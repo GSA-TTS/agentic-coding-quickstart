@@ -418,7 +418,7 @@ cmd_models() {
 	# Display models in a readable table
 	echo "$response" | jq -r '.data[] | "  \(.id)\t\(.owned_by // "unknown")"' | sort | column -t -s $'\t'
 	echo ""
-	log "Run 'make config' to generate opencode.jsonc from these models."
+	log "Run 'make config' to generate opencode.json from these models."
 	audit "models" "fetched ${model_count} models from ${base_url}"
 }
 
@@ -543,18 +543,11 @@ cmd_config() {
             }
         }')
 
-	# Write as plain JSON (not JSONC) for maximum compatibility
-	# OpenCode should support both but some tooling may not handle comments
+	# Write as plain JSON for maximum compatibility
+	# Use opencode.json (not .jsonc) so all tooling can parse it
 	echo "$config_json" >"$config_file"
 
-	# Also write as opencode.json for maximum compatibility
-	local json_file="${config_file%.jsonc}.json"
-	if [[ "$config_file" != "$json_file" ]]; then
-		echo "$config_json" >"$json_file"
-		log "Generated ${config_file} and ${json_file} with ${model_count} models (default: ${provider_name}/${default_model})"
-	else
-		log "Generated ${config_file} with ${model_count} models (default: ${provider_name}/${default_model})"
-	fi
+	log "Generated ${config_file} with ${model_count} models (default: ${provider_name}/${default_model})"
 	log "To use a different default model, edit the \"model\" field in ${config_file}"
 	audit "config" "generated ${config_file} with ${model_count} models"
 }
@@ -563,10 +556,34 @@ cmd_quickstart() {
 	log "=== Agent Sandbox Quickstart ==="
 	echo ""
 
-	# Step 1: Validate .env exists and has required settings
+	# Pre-flight: Verify Docker sandbox support before anything else
+	log "Pre-flight: Checking Docker sandbox support..."
+	docker sandbox ls >/dev/null 2>&1 || err "Docker sandbox not available. Requires Docker Desktop ${DOCKER_MIN_VERSION}+
+  Install from: https://docker.com/products/docker-desktop"
+	log "  Docker sandbox: OK"
+	echo ""
+
+	# Step 1: Auto-run setup if needed (keys not configured)
+	local needs_setup=false
+	if ! security find-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w >/dev/null 2>&1; then
+		needs_setup=true
+		log "Step 1/5: Running initial setup (AGE key not found)..."
+	elif [[ ! -f ".sops.yaml" ]] || grep -q "$PLACEHOLDER_KEY" .sops.yaml 2>/dev/null; then
+		needs_setup=true
+		log "Step 1/5: Running initial setup (.sops.yaml not configured)..."
+	else
+		log "Step 1/5: Setup already complete"
+	fi
+
+	if [[ "$needs_setup" == "true" ]]; then
+		cmd_setup
+	fi
+	echo ""
+
+	# Step 2: Validate .env exists and has required settings
 	if [[ ! -f "$ENV_FILE" ]]; then
 		if [[ -f ".env.example" ]]; then
-			err "${ENV_FILE} not found. Copy .env.example and fill in your settings:\n  cp .env.example .env && vim .env"
+			err "${ENV_FILE} not found. Edit .env with your API keys:\n  vim .env\nThen re-run: make quickstart"
 		else
 			err "${ENV_FILE} not found. Create it with your OPENAI_COMPAT_* settings."
 		fi
@@ -575,32 +592,27 @@ cmd_quickstart() {
 	load_env || err "Failed to load ${ENV_FILE}"
 
 	# Validate required vars are present
-	[[ -n "${OPENAI_COMPAT_BASE_URL:-}" ]] || err "OPENAI_COMPAT_BASE_URL not set in ${ENV_FILE}"
-	[[ -n "${OPENAI_COMPAT_API_KEY:-}" ]] || err "OPENAI_COMPAT_API_KEY not set in ${ENV_FILE}"
+	[[ -n "${OPENAI_COMPAT_BASE_URL:-}" ]] || err "OPENAI_COMPAT_BASE_URL not set in ${ENV_FILE}. Edit .env and re-run: make quickstart"
+	[[ -n "${OPENAI_COMPAT_API_KEY:-}" ]] || err "OPENAI_COMPAT_API_KEY not set in ${ENV_FILE}. Edit .env and re-run: make quickstart"
 
-	log "Step 1/4: Settings validated"
+	log "Step 2/5: Settings validated"
 	log "  Provider URL: ${OPENAI_COMPAT_BASE_URL}"
 	log "  Provider name: ${OPENAI_COMPAT_PROVIDER_NAME:-$DEFAULT_PROVIDER_NAME}"
 	echo ""
 
-	# Step 2: Discover models
-	log "Step 2/4: Discovering models..."
+	# Step 3: Discover models
+	log "Step 3/5: Discovering models..."
 	cmd_models
 	echo ""
 
-	# Step 3: Generate config
-	log "Step 3/4: Generating opencode.jsonc..."
+	# Step 4: Generate config
+	log "Step 4/5: Generating opencode.json..."
 	cmd_config
 	echo ""
 
-	# Step 4: Encrypt .env (if .sops.yaml exists with a real key)
-	if [[ -f ".sops.yaml" ]] && ! grep -q "$PLACEHOLDER_KEY" .sops.yaml; then
-		log "Step 4/4: Encrypting .env..."
-		cmd_encrypt
-	else
-		log "Step 4/4: Skipping encryption (.sops.yaml not configured — run 'make setup' first)"
-		log "  Your .env file still contains plaintext secrets"
-	fi
+	# Step 5: Encrypt .env
+	log "Step 5/5: Encrypting .env..."
+	cmd_encrypt
 
 	echo ""
 	log "=== Quickstart complete ==="
@@ -640,7 +652,7 @@ help | --help | -h)
 	echo "  encrypt     Encrypt .env → .env.enc (removes plaintext)"
 	echo "  decrypt     Decrypt .env.enc → .env (for editing)"
 	echo "  models      List available models from OpenAI-compatible API"
-	echo "  config      Generate opencode.jsonc from discovered models"
+	echo "  config      Generate opencode.json from discovered models"
 	echo "  version     Print version"
 	echo "  help        Show this help message"
 	;;

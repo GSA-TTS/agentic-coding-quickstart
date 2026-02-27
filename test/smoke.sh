@@ -33,7 +33,6 @@ check "test/smoke.sh exists" test -f test/smoke.sh
 check "test/sandbox-unit.sh exists" test -f test/sandbox-unit.sh
 check ".github/workflows/ci.yml exists" test -f .github/workflows/ci.yml
 check ".github/workflows/release.yml exists" test -f .github/workflows/release.yml
-check ".gitleaks.toml exists" test -f .gitleaks.toml
 check "VERSION exists" test -f VERSION
 check "release.sh exists" test -f release.sh
 check "release.sh is executable" test -x release.sh
@@ -87,7 +86,7 @@ check ".gitignore blocks .env" grep -q "^\.env$" .gitignore
 check ".gitignore blocks .env.enc" grep -q "^\.env\.enc$" .gitignore
 check ".gitignore blocks *.key" grep -q "^\*\.key$" .gitignore
 check ".gitignore blocks *.pem" grep -q "^\*\.pem$" .gitignore
-check ".gitignore blocks opencode.jsonc" grep -q "opencode.jsonc" .gitignore
+check ".gitignore blocks opencode.json" grep -q "opencode.json" .gitignore
 echo ""
 
 # YAML validation

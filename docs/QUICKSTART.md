@@ -20,47 +20,45 @@ docker sandbox ls
 
 If this errors, update Docker Desktop to 4.50+ and ensure sandbox mode is enabled.
 
-## 2. Clone and Setup
+## 2. Clone and Configure
 
 ```bash
 git clone https://github.com/cloud-gov/agent-sandbox.git
 cd agent-sandbox
-make setup
 ```
 
-This will:
-- Verify Docker Desktop, sops, age, and jq are installed
-- Generate an AGE keypair (private key stored in macOS Keychain)
-- Create `.sops.yaml` with your public key
-- Copy `.env.example` to `.env`
-
-## 3. Configure Secrets
-
-Edit `.env` with your API keys:
+Edit `.env` with your API provider settings (required fields):
 
 ```bash
 vim .env
 ```
 
-At minimum, set:
-- `ANTHROPIC_API_KEY` — primary key for Anthropic-based agents (Claude/OpenCode)
+**Required settings:**
+- `OPENAI_COMPAT_BASE_URL` — API endpoint (e.g., `https://api.example.gov/api/v1`)
+- `OPENAI_COMPAT_API_KEY` — API key for your provider
 
-Optional pass-through keys (only if your agent needs them):
-- `OPENAI_API_KEY` — for agents that call the OpenAI API directly
-- `OPENROUTER_API_KEY` — for agents that use OpenRouter for multi-provider routing
+**Optional pass-through keys** (only if your agent needs them):
+- `ANTHROPIC_API_KEY` — for Claude-based agents
+- `OPENAI_API_KEY` — for GPT-based agents
+- `OPENROUTER_API_KEY` — for multi-provider routing
 
-Then encrypt:
+## 3. Run Quickstart
 
 ```bash
-make encrypt
+make quickstart
 ```
 
-This encrypts `.env` into `.env.enc` and deletes the plaintext file.
+This single command automatically:
+1. Generates AGE encryption key (stored in macOS Keychain)
+2. Creates `.sops.yaml` with your public key
+3. Discovers models from your API provider
+4. Generates `opencode.json` config
+5. Encrypts `.env` to `.env.enc` (deletes plaintext)
 
 ## 4. Launch Sandbox
 
 ```bash
-make run REPO=~/my-project
+make start REPO=~/my-project
 ```
 
 OpenCode launches inside the sandbox with:
@@ -109,9 +107,9 @@ make encrypt    # Re-encrypts and removes plaintext
 | Problem | Solution |
 |---------|----------|
 | `Docker sandbox not available` | Update Docker Desktop to 4.50+ and enable sandbox mode |
-| `AGE key not in Keychain` | Run `make setup` again |
+| `AGE key not in Keychain` | Run `make quickstart` again |
 | `sops not found` | `brew install sops` |
 | `jq not found` | `brew install jq` |
-| `.sops.yaml has placeholder key` | Run `make setup` — AGE key generation may have failed |
+| `.sops.yaml has placeholder key` | Run `make quickstart` — AGE key generation may have failed |
 | Sandbox won't start | `make clean` then retry |
 | Network blocks not applying | Check Docker Desktop version supports `docker sandbox network proxy` |

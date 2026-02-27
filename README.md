@@ -15,23 +15,27 @@ Run AI coding agents in an isolated Docker sandbox with encrypted secrets and ne
 ## Quickstart
 
 ```bash
-# 1. Install prerequisites and generate encryption key
-make setup
-
-# 2. Edit .env with your API keys and provider settings
+# 1. Edit .env with your API keys (required: OPENAI_COMPAT_BASE_URL, OPENAI_COMPAT_API_KEY)
 vim .env
 
-# 3. Discover models, generate config, and encrypt — all in one step
+# 2. Setup, discover models, generate config, and encrypt — all in one step
 make quickstart
 
-# 4. Launch sandbox with your project
-make run REPO=~/my-project
+# 3. Launch sandbox with your project
+make start REPO=~/my-project
 
-# 5. Clean up when done
+# 4. Clean up when done
 make clean
 ```
 
-`make quickstart` validates your `.env`, discovers available models from your provider API, generates `opencode.jsonc` (with only your provider's models visible), and encrypts `.env` — all in one command. You can also run each step individually with `make models`, `make config`, and `make encrypt`.
+`make quickstart` automatically:
+- Runs initial setup if needed (generates AGE key, stores in Keychain)
+- Validates your `.env` configuration
+- Discovers available models from your provider API
+- Generates `opencode.json` (with only your provider's models visible)
+- Encrypts `.env` to `.env.enc`
+
+You can also run each step individually with `make setup`, `make models`, `make config`, and `make encrypt`.
 
 ## How It Works
 
@@ -71,15 +75,16 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 
 | Command | Description |
 |---------|-------------|
-| `make quickstart` | Validate, discover models, generate config, encrypt (all-in-one) |
+| `make quickstart` | Auto-setup, discover models, generate config, encrypt (all-in-one) |
 | `make setup` | Install prerequisites, generate AGE key |
+| `make start REPO=path` | Launch sandbox with project (alias for `run`) |
 | `make run REPO=path` | Launch sandbox with project |
 | `make validate` | Check configuration |
 | `make clean` | Remove sandbox |
 | `make encrypt` | Encrypt `.env` to `.env.enc` |
 | `make decrypt` | Decrypt `.env.enc` for editing |
 | `make models` | List available models from OpenAI-compatible API |
-| `make config` | Generate `opencode.jsonc` from discovered models |
+| `make config` | Generate `opencode.json` from discovered models |
 | `make version` | Print current version |
 | `make release-patch` | Release patch version (x.y.Z+1) |
 | `make release-minor` | Release minor version (x.Y+1.0) |
@@ -88,7 +93,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 
 ## Model Discovery
 
-OpenCode requires a `opencode.jsonc` config listing available models. Agent Sandbox can auto-discover models from any OpenAI-compatible API and generate this config:
+OpenCode requires an `opencode.json` config listing available models. Agent Sandbox can auto-discover models from any OpenAI-compatible API and generate this config:
 
 ```bash
 # Set your provider URL and API key (or add to .env before encrypting)
@@ -99,7 +104,7 @@ export OPENAI_COMPAT_PROVIDER_NAME="gsa-usai"  # optional, default: custom-api
 # List available models
 make models
 
-# Generate opencode.jsonc from discovered models
+# Generate opencode.json from discovered models
 make config
 ```
 

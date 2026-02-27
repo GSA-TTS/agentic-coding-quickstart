@@ -2,7 +2,7 @@ REPO ?= .
 
 .DEFAULT_GOAL := help
 
-.PHONY: quickstart setup run validate clean encrypt decrypt models config test smoke unit lint version release-patch release-minor release-major reset-keys help
+.PHONY: quickstart setup run start validate clean encrypt decrypt models config test smoke unit lint version release-patch release-minor release-major reset-keys help
 
 quickstart:     ## Validate .env, discover models, generate config, encrypt (all-in-one)
 	@./sandbox.sh quickstart
@@ -10,7 +10,10 @@ quickstart:     ## Validate .env, discover models, generate config, encrypt (all
 setup:          ## Install prerequisites, generate AGE key, create .sops.yaml
 	@./sandbox.sh setup
 
-run:            ## Launch OpenCode in Docker sandbox with secrets (REPO=path)
+run:            ## Launch sandbox with project (REPO=path)
+	@./sandbox.sh run "$(REPO)"
+
+start:          ## Alias for 'run' — launch sandbox with project (REPO=path)
 	@./sandbox.sh run "$(REPO)"
 
 validate:       ## Check all prerequisites are configured
@@ -31,7 +34,7 @@ reset-keys:     ## Reset AGE keys and re-encrypt .env (fixes key sync issues)
 models:         ## List available models from OpenAI-compatible API
 	@./sandbox.sh models
 
-config:         ## Generate opencode.jsonc from discovered API models
+config:         ## Generate opencode.json from discovered API models
 	@./sandbox.sh config
 
 test:           ## Run all test suites (requires sops, age, Keychain on macOS)
@@ -65,30 +68,27 @@ help:           ## Show this help
 	@echo "agent-sandbox — Run AI coding agents in isolated Docker sandboxes"
 	@echo ""
 	@echo "Getting Started:"
-	@echo "  make setup                Install prerequisites, generate AGE key"
-	@echo "  vim .env                  Add your API keys and provider settings"
-	@echo "  make quickstart           Discover models, generate config, encrypt (all-in-one)"
-	@echo "  make run REPO=~/project   Launch sandbox with your project"
+	@echo "  vim .env                  Add your API keys (OPENAI_COMPAT_BASE_URL, OPENAI_COMPAT_API_KEY)"
+	@echo "  make quickstart           Auto-setup, discover models, generate config, encrypt"
+	@echo "  make start REPO=~/project Launch sandbox with your project"
 	@echo ""
 	@echo "Commands:"
 	@grep -E '^[a-z][-a-z]*:.*##' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  make %-14s %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Examples:"
-	@echo "  make setup                          # First-time setup"
-	@echo "  make quickstart                     # Validate, discover models, config, encrypt"
+	@echo "  make quickstart                     # All-in-one: setup, models, config, encrypt"
+	@echo "  make start REPO=~/my-project        # Launch sandbox (alias for 'run')"
 	@echo "  make run REPO=~/my-project          # Launch sandbox"
 	@echo "  make models                         # List available models from API"
-	@echo "  make config                         # Regenerate opencode.jsonc"
-	@echo "  make decrypt                        # Edit encrypted secrets"
+	@echo "  make config                         # Regenerate opencode.json"
+	@echo "  make decrypt                        # Decrypt secrets for editing"
 	@echo "  make encrypt                        # Re-encrypt after editing"
-	@echo "  make reset-keys                    # Reset AGE keys and fix sync issues"
+	@echo "  make reset-keys                     # Reset AGE keys and fix sync issues"
 	@echo "  make test                           # Run full test suite"
-	@echo "  make lint                           # ShellCheck all scripts"
 	@echo "  make release-patch                  # Cut a patch release"
 	@echo ""
-	@echo "Environment (.env):"
-	@echo "  OPENAI_COMPAT_BASE_URL    API endpoint (e.g., https://api.gsa.usai.gov/api/v1)"
+	@echo "Required in .env:"
+	@echo "  OPENAI_COMPAT_BASE_URL    API endpoint (e.g., https://api.example.gov/api/v1)"
 	@echo "  OPENAI_COMPAT_API_KEY     API key for the provider"
-	@echo "  OPENAI_COMPAT_PROVIDER_NAME  Provider display name (default: custom-api)"
 	@echo ""
 	@echo "Docs: https://github.com/cloud-gov/agent-sandbox"
