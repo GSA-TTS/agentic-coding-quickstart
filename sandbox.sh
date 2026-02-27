@@ -552,6 +552,63 @@ cmd_config() {
 	audit "config" "generated ${config_file} with ${model_count} models"
 }
 
+cmd_setup_github() {
+	log "=== GitHub Token Setup ==="
+	echo ""
+	log "This will help you create a GitHub Personal Access Token (PAT) with the correct"
+	log "scopes for AI agent use. The token allows the agent to:"
+	log "  - Clone, commit, and push code"
+	log "  - Create pull requests"
+	log "  - Monitor CI workflow status"
+	echo ""
+	log "The token does NOT allow:"
+	log "  - Merging pull requests (requires human review)"
+	log "  - Changing repository settings"
+	echo ""
+
+	# Open the pre-filled GitHub token creation page
+	log "Opening GitHub token creation page in your browser..."
+	log "URL: ${GITHUB_TOKEN_URL}"
+	echo ""
+
+	if command -v open >/dev/null 2>&1; then
+		open "$GITHUB_TOKEN_URL"
+	else
+		log "Could not open browser automatically. Please visit the URL above."
+	fi
+
+	echo ""
+	log "After creating the token:"
+	log "  1. Copy the token (starts with 'github_pat_')"
+	log "  2. Paste it into your .env file as GITHUB_TOKEN=<your-token>"
+	log "  3. Run 'make quickstart' to continue"
+	echo ""
+	audit "setup-github" "opened token creation page"
+}
+
+check_github_token_expiry() {
+	local token="${1:-}"
+	[[ -z "$token" ]] && return 1
+
+	# Check token validity and get expiration info via GitHub API
+	local response
+	response=$(curl -sf -H "Authorization: Bearer $token" \
+		-H "Accept: application/vnd.github+json" \
+		"${GITHUB_API_URL}/user" 2>/dev/null) || return 1
+
+	# Token is valid if we get here
+	# Note: Fine-grained PAT expiration isn't directly exposed in /user response
+	# We'd need to check /installation/token or parse the token metadata
+	# For now, just validate the token works
+	local username
+	username=$(echo "$response" | jq -r '.login // empty')
+	if [[ -n "$username" ]]; then
+		log "  GitHub token valid (user: ${username})"
+		return 0
+	fi
+	return 1
+}
+
 cmd_quickstart() {
 	log "=== Agent Sandbox Quickstart ==="
 	echo ""
@@ -567,12 +624,12 @@ cmd_quickstart() {
 	local needs_setup=false
 	if ! security find-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w >/dev/null 2>&1; then
 		needs_setup=true
-		log "Step 1/5: Running initial setup (AGE key not found)..."
+		log "Step 1/6: Running initial setup (AGE key not found)..."
 	elif [[ ! -f ".sops.yaml" ]] || grep -q "$PLACEHOLDER_KEY" .sops.yaml 2>/dev/null; then
 		needs_setup=true
-		log "Step 1/5: Running initial setup (.sops.yaml not configured)..."
+		log "Step 1/6: Running initial setup (.sops.yaml not configured)..."
 	else
-		log "Step 1/5: Setup already complete"
+		log "Step 1/6: Setup already complete"
 	fi
 
 	if [[ "$needs_setup" == "true" ]]; then
@@ -595,28 +652,52 @@ cmd_quickstart() {
 	[[ -n "${OPENAI_COMPAT_BASE_URL:-}" ]] || err "OPENAI_COMPAT_BASE_URL not set in ${ENV_FILE}. Edit .env and re-run: make quickstart"
 	[[ -n "${OPENAI_COMPAT_API_KEY:-}" ]] || err "OPENAI_COMPAT_API_KEY not set in ${ENV_FILE}. Edit .env and re-run: make quickstart"
 
-	log "Step 2/5: Settings validated"
+	log "Step 2/6: API settings validated"
 	log "  Provider URL: ${OPENAI_COMPAT_BASE_URL}"
 	log "  Provider name: ${OPENAI_COMPAT_PROVIDER_NAME:-$DEFAULT_PROVIDER_NAME}"
 	echo ""
 
-	# Step 3: Discover models
-	log "Step 3/5: Discovering models..."
+	# Step 3: Check GitHub token (recommended but not required)
+	log "Step 3/6: Checking GitHub token..."
+	if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+		if check_github_token_expiry "$GITHUB_TOKEN"; then
+			log "  GitHub token: OK"
+		else
+			log "  WARNING: GitHub token is set but could not be validated"
+			log "  Git operations may fail. Run 'make setup-github' to create a new token."
+		fi
+	else
+		log "  GitHub token: Not configured (optional)"
+		log "  For git operations, run 'make setup-github' and add GITHUB_TOKEN to .env"
+	fi
+	echo ""
+
+	# Step 4: Discover models
+	log "Step 4/6: Discovering models..."
 	cmd_models
 	echo ""
 
-	# Step 4: Generate config
-	log "Step 4/5: Generating opencode.json..."
+	# Step 5: Generate config
+	log "Step 5/6: Generating opencode.json..."
 	cmd_config
 	echo ""
 
-	# Step 5: Encrypt .env
-	log "Step 5/5: Encrypting .env..."
+	# Step 6: Encrypt .env
+	log "Step 6/6: Encrypting .env..."
 	cmd_encrypt
 
 	echo ""
 	log "=== Quickstart complete ==="
-	log "Next: make run REPO=~/your-project"
+	if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+		log ""
+		log "NOTE: No GitHub token configured. To enable git operations:"
+		log "  1. Run 'make setup-github' to create a token"
+		log "  2. Run 'make decrypt' to edit .env"
+		log "  3. Add your token as GITHUB_TOKEN=github_pat_..."
+		log "  4. Run 'make encrypt' to re-encrypt"
+	fi
+	log ""
+	log "Next: make start REPO=~/your-project"
 	audit "quickstart" "completed"
 }
 
@@ -624,6 +705,7 @@ cmd_quickstart() {
 
 case "${1:-help}" in
 setup) cmd_setup ;;
+setup-github) cmd_setup_github ;;
 run) cmd_run "${2:-}" ;;
 validate) cmd_validate ;;
 clean) cmd_clean ;;
@@ -641,20 +723,21 @@ version | --version | -V)
 	fi
 	;;
 help | --help | -h)
-	echo "Usage: $0 {quickstart|setup|run [repo_path]|validate|clean|encrypt|decrypt|models|config|version|help}"
+	echo "Usage: $0 {quickstart|setup|setup-github|run [repo_path]|validate|clean|encrypt|decrypt|models|config|version|help}"
 	echo ""
 	echo "Commands:"
-	echo "  quickstart  Validate .env, discover models, generate config, encrypt (all-in-one)"
-	echo "  setup       Install prerequisites, generate AGE key, create .sops.yaml"
-	echo "  run         Launch OpenCode in a Docker sandbox with encrypted secrets"
-	echo "  validate    Check all prerequisites are configured"
-	echo "  clean       Stop and remove the sandbox"
-	echo "  encrypt     Encrypt .env → .env.enc (removes plaintext)"
-	echo "  decrypt     Decrypt .env.enc → .env (for editing)"
-	echo "  models      List available models from OpenAI-compatible API"
-	echo "  config      Generate opencode.json from discovered models"
-	echo "  version     Print version"
-	echo "  help        Show this help message"
+	echo "  quickstart     Validate .env, discover models, generate config, encrypt (all-in-one)"
+	echo "  setup          Install prerequisites, generate AGE key, create .sops.yaml"
+	echo "  setup-github   Open browser to create a GitHub token with correct scopes"
+	echo "  run            Launch OpenCode in a Docker sandbox with encrypted secrets"
+	echo "  validate       Check all prerequisites are configured"
+	echo "  clean          Stop and remove the sandbox"
+	echo "  encrypt        Encrypt .env → .env.enc (removes plaintext)"
+	echo "  decrypt        Decrypt .env.enc → .env (for editing)"
+	echo "  models         List available models from OpenAI-compatible API"
+	echo "  config         Generate opencode.json from discovered models"
+	echo "  version        Print version"
+	echo "  help           Show this help message"
 	;;
 *) err "Unknown command: $1. Run '$0 help' for usage." ;;
 esac

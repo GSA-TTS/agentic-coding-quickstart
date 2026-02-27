@@ -2,13 +2,16 @@ REPO ?= .
 
 .DEFAULT_GOAL := help
 
-.PHONY: quickstart setup run start validate clean encrypt decrypt models config test smoke unit lint version release-patch release-minor release-major reset-keys help
+.PHONY: quickstart setup setup-github run start validate clean encrypt decrypt models config test smoke unit lint version release-patch release-minor release-major reset-keys help
 
 quickstart:     ## Validate .env, discover models, generate config, encrypt (all-in-one)
 	@./sandbox.sh quickstart
 
 setup:          ## Install prerequisites, generate AGE key, create .sops.yaml
 	@./sandbox.sh setup
+
+setup-github:   ## Open browser to create a GitHub token with correct scopes
+	@./sandbox.sh setup-github
 
 run:            ## Launch sandbox with project (REPO=path)
 	@./sandbox.sh run "$(REPO)"
@@ -77,6 +80,7 @@ help:           ## Show this help
 	@echo ""
 	@echo "Examples:"
 	@echo "  make quickstart                     # All-in-one: setup, models, config, encrypt"
+	@echo "  make setup-github                   # Create GitHub token for git operations"
 	@echo "  make start REPO=~/my-project        # Launch sandbox (alias for 'run')"
 	@echo "  make run REPO=~/my-project          # Launch sandbox"
 	@echo "  make models                         # List available models from API"
@@ -90,5 +94,8 @@ help:           ## Show this help
 	@echo "Required in .env:"
 	@echo "  OPENAI_COMPAT_BASE_URL    API endpoint (e.g., https://api.example.gov/api/v1)"
 	@echo "  OPENAI_COMPAT_API_KEY     API key for the provider"
+	@echo ""
+	@echo "Recommended in .env:"
+	@echo "  GITHUB_TOKEN              Fine-grained PAT for git operations (run 'make setup-github')"
 	@echo ""
 	@echo "Docs: https://github.com/cloud-gov/agent-sandbox"

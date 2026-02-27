@@ -37,6 +37,9 @@ vim .env
 - `OPENAI_COMPAT_BASE_URL` — API endpoint (e.g., `https://api.example.gov/api/v1`)
 - `OPENAI_COMPAT_API_KEY` — API key for your provider
 
+**Recommended settings:**
+- `GITHUB_TOKEN` — Fine-grained PAT for git operations (see [GitHub Token Setup](#github-token-setup) below)
+
 **Optional pass-through keys** (only if your agent needs them):
 - `ANTHROPIC_API_KEY` — for Claude-based agents
 - `OPENAI_API_KEY` — for GPT-based agents
@@ -51,9 +54,10 @@ make quickstart
 This single command automatically:
 1. Generates AGE encryption key (stored in macOS Keychain)
 2. Creates `.sops.yaml` with your public key
-3. Discovers models from your API provider
-4. Generates `opencode.json` config
-5. Encrypts `.env` to `.env.enc` (deletes plaintext)
+3. Validates GitHub token (if configured)
+4. Discovers models from your API provider
+5. Generates `opencode.json` config
+6. Encrypts `.env` to `.env.enc` (deletes plaintext)
 
 ## 4. Launch Sandbox
 
@@ -94,6 +98,51 @@ Verify the sandbox was removed:
 docker sandbox ls  # Should not show agent-sandbox
 ```
 
+## GitHub Token Setup
+
+To enable git operations (clone, commit, push, create PRs) inside the sandbox, you need a GitHub Personal Access Token (PAT) with the correct scopes.
+
+### What the Token Allows
+
+| Operation | Allowed |
+|-----------|---------|
+| Clone repositories | ✅ |
+| Create branches | ✅ |
+| Commit and push | ✅ |
+| Create pull requests | ✅ |
+| Monitor CI status | ✅ |
+| **Merge pull requests** | ❌ (requires human review) |
+| **Change repo settings** | ❌ |
+
+### Creating the Token
+
+```bash
+make setup-github
+```
+
+This opens a pre-configured GitHub token creation page in your browser with:
+- **Name:** `agent-sandbox`
+- **Expiration:** 90 days
+- **Scopes:** `contents:write`, `pull_requests:write`, `actions:read`
+
+After creating the token:
+1. Copy the token (starts with `github_pat_`)
+2. Add it to your `.env` file:
+   ```
+   GITHUB_TOKEN=github_pat_xxxxxxxxxxxx
+   ```
+3. Run `make quickstart` to encrypt
+
+### Adding Token After Initial Setup
+
+If you already ran quickstart without a GitHub token:
+
+```bash
+make decrypt          # Decrypt .env for editing
+vim .env              # Add GITHUB_TOKEN=github_pat_...
+make encrypt          # Re-encrypt
+```
+
 ## Editing Secrets Later
 
 ```bash
@@ -113,3 +162,5 @@ make encrypt    # Re-encrypts and removes plaintext
 | `.sops.yaml has placeholder key` | Run `make quickstart` — AGE key generation may have failed |
 | Sandbox won't start | `make clean` then retry |
 | Network blocks not applying | Check Docker Desktop version supports `docker sandbox network proxy` |
+| Git operations fail | Run `make setup-github` and add token to `.env` |
+| GitHub token invalid | Token may have expired — create a new one with `make setup-github` |

@@ -77,6 +77,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 |---------|-------------|
 | `make quickstart` | Auto-setup, discover models, generate config, encrypt (all-in-one) |
 | `make setup` | Install prerequisites, generate AGE key |
+| `make setup-github` | Create GitHub token for git operations (opens browser) |
 | `make start REPO=path` | Launch sandbox with project (alias for `run`) |
 | `make run REPO=path` | Launch sandbox with project |
 | `make validate` | Check configuration |
@@ -90,6 +91,18 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 | `make release-minor` | Release minor version (x.Y+1.0) |
 | `make release-major` | Release major version (X+1.0.0) |
 | `make test` | Run all test suites (requires macOS with sops/age) |
+
+## GitHub Token Setup
+
+For git operations inside the sandbox (clone, commit, push, create PRs), you need a GitHub Personal Access Token:
+
+```bash
+make setup-github    # Opens browser with pre-configured token scopes
+```
+
+The token allows the agent to push code and create PRs, but **cannot merge** (requires human review). Add the token to your `.env` as `GITHUB_TOKEN=github_pat_...` before running `make quickstart`.
+
+See [docs/QUICKSTART.md](docs/QUICKSTART.md#github-token-setup) for details.
 
 ## Model Discovery
 
