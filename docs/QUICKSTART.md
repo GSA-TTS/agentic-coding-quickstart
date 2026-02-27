@@ -151,6 +151,57 @@ vim .env        # Edit values
 make encrypt    # Re-encrypts and removes plaintext
 ```
 
+## Resuming an Interrupted Session
+
+If you're interrupted while working and need to pick up where you left off, Docker sandboxes persist until explicitly removed.
+
+### Check if Your Sandbox Still Exists
+
+```bash
+docker sandbox ls
+```
+
+Look for a sandbox named `agent-sandbox` (or your custom `SANDBOX_NAME`).
+
+### Resume an Existing Sandbox
+
+```bash
+make resume
+```
+
+This reconnects to the existing sandbox. Note that secrets from your `.env.enc` are **not** re-injected — the sandbox uses whatever environment was set when it was created.
+
+### Recommended: Clean and Restart (Fresh Secrets)
+
+For the cleanest experience with fresh secret injection:
+
+```bash
+make clean                    # Remove existing sandbox
+make start REPO=~/my-project  # Create fresh sandbox with secrets
+```
+
+### Why Fresh Sandboxes Are Recommended
+
+| Fresh Sandbox | Resumed Sandbox |
+|---------------|-----------------|
+| Secrets freshly decrypted and injected | Secrets from previous session (may be stale) |
+| Network policy freshly applied | Network policy persists |
+| Clean environment | May have accumulated state |
+| Audit log shows new session | Continues previous session |
+
+### What Happens If You Run `make start` With Existing Sandbox
+
+The command will detect the existing sandbox and show options:
+
+```
+Sandbox 'agent-sandbox' already exists.
+Options:
+  1. Resume: docker sandbox exec -it agent-sandbox opencode
+  2. Clean and restart: make clean && make start REPO=/path
+```
+
+You must run `make clean` first to create a fresh sandbox.
+
 ## Troubleshooting
 
 | Problem | Solution |

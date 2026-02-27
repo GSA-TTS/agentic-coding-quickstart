@@ -186,6 +186,16 @@ cmd_run() {
 
 	cmd_validate || exit 1
 
+	# Check if sandbox already exists
+	if docker sandbox ls 2>/dev/null | grep -q "^${SANDBOX_NAME}\s"; then
+		log "Sandbox '${SANDBOX_NAME}' already exists."
+		log "Options:"
+		log "  1. Resume: docker sandbox exec -it ${SANDBOX_NAME} opencode"
+		log "  2. Clean and restart: make clean && make start REPO=${repo_path}"
+		log ""
+		err "Sandbox already exists. Run 'make clean' first to create a fresh sandbox, or use 'docker sandbox exec' to resume."
+	fi
+
 	log "Decrypting secrets to temp file (mode 600, auto-deleted on exit)..."
 	check_keychain_access
 	SOPS_AGE_KEY=$(security find-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w)
@@ -374,6 +384,24 @@ cmd_clean() {
 	docker sandbox rm "$SANDBOX_NAME" 2>/dev/null || true
 	log "Sandbox removed"
 	audit "clean" "sandbox removed"
+}
+
+cmd_resume() {
+	# Check if sandbox exists
+	if ! docker sandbox ls 2>/dev/null | grep -q "^${SANDBOX_NAME}\s"; then
+		err "No sandbox '${SANDBOX_NAME}' found. Run 'make start REPO=path' to create one."
+	fi
+
+	log "Resuming sandbox '${SANDBOX_NAME}'..."
+	log "NOTE: This reconnects without re-injecting secrets from .env.enc"
+	log "      For fresh secrets, run: make clean && make start REPO=path"
+	echo ""
+
+	audit "resume" "reconnecting to existing sandbox"
+	docker sandbox exec -it "$SANDBOX_NAME" opencode
+
+	log "Session ended"
+	audit "resume:stop" "session ended"
 }
 
 cmd_models() {
@@ -707,6 +735,7 @@ case "${1:-help}" in
 setup) cmd_setup ;;
 setup-github) cmd_setup_github ;;
 run) cmd_run "${2:-}" ;;
+resume) cmd_resume ;;
 validate) cmd_validate ;;
 clean) cmd_clean ;;
 encrypt) cmd_encrypt ;;
@@ -723,13 +752,14 @@ version | --version | -V)
 	fi
 	;;
 help | --help | -h)
-	echo "Usage: $0 {quickstart|setup|setup-github|run [repo_path]|validate|clean|encrypt|decrypt|models|config|version|help}"
+	echo "Usage: $0 {quickstart|setup|setup-github|run [repo_path]|resume|validate|clean|encrypt|decrypt|models|config|version|help}"
 	echo ""
 	echo "Commands:"
 	echo "  quickstart     Validate .env, discover models, generate config, encrypt (all-in-one)"
 	echo "  setup          Install prerequisites, generate AGE key, create .sops.yaml"
 	echo "  setup-github   Open browser to create a GitHub token with correct scopes"
 	echo "  run            Launch OpenCode in a Docker sandbox with encrypted secrets"
+	echo "  resume         Reconnect to an existing sandbox (without re-injecting secrets)"
 	echo "  validate       Check all prerequisites are configured"
 	echo "  clean          Stop and remove the sandbox"
 	echo "  encrypt        Encrypt .env → .env.enc (removes plaintext)"

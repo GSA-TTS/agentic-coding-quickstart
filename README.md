@@ -80,6 +80,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 | `make setup-github` | Create GitHub token for git operations (opens browser) |
 | `make start REPO=path` | Launch sandbox with project (alias for `run`) |
 | `make run REPO=path` | Launch sandbox with project |
+| `make resume` | Reconnect to existing sandbox (no secret re-injection) |
 | `make validate` | Check configuration |
 | `make clean` | Remove sandbox |
 | `make encrypt` | Encrypt `.env` to `.env.enc` |

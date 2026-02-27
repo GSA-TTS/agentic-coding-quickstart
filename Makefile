@@ -2,7 +2,7 @@ REPO ?= .
 
 .DEFAULT_GOAL := help
 
-.PHONY: quickstart setup setup-github run start validate clean encrypt decrypt models config test smoke unit lint version release-patch release-minor release-major reset-keys help
+.PHONY: quickstart setup setup-github run start resume validate clean encrypt decrypt models config test smoke unit lint version release-patch release-minor release-major reset-keys help
 
 quickstart:     ## Validate .env, discover models, generate config, encrypt (all-in-one)
 	@./sandbox.sh quickstart
@@ -18,6 +18,9 @@ run:            ## Launch sandbox with project (REPO=path)
 
 start:          ## Alias for 'run' — launch sandbox with project (REPO=path)
 	@./sandbox.sh run "$(REPO)"
+
+resume:         ## Reconnect to existing sandbox (no secret re-injection)
+	@./sandbox.sh resume
 
 validate:       ## Check all prerequisites are configured
 	@./sandbox.sh validate
@@ -82,14 +85,14 @@ help:           ## Show this help
 	@echo "  make quickstart                     # All-in-one: setup, models, config, encrypt"
 	@echo "  make setup-github                   # Create GitHub token for git operations"
 	@echo "  make start REPO=~/my-project        # Launch sandbox (alias for 'run')"
-	@echo "  make run REPO=~/my-project          # Launch sandbox"
+	@echo "  make resume                         # Reconnect to existing sandbox"
+	@echo "  make clean && make start REPO=path  # Fresh sandbox (recommended)"
 	@echo "  make models                         # List available models from API"
 	@echo "  make config                         # Regenerate opencode.json"
 	@echo "  make decrypt                        # Decrypt secrets for editing"
 	@echo "  make encrypt                        # Re-encrypt after editing"
 	@echo "  make reset-keys                     # Reset AGE keys and fix sync issues"
 	@echo "  make test                           # Run full test suite"
-	@echo "  make release-patch                  # Cut a patch release"
 	@echo ""
 	@echo "Required in .env:"
 	@echo "  OPENAI_COMPAT_BASE_URL    API endpoint (e.g., https://api.example.gov/api/v1)"
