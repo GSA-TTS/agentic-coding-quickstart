@@ -3,6 +3,15 @@
 > This file defines how AI coding agents should interact with this repository.
 > It is read by Claude Code, Codex CLI, Gemini CLI, and other agent platforms.
 
+## Mandatory Reading
+
+Before making ANY code changes, agents MUST read and follow:
+
+1. **This file (AGENTS.md)** — Project-specific rules and conventions
+2. **[docs/CODING_PRACTICES.md](docs/CODING_PRACTICES.md)** — Secure coding standards (input validation, secrets, testing, architecture)
+
+Violations of CODING_PRACTICES.md will be rejected in code review.
+
 ## Project Overview
 
 **agent-sandbox** is a macOS-only tool that runs AI coding agents in isolated Docker Desktop sandboxes with encrypted secrets (SOPS/AGE) and network controls (RFC 1918 + cloud IMDS blocking).
@@ -63,6 +72,7 @@ Makefile                 # User-facing commands (delegates to sandbox.sh + relea
 docs/QUICKSTART.md       # Step-by-step first-use guide
 docs/SECURITY.md         # Full threat model, network policy, audit logging, secret lifecycle
 docs/SOPS-SETUP.md       # SOPS/AGE key management, manual operations, team sharing, rotation
+docs/CODING_PRACTICES.md # Secure coding standards — MUST READ before any code changes
 ```
 
 ## Conventions
