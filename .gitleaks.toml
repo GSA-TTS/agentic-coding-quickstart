@@ -1,0 +1,6 @@
+# Gitleaks configuration — allow test fixture values
+[allowlist]
+  description = "Test fixture values (not real secrets)"
+  paths = [
+    '''test/.*\.sh'''
+  ]

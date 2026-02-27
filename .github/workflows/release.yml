@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag matches VERSION
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          if [[ "$TAG" != "$VERSION" ]]; then
+            echo "ERROR: Tag v${TAG} does not match VERSION file (${VERSION})"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        id: version
+
+      - name: Extract changelog for this release
+        id: changelog
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Extract the section between this version header and the next version header
+          NOTES=$(sed -n "/^## \[${VERSION}\]/,/^## \[/{ /^## \[${VERSION}\]/d; /^## \[/d; p; }" CHANGELOG.md)
+          if [[ -z "$NOTES" ]]; then
+            NOTES="Release ${GITHUB_REF_NAME}"
+          fi
+          # Write to file for the release action (handles multiline safely)
+          echo "$NOTES" > RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          name: "agent-sandbox ${{ github.ref_name }}"
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: false

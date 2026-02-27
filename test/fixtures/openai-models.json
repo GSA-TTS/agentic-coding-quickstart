@@ -1,0 +1,23 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "gpt-4o",
+      "created": 1718841600,
+      "object": "model",
+      "owned_by": "openai"
+    },
+    {
+      "id": "gpt-4o-mini",
+      "created": 1718841600,
+      "object": "model",
+      "owned_by": "openai"
+    },
+    {
+      "id": "gpt-3.5-turbo",
+      "created": 1677610602,
+      "object": "model",
+      "owned_by": "openai"
+    }
+  ]
+}

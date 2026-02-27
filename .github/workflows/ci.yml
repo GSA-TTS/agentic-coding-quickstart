@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: ShellCheck + Validation
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install tools
+        run: brew install shellcheck yq sops age jq
+
+      - name: ShellCheck
+        run: shellcheck config.sh sandbox.sh release.sh && shellcheck -x -e SC1091 test/helpers.sh test/smoke.sh test/sandbox-unit.sh
+
+      - name: Makefile validation
+        run: |
+          make help
+          make version
+
+      - name: Smoke tests
+        run: bash test/smoke.sh
+
+      - name: Unit + integration tests
+        run: bash test/sandbox-unit.sh
+
+  platform-guard:
+    name: Platform Guard (Linux rejection)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: ShellCheck (cross-platform)
+        run: shellcheck config.sh
+
+      - name: sandbox.sh rejects Linux
+        run: |
+          if bash sandbox.sh help 2>/dev/null; then
+            echo "FAIL: sandbox.sh should have rejected Linux"
+            exit 1
+          else
+            echo "PASS: sandbox.sh correctly rejected Linux"
+          fi
+
+  secrets-scan:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

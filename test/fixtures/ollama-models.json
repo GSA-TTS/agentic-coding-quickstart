@@ -1,0 +1,17 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "llama3:latest",
+      "object": "model",
+      "created": 1718841600,
+      "owned_by": "library"
+    },
+    {
+      "id": "codellama:7b",
+      "object": "model",
+      "created": 1718841600,
+      "owned_by": "library"
+    }
+  ]
+}

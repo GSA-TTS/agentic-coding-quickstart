@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# reset-keys.sh - Clean up and regenerate AGE keys for agent-sandbox
+# This script helps reset the AGE key setup when things get out of sync
+
+set -euo pipefail
+
+# Source config to get constants
+if [[ -f "config.sh" ]]; then
+	# shellcheck disable=SC1091
+	source config.sh
+else
+	echo "ERROR: config.sh not found. Run this script from the agent-sandbox directory."
+	exit 1
+fi
+
+# Resolve variables with defaults from config.sh
+KEYCHAIN_SERVICE="${KEYCHAIN_SERVICE:-$DEFAULT_KEYCHAIN_SERVICE}"
+ENV_FILE="${ENV_FILE:-$DEFAULT_ENV_FILE}"
+ENV_ENC="${ENV_ENC:-$DEFAULT_ENV_ENC}"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # No Color
+
+log() {
+	echo -e "${GREEN}[$(date +%Y-%m-%d\ %H:%M:%S)]${NC} $1"
+}
+
+warn() {
+	echo -e "${YELLOW}[$(date +%Y-%m-%d\ %H:%M:%S)] WARNING:${NC} $1"
+}
+
+err() {
+	echo -e "${RED}[$(date +%Y-%m-%d\ %H:%M:%S)] ERROR:${NC} $1"
+	exit 1
+}
+
+backup_env_files() {
+	local timestamp
+	timestamp=$(date +%Y%m%d%H%M%S)
+
+	# Backup .env if it exists
+	if [[ -f "$ENV_FILE" ]]; then
+		cp "$ENV_FILE" "${ENV_FILE}.${timestamp}.bak"
+		log "Backed up ${ENV_FILE} to ${ENV_FILE}.${timestamp}.bak"
+	fi
+
+	# Backup .env.enc if it exists
+	if [[ -f "$ENV_ENC" ]]; then
+		cp "$ENV_ENC" "${ENV_ENC}.${timestamp}.bak"
+		log "Backed up ${ENV_ENC} to ${ENV_ENC}.${timestamp}.bak"
+	fi
+
+	# Backup .sops.yaml if it exists
+	if [[ -f ".sops.yaml" ]]; then
+		cp ".sops.yaml" ".sops.yaml.${timestamp}.bak"
+		log "Backed up .sops.yaml to .sops.yaml.${timestamp}.bak"
+	fi
+}
+
+check_decrypt_possible() {
+	local can_decrypt=false
+
+	# Check if we have an encrypted file
+	if [[ ! -f "$ENV_ENC" ]]; then
+		warn "No encrypted file (${ENV_ENC}) found, skipping decrypt check."
+		return 0
+	fi
+
+	# Check if we can access the existing key in keychain
+	if security find-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w >/dev/null 2>&1; then
+		local current_key
+		current_key=$(security find-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w)
+		export SOPS_AGE_KEY="$current_key"
+
+		# Try to decrypt with current key
+		if sops --decrypt ${SOPS_FORMAT_FLAGS} "$ENV_ENC" >/dev/null 2>&1; then
+			log "Current AGE key can decrypt ${ENV_ENC} successfully."
+			can_decrypt=true
+		else
+			warn "Current AGE key in Keychain cannot decrypt ${ENV_ENC}."
+		fi
+
+		# Clean up
+		unset SOPS_AGE_KEY
+	else
+		warn "No AGE key found in Keychain."
+	fi
+
+	if [[ "$can_decrypt" == "false" ]]; then
+		if [[ -f "$ENV_FILE" ]]; then
+			warn "Cannot decrypt ${ENV_ENC}, but ${ENV_FILE} exists. Will use existing ${ENV_FILE}."
+		else
+			err "Cannot decrypt ${ENV_ENC} and no ${ENV_FILE} exists. Cannot proceed safely."
+		fi
+	fi
+
+	return 0
+}
+
+# Function to decrypt .env.enc to .env if possible
+decrypt_env_if_possible() {
+	if [[ ! -f "$ENV_ENC" ]]; then
+		return 0
+	fi
+
+	if security find-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w >/dev/null 2>&1; then
+		local current_key
+		current_key=$(security find-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w)
+		export SOPS_AGE_KEY="$current_key"
+
+		if sops --decrypt ${SOPS_FORMAT_FLAGS} "$ENV_ENC" >"${ENV_FILE}.tmp" 2>/dev/null; then
+			mv "${ENV_FILE}.tmp" "$ENV_FILE"
+			chmod 600 "$ENV_FILE"
+			log "Successfully decrypted ${ENV_ENC} to ${ENV_FILE}"
+		else
+			rm -f "${ENV_FILE}.tmp"
+			warn "Failed to decrypt ${ENV_ENC}"
+		fi
+
+		unset SOPS_AGE_KEY
+	fi
+}
+
+# Main function to reset keys
+reset_keys() {
+	log "Starting AGE key reset process..."
+
+	# Create backups before making changes
+	backup_env_files
+
+	# Check if we can decrypt with existing key
+	check_decrypt_possible
+
+	# Decrypt .env.enc to .env if possible
+	decrypt_env_if_possible
+
+	# Remove the existing AGE key from Keychain
+	if security find-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w >/dev/null 2>&1; then
+		security delete-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" >/dev/null 2>&1
+		log "Removed existing AGE key from Keychain"
+	fi
+
+	# Generate a new AGE key pair
+	log "Generating new AGE key pair..."
+	local keygen_output
+	keygen_output=$(age-keygen 2>&1)
+	local private_key public_key
+	private_key=$(echo "$keygen_output" | grep '^AGE-SECRET-KEY-' | head -1)
+	public_key=$(echo "$keygen_output" | grep 'public key:' | awk '{print $NF}')
+
+	# Validate key format before storing
+	if [[ -z "$private_key" || ! "$private_key" =~ $AGE_PRIVATE_KEY_REGEX ]]; then
+		err "age-keygen produced unexpected output — private key not found or malformed"
+	fi
+
+	if [[ -z "$public_key" || ! "$public_key" =~ $AGE_PUBLIC_KEY_REGEX ]]; then
+		err "age-keygen produced unexpected output — public key not found or malformed"
+	fi
+
+	# Store the private key in Keychain
+	security add-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" \
+		-w "$private_key" -T /usr/bin/security -U
+	log "Stored new AGE private key in macOS Keychain (service: $KEYCHAIN_SERVICE)"
+
+	# Create new .sops.yaml with the public key
+	cat >.sops.yaml <<SOPS
+# SOPS configuration — generated by reset-keys.sh on $(date -Iseconds)
+# The public key below is safe to commit. Private key lives in macOS Keychain.
+creation_rules:
+  - age: "${public_key}"
+SOPS
+	log "Created new .sops.yaml with public key: ${public_key}"
+
+	# Re-encrypt .env if it exists
+	if [[ -f "$ENV_FILE" ]]; then
+		export SOPS_AGE_KEY="$private_key"
+		sops --encrypt ${SOPS_FORMAT_FLAGS} "$ENV_FILE" >"$ENV_ENC"
+		unset SOPS_AGE_KEY
+		chmod 600 "$ENV_ENC"
+		log "Re-encrypted ${ENV_FILE} to ${ENV_ENC}"
+	else
+		warn "No ${ENV_FILE} found. You'll need to create it before encrypting."
+	fi
+
+	log "AGE key reset complete. You can now run 'make validate' to verify everything is working."
+}
+
+# Verify that the script is being run on macOS
+if [[ "$(uname)" != "Darwin" ]]; then
+	err "This script must be run on macOS"
+fi
+
+# Check for required tools
+for cmd in security age-keygen sops; do
+	if ! command -v "$cmd" >/dev/null 2>&1; then
+		err "$cmd not found. Please install it first."
+	fi
+done
+
+# Run the reset function
+reset_keys
