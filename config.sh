@@ -61,3 +61,17 @@ readonly MAX_MODELS_RESPONSE_SIZE=1048576 # 1 MB
 
 # curl timeout for model discovery (seconds)
 readonly MODELS_FETCH_TIMEOUT=30
+
+# --- GitHub Token Setup ---
+
+# Pre-filled URL for creating a fine-grained PAT with correct scopes for AI agents
+# Scopes: contents:write (push), pull_requests:write (create PRs), actions:read (monitor CI)
+# Does NOT include: administration, merge capabilities (enforces human review)
+# URL-encoded description: "AI coding agent. Can push and create PRs but cannot merge."
+readonly GITHUB_TOKEN_URL="https://github.com/settings/personal-access-tokens/new?name=agent-sandbox&description=AI%20coding%20agent.%20Can%20push%20and%20create%20PRs%20but%20cannot%20merge.%20Created%20by%20agent-sandbox.&expires_in=90&contents=write&pull_requests=write&actions=read"
+
+# GitHub token format validation (fine-grained PATs start with github_pat_)
+readonly GITHUB_TOKEN_REGEX='^github_pat_[A-Za-z0-9_]+$'
+
+# GitHub API endpoint for checking token expiration
+readonly GITHUB_API_URL="https://api.github.com"

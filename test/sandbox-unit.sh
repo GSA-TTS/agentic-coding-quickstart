@@ -1213,6 +1213,33 @@ check "quickstart: listed in help" bash -c "bash sandbox.sh help 2>&1 | grep -q 
 echo ""
 
 # -----------------------------------------------------------------------
+# 52. GitHub token setup tests
+# -----------------------------------------------------------------------
+echo "GitHub token setup:"
+
+# Test: setup-github command exists and shows help
+check "setup-github: listed in help" bash -c "bash sandbox.sh help 2>&1 | grep -q 'setup-github'"
+
+# Test: GITHUB_TOKEN_URL constant is defined in config.sh
+check "GITHUB_TOKEN_URL: constant defined" bash -c "source config.sh && test -n \"\$GITHUB_TOKEN_URL\""
+
+# Test: GITHUB_TOKEN_URL has correct scopes
+check "GITHUB_TOKEN_URL: has contents=write" bash -c "source config.sh && echo \"\$GITHUB_TOKEN_URL\" | grep -q 'contents=write'"
+check "GITHUB_TOKEN_URL: has pull_requests=write" bash -c "source config.sh && echo \"\$GITHUB_TOKEN_URL\" | grep -q 'pull_requests=write'"
+check "GITHUB_TOKEN_URL: has actions=read" bash -c "source config.sh && echo \"\$GITHUB_TOKEN_URL\" | grep -q 'actions=read'"
+
+# Test: GITHUB_TOKEN_URL does NOT include dangerous scopes
+check "GITHUB_TOKEN_URL: no admin scope" bash -c "source config.sh && ! echo \"\$GITHUB_TOKEN_URL\" | grep -q 'admin'"
+
+# Test: .env.example mentions GITHUB_TOKEN
+check ".env.example: has GITHUB_TOKEN" grep -q "GITHUB_TOKEN" .env.example
+
+# Test: Makefile has setup-github target
+check "Makefile: has setup-github target" grep -q "setup-github:" Makefile
+
+echo ""
+
+# -----------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------
 summary
