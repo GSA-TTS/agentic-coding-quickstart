@@ -1,0 +1,27 @@
+title = "agent-sandbox repo allowlist for test fixtures"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow known fake secrets used in test fixtures and verification"
+
+paths = [
+    # Test scripts use fake credentials for SOPS roundtrip testing
+    '''test/.*\.sh$''',
+    # Test fixtures contain mock API responses
+    '''test/fixtures/.*\.json$''',
+    # Example env file with placeholder values
+    '''\.env\.example$''',
+]
+
+regexes = [
+    # Fake test secrets used in sandbox-unit.sh SOPS roundtrip tests
+    '''test-secret-12345''',
+    '''test-key-12345''',
+    # Generic test/example patterns (already in global caulking config)
+    '''(?i)example[_-]?key''',
+    '''(?i)dummy[_-]?secret''',
+    '''(?i)test[_-]?secret''',
+    '''(?i)fake[_-]?key''',
+]
