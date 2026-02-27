@@ -15,7 +15,6 @@ check "sandbox.sh exists" test -f sandbox.sh
 check "sandbox.sh is executable" test -x sandbox.sh
 check "Makefile exists" test -f Makefile
 check "network-policy.json exists" test -f network-policy.json
-check ".sops.yaml exists" test -f .sops.yaml
 check ".env.example exists" test -f .env.example
 check ".gitignore exists" test -f .gitignore
 check "README.md exists" test -f README.md
@@ -33,7 +32,6 @@ check "test/smoke.sh exists" test -f test/smoke.sh
 check "test/sandbox-unit.sh exists" test -f test/sandbox-unit.sh
 check ".github/workflows/ci.yml exists" test -f .github/workflows/ci.yml
 check ".github/workflows/release.yml exists" test -f .github/workflows/release.yml
-check ".gitleaks.toml exists" test -f .gitleaks.toml
 check "VERSION exists" test -f VERSION
 check "release.sh exists" test -f release.sh
 check "release.sh is executable" test -x release.sh
@@ -87,12 +85,8 @@ check ".gitignore blocks .env" grep -q "^\.env$" .gitignore
 check ".gitignore blocks .env.enc" grep -q "^\.env\.enc$" .gitignore
 check ".gitignore blocks *.key" grep -q "^\*\.key$" .gitignore
 check ".gitignore blocks *.pem" grep -q "^\*\.pem$" .gitignore
-check ".gitignore blocks opencode.jsonc" grep -q "opencode.jsonc" .gitignore
-echo ""
-
-# YAML validation
-echo "SOPS config:"
-check ".sops.yaml mentions age" grep -q "age:" .sops.yaml
+check ".gitignore blocks opencode.json" grep -q "opencode.json" .gitignore
+check ".gitignore blocks .sops.yaml" grep -q ".sops.yaml" .gitignore
 echo ""
 
 # sandbox.sh function checks
