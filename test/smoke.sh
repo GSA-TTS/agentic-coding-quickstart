@@ -15,7 +15,6 @@ check "sandbox.sh exists" test -f sandbox.sh
 check "sandbox.sh is executable" test -x sandbox.sh
 check "Makefile exists" test -f Makefile
 check "network-policy.json exists" test -f network-policy.json
-check ".sops.yaml exists" test -f .sops.yaml
 check ".env.example exists" test -f .env.example
 check ".gitignore exists" test -f .gitignore
 check "README.md exists" test -f README.md
@@ -87,11 +86,7 @@ check ".gitignore blocks .env.enc" grep -q "^\.env\.enc$" .gitignore
 check ".gitignore blocks *.key" grep -q "^\*\.key$" .gitignore
 check ".gitignore blocks *.pem" grep -q "^\*\.pem$" .gitignore
 check ".gitignore blocks opencode.json" grep -q "opencode.json" .gitignore
-echo ""
-
-# YAML validation
-echo "SOPS config:"
-check ".sops.yaml mentions age" grep -q "age:" .sops.yaml
+check ".gitignore blocks .sops.yaml" grep -q ".sops.yaml" .gitignore
 echo ""
 
 # sandbox.sh function checks

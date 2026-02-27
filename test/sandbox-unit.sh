@@ -57,7 +57,10 @@ echo "KEY=val" > "${WORK_DIR}/.env"
 check "encrypt fails without .sops.yaml" bash -c "cd '$WORK_DIR' && ! bash sandbox.sh encrypt 2>/dev/null"
 
 # Placeholder .sops.yaml → error
-cp .sops.yaml "${WORK_DIR}/.sops.yaml"
+cat > "${WORK_DIR}/.sops.yaml" <<SOPS
+creation_rules:
+  - age: "REPLACE_WITH_YOUR_AGE_PUBLIC_KEY"
+SOPS
 echo "KEY=val" > "${WORK_DIR}/.env"
 check "encrypt fails with placeholder key" bash -c "cd '$WORK_DIR' && ! bash sandbox.sh encrypt 2>/dev/null"
 rm -f "${WORK_DIR}/.sops.yaml" "${WORK_DIR}/.env"
@@ -237,12 +240,19 @@ check "Total CIDR count >= 10" bash -c "test $(($(jq '.blockCidrs | length' netw
 echo ""
 
 # -----------------------------------------------------------------------
-# 11. .sops.yaml validation
+# 11. .sops.yaml validation (generate a test one since it's now gitignored)
 # -----------------------------------------------------------------------
 echo ".sops.yaml validation:"
-check ".sops.yaml has creation_rules" grep -q "creation_rules:" .sops.yaml
-check ".sops.yaml has age key reference" grep -q "age:" .sops.yaml
-check ".sops.yaml is valid YAML" bash -c "yq eval '.' .sops.yaml >/dev/null 2>&1"
+# Create a test .sops.yaml for validation tests
+_test_sops_yaml=$(mktemp)
+cat > "$_test_sops_yaml" <<SOPS
+creation_rules:
+  - age: "age1testkey123"
+SOPS
+check ".sops.yaml format has creation_rules" grep -q "creation_rules:" "$_test_sops_yaml"
+check ".sops.yaml format has age key reference" grep -q "age:" "$_test_sops_yaml"
+check ".sops.yaml format is valid YAML" bash -c "yq eval '.' '$_test_sops_yaml' >/dev/null 2>&1"
+rm -f "$_test_sops_yaml"
 echo ""
 
 # -----------------------------------------------------------------------
@@ -419,7 +429,6 @@ check "validate checks for jq" bash -c "echo '$validate_output' | grep -qi 'jq'"
 check "validate checks for Keychain" bash -c "echo '$validate_output' | grep -qi 'key'"
 
 # Placeholder .sops.yaml detection (sandbox.sh:220)
-cp .sops.yaml "${WORK_DIR}/.sops.yaml.bak"
 cat > "${WORK_DIR}/.sops-placeholder.yaml" <<SOPS
 creation_rules:
   - age: "${PLACEHOLDER_KEY}"
