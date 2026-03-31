@@ -1,8 +1,7 @@
 # agent-sandbox
 
 [![CI](https://github.com/GSA-TTS/agent-sandbox/actions/workflows/ci.yml/badge.svg)](https://github.com/GSA-TTS/agent-sandbox/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/GSA-TTS/agent-sandbox?display_name=tag&logo=github)](https://github.com/GSA-TTS/agent-sandbox/releases)
-[![License](https://img.shields.io/github/license/GSA-TTS/agent-sandbox)](LICENSE)
+
 
 A small Python CLI that makes Docker Sandboxes usable with custom OpenAI-style APIs and OpenCode.
 
