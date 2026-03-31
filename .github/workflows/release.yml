@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub release from CHANGELOG
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524cb85302648fd8cd3e9606063b1bac470 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Validate tag, VERSION, and pyproject version match
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION_FILE="$(tr -d '[:space:]' < VERSION)"
+
+          PYPROJECT_VERSION="$(
+            python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(data["project"]["version"])
+          PY
+          )"
+
+          if [[ "${TAG}" != "${VERSION_FILE}" ]]; then
+            echo "ERROR: tag version ${TAG} does not match VERSION file ${VERSION_FILE}" >&2
+            exit 1
+          fi
+
+          if [[ "${TAG}" != "${PYPROJECT_VERSION}" ]]; then
+            echo "ERROR: tag version ${TAG} does not match pyproject version ${PYPROJECT_VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Extract release notes from CHANGELOG.md
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          awk -v version="${VERSION}" '
+            $0 ~ "^## \\[" version "\\]" { capture=1; next }
+            capture && $0 ~ "^## \\[" { exit }
+            capture { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+
+          if [[ ! -s RELEASE_NOTES.md ]]; then
+            echo "ERROR: could not extract release notes for version ${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          name: "agent-sandbox ${{ github.ref_name }}"
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true
+          make_latest: true

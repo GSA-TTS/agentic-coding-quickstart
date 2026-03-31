@@ -1,171 +1,257 @@
-# AGENTS.md — AI Agent Instructions for agent-sandbox
+# AGENTS.md — Instructions for AI Coding Agents
 
-> This file defines how AI coding agents should interact with this repository.
-> It is read by Claude Code, Codex CLI, Gemini CLI, and other agent platforms.
+This file tells AI coding agents how to work in this repository.
+
+It is intentionally short, strict, and practical.
 
 ## Mandatory Reading
 
-Before making ANY code changes, agents MUST read and follow:
+Before making any change, agents MUST read:
 
-1. **This file (AGENTS.md)** — Project-specific rules and conventions
-2. **[docs/CODING_PRACTICES.md](docs/CODING_PRACTICES.md)** — Secure coding standards (input validation, secrets, testing, architecture)
+1. `AGENTS.md`
+2. `docs/CODING_PRACTICES.md`
 
-Violations of CODING_PRACTICES.md will be rejected in code review.
+If these files conflict, follow the more restrictive rule.
 
-## Project Overview
+## Project Summary
 
-**agent-sandbox** is a macOS-only tool that runs AI coding agents in isolated Docker Desktop sandboxes with encrypted secrets (SOPS/AGE) and network controls (RFC 1918 + cloud IMDS blocking).
+`agent-sandbox` is a small Python CLI that makes Docker Sandboxes usable with custom OpenAI-style APIs and OpenCode.
 
-**Stack:** Bash, Docker Desktop sandbox mode, SOPS/AGE, macOS Keychain, jq
+Current architecture:
+
+- Python-first CLI
+- project-local config in `.agent-sandbox/`
+- project-local `opencode.json`
+- explicit provider probing before launch
+- structured audit logging
+- named network policy profiles
+- optional `sops-age` support for stronger local secret handling
+
+## Default Workflow
+
+The normal path should stay simple:
+
+```bash
+cp .env.example .env
+$EDITOR .env
+make init
+make doctor
+make probe
+make run
+```
+
+This is the preferred workflow for both humans and agents.
+
+Do not add extra setup steps unless there is a clear security or correctness reason.
 
 ## Commands
 
+Use the Makefile first unless you have a specific reason not to.
+
 ```bash
-# Run all tests (smoke + unit/integration)
-make test
-
-# Individual test suites
-make smoke                   # File structure, shellcheck, config validation
-make unit                    # Unit + integration tests requiring macOS + sops/age
-make lint                    # ShellCheck on all shell scripts
-
-# Validate environment
-make validate
-
-# Quickstart (validates .env, discovers models, generates config, encrypts)
-make quickstart              # All-in-one: .env → models → config → encrypt
-
-# Model discovery (requires OPENAI_COMPAT_BASE_URL + OPENAI_COMPAT_API_KEY in .env)
-make models                  # List models from OpenAI-compatible API
-make config                  # Generate opencode.json from discovered models
-
-# Version + release
-make version                 # Print current version
-make release-patch           # Bump patch (x.y.Z+1), update CHANGELOG, tag
-make release-minor           # Bump minor (x.Y+1.0), update CHANGELOG, tag
-make release-major           # Bump major (X+1.0.0), update CHANGELOG, tag
-
-# Show available commands
 make help
+make init
+make doctor
+make probe
+make config
+make run
+make dry-run
+make stop
+make remove
+make logs
+make netlogs
+make encrypt
+make decrypt
+make lint
+make format
+make test
+make clean
+make distclean
 ```
 
-## Architecture
-
-```
-VERSION                  # Semver version (single source of truth). Read by sandbox.sh + release.sh.
-config.sh               # Centralized constants (readonly). Single source of truth.
-sandbox.sh              # Main script — sources config.sh, implements all subcommands.
-release.sh              # Release automation — version bump, changelog update, git tag.
-test/helpers.sh          # Shared test functions (check, check_err, summary). Sources config.sh.
-test/smoke.sh            # Fast validation: file structure, shellcheck, config checks.
-test/sandbox-unit.sh     # Thorough tests: encrypt/decrypt roundtrips, guards, edge cases.
-test/fixtures/           # /v1/models API response fixtures (OpenAI, USAi, vLLM, Ollama, edge cases).
-network-policy.json      # CIDR block rules applied via docker sandbox network proxy.
-.sops.yaml               # AGE public key for SOPS encryption (placeholder until setup).
-.env.example             # Template for API keys.
-Makefile                 # User-facing commands (delegates to sandbox.sh + release.sh).
-```
-
-### Documentation
-
-```
-docs/QUICKSTART.md       # Step-by-step first-use guide
-docs/SECURITY.md         # Full threat model, network policy, audit logging, secret lifecycle
-docs/SOPS-SETUP.md       # SOPS/AGE key management, manual operations, team sharing, rotation
-docs/CODING_PRACTICES.md # Secure coding standards — MUST READ before any code changes
-```
-
-## Conventions
-
-### Config Constants
-
-All shared constants live in `config.sh`. This file is sourced by `sandbox.sh` and all test suites (via `test/helpers.sh`).
-
-- **Defaults** are `readonly` variables prefixed with `DEFAULT_` (e.g., `DEFAULT_SANDBOX_NAME`)
-- **Runtime values** in `sandbox.sh` use `${VAR:-$DEFAULT_VAR}` for environment overridability
-- **Non-overridable constants** have no `DEFAULT_` prefix (e.g., `PLACEHOLDER_KEY`, `SOPS_FORMAT_FLAGS`)
-- Never hardcode values that exist in `config.sh` — always reference the constant
-
-### Shell Style
-
-- `set -euo pipefail` at the top of every script
-- ShellCheck clean (`shellcheck -x -e SC1091` for cross-file sourcing)
-- `SC2086` disabled only for intentional word splitting on `$SOPS_FORMAT_FLAGS`
-- `SC2034` disabled in `config.sh` (variables used by sourcing scripts)
-- Functions: `cmd_*` for subcommands, lowercase with underscores
-- Logging: `log "message"` for info, `err "message"` for fatal errors (exits 1)
-- Audit: `audit "action" "detail"` — all user-facing operations must log
-
-### Test Style
-
-- Use `check "description" command args...` from `test/helpers.sh`
-- Use `check_err "description" "expected_pattern" command args...` for stderr assertions
-- Group tests into numbered sections with descriptive headers
-- Use environment variable overrides instead of sed patching (e.g., `KEYCHAIN_SERVICE=test-val bash sandbox.sh decrypt`)
-- Copy `config.sh` alongside `sandbox.sh` when testing in temp directories
-- Use `>=` thresholds for count assertions (resilient to additions)
-- Clean up temp files in trap handlers
-- Model detection tests use fixtures in `test/fixtures/` with `run_model_pipeline()`, `run_small_model_selection()`, and `run_full_config_pipeline()` helpers (sections 41-49)
-
-## File Roles
-
-| File | Role | Agent May Modify? |
-|------|------|-------------------|
-| `config.sh` | Centralized constants | Yes — add new constants here, never elsewhere |
-| `sandbox.sh` | Main script | Yes — all subcommands live here |
-| `test/helpers.sh` | Shared test utilities | Yes — add new helpers here |
-| `test/smoke.sh` | Fast structural tests | Yes — add checks for new files/patterns |
-| `test/sandbox-unit.sh` | Thorough unit/integration tests | Yes — add tests for new functionality |
-| `network-policy.json` | Network isolation rules | Yes — add CIDRs, update docs/SECURITY.md to match |
-| `VERSION` | Semver version file | Yes — via `release.sh` only (never edit manually) |
-| `release.sh` | Release automation | Yes — version bump, changelog, tag |
-| `opencode.json` | OpenCode config (generated) | No — generated by `make config` from API models |
-| `.sops.yaml` | SOPS config (placeholder) | No — generated by `make setup` |
-| `.env` / `.env.enc` | Secrets | Never — gitignored, contains real API keys |
-| `.github/workflows/ci.yml` | CI pipeline | Yes — keep SHA-pinned actions |
-| `.github/workflows/release.yml` | Release workflow | Yes — keep SHA-pinned actions |
-
-## Prohibited Actions
-
-1. **Never commit secrets** — `.env`, `.env.enc`, `*.key`, `*.pem` are gitignored
-2. **Never remove the platform guard** — macOS Keychain dependency is by design
-3. **Never use `eval` or `SOPS_AGE_KEY_CMD`** — direct `SOPS_AGE_KEY` export only (security hardening)
-4. **Never hardcode constants** that exist in `config.sh`
-5. **Never use sed patching in tests** — use environment variable overrides
-6. **Never skip shellcheck** — all `.sh` files must pass
-7. **Never unpin GitHub Actions** — use SHA hashes, not version tags
-
-## Releasing
+Direct CLI usage:
 
 ```bash
-# 1. Ensure working tree is clean (all changes committed)
-# 2. Run release script (bumps VERSION, updates CHANGELOG, commits, tags)
-make release-patch   # or release-minor / release-major
-
-# 3. Push commit + tag (triggers GitHub Actions release workflow)
-git push origin main --tags
+python -m agent_sandbox --help
+python -m agent_sandbox init .
+python -m agent_sandbox doctor .
+python -m agent_sandbox provider probe .
+python -m agent_sandbox config render .
+python -m agent_sandbox run .
 ```
 
-The release workflow (`.github/workflows/release.yml`) automatically creates a GitHub Release with changelog notes extracted from `CHANGELOG.md`.
+## Repository Layout
 
-**Version source of truth:** `VERSION` file (plain text, e.g., `3.1.0`). Read by `sandbox.sh --version` and `release.sh`.
+```text
+src/agent_sandbox/
+  cli.py                # CLI only
+  config.py             # config, env, repo-local state
+  constants.py          # stable constants
+  docker_sandbox.py     # sandbox planning + execution
+  doctor.py             # prerequisite checks
+  errors.py             # typed exceptions
+  logging_utils.py      # structured logging + audit events
+  models.py             # dataclasses / typed models
+  opencode_config.py    # opencode.json rendering
+  providers.py          # provider probing / model discovery
+  secrets.py            # env and sops-age secret handling
+  subprocess_runner.py  # subprocess boundary
 
-**Changelog format:** [Keep a Changelog](https://keepachangelog.com/). Add entries under `## [Unreleased]`. Release script moves them to a versioned section.
+tests/
+  test_cli.py
+  test_config.py
+  test_docker_sandbox.py
+  test_doctor.py
+  test_logging_utils.py
+  test_main.py
+  test_opencode_config.py
+  test_provider_probe.py
+  test_secrets.py
+  test_subprocess_runner.py
+```
 
-## Adding New Features
+## Rules for Agents
 
-1. Add constants to `config.sh` if the value is shared across files
-2. Implement in `sandbox.sh` (add `cmd_*` function, wire into `case` statement)
-3. Add smoke test in `test/smoke.sh` (file existence, grep pattern)
-4. Add unit tests in `test/sandbox-unit.sh` (numbered section, happy path + error cases)
-5. Update `Makefile` if adding a new user-facing command
-6. Update `README.md` commands table
-7. Update `docs/` if the feature affects security model or setup
+### 1. Keep the workflow simple
 
-## Security Boundaries
+Prefer boring, obvious UX.
 
-- **Secrets** are encrypted at rest (SOPS/AGE), decrypted to temp files (mode 600), auto-cleaned on exit
-- **Network** blocks RFC 1918, link-local, and cloud IMDS endpoints (see `network-policy.json`)
-- **Keychain** access requires an active macOS session — fails closed if locked
-- **Audit log** at `~/.config/agent-sandbox/audit.log` records all operations
-- Security changes require review from @cloud-gov
+Good:
+- one clear command per task
+- strong defaults
+- project-local state
+- readable output
+- clear failures
+
+Bad:
+- extra bootstrap layers
+- hidden magic
+- optional complexity made mandatory
+- feature flags for hypothetical futures
+
+### 2. Respect module boundaries
+
+- `cli.py` handles CLI wiring, messaging, and exit behavior
+- `config.py` handles config and environment loading
+- `providers.py` owns provider probing and response parsing
+- `docker_sandbox.py` owns sandbox planning and execution
+- `subprocess_runner.py` owns subprocess calls
+- `logging_utils.py` owns audit logging
+- `secrets.py` owns secret backend behavior
+- `models.py` should stay side-effect free
+
+Do not smear logic across modules.
+
+### 3. Isolate side effects
+
+- no subprocess calls outside `subprocess_runner.py`
+- no direct network probing outside `providers.py`
+- no secret backend logic outside `secrets.py`
+- no logging shape drift outside `logging_utils.py`
+
+### 4. Use typed errors
+
+Raise project-specific exceptions where appropriate.
+
+Do not swallow failures.
+Do not use bare `except`.
+Do not silently fall back to surprising behavior.
+
+### 5. Preserve deterministic behavior
+
+Changes MUST be deterministic and testable.
+
+Avoid:
+- hidden global state
+- time-dependent behavior in core logic
+- random values in business logic
+- implicit environment reads outside config/secrets boundaries
+
+### 6. Minimize dependencies
+
+Before adding any dependency, ask:
+
+- does the standard library already solve this?
+- does this simplify the repo materially?
+- will this make future maintenance easier?
+
+If not, do not add it.
+
+### 7. Do not reintroduce shell-era architecture
+
+This repo used to be shell-first.
+
+Do not reintroduce:
+- large shell orchestration
+- duplicated config sources
+- ad hoc file parsing in shell
+- new runtime-critical `.sh` logic unless there is no reasonable Python alternative
+
+Small helper shell scripts are acceptable only when clearly justified.
+
+## Testing Rules
+
+Every functional change MUST include tests.
+
+Minimum expectations:
+
+- `ruff check src tests`
+- `ruff format --check src tests`
+- `pytest`
+- `bandit -q -r src -c pyproject.toml`
+
+Test behavior, not implementation details.
+
+Mock:
+- subprocess calls
+- provider HTTP interactions
+- filesystem state when practical
+
+Do not require real Docker or real network access in normal tests.
+
+## Security Rules
+
+- never commit secrets
+- never log secrets
+- never hardcode credentials
+- never use `shell=True`
+- always pass subprocess args as lists
+- validate all external input
+- treat provider responses as untrusted input
+- keep project-local runtime state in `.agent-sandbox/`
+
+Supported secret backends:
+
+- `env`
+- `sops-age`
+
+Keep `env` as the easy default.
+Keep `sops-age` as the stronger optional path.
+
+## Docs and UX Expectations
+
+If you change user behavior, update:
+
+- `README.md`
+- `AGENTS.md`
+- `docs/CODING_PRACTICES.md`
+- `.env.example` if required env/config changed
+
+Error messages should help a developer recover fast.
+Help text should be direct and specific.
+Defaults should be visible and unsurprising.
+
+## Definition of Done
+
+A change is not done unless:
+
+- tests pass
+- lint passes
+- security scan passes
+- docs stay accurate
+- behavior remains simple and deterministic
+- no secret handling regressions are introduced
+
+## Final Instruction
+
+Prefer the simplest correct implementation that is easy to test, easy to explain, and easy to maintain.
