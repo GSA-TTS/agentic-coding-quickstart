@@ -1,6 +1,6 @@
 # Agentic Coding Quickstart
 
-> **Audience:** Government developers in the USAi pilot program  
+> **Audience:** Government developers in the TTS pilot program  
 > **Purpose:** Get AI coding agents running safely on your local machine in under 5 minutes
 
 This guide helps you use AI coding agents (like OpenCode) inside isolated Docker sandboxes, connecting to government-approved API endpoints (USAi).
