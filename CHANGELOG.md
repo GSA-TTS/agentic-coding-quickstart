@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.2.0...v0.3.0) (2026-04-14)
+
+
+### Features
+
+* add semver, conventional commits, and automated releases ([#12](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/12)) ([5c3cdfb](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/5c3cdfb0c11f16d8253500bfcadf299abedd07c1))
+
+
+### Bug Fixes
+
+* **ci:** migrate from hello-please to release-please ([583dca5](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/583dca5c3390268536aad47ff8323726855660d2))
+
 ## [Unreleased]
 
 ### Added
