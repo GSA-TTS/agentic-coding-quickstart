@@ -11,17 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Semantic versioning (SemVer 2.0.0) adoption
 - Conventional commits enforcement via commitlint
-- Automated release workflow using hello-please
+- Automated release workflow using release-please (Google)
 - ADR-0002: Version management and release automation decision record
-- `.hello-please.yml` configuration for automated releases
+- `release-please-config.json` and `.release-please-manifest.json` for automated releases
 - This CHANGELOG.md following Keep a Changelog v1.1.0 format
 - CONTRIBUTING.md with commit message guidelines
 
 ### Changed
 
-- Updated AGENTS.md with commit message requirements
+- Updated AGENTS.md with commit message requirements and AI attribution guidance
 - Updated CODING_PRACTICES.md with version control and release standards
-- Migrated release workflow to hello-please automation
+- Migrated release workflow to release-please automation
 
 ## [0.2.0] - 2026-03-31
 

@@ -1,5 +1,5 @@
 ---
-title: "Adopt Semantic Versioning, Conventional Commits, and hello-please for Release Automation"
+title: "Adopt Semantic Versioning, Conventional Commits, and release-please for Release Automation"
 status: accepted
 date: 2026-04-14
 decision_makers: ["William Zujkowski"]
@@ -10,7 +10,7 @@ ato_relevance: yes-process
 risk_treatment: mitigate
 ---
 
-# ADR-0002: Adopt Semantic Versioning, Conventional Commits, and hello-please for Release Automation
+# ADR-0002: Adopt Semantic Versioning, Conventional Commits, and release-please for Release Automation
 
 ## Context and Problem Statement
 
@@ -34,16 +34,16 @@ do not scale as the project grows.
 
 ## Considered Options
 
-1. **Semantic Versioning + Conventional Commits + hello-please (Automated)**
+1. **Semantic Versioning + Conventional Commits + release-please (Automated)**
 2. **Manual Versioning with Keep a Changelog**
 3. **Calendar Versioning (CalVer) with Manual Releases**
 4. **Automated Semantic Release (semantic-release npm package)**
 
 ## Decision Outcome
 
-Chosen option: **Semantic Versioning + Conventional Commits + hello-please (Automated)**,
+Chosen option: **Semantic Versioning + Conventional Commits + release-please (Automated)**,
 because it provides the best balance of automation, traceability, and federal compliance
-requirements while maintaining simplicity and avoiding unnecessary dependencies.
+requirements while maintaining simplicity and being backed by Google's well-maintained tooling.
 
 ### Architecture Overview
 
@@ -60,13 +60,13 @@ requirements while maintaining simplicity and avoiding unnecessary dependencies.
 [Merge to main]
        |
        v
-[hello-please: Auto-bump version + CHANGELOG]
+[release-please: Creates Release PR with version bump + CHANGELOG]
+       |
+       v
+[Merge Release PR]
        |
        v
 [Create Git Tag + GitHub Release]
-       |
-       v
-[Release Artifacts Published]
 ```
 
 ### Key Implementation Elements
@@ -94,16 +94,16 @@ requirements while maintaining simplicity and avoiding unnecessary dependencies.
    - Breaking changes: Include `BREAKING CHANGE:` in commit footer → Major version bump
    - Scope: Optional, e.g., `feat(agents): add new agent rule`
 
-3. **hello-please for Release Automation**
-   - Automatically determines version bump from commit history
-   - Generates CHANGELOG.md from conventional commits
-   - Creates git tags and GitHub releases
-   - Integrates with GitHub Actions for automated releases
-   - Configuration in `.hello-please.yml`
+3. **release-please for Release Automation**
+   - Google-maintained tool for automated releases based on conventional commits
+   - Creates a Release PR that accumulates changes and updates CHANGELOG.md
+   - When Release PR is merged, creates git tag and GitHub release
+   - Configuration in `release-please-config.json` and `.release-please-manifest.json`
+   - GitHub Action: `googleapis/release-please-action`
 
 4. **CHANGELOG.md Format**
    - Follow Keep a Changelog v1.1.0 format
-   - Auto-generated from conventional commits via hello-please
+   - Auto-generated from conventional commits via release-please
    - Sections: Added, Changed, Deprecated, Removed, Fixed, Security
    - Each version links to GitHub compare view
 
@@ -121,12 +121,13 @@ requirements while maintaining simplicity and avoiding unnecessary dependencies.
 - SemVer provides clear expectations for downstream consumers
 - GitHub Actions integration enables full automation
 - Compliance-friendly audit trail (CM-2, CM-3, SA-10)
+- release-please is backed by Google with strong maintenance and community
 
 ### Negative Consequences
 
 - Team must learn and follow conventional commit format
 - Squash merges require careful commit message composition
-- hello-please is a relatively new tool (potential breaking changes)
+- Release PR model requires an additional merge step
 - Requires discipline — incorrect commit types lead to incorrect version bumps
 
 ### Compliance Consequences
@@ -155,22 +156,28 @@ Rejected because:
 - Less common in federal software development
 - SemVer is industry standard and well-understood
 
-### Automated Semantic Release (semantic-release)
+### Automated Semantic Release (semantic-release npm package)
 
-Partially rejected because:
+Rejected because:
 - Heavy dependency on Node.js ecosystem
-- More complex configuration than hello-please
-- Overkill for current project scope
-- hello-please is simpler and Go-based (fewer dependencies)
+- More complex configuration
+- Requires Node.js runtime in CI
+
+### hello-please
+
+Initially considered but rejected because:
+- Repository no longer exists/accessible
+- Less community support than release-please
+- release-please has stronger Google backing and maintenance
 
 ## Implementation Plan
 
-1. Create `.hello-please.yml` configuration
+1. Create `release-please-config.json` and `.release-please-manifest.json`
 2. Create initial `CHANGELOG.md` with Keep a Changelog format
 3. Add commitlint configuration (`.commitlintrc.yml`)
 4. Update AGENTS.md with commit message requirements
 5. Update CODING_PRACTICES.md with version control standards
-6. Update `.github/workflows/release.yml` to use hello-please
+6. Update `.github/workflows/release.yml` to use release-please
 7. Add CONTRIBUTING.md with commit message guidelines
 8. Backfill CHANGELOG for existing releases (v0.1.0, v0.2.0)
 
@@ -218,7 +225,8 @@ Migration guide: docs/migration/oauth-migration.md
 - [Semantic Versioning 2.0.0](https://semver.org/)
 - [Conventional Commits 1.0.0](https://www.conventionalcommits.org/)
 - [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/)
-- [hello-please Documentation](https://github.com/marwan-at-work/hello-please)
+- [release-please](https://github.com/googleapis/release-please)
+- [release-please-action](https://github.com/googleapis/release-please-action)
 - [NIST SP 800-53 Rev 5 — CM-2 Baseline Configuration](https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final)
 - [NIST SP 800-53 Rev 5 — CM-3 Configuration Change Control](https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final)
 - Related: `AGENTS.md`, `docs/CODING_PRACTICES.md`
