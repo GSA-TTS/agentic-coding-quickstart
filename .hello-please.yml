@@ -1,0 +1,128 @@
+# hello-please configuration for automated releases
+# See: https://github.com/marwan-at-work/hello-please
+
+# Version file locations to update automatically
+version:
+  files:
+    - CHANGELOG.md
+
+# Changelog configuration
+changelog:
+  # Follow Keep a Changelog format
+  format: keep-a-changelog
+  
+  # Conventional commit type mappings to changelog sections
+  sections:
+    - title: "Breaking Changes"
+      types:
+        - breaking
+      labels:
+        - breaking-change
+        - semver-major
+    
+    - title: "Added"
+      types:
+        - feat
+      labels:
+        - feature
+        - enhancement
+        - semver-minor
+    
+    - title: "Fixed"
+      types:
+        - fix
+      labels:
+        - bug
+        - bugfix
+        - fix
+        - semver-patch
+    
+    - title: "Changed"
+      types:
+        - refactor
+        - perf
+      labels:
+        - refactor
+        - performance
+    
+    - title: "Deprecated"
+      types:
+        - deprecate
+      labels:
+        - deprecated
+    
+    - title: "Removed"
+      types:
+        - remove
+      labels:
+        - removed
+    
+    - title: "Security"
+      types:
+        - security
+      labels:
+        - security
+    
+    - title: "Documentation"
+      types:
+        - docs
+      labels:
+        - documentation
+        - docs
+    
+    - title: "Maintenance"
+      types:
+        - chore
+        - ci
+        - build
+        - test
+      labels:
+        - chore
+        - ci
+        - test
+        - dependencies
+
+# Git configuration
+git:
+  # Tag format for releases
+  tag_format: "v{{version}}"
+  
+  # Commit message for version bump
+  commit_message: "chore(release): prepare v{{version}}"
+  
+  # Sign commits and tags
+  sign_commits: false
+  sign_tags: false
+
+# GitHub release configuration
+github:
+  # Generate GitHub release from CHANGELOG section
+  release: true
+  
+  # Include auto-generated release notes
+  generate_notes: true
+  
+  # Mark as latest release
+  make_latest: true
+
+# Exclude certain commit types from triggering version bumps
+exclude_types:
+  - chore
+  - docs
+  - test
+  - ci
+  - build
+  - style
+
+# Breaking change detection
+breaking:
+  # Detect breaking changes from commit footers
+  footer_pattern: "^BREAKING CHANGE:"
+  
+  # Alternative: detect from commit type suffix (feat!, fix!)
+  type_suffix: "!"
+
+# Pre-release configuration
+prerelease:
+  # Pattern for pre-release versions
+  pattern: "(alpha|beta|rc)"

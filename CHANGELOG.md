@@ -2,166 +2,71 @@
 
 All notable changes to this project will be documented in this file.
 
-This project follows:
-- [Keep a Changelog](https://keepachangelog.com/)
-- [Semantic Versioning](https://semver.org/)
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Semantic versioning (SemVer 2.0.0) adoption
+- Conventional commits enforcement via commitlint
+- Automated release workflow using hello-please
+- ADR-0002: Version management and release automation decision record
+- `.hello-please.yml` configuration for automated releases
+- This CHANGELOG.md following Keep a Changelog v1.1.0 format
+- CONTRIBUTING.md with commit message guidelines
+
 ### Changed
 
-- Improved developer workflow (`Makefile`, docs, onboarding)
-- Documentation aligned with the Python CLI architecture
-- Internal cleanup and release preparation
+- Updated AGENTS.md with commit message requirements
+- Updated CODING_PRACTICES.md with version control and release standards
+- Migrated release workflow to hello-please automation
 
 ## [0.2.0] - 2026-03-31
 
 ### Added
 
-- Python CLI implementation for `agent-sandbox`
-- Provider probing for OpenAI-compatible `/v1/models` endpoints
-- Deterministic `opencode.json` generation from validated provider state
-- Project-local runtime state in `.agent-sandbox/`
-- Structured JSONL audit logging
-- Named network policy profiles: `open`, `balanced`, and `restricted`
-- Optional `sops-age` support for stronger local secret handling
-- Comprehensive automated test suite with high coverage
-- Integrated developer tooling with Ruff, Bandit, and pytest
+- Python CLI wrapper for SBX operations (`sbx` command)
+- Full test coverage for sandbox lifecycle operations
+- Type hints and validation for all Python modules
 
 ### Changed
 
-- Replaced the Bash-first implementation with a Python package under `src/agent_sandbox/`
-- Simplified the default workflow to `make init`, `make doctor`, `make probe`, and `make run`
-- Centralized runtime configuration in `.agent-sandbox/config.toml`
-- Simplified secrets handling so `.env` is the default path and `sops-age` is optional
-- Moved logging to structured audit events instead of ad hoc shell output
-- Updated documentation and onboarding around the Python CLI workflow
-
-### Removed
-
-- Legacy shell orchestration layer
-- Shell-based config generation
-- Shell-based test suites
-- Legacy Make targets tied directly to shell implementation
-
-### Breaking Changes
-
-- The supported interface is now the Python CLI
-- Legacy shell scripts and shell-only workflows are no longer supported
-- Configuration paths and formats have changed
-- The local workflow now assumes a Python environment
-
-## [3.2.0] - 2026-02-26
-
-### Added
-
-- `make quickstart`
-- `load_env()` helper
-- additional tests
-
-## [3.1.4] - 2026-02-26
+- Replaced bash-based sandbox wrapper with Python implementation
+- Improved error handling and user feedback in CLI
 
 ### Fixed
 
-- `enabled_providers` whitelist support in generated config
-- additional test coverage for generated provider visibility
+- Sandbox lifecycle management issues
 
-## [3.1.3] - 2026-02-26
-
-### Added
-
-- Makefile improvements
-- Makefile validation in CI
-- shell-era fixture and documentation updates
-
-## [3.1.2] - 2026-02-26
+## [0.1.0] - 2026-02-27
 
 ### Added
 
-- Expanded `/v1/models` fixtures
-- multi-format provider tests
-- edge-case hardening and performance tests
+- Initial project structure and documentation
+- AGENTS.md behavioral rules for AI coding agents
+- CODING_PRACTICES.md secure coding standards
+- SBX quickstart guide and documentation
+- Docker SBX integration for isolated agent execution
+- USAi API endpoint configuration examples
+- OpenCode configuration (`opencode.jsonc`)
+- ADR-0001: SBX isolation architecture decision
+- GitHub Actions CI workflow
+- Gitleaks configuration for secret scanning
+- CC0 1.0 Universal license
 
-## [3.1.1] - 2026-02-26
+### Changed
 
-### Added
-
-- `VERSION` file
-- `release.sh`
-- initial GitHub Releases workflow
-- shell-era version and release targets
-
-## [3.0.0] - 2026-02-26
-
-### Added
-
-- OpenAI-compatible `/v1/models` support
-- automatic shell-era config generation
-- provider support for multiple compatible backends
-- HTTPS enforcement and validation
-
-## [2.5.0] - 2026-02-26
-
-### Added
-
-- `AGENTS.md`
-- CI status badge in README
-- shell-era agent and smoke test integration
-
-## [2.4.0] - 2026-02-26
-
-### Added
-
-- centralized shell constants in `config.sh`
-- shell helper and CI improvements
-
-## [2.3.0] - 2026-02-26
-
-### Security
-
-- shell hardening around secret handling and CIDR validation
-
-### Added
-
-- macOS platform guard
-- environment override support
-- smoke test coverage for shell security features
-
-## [2.2.0] - 2026-02-24
+- Default model from claude_3_7_sonnet to claude_4_5_opus
+- Gitleaks configuration from `.gitleaks.toml` to `.gitleaks.repo.toml`
+- Improved sandbox lifecycle documentation
 
 ### Fixed
 
-- safer decrypt flow
-- keychain and sandbox guard improvements
+- CI workflow: removed gitleaks action, improved developer experience
+- GitHub token setup for git operations inside sandbox
 
-### Added
-
-- keychain pre-flight checks
-- atomic decrypt safety tests
-- shell-era cleanup and security tests
-
-## [2.1.0] - 2026-02-24
-
-### Changed
-
-- consolidated shell test suites
-- simplified CI and CIDR blocking
-- cleaned up root `SECURITY.md`
-
-### Added
-
-- shell test helpers
-- command validation tests
-- raw SOPS roundtrip tests
-
-## [2.0.0] - 2026-02-24
-
-### Changed
-
-- MVP rewrite into a smaller shell-based structure
-- simplified Makefile and scripts
-- preserved core security boundaries
-
-## [1.x] - Pre-MVP
-
-See `feature/enterprise-hardening` for earlier history.
+[unreleased]: https://github.com/williamzujkowski/agent-sandbox/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/williamzujkowski/agent-sandbox/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/williamzujkowski/agent-sandbox/releases/tag/v0.1.0

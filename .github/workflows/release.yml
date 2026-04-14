@@ -2,78 +2,82 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   release:
-    name: Create GitHub release from CHANGELOG
+    name: Automated release with hello-please
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@42375524cb85302648fd8cd3e9606063b1bac470 # v5.6.0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
         with:
-          python-version: "3.11"
-
-      - name: Validate tag, VERSION, and pyproject version match
-        shell: bash
+          go-version: '1.22'
+      
+      - name: Install hello-please
+        run: go install github.com/marwan-at-work/hello-please@latest
+      
+      - name: Configure git
         run: |
-          set -euo pipefail
-
-          TAG="${GITHUB_REF_NAME#v}"
-          VERSION_FILE="$(tr -d '[:space:]' < VERSION)"
-
-          PYPROJECT_VERSION="$(
-            python - <<'PY'
-          import tomllib
-          from pathlib import Path
-
-          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-          print(data["project"]["version"])
-          PY
-          )"
-
-          if [[ "${TAG}" != "${VERSION_FILE}" ]]; then
-            echo "ERROR: tag version ${TAG} does not match VERSION file ${VERSION_FILE}" >&2
-            exit 1
-          fi
-
-          if [[ "${TAG}" != "${PYPROJECT_VERSION}" ]]; then
-            echo "ERROR: tag version ${TAG} does not match pyproject version ${PYPROJECT_VERSION}" >&2
-            exit 1
-          fi
-
-      - name: Extract release notes from CHANGELOG.md
-        shell: bash
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Run hello-please to determine version bump
+        id: version
         run: |
-          set -euo pipefail
-
-          VERSION="${GITHUB_REF_NAME#v}"
-
-          awk -v version="${VERSION}" '
-            $0 ~ "^## \\[" version "\\]" { capture=1; next }
-            capture && $0 ~ "^## \\[" { exit }
-            capture { print }
-          ' CHANGELOG.md > RELEASE_NOTES.md
-
-          if [[ ! -s RELEASE_NOTES.md ]]; then
-            echo "ERROR: could not extract release notes for version ${VERSION}" >&2
-            exit 1
+          # Check if there are any releasable commits since last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tags found, creating initial release"
+            echo "bump=true" >> $GITHUB_OUTPUT
+          else
+            # Check for commits that would trigger a version bump
+            COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"%s")
+            
+            if echo "$COMMITS" | grep -qE "^(feat|fix|perf|security|BREAKING CHANGE)"; then
+              echo "Found commits that trigger version bump"
+              echo "bump=true" >> $GITHUB_OUTPUT
+            else
+              echo "No version bump needed (only chore/docs/test/ci commits)"
+              echo "bump=false" >> $GITHUB_OUTPUT
+            fi
           fi
-
+      
+      - name: Bump version and update CHANGELOG
+        if: steps.version.outputs.bump == 'true'
+        run: |
+          hello-please bump
+          
+          # Get the new version
+          NEW_VERSION=$(git describe --tags --abbrev=0)
+          echo "NEW_VERSION=${NEW_VERSION}" >> $GITHUB_ENV
+      
+      - name: Push changes and tags
+        if: steps.version.outputs.bump == 'true'
+        run: |
+          git push origin main
+          git push origin --tags
+      
       - name: Create GitHub release
+        if: steps.version.outputs.bump == 'true'
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
-          name: "agent-sandbox ${{ github.ref_name }}"
-          body_path: RELEASE_NOTES.md
+          tag_name: ${{ env.NEW_VERSION }}
+          name: "agent-sandbox ${{ env.NEW_VERSION }}"
           generate_release_notes: true
           make_latest: true
+

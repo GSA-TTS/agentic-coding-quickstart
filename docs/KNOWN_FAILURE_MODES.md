@@ -1,0 +1,428 @@
+---
+title: "Known Failure Modes"
+description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
+status: canonical
+tier: 2
+last_updated: "2026-04-14"
+audience: "developers"
+keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
+---
+
+# Known Failure Modes
+
+This document captures real-world failure patterns when using Docker SBX + USAi + agent frameworks. If you're hitting something weird, it's probably in here.
+
+---
+
+## 1. "Unknown Agent" Error on sbx create
+
+### Symptoms
+
+- `sbx create my-sandbox` fails
+- Error: `unknown agent "my-sandbox"`
+
+### Root Cause
+
+SBX `create` command requires an agent type (e.g., `opencode`, `claude`, `shell`) and a workspace path.
+
+### Fix
+
+Use the correct syntax:
+```bash
+# Correct: specify agent type and path
+sbx create opencode .
+
+# With custom name
+sbx create --name my-sandbox opencode .
+```
+
+Available agents: `claude`, `codex`, `copilot`, `docker-agent`, `gemini`, `kiro`, `opencode`, `shell`
+
+---
+
+## 2. API Key Works in UI but Fails in Agent
+
+### Symptoms
+
+- Works in Swagger / web UI
+- Fails in agent or CLI
+- Error: `authentication failed` or `401 Unauthorized`
+
+### Likely Causes
+
+- Incorrect header format
+- Missing `Bearer` prefix
+- Wrong environment variable injection
+
+### Fix
+
+Ensure header format is correct:
+```
+Authorization: Bearer <API_KEY>
+```
+
+Confirm SBX injected env var is present inside container:
+```bash
+sbx exec -it <sandbox> sh
+echo $USAI_API_KEY
+```
+
+---
+
+## 3. Agent Cannot See API Key / USAi Authentication Fails
+
+### Symptoms
+
+- Agent fails silently or errors on auth
+- OpenCode shows generic providers instead of USAi
+- `{"detail":"Authentication failed"}` from USAi API
+
+### Root Cause
+
+SBX's secret proxy only works with **standard provider endpoints**. USAi uses a custom `baseURL` (`https://api.gsa.usai.gov/api/v1`), which the proxy doesn't recognize.
+
+When you use `sbx secret set -g openai`, SBX:
+1. Stores your key
+2. Sets `OPENAI_API_KEY=proxy-managed` in the container
+3. Intercepts requests to `api.openai.com` and injects the real key
+
+But requests to `api.gsa.usai.gov` bypass this proxy entirely.
+
+### Fix
+
+Inject the API key directly via environment variable:
+```bash
+sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
+```
+
+This passes the actual key into the container environment, where `opencode.jsonc` reads it via `{env:USAI_API_KEY}`.
+
+---
+
+## 4. Secrets Accidentally Printed
+
+### Symptoms
+
+- API key appears in logs/output
+- Key visible in terminal history
+
+### Root Cause
+
+- Debugging via `printenv` or `env`
+- Logging config objects that contain credentials
+- Shell history capturing secret values
+
+### Fix
+
+- Never print full environment
+- Mask values if debugging required
+- Use `set +o history` before working with secrets
+- Review agent logs before sharing
+
+---
+
+## 5. Incorrect baseURL
+
+### Symptoms
+
+- Model list fails
+- 404 or unexpected API errors
+- Connection refused
+
+### Root Cause
+
+Wrong endpoint format in configuration.
+
+### Fix
+
+Use the correct format:
+```
+https://api.gsa.usai.gov/api/v1
+```
+
+NOT:
+- Missing `/api/v1` suffix
+- Swagger UI URL
+- Documentation endpoint
+- Trailing slash issues
+
+---
+
+## 6. SBX CLI Behavior Changes
+
+### Symptoms
+
+- Commands stop working between runs
+- Flags behave differently than expected
+- Documentation doesn't match actual behavior
+
+### Root Cause
+
+SBX tooling is rapidly evolving with frequent breaking changes.
+
+### Fix
+
+- Check `sbx --help` for current syntax
+- Check `sbx <command> --help` for subcommand options
+- Revalidate commands before assuming code failure
+- Avoid scripting around unstable flags
+- Pin to specific SBX versions if possible
+
+---
+
+## 7. Agent Tries to Escape Sandbox
+
+### Symptoms
+
+- Attempts to access host filesystem paths
+- Unexpected file path errors
+- Permission denied on paths that "should" exist
+
+### Root Cause
+
+Agent assumes host filesystem layout, not container layout.
+
+### Fix
+
+- Enforce working directory constraints in AGENTS.md
+- Avoid granting unnecessary volume mounts
+- Configure agent with container-relative paths
+- Review agent file access patterns
+
+---
+
+## 8. Model Appears Available but Fails at Runtime
+
+### Symptoms
+
+- `/models` endpoint lists the model
+- Inference requests fail with errors
+- "Model not found" despite being listed
+
+### Root Cause
+
+- Model not actually enabled for your API key
+- Backend routing mismatch
+- Model requires specific parameters not provided
+
+### Fix
+
+- Test with minimal request first
+- Confirm model entitlement with USAi provider
+- Check if model requires specific `max_tokens` or other params
+- Try a different model to isolate the issue
+
+---
+
+## 9. Long Timeouts / Hanging Requests
+
+### Symptoms
+
+- Requests never return
+- Agent appears stuck
+- Eventually fails with timeout
+
+### Root Cause
+
+- Missing timeout configuration
+- Network routing issues inside container
+- DNS resolution failures
+- Proxy misconfiguration
+
+### Fix
+
+Set explicit timeouts in config:
+```json
+{
+  "requestTimeout": 30000,
+  "chunkTimeout": 5000
+}
+```
+
+Check network connectivity from inside container:
+```bash
+sbx exec <sandbox> curl -I https://api.gsa.usai.gov/api/v1/models
+```
+
+---
+
+## 10. Overcomplicated Setup
+
+### Symptoms
+
+- Too many scripts to run
+- Hard to reproduce environment
+- Works on one machine, fails on another
+- Debugging requires tribal knowledge
+
+### Root Cause
+
+Over-engineering instead of testing. Adding layers when simplicity would work.
+
+### Fix
+
+- Delete unnecessary wrapper scripts
+- Prefer 1 config file + 1 command
+- Document the minimal reproduction steps
+- If setup takes more than 3 commands, simplify
+
+---
+
+## 11. False Sense of Security
+
+### Symptoms
+
+- Assuming "it's in a container so it's safe"
+- Relaxing secret handling because of SBX
+- Not reviewing agent outputs
+
+### Reality
+
+Containers are NOT perfect isolation:
+- Container escapes exist
+- Mounted volumes expose host data
+- Network access can leak information
+- Logs may be captured outside container
+
+### Fix
+
+- Treat SBX as a strong boundary, not absolute
+- Continue to avoid exposing secrets at all costs
+- Review agent outputs before sharing
+- Don't mount sensitive host directories
+- Apply defense in depth
+
+---
+
+## 12. Environment Variable Naming Conflicts
+
+### Symptoms
+
+- Agent uses wrong API key
+- Configuration seems ignored
+- Unexpected behavior with correct config
+
+### Root Cause
+
+Multiple tools expecting different env var names:
+- `OPENAI_API_KEY`
+- `USAI_API_KEY`
+- `API_KEY`
+- Tool-specific variations
+
+### Fix
+
+- Check tool documentation for expected variable names
+- Set all expected variations if needed
+- Use explicit config file settings over env vars when possible
+
+---
+
+## 13. Config File Not Found in Container
+
+### Symptoms
+
+- Agent starts with defaults
+- Custom configuration ignored
+- "Config file not found" warnings
+
+### Root Cause
+
+Config file exists on host but not mounted into container.
+
+### Fix
+
+Ensure config is in the mounted working directory:
+```bash
+sbx exec -v $(pwd):/workspace <sandbox> sh
+```
+
+Or copy config into container before execution.
+
+---
+
+## 14. SBX Proxy Doesn't Work with Custom baseURL (Security Implication)
+
+### Symptoms
+
+- `sbx secret set -g openai` succeeds
+- But USAi authentication still fails
+- `OPENAI_API_KEY=proxy-managed` in container
+- Must use direct injection (`-e USAI_API_KEY="$USAI_API_KEY"`)
+
+### Root Cause
+
+SBX's secret proxy intercepts requests to **known provider endpoints** (like `api.openai.com`) and injects credentials. Custom `baseURL` endpoints like USAi (`api.gsa.usai.gov`) are not proxied.
+
+### Security Implication
+
+**When using direct injection, the agent CAN see the API key.**
+
+With proxy-based injection (standard providers):
+- Agent sees: `OPENAI_API_KEY=proxy-managed`
+- Real key is injected at the proxy level
+- Agent never has access to the raw credential
+
+With direct injection (USAi/custom endpoints):
+- Agent sees: `USAI_API_KEY=<actual-key-value>`
+- Key exists in container environment
+- Agent process can read it
+
+### Mitigations
+
+1. **AGENTS.md rules** prohibit printing/logging secrets
+2. **Container isolation** limits exposure scope
+3. **No persistence** - key never written to disk
+4. **Memory only** - key exists only during execution
+
+### Fix
+
+For now, bypass the proxy and inject directly:
+```bash
+sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
+```
+
+Your `opencode.jsonc` should use variable substitution:
+```json
+{
+  "provider": {
+    "usai": {
+      "options": {
+        "apiKey": "{env:USAI_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+### Upstream Tracking
+
+This limitation is tracked in **[docker/sbx-releases#35](https://github.com/docker/sbx-releases/issues/35)** - "Feature Request: Configurable Secret Injection for Custom Services"
+
+When implemented, this will allow defining custom service mappings so the proxy can inject credentials for endpoints like USAi without exposing the raw key to the agent.
+
+---
+
+## Debugging Checklist
+
+When something fails, work through this list:
+
+1. [ ] Is the secret actually in the container? (`echo $VAR_NAME`)
+2. [ ] Is the endpoint URL exactly correct? (no typos, correct path)
+3. [ ] Is the auth header format correct? (`Bearer` prefix)
+4. [ ] Can the container reach the network? (`curl` test)
+5. [ ] Is the config file actually being read? (add debug logging)
+6. [ ] Did SBX CLI syntax change? (`sbx --help`)
+7. [ ] Is this a known model/entitlement issue? (test with different model)
+
+---
+
+## Contributing
+
+When you discover a new failure mode:
+
+1. Document the symptoms clearly
+2. Identify the root cause
+3. Provide a minimal fix
+4. Add it to this document
+5. Consider if it indicates a gap in AGENTS.md rules

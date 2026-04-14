@@ -8,6 +8,7 @@ keys.txt
 
 .env
 .env.enc
+.env.*
 
 # SOPS config (per-user)
 .sops.yaml
@@ -19,8 +20,7 @@ keys.txt
 # =========================
 # GENERATED CONFIG / STATE
 # =========================
-opencode.json
-opencode.jsonc
+# Note: opencode.jsonc is committed as the quickstart template
 
 # Agent sandbox runtime state
 .agent-sandbox/
@@ -30,34 +30,6 @@ opencode.jsonc
 audit.log
 
 # =========================
-# PYTHON
-# =========================
-__pycache__/
-*.py[cod]
-*.pyo
-
-# Build / packaging
-build/
-dist/
-*.egg-info/
-
-# Test / coverage
-.pytest_cache/
-.coverage
-coverage/
-htmlcov/
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# =========================
-# DOCKER / SANDBOX
-# =========================
-.docker/
-
-# =========================
 # TEMP FILES
 # =========================
 *.tmp
@@ -65,17 +37,6 @@ env/
 .*.bak
 tmp/
 temp/
-
-# =========================
-# NODE (if ever used)
-# =========================
-node_modules/
-
-# =========================
-# SHELL / LOCAL
-# =========================
-.bash_history
-.sh_history
 
 # =========================
 # OS
@@ -90,10 +51,4 @@ Thumbs.db
 .idea/
 *.swp
 *~
-
-# =========================
-# TOOLING CACHE
-# =========================
-.ruff_cache/
-.mypy_cache/
 
