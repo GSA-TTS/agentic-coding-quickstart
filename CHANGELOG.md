@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.3.0...v0.4.0) (2026-04-14)
+
+
+### Features
+
+* **templates:** add bootstrap files for copying quickstart to other repos ([7ea07e7](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/7ea07e782a7623588415a97cef8884a667299b64))
+
 ## [0.3.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.2.0...v0.3.0) (2026-04-14)
 
 
