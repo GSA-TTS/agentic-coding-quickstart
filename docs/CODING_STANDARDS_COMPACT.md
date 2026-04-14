@@ -48,7 +48,7 @@ Apply these rules when generating or modifying code. For full rationale and exam
 - Explicit error handling — no empty catch blocks
 - Structured logging with correlation IDs
 - Never log PII, secrets, or tokens
-- Include `Co-Authored-By` attribution in all AI-assisted commits
+- Document AI assistance at PR level; per-commit `Co-Authored-By` is optional
 
 ## Crypto
 

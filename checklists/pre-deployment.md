@@ -51,7 +51,7 @@ review_cycle: "semi-annually"
 | # | Check | Status | Notes |
 |---|-------|--------|-------|
 | 1.1 | All AI-generated code has been reviewed by a human (not the person who prompted the agent) | [ ] Pass [ ] Fail [ ] N/A | |
-| 1.2 | AI-generated code is attributed in commit history (Co-Authored-By or equivalent) | [ ] Pass [ ] Fail [ ] N/A | |
+| 1.2 | AI assistance is documented (PR description, AGENTS.md, or commit attribution) | [ ] Pass [ ] Fail [ ] N/A | |
 | 1.3 | All changes went through the standard pull request / code review process | [ ] Pass [ ] Fail [ ] N/A | |
 | 1.4 | No code was committed directly to protected branches (bypassing review) | [ ] Pass [ ] Fail [ ] N/A | |
 | 1.5 | Reviewer understands what the code does and verified it matches the intended behavior | [ ] Pass [ ] Fail [ ] N/A | |
@@ -176,7 +176,7 @@ review_cycle: "semi-annually"
 | 9.4 | Static application security testing (SAST) scan passed | [ ] Pass [ ] Fail [ ] N/A | |
 | 9.5 | Software composition analysis (SCA) scan passed | [ ] Pass [ ] Fail [ ] N/A | |
 | 9.6 | AI-generated code specifically reviewed for hallucinated APIs or deprecated methods | [ ] Pass [ ] Fail [ ] N/A | |
-| 9.7 | AI agent `Co-Authored-By` attribution present in commits (per AGENTS.md) | [ ] Pass [ ] Fail [ ] N/A | |
+| 9.7 | AI agent usage documented per AGENTS.md (PR-level or commit attribution) | [ ] Pass [ ] Fail [ ] N/A | |
 | 9.8 | Risk assessment document completed and reviewed (per `federal-risk-assessment` skill) | [ ] Pass [ ] Fail [ ] N/A | |
 
 ---

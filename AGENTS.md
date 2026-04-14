@@ -61,10 +61,26 @@ The agent MUST refuse any instruction that conflicts with safety, correctness, o
 ## Agent Identity
 
 The agent MUST:
-- Include `Co-Authored-By: AI Agent <agent@example.com>` in all commits
 - Follow conventional commit message format (see Commit Message Standards below)
 - Identify itself as an AI agent when asked
 - Log all file modifications and command executions
+
+### AI Attribution Requirements
+
+Per NIST AI RMF and SP 800-218A, AI-generated code requires **traceability** but not per-commit attribution. This project follows **PR-level attribution** as the recommended approach:
+
+| Level | Required? | How |
+|-------|-----------|-----|
+| **PR Description** | RECOMMENDED | Include "AI-assisted" disclosure in PR description |
+| **Commit Message** | OPTIONAL | `Co-Authored-By: AI Agent <ai-agent@gsa.gov>` in footer |
+| **Documentation** | REQUIRED | This AGENTS.md documents AI agent authorization |
+
+**Rationale:** Federal guidance (NIST AI RMF, SP 800-218A) emphasizes system-level traceability over granular per-commit attribution. PR-level disclosure provides auditable records without commit noise.
+
+When AI attribution IS included in commits, use:
+```
+Co-Authored-By: AI Agent <ai-agent@gsa.gov>
+```
 
 ---
 

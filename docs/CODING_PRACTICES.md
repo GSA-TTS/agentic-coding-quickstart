@@ -59,10 +59,12 @@ AI-generated code requires **the same security scrutiny** as human-written code 
 
 ### 1.1 Code Provenance
 
-- All AI-generated code MUST be attributed (e.g., `Co-Authored-By` in commits)
+- AI-generated code SHOULD be attributed at the PR level (e.g., disclosure in PR description)
+- Per-commit attribution (e.g., `Co-Authored-By`) is OPTIONAL — federal guidance emphasizes traceability, not granular commit-level attribution
 - Developers MUST review all AI-generated code before committing — the developer assumes responsibility for all committed code regardless of who or what generated it
 - The AI agent SHOULD explain its reasoning for non-obvious implementation choices
 - AI-generated code MUST NOT be deployed to production without human review and approval
+- Projects using AI agents SHOULD document this in AGENTS.md or equivalent project documentation
 
 ### 1.2 Known Limitations
 
