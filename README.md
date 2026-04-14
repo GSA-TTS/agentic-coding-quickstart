@@ -27,7 +27,7 @@ AI coding agents can read files, write code, and execute commands. Running them 
 export USAI_API_KEY="your-api-key-here"
 
 # 2. Clone this repo and create a sandbox
-git clone https://github.com/your-org/agentic-coding-quickstart.git
+git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
 cd agentic-coding-quickstart
 sbx create --name quickstart opencode .
 
@@ -46,6 +46,35 @@ That's it. You're now running an AI coding agent in an isolated container with U
 | `docs/SBX_QUICKSTART.md` | Detailed setup walkthrough |
 | `docs/KNOWN_FAILURE_MODES.md` | Troubleshooting guide |
 | `docs/CODING_PRACTICES.md` | Secure coding standards |
+| `templates/` | Files to copy into your own projects |
+
+## Bootstrap Your Own Project
+
+Want to use SBX + USAi in your own repository? Copy the template files:
+
+```bash
+# Set your target repo path
+TARGET_REPO="/path/to/your/project"
+
+# Copy the OpenCode config
+cp templates/opencode.jsonc "$TARGET_REPO/"
+
+# Copy the SBX patterns reference
+mkdir -p "$TARGET_REPO/docs"
+cp templates/SBX_PATTERNS.md "$TARGET_REPO/docs/"
+
+# If you have an existing AGENTS.md, append the SBX addendum (skip the header)
+tail -n +6 templates/AGENTS_SBX_ADDENDUM.md >> "$TARGET_REPO/AGENTS.md"
+```
+
+See [templates/BOOTSTRAP.md](templates/BOOTSTRAP.md) for detailed instructions.
+
+### For Playbook Users
+
+If you've bootstrapped your project using the [Agentic Coding Playbook](https://github.com/GSA-TTS/agentic-coding-playbook), the quickstart templates complement it:
+
+- **Playbook** → Project structure, AGENTS.md, coding practices, risk assessment
+- **Quickstart** → USAi configuration, SBX patterns, credential injection
 
 ## Key Commands
 
@@ -69,8 +98,26 @@ sbx rm my-sandbox
 ## Security Model
 
 1. **All execution happens inside SBX containers** - isolated from your host
-2. **USAi endpoints only** - no external API calls
+2. **Authorized endpoints only** - USAi, GitHub (via proxy), GitLab (via direct injection)
 3. **Agent follows AGENTS.md rules** - explicit permissions and prohibitions
+
+### Git Provider Credentials
+
+For agents that need GitHub or GitLab access:
+
+```bash
+# GitHub (recommended: use SBX proxy)
+gh auth token | sbx secret set -g github
+
+# GitLab (direct injection required)
+sbx exec -it \
+  -e USAI_API_KEY="$USAI_API_KEY" \
+  -e GITLAB_TOKEN="$(glab config get --host workshop.cloud.gov token)" \
+  -e GITLAB_HOST="workshop.cloud.gov" \
+  -w $(pwd) my-sandbox opencode
+```
+
+See [docs/SBX_QUICKSTART.md](docs/SBX_QUICKSTART.md) for full credential injection patterns.
 
 ### Known Limitation: API Key Visibility
 
@@ -108,7 +155,7 @@ See `docs/KNOWN_FAILURE_MODES.md` for more troubleshooting help.
 
 This quickstart is part of a **limited government pilot** for evaluating AI coding agents. Current constraints:
 
-- **USAi endpoints only** - no external AI providers
+- **Authorized endpoints only** - USAi, GitHub, and approved GitLab instances
 - **Local development only** - not for production use
 - **Pattern validation** - documenting what works and what doesn't
 
