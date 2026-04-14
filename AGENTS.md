@@ -277,9 +277,21 @@ The agent MUST:
 
 - **Authorized external endpoints:** 
   - `https://api.gsa.usai.gov/api/v1` (USAi API)
+  - `https://api.github.com` (GitHub API - via SBX proxy)
+  - `https://workshop.cloud.gov` (GitLab API - GSA workshop instance)
 - **Authorized internal endpoints:** None
 - **TLS requirement:** TLS 1.2+ for all connections
 - **Proxy configuration:** Use system proxy if configured
+
+### Credential Injection Methods
+
+| Service | Method | Notes |
+|---------|--------|-------|
+| USAi | Direct injection (`-e USAI_API_KEY`) | Custom endpoint not supported by SBX proxy |
+| GitHub | SBX proxy (`sbx secret set -g github`) | Recommended; agent never sees token |
+| GitLab | Direct injection (`-e GITLAB_TOKEN`) | Not a built-in SBX service |
+
+See `docs/SBX_QUICKSTART.md` for detailed credential injection patterns.
 
 ---
 
