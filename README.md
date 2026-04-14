@@ -1,296 +1,130 @@
-# agent-sandbox
+# Agentic Coding Quickstart
 
-[![CI](https://github.com/GSA-TTS/agent-sandbox/actions/workflows/ci.yml/badge.svg)](https://github.com/GSA-TTS/agent-sandbox/actions/workflows/ci.yml)
+> **Audience:** Government developers in the USAi pilot program  
+> **Purpose:** Get AI coding agents running safely on your local machine in under 5 minutes
 
+This guide helps you use AI coding agents (like OpenCode) inside isolated Docker sandboxes, connecting to government-approved API endpoints (USAi).
 
-A small Python CLI that makes Docker Sandboxes usable with custom OpenAI-style APIs and OpenCode.
+## Why Sandboxes?
 
-The workflow is intentionally boring:
+AI coding agents can read files, write code, and execute commands. Running them in sandboxes provides:
 
-```bash
-cp .env.example .env
-$EDITOR .env
-make init
-make doctor
-make probe
-make run
-````
+- **Isolation:** Agent can't access your full system
+- **Secret protection:** API keys never touch disk or logs
+- **Reproducibility:** Same environment every time
+- **Audit trail:** Clear boundaries for what the agent can do
 
-That is the default path. No forced encryption ceremony on day one. If you want stronger local secret handling later, `sops-age` is built in.
+## Prerequisites
 
----
+- **SBX CLI** installed (`sbx --version` to verify)
+- **USAi API key** from your agency's pilot program
+- **Docker** running locally
 
-## Goals
-
-* dead simple developer setup
-* project-local config
-* centralized structured logging
-* explicit provider probing before launch
-* named network policy profiles
-* safe defaults
-* low maintenance
-
----
-
-## What this ships
-
-* `agent-sandbox init` → creates `.agent-sandbox/config.toml`
-* `agent-sandbox doctor` → validates local prerequisites
-* `agent-sandbox provider probe` → validates OpenAI-compatible endpoint
-* `agent-sandbox config render` → writes `opencode.json`
-* `agent-sandbox run` → creates sandbox, applies policy, launches OpenCode
-* `agent-sandbox logs` → shows JSONL audit log
-* `agent-sandbox netlogs` → shows Docker network logs
-* `agent-sandbox encrypt` / `decrypt` → optional `sops-age`
-
----
-
-## Defaults
-
-* secret backend: `env`
-* sandbox template: `docker/sandbox-templates:opencode`
-* policy profile: `balanced`
-* project config path: `./opencode.json`
-* audit log path: `.agent-sandbox/logs/agent-sandbox.log`
-
----
-
-## Requirements
-
-* Python 3.11+
-* Docker (with Docker Sandboxes support)
-* OpenCode
-
-Optional:
-
-* `sops` + `age` (for encrypted secrets)
-
----
-
-## Quick start
+## Quick Start (3 Commands)
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+# 1. Set your API key (on your host machine)
+export USAI_API_KEY="your-api-key-here"
 
-cp .env.example .env
-$EDITOR .env
+# 2. Clone this repo and create a sandbox
+git clone https://github.com/your-org/agentic-coding-quickstart.git
+cd agentic-coding-quickstart
+sbx create --name quickstart opencode .
 
-make init
-make doctor
-make probe
-make run
+# 3. Run OpenCode with USAi
+sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) quickstart opencode
 ```
+
+That's it. You're now running an AI coding agent in an isolated container with USAi access.
+
+## What's in This Repo
+
+| File | Purpose |
+|------|---------|
+| `opencode.jsonc` | Pre-configured for USAi endpoints |
+| `AGENTS.md` | Behavioral rules the agent follows |
+| `docs/SBX_QUICKSTART.md` | Detailed setup walkthrough |
+| `docs/KNOWN_FAILURE_MODES.md` | Troubleshooting guide |
+| `docs/CODING_PRACTICES.md` | Secure coding standards |
+
+## Key Commands
+
+```bash
+# Create a sandbox
+sbx create --name my-sandbox opencode .
+
+# Run OpenCode (always use this pattern for USAi)
+sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) my-sandbox opencode
+
+# List your sandboxes
+sbx ls
+
+# Stop a sandbox
+sbx stop my-sandbox
+
+# Remove a sandbox
+sbx rm my-sandbox
+```
+
+## Security Model
+
+1. **All execution happens inside SBX containers** - isolated from your host
+2. **USAi endpoints only** - no external API calls
+3. **Agent follows AGENTS.md rules** - explicit permissions and prohibitions
+
+### Known Limitation: API Key Visibility
+
+**Risk:** With the current SBX tooling, the USAi API key is injected directly into the container environment via `-e USAI_API_KEY="$USAI_API_KEY"`. This means the agent process *can* read the key from the environment.
+
+**Why this happens:** SBX's secret proxy only supports a fixed set of services (OpenAI, Anthropic, etc.) with hardcoded endpoints. Custom endpoints like USAi (`api.gsa.usai.gov`) bypass the proxy entirely.
+
+**Mitigations in place:**
+- Key is never written to disk or config files
+- `AGENTS.md` rules prohibit the agent from printing/logging secrets
+- Container isolation limits exposure scope
+- Key only exists in memory during execution
+
+**Upstream tracking:** This limitation is tracked in [docker/sbx-releases#35](https://github.com/docker/sbx-releases/issues/35) - "Feature Request: Configurable Secret Injection for Custom Services"
+
+**Future state:** When SBX supports custom service mappings, we can use true proxy-based injection where the agent never sees the raw key.
+
+## Troubleshooting
+
+**OpenCode shows wrong providers (OpenAI, Anthropic, etc.)**
+- Make sure you're in this repo's directory
+- Use `-w $(pwd)` to set the working directory
+- Verify `opencode.jsonc` exists
+
+**Authentication failed**
+- Check your API key: `echo "Length: ${#USAI_API_KEY}"`
+- Ensure you're using `-e USAI_API_KEY="$USAI_API_KEY"` flag
+
+**"Unknown agent" error**
+- Use: `sbx create --name NAME opencode .` (note the `opencode .` at the end)
+
+See `docs/KNOWN_FAILURE_MODES.md` for more troubleshooting help.
+
+## Pilot Scope
+
+This quickstart is part of a **limited government pilot** for evaluating AI coding agents. Current constraints:
+
+- **USAi endpoints only** - no external AI providers
+- **Local development only** - not for production use
+- **Pattern validation** - documenting what works and what doesn't
+
+## Getting Help
+
+- Check `docs/KNOWN_FAILURE_MODES.md` first
+- Review `AGENTS.md` for agent behavior rules
+- Contact your pilot program coordinator
+
+## Contributing
+
+Found a failure mode we haven't documented? Please add it to `docs/KNOWN_FAILURE_MODES.md` with:
+1. Symptoms
+2. Root cause
+3. Fix
 
 ---
 
-## Environment
-
-Minimum required:
-
-* `OPENAI_COMPAT_BASE_URL`
-* `OPENAI_COMPAT_API_KEY`
-
-Recommended:
-
-* `OPENAI_COMPAT_PROVIDER_ID`
-* `OPENAI_COMPAT_PROVIDER_NAME`
-* `OPENAI_COMPAT_MODEL`
-* `AGENT_SANDBOX_SECRET_BACKEND`
-* `AGENT_SANDBOX_POLICY_PROFILE`
-* `AGENT_SANDBOX_TEMPLATE`
-
-Start with `.env.example`. Change only what you need.
-
----
-
-## Common commands
-
-```bash
-make help
-make init
-make doctor
-make probe
-make config
-make run
-make dry-run
-make logs
-make netlogs
-make stop
-make remove
-make lint
-make test
-```
-
----
-
-## Example workflows
-
-### Fast path
-
-```bash
-cp .env.example .env
-$EDITOR .env
-make init
-make run
-```
-
-### Safer first run
-
-```bash
-cp .env.example .env
-$EDITOR .env
-make init
-make doctor
-make probe
-make dry-run
-make run
-```
-
-### Optional stronger local secret handling
-
-```bash
-cp .env.example .env
-$EDITOR .env
-make encrypt
-make init
-make doctor
-make probe
-make run
-```
-
----
-
-## Repository-local state
-
-Runtime state is stored in:
-
-```
-.agent-sandbox/
-```
-
-Includes:
-
-* config
-* provider lock metadata
-* audit logs
-
-Generated config:
-
-```
-./opencode.json
-```
-
-These are local artifacts and should not be committed.
-
----
-
-## Releases
-
-This project uses:
-
-* `CHANGELOG.md` → source of truth
-* `VERSION` → release version
-* `pyproject.toml` → package version
-* Git tags (`vX.Y.Z`) → trigger releases
-
-### Release process
-
-1. Update:
-
-```bash
-CHANGELOG.md
-VERSION
-pyproject.toml
-```
-
-1. Commit:
-
-```bash
-git add .
-git commit -m "chore(release): prepare vX.Y.Z"
-```
-
-1. Tag:
-
-```bash
-git tag vX.Y.Z
-git push origin vX.Y.Z
-```
-
-1. GitHub Actions will:
-
-* validate versions match
-* extract release notes from `CHANGELOG.md`
-* create the GitHub Release
-
----
-
-## Design choices
-
-This version intentionally removes shell orchestration.
-
-Previous approach:
-
-* shell scripts (`sandbox.sh`, `config.sh`)
-* shell-based config generation
-* mixed config sources
-
-Current approach:
-
-* Python-first CLI
-* deterministic config generation
-* explicit provider validation
-* centralized logging
-* isolated subprocess execution
-* project-local state only
-
----
-
-## Development
-
-Install dev dependencies:
-
-```bash
-pip install -e ".[dev]"
-```
-
-Run checks:
-
-```bash
-ruff check src tests
-ruff format --check src tests
-pytest
-bandit -q -r src -c pyproject.toml
-```
-
-Or:
-
-```bash
-make lint
-make test
-```
-
----
-
-## Notes for AI agents
-
-Agents MUST read:
-
-* `AGENTS.md`
-* `docs/CODING_PRACTICES.md`
-
-Rules:
-
-* keep changes small
-* keep behavior deterministic
-* add tests for all changes
-* do not introduce unnecessary abstraction
-* do not bypass security rules
-
----
-
-## License
-
-See [LICENSE](LICENSE)
+**Impact Level:** FIPS Low | **Data Classification:** Internal/Non-sensitive | **ATO Status:** Pre-ATO (pilot)

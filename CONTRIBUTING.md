@@ -1,149 +1,276 @@
-# Contributing
+# Contributing to agent-sandbox
 
-## Quick Start
+Thank you for contributing to the Agentic Coding Quickstart project! This guide will help you understand our development workflow and standards.
 
-```bash
-git clone https://github.com/cloud-gov/agent-sandbox.git
-cd agent-sandbox
-make setup
+## Table of Contents
+
+- [Code of Conduct](#code-of-conduct)
+- [Getting Started](#getting-started)
+- [Commit Message Guidelines](#commit-message-guidelines)
+- [Pull Request Process](#pull-request-process)
+- [Development Standards](#development-standards)
+- [Testing Requirements](#testing-requirements)
+
+---
+
+## Code of Conduct
+
+This project operates under federal government standards of professional conduct. All contributors must:
+
+- Be respectful and constructive in all interactions
+- Follow security and compliance requirements outlined in `AGENTS.md` and `docs/CODING_PRACTICES.md`
+- Report security vulnerabilities privately (see `SECURITY.md`)
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Docker (for SBX containers)
+- Git
+- Basic understanding of the SBX tooling and USAi API endpoints
+
+### Setup
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/williamzujkowski/agent-sandbox.git
+   cd agent-sandbox
+   ```
+
+2. Read the core documentation:
+   - `AGENTS.md` — Behavioral rules for AI agents
+   - `docs/CODING_PRACTICES.md` — Secure coding standards
+   - `docs/SBX_QUICKSTART.md` — SBX setup guide
+
+3. Follow the quickstart to set up your environment
+
+---
+
+## Commit Message Guidelines
+
+This project follows **Conventional Commits 1.0.0** for automated version management and changelog generation.
+
+### Commit Message Format
+
+```
+<type>(<optional-scope>): <subject>
+
+<optional-body>
+
+<optional-footer>
 ```
 
-## Development
+### Commit Types
 
-1. Fork and create a feature branch
-2. Make changes to `sandbox.sh` or supporting files
-3. Run `make test` (all test suites) and `make validate` (prerequisites check)
-4. Manual test with `make run` if Docker Desktop is available
-5. Submit a PR against `main`
+| Type | Version Bump | When to Use |
+|------|--------------|-------------|
+| `feat` | Minor (0.X.0) | New feature added (backward-compatible) |
+| `fix` | Patch (0.0.X) | Bug fix (backward-compatible) |
+| `docs` | None | Documentation only changes |
+| `style` | None | Code style/formatting (no logic change) |
+| `refactor` | None | Code refactoring (no feature or bug change) |
+| `perf` | Patch (0.0.X) | Performance improvement |
+| `test` | None | Adding or updating tests |
+| `chore` | None | Maintenance tasks (no production code change) |
+| `ci` | None | CI/CD pipeline changes |
+| `build` | None | Build system changes |
+| `revert` | Depends | Reverting a previous commit |
+| `security` | Patch (0.0.X) | Security fixes |
 
-## Running Tests
+### Breaking Changes
 
-```bash
-# Full suite (smoke + unit/integration)
-make test
+Breaking changes trigger a **Major version bump** (X.0.0) and MUST be indicated in one of two ways:
 
-# Individual suites
-make smoke    # Fast: file structure, shellcheck, config validation
-make unit     # Thorough: encrypt/decrypt roundtrips, guards, edge cases
-make lint     # ShellCheck on all shell scripts
+1. **Footer notation** (preferred):
+   ```
+   feat(api): migrate authentication to OAuth 2.0
+
+   BREAKING CHANGE: API authentication now requires OAuth 2.0 tokens
+   instead of API keys. Clients must update their authentication flow.
+   ```
+
+2. **Type suffix**:
+   ```
+   feat(api)!: migrate authentication to OAuth 2.0
+   ```
+
+### Commit Message Rules
+
+✅ **DO:**
+- Use lowercase for type, scope, and subject
+- Keep subject line ≤72 characters
+- Use imperative mood ("add" not "added" or "adds")
+- Separate subject from body with a blank line
+- Wrap body text at 100 characters
+- Reference issues/tickets in the footer (e.g., `Fixes: #42`, `Refs: #123`)
+
+❌ **DON'T:**
+- End subject line with a period
+- Use past tense in subject line
+- Write vague messages ("fix bug", "update code")
+- Skip the commit type prefix
+- Exceed 100 characters in the header
+
+### Examples
+
+#### Feature Addition
+```
+feat(agents): add continuous monitoring requirements
+
+Adds section 17 to CODING_PRACTICES.md covering post-deployment
+monitoring requirements per M-25-21 federal guidance.
+
+Refs: NIST SP 800-218A, M-25-21
 ```
 
-**Requirements:** macOS, sops, age, jq, shellcheck (all test suites require macOS Keychain).
+#### Bug Fix
+```
+fix(sbx): correct secret injection path in container config
 
-## Config Conventions
+The previous configuration used /app/secrets instead of /run/secrets,
+causing secrets to fail injection on container startup.
 
-All shared constants live in `config.sh`:
-
-- **Defaults**: `readonly DEFAULT_*="value"` — overridable via environment
-- **Constants**: `readonly NAME="value"` — not overridable
-- **Usage in sandbox.sh**: `VAR="${VAR:-$DEFAULT_VAR}"`
-- **Usage in tests**: `VAR=override bash sandbox.sh command` (never sed patching)
-
-When adding a new constant, add it to `config.sh` and reference it everywhere. Never hardcode values that belong in config.
-
-## Writing Tests
-
-Tests use `check` and `check_err` from `test/helpers.sh`:
-
-```bash
-# Basic pass/fail assertion
-check "description" command args...
-
-# Assert stderr contains a pattern
-check_err "description" "expected_pattern" command args...
+Fixes: #42
 ```
 
-Guidelines:
-- Group tests into numbered sections with `echo "Section name:"`
-- Test happy path, error cases, and edge cases
-- Use environment overrides: `ENV_FILE=custom.env bash sandbox.sh encrypt`
-- Copy `config.sh` alongside `sandbox.sh` when testing in temp directories
-- Use `>=` thresholds for count assertions (resilient to additions)
-- Clean up temp files in trap handlers
+#### Documentation Update
+```
+docs(readme): clarify SBX installation requirements
 
-## Model Detection Test Fixtures
-
-Test fixtures for the model discovery pipeline live in `test/fixtures/`. Each fixture is a JSON file matching the OpenAI `/v1/models` response format:
-
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "model-name",
-      "object": "model",
-      "created": 1718841600,
-      "owned_by": "provider-name",
-      "context_length": 128000,
-      "max_output_tokens": 16384
-    }
-  ]
-}
+Updates README to explicitly list Docker version requirements
+and link to the full SBX quickstart guide.
 ```
 
-**Current fixtures:**
+#### Breaking Change
+```
+feat(api)!: migrate authentication to OAuth 2.0
 
-| File | Provider Format | Models | Tests |
-|------|----------------|--------|-------|
-| `openai-models.json` | Standard OpenAI (no limits) | 3 | Section 41 |
-| `usai-models.json` | GSA USAi (`context_length` + `max_output_tokens`) | 4 | Section 42 |
-| `vllm-models.json` | vLLM (`max_model_len`) | 2 | Section 43 |
-| `ollama-models.json` | Ollama (minimal fields, colons in IDs) | 2 | Section 44 |
-| `edge-case-models.json` | Edge cases (slashes, dots, Unicode, long names) | 4 | Section 45 |
-| `large-models.json` | Performance test (120 models) | 120 | Section 46 |
+BREAKING CHANGE: API authentication now requires OAuth 2.0 tokens
+instead of API keys. Clients must update their authentication flow.
 
-**Adding a new fixture:**
-
-1. Create `test/fixtures/<name>-models.json` with the response format above
-2. Add a validation check in `test/smoke.sh` (fixture existence + valid JSON)
-3. Add a numbered test section in `test/sandbox-unit.sh` using `run_model_pipeline()` and `run_full_config_pipeline()` helpers
-4. Test the three pipeline stages: model parsing, small_model selection, config generation
-
-**Key fields by provider:**
-
-- `context_length` — OpenAI/USAi: context window size
-- `max_output_tokens` — USAi: max output tokens
-- `max_model_len` — vLLM: maps to `limit.context` in config
-- If no limit fields exist, models are included without `limit` in the generated config
-
-## Versioning and Releases
-
-This project uses [Semantic Versioning](https://semver.org/). The version is stored in a `VERSION` file at the repo root.
-
-```bash
-# Check current version
-make version
-
-# Cut a release (bumps VERSION, updates CHANGELOG.md, creates git tag)
-make release-patch   # 3.1.0 → 3.1.1
-make release-minor   # 3.1.0 → 3.2.0
-make release-major   # 3.1.0 → 4.0.0
-
-# Push to trigger GitHub Release
-git push origin main --tags
+Migration guide: docs/migration/oauth-migration.md
+Refs: #123
 ```
 
-**Changelog workflow:**
-1. Add entries under `## [Unreleased]` in `CHANGELOG.md` as you work
-2. When ready to release, run `make release-{patch|minor|major}`
-3. The release script moves `[Unreleased]` content to a versioned section
-4. Push the tag to trigger the GitHub Actions release workflow
+---
 
-**When to bump:**
-- **patch**: Bug fixes, test improvements, doc updates
-- **minor**: New features, new commands, new config constants
-- **major**: Breaking changes (command renames, config format changes, removed features)
+## Pull Request Process
 
-## Security
+1. **Create a feature branch** from `main`:
+   ```bash
+   git checkout -b feat/your-feature-name
+   ```
 
-- Security changes require review from @wz-gsa
-- Never commit secrets (`.env`, `*.key`, `*.pem`)
-- Never use `eval` or `SOPS_AGE_KEY_CMD` — direct export only
-- All GitHub Actions must be SHA-pinned
+2. **Make your changes** following the coding standards in `docs/CODING_PRACTICES.md`
 
-## Guidelines
+3. **Write tests** if applicable — all new features should include tests
 
-- Follow [conventional commits](https://www.conventionalcommits.org/)
-- Test on macOS (primary target)
-- Run shellcheck on all `.sh` files before submitting
-- See [AGENTS.md](AGENTS.md) for full conventions and file roles
+4. **Commit your changes** using conventional commit format:
+   ```bash
+   git commit -m "feat(scope): add new feature"
+   ```
+
+5. **Push to your fork**:
+   ```bash
+   git push origin feat/your-feature-name
+   ```
+
+6. **Open a pull request** with:
+   - Clear description of changes
+   - Reference to related issues
+   - Screenshots (if UI changes)
+   - Test results (if applicable)
+
+7. **Address review feedback** — reviewers will check for:
+   - Compliance with `AGENTS.md` and `docs/CODING_PRACTICES.md`
+   - Conventional commit format
+   - Test coverage
+   - Security implications
+
+8. **Squash and merge** — Use a conventional commit message for the squash commit title
+
+---
+
+## Development Standards
+
+All code must comply with:
+
+- **AGENTS.md** — Behavioral rules for AI agents
+- **docs/CODING_PRACTICES.md** — Secure coding standards including:
+  - Input validation and output encoding
+  - Secrets management (no secrets in code!)
+  - Dependency security (exact version pinning)
+  - Architecture discipline (ADRs for major decisions)
+  - Size limits (functions ≤50 lines, files ≤400 lines)
+  - Test-driven development
+
+### Architecture Decision Records (ADRs)
+
+Major architectural changes require an ADR before implementation:
+
+- Format: MADR (Markdown Architecture Decision Record)
+- Location: `docs/adr/`
+- Naming: `NNNN-title-of-decision.md`
+- See: `docs/adr/0002-version-management-and-release-automation.md` for template
+
+Create an ADR before:
+- Adding external dependencies
+- Changing authentication/authorization flows
+- Introducing new data stores
+- Altering module boundaries
+- Selecting AI models or frameworks
+
+---
+
+## Testing Requirements
+
+- All patterns must be reproducible from scratch
+- Test inside SBX containers, not directly on host
+- Verification must not expose secrets
+- Document what worked, what failed, and why
+
+For code contributions:
+- Write tests alongside code (TDD: red → green → refactor)
+- Cover happy path + edge cases + error cases
+- Add regression tests for bug fixes
+- Ensure tests pass before submitting PR
+
+---
+
+## Release Process
+
+Releases are **fully automated** via GitHub Actions and hello-please:
+
+1. Commits to `main` are analyzed for conventional commit types
+2. Version bump is determined automatically:
+   - `feat:` → Minor version bump
+   - `fix:`, `perf:`, `security:` → Patch version bump
+   - `BREAKING CHANGE:` → Major version bump
+3. CHANGELOG.md is auto-updated
+4. Git tag is created (`vX.Y.Z`)
+5. GitHub release is published with release notes
+
+**No manual version bumping is required** — just use correct commit types!
+
+---
+
+## Questions or Issues?
+
+- **Security vulnerabilities:** See `SECURITY.md` for responsible disclosure
+- **General questions:** Open a GitHub Discussion
+- **Bug reports:** Open a GitHub Issue with:
+  - Steps to reproduce
+  - Expected vs actual behavior
+  - Environment details (OS, Docker version, etc.)
+
+---
+
+## License
+
+This project is released under the CC0 1.0 Universal license. See `LICENSE` for details.
+
+---
+
+**Thank you for contributing to the Agentic Coding Quickstart!**

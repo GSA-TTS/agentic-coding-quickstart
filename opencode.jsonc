@@ -1,0 +1,85 @@
+{
+  // OpenCode Configuration for SBX + USAi Testing
+  // 
+  // IMPORTANT: This file contains NO secrets.
+  // API key is injected via USAI_API_KEY environment variable.
+  //
+  // Usage (inside SBX):
+  //   sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w /Users/williamjzujkowski/git/sbx-testing usai-test opencode
+
+  "$schema": "https://opencode.ai/config.json",
+
+  // Only enable USAi provider
+  "enabled_providers": ["usai"],
+
+  // Custom USAi provider using OpenAI-compatible SDK
+  "provider": {
+    "usai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "GSA USAI",
+      "options": {
+        "baseURL": "https://api.gsa.usai.gov/api/v1",
+        "apiKey": "{env:USAI_API_KEY}",
+        "timeout": 600000,
+        "chunkTimeout": 45000
+      },
+      "models": {
+        "claude_4_5_sonnet": {
+          "name": "Claude 4.5 Sonnet",
+          "limit": {
+            "context": 200000,
+            "output": 32768
+          }
+        },
+        "claude_4_5_opus": {
+          "name": "Claude 4.5 Opus",
+          "limit": {
+            "context": 200000,
+            "output": 32768
+          }
+        },
+        "claude_3_5_haiku": {
+          "name": "Claude 3.5 Haiku",
+          "limit": {
+            "context": 200000,
+            "output": 8192
+          }
+        },
+        "gemini-2.5-flash": {
+          "name": "Gemini 2.5 Flash",
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          }
+        },
+        "gemini-2.5-pro": {
+          "name": "Gemini 2.5 Pro",
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          }
+        },
+        "gpt-4o": {
+          "name": "GPT-4o",
+          "limit": {
+            "context": 128000,
+            "output": 16384
+          }
+        }
+      }
+    }
+  },
+
+  // Default model
+  "model": "usai/claude_4_5_sonnet",
+
+  // Load AGENTS.md for behavioral rules
+  "instructions": ["AGENTS.md"],
+
+  // Require approval for destructive operations
+  "permission": {
+    "edit": "ask",
+    "bash": "ask",
+    "write": "ask"
+  }
+}
