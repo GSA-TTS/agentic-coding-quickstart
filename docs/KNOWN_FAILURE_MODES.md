@@ -403,6 +403,61 @@ When implemented, this will allow defining custom service mappings so the proxy 
 
 ---
 
+## 15. Direct Credential Injection for Git Providers (Security Consideration)
+
+### Context
+
+GitHub is a built-in SBX service (`sbx secret set -g github`), but GitLab is not. This means:
+- **GitHub**: Can use proxy (recommended) OR direct injection
+- **GitLab**: Must use direct injection (`-e GITLAB_TOKEN="..."`)
+
+### Security Assessment for MVP
+
+| Concern | Severity | Mitigation |
+|---------|----------|------------|
+| Token visible in container env | Low | Container is isolated, short-lived |
+| Token in shell history | Low | Using `$(gh auth token)` subshell avoids literal values |
+| Token in process list | Low | Only visible during exec, not persisted |
+| Agent could exfiltrate token | Medium | Agent already has network access; proxy doesn't prevent this |
+| Token logged by agent | Medium | AGENTS.md prohibits; pre-commit hooks catch committed secrets |
+
+### Key Insight
+
+**The SBX proxy doesn't prevent a malicious agent from exfiltrating credentials** - it prevents the agent from *seeing* them directly. A compromised agent could still make authenticated API calls and exfiltrate data through those APIs.
+
+The real security boundary is:
+1. **Sandbox isolation** - container can't escape to host
+2. **Trusted agent software** - OpenCode, Claude Code, etc. are vetted
+3. **Scoped tokens** - use minimal scopes (e.g., `repo`, not admin)
+4. **Short-lived sessions** - tokens only in memory during execution
+
+### Acceptable for MVP Because
+
+1. **Pre-ATO pilot** with low-impact data (no PII, no CUI)
+2. **Tokens are scoped** - not admin/owner tokens
+3. **Sandbox provides isolation** from host system
+4. **Direct injection is a documented SBX pattern** - shown in their own docs
+5. **Upstream tracking exists** - this is a known gap, not a workaround hack
+
+### Recommendations
+
+1. **Use SBX proxy when available** - GitHub supports it, use `sbx secret set -g github`
+2. **Scope tokens minimally** - only grant permissions the agent actually needs
+3. **Rotate tokens periodically** - treat injected tokens as potentially exposed
+4. **Review agent outputs** - before sharing logs, ensure no tokens leaked
+5. **Monitor API usage** - watch for unexpected patterns
+
+### Upstream Tracking
+
+- **SBX custom service support**: [docker/sbx-releases#35](https://github.com/docker/sbx-releases/issues/35)
+- **Helper script exploration**: [GSA-TTS/agentic-coding-quickstart#15](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/15)
+
+### Related
+
+See also: [Section 14 - SBX Proxy Doesn't Work with Custom baseURL](#14-sbx-proxy-doesnt-work-with-custom-baseurl-security-implication)
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:
