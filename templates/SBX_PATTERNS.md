@@ -11,6 +11,30 @@ Quick reference for injecting credentials into Docker Sandboxes (both Docker Des
 
 See [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/) for installation.
 
+## Network Policy Configuration (Required)
+
+When first running sandbox commands, you'll be prompted to choose a network policy.
+
+> **⚠️ Do NOT choose "Open" on GFE machines** — it allows the agent to access internal GSA network resources.
+
+**Recommended setup:**
+```bash
+# Choose "Balanced" when prompted, then add USAi endpoint:
+sbx policy allow network "api.gsa.usai.gov"
+
+# Verify
+sbx policy ls
+```
+
+If you accidentally chose "Open", reset and reconfigure:
+```bash
+sbx policy reset
+# Choose "Balanced", then:
+sbx policy allow network "api.gsa.usai.gov"
+```
+
+---
+
 ## Credential Methods Overview
 
 | Method | Security | Use Case | Supported Services |
@@ -35,7 +59,7 @@ USAi uses a custom endpoint (`api.gsa.usai.gov`) that the SBX proxy doesn't reco
 # Add to ~/.bashrc or ~/.zshrc
 export USAI_API_KEY="your-key-here"
 
-# Source and restart Docker Desktop
+# Source and COMPLETELY restart Docker Desktop (Quit → Reopen)
 source ~/.zshrc
 # Then restart Docker Desktop from menu/taskbar
 

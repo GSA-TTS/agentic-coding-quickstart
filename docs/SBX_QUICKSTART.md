@@ -66,7 +66,56 @@ sbx login
 
 See [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/) for full details.
 
-## Quick Start (3 Commands)
+## Network Policy Configuration (Important!)
+
+When you first run a sandbox command, you'll be prompted to choose a network policy:
+
+```
+Choose a default network policy:
+     1. Open         — All network traffic allowed, no restrictions.
+     2. Balanced     — Default deny, with common dev sites allowed.
+     3. Locked Down  — All network traffic blocked unless you allow it.
+```
+
+### Recommended: Choose "Balanced" (Option 2)
+
+> **⚠️ Do NOT choose "Open" on GFE machines.** The "Open" policy allows the agent to access internal GSA network resources, which is a security risk.
+
+After selecting "Balanced", you must add the USAi endpoint to the allowlist:
+
+```bash
+# Allow USAi API endpoint (required for USAi to work)
+sbx policy allow network "api.gsa.usai.gov"
+
+# Verify your policy rules
+sbx policy ls
+```
+
+### If You Already Chose "Open"
+
+Reset your policy and reconfigure:
+
+```bash
+# Reset to default (will prompt for policy choice again)
+sbx policy reset
+
+# Choose "Balanced" when prompted, then add USAi
+sbx policy allow network "api.gsa.usai.gov"
+```
+
+### Full Allowlist for USAi Pilot
+
+For the complete pilot experience (USAi + GitHub + package managers):
+
+```bash
+sbx policy allow network "api.gsa.usai.gov"
+sbx policy allow network "api.github.com"
+sbx policy allow network "github.com"
+```
+
+The "Balanced" policy already includes common package managers (npm, pypi) and container registries.
+
+## Quick Start
 
 ### Using Docker Desktop (`docker sandbox`)
 
@@ -74,27 +123,40 @@ See [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/) for 
 # 1. Set your API key in your shell config file (~/.bashrc or ~/.zshrc)
 echo 'export USAI_API_KEY="your-api-key-here"' >> ~/.zshrc
 source ~/.zshrc
-# IMPORTANT: Restart Docker Desktop so it picks up the new variable
 
-# 2. Create a sandbox for OpenCode in current directory
+# 2. IMPORTANT: Restart Docker Desktop completely (Quit → Reopen)
+#    Docker reads env vars at startup, not from your current shell
+
+# 3. Configure network policy (first run will prompt - choose "Balanced")
+#    Then add USAi to the allowlist:
+sbx policy allow network "api.gsa.usai.gov"
+
+# 4. Create a sandbox for OpenCode in current directory
 docker sandbox create --name usai-test opencode .
 
-# 3. Run OpenCode (connects to the sandbox)
+# 5. Run OpenCode (connects to the sandbox)
 docker sandbox run usai-test
 ```
 
-> **Important:** Docker Desktop reads environment variables from your shell config at startup. After adding `USAI_API_KEY` to `~/.bashrc` or `~/.zshrc`, you must restart Docker Desktop for it to take effect.
+> **Common mistake:** Setting `export USAI_API_KEY=...` in your terminal isn't enough for Docker Desktop. You must:
+> 1. Add it to `~/.bashrc` or `~/.zshrc`
+> 2. Source the file
+> 3. **Completely restart Docker Desktop** (not just the terminal)
 
-### Using Standalone CLI (`sbx`)
+### Using Standalone CLI (`sbx`) — Recommended
 
 ```bash
-# 1. Verify your API key is set on the HOST (should show key length, not the key itself)
-echo "USAI_API_KEY length: ${#USAI_API_KEY}"
+# 1. Set your API key (export works for sbx CLI)
+export USAI_API_KEY="your-api-key-here"
 
-# 2. Create a sandbox for OpenCode in current directory
+# 2. Configure network policy (first run will prompt - choose "Balanced")
+#    Then add USAi to the allowlist:
+sbx policy allow network "api.gsa.usai.gov"
+
+# 3. Create a sandbox for OpenCode in current directory
 sbx create --name usai-test opencode .
 
-# 3. Run OpenCode with API key injection
+# 4. Run OpenCode with API key injection
 sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) usai-test opencode
 ```
 
@@ -525,6 +587,34 @@ sbx exec SANDBOX_NAME ls -la
 
 ## Troubleshooting
 
+### Network policy blocks USAi API / Connection errors
+
+**Problem:** Getting connection refused, timeout, or unauthorized errors when trying to reach USAi.
+
+**Root Cause:** The "Balanced" network policy blocks unknown endpoints by default. USAi (`api.gsa.usai.gov`) must be explicitly allowed.
+
+**Fix:**
+```bash
+# Add USAi to the allowlist
+sbx policy allow network "api.gsa.usai.gov"
+
+# Verify it was added
+sbx policy ls
+```
+
+### Chose "Open" policy by mistake
+
+**Problem:** You selected "Open" network policy, which is a security risk on GFE machines (allows access to internal GSA resources).
+
+**Fix:** Reset and reconfigure:
+```bash
+# Reset policy (will prompt for new choice)
+sbx policy reset
+
+# Choose "Balanced" when prompted, then add USAi
+sbx policy allow network "api.gsa.usai.gov"
+```
+
 ### "docker: unknown command: docker sbx"
 
 **Problem:** Running `docker sbx` returns "unknown command".
@@ -563,7 +653,7 @@ sbx create --name usai-test opencode .
 **Fix for Docker Desktop:**
 1. Ensure `USAI_API_KEY` is in `~/.bashrc` or `~/.zshrc`
 2. Source the file: `source ~/.zshrc`
-3. **Restart Docker Desktop** (this is required!)
+3. **Restart Docker Desktop completely** (Quit → Reopen, not just close terminal)
 4. Run: `docker sandbox run usai-test`
 
 **Fix for sbx CLI:**
