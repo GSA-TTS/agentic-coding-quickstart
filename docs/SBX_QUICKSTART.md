@@ -1,16 +1,91 @@
-# SBX + USAi Quick Start
+# Docker Sandboxes + USAi Quick Start
 
-This guide gets you from zero to running an AI agent inside SBX with USAi in under 5 minutes.
+This guide gets you from zero to running an AI agent inside Docker Sandboxes with USAi in under 5 minutes.
+
+## What is Docker Sandboxes?
+
+[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) runs AI coding agents in isolated microVM environments. Each sandbox gets its own Docker daemon, filesystem, and network—the agent can build containers, install packages, and modify files without touching your host system.
+
+There are **two ways** to use Docker Sandboxes:
+
+| Method | Install | Command Prefix | Best For |
+|--------|---------|----------------|----------|
+| **Docker Desktop built-in** | None (Docker Desktop 4.58+) | `docker sandbox` | Quick start, GFE Macs with managed Docker |
+| **Standalone sbx CLI** | Homebrew/Winget/apt | `sbx` | Full features, secret proxy, more flexibility |
+
+> **Which should I use?** Start with `docker sandbox` if you already have Docker Desktop 4.58+. The standalone `sbx` CLI offers additional features like the secret proxy (for GitHub tokens) and more granular control. Both work for basic USAi usage.
 
 ## Prerequisites
 
-- SBX CLI installed (`sbx --version`)
+**Choose one:**
+- **Docker Desktop 4.58+** (`docker --version` to check) — sandboxes built-in, no extra install
+- **Standalone sbx CLI** (`sbx --version` to check) — install via Homebrew/Winget/apt
+
+**Plus:**
 - USAi API key (set as `USAI_API_KEY` environment variable on host)
 - This repository cloned locally
 - (Optional) GitHub CLI logged in (`gh auth status`)
 - (Optional) GitLab CLI logged in (`glab auth status`)
 
+## Installing Docker Sandboxes
+
+### Option A: Docker Desktop Built-in (No Extra Install)
+
+If you have **Docker Desktop 4.58 or later**, sandboxes are already included. Verify:
+
+```bash
+docker sandbox --help
+```
+
+> **Note:** On some managed Docker installations (like GSA GFE Macs), the command is `docker sandbox` (two words), not `docker sbx`. If `docker sbx` returns "unknown command", try `docker sandbox`.
+
+### Option B: Standalone sbx CLI (More Features)
+
+The standalone CLI offers additional features (secret proxy, network policies) and doesn't require Docker Desktop.
+
+**macOS (Homebrew):**
+```bash
+brew install docker/tap/sbx
+sbx login
+```
+
+**Windows (Winget):**
+```powershell
+winget install -h Docker.sbx
+sbx login
+```
+
+**Linux (Ubuntu):**
+```bash
+curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
+sudo apt-get install docker-sbx
+sudo usermod -aG kvm $USER
+newgrp kvm
+sbx login
+```
+
+See [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/) for full details.
+
 ## Quick Start (3 Commands)
+
+### Using Docker Desktop (`docker sandbox`)
+
+```bash
+# 1. Set your API key in your shell config file (~/.bashrc or ~/.zshrc)
+echo 'export USAI_API_KEY="your-api-key-here"' >> ~/.zshrc
+source ~/.zshrc
+# IMPORTANT: Restart Docker Desktop so it picks up the new variable
+
+# 2. Create a sandbox for OpenCode in current directory
+docker sandbox create --name usai-test opencode .
+
+# 3. Run OpenCode (connects to the sandbox)
+docker sandbox run usai-test
+```
+
+> **Important:** Docker Desktop reads environment variables from your shell config at startup. After adding `USAI_API_KEY` to `~/.bashrc` or `~/.zshrc`, you must restart Docker Desktop for it to take effect.
+
+### Using Standalone CLI (`sbx`)
 
 ```bash
 # 1. Verify your API key is set on the HOST (should show key length, not the key itself)
@@ -27,16 +102,46 @@ That's it. You're now running an AI agent in an isolated container with USAi acc
 
 > **Important:** USAi requires manual API key injection because it uses a custom endpoint. SBX's built-in secret proxy only works with standard provider endpoints (OpenAI, Anthropic, etc.).
 
+### Command Comparison Reference
+
+| Action | Docker Desktop | Standalone sbx CLI |
+|--------|----------------|--------------------|
+| Create sandbox | `docker sandbox create --name NAME opencode .` | `sbx create --name NAME opencode .` |
+| Run/connect | `docker sandbox run NAME` | `sbx run NAME` |
+| Run with env vars | Set in shell config + restart Docker | `sbx exec -it -e VAR="$VAR" NAME cmd` |
+| List sandboxes | `docker sandbox ls` | `sbx ls` |
+| Stop sandbox | (sandboxes auto-stop) | `sbx stop NAME` |
+| Remove sandbox | `docker sandbox rm NAME` | `sbx rm NAME` |
+| Set secrets | N/A (use shell config) | `sbx secret set -g SERVICE` |
+| Reset all | `docker sandbox reset` | (remove individually) |
+
 ## Credential Injection Overview
 
-SBX supports two methods for injecting credentials:
+How credentials are handled differs between Docker Desktop and the standalone CLI:
+
+### Docker Desktop (`docker sandbox`)
+
+Docker Desktop reads environment variables from your shell configuration file (`~/.bashrc`, `~/.zshrc`) at startup. The sandbox proxy injects credentials into API requests, so keys stay on your host.
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export USAI_API_KEY="your-api-key"
+export ANTHROPIC_API_KEY="your-key"  # if using Claude directly
+export GH_TOKEN="your-github-token"  # for GitHub access
+```
+
+After adding variables, **source your config and restart Docker Desktop**.
+
+### Standalone CLI (`sbx`)
+
+The `sbx` CLI supports two methods:
 
 | Method | Security | Use Case | Supported Services |
 |--------|----------|----------|-------------------|
 | **SBX Proxy** (recommended) | High - agent never sees token | Standard API endpoints | `anthropic`, `aws`, `cursor`, `github`, `google`, `groq`, `mistral`, `nebius`, `openai`, `xai` |
 | **Direct Injection** (`-e`) | Medium - token in container env | Custom endpoints (USAi, GitLab) | Any service |
 
-**Rule of thumb:** Use SBX proxy when available; use direct injection for custom endpoints.
+**Rule of thumb:** Use SBX proxy when available; use direct injection for custom endpoints like USAi.
 
 ---
 
@@ -45,6 +150,19 @@ SBX supports two methods for injecting credentials:
 Agents often need git credentials for cloning private repos, creating PRs, or pushing changes. Here's how to inject them securely.
 
 ### GitHub (github.com)
+
+#### Using Docker Desktop
+
+Add to your shell config and restart Docker Desktop:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export GH_TOKEN="$(gh auth token)"
+# Or use a personal access token directly
+export GITHUB_TOKEN="your-github-pat"
+```
+
+#### Using Standalone sbx CLI
 
 GitHub is a **built-in SBX service**, so the proxy method works:
 
@@ -81,7 +199,17 @@ sbx exec SANDBOX_NAME sh -c 'curl -s -H "Authorization: Bearer test" https://api
 
 ### GitLab (Custom Instances)
 
-GitLab is **NOT a built-in SBX service**, so you must use direct injection:
+GitLab is **NOT a built-in service** for either method, so you must use direct injection/shell config:
+
+#### Using Docker Desktop
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export GITLAB_TOKEN="your-gitlab-token"
+export GITLAB_HOST="workshop.cloud.gov"  # for self-hosted
+```
+
+#### Using Standalone sbx CLI
 
 ```bash
 # For gitlab.com
@@ -104,7 +232,7 @@ sbx exec -it \
 sbx exec SANDBOX_NAME sh -c 'curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" https://$GITLAB_HOST/api/v4/user | jq .username'
 ```
 
-### Combined: USAi + GitHub + GitLab
+### Combined: USAi + GitHub + GitLab (sbx CLI)
 
 For agents that need all three:
 
@@ -122,11 +250,11 @@ sbx exec -it \
 
 ### Git Credential Summary
 
-| Provider | SBX Proxy | Direct Injection | CLI to Extract Token |
-|----------|-----------|------------------|---------------------|
-| GitHub (github.com) | `sbx secret set -g github` | `-e GH_TOKEN="$(gh auth token)"` | `gh auth token` |
-| GitLab.com | Not supported | `-e GITLAB_TOKEN="..."` | `glab config get token` |
-| GitLab (self-hosted) | Not supported | `-e GITLAB_TOKEN="..." -e GITLAB_HOST="..."` | `glab config get --host HOST token` |
+| Provider | Docker Desktop | sbx CLI (Proxy) | sbx CLI (Direct) |
+|----------|----------------|-----------------|------------------|
+| GitHub | `GH_TOKEN` in shell config | `sbx secret set -g github` | `-e GH_TOKEN="$(gh auth token)"` |
+| GitLab.com | `GITLAB_TOKEN` in shell config | Not supported | `-e GITLAB_TOKEN="..."` |
+| GitLab (self-hosted) | `GITLAB_TOKEN` + `GITLAB_HOST` | Not supported | `-e GITLAB_TOKEN="..." -e GITLAB_HOST="..."` |
 
 ---
 
@@ -137,17 +265,20 @@ sbx exec -it \
 **On your host machine** (not inside the container):
 
 ```bash
-# Option A: Export for current session
+# Option A: Export for current session (sbx CLI only)
 export USAI_API_KEY="your-api-key-here"
 
-# Option B: Add to shell profile (bash)
+# Option B: Add to shell profile (required for Docker Desktop, recommended for both)
+# For bash:
 echo 'export USAI_API_KEY="your-api-key-here"' >> ~/.bashrc
 source ~/.bashrc
 
-# Option C: Add to shell profile (zsh)
+# For zsh:
 echo 'export USAI_API_KEY="your-api-key-here"' >> ~/.zshrc
 source ~/.zshrc
 ```
+
+> **Docker Desktop users:** After adding to your shell config, **restart Docker Desktop** so it picks up the new variable.
 
 **Verify it's set** (safe command - only shows length):
 ```bash
@@ -157,15 +288,20 @@ echo "Key length: ${#USAI_API_KEY}"
 
 ### Step 2: Create a Sandbox
 
-SBX requires specifying an agent type and workspace path:
+Both methods require specifying an agent type and workspace path:
 
 ```bash
-# Create a sandbox for OpenCode in current directory
 cd /path/to/your-project
+
+# Docker Desktop
+docker sandbox create --name my-sandbox opencode .
+
+# OR Standalone sbx CLI
 sbx create --name my-sandbox opencode .
 
 # Verify it exists
-sbx ls
+docker sandbox ls   # Docker Desktop
+sbx ls              # Standalone CLI
 ```
 
 **Available agents:** `claude`, `codex`, `copilot`, `docker-agent`, `gemini`, `kiro`, `opencode`, `shell`
@@ -174,6 +310,9 @@ sbx ls
 
 If your agent needs to interact with GitHub:
 
+**Docker Desktop:** Add `GH_TOKEN` to your shell config and restart Docker Desktop.
+
+**Standalone sbx CLI:**
 ```bash
 # Recommended: Use SBX proxy for GitHub
 gh auth token | sbx secret set -g github
@@ -181,7 +320,15 @@ gh auth token | sbx secret set -g github
 
 ### Step 4: Run OpenCode with USAi
 
-**Important:** USAi uses a custom endpoint, so you must inject the API key manually:
+**Docker Desktop:**
+```bash
+# Simply run (environment variables come from shell config)
+docker sandbox run my-sandbox
+```
+
+**Standalone sbx CLI:**
+
+USAi uses a custom endpoint, so you must inject the API key manually:
 
 ```bash
 # Basic: USAi only
@@ -214,6 +361,30 @@ This is still secure because:
 
 ### Sandbox Management
 
+#### Docker Desktop (`docker sandbox`)
+
+```bash
+# Create a sandbox
+docker sandbox create --name my-sandbox opencode .
+
+# Run/connect to sandbox
+docker sandbox run my-sandbox
+
+# List sandboxes
+docker sandbox ls
+
+# Execute a command in sandbox
+docker sandbox exec -it my-sandbox bash
+
+# Remove a sandbox
+docker sandbox rm my-sandbox
+
+# Reset all sandboxes
+docker sandbox reset
+```
+
+#### Standalone CLI (`sbx`)
+
 ```bash
 # Create a sandbox (AGENT = claude|codex|copilot|gemini|kiro|opencode|shell)
 sbx create AGENT PATH
@@ -232,7 +403,7 @@ sbx stop SANDBOX_NAME
 sbx rm SANDBOX_NAME
 ```
 
-### Secret Management
+### Secret Management (sbx CLI only)
 
 ```bash
 # Set a secret globally (prompts for value)
@@ -255,7 +426,7 @@ sbx secret rm SERVICE
 
 > **How it works:** SBX proxies API requests from the agent and injects authentication headers automatically. The agent never sees the raw secret.
 
-### Environment Variable Injection
+### Environment Variable Injection (sbx CLI)
 
 For services not supported by SBX proxy (USAi, GitLab, custom APIs):
 
@@ -272,6 +443,21 @@ sbx exec \
 ```
 
 ### Executing Commands
+
+#### Docker Desktop
+
+```bash
+# Run sandbox (uses env vars from shell config)
+docker sandbox run SANDBOX_NAME
+
+# Execute a command
+docker sandbox exec -it SANDBOX_NAME bash
+
+# Pass agent-specific options (use -- separator)
+docker sandbox run SANDBOX_NAME -- --continue
+```
+
+#### Standalone sbx CLI
 
 ```bash
 # Run OpenCode with USAi (the working pattern)
@@ -297,6 +483,24 @@ sbx exec -e VAR="value" SANDBOX_NAME COMMAND
 
 ### Debugging
 
+#### Docker Desktop
+
+```bash
+# Shell into sandbox
+docker sandbox exec -it SANDBOX_NAME bash
+
+# Check environment variables
+docker sandbox exec -it SANDBOX_NAME bash -c 'echo "USAI key length: ${#USAI_API_KEY}"'
+
+# Check workspace contents
+docker sandbox exec -it SANDBOX_NAME ls -la
+
+# View network activity
+docker sandbox network log
+```
+
+#### Standalone sbx CLI
+
 ```bash
 # Check if secrets are available inside sandbox
 sbx exec SANDBOX_NAME sh -c 'echo "USAI key length: ${#USAI_API_KEY}"'
@@ -321,14 +525,28 @@ sbx exec SANDBOX_NAME ls -la
 
 ## Troubleshooting
 
+### "docker: unknown command: docker sbx"
+
+**Problem:** Running `docker sbx` returns "unknown command".
+
+**Fix:** The correct command is `docker sandbox` (two words), not `docker sbx`. If that also doesn't work:
+1. Check Docker Desktop version: `docker --version` (need 4.58+)
+2. Verify the plugin exists: `ls ~/.docker/cli-plugins/docker-sandbox`
+3. Alternatively, install the standalone `sbx` CLI via Homebrew:
+   ```bash
+   brew install docker/tap/sbx
+   ```
+
 ### "unknown agent" error
 
-**Problem:** `sbx create usai-test` fails with "unknown agent".
+**Problem:** `docker sandbox create usai-test` or `sbx create usai-test` fails with "unknown agent".
 
-**Fix:** SBX requires an agent type. Use:
+**Fix:** You must specify an agent type. Use:
 ```bash
-sbx create opencode .
-# Or with custom name:
+# Docker Desktop
+docker sandbox create --name usai-test opencode .
+
+# Standalone CLI
 sbx create --name usai-test opencode .
 ```
 
@@ -339,15 +557,26 @@ sbx create --name usai-test opencode .
 **Root Cause:** Either:
 1. API key not injected properly
 2. Config file not found
-3. Working directory not set
+3. Working directory not set (sbx CLI)
+4. Docker Desktop not restarted after setting env var
 
-**Fix:** Use the full command with all flags:
+**Fix for Docker Desktop:**
+1. Ensure `USAI_API_KEY` is in `~/.bashrc` or `~/.zshrc`
+2. Source the file: `source ~/.zshrc`
+3. **Restart Docker Desktop** (this is required!)
+4. Run: `docker sandbox run usai-test`
+
+**Fix for sbx CLI:**
 ```bash
 sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) usai-test opencode
 ```
 
 Verify the config exists:
 ```bash
+# Docker Desktop
+docker sandbox exec -it usai-test cat /path/to/opencode.jsonc
+
+# sbx CLI
 sbx exec usai-test cat $(pwd)/opencode.jsonc
 ```
 
@@ -355,7 +584,11 @@ sbx exec usai-test cat $(pwd)/opencode.jsonc
 
 **Problem:** Agent can't authenticate to USAi.
 
-**Fix:** USAi requires manual key injection (SBX proxy doesn't work with custom endpoints):
+**Fix for Docker Desktop:**
+1. Add to shell config: `export USAI_API_KEY="your-key"`
+2. Source config and **restart Docker Desktop**
+
+**Fix for sbx CLI:**
 ```bash
 sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) usai-test opencode
 ```
@@ -369,7 +602,10 @@ echo "Key length: ${#USAI_API_KEY}"
 
 **Problem:** GitHub API calls fail despite having `gh` logged in.
 
-**Fix:** Ensure GitHub secret is set in SBX:
+**Fix for Docker Desktop:**
+Add `GH_TOKEN` or `GITHUB_TOKEN` to your shell config and restart Docker Desktop.
+
+**Fix for sbx CLI:**
 ```bash
 # Check if github secret exists
 sbx secret ls
