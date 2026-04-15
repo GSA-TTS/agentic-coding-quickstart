@@ -1,9 +1,18 @@
-# SBX + USAi Addendum for AGENTS.md
+# Docker Sandboxes + USAi Addendum for AGENTS.md
 
 > **Instructions:** Append this content to your existing AGENTS.md file.
 > If you don't have an AGENTS.md, consider using the [Agentic Coding Playbook](https://github.com/GSA-TTS/agentic-coding-playbook) to generate one first.
 
 ---
+
+## Docker Sandboxes Overview
+
+[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) runs AI coding agents in isolated microVM environments. There are two ways to use it:
+
+| Method | Command Prefix | Best For |
+|--------|----------------|----------|
+| **Docker Desktop built-in** | `docker sandbox` | GFE Macs with managed Docker (4.58+) |
+| **Standalone sbx CLI** | `sbx` | Full features, secret proxy |
 
 ## SBX-Specific Rules (Non-Negotiable)
 
@@ -16,8 +25,8 @@ The agent MUST NEVER:
 - Include secrets in commit messages, comments, or documentation
 
 All secrets MUST be accessed via:
-- SBX secret management (for supported services like GitHub)
-- Environment variables injected at runtime via `-e` flag (not persisted)
+- Docker Desktop: Environment variables set in shell config (read by Docker at startup)
+- sbx CLI: Secret management (`sbx secret set`) or runtime injection (`-e` flag)
 
 ### 2. Assume You Are Untrusted
 
@@ -26,10 +35,10 @@ Agents must behave as if:
 - Outputs may be logged and reviewed
 - Any exposed secret is considered compromised
 
-### 3. SBX Is the Security Boundary
+### 3. Sandbox Is the Security Boundary
 
 All agent execution MUST:
-- Occur inside Docker SBX containers when working with USAi endpoints
+- Occur inside Docker Sandboxes when working with USAi endpoints
 - Avoid direct host interaction unless explicitly required
 - Avoid writing outside the working directory
 - Respect container filesystem boundaries
@@ -44,35 +53,47 @@ Agents should:
 
 ---
 
-## Network Access (SBX)
+## Network Access
 
 - **Authorized external endpoints:**
   - `https://api.gsa.usai.gov/api/v1` (USAi API)
-  - `https://api.github.com` (GitHub API - via SBX proxy)
+  - `https://api.github.com` (GitHub API - via proxy)
   - `https://workshop.cloud.gov` (GitLab API - GSA workshop instance, if applicable)
 - **TLS requirement:** TLS 1.2+ for all connections
 
 ### Credential Injection Methods
 
-| Service | Method | Notes |
-|---------|--------|-------|
-| USAi | Direct injection (`-e USAI_API_KEY`) | Custom endpoint not supported by SBX proxy |
-| GitHub | SBX proxy (`sbx secret set -g github`) | Recommended; agent never sees token |
-| GitLab | Direct injection (`-e GITLAB_TOKEN`) | Not a built-in SBX service |
+| Service | Docker Desktop | sbx CLI |
+|---------|----------------|---------|
+| USAi | `USAI_API_KEY` in shell config | `-e USAI_API_KEY="$USAI_API_KEY"` |
+| GitHub | `GH_TOKEN` in shell config | `sbx secret set -g github` (recommended) |
+| GitLab | `GITLAB_TOKEN` in shell config | `-e GITLAB_TOKEN="..."` |
 
 See `docs/SBX_PATTERNS.md` for detailed credential injection patterns.
 
 ---
 
-## SBX Execution Patterns
+## Execution Patterns
 
-### Basic: USAi Only
+### Docker Desktop
+
+```bash
+# Create sandbox
+docker sandbox create --name SANDBOX_NAME opencode .
+
+# Run (environment variables come from shell config)
+docker sandbox run SANDBOX_NAME
+```
+
+### Standalone sbx CLI
+
+#### Basic: USAi Only
 
 ```bash
 sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
 ```
 
-### With GitHub (via proxy - recommended)
+#### With GitHub (via proxy - recommended)
 
 ```bash
 # One-time setup
@@ -82,7 +103,7 @@ gh auth token | sbx secret set -g github
 sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
 ```
 
-### With GitLab (direct injection)
+#### With GitLab (direct injection)
 
 ```bash
 sbx exec -it \
