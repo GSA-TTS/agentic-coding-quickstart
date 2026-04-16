@@ -73,37 +73,58 @@ sbx login
 
 See [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/) for full installation details.
 
-## Quick Start (3 Commands)
+## Quick Start
 
-### Using Docker Desktop (`docker sandbox`)
+### Step 1: Configure Network Policy (Required)
+
+When you first run a sandbox command, you'll be prompted to choose a network policy. **Do not choose "Open"** — it allows access to internal GSA resources, which is a security risk on GFE.
+
+Choose **"Balanced"** or **"Locked Down"**, then add the USAi endpoint:
 
 ```bash
-# 1. Set your API key in your shell config (~/.bashrc or ~/.zshrc)
-#    Then source it and restart Docker Desktop
-export USAI_API_KEY="your-api-key-here"
-
-# 2. Clone this repo and create a sandbox
-git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
-cd agentic-coding-quickstart
-docker sandbox create --name quickstart opencode .
-
-# 3. Run OpenCode
-docker sandbox run quickstart
+# Allow USAi API endpoint (required for both methods)
+sbx policy allow network "api.gsa.usai.gov"
 ```
 
-### Using Standalone CLI (`sbx`)
+> **Why not "Open"?** On GFE machines, "Open" allows the agent to access internal GSA network resources. Always use "Balanced" with explicit allowlist entries.
+
+### Step 2: Set Your API Key
+
+**For sbx CLI:** Export in your current terminal session:
+```bash
+export USAI_API_KEY="your-api-key-here"
+```
+
+**For Docker Desktop:** Add to your shell config AND restart Docker Desktop:
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+echo 'export USAI_API_KEY="your-api-key-here"' >> ~/.zshrc
+source ~/.zshrc
+
+# IMPORTANT: Restart Docker Desktop (Quit and reopen)
+# Docker reads env vars at startup, not from your current shell
+```
+
+> **Common mistake:** Setting the env var in your terminal isn't enough for Docker Desktop. You must add it to your shell config file AND restart Docker Desktop.
+
+### Step 3: Create and Run Sandbox
+
+**Using Standalone CLI (`sbx`) — Recommended:**
 
 ```bash
-# 1. Set your API key (on your host machine)
-export USAI_API_KEY="your-api-key-here"
-
-# 2. Clone this repo and create a sandbox
 git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
 cd agentic-coding-quickstart
 sbx create --name quickstart opencode .
-
-# 3. Run OpenCode with USAi
 sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) quickstart opencode
+```
+
+**Using Docker Desktop (`docker sandbox`):**
+
+```bash
+git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
+cd agentic-coding-quickstart
+docker sandbox create --name quickstart opencode .
+docker sandbox run quickstart
 ```
 
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
@@ -240,6 +261,10 @@ See [docs/SBX_QUICKSTART.md](docs/SBX_QUICKSTART.md) for full credential injecti
 
 ## Troubleshooting
 
+**Network policy errors / "Balanced" policy blocks USAi**
+- Add the USAi endpoint to your allowlist: `sbx policy allow network "api.gsa.usai.gov"`
+- Do NOT use "Open" policy on GFE — it exposes internal GSA resources to the agent
+
 **"docker: unknown command: docker sbx"**
 - Use `docker sandbox` (two words), not `docker sbx`
 - If that doesn't work, verify Docker Desktop version: `docker --version` (need 4.58+)
@@ -251,10 +276,14 @@ See [docs/SBX_QUICKSTART.md](docs/SBX_QUICKSTART.md) for full credential injecti
 - For `docker sandbox`: The workspace is auto-mounted
 - Verify `opencode.jsonc` exists
 
-**Authentication failed**
+**Authentication failed / Unauthorized errors**
 - Check your API key: `echo "Length: ${#USAI_API_KEY}"`
 - For `sbx`: Ensure you're using `-e USAI_API_KEY="$USAI_API_KEY"` flag
-- For `docker sandbox`: Set the key in `~/.bashrc` or `~/.zshrc`, source it, and restart Docker Desktop
+- For `docker sandbox`: 
+  1. Add the key to `~/.bashrc` or `~/.zshrc` (not just `export` in terminal)
+  2. Run `source ~/.zshrc`
+  3. **Restart Docker Desktop completely** (Quit → Reopen)
+  4. Then run `docker sandbox run quickstart`
 
 **"Unknown agent" error**
 - Use: `docker sandbox create --name NAME opencode .` or `sbx create --name NAME opencode .`
