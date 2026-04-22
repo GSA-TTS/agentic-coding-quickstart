@@ -3,9 +3,9 @@ title: "Agentic Coding Quickstart - Agent Rules"
 description: "Behavioral rules for AI coding agents operating with SBX + USAi"
 status: canonical
 tier: 1
-last_updated: "2026-04-14"
+last_updated: "2026-04-21"
 audience: "developers"
-keywords: ["AGENTS.md", "sbx", "usai", "sandbox", "agent-rules"]
+keywords: ["AGENTS.md", "sbx", "usai", "sandbox", "agent-rules", "workspace"]
 related_files: ["docs/KNOWN_FAILURE_MODES.md", "docs/adr/0001-sbx-usai-agent-execution-architecture.md"]
 load_priority: "always"
 review_cycle: "quarterly"
@@ -15,9 +15,43 @@ review_cycle: "quarterly"
 
 > **System:** Agentic Coding Quickstart | **Impact Level:** FIPS Low | **Agency:** GSA
 >
-> **Last Updated:** 2026-04-14 | **Reviewed By:** William Zujkowski
+> **Last Updated:** 2026-04-21 | **Reviewed By:** William Zujkowski
 >
 > This document defines the behavioral rules for AI coding agents operating within this project. The AI agent MUST follow these rules without exception.
+
+---
+
+## Workspace Structure
+
+This repository serves as the **entry point** for AI-assisted government development. The expected folder structure:
+
+```
+my-workspace/                     # Parent folder (user creates this)
+├── agentic-coding-quickstart/    # THIS REPO - setup, config, entry point
+│   ├── AGENTS.md                 # You are here
+│   ├── Makefile                  # make setup, make doctor, make new-project
+│   └── docs/                     # Setup guides and references
+├── agentic-coding-playbook/      # Skills, templates, compliance docs
+│   ├── skills/                   # Executable procedures for common tasks
+│   ├── templates/                # Project scaffolding
+│   └── docs/                     # Federal compliance guidance
+└── my-app/                       # User's project(s)
+```
+
+### Agent Resource Access
+
+When working on user projects, the agent has access to:
+
+| Resource | Location | Use For |
+|----------|----------|---------|
+| Skills | `../agentic-coding-playbook/skills/` | Step-by-step procedures (deploy, security scan, etc.) |
+| Templates | `../agentic-coding-playbook/templates/` | Project scaffolding |
+| Compliance docs | `../agentic-coding-playbook/docs/` | Security controls, coding practices |
+| Setup guides | `./docs/` | SBX configuration, troubleshooting |
+
+**To use a skill:** Read the SKILL.md file in the skill directory and follow its procedures.
+
+**To scaffold a project:** Use templates from the playbook or ask the user what they want to build.
 
 ---
 
