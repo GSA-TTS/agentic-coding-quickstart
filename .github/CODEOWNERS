@@ -1,0 +1,10 @@
+# CODEOWNERS for agentic-coding-quickstart
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything in the repo
+* @GSA-TTS/hello-ato-team
+
+# Security-sensitive files require explicit review
+AGENTS.md @GSA-TTS/hello-ato-team
+SECURITY.md @GSA-TTS/hello-ato-team
+.github/ @GSA-TTS/hello-ato-team
