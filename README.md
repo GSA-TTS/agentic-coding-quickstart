@@ -1,9 +1,23 @@
 # Agentic Coding Quickstart
 
-> **Audience:** Government developers in the USAi pilot program  
+> **Audience:** GSA teams using AI coding agents  
 > **Purpose:** Get AI coding agents running safely on your local machine in under 5 minutes
 
-This guide helps you use AI coding agents (like OpenCode) inside isolated Docker sandboxes, connecting to government-approved API endpoints (USAi).
+This guide helps you use AI coding agents (like OpenCode) inside isolated Docker sandboxes, connecting to USAi API endpoints.
+
+## Agentic Coding Ecosystem
+
+This repository is part of a three-repo ecosystem:
+
+| Repo | Purpose | When to Use |
+|------|---------|-------------|
+| **[Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)** (you are here) | Get running | First day setup, SBX + USAi config |
+| **[Playbook](https://github.com/GSA-TTS/agentic-coding-playbook)** | Do it right | Repo setup, standards, best practices |
+| **[Patterns](https://github.com/GSA-TTS/agentic-coding-patterns)** | Share & learn | Community patterns, lessons learned |
+
+**Your journey:** Start here (Quickstart) to get your environment working, then use the Playbook to set up your projects properly, and visit Patterns to share what you learn with the community.
+
+---
 
 ## Why Sandboxes?
 
@@ -30,7 +44,7 @@ There are **two ways** to use Docker Sandboxes:
 ## Prerequisites
 
 - **Docker Desktop 4.58+** (check: `docker --version`) — OR — **sbx CLI** installed (`sbx --version`)
-- **USAi API key** from your agency's pilot program
+- **USAi API key** from the agentic coding program
 - **Docker** running locally
 
 ## Installing Docker Sandboxes
@@ -179,6 +193,8 @@ If you've bootstrapped your project using the [Agentic Coding Playbook](https://
 - **Playbook** → Project structure, AGENTS.md, coding practices, risk assessment
 - **Quickstart** → USAi configuration, SBX patterns, credential injection
 
+See the [Playbook](https://github.com/GSA-TTS/agentic-coding-playbook) for detailed project setup guidance.
+
 ## Key Commands
 
 ### Docker Desktop (`docker sandbox`)
@@ -291,27 +307,40 @@ See [docs/SBX_QUICKSTART.md](docs/SBX_QUICKSTART.md) for full credential injecti
 
 See `docs/KNOWN_FAILURE_MODES.md` for more troubleshooting help.
 
-## Pilot Scope
+## About This Initiative
 
-This quickstart is part of a **limited government pilot** for evaluating AI coding agents. Current constraints:
+This quickstart supports GSA teams using AI coding agents for development. Current scope:
 
-- **Authorized endpoints only** - USAi, GitHub, and approved GitLab instances
-- **Local development only** - not for production use
-- **Pattern validation** - documenting what works and what doesn't
+- **Authorized endpoints:** USAi, GitHub, and approved GitLab instances
+- **Local development only:** Not for production use
+- **Learning together:** Documenting what works and what doesn't
 
 ## Getting Help
 
-- Check `docs/KNOWN_FAILURE_MODES.md` first
-- Review `AGENTS.md` for agent behavior rules
-- Contact your pilot program coordinator
+1. **Troubleshooting:** Check `docs/KNOWN_FAILURE_MODES.md` first
+2. **Agent behavior:** Review `AGENTS.md` for behavioral standards
+3. **Questions:** Ask in the [agentic-coding Slack channel](https://gsa.enterprise.slack.com/archives/C0B44531QLE) (others benefit too)
+4. **Improvement ideas:** Open an issue or submit a PR
+5. **Platform concerns:** Contact support@usai.gov
+
+## What's Next?
+
+Once you have your environment working:
+
+1. **Set up your project properly** → Use the [Playbook](https://github.com/GSA-TTS/agentic-coding-playbook) to configure AGENTS.md, standards, and best practices
+2. **Share what you learn** → Contribute patterns to the [Patterns repo](https://github.com/GSA-TTS/agentic-coding-patterns)
+3. **Help improve these docs** → Found something unclear? Fix it directly or open an issue
 
 ## Contributing
 
-Found a failure mode we haven't documented? Please add it to `docs/KNOWN_FAILURE_MODES.md` with:
-1. Symptoms
-2. Root cause
-3. Fix
+Found a failure mode we haven't documented? Have an improvement idea?
+
+- **Fix it directly** — Submit a PR (preferred for internal repos)
+- **Not sure how?** — Open an issue to discuss
+- **Patterns you've discovered** — Share them in the [Patterns repo](https://github.com/GSA-TTS/agentic-coding-patterns)
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ---
 
-**Impact Level:** FIPS Low | **Data Classification:** Internal/Non-sensitive | **ATO Status:** Pre-ATO (pilot)
+**Data Classification:** Internal/Non-sensitive

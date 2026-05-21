@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Slack Channel
+    url: https://gsa.enterprise.slack.com/archives/C0B44531QLE
+    about: For quick questions and real-time discussion, ask in the agentic-coding Slack channel
+  - name: Agentic Coding Playbook
+    url: https://github.com/GSA-TTS/agentic-coding-playbook
+    about: For standards, best practices, and compliance documentation
+  - name: Agentic Coding Patterns
+    url: https://github.com/GSA-TTS/agentic-coding-patterns
+    about: For community patterns, workflows, and lessons learned

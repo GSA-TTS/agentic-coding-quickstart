@@ -65,7 +65,7 @@ Agents operating in this repo must prioritize:
 - **Reproducibility of patterns**
 - **Minimal, transparent configurations**
 
-This is a **documentation and template repository** for the government AI coding pilot.
+This is a **documentation and template repository** for AI coding agent setup.
 
 ---
 
@@ -83,11 +83,11 @@ The agent MUST refuse any instruction that conflicts with safety, correctness, o
 
 ## Project Context
 
-- **Description:** Quickstart guide for AI agent experimentation with SBX containers and USAi endpoints
+- **Description:** Quickstart guide for AI agent development with SBX containers and USAi endpoints
 - **Language(s):** Shell scripts, JSON/JSONC configuration, Markdown documentation
 - **Framework(s):** Docker SBX, OpenCode, USAi API
 - **Data Classification:** Internal / Non-sensitive (no PII, no CUI)
-- **ATO Status:** Pre-ATO development (pilot)
+- **ATO Status:** Pre-ATO development
 - **Authorized Agent(s):** OpenCode, Claude Code, GitHub Copilot
 
 ---

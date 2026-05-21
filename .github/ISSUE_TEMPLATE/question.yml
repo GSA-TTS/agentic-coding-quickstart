@@ -1,0 +1,39 @@
+name: Question
+description: Ask a question about the quickstart or agentic coding setup
+title: "[Question] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Question
+
+        Have a question? We're happy to help!
+
+        **Tip:** For faster responses, consider asking in the **agentic-coding Slack channel** first. Others often benefit from seeing questions answered there too.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What would you like to know?
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: What documentation have you checked or steps have you tried?
+      placeholder: |
+        - Checked README.md
+        - Tried docs/KNOWN_FAILURE_MODES.md
+        - Searched existing issues
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Any other information that might help us answer your question

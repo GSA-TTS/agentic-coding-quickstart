@@ -1,6 +1,24 @@
-# Contributing to agent-sandbox
+# Contributing to Agentic Coding Quickstart
 
-Thank you for contributing to the Agentic Coding Quickstart project! This guide will help you understand our development workflow and standards.
+Thank you for contributing! This repository helps GSA teams use AI coding agents effectively.
+
+## Ecosystem Overview
+
+This repo is one of three in the agentic coding ecosystem:
+
+| Repo | Focus | Typical Contributions |
+|------|-------|----------------------|
+| **[Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)** (you are here) | Environment setup | SBX fixes, troubleshooting docs, config improvements |
+| **[Playbook](https://github.com/GSA-TTS/agentic-coding-playbook)** | Standards & practices | Coding standards, skills, templates |
+| **[Patterns](https://github.com/GSA-TTS/agentic-coding-patterns)** | Community sharing | Workflows, lessons learned, tool examples |
+
+**Not sure where your contribution belongs?** Ask in the [agentic-coding Slack channel](https://gsa.enterprise.slack.com/archives/C0B44531QLE).
+
+## Getting Help
+
+- **Questions:** Ask in the [agentic-coding Slack channel](https://gsa.enterprise.slack.com/archives/C0B44531QLE) (others benefit too)
+- **Bugs:** Open a GitHub issue with steps to reproduce
+- **Security issues:** See [SECURITY.md](SECURITY.md) — direct fixes preferred
 
 ## Table of Contents
 
@@ -15,11 +33,11 @@ Thank you for contributing to the Agentic Coding Quickstart project! This guide 
 
 ## Code of Conduct
 
-This project operates under federal government standards of professional conduct. All contributors must:
+This project operates under professional standards of conduct. All contributors:
 
 - Be respectful and constructive in all interactions
-- Follow security and compliance requirements outlined in `AGENTS.md` and `docs/CODING_PRACTICES.md`
-- Report security vulnerabilities privately (see `SECURITY.md`)
+- Follow security requirements outlined in `AGENTS.md` and `docs/CODING_PRACTICES.md`
+- For security issues, see [SECURITY.md](SECURITY.md)
 
 ---
 
@@ -258,12 +276,17 @@ Releases are **fully automated** via GitHub Actions and hello-please:
 
 ## Questions or Issues?
 
-- **Security vulnerabilities:** See `SECURITY.md` for responsible disclosure
-- **General questions:** Open a GitHub Discussion
+- **Questions:** Ask in the agentic-coding Slack channel
+- **Security issues:** See [SECURITY.md](SECURITY.md) — direct fixes preferred
 - **Bug reports:** Open a GitHub Issue with:
   - Steps to reproduce
   - Expected vs actual behavior
   - Environment details (OS, Docker version, etc.)
+
+## Teams
+
+- **[@GSA-TTS/agentic-coding-team](https://github.com/orgs/GSA-TTS/teams/agentic-coding-team):** Team members — review, contribute, provide feedback
+- **[@GSA-TTS/agentic-coding-admins](https://github.com/orgs/GSA-TTS/teams/agentic-coding-admins):** Repository administrators — merge, release, maintain
 
 ---
 
@@ -273,4 +296,4 @@ This project is released under the CC0 1.0 Universal license. See `LICENSE` for 
 
 ---
 
-**Thank you for contributing to the Agentic Coding Quickstart!**
+**Thank you for helping improve the Agentic Coding Quickstart!**

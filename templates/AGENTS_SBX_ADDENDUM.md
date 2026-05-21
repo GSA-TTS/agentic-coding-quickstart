@@ -117,9 +117,9 @@ sbx exec -it \
 
 ## Security Considerations
 
-Direct credential injection (for USAi, GitLab) means the agent CAN see the token in the container environment. This is acceptable for the pilot because:
+Direct credential injection (for USAi, GitLab) means the agent CAN see the token in the container environment. This is acceptable for the Pre-ATO environment because:
 
-1. **Pre-ATO pilot** with low-impact data (no PII, no CUI)
+1. **Pre-ATO environment** with low-impact data (no PII, no CUI)
 2. **Tokens are scoped** - use minimal permissions
 3. **Sandbox provides isolation** from host system
 4. **Short-lived sessions** - tokens only in memory during execution
