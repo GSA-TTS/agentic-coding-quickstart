@@ -103,9 +103,9 @@ sbx policy reset
 sbx policy allow network "api.gsa.usai.gov"
 ```
 
-### Full Allowlist for USAi Pilot
+### Full Allowlist for USAi
 
-For the complete pilot experience (USAi + GitHub + package managers):
+For the complete USAi experience (USAi + GitHub + package managers):
 
 ```bash
 sbx policy allow network "api.gsa.usai.gov"

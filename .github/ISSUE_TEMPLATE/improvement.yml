@@ -1,0 +1,57 @@
+name: Documentation Improvement
+description: Suggest an improvement to the documentation
+title: "[Docs] "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Documentation Improvement
+
+        Help us make the quickstart clearer and more useful!
+
+  - type: dropdown
+    id: doc_type
+    attributes:
+      label: What type of improvement?
+      options:
+        - Clarify existing content
+        - Add missing information
+        - Fix an error
+        - Improve examples
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Which document?
+      description: File path or section (e.g., "README.md Quick Start" or "docs/SBX_QUICKSTART.md")
+      placeholder: "README.md"
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current content
+      description: What does the documentation currently say? (Quote or summarize)
+    validations:
+      required: false
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+      description: What should it say instead, or what should be added?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Why is this needed?
+      description: What problem did you encounter that this would solve?
+    validations:
+      required: false

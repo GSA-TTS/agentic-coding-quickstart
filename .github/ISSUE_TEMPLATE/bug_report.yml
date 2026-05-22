@@ -1,0 +1,79 @@
+name: Bug Report
+description: Report an issue with setup, configuration, or documentation
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Bug Report
+
+        Thanks for helping improve the Agentic Coding Quickstart!
+
+        Before submitting, please check [docs/KNOWN_FAILURE_MODES.md](../docs/KNOWN_FAILURE_MODES.md) to see if this is already documented.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the issue you encountered
+      placeholder: |
+        I was trying to set up SBX and...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      description: What should have happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce this issue?
+      placeholder: |
+        1. Run `sbx create --name test opencode .`
+        2. Run `sbx exec...`
+        3. See error...
+    validations:
+      required: true
+
+  - type: input
+    id: docker_version
+    attributes:
+      label: Docker version
+      description: Output of `docker --version`
+      placeholder: "Docker version 4.58.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      description: Your OS and version
+      placeholder: "macOS 14.5 / Windows 11 / Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sbx_method
+    attributes:
+      label: SBX method
+      description: Which method are you using?
+      options:
+        - Docker Desktop (`docker sandbox`)
+        - Standalone CLI (`sbx`)
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Any other relevant information (error messages, screenshots, etc.)
