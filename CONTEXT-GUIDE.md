@@ -51,7 +51,7 @@ Load only when the specific activity is being performed.
 
 ## Typical Task Profiles
 
-| Task Type | Load | 
+| Task Type | Load |
 |-----------|------|
 | Code generation/review | Tier 1 only |
 | SBX + USAi setup | Tier 1 + SBX_QUICKSTART.md |

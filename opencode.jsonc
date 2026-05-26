@@ -1,6 +1,6 @@
 {
   // OpenCode Configuration for SBX + USAi Testing
-  // 
+  //
   // IMPORTANT: This file contains NO secrets.
   // API key is injected via USAI_API_KEY environment variable.
   //

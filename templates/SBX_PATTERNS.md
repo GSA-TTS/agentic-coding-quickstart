@@ -43,7 +43,7 @@ sbx policy allow network "api.gsa.usai.gov"
 | **SBX Proxy** (sbx CLI) | High - agent never sees token | Standard API endpoints | `anthropic`, `aws`, `cursor`, `github`, `google`, `groq`, `mistral`, `nebius`, `openai`, `xai` |
 | **Direct Injection** (`-e`) | Medium - token in container env | Custom endpoints | Any service (USAi, GitLab, etc.) |
 
-**Rule of thumb:** 
+**Rule of thumb:**
 - Docker Desktop: Add to shell config, restart Docker
 - sbx CLI: Use proxy when available; use `-e` for custom endpoints
 

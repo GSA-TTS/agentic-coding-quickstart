@@ -309,7 +309,7 @@ The agent MUST:
 
 ## Network Access
 
-- **Authorized external endpoints:** 
+- **Authorized external endpoints:**
   - `https://api.gsa.usai.gov/api/v1` (USAi API)
   - `https://api.github.com` (GitHub API - via SBX proxy)
   - `https://workshop.cloud.gov` (GitLab API - GSA workshop instance)
