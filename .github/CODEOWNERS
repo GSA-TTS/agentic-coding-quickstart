@@ -1,10 +1,12 @@
-# CODEOWNERS for agentic-coding-quickstart
-# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# CODEOWNERS
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
-# Default owners for everything in the repo
-* @GSA-TTS/hello-ato-team
+# Default owner for everything in the repo
+* @GSA-TTS/agentic-coding-team
 
-# Security-sensitive files require explicit review
-AGENTS.md @GSA-TTS/hello-ato-team
-SECURITY.md @GSA-TTS/hello-ato-team
-.github/ @GSA-TTS/hello-ato-team
+# Security-sensitive files require additional review
+/.github/workflows/ @GSA-TTS/agentic-coding-team
+/opencode.jsonc @GSA-TTS/agentic-coding-team
+/.commitlintrc.yml @GSA-TTS/agentic-coding-team
+/AGENTS.md @GSA-TTS/agentic-coding-team
+/SECURITY.md @GSA-TTS/agentic-coding-team
