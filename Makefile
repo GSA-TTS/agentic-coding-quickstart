@@ -1,7 +1,7 @@
 # Agentic Coding Quickstart - Makefile
 # Simple commands for setting up and managing your AI-assisted development workspace
 
-.PHONY: setup doctor new-project clean help
+.PHONY: setup doctor new-project clean install-hooks help
 
 # Default target
 help:
@@ -9,10 +9,11 @@ help:
 	@echo "========================="
 	@echo ""
 	@echo "Commands:"
-	@echo "  make setup        - Set up your workspace (clone playbook, check dependencies)"
-	@echo "  make doctor       - Run health checks on your environment"
-	@echo "  make new-project  - Create a new project directory"
-	@echo "  make clean        - Remove generated files"
+	@echo "  make setup         - Set up your workspace (clone playbook, check dependencies)"
+	@echo "  make doctor        - Run health checks on your environment"
+	@echo "  make new-project   - Create a new project directory"
+	@echo "  make install-hooks - [OPTIONAL] Install pre-commit hooks"
+	@echo "  make clean         - Remove generated files"
 	@echo ""
 	@echo "First time? Run: make setup"
 
@@ -96,3 +97,13 @@ new-project:
 # Clean up
 clean:
 	@echo "Nothing to clean (this repo doesn't generate files)"
+
+# Install pre-commit hooks (optional)
+install-hooks:  ## [OPTIONAL] Install pre-commit hooks
+	@command -v pre-commit >/dev/null 2>&1 || { \
+		echo "ERROR: pre-commit not installed."; \
+		echo "Install with: pip install pre-commit"; \
+		exit 1; \
+	}
+	@pre-commit install
+	@echo "Pre-commit hooks installed. Run 'pre-commit run --all-files' to test."

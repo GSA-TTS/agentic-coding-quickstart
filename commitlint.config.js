@@ -4,7 +4,7 @@
 // Extend conventional commit configuration
 export default {
   extends: ['@commitlint/config-conventional'],
-  
+
   // Ignore Dependabot commits (they follow conventional commits but may have extra metadata)
   ignores: [
     (message) => /^chore\(deps\)|^chore\(ci\)/.test(message)
@@ -31,28 +31,28 @@ export default {
         'security'   // Security fixes (patch version bump)
       ]
     ],
-    
+
     // Subject must not be empty
     'subject-empty': [2, 'never'],
-    
+
     // Subject must not end with period
     'subject-full-stop': [2, 'never', '.'],
-    
+
     // Subject must be lowercase
     'subject-case': [2, 'always', 'lower-case'],
-    
+
     // Type must be lowercase
     'type-case': [2, 'always', 'lower-case'],
-    
+
     // Scope must be lowercase
     'scope-case': [2, 'always', 'lower-case'],
-    
+
     // Header maximum length
     'header-max-length': [2, 'always', 100],
-    
+
     // Body maximum line length
     'body-max-line-length': [2, 'always', 100],
-    
+
     // Footer maximum line length
     'footer-max-line-length': [2, 'always', 100]
   }

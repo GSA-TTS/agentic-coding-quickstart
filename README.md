@@ -1,6 +1,6 @@
 # Agentic Coding Quickstart
 
-> **Audience:** GSA teams using AI coding agents  
+> **Audience:** GSA teams using AI coding agents
 > **Purpose:** Get AI coding agents running safely on your local machine in under 5 minutes
 
 This guide helps you use AI coding agents (like OpenCode) inside isolated Docker sandboxes, connecting to USAi API endpoints.
@@ -159,6 +159,7 @@ That's it. You're now running an AI coding agent in an isolated container with U
 | File | Purpose |
 |------|---------|
 | `opencode.jsonc` | Pre-configured for USAi endpoints |
+| `.pre-commit-config.yaml` | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md` | Behavioral rules the agent follows |
 | `docs/SBX_QUICKSTART.md` | Detailed setup walkthrough |
 | `docs/KNOWN_FAILURE_MODES.md` | Troubleshooting guide |
@@ -196,6 +197,23 @@ If you've bootstrapped your project using the [Agentic Coding Playbook](https://
 See the [Playbook](https://github.com/GSA-TTS/agentic-coding-playbook) for detailed project setup guidance.
 
 ## Key Commands
+
+### Optional: Install Pre-commit Hooks
+
+Pre-commit hooks are **opt-in** and provide secret detection and file hygiene checks:
+
+```bash
+# Install pre-commit (if not already installed)
+pip install pre-commit
+
+# Install the hooks
+make install-hooks
+
+# Or run checks without installing hooks
+pre-commit run --all-files
+```
+
+See the "Pre-commit Hooks" section in [docs/SBX_QUICKSTART.md](docs/SBX_QUICKSTART.md) for details.
 
 ### Docker Desktop (`docker sandbox`)
 
@@ -295,7 +313,7 @@ See [docs/SBX_QUICKSTART.md](docs/SBX_QUICKSTART.md) for full credential injecti
 **Authentication failed / Unauthorized errors**
 - Check your API key: `echo "Length: ${#USAI_API_KEY}"`
 - For `sbx`: Ensure you're using `-e USAI_API_KEY="$USAI_API_KEY"` flag
-- For `docker sandbox`: 
+- For `docker sandbox`:
   1. Add the key to `~/.bashrc` or `~/.zshrc` (not just `export` in terminal)
   2. Run `source ~/.zshrc`
   3. **Restart Docker Desktop completely** (Quit → Reopen)
