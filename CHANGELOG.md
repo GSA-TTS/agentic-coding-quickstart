@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.5.0...v0.6.0) (2026-05-26)
+
+
+### Features
+
+* **ci:** add minimal pre-commit config (opt-in) for secret detection ([#35](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/35)) ([b40149a](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/b40149af97edfe6e9007d2defe18815ea74f33e5)), closes [#34](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/34)
+* **config:** expand opencode.jsonc with models, permissions, and compaction ([#29](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/29)) ([b6270ca](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/b6270ca1ef2eb905f54cf5b3873c0723d5392af5))
+
 ## [0.5.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.4.0...v0.5.0) (2026-04-22)
 
 
