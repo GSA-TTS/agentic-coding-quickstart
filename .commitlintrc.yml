@@ -5,6 +5,10 @@
 extends:
   - '@commitlint/config-conventional'
 
+# Ignore Dependabot commits (they follow conventional commits but may have extra metadata)
+ignores:
+  - (message) => /^chore\(deps\)|^chore\(ci\)/.test(message)
+
 # Custom rules
 rules:
   # Type must be one of these
