@@ -45,9 +45,9 @@ sbx run opencode .
 
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
 
-**Need more details?** See the [Full sbx CLI Guide](docs/SBX_QUICKSTART.md).
+**Need more details?** See the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
 
-**Prefer Docker Desktop UI?** Use `docker sandbox` commands instead of `sbx`. See the [full guide](docs/SBX_QUICKSTART.md#option-a-docker-desktop-built-in-no-extra-install) for details.
+**Prefer Docker Desktop UI?** See the [Docker Desktop Guide](docs/QUICKSTART_DOCKER_DESKTOP.md).
 
 ---
 
@@ -87,11 +87,26 @@ winget install -h Docker.sbx && sbx login
 | File/Directory | Purpose |
 |----------------|---------|
 | `opencode.jsonc` | Pre-configured for USAi endpoints |
+| `.zed/tasks.json` | Pre-configured tasks for **Zed Editor** |
+| `.pre-commit-config.yaml` | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md` | Behavioral rules the agent follows |
-| `docs/SBX_QUICKSTART.md` | Detailed setup walkthrough |
+| `docs/QUICKSTART_SBX.md` | Full sbx CLI setup guide |
+| `docs/QUICKSTART_DOCKER_DESKTOP.md` | Docker Desktop setup guide |
+| `docs/ZED_SETUP.md` | **Zed Editor** integration guide |
 | `docs/KNOWN_FAILURE_MODES.md` | Troubleshooting guide |
-| `docs/CODING_PRACTICES.md` | Secure coding standards |
 | `templates/` | Files to copy into your own projects |
+
+---
+
+## Zed Editor Integration (Optional)
+
+If you use the **Zed Editor**, pre-configured tasks are available in `.zed/tasks.json`:
+
+- **OpenCode: Run Agent** — Launch the agent in your sandbox
+- **OpenCode: Create Sandbox** — Create a new sandbox
+- **OpenCode: Environment Diagnostics** — Run `make doctor`
+
+See the **[Zed Editor Setup Guide](docs/ZED_SETUP.md)** for detailed instructions.
 
 ---
 
@@ -145,6 +160,10 @@ Want to use sbx + USAi in your own repository?
 ```bash
 # Copy essential files from templates/
 cp templates/opencode.jsonc /path/to/your/project/
+
+# Copy Zed tasks (optional, if using Zed Editor)
+mkdir -p /path/to/your/project/.zed
+cp templates/zed-tasks.json /path/to/your/project/.zed/tasks.json
 ```
 
 See [templates/BOOTSTRAP.md](templates/BOOTSTRAP.md) for detailed instructions.

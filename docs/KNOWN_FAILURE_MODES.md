@@ -458,6 +458,43 @@ See also: [Section 14 - SBX Proxy Doesn't Work with Custom baseURL](#14-sbx-prox
 
 ---
 
+## 16. SSL/TLS Certificate Error: "unable to get local issuer certificate"
+
+### Symptoms
+
+- OpenCode crashes or fails to connect to USAi
+- Error: `unable to get local issuer certificate`
+- Occurs on GFE (Government Furnished Equipment) networks
+
+### Root Cause
+
+On federal/GFE networks, secure internet traffic is often intercepted and decrypted using a custom Root Certificate Authority (CA) for security inspection.
+
+Because the sandboxed container runs a vanilla Linux environment, it does not automatically trust your host's GFE custom root certificate. When Node.js tries to establish a TLS connection to `https://api.gsa.usai.gov/api/v1`, it rejects the connection because it cannot verify the custom certificate chain.
+
+### Fix
+
+To resolve this during local development, you can tell Node.js to ignore TLS validation errors inside the sandbox using `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+
+#### Option A: Run-Time Flag (Standalone CLI)
+Run your agent with the environment variable set:
+```bash
+NODE_TLS_REJECT_UNAUTHORIZED=0 make run-agent
+```
+*(The `Makefile` is configured to automatically pass this variable into the container if it's set on your host).*
+
+#### Option B: Global Shell Profile (Works for both Standalone CLI and Docker Desktop)
+Add the variable to your shell configuration (`~/.zshrc` or `~/.bashrc`):
+```bash
+echo 'export NODE_TLS_REJECT_UNAUTHORIZED="0"' >> ~/.zshrc
+source ~/.zshrc
+```
+*(Docker Desktop users: Remember to completely **restart Docker Desktop** after saving this so that sandboxes inherit the variable).*
+
+> **⚠️ Security Warning:** Bypassing TLS validation should only be used in isolated local development sandbox environments. Never disable certificate validation in production application code.
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:
