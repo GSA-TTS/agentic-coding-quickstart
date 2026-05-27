@@ -133,35 +133,39 @@ Breaking changes trigger a **Major version bump** (X.0.0) and MUST be indicated 
 
 ### Examples
 
-#### Feature Addition
+#### Feature Addition (SBX setup)
 ```
-feat(agents): add continuous monitoring requirements
+feat(sbx): add network policy configuration step
 
-Adds section 17 to CODING_PRACTICES.md covering post-deployment
-monitoring requirements per M-25-21 federal guidance.
+Adds explicit network policy configuration to SBX setup guide.
+Includes examples for allowing USAi API endpoints and blocking
+external network access.
 
-Refs: NIST SP 800-218A, M-25-21
-```
-
-#### Bug Fix
-```
-fix(sbx): correct secret injection path in container config
-
-The previous configuration used /app/secrets instead of /run/secrets,
-causing secrets to fail injection on container startup.
-
-Fixes: #42
+Refs: #39
 ```
 
-#### Documentation Update
+#### Bug Fix (Command syntax)
 ```
-docs(readme): clarify SBX installation requirements
+fix(docs): correct sbx version command syntax
 
-Updates README to explicitly list Docker version requirements
-and link to the full SBX quickstart guide.
+Changed 'sbx --version' to 'sbx version' per CLI documentation.
+Also updated network policy flag from --policy to --global.
+
+Fixes: #36
 ```
 
-#### Breaking Change
+#### Documentation Update (Quickstart guide)
+```
+docs(readme): clarify Docker and SBX requirements
+
+Updates README to explicitly list:
+- Docker Desktop 4.0+ requirement
+- SBX installation steps
+- Link to full quickstart guide
+
+```
+
+#### Breaking Change (API migration)
 ```
 feat(api)!: migrate authentication to OAuth 2.0
 
@@ -171,6 +175,46 @@ instead of API keys. Clients must update their authentication flow.
 Migration guide: docs/migration/oauth-migration.md
 Refs: #123
 ```
+
+### Local Validation
+
+Check your commit message locally before pushing:
+
+```bash
+# Install commitlint (optional but recommended)
+npm install --save-dev @commitlint/cli @commitlint/config-conventional
+
+# Check the last commit
+npx commitlint --from=HEAD~1
+
+# Or check a specific message
+echo "feat: add new feature" | npx commitlint
+```
+
+### Pre-commit Hook (Optional)
+
+Automate validation with a pre-commit hook to catch issues before they reach CI:
+
+```yaml
+# .pre-commit-config.yaml (create in your repo root)
+repos:
+  - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook
+    rev: v9.5.0
+    hooks:
+      - id: commitlint
+        stages: [commit-msg]
+```
+
+Then install the hook:
+```bash
+# Install pre-commit if not already installed
+pip install pre-commit
+
+# Install the commit-msg hook
+pre-commit install --hook-type commit-msg
+```
+
+This will validate your commit message format automatically before each commit.
 
 ---
 
