@@ -38,8 +38,10 @@ export default {
     // Subject must not end with period
     'subject-full-stop': [2, 'never', '.'],
 
-    // Subject must be lowercase
-    'subject-case': [2, 'always', 'lower-case'],
+    // Subject case: disabled to allow acronyms (CLI, API, SQL) in subjects
+    // The Conventional Commits spec only mandates lowercase for types, not subjects
+    // Strict enforcement causes false positives like "sbx CLI" being flagged
+    'subject-case': [0],
 
     // Type must be lowercase
     'type-case': [2, 'always', 'lower-case'],
