@@ -154,8 +154,9 @@ docker sandbox run usai-test
 ### Using Standalone CLI (`sbx`) — Recommended
 
 ```bash
-# 1. Set your API key (export works for sbx CLI)
-export USAI_API_KEY="your-api-key-here"
+# 1. Store your API key securely in system keychain (NEW!)
+sbx secret set -g USAI_API_KEY
+# Enter your key when prompted - stored in system keychain, auto-injected
 
 # 2. Configure network policy (first run will prompt - choose "Balanced")
 #    Then add USAi to the allowlist:
@@ -164,13 +165,13 @@ sbx policy allow network "api.gsa.usai.gov"
 # 3. Create a sandbox for OpenCode in current directory
 sbx create --name usai-test opencode .
 
-# 4. Run OpenCode with API key injection
-sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) usai-test opencode
+# 4. Run OpenCode (secrets auto-injected from keychain)
+sbx run usai-test
 ```
 
 That's it. You're now running an AI agent in an isolated container with USAi access.
 
-> **Important:** USAi requires manual API key injection because it uses a custom endpoint. SBX's built-in secret proxy only works with standard provider endpoints (OpenAI, Anthropic, etc.).
+> **New in sbx CLI:** Custom environment variables like `USAI_API_KEY` can now be stored with `sbx secret set -g VARNAME`. The secret is stored in your system keychain and auto-injected into sandboxes — no more manual `-e` flags!
 
 ### Command Comparison Reference
 
@@ -206,12 +207,16 @@ After adding variables, **source your config and restart Docker Desktop**.
 
 The `sbx` CLI supports two methods:
 
-| Method | Security | Use Case | Supported Services |
-|--------|----------|----------|-------------------|
-| **SBX Proxy** (recommended) | High - agent never sees token | Standard API endpoints | `anthropic`, `aws`, `cursor`, `github`, `google`, `groq`, `mistral`, `nebius`, `openai`, `xai` |
-| **Direct Injection** (`-e`) | Medium - token in container env | Custom endpoints (USAi, GitLab) | Any service |
+| Method | Security | Use Case | Supported |
+|--------|----------|----------|-----------|
+| **SBX Secret Store** (recommended) | High - stored in keychain, auto-injected | Any credential | Built-in services + **custom vars** |
+| **Direct Injection** (`-e`) | Medium - token visible in process list | One-off testing | Any variable |
 
-**Rule of thumb:** Use SBX proxy when available; use direct injection for custom endpoints like USAi.
+**Built-in services:** `anthropic`, `aws`, `cursor`, `github`, `google`, `groq`, `mistral`, `nebius`, `openai`, `xai`
+
+**Custom variables (NEW!):** Any `VARNAME` like `USAI_API_KEY`, `GITLAB_TOKEN`, `MY_SECRET`, etc.
+
+**Rule of thumb:** Use `sbx secret set -g` for any credential you use regularly; use `-e` only for one-off testing.
 
 ---
 
@@ -398,7 +403,19 @@ docker sandbox run my-sandbox
 
 **Standalone sbx CLI:**
 
-USAi uses a custom endpoint, so you must inject the API key manually:
+**Recommended: Use `sbx secret` for persistent storage**
+
+```bash
+# One-time setup: store your secrets in system keychain
+sbx secret set -g USAI_API_KEY    # Enter when prompted
+sbx secret set -g GITLAB_TOKEN    # If using GitLab
+gh auth token | sbx secret set -g github  # Pipe from gh cli
+
+# Then just run (secrets auto-injected!)
+sbx run my-sandbox
+```
+
+**Legacy method: manual injection (still works)**
 
 ```bash
 # Basic: USAi only
@@ -412,20 +429,27 @@ sbx exec -it \
   -w $(pwd) my-sandbox opencode
 ```
 
-The `-e` flag injects environment variables, and `-w` sets the working directory so OpenCode finds the `opencode.jsonc` config.
-
 > **💡 Zed Editor Users:** If you are using the Zed editor, you can automate this entire walkthrough—including sandbox creation and agent launching—using the built-in tasks defined in `.zed/tasks.json`. Check out the **[Zed Editor Setup Guide](ZED_SETUP.md)** to get started.
 
-### Why Not Use SBX Secret Management for USAi?
+### Custom Variables in sbx secret (NEW!)
 
-SBX's `sbx secret set` command works great for standard providers (OpenAI, Anthropic, GitHub, etc.) because SBX proxies requests to known endpoints and injects authentication automatically.
+The `sbx secret set -g VARNAME` command now supports **any variable name**, not just built-in services. This means you can store USAi API keys, GitLab tokens, or any custom secret in your system keychain:
 
-However, USAi uses a **custom baseURL** (`https://api.gsa.usai.gov/api/v1`), which the SBX proxy doesn't recognize. So we inject the API key directly via `-e USAI_API_KEY="$USAI_API_KEY"`.
+```bash
+# Store custom variables
+sbx secret set -g USAI_API_KEY
+sbx secret set -g GITLAB_TOKEN
+sbx secret set -g MY_CUSTOM_SECRET
 
-This is still secure because:
-- The key only exists in the container's environment during execution
-- It's never written to disk or config files
-- The container is isolated from the host
+# List all stored secrets (values masked)
+sbx secret ls
+# SCOPE      SERVICE          SECRET
+# (global)   USAI_API_KEY     api-ke******...******arNI
+# (global)   github           gho_Xb******...******oEtY
+# (global)   GITLAB_TOKEN     glpat-******...******xYz1
+```
+
+This is the **recommended approach** for any credential you use regularly — it's more secure than environment variables and persists across terminal sessions.
 
 ---
 
@@ -479,31 +503,42 @@ sbx rm SANDBOX_NAME
 
 ```bash
 # Set a secret globally (prompts for value)
-# SERVICE = anthropic|aws|cursor|github|google|groq|mistral|nebius|openai|xai
-sbx secret set -g SERVICE
+# Built-in services: anthropic|aws|cursor|github|google|groq|mistral|nebius|openai|xai
+# Custom variables: any VARNAME (NEW!)
+sbx secret set -g SERVICE_OR_VARNAME
 
-# Set a secret for a specific sandbox
-sbx secret set SANDBOX_NAME SERVICE
+# Examples:
+sbx secret set -g USAI_API_KEY        # Custom variable for USAi
+sbx secret set -g github              # Built-in service
+sbx secret set -g GITLAB_TOKEN        # Custom variable for GitLab
+
+# Set a secret for a specific sandbox only
+sbx secret set SANDBOX_NAME SERVICE_OR_VARNAME
 
 # Pipe from CLI tools (recommended - avoids shell history)
 gh auth token | sbx secret set -g github
-echo "$API_KEY" | sbx secret set -g openai
+echo "$USAI_KEY" | sbx secret set -g USAI_API_KEY
 
-# List configured secrets
+# List configured secrets (values are masked)
 sbx secret ls
+# Example output:
+# SCOPE      SERVICE        SECRET
+# (global)   USAI_API_KEY   api-ke******...******arNI
+# (global)   github         gho_Xb******...******oEtY
+# (global)   openai         api-ke******...******lieO
 
 # Remove a secret
-sbx secret rm SERVICE
+sbx secret rm SERVICE_OR_VARNAME
 ```
 
-> **How it works:** SBX proxies API requests from the agent and injects authentication headers automatically. The agent never sees the raw secret.
+> **How it works:** Secrets are stored in your system keychain (macOS Keychain, Windows Credential Manager, or Linux secret service). When you run a sandbox, sbx auto-injects stored secrets as environment variables. The secret never appears in your shell history or process list.
 
 ### Environment Variable Injection (sbx CLI)
 
-For services not supported by SBX proxy (USAi, GitLab, custom APIs):
+For one-off testing or when you haven't stored secrets yet:
 
 ```bash
-# Single variable
+# Single variable (legacy method - prefer sbx secret set)
 sbx exec -e VAR="value" SANDBOX_NAME COMMAND
 
 # Multiple variables
@@ -513,6 +548,8 @@ sbx exec \
   -e GITLAB_HOST="HOST" \
   SANDBOX_NAME COMMAND
 ```
+
+> **Tip:** If you've stored secrets with `sbx secret set -g`, you don't need `-e` flags — they're auto-injected!
 
 ### Executing Commands
 
@@ -532,25 +569,20 @@ docker sandbox run SANDBOX_NAME -- --continue
 #### Standalone sbx CLI
 
 ```bash
-# Run OpenCode with USAi (the working pattern)
-sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
+# Simplest: just run (secrets auto-injected from keychain)
+sbx run SANDBOX_NAME
 
-# Run OpenCode with USAi + GitHub + GitLab
-sbx exec -it \
-  -e USAI_API_KEY="$USAI_API_KEY" \
-  -e GH_TOKEN="$(gh auth token)" \
-  -e GITLAB_TOKEN="$(glab config get --host workshop.cloud.gov token)" \
-  -e GITLAB_HOST="workshop.cloud.gov" \
-  -w $(pwd) SANDBOX_NAME opencode
+# Run OpenCode with working directory set
+sbx run -w $(pwd) SANDBOX_NAME
+
+# Legacy method: manual env injection (still works, but prefer sbx secret)
+sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
 
 # Run a command in the sandbox
 sbx exec SANDBOX_NAME COMMAND
 
 # Interactive shell
 sbx exec -it SANDBOX_NAME sh
-
-# Run with environment variable injection
-sbx exec -e VAR="value" SANDBOX_NAME COMMAND
 ```
 
 ### Debugging
@@ -765,43 +797,36 @@ sbx create opencode .
 2. **Never commit secrets**: The `opencode.jsonc` uses `${USAI_API_KEY}` variable substitution
 3. **Always use SBX**: Don't run agents directly on host with credentials
 4. **Review agent output**: Before sharing logs, ensure no secrets leaked
-5. **Prefer SBX proxy when available**: More secure than direct injection
+5. **Use `sbx secret set` for persistent storage**: More secure than environment variables
 6. **Pipe tokens from CLI tools**: Avoids shell history exposure (e.g., `gh auth token | sbx secret set -g github`)
 
 ---
 
 ## Quick Reference Card
 
-### One-Time Setup
+### One-Time Setup (Recommended)
 
 ```bash
-# GitHub (recommended: use proxy)
-gh auth token | sbx secret set -g github
+# Store all your secrets in system keychain
+sbx secret set -g USAI_API_KEY              # USAi API key
+gh auth token | sbx secret set -g github    # GitHub token
+sbx secret set -g GITLAB_TOKEN              # GitLab token (if needed)
 
-# Verify secrets
+# Verify secrets are stored
 sbx secret ls
 ```
 
-### Per-Session Commands
+### Running Sandboxes
 
 ```bash
-# USAi only
+# Simplest (secrets auto-injected from keychain)
+sbx run SANDBOX
+
+# With working directory
+sbx run -w $(pwd) SANDBOX
+
+# Legacy method (manual injection)
 sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX opencode
-
-# USAi + GitLab (self-hosted)
-sbx exec -it \
-  -e USAI_API_KEY="$USAI_API_KEY" \
-  -e GITLAB_TOKEN="$(glab config get --host GITLAB_HOST token)" \
-  -e GITLAB_HOST="GITLAB_HOST" \
-  -w $(pwd) SANDBOX opencode
-
-# Full stack (USAi + GitHub direct + GitLab)
-sbx exec -it \
-  -e USAI_API_KEY="$USAI_API_KEY" \
-  -e GH_TOKEN="$(gh auth token)" \
-  -e GITLAB_TOKEN="$(glab config get --host GITLAB_HOST token)" \
-  -e GITLAB_HOST="GITLAB_HOST" \
-  -w $(pwd) SANDBOX opencode
 ```
 
 ---

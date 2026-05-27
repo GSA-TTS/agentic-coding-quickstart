@@ -78,18 +78,30 @@ sbx policy ls
 
 ## Step 3: Store Your Secrets
 
-Docker Sandboxes uses a secure proxy to inject credentials. Your API keys are stored in the **system keychain** and **never exposed directly to the agent**.
+Docker Sandboxes uses a secure secret store to inject credentials. Your API keys are stored in the **system keychain** and **auto-injected into sandboxes**.
 
-### Store USAi API Key (Anthropic)
+### Store USAi API Key (Custom Variable - NEW!)
 
 ```bash
+sbx secret set -g USAI_API_KEY
+# Enter your key when prompted
+```
+
+### Store Using Built-in Service Names
+
+```bash
+# For standard Anthropic endpoint (if not using USAi)
 sbx secret set -g anthropic
-# When prompted, enter your USAi API key
+# When prompted, enter your API key
 ```
 
 ### Store GitHub Token (for code access)
 
 ```bash
+# Recommended: pipe from gh cli (never touches shell history)
+gh auth token | sbx secret set -g github
+
+# Or enter manually
 sbx secret set -g github
 # When prompted, paste output of: gh auth token
 ```
@@ -102,9 +114,9 @@ sbx secret ls
 
 Expected output:
 ```
-SERVICE     SCOPE    SANDBOX
-anthropic   global   -
-github      global   -
+SCOPE      SERVICE        SECRET
+(global)   USAI_API_KEY   api-ke******...******arNI
+(global)   github         gho_Xb******...******oEtY
 ```
 
 ### Why Use `sbx secret` Instead of Shell Export?
@@ -116,21 +128,38 @@ github      global   -
 | Never in shell history | ✅ | ❌ (unless you're careful) |
 | Works in CI/CD | ✅ | ✅ |
 | Audit trail | ✅ | ❌ |
-| Agent never sees raw key | ✅ | ❌ |
+| Auto-injected into sandboxes | ✅ | ❌ |
 
 **Bottom line:** `sbx secret` is more secure and convenient.
 
-### Supported Services
+### Supported Services & Custom Variables
+
+**Built-in services** (with special handling):
 
 | Service | Variables Injected | Use Case |
 |---------|-------------------|----------|
-| `anthropic` | `ANTHROPIC_API_KEY` | USAi / Claude |
+| `anthropic` | `ANTHROPIC_API_KEY` | Claude / Anthropic |
 | `github` | `GH_TOKEN`, `GITHUB_TOKEN` | Code access, PRs |
 | `openai` | `OPENAI_API_KEY` | OpenAI models |
 | `google` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` | Gemini models |
 | `aws` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | AWS Bedrock |
 | `groq` | `GROQ_API_KEY` | Groq inference |
 | `mistral` | `MISTRAL_API_KEY` | Mistral models |
+
+**Custom variables (NEW!)** — any variable name works:
+
+| Variable | Use Case |
+|----------|----------|
+| `USAI_API_KEY` | USAi API endpoint |
+| `GITLAB_TOKEN` | GitLab access |
+| `MY_CUSTOM_SECRET` | Any custom credential |
+
+```bash
+# Store any custom variable
+sbx secret set -g USAI_API_KEY
+sbx secret set -g GITLAB_TOKEN
+sbx secret set -g MY_CUSTOM_SECRET
+```
 
 ### Managing Secrets
 
@@ -143,6 +172,7 @@ sbx secret ls -g
 
 # Remove a secret
 sbx secret rm -g anthropic
+sbx secret rm -g USAI_API_KEY
 
 # Update a secret (just set it again)
 sbx secret set -g anthropic
