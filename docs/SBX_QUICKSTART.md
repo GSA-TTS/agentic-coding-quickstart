@@ -414,6 +414,8 @@ sbx exec -it \
 
 The `-e` flag injects environment variables, and `-w` sets the working directory so OpenCode finds the `opencode.jsonc` config.
 
+> **💡 Zed Editor Users:** If you are using the Zed editor, you can automate this entire walkthrough—including sandbox creation and agent launching—using the built-in tasks defined in `.zed/tasks.json`. Check out the **[Zed Editor Setup Guide](ZED_SETUP.md)** to get started.
+
 ### Why Not Use SBX Secret Management for USAi?
 
 SBX's `sbx secret set` command works great for standard providers (OpenAI, Anthropic, GitHub, etc.) because SBX proxies requests to known endpoints and injects authentication automatically.

@@ -15,6 +15,7 @@ See [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/) for 
 | File | Purpose | Required? |
 |------|---------|-----------|
 | `opencode.jsonc` | OpenCode configuration with USAi provider | Yes |
+| `.zed/tasks.json` | Pre-configured Tasks for the Zed editor | Recommended (if using Zed) |
 | `docs/SBX_PATTERNS.md` | Credential injection quick reference | Recommended |
 | `AGENTS_SBX_ADDENDUM.md` | Sandbox rules to append to your AGENTS.md | If you have AGENTS.md |
 
@@ -29,6 +30,10 @@ git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git /tmp/quicksta
 
 # Copy the OpenCode config
 cp /tmp/quickstart/templates/opencode.jsonc "$TARGET_REPO/"
+
+# Copy Zed editor tasks configuration (optional, recommended if using Zed)
+mkdir -p "$TARGET_REPO/.zed"
+cp /tmp/quickstart/templates/zed-tasks.json "$TARGET_REPO/.zed/tasks.json"
 
 # Copy the SBX patterns reference
 mkdir -p "$TARGET_REPO/docs"

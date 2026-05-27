@@ -9,11 +9,15 @@ help:
 	@echo "========================="
 	@echo ""
 	@echo "Commands:"
-	@echo "  make setup         - Set up your workspace (clone playbook, check dependencies)"
-	@echo "  make doctor        - Run health checks on your environment"
-	@echo "  make new-project   - Create a new project directory"
-	@echo "  make install-hooks - [OPTIONAL] Install pre-commit hooks"
-	@echo "  make clean         - Remove generated files"
+	@echo "  make setup                 - Set up your workspace (clone playbook, check dependencies)"
+	@echo "  make doctor                - Run health checks on your environment"
+	@echo "  make new-project           - Create a new project directory"
+	@echo "  make create-sandbox        - Create SBX sandbox 'quickstart' (standalone sbx CLI)"
+	@echo "  make create-sandbox-desktop- Create SBX sandbox 'quickstart' (Docker Desktop)"
+	@echo "  make run-agent             - Run OpenCode agent in SBX (standalone sbx CLI)"
+	@echo "  make run-agent-desktop     - Run OpenCode agent in SBX (Docker Desktop)"
+	@echo "  make install-hooks         - [OPTIONAL] Install pre-commit hooks"
+	@echo "  make clean                 - Remove generated files"
 	@echo ""
 	@echo "First time? Run: make setup"
 
@@ -97,6 +101,45 @@ new-project:
 # Clean up
 clean:
 	@echo "Nothing to clean (this repo doesn't generate files)"
+
+# Create SBX sandbox 'quickstart' using standalone CLI (sbx)
+create-sandbox:
+	@echo "Creating SBX sandbox 'quickstart' using standalone CLI..."
+	@if sbx ls | grep -q "quickstart"; then \
+		echo "Sandbox 'quickstart' already exists. Skipping creation."; \
+	else \
+		sbx create --name quickstart opencode .; \
+	fi
+
+# Create SBX sandbox 'quickstart' using Docker Desktop
+create-sandbox-desktop:
+	@echo "Creating SBX sandbox 'quickstart' using Docker Desktop..."
+	@if docker sandbox ls 2>/dev/null | grep -q "quickstart"; then \
+		echo "Sandbox 'quickstart' already exists. Skipping creation."; \
+	else \
+		docker sandbox create --name quickstart opencode .; \
+	fi
+
+# Run OpenCode agent in sandbox 'quickstart' using standalone CLI (sbx)
+run-agent: _check-usai-key
+	@echo "Running OpenCode agent in SBX sandbox 'quickstart' (standalone CLI)..."
+	@sbx exec -it \
+		-e USAI_API_KEY="$(USAI_API_KEY)" \
+		$(if $(NODE_TLS_REJECT_UNAUTHORIZED),-e NODE_TLS_REJECT_UNAUTHORIZED="$(NODE_TLS_REJECT_UNAUTHORIZED)",) \
+		-w "$(shell pwd)" quickstart opencode
+
+# Run OpenCode agent in sandbox 'quickstart' using Docker Desktop
+run-agent-desktop:
+	@echo "Running OpenCode agent in SBX sandbox 'quickstart' (Docker Desktop)..."
+	@docker sandbox run quickstart
+
+_check-usai-key:
+	@if [ -z "$(USAI_API_KEY)" ]; then \
+		echo "ERROR: USAI_API_KEY environment variable is not set on host."; \
+		echo "Please set it before running the agent. Example:"; \
+		echo "  export USAI_API_KEY=\"your-key-here\""; \
+		exit 1; \
+	fi
 
 # Install pre-commit hooks (optional)
 install-hooks:  ## [OPTIONAL] Install pre-commit hooks
