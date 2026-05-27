@@ -1,8 +1,47 @@
 # Docker Desktop Quickstart Guide
 
-> **Alternative approach** — For users who prefer graphical interfaces.
+> [!CAUTION]
+> **DEPRECATED:** The Docker Desktop-integrated `docker sandbox` commands are deprecated by Docker.
+> Please use the standalone **[sbx CLI Guide](QUICKSTART_SBX.md)** instead.
 >
-> **Recommended:** If you're comfortable with command line, use the [sbx CLI Guide](QUICKSTART_SBX.md) instead for better security and automation.
+> See [Docker's deprecation notice](https://docs.docker.com/reference/cli/docker/sandbox/).
+
+---
+
+## Migration to sbx CLI
+
+If you're currently using `docker sandbox` commands, migrate to `sbx`:
+
+| Deprecated Command | New Command |
+|-------------------|-------------|
+| `docker sandbox create` | `sbx create` |
+| `docker sandbox run opencode .` | `sbx run opencode .` |
+| `docker sandbox exec` | `sbx exec` |
+| `docker sandbox ls` | `sbx ls` |
+| `docker sandbox rm` | `sbx rm` |
+| `docker sandbox stop` | `sbx stop` |
+
+**Install sbx CLI:**
+
+```bash
+# macOS
+brew install docker/tap/sbx
+
+# Windows
+winget install Docker.sbx
+```
+
+**Your existing sandboxes and secrets will continue to work with the `sbx` CLI.**
+
+**[Continue to sbx CLI Guide](QUICKSTART_SBX.md)**
+
+---
+
+## Legacy Documentation (Deprecated)
+
+> [!WARNING]
+> The following documentation is preserved for reference only.
+> The `docker sandbox` commands will stop working in a future Docker Desktop release.
 
 This guide covers using Docker Desktop's graphical interface to run AI coding agents with USAi.
 
