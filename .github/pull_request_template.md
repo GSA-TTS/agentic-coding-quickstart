@@ -16,6 +16,7 @@
 ## Checklist
 
 - [ ] I have read [CONTRIBUTING.md](../CONTRIBUTING.md)
+- [ ] My commits follow the [Conventional Commits format](../CONTRIBUTING.md#commit-message-guidelines) (e.g., `feat:`, `fix:`, `docs:`)
 - [ ] I have tested my changes locally
 - [ ] I have updated documentation as needed
 - [ ] I have not included any secrets, API keys, or sensitive information
