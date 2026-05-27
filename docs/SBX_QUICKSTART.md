@@ -451,6 +451,8 @@ sbx secret ls
 
 This is the **recommended approach** for any credential you use regularly — it's more secure than environment variables and persists across terminal sessions.
 
+> **Reference:** This feature was added in response to community feedback. See [docker/sbx-releases#7](https://github.com/docker/sbx-releases/issues/7) for the original feature request and implementation details. Note: This feature may still be marked as experimental in `sbx secret --help`.
+
 ---
 
 ## Common Commands Reference

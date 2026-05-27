@@ -154,6 +154,8 @@ SCOPE      SERVICE        SECRET
 | `GITLAB_TOKEN` | GitLab access |
 | `MY_CUSTOM_SECRET` | Any custom credential |
 
+> **Note:** Custom variable support was added based on community feedback. See [docker/sbx-releases#7](https://github.com/docker/sbx-releases/issues/7) for details. This feature may still be marked as experimental.
+
 ```bash
 # Store any custom variable
 sbx secret set -g USAI_API_KEY
