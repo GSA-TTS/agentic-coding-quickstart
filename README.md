@@ -43,7 +43,7 @@ There are **two ways** to use Docker Sandboxes:
 
 ## Prerequisites
 
-- **Docker Desktop 4.58+** (check: `docker --version`) — OR — **sbx CLI** installed (`sbx --version`)
+- **Docker Desktop 4.58+** (check: `docker --version`) — OR — **sbx CLI** installed (`sbx version`)
 - **USAi API key** from the agentic coding program
 - **Docker** running locally
 
@@ -97,7 +97,7 @@ Choose **"Balanced"** or **"Locked Down"**, then add the USAi endpoint:
 
 ```bash
 # Allow USAi API endpoint (required for both methods)
-sbx policy allow network "api.gsa.usai.gov"
+sbx policy allow network --global "api.gsa.usai.gov"
 ```
 
 > **Why not "Open"?** On GFE machines, "Open" allows the agent to access internal GSA network resources. Always use "Balanced" with explicit allowlist entries.
