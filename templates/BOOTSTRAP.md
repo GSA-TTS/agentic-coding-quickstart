@@ -4,9 +4,18 @@ Copy the template files from this quickstart into your target repository to enab
 
 ## Prerequisites
 
-**Choose one:**
-- **Docker Desktop 4.58+** — sandboxes built-in, no extra install
-- **Standalone sbx CLI** — install via `brew install docker/tap/sbx`
+> [!IMPORTANT]
+> The Docker Desktop-integrated `docker sandbox` commands are **deprecated**.
+> Use the standalone `sbx` CLI instead.
+
+**Install sbx CLI:**
+```bash
+# macOS
+brew install docker/tap/sbx
+
+# Windows
+winget install Docker.sbx
+```
 
 See [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/) for details.
 
@@ -56,7 +65,39 @@ rm -rf /tmp/quickstart
 
 ## After Bootstrap
 
-### Option A: Using Docker Desktop (`docker sandbox`)
+### Using sbx CLI (Recommended)
+
+1. **Store your USAi API key securely**:
+   ```bash
+   sbx secret set -g USAI_API_KEY
+   # Enter your key when prompted
+   ```
+
+2. **Set up GitHub credentials** (if needed):
+   ```bash
+   sbx secret set -g github
+   # Enter output of: gh auth token
+   ```
+
+3. **Create a sandbox** for your project:
+   ```bash
+   cd "$TARGET_REPO"
+   sbx create --name my-project opencode .
+   ```
+
+4. **Run the agent** (secrets auto-injected from keychain):
+   ```bash
+   sbx run my-project
+   ```
+
+### Using Docker Desktop (`docker sandbox`) — DEPRECATED
+
+> [!WARNING]
+> The `docker sandbox` command is deprecated by Docker.
+> Migrate to the `sbx` CLI above.
+
+<details>
+<summary>Legacy instructions (click to expand)</summary>
 
 1. **Set your USAi API key** in your shell config (`~/.bashrc` or `~/.zshrc`):
    ```bash
@@ -77,28 +118,7 @@ rm -rf /tmp/quickstart
    docker sandbox run my-project
    ```
 
-### Option B: Using Standalone CLI (`sbx`)
-
-1. **Set your USAi API key** on the host:
-   ```bash
-   export USAI_API_KEY="your-key-here"
-   ```
-
-2. **Set up GitHub credentials** (if needed):
-   ```bash
-   gh auth token | sbx secret set -g github
-   ```
-
-3. **Create a sandbox** for your project:
-   ```bash
-   cd "$TARGET_REPO"
-   sbx create --name my-project opencode .
-   ```
-
-4. **Run the agent**:
-   ```bash
-   sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) my-project opencode
-   ```
+</details>
 
 ## For Playbook Users
 

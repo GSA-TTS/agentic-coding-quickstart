@@ -12,12 +12,14 @@ help:
 	@echo "  make setup                 - Set up your workspace (clone playbook, check dependencies)"
 	@echo "  make doctor                - Run health checks on your environment"
 	@echo "  make new-project           - Create a new project directory"
-	@echo "  make create-sandbox        - Create SBX sandbox 'quickstart' (standalone sbx CLI)"
-	@echo "  make create-sandbox-desktop- Create SBX sandbox 'quickstart' (Docker Desktop)"
-	@echo "  make run-agent             - Run OpenCode agent in SBX (standalone sbx CLI)"
-	@echo "  make run-agent-desktop     - Run OpenCode agent in SBX (Docker Desktop)"
+	@echo "  make create-sandbox        - Create SBX sandbox 'quickstart' (sbx CLI)"
+	@echo "  make run-agent             - Run OpenCode agent in SBX (sbx CLI)"
 	@echo "  make install-hooks         - [OPTIONAL] Install pre-commit hooks"
 	@echo "  make clean                 - Remove generated files"
+	@echo ""
+	@echo "Deprecated targets (will be removed in future release):"
+	@echo "  make create-sandbox-desktop- DEPRECATED: use 'make create-sandbox'"
+	@echo "  make run-agent-desktop     - DEPRECATED: use 'make run-agent'"
 	@echo ""
 	@echo "First time? Run: make setup"
 
@@ -102,35 +104,45 @@ new-project:
 clean:
 	@echo "Nothing to clean (this repo doesn't generate files)"
 
-# Create SBX sandbox 'quickstart' using standalone CLI (sbx)
+# Create SBX sandbox 'quickstart' using sbx CLI
 create-sandbox:
-	@echo "Creating SBX sandbox 'quickstart' using standalone CLI..."
+	@echo "Creating SBX sandbox 'quickstart'..."
 	@if sbx ls | grep -q "quickstart"; then \
 		echo "Sandbox 'quickstart' already exists. Skipping creation."; \
 	else \
 		sbx create --name quickstart opencode .; \
 	fi
 
-# Create SBX sandbox 'quickstart' using Docker Desktop
+# DEPRECATED: Create SBX sandbox using Docker Desktop
+# Docker has deprecated 'docker sandbox' commands. Use 'make create-sandbox' instead.
 create-sandbox-desktop:
-	@echo "Creating SBX sandbox 'quickstart' using Docker Desktop..."
+	@echo ""
+	@echo "WARNING: 'docker sandbox' commands are DEPRECATED by Docker."
+	@echo "         Use 'make create-sandbox' (sbx CLI) instead."
+	@echo "         See: https://docs.docker.com/reference/cli/docker/sandbox/"
+	@echo ""
 	@if docker sandbox ls 2>/dev/null | grep -q "quickstart"; then \
 		echo "Sandbox 'quickstart' already exists. Skipping creation."; \
 	else \
 		docker sandbox create --name quickstart opencode .; \
 	fi
 
-# Run OpenCode agent in sandbox 'quickstart' using standalone CLI (sbx)
+# Run OpenCode agent in sandbox 'quickstart' using sbx CLI
 run-agent: _check-usai-key
-	@echo "Running OpenCode agent in SBX sandbox 'quickstart' (standalone CLI)..."
+	@echo "Running OpenCode agent in SBX sandbox 'quickstart'..."
 	@sbx exec -it \
 		-e USAI_API_KEY="$(USAI_API_KEY)" \
 		$(if $(NODE_TLS_REJECT_UNAUTHORIZED),-e NODE_TLS_REJECT_UNAUTHORIZED="$(NODE_TLS_REJECT_UNAUTHORIZED)",) \
 		-w "$(shell pwd)" quickstart opencode
 
-# Run OpenCode agent in sandbox 'quickstart' using Docker Desktop
+# DEPRECATED: Run agent using Docker Desktop
+# Docker has deprecated 'docker sandbox' commands. Use 'make run-agent' instead.
 run-agent-desktop:
-	@echo "Running OpenCode agent in SBX sandbox 'quickstart' (Docker Desktop)..."
+	@echo ""
+	@echo "WARNING: 'docker sandbox' commands are DEPRECATED by Docker."
+	@echo "         Use 'make run-agent' (sbx CLI) instead."
+	@echo "         See: https://docs.docker.com/reference/cli/docker/sandbox/"
+	@echo ""
 	@docker sandbox run quickstart
 
 _check-usai-key:

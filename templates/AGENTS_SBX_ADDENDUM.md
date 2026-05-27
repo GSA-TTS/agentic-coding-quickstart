@@ -7,12 +7,21 @@
 
 ## Docker Sandboxes Overview
 
-[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) runs AI coding agents in isolated microVM environments. There are two ways to use it:
+[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) runs AI coding agents in isolated microVM environments.
 
-| Method | Command Prefix | Best For |
-|--------|----------------|----------|
-| **Docker Desktop built-in** | `docker sandbox` | GFE Macs with managed Docker (4.58+) |
-| **Standalone sbx CLI** | `sbx` | Full features, secret proxy |
+> [!IMPORTANT]
+> The Docker Desktop-integrated `docker sandbox` commands are **deprecated**.
+> Use the standalone `sbx` CLI instead.
+> See [Docker's deprecation notice](https://docs.docker.com/reference/cli/docker/sandbox/).
+
+**Install sbx CLI:**
+```bash
+# macOS
+brew install docker/tap/sbx
+
+# Windows
+winget install Docker.sbx
+```
 
 ## SBX-Specific Rules (Non-Negotiable)
 
@@ -25,8 +34,7 @@ The agent MUST NEVER:
 - Include secrets in commit messages, comments, or documentation
 
 All secrets MUST be accessed via:
-- Docker Desktop: Environment variables set in shell config (read by Docker at startup)
-- sbx CLI: Secret management (`sbx secret set`) or runtime injection (`-e` flag)
+- sbx CLI: Secret management (`sbx secret set -g`) or runtime injection (`-e` flag)
 
 ### 2. Assume You Are Untrusted
 
@@ -63,11 +71,11 @@ Agents should:
 
 ### Credential Injection Methods
 
-| Service | Docker Desktop | sbx CLI |
-|---------|----------------|---------|
-| USAi | `USAI_API_KEY` in shell config | `-e USAI_API_KEY="$USAI_API_KEY"` |
-| GitHub | `GH_TOKEN` in shell config | `sbx secret set -g github` (recommended) |
-| GitLab | `GITLAB_TOKEN` in shell config | `-e GITLAB_TOKEN="..."` |
+| Service | sbx CLI (Secret Store) | sbx CLI (Direct) |
+|---------|------------------------|------------------|
+| USAi | `sbx secret set -g USAI_API_KEY` | `-e USAI_API_KEY="$USAI_API_KEY"` |
+| GitHub | `sbx secret set -g github` | `-e GH_TOKEN="$(gh auth token)"` |
+| GitLab | `sbx secret set -g GITLAB_TOKEN` | `-e GITLAB_TOKEN="..."` |
 
 See `docs/SBX_PATTERNS.md` for detailed credential injection patterns.
 
@@ -75,39 +83,33 @@ See `docs/SBX_PATTERNS.md` for detailed credential injection patterns.
 
 ## Execution Patterns
 
-### Docker Desktop
-
-```bash
-# Create sandbox
-docker sandbox create --name SANDBOX_NAME opencode .
-
-# Run (environment variables come from shell config)
-docker sandbox run SANDBOX_NAME
-```
-
-### Standalone sbx CLI
+### sbx CLI (Recommended)
 
 #### Basic: USAi Only
 
 ```bash
-sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
+# Store secret (one-time)
+sbx secret set -g USAI_API_KEY
+
+# Run (secrets auto-injected)
+sbx run SANDBOX_NAME
 ```
 
-#### With GitHub (via proxy - recommended)
+#### With GitHub (via secret store)
 
 ```bash
 # One-time setup
-gh auth token | sbx secret set -g github
+sbx secret set -g github
+# Enter: output of `gh auth token`
 
-# Run (GitHub auth handled by proxy)
-sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
+# Run (GitHub auth handled automatically)
+sbx run SANDBOX_NAME
 ```
 
 #### With GitLab (direct injection)
 
 ```bash
 sbx exec -it \
-  -e USAI_API_KEY="$USAI_API_KEY" \
   -e GITLAB_TOKEN="$(glab config get --host GITLAB_HOST token)" \
   -e GITLAB_HOST="GITLAB_HOST" \
   -w $(pwd) SANDBOX_NAME opencode

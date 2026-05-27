@@ -64,10 +64,10 @@ body:
     id: sbx_method
     attributes:
       label: SBX method
-      description: Which method are you using?
+      description: "Which method are you using? (Note: Docker Desktop docker sandbox is deprecated)"
       options:
-        - Docker Desktop (`docker sandbox`)
-        - Standalone CLI (`sbx`)
+        - "Standalone CLI (sbx) - Recommended"
+        - "Docker Desktop (docker sandbox) - Deprecated"
         - Not sure
     validations:
       required: true

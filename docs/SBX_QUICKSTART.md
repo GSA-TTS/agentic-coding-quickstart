@@ -1,8 +1,17 @@
 # Docker Sandboxes + USAi Quick Start
 
+> [!IMPORTANT]
+> **Docker Desktop `docker sandbox` commands are deprecated.**
+> Docker has deprecated the Docker Desktop-integrated `docker sandbox` commands in favor of the standalone `sbx` CLI.
+> See [Docker's deprecation notice](https://docs.docker.com/reference/cli/docker/sandbox/).
+>
+> **Use the [sbx CLI Guide](QUICKSTART_SBX.md) for the recommended setup.**
+
+---
+
 > **Looking for a faster start?**
-> - [sbx CLI Guide](QUICKSTART_SBX.md) — **Recommended** for federal users (better security, automation)
-> - [Docker Desktop Guide](QUICKSTART_DOCKER_DESKTOP.md) — Alternative for GUI preference
+> - [sbx CLI Guide](QUICKSTART_SBX.md) — **Recommended** for all users
+> - [Docker Desktop Guide](QUICKSTART_DOCKER_DESKTOP.md) — **Deprecated** (legacy reference only)
 >
 > This document is the **comprehensive reference** covering both approaches in detail.
 
@@ -14,19 +23,18 @@ This guide gets you from zero to running an AI agent inside Docker Sandboxes wit
 
 [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) runs AI coding agents in isolated microVM environments. Each sandbox gets its own Docker daemon, filesystem, and network—the agent can build containers, install packages, and modify files without touching your host system.
 
-There are **two ways** to use Docker Sandboxes:
+> [!CAUTION]
+> **Deprecation Notice:** The Docker Desktop-integrated `docker sandbox` command is deprecated.
+> Use the standalone `sbx` CLI instead. See the [migration guide](#migrating-from-docker-sandbox-to-sbx).
 
-| Method | Install | Command Prefix | Best For |
-|--------|---------|----------------|----------|
-| **Docker Desktop built-in** | None (Docker Desktop 4.58+) | `docker sandbox` | Quick start, GFE Macs with managed Docker |
-| **Standalone sbx CLI** | Homebrew/Winget/apt | `sbx` | Full features, secret proxy, more flexibility |
-
-> **Which should I use?** Start with `docker sandbox` if you already have Docker Desktop 4.58+. The standalone `sbx` CLI offers additional features like the secret proxy (for GitHub tokens) and more granular control. Both work for basic USAi usage.
+| Method | Status | Install | Command Prefix | Best For |
+|--------|--------|---------|----------------|----------|
+| **Standalone sbx CLI** | **Recommended** | Homebrew/Winget/apt | `sbx` | All users, full features, secret proxy |
+| ~~Docker Desktop built-in~~ | **Deprecated** | ~~None (Docker Desktop 4.58+)~~ | ~~`docker sandbox`~~ | ~~Legacy only~~ |
 
 ## Prerequisites
 
-**Choose one:**
-- **Docker Desktop 4.58+** (`docker --version` to check) — sandboxes built-in, no extra install
+**Required:**
 - **Standalone sbx CLI** (`sbx --version` to check) — install via Homebrew/Winget/apt
 
 **Plus:**
@@ -37,19 +45,9 @@ There are **two ways** to use Docker Sandboxes:
 
 ## Installing Docker Sandboxes
 
-### Option A: Docker Desktop Built-in (No Extra Install)
+### Standalone sbx CLI (Recommended)
 
-If you have **Docker Desktop 4.58 or later**, sandboxes are already included. Verify:
-
-```bash
-docker sandbox --help
-```
-
-> **Note:** On some managed Docker installations (like GSA GFE Macs), the command is `docker sandbox` (two words), not `docker sbx`. If `docker sbx` returns "unknown command", try `docker sandbox`.
-
-### Option B: Standalone sbx CLI (More Features)
-
-The standalone CLI offers additional features (secret proxy, network policies) and doesn't require Docker Desktop.
+The standalone CLI offers full features (secret proxy, network policies) and is the only supported method going forward.
 
 **macOS (Homebrew):**
 ```bash
@@ -73,6 +71,22 @@ sbx login
 ```
 
 See [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/) for full details.
+
+## Migrating from `docker sandbox` to `sbx`
+
+If you're currently using the deprecated `docker sandbox` commands, migrate to `sbx`:
+
+| Deprecated Command | New Command |
+|-------------------|-------------|
+| `docker sandbox create --name NAME opencode .` | `sbx create --name NAME opencode .` |
+| `docker sandbox run NAME` | `sbx run NAME` |
+| `docker sandbox exec NAME cmd` | `sbx exec NAME cmd` |
+| `docker sandbox ls` | `sbx ls` |
+| `docker sandbox rm NAME` | `sbx rm NAME` |
+| `docker sandbox stop NAME` | `sbx stop NAME` |
+| `docker sandbox reset` | (remove individually with `sbx rm`) |
+
+**Your existing sandboxes and secrets will continue to work with the `sbx` CLI.**
 
 ## Network Policy Configuration (Important!)
 
@@ -125,7 +139,36 @@ The "Balanced" policy already includes common package managers (npm, pypi) and c
 
 ## Quick Start
 
-### Using Docker Desktop (`docker sandbox`)
+### Using Standalone CLI (`sbx`) — Recommended
+
+```bash
+# 1. Store your API key securely in system keychain (NEW!)
+sbx secret set -g USAI_API_KEY
+# Enter your key when prompted - stored in system keychain, auto-injected
+
+# 2. Configure network policy (first run will prompt - choose "Balanced")
+#    Then add USAi to the allowlist:
+sbx policy allow network "api.gsa.usai.gov"
+
+# 3. Create a sandbox for OpenCode in current directory
+sbx create --name usai-test opencode .
+
+# 4. Run OpenCode (secrets auto-injected from keychain)
+sbx run usai-test
+```
+
+That's it. You're now running an AI agent in an isolated container with USAi access.
+
+> **New in sbx CLI:** Custom environment variables like `USAI_API_KEY` can now be stored with `sbx secret set -g VARNAME`. The secret is stored in your system keychain and auto-injected into sandboxes — no more manual `-e` flags!
+
+### Using Docker Desktop (`docker sandbox`) — DEPRECATED
+
+> [!WARNING]
+> **Deprecated:** The `docker sandbox` command is deprecated by Docker.
+> Migrate to the `sbx` CLI above. See the [migration guide](#migrating-from-docker-sandbox-to-sbx).
+
+<details>
+<summary>Legacy instructions (click to expand)</summary>
 
 ```bash
 # 1. Set your API key in your shell config file (~/.bashrc or ~/.zshrc)
@@ -151,59 +194,29 @@ docker sandbox run usai-test
 > 2. Source the file
 > 3. **Completely restart Docker Desktop** (not just the terminal)
 
-### Using Standalone CLI (`sbx`) — Recommended
-
-```bash
-# 1. Store your API key securely in system keychain (NEW!)
-sbx secret set -g USAI_API_KEY
-# Enter your key when prompted - stored in system keychain, auto-injected
-
-# 2. Configure network policy (first run will prompt - choose "Balanced")
-#    Then add USAi to the allowlist:
-sbx policy allow network "api.gsa.usai.gov"
-
-# 3. Create a sandbox for OpenCode in current directory
-sbx create --name usai-test opencode .
-
-# 4. Run OpenCode (secrets auto-injected from keychain)
-sbx run usai-test
-```
-
-That's it. You're now running an AI agent in an isolated container with USAi access.
-
-> **New in sbx CLI:** Custom environment variables like `USAI_API_KEY` can now be stored with `sbx secret set -g VARNAME`. The secret is stored in your system keychain and auto-injected into sandboxes — no more manual `-e` flags!
+</details>
 
 ### Command Comparison Reference
 
-| Action | Docker Desktop | Standalone sbx CLI |
+> [!NOTE]
+> The `docker sandbox` commands in the left column are **deprecated**. Use `sbx` commands instead.
+
+| Action | ~~Docker Desktop~~ (Deprecated) | Standalone sbx CLI |
 |--------|----------------|--------------------|
-| Create sandbox | `docker sandbox create --name NAME opencode .` | `sbx create --name NAME opencode .` |
-| Run/connect | `docker sandbox run NAME` | `sbx run NAME` |
-| Run with env vars | Set in shell config + restart Docker | `sbx exec -it -e VAR="$VAR" NAME cmd` |
-| List sandboxes | `docker sandbox ls` | `sbx ls` |
-| Stop sandbox | (sandboxes auto-stop) | `sbx stop NAME` |
-| Remove sandbox | `docker sandbox rm NAME` | `sbx rm NAME` |
-| Set secrets | N/A (use shell config) | `sbx secret set -g SERVICE` |
-| Reset all | `docker sandbox reset` | (remove individually) |
+| Create sandbox | ~~`docker sandbox create --name NAME opencode .`~~ | `sbx create --name NAME opencode .` |
+| Run/connect | ~~`docker sandbox run NAME`~~ | `sbx run NAME` |
+| Run with env vars | ~~Set in shell config + restart Docker~~ | `sbx exec -it -e VAR="$VAR" NAME cmd` |
+| List sandboxes | ~~`docker sandbox ls`~~ | `sbx ls` |
+| Stop sandbox | ~~(sandboxes auto-stop)~~ | `sbx stop NAME` |
+| Remove sandbox | ~~`docker sandbox rm NAME`~~ | `sbx rm NAME` |
+| Set secrets | ~~N/A (use shell config)~~ | `sbx secret set -g SERVICE` |
+| Reset all | ~~`docker sandbox reset`~~ | (remove individually) |
 
 ## Credential Injection Overview
 
-How credentials are handled differs between Docker Desktop and the standalone CLI:
+The `sbx` CLI provides secure credential injection via the system keychain.
 
-### Docker Desktop (`docker sandbox`)
-
-Docker Desktop reads environment variables from your shell configuration file (`~/.bashrc`, `~/.zshrc`) at startup. The sandbox proxy injects credentials into API requests, so keys stay on your host.
-
-```bash
-# Add to ~/.bashrc or ~/.zshrc
-export USAI_API_KEY="your-api-key"
-export ANTHROPIC_API_KEY="your-key"  # if using Claude directly
-export GH_TOKEN="your-github-token"  # for GitHub access
-```
-
-After adding variables, **source your config and restart Docker Desktop**.
-
-### Standalone CLI (`sbx`)
+### Standalone CLI (`sbx`) — Recommended
 
 The `sbx` CLI supports two methods:
 

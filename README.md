@@ -47,7 +47,9 @@ That's it. You're now running an AI coding agent in an isolated container with U
 
 **Need more details?** See the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
 
-**Prefer Docker Desktop UI?** See the [Docker Desktop Guide](docs/QUICKSTART_DOCKER_DESKTOP.md).
+> [!WARNING]
+> **Docker Desktop `docker sandbox` commands are deprecated.** Use the `sbx` CLI instead.
+> See [Docker's deprecation notice](https://docs.docker.com/reference/cli/docker/sandbox/).
 
 ---
 
@@ -91,7 +93,7 @@ winget install -h Docker.sbx && sbx login
 | `.pre-commit-config.yaml` | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md` | Behavioral rules the agent follows |
 | `docs/QUICKSTART_SBX.md` | Full sbx CLI setup guide |
-| `docs/QUICKSTART_DOCKER_DESKTOP.md` | Docker Desktop setup guide |
+| `docs/QUICKSTART_DOCKER_DESKTOP.md` | ~~Docker Desktop setup guide~~ (deprecated) |
 | `docs/ZED_SETUP.md` | **Zed Editor** integration guide |
 | `docs/KNOWN_FAILURE_MODES.md` | Troubleshooting guide |
 | `templates/` | Files to copy into your own projects |
@@ -131,9 +133,19 @@ sbx policy allow network -g "api.gsa.usai.gov"
 
 > Do NOT use "Open" policy on GFE — it exposes internal GSA resources to the agent.
 
-### "docker: unknown command: docker sbx"
+### "docker: unknown command: docker sbx" or "docker sandbox deprecated"
 
-Use `docker sandbox` (two words), not `docker sbx`. Or install the standalone `sbx` CLI.
+The `docker sandbox` command is deprecated. Install and use the standalone `sbx` CLI instead:
+
+```bash
+# macOS
+brew install docker/tap/sbx
+
+# Windows
+winget install Docker.sbx
+```
+
+Then use `sbx` commands directly (e.g., `sbx run opencode .` instead of `docker sandbox run opencode .`).
 
 ### OpenCode shows wrong providers
 
