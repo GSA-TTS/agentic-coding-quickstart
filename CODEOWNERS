@@ -1,0 +1,9 @@
+# CODEOWNERS for agentic-coding-quickstart
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Security-sensitive files require admin review
+/.github/workflows/         @GSA-TTS/agentic-coding-admins
+/SECURITY.md                @GSA-TTS/agentic-coding-admins
+
+# Documentation
+/docs/                      @GSA-TTS/agentic-coding-team
