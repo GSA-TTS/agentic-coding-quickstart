@@ -91,11 +91,13 @@ See [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/) for 
 
 ### Step 1: Configure Network Policy (Required)
 
-When you first run a sandbox command, you'll be prompted to choose a network policy. **Do not choose "Open"** — it allows access to internal GSA resources, which is a security risk on GFE.
+When you first run a sandbox command, you need to choose a network policy. **Do not choose "Open"** — it allows access to internal GSA resources, which is a security risk on GFE.
 
 Choose **"Balanced"** or **"Locked Down"**, then add the USAi endpoint:
 
 ```bash
+# Set default network policy to "balanced"
+sbx policy set-default balanced
 # Allow USAi API endpoint (required for both methods)
 sbx policy allow network --global "api.gsa.usai.gov"
 ```
