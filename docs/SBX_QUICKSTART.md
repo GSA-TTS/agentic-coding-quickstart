@@ -1,5 +1,13 @@
 # Docker Sandboxes + USAi Quick Start
 
+> **Looking for a faster start?**
+> - [sbx CLI Guide](QUICKSTART_SBX.md) — **Recommended** for federal users (better security, automation)
+> - [Docker Desktop Guide](QUICKSTART_DOCKER_DESKTOP.md) — Alternative for GUI preference
+>
+> This document is the **comprehensive reference** covering both approaches in detail.
+
+---
+
 This guide gets you from zero to running an AI agent inside Docker Sandboxes with USAi in under 5 minutes.
 
 ## What is Docker Sandboxes?
