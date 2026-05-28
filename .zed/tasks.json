@@ -1,25 +1,13 @@
 [
   {
-    "label": "OpenCode: Run Agent (Standalone CLI)",
+    "label": "OpenCode: Run Agent",
     "command": "make run-agent",
     "use_new_terminal": true,
     "allow_concurrent_runs": false
   },
   {
-    "label": "OpenCode: Run Agent (Docker Desktop)",
-    "command": "make run-agent-desktop",
-    "use_new_terminal": true,
-    "allow_concurrent_runs": false
-  },
-  {
-    "label": "OpenCode: Create Sandbox (Standalone CLI)",
+    "label": "OpenCode: Create Sandbox",
     "command": "make create-sandbox",
-    "use_new_terminal": true,
-    "allow_concurrent_runs": false
-  },
-  {
-    "label": "OpenCode: Create Sandbox (Docker Desktop)",
-    "command": "make create-sandbox-desktop",
     "use_new_terminal": true,
     "allow_concurrent_runs": false
   },

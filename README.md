@@ -181,18 +181,58 @@ For more troubleshooting, see [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_M
 
 ## Bootstrap Your Own Project
 
-Want to use sbx + USAi in your own repository?
+Want to use sbx + USAi in your own repository? Use the `init-project.sh` script to automatically provision any directory (new or existing) with all necessary configuration files.
+
+### Quick Start
 
 ```bash
-# Copy essential files from templates/
-cp templates/opencode.jsonc /path/to/your/project/
-
-# Copy Zed tasks (optional, if using Zed Editor)
-mkdir -p /path/to/your/project/.zed
-cp templates/zed-tasks.json /path/to/your/project/.zed/tasks.json
+# Provision a new or existing project directory
+./init-project.sh /path/to/your/project
 ```
 
-See [templates/BOOTSTRAP.md](templates/BOOTSTRAP.md) for detailed instructions.
+### What Gets Provisioned
+
+The script copies these files to your target directory:
+
+| File | Purpose |
+|------|---------|
+| `AGENTS.md` | Behavioral rules for AI agents |
+| `opencode.jsonc` | Pre-configured USAi endpoints |
+| `Makefile` | Helper commands (`make setup`, `make doctor`, etc.) |
+| `.zed/tasks.json` | Zed Editor task integration |
+| `README.md` | Generated project README (only if it doesn't exist) |
+
+The script also:
+- Initializes a git repository (if not already initialized)
+- Preserves existing files (won't overwrite your README.md)
+- Works with both empty and populated directories
+
+### Example
+
+```bash
+# From the quickstart directory
+cd /path/to/agentic-coding-quickstart
+
+# Provision your project
+./init-project.sh /path/to/my-existing-app
+
+# Result:
+# [OK] AGENTS.md
+# [OK] opencode.jsonc
+# [OK] Makefile
+# [OK] .zed/tasks.json
+# [OK] Git repository initialized (if needed)
+```
+
+### Next Steps After Provisioning
+
+```bash
+cd /path/to/your/project
+make setup    # Clone playbook and check dependencies
+make doctor   # Verify your environment
+```
+
+**Alternative (Manual):** If you prefer manual setup, see [templates/BOOTSTRAP.md](templates/BOOTSTRAP.md) for detailed instructions.
 
 ---
 
