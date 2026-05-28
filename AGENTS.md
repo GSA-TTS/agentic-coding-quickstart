@@ -325,7 +325,7 @@ The agent MUST:
 | GitHub | SBX proxy (`sbx secret set -g github`) | Recommended; agent never sees token |
 | GitLab | Direct injection (`-e GITLAB_TOKEN`) | Not a built-in SBX service |
 
-See `docs/SBX_QUICKSTART.md` for detailed credential injection patterns.
+See `docs/QUICKSTART_SBX.md` for detailed credential injection patterns.
 
 ---
 

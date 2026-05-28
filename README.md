@@ -122,7 +122,7 @@ See the **[Zed Editor Setup Guide](docs/ZED_SETUP.md)** for detailed instruction
 3. **Secret proxy** — Agent never sees raw API keys when using `sbx secret`
 4. **Agent follows AGENTS.md rules** — Explicit permissions and prohibitions
 
-For Git provider credentials and advanced patterns, see [docs/SBX_QUICKSTART.md](docs/SBX_QUICKSTART.md#git-provider-credentials).
+For Git provider credentials and advanced patterns, see [docs/QUICKSTART_SBX.md](docs/QUICKSTART_SBX.md).
 
 ---
 

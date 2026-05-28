@@ -495,6 +495,37 @@ source ~/.zshrc
 
 ---
 
+## 17. Chose "Open" Network Policy by Mistake
+
+### Symptoms
+
+- Selected "Open" network policy during first sbx run
+- Security concern: Open policy allows access to internal GSA resources
+
+### Root Cause
+
+"Open" policy allows all network traffic without restrictions, which is a security risk on GFE (Government Furnished Equipment) machines.
+
+### Fix
+
+Reset and reconfigure:
+```bash
+# Reset policy (will prompt for new choice)
+sbx policy reset
+
+# Choose "Balanced" when prompted, then add USAi
+sbx policy allow network "api.gsa.usai.gov"
+
+# Verify
+sbx policy ls
+```
+
+### Prevention
+
+Always choose "Balanced" (Option 2) when prompted. The Balanced policy allows typical dev traffic while blocking internal network access.
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:

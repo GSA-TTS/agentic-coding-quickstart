@@ -29,7 +29,7 @@ setup: _check-docker _check-git _clone-playbook
 	@echo "Setup complete!"
 	@echo ""
 	@echo "Next steps:"
-	@echo "  1. Configure your credentials (see docs/SBX_QUICKSTART.md)"
+	@echo "  1. Configure your credentials (see docs/QUICKSTART_SBX.md)"
 	@echo "  2. Start your AI agent"
 	@echo "  3. Ask it to help you build something"
 	@echo ""
