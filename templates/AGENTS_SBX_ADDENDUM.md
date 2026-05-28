@@ -71,11 +71,15 @@ Agents should:
 
 ### Credential Injection Methods
 
-| Service | sbx CLI (Secret Store) | sbx CLI (Direct) |
-|---------|------------------------|------------------|
-| USAi | `sbx secret set -g USAI_API_KEY` | `-e USAI_API_KEY="$USAI_API_KEY"` |
-| GitHub | `sbx secret set -g github` | `-e GH_TOKEN="$(gh auth token)"` |
-| GitLab | `sbx secret set -g GITLAB_TOKEN` | `-e GITLAB_TOKEN="..."` |
+| Service | Command | Notes |
+|---------|---------|-------|
+| USAi | `sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"` | Custom endpoint |
+| GitHub | `gh auth token \| sbx secret set -g github` | Built-in service |
+| GitLab | `sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"` | Custom endpoint |
+
+> [!IMPORTANT]
+> USAi and GitLab are **not built-in sbx services**. You must use `sbx secret set-custom` with the `--host` parameter.
+> After changing secrets, **delete and recreate** the sandbox for changes to take effect.
 
 See `docs/SBX_PATTERNS.md` for detailed credential injection patterns.
 
@@ -88,31 +92,35 @@ See `docs/SBX_PATTERNS.md` for detailed credential injection patterns.
 #### Basic: USAi Only
 
 ```bash
-# Store secret (one-time)
-sbx secret set -g USAI_API_KEY
+# Store secret (one-time) - USAi requires set-custom
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+
+# Create/recreate sandbox
+sbx rm SANDBOX_NAME 2>/dev/null; sbx create --name SANDBOX_NAME opencode .
 
 # Run (secrets auto-injected)
 sbx run SANDBOX_NAME
 ```
 
-#### With GitHub (via secret store)
+#### With GitHub (built-in service)
 
 ```bash
 # One-time setup
-sbx secret set -g github
-# Enter: output of `gh auth token`
+gh auth token | sbx secret set -g github
 
 # Run (GitHub auth handled automatically)
 sbx run SANDBOX_NAME
 ```
 
-#### With GitLab (direct injection)
+#### With GitLab (custom endpoint)
 
 ```bash
-sbx exec -it \
-  -e GITLAB_TOKEN="$(glab config get --host GITLAB_HOST token)" \
-  -e GITLAB_HOST="GITLAB_HOST" \
-  -w $(pwd) SANDBOX_NAME opencode
+# Store secret
+sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"
+
+# Recreate sandbox and run
+sbx rm SANDBOX_NAME 2>/dev/null; sbx create --name SANDBOX_NAME opencode .
+sbx run SANDBOX_NAME
 ```
 
 ---

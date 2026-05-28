@@ -117,17 +117,18 @@ source ~/.zshrc  # or ~/.bashrc
 Even when using Docker Desktop UI, you can use `sbx secret` for better security:
 
 ```bash
-# Store USAi key securely in keychain
-sbx secret set -g anthropic
-# Enter your key when prompted
+# Store USAi key securely (USAi is a custom endpoint)
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
 
-# Store GitHub token
-sbx secret set -g github
-# Enter token when prompted
+# Store GitHub token (built-in service)
+gh auth token | sbx secret set -g github
 
 # Verify
 sbx secret ls
 ```
+
+> [!NOTE]
+> After setting secrets, you must **delete and recreate** the sandbox for changes to take effect.
 
 **Why `sbx secret` is better:**
 

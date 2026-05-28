@@ -142,9 +142,8 @@ The "Balanced" policy already includes common package managers (npm, pypi) and c
 ### Using Standalone CLI (`sbx`) — Recommended
 
 ```bash
-# 1. Store your API key securely in system keychain (NEW!)
-sbx secret set -g USAI_API_KEY
-# Enter your key when prompted - stored in system keychain, auto-injected
+# 1. Store your USAi API key securely (USAi is a custom endpoint)
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
 
 # 2. Configure network policy (first run will prompt - choose "Balanced")
 #    Then add USAi to the allowlist:
@@ -159,7 +158,9 @@ sbx run usai-test
 
 That's it. You're now running an AI agent in an isolated container with USAi access.
 
-> **New in sbx CLI:** Custom environment variables like `USAI_API_KEY` can now be stored with `sbx secret set -g VARNAME`. The secret is stored in your system keychain and auto-injected into sandboxes — no more manual `-e` flags!
+> [!IMPORTANT]
+> USAi (`api.gsa.usai.gov`) is **not a built-in sbx service**. You must use `sbx secret set-custom` with the `--host` parameter.
+> After changing secrets, **delete and recreate** the sandbox for changes to take effect.
 
 ### Using Docker Desktop (`docker sandbox`) — DEPRECATED
 
@@ -420,11 +421,18 @@ docker sandbox run my-sandbox
 
 ```bash
 # One-time setup: store your secrets in system keychain
-sbx secret set -g USAI_API_KEY    # Enter when prompted
-sbx secret set -g GITLAB_TOKEN    # If using GitLab
-gh auth token | sbx secret set -g github  # Pipe from gh cli
 
-# Then just run (secrets auto-injected!)
+# USAi requires set-custom (not a built-in service)
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+
+# GitLab also requires set-custom for self-hosted instances
+sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"
+
+# GitHub uses built-in service
+gh auth token | sbx secret set -g github
+
+# Then recreate sandbox and run (secrets auto-injected!)
+sbx rm my-sandbox 2>/dev/null; sbx create --name my-sandbox opencode .
 sbx run my-sandbox
 ```
 
@@ -442,17 +450,16 @@ sbx exec -it \
   -w $(pwd) my-sandbox opencode
 ```
 
-> **💡 Zed Editor Users:** If you are using the Zed editor, you can automate this entire walkthrough—including sandbox creation and agent launching—using the built-in tasks defined in `.zed/tasks.json`. Check out the **[Zed Editor Setup Guide](ZED_SETUP.md)** to get started.
+> **Zed Editor Users:** If you are using the Zed editor, you can automate this entire walkthrough—including sandbox creation and agent launching—using the built-in tasks defined in `.zed/tasks.json`. Check out the **[Zed Editor Setup Guide](ZED_SETUP.md)** to get started.
 
-### Custom Variables in sbx secret (NEW!)
+### Custom Endpoints (set-custom)
 
-The `sbx secret set -g VARNAME` command now supports **any variable name**, not just built-in services. This means you can store USAi API keys, GitLab tokens, or any custom secret in your system keychain:
+For custom API endpoints (like USAi at `api.gsa.usai.gov`), you must use `sbx secret set-custom` instead of `sbx secret set -g`:
 
 ```bash
-# Store custom variables
-sbx secret set -g USAI_API_KEY
-sbx secret set -g GITLAB_TOKEN
-sbx secret set -g MY_CUSTOM_SECRET
+# Store custom endpoint secrets
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"
 
 # List all stored secrets (values masked)
 sbx secret ls
@@ -462,9 +469,13 @@ sbx secret ls
 # (global)   GITLAB_TOKEN     glpat-******...******xYz1
 ```
 
-This is the **recommended approach** for any credential you use regularly — it's more secure than environment variables and persists across terminal sessions.
+> [!WARNING]
+> The `sbx secret set -g VARNAME` syntax does **not** work for custom variables.
+> You must use `sbx secret set-custom` with the `--host` parameter for non-built-in services.
 
-> **Reference:** This feature was added in response to community feedback. See [docker/sbx-releases#7](https://github.com/docker/sbx-releases/issues/7) for the original feature request and implementation details. Note: This feature may still be marked as experimental in `sbx secret --help`.
+> [!NOTE]
+> After setting or changing a custom secret, you must **delete and recreate** the sandbox for changes to take effect.
+> The `set-custom` command is experimental and may change. See [Docker docs on credentials](https://docs.docker.com/ai/sandboxes/security/credentials/).
 
 ---
 
@@ -519,20 +530,21 @@ sbx rm SANDBOX_NAME
 ```bash
 # Set a secret globally (prompts for value)
 # Built-in services: anthropic|aws|cursor|github|google|groq|mistral|nebius|openai|xai
-# Custom variables: any VARNAME (NEW!)
-sbx secret set -g SERVICE_OR_VARNAME
+sbx secret set -g SERVICE_NAME
 
-# Examples:
-sbx secret set -g USAI_API_KEY        # Custom variable for USAi
+# Examples of built-in services:
 sbx secret set -g github              # Built-in service
-sbx secret set -g GITLAB_TOKEN        # Custom variable for GitLab
+sbx secret set -g anthropic           # Built-in service
+
+# For custom endpoints (like USAi), use set-custom:
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"
 
 # Set a secret for a specific sandbox only
-sbx secret set SANDBOX_NAME SERVICE_OR_VARNAME
+sbx secret set SANDBOX_NAME SERVICE_NAME
 
 # Pipe from CLI tools (recommended - avoids shell history)
 gh auth token | sbx secret set -g github
-echo "$USAI_KEY" | sbx secret set -g USAI_API_KEY
 
 # List configured secrets (values are masked)
 sbx secret ls
@@ -543,8 +555,12 @@ sbx secret ls
 # (global)   openai         api-ke******...******lieO
 
 # Remove a secret
-sbx secret rm SERVICE_OR_VARNAME
+sbx secret rm SERVICE_NAME
 ```
+
+> [!IMPORTANT]
+> `sbx secret set -g VARNAME` does **not** work for custom variables like `USAI_API_KEY`.
+> Use `sbx secret set-custom -g --host HOSTNAME --env VARNAME --value VALUE` for custom endpoints.
 
 > **How it works:** Secrets are stored in your system keychain (macOS Keychain, Windows Credential Manager, or Linux secret service). When you run a sandbox, sbx auto-injects stored secrets as environment variables. The secret never appears in your shell history or process list.
 
@@ -822,13 +838,20 @@ sbx create opencode .
 ### One-Time Setup (Recommended)
 
 ```bash
-# Store all your secrets in system keychain
-sbx secret set -g USAI_API_KEY              # USAi API key
-gh auth token | sbx secret set -g github    # GitHub token
-sbx secret set -g GITLAB_TOKEN              # GitLab token (if needed)
+# Store USAi API key (custom endpoint - requires set-custom)
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+
+# Store GitHub token (built-in service)
+gh auth token | sbx secret set -g github
+
+# Store GitLab token (custom endpoint - if needed)
+sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"
 
 # Verify secrets are stored
 sbx secret ls
+
+# Recreate sandbox to pick up new secrets
+sbx rm my-sandbox 2>/dev/null; sbx create --name my-sandbox opencode .
 ```
 
 ### Running Sandboxes

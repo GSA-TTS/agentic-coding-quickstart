@@ -47,25 +47,31 @@ sbx policy allow network "api.gsa.usai.gov"
 
 | Method | Security | Use Case | Supported Services |
 |--------|----------|----------|-------------------|
-| **SBX Secret Store** (recommended) | High - stored in keychain, auto-injected | Any credential | Built-in services + custom vars |
+| **SBX Secret Store** (recommended) | High - stored in keychain, auto-injected | Any credential | Built-in services |
+| **SBX Secret Set-Custom** | High - stored in keychain | Custom endpoints (USAi, GitLab) | Any custom host |
 | **Direct Injection** (`-e`) | Medium - token in container env | One-off testing | Any service |
 
-**Rule of thumb:** Use `sbx secret set -g` for any credential you use regularly; use `-e` only for one-off testing.
+**Rule of thumb:** Use `sbx secret set -g` for built-in services (github, anthropic, etc.); use `sbx secret set-custom` for custom endpoints like USAi.
 
 ---
 
 ## USAi
 
-USAi uses a custom endpoint (`api.gsa.usai.gov`). Store the key using `sbx secret`:
+USAi (`api.gsa.usai.gov`) is **not a built-in sbx service**. You must use `sbx secret set-custom`:
 
 ```bash
-# Store securely in system keychain (recommended)
-sbx secret set -g USAI_API_KEY
-# Enter your key when prompted
+# Store securely in system keychain (required for USAi)
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+
+# Recreate sandbox to pick up new secret
+sbx rm SANDBOX_NAME 2>/dev/null; sbx create --name SANDBOX_NAME opencode .
 
 # Run - secrets auto-injected
 sbx run SANDBOX_NAME
 ```
+
+> [!IMPORTANT]
+> After setting or changing a custom secret, you must **delete and recreate** the sandbox.
 
 Or for one-off testing:
 ```bash
@@ -82,6 +88,8 @@ sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
 
 ### Method 1: SBX Secret Store (Recommended)
 
+GitHub is a **built-in service**, so use the simpler syntax:
+
 ```bash
 # One-time setup - pipe from gh cli (avoids shell history)
 gh auth token | sbx secret set -g github
@@ -90,7 +98,7 @@ gh auth token | sbx secret set -g github
 sbx secret ls
 
 # Run - proxy handles auth automatically
-sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
+sbx run SANDBOX_NAME
 ```
 
 #### Method 2: Direct Injection
@@ -114,20 +122,18 @@ sbx exec -e GH_TOKEN="$(gh auth token)" SANDBOX_NAME sh -c 'curl -s -H "Authoriz
 
 ---
 
-## GitLab (Direct Injection Required)
+## GitLab (Custom Endpoint)
 
-GitLab credentials are not auto-injected. Use `sbx secret` or direct injection.
+GitLab (especially self-hosted instances) requires `sbx secret set-custom`:
 
 ### Store in sbx secret (recommended)
 
 ```bash
-# Store GitLab token
-sbx secret set -g GITLAB_TOKEN
-# Enter your token when prompted
+# Store GitLab token for self-hosted instance
+sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"
 
-# For self-hosted, also store the host
-sbx secret set -g GITLAB_HOST
-# Enter: workshop.cloud.gov (or your host)
+# Recreate sandbox to pick up new secret
+sbx rm SANDBOX_NAME 2>/dev/null; sbx create --name SANDBOX_NAME opencode .
 ```
 
 ### Direct injection (one-off)
@@ -136,7 +142,6 @@ sbx secret set -g GITLAB_HOST
 
 ```bash
 sbx exec -it \
-  -e USAI_API_KEY="$USAI_API_KEY" \
   -e GITLAB_TOKEN="your-gitlab-token" \
   -w $(pwd) SANDBOX_NAME opencode
 ```
@@ -145,7 +150,6 @@ sbx exec -it \
 
 ```bash
 sbx exec -it \
-  -e USAI_API_KEY="$USAI_API_KEY" \
   -e GITLAB_TOKEN="$(glab config get --host workshop.cloud.gov token)" \
   -e GITLAB_HOST="workshop.cloud.gov" \
   -w $(pwd) SANDBOX_NAME opencode
@@ -164,38 +168,43 @@ sbx exec -e GITLAB_TOKEN="$GITLAB_TOKEN" -e GITLAB_HOST="workshop.cloud.gov" SAN
 
 ### sbx CLI (Recommended)
 
-For agents needing USAi + GitHub + GitLab:
+For agents needing USAi + GitHub + GitLab, first set up all secrets:
 
 ```bash
-# Assumes: gh logged in, glab logged in, secrets stored in sbx
+# One-time setup
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"
+gh auth token | sbx secret set -g github
 
-sbx exec -it \
-  -e GITLAB_TOKEN="$(glab config get --host workshop.cloud.gov token)" \
-  -e GITLAB_HOST="workshop.cloud.gov" \
-  -w $(pwd) SANDBOX_NAME opencode
+# Recreate sandbox
+sbx rm SANDBOX_NAME 2>/dev/null; sbx create --name SANDBOX_NAME opencode .
+
+# Run - all secrets auto-injected
+sbx run SANDBOX_NAME
 ```
-
-> **Note:** If you've set secrets via `sbx secret set -g`, they are auto-injected.
 
 ---
 
 ## Quick Reference
 
-| Provider | sbx CLI (Secret Store) | sbx CLI (Direct) |
-|----------|------------------------|------------------|
-| USAi | `sbx secret set -g USAI_API_KEY` | `-e USAI_API_KEY="$USAI_API_KEY"` |
-| GitHub | `sbx secret set -g github` | `-e GH_TOKEN="$(gh auth token)"` |
-| GitLab.com | `sbx secret set -g GITLAB_TOKEN` | `-e GITLAB_TOKEN="..."` |
-| GitLab (self-hosted) | + `sbx secret set -g GITLAB_HOST` | + `-e GITLAB_HOST="..."` |
+| Provider | Command | Notes |
+|----------|---------|-------|
+| USAi | `sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"` | Custom endpoint |
+| GitHub | `gh auth token \| sbx secret set -g github` | Built-in service |
+| GitLab (self-hosted) | `sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"` | Custom endpoint |
+
+> [!IMPORTANT]
+> After setting custom secrets, **delete and recreate** the sandbox for changes to take effect.
 
 ---
 
 ## Security Notes
 
-1. **Prefer sbx secret store** - more secure, stored in system keychain
-2. **Pipe tokens from CLI tools** - avoids shell history (`gh auth token | sbx secret set -g github`)
-3. **Scope tokens minimally** - only grant permissions the agent needs
-4. **Tokens exist only in memory** - never written to disk inside container
-5. **Review agent output** - before sharing logs, ensure no tokens leaked
+1. **Use `sbx secret set-custom` for custom endpoints** like USAi (not `sbx secret set -g VARNAME`)
+2. **Use `sbx secret set -g SERVICE` for built-in services** like github, anthropic
+3. **Pipe tokens from CLI tools** - avoids shell history (`gh auth token | sbx secret set -g github`)
+4. **Scope tokens minimally** - only grant permissions the agent needs
+5. **Tokens exist only in memory** - never written to disk inside container
+6. **Review agent output** - before sharing logs, ensure no tokens leaked
 
 For full security analysis, see [KNOWN_FAILURE_MODES.md Section 15](https://github.com/GSA-TTS/agentic-coding-quickstart/blob/main/docs/KNOWN_FAILURE_MODES.md#15-direct-credential-injection-for-git-providers-security-consideration).
