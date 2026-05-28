@@ -1,7 +1,7 @@
 # Agentic Coding Quickstart - Makefile
 # Simple commands for setting up and managing your AI-assisted development workspace
 
-.PHONY: setup doctor new-project clean install-hooks help
+.PHONY: setup doctor new-project clean install-hooks help init-project create-sandbox run-agent
 
 # Default target
 help:
@@ -11,15 +11,12 @@ help:
 	@echo "Commands:"
 	@echo "  make setup                 - Set up your workspace (clone playbook, check dependencies)"
 	@echo "  make doctor                - Run health checks on your environment"
-	@echo "  make new-project           - Create a new project directory"
-	@echo "  make create-sandbox        - Create SBX sandbox 'quickstart' (sbx CLI)"
-	@echo "  make run-agent             - Run OpenCode agent in SBX (sbx CLI)"
+	@echo "  make new-project           - Create a new project directory (interactive)"
+	@echo "  make init-project TARGET_DIR=/path - Bootstrap a project directory (non-interactive)"
+	@echo "  make create-sandbox        - Create SBX sandbox 'quickstart'"
+	@echo "  make run-agent             - Run OpenCode agent in SBX"
 	@echo "  make install-hooks         - [OPTIONAL] Install pre-commit hooks"
 	@echo "  make clean                 - Remove generated files"
-	@echo ""
-	@echo "Deprecated targets (will be removed in future release):"
-	@echo "  make create-sandbox-desktop- DEPRECATED: use 'make create-sandbox'"
-	@echo "  make run-agent-desktop     - DEPRECATED: use 'make run-agent'"
 	@echo ""
 	@echo "First time? Run: make setup"
 
@@ -68,6 +65,16 @@ doctor:
 	@docker info >/dev/null 2>&1 && echo "[OK] Docker running" || echo "[FAIL] Docker not running"
 	@command -v git >/dev/null 2>&1 && echo "[OK] Git installed" || echo "[FAIL] Git not found"
 	@command -v sbx >/dev/null 2>&1 && echo "[OK] SBX installed" || echo "[WARN] SBX not found (optional)"
+	@if [ -n "$$USAI_API_KEY" ]; then \
+		echo "[OK] USAI_API_KEY is set"; \
+	else \
+		echo "[FAIL] USAI_API_KEY is not set"; \
+		echo ""; \
+		echo "To set your API key, run:"; \
+		echo "  export USAI_API_KEY=\"your-api-key-here\""; \
+		echo ""; \
+		echo "Get your API key at: https://console.gsa.usai.gov/key-management"; \
+	fi
 	@echo ""
 	@echo "Workspace"
 	@echo "---------"
@@ -77,7 +84,7 @@ doctor:
 	@echo ""
 	@echo "Run 'make setup' to fix any issues."
 
-# Create a new project
+# Create a new project (interactive)
 new-project:
 	@echo "Create a new project"
 	@echo "--------------------"
@@ -86,25 +93,64 @@ new-project:
 		echo "ERROR: Project name required"; \
 		exit 1; \
 	fi; \
-	if [ -d "../$$name" ]; then \
-		echo "ERROR: Directory ../$$name already exists"; \
+	$(MAKE) init-project TARGET_DIR="../$$name"
+
+# Initialize a new project from the quickstart (non-interactive)
+init-project: _check-target-dir
+	@echo "Initializing project in $(TARGET_DIR)..."
+	@mkdir -p "$(TARGET_DIR)"
+	@echo "Copying configuration files..."
+	@cp AGENTS.md "$(TARGET_DIR)/" && echo "  [OK] AGENTS.md"
+	@cp opencode.jsonc "$(TARGET_DIR)/" && echo "  [OK] opencode.jsonc"
+	@cp Makefile "$(TARGET_DIR)/" && echo "  [OK] Makefile"
+	
+	@# Only create README if it doesn't exist
+	@if [ ! -f "$(TARGET_DIR)/README.md" ]; then \
+		echo "# $$(basename "$(TARGET_DIR)")" > "$(TARGET_DIR)/README.md"; \
+		echo "" >> "$(TARGET_DIR)/README.md"; \
+		echo "Project initialized from agentic-coding-quickstart." >> "$(TARGET_DIR)/README.md"; \
+		echo "" >> "$(TARGET_DIR)/README.md"; \
+		echo "Next: run 'make setup' inside your new project directory." >> "$(TARGET_DIR)/README.md"; \
+		echo "  [OK] README.md (created)"; \
+	else \
+		echo "  [SKIP] README.md (already exists)"; \
+	fi
+
+	@# Create .zed directory and copy tasks.json
+	@mkdir -p "$(TARGET_DIR)/.zed"
+	@cp .zed/tasks.json "$(TARGET_DIR)/.zed/tasks.json" && echo "  [OK] .zed/tasks.json"
+	
+	@# Only run git init if it's not already a git repository
+	@if [ ! -d "$(TARGET_DIR)/.git" ]; then \
+		git init "$(TARGET_DIR)" > /dev/null 2>&1; \
+		echo "  [OK] Git repository initialized"; \
+	else \
+		echo "  [SKIP] Git repository (already exists)"; \
+	fi
+	@echo ""
+	@echo "[OK] Project initialized in $(TARGET_DIR)"
+	@echo ""
+	@echo "Next steps:"
+	@echo "  1. cd $(TARGET_DIR)"
+	@echo "  2. make setup"
+
+_check-target-dir:
+	@if [ -z "$(TARGET_DIR)" ]; then \
+		echo "ERROR: TARGET_DIR is not set. Usage: make init-project TARGET_DIR=/path/to/project"; \
 		exit 1; \
-	fi; \
-	mkdir -p "../$$name"; \
-	echo "# $$name" > "../$$name/README.md"; \
-	echo "" >> "../$$name/README.md"; \
-	echo "Project created with agentic-coding-quickstart." >> "../$$name/README.md"; \
-	echo ""; \
-	echo "Created: ../$$name"; \
-	echo ""; \
-	echo "Next: Start your AI agent and ask it to help you set up the project."; \
-	echo "      The agent can use skills from the playbook to scaffold your app."
+	fi
+	@if [ -d "$(TARGET_DIR)" ]; then \
+		echo "--> Provisioning existing directory: $(TARGET_DIR)"; \
+	else \
+		echo "--> Creating new directory: $(TARGET_DIR)"; \
+		mkdir -p "$(TARGET_DIR)"; \
+	fi
 
 # Clean up
 clean:
 	@echo "Nothing to clean (this repo doesn't generate files)"
 
-# Create SBX sandbox 'quickstart' using sbx CLI
+# Create SBX sandbox 'quickstart'
 create-sandbox:
 	@echo "Creating SBX sandbox 'quickstart'..."
 	@if sbx ls | grep -q "quickstart"; then \
@@ -113,37 +159,13 @@ create-sandbox:
 		sbx create --name quickstart opencode .; \
 	fi
 
-# DEPRECATED: Create SBX sandbox using Docker Desktop
-# Docker has deprecated 'docker sandbox' commands. Use 'make create-sandbox' instead.
-create-sandbox-desktop:
-	@echo ""
-	@echo "WARNING: 'docker sandbox' commands are DEPRECATED by Docker."
-	@echo "         Use 'make create-sandbox' (sbx CLI) instead."
-	@echo "         See: https://docs.docker.com/reference/cli/docker/sandbox/"
-	@echo ""
-	@if docker sandbox ls 2>/dev/null | grep -q "quickstart"; then \
-		echo "Sandbox 'quickstart' already exists. Skipping creation."; \
-	else \
-		docker sandbox create --name quickstart opencode .; \
-	fi
-
-# Run OpenCode agent in sandbox 'quickstart' using sbx CLI
+# Run OpenCode agent in sandbox 'quickstart'
 run-agent: _check-usai-key
 	@echo "Running OpenCode agent in SBX sandbox 'quickstart'..."
 	@sbx exec -it \
 		-e USAI_API_KEY="$(USAI_API_KEY)" \
 		$(if $(NODE_TLS_REJECT_UNAUTHORIZED),-e NODE_TLS_REJECT_UNAUTHORIZED="$(NODE_TLS_REJECT_UNAUTHORIZED)",) \
 		-w "$(shell pwd)" quickstart opencode
-
-# DEPRECATED: Run agent using Docker Desktop
-# Docker has deprecated 'docker sandbox' commands. Use 'make run-agent' instead.
-run-agent-desktop:
-	@echo ""
-	@echo "WARNING: 'docker sandbox' commands are DEPRECATED by Docker."
-	@echo "         Use 'make run-agent' (sbx CLI) instead."
-	@echo "         See: https://docs.docker.com/reference/cli/docker/sandbox/"
-	@echo ""
-	@docker sandbox run quickstart
 
 _check-usai-key:
 	@if [ -z "$(USAI_API_KEY)" ]; then \
