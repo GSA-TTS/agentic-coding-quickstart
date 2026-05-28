@@ -60,7 +60,7 @@ This project operates under professional standards of conduct. All contributors:
 2. Read the core documentation:
    - `AGENTS.md` — Behavioral rules for AI agents
    - `docs/CODING_PRACTICES.md` — Secure coding standards
-   - `docs/SBX_QUICKSTART.md` — SBX setup guide
+   - `docs/QUICKSTART_SBX.md` — sbx CLI setup guide
 
 3. Follow the quickstart to set up your environment
 

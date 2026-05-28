@@ -4,6 +4,15 @@
 
 This guide walks you through setting up Docker Sandboxes using the `sbx` command-line interface to run AI coding agents with USAi.
 
+## What is Docker Sandboxes?
+
+[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) runs AI coding agents in isolated microVM environments. Each sandbox gets its own Docker daemon, filesystem, and network—the agent can build containers, install packages, and modify files without touching your host system.
+
+**Key benefits:**
+- **Isolation** — Agent actions are contained; your host is protected
+- **Reproducibility** — Same environment every time
+- **Security** — Network policies control what the agent can access
+
 ## Why sbx CLI?
 
 | Feature | sbx CLI | Docker Desktop UI |
@@ -47,6 +56,13 @@ brew install docker/tap/sbx && sbx login
 
 # Windows
 winget install -h Docker.sbx && sbx login
+
+# Linux (Ubuntu/Debian)
+curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
+sudo apt-get install docker-sbx
+sudo usermod -aG kvm $USER
+newgrp kvm
+sbx login
 ```
 
 ---
@@ -112,6 +128,18 @@ gh auth token | sbx secret set -g github
 # Or enter manually
 sbx secret set -g github
 # When prompted, paste output of: gh auth token
+```
+
+### Store GitLab Token (for self-hosted GitLab)
+
+GitLab is **not a built-in sbx service**, so use `sbx secret set-custom`:
+
+```bash
+# For self-hosted GitLab (e.g., workshop.cloud.gov)
+sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"
+
+# Verify access inside sandbox
+sbx exec SANDBOX_NAME sh -c 'curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" https://workshop.cloud.gov/api/v4/user | jq .username'
 ```
 
 ### Verify Stored Secrets
@@ -364,6 +392,35 @@ sbx create --branch=feature/login opencode .
 # Work in isolation - changes stay on that branch
 sbx run opencode-myproject
 ```
+
+---
+
+## Security Reminders
+
+1. **Never print your API key**: Use `${#VAR}` to check length, not `echo $VAR`
+2. **Never commit secrets**: The `opencode.jsonc` uses `${USAI_API_KEY}` variable substitution
+3. **Always use SBX**: Don't run agents directly on host with credentials
+4. **Review agent output**: Before sharing logs, ensure no secrets leaked
+5. **Use `sbx secret set` for persistent storage**: More secure than environment variables
+6. **Pipe tokens from CLI tools**: Avoids shell history exposure (e.g., `gh auth token | sbx secret set -g github`)
+
+---
+
+## Migrating from `docker sandbox`
+
+> [!NOTE]
+> The Docker Desktop-integrated `docker sandbox` command is deprecated.
+> If you're currently using `docker sandbox`, migrate to `sbx`:
+
+| Deprecated Command | New Command |
+|-------------------|-------------|
+| `docker sandbox create --name NAME opencode .` | `sbx create --name NAME opencode .` |
+| `docker sandbox run NAME` | `sbx run NAME` |
+| `docker sandbox exec NAME cmd` | `sbx exec NAME cmd` |
+| `docker sandbox ls` | `sbx ls` |
+| `docker sandbox rm NAME` | `sbx rm NAME` |
+
+Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
 
 ---
 

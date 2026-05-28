@@ -35,7 +35,7 @@ These define the behavioral contract. Load for **every task**.
 
 | Document | Load When Task Involves |
 |----------|------------------------|
-| `docs/SBX_QUICKSTART.md` | Setting up SBX, running agents, USAi configuration, first-time setup |
+| `docs/QUICKSTART_SBX.md` | Setting up SBX, running agents, USAi configuration, first-time setup |
 | `docs/KNOWN_FAILURE_MODES.md` | Debugging SBX/USAi issues, troubleshooting, error diagnosis |
 | `docs/adr/0001-sbx-usai-agent-execution-architecture.md` | Understanding SBX architecture decisions, isolation rationale |
 
@@ -54,6 +54,6 @@ Load only when the specific activity is being performed.
 | Task Type | Load |
 |-----------|------|
 | Code generation/review | Tier 1 only |
-| SBX + USAi setup | Tier 1 + SBX_QUICKSTART.md |
+| SBX + USAi setup | Tier 1 + QUICKSTART_SBX.md |
 | Debugging agent issues | Tier 1 + KNOWN_FAILURE_MODES.md |
 | Pre-deployment review | Tier 1 + checklist |
