@@ -1,5 +1,5 @@
 # .pre-commit-config.yaml
-# Minimal, opt-in pre-commit configuration for agentic-coding-quickstart
+# Pre-commit hooks for agentic-coding-quickstart
 #
 # Installation (optional):
 #   pip install pre-commit
@@ -8,7 +8,7 @@
 # Run without installing hooks:
 #   pre-commit run --all-files
 #
-# See https://pre-commit.com for more information
+# All hooks pinned to commit SHAs for supply chain security (NIST SA-12)
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -18,8 +18,18 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=500']
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: ee6b38352380ce52369d16b7873093c4b8bf829b  # v8.24.3
     hooks:
       - id: gitleaks
+
+  # Markdown linting
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: d174eb7a8f35e05d4065c82d375ad84aa0b32352  # v0.17.2
+    hooks:
+      - id: markdownlint-cli2
+        args: ["--fix"]

@@ -1,0 +1,60 @@
+# markdownlint-cli2 configuration
+# Aligned with playbook standards for consistency
+# See: https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+
+config:
+  # MD003 - Heading style (disabled — mixed styles OK)
+  MD003: false
+  # MD007 - Unordered list indent (allow 2-space, frontmatter false positives)
+  MD007: false
+  # MD004 - Unordered list style (disabled — mixed markers OK)
+  MD004: false
+  # MD013 - Line length (disabled — long lines OK in docs)
+  MD013: false
+  # MD022 - Headings should be surrounded by blank lines
+  MD022: false
+  # MD024 - No duplicate heading names (disabled — repeated names OK)
+  MD024: false
+  # MD025 - Single top-level heading (disabled — multiple H1 OK)
+  MD025: false
+  # MD026 - No trailing punctuation in headings
+  MD026: false
+  # MD031 - Fenced code blocks surrounded by blank lines
+  MD031: false
+  # MD032 - Lists surrounded by blank lines
+  MD032: false
+  # MD033 - No inline HTML (disabled — HTML allowed)
+  MD033: false
+  # MD034 - No bare URLs
+  MD034: false
+  # MD036 - No emphasis used instead of heading
+  MD036: false
+  # MD040 - Fenced code blocks should have language
+  MD040: false
+  # MD041 - First line in file should be H1
+  MD041: false
+  # MD051 - Link fragments should be valid
+  MD051: false
+  # MD056 - Table column count
+  MD056: false
+  # MD058 - Tables should be surrounded by blank lines
+  MD058: false
+  # MD060 - Table column style spacing
+  MD060: false
+
+# Scan these files
+globs:
+  - "AGENTS.md"
+  - "CONTEXT-GUIDE.md"
+  - "CONTRIBUTING.md"
+  - "README.md"
+  - "docs/*.md"
+  - "templates/*.md"
+
+# Ignore files
+ignores:
+  - "node_modules"
+  - "deleteme"
+
+# Support YAML frontmatter
+frontMatter: "/^---\\s*$[\\s\\S]*?^---\\s*$/m"
