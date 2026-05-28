@@ -8,7 +8,7 @@ nist_controls: ["SA-11", "SA-12", "CM-2", "SI-10", "IA-5", "SC-13", "AU-2"]
 frameworks: ["NIST SP 800-53 Rev 5.2", "OWASP Top 10 LLM 2025", "OWASP Top 10 Agentic 2026"]
 audience: "developers"
 keywords: ["checklist", "pre-deployment", "security-review", "sign-off"]
-related_files: ["docs/CODING_PRACTICES.md", "docs/SECURITY-CONTROLS.md"]
+related_files: ["docs/CODING_PRACTICES.md", "AGENTS.md"]
 load_priority: "reference-only"
 review_cycle: "semi-annually"
 ---
