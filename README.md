@@ -19,9 +19,31 @@ This repository is part of a three-repo ecosystem:
 
 ---
 
-## 5-Minute Quickstart (sbx CLI) — Recommended
+## 5-Minute Quickstart
 
-Already have Docker Desktop 4.41+? Run these commands:
+### Step 1: Install sbx CLI
+
+The `sbx` CLI is a standalone tool — Docker Desktop is **not required**.
+
+```bash
+# macOS
+brew install docker/tap/sbx && sbx login
+
+# Windows
+winget install -h Docker.sbx && sbx login
+
+# Linux (Ubuntu)
+curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
+sudo apt-get install docker-sbx
+sudo usermod -aG kvm $USER && newgrp kvm
+sbx login
+```
+
+> [!NOTE]
+> `sbx login` requires a Docker account. Docker Desktop is not required, but if you have it,
+> your Docker subscription covers sbx licensing.
+
+### Step 2: Configure and Run
 
 ```bash
 # 1. Set network policy (first-time only)
@@ -34,8 +56,7 @@ sbx policy allow network -g "api.gsa.usai.gov"
 sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
 
 # 4. Store GitHub token (for code access)
-sbx secret set -g github
-# When prompted, paste output of: gh auth token
+gh auth token | sbx secret set -g github
 
 # 5. Start a sandbox in your project
 cd /path/to/your/project
@@ -71,19 +92,9 @@ AI coding agents can read files, write code, and execute commands. Running them 
 
 | Requirement | How to Check | Notes |
 |-------------|--------------|-------|
-| Docker Desktop 4.41+ | `docker --version` | Includes sbx CLI |
+| sbx CLI | `sbx version` | Standalone tool, Docker Desktop not required |
 | USAi API key | From your GSA account | Stored via `sbx secret` |
 | GitHub token | `gh auth status` | Optional, for code access |
-
-**Installing sbx CLI (if not bundled):**
-
-```bash
-# macOS
-brew install docker/tap/sbx && sbx login
-
-# Windows
-winget install -h Docker.sbx && sbx login
-```
 
 ---
 
