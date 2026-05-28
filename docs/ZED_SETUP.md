@@ -117,17 +117,17 @@ Add these targets to your target repository's `Makefile` so that the Zed tasks f
 ```makefile
 # Create SBX sandbox using sbx CLI
 create-sandbox:
-	@echo "Creating SBX sandbox..."
-	@if sbx ls | grep -q "my-sandbox"; then \
-		echo "Sandbox already exists. Skipping creation."; \
-	else \
-		sbx create --name my-sandbox opencode .; \
-	fi
+ @echo "Creating SBX sandbox..."
+ @if sbx ls | grep -q "my-sandbox"; then \
+  echo "Sandbox already exists. Skipping creation."; \
+ else \
+  sbx create --name my-sandbox opencode .; \
+ fi
 
 # Run OpenCode agent in sandbox using sbx CLI
 run-agent:
-	@echo "Running OpenCode agent in SBX sandbox..."
-	@sbx run my-sandbox
+ @echo "Running OpenCode agent in SBX sandbox..."
+ @sbx run my-sandbox
 ```
 
 *(Note: If your sandbox name is different than `my-sandbox`, make sure to update the name in the `Makefile` and `.zed/tasks.json` to match!)*
