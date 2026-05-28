@@ -31,24 +31,17 @@ For federal compliance and automation, sbx CLI is the recommended approach.
 
 | Requirement | How to Check | Notes |
 |-------------|--------------|-------|
-| Docker Desktop 4.41+ | `docker --version` | Includes sbx CLI |
+| sbx CLI | `sbx version` | Standalone tool, Docker Desktop not required |
 | USAi API key | From your GSA account | For Anthropic/Claude access |
 | GitHub token | `gh auth token` | Optional, for code access |
 
+> [!NOTE]
+> Docker Desktop is **not required** to use sbx. The sbx CLI is a standalone tool.
+> If you have Docker Desktop, your Docker subscription covers sbx licensing.
+
 ---
 
-## Step 1: Verify Installation
-
-```bash
-# Check sbx is installed
-sbx version
-
-# Expected output:
-# Client Version:  v0.30.0 ...
-# Server Version:  v0.30.0 ...
-```
-
-**Not installed?** Install sbx CLI:
+## Step 1: Install sbx CLI
 
 ```bash
 # macOS
@@ -63,6 +56,16 @@ sudo apt-get install docker-sbx
 sudo usermod -aG kvm $USER
 newgrp kvm
 sbx login
+```
+
+**Verify installation:**
+
+```bash
+sbx version
+
+# Expected output:
+# Client Version:  v0.30.0 ...
+# Server Version:  v0.30.0 ...
 ```
 
 ---
