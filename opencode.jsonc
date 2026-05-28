@@ -4,8 +4,8 @@
   // IMPORTANT: This file contains NO secrets.
   // API key is injected via USAI_API_KEY environment variable.
   //
-  // Usage (inside SBX):
-  //   sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w /Users/williamjzujkowski/git/sbx-testing usai-test opencode
+  // Run this before creating the sandbox:
+  // sbx secret set-custom -g --host api.gsa.usai.gov --name USAI_API_KEY --value <your_api_key>
   "$schema": "https://opencode.ai/config.json",
   "enabled_providers": [
     "usai"
