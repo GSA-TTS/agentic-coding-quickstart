@@ -67,16 +67,14 @@ rm -rf /tmp/quickstart
 
 ### Using sbx CLI (Recommended)
 
-1. **Store your USAi API key securely**:
+1. **Store your USAi API key securely** (USAi is a custom endpoint):
    ```bash
-   sbx secret set -g USAI_API_KEY
-   # Enter your key when prompted
+   sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
    ```
 
-2. **Set up GitHub credentials** (if needed):
+2. **Set up GitHub credentials** (built-in service):
    ```bash
-   sbx secret set -g github
-   # Enter output of: gh auth token
+   gh auth token | sbx secret set -g github
    ```
 
 3. **Create a sandbox** for your project:
@@ -89,6 +87,9 @@ rm -rf /tmp/quickstart
    ```bash
    sbx run my-project
    ```
+
+> [!NOTE]
+> After changing secrets, you must **delete and recreate** the sandbox for changes to take effect.
 
 ### Using Docker Desktop (`docker sandbox`) — DEPRECATED
 

@@ -80,14 +80,22 @@ sbx policy ls
 
 Docker Sandboxes uses a secure secret store to inject credentials. Your API keys are stored in the **system keychain** and **auto-injected into sandboxes**.
 
-### Store USAi API Key (Custom Variable - NEW!)
+### Store USAi API Key (Custom Endpoint)
+
+USAi (`api.gsa.usai.gov`) is **not a built-in sbx service**, so you must use `sbx secret set-custom`:
 
 ```bash
-sbx secret set -g USAI_API_KEY
-# Enter your key when prompted
+# Store USAi API key for the custom endpoint
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
 ```
 
+> [!IMPORTANT]
+> After setting or changing a custom secret, you must **delete and recreate** the sandbox for it to take effect.
+> The `set-custom` command is experimental and may change in future sbx versions.
+
 ### Store Using Built-in Service Names
+
+For built-in services (anthropic, github, openai, etc.), use the simpler syntax:
 
 ```bash
 # For standard Anthropic endpoint (if not using USAi)
@@ -146,22 +154,18 @@ SCOPE      SERVICE        SECRET
 | `groq` | `GROQ_API_KEY` | Groq inference |
 | `mistral` | `MISTRAL_API_KEY` | Mistral models |
 
-**Custom variables (NEW!)** — any variable name works:
+### Custom Endpoints (like USAi)
 
-| Variable | Use Case |
-|----------|----------|
-| `USAI_API_KEY` | USAi API endpoint |
-| `GITLAB_TOKEN` | GitLab access |
-| `MY_CUSTOM_SECRET` | Any custom credential |
+For custom API endpoints that aren't built-in services, use `sbx secret set-custom`:
 
-> **Note:** Custom variable support was added based on community feedback. See [docker/sbx-releases#7](https://github.com/docker/sbx-releases/issues/7) for details. This feature may still be marked as experimental.
+| Endpoint | Command |
+|----------|---------|
+| USAi (`api.gsa.usai.gov`) | `sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"` |
+| GitLab (self-hosted) | `sbx secret set-custom -g --host gitlab.example.com --env GITLAB_TOKEN --value "$GITLAB_TOKEN"` |
 
-```bash
-# Store any custom variable
-sbx secret set -g USAI_API_KEY
-sbx secret set -g GITLAB_TOKEN
-sbx secret set -g MY_CUSTOM_SECRET
-```
+> [!WARNING]
+> The `sbx secret set -g VARNAME` syntax does **not** work for custom variables like `USAI_API_KEY`.
+> You must use `sbx secret set-custom` with the `--host` parameter.
 
 ### Managing Secrets
 
@@ -174,10 +178,10 @@ sbx secret ls -g
 
 # Remove a secret
 sbx secret rm -g anthropic
-sbx secret rm -g USAI_API_KEY
 
-# Update a secret (just set it again)
-sbx secret set -g anthropic
+# Update a secret (set it again, then recreate sandbox)
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$NEW_KEY"
+sbx rm my-sandbox && sbx create --name my-sandbox opencode .
 ```
 
 ---

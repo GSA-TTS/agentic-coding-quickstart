@@ -30,9 +30,8 @@ sbx policy set-default balanced
 # 2. Allow USAi endpoint
 sbx policy allow network -g "api.gsa.usai.gov"
 
-# 3. Store your USAi API key securely
-sbx secret set -g anthropic
-# When prompted, enter your USAi API key
+# 3. Store your USAi API key securely (USAi is a custom endpoint, not built-in)
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
 
 # 4. Store GitHub token (for code access)
 sbx secret set -g github
@@ -42,6 +41,10 @@ sbx secret set -g github
 cd /path/to/your/project
 sbx run opencode .
 ```
+
+> [!NOTE]
+> USAi is not a built-in sbx service, so we use `sbx secret set-custom` instead of `sbx secret set -g`.
+> If you change the secret, you must **delete and recreate** the sandbox for it to take effect.
 
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
 
