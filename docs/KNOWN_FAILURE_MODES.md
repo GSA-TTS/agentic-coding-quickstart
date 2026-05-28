@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-04-14"
+last_updated: "2026-05-28"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -537,71 +537,6 @@ When something fails, work through this list:
 5. [ ] Is the config file actually being read? (add debug logging)
 6. [ ] Did SBX CLI syntax change? (`sbx --help`)
 7. [ ] Is this a known model/entitlement issue? (test with different model)
-
----
-
-## 18. GPT-5.x Models Fail with "Unsupported parameter: max_tokens"
-
-### Symptoms
-
-- OpenCode fails silently when using USAi GPT-5.x models
-- No error message displayed in the UI
-- Direct API calls with `max_tokens` return:
-  ```json
-  {"detail":"400: Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."}
-  ```
-
-### Affected Models
-
-- `gpt-5.4-latest-guardrails-defaultv2`
-- `gpt-5.2-latest-guardrails-defaultv2`
-
-### Root Cause
-
-OpenAI's GPT-5.x series models have deprecated the `max_tokens` parameter in favor of `max_completion_tokens`. The `@ai-sdk/openai-compatible` package (used by OpenCode for USAi) always sends `max_tokens`, which these models reject.
-
-Unlike the primary `@ai-sdk/openai` package, the OpenAI-compatible provider does **not** have reasoning model detection that converts `max_tokens → max_completion_tokens` for GPT-5.x models.
-
-### Status
-
-**USAi team is aware and working on a proxy-level fix** to translate `max_tokens → max_completion_tokens` for affected models. No ETA currently.
-
-Tracked in: [Issue #62](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/62)
-
-### Workaround
-
-Use Claude or Gemini models instead of GPT-5.x until the fix is deployed:
-
-```jsonc
-// In opencode.jsonc
-"model": "usai/claude_4_5_sonnet",  // Works correctly
-// "model": "usai/gpt-5.4-latest-guardrails-defaultv2",  // Broken until fix
-```
-
-**Working models:**
-- `usai/claude_4_5_opus`
-- `usai/claude_4_5_sonnet`
-- `usai/claude_3_5_haiku`
-- `usai/gemini-2.5-pro`
-- `usai/gemini-2.5-flash`
-
-### Verification
-
-Test directly with curl:
-
-```bash
-# This FAILS with max_tokens
-curl -s "https://api.gsa.usai.gov/api/v1/chat/completions" \
-  -H "Authorization: Bearer $USAI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4-latest-guardrails-defaultv2","messages":[{"role":"user","content":"hello"}],"max_tokens":10}'
-
-# This SUCCEEDS without max_tokens
-curl -s "https://api.gsa.usai.gov/api/v1/chat/completions" \
-  -H "Authorization: Bearer $USAI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4-latest-guardrails-defaultv2","messages":[{"role":"user","content":"hello"}]}'
-```
 
 ---
 
