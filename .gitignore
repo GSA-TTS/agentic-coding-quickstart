@@ -37,6 +37,7 @@ audit.log
 .*.bak
 tmp/
 temp/
+deleteme/
 
 # =========================
 # OS
