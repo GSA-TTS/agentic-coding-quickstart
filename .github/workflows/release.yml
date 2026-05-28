@@ -1,5 +1,6 @@
 # Release - Consumes reusable workflow from playbook
 # See: https://github.com/GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-release-please.yml
+# Note: GITHUB_TOKEN is automatically inherited, no need to pass as secret
 
 name: Release
 
@@ -14,5 +15,3 @@ jobs:
     uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-release-please.yml@main
     with:
       release-type: simple
-    secrets:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
