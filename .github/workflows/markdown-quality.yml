@@ -19,7 +19,7 @@ on:
 
 jobs:
   markdown:
-    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-markdown-quality.yml@main
+    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-markdown-quality.yml@workflows/v1
     with:
       run-link-check: true
       continue-on-link-error: true

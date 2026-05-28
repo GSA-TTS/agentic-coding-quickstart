@@ -10,6 +10,6 @@ on:
 
 jobs:
   lint:
-    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-pr-lint.yml@main
+    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-pr-lint.yml@workflows/v1
     with:
       validate-commits: true

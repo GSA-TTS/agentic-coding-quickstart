@@ -12,6 +12,6 @@ on:
 
 jobs:
   release:
-    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-release-please.yml@main
+    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-release-please.yml@workflows/v1
     with:
       release-type: simple
