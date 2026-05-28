@@ -217,11 +217,11 @@ cd /path/to/agentic-coding-quickstart
 ./init-project.sh /path/to/my-existing-app
 
 # Result:
-# ✓ AGENTS.md copied
-# ✓ opencode.jsonc copied
-# ✓ Makefile copied
-# ✓ .zed/tasks.json created
-# ✓ Git repository initialized (if needed)
+# [OK] AGENTS.md
+# [OK] opencode.jsonc
+# [OK] Makefile
+# [OK] .zed/tasks.json
+# [OK] Git repository initialized (if needed)
 ```
 
 ### Next Steps After Provisioning

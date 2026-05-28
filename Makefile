@@ -1,7 +1,7 @@
 # Agentic Coding Quickstart - Makefile
 # Simple commands for setting up and managing your AI-assisted development workspace
 
-.PHONY: setup doctor new-project clean install-hooks help
+.PHONY: setup doctor new-project clean install-hooks help init-project create-sandbox run-agent
 
 # Default target
 help:
@@ -11,7 +11,8 @@ help:
 	@echo "Commands:"
 	@echo "  make setup                 - Set up your workspace (clone playbook, check dependencies)"
 	@echo "  make doctor                - Run health checks on your environment"
-	@echo "  make new-project           - Create a new project directory"
+	@echo "  make new-project           - Create a new project directory (interactive)"
+	@echo "  make init-project TARGET_DIR=/path - Bootstrap a project directory (non-interactive)"
 	@echo "  make create-sandbox        - Create SBX sandbox 'quickstart'"
 	@echo "  make run-agent             - Run OpenCode agent in SBX"
 	@echo "  make install-hooks         - [OPTIONAL] Install pre-commit hooks"
@@ -99,35 +100,35 @@ init-project: _check-target-dir
 	@echo "Initializing project in $(TARGET_DIR)..."
 	@mkdir -p "$(TARGET_DIR)"
 	@echo "Copying configuration files..."
-	@cp AGENTS.md "$(TARGET_DIR)/" && echo "  ✓ AGENTS.md"
-	@cp opencode.jsonc "$(TARGET_DIR)/" && echo "  ✓ opencode.jsonc"
-	@cp Makefile "$(TARGET_DIR)/" && echo "  ✓ Makefile"
+	@cp AGENTS.md "$(TARGET_DIR)/" && echo "  [OK] AGENTS.md"
+	@cp opencode.jsonc "$(TARGET_DIR)/" && echo "  [OK] opencode.jsonc"
+	@cp Makefile "$(TARGET_DIR)/" && echo "  [OK] Makefile"
 	
 	@# Only create README if it doesn't exist
 	@if [ ! -f "$(TARGET_DIR)/README.md" ]; then \
-		echo "# $(shell basename $(TARGET_DIR))" > "$(TARGET_DIR)/README.md"; \
+		echo "# $$(basename "$(TARGET_DIR)")" > "$(TARGET_DIR)/README.md"; \
 		echo "" >> "$(TARGET_DIR)/README.md"; \
 		echo "Project initialized from agentic-coding-quickstart." >> "$(TARGET_DIR)/README.md"; \
 		echo "" >> "$(TARGET_DIR)/README.md"; \
 		echo "Next: run 'make setup' inside your new project directory." >> "$(TARGET_DIR)/README.md"; \
-		echo "  ✓ README.md (created)"; \
+		echo "  [OK] README.md (created)"; \
 	else \
-		echo "  → README.md (already exists, skipped)"; \
+		echo "  [SKIP] README.md (already exists)"; \
 	fi
 
 	@# Create .zed directory and copy tasks.json
 	@mkdir -p "$(TARGET_DIR)/.zed"
-	@cp .zed/tasks.json "$(TARGET_DIR)/.zed/tasks.json" && echo "  ✓ .zed/tasks.json"
+	@cp .zed/tasks.json "$(TARGET_DIR)/.zed/tasks.json" && echo "  [OK] .zed/tasks.json"
 	
 	@# Only run git init if it's not already a git repository
 	@if [ ! -d "$(TARGET_DIR)/.git" ]; then \
 		git init "$(TARGET_DIR)" > /dev/null 2>&1; \
-		echo "  ✓ Git repository initialized"; \
+		echo "  [OK] Git repository initialized"; \
 	else \
-		echo "  → Git repository (already exists, skipped)"; \
+		echo "  [SKIP] Git repository (already exists)"; \
 	fi
 	@echo ""
-	@echo "✓ Project initialized in $(TARGET_DIR)"
+	@echo "[OK] Project initialized in $(TARGET_DIR)"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. cd $(TARGET_DIR)"
