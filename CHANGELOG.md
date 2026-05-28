@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.7.0...v0.7.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* use `sbx secret set-custom` for USAI_API_KEY ([#57](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/57)) ([56da7c5](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/56da7c523b88e6a7093091bc86f3a31bf846c9b3))
+
 ## [0.7.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.6.1...v0.7.0) (2026-05-27)
 
 
