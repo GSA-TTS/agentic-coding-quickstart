@@ -1,3 +1,6 @@
+# Release - Consumes reusable workflow from playbook
+# See: https://github.com/GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-release-please.yml
+
 name: Release
 
 on:
@@ -6,23 +9,10 @@ on:
       - main
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
-  release-please:
-    name: Release Please
-    runs-on: ubuntu-latest
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      version: ${{ steps.release.outputs.version }}
-
-    steps:
-      - name: Run release-please
-        id: release
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          release-type: simple
+  release:
+    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-release-please.yml@main
+    with:
+      release-type: simple
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

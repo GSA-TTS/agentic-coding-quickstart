@@ -1,0 +1,16 @@
+# PR Lint - Consumes reusable workflow from playbook
+# See: https://github.com/GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-pr-lint.yml
+
+name: PR Lint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  lint:
+    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-pr-lint.yml@main
+    with:
+      validate-commits: true
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

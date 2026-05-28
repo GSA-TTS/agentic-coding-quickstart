@@ -1,0 +1,25 @@
+# Markdown Quality - Consumes reusable workflow from playbook
+# See: https://github.com/GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-markdown-quality.yml
+
+name: Markdown Quality
+
+on:
+  pull_request:
+    paths:
+      - '**/*.md'
+      - '.markdownlint-cli2.jsonc'
+      - '.markdown-link-check.json'
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.md'
+      - '.markdownlint-cli2.jsonc'
+      - '.markdown-link-check.json'
+
+jobs:
+  markdown:
+    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-markdown-quality.yml@main
+    with:
+      run-link-check: true
+      continue-on-link-error: true
