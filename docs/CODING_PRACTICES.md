@@ -8,7 +8,7 @@ nist_controls: ["SA-8", "SA-11", "SA-12", "SA-15", "SA-17", "SI-2", "SI-4", "SI-
 frameworks: ["NIST SP 800-53 Rev 5.2", "NIST SP 800-218A", "OWASP Top 10 LLM 2025", "OWASP Top 10 Agentic 2026", "CISA Secure by Design"]
 audience: "developers"
 keywords: ["secure-coding", "input-validation", "secrets-management", "supply-chain", "SBOM", "OWASP", "SSDF", "TDD", "SOLID", "YAGNI", "DRY", "ADR", "design-by-contract", "bias-testing", "fairness", "model-evaluation", "continuous-monitoring", "model-drift"]
-related_files: ["AGENTS.md", "docs/SECURITY-CONTROLS.md", "checklists/pre-deployment.md"]
+related_files: ["AGENTS.md", "checklists/pre-deployment.md"]
 load_priority: "always"
 review_cycle: "quarterly"
 ---

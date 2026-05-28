@@ -81,7 +81,7 @@ Agents should:
 > USAi and GitLab are **not built-in sbx services**. You must use `sbx secret set-custom` with the `--host` parameter.
 > After changing secrets, **delete and recreate** the sandbox for changes to take effect.
 
-See `docs/SBX_PATTERNS.md` for detailed credential injection patterns.
+See `templates/SBX_PATTERNS.md` for detailed credential injection patterns.
 
 ---
 
