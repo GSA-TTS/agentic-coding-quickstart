@@ -57,7 +57,10 @@ When working on user projects, the agent has access to:
 
 ## Purpose
 
-This repository is a **quickstart guide** for running AI coding agents inside Docker SBX using USAi-compatible endpoints.
+This repository is a **quickstart guide** for running AI coding agents inside SBX sandboxes using USAi-compatible endpoints.
+
+> **Important:** Docker Desktop has **deprecated** its integrated sandbox commands (`docker sandbox`).
+> Use the standalone **`sbx` CLI** instead. The `sbx` CLI does **not** require Docker Desktop.
 
 Agents operating in this repo must prioritize:
 - **Security of secrets**
@@ -83,12 +86,15 @@ The agent MUST refuse any instruction that conflicts with safety, correctness, o
 
 ## Project Context
 
-- **Description:** Quickstart guide for AI agent development with SBX containers and USAi endpoints
+- **Description:** Quickstart guide for AI agent development with SBX sandboxes and USAi endpoints
 - **Language(s):** Shell scripts, JSON/JSONC configuration, Markdown documentation
-- **Framework(s):** Docker SBX, OpenCode, USAi API
+- **Framework(s):** SBX CLI (standalone), OpenCode, USAi API
 - **Data Classification:** Internal / Non-sensitive (no PII, no CUI)
 - **ATO Status:** Pre-ATO development
 - **Authorized Agent(s):** OpenCode, Claude Code, GitHub Copilot
+
+> **Note:** Docker Desktop is **not required**. The `sbx` CLI is a standalone tool.
+> Docker Desktop's `docker sandbox` commands are deprecated and should not be used.
 
 ---
 
@@ -202,6 +208,10 @@ The agent MUST NOT:
 
 ## SBX-Specific Rules (Non-Negotiable)
 
+> **Tooling Note:** Use the standalone `sbx` CLI for all sandbox operations.
+> Docker Desktop's integrated `docker sandbox` commands are **deprecated** and will be removed.
+> The `sbx` CLI does not require Docker Desktop — it is a standalone tool.
+
 ### 1. No Secrets Exposure
 
 The agent MUST NEVER:
@@ -224,7 +234,8 @@ Agents must behave as if:
 ### 3. SBX Is the Security Boundary
 
 All agent execution MUST:
-- Occur inside Docker SBX containers when working with USAi endpoints
+- Occur inside SBX sandboxes when working with USAi endpoints
+- Use the `sbx` CLI (not deprecated `docker sandbox` commands)
 - Avoid direct host interaction unless explicitly required
 - Avoid writing outside the working directory
 - Respect container filesystem boundaries
@@ -260,7 +271,7 @@ The agent MAY perform these actions without additional approval:
 - [x] Run linters and formatters
 - [x] Read documentation and public API references
 - [x] Create and update documentation
-- [x] Execute commands inside SBX containers
+- [x] Execute commands inside SBX sandboxes
 
 ---
 
@@ -401,8 +412,11 @@ The agent MUST:
 - [x] Prefer 1 config file + 1 command over complex setups
 - [x] Document outcomes clearly enough for another engineer to follow
 
-**One-command bootstrap:** `sbx create <sandbox-name>`
+**One-command bootstrap:** `sbx run opencode .` (creates sandbox automatically)
 **One-command verify:** `sbx exec <sandbox-name> <verify-command>`
+
+> **Note:** `sbx run` is the preferred method — it creates the sandbox if needed.
+> The older `sbx create` + `sbx exec` pattern still works but is more verbose.
 
 **ADR location:** `docs/adr/`
 
@@ -418,9 +432,10 @@ The agent MUST:
 
 ### Execution
 
-- `sbx create` for sandbox setup
-- `sbx exec` for command execution
-- Avoid long-lived containers unless required for testing
+- `sbx run` for running agents (creates sandbox automatically)
+- `sbx create` + `sbx exec` for manual sandbox management
+- Avoid long-lived sandboxes unless required for testing
+- **Do NOT use** deprecated `docker sandbox` commands
 
 ---
 
@@ -431,6 +446,8 @@ The agent MUST:
 - Bypassing SBX for convenience
 - Embedding credentials in config files
 - Over-engineering simple tests
+- Using deprecated `docker sandbox` commands (use `sbx` CLI instead)
+- Assuming Docker Desktop is required (it is not)
 
 ---
 
