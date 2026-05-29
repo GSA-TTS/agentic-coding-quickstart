@@ -1,7 +1,7 @@
 # Agentic Coding Quickstart - Makefile
 # Simple commands for setting up and managing your AI-assisted development workspace
 
-.PHONY: setup doctor new-project clean install-hooks help init-project create-sandbox run-agent
+.PHONY: setup doctor new-project clean install-hooks help init-project run-agent
 
 # Default target
 help:
@@ -9,11 +9,10 @@ help:
 	@echo "========================="
 	@echo ""
 	@echo "Commands:"
-	@echo "  make setup                 - Set up your workspace (clone playbook, check dependencies)"
+	@echo "  make setup                 - Set up your workspace (clone playbook, check dependencies, save USAI_API_KEY to SBX)"
 	@echo "  make doctor                - Run health checks on your environment"
 	@echo "  make new-project           - Create a new project directory (interactive)"
 	@echo "  make init-project TARGET_DIR=/path - Bootstrap a project directory (non-interactive)"
-	@echo "  make create-sandbox        - Create SBX sandbox 'quickstart'"
 	@echo "  make run-agent             - Run OpenCode agent in SBX"
 	@echo "  make install-hooks         - [OPTIONAL] Install pre-commit hooks"
 	@echo "  make clean                 - Remove generated files"
@@ -21,7 +20,7 @@ help:
 	@echo "First time? Run: make setup"
 
 # Set up the workspace
-setup: _check-docker _check-git _clone-playbook
+setup: _check-git _check-sbx _check-usai-key _clone-playbook
 	@echo ""
 	@echo "Setup complete!"
 	@echo ""
@@ -31,16 +30,45 @@ setup: _check-docker _check-git _clone-playbook
 	@echo "  3. Ask it to help you build something"
 	@echo ""
 
-_check-docker:
-	@echo "Checking Docker..."
-	@command -v docker >/dev/null 2>&1 || { echo "ERROR: Docker not found. Install Docker first."; exit 1; }
-	@docker info >/dev/null 2>&1 || { echo "ERROR: Docker not running. Start Docker first."; exit 1; }
-	@echo "  Docker: OK"
-
 _check-git:
 	@echo "Checking Git..."
 	@command -v git >/dev/null 2>&1 || { echo "ERROR: Git not found. Install Git first."; exit 1; }
 	@echo "  Git: OK"
+
+_check-sbx:
+	@echo "Checking SBX..."
+	@command -v sbx >/dev/null 2>&1 || { echo "ERROR: SBX not found. Install SBX first."; exit 1; }
+	@# Verify sbx is accessible (catches auth/daemon issues)
+	@sbx secret ls >/dev/null 2>&1 || { \
+		echo "ERROR: Cannot access SBX. Common fixes:"; \
+		echo "  - Run: sbx login"; \
+		echo "  - Run: sbx diagnose"; \
+		exit 1; \
+	}
+	@echo "  SBX: OK"
+
+_check-usai-key:
+	@echo "Checking USAI_API_KEY secret in SBX..."
+	@if sbx secret ls 2>/dev/null | grep -q "USAI_API_KEY"; then \
+		echo "  USAI_API_KEY: OK"; \
+	else \
+		echo "  USAI_API_KEY not found in SBX secrets."; \
+		read -s -p "Paste USAI_API_KEY value here: " key; \
+		echo ""; \
+		if [ -n "$$key" ]; then \
+			USAI_KEY="$$key" sh -c 'sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$$USAI_KEY"' || { \
+				echo "ERROR: Failed to store USAI_API_KEY in SBX secrets."; \
+				echo "  Check that SBX is running and you have permissions."; \
+				exit 1; \
+			}; \
+			echo "  USAI_API_KEY: Stored in SBX secrets"; \
+		else \
+			echo ""; \
+			echo "ERROR: USAI_API_KEY is required. Get your key at:"; \
+			echo "  https://console.gsa.usai.gov/key-management"; \
+			exit 1; \
+		fi; \
+	fi
 
 _clone-playbook:
 	@echo "Checking for playbook..."
@@ -61,19 +89,12 @@ doctor:
 	@echo ""
 	@echo "Environment"
 	@echo "-----------"
-	@command -v docker >/dev/null 2>&1 && echo "[OK] Docker installed" || echo "[FAIL] Docker not found"
-	@docker info >/dev/null 2>&1 && echo "[OK] Docker running" || echo "[FAIL] Docker not running"
 	@command -v git >/dev/null 2>&1 && echo "[OK] Git installed" || echo "[FAIL] Git not found"
-	@command -v sbx >/dev/null 2>&1 && echo "[OK] SBX installed" || echo "[WARN] SBX not found (optional)"
-	@if [ -n "$$USAI_API_KEY" ]; then \
-		echo "[OK] USAI_API_KEY is set"; \
+	@command -v sbx >/dev/null 2>&1 && echo "[OK] SBX installed" || echo "[FAIL] SBX not found"
+	@if sbx secret ls 2>/dev/null | grep -q "USAI_API_KEY"; then \
+		echo "[OK] USAI_API_KEY secret set in SBX"; \
 	else \
-		echo "[FAIL] USAI_API_KEY is not set"; \
-		echo ""; \
-		echo "To set your API key, run:"; \
-		echo "  export USAI_API_KEY=\"your-api-key-here\""; \
-		echo ""; \
-		echo "Get your API key at: https://console.gsa.usai.gov/key-management"; \
+		echo "[FAIL] USAI_API_KEY secret not found in SBX"; \
 	fi
 	@echo ""
 	@echo "Workspace"
@@ -96,12 +117,30 @@ new-project:
 	$(MAKE) init-project TARGET_DIR="../$$name"
 
 # Initialize a new project from the quickstart (non-interactive)
-init-project: _check-target-dir
+init-project: _check-target-dir _clone-playbook
 	@echo "Initializing project in $(TARGET_DIR)..."
-	@mkdir -p "$(TARGET_DIR)"
+	@# Verify required source files exist before copying
+	@test -f ../agentic-coding-playbook/AGENTS.md || { \
+		echo "ERROR: Playbook AGENTS.md not found."; \
+		echo "  Run 'make setup' or check ../agentic-coding-playbook exists."; \
+		exit 1; \
+	}
+	@test -f templates/AGENTS_SBX_ADDENDUM.md || { \
+		echo "ERROR: templates/AGENTS_SBX_ADDENDUM.md not found."; \
+		exit 1; \
+	}
+	@test -f templates/opencode.jsonc || { \
+		echo "ERROR: templates/opencode.jsonc not found."; \
+		exit 1; \
+	}
+	@test -f templates/SBX_PATTERNS.md || { \
+		echo "ERROR: templates/SBX_PATTERNS.md not found."; \
+		exit 1; \
+	}
 	@echo "Copying configuration files..."
-	@cp AGENTS.md "$(TARGET_DIR)/" && echo "  [OK] AGENTS.md"
-	@cp opencode.jsonc "$(TARGET_DIR)/" && echo "  [OK] opencode.jsonc"
+	@cp ../agentic-coding-playbook/AGENTS.md "$(TARGET_DIR)/" && echo "  [OK] AGENTS.md"
+	@tail -n +7 templates/AGENTS_SBX_ADDENDUM.md >> "$(TARGET_DIR)/AGENTS.md" && echo "  [OK] AGENTS.md (SBX addendum appended)"
+	@cp templates/opencode.jsonc "$(TARGET_DIR)/" && echo "  [OK] opencode.jsonc"
 	@cp Makefile "$(TARGET_DIR)/" && echo "  [OK] Makefile"
 
 	@# Only create README if it doesn't exist
@@ -118,7 +157,11 @@ init-project: _check-target-dir
 
 	@# Create .zed directory and copy tasks.json
 	@mkdir -p "$(TARGET_DIR)/.zed"
-	@cp .zed/tasks.json "$(TARGET_DIR)/.zed/tasks.json" && echo "  [OK] .zed/tasks.json"
+	@cp templates/zed-tasks.json "$(TARGET_DIR)/.zed/tasks.json" && echo "  [OK] .zed/tasks.json"
+
+	@# Create docs directory and copy SBX_PATTERNS.md
+	@mkdir -p "$(TARGET_DIR)/docs"
+	@cp templates/SBX_PATTERNS.md "$(TARGET_DIR)/docs/SBX_PATTERNS.md" && echo "  [OK] docs/SBX_PATTERNS.md"
 
 	@# Only run git init if it's not already a git repository
 	@if [ ! -d "$(TARGET_DIR)/.git" ]; then \
@@ -150,30 +193,10 @@ _check-target-dir:
 clean:
 	@echo "Nothing to clean (this repo doesn't generate files)"
 
-# Create SBX sandbox 'quickstart'
-create-sandbox:
-	@echo "Creating SBX sandbox 'quickstart'..."
-	@if sbx ls | grep -q "quickstart"; then \
-		echo "Sandbox 'quickstart' already exists. Skipping creation."; \
-	else \
-		sbx create --name quickstart opencode .; \
-	fi
-
-# Run OpenCode agent in sandbox 'quickstart'
+# Run OpenCode agent in sandbox with default name
 run-agent: _check-usai-key
-	@echo "Running OpenCode agent in SBX sandbox 'quickstart'..."
-	@sbx exec -it \
-		-e USAI_API_KEY="$(USAI_API_KEY)" \
-		$(if $(NODE_TLS_REJECT_UNAUTHORIZED),-e NODE_TLS_REJECT_UNAUTHORIZED="$(NODE_TLS_REJECT_UNAUTHORIZED)",) \
-		-w "$(shell pwd)" quickstart opencode
-
-_check-usai-key:
-	@if [ -z "$(USAI_API_KEY)" ]; then \
-		echo "ERROR: USAI_API_KEY environment variable is not set on host."; \
-		echo "Please set it before running the agent. Example:"; \
-		echo "  export USAI_API_KEY=\"your-key-here\""; \
-		exit 1; \
-	fi
+	@echo "Running OpenCode agent in SBX sandbox..."
+	@sbx run opencode .
 
 # Install pre-commit hooks (optional)
 install-hooks:  ## [OPTIONAL] Install pre-commit hooks

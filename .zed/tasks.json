@@ -6,12 +6,6 @@
     "allow_concurrent_runs": false
   },
   {
-    "label": "OpenCode: Create Sandbox",
-    "command": "make create-sandbox",
-    "use_new_terminal": true,
-    "allow_concurrent_runs": false
-  },
-  {
     "label": "OpenCode: Environment Diagnostics (make doctor)",
     "command": "make doctor",
     "use_new_terminal": true,
