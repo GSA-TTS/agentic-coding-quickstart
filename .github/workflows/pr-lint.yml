@@ -8,6 +8,14 @@ on:
   pull_request:
     types: [opened, edited, synchronize]
 
+concurrency:
+  group: pr-lint-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   lint:
     uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-pr-lint.yml@workflows/v1

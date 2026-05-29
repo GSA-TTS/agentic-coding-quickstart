@@ -10,6 +10,12 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
 jobs:
   release:
     uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-release-please.yml@workflows/v1

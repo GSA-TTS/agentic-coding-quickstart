@@ -17,6 +17,13 @@ on:
       - '.markdownlint-cli2.jsonc'
       - '.markdown-link-check.json'
 
+concurrency:
+  group: markdown-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   markdown:
     uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-markdown-quality.yml@workflows/v1
