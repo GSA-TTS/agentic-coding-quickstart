@@ -5,10 +5,12 @@
   // 1. Copy this file to your project root as `opencode.jsonc`
   // 2. Customize the models list based on your USAi API key entitlements
   // 3. Update the default model if needed
-  // 4. Run with: sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX opencode
+  // 4. Set up your USAi API key as a SBX secret before the first run:
+  //    sbx secret set-custom -g --host api.gsa.usai.gov --name USAI_API_KEY --value <your_api_key>
+  // 5. Run with: sbx run opencode .
   //
   // IMPORTANT: This file contains NO secrets.
-  // API key is injected via USAI_API_KEY environment variable.
+  // API key is injected via USAI_API_KEY secret.
 
   "$schema": "https://opencode.ai/config.json",
   "enabled_providers": [
