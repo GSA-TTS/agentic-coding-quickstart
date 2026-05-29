@@ -126,6 +126,32 @@ See the **[Zed Editor Setup Guide](docs/ZED_SETUP.md)** for detailed instruction
 
 ---
 
+## OpenCode Web (Optional)
+
+An alternative to running OpenCode in the terminal is to run OpenCode Web in the sandbox and access it from your host browser. This has a few benefits:
+
+- Full support for copying text from the agent output to your host clipboard
+- Richer visual interface with improved markdown rendering
+- Easier navigation through long outputs and conversation history
+
+To run OpenCode Web in a sandbox:
+
+```bash
+# In one terminal, start OpenCode Web
+sbx run [your sandbox name] -- web --hostname 0.0.0.0 --port 4096
+
+# In another terminal, publish the port to your host
+sbx ports [your sandbox name] --publish 4096:4096
+```
+
+Then open `http://127.0.0.1:4096` in your browser.
+
+A convenience script is available to automate this: [`opencode-web.sh`](opencode-web.sh)
+
+For more information, see the [OpenCode Web documentation](https://opencode.ai/docs/web).
+
+---
+
 ## Security Model
 
 1. **All execution inside sbx containers** — Isolated from your host system
