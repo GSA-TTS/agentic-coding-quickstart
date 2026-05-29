@@ -1,7 +1,7 @@
 # Agentic Coding Quickstart - Makefile
 # Simple commands for setting up and managing your AI-assisted development workspace
 
-.PHONY: setup doctor new-project clean install-hooks help init-project create-sandbox run-agent
+.PHONY: setup doctor new-project clean install-hooks help init-project run-agent
 
 # Default target
 help:
@@ -13,7 +13,6 @@ help:
 	@echo "  make doctor                - Run health checks on your environment"
 	@echo "  make new-project           - Create a new project directory (interactive)"
 	@echo "  make init-project TARGET_DIR=/path - Bootstrap a project directory (non-interactive)"
-	@echo "  make create-sandbox        - Create SBX sandbox 'quickstart'"
 	@echo "  make run-agent             - Run OpenCode agent in SBX"
 	@echo "  make install-hooks         - [OPTIONAL] Install pre-commit hooks"
 	@echo "  make clean                 - Remove generated files"
@@ -158,22 +157,10 @@ _check-target-dir:
 clean:
 	@echo "Nothing to clean (this repo doesn't generate files)"
 
-# Create SBX sandbox 'quickstart'
-create-sandbox:
-	@echo "Creating SBX sandbox 'quickstart'..."
-	@if sbx ls | grep -q "quickstart"; then \
-		echo "Sandbox 'quickstart' already exists. Skipping creation."; \
-	else \
-		sbx create --name quickstart opencode .; \
-	fi
-
-# Run OpenCode agent in sandbox 'quickstart'
+# Run OpenCode agent in sandbox with default name
 run-agent: _check-usai-key
-	@echo "Running OpenCode agent in SBX sandbox 'quickstart'..."
-	@sbx exec -it \
-		-e USAI_API_KEY="$(USAI_API_KEY)" \
-		$(if $(NODE_TLS_REJECT_UNAUTHORIZED),-e NODE_TLS_REJECT_UNAUTHORIZED="$(NODE_TLS_REJECT_UNAUTHORIZED)",) \
-		-w "$(shell pwd)" quickstart opencode
+	@echo "Running OpenCode agent in SBX sandbox..."
+	@sbx run opencode .
 
 # Install pre-commit hooks (optional)
 install-hooks:  ## [OPTIONAL] Install pre-commit hooks
