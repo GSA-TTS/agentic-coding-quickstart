@@ -9,7 +9,7 @@ help:
 	@echo "========================="
 	@echo ""
 	@echo "Commands:"
-	@echo "  make setup                 - Set up your workspace (clone playbook, check dependencies)"
+	@echo "  make setup                 - Set up your workspace (clone playbook, check dependencies, save USAI_API_KEY to SBX)"
 	@echo "  make doctor                - Run health checks on your environment"
 	@echo "  make new-project           - Create a new project directory (interactive)"
 	@echo "  make init-project TARGET_DIR=/path - Bootstrap a project directory (non-interactive)"
@@ -21,7 +21,7 @@ help:
 	@echo "First time? Run: make setup"
 
 # Set up the workspace
-setup: _check-git _check-sbx _clone-playbook
+setup: _check-git _check-sbx _check-usai-key _clone-playbook
 	@echo ""
 	@echo "Setup complete!"
 	@echo ""
@@ -40,6 +40,22 @@ _check-sbx:
 	@echo "Checking SBX..."
 	@command -v sbx >/dev/null 2>&1 || { echo "ERROR: SBX not found. Install SBX first."; exit 1; }
 	@echo "  SBX: OK"
+
+_check-usai-key:
+	@echo "Checking USAI_API_KEY secret in SBX..."
+	@if sbx secret ls | grep -q "USAI_API_KEY"; then \
+		echo "  USAI_API_KEY: OK"; \
+	else \
+		read -s -p "Paste USAI_API_KEY value here: " key; \
+		echo ""; \
+		if [ -n "$$key" ]; then \
+			sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$$key"; \
+		else \
+			echo ""; \
+			echo "ERROR: USAI_API_KEY secret not found in SBX. Please set it up before running the agent."; \
+			exit 1; \
+		fi; \
+	fi
 
 _clone-playbook:
 	@echo "Checking for playbook..."
@@ -62,15 +78,10 @@ doctor:
 	@echo "-----------"
 	@command -v git >/dev/null 2>&1 && echo "[OK] Git installed" || echo "[FAIL] Git not found"
 	@command -v sbx >/dev/null 2>&1 && echo "[OK] SBX installed" || echo "[FAIL] SBX not found"
-	@if [ -n "$$USAI_API_KEY" ]; then \
-		echo "[OK] USAI_API_KEY is set"; \
+	@if sbx secret ls | grep -q "USAI_API_KEY"; then \
+		echo "[OK] USAI_API_KEY secret set in SBX"; \
 	else \
-		echo "[FAIL] USAI_API_KEY is not set"; \
-		echo ""; \
-		echo "To set your API key, run:"; \
-		echo "  export USAI_API_KEY=\"your-api-key-here\""; \
-		echo ""; \
-		echo "Get your API key at: https://console.gsa.usai.gov/key-management"; \
+		echo "[FAIL] USAI_API_KEY secret not found in SBX"; \
 	fi
 	@echo ""
 	@echo "Workspace"
@@ -163,14 +174,6 @@ run-agent: _check-usai-key
 		-e USAI_API_KEY="$(USAI_API_KEY)" \
 		$(if $(NODE_TLS_REJECT_UNAUTHORIZED),-e NODE_TLS_REJECT_UNAUTHORIZED="$(NODE_TLS_REJECT_UNAUTHORIZED)",) \
 		-w "$(shell pwd)" quickstart opencode
-
-_check-usai-key:
-	@if [ -z "$(USAI_API_KEY)" ]; then \
-		echo "ERROR: USAI_API_KEY environment variable is not set on host."; \
-		echo "Please set it before running the agent. Example:"; \
-		echo "  export USAI_API_KEY=\"your-key-here\""; \
-		exit 1; \
-	fi
 
 # Install pre-commit hooks (optional)
 install-hooks:  ## [OPTIONAL] Install pre-commit hooks
