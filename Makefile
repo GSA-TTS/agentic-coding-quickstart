@@ -21,7 +21,7 @@ help:
 	@echo "First time? Run: make setup"
 
 # Set up the workspace
-setup: _check-docker _check-git _clone-playbook
+setup: _check-git _check-sbx _clone-playbook
 	@echo ""
 	@echo "Setup complete!"
 	@echo ""
@@ -31,16 +31,15 @@ setup: _check-docker _check-git _clone-playbook
 	@echo "  3. Ask it to help you build something"
 	@echo ""
 
-_check-docker:
-	@echo "Checking Docker..."
-	@command -v docker >/dev/null 2>&1 || { echo "ERROR: Docker not found. Install Docker first."; exit 1; }
-	@docker info >/dev/null 2>&1 || { echo "ERROR: Docker not running. Start Docker first."; exit 1; }
-	@echo "  Docker: OK"
-
 _check-git:
 	@echo "Checking Git..."
 	@command -v git >/dev/null 2>&1 || { echo "ERROR: Git not found. Install Git first."; exit 1; }
 	@echo "  Git: OK"
+
+_check-sbx:
+	@echo "Checking SBX..."
+	@command -v sbx >/dev/null 2>&1 || { echo "ERROR: SBX not found. Install SBX first."; exit 1; }
+	@echo "  SBX: OK"
 
 _clone-playbook:
 	@echo "Checking for playbook..."
@@ -61,10 +60,8 @@ doctor:
 	@echo ""
 	@echo "Environment"
 	@echo "-----------"
-	@command -v docker >/dev/null 2>&1 && echo "[OK] Docker installed" || echo "[FAIL] Docker not found"
-	@docker info >/dev/null 2>&1 && echo "[OK] Docker running" || echo "[FAIL] Docker not running"
 	@command -v git >/dev/null 2>&1 && echo "[OK] Git installed" || echo "[FAIL] Git not found"
-	@command -v sbx >/dev/null 2>&1 && echo "[OK] SBX installed" || echo "[WARN] SBX not found (optional)"
+	@command -v sbx >/dev/null 2>&1 && echo "[OK] SBX installed" || echo "[FAIL] SBX not found"
 	@if [ -n "$$USAI_API_KEY" ]; then \
 		echo "[OK] USAI_API_KEY is set"; \
 	else \
