@@ -476,22 +476,23 @@ Because the sandboxed container runs a vanilla Linux environment, it does not au
 
 To resolve this during local development, you can tell Node.js to ignore TLS validation errors inside the sandbox using `NODE_TLS_REJECT_UNAUTHORIZED=0`.
 
-#### Option A: Run-Time Flag (Standalone CLI)
-Run your agent with the environment variable set:
-```bash
-NODE_TLS_REJECT_UNAUTHORIZED=0 make run-agent
-```
-*(The `Makefile` is configured to automatically pass this variable into the container if it's set on your host).*
+> **⚠️ SECURITY WARNING:** Disabling TLS validation bypasses certificate verification, which is a significant security risk. This workaround should **only** be used:
+> - For debugging TLS issues in isolated local development environments
+> - **Never** with real credentials or production endpoints
+> - **Never** in CI/CD pipelines or shared environments
 
-#### Option B: Global Shell Profile (Works for both Standalone CLI and Docker Desktop)
-Add the variable to your shell configuration (`~/.zshrc` or `~/.bashrc`):
-```bash
-echo 'export NODE_TLS_REJECT_UNAUTHORIZED="0"' >> ~/.zshrc
-source ~/.zshrc
-```
-*(Docker Desktop users: Remember to completely **restart Docker Desktop** after saving this so that sandboxes inherit the variable).*
+#### Workaround: Pass Environment Variable via SBX
 
-> **⚠️ Security Warning:** Bypassing TLS validation should only be used in isolated local development sandbox environments. Never disable certificate validation in production application code.
+Run your agent with the environment variable injected directly into the sandbox:
+
+```bash
+# For debugging TLS issues only - never use with real credentials
+sbx run -e NODE_TLS_REJECT_UNAUTHORIZED=0 opencode .
+```
+
+This passes the `NODE_TLS_REJECT_UNAUTHORIZED=0` environment variable into the sandbox at runtime without persisting it.
+
+> **Note:** The previous `make run-agent` passthrough has been removed. Use the `sbx run -e` flag directly to inject environment variables.
 
 ---
 

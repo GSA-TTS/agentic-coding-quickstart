@@ -425,6 +425,24 @@ sbx run opencode-myproject
 
 Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
 
+### Migration from Pre-v0.9.0
+
+If you previously used `make create-sandbox`, you may have an orphaned `quickstart` sandbox that is no longer used. The new `make run-agent` uses `sbx run` which manages sandboxes automatically.
+
+To clean up the old sandbox:
+
+```bash
+# Check for old sandbox
+sbx ls | grep quickstart
+
+# Remove if present (optional - it won't interfere, just wastes disk space)
+sbx rm quickstart
+```
+
+The new workflow is simpler:
+- Old: `make create-sandbox` then `make run-agent`
+- New: `make run-agent` (creates sandbox automatically via `sbx run`)
+
 ---
 
 ## Next Steps
