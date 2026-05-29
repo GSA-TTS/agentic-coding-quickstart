@@ -41,8 +41,8 @@ _check-sbx:
 	@# Verify sbx is accessible (catches auth/daemon issues)
 	@sbx secret ls >/dev/null 2>&1 || { \
 		echo "ERROR: Cannot access SBX. Common fixes:"; \
-		echo "  - Ensure Docker Desktop is running"; \
 		echo "  - Run: sbx login"; \
+		echo "  - Run: sbx diagnose"; \
 		exit 1; \
 	}
 	@echo "  SBX: OK"
