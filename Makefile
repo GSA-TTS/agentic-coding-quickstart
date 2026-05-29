@@ -38,20 +38,34 @@ _check-git:
 _check-sbx:
 	@echo "Checking SBX..."
 	@command -v sbx >/dev/null 2>&1 || { echo "ERROR: SBX not found. Install SBX first."; exit 1; }
+	@# Verify sbx is accessible (catches auth/daemon issues)
+	@sbx secret ls >/dev/null 2>&1 || { \
+		echo "ERROR: Cannot access SBX. Common fixes:"; \
+		echo "  - Ensure Docker Desktop is running"; \
+		echo "  - Run: sbx login"; \
+		exit 1; \
+	}
 	@echo "  SBX: OK"
 
 _check-usai-key:
 	@echo "Checking USAI_API_KEY secret in SBX..."
-	@if sbx secret ls | grep -q "USAI_API_KEY"; then \
+	@if sbx secret ls 2>/dev/null | grep -q "USAI_API_KEY"; then \
 		echo "  USAI_API_KEY: OK"; \
 	else \
+		echo "  USAI_API_KEY not found in SBX secrets."; \
 		read -s -p "Paste USAI_API_KEY value here: " key; \
 		echo ""; \
 		if [ -n "$$key" ]; then \
-			sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$$key"; \
+			USAI_KEY="$$key" sh -c 'sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$$USAI_KEY"' || { \
+				echo "ERROR: Failed to store USAI_API_KEY in SBX secrets."; \
+				echo "  Check that SBX is running and you have permissions."; \
+				exit 1; \
+			}; \
+			echo "  USAI_API_KEY: Stored in SBX secrets"; \
 		else \
 			echo ""; \
-			echo "ERROR: USAI_API_KEY secret not found in SBX. Please set it up before running the agent."; \
+			echo "ERROR: USAI_API_KEY is required. Get your key at:"; \
+			echo "  https://console.gsa.usai.gov/key-management"; \
 			exit 1; \
 		fi; \
 	fi
@@ -77,7 +91,7 @@ doctor:
 	@echo "-----------"
 	@command -v git >/dev/null 2>&1 && echo "[OK] Git installed" || echo "[FAIL] Git not found"
 	@command -v sbx >/dev/null 2>&1 && echo "[OK] SBX installed" || echo "[FAIL] SBX not found"
-	@if sbx secret ls | grep -q "USAI_API_KEY"; then \
+	@if sbx secret ls 2>/dev/null | grep -q "USAI_API_KEY"; then \
 		echo "[OK] USAI_API_KEY secret set in SBX"; \
 	else \
 		echo "[FAIL] USAI_API_KEY secret not found in SBX"; \
@@ -105,6 +119,24 @@ new-project:
 # Initialize a new project from the quickstart (non-interactive)
 init-project: _check-target-dir _clone-playbook
 	@echo "Initializing project in $(TARGET_DIR)..."
+	@# Verify required source files exist before copying
+	@test -f ../agentic-coding-playbook/AGENTS.md || { \
+		echo "ERROR: Playbook AGENTS.md not found."; \
+		echo "  Run 'make setup' or check ../agentic-coding-playbook exists."; \
+		exit 1; \
+	}
+	@test -f templates/AGENTS_SBX_ADDENDUM.md || { \
+		echo "ERROR: templates/AGENTS_SBX_ADDENDUM.md not found."; \
+		exit 1; \
+	}
+	@test -f templates/opencode.jsonc || { \
+		echo "ERROR: templates/opencode.jsonc not found."; \
+		exit 1; \
+	}
+	@test -f templates/SBX_PATTERNS.md || { \
+		echo "ERROR: templates/SBX_PATTERNS.md not found."; \
+		exit 1; \
+	}
 	@echo "Copying configuration files..."
 	@cp ../agentic-coding-playbook/AGENTS.md "$(TARGET_DIR)/" && echo "  [OK] AGENTS.md"
 	@tail -n +7 templates/AGENTS_SBX_ADDENDUM.md >> "$(TARGET_DIR)/AGENTS.md" && echo "  [OK] AGENTS.md (SBX addendum appended)"
