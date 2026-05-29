@@ -7,12 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.8.1...v0.9.0) (2026-05-29)
 
-
 ### Features
 
 * add opencode web ([b462efc](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/b462efc34a71c2264e8f56f40832d57665d07178))
 * add opencode web ([#86](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/86)) ([b462efc](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/b462efc34a71c2264e8f56f40832d57665d07178))
-
 
 ### Bug Fixes
 
@@ -20,18 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.8.0...v0.8.1) (2026-05-28)
 
-
 ### Bug Fixes
 
 * **docs:** correct broken related_files links in frontmatter ([#74](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/74)) ([2af5b26](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/2af5b26272bfafd46568b20620e8a1bdca18e0be))
 
 ## [0.8.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.7.0...v0.8.0) (2026-05-28)
 
-
 ### Features
 
 * **bootstrap:** add init-project script for project bootstrapping ([#70](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/70)) ([0715e19](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/0715e1958535d8435a1087fb5dcdc4a5ddc3faf5))
-
 
 ### Bug Fixes
 
@@ -39,20 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.6.1...v0.7.0) (2026-05-27)
 
-
 ### Features
 
 * **zed:** add zed editor integration and task runner setup ([#45](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/45)) ([0aff745](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/0aff745145dd4a51a49f90454abfe01d531127dd))
 
 ## [0.6.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.6.0...v0.6.1) (2026-05-27)
 
-
 ### Bug Fixes
 
 * correct invocations of sbx version and policy ([#36](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/36)) ([d2ff60e](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/d2ff60eb3d41fbe17bc14e7220c63f67e6a37a36))
 
 ## [0.6.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.5.0...v0.6.0) (2026-05-26)
-
 
 ### Features
 
@@ -61,13 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.4.0...v0.5.0) (2026-04-22)
 
-
 ### Features
 
 * add workspace structure and makefile for simplified setup ([#20](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/20)) ([abd22e8](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/abd22e8629b7912b5cc34835b37c4457fe7f7cee))
 
 ## [0.4.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.3.0...v0.4.0) (2026-04-14)
-
 
 ### Features
 
@@ -75,11 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.2.0...v0.3.0) (2026-04-14)
 
-
 ### Features
 
 * add semver, conventional commits, and automated releases ([#12](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/12)) ([5c3cdfb](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/5c3cdfb0c11f16d8253500bfcadf299abedd07c1))
-
 
 ### Bug Fixes
 
