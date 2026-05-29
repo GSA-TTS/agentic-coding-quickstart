@@ -103,12 +103,12 @@ new-project:
 	$(MAKE) init-project TARGET_DIR="../$$name"
 
 # Initialize a new project from the quickstart (non-interactive)
-init-project: _check-target-dir
+init-project: _check-target-dir _clone-playbook
 	@echo "Initializing project in $(TARGET_DIR)..."
-	@mkdir -p "$(TARGET_DIR)"
 	@echo "Copying configuration files..."
-	@cp AGENTS.md "$(TARGET_DIR)/" && echo "  [OK] AGENTS.md"
-	@cp opencode.jsonc "$(TARGET_DIR)/" && echo "  [OK] opencode.jsonc"
+	@cp ../agentic-coding-playbook/AGENTS.md "$(TARGET_DIR)/" && echo "  [OK] AGENTS.md"
+	@tail -n +7 templates/AGENTS_SBX_ADDENDUM.md >> "$(TARGET_DIR)/AGENTS.md" && echo "  [OK] AGENTS.md (SBX addendum appended)"
+	@cp templates/opencode.jsonc "$(TARGET_DIR)/" && echo "  [OK] opencode.jsonc"
 	@cp Makefile "$(TARGET_DIR)/" && echo "  [OK] Makefile"
 
 	@# Only create README if it doesn't exist
@@ -125,7 +125,11 @@ init-project: _check-target-dir
 
 	@# Create .zed directory and copy tasks.json
 	@mkdir -p "$(TARGET_DIR)/.zed"
-	@cp .zed/tasks.json "$(TARGET_DIR)/.zed/tasks.json" && echo "  [OK] .zed/tasks.json"
+	@cp templates/zed-tasks.json "$(TARGET_DIR)/.zed/tasks.json" && echo "  [OK] .zed/tasks.json"
+
+	@# Create docs directory and copy SBX_PATTERNS.md
+	@mkdir -p "$(TARGET_DIR)/docs"
+	@cp templates/SBX_PATTERNS.md "$(TARGET_DIR)/docs/SBX_PATTERNS.md" && echo "  [OK] docs/SBX_PATTERNS.md"
 
 	@# Only run git init if it's not already a git repository
 	@if [ ! -d "$(TARGET_DIR)/.git" ]; then \
