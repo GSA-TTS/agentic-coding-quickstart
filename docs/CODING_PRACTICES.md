@@ -381,11 +381,11 @@ This project follows **Semantic Versioning 2.0.0** and **Conventional Commits 1.
 - MUST maintain CHANGELOG.md following Keep a Changelog format:
   - Sections: Added, Changed, Deprecated, Removed, Fixed, Security
   - Version links to GitHub compare views
-  - Auto-generated from conventional commits via hello-please
+  - Auto-generated from conventional commits via release-please
 
 #### Release Automation
 
-- MUST use automated release workflows (hello-please + GitHub Actions)
+- MUST use automated release workflows (release-please + GitHub Actions)
 - Version bumps determined automatically from commit types:
   - `feat:` → Minor version bump
   - `fix:`, `perf:`, `security:` → Patch version bump

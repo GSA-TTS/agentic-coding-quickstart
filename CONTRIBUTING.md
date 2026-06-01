@@ -53,8 +53,8 @@ This project operates under professional standards of conduct. All contributors:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/williamzujkowski/agent-sandbox.git
-   cd agent-sandbox
+   git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
+   cd agentic-coding-quickstart
    ```
 
 2. Read the core documentation:
@@ -303,7 +303,7 @@ For code contributions:
 
 ## Release Process
 
-Releases are **fully automated** via GitHub Actions and hello-please:
+Releases are **fully automated** via GitHub Actions and release-please:
 
 1. Commits to `main` are analyzed for conventional commit types
 2. Version bump is determined automatically:
