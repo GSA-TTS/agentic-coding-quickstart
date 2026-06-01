@@ -11,7 +11,6 @@
   //
   // IMPORTANT: This file contains NO secrets.
   // API key is injected via USAI_API_KEY secret.
-
   "$schema": "https://opencode.ai/config.json",
   "enabled_providers": [
     "usai"
@@ -23,8 +22,7 @@
       "options": {
         "baseURL": "https://api.gsa.usai.gov/api/v1",
         "apiKey": "{env:USAI_API_KEY}",
-        "timeout": 600000,
-        "chunkTimeout": 45000,
+        "timeout": 3600000, // 1 hour, for long-running tasks
         "headers": {
           "User-Agent": "OpenCode-USAI/1.0"
         }

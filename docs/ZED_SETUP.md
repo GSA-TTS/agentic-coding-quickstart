@@ -53,8 +53,7 @@ You will see several tasks preconfigured for this workspace:
 
 | Task Label | Description | Underlying Command |
 |------------|-------------|--------------------|
-| `OpenCode: Create Sandbox` | Creates the `quickstart` sandbox using `sbx` CLI | `make create-sandbox` |
-| `OpenCode: Run Agent` | Launches OpenCode inside SBX (secrets auto-injected) | `make run-agent` |
+| `OpenCode: Run Agent` | Launches OpenCode inside SBX (secrets auto-injected, creates sandbox if needed) | `make run-agent` |
 | `OpenCode: Environment Diagnostics` | Performs health checks on your Docker & SBX setup | `make doctor` |
 
 > **Note:** The deprecated Docker Desktop tasks have been removed. Use the `sbx` CLI tasks above.
@@ -62,10 +61,9 @@ You will see several tasks preconfigured for this workspace:
 ### 3. Step-by-Step Workflow inside Zed
 
 1. **Run Diagnostics:** Open the tasks palette and select `OpenCode: Environment Diagnostics (make doctor)`. It will open a panel in Zed and verify your Docker and setup states.
-2. **Create Sandbox:** Select `OpenCode: Create Sandbox`. This prepares your microVM.
-3. **Launch OpenCode Agent:** Select `OpenCode: Run Agent`.
-4. **Interact with the Agent:** The agent will boot inside a terminal panel in Zed. You can type prompts directly to the agent (e.g. *"Analyze the directory structure and check for AGENTS.md"*).
-5. **Interactive Approvals:** Because our `opencode.jsonc` is configured with `"edit": "ask"` and `"bash": "ask"` for safety, the agent will prompt you in the terminal for approval before making file changes or running mutating shell commands. Type `y` or `n` directly into the Zed terminal tab to respond.
+2. **Launch OpenCode Agent:** Select `OpenCode: Run Agent`. This creates the sandbox if needed and launches the agent.
+3. **Interact with the Agent:** The agent will boot inside a terminal panel in Zed. You can type prompts directly to the agent (e.g. *"Analyze the directory structure and check for AGENTS.md"*).
+4. **Interactive Approvals:** Because our `opencode.jsonc` is configured with `"edit": "ask"` and `"bash": "ask"` for safety, the agent will prompt you in the terminal for approval before making file changes or running mutating shell commands. Type `y` or `n` directly into the Zed terminal tab to respond.
 
 ---
 
@@ -77,8 +75,7 @@ If you prefer to run commands manually, you can open Zed's integrated terminal (
 # Check if your environment is healthy
 make doctor
 
-# Create sandbox and run agent
-make create-sandbox
+# Run agent (creates sandbox automatically if needed)
 make run-agent
 ```
 
