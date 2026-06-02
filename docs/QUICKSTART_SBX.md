@@ -386,14 +386,24 @@ echo "$DOCKER_PAT" | sbx login --password-stdin --username "$DOCKER_USER"
 
 ## Working with Git Branches
 
-Create isolated sandboxes for different branches:
+For branch isolation, use the `--clone` flag which creates an in-container clone of your repository:
 
 ```bash
-# Create sandbox with Git worktree for a feature branch
-sbx create --branch=feature/login opencode .
+# Create sandbox with an in-container clone (changes accessible via git remote)
+sbx create --clone --name feature-work opencode .
 
-# Work in isolation - changes stay on that branch
-sbx run opencode-myproject
+# The sandbox works on a private clone; commits are accessible via:
+# git fetch sandbox-feature-work
+```
+
+Alternatively, check out the branch on your host before creating the sandbox:
+
+```bash
+# On host: switch to feature branch
+git checkout feature/login
+
+# Create sandbox - it mounts the current branch
+sbx run opencode .
 ```
 
 ---
