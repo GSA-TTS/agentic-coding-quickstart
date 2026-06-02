@@ -119,7 +119,6 @@ AI coding agents can read files, write code, and execute commands. Running them 
 If you use the **Zed Editor**, pre-configured tasks are available in `.zed/tasks.json`:
 
 - **OpenCode: Run Agent** — Launch the agent in your sandbox
-- **OpenCode: Create Sandbox** — Create a new sandbox
 - **OpenCode: Environment Diagnostics** — Run `make doctor`
 
 See the **[Zed Editor Setup Guide](docs/ZED_SETUP.md)** for detailed instructions.

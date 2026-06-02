@@ -149,12 +149,14 @@ run-agent:
 
 ### SSL/TLS Certificate Errors ("unable to get local issuer certificate")
 - If OpenCode launches but fails to connect with an `unable to get local issuer certificate` error, this is due to SSL/TLS interception/decryption on federal GFE (Government Furnished Equipment) networks.
-- **To fix this:** Set the environment variable when running:
+- **To fix this:** Use the two-step `create` + `exec` pattern (since `sbx run` does not support `-e`):
   ```bash
   # For debugging TLS issues only - never use with real credentials
-  sbx run -e NODE_TLS_REJECT_UNAUTHORIZED=0 opencode .
+  sbx create --name debug-sandbox opencode . 2>/dev/null || true && \
+  sbx exec -e NODE_TLS_REJECT_UNAUTHORIZED=0 debug-sandbox opencode
   ```
 - **⚠️ Security Warning:** Disabling TLS validation bypasses certificate verification. Only use this for debugging in isolated local environments, never with real credentials.
+- See [KNOWN_FAILURE_MODES.md](KNOWN_FAILURE_MODES.md#16-ssltls-certificate-errors-unable-to-get-local-issuer-certificate) for details.
 
 ### Terminal Output is Frozen or Unresponsive
 - If a task runs and does not respond to keystrokes, close the terminal pane (`Cmd + W`) and trigger the task again via the tasks palette.

@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-05-28"
+last_updated: "2026-06-02"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -483,16 +483,26 @@ To resolve this during local development, you can tell Node.js to ignore TLS val
 
 #### Workaround: Pass Environment Variable via SBX
 
-Run your agent with the environment variable injected directly into the sandbox:
+The `sbx run` command does **not** support the `-e` flag for environment variables. Use the two-step `create` + `exec` pattern instead:
 
 ```bash
 # For debugging TLS issues only - never use with real credentials
-sbx run -e NODE_TLS_REJECT_UNAUTHORIZED=0 opencode .
+
+# Step 1: Create the sandbox (or skip if it already exists)
+sbx create --name debug-sandbox opencode .
+
+# Step 2: Run with environment variable
+sbx exec -e NODE_TLS_REJECT_UNAUTHORIZED=0 debug-sandbox opencode
 ```
 
-This passes the `NODE_TLS_REJECT_UNAUTHORIZED=0` environment variable into the sandbox at runtime without persisting it.
+Alternatively, combine into a single line:
 
-> **Note:** The previous `make run-agent` passthrough has been removed. Use the `sbx run -e` flag directly to inject environment variables.
+```bash
+sbx create --name debug-sandbox opencode . 2>/dev/null || true && \
+sbx exec -e NODE_TLS_REJECT_UNAUTHORIZED=0 debug-sandbox opencode
+```
+
+**Important:** Only `sbx exec` supports the `-e` flag, not `sbx run`.
 
 ---
 
