@@ -6,7 +6,7 @@
   // 2. Customize the models list based on your USAi API key entitlements
   // 3. Update the default model if needed
   // 4. Set up your USAi API key as a SBX secret before the first run:
-  //    sbx secret set-custom -g --host api.gsa.usai.gov --name USAI_API_KEY --value <your_api_key>
+  //    sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value <your_api_key>
   // 5. Run with: sbx run opencode .
   //
   // IMPORTANT: This file contains NO secrets.
