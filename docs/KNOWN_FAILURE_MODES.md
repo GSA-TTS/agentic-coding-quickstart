@@ -332,12 +332,19 @@ Config file exists on host but not mounted into container.
 
 ### Fix
 
-Ensure config is in the mounted working directory:
+Ensure config is in the mounted working directory. When using `sbx run` or `sbx create`, the current directory is automatically mounted:
+
 ```bash
-sbx exec -v $(pwd):/workspace <sandbox> sh
+# Run from the directory containing your config
+cd /path/to/project-with-config
+sbx run opencode .
 ```
 
-Or copy config into container before execution.
+Or copy config into an existing container:
+
+```bash
+sbx cp ./opencode.jsonc my-sandbox:/workspace/
+```
 
 ---
 
