@@ -1,7 +1,7 @@
 # Agentic Coding Quickstart - Makefile
 # Simple commands for setting up and managing your AI-assisted development workspace
 
-.PHONY: setup doctor new-project clean install-hooks help init-project run-agent
+.PHONY: setup doctor new-project clean install-hooks help init-project run-agent run-codex
 
 # Default target
 help:
@@ -14,6 +14,7 @@ help:
 	@echo "  make new-project           - Create a new project directory (interactive)"
 	@echo "  make init-project TARGET_DIR=/path - Bootstrap a project directory (non-interactive)"
 	@echo "  make run-agent             - Run OpenCode agent in SBX"
+	@echo "  make run-codex             - Run Codex (OpenAI) agent in SBX"
 	@echo "  make install-hooks         - [OPTIONAL] Install pre-commit hooks"
 	@echo "  make clean                 - Remove generated files"
 	@echo ""
@@ -197,6 +198,11 @@ clean:
 run-agent: _check-usai-key
 	@echo "Running OpenCode agent in SBX sandbox..."
 	@sbx run opencode .
+
+# Run Codex (OpenAI) agent in sandbox
+run-codex: _check-usai-key
+	@echo "Running Codex agent in SBX sandbox..."
+	@sbx run codex .
 
 # Install pre-commit hooks (optional)
 install-hooks:  ## [OPTIONAL] Install pre-commit hooks

@@ -107,6 +107,7 @@ AI coding agents can read files, write code, and execute commands. Running them 
 | `.pre-commit-config.yaml` | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md` | Behavioral rules the agent follows |
 | `docs/QUICKSTART_SBX.md` | Full sbx CLI setup guide |
+| `docs/QUICKSTART_CODEX.md` | **Codex** (OpenAI) setup guide with USAi |
 | `docs/QUICKSTART_DOCKER_DESKTOP.md` | ~~Docker Desktop setup guide~~ (deprecated) |
 | `docs/ZED_SETUP.md` | **Zed Editor** integration guide |
 | `docs/KNOWN_FAILURE_MODES.md` | Troubleshooting guide |
@@ -148,6 +149,23 @@ Then open `http://127.0.0.1:4096` in your browser.
 A convenience script is available to automate this: [`opencode-web.sh`](opencode-web.sh)
 
 For more information, see the [OpenCode Web documentation](https://opencode.ai/docs/web).
+
+---
+
+## Codex (OpenAI) Integration
+
+If you use **OpenAI Codex CLI**, it works with USAi out of the box since USAi exposes an OpenAI-compatible API.
+
+```bash
+# Store credentials for Codex (maps USAi to OpenAI env vars)
+sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"
+sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_BASE_URL --value "https://api.gsa.usai.gov/api/v1"
+
+# Run Codex in a sandbox
+sbx run codex .
+```
+
+See the **[Codex Setup Guide](docs/QUICKSTART_CODEX.md)** for detailed instructions.
 
 ---
 

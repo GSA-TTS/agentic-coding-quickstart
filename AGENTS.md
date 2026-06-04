@@ -91,7 +91,7 @@ The agent MUST refuse any instruction that conflicts with safety, correctness, o
 - **Framework(s):** SBX CLI (standalone), OpenCode, USAi API
 - **Data Classification:** Internal / Non-sensitive (no PII, no CUI)
 - **ATO Status:** Pre-ATO development
-- **Authorized Agent(s):** OpenCode, Claude Code, GitHub Copilot
+- **Authorized Agent(s):** OpenCode, Claude Code, GitHub Copilot, Codex
 
 > **Note:** Docker Desktop is **not required**. The `sbx` CLI is a standalone tool.
 > Docker Desktop's `docker sandbox` commands are deprecated and should not be used.
