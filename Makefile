@@ -2,7 +2,6 @@
 # Simple commands for setting up and managing your AI-assisted development workspace
 
 CODEX_MODEL ?= gpt-5.4-latest-guardrails-defaultv2
-CODEX_BASE_URL ?= https://api.gsa.usai.gov/api/v1
 
 .PHONY: setup doctor new-project clean install-hooks help init-project run-agent run-codex
 
@@ -203,13 +202,11 @@ run-agent: _check-usai-key
 	@sbx run opencode .
 
 # Run Codex (OpenAI) agent in sandbox
-# openai_base_url redirects the built-in openai provider to USAi.
-# Passed via -c CLI override (bypasses project config restrictions).
+# Provider config (USAi base URL, wire_api) lives in .codex/config.toml.
+# Only the model needs to be passed at runtime so users can override it.
 run-codex: _check-codex-keys
 	@echo "Running Codex agent in SBX sandbox with model $(CODEX_MODEL)..."
-	@sbx run codex . -- \
-		-c 'openai_base_url="$(CODEX_BASE_URL)"' \
-		-m "$(CODEX_MODEL)"
+	@sbx run codex . -- -m "$(CODEX_MODEL)"
 
 # Check Codex-specific secrets (only OPENAI_API_KEY needed; base URL is
 # configured via -c flags at runtime, not via env vars or SBX secrets).

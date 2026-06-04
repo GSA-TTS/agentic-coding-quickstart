@@ -200,7 +200,7 @@ If you use **OpenAI Codex CLI**, it works with USAi out of the box since USAi ex
 make run-codex
 ```
 
-This automatically checks for (and prompts to set) the required `OPENAI_API_KEY` secret, then launches Codex in a sandbox with the default USAi model `gpt-5.4-latest-guardrails-defaultv2`. The base URL is configured via Codex's own `-c` flags — no additional secrets needed.
+This automatically checks for (and prompts to set) the required `OPENAI_API_KEY` secret, then launches Codex with the default USAi model `gpt-5.4-latest-guardrails-defaultv2`. Provider config (base URL, wire API) is read from `.codex/config.toml` automatically.
 
 To use a different USAi-entitled model:
 
@@ -214,10 +214,8 @@ make run-codex CODEX_MODEL=gpt-5.2-latest-guardrails-defaultv2
 # Store USAi API key as OPENAI_API_KEY (only secret needed)
 sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"
 
-# Run Codex in a sandbox, routing to USAi via openai_base_url override
-sbx run codex . -- \
-  -c 'openai_base_url="https://api.gsa.usai.gov/api/v1"' \
-  -m gpt-5.4-latest-guardrails-defaultv2
+# Run Codex — .codex/config.toml wires the USAi provider automatically
+sbx run codex . -- -m gpt-5.4-latest-guardrails-defaultv2
 ```
 
 See the **[Codex Setup Guide](docs/QUICKSTART_CODEX.md)** for detailed instructions.

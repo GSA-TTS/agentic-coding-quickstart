@@ -6,15 +6,18 @@ This guide walks you through setting up [OpenAI Codex CLI](https://github.com/op
 
 ## Why Codex + USAi?
 
-Codex is OpenAI's agentic coding CLI (built in Rust). Since USAi exposes an **OpenAI-compatible API**, Codex works natively by pointing its custom model provider at the USAi endpoint via its `-c` config override flags.
+Codex is OpenAI's agentic coding CLI (built in Rust). It uses its own config system (`config.toml`) and a custom provider definition to point at USAi's Chat Completions API.
 
 > [!IMPORTANT]
 > Codex uses its **own config system** (`config.toml`), not the Python SDK env var `OPENAI_BASE_URL`.
-> Setting `OPENAI_BASE_URL` as an env var has **no effect** on the Codex CLI.
+> USAi also does not support the Responses API (`/v1/responses`) that Codex defaults to — it must
+> be told to use the Chat Completions API (`/v1/chat/completions`) via `wire_api = "chat-completions"`.
+
+This repo ships a `.codex/config.toml` that handles all of this automatically.
 
 **Key benefits:**
 
-- **No config files needed** — provider base URL is passed as a one-time CLI flag at startup
+- **Config file provided** — `.codex/config.toml` wires USAi as the provider out of the box
 - **Native AGENTS.md support** — Codex reads `AGENTS.md` automatically (part of the [agents.md standard](https://agents.md))
 - **Full sandbox isolation** — Same security model as other agents in this repo
 
@@ -33,8 +36,6 @@ Codex is OpenAI's agentic coding CLI (built in Rust). Since USAi exposes an **Op
 ## Step 1: Store Credentials
 
 Only one secret is needed: `OPENAI_API_KEY` (the SBX proxy swaps it with the real USAi key when Codex calls `api.gsa.usai.gov`).
-
-The base URL is **not a secret** — it is passed as a Codex config flag at startup (see Step 3).
 
 ```bash
 # Store USAi API key as OPENAI_API_KEY
@@ -67,10 +68,8 @@ sbx policy allow network -g "api.gsa.usai.gov"
 # Navigate to your project
 cd /path/to/your/project
 
-# Run Codex in a sandbox, routing requests to USAi
-sbx run codex . -- \
-  -c 'openai_base_url="https://api.gsa.usai.gov/api/v1"' \
-  -m gpt-5.4-latest-guardrails-defaultv2
+# Run Codex — .codex/config.toml routes requests to USAi automatically
+sbx run codex . -- -m gpt-5.4-latest-guardrails-defaultv2
 ```
 
 That's it. Codex will start inside the sandbox with USAi access.
@@ -82,21 +81,20 @@ That's it. Codex will start inside the sandbox with USAi access.
 | What | Value | Purpose |
 |------|-------|---------|
 | `OPENAI_API_KEY` SBX secret | Placeholder swapped by proxy | Authentication — real key injected by SBX when Codex calls `api.gsa.usai.gov` |
-| `-c openai_base_url` | `"https://api.gsa.usai.gov/api/v1"` | Redirects the built-in `openai` provider to USAi |
+| `.codex/config.toml` `model_provider` | `usai` | Selects the USAi provider |
+| `.codex/config.toml` `base_url` | `https://api.gsa.usai.gov/api/v1` | Routes requests to USAi |
+| `.codex/config.toml` `wire_api` | `chat-completions` | Uses `/v1/chat/completions` (USAi does not support `/v1/responses`) |
 
-Codex (the Rust CLI) uses its own config system. The `-c openai_base_url` flag overrides the built-in OpenAI provider's base URL for that run. No files are written or modified.
+Codex loads `.codex/config.toml` from the project root automatically. No extra flags needed.
 
 ---
 
 ## Model Selection
 
-USAi exposes OpenAI models with specific names. When you launch Codex directly, specify a USAi model name explicitly via `-m`:
+USAi exposes OpenAI models with specific names. Specify a USAi model name explicitly via `-m`:
 
 ```bash
-# Use a specific model (check USAi catalog for available names)
-sbx run codex . -- \
-  -c 'openai_base_url="https://api.gsa.usai.gov/api/v1"' \
-  -m gpt-5.4-latest-guardrails-defaultv2
+sbx run codex . -- -m gpt-5.4-latest-guardrails-defaultv2
 ```
 
 Available models via USAi (check your entitlements):
@@ -125,21 +123,23 @@ This means:
 
 ---
 
-## Configuration File (Optional)
+## Configuration File
 
-Codex uses a TOML config file (`~/.codex/config.toml`) for persistent settings. For USAi integration the `-c` flags used by `make run-codex` are sufficient — no file is needed.
-
-If you want to persist the provider config in the user-level config file instead (inside the sandbox home):
+This repo ships `.codex/config.toml` which wires Codex to USAi automatically:
 
 ```toml
-# ~/.codex/config.toml inside the sandbox (user-level only)
-openai_base_url = "https://api.gsa.usai.gov/api/v1"
+model_provider = "usai"
 model = "gpt-5.4-latest-guardrails-defaultv2"
+
+[model_providers.usai]
+name     = "USAi"
+base_url = "https://api.gsa.usai.gov/api/v1"
+env_key  = "OPENAI_API_KEY"
+wire_api = "chat-completions"
 ```
 
-> [!NOTE]
-> `openai_base_url` is blocked in project-level `.codex/config.toml` by Codex's security model.
-> It can only be set in the user-level `~/.codex/config.toml` inside the container.
+The key setting is `wire_api = "chat-completions"` — USAi does not implement the Responses API
+(`/v1/responses`) that Codex defaults to. Without this, requests return a 404.
 
 ---
 
@@ -150,18 +150,12 @@ model = "gpt-5.4-latest-guardrails-defaultv2"
 make run-codex
 ```
 
-This runs `sbx run codex . -- -c 'openai_base_url="https://api.gsa.usai.gov/api/v1"' -m gpt-5.4-latest-guardrails-defaultv2`, with the same `OPENAI_API_KEY` credential check as `make run-agent`.
+This runs `sbx run codex . -- -m gpt-5.4-latest-guardrails-defaultv2`. Provider config is picked up from `.codex/config.toml` automatically.
 
 To override the default model:
 
 ```bash
 make run-codex CODEX_MODEL=gpt-5.2-latest-guardrails-defaultv2
-```
-
-To override the base URL (e.g. for a different USAi region):
-
-```bash
-make run-codex CODEX_BASE_URL=https://us-east.api.gsa.usai.gov/api/v1
 ```
 
 ---
@@ -212,11 +206,11 @@ Codex should detect `AGENTS.md` automatically. If it doesn't:
 
 | Feature | OpenCode | Codex |
 |---------|----------|-------|
-| Configuration | `opencode.jsonc` | `-c` CLI flags or `~/.codex/config.toml` |
-| Provider setup | Explicit `baseURL` in JSONC config | `-c model_providers.*` flags at run time |
+| Configuration | `opencode.jsonc` | `.codex/config.toml` |
+| Provider setup | Explicit `baseURL` in JSONC config | `model_providers.usai` in `config.toml` |
+| Wire API | Responses API | Chat Completions (required for USAi) |
 | Instruction files | `AGENTS.md`, `CLAUDE.md`, custom | `AGENTS.md` (native) |
-| USAi mapping | `baseURL` in config | `-c model_providers.usai.base_url` flag |
-| Model selection | In config file | `-m` flag or config |
+| Model selection | In config file | `.codex/config.toml` or `-m` flag |
 
 ---
 
