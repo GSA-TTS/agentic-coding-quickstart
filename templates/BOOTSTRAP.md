@@ -23,10 +23,15 @@ See [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/) for 
 
 | File | Purpose | Required? |
 |------|---------|-----------|
-| `opencode.jsonc` | OpenCode configuration with USAi provider | Yes |
+| `opencode.jsonc` | OpenCode configuration with USAi provider | Yes (for OpenCode) |
 | `.zed/tasks.json` | Pre-configured Tasks for the Zed editor | Recommended (if using Zed) |
 | `docs/SBX_PATTERNS.md` | Credential injection quick reference | Recommended |
 | `AGENTS_SBX_ADDENDUM.md` | Sandbox rules to append to your AGENTS.md | If you have AGENTS.md |
+
+> [!NOTE]
+> **Using Codex?** No config file is needed. Codex uses `OPENAI_API_KEY` and `OPENAI_BASE_URL`
+> environment variables, which are injected via `sbx secret set-custom`. See the
+> [Codex Quickstart Guide](../docs/QUICKSTART_CODEX.md) for details.
 
 ## Quick Bootstrap
 

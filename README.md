@@ -137,17 +137,18 @@ AI coding agents can read files, write code, and execute commands. Running them 
 
 ## What's in This Repo
 
-| File/Directory                      | Purpose                                                    |
-| ----------------------------------- | ---------------------------------------------------------- |
-| `opencode.jsonc`                    | Pre-configured for USAi endpoints                          |
-| `.zed/tasks.json`                   | Pre-configured tasks for **Zed Editor**                    |
-| `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
-| `AGENTS.md`                         | Behavioral rules the agent follows                         |
-| `docs/QUICKSTART_SBX.md`            | Full sbx CLI setup guide                                   |
-| `docs/QUICKSTART_DOCKER_DESKTOP.md` | ~~Docker Desktop setup guide~~ (deprecated)                |
-| `docs/ZED_SETUP.md`                 | **Zed Editor** integration guide                           |
-| `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
-| `templates/`                        | Files to copy into your own projects                       |
+| File/Directory | Purpose |
+|----------------|---------|
+| `opencode.jsonc` | Pre-configured for USAi endpoints |
+| `.zed/tasks.json` | Pre-configured tasks for **Zed Editor** |
+| `.pre-commit-config.yaml` | Optional pre-commit hooks (secret detection, file hygiene) |
+| `AGENTS.md` | Behavioral rules the agent follows |
+| `docs/QUICKSTART_SBX.md` | Full sbx CLI setup guide |
+| `docs/QUICKSTART_CODEX.md` | **Codex** (OpenAI) setup guide with USAi |
+| `docs/QUICKSTART_DOCKER_DESKTOP.md` | ~~Docker Desktop setup guide~~ (deprecated) |
+| `docs/ZED_SETUP.md` | **Zed Editor** integration guide |
+| `docs/KNOWN_FAILURE_MODES.md` | Troubleshooting guide |
+| `templates/` | Files to copy into your own projects |
 
 ---
 
@@ -185,6 +186,41 @@ Then open `http://127.0.0.1:4096` in your browser.
 A convenience script is available to automate this: [`opencode-web.sh`](opencode-web.sh)
 
 For more information, see the [OpenCode Web documentation](https://opencode.ai/docs/web).
+
+---
+
+## Codex (OpenAI) Integration
+
+If you use **OpenAI Codex CLI**, it works with USAi out of the box since USAi exposes an OpenAI-compatible API.
+
+### Quick Start with Make
+
+```bash
+# From this repo or any project with the Makefile
+make run-codex
+```
+
+This automatically checks for (and prompts to set) the required `OPENAI_API_KEY` secret, then launches Codex in a sandbox with the default USAi model `gpt-5.4-latest-guardrails-defaultv2`. The base URL is configured via Codex's own `-c` flags — no additional secrets needed.
+
+To use a different USAi-entitled model:
+
+```bash
+make run-codex CODEX_MODEL=gpt-5.2-latest-guardrails-defaultv2
+```
+
+### Manual Setup
+
+```bash
+# Store USAi API key as OPENAI_API_KEY (only secret needed)
+sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"
+
+# Run Codex in a sandbox, routing to USAi via openai_base_url override
+sbx run codex . -- \
+  -c 'openai_base_url="https://api.gsa.usai.gov/api/v1"' \
+  -m gpt-5.4-latest-guardrails-defaultv2
+```
+
+See the **[Codex Setup Guide](docs/QUICKSTART_CODEX.md)** for detailed instructions.
 
 ---
 

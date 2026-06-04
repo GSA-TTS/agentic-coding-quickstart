@@ -74,6 +74,7 @@ Agents should:
 | Service | Command | Notes |
 |---------|---------|-------|
 | USAi | `sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"` | Custom endpoint |
+| Codex (via USAi) | `sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"` | Maps OpenAI vars to USAi |
 | GitHub | `gh auth token \| sbx secret set -g github` | Built-in service |
 | GitLab | `sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"` | Custom endpoint |
 
@@ -121,6 +122,17 @@ sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$
 # Recreate sandbox and run
 sbx rm SANDBOX_NAME 2>/dev/null; sbx create --name SANDBOX_NAME opencode .
 sbx run SANDBOX_NAME
+```
+
+#### With Codex (OpenAI CLI via USAi)
+
+```bash
+# Store USAi credentials as OpenAI env vars (one-time)
+sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"
+sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_BASE_URL --value "https://api.gsa.usai.gov/api/v1"
+
+# Run Codex
+sbx run codex .
 ```
 
 ---

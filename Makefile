@@ -1,7 +1,10 @@
 # Agentic Coding Quickstart - Makefile
 # Simple commands for setting up and managing your AI-assisted development workspace
 
-.PHONY: setup doctor new-project clean install-hooks help init-project run-agent sync-models
+CODEX_MODEL ?= gpt-5.4-latest-guardrails-defaultv2
+CODEX_BASE_URL ?= https://api.gsa.usai.gov/api/v1
+
+.PHONY: setup doctor new-project clean install-hooks help init-project run-agent run-codex
 
 # Default target
 help:
@@ -14,7 +17,7 @@ help:
 	@echo "  make new-project           - Create a new project directory (interactive)"
 	@echo "  make init-project TARGET_DIR=/path - Bootstrap a project directory (non-interactive)"
 	@echo "  make run-agent             - Run OpenCode agent in SBX"
-	@echo "  make sync-models           - Sync USAI model catalog (requires USAI_API_KEY)"
+	@echo "  make run-codex             - Run Codex (OpenAI) agent in SBX"
 	@echo "  make install-hooks         - [OPTIONAL] Install pre-commit hooks"
 	@echo "  make clean                 - Remove generated files"
 	@echo ""
@@ -198,6 +201,45 @@ clean:
 run-agent: _check-usai-key
 	@echo "Running OpenCode agent in SBX sandbox..."
 	@sbx run opencode .
+
+# Run Codex (OpenAI) agent in sandbox
+# openai_base_url redirects the built-in openai provider to USAi.
+# Passed via -c CLI override (bypasses project config restrictions).
+run-codex: _check-codex-keys
+	@echo "Running Codex agent in SBX sandbox with model $(CODEX_MODEL)..."
+	@sbx run codex . -- \
+		-c 'openai_base_url="$(CODEX_BASE_URL)"' \
+		-m "$(CODEX_MODEL)"
+
+# Check Codex-specific secrets (only OPENAI_API_KEY needed; base URL is
+# configured via -c flags at runtime, not via env vars or SBX secrets).
+_check-codex-keys:
+	@echo "Checking Codex secrets in SBX..."
+	@# Check OPENAI_API_KEY (used by Codex as the auth credential via env_key)
+	@if sbx secret ls 2>/dev/null | grep -q "OPENAI_API_KEY"; then \
+		echo "  OPENAI_API_KEY: OK"; \
+	else \
+		echo "  OPENAI_API_KEY not found in SBX secrets."; \
+		echo "  Codex requires OPENAI_API_KEY mapped to your USAi key."; \
+		read -s -p "Paste USAI_API_KEY value (will be stored as OPENAI_API_KEY): " key; \
+		echo ""; \
+		if [ -n "$$key" ]; then \
+			USAI_KEY="$$key" sh -c 'sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$$USAI_KEY"' || { \
+				echo "ERROR: Failed to store OPENAI_API_KEY in SBX secrets."; \
+				exit 1; \
+			}; \
+			echo "  OPENAI_API_KEY: Stored in SBX secrets"; \
+		else \
+			echo ""; \
+			echo "ERROR: OPENAI_API_KEY is required for Codex. Get your USAi key at:"; \
+			echo "  https://console.gsa.usai.gov/key-management"; \
+			exit 1; \
+		fi; \
+	fi
+	@echo ""
+	@echo "NOTE: If you just set a new OPENAI_API_KEY secret, recreate any existing Codex sandbox:"
+	@echo "  sbx rm <sandbox-name> && make run-codex"
+	@echo ""
 
 # Install pre-commit hooks (optional)
 install-hooks:  ## [OPTIONAL] Install pre-commit hooks

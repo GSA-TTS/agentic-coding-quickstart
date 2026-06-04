@@ -84,6 +84,46 @@ sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
 
 ---
 
+## Codex (OpenAI CLI)
+
+Codex uses standard OpenAI environment variables. To connect Codex to USAi, map `OPENAI_API_KEY` and `OPENAI_BASE_URL` to the USAi endpoint:
+
+### Store in sbx secret (recommended)
+
+```bash
+# Store USAi API key as OPENAI_API_KEY
+sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"
+
+# Store USAi base URL
+sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_BASE_URL --value "https://api.gsa.usai.gov/api/v1"
+
+# Recreate sandbox to pick up new secrets
+sbx rm SANDBOX_NAME 2>/dev/null; sbx create --name SANDBOX_NAME codex .
+
+# Run - secrets auto-injected
+sbx run SANDBOX_NAME
+```
+
+### Quick run (no named sandbox)
+
+```bash
+sbx run codex .
+```
+
+### Direct injection (one-off)
+
+```bash
+sbx exec -it \
+  -e OPENAI_API_KEY="$USAI_API_KEY" \
+  -e OPENAI_BASE_URL="https://api.gsa.usai.gov/api/v1" \
+  -w $(pwd) SANDBOX_NAME codex
+```
+
+> [!NOTE]
+> Codex reads `AGENTS.md` natively — no additional instruction file configuration is needed.
+
+---
+
 ## GitHub
 
 ### Method 1: SBX Secret Store (Recommended)
@@ -190,6 +230,7 @@ sbx run SANDBOX_NAME
 | Provider | Command | Notes |
 |----------|---------|-------|
 | USAi | `sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"` | Custom endpoint |
+| Codex (via USAi) | `sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"` | Maps to OpenAI env vars |
 | GitHub | `gh auth token \| sbx secret set -g github` | Built-in service |
 | GitLab (self-hosted) | `sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"` | Custom endpoint |
 
