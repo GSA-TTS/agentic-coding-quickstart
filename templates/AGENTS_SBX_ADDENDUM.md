@@ -126,14 +126,22 @@ sbx run SANDBOX_NAME
 
 #### With Codex (OpenAI CLI via USAi)
 
-```bash
-# Store USAi credentials as OpenAI env vars (one-time)
-sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"
-sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_BASE_URL --value "https://api.gsa.usai.gov/api/v1"
+Codex uses its own config system (`.codex/config.toml`), **not** the `OPENAI_BASE_URL` env var.
+This repo ships a `.codex/config.toml` that configures the USAi provider automatically.
 
-# Run Codex
-sbx run codex .
+```bash
+# Store USAi API key as OPENAI_API_KEY (only secret needed - one-time)
+sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"
+
+# Run Codex - .codex/config.toml handles base URL and wire API
+sbx run codex . -- -m gpt-5.4-latest-guardrails-defaultv2
+
+# Or use Make (easiest)
+make run-codex
 ```
+
+> [!NOTE]
+> `OPENAI_BASE_URL` has no effect on Codex CLI. Provider config is in `.codex/config.toml`.
 
 ---
 

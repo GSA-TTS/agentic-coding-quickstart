@@ -86,41 +86,44 @@ sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
 
 ## Codex (OpenAI CLI)
 
-Codex uses standard OpenAI environment variables. To connect Codex to USAi, map `OPENAI_API_KEY` and `OPENAI_BASE_URL` to the USAi endpoint:
+Codex uses its own config system (`.codex/config.toml`), **not** the Python SDK env vars like `OPENAI_BASE_URL`. This repo ships a `.codex/config.toml` that wires the USAi provider automatically.
 
-### Store in sbx secret (recommended)
+> [!IMPORTANT]
+> `OPENAI_BASE_URL` has **no effect** on Codex CLI — it's a Python SDK env var. The base URL is configured in `.codex/config.toml` via the `base_url` field. Only `OPENAI_API_KEY` needs to be stored as a secret.
+
+### Store API key in sbx secret (recommended)
 
 ```bash
-# Store USAi API key as OPENAI_API_KEY
+# Store USAi API key as OPENAI_API_KEY (only secret needed)
 sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"
 
-# Store USAi base URL
-sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_BASE_URL --value "https://api.gsa.usai.gov/api/v1"
-
-# Recreate sandbox to pick up new secrets
+# Recreate sandbox to pick up new secret
 sbx rm SANDBOX_NAME 2>/dev/null; sbx create --name SANDBOX_NAME codex .
 
-# Run - secrets auto-injected
+# Run - .codex/config.toml handles provider config automatically
 sbx run SANDBOX_NAME
 ```
 
 ### Quick run (no named sandbox)
 
 ```bash
-sbx run codex .
+# Requires .codex/config.toml in project root (provided by this repo)
+sbx run codex . -- -m gpt-5.4-latest-guardrails-defaultv2
 ```
 
-### Direct injection (one-off)
+### Using Make (easiest)
 
 ```bash
-sbx exec -it \
-  -e OPENAI_API_KEY="$USAI_API_KEY" \
-  -e OPENAI_BASE_URL="https://api.gsa.usai.gov/api/v1" \
-  -w $(pwd) SANDBOX_NAME codex
+# From this repo - handles secret check and model selection
+make run-codex
+
+# Override model
+make run-codex CODEX_MODEL=gpt-5.2-latest-guardrails-defaultv2
 ```
 
 > [!NOTE]
 > Codex reads `AGENTS.md` natively — no additional instruction file configuration is needed.
+> Provider config (base URL, wire API) is handled by `.codex/config.toml`.
 
 ---
 
