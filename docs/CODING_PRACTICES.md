@@ -3,12 +3,12 @@ title: "Secure Coding Practices for AI-Assisted Federal Development"
 description: "Secure coding standards for AI-assisted development — input validation, secrets management, dependency security, architecture discipline, change safety, SOLID principles, OWASP/SSDF alignment"
 status: canonical
 tier: 1
-last_updated: "2026-02-25"
+last_updated: "2026-06-05"
 nist_controls: ["SA-8", "SA-11", "SA-12", "SA-15", "SA-17", "SI-2", "SI-4", "SI-7", "SI-10", "SI-11", "SI-15", "SC-3", "SC-13", "SC-28", "CP-10", "CA-7", "CM-2", "CM-3", "IA-2", "IA-5", "AC-3", "AU-2", "SR-3"]
 frameworks: ["NIST SP 800-53 Rev 5.2", "NIST SP 800-218A", "OWASP Top 10 LLM 2025", "OWASP Top 10 Agentic 2026", "CISA Secure by Design"]
 audience: "developers"
 keywords: ["secure-coding", "input-validation", "secrets-management", "supply-chain", "SBOM", "OWASP", "SSDF", "TDD", "SOLID", "YAGNI", "DRY", "ADR", "design-by-contract", "bias-testing", "fairness", "model-evaluation", "continuous-monitoring", "model-drift"]
-related_files: ["AGENTS.md", "checklists/pre-deployment.md"]
+related_files: ["AGENTS.md", "docs/SECURITY-CONTROLS.md", "checklists/pre-deployment.md"]
 load_priority: "always"
 review_cycle: "quarterly"
 ---
@@ -33,10 +33,10 @@ review_cycle: "quarterly"
 | Architecture | ADRs for design decisions, Design by Contract, interfaces before implementations |
 | Change Safety | TDD (red-green-refactor), regression tests for bug fixes, idempotent operations |
 | Size Limits | Functions ≤50 lines, files ≤400 lines, cyclomatic complexity ≤10, params ≤5 |
-| Version Control | SemVer 2.0.0, Conventional Commits 1.0.0, automated releases, CHANGELOG maintenance |
 | AI Bias | Test decision-making outputs for bias across protected classes; document known limitations |
 | Model Eval | Evaluate accuracy, limitations, provenance before use; document selection in ADR |
 | AI Monitoring | Track error rates, detect model drift, monitor for prompt injection, monthly evaluation |
+| Version Control | SemVer 2.0.0, Conventional Commits 1.0.0, automated releases, CHANGELOG maintenance |
 
 > **Full details in sections below. See `CONTEXT-GUIDE.md` for loading instructions.**
 
@@ -362,39 +362,55 @@ Logging format:
 - MUST sign release artifacts when deploying to production
 - SHOULD implement pipeline-as-code with version-controlled CI configurations
 
+> **Control Mapping:** CM-2 (Baseline Configuration), SA-10 (Developer Configuration Management), SA-11 (Developer Testing)
+
 ### 10.3 Version Control and Release Management
 
-This project follows **Semantic Versioning 2.0.0** and **Conventional Commits 1.0.0** with automated release workflows.
+<!-- NIST SP 800-53: CM-2 (Baseline Configuration), CM-3 (Configuration Change Control), SA-10 (Developer Configuration Management), AU-10 (Non-repudiation) -->
+
+This section defines version control and release management requirements for federal software projects.
 
 #### Version Control Requirements
 
-- MUST follow Semantic Versioning (SemVer) for all releases:
+- MUST follow Semantic Versioning (SemVer 2.0.0) for all releases:
   - **MAJOR**: Breaking changes (incompatible API changes)
   - **MINOR**: New features (backward-compatible)
   - **PATCH**: Bug fixes (backward-compatible)
-  - Pre-release tags: `alpha`, `beta`, `rc` (e.g., `1.0.0-alpha.1`)
+  - Pre-release versions MAY use dot-separated identifiers (e.g., `1.0.0-alpha.1`, `1.0.0-rc.1`)
 
-- MUST use Conventional Commits format for all commit messages:
-  - Format: `<type>(<scope>): <subject>`
+- MUST use Conventional Commits 1.0.0 format for all commit messages:
+  - Format: `<type>[optional scope][!]: <description>`
+  - The `!` suffix indicates a breaking change
   - See AGENTS.md for complete commit message standards
+
+- SHOULD sign commits using GPG or SSH keys for non-repudiation
+- MUST sign release tags for production releases (`git tag -s`)
 
 - MUST maintain CHANGELOG.md following Keep a Changelog format:
   - Sections: Added, Changed, Deprecated, Removed, Fixed, Security
   - Version links to GitHub compare views
-  - Auto-generated from conventional commits via release-please
+  - SHOULD be auto-generated from conventional commits via release-please
+
+#### Branch Protection
+
+- MUST enable branch protection on default and release branches
+- MUST require pull request reviews before merging to protected branches
+- MUST require status checks to pass before merging
+- SHOULD require linear history for cleaner release automation
 
 #### Release Automation
 
 - MUST use automated release workflows (release-please + GitHub Actions)
 - Version bumps determined automatically from commit types:
   - `feat:` → Minor version bump
-  - `fix:`, `perf:`, `security:` → Patch version bump
+  - `fix:` → Patch version bump
   - `BREAKING CHANGE:` footer or `!` suffix → Major version bump
-  - `docs:`, `chore:`, `test:`, `ci:`, `build:`, `style:`, `refactor:` → No version bump
+  - `docs:`, `chore:`, `test:`, `ci:`, `build:`, `style:`, `refactor:`, `perf:` → No version bump (configurable)
 
 - MUST validate commit messages in CI (commitlint)
 - MUST create git tags for all releases (`v<version>`)
 - MUST generate GitHub releases with release notes from CHANGELOG
+- Release artifacts MUST be signed per §10.2
 
 #### Traceability Requirements
 
@@ -403,7 +419,7 @@ This project follows **Semantic Versioning 2.0.0** and **Conventional Commits 1.
 - CHANGELOG.md MUST document all user-facing changes with version and date
 - Breaking changes MUST be clearly documented in CHANGELOG and commit messages
 
-> **Control Mapping:** CM-2 (Baseline Configuration), CM-3 (Configuration Change Control), SA-10 (Developer Configuration Management), SA-11 (Developer Testing)
+> **Control Mapping:** CM-2 (Baseline Configuration), CM-3 (Configuration Change Control), SA-10 (Developer Configuration Management), AU-10 (Non-repudiation), SI-7 (Software, Firmware, and Information Integrity)
 
 ---
 
