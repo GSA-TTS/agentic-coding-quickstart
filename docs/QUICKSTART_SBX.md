@@ -457,9 +457,36 @@ sbx create --clone --name feature-work opencode .
 # git fetch sandbox-feature-work
 ```
 
-> [!WARNING]
+> [!NOTE]
+> `--clone` replaced the earlier `--branch` flag in sbx v0.31.0. If your CLI does not recognize
+> `--clone`, update to the latest version.
+>
 > Removing a clone-mode sandbox deletes the in-sandbox clone. Any commits you have not fetched
 > (`git fetch sandbox-<name>`) or pushed to an upstream remote are lost.
+
+### Understanding the Git Remote Lifecycle
+
+When you use `--clone`, the sandbox exposes its clone as a Git remote named `sandbox-<name>` on
+your host repository:
+
+| Event | Effect |
+|-------|--------|
+| `sbx create --clone` | Adds `sandbox-<name>` remote to your host `.git/config` |
+| `sbx stop` | Git daemon stops; `git fetch sandbox-<name>` fails until restart |
+| `sbx run` (restart) | Git daemon restarts on a new port; CLI updates remote URL automatically |
+| `sbx rm` | Removes sandbox, clone, daemon, and the `sandbox-<name>` remote entry |
+
+**Safe pattern before removal:**
+
+```bash
+# Fetch any uncommitted work first
+git fetch sandbox-feature-work
+
+# Then remove
+sbx rm feature-work
+```
+
+### Direct Mode Alternative
 
 Alternatively, check out the branch on your host before creating the sandbox:
 
