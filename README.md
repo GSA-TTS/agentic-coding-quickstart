@@ -240,6 +240,26 @@ If USAi authentication fails right after copying a newly created key, regenerate
 the console copy button immediately instead of selecting the displayed text. The displayed value may
 be truncated.
 
+### How default USAI models are chosen
+
+The quickstart `templates/opencode.jsonc` includes a generated USAI model catalog.
+This repository keeps that section in sync with the USAI `/models` API so new
+projects start from a current baseline.
+
+Default model policy:
+
+- `model` tracks the highest available Opus generation
+- `agent.compaction.model` tracks the highest available GPT generation
+- `small_model` stays a curated fast/cheap fallback
+
+The generated catalog improves discoverability, but it is still possible for a
+model listed by `/models` to fail at runtime for a specific key or request. See
+[docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md) for troubleshooting.
+
+Repository maintainers can refresh this catalog through the trusted GitHub Actions
+workflow using the `USAI_MODELS_API_KEY` repository secret. The workflow opens or
+updates a pull request instead of pushing directly to `main`.
+
 For more troubleshooting, see [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md).
 
 ---

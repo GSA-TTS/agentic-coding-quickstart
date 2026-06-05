@@ -142,7 +142,20 @@ Edit `opencode.jsonc`:
 
 ### Add/Remove Models
 
-Edit the `models` section in `opencode.jsonc` based on your USAi API key entitlements.
+The bundled `opencode.jsonc` includes a generated USAI model catalog. The
+generated block is maintained by this repository so the default template stays in
+sync with current USAI offerings.
+
+When you copy the file into your own project, you can still trim the list or pin
+different defaults for your team. Keep in mind:
+
+- The main `model` default is chosen from the highest available Opus generation
+- `agent.compaction.model` is chosen from the highest available GPT generation
+- `small_model` stays a curated fast/cheap fallback
+- A model listed by `/models` may still fail at runtime for a given key or request
+
+If you want a smaller local config, remove models you do not plan to use after
+provisioning.
 
 ### Change GitLab Host
 

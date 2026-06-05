@@ -1,4 +1,9 @@
 {
+  "type": "module",
+  "scripts": {
+    "sync:usai-models": "node scripts/sync-usai-models.mjs --write-snapshot",
+    "test": "node --test"
+  },
   "devDependencies": {
     "@commitlint/cli": "21.0.1",
     "@commitlint/config-conventional": "21.0.1"
