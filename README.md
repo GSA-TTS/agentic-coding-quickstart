@@ -230,7 +230,7 @@ Ensure you're in a directory with `opencode.jsonc`. For sbx, the workspace is au
 
 ```bash
 # Check your secret is stored
-sbx secret list
+sbx secret ls
 
 # Re-set if needed
 sbx secret set -g anthropic

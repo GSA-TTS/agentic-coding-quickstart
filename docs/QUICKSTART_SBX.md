@@ -443,6 +443,12 @@ sbx run opencode ~/projects/backend ~/projects/frontend:ro
 Prefer read-only mounts for secondary workspaces unless the agent genuinely needs write access. This
 limits accidental modifications and reduces the blast radius of agent errors.
 
+> [!WARNING]
+> Mounted directories expose **all content** to the agent, including `.env` files, `.git/config`
+> (which may contain tokens), and any secrets in the mounted path. Avoid mounting directories that
+> contain sensitive files you do not want the agent to see. Use selective, targeted mounts rather
+> than mounting parent or home directories.
+
 ---
 
 ## Working with Git Branches
