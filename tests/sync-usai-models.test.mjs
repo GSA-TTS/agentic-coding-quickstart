@@ -1,11 +1,28 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
+import vm from "node:vm"
 
 import { updateTemplate } from "../scripts/sync-usai-models.mjs"
 
 const templatePath = new URL("../templates/opencode.jsonc", import.meta.url)
 const fixturePath = new URL("./fixtures/usai-models.json", import.meta.url)
+
+/**
+ * Validates that text is syntactically valid JSONC (JSON with comments and trailing commas).
+ * Uses JS eval in a sandbox since JSONC is a subset of JS object literal syntax.
+ * @param {string} text - JSONC text to validate
+ * @returns {{ valid: boolean, parsed?: object, error?: string }}
+ */
+function validateJsonc(text) {
+  const sandbox = {}
+  try {
+    vm.runInNewContext("result = " + text, sandbox)
+    return { valid: true, parsed: sandbox.result }
+  } catch (e) {
+    return { valid: false, error: e.message }
+  }
+}
 
 test("updateTemplate filters embeddings and keeps strongest defaults", async () => {
   const [templateText, fixtureText] = await Promise.all([
@@ -87,4 +104,69 @@ test("updateTemplate filters only-embedding payloads", async () => {
   const { models } = updateTemplate(templateText, payload)
 
   assert.equal(models.length, 0)
+})
+
+test("updateTemplate produces valid JSONC syntax", async () => {
+  const [templateText, fixtureText] = await Promise.all([
+    readFile(templatePath, "utf8"),
+    readFile(fixturePath, "utf8"),
+  ])
+
+  const { updatedTemplate } = updateTemplate(templateText, JSON.parse(fixtureText))
+  const result = validateJsonc(updatedTemplate)
+
+  assert.equal(result.valid, true, `JSONC validation failed: ${result.error}`)
+  assert.equal(typeof result.parsed.model, "string", "model should be a string")
+  assert.equal(typeof result.parsed.small_model, "string", "small_model should be a string")
+  assert.equal(typeof result.parsed.agent, "object", "agent should be an object")
+})
+
+test("updateTemplate is idempotent across multiple generations", async () => {
+  const [templateText, fixtureText] = await Promise.all([
+    readFile(templatePath, "utf8"),
+    readFile(fixturePath, "utf8"),
+  ])
+  const payload = JSON.parse(fixtureText)
+
+  // Generate 3 times
+  const results = []
+  for (let i = 0; i < 3; i++) {
+    const { updatedTemplate } = updateTemplate(templateText, payload)
+    results.push(updatedTemplate)
+  }
+
+  // All should be identical
+  assert.equal(results[0], results[1], "First and second generation differ")
+  assert.equal(results[1], results[2], "Second and third generation differ")
+})
+
+test("updateTemplate preserves required structure after generation", async () => {
+  const [templateText, fixtureText] = await Promise.all([
+    readFile(templatePath, "utf8"),
+    readFile(fixturePath, "utf8"),
+  ])
+
+  const { updatedTemplate } = updateTemplate(templateText, JSON.parse(fixtureText))
+  const { valid, parsed, error } = validateJsonc(updatedTemplate)
+
+  assert.equal(valid, true, `JSONC validation failed: ${error}`)
+
+  // Required top-level keys
+  assert.ok("model" in parsed, "missing model key")
+  assert.ok("small_model" in parsed, "missing small_model key")
+  assert.ok("agent" in parsed, "missing agent key")
+  assert.ok("provider" in parsed, "missing provider key")
+
+  // Agent structure
+  assert.ok("compaction" in parsed.agent, "missing agent.compaction")
+  assert.ok("model" in parsed.agent.compaction, "missing agent.compaction.model")
+
+  // Provider structure (at least one provider)
+  const providerKeys = Object.keys(parsed.provider)
+  assert.ok(providerKeys.length > 0, "no providers defined")
+
+  // Model values should have usai/ prefix
+  assert.match(parsed.model, /^usai\//, "model should have usai/ prefix")
+  assert.match(parsed.small_model, /^usai\//, "small_model should have usai/ prefix")
+  assert.match(parsed.agent.compaction.model, /^usai\//, "compaction model should have usai/ prefix")
 })
