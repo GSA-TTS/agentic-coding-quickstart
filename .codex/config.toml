@@ -4,8 +4,8 @@
 # USAi does not implement the Responses API (/v1/responses); this config
 # forces the older /v1/chat/completions path which USAi supports.
 #
-# The OPENAI_API_KEY env var is populated at runtime by the SBX proxy
-# (stored via: sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY)
+# The USAI_API_KEY env var is populated at runtime by the SBX proxy
+# (stored via: sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY)
 
 model_provider = "usai"
 model = "gpt-5.4-latest-guardrails-defaultv2"
@@ -13,5 +13,5 @@ model = "gpt-5.4-latest-guardrails-defaultv2"
 [model_providers.usai]
 name    = "USAi"
 base_url = "https://api.gsa.usai.gov/api/v1"
-env_key  = "OPENAI_API_KEY"
+env_key  = "USAI_API_KEY"
 wire_api = "chat-completions"

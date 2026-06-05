@@ -144,7 +144,7 @@ AI coding agents can read files, write code, and execute commands. Running them 
 | `.pre-commit-config.yaml` | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md` | Behavioral rules the agent follows |
 | `docs/QUICKSTART_SBX.md` | Full sbx CLI setup guide |
-| `docs/QUICKSTART_CODEX.md` | **Codex** (OpenAI) setup guide with USAi |
+| `docs/QUICKSTART_OPENHANDS.md` | **OpenHands** setup guide with USAi |
 | `docs/QUICKSTART_DOCKER_DESKTOP.md` | ~~Docker Desktop setup guide~~ (deprecated) |
 | `docs/ZED_SETUP.md` | **Zed Editor** integration guide |
 | `docs/KNOWN_FAILURE_MODES.md` | Troubleshooting guide |
@@ -189,36 +189,47 @@ For more information, see the [OpenCode Web documentation](https://opencode.ai/d
 
 ---
 
-## Codex (OpenAI) Integration
+## OpenHands Integration
 
-If you use **OpenAI Codex CLI**, it works with USAi out of the box since USAi exposes an OpenAI-compatible API.
+If you use **OpenHands**, it works with USAi since USAi exposes an OpenAI-compatible API. OpenHands provides a web-based IDE experience with powerful AI coding agents.
 
 ### Quick Start with Make
 
 ```bash
+# Set your USAi API key first
+export OPENAI_API_KEY="your-usai-api-key"
+
 # From this repo or any project with the Makefile
-make run-codex
+make run-openhands
 ```
 
-This automatically checks for (and prompts to set) the required `OPENAI_API_KEY` secret, then launches Codex with the default USAi model `gpt-5.4-latest-guardrails-defaultv2`. Provider config (base URL, wire API) is read from `.codex/config.toml` automatically.
+This launches OpenHands with the default USAi model `openai/gpt-5.4-latest-guardrails-defaultv2`. The web interface will be available at http://localhost:3000.
 
 To use a different USAi-entitled model:
 
 ```bash
-make run-codex CODEX_MODEL=gpt-5.2-latest-guardrails-defaultv2
+make run-openhands OPENHANDS_MODEL=openai/gpt-5.2-latest-guardrails-defaultv2
 ```
 
 ### Manual Setup
 
 ```bash
-# Store USAi API key as OPENAI_API_KEY (only secret needed)
-sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"
+# Set USAi API key as OPENAI_API_KEY
+export OPENAI_API_KEY="your-usai-api-key"
 
-# Run Codex — .codex/config.toml wires the USAi provider automatically
-sbx run codex . -- -m gpt-5.4-latest-guardrails-defaultv2
+# Run OpenHands via Docker
+docker run -it --pull always \
+  -e LLM_MODEL="openai/gpt-5.4-latest-guardrails-defaultv2" \
+  -e LLM_BASE_URL="https://api.gsa.usai.gov/api/v1" \
+  -e LLM_API_KEY="$OPENAI_API_KEY" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v ~/.openhands:/.openhands \
+  -v "$(pwd)":/opt/workspace_base \
+  -p 3000:3000 \
+  ghcr.io/openhands/openhands:latest
 ```
 
-See the **[Codex Setup Guide](docs/QUICKSTART_CODEX.md)** for detailed instructions.
+See the **[OpenHands Setup Guide](docs/QUICKSTART_OPENHANDS.md)** for detailed instructions.
 
 ---
 

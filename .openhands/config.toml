@@ -1,0 +1,28 @@
+# OpenHands project configuration — USAi provider
+#
+# Routes OpenHands to the GSA USAi endpoint.
+# The OPENAI_API_KEY env var is populated at runtime by the SBX proxy
+# (stored via: sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY)
+
+[core]
+# Working directory for OpenHands
+workspace_base = "/workspace"
+
+# Default agent to use
+default_agent = "CodeActAgent"
+
+# Maximum iterations for agent tasks
+max_iterations = 100
+
+[llm]
+# USAi-compatible endpoint
+model = "openai/gpt-5.4-latest-guardrails-defaultv2"
+base_url = "https://api.gsa.usai.gov/api/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[sandbox]
+# Container image to use for the sandbox
+base_container_image = "nikolaik/python-nodejs:python3.12-nodejs22-slim"
+
+# Timeout for sandbox operations
+timeout = 120

@@ -29,9 +29,9 @@ See [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/) for 
 | `AGENTS_SBX_ADDENDUM.md` | Sandbox rules to append to your AGENTS.md | If you have AGENTS.md |
 
 > [!NOTE]
-> **Using Codex?** No config file is needed. Codex uses `OPENAI_API_KEY` and `OPENAI_BASE_URL`
-> environment variables, which are injected via `sbx secret set-custom`. See the
-> [Codex Quickstart Guide](../docs/QUICKSTART_CODEX.md) for details.
+> **Using OpenHands?** OpenHands runs via Docker and uses environment variables for configuration.
+> Set `export OPENAI_API_KEY="your-usai-key"` before running. See the
+> [OpenHands Quickstart Guide](../docs/QUICKSTART_OPENHANDS.md) for details.
 
 ## Quick Bootstrap
 

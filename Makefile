@@ -1,9 +1,9 @@
 # Agentic Coding Quickstart - Makefile
 # Simple commands for setting up and managing your AI-assisted development workspace
 
-CODEX_MODEL ?= gpt-5.4-latest-guardrails-defaultv2
+OPENHANDS_MODEL ?= openai/gpt-5.4-latest-guardrails-defaultv2
 
-.PHONY: setup doctor new-project clean install-hooks help init-project run-agent run-codex
+.PHONY: setup doctor new-project clean install-hooks help init-project run-agent run-openhands
 
 # Default target
 help:
@@ -16,7 +16,7 @@ help:
 	@echo "  make new-project           - Create a new project directory (interactive)"
 	@echo "  make init-project TARGET_DIR=/path - Bootstrap a project directory (non-interactive)"
 	@echo "  make run-agent             - Run OpenCode agent in SBX"
-	@echo "  make run-codex             - Run Codex (OpenAI) agent in SBX"
+	@echo "  make run-openhands         - Run OpenHands agent in SBX (Docker)"
 	@echo "  make install-hooks         - [OPTIONAL] Install pre-commit hooks"
 	@echo "  make clean                 - Remove generated files"
 	@echo ""
@@ -201,42 +201,50 @@ run-agent: _check-usai-key
 	@echo "Running OpenCode agent in SBX sandbox..."
 	@sbx run opencode .
 
-# Run Codex (OpenAI) agent in sandbox
-# Provider config (USAi base URL, wire_api) lives in .codex/config.toml.
-# Only the model needs to be passed at runtime so users can override it.
-run-codex: _check-codex-keys
-	@echo "Running Codex agent in SBX sandbox with model $(CODEX_MODEL)..."
-	@sbx run codex . -- -m "$(CODEX_MODEL)"
+# Run OpenHands agent via Docker
+# OpenHands runs as a web-based IDE/agent accessible via browser.
+# Provider config (USAi base URL) lives in .openhands/config.toml.
+run-openhands: _check-openhands-keys
+	@echo "Running OpenHands agent via Docker with model $(OPENHANDS_MODEL)..."
+	@echo "OpenHands will be accessible at http://localhost:3000"
+	@docker run -it --pull always \
+		-e LLM_MODEL="$(OPENHANDS_MODEL)" \
+		-e LLM_BASE_URL="https://api.gsa.usai.gov/api/v1" \
+		-e LLM_API_KEY="$$OPENAI_API_KEY" \
+		-e WORKSPACE_MOUNT_PATH="$(PWD)" \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-v $(HOME)/.openhands:/.openhands \
+		-v $(PWD):/opt/workspace_base \
+		-p 3000:3000 \
+		--add-host host.docker.internal:host-gateway \
+		ghcr.io/openhands/openhands:latest
 
-# Check Codex-specific secrets (only OPENAI_API_KEY needed; base URL is
-# configured via -c flags at runtime, not via env vars or SBX secrets).
-_check-codex-keys:
-	@echo "Checking Codex secrets in SBX..."
-	@# Check OPENAI_API_KEY (used by Codex as the auth credential via env_key)
-	@if sbx secret ls 2>/dev/null | grep -q "OPENAI_API_KEY"; then \
-		echo "  OPENAI_API_KEY: OK"; \
+# Check OpenHands-specific secrets (only OPENAI_API_KEY needed; base URL is
+# configured via env var or config file).
+_check-openhands-keys:
+	@echo "Checking OpenHands secrets..."
+	@# Check OPENAI_API_KEY environment variable
+	@if [ -n "$$OPENAI_API_KEY" ]; then \
+		echo "  OPENAI_API_KEY: OK (from environment)"; \
+	elif sbx secret ls 2>/dev/null | grep -q "OPENAI_API_KEY"; then \
+		echo "  OPENAI_API_KEY: OK (from SBX secrets)"; \
+		echo "  NOTE: For OpenHands Docker, export the key: export OPENAI_API_KEY=\$$(sbx secret get OPENAI_API_KEY)"; \
 	else \
-		echo "  OPENAI_API_KEY not found in SBX secrets."; \
-		echo "  Codex requires OPENAI_API_KEY mapped to your USAi key."; \
-		read -s -p "Paste USAI_API_KEY value (will be stored as OPENAI_API_KEY): " key; \
+		echo "  OPENAI_API_KEY not found."; \
+		echo "  OpenHands requires OPENAI_API_KEY set as an environment variable."; \
+		read -s -p "Paste USAI_API_KEY value (will be exported as OPENAI_API_KEY): " key; \
 		echo ""; \
 		if [ -n "$$key" ]; then \
-			USAI_KEY="$$key" sh -c 'sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$$USAI_KEY"' || { \
-				echo "ERROR: Failed to store OPENAI_API_KEY in SBX secrets."; \
-				exit 1; \
-			}; \
-			echo "  OPENAI_API_KEY: Stored in SBX secrets"; \
+			export OPENAI_API_KEY="$$key"; \
+			echo "  OPENAI_API_KEY: Set for this session"; \
+			echo "  TIP: Add 'export OPENAI_API_KEY=your-key' to your shell profile for persistence"; \
 		else \
 			echo ""; \
-			echo "ERROR: OPENAI_API_KEY is required for Codex. Get your USAi key at:"; \
+			echo "ERROR: OPENAI_API_KEY is required for OpenHands. Get your USAi key at:"; \
 			echo "  https://console.gsa.usai.gov/key-management"; \
 			exit 1; \
 		fi; \
 	fi
-	@echo ""
-	@echo "NOTE: If you just set a new OPENAI_API_KEY secret, recreate any existing Codex sandbox:"
-	@echo "  sbx rm <sandbox-name> && make run-codex"
-	@echo ""
 
 # Install pre-commit hooks (optional)
 install-hooks:  ## [OPTIONAL] Install pre-commit hooks

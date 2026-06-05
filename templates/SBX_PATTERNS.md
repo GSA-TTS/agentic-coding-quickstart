@@ -84,46 +84,51 @@ sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
 
 ---
 
-## Codex (OpenAI CLI)
+## OpenHands (Web-based IDE)
 
-Codex uses its own config system (`.codex/config.toml`), **not** the Python SDK env vars like `OPENAI_BASE_URL`. This repo ships a `.codex/config.toml` that wires the USAi provider automatically.
+OpenHands runs as a Docker container and provides a web-based IDE experience. It uses environment variables for configuration, **not** SBX secrets.
 
 > [!IMPORTANT]
-> `OPENAI_BASE_URL` has **no effect** on Codex CLI — it's a Python SDK env var. The base URL is configured in `.codex/config.toml` via the `base_url` field. Only `OPENAI_API_KEY` needs to be stored as a secret.
+> OpenHands runs via Docker directly, not inside SBX. Set `OPENAI_API_KEY` as an environment variable before starting.
 
-### Store API key in sbx secret (recommended)
+### Set environment variable
 
 ```bash
-# Store USAi API key as OPENAI_API_KEY (only secret needed)
-sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"
+# Set USAi API key as OPENAI_API_KEY
+export OPENAI_API_KEY="your-usai-api-key"
 
-# Recreate sandbox to pick up new secret
-sbx rm SANDBOX_NAME 2>/dev/null; sbx create --name SANDBOX_NAME codex .
-
-# Run - .codex/config.toml handles provider config automatically
-sbx run SANDBOX_NAME
+# Optional: Add to your shell profile for persistence
+echo 'export OPENAI_API_KEY="your-usai-api-key"' >> ~/.zshrc
 ```
 
-### Quick run (no named sandbox)
+### Run OpenHands via Docker
 
 ```bash
-# Requires .codex/config.toml in project root (provided by this repo)
-sbx run codex . -- -m gpt-5.4-latest-guardrails-defaultv2
+# Run OpenHands - accessible at http://localhost:3000
+docker run -it --pull always \
+  -e LLM_MODEL="openai/gpt-5.4-latest-guardrails-defaultv2" \
+  -e LLM_BASE_URL="https://api.gsa.usai.gov/api/v1" \
+  -e LLM_API_KEY="$OPENAI_API_KEY" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v ~/.openhands:/.openhands \
+  -v "$(pwd)":/opt/workspace_base \
+  -p 3000:3000 \
+  ghcr.io/openhands/openhands:latest
 ```
 
 ### Using Make (easiest)
 
 ```bash
-# From this repo - handles secret check and model selection
-make run-codex
+# From this repo - handles model selection
+make run-openhands
 
 # Override model
-make run-codex CODEX_MODEL=gpt-5.2-latest-guardrails-defaultv2
+make run-openhands OPENHANDS_MODEL=openai/gpt-5.2-latest-guardrails-defaultv2
 ```
 
 > [!NOTE]
-> Codex reads `AGENTS.md` natively — no additional instruction file configuration is needed.
-> Provider config (base URL, wire API) is handled by `.codex/config.toml`.
+> OpenHands provides a web interface at http://localhost:3000.
+> Configuration is handled via environment variables and `.openhands/config.toml`.
 
 ---
 
@@ -233,7 +238,7 @@ sbx run SANDBOX_NAME
 | Provider | Command | Notes |
 |----------|---------|-------|
 | USAi | `sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"` | Custom endpoint |
-| Codex (via USAi) | `sbx secret set-custom -g --host api.gsa.usai.gov --env OPENAI_API_KEY --value "$USAI_API_KEY"` | Maps to OpenAI env vars |
+| OpenHands (via USAi) | `export OPENAI_API_KEY="$USAI_API_KEY"` | Environment variable for Docker |
 | GitHub | `gh auth token \| sbx secret set -g github` | Built-in service |
 | GitLab (self-hosted) | `sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"` | Custom endpoint |
 
