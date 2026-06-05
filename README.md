@@ -21,23 +21,67 @@ This repository is part of a three-repo ecosystem:
 
 ## 5-Minute Quickstart
 
+### Step 0: Prerequisites
+
+Before you start, make sure you have:
+
+| Requirement | Notes |
+|-------------|-------|
+| Package manager | Homebrew on macOS, `winget` on Windows, or `apt` on Ubuntu |
+| Docker account | Required for `sbx login` |
+| USAi API key | Export as `USAI_API_KEY` before configuring secrets |
+| GitHub CLI auth | Optional, but recommended for repository access |
+
+```bash
+export USAI_API_KEY="your-usai-api-key"
+```
+
+> [!NOTE]
+> Use the USAi console copy button when available. The key-management UI may display only a
+> truncated portion of the key, which can look like the full value if you manually select it.
+
 ### Step 1: Install sbx CLI
 
 The `sbx` CLI is a standalone tool — Docker Desktop is **not required**.
 
+<details>
+<summary>macOS</summary>
+
 ```bash
-# macOS
-brew install docker/tap/sbx && sbx login
+brew install docker/tap/sbx
+sbx login
+```
 
-# Windows
-winget install -h Docker.sbx && sbx login
+> [!NOTE]
+> macOS may prompt you to approve helper binaries the first time you use `sbx`. Allow these if
+> prompted:
+> - `mkfs.erofs`
+> - `mkfs.ext4`
+> - `containerd-shim-nerdbox-v1`
 
-# Linux (Ubuntu)
+</details>
+
+<details>
+<summary>Windows</summary>
+
+```bash
+winget install -h Docker.sbx
+sbx login
+```
+
+</details>
+
+<details>
+<summary>Linux (Ubuntu)</summary>
+
+```bash
 curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
 sudo apt-get install docker-sbx
 sudo usermod -aG kvm $USER && newgrp kvm
 sbx login
 ```
+
+</details>
 
 > [!NOTE]
 > `sbx login` requires a Docker account. Docker Desktop is not required, but if you have it,
@@ -64,16 +108,16 @@ sbx run opencode .
 ```
 
 > [!NOTE]
-> USAi is not a built-in sbx service, so we use `sbx secret set-custom` instead of `sbx secret set -g`.
-> If you change the secret, you must **delete and recreate** the sandbox for it to take effect.
+> `sbx policy set-default balanced` may need to be retried if the policy service has not settled
+> yet after login or first-time setup.
+>
+> USAi is not a built-in sbx service, so we use `sbx secret set-custom` instead of
+> `sbx secret set -g`. If you change the secret, you must **delete and recreate** the sandbox for
+> it to take effect.
 
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
 
 **Need more details?** See the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
-
-> [!WARNING]
-> **Docker Desktop `docker sandbox` commands are deprecated.** Use the `sbx` CLI instead.
-> See [Docker's deprecation notice](https://docs.docker.com/reference/cli/docker/sandbox/).
 
 ---
 
@@ -85,16 +129,6 @@ AI coding agents can read files, write code, and execute commands. Running them 
 - **Secret protection** — API keys injected via proxy, never touch disk
 - **Reproducibility** — Same environment every time
 - **Audit trail** — Clear boundaries for what the agent can do
-
----
-
-## Prerequisites
-
-| Requirement | How to Check | Notes |
-|-------------|--------------|-------|
-| sbx CLI | `sbx version` | Standalone tool, Docker Desktop not required |
-| USAi API key | From your GSA account | Stored via `sbx secret` |
-| GitHub token | `gh auth status` | Optional, for code access |
 
 ---
 
@@ -199,6 +233,10 @@ sbx secret list
 # Re-set if needed
 sbx secret set -g anthropic
 ```
+
+If USAi authentication fails right after copying a newly created key, regenerate the key and use
+the console copy button immediately instead of selecting the displayed text. The displayed value may
+be truncated.
 
 For more troubleshooting, see [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md).
 
