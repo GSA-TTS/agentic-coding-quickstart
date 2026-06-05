@@ -384,6 +384,67 @@ echo "$DOCKER_PAT" | sbx login --password-stdin --username "$DOCKER_USER"
 
 ---
 
+## Multiple Workspaces
+
+You can mount additional directories alongside the primary workspace when creating a sandbox. This
+is useful when you need to reference multiple repos or folders from one sandbox session.
+
+### Syntax
+
+```bash
+sbx run <agent> <primary-workspace> [extra-workspace]:ro [extra-workspace]:ro ...
+```
+
+- **Primary workspace** — The first path; agent starts here. Read/write by default.
+- **Extra workspaces** — Additional paths the agent can access.
+- **`:ro` suffix** — Mounts extra workspaces as read-only (recommended for reference repos).
+
+All workspaces appear inside the sandbox at their absolute host paths.
+
+### Example: App Repo + Playbook Reference
+
+```bash
+# Primary: your app (read/write)
+# Secondary: agentic-coding-playbook (read-only reference)
+sbx run opencode ~/projects/my-app ~/projects/agentic-coding-playbook:ro
+```
+
+The agent can edit `~/projects/my-app` and read from `~/projects/agentic-coding-playbook` without
+risk of modifying the playbook content.
+
+### Example: Frontend + Backend Repos
+
+```bash
+# Primary: backend (read/write)
+# Secondary: frontend (read-only for now)
+sbx run opencode ~/projects/backend ~/projects/frontend:ro
+```
+
+### Important Constraints
+
+| Constraint | Detail |
+|------------|--------|
+| Mounts are fixed at creation | You cannot add or remove workspaces from an existing sandbox |
+| Changing mounts requires recreation | `sbx rm <name>` then recreate with new paths |
+| `:ro` applies to extra workspaces only | Primary workspace is always read/write in direct mode |
+| Mounted content is visible to agent | Only mount what the agent needs to see |
+
+### When to Use Multi-Workspace
+
+| Use Case | Recommended Setup |
+|----------|-------------------|
+| Reference standards/skills from playbook | Primary: your app, Secondary: playbook `:ro` |
+| Cross-repo code review | Primary: repo under review, Secondary: related repos `:ro` |
+| Docs + implementation side by side | Primary: implementation, Secondary: docs `:ro` |
+| Monorepo-style multi-package work | Primary: one package, Secondary: shared libs `:ro` |
+
+### Security Recommendation
+
+Prefer read-only mounts for secondary workspaces unless the agent genuinely needs write access. This
+limits accidental modifications and reduces the blast radius of agent errors.
+
+---
+
 ## Working with Git Branches
 
 For branch isolation, use the `--clone` flag which creates an in-container clone of your repository:
@@ -396,6 +457,10 @@ sbx create --clone --name feature-work opencode .
 # git fetch sandbox-feature-work
 ```
 
+> [!WARNING]
+> Removing a clone-mode sandbox deletes the in-sandbox clone. Any commits you have not fetched
+> (`git fetch sandbox-<name>`) or pushed to an upstream remote are lost.
+
 Alternatively, check out the branch on your host before creating the sandbox:
 
 ```bash
@@ -405,6 +470,18 @@ git checkout feature/login
 # Create sandbox - it mounts the current branch
 sbx run opencode .
 ```
+
+### Clone Mode + Multiple Workspaces
+
+Clone mode and multiple workspaces work together. When using both:
+
+```bash
+sbx create --clone --name feature-work opencode ~/my-app ~/shared-libs:ro
+```
+
+- The primary workspace (`~/my-app`) is cloned inside the sandbox
+- Extra workspaces (`~/shared-libs:ro`) are mounted as-is (not cloned)
+- Use `git fetch sandbox-feature-work` to retrieve commits from the cloned primary
 
 ---
 

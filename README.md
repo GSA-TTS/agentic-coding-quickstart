@@ -119,6 +119,8 @@ That's it. You're now running an AI coding agent in an isolated container with U
 
 **Need more details?** See the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
 
+**Working across multiple repos?** See [Multiple Workspaces](docs/QUICKSTART_SBX.md#multiple-workspaces) for mounting extra directories.
+
 ---
 
 ## Why Sandboxes?
