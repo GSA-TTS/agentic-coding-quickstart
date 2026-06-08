@@ -251,15 +251,21 @@ async function loadPayload(args) {
     return JSON.parse(await readFile(fixturePath, "utf8"))
   }
 
-  const response = await fetch("https://api.gsa.usai.gov/api/v1/models", {
-    headers: {
-      accept: "application/json",
-      authorization: `Bearer ${process.env.USAI_API_KEY}`,
-    },
-  })
+  let response
+  try {
+    response = await fetch("https://api.gsa.usai.gov/api/v1/models", {
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${process.env.USAI_API_KEY}`,
+      },
+    })
+  } catch (err) {
+    throw new Error(`USAI API fetch failed: ${err.message}`)
+  }
 
   if (!response.ok) {
-    throw new Error(`USAI models request failed: ${response.status}`)
+    const body = await response.text().catch(() => "(no body)")
+    throw new Error(`USAI models request failed: ${response.status} ${response.statusText} - ${body}`)
   }
 
   return response.json()
