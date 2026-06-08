@@ -51,16 +51,19 @@
         "apiKey": "{env:USAI_API_KEY}",
         // Request timeout (10 minutes) - increase for complex reasoning tasks
         "timeout": 600000,
-        // Timeout between streamed response chunks (45 seconds)
-        "chunkTimeout": 45000,
+        // Timeout between streamed response chunks (2 minutes)
+        // Generous timeout for extended thinking through proxy gateways
+        "chunkTimeout": 120000,
         // LiteLLM/proxy gateway compatibility mode.
         // Helps with compaction failures where prior messages contain
         // tool calls/results but the compaction request itself has no active
         // tools attached. OpenCode injects a noop tool for strict gateways.
         "litellmProxy": true,
-        // Custom headers for the API requests
+        // Custom headers for identifying agentic traffic in logs/analytics
         "headers": {
-          "User-Agent": "OpenCode-USAI/1.0"
+          "User-Agent": "OpenCode-USAI/1.0 (GSA-TTS/agentic-coding-quickstart)",
+          "X-Agent-Type": "opencode",
+          "X-Agent-Environment": "development"
         }
         // Additional provider options available:
         // "setCacheKey": true  // Ensure cache key is always set for this provider
