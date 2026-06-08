@@ -330,6 +330,29 @@ make doctor   # Verify your environment
 2. **Share what you learn** — Contribute to the [Patterns repo](https://github.com/GSA-TTS/agentic-coding-patterns)
 3. **Help improve these docs** — Found something unclear? Open an issue or submit a PR
 
+### Available Skills and Resources
+
+The Playbook and Patterns repos include reusable **agent skills** that provide step-by-step procedures for common tasks. Skills follow the [agentskills.io](https://agentskills.io) standard and are auto-discovered by OpenCode, Codex, and other tools.
+
+| Repo | Skills | Examples |
+|------|--------|----------|
+| **Playbook** | Federal compliance, security | `federal-security-controls-lookup`, `ato-package`, `code-review`, `cloudgov-deploy` |
+| **Patterns** | Development workflows | `accessibility-review`, `uswds-prototype`, `test-generation`, `secure-code-review` |
+
+**Skills location:** `.agents/skills/<skill-name>/SKILL.md`
+
+To use skills in your project, clone the playbook alongside your workspace:
+
+```bash
+# Recommended workspace structure
+my-workspace/
+├── my-app/                       # Your project
+├── agentic-coding-playbook/      # Skills and standards
+└── agentic-coding-patterns/      # Community patterns
+```
+
+Agents can then reference skills from the playbook when working on your project.
+
 ---
 
 ## Getting Help
