@@ -19,5 +19,8 @@ permissions: {}
 jobs:
   release:
     uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-release-please.yml@workflows/v1
+    permissions:
+      contents: write
+      pull-requests: write
     with:
       release-type: simple
