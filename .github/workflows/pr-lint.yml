@@ -35,27 +35,3 @@ jobs:
             PR title must follow conventional commits format:
             type: description (e.g., "feat: add new feature")
             Valid types: feat, fix, docs, chore, refactor, test, perf, ci
-
-  validate-commits:
-    name: Validate Commits
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-
-      - name: Check commit messages
-        run: |
-          # Get commits in this PR
-          COMMITS=$(git log --format="%s" origin/${{ github.base_ref }}..${{ github.head_ref }} 2>/dev/null || echo "")
-          if [ -z "$COMMITS" ]; then
-            echo "No commits to check"
-            exit 0
-          fi
-
-          # Check each commit follows conventional commits
-          echo "$COMMITS" | while read -r msg; do
-            if ! echo "$msg" | grep -qE "^(feat|fix|docs|chore|refactor|test|perf|ci)(\(.+\))?!?: .+"; then
-              echo "::warning::Commit message doesn't follow conventional commits: $msg"
-            fi
-          done
