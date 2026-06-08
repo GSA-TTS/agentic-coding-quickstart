@@ -30,6 +30,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test USAI API connectivity
+        run: |
+          echo "Testing connectivity to api.gsa.usai.gov..."
+          curl -sS --connect-timeout 10 -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" https://api.gsa.usai.gov/api/v1/models \
+            -H "Accept: application/json" \
+            -H "Authorization: Bearer $USAI_API_KEY" || echo "curl failed with exit code $?"
+        env:
+          USAI_API_KEY: ${{ secrets.USAI_MODELS_API_KEY }}
+
       - name: Sync USAI model catalog
         env:
           USAI_API_KEY: ${{ secrets.USAI_MODELS_API_KEY }}
