@@ -4,8 +4,11 @@
   // ===========================================================================
   //
   // This template demonstrates OpenCode configuration patterns for federal
-  // government developers using the USAi LiteLLM gateway. Commented examples
-  // show available options without affecting the active configuration.
+  // government developers using the USAi LiteLLM gateway.
+  //
+  // STRUCTURE:
+  //   Lines 1-400:   Active configuration (functional settings)
+  //   Lines 400+:    Reference examples (all commented out)
   //
   // Documentation: https://opencode.ai/docs/config/
   // Schema:        https://opencode.ai/config.json
@@ -70,6 +73,7 @@
       // Run `npm run sync-models` to update from USAi API + models.dev catalog.
       // =========================================================================
       "models": {
+        // BEGIN GENERATED USAI MODELS
         "claude_4_5_opus": {
           "name": "Claude 4.5 Opus",
           "limit": {
@@ -162,229 +166,43 @@
             "output": 8192
           }
         }
-        // Intentionally omitted:
-        // "text-embedding-005"
-        //
-        // That model appears to be an embedding model, not a chat/coding model.
-        // Add it only if OpenCode/USAI exposes a separate embedding-model config path.
+        // END GENERATED USAI MODELS
       }
     }
-    // =========================================================================
-    // ADDITIONAL PROVIDER EXAMPLES (Commented Out)
-    // =========================================================================
-    // Example: Amazon Bedrock with AWS profile authentication
-    // "amazon-bedrock": {
-    //   "options": {
-    //     "region": "us-east-1",
-    //     "profile": "agency-profile",  // AWS profile from ~/.aws/credentials
-    //     "endpoint": "https://bedrock-runtime.us-east-1.vpce-xxxxx.amazonaws.com"
-    //   }
-    // }
-    //
-    // Example: Direct Anthropic API (if not using USAi gateway)
-    // "anthropic": {
-    //   "options": {
-    //     "apiKey": "{env:ANTHROPIC_API_KEY}",
-    //     "timeout": 300000
-    //   }
-    // }
   },
   // ===========================================================================
   // MODEL SELECTION
   // ===========================================================================
-  // model: Primary model for coding tasks (format: provider/model-id)
-  // small_model: Lightweight model for internal tasks (title generation, etc.)
-  // ===========================================================================
-  // Main coding model - use most capable model for complex development work
   "model": "usai/claude_4_5_sonnet",
-  // Lightweight model for small OpenCode tasks when no hidden-agent override applies
   "small_model": "usai/claude_3_5_haiku",
-
-  // ===========================================================================
-  // DEFAULT AGENT SELECTION
-  // ===========================================================================
-  // Sets which primary agent is used when OpenCode starts.
-  // Must be a non-hidden, primary-mode agent (e.g., "build", "plan").
-  // ===========================================================================
-  // "default_agent": "build",
   // ===========================================================================
   // AGENT CONFIGURATION
   // ===========================================================================
-  // Agents are specialized AI assistants with custom prompts, models, and
-  // tool access. Types:
-  //   - "primary": Tab-switchable main agents (build, plan)
-  //   - "subagent": Invoked via @name or Task tool (general, explore, scout)
-  //
-  // Agent options:
-  //   - model: Override the default model
-  //   - temperature: 0.0 (deterministic) to 1.0+ (creative)
-  //   - steps: Max agentic iterations (cost control)
-  //   - permission: Per-agent permission overrides
-  //   - prompt: Custom system prompt additions
-  //   - color: UI indicator color (hex or theme name)
-  //   - hidden: Hide from @ autocomplete (subagents only)
-  //   - disable: Disable the agent entirely
-  // ===========================================================================
   "agent": {
-    // -------------------------------------------------------------------------
-    // HIDDEN SYSTEM AGENTS
-    // -------------------------------------------------------------------------
-    // These agents run automatically for internal tasks. Customize them to
-    // control model/token usage for background operations.
-    // -------------------------------------------------------------------------
     "compaction": {
-      // Use an OpenAI-family model through the USAi endpoint for context compaction.
-      // GPT-5.2 is strong enough for summaries without spending the highest-tier
-      // model on routine state compression.
       "model": "usai/gpt-5.2-latest-guardrails-defaultv2",
       "temperature": 0
     },
     "summary": {
-      // Keep session summaries on the same OpenAI-family model path as compaction.
-      // This avoids switching hidden summarization work back to an Anthropic model
-      // through the same OpenAI-compatible gateway.
       "model": "usai/gpt-5.2-latest-guardrails-defaultv2",
       "temperature": 0
     },
     "title": {
-      // Deterministic title generation. Slightly heavier than Haiku, but
-      // keeps the hidden system-agent path consistent while testing USAi behavior.
       "model": "usai/gpt-5.2-latest-guardrails-defaultv2",
       "temperature": 0
     }
-
-    // -------------------------------------------------------------------------
-    // CUSTOM AGENT EXAMPLES (Commented Out)
-    // -------------------------------------------------------------------------
-    // Example: Security Auditor Agent (Read-Only)
-    // Invoke with: @security-auditor "Review authentication flow"
-    // -------------------------------------------------------------------------
-    // "security-auditor": {
-    //   "description": "Security-focused code reviewer. Read-only.",
-    //   "mode": "subagent",
-    //   "model": "usai/claude_4_5_sonnet",
-    //   "temperature": 0.2,
-    //   "steps": 25,
-    //   "permission": {
-    //     "read": "allow",
-    //     "glob": "allow",
-    //     "grep": "allow",
-    //     "edit": "deny",
-    //     "bash": {
-    //       "*": "deny",
-    //       "git log *": "allow",
-    //       "git diff *": "allow",
-    //       "git show *": "allow"
-    //     },
-    //     "task": "deny",
-    //     "webfetch": "deny"
-    //   }
-    // },
-
-    // -------------------------------------------------------------------------
-    // Example: Documentation Writer Agent
-    // Can write markdown but cannot modify code files.
-    // -------------------------------------------------------------------------
-    // "docs-writer": {
-    //   "description": "Technical documentation specialist. Cannot modify code.",
-    //   "mode": "subagent",
-    //   "model": "usai/claude_4_5_sonnet",
-    //   "temperature": 0.5,
-    //   "permission": {
-    //     "read": "allow",
-    //     "edit": {
-    //       "*.py": "deny",
-    //       "*.js": "deny",
-    //       "*.ts": "deny",
-    //       "*.md": "allow",
-    //       "*.mdx": "allow",
-    //       "docs/**": "allow"
-    //     },
-    //     "bash": "deny"
-    //   }
-    // },
-
-    // -------------------------------------------------------------------------
-    // Example: Fast Reviewer (Cost-Optimized)
-    // Uses smaller model for quick initial reviews.
-    // -------------------------------------------------------------------------
-    // "fast-reviewer": {
-    //   "description": "Quick code reviewer using faster model.",
-    //   "mode": "subagent",
-    //   "model": "usai/claude_3_5_haiku",
-    //   "temperature": 0.1,
-    //   "steps": 15,
-    //   "permission": {
-    //     "read": "allow",
-    //     "edit": "deny",
-    //     "bash": {
-    //       "*": "deny",
-    //       "git diff *": "allow"
-    //     }
-    //   }
-    // },
-
-    // -------------------------------------------------------------------------
-    // Example: Compliance Mode (Custom Primary Agent)
-    // Appears in Tab rotation alongside build/plan.
-    // -------------------------------------------------------------------------
-    // "compliance-mode": {
-    //   "description": "FedRAMP/FISMA compliance-focused development.",
-    //   "mode": "primary",
-    //   "model": "usai/claude_4_5_sonnet",
-    //   "temperature": 0.3,
-    //   "color": "#0050d8",
-    //   "prompt": "You are a federal compliance specialist. Consider NIST 800-53 controls, FedRAMP requirements, and OWASP guidelines.",
-    //   "permission": {
-    //     "edit": "ask",
-    //     "bash": "ask"
-    //   }
-    // },
-
-    // -------------------------------------------------------------------------
-    // Example: Override Built-in Agents
-    // -------------------------------------------------------------------------
-    // "build": {
-    //   "temperature": 0.3,
-    //   "steps": 50
-    // },
-    // "plan": {
-    //   "model": "usai/claude_4_5_opus"
-    // },
-    // "explore": {
-    //   "model": "usai/gemini-2.5-pro"  // Large context for big codebases
-    // }
   },
   // ===========================================================================
   // COMPACTION SETTINGS
   // ===========================================================================
-  // Controls how OpenCode manages context window when it fills up.
-  //   - auto: Automatically compact when context is full
-  //   - prune: Remove old tool outputs to save tokens
-  //   - reserved: Token buffer to leave room during compaction
-  // ===========================================================================
   "compaction": {
     "auto": true,
     "prune": true,
-    // Give active work more room before compaction triggers.
-    // If compaction still fails even with litellmProxy enabled, temporarily set
-    // auto to false and start new sessions manually until the gateway behavior
-    // or OpenCode handling is fixed.
     "reserved": 20000
   },
 
   // ===========================================================================
   // INSTRUCTIONS
-  // ===========================================================================
-  // Files loaded as additional context for every session. Supports glob patterns.
-  // These are injected into the system prompt to guide agent behavior.
-  //
-  // Common patterns:
-  //   - AGENTS.md: Agent instructions (workspace routing)
-  //   - CLAUDE.md: Anthropic-specific instructions
-  //   - CONTRIBUTING.md: Contribution guidelines
-  //   - .cursor/rules/*.md: Cursor IDE rules (compatible)
-  //   - .github/copilot-instructions.md: GitHub Copilot instructions
   // ===========================================================================
   "instructions": [
     "AGENTS.md",
@@ -396,30 +214,8 @@
   // ===========================================================================
   // PERMISSIONS
   // ===========================================================================
-  // Control which actions require approval. Actions:
-  //   - "allow": Run without approval
-  //   - "ask": Prompt for approval (default for most operations)
-  //   - "deny": Block the action entirely
-  //
-  // Permission keys: read, edit, write, glob, grep, list, bash, task, skill,
-  //                  lsp, webfetch, websearch, external_directory, doom_loop
-  //
-  // Granular patterns use "last matching rule wins" - put broad rules first,
-  // specific rules last.
-  //
-  // SECURITY: This config uses conservative defaults appropriate for federal use.
-  // ===========================================================================
   "permission": {
-    // Conservative default: anything not explicitly handled asks first
     "*": "ask",
-
-    // -------------------------------------------------------------------------
-    // READ PERMISSIONS
-    // -------------------------------------------------------------------------
-    // OpenCode already denies .env-style files by default, but keeping these
-    // rules explicit makes the policy clear and portable.
-    // Rule order matters: "last matching rule wins"
-    // -------------------------------------------------------------------------
     "read": {
       "*": "allow",
       // Deny sensitive credential files
@@ -470,130 +266,32 @@
       "*.env.example": "allow",
       "*.tfvars.example": "allow"
     },
-
-    // -------------------------------------------------------------------------
-    // FILE MODIFICATION PERMISSIONS
-    // -------------------------------------------------------------------------
-    // OpenCode controls edit, write, and apply_patch through the "edit" permission.
-    // Keep as "ask" so agent proposes changes but doesn't silently modify files.
-    // -------------------------------------------------------------------------
     "edit": "ask",
-    // Granular edit example (allow docs, ask for code):
-    // "edit": {
-    //   "*.md": "allow",
-    //   "*.mdx": "allow",
-    //   "docs/**": "allow",
-    //   "*.py": "ask",
-    //   "*.ts": "ask",
-    //   "*.js": "ask"
-    // },
-
-    // -------------------------------------------------------------------------
-    // WORKSPACE DISCOVERY
-    // -------------------------------------------------------------------------
     "glob": "allow",
     "grep": "allow",
     "list": "allow",
-
-    // -------------------------------------------------------------------------
-    // LSP (Language Server Protocol)
-    // -------------------------------------------------------------------------
-    // Experimental in OpenCode - only active when OPENCODE_EXPERIMENTAL_LSP_TOOL=true
     "lsp": "allow",
-
-    // -------------------------------------------------------------------------
-    // TASK TRACKING
-    // -------------------------------------------------------------------------
     "todowrite": "allow",
-
-    // -------------------------------------------------------------------------
-    // USER INTERACTION
-    // -------------------------------------------------------------------------
     "question": "allow",
-
-    // -------------------------------------------------------------------------
-    // SKILLS
-    // -------------------------------------------------------------------------
-    // Skills inject additional instructions. Keep gated as they're effectively
-    // prompt/runtime behavior extensions.
     "skill": "ask",
-    // Granular skill permissions:
-    // "skill": {
-    //   "*": "allow",
-    //   "internal-*": "deny",       // Block internal skills
-    //   "experimental-*": "ask"     // Ask for experimental skills
-    // },
-
-    // -------------------------------------------------------------------------
-    // SUBAGENT INVOCATION
-    // -------------------------------------------------------------------------
-    // Subagents can do substantial work. Keep gated unless you define
-    // specific trusted subagents with narrower permissions.
     "task": "ask",
-    // Granular task permissions (control which subagents can be invoked):
-    // "task": {
-    //   "*": "ask",
-    //   "explore": "allow",         // Allow explore subagent
-    //   "general": "allow"          // Allow general subagent
-    // },
-
-    // -------------------------------------------------------------------------
-    // WEB TOOLS
-    // -------------------------------------------------------------------------
-    // webfetch: Retrieves specific URL content
-    // websearch: Performs discovery through OpenCode's search integration
-    // SECURITY: Both require approval in federal environments to prevent
-    // data exfiltration and ensure network access is intentional.
     "webfetch": "ask",
     "websearch": "ask",
-    // For less restrictive environments:
-    // "webfetch": "allow",
-    // "websearch": "ask",
-    // For air-gapped environments:
-    // "webfetch": "deny",
-    // "websearch": "deny",
-
-    // -------------------------------------------------------------------------
-    // SAFETY GUARDS
-    // -------------------------------------------------------------------------
-    // external_directory: Access to files outside the project workspace
-    // doom_loop: Detection of agent getting stuck on same tool call
     "external_directory": "ask",
     "doom_loop": "ask",
-    // Granular external_directory permissions:
-    // "external_directory": {
-    //   "~/projects/personal/**": "allow",  // Allow specific external paths
-    //   "/tmp/**": "allow"
-    // },
-
-    // -------------------------------------------------------------------------
-    // SHELL COMMAND POLICY
-    // -------------------------------------------------------------------------
-    // Strategy:
-    //   - Allow low-risk inspection commands
-    //   - Ask for mutating, installing, testing, or network commands
-    //   - Deny obvious foot-guns and privilege/remote-access paths
-    // -------------------------------------------------------------------------
     "bash": {
       "*": "ask",
-
-      // Basic inspection
       "pwd": "allow",
       "ls": "allow",
       "ls *": "allow",
       "tree": "allow",
       "tree *": "allow",
-
-      // Search/read-only discovery
       "rg": "allow",
       "rg *": "allow",
       "grep": "allow",
       "grep *": "allow",
-      // Keep find gated - can run -exec, traverse unexpected paths, or delete
       "find": "ask",
       "find *": "ask",
-
-      // Git read-only operations
       "git status": "allow",
       "git status *": "allow",
       "git diff": "allow",
@@ -603,10 +301,6 @@
       "git show": "allow",
       "git show *": "allow",
       "git blame *": "allow",
-      // Git branch: allow listing, ask for modifications
-      // Note: Patterns are evaluated in order, last match wins.
-      // Destructive patterns (-D, -d, --delete, -m, --move) come AFTER
-      // read-only patterns to ensure they require approval.
       "git branch": "allow",
       "git branch -a": "allow",
       "git branch -l": "allow",
@@ -615,16 +309,12 @@
       "git branch -vv": "allow",
       "git branch --list": "allow",
       "git branch --list *": "allow",
-      // Branch deletion/modification - always ask (must come after read patterns)
       "git branch -d *": "ask",
       "git branch -D *": "ask",
       "git branch --delete *": "ask",
       "git branch -m *": "ask",
       "git branch --move *": "ask",
-      // Catch-all for other git branch operations (e.g., creating branches)
       "git branch *": "ask",
-
-      // Git state-changing or remote operations
       "git checkout *": "ask",
       "git switch *": "ask",
       "git add *": "ask",
@@ -638,8 +328,6 @@
       "git stash *": "ask",
       "git clean": "deny",
       "git clean *": "deny",
-
-      // Language/package/test commands
       "uv *": "ask",
       "python *": "ask",
       "pytest *": "ask",
@@ -650,22 +338,16 @@
       "go test *": "ask",
       "cargo test *": "ask",
       "make *": "ask",
-
-      // Shell-based network access
       "curl *": "ask",
       "wget *": "ask",
       "ping *": "ask",
       "traceroute *": "ask",
       "dig *": "ask",
       "nslookup *": "ask",
-
-      // Destructive operations
       "rm": "deny",
       "rm *": "deny",
       "rmdir": "deny",
       "rmdir *": "deny",
-
-      // Disk/filesystem destruction - CRITICAL
       "dd": "deny",
       "dd *": "deny",
       "mkfs*": "deny",
@@ -674,21 +356,15 @@
       "gdisk*": "deny",
       "mount *": "deny",
       "umount *": "deny",
-
-      // File operations requiring approval
       "mv *": "ask",
       "cp *": "ask",
       "chmod *": "ask",
-
-      // Privilege escalation - always deny
       "chown": "deny",
       "chown *": "deny",
       "sudo": "deny",
       "sudo *": "deny",
       "su": "deny",
       "su *": "deny",
-
-      // User/group management - deny
       "passwd*": "deny",
       "chpasswd*": "deny",
       "useradd*": "deny",
@@ -697,47 +373,30 @@
       "groupadd*": "deny",
       "groupdel*": "deny",
       "visudo*": "deny",
-
-      // Scheduled tasks - deny
       "crontab*": "deny",
       "at *": "deny",
-
-      // Network firewall - deny
       "iptables*": "deny",
       "ip6tables*": "deny",
       "nft *": "deny",
       "firewall-cmd*": "deny",
       "ufw *": "deny",
-
-      // Raw network tools - deny
       "nc *": "deny",
       "netcat *": "deny",
       "ncat *": "deny",
       "nmap *": "deny",
       "telnet *": "deny",
-
-      // Shell execution vectors - deny
       "eval *": "deny",
-
-      // Service management - ask
       "systemctl *": "ask",
       "service *": "ask",
       "launchctl *": "ask",
-
-      // Process control - ask
       "kill *": "ask",
       "killall *": "ask",
       "pkill *": "ask",
-
-      // Remote access - always deny
-      // Note: rsync can use SSH transport (--rsh), so deny for consistency
       "ssh": "deny",
       "ssh *": "deny",
       "scp *": "deny",
       "sftp *": "deny",
       "rsync *": "deny",
-
-      // Container operations (federal security concern)
       "docker *": "ask",
       "podman *": "ask",
       "kubectl *": "ask",
@@ -748,21 +407,10 @@
       "helm *": "ask",
       "docker-compose *": "ask",
       "docker compose *": "ask"
-
-      // Cloud CLI tools (uncomment for additional coverage):
-      // "aws *": "ask",
-      // "gcloud *": "ask",
-      // "az *": "ask",
-      // "terraform *": "ask",
-      // "terragrunt *": "ask",
-      // "pulumi *": "ask"
     }
   },
   // ===========================================================================
   // WATCHER CONFIGURATION
-  // ===========================================================================
-  // Configure file watcher ignore patterns to reduce noise and improve
-  // performance. Uses glob syntax.
   // ===========================================================================
   "watcher": {
     "ignore": [
@@ -779,231 +427,205 @@
       ".mypy_cache/**",
       ".ruff_cache/**",
       "coverage/**"
-      // Additional patterns for federal environments:
-      // ".terraform/**",
-      // "*.tfstate*",
-      // ".serverless/**"
     ]
-  },
+  }
 
   // ===========================================================================
-  // MCP (Model Context Protocol) SERVERS
   // ===========================================================================
-  // MCP servers extend OpenCode with additional tools and capabilities.
-  // Types:
-  //   - "local": Runs a process on your machine via command array
-  //   - "remote": Connects to a hosted HTTP/SSE endpoint
   //
-  // SECURITY WARNING: Local MCP servers execute code with YOUR permissions.
-  // Remote MCP servers may transmit data to external services.
-  // Review all MCP server source code before enabling.
+  //   REFERENCE EXAMPLES — Everything below is commented out
   //
-  // To enable an MCP server, uncomment the example and modify as needed.
+  //   The following sections demonstrate available OpenCode features.
+  //   Uncomment and customize as needed for your project.
+  //
   // ===========================================================================
-  // "mcp": {
-  //   // -------------------------------------------------------------------------
-  //   // Example: Local MCP server via npx
-  //   // -------------------------------------------------------------------------
-  //   // Context7 provides documentation search across popular libraries.
-  //   // "context7": {
-  //   //   "type": "local",
-  //   //   "command": ["npx", "-y", "@upstash/context7-mcp"],
-  //   //   "enabled": true,
-  //   //   "timeout": 30000
-  //   // },
+  // ===========================================================================
+
+  // ===========================================================================
+  // PROVIDER EXAMPLES
+  // ===========================================================================
+  // Example: Amazon Bedrock with AWS profile authentication
+  // "amazon-bedrock": {
+  //   "options": {
+  //     "region": "us-east-1",
+  //     "profile": "agency-profile",
+  //     "endpoint": "https://bedrock-runtime.us-east-1.vpce-xxxxx.amazonaws.com"
+  //   }
+  // }
   //
-  //   // -------------------------------------------------------------------------
-  //   // Example: Remote MCP server with API key authentication
-  //   // -------------------------------------------------------------------------
-  //   // "grep": {
-  //   //   "type": "remote",
-  //   //   "url": "https://grep.app/mcp",
-  //   //   "enabled": true,
-  //   //   "headers": {
-  //   //     "Authorization": "Bearer {env:GREP_API_KEY}"
-  //   //   },
-  //   //   "timeout": 20000
-  //   // },
-  //
-  //   // -------------------------------------------------------------------------
-  //   // Example: Remote MCP with OAuth authentication
-  //   // -------------------------------------------------------------------------
-  //   // "agency-internal": {
-  //   //   "type": "remote",
-  //   //   "url": "https://mcp.agency.gov/api/v1",
-  //   //   "enabled": true,
-  //   //   "oauth": {
-  //   //     "clientId": "opencode-dev-client",
-  //   //     "clientSecret": "{env:AGENCY_MCP_CLIENT_SECRET}",
-  //   //     "scope": "mcp:read mcp:tools"
-  //   //   }
-  //   // },
-  //
-  //   // -------------------------------------------------------------------------
-  //   // Example: Local MCP with environment variables
-  //   // -------------------------------------------------------------------------
-  //   // "sentry": {
-  //   //   "type": "local",
-  //   //   "command": ["npx", "-y", "@sentry/mcp-server"],
-  //   //   "enabled": true,
-  //   //   "environment": {
-  //   //     "SENTRY_AUTH_TOKEN": "{env:SENTRY_AUTH_TOKEN}",
-  //   //     "SENTRY_URL": "https://sentry.agency.gov"
-  //   //   }
-  //   // },
-  //
-  //   // -------------------------------------------------------------------------
-  //   // Example: Disabled server (pending security review)
-  //   // -------------------------------------------------------------------------
-  //   // "pending-review": {
-  //   //   "type": "local",
-  //   //   "command": ["npx", "-y", "some-mcp-server"],
-  //   //   "enabled": false
-  //   // }
+  // Example: Direct Anthropic API (if not using USAi gateway)
+  // "anthropic": {
+  //   "options": {
+  //     "apiKey": "{env:ANTHROPIC_API_KEY}",
+  //     "timeout": 300000
+  //   }
   // }
 
   // ===========================================================================
-  // TOOLS CONFIGURATION (Optional)
+  // MODEL OPTIONS EXAMPLES
   // ===========================================================================
-  // Enable or disable specific tools. Use when you need to restrict agent
-  // capabilities beyond what permissions control.
+  // Model-specific options (for models that support them):
+  // "options": {
+  //   "thinking": {
+  //     "type": "enabled",
+  //     "budgetTokens": 16000
+  //   }
+  // }
   //
-  // Disable specific MCP tools using: "mcp_<server>_<tool>": false
-  // ===========================================================================
-  // "tools": {
-  //   "bash": true,
-  //   "write": true,
-  //   "webfetch": true,
-  //   "websearch": false,
-  //   // Disable specific MCP tools:
-  //   // "mcp_sentry_create_issue": false
-  // },
+  // Model variants for different use cases:
+  // "variants": {
+  //   "high": { "thinking": { "type": "enabled", "budgetTokens": 32000 } },
+  //   "low": { "thinking": { "type": "disabled" } }
+  // }
+  //
+  // OpenAI model options:
+  // "options": {
+  //   "reasoningEffort": "medium",
+  //   "textVerbosity": "low",
+  //   "reasoningSummary": "auto"
+  // }
 
   // ===========================================================================
-  // PLUGINS (Optional)
+  // AGENT EXAMPLES
   // ===========================================================================
-  // Plugins extend OpenCode with custom tools, hooks, and integrations.
-  // Sources: npm packages, local files
+  // Security Auditor Agent (Read-Only):
+  // "security-auditor": {
+  //   "description": "Security-focused code reviewer. Read-only.",
+  //   "mode": "subagent",
+  //   "model": "usai/claude_4_5_sonnet",
+  //   "temperature": 0.2,
+  //   "steps": 25,
+  //   "permission": {
+  //     "read": "allow",
+  //     "glob": "allow",
+  //     "grep": "allow",
+  //     "edit": "deny",
+  //     "bash": {
+  //       "*": "deny",
+  //       "git log *": "allow",
+  //       "git diff *": "allow",
+  //       "git show *": "allow"
+  //     },
+  //     "task": "deny",
+  //     "webfetch": "deny"
+  //   }
+  // }
   //
-  // Auto-discovered: .opencode/plugin/*.ts and .opencode/plugins/*.js
+  // Documentation Writer Agent:
+  // "docs-writer": {
+  //   "description": "Technical documentation specialist. Cannot modify code.",
+  //   "mode": "subagent",
+  //   "model": "usai/claude_4_5_sonnet",
+  //   "temperature": 0.5,
+  //   "permission": {
+  //     "read": "allow",
+  //     "edit": {
+  //       "*.py": "deny",
+  //       "*.js": "deny",
+  //       "*.ts": "deny",
+  //       "*.md": "allow",
+  //       "*.mdx": "allow",
+  //       "docs/**": "allow"
+  //     },
+  //     "bash": "deny"
+  //   }
+  // }
   //
-  // SECURITY: Plugins run with full system access. Only install from trusted
-  // sources. Pin exact versions to prevent supply chain attacks.
-  // ===========================================================================
-  // "plugin": [
-  //   // npm plugin with pinned version (recommended)
-  //   "opencode-audit-logger@1.2.3",
-  //
-  //   // Local plugin
-  //   "./plugins/agency-compliance.ts",
-  //
-  //   // Plugin with configuration options
-  //   ["opencode-rate-limiter", {
-  //     "maxRequestsPerMinute": 60
-  //   }]
-  // ],
+  // Compliance Mode (Custom Primary Agent):
+  // "compliance-mode": {
+  //   "description": "FedRAMP/FISMA compliance-focused development.",
+  //   "mode": "primary",
+  //   "model": "usai/claude_4_5_sonnet",
+  //   "temperature": 0.3,
+  //   "color": "#0050d8",
+  //   "prompt": "You are a federal compliance specialist."
+  // }
 
   // ===========================================================================
-  // CUSTOM COMMANDS (Optional)
+  // MCP SERVER EXAMPLES
   // ===========================================================================
-  // Define reusable prompt templates for common tasks.
-  // Invoke with /command-name in the TUI.
-  //
-  // Template variables:
-  //   $ARGUMENTS - All arguments as string
-  //   $1, $2, $3 - Positional arguments
-  //   !`cmd`     - Shell command output injection
-  //   @filepath  - File content inclusion
+  // "mcp": {
+  //   "context7": {
+  //     "type": "local",
+  //     "command": ["npx", "-y", "@upstash/context7-mcp"],
+  //     "enabled": true,
+  //     "timeout": 30000
+  //   },
+  //   "grep": {
+  //     "type": "remote",
+  //     "url": "https://grep.app/mcp",
+  //     "enabled": true,
+  //     "headers": {
+  //       "Authorization": "Bearer {env:GREP_API_KEY}"
+  //     }
+  //   },
+  //   "agency-internal": {
+  //     "type": "remote",
+  //     "url": "https://mcp.agency.gov/api/v1",
+  //     "enabled": true,
+  //     "oauth": {
+  //       "clientId": "opencode-dev-client",
+  //       "clientSecret": "{env:AGENCY_MCP_CLIENT_SECRET}",
+  //       "scope": "mcp:read mcp:tools"
+  //     }
+  //   }
+  // }
+
+  // ===========================================================================
+  // CUSTOM COMMANDS EXAMPLES
   // ===========================================================================
   // "command": {
   //   "test": {
-  //     "template": "Run the full test suite with coverage and show failures.",
+  //     "template": "Run the full test suite with coverage.",
   //     "description": "Run tests with coverage",
   //     "agent": "build"
   //   },
   //   "review": {
-  //     "template": "Review the staged changes:\n!`git diff --staged`\n\nFocus on security, correctness, and maintainability.",
+  //     "template": "Review the staged changes:\n!`git diff --staged`",
   //     "description": "Code review staged changes",
   //     "agent": "plan"
   //   },
-  //   "security": {
-  //     "template": "Perform a security audit of $ARGUMENTS. Check for OWASP Top 10 vulnerabilities.",
-  //     "description": "Security audit",
-  //     "agent": "build"
-  //   },
   //   "commit": {
-  //     "template": "Generate a commit message following Conventional Commits for:\n!`git diff --staged`",
+  //     "template": "Generate a Conventional Commit message for:\n!`git diff --staged`",
   //     "description": "Generate commit message"
   //   }
-  // },
+  // }
 
   // ===========================================================================
-  // EXPERIMENTAL FEATURES (Optional)
+  // ADDITIONAL OPTIONS
   // ===========================================================================
-  // Features under active development. May change or be removed.
-  // ===========================================================================
-  // "experimental": {
-  //   // Provider restriction policies (stronger than disabled_providers)
-  //   "policies": [
-  //     {
-  //       "effect": "deny",
-  //       "action": "provider.use",
-  //       "resource": "*"
-  //     },
-  //     {
-  //       "effect": "allow",
-  //       "action": "provider.use",
-  //       "resource": "usai"
-  //     }
-  //   ]
-  // },
-
-  // ===========================================================================
-  // ADDITIONAL OPTIONS (Commented Out)
-  // ===========================================================================
-
-  // Server settings (for opencode serve / opencode web)
-  // SECURITY: Bind to localhost only. Disable mDNS in federal environments.
+  // "default_agent": "build"
+  // "share": "disabled"
+  // "autoupdate": false
+  // "snapshot": true
+  // "shell": "/bin/zsh"
+  //
   // "server": {
   //   "port": 4096,
   //   "hostname": "127.0.0.1",
-  //   "mdns": false,
-  //   "cors": ["http://localhost:5173"]
-  // },
-
-  // Shell configuration
-  // "shell": "/bin/zsh",
-
-  // Sharing - DISABLE for sensitive federal projects
-  // "share": "disabled",
-
-  // Autoupdate - DISABLE for change control compliance (NIST CM-3)
-  // "autoupdate": false,
-
-  // Snapshot tracking (undo capability)
-  // "snapshot": true,
-
-  // Image attachment limits
+  //   "mdns": false
+  // }
+  //
   // "attachment": {
   //   "image": {
   //     "auto_resize": true,
   //     "max_width": 2000,
-  //     "max_height": 2000,
-  //     "max_base64_bytes": 5242880
+  //     "max_height": 2000
   //   }
-  // },
-
-  // Formatters
+  // }
+  //
   // "formatter": {
-  //   "prettier": { "disabled": true },
-  //   "custom-formatter": {
-  //     "command": ["npx", "prettier", "--write", "$FILE"],
-  //     "extensions": [".js", ".ts", ".jsx", ".tsx"]
-  //   }
-  // },
-
-  // LSP servers
+  //   "prettier": { "disabled": true }
+  // }
+  //
   // "lsp": {
   //   "typescript": { "disabled": false }
+  // }
+  //
+  // "experimental": {
+  //   "policies": [
+  //     { "effect": "deny", "action": "provider.use", "resource": "*" },
+  //     { "effect": "allow", "action": "provider.use", "resource": "usai" }
+  //   ]
   // }
 }
