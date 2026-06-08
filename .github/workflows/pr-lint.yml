@@ -1,15 +1,61 @@
-# PR Lint - Consumes reusable workflow from playbook
-# See: https://github.com/GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-pr-lint.yml
-# Note: GITHUB_TOKEN is automatically inherited, no need to pass as secret
-
 name: PR Lint
 
 on:
   pull_request:
     types: [opened, edited, synchronize]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: read
+
 jobs:
-  lint:
-    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-pr-lint.yml@workflows/v1
-    with:
-      validate-commits: true
+  conventional-commits:
+    name: Conventional Commit Title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            chore
+            refactor
+            test
+            perf
+            ci
+          requireScope: false
+          subjectPattern: ^.+$
+          subjectPatternError: |
+            PR title must follow conventional commits format:
+            type: description (e.g., "feat: add new feature")
+            Valid types: feat, fix, docs, chore, refactor, test, perf, ci
+
+  validate-commits:
+    name: Validate Commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Check commit messages
+        run: |
+          # Get commits in this PR
+          COMMITS=$(git log --format="%s" origin/${{ github.base_ref }}..${{ github.head_ref }} 2>/dev/null || echo "")
+          if [ -z "$COMMITS" ]; then
+            echo "No commits to check"
+            exit 0
+          fi
+
+          # Check each commit follows conventional commits
+          echo "$COMMITS" | while read -r msg; do
+            if ! echo "$msg" | grep -qE "^(feat|fix|docs|chore|refactor|test|perf|ci)(\(.+\))?!?: .+"; then
+              echo "::warning::Commit message doesn't follow conventional commits: $msg"
+            fi
+          done
