@@ -31,43 +31,73 @@
         // BEGIN GENERATED USAI MODELS
         "claude_3_5_haiku": {
           "name": "claude_3_5_haiku",
-          "limit": {}
+          "limit": {
+            "context": 200000,
+            "output": 8192
+          }
         },
         "claude_4_5_opus": {
           "name": "claude_4_5_opus",
-          "limit": {}
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          }
         },
         "claude_4_5_sonnet": {
           "name": "claude_4_5_sonnet",
-          "limit": {}
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          }
         },
         "cohere_english_v3": {
           "name": "cohere_english_v3",
-          "limit": {}
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
         },
         "gemini-2.5-flash": {
           "name": "gemini-2.5-flash",
-          "limit": {}
+          "limit": {
+            "context": 32768,
+            "output": 16384
+          }
         },
         "gemini-2.5-flash-lite": {
           "name": "gemini-2.5-flash-lite",
-          "limit": {}
+          "limit": {
+            "context": 32768,
+            "output": 16384
+          }
         },
         "gemini-2.5-pro": {
           "name": "gemini-2.5-pro",
-          "limit": {}
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          }
         },
         "gpt-5.2-latest-guardrails-defaultv2": {
           "name": "gpt-5.2-latest-guardrails-defaultv2",
-          "limit": {}
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "gpt-5.4-latest-guardrails-defaultv2": {
           "name": "gpt-5.4-latest-guardrails-defaultv2",
-          "limit": {}
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
         },
         "llama_4_maverick": {
           "name": "llama_4_maverick",
-          "limit": {}
+          "limit": {
+            "context": 1000000,
+            "output": 16384
+          }
         }
         // Intentionally omitted:
         // "text-embedding-005"

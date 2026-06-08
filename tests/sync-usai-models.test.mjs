@@ -170,3 +170,108 @@ test("updateTemplate preserves required structure after generation", async () =>
   assert.match(parsed.small_model, /^usai\//, "small_model should have usai/ prefix")
   assert.match(parsed.agent.compaction.model, /^usai\//, "compaction model should have usai/ prefix")
 })
+
+test("updateTemplate enriches models with models.dev catalog", async () => {
+  const templateText = await readFile(templatePath, "utf8")
+  const payload = {
+    data: [
+      { id: "claude_4_5_opus", name: "Claude 4.5 Opus" },
+      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" },
+    ],
+  }
+
+  // Simulate models.dev catalog with provider-prefixed IDs
+  const modelsDevCatalog = {
+    "anthropic/claude-4.5-opus": {
+      id: "anthropic/claude-4.5-opus",
+      name: "Claude 4.5 Opus",
+      limit: { context: 200000, output: 64000 },
+      tool_call: true,
+      reasoning: true,
+    },
+    "google/gemini-2.5-pro": {
+      id: "google/gemini-2.5-pro",
+      name: "Gemini 2.5 Pro",
+      limit: { context: 1048576, output: 65536 },
+      tool_call: true,
+    },
+  }
+
+  const { models } = updateTemplate(templateText, payload, modelsDevCatalog)
+
+  // Claude should be enriched
+  const claude = models.find((m) => m.id === "claude_4_5_opus")
+  assert.ok(claude, "claude model should exist")
+  assert.equal(claude.contextWindow, 200000)
+  assert.equal(claude.maxOutputTokens, 64000)
+  assert.equal(claude.modelsDevId, "anthropic/claude-4.5-opus")
+
+  // Gemini should be enriched
+  const gemini = models.find((m) => m.id === "gemini-2.5-pro")
+  assert.ok(gemini, "gemini model should exist")
+  assert.equal(gemini.contextWindow, 1048576)
+  assert.equal(gemini.maxOutputTokens, 65536)
+  assert.equal(gemini.modelsDevId, "google/gemini-2.5-pro")
+})
+
+test("updateTemplate uses fallback limits when model not in catalog", async () => {
+  const templateText = await readFile(templatePath, "utf8")
+  const payload = {
+    data: [
+      { id: "cohere_english_v3", name: "Cohere English v3" },
+      { id: "custom-internal-model", name: "Custom Internal Model" },
+    ],
+  }
+
+  // Catalog with some models but not our test models - enrichment will run
+  const modelsDevCatalog = {
+    "anthropic/claude-3-opus": { id: "anthropic/claude-3-opus", limit: { context: 200000, output: 4096 } },
+  }
+
+  const { models } = updateTemplate(templateText, payload, modelsDevCatalog)
+
+  // Both should use fallback limits since they don't match catalog
+  for (const model of models) {
+    assert.equal(model.contextWindow, 128000, `${model.id} should use fallback context`)
+    assert.equal(model.maxOutputTokens, 8192, `${model.id} should use fallback output`)
+    assert.equal(model.modelsDevId, null, `${model.id} should have null modelsDevId`)
+  }
+})
+
+test("updateTemplate handles version matching across naming conventions", async () => {
+  const templateText = await readFile(templatePath, "utf8")
+  const payload = {
+    data: [
+      { id: "gpt-5.4-latest-guardrails-defaultv2", name: "GPT-5.4 Latest" },
+      { id: "claude_4_5_sonnet", name: "Claude 4.5 Sonnet" },
+    ],
+  }
+
+  // Catalog with different naming conventions
+  const modelsDevCatalog = {
+    "openai/gpt-5.4": {
+      id: "openai/gpt-5.4",
+      name: "GPT-5.4",
+      limit: { context: 1050000, output: 128000 },
+    },
+    "anthropic/claude-4.5-sonnet": {
+      id: "anthropic/claude-4.5-sonnet",
+      name: "Claude 4.5 Sonnet",
+      limit: { context: 200000, output: 64000 },
+    },
+  }
+
+  const { models } = updateTemplate(templateText, payload, modelsDevCatalog)
+
+  // GPT should match despite USAI suffix
+  const gpt = models.find((m) => m.id === "gpt-5.4-latest-guardrails-defaultv2")
+  assert.ok(gpt, "gpt model should exist")
+  assert.equal(gpt.contextWindow, 1050000)
+  assert.equal(gpt.modelsDevId, "openai/gpt-5.4")
+
+  // Claude should match despite underscore vs hyphen
+  const claude = models.find((m) => m.id === "claude_4_5_sonnet")
+  assert.ok(claude, "claude model should exist")
+  assert.equal(claude.contextWindow, 200000)
+  assert.equal(claude.modelsDevId, "anthropic/claude-4.5-sonnet")
+})

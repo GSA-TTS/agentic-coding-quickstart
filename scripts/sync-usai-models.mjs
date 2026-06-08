@@ -9,6 +9,13 @@ const GENERATED_END = "// END GENERATED USAI MODELS"
 
 const DEFAULT_TEMPLATE_PATH = path.resolve("templates/opencode.jsonc")
 const DEFAULT_FIXTURE_PATH = path.resolve("tests/fixtures/usai-models.json")
+const MODELS_DEV_URL = "https://models.dev/models.json"
+
+// Fallback limits for models not found in models.dev
+const FALLBACK_LIMITS = {
+  context: 128000,
+  output: 8192,
+}
 
 function normalizeText(value) {
   return String(value ?? "").toLowerCase()
@@ -80,6 +87,146 @@ function parseModel(rawModel) {
 
 function isAllowedModel(model) {
   return model.isChat
+}
+
+/**
+ * Normalize a model ID for fuzzy matching.
+ * Handles differences like underscores vs hyphens, version formats, etc.
+ * @param {string} id - Model ID to normalize
+ * @returns {string} Normalized ID for comparison
+ */
+function normalizeModelId(id) {
+  // Strip provider prefix if present (e.g., "anthropic/claude-4" -> "claude-4")
+  const withoutProvider = id.includes("/") ? id.split("/").pop() : id
+  return withoutProvider
+    .toLowerCase()
+    .replace(/[_-]+/g, "-")
+    .replace(/(\d)\.(\d)/g, "$1-$2") // 4.5 -> 4-5
+    .replace(/guardrails.*$/i, "") // Remove USAI-specific suffixes
+    .replace(/latest.*$/i, "")
+    .replace(/-+$/, "")
+}
+
+/**
+ * Extract family and version tokens from a model ID.
+ * @param {string} id - Model ID
+ * @returns {{ family: string, version: number[], variant: string }}
+ */
+function extractModelTokens(id) {
+  const normalized = normalizeModelId(id)
+  const parts = normalized.split("-")
+
+  // Identify family (claude, gpt, gemini, llama, cohere)
+  let family = ""
+  let variant = ""
+  const versionParts = []
+
+  for (const part of parts) {
+    if (/^(claude|gpt|gemini|llama|cohere)$/i.test(part)) {
+      family = part
+    } else if (/^(opus|sonnet|haiku|pro|flash|mini|nano|maverick)$/i.test(part)) {
+      variant = part
+    } else if (/^\d+$/.test(part)) {
+      versionParts.push(Number.parseInt(part, 10))
+    }
+  }
+
+  return { family, version: versionParts, variant }
+}
+
+/**
+ * Find the best matching model in models.dev catalog for a USAI model ID.
+ * @param {string} usaiId - USAI model ID (e.g., "claude_4_5_opus")
+ * @param {Object} catalog - models.dev catalog keyed by model ID
+ * @returns {{ id: string, data: Object } | null}
+ */
+function findModelsDevMatch(usaiId, catalog) {
+  const usaiTokens = extractModelTokens(usaiId)
+
+  // Score each catalog entry
+  let bestMatch = null
+  let bestScore = 0
+
+  for (const [catalogId, data] of Object.entries(catalog)) {
+    const catalogTokens = extractModelTokens(catalogId)
+
+    // Must match family
+    if (usaiTokens.family !== catalogTokens.family) continue
+
+    let score = 10 // Base score for family match
+
+    // Variant match (opus, sonnet, haiku, pro, flash, etc.)
+    if (usaiTokens.variant && usaiTokens.variant === catalogTokens.variant) {
+      score += 50
+    }
+
+    // Version match
+    const versionMatch = usaiTokens.version.every((v, i) => catalogTokens.version[i] === v)
+    if (versionMatch && usaiTokens.version.length > 0) {
+      score += 30
+    }
+
+    // Prefer exact ID prefix match
+    if (normalizeModelId(catalogId).startsWith(normalizeModelId(usaiId).slice(0, 10))) {
+      score += 5
+    }
+
+    if (score > bestScore) {
+      bestScore = score
+      bestMatch = { id: catalogId, data }
+    }
+  }
+
+  return bestMatch
+}
+
+/**
+ * Fetch and parse the models.dev catalog.
+ * @returns {Promise<Object>} Catalog keyed by model ID
+ */
+async function fetchModelsDevCatalog() {
+  try {
+    const response = await fetch(MODELS_DEV_URL)
+    if (!response.ok) {
+      console.error(`models.dev fetch failed: ${response.status}`)
+      return {}
+    }
+    return response.json()
+  } catch (err) {
+    console.error(`models.dev fetch error: ${err.message}`)
+    return {}
+  }
+}
+
+/**
+ * Enrich USAI models with metadata from models.dev.
+ * @param {Array} models - Parsed USAI models
+ * @param {Object} catalog - models.dev catalog
+ * @returns {Array} Enriched models
+ */
+function enrichModelsFromCatalog(models, catalog) {
+  return models.map((model) => {
+    const match = findModelsDevMatch(model.id, catalog)
+
+    if (match && match.data.limit) {
+      return {
+        ...model,
+        contextWindow: model.contextWindow || match.data.limit.context || FALLBACK_LIMITS.context,
+        maxOutputTokens: model.maxOutputTokens || match.data.limit.output || FALLBACK_LIMITS.output,
+        toolCall: match.data.tool_call,
+        reasoning: match.data.reasoning,
+        modelsDevId: match.id,
+      }
+    }
+
+    // No match found - use fallbacks
+    return {
+      ...model,
+      contextWindow: model.contextWindow || FALLBACK_LIMITS.context,
+      maxOutputTokens: model.maxOutputTokens || FALLBACK_LIMITS.output,
+      modelsDevId: null,
+    }
+  })
 }
 
 function familyScore(model, family) {
@@ -202,7 +349,7 @@ function replaceCompactionModel(text, value) {
   return text.replace(pattern, `$1${value}$3`)
 }
 
-export function updateTemplate(templateText, payload) {
+export function updateTemplate(templateText, payload, modelsDevCatalog = {}) {
   const eol = templateText.includes("\r\n") ? "\r\n" : "\n"
   const rawModels = Array.isArray(payload)
     ? payload
@@ -212,11 +359,16 @@ export function updateTemplate(templateText, payload) {
         ? payload.models
         : []
 
-  const models = rawModels
+  let models = rawModels
     .map(parseModel)
     .filter((model) => model.id)
     .filter(isAllowedModel)
     .sort((a, b) => a.id.localeCompare(b.id))
+
+  // Enrich with models.dev metadata if catalog provided
+  if (Object.keys(modelsDevCatalog).length > 0) {
+    models = enrichModelsFromCatalog(models, modelsDevCatalog)
+  }
 
   const updatedBlock = renderModelBlock(models, eol)
   let updatedTemplate = replaceBetween(templateText, GENERATED_START, GENERATED_END, updatedBlock, eol)
@@ -275,15 +427,28 @@ async function main() {
   const args = process.argv.slice(2)
   const checkOnly = args.includes("--check")
   const writeSnapshot = args.includes("--write-snapshot")
+  const skipEnrich = args.includes("--skip-enrich")
   const templatePathArg = args.find((arg) => arg.startsWith("--template="))
   const templatePath = templatePathArg ? path.resolve(templatePathArg.split("=")[1]) : DEFAULT_TEMPLATE_PATH
 
-  const [templateText, payload] = await Promise.all([
+  // Fetch models.dev catalog in parallel with other data (unless skipped)
+  const [templateText, payload, modelsDevCatalog] = await Promise.all([
     readFile(templatePath, "utf8"),
     loadPayload(args),
+    skipEnrich ? {} : fetchModelsDevCatalog(),
   ])
 
-  const { updatedTemplate, models } = updateTemplate(templateText, payload)
+  const { updatedTemplate, models } = updateTemplate(templateText, payload, modelsDevCatalog)
+
+  // Log enrichment results
+  const enriched = models.filter((m) => m.modelsDevId)
+  const notEnriched = models.filter((m) => !m.modelsDevId)
+  if (enriched.length > 0) {
+    process.stdout.write(`Enriched ${enriched.length} models from models.dev\n`)
+  }
+  if (notEnriched.length > 0) {
+    process.stdout.write(`Using fallback limits for ${notEnriched.length} models: ${notEnriched.map((m) => m.id).join(", ")}\n`)
+  }
 
   if (checkOnly) {
     if (templateText !== updatedTemplate) {
