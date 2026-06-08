@@ -30,74 +30,44 @@
       "models": {
         // BEGIN GENERATED USAI MODELS
         "claude_3_5_haiku": {
-          "name": "Claude 3.5 Haiku",
-          "limit": {
-            "context": 200000,
-            "output": 8192
-          }
+          "name": "claude_3_5_haiku",
+          "limit": {}
         },
         "claude_4_5_opus": {
-          "name": "Claude 4.5 Opus",
-          "limit": {
-            "context": 200000,
-            "output": 32768
-          }
+          "name": "claude_4_5_opus",
+          "limit": {}
         },
         "claude_4_5_sonnet": {
-          "name": "Claude 4.5 Sonnet",
-          "limit": {
-            "context": 200000,
-            "output": 32768
-          }
+          "name": "claude_4_5_sonnet",
+          "limit": {}
         },
         "cohere_english_v3": {
-          "name": "Cohere English v3",
-          "limit": {
-            "context": 128000,
-            "output": 8192
-          }
+          "name": "cohere_english_v3",
+          "limit": {}
         },
         "gemini-2.5-flash": {
-          "name": "Gemini 2.5 Flash",
-          "limit": {
-            "context": 1048576,
-            "output": 65536
-          }
+          "name": "gemini-2.5-flash",
+          "limit": {}
         },
         "gemini-2.5-flash-lite": {
-          "name": "Gemini 2.5 Flash Lite",
-          "limit": {
-            "context": 1048576,
-            "output": 32768
-          }
+          "name": "gemini-2.5-flash-lite",
+          "limit": {}
         },
         "gemini-2.5-pro": {
-          "name": "Gemini 2.5 Pro",
-          "limit": {
-            "context": 1048576,
-            "output": 65536
-          }
+          "name": "gemini-2.5-pro",
+          "limit": {}
         },
         "gpt-5.2-latest-guardrails-defaultv2": {
-          "name": "GPT-5.2 Latest Guardrails Default v2",
-          "limit": {
-            "context": 400000,
-            "output": 32768
-          }
+          "name": "gpt-5.2-latest-guardrails-defaultv2",
+          "limit": {}
         },
         "gpt-5.4-latest-guardrails-defaultv2": {
-          "name": "GPT-5.4 Latest Guardrails Default v2",
-          "limit": {
-            "context": 400000,
-            "output": 32768
-          }
+          "name": "gpt-5.4-latest-guardrails-defaultv2",
+          "limit": {}
         },
         "llama_4_maverick": {
-          "name": "Llama 4 Maverick",
-          "limit": {
-            "context": 128000,
-            "output": 16384
-          }
+          "name": "llama_4_maverick",
+          "limit": {}
         }
         // Intentionally omitted:
         // "text-embedding-005"
