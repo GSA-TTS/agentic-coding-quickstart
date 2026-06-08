@@ -1,15 +1,37 @@
-# PR Lint - Consumes reusable workflow from playbook
-# See: https://github.com/GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-pr-lint.yml
-# Note: GITHUB_TOKEN is automatically inherited, no need to pass as secret
-
 name: PR Lint
 
 on:
   pull_request:
     types: [opened, edited, synchronize]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: read
+
 jobs:
-  lint:
-    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-pr-lint.yml@workflows/v1
-    with:
-      validate-commits: true
+  conventional-commits:
+    name: Conventional Commit Title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            chore
+            refactor
+            test
+            perf
+            ci
+          requireScope: false
+          subjectPattern: ^.+$
+          subjectPatternError: |
+            PR title must follow conventional commits format:
+            type: description (e.g., "feat: add new feature")
+            Valid types: feat, fix, docs, chore, refactor, test, perf, ci
