@@ -43,7 +43,6 @@ deleteme/
 # NODE.JS
 # =========================
 node_modules/
-package-lock.json
 
 # =========================
 # OS
