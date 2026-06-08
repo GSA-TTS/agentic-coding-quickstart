@@ -58,7 +58,7 @@ avoiding blind drift in the model catalog.
 ### Architecture Overview
 
 ```
-[Trusted GitHub Actions Trigger]
+[Local make sync-models command]
           |
           v
 [Repo-local sync script]
@@ -73,8 +73,12 @@ avoiding blind drift in the model catalog.
 [Update generated section in templates/opencode.jsonc]
           |
           v
-[Open or update pull request for review]
+[Commit and push via normal PR process]
 ```
+
+> **Note:** GitHub Actions cannot reach `api.gsa.usai.gov` due to network
+> restrictions. The sync is performed locally using `make sync-models` until
+> network access is resolved.
 
 ### Key Implementation Elements
 
@@ -98,12 +102,11 @@ avoiding blind drift in the model catalog.
      variants such as `claude_4_5_opus` and `gpt-5.4-latest-guardrails-defaultv2`
      can be ranked consistently.
 
-4. **PR-based automation instead of direct commits to `main`**
-   - The sync workflow runs only on trusted triggers such as `schedule` and
-     `workflow_dispatch`.
-   - The workflow opens or updates a pull request rather than pushing directly to
-     the default branch.
-   - Branch protection and normal review remain in force.
+4. **Local execution instead of GitHub Actions**
+   - The sync is run locally via `make sync-models` with an exported `USAI_API_KEY`.
+   - GitHub Actions cannot reach `api.gsa.usai.gov` due to network restrictions.
+   - Changes are committed and pushed through the normal PR process.
+   - This approach can be revisited if network access is resolved.
 
 5. **Optional external references are advisory, not required**
    - External catalogs such as `models.dev` may help maintain ranking heuristics
@@ -124,7 +127,7 @@ avoiding blind drift in the model catalog.
 - The repository gains a small amount of generator logic to maintain
 - Model ranking requires explicit policy decisions for edge cases
 - `/models` availability can still diverge from runtime entitlement for a given key
-- The workflow depends on a dedicated automation credential
+- Sync requires local execution with `USAI_API_KEY` until network access is resolved
 
 ### Compliance Consequences
 
@@ -161,7 +164,7 @@ Rejected because:
 2. Add a repo-local script to fetch, filter, rank, and render USAI models
 3. Add fixture-based tests for filtering, ranking, and rendering
 4. Update README and bootstrap docs to describe generated vs manual sections
-5. Add a trusted GitHub Actions workflow that opens or updates a PR
+5. Add `make sync-models` target for local execution
 6. Document operational caveats in troubleshooting docs where needed
 
 ## Links

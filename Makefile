@@ -1,7 +1,7 @@
 # Agentic Coding Quickstart - Makefile
 # Simple commands for setting up and managing your AI-assisted development workspace
 
-.PHONY: setup doctor new-project clean install-hooks help init-project run-agent
+.PHONY: setup doctor new-project clean install-hooks help init-project run-agent sync-models
 
 # Default target
 help:
@@ -14,6 +14,7 @@ help:
 	@echo "  make new-project           - Create a new project directory (interactive)"
 	@echo "  make init-project TARGET_DIR=/path - Bootstrap a project directory (non-interactive)"
 	@echo "  make run-agent             - Run OpenCode agent in SBX"
+	@echo "  make sync-models           - Sync USAI model catalog (requires USAI_API_KEY)"
 	@echo "  make install-hooks         - [OPTIONAL] Install pre-commit hooks"
 	@echo "  make clean                 - Remove generated files"
 	@echo ""
@@ -207,3 +208,31 @@ install-hooks:  ## [OPTIONAL] Install pre-commit hooks
 	}
 	@pre-commit install
 	@echo "Pre-commit hooks installed. Run 'pre-commit run --all-files' to test."
+
+# Sync USAI model catalog
+# Requires USAI_API_KEY environment variable or SBX secret
+sync-models:
+	@echo "Syncing USAI model catalog..."
+	@if [ -z "$$USAI_API_KEY" ]; then \
+		if command -v sbx >/dev/null 2>&1 && sbx secret ls 2>/dev/null | grep -q "USAI_API_KEY"; then \
+			echo "  Using USAI_API_KEY from SBX secrets"; \
+			echo "  Note: Run this inside SBX or export the key manually"; \
+			echo ""; \
+			echo "  To run inside SBX:"; \
+			echo "    sbx run --rm -it node:22 bash -c 'npm ci && npm run sync'"; \
+			echo ""; \
+			echo "  Or export the key and run locally:"; \
+			echo "    export USAI_API_KEY='your-key-here'"; \
+			echo "    make sync-models"; \
+			exit 1; \
+		else \
+			echo "ERROR: USAI_API_KEY not set."; \
+			echo "  Export it: export USAI_API_KEY='your-key-here'"; \
+			echo "  Or run: make setup (to store in SBX)"; \
+			exit 1; \
+		fi; \
+	fi
+	@node scripts/sync-usai-models.mjs --write-snapshot
+	@echo ""
+	@echo "Model catalog updated. Review changes with:"
+	@echo "  git diff templates/opencode.jsonc"

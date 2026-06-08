@@ -256,9 +256,12 @@ The generated catalog improves discoverability, but it is still possible for a
 model listed by `/models` to fail at runtime for a specific key or request. See
 [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md) for troubleshooting.
 
-Repository maintainers can refresh this catalog through the trusted GitHub Actions
-workflow using the `USAI_MODELS_API_KEY` repository secret. The workflow opens or
-updates a pull request instead of pushing directly to `main`.
+To refresh the model catalog locally:
+
+```bash
+export USAI_API_KEY="your-key-here"
+make sync-models
+```
 
 For more troubleshooting, see [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md).
 
