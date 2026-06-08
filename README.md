@@ -240,6 +240,39 @@ If USAi authentication fails right after copying a newly created key, regenerate
 the console copy button immediately instead of selecting the displayed text. The displayed value may
 be truncated.
 
+### Rotating USAi API keys
+
+USAi API keys expire every 7 days. A stale API key is a common cause of authentication failures like:
+
+```
+Unauthorized: {"detail":"Not authenticated"}
+```
+
+To check if your key has expired:
+
+1. Go to https://console.gsa.usai.gov/key-management
+2. Under "My Keys", check the "Expires In" field. If the value is 0h0m, then the key has expired.
+
+To rotate your key:
+
+1. On the same page, choose "Rotate" from the "Actions" menu
+2. Copy the new key using the console copy button
+3. Update the secret in sbx:
+
+```bash
+# Get the current placeholder name
+placeholder=$(sbx secret ls -g | grep USAI_API_KEY | awk '{print $4}')
+
+# Rotate the secret with your new key
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --placeholder $placeholder
+```
+
+The `sbx secret` command will prompt you for the new key.
+
+If the placeholder value hasn't changed, you should be able to
+continue working. If you're still having authentication issues, you
+may need to run `sbx rm <sandbox>` for each of your sandboxes.
+
 ### How default USAI models are chosen
 
 The quickstart `templates/opencode.jsonc` includes a generated USAI model catalog.
