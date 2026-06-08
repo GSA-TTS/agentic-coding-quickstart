@@ -1,6 +1,5 @@
-# Release - Consumes reusable workflow from playbook
-# See: https://github.com/GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-release-please.yml
-# Note: GITHUB_TOKEN is automatically inherited, no need to pass as secret
+# Release - Uses release-please directly (simpler than reusable workflow)
+# Based on: https://github.com/googleapis/release-please-action
 
 name: Release
 
@@ -17,10 +16,13 @@ concurrency:
 permissions: {}
 
 jobs:
-  release:
-    uses: GSA-TTS/agentic-coding-playbook/.github/workflows/reusable-release-please.yml@workflows/v1
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
-    with:
-      release-type: simple
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          release-type: simple
