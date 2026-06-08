@@ -7,6 +7,23 @@ import process from "node:process"
 const GENERATED_START = "// BEGIN GENERATED USAI MODELS"
 const GENERATED_END = "// END GENERATED USAI MODELS"
 
+// Vendor ordering and labels for grouped output
+const VENDOR_CONFIG = {
+  anthropic: { order: 1, label: "Anthropic Models" },
+  openai: { order: 2, label: "OpenAI Models" },
+  google: { order: 3, label: "Google Models" },
+  meta: { order: 4, label: "Meta Models" },
+  cohere: { order: 5, label: "Cohere Models" },
+  other: { order: 99, label: "Other Models" },
+}
+
+// Special display name overrides for complex model IDs
+const DISPLAY_NAME_OVERRIDES = {
+  "gpt-5.4-latest-guardrails-defaultv2": "GPT-5.4 Latest — Guardrails Default v2",
+  "gpt-5.2-latest-guardrails-defaultv2": "GPT-5.2 Latest — Guardrails Default v2",
+  cohere_english_v3: "Cohere English v3",
+}
+
 const DEFAULT_TEMPLATE_PATH = path.resolve("templates/opencode.jsonc")
 const DEFAULT_FIXTURE_PATH = path.resolve("tests/fixtures/usai-models.json")
 const MODELS_DEV_URL = "https://models.dev/models.json"
@@ -58,6 +75,7 @@ function compareVersions(a, b) {
 function parseModel(rawModel) {
   const id = rawModel.id || rawModel.model_id || rawModel.name
   const name = rawModel.name || rawModel.display_name || id
+  const ownedBy = normalizeText(rawModel.owned_by || "")
   const haystack = `${id} ${name}`
   const parts = extractParts(haystack)
   const version = parseVersion(haystack)
@@ -68,9 +86,24 @@ function parseModel(rawModel) {
   const isFlashLite = /flash lite|flash-lite/.test(haystack)
   const isChat = !isEmbedding
 
+  // Determine vendor from owned_by or model ID
+  let vendor = "other"
+  if (ownedBy.includes("anthropic") || /^claude/i.test(id)) {
+    vendor = "anthropic"
+  } else if (ownedBy.includes("open ai") || ownedBy.includes("openai") || /^gpt/i.test(id)) {
+    vendor = "openai"
+  } else if (ownedBy.includes("google") || /^gemini/i.test(id)) {
+    vendor = "google"
+  } else if (ownedBy.includes("meta") || /^llama/i.test(id)) {
+    vendor = "meta"
+  } else if (ownedBy.includes("cohere") || /^cohere/i.test(id)) {
+    vendor = "cohere"
+  }
+
   return {
     id,
     name,
+    vendor,
     raw: rawModel,
     parts,
     version,
@@ -87,6 +120,45 @@ function parseModel(rawModel) {
 
 function isAllowedModel(model) {
   return model.isChat
+}
+
+/**
+ * Generate a human-readable display name from a model ID.
+ * @param {string} id - Model ID
+ * @returns {string} Human-readable display name
+ */
+function generateDisplayName(id) {
+  // Check for special overrides first
+  if (DISPLAY_NAME_OVERRIDES[id]) {
+    return DISPLAY_NAME_OVERRIDES[id]
+  }
+
+  // General transformation
+  return id
+    .replace(/[_-]+/g, " ") // Replace underscores/hyphens with spaces
+    .replace(/(\d)\s+(\d)/g, "$1.$2") // "4 5" -> "4.5"
+    .replace(/\b\w/g, (c) => c.toUpperCase()) // Capitalize words
+    .replace(/\bGpt\b/g, "GPT") // Fix GPT
+    .replace(/\bLlama\b/g, "Llama") // Keep Llama
+}
+
+/**
+ * Sort models by vendor order, then by version (descending).
+ * @param {Array} models - Array of parsed models
+ * @returns {Array} Sorted models
+ */
+function sortModelsByVendor(models) {
+  return [...models].sort((a, b) => {
+    const vendorA = VENDOR_CONFIG[a.vendor]?.order ?? 99
+    const vendorB = VENDOR_CONFIG[b.vendor]?.order ?? 99
+    if (vendorA !== vendorB) return vendorA - vendorB
+
+    // Within vendor, sort by version descending then alphabetically
+    const versionCmp = compareVersions(b.version, a.version)
+    if (versionCmp !== 0) return versionCmp
+
+    return a.id.localeCompare(b.id)
+  })
 }
 
 /**
@@ -284,10 +356,26 @@ function selectDefault(models, family, fallbackId) {
 
 function renderModelBlock(models, eol) {
   const lines = []
+  const sortedModels = sortModelsByVendor(models)
+  let currentVendor = null
 
-  models.forEach((model, index) => {
+  sortedModels.forEach((model, index) => {
+    // Add vendor comment header when vendor changes
+    if (model.vendor !== currentVendor) {
+      if (currentVendor !== null) {
+        // Add blank line between vendor groups
+        lines.push("")
+      }
+      const vendorLabel = VENDOR_CONFIG[model.vendor]?.label || "Other Models"
+      lines.push(`        // ${vendorLabel}`)
+      currentVendor = model.vendor
+    }
+
+    // Generate display name
+    const displayName = generateDisplayName(model.id)
+
     lines.push(`        "${model.id}": {`)
-    lines.push(`          "name": ${JSON.stringify(model.name)},`)
+    lines.push(`          "name": "${displayName}",`)
 
     if (model.contextWindow || model.maxOutputTokens) {
       lines.push('          "limit": {')
@@ -305,17 +393,12 @@ function renderModelBlock(models, eol) {
     lines.push("        },")
   })
 
-  if (models.length > 0) {
-    lines.push("        // Intentionally omitted:")
-    lines.push('        // "text-embedding-005"')
-    lines.push("        //")
-    lines.push("        // That model appears to be an embedding model, not a chat/coding model.")
-    lines.push("        // Add it only if OpenCode/USAI exposes a separate embedding-model config path.")
-  }
-
-  if (models.length > 0) {
-    const lastModelLine = lines.findLastIndex((line) => line === "        },")
-    lines[lastModelLine] = "        }"
+  // Remove trailing comma from last model entry
+  if (sortedModels.length > 0) {
+    const lastModelLine = lines.findLastIndex((line) => line.trim() === "},")
+    if (lastModelLine !== -1) {
+      lines[lastModelLine] = "        }"
+    }
   }
 
   return lines.join(eol)
