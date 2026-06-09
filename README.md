@@ -261,11 +261,14 @@ To rotate your key:
 
 ```bash
 # Get the current placeholder name
-placeholder=$(sbx secret ls -g | grep USAI_API_KEY | awk '{print $4}')
+placeholder=$(sbx secret ls -g | grep '^USAI_API_KEY[[:space:]]' | awk '{print $4}')
 
-# Rotate the secret with your new key
-sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --placeholder $placeholder
-```
+if [ -z "$placeholder" ]; then
+  echo "Error: USAI_API_KEY not found. Run 'sbx secret ls -g' to check." >&2
+else
+  # Rotate the secret with your new key (will prompt for input)
+  sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --placeholder "$placeholder"
+fi
 
 The `sbx secret` command will prompt you for the new key.
 
