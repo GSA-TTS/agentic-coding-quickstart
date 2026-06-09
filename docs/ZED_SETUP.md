@@ -53,15 +53,16 @@ You will see several tasks preconfigured for this workspace:
 
 | Task Label | Description | Underlying Command |
 |------------|-------------|--------------------|
-| `OpenCode: Run Agent` | Launches OpenCode inside SBX (secrets auto-injected, creates sandbox if needed) | `make run-agent` |
-| `OpenCode: Environment Diagnostics` | Performs health checks on your Docker & SBX setup | `make doctor` |
+| `USAi OpenCode: Run Agent` | Launches OpenCode inside a project-named SBX sandbox (secrets auto-injected, creates sandbox if needed) | `make run-agent` |
+| `USAi OpenCode: Diagnostics (make doctor)` | Performs health checks on your Docker & SBX setup | `make doctor` |
+| `USAi OpenCode: Set USAi API Key (SBX Secret)` | Prompts for `USAI_API_KEY` and stores it as an SBX custom secret | `make setup-usai-secret` |
 
 > **Note:** The deprecated Docker Desktop tasks have been removed. Use the `sbx` CLI tasks above.
 
 ### 3. Step-by-Step Workflow inside Zed
 
-1. **Run Diagnostics:** Open the tasks palette and select `OpenCode: Environment Diagnostics (make doctor)`. It will open a panel in Zed and verify your Docker and setup states.
-2. **Launch OpenCode Agent:** Select `OpenCode: Run Agent`. This creates the sandbox if needed and launches the agent.
+1. **Run Diagnostics:** Open the tasks palette and select `USAi OpenCode: Diagnostics (make doctor)`. It will open a panel in Zed and verify your Docker and setup states.
+2. **Launch OpenCode Agent:** Select `USAi OpenCode: Run Agent`. This creates the sandbox if needed and launches the agent.
 3. **Interact with the Agent:** The agent will boot inside a terminal panel in Zed. You can type prompts directly to the agent (e.g. *"Analyze the directory structure and check for AGENTS.md"*).
 4. **Interactive Approvals:** Because our `opencode.jsonc` is configured with `"edit": "ask"` and `"bash": "ask"` for safety, the agent will prompt you in the terminal for approval before making file changes or running mutating shell commands. Type `y` or `n` directly into the Zed terminal tab to respond.
 
@@ -75,7 +76,14 @@ If you prefer to run commands manually, you can open Zed's integrated terminal (
 # Check if your environment is healthy
 make doctor
 
+# Store or reset your USAi key in SBX secrets
+make setup-usai-secret
+
 # Run agent (creates sandbox automatically if needed)
+make run-agent
+
+# Remove and recreate the project sandbox if SBX cached a stale workspace path
+make reset-agent-sandbox
 make run-agent
 ```
 
@@ -107,27 +115,16 @@ cp templates/SBX_PATTERNS.md "$TARGET_REPO/docs/"
 tail -n +6 templates/AGENTS_SBX_ADDENDUM.md >> "$TARGET_REPO/AGENTS.md"
 ```
 
-### Step 2: Configure your `Makefile`
+### Step 2: Use the generated `Makefile`
 
-Add these targets to your target repository's `Makefile` so that the Zed tasks function properly:
+The bootstrap copies this repository's `Makefile` into the target project. That file provides the Zed task targets:
 
-```makefile
-# Create SBX sandbox using sbx CLI
-create-sandbox:
- @echo "Creating SBX sandbox..."
- @if sbx ls | grep -q "my-sandbox"; then \
-  echo "Sandbox already exists. Skipping creation."; \
- else \
-  sbx create --name my-sandbox opencode .; \
- fi
+- `make setup-usai-secret` prompts for `USAI_API_KEY`, confirms before replacing an existing SBX secret, and points reset users to `https://console.gsa.usai.gov/`.
+- `make doctor` checks local tooling, SBX access, SBX secret presence, and workspace files.
+- `make run-agent` uses the current directory name as the SBX sandbox name and checks USAi API access from an existing sandbox before launch.
+- `make reset-agent-sandbox` removes the project sandbox so changed custom secrets or workspace paths can be picked up.
 
-# Run OpenCode agent in sandbox using sbx CLI
-run-agent:
- @echo "Running OpenCode agent in SBX sandbox..."
- @sbx run my-sandbox
-```
-
-*(Note: If your sandbox name is different than `my-sandbox`, make sure to update the name in the `Makefile` and `.zed/tasks.json` to match!)*
+The default sandbox name is the current directory name. You can override it with `SANDBOX_NAME=my-project make run-agent`.
 
 ---
 
@@ -161,3 +158,12 @@ run-agent:
 ### Terminal Output is Frozen or Unresponsive
 - If a task runs and does not respond to keystrokes, close the terminal pane (`Cmd + W`) and trigger the task again via the tasks palette.
 - Standard interactive shells are fully supported, but if you run into environment issues, run `make run-agent` directly in Zed's integrated terminal (`Ctrl + ~`) instead of the task runner.
+
+### `OCI runtime exec failed: chdir ... no such file or directory`
+- SBX may be trying to reuse cached workspace metadata for a sandbox whose host path changed or was never mounted correctly.
+- Remove the project sandbox and let `make run-agent` recreate it from the current directory:
+  ```bash
+  make reset-agent-sandbox
+  make run-agent
+  ```
+- See [KNOWN_FAILURE_MODES.md](KNOWN_FAILURE_MODES.md#18-sbx-fails-to-start-with-host-path-chdir-error) for details.

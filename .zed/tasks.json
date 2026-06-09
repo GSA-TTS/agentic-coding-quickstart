@@ -1,13 +1,19 @@
 [
   {
-    "label": "OpenCode: Run Agent",
+    "label": "USAi OpenCode: Run Agent",
     "command": "make run-agent",
     "use_new_terminal": true,
     "allow_concurrent_runs": false
   },
   {
-    "label": "OpenCode: Environment Diagnostics (make doctor)",
+    "label": "USAi OpenCode: Diagnostics (make doctor)",
     "command": "make doctor",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false
+  },
+  {
+    "label": "USAi OpenCode: Set USAi API Key (SBX Secret)",
+    "command": "make setup-usai-secret",
     "use_new_terminal": true,
     "allow_concurrent_runs": false
   }

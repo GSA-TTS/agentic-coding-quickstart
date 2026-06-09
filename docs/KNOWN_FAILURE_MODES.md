@@ -544,6 +544,42 @@ Always choose "Balanced" (Option 2) when prompted. The Balanced policy allows ty
 
 ---
 
+## 18. SBX Fails to Start with Host Path `chdir` Error
+
+### Symptoms
+
+- Zed task or `make run-agent` exits after printing an OCI runtime error
+- Error includes: `OCI runtime exec failed: chdir to '/Users/.../your-project': no such file or directory`
+- The task runner may still report the task as finished successfully
+
+### Root Cause
+
+SBX cached sandbox metadata can point at a workspace path that is not available inside the container. This is most likely after moving, renaming, or reprovisioning a project, or after reusing a loosely named/default sandbox.
+
+### Fix
+
+Generated projects use a deterministic sandbox name based on the current directory. Remove that sandbox and let SBX recreate it from the current workspace:
+
+```bash
+make reset-agent-sandbox
+make run-agent
+```
+
+If you override the sandbox name, pass the same name to both commands:
+
+```bash
+make reset-agent-sandbox SANDBOX_NAME=my-project
+make run-agent SANDBOX_NAME=my-project
+```
+
+You can also inspect the cached workspace path directly:
+
+```bash
+sbx ls
+```
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:

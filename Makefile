@@ -1,7 +1,11 @@
 # Agentic Coding Quickstart - Makefile
 # Simple commands for setting up and managing your AI-assisted development workspace
 
-.PHONY: setup doctor new-project clean install-hooks help init-project run-agent sync-models
+.PHONY: setup doctor new-project clean install-hooks help init-project setup-usai-secret run-agent reset-agent-sandbox sync-models
+
+PROJECT_SLUG ?= $(shell basename "$(CURDIR)" | tr -cs '[:alnum:].+-' '-' | sed 's/^-//; s/-$$//')
+SANDBOX_NAME ?= $(PROJECT_SLUG)
+USAI_MODELS_URL ?= https://api.gsa.usai.gov/api/v1/models
 
 # Default target
 help:
@@ -13,7 +17,9 @@ help:
 	@echo "  make doctor                - Run health checks on your environment"
 	@echo "  make new-project           - Create a new project directory (interactive)"
 	@echo "  make init-project TARGET_DIR=/path - Bootstrap a project directory (non-interactive)"
+	@echo "  make setup-usai-secret     - Store or reset USAI_API_KEY in SBX secrets"
 	@echo "  make run-agent             - Run OpenCode agent in SBX"
+	@echo "  make reset-agent-sandbox   - Remove the project SBX sandbox so it can be recreated"
 	@echo "  make sync-models           - Sync USAI model catalog (requires USAI_API_KEY)"
 	@echo "  make install-hooks         - [OPTIONAL] Install pre-commit hooks"
 	@echo "  make clean                 - Remove generated files"
@@ -54,21 +60,35 @@ _check-usai-key:
 		echo "  USAI_API_KEY: OK"; \
 	else \
 		echo "  USAI_API_KEY not found in SBX secrets."; \
-		read -s -p "Paste USAI_API_KEY value here: " key; \
-		echo ""; \
-		if [ -n "$$key" ]; then \
-			USAI_KEY="$$key" sh -c 'sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$$USAI_KEY"' || { \
-				echo "ERROR: Failed to store USAI_API_KEY in SBX secrets."; \
-				echo "  Check that SBX is running and you have permissions."; \
-				exit 1; \
-			}; \
-			echo "  USAI_API_KEY: Stored in SBX secrets"; \
-		else \
-			echo ""; \
-			echo "ERROR: USAI_API_KEY is required. Get your key at:"; \
-			echo "  https://console.gsa.usai.gov/key-management"; \
-			exit 1; \
-		fi; \
+		$(MAKE) --no-print-directory setup-usai-secret; \
+	fi
+
+setup-usai-secret: _check-sbx
+	@echo "Configuring USAI_API_KEY secret in SBX..."
+	@if sbx secret ls 2>/dev/null | grep -q "USAI_API_KEY"; then \
+		echo "  USAI_API_KEY is already present in SBX secrets."; \
+		read -p "Reset it? [y/N]: " confirm; \
+		case "$$confirm" in \
+			y|Y|yes|YES) echo "  Resetting USAI_API_KEY..."; echo "  USAi console: https://console.gsa.usai.gov/" ;; \
+			*) echo "  Keeping existing USAI_API_KEY secret."; exit 0 ;; \
+		esac; \
+	fi; \
+	read -s -p "Paste USAI_API_KEY value here: " key; \
+	echo ""; \
+	if [ -z "$$key" ]; then \
+		echo "ERROR: USAI_API_KEY is required. Get your key at:"; \
+		echo "  https://console.gsa.usai.gov/key-management"; \
+		exit 1; \
+	fi; \
+	USAI_KEY="$$key" sh -c 'sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$$USAI_KEY"' || { \
+		echo "ERROR: Failed to store USAI_API_KEY in SBX secrets."; \
+		echo "  Check that SBX is running and you have permissions."; \
+		exit 1; \
+	}; \
+	echo "  USAI_API_KEY: Stored in SBX secrets"; \
+	if sbx ls 2>/dev/null | awk 'NR > 1 {print $$1}' | grep -Fxq "$(SANDBOX_NAME)"; then \
+		echo "  Note: reset the existing sandbox to pick up changed custom secrets:"; \
+		echo "    make reset-agent-sandbox && make run-agent"; \
 	fi
 
 _clone-playbook:
@@ -194,10 +214,32 @@ _check-target-dir:
 clean:
 	@echo "Nothing to clean (this repo doesn't generate files)"
 
+
+_check-usai-api:
+	@echo "Checking USAi API access..."
+	@if sbx ls 2>/dev/null | awk 'NR > 1 {print $$1}' | grep -Fxq "$(SANDBOX_NAME)"; then \
+		echo "  Using USAI_API_KEY from SBX secret in sandbox: $(SANDBOX_NAME)"; \
+		sbx exec "$(SANDBOX_NAME)" sh -lc 'command -v curl >/dev/null 2>&1 || exit 64; test -n "$$USAI_API_KEY" || exit 65; curl -fsS --connect-timeout 10 --max-time 30 -H "Authorization: Bearer $$USAI_API_KEY" "$(USAI_MODELS_URL)" >/dev/null' >/dev/null 2>&1; \
+		case "$$?" in \
+			0) echo "  USAi API: OK" ;; \
+			64) echo "  [WARN] curl not found in sandbox; skipping preflight API check" ;; \
+			65) echo "ERROR: USAI_API_KEY is not available inside sandbox '$(SANDBOX_NAME)'."; echo "  Reset the sandbox so it picks up current SBX custom secrets:"; echo "    make reset-agent-sandbox && make run-agent"; exit 1 ;; \
+			*) echo "ERROR: USAi API check failed from sandbox '$(SANDBOX_NAME)'."; echo "  The key may be expired or invalid."; echo "  USAi console: https://console.gsa.usai.gov/"; echo "  Reset it with:"; echo "    make setup-usai-secret"; echo "  Then recreate the sandbox:"; echo "    make reset-agent-sandbox && make run-agent"; exit 1 ;; \
+		esac; \
+	else \
+		echo "  [WARN] Sandbox '$(SANDBOX_NAME)' does not exist yet; skipping preflight API check"; \
+		echo "         If auth fails after launch, visit https://console.gsa.usai.gov/ and run: make setup-usai-secret"; \
+	fi
+
 # Run OpenCode agent in sandbox with default name
-run-agent: _check-usai-key
-	@echo "Running OpenCode agent in SBX sandbox..."
-	@sbx run opencode .
+run-agent: _check-usai-key _check-usai-api
+	@echo "Running OpenCode agent in SBX sandbox: $(SANDBOX_NAME)"
+	@sbx run --name "$(SANDBOX_NAME)" opencode .
+
+reset-agent-sandbox:
+	@echo "Removing SBX sandbox: $(SANDBOX_NAME)"
+	@sbx rm "$(SANDBOX_NAME)" 2>/dev/null || true
+	@echo "Run 'make run-agent' to recreate it for this workspace."
 
 # Install pre-commit hooks (optional)
 install-hooks:  ## [OPTIONAL] Install pre-commit hooks
