@@ -261,7 +261,7 @@ To rotate your key:
 
 ```bash
 # Get the current placeholder name
-placeholder=$(sbx secret ls -g | grep '^USAI_API_KEY[[:space:]]' | awk '{print $4}')
+placeholder=$(sbx secret ls -g | grep '\sUSAI_API_KEY\s' | awk '{print $4}')
 
 if [ -z "$placeholder" ]; then
   echo "Error: USAI_API_KEY not found. Run 'sbx secret ls -g' to check." >&2
@@ -277,6 +277,25 @@ The `sbx secret` command will prompt you for the new key. Paste it when prompted
 ```bash
 # Should list available models without auth errors
 sbx exec <sandbox-name> -- opencode models
+````
+
+If the placeholder value hasn't changed, your existing sandboxes will automatically use the new key.
+
+#### Troubleshooting
+
+If you're still having authentication issues after rotation:
+
+1. Verify the secret is set:
+
+   ```bash
+   sbx secret ls -g | grep USAI_API_KEY
+   ```
+
+2. As a last resort, recreate your sandbox:
+   > ⚠️ **Warning:** This destroys all sandbox state including uncommitted work.
+   ```bash
+   sbx rm <sandbox-name>
+   ```
 
 ### How default USAI models are chosen
 
