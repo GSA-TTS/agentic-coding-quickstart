@@ -270,11 +270,13 @@ else
   sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --placeholder "$placeholder"
 fi
 
-The `sbx secret` command will prompt you for the new key.
+The `sbx secret` command will prompt you for the new key. Paste it when prompted.
 
-If the placeholder value hasn't changed, you should be able to
-continue working. If you're still having authentication issues, you
-may need to run `sbx rm <sandbox>` for each of your sandboxes.
+4. Verify the rotation worked:
+
+```bash
+# Should list available models without auth errors
+sbx exec <sandbox-name> -- opencode models
 
 ### How default USAI models are chosen
 
