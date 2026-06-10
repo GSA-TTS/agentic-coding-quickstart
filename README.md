@@ -258,7 +258,7 @@ To rotate your key:
 
 1. On the same page, choose "Rotate" from the "Actions" menu
 2. Copy the new key using the console copy button
-3. Update the secret in sbx:
+3. Update the secret in sbx by running the following code block:
 
    ```bash
    # Get the current placeholder name
@@ -268,7 +268,8 @@ To rotate your key:
      echo "Error: USAI_API_KEY not found. Run 'sbx secret ls -g' to check." >&2
    else
      # Rotate the secret with your new key (will prompt for input)
-     sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --placeholder "$placeholder"
+     sbx secret set-custom -g --host api.gsa.usai.gov \
+      --env USAI_API_KEY --placeholder "$placeholder"
    fi
    ```
 
@@ -394,10 +395,10 @@ make doctor   # Verify your environment
 
 The Playbook and Patterns repos include reusable **agent skills** that provide step-by-step procedures for common tasks. Skills follow the [agentskills.io](https://agentskills.io) standard and are auto-discovered by OpenCode, Codex, and other tools.
 
-| Repo | Skills | Examples |
-|------|--------|----------|
+| Repo         | Skills                       | Examples                                                                            |
+| ------------ | ---------------------------- | ----------------------------------------------------------------------------------- |
 | **Playbook** | Federal compliance, security | `federal-security-controls-lookup`, `ato-package`, `code-review`, `cloudgov-deploy` |
-| **Patterns** | Development workflows | `accessibility-review`, `uswds-prototype`, `test-generation`, `secure-code-review` |
+| **Patterns** | Development workflows        | `accessibility-review`, `uswds-prototype`, `test-generation`, `secure-code-review`  |
 
 **Skills location:** `.agents/skills/<skill-name>/SKILL.md`
 
