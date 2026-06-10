@@ -23,20 +23,22 @@ review_cycle: "quarterly"
 
 ## Workspace Structure
 
-This repository serves as the **entry point** for AI-assisted government development. The expected folder structure:
+This repository holds the **shared global config** (OpenCode settings, AGENTS.md,
+docs) that gets mounted into SBX sandboxes alongside your project workspaces. A
+typical layout:
 
 ```
 my-workspace/                     # Parent folder (user creates this)
-├── agentic-coding-quickstart/    # THIS REPO - setup, config, entry point
+├── agentic-coding-quickstart/    # THIS REPO - global config, mounted into sandboxes
 │   ├── AGENTS.md                 # You are here
-│   ├── Makefile                  # make setup, make doctor, make new-project
+│   ├── opencode.jsonc            # USAi provider + model + permission config
+│   ├── qsbx.sh                   # sbx wrapper that mounts this clone as config
 │   └── docs/                     # Setup guides and references
-├── agentic-coding-playbook/      # Skills, templates, compliance docs
-│   ├── skills/                   # Executable procedures for common tasks
-│   ├── templates/                # Project scaffolding
-│   └── docs/                     # Federal compliance guidance
 └── my-app/                       # User's project(s)
 ```
+
+The agent reads this repo as `OPENCODE_CONFIG_DIR` inside the sandbox (set by
+`qsbx.sh`), so changes you make here are picked up by every sandbox that mounts it.
 
 ### Agent Resource Access
 
@@ -44,14 +46,11 @@ When working on user projects, the agent has access to:
 
 | Resource | Location | Use For |
 |----------|----------|---------|
-| Skills | `../agentic-coding-playbook/skills/` | Step-by-step procedures (deploy, security scan, etc.) |
-| Templates | `../agentic-coding-playbook/templates/` | Project scaffolding |
-| Compliance docs | `../agentic-coding-playbook/docs/` | Security controls, coding practices |
+| Global config | This repo (mounted as `OPENCODE_CONFIG_DIR`) | Model/provider config, agent rules |
 | Setup guides | `./docs/` | SBX configuration, troubleshooting |
+| Playbook (optional) | `../agentic-coding-playbook/` | Skills, compliance docs (clone separately) |
 
 **To use a skill:** Read the SKILL.md file in the skill directory and follow its procedures.
-
-**To scaffold a project:** Use templates from the playbook or ask the user what they want to build.
 
 ---
 
