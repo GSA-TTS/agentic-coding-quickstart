@@ -1,0 +1,244 @@
+#!/bin/bash
+#
+# qsbx — sbx wrapper that mounts a shared "quickstart" config clone into sandboxes
+#
+# Problem: each new sbx sandbox is fresh, with no access to your persistent
+# global config (agent settings, AGENTS.md, skills, etc.). Without this, you end
+# up copying those files into every sandbox and manually keeping them in sync.
+#
+# Solution: when qsbx creates a sandbox it
+#   1. mounts $QUICKSTART_CLONE as an extra read-write workspace, and
+#   2. symlinks the shared config into the locations OpenCode actually searches
+#      under the sandbox's home (~/.config/opencode and ~/.agents):
+#        ~/.config/opencode/opencode.jsonc -> <clone>/opencode/opencode.jsonc
+#        ~/.config/opencode/AGENTS.md       -> <clone>/agentic-coding-playbook/AGENTS.md
+#        ~/.agents/skills                   -> <clone>/agentic-coding-playbook/.agents/skills
+# so the agent finds — and can edit — your global config, behavioral rules, and
+# the playbook's skills from one shared place. All other subcommands pass
+# straight through to sbx.
+#
+# Note: an empirical spike showed OpenCode does NOT read AGENTS.md or
+# .agents/skills relative to OPENCODE_CONFIG_DIR, so we link into the
+# home-directory search paths instead. See docs/adr/0004.
+#
+# Setup:  export QUICKSTART_CLONE=/path/to/my/quickstart-clone
+#         (only needed when a sandbox is actually created; re-attaching does not
+#          require it)
+#
+# Workflow:
+#   git switch -c "$(whoami)-global-config"        # personal branch for config
+#   QUICKSTART_CLONE=$(pwd) qsbx run opencode .     # create-if-missing + attach
+#   # ...customize AGENTS.md, skills, etc. inside the sandbox...
+#   git fetch origin main && git merge origin/main  # pull in upstream changes
+
+set -euo pipefail
+
+# Agents understood by `sbx run AGENT [PATH...]`. Used to tell whether the first
+# positional after `run` is an agent (create-if-missing form) or the name of an
+# existing sandbox (plain attach). A sandbox literally named after an agent will
+# be treated as the agent form; pass such sandboxes to `sbx run` directly.
+KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
+
+# Assert QUICKSTART_CLONE is set; only required on paths that create a sandbox.
+require_clone() {
+  : "${QUICKSTART_CLONE:?Set QUICKSTART_CLONE before creating a sandbox}"
+}
+
+is_known_agent() {
+  case "$KNOWN_AGENTS" in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# True if PREV is a flag that consumes the next argument as its value.
+takes_value() {
+  case "$1" in
+    --name|--template|-t|--profile|--cpus|--memory|-m|--kit) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Find the first non-flag positional in a create/run arg list, skipping flags
+# and their values (e.g. `--name custom`). Echoes the token, or nothing.
+first_positional() {
+  local prev=""
+  for arg in "$@"; do
+    if takes_value "$prev"; then
+      prev="$arg"
+      continue
+    fi
+    case "$arg" in
+      -*) prev="$arg"; continue ;;
+    esac
+    printf '%s\n' "$arg"
+    return 0
+  done
+}
+
+# Derive a sandbox name from the args following a create/run subcommand.
+# Honors an explicit `--name NAME`; otherwise returns "<agent>-<basename-of-path>"
+# to mirror sbx's own "<agent>-<workdir>" default slug.
+derive_name() {
+  local agent="" first_path="" prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--name" ]; then
+      printf '%s\n' "$arg"
+      return 0
+    fi
+    case "$arg" in
+      --name=*)
+        printf '%s\n' "${arg#--name=}"
+        return 0
+        ;;
+    esac
+    prev="$arg"
+  done
+
+  # No explicit --name: agent is the first non-flag token, path the next one.
+  prev=""
+  for arg in "$@"; do
+    if takes_value "$prev"; then prev="$arg"; continue; fi
+    case "$arg" in
+      -*) prev="$arg"; continue ;;
+    esac
+    if [ -z "$agent" ]; then
+      agent="$arg"
+    elif [ -z "$first_path" ]; then
+      first_path="${arg%%:*}"   # strip any :ro suffix
+      break
+    fi
+    prev="$arg"
+  done
+
+  if [ -z "$agent" ]; then
+    echo "error: could not determine agent for sandbox name" >&2
+    return 1
+  fi
+
+  local base="."
+  [ -n "$first_path" ] && base=$(basename "$first_path")
+  [ "$base" = "." ] && base=$(basename "$PWD")
+  printf '%s\n' "$agent-$base"
+}
+
+# Drop any user-supplied `--name NAME` / `--name=NAME` from an arg list. qsbx
+# always passes an explicit, derived name to `sbx create`, so the original must
+# be removed to avoid a duplicate flag. Result is placed in the STRIPPED_ARGS
+# global array (bash can't return arrays directly).
+strip_name() {
+  STRIPPED_ARGS=()
+  local skip=0
+  for arg in "$@"; do
+    if [ "$skip" -eq 1 ]; then
+      skip=0
+      continue
+    fi
+    case "$arg" in
+      --name) skip=1; continue ;;
+      --name=*) continue ;;
+    esac
+    STRIPPED_ARGS+=("$arg")
+  done
+}
+
+# Create a detached sandbox with the config clone mounted, then symlink the
+# shared config into the home-directory locations OpenCode searches.
+# Usage: create_with_config NAME CREATE_ARGS...
+create_with_config() {
+  require_clone
+  local name="$1"
+  shift
+
+  strip_name "$@"
+  sbx create --name "$name" "${STRIPPED_ARGS[@]}" "$QUICKSTART_CLONE"
+
+  # sbx mounts extra workspaces at their absolute host path inside the sandbox,
+  # so the clone is reachable at the same $QUICKSTART_CLONE path. Pass it through
+  # and symlink the shared config into OpenCode's home search locations.
+  sbx exec \
+    -e CLONE="$QUICKSTART_CLONE" \
+    "$name" \
+    bash <<'EOF'
+set -eu
+
+if [ ! -f "$CLONE/opencode/opencode.jsonc" ]; then
+  echo "qsbx: clone not found at $CLONE inside sandbox; skipping config symlinks" >&2
+  exit 0
+fi
+
+# link_into TARGET SOURCE — back up a pre-existing non-symlink target, then link.
+link_into() {
+  target="$1"; source="$2"
+  [ -e "$source" ] || { echo "qsbx: missing $source; skipping $target" >&2; return 0; }
+  mkdir -p "$(dirname "$target")"
+  if [ -e "$target" ] && [ ! -L "$target" ]; then
+    mv "$target" "$target.qsbx-bak"
+    echo "qsbx: backed up existing $target -> $target.qsbx-bak" >&2
+  fi
+  ln -sfn "$source" "$target"
+}
+
+link_into "$HOME/.config/opencode/opencode.jsonc" "$CLONE/opencode/opencode.jsonc"
+link_into "$HOME/.config/opencode/AGENTS.md"      "$CLONE/agentic-coding-playbook/AGENTS.md"
+link_into "$HOME/.agents/skills"                  "$CLONE/agentic-coding-playbook/.agents/skills"
+EOF
+}
+
+sandbox_exists() {
+  sbx ls 2>/dev/null | grep -qE "^$1[[:space:]]"
+}
+
+subcommand="${1:-}"
+
+case "$subcommand" in
+  create)
+    shift
+    name=$(derive_name "$@")
+    create_with_config "$name" "$@"
+    ;;
+
+  run)
+    shift
+    # Split args into the create portion (agent + paths + flags) and any agent
+    # args after "--", which only apply on attach.
+    create_args=()
+    agent_args=()
+    seen_sep=0
+    for arg in "$@"; do
+      if [ "$seen_sep" -eq 1 ]; then
+        agent_args+=("$arg")
+      elif [ "$arg" = "--" ]; then
+        seen_sep=1
+      else
+        create_args+=("$arg")
+      fi
+    done
+
+    first=""
+    [ "${#create_args[@]}" -gt 0 ] && first=$(first_positional "${create_args[@]}")
+
+    if [ -n "$first" ] && is_known_agent "$first"; then
+      # AGENT form: create the sandbox (mounting config) if it does not exist,
+      # then attach to it.
+      name=$(derive_name "${create_args[@]}")
+      if ! sandbox_exists "$name"; then
+        create_with_config "$name" "${create_args[@]}"
+      fi
+
+      if [ "${#agent_args[@]}" -gt 0 ]; then
+        sbx run "$name" -- "${agent_args[@]}"
+      else
+        sbx run "$name"
+      fi
+    else
+      # SANDBOX form (or no args): plain attach, no config mount needed.
+      sbx run "$@"
+    fi
+    ;;
+
+  *)
+    # --- Any other subcommand: pass through unmolested ---
+    sbx "$@"
+    ;;
+esac

@@ -85,13 +85,14 @@ sbx run opencode .
 
 This repository's `opencode.jsonc`, `AGENTS.md`, and docs are meant to be mounted
 into sandboxes as shared global config rather than copied into each project. Use
-`qsbx.sh` to mount this clone and set `OPENCODE_CONFIG_DIR` automatically:
+`qsbx` to mount this clone and set `OPENCODE_CONFIG_DIR` automatically:
 
 ```bash
-export QUICKSTART_CLONE=$(pwd)        # path to this clone
-./qsbx.sh create --name mysandbox opencode /path/to/your/project
-sbx run mysandbox
+QUICKSTART_CLONE=$(pwd) ./qsbx run opencode /path/to/your/project
 ```
+
+`qsbx run` creates the sandbox (with this clone mounted) if it doesn't exist,
+then attaches.
 
 The `.zed/tasks.json` in this repo drives the Zed tasks above. If you want the
 same tasks in another repo, copy that file into your project's `.zed/` directory

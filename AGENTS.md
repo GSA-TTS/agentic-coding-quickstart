@@ -32,13 +32,13 @@ my-workspace/                     # Parent folder (user creates this)
 ├── agentic-coding-quickstart/    # THIS REPO - global config, mounted into sandboxes
 │   ├── AGENTS.md                 # You are here
 │   ├── opencode.jsonc            # USAi provider + model + permission config
-│   ├── qsbx.sh                   # sbx wrapper that mounts this clone as config
+│   ├── qsbx                      # sbx wrapper that mounts this clone as config
 │   └── docs/                     # Setup guides and references
 └── my-app/                       # User's project(s)
 ```
 
 The agent reads this repo as `OPENCODE_CONFIG_DIR` inside the sandbox (set by
-`qsbx.sh`), so changes you make here are picked up by every sandbox that mounts it.
+`qsbx`), so changes you make here are picked up by every sandbox that mounts it.
 
 ### Agent Resource Access
 
@@ -411,11 +411,12 @@ The agent MUST:
 - [x] Prefer 1 config file + 1 command over complex setups
 - [x] Document outcomes clearly enough for another engineer to follow
 
-**One-command bootstrap:** `sbx run opencode .` (creates sandbox automatically)
+**One-command bootstrap:** `QUICKSTART_CLONE=$(pwd) ./qsbx run opencode .` (creates sandbox with config mounted, then attaches)
 **One-command verify:** `sbx exec <sandbox-name> <verify-command>`
 
-> **Note:** `sbx run` is the preferred method — it creates the sandbox if needed.
-> The older `sbx create` + `sbx exec` pattern still works but is more verbose.
+> **Note:** `qsbx run` is the preferred method — it creates the sandbox if needed
+> (mounting this clone as global config), then attaches. `QUICKSTART_CLONE` is
+> only required the first time a given sandbox is created.
 
 **ADR location:** `docs/adr/`
 

@@ -118,20 +118,17 @@ gh auth token | sbx secret set -g github
 ### Step 3: Create and run a sandbox (as often as you like)
 
 This clone holds your shared global config (`opencode.jsonc`, `AGENTS.md`, docs).
-`qsbx.sh` mounts it into the sandbox and points `OPENCODE_CONFIG_DIR` at it, so
-every sandbox you create picks up the same config. Repeat this step for each
-project you want to work on.
+`qsbx` mounts it into the sandbox and points `OPENCODE_CONFIG_DIR` at it, so
+every sandbox you create picks up the same config. Repeat this for each project
+you want to work on.
 
 ```bash
-# QUICKSTART_CLONE points at this checkout (the global config)
-export QUICKSTART_CLONE=$(pwd)
-
-# Create a sandbox for your project, with this clone mounted as config
-./qsbx.sh create --name mysandbox opencode /path/to/your/project
-
-# Run it
-sbx run mysandbox
+QUICKSTART_CLONE=$(pwd) ./qsbx run opencode /path/to/your/project
 ```
+
+`qsbx run` creates the sandbox (with this clone mounted) if it doesn't exist yet,
+then attaches. `QUICKSTART_CLONE` only matters the first time a given sandbox is
+created — re-attaching to an existing one doesn't need it.
 
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
 
@@ -161,7 +158,7 @@ AI coding agents can read files, write code, and execute commands. Running them 
 | File/Directory                      | Purpose                                                    |
 | ----------------------------------- | ---------------------------------------------------------- |
 | `opencode.jsonc`                    | Pre-configured for USAi endpoints                          |
-| `qsbx.sh`                           | sbx wrapper that mounts this clone as shared global config |
+| `qsbx`                              | sbx wrapper that mounts this clone as shared global config |
 | `rotate-apikey.sh`                  | Rotate your USAi API key secret in sbx                     |
 | `.zed/tasks.json`                   | Pre-configured tasks for **Zed Editor**                    |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
@@ -247,7 +244,7 @@ Then use `sbx` commands directly (e.g., `sbx run opencode .` instead of `docker 
 ### OpenCode shows wrong providers
 
 Ensure `OPENCODE_CONFIG_DIR` points at this clone (it contains `opencode.jsonc`).
-`qsbx.sh` sets this automatically when you create the sandbox; if you created the
+`qsbx` sets this automatically when you create the sandbox; if you created the
 sandbox another way, the USAi provider config won't be picked up.
 
 ### Authentication failed
