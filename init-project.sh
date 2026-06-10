@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Script to initialize/bootstrap a project from the agentic-coding-quickstart
 
-set -e
+set -euo pipefail
 
 # --- Configuration ---
 # Get the directory of this script (portable for Linux and macOS)

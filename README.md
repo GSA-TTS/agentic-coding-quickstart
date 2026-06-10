@@ -258,28 +258,26 @@ To rotate your key:
 
 1. On the same page, choose "Rotate" from the "Actions" menu
 2. Copy the new key using the console copy button
-3. Update the secret in sbx:
+3. With the key in your paste buffer, update the secret in `sbx` by running
 
    ```bash
-   # Get the current placeholder name
-   placeholder=$(sbx secret ls -g | grep '\sUSAI_API_KEY\s' | awk '{print $4}')
-
-   if [ -z "$placeholder" ]; then
-     echo "Error: USAI_API_KEY not found. Run 'sbx secret ls -g' to check." >&2
-   else
-     # Rotate the secret with your new key (will prompt for input)
-     sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --placeholder "$placeholder"
-   fi
+   ./rotate-apikey.sh
    ```
 
-   The `sbx secret` command will prompt you for the new key. Paste it when prompted.
+   The command will prompt you for the new key. Paste it when prompted. It will
+   also validate that the new key works.
 
-4. Verify the rotation worked:
-
-   ```bash
-   # Should list available models without auth errors
-   sbx exec <sandbox-name> -- opencode models
-   ```
+> [!NOTE]
+> If you don't have a sandbox named, "opencode-agentic-coding-quickstart", then
+> you'll need to manually validate the key with:
+>
+> ```bash
+> # Should return HTTP 200. A 401/403 means the key is invalid or expired.
+> sbx exec <sandbox-name> -- sh -c \
+>   'curl -sS -o /dev/null -w "%{http_code}\n" \
+>    -H "Authorization: Bearer $USAI_API_KEY" \
+>    https://api.gsa.usai.gov/api/v1/models'
+> ```
 
 If the placeholder value hasn't changed, your existing sandboxes will automatically use the new key.
 
@@ -394,10 +392,10 @@ make doctor   # Verify your environment
 
 The Playbook and Patterns repos include reusable **agent skills** that provide step-by-step procedures for common tasks. Skills follow the [agentskills.io](https://agentskills.io) standard and are auto-discovered by OpenCode, Codex, and other tools.
 
-| Repo | Skills | Examples |
-|------|--------|----------|
+| Repo         | Skills                       | Examples                                                                            |
+| ------------ | ---------------------------- | ----------------------------------------------------------------------------------- |
 | **Playbook** | Federal compliance, security | `federal-security-controls-lookup`, `ato-package`, `code-review`, `cloudgov-deploy` |
-| **Patterns** | Development workflows | `accessibility-review`, `uswds-prototype`, `test-generation`, `secure-code-review` |
+| **Patterns** | Development workflows        | `accessibility-review`, `uswds-prototype`, `test-generation`, `secure-code-review`  |
 
 **Skills location:** `.agents/skills/<skill-name>/SKILL.md`
 
