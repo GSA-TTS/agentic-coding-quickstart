@@ -3,7 +3,7 @@
 #
 # Installation (optional):
 #   pip install pre-commit
-#   make install-hooks
+#   pre-commit install
 #
 # Run without installing hooks:
 #   pre-commit run --all-files

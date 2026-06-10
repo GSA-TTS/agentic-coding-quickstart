@@ -73,7 +73,7 @@
       // =========================================================================
       // Each model entry maps a model ID to its display name and token limits.
       // The limit.context is the maximum input tokens; limit.output is max response.
-      // Run `npm run sync-models` to update from USAi API + models.dev catalog.
+      // Run `npm run sync:usai-models` to update from USAi API + models.dev catalog.
       // =========================================================================
       "models": {
         // BEGIN GENERATED USAI MODELS
