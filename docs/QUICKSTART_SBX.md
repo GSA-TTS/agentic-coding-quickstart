@@ -551,7 +551,6 @@ Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
 
 - [Known Failure Modes](KNOWN_FAILURE_MODES.md) — Common issues and solutions
 - [Coding Practices](CODING_PRACTICES.md) — Secure coding standards
-- [Docker Desktop Alternative](QUICKSTART_DOCKER_DESKTOP.md) — If you prefer GUI
 
 ---
 

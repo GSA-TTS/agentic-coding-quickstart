@@ -140,14 +140,14 @@ AI coding agents can read files, write code, and execute commands. Running them 
 | File/Directory                      | Purpose                                                    |
 | ----------------------------------- | ---------------------------------------------------------- |
 | `opencode.jsonc`                    | Pre-configured for USAi endpoints                          |
+| `qsbx.sh`                           | sbx wrapper that mounts this clone as shared global config |
+| `rotate-apikey.sh`                  | Rotate your USAi API key secret in sbx                     |
 | `.zed/tasks.json`                   | Pre-configured tasks for **Zed Editor**                    |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md`                         | Behavioral rules the agent follows                         |
 | `docs/QUICKSTART_SBX.md`            | Full sbx CLI setup guide                                   |
-| `docs/QUICKSTART_DOCKER_DESKTOP.md` | ~~Docker Desktop setup guide~~ (deprecated)                |
 | `docs/ZED_SETUP.md`                 | **Zed Editor** integration guide                           |
 | `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
-| `templates/`                        | Files to copy into your own projects                       |
 
 ---
 
