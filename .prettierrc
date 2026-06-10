@@ -1,7 +1,5 @@
 ---
+# Need to preserve GitHub Markdown admonitions like
+# > ![Note]
+#
 proseWrap: preserve
-
-"[yaml]": {
-    "editor.formatOnSave": false,
-    "editor.defaultFormatter": "none"
-}
