@@ -113,7 +113,7 @@ sbx run opencode .
 >
 > USAi is not a built-in sbx service, so we use `sbx secret set-custom` instead of
 > `sbx secret set -g`. If you change the secret, you must **delete and recreate** the sandbox for
-> it to take effect.
+> `sbx secret set -g`. USAi API keys expire every 7 days. To rotate the secret in your existing sandboxes, follow the procedure below.
 
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
 
