@@ -103,9 +103,9 @@ sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$US
 # 4. Store GitHub token (for code access)
 gh auth token | sbx secret set -g github
 
-# 5. Start a sandbox in your project
-cd /path/to/your/project
-sbx run opencode .
+# 5. Create and run a sandbox for your project
+QUICKSTART_CLONE=$(pwd) ./qsbx.sh create --name mysandbox opencode /path/to/your/project
+sbx run mysandbox
 ```
 
 > [!NOTE]
