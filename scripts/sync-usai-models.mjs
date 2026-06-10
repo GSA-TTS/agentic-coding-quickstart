@@ -24,7 +24,7 @@ const DISPLAY_NAME_OVERRIDES = {
   cohere_english_v3: "Cohere English v3",
 }
 
-const DEFAULT_TEMPLATE_PATH = path.resolve("templates/opencode.jsonc")
+const DEFAULT_TEMPLATE_PATH = path.resolve("opencode.jsonc")
 const DEFAULT_FIXTURE_PATH = path.resolve("tests/fixtures/usai-models.json")
 const MODELS_DEV_URL = "https://models.dev/models.json"
 const USAI_MODELS_URL = "https://api.gsa.usai.gov/api/v1/models"
