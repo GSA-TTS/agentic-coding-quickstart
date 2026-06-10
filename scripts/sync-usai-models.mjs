@@ -27,6 +27,13 @@ const DISPLAY_NAME_OVERRIDES = {
 const DEFAULT_TEMPLATE_PATH = path.resolve("templates/opencode.jsonc")
 const DEFAULT_FIXTURE_PATH = path.resolve("tests/fixtures/usai-models.json")
 const MODELS_DEV_URL = "https://models.dev/models.json"
+const USAI_MODELS_URL = "https://api.gsa.usai.gov/api/v1/models"
+
+// Network hardening limits (Issue #138). Remote feeds (USAi API, models.dev)
+// are third-party content written into committed config, so we bound time and
+// size and validate the shape before trusting the response.
+const FETCH_TIMEOUT_MS = 15000
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024 // 10 MiB
 
 // Fallback limits for models not found in models.dev
 const FALLBACK_LIMITS = {
@@ -253,17 +260,129 @@ function findModelsDevMatch(usaiId, catalog) {
 }
 
 /**
+ * Fetch with a timeout and a hard response-size cap. Remote feeds are
+ * untrusted third-party content, so we never read an unbounded body and we
+ * always bound the request time. (Issue #138)
+ * @param {string} url
+ * @param {object} [options] - fetch options
+ * @returns {Promise<unknown>} parsed JSON
+ */
+async function fetchJsonBounded(url, options = {}) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? FETCH_TIMEOUT_MS)
+
+  let response
+  try {
+    response = await fetch(url, { ...options, signal: controller.signal })
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error(`request to ${url} timed out after ${FETCH_TIMEOUT_MS}ms`)
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "(no body)")
+    throw new Error(`request to ${url} failed: ${response.status} ${response.statusText} - ${body.slice(0, 200)}`)
+  }
+
+  // Reject obviously-oversized payloads up front when the server advertises a
+  // length; otherwise enforce the cap while streaming the body.
+  const declaredLength = Number(response.headers.get("content-length") || "0")
+  if (declaredLength > MAX_RESPONSE_BYTES) {
+    throw new Error(`response from ${url} too large: ${declaredLength} bytes > ${MAX_RESPONSE_BYTES}`)
+  }
+
+  const text = await readBodyCapped(response, url)
+  try {
+    return JSON.parse(text)
+  } catch (err) {
+    throw new Error(`response from ${url} was not valid JSON: ${err.message}`)
+  }
+}
+
+/**
+ * Read a Response body, aborting if it exceeds MAX_RESPONSE_BYTES.
+ * @param {Response} response
+ * @param {string} url
+ * @returns {Promise<string>}
+ */
+async function readBodyCapped(response, url) {
+  if (!response.body || typeof response.body.getReader !== "function") {
+    // Environments without a streaming body (e.g. some test doubles): fall
+    // back to text() but still enforce the byte cap afterwards.
+    const text = await response.text()
+    if (Buffer.byteLength(text, "utf8") > MAX_RESPONSE_BYTES) {
+      throw new Error(`response from ${url} exceeded ${MAX_RESPONSE_BYTES} bytes`)
+    }
+    return text
+  }
+
+  const reader = response.body.getReader()
+  const chunks = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > MAX_RESPONSE_BYTES) {
+      await reader.cancel().catch(() => {})
+      throw new Error(`response from ${url} exceeded ${MAX_RESPONSE_BYTES} bytes`)
+    }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8")
+}
+
+/**
+ * Validate that a USAi models payload has the expected shape before we trust
+ * it enough to rewrite committed config. Accepts a top-level array, or an
+ * object with a `data` or `models` array. (Issue #138)
+ * @param {unknown} payload
+ * @returns {unknown} the same payload (for chaining)
+ */
+function validateUsaiPayload(payload) {
+  const list = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.data)
+      ? payload.data
+      : Array.isArray(payload?.models)
+        ? payload.models
+        : null
+
+  if (!list) {
+    throw new Error("USAi payload invalid: expected an array or { data | models: [] }")
+  }
+  if (list.length === 0) {
+    throw new Error("USAi payload invalid: model list is empty")
+  }
+  const hasUsableId = list.some(
+    (m) => m && typeof m === "object" && (m.id || m.model_id || m.name),
+  )
+  if (!hasUsableId) {
+    throw new Error("USAi payload invalid: no entries have an id/model_id/name field")
+  }
+  return payload
+}
+
+export { validateUsaiPayload, fetchJsonBounded }
+
+/**
  * Fetch and parse the models.dev catalog.
  * @returns {Promise<Object>} Catalog keyed by model ID
  */
 async function fetchModelsDevCatalog() {
   try {
-    const response = await fetch(MODELS_DEV_URL)
-    if (!response.ok) {
-      console.error(`models.dev fetch failed: ${response.status}`)
+    const catalog = await fetchJsonBounded(MODELS_DEV_URL)
+    // models.dev returns an object keyed by id; reject anything else rather
+    // than feeding a malformed catalog into the enrichment matcher.
+    if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) {
+      console.error("models.dev catalog has unexpected shape; skipping enrichment")
       return {}
     }
-    return response.json()
+    return catalog
   } catch (err) {
     console.error(`models.dev fetch error: ${err.message}`)
     return {}
@@ -483,12 +602,12 @@ async function loadPayload(args) {
   const useFixture = args.includes("--fixture") || fixtureArg || !process.env.USAI_API_KEY
 
   if (useFixture) {
-    return JSON.parse(await readFile(fixturePath, "utf8"))
+    return validateUsaiPayload(JSON.parse(await readFile(fixturePath, "utf8")))
   }
 
-  let response
+  let payload
   try {
-    response = await fetch("https://api.gsa.usai.gov/api/v1/models", {
+    payload = await fetchJsonBounded(USAI_MODELS_URL, {
       headers: {
         accept: "application/json",
         authorization: `Bearer ${process.env.USAI_API_KEY}`,
@@ -498,12 +617,7 @@ async function loadPayload(args) {
     throw new Error(`USAI API fetch failed: ${err.message}`)
   }
 
-  if (!response.ok) {
-    const body = await response.text().catch(() => "(no body)")
-    throw new Error(`USAI models request failed: ${response.status} ${response.statusText} - ${body}`)
-  }
-
-  return response.json()
+  return validateUsaiPayload(payload)
 }
 
 async function main() {

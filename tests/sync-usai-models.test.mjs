@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import vm from "node:vm"
 
-import { updateTemplate } from "../scripts/sync-usai-models.mjs"
+import { updateTemplate, validateUsaiPayload, fetchJsonBounded } from "../scripts/sync-usai-models.mjs"
 
 const templatePath = new URL("../templates/opencode.jsonc", import.meta.url)
 const fixturePath = new URL("./fixtures/usai-models.json", import.meta.url)
@@ -274,4 +274,122 @@ test("updateTemplate handles version matching across naming conventions", async 
   assert.ok(claude, "claude model should exist")
   assert.equal(claude.contextWindow, 200000)
   assert.equal(claude.modelsDevId, "anthropic/claude-4.5-sonnet")
+})
+
+test("validateUsaiPayload accepts array, { data }, and { models } shapes", () => {
+  const entry = [{ id: "claude_4_5_opus", name: "Claude 4.5 Opus" }]
+  assert.deepEqual(validateUsaiPayload(entry), entry)
+
+  const dataShape = { data: entry }
+  assert.deepEqual(validateUsaiPayload(dataShape), dataShape)
+
+  const modelsShape = { models: entry }
+  assert.deepEqual(validateUsaiPayload(modelsShape), modelsShape)
+})
+
+test("validateUsaiPayload accepts entries keyed by model_id or name only", () => {
+  assert.doesNotThrow(() => validateUsaiPayload([{ model_id: "gpt-5.5" }]))
+  assert.doesNotThrow(() => validateUsaiPayload({ data: [{ name: "Claude 4.8 Opus" }] }))
+})
+
+test("validateUsaiPayload rejects malformed payloads", () => {
+  // Wrong top-level shape
+  assert.throws(() => validateUsaiPayload({}), /expected an array/)
+  assert.throws(() => validateUsaiPayload(null), /expected an array/)
+  assert.throws(() => validateUsaiPayload("nope"), /expected an array/)
+  // Empty list
+  assert.throws(() => validateUsaiPayload([]), /empty/)
+  assert.throws(() => validateUsaiPayload({ data: [] }), /empty/)
+  // No usable identifier on any entry
+  assert.throws(() => validateUsaiPayload([{ foo: "bar" }]), /id\/model_id\/name/)
+})
+
+// --- fetchJsonBounded network hardening (Issue #138) ---
+
+function withStubbedFetch(stub, fn) {
+  const original = globalThis.fetch
+  globalThis.fetch = stub
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      globalThis.fetch = original
+    })
+}
+
+function jsonResponse(body, { ok = true, status = 200, headers = {} } = {}) {
+  const text = typeof body === "string" ? body : JSON.stringify(body)
+  return {
+    ok,
+    status,
+    statusText: ok ? "OK" : "Error",
+    headers: { get: (k) => headers[k.toLowerCase()] ?? null },
+    body: null, // force the text() fallback path in readBodyCapped
+    text: async () => text,
+  }
+}
+
+test("fetchJsonBounded parses a well-formed JSON response", async () => {
+  await withStubbedFetch(
+    async () => jsonResponse({ ok: true, data: [1, 2, 3] }),
+    async () => {
+      const result = await fetchJsonBounded("https://example.test/feed.json")
+      assert.deepEqual(result, { ok: true, data: [1, 2, 3] })
+    },
+  )
+})
+
+test("fetchJsonBounded throws on non-OK responses", async () => {
+  await withStubbedFetch(
+    async () => jsonResponse("nope", { ok: false, status: 503 }),
+    async () => {
+      await assert.rejects(
+        () => fetchJsonBounded("https://example.test/feed.json"),
+        /failed: 503/,
+      )
+    },
+  )
+})
+
+test("fetchJsonBounded throws on invalid JSON", async () => {
+  await withStubbedFetch(
+    async () => jsonResponse("{not json", { headers: { "content-type": "application/json" } }),
+    async () => {
+      await assert.rejects(
+        () => fetchJsonBounded("https://example.test/feed.json"),
+        /not valid JSON/,
+      )
+    },
+  )
+})
+
+test("fetchJsonBounded rejects payloads over the size cap (declared length)", async () => {
+  await withStubbedFetch(
+    async () => jsonResponse({ a: 1 }, { headers: { "content-length": String(50 * 1024 * 1024) } }),
+    async () => {
+      await assert.rejects(
+        () => fetchJsonBounded("https://example.test/feed.json"),
+        /too large/,
+      )
+    },
+  )
+})
+
+test("fetchJsonBounded aborts on timeout", async () => {
+  await withStubbedFetch(
+    (_url, opts) =>
+      new Promise((_resolve, reject) => {
+        // Never resolves on its own; reject when the AbortController fires.
+        opts.signal.addEventListener("abort", () => {
+          const err = new Error("aborted")
+          err.name = "AbortError"
+          reject(err)
+        })
+      }),
+    async () => {
+      await assert.rejects(
+        () => fetchJsonBounded("https://example.test/slow.json", { timeoutMs: 10 }),
+        /timed out/,
+      )
+    },
+  )
 })
