@@ -1,0 +1,12 @@
+{
+  "name": "linters",
+  "version": "1.0.0",
+  "description": "Pinned linter dependencies for CI supply chain security",
+  "private": true,
+  "scripts": {
+    "lint:md": "markdownlint-cli2 '**/*.md' '#node_modules'"
+  },
+  "dependencies": {
+    "markdownlint-cli2": "0.22.1"
+  }
+}

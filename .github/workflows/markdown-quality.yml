@@ -6,6 +6,7 @@ on:
       - '**/*.md'
       - '.markdownlint-cli2.jsonc'
       - '.markdown-link-check.json'
+      - '.github/linters/package*.json'
   push:
     branches:
       - main
@@ -13,6 +14,7 @@ on:
       - '**/*.md'
       - '.markdownlint-cli2.jsonc'
       - '.markdown-link-check.json'
+      - '.github/linters/package*.json'
 
 concurrency:
   group: markdown-${{ github.head_ref || github.ref }}
@@ -29,11 +31,21 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Run markdownlint
-        uses: DavidAnson/markdownlint-cli2-action@ded1f9488f68a970bc66ea5619e13e9b52e601cd # v23.2.0
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          config: '.markdownlint-cli2.jsonc'
-          globs: '**/*.md'
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: '.github/linters/package-lock.json'
+
+      - name: Install linter dependencies
+        working-directory: .github/linters
+        run: |
+          npm ci
+          npm audit --audit-level=high
+
+      - name: Run markdownlint
+        run: npx --prefix .github/linters markdownlint-cli2 "**/*.md" "#node_modules" "#.github/linters/node_modules"
 
   link-check:
     name: Link Check
