@@ -1,0 +1,7 @@
+---
+proseWrap: preserve
+
+"[yaml]": {
+    "editor.formatOnSave": false,
+    "editor.defaultFormatter": "none"
+}

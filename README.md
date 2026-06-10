@@ -264,14 +264,20 @@ To rotate your key:
    ./rotate-apikey.sh
    ```
 
-   The command will prompt you for the new key. Paste it when prompted.
+   The command will prompt you for the new key. Paste it when prompted. It will
+   also validate that the new key works.
 
-4. Verify the rotation worked:
-
-   ```bash
-   # Should list available models without auth errors
-   sbx exec <sandbox-name> -- opencode models
-   ```
+> ![NOTE]
+> If you don't have a sandbox named, "opencode-agentic-coding-quickstart", then
+> you'll need to manually valdate the key with :
+>
+> ```bash
+> # Should return HTTP 200. A 401/403 means the key is invalid or expired.
+> sbx exec <sandbox-name> -- sh -c \
+>   'curl -sS -o /dev/null -w "%{http_code}\n" \
+>    -H "Authorization: Bearer $USAI_API_KEY" \
+>    https://api.gsa.usai.gov/api/v1/models'
+> ```
 
 If the placeholder value hasn't changed, your existing sandboxes will automatically use the new key.
 
