@@ -258,22 +258,13 @@ To rotate your key:
 
 1. On the same page, choose "Rotate" from the "Actions" menu
 2. Copy the new key using the console copy button
-3. Update the secret in sbx by running the following code block:
+3. With the key in your paste buffer, update the secret in `sbx` by running
 
    ```bash
-   # Get the current placeholder name
-   placeholder=$(sbx secret ls -g | grep '\sUSAI_API_KEY\s' | awk '{print $4}')
-
-   if [ -z "$placeholder" ]; then
-     echo "Error: USAI_API_KEY not found. Run 'sbx secret ls -g' to check." >&2
-   else
-     # Rotate the secret with your new key (will prompt for input)
-     sbx secret set-custom -g --host api.gsa.usai.gov \
-      --env USAI_API_KEY --placeholder "$placeholder"
-   fi
+   ./rotate-apikey.sh
    ```
 
-   The `sbx secret` command will prompt you for the new key. Paste it when prompted.
+   The command will prompt you for the new key. Paste it when prompted.
 
 4. Verify the rotation worked:
 
