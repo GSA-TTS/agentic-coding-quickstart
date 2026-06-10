@@ -67,7 +67,7 @@ Agents operating in this repo must prioritize:
 - **Reproducibility of patterns**
 - **Minimal, transparent configurations**
 
-This is a **documentation and template repository** for AI coding agent setup.
+This is a **documentation and configuration repository** for AI coding agent setup.
 
 ---
 
