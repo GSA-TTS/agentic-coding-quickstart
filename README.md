@@ -88,7 +88,10 @@ sbx login
 > `sbx login` requires a Docker account. Docker Desktop is not required, but if you have it,
 > your Docker subscription covers sbx licensing.
 
-### Step 2: Configure and Run
+### Step 2: Configure secrets and policy (once)
+
+You only need to do this once per machine. Your USAi key and GitHub token are
+stored in sbx's secret manager, and the network policy persists across sandboxes.
 
 ```bash
 # 1. Set network policy (first-time only)
@@ -102,10 +105,6 @@ sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$US
 
 # 4. Store GitHub token (for code access)
 gh auth token | sbx secret set -g github
-
-# 5. Create and run a sandbox for your project
-QUICKSTART_CLONE=$(pwd) ./qsbx.sh create --name mysandbox opencode /path/to/your/project
-sbx run mysandbox
 ```
 
 > [!NOTE]
@@ -116,7 +115,29 @@ sbx run mysandbox
 > `sbx secret set -g`. USAi API keys expire every 7 days. To rotate the secret in
 > your existing sandboxes, follow the [Rotating USAI API Keys procedure](#rotating-usai-api-keys) below.
 
+### Step 3: Create and run a sandbox (as often as you like)
+
+This clone holds your shared global config (`opencode.jsonc`, `AGENTS.md`, docs).
+`qsbx.sh` mounts it into the sandbox and points `OPENCODE_CONFIG_DIR` at it, so
+every sandbox you create picks up the same config. Repeat this step for each
+project you want to work on.
+
+```bash
+# QUICKSTART_CLONE points at this checkout (the global config)
+export QUICKSTART_CLONE=$(pwd)
+
+# Create a sandbox for your project, with this clone mounted as config
+./qsbx.sh create --name mysandbox opencode /path/to/your/project
+
+# Run it
+sbx run mysandbox
+```
+
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
+
+**Staying current:** Once in a while, `git fetch` this clone to pick up config
+updates, and rotate your USAi key when it expires (see
+[Rotating USAI API Keys](#rotating-usai-api-keys)).
 
 **Need more details?** See the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
 
@@ -156,7 +177,7 @@ AI coding agents can read files, write code, and execute commands. Running them 
 If you use the **Zed Editor**, pre-configured tasks are available in `.zed/tasks.json`:
 
 - **OpenCode: Run Agent** — Launch the agent in your sandbox
-- **OpenCode: Environment Diagnostics** — Run `make doctor`
+- **OpenCode: Environment Diagnostics** — Check that `sbx` is installed and your USAi key secret is set
 
 See the **[Zed Editor Setup Guide](docs/ZED_SETUP.md)** for detailed instructions.
 
@@ -225,7 +246,9 @@ Then use `sbx` commands directly (e.g., `sbx run opencode .` instead of `docker 
 
 ### OpenCode shows wrong providers
 
-Ensure you're in a directory with `opencode.jsonc`. For sbx, the workspace is auto-mounted.
+Ensure `OPENCODE_CONFIG_DIR` points at this clone (it contains `opencode.jsonc`).
+`qsbx.sh` sets this automatically when you create the sandbox; if you created the
+sandbox another way, the USAi provider config won't be picked up.
 
 ### Authentication failed
 
@@ -299,7 +322,7 @@ If you're still having authentication issues after rotation:
 
 ### How default USAI models are chosen
 
-The quickstart `templates/opencode.jsonc` includes a generated USAI model catalog.
+The `opencode.jsonc` in this repo includes a generated USAI model catalog.
 This repository keeps that section in sync with the USAI `/models` API so new
 projects start from a current baseline.
 
@@ -317,7 +340,7 @@ To refresh the model catalog locally:
 
 ```bash
 export USAI_API_KEY="your-key-here"
-make sync-models
+npm run sync:usai-models
 ```
 
 For more troubleshooting, see [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md).
