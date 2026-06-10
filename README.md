@@ -169,6 +169,10 @@ qsbx detects that the target is the clone and mounts it **read-write** as the
 primary workspace (and tells you so). Review the agent's changes with `git diff`
 and commit/push before they propagate to other sandboxes.
 
+Before attaching, `qsbx` checks that the sandbox's USAi key still works. If it
+has expired, it walks you through [rotating it](#rotating-usai-api-keys) and
+re-validates before launching the agent.
+
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
 
 **Staying current:** Once in a while, `git fetch` this clone (and
