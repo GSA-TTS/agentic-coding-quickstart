@@ -267,9 +267,9 @@ To rotate your key:
    The command will prompt you for the new key. Paste it when prompted. It will
    also validate that the new key works.
 
-> ![NOTE]
+> [!NOTE]
 > If you don't have a sandbox named, "opencode-agentic-coding-quickstart", then
-> you'll need to manually valdate the key with :
+> you'll need to manually validate the key with:
 >
 > ```bash
 > # Should return HTTP 200. A 401/403 means the key is invalid or expired.

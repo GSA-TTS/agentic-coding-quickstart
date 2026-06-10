@@ -1,5 +1,5 @@
 ---
 # Need to preserve GitHub Markdown admonitions like
-# > ![Note]
+# > [!Note]
 #
 proseWrap: preserve
