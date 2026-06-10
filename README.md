@@ -9,11 +9,11 @@ This quickstart gets you from zero to running an AI coding agent with USAi in un
 
 This repository is part of a three-repo ecosystem:
 
-| Repo | Purpose | When to Use |
-|------|---------|-------------|
-| **[Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)** (you are here) | Get running | First day setup, sbx + USAi config |
-| **[Playbook](https://github.com/GSA-TTS/agentic-coding-playbook)** | Do it right | Repo setup, standards, best practices |
-| **[Patterns](https://github.com/GSA-TTS/agentic-coding-patterns)** | Share & learn | Community patterns, lessons learned |
+| Repo                                                                                  | Purpose       | When to Use                           |
+| ------------------------------------------------------------------------------------- | ------------- | ------------------------------------- |
+| **[Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)** (you are here) | Get running   | First day setup, sbx + USAi config    |
+| **[Playbook](https://github.com/GSA-TTS/agentic-coding-playbook)**                    | Do it right   | Repo setup, standards, best practices |
+| **[Patterns](https://github.com/GSA-TTS/agentic-coding-patterns)**                    | Share & learn | Community patterns, lessons learned   |
 
 **Your journey:** Start here (Quickstart) to get your environment working, then use the Playbook to set up your projects properly, and visit Patterns to share what you learn.
 
@@ -25,12 +25,12 @@ This repository is part of a three-repo ecosystem:
 
 Before you start, make sure you have:
 
-| Requirement | Notes |
-|-------------|-------|
+| Requirement     | Notes                                                      |
+| --------------- | ---------------------------------------------------------- |
 | Package manager | Homebrew on macOS, `winget` on Windows, or `apt` on Ubuntu |
-| Docker account | Required for `sbx login` |
-| USAi API key | Export as `USAI_API_KEY` before configuring secrets |
-| GitHub CLI auth | Optional, but recommended for repository access |
+| Docker account  | Required for `sbx login`                                   |
+| USAi API key    | Export as `USAI_API_KEY` before configuring secrets        |
+| GitHub CLI auth | Optional, but recommended for repository access            |
 
 ```bash
 export USAI_API_KEY="your-usai-api-key"
@@ -55,6 +55,7 @@ sbx login
 > [!NOTE]
 > macOS may prompt you to approve helper binaries the first time you use `sbx`. Allow these if
 > prompted:
+>
 > - `mkfs.erofs`
 > - `mkfs.ext4`
 > - `containerd-shim-nerdbox-v1`
@@ -112,8 +113,8 @@ sbx run opencode .
 > yet after login or first-time setup.
 >
 > USAi is not a built-in sbx service, so we use `sbx secret set-custom` instead of
-> `sbx secret set -g`. If you change the secret, you must **delete and recreate** the sandbox for
-> `sbx secret set -g`. USAi API keys expire every 7 days. To rotate the secret in your existing sandboxes, follow the procedure below.
+> `sbx secret set -g`. USAi API keys expire every 7 days. To rotate the secret in
+> your existing sandboxes, follow the [Rotating USAI API Keys procedure](#rotating-usai-api-keys) below.
 
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
 
@@ -136,17 +137,17 @@ AI coding agents can read files, write code, and execute commands. Running them 
 
 ## What's in This Repo
 
-| File/Directory | Purpose |
-|----------------|---------|
-| `opencode.jsonc` | Pre-configured for USAi endpoints |
-| `.zed/tasks.json` | Pre-configured tasks for **Zed Editor** |
-| `.pre-commit-config.yaml` | Optional pre-commit hooks (secret detection, file hygiene) |
-| `AGENTS.md` | Behavioral rules the agent follows |
-| `docs/QUICKSTART_SBX.md` | Full sbx CLI setup guide |
-| `docs/QUICKSTART_DOCKER_DESKTOP.md` | ~~Docker Desktop setup guide~~ (deprecated) |
-| `docs/ZED_SETUP.md` | **Zed Editor** integration guide |
-| `docs/KNOWN_FAILURE_MODES.md` | Troubleshooting guide |
-| `templates/` | Files to copy into your own projects |
+| File/Directory                      | Purpose                                                    |
+| ----------------------------------- | ---------------------------------------------------------- |
+| `opencode.jsonc`                    | Pre-configured for USAi endpoints                          |
+| `.zed/tasks.json`                   | Pre-configured tasks for **Zed Editor**                    |
+| `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
+| `AGENTS.md`                         | Behavioral rules the agent follows                         |
+| `docs/QUICKSTART_SBX.md`            | Full sbx CLI setup guide                                   |
+| `docs/QUICKSTART_DOCKER_DESKTOP.md` | ~~Docker Desktop setup guide~~ (deprecated)                |
+| `docs/ZED_SETUP.md`                 | **Zed Editor** integration guide                           |
+| `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
+| `templates/`                        | Files to copy into your own projects                       |
 
 ---
 
@@ -259,25 +260,26 @@ To rotate your key:
 2. Copy the new key using the console copy button
 3. Update the secret in sbx:
 
-```bash
-# Get the current placeholder name
-placeholder=$(sbx secret ls -g | grep '\sUSAI_API_KEY\s' | awk '{print $4}')
+   ```bash
+   # Get the current placeholder name
+   placeholder=$(sbx secret ls -g | grep '\sUSAI_API_KEY\s' | awk '{print $4}')
 
-if [ -z "$placeholder" ]; then
-  echo "Error: USAI_API_KEY not found. Run 'sbx secret ls -g' to check." >&2
-else
-  # Rotate the secret with your new key (will prompt for input)
-  sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --placeholder "$placeholder"
-fi
+   if [ -z "$placeholder" ]; then
+     echo "Error: USAI_API_KEY not found. Run 'sbx secret ls -g' to check." >&2
+   else
+     # Rotate the secret with your new key (will prompt for input)
+     sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --placeholder "$placeholder"
+   fi
+   ```
 
-The `sbx secret` command will prompt you for the new key. Paste it when prompted.
+   The `sbx secret` command will prompt you for the new key. Paste it when prompted.
 
 4. Verify the rotation worked:
 
-```bash
-# Should list available models without auth errors
-sbx exec <sandbox-name> -- opencode models
-````
+   ```bash
+   # Should list available models without auth errors
+   sbx exec <sandbox-name> -- opencode models
+   ```
 
 If the placeholder value hasn't changed, your existing sandboxes will automatically use the new key.
 
@@ -339,15 +341,16 @@ Want to use sbx + USAi in your own repository? Use the `init-project.sh` script 
 
 The script copies these files to your target directory:
 
-| File | Purpose |
-|------|---------|
-| `AGENTS.md` | Behavioral rules for AI agents |
-| `opencode.jsonc` | Pre-configured USAi endpoints |
-| `Makefile` | Helper commands (`make setup`, `make doctor`, etc.) |
-| `.zed/tasks.json` | Zed Editor task integration |
-| `README.md` | Generated project README (only if it doesn't exist) |
+| File              | Purpose                                             |
+| ----------------- | --------------------------------------------------- |
+| `AGENTS.md`       | Behavioral rules for AI agents                      |
+| `opencode.jsonc`  | Pre-configured USAi endpoints                       |
+| `Makefile`        | Helper commands (`make setup`, `make doctor`, etc.) |
+| `.zed/tasks.json` | Zed Editor task integration                         |
+| `README.md`       | Generated project README (only if it doesn't exist) |
 
 The script also:
+
 - Initializes a git repository (if not already initialized)
 - Preserves existing files (won't overwrite your README.md)
 - Works with both empty and populated directories
@@ -428,4 +431,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ---
 
 **Data Classification:** Internal/Non-sensitive
+
 # CI trigger
