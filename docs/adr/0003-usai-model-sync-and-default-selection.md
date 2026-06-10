@@ -12,6 +12,11 @@ risk_treatment: mitigate
 
 # ADR-0003: Automate USAI Model Sync and Default Selection for OpenCode Templates
 
+> **Update (2026-06):** The reference config moved from `templates/opencode.jsonc`
+> to the repository-root `opencode.jsonc`, and the local sync command is now
+> `npm run sync:usai-models` (the `make` targets were removed). References below
+> reflect the original decision; paths and commands have since changed.
+
 ## Context and Problem Statement
 
 The quickstart repository ships `templates/opencode.jsonc` as the reference

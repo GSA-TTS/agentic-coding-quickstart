@@ -53,89 +53,57 @@ You will see several tasks preconfigured for this workspace:
 
 | Task Label | Description | Underlying Command |
 |------------|-------------|--------------------|
-| `OpenCode: Run Agent` | Launches OpenCode inside SBX (secrets auto-injected, creates sandbox if needed) | `make run-agent` |
-| `OpenCode: Environment Diagnostics` | Performs health checks on your Docker & SBX setup | `make doctor` |
+| `OpenCode: Run Agent` | Launches OpenCode inside SBX (secrets auto-injected, creates sandbox if needed) | `sbx run opencode .` |
+| `OpenCode: Environment Diagnostics` | Checks that `sbx` is installed and the USAI_API_KEY secret is set | inline `sbx` checks |
 
 > **Note:** The deprecated Docker Desktop tasks have been removed. Use the `sbx` CLI tasks above.
 
 ### 3. Step-by-Step Workflow inside Zed
 
-1. **Run Diagnostics:** Open the tasks palette and select `OpenCode: Environment Diagnostics (make doctor)`. It will open a panel in Zed and verify your Docker and setup states.
+1. **Run Diagnostics:** Open the tasks palette and select `OpenCode: Environment Diagnostics`. It will open a panel in Zed and verify your SBX setup states.
 2. **Launch OpenCode Agent:** Select `OpenCode: Run Agent`. This creates the sandbox if needed and launches the agent.
 3. **Interact with the Agent:** The agent will boot inside a terminal panel in Zed. You can type prompts directly to the agent (e.g. *"Analyze the directory structure and check for AGENTS.md"*).
 4. **Interactive Approvals:** Because our `opencode.jsonc` is configured with `"edit": "ask"` and `"bash": "ask"` for safety, the agent will prompt you in the terminal for approval before making file changes or running mutating shell commands. Type `y` or `n` directly into the Zed terminal tab to respond.
 
 ---
 
-## Alternative: Integrated Terminal (Makefile Shortcuts)
+## Alternative: Integrated Terminal
 
-If you prefer to run commands manually, you can open Zed's integrated terminal (`Ctrl + ~`) and use the following Makefile shortcuts:
+If you prefer to run commands manually, open Zed's integrated terminal (`Ctrl + ~`) and run `sbx` directly:
 
 ```bash
-# Check if your environment is healthy
-make doctor
+# Check that sbx is installed and your USAi key secret is set
+command -v sbx && sbx secret ls | grep USAI_API_KEY
 
 # Run agent (creates sandbox automatically if needed)
-make run-agent
+sbx run opencode .
 ```
 
 ---
 
-## Bootstrapping a New Project with Zed Integration
+## Mounting This Config into Your Sandbox
 
-If you want to configure a new or existing repository to use the OpenCode agent in SBX with Zed support:
-
-### Step 1: Copy Templates
-
-Use the quickstart bootstrap files to copy configurations over to your repository:
+This repository's `opencode.jsonc`, `AGENTS.md`, and docs are meant to be mounted
+into sandboxes as shared global config rather than copied into each project. Use
+`qsbx.sh` to mount this clone and set `OPENCODE_CONFIG_DIR` automatically:
 
 ```bash
-TARGET_REPO="/path/to/your/project"
-
-# Copy OpenCode config
-cp templates/opencode.jsonc "$TARGET_REPO/"
-
-# Copy Zed Tasks configuration
-mkdir -p "$TARGET_REPO/.zed"
-cp templates/zed-tasks.json "$TARGET_REPO/.zed/tasks.json"
-
-# Copy SBX patterns reference
-mkdir -p "$TARGET_REPO/docs"
-cp templates/SBX_PATTERNS.md "$TARGET_REPO/docs/"
-
-# Append Sandbox Rules to AGENTS.md
-tail -n +6 templates/AGENTS_SBX_ADDENDUM.md >> "$TARGET_REPO/AGENTS.md"
+export QUICKSTART_CLONE=$(pwd)        # path to this clone
+./qsbx.sh create --name mysandbox opencode /path/to/your/project
+sbx run mysandbox
 ```
 
-### Step 2: Configure your `Makefile`
-
-Add these targets to your target repository's `Makefile` so that the Zed tasks function properly:
-
-```makefile
-# Create SBX sandbox using sbx CLI
-create-sandbox:
- @echo "Creating SBX sandbox..."
- @if sbx ls | grep -q "my-sandbox"; then \
-  echo "Sandbox already exists. Skipping creation."; \
- else \
-  sbx create --name my-sandbox opencode .; \
- fi
-
-# Run OpenCode agent in sandbox using sbx CLI
-run-agent:
- @echo "Running OpenCode agent in SBX sandbox..."
- @sbx run my-sandbox
-```
-
-*(Note: If your sandbox name is different than `my-sandbox`, make sure to update the name in the `Makefile` and `.zed/tasks.json` to match!)*
+The `.zed/tasks.json` in this repo drives the Zed tasks above. If you want the
+same tasks in another repo, copy that file into your project's `.zed/` directory
+and adjust the sandbox name to match.
 
 ---
 
 ## Troubleshooting Zed Integration
 
-### "Task Command Not Found: make"
-- Ensure that `make` is installed on your host machine (included by default on macOS, installable on Linux via `build-essential`, or Windows via Chocolatey/Scoop).
-- Alternatively, you can edit your `.zed/tasks.json` and replace the `make` commands with the direct `sbx` command strings.
+### "Task Command Not Found"
+- The Zed tasks call `sbx` directly. Ensure the `sbx` CLI is installed and on your `PATH`.
+- You can edit `.zed/tasks.json` to adjust the commands for your environment.
 
 ### "ERROR: USAI_API_KEY not found"
 - USAi is a custom endpoint, so you must use `sbx secret set-custom`:
@@ -160,4 +128,4 @@ run-agent:
 
 ### Terminal Output is Frozen or Unresponsive
 - If a task runs and does not respond to keystrokes, close the terminal pane (`Cmd + W`) and trigger the task again via the tasks palette.
-- Standard interactive shells are fully supported, but if you run into environment issues, run `make run-agent` directly in Zed's integrated terminal (`Ctrl + ~`) instead of the task runner.
+- Standard interactive shells are fully supported, but if you run into environment issues, run `sbx run opencode .` directly in Zed's integrated terminal (`Ctrl + ~`) instead of the task runner.

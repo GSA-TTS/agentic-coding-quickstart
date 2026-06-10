@@ -5,7 +5,7 @@ This repository includes an optional pre-commit configuration that provides:
 - Basic file hygiene checks (trailing whitespace, end-of-file-fixer, YAML/JSON validation)
 
 > [!NOTE]
-> Pre-commit hooks are **opt-in** and do NOT auto-install during `make setup`.
+> Pre-commit hooks are **opt-in** — install them yourself with `pre-commit install`.
 
 ---
 
@@ -33,9 +33,6 @@ pip install pre-commit
 
 # Install the hooks (from repo root)
 pre-commit install
-
-# Or use the make target
-make install-hooks
 ```
 
 ### Inside Docker Sandbox (SBX)
@@ -48,9 +45,6 @@ pip install pre-commit
 
 # Install the hooks (from repo root)
 pre-commit install
-
-# Or use the make target (from repo root)
-make install-hooks
 ```
 
 ---
