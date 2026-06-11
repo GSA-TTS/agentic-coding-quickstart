@@ -423,12 +423,12 @@ The agent MUST:
 - [x] Prefer 1 config file + 1 command over complex setups
 - [x] Document outcomes clearly enough for another engineer to follow
 
-**One-command bootstrap:** `QUICKSTART_CLONE=$(pwd) ./qsbx run opencode .` (creates sandbox with config mounted, then attaches)
+**One-command bootstrap:** `./qsbx run opencode .` (creates sandbox with config mounted, then attaches)
 **One-command verify:** `sbx exec <sandbox-name> <verify-command>`
 
 > **Note:** `qsbx run` is the preferred method — it creates the sandbox if needed
-> (mounting this clone as global config), then attaches. `QUICKSTART_CLONE` is
-> only required the first time a given sandbox is created.
+> (mounting this clone as global config), then attaches. qsbx uses the clone it
+> lives in; export `QUICKSTART_CLONE` only to override that.
 
 **ADR location:** `docs/adr/`
 

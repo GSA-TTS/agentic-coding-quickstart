@@ -144,12 +144,12 @@ So every sandbox you create picks up the same config, rules, and skills. Repeat
 this for each project you want to work on.
 
 ```bash
-QUICKSTART_CLONE=$(pwd) ./qsbx run opencode /path/to/your/project
+./qsbx run opencode /path/to/your/project
 ```
 
 `qsbx run` creates the sandbox (with this clone mounted) if it doesn't exist yet,
-then attaches. `QUICKSTART_CLONE` only matters the first time a given sandbox is
-created — re-attaching to an existing one doesn't need it.
+then attaches. It uses the clone it lives in, so run it from this checkout (or
+via a symlink to it); set `QUICKSTART_CLONE` only if you want to override that.
 
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
 

@@ -7,7 +7,7 @@
 # up copying those files into every sandbox and manually keeping them in sync.
 #
 # Solution: when qsbx creates a sandbox it
-#   1. mounts $QUICKSTART_CLONE as an extra read-write workspace, and
+#   1. mounts this quickstart clone as an extra read-write workspace, and
 #   2. symlinks the shared config into the locations OpenCode actually searches
 #      under the sandbox's home (~/.config/opencode and ~/.agents):
 #        ~/.config/opencode/opencode.jsonc -> <clone>/opencode/opencode.jsonc
@@ -21,17 +21,37 @@
 # .agents/skills relative to OPENCODE_CONFIG_DIR, so we link into the
 # home-directory search paths instead. See docs/adr/0004.
 #
-# Setup:  export QUICKSTART_CLONE=/path/to/my/quickstart-clone
-#         (only needed when a sandbox is actually created; re-attaching does not
-#          require it)
+# The quickstart clone is the directory containing this script — no env var or
+# setup required. You can still override it by exporting QUICKSTART_CLONE.
 #
 # Workflow:
-#   git switch -c "$(whoami)-global-config"        # personal branch for config
-#   QUICKSTART_CLONE=$(pwd) qsbx run opencode .     # create-if-missing + attach
+#   git switch -c "$(whoami)-global-config"   # personal branch for config
+#   ./qsbx run opencode .                      # create-if-missing + attach
 #   # ...customize AGENTS.md, skills, etc. inside the sandbox...
 #   git fetch origin main && git merge origin/main  # pull in upstream changes
 
 set -euo pipefail
+
+# Resolve the absolute directory containing this script, following symlinks so
+# qsbx works when invoked via a symlink on PATH. Portable across macOS (whose
+# BSD `readlink` lacks `-f`) and Linux: walk the symlink chain manually.
+script_dir() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [ -h "$src" ]; do
+    dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+    src=$(readlink "$src")
+    # Resolve relative symlink targets against the link's directory.
+    case "$src" in
+      /*) ;;
+      *) src="$dir/$src" ;;
+    esac
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
+# The quickstart clone defaults to this script's directory; QUICKSTART_CLONE
+# overrides it if exported.
+QUICKSTART_CLONE="${QUICKSTART_CLONE:-$(script_dir)}"
 
 # Agents understood by `sbx run AGENT [PATH...]`. Used to tell whether the first
 # positional after `run` is an agent (create-if-missing form) or the name of an
@@ -39,9 +59,13 @@ set -euo pipefail
 # be treated as the agent form; pass such sandboxes to `sbx run` directly.
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
-# Assert QUICKSTART_CLONE is set; only required on paths that create a sandbox.
+# Assert QUICKSTART_CLONE points at a usable clone (has the shared config).
 require_clone() {
-  : "${QUICKSTART_CLONE:?Set QUICKSTART_CLONE before creating a sandbox}"
+  if [ ! -f "$QUICKSTART_CLONE/opencode/opencode.jsonc" ]; then
+    echo "error: could not find opencode/opencode.jsonc under '$QUICKSTART_CLONE'." >&2
+    echo "       Run qsbx from your quickstart clone, or export QUICKSTART_CLONE." >&2
+    exit 1
+  fi
 }
 
 is_known_agent() {
@@ -154,8 +178,8 @@ create_with_config() {
   sbx create --name "$name" "${STRIPPED_ARGS[@]}" "$QUICKSTART_CLONE"
 
   # sbx mounts extra workspaces at their absolute host path inside the sandbox,
-  # so the clone is reachable at the same $QUICKSTART_CLONE path. Pass it through
-  # and symlink the shared config into OpenCode's home search locations.
+  # so the clone is reachable at the same path. Pass it through and symlink the
+  # shared config into OpenCode's home search locations.
   sbx exec \
     -e CLONE="$QUICKSTART_CLONE" \
     "$name" \

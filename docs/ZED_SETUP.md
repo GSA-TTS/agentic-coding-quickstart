@@ -90,11 +90,12 @@ home (`~/.config/opencode/opencode.jsonc`, `~/.config/opencode/AGENTS.md`,
 `~/.agents/skills`) automatically:
 
 ```bash
-QUICKSTART_CLONE=$(pwd) ./qsbx run opencode /path/to/your/project
+./qsbx run opencode /path/to/your/project
 ```
 
 `qsbx run` creates the sandbox (with this clone mounted) if it doesn't exist,
-then attaches.
+then attaches. It uses the clone it lives in; set `QUICKSTART_CLONE` only to
+override that.
 
 The `.zed/tasks.json` in this repo drives the Zed tasks above. If you want the
 same tasks in another repo, copy that file into your project's `.zed/` directory
