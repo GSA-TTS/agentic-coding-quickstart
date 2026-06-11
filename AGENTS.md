@@ -23,22 +23,33 @@ review_cycle: "quarterly"
 
 ## Workspace Structure
 
-This repository holds the **shared global config** (OpenCode settings, AGENTS.md,
-docs) that gets mounted into SBX sandboxes alongside your project workspaces. A
-typical layout:
+This repository holds the **shared global config** (OpenCode settings, agent
+rules, docs) plus the playbook as a pinned submodule. `qsbx` mounts this clone
+into SBX sandboxes and symlinks the config into the home locations OpenCode
+searches. A typical layout:
 
 ```
-my-workspace/                     # Parent folder (user creates this)
-├── agentic-coding-quickstart/    # THIS REPO - global config, mounted into sandboxes
-│   ├── AGENTS.md                 # You are here
-│   ├── opencode.jsonc            # USAi provider + model + permission config
-│   ├── qsbx                      # sbx wrapper that mounts this clone as config
-│   └── docs/                     # Setup guides and references
-└── my-app/                       # User's project(s)
+my-workspace/                       # Parent folder (user creates this)
+├── agentic-coding-quickstart/      # THIS REPO - global config, mounted into sandboxes
+│   ├── AGENTS.md                   # You are here (rules for working ON this repo)
+│   ├── opencode/opencode.jsonc     # USAi provider + model + permission config (shared)
+│   ├── opencode.jsonc -> opencode/opencode.jsonc   # root convenience symlink
+│   ├── agentic-coding-playbook/    # Pinned submodule: skills + federal AGENTS.md
+│   ├── qsbx                        # sbx wrapper: mounts clone, links config into sandbox
+│   └── docs/                       # Setup guides and references
+└── my-app/                         # User's project(s)
 ```
 
-The agent reads this repo as `OPENCODE_CONFIG_DIR` inside the sandbox (set by
-`qsbx`), so changes you make here are picked up by every sandbox that mounts it.
+Inside the sandbox, `qsbx` symlinks the shared config into the locations OpenCode
+actually searches:
+
+- `~/.config/opencode/opencode.jsonc` → `<clone>/opencode/opencode.jsonc`
+- `~/.config/opencode/AGENTS.md` → `<clone>/agentic-coding-playbook/AGENTS.md`
+- `~/.agents/skills` → `<clone>/agentic-coding-playbook/.agents/skills`
+
+So edits to the shared config or playbook (after a submodule bump) are picked up
+by every sandbox. (An empirical spike found OpenCode does **not** read these
+relative to `OPENCODE_CONFIG_DIR`; see `docs/adr/0004`.)
 
 ### Agent Resource Access
 
@@ -46,9 +57,10 @@ When working on user projects, the agent has access to:
 
 | Resource | Location | Use For |
 |----------|----------|---------|
-| Global config | This repo (mounted as `OPENCODE_CONFIG_DIR`) | Model/provider config, agent rules |
+| Global config | `~/.config/opencode/opencode.jsonc` (linked to clone) | Model/provider config |
+| Behavioral rules | `~/.config/opencode/AGENTS.md` (linked to playbook) | Federal agent rules |
+| Skills | `~/.agents/skills` (linked to playbook) | Step-by-step procedures |
 | Setup guides | `./docs/` | SBX configuration, troubleshooting |
-| Playbook (optional) | `../agentic-coding-playbook/` | Skills, compliance docs (clone separately) |
 
 **To use a skill:** Read the SKILL.md file in the skill directory and follow its procedures.
 

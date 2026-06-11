@@ -83,9 +83,11 @@ sbx run opencode .
 
 ## Mounting This Config into Your Sandbox
 
-This repository's `opencode.jsonc`, `AGENTS.md`, and docs are meant to be mounted
-into sandboxes as shared global config rather than copied into each project. Use
-`qsbx` to mount this clone and set `OPENCODE_CONFIG_DIR` automatically:
+This repository's shared config (`opencode/opencode.jsonc`) and the playbook
+submodule are meant to be mounted into sandboxes rather than copied into each
+project. Use `qsbx` to mount this clone and symlink the config into the sandbox
+home (`~/.config/opencode/opencode.jsonc`, `~/.config/opencode/AGENTS.md`,
+`~/.agents/skills`) automatically:
 
 ```bash
 QUICKSTART_CLONE=$(pwd) ./qsbx run opencode /path/to/your/project
