@@ -1,0 +1,3 @@
+[submodule "agentic-coding-playbook"]
+	path = agentic-coding-playbook
+	url = https://github.com/GSA-TTS/agentic-coding-playbook.git
