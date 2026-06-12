@@ -100,9 +100,20 @@ first_positional() {
   done
 }
 
-# Derive a sandbox name from the args following a create/run subcommand.
-# Honors an explicit `--name NAME`; otherwise returns "<agent>-<basename-of-path>"
-# to mirror sbx's own "<agent>-<workdir>" default slug.
+# Normalize a string into sbx's sandbox-name slug rules: lowercase, every run
+# of non-alphanumerics collapsed to a single hyphen, leading/trailing hyphens
+# trimmed. (Verified against sbx 0.32.0: My_App -> my-app, "with space" ->
+# with-space, under_score_x -> under-score-x.)
+slugify() {
+  printf '%s' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-*//' -e 's/-*$//'
+}
+
+# Derive the sandbox name qsbx will own and pass to BOTH `sbx create --name` and
+# the existence check, so the two always agree (rather than reconstructing and
+# guessing at sbx's auto-generated slug). Honors an explicit `--name NAME`;
+# otherwise builds "<agent>-<slug-of-basename>" using sbx's normalization rules.
 derive_name() {
   local agent="" first_path="" prev=""
   for arg in "$@"; do
@@ -143,7 +154,7 @@ derive_name() {
   local base="."
   [ -n "$first_path" ] && base=$(basename "$first_path")
   [ "$base" = "." ] && base=$(basename "$PWD")
-  printf '%s\n' "$agent-$base"
+  printf '%s\n' "$(slugify "$agent")-$(slugify "$base")"
 }
 
 # Drop any user-supplied `--name NAME` / `--name=NAME` from an arg list. qsbx
@@ -175,7 +186,13 @@ create_with_config() {
   shift
 
   strip_name "$@"
-  sbx create --name "$name" "${STRIPPED_ARGS[@]}" "$QUICKSTART_CLONE"
+  # Guard the array expansion for bash 3.2 (macOS default): under `set -u` an
+  # empty array expansion is an "unbound variable" error there.
+  if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
+    sbx create --name "$name" "${STRIPPED_ARGS[@]}" "$QUICKSTART_CLONE"
+  else
+    sbx create --name "$name" "$QUICKSTART_CLONE"
+  fi
 
   # sbx mounts extra workspaces at their absolute host path inside the sandbox,
   # so the clone is reachable at the same path. Pass it through and symlink the
@@ -197,8 +214,10 @@ link_into() {
   [ -e "$source" ] || { echo "qsbx: missing $source; skipping $target" >&2; return 0; }
   mkdir -p "$(dirname "$target")"
   if [ -e "$target" ] && [ ! -L "$target" ]; then
-    mv "$target" "$target.qsbx-bak"
-    echo "qsbx: backed up existing $target -> $target.qsbx-bak" >&2
+    # Timestamp the backup so a second run can't clobber an earlier one.
+    backup="$target.$(date +%Y%m%d%H%M%S).qsbx-bak"
+    mv "$target" "$backup"
+    echo "qsbx: backed up existing $target -> $backup" >&2
   fi
   ln -sfn "$source" "$target"
 }
@@ -210,7 +229,10 @@ EOF
 }
 
 sandbox_exists() {
-  sbx ls 2>/dev/null | grep -qE "^$1[[:space:]]"
+  # `sbx ls -q` prints bare sandbox names, one per line (no header). Match the
+  # whole line as a fixed string so names containing regex metacharacters (e.g.
+  # a dotted path slug) can't accidentally match a different sandbox.
+  sbx ls -q 2>/dev/null | grep -Fxq -- "$1"
 }
 
 subcommand="${1:-}"
@@ -218,7 +240,8 @@ subcommand="${1:-}"
 case "$subcommand" in
   create)
     shift
-    name=$(derive_name "$@")
+    name=$(derive_name "$@") || exit 1
+    [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
     create_with_config "$name" "$@"
     ;;
 
@@ -245,7 +268,8 @@ case "$subcommand" in
     if [ -n "$first" ] && is_known_agent "$first"; then
       # AGENT form: create the sandbox (mounting config) if it does not exist,
       # then attach to it.
-      name=$(derive_name "${create_args[@]}")
+      name=$(derive_name "${create_args[@]}") || exit 1
+      [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
       if ! sandbox_exists "$name"; then
         create_with_config "$name" "${create_args[@]}"
       fi
