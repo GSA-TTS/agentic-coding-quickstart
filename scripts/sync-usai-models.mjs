@@ -599,10 +599,17 @@ export function updateTemplate(templateText, payload, modelsDevCatalog = {}) {
 async function loadPayload(args) {
   const fixtureArg = args.find((arg) => arg.startsWith("--fixture="))
   const fixturePath = fixtureArg ? path.resolve(fixtureArg.split("=")[1]) : DEFAULT_FIXTURE_PATH
-  const useFixture = args.includes("--fixture") || fixtureArg || !process.env.USAI_API_KEY
+  const useFixture = args.includes("--fixture") || Boolean(fixtureArg)
 
   if (useFixture) {
     return validateUsaiPayload(JSON.parse(await readFile(fixturePath, "utf8")))
+  }
+
+  if (!process.env.USAI_API_KEY) {
+    throw new Error(
+      "USAI_API_KEY is not set. Export it (e.g. `export USAI_API_KEY=...`) and " +
+        "re-run, or pass --fixture to sync from the bundled test fixture.",
+    )
   }
 
   let payload
