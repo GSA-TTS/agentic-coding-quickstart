@@ -147,9 +147,27 @@ this for each project you want to work on.
 ./qsbx run opencode /path/to/your/project
 ```
 
-`qsbx run` creates the sandbox (with this clone mounted) if it doesn't exist yet,
-then attaches. It uses the clone it lives in, so run it from this checkout (or
-via a symlink to it); set `QUICKSTART_CLONE` only if you want to override that.
+`qsbx run` creates the sandbox (with this clone mounted **read-only**) if it
+doesn't exist yet, then attaches. It uses the clone it lives in, so run it from
+this checkout (or via a symlink to it); set `QUICKSTART_CLONE` only if you want
+to override that.
+
+The clone is mounted read-only for project work so a (possibly prompt-injected)
+agent can't rewrite the permission policy, rules, or skills that every other
+sandbox loads.
+
+#### Customizing the shared config
+
+To edit the shared config itself with an agent, point `qsbx` at the clone:
+
+```bash
+./qsbx run opencode .          # from inside the clone
+# or: ./qsbx run opencode /path/to/agentic-coding-quickstart
+```
+
+qsbx detects that the target is the clone and mounts it **read-write** as the
+primary workspace (and tells you so). Review the agent's changes with `git diff`
+and commit/push before they propagate to other sandboxes.
 
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
 

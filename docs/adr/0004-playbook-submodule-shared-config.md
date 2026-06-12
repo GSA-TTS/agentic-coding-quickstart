@@ -118,12 +118,40 @@ runs `sbx exec` to symlink (backing up any pre-existing non-symlink target to
 `OPENCODE_CONFIG_DIR` persistent-env injection, which the spike showed was
 insufficient for rules/skills.
 
+### Mount mode: read-only for project work, read-write only to edit config
+
+The shared `opencode.jsonc` carries the **permission policy** (`"bash": "ask"`,
+`"edit": "ask"`, deny lists) that every sandbox loads. If the clone were mounted
+read-write during ordinary project work, a prompt-injected agent in one sandbox
+could rewrite that policy — plus the rules and skills — that all other sandboxes
+subsequently trust. That is an unacceptable blast radius even at FIPS Low.
+
+Decision:
+
+- **Project work** (`qsbx run <agent> <project>`): the clone is mounted as an
+  **extra workspace with `:ro`**. sbx enforces read-only on extra workspaces, so
+  the agent can read the config/rules/skills but cannot modify the policy that
+  governs other sandboxes.
+- **Editing the shared config** (`qsbx run <agent> <clone-path>`, e.g.
+  `qsbx run opencode .` from within the clone): qsbx detects that the target
+  workspace *is* the clone and instead mounts it **read-write as the primary
+  workspace** (sbx primary workspaces are always RW). It prints an explicit
+  notice, skips the home-dir symlinks (the agent is editing the clone directly),
+  and defaults the sandbox name to `qsbx-quickstart-config` (unless `--name` is
+  given). Normal `"edit": "ask"` gating still applies, and changes only reach
+  other sandboxes after the user reviews them with `git diff` and commits/pushes.
+
+This keeps the policy-governing files writable only in a sandbox whose explicit
+purpose is editing them — never incidentally writable during untrusted project
+work. The `git diff` + commit step is the propagation gate.
+
 ### Positive Consequences
 
 - One mounted clone provides config + rules + skills; edits propagate to every sandbox.
 - Playbook version is pinned and bumped through review (SA-10, CM-3).
 - The user's project repo is never modified.
 - Extensible to other agents via sibling config subdirs.
+- Project-work sandboxes cannot tamper with the shared permission policy (`:ro`).
 
 ### Negative Consequences
 
@@ -134,6 +162,10 @@ insufficient for rules/skills.
   handled via `submodules: false` checkout default and lint/hook excludes.
 - Symlink wiring assumes the sandbox home layout (`/home/agent`); documented and
   defensively guarded in `qsbx`.
+- **Residual trust tradeoff:** the config-editing sandbox does have RW access to
+  the shared policy. This is intentional and scoped to that explicit workflow;
+  the safeguard is human `git diff` review before changes are committed and
+  propagate. Acceptable for local-dev / FIPS Low.
 
 ### Compliance Consequences
 
