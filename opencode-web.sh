@@ -7,6 +7,9 @@
 
 sandbox="${1:?Usage: $0 <sandbox-name>}"
 
-sbx run "$sandbox" -- web --hostname 0.0.0.0 --port 4096 &
+# Run the sandbox detached with opencode web
+sbx exec -d "$sandbox" sh -lc 'nohup opencode web --hostname 0.0.0.0 --port 4096' &
+
+# Poll + publish ports
 until sbx ports "$sandbox" --publish 4096:4096 2>/dev/null; do sleep 1; done
 echo "Ready: $sandbox on port 4096"
