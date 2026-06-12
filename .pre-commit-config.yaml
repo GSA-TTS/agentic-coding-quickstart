@@ -3,12 +3,16 @@
 #
 # Installation (optional):
 #   pip install pre-commit
-#   make install-hooks
+#   pre-commit install
 #
 # Run without installing hooks:
 #   pre-commit run --all-files
 #
 # All hooks pinned to commit SHAs for supply chain security (NIST SA-12)
+
+# The playbook is a pinned git submodule; it has its own hooks/CI. Don't lint it
+# from this repo.
+exclude: '^agentic-coding-playbook/'
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

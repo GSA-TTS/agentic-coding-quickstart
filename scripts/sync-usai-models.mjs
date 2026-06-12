@@ -24,7 +24,7 @@ const DISPLAY_NAME_OVERRIDES = {
   cohere_english_v3: "Cohere English v3",
 }
 
-const DEFAULT_TEMPLATE_PATH = path.resolve("templates/opencode.jsonc")
+const DEFAULT_TEMPLATE_PATH = path.resolve("opencode/opencode.jsonc")
 const DEFAULT_FIXTURE_PATH = path.resolve("tests/fixtures/usai-models.json")
 const MODELS_DEV_URL = "https://models.dev/models.json"
 const USAI_MODELS_URL = "https://api.gsa.usai.gov/api/v1/models"
@@ -599,10 +599,17 @@ export function updateTemplate(templateText, payload, modelsDevCatalog = {}) {
 async function loadPayload(args) {
   const fixtureArg = args.find((arg) => arg.startsWith("--fixture="))
   const fixturePath = fixtureArg ? path.resolve(fixtureArg.split("=")[1]) : DEFAULT_FIXTURE_PATH
-  const useFixture = args.includes("--fixture") || fixtureArg || !process.env.USAI_API_KEY
+  const useFixture = args.includes("--fixture") || Boolean(fixtureArg)
 
   if (useFixture) {
     return validateUsaiPayload(JSON.parse(await readFile(fixturePath, "utf8")))
+  }
+
+  if (!process.env.USAI_API_KEY) {
+    throw new Error(
+      "USAI_API_KEY is not set. Export it (e.g. `export USAI_API_KEY=...`) and " +
+        "re-run, or pass --fixture to sync from the bundled test fixture.",
+    )
   }
 
   let payload

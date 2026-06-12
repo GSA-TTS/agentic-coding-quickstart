@@ -49,12 +49,13 @@ globs:
   - "CONTRIBUTING.md"
   - "README.md"
   - "docs/*.md"
-  - "templates/*.md"
 
 # Ignore files
 ignores:
   - "node_modules"
   - "deleteme"
+  # Playbook is a pinned submodule with its own linting; don't lint it here.
+  - "agentic-coding-playbook"
 
 # Support YAML frontmatter
 frontMatter: "/^---\\s*$[\\s\\S]*?^---\\s*$/m"

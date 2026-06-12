@@ -1,0 +1,397 @@
+#!/bin/bash
+#
+# qsbx — sbx wrapper that mounts a shared "quickstart" config clone into sandboxes
+#
+# Problem: each new sbx sandbox is fresh, with no access to your persistent
+# global config (agent settings, AGENTS.md, skills, etc.). Without this, you end
+# up copying those files into every sandbox and manually keeping them in sync.
+#
+# Solution: when qsbx creates a sandbox it
+#   1. mounts this quickstart clone as an extra READ-ONLY workspace, and
+#   2. symlinks the shared config into the locations OpenCode actually searches
+#      under the sandbox's home (~/.config/opencode and ~/.agents):
+#        ~/.config/opencode/opencode.jsonc -> <clone>/opencode/opencode.jsonc
+#        ~/.config/opencode/AGENTS.md       -> <clone>/agentic-coding-playbook/AGENTS.md
+#        ~/.agents/skills                   -> <clone>/agentic-coding-playbook/.agents/skills
+# so the agent finds your global config, behavioral rules, and the playbook's
+# skills from one shared place. All other subcommands pass straight through to
+# sbx.
+#
+# The clone is mounted READ-ONLY for project work so that a (potentially
+# prompt-injected) agent working on your project cannot rewrite the permission
+# policy / rules / skills that every other sandbox loads. See docs/adr/0004.
+#
+# Editing the shared config itself: run the agent with the clone as the project,
+# e.g. `./qsbx run opencode .` from inside the clone (or `qsbx run opencode
+# <clone-path>`). qsbx detects this, mounts the clone read-WRITE as the primary
+# workspace (sbx primary workspaces are always RW), and skips the home-dir
+# symlinks (the agent is already in the clone). Review changes with `git diff`
+# before they propagate to other sandboxes.
+#
+# Note: an empirical spike showed OpenCode does NOT read AGENTS.md or
+# .agents/skills relative to OPENCODE_CONFIG_DIR, so we link into the
+# home-directory search paths instead. See docs/adr/0004.
+#
+# The quickstart clone is the directory containing this script — no env var or
+# setup required. You can still override it by exporting QUICKSTART_CLONE.
+#
+# Workflow:
+#   git switch -c "$(whoami)-global-config"   # personal branch for config
+#   ./qsbx run opencode .                      # edit config (clone is RW primary)
+#   # ...customize AGENTS.md, skills, etc., review with git diff...
+#   git fetch origin main && git merge origin/main  # pull in upstream changes
+
+set -euo pipefail
+
+# Resolve the absolute directory containing this script, following symlinks so
+# qsbx works when invoked via a symlink on PATH. Portable across macOS (whose
+# BSD `readlink` lacks `-f`) and Linux: walk the symlink chain manually.
+script_dir() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [ -h "$src" ]; do
+    dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+    src=$(readlink "$src")
+    # Resolve relative symlink targets against the link's directory.
+    case "$src" in
+      /*) ;;
+      *) src="$dir/$src" ;;
+    esac
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
+# The quickstart clone defaults to this script's directory; QUICKSTART_CLONE
+# overrides it if exported.
+QUICKSTART_CLONE="${QUICKSTART_CLONE:-$(script_dir)}"
+
+# Agents understood by `sbx run AGENT [PATH...]`. Used to tell whether the first
+# positional after `run` is an agent (create-if-missing form) or the name of an
+# existing sandbox (plain attach). A sandbox literally named after an agent will
+# be treated as the agent form; pass such sandboxes to `sbx run` directly.
+KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
+
+# Assert QUICKSTART_CLONE points at a usable clone (has the shared config).
+require_clone() {
+  if [ ! -f "$QUICKSTART_CLONE/opencode/opencode.jsonc" ]; then
+    echo "error: could not find opencode/opencode.jsonc under '$QUICKSTART_CLONE'." >&2
+    echo "       Run qsbx from your quickstart clone, or export QUICKSTART_CLONE." >&2
+    exit 1
+  fi
+}
+
+# Canonicalize a directory path to an absolute, symlink-resolved form so we can
+# compare a user-supplied workspace path against the clone dir. Echoes nothing
+# if the path does not exist / is not a directory.
+canonical_dir() {
+  [ -d "$1" ] || return 0
+  ( cd -P "$1" >/dev/null 2>&1 && pwd )
+}
+
+# True if PATH (a create/run positional) refers to the quickstart clone itself.
+is_clone_path() {
+  local resolved
+  resolved=$(canonical_dir "$1")
+  [ -n "$resolved" ] && [ "$resolved" = "$QUICKSTART_CLONE" ]
+}
+
+is_known_agent() {
+  case "$KNOWN_AGENTS" in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# True if PREV is a flag that consumes the next argument as its value.
+takes_value() {
+  case "$1" in
+    --name|--template|-t|--profile|--cpus|--memory|-m|--kit) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Find the first non-flag positional in a create/run arg list, skipping flags
+# and their values (e.g. `--name custom`). Echoes the token, or nothing.
+first_positional() {
+  local prev=""
+  for arg in "$@"; do
+    if takes_value "$prev"; then
+      prev="$arg"
+      continue
+    fi
+    case "$arg" in
+      -*) prev="$arg"; continue ;;
+    esac
+    printf '%s\n' "$arg"
+    return 0
+  done
+}
+
+# Normalize a string into sbx's sandbox-name slug rules: lowercase, every run
+# of non-alphanumerics collapsed to a single hyphen, leading/trailing hyphens
+# trimmed. (Verified against sbx 0.32.0: My_App -> my-app, "with space" ->
+# with-space, under_score_x -> under-score-x.)
+slugify() {
+  printf '%s' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-*//' -e 's/-*$//'
+}
+
+# Derive the sandbox name qsbx will own and pass to BOTH `sbx create --name` and
+# the existence check, so the two always agree (rather than reconstructing and
+# guessing at sbx's auto-generated slug). Honors an explicit `--name NAME`;
+# otherwise builds "<agent>-<slug-of-basename>" using sbx's normalization rules.
+derive_name() {
+  local agent="" first_path="" prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--name" ]; then
+      printf '%s\n' "$arg"
+      return 0
+    fi
+    case "$arg" in
+      --name=*)
+        printf '%s\n' "${arg#--name=}"
+        return 0
+        ;;
+    esac
+    prev="$arg"
+  done
+
+  # No explicit --name: agent is the first non-flag token, path the next one.
+  prev=""
+  for arg in "$@"; do
+    if takes_value "$prev"; then prev="$arg"; continue; fi
+    case "$arg" in
+      -*) prev="$arg"; continue ;;
+    esac
+    if [ -z "$agent" ]; then
+      agent="$arg"
+    elif [ -z "$first_path" ]; then
+      first_path="${arg%%:*}"   # strip any :ro suffix
+      break
+    fi
+    prev="$arg"
+  done
+
+  if [ -z "$agent" ]; then
+    echo "error: could not determine agent for sandbox name" >&2
+    return 1
+  fi
+
+  local base="."
+  [ -n "$first_path" ] && base=$(basename "$first_path")
+  [ "$base" = "." ] && base=$(basename "$PWD")
+  printf '%s\n' "$(slugify "$agent")-$(slugify "$base")"
+}
+
+# Echo an explicit `--name NAME` / `--name=NAME` from an arg list, or nothing.
+name_flag() {
+  local prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--name" ]; then
+      printf '%s\n' "$arg"
+      return 0
+    fi
+    case "$arg" in
+      --name=*) printf '%s\n' "${arg#--name=}"; return 0 ;;
+    esac
+    prev="$arg"
+  done
+}
+
+# Drop any user-supplied `--name NAME` / `--name=NAME` from an arg list. qsbx
+# always passes an explicit, derived name to `sbx create`, so the original must
+# be removed to avoid a duplicate flag. Result is placed in the STRIPPED_ARGS
+# global array (bash can't return arrays directly).
+strip_name() {
+  STRIPPED_ARGS=()
+  local skip=0
+  for arg in "$@"; do
+    if [ "$skip" -eq 1 ]; then
+      skip=0
+      continue
+    fi
+    case "$arg" in
+      --name) skip=1; continue ;;
+      --name=*) continue ;;
+    esac
+    STRIPPED_ARGS+=("$arg")
+  done
+}
+
+# Create a detached sandbox with the config clone mounted READ-ONLY, then
+# symlink the shared config into the home-directory locations OpenCode searches.
+# Usage: create_with_config NAME CREATE_ARGS...
+create_with_config() {
+  require_clone
+  local name="$1"
+  shift
+
+  strip_name "$@"
+  # Mount the clone read-only (":ro") as an extra workspace so a project-working
+  # agent can't rewrite the shared permission policy / rules / skills. sbx only
+  # honors ":ro" on extra workspaces, which the clone is here (the project is the
+  # primary workspace). Guard the array expansion for bash 3.2 (macOS default):
+  # under `set -u` an empty array expansion is an "unbound variable" error there.
+  if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
+    sbx create --name "$name" "${STRIPPED_ARGS[@]}" "$QUICKSTART_CLONE:ro"
+  else
+    sbx create --name "$name" "$QUICKSTART_CLONE:ro"
+  fi
+
+  link_shared_config "$name"
+}
+
+# Symlink the shared config from the mounted clone into the home locations
+# OpenCode searches inside the sandbox.
+link_shared_config() {
+  local name="$1"
+  # sbx mounts extra workspaces at their absolute host path inside the sandbox,
+  # so the clone is reachable at the same path. Pass it through and symlink the
+  # shared config into OpenCode's home search locations.
+  sbx exec \
+    -e CLONE="$QUICKSTART_CLONE" \
+    "$name" \
+    bash <<'EOF'
+set -eu
+
+if [ ! -f "$CLONE/opencode/opencode.jsonc" ]; then
+  echo "qsbx: clone not found at $CLONE inside sandbox; skipping config symlinks" >&2
+  exit 0
+fi
+
+# link_into TARGET SOURCE — back up a pre-existing non-symlink target, then link.
+link_into() {
+  target="$1"; source="$2"
+  [ -e "$source" ] || { echo "qsbx: missing $source; skipping $target" >&2; return 0; }
+  mkdir -p "$(dirname "$target")"
+  if [ -e "$target" ] && [ ! -L "$target" ]; then
+    # Timestamp the backup so a second run can't clobber an earlier one.
+    backup="$target.$(date +%Y%m%d%H%M%S).qsbx-bak"
+    mv "$target" "$backup"
+    echo "qsbx: backed up existing $target -> $backup" >&2
+  fi
+  ln -sfn "$source" "$target"
+}
+
+link_into "$HOME/.config/opencode/opencode.jsonc" "$CLONE/opencode/opencode.jsonc"
+link_into "$HOME/.config/opencode/AGENTS.md"      "$CLONE/agentic-coding-playbook/AGENTS.md"
+link_into "$HOME/.agents/skills"                  "$CLONE/agentic-coding-playbook/.agents/skills"
+EOF
+}
+
+sandbox_exists() {
+  # `sbx ls -q` prints bare sandbox names, one per line (no header). Match the
+  # whole line as a fixed string so names containing regex metacharacters (e.g.
+  # a dotted path slug) can't accidentally match a different sandbox.
+  sbx ls -q 2>/dev/null | grep -Fxq -- "$1"
+}
+
+# True if any create/run positional path refers to the clone itself — meaning
+# the user wants to edit the shared config with an agent.
+args_target_clone() {
+  local prev=""
+  for arg in "$@"; do
+    if takes_value "$prev"; then prev="$arg"; continue; fi
+    case "$arg" in
+      -*) prev="$arg"; continue ;;
+    esac
+    # Skip the agent token (first positional); paths follow it.
+    if is_known_agent "$arg"; then prev="$arg"; continue; fi
+    if is_clone_path "${arg%%:*}"; then return 0; fi
+    prev="$arg"
+  done
+  return 1
+}
+
+# Create a sandbox for editing the shared config itself: the clone is the
+# primary workspace (sbx primary workspaces are always read-write), so the agent
+# can modify it. No home-dir symlinks — the agent is working in the clone
+# directly, and we don't want the project's own config self-referencing the
+# home links. Default name is "qsbx-quickstart-config" unless the user gave one.
+create_config_sandbox() {
+  require_clone
+  local name="$1"
+  shift
+
+  echo "qsbx: target is the quickstart clone — mounting it READ-WRITE as the" >&2
+  echo "      primary workspace so you can edit the shared config. Review with" >&2
+  echo "      'git diff' before changes propagate to other sandboxes." >&2
+
+  strip_name "$@"
+  if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
+    sbx create --name "$name" "${STRIPPED_ARGS[@]}"
+  else
+    sbx create --name "$name"
+  fi
+}
+
+subcommand="${1:-}"
+
+case "$subcommand" in
+  create)
+    shift
+    name=$(derive_name "$@") || exit 1
+    [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
+    if args_target_clone "$@"; then
+      [ -n "$(name_flag "$@")" ] || name="qsbx-quickstart-config"
+      create_config_sandbox "$name" "$@"
+    else
+      create_with_config "$name" "$@"
+    fi
+    ;;
+
+  run)
+    shift
+    # Split args into the create portion (agent + paths + flags) and any agent
+    # args after "--", which only apply on attach.
+    create_args=()
+    agent_args=()
+    seen_sep=0
+    for arg in "$@"; do
+      if [ "$seen_sep" -eq 1 ]; then
+        agent_args+=("$arg")
+      elif [ "$arg" = "--" ]; then
+        seen_sep=1
+      else
+        create_args+=("$arg")
+      fi
+    done
+
+    first=""
+    [ "${#create_args[@]}" -gt 0 ] && first=$(first_positional "${create_args[@]}")
+
+    if [ -n "$first" ] && is_known_agent "$first"; then
+      # AGENT form: create the sandbox if it does not exist, then attach to it.
+      if args_target_clone "${create_args[@]}"; then
+        # Editing the shared config itself: clone is the RW primary workspace,
+        # no read-only mount, no home-dir symlinks.
+        name=$(name_flag "${create_args[@]}")
+        [ -n "$name" ] || name="qsbx-quickstart-config"
+        if ! sandbox_exists "$name"; then
+          create_config_sandbox "$name" "${create_args[@]}"
+        fi
+      else
+        # Project work: clone mounted read-only + config symlinked into home.
+        name=$(derive_name "${create_args[@]}") || exit 1
+        [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
+        if ! sandbox_exists "$name"; then
+          create_with_config "$name" "${create_args[@]}"
+        fi
+      fi
+
+      if [ "${#agent_args[@]}" -gt 0 ]; then
+        sbx run "$name" -- "${agent_args[@]}"
+      else
+        sbx run "$name"
+      fi
+    else
+      # SANDBOX form (or no args): plain attach, no config mount needed.
+      sbx run "$@"
+    fi
+    ;;
+
+  *)
+    # --- Any other subcommand: pass through unmolested ---
+    sbx "$@"
+    ;;
+esac

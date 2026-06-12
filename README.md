@@ -21,7 +21,21 @@ This repository is part of a three-repo ecosystem:
 
 ## 5-Minute Quickstart
 
-### Step 0: Prerequisites
+### Step 0: Clone this repo (with the playbook submodule)
+
+```bash
+git clone --recurse-submodules \
+  https://github.com/GSA-TTS/agentic-coding-quickstart.git
+cd agentic-coding-quickstart
+```
+
+> [!NOTE]
+> The playbook ships as a pinned git submodule under `agentic-coding-playbook/`.
+> If you already cloned without `--recurse-submodules`, run
+> `git submodule update --init`. You need access to the (currently private)
+> playbook repo; your GitHub token covers it.
+
+### Step 0b: Prerequisites
 
 Before you start, make sure you have:
 
@@ -88,7 +102,10 @@ sbx login
 > `sbx login` requires a Docker account. Docker Desktop is not required, but if you have it,
 > your Docker subscription covers sbx licensing.
 
-### Step 2: Configure and Run
+### Step 2: Configure secrets and policy (once)
+
+You only need to do this once per machine. Your USAi key and GitHub token are
+stored in sbx's secret manager, and the network policy persists across sandboxes.
 
 ```bash
 # 1. Set network policy (first-time only)
@@ -102,10 +119,6 @@ sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$US
 
 # 4. Store GitHub token (for code access)
 gh auth token | sbx secret set -g github
-
-# 5. Start a sandbox in your project
-cd /path/to/your/project
-sbx run opencode .
 ```
 
 > [!NOTE]
@@ -116,7 +129,52 @@ sbx run opencode .
 > `sbx secret set -g`. USAi API keys expire every 7 days. To rotate the secret in
 > your existing sandboxes, follow the [Rotating USAI API Keys procedure](#rotating-usai-api-keys) below.
 
+### Step 3: Create and run a sandbox (as often as you like)
+
+This clone holds your shared global config (`opencode/opencode.jsonc`) plus the
+playbook submodule (`agentic-coding-playbook/`). `qsbx` mounts the clone into the
+sandbox and symlinks the config into the locations OpenCode searches under the
+sandbox home:
+
+- `~/.config/opencode/opencode.jsonc` → the shared config
+- `~/.config/opencode/AGENTS.md` → the playbook's federal agent rules
+- `~/.agents/skills` → the playbook's skills
+
+So every sandbox you create picks up the same config, rules, and skills. Repeat
+this for each project you want to work on.
+
+```bash
+./qsbx run opencode /path/to/your/project
+```
+
+`qsbx run` creates the sandbox (with this clone mounted **read-only**) if it
+doesn't exist yet, then attaches. It uses the clone it lives in, so run it from
+this checkout (or via a symlink to it); set `QUICKSTART_CLONE` only if you want
+to override that.
+
+The clone is mounted read-only for project work so a (possibly prompt-injected)
+agent can't rewrite the permission policy, rules, or skills that every other
+sandbox loads.
+
+#### Customizing the shared config
+
+To edit the shared config itself with an agent, point `qsbx` at the clone:
+
+```bash
+./qsbx run opencode .          # from inside the clone
+# or: ./qsbx run opencode /path/to/agentic-coding-quickstart
+```
+
+qsbx detects that the target is the clone and mounts it **read-write** as the
+primary workspace (and tells you so). Review the agent's changes with `git diff`
+and commit/push before they propagate to other sandboxes.
+
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
+
+**Staying current:** Once in a while, `git fetch` this clone (and
+`git submodule update --remote --merge agentic-coding-playbook` to bump the
+playbook) to pick up updates, and rotate your USAi key when it expires (see
+[Rotating USAI API Keys](#rotating-usai-api-keys)).
 
 **Need more details?** See the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
 
@@ -139,15 +197,17 @@ AI coding agents can read files, write code, and execute commands. Running them 
 
 | File/Directory                      | Purpose                                                    |
 | ----------------------------------- | ---------------------------------------------------------- |
-| `opencode.jsonc`                    | Pre-configured for USAi endpoints                          |
+| `opencode/opencode.jsonc`           | Pre-configured for USAi endpoints (shared config)          |
+| `opencode.jsonc`                    | Convenience symlink to `opencode/opencode.jsonc`           |
+| `agentic-coding-playbook/`          | Pinned submodule: federal `AGENTS.md` + agent skills       |
+| `qsbx`                              | sbx wrapper that mounts this clone and links config in     |
+| `rotate-apikey.sh`                  | Rotate your USAi API key secret in sbx                     |
 | `.zed/tasks.json`                   | Pre-configured tasks for **Zed Editor**                    |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
-| `AGENTS.md`                         | Behavioral rules the agent follows                         |
+| `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
 | `docs/QUICKSTART_SBX.md`            | Full sbx CLI setup guide                                   |
-| `docs/QUICKSTART_DOCKER_DESKTOP.md` | ~~Docker Desktop setup guide~~ (deprecated)                |
 | `docs/ZED_SETUP.md`                 | **Zed Editor** integration guide                           |
 | `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
-| `templates/`                        | Files to copy into your own projects                       |
 
 ---
 
@@ -156,7 +216,7 @@ AI coding agents can read files, write code, and execute commands. Running them 
 If you use the **Zed Editor**, pre-configured tasks are available in `.zed/tasks.json`:
 
 - **OpenCode: Run Agent** — Launch the agent in your sandbox
-- **OpenCode: Environment Diagnostics** — Run `make doctor`
+- **OpenCode: Environment Diagnostics** — Check that `sbx` is installed and your USAi key secret is set
 
 See the **[Zed Editor Setup Guide](docs/ZED_SETUP.md)** for detailed instructions.
 
@@ -225,7 +285,11 @@ Then use `sbx` commands directly (e.g., `sbx run opencode .` instead of `docker 
 
 ### OpenCode shows wrong providers
 
-Ensure you're in a directory with `opencode.jsonc`. For sbx, the workspace is auto-mounted.
+Ensure `~/.config/opencode/opencode.jsonc` inside the sandbox is the symlink
+into this clone. `qsbx` creates it (along with `AGENTS.md` and `~/.agents/skills`)
+when it creates the sandbox; if you created the sandbox another way, the USAi
+provider config won't be picked up. Re-create it with `qsbx run`, or link the
+files manually.
 
 ### Authentication failed
 
@@ -299,7 +363,7 @@ If you're still having authentication issues after rotation:
 
 ### How default USAI models are chosen
 
-The quickstart `templates/opencode.jsonc` includes a generated USAI model catalog.
+The `opencode.jsonc` in this repo includes a generated USAI model catalog.
 This repository keeps that section in sync with the USAI `/models` API so new
 projects start from a current baseline.
 
@@ -317,68 +381,10 @@ To refresh the model catalog locally:
 
 ```bash
 export USAI_API_KEY="your-key-here"
-make sync-models
+npm run sync:usai-models
 ```
 
 For more troubleshooting, see [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md).
-
----
-
-## Bootstrap Your Own Project
-
-Want to use sbx + USAi in your own repository? Use the `init-project.sh` script to automatically provision any directory (new or existing) with all necessary configuration files.
-
-### Quick Start
-
-```bash
-# Provision a new or existing project directory
-./init-project.sh /path/to/your/project
-```
-
-### What Gets Provisioned
-
-The script copies these files to your target directory:
-
-| File              | Purpose                                             |
-| ----------------- | --------------------------------------------------- |
-| `AGENTS.md`       | Behavioral rules for AI agents                      |
-| `opencode.jsonc`  | Pre-configured USAi endpoints                       |
-| `Makefile`        | Helper commands (`make setup`, `make doctor`, etc.) |
-| `.zed/tasks.json` | Zed Editor task integration                         |
-| `README.md`       | Generated project README (only if it doesn't exist) |
-
-The script also:
-
-- Initializes a git repository (if not already initialized)
-- Preserves existing files (won't overwrite your README.md)
-- Works with both empty and populated directories
-
-### Example
-
-```bash
-# From the quickstart directory
-cd /path/to/agentic-coding-quickstart
-
-# Provision your project
-./init-project.sh /path/to/my-existing-app
-
-# Result:
-# [OK] AGENTS.md
-# [OK] opencode.jsonc
-# [OK] Makefile
-# [OK] .zed/tasks.json
-# [OK] Git repository initialized (if needed)
-```
-
-### Next Steps After Provisioning
-
-```bash
-cd /path/to/your/project
-make setup    # Clone playbook and check dependencies
-make doctor   # Verify your environment
-```
-
-**Alternative (Manual):** If you prefer manual setup, see [templates/BOOTSTRAP.md](templates/BOOTSTRAP.md) for detailed instructions.
 
 ---
 
@@ -390,26 +396,23 @@ make doctor   # Verify your environment
 
 ### Available Skills and Resources
 
-The Playbook and Patterns repos include reusable **agent skills** that provide step-by-step procedures for common tasks. Skills follow the [agentskills.io](https://agentskills.io) standard and are auto-discovered by OpenCode, Codex, and other tools.
+The playbook (vendored here as the `agentic-coding-playbook/` submodule) provides
+reusable **agent skills** — step-by-step procedures for common tasks. Skills
+follow the [agentskills.io](https://agentskills.io) standard. When you launch a
+sandbox with `qsbx`, these are symlinked to `~/.agents/skills` so OpenCode
+discovers them automatically; no separate clone is needed.
 
-| Repo         | Skills                       | Examples                                                                            |
+| Source       | Skills                       | Examples                                                                            |
 | ------------ | ---------------------------- | ----------------------------------------------------------------------------------- |
-| **Playbook** | Federal compliance, security | `federal-security-controls-lookup`, `ato-package`, `code-review`, `cloudgov-deploy` |
+| **Playbook** (submodule) | Federal compliance, security | `federal-security-controls-lookup`, `ato-package`, `code-review`, `cloudgov-deploy` |
 | **Patterns** | Development workflows        | `accessibility-review`, `uswds-prototype`, `test-generation`, `secure-code-review`  |
 
-**Skills location:** `.agents/skills/<skill-name>/SKILL.md`
-
-To use skills in your project, clone the playbook alongside your workspace:
+To bump the playbook to a newer release:
 
 ```bash
-# Recommended workspace structure
-my-workspace/
-├── my-app/                       # Your project
-├── agentic-coding-playbook/      # Skills and standards
-└── agentic-coding-patterns/      # Community patterns
+git submodule update --remote --merge agentic-coding-playbook
+git add agentic-coding-playbook && git commit -m "chore: bump playbook submodule"
 ```
-
-Agents can then reference skills from the playbook when working on your project.
 
 ---
 

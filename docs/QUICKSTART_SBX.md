@@ -545,31 +545,12 @@ sbx create --clone --name feature-work opencode ~/my-app ~/shared-libs:ro
 
 Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
 
-### Migration from Pre-v0.9.0
-
-If you previously used `make create-sandbox`, you may have an orphaned `quickstart` sandbox that is no longer used. The new `make run-agent` uses `sbx run` which manages sandboxes automatically.
-
-To clean up the old sandbox:
-
-```bash
-# Check for old sandbox
-sbx ls | grep quickstart
-
-# Remove if present (optional - it won't interfere, just wastes disk space)
-sbx rm quickstart
-```
-
-The new workflow is simpler:
-- Old: `make create-sandbox` then `make run-agent`
-- New: `make run-agent` (creates sandbox automatically via `sbx run`)
-
 ---
 
 ## Next Steps
 
 - [Known Failure Modes](KNOWN_FAILURE_MODES.md) — Common issues and solutions
 - [Coding Practices](CODING_PRACTICES.md) — Secure coding standards
-- [Docker Desktop Alternative](QUICKSTART_DOCKER_DESKTOP.md) — If you prefer GUI
 
 ---
 

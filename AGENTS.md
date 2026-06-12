@@ -23,20 +23,33 @@ review_cycle: "quarterly"
 
 ## Workspace Structure
 
-This repository serves as the **entry point** for AI-assisted government development. The expected folder structure:
+This repository holds the **shared global config** (OpenCode settings, agent
+rules, docs) plus the playbook as a pinned submodule. `qsbx` mounts this clone
+into SBX sandboxes and symlinks the config into the home locations OpenCode
+searches. A typical layout:
 
 ```
-my-workspace/                     # Parent folder (user creates this)
-├── agentic-coding-quickstart/    # THIS REPO - setup, config, entry point
-│   ├── AGENTS.md                 # You are here
-│   ├── Makefile                  # make setup, make doctor, make new-project
-│   └── docs/                     # Setup guides and references
-├── agentic-coding-playbook/      # Skills, templates, compliance docs
-│   ├── skills/                   # Executable procedures for common tasks
-│   ├── templates/                # Project scaffolding
-│   └── docs/                     # Federal compliance guidance
-└── my-app/                       # User's project(s)
+my-workspace/                       # Parent folder (user creates this)
+├── agentic-coding-quickstart/      # THIS REPO - global config, mounted into sandboxes
+│   ├── AGENTS.md                   # You are here (rules for working ON this repo)
+│   ├── opencode/opencode.jsonc     # USAi provider + model + permission config (shared)
+│   ├── opencode.jsonc -> opencode/opencode.jsonc   # root convenience symlink
+│   ├── agentic-coding-playbook/    # Pinned submodule: skills + federal AGENTS.md
+│   ├── qsbx                        # sbx wrapper: mounts clone, links config into sandbox
+│   └── docs/                       # Setup guides and references
+└── my-app/                         # User's project(s)
 ```
+
+Inside the sandbox, `qsbx` symlinks the shared config into the locations OpenCode
+actually searches:
+
+- `~/.config/opencode/opencode.jsonc` → `<clone>/opencode/opencode.jsonc`
+- `~/.config/opencode/AGENTS.md` → `<clone>/agentic-coding-playbook/AGENTS.md`
+- `~/.agents/skills` → `<clone>/agentic-coding-playbook/.agents/skills`
+
+So edits to the shared config or playbook (after a submodule bump) are picked up
+by every sandbox. (An empirical spike found OpenCode does **not** read these
+relative to `OPENCODE_CONFIG_DIR`; see `docs/adr/0004`.)
 
 ### Agent Resource Access
 
@@ -44,14 +57,12 @@ When working on user projects, the agent has access to:
 
 | Resource | Location | Use For |
 |----------|----------|---------|
-| Skills | `../agentic-coding-playbook/skills/` | Step-by-step procedures (deploy, security scan, etc.) |
-| Templates | `../agentic-coding-playbook/templates/` | Project scaffolding |
-| Compliance docs | `../agentic-coding-playbook/docs/` | Security controls, coding practices |
+| Global config | `~/.config/opencode/opencode.jsonc` (linked to clone) | Model/provider config |
+| Behavioral rules | `~/.config/opencode/AGENTS.md` (linked to playbook) | Federal agent rules |
+| Skills | `~/.agents/skills` (linked to playbook) | Step-by-step procedures |
 | Setup guides | `./docs/` | SBX configuration, troubleshooting |
 
 **To use a skill:** Read the SKILL.md file in the skill directory and follow its procedures.
-
-**To scaffold a project:** Use templates from the playbook or ask the user what they want to build.
 
 ---
 
@@ -68,7 +79,7 @@ Agents operating in this repo must prioritize:
 - **Reproducibility of patterns**
 - **Minimal, transparent configurations**
 
-This is a **documentation and template repository** for AI coding agent setup.
+This is a **documentation and configuration repository** for AI coding agent setup.
 
 ---
 
@@ -412,11 +423,12 @@ The agent MUST:
 - [x] Prefer 1 config file + 1 command over complex setups
 - [x] Document outcomes clearly enough for another engineer to follow
 
-**One-command bootstrap:** `sbx run opencode .` (creates sandbox automatically)
+**One-command bootstrap:** `./qsbx run opencode .` (creates sandbox with config mounted, then attaches)
 **One-command verify:** `sbx exec <sandbox-name> <verify-command>`
 
-> **Note:** `sbx run` is the preferred method — it creates the sandbox if needed.
-> The older `sbx create` + `sbx exec` pattern still works but is more verbose.
+> **Note:** `qsbx run` is the preferred method — it creates the sandbox if needed
+> (mounting this clone as global config), then attaches. qsbx uses the clone it
+> lives in; export `QUICKSTART_CLONE` only to override that.
 
 **ADR location:** `docs/adr/`
 
