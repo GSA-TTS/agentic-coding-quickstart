@@ -86,7 +86,7 @@ sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
 
 ## OpenHands (Web-based IDE)
 
-OpenHands runs as a Docker container and provides a web-based IDE experience. It uses environment variables for configuration, **not** SBX secrets.
+OpenHands runs as a Docker container and provides a web-based IDE experience. The USAi provider config is seeded into `~/.openhands/settings.json` — OpenHands V1 does **not** read it from environment variables or SBX secrets.
 
 > [!IMPORTANT]
 > OpenHands runs via Docker directly, not inside SBX. Set `OPENAI_API_KEY` as an environment variable before starting.
@@ -104,22 +104,27 @@ echo 'export OPENAI_API_KEY="your-usai-api-key"' >> ~/.zshrc
 ### Run OpenHands via Docker
 
 ```bash
-# Run OpenHands - accessible at http://localhost:3000
-docker run -it --pull always \
-  -e LLM_MODEL="openai/gpt-5.4-latest-guardrails-defaultv2" \
-  -e LLM_BASE_URL="https://api.gsa.usai.gov/api/v1" \
-  -e LLM_API_KEY="$OPENAI_API_KEY" \
+# 1. Seed the USAi provider config into ~/.openhands/settings.json
+OPENHANDS_MODEL="openai/gpt-5.4-latest-guardrails-defaultv2" \
+  ./scripts/seed-openhands-settings.sh
+
+# 2. Run OpenHands - accessible at http://localhost:3000
+docker run -it --rm --pull always \
+  -e AGENT_SERVER_IMAGE_REPOSITORY="ghcr.io/openhands/agent-server" \
+  -e AGENT_SERVER_IMAGE_TAG="1.28.0-python" \
+  -e SANDBOX_VOLUMES="$(pwd):/workspace:rw" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v ~/.openhands:/.openhands \
-  -v "$(pwd)":/opt/workspace_base \
   -p 3000:3000 \
-  ghcr.io/openhands/openhands:latest
+  --add-host host.docker.internal:host-gateway \
+  --name openhands-app \
+  docker.openhands.dev/openhands/openhands:1.8
 ```
 
 ### Using Make (easiest)
 
 ```bash
-# From this repo - handles model selection
+# From this repo - handles seeding and model selection
 make run-openhands
 
 # Override model
@@ -128,7 +133,8 @@ make run-openhands OPENHANDS_MODEL=openai/gpt-5.2-latest-guardrails-defaultv2
 
 > [!NOTE]
 > OpenHands provides a web interface at http://localhost:3000.
-> Configuration is handled via environment variables and `.openhands/config.toml`.
+> The USAi provider config (model, base URL, API key) is written to
+> `~/.openhands/settings.json` by `scripts/seed-openhands-settings.sh`.
 
 ---
 

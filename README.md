@@ -203,7 +203,7 @@ export OPENAI_API_KEY="your-usai-api-key"
 make run-openhands
 ```
 
-This launches OpenHands with the default USAi model `openai/gpt-5.4-latest-guardrails-defaultv2`. The web interface will be available at http://localhost:3000.
+This launches OpenHands with the default USAi model `openai/gpt-5.4-latest-guardrails-defaultv2`. The web interface will be available at http://localhost:3000. `make run-openhands` seeds the USAi provider config into `~/.openhands/settings.json`, so the agent is ready to use without any manual setup in the Settings UI.
 
 To use a different USAi-entitled model:
 
@@ -217,17 +217,24 @@ make run-openhands OPENHANDS_MODEL=openai/gpt-5.2-latest-guardrails-defaultv2
 # Set USAi API key as OPENAI_API_KEY
 export OPENAI_API_KEY="your-usai-api-key"
 
-# Run OpenHands via Docker
-docker run -it --pull always \
-  -e LLM_MODEL="openai/gpt-5.4-latest-guardrails-defaultv2" \
-  -e LLM_BASE_URL="https://api.gsa.usai.gov/api/v1" \
-  -e LLM_API_KEY="$OPENAI_API_KEY" \
+# 1. Seed the USAi provider config into ~/.openhands/settings.json
+OPENHANDS_MODEL="openai/gpt-5.4-latest-guardrails-defaultv2" \
+  ./scripts/seed-openhands-settings.sh
+
+# 2. Run OpenHands via Docker (accessible at http://localhost:3000)
+docker run -it --rm --pull always \
+  -e AGENT_SERVER_IMAGE_REPOSITORY="ghcr.io/openhands/agent-server" \
+  -e AGENT_SERVER_IMAGE_TAG="1.28.0-python" \
+  -e SANDBOX_VOLUMES="$(pwd):/workspace:rw" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v ~/.openhands:/.openhands \
-  -v "$(pwd)":/opt/workspace_base \
   -p 3000:3000 \
-  ghcr.io/openhands/openhands:latest
+  --add-host host.docker.internal:host-gateway \
+  --name openhands-app \
+  docker.openhands.dev/openhands/openhands:1.8
 ```
+
+> **Note:** OpenHands V1 reads its LLM configuration from `~/.openhands/settings.json` (not from environment variables), which is why the provider config is seeded first.
 
 See the **[OpenHands Setup Guide](docs/QUICKSTART_OPENHANDS.md)** for detailed instructions.
 

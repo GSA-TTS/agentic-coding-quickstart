@@ -34,71 +34,81 @@ first-class support.
 
 ## Considered Options
 
-1. **Document OpenHands integration with Docker and environment variables** — Configure LLM
-   provider via environment variables pointing to USAi
-2. **Require a custom configuration file only** — Create `.openhands/config.toml` without
-   Docker run documentation
-3. **Do not support OpenHands** — Only support OpenCode as the primary agent
+1. **Seed `~/.openhands/settings.json` with the USAi provider config** — OpenHands
+   V1 reads its LLM configuration (model, base URL, API key) from a persisted
+   settings file. Pre-seed it so USAi works on first launch with no manual UI steps.
+2. **Require manual entry in the Settings UI** — Launch the container and have the
+   user enter the USAi Base URL, model, and key in the Settings panel each time.
+3. **Do not support OpenHands** — Only support OpenCode as the primary agent.
 
 ## Decision Outcome
 
-**Chosen option: Option 1** — Document OpenHands integration with Docker deployment and
-environment variable configuration, supplemented by a `.openhands/config.toml` for defaults.
+**Chosen option: Option 1** — Seed `~/.openhands/settings.json` with the USAi
+provider configuration before launching the OpenHands V1 Docker container.
 
 ### Rationale
 
-- **Docker-native approach:** OpenHands is designed to run as a Docker container with a web
-  interface. This aligns with modern containerized development practices.
-- **Environment variables for runtime config:** OpenHands reads `LLM_BASE_URL`, `LLM_API_KEY`,
-  and `LLM_MODEL` from environment variables, making it easy to configure at runtime.
-- **Config file for defaults:** The `.openhands/config.toml` provides sensible defaults that
-  can be overridden by environment variables.
-- **Web-based interface:** OpenHands provides a rich IDE experience with file browser, terminal,
-  and chat interface — complementing the CLI-based OpenCode.
-- **Agent flexibility:** OpenHands supports multiple agent types (CodeActAgent for coding,
-  BrowsingAgent for research) providing more flexibility than CLI-only agents.
+- **V1 reality:** OpenHands V1 (the current GUI/agent-server image) does **not**
+  honor a custom LLM Base URL via environment variables. The legacy
+  `LLM_BASE_URL`/`LLM_MODEL` env-var approach only worked for the V0 runtime.
+  USAi's custom endpoint therefore must live in the persisted settings file.
+- **End-to-end without manual steps:** Seeding `settings.json` means
+  `make run-openhands` produces a working USAi-backed agent on first launch — no
+  Settings-UI clicks required.
+- **Docker-native approach:** OpenHands is designed to run as a Docker container
+  with a web interface, aligning with modern containerized development practices.
+- **Secret hygiene:** The API key is read from `OPENAI_API_KEY` at runtime and
+  written into `settings.json` with `0600` permissions; it is never committed.
+- **Web-based interface:** OpenHands provides a rich IDE experience (file browser,
+  terminal, chat) complementing the CLI-based OpenCode.
+- **Agent flexibility:** OpenHands supports multiple agent types (CodeActAgent for
+  coding, BrowsingAgent for research).
 
 ## Technical Details
 
-### Environment Variables
+### Provider Configuration (seeded settings.json)
 
-| Variable | Value | Purpose |
-|----------|-------|---------|
-| `LLM_API_KEY` | Your USAi API key | Authentication with USAi |
-| `LLM_BASE_URL` | `https://api.gsa.usai.gov/api/v1` | Routes requests to USAi |
-| `LLM_MODEL` | `openai/gpt-5.4-latest-guardrails-defaultv2` | Selects the model |
-| `WORKSPACE_MOUNT_PATH` | Project directory path | Working directory for agent |
+The harness writes `~/.openhands/settings.json` via
+`scripts/seed-openhands-settings.sh`. Key fields:
+
+| Field | Value | Purpose |
+|-------|-------|---------|
+| `agent_settings.llm.api_key` | Your USAi API key | Authentication with USAi |
+| `agent_settings.llm.base_url` | `https://api.gsa.usai.gov/api/v1` | Routes requests to USAi |
+| `agent_settings.llm.model` | `openai/gpt-5.4-latest-guardrails-defaultv2` | Selects the model |
+| `agent_settings.agent_kind` | `openhands` | V1 discriminated settings variant |
+
+The `SANDBOX_VOLUMES` environment variable (`$PWD:/workspace:rw`) mounts the
+project into the agent sandbox.
 
 ### Docker Deployment
 
-OpenHands runs as a Docker container exposing port 3000:
+OpenHands V1 runs as a Docker container exposing port 3000:
 
 ```bash
-docker run -it --pull always \
-  -e LLM_MODEL="openai/gpt-5.4-latest-guardrails-defaultv2" \
-  -e LLM_BASE_URL="https://api.gsa.usai.gov/api/v1" \
-  -e LLM_API_KEY="$OPENAI_API_KEY" \
+# 1. Seed the USAi provider config into ~/.openhands/settings.json
+OPENAI_API_KEY="$OPENAI_API_KEY" \
+OPENHANDS_MODEL="openai/gpt-5.4-latest-guardrails-defaultv2" \
+  ./scripts/seed-openhands-settings.sh
+
+# 2. Launch OpenHands
+docker run -it --rm --pull always \
+  -e AGENT_SERVER_IMAGE_REPOSITORY="ghcr.io/openhands/agent-server" \
+  -e AGENT_SERVER_IMAGE_TAG="1.28.0-python" \
+  -e LOG_ALL_EVENTS=true \
+  -e SANDBOX_VOLUMES="$(pwd):/workspace:rw" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v ~/.openhands:/.openhands \
-  -v "$(pwd)":/opt/workspace_base \
   -p 3000:3000 \
-  ghcr.io/openhands/openhands:latest
+  --add-host host.docker.internal:host-gateway \
+  --name openhands-app \
+  docker.openhands.dev/openhands/openhands:1.8
 ```
 
-### Configuration File
+### Legacy Configuration File
 
-`.openhands/config.toml` provides defaults:
-
-```toml
-[core]
-workspace_base = "/workspace"
-default_agent = "CodeActAgent"
-
-[llm]
-model = "openai/gpt-5.4-latest-guardrails-defaultv2"
-base_url = "https://api.gsa.usai.gov/api/v1"
-api_key_env = "OPENAI_API_KEY"
-```
+`.openhands/config.toml` is retained for the **legacy (V0)** OpenHands runtime,
+which reads provider settings from TOML. The V1 GUI image ignores it.
 
 ### Model Name Mapping
 

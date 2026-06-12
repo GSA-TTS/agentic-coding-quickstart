@@ -12,7 +12,11 @@ OpenHands is an AI-driven development platform that provides a web-based IDE exp
 > OpenHands runs as a Docker container and provides a web interface accessible via browser.
 > The agent can execute code, browse the web, and interact with your development environment.
 
-This repo ships a `.openhands/config.toml` that configures the USAi provider automatically.
+OpenHands V1 (the current GUI image) does **not** accept a custom LLM Base URL
+through environment variables — it reads its runtime configuration from
+`~/.openhands/settings.json`. To make USAi work end-to-end without manually
+entering settings in the web UI, `make run-openhands` seeds that file for you via
+[`scripts/seed-openhands-settings.sh`](../scripts/seed-openhands-settings.sh).
 
 **Key benefits:**
 
@@ -35,18 +39,23 @@ This repo ships a `.openhands/config.toml` that configures the USAi provider aut
 
 ## Step 1: Set Environment Variables
 
-OpenHands reads configuration from environment variables:
+OpenHands needs your USAi API key exported as `OPENAI_API_KEY` so the harness can
+seed it into the OpenHands settings:
 
 ```bash
 # Set USAi API key as OPENAI_API_KEY
 export OPENAI_API_KEY="your-usai-api-key"
+
+# If you stored it in SBX during `make setup`, export it from there:
+export OPENAI_API_KEY="$(sbx secret get USAI_API_KEY)"
 
 # Optional: Add to your shell profile for persistence
 echo 'export OPENAI_API_KEY="your-usai-api-key"' >> ~/.zshrc
 ```
 
 > [!IMPORTANT]
-> OpenHands requires the `OPENAI_API_KEY` environment variable to be set before starting.
+> OpenHands Docker cannot read SBX secrets directly — the key must be present as
+> the `OPENAI_API_KEY` environment variable before starting.
 
 ---
 
@@ -74,27 +83,46 @@ make run-openhands
 ```
 
 This starts OpenHands with:
-- USAi as the LLM provider
+- USAi as the LLM provider (seeded into `~/.openhands/settings.json`)
 - Default model: `openai/gpt-5.4-latest-guardrails-defaultv2`
 - Web interface at http://localhost:3000
 
+`make run-openhands` performs three steps:
+1. `_check-openhands-keys` — verifies `OPENAI_API_KEY` is exported
+2. `_seed-openhands-settings` — writes the USAi provider config into
+   `~/.openhands/settings.json` (model, base URL, and API key) with `0600`
+   permissions
+3. Launches the OpenHands Docker container with your project mounted at
+   `/workspace`
+
 ### Manual Docker Run
 
+First seed the settings (or run the script directly):
+
 ```bash
-docker run -it --pull always \
-  -e LLM_MODEL="openai/gpt-5.4-latest-guardrails-defaultv2" \
-  -e LLM_BASE_URL="https://api.gsa.usai.gov/api/v1" \
-  -e LLM_API_KEY="$OPENAI_API_KEY" \
-  -e WORKSPACE_MOUNT_PATH="$(pwd)" \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v ~/.openhands:/.openhands \
-  -v "$(pwd)":/opt/workspace_base \
-  -p 3000:3000 \
-  --add-host host.docker.internal:host-gateway \
-  ghcr.io/openhands/openhands:latest
+OPENAI_API_KEY="your-usai-api-key" \
+OPENHANDS_MODEL="openai/gpt-5.4-latest-guardrails-defaultv2" \
+  ./scripts/seed-openhands-settings.sh
 ```
 
-Then open http://localhost:3000 in your browser.
+Then start the container:
+
+```bash
+docker run -it --rm --pull always \
+  -e AGENT_SERVER_IMAGE_REPOSITORY="ghcr.io/openhands/agent-server" \
+  -e AGENT_SERVER_IMAGE_TAG="1.28.0-python" \
+  -e LOG_ALL_EVENTS=true \
+  -e SANDBOX_VOLUMES="$(pwd):/workspace:rw" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v ~/.openhands:/.openhands \
+  -p 3000:3000 \
+  --add-host host.docker.internal:host-gateway \
+  --name openhands-app \
+  docker.openhands.dev/openhands/openhands:1.8
+```
+
+Then open http://localhost:3000 in your browser. The USAi provider, model, and
+key will already be configured.
 
 ---
 
@@ -102,18 +130,21 @@ Then open http://localhost:3000 in your browser.
 
 | What | Value | Purpose |
 |------|-------|---------|
-| `LLM_API_KEY` | Your USAi API key | Authentication |
-| `LLM_BASE_URL` | `https://api.gsa.usai.gov/api/v1` | Routes requests to USAi |
-| `LLM_MODEL` | `openai/gpt-5.4-latest-guardrails-defaultv2` | USAi model selection |
-| `WORKSPACE_MOUNT_PATH` | Your project directory | Working directory for the agent |
+| `agent_settings.llm.api_key` | Your USAi API key | Authentication |
+| `agent_settings.llm.base_url` | `https://api.gsa.usai.gov/api/v1` | Routes requests to USAi |
+| `agent_settings.llm.model` | `openai/gpt-5.4-latest-guardrails-defaultv2` | USAi model selection |
+| `SANDBOX_VOLUMES` | `$(pwd):/workspace:rw` | Mounts your project into the sandbox |
 
-OpenHands loads configuration from environment variables and `.openhands/config.toml` in the project root.
+OpenHands V1 reads its LLM configuration from `~/.openhands/settings.json`, which
+`make run-openhands` seeds before launching the container. The `openai/` model
+prefix tells LiteLLM (used internally by OpenHands) to speak the
+OpenAI-compatible chat-completions API that USAi exposes.
 
 ---
 
 ## Model Selection
 
-USAi exposes OpenAI models with specific names. Specify a USAi model name via the `LLM_MODEL` environment variable or Make override:
+USAi exposes OpenAI models with specific names. Specify a USAi model name via the `OPENHANDS_MODEL` Make override:
 
 ```bash
 # Override model via Make
@@ -146,25 +177,38 @@ To ensure the agent follows your guidelines:
 
 ## Configuration File
 
-This repo ships `.openhands/config.toml` which provides default settings:
+OpenHands V1 stores its active configuration in `~/.openhands/settings.json`.
+`make run-openhands` generates this file via
+[`scripts/seed-openhands-settings.sh`](../scripts/seed-openhands-settings.sh).
+The seeded file looks like (API key redacted):
 
-```toml
-[core]
-workspace_base = "/workspace"
-default_agent = "CodeActAgent"
-max_iterations = 100
-
-[llm]
-model = "openai/gpt-5.4-latest-guardrails-defaultv2"
-base_url = "https://api.gsa.usai.gov/api/v1"
-api_key_env = "OPENAI_API_KEY"
-
-[sandbox]
-base_container_image = "nikolaik/python-nodejs:python3.12-nodejs22-slim"
-timeout = 120
+```json
+{
+  "schema_version": 2,
+  "v1_enabled": true,
+  "agent_settings": {
+    "schema_version": 4,
+    "agent_kind": "openhands",
+    "agent": "CodeActAgent",
+    "llm": {
+      "model": "openai/gpt-5.4-latest-guardrails-defaultv2",
+      "base_url": "https://api.gsa.usai.gov/api/v1",
+      "api_key": "<your-usai-key>"
+    },
+    "tools": [{ "name": "TerminalTool", "params": {} }]
+  },
+  "conversation_settings": { "schema_version": 1, "max_iterations": 100 },
+  "llm_profiles": {
+    "profiles": { "Default": { "model": "...", "base_url": "...", "api_key": "..." } },
+    "active": "Default"
+  }
+}
 ```
 
-Environment variables take precedence over config file settings.
+> [!NOTE]
+> The repo also ships `.openhands/config.toml`, but that file is only used by the
+> **legacy (V0)** OpenHands runtime. The V1 GUI image used by `make run-openhands`
+> ignores it and reads `~/.openhands/settings.json` instead.
 
 ---
 
@@ -225,6 +269,17 @@ USAi model names may differ from standard OpenAI names. Check:
 1. Your USAi API key entitlements at <https://console.gsa.usai.gov/key-management>
 2. Use the full model name with `openai/` prefix (e.g., `openai/gpt-5.4-latest-guardrails-defaultv2`)
 
+### Settings not applied / wrong model in the UI
+
+OpenHands caches settings in `~/.openhands/settings.json`. If you change models
+or your key is stale, re-seed and restart:
+
+```bash
+export OPENAI_API_KEY="your-usai-api-key"
+./scripts/seed-openhands-settings.sh
+make run-openhands
+```
+
 ### Port already in use
 
 ```bash
@@ -242,10 +297,10 @@ docker run ... -p 3001:3000 ...
 | Feature | OpenCode | OpenHands |
 |---------|----------|-----------|
 | Interface | CLI (terminal) | Web-based IDE (browser) |
-| Configuration | `opencode.jsonc` | `.openhands/config.toml` + env vars |
+| Configuration | `opencode.jsonc` | `~/.openhands/settings.json` (seeded) |
 | Runtime | SBX sandbox | Docker container |
 | Agent type | CLI agent | Multiple agents (CodeAct, Browsing, etc.) |
-| Model selection | In config file | Environment variable or config file |
+| Model selection | In config file | `OPENHANDS_MODEL` Make override |
 
 ---
 

@@ -2,8 +2,13 @@
 # Simple commands for setting up and managing your AI-assisted development workspace
 
 OPENHANDS_MODEL ?= openai/gpt-5.4-latest-guardrails-defaultv2
+OPENHANDS_VERSION ?= 1.8
+OPENHANDS_IMAGE ?= docker.openhands.dev/openhands/openhands:$(OPENHANDS_VERSION)
+OPENHANDS_AGENT_SERVER_IMAGE ?= ghcr.io/openhands/agent-server
+OPENHANDS_AGENT_SERVER_TAG ?= 1.28.0-python
+USAI_BASE_URL ?= https://api.gsa.usai.gov/api/v1
 
-.PHONY: setup doctor new-project clean install-hooks help init-project run-agent run-openhands
+.PHONY: setup doctor new-project clean install-hooks help init-project run-agent run-openhands _seed-openhands-settings _check-openhands-keys
 
 # Default target
 help:
@@ -202,42 +207,57 @@ run-agent: _check-usai-key
 	@sbx run opencode .
 
 # Run OpenHands agent via Docker
-# OpenHands runs as a web-based IDE/agent accessible via browser.
-# Provider config (USAi base URL) lives in .openhands/config.toml.
-run-openhands: _check-openhands-keys
-	@echo "Running OpenHands agent via Docker with model $(OPENHANDS_MODEL)..."
+# OpenHands V1 runs as a web-based IDE/agent accessible via browser. The USAi
+# provider (custom base URL) cannot be supplied to the GUI via environment
+# variables, so we pre-seed ~/.openhands/settings.json (mounted into the
+# container) with the USAi endpoint, model, and API key.
+run-openhands: _check-openhands-keys _seed-openhands-settings
+	@echo "Running OpenHands $(OPENHANDS_VERSION) via Docker with model $(OPENHANDS_MODEL)..."
 	@echo "OpenHands will be accessible at http://localhost:3000"
-	@docker run -it --pull always \
-		-e LLM_MODEL="$(OPENHANDS_MODEL)" \
-		-e LLM_BASE_URL="https://api.gsa.usai.gov/api/v1" \
-		-e LLM_API_KEY="$$OPENAI_API_KEY" \
-		-e WORKSPACE_MOUNT_PATH="$(PWD)" \
+	@docker run -it --rm --pull always \
+		-e AGENT_SERVER_IMAGE_REPOSITORY="$(OPENHANDS_AGENT_SERVER_IMAGE)" \
+		-e AGENT_SERVER_IMAGE_TAG="$(OPENHANDS_AGENT_SERVER_TAG)" \
+		-e LOG_ALL_EVENTS=true \
+		-e SANDBOX_VOLUMES="$(PWD):/workspace:rw" \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(HOME)/.openhands:/.openhands \
-		-v $(PWD):/opt/workspace_base \
 		-p 3000:3000 \
 		--add-host host.docker.internal:host-gateway \
-		ghcr.io/openhands/openhands:latest
+		--name openhands-app \
+		$(OPENHANDS_IMAGE)
 
-# Check OpenHands-specific secrets (only OPENAI_API_KEY needed; base URL is
-# configured via env var or config file).
+# Seed ~/.openhands/settings.json with the USAi provider configuration so
+# OpenHands works end-to-end without manual entry in the Settings UI.
+_seed-openhands-settings:
+	@echo "Seeding OpenHands settings for USAi..."
+	@OPENAI_API_KEY="$$OPENAI_API_KEY" \
+		OPENHANDS_MODEL="$(OPENHANDS_MODEL)" \
+		USAI_BASE_URL="$(USAI_BASE_URL)" \
+		bash scripts/seed-openhands-settings.sh
+
+# Check OpenHands-specific secrets (only OPENAI_API_KEY needed; base URL and
+# model are written into the seeded settings.json by _seed-openhands-settings).
 _check-openhands-keys:
 	@echo "Checking OpenHands secrets..."
-	@# Check OPENAI_API_KEY environment variable
+	@# OpenHands Docker needs the USAi key exported as OPENAI_API_KEY.
 	@if [ -n "$$OPENAI_API_KEY" ]; then \
 		echo "  OPENAI_API_KEY: OK (from environment)"; \
-	elif sbx secret ls 2>/dev/null | grep -q "OPENAI_API_KEY"; then \
-		echo "  OPENAI_API_KEY: OK (from SBX secrets)"; \
-		echo "  NOTE: For OpenHands Docker, export the key: export OPENAI_API_KEY=\$$(sbx secret get OPENAI_API_KEY)"; \
+	elif sbx secret ls 2>/dev/null | grep -q "USAI_API_KEY"; then \
+		echo "  OPENAI_API_KEY not exported, but USAI_API_KEY exists in SBX secrets."; \
+		echo "  Export it before running OpenHands (Docker cannot read SBX secrets):"; \
+		echo "    export OPENAI_API_KEY=\$$(sbx secret get USAI_API_KEY)"; \
+		echo ""; \
+		echo "ERROR: OPENAI_API_KEY must be set in the environment for OpenHands."; \
+		exit 1; \
 	else \
 		echo "  OPENAI_API_KEY not found."; \
 		echo "  OpenHands requires OPENAI_API_KEY set as an environment variable."; \
-		read -s -p "Paste USAI_API_KEY value (will be exported as OPENAI_API_KEY): " key; \
+		read -s -p "Paste USAI_API_KEY value (will be used as OPENAI_API_KEY): " key; \
 		echo ""; \
 		if [ -n "$$key" ]; then \
-			export OPENAI_API_KEY="$$key"; \
-			echo "  OPENAI_API_KEY: Set for this session"; \
-			echo "  TIP: Add 'export OPENAI_API_KEY=your-key' to your shell profile for persistence"; \
+			echo "  OPENAI_API_KEY: captured for this run"; \
+			echo "  TIP: export it in your shell to avoid re-entry:"; \
+			echo "    export OPENAI_API_KEY=<your-usai-key>"; \
 		else \
 			echo ""; \
 			echo "ERROR: OPENAI_API_KEY is required for OpenHands. Get your USAi key at:"; \
