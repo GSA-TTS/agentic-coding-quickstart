@@ -176,45 +176,24 @@ Migration guide: docs/migration/oauth-migration.md
 Refs: #123
 ```
 
-### Local Validation
+### Validation and Merge Strategy
 
-Check your commit message locally before pushing:
+Conventional-commit format is enforced on the **pull request title** by a
+pinned GitHub Action (`amannn/action-semantic-pull-request`, see
+`.github/workflows/pr-lint.yml`) — **no local tooling or `npm install` is
+required**.
 
-```bash
-# Install commitlint (optional but recommended)
-npm install --save-dev @commitlint/cli @commitlint/config-conventional
+**Squash-merge is the preferred merge strategy.** On squash, the validated PR
+title becomes the squashed commit subject, which is exactly what the release
+automation (release-please) consumes to determine version bumps. Keep the PR
+title in `type(scope): description` form, e.g.:
 
-# Check the last commit
-npx commitlint --from=HEAD~1
-
-# Or check a specific message
-echo "feat: add new feature" | npx commitlint
+```
+feat(sbx): add reset target for stale sandbox paths
 ```
 
-### Pre-commit Hook (Optional)
-
-Automate validation with a pre-commit hook to catch issues before they reach CI:
-
-```yaml
-# .pre-commit-config.yaml (create in your repo root)
-repos:
-  - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook
-    rev: v9.5.0
-    hooks:
-      - id: commitlint
-        stages: [commit-msg]
-```
-
-Then install the hook:
-```bash
-# Install pre-commit if not already installed
-pip install pre-commit
-
-# Install the commit-msg hook
-pre-commit install --hook-type commit-msg
-```
-
-This will validate your commit message format automatically before each commit.
+Per-commit messages on a feature branch are not individually linted (they are
+squashed away), so focus on getting the PR title right.
 
 ---
 
