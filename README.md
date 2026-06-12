@@ -169,6 +169,10 @@ qsbx detects that the target is the clone and mounts it **read-write** as the
 primary workspace (and tells you so). Review the agent's changes with `git diff`
 and commit/push before they propagate to other sandboxes.
 
+Before attaching, `qsbx` checks that the sandbox's USAi key still works. If it
+has expired, it walks you through [rotating it](#rotating-usai-api-keys) and
+re-validates before launching the agent.
+
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
 
 **Staying current:** Once in a while, `git fetch` this clone (and
@@ -201,7 +205,7 @@ AI coding agents can read files, write code, and execute commands. Running them 
 | `opencode.jsonc`                    | Convenience symlink to `opencode/opencode.jsonc`           |
 | `agentic-coding-playbook/`          | Pinned submodule: federal `AGENTS.md` + agent skills       |
 | `qsbx`                              | sbx wrapper that mounts this clone and links config in     |
-| `rotate-apikey.sh`                  | Rotate your USAi API key secret in sbx                     |
+| `scripts/rotate-apikey`             | Rotate your USAi API key secret (`qsbx usai-rotate-api-key`) |
 | `.zed/tasks.json`                   | Pre-configured tasks for **Zed Editor**                    |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
@@ -325,11 +329,12 @@ To rotate your key:
 3. With the key in your paste buffer, update the secret in `sbx` by running
 
    ```bash
-   ./rotate-apikey.sh
+   ./qsbx usai-rotate-api-key
    ```
 
-   The command will prompt you for the new key. Paste it when prompted. It will
-   also validate that the new key works.
+   (or run the underlying `scripts/rotate-apikey` directly). The command will
+   prompt you for the new key. Paste it when prompted. It will also validate
+   that the new key works.
 
 > [!NOTE]
 > If you don't have a sandbox named, "opencode-agentic-coding-quickstart", then
