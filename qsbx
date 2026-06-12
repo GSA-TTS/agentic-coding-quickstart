@@ -36,6 +36,9 @@
 # The quickstart clone is the directory containing this script — no env var or
 # setup required. You can still override it by exporting QUICKSTART_CLONE.
 #
+# qsbx is also the single entry point for this repo's sbx extensions:
+#   qsbx usai-rotate-api-key   # rotate the USAi key secret (scripts/rotate-apikey)
+#
 # Workflow:
 #   git switch -c "$(whoami)-global-config"   # personal branch for config
 #   ./qsbx run opencode .                      # edit config (clone is RW primary)
@@ -62,8 +65,8 @@ script_dir() {
 }
 
 # Absolute directory of this script, used both as the default clone location and
-# to locate sibling scripts (rotate-apikey.sh).
-SCRIPT_DIR=$(script_dir)
+# to locate sibling scripts (scripts/rotate-apikey).
+SCRIPT_DIR=$(script_dir) || { echo "qsbx: could not resolve script directory" >&2; exit 1; }
 
 # The quickstart clone defaults to this script's directory; QUICKSTART_CLONE
 # overrides it if exported.
@@ -71,6 +74,10 @@ QUICKSTART_CLONE="${QUICKSTART_CLONE:-$SCRIPT_DIR}"
 
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 KEY_MGMT_URL="https://console.gsa.usai.gov/key-management"
+
+# Standalone helper scripts that qsbx fronts as subcommands. They remain runnable
+# on their own; qsbx is just the single entry point for this repo's sbx extras.
+ROTATE_SCRIPT="$SCRIPT_DIR/scripts/rotate-apikey"
 
 # Agents understood by `sbx run AGENT [PATH...]`. Used to tell whether the first
 # positional after `run` is an agent (create-if-missing form) or the name of an
@@ -335,8 +342,8 @@ create_config_sandbox() {
 
 # Probe the USAi API from inside the sandbox using its injected USAI_API_KEY.
 # Echoes the HTTP status code (e.g. 200, 401). A non-200 means the key is
-# missing, invalid, or expired. Mirrors the validation in rotate-apikey.sh, but
-# targets the sandbox we are about to attach to.
+# missing, invalid, or expired. Mirrors the validation in scripts/rotate-apikey,
+# but targets the sandbox we are about to attach to.
 check_key() {
   local name="$1"
   sbx exec "$name" -- sh -c \
@@ -346,7 +353,7 @@ check_key() {
 }
 
 # Validate the sandbox's key and, if it is not working, walk the user through
-# rotating it via rotate-apikey.sh. Best-effort: if we cannot run the check
+# rotating it via scripts/rotate-apikey. Best-effort: if we cannot run the check
 # (e.g. no curl in the sandbox), we warn and continue rather than block attach.
 ensure_valid_key() {
   local name="$1"
@@ -372,9 +379,8 @@ ensure_valid_key() {
   echo "  3. Copy the new key using the console copy button" >&2
   echo >&2
 
-  local rotate_script="$SCRIPT_DIR/rotate-apikey.sh"
-  if [ ! -x "$rotate_script" ]; then
-    echo "Cannot find rotate-apikey.sh next to qsbx; rotate manually, then re-run." >&2
+  if [ ! -x "$ROTATE_SCRIPT" ]; then
+    echo "Cannot find scripts/rotate-apikey; rotate manually, then re-run." >&2
     return 1
   fi
 
@@ -383,7 +389,7 @@ ensure_valid_key() {
   read -r answer || true
   case "$answer" in
     [yY]|[yY][eE][sS])
-      "$rotate_script"
+      "$ROTATE_SCRIPT"
       # Re-validate after rotation.
       status=$(check_key "$name")
       if [ "$status" = "200" ]; then
@@ -403,6 +409,18 @@ ensure_valid_key() {
 subcommand="${1:-}"
 
 case "$subcommand" in
+  usai-rotate-api-key)
+    # Front the standalone rotation helper as a subcommand so qsbx is the single
+    # entry point for this repo's sbx extensions. The script stays runnable on
+    # its own. Forward any extra args through to it.
+    shift
+    if [ ! -x "$ROTATE_SCRIPT" ]; then
+      echo "qsbx: scripts/rotate-apikey not found or not executable" >&2
+      exit 1
+    fi
+    exec "$ROTATE_SCRIPT" "$@"
+    ;;
+
   create)
     shift
     name=$(derive_name "$@") || exit 1

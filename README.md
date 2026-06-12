@@ -205,7 +205,7 @@ AI coding agents can read files, write code, and execute commands. Running them 
 | `opencode.jsonc`                    | Convenience symlink to `opencode/opencode.jsonc`           |
 | `agentic-coding-playbook/`          | Pinned submodule: federal `AGENTS.md` + agent skills       |
 | `qsbx`                              | sbx wrapper that mounts this clone and links config in     |
-| `rotate-apikey.sh`                  | Rotate your USAi API key secret in sbx                     |
+| `scripts/rotate-apikey`             | Rotate your USAi API key secret (`qsbx usai-rotate-api-key`) |
 | `.zed/tasks.json`                   | Pre-configured tasks for **Zed Editor**                    |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
@@ -329,11 +329,12 @@ To rotate your key:
 3. With the key in your paste buffer, update the secret in `sbx` by running
 
    ```bash
-   ./rotate-apikey.sh
+   ./qsbx usai-rotate-api-key
    ```
 
-   The command will prompt you for the new key. Paste it when prompted. It will
-   also validate that the new key works.
+   (or run the underlying `scripts/rotate-apikey` directly). The command will
+   prompt you for the new key. Paste it when prompted. It will also validate
+   that the new key works.
 
 > [!NOTE]
 > If you don't have a sandbox named, "opencode-agentic-coding-quickstart", then
