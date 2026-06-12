@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.9.0...v0.10.0) (2026-06-12)
+
+
+### Features
+
+* add key rotation script ([6503fc8](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/6503fc80848d9dfe3d5f48eca5bf3b9a473bf638))
+* Better rotation script. ([33c22a1](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/33c22a135258c17f2433c7d833bb5b3a5b13a222))
+* **qsbx:** validate USAi key and offer rotation before attach ([#143](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/143)) ([14c4cc5](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/14c4cc583d86811410b5f6af7dca1b7debe38a90)), closes [#140](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/140)
+* **sync:** automate USAI model sync for opencode templates ([26e777b](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/26e777bebac5e658226841448fc48e54cb14d47c)), closes [#117](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/117) [#118](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/118) [#119](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/119)
+* **template:** add comprehensive commented examples for OpenCode config ([#123](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/123)) ([0ed5771](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/0ed5771b9d33498a8c30580b5cadec11e3890e96))
+* **template:** add headers for agentic traffic identification ([#125](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/125)) ([a54f7e6](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/a54f7e635bac90e0d55c40ac707d48f2fe7b15ee))
+
+
+### Bug Fixes
+
+* Apply suggestion from [@mogul](https://github.com/mogul) ([edeba92](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/edeba922b22309946aae81979aea4e9eec0bfdc6))
+* **ci:** add permissions block to release workflow ([#129](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/129)) ([27b019e](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/27b019ede8822074705b20fe0b15fe3cbfc64626))
+* **ci:** correct action SHA pins for usai-model-sync workflow ([1579774](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/15797744c9e7b613282edcecf34a19f29800acd5))
+* **ci:** track package-lock.json for reproducible CI builds ([59762bd](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/59762bd86a2a5a3d6b084c17071c1080c2adce49))
+* **ci:** update markdownlint-cli2-action SHA to v23.2.0 ([#135](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/135)) ([3b38acb](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/3b38acb67d12f6beb405f9fb8c88b5e01e460c84))
+* clarify rotation steps ([4e6255f](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/4e6255fd5102d1986e650d551deafc22bda20d77))
+* clarify rotation steps ([934497d](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/934497db283bc0a417249b1e02f6e4670bbc9914))
+* Formatting, typos ([ef65361](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/ef65361ccdc0ccc44f4f2c4185a3b1d55d0907fb))
+* opencode PR suggestion bugs ([9ce4664](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/9ce46642435a9464147c87ed2b18089c564a3cf0))
+* prettier, formatting, and fix link to guidance ([dec8d11](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/dec8d11667c70a79fed2328bdb3ff3e35aa5b70f))
+* **sync:** improve API error messages for debugging ([2bcf082](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/2bcf0821b14960ef3e18a78a9fe688fe28a4d694))
+* Use QS_SBX var ([ad17ad7](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/ad17ad7a4a18616dfe58b0c51f2a8e724946e1a3))
+* **web:** run opencode web detached via sbx exec ([#147](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/147)) ([70cf626](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/70cf62699f2ac6e6d1b5711768f069326bcff127))
+
 ## [0.9.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.8.1...v0.9.0) (2026-05-29)
 
 ### Features
