@@ -219,7 +219,7 @@ sync-models:
 			echo "  Note: Run this inside SBX or export the key manually"; \
 			echo ""; \
 			echo "  To run inside SBX:"; \
-			echo "    sbx run --rm -it node:22 bash -c 'npm ci && npm run sync'"; \
+			echo "    sbx run --rm -it node:22 bash -c 'npm run sync:usai-models'"; \
 			echo ""; \
 			echo "  Or export the key and run locally:"; \
 			echo "    export USAI_API_KEY='your-key-here'"; \
