@@ -429,5 +429,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ---
 
 **Data Classification:** Internal/Non-sensitive
-
-# CI trigger
