@@ -407,7 +407,7 @@ This section defines version control and release management requirements for fed
   - `BREAKING CHANGE:` footer or `!` suffix → Major version bump
   - `docs:`, `chore:`, `test:`, `ci:`, `build:`, `style:`, `refactor:`, `perf:` → No version bump (configurable)
 
-- MUST validate commit messages in CI (commitlint)
+- MUST validate conventional-commit format in CI (e.g., a pinned PR-title-linting Action such as `amannn/action-semantic-pull-request`); local `commitlint-cli` is optional convenience tooling, not required
 - MUST create git tags for all releases (`v<version>`)
 - MUST generate GitHub releases with release notes from CHANGELOG
 - Release artifacts MUST be signed per §10.2

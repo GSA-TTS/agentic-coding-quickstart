@@ -107,10 +107,17 @@ requirements while maintaining simplicity and being backed by Google's well-main
    - Sections: Added, Changed, Deprecated, Removed, Fixed, Security
    - Each version links to GitHub compare view
 
-5. **Commitlint Enforcement**
-   - Pre-commit hook validates commit message format
-   - CI check blocks non-compliant commits
-   - Configuration in `.commitlintrc.yml`
+5. **Conventional-Commit Enforcement**
+   - Enforced on the **pull request title** by a SHA-pinned GitHub Action
+     (`amannn/action-semantic-pull-request`), not local commitlint.
+   - **Squash-merge is preferred:** the validated PR title becomes the squashed
+     commit subject that release-please consumes.
+   - No local `commitlint`/npm dependency is required.
+
+   > **Update (2026-06):** The original plan specified local `commitlint` with a
+   > `.commitlintrc.yml` and a pre-commit hook. That was never wired to CI and
+   > added an npm dependency tree for a check the merge gate already performs;
+   > it was removed (see issue #145). Enforcement is the PR-title Action above.
 
 ### Positive Consequences
 
@@ -134,7 +141,7 @@ requirements while maintaining simplicity and being backed by Google's well-main
 
 - **CM-2 (Baseline Configuration):** Satisfied — all versions tracked in git with clear diffs
 - **CM-3 (Configuration Change Control):** Satisfied — CHANGELOG documents all changes with rationale
-- **SA-10 (Developer Configuration Management):** Satisfied — version control enforced via commitlint
+- **SA-10 (Developer Configuration Management):** Satisfied — conventional-commit format enforced on the PR title via a pinned CI Action
 - **SA-11 (Developer Testing):** Satisfied — release workflow integrates with CI testing
 - **SSP Impact:** Add release process description to System Design section
 
@@ -174,7 +181,7 @@ Initially considered but rejected because:
 
 1. Create `release-please-config.json` and `.release-please-manifest.json`
 2. Create initial `CHANGELOG.md` with Keep a Changelog format
-3. Add commitlint configuration (`.commitlintrc.yml`)
+3. Enforce conventional-commit format on the PR title via the pinned `amannn/action-semantic-pull-request` Action (no local commitlint)
 4. Update AGENTS.md with commit message requirements
 5. Update CODING_PRACTICES.md with version control standards
 6. Update `.github/workflows/release.yml` to use release-please
