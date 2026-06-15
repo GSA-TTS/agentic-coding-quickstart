@@ -11,8 +11,8 @@
 # All hooks pinned to commit SHAs for supply chain security (NIST SA-12)
 
 # The playbook is a pinned git submodule; it has its own hooks/CI. Don't lint it
-# from this repo.
-exclude: '^agentic-coding-playbook/'
+# from this repo. CHANGELOG.md is release-please-generated; don't lint/reformat it.
+exclude: '^(agentic-coding-playbook/|CHANGELOG\.md$)'
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

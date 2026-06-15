@@ -45,7 +45,7 @@ jobs:
           npm audit --audit-level=high
 
       - name: Run markdownlint
-        run: npx --prefix .github/linters markdownlint-cli2 "**/*.md" "#node_modules" "#.github/linters/node_modules"
+        run: npx --prefix .github/linters markdownlint-cli2 "**/*.md" "#node_modules" "#.github/linters/node_modules" "#CHANGELOG.md" "#agentic-coding-playbook"
 
   link-check:
     name: Link Check
