@@ -30,7 +30,7 @@ Using [Zed](https://zed.dev) with Docker Sandboxes and USAi provides a robust, f
    ```
 3. **USAi API Key** stored securely (USAi is a custom endpoint):
    ```bash
-   sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+   sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
    ```
    > After setting the secret, recreate any existing sandbox: `sbx rm quickstart; sbx create --name quickstart opencode .`
 
@@ -112,7 +112,7 @@ and adjust the sandbox name to match.
 ### "ERROR: USAI_API_KEY not found"
 - USAi is a custom endpoint, so you must use `sbx secret set-custom`:
   ```bash
-  sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+  sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
   ```
 - After setting the secret, **delete and recreate** the sandbox:
   ```bash
