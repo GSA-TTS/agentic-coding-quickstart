@@ -129,14 +129,9 @@ sbx secret set -g github
 ./qsbx run opencode /path/to/your/project
 ```
 
-`qsbx run` creates the sandbox (if it doesn't exist yet) with this clone's shared
-config mounted, then attaches. Every sandbox picks up the same USAi provider
-config, federal agent rules, and skills. Repeat this for each project you want to
-work on.
+That's it. You're now running an AI coding agent with USAi access and restricted filesystem and network access.  Repeat this to create sandboxes for each project you want to work on.
 
-That's it. You're now running an AI coding agent in an isolated container with USAi access.
-
-**Want to know what `qsbx` is doing under the hood?** See [How It Works](#how-it-works).
+**Want to know more about what `qsbx` is doing under the hood?** See [How It Works](#how-it-works).
 
 **Need more details?** See the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
 
@@ -218,6 +213,10 @@ AI coding agents can read files, write code, and execute commands. Running them 
 You can skip this section to get started — it explains the mechanics behind the
 quickstart for when you want to customize or troubleshoot.
 
+### What happened when I ran the `qsbx` command?
+
+`qsbx run` created the sandbox for that path (if it doesn't exist yet) using the underlying `sbx` command, making sure that sure this clone is accessible inside it. Then it configured the coding agent (`opencode`) to pick up configuration for using the USAi provider and made sure the agent was provisioned with custom  guidance and relevant skills for working in the federal context.
+
 ### What `qsbx` mounts and links
 
 This clone holds your shared global config (`opencode/opencode.jsonc`) plus the
@@ -241,22 +240,9 @@ The built-in `set -g` form only recognizes known providers.
 
 ### Read-only by default
 
-For project work, the clone is mounted **read-only** so a (possibly
+For project work, this clone is mounted **read-only** so a (possibly
 prompt-injected) agent can't rewrite the permission policy, rules, or skills that
 every other sandbox loads.
-
-### Customizing the shared config
-
-To edit the shared config itself with an agent, point `qsbx` at the clone:
-
-```bash
-./qsbx run opencode .          # from inside the clone
-# or: ./qsbx run opencode /path/to/agentic-coding-quickstart
-```
-
-qsbx detects that the target is the clone and mounts it **read-write** as the
-primary workspace (and tells you so). Review the agent's changes with `git diff`
-and commit/push before they propagate to other sandboxes.
 
 ### Key pre-validation
 
@@ -296,6 +282,23 @@ To refresh the model catalog locally:
 read -rs USAI_API_KEY && export USAI_API_KEY
 npm run sync:usai-models
 ```
+
+---
+## Customizing the shared config
+
+You can always edit the shared config in this clone by hand, but you may also use an agent to work on it! To edit it using an agent, point `qsbx` at the clone:
+
+```bash
+./qsbx run opencode .          # from inside the clone
+# or: qsbx run opencode /path/to/agentic-coding-quickstart
+```
+
+qsbx detects that the target is the clone and mounts it **read-write** as the
+primary workspace (and tells you so). Review the agent's changes carefully. You probably want to test them by starting another sandbox up and trying them out. 
+
+Note that changes to the config are visible across all sandboxes that mount it, but agents don't reload their config on the fly. To have them reread the shared configuration, you can exit them and run `qsbx run opencode /path/to/your/project -c` to continue the existing session where you left off.
+
+When you're done, you probably want to version-control your customizations. We recommend that you commit them to a local branch in this clone. That way you can pull changes from main into your branch when needed.
 
 ---
 
