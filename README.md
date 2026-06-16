@@ -120,11 +120,7 @@ sbx secret set -g github
 ```
 
 > [!NOTE]
-> `sbx policy set-default balanced` may need to be retried if the policy service has not settled
-> yet after login or first-time setup.
->
-> USAi is not a built-in sbx service, so we use `sbx secret set-custom` instead of
-> `sbx secret set -g`. USAi API keys expire every 7 days; when one does, see
+> USAi API keys expire every 7 days; when one does, see
 > [Troubleshooting](#troubleshooting) to rotate it.
 
 ### Step 3: Create and run a sandbox (as often as you like)
@@ -193,6 +189,17 @@ sbx policy allow network -g "api.gsa.usai.gov"
 
 </details>
 
+<details>
+<summary><strong>"sbx policy set-default" fails right after first-time setup</strong></summary>
+
+The policy service may not have settled yet after `sbx login`. Retry the command:
+
+```bash
+sbx policy set-default balanced
+```
+
+</details>
+
 ---
 
 ## Why Sandboxes?
@@ -225,6 +232,12 @@ sandbox home:
 So every sandbox you create picks up the same config, rules, and skills. `qsbx`
 uses the clone it lives in, so run it from this checkout (or via a symlink to it);
 set `QUICKSTART_CLONE` only if you want to override that.
+
+### Why the USAi key uses `set-custom`
+
+USAi is not a built-in sbx service, so we store its key with
+`sbx secret set-custom` (with an explicit `--host`) instead of `sbx secret set -g`.
+The built-in `set -g` form only recognizes known providers.
 
 ### Read-only by default
 
