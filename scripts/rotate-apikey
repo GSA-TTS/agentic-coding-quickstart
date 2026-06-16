@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-QS_SBX="opencode-agentic-coding-quickstart"
+USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 
 fail() {
     echo "$@" >&2
@@ -21,12 +21,28 @@ fi
 sbx secret set-custom -g --host api.gsa.usai.gov \
       --env USAI_API_KEY --placeholder "$placeholder"
 
-if sbx ls | grep -qE "^${QS_SBX}[[:space:]]"; then
-  echo "Validating new key. 200 is OK, otherwise, you have a problem"
-  sbx exec "$QS_SBX" -- sh -c \
-     'curl -sS -o /dev/null -w "%{http_code}\n" \
-      -H "Authorization: Bearer $USAI_API_KEY" \
-      https://api.gsa.usai.gov/api/v1/models'
+# Validate the new key in a throwaway sandbox so we don't depend on any
+# particular pre-existing sandbox. Created here, removed on exit.
+validation_sbx="qsbx-keycheck-$$"
+cleanup() {
+  sbx rm "$validation_sbx" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+echo "Validating new key in a temporary sandbox..."
+if ! sbx create --name "$validation_sbx" shell . >/dev/null 2>&1; then
+  echo "Could not create a validation sandbox; skipping check." >&2
+  echo "The key was rotated. Re-run 'qsbx run' to validate on next attach." >&2
+  exit 0
+fi
+
+status=$(sbx exec "$validation_sbx" -- sh -c \
+   "curl -sS -o /dev/null -w '%{http_code}' \
+    -H \"Authorization: Bearer \$USAI_API_KEY\" \
+    $USAI_MODELS_URL" 2>/dev/null || true)
+
+if [ "$status" = "200" ]; then
+  echo "Key validated (HTTP 200). You're good to go."
 else
-  echo "Cannot find sandbox, $QS_SBX, for validation. See README.md for help"
+  fail "Key validation failed (HTTP ${status:-unknown}). Double-check the key and rotate again."
 fi
