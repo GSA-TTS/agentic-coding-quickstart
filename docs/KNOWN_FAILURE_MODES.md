@@ -90,12 +90,14 @@ But requests to `api.gsa.usai.gov` bypass this proxy entirely.
 
 ### Fix
 
-Inject the API key directly via environment variable:
+Store the key as a custom secret so sbx injects it for you:
+
 ```bash
-sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 ```
 
-This passes the actual key into the container environment, where `opencode.jsonc` reads it via `{env:USAI_API_KEY}`.
+Recreate the sandbox so the secret takes effect. `opencode.jsonc` reads the
+injected value via `{env:USAI_API_KEY}`.
 
 ---
 
@@ -355,7 +357,7 @@ sbx cp ./opencode.jsonc my-sandbox:/workspace/
 - `sbx secret set -g openai` succeeds
 - But USAi authentication still fails
 - `OPENAI_API_KEY=proxy-managed` in container
-- Must use direct injection (`-e USAI_API_KEY="$USAI_API_KEY"`)
+- Must inject the key via a custom secret instead
 
 ### Root Cause
 
@@ -363,14 +365,14 @@ SBX's secret proxy intercepts requests to **known provider endpoints** (like `ap
 
 ### Security Implication
 
-**When using direct injection, the agent CAN see the API key.**
+**For custom endpoints, the agent CAN see the API key.**
 
 With proxy-based injection (standard providers):
 - Agent sees: `OPENAI_API_KEY=proxy-managed`
 - Real key is injected at the proxy level
 - Agent never has access to the raw credential
 
-With direct injection (USAi/custom endpoints):
+With a custom secret (USAi/custom endpoints):
 - Agent sees: `USAI_API_KEY=<actual-key-value>`
 - Key exists in container environment
 - Agent process can read it
@@ -384,9 +386,10 @@ With direct injection (USAi/custom endpoints):
 
 ### Fix
 
-For now, bypass the proxy and inject directly:
+Store the key as a custom secret so sbx injects it into the sandbox:
+
 ```bash
-sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 ```
 
 Your `opencode.jsonc` should use variable substitution:
@@ -415,16 +418,16 @@ When implemented, this will allow defining custom service mappings so the proxy 
 ### Context
 
 GitHub is a built-in SBX service (`sbx secret set -g github`), but GitLab is not. This means:
-- **GitHub**: Can use proxy (recommended) OR direct injection
-- **GitLab**: Must use direct injection (`-e GITLAB_TOKEN="..."`)
+- **GitHub**: Uses the proxy (recommended)
+- **GitLab**: Must use a custom secret (`sbx secret set-custom -g --host <host> --env GITLAB_TOKEN`)
 
 ### Security Assessment for MVP
 
 | Concern | Severity | Mitigation |
 |---------|----------|------------|
 | Token visible in container env | Low | Container is isolated, short-lived |
-| Token in shell history | Low | Using `$(gh auth token)` subshell avoids literal values |
-| Token in process list | Low | Only visible during exec, not persisted |
+| Token in shell history | Low | sbx prompts for the value; never typed on the command line |
+| Token in process list | Low | Stored secret injected by sbx, not passed via process args |
 | Agent could exfiltrate token | Medium | Agent already has network access; proxy doesn't prevent this |
 | Token logged by agent | Medium | AGENTS.md prohibits; pre-commit hooks catch committed secrets |
 

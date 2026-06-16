@@ -104,8 +104,8 @@ Docker Sandboxes uses a secure secret store to inject credentials. Your API keys
 USAi (`api.gsa.usai.gov`) is **not a built-in sbx service**, so you must use `sbx secret set-custom`:
 
 ```bash
-# Store USAi API key for the custom endpoint
-sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+# sbx prompts for the key
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 ```
 
 > [!IMPORTANT]
@@ -125,7 +125,7 @@ sbx secret set -g anthropic
 ### Store GitHub Token (for code access)
 
 ```bash
-# Recommended: pipe from gh cli (never touches shell history)
+# Recommended: pipe from gh cli
 gh auth token | sbx secret set -g github
 
 # Or enter manually
@@ -138,8 +138,8 @@ sbx secret set -g github
 GitLab is **not a built-in sbx service**, so use `sbx secret set-custom`:
 
 ```bash
-# For self-hosted GitLab (e.g., workshop.cloud.gov)
-sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"
+# For self-hosted GitLab (e.g., workshop.cloud.gov). sbx prompts for the token.
+sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN
 
 # Verify access inside sandbox
 sbx exec SANDBOX_NAME sh -c 'curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" https://workshop.cloud.gov/api/v4/user | jq .username'
@@ -191,8 +191,8 @@ For custom API endpoints that aren't built-in services, use `sbx secret set-cust
 
 | Endpoint | Command |
 |----------|---------|
-| USAi (`api.gsa.usai.gov`) | `sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"` |
-| GitLab (self-hosted) | `sbx secret set-custom -g --host gitlab.example.com --env GITLAB_TOKEN --value "$GITLAB_TOKEN"` |
+| USAi (`api.gsa.usai.gov`) | `sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY` |
+| GitLab (self-hosted) | `sbx secret set-custom -g --host gitlab.example.com --env GITLAB_TOKEN` |
 
 > [!WARNING]
 > The `sbx secret set -g VARNAME` syntax does **not** work for custom variables like `USAI_API_KEY`.
@@ -211,7 +211,7 @@ sbx secret ls -g
 sbx secret rm -g anthropic
 
 # Update a secret (set it again, then recreate sandbox)
-sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$NEW_KEY"
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 sbx rm my-sandbox && sbx create --name my-sandbox opencode .
 ```
 
