@@ -30,10 +30,10 @@ cd agentic-coding-quickstart
 ```
 
 > [!NOTE]
-> The playbook ships as a pinned git submodule under `agentic-coding-playbook/`.
-> If you already cloned without `--recurse-submodules`, run
-> `git submodule update --init`. You need access to the (currently private)
-> playbook repo; your GitHub token covers it.
+> You need access to the (currently private) playbook repo; if you can see this,
+> your GitHub token covers it. The playbook ships as a pinned git submodule
+> under `agentic-coding-playbook/`. (If you already cloned without `--recurse-submodules`, run
+> `git submodule update --init`.)
 
 ### Step 0b: Prerequisites
 
@@ -43,17 +43,9 @@ Before you start, make sure you have:
 | --------------- | ---------------------------------------------------------- |
 | Package manager | Homebrew on macOS, `winget` on Windows, or `apt` on Ubuntu |
 | Docker account  | Required for `sbx login`                                   |
-| USAi API key    | Export as `USAI_API_KEY` before configuring secrets        |
-| GitHub CLI auth | Optional, but recommended for repository access            |
+| USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
+| GitHub CLI auth'd | Optional, but recommended for repository access            |
 | GitHub personal access token | Optional, but needed if you are not using the GitHub CLI |
-
-```bash
-export USAI_API_KEY="your-usai-api-key"
-```
-
-> [!NOTE]
-> Use the USAi console copy button when available. The key-management UI may display only a
-> truncated portion of the key, which can look like the full value if you manually select it.
 
 ### Step 1: Install sbx CLI
 
@@ -116,17 +108,15 @@ sbx policy set-default balanced
 # 2. Allow USAi endpoint
 sbx policy allow network -g "api.gsa.usai.gov"
 
-# 3. Store your USAi API key securely (USAi is a custom endpoint, not built-in)
-sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+# 3. Store your USAi API key securely (you will be prompted for it)
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 
 # 4. Store GitHub token (for code access)
 # If you are using the GitHub CLI
 gh auth token | sbx secret set -g github
 
-# If you are using a personal access token (classic)
-sbx secret set -g github -t="$TOKEN_STRING"
-# OR, if you want to keep the token out of your shell history, set it to an env var in your profile
-echo "$GITHUB_TOKEN" | sbx secret set -g github
+# If you are using a personal access token (classic); you will be prompted
+sbx secret set -g github
 ```
 
 > [!NOTE]
