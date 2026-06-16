@@ -289,7 +289,7 @@ You can always edit the shared config in this clone by hand, but you may also us
 qsbx detects that the target is the clone and mounts it **read-write** as the
 primary workspace (and tells you so). Review the agent's changes carefully. You probably want to test them by starting another sandbox up and trying them out. 
 
-Note that changes to the config are visible across all sandboxes that mount it, but agents don't reload their config on the fly. To have them reread the shared configuration, you can exit them and run `qsbx run opencode /path/to/your/project -c` to continue the existing session where you left off.
+Note that changes to the config are visible across all sandboxes that mount it, but agents don't reload their config on the fly. To have them reread the shared configuration, you can exit them and run `qsbx run opencode /path/to/your/project -- -c` to continue the existing session where you left off.
 
 When you're done, you probably want to version-control your customizations. We recommend that you commit them to a local branch in this clone. That way you can pull changes from main into your branch when needed.
 
