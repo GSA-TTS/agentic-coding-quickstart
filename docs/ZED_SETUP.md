@@ -2,11 +2,6 @@
 
 This guide documents how to set up and run the containerized OpenCode agent inside a sandboxed Docker environment (SBX) while developing on your host machine using the **Zed editor**.
 
-> [!IMPORTANT]
-> The Docker Desktop-integrated `docker sandbox` commands are **deprecated**.
-> Use the standalone `sbx` CLI instead.
-> See [Docker's deprecation notice](https://docs.docker.com/reference/cli/docker/sandbox/).
-
 ## Why Use Zed with Docker Sandboxes?
 
 Using [Zed](https://zed.dev) with Docker Sandboxes and USAi provides a robust, fast developer workflow:

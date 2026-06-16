@@ -547,6 +547,83 @@ Always choose "Balanced" (Option 2) when prompted. The Balanced policy allows ty
 
 ---
 
+## 18. Migrating from `docker sandbox`
+
+### Symptoms
+
+- You're using deprecated `docker sandbox ...` commands
+- Want to know the `sbx` CLI equivalents
+
+### Root Cause
+
+The Docker Desktop-integrated `docker sandbox` command is deprecated. The standalone `sbx` CLI replaces it and does not require Docker Desktop.
+
+### Fix
+
+Migrate to the equivalent `sbx` commands:
+
+| Deprecated Command | New Command |
+|-------------------|-------------|
+| `docker sandbox create --name NAME opencode .` | `sbx create --name NAME opencode .` |
+| `docker sandbox run NAME` | `sbx run NAME` |
+| `docker sandbox exec NAME cmd` | `sbx exec NAME cmd` |
+| `docker sandbox ls` | `sbx ls` |
+| `docker sandbox rm NAME` | `sbx rm NAME` |
+
+Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
+
+---
+
+## 19. OpenCode Shows Wrong Providers
+
+### Symptoms
+
+- OpenCode lists generic providers instead of USAi
+- Custom USAi model catalog missing
+
+### Root Cause
+
+The `~/.config/opencode/opencode.jsonc` inside the sandbox is not the symlink into your quickstart clone, so the USAi provider config is never loaded. This happens when the sandbox was created without `qsbx` (which sets up the symlinks for `opencode.jsonc`, `AGENTS.md`, and `~/.agents/skills`).
+
+### Fix
+
+Re-create the sandbox with `qsbx run`, which links the config automatically:
+
+```bash
+./qsbx run opencode /path/to/your/project
+```
+
+Or link the files manually inside the sandbox if you created it another way.
+
+---
+
+## 20. Authentication Failed After Copying a New Key
+
+### Symptoms
+
+- USAi authentication fails immediately after creating/copying a key
+- Key looks correct but is rejected
+
+### Root Cause
+
+The displayed key value in the console may be truncated when selected by hand, so the stored secret is incomplete.
+
+### Fix
+
+Regenerate the key and use the console **copy button** immediately instead of selecting the displayed text. Then confirm the secret is stored:
+
+```bash
+sbx secret ls -g | grep USAI_API_KEY
+```
+
+If problems persist, see [Section 2](#2-api-key-works-in-ui-but-fails-in-agent) and [Section 3](#3-agent-cannot-see-api-key--usai-authentication-fails). As a last resort, recreate the sandbox (this destroys all sandbox state, including uncommitted work):
+
+```bash
+sbx rm <sandbox-name>
+```
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:

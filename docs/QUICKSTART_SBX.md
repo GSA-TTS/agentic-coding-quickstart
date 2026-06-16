@@ -531,19 +531,9 @@ sbx create --clone --name feature-work opencode ~/my-app ~/shared-libs:ro
 
 ## Migrating from `docker sandbox`
 
-> [!NOTE]
-> The Docker Desktop-integrated `docker sandbox` command is deprecated.
-> If you're currently using `docker sandbox`, migrate to `sbx`:
-
-| Deprecated Command | New Command |
-|-------------------|-------------|
-| `docker sandbox create --name NAME opencode .` | `sbx create --name NAME opencode .` |
-| `docker sandbox run NAME` | `sbx run NAME` |
-| `docker sandbox exec NAME cmd` | `sbx exec NAME cmd` |
-| `docker sandbox ls` | `sbx ls` |
-| `docker sandbox rm NAME` | `sbx rm NAME` |
-
-Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
+The Docker Desktop-integrated `docker sandbox` command is deprecated. For the
+`sbx` equivalents, see
+[Known Failure Modes — Migrating from `docker sandbox`](KNOWN_FAILURE_MODES.md#18-migrating-from-docker-sandbox).
 
 ---
 
