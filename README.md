@@ -199,12 +199,14 @@ sbx policy set-default balanced
 
 ## Why Sandboxes?
 
-AI coding agents can read files, write code, and execute commands. Running them in sandboxes provides:
+AI coding agents can read files, write code, and execute commands. That makes them potent agents of chaos if they're compromised. Running them in sandboxes provides:
 
-- **Isolation** — Agent can't access your full system
-- **Secret protection** — API keys injected via proxy, never touch disk
-- **Reproducibility** — Same environment every time
-- **Audit trail** — Clear boundaries for what the agent can do
+- **Isolation** — Agent shouldn't be able to access the full host system; they should be limited both the filesystem and network access
+- **Secret protection** — By using proxy that injects secrets into outgoing requests, the actual secret is never available to the agent for exfiltration
+- **Reproducibility** — Agents should have a consistent configuration tailored to their operating context every time they run
+- **Audit trail** — Hard boundaries for what the agent can do, potentially logging violations
+
+For more details on this sandbox implementation and discussion of advanced patterns, see [docs/QUICKSTART_SBX.md](docs/QUICKSTART_SBX.md).
 
 ---
 
@@ -249,15 +251,6 @@ every other sandbox loads.
 Before attaching, `qsbx` checks that the sandbox's USAi key still works. If it
 has expired, it walks you through [rotating it](#troubleshooting) and
 re-validates before launching the agent.
-
-### Security Model
-
-1. **All execution inside sbx containers** — Isolated from your host system
-2. **Authorized endpoints only** — USAi, GitHub (via proxy)
-3. **Secret proxy** — Agent never sees raw API keys when using `sbx secret`
-4. **Agent follows AGENTS.md rules** — Explicit permissions and prohibitions
-
-For Git provider credentials and advanced patterns, see [docs/QUICKSTART_SBX.md](docs/QUICKSTART_SBX.md).
 
 ### How default USAi models are chosen
 
