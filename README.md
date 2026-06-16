@@ -3,7 +3,7 @@
 > **Audience:** GSA teams using AI coding agents
 > **Purpose:** Get AI coding agents running safely inside isolated sandboxes, connected to USAi
 
-This quickstart gets you from zero to running an AI coding agent with USAi in under 5 minutes using Docker Sandboxes.
+This quickstart gets you from zero to running an AI coding agent with USAi in under 5 minutes using the standalone `sbx` CLI.
 
 ## Agentic Coding Ecosystem
 
@@ -124,63 +124,74 @@ sbx secret set -g github
 > yet after login or first-time setup.
 >
 > USAi is not a built-in sbx service, so we use `sbx secret set-custom` instead of
-> `sbx secret set -g`. USAi API keys expire every 7 days. To rotate the secret in
-> your existing sandboxes, follow the [Rotating USAI API Keys procedure](#rotating-usai-api-keys) below.
+> `sbx secret set -g`. USAi API keys expire every 7 days; when one does, see
+> [Troubleshooting](#troubleshooting) to rotate it.
 
 ### Step 3: Create and run a sandbox (as often as you like)
-
-This clone holds your shared global config (`opencode/opencode.jsonc`) plus the
-playbook submodule (`agentic-coding-playbook/`). `qsbx` mounts the clone into the
-sandbox and symlinks the config into the locations OpenCode searches under the
-sandbox home:
-
-- `~/.config/opencode/opencode.jsonc` → the shared config
-- `~/.config/opencode/AGENTS.md` → the playbook's federal agent rules
-- `~/.agents/skills` → the playbook's skills
-
-So every sandbox you create picks up the same config, rules, and skills. Repeat
-this for each project you want to work on.
 
 ```bash
 ./qsbx run opencode /path/to/your/project
 ```
 
-`qsbx run` creates the sandbox (with this clone mounted **read-only**) if it
-doesn't exist yet, then attaches. It uses the clone it lives in, so run it from
-this checkout (or via a symlink to it); set `QUICKSTART_CLONE` only if you want
-to override that.
-
-The clone is mounted read-only for project work so a (possibly prompt-injected)
-agent can't rewrite the permission policy, rules, or skills that every other
-sandbox loads.
-
-#### Customizing the shared config
-
-To edit the shared config itself with an agent, point `qsbx` at the clone:
-
-```bash
-./qsbx run opencode .          # from inside the clone
-# or: ./qsbx run opencode /path/to/agentic-coding-quickstart
-```
-
-qsbx detects that the target is the clone and mounts it **read-write** as the
-primary workspace (and tells you so). Review the agent's changes with `git diff`
-and commit/push before they propagate to other sandboxes.
-
-Before attaching, `qsbx` checks that the sandbox's USAi key still works. If it
-has expired, it walks you through [rotating it](#rotating-usai-api-keys) and
-re-validates before launching the agent.
+`qsbx run` creates the sandbox (if it doesn't exist yet) with this clone's shared
+config mounted, then attaches. Every sandbox picks up the same USAi provider
+config, federal agent rules, and skills. Repeat this for each project you want to
+work on.
 
 That's it. You're now running an AI coding agent in an isolated container with USAi access.
 
-**Staying current:** Once in a while, `git fetch` this clone (and
-`git submodule update --remote --merge agentic-coding-playbook` to bump the
-playbook) to pick up updates, and rotate your USAi key when it expires (see
-[Rotating USAI API Keys](#rotating-usai-api-keys)).
+**Want to know what `qsbx` is doing under the hood?** See [How It Works](#how-it-works).
 
 **Need more details?** See the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
 
 **Working across multiple repos?** See [Multiple Workspaces](docs/QUICKSTART_SBX.md#multiple-workspaces) for mounting extra directories.
+
+---
+
+## Troubleshooting
+
+If the happy path above didn't work, the two most common issues are below. For
+everything else (wrong providers, auth failures, TLS/certificate errors, and
+more), see **[docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md)**.
+
+<details>
+<summary><strong>Authentication failures (expired USAi key)</strong></summary>
+
+USAi API keys expire every 7 days, which is the most common cause of errors like:
+
+```
+Unauthorized: {"detail":"Not authenticated"}
+```
+
+The simplest fix: end your session, then run `./qsbx run opencode <path>` again.
+`qsbx` validates the key on attach and walks you through rotating it when needed.
+
+To rotate the key explicitly outside that workflow:
+
+1. Open https://console.gsa.usai.gov/key-management
+2. Choose "Rotate" from the "Actions" menu for your key
+3. Copy the new key using the console copy button
+4. With the key in your paste buffer, run:
+
+   ```bash
+   ./qsbx usai-rotate-api-key
+   ```
+
+   (or run the underlying `scripts/rotate-apikey` directly). It prompts for the
+   new key, then validates it in a temporary sandbox.
+
+</details>
+
+<details>
+<summary><strong>Network policy blocks USAi</strong></summary>
+
+```bash
+sbx policy allow network -g "api.gsa.usai.gov"
+```
+
+> Do NOT use "Open" policy on GFE — it exposes internal GSA resources to the agent.
+
+</details>
 
 ---
 
@@ -195,62 +206,52 @@ AI coding agents can read files, write code, and execute commands. Running them 
 
 ---
 
-## What's in This Repo
+## How It Works
 
-| File/Directory                      | Purpose                                                    |
-| ----------------------------------- | ---------------------------------------------------------- |
-| `opencode/opencode.jsonc`           | Pre-configured for USAi endpoints (shared config)          |
-| `opencode.jsonc`                    | Convenience symlink to `opencode/opencode.jsonc`           |
-| `agentic-coding-playbook/`          | Pinned submodule: federal `AGENTS.md` + agent skills       |
-| `qsbx`                              | sbx wrapper that mounts this clone and links config in     |
-| `scripts/rotate-apikey`             | Rotate your USAi API key secret (`qsbx usai-rotate-api-key`) |
-| `.zed/tasks.json`                   | Pre-configured tasks for **Zed Editor**                    |
-| `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
-| `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
-| `docs/QUICKSTART_SBX.md`            | Full sbx CLI setup guide                                   |
-| `docs/ZED_SETUP.md`                 | **Zed Editor** integration guide                           |
-| `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
+You can skip this section to get started — it explains the mechanics behind the
+quickstart for when you want to customize or troubleshoot.
 
----
+### What `qsbx` mounts and links
 
-## Zed Editor Integration (Optional)
+This clone holds your shared global config (`opencode/opencode.jsonc`) plus the
+playbook submodule (`agentic-coding-playbook/`). `qsbx` mounts the clone into the
+sandbox and symlinks the config into the locations OpenCode searches under the
+sandbox home:
 
-If you use the **Zed Editor**, pre-configured tasks are available in `.zed/tasks.json`:
+- `~/.config/opencode/opencode.jsonc` → the shared config
+- `~/.config/opencode/AGENTS.md` → the playbook's federal agent rules
+- `~/.agents/skills` → the playbook's skills
 
-- **OpenCode: Run Agent** — Launch the agent in your sandbox
-- **OpenCode: Environment Diagnostics** — Check that `sbx` is installed and your USAi key secret is set
+So every sandbox you create picks up the same config, rules, and skills. `qsbx`
+uses the clone it lives in, so run it from this checkout (or via a symlink to it);
+set `QUICKSTART_CLONE` only if you want to override that.
 
-See the **[Zed Editor Setup Guide](docs/ZED_SETUP.md)** for detailed instructions.
+### Read-only by default
 
----
+For project work, the clone is mounted **read-only** so a (possibly
+prompt-injected) agent can't rewrite the permission policy, rules, or skills that
+every other sandbox loads.
 
-## OpenCode Web (Optional)
+### Customizing the shared config
 
-An alternative to running OpenCode in the terminal is to run OpenCode Web in the sandbox and access it from your host browser. This has a few benefits:
-
-- Full support for copying text from the agent output to your host clipboard
-- Richer visual interface with improved markdown rendering
-- Easier navigation through long outputs and conversation history
-
-To run OpenCode Web in a sandbox:
+To edit the shared config itself with an agent, point `qsbx` at the clone:
 
 ```bash
-# In one terminal, start OpenCode Web
-sbx run [your sandbox name] -- web --hostname 0.0.0.0 --port 4096
-
-# In another terminal, publish the port to your host
-sbx ports [your sandbox name] --publish 4096:4096
+./qsbx run opencode .          # from inside the clone
+# or: ./qsbx run opencode /path/to/agentic-coding-quickstart
 ```
 
-Then open `http://127.0.0.1:4096` in your browser.
+qsbx detects that the target is the clone and mounts it **read-write** as the
+primary workspace (and tells you so). Review the agent's changes with `git diff`
+and commit/push before they propagate to other sandboxes.
 
-A convenience script is available to automate this: [`opencode-web.sh`](opencode-web.sh)
+### Key pre-validation
 
-For more information, see the [OpenCode Web documentation](https://opencode.ai/docs/web).
+Before attaching, `qsbx` checks that the sandbox's USAi key still works. If it
+has expired, it walks you through [rotating it](#troubleshooting) and
+re-validates before launching the agent.
 
----
-
-## Security Model
+### Security Model
 
 1. **All execution inside sbx containers** — Isolated from your host system
 2. **Authorized endpoints only** — USAi, GitHub (via proxy)
@@ -259,112 +260,7 @@ For more information, see the [OpenCode Web documentation](https://opencode.ai/d
 
 For Git provider credentials and advanced patterns, see [docs/QUICKSTART_SBX.md](docs/QUICKSTART_SBX.md).
 
----
-
-## Troubleshooting
-
-### Network policy blocks USAi
-
-```bash
-sbx policy allow network -g "api.gsa.usai.gov"
-```
-
-> Do NOT use "Open" policy on GFE — it exposes internal GSA resources to the agent.
-
-### "docker: unknown command: docker sbx" or "docker sandbox deprecated"
-
-The `docker sandbox` command is deprecated. Install and use the standalone `sbx` CLI instead:
-
-```bash
-# macOS
-brew install docker/tap/sbx
-
-# Windows
-winget install Docker.sbx
-```
-
-Then use `sbx` commands directly (e.g., `sbx run opencode .` instead of `docker sandbox run opencode .`).
-
-### OpenCode shows wrong providers
-
-Ensure `~/.config/opencode/opencode.jsonc` inside the sandbox is the symlink
-into this clone. `qsbx` creates it (along with `AGENTS.md` and `~/.agents/skills`)
-when it creates the sandbox; if you created the sandbox another way, the USAi
-provider config won't be picked up. Re-create it with `qsbx run`, or link the
-files manually.
-
-### Authentication failed
-
-```bash
-# Check your secret is stored
-sbx secret ls
-
-# Re-set if needed
-sbx secret set -g anthropic
-```
-
-If USAi authentication fails right after copying a newly created key, regenerate the key and use
-the console copy button immediately instead of selecting the displayed text. The displayed value may
-be truncated.
-
-### Rotating USAi API keys
-
-USAi API keys expire every 7 days. A stale API key is a common cause of authentication failures like:
-
-```
-Unauthorized: {"detail":"Not authenticated"}
-```
-
-To check if your key has expired:
-
-1. Go to https://console.gsa.usai.gov/key-management
-2. Under "My Keys", check the "Expires In" field. If the value is 0h0m, then the key has expired.
-
-To rotate your key:
-
-1. On the same page, choose "Rotate" from the "Actions" menu
-2. Copy the new key using the console copy button
-3. With the key in your paste buffer, update the secret in `sbx` by running
-
-   ```bash
-   ./qsbx usai-rotate-api-key
-   ```
-
-   (or run the underlying `scripts/rotate-apikey` directly). The command will
-   prompt you for the new key. Paste it when prompted. It will also validate
-   that the new key works.
-
-> [!NOTE]
-> If you don't have a sandbox named, "opencode-agentic-coding-quickstart", then
-> you'll need to manually validate the key with:
->
-> ```bash
-> # Should return HTTP 200. A 401/403 means the key is invalid or expired.
-> sbx exec <sandbox-name> -- sh -c \
->   'curl -sS -o /dev/null -w "%{http_code}\n" \
->    -H "Authorization: Bearer $USAI_API_KEY" \
->    https://api.gsa.usai.gov/api/v1/models'
-> ```
-
-If the placeholder value hasn't changed, your existing sandboxes will automatically use the new key.
-
-#### Troubleshooting
-
-If you're still having authentication issues after rotation:
-
-1. Verify the secret is set:
-
-   ```bash
-   sbx secret ls -g | grep USAI_API_KEY
-   ```
-
-2. As a last resort, recreate your sandbox:
-   > ⚠️ **Warning:** This destroys all sandbox state including uncommitted work.
-   ```bash
-   sbx rm <sandbox-name>
-   ```
-
-### How default USAI models are chosen
+### How default USAi models are chosen
 
 The `opencode.jsonc` in this repo includes a generated USAI model catalog.
 This repository keeps that section in sync with the USAI `/models` API so new
@@ -383,11 +279,37 @@ model listed by `/models` to fail at runtime for a specific key or request. See
 To refresh the model catalog locally:
 
 ```bash
-export USAI_API_KEY="your-key-here"
+# Prompt for the key (no echo)
+read -rs USAI_API_KEY && export USAI_API_KEY
 npm run sync:usai-models
 ```
 
-For more troubleshooting, see [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md).
+---
+
+## Optional Integrations
+
+- **Zed Editor** — Pre-configured tasks in `.zed/tasks.json` let you launch the
+  agent and run diagnostics from the editor. See the [Zed Editor Setup Guide](docs/ZED_SETUP.md).
+- **OpenCode Web** — Run OpenCode Web in the sandbox and reach it from your host
+  browser for clipboard support and richer markdown rendering. The
+  [`opencode-web.sh`](opencode-web.sh) script automates it; see the
+  [OpenCode Web documentation](https://opencode.ai/docs/web).
+
+---
+
+## Staying Current
+
+Once in a while, refresh this clone and the playbook to pick up updates, and
+rotate your USAi key when it expires (see [Troubleshooting](#troubleshooting)).
+
+```bash
+# Update the quickstart clone
+git fetch
+
+# Bump the playbook submodule to a newer release
+git submodule update --remote --merge agentic-coding-playbook
+git add agentic-coding-playbook && git commit -m "chore: bump playbook submodule"
+```
 
 ---
 
@@ -410,13 +332,6 @@ discovers them automatically; no separate clone is needed.
 | **Playbook** (submodule) | Federal compliance, security | `federal-security-controls-lookup`, `ato-package`, `code-review`, `cloudgov-deploy` |
 | **Patterns** | Development workflows        | `accessibility-review`, `uswds-prototype`, `test-generation`, `secure-code-review`  |
 
-To bump the playbook to a newer release:
-
-```bash
-git submodule update --remote --merge agentic-coding-playbook
-git add agentic-coding-playbook && git commit -m "chore: bump playbook submodule"
-```
-
 ---
 
 ## Getting Help
@@ -431,6 +346,24 @@ git add agentic-coding-playbook && git commit -m "chore: bump playbook submodule
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+---
+
+## What's in This Repo
+
+| File/Directory                      | Purpose                                                    |
+| ----------------------------------- | ---------------------------------------------------------- |
+| `opencode/opencode.jsonc`           | Pre-configured for USAi endpoints (shared config)          |
+| `opencode.jsonc`                    | Convenience symlink to `opencode/opencode.jsonc`           |
+| `agentic-coding-playbook/`          | Pinned submodule: federal `AGENTS.md` + agent skills       |
+| `qsbx`                              | sbx wrapper that mounts this clone and links config in     |
+| `scripts/rotate-apikey`             | Rotate your USAi API key secret (`qsbx usai-rotate-api-key`) |
+| `.zed/tasks.json`                   | Pre-configured tasks for **Zed Editor**                    |
+| `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
+| `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
+| `docs/QUICKSTART_SBX.md`            | Full sbx CLI setup guide                                   |
+| `docs/ZED_SETUP.md`                 | **Zed Editor** integration guide                           |
+| `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
 
 ---
 
