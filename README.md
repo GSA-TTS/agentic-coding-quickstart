@@ -45,6 +45,7 @@ Before you start, make sure you have:
 | Docker account  | Required for `sbx login`                                   |
 | USAi API key    | Export as `USAI_API_KEY` before configuring secrets        |
 | GitHub CLI auth | Optional, but recommended for repository access            |
+| GitHub personal access token | Optional, but needed if you are not using the GitHub CLI |
 
 ```bash
 export USAI_API_KEY="your-usai-api-key"
@@ -62,6 +63,7 @@ The `sbx` CLI is a standalone tool — Docker Desktop is **not required**.
 <summary>macOS</summary>
 
 ```bash
+brew trust docker/tap
 brew install docker/tap/sbx
 sbx login
 ```
@@ -118,7 +120,13 @@ sbx policy allow network -g "api.gsa.usai.gov"
 sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
 
 # 4. Store GitHub token (for code access)
+# If you are using the GitHub CLI
 gh auth token | sbx secret set -g github
+
+# If you are using a personal access token (classic)
+sbx secret set -g github -t="$TOKEN_STRING"
+# OR, if you want to keep the token out of your shell history, set it to an env var in your profile
+echo "$GITHUB_TOKEN" | sbx secret set -g github
 ```
 
 > [!NOTE]
