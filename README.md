@@ -217,7 +217,7 @@ quickstart for when you want to customize or troubleshoot.
 
 ### What happened when I ran the `qsbx` command?
 
-`qsbx run` created the sandbox for that path (if it doesn't exist yet) using the underlying `sbx` command, making sure that sure this clone is accessible inside it. Then it configured the coding agent (`opencode`) to pick up configuration for using the USAi provider and made sure the agent was provisioned with custom  guidance and relevant skills for working in the federal context.
+`qsbx run` created the sandbox for that path (if it didn't exist yet) using the underlying `sbx` command, making sure that this clone was accessible inside it. Then it configured the coding agent (`opencode`) to pick up configuration for using the USAi provider and made sure the agent was provisioned with custom guidance and relevant skills for working in the federal context.
 
 ### What `qsbx` mounts and links
 
