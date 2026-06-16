@@ -121,6 +121,8 @@ sbx policy allow network "api.gsa.usai.gov"
 sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
 
 # 4. Store GitHub token (for code access)
+brew install gh # (if not already installed)
+gh auth login # (if not already authenticated to Github cli)
 gh auth token | sbx secret set -g github
 ```
 

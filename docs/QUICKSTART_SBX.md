@@ -79,7 +79,7 @@ Sandboxes use network policies to control what external services agents can acce
 sbx policy set-default balanced
 
 # Allow USAi API endpoint
-sbx policy allow network -g "api.gsa.usai.gov"
+sbx policy allow network "api.gsa.usai.gov"
 
 # Verify policies are set
 sbx policy ls
@@ -126,6 +126,8 @@ sbx secret set -g anthropic
 
 ```bash
 # Recommended: pipe from gh cli (never touches shell history)
+brew install gh # (if not already installed)
+gh auth login # (if not already authenticated to Github cli)
 gh auth token | sbx secret set -g github
 
 # Or enter manually
