@@ -72,7 +72,10 @@ sbx login
 >
 > - `mkfs.erofs`
 > - `mkfs.ext4`
-> - `containerd-shim-nerdbox-v1`
+> - `containerd-shim-nerdbox-v1` 
+> ___
+> macOS may say sbx is not from a "trusted developer" and block it. In this case you will need to open System Preferences/Privacy
+> & Security/Security, and click the "Allow anyway" button. Run `sbx login` again and click "Allow anyway" in the popup. 
 
 </details>
 
@@ -112,7 +115,7 @@ stored in sbx's secret manager, and the network policy persists across sandboxes
 sbx policy set-default balanced
 
 # 2. Allow USAi endpoint
-sbx policy allow network -g "api.gsa.usai.gov"
+sbx policy allow network "api.gsa.usai.gov"
 
 # 3. Store your USAi API key securely (USAi is a custom endpoint, not built-in)
 sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
