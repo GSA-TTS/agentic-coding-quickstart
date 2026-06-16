@@ -90,12 +90,14 @@ But requests to `api.gsa.usai.gov` bypass this proxy entirely.
 
 ### Fix
 
-Inject the API key directly via environment variable:
+Store the key as a custom secret so sbx injects it for you:
+
 ```bash
-sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 ```
 
-This passes the actual key into the container environment, where `opencode.jsonc` reads it via `{env:USAI_API_KEY}`.
+Recreate the sandbox so the secret takes effect. `opencode.jsonc` reads the
+injected value via `{env:USAI_API_KEY}`.
 
 ---
 
@@ -355,7 +357,7 @@ sbx cp ./opencode.jsonc my-sandbox:/workspace/
 - `sbx secret set -g openai` succeeds
 - But USAi authentication still fails
 - `OPENAI_API_KEY=proxy-managed` in container
-- Must use direct injection (`-e USAI_API_KEY="$USAI_API_KEY"`)
+- Must inject the key via a custom secret instead
 
 ### Root Cause
 
@@ -363,14 +365,14 @@ SBX's secret proxy intercepts requests to **known provider endpoints** (like `ap
 
 ### Security Implication
 
-**When using direct injection, the agent CAN see the API key.**
+**For custom endpoints, the agent CAN see the API key.**
 
 With proxy-based injection (standard providers):
 - Agent sees: `OPENAI_API_KEY=proxy-managed`
 - Real key is injected at the proxy level
 - Agent never has access to the raw credential
 
-With direct injection (USAi/custom endpoints):
+With a custom secret (USAi/custom endpoints):
 - Agent sees: `USAI_API_KEY=<actual-key-value>`
 - Key exists in container environment
 - Agent process can read it
@@ -384,9 +386,10 @@ With direct injection (USAi/custom endpoints):
 
 ### Fix
 
-For now, bypass the proxy and inject directly:
+Store the key as a custom secret so sbx injects it into the sandbox:
+
 ```bash
-sbx exec -it -e USAI_API_KEY="$USAI_API_KEY" -w $(pwd) SANDBOX_NAME opencode
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 ```
 
 Your `opencode.jsonc` should use variable substitution:
@@ -415,16 +418,16 @@ When implemented, this will allow defining custom service mappings so the proxy 
 ### Context
 
 GitHub is a built-in SBX service (`sbx secret set -g github`), but GitLab is not. This means:
-- **GitHub**: Can use proxy (recommended) OR direct injection
-- **GitLab**: Must use direct injection (`-e GITLAB_TOKEN="..."`)
+- **GitHub**: Uses the proxy (recommended)
+- **GitLab**: Must use a custom secret (`sbx secret set-custom -g --host <host> --env GITLAB_TOKEN`)
 
 ### Security Assessment for MVP
 
 | Concern | Severity | Mitigation |
 |---------|----------|------------|
 | Token visible in container env | Low | Container is isolated, short-lived |
-| Token in shell history | Low | Using `$(gh auth token)` subshell avoids literal values |
-| Token in process list | Low | Only visible during exec, not persisted |
+| Token in shell history | Low | sbx prompts for the value; never typed on the command line |
+| Token in process list | Low | Stored secret injected by sbx, not passed via process args |
 | Agent could exfiltrate token | Medium | Agent already has network access; proxy doesn't prevent this |
 | Token logged by agent | Medium | AGENTS.md prohibits; pre-commit hooks catch committed secrets |
 
@@ -541,6 +544,83 @@ sbx policy ls
 ### Prevention
 
 Always choose "Balanced" (Option 2) when prompted. The Balanced policy allows typical dev traffic while blocking internal network access.
+
+---
+
+## 18. Migrating from `docker sandbox`
+
+### Symptoms
+
+- You're using deprecated `docker sandbox ...` commands
+- Want to know the `sbx` CLI equivalents
+
+### Root Cause
+
+The Docker Desktop-integrated `docker sandbox` command is deprecated. The standalone `sbx` CLI replaces it and does not require Docker Desktop.
+
+### Fix
+
+Migrate to the equivalent `sbx` commands:
+
+| Deprecated Command | New Command |
+|-------------------|-------------|
+| `docker sandbox create --name NAME opencode .` | `sbx create --name NAME opencode .` |
+| `docker sandbox run NAME` | `sbx run NAME` |
+| `docker sandbox exec NAME cmd` | `sbx exec NAME cmd` |
+| `docker sandbox ls` | `sbx ls` |
+| `docker sandbox rm NAME` | `sbx rm NAME` |
+
+Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
+
+---
+
+## 19. OpenCode Shows Wrong Providers
+
+### Symptoms
+
+- OpenCode lists generic providers instead of USAi
+- Custom USAi model catalog missing
+
+### Root Cause
+
+The `~/.config/opencode/opencode.jsonc` inside the sandbox is not the symlink into your quickstart clone, so the USAi provider config is never loaded. This happens when the sandbox was created without `qsbx` (which sets up the symlinks for `opencode.jsonc`, `AGENTS.md`, and `~/.agents/skills`).
+
+### Fix
+
+Re-create the sandbox with `qsbx run`, which links the config automatically:
+
+```bash
+./qsbx run opencode /path/to/your/project
+```
+
+Or link the files manually inside the sandbox if you created it another way.
+
+---
+
+## 20. Authentication Failed After Copying a New Key
+
+### Symptoms
+
+- USAi authentication fails immediately after creating/copying a key
+- Key looks correct but is rejected
+
+### Root Cause
+
+The displayed key value in the console may be truncated when selected by hand, so the stored secret is incomplete.
+
+### Fix
+
+Regenerate the key and use the console **copy button** immediately instead of selecting the displayed text. Then confirm the secret is stored:
+
+```bash
+sbx secret ls -g | grep USAI_API_KEY
+```
+
+If problems persist, see [Section 2](#2-api-key-works-in-ui-but-fails-in-agent) and [Section 3](#3-agent-cannot-see-api-key--usai-authentication-fails). As a last resort, recreate the sandbox (this destroys all sandbox state, including uncommitted work):
+
+```bash
+sbx rm <sandbox-name>
+```
 
 ---
 
