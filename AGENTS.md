@@ -343,9 +343,9 @@ The agent MUST:
 
 | Service | Method | Notes |
 |---------|--------|-------|
-| USAi | Direct injection (`-e USAI_API_KEY`) | Custom endpoint not supported by SBX proxy |
+| USAi | Custom secret (`sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY`) | Custom endpoint not supported by SBX proxy |
 | GitHub | SBX proxy (`sbx secret set -g github`) | Recommended; agent never sees token |
-| GitLab | Direct injection (`-e GITLAB_TOKEN`) | Not a built-in SBX service |
+| GitLab | Custom secret (`sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN`) | Not a built-in SBX service |
 
 See `docs/QUICKSTART_SBX.md` for detailed credential injection patterns.
 

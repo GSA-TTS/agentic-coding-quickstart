@@ -104,8 +104,8 @@ Docker Sandboxes uses a secure secret store to inject credentials. Your API keys
 USAi (`api.gsa.usai.gov`) is **not a built-in sbx service**, so you must use `sbx secret set-custom`:
 
 ```bash
-# Store USAi API key for the custom endpoint
-sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"
+# sbx prompts for the key
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 ```
 
 > [!IMPORTANT]
@@ -140,8 +140,8 @@ sbx secret set -g github
 GitLab is **not a built-in sbx service**, so use `sbx secret set-custom`:
 
 ```bash
-# For self-hosted GitLab (e.g., workshop.cloud.gov)
-sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN --value "$GITLAB_TOKEN"
+# For self-hosted GitLab (e.g., workshop.cloud.gov). sbx prompts for the token.
+sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN
 
 # Verify access inside sandbox
 sbx exec SANDBOX_NAME sh -c 'curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" https://workshop.cloud.gov/api/v4/user | jq .username'
@@ -193,8 +193,8 @@ For custom API endpoints that aren't built-in services, use `sbx secret set-cust
 
 | Endpoint | Command |
 |----------|---------|
-| USAi (`api.gsa.usai.gov`) | `sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$USAI_API_KEY"` |
-| GitLab (self-hosted) | `sbx secret set-custom -g --host gitlab.example.com --env GITLAB_TOKEN --value "$GITLAB_TOKEN"` |
+| USAi (`api.gsa.usai.gov`) | `sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY` |
+| GitLab (self-hosted) | `sbx secret set-custom -g --host gitlab.example.com --env GITLAB_TOKEN` |
 
 > [!WARNING]
 > The `sbx secret set -g VARNAME` syntax does **not** work for custom variables like `USAI_API_KEY`.
@@ -213,7 +213,7 @@ sbx secret ls -g
 sbx secret rm -g anthropic
 
 # Update a secret (set it again, then recreate sandbox)
-sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY --value "$NEW_KEY"
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 sbx rm my-sandbox && sbx create --name my-sandbox opencode .
 ```
 
@@ -533,19 +533,9 @@ sbx create --clone --name feature-work opencode ~/my-app ~/shared-libs:ro
 
 ## Migrating from `docker sandbox`
 
-> [!NOTE]
-> The Docker Desktop-integrated `docker sandbox` command is deprecated.
-> If you're currently using `docker sandbox`, migrate to `sbx`:
-
-| Deprecated Command | New Command |
-|-------------------|-------------|
-| `docker sandbox create --name NAME opencode .` | `sbx create --name NAME opencode .` |
-| `docker sandbox run NAME` | `sbx run NAME` |
-| `docker sandbox exec NAME cmd` | `sbx exec NAME cmd` |
-| `docker sandbox ls` | `sbx ls` |
-| `docker sandbox rm NAME` | `sbx rm NAME` |
-
-Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
+The Docker Desktop-integrated `docker sandbox` command is deprecated. For the
+`sbx` equivalents, see
+[Known Failure Modes — Migrating from `docker sandbox`](KNOWN_FAILURE_MODES.md#18-migrating-from-docker-sandbox).
 
 ---
 
