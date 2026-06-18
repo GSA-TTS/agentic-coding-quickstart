@@ -5,11 +5,11 @@
 
 **In one sentence:** this quickstart gets you running an AI coding agent connected to USAi in under 5 minutes, using `sbx`.
 
-**`sbx`** is a command-line tool from Docker that runs your AI coding agent inside an isolated sandbox, so the agent can only touch the files and network you allow.
+**`sbx`** is a command-line tool from Docker — standalone, not part of Docker Desktop — that runs your AI coding agent inside an isolated sandbox, so the agent can only touch the files and network you allow.
 
 ## Agentic Coding Ecosystem
 
-**Your journey:** This repository is part of a three-repo ecosystem...
+**Your journey:** This repository is part of a three-repo ecosystem.
 
 | Repo                                                                                  | Purpose       | When to Use                           |
 | ------------------------------------------------------------------------------------- | ------------- | ------------------------------------- |
@@ -28,7 +28,7 @@ Once you complete this Quickstart to get your environment working, use the Playb
 You will run the commands in this guide from a terminal. Open one now:
 
 <details>
-<summary>► How to open a terminal (click to expand)</summary>
+<summary>How to open a terminal (click to expand)</summary>
 
 - **macOS:** open **Terminal** — find it in Applications → Utilities, or press ⌘-Space, type "Terminal", and press Return.
 - **Windows:** open **Windows Terminal** or **PowerShell** — press the Start button, type "Terminal" (or "PowerShell"), and press Enter.
@@ -41,18 +41,18 @@ Then make sure you have each of these ready:
 | Requirement     | Notes                                                      |
 | --------------- | ---------------------------------------------------------- |
 | Package manager | Homebrew on macOS, `winget` on Windows, or `apt` on Ubuntu |
-| Docker account with a paid seat | `sbx login` needs a **paid Docker seat assigned to you in your organization** (see the note below). Docker Desktop is not required. |
+| Docker account | A Docker account to sign in with `sbx login`. Your organization may require a paid Docker subscription seat (see the note below). Docker Desktop is not required. |
 | USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
 | GitHub CLI (`gh`) | (optional) GitHub's official command-line tool ([install](https://cli.github.com/)). It lets the coding agent work with your repos without you handling a token by hand. |
 | GitHub personal access token | (optional) Needed only if you are **not** using the GitHub CLI |
 
 <details>
-<summary>► How to verify each requirement (click to expand)</summary>
+<summary>How to verify each requirement (click to expand)</summary>
 
 Run each command in your terminal. If a command isn't found, that requirement isn't installed yet.
 
 - **Package manager** — `brew --version` (macOS), `winget --version` (Windows), or `apt --version` (Ubuntu). You should see a version number.
-- **Docker account with a paid seat** — confirmed when `sbx login` succeeds in Step 2.
+- **Docker account** — this is the one prerequisite you can't confirm until Step 2, since `sbx` isn't installed yet. It's confirmed when `sbx login` succeeds there.
 - **USAi API key** — visit [the key-management console](https://console.gsa.usai.gov/key-management); you should see (or be able to create) a key. Have the token string ready to paste in Step 3.
 - **GitHub CLI** — `gh auth status` should report that you're logged in.
 - **GitHub personal access token** — only needed without the GitHub CLI; have the token string ready to paste in Step 3.
@@ -60,12 +60,14 @@ Run each command in your terminal. If a command isn't found, that requirement is
 </details>
 
 > [!NOTE]
-> **About the Docker seat.** Signing in with `sbx login` requires a Docker
-> account that has a **paid seat assigned to you in your organization**.
-> Docker Desktop itself is **not required** to run `sbx` — but if you do have a
-> Docker Desktop subscription, that already provides your seat. If you don't
-> have a seat yet, ask your organization's Docker administrator to assign you
-> one.
+> **About the Docker subscription.** `sbx login` signs in with a Docker account.
+> In at least one organization we've seen, sign-in fails with a "Not enough
+> seats" error unless you have a paid Docker subscription seat (see the
+> troubleshooting callout in Step 2). Docker Desktop itself is **not required**
+> to run `sbx` — but if you do have a Docker Desktop subscription, that already
+> provides your seat. If you hit the seats error, ask your organization's Docker
+> administrator to assign you one. For how Docker licensing works, see
+> [Docker's subscription docs](https://docs.docker.com/subscription/).
 
 ### Step 1: Clone this repo (with the playbook submodule)
 
@@ -75,16 +77,18 @@ git clone --recurse-submodules \
 cd agentic-coding-quickstart
 ```
 
-**Check it worked:** run `ls qsbx` — it should print `qsbx`. The remaining steps
-must be run from inside this cloned folder.
+**Check it worked:** run `ls agentic-coding-playbook` — it should list files
+(`AGENTS.md`, `.agents`, …). If it's empty, the submodule didn't populate; run
+`git submodule update --init`. The remaining steps must be run from inside this
+cloned folder.
 
 ### Step 2: Install sbx CLI
 
 The `sbx` CLI is a standalone tool — Docker Desktop is **not required** (you do
-need a paid Docker seat; see the callout in Step 0).
+need a Docker account, and your org may require a paid seat; see the note in Step 0).
 
 <details>
-<summary>► Show macOS install steps (click to expand)</summary>
+<summary>Show macOS install steps (click to expand)</summary>
 
 ```bash
 brew trust docker/tap
@@ -108,7 +112,7 @@ sbx login
 </details>
 
 <details>
-<summary>► Show Windows install steps (click to expand)</summary>
+<summary>Show Windows install steps (click to expand)</summary>
 
 ```bash
 winget install -h Docker.sbx
@@ -118,7 +122,7 @@ sbx login
 </details>
 
 <details>
-<summary>► Show Linux (Ubuntu) install steps (click to expand)</summary>
+<summary>Show Linux (Ubuntu) install steps (click to expand)</summary>
 
 ```bash
 curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
@@ -130,7 +134,7 @@ sbx login
 </details>
 
 **Check it worked:** after `sbx login` finishes with no error, run `sbx version`.
-You should see a `Client Version:` and `Server Version:` line.
+You should see a line like `sbx version: v0.32.0 <sha>`.
 
 > [!IMPORTANT]
 > **If `sbx login` fails with a "Not enough seats" error**, like this:
@@ -200,7 +204,7 @@ everything else (wrong providers, auth failures, TLS/certificate errors, and
 more), see **[docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md)**.
 
 <details>
-<summary>► <strong>Authentication failures (expired USAi key)</strong> (click to expand)</summary>
+<summary><strong>Authentication failures (expired USAi key)</strong> (click to expand)</summary>
 
 USAi API keys expire every 7 days, which is the most common cause of errors like:
 
@@ -228,7 +232,7 @@ To rotate the key explicitly outside that workflow:
 </details>
 
 <details>
-<summary>► <strong>Network policy blocks USAi</strong> (click to expand)</summary>
+<summary><strong>Network policy blocks USAi</strong> (click to expand)</summary>
 
 ```bash
 sbx policy allow network -g "api.gsa.usai.gov"
@@ -239,7 +243,7 @@ sbx policy allow network -g "api.gsa.usai.gov"
 </details>
 
 <details>
-<summary>► <strong>"sbx policy set-default" fails right after first-time setup</strong> (click to expand)</summary>
+<summary><strong>"sbx policy set-default" fails right after first-time setup</strong> (click to expand)</summary>
 
 The policy service may not have settled yet after `sbx login`. Retry the command:
 
