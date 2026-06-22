@@ -66,10 +66,12 @@ sbx login
 >
 > - `mkfs.erofs`
 > - `mkfs.ext4`
-> - `containerd-shim-nerdbox-v1` 
-> ___
+> - `containerd-shim-nerdbox-v1`
+>
+> ---
+>
 > macOS may say sbx is not from a "trusted developer" and block it. In this case you will need to open System Preferences/Privacy
-> & Security/Security, and click the "Allow anyway" button. Run `sbx login` again and click "Allow anyway" in the popup. 
+> & Security/Security, and click the "Allow anyway" button. Run `sbx login` again and click "Allow anyway" in the popup.
 
 </details>
 
