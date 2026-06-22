@@ -123,14 +123,14 @@ Per NIST AI RMF and SP 800-218A, AI-generated code requires **traceability** but
 | Level | Required? | How |
 |-------|-----------|-----|
 | **PR Description** | RECOMMENDED | Include "AI-assisted" disclosure in PR description |
-| **Commit Message** | OPTIONAL | `Co-Authored-By: AI Agent <ai-agent@gsa.gov>` in footer |
+| **Commit Message** | OPTIONAL | `Co-authored-by: AI Agent <ai-agent@gsa.gov>` in footer |
 | **Documentation** | REQUIRED | This AGENTS.md documents AI agent authorization |
 
 **Rationale:** Federal guidance (NIST AI RMF, SP 800-218A) emphasizes system-level traceability over granular per-commit attribution. PR-level disclosure provides auditable records without commit noise.
 
 When AI attribution IS included in commits, use:
 ```
-Co-Authored-By: AI Agent <ai-agent@gsa.gov>
+Co-authored-by: AI Agent <ai-agent@gsa.gov>
 ```
 
 ---
@@ -353,7 +353,7 @@ See `docs/QUICKSTART_SBX.md` for detailed credential injection patterns.
 
 ## Coding Standards
 
-- Follow `docs/CODING_PRACTICES.md` for secure coding guidelines
+- Follow [`agentic-coding-playbook/docs/CODING_PRACTICES.md`](agentic-coding-playbook/docs/CODING_PRACTICES.md) (the pinned playbook submodule) for secure coding guidelines
 - Prefer explicit configuration over implicit behavior
 - Maximum function length: 50 lines
 - All external input MUST be validated before use

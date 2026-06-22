@@ -547,7 +547,7 @@ The Docker Desktop-integrated `docker sandbox` command is deprecated. For the
 ## Next Steps
 
 - [Known Failure Modes](KNOWN_FAILURE_MODES.md) — Common issues and solutions
-- [Coding Practices](CODING_PRACTICES.md) — Secure coding standards
+- [Coding Practices](../agentic-coding-playbook/docs/CODING_PRACTICES.md) — Secure coding standards (playbook submodule)
 
 ---
 
