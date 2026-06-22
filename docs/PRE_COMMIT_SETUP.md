@@ -30,6 +30,8 @@ By making hooks opt-in, users can:
 ```bash
 # Install pre-commit
 pip install pre-commit
+# or on Mac
+brew install pre-commit
 
 # Install the hooks (from repo root)
 pre-commit install

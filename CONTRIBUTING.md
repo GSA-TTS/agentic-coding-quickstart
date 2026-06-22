@@ -78,6 +78,8 @@ npm ci --prefix .github/linters
 
 # Pre-commit hooks (Python) — optional but recommended
 pip install pre-commit
+# or on Mac
+brew install pre-commit
 pre-commit install
 ```
 
