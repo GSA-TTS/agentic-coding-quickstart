@@ -25,6 +25,9 @@ keys.txt
 # Agent sandbox runtime state
 .agent-sandbox/
 
+# Generated model-sync snapshot (sync-usai-models.mjs --write-snapshot)
+tests/output/
+
 # Audit / runtime logs
 *.log
 audit.log
