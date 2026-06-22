@@ -1,24 +1,45 @@
 #!/usr/bin/env bash
-# Script to rotate ur keyz
+# Rotate the global USAI_API_KEY custom secret in sbx, preserving its
+# placeholder so existing sandboxes keep working after the new value is set.
 
 set -euo pipefail
 
-USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
+USAI_HOST="api.gsa.usai.gov"
+USAI_MODELS_URL="https://${USAI_HOST}/api/v1/models"
 
 fail() {
     echo "$@" >&2
     exit 1
 }
 
-# Grab the placeholder
-placeholder=$(sbx secret ls -g | grep -E '[[:space:]]USAI_API_KEY[[:space:]]' | awk '{print $4}')
+# Grab the existing placeholder. Take only the FIRST matching row and stop, so
+# duplicate/ghost rows (a known failure mode — see below) can't turn this into a
+# multi-line value that then gets fed back in and creates more bad entries.
+placeholder=$(sbx secret ls -g \
+  | awk '$0 ~ /[[:space:]]USAI_API_KEY[[:space:]]/ { print $4; exit }')
 
 if [ -z "$placeholder" ]; then
    fail "Error: USAI_API_KEY not found. Run 'sbx secret ls -g' to check."
 fi
 
-# Rotate the secret with your new key (will prompt for input)
-sbx secret set-custom -g --host api.gsa.usai.gov \
+# Count how many USAI_API_KEY rows exist. More than one means a previous rotation
+# left duplicate/ghost entries; the proxy may then resolve the placeholder to an
+# empty entry and validation fails with 401. We always remove every custom
+# secret for the host and re-create a single entry, so rotation is idempotent.
+row_count=$(sbx secret ls -g \
+  | grep -cE '[[:space:]]USAI_API_KEY[[:space:]]' || true)
+if [ "${row_count:-0}" -gt 1 ]; then
+  echo "Found $row_count USAI_API_KEY entries; consolidating to a single secret." >&2
+fi
+
+# Remove all custom secrets for the host (sbx removes every entry matching the
+# host), then set exactly one. We keep the same placeholder value so any running
+# sandbox that already injected it continues to resolve to the new secret.
+sbx secret rm -g --host "$USAI_HOST" -f >/dev/null 2>&1 || true
+
+# Re-create the single secret with the preserved placeholder. Omitting --value
+# makes sbx prompt for the new key (keeps it out of shell history).
+sbx secret set-custom -g --host "$USAI_HOST" \
       --env USAI_API_KEY --placeholder "$placeholder"
 
 # Validate the new key in a throwaway sandbox so we don't depend on any
