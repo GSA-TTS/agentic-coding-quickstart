@@ -67,6 +67,11 @@ sbx login
 > - `mkfs.erofs`
 > - `mkfs.ext4`
 > - `containerd-shim-nerdbox-v1`
+>
+> ---
+>
+> macOS may say sbx is not from a "trusted developer" and block it. In this case you will need to open System Preferences/Privacy
+> & Security/Security, and click the "Allow anyway" button. Run `sbx login` again and click "Allow anyway" in the popup.
 
 </details>
 
@@ -106,13 +111,15 @@ stored in sbx's secret manager, and the network policy persists across sandboxes
 sbx policy set-default balanced
 
 # 2. Allow USAi endpoint
-sbx policy allow network -g "api.gsa.usai.gov"
+sbx policy allow network "api.gsa.usai.gov"
 
 # 3. Store your USAi API key securely (you will be prompted for it)
 sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 
 # 4. Store GitHub token (for code access)
 # If you are using the GitHub CLI
+brew install gh # (if not already installed)
+gh auth login # (if not already authenticated to Github cli)
 gh auth token | sbx secret set -g github
 
 # If you are using a personal access token (classic); you will be prompted
