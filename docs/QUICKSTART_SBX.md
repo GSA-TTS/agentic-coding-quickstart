@@ -32,12 +32,18 @@ For federal compliance and automation, sbx CLI is the recommended approach.
 | Requirement | How to Check | Notes |
 |-------------|--------------|-------|
 | sbx CLI | `sbx version` | Standalone tool, Docker Desktop not required |
+| Docker account | `sbx login` succeeds | Your org may require a paid Docker subscription seat |
 | USAi API key | From your GSA account | For Anthropic/Claude access |
 | GitHub token | `gh auth token` | Optional, for code access |
 
 > [!NOTE]
 > Docker Desktop is **not required** to use sbx. The sbx CLI is a standalone tool.
-> If you have Docker Desktop, your Docker subscription covers sbx licensing.
+> `sbx login` signs in with a Docker account. In at least one organization we've
+> seen, sign-in fails with a "Not enough seats in organization" error unless you
+> have a paid Docker subscription seat. If you have a Docker Desktop subscription,
+> that already provides your seat; otherwise ask your organization's Docker
+> administrator to assign you one. For how Docker licensing works, see
+> [Docker's subscription docs](https://docs.docker.com/subscription/).
 
 ---
 
@@ -63,9 +69,8 @@ sbx login
 ```bash
 sbx version
 
-# Expected output:
-# Client Version:  v0.30.0 ...
-# Server Version:  v0.30.0 ...
+# Expected output (single line):
+# sbx version: v0.32.0 <commit-sha>
 ```
 
 ---

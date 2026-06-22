@@ -3,25 +3,73 @@
 > **Audience:** GSA teams using AI coding agents
 > **Purpose:** Get AI coding agents running safely inside isolated sandboxes, connected to USAi
 
-This quickstart gets you from zero to running an AI coding agent with USAi in under 5 minutes using the standalone `sbx` CLI.
+**In one sentence:** this quickstart gets you running an AI coding agent connected to USAi in under 5 minutes, using `sbx`.
+
+**`sbx`** is a command-line tool from Docker — standalone, not part of Docker Desktop — that runs your AI coding agent inside an isolated sandbox, so the agent can only touch the files and network you allow.
 
 ## Agentic Coding Ecosystem
 
-This repository is part of a three-repo ecosystem:
+**Your journey:** This repository is part of a three-repo ecosystem.
 
 | Repo                                                                                  | Purpose       | When to Use                           |
 | ------------------------------------------------------------------------------------- | ------------- | ------------------------------------- |
-| **[Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)** (you are here) | Get running   | First day setup, sbx + USAi config    |
+| **[Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)** (you are here) | Get running   | First day setup, sandboxing + USAi config    |
 | **[Playbook](https://github.com/GSA-TTS/agentic-coding-playbook)**                    | Do it right   | Repo setup, standards, best practices |
 | **[Patterns](https://github.com/GSA-TTS/agentic-coding-patterns)**                    | Share & learn | Community patterns, lessons learned   |
 
-**Your journey:** Start here (Quickstart) to get your environment working, then use the Playbook to set up your projects properly, and visit Patterns to share what you learn.
+Once you complete this Quickstart to get your environment working, use the Playbook to set up your projects properly, and visit Patterns to share what you learn.
 
 ---
 
 ## 5-Minute Quickstart
 
-### Step 0: Clone this repo (with the playbook submodule)
+### Step 0: Prerequisites
+
+You will run the commands in this guide from a terminal. Open one now:
+
+<details>
+<summary>How to open a terminal (click to expand)</summary>
+
+- **macOS:** open **Terminal** — find it in Applications → Utilities, or press ⌘-Space, type "Terminal", and press Return.
+- **Windows:** open **Windows Terminal** or **PowerShell** — press the Start button, type "Terminal" (or "PowerShell"), and press Enter.
+- **Linux (Ubuntu):** press Ctrl-Alt-T, or search for "Terminal" in your applications menu.
+
+</details>
+
+Then make sure you have each of these ready:
+
+| Requirement     | Notes                                                      |
+| --------------- | ---------------------------------------------------------- |
+| Package manager | Homebrew on macOS, `winget` on Windows, or `apt` on Ubuntu |
+| Docker account | A Docker account to sign in with `sbx login`. Your organization may require a paid Docker subscription seat (see the note below). Docker Desktop is not required. |
+| USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
+| GitHub CLI (`gh`) | (optional) GitHub's official command-line tool ([install](https://cli.github.com/)). It lets the coding agent work with your repos without you handling a token by hand. |
+| GitHub personal access token | (optional) Needed only if you are **not** using the GitHub CLI |
+
+<details>
+<summary>How to verify each requirement (click to expand)</summary>
+
+Run each command in your terminal. If a command isn't found, that requirement isn't installed yet.
+
+- **Package manager** — `brew --version` (macOS), `winget --version` (Windows), or `apt --version` (Ubuntu). You should see a version number.
+- **Docker account** — this is the one prerequisite you can't confirm until Step 2, since `sbx` isn't installed yet. It's confirmed when `sbx login` succeeds there.
+- **USAi API key** — visit [the key-management console](https://console.gsa.usai.gov/key-management); you should see (or be able to create) a key. Have the token string ready to paste in Step 3.
+- **GitHub CLI** — `gh auth status` should report that you're logged in.
+- **GitHub personal access token** — only needed without the GitHub CLI; have the token string ready to paste in Step 3.
+
+</details>
+
+> [!NOTE]
+> **About the Docker subscription.** `sbx login` signs in with a Docker account.
+> In at least one organization we've seen, sign-in fails with a "Not enough
+> seats" error unless you have a paid Docker subscription seat (see the
+> troubleshooting callout in Step 2). Docker Desktop itself is **not required**
+> to run `sbx` — but if you do have a Docker Desktop subscription, that already
+> provides your seat. If you hit the seats error, ask your organization's Docker
+> administrator to assign you one. For how Docker licensing works, see
+> [Docker's subscription docs](https://docs.docker.com/subscription/).
+
+### Step 1: Clone this repo (with the playbook submodule)
 
 ```bash
 git clone --recurse-submodules \
@@ -29,30 +77,18 @@ git clone --recurse-submodules \
 cd agentic-coding-quickstart
 ```
 
-> [!NOTE]
-> You need access to the (currently private) playbook repo; if you can see this,
-> your GitHub token covers it. The playbook ships as a pinned git submodule
-> under `agentic-coding-playbook/`. (If you already cloned without `--recurse-submodules`, run
-> `git submodule update --init`.)
+**Check it worked:** run `ls agentic-coding-playbook` — it should list files
+(`AGENTS.md`, `.agents`, …). If it's empty, the submodule didn't populate; run
+`git submodule update --init`. The remaining steps must be run from inside this
+cloned folder.
 
-### Step 0b: Prerequisites
+### Step 2: Install sbx CLI
 
-Before you start, make sure you have:
-
-| Requirement     | Notes                                                      |
-| --------------- | ---------------------------------------------------------- |
-| Package manager | Homebrew on macOS, `winget` on Windows, or `apt` on Ubuntu |
-| Docker account  | Required for `sbx login`                                   |
-| USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
-| GitHub CLI auth'd | Optional, but recommended for repository access            |
-| GitHub personal access token | Optional, but needed if you are not using the GitHub CLI |
-
-### Step 1: Install sbx CLI
-
-The `sbx` CLI is a standalone tool — Docker Desktop is **not required**.
+The `sbx` CLI is a standalone tool — Docker Desktop is **not required** (you do
+need a Docker account, and your org may require a paid seat; see the note in Step 0).
 
 <details>
-<summary>macOS</summary>
+<summary>Show macOS install steps (click to expand)</summary>
 
 ```bash
 brew trust docker/tap
@@ -76,7 +112,7 @@ sbx login
 </details>
 
 <details>
-<summary>Windows</summary>
+<summary>Show Windows install steps (click to expand)</summary>
 
 ```bash
 winget install -h Docker.sbx
@@ -86,7 +122,7 @@ sbx login
 </details>
 
 <details>
-<summary>Linux (Ubuntu)</summary>
+<summary>Show Linux (Ubuntu) install steps (click to expand)</summary>
 
 ```bash
 curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
@@ -97,11 +133,23 @@ sbx login
 
 </details>
 
-> [!NOTE]
-> `sbx login` requires a Docker account. Docker Desktop is not required, but if you have it,
-> your Docker subscription covers sbx licensing.
+**Check it worked:** after `sbx login` finishes with no error, run `sbx version`.
+You should see a line like `sbx version: v0.32.0 <sha>`.
 
-### Step 2: Configure secrets and policy (once)
+> [!IMPORTANT]
+> **If `sbx login` fails with a "Not enough seats" error**, like this:
+>
+> ```
+> ERROR: sign-in failed: auth login failed: completing login: oauth2:
+> "access_denied" "Not enough seats in organization '<your-org>'. Add more
+> seats or contact your company administrator."
+> ```
+>
+> you don't have a paid Docker seat yet (you may also see a red X in the browser
+> tab that opened). Ask your organization's Docker administrator to assign you a
+> seat, then run `sbx login` again.
+
+### Step 3: Configure secrets and policy (once)
 
 You only need to do this once per machine. Your USAi key and GitHub token are
 stored in sbx's secret manager, and the network policy persists across sandboxes.
@@ -126,11 +174,14 @@ gh auth token | sbx secret set -g github
 sbx secret set -g github
 ```
 
+**Check it worked:** run `sbx policy ls` — you should see `api.gsa.usai.gov`
+in the list of allowed network destinations.
+
 > [!NOTE]
 > USAi API keys expire every 7 days; when one does, see
 > [Troubleshooting](#troubleshooting) to rotate it.
 
-### Step 3: Create and run a sandbox (as often as you like)
+### Step 4: Create and run a sandbox (as often as you like)
 
 ```bash
 ./qsbx run opencode /path/to/your/project
@@ -153,7 +204,7 @@ everything else (wrong providers, auth failures, TLS/certificate errors, and
 more), see **[docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md)**.
 
 <details>
-<summary><strong>Authentication failures (expired USAi key)</strong></summary>
+<summary><strong>Authentication failures (expired USAi key)</strong> (click to expand)</summary>
 
 USAi API keys expire every 7 days, which is the most common cause of errors like:
 
@@ -181,7 +232,7 @@ To rotate the key explicitly outside that workflow:
 </details>
 
 <details>
-<summary><strong>Network policy blocks USAi</strong></summary>
+<summary><strong>Network policy blocks USAi</strong> (click to expand)</summary>
 
 ```bash
 sbx policy allow network -g "api.gsa.usai.gov"
@@ -192,7 +243,7 @@ sbx policy allow network -g "api.gsa.usai.gov"
 </details>
 
 <details>
-<summary><strong>"sbx policy set-default" fails right after first-time setup</strong></summary>
+<summary><strong>"sbx policy set-default" fails right after first-time setup</strong> (click to expand)</summary>
 
 The policy service may not have settled yet after `sbx login`. Retry the command:
 
