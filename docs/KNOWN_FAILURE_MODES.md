@@ -565,7 +565,7 @@ Migrate to the equivalent `sbx` commands:
 | Deprecated Command | New Command |
 |-------------------|-------------|
 | `docker sandbox create --name NAME opencode .` | `sbx create --name NAME opencode .` |
-| `docker sandbox run NAME` | `sbx run NAME` |
+| `docker sandbox run NAME` | `sbx run --name NAME` |
 | `docker sandbox exec NAME cmd` | `sbx exec NAME cmd` |
 | `docker sandbox ls` | `sbx ls` |
 | `docker sandbox rm NAME` | `sbx rm NAME` |

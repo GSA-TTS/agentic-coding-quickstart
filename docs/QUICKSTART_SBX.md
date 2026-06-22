@@ -248,8 +248,8 @@ sbx run shell .       # Just a shell (no agent)
 # Create with a specific name
 sbx create --name my-feature opencode .
 
-# Then run it
-sbx run my-feature
+# Then run it (re-attach by name)
+sbx run --name my-feature
 ```
 
 ---
@@ -263,8 +263,8 @@ sbx ls
 # Stop a sandbox (preserves state)
 sbx stop my-sandbox
 
-# Resume a stopped sandbox
-sbx run my-sandbox
+# Resume a stopped sandbox (re-attach by name)
+sbx run --name my-sandbox
 
 # Remove a sandbox permanently
 sbx rm my-sandbox
@@ -286,7 +286,7 @@ sbx exec -it my-sandbox bash
 | List sandboxes | `sbx ls` |
 | Create sandbox | `sbx run <agent> .` |
 | Stop sandbox | `sbx stop <name>` |
-| Resume sandbox | `sbx run <name>` |
+| Resume sandbox | `sbx run --name <name>` |
 | Remove sandbox | `sbx rm <name>` |
 | Shell access | `sbx exec -it <name> bash` |
 | Copy files | `sbx cp ./file.txt <name>:/path/` |
