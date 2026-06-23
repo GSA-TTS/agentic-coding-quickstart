@@ -133,7 +133,7 @@ sbx secret set -g anthropic
 # Recommended: pipe from gh cli (never touches shell history)
 brew install gh # (if not already installed)
 gh auth login # (if not already authenticated to Github cli)
-gh auth token | sbx secret set -g github
+gh auth token | sbx secret set -g github --force
 
 # Or enter manually
 sbx secret set -g github
@@ -253,8 +253,8 @@ sbx run shell .       # Just a shell (no agent)
 # Create with a specific name
 sbx create --name my-feature opencode .
 
-# Then run it
-sbx run my-feature
+# Then run it (re-attach by name)
+sbx run --name my-feature
 ```
 
 ---
@@ -268,8 +268,8 @@ sbx ls
 # Stop a sandbox (preserves state)
 sbx stop my-sandbox
 
-# Resume a stopped sandbox
-sbx run my-sandbox
+# Resume a stopped sandbox (re-attach by name)
+sbx run --name my-sandbox
 
 # Remove a sandbox permanently
 sbx rm my-sandbox
@@ -291,7 +291,7 @@ sbx exec -it my-sandbox bash
 | List sandboxes | `sbx ls` |
 | Create sandbox | `sbx run <agent> .` |
 | Stop sandbox | `sbx stop <name>` |
-| Resume sandbox | `sbx run <name>` |
+| Resume sandbox | `sbx run --name <name>` |
 | Remove sandbox | `sbx rm <name>` |
 | Shell access | `sbx exec -it <name> bash` |
 | Copy files | `sbx cp ./file.txt <name>:/path/` |
@@ -370,7 +370,7 @@ sbx policy set-default balanced
 
 # Store secrets from environment variables (pipe to avoid prompts)
 echo "$ANTHROPIC_API_KEY" | sbx secret set -g anthropic
-echo "$GITHUB_TOKEN" | sbx secret set -g github
+echo "$GITHUB_TOKEN" | sbx secret set -g github --force
 
 # Login with PAT (personal access token)
 echo "$DOCKER_PAT" | sbx login --password-stdin --username "$DOCKER_USER"
@@ -532,7 +532,7 @@ sbx create --clone --name feature-work opencode ~/my-app ~/shared-libs:ro
 3. **Always use SBX**: Don't run agents directly on host with credentials
 4. **Review agent output**: Before sharing logs, ensure no secrets leaked
 5. **Use `sbx secret set` for persistent storage**: More secure than environment variables
-6. **Pipe tokens from CLI tools**: Avoids shell history exposure (e.g., `gh auth token | sbx secret set -g github`)
+6. **Pipe tokens from CLI tools**: Avoids shell history exposure (e.g., `gh auth token | sbx secret set -g github --force`)
 
 ---
 

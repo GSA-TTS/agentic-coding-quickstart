@@ -168,7 +168,7 @@ sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 # If you are using the GitHub CLI
 brew install gh # (if not already installed)
 gh auth login # (if not already authenticated to Github cli)
-gh auth token | sbx secret set -g github
+gh auth token | sbx secret set -g github --force
 
 # If you are using a personal access token (classic); you will be prompted
 sbx secret set -g github

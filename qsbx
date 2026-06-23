@@ -81,8 +81,11 @@ ROTATE_SCRIPT="$SCRIPT_DIR/scripts/rotate-apikey"
 
 # Agents understood by `sbx run AGENT [PATH...]`. Used to tell whether the first
 # positional after `run` is an agent (create-if-missing form) or the name of an
-# existing sandbox (plain attach). A sandbox literally named after an agent will
-# be treated as the agent form; pass such sandboxes to `sbx run` directly.
+# existing sandbox. qsbx always identifies sandboxes with `--name` (sbx's
+# preferred form); a bare sandbox positional is still accepted and rewritten to
+# `--name <sandbox>` since the positional-sandbox form is deprecated in sbx.
+# Note: a sandbox literally named after an agent (e.g. `shell`) is treated as the
+# agent form; attach such sandboxes with `sbx run --name <sandbox>` directly.
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
 # Assert QUICKSTART_CLONE points at a usable clone (has the shared config).
@@ -476,14 +479,33 @@ case "$subcommand" in
       # if it does not.
       ensure_valid_key "$name"
 
+      # Attach by name. `sbx run --name <name>` re-attaches independent of the
+      # working directory; the agent positional is omitted on attach (sbx infers
+      # it from the named sandbox and errors if a mismatching agent is passed).
       if [ "${#agent_args[@]}" -gt 0 ]; then
-        sbx run "$name" -- "${agent_args[@]}"
+        sbx run --name "$name" -- "${agent_args[@]}"
       else
-        sbx run "$name"
+        sbx run --name "$name"
       fi
     else
-      # SANDBOX form (or no args): plain attach, no config mount needed.
-      sbx run "$@"
+      # No agent positional. If the first arg names an existing sandbox, attach
+      # to it by name (the positional-sandbox form is deprecated in sbx); else
+      # pass through unchanged (e.g. flags-only, or `sbx run` with no args).
+      if [ -n "$first" ] && sandbox_exists "$first"; then
+        # Rebuild the arg list with the matched sandbox token removed (drop only
+        # the first occurrence), so flags that appear before the name are
+        # preserved and the name isn't duplicated. Positional `${@:2}` would be
+        # wrong whenever the name isn't $1 (e.g. `qsbx run -t tpl mysandbox`).
+        rest=(); dropped=0
+        for arg in "$@"; do
+          if [ "$dropped" -eq 0 ] && [ "$arg" = "$first" ]; then dropped=1; continue; fi
+          rest+=("$arg")
+        done
+        # ${arr[@]+...} keeps this bash-3.2-safe under set -u when rest is empty.
+        sbx run --name "$first" ${rest[@]+"${rest[@]}"}
+      else
+        sbx run "$@"
+      fi
     fi
     ;;
 
