@@ -87,7 +87,7 @@ npm ci --prefix .github/linters
 | `npm test` | Run the test suite (`node --test`) |
 | `npm run lint:md` | Lint markdown files (same rules as CI) |
 | `npm run lint` | Run all linters |
-| `npm run lint:secrets` | Run gitleaks (requires gitleaks to be installed: `brew install gitleaks`)
+| `npm run lint:secrets` | Run gitleaks (requires gitleaks to be installed: `brew install gitleaks`) |
 | `npm run check` | Run the full pre-commit suite (gitleaks, shellcheck, YAML/JSON validation, whitespace, markdown lint) |
 
 > [!NOTE]
