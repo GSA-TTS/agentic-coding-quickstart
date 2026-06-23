@@ -457,6 +457,13 @@ The real security boundary is:
 4. **Review agent outputs** - before sharing logs, ensure no tokens leaked
 5. **Monitor API usage** - watch for unexpected patterns
 
+If GitHub auth in an existing sandbox starts failing after token rotation,
+force-refresh the stored global GitHub secret from the host:
+
+```bash
+gh auth token | sbx secret set -g github --force
+```
+
 ### Upstream Tracking
 
 - **SBX custom service support**: [docker/sbx-releases#35](https://github.com/docker/sbx-releases/issues/35)

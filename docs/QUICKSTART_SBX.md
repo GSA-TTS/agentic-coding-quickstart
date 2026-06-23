@@ -128,7 +128,7 @@ sbx secret set -g anthropic
 # Recommended: pipe from gh cli (never touches shell history)
 brew install gh # (if not already installed)
 gh auth login # (if not already authenticated to Github cli)
-gh auth token | sbx secret set -g github
+gh auth token | sbx secret set -g github --force
 
 # Or enter manually
 sbx secret set -g github
@@ -365,7 +365,7 @@ sbx policy set-default balanced
 
 # Store secrets from environment variables (pipe to avoid prompts)
 echo "$ANTHROPIC_API_KEY" | sbx secret set -g anthropic
-echo "$GITHUB_TOKEN" | sbx secret set -g github
+echo "$GITHUB_TOKEN" | sbx secret set -g github --force
 
 # Login with PAT (personal access token)
 echo "$DOCKER_PAT" | sbx login --password-stdin --username "$DOCKER_USER"
@@ -527,7 +527,7 @@ sbx create --clone --name feature-work opencode ~/my-app ~/shared-libs:ro
 3. **Always use SBX**: Don't run agents directly on host with credentials
 4. **Review agent output**: Before sharing logs, ensure no secrets leaked
 5. **Use `sbx secret set` for persistent storage**: More secure than environment variables
-6. **Pipe tokens from CLI tools**: Avoids shell history exposure (e.g., `gh auth token | sbx secret set -g github`)
+6. **Pipe tokens from CLI tools**: Avoids shell history exposure (e.g., `gh auth token | sbx secret set -g github --force`)
 
 ---
 
