@@ -84,6 +84,8 @@ ROTATE_SCRIPT="$SCRIPT_DIR/scripts/rotate-apikey"
 # existing sandbox. qsbx always identifies sandboxes with `--name` (sbx's
 # preferred form); a bare sandbox positional is still accepted and rewritten to
 # `--name <sandbox>` since the positional-sandbox form is deprecated in sbx.
+# Note: a sandbox literally named after an agent (e.g. `shell`) is treated as the
+# agent form; attach such sandboxes with `sbx run --name <sandbox>` directly.
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
 # Assert QUICKSTART_CLONE points at a usable clone (has the shared config).
@@ -490,12 +492,17 @@ case "$subcommand" in
       # to it by name (the positional-sandbox form is deprecated in sbx); else
       # pass through unchanged (e.g. flags-only, or `sbx run` with no args).
       if [ -n "$first" ] && sandbox_exists "$first"; then
-        rest=("${@:2}")
-        if [ "${#rest[@]}" -gt 0 ]; then
-          sbx run --name "$first" "${rest[@]}"
-        else
-          sbx run --name "$first"
-        fi
+        # Rebuild the arg list with the matched sandbox token removed (drop only
+        # the first occurrence), so flags that appear before the name are
+        # preserved and the name isn't duplicated. Positional `${@:2}` would be
+        # wrong whenever the name isn't $1 (e.g. `qsbx run -t tpl mysandbox`).
+        rest=(); dropped=0
+        for arg in "$@"; do
+          if [ "$dropped" -eq 0 ] && [ "$arg" = "$first" ]; then dropped=1; continue; fi
+          rest+=("$arg")
+        done
+        # ${arr[@]+...} keeps this bash-3.2-safe under set -u when rest is empty.
+        sbx run --name "$first" ${rest[@]+"${rest[@]}"}
       else
         sbx run "$@"
       fi
