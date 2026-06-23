@@ -12,35 +12,66 @@ fail() {
     exit 1
 }
 
-# Grab the existing placeholder. Take only the FIRST matching row and stop, so
-# duplicate/ghost rows (a known failure mode — see below) can't turn this into a
-# multi-line value that then gets fed back in and creates more bad entries.
-placeholder=$(sbx secret ls -g \
-  | awk '$0 ~ /[[:space:]]USAI_API_KEY[[:space:]]/ { print $4; exit }')
+# Read the current secret table once (avoids a TOCTOU window and a second call).
+secret_ls=$(sbx secret ls -g)
+
+# Grab the existing placeholder, anchoring on the USAI_API_KEY token rather than
+# a fixed column, and take only the FIRST match so a duplicated state can't
+# produce a multi-line value. The placeholder is preserved across rotation so
+# running sandboxes that already injected it keep resolving to the new secret.
+placeholder=$(printf '%s\n' "$secret_ls" \
+  | awk '{ for (i = 1; i <= NF; i++) if ($i == "USAI_API_KEY") { print $(i+1); exit } }')
 
 if [ -z "$placeholder" ]; then
    fail "Error: USAI_API_KEY not found. Run 'sbx secret ls -g' to check."
 fi
 
-# Count how many USAI_API_KEY rows exist. More than one means a previous rotation
-# left duplicate/ghost entries; the proxy may then resolve the placeholder to an
-# empty entry and validation fails with 401. We always remove every custom
-# secret for the host and re-create a single entry, so rotation is idempotent.
-row_count=$(sbx secret ls -g \
+# Count USAI_API_KEY rows. More than one means a previous rotation (before this
+# bug was fixed) left duplicate/ghost entries; the proxy can then resolve the
+# placeholder to an empty entry and validation fails with 401.
+row_count=$(printf '%s\n' "$secret_ls" \
   | grep -cE '[[:space:]]USAI_API_KEY[[:space:]]' || true)
+
 if [ "${row_count:-0}" -gt 1 ]; then
+  # --- Cleanup path for data corrupted by the pre-fix rotation bug -----------
+  # Only taken when duplicates exist. We must remove every custom secret for the
+  # host (`sbx secret rm -g --host` deletes ALL matching entries) and recreate a
+  # single one — there's no in-place "dedupe". This is destructive and
+  # non-atomic: between the rm and the set-custom the host has NO USAi secret, so
+  # a Ctrl-C or a failed/cancelled set-custom would leave the host with no key at
+  # all. Guard that window with a trap that prints exact recovery steps, and
+  # disarm it once set-custom succeeds.
   echo "Found $row_count USAI_API_KEY entries; consolidating to a single secret." >&2
+
+  recover_msg() {
+    echo "" >&2
+    echo "ERROR: rotation was interrupted while the USAI_API_KEY secret was removed" >&2
+    echo "but before the new value was set. Your sandboxes currently have NO USAi key." >&2
+    echo "Recover by re-running this script, or manually:" >&2
+    echo "  sbx secret set-custom -g --host $USAI_HOST --env USAI_API_KEY --placeholder $placeholder" >&2
+  }
+  trap recover_msg EXIT
+
+  # Surface rm failures (e.g. an sbx flag change) instead of silently swallowing
+  # them and recreating on top of the duplicates.
+  if ! rm_err=$(sbx secret rm -g --host "$USAI_HOST" -f 2>&1); then
+    trap - EXIT
+    fail "Failed to remove existing secrets: $rm_err"
+  fi
+
+  # Recreate the single secret with the preserved placeholder. Omitting --value
+  # makes sbx prompt for the new key (keeps it out of shell history).
+  sbx secret set-custom -g --host "$USAI_HOST" \
+        --env USAI_API_KEY --placeholder "$placeholder"
+
+  trap - EXIT
+else
+  # Healthy single-row case: set-custom updates the existing entry in place, so
+  # there's no need for the destructive rm (which would only add risk here).
+  # Omitting --value makes sbx prompt for the new key (no shell-history leak).
+  sbx secret set-custom -g --host "$USAI_HOST" \
+        --env USAI_API_KEY --placeholder "$placeholder"
 fi
-
-# Remove all custom secrets for the host (sbx removes every entry matching the
-# host), then set exactly one. We keep the same placeholder value so any running
-# sandbox that already injected it continues to resolve to the new secret.
-sbx secret rm -g --host "$USAI_HOST" -f >/dev/null 2>&1 || true
-
-# Re-create the single secret with the preserved placeholder. Omitting --value
-# makes sbx prompt for the new key (keeps it out of shell history).
-sbx secret set-custom -g --host "$USAI_HOST" \
-      --env USAI_API_KEY --placeholder "$placeholder"
 
 # Validate the new key in a throwaway sandbox so we don't depend on any
 # particular pre-existing sandbox. Created here, removed on exit.
