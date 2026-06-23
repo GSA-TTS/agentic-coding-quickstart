@@ -91,7 +91,7 @@ The agent should be configured to run pre-commit checks before committing if hoo
 The `.pre-commit-config.yaml` file uses SHA-pinned revisions for security:
 
 - **pre-commit-hooks v6.0.0**: Basic file hygiene
-- **gitleaks v8.24.3**: Secret detection
+- **gitleaks v8.30.1**: Secret detection
 
 To update hook versions, edit `.pre-commit-config.yaml` and update both the rev (SHA) and the version comment.
 
