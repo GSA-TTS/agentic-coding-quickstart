@@ -36,6 +36,9 @@ brew install pre-commit
 # Install the hooks (from repo root)
 pre-commit install
 ```
+> [!NOTE]
+> Running `pre-commit install` sets up a git hook so checks run automatically on
+every commit.
 
 ### Inside Docker Sandbox (SBX)
 
@@ -57,6 +60,8 @@ You can run pre-commit checks on-demand without installing the hooks:
 
 ```bash
 # Run all hooks on all files
+npm run check
+# OR
 pre-commit run --all-files
 
 # Run all hooks on staged files only

@@ -72,19 +72,13 @@ Run CI checks locally before pushing to catch issues early.
 
 ### Install dependencies
 
+#### Markdown linter (Node.js)
 ```bash
-# Markdown linter (Node.js)
 npm ci --prefix .github/linters
-
-# Pre-commit hooks (Python) — optional but recommended
-pip install pre-commit
-# or on Mac
-brew install pre-commit
-pre-commit install
 ```
-
-Running `pre-commit install` sets up a git hook so checks run automatically on
-every commit.
+#### Pre-commit hooks (Python) — optional but recommended
+- requires `pre-commit` installation and setup
+- see `docs/PRE_COMMIT_SETUP.md` for instructions
 
 ### Available scripts
 
@@ -93,6 +87,7 @@ every commit.
 | `npm test` | Run the test suite (`node --test`) |
 | `npm run lint:md` | Lint markdown files (same rules as CI) |
 | `npm run lint` | Run all linters |
+| `npm run lint:secrets` | Run gitleaks (requires gitleaks to be installed: `brew install gitleaks`)
 | `npm run check` | Run the full pre-commit suite (gitleaks, shellcheck, YAML/JSON validation, whitespace, markdown lint) |
 
 > [!NOTE]
