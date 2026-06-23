@@ -95,6 +95,9 @@ every commit.
 | `npm run lint` | Run all linters |
 | `npm run check` | Run the full pre-commit suite (gitleaks, shellcheck, YAML/JSON validation, whitespace, markdown lint) |
 
+> [!NOTE]
+> `npm run check` auto-fixes some issues (markdown, whitespace, EOF) — review and stage the changes it makes.
+
 ### Quick pre-push check
 
 ```bash
