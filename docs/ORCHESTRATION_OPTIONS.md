@@ -80,9 +80,10 @@ to deliver **two non-negotiable values**:
                          └───────────────────────┬──────────────────────┘
                                                  │ executes within
                          ┌───────────────────────┴──────────────────────┐
-   L2  SANDBOX           │   SBX microVM (via qsbx / sbx)                │
-       (security         │   own FS · own Docker · network policy        │
-        boundary)        │   << THE SECURITY BOUNDARY >>                 │
+   L2  ISOLATION /       │   SBX microVM (DEFAULT, via qsbx / sbx)       │
+       EXECUTION         │   own FS · own Docker · network policy        │
+       BOUNDARY          │   alt: container · Unix-user · worktree-only  │
+                         │   << THE SECURITY BOUNDARY — SBX is strongest>>│
                          └───────────────────────┬──────────────────────┘
                                                  │ bound to one
                          ┌───────────────────────┴──────────────────────┐
@@ -97,7 +98,10 @@ to deliver **two non-negotiable values**:
 
 The layers are not all owned by the same tool. Some surveyed tools are **L5
 dashboards**; others are **L4 governance/workflow engines** that can sit *under*
-or *beside* an L5 UI.
+or *beside* an L5 UI. **L2 is deliberately generalized**: SBX microVM is this
+repo's default and the strongest boundary, but the section
+[Native Isolation, Independent of SBX](#native-isolation-independent-of-sbx)
+surveys the weaker alternatives the surveyed tools ship with.
 
 ---
 
@@ -145,21 +149,97 @@ review of its network/secrets behavior, and a plan for the qsbx two values.
 
 ---
 
+## Native Isolation, Independent of SBX
+
+Because the question "what if we used something other than SBX at L2?" is worth
+answering, this section records what execution isolation each tool ships with
+**on its own**, independent of Docker SBX. The short answer: **none of them
+provides a boundary as strong as an SBX microVM**, and most provide no execution
+containment at all.
+
+**Isolation-strength spectrum (strongest → weakest):**
+
+```
+microVM            container-per-session     Unix-user + sudo        worktree-only
+(SBX, default)     (vigilante, PLANNED)      (agor strict/insulated)  / none
+   ▼                      ▼                          ▼                     ▼
+own kernel,        shared host kernel,        shared host kernel,     no containment;
+FS, Docker,        scoped creds, TTL          per-user FS perms,      filesystem
+network policy     teardown, gh proxy         needs root/sudoers      separation only
+```
+
+| Tool | Native isolation mechanism | Built-in? | Privilege footprint | Beyond worktrees? |
+|------|----------------------------|-----------|---------------------|-------------------|
+| **SBX (qsbx)** | microVM — own kernel/FS/Docker/network policy | This repo's default | Unprivileged host CLI | ✅ Strongest |
+| **BiomeLab** | None of its own — **wraps `sbx`** (`internal/sandbox/sandbox.go`) | Delegates to SBX | Inherits SBX | ✅ via SBX |
+| **vigilante** | **Planned** Docker-per-session: DinD, `gh` mirror→reverse-proxy repo scoping, HMAC short-lived tokens, ephemeral deploy keys, guaranteed TTL teardown (`SANDBOX.md`) | Planned, not shipped | Docker daemon access | ✅ (when built) |
+| **agor** | Unix users/groups + filesystem perms + **`sudo` impersonation**; modes `simple`/`insulated`/`strict` | Opt-in; default `simple` = none | **Requires root**: installs `/etc/sudoers.d/agor`, `useradd`/`groupadd`/`chown` | ✅ only in `insulated`/`strict` |
+| **Hive** | git worktrees only (containers are roadmap "Future Vision") | Built-in | None | ❌ |
+| **OpenChamber** | git worktrees; Docker only for *deployment*, not per-agent | Built-in | None | ❌ |
+| **dmux** | git worktrees + tmux panes | Built-in | None | ❌ |
+| **ccswarm** | git worktrees + sensitive-path deny-list ("sandboxed execution" claim unbacked by any named tech) | Built-in | None | ❌ |
+
+**Two alternatives are real, both with caveats:**
+
+- **vigilante's `SANDBOX.md`** is the closest peer to SBX's posture: a container
+  per session, a `gh` **mirror binary → reverse proxy** that scopes GitHub access
+  to a single repo, HMAC-signed short-lived tokens, ephemeral deploy keys, and
+  guaranteed TTL teardown. It is **planned, not shipped**, but the credential-
+  scoping pattern is worth studying even if we stay on SBX — it complements the
+  USAi/secret rules in `AGENTS.md`.
+- **agor's Unix-user model** is genuine OS-level isolation, but it is built for a
+  **shared multi-user server** (Linux + systemd + PostgreSQL, private network)
+  and requires a **root-privileged daemon** (`sudoers` granting `useradd`,
+  `groupadd`, `chown`). Its threat model explicitly allows a malicious prompt to
+  *"damage own files"* — it isolates *users from each other*, not the *agent from
+  the host*. This cuts against `AGENTS.md` ("SBX is the security boundary", no
+  privilege escalation) and the local-only constraint. See
+  [agor's deployment model](#agor-local-vs-shared-server) below.
+
+> **Lima / nono:** specifically checked for and **found in none** of the surveyed
+> tools. No tool uses Lima (lima-vm), nono, Firecracker, or gVisor. They remain
+> unevaluated candidates a future ADR (`0005`) could weigh as SBX alternatives or
+> complements at L2.
+
+<a id="agor-local-vs-shared-server"></a>
+### agor: local single-dev vs shared-server multi-user
+
+agor **can** run locally for a single user — `npm install -g agor-live`,
+`agor init`, `agor daemon start`, `agor open`, no sudo or PostgreSQL required
+(`unix_user_mode: simple` and `branch_rbac: false` are the defaults, on SQLite).
+But two facts hold in **either** deployment mode, and one tradeoff is inherent:
+
+- **Local-mode caveat:** in `simple` mode there is **no execution isolation** —
+  agents run as the daemon user on the host, exactly like Hive/dmux/OpenChamber.
+  So used locally, agor still needs SBX underneath for a real boundary.
+- **You cannot get agor's isolation without its server/privilege model.** The
+  Unix-user containment only activates in `insulated`/`strict`, which require the
+  root-privileged sudoers setup and target a shared server.
+- **Always-on regardless of mode:** a persistent localhost **daemon + WebSocket +
+  MCP HTTP endpoint** (a service/network surface to weigh against `AGENTS.md`),
+  and the **BSL 1.1** license (non-CC0; a federal-adoption flag).
+
+Net: agor's distinctive value (RBAC, per-user credential isolation, cost
+accounting) is a **governance** story that only unlocks in the privileged
+shared-server model; locally it is "another dashboard that still needs SBX."
+
+---
+
 ## Tool Comparison
 
 Grounded in each project's README (fetched 2026-06-24). "qsbx values?" asks
 whether the tool can preserve global-config injection **and** the USAi-via-
 `opencode.jsonc` path — most need `qsbx`/SBX underneath to do so.
 
-| Tool | Stack | Local vs server | Network surface | Worktree-aware | SBX/sandbox-aware | Agent-agnostic? | Governance / audit | License | qsbx values? |
-|------|-------|-----------------|-----------------|----------------|-------------------|-----------------|--------------------|---------|--------------|
-| **BiomeLab** | Go / Fyne desktop | Local desktop app | Local; `gh`/`glab` API | Yes | **Yes — native `sbx` mode**, one sandbox/agent/repo | **Yes** (detects Claude/Kiro/Copilot/Codex/OpenCode/Gemini) | re_gent (`rgt`) activity log, export JSON | MIT | Best fit — already SBX-native; could host qsbx injection (open Q) |
-| **Hive** | Electron / React | Local desktop app | Localhost Effect backend (free port) | Yes | No | Partial (OpenCode/Claude/Codex sessions) | Undo/redo; visual git | MIT | Needs SBX underneath; no sandbox layer |
-| **OpenChamber** | TypeScript; desktop/web/PWA | Local **or** server + tunnels | Cloudflare tunnels, LAN bind options — **scrutinize** | Yes (isolated worktrees for multi-agent runs) | No | **OpenCode-only** | Token/cost panels; git/PR in-app | MIT | OpenCode-bound; tunnel/LAN surface conflicts with network rules |
-| **dmux** | Node / tmux | Local TUI | Local; optional OpenRouter for names | Yes (worktree per pane) | No | **Yes** (11+ CLIs incl. OpenCode) | Lifecycle hooks; native notifications | MIT | Needs SBX underneath; optional OpenRouter call to flag |
-| **vigilante** | Go | Local daemon/service | `gh` API; planned Docker mode | Yes (worktree per issue) | Planned (containerized mode in `SANDBOX.md`) | **Yes** (codex/claude/gemini/opencode) | Issue→PR trail, resume/redispatch/cleanup; "untrusted model" posture | Apache-2.0 | Issue-driven, not a dashboard; SBX support is future |
-| **agor** | TS / FeathersJS daemon + React | **Self-hosted server + web UI** | Web UI, WebSocket, MCP endpoint, multiplayer | Yes (branches = worktrees under `~/.agor/`) | No (progressive **Unix** isolation, not containers) | **Yes** (Claude/Codex/Gemini/OpenCode/Copilot/Cursor) | RBAC/ACLs, per-prompt token+cost, durable history, MCP | **BSL 1.1 — flag** | Web/daemon surface + non-CC0 license conflict with constraints |
-| **ccswarm** | Rust | Local CLI engine | `gh` (issue ingest) | Yes (Claude `--worktree`) | No | Partial (claude/codex; copilot unsupported for codegen) | **NDJSON audit, replay/diff/undo, HITL gates, sensitive-path deny-list** | MIT | L4 engine, not L5 UI; pairs with audit/approval rules |
+| Tool | Stack | Local vs server | Network surface | Worktree-aware | Native isolation tech | Agent-agnostic? | Governance / audit | License | qsbx values? |
+|------|-------|-----------------|-----------------|----------------|-----------------------|-----------------|--------------------|---------|--------------|
+| **BiomeLab** | Go / Fyne desktop | Local desktop app | Local; `gh`/`glab` API | Yes | **Wraps `sbx` microVM** (one sandbox/agent/repo) | **Yes** (detects Claude/Kiro/Copilot/Codex/OpenCode/Gemini) | re_gent (`rgt`) activity log, export JSON | MIT | Best fit — already SBX-native; could host qsbx injection (open Q) |
+| **Hive** | Electron / React | Local desktop app | Localhost Effect backend (free port) | Yes | Worktree-only (containers on roadmap) | Partial (OpenCode/Claude/Codex sessions) | Undo/redo; visual git | MIT | Needs SBX underneath; no sandbox layer |
+| **OpenChamber** | TypeScript; desktop/web/PWA | Local **or** server + tunnels | Cloudflare tunnels, LAN bind options — **scrutinize** | Yes (isolated worktrees for multi-agent runs) | Worktree-only (Docker = deploy only) | **OpenCode-only** | Token/cost panels; git/PR in-app | MIT | OpenCode-bound; tunnel/LAN surface conflicts with network rules |
+| **dmux** | Node / tmux | Local TUI | Local; optional OpenRouter for names | Yes (worktree per pane) | Worktree + tmux panes | **Yes** (11+ CLIs incl. OpenCode) | Lifecycle hooks; native notifications | MIT | Needs SBX underneath; optional OpenRouter call to flag |
+| **vigilante** | Go | Local daemon/service | `gh` API; planned Docker mode | Yes (worktree per issue) | **Planned** container-per-session (gh reverse-proxy, TTL teardown — `SANDBOX.md`) | **Yes** (codex/claude/gemini/opencode) | Issue→PR trail, resume/redispatch/cleanup; "untrusted model" posture | Apache-2.0 | Issue-driven, not a dashboard; SBX support is future |
+| **agor** | TS / FeathersJS daemon + React | Local (simple) **or** shared server (RBAC) | Localhost daemon, WebSocket, MCP endpoint; multiplayer when on server | Yes (branches = worktrees under `~/.agor/`) | Unix-user + `sudo` (`strict`/`insulated`); **none in `simple`**; needs root | **Yes** (Claude/Codex/Gemini/OpenCode/Copilot/Cursor) | RBAC/ACLs, per-prompt token+cost, durable history, MCP | **BSL 1.1 — flag** | Local-usable but no isolation in `simple`; daemon/MCP surface + non-CC0 license |
+| **ccswarm** | Rust | Local CLI engine | `gh` (issue ingest) | Yes (Claude `--worktree`) | Worktree + sensitive-path deny-list (no real sandbox) | Partial (claude/codex; copilot unsupported for codegen) | **NDJSON audit, replay/diff/undo, HITL gates, sensitive-path deny-list** | MIT | L4 engine, not L5 UI; pairs with audit/approval rules |
 
 > **Agent-agnostic note (your OpenCode concern):** OpenChamber and Hive are
 > OpenCode/Claude/Codex-bound (OpenChamber the most). BiomeLab, dmux, vigilante,
@@ -170,6 +250,17 @@ whether the tool can preserve global-config injection **and** the USAi-via-
 - **L5 dashboards:** BiomeLab, Hive, OpenChamber, agor, dmux (TUI).
 - **L4 governance / workflow engines:** ccswarm, vigilante (issue→PR orchestrators
   with audit + approval gates) — these can run *under* or *beside* an L5 UI.
+
+A second, more decision-relevant axis is **deployment model**, because that is
+where the local-only constraint bites harder than the L4/L5 line:
+
+- **Local, single-developer:** BiomeLab, Hive, OpenChamber (local mode), dmux,
+  ccswarm, vigilante, **and agor in `simple` mode**.
+- **Shared-server, multi-user:** **agor** with RBAC + Unix isolation
+  (`insulated`/`strict`) — the only surveyed tool whose distinctive value assumes
+  a team sharing one privileged server. agor spans L4+L5 (rich dashboard *and*
+  governance), so it is kept in the L5 list above; its real misfit is this
+  deployment axis, not its layer.
 
 ---
 
@@ -209,6 +300,9 @@ deny-list) is worth evaluating against the audit and approval requirements in
 - Network egress limited to the approved endpoints; scrutinize any tool that
   opens tunnels (OpenChamber Cloudflare modes), binds LAN (OpenChamber, agor),
   or makes third-party calls (dmux → OpenRouter for branch names).
+- No privilege escalation; SBX is the security boundary. **agor's `insulated`/
+  `strict` isolation requires a root-privileged daemon** (`/etc/sudoers.d/agor`,
+  `useradd`/`groupadd`/`chown`) — directly at odds with this rule.
 - Dependencies require approval; no AGPL, GPL needs justification, exact pins.
   **agor is BSL 1.1** — non-CC0 and source-available-with-restrictions; flag for
   licensing review.
@@ -220,7 +314,10 @@ deny-list) is worth evaluating against the audit and approval requirements in
    SBX `--clone`, or support both per-task?
 3. Is a governance/audit engine (ccswarm-style) needed as a distinct L4 layer for
    federal traceability, separate from the L5 UI?
-4. For any adopted tool/service: which ADR (`0005`) and which security review?
+4. **L2 alternatives:** should a future ADR evaluate **Lima**, **nono**, or
+   vigilante's container model as SBX alternatives/complements — or is SBX the
+   settled boundary?
+5. For any adopted tool/service: which ADR (`0005`) and which security review?
 
 **Next steps:** choose a direction among A/B/C, then open ADR `0005` before
 adopting any dependency or standing up any service.
@@ -233,8 +330,11 @@ adopting any dependency or standing up any service.
 - `AGENTS.md` — network, secrets, and approval rules
 - `docs/adr/0004-playbook-submodule-shared-config.md` — how shared config reaches the sandbox
 - Tools: BiomeLab `github.com/mdelapenya/biomelab` (MIT) · Hive `github.com/morapelker/hive` (MIT) ·
-  OpenChamber `github.com/openchamber/openchamber` (MIT) · dmux `github.com/standardagents/dmux` (MIT) ·
+  OpenChamber `github.com/btriapitsyn/openchamber` (MIT) · dmux `github.com/standardagents/dmux` (MIT) ·
   vigilante `github.com/aliengiraffe/vigilante` (Apache-2.0) · agor `github.com/preset-io/agor` (BSL 1.1) ·
   ccswarm `github.com/nwiizo/ccswarm` (MIT)
+- Isolation sources: agor `multiplayer-unix-isolation.mdx` (Unix-user/sudo model) ·
+  vigilante `SANDBOX.md` (planned container model) · BiomeLab `ARCHITECTURE.md`
+  (`internal/sandbox/sandbox.go` wraps `sbx`)
 </content>
 </invoke>
