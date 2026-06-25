@@ -2,6 +2,10 @@
   "type": "module",
   "scripts": {
     "sync:usai-models": "node scripts/sync-usai-models.mjs --write-snapshot",
-    "test": "node --test"
+    "test": "node --test",
+    "lint:md": "npx --prefix .github/linters markdownlint-cli2 '**/*.md' '#node_modules' '#.github/linters/node_modules' '#CHANGELOG.md' '#agentic-coding-playbook'",
+    "lint:secrets": "gitleaks detect --source .",
+    "lint": "npm run lint:md",
+    "check": "pre-commit run --all-files"
   }
 }

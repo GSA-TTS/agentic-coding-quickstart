@@ -30,10 +30,15 @@ By making hooks opt-in, users can:
 ```bash
 # Install pre-commit
 pip install pre-commit
+# or on Mac
+brew install pre-commit
 
 # Install the hooks (from repo root)
 pre-commit install
 ```
+> [!NOTE]
+> Running `pre-commit install` sets up a git hook so checks run automatically on
+every commit.
 
 ### Inside Docker Sandbox (SBX)
 
@@ -55,6 +60,8 @@ You can run pre-commit checks on-demand without installing the hooks:
 
 ```bash
 # Run all hooks on all files
+npm run check
+# OR
 pre-commit run --all-files
 
 # Run all hooks on staged files only
@@ -89,7 +96,7 @@ The agent should be configured to run pre-commit checks before committing if hoo
 The `.pre-commit-config.yaml` file uses SHA-pinned revisions for security:
 
 - **pre-commit-hooks v6.0.0**: Basic file hygiene
-- **gitleaks v8.24.3**: Secret detection
+- **gitleaks v8.30.1**: Secret detection
 
 To update hook versions, edit `.pre-commit-config.yaml` and update both the rev (SHA) and the version comment.
 

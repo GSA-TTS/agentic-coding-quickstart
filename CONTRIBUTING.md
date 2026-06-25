@@ -66,6 +66,47 @@ This project operates under professional standards of conduct. All contributors:
 
 ---
 
+## Local Development Checks
+
+Run CI checks locally before pushing to catch issues early.
+
+### Install dependencies
+
+#### Markdown linter (Node.js)
+```bash
+npm ci --prefix .github/linters
+```
+#### Pre-commit hooks (Python) — optional but recommended
+- requires `pre-commit` installation and setup
+- see `docs/PRE_COMMIT_SETUP.md` for instructions
+
+### Available scripts
+
+| Command | What it does |
+|---------|-------------|
+| `npm test` | Run the test suite (`node --test`) |
+| `npm run lint:md` | Lint markdown files (same rules as CI) |
+| `npm run lint` | Run all linters |
+| `npm run lint:secrets` | Run gitleaks (requires gitleaks to be installed: `brew install gitleaks`) |
+| `npm run check` | Run the full pre-commit suite (gitleaks, shellcheck, YAML/JSON validation, whitespace, markdown lint) |
+
+> [!NOTE]
+> `npm run check` auto-fixes some issues (markdown, whitespace, EOF) — review and stage the changes it makes.
+
+### Quick pre-push check
+
+```bash
+npm run lint && npm test
+```
+
+Or for the most comprehensive local check (requires pre-commit):
+
+```bash
+npm run check
+```
+
+---
+
 ## Commit Message Guidelines
 
 This project follows **Conventional Commits 1.0.0** for automated version management and changelog generation.
