@@ -87,7 +87,7 @@ to deliver **two non-negotiable values**:
                          └───────────────────────┬──────────────────────┘
                                                  │ bound to one
                          ┌───────────────────────┴──────────────────────┐
-   L1  ISOLATION UNIT    │   git worktree   OR   SBX --clone             │
+   L1  ISOLATION UNIT    │   git worktree (mounted into the sandbox)     │
                          │   (one branch / one working tree per task)    │
                          └───────────────────────┬──────────────────────┘
                                                  │ derived from
@@ -105,26 +105,27 @@ surveys the weaker alternatives the surveyed tools ship with.
 
 ---
 
-## L1 Deep-Dive: git worktree vs SBX `--clone`
+## L1 Deep-Dive: git worktrees (SBX `--clone` abandoned)
 
-The repo currently has **no git-worktree usage**; branch isolation is done with
-SBX `--clone`. Most surveyed dashboards are worktree-native, so this layer is
-where adoption friction is highest.
+Branch isolation will use **git worktrees mounted into sandboxes**. SBX `--clone`
+(an in-container clone exposed as a host git remote `sandbox-<name>`) has been
+**abandoned as too fiddly** — it requires `git fetch sandbox-<name>` before
+removal to avoid data loss, and most surveyed dashboards are worktree-native
+anyway. Worktrees align with the tooling and avoid that footgun.
 
-| Aspect | git worktree | SBX `--clone` |
-|--------|--------------|---------------|
+| Aspect | git worktree (chosen) | SBX `--clone` (abandoned) |
+|--------|-----------------------|---------------------------|
 | What it is | Extra working tree on the host, one per branch | In-container clone exposed as host git remote `sandbox-<name>` |
-| Isolation strength | Filesystem only; shares host | Full microVM (own FS/Docker/network) |
-| Host footprint | One directory per task on host | Lives inside the sandbox |
-| Fit with SBX boundary | Needs mounting into a sandbox to gain isolation | Already inside the boundary |
-| Cleanup | `git worktree remove` + dir delete | `sbx rm` removes clone + remote |
-| Data-loss risk | Low | Must `git fetch sandbox-<name>` before removal |
-| Tooling support | BiomeLab, Hive, dmux, agor, vigilante, ccswarm | Native to this repo / SBX |
+| Isolation strength | Filesystem only on host; **gains microVM isolation once mounted into a sandbox** | Full microVM (own FS/Docker/network) |
+| Host footprint | One directory per task on host | Lived inside the sandbox |
+| Cleanup | `git worktree remove` + dir delete | `sbx rm` + remote; **needs `git fetch` first** |
+| Data-loss risk | Low | High if you forget the fetch — the abandonment reason |
+| Tooling support | BiomeLab, Hive, dmux, agor, vigilante, ccswarm | Native to SBX only |
 
-A hybrid is possible: create a **git worktree on the host** and **mount it into a
-sandbox** (`sbx` supports extra workspace mounts; `qsbx` already mounts the clone
-`:ro`). This is the bridge most worktree-native dashboards would need to stay
-SBX-native here.
+The pattern: create a **git worktree on the host** and **mount it into a sandbox**
+(`sbx` supports extra workspace mounts; `qsbx` already mounts the clone `:ro`).
+This is also how worktree-native dashboards stay SBX-native here, and matches
+agor's model (it manages worktrees on a shared filesystem its executor mounts).
 
 ---
 
@@ -175,7 +176,9 @@ L7 egress + inference routing         teardown, gh proxy       needs root/sudoer
 | **OpenShell** (L2 runtime, not an orchestrator) | Per-sandbox container/**microVM** via pluggable drivers (Docker/Podman/MicroVM/k8s) + declarative YAML policy across FS/network/process/inference; L7 egress proxy; credential injection as env (never on disk) | Shipping (**alpha**) | Gateway control-plane + container/VM runtime | ✅ Peer of SBX |
 | **BiomeLab** | None of its own — **wraps `sbx`** (`internal/sandbox/sandbox.go`) | Delegates to SBX | Inherits SBX | ✅ via SBX |
 | **vigilante** | **Planned** Docker-per-session: DinD, `gh` mirror→reverse-proxy repo scoping, HMAC short-lived tokens, ephemeral deploy keys, guaranteed TTL teardown (`SANDBOX.md`) | Planned, not shipped | Docker daemon access | ✅ (when built) |
-| **agor** | Unix users/groups + `sudo` impersonation (`simple`/`insulated`/`strict`); **plus a shipping `executor_command_template` shim** — a pivot point that wraps *every* agent/git op (agor uses it for k8s pods; could wrap `sbx`) | Opt-in; `simple` = none; template = configurable runtime | **Root** for Unix mode; template runtime sets its own | ✅ Unix mode, **or any runtime via the executor template** |
+| **agor** — `simple` mode | None — agents run as the daemon user on the host | Default | None | ❌ (needs SBX underneath) |
+| **agor** — `insulated`/`strict` | Unix users/groups + filesystem perms + `sudo` impersonation | Opt-in | **Root**: installs `/etc/sudoers.d/agor`, `useradd`/`groupadd`/`chown` | ✅ isolates users from each other |
+| **agor** — executor template | Wraps the executor spawn in *any* runtime (`executor_command_template`); agor uses it for k8s pods, could wrap `sbx` | **Shipping** config knob | Inherits the chosen runtime's footprint | ✅ via whatever runtime you template in |
 | **AoE** | **Native Docker sandbox** (`docker exec -it <container> <tool>`; Podman/Apple Containers too), worktree→`/workspace`, auth dirs mounted, creds via env | Opt-in (`--sandbox`) | Docker daemon access | ✅ container-level |
 | **Hive** | git worktrees only (containers are roadmap "Future Vision") | Built-in | None | ❌ |
 | **OpenChamber** | git worktrees; Docker only for *deployment*, not per-agent | Built-in | None | ❌ |
@@ -193,10 +196,10 @@ L7 egress + inference routing         teardown, gh proxy       needs root/sudoer
   sandbox filesystem**, and launches agents with the same UX as SBX
   (`openshell sandbox create -- claude|opencode|codex|copilot`). Its **Privacy
   Router** can strip caller creds and reroute model calls to a controlled
-  backend — conceptually aligned with forcing all traffic through USAi. Caveats:
-  **alpha / "single-player" / NVIDIA-led**, a heavier **gateway + driver**
-  architecture than SBX's single CLI, and an inference model that assumes
-  OpenAI/Anthropic-style provider env (USAi `baseURL` fit unverified). Apache-2.0.
+  backend — directly aligned with forcing all traffic through USAi, whose API is
+  OpenAI-shaped and so fits OpenShell's OpenAI-style provider model. Caveats:
+  **alpha / "single-player" / NVIDIA-led**, and a heavier **gateway + driver**
+  architecture than SBX's single CLI. Apache-2.0.
   Adopting it would be an **SBX *replacement* at L2** — a much larger decision
   than adding an orchestrator, squarely ADR-`0005` territory.
 - **vigilante's `SANDBOX.md`** is the closest *orchestrator-native* peer to SBX's
@@ -264,19 +267,9 @@ terminals) behind a single **executor** process, and the daemon spawns that
 executor through an admin-configurable **`executor_command_template`**. The
 default is a local subprocess; a template string lets the admin wrap the spawn in
 *any* runtime. agor's own user-facing docs use it to run each executor in an
-ephemeral **k8s pod** (`kubectl run … -- agor-executor --stdin`).
-
-**This is shipping, not aspirational.** Verified on `main` (commit `21edf7b`,
-2026-06-24): the daemon reads `config.execution.executor_command_template`
-(`apps/agor-daemon/src/index.ts` → `configureExecutor`), and `spawnExecutor`
-branches between `spawnExecutorWithTemplate` and `spawnExecutorLocal`
-(`apps/agor-daemon/src/utils/spawn-executor.ts`). The template is rendered and run
-via `spawn('sh', ['-c', command])`, the JSON payload is written to the child's
-stdin (`agor-executor --stdin`), and tests assert the k8s template renders
-(`spawn-executor.configured.test.ts`). There is a typed config field
-(`AgorExecutionSettings.executor_command_template`) and a dedicated user-facing
-guide (`apps/agor-docs/pages/guide/containerized-execution.mdx`), separate from
-the original exploration doc.
+ephemeral **k8s pod** (`kubectl run … -- agor-executor --stdin`). There's a dedicated user-facing
+guide (`apps/agor-docs/pages/guide/containerized-execution.mdx`) focused on k8s 
+(which is what the agor team themselves use for their notional hosted service).
 
 ```yaml
 # ~/.agor/config.yaml  (shipping config key)
@@ -303,17 +296,19 @@ Why this matters for SBX:
 
 Caveats / integration unknowns (about *fit*, not *existence*):
 
-- **No path/worktree template variable.** The implemented substitution
-  (`substituteTemplateVariables`) supports only `{task_id}`, `{command}`,
+- **Worktree mount is a filesystem concern, largely solved by agor's design.**
+  agor creates and manages the branch worktree on a **shared filesystem**
+  (`data_home`) *before* the executor runs, and the executor reads `dataHome` from
+  its payload. So the sandbox doesn't need a per-worktree template variable — it
+  mounts `data_home` (the same model agor uses for k8s, where executor pods mount
+  the `data_home` PVC) and the worktree is already present at a path the executor
+  knows. The implemented template variables (`{task_id}`, `{command}`,
   `{unix_user}`, `{unix_user_uid}`, `{unix_user_gid}`, `{session_id}`,
-  `{branch_id}`, `{log_level}` — **no `{cwd}`/`{worktree_path}`/`{data_home}`**.
-  (The docs page also advertises `{repo_gid}`/`{branch_gid}`/etc. that the code
-  does **not** implement — a docs-vs-code drift to be aware of.) So mounting a
-  per-branch worktree into an `sbx` invocation isn't a template variable; agor's
-  own k8s approach instead mounts the whole `data_home` PVC and keys off
-  `{branch_id}`/`{session_id}`. Reconciling that with SBX per-worktree mounts (and
-  carrying the [qsbx two values](#shimming-sbx-into-non-isolating-tools) inside)
-  is the real integration work.
+  `{branch_id}`, `{log_level}`; **no `{cwd}`**) are sufficient given this. (Minor:
+  the docs page advertises `{repo_gid}`/`{branch_gid}`/etc. the code does **not**
+  implement — a docs-vs-code drift, not blocking.) The remaining work is wiring
+  the `data_home` mount into the `sbx` invocation and carrying the
+  [qsbx two values](#shimming-sbx-into-non-isolating-tools) inside.
 - **Daemon egress hop.** The `prompt` command expects the executor to reach the
   daemon over a Feathers WebSocket, so a sandboxed executor must still be allowed
   that one connection.
@@ -323,8 +318,7 @@ Caveats / integration unknowns (about *fit*, not *existence*):
 
 > **Reframing:** agor offers **two** isolation stories. Its *Unix-user* mode is a
 > poor fit (root-privileged, shared-server). But its *executor-template* shim is a
-> genuinely good fit — and a **shipping, tested** config knob, arguably the
-> cleanest orchestrator-level seam surveyed for dropping in SBX/OpenShell/`nono`
+> genuinely good fit — arguably the cleanest orchestrator-level seam surveyed for dropping in SBX/OpenShell/`nono`
 > at L2, because the tool was explicitly designed to swap its execution runtime.
 > Pilot-worthy; the remaining work is worktree-mount + qsbx-injection integration,
 > not waiting on a feature to land.
@@ -347,15 +341,23 @@ orchestrator, so its dashboard/governance columns read "n/a".
 | **OpenChamber** | TypeScript; desktop/web/PWA | Local **or** server + tunnels | Cloudflare tunnels, LAN bind options — **scrutinize** | Yes (isolated worktrees for multi-agent runs) | Worktree-only (Docker = deploy only) | **OpenCode-only** | Token/cost panels; git/PR in-app | MIT | OpenCode-bound; tunnel/LAN surface conflicts with network rules |
 | **dmux** | Node / tmux | Local TUI | Local; optional OpenRouter for names | Yes (worktree per pane) | Worktree + tmux panes | **Yes** (11+ CLIs incl. OpenCode) | Lifecycle hooks; native notifications | MIT | Needs SBX underneath; optional OpenRouter call to flag |
 | **vigilante** | Go | Local daemon/service | `gh` API; planned Docker mode | Yes (worktree per issue) | **Planned** container-per-session (gh reverse-proxy, TTL teardown — `SANDBOX.md`) | **Yes** (codex/claude/gemini/opencode) | Issue→PR trail, resume/redispatch/cleanup; "untrusted model" posture | Apache-2.0 | Issue-driven, not a dashboard; SBX support is future |
-| **agor** | TS / FeathersJS daemon + React | Local (simple) **or** shared server (RBAC) | Localhost daemon, WebSocket, MCP endpoint; multiplayer when on server | Yes (branches = worktrees under `~/.agor/`) | Unix-user + `sudo`; **plus `executor_command_template`** (designed L2 shim — wrap executor in `sbx`/k8s/etc.) | **Yes** (Claude/Codex/Gemini/OpenCode/Copilot/Cursor) | RBAC/ACLs, per-prompt token+cost, durable history, MCP | BSL 1.1 (self-host OK) | Executor template can route execution through `sbx` (cleanest orchestrator-level seam); daemon/MCP surface to weigh |
+| **agor** — `simple` mode | TS / FeathersJS daemon + React | Local, single-dev | Localhost daemon, WebSocket, MCP endpoint | Yes (branches = worktrees under `~/.agor/`) | None — runs as daemon user on host | **Yes** (Claude/Codex/Gemini/OpenCode/Copilot/Cursor) | RBAC/ACLs, per-prompt token+cost, durable history, MCP | BSL 1.1 (self-host OK) | No isolation — needs SBX underneath |
+| **agor** — `insulated`/`strict` | TS / FeathersJS daemon + React | Shared server, multi-user | Localhost daemon + WebSocket + MCP; multiplayer | Yes (branches = worktrees under `~/.agor/`) | Unix-user + `sudo`; **needs root** | **Yes** (same) | RBAC/ACLs, per-prompt token+cost, durable history, MCP | BSL 1.1 (self-host OK) | Isolates users from each other, not agent from host; root-privileged |
+| **agor** — executor template | TS / FeathersJS daemon + React | Local or server | Daemon + WebSocket + MCP; runtime adds its own | Yes (branches = worktrees under `~/.agor/`) | **`executor_command_template`** — wrap executor in `sbx`/k8s/etc. | **Yes** (same) | RBAC/ACLs, per-prompt token+cost, durable history, MCP | BSL 1.1 (self-host OK) | Executor template can route execution through `sbx` (cleanest orchestrator-level seam); daemon/MCP surface to weigh |
 | **ccswarm** | Rust | Local CLI engine | `gh` (issue ingest) | Yes (Claude `--worktree`) | Worktree + sensitive-path deny-list (no real sandbox) | Partial (claude/codex; copilot unsupported for codegen) | **NDJSON audit, replay/diff/undo, HITL gates, sensitive-path deny-list** | MIT | L4 engine, not L5 UI; pairs with audit/approval rules |
-| **OpenShell** *(L2 runtime, not an orchestrator)* | Rust; gateway + driver | Local gateway; k8s/Helm option | **L7 egress proxy** (allow/deny per method+path); inference router | n/a (isolates whatever you run) | **microVM/container** + YAML policy (FS/net/process/inference) | **Yes** (`-- claude\|opencode\|codex\|copilot`; BYOC) | Policy decisions logged; k9s-style TUI | Apache-2.0 | An **SBX replacement** at L2, not a layer on top; would own USAi routing via its inference router (fit unverified) |
+| **OpenShell** *(L2 runtime, not an orchestrator)* | Rust; gateway + driver | Local gateway; k8s/Helm option | **L7 egress proxy** (allow/deny per method+path); inference router | n/a (isolates whatever you run) | **microVM/container** + YAML policy (FS/net/process/inference) | **Yes** (`-- claude\|opencode\|codex\|copilot`; BYOC) | Policy decisions logged; k9s-style TUI | Apache-2.0 | An **SBX replacement** at L2, not a layer on top; could own USAi routing via its inference router (USAi is OpenAI-shaped) |
 
 > **Agent-agnostic note (your OpenCode concern):** OpenChamber and Hive are
 > OpenCode/Claude/Codex-bound (OpenChamber the most). BiomeLab, AoE, dmux,
 > vigilante, agor, and ccswarm are broadly agent-agnostic — they detect or launch
 > many CLIs rather than embedding one runtime. OpenShell (L2) is agent-agnostic by
 > construction: it sandboxes whatever agent you launch inside it.
+
+> **agor's three rows** above are the *same product* in different configurations,
+> not three tools: `simple` (local, no isolation), `insulated`/`strict` (shared
+> server, root-privileged Unix isolation), and the `executor_command_template`
+> shim (runtime-pluggable). They are split out because their isolation, network,
+> and federal-fit characteristics differ enough to warrant separate evaluation.
 
 ### Where each tool sits
 - **L2 isolation runtimes (SBX peers):** SBX/qsbx (default), **OpenShell** (alpha).
@@ -372,39 +374,18 @@ where the local-only constraint bites harder than the L4/L5 line:
   (`insulated`/`strict`) — the only surveyed tool whose distinctive value assumes
   a team sharing one privileged server. agor spans L4+L5 (rich dashboard *and*
   governance), so it is kept in the L5 list above; its real misfit is this
-  deployment axis, not its layer.
-
----
-
-## BiomeLab as a Pilot Candidate
-
-> **Candidate, not a decision.** Recorded here for a future ADR/spike.
-
-BiomeLab is the strongest architectural fit because it is the only surveyed tool
-that is **already SBX-native** (its recommended mode is one `sbx` sandbox per
-agent per repo) **and** agent-agnostic (it detects Claude/Kiro/Copilot/Codex/
-OpenCode/Gemini rather than embedding one runtime). It also ships a desktop
-dashboard, PR/MR status, per-worktree notes mounted into the sandbox, a
-dependency-status panel for `gh`/`glab`/`sbx`/`rgt`, and a `re_gent` audit trail.
-
-A pilot would test:
-
-- **Does it preserve the qsbx baseline?** Specifically, can BiomeLab's sandbox
-  creation carry (a) the global `AGENTS.md` + skills injection and (b) the
-  `opencode.jsonc`/USAi wiring — via its `--kit` mechanism and/or its
-  worktree-mount behavior — or does `qsbx` need to wrap/feed BiomeLab? **(Open
-  research question; not investigated here.)**
-- **Network/secrets posture** under `AGENTS.md` (it calls `gh`/`glab` APIs).
-- **Worktree ↔ SBX `--clone`** reconciliation at L1.
-
-Independently of which L5 UI is chosen, **ccswarm's governance model** (NDJSON
-audit trails with replay/diff/undo, HITL approval gates, sensitive-path
-deny-list) is worth evaluating against the audit and approval requirements in
-`AGENTS.md`.
+   deployment axis, not its layer.
 
 ---
 
 ## Shimming SBX into Non-Isolating Tools
+
+> **De-emphasized.** The per-agent shim approaches in this section (seams (a)–(c))
+> are considered **too fragile** to pursue as a primary direction — PATH-overrides
+> are bypassable and command-wrapping is brittle across tool upgrades. They are
+> retained here for completeness. The durable seam is the **orchestrator-level
+> runtime template** (seam (d), agor's `executor_command_template`), covered in the
+> [Pilot Candidates](#pilot-candidates) section.
 
 Most orchestrators above provide no execution boundary of their own. Rather than
 wait for each to add native SBX support, we can **inject `sbx` at the point where
@@ -508,8 +489,8 @@ line: `agent_command_override.opencode = "sbx exec -it <sandbox> -- opencode"`.
 1. **Worktree → sandbox mount.** The shim must guarantee the current worktree is
    mounted in the target sandbox. Either create-on-demand keyed by `$PWD`, or
    pre-provision via a lifecycle hook (dmux `worktree_created`). This is also
-   where the [L1 worktree↔`--clone`](#l1-deep-dive-git-worktree-vs-sbx---clone)
-   reconciliation surfaces.
+   where the [L1 worktree mounting](#l1-deep-dive-git-worktrees-sbx---clone-abandoned)
+   detail surfaces.
 2. **Preserving the qsbx two values.** The sandbox the shim targets must still
    carry the global `AGENTS.md` + skills **and** the USAi `opencode.jsonc` — i.e.
    the shim must target a **qsbx-prepared** sandbox, never a bare `sbx`. Otherwise
@@ -534,6 +515,74 @@ ADR can revisit without changing the seam.
 
 ---
 
+## Pilot Candidates
+
+> **Candidates, not decisions.** Recorded here for a future ADR/spike. Two tools
+> stand out for different reasons: **BiomeLab** is already SBX-native; **agor**
+> offers a seam to make its execution SBX-native.
+
+### BiomeLab — the SBX-native dashboard
+
+BiomeLab is the strongest architectural fit because it is the only surveyed tool
+that is **already SBX-native** (its recommended mode is one `sbx` sandbox per
+agent per repo) **and** agent-agnostic (it detects Claude/Kiro/Copilot/Codex/
+OpenCode/Gemini rather than embedding one runtime). It also ships a desktop
+dashboard, PR/MR status, per-worktree notes mounted into the sandbox, a
+dependency-status panel for `gh`/`glab`/`sbx`/`rgt`, and a `re_gent` audit trail.
+
+A pilot would test:
+
+- **Does it preserve the qsbx baseline?** Specifically, can BiomeLab's sandbox
+  creation carry (a) the global `AGENTS.md` + skills injection and (b) the
+  `opencode.jsonc`/USAi wiring — via its `--kit` mechanism and/or its
+  worktree-mount behavior — or does `qsbx` need to wrap/feed BiomeLab? **(Open
+  research question; not investigated here.)**
+- **Network/secrets posture** under `AGENTS.md` (it calls `gh`/`glab` APIs).
+- **Worktree mounting at L1** — how BiomeLab's worktree gets into the sandbox,
+  given SBX `--clone` is abandoned in favor of mounted worktrees.
+
+### agor — the executor-template route to SBX
+
+agor warrants a pilot for a different reason than BiomeLab: it is *not* SBX-native
+today, but its **`executor_command_template`** (see
+[agor's executor template](#agor-executor-template)) is a first-class, supported
+seam for making it so — wrap the executor in `sbx exec … -- agor-executor --stdin`
+and all of agor's execution routes through SBX without forking. In exchange you
+get agor's richer governance surface (branch RBAC, per-prompt token/cost
+accounting, durable history, MCP endpoint) that BiomeLab lacks.
+
+A pilot would test:
+
+- **Worktree availability in the sandbox** *(largely resolved by design)*. agor
+  manages the branch worktree on a **shared filesystem** (`data_home`) *before*
+  the executor runs, and the executor receives `dataHome` in its payload — the
+  same model agor uses for k8s (executor pods mount the `data_home` PVC). So the
+  pilot only needs to mount `data_home` into the `sbx` sandbox; the worktree is
+  already there. No per-worktree template variable is required despite the absent
+  `{cwd}`. Remaining detail: confirm the `data_home` mount path inside the sandbox
+  matches what the executor's payload expects.
+- **Does it preserve the qsbx baseline?** Can the sandboxed executor carry the
+  global `AGENTS.md` + skills and the `opencode.jsonc`/USAi wiring — i.e. is the
+  template pointed at a **qsbx-prepared** sandbox?
+- **Daemon egress hop.** The `prompt` command needs the executor to reach the
+  daemon over a Feathers WebSocket; confirm a sandboxed executor retains exactly
+  that one connection and nothing more under `AGENTS.md` network rules.
+- **`simple` mode is mandatory here.** Use agor's local `simple` mode (no
+  root-privileged Unix isolation) and let SBX be the boundary — never the
+  `insulated`/`strict` sudoers model, which conflicts with `AGENTS.md`.
+
+> **BiomeLab vs agor framing:** BiomeLab is the lower-effort pilot (isolation is
+> already SBX); the open work is config injection. agor is the higher-ceiling
+> pilot (more governance); since agor already manages the worktree on shared
+> storage before the executor runs, its open work is mainly mounting `data_home`
+> into the sandbox and qsbx injection through the template. They are not mutually
+> exclusive — a spike could evaluate both against the same task.
+
+Independently of which dashboard is chosen, the project's audit/approval
+requirements warrant a distinct governance evaluation — see open question 3.
+
+---
+
 ## Constraints & Open Questions
 
 **Constraints (from `AGENTS.md`):**
@@ -552,32 +601,32 @@ ADR can revisit without changing the seam.
 
 **Open questions:**
 1. Can BiomeLab's `--kit` / mount mechanism absorb qsbx's two values, or does
-   qsbx wrap BiomeLab? (BiomeLab's `.biomelab/` notes ride along only because
-   they sit *inside* the mounted worktree — that is **not** a general config-
-   injection seam, and OpenCode won't read `opencode.jsonc` from the project
-   root — so this resolves to "`--kit`, or qsbx prepares the sandbox", not mounts.)
-2. L1 reconciliation: standardize on git worktrees mounted into sandboxes, keep
-   SBX `--clone`, or support both per-task?
-3. Is a governance/audit engine (ccswarm-style) needed as a distinct L4 layer for
-   federal traceability, separate from the L5 UI?
-4. **L2 alternatives:** should a future ADR evaluate **OpenShell** (microVM +
-   policy + inference router), **nono**, **Lima**, or vigilante's container model
-   as SBX alternatives/complements — or is SBX the settled boundary? (OpenShell's
-   inference router vs USAi `baseURL` fit is the key unknown to test.)
-5. **Shim strategy:** do we build one shared wrapper (`qsbx-sandbox-for "$PWD"`)
-   targeted by both the explicit-config seam (AoE) and the PATH-override seam
-   (dmux/ccswarm), or wait for native SBX support (BiomeLab)? Is the bypassable
-   PATH-override seam acceptable as defense-in-depth under `AGENTS.md`?
-6. **agor executor template:** the `executor_command_template` knob is **shipping**
-   (verified on `main` `21edf7b`), so a template like
-   `sbx exec <sandbox> -- agor-executor --stdin` is wirable today. The open work is
-   *integration*: the implemented template variables are `{task_id}`/`{command}`/
-   `{unix_user}`/`{unix_user_uid,gid}`/`{session_id}`/`{branch_id}`/`{log_level}` —
-   **no `{cwd}`/worktree-path** — so how do we mount the per-branch worktree into
-   the `sbx` invocation (agor's own k8s pattern mounts the whole `data_home` and
-   keys off `{branch_id}`) and carry the
-   [qsbx two values](#agor-executor-template) inside, while keeping the executor's
-   one Feathers/WebSocket egress hop to the daemon?
+   qsbx wrap BiomeLab?
+2. **L1 worktrees.** With SBX `--clone` abandoned (too fiddly), standardize on git
+   worktrees mounted into sandboxes. Open detail: worktree layout and how each is
+   mounted into its sandbox.
+3. Is a governance/audit engine needed as a distinct L4 layer for federal
+   traceability, separate from the L5 UI? Candidates: ccswarm's model (NDJSON
+   audit, HITL gates, deny-list) and **re_gent** (`github.com/regent-vcs/re_gent`),
+   which BiomeLab already uses for its activity log — worth evaluating directly.
+4. **L2 runtime — SBX is not settled.** If a better alternative exists we should
+   adopt it. Plan to **evaluate OpenShell** (microVM + policy + inference router;
+   it has made significant progress, and its inference router can route USAi
+   traffic since USAi is OpenAI-shaped) as an SBX successor/complement. `nono` is
+   excluded for now — it does not appear to offer sufficient isolation — though
+   that can be re-checked at evaluation time.
+5. ~~Shim strategy~~ — **de-emphasized.** The PATH-override/wrapper shim approach
+   (seams (a)–(c)) is fragile and is not a preferred direction; agor's
+   orchestrator-level executor template (seam (d)) is the durable seam if a
+   shim-style integration is pursued at all.
+6. **agor executor template:** the `executor_command_template` knob makes a template like
+   `sbx exec <sandbox> -- agor-executor --stdin` wirable today. Worktree access
+   is largely solved by agor's design — it manages the branch worktree on a shared
+   `data_home` filesystem before the executor runs (the same model as its k8s PVC
+   mount), so the sandbox just mounts `data_home`. The open work is *integration*: carry the
+   [qsbx two values](#agor-executor-template) into the sandbox, match the
+   `data_home` mount path to the executor's payload, and keep the executor's one
+   Feathers/WebSocket egress hop to the daemon.
 7. For any adopted tool/service: which ADR (`0005`) and which security review?
 
 **Next steps:** choose a direction among A/B/C, then open ADR `0005` before
@@ -596,8 +645,10 @@ adopting any dependency or standing up any service.
   ccswarm `github.com/nwiizo/ccswarm` (MIT) · AoE `github.com/agent-of-empires/agent-of-empires` (MIT)
 - L2 runtimes: SBX (this repo) · OpenShell `github.com/NVIDIA/OpenShell` (Apache-2.0, alpha) ·
   nono (referenced by AoE docs as a sandbox wrapper)
+- Governance candidates: ccswarm `github.com/nwiizo/ccswarm` ·
+  re_gent `github.com/regent-vcs/re_gent` (BiomeLab's activity log uses it)
 - Isolation sources: agor `multiplayer-unix-isolation.mdx` (Unix-user/sudo model) ·
-  agor `executor_command_template` — **shipping** (`main` `21edf7b`):
+  agor `executor_command_template` — shipped in (`main` `21edf7b`):
   `apps/agor-daemon/src/utils/spawn-executor.ts` (`spawnExecutorWithTemplate` vs
   `spawnExecutorLocal`), `apps/agor-daemon/src/index.ts` (`configureExecutor`),
   `packages/core/src/config/types.ts` (`AgorExecutionSettings`),
@@ -611,5 +662,3 @@ adopting any dependency or standing up any service.
   `providers/claude.rs` (`Command::new("claude")`, `-p`) · Hive `opencode-service.ts`
   (`opencode serve` + SDK) / `claude-cli-spawner.ts` (`claudeBinary`) · OpenChamber
   README (`OPENCODE_SKIP_START`/`OPENCODE_HOST`/`OPENCODE_PORT`)
-</content>
-</invoke>
