@@ -3,7 +3,7 @@ title: "Agentic Coding Quickstart - Agent Rules"
 description: "Behavioral rules for AI coding agents operating with SBX + USAi"
 status: canonical
 tier: 1
-last_updated: "2026-04-21"
+last_updated: "2026-06-26"
 audience: "developers"
 keywords: ["AGENTS.md", "sbx", "usai", "sandbox", "agent-rules", "workspace"]
 related_files: ["docs/KNOWN_FAILURE_MODES.md", "docs/adr/0001-sbx-usai-agent-execution-architecture.md"]
@@ -15,7 +15,7 @@ review_cycle: "quarterly"
 
 > **System:** Agentic Coding Quickstart | **Impact Level:** FIPS Low | **Agency:** GSA
 >
-> **Last Updated:** 2026-04-21 | **Reviewed By:** William Zujkowski
+> **Last Updated:** 2026-06-26 | **Reviewed By:** William Zujkowski
 >
 > This document defines the behavioral rules for AI coding agents operating within this project. The AI agent MUST follow these rules without exception.
 
@@ -294,7 +294,7 @@ The agent MUST ask the user before:
 - [ ] Modifying CI/CD pipeline configurations
 - [ ] Deleting files or directories
 - [ ] Committing or pushing code
-- [ ] Creating new SBX containers or modifying SBX configuration
+- [ ] Modifying SBX configuration, or creating sandboxes outside the sanctioned bootstrap (`qsbx run` / `sbx run`, which auto-create a sandbox as part of normal execution and are pre-approved)
 - [ ] Accessing endpoints outside the approved list
 
 ---
@@ -383,6 +383,15 @@ Before adding any dependency, the agent MUST:
 - [ ] Verification must not expose secrets
 - [ ] Test inside SBX containers, not directly on host
 
+### Periodic Re-Verification
+
+Documented SBX patterns silently rot as `sbx`, USAi, or OpenCode versions move. A pattern marked "works" is only trustworthy if it still runs.
+
+The agent SHOULD:
+- Re-verify documented SBX patterns by **running the real flow (live, not mocked)** on the quarterly review cadence (or on demand when a pattern is in doubt)
+- Capture the actual output and compare it against the documented claim
+- When a pattern marked "works" no longer reproduces, record it in `docs/KNOWN_FAILURE_MODES.md` **and** open a tracking issue (per Failure Handling below)
+
 ---
 
 ## Incident Response
@@ -444,6 +453,7 @@ The agent MUST:
 
 ### Execution
 
+- `qsbx run opencode .` is the sanctioned bootstrap — it auto-creates a sandbox (mounting this clone as global config) and is pre-approved
 - `sbx run` for running agents (creates sandbox automatically)
 - `sbx create` + `sbx exec` for manual sandbox management
 - Avoid long-lived sandboxes unless required for testing
@@ -485,6 +495,10 @@ If something fails:
 3. Document the failure clearly
 4. Propose a minimal fix
 5. Update `docs/KNOWN_FAILURE_MODES.md` if it's a new pattern
+
+### Track Deferred Work — Deferring Is Fine, Untracked Is Not
+
+Every identified follow-up — **including work being deferred or blocked on something else** ("revisit once X lands") — MUST be captured durably: a GitHub issue, or an entry in `docs/KNOWN_FAILURE_MODES.md`. Deferring is acceptable; leaving the work untracked is not. A code `TODO` or a conversation note is not tracking — it gets forgotten. Record the trigger that should unblock the work when it is deferred for a dependency.
 
 ---
 
