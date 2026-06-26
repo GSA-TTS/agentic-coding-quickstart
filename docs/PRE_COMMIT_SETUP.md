@@ -3,9 +3,18 @@
 This repository includes an optional pre-commit configuration that provides:
 - Secret detection (via gitleaks)
 - Basic file hygiene checks (trailing whitespace, end-of-file-fixer, YAML/JSON validation)
+- Markdown linting (markdownlint-cli2)
+- Shell script linting (shellcheck — uses your **locally installed** binary)
 
 > [!NOTE]
 > Pre-commit hooks are **opt-in** — install them yourself with `pre-commit install`.
+>
+> **Behind a TLS-intercepting proxy (e.g. ZScaler)?** The shellcheck hook runs
+> the shellcheck binary you already have on `PATH` rather than downloading one,
+> so it works without network access. Install shellcheck once via your package
+> manager: `brew install shellcheck` (macOS) or `sudo apt-get install shellcheck`
+> (Ubuntu). See [Known Failure Modes](KNOWN_FAILURE_MODES.md) if you hit a
+> `CERTIFICATE_VERIFY_FAILED` error.
 
 ---
 
@@ -97,6 +106,8 @@ The `.pre-commit-config.yaml` file uses SHA-pinned revisions for security:
 
 - **pre-commit-hooks v6.0.0**: Basic file hygiene
 - **gitleaks v8.30.1**: Secret detection
+- **markdownlint-cli2 v0.22.1**: Markdown linting
+- **shellcheck (local hook)**: Shell linting via the system `shellcheck` binary — no download, so it works behind TLS-intercepting proxies. Requires shellcheck on `PATH` (`brew install shellcheck` / `apt-get install shellcheck`).
 
 To update hook versions, edit `.pre-commit-config.yaml` and update both the rev (SHA) and the version comment.
 
@@ -109,6 +120,19 @@ To update hook versions, edit `.pre-commit-config.yaml` and update both the rev 
 Install pre-commit first:
 ```bash
 pip install pre-commit
+```
+
+### shellcheck: `CERTIFICATE_VERIFY_FAILED` behind a corporate proxy (ZScaler)
+
+If an older config pulled the `shellcheck-py` package, its build step downloaded
+the shellcheck binary and failed behind a TLS-intercepting proxy with
+`SSL: CERTIFICATE_VERIFY_FAILED`. This repo now uses a **local** shellcheck hook
+that runs the binary already on your `PATH` — no download. If the hook reports
+`shellcheck: command not found`, install it once:
+
+```bash
+brew install shellcheck        # macOS
+sudo apt-get install shellcheck # Ubuntu
 ```
 
 ### Hooks failing on existing files

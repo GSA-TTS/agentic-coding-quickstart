@@ -38,9 +38,19 @@ repos:
       - id: markdownlint-cli2
         args: ["--fix"]
 
-  # Shell script linting (shellcheck-py: native binary, no Docker required)
-  - repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: 745eface02aef23e168a8afb6b5737818efbea95  # v0.11.0.1
+  # Shell script linting.
+  #
+  # We invoke the SYSTEM shellcheck binary via a local hook rather than the
+  # shellcheck-py pip package. shellcheck-py downloads the shellcheck binary at
+  # build time, which fails behind TLS-intercepting proxies (e.g. ZScaler) with
+  # `CERTIFICATE_VERIFY_FAILED` — see docs/KNOWN_FAILURE_MODES.md and #144.
+  # Using the binary the developer already installed (brew/apt) needs no network.
+  - repo: local
     hooks:
       - id: shellcheck
+        name: shellcheck (system binary)
+        description: Lint shell scripts using the locally installed shellcheck.
+        entry: shellcheck
+        language: system
+        types: [shell]
         args: ["--severity=warning"]

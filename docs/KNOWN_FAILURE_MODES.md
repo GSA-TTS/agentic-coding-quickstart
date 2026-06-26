@@ -631,6 +631,46 @@ sbx rm <sandbox-name>
 
 ---
 
+## 21. Pre-commit `shellcheck` Fails with `CERTIFICATE_VERIFY_FAILED` (ZScaler)
+
+### Symptoms
+
+Installing or running the pre-commit `shellcheck` hook fails while *downloading*
+the shellcheck binary:
+
+```
+error: Failed to install hook `shellcheck`
+  ...
+  => downloading shellcheck...
+  error: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify
+  failed: Basic Constraints of CA cert not marked critical>
+```
+
+### Root Cause
+
+The older config used the `shellcheck-py` package, whose build step **downloads**
+the shellcheck binary over HTTPS. On federal/GFE networks behind a
+TLS-intercepting proxy (e.g. ZScaler), that download fails certificate
+verification — the same root cause as failure mode #16, but triggered at
+hook-install time. (Reported in #144.)
+
+### Fix
+
+This repo now uses a **local** shellcheck hook that runs the shellcheck binary
+already on your `PATH` instead of downloading one — no network, so the proxy is
+not in the path. Install shellcheck once via your package manager:
+
+```bash
+brew install shellcheck         # macOS
+sudo apt-get install shellcheck # Ubuntu
+```
+
+If the hook reports `shellcheck: command not found`, the binary simply isn't
+installed yet — install it with one of the commands above. You no longer need to
+disable ZScaler to commit.
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:

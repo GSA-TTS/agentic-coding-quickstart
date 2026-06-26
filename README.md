@@ -124,14 +124,42 @@ sbx login
 <details>
 <summary>Show Linux (Ubuntu) install steps (click to expand)</summary>
 
+Add Docker's official apt repository using its signed GPG key (no piping a
+remote script into root), then install `docker-sbx`:
+
 ```bash
-curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
-sudo apt-get install docker-sbx
-sudo usermod -aG kvm $USER && newgrp kvm
+# 1. Add Docker's apt repo with its verified signing key
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# 2. Install the sbx package from the now-trusted repo
+sudo apt-get update
+sudo apt-get install -y docker-sbx
+sudo usermod -aG kvm "$USER" && newgrp kvm
 sbx login
 ```
 
+> **Why not `curl … | sudo sh`?** Piping a remote script straight into a
+> privileged shell executes unverified code as root. The steps above add the
+> same Docker apt repo, but gate it behind Docker's published GPG signing key
+> so apt verifies package authenticity — consistent with the federal
+> supply-chain posture (no unpinned, unverified remote execution). The
+> commands above mirror what `get.docker.com` does, made explicit and
+> reviewable. See [Docker's apt install docs](https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository).
+
 </details>
+
+> **Tip (macOS):** install via Homebrew (`brew install docker/tap/sbx`, shown
+> above) rather than a downloaded installer — Homebrew verifies the formula and
+> keeps `sbx` updatable with `brew upgrade`.
 
 **Check it worked:** after `sbx login` finishes with no error, run `sbx version`.
 You should see a line like `sbx version: v0.32.0 <sha>`.
