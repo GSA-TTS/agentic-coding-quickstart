@@ -19,6 +19,14 @@
   // ===========================================================================
   "$schema": "https://opencode.ai/config.json",
 
+  // Ownership sentinel for the usai-opencode-provider sbx kit. The kit's
+  // startup guard reads OPENCODE_CONFIG and looks for this key to tell "the
+  // file we wrote" apart from a foreign opencode.jsonc some other mixin may
+  // have pointed OPENCODE_CONFIG at (env-var last-wins). OpenCode ignores
+  // unknown top-level keys, so this is harmless to the agent. See
+  // docs/adr/0006 (config co-tenancy). Do not remove.
+  "$usaiKit": true,
+
   // ===========================================================================
   // PROVIDER CONFIGURATION
   // ===========================================================================
