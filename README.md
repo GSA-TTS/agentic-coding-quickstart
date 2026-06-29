@@ -280,13 +280,15 @@ quickstart for when you want to customize or troubleshoot.
 ### What `qsbx` mounts and links
 
 This clone holds your shared global config (`files/home/usai-config/opencode.jsonc`)
-plus the playbook submodule (`agentic-coding-playbook/`). `qsbx` mounts the clone
-into the sandbox and symlinks the config into the locations OpenCode searches under
-the sandbox home:
+plus the playbook submodule (`agentic-coding-playbook/`). `qsbx` applies the clone
+as an sbx **kit** (`--kit`) and also mounts it read-only, delivering the shared
+config two ways:
 
-- `~/.config/opencode/opencode.jsonc` → the shared config
-- `~/.config/opencode/AGENTS.md` → the playbook's federal agent rules
-- `~/.agents/skills` → the playbook's skills
+- **OpenCode provider config** — via the kit: it drops the config at
+  `~/usai-config/opencode.jsonc` and sets `OPENCODE_CONFIG` to point there.
+- **Playbook rules + skills** — symlinked into the sandbox home (not yet a kit):
+  - `~/.config/opencode/AGENTS.md` → the playbook's federal agent rules
+  - `~/.agents/skills` → the playbook's skills
 
 So every sandbox you create picks up the same config, rules, and skills. `qsbx`
 uses the clone it lives in, so run it from this checkout (or via a symlink to it);
@@ -302,7 +304,8 @@ The built-in `set -g` form only recognizes known providers.
 
 For project work, this clone is mounted **read-only** so a (possibly
 prompt-injected) agent can't rewrite the permission policy, rules, or skills that
-every other sandbox loads.
+every other sandbox loads. (The OpenCode provider config is delivered by the kit
+rather than from this mount.)
 
 ### Key pre-validation
 
@@ -357,8 +360,8 @@ When you're done, you probably want to version-control your customizations. We r
 
 This repository root is also an **sbx mixin kit** named
 `usai-opencode-provider` (`spec.yaml` + `files/`). The kit configures OpenCode
-for USAi *declaratively* at sandbox creation — an alternative to `qsbx`'s
-post-create symlinking for the provider config. It:
+for USAi *declaratively* at sandbox creation. `qsbx` applies it automatically
+(`--kit`); you can also apply it directly with plain `sbx`. It:
 
 - allow-lists egress to `api.gsa.usai.gov` (`caps.network`),
 - sets `OPENCODE_CONFIG=/home/agent/usai-config/opencode.jsonc`, and
@@ -390,10 +393,10 @@ sbx kit validate .
 ```
 
 > The kit covers provider config + network only. Federal `AGENTS.md` and skills
-> are still mounted by `qsbx` today (a second mixin kit for that content is
-> planned). `qsbx` and the kit can coexist: `qsbx` symlinks the same config to
-> the global path, while the kit points `OPENCODE_CONFIG` at the namespaced
-> copy — different precedence layers loading identical content.
+> are still mounted by `qsbx` via read-only symlinks (a second mixin kit for that
+> content is planned). When you use `qsbx`, the kit and the symlinks are applied
+> together: the kit delivers the OpenCode provider config (`OPENCODE_CONFIG`),
+> and `qsbx` symlinks only the playbook rules/skills.
 
 ---
 

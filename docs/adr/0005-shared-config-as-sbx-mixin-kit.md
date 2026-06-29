@@ -97,10 +97,14 @@ library. If a deployed engine rejects v2, the fallback is v1
 
 ### Coexistence with `qsbx`
 
-`qsbx` is unchanged in mechanism; it now symlinks from the new source path. A
-sandbox created with both `qsbx` *and* `--kit` ends up with the same config
-content at two precedence layers (global via the qsbx symlink, custom via the
-kit's `OPENCODE_CONFIG`) — harmless, since the content is identical.
+> **Update (2026-06-29):** `qsbx` now *uses* the kit rather than running a
+> parallel path. `qsbx`'s `sbx create` passes `--kit <clone>`, and its home-dir
+> symlinking no longer creates `~/.config/opencode/opencode.jsonc` — the OpenCode
+> provider config arrives solely via the kit's `OPENCODE_CONFIG`. `qsbx` still
+> mounts the clone read-only and symlinks the playbook's `AGENTS.md` and
+> `~/.agents/skills`, which are not yet packaged as a kit. So there is now a
+> single source of provider config (the kit), whether the sandbox is created by
+> `qsbx` or by plain `sbx run --kit .`.
 
 ## Considered Options
 
@@ -129,8 +133,9 @@ kit's `OPENCODE_CONFIG`) — harmless, since the content is identical.
 
 - The manual `sbx secret set-custom` step remains until the credentials-proxy
   follow-up lands.
-- Two config-delivery paths (`qsbx` symlink and the kit) coexist during the
-  transition; documented as harmless but is extra surface to explain.
+- The playbook rules/skills are still delivered by `qsbx`'s read-only mount +
+  symlinks, not the kit; full convergence waits on the planned second
+  (playbook-content) mixin kit.
 - v2 schema assumes a v0.34-era engine; older engines need the v1 fallback.
 
 ## Validation

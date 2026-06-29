@@ -43,20 +43,24 @@ my-workspace/                       # Parent folder (user creates this)
 └── my-app/                         # User's project(s)
 ```
 
-Inside the sandbox, `qsbx` symlinks the shared config into the locations OpenCode
-actually searches:
+Inside the sandbox, `qsbx` delivers the shared config two ways:
 
-- `~/.config/opencode/opencode.jsonc` → `<clone>/files/home/usai-config/opencode.jsonc`
-- `~/.config/opencode/AGENTS.md` → `<clone>/agentic-coding-playbook/AGENTS.md`
-- `~/.agents/skills` → `<clone>/agentic-coding-playbook/.agents/skills`
+- **OpenCode provider config** — applied as an sbx **kit** (`qsbx` passes
+  `--kit <clone>` to `sbx create`). The kit drops
+  `<clone>/files/home/usai-config/opencode.jsonc` at `~/usai-config/opencode.jsonc`
+  and sets `OPENCODE_CONFIG` to point there (see `docs/adr/0005`).
+- **Playbook rules + skills** — symlinked into the locations OpenCode searches
+  (not yet packaged as a kit):
+  - `~/.config/opencode/AGENTS.md` → `<clone>/agentic-coding-playbook/AGENTS.md`
+  - `~/.agents/skills` → `<clone>/agentic-coding-playbook/.agents/skills`
 
 So edits to the shared config or playbook (after a submodule bump) are picked up
-by every sandbox. (An empirical spike found OpenCode does **not** read these
-relative to `OPENCODE_CONFIG_DIR`; see `docs/adr/0004`.)
+by every sandbox. (An empirical spike found OpenCode does **not** read the
+rules/skills relative to `OPENCODE_CONFIG_DIR`, which is why they are symlinked
+into the home search paths rather than carried by the kit; see `docs/adr/0004`.)
 
-The same config file doubles as the kit payload: when a sandbox is created with
-`sbx run --kit .`, the kit drops it at `~/usai-config/opencode.jsonc` and sets
-`OPENCODE_CONFIG` to point there (see `docs/adr/0005`).
+Applying the kit directly (without `qsbx`) is equivalent for the provider config:
+`sbx run --kit . opencode <project>`.
 
 ### Agent Resource Access
 
@@ -64,7 +68,7 @@ When working on user projects, the agent has access to:
 
 | Resource | Location | Use For |
 |----------|----------|---------|
-| Global config | `~/.config/opencode/opencode.jsonc` (linked to clone) | Model/provider config |
+| Global config | `~/usai-config/opencode.jsonc` (via kit `OPENCODE_CONFIG`) | Model/provider config |
 | Behavioral rules | `~/.config/opencode/AGENTS.md` (linked to playbook) | Federal agent rules |
 | Skills | `~/.agents/skills` (linked to playbook) | Step-by-step procedures |
 | Setup guides | `./docs/` | SBX configuration, troubleshooting |

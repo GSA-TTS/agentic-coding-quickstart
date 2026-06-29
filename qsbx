@@ -7,16 +7,20 @@
 # up copying those files into every sandbox and manually keeping them in sync.
 #
 # Solution: when qsbx creates a sandbox it
-#   1. mounts this quickstart clone as an extra READ-ONLY workspace, and
-#   2. symlinks the shared config into the locations OpenCode actually searches
-#      under the sandbox's home (~/.config/opencode and ~/.agents):
-#        ~/.config/opencode/opencode.jsonc -> <clone>/files/home/usai-config/opencode.jsonc
+#   1. applies this clone as an sbx KIT (--kit), which configures the USAi
+#      OpenCode provider declaratively (drops ~/usai-config/opencode.jsonc and
+#      sets OPENCODE_CONFIG; allow-lists USAi egress). See spec.yaml, docs/adr/0005.
+#   2. mounts this quickstart clone as an extra READ-ONLY workspace, and
+#   3. symlinks the playbook's rules + skills into the locations OpenCode
+#      actually searches under the sandbox's home (~/.config/opencode and ~/.agents):
 #        ~/.config/opencode/AGENTS.md       -> <clone>/agentic-coding-playbook/AGENTS.md
 #        ~/.agents/skills                   -> <clone>/agentic-coding-playbook/.agents/skills
-# so the agent finds your global config, behavioral rules, and the playbook's
-# skills from one shared place. Before attaching with `qsbx run`, it also checks
-# that the sandbox's USAi key works and, if not, offers to rotate it. All other
-# subcommands pass straight through to sbx.
+# so the agent finds your USAi provider config (via the kit), behavioral rules,
+# and the playbook's skills from one shared place. The OpenCode provider config
+# is delivered by the kit rather than a home symlink; the playbook rules/skills
+# are not yet packaged as a kit, so they are still symlinked. Before attaching
+# with `qsbx run`, it also checks that the sandbox's USAi key works and, if not,
+# offers to rotate it. All other subcommands pass straight through to sbx.
 #
 # The clone is mounted READ-ONLY for project work so that a (potentially
 # prompt-injected) agent working on your project cannot rewrite the permission
@@ -236,8 +240,10 @@ strip_name() {
   done
 }
 
-# Create a detached sandbox with the config clone mounted READ-ONLY, then
-# symlink the shared config into the home-directory locations OpenCode searches.
+# Create a detached sandbox with the config clone applied as a KIT (for the USAi
+# OpenCode provider config + egress) and mounted READ-ONLY (so the playbook
+# rules/skills can be symlinked in), then symlink those rules/skills into the
+# home locations OpenCode searches.
 # Usage: create_with_config NAME CREATE_ARGS...
 create_with_config() {
   require_clone
@@ -245,27 +251,31 @@ create_with_config() {
   shift
 
   strip_name "$@"
-  # Mount the clone read-only (":ro") as an extra workspace so a project-working
-  # agent can't rewrite the shared permission policy / rules / skills. sbx only
-  # honors ":ro" on extra workspaces, which the clone is here (the project is the
-  # primary workspace). Guard the array expansion for bash 3.2 (macOS default):
-  # under `set -u` an empty array expansion is an "unbound variable" error there.
+  # --kit applies this clone's spec.yaml (usai-opencode-provider): it drops the
+  # USAi opencode.jsonc and sets OPENCODE_CONFIG, so the provider config no
+  # longer needs a home symlink. We also mount the clone read-only (":ro") as an
+  # extra workspace so the playbook rules/skills are reachable for symlinking and
+  # a project-working agent can't rewrite them. sbx only honors ":ro" on extra
+  # workspaces, which the clone is here (the project is the primary workspace).
+  # Guard the array expansion for bash 3.2 (macOS default): under `set -u` an
+  # empty array expansion is an "unbound variable" error there.
   if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
-    sbx create --name "$name" "${STRIPPED_ARGS[@]}" "$QUICKSTART_CLONE:ro"
+    sbx create --name "$name" --kit "$QUICKSTART_CLONE" "${STRIPPED_ARGS[@]}" "$QUICKSTART_CLONE:ro"
   else
-    sbx create --name "$name" "$QUICKSTART_CLONE:ro"
+    sbx create --name "$name" --kit "$QUICKSTART_CLONE" "$QUICKSTART_CLONE:ro"
   fi
 
   link_shared_config "$name"
 }
 
-# Symlink the shared config from the mounted clone into the home locations
-# OpenCode searches inside the sandbox.
+# Symlink the shared playbook rules + skills from the mounted clone into the home
+# locations OpenCode searches inside the sandbox. The OpenCode provider config is
+# delivered by the kit (--kit, see create_with_config), not symlinked here.
 link_shared_config() {
   local name="$1"
   # sbx mounts extra workspaces at their absolute host path inside the sandbox,
   # so the clone is reachable at the same path. Pass it through and symlink the
-  # shared config into OpenCode's home search locations.
+  # playbook rules/skills into OpenCode's home search locations.
   sbx exec \
     -e CLONE="$QUICKSTART_CLONE" \
     "$name" \
@@ -291,7 +301,9 @@ link_into() {
   ln -sfn "$source" "$target"
 }
 
-link_into "$HOME/.config/opencode/opencode.jsonc" "$CLONE/files/home/usai-config/opencode.jsonc"
+# OpenCode provider config (opencode.jsonc) is provided by the kit's
+# OPENCODE_CONFIG, so it is intentionally NOT symlinked here. Only the playbook
+# rules + skills (not yet packaged as a kit) are linked into the home paths.
 link_into "$HOME/.config/opencode/AGENTS.md"      "$CLONE/agentic-coding-playbook/AGENTS.md"
 link_into "$HOME/.agents/skills"                  "$CLONE/agentic-coding-playbook/.agents/skills"
 EOF
@@ -323,7 +335,8 @@ args_target_clone() {
 
 # Create a sandbox for editing the shared config itself: the clone is the
 # primary workspace (sbx primary workspaces are always read-write), so the agent
-# can modify it. No home-dir symlinks — the agent is working in the clone
+# can modify it. The kit is still applied (--kit) so the editing agent has a
+# working USAi provider; no home-dir symlinks — the agent is working in the clone
 # directly, and we don't want the project's own config self-referencing the
 # home links. Default name is "qsbx-quickstart-config" unless the user gave one.
 create_config_sandbox() {
@@ -337,9 +350,9 @@ create_config_sandbox() {
 
   strip_name "$@"
   if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
-    sbx create --name "$name" "${STRIPPED_ARGS[@]}"
+    sbx create --name "$name" --kit "$QUICKSTART_CLONE" "${STRIPPED_ARGS[@]}"
   else
-    sbx create --name "$name"
+    sbx create --name "$name" --kit "$QUICKSTART_CLONE"
   fi
 }
 

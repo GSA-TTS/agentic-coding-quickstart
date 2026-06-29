@@ -590,17 +590,39 @@ Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
 
 ### Root Cause
 
-The `~/.config/opencode/opencode.jsonc` inside the sandbox is not the symlink into your quickstart clone, so the USAi provider config is never loaded. This happens when the sandbox was created without `qsbx` (which sets up the symlinks for `opencode.jsonc`, `AGENTS.md`, and `~/.agents/skills`).
+The USAi provider config is not loaded in the sandbox. With `qsbx`, the config is
+delivered by applying this clone as an sbx **kit** (`--kit`), which sets
+`OPENCODE_CONFIG` to `~/usai-config/opencode.jsonc`; `qsbx` separately symlinks
+the playbook's `AGENTS.md` and `~/.agents/skills`. This symptom appears when the
+sandbox was created without `qsbx` (so neither the kit nor the symlinks were
+applied), or with `sbx run` directly but without `--kit .`.
 
 ### Fix
 
-Re-create the sandbox with `qsbx run`, which links the config automatically:
+If the sandbox already exists, inject the kit into it without recreating it
+(replace `SANDBOX` with the sandbox name from `sbx ls`):
+
+```bash
+sbx kit add SANDBOX /path/to/agentic-coding-quickstart
+```
+
+> `sbx kit add` is currently EXPERIMENTAL and may change in future releases. It
+> applies the kit's files, init files, and startup commands to the running
+> container — enough to deliver the USAi provider config. (Restart the agent so
+> it re-reads `OPENCODE_CONFIG`.)
+
+Otherwise, create the sandbox with the kit applied. With `qsbx` this is
+automatic:
 
 ```bash
 ./qsbx run opencode /path/to/your/project
 ```
 
-Or link the files manually inside the sandbox if you created it another way.
+Or apply the kit directly with plain `sbx`:
+
+```bash
+sbx run --kit /path/to/agentic-coding-quickstart opencode /path/to/your/project
+```
 
 ---
 

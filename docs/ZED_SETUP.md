@@ -79,10 +79,10 @@ sbx run opencode .
 ## Mounting This Config into Your Sandbox
 
 This repository's shared config (`files/home/usai-config/opencode.jsonc`) and the
-playbook submodule are meant to be mounted into sandboxes rather than copied into each
-project. Use `qsbx` to mount this clone and symlink the config into the sandbox
-home (`~/.config/opencode/opencode.jsonc`, `~/.config/opencode/AGENTS.md`,
-`~/.agents/skills`) automatically:
+playbook submodule are meant to be applied to sandboxes rather than copied into each
+project. Use `qsbx` to apply this clone as a kit (delivering the OpenCode provider
+config via `OPENCODE_CONFIG`) and symlink the playbook rules/skills into the sandbox
+home (`~/.config/opencode/AGENTS.md`, `~/.agents/skills`) automatically:
 
 ```bash
 ./qsbx run opencode /path/to/your/project
