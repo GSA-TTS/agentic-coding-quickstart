@@ -10,7 +10,7 @@
 #   1. mounts this quickstart clone as an extra READ-ONLY workspace, and
 #   2. symlinks the shared config into the locations OpenCode actually searches
 #      under the sandbox's home (~/.config/opencode and ~/.agents):
-#        ~/.config/opencode/opencode.jsonc -> <clone>/opencode/opencode.jsonc
+#        ~/.config/opencode/opencode.jsonc -> <clone>/files/home/usai-config/opencode.jsonc
 #        ~/.config/opencode/AGENTS.md       -> <clone>/agentic-coding-playbook/AGENTS.md
 #        ~/.agents/skills                   -> <clone>/agentic-coding-playbook/.agents/skills
 # so the agent finds your global config, behavioral rules, and the playbook's
@@ -90,8 +90,8 @@ KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro openco
 
 # Assert QUICKSTART_CLONE points at a usable clone (has the shared config).
 require_clone() {
-  if [ ! -f "$QUICKSTART_CLONE/opencode/opencode.jsonc" ]; then
-    echo "error: could not find opencode/opencode.jsonc under '$QUICKSTART_CLONE'." >&2
+  if [ ! -f "$QUICKSTART_CLONE/files/home/usai-config/opencode.jsonc" ]; then
+    echo "error: could not find files/home/usai-config/opencode.jsonc under '$QUICKSTART_CLONE'." >&2
     echo "       Run qsbx from your quickstart clone, or export QUICKSTART_CLONE." >&2
     exit 1
   fi
@@ -272,7 +272,7 @@ link_shared_config() {
     bash <<'EOF'
 set -eu
 
-if [ ! -f "$CLONE/opencode/opencode.jsonc" ]; then
+if [ ! -f "$CLONE/files/home/usai-config/opencode.jsonc" ]; then
   echo "qsbx: clone not found at $CLONE inside sandbox; skipping config symlinks" >&2
   exit 0
 fi
@@ -291,7 +291,7 @@ link_into() {
   ln -sfn "$source" "$target"
 }
 
-link_into "$HOME/.config/opencode/opencode.jsonc" "$CLONE/opencode/opencode.jsonc"
+link_into "$HOME/.config/opencode/opencode.jsonc" "$CLONE/files/home/usai-config/opencode.jsonc"
 link_into "$HOME/.config/opencode/AGENTS.md"      "$CLONE/agentic-coding-playbook/AGENTS.md"
 link_into "$HOME/.agents/skills"                  "$CLONE/agentic-coding-playbook/.agents/skills"
 EOF

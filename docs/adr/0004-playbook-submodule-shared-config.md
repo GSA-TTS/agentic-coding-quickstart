@@ -12,6 +12,12 @@ risk_treatment: mitigate
 
 # ADR-0004: Vendor the Playbook as a Submodule and Symlink Shared Config into the Sandbox Home
 
+> **Update (ADR-0005):** the shared OpenCode config moved from
+> `opencode/opencode.jsonc` to `files/home/usai-config/opencode.jsonc` when the
+> repository root became an `sbx` mixin kit (`usai-opencode-provider`). The
+> submodule + home-symlink mechanism described here is unchanged; only the
+> source path of the config file changed. See `docs/adr/0005`.
+
 ## Context and Problem Statement
 
 ADR-0001 established SBX as the isolation layer, and this repository has been

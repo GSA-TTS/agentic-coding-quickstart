@@ -24,16 +24,19 @@ review_cycle: "quarterly"
 ## Workspace Structure
 
 This repository holds the **shared global config** (OpenCode settings, agent
-rules, docs) plus the playbook as a pinned submodule. `qsbx` mounts this clone
+rules, docs) plus the playbook as a pinned submodule. The repository root is
+also an **sbx mixin kit** (`spec.yaml` + `files/`) named `usai-opencode-provider`
+that configures OpenCode for USAi at sandbox creation. `qsbx` mounts this clone
 into SBX sandboxes and symlinks the config into the home locations OpenCode
 searches. A typical layout:
 
 ```
 my-workspace/                       # Parent folder (user creates this)
-├── agentic-coding-quickstart/      # THIS REPO - global config, mounted into sandboxes
+├── agentic-coding-quickstart/      # THIS REPO - global config + sbx kit, mounted into sandboxes
 │   ├── AGENTS.md                   # You are here (rules for working ON this repo)
-│   ├── opencode/opencode.jsonc     # USAi provider + model + permission config (shared)
-│   ├── opencode.jsonc -> opencode/opencode.jsonc   # root convenience symlink
+│   ├── spec.yaml                   # sbx mixin kit: USAi provider + network egress
+│   ├── files/home/usai-config/opencode.jsonc  # USAi provider + model config (shared)
+│   ├── opencode.jsonc -> files/home/usai-config/opencode.jsonc   # root convenience symlink
 │   ├── agentic-coding-playbook/    # Pinned submodule: skills + federal AGENTS.md
 │   ├── qsbx                        # sbx wrapper: mounts clone, links config into sandbox
 │   └── docs/                       # Setup guides and references
@@ -43,13 +46,17 @@ my-workspace/                       # Parent folder (user creates this)
 Inside the sandbox, `qsbx` symlinks the shared config into the locations OpenCode
 actually searches:
 
-- `~/.config/opencode/opencode.jsonc` → `<clone>/opencode/opencode.jsonc`
+- `~/.config/opencode/opencode.jsonc` → `<clone>/files/home/usai-config/opencode.jsonc`
 - `~/.config/opencode/AGENTS.md` → `<clone>/agentic-coding-playbook/AGENTS.md`
 - `~/.agents/skills` → `<clone>/agentic-coding-playbook/.agents/skills`
 
 So edits to the shared config or playbook (after a submodule bump) are picked up
 by every sandbox. (An empirical spike found OpenCode does **not** read these
 relative to `OPENCODE_CONFIG_DIR`; see `docs/adr/0004`.)
+
+The same config file doubles as the kit payload: when a sandbox is created with
+`sbx run --kit .`, the kit drops it at `~/usai-config/opencode.jsonc` and sets
+`OPENCODE_CONFIG` to point there (see `docs/adr/0005`).
 
 ### Agent Resource Access
 

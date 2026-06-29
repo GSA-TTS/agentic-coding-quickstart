@@ -279,10 +279,10 @@ quickstart for when you want to customize or troubleshoot.
 
 ### What `qsbx` mounts and links
 
-This clone holds your shared global config (`opencode/opencode.jsonc`) plus the
-playbook submodule (`agentic-coding-playbook/`). `qsbx` mounts the clone into the
-sandbox and symlinks the config into the locations OpenCode searches under the
-sandbox home:
+This clone holds your shared global config (`files/home/usai-config/opencode.jsonc`)
+plus the playbook submodule (`agentic-coding-playbook/`). `qsbx` mounts the clone
+into the sandbox and symlinks the config into the locations OpenCode searches under
+the sandbox home:
 
 - `~/.config/opencode/opencode.jsonc` → the shared config
 - `~/.config/opencode/AGENTS.md` → the playbook's federal agent rules
@@ -353,6 +353,50 @@ When you're done, you probably want to version-control your customizations. We r
 
 ---
 
+## Using this repo as an sbx kit
+
+This repository root is also an **sbx mixin kit** named
+`usai-opencode-provider` (`spec.yaml` + `files/`). The kit configures OpenCode
+for USAi *declaratively* at sandbox creation — an alternative to `qsbx`'s
+post-create symlinking for the provider config. It:
+
+- allow-lists egress to `api.gsa.usai.gov` (`caps.network`),
+- sets `OPENCODE_CONFIG=/home/agent/usai-config/opencode.jsonc`, and
+- drops that config from `files/home/usai-config/opencode.jsonc`.
+
+Because `OPENCODE_CONFIG` loads *between* OpenCode's global and project configs,
+the kit **composes with** (rather than overwrites) any global config the
+opencode template writes — so USAi support doesn't preclude picking up upstream
+changes. See [docs/adr/0005](docs/adr/0005-shared-config-as-sbx-mixin-kit.md).
+
+**Prerequisite (one-time):** the kit declares the *requirement* for the USAi
+key but never stores its value. Supply it once via sbx's secret store:
+
+```bash
+sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
+```
+
+**Apply the kit** (local path — unaffected by the v0.34 `kit.allowedSources`
+restriction, which only gates remote git/OCI sources):
+
+```bash
+sbx run --kit . opencode /path/to/your/project
+```
+
+**Validate the kit:**
+
+```bash
+sbx kit validate .
+```
+
+> The kit covers provider config + network only. Federal `AGENTS.md` and skills
+> are still mounted by `qsbx` today (a second mixin kit for that content is
+> planned). `qsbx` and the kit can coexist: `qsbx` symlinks the same config to
+> the global path, while the kit points `OPENCODE_CONFIG` at the namespaced
+> copy — different precedence layers loading identical content.
+
+---
+
 ## Optional Integrations
 
 - **Zed Editor** — Pre-configured tasks in `.zed/tasks.json` let you launch the
@@ -420,8 +464,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 | File/Directory                      | Purpose                                                    |
 | ----------------------------------- | ---------------------------------------------------------- |
-| `opencode/opencode.jsonc`           | Pre-configured for USAi endpoints (shared config)          |
-| `opencode.jsonc`                    | Convenience symlink to `opencode/opencode.jsonc`           |
+| `spec.yaml`                         | sbx mixin kit (`usai-opencode-provider`): USAi provider + network egress |
+| `files/home/usai-config/opencode.jsonc` | Pre-configured for USAi endpoints (shared config + kit payload) |
+| `opencode.jsonc`                    | Convenience symlink to `files/home/usai-config/opencode.jsonc`   |
 | `agentic-coding-playbook/`          | Pinned submodule: federal `AGENTS.md` + agent skills       |
 | `qsbx`                              | sbx wrapper that mounts this clone and links config in     |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`qsbx usai-rotate-api-key`) |

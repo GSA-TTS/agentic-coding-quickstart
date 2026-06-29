@@ -5,7 +5,7 @@ import vm from "node:vm"
 
 import { updateTemplate, validateUsaiPayload, fetchJsonBounded } from "../scripts/sync-usai-models.mjs"
 
-const templatePath = new URL("../opencode/opencode.jsonc", import.meta.url)
+const templatePath = new URL("../files/home/usai-config/opencode.jsonc", import.meta.url)
 const fixturePath = new URL("./fixtures/usai-models.json", import.meta.url)
 
 /**

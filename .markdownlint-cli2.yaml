@@ -54,6 +54,7 @@ globs:
 ignores:
   - "node_modules"
   - "deleteme"
+  - "tmp"
   # Playbook is a pinned submodule with its own linting; don't lint it here.
   - "agentic-coding-playbook"
 

@@ -15,7 +15,10 @@ risk_treatment: mitigate
 > **Update (2026-06):** The reference config moved from `templates/opencode.jsonc`
 > to the repository-root `opencode.jsonc`, and the local sync command is now
 > `npm run sync:usai-models` (the `make` targets were removed). References below
-> reflect the original decision; paths and commands have since changed.
+> reflect the original decision; paths and commands have since changed. As of
+> ADR-0005 the config file lives at `files/home/usai-config/opencode.jsonc` (the
+> root `opencode.jsonc` symlink still resolves to it); the sync script and tests
+> were repointed accordingly.
 
 ## Context and Problem Statement
 
