@@ -79,6 +79,11 @@ QUICKSTART_CLONE="${QUICKSTART_CLONE:-$SCRIPT_DIR}"
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 KEY_MGMT_URL="https://console.gsa.usai.gov/key-management"
 
+# Minimum sbx version qsbx requires. The kit workflow (qsbx passes --kit to
+# sbx create; see docs/adr/0005) depends on v2-schema kit support and the
+# `sbx policy init` rename, both of which landed in sbx 0.34.0.
+MIN_SBX_VERSION="0.34.0"
+
 # Standalone helper scripts that qsbx fronts as subcommands. They remain runnable
 # on their own; qsbx is just the single entry point for this repo's sbx extras.
 ROTATE_SCRIPT="$SCRIPT_DIR/scripts/rotate-apikey"
@@ -97,6 +102,59 @@ require_clone() {
   if [ ! -f "$QUICKSTART_CLONE/files/home/usai-config/opencode.jsonc" ]; then
     echo "error: could not find files/home/usai-config/opencode.jsonc under '$QUICKSTART_CLONE'." >&2
     echo "       Run qsbx from your quickstart clone, or export QUICKSTART_CLONE." >&2
+    exit 1
+  fi
+}
+
+# Compare two dotted version strings. Echoes 0 if A >= B, 1 otherwise. Pads
+# missing components with 0 and compares numerically per component, so e.g.
+# 0.34 >= 0.34.0 and 0.34.1 >= 0.34.0. Non-numeric suffixes on a component
+# (e.g. a "-rc1") are stripped to their leading digits before comparison.
+version_ge() {
+  local a="$1" b="$2" i a_part b_part
+  local -a a_arr b_arr
+  IFS='.' read -r -a a_arr <<EOF
+$a
+EOF
+  IFS='.' read -r -a b_arr <<EOF
+$b
+EOF
+  for i in 0 1 2; do
+    a_part=${a_arr[i]:-0}; b_part=${b_arr[i]:-0}
+    a_part=${a_part%%[!0-9]*}; b_part=${b_part%%[!0-9]*}
+    a_part=${a_part:-0}; b_part=${b_part:-0}
+    if [ "$a_part" -gt "$b_part" ]; then echo 0; return; fi
+    if [ "$a_part" -lt "$b_part" ]; then echo 1; return; fi
+  done
+  echo 0
+}
+
+# Require sbx >= MIN_SBX_VERSION. The kit workflow depends on v2-schema kit
+# support and `sbx policy init`, both introduced in 0.34.0. If sbx is missing or
+# its version can't be parsed, warn but don't block (don't fail closed on a
+# version we simply couldn't read).
+require_sbx_version() {
+  if ! command -v sbx >/dev/null 2>&1; then
+    echo "error: sbx CLI not found on PATH. Install sbx >= $MIN_SBX_VERSION." >&2
+    echo "       See README.md (Step 2: Install sbx CLI)." >&2
+    exit 1
+  fi
+
+  local raw current
+  # `sbx version` prints e.g. "sbx version: v0.34.0 <sha>". Extract the first
+  # dotted-numeric token, tolerating a leading "v".
+  raw=$(sbx version 2>/dev/null || true)
+  current=$(printf '%s\n' "$raw" | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 | sed 's/^v//')
+
+  if [ -z "$current" ]; then
+    echo "qsbx: warning: could not determine sbx version (need >= $MIN_SBX_VERSION); continuing." >&2
+    return 0
+  fi
+
+  if [ "$(version_ge "$current" "$MIN_SBX_VERSION")" -ne 0 ]; then
+    echo "error: qsbx requires sbx >= $MIN_SBX_VERSION, but found $current." >&2
+    echo "       qsbx applies this repo as an sbx kit (--kit), which needs v0.34.0+." >&2
+    echo "       Upgrade sbx (see README.md, Step 2) and retry." >&2
     exit 1
   fi
 }
@@ -536,6 +594,7 @@ case "$subcommand" in
 
   create)
     shift
+    require_sbx_version
     name=$(derive_name "$@") || exit 1
     [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
     if args_target_clone "$@"; then
@@ -548,6 +607,7 @@ case "$subcommand" in
 
   run)
     shift
+    require_sbx_version
     # Split args into the create portion (agent + paths + flags) and any agent
     # args after "--", which only apply on attach.
     create_args=()
