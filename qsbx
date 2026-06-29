@@ -363,11 +363,19 @@ check_fresh_sandbox_key() {
     return 0
   fi
 
+  # Guarantee cleanup even if the exec/curl below fails or the user interrupts
+  # (Ctrl-C) before the explicit rm — otherwise the validation sandbox leaks
+  # (qsbx-keycheck-PID accumulates). Mirrors scripts/rotate-apikey. The trap is
+  # disarmed once the explicit rm has run.
+  # shellcheck disable=SC2064
+  trap "sbx rm --force '$validation_sbx' </dev/null >/dev/null 2>&1 || true" EXIT
+
   status=$(sbx exec "$validation_sbx" -- sh -c \
     "curl -sS -o /dev/null -w '%{http_code}' \
      -H \"Authorization: Bearer \$USAI_API_KEY\" \
      $USAI_MODELS_URL" </dev/null 2>/dev/null || true)
   sbx rm --force "$validation_sbx" </dev/null >/dev/null 2>&1 || true
+  trap - EXIT
   printf '%s\n' "$status"
 }
 
