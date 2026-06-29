@@ -635,9 +635,9 @@ sbx rm <sandbox-name>
 
 ### Symptoms
 
-- Zed task or `qsbx run opencode ...` exits after printing an OCI runtime error
+- `qsbx run opencode ...` exits after printing an OCI runtime error
 - Error includes: `OCI runtime exec failed: chdir to '/Users/.../your-project': no such file or directory`
-- The task runner may still report the task as finished successfully
+- The agent process may exit before opening an interactive session
 
 ### Root Cause
 

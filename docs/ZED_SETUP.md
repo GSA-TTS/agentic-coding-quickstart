@@ -48,8 +48,8 @@ You will see several tasks preconfigured for this workspace:
 
 | Task Label | Description | Underlying Command |
 |------------|-------------|--------------------|
-| `OpenCode: Run Agent` | Launches OpenCode inside SBX via `qsbx` (secrets auto-injected, creates sandbox if needed, shared config mounted) | `./qsbx run opencode .` |
-| `OpenCode: Environment Diagnostics` | Checks that `qsbx`, `sbx`, `opencode`, and the USAI_API_KEY custom secret are available | inline checks |
+| `OpenCode: Run Agent` | Launches OpenCode inside SBX (secrets auto-injected, creates sandbox if needed) | `sbx run opencode .` |
+| `OpenCode: Environment Diagnostics` | Checks that `sbx` is installed and the USAI_API_KEY secret is set | inline `sbx` checks |
 
 > **Note:** The deprecated Docker Desktop tasks have been removed. Use the `sbx` CLI tasks above.
 
@@ -70,8 +70,8 @@ If you prefer to run commands manually, open Zed's integrated terminal (`Ctrl + 
 # Check that sbx is installed and your USAi key secret is set
 command -v sbx && sbx secret ls | grep USAI_API_KEY
 
-# Run agent (creates sandbox automatically if needed and mounts shared config)
-./qsbx run opencode .
+# Run agent (creates sandbox automatically if needed)
+sbx run opencode .
 ```
 
 ---
@@ -101,8 +101,7 @@ and adjust the sandbox name to match.
 ## Troubleshooting Zed Integration
 
 ### "Task Command Not Found"
-- The Zed tasks call `./qsbx`, which then calls `sbx`. Ensure you opened Zed at the repository root so `./qsbx` exists.
-- If Zed was launched from Finder or Spotlight, it may not inherit your shell `PATH`; the task prepends common Homebrew paths (`/opt/homebrew/bin` and `/usr/local/bin`) before calling `sbx` and `opencode`.
+- The Zed tasks call `sbx` directly. Ensure the `sbx` CLI is installed and on your `PATH`.
 - You can edit `.zed/tasks.json` to adjust the commands for your environment.
 
 ### "ERROR: USAI_API_KEY not found"
@@ -128,4 +127,4 @@ and adjust the sandbox name to match.
 
 ### Terminal Output is Frozen or Unresponsive
 - If a task runs and does not respond to keystrokes, close the terminal pane (`Cmd + W`) and trigger the task again via the tasks palette.
-- Standard interactive shells are fully supported, but if you run into environment issues, run `./qsbx run opencode .` directly in Zed's integrated terminal (`Ctrl + ~`) instead of the task runner.
+- Standard interactive shells are fully supported, but if you run into environment issues, run `sbx run opencode .` directly in Zed's integrated terminal (`Ctrl + ~`) instead of the task runner.
