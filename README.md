@@ -425,6 +425,14 @@ git submodule update --remote --merge agentic-coding-playbook
 git add agentic-coding-playbook && git commit -m "chore: bump playbook submodule"
 ```
 
+> [!NOTE]
+> **Resuming a sandbox after upgrading to the kit-based `qsbx`.** Sandboxes
+> created before the kit migration have an outdated OpenCode provider config.
+> The next time you `qsbx run opencode <path>` against such a sandbox, `qsbx`
+> detects this and automatically injects the kit with `sbx kit add` — no action
+> needed. Restart the agent (or start a fresh session) so it re-reads the
+> config. Requires `sbx` >= 0.34.0, which `qsbx` now enforces.
+
 ---
 
 ## What's Next?

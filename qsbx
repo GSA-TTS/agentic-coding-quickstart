@@ -367,6 +367,42 @@ link_into "$HOME/.agents/skills"                  "$CLONE/agentic-coding-playboo
 EOF
 }
 
+# Heal a sandbox created before qsbx applied this repo as a kit. Such sandboxes
+# have a stale ~/.config/opencode/opencode.jsonc symlink (pointing at the old
+# opencode/opencode.jsonc location, which no longer exists in the clone) and no
+# OPENCODE_CONFIG, so OpenCode loads no USAi provider config. We detect the
+# missing OPENCODE_CONFIG and inject the kit into the running sandbox with
+# `sbx kit add` — no recreation needed. Best-effort: if the (experimental)
+# command fails, warn with the manual recovery step and continue to attach.
+ensure_kit_applied() {
+  local name="$1"
+  local cfg=""
+  # Read OPENCODE_CONFIG from inside the sandbox. Empty => kit not applied
+  # (pre-kit sandbox), or the var was never injected.
+  cfg=$(sbx exec "$name" -- sh -c 'printf "%s" "${OPENCODE_CONFIG:-}"' </dev/null 2>/dev/null || true)
+  if [ -n "$cfg" ]; then
+    return 0
+  fi
+
+  require_clone
+  echo "qsbx: '$name' predates the USAi kit (no OPENCODE_CONFIG); injecting it" >&2
+  echo "      with 'sbx kit add' so the USAi provider config loads..." >&2
+  if sbx kit add "$name" "$QUICKSTART_CLONE" </dev/null >/dev/null 2>&1; then
+    # A stale ~/.config/opencode/opencode.jsonc symlink (to the removed
+    # opencode/ path) is now harmless — OPENCODE_CONFIG takes precedence — but
+    # remove it if it dangles so it can't confuse OpenCode or the user.
+    sbx exec "$name" -- sh -c \
+      'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
+      </dev/null >/dev/null 2>&1 || true
+    echo "qsbx: kit injected into '$name'. Restarting the agent will pick it up." >&2
+  else
+    echo "qsbx: warning: 'sbx kit add' failed for '$name' (it is EXPERIMENTAL)." >&2
+    echo "      USAi config may not load. Recover by running:" >&2
+    echo "        sbx kit add '$name' '$QUICKSTART_CLONE'" >&2
+    echo "      or recreate the sandbox: sbx rm '$name' && qsbx run opencode <path>" >&2
+  fi
+}
+
 sandbox_exists() {
   # `sbx ls -q` prints bare sandbox names, one per line (no header). Match the
   # whole line as a fixed string so names containing regex metacharacters (e.g.
@@ -633,14 +669,18 @@ case "$subcommand" in
         # no read-only mount, no home-dir symlinks.
         name=$(name_flag "${create_args[@]}")
         [ -n "$name" ] || name="qsbx-quickstart-config"
-        if ! sandbox_exists "$name"; then
+        if sandbox_exists "$name"; then
+          ensure_kit_applied "$name"
+        else
           create_config_sandbox "$name" "${create_args[@]}"
         fi
       else
         # Project work: clone mounted read-only + config symlinked into home.
         name=$(derive_name "${create_args[@]}") || exit 1
         [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
-        if ! sandbox_exists "$name"; then
+        if sandbox_exists "$name"; then
+          ensure_kit_applied "$name"
+        else
           create_with_config "$name" "${create_args[@]}"
         fi
       fi
@@ -662,6 +702,8 @@ case "$subcommand" in
       # to it by name (the positional-sandbox form is deprecated in sbx); else
       # pass through unchanged (e.g. flags-only, or `sbx run` with no args).
       if [ -n "$first" ] && sandbox_exists "$first"; then
+        # Existing sandbox attached by name. Heal it if it predates the kit.
+        ensure_kit_applied "$first"
         # Rebuild the arg list with the matched sandbox token removed (drop only
         # the first occurrence), so flags that appear before the name are
         # preserved and the name isn't duplicated. Positional `${@:2}` would be

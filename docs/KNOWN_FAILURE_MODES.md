@@ -597,6 +597,14 @@ the playbook's `AGENTS.md` and `~/.agents/skills`. This symptom appears when the
 sandbox was created without `qsbx` (so neither the kit nor the symlinks were
 applied), or with `sbx run` directly but without `--kit .`.
 
+**Upgrading an existing sandbox.** A sandbox created with an *older* `qsbx`
+(before the kit migration) has a stale `~/.config/opencode/opencode.jsonc`
+symlink pointing at the removed `opencode/` path and no `OPENCODE_CONFIG`. When
+you `git pull` and resume it, `qsbx run` now detects the missing
+`OPENCODE_CONFIG` and **auto-heals** the sandbox by injecting the kit with
+`sbx kit add` (no recreation needed). If that automatic step fails, use the
+manual fix below.
+
 ### Fix
 
 If the sandbox already exists, inject the kit into it without recreating it
@@ -609,7 +617,8 @@ sbx kit add SANDBOX /path/to/agentic-coding-quickstart
 > `sbx kit add` is currently EXPERIMENTAL and may change in future releases. It
 > applies the kit's files, init files, and startup commands to the running
 > container — enough to deliver the USAi provider config. (Restart the agent so
-> it re-reads `OPENCODE_CONFIG`.)
+> it re-reads `OPENCODE_CONFIG`.) `qsbx run` does this automatically for existing
+> sandboxes that predate the kit.
 
 Otherwise, create the sandbox with the kit applied. With `qsbx` this is
 automatic:
