@@ -156,7 +156,7 @@ stored in sbx's secret manager, and the network policy persists across sandboxes
 
 ```bash
 # 1. Set network policy (first-time only)
-sbx policy set-default balanced
+sbx policy init balanced
 
 # 2. Allow USAi endpoint
 sbx policy allow network "api.gsa.usai.gov"
@@ -243,12 +243,12 @@ sbx policy allow network -g "api.gsa.usai.gov"
 </details>
 
 <details>
-<summary><strong>"sbx policy set-default" fails right after first-time setup</strong> (click to expand)</summary>
+<summary><strong>"sbx policy init" fails right after first-time setup</strong> (click to expand)</summary>
 
 The policy service may not have settled yet after `sbx login`. Retry the command:
 
 ```bash
-sbx policy set-default balanced
+sbx policy init balanced
 ```
 
 </details>
