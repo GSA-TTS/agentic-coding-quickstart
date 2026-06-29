@@ -398,6 +398,19 @@ sbx kit validate .
 > together: the kit delivers the OpenCode provider config (`OPENCODE_CONFIG`),
 > and `qsbx` symlinks only the playbook rules/skills.
 
+### Co-tenancy with other kits
+
+This kit **owns the `OPENCODE_CONFIG` channel** — that env var is single-valued,
+so only one kit can set it (sbx env composition is last-wins). The kit's config
+file is tagged with a `"$usaiKit": true` sentinel, and a warn-only startup check
+fires if `OPENCODE_CONFIG` ends up pointing at someone else's file.
+
+If you are writing another mixin that needs to add OpenCode config, **do not set
+`OPENCODE_CONFIG`**. Drop your fragment at `<workspace>/.opencode/opencode.jsonc`
+(kit `files/workspace/...`) — OpenCode deep-merges it *over* `OPENCODE_CONFIG`,
+so your keys and the USAi provider config compose without either clobbering the
+other. See [docs/adr/0006](docs/adr/0006-opencode-config-co-tenancy.md).
+
 ---
 
 ## Optional Integrations

@@ -48,7 +48,9 @@ Inside the sandbox, `qsbx` delivers the shared config two ways:
 - **OpenCode provider config** — applied as an sbx **kit** (`qsbx` passes
   `--kit <clone>` to `sbx create`). The kit drops
   `<clone>/files/home/usai-config/opencode.jsonc` at `~/usai-config/opencode.jsonc`
-  and sets `OPENCODE_CONFIG` to point there (see `docs/adr/0005`).
+  and sets `OPENCODE_CONFIG` to point there (see `docs/adr/0005`). The kit owns
+  the single-valued `OPENCODE_CONFIG` channel; other config-contributing kits
+  must use `<workspace>/.opencode/opencode.jsonc` instead (see `docs/adr/0006`).
 - **Playbook rules + skills** — symlinked into the locations OpenCode searches
   (not yet packaged as a kit):
   - `~/.config/opencode/AGENTS.md` → `<clone>/agentic-coding-playbook/AGENTS.md`
