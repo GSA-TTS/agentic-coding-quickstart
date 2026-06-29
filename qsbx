@@ -352,7 +352,69 @@ check_key() {
   sbx exec "$name" -- sh -c \
     "curl -sS -o /dev/null -w '%{http_code}' \
      -H \"Authorization: Bearer \$USAI_API_KEY\" \
-     $USAI_MODELS_URL" 2>/dev/null || true
+     $USAI_MODELS_URL" </dev/null 2>/dev/null || true
+}
+
+recreate_sandbox() {
+  local name="$1"
+  local target_clone="$2"
+  shift 2
+
+  sbx rm --force "$name" </dev/null
+  if [ "$target_clone" = "1" ]; then
+    create_config_sandbox "$name" "$@"
+  else
+    create_with_config "$name" "$@"
+  fi
+}
+
+check_fresh_sandbox_key() {
+  local validation_sbx="qsbx-keycheck-$$"
+  local status=""
+
+  if ! sbx create --name "$validation_sbx" shell . </dev/null >/dev/null 2>&1; then
+    return 0
+  fi
+
+  status=$(sbx exec "$validation_sbx" -- sh -c \
+    "curl -sS -o /dev/null -w '%{http_code}' \
+     -H \"Authorization: Bearer \$USAI_API_KEY\" \
+     $USAI_MODELS_URL" </dev/null 2>/dev/null || true)
+  sbx rm --force "$validation_sbx" </dev/null >/dev/null 2>&1 || true
+  printf '%s\n' "$status"
+}
+
+offer_recreate_stale_sandbox() {
+  local name="$1"
+  local target_clone="$2"
+  local status="$3"
+  shift 3
+
+  echo >&2
+  echo "The global USAi key works in a fresh sandbox, but '$name' still" >&2
+  echo "fails with HTTP ${status:-unknown}. This usually means the existing" >&2
+  echo "sandbox has a stale USAI_API_KEY placeholder from before rotation." >&2
+  echo >&2
+  echo "Recreating '$name' will delete that sandbox's local state, then" >&2
+  echo "create it again from the current qsbx arguments." >&2
+  printf "Recreate '$name' now? [y/N] " >&2
+  local recreate_answer=""
+  read -r recreate_answer || true
+  case "$recreate_answer" in
+    [yY]|[yY][eE][sS])
+      recreate_sandbox "$name" "$target_clone" "$@"
+      status=$(check_key "$name")
+      if [ "$status" = "200" ]; then
+        echo "Sandbox recreated and key validated. Continuing." >&2
+        return 0
+      fi
+      echo "Sandbox recreated, but key still not working (HTTP ${status:-unknown}). Aborting attach." >&2
+      return 1
+      ;;
+  esac
+
+  echo "Keeping existing sandbox. Aborting attach." >&2
+  return 1
 }
 
 # Validate the sandbox's key and, if it is not working, walk the user through
@@ -360,7 +422,10 @@ check_key() {
 # (e.g. no curl in the sandbox), we warn and continue rather than block attach.
 ensure_valid_key() {
   local name="$1"
+  local target_clone="$2"
+  shift 2
   local status
+  local fresh_status
   status=$(check_key "$name")
 
   if [ "$status" = "200" ]; then
@@ -370,6 +435,12 @@ ensure_valid_key() {
   if [ -z "$status" ]; then
     echo "warning: could not validate USAI_API_KEY for '$name' (skipping check)" >&2
     return 0
+  fi
+
+  fresh_status=$(check_fresh_sandbox_key)
+  if [ "$fresh_status" = "200" ]; then
+    offer_recreate_stale_sandbox "$name" "$target_clone" "$status" "$@"
+    return $?
   fi
 
   echo >&2
@@ -399,6 +470,13 @@ ensure_valid_key() {
         echo "Key validated. Continuing." >&2
         return 0
       fi
+
+      fresh_status=$(check_fresh_sandbox_key)
+      if [ "$fresh_status" = "200" ]; then
+        offer_recreate_stale_sandbox "$name" "$target_clone" "$status" "$@"
+        return $?
+      fi
+
       echo "Key still not working (HTTP ${status:-unknown}). Aborting attach." >&2
       return 1
       ;;
@@ -458,9 +536,11 @@ case "$subcommand" in
 
     if [ -n "$first" ] && is_known_agent "$first"; then
       # AGENT form: create the sandbox if it does not exist, then attach to it.
+      target_clone=0
       if args_target_clone "${create_args[@]}"; then
         # Editing the shared config itself: clone is the RW primary workspace,
         # no read-only mount, no home-dir symlinks.
+        target_clone=1
         name=$(name_flag "${create_args[@]}")
         [ -n "$name" ] || name="qsbx-quickstart-config"
         if ! sandbox_exists "$name"; then
@@ -477,20 +557,20 @@ case "$subcommand" in
 
       # Verify the sandbox's USAi key works before attaching; prompt to rotate
       # if it does not.
-      ensure_valid_key "$name"
+      ensure_valid_key "$name" "$target_clone" "${create_args[@]}"
 
-      # Attach by name. `sbx run --name <name>` re-attaches independent of the
-      # working directory; the agent positional is omitted on attach (sbx infers
-      # it from the named sandbox and errors if a mismatching agent is passed).
+      # Attach to the existing sandbox by positional name. The agent positional
+      # is omitted on attach (sbx infers it from the named sandbox and errors if
+      # a mismatching agent is passed).
       if [ "${#agent_args[@]}" -gt 0 ]; then
-        sbx run --name "$name" -- "${agent_args[@]}"
+        sbx run "$name" -- "${agent_args[@]}"
       else
-        sbx run --name "$name"
+        sbx run "$name"
       fi
     else
       # No agent positional. If the first arg names an existing sandbox, attach
-      # to it by name (the positional-sandbox form is deprecated in sbx); else
-      # pass through unchanged (e.g. flags-only, or `sbx run` with no args).
+      # to it by positional name; else pass through unchanged (e.g. flags-only,
+      # or `sbx run` with no args).
       if [ -n "$first" ] && sandbox_exists "$first"; then
         # Rebuild the arg list with the matched sandbox token removed (drop only
         # the first occurrence), so flags that appear before the name are
@@ -502,7 +582,7 @@ case "$subcommand" in
           rest+=("$arg")
         done
         # ${arr[@]+...} keeps this bash-3.2-safe under set -u when rest is empty.
-        sbx run --name "$first" ${rest[@]+"${rest[@]}"}
+        sbx run "$first" ${rest[@]+"${rest[@]}"}
       else
         sbx run "$@"
       fi
