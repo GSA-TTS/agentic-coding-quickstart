@@ -631,6 +631,44 @@ sbx rm <sandbox-name>
 
 ---
 
+## 21. SBX Fails to Start with Host Path `chdir` Error
+
+### Symptoms
+
+- `qsbx run opencode ...` exits after printing an OCI runtime error
+- Error includes: `OCI runtime exec failed: chdir to '/Users/.../your-project': no such file or directory`
+- The agent process may exit before opening an interactive session
+
+### Root Cause
+
+SBX cached sandbox metadata can point at a workspace path that no longer exists or is not mounted inside the container. This is most likely after moving, renaming, or reprovisioning a project, or after reusing an old sandbox with a stale workspace path.
+
+### Fix
+
+Find the stale sandbox and recreate it from the current workspace:
+
+```bash
+sbx ls
+sbx rm <sandbox-name>
+./qsbx run opencode /path/to/your/project
+```
+
+For this quickstart clone itself, the default `qsbx` sandbox name is `qsbx-quickstart-config`:
+
+```bash
+sbx rm qsbx-quickstart-config
+./qsbx run opencode .
+```
+
+If you used an explicit sandbox name, remove that same name and rerun with the same `--name` value:
+
+```bash
+sbx rm my-project
+./qsbx run --name my-project opencode /path/to/your/project
+```
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:
