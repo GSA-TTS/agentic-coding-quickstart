@@ -6,36 +6,23 @@
 # global config (agent settings, AGENTS.md, skills, etc.). Without this, you end
 # up copying those files into every sandbox and manually keeping them in sync.
 #
-# Solution: when qsbx creates a sandbox it
-#   1. applies this clone as an sbx KIT (--kit), which configures the USAi
-#      OpenCode provider declaratively (drops ~/usai-config/opencode.jsonc and
-#      sets OPENCODE_CONFIG; allow-lists USAi egress). See spec.yaml, docs/adr/0005.
-#   2. mounts this quickstart clone as an extra READ-ONLY workspace, and
-#   3. symlinks the playbook's rules + skills into the locations OpenCode
-#      actually searches under the sandbox's home (~/.config/opencode and ~/.agents):
-#        ~/.config/opencode/AGENTS.md       -> <clone>/agentic-coding-playbook/AGENTS.md
-#        ~/.agents/skills                   -> <clone>/agentic-coding-playbook/.agents/skills
-# so the agent finds your USAi provider config (via the kit), behavioral rules,
-# and the playbook's skills from one shared place. The OpenCode provider config
-# is delivered by the kit rather than a home symlink; the playbook rules/skills
-# are not yet packaged as a kit, so they are still symlinked. Before attaching
-# with `qsbx run`, it also checks that the sandbox's USAi key works and, if not,
+# Solution: when qsbx creates a sandbox it applies TWO sbx kits via --kit:
+#   1. this clone (usai-opencode-provider): configures the USAi OpenCode
+#      provider declaratively (drops ~/usai-config/opencode.jsonc and sets
+#      OPENCODE_CONFIG; allow-lists USAi egress). See spec.yaml, docs/adr/0005.
+#   2. <clone>/playbook-kit (agentic-coding-playbook): at container startup,
+#      clones the playbook at a pinned ref and symlinks its AGENTS.md + skills
+#      into each supported agent's search paths. See playbook-kit/, docs/adr/0007.
+# so the agent finds your USAi provider config, federal behavioral rules, and
+# the playbook's skills — all declaratively, via kits. Before attaching with
+# `qsbx run`, it also checks that the sandbox's USAi key works and, if not,
 # offers to rotate it. All other subcommands pass straight through to sbx.
-#
-# The clone is mounted READ-ONLY for project work so that a (potentially
-# prompt-injected) agent working on your project cannot rewrite the permission
-# policy / rules / skills that every other sandbox loads. See docs/adr/0004.
 #
 # Editing the shared config itself: run the agent with the clone as the project,
 # e.g. `./qsbx run opencode .` from inside the clone (or `qsbx run opencode
-# <clone-path>`). qsbx detects this, mounts the clone read-WRITE as the primary
-# workspace (sbx primary workspaces are always RW), and skips the home-dir
-# symlinks (the agent is already in the clone). Review changes with `git diff`
-# before they propagate to other sandboxes.
-#
-# Note: an empirical spike showed OpenCode does NOT read AGENTS.md or
-# .agents/skills relative to OPENCODE_CONFIG_DIR, so we link into the
-# home-directory search paths instead. See docs/adr/0004.
+# <clone-path>`). qsbx detects this and mounts the clone read-WRITE as the
+# primary workspace (sbx primary workspaces are always RW) so you can edit the
+# kits. Review changes with `git diff` before they propagate to other sandboxes.
 #
 # The quickstart clone is the directory containing this script — no env var or
 # setup required. You can still override it by exporting QUICKSTART_CLONE.
@@ -46,7 +33,7 @@
 # Workflow:
 #   git switch -c "$(whoami)-global-config"   # personal branch for config
 #   ./qsbx run opencode .                      # edit config (clone is RW primary)
-#   # ...customize AGENTS.md, skills, etc., review with git diff...
+#   # ...customize the kits (USAi config, playbook ref), review with git diff...
 #   git fetch origin main && git merge origin/main  # pull in upstream changes
 
 set -euo pipefail
@@ -76,6 +63,10 @@ SCRIPT_DIR=$(script_dir) || { echo "qsbx: could not resolve script directory" >&
 # overrides it if exported.
 QUICKSTART_CLONE="${QUICKSTART_CLONE:-$SCRIPT_DIR}"
 
+# The playbook mixin kit lives in a subdirectory of the clone. Applied via --kit
+# alongside the root (usai-opencode-provider) kit. See playbook-kit/, docs/adr/0007.
+PLAYBOOK_KIT="$QUICKSTART_CLONE/playbook-kit"
+
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 KEY_MGMT_URL="https://console.gsa.usai.gov/key-management"
 
@@ -97,10 +88,15 @@ ROTATE_SCRIPT="$SCRIPT_DIR/scripts/rotate-apikey"
 # agent form; attach such sandboxes with `sbx run --name <sandbox>` directly.
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
-# Assert QUICKSTART_CLONE points at a usable clone (has the shared config).
+# Assert QUICKSTART_CLONE points at a usable clone (has both kits).
 require_clone() {
   if [ ! -f "$QUICKSTART_CLONE/files/home/usai-config/opencode.jsonc" ]; then
     echo "error: could not find files/home/usai-config/opencode.jsonc under '$QUICKSTART_CLONE'." >&2
+    echo "       Run qsbx from your quickstart clone, or export QUICKSTART_CLONE." >&2
+    exit 1
+  fi
+  if [ ! -f "$PLAYBOOK_KIT/spec.yaml" ]; then
+    echo "error: could not find the playbook kit at '$PLAYBOOK_KIT' (spec.yaml missing)." >&2
     echo "       Run qsbx from your quickstart clone, or export QUICKSTART_CLONE." >&2
     exit 1
   fi
@@ -298,10 +294,11 @@ strip_name() {
   done
 }
 
-# Create a detached sandbox with the config clone applied as a KIT (for the USAi
-# OpenCode provider config + egress) and mounted READ-ONLY (so the playbook
-# rules/skills can be symlinked in), then symlink those rules/skills into the
-# home locations OpenCode searches.
+# Create a detached sandbox with both kits applied via --kit: the clone itself
+# (usai-opencode-provider: USAi provider config + egress) and the playbook kit
+# (agentic-coding-playbook: clones the playbook at startup and links its
+# AGENTS.md + skills into each agent's search paths). No read-only mount and no
+# home-dir symlinking are needed any more — the kits do everything declaratively.
 # Usage: create_with_config NAME CREATE_ARGS...
 create_with_config() {
   require_clone
@@ -309,97 +306,58 @@ create_with_config() {
   shift
 
   strip_name "$@"
-  # --kit applies this clone's spec.yaml (usai-opencode-provider): it drops the
-  # USAi opencode.jsonc and sets OPENCODE_CONFIG, so the provider config no
-  # longer needs a home symlink. We also mount the clone read-only (":ro") as an
-  # extra workspace so the playbook rules/skills are reachable for symlinking and
-  # a project-working agent can't rewrite them. sbx only honors ":ro" on extra
-  # workspaces, which the clone is here (the project is the primary workspace).
   # Guard the array expansion for bash 3.2 (macOS default): under `set -u` an
   # empty array expansion is an "unbound variable" error there.
   if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
-    sbx create --name "$name" --kit "$QUICKSTART_CLONE" "${STRIPPED_ARGS[@]}" "$QUICKSTART_CLONE:ro"
+    sbx create --name "$name" --kit "$QUICKSTART_CLONE" --kit "$PLAYBOOK_KIT" "${STRIPPED_ARGS[@]}"
   else
-    sbx create --name "$name" --kit "$QUICKSTART_CLONE" "$QUICKSTART_CLONE:ro"
+    sbx create --name "$name" --kit "$QUICKSTART_CLONE" --kit "$PLAYBOOK_KIT"
   fi
-
-  link_shared_config "$name"
 }
 
-# Symlink the shared playbook rules + skills from the mounted clone into the home
-# locations OpenCode searches inside the sandbox. The OpenCode provider config is
-# delivered by the kit (--kit, see create_with_config), not symlinked here.
-link_shared_config() {
-  local name="$1"
-  # sbx mounts extra workspaces at their absolute host path inside the sandbox,
-  # so the clone is reachable at the same path. Pass it through and symlink the
-  # playbook rules/skills into OpenCode's home search locations.
-  sbx exec \
-    -e CLONE="$QUICKSTART_CLONE" \
-    "$name" \
-    bash <<'EOF'
-set -eu
-
-if [ ! -f "$CLONE/files/home/usai-config/opencode.jsonc" ]; then
-  echo "qsbx: clone not found at $CLONE inside sandbox; skipping config symlinks" >&2
-  exit 0
-fi
-
-# link_into TARGET SOURCE — back up a pre-existing non-symlink target, then link.
-link_into() {
-  target="$1"; source="$2"
-  [ -e "$source" ] || { echo "qsbx: missing $source; skipping $target" >&2; return 0; }
-  mkdir -p "$(dirname "$target")"
-  if [ -e "$target" ] && [ ! -L "$target" ]; then
-    # Timestamp the backup so a second run can't clobber an earlier one.
-    backup="$target.$(date +%Y%m%d%H%M%S).qsbx-bak"
-    mv "$target" "$backup"
-    echo "qsbx: backed up existing $target -> $backup" >&2
-  fi
-  ln -sfn "$source" "$target"
-}
-
-# OpenCode provider config (opencode.jsonc) is provided by the kit's
-# OPENCODE_CONFIG, so it is intentionally NOT symlinked here. Only the playbook
-# rules + skills (not yet packaged as a kit) are linked into the home paths.
-link_into "$HOME/.config/opencode/AGENTS.md"      "$CLONE/agentic-coding-playbook/AGENTS.md"
-link_into "$HOME/.agents/skills"                  "$CLONE/agentic-coding-playbook/.agents/skills"
-EOF
-}
-
-# Heal a sandbox created before qsbx applied this repo as a kit. Such sandboxes
-# have a stale ~/.config/opencode/opencode.jsonc symlink (pointing at the old
-# opencode/opencode.jsonc location, which no longer exists in the clone) and no
-# OPENCODE_CONFIG, so OpenCode loads no USAi provider config. We detect the
-# missing OPENCODE_CONFIG and inject the kit into the running sandbox with
-# `sbx kit add` — no recreation needed. Best-effort: if the (experimental)
-# command fails, warn with the manual recovery step and continue to attach.
+# Heal a sandbox created before qsbx applied these kits. Such sandboxes either
+# predate the USAi kit (no OPENCODE_CONFIG, stale opencode.jsonc symlink) or
+# predate the playbook kit (no playbook clone / skills). We detect each and
+# inject the missing kit into the running sandbox with `sbx kit add` — no
+# recreation needed. Best-effort: if the (experimental) command fails, warn with
+# the manual recovery step and continue to attach.
 ensure_kit_applied() {
   local name="$1"
+  require_clone
+
+  # 1) USAi provider kit: detect via OPENCODE_CONFIG. Empty => not applied.
   local cfg=""
-  # Read OPENCODE_CONFIG from inside the sandbox. Empty => kit not applied
-  # (pre-kit sandbox), or the var was never injected.
   cfg=$(sbx exec "$name" -- sh -c 'printf "%s" "${OPENCODE_CONFIG:-}"' </dev/null 2>/dev/null || true)
-  if [ -n "$cfg" ]; then
-    return 0
+  if [ -z "$cfg" ]; then
+    echo "qsbx: '$name' predates the USAi kit (no OPENCODE_CONFIG); injecting it" >&2
+    echo "      with 'sbx kit add'..." >&2
+    if sbx kit add "$name" "$QUICKSTART_CLONE" </dev/null >/dev/null 2>&1; then
+      # A stale ~/.config/opencode/opencode.jsonc symlink (to the removed
+      # opencode/ path) is now harmless — OPENCODE_CONFIG takes precedence — but
+      # remove it if it dangles so it can't confuse OpenCode or the user.
+      sbx exec "$name" -- sh -c \
+        'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
+        </dev/null >/dev/null 2>&1 || true
+      echo "qsbx: USAi kit injected into '$name'." >&2
+    else
+      echo "qsbx: warning: 'sbx kit add' (USAi kit) failed for '$name' (it is EXPERIMENTAL)." >&2
+      echo "      Recover with: sbx kit add '$name' '$QUICKSTART_CLONE'" >&2
+    fi
   fi
 
-  require_clone
-  echo "qsbx: '$name' predates the USAi kit (no OPENCODE_CONFIG); injecting it" >&2
-  echo "      with 'sbx kit add' so the USAi provider config loads..." >&2
-  if sbx kit add "$name" "$QUICKSTART_CLONE" </dev/null >/dev/null 2>&1; then
-    # A stale ~/.config/opencode/opencode.jsonc symlink (to the removed
-    # opencode/ path) is now harmless — OPENCODE_CONFIG takes precedence — but
-    # remove it if it dangles so it can't confuse OpenCode or the user.
-    sbx exec "$name" -- sh -c \
-      'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
-      </dev/null >/dev/null 2>&1 || true
-    echo "qsbx: kit injected into '$name'. Restarting the agent will pick it up." >&2
-  else
-    echo "qsbx: warning: 'sbx kit add' failed for '$name' (it is EXPERIMENTAL)." >&2
-    echo "      USAi config may not load. Recover by running:" >&2
-    echo "        sbx kit add '$name' '$QUICKSTART_CLONE'" >&2
-    echo "      or recreate the sandbox: sbx rm '$name' && qsbx run opencode <path>" >&2
+  # 2) Playbook kit: detect via the clone the startup command creates. Absent
+  #    => not applied (predates the playbook kit). The startup command runs on
+  #    the next start after kit add, so it self-heals.
+  local pb=""
+  pb=$(sbx exec "$name" -- sh -c 'test -e "$HOME/.agentic-coding-playbook/.git" && echo yes' </dev/null 2>/dev/null || true)
+  if [ -z "$pb" ]; then
+    echo "qsbx: '$name' predates the playbook kit; injecting it with 'sbx kit add'..." >&2
+    if sbx kit add "$name" "$PLAYBOOK_KIT" </dev/null >/dev/null 2>&1; then
+      echo "qsbx: playbook kit injected into '$name'. Restart the agent to pick it up." >&2
+    else
+      echo "qsbx: warning: 'sbx kit add' (playbook kit) failed for '$name' (it is EXPERIMENTAL)." >&2
+      echo "      Recover with: sbx kit add '$name' '$PLAYBOOK_KIT'" >&2
+    fi
   fi
 }
 
@@ -429,10 +387,9 @@ args_target_clone() {
 
 # Create a sandbox for editing the shared config itself: the clone is the
 # primary workspace (sbx primary workspaces are always read-write), so the agent
-# can modify it. The kit is still applied (--kit) so the editing agent has a
-# working USAi provider; no home-dir symlinks — the agent is working in the clone
-# directly, and we don't want the project's own config self-referencing the
-# home links. Default name is "qsbx-quickstart-config" unless the user gave one.
+# can modify it. Both kits are still applied (--kit) so the editing agent has a
+# working USAi provider and the playbook rules/skills. Default name is
+# "qsbx-quickstart-config" unless the user gave one.
 create_config_sandbox() {
   require_clone
   local name="$1"
@@ -444,9 +401,9 @@ create_config_sandbox() {
 
   strip_name "$@"
   if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
-    sbx create --name "$name" --kit "$QUICKSTART_CLONE" "${STRIPPED_ARGS[@]}"
+    sbx create --name "$name" --kit "$QUICKSTART_CLONE" --kit "$PLAYBOOK_KIT" "${STRIPPED_ARGS[@]}"
   else
-    sbx create --name "$name" --kit "$QUICKSTART_CLONE"
+    sbx create --name "$name" --kit "$QUICKSTART_CLONE" --kit "$PLAYBOOK_KIT"
   fi
 }
 
@@ -665,8 +622,7 @@ case "$subcommand" in
     if [ -n "$first" ] && is_known_agent "$first"; then
       # AGENT form: create the sandbox if it does not exist, then attach to it.
       if args_target_clone "${create_args[@]}"; then
-        # Editing the shared config itself: clone is the RW primary workspace,
-        # no read-only mount, no home-dir symlinks.
+        # Editing the shared config itself: clone is the RW primary workspace.
         name=$(name_flag "${create_args[@]}")
         [ -n "$name" ] || name="qsbx-quickstart-config"
         if sandbox_exists "$name"; then
@@ -675,7 +631,7 @@ case "$subcommand" in
           create_config_sandbox "$name" "${create_args[@]}"
         fi
       else
-        # Project work: clone mounted read-only + config symlinked into home.
+        # Project work: both kits applied via --kit (provider + playbook).
         name=$(derive_name "${create_args[@]}") || exit 1
         [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
         if sandbox_exists "$name"; then
