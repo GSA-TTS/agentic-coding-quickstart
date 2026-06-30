@@ -148,21 +148,14 @@ test("env / secret-dumping commands are denied (fail-closed)", () => {
   assert.equal(resolveBash(bash, "export -p"), "deny")
 })
 
-test("credential-denylist bypass: rg/grep against credential paths are denied (#178)", () => {
-  for (const cmd of [
-    "rg '' .env",
-    "rg KEY .env.local",
-    "rg secret server.pem",
-    "grep -r '' ~/.aws/",
-    "grep token ~/.git-credentials",
-  ]) {
-    // At minimum these must NOT be auto-allowed; the explicit deny rules make
-    // the common forms deny outright.
-    assert.notEqual(resolveBash(bash, cmd), "allow", `${cmd} must not be auto-allowed`)
-  }
-  assert.equal(resolveBash(bash, "rg '' .env"), "deny")
-  assert.equal(resolveBash(bash, "grep -r '' ~/.aws/"), "deny")
-  assert.equal(resolveBash(bash, "grep token ~/.git-credentials"), "deny")
+test("rg/grep are allowed (sandbox injects placeholder secrets, not real ones) (#178)", () => {
+  // Per review of #179: in the SBX sandbox, injected secrets are placeholders,
+  // so a bash read of a credential path is not a real-secret leak. rg/grep are
+  // therefore allowed for normal code search rather than carrying a
+  // credential-path denylist. The defense is the sandbox boundary + credential
+  // injection scoping, not per-pattern bash denies.
+  assert.equal(resolveBash(bash, "rg '' .env"), "allow")
+  assert.equal(resolveBash(bash, "grep -r '' ~/.aws/"), "allow")
 })
 
 test("ordinary rg/grep still allowed for normal code search", () => {
