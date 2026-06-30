@@ -353,7 +353,7 @@ See `docs/QUICKSTART_SBX.md` for detailed credential injection patterns.
 
 ## Coding Standards
 
-- Follow [`agentic-coding-playbook/docs/CODING_PRACTICES.md`](agentic-coding-playbook/docs/CODING_PRACTICES.md) (the pinned playbook submodule) for secure coding guidelines
+- Follow [`agentic-coding-playbook/docs/CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (the pinned playbook submodule) for secure coding guidelines
 - Prefer explicit configuration over implicit behavior
 - Maximum function length: 50 lines
 - All external input MUST be validated before use

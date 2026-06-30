@@ -352,7 +352,82 @@ check_key() {
   sbx exec "$name" -- sh -c \
     "curl -sS -o /dev/null -w '%{http_code}' \
      -H \"Authorization: Bearer \$USAI_API_KEY\" \
-     $USAI_MODELS_URL" 2>/dev/null || true
+     $USAI_MODELS_URL" </dev/null 2>/dev/null || true
+}
+
+check_fresh_sandbox_key() {
+  local validation_sbx="qsbx-keycheck-$$"
+  local status=""
+
+  if ! sbx create --name "$validation_sbx" shell . </dev/null >/dev/null 2>&1; then
+    return 0
+  fi
+
+  status=$(sbx exec "$validation_sbx" -- sh -c \
+    "curl -sS -o /dev/null -w '%{http_code}' \
+     -H \"Authorization: Bearer \$USAI_API_KEY\" \
+     $USAI_MODELS_URL" </dev/null 2>/dev/null || true)
+  sbx rm --force "$validation_sbx" </dev/null >/dev/null 2>&1 || true
+  printf '%s\n' "$status"
+}
+
+global_usai_placeholder() {
+  sbx secret ls -g 2>/dev/null \
+    | awk '$0 ~ /api[.]gsa[.]usai[.]gov/ { for (i = 1; i <= NF; i++) if ($i == "USAI_API_KEY") { print $(i+1); exit } }'
+}
+
+sandbox_usai_placeholder() {
+  local name="$1"
+  sbx exec "$name" -- sh -c 'printf "%s" "${USAI_API_KEY:-}"' </dev/null 2>/dev/null || true
+}
+
+offer_update_stale_placeholder() {
+  local name="$1"
+  local status="$2"
+  local sandbox_placeholder=""
+  local global_placeholder=""
+  sandbox_placeholder=$(sandbox_usai_placeholder "$name")
+  global_placeholder=$(global_usai_placeholder)
+
+  echo >&2
+  echo "The global USAi key works in a fresh sandbox, but '$name' still" >&2
+  echo "fails with HTTP ${status:-unknown}. This usually means the existing" >&2
+  echo "sandbox has a stale USAI_API_KEY placeholder from before rotation." >&2
+  echo >&2
+  if [ -z "$sandbox_placeholder" ]; then
+    echo "Could not read the sandbox's USAI_API_KEY placeholder. Aborting attach." >&2
+    return 1
+  fi
+
+  if [ -n "$global_placeholder" ] && [ "$sandbox_placeholder" = "$global_placeholder" ]; then
+    echo "'$name' already uses the current global placeholder, so this is not" >&2
+    echo "a stale-placeholder case. Aborting attach." >&2
+    return 1
+  fi
+
+  echo "qsbx can repair this without deleting the sandbox by adding a" >&2
+  echo "sandbox-scoped USAi custom secret that uses the placeholder already" >&2
+  echo "injected into '$name'. You will be prompted for the current USAi key;" >&2
+  echo "qsbx will not pass the key on the command line." >&2
+  printf "Update sandbox-scoped USAi placeholder for '%s' now? [y/N] " "$name" >&2
+  local repair_answer=""
+  read -r repair_answer || true
+  case "$repair_answer" in
+    [yY]|[yY][eE][sS])
+      sbx secret set-custom "$name" --host api.gsa.usai.gov \
+        --env USAI_API_KEY --placeholder "$sandbox_placeholder"
+      status=$(check_key "$name")
+      if [ "$status" = "200" ]; then
+        echo "Sandbox placeholder repaired and key validated. Continuing." >&2
+        return 0
+      fi
+      echo "Sandbox placeholder updated, but key still not working (HTTP ${status:-unknown}). Aborting attach." >&2
+      return 1
+      ;;
+  esac
+
+  echo "Leaving existing sandbox unchanged. Aborting attach." >&2
+  return 1
 }
 
 # Validate the sandbox's key and, if it is not working, walk the user through
@@ -361,6 +436,7 @@ check_key() {
 ensure_valid_key() {
   local name="$1"
   local status
+  local fresh_status
   status=$(check_key "$name")
 
   if [ "$status" = "200" ]; then
@@ -370,6 +446,12 @@ ensure_valid_key() {
   if [ -z "$status" ]; then
     echo "warning: could not validate USAI_API_KEY for '$name' (skipping check)" >&2
     return 0
+  fi
+
+  fresh_status=$(check_fresh_sandbox_key)
+  if [ "$fresh_status" = "200" ]; then
+    offer_update_stale_placeholder "$name" "$status"
+    return $?
   fi
 
   echo >&2
@@ -399,6 +481,13 @@ ensure_valid_key() {
         echo "Key validated. Continuing." >&2
         return 0
       fi
+
+      fresh_status=$(check_fresh_sandbox_key)
+      if [ "$fresh_status" = "200" ]; then
+        offer_update_stale_placeholder "$name" "$status"
+        return $?
+      fi
+
       echo "Key still not working (HTTP ${status:-unknown}). Aborting attach." >&2
       return 1
       ;;
