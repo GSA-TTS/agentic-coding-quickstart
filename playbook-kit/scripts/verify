@@ -98,9 +98,9 @@ for p in \
   ".claude/CLAUDE.md" \
   ".copilot/copilot-instructions.md"; do
   if [ "$(in_sbx "test -L \"\$HOME/$p\" && test -e \"\$HOME/$p\" && echo yes")" = "yes" ]; then
-    ok "~/$p -> playbook AGENTS.md"
+    ok "\$HOME/$p -> playbook AGENTS.md"
   else
-    bad "~/$p not linked (or dangling)"
+    bad "\$HOME/$p not linked (or dangling)"
   fi
 done
 
@@ -114,9 +114,9 @@ for r in \
   count="$(in_sbx "ls \"\$HOME/$r\" 2>/dev/null | wc -l | tr -d ' '")"
   resolves="$(in_sbx "for d in \"\$HOME/$r\"/*/; do [ -e \"\$d/SKILL.md\" ] && { echo yes; break; }; done")"
   if [ "${count:-0}" -gt 0 ] 2>/dev/null && [ "$resolves" = "yes" ]; then
-    ok "~/$r ($count skills, a SKILL.md resolves)"
+    ok "\$HOME/$r ($count skills, a SKILL.md resolves)"
   else
-    bad "~/$r empty or skills don't resolve"
+    bad "\$HOME/$r empty or skills don't resolve"
   fi
 done
 
