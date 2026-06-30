@@ -4,50 +4,45 @@ An [sbx](https://docs.docker.com/ai/sandboxes/) **mixin kit** that delivers the
 GSA [agentic-coding-playbook](https://github.com/GSA-TTS/agentic-coding-playbook)
 — the federal `AGENTS.md` rules and the Agent Skills — into a sandbox.
 
-Unlike the `usai-opencode-provider` kit (which ships its config in `files/`),
-this kit ships **no content**. At container **startup** it:
+The kit ships **no content**. At container **startup** it:
 
 1. clones the playbook at a pinned ref into `~/.agentic-coding-playbook`, then
 2. symlinks the playbook's `AGENTS.md` and skills into each supported agent's
    search paths.
 
-See [`../docs/adr/0007-playbook-clone-at-startup-mixin-kit.md`](../docs/adr/0007-playbook-clone-at-startup-mixin-kit.md)
-for why clone-at-startup (rather than a vendored submodule or a `files/`
-payload).
+Clone-at-startup (rather than vendoring the playbook into the kit's `files/`)
+keeps the kit tiny and lets the playbook version be pinned and bumped
+independently. See [Failure behavior](#failure-behavior) for how it degrades
+when the clone can't run.
 
 ## Usage
 
-Apply alongside the provider kit (order does not matter):
-
 ```bash
-sbx run --kit ./usai-opencode-provider --kit ./playbook-kit opencode /path/to/project
+sbx run --kit <path-to-this-kit> opencode /path/to/project
 ```
 
-`qsbx` applies both kits automatically:
-
-```bash
-./qsbx run opencode /path/to/project
-```
+The kit is a `mixin`, so it composes with other kits — apply it alongside an
+agent/provider kit with additional `--kit` flags.
 
 ## Prerequisites
 
-While the playbook repo is **private** (during rollout), the clone needs a
-GitHub token. This kit does **not** declare its own `github` credential — the
-built-in **opencode** base sandbox kit already declares one, and sbx rejects two
-kits declaring the same credential service. That base credential (sentinel-swap
-proxy injection) already authenticates the clone; this kit just allow-lists the
-egress. Set the token once:
+While the playbook repo is **private**, the clone needs a GitHub token. This kit
+does **not** declare its own `github` credential — the built-in **opencode** base
+sandbox kit already declares one, and sbx rejects two kits declaring the same
+credential service. That base credential (sentinel-swap proxy injection)
+authenticates the clone; this kit just allow-lists the GitHub egress. Set the
+token once:
 
 ```bash
 sbx secret set -g github
 ```
 
 The sbx proxy injects it on the outbound clone — the container never sees the
-real token. `qsbx` always uses the opencode base, so this works out of the box.
-If you apply this kit on a **different** base agent whose kit doesn't declare
-`github`, a private-repo clone has no credential and will fail (the kit degrades
-gracefully — it warns and continues); make the playbook repo public or supply a
-GitHub credential via that base. Once the repo is public, no token is needed.
+real token. If you apply this kit on a **base agent whose kit doesn't declare
+`github`**, a private-repo clone has no credential and will fail (the kit
+degrades gracefully — it warns and continues); make the playbook repo public or
+supply a GitHub credential via that base. Once the repo is public, no token is
+needed.
 
 ## What it links
 
@@ -98,15 +93,25 @@ The startup command is **idempotent** and **non-fatal**:
   **self-heals**: the clone is retried on the next start once the network/token
   is available.
 
+## Troubleshooting
+
+See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
+
+## Design decisions
+
+See [`docs/decisions/playbook-clone-at-startup.md`](docs/decisions/playbook-clone-at-startup.md)
+— why the kit clones the playbook at startup (vs. a vendored copy or a `files/`
+payload), `commands.startup` vs `commands.install`, pinning, and the GitHub
+auth approach.
+
 ## Verifying
 
+Run the bundled check on a host with `sbx` installed and logged in:
+
 ```bash
-sbx kit validate ./playbook-kit
-sbx run --kit ./usai-opencode-provider --kit ./playbook-kit opencode /tmp/pb-smoke
-# inside the sandbox / via sbx exec:
-sbx exec <sandbox> -- sh -c 'ls -l ~/.agents/skills && cat ~/.config/opencode/AGENTS.md | head'
-# confirm the minimal egress set:
-sbx policy log <sandbox>
+./scripts/verify
 ```
 
-Add any host shown in the policy log's blocked list to `caps.network.allow`.
+It validates the spec, creates a throwaway sandbox with the kit, and confirms
+the playbook cloned and `AGENTS.md` + skills resolved at the agent paths. Set
+`KEEP=1` to keep the sandbox for inspection.

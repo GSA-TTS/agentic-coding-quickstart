@@ -1,21 +1,25 @@
-# spec.yaml — usai-opencode-provider (an sbx mixin kit)
+# spec.yaml — usai-provider (an sbx mixin kit)
+#
+# Configures an agent to use the GSA USAi OpenAI-compatible endpoint as its
+# model provider. Today it targets OpenCode; the kit is named "usai-provider"
+# (not "usai-opencode-provider") to leave room for additional agents later.
+# See README.md "Scope and roadmap".
 #
 # Applied at sandbox creation with (local path):
-#   sbx run --kit ./usai-opencode-provider opencode <project>
-# qsbx applies it (alongside the playbook kit) automatically.
+#   sbx run --kit <path-to-this-kit> opencode <project>
 #
 # What it does, declaratively:
 #   - caps.network: allow egress to the USAi endpoint (default-deny networks).
 #   - environment: set OPENCODE_CONFIG so OpenCode loads the namespaced USAi
 #     config below instead of prompting for a provider on startup.
 #   - files/: drop the USAi opencode.jsonc at ~/usai-config/opencode.jsonc.
-#   - commands.startup: warn-only co-tenancy guard (see ADR-0006).
+#   - commands.startup: warn-only co-tenancy guard (see README "Co-tenancy").
 #
 # Design: we deliberately do NOT write the global config path
 # (~/.config/opencode/opencode.json). Pointing OPENCODE_CONFIG at a namespaced
 # path lets this kit COMPOSE with (rather than clobber) whatever the opencode
 # template/kit writes to the global path — OpenCode merges global < custom
-# (OPENCODE_CONFIG) < project. See ADR-0005 and README.md.
+# (OPENCODE_CONFIG) < project. See README.md.
 #
 # Secret: the USAi API key is NOT in this kit. opencode.jsonc reads it from the
 # injected USAI_API_KEY env var; supply it once with
@@ -23,13 +27,14 @@
 # (see README.md "Prerequisites").
 schemaVersion: "2"
 kind: mixin
-name: usai-opencode-provider
-displayName: USAi OpenCode Provider
+name: usai-provider
+displayName: USAi Provider (OpenCode)
 description: >
-  Configures OpenCode to use the GSA USAi OpenAI-compatible endpoint as its
-  model provider, with egress allow-listed. Drops a namespaced opencode.jsonc
-  and points OpenCode at it via OPENCODE_CONFIG so it composes with, rather
-  than clobbers, any global config the opencode template or kit writes.
+  Configures the agent to use the GSA USAi OpenAI-compatible endpoint as its
+  model provider, with egress allow-listed. Targets OpenCode today: drops a
+  namespaced opencode.jsonc and points OpenCode at it via OPENCODE_CONFIG so it
+  composes with, rather than clobbers, any global config the opencode template
+  or kit writes.
 
 caps:
   network:
@@ -50,11 +55,11 @@ commands:
   # kit silently shadows the other. We can't prevent that from inside a kit,
   # but we can detect it and fail loud instead of silent: check that the file
   # OPENCODE_CONFIG resolves to is the one we wrote (identified by the
-  # "$usaiKit" sentinel). If not, warn with guidance. This never blocks
-  # startup. Future config-contributing kits should instead drop a fragment at
-  # <workspace>/.opencode/opencode.jsonc, which OpenCode deep-merges over
-  # OPENCODE_CONFIG — see docs/adr/0006. Runs for every sandbox the kit is
-  # applied to (qsbx or plain `sbx run --kit`).
+  # "usai-provider-kit:owns-opencode-config" marker COMMENT — OpenCode rejects
+  # unknown JSON keys, so the sentinel is a comment, not a key). If not, warn
+  # with guidance. This never blocks startup. Future config-contributing kits
+  # should instead drop a fragment at <workspace>/.opencode/opencode.jsonc,
+  # which OpenCode deep-merges over OPENCODE_CONFIG — see README "Co-tenancy".
   startup:
     - description: Warn if OPENCODE_CONFIG was claimed by another kit
       user: "1000"
@@ -66,20 +71,21 @@ commands:
         - |
           cfg="${OPENCODE_CONFIG:-}"
           ours="/home/agent/usai-config/opencode.jsonc"
+          marker="usai-provider-kit:owns-opencode-config"
           if [ -z "$cfg" ]; then
-            echo "usai-opencode-provider: warning: OPENCODE_CONFIG is unset after kit apply; USAi provider config may not load." >&2
+            echo "usai-provider: warning: OPENCODE_CONFIG is unset after kit apply; USAi provider config may not load." >&2
             exit 0
           fi
           if [ ! -f "$cfg" ]; then
-            echo "usai-opencode-provider: warning: OPENCODE_CONFIG points at '$cfg', which does not exist; USAi provider config may not load." >&2
+            echo "usai-provider: warning: OPENCODE_CONFIG points at '$cfg', which does not exist; USAi provider config may not load." >&2
             exit 0
           fi
-          if ! grep -q '"\$usaiKit"' "$cfg" 2>/dev/null; then
-            echo "usai-opencode-provider: warning: OPENCODE_CONFIG ('$cfg') is not the USAi kit config" >&2
-            echo "  (no \$usaiKit sentinel). Another kit likely set OPENCODE_CONFIG and shadowed ours" >&2
+          if ! grep -q "$marker" "$cfg" 2>/dev/null; then
+            echo "usai-provider: warning: OPENCODE_CONFIG ('$cfg') is not the USAi kit config" >&2
+            echo "  (no ownership marker). Another kit likely set OPENCODE_CONFIG and shadowed ours" >&2
             echo "  at '$ours'. OPENCODE_CONFIG is single-valued; only one kit can own it. Have the" >&2
             echo "  other kit contribute via <workspace>/.opencode/opencode.jsonc instead (OpenCode" >&2
-            echo "  merges it). See docs/adr/0006." >&2
+            echo "  merges it). See README 'Co-tenancy'." >&2
           fi
 
 # files/home/usai-config/opencode.jsonc maps to

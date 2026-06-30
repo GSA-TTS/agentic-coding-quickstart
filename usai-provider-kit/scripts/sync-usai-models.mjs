@@ -3,6 +3,11 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
 import process from "node:process"
+import { fileURLToPath } from "node:url"
+
+// Anchor all default paths at the kit root (this file lives in <kit>/scripts/),
+// so the script works regardless of the caller's working directory.
+const KIT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 
 const GENERATED_START = "// BEGIN GENERATED USAI MODELS"
 const GENERATED_END = "// END GENERATED USAI MODELS"
@@ -24,8 +29,8 @@ const DISPLAY_NAME_OVERRIDES = {
   cohere_english_v3: "Cohere English v3",
 }
 
-const DEFAULT_TEMPLATE_PATH = path.resolve("usai-opencode-provider/files/home/usai-config/opencode.jsonc")
-const DEFAULT_FIXTURE_PATH = path.resolve("tests/fixtures/usai-models.json")
+const DEFAULT_TEMPLATE_PATH = path.join(KIT_ROOT, "files/home/usai-config/opencode.jsonc")
+const DEFAULT_FIXTURE_PATH = path.join(KIT_ROOT, "tests/fixtures/usai-models.json")
 const MODELS_DEV_URL = "https://models.dev/models.json"
 const USAI_MODELS_URL = "https://api.gsa.usai.gov/api/v1/models"
 
@@ -664,7 +669,7 @@ async function main() {
   await writeFile(templatePath, updatedTemplate)
 
   if (writeSnapshot) {
-    const snapshotPath = path.resolve("tests/output/latest-opencode.jsonc")
+    const snapshotPath = path.join(KIT_ROOT, "tests/output/latest-opencode.jsonc")
     await mkdir(path.dirname(snapshotPath), { recursive: true })
     await writeFile(snapshotPath, updatedTemplate)
   }

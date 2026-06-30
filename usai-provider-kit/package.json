@@ -1,0 +1,10 @@
+{
+  "name": "usai-provider-kit",
+  "private": true,
+  "type": "module",
+  "description": "sbx mixin kit: configure the agent to use the GSA USAi provider",
+  "scripts": {
+    "sync:usai-models": "node scripts/sync-usai-models.mjs --write-snapshot",
+    "test": "node --test 'tests/**/*.test.mjs'"
+  }
+}

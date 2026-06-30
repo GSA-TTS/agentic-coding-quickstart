@@ -19,13 +19,15 @@
   // ===========================================================================
   "$schema": "https://opencode.ai/config.json",
 
-  // Ownership sentinel for the usai-opencode-provider sbx kit. The kit's
-  // startup guard reads OPENCODE_CONFIG and looks for this key to tell "the
+  // usai-provider-kit:owns-opencode-config
+  // ^ Ownership sentinel COMMENT for the usai-provider sbx kit. The kit's
+  // startup guard greps OPENCODE_CONFIG's file for this marker to tell "the
   // file we wrote" apart from a foreign opencode.jsonc some other mixin may
-  // have pointed OPENCODE_CONFIG at (env-var last-wins). OpenCode ignores
-  // unknown top-level keys, so this is harmless to the agent. See
-  // docs/adr/0006 (config co-tenancy). Do not remove.
-  "$usaiKit": true,
+  // have pointed OPENCODE_CONFIG at (env-var last-wins). It is a comment (not a
+  // JSON key) on purpose: current OpenCode validates config against a closed
+  // schema and rejects unknown top-level keys. See the kit README "Co-tenancy".
+  // Do not remove this comment.
+
 
   // ===========================================================================
   // PROVIDER CONFIGURATION

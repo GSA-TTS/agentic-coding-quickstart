@@ -7,7 +7,7 @@
 # up copying those files into every sandbox and manually keeping them in sync.
 #
 # Solution: when qsbx creates a sandbox it applies TWO sbx kits via --kit:
-#   1. <clone>/usai-opencode-provider: configures the USAi OpenCode provider
+#   1. <clone>/usai-provider-kit: configures the USAi OpenCode provider
 #      declaratively (drops ~/usai-config/opencode.jsonc and sets
 #      OPENCODE_CONFIG; allow-lists USAi egress). See docs/adr/0005.
 #   2. <clone>/playbook-kit (agentic-coding-playbook): at container startup,
@@ -64,8 +64,8 @@ SCRIPT_DIR=$(script_dir) || { echo "qsbx: could not resolve script directory" >&
 QUICKSTART_CLONE="${QUICKSTART_CLONE:-$SCRIPT_DIR}"
 
 # Both mixin kits live in subdirectories of the clone, applied via --kit.
-# See usai-opencode-provider/ (docs/adr/0005) and playbook-kit/ (docs/adr/0007).
-USAI_KIT="$QUICKSTART_CLONE/usai-opencode-provider"
+# See usai-provider-kit/ and playbook-kit/ (docs/adr/0007).
+USAI_KIT="$QUICKSTART_CLONE/usai-provider-kit"
 PLAYBOOK_KIT="$QUICKSTART_CLONE/playbook-kit"
 
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
@@ -92,7 +92,7 @@ KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro openco
 # Assert QUICKSTART_CLONE points at a usable clone (has both kits).
 require_clone() {
   if [ ! -f "$USAI_KIT/files/home/usai-config/opencode.jsonc" ]; then
-    echo "error: could not find usai-opencode-provider/files/home/usai-config/opencode.jsonc under '$QUICKSTART_CLONE'." >&2
+    echo "error: could not find usai-provider-kit/files/home/usai-config/opencode.jsonc under '$QUICKSTART_CLONE'." >&2
     echo "       Run qsbx from your quickstart clone, or export QUICKSTART_CLONE." >&2
     exit 1
   fi
@@ -296,7 +296,7 @@ strip_name() {
 }
 
 # Create a detached sandbox with both kits applied via --kit: the clone itself
-# (usai-opencode-provider: USAi provider config + egress) and the playbook kit
+# (usai-provider-kit: USAi provider config + egress) and the playbook kit
 # (agentic-coding-playbook: clones the playbook at startup and links its
 # AGENTS.md + skills into each agent's search paths). No read-only mount and no
 # home-dir symlinking are needed any more — the kits do everything declaratively.

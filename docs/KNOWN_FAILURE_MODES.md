@@ -596,7 +596,7 @@ delivered by applying this clone as an sbx **kit** (`--kit`), which sets
 (`playbook-kit`, applied alongside it) clones the playbook at startup and links
 `AGENTS.md` + `~/.agents/skills`. This symptom appears when the sandbox was
 created without `qsbx` (so the kits were not applied), or with `sbx run`
-directly but without `--kit ./usai-opencode-provider --kit ./playbook-kit`.
+directly but without `--kit ./usai-provider-kit --kit ./playbook-kit`.
 
 **Upgrading an existing sandbox.** A sandbox created with an *older* `qsbx`
 (before the kit migration) has a stale `~/.config/opencode/opencode.jsonc`
@@ -612,7 +612,7 @@ If the sandbox already exists, inject the kit(s) into it without recreating it
 (replace `SANDBOX` with the sandbox name from `sbx ls`):
 
 ```bash
-sbx kit add SANDBOX /path/to/agentic-coding-quickstart/usai-opencode-provider  # USAi provider
+sbx kit add SANDBOX /path/to/agentic-coding-quickstart/usai-provider-kit  # USAi provider
 sbx kit add SANDBOX /path/to/agentic-coding-quickstart/playbook-kit            # playbook rules+skills
 ```
 
@@ -633,7 +633,7 @@ automatic:
 Or apply the kits directly with plain `sbx`:
 
 ```bash
-sbx run --kit /path/to/agentic-coding-quickstart/usai-opencode-provider \
+sbx run --kit /path/to/agentic-coding-quickstart/usai-provider-kit \
         --kit /path/to/agentic-coding-quickstart/playbook-kit \
         opencode /path/to/your/project
 ```

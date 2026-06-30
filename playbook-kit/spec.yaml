@@ -1,33 +1,30 @@
 # spec.yaml — agentic-coding-playbook (an sbx mixin kit)
 #
 # Delivers the GSA agentic-coding-playbook (federal AGENTS.md rules + Agent
-# Skills) into a sandbox. Unlike the usai-opencode-provider kit, this kit ships
-# NO content in files/: instead a startup command CLONES the playbook at a
-# pinned ref and symlinks its AGENTS.md and skills into every supported agent's
-# search paths. See docs/adr/0007 for why clone-at-startup (vs. a vendored
-# submodule or a files/ payload).
+# Skills) into a sandbox. The kit ships NO content in files/: instead a startup
+# command CLONES the playbook at a pinned ref and symlinks its AGENTS.md and
+# skills into every supported agent's search paths. See README.md for why
+# clone-at-startup (vs. a vendored copy or a files/ payload).
 #
-# Apply alongside the provider kit:
-#   sbx run --kit ./usai-opencode-provider --kit ./playbook-kit opencode <project>
-# qsbx applies both automatically.
+# Apply with:
+#   sbx run --kit <path-to-this-kit> opencode <project>
 #
 # Behavior:
 #   - caps.network: allow egress to GitHub so the clone can run.
-#   - GitHub auth (interim, while the playbook repo is PRIVATE): we do NOT
-#     declare a `github` credential here. The built-in OPENCODE base sandbox kit
-#     already declares one, and sbx composition rejects two kits declaring the
-#     same credential service ("defined in both ..."). That base credential
-#     (sentinel-swap proxy injection) already authenticates the clone — we just
+#   - GitHub auth (while the playbook repo is PRIVATE): we do NOT declare a
+#     `github` credential here. The built-in OPENCODE base sandbox kit already
+#     declares one, and sbx composition rejects two kits declaring the same
+#     credential service ("defined in both ..."). That base credential
+#     (sentinel-swap proxy injection) authenticates the clone — we just
 #     allow-list the egress below. The user supplies the token once via
-#     `sbx secret set -g github`; the container never sees it. (qsbx always uses
-#     the opencode base, so this holds for qsbx. If you apply this kit on a
-#     DIFFERENT base agent whose kit does not declare `github`, a private-repo
-#     clone has no credential and will fail — degrading gracefully; make the
-#     repo public or add a github credential via the base in that case.) Once
-#     the repo is public, no token is needed at all.
+#     `sbx secret set -g github`; the container never sees it. (If you apply this
+#     kit on a base agent whose kit does NOT declare `github`, a private-repo
+#     clone has no credential and will fail — degrading gracefully; make the repo
+#     public or add a github credential via the base.) Once the repo is public,
+#     no token is needed.
 #   - environment.PLAYBOOK_REF: the pinned playbook ref (default: a release tag
-#     baked at commit time). Override by editing this value (or layering a kit)
-#     and recreating — sbx does NOT forward host env into startup commands.
+#     baked at commit time). Override by editing this value and recreating —
+#     sbx does NOT forward host env into startup commands.
 #   - commands.startup: idempotent + NON-FATAL. Clones once (clone-if-missing,
 #     no per-start refetch), links rules + skills, and on any failure warns and
 #     exits 0 so the sandbox still starts (degrades to "no playbook"). Re-runs on
@@ -42,8 +39,7 @@ description: >
   paths (OpenCode, Claude Code, Codex, Copilot, Cursor, Droid, Kiro, Docker
   Agent). Degrades gracefully (warns and continues) when the clone is
   unavailable; self-heals on a later start. Relies on the base sandbox's github
-  credential for cloning while the repo is private; OPENCODE_CONFIG is owned by
-  the usai-opencode-provider kit, not this one.
+  credential for cloning while the playbook repo is private.
 
 caps:
   network:

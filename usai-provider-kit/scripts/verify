@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+#
+# verify — host-side validation for the usai-provider sbx mixin kit.
+#
+# Run on a host where `sbx` (>= 0.34.0) is installed and logged in. It validates
+# the kit spec, creates a sandbox with the kit applied, and confirms OpenCode is
+# pointed at the USAi config (OPENCODE_CONFIG set, the config file present, the
+# ownership marker comment intact, and the USAi API reachable with the key).
+#
+# It creates a temporary sandbox named "usai-kit-verify-*" and removes it at the
+# end (and on interrupt). It does not touch your other sandboxes. Nothing here
+# prints secret values.
+#
+# Usage (from anywhere):
+#   path/to/usai-provider-kit/scripts/verify
+#   KEEP=1 path/to/.../scripts/verify        # keep the sandbox for inspection
+#
+# Prerequisite: store the USAi API key once (the kit reads it via the proxy):
+#   sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
+
+set -uo pipefail
+
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SBX_NAME="usai-kit-verify-$$"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/usai-kit-verify.XXXXXX")"
+CREATE_LOG="$WORK/sbx-create.log"
+KEEP="${KEEP:-0}"
+USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
+
+pass=0
+fail=0
+ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
+bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
+info() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+cleanup() {
+  if [ "$KEEP" = "1" ]; then
+    printf '\nKEEP=1 set; leaving sandbox %s and %s in place.\n' "$SBX_NAME" "$WORK" >&2
+    return
+  fi
+  sbx rm -f "$SBX_NAME" >/dev/null 2>&1 || true
+  rm -rf "$WORK" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+in_sbx() { sbx exec "$SBX_NAME" -- sh -c "$1" </dev/null 2>/dev/null || true; }
+
+info "0. Preconditions"
+if ! command -v sbx >/dev/null 2>&1; then
+  echo "  sbx not on PATH. Install sbx >= 0.34.0 and retry." >&2
+  exit 1
+fi
+echo "  sbx version: $(sbx version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)"
+[ -f "$KIT_DIR/spec.yaml" ] && ok "kit spec.yaml present" || { bad "spec.yaml missing"; exit 1; }
+if sbx secret ls 2>/dev/null | grep -q 'api.gsa.usai.gov'; then
+  ok "USAi custom secret is set"
+else
+  echo "  NOTE: no USAi custom secret found. Set it with:" >&2
+  echo "        sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY" >&2
+fi
+
+info "1. sbx kit validate"
+if sbx kit validate "$KIT_DIR" >/dev/null 2>&1; then ok "kit validates"; else bad "kit failed validation"; fi
+
+info "2. Create a sandbox with the kit"
+echo "  creating $SBX_NAME (workspace $WORK)..."
+if sbx create --name "$SBX_NAME" --kit "$KIT_DIR" opencode "$WORK" >"$CREATE_LOG" 2>&1; then
+  ok "sandbox created with --kit"
+else
+  bad "sbx create failed (exit $?)"
+  sed 's/^/  | /' "$CREATE_LOG" >&2
+  exit 1
+fi
+sleep 2
+
+info "3. OPENCODE_CONFIG points at the kit config"
+cfg="$(in_sbx 'printf "%s" "${OPENCODE_CONFIG:-}"')"
+echo "  OPENCODE_CONFIG=${cfg:-<unset>}"
+[ -n "$cfg" ] && ok "OPENCODE_CONFIG is set" || bad "OPENCODE_CONFIG is unset"
+[ "$(in_sbx "test -f \"$cfg\" && echo yes")" = "yes" ] && ok "config file present at \$OPENCODE_CONFIG" || bad "config file missing"
+[ "$(in_sbx "grep -q 'usai-provider-kit:owns-opencode-config' \"$cfg\" 2>/dev/null && echo yes")" = "yes" ] \
+  && ok "ownership marker present" || bad "ownership marker missing"
+
+info "4. USAi API reachable from the sandbox (uses injected key)"
+status="$(in_sbx "curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$USAI_API_KEY\" $USAI_MODELS_URL")"
+echo "  HTTP status: ${status:-<none>}"
+if [ "$status" = "200" ]; then
+  ok "USAi models API returned 200"
+elif [ -z "$status" ]; then
+  echo "  NOTE: could not probe (no curl, or no network); skipping." >&2
+else
+  bad "USAi API returned $status (key missing/expired, or egress blocked)"
+  echo "  Check: sbx policy log $SBX_NAME (api.gsa.usai.gov), and the USAi secret." >&2
+fi
+
+info "Summary"
+printf '  %d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ] && printf '  \033[32mAll checks passed.\033[0m\n' || printf '  \033[31mSome checks failed — see notes above.\033[0m\n'
+
+[ "$fail" -eq 0 ]

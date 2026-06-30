@@ -78,7 +78,7 @@ sbx run opencode .
 
 ## Mounting This Config into Your Sandbox
 
-This repository is two sbx kits (`usai-opencode-provider` at the root and
+This repository is two sbx kits (`usai-provider` in `usai-provider-kit/` and
 `agentic-coding-playbook` in `playbook-kit/`), meant to be applied to sandboxes
 rather than copied into each project. Use `qsbx` to apply both kits — delivering
 the OpenCode provider config (via `OPENCODE_CONFIG`) and cloning the playbook at

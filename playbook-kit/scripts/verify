@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+#
+# verify — host-side validation for the agentic-coding-playbook sbx mixin kit.
+#
+# Run on a host where `sbx` (>= 0.34.0) is installed and logged in. It validates
+# the kit spec, creates a sandbox with the kit applied, and confirms the playbook
+# was cloned and its AGENTS.md + skills were linked into the agent search paths.
+#
+# It creates a temporary sandbox named "playbook-kit-verify-*" and removes it at
+# the end (and on interrupt). It does not touch your other sandboxes. Nothing
+# here prints secret values.
+#
+# Usage (from anywhere):
+#   path/to/agentic-coding-playbook-kit/scripts/verify
+#   KEEP=1 path/to/.../scripts/verify        # keep the sandbox for inspection
+#
+# Prerequisite: while the playbook repo is private, set the GitHub secret once:
+#   sbx secret set -g github
+
+set -uo pipefail
+
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SBX_NAME="playbook-kit-verify-$$"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/playbook-kit-verify.XXXXXX")"
+CREATE_LOG="$WORK/sbx-create.log"
+KEEP="${KEEP:-0}"
+
+pass=0
+fail=0
+ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
+bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
+info() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+cleanup() {
+  if [ "$KEEP" = "1" ]; then
+    printf '\nKEEP=1 set; leaving sandbox %s and %s in place.\n' "$SBX_NAME" "$WORK" >&2
+    return
+  fi
+  sbx rm -f "$SBX_NAME" >/dev/null 2>&1 || true
+  rm -rf "$WORK" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+in_sbx() { sbx exec "$SBX_NAME" -- sh -c "$1" </dev/null 2>/dev/null || true; }
+
+info "0. Preconditions"
+if ! command -v sbx >/dev/null 2>&1; then
+  echo "  sbx not on PATH. Install sbx >= 0.34.0 and retry." >&2
+  exit 1
+fi
+echo "  sbx version: $(sbx version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)"
+[ -f "$KIT_DIR/spec.yaml" ] && ok "kit spec.yaml present" || { bad "spec.yaml missing"; exit 1; }
+if sbx secret ls 2>/dev/null | grep -q '\bgithub\b'; then
+  ok "github secret is set (private-repo clone will authenticate)"
+else
+  echo "  NOTE: no 'github' secret found. If the playbook repo is still private," >&2
+  echo "        the clone will fail (and the kit will degrade gracefully)." >&2
+  echo "        Set it with: sbx secret set -g github" >&2
+fi
+
+info "1. sbx kit validate"
+if sbx kit validate "$KIT_DIR" >/dev/null 2>&1; then ok "kit validates"; else bad "kit failed validation"; fi
+
+info "2. Create a sandbox with the kit"
+echo "  creating $SBX_NAME (workspace $WORK)..."
+if sbx create --name "$SBX_NAME" --kit "$KIT_DIR" opencode "$WORK" >"$CREATE_LOG" 2>&1; then
+  ok "sandbox created with --kit"
+else
+  bad "sbx create failed (exit $?)"
+  sed 's/^/  | /' "$CREATE_LOG" >&2
+  exit 1
+fi
+sleep 2
+
+info "3. Playbook cloned at the pinned ref?"
+ref_expected="$(grep -E '^[[:space:]]+PLAYBOOK_REF:[[:space:]]*"' "$KIT_DIR/spec.yaml" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')"
+echo "  expected PLAYBOOK_REF: ${ref_expected:-<unknown>}"
+if [ "$(in_sbx 'test -e "$HOME/.agentic-coding-playbook/.git" && echo yes')" = "yes" ]; then
+  ok "playbook cloned to ~/.agentic-coding-playbook"
+  ref_actual="$(in_sbx 'cd "$HOME/.agentic-coding-playbook" && git describe --tags --always 2>/dev/null')"
+  echo "  checked-out ref: ${ref_actual:-<unknown>}"
+  if [ -n "$ref_expected" ] && [ "$ref_actual" = "$ref_expected" ]; then
+    ok "checked-out ref matches PLAYBOOK_REF"
+  else
+    echo "  NOTE: ref mismatch or undetected — verify manually if unexpected." >&2
+  fi
+else
+  bad "playbook NOT cloned — likely offline or missing github secret"
+  echo "  Inspect: sbx exec $SBX_NAME -- sh -c 'ls -la ~/.agentic-coding-playbook'" >&2
+  echo "  And:     sbx policy log $SBX_NAME   (look for blocked github.com)" >&2
+fi
+
+info "4. AGENTS.md linked into agent rules paths?"
+for p in \
+  ".config/opencode/AGENTS.md" \
+  ".codex/AGENTS.md" \
+  ".factory/AGENTS.md" \
+  ".claude/CLAUDE.md" \
+  ".copilot/copilot-instructions.md"; do
+  if [ "$(in_sbx "test -L \"\$HOME/$p\" && test -e \"\$HOME/$p\" && echo yes")" = "yes" ]; then
+    ok "~/$p -> playbook AGENTS.md"
+  else
+    bad "~/$p not linked (or dangling)"
+  fi
+done
+
+info "5. Skills linked into skills roots?"
+for r in \
+  ".agents/skills" \
+  ".claude/skills" \
+  ".factory/skills" \
+  ".cursor/skills" \
+  ".copilot/skills"; do
+  count="$(in_sbx "ls \"\$HOME/$r\" 2>/dev/null | wc -l | tr -d ' '")"
+  resolves="$(in_sbx "for d in \"\$HOME/$r\"/*/; do [ -e \"\$d/SKILL.md\" ] && { echo yes; break; }; done")"
+  if [ "${count:-0}" -gt 0 ] 2>/dev/null && [ "$resolves" = "yes" ]; then
+    ok "~/$r ($count skills, a SKILL.md resolves)"
+  else
+    bad "~/$r empty or skills don't resolve"
+  fi
+done
+
+info "6. Minimal egress (informational)"
+echo "  Review the policy log; add any blocked host to caps.network.allow:"
+echo "    sbx policy log $SBX_NAME"
+
+info "Summary"
+printf '  %d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ] && printf '  \033[32mAll checks passed.\033[0m\n' || printf '  \033[31mSome checks failed — see notes above.\033[0m\n'
+
+info "Offline / graceful-degradation check (manual)"
+cat <<'NOTE'
+  To confirm the kit degrades gracefully when the clone can't run, create a
+  sandbox with a deliberately bad ref and verify it still STARTS (no playbook):
+
+    work=$(mktemp -d)
+    sbx create --name pbkit-offline --kit <this-kit-dir> \
+      --env PLAYBOOK_REF=does-not-exist opencode "$work"
+    # expect: sandbox created; ~/.agentic-coding-playbook/.git absent;
+    #         a warning was printed by the startup command.
+    sbx rm -f pbkit-offline; rm -rf "$work"
+NOTE
+
+[ "$fail" -eq 0 ]
