@@ -7,9 +7,9 @@
 # up copying those files into every sandbox and manually keeping them in sync.
 #
 # Solution: when qsbx creates a sandbox it applies TWO sbx kits via --kit:
-#   1. this clone (usai-opencode-provider): configures the USAi OpenCode
-#      provider declaratively (drops ~/usai-config/opencode.jsonc and sets
-#      OPENCODE_CONFIG; allow-lists USAi egress). See spec.yaml, docs/adr/0005.
+#   1. <clone>/usai-opencode-provider: configures the USAi OpenCode provider
+#      declaratively (drops ~/usai-config/opencode.jsonc and sets
+#      OPENCODE_CONFIG; allow-lists USAi egress). See docs/adr/0005.
 #   2. <clone>/playbook-kit (agentic-coding-playbook): at container startup,
 #      clones the playbook at a pinned ref and symlinks its AGENTS.md + skills
 #      into each supported agent's search paths. See playbook-kit/, docs/adr/0007.
@@ -63,8 +63,9 @@ SCRIPT_DIR=$(script_dir) || { echo "qsbx: could not resolve script directory" >&
 # overrides it if exported.
 QUICKSTART_CLONE="${QUICKSTART_CLONE:-$SCRIPT_DIR}"
 
-# The playbook mixin kit lives in a subdirectory of the clone. Applied via --kit
-# alongside the root (usai-opencode-provider) kit. See playbook-kit/, docs/adr/0007.
+# Both mixin kits live in subdirectories of the clone, applied via --kit.
+# See usai-opencode-provider/ (docs/adr/0005) and playbook-kit/ (docs/adr/0007).
+USAI_KIT="$QUICKSTART_CLONE/usai-opencode-provider"
 PLAYBOOK_KIT="$QUICKSTART_CLONE/playbook-kit"
 
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
@@ -90,8 +91,8 @@ KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro openco
 
 # Assert QUICKSTART_CLONE points at a usable clone (has both kits).
 require_clone() {
-  if [ ! -f "$QUICKSTART_CLONE/files/home/usai-config/opencode.jsonc" ]; then
-    echo "error: could not find files/home/usai-config/opencode.jsonc under '$QUICKSTART_CLONE'." >&2
+  if [ ! -f "$USAI_KIT/files/home/usai-config/opencode.jsonc" ]; then
+    echo "error: could not find usai-opencode-provider/files/home/usai-config/opencode.jsonc under '$QUICKSTART_CLONE'." >&2
     echo "       Run qsbx from your quickstart clone, or export QUICKSTART_CLONE." >&2
     exit 1
   fi
@@ -309,9 +310,9 @@ create_with_config() {
   # Guard the array expansion for bash 3.2 (macOS default): under `set -u` an
   # empty array expansion is an "unbound variable" error there.
   if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
-    sbx create --name "$name" --kit "$QUICKSTART_CLONE" --kit "$PLAYBOOK_KIT" "${STRIPPED_ARGS[@]}"
+    sbx create --name "$name" --kit "$USAI_KIT" --kit "$PLAYBOOK_KIT" "${STRIPPED_ARGS[@]}"
   else
-    sbx create --name "$name" --kit "$QUICKSTART_CLONE" --kit "$PLAYBOOK_KIT"
+    sbx create --name "$name" --kit "$USAI_KIT" --kit "$PLAYBOOK_KIT"
   fi
 }
 
@@ -331,7 +332,7 @@ ensure_kit_applied() {
   if [ -z "$cfg" ]; then
     echo "qsbx: '$name' predates the USAi kit (no OPENCODE_CONFIG); injecting it" >&2
     echo "      with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$QUICKSTART_CLONE" </dev/null >/dev/null 2>&1; then
+    if sbx kit add "$name" "$USAI_KIT" </dev/null >/dev/null 2>&1; then
       # A stale ~/.config/opencode/opencode.jsonc symlink (to the removed
       # opencode/ path) is now harmless — OPENCODE_CONFIG takes precedence — but
       # remove it if it dangles so it can't confuse OpenCode or the user.
@@ -341,7 +342,7 @@ ensure_kit_applied() {
       echo "qsbx: USAi kit injected into '$name'." >&2
     else
       echo "qsbx: warning: 'sbx kit add' (USAi kit) failed for '$name' (it is EXPERIMENTAL)." >&2
-      echo "      Recover with: sbx kit add '$name' '$QUICKSTART_CLONE'" >&2
+      echo "      Recover with: sbx kit add '$name' '$USAI_KIT'" >&2
     fi
   fi
 
@@ -401,9 +402,9 @@ create_config_sandbox() {
 
   strip_name "$@"
   if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
-    sbx create --name "$name" --kit "$QUICKSTART_CLONE" --kit "$PLAYBOOK_KIT" "${STRIPPED_ARGS[@]}"
+    sbx create --name "$name" --kit "$USAI_KIT" --kit "$PLAYBOOK_KIT" "${STRIPPED_ARGS[@]}"
   else
-    sbx create --name "$name" --kit "$QUICKSTART_CLONE" --kit "$PLAYBOOK_KIT"
+    sbx create --name "$name" --kit "$USAI_KIT" --kit "$PLAYBOOK_KIT"
   fi
 }
 

@@ -12,6 +12,16 @@ risk_treatment: mitigate
 
 # ADR-0005: Distribute Shared OpenCode Config as an sbx Mixin Kit at the Repo Root
 
+> **Update (ADR-0007 era):** the kit was later **moved out of the repo root**
+> into an explicit `usai-opencode-provider/` subdirectory (a sibling of
+> `playbook-kit/`), once a second kit existed and "the repo root is one specific
+> kit" became confusing. The config now lives at
+> `usai-opencode-provider/files/home/usai-config/opencode.jsonc` and is applied
+> with `--kit ./usai-opencode-provider`. The design below (namespaced
+> `OPENCODE_CONFIG`, the `$usaiKit` sentinel, compose-don't-clobber) is
+> unchanged; only the kit's directory moved. Paths in this ADR reflect the
+> original root-as-kit layout.
+
 ## Context and Problem Statement
 
 ADR-0004 established that `qsbx` mounts this clone into each sandbox and

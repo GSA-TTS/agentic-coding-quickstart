@@ -20,7 +20,7 @@ payload).
 Apply alongside the provider kit (order does not matter):
 
 ```bash
-sbx run --kit . --kit ./playbook-kit opencode /path/to/project
+sbx run --kit ./usai-opencode-provider --kit ./playbook-kit opencode /path/to/project
 ```
 
 `qsbx` applies both kits automatically:
@@ -102,7 +102,7 @@ The startup command is **idempotent** and **non-fatal**:
 
 ```bash
 sbx kit validate ./playbook-kit
-sbx run --kit . --kit ./playbook-kit opencode /tmp/pb-smoke
+sbx run --kit ./usai-opencode-provider --kit ./playbook-kit opencode /tmp/pb-smoke
 # inside the sandbox / via sbx exec:
 sbx exec <sandbox> -- sh -c 'ls -l ~/.agents/skills && cat ~/.config/opencode/AGENTS.md | head'
 # confirm the minimal egress set:

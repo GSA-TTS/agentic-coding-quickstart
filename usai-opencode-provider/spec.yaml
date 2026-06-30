@@ -1,7 +1,8 @@
 # spec.yaml — usai-opencode-provider (an sbx mixin kit)
 #
-# This repository root IS the kit. Applied at sandbox creation with:
-#   sbx run --kit . opencode <project>        (local path)
+# Applied at sandbox creation with (local path):
+#   sbx run --kit ./usai-opencode-provider opencode <project>
+# qsbx applies it (alongside the playbook kit) automatically.
 #
 # What it does, declaratively:
 #   - caps.network: allow egress to the USAi endpoint (default-deny networks).

@@ -130,7 +130,7 @@ should be verified in-sandbox.
   rules + skills, silent), missing clone with failing `git` (warns, exits 0,
   self-heal on next start), and idempotent re-run.
 - `sbx kit validate ./playbook-kit` → VALID.
-- Live: `sbx run --kit . --kit ./playbook-kit opencode <proj>` → clone present,
+- Live: `sbx run --kit ./usai-opencode-provider --kit ./playbook-kit opencode <proj>` → clone present,
   `~/.agents/skills/<skill>/SKILL.md` and `~/.config/opencode/AGENTS.md` resolve;
   `sbx policy log` pins the minimal egress set.
 

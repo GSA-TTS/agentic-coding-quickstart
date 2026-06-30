@@ -126,5 +126,5 @@ Adopt a **convention-based co-tenancy contract**, not a custom merge engine
 ## Links
 
 - Builds on: ADR-0005 (kit owns `OPENCODE_CONFIG`)
-- Related: `spec.yaml` (`commands.startup` guard), `files/home/usai-config/opencode.jsonc` (`$usaiKit` sentinel)
+- Related: `usai-opencode-provider/spec.yaml` (`commands.startup` guard), `usai-opencode-provider/files/home/usai-config/opencode.jsonc` (`$usaiKit` sentinel)
 - OpenCode config loader: `packages/opencode/src/config/config.ts` (`loadInstanceState`)

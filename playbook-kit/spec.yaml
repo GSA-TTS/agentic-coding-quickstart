@@ -8,7 +8,7 @@
 # submodule or a files/ payload).
 #
 # Apply alongside the provider kit:
-#   sbx run --kit . --kit ./playbook-kit opencode <project>
+#   sbx run --kit ./usai-opencode-provider --kit ./playbook-kit opencode <project>
 # qsbx applies both automatically.
 #
 # Behavior:

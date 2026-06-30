@@ -24,21 +24,20 @@ review_cycle: "quarterly"
 ## Workspace Structure
 
 This repository holds the **shared global config** (OpenCode settings, agent
-rules, docs) plus the playbook as a pinned submodule. The repository root is
-This repository holds the **shared global config** (OpenCode settings, agent
-rules, docs) and is itself **two sbx mixin kits**: the repository root
-(`spec.yaml` + `files/`) is `usai-opencode-provider`, which configures OpenCode
-for USAi; and `playbook-kit/` is `agentic-coding-playbook`, which clones the GSA
-playbook at startup and links its `AGENTS.md` + skills into each agent. `qsbx`
-applies both kits at sandbox creation. A typical layout:
+rules, docs) and is itself the home of **two sbx mixin kits**:
+`usai-opencode-provider/` configures OpenCode for USAi, and `playbook-kit/`
+(`agentic-coding-playbook`) clones the GSA playbook at startup and links its
+`AGENTS.md` + skills into each agent. `qsbx` applies both kits at sandbox
+creation. A typical layout:
 
 ```
 my-workspace/                       # Parent folder (user creates this)
 ├── agentic-coding-quickstart/      # THIS REPO - global config + sbx kits, applied to sandboxes
 │   ├── AGENTS.md                   # You are here (rules for working ON this repo)
-│   ├── spec.yaml                   # sbx mixin kit: USAi provider + network egress
-│   ├── files/home/usai-config/opencode.jsonc  # USAi provider + model config (shared)
-│   ├── opencode.jsonc -> files/home/usai-config/opencode.jsonc   # root convenience symlink
+│   ├── usai-opencode-provider/     # sbx mixin kit: USAi provider + network egress
+│   │   ├── spec.yaml
+│   │   └── files/home/usai-config/opencode.jsonc  # USAi provider + model config
+│   ├── opencode.jsonc -> usai-opencode-provider/files/home/usai-config/opencode.jsonc  # convenience symlink
 │   ├── playbook-kit/               # sbx mixin kit: clones playbook, links AGENTS.md + skills
 │   │   ├── spec.yaml
 │   │   └── README.md
@@ -47,14 +46,15 @@ my-workspace/                       # Parent folder (user creates this)
 └── my-app/                         # User's project(s)
 ```
 
-Inside the sandbox, `qsbx` applies two kits (`--kit <clone> --kit
-<clone>/playbook-kit`):
+Inside the sandbox, `qsbx` applies two kits (`--kit <clone>/usai-opencode-provider
+--kit <clone>/playbook-kit`):
 
 - **OpenCode provider config** (`usai-opencode-provider`) — drops
-  `<clone>/files/home/usai-config/opencode.jsonc` at `~/usai-config/opencode.jsonc`
-  and sets `OPENCODE_CONFIG` to point there (see `docs/adr/0005`). The kit owns
-  the single-valued `OPENCODE_CONFIG` channel; other config-contributing kits
-  must use `<workspace>/.opencode/opencode.jsonc` instead (see `docs/adr/0006`).
+  `usai-opencode-provider/files/home/usai-config/opencode.jsonc` at
+  `~/usai-config/opencode.jsonc` and sets `OPENCODE_CONFIG` to point there (see
+  `docs/adr/0005`). The kit owns the single-valued `OPENCODE_CONFIG` channel;
+  other config-contributing kits must use `<workspace>/.opencode/opencode.jsonc`
+  instead (see `docs/adr/0006`).
 - **Playbook rules + skills** (`agentic-coding-playbook`) — at container startup,
   clones the playbook at a pinned ref into `~/.agentic-coding-playbook` and
   symlinks its `AGENTS.md` into each agent's rules path (e.g.
@@ -67,7 +67,7 @@ rules/skills relative to `OPENCODE_CONFIG_DIR`, which is why they are linked
 into the home search paths; see `docs/adr/0004`.)
 
 Applying the kits directly (without `qsbx`) is equivalent:
-`sbx run --kit . --kit ./playbook-kit opencode <project>`.
+`sbx run --kit ./usai-opencode-provider --kit ./playbook-kit opencode <project>`.
 
 ### Agent Resource Access
 

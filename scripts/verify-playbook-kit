@@ -22,6 +22,7 @@
 set -uo pipefail
 
 CLONE="$(cd "$(dirname "$0")/.." && pwd)"
+USAI_KIT="$CLONE/usai-opencode-provider"
 PLAYBOOK_KIT="$CLONE/playbook-kit"
 SBX_NAME="pbkit-verify-$$"
 # Use a RELATIVE tmp/ dir under the clone (gitignored) so the workspace and the
@@ -70,14 +71,14 @@ else
 fi
 
 info "1. sbx kit validate (both kits)"
-if sbx kit validate "$CLONE" >/dev/null 2>&1; then ok "usai-opencode-provider validates"; else bad "usai-opencode-provider failed validation"; fi
+if sbx kit validate "$USAI_KIT" >/dev/null 2>&1; then ok "usai-opencode-provider validates"; else bad "usai-opencode-provider failed validation"; fi
 if sbx kit validate "$PLAYBOOK_KIT" >/dev/null 2>&1; then ok "agentic-coding-playbook validates"; else bad "agentic-coding-playbook failed validation"; fi
 
 info "2. Create a sandbox with both kits"
 echo "  creating $SBX_NAME (workspace $WORK)..."
 echo "  capturing sbx create output to $CREATE_LOG"
-if sbx create --name "$SBX_NAME" --kit "$CLONE" --kit "$PLAYBOOK_KIT" opencode "$WORK" >"$CREATE_LOG" 2>&1; then
-  ok "sandbox created with --kit . --kit ./playbook-kit"
+if sbx create --name "$SBX_NAME" --kit "$USAI_KIT" --kit "$PLAYBOOK_KIT" opencode "$WORK" >"$CREATE_LOG" 2>&1; then
+  ok "sandbox created with --kit usai-opencode-provider --kit playbook-kit"
 else
   bad "sbx create with both kits failed (exit $?)"
   echo "  --- sbx create output ($CREATE_LOG) ---" >&2
@@ -158,7 +159,7 @@ cat <<'NOTE'
   sandbox with a deliberately bad ref and verify it still STARTS (no playbook):
 
     mkdir -p /tmp/pbkit-offline
-    sbx create --name pbkit-offline --kit . --kit ./playbook-kit \
+    sbx create --name pbkit-offline --kit ./usai-opencode-provider --kit ./playbook-kit \
       --env PLAYBOOK_REF=does-not-exist opencode /tmp/pbkit-offline
     # expect: sandbox created; sbx exec shows NO ~/.agentic-coding-playbook/.git;
     #         a warning was printed by the startup command.
