@@ -12,11 +12,14 @@ risk_treatment: mitigate
 
 # ADR-0004: Vendor the Playbook as a Submodule and Symlink Shared Config into the Sandbox Home
 
-> **Update (ADR-0005):** the shared OpenCode config moved from
-> `opencode/opencode.jsonc` to `files/home/usai-config/opencode.jsonc` when the
-> repository root became an `sbx` mixin kit (`usai-opencode-provider`). The
-> submodule + home-symlink mechanism described here is unchanged; only the
-> source path of the config file changed. See `docs/adr/0005`.
+> **Status update (ADR-0007): SUPERSEDED.** The git submodule and `qsbx`'s
+> home-symlinking of `AGENTS.md`/skills described here were **removed**. The
+> playbook is now delivered by the `agentic-coding-playbook` mixin kit, which
+> clones the playbook at container startup and links its `AGENTS.md` + skills
+> into each agent's search paths. See `docs/adr/0007`. (Earlier, ADR-0005 moved
+> the OpenCode config to `files/home/usai-config/opencode.jsonc` when the repo
+> root became the `usai-opencode-provider` kit.) This ADR is retained for
+> historical context.
 
 ## Context and Problem Statement
 

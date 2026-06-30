@@ -25,44 +25,49 @@ review_cycle: "quarterly"
 
 This repository holds the **shared global config** (OpenCode settings, agent
 rules, docs) plus the playbook as a pinned submodule. The repository root is
-also an **sbx mixin kit** (`spec.yaml` + `files/`) named `usai-opencode-provider`
-that configures OpenCode for USAi at sandbox creation. `qsbx` mounts this clone
-into SBX sandboxes and symlinks the config into the home locations OpenCode
-searches. A typical layout:
+This repository holds the **shared global config** (OpenCode settings, agent
+rules, docs) and is itself **two sbx mixin kits**: the repository root
+(`spec.yaml` + `files/`) is `usai-opencode-provider`, which configures OpenCode
+for USAi; and `playbook-kit/` is `agentic-coding-playbook`, which clones the GSA
+playbook at startup and links its `AGENTS.md` + skills into each agent. `qsbx`
+applies both kits at sandbox creation. A typical layout:
 
 ```
 my-workspace/                       # Parent folder (user creates this)
-├── agentic-coding-quickstart/      # THIS REPO - global config + sbx kit, mounted into sandboxes
+├── agentic-coding-quickstart/      # THIS REPO - global config + sbx kits, applied to sandboxes
 │   ├── AGENTS.md                   # You are here (rules for working ON this repo)
 │   ├── spec.yaml                   # sbx mixin kit: USAi provider + network egress
 │   ├── files/home/usai-config/opencode.jsonc  # USAi provider + model config (shared)
 │   ├── opencode.jsonc -> files/home/usai-config/opencode.jsonc   # root convenience symlink
-│   ├── agentic-coding-playbook/    # Pinned submodule: skills + federal AGENTS.md
-│   ├── qsbx                        # sbx wrapper: mounts clone, links config into sandbox
+│   ├── playbook-kit/               # sbx mixin kit: clones playbook, links AGENTS.md + skills
+│   │   ├── spec.yaml
+│   │   └── README.md
+│   ├── qsbx                        # sbx wrapper: applies both kits to each sandbox
 │   └── docs/                       # Setup guides and references
 └── my-app/                         # User's project(s)
 ```
 
-Inside the sandbox, `qsbx` delivers the shared config two ways:
+Inside the sandbox, `qsbx` applies two kits (`--kit <clone> --kit
+<clone>/playbook-kit`):
 
-- **OpenCode provider config** — applied as an sbx **kit** (`qsbx` passes
-  `--kit <clone>` to `sbx create`). The kit drops
+- **OpenCode provider config** (`usai-opencode-provider`) — drops
   `<clone>/files/home/usai-config/opencode.jsonc` at `~/usai-config/opencode.jsonc`
   and sets `OPENCODE_CONFIG` to point there (see `docs/adr/0005`). The kit owns
   the single-valued `OPENCODE_CONFIG` channel; other config-contributing kits
   must use `<workspace>/.opencode/opencode.jsonc` instead (see `docs/adr/0006`).
-- **Playbook rules + skills** — symlinked into the locations OpenCode searches
-  (not yet packaged as a kit):
-  - `~/.config/opencode/AGENTS.md` → `<clone>/agentic-coding-playbook/AGENTS.md`
-  - `~/.agents/skills` → `<clone>/agentic-coding-playbook/.agents/skills`
+- **Playbook rules + skills** (`agentic-coding-playbook`) — at container startup,
+  clones the playbook at a pinned ref into `~/.agentic-coding-playbook` and
+  symlinks its `AGENTS.md` into each agent's rules path (e.g.
+  `~/.config/opencode/AGENTS.md`) and each skill into `~/.agents/skills`
+  (see `docs/adr/0007`).
 
-So edits to the shared config or playbook (after a submodule bump) are picked up
-by every sandbox. (An empirical spike found OpenCode does **not** read the
-rules/skills relative to `OPENCODE_CONFIG_DIR`, which is why they are symlinked
-into the home search paths rather than carried by the kit; see `docs/adr/0004`.)
+So every sandbox picks up the USAi config, federal rules, and skills
+declaratively. (An empirical spike found OpenCode does **not** read the
+rules/skills relative to `OPENCODE_CONFIG_DIR`, which is why they are linked
+into the home search paths; see `docs/adr/0004`.)
 
-Applying the kit directly (without `qsbx`) is equivalent for the provider config:
-`sbx run --kit . opencode <project>`.
+Applying the kits directly (without `qsbx`) is equivalent:
+`sbx run --kit . --kit ./playbook-kit opencode <project>`.
 
 ### Agent Resource Access
 
@@ -71,8 +76,8 @@ When working on user projects, the agent has access to:
 | Resource | Location | Use For |
 |----------|----------|---------|
 | Global config | `~/usai-config/opencode.jsonc` (via kit `OPENCODE_CONFIG`) | Model/provider config |
-| Behavioral rules | `~/.config/opencode/AGENTS.md` (linked to playbook) | Federal agent rules |
-| Skills | `~/.agents/skills` (linked to playbook) | Step-by-step procedures |
+| Behavioral rules | `~/.config/opencode/AGENTS.md` (linked to playbook clone) | Federal agent rules |
+| Skills | `~/.agents/skills` (linked to playbook clone) | Step-by-step procedures |
 | Setup guides | `./docs/` | SBX configuration, troubleshooting |
 
 **To use a skill:** Read the SKILL.md file in the skill directory and follow its procedures.
@@ -366,7 +371,7 @@ See `docs/QUICKSTART_SBX.md` for detailed credential injection patterns.
 
 ## Coding Standards
 
-- Follow [`agentic-coding-playbook/docs/CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (the pinned playbook submodule) for secure coding guidelines
+- Follow [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) in the GSA agentic-coding-playbook for secure coding guidelines
 - Prefer explicit configuration over implicit behavior
 - Maximum function length: 50 lines
 - All external input MUST be validated before use

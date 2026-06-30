@@ -592,35 +592,38 @@ Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
 
 The USAi provider config is not loaded in the sandbox. With `qsbx`, the config is
 delivered by applying this clone as an sbx **kit** (`--kit`), which sets
-`OPENCODE_CONFIG` to `~/usai-config/opencode.jsonc`; `qsbx` separately symlinks
-the playbook's `AGENTS.md` and `~/.agents/skills`. This symptom appears when the
-sandbox was created without `qsbx` (so neither the kit nor the symlinks were
-applied), or with `sbx run` directly but without `--kit .`.
+`OPENCODE_CONFIG` to `~/usai-config/opencode.jsonc`; a second kit
+(`playbook-kit`, applied alongside it) clones the playbook at startup and links
+`AGENTS.md` + `~/.agents/skills`. This symptom appears when the sandbox was
+created without `qsbx` (so the kits were not applied), or with `sbx run`
+directly but without `--kit . --kit ./playbook-kit`.
 
 **Upgrading an existing sandbox.** A sandbox created with an *older* `qsbx`
 (before the kit migration) has a stale `~/.config/opencode/opencode.jsonc`
-symlink pointing at the removed `opencode/` path and no `OPENCODE_CONFIG`. When
-you `git pull` and resume it, `qsbx run` now detects the missing
-`OPENCODE_CONFIG` and **auto-heals** the sandbox by injecting the kit with
-`sbx kit add` (no recreation needed). If that automatic step fails, use the
-manual fix below.
+symlink pointing at the removed `opencode/` path and no `OPENCODE_CONFIG` (and no
+playbook clone). When you `git pull` and resume it, `qsbx run` detects the
+missing `OPENCODE_CONFIG` (and missing playbook) and **auto-heals** the sandbox
+by injecting the kit(s) with `sbx kit add` (no recreation needed). If that
+automatic step fails, use the manual fix below.
 
 ### Fix
 
-If the sandbox already exists, inject the kit into it without recreating it
+If the sandbox already exists, inject the kit(s) into it without recreating it
 (replace `SANDBOX` with the sandbox name from `sbx ls`):
 
 ```bash
-sbx kit add SANDBOX /path/to/agentic-coding-quickstart
+sbx kit add SANDBOX /path/to/agentic-coding-quickstart                 # USAi provider
+sbx kit add SANDBOX /path/to/agentic-coding-quickstart/playbook-kit    # playbook rules+skills
 ```
 
 > `sbx kit add` is currently EXPERIMENTAL and may change in future releases. It
 > applies the kit's files, init files, and startup commands to the running
-> container — enough to deliver the USAi provider config. (Restart the agent so
-> it re-reads `OPENCODE_CONFIG`.) `qsbx run` does this automatically for existing
-> sandboxes that predate the kit.
+> container — enough to deliver the USAi provider config and the playbook. (The
+> playbook clones on the next start; restart the agent so it re-reads
+> `OPENCODE_CONFIG` and picks up rules/skills.) `qsbx run` does this automatically
+> for existing sandboxes that predate the kits.
 
-Otherwise, create the sandbox with the kit applied. With `qsbx` this is
+Otherwise, create the sandbox with both kits applied. With `qsbx` this is
 automatic:
 
 ```bash

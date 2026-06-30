@@ -8,7 +8,7 @@ nist_controls: ["RA-3", "RA-5"]
 frameworks: ["NIST AI RMF 1.0", "OWASP Top 10 LLM 2025", "OWASP Top 10 Agentic 2026"]
 audience: "isso"
 keywords: ["risk-assessment", "AI-RMF", "threat-analysis", "OWASP", "ATO"]
-related_files: ["agentic-coding-playbook/docs/CODING_PRACTICES.md", "AGENTS.md"]
+related_files: ["playbook-kit/spec.yaml", "AGENTS.md"]
 load_priority: "reference-only"
 review_cycle: "semi-annually"
 ---

@@ -72,15 +72,11 @@ Run each command in your terminal. If a command isn't found, that requirement is
 ### Step 1: Clone this repo (with the playbook submodule)
 
 ```bash
-git clone --recurse-submodules \
-  https://github.com/GSA-TTS/agentic-coding-quickstart.git
+git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
 cd agentic-coding-quickstart
 ```
 
-**Check it worked:** run `ls agentic-coding-playbook` — it should list files
-(`AGENTS.md`, `.agents`, …). If it's empty, the submodule didn't populate; run
-`git submodule update --init`. The remaining steps must be run from inside this
-cloned folder.
+The remaining steps must be run from inside this cloned folder.
 
 ### Step 2: Install sbx CLI
 
@@ -277,22 +273,26 @@ quickstart for when you want to customize or troubleshoot.
 
 `qsbx run` created the sandbox for that path (if it didn't exist yet) using the underlying `sbx` command, making sure that this clone was accessible inside it. Then it configured the coding agent (`opencode`) to pick up configuration for using the USAi provider and made sure the agent was provisioned with custom guidance and relevant skills for working in the federal context.
 
-### What `qsbx` mounts and links
+### What `qsbx` applies
 
-This clone holds your shared global config (`files/home/usai-config/opencode.jsonc`)
-plus the playbook submodule (`agentic-coding-playbook/`). `qsbx` applies the clone
-as an sbx **kit** (`--kit`) and also mounts it read-only, delivering the shared
-config two ways:
+This clone is **two sbx kits**: the root (`usai-opencode-provider`) and
+`playbook-kit/` (`agentic-coding-playbook`). `qsbx` applies **both** with `--kit`
+when it creates a sandbox, delivering everything declaratively:
 
-- **OpenCode provider config** — via the kit: it drops the config at
+- **OpenCode provider config** — the root kit drops the config at
   `~/usai-config/opencode.jsonc` and sets `OPENCODE_CONFIG` to point there.
-- **Playbook rules + skills** — symlinked into the sandbox home (not yet a kit):
-  - `~/.config/opencode/AGENTS.md` → the playbook's federal agent rules
-  - `~/.agents/skills` → the playbook's skills
+- **Playbook rules + skills** — the playbook kit clones the playbook at startup
+  into `~/.agentic-coding-playbook` and symlinks its `AGENTS.md` into each
+  agent's rules path and its skills into `~/.agents/skills` (+ per-agent roots).
+  See [`playbook-kit/README.md`](playbook-kit/README.md).
 
 So every sandbox you create picks up the same config, rules, and skills. `qsbx`
 uses the clone it lives in, so run it from this checkout (or via a symlink to it);
 set `QUICKSTART_CLONE` only if you want to override that.
+
+> While the playbook repo is private (during rollout), the clone needs a GitHub
+> token — set it once with `sbx secret set -g github`. The sbx proxy injects it;
+> the container never sees it. Once the repo is public this is unnecessary.
 
 ### Why the USAi key uses `set-custom`
 
@@ -426,25 +426,25 @@ other. See [docs/adr/0006](docs/adr/0006-opencode-config-co-tenancy.md).
 
 ## Staying Current
 
-Once in a while, refresh this clone and the playbook to pick up updates, and
-rotate your USAi key when it expires (see [Troubleshooting](#troubleshooting)).
+Once in a while, refresh this clone to pick up updates, and rotate your USAi key
+when it expires (see [Troubleshooting](#troubleshooting)).
 
 ```bash
 # Update the quickstart clone
-git fetch
+git fetch && git pull
 
-# Bump the playbook submodule to a newer release
-git submodule update --remote --merge agentic-coding-playbook
-git add agentic-coding-playbook && git commit -m "chore: bump playbook submodule"
+# Adopt a newer playbook release: bump PLAYBOOK_REF in playbook-kit/spec.yaml
+# (and the matching default in its startup script), then recreate sandboxes.
 ```
 
 > [!NOTE]
 > **Resuming a sandbox after upgrading to the kit-based `qsbx`.** Sandboxes
-> created before the kit migration have an outdated OpenCode provider config.
-> The next time you `qsbx run opencode <path>` against such a sandbox, `qsbx`
-> detects this and automatically injects the kit with `sbx kit add` — no action
-> needed. Restart the agent (or start a fresh session) so it re-reads the
-> config. Requires `sbx` >= 0.34.0, which `qsbx` now enforces.
+> created before the kit migration have an outdated provider config or no
+> playbook. The next time you `qsbx run opencode <path>` against such a sandbox,
+> `qsbx` detects this and automatically injects the missing kit(s) with `sbx kit
+> add` — no action needed. Restart the agent (or start a fresh session) so it
+> re-reads the config and picks up the playbook. Requires `sbx` >= 0.34.0, which
+> `qsbx` now enforces.
 
 ---
 
@@ -456,11 +456,12 @@ git add agentic-coding-playbook && git commit -m "chore: bump playbook submodule
 
 ### Available Skills and Resources
 
-The playbook (vendored here as the `agentic-coding-playbook/` submodule) provides
-reusable **agent skills** — step-by-step procedures for common tasks. Skills
-follow the [agentskills.io](https://agentskills.io) standard. When you launch a
-sandbox with `qsbx`, these are symlinked to `~/.agents/skills` so OpenCode
-discovers them automatically; no separate clone is needed.
+The playbook provides reusable **agent skills** — step-by-step procedures for
+common tasks. Skills follow the [agentskills.io](https://agentskills.io)
+standard. When you launch a sandbox with `qsbx`, the `agentic-coding-playbook`
+kit clones the playbook at startup and symlinks these into `~/.agents/skills`
+(and per-agent roots) so your agent discovers them automatically; no separate
+clone is needed.
 
 | Source       | Skills                       | Examples                                                                            |
 | ------------ | ---------------------------- | ----------------------------------------------------------------------------------- |
@@ -491,8 +492,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 | `spec.yaml`                         | sbx mixin kit (`usai-opencode-provider`): USAi provider + network egress |
 | `files/home/usai-config/opencode.jsonc` | Pre-configured for USAi endpoints (shared config + kit payload) |
 | `opencode.jsonc`                    | Convenience symlink to `files/home/usai-config/opencode.jsonc`   |
-| `agentic-coding-playbook/`          | Pinned submodule: federal `AGENTS.md` + agent skills       |
-| `qsbx`                              | sbx wrapper that mounts this clone and links config in     |
+| `playbook-kit/`                     | sbx mixin kit (`agentic-coding-playbook`): clones playbook at startup, links `AGENTS.md` + skills |
+| `qsbx`                              | sbx wrapper that applies both kits to each sandbox         |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`qsbx usai-rotate-api-key`) |
 | `.zed/tasks.json`                   | Pre-configured tasks for **Zed Editor**                    |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
