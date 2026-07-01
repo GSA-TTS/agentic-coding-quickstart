@@ -228,8 +228,17 @@ The agent MUST NOT:
 The agent MUST NEVER:
 - Print, log, or persist API keys, tokens, or credentials
 - Hardcode secrets in source files, config files, or scripts
-- Use `printenv`, `env`, or `echo $SECRET` in ways that expose values
+- Deliberately expose real secret *values* (e.g., `echo $SECRET`, or piping `printenv`/`env` output somewhere it is logged, committed, or shown)
 - Include secrets in commit messages, comments, or documentation
+
+> **Note on `env` / `printenv` in the sandbox:** Inside an SBX sandbox, secrets
+> are **injected placeholders or proxied** (the agent never holds the real USAi
+> key material), so inspecting the environment is not automatically a leak.
+> These commands are therefore **gated (`ask`)** rather than hard-denied in
+> `opencode.jsonc` — the agent should still avoid dumping secret values and must
+> get user approval before running them. The prohibition above is about
+> *exposing real secret values*, not about routine environment inspection in the
+> sandbox.
 
 All secrets MUST be accessed via:
 - SBX secret management

@@ -301,7 +301,7 @@
     "skill": "ask",
     "task": "ask",
     "webfetch": "ask",
-    "websearch": "ask",
+    "websearch": "allow",
     "external_directory": "ask",
     "doom_loop": "ask",
     "bash": {
@@ -315,8 +315,70 @@
       "rg *": "allow",
       "grep": "allow",
       "grep *": "allow",
-      "find": "ask",
-      "find *": "ask",
+      // ---------------------------------------------------------------------
+      // Read-only filesystem traversal. `find` is allowed for inspection,
+      // but the mutating / command-executing forms are denied first so they
+      // win over the broad allow (issue #177).
+      // ---------------------------------------------------------------------
+      "find * -exec*": "deny",
+      "find * -execdir*": "deny",
+      "find * -delete*": "deny",
+      "find * -fprintf*": "deny",
+      "find * -fls*": "deny",
+      "find * -ok*": "deny",
+      "find * -okdir*": "deny",
+      "find": "allow",
+      "find *": "allow",
+      // ---------------------------------------------------------------------
+      // Pure metadata / inspection — no mutation, no network, no secret or
+      // file-content exposure; safe even as a shell-chain prefix (issue #177).
+      // ---------------------------------------------------------------------
+      "which": "allow",
+      "which *": "allow",
+      "whoami": "allow",
+      "id": "allow",
+      "id *": "allow",
+      "uname": "allow",
+      "uname *": "allow",
+      "hostname": "allow",
+      "uptime": "allow",
+      "arch": "allow",
+      "date": "allow",
+      "file *": "allow",
+      "stat *": "allow",
+      "wc": "allow",
+      "wc *": "allow",
+      "du": "allow",
+      "du *": "allow",
+      "df": "allow",
+      "df *": "allow",
+      "ps": "allow",
+      "ps *": "allow",
+      "pgrep *": "allow",
+      // Language/tooling version probes (version-flag forms ONLY — never the
+      // bare interpreter, which would open a REPL / execute arbitrary code).
+      "node -v": "allow",
+      "node --version": "allow",
+      "npm -v": "allow",
+      "npm --version": "allow",
+      "python --version": "allow",
+      "python3 --version": "allow",
+      "go version": "allow",
+      "cargo --version": "allow",
+      "rustc --version": "allow",
+      "uv --version": "allow",
+      // Read-only git inspection (consistent with status/diff/log/show already
+      // allowed). NOTE: deliberately NOT allowing `git config`, `git remote -v`,
+      // `git cat-file`, or `git show <blob>` — those can reveal tokens or dump
+      // file contents and stay gated.
+      "git tag": "allow",
+      "git tag -l*": "allow",
+      "git tag --list*": "allow",
+      "git rev-parse *": "allow",
+      "git ls-files *": "allow",
+      "git shortlog *": "allow",
+      "git reflog": "allow",
+      "git reflog *": "allow",
       "git status": "allow",
       "git status *": "allow",
       "git diff": "allow",
