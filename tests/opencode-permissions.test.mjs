@@ -139,13 +139,13 @@ test("find: mutating / command-executing forms are denied", () => {
   }
 })
 
-test("env / secret-dumping commands are denied (fail-closed)", () => {
-  assert.equal(resolveBash(bash, "env"), "deny")
-  assert.equal(resolveBash(bash, "env | grep KEY"), "deny")
-  assert.equal(resolveBash(bash, "printenv"), "deny")
-  assert.equal(resolveBash(bash, "printenv USAI_API_KEY"), "deny")
-  assert.equal(resolveBash(bash, "set"), "deny")
-  assert.equal(resolveBash(bash, "export -p"), "deny")
+test("env / printenv fall through to the global ask default (not auto-allowed) (#179)", () => {
+  // Per review of #179: in the SBX sandbox the injected secrets are placeholders,
+  // so env/printenv are not a hard deny. They still MUST NOT be auto-allowed —
+  // they fall through to the global "*": "ask" so the user is prompted.
+  assert.notEqual(resolveBash(bash, "env"), "allow")
+  assert.notEqual(resolveBash(bash, "printenv"), "allow")
+  assert.notEqual(resolveBash(bash, "printenv USAI_API_KEY"), "allow")
 })
 
 test("rg/grep are allowed (sandbox injects placeholder secrets, not real ones) (#178)", () => {

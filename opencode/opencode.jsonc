@@ -435,15 +435,6 @@
       "rm *": "deny",
       "rmdir": "deny",
       "rmdir *": "deny",
-      // Environment dumpers — explicit DENY (fail-closed). These leak
-      // USAI_API_KEY and other injected secrets; AGENTS.md forbids exposing
-      // env secrets, so they must not even fall through to "ask" (issue #177).
-      "env": "deny",
-      "env *": "deny",
-      "printenv": "deny",
-      "printenv *": "deny",
-      "set": "deny",
-      "export -p": "deny",
       "dd": "deny",
       "dd *": "deny",
       "mkfs*": "deny",
