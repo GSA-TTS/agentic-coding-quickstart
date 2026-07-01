@@ -69,7 +69,7 @@ Run each command in your terminal. If a command isn't found, that requirement is
 > administrator to assign you one. For how Docker licensing works, see
 > [Docker's subscription docs](https://docs.docker.com/subscription/).
 
-### Step 1: Clone this repo (with the playbook submodule)
+### Step 1: Clone this repo
 
 ```bash
 git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
@@ -397,6 +397,24 @@ git fetch && git pull
 > add` — no action needed. Restart the agent (or start a fresh session) so it
 > re-reads the config and picks up the playbook. Requires `sbx` >= 0.34.0, which
 > `qsbx` now enforces.
+
+### Migrating an existing clone off the playbook submodule
+
+Earlier versions vendored the playbook as a git submodule at
+`agentic-coding-playbook/`. The kits now live in the
+[agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
+repo and `qsbx` fetches them at sandbox-create time, so the submodule is gone. If
+you cloned before that change, `git pull` leaves an orphaned submodule directory;
+clean it up once:
+
+```bash
+git submodule deinit -f agentic-coding-playbook 2>/dev/null || true
+git rm -f agentic-coding-playbook 2>/dev/null || true
+rm -rf .git/modules/agentic-coding-playbook agentic-coding-playbook
+```
+
+No sandbox impact — the playbook is delivered by the `agentic-coding-playbook`
+kit, not the submodule.
 
 ---
 

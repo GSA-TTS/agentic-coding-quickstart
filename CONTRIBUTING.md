@@ -92,6 +92,12 @@ npm ci --prefix .github/linters
 > [!NOTE]
 > `npm run check` auto-fixes some issues (markdown, whitespace, EOF) — review and stage the changes it makes.
 
+This repo carries no executable test suite. The sbx kits it applies — and their
+tests (permission-matrix, model-sync, per-kit `scripts/verify`) — live in the
+[agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
+repo under `integrations/isolation/sbx-kits/`. Changes to provider config,
+rules, skills, or CA trust belong there.
+
 ### Quick pre-push check
 
 ```bash

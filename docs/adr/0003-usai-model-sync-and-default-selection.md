@@ -1,6 +1,6 @@
 ---
 title: "Automate USAI Model Sync and Default Selection for OpenCode Templates"
-status: accepted
+status: superseded
 date: 2026-06-05
 decision_makers: ["William Zujkowski"]
 category: configuration-management
@@ -12,14 +12,14 @@ risk_treatment: mitigate
 
 # ADR-0003: Automate USAI Model Sync and Default Selection for OpenCode Templates
 
-> **Update (2026-06):** The reference config moved from `templates/opencode.jsonc`
-> to the repository-root `opencode.jsonc`, and the local sync command is now
-> `npm run sync:usai-models` (the `make` targets were removed). References below
-> reflect the original decision; paths and commands have since changed. The USAi
-> config and its model-sync tooling have since moved out of this repo entirely
-> into the `usai-provider` sbx mixin kit in the community
+> **Status: SUPERSEDED by [ADR-0005](0005-kits-from-patterns-and-agent-trust-model.md).**
+> The USAi config and its model-sync tooling (`sync-usai-models`) have moved out
+> of this repo entirely into the `usai-provider` sbx mixin kit in the community
 > [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
-> repo; the model-catalog decision recorded here still applies there.
+> repo. The model-catalog decision recorded here still applies, but it is now
+> maintained with the kit; the in-repo paths and commands below (e.g.
+> `npm run sync:usai-models`) no longer exist here. Retained for historical
+> context.
 
 ## Context and Problem Statement
 

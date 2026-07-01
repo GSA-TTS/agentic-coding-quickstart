@@ -1,6 +1,6 @@
 ---
 title: "Vendor the Playbook as a Submodule and Symlink Shared Config into the Sandbox Home"
-status: accepted
+status: superseded
 date: 2026-06-11
 decision_makers: ["Bret Mogilefsky"]
 category: configuration-management
@@ -12,14 +12,15 @@ risk_treatment: mitigate
 
 # ADR-0004: Vendor the Playbook as a Submodule and Symlink Shared Config into the Sandbox Home
 
-> **Status update: SUPERSEDED.** The git submodule and `qsbx`'s home-symlinking
-> of `AGENTS.md`/skills described here were **removed**. The playbook, the USAi
-> provider config, and the Zscaler CA are now delivered as sbx **mixin kits**
-> hosted in the community
+> **Status: SUPERSEDED by [ADR-0005](0005-kits-from-patterns-and-agent-trust-model.md).**
+> The git submodule and `qsbx`'s home-symlinking of `AGENTS.md`/skills described
+> here were **removed**. The playbook, the USAi provider config, and the Zscaler
+> CA are now delivered as sbx **mixin kits** hosted in the community
 > [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
 > repo (`integrations/isolation/sbx-kits/`); `qsbx` applies them by pinned remote
-> reference. The per-kit design rationale lives with the kits. This ADR is
-> retained for historical context.
+> reference. ADR-0005 records the new trust model (including the writable-clone
+> tradeoff this ADR's read-only mount previously mitigated) and the migration
+> path. This ADR is retained for historical context.
 
 ## Context and Problem Statement
 
