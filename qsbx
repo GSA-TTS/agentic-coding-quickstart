@@ -82,14 +82,27 @@ ZSCALER_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR
 #   export QSBX_EXTRA_KITS="./my-kit git+https://github.com/acme/kits.git#ref=<sha>&dir=foo"
 # These are appended AFTER the three built-in kits (later kits win on conflicting
 # env vars / overlay files, per sbx composition). Remote extras from a new host
-# still need their prefix on kit.allowedSources — see KIT_EXTRA_SOURCE_PREFIXES.
+# still need their prefix on kit.allowedSources — see QSBX_EXTRA_KIT_SOURCES.
 QSBX_EXTRA_KITS="${QSBX_EXTRA_KITS:-}"
 
+# Word-split a whitespace-separated env value into the named array WITHOUT
+# filename globbing (a literal `*` in a kit ref must not expand against the cwd).
+# Usage: split_noglob ARRAYNAME "$VALUE"
+split_noglob() {
+  local _name="$1" _val="$2" _oldopts
+  _oldopts=$(set +o); set -f
+  # shellcheck disable=SC2086
+  set -- $_val
+  eval "$_oldopts"
+  eval "$_name=(\"\$@\")"
+}
+
 # Assemble the full ordered kit list once: the three built-ins, then extras.
-# Word-split QSBX_EXTRA_KITS on whitespace (kit refs contain no spaces).
 KITS=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT")
-# shellcheck disable=SC2206
-[ -n "$QSBX_EXTRA_KITS" ] && KITS+=($QSBX_EXTRA_KITS)
+if [ -n "$QSBX_EXTRA_KITS" ]; then
+  split_noglob _extra_kits "$QSBX_EXTRA_KITS"
+  KITS+=("${_extra_kits[@]}")
+fi
 
 # Emit the --kit flags for the full kit list on stdout (one token per line) so
 # callers can collect them into an array. Keeps the three create sites in sync.
@@ -108,8 +121,10 @@ kit_flags() {
 KIT_SOURCE_PREFIX="github.com/GSA-TTS/"
 QSBX_EXTRA_KIT_SOURCES="${QSBX_EXTRA_KIT_SOURCES:-}"
 KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
-# shellcheck disable=SC2206
-[ -n "$QSBX_EXTRA_KIT_SOURCES" ] && KIT_SOURCE_PREFIXES+=($QSBX_EXTRA_KIT_SOURCES)
+if [ -n "$QSBX_EXTRA_KIT_SOURCES" ]; then
+  split_noglob _extra_sources "$QSBX_EXTRA_KIT_SOURCES"
+  KIT_SOURCE_PREFIXES+=("${_extra_sources[@]}")
+fi
 
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 KEY_MGMT_URL="https://console.gsa.usai.gov/key-management"
@@ -143,36 +158,88 @@ KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro openco
 #     entries (notably the default "docker.io/").
 #   - Entries are scheme-less, matched as prefixes on a path-segment boundary
 #     (e.g. "github.com/GSA-TTS/"), NOT "git+https://..." URLs.
-# Covers the built-in GSA-TTS prefix plus any in QSBX_EXTRA_KIT_SOURCES. If the
-# settings surface can't be read/written non-interactively, warn and continue —
-# the subsequent `sbx create` surfaces the real error if the gate blocks it.
+#
+# FAIL SAFE: this rewrites a GLOBAL sbx policy list, so we never write a guess.
+# We only add prefixes when we can read the current value AND parse it as a JSON
+# array (via jq). If jq is missing, the read fails, or the value isn't an array
+# (e.g. a transient/flaky read), we warn and print the manual command but DO NOT
+# write — so a blip can't silently narrow or corrupt an operator's allowlist.
+# Prefixes are added with `jq --arg` (never string-concatenated), so a stray
+# quote in QSBX_EXTRA_KIT_SOURCES can't inject an array element.
 ensure_kit_sources_allowed() {
-  local current entries missing p desired
+  local current desired
+
+  if ! command -v jq >/dev/null 2>&1; then
+    _kit_sources_manual_hint "jq not found; cannot safely update the allowlist"
+    return 0
+  fi
+
   current=$(sbx settings get kit.allowedSources 2>/dev/null || true)
 
-  # Existing quoted elements (may be empty/unreadable → seed with docker.io/).
-  entries=$(printf '%s' "$current" | grep -oE '"[^"]+"' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-  [ -z "$entries" ] && entries='"docker.io/"'
-
-  # Collect any required prefixes not already present.
-  missing=""
-  for p in "${KIT_SOURCE_PREFIXES[@]}"; do
-    case "$current" in
-      *"\"$p\""*) : ;;                      # already an array element
-      *) missing="${missing:+$missing,}\"$p\"" ;;
-    esac
-  done
-  [ -z "$missing" ] && return 0             # nothing to add
-
-  desired="[${entries},${missing}]"
-  if sbx settings set kit.allowedSources "$desired" </dev/null >/dev/null 2>&1; then
-    echo "qsbx: allowed remote kit source(s) on sbx kit.allowedSources: ${missing//\"/}" >&2
-  else
-    echo "qsbx: warning: could not update sbx kit.allowedSources." >&2
-    echo "      If kit resolution fails, run (the setting replaces the whole list," >&2
-    echo "      so keep the entries you want):" >&2
-    echo "        sbx settings set kit.allowedSources '${desired}'" >&2
+  # Validate: must be a JSON array. Anything else (empty, error text, object) is
+  # treated as unreadable — warn, don't write.
+  if ! printf '%s' "$current" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    _kit_sources_manual_hint "could not read kit.allowedSources as a JSON array"
+    return 0
   fi
+
+  # Compute the new array = current followed by any required prefixes not already
+  # present (order preserved, deduped). Prefixes come in as jq args, so a stray
+  # quote can't inject an element.
+  desired=$(printf '%s' "$current" | jq -c --args \
+    'reduce $ARGS.positional[] as $p (.; if index($p) then . else . + [$p] end)' \
+    "${KIT_SOURCE_PREFIXES[@]}" 2>/dev/null)
+  if [ -z "$desired" ]; then
+    _kit_sources_manual_hint "failed to compute updated allowlist"
+    return 0
+  fi
+
+  # No change needed? (current already contained every required prefix)
+  if [ "$(printf '%s' "$current" | jq -cS .)" = "$(printf '%s' "$desired" | jq -cS .)" ]; then
+    return 0
+  fi
+
+  if sbx settings set kit.allowedSources "$desired" </dev/null >/dev/null 2>&1; then
+    echo "qsbx: updated sbx kit.allowedSources to: $(printf '%s' "$desired" | jq -r '.[]' | tr '\n' ' ')" >&2
+  else
+    _kit_sources_manual_hint "could not write kit.allowedSources"
+  fi
+}
+
+# Print a warning + the exact manual command to allow the required prefixes,
+# using jq to build a well-formed array from whatever is currently set (falling
+# back to the documented default). Never writes anything.
+_kit_sources_manual_hint() {
+  local reason="$1" cmd cur
+  echo "qsbx: warning: $reason." >&2
+  if command -v jq >/dev/null 2>&1; then
+    cur=$(sbx settings get kit.allowedSources 2>/dev/null || true)
+    printf '%s' "$cur" | jq -e 'type == "array"' >/dev/null 2>&1 || cur='["docker.io/"]'
+    cmd=$(printf '%s' "$cur" | jq -c --args \
+      'reduce $ARGS.positional[] as $p (.; if index($p) then . else . + [$p] end)' \
+      "${KIT_SOURCE_PREFIXES[@]}" 2>/dev/null)
+  fi
+  [ -z "${cmd:-}" ] && cmd='["docker.io/","github.com/GSA-TTS/"]'
+  echo "      If kit resolution fails, review the current value and run (the" >&2
+  echo "      setting REPLACES the whole list — keep the entries you want):" >&2
+  echo "        sbx settings set kit.allowedSources '${cmd}'" >&2
+}
+
+# Print a warning + the exact manual command to allow the required prefixes,
+# using jq to build a well-formed array from whatever is currently set (falling
+# back to the documented default). Never writes anything.
+_kit_sources_manual_hint() {
+  local reason="$1" cmd cur
+  echo "qsbx: warning: $reason." >&2
+  if command -v jq >/dev/null 2>&1; then
+    cur=$(sbx settings get kit.allowedSources 2>/dev/null || true)
+    printf '%s' "$cur" | jq -e 'type == "array"' >/dev/null 2>&1 || cur='["docker.io/"]'
+    cmd=$(printf '%s' "$cur" | jq -c --args '. + ($ARGS.positional) | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end)' "${KIT_SOURCE_PREFIXES[@]}" 2>/dev/null)
+  fi
+  [ -z "${cmd:-}" ] && cmd='["docker.io/","github.com/GSA-TTS/"]'
+  echo "      If kit resolution fails, review the current value and run (the" >&2
+  echo "      setting REPLACES the whole list — keep the entries you want):" >&2
+  echo "        sbx settings set kit.allowedSources '${cmd}'" >&2
 }
 
 # Compare two dotted version strings. Echoes 0 if A >= B, 1 otherwise. Pads
@@ -395,14 +462,27 @@ create_with_config() {
 # Zscaler CA. We detect each and inject the missing kit into the running sandbox
 # with `sbx kit add` — no recreation needed. Best-effort: if the (experimental)
 # command fails, warn with the manual recovery step and continue to attach.
+#
+# Probe discipline: we distinguish "the probe ran and the feature is absent"
+# (heal) from "the probe itself failed to run" (skip — a transient exec blip
+# must not trigger a redundant kit add). kit_feature_absent runs a test snippet
+# that MUST print "present" when the feature exists; it returns:
+#   0 = ran, feature absent   1 = ran, feature present   2 = probe failed to run
+kit_feature_absent() {
+  local name="$1" snippet="$2" out
+  out=$(sbx exec "$name" -- sh -c "$snippet" </dev/null 2>/dev/null)
+  case "$?" in
+    0) [ "$out" = "present" ] && return 1 || return 0 ;;  # ran cleanly
+    *) return 2 ;;                                          # exec failed
+  esac
+}
+
 ensure_kit_applied() {
   local name="$1"
   ensure_kit_sources_allowed
 
-  # 1) USAi provider kit: detect via OPENCODE_CONFIG. Empty => not applied.
-  local cfg=""
-  cfg=$(sbx exec "$name" -- sh -c 'printf "%s" "${OPENCODE_CONFIG:-}"' </dev/null 2>/dev/null || true)
-  if [ -z "$cfg" ]; then
+  # 1) USAi provider kit: present iff OPENCODE_CONFIG is set.
+  if kit_feature_absent "$name" '[ -n "${OPENCODE_CONFIG:-}" ] && echo present'; then
     echo "qsbx: '$name' is missing the USAi kit (no OPENCODE_CONFIG); injecting it" >&2
     echo "      with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$USAI_KIT" </dev/null >/dev/null 2>&1; then
@@ -419,12 +499,9 @@ ensure_kit_applied() {
     fi
   fi
 
-  # 2) Playbook kit: detect via the clone the startup command creates. Absent
-  #    => not applied. The startup command runs on the next start after kit add,
-  #    so it self-heals.
-  local pb=""
-  pb=$(sbx exec "$name" -- sh -c 'test -e "$HOME/.agentic-coding-playbook/.git" && echo yes' </dev/null 2>/dev/null || true)
-  if [ -z "$pb" ]; then
+  # 2) Playbook kit: present iff the startup clone exists. The startup command
+  #    runs on the next start after kit add, so it self-heals.
+  if kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/.git" && echo present'; then
     echo "qsbx: '$name' is missing the playbook kit; injecting it with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$PLAYBOOK_KIT" </dev/null >/dev/null 2>&1; then
       echo "qsbx: playbook kit injected into '$name'. Restart the agent to pick it up." >&2
@@ -434,10 +511,8 @@ ensure_kit_applied() {
     fi
   fi
 
-  # 3) Zscaler CA kit: detect via the installed cert. Absent => not applied.
-  local ca=""
-  ca=$(sbx exec "$name" -- sh -c 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo yes' </dev/null 2>/dev/null || true)
-  if [ -z "$ca" ]; then
+  # 3) Zscaler CA kit: present iff the installed cert exists.
+  if kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
     echo "qsbx: '$name' is missing the Zscaler CA kit; injecting it with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$ZSCALER_KIT" </dev/null >/dev/null 2>&1; then
       echo "qsbx: Zscaler CA kit injected into '$name'. Restart the agent to pick it up." >&2
@@ -454,9 +529,9 @@ ensure_kit_applied() {
   #    injects just that one on the next `qsbx run <existing-sandbox>`.
   local applied k
   applied=$(sbx exec "$name" -- sh -c 'cat "$HOME/.qsbx-extra-kits" 2>/dev/null' </dev/null 2>/dev/null || true)
-  # Intentional word-split of the whitespace-separated extra-kits list.
-  # shellcheck disable=SC2086
-  for k in ${QSBX_EXTRA_KITS:-}; do
+  local _extras=()
+  [ -n "$QSBX_EXTRA_KITS" ] && split_noglob _extras "$QSBX_EXTRA_KITS"
+  for k in ${_extras[@]+"${_extras[@]}"}; do
     case "$applied" in
       *"$k"*) continue ;;   # already applied to this sandbox
     esac
