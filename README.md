@@ -417,8 +417,11 @@ other. See [docs/adr/0006](docs/adr/0006-opencode-config-co-tenancy.md).
 
 ## Optional Integrations
 
-- **Zed Editor** — Pre-configured tasks in `.zed/tasks.json` let you launch the
-  agent and run diagnostics from the editor. See the [Zed Editor Setup Guide](docs/ZED_SETUP.md).
+- **Editor integrations (Zed, etc.)** — Editor task configs and setup guides now
+  live in the community
+  [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations)
+  repo under `integrations/`. (For example, the Zed editor integration is at
+  `integrations/editors/zed/`.)
 - **OpenCode Web** — Run OpenCode Web in the sandbox and reach it from your host
   browser for clipboard support and richer markdown rendering. The
   [`opencode-web.sh`](opencode-web.sh) script automates it; see the
@@ -496,11 +499,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 | `playbook-kit/`                     | sbx mixin kit (`agentic-coding-playbook`): clones playbook at startup, links `AGENTS.md` + skills |
 | `qsbx`                              | sbx wrapper that applies both kits to each sandbox         |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`qsbx usai-rotate-api-key`) |
-| `.zed/tasks.json`                   | Pre-configured tasks for **Zed Editor**                    |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
 | `docs/QUICKSTART_SBX.md`            | Full sbx CLI setup guide                                   |
-| `docs/ZED_SETUP.md`                 | **Zed Editor** integration guide                           |
 | `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
 
 ---
