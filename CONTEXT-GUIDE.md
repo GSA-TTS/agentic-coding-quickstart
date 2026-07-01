@@ -45,7 +45,6 @@ Load only when the specific activity is being performed.
 
 | Document | Load When |
 |----------|-----------|
-| `opencode.jsonc` | Configuring OpenCode, model selection, provider setup |
 | `checklists/pre-deployment.md` | Running pre-deployment checklist |
 | `docs/risk-assessment.md` | Performing a risk assessment |
 

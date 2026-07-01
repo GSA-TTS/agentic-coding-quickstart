@@ -23,51 +23,45 @@ review_cycle: "quarterly"
 
 ## Workspace Structure
 
-This repository holds the **shared global config** (OpenCode settings, agent
-rules, docs) and is itself the home of **two sbx mixin kits**:
-`usai-provider-kit/` configures OpenCode for USAi, and `playbook-kit/`
-(`agentic-coding-playbook`) clones the GSA playbook at startup and links its
-`AGENTS.md` + skills into each agent. `qsbx` applies both kits at sandbox
-creation. A typical layout:
+This repository is a thin **wrapper** (`qsbx`) that stands up a working,
+federally-configured agent sandbox by composing existing tools: the `sbx` CLI
+plus three sbx **mixin kits** hosted in the community
+[agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
+repo (`integrations/isolation/sbx-kits/`). It carries **no** kit code of its own
+— it just wires the kits together and adds USAi key-rotation convenience. A
+typical layout:
 
 ```
 my-workspace/                       # Parent folder (user creates this)
-├── agentic-coding-quickstart/      # THIS REPO - global config + sbx kits, applied to sandboxes
+├── agentic-coding-quickstart/      # THIS REPO - the qsbx wrapper + docs
 │   ├── AGENTS.md                   # You are here (rules for working ON this repo)
-│   ├── usai-provider-kit/          # sbx mixin kit: USAi provider + network egress
-│   │   ├── spec.yaml
-│   │   └── files/home/usai-config/opencode.jsonc  # USAi provider + model config
-│   ├── opencode.jsonc -> usai-provider-kit/files/home/usai-config/opencode.jsonc  # convenience symlink
-│   ├── playbook-kit/               # sbx mixin kit: clones playbook, links AGENTS.md + skills
-│   │   ├── spec.yaml
-│   │   └── README.md
-│   ├── qsbx                        # sbx wrapper: applies both kits to each sandbox
+│   ├── qsbx                        # sbx wrapper: applies the kits to each sandbox
+│   ├── scripts/                    # helper scripts (USAi key rotation)
 │   └── docs/                       # Setup guides and references
 └── my-app/                         # User's project(s)
 ```
 
-Inside the sandbox, `qsbx` applies two kits (`--kit <clone>/usai-provider-kit
---kit <clone>/playbook-kit`):
+When `qsbx` creates a sandbox it applies three kits by pinned remote reference
+(`--kit git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=<sha>&dir=…`):
 
-- **OpenCode provider config** (`usai-provider`) — drops
-  `usai-provider-kit/files/home/usai-config/opencode.jsonc` at
-  `~/usai-config/opencode.jsonc` and sets `OPENCODE_CONFIG` to point there (see
-  `docs/adr/0005`). The kit owns the single-valued `OPENCODE_CONFIG` channel;
-  other config-contributing kits must use `<workspace>/.opencode/opencode.jsonc`
-  instead (see `docs/adr/0006`).
-- **Playbook rules + skills** (`agentic-coding-playbook`) — at container startup,
-  clones the playbook at a pinned ref into `~/.agentic-coding-playbook` and
-  symlinks its `AGENTS.md` into each agent's rules path (e.g.
-  `~/.config/opencode/AGENTS.md`) and each skill into `~/.agents/skills`
-  (see `docs/adr/0007`).
+- **`usai-provider`** — drops `~/usai-config/opencode.jsonc` and sets
+  `OPENCODE_CONFIG` to point there (allow-listing USAi egress), so OpenCode uses
+  the GSA USAi gateway. It owns the single-valued `OPENCODE_CONFIG` channel.
+- **`agentic-coding-playbook`** — at container startup, clones the playbook at a
+  pinned ref into `~/.agentic-coding-playbook` and symlinks its `AGENTS.md` into
+  each agent's rules path (e.g. `~/.config/opencode/AGENTS.md`) and each skill
+  into `~/.agents/skills`.
+- **`zscaler-ca-certificate`** — installs the public Zscaler Root CA into the
+  sandbox trust store so HTTPS works on Zscaler-inspected hosts (harmless
+  elsewhere).
 
-So every sandbox picks up the USAi config, federal rules, and skills
-declaratively. (An empirical spike found OpenCode does **not** read the
-rules/skills relative to `OPENCODE_CONFIG_DIR`, which is why they are linked
-into the home search paths; see `docs/adr/0004`.)
+So every sandbox picks up the USAi config, federal rules, skills, and CA trust
+declaratively. `qsbx` also handles the `sbx` prerequisites automatically
+(allow-listing the kit source; requiring sbx ≥ 0.34.0). Per-kit design rationale
+lives with the kits in the patterns repo.
 
-Applying the kits directly (without `qsbx`) is equivalent:
-`sbx run --kit ./usai-provider-kit --kit ./playbook-kit opencode <project>`.
+Applying the kits directly (without `qsbx`) is equivalent — pass the same three
+`--kit` refs to `sbx run`.
 
 ### Agent Resource Access
 

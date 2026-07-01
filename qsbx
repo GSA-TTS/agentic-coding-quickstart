@@ -6,35 +6,32 @@
 # global config (agent settings, AGENTS.md, skills, etc.). Without this, you end
 # up copying those files into every sandbox and manually keeping them in sync.
 #
-# Solution: when qsbx creates a sandbox it applies TWO sbx kits via --kit:
-#   1. <clone>/usai-provider-kit: configures the USAi OpenCode provider
-#      declaratively (drops ~/usai-config/opencode.jsonc and sets
-#      OPENCODE_CONFIG; allow-lists USAi egress). See docs/adr/0005.
-#   2. <clone>/playbook-kit (agentic-coding-playbook): at container startup,
-#      clones the playbook at a pinned ref and symlinks its AGENTS.md + skills
-#      into each supported agent's search paths. See playbook-kit/, docs/adr/0007.
-# so the agent finds your USAi provider config, federal behavioral rules, and
-# the playbook's skills — all declaratively, via kits. Before attaching with
-# `qsbx run`, it also checks that the sandbox's USAi key works and, if not,
-# offers to rotate it. All other subcommands pass straight through to sbx.
+# Solution: when qsbx creates a sandbox it applies THREE sbx mixin kits from the
+# community agentic-coding-patterns repo, by remote reference pinned to a commit
+# (see PATTERNS_KIT_REF below), so every sandbox is configured declaratively:
+#   1. usai-provider     — configures the USAi OpenCode provider (drops
+#      ~/usai-config/opencode.jsonc and sets OPENCODE_CONFIG; allow-lists USAi
+#      egress).
+#   2. agentic-coding-playbook — at container startup, clones the playbook at a
+#      pinned ref and symlinks its AGENTS.md + skills into each agent's search
+#      paths.
+#   3. zscaler-ca-certificate  — installs the public Zscaler Root CA into the
+#      sandbox trust store, so HTTPS works on Zscaler-inspecting hosts (harmless
+#      no-op elsewhere).
+# The kits live in GSA-TTS/agentic-coding-patterns under
+# integrations/isolation/sbx-kits/. qsbx no longer carries copies of them; this
+# repo just wires them together into one comprehensible path to a working
+# sandbox. Set QSBX_EXTRA_KITS to apply additional kits on every invocation
+# without repeating --kit flags. Before attaching with `qsbx run`, it also
+# checks that the sandbox's USAi key works and, if not, offers to rotate it. All
+# other subcommands pass straight through to sbx.
 #
-# Editing the shared config itself: run the agent with the clone as the project,
-# e.g. `./qsbx run opencode .` from inside the clone (or `qsbx run opencode
-# <clone-path>`). qsbx detects this and mounts the clone read-WRITE as the
-# primary workspace (sbx primary workspaces are always RW) so you can edit the
-# kits. Review changes with `git diff` before they propagate to other sandboxes.
-#
-# The quickstart clone is the directory containing this script — no env var or
-# setup required. You can still override it by exporting QUICKSTART_CLONE.
+# Remote kits require the source prefix to be on sbx's kit.allowedSources
+# allowlist (a v0.34 safety gate). qsbx adds it automatically at the start of any
+# create/run — no manual `sbx settings` step. See ensure_kit_sources_allowed().
 #
 # qsbx is also the single entry point for this repo's sbx extensions:
 #   qsbx usai-rotate-api-key   # rotate the USAi key secret (scripts/rotate-apikey)
-#
-# Workflow:
-#   git switch -c "$(whoami)-global-config"   # personal branch for config
-#   ./qsbx run opencode .                      # edit config (clone is RW primary)
-#   # ...customize the kits (USAi config, playbook ref), review with git diff...
-#   git fetch origin main && git merge origin/main  # pull in upstream changes
 
 set -euo pipefail
 
@@ -60,20 +57,65 @@ script_dir() {
 SCRIPT_DIR=$(script_dir) || { echo "qsbx: could not resolve script directory" >&2; exit 1; }
 
 # The quickstart clone defaults to this script's directory; QUICKSTART_CLONE
-# overrides it if exported.
+# overrides it if exported. Used only to locate sibling helper scripts and to
+# support editing this repo as a project — the kits themselves are remote (below).
 QUICKSTART_CLONE="${QUICKSTART_CLONE:-$SCRIPT_DIR}"
 
-# Both mixin kits live in subdirectories of the clone, applied via --kit.
-# See usai-provider-kit/ and playbook-kit/ (docs/adr/0007).
-USAI_KIT="$QUICKSTART_CLONE/usai-provider-kit"
-PLAYBOOK_KIT="$QUICKSTART_CLONE/playbook-kit"
+# ============================================================================
+# KITS — the three sbx mixin kits applied to every sandbox, sourced from the
+# community agentic-coding-patterns repo. To adopt newer kits, bump the pinned
+# commit below (sbx requires remote kit refs to be a full 40-char commit SHA).
+# ============================================================================
+PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
+PATTERNS_KIT_REF="598a57cb9f5fd2e279046a5e740a7e9ea8173c71"  # -patterns main @ PR #191 merge
+PATTERNS_KIT_DIR="integrations/isolation/sbx-kits"
+
+# Remote kit references (repo#ref=<sha>&dir=<subpath>). Applied in order via
+# repeated --kit; mixins compose. Order: provider, then playbook, then CA.
+USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider-kit"
+PLAYBOOK_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/playbook-kit"
+ZSCALER_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/zscaler-ca-certificate"
+
+# Additional user-supplied kits. Set QSBX_EXTRA_KITS to a whitespace-separated
+# list of kit references (local paths or remote refs) to apply on every sandbox,
+# so you don't have to pass a long series of --kit flags each invocation. E.g.:
+#   export QSBX_EXTRA_KITS="./my-kit git+https://github.com/acme/kits.git#ref=<sha>&dir=foo"
+# These are appended AFTER the three built-in kits (later kits win on conflicting
+# env vars / overlay files, per sbx composition). Remote extras from a new host
+# still need their prefix on kit.allowedSources — see KIT_EXTRA_SOURCE_PREFIXES.
+QSBX_EXTRA_KITS="${QSBX_EXTRA_KITS:-}"
+
+# Assemble the full ordered kit list once: the three built-ins, then extras.
+# Word-split QSBX_EXTRA_KITS on whitespace (kit refs contain no spaces).
+KITS=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT")
+# shellcheck disable=SC2206
+[ -n "$QSBX_EXTRA_KITS" ] && KITS+=($QSBX_EXTRA_KITS)
+
+# Emit the --kit flags for the full kit list on stdout (one token per line) so
+# callers can collect them into an array. Keeps the three create sites in sync.
+kit_flags() {
+  local k
+  for k in "${KITS[@]}"; do
+    printf '%s\n%s\n' "--kit" "$k"
+  done
+}
+
+# The kit.allowedSources prefixes qsbx must ensure are allowlisted so the remote
+# refs above resolve. Entries match as PATH-SEGMENT prefixes WITHOUT the scheme
+# (per sbx docs), so this covers github.com/GSA-TTS/agentic-coding-patterns.
+# Users applying remote extras from other hosts can add prefixes here via
+# QSBX_EXTRA_KIT_SOURCES (whitespace-separated), e.g. "github.com/acme/".
+KIT_SOURCE_PREFIX="github.com/GSA-TTS/"
+QSBX_EXTRA_KIT_SOURCES="${QSBX_EXTRA_KIT_SOURCES:-}"
+KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
+# shellcheck disable=SC2206
+[ -n "$QSBX_EXTRA_KIT_SOURCES" ] && KIT_SOURCE_PREFIXES+=($QSBX_EXTRA_KIT_SOURCES)
 
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 KEY_MGMT_URL="https://console.gsa.usai.gov/key-management"
 
-# Minimum sbx version qsbx requires. The kit workflow (qsbx passes --kit to
-# sbx create; see docs/adr/0005) depends on v2-schema kit support and the
-# `sbx policy init` rename, both of which landed in sbx 0.34.0.
+# Minimum sbx version qsbx requires. Remote SHA-pinned kit refs + the v2 kit
+# schema + `sbx policy init` all landed in sbx 0.34.0.
 MIN_SBX_VERSION="0.34.0"
 
 # Standalone helper scripts that qsbx fronts as subcommands. They remain runnable
@@ -89,17 +131,47 @@ ROTATE_SCRIPT="$SCRIPT_DIR/scripts/rotate-apikey"
 # agent form; attach such sandboxes with `sbx run --name <sandbox>` directly.
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
-# Assert QUICKSTART_CLONE points at a usable clone (has both kits).
-require_clone() {
-  if [ ! -f "$USAI_KIT/files/home/usai-config/opencode.jsonc" ]; then
-    echo "error: could not find usai-provider-kit/files/home/usai-config/opencode.jsonc under '$QUICKSTART_CLONE'." >&2
-    echo "       Run qsbx from your quickstart clone, or export QUICKSTART_CLONE." >&2
-    exit 1
-  fi
-  if [ ! -f "$PLAYBOOK_KIT/spec.yaml" ]; then
-    echo "error: could not find the playbook kit at '$PLAYBOOK_KIT' (spec.yaml missing)." >&2
-    echo "       Run qsbx from your quickstart clone, or export QUICKSTART_CLONE." >&2
-    exit 1
+# Ensure the kit source prefixes qsbx needs are on sbx's kit.allowedSources
+# allowlist, so the remote --kit refs resolve. sbx v0.34 restricts kit installs
+# to an allowlist of source prefixes (default: ["docker.io/"]); a Git URL fails
+# until its host/path prefix is added. Rather than make this a documented manual
+# setup step, qsbx ensures the prefixes are present at the top of any create/run.
+#
+# Important semantics (per sbx docs):
+#   - The value is a JSON array; `settings set` REPLACES the whole list, so we
+#     read the current list and add only missing prefixes, preserving existing
+#     entries (notably the default "docker.io/").
+#   - Entries are scheme-less, matched as prefixes on a path-segment boundary
+#     (e.g. "github.com/GSA-TTS/"), NOT "git+https://..." URLs.
+# Covers the built-in GSA-TTS prefix plus any in QSBX_EXTRA_KIT_SOURCES. If the
+# settings surface can't be read/written non-interactively, warn and continue —
+# the subsequent `sbx create` surfaces the real error if the gate blocks it.
+ensure_kit_sources_allowed() {
+  local current entries missing p desired
+  current=$(sbx settings get kit.allowedSources 2>/dev/null || true)
+
+  # Existing quoted elements (may be empty/unreadable → seed with docker.io/).
+  entries=$(printf '%s' "$current" | grep -oE '"[^"]+"' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+  [ -z "$entries" ] && entries='"docker.io/"'
+
+  # Collect any required prefixes not already present.
+  missing=""
+  for p in "${KIT_SOURCE_PREFIXES[@]}"; do
+    case "$current" in
+      *"\"$p\""*) : ;;                      # already an array element
+      *) missing="${missing:+$missing,}\"$p\"" ;;
+    esac
+  done
+  [ -z "$missing" ] && return 0             # nothing to add
+
+  desired="[${entries},${missing}]"
+  if sbx settings set kit.allowedSources "$desired" </dev/null >/dev/null 2>&1; then
+    echo "qsbx: allowed remote kit source(s) on sbx kit.allowedSources: ${missing//\"/}" >&2
+  else
+    echo "qsbx: warning: could not update sbx kit.allowedSources." >&2
+    echo "      If kit resolution fails, run (the setting replaces the whole list," >&2
+    echo "      so keep the entries you want):" >&2
+    echo "        sbx settings set kit.allowedSources '${desired}'" >&2
   fi
 }
 
@@ -302,35 +374,36 @@ strip_name() {
 # home-dir symlinking are needed any more — the kits do everything declaratively.
 # Usage: create_with_config NAME CREATE_ARGS...
 create_with_config() {
-  require_clone
+  ensure_kit_sources_allowed
   local name="$1"
   shift
 
   strip_name "$@"
+  # Collect the --kit flags for all configured kits (built-ins + QSBX_EXTRA_KITS).
+  local kf=(); while IFS= read -r line; do kf+=("$line"); done < <(kit_flags)
   # Guard the array expansion for bash 3.2 (macOS default): under `set -u` an
   # empty array expansion is an "unbound variable" error there.
   if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
-    sbx create --name "$name" --kit "$USAI_KIT" --kit "$PLAYBOOK_KIT" "${STRIPPED_ARGS[@]}"
+    sbx create --name "$name" "${kf[@]}" "${STRIPPED_ARGS[@]}"
   else
-    sbx create --name "$name" --kit "$USAI_KIT" --kit "$PLAYBOOK_KIT"
+    sbx create --name "$name" "${kf[@]}"
   fi
 }
 
-# Heal a sandbox created before qsbx applied these kits. Such sandboxes either
-# predate the USAi kit (no OPENCODE_CONFIG, stale opencode.jsonc symlink) or
-# predate the playbook kit (no playbook clone / skills). We detect each and
-# inject the missing kit into the running sandbox with `sbx kit add` — no
-# recreation needed. Best-effort: if the (experimental) command fails, warn with
-# the manual recovery step and continue to attach.
+# Heal a sandbox created before qsbx applied these kits. Such sandboxes may lack
+# the USAi provider config (no OPENCODE_CONFIG), the playbook clone, and/or the
+# Zscaler CA. We detect each and inject the missing kit into the running sandbox
+# with `sbx kit add` — no recreation needed. Best-effort: if the (experimental)
+# command fails, warn with the manual recovery step and continue to attach.
 ensure_kit_applied() {
   local name="$1"
-  require_clone
+  ensure_kit_sources_allowed
 
   # 1) USAi provider kit: detect via OPENCODE_CONFIG. Empty => not applied.
   local cfg=""
   cfg=$(sbx exec "$name" -- sh -c 'printf "%s" "${OPENCODE_CONFIG:-}"' </dev/null 2>/dev/null || true)
   if [ -z "$cfg" ]; then
-    echo "qsbx: '$name' predates the USAi kit (no OPENCODE_CONFIG); injecting it" >&2
+    echo "qsbx: '$name' is missing the USAi kit (no OPENCODE_CONFIG); injecting it" >&2
     echo "      with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$USAI_KIT" </dev/null >/dev/null 2>&1; then
       # A stale ~/.config/opencode/opencode.jsonc symlink (to the removed
@@ -347,12 +420,12 @@ ensure_kit_applied() {
   fi
 
   # 2) Playbook kit: detect via the clone the startup command creates. Absent
-  #    => not applied (predates the playbook kit). The startup command runs on
-  #    the next start after kit add, so it self-heals.
+  #    => not applied. The startup command runs on the next start after kit add,
+  #    so it self-heals.
   local pb=""
   pb=$(sbx exec "$name" -- sh -c 'test -e "$HOME/.agentic-coding-playbook/.git" && echo yes' </dev/null 2>/dev/null || true)
   if [ -z "$pb" ]; then
-    echo "qsbx: '$name' predates the playbook kit; injecting it with 'sbx kit add'..." >&2
+    echo "qsbx: '$name' is missing the playbook kit; injecting it with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$PLAYBOOK_KIT" </dev/null >/dev/null 2>&1; then
       echo "qsbx: playbook kit injected into '$name'. Restart the agent to pick it up." >&2
     else
@@ -360,6 +433,43 @@ ensure_kit_applied() {
       echo "      Recover with: sbx kit add '$name' '$PLAYBOOK_KIT'" >&2
     fi
   fi
+
+  # 3) Zscaler CA kit: detect via the installed cert. Absent => not applied.
+  local ca=""
+  ca=$(sbx exec "$name" -- sh -c 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo yes' </dev/null 2>/dev/null || true)
+  if [ -z "$ca" ]; then
+    echo "qsbx: '$name' is missing the Zscaler CA kit; injecting it with 'sbx kit add'..." >&2
+    if sbx kit add "$name" "$ZSCALER_KIT" </dev/null >/dev/null 2>&1; then
+      echo "qsbx: Zscaler CA kit injected into '$name'. Restart the agent to pick it up." >&2
+    else
+      echo "qsbx: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name' (it is EXPERIMENTAL)." >&2
+      echo "      Recover with: sbx kit add '$name' '$ZSCALER_KIT'" >&2
+    fi
+  fi
+
+  # 4) User-supplied QSBX_EXTRA_KITS. These have no content signature qsbx can
+  #    probe, so we track which extras were already applied to this sandbox in a
+  #    marker file (~/.qsbx-extra-kits) and only `kit add` the ones not recorded.
+  #    Idempotent across re-invocations; adding a new entry to QSBX_EXTRA_KITS
+  #    injects just that one on the next `qsbx run <existing-sandbox>`.
+  local applied k
+  applied=$(sbx exec "$name" -- sh -c 'cat "$HOME/.qsbx-extra-kits" 2>/dev/null' </dev/null 2>/dev/null || true)
+  # Intentional word-split of the whitespace-separated extra-kits list.
+  # shellcheck disable=SC2086
+  for k in ${QSBX_EXTRA_KITS:-}; do
+    case "$applied" in
+      *"$k"*) continue ;;   # already applied to this sandbox
+    esac
+    echo "qsbx: applying extra kit to '$name': $k" >&2
+    if sbx kit add "$name" "$k" </dev/null >/dev/null 2>&1; then
+      # Record it so we don't re-add on the next invocation. Append via the
+      # agent user's home; the marker is advisory, failures are non-fatal.
+      sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.qsbx-extra-kits"' "$k" </dev/null >/dev/null 2>&1 || true
+    else
+      echo "qsbx: warning: 'sbx kit add' (extra kit) failed for '$name' (it is EXPERIMENTAL)." >&2
+      echo "      Recover with: sbx kit add '$name' '$k'" >&2
+    fi
+  done
 }
 
 sandbox_exists() {
@@ -386,25 +496,26 @@ args_target_clone() {
   return 1
 }
 
-# Create a sandbox for editing the shared config itself: the clone is the
-# primary workspace (sbx primary workspaces are always read-write), so the agent
-# can modify it. Both kits are still applied (--kit) so the editing agent has a
-# working USAi provider and the playbook rules/skills. Default name is
+# Create a sandbox for editing THIS repo itself (qsbx, docs) with an agent: the
+# clone is the primary workspace (sbx primary workspaces are always read-write).
+# All three kits are still applied so the editing agent has a working provider,
+# the playbook rules/skills, and CA trust. Default name is
 # "qsbx-quickstart-config" unless the user gave one.
 create_config_sandbox() {
-  require_clone
+  ensure_kit_sources_allowed
   local name="$1"
   shift
 
   echo "qsbx: target is the quickstart clone — mounting it READ-WRITE as the" >&2
-  echo "      primary workspace so you can edit the shared config. Review with" >&2
-  echo "      'git diff' before changes propagate to other sandboxes." >&2
+  echo "      primary workspace so you can edit this repo. Review with" >&2
+  echo "      'git diff' before committing." >&2
 
   strip_name "$@"
+  local kf=(); while IFS= read -r line; do kf+=("$line"); done < <(kit_flags)
   if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
-    sbx create --name "$name" --kit "$USAI_KIT" --kit "$PLAYBOOK_KIT" "${STRIPPED_ARGS[@]}"
+    sbx create --name "$name" "${kf[@]}" "${STRIPPED_ARGS[@]}"
   else
-    sbx create --name "$name" --kit "$USAI_KIT" --kit "$PLAYBOOK_KIT"
+    sbx create --name "$name" "${kf[@]}"
   fi
 }
 

@@ -84,7 +84,6 @@ npm ci --prefix .github/linters
 
 | Command | What it does |
 |---------|-------------|
-| `npm test` | Run the test suite (`node --test`) |
 | `npm run lint:md` | Lint markdown files (same rules as CI) |
 | `npm run lint` | Run all linters |
 | `npm run lint:secrets` | Run gitleaks (requires gitleaks to be installed: `brew install gitleaks`) |
@@ -96,7 +95,7 @@ npm ci --prefix .github/linters
 ### Quick pre-push check
 
 ```bash
-npm run lint && npm test
+npm run lint
 ```
 
 Or for the most comprehensive local check (requires pre-commit):

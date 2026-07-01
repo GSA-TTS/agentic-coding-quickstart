@@ -1,8 +1,6 @@
 {
   "type": "module",
   "scripts": {
-    "sync:usai-models": "npm --prefix usai-provider-kit run sync:usai-models",
-    "test": "npm --prefix usai-provider-kit test",
     "lint:md": "npx --prefix .github/linters markdownlint-cli2 '**/*.md' '#node_modules' '#.github/linters/node_modules' '#CHANGELOG.md' '#tmp'",
     "lint:secrets": "gitleaks detect --source .",
     "lint": "npm run lint:md",

@@ -15,10 +15,11 @@ risk_treatment: mitigate
 > **Update (2026-06):** The reference config moved from `templates/opencode.jsonc`
 > to the repository-root `opencode.jsonc`, and the local sync command is now
 > `npm run sync:usai-models` (the `make` targets were removed). References below
-> reflect the original decision; paths and commands have since changed. As of
-> ADR-0005 the config file lives at `files/home/usai-config/opencode.jsonc` (the
-> root `opencode.jsonc` symlink still resolves to it); the sync script and tests
-> were repointed accordingly.
+> reflect the original decision; paths and commands have since changed. The USAi
+> config and its model-sync tooling have since moved out of this repo entirely
+> into the `usai-provider` sbx mixin kit in the community
+> [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
+> repo; the model-catalog decision recorded here still applies there.
 
 ## Context and Problem Statement
 

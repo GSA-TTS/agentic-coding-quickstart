@@ -590,53 +590,48 @@ Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
 
 ### Root Cause
 
-The USAi provider config is not loaded in the sandbox. With `qsbx`, the config is
-delivered by applying this clone as an sbx **kit** (`--kit`), which sets
-`OPENCODE_CONFIG` to `~/usai-config/opencode.jsonc`; a second kit
-(`playbook-kit`, applied alongside it) clones the playbook at startup and links
-`AGENTS.md` + `~/.agents/skills`. This symptom appears when the sandbox was
-created without `qsbx` (so the kits were not applied), or with `sbx run`
-directly but without `--kit ./usai-provider-kit --kit ./playbook-kit`.
+The USAi provider config is not loaded in the sandbox. With `qsbx`, it is
+delivered by the `usai-provider` sbx **kit** (applied by pinned remote reference
+from the agentic-coding-patterns repo), which sets `OPENCODE_CONFIG` to
+`~/usai-config/opencode.jsonc`. `qsbx` applies it alongside the
+`agentic-coding-playbook` and `zscaler-ca-certificate` kits. This symptom appears
+when the sandbox was created without `qsbx` (so the kits were not applied), or
+with plain `sbx run` without the kit refs.
 
 **Upgrading an existing sandbox.** A sandbox created with an *older* `qsbx`
-(before the kit migration) has a stale `~/.config/opencode/opencode.jsonc`
-symlink pointing at the removed `opencode/` path and no `OPENCODE_CONFIG` (and no
-playbook clone). When you `git pull` and resume it, `qsbx run` detects the
-missing `OPENCODE_CONFIG` (and missing playbook) and **auto-heals** the sandbox
-by injecting the kit(s) with `sbx kit add` (no recreation needed). If that
-automatic step fails, use the manual fix below.
+(before the kit migration) may have a stale `~/.config/opencode/opencode.jsonc`
+symlink and no `OPENCODE_CONFIG` (and no playbook clone). When you resume it,
+`qsbx run` detects the missing kits and **auto-heals** the sandbox by injecting
+them with `sbx kit add` (no recreation needed). If that automatic step fails, use
+the manual fix below.
 
 ### Fix
 
-If the sandbox already exists, inject the kit(s) into it without recreating it
-(replace `SANDBOX` with the sandbox name from `sbx ls`):
-
-```bash
-sbx kit add SANDBOX /path/to/agentic-coding-quickstart/usai-provider-kit  # USAi provider
-sbx kit add SANDBOX /path/to/agentic-coding-quickstart/playbook-kit            # playbook rules+skills
-```
-
-> `sbx kit add` is currently EXPERIMENTAL and may change in future releases. It
-> applies the kit's files, init files, and startup commands to the running
-> container — enough to deliver the USAi provider config and the playbook. (The
-> playbook clones on the next start; restart the agent so it re-reads
-> `OPENCODE_CONFIG` and picks up rules/skills.) `qsbx run` does this automatically
-> for existing sandboxes that predate the kits.
-
-Otherwise, create the sandbox with both kits applied. With `qsbx` this is
-automatic:
+Recreate the sandbox with `qsbx`, which applies all three kits (and adds the kit
+source to `sbx settings kit.allowedSources` automatically):
 
 ```bash
 ./qsbx run opencode /path/to/your/project
 ```
 
-Or apply the kits directly with plain `sbx`:
+Or inject the kit(s) into an existing sandbox without recreating (replace
+`SANDBOX` with the name from `sbx ls`; `<sha>` is `PATTERNS_KIT_REF` from `qsbx`).
+Remote kit sources must be allowlisted first:
 
 ```bash
-sbx run --kit /path/to/agentic-coding-quickstart/usai-provider-kit \
-        --kit /path/to/agentic-coding-quickstart/playbook-kit \
-        opencode /path/to/your/project
+sbx settings set kit.allowedSources '["docker.io/","github.com/GSA-TTS/"]'
+REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
+DIR="integrations/isolation/sbx-kits"
+sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/usai-provider-kit"
+sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/playbook-kit"
+sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/zscaler-ca-certificate"
 ```
+
+> `sbx kit add` is currently EXPERIMENTAL and may change in future releases. It
+> applies the kit's files, init files, and startup commands to the running
+> container. (The playbook clones on the next start; restart the agent so it
+> re-reads `OPENCODE_CONFIG` and picks up rules/skills.) `qsbx run` does all of
+> this automatically for existing sandboxes.
 
 ---
 

@@ -12,14 +12,14 @@ risk_treatment: mitigate
 
 # ADR-0004: Vendor the Playbook as a Submodule and Symlink Shared Config into the Sandbox Home
 
-> **Status update (ADR-0007): SUPERSEDED.** The git submodule and `qsbx`'s
-> home-symlinking of `AGENTS.md`/skills described here were **removed**. The
-> playbook is now delivered by the `agentic-coding-playbook` mixin kit, which
-> clones the playbook at container startup and links its `AGENTS.md` + skills
-> into each agent's search paths. See `docs/adr/0007`. (Earlier, ADR-0005 moved
-> the OpenCode config to `files/home/usai-config/opencode.jsonc` when the repo
-> root became the `usai-opencode-provider` kit.) This ADR is retained for
-> historical context.
+> **Status update: SUPERSEDED.** The git submodule and `qsbx`'s home-symlinking
+> of `AGENTS.md`/skills described here were **removed**. The playbook, the USAi
+> provider config, and the Zscaler CA are now delivered as sbx **mixin kits**
+> hosted in the community
+> [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
+> repo (`integrations/isolation/sbx-kits/`); `qsbx` applies them by pinned remote
+> reference. The per-kit design rationale lives with the kits. This ADR is
+> retained for historical context.
 
 ## Context and Problem Statement
 
