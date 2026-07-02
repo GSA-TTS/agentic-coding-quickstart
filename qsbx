@@ -777,12 +777,7 @@ case "$subcommand" in
     require_sbx_version
     name=$(derive_name "$@") || exit 1
     [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
-    if args_target_clone "$@"; then
-      [ -n "$(name_flag "$@")" ] || name="qsbx-quickstart-config"
-      create_config_sandbox "$name" "$@"
-    else
-      create_with_config "$name" "$@"
-    fi
+    create_with_config "$name" "$@"
     ;;
 
   run)
@@ -808,24 +803,12 @@ case "$subcommand" in
 
     if [ -n "$first" ] && is_known_agent "$first"; then
       # AGENT form: create the sandbox if it does not exist, then attach to it.
-      if args_target_clone "${create_args[@]}"; then
-        # Editing the shared config itself: clone is the RW primary workspace.
-        name=$(name_flag "${create_args[@]}")
-        [ -n "$name" ] || name="qsbx-quickstart-config"
-        if sandbox_exists "$name"; then
-          ensure_kit_applied "$name"
-        else
-          create_config_sandbox "$name" "${create_args[@]}"
-        fi
+      name=$(derive_name "${create_args[@]}") || exit 1
+      [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
+      if sandbox_exists "$name"; then
+        ensure_kit_applied "$name"
       else
-        # Project work: both kits applied via --kit (provider + playbook).
-        name=$(derive_name "${create_args[@]}") || exit 1
-        [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
-        if sandbox_exists "$name"; then
-          ensure_kit_applied "$name"
-        else
-          create_with_config "$name" "${create_args[@]}"
-        fi
+        create_with_config "$name" "${create_args[@]}"
       fi
 
       # Verify the sandbox's USAi key works before attaching; prompt to rotate
