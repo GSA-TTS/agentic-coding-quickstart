@@ -554,46 +554,6 @@ sandbox_exists() {
   sbx ls -q 2>/dev/null | grep -Fxq -- "$1"
 }
 
-# True if any create/run positional path refers to the clone itself — meaning
-# the user wants to edit the shared config with an agent.
-args_target_clone() {
-  local prev=""
-  for arg in "$@"; do
-    if takes_value "$prev"; then prev="$arg"; continue; fi
-    case "$arg" in
-      -*) prev="$arg"; continue ;;
-    esac
-    # Skip the agent token (first positional); paths follow it.
-    if is_known_agent "$arg"; then prev="$arg"; continue; fi
-    if is_clone_path "${arg%%:*}"; then return 0; fi
-    prev="$arg"
-  done
-  return 1
-}
-
-# Create a sandbox for editing THIS repo itself (qsbx, docs) with an agent: the
-# clone is the primary workspace (sbx primary workspaces are always read-write).
-# All three kits are still applied so the editing agent has a working provider,
-# the playbook rules/skills, and CA trust. Default name is
-# "qsbx-quickstart-config" unless the user gave one.
-create_config_sandbox() {
-  ensure_kit_sources_allowed
-  local name="$1"
-  shift
-
-  echo "qsbx: target is the quickstart clone — mounting it READ-WRITE as the" >&2
-  echo "      primary workspace so you can edit this repo. Review with" >&2
-  echo "      'git diff' before committing." >&2
-
-  strip_name "$@"
-  local kf=(); while IFS= read -r line; do kf+=("$line"); done < <(kit_flags)
-  if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
-    sbx create --name "$name" "${kf[@]}" "${STRIPPED_ARGS[@]}"
-  else
-    sbx create --name "$name" "${kf[@]}"
-  fi
-}
-
 # Probe the USAi API from inside the sandbox using its injected USAI_API_KEY.
 # Echoes the HTTP status code (e.g. 200, 401). A non-200 means the key is
 # missing, invalid, or expired. Mirrors the validation in scripts/rotate-apikey,
