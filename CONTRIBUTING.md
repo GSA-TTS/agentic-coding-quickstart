@@ -110,6 +110,17 @@ Run it after changing `migrate_or_halt`, `halt_with_options`, or the auto-heal
 gate. It asserts, among other things, that a sandbox is **never** removed
 without a verified session export.
 
+To verify the same migration path end-to-end against the **real** toolchain
+(requires a host that can create sandboxes — Docker + KVM, `sbx login` done):
+
+```bash
+./scripts/verify-migrate-live
+```
+
+It creates a throwaway pre-kit sandbox, seeds a session, runs the migration, and
+asserts the recreated sandbox has a working USAi provider with the session
+preserved — then removes the throwaway sandbox. It cannot run inside a sandbox.
+
 ### Quick pre-push check
 
 ```bash
