@@ -128,6 +128,20 @@ if [ -n "$QSBX_EXTRA_KIT_SOURCES" ]; then
   KIT_SOURCE_PREFIXES+=("${_extra_sources[@]}")
 fi
 
+# In-place auto-heal of sandboxes created before the kit migration is currently
+# DISABLED, gated behind this flag, because of an upstream sbx bug: `sbx kit add`
+# fails ("failed to read tar header: unexpected EOF") on any kit that ships a
+# static files/ payload (docker/sbx-releases#133). The usai-provider kit ships
+# files/opencode.jsonc, so it cannot be injected into a running sandbox — and a
+# sandbox without the USAi provider config is unusable (no OPENCODE_CONFIG, no
+# endpoint, no models), so healing only the other two kits is pointless. Instead
+# of a doomed `sbx kit add`, qsbx offers an assisted session migration (see
+# migrate_or_halt) or halts with documented options. Re-enable this (export
+# QSBX_AUTOHEAL_KITS=1) once #133 is fixed and `sbx kit add` on usai-provider is
+# verified. The healing code is preserved in ensure_kit_applied for that day.
+# Tracking: GSA-TTS/agentic-coding-quickstart#188.
+QSBX_AUTOHEAL_KITS="${QSBX_AUTOHEAL_KITS:-0}"
+
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 KEY_MGMT_URL="https://console.gsa.usai.gov/key-management"
 
@@ -479,8 +493,18 @@ kit_feature_absent() {
   esac
 }
 
+# In-place kit healing for pre-kit sandboxes. DISABLED by default behind
+# QSBX_AUTOHEAL_KITS (see the flag definition above) because upstream #133 breaks
+# `sbx kit add` on the file-shipping usai-provider kit. The body is preserved
+# intact so it can be re-enabled once #133 is fixed. Callers must not rely on
+# this to fix a USAi-less sandbox while the flag is off — use migrate_or_halt.
 ensure_kit_applied() {
   local name="$1"
+
+  # Auto-heal is gated off pending upstream sbx#133. When disabled, this is a
+  # no-op; sandboxes missing the USAi kit are handled by migrate_or_halt instead.
+  [ "$QSBX_AUTOHEAL_KITS" = "1" ] || return 0
+
   ensure_kit_sources_allowed
 
   # 1) USAi provider kit: present iff OPENCODE_CONFIG is set.
@@ -554,6 +578,147 @@ sandbox_exists() {
   # whole line as a fixed string so names containing regex metacharacters (e.g.
   # a dotted path slug) can't accidentally match a different sandbox.
   sbx ls -q 2>/dev/null | grep -Fxq -- "$1"
+}
+
+# True (0) iff an existing sandbox lacks the USAi provider config — i.e. it was
+# created before the kit migration (no OPENCODE_CONFIG). Reuses kit_feature_absent
+# so a transient exec blip (return 2) is treated as "not confirmed missing" (we
+# do NOT tear down a sandbox on an unreliable probe).
+sandbox_missing_usai() {
+  local rc
+  kit_feature_absent "$1" '[ -n "${OPENCODE_CONFIG:-}" ] && echo present'
+  rc=$?
+  [ "$rc" -eq 0 ]
+}
+
+# Print the manual recovery options for a USAi-less pre-kit sandbox, then exit
+# non-zero (fail closed). Used both when the user declines migration and when any
+# migration step fails. $1 = sandbox name.
+halt_with_options() {
+  local name="$1"
+  cat >&2 <<EOF
+qsbx: sandbox '$name' predates the kit migration and cannot be auto-healed.
+      Upstream sbx bug docker/sbx-releases#133 makes 'sbx kit add' fail on the
+      USAi provider kit (it ships a static file), and a sandbox without the USAi
+      config is unusable. In-place healing is disabled until #133 is fixed.
+
+      Your options:
+        1. Re-create it (loses this sandbox's session/context):
+             sbx rm --force '$name' && ./qsbx run opencode <project-path>
+        2. Let qsbx migrate your sessions into a fresh, working sandbox with the
+           same name — re-run and answer 'y' at the prompt. (Sessions are
+           exported with --sanitize; the old sandbox is removed to reuse its
+           name. Both are irreversible.)
+        3. Downgrade to the last release before the kit migration (v0.11.0),
+           which can still reattach to pre-kit sandboxes:
+             git checkout v0.11.0
+
+      See docs/KNOWN_FAILURE_MODES.md (section 19) for details.
+EOF
+  exit 1
+}
+
+# Assisted migration for a USAi-less pre-kit sandbox. sbx has no rename, so to
+# give the working sandbox the ORIGINAL name we must remove the old one — which
+# is destructive. We therefore export first, verify we captured something, and
+# only then remove + recreate + import. If the user declines or any step fails,
+# we halt with options and never remove a sandbox without a verified export.
+#
+# Flow: prompt -> export --sanitize each session to a host temp dir -> verify
+# non-empty -> sbx rm --force old -> wait for name release -> create_with_config
+# under the original name -> sbx cp + opencode import each -> return so the
+# caller attaches. $1 = sandbox name; remaining args = the create args to reuse.
+migrate_or_halt() {
+  local name="$1"; shift
+  local create_args=("$@")
+
+  echo "qsbx: sandbox '$name' predates the kit migration (no USAi config) and" >&2
+  echo "      cannot be auto-healed (upstream sbx#133). qsbx can migrate its" >&2
+  echo "      sessions into a fresh, working sandbox of the same name." >&2
+  echo "" >&2
+  echo "      This EXPORTS your sessions with --sanitize (sensitive transcript and" >&2
+  echo "      file data are redacted), then PERMANENTLY REMOVES the old sandbox to" >&2
+  echo "      reuse its name, then recreates it with the kits and imports the" >&2
+  echo "      sessions. Both the removal and the redaction are irreversible." >&2
+  echo "" >&2
+  printf "qsbx: migrate sessions and recreate '%s'? [y/N] " "$name" >&2
+  local reply=""
+  # Read the confirmation from the terminal by default so a prompt still works
+  # when stdin is a pipe. Tests set QSBX_PROMPT_STDIN=1 to read from stdin
+  # instead (no tty available in CI / a harness).
+  if [ -n "${QSBX_PROMPT_STDIN:-}" ]; then
+    read -r reply || true
+  else
+    read -r reply </dev/tty || true
+  fi
+  case "$reply" in
+    y|Y|yes|YES) ;;
+    *) echo "qsbx: migration declined." >&2; halt_with_options "$name" ;;
+  esac
+
+  # Export sessions to a private host temp dir. Session JSON is the user's data;
+  # keep it under a 0700 dir in TMPDIR and always clean it up (trap), never log
+  # its contents, never write it into the repo.
+  local workdir
+  workdir=$(mktemp -d "${TMPDIR:-/tmp}/qsbx-migrate.XXXXXX") || {
+    echo "qsbx: could not create a temp dir for migration." >&2; halt_with_options "$name"; }
+  chmod 700 "$workdir"
+  # shellcheck disable=SC2064  # expand workdir now so the trap removes this exact dir
+  trap "rm -rf '$workdir'" RETURN
+
+  echo "qsbx: exporting sessions from '$name' (sanitized)..." >&2
+  local ids id count=0
+  ids=$(sbx exec "$name" -- sh -c 'opencode session list 2>/dev/null' </dev/null 2>/dev/null | extract_session_ids) || true
+  for id in $ids; do
+    if sbx exec "$name" -- sh -c "opencode export '$id' --sanitize" </dev/null >"$workdir/$id.json" 2>/dev/null \
+        && [ -s "$workdir/$id.json" ]; then
+      count=$((count + 1))
+    else
+      rm -f "$workdir/$id.json"
+    fi
+  done
+
+  if [ "$count" -eq 0 ]; then
+    echo "qsbx: no sessions could be exported from '$name'; not removing it." >&2
+    halt_with_options "$name"
+  fi
+  echo "qsbx: exported $count session(s)." >&2
+
+  # Destructive: remove the old sandbox so the name frees up, then wait until
+  # sbx no longer lists it (create fails if the name is still taken).
+  echo "qsbx: removing old sandbox '$name' to reuse its name..." >&2
+  sbx rm --force "$name" </dev/null >/dev/null 2>&1 || {
+    echo "qsbx: 'sbx rm' failed for '$name'; aborting migration." >&2; halt_with_options "$name"; }
+  local tries=0
+  while sandbox_exists "$name"; do
+    tries=$((tries + 1))
+    [ "$tries" -gt 30 ] && { echo "qsbx: '$name' still present after removal; aborting." >&2; exit 1; }
+    sleep 1
+  done
+
+  echo "qsbx: creating fresh sandbox '$name' with the kits..." >&2
+  create_with_config "$name" "${create_args[@]+"${create_args[@]}"}"
+
+  echo "qsbx: importing $count session(s) into '$name'..." >&2
+  local f base
+  for f in "$workdir"/*.json; do
+    [ -e "$f" ] || continue
+    base=$(basename "$f")
+    if sbx cp "$f" "$name:/tmp/$base" </dev/null >/dev/null 2>&1 \
+        && sbx exec "$name" -- sh -c "opencode import '/tmp/$base'; rm -f '/tmp/$base'" </dev/null >/dev/null 2>&1; then
+      :
+    else
+      echo "qsbx: warning: failed to import session '$base' into '$name'." >&2
+    fi
+  done
+  echo "qsbx: migration complete. Attaching to '$name'." >&2
+}
+
+# Extract session IDs from `opencode session list` output on stdin. The command
+# is human-oriented, so pull the first whitespace-delimited token that looks like
+# a session id (ses_… or a hex/alnum id) off each non-empty line.
+extract_session_ids() {
+  awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^ses_[A-Za-z0-9]+$/) { print $i; break } }'
 }
 
 # Probe the USAi API from inside the sandbox using its injected USAI_API_KEY.
@@ -719,6 +884,12 @@ ensure_valid_key() {
   esac
 }
 
+# Allow tests to source this script for its functions without running the
+# dispatch below: `QSBX_SOURCE_ONLY=1 . ./qsbx`. Normal invocation is unaffected.
+if [ -n "${QSBX_SOURCE_ONLY:-}" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 subcommand="${1:-}"
 
 case "$subcommand" in
@@ -768,7 +939,15 @@ case "$subcommand" in
       name=$(derive_name "${create_args[@]}") || exit 1
       [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
       if sandbox_exists "$name"; then
-        ensure_kit_applied "$name"
+        # Existing sandbox. If it predates the kit migration (no USAi config),
+        # in-place healing is blocked by upstream sbx#133 — offer to migrate its
+        # sessions into a fresh, working sandbox of the same name, or halt with
+        # options. Otherwise heal it in place (a no-op while auto-heal is gated).
+        if sandbox_missing_usai "$name"; then
+          migrate_or_halt "$name" "${create_args[@]}"
+        else
+          ensure_kit_applied "$name"
+        fi
       else
         create_with_config "$name" "${create_args[@]}"
       fi
@@ -790,7 +969,13 @@ case "$subcommand" in
       # to it by name (the positional-sandbox form is deprecated in sbx); else
       # pass through unchanged (e.g. flags-only, or `sbx run` with no args).
       if [ -n "$first" ] && sandbox_exists "$first"; then
-        # Existing sandbox attached by name. Heal it if it predates the kit.
+        # Existing sandbox attached by name. If it predates the kit migration,
+        # in-place healing is blocked by upstream sbx#133. We can't recreate it
+        # here (no agent positional was given, so we lack the create args), so we
+        # halt with options rather than attach to a USAi-less, unusable sandbox.
+        if sandbox_missing_usai "$first"; then
+          halt_with_options "$first"
+        fi
         ensure_kit_applied "$first"
         # Rebuild the arg list with the matched sandbox token removed (drop only
         # the first occurrence), so flags that appear before the name are

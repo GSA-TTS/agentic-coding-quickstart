@@ -598,40 +598,64 @@ from the agentic-coding-patterns repo), which sets `OPENCODE_CONFIG` to
 when the sandbox was created without `qsbx` (so the kits were not applied), or
 with plain `sbx run` without the kit refs.
 
-**Upgrading an existing sandbox.** A sandbox created with an *older* `qsbx`
-(before the kit migration) may have a stale `~/.config/opencode/opencode.jsonc`
-symlink and no `OPENCODE_CONFIG` (and no playbook clone). When you resume it,
-`qsbx run` detects the missing kits and **auto-heals** the sandbox by injecting
-them with `sbx kit add` (no recreation needed). If that automatic step fails, use
-the manual fix below.
+**Upgrading an existing sandbox (pre-kit).** A sandbox created with an *older*
+`qsbx` (before the kit migration) has no `OPENCODE_CONFIG` and no playbook clone.
+`qsbx` cannot auto-heal it in place: the fix would be `sbx kit add`, but an
+upstream sbx bug ([docker/sbx-releases#133][sbx133]) makes `sbx kit add` fail
+(`failed to read tar header: unexpected EOF`) on any kit that ships a static
+file — and the `usai-provider` kit ships `opencode.jsonc`. Because a sandbox
+without the USAi provider config is unusable, in-place healing is **disabled**
+(gated behind `QSBX_AUTOHEAL_KITS`, off by default) until #133 is fixed.
+
+Instead, when you `qsbx run` an existing pre-kit sandbox, `qsbx` offers to
+**migrate your sessions into a fresh, working sandbox of the same name**:
+
+1. It exports each session with `opencode export --sanitize` (sensitive
+   transcript and file data are redacted).
+2. It **permanently removes** the old sandbox (`sbx rm --force`) so the name can
+   be reused — sbx has no rename, so this is the only way to keep the original
+   name. This is irreversible, so `qsbx` only does it *after* a successful,
+   verified export, and never if you decline or the export captures nothing.
+3. It recreates the sandbox with all three kits and imports the sessions.
+
+Answer `y` at the prompt to migrate, or `N` to keep the old sandbox untouched
+and choose one of the manual options below.
+
+[sbx133]: https://github.com/docker/sbx-releases/issues/133
 
 ### Fix
 
-Recreate the sandbox with `qsbx`, which applies all three kits (and adds the kit
-source to `sbx settings kit.allowedSources` automatically):
+The simplest fix is to recreate the sandbox with `qsbx`, which applies all three
+kits (and adds the kit source to `kit.allowedSources` automatically). This loses
+the old sandbox's session/context unless you use the assisted migration above:
 
 ```bash
+sbx rm --force SANDBOX          # discard the un-healable sandbox (irreversible)
 ./qsbx run opencode /path/to/your/project
 ```
 
-Or inject the kit(s) into an existing sandbox without recreating (replace
-`SANDBOX` with the name from `sbx ls`; `<sha>` is `PATTERNS_KIT_REF` from `qsbx`).
-Remote kit sources must be allowlisted first:
+Or **downgrade** to the last release before the kit migration (`v0.11.0`), which
+still uses the submodule model and can reattach to pre-kit sandboxes:
 
 ```bash
-sbx settings set kit.allowedSources '["docker.io/","github.com/GSA-TTS/"]'
-REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-DIR="integrations/isolation/sbx-kits"
-sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/usai-provider-kit"
-sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/playbook-kit"
-sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/zscaler-ca-certificate"
+git checkout v0.11.0
 ```
 
-> `sbx kit add` is currently EXPERIMENTAL and may change in future releases. It
-> applies the kit's files, init files, and startup commands to the running
-> container. (The playbook clones on the next start; restart the agent so it
-> re-reads `OPENCODE_CONFIG` and picks up rules/skills.) `qsbx run` does all of
-> this automatically for existing sandboxes.
+> **`sbx kit add` recovery is currently blocked by [#133][sbx133].** Injecting
+> the kits into a running sandbox — shown below — will fail on the
+> `usai-provider` kit until the upstream bug is fixed. It is retained here for
+> when `sbx kit add` works again (and is what `qsbx`'s auto-heal will use once
+> `QSBX_AUTOHEAL_KITS` is re-enabled). Remote kit sources must be allowlisted
+> first:
+>
+> ```bash
+> sbx settings set kit.allowedSources '["docker.io/","github.com/GSA-TTS/"]'
+> REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
+> DIR="integrations/isolation/sbx-kits"
+> sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/usai-provider-kit"   # fails: #133
+> sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/playbook-kit"
+> sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/zscaler-ca-certificate"
+> ```
 
 ---
 

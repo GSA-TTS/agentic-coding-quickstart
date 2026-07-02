@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+#
+# test-migrate-or-halt — offline harness for qsbx's pre-kit sandbox handling.
+#
+# qsbx cannot auto-heal a sandbox created before the kit migration: the fix would
+# be `sbx kit add`, but upstream docker/sbx-releases#133 makes that fail on the
+# file-shipping usai-provider kit. So qsbx instead offers an assisted session
+# migration (export --sanitize -> sbx rm old -> recreate -> import) or halts with
+# documented options. That flow is destructive (`sbx rm`), so it must be exact.
+#
+# This harness sources qsbx (QSBX_SOURCE_ONLY=1) and exercises migrate_or_halt /
+# halt_with_options / sandbox_missing_usai against STUBBED `sbx` and `opencode`
+# commands — no Docker, no real sandbox, no network. Every stubbed invocation is
+# logged so we can assert the exact command sequence, and critically that we
+# NEVER `sbx rm` a sandbox without a verified export.
+#
+# Run:  ./scripts/test-migrate-or-halt      (exit 0 = all pass)
+#
+# This is a host-independent unit-level check. The live end-to-end path (real
+# `opencode export` in a USAi-less sandbox, real rm/recreate/import, USAi working
+# afterward) still has to be verified on a machine that can create sandboxes.
+
+set -uo pipefail
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+QSBX="$REPO_ROOT/qsbx"
+
+PASS=0
+FAIL=0
+
+pass() { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+fail() { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
+
+assert_eq() { # label expected actual
+  if [ "$2" = "$3" ]; then pass "$1"; else fail "$1" "expected [$2], got [$3]"; fi
+}
+assert_contains() { # label haystack needle
+  case "$2" in *"$3"*) pass "$1" ;; *) fail "$1" "missing [$3] in output" ;; esac
+}
+assert_not_contains() { # label haystack needle
+  case "$2" in *"$3"*) fail "$1" "unexpected [$3] in output" ;; *) pass "$1" ;; esac
+}
+
+# --- Stub scaffolding -------------------------------------------------------
+# Each test runs in its own temp dir with a stub `sbx` and `opencode` on PATH.
+# The stubs log every call to $CALLS and consult env-driven fixtures so a test
+# can simulate "export produced nothing", "rm fails", etc.
+
+make_stubs() {
+  STUBDIR=$(mktemp -d "${TMPDIR:-/tmp}/qsbx-test.XXXXXX")
+  CALLS="$STUBDIR/calls.log"
+  : >"$CALLS"
+
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+# Logged sbx stub. Behavior is driven by env vars set per-test.
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+cmd="${1:-}"
+case "$cmd" in
+  exec)
+    # sbx exec NAME -- sh -c "SNIPPET"   (find the snippet after `sh -c`)
+    snippet=""; prev=""
+    for a in "$@"; do
+      [ "$prev" = "-c" ] && { snippet="$a"; break; }
+      prev="$a"
+    done
+    case "$snippet" in
+      *"opencode session list"*) printf '%s\n' "${STUB_SESSION_LIST:-}" ;;
+      *"opencode export"*)
+        # Emit fixture JSON unless told to fail/emit-empty for this id.
+        [ "${STUB_EXPORT_FAIL:-0}" = "1" ] && exit 3
+        [ "${STUB_EXPORT_EMPTY:-0}" = "1" ] && exit 0   # nothing on stdout
+        printf '{"session":"data"}\n' ;;
+      *"opencode import"*) [ "${STUB_IMPORT_FAIL:-0}" = "1" ] && exit 4; exit 0 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  ls)
+    # -q form: bare names, one per line. After a successful `sbx rm`, a marker
+    # file makes the removed sandbox disappear from `ls` so the wait-for-release
+    # loop in migrate_or_halt terminates (a subshell stub can't mutate parent env).
+    [ -f "$STUBDIR/.removed" ] && exit 0
+    printf '%s\n' "${STUB_LS:-}" ;;
+  rm)   [ "${STUB_RM_FAIL:-0}" = "1" ] && exit 5; : >"$STUBDIR/.removed"; exit 0 ;;
+  cp)   [ "${STUB_CP_FAIL:-0}" = "1" ] && exit 6; exit 0 ;;
+  create) exit 0 ;;
+  kit)  exit 0 ;;
+  settings) exit 0 ;;
+  *)    exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+
+  PATH="$STUBDIR:$PATH"
+  export PATH CALLS STUBDIR
+  # Tests read the migrate prompt from stdin (no tty in this harness).
+  export QSBX_PROMPT_STDIN=1
+}
+
+cleanup_stubs() { [ -n "${STUBDIR:-}" ] && rm -rf "$STUBDIR"; }
+
+# Source qsbx for its functions (no dispatch). qsbx runs `set -euo pipefail`,
+# which would enable errexit for the rest of this harness (killing it on the
+# first intentional non-zero assertion). Re-disable errexit after each load.
+# shellcheck disable=SC1090
+load_qsbx() { QSBX_SOURCE_ONLY=1 . "$QSBX"; set +e; }
+
+# ---------------------------------------------------------------------------
+echo "test-migrate-or-halt"
+
+# 1) sandbox_missing_usai: probe says present -> not missing (1); absent -> (0)
+make_stubs; load_qsbx
+STUB_SESSION_LIST="" ; export STUB_LS="probe"
+# Simulate "present": exec prints "present"
+cat >"$STUBDIR/sbx" <<'STUB'
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+[ "${1:-}" = "exec" ] && { printf 'present\n'; exit 0; }
+exit 0
+STUB
+chmod +x "$STUBDIR/sbx"
+if sandbox_missing_usai foo; then fail "present sandbox -> missing=false" "returned missing=true"; else pass "present sandbox -> missing=false"; fi
+# Simulate "absent": exec prints nothing
+cat >"$STUBDIR/sbx" <<'STUB'
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+[ "${1:-}" = "exec" ] && exit 0
+exit 0
+STUB
+chmod +x "$STUBDIR/sbx"
+if sandbox_missing_usai foo; then pass "absent sandbox -> missing=true"; else fail "absent sandbox -> missing=true" "returned missing=false"; fi
+cleanup_stubs
+
+# 2) halt_with_options: exits non-zero and prints all three options + #133.
+make_stubs; load_qsbx
+out=$( { halt_with_options mybox; } 2>&1 ); rc=$?
+assert_eq "halt exits non-zero" "1" "$rc"
+assert_contains "halt mentions #133" "$out" "docker/sbx-releases#133"
+assert_contains "halt option: re-create" "$out" "sbx rm --force 'mybox'"
+assert_contains "halt option: downgrade v0.11.0" "$out" "git checkout v0.11.0"
+cleanup_stubs
+
+# 3) migrate_or_halt: user declines -> no rm, halts with options.
+make_stubs; load_qsbx
+export STUB_SESSION_LIST="ses_aaa"
+out=$( printf 'n\n' | migrate_or_halt mybox opencode /proj 2>&1 ); rc=$?
+assert_eq "decline exits non-zero" "1" "$rc"
+assert_not_contains "decline never calls sbx rm" "$(cat "$CALLS")" "sbx rm"
+assert_contains "decline shows options" "$out" "git checkout v0.11.0"
+cleanup_stubs
+
+# 4) migrate_or_halt: accept, export empty -> MUST NOT rm; halts.
+make_stubs
+export STUB_SESSION_LIST="ses_aaa ses_bbb" STUB_EXPORT_EMPTY=1
+( printf 'y\n' | migrate_or_halt mybox opencode /proj ) >/dev/null 2>&1 </dev/null; rc=$?
+assert_eq "empty-export exits non-zero" "1" "$rc"
+assert_not_contains "empty export never removes sandbox" "$(cat "$CALLS")" "sbx rm"
+unset STUB_EXPORT_EMPTY
+cleanup_stubs
+
+# 5) migrate_or_halt: accept, export fails -> MUST NOT rm; halts.
+make_stubs
+export STUB_SESSION_LIST="ses_aaa" STUB_EXPORT_FAIL=1
+( printf 'y\n' | migrate_or_halt mybox opencode /proj ) >/dev/null 2>&1 </dev/null; rc=$?
+assert_eq "export-fail exits non-zero" "1" "$rc"
+assert_not_contains "failed export never removes sandbox" "$(cat "$CALLS")" "sbx rm"
+unset STUB_EXPORT_FAIL
+cleanup_stubs
+
+# 6) Happy path: accept, export ok -> rm, create, import; correct ORDER.
+make_stubs
+export STUB_SESSION_LIST="ses_aaa ses_bbb"
+( printf 'y\n' | migrate_or_halt mybox opencode /proj ) >/dev/null 2>&1 </dev/null; rc=$?
+log=$(cat "$CALLS")
+assert_eq "happy path returns 0" "0" "$rc"
+assert_contains "happy: exports with --sanitize" "$log" "opencode export 'ses_aaa' --sanitize"
+assert_contains "happy: removes old sandbox forcibly" "$log" "sbx rm --force mybox"
+assert_contains "happy: recreates via sbx create --name" "$log" "sbx create --name mybox"
+assert_contains "happy: imports a session" "$log" "opencode import"
+# Order: last export line must precede the rm line, which must precede create.
+line_export=$(printf '%s\n' "$log" | grep -n "opencode export" | tail -1 | cut -d: -f1)
+line_rm=$(printf '%s\n' "$log" | grep -n "sbx rm --force" | head -1 | cut -d: -f1)
+line_create=$(printf '%s\n' "$log" | grep -n "sbx create --name" | head -1 | cut -d: -f1)
+if [ "$line_export" -lt "$line_rm" ] && [ "$line_rm" -lt "$line_create" ]; then
+  pass "happy: order export < rm < create"
+else
+  fail "happy: order export < rm < create" "export=$line_export rm=$line_rm create=$line_create"
+fi
+cleanup_stubs
+
+# 7) extract_session_ids: pulls ses_ tokens, ignores chatter.
+make_stubs; load_qsbx
+ids=$(printf '%s\n' \
+  "SESSION                 UPDATED" \
+  "ses_abc123   my project   2m ago" \
+  "(no id here)" \
+  "ses_def456   other        1h ago" | extract_session_ids | tr '\n' ' ')
+assert_eq "extract_session_ids" "ses_abc123 ses_def456 " "$ids"
+cleanup_stubs
+
+echo
+echo "  passed: $PASS   failed: $FAIL"
+[ "$FAIL" -eq 0 ]
