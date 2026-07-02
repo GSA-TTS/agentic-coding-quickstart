@@ -621,7 +621,7 @@ Instead, when you `qsbx run` an existing pre-kit sandbox, `qsbx` offers to
    be reused — sbx has no rename, so this is the only way to keep the original
    name. This is irreversible, so `qsbx` only does it *after* a successful,
    verified export, and never if you decline or the export captures nothing.
-4. It recreates the sandbox with all three kits, **verifies the USAi kit
+4. It recreates the sandbox with all the kits, **verifies the USAi kit
    actually applied** (checks for the config file at
    `/home/agent/usai-config/opencode.jsonc`), and only then imports the sessions.
    If the recreate or verification fails, it stops and keeps your exported

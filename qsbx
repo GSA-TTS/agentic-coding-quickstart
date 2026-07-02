@@ -6,7 +6,7 @@
 # global config (agent settings, AGENTS.md, skills, etc.). Without this, you end
 # up copying those files into every sandbox and manually keeping them in sync.
 #
-# Solution: when qsbx creates a sandbox it applies THREE sbx mixin kits from the
+# Solution: when qsbx creates a sandbox it applies FOUR sbx mixin kits from the
 # community agentic-coding-patterns repo, by remote reference pinned to a commit
 # (see PATTERNS_KIT_REF below), so every sandbox is configured declaratively:
 #   1. usai-provider     — configures the USAi OpenCode provider (drops
@@ -18,6 +18,9 @@
 #   3. zscaler-ca-certificate  — installs the public Zscaler Root CA into the
 #      sandbox trust store, so HTTPS works on Zscaler-inspecting hosts (harmless
 #      no-op elsewhere).
+#   4. git-ssh-sign      — configures git to sign commits/tags with the SSH key
+#      forwarded from the host's SSH agent (private key never leaves the host).
+#      Fails closed if no key is loaded; qsbx warns before attaching.
 # The kits live in GSA-TTS/agentic-coding-patterns under
 # integrations/isolation/sbx-kits/. qsbx no longer carries copies of them; this
 # repo just wires them together into one comprehensible path to a working
@@ -62,19 +65,24 @@ SCRIPT_DIR=$(script_dir) || { echo "qsbx: could not resolve script directory" >&
 QUICKSTART_CLONE="${QUICKSTART_CLONE:-$SCRIPT_DIR}"
 
 # ============================================================================
-# KITS — the three sbx mixin kits applied to every sandbox, sourced from the
+# KITS — the four sbx mixin kits applied to every sandbox, sourced from the
 # community agentic-coding-patterns repo. To adopt newer kits, bump the pinned
 # commit below (sbx requires remote kit refs to be a full 40-char commit SHA).
 # ============================================================================
 PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-PATTERNS_KIT_REF="598a57cb9f5fd2e279046a5e740a7e9ea8173c71"  # -patterns main @ PR #191 merge
+PATTERNS_KIT_REF="b791e04a4dd6b97fe2cf172897e8cb3e9ddef1a1"  # -patterns main @ PR #200 merge (adds git-ssh-sign)
 PATTERNS_KIT_DIR="integrations/isolation/sbx-kits"
 
 # Remote kit references (repo#ref=<sha>&dir=<subpath>). Applied in order via
-# repeated --kit; mixins compose. Order: provider, then playbook, then CA.
+# repeated --kit; mixins compose. Order: provider, playbook, CA, then signing.
 USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider-kit"
 PLAYBOOK_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/playbook-kit"
 ZSCALER_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/zscaler-ca-certificate"
+# git-ssh-sign: configures git in the sandbox to sign commits/tags with the SSH
+# key forwarded from the host agent (private key never leaves the host). If no
+# key is loaded on the host, git signing fails closed with a clear error; qsbx
+# warns before attaching (see warn_if_no_ssh_signing_key). See ADR-0006.
+GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/git-ssh-sign"
 
 # Additional user-supplied kits. Set QSBX_EXTRA_KITS to a whitespace-separated
 # list of kit references (local paths or remote refs) to apply on every sandbox,
@@ -97,8 +105,10 @@ split_noglob() {
   eval "$_name=(\"\$@\")"
 }
 
-# Assemble the full ordered kit list once: the three built-ins, then extras.
-KITS=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT")
+# Assemble the full ordered kit list once: the built-ins, then extras. Order
+# matters for sbx composition (later kits win on conflicting env/overlay); the
+# signing kit is independent of the others.
+KITS=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT" "$GITSSHSIGN_KIT")
 if [ -n "$QSBX_EXTRA_KITS" ]; then
   split_noglob _extra_kits "$QSBX_EXTRA_KITS"
   # shellcheck disable=SC2154  # assigned indirectly by split_noglob via eval
@@ -962,6 +972,28 @@ offer_update_stale_placeholder() {
   return 1
 }
 
+# Warn (do not block) if the host has no SSH key loaded for the git-ssh-sign
+# kit. The kit signs commits/tags with the forwarded SSH agent key and fails
+# CLOSED at commit time if none is loaded — so surface it up front rather than
+# letting the user discover it mid-commit. We check the HOST's agent (this
+# script runs on the host); `ssh-add -L` exits non-zero / prints a notice when
+# the agent is empty or absent. Purely advisory: never affects the exit path.
+warn_if_no_ssh_signing_key() {
+  local keys=""
+  if command -v ssh-add >/dev/null 2>&1; then
+    keys=$(ssh-add -L 2>/dev/null || true)
+  fi
+  case "$keys" in
+    ssh-*|ecdsa-*|sk-*)
+      return 0 ;;  # at least one key is loaded
+  esac
+  echo "qsbx: note — no SSH key is loaded in your host's SSH agent." >&2
+  echo "      This sandbox signs git commits with your forwarded SSH key, and" >&2
+  echo "      commits will FAIL until a key is loaded. To fix, on your host run:" >&2
+  echo "        ssh-add ~/.ssh/id_ed25519   # or your signing key" >&2
+  echo "      Then commit as usual. (You can still work; only committing needs it.)" >&2
+}
+
 # Validate the sandbox's key and, if it is not working, walk the user through
 # rotating it via scripts/rotate-apikey. Best-effort: if we cannot run the check
 # (e.g. no curl in the sandbox), we warn and continue rather than block attach.
@@ -1032,8 +1064,7 @@ ensure_valid_key() {
 
 # Allow tests to source this script for its functions without running the
 # dispatch below: `QSBX_SOURCE_ONLY=1 . ./qsbx`. Normal invocation is unaffected.
-if [ -n "${QSBX_SOURCE_ONLY:-}" ]; then
-  return 0 2>/dev/null || exit 0
+if [ -n "${QSBX_SOURCE_ONLY:-}" ]; then  return 0 2>/dev/null || exit 0
 fi
 
 subcommand="${1:-}"
@@ -1102,6 +1133,10 @@ case "$subcommand" in
       # if it does not.
       ensure_valid_key "$name"
 
+      # Advisory: the git-ssh-sign kit signs commits with the forwarded SSH key
+      # and fails closed if the host agent has no key loaded. Warn up front.
+      warn_if_no_ssh_signing_key
+
       # Attach by name. `sbx run --name <name>` re-attaches independent of the
       # working directory; the agent positional is omitted on attach (sbx infers
       # it from the named sandbox and errors if a mismatching agent is passed).
@@ -1123,6 +1158,7 @@ case "$subcommand" in
           halt_with_options "$first"
         fi
         ensure_kit_applied "$first"
+        warn_if_no_ssh_signing_key
         # Rebuild the arg list with the matched sandbox token removed (drop only
         # the first occurrence), so flags that appear before the name are
         # preserved and the name isn't duplicated. Positional `${@:2}` would be

@@ -25,7 +25,7 @@ review_cycle: "quarterly"
 
 This repository is a thin **wrapper** (`qsbx`) that stands up a working,
 federally-configured agent sandbox by composing existing tools: the `sbx` CLI
-plus three sbx **mixin kits** hosted in the community
+plus four sbx **mixin kits** hosted in the community
 [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
 repo (`integrations/isolation/sbx-kits/`). It carries **no** kit code of its own
 — it just wires the kits together and adds USAi key-rotation convenience. A
@@ -41,7 +41,7 @@ my-workspace/                       # Parent folder (user creates this)
 └── my-app/                         # User's project(s)
 ```
 
-When `qsbx` creates a sandbox it applies three kits by pinned remote reference
+When `qsbx` creates a sandbox it applies four kits by pinned remote reference
 (`--kit git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=<sha>&dir=…`):
 
 - **`usai-provider`** — drops `~/usai-config/opencode.jsonc` and sets
@@ -54,13 +54,16 @@ When `qsbx` creates a sandbox it applies three kits by pinned remote reference
 - **`zscaler-ca-certificate`** — installs the public Zscaler Root CA into the
   sandbox trust store so HTTPS works on Zscaler-inspected hosts (harmless
   elsewhere).
+- **`git-ssh-sign`** — signs git commits/tags with the SSH key forwarded from
+  the host's SSH agent (the private key never enters the sandbox). Fails closed
+  if no host key is loaded; `qsbx` warns before attaching.
 
-So every sandbox picks up the USAi config, federal rules, skills, and CA trust
-declaratively. `qsbx` also handles the `sbx` prerequisites automatically
-(allow-listing the kit source; requiring sbx ≥ 0.34.0). Per-kit design rationale
-lives with the kits in the patterns repo.
+So every sandbox picks up the USAi config, federal rules, skills, CA trust, and
+commit signing declaratively. `qsbx` also handles the `sbx` prerequisites
+automatically (allow-listing the kit source; requiring sbx ≥ 0.34.0). Per-kit
+design rationale lives with the kits in the patterns repo.
 
-Applying the kits directly (without `qsbx`) is equivalent — pass the same three
+Applying the kits directly (without `qsbx`) is equivalent — pass the same four
 `--kit` refs to `sbx run`.
 
 ### Agent Resource Access

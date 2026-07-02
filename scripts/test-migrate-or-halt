@@ -298,6 +298,16 @@ ids=$(printf '%s\n' \
 assert_eq "extract_session_ids" "ses_abc123 ses_def456 " "$ids"
 cleanup_stubs
 
+# 8) The built-in KITS list includes all four kits (guards against a kit being
+# dropped from the default set). qsbx sourced with QSBX_SOURCE_ONLY exposes KITS.
+make_stubs; load_qsbx
+kits_joined=$(printf '%s\n' "${KITS[@]}")
+assert_contains "kits: usai-provider" "$kits_joined" "usai-provider-kit"
+assert_contains "kits: playbook" "$kits_joined" "playbook-kit"
+assert_contains "kits: zscaler" "$kits_joined" "zscaler-ca-certificate"
+assert_contains "kits: git-ssh-sign" "$kits_joined" "git-ssh-sign"
+cleanup_stubs
+
 echo
 echo "  passed: $PASS   failed: $FAIL"
 [ "$FAIL" -eq 0 ]

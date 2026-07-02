@@ -137,7 +137,7 @@ Rate each threat for your specific deployment. **Likelihood**: 1 (Rare) to 5 (Al
 | T9 | **Audit trail gaps** — Agent actions cannot be reconstructed from logs | Agentic-02 | | | | | |
 | T10 | **Human trust exploitation** — User over-trusts agent output without review | Agentic-05 | | | | | |
 
-> **Project-specific note (qsbx kit sourcing).** `qsbx` applies its three sbx
+> **Project-specific note (qsbx kit sourcing).** `qsbx` applies its four sbx
 > kits by **pinned commit SHA** from `GSA-TTS/agentic-coding-patterns`, fetched
 > at sandbox-create time. This adds two dependencies to weigh under **T3 (supply
 > chain)** and availability:

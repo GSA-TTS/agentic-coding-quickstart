@@ -300,7 +300,7 @@ quickstart for when you want to customize or troubleshoot.
 
 ### What `qsbx` applies
 
-`qsbx` applies **three sbx mixin kits** (by pinned remote reference from the
+`qsbx` applies **four sbx mixin kits** (by pinned remote reference from the
 community [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
 repo) when it creates a sandbox, delivering everything declaratively:
 
@@ -311,6 +311,10 @@ repo) when it creates a sandbox, delivering everything declaratively:
   rules path and its skills into `~/.agents/skills` (+ per-agent roots).
 - **`zscaler-ca-certificate`** — installs the public Zscaler Root CA into the
   sandbox trust store (harmless off-Zscaler).
+- **`git-ssh-sign`** — signs git commits and tags with the SSH key forwarded
+  from your host's SSH agent; the private key never enters the sandbox. Load a
+  key on the host first (`ssh-add ~/.ssh/id_ed25519`) — without one, commits fail
+  with a clear error, and `qsbx` warns you before attaching.
 
 `qsbx` also handles the `sbx` prerequisites for you: it adds the kit source to
 `sbx settings kit.allowedSources` (the v0.34 remote-kit allowlist) and requires
@@ -350,7 +354,7 @@ The catalog and its refresh tooling live with the kit in the patterns repo.
 ---
 ## Customizing your setup
 
-`qsbx` applies a fixed set of three kits, pinned to a commit of the patterns
+`qsbx` applies a fixed set of four kits, pinned to a commit of the patterns
 repo. To customize:
 
 - **Adopt newer kits:** bump `PATTERNS_KIT_REF` near the top of `qsbx`.
@@ -365,7 +369,7 @@ repo. To customize:
 
 ## Advanced: extra kits
 
-`qsbx` always applies its three built-in kits. To apply **additional** kits on
+`qsbx` always applies its four built-in kits. To apply **additional** kits on
 every invocation without repeating `--kit` flags, set `QSBX_EXTRA_KITS` to a
 whitespace-separated list of kit references (local paths or remote refs):
 
