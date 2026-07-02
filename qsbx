@@ -101,6 +101,7 @@ split_noglob() {
 KITS=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT")
 if [ -n "$QSBX_EXTRA_KITS" ]; then
   split_noglob _extra_kits "$QSBX_EXTRA_KITS"
+  # shellcheck disable=SC2154  # assigned indirectly by split_noglob via eval
   KITS+=("${_extra_kits[@]}")
 fi
 
@@ -123,6 +124,7 @@ QSBX_EXTRA_KIT_SOURCES="${QSBX_EXTRA_KIT_SOURCES:-}"
 KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
 if [ -n "$QSBX_EXTRA_KIT_SOURCES" ]; then
   split_noglob _extra_sources "$QSBX_EXTRA_KIT_SOURCES"
+  # shellcheck disable=SC2154  # assigned indirectly by split_noglob via eval
   KIT_SOURCE_PREFIXES+=("${_extra_sources[@]}")
 fi
 
