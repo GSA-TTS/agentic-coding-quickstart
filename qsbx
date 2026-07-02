@@ -149,6 +149,14 @@ KEY_MGMT_URL="https://console.gsa.usai.gov/key-management"
 # schema + `sbx policy init` all landed in sbx 0.34.0.
 MIN_SBX_VERSION="0.34.0"
 
+# Max seconds to wait for `sbx exec` to become usable in a sandbox. Right after
+# `sbx create` (or the first touch of a stopped sandbox), sbx exec fails with
+# "inspect exec: context deadline exceeded" until the container is ready. We poll
+# until a trivial exec succeeds before making the migrate/heal decision or
+# running the migration's export/import, so a cold-start delay is never mistaken
+# for "feature absent". Override with QSBX_EXEC_READY_TIMEOUT (seconds).
+QSBX_EXEC_READY_TIMEOUT="${QSBX_EXEC_READY_TIMEOUT:-60}"
+
 # Standalone helper scripts that qsbx fronts as subcommands. They remain runnable
 # on their own; qsbx is just the single entry point for this repo's sbx extras.
 ROTATE_SCRIPT="$SCRIPT_DIR/scripts/rotate-apikey"
@@ -465,7 +473,8 @@ create_with_config() {
   # Collect the --kit flags for all configured kits (built-ins + QSBX_EXTRA_KITS).
   local kf=(); while IFS= read -r line; do kf+=("$line"); done < <(kit_flags)
   # Guard the array expansion for bash 3.2 (macOS default): under `set -u` an
-  # empty array expansion is an "unbound variable" error there.
+  # empty array expansion is an "unbound variable" error there. Return sbx's exit
+  # status so callers can fail closed instead of proceeding on a broken sandbox.
   if [ "${#STRIPPED_ARGS[@]}" -gt 0 ]; then
     sbx create --name "$name" "${kf[@]}" "${STRIPPED_ARGS[@]}"
   else
@@ -479,18 +488,76 @@ create_with_config() {
 # with `sbx kit add` — no recreation needed. Best-effort: if the (experimental)
 # command fails, warn with the manual recovery step and continue to attach.
 #
+# Wait until `sbx exec` works in a sandbox, or the readiness timeout elapses.
+# Returns 0 once a trivial exec succeeds, 1 if it never does within the budget.
+# This exists because sbx exec fails ("inspect exec: context deadline exceeded")
+# for a while after a sandbox is created or first touched; callers must wait for
+# readiness before probing for features or running commands, otherwise a
+# cold-start delay is misread as "the command/feature failed/absent".
+wait_for_exec_ready() {
+  local name="$1" deadline out
+  deadline=$(( $(date +%s) + QSBX_EXEC_READY_TIMEOUT ))
+  while :; do
+    # Capture rather than pipe to grep: under `set -o pipefail`, grep -q closing
+    # the pipe early makes sbx see SIGPIPE and the pipeline reports failure even
+    # though exec succeeded (notably on macOS). Strip CR so a CRLF 'ok\r' still
+    # matches. A substring test tolerates any extra sbx chatter around it.
+    out=$(sbx exec "$name" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r')
+    case "$out" in
+      *ok*) return 0 ;;
+    esac
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 2
+  done
+}
+
 # Probe discipline: we distinguish "the probe ran and the feature is absent"
-# (heal) from "the probe itself failed to run" (skip — a transient exec blip
-# must not trigger a redundant kit add). kit_feature_absent runs a test snippet
-# that MUST print "present" when the feature exists; it returns:
+# (heal/migrate) from "the probe itself failed to run" (do NOT act on an
+# unreliable probe). Callers MUST have waited for exec readiness first
+# (wait_for_exec_ready); given that, a failing exec here is a genuine failure,
+# not a cold-start blip, but we still retry a couple of times for robustness.
+#
+# CONTRACT: the snippet MUST decide presence purely by what it PRINTS, and MUST
+# exit 0 either way. We cannot use the exec exit status to mean "feature absent"
+# because a snippet like `test -f X && echo present` exits 1 when X is absent —
+# indistinguishable from a genuine exec failure. So kit_feature_absent classifies
+# on stdout: it wraps the snippet to always exit 0 and prints "present" (feature
+# there) or "absent" (feature not there); an empty/garbled result means the probe
+# didn't run cleanly. Returns:
 #   0 = ran, feature absent   1 = ran, feature present   2 = probe failed to run
 kit_feature_absent() {
-  local name="$1" snippet="$2" out
-  out=$(sbx exec "$name" -- sh -c "$snippet" </dev/null 2>/dev/null)
-  case "$?" in
-    0) [ "$out" = "present" ] && return 1 || return 0 ;;  # ran cleanly
-    *) return 2 ;;                                          # exec failed
-  esac
+  local name="$1" snippet="$2" out tries=0
+  # Force exit 0 and a definitive token regardless of the snippet's own status.
+  local wrapped="if ${snippet%% && echo present}"' >/dev/null 2>&1; then echo present; else echo absent; fi'
+  while [ "$tries" -lt 5 ]; do
+    tries=$((tries + 1))
+    out=$(sbx exec "$name" -- sh -c "$wrapped" </dev/null 2>/dev/null | tr -d '\r')
+    case "$out" in
+      *present*) return 1 ;;   # ran, feature present
+      *absent*)  return 0 ;;   # ran, feature absent
+    esac
+    # Neither token: probe didn't run cleanly (exec blip). Back off and retry.
+    sleep 2
+  done
+  return 2   # probe never ran cleanly
+}
+
+# Run a snippet inside a sandbox, retrying on the transient failure sbx exec
+# exhibits right after a sandbox (re)starts ("inspect exec: context deadline
+# exceeded"). Echoes the snippet's stdout; returns 0 on the first clean run, or
+# the last non-zero status if it never succeeds. Used for the migration
+# export/import steps, which run against a just-recreated sandbox.
+sbx_exec_retry() {
+  local name="$1" snippet="$2" out rc tries=0
+  while [ "$tries" -lt 5 ]; do
+    tries=$((tries + 1))
+    out=$(sbx exec "$name" -- sh -c "$snippet" </dev/null 2>/dev/null)
+    rc=$?
+    [ "$rc" -eq 0 ] && { printf '%s' "$out"; return 0; }
+    sleep 2
+  done
+  printf '%s' "$out"
+  return "$rc"
 }
 
 # In-place kit healing for pre-kit sandboxes. DISABLED by default behind
@@ -507,9 +574,11 @@ ensure_kit_applied() {
 
   ensure_kit_sources_allowed
 
-  # 1) USAi provider kit: present iff OPENCODE_CONFIG is set.
-  if kit_feature_absent "$name" '[ -n "${OPENCODE_CONFIG:-}" ] && echo present'; then
-    echo "qsbx: '$name' is missing the USAi kit (no OPENCODE_CONFIG); injecting it" >&2
+  # 1) USAi provider kit: present iff the kit's config file is present. (We probe
+  #    the dropped file, not the OPENCODE_CONFIG env var, which an exec shell may
+  #    not see — see USAI_KIT_CONFIG_PATH.)
+  if kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
+    echo "qsbx: '$name' is missing the USAi kit (no config file); injecting it" >&2
     echo "      with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$USAI_KIT" </dev/null >/dev/null 2>&1; then
       # A stale ~/.config/opencode/opencode.jsonc symlink (to the removed
@@ -580,13 +649,32 @@ sandbox_exists() {
   sbx ls -q 2>/dev/null | grep -Fxq -- "$1"
 }
 
+# Absolute path where the usai-provider kit installs its OpenCode config (and
+# sets OPENCODE_CONFIG to). We detect the kit by the presence of THIS FILE rather
+# than the OPENCODE_CONFIG env var: kit-injected env vars reach the agent process
+# but are not reliably visible to a fresh `sbx exec … sh -c` shell, whereas the
+# dropped file always is. Keep in sync with the kit's spec.yaml.
+USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
+
 # True (0) iff an existing sandbox lacks the USAi provider config — i.e. it was
-# created before the kit migration (no OPENCODE_CONFIG). Reuses kit_feature_absent
-# so a transient exec blip (return 2) is treated as "not confirmed missing" (we
-# do NOT tear down a sandbox on an unreliable probe).
+# created before the kit migration. We probe for the config FILE the kit drops
+# (see USAI_KIT_CONFIG_PATH), not the OPENCODE_CONFIG env var, because the env
+# var isn't reliably visible to an exec shell.
+#
+# Waits for exec readiness first: a stopped/just-touched sandbox's exec times out
+# for a while, and treating that as "config absent" would wrongly trigger a
+# destructive migration. If the sandbox never becomes exec-ready within the
+# budget, we FAIL CLOSED to "not missing" (return 1) — we do not tear down a
+# sandbox we could not even probe. Reuses kit_feature_absent, whose return 2
+# (probe ran but failed) is likewise treated as "not confirmed missing".
 sandbox_missing_usai() {
-  local rc
-  kit_feature_absent "$1" '[ -n "${OPENCODE_CONFIG:-}" ] && echo present'
+  local name="$1" rc
+  if ! wait_for_exec_ready "$name"; then
+    echo "qsbx: '$name' did not become ready for exec within ${QSBX_EXEC_READY_TIMEOUT}s;" >&2
+    echo "      cannot determine whether the USAi kit is present. Not migrating." >&2
+    return 1   # fail closed: not confirmed missing
+  fi
+  kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"
   rc=$?
   [ "$rc" -eq 0 ]
 }
@@ -597,25 +685,40 @@ sandbox_missing_usai() {
 halt_with_options() {
   local name="$1"
   cat >&2 <<EOF
-qsbx: sandbox '$name' predates the kit migration and cannot be auto-healed.
-      Upstream sbx bug docker/sbx-releases#133 makes 'sbx kit add' fail on the
-      USAi provider kit (it ships a static file), and a sandbox without the USAi
-      config is unusable. In-place healing is disabled until #133 is fixed.
+qsbx: The quickstart has been updated since sandbox '$name' was created, and it
+      now sets up sandboxes a different way. This one can't be used as-is.
 
-      Your options:
-        1. Re-create it (loses this sandbox's session/context):
-             sbx rm --force '$name' && ./qsbx run opencode <project-path>
-        2. Let qsbx migrate your sessions into a fresh, working sandbox with the
-           same name — re-run and answer 'y' at the prompt. (Sessions are
-           exported with --sanitize; the old sandbox is removed to reuse its
-           name. Both are irreversible.)
-        3. Downgrade to the last release before the kit migration (v0.11.0),
-           which can still reattach to pre-kit sandboxes:
+      What you can do:
+        1. Move your sessions to a new sandbox: re-run and answer 'y' at the
+           prompt. qsbx saves your chat sessions, recreates the sandbox the new
+           way (same name), and loads them back in.
+        2. Keep your existing sessions by switching to the previous quickstart
+           version, which still works with this sandbox as-is:
              git checkout v0.11.0
+           Your chat history stays exactly where it is.
+        3. Start over without your old chat history — delete this sandbox
+           first, then create it fresh:
+             sbx rm --force '$name'
+             ./qsbx run opencode <your-project-folder>
 
-      See docs/KNOWN_FAILURE_MODES.md (section 19) for details.
+      More detail: docs/KNOWN_FAILURE_MODES.md (section 19).
 EOF
   exit 1
+}
+
+# Copy a migration's exported session JSON out of the temp workdir (which is
+# removed by migrate_or_halt's RETURN trap) into a stable, private location so a
+# failed migration doesn't lose the user's exported sessions. Prints the path.
+# $1 = sandbox name (for the dir label); $2 = the temp workdir being abandoned.
+_preserve_migration_exports() {
+  local name="$1" src="$2" dest
+  # Only bother if there is something to save.
+  case "$(echo "$src"/*.json)" in *"*.json") return 0 ;; esac
+  dest="${TMPDIR:-/tmp}/qsbx-sessions-$(slugify "$name")-$$"
+  if mkdir -p "$dest" 2>/dev/null && cp "$src"/*.json "$dest"/ 2>/dev/null; then
+    chmod 700 "$dest" 2>/dev/null || true
+    echo "      Your saved sessions are here: $dest" >&2
+  fi
 }
 
 # Assisted migration for a USAi-less pre-kit sandbox. sbx has no rename, so to
@@ -632,16 +735,21 @@ migrate_or_halt() {
   local name="$1"; shift
   local create_args=("$@")
 
-  echo "qsbx: sandbox '$name' predates the kit migration (no USAi config) and" >&2
-  echo "      cannot be auto-healed (upstream sbx#133). qsbx can migrate its" >&2
-  echo "      sessions into a fresh, working sandbox of the same name." >&2
+  echo "qsbx: The quickstart has been updated since this sandbox was created, and" >&2
+  echo "      now sets up sandboxes a different way. This one can't be upgraded in" >&2
+  echo "      place, but qsbx can move your existing chat sessions over for you." >&2
   echo "" >&2
-  echo "      This EXPORTS your sessions with --sanitize (sensitive transcript and" >&2
-  echo "      file data are redacted), then PERMANENTLY REMOVES the old sandbox to" >&2
-  echo "      reuse its name, then recreates it with the kits and imports the" >&2
-  echo "      sessions. Both the removal and the redaction are irreversible." >&2
+  echo "      Here's what will happen:" >&2
+  echo "        - Your sessions are saved (with sensitive details redacted)." >&2
+  echo "        - This sandbox is deleted and recreated the new way, same name." >&2
+  echo "        - Your saved sessions are loaded back in." >&2
   echo "" >&2
-  printf "qsbx: migrate sessions and recreate '%s'? [y/N] " "$name" >&2
+  echo "      This can't be undone. Your work in the current sandbox is replaced" >&2
+  echo "      by the recreated one. If you say no, nothing changes, and we'll leave" >&2
+  echo "      you pointers on how to manually recover access to your previous" >&2
+  echo "      sessions." >&2
+  echo "" >&2
+  printf "qsbx: Move your sessions and recreate '%s'? [y/N] " "$name" >&2
   local reply=""
   # Read the confirmation from the terminal by default so a prompt still works
   # when stdin is a pipe. Tests set QSBX_PROMPT_STDIN=1 to read from stdin
@@ -653,7 +761,7 @@ migrate_or_halt() {
   fi
   case "$reply" in
     y|Y|yes|YES) ;;
-    *) echo "qsbx: migration declined." >&2; halt_with_options "$name" ;;
+    *) echo "qsbx: Okay, leaving '$name' as-is." >&2; halt_with_options "$name" ;;
   esac
 
   # Export sessions to a private host temp dir. Session JSON is the user's data;
@@ -666,11 +774,18 @@ migrate_or_halt() {
   # shellcheck disable=SC2064  # expand workdir now so the trap removes this exact dir
   trap "rm -rf '$workdir'" RETURN
 
-  echo "qsbx: exporting sessions from '$name' (sanitized)..." >&2
+  echo "qsbx: Saving your sessions..." >&2
+  # The old sandbox may be stopped; wait for exec readiness before listing and
+  # exporting, so a cold-start timeout isn't misread as "no sessions".
+  if ! wait_for_exec_ready "$name"; then
+    echo "qsbx: '$name' didn't start up in time (${QSBX_EXEC_READY_TIMEOUT}s), so" >&2
+    echo "      qsbx couldn't read its sessions. Nothing was changed; try again." >&2
+    halt_with_options "$name"
+  fi
   local ids id count=0
-  ids=$(sbx exec "$name" -- sh -c 'opencode session list 2>/dev/null' </dev/null 2>/dev/null | extract_session_ids) || true
+  ids=$(sbx_exec_retry "$name" 'opencode session list 2>/dev/null' | extract_session_ids) || true
   for id in $ids; do
-    if sbx exec "$name" -- sh -c "opencode export '$id' --sanitize" </dev/null >"$workdir/$id.json" 2>/dev/null \
+    if sbx_exec_retry "$name" "opencode export '$id' --sanitize" >"$workdir/$id.json" 2>/dev/null \
         && [ -s "$workdir/$id.json" ]; then
       count=$((count + 1))
     else
@@ -679,39 +794,70 @@ migrate_or_halt() {
   done
 
   if [ "$count" -eq 0 ]; then
-    echo "qsbx: no sessions could be exported from '$name'; not removing it." >&2
+    echo "qsbx: Couldn't save any sessions from '$name', so it was left as-is." >&2
     halt_with_options "$name"
   fi
-  echo "qsbx: exported $count session(s)." >&2
+  echo "qsbx: Saved $count session(s)." >&2
 
   # Destructive: remove the old sandbox so the name frees up, then wait until
   # sbx no longer lists it (create fails if the name is still taken).
-  echo "qsbx: removing old sandbox '$name' to reuse its name..." >&2
+  echo "qsbx: Deleting the old sandbox '$name'..." >&2
   sbx rm --force "$name" </dev/null >/dev/null 2>&1 || {
-    echo "qsbx: 'sbx rm' failed for '$name'; aborting migration." >&2; halt_with_options "$name"; }
+    echo "qsbx: Couldn't delete '$name'. Nothing was changed; try again." >&2; halt_with_options "$name"; }
   local tries=0
   while sandbox_exists "$name"; do
     tries=$((tries + 1))
-    [ "$tries" -gt 30 ] && { echo "qsbx: '$name' still present after removal; aborting." >&2; exit 1; }
+    [ "$tries" -gt 30 ] && { echo "qsbx: '$name' is still around after deleting; stopping here." >&2; exit 1; }
     sleep 1
   done
 
-  echo "qsbx: creating fresh sandbox '$name' with the kits..." >&2
-  create_with_config "$name" "${create_args[@]+"${create_args[@]}"}"
+  echo "qsbx: Recreating '$name' the new way..." >&2
+  if ! create_with_config "$name" "${create_args[@]+"${create_args[@]}"}"; then
+    echo "qsbx: Couldn't recreate '$name'." >&2
+    _preserve_migration_exports "$name" "$workdir"
+    exit 1
+  fi
 
-  echo "qsbx: importing $count session(s) into '$name'..." >&2
-  local f base
+  # Fail closed: confirm the usai-provider kit actually landed. The create can
+  # succeed at the sandbox level yet not apply the kit (e.g. kit source not
+  # allow-listed, kit resolution error) — importing sessions into a USAi-less
+  # sandbox would just recreate the problem we set out to fix. Wait for exec
+  # readiness first (the sandbox was just created), then probe the kit's config
+  # file — not a USAi HTTP call: the injected USAI_API_KEY answers 200 even with
+  # no kit applied.
+  if ! wait_for_exec_ready "$name"; then
+    echo "qsbx: '$name' was recreated but didn't start up in time to check it." >&2
+    echo "      Your saved sessions were not loaded, but they are kept safe:" >&2
+    _preserve_migration_exports "$name" "$workdir"
+    exit 1
+  fi
+  if kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
+    echo "qsbx: '$name' was recreated, but the new setup didn't take effect, so" >&2
+    echo "      qsbx won't load your sessions into it. Your saved sessions are kept" >&2
+    echo "      safe below. Please report this if it keeps happening." >&2
+    _preserve_migration_exports "$name" "$workdir"
+    exit 1
+  fi
+
+  echo "qsbx: Loading your saved sessions back in..." >&2
+  local f base tries imported=0
   for f in "$workdir"/*.json; do
     [ -e "$f" ] || continue
     base=$(basename "$f")
-    if sbx cp "$f" "$name:/tmp/$base" </dev/null >/dev/null 2>&1 \
-        && sbx exec "$name" -- sh -c "opencode import '/tmp/$base'; rm -f '/tmp/$base'" </dev/null >/dev/null 2>&1; then
-      :
+    # The sandbox was just recreated; sbx cp can hit the transient post-start
+    # "context deadline exceeded" too, so retry the copy briefly.
+    tries=0
+    while [ "$tries" -lt 5 ] && ! sbx cp "$f" "$name:/tmp/$base" </dev/null >/dev/null 2>&1; do
+      tries=$((tries + 1)); sleep 2
+    done
+    if [ "$tries" -lt 5 ] \
+        && sbx_exec_retry "$name" "opencode import '/tmp/$base'; rm -f '/tmp/$base'" >/dev/null 2>&1; then
+      imported=$((imported + 1))
     else
-      echo "qsbx: warning: failed to import session '$base' into '$name'." >&2
+      echo "qsbx: warning: couldn't load one saved session back in." >&2
     fi
   done
-  echo "qsbx: migration complete. Attaching to '$name'." >&2
+  echo "qsbx: Done — moved $imported of $count session(s) into '$name'. Opening it now." >&2
 }
 
 # Extract session IDs from `opencode session list` output on stdin. The command

@@ -610,16 +610,32 @@ without the USAi provider config is unusable, in-place healing is **disabled**
 Instead, when you `qsbx run` an existing pre-kit sandbox, `qsbx` offers to
 **migrate your sessions into a fresh, working sandbox of the same name**:
 
-1. It exports each session with `opencode export --sanitize` (sensitive
+1. It waits for the sandbox to be ready for `sbx exec` (right after a create or a
+   cold start, exec fails with `inspect exec: context deadline exceeded` for a
+   few seconds; qsbx polls until a trivial exec succeeds, up to
+   `QSBX_EXEC_READY_TIMEOUT`, default 60s). This avoids misreading a cold-start
+   delay as "no USAi config" and wrongly triggering — or skipping — a migration.
+2. It exports each session with `opencode export --sanitize` (sensitive
    transcript and file data are redacted).
-2. It **permanently removes** the old sandbox (`sbx rm --force`) so the name can
+3. It **permanently removes** the old sandbox (`sbx rm --force`) so the name can
    be reused — sbx has no rename, so this is the only way to keep the original
    name. This is irreversible, so `qsbx` only does it *after* a successful,
    verified export, and never if you decline or the export captures nothing.
-3. It recreates the sandbox with all three kits and imports the sessions.
+4. It recreates the sandbox with all three kits, **verifies the USAi kit
+   actually applied** (checks for the config file at
+   `/home/agent/usai-config/opencode.jsonc`), and only then imports the sessions.
+   If the recreate or verification fails, it stops and keeps your exported
+   sessions in a temp directory rather than importing into a broken sandbox.
 
 Answer `y` at the prompt to migrate, or `N` to keep the old sandbox untouched
 and choose one of the manual options below.
+
+> **Detecting a pre-kit sandbox.** qsbx decides a sandbox predates the migration
+> by checking for the USAi config file, classifying on the probe's **stdout**
+> (`present`/`absent`), never its exit status — `test -f` exits non-zero when the
+> file is absent, which is indistinguishable from a genuine exec failure, so an
+> exit-status check would wrongly treat "file absent" as "probe failed" and skip
+> the migration.
 
 [sbx133]: https://github.com/docker/sbx-releases/issues/133
 
