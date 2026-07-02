@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.10.1...v0.11.0) (2026-07-01)
+
+
+### Features
+
+* **opencode:** reduce read/inspection approval fatigue in permissions ([#179](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/179)) ([e840ae4](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/e840ae4f5fbcfa0e412b1bfdbc3f26f45cb22525))
+
+
+### Bug Fixes
+
+* **docs:** harden Docker install (no curl|sudo sh) ([#187](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/187)) ([1706af3](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/1706af37caf5028ab6249465cf3d7133409e0541))
+* **qsbx:** repair stale usai placeholders ([#182](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/182)) ([4b3c7e0](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/4b3c7e00ebe6c11ff46dc021655bf97aaf628c45))
+
 ## [0.10.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.10.0...v0.10.1) (2026-06-26)
 
 

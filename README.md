@@ -120,14 +120,39 @@ sbx login
 <details>
 <summary>Show Linux (Ubuntu) install steps (click to expand)</summary>
 
+<details>
+<summary>Show Linux (Ubuntu) install steps (click to expand)</summary>
+
+Add Docker's official apt repository (verified by its signed GPG key), then
+install `docker-sbx` — instead of piping a remote script into a root shell:
+
 ```bash
-curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh
-sudo apt-get install docker-sbx
-sudo usermod -aG kvm $USER && newgrp kvm
+# 1. Add Docker's apt repo with its verified signing key
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# 2. Install the sbx package from the now-trusted repo
+sudo apt-get update
+sudo apt-get install -y docker-sbx
+sudo usermod -aG kvm "$USER" && newgrp kvm
 sbx login
 ```
 
+See [Docker's apt install docs](https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository).
+
 </details>
+
+> **Tip (macOS):** install `sbx` via Homebrew (shown above) rather than a
+> downloaded installer, so Homebrew verifies the formula and keeps it updatable
+> with `brew upgrade`.
 
 **Check it worked:** after `sbx login` finishes with no error, run `sbx version`.
 You should see a line like `sbx version: v0.32.0 <sha>`.
