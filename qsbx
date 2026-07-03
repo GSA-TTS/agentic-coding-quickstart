@@ -70,7 +70,7 @@ QUICKSTART_CLONE="${QUICKSTART_CLONE:-$SCRIPT_DIR}"
 # commit below (sbx requires remote kit refs to be a full 40-char commit SHA).
 # ============================================================================
 PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-PATTERNS_KIT_REF="b791e04a4dd6b97fe2cf172897e8cb3e9ddef1a1"  # -patterns main @ PR #200 merge (adds git-ssh-sign)
+PATTERNS_KIT_REF="6cb6cde94f228073555837028cb5150b7c80005a"  # -patterns main @ PR #201 merge (relaxes usai-provider permissions)
 PATTERNS_KIT_DIR="integrations/isolation/sbx-kits"
 
 # Remote kit references (repo#ref=<sha>&dir=<subpath>). Applied in order via

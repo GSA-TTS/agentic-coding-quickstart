@@ -248,12 +248,14 @@ The agent MUST NEVER:
 
 > **Note on `env` / `printenv` in the sandbox:** Inside an SBX sandbox, secrets
 > are **injected placeholders or proxied** (the agent never holds the real USAi
-> key material), so inspecting the environment is not automatically a leak.
-> These commands are therefore **gated (`ask`)** rather than hard-denied in
-> `opencode.jsonc` — the agent should still avoid dumping secret values and must
-> get user approval before running them. The prohibition above is about
-> *exposing real secret values*, not about routine environment inspection in the
-> sandbox.
+> key material), so inspecting the environment is not automatically a leak. The
+> `usai-provider` kit's OpenCode policy is **default-allow** (the sandbox is the
+> security boundary), so these commands are **allowed** rather than gated — the
+> agent should still avoid deliberately dumping secret values. The prohibition
+> above is about *exposing real secret values*, not about routine environment
+> inspection in the sandbox. The gated (`ask`) class is instead commands that
+> open a **new outbound destination** (e.g. `git push`, new git remotes,
+> `scp`/`sftp`/`rsync`/`nc`); see ADR-0005 and the kit's decision record.
 
 All secrets MUST be accessed via:
 - SBX secret management
