@@ -201,6 +201,13 @@ in the list of allowed network destinations.
 > [!NOTE]
 > USAi API keys expire every 7 days; when one does, see
 > [Troubleshooting](#troubleshooting) to rotate it.
+>
+> Sandboxes also sign your git commits with your host SSH key. For those commits
+> to show **Verified** on GitHub you need, one time: a GitHub-verified
+> `user.email` set **in the project** (repo-local config, since the sandbox has
+> its own home and does not see your host global git config) and your **public**
+> signing key registered on GitHub as a _Signing Key_. See
+> [Commits show "Unverified" on GitHub](#troubleshooting) below.
 
 ### Step 4: Create and run a sandbox (as often as you like)
 
@@ -274,6 +281,48 @@ sbx policy init balanced
 
 </details>
 
+<details>
+<summary><strong>Commits show "Unverified" on GitHub</strong> (click to expand)</summary>
+
+Sandboxes sign commits with the SSH key forwarded from your host (the
+`git-ssh-sign` kit). A signed commit is only marked **Verified** on GitHub when
+**both** of these are true — signing alone is not enough:
+
+1. The commit's `user.email` is an email **verified on your GitHub account**, and
+2. Your **public** signing key is registered on that account **as a Signing
+   Key** (not just an authentication key).
+
+No kit sets your identity, and — importantly — the sandbox has its **own home
+directory**, so your host's **global** git config (`~/.gitconfig`) is **not
+visible inside it**. Only the project's **repo-local** identity (stored in the
+workspace, which is mounted) reaches the sandbox. So `qsbx` checks the project's
+local `user.email` before attaching and warns if it's unset. To fix it (one
+time, in the project):
+
+**Step 1 — set a GitHub-verified identity in the project** (repo-local, so the
+sandbox sees it — run this inside the project directory):
+
+```bash
+git config user.email you@verified-on-github.example
+git config user.name  "Your Name"
+```
+
+**Step 2 — register your signing key on GitHub.** Add the **public** half of your
+signing key as a **Signing Key**: _Settings → SSH and GPG keys → New SSH key →
+Key type: **Signing Key**_. (The same key may already be an authentication key;
+add it again as a signing key.)
+
+Then make a **new** commit — verification applies going forward.
+
+> Prefer a global identity? You can instead set `user.email` in a git config
+> that lives **inside the mounted workspace** (repo-local is simplest). A plain
+> `git config --global` on your host will **not** carry into the sandbox.
+
+For the signing mechanics and more failure modes, see the kit's
+[`TROUBLESHOOTING.md`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/sbx-kits/git-ssh-sign/TROUBLESHOOTING.md).
+
+</details>
+
 ---
 
 ## Why Sandboxes?
@@ -314,7 +363,9 @@ repo) when it creates a sandbox, delivering everything declaratively:
 - **`git-ssh-sign`** — signs git commits and tags with the SSH key forwarded
   from your host's SSH agent; the private key never enters the sandbox. Load a
   key on the host first (`ssh-add ~/.ssh/id_ed25519`) — without one, commits fail
-  with a clear error, and `qsbx` warns you before attaching.
+  with a clear error, and `qsbx` warns you before attaching. Signing alone does
+  not make a commit GitHub-**Verified**; see
+  [Commits show "Unverified" on GitHub](#troubleshooting).
 
 `qsbx` also handles the `sbx` prerequisites for you: it adds the kit source to
 `sbx settings kit.allowedSources` (the v0.34 remote-kit allowlist) and requires

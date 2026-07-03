@@ -76,8 +76,11 @@ session.
 - **Better:** commits/tags from sandboxes are signed and attributable by
   default, with the signing key never entering the sandbox. Verification of
   a signed commit against an identity is a follow-on step the user controls
-  (matching `user.email` to a verified GitHub identity; see the kit's
-  TROUBLESHOOTING).
+  (matching `user.email` to a verified GitHub identity, and registering the key
+  as a *signing* key). `qsbx` surfaces a missing identity up front and the
+  quickstart documents the end-to-end path; see
+  [ADR-0007](0007-commit-verification-identity-guidance.md) and
+  [patterns#211](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211).
 - **New host dependency:** committing inside a sandbox now requires an SSH key
   loaded in the host agent. Without it, commits fail closed. The up-front warning
   mitigates surprise; non-committing work is unaffected.

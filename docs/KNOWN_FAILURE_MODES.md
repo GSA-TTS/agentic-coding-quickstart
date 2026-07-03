@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-06-02"
+last_updated: "2026-07-03"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -737,6 +737,57 @@ If you used an explicit sandbox name, remove that same name and rerun with the s
 sbx rm my-project
 ./qsbx run --name my-project opencode /path/to/your/project
 ```
+
+---
+
+## 22. Signed Commits Show "Unverified" on GitHub
+
+### Symptoms
+
+- Commits made inside a sandbox are signed (`git log --show-signature` looks
+  fine locally) but GitHub shows an **Unverified** badge, or no badge.
+- `qsbx` printed a note before attaching: *"no repo-local git user.email is set
+  for this project."*
+
+### Root Cause
+
+The `git-ssh-sign` kit signs commits, but GitHub only marks an SSH-signed commit
+**Verified** when **both** are true:
+
+1. the commit's `user.email` is an email **verified on your GitHub account**, and
+2. your **public** signing key is registered on that account **as a Signing
+   Key** (Settings → SSH and GPG keys → New SSH key → Key type: **Signing
+   Key**) — an authentication-only key does not verify commits.
+
+No kit sets `user.email` / `user.name` (identity is user-owned, not something a
+signing mixin should inject). Crucially, the sandbox has its **own home
+directory**, so your host's **global** `~/.gitconfig` identity is **not visible
+inside it** — only the project's **repo-local** identity (stored in the mounted
+workspace) reaches the sandbox. A host global `user.email` alone therefore yields
+signed-but-Unverified commits.
+
+### Fix
+
+Set the identity **repo-local** (inside the project, so the mount carries it into
+the sandbox — a host `--global` value will not):
+
+```bash
+git config user.email you@verified-on-github.example
+git config user.name  "Your Name"
+```
+
+Then register the **public** half of your signing key on GitHub as a **Signing
+Key**, and make a **new** commit — verification applies going forward. `qsbx`
+checks the project's **repo-local** `user.email` before attaching (the only tier
+the sandbox can see) and warns if it is unset. For signing mechanics and more
+failure modes, see the kit's
+[`TROUBLESHOOTING.md`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/sbx-kits/git-ssh-sign/TROUBLESHOOTING.md).
+
+> The end-to-end verification/identity gap in the kits themselves is tracked
+> upstream in
+> [agentic-coding-patterns#211](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211);
+> the quickstart-side decision (docs + advisory) is recorded in
+> [ADR-0007](adr/0007-commit-verification-identity-guidance.md).
 
 ---
 

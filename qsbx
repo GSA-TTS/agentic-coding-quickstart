@@ -82,6 +82,10 @@ ZSCALER_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR
 # key forwarded from the host agent (private key never leaves the host). If no
 # key is loaded on the host, git signing fails closed with a clear error; qsbx
 # warns before attaching (see warn_if_no_ssh_signing_key). See ADR-0006.
+# Signing alone does not make a commit GitHub-"Verified": that also needs a
+# GitHub-verified user.email and a registered signing key. qsbx surfaces a
+# missing identity up front (warn_if_no_git_identity). See ADR-0007 and
+# patterns#211 for the end-to-end verification gap.
 GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/git-ssh-sign"
 
 # Additional user-supplied kits. Set QSBX_EXTRA_KITS to a whitespace-separated
@@ -373,6 +377,28 @@ first_positional() {
     esac
     printf '%s\n' "$arg"
     return 0
+  done
+}
+
+# Find the workspace path in an AGENT-form create/run arg list: the SECOND
+# non-flag positional (the first is the agent). Echoes the path with any `:ro`
+# mount-mode suffix stripped, or nothing if none was given (agent-only form,
+# where the workspace defaults to the current directory — see caller). Mirrors
+# the positional-scan in derive_name so the two agree on which token is the path.
+workspace_path() {
+  local agent="" prev=""
+  for arg in "$@"; do
+    if takes_value "$prev"; then prev="$arg"; continue; fi
+    case "$arg" in
+      -*) prev="$arg"; continue ;;
+    esac
+    if [ -z "$agent" ]; then
+      agent="$arg"
+    else
+      printf '%s\n' "${arg%%:*}"   # strip any :ro suffix
+      return 0
+    fi
+    prev="$arg"
   done
 }
 
@@ -994,6 +1020,44 @@ warn_if_no_ssh_signing_key() {
   echo "      Then commit as usual. (You can still work; only committing needs it.)" >&2
 }
 
+# Warn (do not block) if the committer git identity that will be used inside the
+# sandbox has no resolvable user.email. The git-ssh-sign kit signs commits, but
+# GitHub only marks a signed commit "Verified" when the commit's user.email is a
+# verified email on the committer's GitHub account AND the signing key is
+# registered on that account as a *Signing Key*. Neither the kit nor its sibling
+# kits set user.email, so absent identity yields signed-but-Unverified commits.
+#
+# CRITICAL: only the REPO-LOCAL identity crosses into the sandbox. sbx mounts the
+# workspace (so the repo's .git/config is visible) but NOT the host home — the
+# sandbox has its own empty $HOME, so the host's GLOBAL/system git identity is
+# invisible inside it. We therefore check ONLY the workspace's local config
+# (`git -C <path> config --local user.email`); a plain lookup would fall through
+# to the host global and give a false-negative (staying silent when the sandbox
+# will in fact have no identity). If no workspace path is known (attach-by-name),
+# there is nothing meaningful to check on the host, so we skip. Purely advisory:
+# fail-open if git is absent, and never affects the exit path.
+# Usage: warn_if_no_git_identity WORKSPACE_PATH   (no-op if path is empty)
+warn_if_no_git_identity() {
+  local path="${1:-}" email=""
+  command -v git >/dev/null 2>&1 || return 0
+  # No workspace path (attach-by-name): the host global identity does NOT reach
+  # the sandbox, so we can't meaningfully predict the sandbox identity. Skip.
+  [ -n "$path" ] && [ -d "$path" ] || return 0
+  # Repo-local only — the sole tier that reaches the sandbox via the mount.
+  email=$(git -C "$path" config --local user.email 2>/dev/null || true)
+  [ -n "$email" ] && return 0
+  echo "qsbx: note — no repo-local git user.email is set for this project." >&2
+  echo "      The sandbox has its own empty home, so your host's global git" >&2
+  echo "      identity is NOT visible inside it. Commits will be SIGNED but show" >&2
+  echo "      'Unverified' on GitHub until you set an identity that reaches the" >&2
+  echo "      sandbox and register your signing key. Fix (in this project):" >&2
+  echo "        git config user.email you@verified-on-github.example" >&2
+  echo "        git config user.name  \"Your Name\"" >&2
+  echo "      (repo-local config lives in the workspace, so the sandbox sees it.)" >&2
+  echo "      Then add your PUBLIC signing key to GitHub as a SIGNING key:" >&2
+  echo "      Settings > SSH and GPG keys > New SSH key > Key type: Signing Key." >&2
+}
+
 # Validate the sandbox's key and, if it is not working, walk the user through
 # rotating it via scripts/rotate-apikey. Best-effort: if we cannot run the check
 # (e.g. no curl in the sandbox), we warn and continue rather than block attach.
@@ -1137,6 +1201,14 @@ case "$subcommand" in
       # and fails closed if the host agent has no key loaded. Warn up front.
       warn_if_no_ssh_signing_key
 
+      # Advisory: signing alone doesn't make commits GitHub-"Verified" — that
+      # needs a repo-local user.email (the only identity tier that reaches the
+      # sandbox via the workspace mount; the host's global config does not).
+      # Probe the workspace git will use: the path arg if given, else $PWD
+      # (sbx's default workspace, which is mounted).
+      ws=$(workspace_path "${create_args[@]}"); [ -n "$ws" ] || ws="$PWD"
+      warn_if_no_git_identity "$ws"
+
       # Attach by name. `sbx run --name <name>` re-attaches independent of the
       # working directory; the agent positional is omitted on attach (sbx infers
       # it from the named sandbox and errors if a mismatching agent is passed).
@@ -1159,6 +1231,9 @@ case "$subcommand" in
         fi
         ensure_kit_applied "$first"
         warn_if_no_ssh_signing_key
+        # Attach-by-name: no workspace path is in the args, and the host's global
+        # git identity does NOT reach the sandbox, so there's nothing meaningful
+        # to check here — the identity advisory is a no-op without a path.
         # Rebuild the arg list with the matched sandbox token removed (drop only
         # the first occurrence), so flags that appear before the name are
         # preserved and the name isn't duplicated. Positional `${@:2}` would be
