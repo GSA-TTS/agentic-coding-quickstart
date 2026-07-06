@@ -29,7 +29,7 @@ These define the behavioral contract. Load for **every task**.
 |----------|----------------|
 | `AGENTS.md` | Agent rules: permissions, prohibitions, data handling, identity, meta-constraints |
 | `docs/CODING_PRACTICES.md` | Secure coding: input validation, secrets, dependencies, architecture, TDD, SOLID |
-| `../agentic-coding-playbook/docs/CODING_STANDARDS_COMPACT.md` | **Code generation shortcut** — load INSTEAD of full CODING_PRACTICES.md for routine code tasks (from upstream playbook) |
+| `~/.agentic-coding-playbook/docs/CODING_STANDARDS_COMPACT.md` | **Code generation shortcut** — load INSTEAD of full CODING_PRACTICES.md for routine code tasks (from the playbook, cloned into the sandbox by the `agentic-coding-playbook` kit) |
 
 ## Tier 2 — Load When Task Matches
 
@@ -45,7 +45,6 @@ Load only when the specific activity is being performed.
 
 | Document | Load When |
 |----------|-----------|
-| `opencode.jsonc` | Configuring OpenCode, model selection, provider setup |
 | `checklists/pre-deployment.md` | Running pre-deployment checklist |
 | `docs/risk-assessment.md` | Performing a risk assessment |
 

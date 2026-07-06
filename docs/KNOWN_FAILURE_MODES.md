@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-06-02"
+last_updated: "2026-07-03"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -590,17 +590,88 @@ Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
 
 ### Root Cause
 
-The `~/.config/opencode/opencode.jsonc` inside the sandbox is not the symlink into your quickstart clone, so the USAi provider config is never loaded. This happens when the sandbox was created without `qsbx` (which sets up the symlinks for `opencode.jsonc`, `AGENTS.md`, and `~/.agents/skills`).
+The USAi provider config is not loaded in the sandbox. With `qsbx`, it is
+delivered by the `usai-provider` sbx **kit** (applied by pinned remote reference
+from the agentic-coding-patterns repo), which sets `OPENCODE_CONFIG` to
+`~/usai-config/opencode.jsonc`. `qsbx` applies it alongside the
+`agentic-coding-playbook` and `zscaler-ca-certificate` kits. This symptom appears
+when the sandbox was created without `qsbx` (so the kits were not applied), or
+with plain `sbx run` without the kit refs.
+
+**Upgrading an existing sandbox (pre-kit).** A sandbox created with an *older*
+`qsbx` (before the kit migration) has no `OPENCODE_CONFIG` and no playbook clone.
+`qsbx` cannot auto-heal it in place: the fix would be `sbx kit add`, but an
+upstream sbx bug ([docker/sbx-releases#133][sbx133]) makes `sbx kit add` fail
+(`failed to read tar header: unexpected EOF`) on any kit that ships a static
+file — and the `usai-provider` kit ships `opencode.jsonc`. Because a sandbox
+without the USAi provider config is unusable, in-place healing is **disabled**
+(gated behind `QSBX_AUTOHEAL_KITS`, off by default) until #133 is fixed.
+
+Instead, when you `qsbx run` an existing pre-kit sandbox, `qsbx` offers to
+**migrate your sessions into a fresh, working sandbox of the same name**:
+
+1. It waits for the sandbox to be ready for `sbx exec` (right after a create or a
+   cold start, exec fails with `inspect exec: context deadline exceeded` for a
+   few seconds; qsbx polls until a trivial exec succeeds, up to
+   `QSBX_EXEC_READY_TIMEOUT`, default 60s). This avoids misreading a cold-start
+   delay as "no USAi config" and wrongly triggering — or skipping — a migration.
+2. It exports each session with `opencode export --sanitize` (sensitive
+   transcript and file data are redacted).
+3. It **permanently removes** the old sandbox (`sbx rm --force`) so the name can
+   be reused — sbx has no rename, so this is the only way to keep the original
+   name. This is irreversible, so `qsbx` only does it *after* a successful,
+   verified export, and never if you decline or the export captures nothing.
+4. It recreates the sandbox with all the kits, **verifies the USAi kit
+   actually applied** (checks for the config file at
+   `/home/agent/usai-config/opencode.jsonc`), and only then imports the sessions.
+   If the recreate or verification fails, it stops and keeps your exported
+   sessions in a temp directory rather than importing into a broken sandbox.
+
+Answer `y` at the prompt to migrate, or `N` to keep the old sandbox untouched
+and choose one of the manual options below.
+
+> **Detecting a pre-kit sandbox.** qsbx decides a sandbox predates the migration
+> by checking for the USAi config file, classifying on the probe's **stdout**
+> (`present`/`absent`), never its exit status — `test -f` exits non-zero when the
+> file is absent, which is indistinguishable from a genuine exec failure, so an
+> exit-status check would wrongly treat "file absent" as "probe failed" and skip
+> the migration.
+
+[sbx133]: https://github.com/docker/sbx-releases/issues/133
 
 ### Fix
 
-Re-create the sandbox with `qsbx run`, which links the config automatically:
+The simplest fix is to recreate the sandbox with `qsbx`, which applies all the
+kits (and adds the kit source to `kit.allowedSources` automatically). This loses
+the old sandbox's session/context unless you use the assisted migration above:
 
 ```bash
+sbx rm --force SANDBOX          # discard the un-healable sandbox (irreversible)
 ./qsbx run opencode /path/to/your/project
 ```
 
-Or link the files manually inside the sandbox if you created it another way.
+Or **downgrade** to the last release before the kit migration (`v0.11.0`), which
+still uses the submodule model and can reattach to pre-kit sandboxes:
+
+```bash
+git checkout v0.11.0
+```
+
+> **`sbx kit add` recovery is currently blocked by [#133][sbx133].** Injecting
+> the kits into a running sandbox — shown below — will fail on the
+> `usai-provider` kit until the upstream bug is fixed. It is retained here for
+> when `sbx kit add` works again (and is what `qsbx`'s auto-heal will use once
+> `QSBX_AUTOHEAL_KITS` is re-enabled). Remote kit sources must be allowlisted
+> first:
+>
+> ```bash
+> sbx settings set kit.allowedSources '["docker.io/","github.com/GSA-TTS/"]'
+> REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
+> DIR="integrations/isolation/sbx-kits"
+> sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/usai-provider-kit"   # fails: #133
+> sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/playbook-kit"
+> sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/zscaler-ca-certificate"
+> ```
 
 ---
 
@@ -666,6 +737,57 @@ If you used an explicit sandbox name, remove that same name and rerun with the s
 sbx rm my-project
 ./qsbx run --name my-project opencode /path/to/your/project
 ```
+
+---
+
+## 22. Signed Commits Show "Unverified" on GitHub
+
+### Symptoms
+
+- Commits made inside a sandbox are signed (`git log --show-signature` looks
+  fine locally) but GitHub shows an **Unverified** badge, or no badge.
+- `qsbx` printed a note before attaching: *"no repo-local git user.email is set
+  for this project."*
+
+### Root Cause
+
+The `git-ssh-sign` kit signs commits, but GitHub only marks an SSH-signed commit
+**Verified** when **both** are true:
+
+1. the commit's `user.email` is an email **verified on your GitHub account**, and
+2. your **public** signing key is registered on that account **as a Signing
+   Key** (Settings → SSH and GPG keys → New SSH key → Key type: **Signing
+   Key**) — an authentication-only key does not verify commits.
+
+No kit sets `user.email` / `user.name` (identity is user-owned, not something a
+signing mixin should inject). Crucially, the sandbox has its **own home
+directory**, so your host's **global** `~/.gitconfig` identity is **not visible
+inside it** — only the project's **repo-local** identity (stored in the mounted
+workspace) reaches the sandbox. A host global `user.email` alone therefore yields
+signed-but-Unverified commits.
+
+### Fix
+
+Set the identity **repo-local** (inside the project, so the mount carries it into
+the sandbox — a host `--global` value will not):
+
+```bash
+git config user.email you@verified-on-github.example
+git config user.name  "Your Name"
+```
+
+Then register the **public** half of your signing key on GitHub as a **Signing
+Key**, and make a **new** commit — verification applies going forward. `qsbx`
+checks the project's **repo-local** `user.email` before attaching (the only tier
+the sandbox can see) and warns if it is unset. For signing mechanics and more
+failure modes, see the kit's
+[`TROUBLESHOOTING.md`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/sbx-kits/git-ssh-sign/TROUBLESHOOTING.md).
+
+> The end-to-end verification/identity gap in the kits themselves is tracked
+> upstream in
+> [agentic-coding-patterns#211](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211);
+> the quickstart-side decision (docs + advisory) is recorded in
+> [ADR-0007](adr/0007-commit-verification-identity-guidance.md).
 
 ---
 

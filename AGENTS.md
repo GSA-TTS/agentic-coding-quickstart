@@ -23,33 +23,48 @@ review_cycle: "quarterly"
 
 ## Workspace Structure
 
-This repository holds the **shared global config** (OpenCode settings, agent
-rules, docs) plus the playbook as a pinned submodule. `qsbx` mounts this clone
-into SBX sandboxes and symlinks the config into the home locations OpenCode
-searches. A typical layout:
+This repository is a thin **wrapper** (`qsbx`) that stands up a working,
+federally-configured agent sandbox by composing existing tools: the `sbx` CLI
+plus four sbx **mixin kits** hosted in the community
+[agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
+repo (`integrations/isolation/sbx-kits/`). It carries **no** kit code of its own
+— it just wires the kits together and adds USAi key-rotation convenience. A
+typical layout:
 
 ```
 my-workspace/                       # Parent folder (user creates this)
-├── agentic-coding-quickstart/      # THIS REPO - global config, mounted into sandboxes
+├── agentic-coding-quickstart/      # THIS REPO - the qsbx wrapper + docs
 │   ├── AGENTS.md                   # You are here (rules for working ON this repo)
-│   ├── opencode/opencode.jsonc     # USAi provider + model + permission config (shared)
-│   ├── opencode.jsonc -> opencode/opencode.jsonc   # root convenience symlink
-│   ├── agentic-coding-playbook/    # Pinned submodule: skills + federal AGENTS.md
-│   ├── qsbx                        # sbx wrapper: mounts clone, links config into sandbox
+│   ├── qsbx                        # sbx wrapper: applies the kits to each sandbox
+│   ├── scripts/                    # helper scripts (USAi key rotation)
 │   └── docs/                       # Setup guides and references
 └── my-app/                         # User's project(s)
 ```
 
-Inside the sandbox, `qsbx` symlinks the shared config into the locations OpenCode
-actually searches:
+When `qsbx` creates a sandbox it applies four kits by pinned remote reference
+(`--kit git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=<sha>&dir=…`):
 
-- `~/.config/opencode/opencode.jsonc` → `<clone>/opencode/opencode.jsonc`
-- `~/.config/opencode/AGENTS.md` → `<clone>/agentic-coding-playbook/AGENTS.md`
-- `~/.agents/skills` → `<clone>/agentic-coding-playbook/.agents/skills`
+- **`usai-provider`** — drops `~/usai-config/opencode.jsonc` and sets
+  `OPENCODE_CONFIG` to point there (allow-listing USAi egress), so OpenCode uses
+  the GSA USAi gateway. It owns the single-valued `OPENCODE_CONFIG` channel.
+- **`agentic-coding-playbook`** — at container startup, clones the playbook at a
+  pinned ref into `~/.agentic-coding-playbook` and symlinks its `AGENTS.md` into
+  each agent's rules path (e.g. `~/.config/opencode/AGENTS.md`) and each skill
+  into `~/.agents/skills`.
+- **`zscaler-ca-certificate`** — installs the public Zscaler Root CA into the
+  sandbox trust store so HTTPS works on Zscaler-inspected hosts (harmless
+  elsewhere).
+- **`git-ssh-sign`** — signs git commits/tags with the SSH key forwarded from
+  the host's SSH agent (the private key never enters the sandbox). Fails closed
+  if no host key is loaded; `qsbx` warns before attaching.
 
-So edits to the shared config or playbook (after a submodule bump) are picked up
-by every sandbox. (An empirical spike found OpenCode does **not** read these
-relative to `OPENCODE_CONFIG_DIR`; see `docs/adr/0004`.)
+So every sandbox picks up the USAi config, federal rules, skills, CA trust, and
+commit signing declaratively. `qsbx` also handles the `sbx` prerequisites
+automatically (allow-listing the kit source; requiring sbx ≥ 0.34.0). Per-kit
+design rationale lives with the kits in the patterns repo.
+
+Applying the kits directly (without `qsbx`) is equivalent — pass the same four
+`--kit` refs to `sbx run`.
 
 ### Agent Resource Access
 
@@ -57,9 +72,9 @@ When working on user projects, the agent has access to:
 
 | Resource | Location | Use For |
 |----------|----------|---------|
-| Global config | `~/.config/opencode/opencode.jsonc` (linked to clone) | Model/provider config |
-| Behavioral rules | `~/.config/opencode/AGENTS.md` (linked to playbook) | Federal agent rules |
-| Skills | `~/.agents/skills` (linked to playbook) | Step-by-step procedures |
+| Global config | `~/usai-config/opencode.jsonc` (via kit `OPENCODE_CONFIG`) | Model/provider config |
+| Behavioral rules | `~/.config/opencode/AGENTS.md` (linked to playbook clone) | Federal agent rules |
+| Skills | `~/.agents/skills` (linked to playbook clone) | Step-by-step procedures |
 | Setup guides | `./docs/` | SBX configuration, troubleshooting |
 
 **To use a skill:** Read the SKILL.md file in the skill directory and follow its procedures.
@@ -233,12 +248,14 @@ The agent MUST NEVER:
 
 > **Note on `env` / `printenv` in the sandbox:** Inside an SBX sandbox, secrets
 > are **injected placeholders or proxied** (the agent never holds the real USAi
-> key material), so inspecting the environment is not automatically a leak.
-> These commands are therefore **gated (`ask`)** rather than hard-denied in
-> `opencode.jsonc` — the agent should still avoid dumping secret values and must
-> get user approval before running them. The prohibition above is about
-> *exposing real secret values*, not about routine environment inspection in the
-> sandbox.
+> key material), so inspecting the environment is not automatically a leak. The
+> `usai-provider` kit's OpenCode policy is **default-allow** (the sandbox is the
+> security boundary), so these commands are **allowed** rather than gated — the
+> agent should still avoid deliberately dumping secret values. The prohibition
+> above is about *exposing real secret values*, not about routine environment
+> inspection in the sandbox. The gated (`ask`) class is instead commands that
+> open a **new outbound destination** (e.g. `git push`, new git remotes,
+> `scp`/`sftp`/`rsync`/`nc`); see ADR-0005 and the kit's decision record.
 
 All secrets MUST be accessed via:
 - SBX secret management
@@ -362,7 +379,7 @@ See `docs/QUICKSTART_SBX.md` for detailed credential injection patterns.
 
 ## Coding Standards
 
-- Follow [`agentic-coding-playbook/docs/CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (the pinned playbook submodule) for secure coding guidelines
+- Follow [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) in the GSA agentic-coding-playbook for secure coding guidelines
 - Prefer explicit configuration over implicit behavior
 - Maximum function length: 50 lines
 - All external input MUST be validated before use

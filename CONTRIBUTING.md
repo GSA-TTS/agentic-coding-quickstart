@@ -84,7 +84,6 @@ npm ci --prefix .github/linters
 
 | Command | What it does |
 |---------|-------------|
-| `npm test` | Run the test suite (`node --test`) |
 | `npm run lint:md` | Lint markdown files (same rules as CI) |
 | `npm run lint` | Run all linters |
 | `npm run lint:secrets` | Run gitleaks (requires gitleaks to be installed: `brew install gitleaks`) |
@@ -93,10 +92,39 @@ npm ci --prefix .github/linters
 > [!NOTE]
 > `npm run check` auto-fixes some issues (markdown, whitespace, EOF) — review and stage the changes it makes.
 
+This repo carries almost no application code, so it has no broad test suite. The
+sbx kits it applies — and their tests (permission-matrix, model-sync, per-kit
+`scripts/verify`) — live in the
+[agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
+repo under `integrations/isolation/sbx-kits/`. Changes to provider config,
+rules, skills, or CA trust belong there.
+
+The one exception is `qsbx`'s destructive pre-kit migration path, which has an
+offline unit harness (stubbed `sbx`/`opencode`, no Docker or network):
+
+```bash
+./scripts/test-migrate-or-halt
+```
+
+Run it after changing `migrate_or_halt`, `halt_with_options`, or the auto-heal
+gate. It asserts, among other things, that a sandbox is **never** removed
+without a verified session export.
+
+To verify the same migration path end-to-end against the **real** toolchain
+(requires a host that can create sandboxes — Docker + KVM, `sbx login` done):
+
+```bash
+./scripts/verify-migrate-live
+```
+
+It creates a throwaway pre-kit sandbox, seeds a session, runs the migration, and
+asserts the recreated sandbox has a working USAi provider with the session
+preserved — then removes the throwaway sandbox. It cannot run inside a sandbox.
+
 ### Quick pre-push check
 
 ```bash
-npm run lint && npm test
+npm run lint
 ```
 
 Or for the most comprehensive local check (requires pre-commit):

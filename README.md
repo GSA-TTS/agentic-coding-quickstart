@@ -69,18 +69,14 @@ Run each command in your terminal. If a command isn't found, that requirement is
 > administrator to assign you one. For how Docker licensing works, see
 > [Docker's subscription docs](https://docs.docker.com/subscription/).
 
-### Step 1: Clone this repo (with the playbook submodule)
+### Step 1: Clone this repo
 
 ```bash
-git clone --recurse-submodules \
-  https://github.com/GSA-TTS/agentic-coding-quickstart.git
+git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
 cd agentic-coding-quickstart
 ```
 
-**Check it worked:** run `ls agentic-coding-playbook` — it should list files
-(`AGENTS.md`, `.agents`, …). If it's empty, the submodule didn't populate; run
-`git submodule update --init`. The remaining steps must be run from inside this
-cloned folder.
+The remaining steps must be run from inside this cloned folder.
 
 ### Step 2: Install sbx CLI
 
@@ -181,7 +177,7 @@ stored in sbx's secret manager, and the network policy persists across sandboxes
 
 ```bash
 # 1. Set network policy (first-time only)
-sbx policy set-default balanced
+sbx policy init balanced
 
 # 2. Allow USAi endpoint
 sbx policy allow network "api.gsa.usai.gov"
@@ -205,6 +201,13 @@ in the list of allowed network destinations.
 > [!NOTE]
 > USAi API keys expire every 7 days; when one does, see
 > [Troubleshooting](#troubleshooting) to rotate it.
+>
+> Sandboxes also sign your git commits with your host SSH key. For those commits
+> to show **Verified** on GitHub you need, one time: a GitHub-verified
+> `user.email` set **in the project** (repo-local config, since the sandbox has
+> its own home and does not see your host global git config) and your **public**
+> signing key registered on GitHub as a _Signing Key_. See
+> [Commits show "Unverified" on GitHub](#troubleshooting) below.
 
 ### Step 4: Create and run a sandbox (as often as you like)
 
@@ -268,13 +271,55 @@ sbx policy allow network -g "api.gsa.usai.gov"
 </details>
 
 <details>
-<summary><strong>"sbx policy set-default" fails right after first-time setup</strong> (click to expand)</summary>
+<summary><strong>"sbx policy init" fails right after first-time setup</strong> (click to expand)</summary>
 
 The policy service may not have settled yet after `sbx login`. Retry the command:
 
 ```bash
-sbx policy set-default balanced
+sbx policy init balanced
 ```
+
+</details>
+
+<details>
+<summary><strong>Commits show "Unverified" on GitHub</strong> (click to expand)</summary>
+
+Sandboxes sign commits with the SSH key forwarded from your host (the
+`git-ssh-sign` kit). A signed commit is only marked **Verified** on GitHub when
+**both** of these are true — signing alone is not enough:
+
+1. The commit's `user.email` is an email **verified on your GitHub account**, and
+2. Your **public** signing key is registered on that account **as a Signing
+   Key** (not just an authentication key).
+
+No kit sets your identity, and — importantly — the sandbox has its **own home
+directory**, so your host's **global** git config (`~/.gitconfig`) is **not
+visible inside it**. Only the project's **repo-local** identity (stored in the
+workspace, which is mounted) reaches the sandbox. So `qsbx` checks the project's
+local `user.email` before attaching and warns if it's unset. To fix it (one
+time, in the project):
+
+**Step 1 — set a GitHub-verified identity in the project** (repo-local, so the
+sandbox sees it — run this inside the project directory):
+
+```bash
+git config user.email you@verified-on-github.example
+git config user.name  "Your Name"
+```
+
+**Step 2 — register your signing key on GitHub.** Add the **public** half of your
+signing key as a **Signing Key**: _Settings → SSH and GPG keys → New SSH key →
+Key type: **Signing Key**_. (The same key may already be an authentication key;
+add it again as a signing key.)
+
+Then make a **new** commit — verification applies going forward.
+
+> Prefer a global identity? You can instead set `user.email` in a git config
+> that lives **inside the mounted workspace** (repo-local is simplest). A plain
+> `git config --global` on your host will **not** carry into the sandbox.
+
+For the signing mechanics and more failure modes, see the kit's
+[`TROUBLESHOOTING.md`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/sbx-kits/git-ssh-sign/TROUBLESHOOTING.md).
 
 </details>
 
@@ -302,32 +347,39 @@ quickstart for when you want to customize or troubleshoot.
 
 `qsbx run` created the sandbox for that path (if it didn't exist yet) using the underlying `sbx` command, making sure that this clone was accessible inside it. Then it configured the coding agent (`opencode`) to pick up configuration for using the USAi provider and made sure the agent was provisioned with custom guidance and relevant skills for working in the federal context.
 
-### What `qsbx` mounts and links
+### What `qsbx` applies
 
-This clone holds your shared global config (`opencode/opencode.jsonc`) plus the
-playbook submodule (`agentic-coding-playbook/`). `qsbx` mounts the clone into the
-sandbox and symlinks the config into the locations OpenCode searches under the
-sandbox home:
+`qsbx` applies **four sbx mixin kits** (by pinned remote reference from the
+community [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
+repo) when it creates a sandbox, delivering everything declaratively:
 
-- `~/.config/opencode/opencode.jsonc` → the shared config
-- `~/.config/opencode/AGENTS.md` → the playbook's federal agent rules
-- `~/.agents/skills` → the playbook's skills
+- **`usai-provider`** — drops the USAi config at `~/usai-config/opencode.jsonc`
+  and sets `OPENCODE_CONFIG` to point there (allow-listing USAi egress).
+- **`agentic-coding-playbook`** — clones the playbook at startup into
+  `~/.agentic-coding-playbook` and symlinks its `AGENTS.md` into each agent's
+  rules path and its skills into `~/.agents/skills` (+ per-agent roots).
+- **`zscaler-ca-certificate`** — installs the public Zscaler Root CA into the
+  sandbox trust store (harmless off-Zscaler).
+- **`git-ssh-sign`** — signs git commits and tags with the SSH key forwarded
+  from your host's SSH agent; the private key never enters the sandbox. Load a
+  key on the host first (`ssh-add ~/.ssh/id_ed25519`) — without one, commits fail
+  with a clear error, and `qsbx` warns you before attaching. Signing alone does
+  not make a commit GitHub-**Verified**; see
+  [Commits show "Unverified" on GitHub](#troubleshooting).
 
-So every sandbox you create picks up the same config, rules, and skills. `qsbx`
-uses the clone it lives in, so run it from this checkout (or via a symlink to it);
-set `QUICKSTART_CLONE` only if you want to override that.
+`qsbx` also handles the `sbx` prerequisites for you: it adds the kit source to
+`sbx settings kit.allowedSources` (the v0.34 remote-kit allowlist) and requires
+`sbx` ≥ 0.34.0 — no manual setup.
+
+> While the playbook repo is private (during rollout), the clone needs a GitHub
+> token — set it once with `sbx secret set -g github`. The sbx proxy injects it;
+> the container never sees it. Once the repo is public this is unnecessary.
 
 ### Why the USAi key uses `set-custom`
 
 USAi is not a built-in sbx service, so we store its key with
 `sbx secret set-custom` (with an explicit `--host`) instead of `sbx secret set -g`.
 The built-in `set -g` form only recognizes known providers.
-
-### Read-only by default
-
-For project work, this clone is mounted **read-only** so a (possibly
-prompt-injected) agent can't rewrite the permission policy, rules, or skills that
-every other sandbox loads.
 
 ### Key pre-validation
 
@@ -337,44 +389,56 @@ re-validates before launching the agent.
 
 ### How default USAi models are chosen
 
-The `opencode.jsonc` in this repo includes a generated USAI model catalog.
-This repository keeps that section in sync with the USAI `/models` API so new
-projects start from a current baseline.
-
-Default model policy:
+The `usai-provider` kit ships an `opencode.jsonc` with a generated USAi model
+catalog, kept in sync with the USAi `/models` API so new projects start from a
+current baseline. Default model policy:
 
 - `model` tracks the highest available Opus generation
 - `agent.compaction.model` tracks the highest available GPT generation
 - `small_model` stays a curated fast/cheap fallback
 
-The generated catalog improves discoverability, but it is still possible for a
-model listed by `/models` to fail at runtime for a specific key or request. See
+It is still possible for a model listed by `/models` to fail at runtime for a
+specific key or request. See
 [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md) for troubleshooting.
-
-To refresh the model catalog locally:
-
-```bash
-# Prompt for the key (no echo)
-read -rs USAI_API_KEY && export USAI_API_KEY
-npm run sync:usai-models
-```
+The catalog and its refresh tooling live with the kit in the patterns repo.
 
 ---
-## Customizing the shared config
+## Customizing your setup
 
-You can always edit the shared config in this clone by hand, but you may also use an agent to work on it! To edit it using an agent, point `qsbx` at the clone:
+`qsbx` applies a fixed set of four kits, pinned to a commit of the patterns
+repo. To customize:
+
+- **Adopt newer kits:** bump `PATTERNS_KIT_REF` near the top of `qsbx`.
+- **Add your own kits on every run:** see [Advanced: extra kits](#advanced-extra-kits).
+- **Change USAi models / provider config, rules, or skills:** contribute to the
+  kits in the
+  [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
+  repo (`integrations/isolation/sbx-kits/`), where each kit and its design notes
+  live.
+
+---
+
+## Advanced: extra kits
+
+`qsbx` always applies its four built-in kits. To apply **additional** kits on
+every invocation without repeating `--kit` flags, set `QSBX_EXTRA_KITS` to a
+whitespace-separated list of kit references (local paths or remote refs):
 
 ```bash
-./qsbx run opencode .          # from inside the clone
-# or: qsbx run opencode /path/to/agentic-coding-quickstart
+export QSBX_EXTRA_KITS="./my-local-kit git+https://github.com/acme/kits.git#ref=<sha>&dir=some-kit"
 ```
 
-qsbx detects that the target is the clone and mounts it **read-write** as the
-primary workspace (and tells you so). Review the agent's changes carefully. You probably want to test them by starting another sandbox up and trying them out.
+Extras are applied **after** the built-in kits (so they win on any overlapping
+config). They also work when re-running against an existing sandbox: adding a new
+entry and re-running `qsbx run <existing-sandbox>` injects just the new kit via
+`sbx kit add`.
 
-Note that changes to the config are visible across all sandboxes that mount it, but agents don't reload their config on the fly. To have them reread the shared configuration, you can exit them and run `qsbx run opencode /path/to/your/project -- -c` to continue the existing session where you left off.
+If an extra kit is hosted somewhere other than `github.com/GSA-TTS/`, add its
+scheme-less prefix so `qsbx` allowlists it on `sbx settings kit.allowedSources`:
 
-When you're done, you probably want to version-control your customizations. We recommend that you commit them to a local branch in this clone. That way you can pull changes from main into your branch when needed.
+```bash
+export QSBX_EXTRA_KIT_SOURCES="github.com/acme/"
+```
 
 ---
 
@@ -394,17 +458,43 @@ When you're done, you probably want to version-control your customizations. We r
 
 ## Staying Current
 
-Once in a while, refresh this clone and the playbook to pick up updates, and
-rotate your USAi key when it expires (see [Troubleshooting](#troubleshooting)).
+Once in a while, refresh this clone to pick up updates, and rotate your USAi key
+when it expires (see [Troubleshooting](#troubleshooting)).
 
 ```bash
 # Update the quickstart clone
-git fetch
+git fetch && git pull
 
-# Bump the playbook submodule to a newer release
-git submodule update --remote --merge agentic-coding-playbook
-git add agentic-coding-playbook && git commit -m "chore: bump playbook submodule"
+# Adopt newer kits (USAi config, playbook, CA): bump PATTERNS_KIT_REF near the
+# top of qsbx to a newer agentic-coding-patterns commit, then recreate sandboxes.
 ```
+
+> [!NOTE]
+> **Resuming a sandbox after upgrading to the kit-based `qsbx`.** Sandboxes
+> created before the kit migration have an outdated provider config or no
+> playbook. The next time you `qsbx run opencode <path>` against such a sandbox,
+> `qsbx` detects this and automatically injects the missing kit(s) with `sbx kit
+> add` — no action needed. Restart the agent (or start a fresh session) so it
+> re-reads the config and picks up the playbook. Requires `sbx` >= 0.34.0, which
+> `qsbx` now enforces.
+
+### Migrating an existing clone off the playbook submodule
+
+Earlier versions vendored the playbook as a git submodule at
+`agentic-coding-playbook/`. The kits now live in the
+[agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
+repo and `qsbx` fetches them at sandbox-create time, so the submodule is gone. If
+you cloned before that change, `git pull` leaves an orphaned submodule directory;
+clean it up once:
+
+```bash
+git submodule deinit -f agentic-coding-playbook 2>/dev/null || true
+git rm -f agentic-coding-playbook 2>/dev/null || true
+rm -rf .git/modules/agentic-coding-playbook agentic-coding-playbook
+```
+
+No sandbox impact — the playbook is delivered by the `agentic-coding-playbook`
+kit, not the submodule.
 
 ---
 
@@ -416,15 +506,16 @@ git add agentic-coding-playbook && git commit -m "chore: bump playbook submodule
 
 ### Available Skills and Resources
 
-The playbook (vendored here as the `agentic-coding-playbook/` submodule) provides
-reusable **agent skills** — step-by-step procedures for common tasks. Skills
-follow the [agentskills.io](https://agentskills.io) standard. When you launch a
-sandbox with `qsbx`, these are symlinked to `~/.agents/skills` so OpenCode
-discovers them automatically; no separate clone is needed.
+The playbook provides reusable **agent skills** — step-by-step procedures for
+common tasks. Skills follow the [agentskills.io](https://agentskills.io)
+standard. When you launch a sandbox with `qsbx`, the `agentic-coding-playbook`
+kit clones the playbook at startup and symlinks these into `~/.agents/skills`
+(and per-agent roots) so your agent discovers them automatically; no separate
+clone is needed.
 
 | Source       | Skills                       | Examples                                                                            |
 | ------------ | ---------------------------- | ----------------------------------------------------------------------------------- |
-| **Playbook** (submodule) | Federal compliance, security | `federal-security-controls-lookup`, `ato-package`, `code-review`, `cloudgov-deploy` |
+| **Playbook** | Federal compliance, security | `federal-security-controls-lookup`, `ato-package`, `code-review`, `cloudgov-deploy` |
 | **Patterns** | Development workflows        | `accessibility-review`, `uswds-prototype`, `test-generation`, `secure-code-review`  |
 
 ---
@@ -448,10 +539,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 | File/Directory                      | Purpose                                                    |
 | ----------------------------------- | ---------------------------------------------------------- |
-| `opencode/opencode.jsonc`           | Pre-configured for USAi endpoints (shared config)          |
-| `opencode.jsonc`                    | Convenience symlink to `opencode/opencode.jsonc`           |
-| `agentic-coding-playbook/`          | Pinned submodule: federal `AGENTS.md` + agent skills       |
-| `qsbx`                              | sbx wrapper that mounts this clone and links config in     |
+| `qsbx`                              | sbx wrapper that applies the three community kits to each sandbox |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`qsbx usai-rotate-api-key`) |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md`                         | Rules for working **on this quickstart repo**              |

@@ -81,7 +81,7 @@ Sandboxes use network policies to control what external services agents can acce
 
 ```bash
 # Set default policy (first-time only)
-sbx policy set-default balanced
+sbx policy init balanced
 
 # Allow USAi API endpoint
 sbx policy allow network "api.gsa.usai.gov"
@@ -301,7 +301,7 @@ sbx exec -it my-sandbox bash
 | Remove secret | `sbx secret rm -g <service>` |
 | **Policies** | |
 | List policies | `sbx policy ls` |
-| Set default | `sbx policy set-default balanced` |
+| Set default | `sbx policy init balanced` |
 | Allow domain | `sbx policy allow network -g "domain.com"` |
 | Check logs | `sbx policy log` |
 | **Troubleshooting** | |
@@ -366,7 +366,7 @@ For non-interactive environments (GitHub Actions, GitLab CI):
 
 ```bash
 # Set policy non-interactively
-sbx policy set-default balanced
+sbx policy init balanced
 
 # Store secrets from environment variables (pipe to avoid prompts)
 echo "$ANTHROPIC_API_KEY" | sbx secret set -g anthropic
@@ -381,7 +381,7 @@ echo "$DOCKER_PAT" | sbx login --password-stdin --username "$DOCKER_USER"
 ```yaml
 - name: Setup sbx
   run: |
-    sbx policy set-default balanced
+    sbx policy init balanced
     sbx policy allow network -g "api.gsa.usai.gov"
     echo "${{ secrets.ANTHROPIC_API_KEY }}" | sbx secret set -g anthropic
 
@@ -547,7 +547,7 @@ The Docker Desktop-integrated `docker sandbox` command is deprecated. For the
 ## Next Steps
 
 - [Known Failure Modes](KNOWN_FAILURE_MODES.md) — Common issues and solutions
-- [Coding Practices](../agentic-coding-playbook/docs/CODING_PRACTICES.md) — Secure coding standards (playbook submodule)
+- [Coding Practices](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) — Secure coding standards (GSA agentic-coding-playbook)
 
 ---
 

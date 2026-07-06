@@ -54,8 +54,7 @@ globs:
 ignores:
   - "node_modules"
   - "deleteme"
-  # Playbook is a pinned submodule with its own linting; don't lint it here.
-  - "agentic-coding-playbook"
+  - "tmp"
 
 # Support YAML frontmatter
 frontMatter: "/^---\\s*$[\\s\\S]*?^---\\s*$/m"

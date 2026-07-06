@@ -8,7 +8,7 @@ nist_controls: ["RA-3", "RA-5"]
 frameworks: ["NIST AI RMF 1.0", "OWASP Top 10 LLM 2025", "OWASP Top 10 Agentic 2026"]
 audience: "isso"
 keywords: ["risk-assessment", "AI-RMF", "threat-analysis", "OWASP", "ATO"]
-related_files: ["agentic-coding-playbook/docs/CODING_PRACTICES.md", "AGENTS.md"]
+related_files: ["qsbx", "AGENTS.md"]
 load_priority: "reference-only"
 review_cycle: "semi-annually"
 ---
@@ -136,6 +136,24 @@ Rate each threat for your specific deployment. **Likelihood**: 1 (Rare) to 5 (Al
 | T8 | **Context/memory poisoning** — Agent's context is manipulated to influence behavior | Agentic-08 | | | | | |
 | T9 | **Audit trail gaps** — Agent actions cannot be reconstructed from logs | Agentic-02 | | | | | |
 | T10 | **Human trust exploitation** — User over-trusts agent output without review | Agentic-05 | | | | | |
+
+> **Project-specific note (qsbx kit sourcing).** `qsbx` applies its four sbx
+> kits by **pinned commit SHA** from `GSA-TTS/agentic-coding-patterns`, fetched
+> at sandbox-create time. This adds two dependencies to weigh under **T3 (supply
+> chain)** and availability:
+>
+> - *Supply chain (T3):* the SHA pin means sbx verifies the fetched kit content
+>   against a specific commit, so substitution — even via the trusted ZScaler
+>   TLS-inspecting proxy — is detected. Bumping `PATTERNS_KIT_REF` is a
+>   reviewable change. The playbook kit further SHA-verifies its own runtime
+>   clone (`PLAYBOOK_SHA`).
+> - *Availability:* sandbox creation now requires network access to GitHub, and —
+>   while the playbook repo is private — a GitHub token
+>   (`sbx secret set -g github`). Offline/airgapped creation yields a sandbox
+>   without the kits rather than falling back to a vendored copy.
+> - *Trust model:* the playbook is cloned into a **writable** home dir, so an
+>   agent can modify its own rules/skills in-session (accepted at FIPS-Low; blast
+>   radius is one ephemeral sandbox). See `docs/adr/0005`.
 
 ### Risk Tolerance
 
