@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# qsbx — sbx wrapper that mounts a shared "quickstart" config clone into sandboxes
+# qsbx — sbx wrapper that applies the quickstart's sbx mixin kits to sandboxes
 #
 # Problem: each new sbx sandbox is fresh, with no access to your persistent
 # global config (agent settings, AGENTS.md, skills, etc.). Without this, you end
@@ -92,7 +92,7 @@ GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_
 # list of kit references (local paths or remote refs) to apply on every sandbox,
 # so you don't have to pass a long series of --kit flags each invocation. E.g.:
 #   export QSBX_EXTRA_KITS="./my-kit git+https://github.com/acme/kits.git#ref=<sha>&dir=foo"
-# These are appended AFTER the three built-in kits (later kits win on conflicting
+# These are appended AFTER the built-in kits (later kits win on conflicting
 # env vars / overlay files, per sbx composition). Remote extras from a new host
 # still need their prefix on kit.allowedSources — see QSBX_EXTRA_KIT_SOURCES.
 QSBX_EXTRA_KITS="${QSBX_EXTRA_KITS:-}"
@@ -256,23 +256,6 @@ _kit_sources_manual_hint() {
     cmd=$(printf '%s' "$cur" | jq -c --args \
       'reduce $ARGS.positional[] as $p (.; if index($p) then . else . + [$p] end)' \
       "${KIT_SOURCE_PREFIXES[@]}" 2>/dev/null)
-  fi
-  [ -z "${cmd:-}" ] && cmd='["docker.io/","github.com/GSA-TTS/"]'
-  echo "      If kit resolution fails, review the current value and run (the" >&2
-  echo "      setting REPLACES the whole list — keep the entries you want):" >&2
-  echo "        sbx settings set kit.allowedSources '${cmd}'" >&2
-}
-
-# Print a warning + the exact manual command to allow the required prefixes,
-# using jq to build a well-formed array from whatever is currently set (falling
-# back to the documented default). Never writes anything.
-_kit_sources_manual_hint() {
-  local reason="$1" cmd cur
-  echo "qsbx: warning: $reason." >&2
-  if command -v jq >/dev/null 2>&1; then
-    cur=$(sbx settings get kit.allowedSources 2>/dev/null || true)
-    printf '%s' "$cur" | jq -e 'type == "array"' >/dev/null 2>&1 || cur='["docker.io/"]'
-    cmd=$(printf '%s' "$cur" | jq -c --args '. + ($ARGS.positional) | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end)' "${KIT_SOURCE_PREFIXES[@]}" 2>/dev/null)
   fi
   [ -z "${cmd:-}" ] && cmd='["docker.io/","github.com/GSA-TTS/"]'
   echo "      If kit resolution fails, review the current value and run (the" >&2
@@ -743,7 +726,7 @@ EOF
 }
 
 # Copy a migration's exported session JSON out of the temp workdir (which is
-# removed by migrate_or_halt's RETURN trap) into a stable, private location so a
+# removed by migrate_or_halt's EXIT trap) into a stable, private location so a
 # failed migration doesn't lose the user's exported sessions. Prints the path.
 # $1 = sandbox name (for the dir label); $2 = the temp workdir being abandoned.
 _preserve_migration_exports() {
@@ -807,8 +790,14 @@ migrate_or_halt() {
   workdir=$(mktemp -d "${TMPDIR:-/tmp}/qsbx-migrate.XXXXXX") || {
     echo "qsbx: could not create a temp dir for migration." >&2; halt_with_options "$name"; }
   chmod 700 "$workdir"
-  # shellcheck disable=SC2064  # expand workdir now so the trap removes this exact dir
-  trap "rm -rf '$workdir'" RETURN
+  # Clean the temp dir on ANY exit of this process, not just function return: the
+  # failure paths below call `exit 1`, and a RETURN trap does not fire on exit,
+  # which would leak the mktemp dir. On failure we copy sessions to a stable
+  # location first (_preserve_migration_exports), so this only removes the
+  # transient working copy. shellcheck disable=SC2064: expand workdir now so the
+  # trap targets this exact dir.
+  # shellcheck disable=SC2064
+  trap "rm -rf '$workdir'" EXIT
 
   echo "qsbx: Saving your sessions..." >&2
   # The old sandbox may be stopped; wait for exec readiness before listing and
@@ -894,6 +883,10 @@ migrate_or_halt() {
     fi
   done
   echo "qsbx: Done — moved $imported of $count session(s) into '$name'. Opening it now." >&2
+  # Success: drop the transient working copy now and disarm the EXIT trap so it
+  # doesn't linger for the remainder of the process (attach).
+  rm -rf "$workdir"
+  trap - EXIT
 }
 
 # Extract session IDs from `opencode session list` output on stdin. The command

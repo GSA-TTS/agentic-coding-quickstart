@@ -641,7 +641,7 @@ and choose one of the manual options below.
 
 ### Fix
 
-The simplest fix is to recreate the sandbox with `qsbx`, which applies all three
+The simplest fix is to recreate the sandbox with `qsbx`, which applies all the
 kits (and adds the kit source to `kit.allowedSources` automatically). This loses
 the old sandbox's session/context unless you use the assisted migration above:
 
