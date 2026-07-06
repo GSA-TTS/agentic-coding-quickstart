@@ -120,9 +120,6 @@ sbx login
 <details>
 <summary>Show Linux (Ubuntu) install steps (click to expand)</summary>
 
-<details>
-<summary>Show Linux (Ubuntu) install steps (click to expand)</summary>
-
 Add Docker's official apt repository (verified by its signed GPG key), then
 install `docker-sbx` — instead of piping a remote script into a root shell:
 
