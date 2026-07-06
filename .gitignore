@@ -42,6 +42,13 @@ tmp/
 temp/
 deleteme/
 
+# qsbx config backups (qsbx writes <target>.<timestamp>.qsbx-bak before overwriting)
+*.qsbx-bak
+
+# repomix / repo-packing dumps (generated for LLM context, never committed)
+repomix-output.*
+.repomix/
+
 # =========================
 # NODE.JS
 # =========================
