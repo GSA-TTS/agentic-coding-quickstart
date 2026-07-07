@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.11.0...v1.0.0) (2026-07-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sbx:** the agentic-coding-playbook git submodule is removed. Existing clones should run `git submodule deinit -f agentic-coding-playbook` after pulling. The playbook is now delivered into sandboxes by the playbook kit, not the submodule.
+
+### Features
+
+* **sbx:** bump patterns kit ref to v1.5.0 release ([#193](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/193)) ([f6f57d5](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/f6f57d58c22e52343994139d32bcc3e838d26910))
+* **sbx:** deliver USAi config and the playbook as sbx mixin kits ([#184](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/184)) ([88f121a](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/88f121acfacb67a53bc0baff5e0783d459da92ed))
+
+
+### Bug Fixes
+
+* **docs:** Remove duplicate &lt;details&gt; tag that breaks rendering of README ([#192](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/192)) ([809154b](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/809154bc236060ad2aed53beb4ac85c7d8a220ff))
+
 ## [0.11.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.10.1...v0.11.0) (2026-07-01)
 
 
