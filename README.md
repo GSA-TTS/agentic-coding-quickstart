@@ -320,6 +320,28 @@ For the signing mechanics and more failure modes, see the kit's
 
 </details>
 
+<details>
+<summary><strong>Pulled a branch but qsbx behaves like the old version</strong> (click to expand)</summary>
+
+`git pull origin <branch>` does **not** switch you to that branch — it merges
+into the branch you are already on, so `Already up to date` does not mean your
+working tree changed. Also, if `qsbx`/`qsb` is on your `PATH` (e.g. a symlink in
+`~/bin`), it may resolve to a **different clone** than the one you edited.
+
+Ask qsbx which file and clone are actually running:
+
+```bash
+qsbx version
+```
+
+It prints the resolved script path, the clone directory, and that clone's
+`branch@commit`. If it isn't what you expect, either `git switch <branch>` in the
+clone you run from, or re-point your `qsbx` symlink (`readlink -f "$(command -v
+qsbx)"` shows where it goes). See
+[docs/KNOWN_FAILURE_MODES.md §24](docs/KNOWN_FAILURE_MODES.md).
+
+</details>
+
 ---
 
 ## Why Sandboxes?

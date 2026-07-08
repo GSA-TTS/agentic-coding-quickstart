@@ -428,6 +428,64 @@ assert_contains "kits: zscaler" "$kits_joined" "zscaler-ca-certificate"
 assert_contains "kits: git-ssh-sign" "$kits_joined" "git-ssh-sign"
 cleanup_stubs
 
+# 9) print_version reports the resolved script path + this clone's git state.
+# The harness sources the real qsbx from REPO_ROOT, so SCRIPT_DIR is REPO_ROOT
+# and the git branch/commit come from this repo. We assert the stable labels and
+# that it names the actual repo dir (not a guess) and exits 0.
+make_stubs; load_qsbx
+out=$(print_version 2>&1); rc=$?
+assert_eq "version exits 0" "0" "$rc"
+assert_contains "version shows script path" "$out" "$REPO_ROOT/qsbx"
+assert_contains "version shows clone dir" "$out" "$REPO_ROOT"
+assert_contains "version shows patterns kit ref" "$out" "$PATTERNS_KIT_REF"
+# This repo IS a git work tree, so the git line must carry a branch@sha, not the
+# "not a git clone" fallback.
+assert_contains "version reports git state" "$out" "git:"
+assert_not_contains "version not-a-clone fallback absent here" "$out" "not a git clone"
+cleanup_stubs
+
+# 9b) print_version surfaces a QUICKSTART_CLONE override note when set. Re-source
+# qsbx with the env var exported so the override-detection at load time fires.
+make_stubs
+( export QUICKSTART_CLONE="$REPO_ROOT"
+  QSBX_SOURCE_ONLY=1 . "$QSBX"; set +e
+  out=$(print_version 2>&1)
+  case "$out" in *"QUICKSTART_CLONE is set"*) echo PASS ;; *) echo "FAIL: $out" ;; esac
+) | grep -q PASS && pass "version notes QUICKSTART_CLONE override" \
+  || fail "version notes QUICKSTART_CLONE override"
+cleanup_stubs
+
+# 10) warn_if_running_foreign_clone: SAME clone (cwd toplevel == script toplevel)
+# -> silent. Here cwd is REPO_ROOT and SCRIPT_DIR is REPO_ROOT, so no warning.
+make_stubs; load_qsbx
+out=$( cd "$REPO_ROOT" && warn_if_running_foreign_clone 2>&1 ); 
+assert_eq "same-clone: no foreign-clone warning" "" "$out"
+cleanup_stubs
+
+# 10b) warn_if_running_foreign_clone: DIFFERENT clone -> warns. Build a throwaway
+# git work tree that looks like a quickstart clone (has a qsbx), cd into it, and
+# call the function while SCRIPT_DIR still points at REPO_ROOT. Expect the note.
+make_stubs; load_qsbx
+FOREIGN=$(mktemp -d "${TMPDIR:-/tmp}/qsbx-foreign.XXXXXX")
+git -C "$FOREIGN" init -q
+: >"$FOREIGN/qsbx"            # make it look like a quickstart clone
+out=$( cd "$FOREIGN" && warn_if_running_foreign_clone 2>&1 )
+assert_contains "foreign-clone: warns" "$out" "DIFFERENT clone"
+assert_contains "foreign-clone: names the running script" "$out" "$REPO_ROOT/qsbx"
+assert_contains "foreign-clone: suggests version cmd" "$out" "qsbx version"
+rm -rf "$FOREIGN"
+cleanup_stubs
+
+# 10c) warn_if_running_foreign_clone: cwd is a NON-quickstart git repo (no qsbx)
+# -> silent (we don't nag for unrelated projects the user runs qsbx against).
+make_stubs; load_qsbx
+PLAIN=$(mktemp -d "${TMPDIR:-/tmp}/qsbx-plain.XXXXXX")
+git -C "$PLAIN" init -q
+out=$( cd "$PLAIN" && warn_if_running_foreign_clone 2>&1 )
+assert_eq "non-quickstart cwd: no warning" "" "$out"
+rm -rf "$PLAIN"
+cleanup_stubs
+
 echo
 echo "  passed: $PASS   failed: $FAIL"
 [ "$FAIL" -eq 0 ]

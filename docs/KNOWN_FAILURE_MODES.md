@@ -898,6 +898,80 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
 
 ---
 
+## 24. Pulled/Switched a Branch but qsbx Still Shows Old Behavior
+
+### Symptoms
+
+- You `git pull` or `git checkout` a branch with a fix, but `qsbx`/`qsb` still
+  prints wording or behaves in a way that only exists in an **older** version.
+- `git pull origin <branch>` prints **`Already up to date.`** yet nothing changes.
+- You are `cd`'d into a quickstart clone, but the behavior does not match the
+  code you see in that clone's `qsbx`.
+
+### Root Cause
+
+Two independent traps, often combined:
+
+1. **`git pull origin <branch>` does not switch you to that branch.** `pull` =
+   `fetch` + `merge FETCH_HEAD` into the branch you are **currently on**.
+   `Already up to date` means the *merge* was a no-op — **not** that your working
+   tree now contains the branch. If you never ran `git switch <branch>` /
+   `git checkout <branch>`, your working tree still has the old `qsbx`.
+
+2. **A `qsbx`/`qsb` on your `PATH` points at a *different* clone.** If `qsb` is an
+   alias for the bare name `qsbx` (not `./qsbx`), the shell resolves it via
+   `PATH`. A symlink in `~/bin` or `/usr/local/bin` may point at a **different
+   clone** than the one you edited/pulled. `qsbx` follows that symlink to find
+   its own directory, so it runs the *other* clone's code — you update clone A
+   and execute clone B.
+
+A related variant: exporting `QUICKSTART_CLONE` overrides where sibling helper
+scripts are located, which can also make "which clone is in effect" confusing.
+
+### Fix
+
+First, ask qsbx which file and clone are actually running:
+
+```bash
+qsbx version
+```
+
+It prints the resolved script path, the clone directory, and that clone's git
+branch@commit (and flags if the tree is dirty or `QUICKSTART_CLONE` is set).
+Compare the branch/commit against what you expect.
+
+Then, depending on which trap you hit:
+
+- **Wrong branch checked out:** switch (don't just pull):
+
+  ```bash
+  git switch fix/your-branch      # or: git checkout fix/your-branch
+  git rev-parse --abbrev-ref HEAD # confirm
+  ```
+
+- **Running a different clone via a PATH symlink:** either run the clone you
+  updated directly, or re-point the symlink:
+
+  ```bash
+  # Run the clone you actually updated:
+  ./qsbx run opencode <your-project>
+
+  # …or see where the installed one lives and re-point it:
+  readlink -f "$(command -v qsbx)"
+  ```
+
+When you run `qsbx run` from inside one quickstart clone while the executing
+`qsbx` lives in another, qsbx now prints a startup note pointing this out.
+
+### Prevention
+
+- Use `git switch <branch>` to change branches; treat `Already up to date` as a
+  signal to check `git rev-parse --abbrev-ref HEAD`, not confirmation.
+- Keep a single canonical clone, and make any `qsbx`/`qsb` on `PATH` a symlink to
+  that clone's `qsbx`. Run `qsbx version` when in doubt.
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:
