@@ -350,8 +350,11 @@ quickstart for when you want to customize or troubleshoot.
 community [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
 repo) when it creates a sandbox, delivering everything declaratively:
 
-- **`usai-provider`** — drops the USAi config at `~/usai-config/opencode.jsonc`
-  and sets `OPENCODE_CONFIG` to point there (allow-listing USAi egress).
+- **`usai-provider`** — stages the USAi config at `~/usai-config/opencode.jsonc`
+  and, at startup, merges it into OpenCode's global config at
+  `~/.config/opencode/opencode.jsonc` (allow-listing USAi egress). It composes
+  with, rather than clobbers, any existing global config, and no longer sets
+  `OPENCODE_CONFIG`.
 - **`agentic-coding-playbook`** — clones the playbook at startup into
   `~/.agentic-coding-playbook` and symlinks its `AGENTS.md` into each agent's
   rules path and its skills into `~/.agents/skills` (+ per-agent roots).
