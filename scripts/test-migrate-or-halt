@@ -448,6 +448,7 @@ cleanup_stubs
 # qsbx with the env var exported so the override-detection at load time fires.
 make_stubs
 ( export QUICKSTART_CLONE="$REPO_ROOT"
+  # shellcheck disable=SC1090
   QSBX_SOURCE_ONLY=1 . "$QSBX"; set +e
   out=$(print_version 2>&1)
   case "$out" in *"QUICKSTART_CLONE is set"*) echo PASS ;; *) echo "FAIL: $out" ;; esac
@@ -458,7 +459,7 @@ cleanup_stubs
 # 10) warn_if_running_foreign_clone: SAME clone (cwd toplevel == script toplevel)
 # -> silent. Here cwd is REPO_ROOT and SCRIPT_DIR is REPO_ROOT, so no warning.
 make_stubs; load_qsbx
-out=$( cd "$REPO_ROOT" && warn_if_running_foreign_clone 2>&1 ); 
+out=$( cd "$REPO_ROOT" && warn_if_running_foreign_clone 2>&1 );
 assert_eq "same-clone: no foreign-clone warning" "" "$out"
 cleanup_stubs
 
