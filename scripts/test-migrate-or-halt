@@ -80,6 +80,10 @@ case "$cmd" in
         [ "${STUB_EXPORT_EMPTY:-0}" = "1" ] && exit 0   # nothing on stdout
         printf '{"session":"data"}\n' ;;
       *"opencode import"*) [ "${STUB_IMPORT_FAIL:-0}" = "1" ] && exit 4; exit 0 ;;
+      # sandbox_usai_placeholder reads the baked-in USAI_API_KEY. Empty unless a
+      # test sets STUB_SANDBOX_PLACEHOLDER (used by the stale-placeholder tests
+      # that reuse this full stub, e.g. the recreate-first path via migrate).
+      *'USAI_API_KEY:-'*) printf '%s' "${STUB_SANDBOX_PLACEHOLDER:-}"; exit 0 ;;
       # Kit-applied probe (kit_feature_absent wraps the snippet to print
       # present/absent and exit 0). Match on the usai config path in the wrapped
       # command. "present" iff the sandbox was (re)created and the kit is not
@@ -103,6 +107,13 @@ case "$cmd" in
   rm)   [ "${STUB_RM_FAIL:-0}" = "1" ] && exit 5; : >"$STUBDIR/.removed"; exit 0 ;;
   cp)   [ "${STUB_CP_FAIL:-0}" = "1" ] && exit 6; exit 0 ;;
   create) [ "${STUB_CREATE_FAIL:-0}" = "1" ] && exit 7; : >"$STUBDIR/.created"; exit 0 ;;
+  secret)
+    # `sbx secret ls -g` — used by global_usai_placeholder. Emit a USAi row with
+    # the global placeholder when a test provides one; otherwise nothing.
+    if [ "${2:-}" = "ls" ] && [ -n "${STUB_GLOBAL_PLACEHOLDER:-}" ]; then
+      printf 'api.gsa.usai.gov   USAI_API_KEY   %s\n' "$STUB_GLOBAL_PLACEHOLDER"
+    fi
+    exit 0 ;;
   kit)  exit 0 ;;
   settings) exit 0 ;;
   *)    exit 0 ;;
@@ -286,6 +297,115 @@ assert_eq "create-fail exits non-zero" "1" "$rc"
 assert_not_contains "create-fail does NOT import" "$log" "opencode import"
 assert_contains "create-fail preserves exports" "$out" "Your saved sessions are here:"
 unset STUB_CREATE_FAIL
+cleanup_stubs
+
+# --- offer_update_stale_placeholder scaffolding ----------------------------
+# A focused sbx stub for the stale-placeholder repair. It models the three reads
+# that function makes — the sandbox's baked-in USAI_API_KEY (via `sbx exec …
+# printf $USAI_API_KEY`), the global secret list (`sbx secret ls -g`), and the
+# post-repair key check (`sbx exec … curl … %{http_code}`) — plus `secret
+# set-custom`. Behavior is env-driven per test:
+#   STUB_SANDBOX_PLACEHOLDER  value the sandbox's USAI_API_KEY reads back as ("" = empty)
+#   STUB_GLOBAL_PLACEHOLDER   placeholder printed in the `secret ls -g` USAi row ("" = none)
+#   STUB_KEY_STATUS           http code check_key returns after repair (e.g. 200, 401)
+make_placeholder_stub() {
+  cat >"$STUBDIR/sbx" <<'STUB'
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *'USAI_API_KEY:-'*) printf '%s' "${STUB_SANDBOX_PLACEHOLDER:-}" ;;   # sandbox_usai_placeholder
+      *'%{http_code}'*)   printf '%s' "${STUB_KEY_STATUS:-401}" ;;         # check_key after repair
+      *) exit 0 ;;
+    esac
+    ;;
+  secret)
+    # `sbx secret ls -g` — emit a USAi row carrying the global placeholder, or
+    # nothing when STUB_GLOBAL_PLACEHOLDER is empty (secret deleted).
+    if [ "${2:-}" = "ls" ]; then
+      [ -n "${STUB_GLOBAL_PLACEHOLDER:-}" ] && \
+        printf 'api.gsa.usai.gov   USAI_API_KEY   %s\n' "$STUB_GLOBAL_PLACEHOLDER"
+    fi
+    exit 0 ;;   # set-custom etc. just succeed (and are logged above)
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+}
+
+# 6d) Orphaned/empty sandbox placeholder + present global, user picks the
+# non-destructive rebind (declines recreate 'n', accepts rebind 'y'), and the
+# post-repair key check is 200 -> returns 0 and binds to the GLOBAL placeholder.
+make_stubs; load_qsbx
+make_placeholder_stub
+export STUB_SANDBOX_PLACEHOLDER="" STUB_GLOBAL_PLACEHOLDER="ph-new-123" STUB_KEY_STATUS=200
+out=$( printf 'n\ny\n' | offer_update_stale_placeholder mybox 401 opencode /proj 2>&1 ); rc=$?
+log=$(cat "$CALLS")
+assert_eq "orphaned+rebind returns 0" "0" "$rc"
+assert_contains "rebind uses CURRENT GLOBAL placeholder" "$log" "--placeholder ph-new-123"
+assert_not_contains "rebind never binds to empty sandbox placeholder" "$log" "--placeholder ph-new-123 --placeholder"
+assert_contains "rebind confirms success" "$out" "repaired and key validated"
+unset STUB_SANDBOX_PLACEHOLDER STUB_GLOBAL_PLACEHOLDER STUB_KEY_STATUS
+cleanup_stubs
+
+# 6e) Recreate offered FIRST when create args are present; accepting it runs the
+# session-preserving migration (migrate_or_halt) rather than the rebind. Uses the
+# migrate-capable stub so the migration completes; asserts we did NOT set-custom.
+# Two 'y' answers: one for the recreate offer, one for migrate_or_halt's own
+# confirmation prompt.
+make_stubs
+export STUB_SESSION_LIST="ses_aaa"
+# migrate_or_halt needs the full migrate stub (export/rm/create/import). Bind the
+# sandbox/global reads onto it so offer_update_stale_placeholder's pre-migration
+# reads still work.
+( printf 'y\ny\n' | STUB_GLOBAL_PLACEHOLDER="ph-new" STUB_SANDBOX_PLACEHOLDER="" \
+    offer_update_stale_placeholder mybox 401 opencode /proj ) >/dev/null 2>&1 </dev/null; rc=$?
+log=$(cat "$CALLS")
+assert_eq "recreate-first returns 0" "0" "$rc"
+assert_contains "recreate-first runs migration (rm)" "$log" "sbx rm --force mybox"
+assert_not_contains "recreate-first does NOT set-custom" "$log" "secret set-custom"
+unset STUB_SESSION_LIST
+cleanup_stubs
+
+# 6f) Empty sandbox placeholder AND no global placeholder (secret truly gone):
+# nothing safe to bind to -> abort with recreate guidance, no set-custom.
+make_stubs; load_qsbx
+make_placeholder_stub
+export STUB_SANDBOX_PLACEHOLDER="" STUB_GLOBAL_PLACEHOLDER=""
+out=$( printf 'n\n' | offer_update_stale_placeholder mybox 401 2>&1 ); rc=$?
+log=$(cat "$CALLS")
+assert_eq "no-global aborts non-zero" "1" "$rc"
+assert_not_contains "no-global never set-custom" "$log" "secret set-custom"
+assert_contains "no-global gives recreate guidance" "$out" "sbx rm --force 'mybox'"
+unset STUB_SANDBOX_PLACEHOLDER STUB_GLOBAL_PLACEHOLDER
+cleanup_stubs
+
+# 6g) Sandbox placeholder already EQUALS the current global (not a stale case):
+# abort without changing anything.
+make_stubs; load_qsbx
+make_placeholder_stub
+export STUB_SANDBOX_PLACEHOLDER="ph-same" STUB_GLOBAL_PLACEHOLDER="ph-same"
+out=$( printf 'y\n' | offer_update_stale_placeholder mybox 401 opencode /proj 2>&1 ); rc=$?
+log=$(cat "$CALLS")
+assert_eq "not-stale aborts non-zero" "1" "$rc"
+assert_contains "not-stale explains" "$out" "not"
+assert_not_contains "not-stale never set-custom" "$log" "secret set-custom"
+unset STUB_SANDBOX_PLACEHOLDER STUB_GLOBAL_PLACEHOLDER
+cleanup_stubs
+
+# 6h) Attach-by-name (no create args): recreate route is NOT offered; only the
+# rebind is. Rebind succeeds (200).
+make_stubs; load_qsbx
+make_placeholder_stub
+export STUB_SANDBOX_PLACEHOLDER="" STUB_GLOBAL_PLACEHOLDER="ph-x" STUB_KEY_STATUS=200
+out=$( printf 'y\n' | offer_update_stale_placeholder mybox 401 2>&1 ); rc=$?
+log=$(cat "$CALLS")
+assert_eq "attach-by-name rebind returns 0" "0" "$rc"
+assert_not_contains "attach-by-name never recreates" "$log" "sbx rm --force"
+assert_contains "attach-by-name binds to global placeholder" "$log" "--placeholder ph-x"
+unset STUB_SANDBOX_PLACEHOLDER STUB_GLOBAL_PLACEHOLDER STUB_KEY_STATUS
 cleanup_stubs
 
 # 7) extract_session_ids: pulls ses_ tokens, ignores chatter.

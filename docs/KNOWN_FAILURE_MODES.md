@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-07-03"
+last_updated: "2026-07-08"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -791,6 +791,110 @@ failure modes, see the kit's
 > [agentic-coding-patterns#211](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211);
 > the quickstart-side decision (docs + advisory) is recorded in
 > [ADR-0007](adr/0007-commit-verification-identity-guidance.md).
+
+---
+
+## 23. USAi 401 in an Existing Sandbox After Deleting/Recreating the Global Secret
+
+### Symptoms
+
+- A **fresh** sandbox authenticates to USAi fine, but an **existing** sandbox
+  keeps failing with **HTTP 401** from the models API.
+- You recently **deleted the global USAi secret and re-added it** (rather than
+  using `qsbx usai-rotate-api-key`), and/or you had a stray `USAI_API_KEY`
+  exported in your shell (`.zshrc`/`.bashrc`) that you commented out.
+- `qsbx run` printed something like:
+
+  ```text
+  The global USAi key works in a fresh sandbox, but 'opencode-workspace' still
+  fails with HTTP 401. This usually means the existing sandbox has a stale
+  USAI_API_KEY placeholder from before rotation.
+
+  Could not read the sandbox's USAI_API_KEY placeholder. Aborting attach.
+  ```
+
+- The `usai-provider` config (`opencode.jsonc`) **is** loaded — OpenCode shows
+  the USAi provider and correct `baseURL` — so this is **not** the pre-kit
+  migration case in [Section 19](#19-opencode-shows-wrong-providers). The config
+  is fine; only the injected credential fails to resolve.
+
+### Root Cause
+
+USAi is injected as a **custom secret** (`sbx secret set-custom`), which is
+**not** proxied. Instead, sbx bakes a **placeholder token** into each sandbox's
+`USAI_API_KEY` at creation time, and the sbx proxy resolves that placeholder to
+the real global secret value at request time.
+
+When you **delete and re-add** the global secret (as opposed to rotating it in
+place), sbx mints a **new placeholder**. A newly created sandbox picks up the new
+placeholder, but an **existing** sandbox still carries the **old** placeholder —
+which the proxy can no longer resolve. The proxy then injects an **empty**
+`USAI_API_KEY`, so USAi returns 401. Reading the sandbox's baked-in value can
+even come back **empty**, which is why older `qsbx` versions hit a hard
+`Could not read the sandbox's USAI_API_KEY placeholder. Aborting attach.`
+dead-end here.
+
+> Contrast with `qsbx usai-rotate-api-key` (`scripts/rotate-apikey`), which
+> **preserves the existing placeholder** across rotation on purpose — so running
+> sandboxes keep resolving. Deleting + re-adding the secret defeats that.
+
+### Fix (automatic)
+
+Current `qsbx` detects this exact case — sandbox 401 while a fresh sandbox
+returns 200 — and offers two recovery routes, in order:
+
+1. **Recreate the sandbox, preserving your sessions** (recommended). `qsbx`
+   exports your chat sessions (sanitized), recreates the sandbox the current way
+   (so it gets the correct, current placeholder), and imports the sessions back.
+   This is the same session-preserving migration used for pre-kit sandboxes.
+2. **Non-destructive rebind.** If you decline the recreate, `qsbx` can add a
+   **sandbox-scoped** USAi secret bound to the **current global placeholder** and
+   re-validate — keeping the sandbox as-is. You are prompted for the current USAi
+   key (never passed on the command line).
+
+Just re-run and answer the prompts:
+
+```bash
+./qsbx run opencode /path/to/your/project
+```
+
+### Fix (manual)
+
+If you prefer to do it by hand, either recreate the sandbox:
+
+```bash
+sbx rm --force <sandbox-name>
+./qsbx run opencode /path/to/your/project
+```
+
+…or rebind the existing sandbox to the current global placeholder. First read
+the current placeholder from the global secret list, then bind a sandbox-scoped
+secret to it (sbx prompts for the key value):
+
+```bash
+# The value in the USAI_API_KEY column is the current placeholder:
+sbx secret ls -g | grep USAI_API_KEY
+
+sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
+  --env USAI_API_KEY --placeholder <current-placeholder>
+```
+
+> **Do not** bind to the sandbox's *old* placeholder — that is the value that
+> stopped resolving. Always bind to the **current global** one.
+
+### Prevention
+
+- Rotate with `qsbx usai-rotate-api-key`, which preserves the placeholder so
+  existing sandboxes keep working. Avoid deleting + re-adding the global secret.
+- Remove any `export USAI_API_KEY=...` from your shell profile — the sandbox gets
+  its value from sbx injection, and a host env var only causes confusion.
+
+### Related
+
+- [Section 3 — Agent Cannot See API Key / USAi Authentication Fails](#3-agent-cannot-see-api-key--usai-authentication-fails)
+- [Section 14 — SBX Proxy Doesn't Work with Custom baseURL](#14-sbx-proxy-doesnt-work-with-custom-baseurl-security-implication)
+- [Section 20 — Authentication Failed After Copying a New Key](#20-authentication-failed-after-copying-a-new-key)
+- Decision record: [ADR-0008](adr/0008-usai-placeholder-recovery.md)
 
 ---
 

@@ -952,9 +952,30 @@ sandbox_usai_placeholder() {
   sbx exec "$name" -- sh -c 'printf "%s" "${USAI_API_KEY:-}"' </dev/null 2>/dev/null || true
 }
 
+# Repair path for a sandbox whose baked-in USAI_API_KEY placeholder no longer
+# resolves — the classic case being a global USAi secret that was DELETED and
+# re-added (or otherwise regenerated), which mints a NEW placeholder. A fresh
+# sandbox gets the new placeholder (so check_fresh_sandbox_key is 200), but the
+# existing sandbox still carries the OLD placeholder, so the proxy resolves it to
+# nothing and USAi returns 401. The old sandbox's baked-in value can even read
+# back EMPTY. See docs/KNOWN_FAILURE_MODES.md section 23 and ADR-0008.
+#
+# Two recovery routes, offered in this order:
+#   1. Recreate the sandbox via the session-preserving migration (migrate_or_halt)
+#      — guarantees a correct, current placeholder and keeps chat sessions. This
+#      is offered FIRST when we have the create args to do it.
+#   2. Non-destructive rebind: add a sandbox-scoped custom secret bound to the
+#      CURRENT GLOBAL placeholder (not the stale/empty sandbox one), prompting for
+#      the key. Keeps the sandbox as-is.
+#
+# Usage: offer_update_stale_placeholder NAME STATUS [CREATE_ARGS...]
+# CREATE_ARGS (optional) are the `sbx create`-style args used to offer route 1;
+# when absent (e.g. attach-by-name), only route 2 is offered.
 offer_update_stale_placeholder() {
   local name="$1"
   local status="$2"
+  shift 2
+  local create_args=("$@")
   local sandbox_placeholder=""
   local global_placeholder=""
   sandbox_placeholder=$(sandbox_usai_placeholder "$name")
@@ -963,30 +984,73 @@ offer_update_stale_placeholder() {
   echo >&2
   echo "The global USAi key works in a fresh sandbox, but '$name' still" >&2
   echo "fails with HTTP ${status:-unknown}. This usually means the existing" >&2
-  echo "sandbox has a stale USAI_API_KEY placeholder from before rotation." >&2
+  echo "sandbox has a stale USAI_API_KEY placeholder — most often because the" >&2
+  echo "global USAi secret was deleted and re-added, which regenerates the" >&2
+  echo "placeholder. A fresh sandbox picks up the new one; this one still has" >&2
+  echo "the old (now unresolvable) placeholder." >&2
   echo >&2
-  if [ -z "$sandbox_placeholder" ]; then
-    echo "Could not read the sandbox's USAI_API_KEY placeholder. Aborting attach." >&2
-    return 1
-  fi
 
-  if [ -n "$global_placeholder" ] && [ "$sandbox_placeholder" = "$global_placeholder" ]; then
+  # Not a stale-placeholder case: the sandbox already carries the SAME placeholder
+  # as the current global secret, so rebinding it would change nothing. (An empty
+  # sandbox placeholder never equals a non-empty global one, so this correctly
+  # does NOT fire on the empty/orphaned case handled below.)
+  if [ -n "$sandbox_placeholder" ] && [ -n "$global_placeholder" ] \
+      && [ "$sandbox_placeholder" = "$global_placeholder" ]; then
     echo "'$name' already uses the current global placeholder, so this is not" >&2
     echo "a stale-placeholder case. Aborting attach." >&2
     return 1
   fi
 
-  echo "qsbx can repair this without deleting the sandbox by adding a" >&2
-  echo "sandbox-scoped USAi custom secret that uses the placeholder already" >&2
-  echo "injected into '$name'. You will be prompted for the current USAi key;" >&2
-  echo "qsbx will not pass the key on the command line." >&2
-  printf "Update sandbox-scoped USAi placeholder for '%s' now? [y/N] " "$name" >&2
+  # Route 1 (preferred): session-preserving recreate. Offered only when we have
+  # both the create args to rebuild the sandbox and the migration helper. This
+  # keeps the user's chat sessions and guarantees a current placeholder.
+  if [ "${#create_args[@]}" -gt 0 ] && command -v migrate_or_halt >/dev/null 2>&1; then
+    echo "The most reliable fix is to recreate '$name' the current way, moving" >&2
+    echo "your existing chat sessions across. This guarantees a working key." >&2
+    printf "Recreate '%s' (keeping your sessions) now? [y/N] " "$name" >&2
+    local recreate_answer=""
+    if [ -n "${QSBX_PROMPT_STDIN:-}" ]; then
+      read -r recreate_answer || true
+    else
+      read -r recreate_answer </dev/tty || true
+    fi
+    case "$recreate_answer" in
+      [yY]|[yY][eE][sS])
+        # migrate_or_halt exits the process on failure and returns 0 on success,
+        # after which the caller attaches. It re-exports/imports sessions itself.
+        migrate_or_halt "$name" "${create_args[@]}"
+        return 0
+        ;;
+    esac
+    echo >&2
+  fi
+
+  # Route 2: non-destructive rebind to the CURRENT GLOBAL placeholder. We must
+  # have a global placeholder to bind to — binding to the stale/empty sandbox
+  # placeholder is exactly what left the sandbox broken, so never do that.
+  if [ -z "$global_placeholder" ]; then
+    echo "Could not read a current global USAi placeholder to rebind to, so" >&2
+    echo "qsbx cannot repair '$name' in place. Recreate it with:" >&2
+    echo "  sbx rm --force '$name' && ./qsbx run opencode <your-project-folder>" >&2
+    echo "Aborting attach." >&2
+    return 1
+  fi
+
+  echo "Alternatively, qsbx can repair this WITHOUT deleting the sandbox by" >&2
+  echo "adding a sandbox-scoped USAi secret bound to the CURRENT global" >&2
+  echo "placeholder. You will be prompted for the current USAi key; qsbx will" >&2
+  echo "not pass the key on the command line." >&2
+  printf "Rebind '%s' to the current placeholder now? [y/N] " "$name" >&2
   local repair_answer=""
-  read -r repair_answer || true
+  if [ -n "${QSBX_PROMPT_STDIN:-}" ]; then
+    read -r repair_answer || true
+  else
+    read -r repair_answer </dev/tty || true
+  fi
   case "$repair_answer" in
     [yY]|[yY][eE][sS])
       sbx secret set-custom "$name" --host api.gsa.usai.gov \
-        --env USAI_API_KEY --placeholder "$sandbox_placeholder"
+        --env USAI_API_KEY --placeholder "$global_placeholder"
       status=$(check_key "$name")
       if [ "$status" = "200" ]; then
         echo "Sandbox placeholder repaired and key validated. Continuing." >&2
@@ -1064,8 +1128,14 @@ warn_if_no_git_identity() {
 # Validate the sandbox's key and, if it is not working, walk the user through
 # rotating it via scripts/rotate-apikey. Best-effort: if we cannot run the check
 # (e.g. no curl in the sandbox), we warn and continue rather than block attach.
+# Usage: ensure_valid_key NAME [CREATE_ARGS...]
+# CREATE_ARGS (optional) are the `sbx create`-style args; when provided they let
+# the stale-placeholder repair offer a session-preserving recreate as its first
+# option (see offer_update_stale_placeholder). Attach-by-name omits them.
 ensure_valid_key() {
   local name="$1"
+  shift
+  local create_args=("$@")
   local status
   local fresh_status
   status=$(check_key "$name")
@@ -1081,7 +1151,7 @@ ensure_valid_key() {
 
   fresh_status=$(check_fresh_sandbox_key)
   if [ "$fresh_status" = "200" ]; then
-    offer_update_stale_placeholder "$name" "$status"
+    offer_update_stale_placeholder "$name" "$status" "${create_args[@]+"${create_args[@]}"}"
     return $?
   fi
 
@@ -1115,7 +1185,7 @@ ensure_valid_key() {
 
       fresh_status=$(check_fresh_sandbox_key)
       if [ "$fresh_status" = "200" ]; then
-        offer_update_stale_placeholder "$name" "$status"
+        offer_update_stale_placeholder "$name" "$status" "${create_args[@]+"${create_args[@]}"}"
         return $?
       fi
 
@@ -1197,8 +1267,9 @@ case "$subcommand" in
       fi
 
       # Verify the sandbox's USAi key works before attaching; prompt to rotate
-      # if it does not.
-      ensure_valid_key "$name"
+      # if it does not. Pass the create args so a stale-placeholder repair can
+      # offer a session-preserving recreate as its first option.
+      ensure_valid_key "$name" "${create_args[@]}"
 
       # Advisory: the git-ssh-sign kit signs commits with the forwarded SSH key
       # and fails closed if the host agent has no key loaded. Warn up front.
