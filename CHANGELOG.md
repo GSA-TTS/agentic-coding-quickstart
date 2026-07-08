@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v1.0.0...v1.0.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* **sbx:** align qsbx docs/verify with v1.5.0 usai-provider global-config merge ([#194](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/194)) ([e1622f6](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/e1622f602d8d52279df57adf9c9c9cd7e6e1ee37))
+
 ## [1.0.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v0.11.0...v1.0.0) (2026-07-07)
 
 
