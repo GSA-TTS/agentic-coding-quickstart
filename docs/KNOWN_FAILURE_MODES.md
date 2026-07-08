@@ -592,16 +592,18 @@ Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
 
 The USAi provider config is not loaded in the sandbox. With `qsbx`, it is
 delivered by the `usai-provider` sbx **kit** (applied by pinned remote reference
-from the agentic-coding-patterns repo), which sets `OPENCODE_CONFIG` to
-`~/usai-config/opencode.jsonc`. `qsbx` applies it alongside the
-`agentic-coding-playbook` and `zscaler-ca-certificate` kits. This symptom appears
-when the sandbox was created without `qsbx` (so the kits were not applied), or
-with plain `sbx run` without the kit refs.
+from the agentic-coding-patterns repo), which stages an `opencode.jsonc` at
+`~/usai-config/` and, at startup, merges it into OpenCode's global config at
+`~/.config/opencode/opencode.jsonc` (the kit no longer sets `OPENCODE_CONFIG`).
+`qsbx` applies it alongside the `agentic-coding-playbook` and
+`zscaler-ca-certificate` kits. This symptom appears when the sandbox was created
+without `qsbx` (so the kits were not applied), or with plain `sbx run` without
+the kit refs.
 
 **Upgrading an existing sandbox (pre-kit).** A sandbox created with an *older*
-`qsbx` (before the kit migration) has no `OPENCODE_CONFIG` and no playbook clone.
-`qsbx` cannot auto-heal it in place: the fix would be `sbx kit add`, but an
-upstream sbx bug ([docker/sbx-releases#133][sbx133]) makes `sbx kit add` fail
+`qsbx` (before the kit migration) has no USAi provider config and no playbook
+clone. `qsbx` cannot auto-heal it in place: the fix would be `sbx kit add`, but
+an upstream sbx bug ([docker/sbx-releases#133][sbx133]) makes `sbx kit add` fail
 (`failed to read tar header: unexpected EOF`) on any kit that ships a static
 file — and the `usai-provider` kit ships `opencode.jsonc`. Because a sandbox
 without the USAi provider config is unusable, in-place healing is **disabled**
@@ -622,8 +624,9 @@ Instead, when you `qsbx run` an existing pre-kit sandbox, `qsbx` offers to
    name. This is irreversible, so `qsbx` only does it *after* a successful,
    verified export, and never if you decline or the export captures nothing.
 4. It recreates the sandbox with all the kits, **verifies the USAi kit
-   actually applied** (checks for the config file at
-   `/home/agent/usai-config/opencode.jsonc`), and only then imports the sessions.
+   actually applied** (checks for the kit's staged config file at
+   `/home/agent/usai-config/opencode.jsonc`, which the kit ships and merges into
+   the global config at startup), and only then imports the sessions.
    If the recreate or verification fails, it stops and keeps your exported
    sessions in a temp directory rather than importing into a broken sandbox.
 

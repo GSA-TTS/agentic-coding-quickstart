@@ -44,9 +44,11 @@ my-workspace/                       # Parent folder (user creates this)
 When `qsbx` creates a sandbox it applies four kits by pinned remote reference
 (`--kit git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=<sha>&dir=…`):
 
-- **`usai-provider`** — drops `~/usai-config/opencode.jsonc` and sets
-  `OPENCODE_CONFIG` to point there (allow-listing USAi egress), so OpenCode uses
-  the GSA USAi gateway. It owns the single-valued `OPENCODE_CONFIG` channel.
+- **`usai-provider`** — stages a USAi `opencode.jsonc` at `~/usai-config/` and,
+  at container startup, merges it into OpenCode's **global** config path
+  (`~/.config/opencode/opencode.jsonc`) — copying verbatim into an empty global
+  dir, deep-merging into an existing one — so OpenCode uses the GSA USAi gateway
+  (allow-listing USAi egress). It no longer sets `OPENCODE_CONFIG`.
 - **`agentic-coding-playbook`** — at container startup, clones the playbook at a
   pinned ref into `~/.agentic-coding-playbook` and symlinks its `AGENTS.md` into
   each agent's rules path (e.g. `~/.config/opencode/AGENTS.md`) and each skill
@@ -72,7 +74,7 @@ When working on user projects, the agent has access to:
 
 | Resource | Location | Use For |
 |----------|----------|---------|
-| Global config | `~/usai-config/opencode.jsonc` (via kit `OPENCODE_CONFIG`) | Model/provider config |
+| Global config | `~/.config/opencode/opencode.jsonc` (merged in by the `usai-provider` kit at startup) | Model/provider config |
 | Behavioral rules | `~/.config/opencode/AGENTS.md` (linked to playbook clone) | Federal agent rules |
 | Skills | `~/.agents/skills` (linked to playbook clone) | Step-by-step procedures |
 | Setup guides | `./docs/` | SBX configuration, troubleshooting |

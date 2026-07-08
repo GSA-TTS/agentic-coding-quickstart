@@ -9,8 +9,9 @@
 # Solution: when qsbx creates a sandbox it applies FOUR sbx mixin kits from the
 # community agentic-coding-patterns repo, by remote reference pinned to a commit
 # (see PATTERNS_KIT_REF below), so every sandbox is configured declaratively:
-#   1. usai-provider     — configures the USAi OpenCode provider (drops
-#      ~/usai-config/opencode.jsonc and sets OPENCODE_CONFIG; allow-lists USAi
+#   1. usai-provider     — configures the USAi OpenCode provider (stages
+#      ~/usai-config/opencode.jsonc and merges it into OpenCode's global config
+#      at ~/.config/opencode/opencode.jsonc at startup; allow-lists USAi
 #      egress).
 #   2. agentic-coding-playbook — at container startup, clones the playbook at a
 #      pinned ref and symlinks its AGENTS.md + skills into each agent's search
@@ -147,7 +148,7 @@ fi
 # fails ("failed to read tar header: unexpected EOF") on any kit that ships a
 # static files/ payload (docker/sbx-releases#133). The usai-provider kit ships
 # files/opencode.jsonc, so it cannot be injected into a running sandbox — and a
-# sandbox without the USAi provider config is unusable (no OPENCODE_CONFIG, no
+# sandbox without the USAi provider config is unusable (no USAi provider, no
 # endpoint, no models), so healing only the other two kits is pointless. Instead
 # of a doomed `sbx kit add`, qsbx offers an assisted session migration (see
 # migrate_or_halt) or halts with documented options. Re-enable this (export
@@ -502,10 +503,11 @@ create_with_config() {
 }
 
 # Heal a sandbox created before qsbx applied these kits. Such sandboxes may lack
-# the USAi provider config (no OPENCODE_CONFIG), the playbook clone, and/or the
-# Zscaler CA. We detect each and inject the missing kit into the running sandbox
-# with `sbx kit add` — no recreation needed. Best-effort: if the (experimental)
-# command fails, warn with the manual recovery step and continue to attach.
+# the USAi provider config (no staged usai-config), the playbook clone, and/or
+# the Zscaler CA. We detect each and inject the missing kit into the running
+# sandbox with `sbx kit add` — no recreation needed. Best-effort: if the
+# (experimental) command fails, warn with the manual recovery step and continue
+# to attach.
 #
 # Wait until `sbx exec` works in a sandbox, or the readiness timeout elapses.
 # Returns 0 once a trivial exec succeeds, 1 if it never does within the budget.
@@ -593,16 +595,20 @@ ensure_kit_applied() {
 
   ensure_kit_sources_allowed
 
-  # 1) USAi provider kit: present iff the kit's config file is present. (We probe
-  #    the dropped file, not the OPENCODE_CONFIG env var, which an exec shell may
-  #    not see — see USAI_KIT_CONFIG_PATH.)
+  # 1) USAi provider kit: present iff the kit's staged config file is present.
+  #    (We probe the file the kit ships, not any env var: the kit no longer sets
+  #    OPENCODE_CONFIG, and kit-injected env is not reliably visible to an exec
+  #    shell anyway — see USAI_KIT_CONFIG_PATH.)
   if kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "qsbx: '$name' is missing the USAi kit (no config file); injecting it" >&2
     echo "      with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$USAI_KIT" </dev/null >/dev/null 2>&1; then
-      # A stale ~/.config/opencode/opencode.jsonc symlink (to the removed
-      # opencode/ path) is now harmless — OPENCODE_CONFIG takes precedence — but
-      # remove it if it dangles so it can't confuse OpenCode or the user.
+      # The kit's startup step merges its config into the GLOBAL path
+      # (~/.config/opencode/opencode.jsonc). A leftover dangling SYMLINK there
+      # from a much older layout (when that path symlinked into a since-removed
+      # opencode/ dir) would block that write, so remove it if — and only if — it
+      # is a symlink that no longer resolves. A real merged config file is left
+      # untouched (the guard requires -L).
       sbx exec "$name" -- sh -c \
         'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
         </dev/null >/dev/null 2>&1 || true
@@ -668,17 +674,21 @@ sandbox_exists() {
   sbx ls -q 2>/dev/null | grep -Fxq -- "$1"
 }
 
-# Absolute path where the usai-provider kit installs its OpenCode config (and
-# sets OPENCODE_CONFIG to). We detect the kit by the presence of THIS FILE rather
-# than the OPENCODE_CONFIG env var: kit-injected env vars reach the agent process
-# but are not reliably visible to a fresh `sbx exec … sh -c` shell, whereas the
-# dropped file always is. Keep in sync with the kit's spec.yaml.
+# Absolute path where the usai-provider kit STAGES its OpenCode config. As of the
+# patterns v1.5.0 kit this staged file is the merge SOURCE: a startup step merges
+# it into OpenCode's GLOBAL config (~/.config/opencode/opencode.jsonc), and the
+# kit no longer sets OPENCODE_CONFIG. We still detect the kit by the presence of
+# THIS staged FILE (not an env var, and not the merged global config): the kit
+# always ships it, so it is present iff the kit was applied — including in a
+# stopped sandbox where the startup merge has not re-run. kit-injected env vars
+# are also not reliably visible to a fresh `sbx exec … sh -c` shell. Keep in sync
+# with the kit's spec.yaml.
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 
 # True (0) iff an existing sandbox lacks the USAi provider config — i.e. it was
-# created before the kit migration. We probe for the config FILE the kit drops
-# (see USAI_KIT_CONFIG_PATH), not the OPENCODE_CONFIG env var, because the env
-# var isn't reliably visible to an exec shell.
+# created before the kit migration. We probe for the staged config FILE the kit
+# ships (see USAI_KIT_CONFIG_PATH), not the merged global config or any env var,
+# because the staged file is the most reliable "kit applied" signal.
 #
 # Waits for exec readiness first: a stopped/just-touched sandbox's exec times out
 # for a while, and treating that as "config absent" would wrongly trigger a
