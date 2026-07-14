@@ -1,0 +1,102 @@
+#!/bin/bash
+# This runs OpenChamber (a web UI for OpenCode) in a Docker Sandbox using the
+# sbx CLI and then publishes it to your host on port 3000 (or a port you pass).
+#
+# It makes sure OpenChamber is installed in the sandbox, starts a headless
+# `opencode serve`, starts `openchamber --lan` bound to 0.0.0.0, and forwards
+# the port back to the host.
+#
+# Usage: scripts/openchamber [your sandbox name] [port]
+# Connect via http://127.0.0.1:<port>  (default 3000)
+# To stop: sbx stop [your sandbox name]
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/openchamber <sandbox-name> [port]
+
+Runs OpenChamber (a web UI for OpenCode) inside an existing sbx sandbox and
+publishes it back to the host.
+
+It ensures OpenChamber is installed in the sandbox, starts a headless
+`opencode serve`, starts `openchamber --lan` bound to 0.0.0.0, then forwards
+the port back to the host so you can reach it at http://127.0.0.1:<port>.
+
+Arguments:
+  <sandbox-name>   Name of an existing sbx sandbox (see: sbx ls).
+  [port]           Host/container port to serve on (default: 3000).
+
+Options:
+  -h, --help       Show this help and exit.
+
+Examples:
+  scripts/openchamber my-sandbox          # serve on port 3000
+  scripts/openchamber my-sandbox 8080     # serve on port 8080
+
+To stop: sbx stop <sandbox-name>
+EOF
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+if [ "$#" -lt 1 ]; then
+  usage >&2
+  exit 1
+fi
+
+sandbox="$1"
+port="${2:-3000}"
+
+# Validate the port is a plain integer in the usable range.
+case "$port" in
+  ''|*[!0-9]*) echo "error: port must be a number, got '$port'" >&2; exit 1 ;;
+esac
+if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+  echo "error: port must be between 1 and 65535, got '$port'" >&2
+  exit 1
+fi
+
+# 1. Ensure OpenChamber is installed in the sandbox. The official installer is
+#    idempotent (it hands off to `openchamber update` when already present), so
+#    running it unconditionally is safe.
+echo "Ensuring OpenChamber is installed in '$sandbox'..."
+sbx exec "$sandbox" -- sh -lc '
+  command -v openchamber >/dev/null 2>&1 && exit 0
+  curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash
+'
+
+# 2. Start a headless opencode server (detached) on its default port 4096,
+#    then start OpenChamber bound to all interfaces so the published port is
+#    reachable from the host. --lan binds OpenChamber to 0.0.0.0;
+#    OPENCHAMBER_ALLOW_UNAUTHENTICATED_LAN=true is required because --lan
+#    otherwise refuses unauthenticated access. The sandbox is the security
+#    boundary here and the port is only published to the host loopback.
+echo "Starting opencode serve and openchamber --lan on port $port..."
+sbx exec -d "$sandbox" sh -lc "
+  nohup opencode serve --hostname 127.0.0.1 --port 4096 >/tmp/opencode-serve.log 2>&1 &
+  export OPENCHAMBER_ALLOW_UNAUTHENTICATED_LAN=true
+  exec openchamber --lan --port $port --foreground
+" &
+
+# 3. Poll + publish the port back to the host. Bound the wait so a permanent
+#    failure (host port already in use, or the sandbox process never came up)
+#    surfaces an error instead of looping forever.
+deadline=$(( $(date +%s) + 60 ))
+until sbx ports "$sandbox" --publish "$port:$port" 2>/tmp/openchamber-ports.err; do
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "error: could not publish port $port after 60s." >&2
+    echo "  Last error from 'sbx ports':" >&2
+    sed 's/^/    /' /tmp/openchamber-ports.err >&2 || true
+    echo "  The host port may already be in use (try a different port)," >&2
+    echo "  or OpenChamber failed to start. Check: sbx exec $sandbox -- openchamber logs" >&2
+    exit 1
+  fi
+  sleep 1
+done
+echo "Ready: OpenChamber on http://127.0.0.1:$port (sandbox: $sandbox)"
