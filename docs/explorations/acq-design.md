@@ -809,3 +809,19 @@ can distinguish "not done yet" from "done differently":
 9. **`scripts/verify-backends` not present.** §5 lists a CI verification
    script. Not implemented in 1.1.x; live sbx verification is deferred (this
    environment runs inside an sbx sandbox and cannot create nested sandboxes).
+
+10. **`sbx secret set-custom` does not support `--password-stdin`.** The
+    handoff doc (§9) specified `--password-stdin` as the preferred form for
+    custom secrets. Verified against the actual sbx 0.35.0 CLI: the flag does
+    not exist on `set-custom`. The implementation reads the secret via `read -rs`
+    (interactive) or stdin (piped) and pipes it to sbx, keeping it out of argv.
+    The `--password-stdin` flag is only available on `sbx secret set --registry`.
+
+11. **`acq secret set` requires explicit scope (`-g` or sandbox name).** The
+    handoff doc (§9) shows all examples with `-g` (global). The implementation
+    makes scope mandatory — omitting it errors immediately rather than silently
+    defaulting to global. This mirrors `sbx secret set` / `set-custom` and
+    prevents accidentally overwriting the global USAi key during testing.
+    Use `acq secret set -g usai` for global, or `acq secret set SANDBOX usai`
+    to scope to a single sandbox. All other `acq secret` subcommands
+    (`ls`, `rm`, `import`, `set-custom`, `--help`) pass through to sbx unchanged.

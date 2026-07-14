@@ -241,7 +241,11 @@ case "$subcommand" in
       fi
 
     elif [ -n "$first" ] && acq_backend_exists "$first"; then
-      # Existing sandbox by name.
+      # Existing sandbox by name (no agent/path given). Heal kits and attach.
+      # ensure_valid_key is intentionally omitted here: we don't have the
+      # create args needed to provision a fresh validation sandbox, and
+      # attaching by name is a re-attach to a running session where the key
+      # was already validated on the original acq run. Matches qsbx behavior.
       acq_backend_ensure_kits_applied "$first"
       warn_if_no_ssh_signing_key
 
@@ -313,9 +317,32 @@ case "$subcommand" in
         shift
         acq_backend_secret_set "$@"
         ;;
+      ls|rm|import|set-custom)
+        # Pass through to the backend secret CLI unchanged.
+        acq_backend_run "" secret "$@" 2>/dev/null || \
+          command "${ACQ_RESOLVED_BACKEND}" secret "$@"
+        ;;
+      --help|-h|"")
+        # Print acq's own summary, then delegate to backend for full detail.
+        cat >&2 <<'SECRETUSAGE'
+acq secret — manage sandbox secrets
+
+Usage:
+  acq secret set [-g | SANDBOX] SERVICE [--host HOST --env ENV]
+  acq secret ls
+  acq secret rm [-g | SANDBOX] <placeholder>
+  acq secret import [SERVICE] [--all] [--force] [--dry-run]
+  acq secret set-custom [-g | SANDBOX] --host HOST --env ENV
+
+All other subcommands pass through directly to sbx secret.
+
+Full sbx reference:
+SECRETUSAGE
+        command "${ACQ_RESOLVED_BACKEND}" secret --help
+        ;;
       *)
-        echo "acq: unknown secret subcommand '${sub2}'. Supported: acq secret set SERVICE [...]" >&2
-        exit 1
+        # Unknown subcommand — pass through to backend.
+        command "${ACQ_RESOLVED_BACKEND}" secret "$@"
         ;;
     esac
     ;;

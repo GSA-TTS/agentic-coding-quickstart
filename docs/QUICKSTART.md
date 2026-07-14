@@ -56,14 +56,17 @@ kits, validates your USAi key, and attaches the agent.
 ### Secrets
 
 ```bash
-# USAi key (custom endpoint — prompted securely)
-./acq secret set usai
+# USAi key — global (available to all sandboxes)
+./acq secret set -g usai
 
-# GitHub token (built-in proxy injection)
-./acq secret set github
+# USAi key — scoped to one sandbox only (safe for testing)
+./acq secret set my-sandbox usai
 
-# Arbitrary custom endpoint
-./acq secret set myservice --host api.example.com --env MY_API_KEY
+# GitHub token — global
+./acq secret set -g github
+
+# Arbitrary custom endpoint — global
+./acq secret set -g myservice --host api.example.com --env MY_API_KEY
 ```
 
 ### Rotate your USAi key

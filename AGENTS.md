@@ -300,7 +300,7 @@ The agent MUST ask the user before:
 - [ ] Modifying CI/CD pipeline configurations
 - [ ] Deleting files or directories
 - [ ] Committing or pushing code
-- [ ] Modifying SBX configuration, or creating sandboxes outside the sanctioned bootstrap (`qsbx run` / `sbx run`, which auto-create a sandbox as part of normal execution and are pre-approved)
+- [ ] Modifying SBX configuration, or creating sandboxes outside the sanctioned bootstrap (`acq run` / `qsbx run` / `sbx run`, which auto-create a sandbox as part of normal execution and are pre-approved)
 - [ ] Accessing endpoints outside the approved list
 
 ---

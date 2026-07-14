@@ -154,6 +154,7 @@ make_stubs; load_acq
 # Resolve via explicit flag.
 unset ACQ_BACKEND 2>/dev/null || true
 ( unset ACQ_BACKEND 2>/dev/null || true
+  # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   set +e
@@ -167,6 +168,7 @@ make_stubs; load_acq
 (
   ACQ_BACKEND="sbx"
   export ACQ_BACKEND
+  # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   set +e
@@ -183,6 +185,7 @@ make_stubs; load_acq
   export XDG_CONFIG_HOME="$STUBDIR/config"
   mkdir -p "$XDG_CONFIG_HOME/acq"
   printf 'backend: sbx\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   set +e
@@ -196,6 +199,7 @@ make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   set +e
@@ -284,39 +288,72 @@ assert_not_contains "qsbx: notice silenced" "$dep_silent" "deprecated"
 cleanup_stubs
 
 # ===========================================================================
-# 5. acq secret set — correct sbx command, secret never in argv
+# 5. acq secret set — correct sbx command, scope required
 # ===========================================================================
 
-# 5a. `acq secret set github` -> built-in form: `sbx secret set -g github`
+# 5a. No scope → error, no sbx call.
 make_stubs
-# Supply input so --password-stdin doesn't hang (built-in doesn't use it, but
-# the test should complete quickly regardless).
-(echo "fake-key" | ACQ_BACKEND=sbx "$ACQ" secret set github) >/dev/null 2>/dev/null || true
+out=$(ACQ_BACKEND=sbx "$ACQ" secret set usai 2>&1 || true)
+assert_contains "secret: no scope -> error" "$out" "scope required"
 log=$(cat "$CALLS")
-assert_contains "secret: github -> sbx secret set -g github" "$log" "sbx secret set -g github"
-assert_not_contains "secret: key not in sbx args" "$log" "fake-key"
+assert_not_contains "secret: no scope -> sbx not called" "$log" "sbx secret"
 cleanup_stubs
 
-# 5b. `acq secret set usai` -> custom form with USAi defaults, uses --password-stdin.
+# 5b. `-g github` -> built-in form: `sbx secret set -g github`
 make_stubs
-(echo "my-usai-key" | ACQ_BACKEND=sbx "$ACQ" secret set usai) >/dev/null 2>/dev/null || true
+(ACQ_BACKEND=sbx "$ACQ" secret set -g github) >/dev/null 2>/dev/null || true
 log=$(cat "$CALLS")
-assert_contains "secret: usai -> sbx secret set-custom" "$log" "sbx secret set-custom -g"
-assert_contains "secret: usai fills in --host" "$log" "--host api.gsa.usai.gov"
-assert_contains "secret: usai fills in --env USAI_API_KEY" "$log" "--env USAI_API_KEY"
-assert_contains "secret: usai uses --password-stdin" "$log" "--password-stdin"
-assert_not_contains "secret: usai key never in argv" "$log" "my-usai-key"
+assert_contains "secret: -g github -> sbx secret set -g github" "$log" "sbx secret set -g github"
 cleanup_stubs
 
-# 5c. `acq secret set custom-svc --host h.example.com --env MY_KEY` -> custom form.
+# 5c. `my-sandbox github` -> built-in form scoped to sandbox
 make_stubs
-(echo "my-custom-key" | ACQ_BACKEND=sbx "$ACQ" secret set custom-svc --host h.example.com --env MY_KEY) \
-  >/dev/null 2>/dev/null || true
+(ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox github) >/dev/null 2>/dev/null || true
 log=$(cat "$CALLS")
-assert_contains "secret: custom --host -> set-custom" "$log" "sbx secret set-custom -g"
-assert_contains "secret: custom --host value present" "$log" "--host h.example.com"
-assert_contains "secret: custom --env value present" "$log" "--env MY_KEY"
-assert_not_contains "secret: custom key never in argv" "$log" "my-custom-key"
+assert_contains "secret: sandbox github -> sbx secret set my-sandbox" "$log" "sbx secret set my-sandbox github"
+cleanup_stubs
+
+# 5d. `acq secret set -g usai` -> custom form, global scope
+make_stubs
+(
+  ACQ_SECRET_TEST_VALUE="my-usai-key" ACQ_BACKEND=sbx "$ACQ" secret set -g usai
+) >/dev/null 2>/dev/null || true
+log=$(cat "$CALLS")
+assert_contains "secret: -g usai -> sbx secret set-custom -g" "$log" "sbx secret set-custom -g"
+assert_contains "secret: -g usai fills in --host" "$log" "--host api.gsa.usai.gov"
+assert_contains "secret: -g usai fills in --env USAI_API_KEY" "$log" "--env USAI_API_KEY"
+cleanup_stubs
+
+# 5e. `acq secret set my-sandbox usai` -> custom form, sandbox scope
+make_stubs
+(
+  ACQ_SECRET_TEST_VALUE="my-usai-key" ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox usai
+) >/dev/null 2>/dev/null || true
+log=$(cat "$CALLS")
+assert_contains "secret: sandbox usai -> sbx secret set-custom my-sandbox" "$log" "sbx secret set-custom my-sandbox"
+assert_contains "secret: sandbox usai fills in --host" "$log" "--host api.gsa.usai.gov"
+cleanup_stubs
+
+# 5f. `acq secret set -g custom-svc --host h.example.com --env MY_KEY` -> global custom form
+make_stubs
+(
+  ACQ_SECRET_TEST_VALUE="my-custom-key" ACQ_BACKEND=sbx "$ACQ" secret set -g custom-svc --host h.example.com --env MY_KEY
+) >/dev/null 2>/dev/null || true
+log=$(cat "$CALLS")
+assert_contains "secret: -g custom -> set-custom -g" "$log" "sbx secret set-custom -g"
+assert_contains "secret: -g custom --host value" "$log" "--host h.example.com"
+assert_contains "secret: -g custom --env value" "$log" "--env MY_KEY"
+cleanup_stubs
+
+# 5g. `acq secret set -g custom-svc --host=h.example.com --env=MY_KEY` -> inline = form
+make_stubs
+(
+  ACQ_SECRET_TEST_VALUE="ignored" ACQ_BACKEND=sbx "$ACQ" secret set -g custom-svc --host=h.example.com --env=MY_KEY
+) >/dev/null 2>/dev/null || true
+log=$(cat "$CALLS")
+assert_contains "secret: inline= form -> set-custom -g" "$log" "sbx secret set-custom -g"
+assert_contains "secret: inline= --host value" "$log" "--host h.example.com"
+assert_contains "secret: inline= --env value" "$log" "--env MY_KEY"
 cleanup_stubs
 
 # ===========================================================================
