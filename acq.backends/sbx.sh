@@ -8,11 +8,18 @@
 # Sourced by acq (via acq_resolve_backend) after common.sh is already loaded.
 # Never run directly.
 
-# Capability flags
+# Capability flags — reserved for multi-backend dispatch in common.sh (1.2.x+).
+# Each backend adapter declares these so common.sh can gate features once a
+# second backend exists. Unused by common.sh today (only one backend).
+# shellcheck disable=SC2034
 ACQ_BACKEND_NAME="sbx"
+# shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_PORT_FORWARD=1
+# shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_SNAPSHOTS=0
+# shellcheck disable=SC2034
 ACQ_BACKEND_CAN_RESUME=1
+# shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1
 
 # Minimum sbx version required.
@@ -421,7 +428,7 @@ acq_backend_secret_set() {
     local cmd_args=("secret" "set-custom" "-g" "--host" "${host:-}" "--env" "${env_var:-}" "--password-stdin")
     # Append any extra flags that aren't --host/--env and their values.
     local skip_next=0
-    for arg in "${extra_flags[@]}"; do
+    for arg in "${extra_flags[@]+"${extra_flags[@]}"}"; do
       if [ "$skip_next" -eq 1 ]; then skip_next=0; continue; fi
       case "$arg" in
         --host|--env) skip_next=1 ;;  # skip value too

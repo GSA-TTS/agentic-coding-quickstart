@@ -101,7 +101,7 @@ cleanup_stubs() { [ -n "${STUBDIR:-}" ] && rm -rf "$STUBDIR"; }
 load_acq() {
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   # Also load the sbx adapter since acq_resolve_backend would normally do it.
-  # shellcheck disable=SC1091
+  # shellcheck source=acq.backends/sbx.sh
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   # Build the kit list (normally called by acq_resolve_backend).
   _build_kit_list
