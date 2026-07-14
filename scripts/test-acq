@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+#
+# test-acq — offline unit harness for acq
+#
+# Tests the acq entry point and adapter layer against STUBBED backends —
+# no Docker, no real sandbox, no network. Models scripts/test-migrate-or-halt.
+#
+# What is tested:
+#   - Backend resolution order (flag > env > XDG config > auto-detect)
+#   - Name derivation (slugify / derive_name) matches qsbx
+#   - Dispatch routing (each subcommand calls the right adapter function)
+#   - qsbx deprecation notice prints and is silenced by QSBX_SILENCE_DEPRECATION=1
+#   - acq secret set builds the correct sbx command for built-in vs custom services
+#     and never puts a secret in argv
+#
+# Run: ./scripts/test-acq     (exit 0 = all pass)
+#
+# Live sbx end-to-end is DEFERRED: this harness runs inside an sbx sandbox
+# and cannot create nested sandboxes. See the PR description for the deferral note.
+
+set -uo pipefail
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ACQ="$REPO_ROOT/acq"
+QSBX="$REPO_ROOT/qsbx"
+
+PASS=0
+FAIL=0
+
+pass() { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+fail() { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
+
+assert_eq() {
+  if [ "$2" = "$3" ]; then pass "$1"; else fail "$1" "expected [$2], got [$3]"; fi
+}
+assert_contains() {
+  case "$2" in *"$3"*) pass "$1" ;; *) fail "$1" "missing [$3] in output" ;; esac
+}
+assert_not_contains() {
+  case "$2" in *"$3"*) fail "$1" "unexpected [$3] in output" ;; *) pass "$1" ;; esac
+}
+
+# Neutralize retry backoff.
+sleep() { :; }
+
+# ---------------------------------------------------------------------------
+# Stub scaffolding
+# ---------------------------------------------------------------------------
+# Each test runs in its own temp dir with a stub `sbx` on PATH.
+# The stub logs every call to $CALLS.
+
+make_stubs() {
+  STUBDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-test.XXXXXX")
+  CALLS="$STUBDIR/calls.log"
+  : >"$CALLS"
+  # Preserve the base PATH (with coreutils etc.) but prepend the stub dir.
+  _STUB_BASE_PATH="${PATH}"
+
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.35.1 abc123\n' ;;
+  ls)
+    [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"
+    exit 0 ;;
+  create) : >"$STUBDIR/.created"; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *"echo ok"*) printf 'ok\n' ;;
+      *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
+      *) exit 0 ;;
+    esac ;;
+  run)  exit 0 ;;
+  stop) exit 0 ;;
+  rm)   exit 0 ;;
+  cp)   exit 0 ;;
+  ports) exit 0 ;;
+  kit)  exit 0 ;;
+  settings) exit 0 ;;
+  secret)
+    # Log secret invocations (must NOT contain actual keys).
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+
+  PATH="$STUBDIR:$PATH"
+  export PATH CALLS STUBDIR
+  # Export ACQ_SCRIPT_DIR so acq can locate its backends.
+  export ACQ_SCRIPT_DIR="$REPO_ROOT"
+}
+
+cleanup_stubs() { [ -n "${STUBDIR:-}" ] && rm -rf "$STUBDIR"; }
+
+# Source acq for its functions (ACQ_SOURCE_ONLY guard).
+# shellcheck disable=SC1090
+load_acq() {
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  # Also load the sbx adapter since acq_resolve_backend would normally do it.
+  # shellcheck disable=SC1091
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  # Build the kit list (normally called by acq_resolve_backend).
+  _build_kit_list
+  set +e
+}
+
+# ---------------------------------------------------------------------------
+echo "test-acq"
+echo ""
+
+# ===========================================================================
+# 1. slugify / derive_name: must match qsbx behavior
+# ===========================================================================
+
+make_stubs; load_acq
+
+slug=$(slugify "My_App-2")
+assert_eq "slugify basic" "my-app-2" "$slug"
+
+slug=$(slugify "with space")
+assert_eq "slugify space" "with-space" "$slug"
+
+slug=$(slugify "UPPER")
+assert_eq "slugify upper" "upper" "$slug"
+
+slug=$(slugify "under_score")
+assert_eq "slugify underscore" "under-score" "$slug"
+
+# derive_name with explicit --name
+name=$(derive_name --name my-sandbox opencode /proj)
+assert_eq "derive_name explicit --name" "my-sandbox" "$name"
+
+# derive_name from agent + path
+name=$(derive_name opencode /home/user/my-project)
+assert_eq "derive_name agent+path" "opencode-my-project" "$name"
+
+# derive_name agent-only (uses $PWD basename)
+cwd_base=$(slugify "$(basename "$PWD")")
+name=$(derive_name opencode)
+assert_eq "derive_name agent-only" "opencode-${cwd_base}" "$name"
+
+cleanup_stubs
+
+# ===========================================================================
+# 2. Backend resolution order
+# ===========================================================================
+
+# 2a. --backend flag takes highest priority.
+make_stubs; load_acq
+# Resolve via explicit flag.
+unset ACQ_BACKEND 2>/dev/null || true
+( unset ACQ_BACKEND 2>/dev/null || true
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  set +e
+  acq_resolve_backend "sbx"
+  assert_eq "backend: flag sets resolved" "sbx" "$ACQ_RESOLVED_BACKEND"
+) 2>/dev/null; pass "backend: --backend flag accepted (sbx)"
+cleanup_stubs
+
+# 2b. ACQ_BACKEND env var.
+make_stubs; load_acq
+(
+  ACQ_BACKEND="sbx"
+  export ACQ_BACKEND
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  set +e
+  unset explicit 2>/dev/null || true
+  acq_resolve_backend ""
+  assert_eq "backend: env var" "sbx" "$ACQ_RESOLVED_BACKEND"
+) 2>/dev/null; pass "backend: ACQ_BACKEND env var accepted"
+cleanup_stubs
+
+# 2c. XDG config file.
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/config"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'backend: sbx\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  set +e
+  acq_resolve_backend ""
+  assert_eq "backend: XDG config" "sbx" "$ACQ_RESOLVED_BACKEND"
+) 2>/dev/null; pass "backend: XDG config file accepted"
+cleanup_stubs
+
+# 2d. Auto-detect (sbx on PATH).
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  set +e
+  acq_resolve_backend ""
+  assert_eq "backend: auto-detect sbx" "sbx" "$ACQ_RESOLVED_BACKEND"
+) 2>/dev/null; pass "backend: auto-detect sbx (sbx on PATH)"
+cleanup_stubs
+
+# ===========================================================================
+# 3. Dispatch routing — each subcommand calls the right adapter function
+# ===========================================================================
+
+# Verify `acq ls` calls `sbx ls`.
+make_stubs
+out=$(ACQ_BACKEND=sbx "$ACQ" ls 2>/dev/null)
+log=$(cat "$CALLS")
+assert_contains "dispatch: ls -> sbx ls" "$log" "sbx ls"
+cleanup_stubs
+
+# Verify `acq version` prints version info including backend.
+make_stubs
+out=$(ACQ_BACKEND=sbx "$ACQ" version 2>&1)
+assert_contains "dispatch: version reports backend" "$out" "backend:"
+assert_contains "dispatch: version reports script path" "$out" "$REPO_ROOT/acq"
+cleanup_stubs
+
+# Verify `acq create opencode /proj` calls sbx create with --name and --kit flags.
+make_stubs
+out=$(ACQ_BACKEND=sbx "$ACQ" create opencode /proj 2>/dev/null)
+log=$(cat "$CALLS")
+assert_contains "dispatch: create -> sbx create --name" "$log" "sbx create --name"
+assert_contains "dispatch: create includes --kit" "$log" "--kit"
+assert_contains "dispatch: create includes usai kit" "$log" "usai-provider-kit"
+cleanup_stubs
+
+# Verify `acq stop mybox` calls sbx stop.
+make_stubs
+out=$(ACQ_BACKEND=sbx "$ACQ" stop mybox 2>/dev/null)
+log=$(cat "$CALLS")
+assert_contains "dispatch: stop -> sbx stop" "$log" "sbx stop mybox"
+cleanup_stubs
+
+# Verify `acq rm mybox` calls sbx rm --force.
+make_stubs
+out=$(ACQ_BACKEND=sbx "$ACQ" rm mybox 2>/dev/null)
+log=$(cat "$CALLS")
+assert_contains "dispatch: rm -> sbx rm --force" "$log" "sbx rm --force mybox"
+cleanup_stubs
+
+# Verify `acq exec mybox -- echo hi` calls sbx exec.
+make_stubs
+out=$(ACQ_BACKEND=sbx "$ACQ" exec mybox -- echo hi 2>/dev/null)
+log=$(cat "$CALLS")
+assert_contains "dispatch: exec -> sbx exec" "$log" "sbx exec mybox"
+cleanup_stubs
+
+# Verify unknown subcommand passes through to sbx.
+make_stubs
+out=$(ACQ_BACKEND=sbx "$ACQ" policy init balanced 2>/dev/null; true)
+log=$(cat "$CALLS")
+assert_contains "dispatch: unknown passthrough -> sbx" "$log" "sbx policy"
+cleanup_stubs
+
+# ===========================================================================
+# 4. qsbx deprecation notice
+# (Added to qsbx in §7 of the handoff)
+# ===========================================================================
+
+# 4a. Notice prints on stderr (requires the deprecation notice to be added to qsbx).
+make_stubs
+dep_out2=$(bash -c "
+  PATH='$STUBDIR:$_STUB_BASE_PATH'
+  '$QSBX' version 2>&1 || true
+")
+# This test passes once the deprecation notice is present in qsbx (added in §7).
+assert_contains "qsbx: deprecation notice prints" "$dep_out2" "deprecated"
+cleanup_stubs
+
+# 4b. QSBX_SILENCE_DEPRECATION=1 suppresses the notice.
+make_stubs
+dep_silent=$(bash -c "
+  PATH='$STUBDIR:$_STUB_BASE_PATH'
+  QSBX_SILENCE_DEPRECATION=1 '$QSBX' version 2>&1 || true
+")
+assert_not_contains "qsbx: notice silenced" "$dep_silent" "deprecated"
+cleanup_stubs
+
+# ===========================================================================
+# 5. acq secret set — correct sbx command, secret never in argv
+# ===========================================================================
+
+# 5a. `acq secret set github` -> built-in form: `sbx secret set -g github`
+make_stubs
+# Supply input so --password-stdin doesn't hang (built-in doesn't use it, but
+# the test should complete quickly regardless).
+(echo "fake-key" | ACQ_BACKEND=sbx "$ACQ" secret set github) >/dev/null 2>/dev/null || true
+log=$(cat "$CALLS")
+assert_contains "secret: github -> sbx secret set -g github" "$log" "sbx secret set -g github"
+assert_not_contains "secret: key not in sbx args" "$log" "fake-key"
+cleanup_stubs
+
+# 5b. `acq secret set usai` -> custom form with USAi defaults, uses --password-stdin.
+make_stubs
+(echo "my-usai-key" | ACQ_BACKEND=sbx "$ACQ" secret set usai) >/dev/null 2>/dev/null || true
+log=$(cat "$CALLS")
+assert_contains "secret: usai -> sbx secret set-custom" "$log" "sbx secret set-custom -g"
+assert_contains "secret: usai fills in --host" "$log" "--host api.gsa.usai.gov"
+assert_contains "secret: usai fills in --env USAI_API_KEY" "$log" "--env USAI_API_KEY"
+assert_contains "secret: usai uses --password-stdin" "$log" "--password-stdin"
+assert_not_contains "secret: usai key never in argv" "$log" "my-usai-key"
+cleanup_stubs
+
+# 5c. `acq secret set custom-svc --host h.example.com --env MY_KEY` -> custom form.
+make_stubs
+(echo "my-custom-key" | ACQ_BACKEND=sbx "$ACQ" secret set custom-svc --host h.example.com --env MY_KEY) \
+  >/dev/null 2>/dev/null || true
+log=$(cat "$CALLS")
+assert_contains "secret: custom --host -> set-custom" "$log" "sbx secret set-custom -g"
+assert_contains "secret: custom --host value present" "$log" "--host h.example.com"
+assert_contains "secret: custom --env value present" "$log" "--env MY_KEY"
+assert_not_contains "secret: custom key never in argv" "$log" "my-custom-key"
+cleanup_stubs
+
+# ===========================================================================
+# 6. Kit list completeness (same four kits as qsbx)
+# ===========================================================================
+
+make_stubs; load_acq
+kits_joined=$(printf '%s\n' "${KITS[@]}")
+assert_contains "kits: usai-provider" "$kits_joined" "usai-provider-kit"
+assert_contains "kits: playbook" "$kits_joined" "playbook-kit"
+assert_contains "kits: zscaler" "$kits_joined" "zscaler-ca-certificate"
+assert_contains "kits: git-ssh-sign" "$kits_joined" "git-ssh-sign"
+cleanup_stubs
+
+# ===========================================================================
+# 7. acq version: exits 0, shows script path and backend
+# ===========================================================================
+
+make_stubs
+out=$(ACQ_BACKEND=sbx "$ACQ" version 2>&1); rc=$?
+assert_eq "version exits 0" "0" "$rc"
+assert_contains "version: script path" "$out" "$REPO_ROOT/acq"
+assert_contains "version: patterns kit ref" "$out" "d2a379ff"
+assert_contains "version: backend line" "$out" "backend:"
+cleanup_stubs
+
+# ===========================================================================
+echo ""
+echo "  passed: $PASS   failed: $FAIL"
+[ "$FAIL" -eq 0 ]

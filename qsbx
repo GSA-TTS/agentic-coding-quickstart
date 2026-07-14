@@ -1271,6 +1271,14 @@ ensure_valid_key() {
 if [ -n "${QSBX_SOURCE_ONLY:-}" ]; then  return 0 2>/dev/null || exit 0
 fi
 
+# qsbx is deprecated in 1.1.0. Use ./acq instead (same commands on the sbx backend).
+# This notice is silenceable for tests/CI; qsbx remains fully functional until 2.0.0.
+if [ -z "${QSBX_SILENCE_DEPRECATION:-}" ]; then
+  echo "qsbx: note — qsbx is deprecated; use ./acq (same commands on the sbx backend)." >&2
+  echo "      This notice will be removed when qsbx is removed in 2.0.0." >&2
+  echo "      Set QSBX_SILENCE_DEPRECATION=1 to hide this." >&2
+fi
+
 subcommand="${1:-}"
 
 case "$subcommand" in

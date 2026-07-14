@@ -1,0 +1,362 @@
+#!/bin/bash
+#
+# acq — pluggable-backend wrapper for agentic-coding-quickstart
+#
+# acq is the forward path; qsbx is frozen and deprecated (see §8 of the
+# handoff doc). acq defaults to the sbx backend and reuses the same four
+# sbx kits as qsbx, unchanged, for 1.1.x.
+#
+# Usage:
+#   acq run AGENT PATH [...] [-- AGENT_ARGS...]  # create+attach or re-attach
+#   acq create AGENT PATH [...]                   # create detached
+#   acq ls                                        # list sandboxes
+#   acq stop NAME                                 # stop without removing
+#   acq rm NAME                                   # remove
+#   acq exec NAME -- CMD...                       # run command inside
+#   acq cp SRC DST                                # copy in/out
+#   acq ports NAME [--publish ...]                # list/publish ports
+#   acq secret set SERVICE [...]                  # set a secret (see sbx.sh)
+#   acq usai-rotate-api-key                       # rotate the USAi key
+#   acq version                                   # version + backend info
+#   acq doctor                                    # backend health + config
+#   acq backend list                              # list detected backends
+#   acq backend set NAME                          # persist default backend
+#   *                                             # pass through to backend CLI
+#
+# Global flag (before subcommand):
+#   --backend <name>    Override backend for this invocation
+
+set -euo pipefail
+
+# Resolve the absolute directory containing this script, following symlinks.
+_acq_script_dir() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [ -h "$src" ]; do
+    dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+    src=$(readlink "$src")
+    case "$src" in
+      /*) ;;
+      *) src="$dir/$src" ;;
+    esac
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
+ACQ_SCRIPT_DIR=$(_acq_script_dir) || { echo "acq: could not resolve script directory" >&2; exit 1; }
+export ACQ_SCRIPT_DIR
+
+# The resolved path of this acq script (for version output).
+ACQ_RESOLVED_PATH="${ACQ_SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+
+# Standalone helper scripts.
+ROTATE_SCRIPT="${ACQ_SCRIPT_DIR}/scripts/rotate-apikey"
+
+# Source common backend-agnostic logic.
+# shellcheck disable=SC1091
+. "${ACQ_SCRIPT_DIR}/acq.backends/common.sh"
+
+# ---------------------------------------------------------------------------
+# Print version/identity
+# ---------------------------------------------------------------------------
+
+print_version() {
+  local resolved_backend="${ACQ_RESOLVED_BACKEND:-unknown}"
+  echo "acq"
+  echo "  script:      ${ACQ_RESOLVED_PATH}"
+  echo "  clone dir:   ${ACQ_SCRIPT_DIR}"
+  if command -v git >/dev/null 2>&1 \
+      && git -C "${ACQ_SCRIPT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local branch sha dirty=""
+    branch=$(git -C "${ACQ_SCRIPT_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+    sha=$(git -C "${ACQ_SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo "?")
+    git -C "${ACQ_SCRIPT_DIR}" diff --quiet 2>/dev/null && \
+      git -C "${ACQ_SCRIPT_DIR}" diff --cached --quiet 2>/dev/null || dirty=" (dirty)"
+    echo "  git:         ${branch}@${sha}${dirty}"
+  else
+    echo "  git:         (not a git clone — cannot report branch/commit)"
+  fi
+  echo "  backend:     ${resolved_backend}"
+  if command -v acq_backend_version >/dev/null 2>&1; then
+    echo "  backend ver: $(acq_backend_version 2>/dev/null || echo '?')"
+  fi
+  echo "  patterns kit ref: ${PATTERNS_KIT_REF}"
+}
+
+# ---------------------------------------------------------------------------
+# Allow tests to source this script without running the dispatch.
+# ---------------------------------------------------------------------------
+if [ -n "${ACQ_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
+
+# ---------------------------------------------------------------------------
+# Pre-parse global --backend flag (must appear before the subcommand).
+# ---------------------------------------------------------------------------
+explicit_backend=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --backend=*)
+      explicit_backend="${1#--backend=}"
+      shift
+      ;;
+    --backend)
+      shift
+      explicit_backend="${1:-}"
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+subcommand="${1:-}"
+
+# ---------------------------------------------------------------------------
+# Subcommands that don't need a backend resolved first.
+# ---------------------------------------------------------------------------
+
+case "$subcommand" in
+  backend)
+    shift
+    sub2="${1:-}"
+    case "$sub2" in
+      list)
+        # List detected/installed backends.
+        printf 'Installed backends:\n'
+        if command -v sbx >/dev/null 2>&1; then
+          local_ver=$(sbx version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 | sed 's/^v//' || echo "?")
+          printf '  sbx  v%s\n' "$local_ver"
+        else
+          printf '  sbx  (not found)\n'
+        fi
+        printf '\nComing in 1.2.x:\n  msb  (not found)\n'
+        ;;
+      set)
+        shift
+        local_backend="${1:-}"
+        [ -z "$local_backend" ] && { echo "acq: backend set: missing backend name" >&2; exit 1; }
+        local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+        mkdir -p "$(dirname "$local_config_file")"
+        printf 'backend: %s\n' "$local_backend" > "$local_config_file"
+        echo "acq: default backend set to '${local_backend}' in ${local_config_file}" >&2
+        ;;
+      *)
+        echo "acq: unknown backend subcommand '${sub2}'. Try: acq backend list | set NAME" >&2
+        exit 1
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# version/doctor: resolve backend best-effort (they work even if none detected).
+# ---------------------------------------------------------------------------
+case "$subcommand" in
+  version|--version|-v)
+    # Resolve backend best-effort so version can report it; don't fail.
+    acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+    print_version
+    exit 0
+    ;;
+
+  doctor)
+    acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+    acq_print_doctor
+    exit 0
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Resolve and load the backend adapter (required for all other subcommands).
+# ---------------------------------------------------------------------------
+acq_resolve_backend "${explicit_backend}"
+
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+
+case "$subcommand" in
+  usai-rotate-api-key)
+    shift
+    if [ ! -x "$ROTATE_SCRIPT" ]; then
+      echo "acq: scripts/rotate-apikey not found or not executable" >&2
+      exit 1
+    fi
+    exec "$ROTATE_SCRIPT" "$@"
+    ;;
+
+  create)
+    shift
+    acq_backend_prepare
+    local_name=$(derive_name "$@") || exit 1
+    [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
+    acq_backend_provision "$local_name" "$@"
+    ;;
+
+  run)
+    shift
+    acq_backend_prepare
+
+    # Split args into create portion and agent args after "--".
+    create_args=()
+    agent_args=()
+    seen_sep=0
+    for arg in "$@"; do
+      if [ "$seen_sep" -eq 1 ]; then
+        agent_args+=("$arg")
+      elif [ "$arg" = "--" ]; then
+        seen_sep=1
+      else
+        create_args+=("$arg")
+      fi
+    done
+
+    first=""
+    [ "${#create_args[@]}" -gt 0 ] && first=$(first_positional "${create_args[@]}")
+
+    if [ -n "$first" ] && is_known_agent "$first"; then
+      # AGENT form: create if missing, then attach.
+      local_name=$(derive_name "${create_args[@]}") || exit 1
+      [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
+
+      if acq_backend_exists "$local_name"; then
+        acq_backend_ensure_kits_applied "$local_name"
+      else
+        acq_backend_provision "$local_name" "${create_args[@]}"
+      fi
+
+      # Validate USAi key before attaching.
+      ensure_valid_key "$local_name" "${create_args[@]}"
+
+      # Advisories.
+      warn_if_no_ssh_signing_key
+
+      ws=$(workspace_path "${create_args[@]}"); [ -n "$ws" ] || ws="$PWD"
+      warn_if_no_git_identity "$ws"
+
+      if [ "${#agent_args[@]}" -gt 0 ]; then
+        acq_backend_attach "$local_name" -- "${agent_args[@]}"
+      else
+        acq_backend_attach "$local_name"
+      fi
+
+    elif [ -n "$first" ] && acq_backend_exists "$first"; then
+      # Existing sandbox by name.
+      acq_backend_ensure_kits_applied "$first"
+      warn_if_no_ssh_signing_key
+
+      # Rebuild arg list without the sandbox name (first occurrence only).
+      rest=(); dropped=0
+      for arg in "${create_args[@]}"; do
+        if [ "$dropped" -eq 0 ] && [ "$arg" = "$first" ]; then dropped=1; continue; fi
+        rest+=("$arg")
+      done
+
+      if [ "${#agent_args[@]}" -gt 0 ]; then
+        acq_backend_attach "$first" -- "${agent_args[@]}"
+      elif [ "${#rest[@]}" -gt 0 ]; then
+        acq_backend_attach "$first" "${rest[@]}"
+      else
+        acq_backend_attach "$first"
+      fi
+    else
+      # Pass through.
+      acq_backend_attach "${create_args[@]+"${create_args[@]}"}"
+    fi
+    ;;
+
+  ls)
+    shift
+    acq_backend_list "$@"
+    ;;
+
+  stop)
+    shift
+    local_name="${1:-}"
+    [ -n "$local_name" ] || { echo "acq: stop: missing sandbox name" >&2; exit 1; }
+    acq_backend_stop "$local_name"
+    ;;
+
+  rm)
+    shift
+    local_name="${1:-}"
+    [ -n "$local_name" ] || { echo "acq: rm: missing sandbox name" >&2; exit 1; }
+    acq_backend_terminate "$local_name"
+    ;;
+
+  exec)
+    shift
+    local_name="${1:-}"
+    [ -n "$local_name" ] || { echo "acq: exec: missing sandbox name" >&2; exit 1; }
+    shift
+    acq_backend_run "$local_name" "$@"
+    ;;
+
+  cp)
+    shift
+    acq_backend_cp "${1:-}" "${2:-}"
+    ;;
+
+  ports)
+    shift
+    local_name="${1:-}"
+    [ -n "$local_name" ] || { echo "acq: ports: missing sandbox name" >&2; exit 1; }
+    shift
+    acq_backend_ports "$local_name" "$@"
+    ;;
+
+  secret)
+    shift
+    sub2="${1:-}"
+    case "$sub2" in
+      set)
+        shift
+        acq_backend_secret_set "$@"
+        ;;
+      *)
+        echo "acq: unknown secret subcommand '${sub2}'. Supported: acq secret set SERVICE [...]" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  "")
+    # No subcommand: print usage.
+    cat >&2 <<'USAGE'
+acq — agentic coding quickstart wrapper (sbx backend)
+
+Usage:
+  acq [--backend <name>] <subcommand> [args...]
+
+Subcommands:
+  run AGENT PATH [...]       Create+attach or re-attach a sandbox
+  create AGENT PATH [...]    Create a sandbox (detached)
+  ls                         List sandboxes
+  stop NAME                  Stop a sandbox
+  rm NAME                    Remove a sandbox
+  exec NAME -- CMD...        Run a command inside a sandbox
+  cp SRC DST                 Copy files in/out (NAME:path syntax)
+  ports NAME [--publish ...]  List/publish ports
+  secret set SERVICE [...]   Set a secret (--host/--env for custom)
+  usai-rotate-api-key        Rotate the USAi API key
+  version                    Show acq version + backend info
+  doctor                     Backend health check + write default config
+  backend list               List detected backends
+  backend set NAME           Persist the default backend
+
+Global flags (before subcommand):
+  --backend <name>           Override the active backend
+
+Unknown subcommands are passed through to the active backend's CLI.
+
+See docs/QUICKSTART.md and docs/BACKEND_GUIDE.md for more.
+USAGE
+    exit 1
+    ;;
+
+  *)
+    # Pass unknown subcommands through to the active backend CLI unchanged.
+    # For sbx: `sbx <subcommand> [args...]`
+    command "${ACQ_RESOLVED_BACKEND}" "$subcommand" "$@"
+    ;;
+esac

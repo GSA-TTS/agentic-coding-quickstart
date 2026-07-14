@@ -3,7 +3,7 @@ title: "Agentic Coding Quickstart - Agent Rules"
 description: "Behavioral rules for AI coding agents operating with SBX + USAi"
 status: canonical
 tier: 1
-last_updated: "2026-06-26"
+last_updated: "2026-07-14"
 audience: "developers"
 keywords: ["AGENTS.md", "sbx", "usai", "sandbox", "agent-rules", "workspace"]
 related_files: ["docs/KNOWN_FAILURE_MODES.md", "docs/adr/0001-sbx-usai-agent-execution-architecture.md"]
@@ -23,7 +23,7 @@ review_cycle: "quarterly"
 
 ## Workspace Structure
 
-This repository is a thin **wrapper** (`qsbx`) that stands up a working,
+This repository is a thin **wrapper** (`acq`) that stands up a working,
 federally-configured agent sandbox by composing existing tools: the `sbx` CLI
 plus four sbx **mixin kits** hosted in the community
 [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
@@ -33,40 +33,18 @@ typical layout:
 
 ```
 my-workspace/                       # Parent folder (user creates this)
-├── agentic-coding-quickstart/      # THIS REPO - the qsbx wrapper + docs
+├── agentic-coding-quickstart/      # THIS REPO - the acq wrapper + docs
 │   ├── AGENTS.md                   # You are here (rules for working ON this repo)
-│   ├── qsbx                        # sbx wrapper: applies the kits to each sandbox
-│   ├── scripts/                    # helper scripts (USAi key rotation)
+│   ├── acq                         # Recommended entry point: pluggable-backend wrapper
+│   ├── acq.backends/               # Backend adapters (sbx, future: msb)
+│   ├── qsbx                        # DEPRECATED: use acq instead (removed in 2.0.0)
+│   ├── scripts/                    # helper scripts (USAi key rotation, tests)
 │   └── docs/                       # Setup guides and references
 └── my-app/                         # User's project(s)
 ```
 
-When `qsbx` creates a sandbox it applies four kits by pinned remote reference
+When `acq` creates a sandbox it applies four kits by pinned remote reference
 (`--kit git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=<sha>&dir=…`):
-
-- **`usai-provider`** — stages a USAi `opencode.jsonc` at `~/usai-config/` and,
-  at container startup, merges it into OpenCode's **global** config path
-  (`~/.config/opencode/opencode.jsonc`) — copying verbatim into an empty global
-  dir, deep-merging into an existing one — so OpenCode uses the GSA USAi gateway
-  (allow-listing USAi egress). It no longer sets `OPENCODE_CONFIG`.
-- **`agentic-coding-playbook`** — at container startup, clones the playbook at a
-  pinned ref into `~/.agentic-coding-playbook` and symlinks its `AGENTS.md` into
-  each agent's rules path (e.g. `~/.config/opencode/AGENTS.md`) and each skill
-  into `~/.agents/skills`.
-- **`zscaler-ca-certificate`** — installs the public Zscaler Root CA into the
-  sandbox trust store so HTTPS works on Zscaler-inspected hosts (harmless
-  elsewhere).
-- **`git-ssh-sign`** — signs git commits/tags with the SSH key forwarded from
-  the host's SSH agent (the private key never enters the sandbox). Fails closed
-  if no host key is loaded; `qsbx` warns before attaching.
-
-So every sandbox picks up the USAi config, federal rules, skills, CA trust, and
-commit signing declaratively. `qsbx` also handles the `sbx` prerequisites
-automatically (allow-listing the kit source; requiring sbx ≥ 0.35.0). Per-kit
-design rationale lives with the kits in the patterns repo.
-
-Applying the kits directly (without `qsbx`) is equivalent — pass the same four
-`--kit` refs to `sbx run`.
 
 ### Agent Resource Access
 
@@ -460,12 +438,16 @@ The agent MUST:
 - [x] Prefer 1 config file + 1 command over complex setups
 - [x] Document outcomes clearly enough for another engineer to follow
 
-**One-command bootstrap:** `./qsbx run opencode .` (creates sandbox with config mounted, then attaches)
+**One-command bootstrap:** `./acq run opencode .` (creates sandbox with config mounted, then attaches)
 **One-command verify:** `sbx exec <sandbox-name> <verify-command>`
 
-> **Note:** `qsbx run` is the preferred method — it creates the sandbox if needed
-> (mounting this clone as global config), then attaches. qsbx uses the clone it
+> **Note:** `acq run` is the preferred method — it creates the sandbox if needed
+> (mounting this clone as global config), then attaches. acq uses the clone it
 > lives in; export `QUICKSTART_CLONE` only to override that.
+>
+> **Migrating from qsbx?** `qsbx` is deprecated; replace `./qsbx` with `./acq`
+> — commands are identical on the sbx backend. Set `QSBX_SILENCE_DEPRECATION=1`
+> to suppress the deprecation notice in scripts/CI.
 
 **ADR location:** `docs/adr/`
 
@@ -481,7 +463,7 @@ The agent MUST:
 
 ### Execution
 
-- `qsbx run opencode .` is the sanctioned bootstrap — it auto-creates a sandbox (mounting this clone as global config) and is pre-approved
+- `acq run opencode .` is the sanctioned bootstrap — it auto-creates a sandbox (mounting this clone as global config) and is pre-approved
 - `sbx run` for running agents (creates sandbox automatically)
 - `sbx create` + `sbx exec` for manual sandbox management
 - Avoid long-lived sandboxes unless required for testing
@@ -498,6 +480,7 @@ The agent MUST:
 - Over-engineering simple tests
 - Using deprecated `docker sandbox` commands (use `sbx` CLI instead)
 - Assuming Docker Desktop is required (it is not)
+- Using `./qsbx` instead of `./acq` for new work (qsbx is deprecated; use acq)
 
 ---
 
