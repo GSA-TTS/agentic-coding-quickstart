@@ -99,27 +99,40 @@ sbx kits it applies — and their tests (permission-matrix, model-sync, per-kit
 repo under `integrations/isolation/sbx-kits/`. Changes to provider config,
 rules, skills, or CA trust belong there.
 
-The one exception is `qsbx`'s destructive pre-kit migration path, which has an
-offline unit harness (stubbed `sbx`/`opencode`, no Docker or network):
+There are two offline unit harnesses (stubbed `sbx`/`opencode`, no Docker or network):
+
+- **`scripts/test-acq`** — covers `acq` dispatch, backend resolution, secret
+  command shapes, kit list completeness, and the qsbx deprecation notice. Run
+  after changing `acq`, `acq.backends/common.sh`, or `acq.backends/sbx.sh`.
+
+  ```bash
+  ./scripts/test-acq
+  ```
+
+- **`scripts/test-migrate-or-halt`** — covers `qsbx`'s session-preserving
+  recreate path (route 1 of the USAi stale-placeholder recovery; see
+  ADR-0008/ADR-0009). Run after changing `migrate_or_halt`, `halt_with_options`, or
+  `offer_update_stale_placeholder`.
 
 ```bash
 ./scripts/test-migrate-or-halt
 ```
 
-Run it after changing `migrate_or_halt`, `halt_with_options`, or the auto-heal
-gate. It asserts, among other things, that a sandbox is **never** removed
-without a verified session export.
+It asserts, among other things, that a sandbox
+is **never** removed without a verified session export.
 
-To verify the same migration path end-to-end against the **real** toolchain
-(requires a host that can create sandboxes — Docker + KVM, `sbx login` done):
+To verify `acq`/`qsbx`'s in-place healing of a pre-kit sandbox end-to-end against the
+**real** toolchain (requires a host that can create sandboxes — Docker + KVM,
+`sbx login` done, sbx >= 0.35.0):
 
 ```bash
 ./scripts/verify-migrate-live
 ```
 
-It creates a throwaway pre-kit sandbox, seeds a session, runs the migration, and
-asserts the recreated sandbox has a working USAi provider with the session
-preserved — then removes the throwaway sandbox. It cannot run inside a sandbox.
+It creates a throwaway pre-kit sandbox, plants a state marker, runs `acq` to
+heal it in place with `sbx kit add`, and asserts the sandbox has a working USAi
+provider with its state preserved — then removes the throwaway sandbox. It cannot
+run inside a sandbox.
 
 ### Quick pre-push check
 

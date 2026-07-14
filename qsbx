@@ -31,7 +31,7 @@
 # other subcommands pass straight through to sbx.
 #
 # Remote kits require the source prefix to be on sbx's kit.allowedSources
-# allowlist (a v0.34 safety gate). qsbx adds it automatically at the start of any
+# allowlist (a v0.34+ safety gate). qsbx adds it automatically at the start of any
 # create/run — no manual `sbx settings` step. See ensure_kit_sources_allowed().
 #
 # qsbx is also the single entry point for this repo's sbx extensions:
@@ -208,26 +208,26 @@ if [ -n "$QSBX_EXTRA_KIT_SOURCES" ]; then
   KIT_SOURCE_PREFIXES+=("${_extra_sources[@]}")
 fi
 
-# In-place auto-heal of sandboxes created before the kit migration is currently
-# DISABLED, gated behind this flag, because of an upstream sbx bug: `sbx kit add`
-# fails ("failed to read tar header: unexpected EOF") on any kit that ships a
-# static files/ payload (docker/sbx-releases#133). The usai-provider kit ships
-# files/opencode.jsonc, so it cannot be injected into a running sandbox — and a
-# sandbox without the USAi provider config is unusable (no USAi provider, no
-# endpoint, no models), so healing only the other two kits is pointless. Instead
-# of a doomed `sbx kit add`, qsbx offers an assisted session migration (see
-# migrate_or_halt) or halts with documented options. Re-enable this (export
-# QSBX_AUTOHEAL_KITS=1) once #133 is fixed and `sbx kit add` on usai-provider is
-# verified. The healing code is preserved in ensure_kit_applied for that day.
-# Tracking: GSA-TTS/agentic-coding-quickstart#188.
-QSBX_AUTOHEAL_KITS="${QSBX_AUTOHEAL_KITS:-0}"
+# In-place healing of sandboxes created before qsbx applied a given kit (e.g.
+# created with an older qsbx, or a plain `sbx run` without the --kit refs) is
+# done by `sbx kit add`. As of sbx 0.35.0 `sbx kit add` RECREATES the sandbox
+# container with the augmented kit set and PRESERVES state (docker/sbx-releases
+# fixed the earlier #133 defect, where `sbx kit add` failed with "failed to read
+# tar header: unexpected EOF" on any kit shipping a static files/ payload — which
+# the usai-provider kit does). Because qsbx now requires sbx >= 0.35.0
+# (require_sbx_version), healing runs unconditionally; there is no longer a
+# feature flag gating it. See ensure_kit_applied and ADR-0009.
 
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 KEY_MGMT_URL="https://console.gsa.usai.gov/key-management"
 
 # Minimum sbx version qsbx requires. Remote SHA-pinned kit refs + the v2 kit
-# schema + `sbx policy init` all landed in sbx 0.34.0.
-MIN_SBX_VERSION="0.34.0"
+# schema + `sbx policy init` landed in 0.34.0; sbx 0.35.0 makes `sbx kit add`
+# recreate the sandbox container preserving state (fixing #133), which qsbx
+# relies on to heal pre-kit sandboxes in place (see ensure_kit_applied). NOTE:
+# sbx 0.35.x ships NO Linux/ARM64 build (deferred to 0.36.x per the release
+# notes); require_sbx_version detects that arch and gives targeted guidance.
+MIN_SBX_VERSION="0.35.0"
 
 # Max seconds to wait for `sbx exec` to become usable in a sandbox. Right after
 # `sbx create` (or the first touch of a stopped sandbox), sbx exec fails with
@@ -251,7 +251,7 @@ ROTATE_SCRIPT="$SCRIPT_DIR/scripts/rotate-apikey"
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
 # Ensure the kit source prefixes qsbx needs are on sbx's kit.allowedSources
-# allowlist, so the remote --kit refs resolve. sbx v0.34 restricts kit installs
+# allowlist, so the remote --kit refs resolve. sbx (v0.34+) restricts kit installs
 # to an allowlist of source prefixes (default: ["docker.io/"]); a Git URL fails
 # until its host/path prefix is added. Rather than make this a documented manual
 # setup step, qsbx ensures the prefixes are present at the top of any create/run.
@@ -331,7 +331,7 @@ _kit_sources_manual_hint() {
 
 # Compare two dotted version strings. Echoes 0 if A >= B, 1 otherwise. Pads
 # missing components with 0 and compares numerically per component, so e.g.
-# 0.34 >= 0.34.0 and 0.34.1 >= 0.34.0. Non-numeric suffixes on a component
+# 0.35 >= 0.35.0 and 0.35.1 >= 0.35.0. Non-numeric suffixes on a component
 # (e.g. a "-rc1") are stripped to their leading digits before comparison.
 version_ge() {
   local a="$1" b="$2" i a_part b_part
@@ -352,10 +352,16 @@ EOF
   echo 0
 }
 
-# Require sbx >= MIN_SBX_VERSION. The kit workflow depends on v2-schema kit
-# support and `sbx policy init`, both introduced in 0.34.0. If sbx is missing or
-# its version can't be parsed, warn but don't block (don't fail closed on a
-# version we simply couldn't read).
+# Require sbx >= MIN_SBX_VERSION. qsbx depends on v2-schema kit support and
+# `sbx policy init` (0.34.0) and on `sbx kit add` recreating the sandbox
+# container while preserving state (0.35.0), which is how pre-kit sandboxes heal
+# in place. If sbx is missing or its version can't be parsed, warn but don't
+# block (don't fail closed on a version we simply couldn't read).
+#
+# ARM64 CAVEAT: sbx 0.35.x publishes NO Linux/ARM64 build (deferred to 0.36.x per
+# the release notes), so a Linux/ARM64 host literally cannot install a version
+# that satisfies this floor yet. When we detect that arch AND an older sbx, we
+# give targeted guidance instead of a generic "upgrade" message.
 require_sbx_version() {
   if ! command -v sbx >/dev/null 2>&1; then
     echo "error: sbx CLI not found on PATH. Install sbx >= $MIN_SBX_VERSION." >&2
@@ -364,7 +370,7 @@ require_sbx_version() {
   fi
 
   local raw current
-  # `sbx version` prints e.g. "sbx version: v0.34.0 <sha>". Extract the first
+  # `sbx version` prints e.g. "sbx version: v0.35.0 <sha>". Extract the first
   # dotted-numeric token, tolerating a leading "v".
   raw=$(sbx version 2>/dev/null || true)
   current=$(printf '%s\n' "$raw" | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 | sed 's/^v//')
@@ -375,8 +381,24 @@ require_sbx_version() {
   fi
 
   if [ "$(version_ge "$current" "$MIN_SBX_VERSION")" -ne 0 ]; then
+    # Linux/ARM64 hosts can't get a 0.35.x build yet — give them a specific path
+    # rather than an "upgrade" message they can't act on.
+    local os arch
+    os=$(uname -s 2>/dev/null || echo unknown)
+    arch=$(uname -m 2>/dev/null || echo unknown)
+    if [ "$os" = "Linux" ] && { [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; }; then
+      echo "error: qsbx requires sbx >= $MIN_SBX_VERSION, but found $current, and" >&2
+      echo "       sbx $MIN_SBX_VERSION.x publishes NO Linux/ARM64 build (deferred to" >&2
+      echo "       0.36.x per the sbx release notes). On Linux/ARM64 you cannot yet" >&2
+      echo "       install a version that satisfies this floor. Options:" >&2
+      echo "         - run qsbx on an x86_64 host (sbx has a 0.35.x build there), or" >&2
+      echo "         - wait for the sbx 0.36.x release, which restores ARM64 builds." >&2
+      echo "       See README.md (Step 2) for the ARM64 note." >&2
+      exit 1
+    fi
     echo "error: qsbx requires sbx >= $MIN_SBX_VERSION, but found $current." >&2
-    echo "       qsbx applies this repo as an sbx kit (--kit), which needs v0.34.0+." >&2
+    echo "       qsbx heals pre-kit sandboxes with 'sbx kit add', which recreates" >&2
+    echo "       the sandbox preserving state as of sbx 0.35.0." >&2
     echo "       Upgrade sbx (see README.md, Step 2) and retry." >&2
     exit 1
   fi
@@ -646,17 +668,16 @@ sbx_exec_retry() {
   return "$rc"
 }
 
-# In-place kit healing for pre-kit sandboxes. DISABLED by default behind
-# QSBX_AUTOHEAL_KITS (see the flag definition above) because upstream #133 breaks
-# `sbx kit add` on the file-shipping usai-provider kit. The body is preserved
-# intact so it can be re-enabled once #133 is fixed. Callers must not rely on
-# this to fix a USAi-less sandbox while the flag is off — use migrate_or_halt.
+# In-place kit healing for pre-kit sandboxes (created by an older qsbx, or a
+# plain `sbx run` without the --kit refs). For each built-in kit we probe whether
+# its footprint is present in the sandbox and, if not, inject it with `sbx kit
+# add`. As of sbx 0.35.0 `sbx kit add` recreates the sandbox container with the
+# augmented kit set and PRESERVES state, so this heals a USAi-less sandbox in
+# place — no export/recreate/import dance needed (qsbx requires sbx >= 0.35.0;
+# see require_sbx_version and ADR-0009). Best-effort: if a `kit add` fails, warn
+# with the manual recovery step and continue to attach.
 ensure_kit_applied() {
   local name="$1"
-
-  # Auto-heal is gated off pending upstream sbx#133. When disabled, this is a
-  # no-op; sandboxes missing the USAi kit are handled by migrate_or_halt instead.
-  [ "$QSBX_AUTOHEAL_KITS" = "1" ] || return 0
 
   ensure_kit_sources_allowed
 
@@ -666,7 +687,7 @@ ensure_kit_applied() {
   #    shell anyway — see USAI_KIT_CONFIG_PATH.)
   if kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "qsbx: '$name' is missing the USAi kit (no config file); injecting it" >&2
-    echo "      with 'sbx kit add'..." >&2
+    echo "      with 'sbx kit add' (recreates the sandbox, preserving state)..." >&2
     if sbx kit add "$name" "$USAI_KIT" </dev/null >/dev/null 2>&1; then
       # The kit's startup step merges its config into the GLOBAL path
       # (~/.config/opencode/opencode.jsonc). A leftover dangling SYMLINK there
@@ -679,7 +700,7 @@ ensure_kit_applied() {
         </dev/null >/dev/null 2>&1 || true
       echo "qsbx: USAi kit injected into '$name'." >&2
     else
-      echo "qsbx: warning: 'sbx kit add' (USAi kit) failed for '$name' (it is EXPERIMENTAL)." >&2
+      echo "qsbx: warning: 'sbx kit add' (USAi kit) failed for '$name'." >&2
       echo "      Recover with: sbx kit add '$name' '$USAI_KIT'" >&2
     fi
   fi
@@ -691,7 +712,7 @@ ensure_kit_applied() {
     if sbx kit add "$name" "$PLAYBOOK_KIT" </dev/null >/dev/null 2>&1; then
       echo "qsbx: playbook kit injected into '$name'. Restart the agent to pick it up." >&2
     else
-      echo "qsbx: warning: 'sbx kit add' (playbook kit) failed for '$name' (it is EXPERIMENTAL)." >&2
+      echo "qsbx: warning: 'sbx kit add' (playbook kit) failed for '$name'." >&2
       echo "      Recover with: sbx kit add '$name' '$PLAYBOOK_KIT'" >&2
     fi
   fi
@@ -702,7 +723,7 @@ ensure_kit_applied() {
     if sbx kit add "$name" "$ZSCALER_KIT" </dev/null >/dev/null 2>&1; then
       echo "qsbx: Zscaler CA kit injected into '$name'. Restart the agent to pick it up." >&2
     else
-      echo "qsbx: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name' (it is EXPERIMENTAL)." >&2
+      echo "qsbx: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name'." >&2
       echo "      Recover with: sbx kit add '$name' '$ZSCALER_KIT'" >&2
     fi
   fi
@@ -726,7 +747,7 @@ ensure_kit_applied() {
       # agent user's home; the marker is advisory, failures are non-fatal.
       sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.qsbx-extra-kits"' "$k" </dev/null >/dev/null 2>&1 || true
     else
-      echo "qsbx: warning: 'sbx kit add' (extra kit) failed for '$name' (it is EXPERIMENTAL)." >&2
+      echo "qsbx: warning: 'sbx kit add' (extra kit) failed for '$name'." >&2
       echo "      Recover with: sbx kit add '$name' '$k'" >&2
     fi
   done
@@ -750,52 +771,28 @@ sandbox_exists() {
 # with the kit's spec.yaml.
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 
-# True (0) iff an existing sandbox lacks the USAi provider config — i.e. it was
-# created before the kit migration. We probe for the staged config FILE the kit
-# ships (see USAI_KIT_CONFIG_PATH), not the merged global config or any env var,
-# because the staged file is the most reliable "kit applied" signal.
-#
-# Waits for exec readiness first: a stopped/just-touched sandbox's exec times out
-# for a while, and treating that as "config absent" would wrongly trigger a
-# destructive migration. If the sandbox never becomes exec-ready within the
-# budget, we FAIL CLOSED to "not missing" (return 1) — we do not tear down a
-# sandbox we could not even probe. Reuses kit_feature_absent, whose return 2
-# (probe ran but failed) is likewise treated as "not confirmed missing".
-sandbox_missing_usai() {
-  local name="$1" rc
-  if ! wait_for_exec_ready "$name"; then
-    echo "qsbx: '$name' did not become ready for exec within ${QSBX_EXEC_READY_TIMEOUT}s;" >&2
-    echo "      cannot determine whether the USAi kit is present. Not migrating." >&2
-    return 1   # fail closed: not confirmed missing
-  fi
-  kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"
-  rc=$?
-  [ "$rc" -eq 0 ]
-}
-
-# Print the manual recovery options for a USAi-less pre-kit sandbox, then exit
-# non-zero (fail closed). Used both when the user declines migration and when any
-# migration step fails. $1 = sandbox name.
+# Print the manual recovery options when a session-preserving recreate can't be
+# completed (declined by the user, or a migration step failed). Reached from the
+# ADR-0008 stale-placeholder recovery via migrate_or_halt; NOT from routine
+# pre-kit healing, which is now handled in place by ensure_kit_applied. Exits
+# non-zero (fail closed). $1 = sandbox name.
 halt_with_options() {
   local name="$1"
   cat >&2 <<EOF
-qsbx: The quickstart has been updated since sandbox '$name' was created, and it
-      now sets up sandboxes a different way. This one can't be used as-is.
+qsbx: Sandbox '$name' couldn't be recreated, so it was left as-is.
 
       What you can do:
-        1. Move your sessions to a new sandbox: re-run and answer 'y' at the
-           prompt. qsbx saves your chat sessions, recreates the sandbox the new
-           way (same name), and loads them back in.
-        2. Keep your existing sessions by switching to the previous quickstart
-           version, which still works with this sandbox as-is:
-             git checkout v0.11.0
-           Your chat history stays exactly where it is.
+        1. Try the session-preserving recreate again: re-run and answer 'y' at
+           the prompt. qsbx saves your chat sessions, recreates the sandbox the
+           current way (same name), and loads them back in.
+        2. Rebind this sandbox's USAi key in place (no delete) — re-run and, when
+           offered, decline the recreate and accept the rebind instead.
         3. Start over without your old chat history — delete this sandbox
            first, then create it fresh:
              sbx rm --force '$name'
              ./qsbx run opencode <your-project-folder>
 
-      More detail: docs/KNOWN_FAILURE_MODES.md (section 19).
+      More detail: docs/KNOWN_FAILURE_MODES.md (section 23).
 EOF
   exit 1
 }
@@ -815,11 +812,17 @@ _preserve_migration_exports() {
   fi
 }
 
-# Assisted migration for a USAi-less pre-kit sandbox. sbx has no rename, so to
-# give the working sandbox the ORIGINAL name we must remove the old one — which
-# is destructive. We therefore export first, verify we captured something, and
-# only then remove + recreate + import. If the user declines or any step fails,
-# we halt with options and never remove a sandbox without a verified export.
+# Session-preserving recreate of a sandbox. sbx has no rename, so to give the
+# rebuilt sandbox the ORIGINAL name we must remove the old one — which is
+# destructive. We therefore export first, verify we captured something, and only
+# then remove + recreate + import. If the user declines or any step fails, we
+# halt with options and never remove a sandbox without a verified export.
+#
+# Sole caller: the ADR-0008 stale-placeholder recovery
+# (offer_update_stale_placeholder), where the sandbox's baked-in USAI_API_KEY
+# placeholder no longer resolves and recreating it mints a current one. (Pre-kit
+# sandboxes no longer use this path — they heal in place via ensure_kit_applied /
+# `sbx kit add` on sbx >= 0.35.0; see ADR-0009.)
 #
 # Flow: prompt -> export --sanitize each session to a host temp dir -> verify
 # non-empty -> sbx rm --force old -> wait for name release -> create_with_config
@@ -829,13 +832,12 @@ migrate_or_halt() {
   local name="$1"; shift
   local create_args=("$@")
 
-  echo "qsbx: The quickstart has been updated since this sandbox was created, and" >&2
-  echo "      now sets up sandboxes a different way. This one can't be upgraded in" >&2
-  echo "      place, but qsbx can move your existing chat sessions over for you." >&2
+  echo "qsbx: To fix '$name', qsbx will recreate it — moving your existing chat" >&2
+  echo "      sessions across so you don't lose them." >&2
   echo "" >&2
   echo "      Here's what will happen:" >&2
   echo "        - Your sessions are saved (with sensitive details redacted)." >&2
-  echo "        - This sandbox is deleted and recreated the new way, same name." >&2
+  echo "        - This sandbox is deleted and recreated the current way, same name." >&2
   echo "        - Your saved sessions are loaded back in." >&2
   echo "" >&2
   echo "      This can't be undone. Your work in the current sandbox is replaced" >&2
@@ -1269,6 +1271,14 @@ ensure_valid_key() {
 if [ -n "${QSBX_SOURCE_ONLY:-}" ]; then  return 0 2>/dev/null || exit 0
 fi
 
+# qsbx is deprecated in 1.1.0. Use ./acq instead (same commands on the sbx backend).
+# This notice is silenceable for tests/CI; qsbx remains fully functional until 2.0.0.
+if [ -z "${QSBX_SILENCE_DEPRECATION:-}" ]; then
+  echo "qsbx: note — qsbx is deprecated; use ./acq (same commands on the sbx backend)." >&2
+  echo "      This notice will be removed when qsbx is removed in 2.0.0." >&2
+  echo "      Set QSBX_SILENCE_DEPRECATION=1 to hide this." >&2
+fi
+
 subcommand="${1:-}"
 
 case "$subcommand" in
@@ -1330,15 +1340,11 @@ case "$subcommand" in
       name=$(derive_name "${create_args[@]}") || exit 1
       [ -n "$name" ] || { echo "qsbx: could not determine sandbox name" >&2; exit 1; }
       if sandbox_exists "$name"; then
-        # Existing sandbox. If it predates the kit migration (no USAi config),
-        # in-place healing is blocked by upstream sbx#133 — offer to migrate its
-        # sessions into a fresh, working sandbox of the same name, or halt with
-        # options. Otherwise heal it in place (a no-op while auto-heal is gated).
-        if sandbox_missing_usai "$name"; then
-          migrate_or_halt "$name" "${create_args[@]}"
-        else
-          ensure_kit_applied "$name"
-        fi
+        # Existing sandbox. Heal any missing kits in place: on sbx >= 0.35.0
+        # `sbx kit add` recreates the container with the augmented kit set and
+        # preserves state, so a pre-kit (USAi-less) sandbox is fixed without any
+        # export/recreate/import dance. See ensure_kit_applied and ADR-0009.
+        ensure_kit_applied "$name"
       else
         create_with_config "$name" "${create_args[@]}"
       fi
@@ -1373,13 +1379,10 @@ case "$subcommand" in
       # to it by name (the positional-sandbox form is deprecated in sbx); else
       # pass through unchanged (e.g. flags-only, or `sbx run` with no args).
       if [ -n "$first" ] && sandbox_exists "$first"; then
-        # Existing sandbox attached by name. If it predates the kit migration,
-        # in-place healing is blocked by upstream sbx#133. We can't recreate it
-        # here (no agent positional was given, so we lack the create args), so we
-        # halt with options rather than attach to a USAi-less, unusable sandbox.
-        if sandbox_missing_usai "$first"; then
-          halt_with_options "$first"
-        fi
+        # Existing sandbox attached by name. Heal any missing kits in place:
+        # `sbx kit add` on sbx >= 0.35.0 recreates the container preserving
+        # state, so a pre-kit (USAi-less) sandbox is fixed without recreation
+        # arguments. See ensure_kit_applied and ADR-0009.
         ensure_kit_applied "$first"
         warn_if_no_ssh_signing_key
         # Attach-by-name: no workspace path is in the args, and the host's global

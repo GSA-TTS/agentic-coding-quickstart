@@ -3,9 +3,12 @@
 > **Audience:** GSA teams using AI coding agents
 > **Purpose:** Get AI coding agents running safely inside isolated sandboxes, connected to USAi
 
-**In one sentence:** this quickstart gets you running an AI coding agent connected to USAi in under 5 minutes, using `sbx`.
+**In one sentence:** this quickstart gets you running an AI coding agent connected to USAi in under 5 minutes, using `acq`, a CLI tool provided here (backed by `sbx`).
 
-**`sbx`** is a command-line tool from Docker — standalone, not part of Docker Desktop — that runs your AI coding agent inside an isolated sandbox, so the agent can only touch the files and network you allow.
+**`acq`** is the recommended entry point as of version 1.1.0. It wraps `sbx` — a command-line tool from Docker — providing a pluggable-backend architecture that will support additional isolation runtimes in future releases.
+
+> **Migrating from `qsbx`?** Replace `./qsbx` with `./acq` — all commands are
+> identical on the sbx backend. `qsbx` is deprecated and will be removed in 2.0.0.
 
 ## Agentic Coding Ecosystem
 
@@ -152,7 +155,20 @@ See [Docker's apt install docs](https://docs.docker.com/engine/install/ubuntu/#i
 > with `brew upgrade`.
 
 **Check it worked:** after `sbx login` finishes with no error, run `sbx version`.
-You should see a line like `sbx version: v0.32.0 <sha>`.
+You should see a line like `sbx version: v0.35.0 <sha>`.
+
+> [!IMPORTANT]
+> **acq (and qsbx) require `sbx` ≥ 0.35.0.** This is the release where `sbx kit add`
+> recreates a sandbox with the added kit while preserving its state, which is how
+> `acq` heals sandboxes created by an older version (see
+> [Staying Current](#staying-current)).
+>
+> **Linux/ARM64 note:** sbx `0.35.x` publishes **no Linux/ARM64 build** (deferred
+> to `0.36.x` per the sbx release notes). On a Linux/ARM64 host you can't yet
+> install a version that meets this floor — run `acq` on an x86_64 host, or wait
+> for the `0.36.x` release. `acq` detects this arch and prints the same guidance.
+
+---
 
 > [!IMPORTANT]
 > **If `sbx login` fails with a "Not enough seats" error**, like this:
@@ -209,14 +225,14 @@ in the list of allowed network destinations.
 ### Step 4: Create and run a sandbox (as often as you like)
 
 ```bash
-./qsbx run opencode /path/to/your/project
+./acq run opencode /path/to/your/project
 ```
 
-That's it. You're now running an AI coding agent with USAi access and restricted filesystem and network access.  Repeat this to create sandboxes for each project you want to work on.
+That's it. You're now running an AI coding agent with USAi access and restricted filesystem and network access. Repeat this to create sandboxes for each project you want to work on.
 
-**Want to know more about what `qsbx` is doing under the hood?** See [How It Works](#how-it-works).
+**Want to know more about what `acq` is doing under the hood?** See [How It Works](#how-it-works).
 
-**Need more details?** See the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
+**Need more details?** See the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md) and the [acq Quickstart](docs/QUICKSTART.md).
 
 **Working across multiple repos?** See [Multiple Workspaces](docs/QUICKSTART_SBX.md#multiple-workspaces) for mounting extra directories.
 
@@ -237,8 +253,8 @@ USAi API keys expire every 7 days, which is the most common cause of errors like
 Unauthorized: {"detail":"Not authenticated"}
 ```
 
-The simplest fix: end your session, then run `./qsbx run opencode <path>` again.
-`qsbx` validates the key on attach and walks you through rotating it when needed.
+The simplest fix: end your session, then run `./acq run opencode <path>` again.
+`acq` validates the key on attach and walks you through rotating it when needed.
 
 To rotate the key explicitly outside that workflow:
 
@@ -248,7 +264,7 @@ To rotate the key explicitly outside that workflow:
 4. With the key in your paste buffer, run:
 
    ```bash
-   ./qsbx usai-rotate-api-key
+   ./acq usai-rotate-api-key
    ```
 
    (or run the underlying `scripts/rotate-apikey` directly). It prompts for the
@@ -292,7 +308,7 @@ Sandboxes sign commits with the SSH key forwarded from your host (the
 No kit sets your identity, and — importantly — the sandbox has its **own home
 directory**, so your host's **global** git config (`~/.gitconfig`) is **not
 visible inside it**. Only the project's **repo-local** identity (stored in the
-workspace, which is mounted) reaches the sandbox. So `qsbx` checks the project's
+workspace, which is mounted) reaches the sandbox. So `acq` checks the project's
 local `user.email` before attaching and warns if it's unset. To fix it (one
 time, in the project):
 
@@ -321,23 +337,22 @@ For the signing mechanics and more failure modes, see the kit's
 </details>
 
 <details>
-<summary><strong>Pulled a branch but qsbx behaves like the old version</strong> (click to expand)</summary>
+<summary><strong>Pulled a branch but acq/qsbx behaves like the old version</strong> (click to expand)</summary>
 
 `git pull origin <branch>` does **not** switch you to that branch — it merges
 into the branch you are already on, so `Already up to date` does not mean your
-working tree changed. Also, if `qsbx`/`qsb` is on your `PATH` (e.g. a symlink in
+working tree changed. Also, if `acq`/`qsbx`/`qsb` is on your `PATH` (e.g. a symlink in
 `~/bin`), it may resolve to a **different clone** than the one you edited.
 
-Ask qsbx which file and clone are actually running:
+Ask acq which file and clone are actually running:
 
 ```bash
-qsbx version
+./acq version
 ```
 
 It prints the resolved script path, the clone directory, and that clone's
 `branch@commit`. If it isn't what you expect, either `git switch <branch>` in the
-clone you run from, or re-point your `qsbx` symlink (`readlink -f "$(command -v
-qsbx)"` shows where it goes). See
+clone you run from, or re-point your `acq` symlink. See
 [docs/KNOWN_FAILURE_MODES.md §24](docs/KNOWN_FAILURE_MODES.md).
 
 </details>
@@ -362,13 +377,13 @@ For more details on this sandbox implementation and discussion of advanced patte
 You can skip this section to get started — it explains the mechanics behind the
 quickstart for when you want to customize or troubleshoot.
 
-### What happened when I ran the `qsbx` command?
+### What happened when I ran the `acq` command?
 
-`qsbx run` created the sandbox for that path (if it didn't exist yet) using the underlying `sbx` command, making sure that this clone was accessible inside it. Then it configured the coding agent (`opencode`) to pick up configuration for using the USAi provider and made sure the agent was provisioned with custom guidance and relevant skills for working in the federal context.
+`acq run` created the sandbox for that path (if it didn't exist yet) using the active backend (`sbx` by default), making sure that this clone was accessible inside it. Then it configured the coding agent (`opencode`) to pick up configuration for using the USAi provider and made sure the agent was provisioned with custom guidance and relevant skills for working in the federal context.
 
-### What `qsbx` applies
+### What `acq` applies
 
-`qsbx` applies **four sbx mixin kits** (by pinned remote reference from the
+`acq` applies **four sbx mixin kits** (by pinned remote reference from the
 community [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
 repo) when it creates a sandbox, delivering everything declaratively:
 
@@ -389,9 +404,9 @@ repo) when it creates a sandbox, delivering everything declaratively:
   not make a commit GitHub-**Verified**; see
   [Commits show "Unverified" on GitHub](#troubleshooting).
 
-`qsbx` also handles the `sbx` prerequisites for you: it adds the kit source to
-`sbx settings kit.allowedSources` (the v0.34 remote-kit allowlist) and requires
-`sbx` ≥ 0.34.0 — no manual setup.
+`acq` also handles the `sbx` prerequisites for you: it adds the kit source to
+`sbx settings kit.allowedSources` (the remote-kit allowlist) and requires
+`sbx` ≥ 0.35.0 — no manual setup.
 
 > While the playbook repo is private (during rollout), the clone needs a GitHub
 > token — set it once with `sbx secret set -g github`. The sbx proxy injects it;
@@ -405,7 +420,7 @@ The built-in `set -g` form only recognizes known providers.
 
 ### Key pre-validation
 
-Before attaching, `qsbx` checks that the sandbox's USAi key still works. If it
+Before attaching, `acq` checks that the sandbox's USAi key still works. If it
 has expired, it walks you through [rotating it](#troubleshooting) and
 re-validates before launching the agent.
 
@@ -427,10 +442,10 @@ The catalog and its refresh tooling live with the kit in the patterns repo.
 ---
 ## Customizing your setup
 
-`qsbx` applies a fixed set of four kits, pinned to a commit of the patterns
+`acq` applies a fixed set of four kits, pinned to a commit of the patterns
 repo. To customize:
 
-- **Adopt newer kits:** bump `PATTERNS_KIT_REF` near the top of `qsbx`.
+- **Adopt newer kits:** bump `PATTERNS_KIT_REF` near the top of `acq.backends/common.sh`.
 - **Add your own kits on every run:** see [Advanced: extra kits](#advanced-extra-kits).
 - **Change USAi models / provider config, rules, or skills:** contribute to the
   kits in the
@@ -442,25 +457,28 @@ repo. To customize:
 
 ## Advanced: extra kits
 
-`qsbx` always applies its four built-in kits. To apply **additional** kits on
-every invocation without repeating `--kit` flags, set `QSBX_EXTRA_KITS` to a
+`acq` always applies its four built-in kits. To apply **additional** kits on
+every invocation without repeating `--kit` flags, set `ACQ_EXTRA_KITS` to a
 whitespace-separated list of kit references (local paths or remote refs):
 
 ```bash
-export QSBX_EXTRA_KITS="./my-local-kit git+https://github.com/acme/kits.git#ref=<sha>&dir=some-kit"
+export ACQ_EXTRA_KITS="./my-local-kit git+https://github.com/acme/kits.git#ref=<sha>&dir=some-kit"
 ```
 
 Extras are applied **after** the built-in kits (so they win on any overlapping
 config). They also work when re-running against an existing sandbox: adding a new
-entry and re-running `qsbx run <existing-sandbox>` injects just the new kit via
+entry and re-running `acq run <existing-sandbox>` injects just the new kit via
 `sbx kit add`.
 
 If an extra kit is hosted somewhere other than `github.com/GSA-TTS/`, add its
-scheme-less prefix so `qsbx` allowlists it on `sbx settings kit.allowedSources`:
+scheme-less prefix so `acq` allowlists it on `sbx settings kit.allowedSources`:
 
 ```bash
-export QSBX_EXTRA_KIT_SOURCES="github.com/acme/"
+export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 ```
+
+> **Migrating from qsbx?** Rename `QSBX_EXTRA_KITS` → `ACQ_EXTRA_KITS` and
+> `QSBX_EXTRA_KIT_SOURCES` → `ACQ_EXTRA_KIT_SOURCES`.
 
 ---
 
@@ -492,13 +510,14 @@ git fetch && git pull
 ```
 
 > [!NOTE]
-> **Resuming a sandbox after upgrading to the kit-based `qsbx`.** Sandboxes
-> created before the kit migration have an outdated provider config or no
-> playbook. The next time you `qsbx run opencode <path>` against such a sandbox,
-> `qsbx` detects this and automatically injects the missing kit(s) with `sbx kit
-> add` — no action needed. Restart the agent (or start a fresh session) so it
-> re-reads the config and picks up the playbook. Requires `sbx` >= 0.34.0, which
-> `qsbx` now enforces.
+> **Resuming a sandbox created by an older `acq` or `qsbx`.** Sandboxes created before the
+> kit migration have an outdated provider config or no playbook. The next time you
+> `acq run opencode <path>` against such a sandbox, `acq` detects the missing
+> kit(s) and injects them with `sbx kit add` — no action needed. On `sbx` ≥
+> 0.35.0 `sbx kit add` recreates the sandbox with the added kit while **preserving
+> its state**, so your work and sessions survive. Restart the agent (or start a
+> fresh session) so it re-reads the config and picks up the playbook. Requires
+> `sbx` >= 0.35.0, which `acq` enforces.
 
 ### Migrating an existing clone off the playbook submodule
 
@@ -561,10 +580,16 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 | File/Directory                      | Purpose                                                    |
 | ----------------------------------- | ---------------------------------------------------------- |
-| `qsbx`                              | sbx wrapper that applies the three community kits to each sandbox |
-| `scripts/rotate-apikey`             | Rotate your USAi API key secret (`qsbx usai-rotate-api-key`) |
+| `acq`                               | Recommended entry point — pluggable-backend wrapper (sbx by default) |
+| `acq.backends/`                     | Backend adapters (`common.sh`, `sbx.sh`) |
+| `qsbx`                              | **Deprecated** sbx wrapper (use `acq` instead; removed in 2.0.0) |
+| `scripts/rotate-apikey`             | Rotate your USAi API key secret (`acq usai-rotate-api-key`) |
+| `scripts/test-acq`                  | Offline unit harness for acq |
+| `scripts/test-migrate-or-halt`      | Offline unit harness for qsbx session migration |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
+| `docs/QUICKSTART.md`                | acq quickstart and migration guide                        |
+| `docs/BACKEND_GUIDE.md`             | Per-backend strengths, tradeoffs, and configuration       |
 | `docs/QUICKSTART_SBX.md`            | Full sbx CLI setup guide                                   |
 | `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
 
