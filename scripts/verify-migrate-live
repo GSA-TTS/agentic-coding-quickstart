@@ -1,33 +1,37 @@
 #!/usr/bin/env bash
 #
-# verify-migrate-live — HOST-SIDE end-to-end check for qsbx's pre-kit sandbox
-# session migration. Unlike scripts/test-migrate-or-halt (which stubs sbx and
+# verify-migrate-live — HOST-SIDE end-to-end check for qsbx's IN-PLACE healing of
+# a pre-kit sandbox. Unlike scripts/test-migrate-or-halt (which stubs sbx and
 # runs anywhere), this exercises the REAL toolchain and therefore must run on a
-# machine that can create sandboxes (Docker + KVM, `sbx login` done).
+# machine that can create sandboxes (Docker + KVM, `sbx login` done) with
+# sbx >= 0.35.0.
 #
-# It proves the claim behind PR #184 / issue #188: when qsbx meets an existing
-# sandbox that predates the kit migration (no USAi provider config), it can
-# export that sandbox's sessions, remove and recreate it under the same name with
-# the kits, import the sessions back, and end up with a WORKING USAi provider.
+# It proves the claim behind ADR-0009: when qsbx meets an existing sandbox that
+# predates the kit migration (no USAi provider config), it heals it IN PLACE with
+# `sbx kit add` — which on sbx 0.35.0 recreates the sandbox container with the
+# added kit while PRESERVING state — ending up with a WORKING USAi provider and
+# the sandbox's prior state intact. No export/rm/recreate/import dance.
 #
-# What it does (all on a throwaway sandbox named qsbx-migrate-verify-<pid>):
-#   1. Create a "pre-kit" sandbox WITHOUT the kits (plain `sbx create opencode`),
-#      so it has no USAi provider config — the condition migrate_or_halt targets.
-#   2. Seed a session in it via `opencode run` so there is something to migrate.
-#   3. Record the session id(s) and confirm the USAi config is absent (pre-state).
-#   4. Run `qsbx run opencode <dir>` and answer "y" to the migration prompt.
-#   5. Assert post-state: the USAi kit is applied (its config landed at OpenCode's
-#      global path), OpenCode resolves a USAi model, and the migrated session id
-#      survived.
-#   6. Clean up the throwaway sandbox (always, via trap).
+# What it does (all on a throwaway sandbox named qsbx-heal-verify-<pid>):
+#   1. Require sbx >= 0.35.0 (the floor qsbx enforces; healing needs it).
+#   2. Create a "pre-kit" sandbox WITHOUT the kits (plain `sbx create opencode`),
+#      so it has no USAi provider config — the condition ensure_kit_applied
+#      targets.
+#   3. Drop a state marker file in the sandbox so we can prove state survived the
+#      kit-add recreate.
+#   4. Confirm the pre-state: USAi kit config absent, marker present.
+#   5. Run `qsbx run opencode <dir>`, which heals in place (no prompt).
+#   6. Assert post-state: the USAi kit is applied (its config landed at OpenCode's
+#      global path), OpenCode resolves a USAi model, and the state marker survived.
+#   7. Clean up the throwaway sandbox (always, via trap).
 #
 # Usage:
 #   ./scripts/verify-migrate-live [WORKDIR]
 #     WORKDIR  optional path to use as the sandbox workspace (default: a temp
 #              git repo created under $TMPDIR). Must be a directory.
 #
-# Exit 0 = migration verified end-to-end. Non-zero = a step failed (details on
-# stderr). This script is READ-mostly on your environment except for the one
+# Exit 0 = in-place healing verified end-to-end. Non-zero = a step failed
+# (details on stderr). READ-mostly on your environment except for the one
 # throwaway sandbox it creates and removes.
 
 set -uo pipefail
@@ -36,18 +40,17 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 QSBX="$REPO_ROOT/qsbx"
 
-SANDBOX="qsbx-migrate-verify-$$"
-# Absolute path where the usai-provider kit STAGES its OpenCode config. As of the
-# patterns v1.5.0 kit this is the merge SOURCE, not the path OpenCode reads: a
-# startup step merges it into the GLOBAL config (see GLOBAL_CFG below). qsbx keys
-# its pre-kit detection off this staged file (USAI_KIT_CONFIG_PATH), so the
-# pre-state probe here mirrors it. Keep in sync with qsbx's USAI_KIT_CONFIG_PATH.
+SANDBOX="qsbx-heal-verify-$$"
+# Absolute path where the usai-provider kit STAGES its OpenCode config (the merge
+# SOURCE). qsbx keys its pre-kit detection off this staged file
+# (USAI_KIT_CONFIG_PATH), so the pre-state probe here mirrors it.
 KIT_CFG="/home/agent/usai-config/opencode.jsonc"
 # Absolute path OpenCode actually reads. The kit's startup merge lands its config
-# here (copying verbatim into an empty global dir, deep-merging into an existing
-# one). This is the authoritative post-migration artifact — the kit's own
-# scripts/verify asserts on this path. The kit no longer sets OPENCODE_CONFIG.
+# here. This is the authoritative post-healing artifact.
 GLOBAL_CFG="/home/agent/.config/opencode/opencode.jsonc"
+# A state marker we plant BEFORE healing and check AFTER, to prove `sbx kit add`
+# preserved sandbox state across its container recreate.
+STATE_MARKER="/home/agent/.qsbx-heal-verify-marker"
 WORKDIR="${1:-}"
 MADE_WORKDIR=0
 PASS=0
@@ -74,8 +77,6 @@ sbx_exec_retry() {
 }
 
 # Wait until `sbx exec` works in the sandbox (up to READY_TIMEOUT seconds).
-# sbx exec fails for a while after a sandbox is created/touched; probing before
-# then yields false negatives. Mirrors qsbx's own wait_for_exec_ready.
 READY_TIMEOUT="${QSBX_EXEC_READY_TIMEOUT:-60}"
 wait_ready() {
   local name="$1" deadline
@@ -111,13 +112,32 @@ command -v sbx >/dev/null   || { echo "sbx not on PATH — run this on the host,
 command -v qsbx >/dev/null || [ -x "$QSBX" ] || { echo "qsbx not found at $QSBX" >&2; exit 2; }
 [ -x "$QSBX" ] || QSBX="$(command -v qsbx)"
 
+# In-place healing needs sbx >= 0.35.0 (state-preserving `sbx kit add`). Bail
+# early with a clear message rather than failing mid-run on an older sbx.
+sbx_ver=$(sbx version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 | sed 's/^v//')
+case "$sbx_ver" in
+  "") echo "  (warning: could not determine sbx version; expecting >= 0.35.0)" >&2 ;;
+  *)
+    # Reuse a tiny numeric compare: major/minor/patch.
+    IFS='.' read -r _a _b _c <<EOF
+$sbx_ver
+EOF
+    if [ "${_a:-0}" -eq 0 ] && [ "${_b:-0}" -lt 35 ]; then
+      echo "This check requires sbx >= 0.35.0 (state-preserving 'sbx kit add'); found $sbx_ver." >&2
+      echo "Upgrade sbx and retry." >&2
+      exit 2
+    fi
+    echo "  sbx version: $sbx_ver"
+    ;;
+esac
+
 if sbx ls -q 2>/dev/null | grep -Fxq -- "$SANDBOX"; then
   echo "A sandbox named '$SANDBOX' already exists; refusing to clobber it." >&2
   exit 2
 fi
 
 if [ -z "$WORKDIR" ]; then
-  WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/qsbx-migrate-verify.XXXXXX") || exit 2
+  WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/qsbx-heal-verify.XXXXXX") || exit 2
   MADE_WORKDIR=1
   ( cd "$WORKDIR" && git init -q && git commit -q --allow-empty -m "seed" ) 2>/dev/null || true
   echo "  using temp workspace: $WORKDIR"
@@ -134,78 +154,61 @@ else
   bad "could not create pre-kit sandbox" "check 'sbx login' and Docker/KVM"
   exit 1
 fi
-# Wait for the just-created sandbox to accept exec before touching it.
 wait_ready "$SANDBOX" || { bad "sandbox never became exec-ready" "increase QSBX_EXEC_READY_TIMEOUT"; exit 1; }
 
-# --- 2) Seed a session so there is something to migrate ---------------------
-info "2) Seeding a session in the pre-kit sandbox"
-# `opencode run` records a session even without a working provider for our
-# purposes; if the provider is required, this still creates session state we can
-# export. Ignore its exit — we only need the local session store populated.
-# Retry through the transient post-start "context deadline exceeded".
-sbx_exec_retry "$SANDBOX" 'opencode run "verify-migrate seed message" >/dev/null 2>&1 || true' >/dev/null || true
-pre_ids=$(sbx_exec_retry "$SANDBOX" 'opencode session list 2>/dev/null' \
-  | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^ses_[A-Za-z0-9]+$/) { print $i; break } }')
-if [ -n "$pre_ids" ]; then
-  ok "seeded session(s): $(printf '%s' "$pre_ids" | tr '\n' ' ')"
+# --- 2) Plant a state marker so we can prove state survives the kit-add recreate
+info "2) Planting a state marker in the pre-kit sandbox"
+if sbx_exec_retry "$SANDBOX" "printf 'heal-verify-%s\n' '$$' > '$STATE_MARKER' && test -f '$STATE_MARKER'" >/dev/null; then
+  ok "state marker written at $STATE_MARKER"
 else
-  bad "no session was recorded to migrate" "opencode run may need a working provider here; seed one manually and re-run with that sandbox"
+  bad "could not write state marker" "sbx exec may be failing; cannot prove state preservation"
 fi
 
-# --- 3) Confirm the pre-state: USAi kit config absent ------------------------
+# --- 3) Confirm the pre-state: USAi kit config absent, marker present --------
 info "3) Confirming pre-state (USAi config absent)"
-# Probe the kit's STAGED config FILE (KIT_CFG). This is the same signal qsbx uses
-# to decide a sandbox is "pre-kit" (sandbox_missing_usai / USAI_KIT_CONFIG_PATH):
-# the file the kit ships, not any env var (an exec shell may not see kit-injected
-# env). A plain `sbx create opencode` writes no such file, so it is absent here.
 pre_cfg=$(sbx_exec_retry "$SANDBOX" "test -f '$KIT_CFG' && echo yes" || true)
 if [ "$pre_cfg" != "yes" ]; then
   ok "USAi kit config absent (this is a genuine pre-kit sandbox)"
 else
-  bad "USAi kit config already present" "not a pre-kit sandbox; migration path won't trigger"
+  bad "USAi kit config already present" "not a pre-kit sandbox; healing path won't trigger"
 fi
 
-# --- 4) Run qsbx and accept the migration -----------------------------------
-info "4) Running qsbx and accepting the migration prompt"
-echo "  (qsbx will export --sanitize, remove '$SANDBOX', recreate it with kits, and import)"
-# Target the throwaway sandbox by name so qsbx resolves to IT (not a name
-# derived from the workspace basename). The AGENT form (`opencode <dir>`) derives
-# the name from the workspace, which wouldn't match "$SANDBOX"; passing
-# --name pins it. Feed "y" to the [y/N] prompt; QSBX_PROMPT_STDIN makes qsbx read
-# the prompt from stdin instead of /dev/tty so this runs non-interactively.
-if printf 'y\n' | QSBX_PROMPT_STDIN=1 "$QSBX" run --name "$SANDBOX" opencode "$WORKDIR"; then
+# --- 4) Run qsbx; it heals in place with `sbx kit add` (no prompt) -----------
+info "4) Running qsbx to heal the sandbox in place"
+echo "  (qsbx detects the missing kit and runs 'sbx kit add', which recreates the sandbox preserving state)"
+# Target the throwaway sandbox by name so qsbx resolves to IT (the AGENT form
+# would derive a name from the workspace basename). Feed newline in case any
+# advisory prompt appears; healing itself is non-interactive.
+if printf '\n' | QSBX_PROMPT_STDIN=1 "$QSBX" run --name "$SANDBOX" opencode "$WORKDIR"; then
   ok "qsbx run completed"
 else
-  # qsbx attaches at the end; a non-zero here may just be the attach exiting.
   echo "  (qsbx run returned non-zero — likely the interactive attach exiting; continuing to assert post-state)" >&2
 fi
 
 # --- 5) Assert post-state ----------------------------------------------------
-info "5) Asserting post-state (working USAi + sessions survived)"
-# The migration recreated the sandbox; wait for it to accept exec before probing
-# so a cold-start timeout doesn't masquerade as "kit missing".
-echo "  (waiting for the recreated sandbox to become exec-ready...)"
+info "5) Asserting post-state (working USAi + state preserved)"
+echo "  (waiting for the healed sandbox to become exec-ready...)"
 wait_ready "$SANDBOX" || echo "  (warning: sandbox not exec-ready within ${READY_TIMEOUT}s; probes may be unreliable)" >&2
 
-# The usai-provider kit's startup step merges its config into OpenCode's GLOBAL
-# path (GLOBAL_CFG) and no longer sets OPENCODE_CONFIG. Assert on the artifact
-# the kit actually installs — the global config file carrying the USAi provider —
-# mirroring the kit's own scripts/verify. The staged source (KIT_CFG) also still
-# exists (it is the merge source), and when the global dir starts empty the merge
-# copies KIT_CFG verbatim, preserving the ownership marker; after a merge into a
-# pre-existing config the marker (a comment) is dropped, so we do not require it.
 cfg_present=$(sbx_exec_retry "$SANDBOX" "test -f '$GLOBAL_CFG' && echo yes" || true)
 usai_in_cfg=$(sbx_exec_retry "$SANDBOX" "grep -q '\"usai\"' '$GLOBAL_CFG' 2>/dev/null && echo yes" || true)
 if [ "$cfg_present" = "yes" ] && [ "$usai_in_cfg" = "yes" ]; then
-  ok "usai-provider kit applied (USAi provider present in global config at $GLOBAL_CFG)"
+  ok "usai-provider kit applied in place (USAi provider present in global config at $GLOBAL_CFG)"
 elif [ "$cfg_present" = "yes" ]; then
   bad "global config present but USAi provider missing" "kit merge may have failed"
 else
   bad "global OpenCode config missing at $GLOBAL_CFG" "the usai-provider kit did not apply"
 fi
 
-# Corroboration: the kit stages its source config at KIT_CFG (the merge source),
-# which should also survive. Informational — never fails the run.
+# The key claim of ADR-0009: `sbx kit add` PRESERVED state across its recreate.
+marker_present=$(sbx_exec_retry "$SANDBOX" "test -f '$STATE_MARKER' && echo yes" || true)
+if [ "$marker_present" = "yes" ]; then
+  ok "sandbox state preserved across 'sbx kit add' (marker survived)"
+else
+  bad "state marker missing after healing" "'sbx kit add' did not preserve state — expected on sbx >= 0.35.0"
+fi
+
+# Corroboration: the kit stages its source config at KIT_CFG. Informational.
 staged_present=$(sbx_exec_retry "$SANDBOX" "test -f '$KIT_CFG' && echo yes" || true)
 if [ "$staged_present" = "yes" ]; then
   ok "kit staging source present at $KIT_CFG"
@@ -214,22 +217,18 @@ else
 fi
 
 # NOTE: we deliberately do NOT probe the USAi HTTP endpoint with USAI_API_KEY as
-# a success signal. The secret proxy injects USAI_API_KEY independently of any
-# kit, so `curl … /models` returns 200 even in a sandbox where the kit never
-# applied — a false positive that masked a real migration bug during
-# development. The authoritative signal that the provider is configured is the
-# global config carrying the USAi provider, checked above. As a functional
-# corroboration, confirm OpenCode itself resolves the USAi provider.
+# a success signal — the secret proxy injects USAI_API_KEY independently of any
+# kit, so curl … /models returns 200 even where the kit never applied. The
+# authoritative signal is the global config carrying the USAi provider (above).
+# As functional corroboration, confirm OpenCode itself resolves the USAi provider.
 usai_models=$(sbx_exec_retry "$SANDBOX" 'opencode models 2>/dev/null | grep -i usai | head -1' || true)
 if [ -n "$usai_models" ]; then
   ok "OpenCode resolves a USAi model ($usai_models)"
 else
-  echo "  (note: could not confirm a USAi model via 'opencode models'; the config-file check above is authoritative for kit application)" >&2
+  echo "  (note: could not confirm a USAi model via 'opencode models'; the config-file check above is authoritative)" >&2
 fi
 
-# Diagnostic dump: when the global config check fails, show what the recreated
-# sandbox actually contains so we can see where the kit config landed (or
-# didn't). Runs whenever the file check failed, or always under KEEP=1.
+# Diagnostic dump when the config check failed, or always under KEEP=1.
 if [ "$cfg_present" != "yes" ] || [ "${KEEP:-0}" = "1" ]; then
   info "Diagnostics (kit artifact locations)"
   echo "  --- ls -la /home/agent/.config/opencode (global config dir) ---" >&2
@@ -239,22 +238,6 @@ if [ "$cfg_present" != "yes" ] || [ "${KEEP:-0}" = "1" ]; then
   echo "  --- any opencode.jsonc under /home/agent ---" >&2
   sbx_exec_retry "$SANDBOX" 'find /home/agent -name "opencode.json*" 2>/dev/null || echo "(none)"' >&2 || true
   echo "" >&2
-fi
-
-post_ids=$(sbx_exec_retry "$SANDBOX" 'opencode session list 2>/dev/null' \
-  | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^ses_[A-Za-z0-9]+$/) { print $i; break } }')
-if [ -z "$pre_ids" ]; then
-  echo "  (skipping session-survival check: nothing was seeded in step 2)" >&2
-else
-  missing=0
-  for id in $pre_ids; do
-    printf '%s\n' "$post_ids" | grep -Fxq -- "$id" || missing=1
-  done
-  if [ "$missing" = "0" ]; then
-    ok "all seeded session id(s) present after migration"
-  else
-    bad "a seeded session id is missing after migration" "pre=[$(printf '%s' "$pre_ids" | tr '\n' ' ')] post=[$(printf '%s' "$post_ids" | tr '\n' ' ')]"
-  fi
 fi
 
 # --- Summary ----------------------------------------------------------------

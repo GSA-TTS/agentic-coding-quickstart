@@ -62,7 +62,7 @@ When `qsbx` creates a sandbox it applies four kits by pinned remote reference
 
 So every sandbox picks up the USAi config, federal rules, skills, CA trust, and
 commit signing declaratively. `qsbx` also handles the `sbx` prerequisites
-automatically (allow-listing the kit source; requiring sbx ≥ 0.34.0). Per-kit
+automatically (allow-listing the kit source; requiring sbx ≥ 0.35.0). Per-kit
 design rationale lives with the kits in the patterns repo.
 
 Applying the kits directly (without `qsbx`) is equivalent — pass the same four

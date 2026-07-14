@@ -52,6 +52,12 @@ user may have live chat sessions in it?
 
 ### 1. Offer a session-preserving recreate first (when it can)
 
+> **Note ([ADR-0009](0009-require-sbx-0.35.0-in-place-kit-healing.md)):** as of
+> ADR-0009, pre-kit sandboxes heal in place via `sbx kit add`, so this
+> stale-placeholder recovery is the **sole remaining consumer** of
+> `migrate_or_halt` (and `halt_with_options`). They are retained specifically for
+> route 1 below.
+
 When `qsbx run` has the create args in hand (the AGENT form), the **first**
 option is to recreate the sandbox via the existing session-preserving migration
 (`migrate_or_halt`): export sessions (sanitized) → remove → recreate with the

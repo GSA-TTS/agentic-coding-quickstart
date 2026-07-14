@@ -602,79 +602,58 @@ the kit refs.
 
 **Upgrading an existing sandbox (pre-kit).** A sandbox created with an *older*
 `qsbx` (before the kit migration) has no USAi provider config and no playbook
-clone. `qsbx` cannot auto-heal it in place: the fix would be `sbx kit add`, but
-an upstream sbx bug ([docker/sbx-releases#133][sbx133]) makes `sbx kit add` fail
-(`failed to read tar header: unexpected EOF`) on any kit that ships a static
-file — and the `usai-provider` kit ships `opencode.jsonc`. Because a sandbox
-without the USAi provider config is unusable, in-place healing is **disabled**
-(gated behind `QSBX_AUTOHEAL_KITS`, off by default) until #133 is fixed.
+clone. `qsbx` now **heals it in place**: the next time you `qsbx run` against
+such a sandbox, it detects the missing kit(s) and injects them with `sbx kit
+add`. As of `sbx` 0.35.0 `sbx kit add` **recreates the sandbox container with the
+augmented kit set and preserves state**, so your work and sessions survive — no
+export/recreate/import dance, and no manual steps.
 
-Instead, when you `qsbx run` an existing pre-kit sandbox, `qsbx` offers to
-**migrate your sessions into a fresh, working sandbox of the same name**:
+> **Historical note.** Earlier `qsbx` releases could *not* auto-heal in place: on
+> `sbx` ≤ 0.34.x, `sbx kit add` failed (`failed to read tar header: unexpected
+> EOF`) on any kit shipping a static file — including the `usai-provider` kit
+> ([docker/sbx-releases#133][sbx133]). Those releases gated healing off behind
+> `QSBX_AUTOHEAL_KITS` and offered a destructive session migration instead. `sbx`
+> 0.35.0 fixed #133, so `qsbx` requires `sbx` >= 0.35.0 and heals unconditionally.
 
-1. It waits for the sandbox to be ready for `sbx exec` (right after a create or a
-   cold start, exec fails with `inspect exec: context deadline exceeded` for a
-   few seconds; qsbx polls until a trivial exec succeeds, up to
-   `QSBX_EXEC_READY_TIMEOUT`, default 60s). This avoids misreading a cold-start
-   delay as "no USAi config" and wrongly triggering — or skipping — a migration.
-2. It exports each session with `opencode export --sanitize` (sensitive
-   transcript and file data are redacted).
-3. It **permanently removes** the old sandbox (`sbx rm --force`) so the name can
-   be reused — sbx has no rename, so this is the only way to keep the original
-   name. This is irreversible, so `qsbx` only does it *after* a successful,
-   verified export, and never if you decline or the export captures nothing.
-4. It recreates the sandbox with all the kits, **verifies the USAi kit
-   actually applied** (checks for the kit's staged config file at
-   `/home/agent/usai-config/opencode.jsonc`, which the kit ships and merges into
-   the global config at startup), and only then imports the sessions.
-   If the recreate or verification fails, it stops and keeps your exported
-   sessions in a temp directory rather than importing into a broken sandbox.
+`qsbx` waits for the sandbox to be ready for `sbx exec` before probing (right
+after a create or a cold start, exec fails with `inspect exec: context deadline
+exceeded` for a few seconds; qsbx polls until a trivial exec succeeds, up to
+`QSBX_EXEC_READY_TIMEOUT`, default 60s) so a cold-start delay is not misread as
+"kit absent".
 
-Answer `y` at the prompt to migrate, or `N` to keep the old sandbox untouched
-and choose one of the manual options below.
-
-> **Detecting a pre-kit sandbox.** qsbx decides a sandbox predates the migration
-> by checking for the USAi config file, classifying on the probe's **stdout**
-> (`present`/`absent`), never its exit status — `test -f` exits non-zero when the
-> file is absent, which is indistinguishable from a genuine exec failure, so an
-> exit-status check would wrongly treat "file absent" as "probe failed" and skip
-> the migration.
+> **Detecting a pre-kit sandbox.** qsbx decides a kit is missing by checking for
+> the kit's footprint (e.g. the USAi config file), classifying on the probe's
+> **stdout** (`present`/`absent`), never its exit status — `test -f` exits
+> non-zero when the file is absent, which is indistinguishable from a genuine
+> exec failure, so an exit-status check would wrongly treat "file absent" as
+> "probe failed" and skip healing.
 
 [sbx133]: https://github.com/docker/sbx-releases/issues/133
 
 ### Fix
 
-The simplest fix is to recreate the sandbox with `qsbx`, which applies all the
-kits (and adds the kit source to `kit.allowedSources` automatically). This loses
-the old sandbox's session/context unless you use the assisted migration above:
+Usually there is nothing to do — re-running `qsbx run opencode <path>` against
+the sandbox heals it in place with `sbx kit add` (state preserved). If a kit
+injection fails, `qsbx` prints the exact manual recovery command. You can also
+run it yourself; remote kit sources must be allowlisted first (`qsbx` does this
+automatically, but by hand it is):
 
 ```bash
-sbx rm --force SANDBOX          # discard the un-healable sandbox (irreversible)
+sbx settings set kit.allowedSources '["docker.io/","github.com/GSA-TTS/"]'
+REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
+DIR="integrations/isolation/sbx-kits"
+sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/usai-provider-kit"
+sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/playbook-kit"
+sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/zscaler-ca-certificate"
+```
+
+As a last resort, recreate the sandbox from scratch (this discards the sandbox's
+session/context):
+
+```bash
+sbx rm --force SANDBOX          # discard the sandbox (irreversible)
 ./qsbx run opencode /path/to/your/project
 ```
-
-Or **downgrade** to the last release before the kit migration (`v0.11.0`), which
-still uses the submodule model and can reattach to pre-kit sandboxes:
-
-```bash
-git checkout v0.11.0
-```
-
-> **`sbx kit add` recovery is currently blocked by [#133][sbx133].** Injecting
-> the kits into a running sandbox — shown below — will fail on the
-> `usai-provider` kit until the upstream bug is fixed. It is retained here for
-> when `sbx kit add` works again (and is what `qsbx`'s auto-heal will use once
-> `QSBX_AUTOHEAL_KITS` is re-enabled). Remote kit sources must be allowlisted
-> first:
->
-> ```bash
-> sbx settings set kit.allowedSources '["docker.io/","github.com/GSA-TTS/"]'
-> REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-> DIR="integrations/isolation/sbx-kits"
-> sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/usai-provider-kit"   # fails: #133
-> sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/playbook-kit"
-> sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/zscaler-ca-certificate"
-> ```
 
 ---
 

@@ -152,7 +152,20 @@ See [Docker's apt install docs](https://docs.docker.com/engine/install/ubuntu/#i
 > with `brew upgrade`.
 
 **Check it worked:** after `sbx login` finishes with no error, run `sbx version`.
-You should see a line like `sbx version: v0.32.0 <sha>`.
+You should see a line like `sbx version: v0.35.0 <sha>`.
+
+> [!IMPORTANT]
+> **qsbx requires `sbx` ≥ 0.35.0.** This is the release where `sbx kit add`
+> recreates a sandbox with the added kit while preserving its state, which is how
+> `qsbx` heals sandboxes created by an older version (see
+> [Staying Current](#staying-current)).
+>
+> **Linux/ARM64 note:** sbx `0.35.x` publishes **no Linux/ARM64 build** (deferred
+> to `0.36.x` per the sbx release notes). On a Linux/ARM64 host you can't yet
+> install a version that meets this floor — run `qsbx` on an x86_64 host, or wait
+> for the `0.36.x` release. `qsbx` detects this arch and prints the same guidance.
+
+---
 
 > [!IMPORTANT]
 > **If `sbx login` fails with a "Not enough seats" error**, like this:
@@ -390,8 +403,8 @@ repo) when it creates a sandbox, delivering everything declaratively:
   [Commits show "Unverified" on GitHub](#troubleshooting).
 
 `qsbx` also handles the `sbx` prerequisites for you: it adds the kit source to
-`sbx settings kit.allowedSources` (the v0.34 remote-kit allowlist) and requires
-`sbx` ≥ 0.34.0 — no manual setup.
+`sbx settings kit.allowedSources` (the remote-kit allowlist) and requires
+`sbx` ≥ 0.35.0 — no manual setup.
 
 > While the playbook repo is private (during rollout), the clone needs a GitHub
 > token — set it once with `sbx secret set -g github`. The sbx proxy injects it;
@@ -492,13 +505,14 @@ git fetch && git pull
 ```
 
 > [!NOTE]
-> **Resuming a sandbox after upgrading to the kit-based `qsbx`.** Sandboxes
-> created before the kit migration have an outdated provider config or no
-> playbook. The next time you `qsbx run opencode <path>` against such a sandbox,
-> `qsbx` detects this and automatically injects the missing kit(s) with `sbx kit
-> add` — no action needed. Restart the agent (or start a fresh session) so it
-> re-reads the config and picks up the playbook. Requires `sbx` >= 0.34.0, which
-> `qsbx` now enforces.
+> **Resuming a sandbox created by an older `qsbx`.** Sandboxes created before the
+> kit migration have an outdated provider config or no playbook. The next time you
+> `qsbx run opencode <path>` against such a sandbox, `qsbx` detects the missing
+> kit(s) and injects them with `sbx kit add` — no action needed. On `sbx` ≥
+> 0.35.0 `sbx kit add` recreates the sandbox with the added kit while **preserving
+> its state**, so your work and sessions survive. Restart the agent (or start a
+> fresh session) so it re-reads the config and picks up the playbook. Requires
+> `sbx` >= 0.35.0, which `qsbx` enforces.
 
 ### Migrating an existing clone off the playbook submodule
 
