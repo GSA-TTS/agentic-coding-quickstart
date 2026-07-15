@@ -730,14 +730,14 @@ Both will reference this document (`docs/adr/agentic-coding-quickstart-v2-design
 
 ### Phase timeline
 
-| Release | Change | Status |
-|---------|--------|--------|
-| **1.1.0** | Add `acq` (sbx driver only), deprecate `qsbx` | **Shipped** |
-| **1.2.0** | Add `msb` driver; neutral hybrid/v1 kit spec; `kits/` move in patterns | Planned |
-| **1.3.0** | Add `ppp` driver | Deferred / undecided |
-| **2.0.0** | `acq` becomes primary; remove `qsbx` | Planned |
+| Phase | Target release | Change | Status |
+|-------|----------------|--------|--------|
+| **Phase 1** | 1.1.0 | Add `acq` (sbx driver only), deprecate `qsbx` | **Shipped** |
+| **Phase 2** | 1.2.0 | Add `msb` driver; neutral hybrid/v1 kit spec; `kits/` move in patterns | Planned |
+| **Phase 3** | 1.3.0 | Add `ppp` driver | Deferred / undecided |
+| **Phase 4** | 2.0.0 | `acq` becomes primary; remove `qsbx` | Planned |
 
-### What is implemented (1.1.0)
+### What is implemented (Phase 1 / 1.1.0)
 
 - **`acq` entry point** (`acq`, `chmod +x`) — full command surface for the
   qsbx-parity subset plus `backend`/`doctor`:
@@ -764,7 +764,7 @@ Both will reference this document (`docs/adr/agentic-coding-quickstart-v2-design
 
 ### Deviations from this design doc
 
-The following are **deliberate deductions** for 1.1.x, recorded here so readers
+The following are **deliberate deductions** for Phase 1 (1.1.x), recorded here so readers
 can distinguish "not done yet" from "done differently":
 
 1. **XDG config path, not `~/.acq/`.** The design draft uses `~/.acq/config.yaml`
@@ -775,39 +775,39 @@ can distinguish "not done yet" from "done differently":
 
 2. **Bash adapter, not Python ABC.** §7 specifies a Python `IsolationBackend`
    ABC; the note says "v2.0.0 ships a bash implementation of the same shape."
-   1.1.x ships that bash implementation. Function-level parity with the ABC
+   Phase 1 (1.1.x) ships that bash implementation. Function-level parity with the ABC
    contract is maintained; a Go/Python port is a future option.
 
 3. **No neutral hybrid/v1 kit spec.** §3 describes `schemaVersion: "hybrid/v1"`
-   and `kit-translate.sh`. 1.1.x pins the **same four sbx-kit refs** as qsbx
+   and `kit-translate.sh`. Phase 1 (1.1.x) pins the **same four sbx-kit refs** as qsbx
    unchanged — no kit translation layer, no new schema, no `kits/` move in the
-   patterns repo. These land in 1.2.x when a second backend actually needs a
+   patterns repo. These land in Phase 2 (1.2.x) when a second backend actually needs a
    neutral vocabulary.
 
 4. **No `acq kit apply|list|validate`, no `acq policy`, no `acq secret` swap-on-access model.**
-   These are deferred to 1.2.x+. `acq secret set` is a thin wrapper over the
+   These are deferred to Phase 2+ (1.2.x+). `acq secret set` is a thin wrapper over the
    sbx secret CLI for the current release.
 
 5. **ADR number is 0010, not 0008.** The design says "ADR-0008". ADRs 0008 and
    0009 were already in use in this repo (stale-placeholder recovery and
    in-place kit healing). The pluggable-backend ADR is `docs/adr/0010-acq-pluggable-backends.md`.
 
-6. **`qsbx` is not removed.** §5 says "`qsbx` replaced by `acq`". In 1.1.x,
+6. **`qsbx` is not removed.** §5 says "`qsbx` replaced by `acq`". In Phase 1 (1.1.x),
    `qsbx` is deprecated (notice + docs) but fully functional; it is scheduled
-   for removal in 2.0.0 (not 1.x). `scripts/test-migrate-or-halt` and
-   `scripts/verify-migrate-live` are also retained until 2.0.0.
+   for removal in Phase 4 (2.0.0). `scripts/test-migrate-or-halt` and
+   `scripts/verify-migrate-live` are also retained until Phase 4 (2.0.0).
 
 7. **`docs/QUICKSTART_SBX.md` not yet replaced.** §5 says it is replaced by
-   `docs/QUICKSTART.md` + per-backend sections. 1.1.x adds `docs/QUICKSTART.md`
+   `docs/QUICKSTART.md` + per-backend sections. Phase 1 (1.1.x) adds `docs/QUICKSTART.md`
    (acq-focused) alongside the existing `docs/QUICKSTART_SBX.md` (kept as
-   detailed sbx reference). Full replacement deferred to 2.0.0.
+   detailed sbx reference). Full replacement deferred to Phase 4 (2.0.0).
 
 8. **`kit-translate.sh` not present.** The repo layout in §5 lists
    `acq.backends/kit-translate.sh`. This file is not needed until a second
-   backend requires kit translation; it is omitted in 1.1.x.
+   backend requires kit translation; it is omitted in Phase 1 (1.1.x).
 
 9. **`scripts/verify-backends` not present.** §5 lists a CI verification
-   script. Not implemented in 1.1.x; live sbx verification is deferred (this
+   script. Not implemented in Phase 1 (1.1.x); live sbx verification is deferred (this
    environment runs inside an sbx sandbox and cannot create nested sandboxes).
 
 10. **`sbx secret set-custom` does not support `--password-stdin`.** The
