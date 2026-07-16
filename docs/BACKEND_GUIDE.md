@@ -247,9 +247,16 @@ the same service (supporting USAi per-sandbox billing-code keys).
 
 At `acq run`/`create`, the **msb** backend reads the value from the store,
 exports it into a transient host env var, and binds it with
-`msb --secret ENV@HOST` — so it is swapped in on the wire and **never enters the
-guest** and **never appears in argv**. USAi binds to `api.gsa.usai.gov`; GitHub
-binds to `github.com` and `api.github.com`.
+`msb --secret ENV@HOST`. msb puts a **placeholder** (`$MSB_<env>`) in the guest;
+when the guest sends that placeholder to an allowed host over **intercepted TLS**
+(`--tls-intercept`, which acq enables), msb swaps in the real value on the wire —
+so the credential **never enters the guest** and **never appears in argv**.
+`acq secret set` also re-feeds running sandboxes with `msb modify --secret` so a
+rotated key takes effect without recreating the sandbox.
+
+- **USAi** binds to `api.gsa.usai.gov`. The USAi provider sends the key as an
+  `Authorization: Bearer` header, which msb substitutes correctly.
+- **GitHub is NOT bound as an msb secret** — see the known limitation below.
 
 Feeding the **sbx** proxy depends on the sbx secret type (per the sbx CLI):
 
@@ -278,6 +285,28 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 > already holds the secret it stops with an `sbx secret rm …` hint rather than
 > silently replacing it. The acq store copy is always updated.
 
+### Known limitations (msb)
+
+- **Private GitHub repos: the playbook kit clone is skipped on msb.** The
+  `agentic-coding-playbook` kit clones a private GitHub repo over HTTPS. msb
+  0.6.6 does not substitute the credential placeholder for git's HTTPS
+  smart-transport to `github.com` — the request is blocked/unsubstituted
+  regardless of request shape (verified extensively; msb's `Authorization:
+  Bearer` substitution works for the USAi header path but not for git). Binding
+  the same placeholder across multiple github hosts also trips microsandbox
+  [#1170](https://github.com/superradcompany/microsandbox/issues/1170). acq
+  therefore does **not** bind a GitHub secret on msb; the playbook kit is
+  non-fatal and warns, and the sandbox comes up fully usable otherwise. This is
+  tracked in
+  [quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203)
+  for a fix once upstream git substitution works (see microsandbox
+  [#756](https://github.com/superradcompany/microsandbox/issues/756) /
+  [#768](https://github.com/superradcompany/microsandbox/pull/768) /
+  [#1170](https://github.com/superradcompany/microsandbox/issues/1170)). On the
+  **sbx** backend the playbook clone works (its proxy injects the token
+  transparently). Workarounds on msb: make the repo readable without auth, use a
+  base image with the playbook pre-cloned, or use the sbx backend.
+
 ### Capability flags
 
 | Flag | Value | Meaning |
@@ -285,7 +314,7 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 | `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 0 | No post-hoc `acq ports`; publish at create/run via `-p HOST:GUEST` |
 | `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 1 | `msb snapshot` save/restore |
 | `ACQ_BACKEND_CAN_RESUME` | 1 | `msb stop` / `msb start` preserve state |
-| `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` |
+| `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (header substitution; git HTTPS not yet supported by msb) |
 
 ### Differences from sbx
 

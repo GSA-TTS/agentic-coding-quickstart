@@ -586,10 +586,11 @@ else
 fi
 cleanup_stubs
 
-# 8l. msb secret set github stores in the acq store + mentions the github binding.
+# 8l. msb secret set github stores in the acq store + explains it is NOT bound on
+#     msb (git substitution unsupported), pointing at the known limitation.
 make_stubs
 out=$(ACQ_SECRET_TEST_VALUE="ghp_x" ACQ_BACKEND=msb "$ACQ" secret set -g github 2>&1 || true)
-assert_contains "msb: secret set github mentions GITHUB_TOKEN binding" "$out" "GITHUB_TOKEN"
+assert_contains "msb: secret set github notes msb does not bind it" "$out" "does NOT bind GitHub"
 if [ -f "$STUBDIR/secrets/acq.github" ]; then
   pass "msb: secret set github stored in acq store"
 else
@@ -597,7 +598,8 @@ else
 fi
 cleanup_stubs
 
-# 8m. msb provision binds USAi + GitHub from the acq store via --secret ENV@HOST,
+# 8m. msb provision binds USAi via --secret ENV@HOST (with --tls-intercept),
+#     does NOT bind GitHub (msb git substitution unsupported — see BACKEND_GUIDE),
 #     and the real secret VALUES never appear in the msb command line.
 make_stubs; load_acq
 : > "$CALLS"
@@ -616,8 +618,9 @@ prov_leaks=$(
   if grep -q 'USAI-REAL-VALUE\|GH-REAL-VALUE' "$CALLS"; then echo LEAK; else echo CLEAN; fi
 )
 prov_log=$(cat "$CALLS")
+assert_contains "msb: provision enables --tls-intercept (needed for substitution)" "$prov_log" "--tls-intercept"
 assert_contains "msb: provision binds USAi via --secret" "$prov_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
-assert_contains "msb: provision binds github via --secret" "$prov_log" "--secret GITHUB_TOKEN@github.com"
+assert_not_contains "msb: provision does NOT bind github (git substitution unsupported)" "$prov_log" "GITHUB_TOKEN@"
 assert_eq "msb: provision never leaks secret values to argv" "CLEAN" "$prov_leaks"
 # Workspace is mounted at the fixed guest path (NOT host:host), and the host
 # path (/tmp) exists so no error.

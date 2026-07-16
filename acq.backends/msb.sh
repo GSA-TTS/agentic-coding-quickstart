@@ -227,6 +227,10 @@ _acq_msb_fetch_kit() {
 
 # Emit the --net-rule flags for a kit's caps.network.allow into the named array.
 # Usage: _acq_msb_net_rules_into ARRVAR SPEC
+# Uses the codebase's eval-by-name array pattern (see common.sh split_noglob;
+# chosen over bash-4.3 namerefs for macOS bash 3.2 compatibility). Each host is
+# validated to look like a DNS name/wildcard BEFORE it reaches eval, so a
+# malformed or malicious spec value can't smuggle shell metacharacters in.
 _acq_msb_net_rules_into() {
   local _arr="$1" _spec="$2" _host
   eval "$_arr=()"
@@ -241,7 +245,15 @@ _acq_msb_net_rules_into() {
     # Strip any :port the neutral spec carries (msb keys on the domain; the daemon
     # handles ports/DNS for the allowed host).
     _host="${_host%%:*}"
-    eval "$_arr+=(--net-rule \"allow@${_host}\")"
+    # Reject anything that isn't a plausible hostname/wildcard, so a malformed or
+    # malicious spec value can't smuggle characters through the eval below.
+    case "$_host" in
+      ""|*[!A-Za-z0-9.*_-]*)
+        echo "acq(msb): warning: skipping non-hostname net-allow entry: $_host" >&2
+        continue
+        ;;
+    esac
+    eval "$_arr+=(--net-rule \"allow@\${_host}\")"
   done <<EOF
 $(kit_spec_net_allow "$_spec")
 EOF
@@ -252,6 +264,15 @@ EOF
 # provision time — see acq_backend_provision; here we skip the file/command
 # path for a shortcut kit). Drops files and runs install/initFiles/startup
 # commands via `msb exec`.
+#
+# KNOWN LIMITATION (agentic-coding-playbook kit on msb): the playbook kit clones
+# a PRIVATE GitHub repo over HTTPS. msb 0.6.6 does not substitute the credential
+# placeholder for git's HTTPS smart-transport to github.com (the request is
+# blocked/unsubstituted regardless of request shape — verified extensively;
+# curl's Authorization-header path to api.gsa.usai.gov DOES work). So on msb the
+# clone is skipped and the kit warns (it is non-fatal by design). Tracked in
+# quickstart#203 (and upstream microsandbox #756/#768/#1170). USAi, git-ssh-sign,
+# and zscaler kits are unaffected.
 _acq_msb_apply_kit_dir() {
   local name="$1" kitdir="$2"
   local spec="${kitdir}/spec.yaml"
@@ -501,6 +522,17 @@ acq_backend_provision() {
 
   [ "$trust_host_cas" -eq 1 ] && create_flags+=(--trust-host-cas)
 
+  # TLS interception is REQUIRED for secret substitution: msb only swaps a
+  # placeholder for the real value on a connection it can see into (the security
+  # docs: "a secret requires intercepted TLS"). Without --tls-intercept the USAi
+  # placeholder would be sent literally and rejected. The interception CA is
+  # auto-trusted in the guest, so no extra CA install is needed (verified: plain
+  # HTTPS to an intercepted host returns 200). Toggle off only if a deployment
+  # cannot use interception (secrets then won't substitute).
+  if [ -z "${ACQ_MSB_NO_TLS_INTERCEPT:-}" ]; then
+    create_flags+=(--tls-intercept)
+  fi
+
   # Guest DNS: use a resolver reachable from the microVM. The host's resolvers
   # (often a corporate/VPN/Zscaler IP) are typically unreachable from the guest,
   # so without this the guest can't resolve even allow-listed hosts. See the
@@ -531,16 +563,25 @@ acq_backend_provision() {
   fi
 
   # Credentials: read from the acq-owned secret store (keychain/file), scoped to
-  # this sandbox first, then global. The real value is exported into a TRANSIENT
-  # env var (never argv, never the kit spec) and bound with msb --secret
-  # ENV@HOST, so it is swapped in on the wire and never inlined into the sandbox
-  # config. Supports the two pinned credential services: usai and github.
+  # this sandbox first, then global. The real value is read into a TRANSIENT env
+  # var (never argv, never the kit spec) and bound with `msb --secret ENV@HOST`,
+  # which puts a PLACEHOLDER ($MSB_<env>) in the guest and swaps in the real value
+  # on the wire to the allowed host (requires --tls-intercept, set above). The
+  # real value never enters the guest.
   #
-  # msb --secret reads the value from the NAMED host env var at create time. We
-  # set that env var only for the duration of the msb create call.
+  # SCOPE (deliberately narrow, verified against msb 0.6.6):
+  #   - USAi: bind USAI_API_KEY@api.gsa.usai.gov ONLY. The USAi provider sends the
+  #     key as an `Authorization: Bearer` header, which msb substitutes correctly.
+  #   - GitHub: NOT bound here. msb 0.6.6 does not substitute the placeholder for
+  #     git's HTTPS clone to github.com (verified extensively: the request is
+  #     blocked/unsubstituted regardless of single/multi binding or request shape;
+  #     see the KNOWN LIMITATION note on _acq_msb_apply_kit_dir and the tracked
+  #     issue). Binding the same placeholder across multiple github hosts also
+  #     triggers microsandbox #1170 (ineligible-entry blocks eligible). So the
+  #     private playbook clone is expected to be skipped on msb until upstream git
+  #     substitution works; the kit is non-fatal and warns.
   local _secret_env_names=()   # env vars we set transiently, cleared after create
   if command -v acq_secret_resolve >/dev/null 2>&1; then
-    # USAi key -> USAI_API_KEY@api.gsa.usai.gov
     local usai_val
     if usai_val=$(acq_secret_resolve usai "$name" 2>/dev/null) && [ -n "$usai_val" ]; then
       export USAI_API_KEY="$usai_val"; usai_val=""
@@ -552,14 +593,9 @@ acq_backend_provision() {
       create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
       acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from env)"
     fi
-    # GitHub token -> GITHUB_TOKEN@github.com and @api.github.com (git + API).
-    local gh_val
-    if gh_val=$(acq_secret_resolve github "$name" 2>/dev/null) && [ -n "$gh_val" ]; then
-      export GITHUB_TOKEN="$gh_val"; gh_val=""
-      _secret_env_names+=("GITHUB_TOKEN")
-      create_flags+=(--secret "GITHUB_TOKEN@github.com" --secret "GITHUB_TOKEN@api.github.com")
-      acq_debug "msb secret: binding GITHUB_TOKEN@github.com,api.github.com (from acq store)"
-    fi
+    # NOTE: GitHub token is intentionally NOT bound as an msb secret — see the
+    # scope note above. It remains in the acq store for the sbx backend and for
+    # a future msb path once upstream git substitution is fixed.
   elif [ -n "${USAI_API_KEY:-}" ]; then
     create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
   fi
@@ -672,9 +708,9 @@ _acq_msb_ensure_agent_user() {
     chown -R agent:agent /home/agent 2>/dev/null || chown -R agent /home/agent 2>/dev/null || true
   ' || {
     echo "acq(msb): warning: could not create the 'agent' user in '$name'." >&2
-    echo "acq(msb):   kit commands that run as the agent user (usai merge, playbook" >&2
-    echo "acq(msb):   clone) may fail. Use an ACQ_MSB_IMAGE that provides an 'agent'" >&2
-    echo "acq(msb):   user with HOME=/home/agent, or a base with useradd/adduser." >&2
+    echo "acq(msb):   kit commands that run as the agent user (e.g. the usai merge)" >&2
+    echo "acq(msb):   may fail. Use an ACQ_MSB_IMAGE that provides an 'agent' user" >&2
+    echo "acq(msb):   with HOME=/home/agent, or a base with useradd/adduser." >&2
     return 0
   }
   msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
@@ -862,21 +898,48 @@ acq_backend_secret_set() {
   # Store into the acq-owned store (keychain/file); value read from TTY/stdin.
   acq_secret_set_interactive "$service" "$scope_name" || return 1
 
+  # Re-feed running sandboxes so a rotated secret takes effect without recreate
+  # (msb modify --secret; the guest keeps its placeholder, only the injected
+  # value changes). Only for services the msb adapter actually binds (usai).
   case "$service" in
     usai)
+      local val
+      if val=$(acq_secret_resolve usai "$scope_name" 2>/dev/null) && [ -n "$val" ]; then
+        local applied=0 sb
+        # Determine target sandboxes: a named scope, else all running sandboxes.
+        if [ -n "$scope_name" ]; then
+          if acq_backend_exists "$scope_name"; then
+            USAI_API_KEY="$val" msb modify "$scope_name" --secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}" >/dev/null 2>&1 \
+              && applied=$((applied + 1))
+          fi
+        else
+          while IFS= read -r sb; do
+            [ -n "$sb" ] || continue
+            USAI_API_KEY="$val" msb modify "$sb" --secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}" >/dev/null 2>&1 \
+              && applied=$((applied + 1))
+          done <<EOF
+$(msb list -q 2>/dev/null)
+EOF
+        fi
+        val=""
+        [ "$applied" -gt 0 ] && acq_debug "msb modify: re-fed USAi secret to $applied sandbox(es)"
+      fi
       echo "acq(msb): stored USAi key in the acq secret store. At 'acq run/create'" >&2
       echo "      the msb backend binds it via --secret USAI_API_KEY@${ACQ_MSB_USAI_HOST};" >&2
       echo "      the real value is swapped in on the wire and never enters the guest." >&2
+      echo "      Running sandboxes were re-fed via 'msb modify' (no recreate needed)." >&2
       ;;
     github)
-      echo "acq(msb): stored GitHub token in the acq secret store. At 'acq run/create'" >&2
-      echo "      the msb backend binds it via --secret GITHUB_TOKEN@github.com and" >&2
-      echo "      @api.github.com; the real value never enters the guest." >&2
+      echo "acq(msb): stored GitHub token in the acq secret store (used by the sbx" >&2
+      echo "      backend). NOTE: the msb backend does NOT bind GitHub as a secret —" >&2
+      echo "      msb 0.6.6 does not substitute the placeholder for git's HTTPS clone" >&2
+      echo "      to github.com, so the private playbook-clone kit is skipped on msb." >&2
+      echo "      Tracked for a fix (see docs/BACKEND_GUIDE.md, msb known limitations)." >&2
       ;;
     *)
       echo "acq(msb): stored '$service' in the acq secret store. Note: the msb adapter" >&2
-      echo "      only auto-binds 'usai' and 'github' at create today; other services" >&2
-      echo "      are stored but not yet wired to a --secret host mapping." >&2
+      echo "      only auto-binds 'usai' at create today; other services are stored" >&2
+      echo "      but not yet wired to a --secret host mapping." >&2
       ;;
   esac
   return 0

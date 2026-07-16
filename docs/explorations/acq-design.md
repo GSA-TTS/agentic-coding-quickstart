@@ -877,12 +877,16 @@ kit vocabulary** with a translation layer. Recorded in
    keychain (`security`/`secret-tool`) with a `0600` file fallback. `acq secret
    set` writes there; BOTH backends read from it at provision — sbx feeds its
    proxy (`sbx secret set`/`set-custom`, piped), msb binds `--secret ENV@HOST`
-   (USAi + GitHub) from a transient env var. The value never enters the guest,
-   never appears in argv, and is never serialized. This is the bash subset of
-   §7.5; the full Go/`go-keyring`/`age` + MITM `CredentialRewriteRule` +
-   swap-on-access placeholder component remains a larger future effort. The
-   earlier "msb uses raw host-env `--secret`, unified store deferred" note is
-   superseded.
+   with `--tls-intercept` (USAi only) and re-feeds running sandboxes with `msb
+   modify --secret`. The value never enters the guest (msb gives it a
+   placeholder), never appears in argv, and is never serialized. **GitHub is NOT
+   bound on msb** — msb 0.6.6 doesn't substitute the placeholder for git's HTTPS
+   clone to github.com (works for the USAi `Authorization` header, not git; see
+   microsandbox #756/#768/#1170), so the private playbook clone is skipped on
+   msb (non-fatal). This is the bash subset of §7.5; the full
+   Go/`go-keyring`/`age` + MITM `CredentialRewriteRule` + swap-on-access
+   placeholder component remains a larger future effort. The earlier "msb uses
+   raw host-env `--secret`, unified store deferred" note is superseded.
 
 4. **msb `ports` is create/run-time only** (msb 0.6.6 has no post-hoc ports
    verb), and **msb `ensure_kits_applied` re-applies kits idempotently** rather
@@ -913,7 +917,12 @@ kit vocabulary** with a translation layer. Recorded in
    returns 200);
    (iv) a sandbox that isn't exec-ready after create is a HARD failure —
    `msb create` returns 0 even when the guest fails to START, so earlier runs
-   were false successes.
+   were false successes;
+   (v) secret substitution requires `--tls-intercept` (the interception CA is
+   auto-trusted in the guest), and only covers the `Authorization` header path
+   (USAi works); it does NOT work for git's HTTPS clone to github.com in 0.6.6,
+   so the private playbook clone is skipped on msb (tracked; microsandbox
+   #756/#768/#1170).
 
 6. **`PATTERNS_KIT_REF` is provisionally pinned to the Part A PR head**
    (`#221`, pre-merge) with a `TODO` in `common.sh`. Per the handoff §4.1 hard

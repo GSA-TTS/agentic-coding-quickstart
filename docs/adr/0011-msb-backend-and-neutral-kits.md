@@ -93,10 +93,14 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   allow@HOST` (bare FQDN); `files[]` → `msb copy`; `commands[]` → `msb exec` (install
   phase marker-gated for idempotency); the zscaler `backend_shortcuts.msb`
   → `--trust-host-cas`; the USAi key → `--secret USAI_API_KEY@api.gsa.usai.gov`
-  and the GitHub token → `--secret GITHUB_TOKEN@github.com`/`@api.github.com`,
-  read from the acq secret store at provision into a transient env var (never
-  argv, never the kit spec; the real value never enters the guest). Unlike sbx
-  (whose
+  with `--tls-intercept` (required for substitution), read from the acq secret
+  store at provision into a transient env var (never argv, never the kit spec;
+  the guest gets only a placeholder). `acq secret set` re-feeds running sandboxes
+  via `msb modify --secret`. The **GitHub token is deliberately NOT bound on
+  msb**: msb 0.6.6 does not substitute the placeholder for git's HTTPS clone to
+  github.com (verified; the header path for USAi works, git does not — see
+  microsandbox #756/#768/#1170), so the private playbook-clone kit is skipped on
+  msb (non-fatal, warns). Unlike sbx (whose
   templates supply the image), msb runs a plain OCI image: the default is the
   public `node:22-bookworm` (built on buildpack-deps, so it already ships
   node/git/curl/ca-certificates — the four kits' prerequisites — and pulls
@@ -187,6 +191,28 @@ allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
 - **Compliance:** no new external services; the msb secret path keeps the real
   key out of the guest (SC-8/SC-28); network egress is allow-listed per kit
   (SC-7). Structural adapter change only (SA-8/SA-15/SA-17; CM-2/CM-3/CM-6).
+- **Known limitation (tracked):** on msb the private `agentic-coding-playbook`
+  clone is skipped — msb 0.6.6 does not substitute the credential placeholder
+  for git's HTTPS smart-transport to github.com (upstream microsandbox
+  #756/#768/#1170). The kit is non-fatal; the sandbox is otherwise fully usable
+  (USAi, git-ssh-sign, zscaler all work). The sbx backend is unaffected. Tracked
+  in quickstart#203 for when upstream git substitution lands.
+
+## Live verification (msb, on a KVM host)
+
+Confirmed working end-to-end on a sandbox-capable host during bring-up:
+`msb create` (with `--dns-nameserver`, `--tls-intercept`, `--trust-host-cas`,
+workspace mount at `/home/agent/workspace`, `agent` user creation), USAi key
+substitution (models API returns a real status over intercepted TLS),
+git-ssh-sign config, zscaler CA trust, and all kit files/commands applied. The
+one gap is the private playbook clone (above). Several msb behaviors were
+discovered and worked around here (recorded so they aren't re-litigated):
+`msb create` returns 0 even on async start failure (→ exec-ready gate);
+identical host:guest `/tmp` mounts silently fail (→ fixed guest mount point);
+the host resolver is unreachable from the microVM (→ `--dns-nameserver`); the
+kits assume an `agent`/`/home/agent` user a plain base lacks (→ create it);
+secret substitution requires `--tls-intercept` and only covers the
+`Authorization` header path, not git HTTPS.
 
 ## Validation
 
