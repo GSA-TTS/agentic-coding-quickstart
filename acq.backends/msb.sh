@@ -96,6 +96,18 @@ ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
 # preferred id but not required — kit commands address the user by name.
 ACQ_MSB_AGENT_UID="${ACQ_MSB_AGENT_UID:-1000}"
 
+# DNS nameserver for the guest. msb hands the guest the HOST's resolvers, but a
+# corporate/VPN resolver (e.g. 172.16.x, Zscaler) is typically unreachable from
+# the microVM's network namespace — so the guest cannot resolve even the
+# allow-listed kit hosts (api.gsa.usai.gov, github.com), and every outbound
+# request fails with "Could not resolve host". A public resolver reachable from
+# the microVM fixes it (verified: with --dns-nameserver 1.1.1.1 the models API
+# resolves + returns 401/200 and github returns 200). Override with a resolver
+# reachable from your environment, or set to empty to skip and use msb's default
+# (only if the host resolver IS reachable from the guest). Uses `-` (not `:-`)
+# so an explicitly-empty value disables the flag rather than re-defaulting.
+ACQ_MSB_DNS_NAMESERVER="${ACQ_MSB_DNS_NAMESERVER-1.1.1.1}"
+
 # Agents recognized by acq's run dispatch (mirrors sbx.sh KNOWN_AGENTS).
 # shellcheck disable=SC2034
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
@@ -260,9 +272,20 @@ _acq_msb_apply_kit_dir() {
   #    kit_spec_files emits tab-separated "path<TAB>mode<TAB>phase<TAB>source"
   #    with possibly-empty middle fields; parse each field explicitly with cut
   #    (a bare `IFS=<tab> read` collapses adjacent empty tab fields).
-  local fline path mode phase source src
+  #    IMPORTANT: read ALL records into an array FIRST. If we iterated the
+  #    heredoc directly, the `msb copy`/`msb exec` calls inside the loop body
+  #    would consume the loop's stdin and only the first file would be processed
+  #    (this is exactly what dropped merge-global-config.mjs).
+  local _frecs=() fline
   while IFS= read -r fline; do
-    [ -n "$fline" ] || continue
+    [ -n "$fline" ] && _frecs+=("$fline")
+  done <<EOF
+$(kit_spec_files "$spec")
+EOF
+
+  local path mode phase source src _i
+  for _i in ${_frecs[@]+"${!_frecs[@]}"}; do
+    fline="${_frecs[$_i]}"
     path=$(printf '%s' "$fline" | cut -f1)
     mode=$(printf '%s' "$fline" | cut -f2)
     phase=$(printf '%s' "$fline" | cut -f3)
@@ -279,9 +302,7 @@ _acq_msb_apply_kit_dir() {
         return 1
       }
     fi
-  done <<EOF
-$(kit_spec_files "$spec")
-EOF
+  done
 
   # 2) Run commands[]. Reassemble each argv record and exec it as the given uid.
   #    install → run once (idempotent, marker-gated); initFiles/startup → every
@@ -293,7 +314,9 @@ EOF
 # Copy a host file into the guest and VERIFY it is readable there before
 # returning. Also chown files under /home/agent to the agent user (they are
 # copied as root, but the kits' startup commands read them as the agent user;
-# see _acq_msb_ensure_agent_user). Retries briefly to absorb any copy lag.
+# see _acq_msb_ensure_agent_user). The verify poll is belt-and-suspenders — msb
+# copy/exec persistence is synchronous in practice, but a short readiness poll
+# costs nothing and gives a clear error if a copy genuinely didn't land.
 _acq_msb_copy_file_verified() {
   local name="$1" src="$2" path="$3" mode="$4"
   local dir; dir=$(dirname "$path")
@@ -338,9 +361,21 @@ _acq_msb_copy_file_verified() {
 # Parse and execute a kit spec's commands[] against sandbox NAME.
 _acq_msb_run_commands() {
   local name="$1" spec="$2"
-  local phase="" user="" argv=() reading=0 line
 
+  # Buffer the parsed command stream FIRST, then execute. The exec step calls
+  # `msb exec`, which would consume this loop's stdin if we iterated the heredoc
+  # directly — dropping every command after the first (same class of bug as the
+  # files loop). So collect records, then run them from the array.
+  local _lines=() line
   while IFS= read -r line; do
+    _lines+=("$line")
+  done <<EOF
+$(kit_spec_commands "$spec")
+EOF
+
+  local phase="" user="" argv=() reading=0 _i
+  for _i in ${_lines[@]+"${!_lines[@]}"}; do
+    line="${_lines[$_i]}"
     case "$line" in
       "__CMD__"*)
         # __CMD__<TAB>phase<TAB>user
@@ -351,7 +386,7 @@ _acq_msb_run_commands() {
         ;;
       "__END__")
         reading=0
-        _acq_msb_exec_command "$name" "$phase" "$user" "${argv[@]}"
+        _acq_msb_exec_command "$name" "$phase" "$user" ${argv[@]+"${argv[@]}"}
         ;;
       *)
         if [ "$reading" -eq 1 ]; then
@@ -361,9 +396,7 @@ _acq_msb_run_commands() {
         fi
         ;;
     esac
-  done <<EOF
-$(kit_spec_commands "$spec")
-EOF
+  done
 }
 
 # Execute one command record. install-phase commands are gated by a per-command
@@ -468,14 +501,33 @@ acq_backend_provision() {
 
   [ "$trust_host_cas" -eq 1 ] && create_flags+=(--trust-host-cas)
 
-  # Translate the caller's workspace paths into --volume mounts. The agent token
-  # is the first positional; each subsequent positional is a path (optionally
-  # host:guest or path:ro). Mount each project path read-write (or :ro) at the
-  # same absolute path inside the guest, mirroring the sbx workspace model.
+  # Guest DNS: use a resolver reachable from the microVM. The host's resolvers
+  # (often a corporate/VPN/Zscaler IP) are typically unreachable from the guest,
+  # so without this the guest can't resolve even allow-listed hosts. See the
+  # ACQ_MSB_DNS_NAMESERVER note above.
+  if [ -n "$ACQ_MSB_DNS_NAMESERVER" ]; then
+    create_flags+=(--dns-nameserver "$ACQ_MSB_DNS_NAMESERVER")
+  fi
+
+  # Translate the caller's workspace path into a --volume mount. The agent token
+  # is the first positional; the workspace path follows. msb does NOT create the
+  # host mount path and it FAILS to mount when the guest path mirrors an absolute
+  # host path under /tmp (verified: identical host:guest under /tmp starts but
+  # the mount silently doesn't appear). So we mount the host workspace at a fixed
+  # conventional guest path under the agent home (ACQ_MSB_WORKSPACE), which works
+  # reliably. The chosen guest path is exported so the run/attach path can cd there.
   local ws
   ws=$(workspace_path "$@")
+  ACQ_MSB_GUEST_WORKSPACE=""
   if [ -n "$ws" ]; then
-    create_flags+=(--volume "${ws}:${ws}")
+    if [ ! -d "$ws" ]; then
+      echo "acq(msb): error: workspace path does not exist on the host: $ws" >&2
+      echo "acq(msb):   msb cannot mount a nonexistent host path. Create it first." >&2
+      return 1
+    fi
+    ACQ_MSB_GUEST_WORKSPACE="${ACQ_MSB_WORKSPACE:-/home/agent/workspace}"
+    create_flags+=(--volume "${ws}:${ACQ_MSB_GUEST_WORKSPACE}")
+    acq_debug "msb volume: ${ws} -> ${ACQ_MSB_GUEST_WORKSPACE}"
   fi
 
   # Credentials: read from the acq-owned secret store (keychain/file), scoped to
@@ -535,12 +587,22 @@ acq_backend_provision() {
     return 1
   fi
 
-  # msb create boots the guest in the BACKGROUND; copying files / running kit
-  # commands before it is exec-ready races the boot (files may not be present
-  # when a startup command runs). Wait until `msb exec` works before applying.
+  # CRITICAL: `msb create` returns 0 even when the sandbox later FAILS TO START
+  # (e.g. a bad mount): the boot is asynchronous. So a zero rc from create does
+  # NOT mean the sandbox is usable. The ONLY reliable readiness signal is that
+  # `msb exec` works. Treat a non-ready sandbox as a HARD provision failure —
+  # otherwise kit application (and every downstream check) runs against a
+  # sandbox that isn't really up, which looks like success but silently isn't.
   if ! _acq_msb_wait_for_exec_ready "$name"; then
-    echo "acq(msb): warning: sandbox '$name' did not become exec-ready within" >&2
-    echo "acq(msb):   ${ACQ_MSB_EXEC_READY_TIMEOUT}s; kit application may be unreliable." >&2
+    echo "acq(msb): error: sandbox '$name' did not become exec-ready within" >&2
+    echo "acq(msb):   ${ACQ_MSB_EXEC_READY_TIMEOUT}s. 'msb create' returns 0 even when the" >&2
+    echo "acq(msb):   guest fails to START (async boot) — a bad mount, image, or host" >&2
+    echo "acq(msb):   virtualization issue. Diagnose with:" >&2
+    echo "acq(msb):     msb logs --source system $name" >&2
+    echo "acq(msb):     msb list          # is it running?" >&2
+    echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the create command trace.)" >&2
+    # Leave the sandbox in place for inspection; caller decides whether to rm.
+    return 1
   fi
 
   # Verify the kits' runtime prerequisites are present in the base image

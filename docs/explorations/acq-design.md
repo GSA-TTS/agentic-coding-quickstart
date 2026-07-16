@@ -889,16 +889,31 @@ kit vocabulary** with a translation layer. Recorded in
    than a state-preserving in-place add (msb has no `sbx kit add` equivalent;
    it never silently destroys state).
 
-5. **msb provides the kits' `agent`/uid-1000 + /home/agent contract itself.**
+5. **msb provides the kits' `agent`/uid-1000 + /home/agent contract itself,
+   plus several live-bring-up fixes.**
    The kits assume the sbx agent-template user (`agent`, HOME=/home/agent, run
    as `-u 1000`). A plain OCI base has no such user (node:22-bookworm ships
    `node` at uid 1000), which caused the usai `node merge-global-config.mjs`
    MODULE_NOT_FOUND and the playbook-clone failure (both ran as the wrong
-   user/home). The adapter now creates the `agent` user at provision
-   (idempotent, offline), chowns staged `/home/agent` files to it, and runs
-   uid-1000 kit commands as `agent` with `HOME=/home/agent` (addressed by name,
-   not literal uid). `msb exec`/`copy` persistence itself was verified fine —
-   the failure was the missing user contract, not a copy race.
+   user/home). The adapter creates the `agent` user at provision (idempotent,
+   offline), chowns staged `/home/agent` files to it, and runs uid-1000 kit
+   commands as `agent` with `HOME=/home/agent` (addressed by name, not literal
+   uid). Other gotchas found during live bring-up, all fixed:
+   (i) the kit files/commands apply loops buffer their records into arrays
+   first — an inner `msb copy`/`msb exec` consumes the loop's stdin, which
+   silently dropped every file/command after the first (this was the actual
+   cause of the missing `merge-global-config.mjs`, not the earlier copy-race
+   theory; `msb` exec/copy persistence itself was verified fine);
+   (ii) the host workspace is mounted at a fixed guest path
+   (`/home/agent/workspace`), because msb won't create the host path and
+   mishandles an identical host:guest `/tmp` mount;
+   (iii) `--dns-nameserver` (default `1.1.1.1`) is passed to `msb create`,
+   because the host's corporate/VPN resolver is unreachable from the microVM
+   (verified: with it, the models API resolves and returns 401/200 and github
+   returns 200);
+   (iv) a sandbox that isn't exec-ready after create is a HARD failure —
+   `msb create` returns 0 even when the guest fails to START, so earlier runs
+   were false successes.
 
 6. **`PATTERNS_KIT_REF` is provisionally pinned to the Part A PR head**
    (`#221`, pre-merge) with a `TODO` in `common.sh`. Per the handoff §4.1 hard

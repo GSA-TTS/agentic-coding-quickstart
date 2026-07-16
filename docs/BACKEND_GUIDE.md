@@ -158,7 +158,37 @@ Tunables:
 |---------|---------|---------|
 | `ACQ_MSB_IMAGE` | `docker.io/library/node:22-bookworm` | Base OCI image (must be pullable and ship node/git/curl/ca-certificates) |
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
+| `ACQ_MSB_AGENT_UID` | `1000` | Preferred uid for the provisioned `agent` user |
+| `ACQ_MSB_WORKSPACE` | `/home/agent/workspace` | Guest mount point for the host workspace |
+| `ACQ_MSB_DNS_NAMESERVER` | `1.1.1.1` | Guest DNS resolver (set empty to use msb's default) |
 | `ACQ_MSB_KIT_CACHE` | `$XDG_CACHE_HOME/acq/kits` | where fetched neutral kits are materialized |
+
+### DNS / name resolution
+
+msb hands the guest the **host's** DNS resolvers, but a corporate/VPN resolver
+(e.g. a `172.16.x` or Zscaler address) is typically **unreachable from the
+microVM's network namespace** — so the guest can't resolve even the
+allow-listed kit hosts (`api.gsa.usai.gov`, `github.com`) and every outbound
+request fails with `Could not resolve host`. The msb backend therefore passes
+`--dns-nameserver` (default `1.1.1.1`, a public resolver reachable from the
+microVM) to `msb create`. Override `ACQ_MSB_DNS_NAMESERVER` if `1.1.1.1` is
+blocked in your environment, or set it empty to fall back to msb's default (only
+if your host resolver is reachable from the guest).
+
+### Workspace mounting
+
+msb does **not** create the host mount path and will not reliably mount a guest
+path that mirrors an absolute host path under `/tmp` (the mount silently does
+not appear). So the msb backend mounts your host workspace at a fixed guest path
+(`ACQ_MSB_WORKSPACE`, default `/home/agent/workspace`) rather than at its host
+path. The host path must already exist — `acq` errors clearly if it does not.
+This differs from sbx, which mounts the workspace at its original path.
+
+> **`msb create` starts asynchronously.** `msb create` returns success even if
+> the sandbox later fails to *start* (e.g. a bad mount). `acq` therefore treats
+> "sandbox not exec-ready within `ACQ_MSB_EXEC_READY_TIMEOUT`" as a **hard
+> provision failure** and points you at `msb logs --source system <name>` —
+> rather than proceeding against a sandbox that never came up.
 
 ### Base image and prerequisites
 

@@ -107,7 +107,15 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   user (HOME=/home/agent)** the kits assume (the sbx agent-template contract) —
   a plain base has no such user (node:22-bookworm has `node` at uid 1000) — and
   runs the kits' uid-1000 commands as `agent` (by name, with HOME set), chowning
-  staged `/home/agent` files to it.
+  staged `/home/agent` files to it. It **mounts the host workspace at a fixed
+  guest path** (`ACQ_MSB_WORKSPACE`, default `/home/agent/workspace`) because msb
+  won't create the host path and mishandles an identical host:guest `/tmp` mount.
+  It passes **`--dns-nameserver`** (default `1.1.1.1`) because msb hands the
+  guest the host's resolvers, which for a corporate/VPN resolver are unreachable
+  from the microVM (otherwise the guest can't resolve even allow-listed hosts).
+  It treats a sandbox that is **not exec-ready** after create as a HARD failure:
+  `msb create` returns 0 even when the guest fails to START (async boot), so the
+  only reliable readiness signal is that `msb exec` works.
 
 - **sbx-v2 command typing (translation):** sbx types `commands.install[].command`
   as a shell **string** but `commands.startup[]`/`initFiles[]` as an argv

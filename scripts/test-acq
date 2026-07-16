@@ -99,30 +99,41 @@ STUB
   chmod +x "$STUBDIR/sbx"
 
   # Stub `msb` (microsandbox) the same way, logging every call to $CALLS.
+  # IMPORTANT: this stub DRAINS STDIN (`cat >/dev/null`) like a real `msb exec`
+  # / `msb ssh` does. That is what surfaced the loop-stdin-consumption bug (a
+  # `while read … done <<heredoc` whose body calls msb would otherwise lose all
+  # records after the first). Keeping the stub faithful guards against regressions.
   cat >"$STUBDIR/msb" <<'MSBSTUB'
 #!/usr/bin/env bash
 { printf 'msb'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
-case "${1:-}" in
+_msb_sub="${1:-}"
+case "$_msb_sub" in
   --version|-V) printf 'msb 0.6.6\n' ;;
   doctor) exit 0 ;;
-  create) : >"$STUBDIR/.msb_created"; exit 0 ;;
+  create) : >"$STUBDIR/.msb_created" ;;
   list|ls)
-    [ -f "$STUBDIR/.msb_sandbox_list" ] && cat "$STUBDIR/.msb_sandbox_list"
-    exit 0 ;;
+    [ -f "$STUBDIR/.msb_sandbox_list" ] && cat "$STUBDIR/.msb_sandbox_list" ;;
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
     case "$snippet" in
       *"echo ok"*) printf 'ok\n' ;;
       *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
-      *) exit 0 ;;
+      *"command -v"*) : ;;          # prereqs "present" (empty missing set)
+      *"test -f "*) exit 1 ;;       # markers absent
+      *"test -s "*) exit 0 ;;       # copied files present
+      *) : ;;
     esac ;;
-  ssh)  exit 0 ;;
-  stop) exit 0 ;;
-  remove|rm) exit 0 ;;
-  copy|cp) exit 0 ;;
-  *) exit 0 ;;
+  ssh)  : ;;
+  stop) : ;;
+  remove|rm) : ;;
+  copy|cp) : ;;
+  *) : ;;
 esac
+# Drain any piped stdin exactly like a real remote exec would, so the test
+# harness catches loops that leak their stdin into an inner msb call.
+cat >/dev/null 2>&1 || true
+exit 0
 MSBSTUB
   chmod +x "$STUBDIR/msb"
 
@@ -608,6 +619,58 @@ prov_log=$(cat "$CALLS")
 assert_contains "msb: provision binds USAi via --secret" "$prov_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
 assert_contains "msb: provision binds github via --secret" "$prov_log" "--secret GITHUB_TOKEN@github.com"
 assert_eq "msb: provision never leaks secret values to argv" "CLEAN" "$prov_leaks"
+# Workspace is mounted at the fixed guest path (NOT host:host), and the host
+# path (/tmp) exists so no error.
+assert_contains "msb: workspace mounted at guest path" "$prov_log" "--volume /tmp:/home/agent/workspace"
+assert_not_contains "msb: workspace NOT mounted host:host" "$prov_log" "--volume /tmp:/tmp"
+cleanup_stubs
+
+# 8m2. msb provision aborts (hard fail) when the sandbox never becomes
+#      exec-ready — `msb create` returns 0 even when the guest fails to START,
+#      so acq must NOT proceed against a dead sandbox.
+make_stubs; load_acq
+# Make the msb stub's `exec` never return "ok" (simulate a sandbox that didn't
+# start), by pointing echo-ok probes at a failing exit.
+cat >"$STUBDIR/msb" <<'MSBSTUB2'
+#!/usr/bin/env bash
+{ printf 'msb'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  --version|-V) printf 'msb 0.6.6\n' ;;
+  create) exit 0 ;;              # create "succeeds" but the guest never starts
+  exec)   exit 1 ;;              # every exec fails -> never exec-ready
+  *) exit 0 ;;
+esac
+MSBSTUB2
+chmod +x "$STUBDIR/msb"
+notready_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/nr-secrets" ACQ_MSB_EXEC_READY_TIMEOUT=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision nrbox shell /tmp 2>&1
+  echo "PROVISION_RC=$?"
+)
+assert_contains "msb: not-ready aborts provision" "$notready_out" "did not become exec-ready"
+assert_contains "msb: not-ready is a hard failure (rc!=0)" "$notready_out" "PROVISION_RC=1"
+cleanup_stubs
+
+# 8m3. msb provision errors clearly when the host workspace path does not exist
+#      (msb cannot mount a nonexistent host path).
+make_stubs; load_acq
+missing_ws_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/mw-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision mwbox shell /no/such/path/here 2>&1
+  echo "RC=$?"
+)
+assert_contains "msb: missing workspace errors" "$missing_ws_out" "workspace path does not exist"
+assert_contains "msb: missing workspace is a hard failure" "$missing_ws_out" "RC=1"
 cleanup_stubs
 
 # 8n. msb provision creates the agent user and runs a uid-1000 kit command as
@@ -651,6 +714,104 @@ assert_contains "msb: provision creates agent user" "$agent_log" "agent"
 assert_contains "msb: uid-1000 kit cmd runs as agent" "$agent_log" "msb exec agentbox -u agent -e HOME=/home/agent -- node"
 assert_not_contains "msb: uid-1000 kit cmd not run as -u 1000" "$agent_log" "msb exec agentbox -u 1000 -- node"
 assert_contains "msb: chowns staged /home/agent file to agent" "$agent_log" "chown agent '/home/agent/usai-config/merge-global-config.mjs'"
+cleanup_stubs
+
+# 8o. Regression: msb applies ALL kit files and ALL kit commands, not just the
+#     first. The apply loops call `msb copy`/`msb exec`, which drain stdin (the
+#     stub mimics this) — a naive `while read … done <<heredoc` would lose every
+#     record after the first. Assert a two-file, two-command kit is fully applied.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/multi-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  mk="${STUBDIR}/multikit"
+  mkdir -p "$mk/files/home"
+  printf 'A\n' > "$mk/files/home/file_one"
+  printf 'B\n' > "$mk/files/home/file_two"
+  cat >"$mk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: multi-kit
+displayName: Multi Kit
+description: two files and two startup commands
+files:
+  - path: /home/agent/file_one
+    mode: "0644"
+    source: files/home/file_one
+  - path: /home/agent/file_two
+    mode: "0644"
+    source: files/home/file_two
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - echo CMD_ALPHA
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - echo CMD_BETA
+SPEC
+  _acq_msb_fetch_kit() { printf '%s\n' "$mk"; }
+  # Apply just this kit directly (avoid the built-in kit fetches).
+  _acq_msb_apply_kit_dir multibox "$mk"
+)
+multi_log=$(cat "$CALLS")
+assert_contains "msb: applies first kit file" "$multi_log" "msb copy ${STUBDIR}/multikit/files/home/file_one multibox:/home/agent/file_one"
+assert_contains "msb: applies SECOND kit file (not dropped)" "$multi_log" "msb copy ${STUBDIR}/multikit/files/home/file_two multibox:/home/agent/file_two"
+assert_contains "msb: runs first kit command" "$multi_log" "echo CMD_ALPHA"
+assert_contains "msb: runs SECOND kit command (not dropped)" "$multi_log" "echo CMD_BETA"
+cleanup_stubs
+
+# 8p. msb provision passes --dns-nameserver so the guest can resolve allow-listed
+#     hosts (the host's corporate resolver is unreachable from the microVM).
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/dns-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision dnsbox shell /tmp >/dev/null 2>&1
+)
+dns_log=$(cat "$CALLS")
+assert_contains "msb: provision sets --dns-nameserver" "$dns_log" "--dns-nameserver 1.1.1.1"
+cleanup_stubs
+
+# 8q. ACQ_MSB_DNS_NAMESERVER override + disable (empty = omit the flag).
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/dns2-secrets" ACQ_MSB_DNS_NAMESERVER="9.9.9.9"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision dns2box shell /tmp >/dev/null 2>&1
+)
+assert_contains "msb: DNS nameserver override honored" "$(cat "$CALLS")" "--dns-nameserver 9.9.9.9"
+cleanup_stubs
+
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/dns3-secrets" ACQ_MSB_DNS_NAMESERVER=""
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision dns3box shell /tmp >/dev/null 2>&1
+)
+assert_not_contains "msb: empty DNS nameserver omits the flag" "$(cat "$CALLS")" "--dns-nameserver"
 cleanup_stubs
 
 # ===========================================================================
