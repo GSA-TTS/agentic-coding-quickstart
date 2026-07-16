@@ -385,6 +385,11 @@ inspection):
 ./scripts/verify-backends -v
 ```
 
+A `WARN` line marks a known, tracked limitation (e.g. the msb private-repo
+playbook clone, [quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203))
+— it is surfaced every run but does **not** count as a failure, so a clean msb
+run still exits 0.
+
 ---
 
 ## Adding a new backend (implementer notes)
