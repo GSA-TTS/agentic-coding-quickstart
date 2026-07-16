@@ -506,7 +506,9 @@ make_stubs; load_acq
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
   rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
+  # shellcheck disable=SC1090
   ACQ_SOURCE_ONLY=1 . "$ACQ"
+  # shellcheck source=acq.backends/msb.sh
   . "${REPO_ROOT}/acq.backends/msb.sh"
   set +e
   detected=$(_auto_detect_backend)
@@ -518,7 +520,9 @@ cleanup_stubs
 make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
+  # shellcheck disable=SC1090
   ACQ_SOURCE_ONLY=1 . "$ACQ"
+  # shellcheck source=acq.backends/msb.sh
   . "${REPO_ROOT}/acq.backends/msb.sh"
   set +e
   acq_resolve_backend "msb"

@@ -41,6 +41,7 @@ GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_
 # Neutral kit directory names (relative to PATTERNS_KIT_DIR), in apply order.
 # kit-translate.sh resolves a kit's spec.yaml + files/ from these names. The
 # built-in kit set maps 1:1 to the four *_KIT refs above.
+# shellcheck disable=SC2034  # consumed by `acq kit list` in the acq entry point
 ACQ_KIT_NAMES=(usai-provider agentic-coding-playbook zscaler-ca-certificate git-ssh-sign)
 
 # Additional user-supplied kits. Set ACQ_EXTRA_KITS to a whitespace-separated

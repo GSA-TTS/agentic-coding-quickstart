@@ -686,12 +686,11 @@ kit_validate() {
   [ -z "$desc" ]    && { echo "kit: validate: description is required" >&2; errs=$((errs + 1)); }
 
   # files[]: each source: must exist under the kit dir; each path must be absolute.
-  local fline p m ph src
+  # (Only path + source are validated here; mode/phase are not checked.)
+  local fline p src
   while IFS= read -r fline; do
     [ -n "$fline" ] || continue
     p=$(printf '%s' "$fline" | cut -f1)
-    m=$(printf '%s' "$fline" | cut -f2)
-    ph=$(printf '%s' "$fline" | cut -f3)
     src=$(printf '%s' "$fline" | cut -f4)
     [ -n "$p" ] || continue
     case "$p" in

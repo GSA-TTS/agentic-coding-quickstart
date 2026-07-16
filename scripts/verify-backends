@@ -92,12 +92,12 @@ dump() {
 }
 
 # Run an acq command, capturing combined stdout+stderr into LAST_OUT and
-# returning its exit status. In verbose mode, also stream it live with the
-# exact command line first.
+# returning its exit status. The first arg is a short label for the step; in
+# verbose mode it and the exact command line are streamed live.
 run_acq() {
   local desc="$1"; shift
   if [ -n "$VERBOSE" ]; then
-    printf '        $ acq %s\n' "$*" >&2
+    printf '        $ acq %s   # %s\n' "$*" "$desc" >&2
     LAST_OUT=$("$ACQ" "$@" 2>&1 | tee /dev/stderr); return "${PIPESTATUS[0]}"
   fi
   LAST_OUT=$("$ACQ" "$@" 2>&1); return $?
@@ -151,6 +151,7 @@ verify_backend() {
   # create dispatch so we address the exact sandbox acq creates.
   local name
   name=$(
+    # shellcheck disable=SC1090
     ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
     derive_name shell "$WORKDIR" 2>/dev/null
   )
@@ -207,7 +208,8 @@ verify_backend() {
       #       provision could bind it;
       #   (b) the models host must resolve/connect from the guest (egress OK).
       if [ -n "${USAI_API_KEY:-}" ] || \
-         ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1;
+         ( # shellcheck disable=SC1090
+           ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1;
            command -v acq_secret_has >/dev/null 2>&1 && acq_secret_has usai ); then
         pass "${backend}: USAi key available to bind (acq store or host env)"
       else
