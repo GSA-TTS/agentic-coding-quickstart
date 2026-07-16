@@ -464,13 +464,36 @@ acq_backend_ensure_kits_applied() {
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_secret_set — thin wrapper over sbx secret CLI
+# Service → (host, env) mapping shared by both backends' secret feeds.
+# ---------------------------------------------------------------------------
+# The acq secret store holds the raw value under acq.<service>. Each backend
+# needs to know which HOST(s) the credential is injected for and (for the
+# placeholder/env path) which ENV var. Keep this table backend-neutral here so
+# sbx.sh and msb.sh agree on the mapping.
+#   usai   -> api.gsa.usai.gov            USAI_API_KEY
+#   github -> github.com,api.github.com   GITHUB_TOKEN (sbx built-in service)
+# Echoes "host1[,host2] <TAB> ENVVAR"; empty for unknown services.
+_acq_service_hosts_env() {
+  case "$1" in
+    usai)   printf 'api.gsa.usai.gov\tUSAI_API_KEY\n' ;;
+    github) printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
+    *)      printf '\t\n' ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_secret_set — store in the acq secret store, then feed sbx's proxy
 # ---------------------------------------------------------------------------
 #
-# Built-in services use `sbx secret set -g <service>`.
-# Custom endpoints (--host/--env present, or unknown service) use set-custom.
-# `usai` is a known alias for the USAi custom endpoint.
-# Never passes a secret as a CLI argument.
+# Phase 2: credentials are owned by acq's backend-neutral store
+# (acq.backends/secret-store.sh), not sbx's. `acq secret set` writes the value
+# into the acq store (keychain / 0600 file) keyed acq.<service> or
+# acq.<sandbox>.<service>, then synthesizes the equivalent sbx secret so the sbx
+# proxy performs the on-the-wire injection (the sbx runtime still needs the
+# value in its own proxy config; we feed it from the acq store, piped via stdin,
+# never argv). msb reads the same acq store at provision (see msb.sh).
+#
+# Usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]
 
 # Known sbx built-in services (the proxy injects these transparently).
 _ACQ_SBX_BUILTIN_SERVICES=" anthropic github gitlab google-cloud openai aws azure "
@@ -554,109 +577,95 @@ acq_backend_secret_set() {
     esac
   done
 
-  # Fill in USAi defaults.
-  if [ "$service" = "usai" ]; then
-    [ -z "$host" ]    && host="api.gsa.usai.gov"
-    [ -z "$env_var" ] && env_var="USAI_API_KEY"
+  # Fill in defaults for known custom-endpoint services. NOTE: services that are
+  # sbx BUILT-INS (github, anthropic, ...) must NOT be given a host/env here —
+  # they use `sbx secret set <service>` so the sbx proxy injects them natively.
+  # Only non-built-in services (usai) get a host/env mapping → set-custom.
+  case "$_ACQ_SBX_BUILTIN_SERVICES" in
+    *" $service "*) : ;;   # built-in: leave host/env empty
+    *)
+      local svc_hosts svc_env
+      svc_hosts=$(_acq_service_hosts_env "$service" | cut -f1)
+      svc_env=$(_acq_service_hosts_env "$service" | cut -f2)
+      [ -z "$host" ] && [ -n "$svc_hosts" ] && host="${svc_hosts%%,*}"   # primary host
+      [ -z "$env_var" ] && [ -n "$svc_env" ] && env_var="$svc_env"
+      ;;
+  esac
+
+  # --- Step 1: store the value in the acq-owned secret store (keychain/file). --
+  # This is the source of truth both backends read from. The value is read from
+  # a TTY (silent) or piped stdin and never appears in argv.
+  local acq_sandbox=""
+  [ -n "$scope_name" ] && acq_sandbox="$scope_name"
+  if command -v acq_secret_set_interactive >/dev/null 2>&1; then
+    acq_secret_set_interactive "$service" "$acq_sandbox" || return 1
+  else
+    echo "acq: internal error: secret store not loaded" >&2
+    return 1
   fi
 
-  # Decide: built-in `set` form vs custom `set-custom` form.
+  # --- Step 2: feed sbx's proxy from the acq store so sbx does the injection. --
+  # sbx's runtime still needs the value in its own proxy config to rewrite
+  # outbound requests; we pipe it from the acq store via stdin (never argv).
+  local secret_value
+  secret_value=$(acq_secret_resolve "$service" "$acq_sandbox" 2>/dev/null || true)
+  if [ -z "$secret_value" ]; then
+    echo "acq: warning: stored '$service' but could not read it back to feed sbx." >&2
+    return 1
+  fi
+
+  local exit_code=0
   if [ -n "$host" ] || [ -n "$env_var" ]; then
-    # Custom form. sbx set-custom reads the secret from stdin when --value is
-    # omitted — keeping it out of argv entirely.
-    #
-    # Two modes:
-    #   Interactive (TTY on stdin): prompt the user, read silently, pipe to sbx.
-    #   Piped (stdin is not a TTY):  read from stdin directly, no prompt emitted,
-    #                                print confirmation when done.
-    local secret_value=""
-    local piped=0
-
-    # ACQ_SECRET_TEST_VALUE is an offline-test escape hatch (no TTY in CI).
-    # Never set this in production use.
-    if [ -n "${ACQ_SECRET_TEST_VALUE:-}" ]; then
-      secret_value="$ACQ_SECRET_TEST_VALUE"
-    elif [ ! -t 0 ]; then
-      # Stdin is a pipe — read the secret from it, no prompt.
-      read -r secret_value
-      piped=1
-    else
-      printf 'Enter %s secret: ' "$service" >&2
-      read -rs secret_value 2>/dev/null || read -r secret_value
-      printf '\n' >&2
-    fi
-
-    if [ -z "$secret_value" ]; then
-      echo "acq: no secret entered; aborting." >&2
-      return 1
-    fi
-
+    # Custom-endpoint form: sbx secret set-custom, value piped on stdin.
     local cmd_args=("secret" "set-custom")
-    if [ -n "$scope_flag" ]; then
-      cmd_args+=("$scope_flag")
-    else
-      cmd_args+=("$scope_name")
-    fi
+    if [ -n "$scope_flag" ]; then cmd_args+=("$scope_flag"); else cmd_args+=("$scope_name"); fi
     cmd_args+=("--host" "${host:-}" "--env" "${env_var:-}")
-    # Append any extra flags that aren't --host/--env and their values.
-    local skip_next=0
+    # For a multi-host service (e.g. github.com,api.github.com) sbx set-custom
+    # takes one --host; the primary was chosen above. Additional hosts are
+    # covered by the sbx built-in service path when applicable.
+    local skip_next=0 arg
     for arg in "${extra_flags[@]+"${extra_flags[@]}"}"; do
       if [ "$skip_next" -eq 1 ]; then skip_next=0; continue; fi
       case "$arg" in
-        --host|--env) skip_next=1 ;;  # skip value too
-        --host=*|--env=*) ;;          # skip inline form
+        --host|--env) skip_next=1 ;;
+        --host=*|--env=*) ;;
         *) cmd_args+=("$arg") ;;
       esac
     done
-
-    local exit_code
-    if [ "$piped" -eq 1 ] || [ -n "${ACQ_SECRET_TEST_VALUE:-}" ]; then
-      # Non-interactive: pass via --value to suppress sbx's "Enter secret:" prompt.
-      sbx "${cmd_args[@]}" --value "$secret_value"
-      exit_code=$?
-      secret_value=""
-      if [ "$exit_code" -eq 0 ]; then
-        echo "acq: ${service} secret set." >&2
-      fi
-    else
-      # Interactive TTY: pipe the value so it never appears in argv.
-      printf '%s\n' "$secret_value" | sbx "${cmd_args[@]}"
-      exit_code=$?
-      secret_value=""
-    fi
-
-    if [ "$exit_code" -ne 0 ]; then
-      echo "" >&2
-      echo "acq: if the error above is 'already exists', remove the existing secret first:" >&2
-      echo "       sbx secret ls                        # find the placeholder" >&2
-      if [ -n "$scope_flag" ]; then
-        echo "       sbx secret rm -g <placeholder>       # remove it" >&2
-        echo "       acq secret set -g ${service}         # re-set" >&2
-      else
-        echo "       sbx secret rm ${scope_name} <placeholder>  # remove it" >&2
-        echo "       acq secret set ${scope_name} ${service}    # re-set" >&2
-      fi
-    fi
-    return "$exit_code"
+    printf '%s\n' "$secret_value" | sbx "${cmd_args[@]}"
+    exit_code=$?
   else
-    # Check if this is a known built-in service.
-    local builtin_scope_args=()
-    if [ -n "$scope_flag" ]; then
-      builtin_scope_args+=("$scope_flag")
-    else
-      builtin_scope_args+=("$scope_name")
-    fi
+    # Built-in service form (github, anthropic, ...): value piped on stdin.
     case "$_ACQ_SBX_BUILTIN_SERVICES" in
       *" $service "*)
-        sbx secret set "${builtin_scope_args[@]}" "$service" "${extra_flags[@]+"${extra_flags[@]}"}"
+        local builtin_scope_args=()
+        if [ -n "$scope_flag" ]; then builtin_scope_args+=("$scope_flag"); else builtin_scope_args+=("$scope_name"); fi
+        printf '%s\n' "$secret_value" | sbx secret set "${builtin_scope_args[@]}" "$service" --force 2>/dev/null \
+          || printf '%s\n' "$secret_value" | sbx secret set "${builtin_scope_args[@]}" "$service"
+        exit_code=$?
         ;;
       *)
-        echo "acq: '$service' is not a known built-in sbx service." >&2
-        echo "     For custom endpoints use: acq secret set [-g | SANDBOX] $service --host HOST --env ENV" >&2
-        exit 1
+        echo "acq: '$service' has no host/env mapping and is not a built-in sbx service." >&2
+        echo "     Provide --host HOST --env ENV, or use a known service (usai, github, ...)." >&2
+        secret_value=""
+        return 1
         ;;
     esac
   fi
+  secret_value=""
+
+  if [ "$exit_code" -ne 0 ]; then
+    echo "" >&2
+    echo "acq: the value was stored in the acq secret store, but feeding the sbx" >&2
+    echo "     proxy failed. If the error is 'already exists', remove it and retry:" >&2
+    echo "       sbx secret ls" >&2
+    if [ -n "$scope_flag" ]; then
+      echo "       sbx secret rm -g <placeholder> && acq secret set -g ${service}" >&2
+    else
+      echo "       sbx secret rm ${scope_name} <placeholder> && acq secret set ${scope_name} ${service}" >&2
+    fi
+  fi
+  return "$exit_code"
 }
 
 # ---------------------------------------------------------------------------

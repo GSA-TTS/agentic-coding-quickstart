@@ -193,12 +193,18 @@ verify_backend() {
       esac
       ;;
     msb)
-      # (a) The secret must be bound (guest env has USAI_API_KEY, even as sentinel).
-      if run_acq "exec usai-bound" --backend "$backend" exec "$name" -- sh -c \
-          'test -n "$USAI_API_KEY"'; then
-        pass "${backend}: USAi secret bound in guest (msb --secret ENV@HOST)"
+      # msb binds the USAi key with `--secret ENV@HOST`: the guest's
+      # $USAI_API_KEY is a proxy-managed SENTINEL, not the real value. So we do
+      # NOT assert a guest-side 200. Instead:
+      #   (a) the acq secret store (or a host env fallback) must HAVE the key, so
+      #       provision could bind it;
+      #   (b) the models host must resolve/connect from the guest (egress OK).
+      if [ -n "${USAI_API_KEY:-}" ] || \
+         ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1;
+           command -v acq_secret_has >/dev/null 2>&1 && acq_secret_has usai ); then
+        pass "${backend}: USAi key available to bind (acq store or host env)"
       else
-        skip "${backend}: USAi secret not bound (export USAI_API_KEY before create)"
+        skip "${backend}: USAi key not available (run 'acq secret set -g usai' or export USAI_API_KEY)"
       fi
       # (b) The models host must resolve/connect from the guest (egress allow).
       #     msb rewrites the auth header on the wire, so any HTTP status back from

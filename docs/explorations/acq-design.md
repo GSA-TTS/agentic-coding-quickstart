@@ -871,10 +871,18 @@ kit vocabulary** with a translation layer. Recorded in
    (`schemas/kit-hybrid-v1.schema.json`); `acq kit validate` does structural
    checks without a full JSON-schema engine.
 
-3. **msb secret model is native host-env `--secret`,** not the unified
-   swap-on-access store of §7.5 (deferred per the handoff §2). msb binds
-   `USAI_API_KEY@api.gsa.usai.gov` at create; the real value never enters the
-   guest. `acq secret set usai` on msb prints host-env guidance.
+3. **Secrets are acq-owned (bash keychain subset of §7.5), not sbx-specific.**
+   Phase 2 adds `acq.backends/secret-store.sh`: one store keyed
+   `acq.<service>` / `acq.<sandbox>.<service>` (sandbox scope wins) in the OS
+   keychain (`security`/`secret-tool`) with a `0600` file fallback. `acq secret
+   set` writes there; BOTH backends read from it at provision — sbx feeds its
+   proxy (`sbx secret set`/`set-custom`, piped), msb binds `--secret ENV@HOST`
+   (USAi + GitHub) from a transient env var. The value never enters the guest,
+   never appears in argv, and is never serialized. This is the bash subset of
+   §7.5; the full Go/`go-keyring`/`age` + MITM `CredentialRewriteRule` +
+   swap-on-access placeholder component remains a larger future effort. The
+   earlier "msb uses raw host-env `--secret`, unified store deferred" note is
+   superseded.
 
 4. **msb `ports` is create/run-time only** (msb 0.6.6 has no post-hoc ports
    verb), and **msb `ensure_kits_applied` re-applies kits idempotently** rather

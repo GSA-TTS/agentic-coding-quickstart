@@ -70,13 +70,26 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   - Multi-line command bodies are carried through the parser as **base64**
     tokens so literal block scalars survive as a single argv element.
 
+- **`acq.backends/secret-store.sh`** — the acq-owned, backend-neutral secret
+  store (the design's §7.5 model, as a thin bash subset). Credentials are no
+  longer sbx-specific: one store keyed `acq.<service>` / `acq.<sandbox>.<service>`
+  (sandbox scope wins), stored in the OS keychain (macOS `security`, Linux
+  `secret-tool`) with a `0600` file fallback. `acq secret set` writes here; both
+  adapters read from here at provision. Trust hygiene per §7.5: the value is
+  read from TTY/stdin (never argv), never serialized into kit specs/config/logs,
+  and file entries are `0600`. The full Go/`go-keyring`/`age`/MITM
+  `CredentialRewriteRule` component of §7.5 remains a larger future effort.
+
 - **`acq.backends/msb.sh`** — the microsandbox adapter implementing the full
   ADR-0010 contract against the `msb` CLI. It fetches each neutral kit and
   drives the parsed operations directly: `caps.network.allow` → `--net-rule
   allow@HOST` (bare FQDN); `files[]` → `msb copy`; `commands[]` → `msb exec` (install
   phase marker-gated for idempotency); the zscaler `backend_shortcuts.msb`
   → `--trust-host-cas`; the USAi key → `--secret USAI_API_KEY@api.gsa.usai.gov`
-  (host-env binding; the real key never enters the guest). Unlike sbx (whose
+  and the GitHub token → `--secret GITHUB_TOKEN@github.com`/`@api.github.com`,
+  read from the acq secret store at provision into a transient env var (never
+  argv, never the kit spec; the real value never enters the guest). Unlike sbx
+  (whose
   templates supply the image), msb runs a plain OCI image: the default is the
   public `node:22-bookworm` (built on buildpack-deps, so it already ships
   node/git/curl/ca-certificates — the four kits' prerequisites — and pulls

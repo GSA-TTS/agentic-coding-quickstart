@@ -63,6 +63,13 @@ if [ -n "${ACQ_SCRIPT_DIR:-}" ] && [ -f "${ACQ_SCRIPT_DIR}/acq.backends/kit-tran
   . "${ACQ_SCRIPT_DIR}/acq.backends/kit-translate.sh"
 fi
 
+# Source the acq-owned, backend-neutral secret store (keychain-backed; both the
+# sbx and msb adapters read credentials from here at provision time).
+if [ -n "${ACQ_SCRIPT_DIR:-}" ] && [ -f "${ACQ_SCRIPT_DIR}/acq.backends/secret-store.sh" ]; then
+  # shellcheck disable=SC1091
+  . "${ACQ_SCRIPT_DIR}/acq.backends/secret-store.sh"
+fi
+
 # ============================================================================
 # Utility functions
 # ============================================================================

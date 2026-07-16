@@ -189,19 +189,35 @@ If the image requires registry auth, log in with your container tooling (e.g.
 
 ### Secrets
 
-msb binds secrets from **host environment variables** at create time. The real
-value is never inlined into the sandbox config and never enters the guest:
+Credentials are owned by **acq's backend-neutral secret store** (not sbx's).
+Set a secret once with `acq secret set`; both backends read it from the same
+store at provision:
 
 ```bash
-export USAI_API_KEY=<your-usai-key>
-./acq --backend msb run opencode /path/to/project
-# acq binds USAI_API_KEY@api.gsa.usai.gov automatically at create.
+./acq secret set -g usai            # prompts; stored under acq.usai
+./acq secret set -g github          # prompts; stored under acq.github
+./acq secret set my-sandbox usai    # sandbox-scoped; overrides the global key
 ```
 
-`acq secret set usai` on the msb backend prints this guidance rather than
-writing to a store. A unified cross-backend secret store is planned (see
-[ADR-0011](adr/0011-msb-backend-and-neutral-kits.md)); it is out of scope for
-1.2.0.
+The store lives in the host OS keychain when available (macOS `security`, Linux
+`secret-tool`) with a `0600` file fallback under `$XDG_DATA_HOME/acq/secrets/`.
+Entries are keyed `acq.<service>` (global) or `acq.<sandbox>.<service>`
+(sandbox-scoped); a sandbox-scoped key takes precedence over the global one for
+the same service (supporting USAi per-sandbox billing-code keys).
+
+At `acq run`/`create`, the **msb** backend reads the value from the store,
+exports it into a transient host env var, and binds it with
+`msb --secret ENV@HOST` — so it is swapped in on the wire and **never enters the
+guest** and **never appears in argv**. USAi binds to `api.gsa.usai.gov`; GitHub
+binds to `github.com` and `api.github.com`. The **sbx** backend feeds the same
+stored value into the sbx proxy (`sbx secret set`/`set-custom`, piped via
+stdin). This is the bash subset of the design's §7.5 unified secret model; the
+full Go/keychain MITM component (age fallback, `CredentialRewriteRule`,
+swap-on-access placeholders) remains a larger future effort tracked separately.
+
+> **Migration:** if you previously stored the USAi key with `sbx secret …`, run
+> `acq secret set -g usai` once to move it into the acq store (the value is
+> re-prompted). A future `acq secret import` will automate this.
 
 ### Capability flags
 

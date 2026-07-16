@@ -267,12 +267,11 @@ _acq_msb_apply_kit_dir() {
       src="${kitdir}/${source}"
     fi
     if [ -n "$src" ] && [ -f "$src" ]; then
-      # Ensure the parent dir exists in the guest, then copy and chmod.
-      msb exec "$name" -- sh -c "mkdir -p '$(dirname "$path")'" >/dev/null 2>&1 || true
-      msb copy "$src" "${name}:${path}" >/dev/null 2>&1 || {
-        echo "acq(msb): warning: failed to copy kit file to ${name}:${path}" >&2
+      _acq_msb_copy_file_verified "$name" "$src" "$path" "$mode" || {
+        echo "acq(msb): error: could not place kit file at ${name}:${path}" >&2
+        echo "acq(msb):   subsequent kit commands that read it will fail." >&2
+        return 1
       }
-      [ -n "$mode" ] && msb exec "$name" -- sh -c "chmod $mode '$path'" >/dev/null 2>&1 || true
     fi
   done <<EOF
 $(kit_spec_files "$spec")
@@ -283,6 +282,47 @@ EOF
   #    apply. msb has no create-time-only hook, so install collapses to a
   #    marker-gated exec (design §3 lifecycle table).
   _acq_msb_run_commands "$name" "$spec"
+}
+
+# Copy a host file into the guest and VERIFY it is readable there before
+# returning. msb copy can return before the write is observable by a subsequent
+# `msb exec` (the earlier .mjs MODULE_NOT_FOUND at startup-command time was this
+# race — the .jsonc happened to settle by the time it was checked much later,
+# the .mjs did not by the time `node` ran). Poll `test -f` up to a short
+# deadline so kit commands never run against a not-yet-present file.
+_acq_msb_copy_file_verified() {
+  local name="$1" src="$2" path="$3" mode="$4"
+  local dir; dir=$(dirname "$path")
+
+  msb exec "$name" -u 0 -- sh -c "mkdir -p '$dir'" >/dev/null 2>&1 || true
+  if ! msb copy "$src" "${name}:${path}" >/dev/null 2>&1; then
+    echo "acq(msb): warning: 'msb copy' failed for ${name}:${path}" >&2
+  fi
+
+  # Verify the file is present + non-empty in the guest, retrying briefly to
+  # absorb copy/boot lag.
+  local deadline attempt=0
+  deadline=$(( $(date +%s) + ${ACQ_MSB_COPY_SETTLE_TIMEOUT:-20} ))
+  while :; do
+    if msb exec "$name" -u 0 -- sh -c "test -s '$path'" >/dev/null 2>&1; then
+      [ -n "$mode" ] && msb exec "$name" -u 0 -- sh -c "chmod $mode '$path'" >/dev/null 2>&1 || true
+      acq_debug "msb copy verified: ${name}:${path}"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "acq(msb): warning: ${name}:${path} not observable after copy" \
+           "(${attempt} checks); retrying copy once." >&2
+      # One explicit re-copy in case the first was dropped during boot.
+      msb copy "$src" "${name}:${path}" >/dev/null 2>&1 || true
+      if msb exec "$name" -u 0 -- sh -c "test -s '$path'" >/dev/null 2>&1; then
+        [ -n "$mode" ] && msb exec "$name" -u 0 -- sh -c "chmod $mode '$path'" >/dev/null 2>&1 || true
+        return 0
+      fi
+      return 1
+    fi
+    sleep 1
+  done
 }
 
 # Parse and execute a kit spec's commands[] against sandbox NAME.
@@ -413,18 +453,50 @@ acq_backend_provision() {
     create_flags+=(--volume "${ws}:${ws}")
   fi
 
-  # USAi credential: bind the injected USAI_API_KEY host env var to the sandbox,
-  # scoped to the USAi host, so the models API returns 200 without the real key
-  # ever being inlined into the sandbox config (msb --secret ENV@HOST).
-  # NOTE: acq's own secret store integration (unified swap-on-access) is out of
-  # scope for Phase 2 (handoff §2); this uses msb's native host-env secret path.
-  if [ -n "${USAI_API_KEY:-}" ]; then
+  # Credentials: read from the acq-owned secret store (keychain/file), scoped to
+  # this sandbox first, then global. The real value is exported into a TRANSIENT
+  # env var (never argv, never the kit spec) and bound with msb --secret
+  # ENV@HOST, so it is swapped in on the wire and never inlined into the sandbox
+  # config. Supports the two pinned credential services: usai and github.
+  #
+  # msb --secret reads the value from the NAMED host env var at create time. We
+  # set that env var only for the duration of the msb create call.
+  local _secret_env_names=()   # env vars we set transiently, cleared after create
+  if command -v acq_secret_resolve >/dev/null 2>&1; then
+    # USAi key -> USAI_API_KEY@api.gsa.usai.gov
+    local usai_val
+    if usai_val=$(acq_secret_resolve usai "$name" 2>/dev/null) && [ -n "$usai_val" ]; then
+      export USAI_API_KEY="$usai_val"; usai_val=""
+      _secret_env_names+=("USAI_API_KEY")
+      create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
+      acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from acq store)"
+    elif [ -n "${USAI_API_KEY:-}" ]; then
+      # Fallback: a pre-exported USAI_API_KEY (e.g. CI) still works.
+      create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
+      acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from env)"
+    fi
+    # GitHub token -> GITHUB_TOKEN@github.com and @api.github.com (git + API).
+    local gh_val
+    if gh_val=$(acq_secret_resolve github "$name" 2>/dev/null) && [ -n "$gh_val" ]; then
+      export GITHUB_TOKEN="$gh_val"; gh_val=""
+      _secret_env_names+=("GITHUB_TOKEN")
+      create_flags+=(--secret "GITHUB_TOKEN@github.com" --secret "GITHUB_TOKEN@api.github.com")
+      acq_debug "msb secret: binding GITHUB_TOKEN@github.com,api.github.com (from acq store)"
+    fi
+  elif [ -n "${USAI_API_KEY:-}" ]; then
     create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
   fi
 
   # Create the sandbox (detached; msb create boots in the background).
   acq_debug "msb create --name $name ${create_flags[*]} $ACQ_MSB_IMAGE"
-  if ! msb create --name "$name" "${create_flags[@]}" "$ACQ_MSB_IMAGE"; then
+  msb create --name "$name" "${create_flags[@]}" "$ACQ_MSB_IMAGE"
+  local _create_rc=$?
+  # Clear the transient secret env vars immediately after create reads them.
+  local _ev
+  for _ev in ${_secret_env_names[@]+"${_secret_env_names[@]}"}; do
+    unset "$_ev"
+  done
+  if [ "$_create_rc" -ne 0 ]; then
     echo "acq(msb): error: 'msb create' failed for '$name'." >&2
     echo "acq(msb):   flags: ${create_flags[*]}" >&2
     echo "acq(msb):   image: $ACQ_MSB_IMAGE" >&2
@@ -594,30 +666,35 @@ acq_backend_ensure_kits_applied() {
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_secret_set — minimal secret wrapper (USAi to a 200)
+# acq_backend_secret_set — store in the acq secret store (msb reads it at create)
 # ---------------------------------------------------------------------------
-# Phase 2 scope (handoff §2): implement only as much as msb needs for the USAi
-# models API to return 200. msb's native model is `--secret ENV@HOST` at create
-# time, reading the value from a host env var and never inlining it into the
-# sandbox config. There is no separate `msb secret set` store to write to, so
-# acq's msb secret_set validates usage and instructs the user to export the env
-# var that provision binds. The full unified swap-on-access store is deferred.
+# Credentials are owned by acq's backend-neutral store
+# (acq.backends/secret-store.sh). `acq secret set` on the msb backend writes the
+# value into the same acq store the sbx path uses, keyed acq.<service> or
+# acq.<sandbox>.<service>. At provision, acq_backend_provision reads it back and
+# binds it with `msb --secret ENV@HOST` (value in a transient env var, never
+# argv, never the sandbox config). No separate msb secret store is written.
+#
+# Usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]
 
 acq_backend_secret_set() {
   local service="${1:-}"
   shift || true
 
-  # Strip a leading scope token (-g / --global / a sandbox name) for parity with
-  # the sbx wrapper's calling convention; msb binds secrets at create, so the
-  # scope only affects the guidance we print.
+  # Parse scope (mirrors the sbx wrapper): -g/--global -> global;
+  # a leading bare token before the service -> sandbox name.
+  local scope_name=""
   case "$service" in
-    -g|--global) service="${1:-}"; shift || true ;;
-    -*) ;;
+    -g|--global)
+      service="${1:-}"; shift || true
+      ;;
+    -*)
+      ;;
     *)
       local _next="${1:-}"
       case "$_next" in
         ""|-*) ;;
-        *) service="$_next"; shift || true ;;
+        *) scope_name="$service"; service="$_next"; shift || true ;;
       esac
       ;;
   esac
@@ -628,24 +705,32 @@ acq_backend_secret_set() {
     return 1
   fi
 
+  if ! command -v acq_secret_set_interactive >/dev/null 2>&1; then
+    echo "acq(msb): internal error: secret store not loaded" >&2
+    return 1
+  fi
+
+  # Store into the acq-owned store (keychain/file); value read from TTY/stdin.
+  acq_secret_set_interactive "$service" "$scope_name" || return 1
+
   case "$service" in
     usai)
-      echo "acq(msb): the msb backend binds the USAi key from a host environment" >&2
-      echo "      variable at sandbox-create time (msb --secret ENV@HOST) — the real" >&2
-      echo "      value never enters the guest. To use it:" >&2
-      echo "        export USAI_API_KEY=<your-usai-key>" >&2
-      echo "        acq --backend msb run opencode <path>" >&2
-      echo "      provision binds USAI_API_KEY@${ACQ_MSB_USAI_HOST} automatically." >&2
-      echo "      (A unified acq secret store across backends is planned; see ADR-0011.)" >&2
-      return 0
+      echo "acq(msb): stored USAi key in the acq secret store. At 'acq run/create'" >&2
+      echo "      the msb backend binds it via --secret USAI_API_KEY@${ACQ_MSB_USAI_HOST};" >&2
+      echo "      the real value is swapped in on the wire and never enters the guest." >&2
+      ;;
+    github)
+      echo "acq(msb): stored GitHub token in the acq secret store. At 'acq run/create'" >&2
+      echo "      the msb backend binds it via --secret GITHUB_TOKEN@github.com and" >&2
+      echo "      @api.github.com; the real value never enters the guest." >&2
       ;;
     *)
-      echo "acq(msb): '$service' secret binding is not modeled by the msb adapter yet." >&2
-      echo "      msb binds secrets from host env vars at create time" >&2
-      echo "      (msb --secret ENV@HOST). Export the value and re-run 'acq run'." >&2
-      return 1
+      echo "acq(msb): stored '$service' in the acq secret store. Note: the msb adapter" >&2
+      echo "      only auto-binds 'usai' and 'github' at create today; other services" >&2
+      echo "      are stored but not yet wired to a --secret host mapping." >&2
       ;;
   esac
+  return 0
 }
 
 # ---------------------------------------------------------------------------
