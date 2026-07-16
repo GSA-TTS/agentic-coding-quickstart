@@ -21,16 +21,16 @@
 # acq.backends/kit-translate.sh, which fetches a kit's neutral spec.yaml and
 # emits the active backend's native operations.
 #
-# TODO(part-a-gate): PATTERNS_KIT_REF below is a PROVISIONAL pre-merge pin at
-# the *PR head* of agentic-coding-patterns#221 ("feat(acq): add neutral
-# hybrid/v1 acq-kits + schema + registry"), NOT a merged commit. Per the Phase 2
-# handoff §4.1 hard gate and AGENTS.md fail-closed rule, this PR MUST stay in
-# draft and this pin MUST be flipped to the real Part A merge-commit SHA before
-# undrafting. Release-gate checklist item: "PATTERNS_KIT_REF points at a real,
-# merged Part A SHA (not a placeholder)".
+# PATTERNS_KIT_REF is pinned to the agentic-coding-patterns v1.6.0 release commit
+# on main. Part A (PR #221, "feat(acq): add neutral hybrid/v1 acq-kits + schema
+# + registry") is included at this commit; v1.6.0 also adds an unrelated sbx kit
+# and a validation script (the acq-kits + kit-hybrid-v1 schema are unchanged from
+# the #221 merge). Pinning to a release tag mirrors Phase 1 (which pinned
+# patterns v1.5.0). The four acq-kits and the schema are present at this commit
+# (verified).
 # ============================================================================
 PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-PATTERNS_KIT_REF="cd72ac27c368f51c3cb2044f609e71a10c90d6ab"   # PROVISIONAL: #221 PR head, pre-merge — flip to merge SHA before undrafting
+PATTERNS_KIT_REF="e387c59bb2f743eb321bfb56a8ac71a6abb185ae"   # patterns v1.6.0 (includes Part A / #221)
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider"

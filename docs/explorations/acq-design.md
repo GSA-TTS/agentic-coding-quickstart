@@ -924,10 +924,10 @@ kit vocabulary** with a translation layer. Recorded in
    so the private playbook clone is skipped on msb (tracked; microsandbox
    #756/#768/#1170).
 
-6. **`PATTERNS_KIT_REF` is provisionally pinned to the Part A PR head**
-   (`#221`, pre-merge) with a `TODO` in `common.sh`. Per the handoff §4.1 hard
-   gate, the Part B PR stays in draft until this is flipped to the Part A
-   merge-commit SHA.
+6. **`PATTERNS_KIT_REF` is pinned to the patterns v1.6.0 release commit**
+   (`e387c59bb2f743eb321bfb56a8ac71a6abb185ae`), which includes Part A (#221,
+   merged 2026-07-16). The Phase 2 handoff §4.1 gate is satisfied; pinning to a
+   release tag mirrors the Phase 1 v1.5.0 pin.
 
 7. **`scripts/verify-backends` live run is deferred.** The script exists
    (design §9) but the full `acq run … --backend msb` loop cannot run inside a

@@ -229,12 +229,16 @@ secret substitution requires `--tls-intercept` and only covers the
   ADR-0009/ADR-0010 defer live verification. Run `./scripts/verify-backends`
   on a sandbox-capable host and attach the transcript.
 
-## Release gate (do not undraft until satisfied)
+## Release gate (satisfied)
 
-- **`PATTERNS_KIT_REF` must point at a real, merged Part A SHA** — it is
-  currently a **provisional** pin at the `#221` PR head
-  (`cd72ac27c368f51c3cb2044f609e71a10c90d6ab`, pre-merge) with a `TODO` in
-  `common.sh`. Flip it to the Part A merge-commit SHA before undrafting.
+- **`PATTERNS_KIT_REF` points at a merged, released Part A SHA.** Patterns PR
+  #221 (Part A) merged to `main` on 2026-07-16; `common.sh` is pinned to the
+  patterns **v1.6.0** release commit `e387c59bb2f743eb321bfb56a8ac71a6abb185ae`,
+  which includes Part A unchanged (v1.6.0 also adds an unrelated sbx kit +
+  validation script; the acq-kits and kit-hybrid-v1 schema are identical to the
+  #221 merge). Pinning to a release tag mirrors Phase 1's v1.5.0 pin. The four
+  acq-kits and the schema are present at this commit, and a live sparse-fetch +
+  neutral→sbx-v2 translation of all four kits was verified against it.
 
 ## Links
 
