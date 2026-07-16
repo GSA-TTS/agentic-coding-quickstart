@@ -74,17 +74,20 @@ kit_translate_fetch() {
         echo "kit-translate: malformed kit ref (need #ref=&dir=): $kitref" >&2
         return 1
       fi
+      command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: $url ref=$ref dir=$dir -> $destdir"
       mkdir -p "$destdir"
-      (
+      local _ferr
+      _ferr=$(
         cd "$destdir" || exit 1
         git init -q
         git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"
         git config core.sparseCheckout true
         printf '%s/*\n' "$dir" > .git/info/sparse-checkout
-        git fetch --depth 1 origin "$ref" -q || exit 1
-        git checkout -q FETCH_HEAD || exit 1
+        git fetch --depth 1 origin "$ref" 2>&1 || exit 1
+        git checkout -q FETCH_HEAD 2>&1 || exit 1
       ) || {
         echo "kit-translate: failed to fetch $kitref" >&2
+        [ -n "$_ferr" ] && printf '%s\n' "$_ferr" | sed 's/^/kit-translate:   /' >&2
         return 1
       }
       printf '%s/%s\n' "$destdir" "$dir"

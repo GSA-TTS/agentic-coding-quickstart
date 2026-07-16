@@ -375,8 +375,12 @@ acq_backend_provision() {
   fi
 
   # Create the sandbox (detached; msb create boots in the background).
+  acq_debug "msb create --name $name ${create_flags[*]} $ACQ_MSB_IMAGE"
   if ! msb create --name "$name" "${create_flags[@]}" "$ACQ_MSB_IMAGE"; then
     echo "acq(msb): error: 'msb create' failed for '$name'." >&2
+    echo "acq(msb):   flags: ${create_flags[*]}" >&2
+    echo "acq(msb):   image: $ACQ_MSB_IMAGE" >&2
+    echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the full command trace)" >&2
     return 1
   fi
 

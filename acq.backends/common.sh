@@ -67,6 +67,14 @@ fi
 # Utility functions
 # ============================================================================
 
+# Debug trace. Set ACQ_DEBUG=1 to emit "acq[debug]: ..." diagnostics to stderr
+# (backend CLI invocations, kit fetch/translate steps). Off by default; safe to
+# leave in — it never prints secret VALUES, only command shapes.
+acq_debug() {
+  [ -n "${ACQ_DEBUG:-}" ] || return 0
+  printf 'acq[debug]: %s\n' "$*" >&2
+}
+
 # Word-split a whitespace-separated env value into the named array WITHOUT
 # filename globbing (a literal `*` in a kit ref must not expand against the cwd).
 split_noglob() {

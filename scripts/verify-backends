@@ -26,6 +26,15 @@
 #   ./scripts/verify-backends [WORKDIR]
 #     WORKDIR  optional workspace path (default: a temp git repo under $TMPDIR).
 #
+#   Flags / env:
+#     -v | --verbose | VERIFY_VERBOSE=1   Stream every acq command and its full
+#                                         output live (not just on failure).
+#     -k | --keep    | VERIFY_KEEP=1      Keep the throwaway sandbox on failure
+#                                         (default: always remove) for manual poking.
+#
+# On ANY step failure the real command line and its captured stderr/stdout are
+# printed, so a single run tells you what broke (no separate manual re-run).
+#
 # Exit 0 = every installed backend passed (skipped backends don't fail the run).
 # Non-zero = at least one installed backend failed a check.
 
@@ -34,6 +43,22 @@ set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 ACQ="$REPO_ROOT/acq"
+
+VERBOSE="${VERIFY_VERBOSE:-}"
+KEEP="${VERIFY_KEEP:-}"
+POSITIONAL=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -v|--verbose) VERBOSE=1 ;;
+    -k|--keep)    KEEP=1 ;;
+    -h|--help)
+      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) POSITIONAL+=("$1") ;;
+  esac
+  shift
+done
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 # Refuse to run inside a sandbox (no nested sandboxes).
 if [ -f /.dockerenv ] || [ -n "${SBX_SANDBOX:-}" ] || [ -n "${MSB_SANDBOX:-}" ]; then
@@ -45,9 +70,31 @@ fi
 PASS=0
 FAIL=0
 SKIP=0
+LAST_OUT=""          # captured combined output of the most recent run_acq call
 pass() { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
 fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
 skip() { SKIP=$((SKIP + 1)); printf '  skip  %s\n' "$1"; }
+
+# Print a captured block indented under a heading (only when non-empty).
+dump() {
+  local heading="$1" body="$2"
+  [ -n "$body" ] || return 0
+  printf '        --- %s ---\n' "$heading"
+  printf '%s\n' "$body" | sed 's/^/        | /'
+  printf '        --- end ---\n'
+}
+
+# Run an acq command, capturing combined stdout+stderr into LAST_OUT and
+# returning its exit status. In verbose mode, also stream it live with the
+# exact command line first.
+run_acq() {
+  local desc="$1"; shift
+  if [ -n "$VERBOSE" ]; then
+    printf '        $ acq %s\n' "$*" >&2
+    LAST_OUT=$("$ACQ" "$@" 2>&1 | tee /dev/stderr); return "${PIPESTATUS[0]}"
+  fi
+  LAST_OUT=$("$ACQ" "$@" 2>&1); return $?
+}
 
 # Workspace to mount.
 WORKDIR="${1:-}"
@@ -68,6 +115,30 @@ verify_backend() {
   echo ""
   echo "== backend: ${backend} =="
 
+  # Preflight: surface obvious environment gaps before attempting a create, so
+  # the failure names the cause instead of a generic "provision failed".
+  case "$backend" in
+    sbx)
+      run_acq "version" --backend sbx version >/dev/null 2>&1 || true
+      if ! sbx version >/dev/null 2>&1; then
+        fail "${backend}: 'sbx version' failed — is sbx installed and on PATH?"
+        return
+      fi
+      # A logged-out sbx will fail kit resolution / create with an auth error.
+      # We can't cheaply assert login state, so just note it if create fails.
+      ;;
+    msb)
+      if ! msb --version >/dev/null 2>&1; then
+        fail "${backend}: 'msb --version' failed — is msb installed and on PATH?"
+        return
+      fi
+      if ! msb doctor >/dev/null 2>&1; then
+        printf '        note: "msb doctor" reports host virtualization is not ready\n'
+        printf '              (e.g. /dev/kvm / HVF / WHP). Create may fail below.\n'
+      fi
+      ;;
+  esac
+
   # Derive the sandbox name the same way acq does (agent "shell" + workspace
   # basename), by sourcing common.sh's derive_name. This mirrors the acq run/
   # create dispatch so we address the exact sandbox acq creates.
@@ -77,52 +148,65 @@ verify_backend() {
     derive_name shell "$WORKDIR" 2>/dev/null
   )
   [ -n "$name" ] || name="shell-$(basename "$WORKDIR" | tr '[:upper:]' '[:lower:]')"
+  printf '        sandbox name: %s\n' "$name"
 
   # Create a sandbox with the four kits applied via acq's normal provision path.
-  if ! "$ACQ" --backend "$backend" create shell "$WORKDIR" >/dev/null 2>&1; then
+  if ! run_acq "create" --backend "$backend" create shell "$WORKDIR"; then
     fail "${backend}: provision (acq create shell) failed" \
-         "review 'acq --backend ${backend} create shell ${WORKDIR}'"
-    "$ACQ" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
+         "command: acq --backend ${backend} create shell ${WORKDIR}"
+    dump "acq create output" "$LAST_OUT"
+    if [ -n "$KEEP" ]; then
+      printf '        (keeping sandbox %s for inspection; --keep set)\n' "$name"
+    else
+      run_acq "rm" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
+    fi
     return
   fi
 
   # 1) USAi kit config landed.
-  if "$ACQ" --backend "$backend" exec "$name" -- sh -c "test -f '$USAI_KIT_CONFIG_PATH'" >/dev/null 2>&1; then
+  if run_acq "exec usai-check" --backend "$backend" exec "$name" -- sh -c "test -f '$USAI_KIT_CONFIG_PATH'"; then
     pass "${backend}: usai-provider kit applied (config staged)"
   else
     fail "${backend}: usai-provider kit config missing at $USAI_KIT_CONFIG_PATH"
+    dump "exec output" "$LAST_OUT"
   fi
 
   # 2) USAi key round-trips to 200 (needs a valid key available to the backend).
   local status
-  status=$("$ACQ" --backend "$backend" exec "$name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$USAI_API_KEY\" $USAI_MODELS_URL" \
-    2>/dev/null || true)
+  run_acq "exec usai-200" --backend "$backend" exec "$name" -- sh -c \
+    "curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$USAI_API_KEY\" $USAI_MODELS_URL"
+  status="$LAST_OUT"
   case "$status" in
-    200) pass "${backend}: USAi key round-trips to 200" ;;
-    "")  skip "${backend}: USAi key check (could not reach models API — no key?)" ;;
-    *)   fail "${backend}: USAi key check returned HTTP $status (expected 200)" ;;
+    *200*) pass "${backend}: USAi key round-trips to 200" ;;
+    "")    skip "${backend}: USAi key check (could not reach models API — no key?)" ;;
+    *)     fail "${backend}: USAi key check returned HTTP '$status' (expected 200)"
+           dump "curl output" "$LAST_OUT" ;;
   esac
 
   # 3) git-ssh-sign config present (system gitconfig has gpg.format ssh).
-  if "$ACQ" --backend "$backend" exec "$name" -- sh -c \
-      "git config --system --get gpg.format 2>/dev/null | grep -q ssh" >/dev/null 2>&1; then
+  if run_acq "exec gpg-format" --backend "$backend" exec "$name" -- sh -c \
+      "git config --system --get gpg.format 2>/dev/null | grep -q ssh"; then
     pass "${backend}: git-ssh-sign kit applied (gpg.format ssh)"
   else
     fail "${backend}: git commit signing config missing (gpg.format ssh)"
+    dump "exec output" "$LAST_OUT"
   fi
 
   # 4) playbook clone symlink appears (AGENTS.md linked into OpenCode config).
-  if "$ACQ" --backend "$backend" exec "$name" -- sh -c \
-      'test -e "$HOME/.agentic-coding-playbook/.git" || test -L "$HOME/.config/opencode/AGENTS.md"' \
-      >/dev/null 2>&1; then
+  if run_acq "exec playbook" --backend "$backend" exec "$name" -- sh -c \
+      'test -e "$HOME/.agentic-coding-playbook/.git" || test -L "$HOME/.config/opencode/AGENTS.md"'; then
     pass "${backend}: playbook kit applied (clone or AGENTS.md link present)"
   else
     fail "${backend}: playbook clone/symlink not found"
+    dump "exec output" "$LAST_OUT"
   fi
 
   # Clean up the throwaway sandbox.
-  "$ACQ" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
+  if [ -n "$KEEP" ] && [ "$FAIL" -gt 0 ]; then
+    printf '        (keeping sandbox %s; --keep set)\n' "$name"
+  else
+    run_acq "rm" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
+  fi
 }
 
 echo "verify-backends"

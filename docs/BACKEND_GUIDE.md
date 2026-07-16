@@ -236,6 +236,25 @@ auto-detects in the order above (sbx wins when both are present). Use
 
 ---
 
+## Troubleshooting
+
+Set `ACQ_DEBUG=1` to trace backend CLI invocations and kit fetch/translate
+steps to stderr (no secret values are printed):
+
+```bash
+ACQ_DEBUG=1 ./acq --backend msb create shell /path/to/project
+```
+
+`scripts/verify-backends` supports `-v`/`--verbose` (stream every acq command
+and its output live) and `-k`/`--keep` (leave a failing sandbox up for manual
+inspection):
+
+```bash
+./scripts/verify-backends -v
+```
+
+---
+
 ## Adding a new backend (implementer notes)
 
 1. Create `acq.backends/<name>.sh` implementing the contract in

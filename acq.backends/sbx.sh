@@ -212,6 +212,7 @@ _acq_sbx_translate_kit() {
   schema=$(kit_spec_field "${kitdir}/spec.yaml" schemaVersion 2>/dev/null || true)
   case "$schema" in
     hybrid/v1)
+      acq_debug "translate(sbx): $kitref -> $out"
       rm -rf "$out"
       kit_translate_to_sbx "$kitdir" "$out" >/dev/null || {
         echo "acq(sbx): warning: kit translation failed; passing ref through: $kitref" >&2
@@ -318,6 +319,7 @@ acq_backend_provision() {
   local kf=()
   while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
 
+  acq_debug "sbx create --name $name ${kf[*]} ${_stripped[*]:-}"
   if [ "${#_stripped[@]}" -gt 0 ]; then
     sbx create --name "$name" "${kf[@]}" "${_stripped[@]}"
   else
