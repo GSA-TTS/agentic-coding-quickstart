@@ -708,8 +708,10 @@ assert_contains "translate: sh -c startup emits argv seq (- sh)" "$sh_startup_bl
 assert_not_contains "translate: sh -c startup is not a bare string" "$sh_startup_block" "command: |"
 cleanup_stubs
 
-# 10b. msb net-rule uses the literal-hostname `domain=HOST` form (not `domain:HOST`,
-#      which msb rejects as an ambiguous single-label host).
+# 10b. msb net-rule uses the bare-FQDN target form `allow@HOST` (matching msb's
+#      own --help example `allow@example.com:tcp:443`), strips any :port, and
+#      does NOT use the `domain=`/`domain:` prefixes (domain= can break DNS;
+#      domain: is the ambiguous single-label form msb rejects).
 make_stubs; load_acq
 nr_out=$(
   . "${REPO_ROOT}/acq.backends/msb.sh" 2>/dev/null
@@ -730,8 +732,9 @@ SPEC
   _acq_msb_net_rules_into arr "$nkit/spec.yaml"
   printf '%s\n' "${arr[@]}"
 )
-assert_contains "msb: net-rule uses domain= form" "$nr_out" "allow@domain=api.gsa.usai.gov"
-assert_contains "msb: net-rule strips :port to domain=" "$nr_out" "allow@domain=github.com"
+assert_contains "msb: net-rule uses bare FQDN target" "$nr_out" "allow@api.gsa.usai.gov"
+assert_contains "msb: net-rule strips :port" "$nr_out" "allow@github.com"
+assert_not_contains "msb: net-rule avoids domain= prefix" "$nr_out" "allow@domain="
 assert_not_contains "msb: net-rule avoids ambiguous domain: form" "$nr_out" "allow@domain:"
 cleanup_stubs
 

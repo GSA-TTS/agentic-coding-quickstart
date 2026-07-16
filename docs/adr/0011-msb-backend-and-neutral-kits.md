@@ -73,7 +73,7 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
 - **`acq.backends/msb.sh`** — the microsandbox adapter implementing the full
   ADR-0010 contract against the `msb` CLI. It fetches each neutral kit and
   drives the parsed operations directly: `caps.network.allow` → `--net-rule
-  allow@domain=HOST`; `files[]` → `msb copy`; `commands[]` → `msb exec` (install
+  allow@HOST` (bare FQDN); `files[]` → `msb copy`; `commands[]` → `msb exec` (install
   phase marker-gated for idempotency); the zscaler `backend_shortcuts.msb`
   → `--trust-host-cas`; the USAi key → `--secret USAI_API_KEY@api.gsa.usai.gov`
   (host-env binding; the real key never enters the guest). Unlike sbx (whose
@@ -141,7 +141,7 @@ at create/run time via `-p HOST:GUEST`; the flag gates the sbx-style post-hoc
 The msb flag/subcommand shapes used by the adapter were **verified against
 `msb 0.6.6`** (`superradcompany/microsandbox` v0.6.6, linux/aarch64) via
 `msb --tree` and per-command `--help`: `create --name --net-rule
-allow@domain=HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
+allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
 `exec [-u USER] -- CMD`, `list -q`, `stop`, `remove -f`, `copy`, `ssh`,
 `ssh authorize`, `-p HOST:GUEST`, `doctor`.
 

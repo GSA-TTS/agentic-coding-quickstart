@@ -171,16 +171,56 @@ verify_backend() {
     dump "exec output" "$LAST_OUT"
   fi
 
-  # 2) USAi key round-trips to 200 (needs a valid key available to the backend).
-  local status
-  run_acq "exec usai-200" --backend "$backend" exec "$name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$USAI_API_KEY\" $USAI_MODELS_URL"
-  status="$LAST_OUT"
-  case "$status" in
-    *200*) pass "${backend}: USAi key round-trips to 200" ;;
-    "")    skip "${backend}: USAi key check (could not reach models API — no key?)" ;;
-    *)     fail "${backend}: USAi key check returned HTTP '$status' (expected 200)"
-           dump "curl output" "$LAST_OUT" ;;
+  # 2) USAi key check — backend-aware.
+  #    sbx injects the key via its egress proxy: the guest holds the real value
+  #    in $USAI_API_KEY, so a raw bearer curl to the models API returns 200.
+  #    msb binds the key with `--secret ENV@HOST`: the guest's $USAI_API_KEY is a
+  #    proxy-managed SENTINEL (the real value is swapped in on the wire only for
+  #    requests to the allowed host and never enters the VM). A raw bearer curl
+  #    from the guest therefore does NOT prove the key the way it does for sbx —
+  #    so for msb we assert the binding + host reachability instead of a 200 on a
+  #    guest-held key.
+  case "$backend" in
+    sbx)
+      run_acq "exec usai-200" --backend "$backend" exec "$name" -- sh -c \
+        "curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$USAI_API_KEY\" $USAI_MODELS_URL"
+      local status="$LAST_OUT"
+      case "$status" in
+        *200*) pass "${backend}: USAi key round-trips to 200" ;;
+        "")    skip "${backend}: USAi key check (could not reach models API — no key?)" ;;
+        *)     fail "${backend}: USAi key check returned HTTP '$status' (expected 200)"
+               dump "curl output" "$LAST_OUT" ;;
+      esac
+      ;;
+    msb)
+      # (a) The secret must be bound (guest env has USAI_API_KEY, even as sentinel).
+      if run_acq "exec usai-bound" --backend "$backend" exec "$name" -- sh -c \
+          'test -n "$USAI_API_KEY"'; then
+        pass "${backend}: USAi secret bound in guest (msb --secret ENV@HOST)"
+      else
+        skip "${backend}: USAi secret not bound (export USAI_API_KEY before create)"
+      fi
+      # (b) The models host must resolve/connect from the guest (egress allow).
+      #     msb rewrites the auth header on the wire, so any HTTP status back from
+      #     the endpoint (even 401/403) proves resolution + egress worked; a curl
+      #     transport failure (000 / could-not-resolve) means the net-rule/egress
+      #     is wrong. We accept a real HTTP status; we do NOT require 200 because
+      #     the guest never holds the real key to authenticate itself.
+      run_acq "exec usai-reach" --backend "$backend" exec "$name" -- sh -c \
+        "curl -sS -o /dev/null -w '%{http_code}' --max-time 15 $USAI_MODELS_URL"
+      local mstatus="$LAST_OUT"
+      case "$mstatus" in
+        000|*"resolve"*|*"curl:"*|"")
+          fail "${backend}: USAi host not reachable from guest (egress/net-rule?)"
+          dump "curl output" "$LAST_OUT"
+          printf '        note: with kit net-rules, egress is default-deny; the models\n' >&2
+          printf '              host must be allow-listed AND DNS must resolve. See ADR-0011.\n' >&2
+          ;;
+        *)
+          pass "${backend}: USAi host reachable from guest (HTTP $mstatus; auth rewritten on wire)"
+          ;;
+      esac
+      ;;
   esac
 
   # 3) git-ssh-sign config present (system gitconfig has gpg.format ssh).

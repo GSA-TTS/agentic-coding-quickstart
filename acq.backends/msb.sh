@@ -22,9 +22,9 @@
 #     `msb copy|cp SRC DST`, `msb ssh [SANDBOX] [-- CMD…]`, `msb ssh authorize`,
 #     `msb run … -p HOST:GUEST` (published ports), `msb doctor`.
 # net-rule grammar (verified from --help): `<action>[:<direction>]@<target>
-#   [:<proto>[:<ports>]]`. For a literal hostname the target is `domain=HOST`
-#   (a bare `domain:HOST` reads "domain" as a single-label host — ambiguous),
-#   e.g. `allow@domain=api.gsa.usai.gov`.
+#   [:<proto>[:<ports>]]`. For a literal hostname the target is the BARE FQDN,
+#   e.g. `allow@api.gsa.usai.gov` (per the msb --help example
+#   `allow@example.com:tcp:443`).
 #
 # NOT LIVE-VERIFIED (no /dev/kvm + no nested sandboxes in the build env — see
 # ADR-0011 "Validation"): the end-to-end create→exec→attach loop, the exact
@@ -81,6 +81,11 @@ ACQ_MSB_SKIP_PREREQ_CHECK="${ACQ_MSB_SKIP_PREREQ_CHECK:-}"
 # Where fetched neutral kits are materialized for this run (msb has no native
 # kit mechanism, so acq drives the parsed operations itself).
 ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/kits}"
+
+# Max seconds to wait for `msb exec` to work after create (the guest boots in
+# the background; kit application must not race it). Mirrors sbx's
+# ACQ_EXEC_READY_TIMEOUT.
+ACQ_MSB_EXEC_READY_TIMEOUT="${ACQ_MSB_EXEC_READY_TIMEOUT:-${ACQ_EXEC_READY_TIMEOUT:-60}}"
 
 # USAi models path (matches common.sh USAI_MODELS_URL host) for --secret host.
 ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
@@ -165,6 +170,26 @@ acq_backend_exists() {
 }
 
 # ---------------------------------------------------------------------------
+# _acq_msb_wait_for_exec_ready NAME — block until `msb exec` works in the guest
+# ---------------------------------------------------------------------------
+# msb create returns as soon as the sandbox is registered, but the guest boots
+# in the background. Copying files / running kit commands before exec works
+# races the boot. Poll a trivial exec until it succeeds (or time out). Mirrors
+# sbx.sh's _acq_sbx_wait_for_exec_ready.
+_acq_msb_wait_for_exec_ready() {
+  local name="$1" deadline out
+  deadline=$(( $(date +%s) + ACQ_MSB_EXEC_READY_TIMEOUT ))
+  while :; do
+    out=$(msb exec "$name" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r')
+    case "$out" in
+      *ok*) acq_debug "msb exec-ready: $name"; return 0 ;;
+    esac
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 2
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Kit application helpers (msb drives the neutral spec itself)
 # ---------------------------------------------------------------------------
 
@@ -190,13 +215,15 @@ _acq_msb_net_rules_into() {
   while IFS= read -r _host; do
     [ -n "$_host" ] || continue
     # msb net-rule grammar: `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`.
-    # The target for a literal hostname is the bare domain (e.g. api.gsa.usai.gov);
-    # a `:` after the target is the PROTO separator, so "allow@domain:HOST" makes
-    # msb read the target as the single label "domain" (ambiguous) — wrong. Use
-    # the explicit `domain=HOST` target form to force a literal-hostname match.
-    # Strip any :port the neutral spec may carry (msb keys on the domain).
+    # The target for a literal hostname is the BARE FQDN — the msb --help example
+    # is `allow@example.com:tcp:443`. (An earlier acq bug emitted `allow@domain:HOST`,
+    # which msb read as the single-label target "domain" and rejected as ambiguous;
+    # a real multi-label FQDN like api.gsa.usai.gov is unambiguous as a bare domain,
+    # so no `domain=` prefix is needed — and using one can break DNS resolution.)
+    # Strip any :port the neutral spec carries (msb keys on the domain; the daemon
+    # handles ports/DNS for the allowed host).
     _host="${_host%%:*}"
-    eval "$_arr+=(--net-rule \"allow@domain=${_host}\")"
+    eval "$_arr+=(--net-rule \"allow@${_host}\")"
   done <<EOF
 $(kit_spec_net_allow "$_spec")
 EOF
@@ -404,11 +431,19 @@ acq_backend_provision() {
     case "$ACQ_MSB_IMAGE" in
       ghcr.io/*|*.azurecr.io/*|*private*)
         echo "acq(msb):   hint: the image may require registry auth. Set ACQ_MSB_IMAGE to a" >&2
-        echo "acq(msb):         pullable image (default: docker.io/library/debian:stable-slim)." >&2
+        echo "acq(msb):         pullable image (default: docker.io/library/node:22-bookworm)." >&2
         ;;
     esac
     echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the full command trace)" >&2
     return 1
+  fi
+
+  # msb create boots the guest in the BACKGROUND; copying files / running kit
+  # commands before it is exec-ready races the boot (files may not be present
+  # when a startup command runs). Wait until `msb exec` works before applying.
+  if ! _acq_msb_wait_for_exec_ready "$name"; then
+    echo "acq(msb): warning: sandbox '$name' did not become exec-ready within" >&2
+    echo "acq(msb):   ${ACQ_MSB_EXEC_READY_TIMEOUT}s; kit application may be unreliable." >&2
   fi
 
   # Verify the kits' runtime prerequisites are present in the base image
