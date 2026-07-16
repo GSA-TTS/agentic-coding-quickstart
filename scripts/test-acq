@@ -665,6 +665,41 @@ if [ -f "$tout/files/home/tool/config" ]; then
 else
   fail "translate: copies files/ payload tree" "missing $tout/files/home/tool/config"
 fi
+# Regression (sbx "cannot unmarshal !!seq into string"): a `sh -c SCRIPT` command
+# MUST be emitted as a YAML block-scalar STRING (`command: |`), not an argv seq.
+install_block=$(printf '%s\n' "$sbxspec" | sed -n '/^  install:/,/^  [a-z]/p')
+assert_contains "translate: sh -c install emits command string" "$install_block" "command: |"
+assert_not_contains "translate: sh -c install is not an argv seq" "$install_block" "        - sh"
+# A non-shell argv (node ...) MUST stay an argv sequence.
+startup_block=$(printf '%s\n' "$sbxspec" | sed -n '/^  startup:/,$p')
+assert_contains "translate: node startup emits argv seq" "$startup_block" "- node"
+cleanup_stubs
+
+# 10b. msb net-rule uses the literal-hostname `domain=HOST` form (not `domain:HOST`,
+#      which msb rejects as an ambiguous single-label host).
+make_stubs; load_acq
+nr_out=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh" 2>/dev/null
+  nkit="$STUBDIR/nkit"; mkdir -p "$nkit"
+  cat >"$nkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: net-kit
+displayName: Net Kit
+description: net rule kit
+caps:
+  network:
+    allow:
+      - api.gsa.usai.gov
+      - github.com:443
+SPEC
+  arr=()
+  _acq_msb_net_rules_into arr "$nkit/spec.yaml"
+  printf '%s\n' "${arr[@]}"
+)
+assert_contains "msb: net-rule uses domain= form" "$nr_out" "allow@domain=api.gsa.usai.gov"
+assert_contains "msb: net-rule strips :port to domain=" "$nr_out" "allow@domain=github.com"
+assert_not_contains "msb: net-rule avoids ambiguous domain: form" "$nr_out" "allow@domain:"
 cleanup_stubs
 
 # ===========================================================================

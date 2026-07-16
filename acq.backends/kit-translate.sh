@@ -558,10 +558,34 @@ EOF
   rm -f "$tmp"
 }
 
-# Emit one sbx-v2 command list entry (argv form + optional user).
+# Emit one sbx-v2 command list entry from a decoded argv.
+#
+# sbx v2's `command:` field accepts EITHER a shell string OR an argv sequence,
+# and the two former sbx kits differed: git-ssh-sign used a string
+# (`command: |`), while usai/playbook/zscaler used an argv sequence. We match
+# that by shape:
+#   - An argv of the form [sh, -c, SCRIPT] (a shell wrapper) is emitted as a
+#     shell STRING (SCRIPT), which is how sbx expects a `sh -c` body.
+#   - Any other argv (e.g. [node, script.mjs, --flag, ...]) is emitted as an
+#     argv SEQUENCE.
+# This keeps the synthesized kit byte-for-byte equivalent in behavior to the
+# pre-Phase-2 sbx kits (and avoids sbx's "cannot unmarshal !!seq into string").
 _kit_sbx_emit_one_command() {
   local user="$1" out="$2"
   shift 2
+
+  # Detect the `sh -c SCRIPT` shape → emit as a shell string.
+  if [ "$#" -eq 3 ] && [ "$1" = "sh" ] && [ "$2" = "-c" ]; then
+    local script="$3"
+    printf '    - command: |\n' >> "$out"
+    printf '%s\n' "$script" | while IFS= read -r bl; do
+      printf '        %s\n' "$bl" >> "$out"
+    done
+    [ -n "$user" ] && printf '      user: "%s"\n' "$user" >> "$out"
+    return 0
+  fi
+
+  # Otherwise emit an argv sequence.
   printf '    - command:\n' >> "$out"
   local tok
   for tok in "$@"; do

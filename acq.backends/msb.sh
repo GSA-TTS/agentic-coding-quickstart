@@ -22,7 +22,9 @@
 #     `msb copy|cp SRC DST`, `msb ssh [SANDBOX] [-- CMD…]`, `msb ssh authorize`,
 #     `msb run … -p HOST:GUEST` (published ports), `msb doctor`.
 # net-rule grammar (verified from --help): `<action>[:<direction>]@<target>
-#   [:<proto>[:<ports>]]`, e.g. `allow@domain:api.gsa.usai.gov`.
+#   [:<proto>[:<ports>]]`. For a literal hostname the target is `domain=HOST`
+#   (a bare `domain:HOST` reads "domain" as a single-label host — ambiguous),
+#   e.g. `allow@domain=api.gsa.usai.gov`.
 #
 # NOT LIVE-VERIFIED (no /dev/kvm + no nested sandboxes in the build env — see
 # ADR-0011 "Validation"): the end-to-end create→exec→attach loop, the exact
@@ -166,10 +168,14 @@ _acq_msb_net_rules_into() {
   eval "$_arr=()"
   while IFS= read -r _host; do
     [ -n "$_host" ] || continue
-    # msb net-rule grammar: allow@domain:HOST (strip any :port; msb matches by
-    # domain, port handled separately by the daemon's default policy).
+    # msb net-rule grammar: `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`.
+    # The target for a literal hostname is the bare domain (e.g. api.gsa.usai.gov);
+    # a `:` after the target is the PROTO separator, so "allow@domain:HOST" makes
+    # msb read the target as the single label "domain" (ambiguous) — wrong. Use
+    # the explicit `domain=HOST` target form to force a literal-hostname match.
+    # Strip any :port the neutral spec may carry (msb keys on the domain).
     _host="${_host%%:*}"
-    eval "$_arr+=(--net-rule \"allow@domain:${_host}\")"
+    eval "$_arr+=(--net-rule \"allow@domain=${_host}\")"
   done <<EOF
 $(kit_spec_net_allow "$_spec")
 EOF
