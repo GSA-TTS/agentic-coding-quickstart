@@ -665,14 +665,47 @@ if [ -f "$tout/files/home/tool/config" ]; then
 else
   fail "translate: copies files/ payload tree" "missing $tout/files/home/tool/config"
 fi
-# Regression (sbx "cannot unmarshal !!seq into string"): a `sh -c SCRIPT` command
-# MUST be emitted as a YAML block-scalar STRING (`command: |`), not an argv seq.
+# Regression (sbx unmarshal typing): commands.install[].command MUST be a shell
+# STRING (`command: |`), while commands.startup[]/initFiles[] MUST be an argv
+# SEQUENCE — mismatching yields "cannot unmarshal !!seq into string" (install)
+# or "!!str into []string" (startup). The tkit above has a `sh -c` INSTALL and a
+# node STARTUP.
 install_block=$(printf '%s\n' "$sbxspec" | sed -n '/^  install:/,/^  [a-z]/p')
-assert_contains "translate: sh -c install emits command string" "$install_block" "command: |"
-assert_not_contains "translate: sh -c install is not an argv seq" "$install_block" "        - sh"
-# A non-shell argv (node ...) MUST stay an argv sequence.
+assert_contains "translate: install emits command string" "$install_block" "command: |"
+assert_not_contains "translate: install is not an argv seq" "$install_block" "        - sh"
+# A non-shell argv (node ...) startup MUST stay an argv sequence.
 startup_block=$(printf '%s\n' "$sbxspec" | sed -n '/^  startup:/,$p')
 assert_contains "translate: node startup emits argv seq" "$startup_block" "- node"
+cleanup_stubs
+
+# 10a2. A `sh -c` STARTUP command (zscaler/playbook shape) MUST be an argv SEQ,
+#       not a string — sbx types startup as []string. Regression for the second
+#       unmarshal error ("!!str ... into []string").
+make_stubs; load_acq
+shkit="$STUBDIR/shkit"; mkdir -p "$shkit"
+cat >"$shkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: sh-startup-kit
+displayName: Sh Startup Kit
+description: startup uses sh -c
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        echo hello
+SPEC
+shout="$STUBDIR/shout"
+( . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  kit_translate_to_sbx "$shkit" "$shout" >/dev/null ) 2>/dev/null
+shspec=$(cat "$shout/spec.yaml" 2>/dev/null || true)
+sh_startup_block=$(printf '%s\n' "$shspec" | sed -n '/^  startup:/,$p')
+assert_contains "translate: sh -c startup emits argv seq (- sh)" "$sh_startup_block" "        - sh"
+assert_not_contains "translate: sh -c startup is not a bare string" "$sh_startup_block" "command: |"
 cleanup_stubs
 
 # 10b. msb net-rule uses the literal-hostname `domain=HOST` form (not `domain:HOST`,

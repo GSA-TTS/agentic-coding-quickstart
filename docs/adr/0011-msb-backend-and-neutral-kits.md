@@ -76,7 +76,17 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   allow@domain=HOST`; `files[]` → `msb copy`; `commands[]` → `msb exec` (install
   phase marker-gated for idempotency); the zscaler `backend_shortcuts.msb`
   → `--trust-host-cas`; the USAi key → `--secret USAI_API_KEY@api.gsa.usai.gov`
-  (host-env binding; the real key never enters the guest).
+  (host-env binding; the real key never enters the guest). Unlike sbx (whose
+  templates supply the image), msb runs a plain OCI image: the default is a
+  public `debian:stable-slim` and the adapter installs the kits' prerequisites
+  (node/git/curl/ca-certificates, apt/apk auto-detected, marker-gated) before
+  applying kits. Override with `ACQ_MSB_IMAGE` + `ACQ_MSB_SKIP_BOOTSTRAP`.
+
+- **sbx-v2 command typing (translation):** sbx types `commands.install[].command`
+  as a shell **string** but `commands.startup[]`/`initFiles[]` as an argv
+  **sequence**. The synthesizer emits per-phase accordingly (install → block
+  string, startup/initFiles → argv seq); mismatching yields sbx's "cannot
+  unmarshal !!seq into string" / "!!str into []string".
 
 ### Changed modules
 

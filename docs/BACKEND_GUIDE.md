@@ -156,8 +156,30 @@ Tunables:
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `ACQ_MSB_IMAGE` | `ghcr.io/gsa-tts/agentic-coding-quickstart/opencode:latest` | OCI image for provisioned sandboxes |
+| `ACQ_MSB_IMAGE` | `docker.io/library/debian:stable-slim` | Base OCI image for provisioned sandboxes (must be pullable) |
+| `ACQ_MSB_SKIP_BOOTSTRAP` | (unset) | Skip the prerequisite install step (set when your image already bakes in node/git/curl/ca-certificates) |
 | `ACQ_MSB_KIT_CACHE` | `$XDG_CACHE_HOME/acq/kits` | where fetched neutral kits are materialized |
+
+### Base image and prerequisites
+
+Unlike sbx (whose agent templates supply the image), the msb backend runs a
+**plain OCI image** and layers the kits on top. The default is a public
+`debian:stable-slim` (pullable without registry auth). The four pinned kits need
+`node` (usai merge), `git` (playbook clone + signing), `curl`, and
+`ca-certificates`/`update-ca-certificates` (zscaler). The adapter installs these
+once per sandbox (marker-gated, apt/apk auto-detected) **before** applying kits.
+
+To use your own image — e.g. one that bakes in node/git for faster starts —
+set `ACQ_MSB_IMAGE` and, if it already has the prerequisites,
+`ACQ_MSB_SKIP_BOOTSTRAP=1`:
+
+```bash
+export ACQ_MSB_IMAGE=ghcr.io/your-org/agent-base:latest
+export ACQ_MSB_SKIP_BOOTSTRAP=1
+```
+
+If the image requires registry auth, log in with your container tooling (e.g.
+`docker login ghcr.io`) before running `acq`.
 
 ### Secrets
 

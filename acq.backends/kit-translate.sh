@@ -545,7 +545,7 @@ _kit_sbx_emit_commands() {
             for b in "${argv[@]}"; do
               decoded+=("$(printf '%s' "$b" | base64 -d)")
             done
-            _kit_sbx_emit_one_command "$cur_user" "$tmp" "${decoded[@]}"
+            _kit_sbx_emit_one_command "$phase" "$cur_user" "$tmp" "${decoded[@]}"
           fi
           ;;
         *)
@@ -561,25 +561,34 @@ EOF
   rm -f "$tmp"
 }
 
-# Emit one sbx-v2 command list entry from a decoded argv.
+# Emit one sbx-v2 command list entry from a decoded argv, keyed by PHASE.
 #
-# sbx v2's `command:` field accepts EITHER a shell string OR an argv sequence,
-# and the two former sbx kits differed: git-ssh-sign used a string
-# (`command: |`), while usai/playbook/zscaler used an argv sequence. We match
-# that by shape:
-#   - An argv of the form [sh, -c, SCRIPT] (a shell wrapper) is emitted as a
-#     shell STRING (SCRIPT), which is how sbx expects a `sh -c` body.
-#   - Any other argv (e.g. [node, script.mjs, --flag, ...]) is emitted as an
-#     argv SEQUENCE.
-# This keeps the synthesized kit byte-for-byte equivalent in behavior to the
-# pre-Phase-2 sbx kits (and avoids sbx's "cannot unmarshal !!seq into string").
+# sbx v2 types the `command:` field DIFFERENTLY per phase (verified against the
+# pre-Phase-2 sbx kits and sbx's own unmarshaler):
+#   - commands.install[].command   : a shell STRING  (git-ssh-sign used `command: |`)
+#   - commands.startup[].command   : a []string SEQUENCE (usai/playbook/zscaler)
+#   - commands.initFiles[].command : a []string SEQUENCE (same as startup)
+# Feeding a seq where sbx wants a string (or vice-versa) yields
+# "cannot unmarshal !!seq into string" / "!!str into []string".
+#
+# So: emit install as a string, and startup/initFiles as an argv sequence. For
+# the install string we unwrap a `sh -c SCRIPT` argv to just SCRIPT (its natural
+# shell-string form); any other install argv is space-joined as a fallback.
 _kit_sbx_emit_one_command() {
-  local user="$1" out="$2"
-  shift 2
+  local phase="$1" user="$2" out="$3"
+  shift 3
 
-  # Detect the `sh -c SCRIPT` shape → emit as a shell string.
-  if [ "$#" -eq 3 ] && [ "$1" = "sh" ] && [ "$2" = "-c" ]; then
-    local script="$3"
+  if [ "$phase" = "install" ]; then
+    # install => shell STRING.
+    local script
+    if [ "$#" -eq 3 ] && [ "$1" = "sh" ] && [ "$2" = "-c" ]; then
+      script="$3"
+    else
+      # Fallback: join argv into a single shell line (rare; the pinned kits use
+      # the sh -c form). Individual tokens are not re-quoted — acceptable since
+      # this path is not exercised by the four kits.
+      script="$*"
+    fi
     printf '    - command: |\n' >> "$out"
     printf '%s\n' "$script" | while IFS= read -r bl; do
       printf '        %s\n' "$bl" >> "$out"
@@ -588,7 +597,7 @@ _kit_sbx_emit_one_command() {
     return 0
   fi
 
-  # Otherwise emit an argv sequence.
+  # startup / initFiles => argv SEQUENCE.
   printf '    - command:\n' >> "$out"
   local tok
   for tok in "$@"; do

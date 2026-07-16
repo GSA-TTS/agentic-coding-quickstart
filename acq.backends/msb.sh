@@ -52,10 +52,24 @@ ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1  # msb --secret ENV@HOST + --tls-inter
 # rules, --trust-host-cas, and --secret used here.
 MIN_MSB_VERSION="0.6.0"
 
-# Default OCI image for provisioned sandboxes. msb runs standard container
-# images; the opencode agent image is the same base used by the sbx path.
-# Overridable for testing / alternate agents.
-ACQ_MSB_IMAGE="${ACQ_MSB_IMAGE:-ghcr.io/gsa-tts/agentic-coding-quickstart/opencode:latest}"
+# Default OCI image for provisioned sandboxes. Unlike sbx (whose templates
+# supply the agent image), msb runs a plain OCI image and acq layers the kits on
+# top. The default is a public Debian slim base — pullable without registry auth
+# — and the adapter installs the kits' prerequisites (node, git, curl,
+# ca-certificates) into it via a marker-gated install step (see
+# _acq_msb_bootstrap_base). Override with ACQ_MSB_IMAGE to bring your own image
+# (e.g. one that already bakes in node/git for faster starts).
+ACQ_MSB_IMAGE="${ACQ_MSB_IMAGE:-docker.io/library/debian:stable-slim}"
+
+# Prerequisite packages the pinned four kits need at runtime:
+#   node          — usai-provider merge-global-config.mjs
+#   git           — agentic-coding-playbook clone + git-ssh-sign
+#   curl          — health/verification checks
+#   ca-certificates + update-ca-certificates — zscaler-ca-certificate
+# Installed once per sandbox (marker-gated) before kits are applied, unless the
+# image already provides them. Override the whole step with ACQ_MSB_SKIP_BOOTSTRAP=1
+# when your ACQ_MSB_IMAGE already bakes these in.
+ACQ_MSB_SKIP_BOOTSTRAP="${ACQ_MSB_SKIP_BOOTSTRAP:-}"
 
 # Where fetched neutral kits are materialized for this run (msb has no native
 # kit mechanism, so acq drives the parsed operations itself).
@@ -380,15 +394,75 @@ acq_backend_provision() {
     echo "acq(msb): error: 'msb create' failed for '$name'." >&2
     echo "acq(msb):   flags: ${create_flags[*]}" >&2
     echo "acq(msb):   image: $ACQ_MSB_IMAGE" >&2
+    case "$ACQ_MSB_IMAGE" in
+      ghcr.io/*|*.azurecr.io/*|*private*)
+        echo "acq(msb):   hint: the image may require registry auth. Set ACQ_MSB_IMAGE to a" >&2
+        echo "acq(msb):         pullable image (default: docker.io/library/debian:stable-slim)." >&2
+        ;;
+    esac
     echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the full command trace)" >&2
     return 1
   fi
+
+  # Install the kits' runtime prerequisites into the base image (node, git,
+  # curl, ca-certificates), once per sandbox, before applying kits. Skipped when
+  # ACQ_MSB_SKIP_BOOTSTRAP is set (image already provides them).
+  _acq_msb_bootstrap_base "$name"
 
   # Apply each kit's files + commands.
   local kd
   for kd in "${kitdirs[@]}"; do
     _acq_msb_apply_kit_dir "$name" "$kd"
   done
+}
+
+# ---------------------------------------------------------------------------
+# _acq_msb_bootstrap_base NAME — install kit prerequisites into a bare base image
+# ---------------------------------------------------------------------------
+# The pinned kits assume node/git/curl/ca-certificates exist in the guest (sbx's
+# agent templates bake these in; a plain OCI base like debian:stable-slim does
+# not). Install them once per sandbox, marker-gated, detecting the package
+# manager (apt or apk). Best-effort: a failure warns but does not abort — the
+# per-kit commands will surface a clearer error if a specific tool is still
+# missing. Skip entirely with ACQ_MSB_SKIP_BOOTSTRAP=1.
+_acq_msb_bootstrap_base() {
+  local name="$1"
+  [ -z "$ACQ_MSB_SKIP_BOOTSTRAP" ] || return 0
+
+  local marker="/var/lib/acq/bootstrap-prereqs"
+  if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  acq_debug "msb bootstrap: installing node/git/curl/ca-certificates into $name"
+  # Idempotent, package-manager-agnostic install. Only installs what's missing.
+  msb exec "$name" -u 0 -- sh -c '
+    set -e
+    need=""
+    for t in node git curl update-ca-certificates; do
+      command -v "$t" >/dev/null 2>&1 || need="$need $t"
+    done
+    [ -z "$need" ] && exit 0
+    if command -v apt-get >/dev/null 2>&1; then
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y --no-install-recommends nodejs git curl ca-certificates
+      update-ca-certificates || true
+    elif command -v apk >/dev/null 2>&1; then
+      apk add --no-cache nodejs git curl ca-certificates
+      update-ca-certificates || true
+    else
+      echo "acq(msb): no supported package manager (apt/apk) in base image;" >&2
+      echo "          set ACQ_MSB_IMAGE to an image with node/git/curl preinstalled." >&2
+      exit 1
+    fi
+  ' || {
+    echo "acq(msb): warning: base-image prerequisite bootstrap failed for '$name'." >&2
+    echo "acq(msb):   kits needing node/git/curl may not fully apply. Consider setting" >&2
+    echo "acq(msb):   ACQ_MSB_IMAGE to an image that preinstalls them." >&2
+    return 0
+  }
+  msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
