@@ -164,9 +164,12 @@ acq_secret_get() {
         # Value was stored in the file fallback (see acq_secret_store note).
         _acq_secret_get_file "$key"; return $?
       fi
-      value=$(security find-generic-password -s "$ACQ_KEYCHAIN_LABEL" -a "$key" -w 2>/dev/null) || return 1
-      [ -n "$value" ] || return 1
-      printf '%s' "$value"
+      # ALLOW_ARGV is set: prefer the keychain, but fall back to the file backend
+      # so a value stored earlier WITHOUT the flag (→ file) is still found — the
+      # flag governs where new writes go, not where reads may look.
+      value=$(security find-generic-password -s "$ACQ_KEYCHAIN_LABEL" -a "$key" -w 2>/dev/null || true)
+      if [ -n "$value" ]; then printf '%s' "$value"; return 0; fi
+      _acq_secret_get_file "$key"; return $?
       ;;
     keychain-linux)
       value=$(secret-tool lookup acq_key "$key" 2>/dev/null) || return 1

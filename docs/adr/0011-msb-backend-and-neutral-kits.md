@@ -1,10 +1,10 @@
 ---
 title: "Add msb (microsandbox) Backend and Neutral hybrid/v1 Kit Translation"
 status: accepted
-date: 2026-07-15
+date: 2026-07-16
 decision_makers: ["Bret Mogilefsky"]
 category: architecture
-nist_controls: ["CM-2", "CM-3", "CM-6", "SA-8", "SA-15", "SA-17", "SC-7", "SC-8", "SC-28"]
+nist_controls: ["CM-2", "CM-3", "CM-6", "SA-8", "SA-15", "SA-17", "SC-7", "SC-8", "SC-28", "SI-10"]
 impact_level: low
 ato_relevance: no
 risk_treatment: accept
@@ -193,6 +193,25 @@ allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
 - **Compliance:** no new external services; the msb secret path keeps the real
   key out of the guest (SC-8/SC-28); network egress is allow-listed per kit
   (SC-7). Structural adapter change only (SA-8/SA-15/SA-17; CM-2/CM-3/CM-6).
+- **Untrusted-input hardening (SI-10):** kit specs are semi-trusted external
+  input (patterns repo / `ACQ_EXTRA_KITS`) that drive a root shell in the guest,
+  so the translation layer validates every field before it reaches a shell
+  context: `files[].mode` must be octal, `files[].path`/`source` and
+  `commands[].user` are charset-restricted, `commands[].phase` must be a known
+  lifecycle phase, and `caps.network.allow` hosts are hostname-validated.
+  Offending records are dropped with a warning (and reported by `acq kit
+  validate`). Defense-in-depth: the msb adapter also re-checks mode/path at the
+  point of use and passes `chmod`/`chown` arguments as argv, never interpolated
+  into `sh -c`. Command argv is base64-tokenized and passed as separate argv, so
+  a kit command is never reassembled into a joined shell string.
+- **TLS interception scope:** `--tls-intercept` is enabled **guest-wide** (not
+  scoped to a single host) — it must be, because msb only substitutes secret
+  placeholders on connections it can see into, and the guest auto-trusts the
+  interception CA. Secret *substitution* remains host-scoped (`--secret
+  ENV@HOST`), but interception itself covers all guest egress on the intercepted
+  ports. This is a broader/less-transparent posture than sbx's proxy injection;
+  it is the microsandbox model and the price of the microVM boundary. Disable
+  with `ACQ_MSB_NO_TLS_INTERCEPT` (secrets then won't substitute).
 - **Known limitation (tracked):** on msb the private `agentic-coding-playbook`
   clone is skipped — msb 0.6.6 does not substitute the credential placeholder
   for git's HTTPS smart-transport to github.com (upstream microsandbox
@@ -219,7 +238,8 @@ secret substitution requires `--tls-intercept` and only covers the
 ## Validation
 
 - `bash -n acq acq.backends/*.sh scripts/test-acq scripts/verify-backends` clean.
-- `./scripts/test-acq` passes (79 checks, incl. msb + kit + translation cases).
+- `./scripts/test-acq` passes (135 checks, incl. msb + kit + translation +
+  untrusted-input-hardening cases).
 - Neutral→sbx-v2 synthesis for all four kits parses as valid YAML (verified with
   a YAML parser during development).
 - `npm run lint` (markdownlint, shellcheck, gitleaks, YAML/JSON) — run in CI.

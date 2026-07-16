@@ -209,7 +209,20 @@ kit_spec_files() {
     }
     function flush() {
       if (cur_path != "") {
-        printf "%s\t%s\t%s\t%s\n", cur_path, cur_mode, cur_phase, cur_source
+        # Reject fields that could break out of the shell contexts these values
+        # are later interpolated into. A hostile or mistyped kit spec must not
+        # smuggle a command via mode, a metacharacter-bearing path, or a bad
+        # source path. Drop the whole record on any violation and warn.
+        # mode: octal only. path/source: no shell metacharacters or whitespace.
+        if (cur_mode != "" && cur_mode !~ /^[0-7]{3,4}$/) {
+          print "kit-translate: skipping file with invalid mode: " cur_mode > "/dev/stderr"
+        } else if (cur_path !~ /^[A-Za-z0-9._\/-]+$/) {
+          print "kit-translate: skipping file with unsafe path: " cur_path > "/dev/stderr"
+        } else if (cur_source != "" && cur_source !~ /^[A-Za-z0-9._\/-]+$/) {
+          print "kit-translate: skipping file with unsafe source: " cur_source > "/dev/stderr"
+        } else {
+          printf "%s\t%s\t%s\t%s\n", cur_path, cur_mode, cur_phase, cur_source
+        }
       }
       cur_path=""; cur_mode=""; cur_phase=""; cur_source=""; cur_desc=""
     }
@@ -336,15 +349,26 @@ kit_spec_commands() {
     }
     function end_cmd(   i,tok) {
       if (have) {
-        printf "__CMD__\t%s\t%s\n", phase, user
-        for (i=0;i<n;i++) {
-          tok = argv[i]
-          # Strip a single trailing newline left by a YAML block scalar so the
-          # emitted argv token matches the literal command body.
-          sub(/\n$/, "", tok)
-          printf "%s\n", b64(tok)
+        # Validate the fields that later reach a shell/exec context. user is
+        # interpolated into `msb exec -u <user>`; phase selects the lifecycle
+        # branch. A hostile or mistyped kit spec must not smuggle anything here:
+        # user must be a bare uid or a safe username token; phase must be one of
+        # the known lifecycle phases. Drop the whole command on violation.
+        if (user != "" && user !~ /^[A-Za-z0-9_-]+$/) {
+          print "kit-translate: skipping command with unsafe user: " user > "/dev/stderr"
+        } else if (phase != "" && phase !~ /^(install|initFiles|startup)$/) {
+          print "kit-translate: skipping command with unknown phase: " phase > "/dev/stderr"
+        } else {
+          printf "__CMD__\t%s\t%s\n", phase, user
+          for (i=0;i<n;i++) {
+            tok = argv[i]
+            # Strip a single trailing newline left by a YAML block scalar so the
+            # emitted argv token matches the literal command body.
+            sub(/\n$/, "", tok)
+            printf "%s\n", b64(tok)
+          }
+          printf "__END__\n"
         }
-        printf "__END__\n"
       }
       have=0; phase=""; user=""; in_argv=0; n=0
       delete argv
@@ -685,8 +709,12 @@ kit_validate() {
   [ -z "$display" ] && { echo "kit: validate: displayName is required" >&2; errs=$((errs + 1)); }
   [ -z "$desc" ]    && { echo "kit: validate: description is required" >&2; errs=$((errs + 1)); }
 
-  # files[]: each source: must exist under the kit dir; each path must be absolute.
-  # (Only path + source are validated here; mode/phase are not checked.)
+  # files[]: each source: must exist under the kit dir; each path must be
+  # absolute; mode (if present) must be octal. kit_spec_files already DROPS
+  # records with an unsafe mode/path/source (defense-in-depth for the shell
+  # contexts they reach), so validate also scans the RAW spec for a `mode:` that
+  # isn't octal — otherwise a hostile mode would be silently dropped rather than
+  # reported by `acq kit validate`.
   local fline p src
   while IFS= read -r fline; do
     [ -n "$fline" ] || continue
@@ -705,22 +733,59 @@ kit_validate() {
 $(kit_spec_files "$spec")
 EOF
 
-  # commands[]: each must have a known phase.
-  local line
-  while IFS= read -r line; do
-    case "$line" in
-      "__CMD__"*)
-        local ph2
-        ph2=$(printf '%s' "$line" | cut -f2)
-        case "$ph2" in
-          install|initFiles|startup) ;;
-          *) echo "kit: validate: unknown command phase: '${ph2:-<empty>}'" >&2; errs=$((errs + 1)) ;;
-        esac
-        ;;
-    esac
-  done <<EOF
-$(kit_spec_commands "$spec")
+  # Raw-spec scan: any `mode:` value that is not 3-4 octal digits is rejected
+  # (it would break out of the root `chmod $mode` in the msb adapter).
+  local bad_mode
+  bad_mode=$(awk '
+    /^[[:space:]]+mode:/ {
+      v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v)
+      gsub(/^["'\'' ]+|["'\'' ]+$/,"",v)
+      if (v !~ /^[0-7]{3,4}$/) print v
+    }' "$spec")
+  if [ -n "$bad_mode" ]; then
+    while IFS= read -r m; do
+      [ -n "$m" ] && { echo "kit: validate: file mode must be octal (3-4 digits): '$m'" >&2; errs=$((errs + 1)); }
+    done <<EOF
+$bad_mode
 EOF
+  fi
+
+  # commands[]: each must have a known phase. kit_spec_commands DROPS commands
+  # with an unknown phase or unsafe user (defense-in-depth), so scan the RAW
+  # spec here — otherwise a bad phase would be silently dropped rather than
+  # reported by `acq kit validate`. A `phase:` line under commands[] must be one
+  # of install|initFiles|startup; a `user:` must be a bare uid/safe username.
+  local bad_phase bad_user
+  bad_phase=$(awk '
+    /^commands:/ { in_c=1; next }
+    /^[A-Za-z]/  { in_c=0 }
+    in_c && /^[[:space:]]+-?[[:space:]]*phase:/ {
+      v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v)
+      gsub(/^["'\'' ]+|["'\'' ]+$/,"",v)
+      if (v !~ /^(install|initFiles|startup)$/) print v
+    }' "$spec")
+  if [ -n "$bad_phase" ]; then
+    while IFS= read -r ph; do
+      [ -n "$ph" ] && { echo "kit: validate: unknown command phase: '$ph'" >&2; errs=$((errs + 1)); }
+    done <<EOF
+$bad_phase
+EOF
+  fi
+  bad_user=$(awk '
+    /^commands:/ { in_c=1; next }
+    /^[A-Za-z]/  { in_c=0 }
+    in_c && /^[[:space:]]+-?[[:space:]]*user:/ {
+      v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v)
+      gsub(/^["'\'' ]+|["'\'' ]+$/,"",v)
+      if (v != "" && v !~ /^[A-Za-z0-9_-]+$/) print v
+    }' "$spec")
+  if [ -n "$bad_user" ]; then
+    while IFS= read -r u; do
+      [ -n "$u" ] && { echo "kit: validate: unsafe command user: '$u'" >&2; errs=$((errs + 1)); }
+    done <<EOF
+$bad_user
+EOF
+  fi
 
   if [ "$errs" -eq 0 ]; then
     echo "kit: validate: OK — ${name} (${display})"

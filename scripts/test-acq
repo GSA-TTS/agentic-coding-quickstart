@@ -720,7 +720,7 @@ assert_contains "msb: provision creates agent user" "$agent_log" "agent"
 # never as `-u 1000` (which would be the base image's `node` user).
 assert_contains "msb: uid-1000 kit cmd runs as agent" "$agent_log" "msb exec agentbox -u agent -e HOME=/home/agent -- node"
 assert_not_contains "msb: uid-1000 kit cmd not run as -u 1000" "$agent_log" "msb exec agentbox -u 1000 -- node"
-assert_contains "msb: chowns staged /home/agent file to agent" "$agent_log" "chown agent '/home/agent/usai-config/merge-global-config.mjs'"
+assert_contains "msb: chowns staged /home/agent file to agent" "$agent_log" "chown agent /home/agent/usai-config/merge-global-config.mjs"
 cleanup_stubs
 
 # 8o. Regression: msb applies ALL kit files and ALL kit commands, not just the
@@ -773,6 +773,107 @@ assert_contains "msb: applies first kit file" "$multi_log" "msb copy ${STUBDIR}/
 assert_contains "msb: applies SECOND kit file (not dropped)" "$multi_log" "msb copy ${STUBDIR}/multikit/files/home/file_two multibox:/home/agent/file_two"
 assert_contains "msb: runs first kit command" "$multi_log" "echo CMD_ALPHA"
 assert_contains "msb: runs SECOND kit command (not dropped)" "$multi_log" "echo CMD_BETA"
+cleanup_stubs
+
+# 8o2. SECURITY: a hostile kit `mode` must not reach a root shell. kit_spec_files
+#      drops the record; the msb chmod uses argv (no sh -c interpolation); and
+#      the injected command must never appear in the recorded msb calls.
+make_stubs; load_acq
+inj_out=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  ik="${STUBDIR}/injkit"; mkdir -p "$ik/files"
+  printf 'x\n' > "$ik/files/evil"
+  cat >"$ik/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: inj-kit
+displayName: Inj
+description: hostile mode
+files:
+  - path: /home/agent/evil
+    mode: "0644; touch /tmp/PWNED"
+    source: files/evil
+SPEC
+  kit_spec_files "$ik/spec.yaml" 2>&1
+)
+assert_contains "sec: hostile mode record is dropped+warned" "$inj_out" "invalid mode"
+# The rejected value is echoed in the warning; assert no actual FILE RECORD (a
+# tab-separated path<TAB>mode… line) was emitted for it.
+inj_records=$(printf '%s\n' "$inj_out" | grep -v '^kit-translate:' || true)
+assert_eq "sec: hostile mode emits no file record" "" "$inj_records"
+cleanup_stubs
+
+# 8o3. SECURITY: the msb copy/chmod path refuses a non-octal mode and an unsafe
+#      path, and never interpolates them into an sh -c (chmod is argv).
+make_stubs; load_acq
+: > "$CALLS"
+sec_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # Directly exercise the copy helper with a hostile mode + a metachar path.
+  _acq_msb_copy_file_verified secbox /etc/hostname '/home/agent/ok' '0644; touch /tmp/PWNED' 2>&1
+  _acq_msb_copy_file_verified secbox /etc/hostname '/home/agent/a;b' '0644' 2>&1
+)
+sec_log=$(cat "$CALLS")
+assert_contains "sec: non-octal mode refused" "$sec_out" "non-octal mode"
+assert_contains "sec: unsafe path refused" "$sec_out" "unsafe path"
+assert_not_contains "sec: chmod never via sh -c string" "$sec_log" "chmod 0644;"
+assert_not_contains "sec: injected command never reaches msb argv" "$sec_log" "PWNED"
+cleanup_stubs
+
+# 8o4. SECURITY: a hostile command `user` is dropped by kit_spec_commands (it is
+#      interpolated into `msb exec -u <user>`), so the command never runs.
+make_stubs; load_acq
+usr_out=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  uk="${STUBDIR}/userkit"; mkdir -p "$uk"
+  cat >"$uk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: user-kit
+displayName: User
+description: hostile user
+commands:
+  - phase: startup
+    user: "0 -- sh -c touch/tmp/PWNED"
+    command:
+      - true
+SPEC
+  kit_spec_commands "$uk/spec.yaml" 2>&1
+)
+assert_contains "sec: hostile command user is dropped+warned" "$usr_out" "unsafe user"
+assert_not_contains "sec: hostile user not emitted as a command record" "$usr_out" "__CMD__"
+cleanup_stubs
+
+# 8o5. `acq kit validate` REPORTS (not silently drops) a hostile mode / bad phase.
+make_stubs; load_acq
+val_out=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  vk="${STUBDIR}/valkit"; mkdir -p "$vk/files"
+  printf 'x\n' > "$vk/files/f"
+  cat >"$vk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: val-kit
+displayName: Val
+description: bad mode + bad phase
+files:
+  - path: /home/agent/f
+    mode: "0644; rm -rf /"
+    source: files/f
+commands:
+  - phase: bogus-phase
+    user: "0"
+    command:
+      - true
+SPEC
+  kit_validate "$vk" 2>&1
+  echo "RC=$?"
+)
+assert_contains "kit validate: reports non-octal mode" "$val_out" "mode must be octal"
+assert_contains "kit validate: reports unknown phase" "$val_out" "unknown command phase"
+assert_contains "kit validate: fails (RC=1)" "$val_out" "RC=1"
 cleanup_stubs
 
 # 8p. msb provision passes --dns-nameserver so the guest can resolve allow-listed

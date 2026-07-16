@@ -340,6 +340,22 @@ EOF
 # costs nothing and gives a clear error if a copy genuinely didn't land.
 _acq_msb_copy_file_verified() {
   local name="$1" src="$2" path="$3" mode="$4"
+
+  # Guard the guest path up front: it is interpolated into root `sh -c` strings
+  # below (mkdir/test) and passed to chmod/chown. kit_spec_files already drops
+  # unsafe paths, but re-check here so this function is safe regardless of caller
+  # (a single-quote-bearing path would otherwise break out of the sh -c quoting).
+  case "$path" in
+    /*) ;;
+    *) echo "acq(msb): refusing kit file with non-absolute path: '$path'" >&2; return 1 ;;
+  esac
+  case "$path" in
+    *[!A-Za-z0-9._/-]*)
+      echo "acq(msb): refusing kit file with unsafe path: '$path'" >&2
+      return 1
+      ;;
+  esac
+
   local dir; dir=$(dirname "$path")
 
   msb exec "$name" -u 0 -- sh -c "mkdir -p '$dir'" >/dev/null 2>&1 || true
@@ -368,11 +384,19 @@ _acq_msb_copy_file_verified() {
   [ "$ok" -eq 1 ] || return 1
 
   # chmod, then chown files that live under the agent's home so the agent user
-  # (which runs the startup commands) can read/execute them.
-  [ -n "$mode" ] && msb exec "$name" -u 0 -- sh -c "chmod $mode '$path'" >/dev/null 2>&1 || true
+  # (which runs the startup commands) can read/execute them. The path was
+  # validated at function entry; mode is re-checked octal and passed to chmod as
+  # a separate argv element (never interpolated into an sh -c string).
+  if [ -n "$mode" ]; then
+    case "$mode" in
+      [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) : ;;
+      *) echo "acq(msb): refusing chmod: non-octal mode '$mode' for '$path'" >&2; mode="" ;;
+    esac
+  fi
+  [ -n "$mode" ] && msb exec "$name" -u 0 -- chmod "$mode" "$path" >/dev/null 2>&1 || true
   case "$path" in
     /home/agent/*)
-      msb exec "$name" -u 0 -- sh -c "chown agent '$path' 2>/dev/null || true" >/dev/null 2>&1 || true
+      msb exec "$name" -u 0 -- chown agent "$path" >/dev/null 2>&1 || true
       ;;
   esac
   acq_debug "msb copy verified: ${name}:${path}"
@@ -601,10 +625,15 @@ acq_backend_provision() {
   fi
 
   # Create the sandbox (detached; msb create boots in the background).
+  # NOTE: acq runs under `set -euo pipefail`, so capture the status with
+  # `|| _create_rc=$?` — a bare `msb create; local rc=$?` would abort the
+  # function on failure BEFORE the error block and the transient-secret scrub
+  # below ever run.
   acq_debug "msb create --name $name ${create_flags[*]} $ACQ_MSB_IMAGE"
-  msb create --name "$name" "${create_flags[@]}" "$ACQ_MSB_IMAGE"
-  local _create_rc=$?
-  # Clear the transient secret env vars immediately after create reads them.
+  local _create_rc=0
+  msb create --name "$name" "${create_flags[@]}" "$ACQ_MSB_IMAGE" || _create_rc=$?
+  # Clear the transient secret env vars immediately after create reads them
+  # (runs on both success and failure so the exported key never lingers).
   local _ev
   for _ev in ${_secret_env_names[@]+"${_secret_env_names[@]}"}; do
     unset "$_ev"
