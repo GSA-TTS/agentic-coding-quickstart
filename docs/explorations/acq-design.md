@@ -733,7 +733,7 @@ Both will reference this document (`docs/adr/agentic-coding-quickstart-v2-design
 | Phase | Target release | Change | Status |
 |-------|----------------|--------|--------|
 | **Phase 1** | 1.1.0 | Add `acq` (sbx driver only), deprecate `qsbx` | **Shipped** |
-| **Phase 2** | 1.2.0 | Add `msb` driver; neutral hybrid/v1 kit spec; `kits/` move in patterns | Planned |
+| **Phase 2** | 1.2.0 | Add `msb` driver; neutral hybrid/v1 kit spec; `acq-kits/` move in patterns | **Shipped** |
 | **Phase 3** | 1.3.0 | Add `ppp` driver | Deferred / undecided |
 | **Phase 4** | 2.0.0 | `acq` becomes primary; remove `qsbx` | Planned |
 
@@ -825,3 +825,69 @@ can distinguish "not done yet" from "done differently":
     Use `acq secret set -g usai` for global, or `acq secret set SANDBOX usai`
     to scope to a single sandbox. All other `acq secret` subcommands
     (`ls`, `rm`, `import`, `set-custom`, `--help`) pass through to sbx unchanged.
+
+### What is implemented (Phase 2 / 1.2.0)
+
+Phase 2 adds the **msb (microsandbox) backend** and the **neutral `hybrid/v1`
+kit vocabulary** with a translation layer. Recorded in
+`docs/adr/0011-msb-backend-and-neutral-kits.md`. Delivered:
+
+- **`acq.backends/kit-translate.sh`** — the shared neutral-spec layer: fetches a
+  kit ref (remote `git+https#ref=&dir=` via sparse checkout, or a local dir),
+  parses the `hybrid/v1` `spec.yaml` with `awk` (no `yq`), dispatches
+  `backend_shortcuts.<backend>`, synthesizes an sbx-v2 kit dir for the sbx
+  backend, and provides `kit_validate` for `acq kit validate`. Multi-line
+  command bodies are carried as base64 tokens so literal block scalars survive.
+- **`acq.backends/msb.sh`** — the microsandbox adapter (full ADR-0010 contract).
+  Drives the neutral ops directly: `caps.network.allow` → `--net-rule`,
+  `files[]` → `msb copy`, `commands[]` → `msb exec` (install marker-gated),
+  zscaler shortcut → `--trust-host-cas`, USAi key → `--secret ENV@HOST`.
+- **`acq.backends/sbx.sh`** — kit application routed through `kit-translate.sh`
+  (synthesizes a local sbx-v2 kit before `sbx --kit`/`sbx kit add`); observable
+  behavior for sbx users is unchanged.
+- **`acq.backends/common.sh`** — `PATTERNS_KIT_REF`/`DIR` repointed to the
+  neutral `acq-kits/` tree; `_auto_detect_backend` gains `msb` (sbx preferred);
+  real msb probe in `acq doctor`.
+- **`acq`** — real msb row in `backend list`; new `kit list|validate|apply`.
+- **`scripts/verify-backends`** — per-installed-backend live E2E check (design
+  §9). **`scripts/test-acq`** — msb + `acq kit` + neutral→sbx-v2 translation
+  cases (offline, stubs `msb`).
+- **Docs** — `BACKEND_GUIDE.md` msb section flipped to shipped;
+  `QUICKSTART.md` gains a "choose a backend" step and the msb run flow.
+
+### Additional deviations from this design doc (Phase 2)
+
+1. **Kit home is `acq-kits/`, not `kits/`.** The handoff §4.1 said
+   `integrations/isolation/kits`; Part A (patterns repo) shipped
+   `integrations/isolation/acq-kits/` — a reviewer asked for the explicit
+   `acq` association. This repo pins `acq-kits/`, and neutral specs reference
+   payloads via a `source:` field under each kit's `files/` tree. Kit dir names
+   also dropped the `-kit` suffix (`usai-provider-kit` → `usai-provider`).
+
+2. **No `yq` runtime dependency.** §10 flags the neutral spec needs a
+   validator; the parser is `awk`-based (no new dependency). Multi-line command
+   bodies are base64-framed to survive block scalars through the shell pipeline.
+   The authoritative JSON Schema lives in the patterns repo
+   (`schemas/kit-hybrid-v1.schema.json`); `acq kit validate` does structural
+   checks without a full JSON-schema engine.
+
+3. **msb secret model is native host-env `--secret`,** not the unified
+   swap-on-access store of §7.5 (deferred per the handoff §2). msb binds
+   `USAI_API_KEY@api.gsa.usai.gov` at create; the real value never enters the
+   guest. `acq secret set usai` on msb prints host-env guidance.
+
+4. **msb `ports` is create/run-time only** (msb 0.6.6 has no post-hoc ports
+   verb), and **msb `ensure_kits_applied` re-applies kits idempotently** rather
+   than a state-preserving in-place add (msb has no `sbx kit add` equivalent;
+   it never silently destroys state).
+
+5. **`PATTERNS_KIT_REF` is provisionally pinned to the Part A PR head**
+   (`#221`, pre-merge) with a `TODO` in `common.sh`. Per the handoff §4.1 hard
+   gate, the Part B PR stays in draft until this is flipped to the Part A
+   merge-commit SHA.
+
+6. **`scripts/verify-backends` live run is deferred.** The script exists
+   (design §9) but the full `acq run … --backend msb` loop cannot run inside a
+   sandbox (no nested sandboxes) and needs host virtualization. The msb CLI flag
+   shapes were verified against `msb 0.6.6`; the live loop is deferred to a
+   sandbox-capable host, mirroring ADR-0009/ADR-0010.

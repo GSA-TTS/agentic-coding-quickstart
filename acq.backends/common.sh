@@ -3,25 +3,45 @@
 # acq.backends/common.sh — backend-agnostic logic for acq
 #
 # Sourced by the acq entry point. Provides:
-#   - Kit constants (same pinned refs as qsbx for 1.1.x)
+#   - Kit constants (neutral hybrid/v1 acq kits from agentic-coding-patterns)
 #   - Backend resolution (flag > env > XDG config > auto-detect)
 #   - Backend dispatch (call acq_backend_* functions from the loaded adapter)
 #   - Shared utilities: slugify, derive_name, split_noglob, advisories, key check
 #
-# Does NOT contain any sbx-specific CLI knowledge — that all lives in sbx.sh.
+# Does NOT contain any backend-specific CLI knowledge — that lives in the
+# per-backend adapters (sbx.sh, msb.sh). Neutral-kit parsing/translation lives
+# in kit-translate.sh, which this file sources.
 
 # ============================================================================
-# KITS — same four sbx mixin kits as qsbx, pinned to the same ref for 1.1.x.
-# These diverge only when 1.2.x introduces neutral kits.
+# KITS — the four neutral hybrid/v1 acq kits from agentic-coding-patterns.
+#
+# Phase 2 (1.2.x) moves from the sbx-only `sbx-kits/` tree to the neutral
+# `acq-kits/` tree (schemaVersion: "hybrid/v1"), so both the sbx and msb
+# backends share one kit vocabulary. Each backend adapter consumes these via
+# acq.backends/kit-translate.sh, which fetches a kit's neutral spec.yaml and
+# emits the active backend's native operations.
+#
+# TODO(part-a-gate): PATTERNS_KIT_REF below is a PROVISIONAL pre-merge pin at
+# the *PR head* of agentic-coding-patterns#221 ("feat(acq): add neutral
+# hybrid/v1 acq-kits + schema + registry"), NOT a merged commit. Per the Phase 2
+# handoff §4.1 hard gate and AGENTS.md fail-closed rule, this PR MUST stay in
+# draft and this pin MUST be flipped to the real Part A merge-commit SHA before
+# undrafting. Release-gate checklist item: "PATTERNS_KIT_REF points at a real,
+# merged Part A SHA (not a placeholder)".
 # ============================================================================
 PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-PATTERNS_KIT_REF="d2a379ff7cdff611d6d623a1ce7b21e543f76ea8"   # patterns v1.5.0
-PATTERNS_KIT_DIR="integrations/isolation/sbx-kits"
+PATTERNS_KIT_REF="cd72ac27c368f51c3cb2044f609e71a10c90d6ab"   # PROVISIONAL: #221 PR head, pre-merge — flip to merge SHA before undrafting
+PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
-USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider-kit"
-PLAYBOOK_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/playbook-kit"
+USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider"
+PLAYBOOK_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/agentic-coding-playbook"
 ZSCALER_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/zscaler-ca-certificate"
 GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/git-ssh-sign"
+
+# Neutral kit directory names (relative to PATTERNS_KIT_DIR), in apply order.
+# kit-translate.sh resolves a kit's spec.yaml + files/ from these names. The
+# built-in kit set maps 1:1 to the four *_KIT refs above.
+ACQ_KIT_NAMES=(usai-provider agentic-coding-playbook zscaler-ca-certificate git-ssh-sign)
 
 # Additional user-supplied kits. Set ACQ_EXTRA_KITS to a whitespace-separated
 # list of kit references. Set ACQ_EXTRA_KIT_SOURCES for their allowlist prefixes.
@@ -34,6 +54,14 @@ KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
 # USAi endpoint constants
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 KEY_MGMT_URL="https://console.gsa.usai.gov/key-management"
+
+# Source the neutral-kit translation layer (spec.yaml parser + shortcut
+# dispatch). ACQ_SCRIPT_DIR is exported by the acq entry point; in the offline
+# test harness it is set before common.sh is sourced.
+if [ -n "${ACQ_SCRIPT_DIR:-}" ] && [ -f "${ACQ_SCRIPT_DIR}/acq.backends/kit-translate.sh" ]; then
+  # shellcheck disable=SC1091
+  . "${ACQ_SCRIPT_DIR}/acq.backends/kit-translate.sh"
+fi
 
 # ============================================================================
 # Utility functions
@@ -208,10 +236,15 @@ _read_config_backend() {
   awk '/^[[:space:]]*backend[[:space:]]*:/ { gsub(/^[[:space:]]*backend[[:space:]]*:[[:space:]]*/,""); gsub(/[[:space:]]*$/,""); print; exit }' "$cfg"
 }
 
-# Try to auto-detect an available backend. Today only sbx is supported.
+# Try to auto-detect an available backend. Prefers sbx (the mature default),
+# then msb (microsandbox). First one found wins.
 _auto_detect_backend() {
   if command -v sbx >/dev/null 2>&1; then
     printf 'sbx\n'
+    return 0
+  fi
+  if command -v msb >/dev/null 2>&1; then
+    printf 'msb\n'
     return 0
   fi
   return 1
@@ -246,7 +279,8 @@ acq_resolve_backend() {
       name="$cfg_name"
     else
       name=$(_auto_detect_backend) || {
-        echo "acq: error: no backend detected. Install sbx (>= 0.35.0) or set ACQ_BACKEND." >&2
+        echo "acq: error: no backend detected. Install sbx (>= 0.35.0) or msb (>= 0.6.0)," >&2
+        echo "     or set ACQ_BACKEND." >&2
         echo "     Run 'acq doctor' for installation hints." >&2
         exit 1
       }
@@ -394,7 +428,14 @@ acq_print_doctor() {
     sbx_status="not found"
   fi
 
-  msb_status="not found (coming in 1.2.x)"
+  # Check msb (microsandbox).
+  if command -v msb >/dev/null 2>&1; then
+    local msb_ver
+    msb_ver=$(msb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || echo "?")
+    msb_status="installed v${msb_ver}"
+  else
+    msb_status="not found"
+  fi
 
   echo "acq: backend health check"
   echo "  [sbx: ${sbx_status}]"

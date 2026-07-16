@@ -2,15 +2,23 @@
 #
 # acq.backends/sbx.sh — sbx backend adapter for acq
 #
-# Implements the adapter contract defined in docs/explorations/acq-handoff-1.1.md §5.
-# Each acq_backend_* function maps the acq contract to the sbx CLI.
+# Implements the adapter contract defined in
+# docs/adr/0010-acq-pluggable-backends.md ("Adapter contract"). Each
+# acq_backend_* function maps the acq contract to the sbx CLI.
 #
-# Sourced by acq (via acq_resolve_backend) after common.sh is already loaded.
-# Never run directly.
+# ---------------------------------------------------------------------------
+# Neutral-kit consumption (Phase 2 / 1.2.x)
+# ---------------------------------------------------------------------------
+# Kits are now authored in the neutral hybrid/v1 vocabulary (acq-kits/ in the
+# patterns repo). sbx cannot consume that schema natively (it expects its own
+# schemaVersion "2" spec), so this adapter fetches each neutral kit and uses
+# kit-translate.sh to SYNTHESIZE an equivalent sbx-v2 kit directory locally,
+# then hands the local dir to `sbx --kit` / `sbx kit add`. The payloads and
+# behavior are carried verbatim, so the observable result for an sbx user is
+# identical to Phase 1. See docs/adr/0011-msb-backend-and-neutral-kits.md.
 
-# Capability flags — reserved for multi-backend dispatch in common.sh (1.2.x+).
-# Each backend adapter declares these so common.sh can gate features once a
-# second backend exists. Unused by common.sh today (only one backend).
+# Capability flags (per the ADR-0010 contract). common.sh may gate features on
+# these once multiple backends coexist.
 # shellcheck disable=SC2034
 ACQ_BACKEND_NAME="sbx"
 # shellcheck disable=SC2034
@@ -30,6 +38,10 @@ ACQ_EXEC_READY_TIMEOUT="${ACQ_EXEC_READY_TIMEOUT:-60}"
 
 # Absolute path where the usai-provider kit stages its OpenCode config.
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
+
+# Where synthesized sbx-v2 kits (translated from the neutral hybrid/v1 kits)
+# are materialized for this run.
+ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/sbx-kits}"
 
 # Agents recognized by `sbx run` (mirrors qsbx).
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
@@ -160,11 +172,68 @@ _acq_sbx_ensure_kit_sources_allowed() {
   fi
 }
 
-# Emit --kit flags for all kits (built-ins + extras) one token per line.
+# ---------------------------------------------------------------------------
+# Neutral-kit → sbx-v2 translation
+# ---------------------------------------------------------------------------
+# Given a neutral kit ref (remote git+https or local dir), fetch it and
+# synthesize a local sbx-v2 kit directory. Echoes the local sbx-v2 kit dir.
+# Falls back to passing the ref through unchanged if translation is unavailable
+# (e.g. an extra kit that is already an sbx-v2 kit), so existing extra-kit
+# workflows keep working.
+_acq_sbx_translate_kit() {
+  local kitref="$1" slug fetchdir kitdir out
+  # Offline/test escape hatch: pass the ref through unchanged. Used by the
+  # offline unit harness (no network) and by any environment that pre-resolves
+  # kits. Never set this in production — sbx would then receive a neutral
+  # hybrid/v1 ref it cannot parse.
+  if [ -n "${ACQ_SBX_KIT_PASSTHROUGH:-}" ]; then
+    printf '%s\n' "$kitref"
+    return 0
+  fi
+  # If kit-translate isn't loaded (shouldn't happen), pass through unchanged.
+  if ! command -v kit_translate_fetch >/dev/null 2>&1; then
+    printf '%s\n' "$kitref"
+    return 0
+  fi
+
+  slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_')
+  fetchdir="${ACQ_SBX_KIT_CACHE}/fetch/${slug}"
+  out="${ACQ_SBX_KIT_CACHE}/v2/${slug}"
+
+  kitdir=$(kit_translate_fetch "$kitref" "$fetchdir") || {
+    echo "acq(sbx): warning: could not fetch kit; passing ref through: $kitref" >&2
+    printf '%s\n' "$kitref"
+    return 0
+  }
+
+  # Only translate kits that are neutral hybrid/v1. If the fetched kit is
+  # already an sbx-v2 kit (an extra kit authored for sbx), pass its dir through.
+  local schema
+  schema=$(kit_spec_field "${kitdir}/spec.yaml" schemaVersion 2>/dev/null || true)
+  case "$schema" in
+    hybrid/v1)
+      rm -rf "$out"
+      kit_translate_to_sbx "$kitdir" "$out" >/dev/null || {
+        echo "acq(sbx): warning: kit translation failed; passing ref through: $kitref" >&2
+        printf '%s\n' "$kitref"
+        return 0
+      }
+      printf '%s\n' "$out"
+      ;;
+    *)
+      # Not a neutral kit — use the fetched dir (or the original ref) as-is.
+      printf '%s\n' "$kitdir"
+      ;;
+  esac
+}
+
+# Emit --kit flags for all kits (built-ins + extras), translating each neutral
+# hybrid/v1 kit to a local sbx-v2 kit dir first. One token per line.
 _acq_sbx_kit_flags() {
-  local k
+  local k local_kit
   for k in "${KITS[@]}"; do
-    printf '%s\n%s\n' "--kit" "$k"
+    local_kit=$(_acq_sbx_translate_kit "$k")
+    printf '%s\n%s\n' "--kit" "$local_kit"
   done
 }
 
@@ -313,8 +382,9 @@ acq_backend_ports() {
 # ---------------------------------------------------------------------------
 
 acq_backend_apply_kit() {
-  local name="$1" kitref="$2"
-  sbx kit add "$name" "$kitref"
+  local name="$1" kitref="$2" local_kit
+  local_kit=$(_acq_sbx_translate_kit "$kitref")
+  sbx kit add "$name" "$local_kit"
 }
 
 # ---------------------------------------------------------------------------
@@ -327,44 +397,52 @@ acq_backend_ensure_kits_applied() {
 
   _acq_sbx_ensure_kit_sources_allowed
 
+  # Neutral kits must be translated to local sbx-v2 kit dirs before sbx kit add.
+  local usai_local playbook_local zscaler_local
+  usai_local=$(_acq_sbx_translate_kit "$USAI_KIT")
+  playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT")
+  zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT")
+
   # 1) USAi provider kit
   if _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "acq: '$name' is missing the USAi kit; injecting with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$USAI_KIT" </dev/null >/dev/null 2>&1; then
+    if sbx kit add "$name" "$usai_local" </dev/null >/dev/null 2>&1; then
       sbx exec "$name" -- sh -c \
         'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
         </dev/null >/dev/null 2>&1 || true
       echo "acq: USAi kit injected into '$name'." >&2
     else
       echo "acq: warning: 'sbx kit add' (USAi kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$USAI_KIT'" >&2
+      echo "      Recover with: sbx kit add '$name' '$usai_local'" >&2
     fi
   fi
 
   # 2) Playbook kit
   if _acq_sbx_kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/.git" && echo present'; then
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$PLAYBOOK_KIT" </dev/null >/dev/null 2>&1; then
+    if sbx kit add "$name" "$playbook_local" </dev/null >/dev/null 2>&1; then
       echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2
     else
       echo "acq: warning: 'sbx kit add' (playbook kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$PLAYBOOK_KIT'" >&2
+      echo "      Recover with: sbx kit add '$name' '$playbook_local'" >&2
     fi
   fi
 
   # 3) Zscaler CA kit
   if _acq_sbx_kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
     echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$ZSCALER_KIT" </dev/null >/dev/null 2>&1; then
+    if sbx kit add "$name" "$zscaler_local" </dev/null >/dev/null 2>&1; then
       echo "acq: Zscaler CA kit injected into '$name'." >&2
     else
       echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$ZSCALER_KIT'" >&2
+      echo "      Recover with: sbx kit add '$name' '$zscaler_local'" >&2
     fi
   fi
 
-  # 4) Extra kits (tracked by marker file)
-  local applied k
+  # 4) Extra kits (tracked by marker file). Extra kits may be neutral or already
+  #    sbx-v2; _acq_sbx_translate_kit handles both. The marker uses the original
+  #    ref (stable across runs), not the translated local dir.
+  local applied k local_extra
   applied=$(sbx exec "$name" -- sh -c 'cat "$HOME/.acq-extra-kits" 2>/dev/null' </dev/null 2>/dev/null || true)
   local _extras=()
   [ -n "$ACQ_EXTRA_KITS" ] && split_noglob _extras "$ACQ_EXTRA_KITS"
@@ -373,11 +451,12 @@ acq_backend_ensure_kits_applied() {
       *"$k"*) continue ;;
     esac
     echo "acq: applying extra kit to '$name': $k" >&2
-    if sbx kit add "$name" "$k" </dev/null >/dev/null 2>&1; then
+    local_extra=$(_acq_sbx_translate_kit "$k")
+    if sbx kit add "$name" "$local_extra" </dev/null >/dev/null 2>&1; then
       sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$k" </dev/null >/dev/null 2>&1 || true
     else
       echo "acq: warning: 'sbx kit add' (extra kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$k'" >&2
+      echo "      Recover with: sbx kit add '$name' '$local_extra'" >&2
     fi
   done
 }

@@ -3,23 +3,26 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-07-14"
+last_updated: "2026-07-15"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
-related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md"]
+related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
 
 # acq Backend Guide
 
-`acq` is designed to support multiple isolation backends. Today (1.1.x), only
-the **sbx** backend ships. Additional backends are planned:
+`acq` supports multiple isolation backends behind one command surface. As of
+1.2.0, two backends ship: **sbx** (Docker Sandboxes) and **msb**
+(microsandbox). Kits are authored once in the neutral `hybrid/v1` vocabulary and
+translated to each backend's native mechanism (see
+[ADR-0011](adr/0011-msb-backend-and-neutral-kits.md)).
 
 | Backend | Version | Status | Description |
 |---------|---------|--------|-------------|
 | **sbx** | 1.1.0 | Shipped | Docker-based sbx CLI from Docker Inc |
-| **msb** | 1.2.0 (planned) | Coming | microsandbox — lightweight VM-based isolation |
+| **msb** | 1.2.0 | Shipped | microsandbox — lightweight microVM isolation (FOSS) |
 | **ppp** | Deferred | Not scheduled | Podman-Plus-Proxy backend |
 
 ---
@@ -94,36 +97,120 @@ export ACQ_BACKEND=sbx
 
 ---
 
-## msb Backend (planned for 1.2.0)
+## msb Backend (microsandbox, 1.2.0)
 
-> **Not yet available.** This section documents the planned design.
+The **msb** backend wraps [microsandbox](https://github.com/superradcompany/microsandbox),
+an open-source (Apache-2.0) microVM runtime. It is a good fit when you want a
+FOSS runtime with no Docker account/seat, snapshot/restore, or an SDK-first
+automation story.
 
-The **msb** backend will wrap [microsandbox](https://github.com/microsandbox/microsandbox),
-a lightweight VM-based isolation tool with a simpler dependency footprint than
-Docker.
+### Overview
 
-### Planned strengths
+- microVM isolation (libkrun) with per-sandbox network policy
+- Runs standard OCI images (Docker Hub, GHCR, any registry)
+- Native host-CA trust propagation (`--trust-host-cas`)
+- Native TLS interception + host-env secret binding (`--secret ENV@HOST`) so
+  credentials never enter the guest
+- Snapshot/restore and detached long-running sandboxes
 
-- No Docker account required
-- Lower memory/CPU overhead
-- Suitable for Linux environments where Docker is unavailable or undesirable
-- Will become the auto-detect default in 1.2.0 once available
+### Strengths
+
+- **No Docker account required** — FOSS binary, `msb self update` to upgrade
+- **Zscaler CA shortcut**: the `zscaler-ca-certificate` kit takes msb's native
+  `--trust-host-cas` path instead of the file-drop + `update-ca-certificates`
+  dance (behavioral parity — the guest trusts the Zscaler CA either way)
+- **Secret injection**: the USAi key is bound from a host env var at create time
+  (`--secret USAI_API_KEY@api.gsa.usai.gov`); the real value never enters the VM
+- **Snapshots**: `msb snapshot` supports save/restore
+
+### Requirements
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| `msb` CLI | >= 0.6.0 | `--net-rule`, `--trust-host-cas`, `--secret` used by acq |
+| Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
+
+Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
+
+### Installation
+
+```bash
+curl -fsSL https://install.microsandbox.dev | sh        # macOS / Linux
+brew install superradcompany/tap/microsandbox           # Homebrew
+```
+
+### Configuration
+
+```bash
+# Persist msb as the default backend
+./acq backend set msb
+
+# Per-invocation override
+./acq --backend msb run opencode /proj
+
+# Environment override
+export ACQ_BACKEND=msb
+```
+
+Tunables:
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `ACQ_MSB_IMAGE` | `ghcr.io/gsa-tts/agentic-coding-quickstart/opencode:latest` | OCI image for provisioned sandboxes |
+| `ACQ_MSB_KIT_CACHE` | `$XDG_CACHE_HOME/acq/kits` | where fetched neutral kits are materialized |
+
+### Secrets
+
+msb binds secrets from **host environment variables** at create time. The real
+value is never inlined into the sandbox config and never enters the guest:
+
+```bash
+export USAI_API_KEY=<your-usai-key>
+./acq --backend msb run opencode /path/to/project
+# acq binds USAI_API_KEY@api.gsa.usai.gov automatically at create.
+```
+
+`acq secret set usai` on the msb backend prints this guidance rather than
+writing to a store. A unified cross-backend secret store is planned (see
+[ADR-0011](adr/0011-msb-backend-and-neutral-kits.md)); it is out of scope for
+1.2.0.
+
+### Capability flags
+
+| Flag | Value | Meaning |
+|------|-------|---------|
+| `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 0 | No post-hoc `acq ports`; publish at create/run via `-p HOST:GUEST` |
+| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 1 | `msb snapshot` save/restore |
+| `ACQ_BACKEND_CAN_RESUME` | 1 | `msb stop` / `msb start` preserve state |
+| `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` |
 
 ### Differences from sbx
 
-| Feature | sbx | msb (planned) |
-|---------|-----|---------------|
-| Isolation | Container | VM |
-| Secret proxy | Builtin | Planned (different mechanism) |
-| Kit format | sbx v2 mixin | Neutral `acq` hybrid/v1 spec (planned) |
-| Credential rewrite | Yes | Planned |
-| Port forwarding | Yes | Planned |
+| Feature | sbx | msb |
+|---------|-----|-----|
+| Isolation | Container (microVM) | microVM (libkrun) |
+| Kit format | Neutral `hybrid/v1` → sbx-v2 (synthesized) | Neutral `hybrid/v1` → `msb` operations |
+| Zscaler CA | file-drop + `update-ca-certificates` | native `--trust-host-cas` shortcut |
+| Secret model | proxy `secret set-custom` | host-env `--secret ENV@HOST` |
+| Port forwarding | `acq ports` (post-hoc) | published at create/run (`-p`) only |
+| In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+) | re-apply kits idempotently (no state-preserving add) |
 
-### Migration path
+### Known limitations
 
-When msb lands in 1.2.0, `acq` will auto-detect it. If both sbx and msb are
-installed, `acq` will prompt you to pick one and persist the choice via
-`acq doctor`. Existing sbx sandboxes are unaffected.
+- **Ports are set at create/run time**, not post-hoc. `acq --backend msb ports`
+  prints the correct mechanism instead of forwarding.
+- **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
+  re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
+- **Unified secret store deferred.** msb uses its native host-env `--secret`
+  binding for 1.2.0.
+
+> **Live end-to-end note:** the full `acq run … --backend msb` loop and the
+> `scripts/verify-backends` msb row cannot run inside an sbx/msb sandbox (no
+> nested sandboxes) and require host virtualization (`/dev/kvm` on Linux). The
+> msb CLI flag shapes used by the adapter were verified against `msb 0.6.6`;
+> the create→exec→attach loop is deferred to a sandbox-capable host (mirrors
+> ADR-0010's deferred sbx verification). See
+> [ADR-0011](adr/0011-msb-backend-and-neutral-kits.md).
 
 ---
 
@@ -138,34 +225,61 @@ See `docs/explorations/` for the design notes when available.
 
 `acq` resolves the backend in this priority order (highest wins):
 
-1. `--backend <name>` flag
+1. `--backend <name>` flag (per-invocation override)
 2. `ACQ_BACKEND` environment variable
 3. `backend:` key in `~/.config/acq/config.yaml`
-4. Auto-detect: first available backend (`sbx version`, then `msb version`)
+4. Auto-detect: first installed backend (`sbx` preferred, then `msb`)
 
 If multiple backends are installed and none is explicitly selected, `acq`
-prints the candidates and exits with a hint to set `ACQ_BACKEND`. (Only
-relevant once msb/ppp exist alongside sbx.)
+auto-detects in the order above (sbx wins when both are present). Use
+`--backend`, `ACQ_BACKEND`, or `acq backend set` to pick msb explicitly.
 
 ---
 
 ## Adding a new backend (implementer notes)
 
 1. Create `acq.backends/<name>.sh` implementing the contract in
-   `docs/explorations/acq-handoff-1.1.md §5`.
-2. Set the four capability flags at the top of the file.
-3. Implement all required `acq_backend_*` functions.
+   [ADR-0010 §"Adapter contract"](adr/0010-acq-pluggable-backends.md).
+2. Set the capability flags at the top of the file.
+3. Implement all required `acq_backend_*` functions. Consume the neutral
+   `hybrid/v1` kits via `acq.backends/kit-translate.sh` (parse the spec, honor
+   `backend_shortcuts.<name>`, then emit your backend's native operations).
 4. Add auto-detect to `_auto_detect_backend` in `acq.backends/common.sh`.
-5. Add the backend to the `acq backend list` output in `acq`.
-6. Write tests in `scripts/test-acq`.
+5. Add the backend to `acq backend list` and `acq_print_doctor`.
+6. Write tests in `scripts/test-acq` (stub the CLI) and a row in
+   `scripts/verify-backends`.
 7. Document it here.
 
 ---
 
-## Coming in 1.2.x
+## Kits: the neutral hybrid/v1 vocabulary
+
+Kits are authored once in the neutral `hybrid/v1` spec (in the patterns repo
+under `integrations/isolation/acq-kits/`) and translated per backend by
+`acq.backends/kit-translate.sh`:
+
+- **sbx** — the neutral spec is synthesized into an sbx-v2 kit directory
+  (`spec.yaml` + `files/`), then applied via `sbx --kit` / `sbx kit add`. The
+  observable result is identical to the pre-1.2 sbx kits.
+- **msb** — the neutral spec is fetched and driven directly: network allows
+  become `--net-rule` flags, files are `msb copy`'d in, and `commands` run via
+  `msb exec`. A `backend_shortcuts.msb` (e.g. zscaler `trust_host_cas`) uses the
+  native primitive instead.
+
+Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
+
+---
+
+## Shipped in 1.2.0
 
 - `acq kit apply|list|validate` — kit management subcommands
-- Full swap-on-access secret model (unified across backends)
+- Neutral `hybrid/v1` kit spec + `kit-translate.sh` (multi-backend kits)
+- `msb` (microsandbox) backend
+
+## Still deferred
+
+- Full unified swap-on-access secret model across backends (msb uses its native
+  host-env `--secret` binding for now)
 - `acq policy …` — network policy subcommands
-- Neutral hybrid/v1 kit spec for multi-backend kits
-- `msb` backend
+- `ppp` (Podman-Plus-Proxy) backend
+- Removal of `qsbx` (Phase 4 / 2.0.0)

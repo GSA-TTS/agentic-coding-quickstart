@@ -128,7 +128,13 @@ case "$subcommand" in
         else
           printf '  sbx  (not found)\n'
         fi
-        printf '\nComing in 1.2.x:\n  msb  (not found)\n'
+        if command -v msb >/dev/null 2>&1; then
+          local_ver=$(msb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || echo "?")
+          printf '  msb  v%s\n' "$local_ver"
+        else
+          printf '  msb  (not found)\n'
+        fi
+        printf '\nDeferred (not scheduled):\n  ppp  (Podman-Plus-Proxy)\n'
         ;;
       set)
         shift
@@ -145,6 +151,75 @@ case "$subcommand" in
         ;;
     esac
     exit 0
+    ;;
+
+  kit)
+    shift
+    sub2="${1:-}"
+    case "$sub2" in
+      list)
+        # Show the pinned built-in kits (no backend needed).
+        _build_kit_list
+        printf 'Pinned acq kits (neutral hybrid/v1):\n'
+        printf '  patterns ref: %s\n' "$PATTERNS_KIT_REF"
+        printf '  patterns dir: %s\n' "$PATTERNS_KIT_DIR"
+        printf '\n'
+        local_k=""
+        for local_k in "${ACQ_KIT_NAMES[@]}"; do
+          printf '  - %s\n' "$local_k"
+        done
+        if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
+          printf '\nExtra kits (ACQ_EXTRA_KITS):\n'
+          _acq_extra=()
+          split_noglob _acq_extra "$ACQ_EXTRA_KITS"
+          for local_k in "${_acq_extra[@]}"; do
+            printf '  - %s\n' "$local_k"
+          done
+        fi
+        exit 0
+        ;;
+      validate)
+        shift
+        local_path="${1:-}"
+        [ -n "$local_path" ] || { echo "acq: kit validate: missing PATH (kit dir or spec.yaml)" >&2; exit 1; }
+        if ! command -v kit_validate >/dev/null 2>&1; then
+          echo "acq: kit validate: kit-translate.sh not loaded" >&2
+          exit 1
+        fi
+        kit_validate "$local_path"
+        exit $?
+        ;;
+      apply)
+        shift
+        local_name="${1:-}"
+        local_kitref="${2:-}"
+        if [ -z "$local_name" ] || [ -z "$local_kitref" ]; then
+          echo "acq: kit apply: usage: acq kit apply NAME KITREF" >&2
+          exit 1
+        fi
+        # kit apply needs the backend resolved.
+        acq_resolve_backend "${explicit_backend}"
+        acq_backend_apply_kit "$local_name" "$local_kitref"
+        exit $?
+        ;;
+      --help|-h|"")
+        cat >&2 <<'KITUSAGE'
+acq kit — manage neutral hybrid/v1 kits
+
+Usage:
+  acq kit list                 Show the pinned built-in kits (+ extras)
+  acq kit validate PATH        Validate a neutral kit (dir or spec.yaml)
+  acq kit apply NAME KITREF    Apply a kit to an existing sandbox (mid-life)
+
+See docs/BACKEND_GUIDE.md and docs/adr/0011-msb-backend-and-neutral-kits.md.
+KITUSAGE
+        exit 1
+        ;;
+      *)
+        echo "acq: unknown kit subcommand '${sub2}'. Try: acq kit list | validate PATH | apply NAME KITREF" >&2
+        exit 1
+        ;;
+    esac
     ;;
 esac
 
@@ -370,6 +445,9 @@ Subcommands:
   doctor                     Backend health check + write default config
   backend list               List detected backends
   backend set NAME           Persist the default backend
+  kit list                   Show the pinned kits
+  kit validate PATH          Validate a neutral hybrid/v1 kit
+  kit apply NAME KITREF      Apply a kit to an existing sandbox
 
 Global flags (before subcommand):
   --backend <name>           Override the active backend

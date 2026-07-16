@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+#
+# verify-backends — HOST-SIDE end-to-end check that the four neutral acq kits
+# apply cleanly on each INSTALLED backend, and that the core kit behaviors work.
+# Unlike scripts/test-acq (which stubs sbx/msb and runs anywhere), this exercises
+# the REAL toolchain and therefore must run on a machine that can create
+# sandboxes:
+#   - sbx: Docker + KVM, `sbx login` done, sbx >= 0.35.0
+#   - msb: host virtualization (KVM on Linux, HVF on macOS, WHP on Windows),
+#          msb >= 0.6.0
+#
+# For each backend that is INSTALLED, it creates a tiny throwaway sandbox and
+# asserts (design §9):
+#   1. The four pinned kits apply cleanly (no hard failure).
+#   2. The USAi key round-trips to HTTP 200 from the models API (requires a
+#      valid key: USAI_API_KEY exported, or already stored for the backend).
+#   3. Git commit signing config is present (git-ssh-sign kit landed).
+#   4. The playbook clone symlink appears at the agent's AGENTS.md path.
+# A backend that is NOT installed is SKIPPED (its row prints "skipped").
+#
+# This CANNOT run inside an sbx/msb sandbox (no nested sandboxes) — see ADR-0011
+# "Validation" and the §7 handoff note. Run it on a sandbox-capable host and
+# capture the transcript for the PR.
+#
+# Usage:
+#   ./scripts/verify-backends [WORKDIR]
+#     WORKDIR  optional workspace path (default: a temp git repo under $TMPDIR).
+#
+# Exit 0 = every installed backend passed (skipped backends don't fail the run).
+# Non-zero = at least one installed backend failed a check.
+
+set -uo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+ACQ="$REPO_ROOT/acq"
+
+# Refuse to run inside a sandbox (no nested sandboxes).
+if [ -f /.dockerenv ] || [ -n "${SBX_SANDBOX:-}" ] || [ -n "${MSB_SANDBOX:-}" ]; then
+  echo "verify-backends: refusing to run inside a sandbox (no nested sandboxes)." >&2
+  echo "                 Run on a sandbox-capable host. See ADR-0011 Validation." >&2
+  exit 2
+fi
+
+PASS=0
+FAIL=0
+SKIP=0
+pass() { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
+fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
+skip() { SKIP=$((SKIP + 1)); printf '  skip  %s\n' "$1"; }
+
+# Workspace to mount.
+WORKDIR="${1:-}"
+if [ -z "$WORKDIR" ]; then
+  WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-verify-ws.XXXXXX")
+  ( cd "$WORKDIR" && git init -q && git config user.email test@example.com \
+      && git config user.name "acq verify" && echo hi > README.md ) || true
+fi
+
+USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
+USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
+
+# ---------------------------------------------------------------------------
+# Per-backend verification. $1 = backend name. Assumes it is installed.
+# ---------------------------------------------------------------------------
+verify_backend() {
+  local backend="$1"
+  echo ""
+  echo "== backend: ${backend} =="
+
+  # Derive the sandbox name the same way acq does (agent "shell" + workspace
+  # basename), by sourcing common.sh's derive_name. This mirrors the acq run/
+  # create dispatch so we address the exact sandbox acq creates.
+  local name
+  name=$(
+    ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
+    derive_name shell "$WORKDIR" 2>/dev/null
+  )
+  [ -n "$name" ] || name="shell-$(basename "$WORKDIR" | tr '[:upper:]' '[:lower:]')"
+
+  # Create a sandbox with the four kits applied via acq's normal provision path.
+  if ! "$ACQ" --backend "$backend" create shell "$WORKDIR" >/dev/null 2>&1; then
+    fail "${backend}: provision (acq create shell) failed" \
+         "review 'acq --backend ${backend} create shell ${WORKDIR}'"
+    "$ACQ" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
+    return
+  fi
+
+  # 1) USAi kit config landed.
+  if "$ACQ" --backend "$backend" exec "$name" -- sh -c "test -f '$USAI_KIT_CONFIG_PATH'" >/dev/null 2>&1; then
+    pass "${backend}: usai-provider kit applied (config staged)"
+  else
+    fail "${backend}: usai-provider kit config missing at $USAI_KIT_CONFIG_PATH"
+  fi
+
+  # 2) USAi key round-trips to 200 (needs a valid key available to the backend).
+  local status
+  status=$("$ACQ" --backend "$backend" exec "$name" -- sh -c \
+    "curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$USAI_API_KEY\" $USAI_MODELS_URL" \
+    2>/dev/null || true)
+  case "$status" in
+    200) pass "${backend}: USAi key round-trips to 200" ;;
+    "")  skip "${backend}: USAi key check (could not reach models API — no key?)" ;;
+    *)   fail "${backend}: USAi key check returned HTTP $status (expected 200)" ;;
+  esac
+
+  # 3) git-ssh-sign config present (system gitconfig has gpg.format ssh).
+  if "$ACQ" --backend "$backend" exec "$name" -- sh -c \
+      "git config --system --get gpg.format 2>/dev/null | grep -q ssh" >/dev/null 2>&1; then
+    pass "${backend}: git-ssh-sign kit applied (gpg.format ssh)"
+  else
+    fail "${backend}: git commit signing config missing (gpg.format ssh)"
+  fi
+
+  # 4) playbook clone symlink appears (AGENTS.md linked into OpenCode config).
+  if "$ACQ" --backend "$backend" exec "$name" -- sh -c \
+      'test -e "$HOME/.agentic-coding-playbook/.git" || test -L "$HOME/.config/opencode/AGENTS.md"' \
+      >/dev/null 2>&1; then
+    pass "${backend}: playbook kit applied (clone or AGENTS.md link present)"
+  else
+    fail "${backend}: playbook clone/symlink not found"
+  fi
+
+  # Clean up the throwaway sandbox.
+  "$ACQ" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
+}
+
+echo "verify-backends"
+echo "  workspace: $WORKDIR"
+
+# sbx
+if command -v sbx >/dev/null 2>&1; then
+  verify_backend sbx
+else
+  echo ""; echo "== backend: sbx =="; skip "sbx: not installed"
+fi
+
+# msb
+if command -v msb >/dev/null 2>&1; then
+  verify_backend msb
+else
+  echo ""; echo "== backend: msb =="; skip "msb: not installed"
+fi
+
+echo ""
+echo "  passed: $PASS   failed: $FAIL   skipped: $SKIP"
+[ "$FAIL" -eq 0 ]

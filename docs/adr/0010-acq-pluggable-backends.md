@@ -133,6 +133,6 @@ correction, not a change.
 ## Links
 
 - Design: `docs/explorations/acq-design.md` (long-form vision)
-- Handoff: `docs/explorations/acq-handoff-1.1.md` (this implementation scope)
+- Contract: this ADR, §"Adapter contract" (authoritative)
 - Deprecation timeline: `qsbx` frozen 1.1.0, removed 2.0.0
 - Related: [ADR-0009](0009-require-sbx-0.35.0-in-place-kit-healing.md) (sbx version floor)
