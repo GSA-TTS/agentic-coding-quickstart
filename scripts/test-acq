@@ -610,6 +610,49 @@ assert_contains "msb: provision binds github via --secret" "$prov_log" "--secret
 assert_eq "msb: provision never leaks secret values to argv" "CLEAN" "$prov_leaks"
 cleanup_stubs
 
+# 8n. msb provision creates the agent user and runs a uid-1000 kit command as
+#     `agent` with HOME=/home/agent (NOT as the base image's uid-1000 user),
+#     and chowns staged /home/agent files to agent. Uses a kit fixture whose
+#     startup command runs as user "1000" and reads a /home/agent file.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/agent-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # A one-kit fixture: a /home/agent file + a startup command as user 1000.
+  aok="${STUBDIR}/agentkit"
+  mkdir -p "$aok/files/home/usai-config"
+  printf 'MODULE\n' > "$aok/files/home/usai-config/merge-global-config.mjs"
+  cat >"$aok/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: agent-kit
+displayName: Agent Kit
+description: kit whose startup runs as uid 1000
+files:
+  - path: /home/agent/usai-config/merge-global-config.mjs
+    mode: "0755"
+    source: files/home/usai-config/merge-global-config.mjs
+commands:
+  - phase: startup
+    user: "1000"
+    command:
+      - node
+      - /home/agent/usai-config/merge-global-config.mjs
+SPEC
+  _acq_msb_fetch_kit() { printf '%s\n' "$aok"; }
+  acq_backend_provision agentbox shell /tmp >/dev/null 2>&1
+)
+agent_log=$(cat "$CALLS")
+assert_contains "msb: provision creates agent user" "$agent_log" "agent"
+# The uid-1000 startup command must run as `agent` with HOME=/home/agent,
+# never as `-u 1000` (which would be the base image's `node` user).
+assert_contains "msb: uid-1000 kit cmd runs as agent" "$agent_log" "msb exec agentbox -u agent -e HOME=/home/agent -- node"
+assert_not_contains "msb: uid-1000 kit cmd not run as -u 1000" "$agent_log" "msb exec agentbox -u 1000 -- node"
+assert_contains "msb: chowns staged /home/agent file to agent" "$agent_log" "chown agent '/home/agent/usai-config/merge-global-config.mjs'"
+cleanup_stubs
+
 # ===========================================================================
 # 9. acq kit subcommands
 # ===========================================================================

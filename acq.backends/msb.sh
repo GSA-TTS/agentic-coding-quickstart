@@ -90,6 +90,12 @@ ACQ_MSB_EXEC_READY_TIMEOUT="${ACQ_MSB_EXEC_READY_TIMEOUT:-${ACQ_EXEC_READY_TIMEO
 # USAi models path (matches common.sh USAI_MODELS_URL host) for --secret host.
 ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
 
+# The kits expect an unprivileged `agent` user with HOME=/home/agent (the sbx
+# agent-template contract). Plain OCI bases don't provide it, so the adapter
+# creates it at provision (see _acq_msb_ensure_agent_user). uid 1000 is the
+# preferred id but not required — kit commands address the user by name.
+ACQ_MSB_AGENT_UID="${ACQ_MSB_AGENT_UID:-1000}"
+
 # Agents recognized by acq's run dispatch (mirrors sbx.sh KNOWN_AGENTS).
 # shellcheck disable=SC2034
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
@@ -285,11 +291,9 @@ EOF
 }
 
 # Copy a host file into the guest and VERIFY it is readable there before
-# returning. msb copy can return before the write is observable by a subsequent
-# `msb exec` (the earlier .mjs MODULE_NOT_FOUND at startup-command time was this
-# race — the .jsonc happened to settle by the time it was checked much later,
-# the .mjs did not by the time `node` ran). Poll `test -f` up to a short
-# deadline so kit commands never run against a not-yet-present file.
+# returning. Also chown files under /home/agent to the agent user (they are
+# copied as root, but the kits' startup commands read them as the agent user;
+# see _acq_msb_ensure_agent_user). Retries briefly to absorb any copy lag.
 _acq_msb_copy_file_verified() {
   local name="$1" src="$2" path="$3" mode="$4"
   local dir; dir=$(dirname "$path")
@@ -301,28 +305,34 @@ _acq_msb_copy_file_verified() {
 
   # Verify the file is present + non-empty in the guest, retrying briefly to
   # absorb copy/boot lag.
-  local deadline attempt=0
+  local deadline attempt=0 ok=0
   deadline=$(( $(date +%s) + ${ACQ_MSB_COPY_SETTLE_TIMEOUT:-20} ))
   while :; do
     if msb exec "$name" -u 0 -- sh -c "test -s '$path'" >/dev/null 2>&1; then
-      [ -n "$mode" ] && msb exec "$name" -u 0 -- sh -c "chmod $mode '$path'" >/dev/null 2>&1 || true
-      acq_debug "msb copy verified: ${name}:${path}"
-      return 0
+      ok=1; break
     fi
     attempt=$((attempt + 1))
     if [ "$(date +%s)" -ge "$deadline" ]; then
       echo "acq(msb): warning: ${name}:${path} not observable after copy" \
            "(${attempt} checks); retrying copy once." >&2
-      # One explicit re-copy in case the first was dropped during boot.
       msb copy "$src" "${name}:${path}" >/dev/null 2>&1 || true
-      if msb exec "$name" -u 0 -- sh -c "test -s '$path'" >/dev/null 2>&1; then
-        [ -n "$mode" ] && msb exec "$name" -u 0 -- sh -c "chmod $mode '$path'" >/dev/null 2>&1 || true
-        return 0
-      fi
-      return 1
+      msb exec "$name" -u 0 -- sh -c "test -s '$path'" >/dev/null 2>&1 && ok=1
+      break
     fi
     sleep 1
   done
+  [ "$ok" -eq 1 ] || return 1
+
+  # chmod, then chown files that live under the agent's home so the agent user
+  # (which runs the startup commands) can read/execute them.
+  [ -n "$mode" ] && msb exec "$name" -u 0 -- sh -c "chmod $mode '$path'" >/dev/null 2>&1 || true
+  case "$path" in
+    /home/agent/*)
+      msb exec "$name" -u 0 -- sh -c "chown agent '$path' 2>/dev/null || true" >/dev/null 2>&1 || true
+      ;;
+  esac
+  acq_debug "msb copy verified: ${name}:${path}"
+  return 0
 }
 
 # Parse and execute a kit spec's commands[] against sandbox NAME.
@@ -363,8 +373,23 @@ _acq_msb_exec_command() {
   shift 3
   [ "$#" -gt 0 ] || return 0
 
-  local uflag=()
-  [ -n "$user" ] && uflag=(-u "$user")
+  # The kits express the unprivileged agent as uid "1000" (the sbx agent-template
+  # contract). On a plain OCI base uid 1000 may be a DIFFERENT user (e.g. `node`
+  # in node:22-bookworm), so address our provisioned agent by NAME instead, and
+  # set HOME=/home/agent so `$HOME`-relative kit logic resolves correctly.
+  local uflag=() eflag=()
+  case "$user" in
+    ""|0|root)
+      [ -n "$user" ] && uflag=(-u "$user")
+      ;;
+    1000|agent)
+      uflag=(-u agent)
+      eflag=(-e "HOME=/home/agent")
+      ;;
+    *)
+      uflag=(-u "$user")
+      ;;
+  esac
 
   if [ "$phase" = "install" ]; then
     # Idempotency marker keyed by a hash of the argv. The marker lives under
@@ -377,14 +402,14 @@ _acq_msb_exec_command() {
     if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
       return 0
     fi
-    msb exec "$name" "${uflag[@]}" -- "$@" || {
+    msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" || {
       echo "acq(msb): warning: install command failed for '$name'" >&2
       return 0
     }
     msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
   else
     # initFiles / startup — run every apply (they are written idempotent).
-    msb exec "$name" "${uflag[@]}" -- "$@" || {
+    msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" || {
       echo "acq(msb): warning: ${phase} command failed for '$name'" >&2
     }
   fi
@@ -524,11 +549,73 @@ acq_backend_provision() {
   # unreachable during provision. Missing tools => a clear, actionable warning.
   _acq_msb_check_prereqs "$name"
 
+  # Ensure the `agent` user (uid ACQ_MSB_AGENT_UID) with HOME=/home/agent exists.
+  # The pinned kits stage files under /home/agent and run startup commands as
+  # that user (the sbx agent template guarantees this user). A plain OCI base
+  # (e.g. node:22-bookworm) has no `agent` user, so their `-u 1000` commands ran
+  # as the wrong user against a non-existent home. Create it once, idempotently.
+  _acq_msb_ensure_agent_user "$name"
+
   # Apply each kit's files + commands.
   local kd
   for kd in "${kitdirs[@]}"; do
     _acq_msb_apply_kit_dir "$name" "$kd"
   done
+}
+
+# ---------------------------------------------------------------------------
+# _acq_msb_ensure_agent_user NAME — guarantee the kits' agent/uid-1000 contract
+# ---------------------------------------------------------------------------
+# The neutral kits assume the sbx agent-template contract: a user named `agent`
+# whose HOME is /home/agent, addressable as `-u 1000`. Plain OCI bases don't
+# provide it (node:22-bookworm ships `node` at uid 1000 with HOME=/home/node).
+# Create `agent` with home /home/agent, marker-gated so it runs once. Runs fully
+# offline (useradd/adduser need no network). The uid is configurable but
+# defaults to 1000; if 1000 is already taken by another user (e.g. `node`), we
+# still create `agent` at the next free uid AND ensure the kits' `-u 1000`
+# commands map to it by making `agent` own /home/agent and exporting HOME.
+#
+# The adapter runs kit commands via _acq_msb_exec_command, which translates a
+# kit `user: "1000"` to the agent user (see that function). So the guest only
+# needs: an `agent` user, /home/agent owned by it.
+_acq_msb_ensure_agent_user() {
+  local name="$1"
+  local marker="/var/lib/acq/agent-user-ready"
+  if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  acq_debug "msb: ensuring agent user + /home/agent in $name"
+  # Idempotent, distro-agnostic. If an `agent` user already exists, reuse it.
+  # Otherwise create it: prefer uid 1000, but if that uid is taken, let the tool
+  # pick a free uid (the kits address the user by name via our exec translation,
+  # not strictly by 1000).
+  msb exec "$name" -u 0 -- sh -c '
+    set -e
+    if id agent >/dev/null 2>&1; then
+      :
+    elif command -v useradd >/dev/null 2>&1; then
+      # Debian/Ubuntu/RHEL. Try uid 1000 first; fall back to auto uid.
+      useradd -m -d /home/agent -s /bin/sh -u 1000 agent 2>/dev/null \
+        || useradd -m -d /home/agent -s /bin/sh agent
+    elif command -v adduser >/dev/null 2>&1; then
+      # Alpine/BusyBox.
+      adduser -h /home/agent -s /bin/sh -D -u 1000 agent 2>/dev/null \
+        || adduser -h /home/agent -s /bin/sh -D agent
+    else
+      echo "acq(msb): no useradd/adduser in base image; cannot create agent user" >&2
+      exit 1
+    fi
+    mkdir -p /home/agent
+    chown -R agent:agent /home/agent 2>/dev/null || chown -R agent /home/agent 2>/dev/null || true
+  ' || {
+    echo "acq(msb): warning: could not create the 'agent' user in '$name'." >&2
+    echo "acq(msb):   kit commands that run as the agent user (usai merge, playbook" >&2
+    echo "acq(msb):   clone) may fail. Use an ACQ_MSB_IMAGE that provides an 'agent'" >&2
+    echo "acq(msb):   user with HOME=/home/agent, or a base with useradd/adduser." >&2
+    return 0
+  }
+  msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------

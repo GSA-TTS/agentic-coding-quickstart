@@ -889,12 +889,23 @@ kit vocabulary** with a translation layer. Recorded in
    than a state-preserving in-place add (msb has no `sbx kit add` equivalent;
    it never silently destroys state).
 
-5. **`PATTERNS_KIT_REF` is provisionally pinned to the Part A PR head**
+5. **msb provides the kits' `agent`/uid-1000 + /home/agent contract itself.**
+   The kits assume the sbx agent-template user (`agent`, HOME=/home/agent, run
+   as `-u 1000`). A plain OCI base has no such user (node:22-bookworm ships
+   `node` at uid 1000), which caused the usai `node merge-global-config.mjs`
+   MODULE_NOT_FOUND and the playbook-clone failure (both ran as the wrong
+   user/home). The adapter now creates the `agent` user at provision
+   (idempotent, offline), chowns staged `/home/agent` files to it, and runs
+   uid-1000 kit commands as `agent` with `HOME=/home/agent` (addressed by name,
+   not literal uid). `msb exec`/`copy` persistence itself was verified fine —
+   the failure was the missing user contract, not a copy race.
+
+6. **`PATTERNS_KIT_REF` is provisionally pinned to the Part A PR head**
    (`#221`, pre-merge) with a `TODO` in `common.sh`. Per the handoff §4.1 hard
    gate, the Part B PR stays in draft until this is flipped to the Part A
    merge-commit SHA.
 
-6. **`scripts/verify-backends` live run is deferred.** The script exists
+7. **`scripts/verify-backends` live run is deferred.** The script exists
    (design §9) but the full `acq run … --backend msb` loop cannot run inside a
    sandbox (no nested sandboxes) and needs host virtualization. The msb CLI flag
    shapes were verified against `msb 0.6.6`; the live loop is deferred to a

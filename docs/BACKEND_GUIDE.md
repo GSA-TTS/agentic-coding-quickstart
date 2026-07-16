@@ -176,6 +176,16 @@ ships all four tools and pulls from Docker Hub without auth. Before applying
 kits, the adapter **verifies** the tools are present and warns if any are
 missing (it does not try to install them).
 
+**The `agent` user contract.** The kits stage files under `/home/agent` and run
+their unprivileged commands as an `agent` user (uid 1000) — the contract sbx's
+agent template guarantees. A plain OCI base does not provide this (e.g.
+`node:22-bookworm` has a `node` user at uid 1000 and no `agent`). So at provision
+the msb adapter **creates an `agent` user with `HOME=/home/agent`** (idempotent,
+offline via `useradd`/`adduser`), chowns the staged `/home/agent` files to it,
+and runs the kits' uid-1000 commands as `agent` with `HOME=/home/agent` (it
+addresses the user by name, not by the literal uid 1000, so it works even when
+1000 is already taken). Set `ACQ_MSB_AGENT_UID` to prefer a specific uid.
+
 To use your own image, set `ACQ_MSB_IMAGE` to one that also provides node, git,
 curl, and ca-certificates:
 
