@@ -86,7 +86,12 @@ case "${1:-}" in
   kit)  exit 0 ;;
   settings) exit 0 ;;
   secret)
-    # Log secret invocations (must NOT contain actual keys).
+    # `secret ls` returns the optional fixture (to simulate existing secrets);
+    # everything else is logged (must NOT contain actual key values) and no-ops.
+    if [ "${2:-}" = "ls" ]; then
+      [ -n "${SBX_LS_FIXTURE:-}" ] && [ -f "$SBX_LS_FIXTURE" ] && cat "$SBX_LS_FIXTURE"
+      exit 0
+    fi
     exit 0 ;;
   *) exit 0 ;;
 esac
@@ -326,26 +331,30 @@ cleanup_stubs
 # ===========================================================================
 # 5. acq secret set — acq-owned store + backend feed, scope required
 # ===========================================================================
-# Credentials now live in the acq secret store (secret-store.sh); `acq secret
-# set` writes there AND feeds the active backend's proxy. The sbx feed uses
-# `sbx secret set <service> --force` for built-ins (piped value) and
-# `sbx secret set-custom ...` for custom endpoints (usai). make_stubs points
-# ACQ_SECRET_STORE_DIR at a throwaway file store.
+# Credentials live in the acq secret store (secret-store.sh); `acq secret set`
+# writes there AND feeds the active backend's proxy per the real sbx CLI
+# contract:
+#   - built-in services (github, ...) : value piped to `sbx secret set` (stdin);
+#     acq pre-checks `sbx secret ls` and stops with an rm hint if it exists.
+#   - custom endpoints (usai)         : `sbx secret set-custom` has no stdin, so
+#     non-interactively acq stores in the acq store and prints the exact sbx
+#     command (value never forced onto argv); interactively sbx prompts.
+# make_stubs points ACQ_SECRET_STORE_DIR at a throwaway file store, and the sbx
+# stub's `secret ls` returns empty (absent) so the feed path runs.
 
 # 5a. No scope → error, no sbx call, nothing stored.
 make_stubs
 out=$(ACQ_BACKEND=sbx "$ACQ" secret set usai 2>&1 || true)
 assert_contains "secret: no scope -> error" "$out" "scope required"
 log=$(cat "$CALLS")
-assert_not_contains "secret: no scope -> sbx not called" "$log" "sbx secret"
+assert_not_contains "secret: no scope -> sbx not called" "$log" "sbx secret set"
 cleanup_stubs
 
-# 5b. `-g github` -> built-in feed: `sbx secret set -g github` (value piped, --force)
+# 5b. `-g github` (built-in, absent) -> `sbx secret set -g github` via stdin + stored.
 make_stubs
-(ACQ_SECRET_TEST_VALUE="ghp_x" ACQ_BACKEND=sbx "$ACQ" secret set -g github) >/dev/null 2>/dev/null || true
+(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github) >/dev/null 2>/dev/null || true
 log=$(cat "$CALLS")
 assert_contains "secret: -g github -> sbx secret set -g github" "$log" "sbx secret set -g github"
-# And the value landed in the acq store (global github key).
 if [ -f "$STUBDIR/secrets/acq.github" ]; then
   pass "secret: -g github stored in acq store"
 else
@@ -355,7 +364,7 @@ cleanup_stubs
 
 # 5c. `my-sandbox github` -> built-in feed scoped to sandbox + stored scoped.
 make_stubs
-(ACQ_SECRET_TEST_VALUE="ghp_x" ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox github) >/dev/null 2>/dev/null || true
+(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox github) >/dev/null 2>/dev/null || true
 log=$(cat "$CALLS")
 assert_contains "secret: sandbox github -> sbx secret set my-sandbox" "$log" "sbx secret set my-sandbox github"
 if [ -f "$STUBDIR/secrets/acq.my-sandbox.github" ]; then
@@ -365,15 +374,27 @@ else
 fi
 cleanup_stubs
 
-# 5d. `acq secret set -g usai` -> custom-endpoint feed, global scope + stored.
+# 5d. `-g github` when it ALREADY exists -> stop with rm hint, no set call.
 make_stubs
-(
-  ACQ_SECRET_TEST_VALUE="my-usai-key" ACQ_BACKEND=sbx "$ACQ" secret set -g usai
-) >/dev/null 2>/dev/null || true
+# Make the sbx stub's `secret ls` report github present.
+printf 'github\n' > "$STUBDIR/sbx_ls"
+export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || true)
+unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "secret: -g usai -> sbx secret set-custom -g" "$log" "sbx secret set-custom -g"
-assert_contains "secret: -g usai fills in --host" "$log" "--host api.gsa.usai.gov"
-assert_contains "secret: -g usai fills in --env USAI_API_KEY" "$log" "--env USAI_API_KEY"
+assert_contains "secret: existing github -> rm hint" "$out" "sbx secret rm -g github"
+assert_not_contains "secret: existing github -> no set call" "$log" "sbx secret set -g github"
+cleanup_stubs
+
+# 5e. `-g usai` (custom, non-interactive/piped) -> stored + prints sbx command,
+#     value NEVER on argv, and set-custom is NOT invoked (no stdin support).
+make_stubs
+out=$(printf 'SUPERSECRETVALUE123\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai 2>&1 || true)
+log=$(cat "$CALLS")
+assert_contains "secret: -g usai stored msg" "$out" "stored 'usai' in the acq secret store"
+assert_contains "secret: -g usai prints set-custom cmd" "$out" "sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY"
+assert_not_contains "secret: -g usai value never in argv (stdout)" "$out" "SUPERSECRETVALUE123"
+assert_not_contains "secret: -g usai value never in sbx argv" "$log" "SUPERSECRETVALUE123"
 if [ -f "$STUBDIR/secrets/acq.usai" ]; then
   pass "secret: -g usai stored in acq store"
 else
@@ -381,35 +402,24 @@ else
 fi
 cleanup_stubs
 
-# 5e. `acq secret set my-sandbox usai` -> custom form, sandbox scope.
+# 5f. `my-sandbox usai` (custom, piped) -> stored scoped + prints sandbox-scoped cmd.
 make_stubs
-(
-  ACQ_SECRET_TEST_VALUE="my-usai-key" ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox usai
-) >/dev/null 2>/dev/null || true
-log=$(cat "$CALLS")
-assert_contains "secret: sandbox usai -> sbx secret set-custom my-sandbox" "$log" "sbx secret set-custom my-sandbox"
-assert_contains "secret: sandbox usai fills in --host" "$log" "--host api.gsa.usai.gov"
+out=$(printf 'k\n' | ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox usai 2>&1 || true)
+assert_contains "secret: sandbox usai prints set-custom my-sandbox" "$out" "sbx secret set-custom my-sandbox --host api.gsa.usai.gov"
+if [ -f "$STUBDIR/secrets/acq.my-sandbox.usai" ]; then
+  pass "secret: sandbox usai stored scoped in acq store"
+else
+  fail "secret: sandbox usai stored scoped in acq store" "acq.my-sandbox.usai not found"
+fi
 cleanup_stubs
 
-# 5f. Custom service with explicit --host/--env -> set-custom + stored.
+# 5g. Custom usai on the MSB backend (piped) -> stored, msb binds at provision,
+#     NO sbx set-custom command printed (msb reads the acq store directly).
 make_stubs
-(
-  ACQ_SECRET_TEST_VALUE="my-custom-key" ACQ_BACKEND=sbx "$ACQ" secret set -g custom-svc --host h.example.com --env MY_KEY
-) >/dev/null 2>/dev/null || true
-log=$(cat "$CALLS")
-assert_contains "secret: -g custom -> set-custom -g" "$log" "sbx secret set-custom -g"
-assert_contains "secret: -g custom --host value" "$log" "--host h.example.com"
-assert_contains "secret: -g custom --env value" "$log" "--env MY_KEY"
-cleanup_stubs
-
-# 5g. Value NEVER appears in argv (piped to sbx). Assert the secret value is not
-#     present anywhere in the recorded sbx call log.
-make_stubs
-(
-  ACQ_SECRET_TEST_VALUE="SUPERSECRETVALUE123" ACQ_BACKEND=sbx "$ACQ" secret set -g usai
-) >/dev/null 2>/dev/null || true
-log=$(cat "$CALLS")
-assert_not_contains "secret: value never in argv" "$log" "SUPERSECRETVALUE123"
+out=$(printf 'k\n' | ACQ_BACKEND=msb "$ACQ" secret set -g usai 2>&1 || true)
+assert_contains "secret(msb): usai stored" "$out" "acq secret store"
+assert_contains "secret(msb): usai mentions --secret binding" "$out" "USAI_API_KEY@api.gsa.usai.gov"
+assert_not_contains "secret(msb): usai does not print sbx set-custom" "$out" "sbx secret set-custom"
 cleanup_stubs
 
 # ===========================================================================

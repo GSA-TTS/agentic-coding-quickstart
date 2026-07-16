@@ -209,15 +209,34 @@ At `acq run`/`create`, the **msb** backend reads the value from the store,
 exports it into a transient host env var, and binds it with
 `msb --secret ENV@HOST` — so it is swapped in on the wire and **never enters the
 guest** and **never appears in argv**. USAi binds to `api.gsa.usai.gov`; GitHub
-binds to `github.com` and `api.github.com`. The **sbx** backend feeds the same
-stored value into the sbx proxy (`sbx secret set`/`set-custom`, piped via
-stdin). This is the bash subset of the design's §7.5 unified secret model; the
-full Go/keychain MITM component (age fallback, `CredentialRewriteRule`,
+binds to `github.com` and `api.github.com`.
+
+Feeding the **sbx** proxy depends on the sbx secret type (per the sbx CLI):
+
+- **Built-in services** (`github`, `anthropic`, …): the value is piped to
+  `sbx secret set <service>` on **stdin** (never argv). If the secret already
+  exists, `acq` stops and prints the exact `sbx secret rm …` command rather than
+  answering sbx's overwrite prompt.
+- **Custom endpoints** (`usai` and any `--host/--env` service): `sbx secret
+  set-custom` has **no stdin input** — the value would have to go on argv via
+  `--value` (visible in shell history), which violates the no-argv rule. So
+  `acq` stores the value in the acq store and then, from a **terminal**, runs
+  `sbx secret set-custom` interactively so you enter it once at sbx's own
+  prompt. When piped non-interactively (or on the msb backend), `acq` stores the
+  value and prints the exact `sbx secret set-custom …` command for you to run.
+  (On msb no sbx step is needed — msb reads the acq store directly.)
+
+This is the bash subset of the design's §7.5 unified secret model; the full
+Go/keychain MITM component (age fallback, `CredentialRewriteRule`,
 swap-on-access placeholders) remains a larger future effort tracked separately.
 
 > **Migration:** if you previously stored the USAi key with `sbx secret …`, run
 > `acq secret set -g usai` once to move it into the acq store (the value is
 > re-prompted). A future `acq secret import` will automate this.
+>
+> **Overwriting:** `acq secret set` is non-destructive toward sbx — if sbx
+> already holds the secret it stops with an `sbx secret rm …` hint rather than
+> silently replacing it. The acq store copy is always updated.
 
 ### Capability flags
 

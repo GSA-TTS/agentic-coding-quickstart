@@ -77,7 +77,14 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   `secret-tool`) with a `0600` file fallback. `acq secret set` writes here; both
   adapters read from here at provision. Trust hygiene per §7.5: the value is
   read from TTY/stdin (never argv), never serialized into kit specs/config/logs,
-  and file entries are `0600`. The full Go/`go-keyring`/`age`/MITM
+  and file entries are `0600`. Feeding each backend's runtime respects the real
+  CLI contract: sbx built-in services take the value on **stdin**
+  (`sbx secret set`), while sbx **custom endpoints** (`set-custom`) have no stdin
+  and would require `--value` on argv — so acq runs `set-custom` interactively
+  (sbx prompts) from a terminal, or (piped/non-interactive) stores the value and
+  prints the exact command instead of exposing it on argv. `acq secret set` is
+  non-destructive: if sbx already holds the secret it stops with an
+  `sbx secret rm …` hint. The full Go/`go-keyring`/`age`/MITM
   `CredentialRewriteRule` component of §7.5 remains a larger future effort.
 
 - **`acq.backends/msb.sh`** — the microsandbox adapter implementing the full

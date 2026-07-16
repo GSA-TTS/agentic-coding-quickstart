@@ -605,24 +605,89 @@ acq_backend_secret_set() {
   fi
 
   # --- Step 2: feed sbx's proxy from the acq store so sbx does the injection. --
-  # sbx's runtime still needs the value in its own proxy config to rewrite
-  # outbound requests; we pipe it from the acq store via stdin (never argv).
-  local secret_value
-  secret_value=$(acq_secret_resolve "$service" "$acq_sandbox" 2>/dev/null || true)
-  if [ -z "$secret_value" ]; then
-    echo "acq: warning: stored '$service' but could not read it back to feed sbx." >&2
+  # sbx's runtime needs the value in its own proxy config to rewrite outbound
+  # requests. Per the sbx CLI contract (verified against sbx 0.35.x):
+  #   - `sbx secret set <service>` (built-ins: github, anthropic, ...) reads the
+  #     value from STDIN. It has no stdin --force; if the secret already exists
+  #     it prompts "Overwrite? (y/N)" — which would consume our piped value as
+  #     the answer. So we PRE-CHECK existence and stop with an rm hint rather
+  #     than piping into a prompt.
+  #   - `sbx secret set-custom` (usai and other custom hosts) does NOT read
+  #     stdin; the value comes via --value/--token (argv-visible) and there is
+  #     no --force (it errors on "already exists"). To avoid putting the secret
+  #     on argv AND to avoid the already-exists error, we DO NOT pass --value.
+  #     Instead we detect an existing entry and, if absent, run set-custom
+  #     interactively so sbx collects the value at its own prompt.
+  #
+  # In all cases the real value is already safely in the acq store; sbx is just
+  # the injection runtime. We never place the value on argv.
+  local exit_code=0
+  local is_builtin=0
+  case "$_ACQ_SBX_BUILTIN_SERVICES" in
+    *" $service "*) is_builtin=1 ;;
+  esac
+
+  # Existence pre-check (idempotency): sbx errors/prompts if the secret exists.
+  # We list and match by service (built-in) or env var (custom). If present,
+  # stop with a precise rm hint (non-destructive per project decision).
+  local scope_desc rm_scope
+  if [ -n "$scope_flag" ]; then scope_desc="global"; rm_scope="-g"; else scope_desc="sandbox '$scope_name'"; rm_scope="$scope_name"; fi
+
+  if _acq_sbx_secret_exists "$scope_flag" "$scope_name" "$service" "$env_var"; then
+    echo "acq: stored '$service' in the acq secret store, but sbx already has a" >&2
+    echo "     secret for it in ${scope_desc}. sbx won't overwrite non-interactively." >&2
+    echo "     Remove the existing sbx secret, then re-run to re-feed the proxy:" >&2
+    echo "       sbx secret ls" >&2
+    if [ "$is_builtin" -eq 1 ]; then
+      echo "       sbx secret rm ${rm_scope} ${service}" >&2
+    else
+      echo "       sbx secret rm ${rm_scope} <placeholder-for-${env_var}>" >&2
+    fi
+    if [ -n "$scope_flag" ]; then
+      echo "       acq secret set -g ${service}" >&2
+    else
+      echo "       acq secret set ${scope_name} ${service}" >&2
+    fi
     return 1
   fi
 
-  local exit_code=0
-  if [ -n "$host" ] || [ -n "$env_var" ]; then
-    # Custom-endpoint form: sbx secret set-custom, value piped on stdin.
+  if [ "$is_builtin" -eq 1 ]; then
+    # Built-in service: value on STDIN (sbx's documented non-interactive form).
+    local secret_value builtin_scope_args=()
+    secret_value=$(acq_secret_resolve "$service" "$acq_sandbox" 2>/dev/null || true)
+    if [ -z "$secret_value" ]; then
+      echo "acq: warning: stored '$service' but could not read it back to feed sbx." >&2
+      return 1
+    fi
+    if [ -n "$scope_flag" ]; then builtin_scope_args+=("$scope_flag"); else builtin_scope_args+=("$scope_name"); fi
+    printf '%s\n' "$secret_value" | sbx secret set "${builtin_scope_args[@]}" "$service"
+    exit_code=$?
+    secret_value=""
+  else
+    # Custom endpoint (usai, ...): set-custom has no stdin/--force. The value
+    # can only reach sbx via --value (argv-visible) — which violates the "never
+    # in argv" rule — or via sbx's own interactive prompt. We choose:
+    #   - interactive stdin (a TTY): run set-custom so sbx prompts once. The acq
+    #     store already holds the canonical value; we do not echo it on argv.
+    #   - piped stdin (no TTY, e.g. `printf ... | acq secret set -g usai`): sbx
+    #     set-custom cannot read the piped value and would block on its prompt.
+    #     Rather than hang or expose the value on argv, store in the acq store
+    #     and tell the user the one manual sbx command to run. (The acq store is
+    #     the source of truth; msb reads it directly with no sbx step.)
+    if [ -z "$host" ] && [ -z "$env_var" ]; then
+      echo "acq: '$service' has no host/env mapping and is not a built-in sbx service." >&2
+      echo "     Provide --host HOST --env ENV, or use a known service (usai, github, ...)." >&2
+      return 1
+    fi
     local cmd_args=("secret" "set-custom")
     if [ -n "$scope_flag" ]; then cmd_args+=("$scope_flag"); else cmd_args+=("$scope_name"); fi
-    cmd_args+=("--host" "${host:-}" "--env" "${env_var:-}")
-    # For a multi-host service (e.g. github.com,api.github.com) sbx set-custom
-    # takes one --host; the primary was chosen above. Additional hosts are
-    # covered by the sbx built-in service path when applicable.
+    local svc_hosts h
+    svc_hosts=$(_acq_service_hosts_env "$service" | cut -f1)
+    [ -z "$svc_hosts" ] && svc_hosts="$host"
+    local _oldifs="$IFS"; IFS=','
+    for h in $svc_hosts; do [ -n "$h" ] && cmd_args+=("--host" "$h"); done
+    IFS="$_oldifs"
+    cmd_args+=("--env" "${env_var:-}")
     local skip_next=0 arg
     for arg in "${extra_flags[@]+"${extra_flags[@]}"}"; do
       if [ "$skip_next" -eq 1 ]; then skip_next=0; continue; fi
@@ -632,40 +697,55 @@ acq_backend_secret_set() {
         *) cmd_args+=("$arg") ;;
       esac
     done
-    printf '%s\n' "$secret_value" | sbx "${cmd_args[@]}"
-    exit_code=$?
-  else
-    # Built-in service form (github, anthropic, ...): value piped on stdin.
-    case "$_ACQ_SBX_BUILTIN_SERVICES" in
-      *" $service "*)
-        local builtin_scope_args=()
-        if [ -n "$scope_flag" ]; then builtin_scope_args+=("$scope_flag"); else builtin_scope_args+=("$scope_name"); fi
-        printf '%s\n' "$secret_value" | sbx secret set "${builtin_scope_args[@]}" "$service" --force 2>/dev/null \
-          || printf '%s\n' "$secret_value" | sbx secret set "${builtin_scope_args[@]}" "$service"
-        exit_code=$?
-        ;;
-      *)
-        echo "acq: '$service' has no host/env mapping and is not a built-in sbx service." >&2
-        echo "     Provide --host HOST --env ENV, or use a known service (usai, github, ...)." >&2
-        secret_value=""
-        return 1
-        ;;
-    esac
+
+    if [ -t 0 ] && [ -z "${ACQ_SECRET_TEST_VALUE:-}" ]; then
+      # Interactive TTY: let sbx prompt for the value once.
+      echo "acq: now configuring sbx's injector for '$service' — enter the SAME value" >&2
+      echo "     at sbx's prompt (already saved in the acq secret store):" >&2
+      sbx "${cmd_args[@]}"
+      exit_code=$?
+    else
+      # Non-interactive (piped) or test: cannot feed sbx set-custom without argv
+      # exposure. Value is safely in the acq store; print the exact sbx command.
+      echo "acq: stored '$service' in the acq secret store." >&2
+      if [ "${ACQ_BACKEND:-}" = "msb" ] || [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ]; then
+        : # msb reads the acq store directly at provision; no sbx step needed.
+      else
+        echo "acq: to configure the sbx injector for a CUSTOM endpoint non-interactively," >&2
+        echo "     sbx requires the value on the command line (visible in shell history):" >&2
+        echo "       sbx ${cmd_args[*]} --value <the-secret>" >&2
+        echo "     Or run 'acq secret set ${scope_flag:-$scope_name} ${service}' from a terminal" >&2
+        echo "     to enter it at sbx's own prompt." >&2
+      fi
+      exit_code=0
+    fi
   fi
-  secret_value=""
 
   if [ "$exit_code" -ne 0 ]; then
     echo "" >&2
-    echo "acq: the value was stored in the acq secret store, but feeding the sbx" >&2
-    echo "     proxy failed. If the error is 'already exists', remove it and retry:" >&2
-    echo "       sbx secret ls" >&2
-    if [ -n "$scope_flag" ]; then
-      echo "       sbx secret rm -g <placeholder> && acq secret set -g ${service}" >&2
-    else
-      echo "       sbx secret rm ${scope_name} <placeholder> && acq secret set ${scope_name} ${service}" >&2
-    fi
+    echo "acq: value stored in the acq secret store, but feeding the sbx proxy failed." >&2
+    echo "     If sbx says 'already exists', remove it and retry:" >&2
+    echo "       sbx secret ls && sbx secret rm ${rm_scope} <placeholder>" >&2
   fi
   return "$exit_code"
+}
+
+# ---------------------------------------------------------------------------
+# _acq_sbx_secret_exists SCOPE_FLAG SCOPE_NAME SERVICE ENV_VAR -> 0 if present
+# ---------------------------------------------------------------------------
+# Best-effort existence check against `sbx secret ls`. Built-in services show
+# their service name; custom secrets show the env var name. Returns 0 (exists)
+# only on a confident match; on any listing failure, returns 1 (treat as absent)
+# so we don't block the user — sbx will still error clearly if it does exist.
+_acq_sbx_secret_exists() {
+  local scope_flag="$1" scope_name="$2" service="$3" env_var="$4"
+  local listing needle
+  listing=$(sbx secret ls 2>/dev/null) || return 1
+  if [ -n "$env_var" ]; then needle="$env_var"; else needle="$service"; fi
+  case "$listing" in
+    *"$needle"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
