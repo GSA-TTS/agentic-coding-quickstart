@@ -184,7 +184,9 @@ allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
 ## Consequences
 
 - **Better:** one neutral kit vocabulary; msb reuses the same four kits; adding
-  `ppp` (Phase 3) is again additive. Kit authoring is backend-agnostic.
+  `ppp` (Phase 3, in development at
+  [GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)) is again additive. Kit authoring
+  is backend-agnostic.
 - **Tradeoff:** the sbx path gained a translation step. Mitigated by carrying
   payloads verbatim and asserting the synthesized sbx-v2 output in `test-acq`;
   the observable sbx result is unchanged.

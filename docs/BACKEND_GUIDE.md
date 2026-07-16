@@ -23,7 +23,7 @@ translated to each backend's native mechanism (see
 |---------|---------|--------|-------------|
 | **sbx** | 1.1.0 | Shipped | Docker-based sbx CLI from Docker Inc |
 | **msb** | 1.2.0 | Shipped | microsandbox — lightweight microVM isolation (FOSS) |
-| **ppp** | Deferred | Not scheduled | Podman-Plus-Proxy backend |
+| **ppp** | Phase 3 | In development | Podman-Plus-Proxy backend ([GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)) |
 
 ---
 
@@ -346,10 +346,15 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 
 ---
 
-## ppp Backend (deferred)
+## ppp Backend (Phase 3, in development)
 
-The Podman-Plus-Proxy (ppp) backend is on hold — planned but not scheduled.
-See `docs/explorations/` for the design notes when available.
+The Podman-Plus-Proxy (ppp) backend is being developed in
+[GSA-TTS/ppp](https://github.com/GSA-TTS/ppp) and is targeted for Phase 3 — it
+is not part of this release. When it lands, it will implement the same adapter
+contract ([ADR-0010](adr/0010-acq-pluggable-backends.md)) and consume the same
+neutral `hybrid/v1` kits via `kit-translate.sh`, so adding it is additive (a new
+`acq.backends/ppp.sh` + a detection branch), with no change to the sbx or msb
+paths. See `docs/explorations/acq-design.md` §"ppp" for the intended mapping.
 
 ---
 
@@ -434,8 +439,10 @@ Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 
 ## Still deferred
 
-- Full unified swap-on-access secret model across backends (msb uses its native
-  host-env `--secret` binding for now)
+- Full Go/keychain swap-on-access secret component of design §7.5 (age fallback,
+  `CredentialRewriteRule`); acq ships the bash keychain subset (see Secrets)
+- msb private-repo git auth ([quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203))
 - `acq policy …` — network policy subcommands
-- `ppp` (Podman-Plus-Proxy) backend
+- `ppp` (Podman-Plus-Proxy) backend — Phase 3, in development at
+  [GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)
 - Removal of `qsbx` (Phase 4 / 2.0.0)
