@@ -54,22 +54,29 @@ MIN_MSB_VERSION="0.6.0"
 
 # Default OCI image for provisioned sandboxes. Unlike sbx (whose templates
 # supply the agent image), msb runs a plain OCI image and acq layers the kits on
-# top. The default is a public Debian slim base — pullable without registry auth
-# — and the adapter installs the kits' prerequisites (node, git, curl,
-# ca-certificates) into it via a marker-gated install step (see
-# _acq_msb_bootstrap_base). Override with ACQ_MSB_IMAGE to bring your own image
-# (e.g. one that already bakes in node/git for faster starts).
-ACQ_MSB_IMAGE="${ACQ_MSB_IMAGE:-docker.io/library/debian:stable-slim}"
+# top. The default is the public `node:22-bookworm` image — it is built on
+# buildpack-deps:bookworm-scm, so it ALREADY ships node, git, curl, and
+# ca-certificates (exactly the four kits' runtime prerequisites), and it is
+# pullable from Docker Hub without registry auth.
+#
+# We deliberately do NOT apt-install prerequisites at runtime: the kit net-rules
+# lock egress to only the kits' own hosts (api.gsa.usai.gov, github.com, ...),
+# so a package mirror (deb.debian.org) is unreachable during provision. Baking
+# the tools into the base image avoids both the egress hole and the runtime
+# install. Override with ACQ_MSB_IMAGE to bring your own (e.g. a lighter or
+# org-internal image) — see the prerequisite contract below.
+ACQ_MSB_IMAGE="${ACQ_MSB_IMAGE:-docker.io/library/node:22-bookworm}"
 
-# Prerequisite packages the pinned four kits need at runtime:
+# Prerequisite tools the pinned four kits need at runtime, expected to be
+# PRESENT IN THE BASE IMAGE (the default node:22-bookworm provides all four):
 #   node          — usai-provider merge-global-config.mjs
 #   git           — agentic-coding-playbook clone + git-ssh-sign
 #   curl          — health/verification checks
-#   ca-certificates + update-ca-certificates — zscaler-ca-certificate
-# Installed once per sandbox (marker-gated) before kits are applied, unless the
-# image already provides them. Override the whole step with ACQ_MSB_SKIP_BOOTSTRAP=1
-# when your ACQ_MSB_IMAGE already bakes these in.
-ACQ_MSB_SKIP_BOOTSTRAP="${ACQ_MSB_SKIP_BOOTSTRAP:-}"
+#   update-ca-certificates — zscaler-ca-certificate trust rebuild
+# Before applying kits, the adapter VERIFIES these are present and warns if not
+# (it does NOT install them — see the note above about locked egress). Set
+# ACQ_MSB_SKIP_PREREQ_CHECK=1 to skip the check entirely.
+ACQ_MSB_SKIP_PREREQ_CHECK="${ACQ_MSB_SKIP_PREREQ_CHECK:-}"
 
 # Where fetched neutral kits are materialized for this run (msb has no native
 # kit mechanism, so acq drives the parsed operations itself).
@@ -404,10 +411,11 @@ acq_backend_provision() {
     return 1
   fi
 
-  # Install the kits' runtime prerequisites into the base image (node, git,
-  # curl, ca-certificates), once per sandbox, before applying kits. Skipped when
-  # ACQ_MSB_SKIP_BOOTSTRAP is set (image already provides them).
-  _acq_msb_bootstrap_base "$name"
+  # Verify the kits' runtime prerequisites are present in the base image
+  # (node/git/curl/update-ca-certificates). We do NOT install them: the kit
+  # net-rules lock egress to the kits' own hosts, so a package mirror is
+  # unreachable during provision. Missing tools => a clear, actionable warning.
+  _acq_msb_check_prereqs "$name"
 
   # Apply each kit's files + commands.
   local kd
@@ -417,52 +425,36 @@ acq_backend_provision() {
 }
 
 # ---------------------------------------------------------------------------
-# _acq_msb_bootstrap_base NAME — install kit prerequisites into a bare base image
+# _acq_msb_check_prereqs NAME — verify kit prerequisites are in the base image
 # ---------------------------------------------------------------------------
-# The pinned kits assume node/git/curl/ca-certificates exist in the guest (sbx's
-# agent templates bake these in; a plain OCI base like debian:stable-slim does
-# not). Install them once per sandbox, marker-gated, detecting the package
-# manager (apt or apk). Best-effort: a failure warns but does not abort — the
-# per-kit commands will surface a clearer error if a specific tool is still
-# missing. Skip entirely with ACQ_MSB_SKIP_BOOTSTRAP=1.
-_acq_msb_bootstrap_base() {
+# The pinned kits assume node/git/curl/update-ca-certificates exist in the guest.
+# The default ACQ_MSB_IMAGE (node:22-bookworm) provides all four. If a custom
+# ACQ_MSB_IMAGE lacks one, warn clearly rather than fail silently later — we do
+# NOT apt-install (egress is locked to kit hosts). Skip with
+# ACQ_MSB_SKIP_PREREQ_CHECK=1.
+_acq_msb_check_prereqs() {
   local name="$1"
-  [ -z "$ACQ_MSB_SKIP_BOOTSTRAP" ] || return 0
+  [ -z "$ACQ_MSB_SKIP_PREREQ_CHECK" ] || return 0
 
-  local marker="/var/lib/acq/bootstrap-prereqs"
-  if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  acq_debug "msb bootstrap: installing node/git/curl/ca-certificates into $name"
-  # Idempotent, package-manager-agnostic install. Only installs what's missing.
-  msb exec "$name" -u 0 -- sh -c '
-    set -e
-    need=""
+  local missing
+  missing=$(msb exec "$name" -- sh -c '
+    m=""
     for t in node git curl update-ca-certificates; do
-      command -v "$t" >/dev/null 2>&1 || need="$need $t"
+      command -v "$t" >/dev/null 2>&1 || m="$m $t"
     done
-    [ -z "$need" ] && exit 0
-    if command -v apt-get >/dev/null 2>&1; then
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -qq
-      apt-get install -y --no-install-recommends nodejs git curl ca-certificates
-      update-ca-certificates || true
-    elif command -v apk >/dev/null 2>&1; then
-      apk add --no-cache nodejs git curl ca-certificates
-      update-ca-certificates || true
-    else
-      echo "acq(msb): no supported package manager (apt/apk) in base image;" >&2
-      echo "          set ACQ_MSB_IMAGE to an image with node/git/curl preinstalled." >&2
-      exit 1
-    fi
-  ' || {
-    echo "acq(msb): warning: base-image prerequisite bootstrap failed for '$name'." >&2
-    echo "acq(msb):   kits needing node/git/curl may not fully apply. Consider setting" >&2
-    echo "acq(msb):   ACQ_MSB_IMAGE to an image that preinstalls them." >&2
-    return 0
-  }
-  msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+    printf "%s" "$m"
+  ' 2>/dev/null | tr -d '\r')
+
+  if [ -n "$missing" ]; then
+    echo "acq(msb): warning: base image is missing kit prerequisite(s):${missing}." >&2
+    echo "acq(msb):   The pinned kits need node, git, curl, update-ca-certificates." >&2
+    echo "acq(msb):   The default image (node:22-bookworm) provides them; a custom" >&2
+    echo "acq(msb):   ACQ_MSB_IMAGE must too (these are NOT installed at runtime because" >&2
+    echo "acq(msb):   kit net-rules lock egress to the kits' hosts). Affected kits may" >&2
+    echo "acq(msb):   not fully apply. Set ACQ_MSB_SKIP_PREREQ_CHECK=1 to silence." >&2
+  else
+    acq_debug "msb prereqs present (node/git/curl/update-ca-certificates) in $name"
+  fi
 }
 
 # ---------------------------------------------------------------------------

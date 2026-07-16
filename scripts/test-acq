@@ -735,6 +735,43 @@ assert_contains "msb: net-rule strips :port to domain=" "$nr_out" "allow@domain=
 assert_not_contains "msb: net-rule avoids ambiguous domain: form" "$nr_out" "allow@domain:"
 cleanup_stubs
 
+# 10c. msb prerequisite check: warns when the base image lacks a kit tool, and
+#      is silent when all are present / when ACQ_MSB_SKIP_PREREQ_CHECK is set.
+#      (Uses a dedicated msb stub whose `command -v` loop reports the missing set.)
+make_stubs; load_acq
+PQSTUB="$STUBDIR/pq"; mkdir -p "$PQSTUB"
+cat >"$PQSTUB/msb" <<'PQ'
+#!/usr/bin/env bash
+snip=""; prev=""; for a in "$@"; do [ "$prev" = "-c" ] && { snip="$a"; break; }; prev="$a"; done
+case "$1" in --version) echo "msb 0.6.6"; exit 0;; esac
+# The prereq check runs a snippet containing "command -v"; emit MSB_MISSING.
+case "$snip" in *"command -v"*) printf '%s' "${MSB_MISSING:-}"; exit 0;; esac
+exit 0
+PQ
+chmod +x "$PQSTUB/msb"
+missing_out=$(
+  export ACQ_SCRIPT_DIR="$REPO_ROOT"; . "${REPO_ROOT}/acq.backends/common.sh"
+  export PATH="$PQSTUB:$PATH" MSB_MISSING=" node git"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_check_prereqs testbox 2>&1
+)
+assert_contains "msb: prereq check warns on missing tools" "$missing_out" "missing kit prerequisite"
+present_out=$(
+  export ACQ_SCRIPT_DIR="$REPO_ROOT"; . "${REPO_ROOT}/acq.backends/common.sh"
+  export PATH="$PQSTUB:$PATH" MSB_MISSING=""
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_check_prereqs testbox 2>&1
+)
+assert_not_contains "msb: prereq check silent when all present" "$present_out" "missing kit prerequisite"
+skip_out=$(
+  export ACQ_SCRIPT_DIR="$REPO_ROOT"; . "${REPO_ROOT}/acq.backends/common.sh"
+  export PATH="$PQSTUB:$PATH" MSB_MISSING=" node" ACQ_MSB_SKIP_PREREQ_CHECK=1
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_check_prereqs testbox 2>&1
+)
+assert_not_contains "msb: prereq check honors SKIP flag" "$skip_out" "missing kit prerequisite"
+cleanup_stubs
+
 # ===========================================================================
 echo ""
 echo "  passed: $PASS   failed: $FAIL"

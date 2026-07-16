@@ -156,26 +156,32 @@ Tunables:
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `ACQ_MSB_IMAGE` | `docker.io/library/debian:stable-slim` | Base OCI image for provisioned sandboxes (must be pullable) |
-| `ACQ_MSB_SKIP_BOOTSTRAP` | (unset) | Skip the prerequisite install step (set when your image already bakes in node/git/curl/ca-certificates) |
+| `ACQ_MSB_IMAGE` | `docker.io/library/node:22-bookworm` | Base OCI image (must be pullable and ship node/git/curl/ca-certificates) |
+| `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
 | `ACQ_MSB_KIT_CACHE` | `$XDG_CACHE_HOME/acq/kits` | where fetched neutral kits are materialized |
 
 ### Base image and prerequisites
 
 Unlike sbx (whose agent templates supply the image), the msb backend runs a
-**plain OCI image** and layers the kits on top. The default is a public
-`debian:stable-slim` (pullable without registry auth). The four pinned kits need
+**plain OCI image** and layers the kits on top. The four pinned kits need
 `node` (usai merge), `git` (playbook clone + signing), `curl`, and
-`ca-certificates`/`update-ca-certificates` (zscaler). The adapter installs these
-once per sandbox (marker-gated, apt/apk auto-detected) **before** applying kits.
+`ca-certificates`/`update-ca-certificates` (zscaler) **already present in the
+base image**.
 
-To use your own image — e.g. one that bakes in node/git for faster starts —
-set `ACQ_MSB_IMAGE` and, if it already has the prerequisites,
-`ACQ_MSB_SKIP_BOOTSTRAP=1`:
+These are **not** installed at runtime: the kit network rules lock egress to the
+kits' own hosts (`api.gsa.usai.gov`, `github.com`, `codeload.github.com`), so a
+package mirror like `deb.debian.org` is unreachable during provision. The
+default `node:22-bookworm` image (built on `buildpack-deps:bookworm-scm`) already
+ships all four tools and pulls from Docker Hub without auth. Before applying
+kits, the adapter **verifies** the tools are present and warns if any are
+missing (it does not try to install them).
+
+To use your own image, set `ACQ_MSB_IMAGE` to one that also provides node, git,
+curl, and ca-certificates:
 
 ```bash
-export ACQ_MSB_IMAGE=ghcr.io/your-org/agent-base:latest
-export ACQ_MSB_SKIP_BOOTSTRAP=1
+export ACQ_MSB_IMAGE=ghcr.io/your-org/agent-base:latest   # must have node/git/curl/ca-certificates
+# ACQ_MSB_SKIP_PREREQ_CHECK=1   # optional: silence the presence check
 ```
 
 If the image requires registry auth, log in with your container tooling (e.g.

@@ -77,10 +77,13 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   phase marker-gated for idempotency); the zscaler `backend_shortcuts.msb`
   → `--trust-host-cas`; the USAi key → `--secret USAI_API_KEY@api.gsa.usai.gov`
   (host-env binding; the real key never enters the guest). Unlike sbx (whose
-  templates supply the image), msb runs a plain OCI image: the default is a
-  public `debian:stable-slim` and the adapter installs the kits' prerequisites
-  (node/git/curl/ca-certificates, apt/apk auto-detected, marker-gated) before
-  applying kits. Override with `ACQ_MSB_IMAGE` + `ACQ_MSB_SKIP_BOOTSTRAP`.
+  templates supply the image), msb runs a plain OCI image: the default is the
+  public `node:22-bookworm` (built on buildpack-deps, so it already ships
+  node/git/curl/ca-certificates — the four kits' prerequisites — and pulls
+  without registry auth). The adapter VERIFIES those tools are present and warns
+  if a custom `ACQ_MSB_IMAGE` lacks them; it deliberately does NOT install them
+  at runtime because the kit net-rules lock egress to the kits' own hosts, so a
+  package mirror is unreachable during provision.
 
 - **sbx-v2 command typing (translation):** sbx types `commands.install[].command`
   as a shell **string** but `commands.startup[]`/`initFiles[]` as an argv
