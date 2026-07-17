@@ -775,6 +775,42 @@ assert_contains "msb: runs first kit command" "$multi_log" "echo CMD_ALPHA"
 assert_contains "msb: runs SECOND kit command (not dropped)" "$multi_log" "echo CMD_BETA"
 cleanup_stubs
 
+# 8o1. environment vocabulary on msb: the kit's environment[] entries are
+#      threaded onto every command as `msb exec -e NAME=value` (msb's native
+#      per-exec env flag), and an unsafe env var NAME is dropped (never reaches
+#      the exec).
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/env-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  ek="${STUBDIR}/envkit"; mkdir -p "$ek"
+  cat >"$ek/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: env-kit
+displayName: Env Kit
+description: environment vars threaded to msb exec
+environment:
+  GITLAB_HOST: gitlab.example.gov
+  "1BAD": should-be-dropped
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - echo CMD_WITH_ENV
+SPEC
+  _acq_msb_apply_kit_dir envbox "$ek"
+)
+env_log=$(cat "$CALLS")
+assert_contains "msb env: threads -e GITLAB_HOST onto exec" "$env_log" "-e GITLAB_HOST=gitlab.example.gov"
+assert_contains "msb env: command still runs with env" "$env_log" "echo CMD_WITH_ENV"
+assert_not_contains "msb env: unsafe env var name dropped" "$env_log" "1BAD"
+cleanup_stubs
+
 # 8o2. SECURITY: a hostile kit `mode` must not reach a root shell. kit_spec_files
 #      drops the record; the msb chmod uses argv (no sh -c interpolation); and
 #      the injected command must never appear in the recorded msb calls.
@@ -874,6 +910,29 @@ SPEC
 assert_contains "kit validate: reports non-octal mode" "$val_out" "mode must be octal"
 assert_contains "kit validate: reports unknown phase" "$val_out" "unknown command phase"
 assert_contains "kit validate: fails (RC=1)" "$val_out" "RC=1"
+cleanup_stubs
+
+# 8o5b. `acq kit validate` REPORTS (not silently drops) a bad environment var
+#       NAME (env values reach the guest env and possibly a shell).
+make_stubs; load_acq
+env_val_out=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  evk="${STUBDIR}/envvalkit"; mkdir -p "$evk"
+  cat >"$evk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: env-val-kit
+displayName: Env Val
+description: bad env var name
+environment:
+  GOOD_VAR: ok
+  "1BAD": nope
+SPEC
+  kit_validate "$evk" 2>&1
+  echo "RC=$?"
+)
+assert_contains "kit validate: reports invalid env var name" "$env_val_out" "invalid env var name"
+assert_contains "kit validate: env-name failure (RC=1)" "$env_val_out" "RC=1"
 cleanup_stubs
 
 # 8p. msb provision passes --dns-nameserver so the guest can resolve allow-listed
@@ -1116,6 +1175,51 @@ shspec=$(cat "$shout/spec.yaml" 2>/dev/null || true)
 sh_startup_block=$(printf '%s\n' "$shspec" | sed -n '/^  startup:/,$p')
 assert_contains "translate: sh -c startup emits argv seq (- sh)" "$sh_startup_block" "        - sh"
 assert_not_contains "translate: sh -c startup is not a bare string" "$sh_startup_block" "command: |"
+cleanup_stubs
+
+# 10a3. environment vocabulary: kit_spec_env parses NAME/value pairs, DROPS an
+#       unsafe env var name (with a stderr warning), and kit_translate_to_sbx
+#       emits an sbx-v2 `environment.variables` block for the valid entries.
+make_stubs; load_acq
+ekit="$STUBDIR/ekit"; mkdir -p "$ekit"
+cat >"$ekit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: env-kit
+displayName: Env Kit
+description: exercises the environment vocabulary
+environment:
+  OPENCODE_CONFIG: /home/agent/usai-config/opencode.jsonc
+  GITLAB_HOST: gitlab.example.gov
+  "1BAD": should-be-dropped
+commands:
+  - phase: startup
+    user: "1000"
+    command:
+      - node
+      - /home/agent/run.mjs
+SPEC
+env_parse=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  kit_spec_env "$ekit/spec.yaml" 2>/dev/null
+)
+assert_contains "env: parses OPENCODE_CONFIG" "$env_parse" "OPENCODE_CONFIG"
+assert_contains "env: parses GITLAB_HOST value" "$env_parse" "gitlab.example.gov"
+env_warn=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  kit_spec_env "$ekit/spec.yaml" 2>&1 >/dev/null
+)
+assert_contains "env: unsafe env var NAME is dropped+warned" "$env_warn" "unsafe name: 1BAD"
+assert_not_contains "env: unsafe env var NAME not emitted" "$env_parse" "1BAD"
+# sbx-v2 synthesis emits environment.variables.
+eout="$STUBDIR/eout"
+( . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  kit_translate_to_sbx "$ekit" "$eout" >/dev/null ) 2>/dev/null
+espec=$(cat "$eout/spec.yaml" 2>/dev/null || true)
+assert_contains "env: sbx-v2 emits environment block" "$espec" "environment:"
+assert_contains "env: sbx-v2 emits variables map" "$espec" "  variables:"
+assert_contains "env: sbx-v2 emits OPENCODE_CONFIG var" "$espec" "OPENCODE_CONFIG: /home/agent/usai-config/opencode.jsonc"
+assert_not_contains "env: sbx-v2 drops unsafe var name" "$espec" "1BAD"
 cleanup_stubs
 
 # 10b. msb net-rule uses the bare-FQDN target form `allow@HOST` (matching msb's

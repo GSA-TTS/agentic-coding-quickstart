@@ -328,7 +328,10 @@ EOF
   # 2) Run commands[]. Reassemble each argv record and exec it as the given uid.
   #    install → run once (idempotent, marker-gated); initFiles/startup → every
   #    apply. msb has no create-time-only hook, so install collapses to a
-  #    marker-gated exec (design §3 lifecycle table).
+  #    marker-gated exec (design §3 lifecycle table). The kit's environment[]
+  #    entries are threaded onto every command as `msb exec -e NAME=value` (msb's
+  #    native per-exec env flag), so the kit's declared guest env is present when
+  #    its lifecycle commands run.
   _acq_msb_run_commands "$name" "$spec"
 }
 
@@ -407,6 +410,22 @@ _acq_msb_copy_file_verified() {
 _acq_msb_run_commands() {
   local name="$1" spec="$2"
 
+  # Collect the kit's environment[] entries as `NAME=value` argv-ready tokens,
+  # threaded onto every command's `msb exec` as `-e NAME=value`. kit_spec_env
+  # already validates each NAME (^[A-Za-z_][A-Za-z0-9_]*$) and drops unsafe ones,
+  # so these are safe to pass as exec env. Values are passed as a single argv
+  # element (never re-split by a shell).
+  local _kit_env=() eline ekey eval
+  while IFS= read -r eline; do
+    [ -n "$eline" ] || continue
+    ekey=$(printf '%s' "$eline" | cut -f1)
+    eval=$(printf '%s' "$eline" | cut -f2-)
+    [ -n "$ekey" ] || continue
+    _kit_env+=("${ekey}=${eval}")
+  done <<EOF
+$(kit_spec_env "$spec")
+EOF
+
   # Buffer the parsed command stream FIRST, then execute. The exec step calls
   # `msb exec`, which would consume this loop's stdin if we iterated the heredoc
   # directly — dropping every command after the first (same class of bug as the
@@ -431,7 +450,8 @@ EOF
         ;;
       "__END__")
         reading=0
-        _acq_msb_exec_command "$name" "$phase" "$user" ${argv[@]+"${argv[@]}"}
+        _acq_msb_exec_command "$name" "$phase" "$user" \
+          ${_kit_env[@]+"${_kit_env[@]}"} -- ${argv[@]+"${argv[@]}"}
         ;;
       *)
         if [ "$reading" -eq 1 ]; then
@@ -446,9 +466,23 @@ EOF
 
 # Execute one command record. install-phase commands are gated by a per-command
 # marker file so they run once per sandbox even across re-applies.
+#
+# Args: NAME PHASE USER [NAME=value ...] -- ARGV...
+# The optional NAME=value tokens before the literal `--` are the kit's
+# environment[] entries; each is threaded to `msb exec` as `-e NAME=value`.
+# kit_spec_env already validated the names, so they are safe to pass here.
 _acq_msb_exec_command() {
   local name="$1" phase="$2" user="$3"
   shift 3
+
+  # Split leading NAME=value env tokens (up to the `--` sentinel) from argv.
+  local _kit_env=() _tok
+  while [ "$#" -gt 0 ]; do
+    _tok="$1"; shift
+    if [ "$_tok" = "--" ]; then break; fi
+    _kit_env+=("$_tok")
+  done
+
   [ "$#" -gt 0 ] || return 0
 
   # The kits express the unprivileged agent as uid "1000" (the sbx agent-template
@@ -468,6 +502,12 @@ _acq_msb_exec_command() {
       uflag=(-u "$user")
       ;;
   esac
+
+  # Append the kit's declared guest env as additional `-e NAME=value` flags.
+  local _ev
+  for _ev in ${_kit_env[@]+"${_kit_env[@]}"}; do
+    eflag+=(-e "$_ev")
+  done
 
   if [ "$phase" = "install" ]; then
     # Idempotency marker keyed by a hash of the argv. The marker lives under

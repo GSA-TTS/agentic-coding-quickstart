@@ -427,6 +427,26 @@ under `integrations/isolation/acq-kits/`) and translated per backend by
   `msb exec`. A `backend_shortcuts.msb` (e.g. zscaler `trust_host_cas`) uses the
   native primitive instead.
 
+The neutral vocabulary is: `caps.network.allow`, `files[]`, `commands[]`,
+`environment`, `agentContext`, `backend_shortcuts`, and `backend_extras`.
+
+**`environment` (guest env vars).** A flat map of `NAME → value` for
+**non-secret** guest environment variables (e.g. `OPENCODE_CONFIG`,
+`OPENCODE_TUI_CONFIG`, `GITLAB_HOST`). Names must be POSIX identifiers
+(`^[A-Za-z_][A-Za-z0-9_]*$`; an invalid name is dropped with a warning and
+reported by `acq kit validate`); values are plain strings. It maps to sbx-v2
+`environment.variables` (synthesized) and to `msb exec -e NAME=value` (per-exec).
+**Secrets do NOT go here** — use the credential/secret path (`acq secret …`);
+the kit spec never carries a secret value.
+
+> **Note (cross-repo, pending):** the authoritative `environment` schema
+> property and its field-level validator live in the patterns repo
+> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`) and land in a
+> separate patterns PR. The translate-layer support here is additive and
+> backward-compatible; `PATTERNS_KIT_REF` stays pinned at the current patterns
+> release (`e387c59`, v1.6.0) and is bumped **only after** that patterns PR
+> merges (fail-closed cross-repo gating — never repoint to an unmerged SHA).
+
 Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 
 ---

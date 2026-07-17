@@ -35,6 +35,7 @@
 #   kit_spec_net_allow   SPEC                -> one host[:port] per line
 #   kit_spec_files       SPEC                -> one "path|mode|phase|source" per line
 #   kit_spec_commands    SPEC                -> command records (see format below)
+#   kit_spec_env         SPEC                -> one "NAME<TAB>value" per line
 #   kit_spec_has_shortcut SPEC BACKEND       -> 0 if backend_shortcuts.<backend>
 #                                               is present AND non-empty
 #   kit_spec_shortcut_val SPEC BACKEND KEY   -> value of a shortcut key
@@ -435,9 +436,52 @@ kit_spec_shortcut_val() {
 }
 
 # ---------------------------------------------------------------------------
-# kit_spec_agent_context SPEC
+# kit_spec_env SPEC
 # ---------------------------------------------------------------------------
-# Echo the agentContext block scalar verbatim (dedented). Empty if absent.
+# Echo each environment[] entry as a tab-separated "NAME<TAB>value" line.
+# The neutral environment block is a flat map of NAME: value (both strings):
+#
+#   environment:
+#     OPENCODE_CONFIG: /home/agent/usai-config/opencode.jsonc
+#     GITLAB_HOST: gitlab.example.gov
+#
+# SECURITY: env var NAMES reach the guest environment and a shell/exec context
+# (sbx-v2 environment.variables and `msb exec -e NAME=value`), so a name is
+# validated against ^[A-Za-z_][A-Za-z0-9_]*$ and a record with an unsafe name is
+# DROPPED with a stderr warning (mirroring the mode/path/user hardening in
+# kit_spec_files/kit_spec_commands). Values are passed through verbatim: they are
+# threaded as a single argv element (msb `-e NAME=value`) or a quoted YAML scalar
+# (sbx), never re-split by a shell, so a value cannot smuggle a second variable.
+# This block is for NON-SECRET config only; secrets flow through the backend
+# credential path, not the kit spec.
+kit_spec_env() {
+  local spec="$1"
+  [ -f "$spec" ] || return 0
+  awk '
+    function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
+    /^environment:/     { in_env=1; next }
+    /^[A-Za-z]/         { if (in_env) in_env=0 }   # left the top-level block
+    in_env {
+      if ($0 ~ /^[[:space:]]*$/) next               # blank line
+      if ($0 ~ /^[[:space:]]*#/) next               # comment line
+      # A NAME: value entry, one indent level under environment:.
+      if ($0 ~ /^[[:space:]]+[^:[:space:]#]+:/) {
+        k=$0; sub(/:.*/,"",k); k=trim(k); gsub(/^"|"$/,"",k); gsub(/^'\''|'\''$/,"",k)
+        v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); v=trim(v)
+        gsub(/^"|"$/,"",v); gsub(/^'\''|'\''$/,"",v)
+        if (k !~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+          print "kit-translate: skipping env var with unsafe name: " k > "/dev/stderr"
+        } else {
+          printf "%s\t%s\n", k, v
+        }
+      }
+    }
+  ' "$spec"
+}
+
+# ---------------------------------------------------------------------------
+# kit_spec_agent_context SPEC
+# ---------------------------------------------------------------------------# Echo the agentContext block scalar verbatim (dedented). Empty if absent.
 kit_spec_agent_context() {
   local spec="$1"
   [ -f "$spec" ] || return 0
@@ -467,6 +511,10 @@ kit_spec_agent_context() {
 #
 # Mapping (neutral hybrid/v1 -> sbx schemaVersion "2"):
 #   caps.network.allow[]            -> caps.network.allow[]        (identical)
+#   environment{NAME:value}         -> environment.variables{NAME:value}
+#     sbx v2 sets guest env via an `environment.variables` map (the mechanism
+#     the pre-Phase-2 playbook-kit/openchamber kits used). The neutral flat map
+#     maps 1:1 onto it.
 #   files[] with source:            -> files/<...> static payload  (auto-mapped)
 #     The whole files/ tree is copied verbatim; sbx v2 auto-maps files/home/...
 #     -> /home/... at create time. The neutral `phase:` hint (e.g. initFiles) is
@@ -518,6 +566,17 @@ kit_translate_to_sbx() {
       printf 'caps:\n  network:\n    allow:\n'
       printf '%s\n' "$hosts" | while IFS= read -r h; do
         [ -n "$h" ] && printf '      - %s\n' "$h"
+      done
+    fi
+
+    # environment -> sbx-v2 environment.variables (native guest-env mechanism).
+    local envrecs
+    envrecs=$(kit_spec_env "$spec")
+    if [ -n "$envrecs" ]; then
+      printf 'environment:\n  variables:\n'
+      printf '%s\n' "$envrecs" | while IFS="$(printf '\t')" read -r ekey eval; do
+        [ -n "$ekey" ] || continue
+        printf '    %s: %s\n' "$ekey" "$(_kit_yaml_quote "$eval")"
       done
     fi
   } > "$sbxspec"
@@ -784,6 +843,31 @@ EOF
       [ -n "$u" ] && { echo "kit: validate: unsafe command user: '$u'" >&2; errs=$((errs + 1)); }
     done <<EOF
 $bad_user
+EOF
+  fi
+
+  # environment[]: each key must be a valid POSIX env var NAME. kit_spec_env
+  # DROPS entries with an unsafe name (defense-in-depth for the shell/exec
+  # contexts they reach), so scan the RAW spec here — otherwise a bad name would
+  # be silently dropped rather than reported by `acq kit validate`.
+  local bad_env
+  bad_env=$(awk '
+    /^environment:/ { in_e=1; next }
+    /^[A-Za-z]/     { in_e=0 }
+    in_e {
+      if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#/) next
+      if ($0 ~ /^[[:space:]]+[^:[:space:]#]+:/) {
+        k=$0; sub(/:.*/,"",k)
+        sub(/^[[:space:]]+/,"",k); sub(/[[:space:]]+$/,"",k)
+        gsub(/^["'\'']|["'\'']$/,"",k)
+        if (k !~ /^[A-Za-z_][A-Za-z0-9_]*$/) print k
+      }
+    }' "$spec")
+  if [ -n "$bad_env" ]; then
+    while IFS= read -r en; do
+      [ -n "$en" ] && { echo "kit: validate: invalid env var name (must match [A-Za-z_][A-Za-z0-9_]*): '$en'" >&2; errs=$((errs + 1)); }
+    done <<EOF
+$bad_env
 EOF
   fi
 

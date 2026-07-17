@@ -60,7 +60,7 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   - fetches a kit ref (remote `git+https#ref=&dir=` via sparse checkout, or a
     local dir) into a cache;
   - parses the `hybrid/v1` `spec.yaml` with `awk` (fields, `caps.network.allow`,
-    `files[]`, `commands[]`, `agentContext`, `backend_shortcuts`);
+    `files[]`, `commands[]`, `environment`, `agentContext`, `backend_shortcuts`);
   - dispatches `backend_shortcuts.<backend>` (skip the generic path when a
     native primitive applies);
   - for **sbx**, synthesizes an equivalent **sbx-v2** kit directory
@@ -198,7 +198,9 @@ allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
   so the translation layer validates every field before it reaches a shell
   context: `files[].mode` must be octal, `files[].path`/`source` and
   `commands[].user` are charset-restricted, `commands[].phase` must be a known
-  lifecycle phase, and `caps.network.allow` hosts are hostname-validated.
+  lifecycle phase, `environment` var NAMES must match
+  `^[A-Za-z_][A-Za-z0-9_]*$`, and `caps.network.allow` hosts are
+  hostname-validated.
   Offending records are dropped with a warning (and reported by `acq kit
   validate`). Defense-in-depth: the msb adapter also re-checks mode/path at the
   point of use and passes `chmod`/`chown` arguments as argv, never interpolated
@@ -218,6 +220,45 @@ allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
   #756/#768/#1170). The kit is non-fatal; the sandbox is otherwise fully usable
   (USAi, git-ssh-sign, zscaler all work). The sbx backend is unaffected. Tracked
   in quickstart#203 for when upstream git substitution lands.
+
+### `environment` vocabulary (guest env vars)
+
+The neutral `hybrid/v1` spec originally modeled `caps.network.allow`, `files[]`,
+`commands[]`, and `agentContext` — but had **no way to express guest environment
+variables**. A downstream team (this PR's review, comment 5004158773) needs
+`environment.variables`-style config (`OPENCODE_CONFIG`, `OPENCODE_TUI_CONFIG`,
+`GITLAB_HOST`) as a first-class kit mechanism, and the two former sbx-v2 kits
+that used env (`playbook-kit`, `openchamber`) had been re-expressing it as inline
+`KEY=val \` prefixes on their startup commands — a workaround, not a vocabulary.
+
+**Added:** a top-level `environment` block — a flat map of `NAME → value` (both
+strings). The translate layer:
+
+- **sbx:** synthesizes the native sbx-v2 `environment: { variables: { … } }`
+  block (the mechanism the pre-Phase-2 kits used). sbx sets these in the guest
+  environment natively; no `commands` workaround.
+- **msb:** threads each `NAME=value` onto the kit's lifecycle commands as
+  `msb exec -e NAME=value` (msb's native per-exec env flag, already used for
+  `HOME=/home/agent`), scoping the env to the kit's own commands.
+
+Deliberately minimal (YAGNI): **static string values only** — no interpolation,
+no references to `files[]`-staged paths (a kit needing a computed value uses a
+`commands[]` step, as before). Env var **names** are validated against
+`^[A-Za-z_][A-Za-z0-9_]*$` and an unsafe name is dropped with a warning (and
+reported by `acq kit validate`), because a name reaches the guest environment and
+possibly a shell. **Secrets do NOT go here** — they continue through the backend
+credential/secret path (sbx proxy, msb `--secret ENV@HOST`), never the kit spec.
+
+> **Cross-repo dependency (fail-closed pin):** the authoritative `environment`
+> schema property + the field-level validator live in the **patterns** repo
+> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`) and land in a
+> separate PR (see Links). This translate-layer change is safe to merge ahead of
+> it — parsing/emission is additive and existing kits are unaffected — but
+> `PATTERNS_KIT_REF` (`acq.backends/common.sh`) is **left at `e387c59` (patterns
+> v1.6.0)** and is **NOT** flipped to an unmerged SHA. Bump the pin to the new
+> patterns release **only after** the patterns PR merges and a release SHA
+> exists, mirroring the Part-B/Phase-2 cross-repo gating (do not repoint to an
+> unmerged ref).
 
 ## Live verification (msb, on a KVM host)
 
