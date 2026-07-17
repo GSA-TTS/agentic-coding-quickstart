@@ -439,13 +439,12 @@ reported by `acq kit validate`); values are plain strings. It maps to sbx-v2
 **Secrets do NOT go here** — use the credential/secret path (`acq secret …`);
 the kit spec never carries a secret value.
 
-> **Note (cross-repo, pending):** the authoritative `environment` schema
+> **Note (cross-repo, satisfied):** the authoritative `environment` schema
 > property and its field-level validator live in the patterns repo
-> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`) and land in a
-> separate patterns PR. The translate-layer support here is additive and
-> backward-compatible; `PATTERNS_KIT_REF` stays pinned at the current patterns
-> release (`e387c59`, v1.6.0) and is bumped **only after** that patterns PR
-> merges (fail-closed cross-repo gating — never repoint to an unmerged SHA).
+> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`), shipped in patterns
+> **v1.7.0** (#227 + follow-up #228). `PATTERNS_KIT_REF` is pinned to the v1.7.0
+> release commit (`9c277c0`); the pin was held at v1.6.0 until v1.7.0 existed,
+> per the fail-closed cross-repo gating.
 
 Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 

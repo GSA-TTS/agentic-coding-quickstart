@@ -21,16 +21,16 @@
 # acq.backends/kit-translate.sh, which fetches a kit's neutral spec.yaml and
 # emits the active backend's native operations.
 #
-# PATTERNS_KIT_REF is pinned to the agentic-coding-patterns v1.6.0 release commit
-# on main. Part A (PR #221, "feat(acq): add neutral hybrid/v1 acq-kits + schema
-# + registry") is included at this commit; v1.6.0 also adds an unrelated sbx kit
-# and a validation script (the acq-kits + kit-hybrid-v1 schema are unchanged from
-# the #221 merge). Pinning to a release tag mirrors Phase 1 (which pinned
-# patterns v1.5.0). The four acq-kits and the schema are present at this commit
-# (verified).
+# PATTERNS_KIT_REF is pinned to the agentic-coding-patterns v1.7.0 release commit
+# on main. v1.7.0 adds the `environment` vocabulary to the hybrid/v1 schema
+# (patterns #227, consumed by kit-translate.sh's kit_spec_env), on top of the
+# Part A neutral acq-kits + schema (#221) and the openchamber conversion (#224).
+# Pinning to a release tag mirrors Phase 1 (which pinned patterns v1.5.0). The
+# acq-kits and the kit-hybrid-v1 schema (with `environment`) are present at this
+# commit (verified).
 # ============================================================================
 PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-PATTERNS_KIT_REF="e387c59bb2f743eb321bfb56a8ac71a6abb185ae"   # patterns v1.6.0 (includes Part A / #221)
+PATTERNS_KIT_REF="9c277c09ed4ad45fd11709d6b048a58adc785443"   # patterns v1.7.0 (adds environment vocabulary / #227)
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider"

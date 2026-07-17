@@ -249,16 +249,14 @@ reported by `acq kit validate`), because a name reaches the guest environment an
 possibly a shell. **Secrets do NOT go here** — they continue through the backend
 credential/secret path (sbx proxy, msb `--secret ENV@HOST`), never the kit spec.
 
-> **Cross-repo dependency (fail-closed pin):** the authoritative `environment`
-> schema property + the field-level validator live in the **patterns** repo
-> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`) and land in a
-> separate PR (see Links). This translate-layer change is safe to merge ahead of
-> it — parsing/emission is additive and existing kits are unaffected — but
-> `PATTERNS_KIT_REF` (`acq.backends/common.sh`) is **left at `e387c59` (patterns
-> v1.6.0)** and is **NOT** flipped to an unmerged SHA. Bump the pin to the new
-> patterns release **only after** the patterns PR merges and a release SHA
-> exists, mirroring the Part-B/Phase-2 cross-repo gating (do not repoint to an
-> unmerged ref).
+> **Cross-repo dependency (satisfied):** the authoritative `environment` schema
+> property + the field-level validator live in the **patterns** repo
+> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`, PR #227 + the review
+> follow-up #228). Both merged and shipped in patterns **v1.7.0**, and
+> `PATTERNS_KIT_REF` (`acq.backends/common.sh`) is pinned to the v1.7.0 release
+> commit `9c277c09ed4ad45fd11709d6b048a58adc785443` (schema with `environment`
+> verified present). The pin was held at v1.6.0 until v1.7.0 existed, per the
+> fail-closed cross-repo gating.
 
 ## Live verification (msb, on a KVM host)
 
@@ -294,14 +292,15 @@ secret substitution requires `--tls-intercept` and only covers the
 
 ## Release gate (satisfied)
 
-- **`PATTERNS_KIT_REF` points at a merged, released Part A SHA.** Patterns PR
-  #221 (Part A) merged to `main` on 2026-07-16; `common.sh` is pinned to the
-  patterns **v1.6.0** release commit `e387c59bb2f743eb321bfb56a8ac71a6abb185ae`,
-  which includes Part A unchanged (v1.6.0 also adds an unrelated sbx kit +
-  validation script; the acq-kits and kit-hybrid-v1 schema are identical to the
-  #221 merge). Pinning to a release tag mirrors Phase 1's v1.5.0 pin. The four
-  acq-kits and the schema are present at this commit, and a live sparse-fetch +
-  neutral→sbx-v2 translation of all four kits was verified against it.
+- **`PATTERNS_KIT_REF` points at a merged, released SHA.** `common.sh` is pinned
+  to the patterns **v1.7.0** release commit
+  `9c277c09ed4ad45fd11709d6b048a58adc785443`, which includes Part A (the neutral
+  acq-kits + schema, #221), the openchamber conversion (#224), and the
+  `environment` vocabulary (#227 + the review follow-up #228). Pinning to a
+  release tag mirrors Phase 1's v1.5.0 pin. The acq-kits and the kit-hybrid-v1
+  schema (with `environment`) are present at this commit, and a live
+  sparse-fetch + neutral→sbx-v2 translation of the kits was verified against the
+  patterns kit tree.
 
 ## Links
 

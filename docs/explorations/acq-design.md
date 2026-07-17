@@ -924,10 +924,11 @@ kit vocabulary** with a translation layer. Recorded in
    so the private playbook clone is skipped on msb (tracked; microsandbox
    #756/#768/#1170).
 
-6. **`PATTERNS_KIT_REF` is pinned to the patterns v1.6.0 release commit**
-   (`e387c59bb2f743eb321bfb56a8ac71a6abb185ae`), which includes Part A (#221,
-   merged 2026-07-16). The Phase 2 handoff §4.1 gate is satisfied; pinning to a
-   release tag mirrors the Phase 1 v1.5.0 pin.
+6. **`PATTERNS_KIT_REF` is pinned to the patterns v1.7.0 release commit**
+   (`9c277c09ed4ad45fd11709d6b048a58adc785443`), which includes Part A (#221),
+   the openchamber conversion (#224), and the `environment` vocabulary (#227).
+   The Phase 2 handoff §4.1 gate is satisfied; pinning to a release tag mirrors
+   the Phase 1 v1.5.0 pin.
 
 7. **`scripts/verify-backends` live run is deferred.** The script exists
    (design §9) but the full `acq run … --backend msb` loop cannot run inside a

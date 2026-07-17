@@ -478,7 +478,7 @@ make_stubs
 out=$(ACQ_BACKEND=sbx "$ACQ" version 2>&1); rc=$?
 assert_eq "version exits 0" "0" "$rc"
 assert_contains "version: script path" "$out" "$REPO_ROOT/acq"
-assert_contains "version: patterns kit ref" "$out" "e387c59b"
+assert_contains "version: patterns kit ref" "$out" "9c277c09"
 assert_contains "version: backend line" "$out" "backend:"
 cleanup_stubs
 
@@ -988,7 +988,7 @@ cleanup_stubs
 # 9a. `acq kit list` shows the pinned neutral kits.
 make_stubs
 out=$("$ACQ" kit list 2>&1)
-assert_contains "kit: list shows patterns ref" "$out" "e387c59b"
+assert_contains "kit: list shows patterns ref" "$out" "9c277c09"
 assert_contains "kit: list shows acq-kits dir" "$out" "acq-kits"
 assert_contains "kit: list shows usai-provider" "$out" "usai-provider"
 assert_contains "kit: list shows git-ssh-sign" "$out" "git-ssh-sign"
