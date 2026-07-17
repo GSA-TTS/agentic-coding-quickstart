@@ -3,24 +3,27 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-07-14"
+last_updated: "2026-07-15"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
-related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md"]
+related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
 
 # acq Backend Guide
 
-`acq` is designed to support multiple isolation backends. Today (1.1.x), only
-the **sbx** backend ships. Additional backends are planned:
+`acq` supports multiple isolation backends behind one command surface. As of
+1.2.0, two backends ship: **sbx** (Docker Sandboxes) and **msb**
+(microsandbox). Kits are authored once in the neutral `hybrid/v1` vocabulary and
+translated to each backend's native mechanism (see
+[ADR-0011](adr/0011-msb-backend-and-neutral-kits.md)).
 
 | Backend | Version | Status | Description |
 |---------|---------|--------|-------------|
 | **sbx** | 1.1.0 | Shipped | Docker-based sbx CLI from Docker Inc |
-| **msb** | 1.2.0 (planned) | Coming | microsandbox — lightweight VM-based isolation |
-| **ppp** | Deferred | Not scheduled | Podman-Plus-Proxy backend |
+| **msb** | 1.2.0 | Shipped | microsandbox — lightweight microVM isolation (FOSS) |
+| **ppp** | Phase 3 | In development | Podman-Plus-Proxy backend ([GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)) |
 
 ---
 
@@ -94,43 +97,264 @@ export ACQ_BACKEND=sbx
 
 ---
 
-## msb Backend (planned for 1.2.0)
+## msb Backend (microsandbox, 1.2.0)
 
-> **Not yet available.** This section documents the planned design.
+The **msb** backend wraps [microsandbox](https://github.com/superradcompany/microsandbox),
+an open-source (Apache-2.0) microVM runtime. It is a good fit when you want a
+FOSS runtime with no Docker account/seat, snapshot/restore, or an SDK-first
+automation story.
 
-The **msb** backend will wrap [microsandbox](https://github.com/microsandbox/microsandbox),
-a lightweight VM-based isolation tool with a simpler dependency footprint than
-Docker.
+### Overview
 
-### Planned strengths
+- microVM isolation (libkrun) with per-sandbox network policy
+- Runs standard OCI images (Docker Hub, GHCR, any registry)
+- Native host-CA trust propagation (`--trust-host-cas`)
+- Native TLS interception + host-env secret binding (`--secret ENV@HOST`) so
+  credentials never enter the guest
+- Snapshot/restore and detached long-running sandboxes
 
-- No Docker account required
-- Lower memory/CPU overhead
-- Suitable for Linux environments where Docker is unavailable or undesirable
-- Will become the auto-detect default in 1.2.0 once available
+### Strengths
+
+- **No Docker account required** — FOSS binary, `msb self update` to upgrade
+- **Zscaler CA shortcut**: the `zscaler-ca-certificate` kit takes msb's native
+  `--trust-host-cas` path instead of the file-drop + `update-ca-certificates`
+  dance (behavioral parity — the guest trusts the Zscaler CA either way)
+- **Secret injection**: the USAi key is bound from a host env var at create time
+  (`--secret USAI_API_KEY@api.gsa.usai.gov`); the real value never enters the VM
+- **Snapshots**: `msb snapshot` supports save/restore
+
+### Requirements
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| `msb` CLI | >= 0.6.0 | `--net-rule`, `--trust-host-cas`, `--secret` used by acq |
+| Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
+
+Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
+
+### Installation
+
+```bash
+curl -fsSL https://install.microsandbox.dev | sh        # macOS / Linux
+brew install superradcompany/tap/microsandbox           # Homebrew
+```
+
+### Configuration
+
+```bash
+# Persist msb as the default backend
+./acq backend set msb
+
+# Per-invocation override
+./acq --backend msb run opencode /proj
+
+# Environment override
+export ACQ_BACKEND=msb
+```
+
+Tunables:
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `ACQ_MSB_IMAGE` | `docker.io/library/node:22-bookworm` | Base OCI image (must be pullable and ship node/git/curl/ca-certificates) |
+| `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
+| `ACQ_MSB_AGENT_UID` | `1000` | Preferred uid for the provisioned `agent` user |
+| `ACQ_MSB_WORKSPACE` | `/home/agent/workspace` | Guest mount point for the host workspace |
+| `ACQ_MSB_DNS_NAMESERVER` | `1.1.1.1` | Guest DNS resolver (set empty to use msb's default) |
+| `ACQ_MSB_KIT_CACHE` | `$XDG_CACHE_HOME/acq/kits` | where fetched neutral kits are materialized |
+
+### DNS / name resolution
+
+msb hands the guest the **host's** DNS resolvers, but a corporate/VPN resolver
+(e.g. a `172.16.x` or Zscaler address) is typically **unreachable from the
+microVM's network namespace** — so the guest can't resolve even the
+allow-listed kit hosts (`api.gsa.usai.gov`, `github.com`) and every outbound
+request fails with `Could not resolve host`. The msb backend therefore passes
+`--dns-nameserver` (default `1.1.1.1`, a public resolver reachable from the
+microVM) to `msb create`. Override `ACQ_MSB_DNS_NAMESERVER` if `1.1.1.1` is
+blocked in your environment, or set it empty to fall back to msb's default (only
+if your host resolver is reachable from the guest).
+
+### Workspace mounting
+
+msb does **not** create the host mount path and will not reliably mount a guest
+path that mirrors an absolute host path under `/tmp` (the mount silently does
+not appear). So the msb backend mounts your host workspace at a fixed guest path
+(`ACQ_MSB_WORKSPACE`, default `/home/agent/workspace`) rather than at its host
+path. The host path must already exist — `acq` errors clearly if it does not.
+This differs from sbx, which mounts the workspace at its original path.
+
+> **`msb create` starts asynchronously.** `msb create` returns success even if
+> the sandbox later fails to *start* (e.g. a bad mount). `acq` therefore treats
+> "sandbox not exec-ready within `ACQ_MSB_EXEC_READY_TIMEOUT`" as a **hard
+> provision failure** and points you at `msb logs --source system <name>` —
+> rather than proceeding against a sandbox that never came up.
+
+### Base image and prerequisites
+
+Unlike sbx (whose agent templates supply the image), the msb backend runs a
+**plain OCI image** and layers the kits on top. The four pinned kits need
+`node` (usai merge), `git` (playbook clone + signing), `curl`, and
+`ca-certificates`/`update-ca-certificates` (zscaler) **already present in the
+base image**.
+
+These are **not** installed at runtime: the kit network rules lock egress to the
+kits' own hosts (`api.gsa.usai.gov`, `github.com`, `codeload.github.com`), so a
+package mirror like `deb.debian.org` is unreachable during provision. The
+default `node:22-bookworm` image (built on `buildpack-deps:bookworm-scm`) already
+ships all four tools and pulls from Docker Hub without auth. Before applying
+kits, the adapter **verifies** the tools are present and warns if any are
+missing (it does not try to install them).
+
+**The `agent` user contract.** The kits stage files under `/home/agent` and run
+their unprivileged commands as an `agent` user (uid 1000) — the contract sbx's
+agent template guarantees. A plain OCI base does not provide this (e.g.
+`node:22-bookworm` has a `node` user at uid 1000 and no `agent`). So at provision
+the msb adapter **creates an `agent` user with `HOME=/home/agent`** (idempotent,
+offline via `useradd`/`adduser`), chowns the staged `/home/agent` files to it,
+and runs the kits' uid-1000 commands as `agent` with `HOME=/home/agent` (it
+addresses the user by name, not by the literal uid 1000, so it works even when
+1000 is already taken). Set `ACQ_MSB_AGENT_UID` to prefer a specific uid.
+
+To use your own image, set `ACQ_MSB_IMAGE` to one that also provides node, git,
+curl, and ca-certificates:
+
+```bash
+export ACQ_MSB_IMAGE=ghcr.io/your-org/agent-base:latest   # must have node/git/curl/ca-certificates
+# ACQ_MSB_SKIP_PREREQ_CHECK=1   # optional: silence the presence check
+```
+
+If the image requires registry auth, log in with your container tooling (e.g.
+`docker login ghcr.io`) before running `acq`.
+
+### Secrets
+
+Credentials are owned by **acq's backend-neutral secret store** (not sbx's).
+Set a secret once with `acq secret set`; both backends read it from the same
+store at provision:
+
+```bash
+./acq secret set -g usai            # prompts; stored under acq.usai
+./acq secret set -g github          # prompts; stored under acq.github
+./acq secret set my-sandbox usai    # sandbox-scoped; overrides the global key
+```
+
+The store lives in the host OS keychain when available (macOS `security`, Linux
+`secret-tool`) with a `0600` file fallback under `$XDG_DATA_HOME/acq/secrets/`.
+Entries are keyed `acq.<service>` (global) or `acq.<sandbox>.<service>`
+(sandbox-scoped); a sandbox-scoped key takes precedence over the global one for
+the same service (supporting USAi per-sandbox billing-code keys).
+
+At `acq run`/`create`, the **msb** backend reads the value from the store,
+exports it into a transient host env var, and binds it with
+`msb --secret ENV@HOST`. msb puts a **placeholder** (`$MSB_<env>`) in the guest;
+when the guest sends that placeholder to an allowed host over **intercepted TLS**
+(`--tls-intercept`, which acq enables), msb swaps in the real value on the wire —
+so the credential **never enters the guest** and **never appears in argv**.
+`acq secret set` also re-feeds running sandboxes with `msb modify --secret` so a
+rotated key takes effect without recreating the sandbox.
+
+- **USAi** binds to `api.gsa.usai.gov`. The USAi provider sends the key as an
+  `Authorization: Bearer` header, which msb substitutes correctly.
+- **GitHub is NOT bound as an msb secret** — see the known limitation below.
+
+Feeding the **sbx** proxy depends on the sbx secret type (per the sbx CLI):
+
+- **Built-in services** (`github`, `anthropic`, …): the value is piped to
+  `sbx secret set <service>` on **stdin** (never argv). If the secret already
+  exists, `acq` stops and prints the exact `sbx secret rm …` command rather than
+  answering sbx's overwrite prompt.
+- **Custom endpoints** (`usai` and any `--host/--env` service): `sbx secret
+  set-custom` has **no stdin input** — the value would have to go on argv via
+  `--value` (visible in shell history), which violates the no-argv rule. So
+  `acq` stores the value in the acq store and then, from a **terminal**, runs
+  `sbx secret set-custom` interactively so you enter it once at sbx's own
+  prompt. When piped non-interactively (or on the msb backend), `acq` stores the
+  value and prints the exact `sbx secret set-custom …` command for you to run.
+  (On msb no sbx step is needed — msb reads the acq store directly.)
+
+This is the bash subset of the design's §7.5 unified secret model; the full
+Go/keychain MITM component (age fallback, `CredentialRewriteRule`,
+swap-on-access placeholders) remains a larger future effort tracked separately.
+
+> **Migration:** if you previously stored the USAi key with `sbx secret …`, run
+> `acq secret set -g usai` once to move it into the acq store (the value is
+> re-prompted). A future `acq secret import` will automate this.
+>
+> **Overwriting:** `acq secret set` is non-destructive toward sbx — if sbx
+> already holds the secret it stops with an `sbx secret rm …` hint rather than
+> silently replacing it. The acq store copy is always updated.
+
+### Known limitations (msb)
+
+- **Private GitHub repos: the playbook kit clone is skipped on msb.** The
+  `agentic-coding-playbook` kit clones a private GitHub repo over HTTPS. msb
+  0.6.6 does not substitute the credential placeholder for git's HTTPS
+  smart-transport to `github.com` — the request is blocked/unsubstituted
+  regardless of request shape (verified extensively; msb's `Authorization:
+  Bearer` substitution works for the USAi header path but not for git). Binding
+  the same placeholder across multiple github hosts also trips microsandbox
+  [#1170](https://github.com/superradcompany/microsandbox/issues/1170). acq
+  therefore does **not** bind a GitHub secret on msb; the playbook kit is
+  non-fatal and warns, and the sandbox comes up fully usable otherwise. This is
+  tracked in
+  [quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203)
+  for a fix once upstream git substitution works (see microsandbox
+  [#756](https://github.com/superradcompany/microsandbox/issues/756) /
+  [#768](https://github.com/superradcompany/microsandbox/pull/768) /
+  [#1170](https://github.com/superradcompany/microsandbox/issues/1170)). On the
+  **sbx** backend the playbook clone works (its proxy injects the token
+  transparently). Workarounds on msb: make the repo readable without auth, use a
+  base image with the playbook pre-cloned, or use the sbx backend.
+
+### Capability flags
+
+| Flag | Value | Meaning |
+|------|-------|---------|
+| `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 0 | No post-hoc `acq ports`; publish at create/run via `-p HOST:GUEST` |
+| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 1 | `msb snapshot` save/restore |
+| `ACQ_BACKEND_CAN_RESUME` | 1 | `msb stop` / `msb start` preserve state |
+| `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (header substitution; git HTTPS not yet supported by msb) |
 
 ### Differences from sbx
 
-| Feature | sbx | msb (planned) |
-|---------|-----|---------------|
-| Isolation | Container | VM |
-| Secret proxy | Builtin | Planned (different mechanism) |
-| Kit format | sbx v2 mixin | Neutral `acq` hybrid/v1 spec (planned) |
-| Credential rewrite | Yes | Planned |
-| Port forwarding | Yes | Planned |
+| Feature | sbx | msb |
+|---------|-----|-----|
+| Isolation | Container (microVM) | microVM (libkrun) |
+| Kit format | Neutral `hybrid/v1` → sbx-v2 (synthesized) | Neutral `hybrid/v1` → `msb` operations |
+| Zscaler CA | file-drop + `update-ca-certificates` | native `--trust-host-cas` shortcut |
+| Secret model | proxy `secret set-custom` | host-env `--secret ENV@HOST` |
+| Port forwarding | `acq ports` (post-hoc) | published at create/run (`-p`) only |
+| In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+) | re-apply kits idempotently (no state-preserving add) |
 
-### Migration path
+### Known limitations
 
-When msb lands in 1.2.0, `acq` will auto-detect it. If both sbx and msb are
-installed, `acq` will prompt you to pick one and persist the choice via
-`acq doctor`. Existing sbx sandboxes are unaffected.
+- **Ports are set at create/run time**, not post-hoc. `acq --backend msb ports`
+  prints the correct mechanism instead of forwarding.
+- **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
+  re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
+- **Unified secret store deferred.** msb uses its native host-env `--secret`
+  binding for 1.2.0.
+
+> **Live end-to-end note:** the full `acq run … --backend msb` loop and the
+> `scripts/verify-backends` msb row cannot run inside an sbx/msb sandbox (no
+> nested sandboxes) and require host virtualization (`/dev/kvm` on Linux). The
+> msb CLI flag shapes used by the adapter were verified against `msb 0.6.6`;
+> the create→exec→attach loop is deferred to a sandbox-capable host (mirrors
+> ADR-0010's deferred sbx verification). See
+> [ADR-0011](adr/0011-msb-backend-and-neutral-kits.md).
 
 ---
 
-## ppp Backend (deferred)
+## ppp Backend (Phase 3, in development)
 
-The Podman-Plus-Proxy (ppp) backend is on hold — planned but not scheduled.
-See `docs/explorations/` for the design notes when available.
+The Podman-Plus-Proxy (ppp) backend is being developed in
+[GSA-TTS/ppp](https://github.com/GSA-TTS/ppp) and is targeted for Phase 3 — it
+is not part of this release. When it lands, it will implement the same adapter
+contract ([ADR-0010](adr/0010-acq-pluggable-backends.md)) and consume the same
+neutral `hybrid/v1` kits via `kit-translate.sh`, so adding it is additive (a new
+`acq.backends/ppp.sh` + a detection branch), with no change to the sbx or msb
+paths. See `docs/explorations/acq-design.md` §"ppp" for the intended mapping.
 
 ---
 
@@ -138,34 +362,106 @@ See `docs/explorations/` for the design notes when available.
 
 `acq` resolves the backend in this priority order (highest wins):
 
-1. `--backend <name>` flag
+1. `--backend <name>` flag (per-invocation override)
 2. `ACQ_BACKEND` environment variable
 3. `backend:` key in `~/.config/acq/config.yaml`
-4. Auto-detect: first available backend (`sbx version`, then `msb version`)
+4. Auto-detect: first installed backend (`sbx` preferred, then `msb`)
 
 If multiple backends are installed and none is explicitly selected, `acq`
-prints the candidates and exits with a hint to set `ACQ_BACKEND`. (Only
-relevant once msb/ppp exist alongside sbx.)
+auto-detects in the order above (sbx wins when both are present). Use
+`--backend`, `ACQ_BACKEND`, or `acq backend set` to pick msb explicitly.
+
+---
+
+## Troubleshooting
+
+Set `ACQ_DEBUG=1` to trace backend CLI invocations and kit fetch/translate
+steps to stderr (no secret values are printed):
+
+```bash
+ACQ_DEBUG=1 ./acq --backend msb create shell /path/to/project
+```
+
+`scripts/verify-backends` supports `-v`/`--verbose` (stream every acq command
+and its output live) and `-k`/`--keep` (leave a failing sandbox up for manual
+inspection):
+
+```bash
+./scripts/verify-backends -v
+```
+
+A `WARN` line marks a known, tracked limitation (e.g. the msb private-repo
+playbook clone, [quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203))
+— it is surfaced every run but does **not** count as a failure, so a clean msb
+run still exits 0.
 
 ---
 
 ## Adding a new backend (implementer notes)
 
 1. Create `acq.backends/<name>.sh` implementing the contract in
-   `docs/explorations/acq-handoff-1.1.md §5`.
-2. Set the four capability flags at the top of the file.
-3. Implement all required `acq_backend_*` functions.
+   [ADR-0010 §"Adapter contract"](adr/0010-acq-pluggable-backends.md).
+2. Set the capability flags at the top of the file.
+3. Implement all required `acq_backend_*` functions. Consume the neutral
+   `hybrid/v1` kits via `acq.backends/kit-translate.sh` (parse the spec, honor
+   `backend_shortcuts.<name>`, then emit your backend's native operations).
 4. Add auto-detect to `_auto_detect_backend` in `acq.backends/common.sh`.
-5. Add the backend to the `acq backend list` output in `acq`.
-6. Write tests in `scripts/test-acq`.
+5. Add the backend to `acq backend list` and `acq_print_doctor`.
+6. Write tests in `scripts/test-acq` (stub the CLI) and a row in
+   `scripts/verify-backends`.
 7. Document it here.
 
 ---
 
-## Coming in 1.2.x
+## Kits: the neutral hybrid/v1 vocabulary
+
+Kits are authored once in the neutral `hybrid/v1` spec (in the patterns repo
+under `integrations/isolation/acq-kits/`) and translated per backend by
+`acq.backends/kit-translate.sh`:
+
+- **sbx** — the neutral spec is synthesized into an sbx-v2 kit directory
+  (`spec.yaml` + `files/`), then applied via `sbx --kit` / `sbx kit add`. The
+  observable result is identical to the pre-1.2 sbx kits.
+- **msb** — the neutral spec is fetched and driven directly: network allows
+  become `--net-rule` flags, files are `msb copy`'d in, and `commands` run via
+  `msb exec`. A `backend_shortcuts.msb` (e.g. zscaler `trust_host_cas`) uses the
+  native primitive instead.
+
+The neutral vocabulary is: `caps.network.allow`, `files[]`, `commands[]`,
+`environment`, `agentContext`, `backend_shortcuts`, and `backend_extras`.
+
+**`environment` (guest env vars).** A flat map of `NAME → value` for
+**non-secret** guest environment variables (e.g. `OPENCODE_CONFIG`,
+`OPENCODE_TUI_CONFIG`, `GITLAB_HOST`). Names must be POSIX identifiers
+(`^[A-Za-z_][A-Za-z0-9_]*$`; an invalid name is dropped with a warning and
+reported by `acq kit validate`); values are plain strings. It maps to sbx-v2
+`environment.variables` (synthesized) and to `msb exec -e NAME=value` (per-exec).
+**Secrets do NOT go here** — use the credential/secret path (`acq secret …`);
+the kit spec never carries a secret value.
+
+> **Note (cross-repo, satisfied):** the authoritative `environment` schema
+> property and its field-level validator live in the patterns repo
+> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`), shipped in patterns
+> **v1.7.0** (#227 + follow-up #228). `PATTERNS_KIT_REF` is pinned to the v1.7.0
+> release commit (`9c277c0`); the pin was held at v1.6.0 until v1.7.0 existed,
+> per the fail-closed cross-repo gating.
+
+Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
+
+---
+
+## Shipped in 1.2.0
 
 - `acq kit apply|list|validate` — kit management subcommands
-- Full swap-on-access secret model (unified across backends)
+- Neutral `hybrid/v1` kit spec + `kit-translate.sh` (multi-backend kits)
+- `msb` (microsandbox) backend
+
+## Still deferred
+
+- Full Go/keychain swap-on-access secret component of design §7.5 (age fallback,
+  `CredentialRewriteRule`); acq ships the bash keychain subset (see Secrets)
+- msb private-repo git auth ([quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203))
 - `acq policy …` — network policy subcommands
-- Neutral hybrid/v1 kit spec for multi-backend kits
-- `msb` backend
+- `ppp` (Podman-Plus-Proxy) backend — Phase 3, in development at
+  [GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)
+- Removal of `qsbx` (Phase 4 / 2.0.0)

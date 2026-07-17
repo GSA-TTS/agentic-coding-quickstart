@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+#
+# verify-backends — HOST-SIDE end-to-end check that the four neutral acq kits
+# apply cleanly on each INSTALLED backend, and that the core kit behaviors work.
+# Unlike scripts/test-acq (which stubs sbx/msb and runs anywhere), this exercises
+# the REAL toolchain and therefore must run on a machine that can create
+# sandboxes:
+#   - sbx: Docker + KVM, `sbx login` done, sbx >= 0.35.0
+#   - msb: host virtualization (KVM on Linux, HVF on macOS, WHP on Windows),
+#          msb >= 0.6.0
+#
+# For each backend that is INSTALLED, it creates a tiny throwaway sandbox and
+# asserts (design §9):
+#   1. The four pinned kits apply cleanly (no hard failure).
+#   2. The USAi key round-trips to HTTP 200 from the models API (requires a
+#      valid key: USAI_API_KEY exported, or already stored for the backend).
+#   3. Git commit signing config is present (git-ssh-sign kit landed).
+#   4. The playbook clone symlink appears at the agent's AGENTS.md path.
+# A backend that is NOT installed is SKIPPED (its row prints "skipped").
+#
+# This CANNOT run inside an sbx/msb sandbox (no nested sandboxes) — see ADR-0011
+# "Validation" and the §7 handoff note. Run it on a sandbox-capable host and
+# capture the transcript for the PR.
+#
+# Usage:
+#   ./scripts/verify-backends [WORKDIR]
+#     WORKDIR  optional workspace path (default: a temp git repo under $TMPDIR).
+#
+#   Flags / env:
+#     -v | --verbose | VERIFY_VERBOSE=1   Stream every acq command and its full
+#                                         output live (not just on failure).
+#     -k | --keep    | VERIFY_KEEP=1      Keep the throwaway sandbox on failure
+#                                         (default: always remove) for manual poking.
+#
+# On ANY step failure the real command line and its captured stderr/stdout are
+# printed, so a single run tells you what broke (no separate manual re-run).
+#
+# Exit 0 = every installed backend passed (skipped backends don't fail the run).
+# Non-zero = at least one installed backend failed a check.
+# WARN lines are known, tracked limitations (e.g. the msb private-repo playbook
+# clone, quickstart#203) — surfaced every run but NOT counted as failures.
+
+set -uo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+ACQ="$REPO_ROOT/acq"
+
+VERBOSE="${VERIFY_VERBOSE:-}"
+KEEP="${VERIFY_KEEP:-}"
+POSITIONAL=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -v|--verbose) VERBOSE=1 ;;
+    -k|--keep)    KEEP=1 ;;
+    -h|--help)
+      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) POSITIONAL+=("$1") ;;
+  esac
+  shift
+done
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
+
+# Refuse to run inside a sandbox (no nested sandboxes).
+if [ -f /.dockerenv ] || [ -n "${SBX_SANDBOX:-}" ] || [ -n "${MSB_SANDBOX:-}" ]; then
+  echo "verify-backends: refusing to run inside a sandbox (no nested sandboxes)." >&2
+  echo "                 Run on a sandbox-capable host. See ADR-0011 Validation." >&2
+  exit 2
+fi
+
+PASS=0
+FAIL=0
+SKIP=0
+WARN=0
+LAST_OUT=""          # captured combined output of the most recent run_acq call
+pass() { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
+fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
+skip() { SKIP=$((SKIP + 1)); printf '  skip  %s\n' "$1"; }
+# warn(): a known, tracked limitation — surfaced loudly every run but NOT counted
+# as a failure (the run still exits 0). Use for deferred gaps like the msb
+# private-repo playbook clone (quickstart#203).
+warn() { WARN=$((WARN + 1)); printf '  WARN  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
+
+# Print a captured block indented under a heading (only when non-empty).
+dump() {
+  local heading="$1" body="$2"
+  [ -n "$body" ] || return 0
+  printf '        --- %s ---\n' "$heading"
+  printf '%s\n' "$body" | sed 's/^/        | /'
+  printf '        --- end ---\n'
+}
+
+# Run an acq command, capturing combined stdout+stderr into LAST_OUT and
+# returning its exit status. The first arg is a short label for the step; in
+# verbose mode it and the exact command line are streamed live.
+run_acq() {
+  local desc="$1"; shift
+  if [ -n "$VERBOSE" ]; then
+    printf '        $ acq %s   # %s\n' "$*" "$desc" >&2
+    LAST_OUT=$("$ACQ" "$@" 2>&1 | tee /dev/stderr); return "${PIPESTATUS[0]}"
+  fi
+  LAST_OUT=$("$ACQ" "$@" 2>&1); return $?
+}
+
+# Workspace to mount.
+WORKDIR="${1:-}"
+if [ -z "$WORKDIR" ]; then
+  WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-verify-ws.XXXXXX")
+  ( cd "$WORKDIR" && git init -q && git config user.email test@example.com \
+      && git config user.name "acq verify" && echo hi > README.md ) || true
+fi
+
+USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
+USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
+
+# ---------------------------------------------------------------------------
+# Per-backend verification. $1 = backend name. Assumes it is installed.
+# ---------------------------------------------------------------------------
+verify_backend() {
+  local backend="$1"
+  echo ""
+  echo "== backend: ${backend} =="
+
+  # Preflight: surface obvious environment gaps before attempting a create, so
+  # the failure names the cause instead of a generic "provision failed".
+  case "$backend" in
+    sbx)
+      run_acq "version" --backend sbx version >/dev/null 2>&1 || true
+      if ! sbx version >/dev/null 2>&1; then
+        fail "${backend}: 'sbx version' failed — is sbx installed and on PATH?"
+        return
+      fi
+      # A logged-out sbx will fail kit resolution / create with an auth error.
+      # We can't cheaply assert login state, so just note it if create fails.
+      ;;
+    msb)
+      if ! msb --version >/dev/null 2>&1; then
+        fail "${backend}: 'msb --version' failed — is msb installed and on PATH?"
+        return
+      fi
+      if ! msb doctor >/dev/null 2>&1; then
+        printf '        note: "msb doctor" reports host virtualization is not ready\n'
+        printf '              (e.g. /dev/kvm / HVF / WHP). Create may fail below.\n'
+      fi
+      ;;
+  esac
+
+  # Derive the sandbox name the same way acq does (agent "shell" + workspace
+  # basename), by sourcing common.sh's derive_name. This mirrors the acq run/
+  # create dispatch so we address the exact sandbox acq creates.
+  local name
+  name=$(
+    # shellcheck disable=SC1090
+    ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
+    derive_name shell "$WORKDIR" 2>/dev/null
+  )
+  [ -n "$name" ] || name="shell-$(basename "$WORKDIR" | tr '[:upper:]' '[:lower:]')"
+  printf '        sandbox name: %s\n' "$name"
+
+  # Create a sandbox with the four kits applied via acq's normal provision path.
+  if ! run_acq "create" --backend "$backend" create shell "$WORKDIR"; then
+    fail "${backend}: provision (acq create shell) failed" \
+         "command: acq --backend ${backend} create shell ${WORKDIR}"
+    dump "acq create output" "$LAST_OUT"
+    if [ -n "$KEEP" ]; then
+      printf '        (keeping sandbox %s for inspection; --keep set)\n' "$name"
+    else
+      run_acq "rm" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
+    fi
+    return
+  fi
+
+  # 1) USAi kit config landed.
+  if run_acq "exec usai-check" --backend "$backend" exec "$name" -- sh -c "test -f '$USAI_KIT_CONFIG_PATH'"; then
+    pass "${backend}: usai-provider kit applied (config staged)"
+  else
+    fail "${backend}: usai-provider kit config missing at $USAI_KIT_CONFIG_PATH"
+    dump "exec output" "$LAST_OUT"
+  fi
+
+  # 2) USAi key check — backend-aware.
+  #    sbx injects the key via its egress proxy: the guest holds the real value
+  #    in $USAI_API_KEY, so a raw bearer curl to the models API returns 200.
+  #    msb binds the key with `--secret ENV@HOST`: the guest's $USAI_API_KEY is a
+  #    proxy-managed SENTINEL (the real value is swapped in on the wire only for
+  #    requests to the allowed host and never enters the VM). A raw bearer curl
+  #    from the guest therefore does NOT prove the key the way it does for sbx —
+  #    so for msb we assert the binding + host reachability instead of a 200 on a
+  #    guest-held key.
+  case "$backend" in
+    sbx)
+      run_acq "exec usai-200" --backend "$backend" exec "$name" -- sh -c \
+        "curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$USAI_API_KEY\" $USAI_MODELS_URL"
+      local status="$LAST_OUT"
+      case "$status" in
+        *200*) pass "${backend}: USAi key round-trips to 200" ;;
+        "")    skip "${backend}: USAi key check (could not reach models API — no key?)" ;;
+        *)     fail "${backend}: USAi key check returned HTTP '$status' (expected 200)"
+               dump "curl output" "$LAST_OUT" ;;
+      esac
+      ;;
+    msb)
+      # msb binds the USAi key with `--secret ENV@HOST`: the guest's
+      # $USAI_API_KEY is a proxy-managed SENTINEL, not the real value. So we do
+      # NOT assert a guest-side 200. Instead:
+      #   (a) the acq secret store (or a host env fallback) must HAVE the key, so
+      #       provision could bind it;
+      #   (b) the models host must resolve/connect from the guest (egress OK).
+      if [ -n "${USAI_API_KEY:-}" ] || \
+         ( # shellcheck disable=SC1090
+           ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1;
+           command -v acq_secret_has >/dev/null 2>&1 && acq_secret_has usai ); then
+        pass "${backend}: USAi key available to bind (acq store or host env)"
+      else
+        skip "${backend}: USAi key not available (run 'acq secret set -g usai' or export USAI_API_KEY)"
+      fi
+      # (b) The models host must resolve/connect from the guest (egress allow).
+      #     msb rewrites the auth header on the wire, so any HTTP status back from
+      #     the endpoint (even 401/403) proves resolution + egress worked; a curl
+      #     transport failure (000 / could-not-resolve) means the net-rule/egress
+      #     is wrong. We accept a real HTTP status; we do NOT require 200 because
+      #     the guest never holds the real key to authenticate itself.
+      run_acq "exec usai-reach" --backend "$backend" exec "$name" -- sh -c \
+        "curl -sS -o /dev/null -w '%{http_code}' --max-time 15 $USAI_MODELS_URL"
+      local mstatus="$LAST_OUT"
+      case "$mstatus" in
+        000|*"resolve"*|*"curl:"*|"")
+          fail "${backend}: USAi host not reachable from guest (egress/net-rule?)"
+          dump "curl output" "$LAST_OUT"
+          printf '        note: with kit net-rules, egress is default-deny; the models\n' >&2
+          printf '              host must be allow-listed AND DNS must resolve. See ADR-0011.\n' >&2
+          ;;
+        *)
+          pass "${backend}: USAi host reachable from guest (HTTP $mstatus; auth rewritten on wire)"
+          ;;
+      esac
+      ;;
+  esac
+
+  # 3) git-ssh-sign config present (system gitconfig has gpg.format ssh).
+  if run_acq "exec gpg-format" --backend "$backend" exec "$name" -- sh -c \
+      "git config --system --get gpg.format 2>/dev/null | grep -q ssh"; then
+    pass "${backend}: git-ssh-sign kit applied (gpg.format ssh)"
+  else
+    fail "${backend}: git commit signing config missing (gpg.format ssh)"
+    dump "exec output" "$LAST_OUT"
+  fi
+
+  # 4) playbook clone symlink appears (AGENTS.md linked into OpenCode config).
+  #    On msb the private-repo clone is a KNOWN, TRACKED gap (quickstart#203):
+  #    msb 0.6.6 doesn't substitute the git credential for github.com HTTPS. So
+  #    on msb a missing clone is a WARN (surfaced, but the run still passes);
+  #    on sbx it remains a hard requirement.
+  if run_acq "exec playbook" --backend "$backend" exec "$name" -- sh -c \
+      'test -e "$HOME/.agentic-coding-playbook/.git" || test -L "$HOME/.config/opencode/AGENTS.md"'; then
+    pass "${backend}: playbook kit applied (clone or AGENTS.md link present)"
+  elif [ "$backend" = "msb" ]; then
+    warn "${backend}: playbook clone absent — known msb private-repo git-auth gap" \
+         "tracked in quickstart#203 (msb git-over-HTTPS secret substitution); non-fatal"
+  else
+    fail "${backend}: playbook clone/symlink not found"
+    dump "exec output" "$LAST_OUT"
+  fi
+
+  # Clean up the throwaway sandbox.
+  if [ -n "$KEEP" ] && [ "$FAIL" -gt 0 ]; then
+    printf '        (keeping sandbox %s; --keep set)\n' "$name"
+  else
+    run_acq "rm" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
+  fi
+}
+
+echo "verify-backends"
+echo "  workspace: $WORKDIR"
+
+# sbx
+if command -v sbx >/dev/null 2>&1; then
+  verify_backend sbx
+else
+  echo ""; echo "== backend: sbx =="; skip "sbx: not installed"
+fi
+
+# msb
+if command -v msb >/dev/null 2>&1; then
+  verify_backend msb
+else
+  echo ""; echo "== backend: msb =="; skip "msb: not installed"
+fi
+
+echo ""
+echo "  passed: $PASS   failed: $FAIL   skipped: $SKIP   warnings: $WARN"
+if [ "$WARN" -gt 0 ]; then
+  echo "  ($WARN warning(s): known, tracked limitations — not failures. See notes above.)"
+fi
+[ "$FAIL" -eq 0 ]

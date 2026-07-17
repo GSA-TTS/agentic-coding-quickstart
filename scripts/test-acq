@@ -43,6 +43,11 @@ assert_not_contains() {
 # Neutralize retry backoff.
 sleep() { :; }
 
+# Force the sbx adapter to pass kit refs through unchanged (no git fetch /
+# translation) so the harness stays fully offline. The neutral→sbx-v2
+# translation itself is exercised separately (see the kit-translate section).
+export ACQ_SBX_KIT_PASSTHROUGH=1
+
 # ---------------------------------------------------------------------------
 # Stub scaffolding
 # ---------------------------------------------------------------------------
@@ -81,17 +86,64 @@ case "${1:-}" in
   kit)  exit 0 ;;
   settings) exit 0 ;;
   secret)
-    # Log secret invocations (must NOT contain actual keys).
+    # `secret ls` returns the optional fixture (to simulate existing secrets);
+    # everything else is logged (must NOT contain actual key values) and no-ops.
+    if [ "${2:-}" = "ls" ]; then
+      [ -n "${SBX_LS_FIXTURE:-}" ] && [ -f "$SBX_LS_FIXTURE" ] && cat "$SBX_LS_FIXTURE"
+      exit 0
+    fi
     exit 0 ;;
   *) exit 0 ;;
 esac
 STUB
   chmod +x "$STUBDIR/sbx"
 
+  # Stub `msb` (microsandbox) the same way, logging every call to $CALLS.
+  # IMPORTANT: this stub DRAINS STDIN (`cat >/dev/null`) like a real `msb exec`
+  # / `msb ssh` does. That is what surfaced the loop-stdin-consumption bug (a
+  # `while read … done <<heredoc` whose body calls msb would otherwise lose all
+  # records after the first). Keeping the stub faithful guards against regressions.
+  cat >"$STUBDIR/msb" <<'MSBSTUB'
+#!/usr/bin/env bash
+{ printf 'msb'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+_msb_sub="${1:-}"
+case "$_msb_sub" in
+  --version|-V) printf 'msb 0.6.6\n' ;;
+  doctor) exit 0 ;;
+  create) : >"$STUBDIR/.msb_created" ;;
+  list|ls)
+    [ -f "$STUBDIR/.msb_sandbox_list" ] && cat "$STUBDIR/.msb_sandbox_list" ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *"echo ok"*) printf 'ok\n' ;;
+      *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
+      *"command -v"*) : ;;          # prereqs "present" (empty missing set)
+      *"test -f "*) exit 1 ;;       # markers absent
+      *"test -s "*) exit 0 ;;       # copied files present
+      *) : ;;
+    esac ;;
+  ssh)  : ;;
+  stop) : ;;
+  remove|rm) : ;;
+  copy|cp) : ;;
+  *) : ;;
+esac
+# Drain any piped stdin exactly like a real remote exec would, so the test
+# harness catches loops that leak their stdin into an inner msb call.
+cat >/dev/null 2>&1 || true
+exit 0
+MSBSTUB
+  chmod +x "$STUBDIR/msb"
+
   PATH="$STUBDIR:$PATH"
   export PATH CALLS STUBDIR
   # Export ACQ_SCRIPT_DIR so acq can locate its backends.
   export ACQ_SCRIPT_DIR="$REPO_ROOT"
+  # Force the acq secret store to a throwaway file backend (never touch the real
+  # OS keychain in tests).
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/secrets"
 }
 
 cleanup_stubs() { [ -n "${STUBDIR:-}" ] && rm -rf "$STUBDIR"; }
@@ -232,7 +284,7 @@ out=$(ACQ_BACKEND=sbx "$ACQ" create opencode /proj 2>/dev/null)
 log=$(cat "$CALLS")
 assert_contains "dispatch: create -> sbx create --name" "$log" "sbx create --name"
 assert_contains "dispatch: create includes --kit" "$log" "--kit"
-assert_contains "dispatch: create includes usai kit" "$log" "usai-provider-kit"
+assert_contains "dispatch: create includes usai kit" "$log" "acq-kits/usai-provider"
 cleanup_stubs
 
 # Verify `acq stop mybox` calls sbx stop.
@@ -288,72 +340,122 @@ assert_not_contains "qsbx: notice silenced" "$dep_silent" "deprecated"
 cleanup_stubs
 
 # ===========================================================================
-# 5. acq secret set — correct sbx command, scope required
+# 5. acq secret set — acq-owned store + backend feed, scope required
 # ===========================================================================
+# Credentials live in the acq secret store (secret-store.sh); `acq secret set`
+# writes there AND feeds the active backend's proxy per the real sbx CLI
+# contract:
+#   - built-in services (github, ...) : value piped to `sbx secret set` (stdin);
+#     acq pre-checks `sbx secret ls` and stops with an rm hint if it exists.
+#   - custom endpoints (usai)         : `sbx secret set-custom` has no stdin, so
+#     non-interactively acq stores in the acq store and prints the exact sbx
+#     command (value never forced onto argv); interactively sbx prompts.
+# make_stubs points ACQ_SECRET_STORE_DIR at a throwaway file store, and the sbx
+# stub's `secret ls` returns empty (absent) so the feed path runs.
 
-# 5a. No scope → error, no sbx call.
+# 5a. No scope → error, no sbx call, nothing stored.
 make_stubs
 out=$(ACQ_BACKEND=sbx "$ACQ" secret set usai 2>&1 || true)
 assert_contains "secret: no scope -> error" "$out" "scope required"
 log=$(cat "$CALLS")
-assert_not_contains "secret: no scope -> sbx not called" "$log" "sbx secret"
+assert_not_contains "secret: no scope -> sbx not called" "$log" "sbx secret set"
 cleanup_stubs
 
-# 5b. `-g github` -> built-in form: `sbx secret set -g github`
+# 5b. `-g github` (built-in, absent) -> `sbx secret set -g github` via stdin + stored.
 make_stubs
-(ACQ_BACKEND=sbx "$ACQ" secret set -g github) >/dev/null 2>/dev/null || true
+(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github) >/dev/null 2>/dev/null || true
 log=$(cat "$CALLS")
 assert_contains "secret: -g github -> sbx secret set -g github" "$log" "sbx secret set -g github"
+if [ -f "$STUBDIR/secrets/acq.github" ]; then
+  pass "secret: -g github stored in acq store"
+else
+  fail "secret: -g github stored in acq store" "acq.github not found in store"
+fi
 cleanup_stubs
 
-# 5c. `my-sandbox github` -> built-in form scoped to sandbox
+# 5c. `my-sandbox github` -> built-in feed scoped to sandbox + stored scoped.
 make_stubs
-(ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox github) >/dev/null 2>/dev/null || true
+(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox github) >/dev/null 2>/dev/null || true
 log=$(cat "$CALLS")
 assert_contains "secret: sandbox github -> sbx secret set my-sandbox" "$log" "sbx secret set my-sandbox github"
+if [ -f "$STUBDIR/secrets/acq.my-sandbox.github" ]; then
+  pass "secret: sandbox github stored scoped in acq store"
+else
+  fail "secret: sandbox github stored scoped in acq store" "acq.my-sandbox.github not found"
+fi
 cleanup_stubs
 
-# 5d. `acq secret set -g usai` -> custom form, global scope
+# 5d. `-g github` when it ALREADY exists -> stop with rm hint, no set call.
 make_stubs
-(
-  ACQ_SECRET_TEST_VALUE="my-usai-key" ACQ_BACKEND=sbx "$ACQ" secret set -g usai
-) >/dev/null 2>/dev/null || true
+# Make the sbx stub's `secret ls` report github present.
+printf 'github\n' > "$STUBDIR/sbx_ls"
+export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || true)
+unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "secret: -g usai -> sbx secret set-custom -g" "$log" "sbx secret set-custom -g"
-assert_contains "secret: -g usai fills in --host" "$log" "--host api.gsa.usai.gov"
-assert_contains "secret: -g usai fills in --env USAI_API_KEY" "$log" "--env USAI_API_KEY"
+assert_contains "secret: existing github -> rm hint" "$out" "sbx secret rm -g github"
+assert_not_contains "secret: existing github -> no set call" "$log" "sbx secret set -g github"
 cleanup_stubs
 
-# 5e. `acq secret set my-sandbox usai` -> custom form, sandbox scope
+# 5e. `-g usai` (custom, non-interactive/piped) -> stored + prints sbx command,
+#     value NEVER on argv, and set-custom is NOT invoked (no stdin support).
 make_stubs
-(
-  ACQ_SECRET_TEST_VALUE="my-usai-key" ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox usai
-) >/dev/null 2>/dev/null || true
+out=$(printf 'SUPERSECRETVALUE123\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai 2>&1 || true)
 log=$(cat "$CALLS")
-assert_contains "secret: sandbox usai -> sbx secret set-custom my-sandbox" "$log" "sbx secret set-custom my-sandbox"
-assert_contains "secret: sandbox usai fills in --host" "$log" "--host api.gsa.usai.gov"
+assert_contains "secret: -g usai stored msg" "$out" "stored 'usai' in the acq secret store"
+assert_contains "secret: -g usai prints set-custom cmd" "$out" "sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY"
+assert_not_contains "secret: -g usai value never in argv (stdout)" "$out" "SUPERSECRETVALUE123"
+assert_not_contains "secret: -g usai value never in sbx argv" "$log" "SUPERSECRETVALUE123"
+if [ -f "$STUBDIR/secrets/acq.usai" ]; then
+  pass "secret: -g usai stored in acq store"
+else
+  fail "secret: -g usai stored in acq store" "acq.usai not found"
+fi
 cleanup_stubs
 
-# 5f. `acq secret set -g custom-svc --host h.example.com --env MY_KEY` -> global custom form
+# 5f. `my-sandbox usai` (custom, piped) -> stored scoped + prints sandbox-scoped cmd.
 make_stubs
-(
-  ACQ_SECRET_TEST_VALUE="my-custom-key" ACQ_BACKEND=sbx "$ACQ" secret set -g custom-svc --host h.example.com --env MY_KEY
-) >/dev/null 2>/dev/null || true
-log=$(cat "$CALLS")
-assert_contains "secret: -g custom -> set-custom -g" "$log" "sbx secret set-custom -g"
-assert_contains "secret: -g custom --host value" "$log" "--host h.example.com"
-assert_contains "secret: -g custom --env value" "$log" "--env MY_KEY"
+out=$(printf 'k\n' | ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox usai 2>&1 || true)
+assert_contains "secret: sandbox usai prints set-custom my-sandbox" "$out" "sbx secret set-custom my-sandbox --host api.gsa.usai.gov"
+if [ -f "$STUBDIR/secrets/acq.my-sandbox.usai" ]; then
+  pass "secret: sandbox usai stored scoped in acq store"
+else
+  fail "secret: sandbox usai stored scoped in acq store" "acq.my-sandbox.usai not found"
+fi
 cleanup_stubs
 
-# 5g. `acq secret set -g custom-svc --host=h.example.com --env=MY_KEY` -> inline = form
+# 5g. Custom usai on the MSB backend (piped) -> stored, msb binds at provision,
+#     NO sbx set-custom command printed (msb reads the acq store directly).
 make_stubs
-(
-  ACQ_SECRET_TEST_VALUE="ignored" ACQ_BACKEND=sbx "$ACQ" secret set -g custom-svc --host=h.example.com --env=MY_KEY
-) >/dev/null 2>/dev/null || true
-log=$(cat "$CALLS")
-assert_contains "secret: inline= form -> set-custom -g" "$log" "sbx secret set-custom -g"
-assert_contains "secret: inline= --host value" "$log" "--host h.example.com"
-assert_contains "secret: inline= --env value" "$log" "--env MY_KEY"
+out=$(printf 'k\n' | ACQ_BACKEND=msb "$ACQ" secret set -g usai 2>&1 || true)
+assert_contains "secret(msb): usai stored" "$out" "acq secret store"
+assert_contains "secret(msb): usai mentions --secret binding" "$out" "USAI_API_KEY@api.gsa.usai.gov"
+assert_not_contains "secret(msb): usai does not print sbx set-custom" "$out" "sbx secret set-custom"
+cleanup_stubs
+
+# ===========================================================================
+# 5h. acq secret store unit tests (secret-store.sh directly)
+# ===========================================================================
+make_stubs
+store_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/unit-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'GLOBALV\n' | acq_secret_store "$(_acq_secret_key usai)"
+  printf 'SBXV\n'    | acq_secret_store "$(_acq_secret_key usai mybox)"
+  printf 'resolve-global=%s\n' "$(acq_secret_resolve usai)"
+  printf 'resolve-scoped=%s\n' "$(acq_secret_resolve usai mybox)"
+  printf 'resolve-fallback=%s\n' "$(acq_secret_resolve usai otherbox)"
+  acq_secret_has usai && printf 'has-usai=yes\n' || printf 'has-usai=no\n'
+  acq_secret_has nope && printf 'has-nope=yes\n' || printf 'has-nope=no\n'
+)
+assert_contains "store: global resolve" "$store_out" "resolve-global=GLOBALV"
+assert_contains "store: sandbox scope precedence" "$store_out" "resolve-scoped=SBXV"
+assert_contains "store: sandbox falls back to global" "$store_out" "resolve-fallback=GLOBALV"
+assert_contains "store: has present service" "$store_out" "has-usai=yes"
+assert_contains "store: has absent service" "$store_out" "has-nope=no"
+# File-backend entries must be 0600.
+perms=$(stat -c '%a' "$STUBDIR/unit-secrets/acq.usai" 2>/dev/null || stat -f '%Lp' "$STUBDIR/unit-secrets/acq.usai" 2>/dev/null || echo "?")
+assert_eq "store: file entry is 0600" "600" "$perms"
 cleanup_stubs
 
 # ===========================================================================
@@ -362,10 +464,10 @@ cleanup_stubs
 
 make_stubs; load_acq
 kits_joined=$(printf '%s\n' "${KITS[@]}")
-assert_contains "kits: usai-provider" "$kits_joined" "usai-provider-kit"
-assert_contains "kits: playbook" "$kits_joined" "playbook-kit"
-assert_contains "kits: zscaler" "$kits_joined" "zscaler-ca-certificate"
-assert_contains "kits: git-ssh-sign" "$kits_joined" "git-ssh-sign"
+assert_contains "kits: usai-provider" "$kits_joined" "acq-kits/usai-provider"
+assert_contains "kits: playbook" "$kits_joined" "acq-kits/agentic-coding-playbook"
+assert_contains "kits: zscaler" "$kits_joined" "acq-kits/zscaler-ca-certificate"
+assert_contains "kits: git-ssh-sign" "$kits_joined" "acq-kits/git-ssh-sign"
 cleanup_stubs
 
 # ===========================================================================
@@ -376,8 +478,815 @@ make_stubs
 out=$(ACQ_BACKEND=sbx "$ACQ" version 2>&1); rc=$?
 assert_eq "version exits 0" "0" "$rc"
 assert_contains "version: script path" "$out" "$REPO_ROOT/acq"
-assert_contains "version: patterns kit ref" "$out" "d2a379ff"
+assert_contains "version: patterns kit ref" "$out" "9c277c09"
 assert_contains "version: backend line" "$out" "backend:"
+cleanup_stubs
+
+# ===========================================================================
+# 8. msb backend — resolution, dispatch, doctor/list, version
+# ===========================================================================
+
+# 8a. Auto-detect prefers sbx when both present.
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  set +e
+  detected=$(_auto_detect_backend)
+  assert_eq "msb: auto-detect prefers sbx over msb" "sbx" "$detected"
+) 2>/dev/null; pass "msb: auto-detect order sbx>msb (both stubbed)"
+cleanup_stubs
+
+# 8b. Auto-detect falls back to msb when only msb is present.
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
+  # shellcheck disable=SC1090
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  # shellcheck source=acq.backends/msb.sh
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  detected=$(_auto_detect_backend)
+  assert_eq "msb: auto-detect falls back to msb" "msb" "$detected"
+) 2>/dev/null; pass "msb: auto-detect fallback to msb (sbx absent)"
+cleanup_stubs
+
+# 8c. --backend msb resolves and loads the msb adapter.
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND 2>/dev/null || true
+  # shellcheck disable=SC1090
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  # shellcheck source=acq.backends/msb.sh
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  acq_resolve_backend "msb"
+  assert_eq "msb: --backend msb resolves" "msb" "$ACQ_RESOLVED_BACKEND"
+) 2>/dev/null; pass "msb: --backend msb accepted"
+cleanup_stubs
+
+# 8d. Dispatch: `acq --backend msb ls` calls `msb list` (or ls alias).
+make_stubs
+out=$(ACQ_BACKEND=msb "$ACQ" ls 2>/dev/null)
+log=$(cat "$CALLS")
+assert_contains "msb: ls -> msb list" "$log" "msb list"
+cleanup_stubs
+
+# 8e. Dispatch: `acq --backend msb stop mybox` calls `msb stop`.
+make_stubs
+out=$(ACQ_BACKEND=msb "$ACQ" stop mybox 2>/dev/null)
+log=$(cat "$CALLS")
+assert_contains "msb: stop -> msb stop" "$log" "msb stop mybox"
+cleanup_stubs
+
+# 8f. Dispatch: `acq --backend msb rm mybox` calls `msb remove --force`.
+make_stubs
+out=$(ACQ_BACKEND=msb "$ACQ" rm mybox 2>/dev/null)
+log=$(cat "$CALLS")
+assert_contains "msb: rm -> msb remove --force" "$log" "msb remove --force mybox"
+cleanup_stubs
+
+# 8g. Dispatch: `acq --backend msb exec mybox -- echo hi` calls `msb exec`.
+make_stubs
+out=$(ACQ_BACKEND=msb "$ACQ" exec mybox -- echo hi 2>/dev/null)
+log=$(cat "$CALLS")
+assert_contains "msb: exec -> msb exec" "$log" "msb exec mybox"
+cleanup_stubs
+
+# 8h. `acq --backend msb version` reports msb backend + version.
+make_stubs
+out=$(ACQ_BACKEND=msb "$ACQ" version 2>&1)
+assert_contains "msb: version reports backend msb" "$out" "backend:     msb"
+assert_contains "msb: version reports msb ver" "$out" "0.6.6"
+cleanup_stubs
+
+# 8i. `acq backend list` shows a real msb row (not "coming in 1.2.x").
+make_stubs
+out=$("$ACQ" backend list 2>&1)
+assert_contains "msb: backend list shows msb version" "$out" "msb  v0.6.6"
+assert_not_contains "msb: backend list drops 'coming in 1.2.x'" "$out" "Coming in 1.2.x"
+cleanup_stubs
+
+# 8j. `acq doctor` probes msb with a real version (not the old placeholder).
+make_stubs
+out=$(printf 'n\n' | "$ACQ" doctor 2>&1)
+assert_contains "msb: doctor shows msb installed" "$out" "msb: installed v0.6.6"
+assert_not_contains "msb: doctor drops 'coming in 1.2.x'" "$out" "coming in 1.2.x"
+cleanup_stubs
+
+# 8k. msb secret set usai stores in the acq store + prints binding guidance.
+make_stubs
+out=$(ACQ_SECRET_TEST_VALUE="my-usai-key" ACQ_BACKEND=msb "$ACQ" secret set -g usai 2>&1 || true)
+assert_contains "msb: secret set usai mentions USAI_API_KEY binding" "$out" "USAI_API_KEY"
+if [ -f "$STUBDIR/secrets/acq.usai" ]; then
+  pass "msb: secret set usai stored in acq store"
+else
+  fail "msb: secret set usai stored in acq store" "acq.usai not found"
+fi
+cleanup_stubs
+
+# 8l. msb secret set github stores in the acq store + explains it is NOT bound on
+#     msb (git substitution unsupported), pointing at the known limitation.
+make_stubs
+out=$(ACQ_SECRET_TEST_VALUE="ghp_x" ACQ_BACKEND=msb "$ACQ" secret set -g github 2>&1 || true)
+assert_contains "msb: secret set github notes msb does not bind it" "$out" "does NOT bind GitHub"
+if [ -f "$STUBDIR/secrets/acq.github" ]; then
+  pass "msb: secret set github stored in acq store"
+else
+  fail "msb: secret set github stored in acq store" "acq.github not found"
+fi
+cleanup_stubs
+
+# 8m. msb provision binds USAi via --secret ENV@HOST (with --tls-intercept),
+#     does NOT bind GitHub (msb git substitution unsupported — see BACKEND_GUIDE),
+#     and the real secret VALUES never appear in the msb command line.
+make_stubs; load_acq
+: > "$CALLS"
+prov_leaks=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/prov-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL-VALUE\n' | acq_secret_store "$(_acq_secret_key usai)"
+  printf 'GH-REAL-VALUE\n'   | acq_secret_store "$(_acq_secret_key github)"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # Avoid a real network kit fetch: resolve built-in kits to local dirs.
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision provbox shell /tmp >/dev/null 2>&1
+  # Report whether real values leaked into the recorded msb calls.
+  if grep -q 'USAI-REAL-VALUE\|GH-REAL-VALUE' "$CALLS"; then echo LEAK; else echo CLEAN; fi
+)
+prov_log=$(cat "$CALLS")
+assert_contains "msb: provision enables --tls-intercept (needed for substitution)" "$prov_log" "--tls-intercept"
+assert_contains "msb: provision binds USAi via --secret" "$prov_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
+assert_not_contains "msb: provision does NOT bind github (git substitution unsupported)" "$prov_log" "GITHUB_TOKEN@"
+assert_eq "msb: provision never leaks secret values to argv" "CLEAN" "$prov_leaks"
+# Workspace is mounted at the fixed guest path (NOT host:host), and the host
+# path (/tmp) exists so no error.
+assert_contains "msb: workspace mounted at guest path" "$prov_log" "--volume /tmp:/home/agent/workspace"
+assert_not_contains "msb: workspace NOT mounted host:host" "$prov_log" "--volume /tmp:/tmp"
+cleanup_stubs
+
+# 8m2. msb provision aborts (hard fail) when the sandbox never becomes
+#      exec-ready — `msb create` returns 0 even when the guest fails to START,
+#      so acq must NOT proceed against a dead sandbox.
+make_stubs; load_acq
+# Make the msb stub's `exec` never return "ok" (simulate a sandbox that didn't
+# start), by pointing echo-ok probes at a failing exit.
+cat >"$STUBDIR/msb" <<'MSBSTUB2'
+#!/usr/bin/env bash
+{ printf 'msb'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  --version|-V) printf 'msb 0.6.6\n' ;;
+  create) exit 0 ;;              # create "succeeds" but the guest never starts
+  exec)   exit 1 ;;              # every exec fails -> never exec-ready
+  *) exit 0 ;;
+esac
+MSBSTUB2
+chmod +x "$STUBDIR/msb"
+notready_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/nr-secrets" ACQ_MSB_EXEC_READY_TIMEOUT=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision nrbox shell /tmp 2>&1
+  echo "PROVISION_RC=$?"
+)
+assert_contains "msb: not-ready aborts provision" "$notready_out" "did not become exec-ready"
+assert_contains "msb: not-ready is a hard failure (rc!=0)" "$notready_out" "PROVISION_RC=1"
+cleanup_stubs
+
+# 8m3. msb provision errors clearly when the host workspace path does not exist
+#      (msb cannot mount a nonexistent host path).
+make_stubs; load_acq
+missing_ws_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/mw-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision mwbox shell /no/such/path/here 2>&1
+  echo "RC=$?"
+)
+assert_contains "msb: missing workspace errors" "$missing_ws_out" "workspace path does not exist"
+assert_contains "msb: missing workspace is a hard failure" "$missing_ws_out" "RC=1"
+cleanup_stubs
+
+# 8n. msb provision creates the agent user and runs a uid-1000 kit command as
+#     `agent` with HOME=/home/agent (NOT as the base image's uid-1000 user),
+#     and chowns staged /home/agent files to agent. Uses a kit fixture whose
+#     startup command runs as user "1000" and reads a /home/agent file.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/agent-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # A one-kit fixture: a /home/agent file + a startup command as user 1000.
+  aok="${STUBDIR}/agentkit"
+  mkdir -p "$aok/files/home/usai-config"
+  printf 'MODULE\n' > "$aok/files/home/usai-config/merge-global-config.mjs"
+  cat >"$aok/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: agent-kit
+displayName: Agent Kit
+description: kit whose startup runs as uid 1000
+files:
+  - path: /home/agent/usai-config/merge-global-config.mjs
+    mode: "0755"
+    source: files/home/usai-config/merge-global-config.mjs
+commands:
+  - phase: startup
+    user: "1000"
+    command:
+      - node
+      - /home/agent/usai-config/merge-global-config.mjs
+SPEC
+  _acq_msb_fetch_kit() { printf '%s\n' "$aok"; }
+  acq_backend_provision agentbox shell /tmp >/dev/null 2>&1
+)
+agent_log=$(cat "$CALLS")
+assert_contains "msb: provision creates agent user" "$agent_log" "agent"
+# The uid-1000 startup command must run as `agent` with HOME=/home/agent,
+# never as `-u 1000` (which would be the base image's `node` user).
+assert_contains "msb: uid-1000 kit cmd runs as agent" "$agent_log" "msb exec agentbox -u agent -e HOME=/home/agent -- node"
+assert_not_contains "msb: uid-1000 kit cmd not run as -u 1000" "$agent_log" "msb exec agentbox -u 1000 -- node"
+assert_contains "msb: chowns staged /home/agent file to agent" "$agent_log" "chown agent /home/agent/usai-config/merge-global-config.mjs"
+cleanup_stubs
+
+# 8o. Regression: msb applies ALL kit files and ALL kit commands, not just the
+#     first. The apply loops call `msb copy`/`msb exec`, which drain stdin (the
+#     stub mimics this) — a naive `while read … done <<heredoc` would lose every
+#     record after the first. Assert a two-file, two-command kit is fully applied.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/multi-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  mk="${STUBDIR}/multikit"
+  mkdir -p "$mk/files/home"
+  printf 'A\n' > "$mk/files/home/file_one"
+  printf 'B\n' > "$mk/files/home/file_two"
+  cat >"$mk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: multi-kit
+displayName: Multi Kit
+description: two files and two startup commands
+files:
+  - path: /home/agent/file_one
+    mode: "0644"
+    source: files/home/file_one
+  - path: /home/agent/file_two
+    mode: "0644"
+    source: files/home/file_two
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - echo CMD_ALPHA
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - echo CMD_BETA
+SPEC
+  _acq_msb_fetch_kit() { printf '%s\n' "$mk"; }
+  # Apply just this kit directly (avoid the built-in kit fetches).
+  _acq_msb_apply_kit_dir multibox "$mk"
+)
+multi_log=$(cat "$CALLS")
+assert_contains "msb: applies first kit file" "$multi_log" "msb copy ${STUBDIR}/multikit/files/home/file_one multibox:/home/agent/file_one"
+assert_contains "msb: applies SECOND kit file (not dropped)" "$multi_log" "msb copy ${STUBDIR}/multikit/files/home/file_two multibox:/home/agent/file_two"
+assert_contains "msb: runs first kit command" "$multi_log" "echo CMD_ALPHA"
+assert_contains "msb: runs SECOND kit command (not dropped)" "$multi_log" "echo CMD_BETA"
+cleanup_stubs
+
+# 8o1. environment vocabulary on msb: the kit's environment[] entries are
+#      threaded onto every command as `msb exec -e NAME=value` (msb's native
+#      per-exec env flag), and an unsafe env var NAME is dropped (never reaches
+#      the exec).
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/env-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  ek="${STUBDIR}/envkit"; mkdir -p "$ek"
+  cat >"$ek/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: env-kit
+displayName: Env Kit
+description: environment vars threaded to msb exec
+environment:
+  GITLAB_HOST: gitlab.example.gov
+  "1BAD": should-be-dropped
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - echo CMD_WITH_ENV
+SPEC
+  _acq_msb_apply_kit_dir envbox "$ek"
+)
+env_log=$(cat "$CALLS")
+assert_contains "msb env: threads -e GITLAB_HOST onto exec" "$env_log" "-e GITLAB_HOST=gitlab.example.gov"
+assert_contains "msb env: command still runs with env" "$env_log" "echo CMD_WITH_ENV"
+assert_not_contains "msb env: unsafe env var name dropped" "$env_log" "1BAD"
+cleanup_stubs
+
+# 8o2. SECURITY: a hostile kit `mode` must not reach a root shell. kit_spec_files
+#      drops the record; the msb chmod uses argv (no sh -c interpolation); and
+#      the injected command must never appear in the recorded msb calls.
+make_stubs; load_acq
+inj_out=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  ik="${STUBDIR}/injkit"; mkdir -p "$ik/files"
+  printf 'x\n' > "$ik/files/evil"
+  cat >"$ik/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: inj-kit
+displayName: Inj
+description: hostile mode
+files:
+  - path: /home/agent/evil
+    mode: "0644; touch /tmp/PWNED"
+    source: files/evil
+SPEC
+  kit_spec_files "$ik/spec.yaml" 2>&1
+)
+assert_contains "sec: hostile mode record is dropped+warned" "$inj_out" "invalid mode"
+# The rejected value is echoed in the warning; assert no actual FILE RECORD (a
+# tab-separated path<TAB>mode… line) was emitted for it.
+inj_records=$(printf '%s\n' "$inj_out" | grep -v '^kit-translate:' || true)
+assert_eq "sec: hostile mode emits no file record" "" "$inj_records"
+cleanup_stubs
+
+# 8o3. SECURITY: the msb copy/chmod path refuses a non-octal mode and an unsafe
+#      path, and never interpolates them into an sh -c (chmod is argv).
+make_stubs; load_acq
+: > "$CALLS"
+sec_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # Directly exercise the copy helper with a hostile mode + a metachar path.
+  _acq_msb_copy_file_verified secbox /etc/hostname '/home/agent/ok' '0644; touch /tmp/PWNED' 2>&1
+  _acq_msb_copy_file_verified secbox /etc/hostname '/home/agent/a;b' '0644' 2>&1
+)
+sec_log=$(cat "$CALLS")
+assert_contains "sec: non-octal mode refused" "$sec_out" "non-octal mode"
+assert_contains "sec: unsafe path refused" "$sec_out" "unsafe path"
+assert_not_contains "sec: chmod never via sh -c string" "$sec_log" "chmod 0644;"
+assert_not_contains "sec: injected command never reaches msb argv" "$sec_log" "PWNED"
+cleanup_stubs
+
+# 8o4. SECURITY: a hostile command `user` is dropped by kit_spec_commands (it is
+#      interpolated into `msb exec -u <user>`), so the command never runs.
+make_stubs; load_acq
+usr_out=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  uk="${STUBDIR}/userkit"; mkdir -p "$uk"
+  cat >"$uk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: user-kit
+displayName: User
+description: hostile user
+commands:
+  - phase: startup
+    user: "0 -- sh -c touch/tmp/PWNED"
+    command:
+      - true
+SPEC
+  kit_spec_commands "$uk/spec.yaml" 2>&1
+)
+assert_contains "sec: hostile command user is dropped+warned" "$usr_out" "unsafe user"
+assert_not_contains "sec: hostile user not emitted as a command record" "$usr_out" "__CMD__"
+cleanup_stubs
+
+# 8o5. `acq kit validate` REPORTS (not silently drops) a hostile mode / bad phase.
+make_stubs; load_acq
+val_out=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  vk="${STUBDIR}/valkit"; mkdir -p "$vk/files"
+  printf 'x\n' > "$vk/files/f"
+  cat >"$vk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: val-kit
+displayName: Val
+description: bad mode + bad phase
+files:
+  - path: /home/agent/f
+    mode: "0644; rm -rf /"
+    source: files/f
+commands:
+  - phase: bogus-phase
+    user: "0"
+    command:
+      - true
+SPEC
+  kit_validate "$vk" 2>&1
+  echo "RC=$?"
+)
+assert_contains "kit validate: reports non-octal mode" "$val_out" "mode must be octal"
+assert_contains "kit validate: reports unknown phase" "$val_out" "unknown command phase"
+assert_contains "kit validate: fails (RC=1)" "$val_out" "RC=1"
+cleanup_stubs
+
+# 8o5b. `acq kit validate` REPORTS (not silently drops) a bad environment var
+#       NAME (env values reach the guest env and possibly a shell).
+make_stubs; load_acq
+env_val_out=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  evk="${STUBDIR}/envvalkit"; mkdir -p "$evk"
+  cat >"$evk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: env-val-kit
+displayName: Env Val
+description: bad env var name
+environment:
+  GOOD_VAR: ok
+  "1BAD": nope
+SPEC
+  kit_validate "$evk" 2>&1
+  echo "RC=$?"
+)
+assert_contains "kit validate: reports invalid env var name" "$env_val_out" "invalid env var name"
+assert_contains "kit validate: env-name failure (RC=1)" "$env_val_out" "RC=1"
+cleanup_stubs
+
+# 8p. msb provision passes --dns-nameserver so the guest can resolve allow-listed
+#     hosts (the host's corporate resolver is unreachable from the microVM).
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/dns-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision dnsbox shell /tmp >/dev/null 2>&1
+)
+dns_log=$(cat "$CALLS")
+assert_contains "msb: provision sets --dns-nameserver" "$dns_log" "--dns-nameserver 1.1.1.1"
+cleanup_stubs
+
+# 8q. ACQ_MSB_DNS_NAMESERVER override + disable (empty = omit the flag).
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/dns2-secrets" ACQ_MSB_DNS_NAMESERVER="9.9.9.9"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision dns2box shell /tmp >/dev/null 2>&1
+)
+assert_contains "msb: DNS nameserver override honored" "$(cat "$CALLS")" "--dns-nameserver 9.9.9.9"
+cleanup_stubs
+
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/dns3-secrets" ACQ_MSB_DNS_NAMESERVER=""
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision dns3box shell /tmp >/dev/null 2>&1
+)
+assert_not_contains "msb: empty DNS nameserver omits the flag" "$(cat "$CALLS")" "--dns-nameserver"
+cleanup_stubs
+
+# ===========================================================================
+# 9. acq kit subcommands
+# ===========================================================================
+
+# 9a. `acq kit list` shows the pinned neutral kits.
+make_stubs
+out=$("$ACQ" kit list 2>&1)
+assert_contains "kit: list shows patterns ref" "$out" "9c277c09"
+assert_contains "kit: list shows acq-kits dir" "$out" "acq-kits"
+assert_contains "kit: list shows usai-provider" "$out" "usai-provider"
+assert_contains "kit: list shows git-ssh-sign" "$out" "git-ssh-sign"
+cleanup_stubs
+
+# 9b. `acq kit validate` accepts a well-formed local neutral kit.
+make_stubs
+kitdir="$STUBDIR/goodkit"
+mkdir -p "$kitdir/files/home"
+printf 'hello\n' > "$kitdir/files/home/thing"
+cat >"$kitdir/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: sample-kit
+displayName: Sample Kit
+description: A sample neutral kit for the offline test.
+caps:
+  network:
+    allow:
+      - example.com
+files:
+  - path: /home/agent/thing
+    mode: "0644"
+    source: files/home/thing
+commands:
+  - phase: startup
+    user: "1000"
+    command:
+      - sh
+      - -c
+      - echo hi
+SPEC
+out=$("$ACQ" kit validate "$kitdir" 2>&1); rc=$?
+assert_eq "kit: validate good kit exits 0" "0" "$rc"
+assert_contains "kit: validate good kit OK" "$out" "OK"
+cleanup_stubs
+
+# 9c. `acq kit validate` rejects a kit with a bad schemaVersion + missing source.
+make_stubs
+badkit="$STUBDIR/badkit"
+mkdir -p "$badkit"
+cat >"$badkit/spec.yaml" <<'SPEC'
+schemaVersion: "2"
+kind: mixin
+name: Bad_Name
+displayName: Bad
+description: bad kit
+files:
+  - path: relative/path
+    mode: "0644"
+    source: files/missing.txt
+commands:
+  - phase: bogusphase
+    command:
+      - true
+SPEC
+out=$("$ACQ" kit validate "$badkit" 2>&1); rc=$?
+assert_eq "kit: validate bad kit exits 1" "1" "$rc"
+assert_contains "kit: validate flags schemaVersion" "$out" "hybrid/v1"
+assert_contains "kit: validate flags bad name" "$out" "kebab-case"
+assert_contains "kit: validate flags absolute path" "$out" "absolute"
+assert_contains "kit: validate flags missing source" "$out" "source not found"
+assert_contains "kit: validate flags bad phase" "$out" "unknown command phase"
+cleanup_stubs
+
+# 9d. `acq kit apply NAME KITREF` on the msb backend calls msb exec (translated).
+make_stubs
+applykit="$STUBDIR/applykit"
+mkdir -p "$applykit"
+cat >"$applykit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: apply-kit
+displayName: Apply Kit
+description: kit applied mid-life
+commands:
+  - phase: startup
+    user: "1000"
+    command:
+      - sh
+      - -c
+      - echo applied
+SPEC
+out=$(ACQ_BACKEND=msb "$ACQ" kit apply mybox "$applykit" 2>/dev/null || true)
+log=$(cat "$CALLS")
+assert_contains "kit: apply (msb) runs msb exec" "$log" "msb exec mybox"
+cleanup_stubs
+
+# ===========================================================================
+# 10. kit-translate: neutral hybrid/v1 -> sbx-v2 synthesis (offline)
+# ===========================================================================
+
+make_stubs; load_acq
+# Build a local neutral kit and translate it to an sbx-v2 kit dir; assert the
+# synthesized spec is sbx schemaVersion "2" and carries the payload + command.
+tkit="$STUBDIR/tkit"
+mkdir -p "$tkit/files/home/tool"
+printf 'payload\n' > "$tkit/files/home/tool/config"
+cat >"$tkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: translate-kit
+displayName: Translate Kit
+description: >
+  A kit exercising the neutral->sbx-v2 translation, including a multi-line
+  literal block command and a colon: inside the description.
+caps:
+  network:
+    allow:
+      - api.example.com:443
+files:
+  - path: /home/agent/tool/config
+    mode: "0644"
+    source: files/home/tool/config
+commands:
+  - phase: install
+    user: "0"
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        echo "line one"
+        echo "line two"
+  - phase: startup
+    user: "1000"
+    command:
+      - node
+      - /home/agent/tool/run.mjs
+SPEC
+tout="$STUBDIR/tout"
+( . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  kit_translate_to_sbx "$tkit" "$tout" >/dev/null ) 2>/dev/null
+sbxspec=$(cat "$tout/spec.yaml" 2>/dev/null || true)
+assert_contains "translate: emits sbx schemaVersion 2" "$sbxspec" 'schemaVersion: "2"'
+assert_contains "translate: carries caps.network.allow" "$sbxspec" "api.example.com:443"
+assert_contains "translate: has install phase" "$sbxspec" "install:"
+assert_contains "translate: has startup phase" "$sbxspec" "startup:"
+assert_contains "translate: preserves multi-line block body" "$sbxspec" "line two"
+# The static payload file is copied under files/.
+if [ -f "$tout/files/home/tool/config" ]; then
+  pass "translate: copies files/ payload tree"
+else
+  fail "translate: copies files/ payload tree" "missing $tout/files/home/tool/config"
+fi
+# Regression (sbx unmarshal typing): commands.install[].command MUST be a shell
+# STRING (`command: |`), while commands.startup[]/initFiles[] MUST be an argv
+# SEQUENCE — mismatching yields "cannot unmarshal !!seq into string" (install)
+# or "!!str into []string" (startup). The tkit above has a `sh -c` INSTALL and a
+# node STARTUP.
+install_block=$(printf '%s\n' "$sbxspec" | sed -n '/^  install:/,/^  [a-z]/p')
+assert_contains "translate: install emits command string" "$install_block" "command: |"
+assert_not_contains "translate: install is not an argv seq" "$install_block" "        - sh"
+# A non-shell argv (node ...) startup MUST stay an argv sequence.
+startup_block=$(printf '%s\n' "$sbxspec" | sed -n '/^  startup:/,$p')
+assert_contains "translate: node startup emits argv seq" "$startup_block" "- node"
+cleanup_stubs
+
+# 10a2. A `sh -c` STARTUP command (zscaler/playbook shape) MUST be an argv SEQ,
+#       not a string — sbx types startup as []string. Regression for the second
+#       unmarshal error ("!!str ... into []string").
+make_stubs; load_acq
+shkit="$STUBDIR/shkit"; mkdir -p "$shkit"
+cat >"$shkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: sh-startup-kit
+displayName: Sh Startup Kit
+description: startup uses sh -c
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        echo hello
+SPEC
+shout="$STUBDIR/shout"
+( . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  kit_translate_to_sbx "$shkit" "$shout" >/dev/null ) 2>/dev/null
+shspec=$(cat "$shout/spec.yaml" 2>/dev/null || true)
+sh_startup_block=$(printf '%s\n' "$shspec" | sed -n '/^  startup:/,$p')
+assert_contains "translate: sh -c startup emits argv seq (- sh)" "$sh_startup_block" "        - sh"
+assert_not_contains "translate: sh -c startup is not a bare string" "$sh_startup_block" "command: |"
+cleanup_stubs
+
+# 10a3. environment vocabulary: kit_spec_env parses NAME/value pairs, DROPS an
+#       unsafe env var name (with a stderr warning), and kit_translate_to_sbx
+#       emits an sbx-v2 `environment.variables` block for the valid entries.
+make_stubs; load_acq
+ekit="$STUBDIR/ekit"; mkdir -p "$ekit"
+cat >"$ekit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: env-kit
+displayName: Env Kit
+description: exercises the environment vocabulary
+environment:
+  OPENCODE_CONFIG: /home/agent/usai-config/opencode.jsonc
+  GITLAB_HOST: gitlab.example.gov
+  "1BAD": should-be-dropped
+commands:
+  - phase: startup
+    user: "1000"
+    command:
+      - node
+      - /home/agent/run.mjs
+SPEC
+env_parse=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  kit_spec_env "$ekit/spec.yaml" 2>/dev/null
+)
+assert_contains "env: parses OPENCODE_CONFIG" "$env_parse" "OPENCODE_CONFIG"
+assert_contains "env: parses GITLAB_HOST value" "$env_parse" "gitlab.example.gov"
+env_warn=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  kit_spec_env "$ekit/spec.yaml" 2>&1 >/dev/null
+)
+assert_contains "env: unsafe env var NAME is dropped+warned" "$env_warn" "unsafe name: 1BAD"
+assert_not_contains "env: unsafe env var NAME not emitted" "$env_parse" "1BAD"
+# sbx-v2 synthesis emits environment.variables.
+eout="$STUBDIR/eout"
+( . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  kit_translate_to_sbx "$ekit" "$eout" >/dev/null ) 2>/dev/null
+espec=$(cat "$eout/spec.yaml" 2>/dev/null || true)
+assert_contains "env: sbx-v2 emits environment block" "$espec" "environment:"
+assert_contains "env: sbx-v2 emits variables map" "$espec" "  variables:"
+assert_contains "env: sbx-v2 emits OPENCODE_CONFIG var" "$espec" "OPENCODE_CONFIG: /home/agent/usai-config/opencode.jsonc"
+assert_not_contains "env: sbx-v2 drops unsafe var name" "$espec" "1BAD"
+cleanup_stubs
+
+# 10b. msb net-rule uses the bare-FQDN target form `allow@HOST` (matching msb's
+#      own --help example `allow@example.com:tcp:443`), strips any :port, and
+#      does NOT use the `domain=`/`domain:` prefixes (domain= can break DNS;
+#      domain: is the ambiguous single-label form msb rejects).
+make_stubs; load_acq
+nr_out=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh" 2>/dev/null
+  nkit="$STUBDIR/nkit"; mkdir -p "$nkit"
+  cat >"$nkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: net-kit
+displayName: Net Kit
+description: net rule kit
+caps:
+  network:
+    allow:
+      - api.gsa.usai.gov
+      - github.com:443
+SPEC
+  arr=()
+  _acq_msb_net_rules_into arr "$nkit/spec.yaml"
+  printf '%s\n' "${arr[@]}"
+)
+assert_contains "msb: net-rule uses bare FQDN target" "$nr_out" "allow@api.gsa.usai.gov"
+assert_contains "msb: net-rule strips :port" "$nr_out" "allow@github.com"
+assert_not_contains "msb: net-rule avoids domain= prefix" "$nr_out" "allow@domain="
+assert_not_contains "msb: net-rule avoids ambiguous domain: form" "$nr_out" "allow@domain:"
+cleanup_stubs
+
+# 10c. msb prerequisite check: warns when the base image lacks a kit tool, and
+#      is silent when all are present / when ACQ_MSB_SKIP_PREREQ_CHECK is set.
+#      (Uses a dedicated msb stub whose `command -v` loop reports the missing set.)
+make_stubs; load_acq
+PQSTUB="$STUBDIR/pq"; mkdir -p "$PQSTUB"
+cat >"$PQSTUB/msb" <<'PQ'
+#!/usr/bin/env bash
+snip=""; prev=""; for a in "$@"; do [ "$prev" = "-c" ] && { snip="$a"; break; }; prev="$a"; done
+case "$1" in --version) echo "msb 0.6.6"; exit 0;; esac
+# The prereq check runs a snippet containing "command -v"; emit MSB_MISSING.
+case "$snip" in *"command -v"*) printf '%s' "${MSB_MISSING:-}"; exit 0;; esac
+exit 0
+PQ
+chmod +x "$PQSTUB/msb"
+missing_out=$(
+  export ACQ_SCRIPT_DIR="$REPO_ROOT"; . "${REPO_ROOT}/acq.backends/common.sh"
+  export PATH="$PQSTUB:$PATH" MSB_MISSING=" node git"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_check_prereqs testbox 2>&1
+)
+assert_contains "msb: prereq check warns on missing tools" "$missing_out" "missing kit prerequisite"
+present_out=$(
+  export ACQ_SCRIPT_DIR="$REPO_ROOT"; . "${REPO_ROOT}/acq.backends/common.sh"
+  export PATH="$PQSTUB:$PATH" MSB_MISSING=""
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_check_prereqs testbox 2>&1
+)
+assert_not_contains "msb: prereq check silent when all present" "$present_out" "missing kit prerequisite"
+skip_out=$(
+  export ACQ_SCRIPT_DIR="$REPO_ROOT"; . "${REPO_ROOT}/acq.backends/common.sh"
+  export PATH="$PQSTUB:$PATH" MSB_MISSING=" node" ACQ_MSB_SKIP_PREREQ_CHECK=1
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_check_prereqs testbox 2>&1
+)
+assert_not_contains "msb: prereq check honors SKIP flag" "$skip_out" "missing kit prerequisite"
 cleanup_stubs
 
 # ===========================================================================

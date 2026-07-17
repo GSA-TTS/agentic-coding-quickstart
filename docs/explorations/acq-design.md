@@ -730,14 +730,14 @@ Both will reference this document (`docs/adr/agentic-coding-quickstart-v2-design
 
 ### Phase timeline
 
-| Release | Change | Status |
-|---------|--------|--------|
-| **1.1.0** | Add `acq` (sbx driver only), deprecate `qsbx` | **Shipped** |
-| **1.2.0** | Add `msb` driver; neutral hybrid/v1 kit spec; `kits/` move in patterns | Planned |
-| **1.3.0** | Add `ppp` driver | Deferred / undecided |
-| **2.0.0** | `acq` becomes primary; remove `qsbx` | Planned |
+| Phase | Target release | Change | Status |
+|-------|----------------|--------|--------|
+| **Phase 1** | 1.1.0 | Add `acq` (sbx driver only), deprecate `qsbx` | **Shipped** |
+| **Phase 2** | 1.2.0 | Add `msb` driver; neutral hybrid/v1 kit spec; `acq-kits/` move in patterns | **Shipped** |
+| **Phase 3** | 1.3.0 | Add `ppp` driver | Deferred / undecided |
+| **Phase 4** | 2.0.0 | `acq` becomes primary; remove `qsbx` | Planned |
 
-### What is implemented (1.1.0)
+### What is implemented (Phase 1 / 1.1.0)
 
 - **`acq` entry point** (`acq`, `chmod +x`) — full command surface for the
   qsbx-parity subset plus `backend`/`doctor`:
@@ -764,7 +764,7 @@ Both will reference this document (`docs/adr/agentic-coding-quickstart-v2-design
 
 ### Deviations from this design doc
 
-The following are **deliberate deductions** for 1.1.x, recorded here so readers
+The following are **deliberate deductions** for Phase 1 (1.1.x), recorded here so readers
 can distinguish "not done yet" from "done differently":
 
 1. **XDG config path, not `~/.acq/`.** The design draft uses `~/.acq/config.yaml`
@@ -775,39 +775,39 @@ can distinguish "not done yet" from "done differently":
 
 2. **Bash adapter, not Python ABC.** §7 specifies a Python `IsolationBackend`
    ABC; the note says "v2.0.0 ships a bash implementation of the same shape."
-   1.1.x ships that bash implementation. Function-level parity with the ABC
+   Phase 1 (1.1.x) ships that bash implementation. Function-level parity with the ABC
    contract is maintained; a Go/Python port is a future option.
 
 3. **No neutral hybrid/v1 kit spec.** §3 describes `schemaVersion: "hybrid/v1"`
-   and `kit-translate.sh`. 1.1.x pins the **same four sbx-kit refs** as qsbx
+   and `kit-translate.sh`. Phase 1 (1.1.x) pins the **same four sbx-kit refs** as qsbx
    unchanged — no kit translation layer, no new schema, no `kits/` move in the
-   patterns repo. These land in 1.2.x when a second backend actually needs a
+   patterns repo. These land in Phase 2 (1.2.x) when a second backend actually needs a
    neutral vocabulary.
 
 4. **No `acq kit apply|list|validate`, no `acq policy`, no `acq secret` swap-on-access model.**
-   These are deferred to 1.2.x+. `acq secret set` is a thin wrapper over the
+   These are deferred to Phase 2+ (1.2.x+). `acq secret set` is a thin wrapper over the
    sbx secret CLI for the current release.
 
 5. **ADR number is 0010, not 0008.** The design says "ADR-0008". ADRs 0008 and
    0009 were already in use in this repo (stale-placeholder recovery and
    in-place kit healing). The pluggable-backend ADR is `docs/adr/0010-acq-pluggable-backends.md`.
 
-6. **`qsbx` is not removed.** §5 says "`qsbx` replaced by `acq`". In 1.1.x,
+6. **`qsbx` is not removed.** §5 says "`qsbx` replaced by `acq`". In Phase 1 (1.1.x),
    `qsbx` is deprecated (notice + docs) but fully functional; it is scheduled
-   for removal in 2.0.0 (not 1.x). `scripts/test-migrate-or-halt` and
-   `scripts/verify-migrate-live` are also retained until 2.0.0.
+   for removal in Phase 4 (2.0.0). `scripts/test-migrate-or-halt` and
+   `scripts/verify-migrate-live` are also retained until Phase 4 (2.0.0).
 
 7. **`docs/QUICKSTART_SBX.md` not yet replaced.** §5 says it is replaced by
-   `docs/QUICKSTART.md` + per-backend sections. 1.1.x adds `docs/QUICKSTART.md`
+   `docs/QUICKSTART.md` + per-backend sections. Phase 1 (1.1.x) adds `docs/QUICKSTART.md`
    (acq-focused) alongside the existing `docs/QUICKSTART_SBX.md` (kept as
-   detailed sbx reference). Full replacement deferred to 2.0.0.
+   detailed sbx reference). Full replacement deferred to Phase 4 (2.0.0).
 
 8. **`kit-translate.sh` not present.** The repo layout in §5 lists
    `acq.backends/kit-translate.sh`. This file is not needed until a second
-   backend requires kit translation; it is omitted in 1.1.x.
+   backend requires kit translation; it is omitted in Phase 1 (1.1.x).
 
 9. **`scripts/verify-backends` not present.** §5 lists a CI verification
-   script. Not implemented in 1.1.x; live sbx verification is deferred (this
+   script. Not implemented in Phase 1 (1.1.x); live sbx verification is deferred (this
    environment runs inside an sbx sandbox and cannot create nested sandboxes).
 
 10. **`sbx secret set-custom` does not support `--password-stdin`.** The
@@ -825,3 +825,113 @@ can distinguish "not done yet" from "done differently":
     Use `acq secret set -g usai` for global, or `acq secret set SANDBOX usai`
     to scope to a single sandbox. All other `acq secret` subcommands
     (`ls`, `rm`, `import`, `set-custom`, `--help`) pass through to sbx unchanged.
+
+### What is implemented (Phase 2 / 1.2.0)
+
+Phase 2 adds the **msb (microsandbox) backend** and the **neutral `hybrid/v1`
+kit vocabulary** with a translation layer. Recorded in
+`docs/adr/0011-msb-backend-and-neutral-kits.md`. Delivered:
+
+- **`acq.backends/kit-translate.sh`** — the shared neutral-spec layer: fetches a
+  kit ref (remote `git+https#ref=&dir=` via sparse checkout, or a local dir),
+  parses the `hybrid/v1` `spec.yaml` with `awk` (no `yq`), dispatches
+  `backend_shortcuts.<backend>`, synthesizes an sbx-v2 kit dir for the sbx
+  backend, and provides `kit_validate` for `acq kit validate`. Multi-line
+  command bodies are carried as base64 tokens so literal block scalars survive.
+- **`acq.backends/msb.sh`** — the microsandbox adapter (full ADR-0010 contract).
+  Drives the neutral ops directly: `caps.network.allow` → `--net-rule`,
+  `files[]` → `msb copy`, `commands[]` → `msb exec` (install marker-gated),
+  zscaler shortcut → `--trust-host-cas`, USAi key → `--secret ENV@HOST`.
+- **`acq.backends/sbx.sh`** — kit application routed through `kit-translate.sh`
+  (synthesizes a local sbx-v2 kit before `sbx --kit`/`sbx kit add`); observable
+  behavior for sbx users is unchanged.
+- **`acq.backends/common.sh`** — `PATTERNS_KIT_REF`/`DIR` repointed to the
+  neutral `acq-kits/` tree; `_auto_detect_backend` gains `msb` (sbx preferred);
+  real msb probe in `acq doctor`.
+- **`acq`** — real msb row in `backend list`; new `kit list|validate|apply`.
+- **`scripts/verify-backends`** — per-installed-backend live E2E check (design
+  §9). **`scripts/test-acq`** — msb + `acq kit` + neutral→sbx-v2 translation
+  cases (offline, stubs `msb`).
+- **Docs** — `BACKEND_GUIDE.md` msb section flipped to shipped;
+  `QUICKSTART.md` gains a "choose a backend" step and the msb run flow.
+
+### Additional deviations from this design doc (Phase 2)
+
+1. **Kit home is `acq-kits/`, not `kits/`.** The handoff §4.1 said
+   `integrations/isolation/kits`; Part A (patterns repo) shipped
+   `integrations/isolation/acq-kits/` — a reviewer asked for the explicit
+   `acq` association. This repo pins `acq-kits/`, and neutral specs reference
+   payloads via a `source:` field under each kit's `files/` tree. Kit dir names
+   also dropped the `-kit` suffix (`usai-provider-kit` → `usai-provider`).
+
+2. **No `yq` runtime dependency.** §10 flags the neutral spec needs a
+   validator; the parser is `awk`-based (no new dependency). Multi-line command
+   bodies are base64-framed to survive block scalars through the shell pipeline.
+   The authoritative JSON Schema lives in the patterns repo
+   (`schemas/kit-hybrid-v1.schema.json`); `acq kit validate` does structural
+   checks without a full JSON-schema engine.
+
+3. **Secrets are acq-owned (bash keychain subset of §7.5), not sbx-specific.**
+   Phase 2 adds `acq.backends/secret-store.sh`: one store keyed
+   `acq.<service>` / `acq.<sandbox>.<service>` (sandbox scope wins) in the OS
+   keychain (`security`/`secret-tool`) with a `0600` file fallback. `acq secret
+   set` writes there; BOTH backends read from it at provision — sbx feeds its
+   proxy (`sbx secret set`/`set-custom`, piped), msb binds `--secret ENV@HOST`
+   with `--tls-intercept` (USAi only) and re-feeds running sandboxes with `msb
+   modify --secret`. The value never enters the guest (msb gives it a
+   placeholder), never appears in argv, and is never serialized. **GitHub is NOT
+   bound on msb** — msb 0.6.6 doesn't substitute the placeholder for git's HTTPS
+   clone to github.com (works for the USAi `Authorization` header, not git; see
+   microsandbox #756/#768/#1170), so the private playbook clone is skipped on
+   msb (non-fatal). This is the bash subset of §7.5; the full
+   Go/`go-keyring`/`age` + MITM `CredentialRewriteRule` + swap-on-access
+   placeholder component remains a larger future effort. The earlier "msb uses
+   raw host-env `--secret`, unified store deferred" note is superseded.
+
+4. **msb `ports` is create/run-time only** (msb 0.6.6 has no post-hoc ports
+   verb), and **msb `ensure_kits_applied` re-applies kits idempotently** rather
+   than a state-preserving in-place add (msb has no `sbx kit add` equivalent;
+   it never silently destroys state).
+
+5. **msb provides the kits' `agent`/uid-1000 + /home/agent contract itself,
+   plus several live-bring-up fixes.**
+   The kits assume the sbx agent-template user (`agent`, HOME=/home/agent, run
+   as `-u 1000`). A plain OCI base has no such user (node:22-bookworm ships
+   `node` at uid 1000), which caused the usai `node merge-global-config.mjs`
+   MODULE_NOT_FOUND and the playbook-clone failure (both ran as the wrong
+   user/home). The adapter creates the `agent` user at provision (idempotent,
+   offline), chowns staged `/home/agent` files to it, and runs uid-1000 kit
+   commands as `agent` with `HOME=/home/agent` (addressed by name, not literal
+   uid). Other gotchas found during live bring-up, all fixed:
+   (i) the kit files/commands apply loops buffer their records into arrays
+   first — an inner `msb copy`/`msb exec` consumes the loop's stdin, which
+   silently dropped every file/command after the first (this was the actual
+   cause of the missing `merge-global-config.mjs`, not the earlier copy-race
+   theory; `msb` exec/copy persistence itself was verified fine);
+   (ii) the host workspace is mounted at a fixed guest path
+   (`/home/agent/workspace`), because msb won't create the host path and
+   mishandles an identical host:guest `/tmp` mount;
+   (iii) `--dns-nameserver` (default `1.1.1.1`) is passed to `msb create`,
+   because the host's corporate/VPN resolver is unreachable from the microVM
+   (verified: with it, the models API resolves and returns 401/200 and github
+   returns 200);
+   (iv) a sandbox that isn't exec-ready after create is a HARD failure —
+   `msb create` returns 0 even when the guest fails to START, so earlier runs
+   were false successes;
+   (v) secret substitution requires `--tls-intercept` (the interception CA is
+   auto-trusted in the guest), and only covers the `Authorization` header path
+   (USAi works); it does NOT work for git's HTTPS clone to github.com in 0.6.6,
+   so the private playbook clone is skipped on msb (tracked; microsandbox
+   #756/#768/#1170).
+
+6. **`PATTERNS_KIT_REF` is pinned to the patterns v1.7.0 release commit**
+   (`9c277c09ed4ad45fd11709d6b048a58adc785443`), which includes Part A (#221),
+   the openchamber conversion (#224), and the `environment` vocabulary (#227).
+   The Phase 2 handoff §4.1 gate is satisfied; pinning to a release tag mirrors
+   the Phase 1 v1.5.0 pin.
+
+7. **`scripts/verify-backends` live run is deferred.** The script exists
+   (design §9) but the full `acq run … --backend msb` loop cannot run inside a
+   sandbox (no nested sandboxes) and needs host virtualization. The msb CLI flag
+   shapes were verified against `msb 0.6.6`; the live loop is deferred to a
+   sandbox-capable host, mirroring ADR-0009/ADR-0010.

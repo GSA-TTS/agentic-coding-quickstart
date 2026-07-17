@@ -3,20 +3,37 @@ title: "acq Backend Quickstart"
 description: "Get running with acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-07-14"
+last_updated: "2026-07-15"
 audience: "developers"
-keywords: ["acq", "backend", "sbx", "quickstart", "sandbox"]
-related_files: ["docs/BACKEND_GUIDE.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md"]
+keywords: ["acq", "backend", "sbx", "msb", "quickstart", "sandbox"]
+related_files: ["docs/BACKEND_GUIDE.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
 
 # acq Backend Quickstart
 
-> **`acq` is the recommended entry point** as of version 1.1.0. It replaces
-> `qsbx` and adds a pluggable-backend architecture. For now, it defaults to
-> the **sbx** backend and the same four kits as `qsbx`. Migration is seamless:
-> replace `./qsbx` with `./acq` — the commands are identical on the sbx backend.
+> **`acq` is the recommended entry point.** It replaces `qsbx` and adds a
+> pluggable-backend architecture. As of 1.2.0 it supports two backends —
+> **sbx** (Docker Sandboxes) and **msb** (microsandbox) — sharing one neutral
+> kit vocabulary. Migration from `qsbx` is seamless: replace `./qsbx` with
+> `./acq` — the commands are identical on the sbx backend.
+
+---
+
+## Choose a backend
+
+`acq` runs the same commands on either backend; you only choose the backend
+once (install one, and it auto-detects). Pick the one that fits your environment:
+
+| Backend | Install | Fits when |
+|---------|---------|-----------|
+| **sbx** | `brew install docker/tap/sbx && sbx login` | You have Docker and want the commercial product |
+| **msb** | `curl -fsSL https://install.microsandbox.dev \| sh` | You want a FOSS microVM runtime, no Docker seat, snapshots |
+
+See [docs/BACKEND_GUIDE.md](BACKEND_GUIDE.md) for a full comparison. `acq`
+auto-detects an installed backend (sbx preferred when both are present); persist
+a choice with `acq backend set <sbx|msb>` or `acq doctor`.
 
 ---
 
@@ -86,15 +103,16 @@ kits, validates your USAi key, and attaches the agent.
 3. `backend:` in `~/.config/acq/config.yaml`
 4. Auto-detect: first installed backend found
 
-**Today (1.1.x), only the `sbx` backend is available.** A second backend
-(`msb` — microsandbox) is planned for 1.2.0. See
-[docs/BACKEND_GUIDE.md](BACKEND_GUIDE.md) for per-backend details.
+**Today (1.2.x), two backends ship: `sbx` and `msb`.** See
+[docs/BACKEND_GUIDE.md](BACKEND_GUIDE.md) for per-backend details. A third
+backend (`ppp` — Podman-Plus-Proxy) is deferred.
 
 ### Persist the default backend
 
 ```bash
-# Write `backend: sbx` to ~/.config/acq/config.yaml
+# Write `backend: sbx` (or msb) to ~/.config/acq/config.yaml
 ./acq backend set sbx
+./acq backend set msb
 
 # Or run doctor and answer the prompt
 ./acq doctor
@@ -104,6 +122,41 @@ kits, validates your USAi key, and attaches the agent.
 
 ```bash
 ./acq --backend sbx run opencode /proj
+./acq --backend msb run opencode /proj
+```
+
+---
+
+## Running on the msb backend
+
+```bash
+# 1. Install msb (microsandbox) and confirm the host is ready
+curl -fsSL https://install.microsandbox.dev | sh
+msb doctor          # checks KVM/HVF/WHP; msb doctor --fix to set up
+
+# 2. Export the USAi key (msb binds it from a host env var at create; the real
+#    value never enters the guest)
+export USAI_API_KEY=<your-usai-key>
+
+# 3. Run — acq auto-detects msb, or force it with --backend msb
+./acq --backend msb run opencode /path/to/your/project
+```
+
+msb takes native shortcuts where it has a strictly-better primitive — e.g. the
+Zscaler CA kit uses `--trust-host-cas` instead of the file-drop mechanism. Kit
+behavior is otherwise identical across backends.
+
+---
+
+## Managing kits
+
+Kits are authored once in the neutral `hybrid/v1` vocabulary and translated to
+the active backend automatically. Inspect and manage them with:
+
+```bash
+./acq kit list                    # show the pinned kits + patterns ref
+./acq kit validate ./my-kit/      # validate a neutral kit dir or spec.yaml
+./acq kit apply my-sandbox KITREF # apply a kit to an existing sandbox
 ```
 
 ---

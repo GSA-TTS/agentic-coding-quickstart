@@ -2,15 +2,23 @@
 #
 # acq.backends/sbx.sh — sbx backend adapter for acq
 #
-# Implements the adapter contract defined in docs/explorations/acq-handoff-1.1.md §5.
-# Each acq_backend_* function maps the acq contract to the sbx CLI.
+# Implements the adapter contract defined in
+# docs/adr/0010-acq-pluggable-backends.md ("Adapter contract"). Each
+# acq_backend_* function maps the acq contract to the sbx CLI.
 #
-# Sourced by acq (via acq_resolve_backend) after common.sh is already loaded.
-# Never run directly.
+# ---------------------------------------------------------------------------
+# Neutral-kit consumption (Phase 2 / 1.2.x)
+# ---------------------------------------------------------------------------
+# Kits are now authored in the neutral hybrid/v1 vocabulary (acq-kits/ in the
+# patterns repo). sbx cannot consume that schema natively (it expects its own
+# schemaVersion "2" spec), so this adapter fetches each neutral kit and uses
+# kit-translate.sh to SYNTHESIZE an equivalent sbx-v2 kit directory locally,
+# then hands the local dir to `sbx --kit` / `sbx kit add`. The payloads and
+# behavior are carried verbatim, so the observable result for an sbx user is
+# identical to Phase 1. See docs/adr/0011-msb-backend-and-neutral-kits.md.
 
-# Capability flags — reserved for multi-backend dispatch in common.sh (1.2.x+).
-# Each backend adapter declares these so common.sh can gate features once a
-# second backend exists. Unused by common.sh today (only one backend).
+# Capability flags (per the ADR-0010 contract). common.sh may gate features on
+# these once multiple backends coexist.
 # shellcheck disable=SC2034
 ACQ_BACKEND_NAME="sbx"
 # shellcheck disable=SC2034
@@ -30,6 +38,10 @@ ACQ_EXEC_READY_TIMEOUT="${ACQ_EXEC_READY_TIMEOUT:-60}"
 
 # Absolute path where the usai-provider kit stages its OpenCode config.
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
+
+# Where synthesized sbx-v2 kits (translated from the neutral hybrid/v1 kits)
+# are materialized for this run.
+ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/sbx-kits}"
 
 # Agents recognized by `sbx run` (mirrors qsbx).
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
@@ -160,11 +172,69 @@ _acq_sbx_ensure_kit_sources_allowed() {
   fi
 }
 
-# Emit --kit flags for all kits (built-ins + extras) one token per line.
+# ---------------------------------------------------------------------------
+# Neutral-kit → sbx-v2 translation
+# ---------------------------------------------------------------------------
+# Given a neutral kit ref (remote git+https or local dir), fetch it and
+# synthesize a local sbx-v2 kit directory. Echoes the local sbx-v2 kit dir.
+# Falls back to passing the ref through unchanged if translation is unavailable
+# (e.g. an extra kit that is already an sbx-v2 kit), so existing extra-kit
+# workflows keep working.
+_acq_sbx_translate_kit() {
+  local kitref="$1" slug fetchdir kitdir out
+  # Offline/test escape hatch: pass the ref through unchanged. Used by the
+  # offline unit harness (no network) and by any environment that pre-resolves
+  # kits. Never set this in production — sbx would then receive a neutral
+  # hybrid/v1 ref it cannot parse.
+  if [ -n "${ACQ_SBX_KIT_PASSTHROUGH:-}" ]; then
+    printf '%s\n' "$kitref"
+    return 0
+  fi
+  # If kit-translate isn't loaded (shouldn't happen), pass through unchanged.
+  if ! command -v kit_translate_fetch >/dev/null 2>&1; then
+    printf '%s\n' "$kitref"
+    return 0
+  fi
+
+  slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_')
+  fetchdir="${ACQ_SBX_KIT_CACHE}/fetch/${slug}"
+  out="${ACQ_SBX_KIT_CACHE}/v2/${slug}"
+
+  kitdir=$(kit_translate_fetch "$kitref" "$fetchdir") || {
+    echo "acq(sbx): warning: could not fetch kit; passing ref through: $kitref" >&2
+    printf '%s\n' "$kitref"
+    return 0
+  }
+
+  # Only translate kits that are neutral hybrid/v1. If the fetched kit is
+  # already an sbx-v2 kit (an extra kit authored for sbx), pass its dir through.
+  local schema
+  schema=$(kit_spec_field "${kitdir}/spec.yaml" schemaVersion 2>/dev/null || true)
+  case "$schema" in
+    hybrid/v1)
+      acq_debug "translate(sbx): $kitref -> $out"
+      rm -rf "$out"
+      kit_translate_to_sbx "$kitdir" "$out" >/dev/null || {
+        echo "acq(sbx): warning: kit translation failed; passing ref through: $kitref" >&2
+        printf '%s\n' "$kitref"
+        return 0
+      }
+      printf '%s\n' "$out"
+      ;;
+    *)
+      # Not a neutral kit — use the fetched dir (or the original ref) as-is.
+      printf '%s\n' "$kitdir"
+      ;;
+  esac
+}
+
+# Emit --kit flags for all kits (built-ins + extras), translating each neutral
+# hybrid/v1 kit to a local sbx-v2 kit dir first. One token per line.
 _acq_sbx_kit_flags() {
-  local k
+  local k local_kit
   for k in "${KITS[@]}"; do
-    printf '%s\n%s\n' "--kit" "$k"
+    local_kit=$(_acq_sbx_translate_kit "$k")
+    printf '%s\n%s\n' "--kit" "$local_kit"
   done
 }
 
@@ -249,6 +319,7 @@ acq_backend_provision() {
   local kf=()
   while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
 
+  acq_debug "sbx create --name $name ${kf[*]} ${_stripped[*]:-}"
   if [ "${#_stripped[@]}" -gt 0 ]; then
     sbx create --name "$name" "${kf[@]}" "${_stripped[@]}"
   else
@@ -313,8 +384,9 @@ acq_backend_ports() {
 # ---------------------------------------------------------------------------
 
 acq_backend_apply_kit() {
-  local name="$1" kitref="$2"
-  sbx kit add "$name" "$kitref"
+  local name="$1" kitref="$2" local_kit
+  local_kit=$(_acq_sbx_translate_kit "$kitref")
+  sbx kit add "$name" "$local_kit"
 }
 
 # ---------------------------------------------------------------------------
@@ -327,44 +399,52 @@ acq_backend_ensure_kits_applied() {
 
   _acq_sbx_ensure_kit_sources_allowed
 
+  # Neutral kits must be translated to local sbx-v2 kit dirs before sbx kit add.
+  local usai_local playbook_local zscaler_local
+  usai_local=$(_acq_sbx_translate_kit "$USAI_KIT")
+  playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT")
+  zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT")
+
   # 1) USAi provider kit
   if _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "acq: '$name' is missing the USAi kit; injecting with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$USAI_KIT" </dev/null >/dev/null 2>&1; then
+    if sbx kit add "$name" "$usai_local" </dev/null >/dev/null 2>&1; then
       sbx exec "$name" -- sh -c \
         'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
         </dev/null >/dev/null 2>&1 || true
       echo "acq: USAi kit injected into '$name'." >&2
     else
       echo "acq: warning: 'sbx kit add' (USAi kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$USAI_KIT'" >&2
+      echo "      Recover with: sbx kit add '$name' '$usai_local'" >&2
     fi
   fi
 
   # 2) Playbook kit
   if _acq_sbx_kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/.git" && echo present'; then
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$PLAYBOOK_KIT" </dev/null >/dev/null 2>&1; then
+    if sbx kit add "$name" "$playbook_local" </dev/null >/dev/null 2>&1; then
       echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2
     else
       echo "acq: warning: 'sbx kit add' (playbook kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$PLAYBOOK_KIT'" >&2
+      echo "      Recover with: sbx kit add '$name' '$playbook_local'" >&2
     fi
   fi
 
   # 3) Zscaler CA kit
   if _acq_sbx_kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
     echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$ZSCALER_KIT" </dev/null >/dev/null 2>&1; then
+    if sbx kit add "$name" "$zscaler_local" </dev/null >/dev/null 2>&1; then
       echo "acq: Zscaler CA kit injected into '$name'." >&2
     else
       echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$ZSCALER_KIT'" >&2
+      echo "      Recover with: sbx kit add '$name' '$zscaler_local'" >&2
     fi
   fi
 
-  # 4) Extra kits (tracked by marker file)
-  local applied k
+  # 4) Extra kits (tracked by marker file). Extra kits may be neutral or already
+  #    sbx-v2; _acq_sbx_translate_kit handles both. The marker uses the original
+  #    ref (stable across runs), not the translated local dir.
+  local applied k local_extra
   applied=$(sbx exec "$name" -- sh -c 'cat "$HOME/.acq-extra-kits" 2>/dev/null' </dev/null 2>/dev/null || true)
   local _extras=()
   [ -n "$ACQ_EXTRA_KITS" ] && split_noglob _extras "$ACQ_EXTRA_KITS"
@@ -373,23 +453,47 @@ acq_backend_ensure_kits_applied() {
       *"$k"*) continue ;;
     esac
     echo "acq: applying extra kit to '$name': $k" >&2
-    if sbx kit add "$name" "$k" </dev/null >/dev/null 2>&1; then
+    local_extra=$(_acq_sbx_translate_kit "$k")
+    if sbx kit add "$name" "$local_extra" </dev/null >/dev/null 2>&1; then
       sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$k" </dev/null >/dev/null 2>&1 || true
     else
       echo "acq: warning: 'sbx kit add' (extra kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$k'" >&2
+      echo "      Recover with: sbx kit add '$name' '$local_extra'" >&2
     fi
   done
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_secret_set — thin wrapper over sbx secret CLI
+# Service → (host, env) mapping shared by both backends' secret feeds.
+# ---------------------------------------------------------------------------
+# The acq secret store holds the raw value under acq.<service>. Each backend
+# needs to know which HOST(s) the credential is injected for and (for the
+# placeholder/env path) which ENV var. Keep this table backend-neutral here so
+# sbx.sh and msb.sh agree on the mapping.
+#   usai   -> api.gsa.usai.gov            USAI_API_KEY
+#   github -> github.com,api.github.com   GITHUB_TOKEN (sbx built-in service)
+# Echoes "host1[,host2] <TAB> ENVVAR"; empty for unknown services.
+_acq_service_hosts_env() {
+  case "$1" in
+    usai)   printf 'api.gsa.usai.gov\tUSAI_API_KEY\n' ;;
+    github) printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
+    *)      printf '\t\n' ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_secret_set — store in the acq secret store, then feed sbx's proxy
 # ---------------------------------------------------------------------------
 #
-# Built-in services use `sbx secret set -g <service>`.
-# Custom endpoints (--host/--env present, or unknown service) use set-custom.
-# `usai` is a known alias for the USAi custom endpoint.
-# Never passes a secret as a CLI argument.
+# Phase 2: credentials are owned by acq's backend-neutral store
+# (acq.backends/secret-store.sh), not sbx's. `acq secret set` writes the value
+# into the acq store (keychain / 0600 file) keyed acq.<service> or
+# acq.<sandbox>.<service>, then synthesizes the equivalent sbx secret so the sbx
+# proxy performs the on-the-wire injection (the sbx runtime still needs the
+# value in its own proxy config; we feed it from the acq store, piped via stdin,
+# never argv). msb reads the same acq store at provision (see msb.sh).
+#
+# Usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]
 
 # Known sbx built-in services (the proxy injects these transparently).
 _ACQ_SBX_BUILTIN_SERVICES=" anthropic github gitlab google-cloud openai aws azure "
@@ -473,109 +577,175 @@ acq_backend_secret_set() {
     esac
   done
 
-  # Fill in USAi defaults.
-  if [ "$service" = "usai" ]; then
-    [ -z "$host" ]    && host="api.gsa.usai.gov"
-    [ -z "$env_var" ] && env_var="USAI_API_KEY"
+  # Fill in defaults for known custom-endpoint services. NOTE: services that are
+  # sbx BUILT-INS (github, anthropic, ...) must NOT be given a host/env here —
+  # they use `sbx secret set <service>` so the sbx proxy injects them natively.
+  # Only non-built-in services (usai) get a host/env mapping → set-custom.
+  case "$_ACQ_SBX_BUILTIN_SERVICES" in
+    *" $service "*) : ;;   # built-in: leave host/env empty
+    *)
+      local svc_hosts svc_env
+      svc_hosts=$(_acq_service_hosts_env "$service" | cut -f1)
+      svc_env=$(_acq_service_hosts_env "$service" | cut -f2)
+      [ -z "$host" ] && [ -n "$svc_hosts" ] && host="${svc_hosts%%,*}"   # primary host
+      [ -z "$env_var" ] && [ -n "$svc_env" ] && env_var="$svc_env"
+      ;;
+  esac
+
+  # --- Step 1: store the value in the acq-owned secret store (keychain/file). --
+  # This is the source of truth both backends read from. The value is read from
+  # a TTY (silent) or piped stdin and never appears in argv.
+  local acq_sandbox=""
+  [ -n "$scope_name" ] && acq_sandbox="$scope_name"
+  if command -v acq_secret_set_interactive >/dev/null 2>&1; then
+    acq_secret_set_interactive "$service" "$acq_sandbox" || return 1
+  else
+    echo "acq: internal error: secret store not loaded" >&2
+    return 1
   fi
 
-  # Decide: built-in `set` form vs custom `set-custom` form.
-  if [ -n "$host" ] || [ -n "$env_var" ]; then
-    # Custom form. sbx set-custom reads the secret from stdin when --value is
-    # omitted — keeping it out of argv entirely.
-    #
-    # Two modes:
-    #   Interactive (TTY on stdin): prompt the user, read silently, pipe to sbx.
-    #   Piped (stdin is not a TTY):  read from stdin directly, no prompt emitted,
-    #                                print confirmation when done.
-    local secret_value=""
-    local piped=0
+  # --- Step 2: feed sbx's proxy from the acq store so sbx does the injection. --
+  # sbx's runtime needs the value in its own proxy config to rewrite outbound
+  # requests. Per the sbx CLI contract (verified against sbx 0.35.x):
+  #   - `sbx secret set <service>` (built-ins: github, anthropic, ...) reads the
+  #     value from STDIN. It has no stdin --force; if the secret already exists
+  #     it prompts "Overwrite? (y/N)" — which would consume our piped value as
+  #     the answer. So we PRE-CHECK existence and stop with an rm hint rather
+  #     than piping into a prompt.
+  #   - `sbx secret set-custom` (usai and other custom hosts) does NOT read
+  #     stdin; the value comes via --value/--token (argv-visible) and there is
+  #     no --force (it errors on "already exists"). To avoid putting the secret
+  #     on argv AND to avoid the already-exists error, we DO NOT pass --value.
+  #     Instead we detect an existing entry and, if absent, run set-custom
+  #     interactively so sbx collects the value at its own prompt.
+  #
+  # In all cases the real value is already safely in the acq store; sbx is just
+  # the injection runtime. We never place the value on argv.
+  local exit_code=0
+  local is_builtin=0
+  case "$_ACQ_SBX_BUILTIN_SERVICES" in
+    *" $service "*) is_builtin=1 ;;
+  esac
 
-    # ACQ_SECRET_TEST_VALUE is an offline-test escape hatch (no TTY in CI).
-    # Never set this in production use.
-    if [ -n "${ACQ_SECRET_TEST_VALUE:-}" ]; then
-      secret_value="$ACQ_SECRET_TEST_VALUE"
-    elif [ ! -t 0 ]; then
-      # Stdin is a pipe — read the secret from it, no prompt.
-      read -r secret_value
-      piped=1
+  # Existence pre-check (idempotency): sbx errors/prompts if the secret exists.
+  # We list and match by service (built-in) or env var (custom). If present,
+  # stop with a precise rm hint (non-destructive per project decision).
+  local scope_desc rm_scope
+  if [ -n "$scope_flag" ]; then scope_desc="global"; rm_scope="-g"; else scope_desc="sandbox '$scope_name'"; rm_scope="$scope_name"; fi
+
+  if _acq_sbx_secret_exists "$scope_flag" "$scope_name" "$service" "$env_var"; then
+    echo "acq: stored '$service' in the acq secret store, but sbx already has a" >&2
+    echo "     secret for it in ${scope_desc}. sbx won't overwrite non-interactively." >&2
+    echo "     Remove the existing sbx secret, then re-run to re-feed the proxy:" >&2
+    echo "       sbx secret ls" >&2
+    if [ "$is_builtin" -eq 1 ]; then
+      echo "       sbx secret rm ${rm_scope} ${service}" >&2
     else
-      printf 'Enter %s secret: ' "$service" >&2
-      read -rs secret_value 2>/dev/null || read -r secret_value
-      printf '\n' >&2
+      echo "       sbx secret rm ${rm_scope} <placeholder-for-${env_var}>" >&2
     fi
+    if [ -n "$scope_flag" ]; then
+      echo "       acq secret set -g ${service}" >&2
+    else
+      echo "       acq secret set ${scope_name} ${service}" >&2
+    fi
+    return 1
+  fi
 
+  if [ "$is_builtin" -eq 1 ]; then
+    # Built-in service: value on STDIN (sbx's documented non-interactive form).
+    local secret_value builtin_scope_args=()
+    secret_value=$(acq_secret_resolve "$service" "$acq_sandbox" 2>/dev/null || true)
     if [ -z "$secret_value" ]; then
-      echo "acq: no secret entered; aborting." >&2
+      echo "acq: warning: stored '$service' but could not read it back to feed sbx." >&2
       return 1
     fi
-
-    local cmd_args=("secret" "set-custom")
-    if [ -n "$scope_flag" ]; then
-      cmd_args+=("$scope_flag")
-    else
-      cmd_args+=("$scope_name")
+    if [ -n "$scope_flag" ]; then builtin_scope_args+=("$scope_flag"); else builtin_scope_args+=("$scope_name"); fi
+    printf '%s\n' "$secret_value" | sbx secret set "${builtin_scope_args[@]}" "$service"
+    exit_code=$?
+    secret_value=""
+  else
+    # Custom endpoint (usai, ...): set-custom has no stdin/--force. The value
+    # can only reach sbx via --value (argv-visible) — which violates the "never
+    # in argv" rule — or via sbx's own interactive prompt. We choose:
+    #   - interactive stdin (a TTY): run set-custom so sbx prompts once. The acq
+    #     store already holds the canonical value; we do not echo it on argv.
+    #   - piped stdin (no TTY, e.g. `printf ... | acq secret set -g usai`): sbx
+    #     set-custom cannot read the piped value and would block on its prompt.
+    #     Rather than hang or expose the value on argv, store in the acq store
+    #     and tell the user the one manual sbx command to run. (The acq store is
+    #     the source of truth; msb reads it directly with no sbx step.)
+    if [ -z "$host" ] && [ -z "$env_var" ]; then
+      echo "acq: '$service' has no host/env mapping and is not a built-in sbx service." >&2
+      echo "     Provide --host HOST --env ENV, or use a known service (usai, github, ...)." >&2
+      return 1
     fi
-    cmd_args+=("--host" "${host:-}" "--env" "${env_var:-}")
-    # Append any extra flags that aren't --host/--env and their values.
-    local skip_next=0
+    local cmd_args=("secret" "set-custom")
+    if [ -n "$scope_flag" ]; then cmd_args+=("$scope_flag"); else cmd_args+=("$scope_name"); fi
+    local svc_hosts h
+    svc_hosts=$(_acq_service_hosts_env "$service" | cut -f1)
+    [ -z "$svc_hosts" ] && svc_hosts="$host"
+    local _oldifs="$IFS"; IFS=','
+    for h in $svc_hosts; do [ -n "$h" ] && cmd_args+=("--host" "$h"); done
+    IFS="$_oldifs"
+    cmd_args+=("--env" "${env_var:-}")
+    local skip_next=0 arg
     for arg in "${extra_flags[@]+"${extra_flags[@]}"}"; do
       if [ "$skip_next" -eq 1 ]; then skip_next=0; continue; fi
       case "$arg" in
-        --host|--env) skip_next=1 ;;  # skip value too
-        --host=*|--env=*) ;;          # skip inline form
+        --host|--env) skip_next=1 ;;
+        --host=*|--env=*) ;;
         *) cmd_args+=("$arg") ;;
       esac
     done
 
-    local exit_code
-    if [ "$piped" -eq 1 ] || [ -n "${ACQ_SECRET_TEST_VALUE:-}" ]; then
-      # Non-interactive: pass via --value to suppress sbx's "Enter secret:" prompt.
-      sbx "${cmd_args[@]}" --value "$secret_value"
+    if [ -t 0 ] && [ -z "${ACQ_SECRET_TEST_VALUE:-}" ]; then
+      # Interactive TTY: let sbx prompt for the value once.
+      echo "acq: now configuring sbx's injector for '$service' — enter the SAME value" >&2
+      echo "     at sbx's prompt (already saved in the acq secret store):" >&2
+      sbx "${cmd_args[@]}"
       exit_code=$?
-      secret_value=""
-      if [ "$exit_code" -eq 0 ]; then
-        echo "acq: ${service} secret set." >&2
-      fi
     else
-      # Interactive TTY: pipe the value so it never appears in argv.
-      printf '%s\n' "$secret_value" | sbx "${cmd_args[@]}"
-      exit_code=$?
-      secret_value=""
-    fi
-
-    if [ "$exit_code" -ne 0 ]; then
-      echo "" >&2
-      echo "acq: if the error above is 'already exists', remove the existing secret first:" >&2
-      echo "       sbx secret ls                        # find the placeholder" >&2
-      if [ -n "$scope_flag" ]; then
-        echo "       sbx secret rm -g <placeholder>       # remove it" >&2
-        echo "       acq secret set -g ${service}         # re-set" >&2
+      # Non-interactive (piped) or test: cannot feed sbx set-custom without argv
+      # exposure. Value is safely in the acq store; print the exact sbx command.
+      echo "acq: stored '$service' in the acq secret store." >&2
+      if [ "${ACQ_BACKEND:-}" = "msb" ] || [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ]; then
+        : # msb reads the acq store directly at provision; no sbx step needed.
       else
-        echo "       sbx secret rm ${scope_name} <placeholder>  # remove it" >&2
-        echo "       acq secret set ${scope_name} ${service}    # re-set" >&2
+        echo "acq: to configure the sbx injector for a CUSTOM endpoint non-interactively," >&2
+        echo "     sbx requires the value on the command line (visible in shell history):" >&2
+        echo "       sbx ${cmd_args[*]} --value <the-secret>" >&2
+        echo "     Or run 'acq secret set ${scope_flag:-$scope_name} ${service}' from a terminal" >&2
+        echo "     to enter it at sbx's own prompt." >&2
       fi
+      exit_code=0
     fi
-    return "$exit_code"
-  else
-    # Check if this is a known built-in service.
-    local builtin_scope_args=()
-    if [ -n "$scope_flag" ]; then
-      builtin_scope_args+=("$scope_flag")
-    else
-      builtin_scope_args+=("$scope_name")
-    fi
-    case "$_ACQ_SBX_BUILTIN_SERVICES" in
-      *" $service "*)
-        sbx secret set "${builtin_scope_args[@]}" "$service" "${extra_flags[@]+"${extra_flags[@]}"}"
-        ;;
-      *)
-        echo "acq: '$service' is not a known built-in sbx service." >&2
-        echo "     For custom endpoints use: acq secret set [-g | SANDBOX] $service --host HOST --env ENV" >&2
-        exit 1
-        ;;
-    esac
   fi
+
+  if [ "$exit_code" -ne 0 ]; then
+    echo "" >&2
+    echo "acq: value stored in the acq secret store, but feeding the sbx proxy failed." >&2
+    echo "     If sbx says 'already exists', remove it and retry:" >&2
+    echo "       sbx secret ls && sbx secret rm ${rm_scope} <placeholder>" >&2
+  fi
+  return "$exit_code"
+}
+
+# ---------------------------------------------------------------------------
+# _acq_sbx_secret_exists SCOPE_FLAG SCOPE_NAME SERVICE ENV_VAR -> 0 if present
+# ---------------------------------------------------------------------------
+# Best-effort existence check against `sbx secret ls`. Built-in services show
+# their service name; custom secrets show the env var name. Returns 0 (exists)
+# only on a confident match; on any listing failure, returns 1 (treat as absent)
+# so we don't block the user — sbx will still error clearly if it does exist.
+_acq_sbx_secret_exists() {
+  local scope_flag="$1" scope_name="$2" service="$3" env_var="$4"
+  local listing needle
+  listing=$(sbx secret ls 2>/dev/null) || return 1
+  if [ -n "$env_var" ]; then needle="$env_var"; else needle="$service"; fi
+  case "$listing" in
+    *"$needle"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
