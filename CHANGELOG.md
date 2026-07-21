@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v1.0.1...v2.0.0) (2026-07-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **acq:** qsbx now requires sbx >= 0.35.0. sbx 0.35.x has no Linux/ARM64 build (deferred to 0.36.x), so Linux/ARM64 hosts cannot meet the floor until 0.36.x.
+
+### Features
+
+* **acq:** add msb backend and neutral hybrid/v1 kit translation ([#202](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/202)) ([f993250](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/f99325034ab803c2b5609c100ebc8bcc896c524f))
+* **acq:** add pluggable-backend acq wrapper (sbx driver) and deprecate qsbx ([#201](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/201)) ([fbd57be](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/fbd57be188974510ebf30d856aa86f1e55d24218))
+
+
+### Bug Fixes
+
+* **sbx:** recover sandboxes with orphaned USAi placeholders ([#196](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/196)) ([58f58f9](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/58f58f9e64de63c70aa08565763312c7ef64af1a))
+
 ## [1.0.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v1.0.0...v1.0.1) (2026-07-08)
 
 
