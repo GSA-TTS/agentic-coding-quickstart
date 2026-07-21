@@ -10,14 +10,9 @@ set -euo pipefail
 
 sandbox="${1:?Usage: $0 <sandbox-name>}"
 
-# Run the sandbox detached with opencode serve
-sbx exec -d "$sandbox" sh -lc 'nohup opencode serve --hostname 0.0.0.0 --port 4096 >/dev/null 2>&1' >/dev/null 2>&1 &
-
-echo "OpenCode server started."
-echo
-# One-time setup: if you haven't already published port 4096 on this sandbox,
-# run the command printed below once (it is a persistent setting on the sandbox).
 echo "If you haven't already published port 4096 on this sandbox, run this once:"
 echo "  sbx ports $sandbox --publish 4096:4096"
 echo
-echo "Then connect via: http://127.0.0.1:4096"
+
+# Run the sandbox detached with opencode serve
+sbx exec -d "$sandbox" sh -lc 'nohup opencode serve --hostname 0.0.0.0 --port 4096 &'
