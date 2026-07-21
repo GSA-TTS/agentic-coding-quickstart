@@ -75,22 +75,71 @@ kit_translate_fetch() {
         echo "kit-translate: malformed kit ref (need #ref=&dir=): $kitref" >&2
         return 1
       fi
+      # Defense-in-depth: reject a hostile dir= (path traversal / metachars).
+      # `dir` is a repo-relative subpath; it must not escape via `..` or carry
+      # anything but a safe path charset. Matches the hardening in kit_spec_files.
+      case "$dir" in
+        /*|*..*)
+          echo "kit-translate: unsafe kit dir (no absolute paths or '..'): $dir" >&2
+          return 1
+          ;;
+      esac
+      if printf '%s' "$dir" | LC_ALL=C grep -q '[^A-Za-z0-9._/-]'; then
+        echo "kit-translate: unsafe kit dir (illegal characters): $dir" >&2
+        return 1
+      fi
       command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: $url ref=$ref dir=$dir -> $destdir"
       mkdir -p "$destdir"
-      local _ferr
-      _ferr=$(
-        cd "$destdir" || exit 1
-        git init -q
-        git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"
-        git config core.sparseCheckout true
-        printf '%s/*\n' "$dir" > .git/info/sparse-checkout
-        git fetch --depth 1 origin "$ref" 2>&1 || exit 1
-        git checkout -q FETCH_HEAD 2>&1 || exit 1
-      ) || {
+      # Fetch NON-INTERACTIVELY. The kit repo (GSA-TTS/agentic-coding-patterns)
+      # is public, so an anonymous HTTPS fetch needs no credentials. We MUST NOT
+      # drop into an interactive git credential prompt (which hangs, or fails on
+      # GitHub's disabled password auth) just because the user has a global git
+      # credential helper or a url.<x>.insteadOf rewrite — `gh auth login`
+      # authenticates the gh CLI, not plain git. See #207 / KNOWN_FAILURE_MODES.
+      #
+      # Attempt 1 (anonymous): prompts disabled + inherited credential helper and
+      # github.com insteadOf rewrite neutralized, so a public fetch just works.
+      # Attempt 2 (authed retry): if attempt 1 genuinely fails (private source /
+      # egress-restricted enterprise mirror that needs the rewrite), retry with
+      # the system git config intact but STILL prompt-disabled, so a configured
+      # credential helper can supply creds without ever hanging on a prompt.
+      _kit_git_fetch() {
+        # $1 = extra git -c flags (as a single string, word-split intentionally)
+        local _cfg="$1"
+        (
+          cd "$destdir" || exit 1
+          export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
+          rm -rf .git 2>/dev/null
+          git init -q
+          git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"
+          git config core.sparseCheckout true
+          printf '%s/*\n' "$dir" > .git/info/sparse-checkout
+          # shellcheck disable=SC2086
+          git $_cfg fetch --depth 1 origin "$ref" 2>&1 || exit 1
+          git checkout -q FETCH_HEAD 2>&1 || exit 1
+        )
+      }
+      local _ferr _anon_cfg
+      _anon_cfg="-c credential.helper= -c url.https://github.com/.insteadOf="
+      if _ferr=$(_kit_git_fetch "$_anon_cfg"); then
+        :
+      elif _ferr=$(_kit_git_fetch ""); then
+        # authed retry (system config) succeeded
+        :
+      else
         echo "kit-translate: failed to fetch $kitref" >&2
         [ -n "$_ferr" ] && printf '%s\n' "$_ferr" | sed 's/^/kit-translate:   /' >&2
+        cat >&2 <<'EOM'
+kit-translate: The kit repo is public and should need no credentials. If you saw
+kit-translate:   a "Username for 'https://github.com'" prompt, plain git (not gh)
+kit-translate:   is trying to authenticate. Fixes:
+kit-translate:     - run once:  gh auth setup-git
+kit-translate:     - or check for a rewrite:  git config --global --get-regexp 'url\..*insteadOf'
+kit-translate:   If you use an enterprise mirror that requires auth, ensure your git
+kit-translate:   credential helper is configured (a prompt-less helper).
+EOM
         return 1
-      }
+      fi
       printf '%s/%s\n' "$destdir" "$dir"
       ;;
     *)
