@@ -401,9 +401,11 @@ ensure_valid_key() {
   echo "  3. Copy the new key using the console copy button" >&2
   echo >&2
 
-  local rotate_script="${ACQ_SCRIPT_DIR}/scripts/rotate-apikey"
-  if [ ! -x "$rotate_script" ]; then
-    echo "Cannot find scripts/rotate-apikey; rotate manually, then re-run." >&2
+  local rotate_via_backend=1
+  if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
+    rotate_via_backend=0
+    echo "The '${ACQ_RESOLVED_BACKEND:-active}' backend does not implement key rotation." >&2
+    echo "Rotate manually, then re-run." >&2
     return 1
   fi
 
@@ -412,7 +414,12 @@ ensure_valid_key() {
   read -r answer || true
   case "$answer" in
     [yY]|[yY][eE][sS])
-      "$rotate_script"
+      if [ "$rotate_via_backend" -eq 1 ]; then
+        acq_backend_rotate_key || {
+          echo "Rotation did not complete. Aborting attach." >&2
+          return 1
+        }
+      fi
       status=$(check_key "$name")
       if [ "$status" = "200" ]; then
         echo "Key validated. Continuing." >&2
