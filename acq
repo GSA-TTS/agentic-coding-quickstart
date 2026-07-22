@@ -48,9 +48,6 @@ export ACQ_SCRIPT_DIR
 # The resolved path of this acq script (for version output).
 ACQ_RESOLVED_PATH="${ACQ_SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 
-# Standalone helper scripts.
-ROTATE_SCRIPT="${ACQ_SCRIPT_DIR}/scripts/rotate-apikey"
-
 # Source common backend-agnostic logic.
 # shellcheck disable=SC1091
 . "${ACQ_SCRIPT_DIR}/acq.backends/common.sh"
@@ -253,11 +250,12 @@ acq_resolve_backend "${explicit_backend}"
 case "$subcommand" in
   usai-rotate-api-key)
     shift
-    if [ ! -x "$ROTATE_SCRIPT" ]; then
-      echo "acq: scripts/rotate-apikey not found or not executable" >&2
+    if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not implement key rotation" >&2
+      echo "     (acq_backend_rotate_key). Rotate manually, then re-run." >&2
       exit 1
     fi
-    exec "$ROTATE_SCRIPT" "$@"
+    acq_backend_rotate_key "$@"
     ;;
 
   create)

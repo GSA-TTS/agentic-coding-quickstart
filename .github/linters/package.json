@@ -10,7 +10,8 @@
     "markdownlint-cli2": "0.22.1"
   },
   "overrides": {
-    "js-yaml": "4.2.0",
-    "markdown-it": "14.2.0"
+    "js-yaml": "4.3.0",
+    "markdown-it": "14.2.0",
+    "linkify-it": "5.0.2"
   }
 }

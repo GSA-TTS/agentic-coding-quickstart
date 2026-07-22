@@ -129,4 +129,7 @@ never done.
   pinned reference), [KNOWN_FAILURE_MODES.md §14](../KNOWN_FAILURE_MODES.md#14-sbx-proxy-doesnt-work-with-custom-baseurl-security-implication)
   (custom-secret injection), [§20](../KNOWN_FAILURE_MODES.md#20-authentication-failed-after-copying-a-new-key)
 - Rotation helper that preserves the placeholder: `scripts/rotate-apikey`
+  (now a thin shim; the placeholder-preserving logic moved into
+  `acq.backends/sbx.sh` as `acq_backend_rotate_key` per
+  [ADR-0012](0012-backend-neutral-key-rotation.md))
 - Upstream custom-service support: [docker/sbx-releases#35](https://github.com/docker/sbx-releases/issues/35)
