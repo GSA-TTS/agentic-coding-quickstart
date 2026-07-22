@@ -749,6 +749,143 @@ _acq_sbx_secret_exists() {
 }
 
 # ---------------------------------------------------------------------------
+# acq_backend_rotate_key — rotate the global USAi key (per ADR-0012)
+# ---------------------------------------------------------------------------
+# Rotate the global USAI_API_KEY custom secret in sbx, PRESERVING its proxy
+# placeholder so existing sandboxes keep resolving to the new value. Carried
+# verbatim from the former scripts/rotate-apikey (which is now a thin shim that
+# calls `acq usai-rotate-api-key`). Never places the secret value on argv — sbx
+# prompts for the new key at its own prompt. Returns non-zero on failure.
+acq_backend_rotate_key() {
+  local usai_host="api.gsa.usai.gov"
+  local usai_models_url="https://${usai_host}/api/v1/models"
+
+  # Read the current secret table once (avoids a TOCTOU window + a second call).
+  local secret_ls
+  secret_ls=$(sbx secret ls -g) || {
+    echo "acq(sbx): could not read the sbx secret table ('sbx secret ls -g')." >&2
+    return 1
+  }
+
+  # Grab the existing placeholder, anchoring on the USAI_API_KEY token rather
+  # than a fixed column, taking only the FIRST match so a duplicated state can't
+  # produce a multi-line value. Preserved across rotation so running sandboxes
+  # that already injected it keep resolving to the new secret.
+  local placeholder
+  placeholder=$(printf '%s\n' "$secret_ls" \
+    | awk '{ for (i = 1; i <= NF; i++) if ($i == "USAI_API_KEY") { print $(i+1); exit } }')
+
+  if [ -z "$placeholder" ]; then
+    echo "acq(sbx): USAI_API_KEY not found. Run 'acq secret ls' to check." >&2
+    return 1
+  fi
+
+  # Count USAI_API_KEY rows. More than one means a previous rotation (before the
+  # fix in ADR-0008) left duplicate/ghost entries; the proxy can then resolve the
+  # placeholder to an empty entry and validation fails with 401.
+  local row_count
+  row_count=$(printf '%s\n' "$secret_ls" \
+    | grep -cE '[[:space:]]USAI_API_KEY[[:space:]]' || true)
+
+  if [ "${row_count:-0}" -gt 1 ]; then
+    # --- Cleanup path for data corrupted by the pre-fix rotation bug ----------
+    # Only taken when duplicates exist. We must remove every custom secret for
+    # the host (`sbx secret rm -g --host` deletes ALL matching entries) and
+    # recreate a single one — there's no in-place "dedupe". This is destructive
+    # and non-atomic: between the rm and the set-custom the host has NO USAi
+    # secret, so a Ctrl-C or a failed/cancelled set-custom would leave the host
+    # with no key at all. Guard that window with a trap that prints exact
+    # recovery steps, and disarm it once set-custom succeeds.
+    echo "Found $row_count USAI_API_KEY entries; consolidating to a single secret." >&2
+
+    local _ph="$placeholder" _host="$usai_host"
+    # shellcheck disable=SC2064
+    trap "{
+      echo '' >&2
+      echo 'ERROR: rotation was interrupted while the USAI_API_KEY secret was removed' >&2
+      echo 'but before the new value was set. Your sandboxes currently have NO USAi key.' >&2
+      echo 'Recover by re-running this rotation, or manually:' >&2
+      echo '  sbx secret set-custom -g --host ${_host} --env USAI_API_KEY --placeholder ${_ph}' >&2
+    }" EXIT
+
+    local rm_err
+    if ! rm_err=$(sbx secret rm -g --host "$usai_host" -f 2>&1); then
+      trap - EXIT
+      echo "acq(sbx): failed to remove existing secrets: $rm_err" >&2
+      return 1
+    fi
+
+    # Recreate the single secret with the preserved placeholder. Omitting
+    # --value makes sbx prompt for the new key (keeps it out of shell history).
+    sbx secret set-custom -g --host "$usai_host" \
+          --env USAI_API_KEY --placeholder "$placeholder" || {
+      echo "acq(sbx): 'sbx secret set-custom' failed. See recovery steps above." >&2
+      return 1
+    }
+
+    trap - EXIT
+  else
+    # Healthy single-row case: set-custom updates the existing entry in place, so
+    # there's no need for the destructive rm (which would only add risk here).
+    # Omitting --value makes sbx prompt for the new key (no shell-history leak).
+    sbx secret set-custom -g --host "$usai_host" \
+          --env USAI_API_KEY --placeholder "$placeholder" || {
+      echo "acq(sbx): 'sbx secret set-custom' failed." >&2
+      return 1
+    }
+  fi
+
+  # Validate the new key in a throwaway sandbox so we don't depend on any
+  # particular pre-existing sandbox. Created here, removed on exit.
+  local validation_sbx="acq-keycheck-$$"
+  # shellcheck disable=SC2064
+  trap "sbx rm '$validation_sbx' >/dev/null 2>&1 || true" EXIT
+
+  echo "Validating new key in a temporary sandbox..." >&2
+  # `sbx create` needs an authenticated sbx session. If it has expired, sbx
+  # triggers an interactive browser login — and if its output is swallowed and
+  # it's unbounded, rotation appears to hang with no explanation (quickstart
+  # #211). Two guards: (1) do NOT silence stderr, so any login prompt is
+  # visible; (2) bound the create with a timeout so an interactive-login
+  # handshake can never hang indefinitely. sbx has no non-interactive
+  # auth-status probe, so the timeout is the safety net.
+  local create_timeout="${ROTATE_VALIDATE_TIMEOUT:-120}"
+  local rc=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$create_timeout" sbx create --name "$validation_sbx" shell . >/dev/null || rc=$?
+  else
+    sbx create --name "$validation_sbx" shell . >/dev/null || rc=$?
+  fi
+  if [ "$rc" != "0" ]; then
+    if [ "$rc" = "124" ]; then
+      echo "Validation timed out after ${create_timeout}s — sbx likely needed an interactive login." >&2
+      echo "Run 'sbx login', then 'acq run' (it validates the key on next attach)." >&2
+    else
+      echo "Could not create a validation sandbox; skipping check." >&2
+      echo "The key was rotated. Run 'sbx login' if needed, then 'acq run' — it validates on next attach." >&2
+    fi
+    trap - EXIT
+    return 0
+  fi
+
+  local status
+  status=$(sbx exec "$validation_sbx" -- sh -c \
+     "curl -sS -o /dev/null -w '%{http_code}' \
+      -H \"Authorization: Bearer \$USAI_API_KEY\" \
+      $usai_models_url" 2>/dev/null || true)
+
+  sbx rm "$validation_sbx" >/dev/null 2>&1 || true
+  trap - EXIT
+
+  if [ "$status" = "200" ]; then
+    echo "Key validated (HTTP 200). You're good to go." >&2
+    return 0
+  fi
+  echo "acq(sbx): key validation failed (HTTP ${status:-unknown}). Double-check the key and rotate again." >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # acq_backend_version / acq_backend_doctor
 # ---------------------------------------------------------------------------
 

@@ -267,8 +267,10 @@ To rotate the key explicitly outside that workflow:
    ./acq usai-rotate-api-key
    ```
 
-   (or run the underlying `scripts/rotate-apikey` directly). It prompts for the
-   new key, then validates it in a temporary sandbox.
+   (or run the underlying `scripts/rotate-apikey` directly — a thin shim that
+   forwards to `acq usai-rotate-api-key`). It prompts for the new key, then
+   validates it in a temporary sandbox. Rotation runs through the active
+   backend (sbx or msb), so it works regardless of which backend you use.
 
 </details>
 

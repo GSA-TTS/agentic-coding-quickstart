@@ -1015,6 +1015,51 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# acq_backend_rotate_key — rotate the global USAi key (per ADR-0012)
+# ---------------------------------------------------------------------------
+# msb has no proxy-placeholder concept: the acq-owned secret store is the source
+# of truth, and msb binds it at provision via `--secret ENV@HOST` and re-feeds
+# running sandboxes with `msb modify --secret`. Rotation therefore = store the
+# new key in the acq store + re-feed running sandboxes (exactly the `acq secret
+# set -g usai` path) + validate. Never places the value on argv. Returns
+# non-zero on failure.
+acq_backend_rotate_key() {
+  if ! command -v acq_secret_set_interactive >/dev/null 2>&1; then
+    echo "acq(msb): internal error: secret store not loaded" >&2
+    return 1
+  fi
+
+  echo "Rotating the USAi key in the acq secret store (msb backend)." >&2
+
+  # Store the new key (TTY/stdin; never argv) and re-feed running sandboxes.
+  # acq_backend_secret_set already stores usai + runs `msb modify --secret` for
+  # every running sandbox, so reuse it rather than duplicating that logic.
+  acq_backend_secret_set -g usai || {
+    echo "acq(msb): failed to store the new USAi key." >&2
+    return 1
+  }
+
+  # Validate the new key in a fresh throwaway sandbox (backend-neutral helper).
+  echo "Validating new key in a temporary sandbox..." >&2
+  local status=""
+  if command -v check_fresh_sandbox_key >/dev/null 2>&1; then
+    status=$(check_fresh_sandbox_key)
+  fi
+
+  if [ -z "$status" ]; then
+    echo "Could not run a validation sandbox; skipping check." >&2
+    echo "The key was rotated. Re-run 'acq run' to validate on next attach." >&2
+    return 0
+  fi
+  if [ "$status" = "200" ]; then
+    echo "Key validated (HTTP 200). You're good to go." >&2
+    return 0
+  fi
+  echo "acq(msb): key validation failed (HTTP ${status}). Double-check the key and rotate again." >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # acq_backend_version / acq_backend_doctor
 # ---------------------------------------------------------------------------
 
