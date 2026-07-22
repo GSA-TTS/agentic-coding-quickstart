@@ -113,6 +113,11 @@ kit_translate_fetch() {
           git init -q
           git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"
           git config core.sparseCheckout true
+          # `git init` does not always create .git/info/ (platform-dependent),
+          # so create it before writing the sparse-checkout file — otherwise the
+          # redirect fails with ".git/info/sparse-checkout: No such file or
+          # directory" (harmless-but-noisy; fetch still fell back). See #211-adjacent.
+          mkdir -p .git/info
           printf '%s/*\n' "$dir" > .git/info/sparse-checkout
           # shellcheck disable=SC2086
           git $_cfg fetch --depth 1 origin "$ref" 2>&1 || exit 1
