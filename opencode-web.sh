@@ -15,4 +15,4 @@ echo "  sbx ports $sandbox --publish 4096:4096"
 echo
 
 # Run the sandbox detached with opencode serve
-sbx exec -d "$sandbox" sh -lc 'nohup opencode serve --hostname 0.0.0.0 --port 4096 &'
+sbx exec -d "$sandbox" sh -lc 'nohup opencode serve --hostname 0.0.0.0 --port 4096' &
