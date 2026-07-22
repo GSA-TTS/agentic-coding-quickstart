@@ -87,6 +87,11 @@ capability flag variables:
 | `acq_backend_version` | Echo backend version string |
 | `acq_backend_doctor` | Echo one matrix row for `acq doctor` output |
 
+> **Contract addition ([ADR-0012](0012-backend-neutral-key-rotation.md)):**
+> `acq_backend_rotate_key` — rotate the USAi API key using the backend's native
+> secret mechanism and validate the new key. Added so key rotation stays
+> backend-neutral (the core dispatch no longer shells out to `sbx` directly).
+
 Capability flags (`ACQ_BACKEND_SUPPORTS_PORT_FORWARD`, etc.) allow `common.sh`
 to gate features and future backends to declare gaps.
 
