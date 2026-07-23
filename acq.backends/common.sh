@@ -251,6 +251,9 @@ strip_backend_flag() {
 #   ACQ_CLI_KITS         — the kit refs, one per element
 #   ACQ_KIT_REMAINING    — the arg list with all --kit flags removed
 #
+# Scanning STOPS at the first `--` separator: everything after it is agent args
+# (which may legitimately contain their own `--kit`) and is forwarded verbatim.
+#
 # Why acq must intercept `--kit`: the backend spells local-kit application the
 # same way (`sbx create --kit <dir>`), so a user naturally writes
 # `acq run opencode --kit <dir> .`. If acq forwarded that flag verbatim, the
@@ -265,17 +268,24 @@ extract_kit_flags() {
   ACQ_CLI_KITS=()
   ACQ_KIT_REMAINING=()
   local expect_kit=0 arg
-  for arg in "$@"; do
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
     if [ "$expect_kit" -eq 1 ]; then
       ACQ_CLI_KITS+=("$arg")
       expect_kit=0
+      shift
       continue
     fi
     case "$arg" in
+      # Stop scanning at the first `--` separator: everything after it is
+      # agent args (which may legitimately contain their own `--kit`) and MUST
+      # pass through untouched. Append the separator and the rest verbatim.
+      --)      ACQ_KIT_REMAINING+=("$@"); break ;;
       --kit)   expect_kit=1 ;;
       --kit=*) ACQ_CLI_KITS+=("${arg#--kit=}") ;;
       *)       ACQ_KIT_REMAINING+=("$arg") ;;
     esac
+    shift
   done
   # A trailing `--kit` with no value: warn but don't crash.
   if [ "$expect_kit" -eq 1 ]; then

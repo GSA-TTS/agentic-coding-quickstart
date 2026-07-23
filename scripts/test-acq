@@ -364,6 +364,19 @@ assert_contains "kit-flag: run folds --kit ref into kit list (#222)" "$create_li
 assert_not_contains "kit-flag: run --kit not left as trailing raw arg (#222)" "$create_line" "/proj --kit /tmp/runkit"
 cleanup_stubs
 
+# A `--kit` AFTER the `--` separator belongs to the AGENT, not acq: it MUST NOT
+# be hijacked into the kit list, and it MUST survive intact in the agent args.
+make_stubs
+out=$(ACQ_BACKEND=sbx "$ACQ" run opencode /proj -- --kit evil-agent-arg 2>/dev/null)
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^sbx create')
+run_line=$(printf '%s\n' "$log" | grep '^sbx run' || true)
+# acq must not fold the agent's --kit into the sandbox kit list.
+assert_not_contains "kit-flag: agent --kit after -- not hijacked (#222)" "$create_line" "--kit evil-agent-arg"
+# The agent's flag must be forwarded verbatim to the agent invocation.
+assert_contains "kit-flag: agent --kit after -- forwarded intact (#222)" "$log" "--kit evil-agent-arg"
+cleanup_stubs
+
 # ===========================================================================
 # 4. qsbx deprecation notice
 # (Added to qsbx in §7 of the handoff)
