@@ -951,6 +951,60 @@ When you run `qsbx run` from inside one quickstart clone while the executing
 
 ---
 
+## 25. `acq run` Prompts for a GitHub Username/Password During Kit Fetch
+
+### Symptoms
+
+Running `acq run …` prints an interactive prompt and then fails:
+
+```
+Username for 'https://github.com': you@agency.gov
+Password for 'https://you%40agency.gov@github.com':
+kit-translate: failed to fetch git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=…&dir=…
+kit-translate:   remote: Invalid username or token. Password authentication is not supported for Git operations.
+```
+
+You may already be authenticated with the `gh` CLI (`gh auth status` is green).
+
+### Root Cause
+
+`gh auth login` authenticates the **`gh` CLI**, not plain **git**. The acq kit
+fetch uses `git` directly. If your machine has a global git credential helper or
+a `url.<x>.insteadOf` rewrite (common in enterprise/egress setups), git tries to
+*authenticate* to the kit source and — failing — drops into an interactive
+prompt (and GitHub disabled git password auth in 2021, so it can't succeed).
+
+### Fix
+
+Wire git to use your `gh` token, once:
+
+```
+gh auth setup-git
+```
+
+If it still prompts, you likely have a rewrite forcing auth on the clone —
+inspect it with:
+
+```
+git config --global --get-regexp 'url\..*insteadOf'
+```
+
+### Prevention
+
+As of #207, acq's kit fetch is **non-interactive**: it sets `GIT_TERMINAL_PROMPT=0`
+and first attempts an anonymous fetch with any inherited credential helper /
+`github.com` `insteadOf` rewrite neutralized (so an unauthenticated fetch
+proceeds without prompting), then retries once with your system git config
+(still prompt-disabled) for sources that require auth (enterprise mirror, etc.).
+It can no longer hang on a
+prompt; a genuine failure now prints this remedy.
+
+### Related
+
+- Issue #207 (non-interactive fetch), #208 (docs + loud fallback).
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:

@@ -1259,6 +1259,59 @@ assert_contains "translate: sh -c startup emits argv seq (- sh)" "$sh_startup_bl
 assert_not_contains "translate: sh -c startup is not a bare string" "$sh_startup_block" "command: |"
 cleanup_stubs
 
+# 10a2b. #207: a git+https kit fetch MUST be NON-INTERACTIVE. Stub `git` to
+#        record its env + args; drive _resolve_kit against a git+https ref and
+#        assert the fetch ran with GIT_TERMINAL_PROMPT=0 and the anonymous
+#        credential-neutralizing -c flags — i.e. it can never hang on a
+#        "Username for 'https://github.com'" prompt.
+make_stubs; load_acq
+gitlog="$STUBDIR/git-invocations.log"
+: >"$gitlog"
+cat >"$STUBDIR/git" <<GITSTUB
+#!/usr/bin/env bash
+# Record the terminal-prompt env + the full argv for every git call.
+printf 'PROMPT=%s ARGS=%s\n' "\${GIT_TERMINAL_PROMPT:-UNSET}" "\$*" >>"$gitlog"
+# Make the anonymous 'fetch' SUCCEED so we exercise the happy path + populate
+# the sparse dir so checkout has something.
+case "\$*" in
+  *fetch*) exit 0 ;;
+  *checkout*) mkdir -p "integrations/isolation/acq-kits/usai-provider"; exit 0 ;;
+  *) exit 0 ;;
+esac
+GITSTUB
+chmod +x "$STUBDIR/git"
+(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  kit_translate_fetch "git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=integrations/isolation/acq-kits/usai-provider" "$STUBDIR/kitdest"
+) >/dev/null 2>&1 || true
+fetchline=$(grep 'fetch' "$gitlog" | head -1)
+assert_contains "#207: kit fetch disables interactive prompt" "$fetchline" "PROMPT=0"
+# The first (anonymous) attempt neutralizes any inherited credential helper +
+# github insteadOf rewrite so a public fetch never authenticates.
+anonline=$(grep -m1 'credential.helper=' "$gitlog" || true)
+assert_contains "#207: anon fetch neutralizes credential.helper" "$anonline" "credential.helper="
+assert_contains "#207: anon fetch neutralizes github insteadOf" "$anonline" "insteadOf="
+cleanup_stubs
+
+# 10a2c. #207 hardening: a hostile dir= (path traversal) must be rejected before
+#        any git call — no absolute paths, no '..', safe charset only.
+make_stubs; load_acq
+: >"$STUBDIR/git-invocations.log"
+cat >"$STUBDIR/git" <<'GITSTUB'
+#!/usr/bin/env bash
+printf 'CALLED\n' >>"$STUBDIR/git-invocations.log"
+exit 0
+GITSTUB
+chmod +x "$STUBDIR/git"
+trav_out=$(
+  . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+  kit_translate_fetch "git+https://github.com/x/y.git#ref=deadbeef&dir=../../etc" "$STUBDIR/travdest" 2>&1
+) || true
+assert_contains "#207: traversal dir= is rejected" "$trav_out" "unsafe kit dir"
+git_called=$(cat "$STUBDIR/git-invocations.log" 2>/dev/null || true)
+assert_eq "#207: no git call on rejected dir=" "" "$git_called"
+cleanup_stubs
+
 # 10a3. environment vocabulary: kit_spec_env parses NAME/value pairs, DROPS an
 #       unsafe env var name (with a stderr warning), and kit_translate_to_sbx
 #       emits an sbx-v2 `environment.variables` block for the valid entries.

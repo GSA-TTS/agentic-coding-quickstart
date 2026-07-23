@@ -201,7 +201,23 @@ _acq_sbx_translate_kit() {
   out="${ACQ_SBX_KIT_CACHE}/v2/${slug}"
 
   kitdir=$(kit_translate_fetch "$kitref" "$fetchdir") || {
-    echo "acq(sbx): warning: could not fetch kit; passing ref through: $kitref" >&2
+    # #208: make this loud + actionable rather than a terse warning. For a
+    # git+https ref, a failure here (after kit-translate's non-interactive
+    # anonymous+authed retries) is a real fetch problem, not a prompt hang.
+    # Passing the ref through lets sbx try its own fetch (and keeps pre-resolved
+    # extra-kit workflows working), but the user needs to know WHY it failed.
+    case "$kitref" in
+      git+http*)
+        echo "acq(sbx): WARNING: could not fetch kit: $kitref" >&2
+        echo "acq(sbx):   If git prompted for a GitHub username/password, run 'gh auth" >&2
+        echo "acq(sbx):   setup-git' once (gh auth != git auth), or check for a rewrite:" >&2
+        echo "acq(sbx):   git config --global --get-regexp 'url\\..*insteadOf'." >&2
+        echo "acq(sbx):   Passing the ref through to sbx to attempt its own fetch." >&2
+        ;;
+      *)
+        echo "acq(sbx): warning: could not fetch kit; passing ref through: $kitref" >&2
+        ;;
+    esac
     printf '%s\n' "$kitref"
     return 0
   }
