@@ -420,20 +420,99 @@ warn_if_no_ssh_signing_key() {
   echo "      Then commit as usual. (You can still work; only committing needs it.)" >&2
 }
 
-# Warn (do not block) if the project has no repo-local git user.email.
-# Only the repo-local identity crosses into the sandbox via the workspace mount.
+# Warn (do not block) if the mounted workspace has no usable git identity.
+# Only a repo-local identity crosses into the sandbox (the sandbox home is empty
+# and the host's global ~/.gitconfig is NOT mounted), so guidance must point at
+# repo-local config. Classifies the workspace path P into four cases:
+#   (a) P is itself a git repo    -> warn if effective user.email is unset
+#   (b) P is not a repo but has    -> tell the user to set identity per sub-repo
+#       depth-1 sub-repos              (names a capped, symlink-safe list)
+#   (c) P is a dir with no repos   -> forward-looking new-workspace onboarding
+#       yet (new workspace)           note (only on first create; see caller)
+#   (d) P is not a directory       -> silent (the pre-flight path check owns this)
+# Warn-not-block throughout. Portable across macOS (bash 3.2, BSD find) + Linux.
 warn_if_no_git_identity() {
-  local path="${1:-}" email=""
+  local path="${1:-}"
   command -v git >/dev/null 2>&1 || return 0
-  [ -n "$path" ] && [ -d "$path" ] || return 0
-  email=$(git -C "$path" config --local user.email 2>/dev/null || true)
-  [ -n "$email" ] && return 0
-  echo "acq: note — no repo-local git user.email is set for this project." >&2
-  echo "      The sandbox has its own empty home, so your host's global git" >&2
-  echo "      identity is NOT visible inside it. Commits will be SIGNED but show" >&2
-  echo "      'Unverified' on GitHub until you set an identity. Fix:" >&2
-  echo "        git config user.email you@verified-on-github.example" >&2
-  echo "        git config user.name  \"Your Name\"" >&2
+  [ -n "$path" ] && [ -d "$path" ] || return 0   # (d) handled by pre-flight
+
+  # (a) P is itself a git work tree.
+  if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local email
+    # Prefer EFFECTIVE identity (not just --local) so an already-resolvable
+    # value doesn't false-warn.
+    email=$(git -C "$path" config user.email 2>/dev/null || true)
+    [ -n "$email" ] && return 0
+    echo "acq: note — this repo has no git user.email set." >&2
+    echo "      The sandbox home is isolated, so commits will be SIGNED but show" >&2
+    echo "      'Unverified' on GitHub until you set an identity. Fix (in this repo):" >&2
+    echo "        git config user.email you@verified-on-github.example" >&2
+    echo "        git config user.name  \"Your Name\"" >&2
+    return 0
+  fi
+
+  # (b) Not a repo itself — scan immediate children for git repos. symlink-safe
+  # (! -type l, no -L), depth-1 only, prune common noise, and CAP the scan so a
+  # huge/monorepo/flat root can't stall startup. `.git` may be a dir (repo) or a
+  # file (submodule/worktree) -> test -e.
+  local subrepos=() scanned=0 found_more=0 d base
+  while IFS= read -r d; do
+    case "$(basename "$d")" in
+      node_modules|.venv|venv|vendor|target|dist|build) continue ;;
+    esac
+    scanned=$((scanned + 1))
+    if [ "$scanned" -gt 200 ]; then found_more=1; break; fi
+    if [ -e "$d/.git" ]; then
+      if [ "${#subrepos[@]}" -lt 10 ]; then
+        subrepos+=("$(basename "$d")")
+      else
+        found_more=1
+      fi
+    fi
+  done < <(find "$path" -maxdepth 1 -mindepth 1 -type d ! -type l 2>/dev/null)
+
+  if [ "${#subrepos[@]}" -gt 0 ]; then
+    echo "acq: note — this workspace root is not a git repo; its subfolders are." >&2
+    echo "      The sandbox home is isolated, so set identity in each sub-repo you" >&2
+    echo "      commit from (commits are signed but show 'Unverified' otherwise):" >&2
+    local r
+    for r in "${subrepos[@]}"; do
+      # %q-escape the name so odd/hostile filenames can't inject terminal control
+      printf '        git -C %q config user.email you@verified-on-github.example\n' "$path/$r" >&2
+    done
+    [ "$found_more" -eq 1 ] && echo "        (…and more — set identity in each repo as you commit from it.)" >&2
+    return 0
+  fi
+
+  # (c) A directory with no repos yet — a NEW/intended workspace. Forward-looking
+  # onboarding note (emitted only on first create; the caller gates this).
+  echo "acq: note — this workspace has no git repos yet." >&2
+  echo "      When you clone one in, set its identity so commits are Verified:" >&2
+  echo "        git -C <repo> config user.email you@verified-on-github.example" >&2
+  echo "        git -C <repo> config user.name  \"Your Name\"" >&2
+  echo "      (and load your signing key on the host: ssh-add ~/.ssh/id_ed25519)." >&2
+  echo "      The sandbox home is isolated, so git identity is set per-repo." >&2
+}
+
+# Pre-flight: validate the workspace path BEFORE provisioning. Fails fast on a
+# file or a missing path (with an actionable mkdir hint) rather than passing a
+# bad path to `sbx create` and surfacing an opaque backend error. Never creates
+# host dirs (no surprising filesystem mutations) and never prompts (CI-safe).
+# Returns non-zero to abort the run. #<issue>.
+preflight_workspace_path() {
+  local path="${1:-}"
+  [ -n "$path" ] || return 0            # no path arg -> caller's $PWD default
+  if [ -e "$path" ]; then
+    if [ ! -d "$path" ]; then
+      echo "acq: error — workspace must be a directory: $path" >&2
+      return 1
+    fi
+    return 0
+  fi
+  echo "acq: error — workspace path does not exist: $path" >&2
+  echo "      If this is a new workspace, create it first, then re-run:" >&2
+  printf '        mkdir -p %q && acq run …\n' "$path" >&2
+  return 1
 }
 
 # Validate the sandbox's USAi key and walk the user through rotating it if

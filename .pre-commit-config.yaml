@@ -43,3 +43,17 @@ repos:
     hooks:
       - id: shellcheck
         args: ["--severity=warning"]
+
+  # acq offline unit suite — runs the host-side logic (backend resolution, name
+  # derivation, kit-translate, git-identity/path pre-flight) on every push. This
+  # is the Linux behavior gate (CI runs pre-commit on ubuntu-latest); the suite
+  # is stubbed/offline (no Docker/network) so it is safe in CI. Also portable to
+  # macOS bash 3.2.
+  - repo: local
+    hooks:
+      - id: test-acq
+        name: acq offline unit suite
+        entry: bash scripts/test-acq
+        language: system
+        pass_filenames: false
+        files: '^(acq|acq\.backends/.*|scripts/test-acq)$'
