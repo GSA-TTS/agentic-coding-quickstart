@@ -91,19 +91,19 @@ kit_translate_fetch() {
       fi
       command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: $url ref=$ref dir=$dir -> $destdir"
       mkdir -p "$destdir"
-      # Fetch NON-INTERACTIVELY. The kit repo (GSA-TTS/agentic-coding-patterns)
-      # is public, so an anonymous HTTPS fetch needs no credentials. We MUST NOT
-      # drop into an interactive git credential prompt (which hangs, or fails on
-      # GitHub's disabled password auth) just because the user has a global git
-      # credential helper or a url.<x>.insteadOf rewrite — `gh auth login`
-      # authenticates the gh CLI, not plain git. See #207 / KNOWN_FAILURE_MODES.
+      # Fetch NON-INTERACTIVELY. We MUST NOT drop into an interactive git
+      # credential prompt (which hangs, or fails on GitHub's disabled password
+      # auth) just because the user has a global git credential helper or a
+      # url.<x>.insteadOf rewrite — `gh auth login` authenticates the gh CLI,
+      # not plain git. See #207 / KNOWN_FAILURE_MODES.
       #
       # Attempt 1 (anonymous): prompts disabled + inherited credential helper and
-      # github.com insteadOf rewrite neutralized, so a public fetch just works.
-      # Attempt 2 (authed retry): if attempt 1 genuinely fails (private source /
-      # egress-restricted enterprise mirror that needs the rewrite), retry with
-      # the system git config intact but STILL prompt-disabled, so a configured
-      # credential helper can supply creds without ever hanging on a prompt.
+      # github.com insteadOf rewrite neutralized, so an unauthenticated fetch
+      # proceeds without prompting.
+      # Attempt 2 (authed retry): if attempt 1 genuinely fails (a source that
+      # needs auth / egress-restricted enterprise mirror that needs the rewrite),
+      # retry with the system git config intact but STILL prompt-disabled, so a
+      # configured credential helper can supply creds without ever hanging.
       _kit_git_fetch() {
         # $1 = extra git -c flags (as a single string, word-split intentionally)
         local _cfg="$1"
@@ -136,13 +136,13 @@ kit_translate_fetch() {
         echo "kit-translate: failed to fetch $kitref" >&2
         [ -n "$_ferr" ] && printf '%s\n' "$_ferr" | sed 's/^/kit-translate:   /' >&2
         cat >&2 <<'EOM'
-kit-translate: The kit repo is public and should need no credentials. If you saw
-kit-translate:   a "Username for 'https://github.com'" prompt, plain git (not gh)
-kit-translate:   is trying to authenticate. Fixes:
+kit-translate: If you saw a "Username for 'https://github.com'" prompt, plain git
+kit-translate:   (not gh) is trying to authenticate. gh auth authenticates the gh
+kit-translate:   CLI, not git. Fixes:
 kit-translate:     - run once:  gh auth setup-git
 kit-translate:     - or check for a rewrite:  git config --global --get-regexp 'url\..*insteadOf'
-kit-translate:   If you use an enterprise mirror that requires auth, ensure your git
-kit-translate:   credential helper is configured (a prompt-less helper).
+kit-translate:   If the kit source requires auth, ensure your git credential
+kit-translate:   helper is configured (a prompt-less helper).
 EOM
         return 1
       fi

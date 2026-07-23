@@ -971,11 +971,8 @@ You may already be authenticated with the `gh` CLI (`gh auth status` is green).
 `gh auth login` authenticates the **`gh` CLI**, not plain **git**. The acq kit
 fetch uses `git` directly. If your machine has a global git credential helper or
 a `url.<x>.insteadOf` rewrite (common in enterprise/egress setups), git tries to
-*authenticate* to the public kit repo and — failing — drops into an interactive
+*authenticate* to the kit source and — failing — drops into an interactive
 prompt (and GitHub disabled git password auth in 2021, so it can't succeed).
-
-The kit repo (`GSA-TTS/agentic-coding-patterns`) is **public** and needs no
-credentials at all.
 
 ### Fix
 
@@ -985,7 +982,7 @@ Wire git to use your `gh` token, once:
 gh auth setup-git
 ```
 
-If it still prompts, you likely have a rewrite forcing auth on a public clone —
+If it still prompts, you likely have a rewrite forcing auth on the clone —
 inspect it with:
 
 ```
@@ -996,9 +993,10 @@ git config --global --get-regexp 'url\..*insteadOf'
 
 As of #207, acq's kit fetch is **non-interactive**: it sets `GIT_TERMINAL_PROMPT=0`
 and first attempts an anonymous fetch with any inherited credential helper /
-`github.com` `insteadOf` rewrite neutralized (so a public fetch just works),
-then retries once with your system git config (still prompt-disabled) for
-legitimately private/enterprise-mirror sources. It can no longer hang on a
+`github.com` `insteadOf` rewrite neutralized (so an unauthenticated fetch
+proceeds without prompting), then retries once with your system git config
+(still prompt-disabled) for sources that require auth (enterprise mirror, etc.).
+It can no longer hang on a
 prompt; a genuine failure now prints this remedy.
 
 ### Related

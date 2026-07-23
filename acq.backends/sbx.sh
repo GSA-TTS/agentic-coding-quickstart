@@ -209,9 +209,9 @@ _acq_sbx_translate_kit() {
     case "$kitref" in
       git+http*)
         echo "acq(sbx): WARNING: could not fetch kit: $kitref" >&2
-        echo "acq(sbx):   The kit repo is public and needs no credentials. If git prompted for a" >&2
-        echo "acq(sbx):   GitHub username/password, run 'gh auth setup-git' once, or check for a" >&2
-        echo "acq(sbx):   rewrite: git config --global --get-regexp 'url\\..*insteadOf'." >&2
+        echo "acq(sbx):   If git prompted for a GitHub username/password, run 'gh auth" >&2
+        echo "acq(sbx):   setup-git' once (gh auth != git auth), or check for a rewrite:" >&2
+        echo "acq(sbx):   git config --global --get-regexp 'url\\..*insteadOf'." >&2
         echo "acq(sbx):   Passing the ref through to sbx to attempt its own fetch." >&2
         ;;
       *)
