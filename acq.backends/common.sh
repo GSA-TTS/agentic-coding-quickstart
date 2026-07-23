@@ -49,6 +49,14 @@ ACQ_KIT_NAMES=(usai-provider agentic-coding-playbook zscaler-ca-certificate git-
 ACQ_EXTRA_KITS="${ACQ_EXTRA_KITS:-}"
 ACQ_EXTRA_KIT_SOURCES="${ACQ_EXTRA_KIT_SOURCES:-}"
 
+# Kits supplied on the command line via `--kit <ref>` (repeatable) on
+# run/create. These are extracted from the arg list by extract_kit_flags (below)
+# BEFORE the args reach the backend, so a neutral kit ref is translated by acq
+# rather than passed raw to the backend CLI (which would fail to parse the
+# neutral schema). Folded into the kit list by _build_kit_list, alongside
+# ACQ_EXTRA_KITS. One ref per element.
+ACQ_CLI_KITS=()
+
 KIT_SOURCE_PREFIX="github.com/GSA-TTS/"
 KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
 
@@ -102,6 +110,12 @@ _build_kit_list() {
     split_noglob _extra_kits "$ACQ_EXTRA_KITS"
     # shellcheck disable=SC2154
     KITS+=("${_extra_kits[@]}")
+  fi
+  # Kits given on the command line via `--kit <ref>` (extracted by
+  # extract_kit_flags before dispatch). Same treatment as ACQ_EXTRA_KITS:
+  # translated by acq, source-allowlisted, never forwarded raw to the backend.
+  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
+    KITS+=("${ACQ_CLI_KITS[@]}")
   fi
 
   # Also build the allowed sources list.
@@ -229,6 +243,44 @@ strip_backend_flag() {
     esac
     STRIPPED_ARGS+=("$arg")
   done
+}
+
+# Extract user-supplied `--kit <ref>` / `--kit=<ref>` flags from a run/create
+# arg list. Populates two arrays IN THE CURRENT SHELL (so callers must not run
+# this in a subshell/pipeline):
+#   ACQ_CLI_KITS         — the kit refs, one per element
+#   ACQ_KIT_REMAINING    — the arg list with all --kit flags removed
+#
+# Why acq must intercept `--kit`: the backend spells local-kit application the
+# same way (`sbx create --kit <dir>`), so a user naturally writes
+# `acq run opencode --kit <dir> .`. If acq forwarded that flag verbatim, the
+# backend would receive a NEUTRAL hybrid/v1 kit it cannot parse. Treating it like
+# an ACQ_EXTRA_KITS entry routes it through acq's translation instead.
+#
+# Usage:
+#   extract_kit_flags "$@"
+#   _build_kit_list                        # fold ACQ_CLI_KITS into KITS
+#   set -- "${ACQ_KIT_REMAINING[@]}"        # args without --kit
+extract_kit_flags() {
+  ACQ_CLI_KITS=()
+  ACQ_KIT_REMAINING=()
+  local expect_kit=0 arg
+  for arg in "$@"; do
+    if [ "$expect_kit" -eq 1 ]; then
+      ACQ_CLI_KITS+=("$arg")
+      expect_kit=0
+      continue
+    fi
+    case "$arg" in
+      --kit)   expect_kit=1 ;;
+      --kit=*) ACQ_CLI_KITS+=("${arg#--kit=}") ;;
+      *)       ACQ_KIT_REMAINING+=("$arg") ;;
+    esac
+  done
+  # A trailing `--kit` with no value: warn but don't crash.
+  if [ "$expect_kit" -eq 1 ]; then
+    echo "acq: --kit given with no value; ignoring" >&2
+  fi
 }
 
 # ============================================================================
