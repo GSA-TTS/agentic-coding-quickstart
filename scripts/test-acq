@@ -323,24 +323,29 @@ cleanup_stubs
 # pass through untranslated, so the ref appears in the sbx create line as a
 # `--kit <ref>` token pair; the point of these tests is WHERE it appears and that
 # the create positionals are clean.
+#
+# NOTE: the workspace positional MUST be a real, existing directory — acq's
+# pre-flight (#216) aborts create/run on a nonexistent path before it ever
+# reaches `sbx create`. Use a throwaway temp dir as the workspace.
+_kitproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-kitproj.XXXXXX")
 make_stubs
-out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/mykit /proj 2>/dev/null)
+out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/mykit "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
 # The kit ref is present (folded into the kit list, emitted as a --kit flag).
 assert_contains "kit-flag: create folds --kit ref into kit list (#222)" "$create_line" "--kit /tmp/mykit"
 # The workspace positional survives.
-assert_contains "kit-flag: create keeps workspace positional (#222)" "$create_line" "/proj"
+assert_contains "kit-flag: create keeps workspace positional (#222)" "$create_line" "$_kitproj"
 # The kit ref must NOT trail as a raw positional after the workspace (i.e. the
-# create args are opencode + /proj only, with all --kit pairs among the leading
-# translated kit flags). Assert the ref does not appear immediately after /proj.
-assert_not_contains "kit-flag: --kit not left as trailing raw arg (#222)" "$create_line" "/proj --kit /tmp/mykit"
-assert_not_contains "kit-flag: no dangling ref after workspace (#222)" "$create_line" "/proj /tmp/mykit"
+# create args are opencode + <workspace> only, with all --kit pairs among the
+# leading translated kit flags). Assert the ref does not appear after the path.
+assert_not_contains "kit-flag: --kit not left as trailing raw arg (#222)" "$create_line" "$_kitproj --kit /tmp/mykit"
+assert_not_contains "kit-flag: no dangling ref after workspace (#222)" "$create_line" "$_kitproj /tmp/mykit"
 cleanup_stubs
 
 # --kit=<ref> (equals form) is also intercepted.
 make_stubs
-out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit=/tmp/eqkit /proj 2>/dev/null)
+out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit=/tmp/eqkit "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
 assert_contains "kit-flag: create folds --kit=<ref> form (#222)" "$create_line" "--kit /tmp/eqkit"
@@ -349,35 +354,35 @@ cleanup_stubs
 
 # Multiple --kit flags are all intercepted.
 make_stubs
-out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/k1 --kit /tmp/k2 /proj 2>/dev/null)
+out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/k1 --kit /tmp/k2 "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
 assert_contains "kit-flag: first repeated --kit folded (#222)" "$create_line" "--kit /tmp/k1"
 assert_contains "kit-flag: second repeated --kit folded (#222)" "$create_line" "--kit /tmp/k2"
-assert_contains "kit-flag: workspace still present with repeated --kit (#222)" "$create_line" "/proj"
+assert_contains "kit-flag: workspace still present with repeated --kit (#222)" "$create_line" "$_kitproj"
 cleanup_stubs
 
 # run form also intercepts --kit (routes through provision -> sbx create).
 make_stubs
-out=$(ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/runkit /proj 2>/dev/null)
+out=$(ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/runkit "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
 assert_contains "kit-flag: run folds --kit ref into kit list (#222)" "$create_line" "--kit /tmp/runkit"
-assert_not_contains "kit-flag: run --kit not left as trailing raw arg (#222)" "$create_line" "/proj --kit /tmp/runkit"
+assert_not_contains "kit-flag: run --kit not left as trailing raw arg (#222)" "$create_line" "$_kitproj --kit /tmp/runkit"
 cleanup_stubs
 
 # A `--kit` AFTER the `--` separator belongs to the AGENT, not acq: it MUST NOT
 # be hijacked into the kit list, and it MUST survive intact in the agent args.
 make_stubs
-out=$(ACQ_BACKEND=sbx "$ACQ" run opencode /proj -- --kit evil-agent-arg 2>/dev/null)
+out=$(ACQ_BACKEND=sbx "$ACQ" run opencode "$_kitproj" -- --kit evil-agent-arg 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
-run_line=$(printf '%s\n' "$log" | grep '^sbx run' || true)
 # acq must not fold the agent's --kit into the sandbox kit list.
 assert_not_contains "kit-flag: agent --kit after -- not hijacked (#222)" "$create_line" "--kit evil-agent-arg"
 # The agent's flag must be forwarded verbatim to the agent invocation.
 assert_contains "kit-flag: agent --kit after -- forwarded intact (#222)" "$log" "--kit evil-agent-arg"
 cleanup_stubs
+rm -rf "$_kitproj"
 
 # ===========================================================================
 # 4. qsbx deprecation notice
