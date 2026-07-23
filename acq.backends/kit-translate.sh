@@ -33,6 +33,7 @@
 # ---------------------------------------------------------------------------
 #   kit_spec_field       SPEC KEY            -> top-level scalar (name, kind, …)
 #   kit_spec_net_allow   SPEC                -> one host[:port] per line
+#   kit_spec_published_ports SPEC            -> one "container<TAB>proto<TAB>name" per line
 #   kit_spec_files       SPEC                -> one "path|mode|phase|source" per line
 #   kit_spec_commands    SPEC                -> command records (see format below)
 #   kit_spec_env         SPEC                -> one "NAME<TAB>value" per line
@@ -168,6 +169,64 @@ kit_spec_net_allow() {
         in_allow=0                            # dedent ends the list
       }
     }
+  ' "$spec"
+}
+
+# ---------------------------------------------------------------------------
+# kit_spec_published_ports SPEC
+# ---------------------------------------------------------------------------
+# Echo one record per backend_extras.sbx.publishedPorts[] entry, tab-separated:
+#   container <TAB> protocol <TAB> name
+# protocol/name are empty if unspecified. Only the sbx backend's block is read
+# (the neutral spec leaves backend_extras as free-form per-backend objects; the
+# sbx adapter is the consumer of this well-known shape). The list lives at:
+#   backend_extras:
+#     sbx:
+#       publishedPorts:
+#         - container: 3000
+#           protocol: tcp
+#           name: openchamber
+kit_spec_published_ports() {
+  local spec="$1"
+  [ -f "$spec" ] || return 0
+  awk '
+    function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); gsub(/^"|"$/,"",s); return s }
+    function flush(){ if (cur_c != "") printf "%s\t%s\t%s\n", cur_c, cur_p, cur_n; cur_c=""; cur_p=""; cur_n="" }
+    function indent_of(s,   i){ i=match(s,/[^ ]/); return (i==0? 0 : i-1) }
+    /^backend_extras:/  { in_be=1; next }
+    /^[A-Za-z]/         { if (in_be) { flush(); in_be=0; in_sbx=0; in_pp=0 } }
+    in_be {
+      # `  sbx:` at one indent level under backend_extras.
+      if ($0 ~ /^[[:space:]]+sbx:[[:space:]]*$/) { in_sbx=1; in_pp=0; sbx_ind=indent_of($0); next }
+      # Another backend key at the same indent as sbx ends the sbx block.
+      if (in_sbx && $0 ~ /^[[:space:]]+[A-Za-z_]+:/ && indent_of($0) <= sbx_ind && $0 !~ /publishedPorts:/) {
+        # Could be a sibling backend (msb:/ppp:) or a sibling sbx key (background:).
+        # Only leave the sbx block if this key is at sbx_ind (a sibling backend).
+        if (indent_of($0) == sbx_ind) { flush(); in_sbx=0; in_pp=0 }
+      }
+      if (in_sbx && $0 ~ /publishedPorts:[[:space:]]*$/) { in_pp=1; flush(); next }
+      if (in_pp) {
+        # A new list item: "        - container: 3000"
+        if ($0 ~ /^[[:space:]]+-[[:space:]]/) {
+          flush()
+          line=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",line)
+          k=line; sub(/:.*/,"",k); k=trim(k)
+          v=line; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); v=trim(v)
+          if (k=="container") cur_c=v; else if (k=="protocol") cur_p=v; else if (k=="name") cur_n=v
+          next
+        }
+        # Continuation keys of the current item.
+        if ($0 ~ /^[[:space:]]+[A-Za-z]/) {
+          k=$0; sub(/:.*/,"",k); k=trim(k)
+          v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); v=trim(v)
+          if (k=="container") cur_c=v; else if (k=="protocol") cur_p=v; else if (k=="name") cur_n=v
+          # A dedent to sbx-level key (e.g. background:) ends the port list.
+          if (indent_of($0) <= sbx_ind + 2 && k != "container" && k != "protocol" && k != "name") { flush(); in_pp=0 }
+          next
+        }
+      }
+    }
+    END { if (in_be) flush() }
   ' "$spec"
 }
 
@@ -525,6 +584,7 @@ kit_spec_agent_context() {
 #   commands[phase=initFiles]       -> commands.initFiles[]  (command form)
 #   commands[phase=startup]         -> commands.startup[]
 #   agentContext                    -> agentContext            (identical)
+#   backend_extras.sbx.publishedPorts -> publishedPorts[]      (top-level, sbx-v2)
 #   backend_shortcuts.sbx           -> (none defined for the four kits; ignored)
 #
 # Usage: kit_translate_to_sbx NEUTRAL_KIT_DIR OUT_DIR
@@ -559,13 +619,18 @@ kit_translate_to_sbx() {
     [ -n "$display" ] && printf 'displayName: %s\n' "$(_kit_yaml_quote "$display")"
     [ -n "$desc" ] && printf 'description: %s\n' "$(_kit_yaml_quote "$desc")"
 
-    # caps.network.allow
+    # caps.network.allow. Route each host through _kit_yaml_quote: a neutral
+    # allow entry may legitimately contain a YAML-special character — most
+    # commonly a leading `*` for a wildcard subdomain (e.g. "*.npmjs.org"). Emit
+    # it bare and YAML reads the `*` as an ALIAS, producing an invalid sbx spec
+    # ("did not find expected alphabetic or numeric character"). Quoting keeps
+    # plain hostnames bare and single-quotes only the special ones.
     local hosts
     hosts=$(kit_spec_net_allow "$spec")
     if [ -n "$hosts" ]; then
       printf 'caps:\n  network:\n    allow:\n'
       printf '%s\n' "$hosts" | while IFS= read -r h; do
-        [ -n "$h" ] && printf '      - %s\n' "$h"
+        [ -n "$h" ] && printf '      - %s\n' "$(_kit_yaml_quote "$h")"
       done
     fi
 
@@ -577,6 +642,22 @@ kit_translate_to_sbx() {
       printf '%s\n' "$envrecs" | while IFS="$(printf '\t')" read -r ekey eval; do
         [ -n "$ekey" ] || continue
         printf '    %s: %s\n' "$ekey" "$(_kit_yaml_quote "$eval")"
+      done
+    fi
+
+    # backend_extras.sbx.publishedPorts -> sbx-v2 top-level publishedPorts. sbx
+    # maps each declared CONTAINER port to an ephemeral host loopback port at
+    # create time. Without this, an acq-applied kit that exposes a service is
+    # unreachable from the host until the user runs `acq ports --publish`.
+    local portrecs
+    portrecs=$(kit_spec_published_ports "$spec")
+    if [ -n "$portrecs" ]; then
+      printf 'publishedPorts:\n'
+      printf '%s\n' "$portrecs" | while IFS="$(printf '\t')" read -r pcont pproto pname; do
+        [ -n "$pcont" ] || continue
+        printf '  - container: %s\n' "$pcont"
+        [ -n "$pproto" ] && printf '    protocol: %s\n' "$pproto"
+        [ -n "$pname" ]  && printf '    name: %s\n' "$(_kit_yaml_quote "$pname")"
       done
     fi
   } > "$sbxspec"

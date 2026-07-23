@@ -1158,6 +1158,7 @@ caps:
   network:
     allow:
       - api.example.com:443
+      - "*.example.com"
 files:
   - path: /home/agent/tool/config
     mode: "0644"
@@ -1177,6 +1178,16 @@ commands:
     command:
       - node
       - /home/agent/tool/run.mjs
+backend_extras:
+  sbx:
+    publishedPorts:
+      - container: 3000
+        protocol: tcp
+        name: web-ui
+      - container: 4096
+        protocol: tcp
+        name: api
+    background: true
 SPEC
 tout="$STUBDIR/tout"
 ( . "${REPO_ROOT}/acq.backends/kit-translate.sh"
@@ -1187,6 +1198,18 @@ assert_contains "translate: carries caps.network.allow" "$sbxspec" "api.example.
 assert_contains "translate: has install phase" "$sbxspec" "install:"
 assert_contains "translate: has startup phase" "$sbxspec" "startup:"
 assert_contains "translate: preserves multi-line block body" "$sbxspec" "line two"
+# Regression (#220): a wildcard-subdomain allow host (leading `*`) MUST be
+# quoted, or YAML parses the `*` as an alias and the sbx spec is invalid. The
+# host:port form also contains a `:` and must survive. Assert both are quoted.
+assert_contains "translate: quotes wildcard allow host (#220)" "$sbxspec" "- '*.example.com'"
+assert_contains "translate: quotes host:port allow entry (#220)" "$sbxspec" "- 'api.example.com:443'"
+# Regression (#219): backend_extras.sbx.publishedPorts MUST be emitted as a
+# top-level sbx-v2 publishedPorts block so acq-applied kits get host port maps.
+assert_contains "translate: emits publishedPorts block (#219)" "$sbxspec" "publishedPorts:"
+assert_contains "translate: publishedPorts carries container 3000 (#219)" "$sbxspec" "- container: 3000"
+assert_contains "translate: publishedPorts carries container 4096 (#219)" "$sbxspec" "- container: 4096"
+assert_contains "translate: publishedPorts carries protocol (#219)" "$sbxspec" "protocol: tcp"
+assert_contains "translate: publishedPorts carries name (#219)" "$sbxspec" "name: web-ui"
 # The static payload file is copied under files/.
 if [ -f "$tout/files/home/tool/config" ]; then
   pass "translate: copies files/ payload tree"
