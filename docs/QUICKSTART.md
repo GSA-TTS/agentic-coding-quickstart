@@ -189,6 +189,19 @@ export ACQ_EXTRA_KITS="./my-local-kit git+https://github.com/acme/kits.git#ref=<
 export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 ```
 
+You can also apply an extra kit for a single `run`/`create` with `--kit`
+(repeatable), instead of the env var:
+
+```bash
+# One-off: apply a local kit dir (or a git+https ref)
+acq run opencode --kit ./my-local-kit .
+acq create opencode --kit ./kit-a --kit git+https://github.com/acme/kits.git#ref=<sha>&dir=some-kit /proj
+```
+
+`--kit` refs are translated by `acq` exactly like `ACQ_EXTRA_KITS` entries (a
+neutral `hybrid/v1` kit is converted to the active backend's format), so they
+work with any backend — they are **not** forwarded raw to the backend CLI.
+
 ---
 
 ## Exec timeout tuning

@@ -7,8 +7,8 @@
 # sbx kits as qsbx, unchanged, for 1.1.x.
 #
 # Usage:
-#   acq run AGENT PATH [...] [-- AGENT_ARGS...]  # create+attach or re-attach
-#   acq create AGENT PATH [...]                   # create detached
+#   acq run AGENT PATH [...] [--kit REF]... [-- AGENT_ARGS...]  # create+attach
+#   acq create AGENT PATH [...] [--kit REF]...    # create detached
 #   acq ls                                        # list sandboxes
 #   acq stop NAME                                 # stop without removing
 #   acq rm NAME                                   # remove
@@ -25,6 +25,12 @@
 #
 # Global flag (before subcommand):
 #   --backend <name>    Override backend for this invocation
+#
+# run/create flag:
+#   --kit REF           Apply an extra kit (repeatable). REF is a local dir or a
+#                       git+https ref, same as an ACQ_EXTRA_KITS entry. acq
+#                       translates it (neutral hybrid/v1 -> backend); it is NOT
+#                       forwarded raw to the backend.
 
 set -euo pipefail
 
@@ -244,6 +250,27 @@ esac
 acq_resolve_backend "${explicit_backend}"
 
 # ---------------------------------------------------------------------------
+# Intercept user-supplied `--kit <ref>` on run/create (repeatable).
+# ---------------------------------------------------------------------------
+# A `--kit` flag must be handled BY ACQ, not forwarded to the backend: the
+# backend spells local-kit application the same way, so a user naturally writes
+# `acq run opencode --kit <dir> .`, but the backend cannot parse a NEUTRAL
+# hybrid/v1 kit. extract_kit_flags pulls the refs into ACQ_CLI_KITS and the
+# remaining (kit-stripped) args into ACQ_KIT_REMAINING. It must run in THIS
+# shell so the array assignments survive. acq_resolve_backend already built the
+# kit list once; re-run _build_kit_list to include the CLI kits.
+case "$subcommand" in
+  run|create)
+    _sub="$subcommand"
+    shift                       # drop the subcommand token; $@ is now its args
+    extract_kit_flags "$@"
+    [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _build_kit_list   # re-fold with CLI kits
+    # Rebuild positional args as: <subcommand> <remaining args w/o --kit>.
+    set -- "$_sub" ${ACQ_KIT_REMAINING[@]+"${ACQ_KIT_REMAINING[@]}"}
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 
@@ -459,6 +486,10 @@ Subcommands:
 
 Global flags (before subcommand):
   --backend <name>           Override the active backend
+
+run/create flag:
+  --kit REF                  Apply an extra kit (repeatable); local dir or
+                             git+https ref, translated by acq like ACQ_EXTRA_KITS
 
 Unknown subcommands are passed through to the active backend's CLI.
 

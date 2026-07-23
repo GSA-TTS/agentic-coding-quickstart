@@ -555,11 +555,14 @@ acq_backend_provision() {
   # Fetch each built-in kit and gather its create-time contributions.
   local kitref kitdir
   local kits=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT" "$GITSSHSIGN_KIT")
-  # Include any extra kits.
+  # Include any extra kits (env-supplied) and CLI-supplied --kit refs.
   if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
     local _extras=()
     split_noglob _extras "$ACQ_EXTRA_KITS"
     kits+=("${_extras[@]}")
+  fi
+  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
+    kits+=("${ACQ_CLI_KITS[@]}")
   fi
 
   for kitref in "${kits[@]}"; do
