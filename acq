@@ -16,6 +16,7 @@
 #   acq cp SRC DST                                # copy in/out
 #   acq ports NAME [--publish ...]                # list/publish ports
 #   acq secret set SERVICE [...]                  # set a secret (see sbx.sh)
+#   acq github-scope SANDBOX [PATH]               # scope a GitHub token per-sandbox
 #   acq usai-rotate-api-key                       # rotate the USAi key
 #   acq version                                   # version + backend info
 #   acq doctor                                    # backend health + config
@@ -343,6 +344,7 @@ case "$subcommand" in
 
       [ -n "$ws" ] || ws="$PWD"
       warn_if_no_git_identity "$ws"
+      advise_github_scope "$local_name" "$ws"
 
       if [ "${#agent_args[@]}" -gt 0 ]; then
         acq_backend_attach "$local_name" -- "${agent_args[@]}"
@@ -457,6 +459,17 @@ SECRETUSAGE
     esac
     ;;
 
+  github-scope)
+    # Guide the user through minting a fine-grained PAT scoped to the workspace's
+    # repos and store it sandbox-scoped (ADR-0013).
+    shift
+    acq_backend_prepare
+    gs_sandbox="${1:-}"
+    [ -n "$gs_sandbox" ] || { echo "acq: github-scope: missing sandbox name" >&2; echo "     usage: acq github-scope SANDBOX [WORKSPACE_PATH]" >&2; exit 1; }
+    gs_ws="${2:-$PWD}"
+    github_scope_sandbox "$gs_sandbox" "$gs_ws"
+    ;;
+
   "")
     # No subcommand: print usage.
     cat >&2 <<'USAGE'
@@ -475,6 +488,7 @@ Subcommands:
   cp SRC DST                 Copy files in/out (NAME:path syntax)
   ports NAME [--publish ...]  List/publish ports
   secret set SERVICE [...]   Set a secret (--host/--env for custom)
+  github-scope SANDBOX [PATH] Scope a GitHub token to the workspace's repos
   usai-rotate-api-key        Rotate the USAi API key
   version                    Show acq version + backend info
   doctor                     Backend health check + write default config
