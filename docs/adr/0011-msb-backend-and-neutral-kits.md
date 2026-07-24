@@ -172,6 +172,47 @@ at create/run time via `-p HOST:GUEST`; the flag gates the sbx-style post-hoc
   state-preserving in-place add (msb has no `sbx kit add` equivalent); it never
   silently destroys state.
 
+### Agent install + base-image contract + attach (fix for quickstart#228)
+
+The initial 1.2.0 msb adapter provisioned a sandbox with the four kits but
+**never installed or launched the requested agent** (`opencode`): `msb create`
+booted a plain `node:22-bookworm`, no step installed opencode, and
+`acq_backend_attach` ran a bare `msb ssh NAME` — dropping the user into a **root
+shell with no agent** (reported in
+[quickstart#228](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/228)).
+Both defects stem from the adapter ignoring the AGENT token that
+`acq_backend_provision`/`attach` receive. On sbx this "just works" because the
+agent **template supplies the binary and its launch wiring**; msb runs a plain
+base and must reproduce that itself. The fix makes the msb adapter satisfy the
+same contract sbx's templates provide, keyed off the
+[Docker base-image requirements](https://docs.docker.com/ai/sandboxes/customize/kit-reference/#base-image-requirements)
+for `docker/sandbox-templates:shell-docker`:
+
+- **Install the agent** (`_acq_msb_install_agent`). The AGENT token is read from
+  the first positional at provision. `opencode` → `npm install -g opencode-ai`
+  (node is already a verified prerequisite), with the npm registry host
+  (`registry.npmjs.org`) allow-listed at create so the default-deny egress
+  permits the download. Idempotent: skipped if the binary is already present
+  (a pre-baked `ACQ_MSB_IMAGE`) and marker-gated. `shell` is a no-op; an unknown,
+  absent agent warns (bake it into `ACQ_MSB_IMAGE`). Tunables:
+  `ACQ_MSB_OPENCODE_PKG`, `ACQ_MSB_NPM_HOSTS`.
+- **Satisfy the base-image contract** (`_acq_msb_ensure_agent_user`, extended).
+  In addition to the `agent`/`/home/agent` user it already created, it now adds
+  **passwordless sudo** (`/etc/sudoers.d/90-acq-agent`) and preserves the
+  **HTTP proxy env across sudo** (`env_keep` in `/etc/sudoers.d/91-acq-proxy-env`)
+  — the two remaining published requirements a plain base lacks. Idempotent +
+  marker-gated; a base without `sudo` is non-fatal (acq runs root steps as
+  `-u 0` directly).
+- **Launch the agent on attach** (`acq_backend_attach` → `_acq_msb_ssh_agent`).
+  Reproduces `sbx run --name`'s "re-launch the baked-in agent" behavior:
+  `msb ssh NAME -- su - agent -c "cd <workspace>; exec <agent>"`. The agent to
+  run is recorded at provision (`/var/lib/acq/agent`) so the name-only re-attach
+  path (`acq run <sandbox>`) still launches it. Falls back to a shell **as the
+  agent user** (never root) for `shell` sandboxes or a missing binary.
+
+Egress note: this adds one create-time allow-list host (the npm registry) only
+when an installable agent is requested; it does not widen egress for `shell`.
+
 ### msb CLI flag verification
 
 The msb flag/subcommand shapes used by the adapter were **verified against
@@ -277,18 +318,23 @@ secret substitution requires `--tls-intercept` and only covers the
 ## Validation
 
 - `bash -n acq acq.backends/*.sh scripts/test-acq scripts/verify-backends` clean.
-- `./scripts/test-acq` passes (135 checks, incl. msb + kit + translation +
-  untrusted-input-hardening cases).
+- `./scripts/test-acq` passes (incl. msb + kit + translation +
+  untrusted-input-hardening cases, and the quickstart#228 regression cases:
+  agent install, base-image contract — passwordless sudo + proxy `env_keep` —
+  and attach-launches-agent-as-agent-user).
 - Neutral→sbx-v2 synthesis for all four kits parses as valid YAML (verified with
   a YAML parser during development).
 - `npm run lint` (markdownlint, shellcheck, gitleaks, YAML/JSON) — run in CI.
 - **Deferred, requires a sandbox-capable host (no nested sandboxes):**
-  the full `acq run … --backend msb` create→exec→attach loop and the
-  `scripts/verify-backends` msb row cannot run inside an sbx/msb sandbox and need
-  host virtualization (`/dev/kvm` on Linux). The msb CLI flag shapes were
+  the full `acq run … --backend msb` create→install→exec→attach loop and the
+  `scripts/verify-backends` msb rows (now including the `opencode`-installed
+  assertion added for quickstart#228) cannot run inside an sbx/msb sandbox and
+  need host virtualization (`/dev/kvm` on Linux). The msb CLI flag shapes were
   verified against `msb 0.6.6`; the live loop is deferred and mirrors how
   ADR-0009/ADR-0010 defer live verification. Run `./scripts/verify-backends`
-  on a sandbox-capable host and attach the transcript.
+  on a sandbox-capable host and attach the transcript. **The quickstart#228 fix
+  (agent install + attach launch) is verified offline via the stubbed harness;
+  its live create→install→attach path still needs a KVM host run.**
 
 ## Release gate (satisfied)
 

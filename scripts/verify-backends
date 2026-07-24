@@ -271,12 +271,53 @@ verify_backend() {
   fi
 }
 
+# verify_agent_install BACKEND — provision an `opencode` sandbox (not `shell`)
+# and assert the agent binary is actually installed and launchable. This catches
+# the class of bug where a sandbox comes up but the agent was never installed
+# (quickstart#228): on sbx the template bakes it in; on msb acq installs it.
+verify_agent_install() {
+  local backend="$1"
+  echo ""
+  echo "== backend: ${backend} (agent install) =="
+
+  local aname
+  aname=$(
+    # shellcheck disable=SC1090
+    ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
+    derive_name opencode "$WORKDIR" 2>/dev/null
+  )
+  [ -n "$aname" ] || aname="opencode-$(basename "$WORKDIR" | tr '[:upper:]' '[:lower:]')"
+  printf '        sandbox name: %s\n' "$aname"
+
+  if ! run_acq "create-opencode" --backend "$backend" create opencode "$WORKDIR"; then
+    fail "${backend}: provision (acq create opencode) failed"
+    dump "acq create output" "$LAST_OUT"
+    run_acq "rm" --backend "$backend" rm "$aname" >/dev/null 2>&1 || true
+    return
+  fi
+
+  # The agent binary must be on PATH inside the sandbox (the bug: it wasn't).
+  if run_acq "exec opencode-present" --backend "$backend" exec "$aname" -- sh -c "command -v opencode >/dev/null 2>&1"; then
+    pass "${backend}: opencode binary installed and on PATH"
+  else
+    fail "${backend}: opencode binary NOT found in sandbox (agent install failed)"
+    dump "exec output" "$LAST_OUT"
+  fi
+
+  if [ -n "$KEEP" ] && [ "$FAIL" -gt 0 ]; then
+    printf '        (keeping sandbox %s; --keep set)\n' "$aname"
+  else
+    run_acq "rm" --backend "$backend" rm "$aname" >/dev/null 2>&1 || true
+  fi
+}
+
 echo "verify-backends"
 echo "  workspace: $WORKDIR"
 
 # sbx
 if command -v sbx >/dev/null 2>&1; then
   verify_backend sbx
+  verify_agent_install sbx
 else
   echo ""; echo "== backend: sbx =="; skip "sbx: not installed"
 fi
@@ -284,6 +325,7 @@ fi
 # msb
 if command -v msb >/dev/null 2>&1; then
   verify_backend msb
+  verify_agent_install msb
 else
   echo ""; echo "== backend: msb =="; skip "msb: not installed"
 fi

@@ -3,7 +3,7 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-07-15"
+last_updated: "2026-07-24"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
 related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -159,6 +159,8 @@ Tunables:
 | `ACQ_MSB_IMAGE` | `docker.io/library/node:22-bookworm` | Base OCI image (must be pullable and ship node/git/curl/ca-certificates) |
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
 | `ACQ_MSB_AGENT_UID` | `1000` | Preferred uid for the provisioned `agent` user |
+| `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
+| `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
 | `ACQ_MSB_WORKSPACE` | `/home/agent/workspace` | Guest mount point for the host workspace |
 | `ACQ_MSB_DNS_NAMESERVER` | `1.1.1.1` | Guest DNS resolver (set empty to use msb's default) |
 | `ACQ_MSB_KIT_CACHE` | `$XDG_CACHE_HOME/acq/kits` | where fetched neutral kits are materialized |
@@ -206,15 +208,40 @@ ships all four tools and pulls from Docker Hub without auth. Before applying
 kits, the adapter **verifies** the tools are present and warns if any are
 missing (it does not try to install them).
 
-**The `agent` user contract.** The kits stage files under `/home/agent` and run
-their unprivileged commands as an `agent` user (uid 1000) — the contract sbx's
-agent template guarantees. A plain OCI base does not provide this (e.g.
-`node:22-bookworm` has a `node` user at uid 1000 and no `agent`). So at provision
-the msb adapter **creates an `agent` user with `HOME=/home/agent`** (idempotent,
-offline via `useradd`/`adduser`), chowns the staged `/home/agent` files to it,
-and runs the kits' uid-1000 commands as `agent` with `HOME=/home/agent` (it
-addresses the user by name, not by the literal uid 1000, so it works even when
-1000 is already taken). Set `ACQ_MSB_AGENT_UID` to prefer a specific uid.
+**The agent binary.** sbx's agent templates bake the requested agent (e.g.
+`opencode`) into the image; a plain msb base has no agent. So at provision the
+msb adapter **installs the agent it was asked to run**. For `opencode` this is
+`npm install -g opencode-ai` (node is a verified prerequisite), and the adapter
+allow-lists the npm registry host (`registry.npmjs.org`) at create so the
+default-deny guest egress permits the download. The install is idempotent: it is
+skipped when the binary is already present (e.g. a pre-baked `ACQ_MSB_IMAGE`) and
+marker-gated against re-apply. `shell` installs nothing; an agent with no known
+recipe that is also absent from the base image produces a clear warning (bake it
+into `ACQ_MSB_IMAGE`). Tunables: `ACQ_MSB_OPENCODE_PKG` (npm spec, e.g.
+`opencode-ai@1.2.3`), `ACQ_MSB_NPM_HOSTS` (registry host(s) to allow-list, for an
+internal mirror).
+
+**The base-image contract (Docker `shell-docker`).** sbx's templates are built on
+`docker/sandbox-templates:shell-docker`, whose
+[published base-image requirements](https://docs.docker.com/ai/sandboxes/customize/kit-reference/#base-image-requirements)
+are: a non-root `agent` user at UID 1000 **with passwordless sudo**, a
+`/home/agent` home owned by `agent`, **HTTP proxy env (`HTTP_PROXY`/`HTTPS_PROXY`/
+`NO_PROXY`) preserved across sudo**, and the agent binary present. A plain OCI
+base (e.g. `node:22-bookworm`, which has `node` at uid 1000 and no `agent`, no
+sudoers rule) meets none of the first three. So at provision the msb adapter
+**idempotently synthesizes** them: it creates the `agent` user with
+`HOME=/home/agent` (offline via `useradd`/`adduser`), chowns the staged
+`/home/agent` files to it, drops a passwordless-sudo rule in `/etc/sudoers.d`,
+and adds a sudoers `env_keep` for the proxy variables. It addresses the user by
+name (not the literal uid 1000), so it works even when 1000 is already taken. Set
+`ACQ_MSB_AGENT_UID` to prefer a specific uid.
+
+**How attach launches the agent.** sbx's `sbx run --name` re-launches the baked-in
+agent; msb's `msb ssh NAME` only opens a shell (as root, msb's default SSH user).
+So on attach the msb adapter reproduces sbx's behavior itself: it `su - agent`s to
+the unprivileged `agent` user, `cd`s into the workspace, and execs the agent that
+was recorded at provision (falling back to an interactive shell as `agent` — never
+a root shell — for a `shell` sandbox or if the binary is somehow missing).
 
 To use your own image, set `ACQ_MSB_IMAGE` to one that also provides node, git,
 curl, and ca-certificates:

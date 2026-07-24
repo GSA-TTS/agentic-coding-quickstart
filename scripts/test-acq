@@ -119,9 +119,18 @@ case "$_msb_sub" in
     case "$snippet" in
       *"echo ok"*) printf 'ok\n' ;;
       *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
+      # `command -v <agent>` (agent-presence probe): controllable so the install
+      # path can be exercised. By default the agent is ABSENT (exit 1) so install
+      # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq
+      # `command -v node/git/curl/...` checks stay "present" (exit 0).
+      *"command -v 'opencode'"*|*"command -v 'claude'"*|*"command -v 'shell'"*)
+        [ "${STUB_AGENT_PRESENT:-0}" = "1" ] && exit 0 || exit 1 ;;
       *"command -v"*) : ;;          # prereqs "present" (empty missing set)
+      *"npm install"*)
+        [ "${STUB_NPM_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
       *"test -f "*) exit 1 ;;       # markers absent
       *"test -s "*) exit 0 ;;       # copied files present
+      *"cat /var/lib/acq/agent"*) printf '%s' "${STUB_RECORDED_AGENT:-}" ;;
       *) : ;;
     esac ;;
   ssh)  : ;;
@@ -790,6 +799,115 @@ assert_contains "msb: provision creates agent user" "$agent_log" "agent"
 assert_contains "msb: uid-1000 kit cmd runs as agent" "$agent_log" "msb exec agentbox -u agent -e HOME=/home/agent -- node"
 assert_not_contains "msb: uid-1000 kit cmd not run as -u 1000" "$agent_log" "msb exec agentbox -u 1000 -- node"
 assert_contains "msb: chowns staged /home/agent file to agent" "$agent_log" "chown agent /home/agent/usai-config/merge-global-config.mjs"
+cleanup_stubs
+
+# 8n1. msb provision satisfies the Docker base-image contract for the agent user:
+#      passwordless sudo (sudoers.d drop-in) AND HTTP proxy env preserved across
+#      sudo (env_keep). See docs.docker.com kit-reference "Base image requirements".
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/basereq-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision basereqbox shell /tmp >/dev/null 2>&1
+)
+basereq_log=$(cat "$CALLS")
+assert_contains "msb: agent gets passwordless sudo (sudoers.d)" "$basereq_log" "sudoers.d/90-acq-agent"
+assert_contains "msb: NOPASSWD rule for agent" "$basereq_log" "NOPASSWD:ALL"
+assert_contains "msb: proxy env preserved across sudo (env_keep)" "$basereq_log" "env_keep"
+assert_contains "msb: proxy env_keep names HTTPS_PROXY" "$basereq_log" "HTTPS_PROXY"
+cleanup_stubs
+
+# 8n2. msb provision INSTALLS the requested agent (opencode) when it is not
+#      already present — the reported bug was that opencode was never installed.
+#      Install is `npm install -g opencode-ai` as root, and the create call
+#      allow-lists the npm registry host so the (default-deny) egress permits it.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/inst-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  # Default stub: agent ABSENT -> install runs; npm succeeds.
+  acq_backend_provision instbox opencode /tmp >/dev/null 2>&1
+)
+inst_log=$(cat "$CALLS")
+assert_contains "msb: installs opencode via npm -g" "$inst_log" "npm install -g --no-fund --no-audit opencode-ai"
+assert_contains "msb: allow-lists npm registry host at create" "$inst_log" "--net-rule allow@registry.npmjs.org"
+assert_contains "msb: records the agent for attach" "$inst_log" "/var/lib/acq/agent"
+cleanup_stubs
+
+# 8n3. Idempotent install: if the agent binary is already present (e.g. baked
+#      into ACQ_MSB_IMAGE), provision does NOT run npm install again.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/inst2-secrets" STUB_AGENT_PRESENT=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision inst2box opencode /tmp >/dev/null 2>&1
+)
+assert_not_contains "msb: skips npm install when agent already present" "$(cat "$CALLS")" "npm install"
+cleanup_stubs
+
+# 8n4. `shell` sandbox: no agent binary install, no npm registry allow-list.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/shell-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision shellbox shell /tmp >/dev/null 2>&1
+)
+shell_log=$(cat "$CALLS")
+assert_not_contains "msb: shell agent does not npm install" "$shell_log" "npm install"
+assert_not_contains "msb: shell agent adds no npm net-rule" "$shell_log" "allow@registry.npmjs.org"
+cleanup_stubs
+
+# 8n5. Attach LAUNCHES the recorded agent as the `agent` user in the workspace —
+#      NOT a bare root shell (the reported bug). `msb ssh NAME` alone drops you in
+#      as root; acq must `su - agent` + exec the recorded agent.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export STUB_RECORDED_AGENT="opencode"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_attach attachbox >/dev/null 2>&1
+)
+attach_log=$(cat "$CALLS")
+assert_contains "msb: attach uses msb ssh" "$attach_log" "msb ssh attachbox"
+assert_contains "msb: attach drops to the agent user (su - agent)" "$attach_log" "su - agent"
+assert_contains "msb: attach execs the recorded agent" "$attach_log" "exec 'opencode'"
+assert_contains "msb: attach cds into the workspace" "$attach_log" "cd '/home/agent/workspace'"
+assert_not_contains "msb: attach is NOT a bare root ssh" "$attach_log" "msb ssh attachbox
+"
+cleanup_stubs
+
+# 8n6. Attach on a `shell` sandbox (or an unrecorded agent) opens a shell as the
+#      agent user — still never a root shell.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export STUB_RECORDED_AGENT="shell"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_attach shellattach >/dev/null 2>&1
+)
+shellattach_log=$(cat "$CALLS")
+assert_contains "msb: shell attach drops to agent user" "$shellattach_log" "su - agent"
+assert_not_contains "msb: shell attach does not exec a named agent" "$shellattach_log" "exec 'shell'"
 cleanup_stubs
 
 # 8o. Regression: msb applies ALL kit files and ALL kit commands, not just the

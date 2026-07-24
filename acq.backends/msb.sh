@@ -112,6 +112,27 @@ ACQ_MSB_DNS_NAMESERVER="${ACQ_MSB_DNS_NAMESERVER-1.1.1.1}"
 # shellcheck disable=SC2034
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
+# Agent binary install.
+# ---------------------------------------------------------------------------
+# Unlike sbx (whose agent templates BAKE the agent binary into the image), msb
+# runs a plain OCI base, so the adapter must install the requested agent itself.
+# For `opencode`, install the npm package globally (node is a base-image
+# prerequisite the adapter already verifies). The registry host must be reachable
+# from the guest, so the adapter allow-lists it at create (kit net-rules are
+# default-deny). The install is idempotent (marker-gated + `command -v` guarded).
+#
+# Only agents with a known install recipe are auto-installed; `shell` is a no-op
+# (there is nothing to install), and an unknown agent is a clear, non-fatal warning
+# (the user can bake it into ACQ_MSB_IMAGE). Override the opencode package spec
+# (e.g. to pin a version like opencode-ai@1.2.3) with ACQ_MSB_OPENCODE_PKG.
+ACQ_MSB_OPENCODE_PKG="${ACQ_MSB_OPENCODE_PKG:-opencode-ai}"
+
+# Hosts the agent installer needs to reach, allow-listed at create so egress
+# (default-deny under kit net-rules) permits the npm download. registry.npmjs.org
+# serves metadata; the tarballs are on the same host for the public registry.
+# Override for an internal mirror via ACQ_MSB_NPM_HOSTS (space-separated).
+ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
+
 # ---------------------------------------------------------------------------
 # Version comparison (shared shape with sbx.sh; kept local to avoid coupling)
 # ---------------------------------------------------------------------------
@@ -545,6 +566,14 @@ acq_backend_provision() {
   local name="$1"
   shift
 
+  # The AGENT token is the FIRST positional (e.g. `opencode`); the workspace path
+  # follows. Unlike sbx (whose template bakes the agent in), msb must install the
+  # agent itself after create — capture the token now so we know what to install
+  # and, later, what to launch on attach. Defaults to `shell` (no agent binary).
+  local agent
+  agent=$(first_positional "$@")
+  [ -n "$agent" ] || agent="shell"
+
   # Collect create-time flags: net rules (union of all kit caps), --trust-host-cas
   # (if any kit declares the msb zscaler shortcut), volume mounts (from paths),
   # and the USAi secret binding.
@@ -588,6 +617,22 @@ acq_backend_provision() {
   done
 
   [ "$trust_host_cas" -eq 1 ] && create_flags+=(--trust-host-cas)
+
+  # Allow-list the agent installer's registry host(s) so the (default-deny) guest
+  # egress permits the npm download. Only when we will actually install an agent
+  # (a known recipe exists); `shell` and unknown agents add no rule.
+  if _acq_msb_agent_has_install_recipe "$agent"; then
+    local _npm_host
+    for _npm_host in $ACQ_MSB_NPM_HOSTS; do
+      case "$_npm_host" in
+        ""|*[!A-Za-z0-9.*_-]*)
+          echo "acq(msb): warning: skipping non-hostname npm host: $_npm_host" >&2
+          continue
+          ;;
+      esac
+      create_flags+=(--net-rule "allow@${_npm_host}")
+    done
+  fi
 
   # TLS interception is REQUIRED for secret substitution: msb only swaps a
   # placeholder for the real value on a connection it can see into (the security
@@ -726,6 +771,20 @@ acq_backend_provision() {
   # as the wrong user against a non-existent home. Create it once, idempotently.
   _acq_msb_ensure_agent_user "$name"
 
+  # Install the requested agent binary (sbx bakes it into the template image; on
+  # a plain msb base acq must install it). Idempotent + marker-gated; a no-op for
+  # `shell`, a clear warning for an agent with no known recipe.
+  _acq_msb_install_agent "$name" "$agent"
+
+  # Record which agent this sandbox runs, so acq_backend_attach (which only gets
+  # the sandbox name) knows what to launch — the sbx equivalent is that
+  # `sbx run --name` re-launches the agent baked in at create. Written as root to
+  # a fixed guest path; validated charset (KNOWN_AGENTS tokens are word-safe).
+  case "$agent" in
+    *[!a-z-]*) : ;;  # defensive: never write an odd token
+    *) msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && printf '%s' '$agent' > /var/lib/acq/agent" >/dev/null 2>&1 || true ;;
+  esac
+
   # Apply each kit's files + commands.
   local kd
   for kd in "${kitdirs[@]}"; do
@@ -734,20 +793,104 @@ acq_backend_provision() {
 }
 
 # ---------------------------------------------------------------------------
-# _acq_msb_ensure_agent_user NAME — guarantee the kits' agent/uid-1000 contract
+# _acq_msb_agent_has_install_recipe AGENT — 0 if acq knows how to install AGENT
 # ---------------------------------------------------------------------------
-# The neutral kits assume the sbx agent-template contract: a user named `agent`
-# whose HOME is /home/agent, addressable as `-u 1000`. Plain OCI bases don't
-# provide it (node:22-bookworm ships `node` at uid 1000 with HOME=/home/node).
-# Create `agent` with home /home/agent, marker-gated so it runs once. Runs fully
-# offline (useradd/adduser need no network). The uid is configurable but
-# defaults to 1000; if 1000 is already taken by another user (e.g. `node`), we
-# still create `agent` at the next free uid AND ensure the kits' `-u 1000`
-# commands map to it by making `agent` own /home/agent and exporting HOME.
-#
-# The adapter runs kit commands via _acq_msb_exec_command, which translates a
-# kit `user: "1000"` to the agent user (see that function). So the guest only
-# needs: an `agent` user, /home/agent owned by it.
+# `shell` needs no binary; today only `opencode` has a recipe. Others are baked
+# into ACQ_MSB_IMAGE by the user (warned at install time). Keep this in sync with
+# _acq_msb_install_agent's case.
+_acq_msb_agent_has_install_recipe() {
+  case "$1" in
+    opencode) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# _acq_msb_install_agent NAME AGENT — install the agent binary into the guest
+# ---------------------------------------------------------------------------
+# sbx's agent templates ship the binary; msb runs a plain base, so acq installs
+# it. For `opencode`, install the npm package globally as root (node is a
+# verified base prerequisite; the registry host was allow-listed at create).
+# Idempotent: skip if the binary is already present (a pre-baked ACQ_MSB_IMAGE),
+# and marker-gate so a re-apply doesn't reinstall. `shell` is a no-op; an unknown
+# agent is a non-fatal warning (the sandbox still comes up; the user can bake the
+# binary into ACQ_MSB_IMAGE).
+_acq_msb_install_agent() {
+  local name="$1" agent="$2"
+
+  case "$agent" in
+    shell|"") acq_debug "msb: agent '$agent' needs no binary install"; return 0 ;;
+  esac
+
+  if ! _acq_msb_agent_has_install_recipe "$agent"; then
+    # Maybe the base image already provides it — don't warn if so.
+    if msb exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
+      acq_debug "msb: agent '$agent' already present in base image"
+      return 0
+    fi
+    echo "acq(msb): warning: no install recipe for agent '$agent' and it is not in the" >&2
+    echo "acq(msb):   base image. Attach will fail to launch it. Bake '$agent' into" >&2
+    echo "acq(msb):   ACQ_MSB_IMAGE, or use an agent acq can install (e.g. opencode)." >&2
+    return 0
+  fi
+
+  # Already installed (pre-baked image or a prior apply)? Then done.
+  if msb exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
+    acq_debug "msb: agent '$agent' already installed in $name"
+    return 0
+  fi
+
+  local marker="/var/lib/acq/agent-installed-${agent}"
+  if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  case "$agent" in
+    opencode)
+      acq_debug "msb: installing opencode ($ACQ_MSB_OPENCODE_PKG) via npm in $name"
+      # Install globally as root so the binary lands on the system PATH for every
+      # user (the agent runs as `agent`). The package spec is passed as a single
+      # argv element (never re-split by a shell); ACQ_MSB_OPENCODE_PKG is a
+      # controlled tunable. `npm` is present (node prerequisite). npm needs the
+      # registry host, allow-listed at create.
+      if ! msb exec "$name" -u 0 -- npm install -g --no-fund --no-audit "$ACQ_MSB_OPENCODE_PKG" >/dev/null 2>&1; then
+        echo "acq(msb): warning: 'npm install -g $ACQ_MSB_OPENCODE_PKG' failed in '$name'." >&2
+        echo "acq(msb):   opencode will not be available on attach. Common causes: the npm" >&2
+        echo "acq(msb):   registry host (${ACQ_MSB_NPM_HOSTS}) is not reachable/allow-listed," >&2
+        echo "acq(msb):   or npm is missing. Set ACQ_MSB_NPM_HOSTS for an internal mirror," >&2
+        echo "acq(msb):   or bake opencode into ACQ_MSB_IMAGE." >&2
+        return 0
+      fi
+      ;;
+  esac
+
+  # Verify the binary is now on PATH before recording the marker.
+  if msb exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
+    msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+    acq_debug "msb: agent '$agent' installed and on PATH in $name"
+  else
+    echo "acq(msb): warning: installed '$agent' but it is not on PATH in '$name'." >&2
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# _acq_msb_ensure_agent_user NAME — satisfy the sbx/Docker base-image contract
+# ---------------------------------------------------------------------------
+# sbx's agent templates are built on `docker/sandbox-templates:shell-docker`,
+# whose PUBLISHED base-image requirements are (Docker kit-reference,
+# "Base image requirements"):
+#   - a non-root `agent` user at UID 1000 with PASSWORDLESS SUDO
+#   - a /home/agent home directory owned by `agent`
+#   - HTTP proxy env (HTTP_PROXY/HTTPS_PROXY/NO_PROXY) PRESERVED ACROSS SUDO
+#   - the agent binary (baked in, or installed via commands.install)
+# A plain OCI base (e.g. node:22-bookworm, which ships `node` at uid 1000 and no
+# `agent`, and no sudoers rule) meets NONE of the first three. The msb adapter
+# therefore synthesizes them here so both the kits (which run as `-u 1000`) and
+# the agent behave as they do on sbx. Idempotent + marker-gated; runs fully
+# offline (useradd/adduser/sudoers edits need no network). The uid defaults to
+# 1000; if 1000 is taken (e.g. by `node`), `agent` is created at the next free
+# uid and the kits' `-u 1000` commands still map to it by NAME (see
+# _acq_msb_exec_command) with HOME exported.
 _acq_msb_ensure_agent_user() {
   local name="$1"
   local marker="/var/lib/acq/agent-user-ready"
@@ -755,7 +898,7 @@ _acq_msb_ensure_agent_user() {
     return 0
   fi
 
-  acq_debug "msb: ensuring agent user + /home/agent in $name"
+  acq_debug "msb: ensuring agent user + /home/agent + passwordless sudo + proxy-preserve in $name"
   # Idempotent, distro-agnostic. If an `agent` user already exists, reuse it.
   # Otherwise create it: prefer uid 1000, but if that uid is taken, let the tool
   # pick a free uid (the kits address the user by name via our exec translation,
@@ -778,11 +921,28 @@ _acq_msb_ensure_agent_user() {
     fi
     mkdir -p /home/agent
     chown -R agent:agent /home/agent 2>/dev/null || chown -R agent /home/agent 2>/dev/null || true
+
+    # Passwordless sudo for agent (base-image requirement). Only if sudo exists;
+    # a base without sudo still works for our purposes (kit/agent commands that
+    # need root are run by acq as -u 0 directly), so a missing sudo is non-fatal.
+    if command -v sudo >/dev/null 2>&1; then
+      mkdir -p /etc/sudoers.d
+      printf "agent ALL=(ALL) NOPASSWD:ALL\n" > /etc/sudoers.d/90-acq-agent
+      chmod 0440 /etc/sudoers.d/90-acq-agent
+      # Preserve HTTP proxy env across sudo (base-image requirement). msb sets
+      # HTTP_PROXY/HTTPS_PROXY/NO_PROXY for the TLS-intercepting proxy; without
+      # env_keep they are stripped on sudo, breaking egress from elevated cmds.
+      printf "Defaults env_keep += \"HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy\"\n" \
+        > /etc/sudoers.d/91-acq-proxy-env
+      chmod 0440 /etc/sudoers.d/91-acq-proxy-env
+    fi
   ' || {
-    echo "acq(msb): warning: could not create the 'agent' user in '$name'." >&2
+    echo "acq(msb): warning: could not fully satisfy the agent-user base-image contract in '$name'." >&2
     echo "acq(msb):   kit commands that run as the agent user (e.g. the usai merge)" >&2
-    echo "acq(msb):   may fail. Use an ACQ_MSB_IMAGE that provides an 'agent' user" >&2
-    echo "acq(msb):   with HOME=/home/agent, or a base with useradd/adduser." >&2
+    echo "acq(msb):   or agent commands needing passwordless sudo may fail. Use an" >&2
+    echo "acq(msb):   ACQ_MSB_IMAGE built on docker/sandbox-templates:shell-docker (or one" >&2
+    echo "acq(msb):   providing an 'agent' user at uid 1000 with passwordless sudo and" >&2
+    echo "acq(msb):   HOME=/home/agent), or a base with useradd/adduser + sudo." >&2
     return 0
   }
   msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
@@ -835,16 +995,67 @@ acq_backend_run() {
 # ---------------------------------------------------------------------------
 # acq_backend_attach — interactive attach (TTY) via SSH
 # ---------------------------------------------------------------------------
-
+# sbx's `sbx run --name NAME` re-launches the agent baked into the sandbox at
+# create. msb's `msb ssh NAME` only opens a shell (as root, msb's default SSH
+# user), so acq must reproduce sbx's behavior itself: drop to the `agent` user,
+# cd into the workspace, and exec the recorded agent (opencode, …). A bare `acq
+# run <sandbox>` re-attach (no agent token) reads the agent recorded at provision
+# from /var/lib/acq/agent; `shell` (or a missing/failed agent) falls back to an
+# interactive shell as `agent` — never a root shell.
+#
+# Post-`--` args are forwarded to the agent (e.g. `-- --task "run tests"`).
 acq_backend_attach() {
   local name="$1"
   shift
+
+  # Explicit `-- CMD…` after the sandbox name: run exactly that (advanced/escape
+  # hatch), still as the agent user in the workspace.
   if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
     shift
-    msb ssh "$name" -- "$@"
-  else
-    msb ssh "$name"
+    _acq_msb_ssh_agent "$name" "$@"
+    return $?
   fi
+  _acq_msb_ssh_agent "$name"
+}
+
+# _acq_msb_ssh_agent NAME [AGENT_ARGS...] — SSH in as `agent`, cd to the
+# workspace, and launch the recorded agent (or a shell). AGENT_ARGS are appended
+# to the agent invocation. Uses a login shell so PATH picks up the globally
+# installed agent binary.
+_acq_msb_ssh_agent() {
+  local name="$1"
+  shift
+
+  local ws="${ACQ_MSB_WORKSPACE:-/home/agent/workspace}"
+
+  # Read the agent recorded at provision. Default to `shell` if unset (older
+  # sandbox, or a `shell` sandbox).
+  local agent
+  agent=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' 2>/dev/null | tr -d '\r\n[:space:]')
+  [ -n "$agent" ] || agent="shell"
+
+  # Build the remote command run as the agent user. cd to the workspace if it
+  # exists; then exec the agent (or an interactive shell). If the agent binary is
+  # somehow absent, fall back to a shell rather than failing the attach — but say
+  # so, so the user isn't staring at a bare prompt wondering why.
+  local remote
+  if [ "$agent" = "shell" ]; then
+    remote="cd '$ws' 2>/dev/null; exec \$SHELL -l"
+  else
+    # AGENT_ARGS (already shell-safe from the user's own invocation) are joined
+    # with single-quote escaping so they survive the remote sh -c.
+    local extra=""
+    local a
+    for a in "$@"; do
+      extra="$extra '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
+    done
+    remote="cd '$ws' 2>/dev/null; if command -v '$agent' >/dev/null 2>&1; then exec '$agent'$extra; else echo \"acq(msb): '$agent' not found in sandbox; opening a shell instead.\" >&2; exec \$SHELL -l; fi"
+  fi
+
+  # `msb ssh NAME -- CMD` runs CMD (msb's default SSH user is root); we drop to
+  # the agent user via `su` so the agent runs unprivileged in its own HOME, the
+  # same posture as sbx. `su - agent` gives a login environment (PATH/HOME).
+  msb ssh "$name" -- su - agent -c "$remote"
 }
 
 # ---------------------------------------------------------------------------
