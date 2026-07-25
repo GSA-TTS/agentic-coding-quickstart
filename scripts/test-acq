@@ -302,6 +302,22 @@ assert_contains "dispatch: create runs github-scope advisory" "$out" "no repo-sc
 rm -rf "$_ghproj"
 cleanup_stubs
 
+# `acq create` runs a NON-BLOCKING USAi key advisory: it warns on a definitively
+# invalid key but never aborts (create is detached). Drive the stub's key status
+# via STUB_KEY_STATUS. Use a bare temp workspace (no git remote) so the github
+# advisory stays quiet and doesn't confuse the assertion.
+make_stubs
+_keyproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-keycreate.XXXXXX")
+# Bad key -> advisory fires, but create still succeeds (exit 0).
+out=$(STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" create opencode "$_keyproj" 2>&1); rc=$?
+assert_contains "dispatch: create warns on invalid USAi key" "$out" "invalid or expired (HTTP 401)"
+assert_eq       "dispatch: create does not abort on invalid key" "0" "$rc"
+# Healthy key -> no advisory.
+out=$(STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" create opencode "$_keyproj" 2>&1)
+assert_not_contains "dispatch: create silent on valid USAi key" "$out" "invalid or expired"
+rm -rf "$_keyproj"
+cleanup_stubs
+
 # Verify `acq stop mybox` calls sbx stop.
 make_stubs
 out=$(ACQ_BACKEND=sbx "$ACQ" stop mybox 2>/dev/null)

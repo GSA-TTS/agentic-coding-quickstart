@@ -296,6 +296,12 @@ case "$subcommand" in
     [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
     acq_backend_provision "$local_name" "$@"
 
+    # Non-blocking USAi key advisory. `create` is detached and never attaches,
+    # so unlike `run` we don't gate on the key or offer interactive rotation —
+    # just warn if it's already invalid so a create-only user knows before they
+    # later `acq run`.
+    advise_valid_key "$local_name"
+
     # Nudge toward a per-sandbox scoped GitHub token, same as `run`. `create`
     # is detached (no attached agent), but the advisory is informational plus
     # an optional interactive prompt, so it applies equally here.

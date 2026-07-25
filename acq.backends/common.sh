@@ -738,6 +738,30 @@ preflight_workspace_path() {
 
 # Validate the sandbox's USAi key and walk the user through rotating it if
 # needed. Best-effort: warn and continue if we cannot run the check.
+# advise_valid_key NAME — non-blocking USAi key advisory for `acq create`.
+# Unlike ensure_valid_key (which gates attach and offers interactive rotation),
+# this only WARNS if the key isn't valid, then returns 0 regardless. `create`
+# is detached and never attaches, so there is nothing to gate; the point is to
+# give a create-only user a heads-up that their key is stale before they later
+# `acq run`. Silent on a healthy key or an inconclusive check (empty status).
+advise_valid_key() {
+  local name="$1"
+  local status
+  status=$(check_key "$name")
+
+  # 200 = healthy; empty = could not validate (network/tooling) — stay quiet in
+  # both cases to avoid noise. Only speak up on a definitive non-200.
+  [ "$status" = "200" ] && return 0
+  [ -z "$status" ] && return 0
+
+  echo "acq: note — your USAi API key looks invalid or expired (HTTP $status)." >&2
+  echo "      USAi keys expire every 7 days. This sandbox was created, but the" >&2
+  echo "      key must be valid before an agent can use it." >&2
+  echo "      To rotate: acq usai-rotate-api-key   (or re-run via 'acq run', which" >&2
+  echo "      validates and offers to rotate before attaching)." >&2
+  return 0
+}
+
 ensure_valid_key() {
   local name="$1"
   shift
