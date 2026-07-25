@@ -42,10 +42,10 @@ mounted workspace, derived from the `.git` remotes found there.
 
 `acq` **detects the GitHub repositories in the mounted workspace** (by parsing
 `remote.origin.url` of each `.git` directory, reusing the capped, symlink-safe
-scan already in `warn_if_no_git_identity`) and, on `acq run`, **guides the user
-to mint a GitHub fine-grained personal access token (PAT) scoped to exactly
-those repositories**, stored **sandbox-scoped** (`acq.<sandbox>.github`) rather
-than globally.
+scan already in `warn_if_no_git_identity`) and, on `acq run` and `acq create`,
+**guides the user to mint a GitHub fine-grained personal access token (PAT)
+scoped to exactly those repositories**, stored **sandbox-scoped**
+(`acq.<sandbox>.github`) rather than globally.
 
 Concretely:
 
@@ -60,10 +60,11 @@ Concretely:
   store keyed `acq.<sandbox>.github`, and fed to the sbx proxy as the `github`
   built-in for that sandbox — the same injection path as a global github secret,
   the agent never sees the value.
-- On `acq run`, when the workspace has GitHub repos **and no sandbox-scoped
-  github secret exists** (whether or not a broad global one exists), `acq` prints
-  an advisory and, on an interactive TTY, offers `[continue / scope now]`
-  (default: continue). This follows the repo's **warn-not-block** convention
+- On `acq run` and `acq create`, when the workspace has GitHub repos **and no
+  sandbox-scoped github secret exists** (whether or not a broad global one
+  exists), `acq` prints an advisory and, on an interactive TTY, offers
+  `[continue / scope now]` (default: continue). This follows the repo's
+  **warn-not-block** convention
   (matching `warn_if_no_ssh_signing_key` / `warn_if_no_git_identity`) — it never
   blocks a run and is a no-op in CI / non-TTY.
 - The global `sbx secret set -g github` path is **deprecated in the docs** (kept

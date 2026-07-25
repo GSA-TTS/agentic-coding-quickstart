@@ -289,6 +289,19 @@ assert_contains "dispatch: create includes usai kit" "$log" "acq-kits/usai-provi
 rm -rf "$_projdir"
 cleanup_stubs
 
+# `acq create` must also run the github-scope advisory (same as `run`). Use a
+# workspace that has a GitHub remote so advise_github_scope has something to say,
+# and force the file secret store so no real global/scoped secret is consulted.
+# Non-TTY here (stdout captured), so it advises + returns without prompting.
+make_stubs
+_ghproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-ghcreate.XXXXXX")
+( cd "$_ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
+out=$(ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$_ghproj/.secrets" \
+  "$ACQ" create opencode "$_ghproj" 2>&1)
+assert_contains "dispatch: create runs github-scope advisory" "$out" "no repo-scoped GitHub token"
+rm -rf "$_ghproj"
+cleanup_stubs
+
 # Verify `acq stop mybox` calls sbx stop.
 make_stubs
 out=$(ACQ_BACKEND=sbx "$ACQ" stop mybox 2>/dev/null)

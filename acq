@@ -290,10 +290,17 @@ case "$subcommand" in
     shift
     acq_backend_prepare
     # Pre-flight: validate the workspace path before provisioning (#issue).
-    preflight_workspace_path "$(workspace_path "$@")" || exit 1
+    ws=$(workspace_path "$@")
+    preflight_workspace_path "$ws" || exit 1
     local_name=$(derive_name "$@") || exit 1
     [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
     acq_backend_provision "$local_name" "$@"
+
+    # Nudge toward a per-sandbox scoped GitHub token, same as `run`. `create`
+    # is detached (no attached agent), but the advisory is informational plus
+    # an optional interactive prompt, so it applies equally here.
+    [ -n "$ws" ] || ws="$PWD"
+    advise_github_scope "$local_name" "$ws"
     ;;
 
   run)
