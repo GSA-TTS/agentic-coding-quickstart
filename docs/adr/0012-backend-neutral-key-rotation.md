@@ -29,6 +29,13 @@ invoke it unconditionally, *after* the backend has already been resolved:
 - `ensure_valid_key` (`acq.backends/common.sh`) — runs on `acq run` for **every**
   backend when the pre-attach key check fails
 
+> **Note (non-rotation path):** `acq create` calls a sibling, `advise_valid_key`
+> (`common.sh`), which only *warns* on a definitively invalid key and never
+> rotates. Because `create` is detached and never attaches, there is nothing to
+> gate; it does not invoke `acq_backend_rotate_key` and so does not touch the
+> rotation mechanism this ADR governs. Interactive rotation remains exclusive to
+> the `acq run` / attach path via `ensure_valid_key`.
+
 A user on the `msb` backend who runs `acq run` with an expired key (USAi keys
 expire every 7 days) is therefore funneled into `sbx` commands. If `sbx` is not
 installed — or has no available seats — rotation fails and blocks the user from
