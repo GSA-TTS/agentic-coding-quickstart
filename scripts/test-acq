@@ -483,16 +483,57 @@ else
 fi
 cleanup_stubs
 
-# 5d. `-g github` when it ALREADY exists -> stop with rm hint, no set call.
+# 5d. `-g github` when it ALREADY exists (in the GLOBAL scope) -> stop with rm
+#     hint, no set call. The `secret ls` fixture mirrors sbx's real layout: a
+#     leading SCOPE column ("(global)" for global secrets).
 make_stubs
-# Make the sbx stub's `secret ls` report github present.
-printf 'github\n' > "$STUBDIR/sbx_ls"
+# Make the sbx stub's `secret ls` report a GLOBAL github secret present.
+printf 'SCOPE      TYPE      NAME     SECRET\n(global)   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
 export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
 assert_contains "secret: existing github -> rm hint" "$out" "sbx secret rm -g github"
 assert_not_contains "secret: existing github -> no set call" "$log" "sbx secret set -g github"
+cleanup_stubs
+
+# 5d-1. REGRESSION (issue #229): a github secret scoped to a DIFFERENT sandbox
+#     must NOT be treated as an existing secret when setting github for THIS
+#     sandbox. Previously the existence check matched the whole listing, so a
+#     `github` secret for sandbox A blocked setting `github` for sandbox B (and
+#     for the global scope). It must feed sbx and store the new scoped secret.
+make_stubs
+printf 'SCOPE                      TYPE      NAME     SECRET\nopencode-pic-blm-cxworks   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
+export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set opencode-agentic-coding github 2>&1 || true)
+unset SBX_LS_FIXTURE
+log=$(cat "$CALLS")
+assert_not_contains "secret: other-sandbox github -> no false rm hint" "$out" "won't overwrite"
+assert_contains "secret: other-sandbox github -> feeds sbx for THIS sandbox" "$log" "sbx secret set opencode-agentic-coding github"
+cleanup_stubs
+
+# 5d-2. REGRESSION (issue #229): a github secret scoped to a sandbox must NOT
+#     block setting the GLOBAL github secret.
+make_stubs
+printf 'SCOPE                      TYPE      NAME     SECRET\nopencode-pic-blm-cxworks   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
+export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || true)
+unset SBX_LS_FIXTURE
+log=$(cat "$CALLS")
+assert_not_contains "secret: sandbox github -> no false rm hint for global" "$out" "won't overwrite"
+assert_contains "secret: sandbox github -> feeds sbx for global" "$log" "sbx secret set -g github"
+cleanup_stubs
+
+# 5d-3. Same sandbox name, existing scoped secret -> correctly detected as a
+#     collision (positive case for the scope-aware check).
+make_stubs
+printf 'SCOPE                      TYPE      NAME     SECRET\nopencode-agentic-coding    service   github   (stored)\n' > "$STUBDIR/sbx_ls"
+export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set opencode-agentic-coding github 2>&1 || true)
+unset SBX_LS_FIXTURE
+log=$(cat "$CALLS")
+assert_contains "secret: same-sandbox github -> rm hint" "$out" "sbx secret rm opencode-agentic-coding github"
+assert_not_contains "secret: same-sandbox github -> no set call" "$log" "sbx secret set opencode-agentic-coding github"
 cleanup_stubs
 
 # 5e. `-g usai` (custom, non-interactive/piped) -> stored + prints sbx command,

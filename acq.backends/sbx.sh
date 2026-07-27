@@ -750,18 +750,37 @@ acq_backend_secret_set() {
 # _acq_sbx_secret_exists SCOPE_FLAG SCOPE_NAME SERVICE ENV_VAR -> 0 if present
 # ---------------------------------------------------------------------------
 # Best-effort existence check against `sbx secret ls`. Built-in services show
-# their service name; custom secrets show the env var name. Returns 0 (exists)
-# only on a confident match; on any listing failure, returns 1 (treat as absent)
-# so we don't block the user — sbx will still error clearly if it does exist.
+# their service name; custom secrets show the env var name. The match MUST be
+# constrained to the requested SCOPE — sbx secrets are scoped per-sandbox (plus
+# a global scope), so a `github` secret in sandbox A must NOT be reported as
+# "already exists" when we're setting `github` for sandbox B, or for the global
+# scope. `sbx secret ls` prints one row per secret with a leading SCOPE column
+# (the sandbox name, or `(global)` for global secrets). We match the row whose
+# scope equals the requested scope AND whose name/env column equals the needle.
+# Returns 0 (exists) only on a confident, scope-matched hit; on any listing
+# failure, returns 1 (treat as absent) so we don't block the user — sbx will
+# still error clearly if it does in fact exist.
 _acq_sbx_secret_exists() {
   local scope_flag="$1" scope_name="$2" service="$3" env_var="$4"
-  local listing needle
+  local listing needle want_scope
   listing=$(sbx secret ls 2>/dev/null) || return 1
   if [ -n "$env_var" ]; then needle="$env_var"; else needle="$service"; fi
-  case "$listing" in
-    *"$needle"*) return 0 ;;
-    *) return 1 ;;
-  esac
+
+  # The scope token as it appears in the SCOPE column: global secrets render as
+  # "(global)"; sandbox-scoped secrets render as the sandbox name.
+  if [ -n "$scope_flag" ]; then want_scope="(global)"; else want_scope="$scope_name"; fi
+
+  # Scan each row: field 1 is the scope, and the needle (service or env var)
+  # must appear as a whole field on that same row. Header/blank/section lines
+  # (e.g. "SCOPE ...", "CUSTOM SECRETS") don't match a real scope+needle pair,
+  # so they're naturally skipped.
+  printf '%s\n' "$listing" | awk -v scope="$want_scope" -v needle="$needle" '
+    {
+      if ($1 != scope) next
+      for (i = 2; i <= NF; i++) if ($i == needle) { found = 1; exit }
+    }
+    END { exit(found ? 0 : 1) }
+  '
 }
 
 # ---------------------------------------------------------------------------
