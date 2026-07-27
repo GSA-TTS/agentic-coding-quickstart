@@ -304,6 +304,20 @@ verify_agent_install() {
     dump "exec output" "$LAST_OUT"
   fi
 
+  # The guest must have enough RAM to actually RUN a Node.js agent TUI. msb's
+  # 512 MiB default OOM-kills opencode on launch (quickstart#228 follow-up: it
+  # started, then the terminal died with "Killed"). Assert a generous ceiling
+  # (>= ~2 GiB) so a regression that drops the sizing flags is caught live, not
+  # just at exec-present. MemTotal is in kB; 2 GiB ~= 2000000 kB.
+  local memkb
+  run_acq "exec memtotal" --backend "$backend" exec "$aname" -- sh -c "awk '/MemTotal/{print \$2}' /proc/meminfo" >/dev/null 2>&1 || true
+  memkb=$(printf '%s' "$LAST_OUT" | tr -dc '0-9')
+  if [ -n "$memkb" ] && [ "$memkb" -ge 2000000 ] 2>/dev/null; then
+    pass "${backend}: guest has RAM headroom for the agent (${memkb} kB)"
+  else
+    fail "${backend}: guest RAM too small for a Node.js agent (MemTotal='${memkb}' kB); opencode will be OOM-killed"
+  fi
+
   if [ -n "$KEEP" ] && [ "$FAIL" -gt 0 ]; then
     printf '        (keeping sandbox %s; --keep set)\n' "$aname"
   else

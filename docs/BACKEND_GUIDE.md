@@ -162,6 +162,8 @@ Tunables:
 | `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
 | `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
 | `ACQ_MSB_WORKSPACE` | `/home/agent/workspace` | Guest mount point for the host workspace |
+| `ACQ_MSB_MEMORY` | `4G` | Guest RAM at create (`-m`); `4G`/`4096`/`512M` (bare = MiB). Set empty to use msb's 512 MiB default |
+| `ACQ_MSB_CPUS` | `2` | Guest vCPU count at create (`-c`); set empty to use msb's 1-vCPU default |
 | `ACQ_MSB_DNS_NAMESERVER` | `1.1.1.1` | Guest DNS resolver (set empty to use msb's default) |
 | `ACQ_MSB_KIT_CACHE` | `$XDG_CACHE_HOME/acq/kits` | where fetched neutral kits are materialized |
 
@@ -176,6 +178,18 @@ request fails with `Could not resolve host`. The msb backend therefore passes
 microVM) to `msb create`. Override `ACQ_MSB_DNS_NAMESERVER` if `1.1.1.1` is
 blocked in your environment, or set it empty to fall back to msb's default (only
 if your host resolver is reachable from the guest).
+
+### Guest memory and vCPU
+
+msb defaults a sandbox to **512 MiB of RAM and 1 vCPU**, and the microVM has
+**no swap** — so a process that exceeds guest RAM is OOM-killed by the guest
+kernel and simply prints `Killed`. A Node.js agent TUI like `opencode` blows past
+512 MiB immediately, which looked like "opencode starts, then the terminal dies"
+(quickstart#228 follow-up). sbx sizes its agent templates generously; a plain msb
+base does not, so the msb backend passes `--memory 4G --cpus 2` at create by
+default. Tune with `ACQ_MSB_MEMORY` / `ACQ_MSB_CPUS` (set either empty to fall
+back to msb's own default). Memory takes a single-char unit suffix — `G`/`g` =
+GiB, `M`/`m` = MiB, bare number = MiB — so `4G`, `4096`, and `4g` are equivalent.
 
 ### Workspace mounting
 

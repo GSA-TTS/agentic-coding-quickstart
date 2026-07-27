@@ -96,6 +96,27 @@ ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
 # preferred id but not required — kit commands address the user by name.
 ACQ_MSB_AGENT_UID="${ACQ_MSB_AGENT_UID:-1000}"
 
+# Guest memory and vCPU allocation.
+# ---------------------------------------------------------------------------
+# msb 0.6.x defaults a sandbox to 512 MiB RAM and 1 vCPU (see the microsandbox
+# config defaults DEFAULT_MEMORY_MIB=512 / DEFAULT_CPUS=1). The microVM has NO
+# swap, so a process that exceeds guest RAM is OOM-killed by the guest kernel and
+# simply prints "Killed". A Node.js agent TUI like opencode blows past 512 MiB
+# immediately, so a create with no memory flag left the user with an agent that
+# started and was instantly killed (quickstart#228 follow-up). sbx sizes its
+# agent templates generously; msb runs a plain base and must be told, so acq
+# passes a generous default here (4 GiB / 2 vCPU) and lets it be tuned.
+#
+# `msb create` accepts `-m/--memory SIZE` and `-c/--cpus N` (verified against the
+# microsandbox SandboxOpts). SIZE takes a single-char unit suffix: `G`/`g` = GiB,
+# `M`/`m` = MiB, and a bare number = MiB (there is NO multi-char MiB/GiB suffix).
+# So `4G`, `4096`, and `4g` are equivalent. Set ACQ_MSB_MEMORY empty to omit the
+# flag and fall back to msb's 512 MiB default (uses `-`, not `:-`, so an
+# explicitly-empty value disables the flag rather than re-defaulting). Same for
+# ACQ_MSB_CPUS.
+ACQ_MSB_MEMORY="${ACQ_MSB_MEMORY-4G}"
+ACQ_MSB_CPUS="${ACQ_MSB_CPUS-2}"
+
 # DNS nameserver for the guest. msb hands the guest the HOST's resolvers, but a
 # corporate/VPN resolver (e.g. 172.16.x, Zscaler) is typically unreachable from
 # the microVM's network namespace — so the guest cannot resolve even the
@@ -651,6 +672,36 @@ acq_backend_provision() {
   # ACQ_MSB_DNS_NAMESERVER note above.
   if [ -n "$ACQ_MSB_DNS_NAMESERVER" ]; then
     create_flags+=(--dns-nameserver "$ACQ_MSB_DNS_NAMESERVER")
+  fi
+
+  # Guest RAM / vCPU. msb defaults to 512 MiB / 1 vCPU — too small for a Node.js
+  # agent TUI (opencode), which the guest OOM-kills on launch (prints "Killed";
+  # the microVM has no swap). Pass a generous default (tunable via ACQ_MSB_MEMORY
+  # / ACQ_MSB_CPUS; empty = omit and use msb's own default). The memory value is
+  # validated to msb's SIZE grammar (digits with optional single-char G/M/g/m
+  # suffix) so a stray value can't smuggle another flag; cpus must be a positive
+  # integer.
+  if [ -n "$ACQ_MSB_MEMORY" ]; then
+    case "$ACQ_MSB_MEMORY" in
+      *[!0-9GMgm.]*|"")
+        echo "acq(msb): warning: ignoring invalid ACQ_MSB_MEMORY='$ACQ_MSB_MEMORY'" \
+             "(expected e.g. 4G, 4096, 512M)." >&2
+        ;;
+      *)
+        create_flags+=(--memory "$ACQ_MSB_MEMORY")
+        ;;
+    esac
+  fi
+  if [ -n "$ACQ_MSB_CPUS" ]; then
+    case "$ACQ_MSB_CPUS" in
+      *[!0-9]*|0|"")
+        echo "acq(msb): warning: ignoring invalid ACQ_MSB_CPUS='$ACQ_MSB_CPUS'" \
+             "(expected a positive integer)." >&2
+        ;;
+      *)
+        create_flags+=(--cpus "$ACQ_MSB_CPUS")
+        ;;
+    esac
   fi
 
   # Translate the caller's workspace path into a --volume mount. The agent token

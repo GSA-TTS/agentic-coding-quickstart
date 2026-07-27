@@ -213,6 +213,19 @@ for `docker/sandbox-templates:shell-docker`:
 Egress note: this adds one create-time allow-list host (the npm registry) only
 when an installable agent is requested; it does not widen egress for `shell`.
 
+### Guest sizing (follow-up to quickstart#228)
+
+Installing and launching the agent (above) exposed a further defect on the same
+report: `opencode` **started and was immediately `Killed`**. msb defaults a
+sandbox to **512 MiB of RAM and 1 vCPU** and the microVM has **no swap**, so a
+Node.js TUI that exceeds guest RAM is OOM-killed by the guest kernel (surfacing
+only as `Killed`). sbx's agent templates are sized generously; a plain msb base
+inherits the small default. The adapter therefore passes **`--memory 4G --cpus 2`**
+at create, tunable via `ACQ_MSB_MEMORY` / `ACQ_MSB_CPUS` (empty = fall back to
+msb's own default). Values are validated before reaching the create line (memory
+to msb's `[0-9GMgm.]` SIZE grammar, cpus to a positive integer) so a stray value
+cannot smuggle another flag onto `msb create`.
+
 ### msb CLI flag verification
 
 The msb flag/subcommand shapes used by the adapter were **verified against
