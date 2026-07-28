@@ -857,9 +857,15 @@ SPEC
 agent_log=$(cat "$CALLS")
 assert_contains "msb: provision creates agent user" "$agent_log" "agent"
 # The uid-1000 startup command must run as `agent` with HOME=/home/agent,
-# never as `-u 1000` (which would be the base image's `node` user).
-assert_contains "msb: uid-1000 kit cmd runs as agent" "$agent_log" "msb exec agentbox -u agent -e HOME=/home/agent -- node"
+# never as `-u 1000` (which would be the base image's `node` user). acq also
+# injects non-interactive git guards (GIT_TERMINAL_PROMPT=0 etc.) between the
+# HOME env and the argv, so assert the stable prefix rather than the full line.
+assert_contains "msb: uid-1000 kit cmd runs as agent" "$agent_log" "msb exec agentbox -u agent -e HOME=/home/agent"
 assert_not_contains "msb: uid-1000 kit cmd not run as -u 1000" "$agent_log" "msb exec agentbox -u 1000 -- node"
+# Non-interactive enforcement: kit execs get stdin-free git prompt guards so a
+# kit that would prompt (e.g. private `git clone`) fails fast instead of hanging
+# provision. Assert the guard env is threaded onto the startup command.
+assert_contains "msb: kit cmd gets GIT_TERMINAL_PROMPT=0 guard" "$agent_log" "-e GIT_TERMINAL_PROMPT=0"
 assert_contains "msb: chowns staged /home/agent file to agent" "$agent_log" "chown agent /home/agent/usai-config/merge-global-config.mjs"
 cleanup_stubs
 

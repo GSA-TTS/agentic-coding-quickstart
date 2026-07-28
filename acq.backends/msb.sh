@@ -236,15 +236,27 @@ acq_backend_exists() {
 # in the background. Copying files / running kit commands before exec works
 # races the boot. Poll a trivial exec until it succeeds (or time out). Mirrors
 # sbx.sh's _acq_sbx_wait_for_exec_ready.
+#
+# Each probe emits a timestamped acq_debug breadcrumb (attempt #, rc, output) so
+# that if provision ever stalls in this loop it is visible which probe hung —
+# use `ACQ_DEBUG=1` (or `verify-backends -x`) to see it.
 _acq_msb_wait_for_exec_ready() {
-  local name="$1" deadline out
+  local name="$1" deadline out _rc _attempt=0 _now
   deadline=$(( $(date +%s) + ACQ_MSB_EXEC_READY_TIMEOUT ))
   while :; do
+    _attempt=$(( _attempt + 1 ))
+    acq_debug "msb exec-ready probe #${_attempt} for $name"
     out=$(msb exec "$name" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r')
+    _rc=$?
+    acq_debug "msb exec-ready probe #${_attempt}: rc=${_rc} out='${out}'"
     case "$out" in
-      *ok*) acq_debug "msb exec-ready: $name"; return 0 ;;
+      *ok*) acq_debug "msb exec-ready: $name (after ${_attempt} probe(s))"; return 0 ;;
     esac
-    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    _now=$(date +%s)
+    if [ "$_now" -ge "$deadline" ]; then
+      acq_debug "msb exec-ready: giving up on $name after ${_attempt} probe(s) / ${ACQ_MSB_EXEC_READY_TIMEOUT}s"
+      return 1
+    fi
     sleep 2
   done
 }
@@ -551,6 +563,21 @@ _acq_msb_exec_command() {
     eflag+=(-e "$_ev")
   done
 
+  # NON-INTERACTIVE ENFORCEMENT. Kit lifecycle commands run before the agent
+  # attaches, with no terminal, so they MUST NOT try to read from a TTY. Docker's
+  # kit-reference states startup commands are non-interactive; a kit that prompts
+  # (e.g. `git clone` of a private repo with no credential -> "Username for
+  # 'https://github.com':") would BLOCK provision forever (observed: the playbook
+  # kit hung here). Defense-in-depth alongside the kit's own prompt-suppression:
+  #   - stdin from /dev/null for every kit exec, so nothing can read the TTY.
+  #   - GIT_TERMINAL_PROMPT=0 (+ GIT_ASKPASS/SSH_ASKPASS=false) so git fails fast
+  #     instead of prompting. These are injected only if the kit did not already
+  #     set GIT_TERMINAL_PROMPT (kits may override intentionally).
+  case " ${_kit_env[*]-} " in
+    *" GIT_TERMINAL_PROMPT="*) : ;;
+    *) eflag+=(-e "GIT_TERMINAL_PROMPT=0" -e "GIT_ASKPASS=/bin/false" -e "SSH_ASKPASS=/bin/false") ;;
+  esac
+
   if [ "$phase" = "install" ]; then
     # Idempotency marker keyed by a hash of the argv. The marker lives under
     # /var/lib/acq (root-owned) and is both TESTED and WRITTEN as uid 0, so the
@@ -559,19 +586,26 @@ _acq_msb_exec_command() {
     # root-created marker, which would otherwise re-run it every apply).
     local marker
     marker="/var/lib/acq/install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
-    if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+    if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" </dev/null >/dev/null 2>&1; then
+      acq_debug "msb cmd[install] already done (marker hit): $*"
       return 0
     fi
-    msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" || {
+    acq_debug "msb cmd[install] START (user=${user:-0}): $*"
+    msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" </dev/null || {
+      acq_debug "msb cmd[install] FAILED: $*"
       echo "acq(msb): warning: install command failed for '$name'" >&2
       return 0
     }
-    msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+    acq_debug "msb cmd[install] DONE: $*"
+    msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" </dev/null >/dev/null 2>&1 || true
   else
     # initFiles / startup — run every apply (they are written idempotent).
-    msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" || {
+    acq_debug "msb cmd[${phase}] START (user=${user:-0}): $*"
+    msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" </dev/null || {
+      acq_debug "msb cmd[${phase}] FAILED: $*"
       echo "acq(msb): warning: ${phase} command failed for '$name'" >&2
     }
+    acq_debug "msb cmd[${phase}] DONE: $*"
   fi
 }
 
@@ -816,7 +850,9 @@ EOF
   # below ever run.
   acq_debug "msb create --name $name ${create_flags[*]} $ACQ_MSB_IMAGE"
   local _create_rc=0
+  acq_debug "msb create: invoking (this returns fast; guest boots in background)"
   msb create --name "$name" "${create_flags[@]}" "$ACQ_MSB_IMAGE" || _create_rc=$?
+  acq_debug "msb create: returned rc=${_create_rc}"
   # Clear the transient secret env vars immediately after create reads them
   # (runs on both success and failure so the exported key never lingers).
   local _ev
@@ -843,6 +879,7 @@ EOF
   # `msb exec` works. Treat a non-ready sandbox as a HARD provision failure —
   # otherwise kit application (and every downstream check) runs against a
   # sandbox that isn't really up, which looks like success but silently isn't.
+  acq_debug "msb provision: waiting for exec-ready ($name)"
   if ! _acq_msb_wait_for_exec_ready "$name"; then
     echo "acq(msb): error: sandbox '$name' did not become exec-ready within" >&2
     echo "acq(msb):   ${ACQ_MSB_EXEC_READY_TIMEOUT}s. 'msb create' returns 0 even when the" >&2
@@ -854,24 +891,31 @@ EOF
     # Leave the sandbox in place for inspection; caller decides whether to rm.
     return 1
   fi
+  acq_debug "msb provision: exec-ready OK ($name)"
 
   # Verify the kits' runtime prerequisites are present in the base image
   # (node/git/curl/update-ca-certificates). We do NOT install them: the kit
   # net-rules lock egress to the kits' own hosts, so a package mirror is
   # unreachable during provision. Missing tools => a clear, actionable warning.
+  acq_debug "msb provision: checking prereqs ($name)"
   _acq_msb_check_prereqs "$name"
+  acq_debug "msb provision: prereqs checked ($name)"
 
   # Ensure the `agent` user (uid ACQ_MSB_AGENT_UID) with HOME=/home/agent exists.
   # The pinned kits stage files under /home/agent and run startup commands as
   # that user (the sbx agent template guarantees this user). A plain OCI base
   # (e.g. node:22-bookworm) has no `agent` user, so their `-u 1000` commands ran
   # as the wrong user against a non-existent home. Create it once, idempotently.
+  acq_debug "msb provision: ensuring agent user ($name)"
   _acq_msb_ensure_agent_user "$name"
+  acq_debug "msb provision: agent user ready ($name)"
 
   # Install the requested agent binary (sbx bakes it into the template image; on
   # a plain msb base acq must install it). Idempotent + marker-gated; a no-op for
   # `shell`, a clear warning for an agent with no known recipe.
+  acq_debug "msb provision: installing agent '$agent' ($name)"
   _acq_msb_install_agent "$name" "$agent"
+  acq_debug "msb provision: agent install step done ($name)"
 
   # Record which agent this sandbox runs, so acq_backend_attach (which only gets
   # the sandbox name) knows what to launch — the sbx equivalent is that
@@ -899,8 +943,11 @@ EOF
   # Apply each kit's files + commands.
   local kd
   for kd in "${kitdirs[@]}"; do
+    acq_debug "msb provision: applying kit dir $kd ($name)"
     _acq_msb_apply_kit_dir "$name" "$kd"
+    acq_debug "msb provision: applied kit dir $kd ($name)"
   done
+  acq_debug "msb provision: all kits applied; provision complete ($name)"
 }
 
 # ---------------------------------------------------------------------------

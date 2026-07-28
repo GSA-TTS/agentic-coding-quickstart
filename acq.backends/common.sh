@@ -85,10 +85,13 @@ fi
 
 # Debug trace. Set ACQ_DEBUG=1 to emit "acq[debug]: ..." diagnostics to stderr
 # (backend CLI invocations, kit fetch/translate steps). Off by default; safe to
-# leave in — it never prints secret VALUES, only command shapes.
+# leave in — it never prints secret VALUES, only command shapes. Each line is
+# timestamped (HH:MM:SS) so that when a step hangs, the LAST debug line shows
+# both which sub-call was entered and when — the gap to the wall clock is the
+# stall. (verify-backends -x relies on this to localize a hang.)
 acq_debug() {
   [ -n "${ACQ_DEBUG:-}" ] || return 0
-  printf 'acq[debug]: %s\n' "$*" >&2
+  printf 'acq[debug %s]: %s\n' "$(date +%H:%M:%S 2>/dev/null || printf '??:??:??')" "$*" >&2
 }
 
 # Word-split a whitespace-separated env value into the named array WITHOUT

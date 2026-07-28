@@ -48,11 +48,17 @@ ACQ="$REPO_ROOT/acq"
 
 VERBOSE="${VERIFY_VERBOSE:-}"
 KEEP="${VERIFY_KEEP:-}"
+# Live, timestamped step tracing. VERIFY_TRACE=1 (or -x/--trace) turns on a
+# heartbeat before/after each acq step AND forces acq's own ACQ_DEBUG trace to
+# stream live, so a step that hangs is visible (which internal call stalled)
+# instead of silently buffering inside a command substitution. See trace().
+TRACE="${VERIFY_TRACE:-}"
 POSITIONAL=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -v|--verbose) VERBOSE=1 ;;
     -k|--keep)    KEEP=1 ;;
+    -x|--trace)   TRACE=1 ;;
     -h|--help)
       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
@@ -61,6 +67,24 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
+
+# When tracing, acq's internal debug trace is streamed live so we can see which
+# msb/sbx sub-call is executing when a step hangs. Enabling TRACE implies live
+# streaming of the create step (see run_acq).
+if [ -n "$TRACE" ]; then
+  export ACQ_DEBUG="${ACQ_DEBUG:-1}"
+  VERBOSE=1
+fi
+
+# Monotonic-ish timestamp (HH:MM:SS) for trace lines.
+_ts() { date +%H:%M:%S 2>/dev/null || printf '??:??:??'; }
+
+# trace MSG — emit a timestamped heartbeat line to stderr when tracing is on.
+# Used to bracket long/blocking steps so a hang shows the LAST line reached.
+trace() {
+  [ -n "$TRACE" ] || return 0
+  printf '        [trace %s] %s\n' "$(_ts)" "$*" >&2
+}
 
 # Refuse to run inside a sandbox (no nested sandboxes).
 if [ -f /.dockerenv ] || [ -n "${SBX_SANDBOX:-}" ] || [ -n "${MSB_SANDBOX:-}" ]; then
@@ -94,13 +118,24 @@ dump() {
 # Run an acq command, capturing combined stdout+stderr into LAST_OUT and
 # returning its exit status. The first arg is a short label for the step; in
 # verbose mode it and the exact command line are streamed live.
+#
+# When TRACE is on, a timestamped heartbeat brackets the step (START ... DONE
+# rc=N) so a step that hangs shows its START line with no matching DONE — that
+# names the exact acq step that stalled. Live streaming (VERBOSE) is forced in
+# trace mode so acq's own ACQ_DEBUG output appears in real time rather than
+# being buffered inside the command substitution until the step returns.
 run_acq() {
   local desc="$1"; shift
+  trace "START ${desc}: acq $*"
+  local _rc
   if [ -n "$VERBOSE" ]; then
     printf '        $ acq %s   # %s\n' "$*" "$desc" >&2
-    LAST_OUT=$("$ACQ" "$@" 2>&1 | tee /dev/stderr); return "${PIPESTATUS[0]}"
+    LAST_OUT=$("$ACQ" "$@" 2>&1 | tee /dev/stderr); _rc="${PIPESTATUS[0]}"
+  else
+    LAST_OUT=$("$ACQ" "$@" 2>&1); _rc=$?
   fi
-  LAST_OUT=$("$ACQ" "$@" 2>&1); return $?
+  trace "DONE  ${desc}: rc=${_rc}"
+  return "$_rc"
 }
 
 # Workspace to mount.
