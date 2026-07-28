@@ -344,19 +344,13 @@ reported by `acq kit validate`), because a name reaches the guest environment an
 possibly a shell. **Secrets do NOT go here** — they continue through the backend
 credential/secret path (sbx proxy, msb `--secret ENV@HOST`), never the kit spec.
 
-> **Cross-repo dependency:** the authoritative `environment` schema property +
-> the field-level validator live in the **patterns** repo
-> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`, PR #227 + the review
-> follow-up #228), merged and shipped in patterns **v1.7.0**.
->
-> **Pin status (TEMPORARY — see quickstart#203 / patterns#269):** `PATTERNS_KIT_REF`
-> (`acq.backends/common.sh`) is currently pinned to the **tip of patterns
-> `feat/fix-playbook-clones`** (`379756a…`), which carries the playbook kit's
-> REST-tarball fetch (the #203 fix) and is **not yet on patterns `main`**. This
-> is an explicit, in-code-documented temporary pin for validation. The release
-> gate is **not** satisfied until patterns#269 merges and this pin is finalized
-> to the merge commit / next release tag (and the two pin assertions in
-> `scripts/test-acq` are restored). Do not cut a release in the interim.
+> **Cross-repo dependency (satisfied):** the authoritative `environment` schema
+> property + the field-level validator live in the **patterns** repo
+> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`, PR #227), and the
+> playbook kit's REST-tarball fetch (the quickstart#203 fix) landed in
+> patterns#269. Both are merged to patterns `main`, and `PATTERNS_KIT_REF`
+> (`acq.backends/common.sh`) is pinned to `3fcde8e` (the #269 merge commit on
+> `main`, which includes #227). The release gate is satisfied.
 
 ## Live verification (msb, on a KVM host)
 
