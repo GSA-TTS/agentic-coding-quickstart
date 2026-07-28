@@ -190,6 +190,50 @@ _acq_secret_get_file() {
 }
 
 # ---------------------------------------------------------------------------
+# acq_secret_delete KEY  ->  0 if an entry was removed OR none existed
+# ---------------------------------------------------------------------------
+# Remove a secret from the active store backend. Idempotent: returns 0 whether
+# or not the entry existed (so `rm` of an absent secret is not an error), and
+# non-zero only on an actual backend failure. Removes from BOTH the keychain and
+# the file fallback where relevant, since a value may have been written to the
+# file backend on macOS (see the acq_secret_store note about avoiding argv).
+acq_secret_delete() {
+  local key="$1" backend rc=0
+  backend=$(_acq_secret_backend)
+  acq_debug "secret delete: key=$key backend=$backend"
+  case "$backend" in
+    keychain-macos)
+      # New writes go to the file fallback (argv-safe); older ALLOW_ARGV writes
+      # may be in the keychain. Clear both so no copy lingers.
+      security delete-generic-password -s "$ACQ_KEYCHAIN_LABEL" -a "$key" \
+        >/dev/null 2>&1 || true
+      _acq_secret_delete_file "$key" || rc=$?
+      ;;
+    keychain-linux)
+      # secret-tool clear removes all items matching the attribute; a no-match is
+      # not an error for our idempotent contract.
+      secret-tool clear acq_key "$key" >/dev/null 2>&1 || true
+      _acq_secret_delete_file "$key" || rc=$?
+      ;;
+    file)
+      _acq_secret_delete_file "$key" || rc=$?
+      ;;
+  esac
+  return "$rc"
+}
+
+# 0600 file removal. Idempotent (absent file is success); non-zero only if the
+# file exists but cannot be removed.
+_acq_secret_delete_file() {
+  local key="$1" f
+  f=$(_acq_secret_file_for "$key")
+  [ -e "$f" ] || return 0
+  rm -f "$f" 2>/dev/null || {
+    echo "acq: secret delete: file remove failed for '$key'." >&2; return 1; }
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # acq_secret_resolve SERVICE [SANDBOX]  ->  value on STDOUT
 # ---------------------------------------------------------------------------
 # Resolve a service's secret with sandbox-scope precedence: try

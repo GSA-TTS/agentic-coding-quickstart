@@ -119,6 +119,13 @@ case "$_msb_sub" in
     case "$snippet" in
       *"echo ok"*) printf 'ok\n' ;;
       *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
+      # The ensure-agent-user block is one big `sh -c` (useradd/mkdir/chown + a
+      # `su agent … test -w /home/agent` writability check). Match it FIRST (it
+      # also contains `command -v useradd`, which the generic command-v case
+      # below would otherwise swallow). STUB_HOME_NOT_WRITABLE=1 models an
+      # unwritable home so the block exits 1 and provision must abort.
+      *"test -w /home/agent"*)
+        [ "${STUB_HOME_NOT_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
       # `command -v <agent>` (agent-presence probe): controllable so the install
       # path can be exercised. By default the agent is ABSENT (exit 1) so install
       # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq
@@ -138,6 +145,7 @@ case "$_msb_sub" in
   stop) : ;;
   remove|rm) : ;;
   copy|cp) : ;;
+  modify) : ;;
   *) : ;;
 esac
 # Drain any piped stdin exactly like a real remote exec would, so the test
@@ -464,16 +472,66 @@ else
 fi
 cleanup_stubs
 
-# 5d. `-g github` when it ALREADY exists -> stop with rm hint, no set call.
+# 5d. `-g github` when it ALREADY exists (in the GLOBAL scope) -> stop with rm
+#     hint, no set call. The fixture mirrors `sbx secret ls` layout (leading
+#     SCOPE column) so the scope-aware existence check matches the global row.
 make_stubs
-# Make the sbx stub's `secret ls` report github present.
-printf 'github\n' > "$STUBDIR/sbx_ls"
+printf 'SCOPE      TYPE      NAME     SECRET\n(global)   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
 export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
 assert_contains "secret: existing github -> rm hint" "$out" "sbx secret rm -g github"
 assert_not_contains "secret: existing github -> no set call" "$log" "sbx secret set -g github"
+cleanup_stubs
+
+# 5d1. Scope-awareness regression: github existing under a DIFFERENT scope must
+#      NOT block seeding the target scope. Previously a blind substring match
+#      over the whole `sbx secret ls` produced a false "already exists" whenever
+#      any other sandbox had github (the verify-backends sbx seed skip). The
+#      fixture has github under `otherbox` only; setting `-g github` (global
+#      scope) must PROCEED to the feed call.
+make_stubs
+printf 'SCOPE      TYPE      NAME     SECRET\notherbox   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
+export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || true)
+unset SBX_LS_FIXTURE
+log=$(cat "$CALLS")
+assert_contains "secret: github under other scope does NOT block -g (feeds sbx)" "$log" "sbx secret set -g github"
+assert_not_contains "secret: github under other scope -> no false rm hint" "$out" "sbx secret rm -g github"
+cleanup_stubs
+
+# 5d2. Same, sandbox-scoped: setting `mybox github` when github exists only under
+#      `otherbox` must proceed (this is exactly the verify-backends seed case).
+make_stubs
+printf 'SCOPE      TYPE      NAME     SECRET\notherbox   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
+export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set mybox github 2>&1 || true)
+unset SBX_LS_FIXTURE
+log=$(cat "$CALLS")
+assert_contains "secret: sandbox github not blocked by other scope (feeds sbx)" "$log" "sbx secret set mybox github"
+cleanup_stubs
+
+# 5d3. Section-awareness: a BUILT-IN service (github) must be matched in the
+#      built-in table only, and a CUSTOM service (usai) in the CUSTOM SECRETS
+#      table only — never cross-section. Fixture has BOTH tables populated.
+make_stubs
+cat > "$STUBDIR/sbx_ls" <<'LS'
+SCOPE      TYPE      NAME     SECRET
+(global)   service   github   (stored)
+
+CUSTOM SECRETS
+SCOPE      TARGETS            ENV            PLACEHOLDER               SECRET
+(global)   api.gsa.usai.gov   USAI_API_KEY   sbx-cs-0lrfssn3YnvE8P2j   api-ke***tJ63
+LS
+export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+# github IS present in the built-in table at (global) -> should block with rm hint.
+gh_out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || true)
+# usai IS present in the CUSTOM table at (global) -> should block with rm hint.
+usai_out=$(printf 'x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai 2>&1 || true)
+unset SBX_LS_FIXTURE
+assert_contains "secret: github found in built-in section (blocks)" "$gh_out" "sbx secret rm -g github"
+assert_contains "secret: usai found in custom section (blocks)" "$usai_out" "already has"
 cleanup_stubs
 
 # 5e. `-g usai` (custom, non-interactive/piped) -> stored + prints sbx command,
@@ -537,6 +595,122 @@ perms=$(stat -c '%a' "$STUBDIR/unit-secrets/acq.usai" 2>/dev/null || stat -f '%L
 assert_eq "store: file entry is 0600" "600" "$perms"
 cleanup_stubs
 
+# 5h1. acq_secret_delete: removes an entry, is idempotent, and scoped.
+make_stubs
+del_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/del-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'GV\n' | acq_secret_store "$(_acq_secret_key github)"
+  printf 'SV\n' | acq_secret_store "$(_acq_secret_key github mybox)"
+  # Delete the sandbox-scoped one; global must remain. Check the KEY directly
+  # (acq_secret_get on the scoped key) rather than acq_secret_has, which would
+  # fall back to the global entry by design.
+  acq_secret_delete "$(_acq_secret_key github mybox)" && printf 'del-scoped-rc=0\n'
+  acq_secret_get "$(_acq_secret_key github mybox)" >/dev/null 2>&1 && printf 'scoped-still=yes\n' || printf 'scoped-still=no\n'
+  acq_secret_get "$(_acq_secret_key github)" >/dev/null 2>&1 && printf 'global-still=yes\n' || printf 'global-still=no\n'
+  # Deleting an absent key is success (idempotent).
+  acq_secret_delete "$(_acq_secret_key github mybox)" && printf 'del-absent-rc=0\n'
+  # Delete global too.
+  acq_secret_delete "$(_acq_secret_key github)" && printf 'del-global-rc=0\n'
+  acq_secret_get "$(_acq_secret_key github)" >/dev/null 2>&1 && printf 'global-after=yes\n' || printf 'global-after=no\n'
+)
+assert_contains "delete: removes scoped entry (rc 0)" "$del_out" "del-scoped-rc=0"
+assert_contains "delete: scoped gone after delete" "$del_out" "scoped-still=no"
+assert_contains "delete: global untouched by scoped delete" "$del_out" "global-still=yes"
+assert_contains "delete: absent key is idempotent success" "$del_out" "del-absent-rc=0"
+assert_contains "delete: global removed" "$del_out" "del-global-rc=0"
+assert_contains "delete: global gone after delete" "$del_out" "global-after=no"
+cleanup_stubs
+
+# 5h2. `acq secret rm SANDBOX github` (msb) removes the acq-store entry via the
+#      backend rm path, AND live-unbinds it from the running sandbox with
+#      `msb modify --secret-rm GITHUB_TOKEN`. Uses the real dispatch + stubbed msb.
+make_stubs; load_acq
+# Report the sandbox as "running" so the live-unbind path targets it.
+printf 'rmbox\n' > "$STUBDIR/.msb_sandbox_list"
+: > "$CALLS"
+rm_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/rm-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'TOK\n' | acq_secret_store "$(_acq_secret_key github rmbox)"
+  acq_secret_has github rmbox && printf 'before=yes\n' || printf 'before=no\n'
+  ACQ_BACKEND=msb "$ACQ" secret rm rmbox github >/dev/null 2>&1
+  acq_secret_has github rmbox && printf 'after=yes\n' || printf 'after=no\n'
+)
+rm_log=$(cat "$CALLS")
+assert_contains "secret rm: present before" "$rm_out" "before=yes"
+assert_contains "secret rm: removed after (msb backend rm)" "$rm_out" "after=no"
+assert_contains "secret rm: live-unbinds via msb modify --secret-rm" "$rm_log" "msb modify rmbox --secret-rm GITHUB_TOKEN"
+cleanup_stubs
+
+# 5h2b. Global `acq secret rm -g usai` (msb) sweeps ALL running sandboxes with
+#       msb modify --secret-rm USAI_API_KEY.
+make_stubs; load_acq
+printf 'boxA\nboxB\n' > "$STUBDIR/.msb_sandbox_list"
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/rmg-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'K\n' | acq_secret_store "$(_acq_secret_key usai)"
+  ACQ_BACKEND=msb "$ACQ" secret rm -g usai >/dev/null 2>&1
+)
+rmg_log=$(cat "$CALLS")
+assert_contains "secret rm -g: unbinds boxA" "$rmg_log" "msb modify boxA --secret-rm USAI_API_KEY"
+assert_contains "secret rm -g: unbinds boxB" "$rmg_log" "msb modify boxB --secret-rm USAI_API_KEY"
+cleanup_stubs
+
+# 5h2c. `acq secret set` (msb) live add/rotates into running sandboxes for EVERY
+#       bound service, not just usai. github into a named running sandbox must
+#       re-feed via `msb modify <box> --secret GITHUB_TOKEN@api.github.com`, and
+#       the real value must NOT leak into argv.
+make_stubs; load_acq
+printf 'setbox\n' > "$STUBDIR/.msb_sandbox_list"
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/set-secrets"
+  export ACQ_SECRET_TEST_VALUE="ghp_SECRETVALUE"   # non-TTY store input
+  ACQ_BACKEND=msb "$ACQ" secret set setbox github >/dev/null 2>&1
+)
+set_log=$(cat "$CALLS")
+assert_contains "secret set: github live-rotates into running sandbox" "$set_log" "msb modify setbox --secret GITHUB_TOKEN@api.github.com"
+if grep -q 'ghp_SECRETVALUE' "$CALLS"; then
+  fail "secret set: value must NOT appear in msb argv" "leaked into $CALLS"
+else
+  pass "secret set: value never leaks to msb argv (passed via env)"
+fi
+cleanup_stubs
+
+# 5h2d. Global `acq secret set -g usai` (msb) sweeps ALL running sandboxes
+#       (regression guard for the stdin-consumption loop bug: both boxes fed).
+make_stubs; load_acq
+printf 'sboxA\nsboxB\n' > "$STUBDIR/.msb_sandbox_list"
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/setg-secrets"
+  export ACQ_SECRET_TEST_VALUE="usai-key-value"
+  ACQ_BACKEND=msb "$ACQ" secret set -g usai >/dev/null 2>&1
+)
+setg_log=$(cat "$CALLS")
+assert_contains "secret set -g: rotates sboxA" "$setg_log" "msb modify sboxA --secret USAI_API_KEY@api.gsa.usai.gov"
+assert_contains "secret set -g: rotates sboxB" "$setg_log" "msb modify sboxB --secret USAI_API_KEY@api.gsa.usai.gov"
+cleanup_stubs
+
+# 5h3. `acq secret rm` requires a scope; a lone token is passed through (not
+#      treated as a managed removal) — assert the managed-service classifier.
+make_stubs
+classify_out=$(
+  . "${REPO_ROOT}/acq.backends/common.sh"
+  _acq_is_managed_secret_rm -g github     && printf 'g-github=managed\n'  || printf 'g-github=passthru\n'
+  _acq_is_managed_secret_rm mybox usai    && printf 'box-usai=managed\n'  || printf 'box-usai=passthru\n'
+  _acq_is_managed_secret_rm somePlaceholder && printf 'lone=managed\n'    || printf 'lone=passthru\n'
+  _acq_is_managed_secret_rm -g unknownsvc && printf 'g-unknown=managed\n' || printf 'g-unknown=passthru\n'
+)
+assert_contains "classify: -g github is managed" "$classify_out" "g-github=managed"
+assert_contains "classify: SANDBOX usai is managed" "$classify_out" "box-usai=managed"
+assert_contains "classify: lone placeholder is passthrough" "$classify_out" "lone=passthru"
+assert_contains "classify: unknown service is passthrough" "$classify_out" "g-unknown=passthru"
+cleanup_stubs
+
 # ===========================================================================
 # 6. Kit list completeness (same four kits as qsbx)
 # ===========================================================================
@@ -557,7 +731,11 @@ make_stubs
 out=$(ACQ_BACKEND=sbx "$ACQ" version 2>&1); rc=$?
 assert_eq "version exits 0" "0" "$rc"
 assert_contains "version: script path" "$out" "$REPO_ROOT/acq"
-assert_contains "version: patterns kit ref" "$out" "9c277c09"
+# Assert `version` reports the CONFIGURED pin (read from common.sh), not a
+# hardcoded SHA — so this holds across pin bumps (incl. the temporary
+# patterns#269 pin and its eventual finalize). Tests the invariant, not a commit.
+_want_ref=$(ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1; printf '%s' "$PATTERNS_KIT_REF")
+assert_contains "version: patterns kit ref" "$out" "$_want_ref"
 assert_contains "version: backend line" "$out" "backend:"
 cleanup_stubs
 
@@ -673,7 +851,7 @@ cleanup_stubs
 #     msb (git substitution unsupported), pointing at the known limitation.
 make_stubs
 out=$(ACQ_SECRET_TEST_VALUE="ghp_x" ACQ_BACKEND=msb "$ACQ" secret set -g github 2>&1 || true)
-assert_contains "msb: secret set github notes msb does not bind it" "$out" "does NOT bind GitHub"
+assert_contains "msb: secret set github notes REST-API binding" "$out" "GITHUB_TOKEN@api.github.com"
 if [ -f "$STUBDIR/secrets/acq.github" ]; then
   pass "msb: secret set github stored in acq store"
 else
@@ -703,7 +881,12 @@ prov_leaks=$(
 prov_log=$(cat "$CALLS")
 assert_contains "msb: provision enables --tls-intercept (needed for substitution)" "$prov_log" "--tls-intercept"
 assert_contains "msb: provision binds USAi via --secret" "$prov_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
-assert_not_contains "msb: provision does NOT bind github (git substitution unsupported)" "$prov_log" "GITHUB_TOKEN@"
+# GitHub IS now bound — to the REST API host ONLY (api.github.com), the path msb
+# substitutes. The playbook kit fetches a tarball there instead of git-cloning
+# github.com/codeload (which msb does not substitute — quickstart#203).
+assert_contains "msb: provision binds github to api.github.com (REST path msb substitutes)" "$prov_log" "--secret GITHUB_TOKEN@api.github.com"
+assert_not_contains "msb: provision does NOT bind github to github.com (git transport unsubstituted)" "$prov_log" "GITHUB_TOKEN@github.com"
+assert_not_contains "msb: provision does NOT bind github to codeload" "$prov_log" "GITHUB_TOKEN@codeload"
 assert_eq "msb: provision never leaks secret values to argv" "CLEAN" "$prov_leaks"
 # Workspace is mounted at the SAME absolute path in the guest (sbx-parity), not
 # remapped under /home/agent (which fails to mount pre-user-create).
@@ -867,6 +1050,30 @@ assert_not_contains "msb: uid-1000 kit cmd not run as -u 1000" "$agent_log" "msb
 # provision. Assert the guard env is threaded onto the startup command.
 assert_contains "msb: kit cmd gets GIT_TERMINAL_PROMPT=0 guard" "$agent_log" "-e GIT_TERMINAL_PROMPT=0"
 assert_contains "msb: chowns staged /home/agent file to agent" "$agent_log" "chown agent /home/agent/usai-config/merge-global-config.mjs"
+# Agent-user setup must create the user WITHOUT pinning uid 1000 (which collides
+# with the base image's pre-existing uid-1000 user, e.g. node) and must chown the
+# home to agent so it is writable — otherwise every agent-user kit fails with
+# Permission denied (the playbook silent-fetch-failure regression).
+assert_not_contains "msb: agent user NOT created with a fixed -u 1000" "$agent_log" "useradd -m -d /home/agent -s /bin/sh -u 1000"
+assert_contains "msb: chowns /home/agent to the agent user" "$agent_log" 'chown "agent:'
+assert_contains "msb: verifies /home/agent is writable by agent" "$agent_log" "test -w /home/agent"
+cleanup_stubs
+
+# 8n0. Agent-user setup is FATAL when /home/agent is not writable by agent (a
+#      root-owned home silently broke every agent-user kit). Model the su-test
+#      probe FAILING and assert provision aborts (rc != 0) rather than degrading.
+make_stubs; load_acq
+homefail_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/homefail-secrets"
+  export STUB_HOME_NOT_WRITABLE=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision homefailbox shell /tmp >/dev/null 2>&1; printf 'RC=%s\n' "$?"
+)
+assert_contains "msb: unwritable agent home aborts provision (rc!=0)" "$homefail_out" "RC=1"
 cleanup_stubs
 
 # 8n1. msb provision satisfies the Docker base-image contract for the agent user:
@@ -1373,7 +1580,9 @@ fi
 # 9a. `acq kit list` shows the pinned neutral kits.
 make_stubs
 out=$("$ACQ" kit list 2>&1)
-assert_contains "kit: list shows patterns ref" "$out" "9c277c09"
+# Assert the CONFIGURED pin (not a hardcoded SHA) so this survives pin bumps.
+_want_ref=$(ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1; printf '%s' "$PATTERNS_KIT_REF")
+assert_contains "kit: list shows patterns ref" "$out" "$_want_ref"
 assert_contains "kit: list shows acq-kits dir" "$out" "acq-kits"
 assert_contains "kit: list shows usai-provider" "$out" "usai-provider"
 assert_contains "kit: list shows git-ssh-sign" "$out" "git-ssh-sign"

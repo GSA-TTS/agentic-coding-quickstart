@@ -359,25 +359,29 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 
 ### Known limitations (msb)
 
-- **Private GitHub repos: the playbook kit clone is skipped on msb.** The
-  `agentic-coding-playbook` kit clones a private GitHub repo over HTTPS. msb
-  0.6.6 does not substitute the credential placeholder for git's HTTPS
-  smart-transport to `github.com` — the request is blocked/unsubstituted
-  regardless of request shape (verified extensively; msb's `Authorization:
-  Bearer` substitution works for the USAi header path but not for git). Binding
-  the same placeholder across multiple github hosts also trips microsandbox
-  [#1170](https://github.com/superradcompany/microsandbox/issues/1170). acq
-  therefore does **not** bind a GitHub secret on msb; the playbook kit is
-  non-fatal and warns, and the sandbox comes up fully usable otherwise. This is
-  tracked in
-  [quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203)
-  for a fix once upstream git substitution works (see microsandbox
+- **Private GitHub repos: use the REST API, not `git clone`.** msb substitutes
+  an injected credential for the `Authorization: Bearer` header on the
+  **REST API** (`api.github.com`) — verified on msb 0.6.7 (an authenticated
+  request returns full rate-limit headers; a private-repo source-tarball fetch
+  succeeds). It does **not** substitute git's smart-HTTP transport to
+  `github.com` / `codeload.github.com`, so a `git clone` (or `gh repo clone`,
+  which shells out to git) of a private repo fails auth/TLS there. This was the
+  origin of
+  [quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203).
+
+  **Resolution:** kits that need private GitHub content fetch it via the REST
+  API instead of git. The `agentic-coding-playbook` kit now fetches the repo
+  **source tarball** from `api.github.com/repos/<repo>/tarball/<ref>` (verifying
+  the extracted `AGENTS.md` against a pinned sha256), so it works on **both**
+  backends. acq binds `GITHUB_TOKEN@api.github.com` on msb (single host — a
+  multi-host binding trips microsandbox
+  [#1170](https://github.com/superradcompany/microsandbox/issues/1170)). Store a
+  token with `acq secret set -g github` (or `gh auth token | acq secret set -g
+  github`); absent a token the kit degrades gracefully (warns, no rules/skills).
+  Upstream git-transport substitution remains unfixed (microsandbox
   [#756](https://github.com/superradcompany/microsandbox/issues/756) /
-  [#768](https://github.com/superradcompany/microsandbox/pull/768) /
-  [#1170](https://github.com/superradcompany/microsandbox/issues/1170)). On the
-  **sbx** backend the playbook clone works (its proxy injects the token
-  transparently). Workarounds on msb: make the repo readable without auth, use a
-  base image with the playbook pre-cloned, or use the sbx backend.
+  [#768](https://github.com/superradcompany/microsandbox/pull/768)), but kits no
+  longer depend on it.
 
 ### Capability flags
 
@@ -386,7 +390,7 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 | `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 0 | No post-hoc `acq ports`; publish at create/run via `-p HOST:GUEST` |
 | `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 1 | `msb snapshot` save/restore |
 | `ACQ_BACKEND_CAN_RESUME` | 1 | `msb stop` / `msb start` preserve state |
-| `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (header substitution; git HTTPS not yet supported by msb) |
+| `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (header substitution on REST/API hosts; git smart-HTTP transport not substituted — use the REST API) |
 
 ### Differences from sbx
 
@@ -462,10 +466,10 @@ inspection):
 ./scripts/verify-backends -v
 ```
 
-A `WARN` line marks a known, tracked limitation (e.g. the msb private-repo
-playbook clone, [quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203))
-— it is surfaced every run but does **not** count as a failure, so a clean msb
-run still exits 0.
+A `WARN` line marks a known, tracked limitation — it is surfaced every run but
+does **not** count as a failure, so a clean run still exits 0. (The former msb
+private-repo playbook `WARN` is gone: the playbook kit now fetches via the REST
+API and is a hard-required `pass` on both backends, given a stored github token.)
 
 ---
 
@@ -532,7 +536,6 @@ Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 
 - Full Go/keychain swap-on-access secret component of design §7.5 (age fallback,
   `CredentialRewriteRule`); acq ships the bash keychain subset (see Secrets)
-- msb private-repo git auth ([quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203))
 - `acq policy …` — network policy subcommands
 - `ppp` (Podman-Plus-Proxy) backend — Phase 3, in development at
   [GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)

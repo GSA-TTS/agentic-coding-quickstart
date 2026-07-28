@@ -28,9 +28,19 @@
 # Pinning to a release tag mirrors Phase 1 (which pinned patterns v1.5.0). The
 # acq-kits and the kit-hybrid-v1 schema (with `environment`) are present at this
 # commit (verified).
+#
+# TEMPORARY PIN — FINALIZE AFTER patterns#269 MERGES:
+#   This is currently pinned to the TIP of patterns `feat/fix-playbook-clones`
+#   (PR #269: playbook kit REST-tarball fetch, fixes quickstart#203), NOT a
+#   release commit. Once #269 merges to patterns `main`, bump this to the merge
+#   commit (or the next patterns release tag) and RESTORE the two pin assertions
+#   in scripts/test-acq ("version: patterns kit ref" / "kit: list shows patterns
+#   ref") that check for the release SHA. Tracked so it is not forgotten.
 # ============================================================================
 PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-PATTERNS_KIT_REF="9c277c09ed4ad45fd11709d6b048a58adc785443"   # patterns v1.7.0 (adds environment vocabulary / #227)
+# TEMP (patterns#269): finalize to the merge commit once #269 lands. See note above.
+PATTERNS_KIT_REF="379756ae77f979f55e464de30e61681ffaf27b9e"
+# PATTERNS_KIT_REF="9c277c09ed4ad45fd11709d6b048a58adc785443"   # patterns v1.7.0 (adds environment vocabulary / #227)
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider"
@@ -92,6 +102,34 @@ fi
 acq_debug() {
   [ -n "${ACQ_DEBUG:-}" ] || return 0
   printf 'acq[debug %s]: %s\n' "$(date +%H:%M:%S 2>/dev/null || printf '??:??:??')" "$*" >&2
+}
+
+# Services acq manages in its own secret store (and knows how to inject). Used to
+# decide whether `acq secret rm` should route to the acq-owned removal path vs.
+# pass a raw placeholder token through to the backend secret CLI.
+ACQ_MANAGED_SECRET_SERVICES=" usai github gitlab "
+
+# _acq_is_managed_secret_rm ARGS... -> 0 if the `acq secret rm` args name an
+# acq-managed secret (scope + known service), else 1 (pass through to backend).
+# Recognizes:  -g SERVICE  |  --global SERVICE  |  SANDBOX SERVICE
+_acq_is_managed_secret_rm() {
+  local a1="${1:-}" a2="${2:-}" svc=""
+  case "$a1" in
+    -g|--global) svc="$a2" ;;
+    -*)          return 1 ;;              # some other flag/placeholder
+    *)
+      # SANDBOX SERVICE form only (two positionals); a lone token is a raw
+      # placeholder for the backend to handle.
+      [ -n "$a2" ] || return 1
+      case "$a2" in -*) return 1 ;; esac
+      svc="$a2"
+      ;;
+  esac
+  [ -n "$svc" ] || return 1
+  case "$ACQ_MANAGED_SECRET_SERVICES" in
+    *" $svc "*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Word-split a whitespace-separated env value into the named array WITHOUT

@@ -90,6 +90,27 @@ ACQ_MSB_EXEC_READY_TIMEOUT="${ACQ_MSB_EXEC_READY_TIMEOUT:-${ACQ_EXEC_READY_TIMEO
 # USAi models path (matches common.sh USAI_MODELS_URL host) for --secret host.
 ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
 
+# GitHub credential host for the msb --secret binding. We bind the github token
+# to the REST API host ONLY (api.github.com), which msb substitutes on the wire
+# (verified msb 0.6.7). We deliberately do NOT bind github.com/codeload.github.com
+# because msb does not substitute git's smart-HTTP transport there (quickstart#203)
+# and a multi-host binding also trips microsandbox #1170 (ineligible entry blocks
+# eligible). Kits that need github auth must use the REST API (e.g. the playbook
+# kit fetches a source tarball from api.github.com), not `git clone`. The env var
+# name is GITHUB_TOKEN (the neutral service→env mapping; kits also accept GH_TOKEN).
+ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-api.github.com}"
+
+# _acq_msb_service_binding SERVICE -> "ENVVAR<TAB>HOST" for services the msb
+# adapter binds via `--secret ENV@HOST`, or empty for services it does not bind.
+# Single source of truth for the bind (provision) and unbind (secret rm) paths.
+_acq_msb_service_binding() {
+  case "$1" in
+    usai)   printf '%s\t%s\n' "USAI_API_KEY" "$ACQ_MSB_USAI_HOST" ;;
+    github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST" ;;
+    *)      printf '\t\n' ;;
+  esac
+}
+
 # The kits expect an unprivileged `agent` user with HOME=/home/agent (the sbx
 # agent-template contract). Plain OCI bases don't provide it, so the adapter
 # creates it at provision (see _acq_msb_ensure_agent_user). uid 1000 is the
@@ -319,14 +340,15 @@ EOF
 # path for a shortcut kit). Drops files and runs install/initFiles/startup
 # commands via `msb exec`.
 #
-# KNOWN LIMITATION (agentic-coding-playbook kit on msb): the playbook kit clones
-# a PRIVATE GitHub repo over HTTPS. msb 0.6.6 does not substitute the credential
-# placeholder for git's HTTPS smart-transport to github.com (the request is
-# blocked/unsubstituted regardless of request shape — verified extensively;
-# curl's Authorization-header path to api.gsa.usai.gov DOES work). So on msb the
-# clone is skipped and the kit warns (it is non-fatal by design). Tracked in
-# quickstart#203 (and upstream microsandbox #756/#768/#1170). USAi, git-ssh-sign,
-# and zscaler kits are unaffected.
+# RESOLVED (agentic-coding-playbook kit on msb): the playbook kit fetches a
+# PRIVATE GitHub repo. It used to `git clone` over HTTPS, but msb does not
+# substitute the credential placeholder for git's smart-HTTP transport to
+# github.com/codeload (quickstart#203). The kit now fetches the repo SOURCE
+# TARBALL via the REST API (api.github.com/repos/<repo>/tarball/<ref>), which msb
+# DOES substitute (verified msb 0.6.7), and acq binds GITHUB_TOKEN@api.github.com
+# above. So the playbook now works on msb. USAi, git-ssh-sign, and zscaler kits
+# are unaffected. (Upstream git-transport substitution remains unfixed —
+# microsandbox #756/#768/#1170 — but the kit no longer depends on it.)
 _acq_msb_apply_kit_dir() {
   local name="$1" kitdir="$2"
   local spec="${kitdir}/spec.yaml"
@@ -812,17 +834,18 @@ EOF
   # on the wire to the allowed host (requires --tls-intercept, set above). The
   # real value never enters the guest.
   #
-  # SCOPE (deliberately narrow, verified against msb 0.6.6):
+  # SCOPE (verified against msb 0.6.7):
   #   - USAi: bind USAI_API_KEY@api.gsa.usai.gov ONLY. The USAi provider sends the
   #     key as an `Authorization: Bearer` header, which msb substitutes correctly.
-  #   - GitHub: NOT bound here. msb 0.6.6 does not substitute the placeholder for
-  #     git's HTTPS clone to github.com (verified extensively: the request is
-  #     blocked/unsubstituted regardless of single/multi binding or request shape;
-  #     see the KNOWN LIMITATION note on _acq_msb_apply_kit_dir and the tracked
-  #     issue). Binding the same placeholder across multiple github hosts also
-  #     triggers microsandbox #1170 (ineligible-entry blocks eligible). So the
-  #     private playbook clone is expected to be skipped on msb until upstream git
-  #     substitution works; the kit is non-fatal and warns.
+  #   - GitHub: bind GITHUB_TOKEN@api.github.com ONLY. msb substitutes the token on
+  #     the wire to the REST API (verified: an authenticated GET to
+  #     api.github.com returns 5000-rate-limit headers; a private-repo tarball
+  #     fetch succeeds). msb does NOT substitute git's smart-HTTP transport to
+  #     github.com/codeload (a `git clone`/`gh repo clone` of a private repo fails
+  #     auth/TLS there) — this is quickstart#203. So kits authenticate via the REST
+  #     API, not git: the playbook kit fetches a source tarball from
+  #     api.github.com. Binding a single host also avoids microsandbox #1170
+  #     (multi-host binding: ineligible entry blocks eligible).
   local _secret_env_names=()   # env vars we set transiently, cleared after create
   if command -v acq_secret_resolve >/dev/null 2>&1; then
     local usai_val
@@ -836,9 +859,26 @@ EOF
       create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
       acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from env)"
     fi
-    # NOTE: GitHub token is intentionally NOT bound as an msb secret — see the
-    # scope note above. It remains in the acq store for the sbx backend and for
-    # a future msb path once upstream git substitution is fixed.
+
+    # GitHub: bind GITHUB_TOKEN@api.github.com so kits can authenticate to the
+    # REST API (the substituted path). Resolve from the acq store first, then a
+    # pre-exported GITHUB_TOKEN/GH_TOKEN (CI). Absent token => no binding; the
+    # playbook kit then degrades gracefully (warns, no rules/skills).
+    local gh_val
+    if gh_val=$(acq_secret_resolve github "$name" 2>/dev/null) && [ -n "$gh_val" ]; then
+      export GITHUB_TOKEN="$gh_val"; gh_val=""
+      _secret_env_names+=("GITHUB_TOKEN")
+      create_flags+=(--secret "GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST}")
+      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from acq store)"
+    elif [ -n "${GITHUB_TOKEN:-}" ]; then
+      create_flags+=(--secret "GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST}")
+      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from env)"
+    elif [ -n "${GH_TOKEN:-}" ]; then
+      export GITHUB_TOKEN="$GH_TOKEN"
+      _secret_env_names+=("GITHUB_TOKEN")
+      create_flags+=(--secret "GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST}")
+      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from GH_TOKEN env)"
+    fi
   elif [ -n "${USAI_API_KEY:-}" ]; then
     create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
   fi
@@ -901,13 +941,19 @@ EOF
   _acq_msb_check_prereqs "$name"
   acq_debug "msb provision: prereqs checked ($name)"
 
-  # Ensure the `agent` user (uid ACQ_MSB_AGENT_UID) with HOME=/home/agent exists.
-  # The pinned kits stage files under /home/agent and run startup commands as
-  # that user (the sbx agent template guarantees this user). A plain OCI base
-  # (e.g. node:22-bookworm) has no `agent` user, so their `-u 1000` commands ran
-  # as the wrong user against a non-existent home. Create it once, idempotently.
+  # Ensure the `agent` user with HOME=/home/agent exists AND that /home/agent is
+  # writable by it. The pinned kits stage files under /home/agent and run startup
+  # commands as that user (the sbx agent template guarantees this user). A plain
+  # OCI base (e.g. node:22-bookworm) has no `agent` user — and uid 1000 is already
+  # taken there — so acq creates `agent` (any uid) and chowns its home. A failure
+  # here is FATAL: a root-owned /home/agent silently breaks every agent-user kit
+  # (playbook fetch, usai merge), which is exactly how the playbook stopped
+  # fetching. Abort provision rather than degrade silently.
   acq_debug "msb provision: ensuring agent user ($name)"
-  _acq_msb_ensure_agent_user "$name"
+  if ! _acq_msb_ensure_agent_user "$name"; then
+    echo "acq(msb): error: agent-user setup failed for '$name'; aborting provision." >&2
+    return 1
+  fi
   acq_debug "msb provision: agent user ready ($name)"
 
   # Install the requested agent binary (sbx bakes it into the template image; on
@@ -1058,27 +1104,43 @@ _acq_msb_ensure_agent_user() {
 
   acq_debug "msb: ensuring agent user + /home/agent + passwordless sudo + proxy-preserve in $name"
   # Idempotent, distro-agnostic. If an `agent` user already exists, reuse it.
-  # Otherwise create it: prefer uid 1000, but if that uid is taken, let the tool
-  # pick a free uid (the kits address the user by name via our exec translation,
-  # not strictly by 1000).
+  # Otherwise create it. NOTE: we do NOT pin uid 1000 — on common bases
+  # (node:22-bookworm) uid 1000 is already taken by a pre-existing user (`node`),
+  # so requesting -u 1000 fails and, worse, can leave /home/agent half-created or
+  # root-owned. The kits address the agent BY NAME (our exec translation maps
+  # user 1000/agent → `-u agent`), so the uid is irrelevant. What MUST hold is
+  # that /home/agent exists and is OWNED BY agent — otherwise every kit command
+  # that runs as the agent user (playbook fetch, usai merge) fails with
+  # Permission denied. So home creation + ownership is deterministic and its
+  # failure is FATAL (previously it was best-effort `|| true`, which silently
+  # degraded into a root-owned home and a playbook that never fetched).
   msb exec "$name" -u 0 -- sh -c '
     set -e
     if id agent >/dev/null 2>&1; then
       :
     elif command -v useradd >/dev/null 2>&1; then
-      # Debian/Ubuntu/RHEL. Try uid 1000 first; fall back to auto uid.
-      useradd -m -d /home/agent -s /bin/sh -u 1000 agent 2>/dev/null \
-        || useradd -m -d /home/agent -s /bin/sh agent
+      # Debian/Ubuntu/RHEL. Do NOT request a fixed uid (1000 may be taken); let
+      # the tool pick a free uid. -M: do not auto-create home here; we create and
+      # chown it explicitly below so ownership is unconditional.
+      useradd -M -d /home/agent -s /bin/sh agent
     elif command -v adduser >/dev/null 2>&1; then
       # Alpine/BusyBox.
-      adduser -h /home/agent -s /bin/sh -D -u 1000 agent 2>/dev/null \
-        || adduser -h /home/agent -s /bin/sh -D agent
+      adduser -h /home/agent -s /bin/sh -D -H agent
     else
       echo "acq(msb): no useradd/adduser in base image; cannot create agent user" >&2
       exit 1
     fi
+    # Home MUST exist and be owned by agent. Not best-effort: a root-owned home
+    # breaks every agent-user kit. `id -gn agent` resolves the primary group so
+    # chown works whether or not an `agent` group exists.
     mkdir -p /home/agent
-    chown -R agent:agent /home/agent 2>/dev/null || chown -R agent /home/agent 2>/dev/null || true
+    _agrp=$(id -gn agent 2>/dev/null || echo agent)
+    chown "agent:${_agrp}" /home/agent
+    chown -R "agent:${_agrp}" /home/agent
+    # Verify writability as the agent user (catches an exotic base where chown
+    # "succeeds" but the mount is read-only, etc.). Fatal on failure.
+    su agent -s /bin/sh -c "test -w /home/agent" 2>/dev/null \
+      || { echo "acq(msb): /home/agent is not writable by the agent user" >&2; exit 1; }
 
     # Passwordless sudo for agent (base-image requirement). Only if sudo exists;
     # a base without sudo still works for our purposes (kit/agent commands that
@@ -1095,13 +1157,13 @@ _acq_msb_ensure_agent_user() {
       chmod 0440 /etc/sudoers.d/91-acq-proxy-env
     fi
   ' || {
-    echo "acq(msb): warning: could not fully satisfy the agent-user base-image contract in '$name'." >&2
-    echo "acq(msb):   kit commands that run as the agent user (e.g. the usai merge)" >&2
-    echo "acq(msb):   or agent commands needing passwordless sudo may fail. Use an" >&2
-    echo "acq(msb):   ACQ_MSB_IMAGE built on docker/sandbox-templates:shell-docker (or one" >&2
-    echo "acq(msb):   providing an 'agent' user at uid 1000 with passwordless sudo and" >&2
-    echo "acq(msb):   HOME=/home/agent), or a base with useradd/adduser + sudo." >&2
-    return 0
+    echo "acq(msb): error: could not establish a writable agent home in '$name'." >&2
+    echo "acq(msb):   /home/agent must exist and be owned by the 'agent' user — kit" >&2
+    echo "acq(msb):   commands that run as agent (playbook fetch, usai merge) fail" >&2
+    echo "acq(msb):   otherwise. Use an ACQ_MSB_IMAGE built on" >&2
+    echo "acq(msb):   docker/sandbox-templates:shell-docker (agent user + sudo), or a" >&2
+    echo "acq(msb):   base with useradd/adduser. Re-run with ACQ_DEBUG=1 for details." >&2
+    return 1
   }
   msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
 }
@@ -1347,50 +1409,151 @@ acq_backend_secret_set() {
   # Store into the acq-owned store (keychain/file); value read from TTY/stdin.
   acq_secret_set_interactive "$service" "$scope_name" || return 1
 
-  # Re-feed running sandboxes so a rotated secret takes effect without recreate
-  # (msb modify --secret; the guest keeps its placeholder, only the injected
-  # value changes). Only for services the msb adapter actually binds (usai).
-  case "$service" in
-    usai)
-      local val
-      if val=$(acq_secret_resolve usai "$scope_name" 2>/dev/null) && [ -n "$val" ]; then
-        local applied=0 sb
-        # Determine target sandboxes: a named scope, else all running sandboxes.
-        if [ -n "$scope_name" ]; then
-          if acq_backend_exists "$scope_name"; then
-            USAI_API_KEY="$val" msb modify "$scope_name" --secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}" >/dev/null 2>&1 \
-              && applied=$((applied + 1))
-          fi
-        else
-          while IFS= read -r sb; do
-            [ -n "$sb" ] || continue
-            USAI_API_KEY="$val" msb modify "$sb" --secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}" >/dev/null 2>&1 \
-              && applied=$((applied + 1))
-          done <<EOF
+  # Live add/rotate: re-feed running sandboxes so a newly-set or rotated secret
+  # takes effect without recreate (`msb modify --secret ENV@HOST`; the guest keeps
+  # its placeholder, only the injected value changes). Driven off the single
+  # binding table so EVERY bound service (usai, github, ...) rotates in place —
+  # not just usai. A named scope targets that sandbox; a global set sweeps all
+  # running sandboxes. The real value is read from the acq store into a TRANSIENT
+  # env var (never argv) that `msb modify` reads, then cleared.
+  local _env _host _binding val applied=0 sb
+  _binding=$(_acq_msb_service_binding "$service")
+  _env=$(printf '%s' "$_binding" | cut -f1)
+  _host=$(printf '%s' "$_binding" | cut -f2)
+  if [ -n "$_env" ] && [ -n "$_host" ]; then
+    if val=$(acq_secret_resolve "$service" "$scope_name" 2>/dev/null) && [ -n "$val" ]; then
+      if [ -n "$scope_name" ]; then
+        if acq_backend_exists "$scope_name"; then
+          env "$_env=$val" msb modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+            && applied=$((applied + 1))
+        fi
+      else
+        # stdin from /dev/null so `msb modify` can't consume the `while read`
+        # heredoc (else only the first sandbox is processed — a real msb drains
+        # stdin). Same trap guarded in acq_backend_secret_rm's sweep.
+        while IFS= read -r sb; do
+          [ -n "$sb" ] || continue
+          env "$_env=$val" msb modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+            && applied=$((applied + 1))
+        done <<EOF
 $(msb list -q 2>/dev/null)
 EOF
-        fi
-        val=""
-        [ "$applied" -gt 0 ] && acq_debug "msb modify: re-fed USAi secret to $applied sandbox(es)"
       fi
+      val=""
+      [ "$applied" -gt 0 ] && acq_debug "msb modify: re-fed $service (${_env}@${_host}) to $applied sandbox(es)"
+    fi
+  fi
+
+  # Service-specific guidance.
+  case "$service" in
+    usai)
       echo "acq(msb): stored USAi key in the acq secret store. At 'acq run/create'" >&2
       echo "      the msb backend binds it via --secret USAI_API_KEY@${ACQ_MSB_USAI_HOST};" >&2
       echo "      the real value is swapped in on the wire and never enters the guest." >&2
-      echo "      Running sandboxes were re-fed via 'msb modify' (no recreate needed)." >&2
+      [ "$applied" -gt 0 ] && echo "      Re-fed $applied running sandbox(es) via 'msb modify' (no recreate needed)." >&2
       ;;
     github)
-      echo "acq(msb): stored GitHub token in the acq secret store (used by the sbx" >&2
-      echo "      backend). NOTE: the msb backend does NOT bind GitHub as a secret —" >&2
-      echo "      msb 0.6.6 does not substitute the placeholder for git's HTTPS clone" >&2
-      echo "      to github.com, so the private playbook-clone kit is skipped on msb." >&2
-      echo "      Tracked for a fix (see docs/BACKEND_GUIDE.md, msb known limitations)." >&2
+      echo "acq(msb): stored GitHub token in the acq secret store. At 'acq run/create'" >&2
+      echo "      the msb backend binds it via --secret GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST};" >&2
+      echo "      the real value is swapped in on the wire to the REST API and never enters" >&2
+      echo "      the guest. Kits authenticate via the REST API (e.g. the playbook kit" >&2
+      echo "      fetches a source tarball from api.github.com) — NOT 'git clone', which" >&2
+      echo "      msb does not substitute for github.com/codeload (quickstart#203)." >&2
+      [ "$applied" -gt 0 ] && echo "      Re-fed $applied running sandbox(es) via 'msb modify' (no recreate needed)." >&2
       ;;
     *)
       echo "acq(msb): stored '$service' in the acq secret store. Note: the msb adapter" >&2
-      echo "      only auto-binds 'usai' at create today; other services are stored" >&2
-      echo "      but not yet wired to a --secret host mapping." >&2
+      echo "      only binds known services (usai, github) at create today; other" >&2
+      echo "      services are stored but not yet wired to a --secret host mapping." >&2
       ;;
   esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_secret_rm [-g | SANDBOX] SERVICE  (msb backend)
+# ---------------------------------------------------------------------------
+# Remove a secret from the acq store AND live-unbind it from running sandboxes.
+# msb binds a secret at create via `--secret ENV@HOST`; `msb modify --secret-rm
+# ENV` removes that binding from a running VM (verified: msb 0.6.7 modify has
+# --secret-rm <NAME>). So on rm we (1) delete the acq-store value (source of
+# truth for future creates) and (2) `msb modify --secret-rm ENV` the sandbox(es)
+# so the injected value stops flowing immediately — a named scope targets that
+# sandbox; a global rm sweeps all running sandboxes. Idempotent (absent secret /
+# absent binding are both success). Scope parsing mirrors acq_backend_secret_set.
+acq_backend_secret_rm() {
+  local service="${1:-}"
+  shift || true
+
+  local scope_name=""
+  case "$service" in
+    -g|--global)
+      service="${1:-}"; shift || true ;;
+    -*)
+      ;;
+    *)
+      local _next="${1:-}"
+      case "$_next" in
+        ""|-*) ;;
+        *) scope_name="$service"; service="$_next"; shift || true ;;
+      esac
+      ;;
+  esac
+
+  if [ -z "$service" ]; then
+    echo "acq(msb): secret rm: missing service name" >&2
+    echo "     usage: acq secret rm [-g | SANDBOX] <service>" >&2
+    return 1
+  fi
+
+  if ! command -v acq_secret_delete >/dev/null 2>&1; then
+    echo "acq(msb): internal error: secret store not loaded" >&2
+    return 1
+  fi
+
+  # 1) Delete the acq-store value (idempotent).
+  local key removed=0
+  key=$(_acq_secret_key "$service" "$scope_name")
+  acq_secret_delete "$key" && removed=1
+
+  # 2) Live-unbind from running sandboxes via `msb modify --secret-rm ENV`, for
+  #    services the adapter actually binds. A named scope targets that sandbox;
+  #    a global rm sweeps every running sandbox. Best-effort per sandbox.
+  local env_name unbound=0
+  env_name=$(_acq_msb_service_binding "$service" | cut -f1)
+  if [ -n "$env_name" ]; then
+    local sb
+    if [ -n "$scope_name" ]; then
+      if acq_backend_exists "$scope_name"; then
+        msb modify "$scope_name" --secret-rm "$env_name" >/dev/null 2>&1 \
+          && unbound=$((unbound + 1))
+      fi
+    else
+      # NOTE: redirect each `msb modify` stdin from /dev/null. Without it, the
+      # command inside the loop consumes the heredoc that feeds `while read`, so
+      # only the FIRST sandbox is processed (a real `msb` drains stdin). This is
+      # the same stdin-consumption trap the test stub deliberately reproduces.
+      while IFS= read -r sb; do
+        [ -n "$sb" ] || continue
+        msb modify "$sb" --secret-rm "$env_name" </dev/null >/dev/null 2>&1 \
+          && unbound=$((unbound + 1))
+      done <<EOF
+$(msb list -q 2>/dev/null)
+EOF
+    fi
+    [ "$unbound" -gt 0 ] && acq_debug "msb modify --secret-rm $env_name: unbound from $unbound sandbox(es)"
+  fi
+
+  local where="global"
+  [ -n "$scope_name" ] && where="sandbox '$scope_name'"
+  if [ "$removed" -eq 1 ]; then
+    echo "acq(msb): removed '$service' secret (${where}) from the acq store." >&2
+  else
+    echo "acq(msb): no '$service' secret found in the acq store (${where})." >&2
+  fi
+  if [ "$unbound" -gt 0 ]; then
+    echo "      Live-unbound it from $unbound running sandbox(es) (msb modify --secret-rm)." >&2
+  fi
   return 0
 }
 
