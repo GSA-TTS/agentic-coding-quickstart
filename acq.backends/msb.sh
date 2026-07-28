@@ -1029,6 +1029,19 @@ _acq_msb_agent_has_install_recipe() {
   esac
 }
 
+# _acq_msb_safe_agent_token AGENT -> 0 if AGENT is a safe agent token to
+# interpolate into a shell command. Agent tokens are short lowercase names
+# (opencode, claude, shell, …); restrict to [a-z-] so a value can never break
+# out of the `sh -c "command -v '$agent'"` single-quoting (defense against a
+# `acq create "x';…'"` arg or a tampered /var/lib/acq/agent marker). Callers
+# that build an `sh -c` string with $agent MUST gate on this first.
+_acq_msb_safe_agent_token() {
+  case "$1" in
+    ""|*[!a-z-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # _acq_msb_install_agent NAME AGENT — install the agent binary into the guest
 # ---------------------------------------------------------------------------
@@ -1045,6 +1058,15 @@ _acq_msb_install_agent() {
   case "$agent" in
     shell|"") acq_debug "msb: agent '$agent' needs no binary install"; return 0 ;;
   esac
+
+  # Charset-guard the agent token before it enters any `sh -c "… '$agent' …"`.
+  # `acq create <agent> <path>` does not go through is_known_agent, so a hostile
+  # token (e.g. "x';touch /tmp/pwn;'") could otherwise break the single-quoting
+  # and run as root. Refuse anything outside [a-z-].
+  if ! _acq_msb_safe_agent_token "$agent"; then
+    echo "acq(msb): refusing agent name with unexpected characters: '$agent'" >&2
+    return 0
+  fi
 
   if ! _acq_msb_agent_has_install_recipe "$agent"; then
     # Maybe the base image already provides it — don't warn if so.
@@ -1296,10 +1318,16 @@ _acq_msb_attach() {
   fi
   [ -n "$ws" ] || ws="/home/agent"
 
-  # Read the agent recorded at provision. Default to `shell` if unset.
+  # Read the agent recorded at provision. Default to `shell` if unset. The value
+  # comes from a guest file (/var/lib/acq/agent); charset-guard it before it
+  # enters the `sh -c "command -v '$agent'"` below, since a tampered marker could
+  # otherwise break the single-quoting and run as the agent user. Fall back to a
+  # plain shell on anything unexpected.
   local agent
   agent=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null | tr -d '[:space:]')
-  [ -n "$agent" ] || agent="shell"
+  if [ -z "$agent" ] || ! _acq_msb_safe_agent_token "$agent"; then
+    agent="shell"
+  fi
 
   # Common flags for the interactive attach: PTY, agent user, workspace cwd, and
   # a sane $SHELL (msb's default interactive shell is the base image's Node REPL).
@@ -1448,15 +1476,23 @@ acq_backend_secret_set() {
   # not just usai. A named scope targets that sandbox; a global set sweeps all
   # running sandboxes. The real value is read from the acq store into a TRANSIENT
   # env var (never argv) that `msb modify` reads, then cleared.
+  #
+  # SECRET NEVER ON ARGV: the value is placed in the environment via a dynamic
+  # `export "$_env=$val"` (an env ENTRY, invisible to `ps`/`/proc/<pid>/cmdline`),
+  # NOT via `env NAME=VAL msb …` — there NAME=VAL is an OPERAND on env(1)'s argv
+  # and would leak the token to any `ps -ww` for the life of the child. The var
+  # is unset immediately after each call.
   local _env _host _binding val applied=0 sb
   _binding=$(_acq_msb_service_binding "$service")
   _env=$(printf '%s' "$_binding" | cut -f1)
   _host=$(printf '%s' "$_binding" | cut -f2)
   if [ -n "$_env" ] && [ -n "$_host" ]; then
     if val=$(acq_secret_resolve "$service" "$scope_name" 2>/dev/null) && [ -n "$val" ]; then
+      # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
+      export "$_env=$val"
       if [ -n "$scope_name" ]; then
         if acq_backend_exists "$scope_name"; then
-          env "$_env=$val" msb modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+          msb modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
             && applied=$((applied + 1))
         fi
       else
@@ -1465,12 +1501,13 @@ acq_backend_secret_set() {
         # stdin). Same trap guarded in acq_backend_secret_rm's sweep.
         while IFS= read -r sb; do
           [ -n "$sb" ] || continue
-          env "$_env=$val" msb modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+          msb modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
             && applied=$((applied + 1))
         done <<EOF
 $(msb list -q 2>/dev/null)
 EOF
       fi
+      unset "$_env"
       val=""
       [ "$applied" -gt 0 ] && acq_debug "msb modify: re-fed $service (${_env}@${_host}) to $applied sandbox(es)"
     fi

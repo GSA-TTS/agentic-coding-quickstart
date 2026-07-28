@@ -722,6 +722,10 @@ if grep -q 'ghp_SECRETVALUE' "$CALLS"; then
 else
   pass "secret set: value never leaks to msb argv (passed via env)"
 fi
+# The value must reach the child as an env ENTRY (export), NOT as an `env
+# NAME=VAL msb …` argv operand (which `ps`/cmdline would expose). Assert the
+# rotate path does not shell out through `env` with the token on argv.
+assert_not_contains "secret set: no 'env NAME=VAL' argv leak (uses export)" "$set_log" "env GITHUB_TOKEN="
 cleanup_stubs
 
 # 5h2d. Global `acq secret set -g usai` (msb) sweeps ALL running sandboxes
@@ -1298,6 +1302,39 @@ assert_contains "msb: shell attach uses msb exec -t as agent" "$shellattach_log"
 assert_contains "msb: shell attach execs an explicit /bin/sh -l" "$shellattach_log" "shellattach -- /bin/sh -l"
 assert_not_contains "msb: shell attach does not exec a named agent" "$shellattach_log" "shellattach -- shell"
 assert_not_contains "msb: shell attach does NOT use msb ssh" "$shellattach_log" "msb ssh"
+cleanup_stubs
+
+# 8n7. SECURITY: a hostile agent token must never break out of the
+#      `sh -c "command -v '$agent'"` single-quoting. (1) install path with a
+#      metachar-laden `acq create` agent arg, and (2) attach reading a tampered
+#      /var/lib/acq/agent marker — both must refuse/fall back, never emit an
+#      `sh -c` string containing the injection.
+make_stubs; load_acq
+: > "$CALLS"
+inj_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/inj-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_install_agent injbox "x';touch /tmp/acq_pwn;'" 2>&1
+)
+inj_log=$(cat "$CALLS")
+assert_contains "msb: install refuses metachar agent token" "$inj_out" "refusing agent name"
+assert_not_contains "msb: install never emits the injected sh -c" "$inj_log" "touch /tmp/acq_pwn"
+cleanup_stubs
+
+# Attach with a tampered marker (returned by the stub) falls back to a shell and
+# never interpolates the injection into an sh -c command-v probe.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export STUB_RECORDED_AGENT="x';touch /tmp/acq_pwn;'"
+  export STUB_RECORDED_WORKSPACE="/tmp/wsp"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_attach injattach >/dev/null 2>&1
+)
+injattach_log=$(cat "$CALLS")
+assert_not_contains "msb: attach never runs the injected marker in sh -c" "$injattach_log" "touch /tmp/acq_pwn"
+assert_contains "msb: attach falls back to /bin/sh on tampered marker" "$injattach_log" "injattach -- /bin/sh -l"
 cleanup_stubs
 
 # 8o. Regression: msb applies ALL kit files and ALL kit commands, not just the

@@ -30,7 +30,9 @@
 PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # patterns main @ 3fcde8e — playbook REST-tarball fetch (#269, quickstart#203),
 # on top of the environment vocabulary (#227) and neutral acq-kits (#221/#224).
-PATTERNS_KIT_REF="3fcde8e"
+# Full 40-char SHA (not an abbreviation): this ref drives a credential-bearing
+# cross-repo kit fetch, so pin it unambiguously for reproducibility.
+PATTERNS_KIT_REF="3fcde8ee396bf9841de47f6f7886db088164243d"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider"
