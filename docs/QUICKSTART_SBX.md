@@ -129,6 +129,23 @@ sbx secret set -g anthropic
 
 ### Store GitHub Token (for code access)
 
+> **Prefer a per-sandbox scoped token.** A global GitHub token (below) is
+> injected into *every* sandbox, giving each one access to *all* your
+> repositories. For least privilege, let `acq` scope a **fine-grained** token to
+> just the repos in your workspace — on `acq run` it detects the mounted repos
+> and guides you, or run it explicitly:
+>
+> ```bash
+> acq github-scope <sandbox-name> /path/to/your/project
+> ```
+>
+> See [ADR-0013](adr/0013-per-sandbox-github-token-downscoping.md) for the
+> rationale and the alternatives considered. Fine-grained tokens can't
+> contribute to public repos you're not a member of or call the Checks API —
+> use the global token below for those cases.
+
+**Deprecated (broad, global) path** — kept for back-compat:
+
 ```bash
 # Recommended: pipe from gh cli (never touches shell history)
 brew install gh # (if not already installed)

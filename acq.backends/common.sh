@@ -494,6 +494,227 @@ warn_if_no_git_identity() {
   echo "      The sandbox home is isolated, so git identity is set per-repo." >&2
 }
 
+# ---------------------------------------------------------------------------
+# GitHub token down-scoping (ADR-0013)
+# ---------------------------------------------------------------------------
+# The global `sbx secret set -g github` path injects the user's broad gh token
+# into EVERY sandbox. These helpers instead detect the GitHub repos actually
+# present in the mounted workspace and guide the user to a fine-grained PAT
+# scoped to just those repos, stored sandbox-scoped (acq.<sandbox>.github).
+# See ADR-0013 for why this is guided (no API mints a fine-grained PAT) and why
+# the alternatives (token/scoped, App tokens, Jentic, firewall) were not used.
+
+# _acq_parse_github_nwo URL -> "owner/repo" on STDOUT (empty if not github.com).
+# Handles https://github.com/O/R(.git), git@github.com:O/R(.git),
+# ssh://git@github.com/O/R(.git). Pure string work — no network.
+_acq_parse_github_nwo() {
+  local url="$1" rest=""
+  case "$url" in
+    https://github.com/*|http://github.com/*) rest="${url#*github.com/}" ;;
+    git@github.com:*)                         rest="${url#git@github.com:}" ;;
+    ssh://git@github.com/*)                   rest="${url#ssh://git@github.com/}" ;;
+     git://github.com/*)                       rest="${url#git://github.com/}" ;;
+    *) return 0 ;;
+  esac
+  rest="${rest%.git}"        # strip trailing .git
+  rest="${rest%/}"           # strip trailing slash
+  # Keep only owner/repo (drop any deeper path), require exactly two segments.
+  local owner="${rest%%/*}" repo="${rest#*/}"
+  repo="${repo%%/*}"
+  [ -n "$owner" ] && [ -n "$repo" ] || return 0
+  printf '%s/%s\n' "$owner" "$repo"
+}
+
+# detect_workspace_repos PATH -> newline-separated deduped "owner/repo" list on
+# STDOUT for every github.com remote found. Mirrors warn_if_no_git_identity's
+# capped, symlink-safe classification: the path may itself be a repo, or a
+# parent whose depth-1 children are repos. Reads each repo's remote.origin.url
+# (falls back to the first configured remote). No network, no side effects.
+detect_workspace_repos() {
+  local path="${1:-}"
+  command -v git >/dev/null 2>&1 || return 0
+  [ -n "$path" ] && [ -d "$path" ] || return 0
+
+  local dirs=() d
+  if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    dirs=("$path")
+  else
+    local scanned=0
+    while IFS= read -r d; do
+      case "$(basename "$d")" in
+        node_modules|.venv|venv|vendor|target|dist|build) continue ;;
+      esac
+      scanned=$((scanned + 1))
+      [ "$scanned" -gt 200 ] && break
+      [ -e "$d/.git" ] && dirs+=("$d")
+    done < <(find "$path" -maxdepth 1 -mindepth 1 -type d ! -type l 2>/dev/null)
+  fi
+
+  local url nwo seen="" out=""
+  for d in ${dirs[@]+"${dirs[@]}"}; do
+    url=$(git -C "$d" config --get remote.origin.url 2>/dev/null || true)
+    if [ -z "$url" ]; then
+      url=$(git -C "$d" config --get-regexp '^remote\..*\.url$' 2>/dev/null \
+        | head -n1 | cut -d' ' -f2- || true)
+    fi
+    [ -n "$url" ] || continue
+    nwo=$(_acq_parse_github_nwo "$url") || true
+    [ -n "$nwo" ] || continue
+    case "$seen" in *"|$nwo|"*) continue ;; esac
+    seen="$seen|$nwo|"
+    out="$out$nwo
+"
+  done
+  printf '%s' "$out"
+}
+
+# URL-encode a string for a query parameter (RFC 3986 unreserved kept as-is).
+_acq_urlencode() {
+  local s="$1" i c out=""
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9.~_-]) out="$out$c" ;;
+      *) out="$out$(printf '%%%02X' "'$c")" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# Build a pre-filled fine-grained-PAT creation URL for one owner. Selects the
+# minimal default permissions for the normal agent loop — code, PRs, and issues
+# (write implies read; metadata:read is always included by GitHub). The user
+# still picks the specific repositories in the form (fine-grained PATs are
+# single-owner).
+# Args: OWNER SANDBOX_NAME
+_acq_github_pat_url() {
+  local owner="$1" sandbox="$2" name
+  name=$(_acq_urlencode "acq-${sandbox}")
+  printf 'https://github.com/settings/personal-access-tokens/new?name=%s&target_name=%s&expires_in=30&contents=write&pull_requests=write&issues=write\n' \
+    "$name" "$(_acq_urlencode "$owner")"
+}
+
+# github_scope_sandbox SANDBOX WORKSPACE — guide the user through minting a
+# fine-grained PAT scoped to the workspace's repos and store it sandbox-scoped.
+# Warn-not-block: returns 0 even if the user declines. Never places the token in
+# argv (delegates to acq_secret_set_interactive via the backend secret path).
+github_scope_sandbox() {
+  local sandbox="$1" ws="${2:-}"
+  local repos owners="" nwo owner
+
+  repos=$(detect_workspace_repos "$ws")
+  if [ -z "$repos" ]; then
+    echo "acq: no GitHub repositories detected in the workspace; nothing to scope." >&2
+    return 0
+  fi
+
+  # Distinct owners.
+  while IFS= read -r nwo; do
+    [ -n "$nwo" ] || continue
+    owner="${nwo%%/*}"
+    case "$owners" in *"|$owner|"*) ;; *) owners="$owners|$owner|" ;; esac
+  done <<EOF
+$repos
+EOF
+
+  echo "acq: scoping a GitHub token for sandbox '$sandbox'." >&2
+  echo "" >&2
+  echo "      GitHub has no API to mint a fine-grained PAT, so create it in the" >&2
+  echo "      browser. For EACH owner below, open the pre-filled link, select" >&2
+  echo "      'Only select repositories' and choose the repo(s) listed below," >&2
+  echo "      then generate the token and paste it back here." >&2
+  echo "      Default permissions: Contents=Read/Write, Pull requests=Read/Write," >&2
+  echo "      Issues=Read/Write (widen/narrow in the form as needed)." >&2
+
+  local o
+  local _oldifs="$IFS"; IFS='|'
+  # shellcheck disable=SC2086
+  set -- $owners
+  IFS="$_oldifs"
+  for o in "$@"; do
+    [ -n "$o" ] || continue
+    echo "" >&2
+    echo "      Owner '$o' — open:" >&2
+    printf '        %s\n' "$(_acq_github_pat_url "$o" "$sandbox")" >&2
+  done
+
+  echo "" >&2
+  echo "      Scope the token to just these repositories:" >&2
+  while IFS= read -r nwo; do [ -n "$nwo" ] && printf '        %s\n' "$nwo" >&2; done <<EOF
+$repos
+EOF
+
+  echo "" >&2
+  echo "      When you have a token, paste it at the prompt (input hidden)." >&2
+  echo "      To skip for now, press Enter on an empty line." >&2
+
+  # Store sandbox-scoped via the backend secret path (feeds the sbx proxy too).
+  # acq_backend_secret_set reads the value from the TTY (never argv). An empty
+  # entry aborts cleanly (warn-not-block).
+  if command -v acq_backend_secret_set >/dev/null 2>&1; then
+    acq_backend_secret_set "$sandbox" github || {
+      echo "acq: github scoping skipped or failed; continuing (you can re-run later" >&2
+      echo "      with: acq github-scope $sandbox $ws)." >&2
+      return 0
+    }
+  else
+    echo "acq: internal error: backend secret path not loaded; cannot store token." >&2
+    return 0
+  fi
+  echo "acq: stored a repo-scoped GitHub token for sandbox '$sandbox'." >&2
+  return 0
+}
+
+# advise_github_scope SANDBOX WORKSPACE — on acq run, nudge toward a per-sandbox
+# scoped GitHub token. Fires when the workspace has GitHub repos AND no
+# sandbox-scoped github secret exists yet (regardless of whether a broad global
+# one exists). Warn-not-block; interactive TTY gets a [continue/scope now]
+# prompt (default: continue). No-op in CI / non-TTY beyond printing the advisory.
+advise_github_scope() {
+  local sandbox="${1:-}" ws="${2:-}"
+  [ -n "$sandbox" ] || return 0
+
+  # Already scoped for this sandbox? Nothing to do.
+  if command -v acq_secret_get >/dev/null 2>&1 \
+      && acq_secret_get "$(_acq_secret_key github "$sandbox")" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local repos
+  repos=$(detect_workspace_repos "$ws")
+  [ -n "$repos" ] || return 0   # no GitHub repos → nothing to scope
+
+  local has_global="no"
+  if command -v acq_secret_get >/dev/null 2>&1 \
+      && acq_secret_get "$(_acq_secret_key github)" >/dev/null 2>&1; then
+    has_global="yes"
+  fi
+
+  echo "acq: note — this sandbox has no repo-scoped GitHub token." >&2
+  if [ "$has_global" = "yes" ]; then
+    echo "      A GLOBAL GitHub token is set; it grants this sandbox access to ALL" >&2
+    echo "      your repositories — broader than the repos mounted here." >&2
+  else
+    echo "      No GitHub token is set for this sandbox." >&2
+  fi
+  echo "      For least privilege, scope a token to just the mounted repo(s)." >&2
+
+  # Non-interactive (CI, piped): advise and continue.
+  if [ ! -t 0 ]; then
+    echo "      To scope it later: acq github-scope $sandbox $ws" >&2
+    return 0
+  fi
+
+  local ans=""
+  printf 'acq: scope a GitHub token for this sandbox now? [y/N] ' >&2
+  read -r ans 2>/dev/null || ans=""
+  case "$ans" in
+    y|Y|yes|YES) github_scope_sandbox "$sandbox" "$ws" ;;
+    *) echo "acq: continuing without scoping (run 'acq github-scope $sandbox $ws' anytime)." >&2 ;;
+  esac
+  return 0
+}
+
 # Pre-flight: validate the workspace path BEFORE provisioning. Fails fast on a
 # file or a missing path (with an actionable mkdir hint) rather than passing a
 # bad path to `sbx create` and surfacing an opaque backend error. Never creates
@@ -517,6 +738,30 @@ preflight_workspace_path() {
 
 # Validate the sandbox's USAi key and walk the user through rotating it if
 # needed. Best-effort: warn and continue if we cannot run the check.
+# advise_valid_key NAME — non-blocking USAi key advisory for `acq create`.
+# Unlike ensure_valid_key (which gates attach and offers interactive rotation),
+# this only WARNS if the key isn't valid, then returns 0 regardless. `create`
+# is detached and never attaches, so there is nothing to gate; the point is to
+# give a create-only user a heads-up that their key is stale before they later
+# `acq run`. Silent on a healthy key or an inconclusive check (empty status).
+advise_valid_key() {
+  local name="$1"
+  local status
+  status=$(check_key "$name")
+
+  # 200 = healthy; empty = could not validate (network/tooling) — stay quiet in
+  # both cases to avoid noise. Only speak up on a definitive non-200.
+  [ "$status" = "200" ] && return 0
+  [ -z "$status" ] && return 0
+
+  echo "acq: note — your USAi API key looks invalid or expired (HTTP $status)." >&2
+  echo "      USAi keys expire every 7 days. This sandbox was created, but the" >&2
+  echo "      key must be valid before an agent can use it." >&2
+  echo "      To rotate: acq usai-rotate-api-key   (or re-run via 'acq run', which" >&2
+  echo "      validates and offers to rotate before attaching)." >&2
+  return 0
+}
+
 ensure_valid_key() {
   local name="$1"
   shift
