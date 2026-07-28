@@ -1142,6 +1142,19 @@ _acq_msb_ensure_agent_user() {
     su agent -s /bin/sh -c "test -w /home/agent" 2>/dev/null \
       || { echo "acq(msb): /home/agent is not writable by the agent user" >&2; exit 1; }
 
+    # Set SHELL=/bin/sh in the agent profile. The passwd shell is /bin/sh, but
+    # SHELL is not populated by `msb exec`/`su -c`, and msb interactive-exec
+    # ignores the passwd shell entirely (it drops to the base image default, a
+    # Node REPL on node:22-bookworm). acq always execs an explicit shell/agent, so
+    # this is cosmetic (tools that read SHELL) but correct and cheap. Idempotent.
+    # NOTE: this whole block is a single-quoted `sh -c` string — do NOT use single
+    # quotes here (they would close the outer quote). `echo` avoids both quotes
+    # and printf %-escaping.
+    if ! grep -qs "^export SHELL=" /home/agent/.profile 2>/dev/null; then
+      echo export SHELL=/bin/sh >> /home/agent/.profile
+      chown "agent:${_agrp}" /home/agent/.profile
+    fi
+
     # Passwordless sudo for agent (base-image requirement). Only if sudo exists;
     # a base without sudo still works for our purposes (kit/agent commands that
     # need root are run by acq as -u 0 directly), so a missing sudo is non-fatal.
@@ -1213,77 +1226,76 @@ acq_backend_run() {
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_attach — interactive attach (TTY) via SSH
+# acq_backend_attach — interactive attach (TTY) via `msb exec -t`
 # ---------------------------------------------------------------------------
 # sbx's `sbx run --name NAME` re-launches the agent baked into the sandbox at
-# create. msb's `msb ssh NAME` only opens a shell (as root, msb's default SSH
-# user), so acq must reproduce sbx's behavior itself: drop to the `agent` user,
-# cd into the workspace, and exec the recorded agent (opencode, …). A bare `acq
-# run <sandbox>` re-attach (no agent token) reads the agent recorded at provision
-# from /var/lib/acq/agent; `shell` (or a missing/failed agent) falls back to an
-# interactive shell as `agent` — never a root shell.
+# create. On msb we reproduce that with `msb exec`, which (unlike `msb ssh`)
+# gives us everything we need in one non-interactive-safe primitive:
+#   -t/--tty     allocate a PTY so a full-screen agent TUI (opencode) renders
+#                (msb ssh has NO tty flag and runs -- CMD without a PTY, which
+#                hung the TUI; a bare `msb ssh` tries to grab the CLIENT tty and
+#                fails on piped stdin);
+#   -u agent     run as the unprivileged agent user directly (no `su -` dance,
+#                no landing as root);
+#   -w WS        start in the workspace;
+#   -e SHELL     give the session a sane $SHELL (msb's interactive default is the
+#                base image's Node REPL, and the passwd shell isn't exported).
 #
-# Post-`--` args are forwarded to the agent (e.g. `-- --task "run tests"`).
+# A bare `acq run <sandbox>` re-attach (no agent token) reads the agent recorded
+# at provision from /var/lib/acq/agent; `shell` (or a missing/failed agent binary)
+# falls back to an interactive `/bin/sh -l` as `agent` — never a root shell, never
+# msb's Node-REPL default. Post-`--` args are forwarded to the agent.
 acq_backend_attach() {
   local name="$1"
   shift
 
   # Explicit `-- CMD…` after the sandbox name: run exactly that (advanced/escape
-  # hatch), still as the agent user in the workspace.
+  # hatch), still as the agent user in the workspace with a PTY.
   if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
     shift
-    _acq_msb_ssh_agent "$name" "$@"
+    _acq_msb_attach "$name" "$@"
     return $?
   fi
-  _acq_msb_ssh_agent "$name"
+  _acq_msb_attach "$name"
 }
 
-# _acq_msb_ssh_agent NAME [AGENT_ARGS...] — SSH in as `agent`, cd to the
+# _acq_msb_attach NAME [AGENT_ARGS...] — attach as `agent` with a PTY, cd to the
 # workspace, and launch the recorded agent (or a shell). AGENT_ARGS are appended
-# to the agent invocation. Uses a login shell so PATH picks up the globally
-# installed agent binary.
-_acq_msb_ssh_agent() {
+# to the agent invocation.
+_acq_msb_attach() {
   local name="$1"
   shift
 
-  # Determine the workspace to cd into. Prefer an explicit ACQ_MSB_WORKSPACE
-  # override; otherwise read the guest path recorded at provision (which now
-  # mirrors the host mount path, so it can't be recomputed from NAME alone).
-  # Fall back to the agent home only if nothing was recorded (older sandbox).
+  # Determine the workspace to cd into (-w). Prefer an explicit ACQ_MSB_WORKSPACE
+  # override; otherwise read the guest path recorded at provision (it mirrors the
+  # host mount path, so it can't be recomputed from NAME alone). Fall back to the
+  # agent home if nothing was recorded (older sandbox).
   local ws="${ACQ_MSB_WORKSPACE:-}"
   if [ -z "$ws" ]; then
-    ws=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' 2>/dev/null | tr -d '\r\n')
+    ws=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null | tr -d '\r\n')
   fi
   [ -n "$ws" ] || ws="/home/agent"
 
-  # Read the agent recorded at provision. Default to `shell` if unset (older
-  # sandbox, or a `shell` sandbox).
+  # Read the agent recorded at provision. Default to `shell` if unset.
   local agent
-  agent=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' 2>/dev/null | tr -d '\r\n[:space:]')
+  agent=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null | tr -d '\r\n[:space:]')
   [ -n "$agent" ] || agent="shell"
 
-  # Build the remote command run as the agent user. cd to the workspace if it
-  # exists; then exec the agent (or an interactive shell). If the agent binary is
-  # somehow absent, fall back to a shell rather than failing the attach — but say
-  # so, so the user isn't staring at a bare prompt wondering why.
-  local remote
+  # Common flags for the interactive attach: PTY, agent user, workspace cwd, and
+  # a sane $SHELL (msb's default interactive shell is the base image's Node REPL).
+  # exec so acq hands the terminal straight to msb (no wrapper between TTY & PTY).
   if [ "$agent" = "shell" ]; then
-    remote="cd '$ws' 2>/dev/null; exec \$SHELL -l"
-  else
-    # AGENT_ARGS (already shell-safe from the user's own invocation) are joined
-    # with single-quote escaping so they survive the remote sh -c.
-    local extra=""
-    local a
-    for a in "$@"; do
-      extra="$extra '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
-    done
-    remote="cd '$ws' 2>/dev/null; if command -v '$agent' >/dev/null 2>&1; then exec '$agent'$extra; else echo \"acq(msb): '$agent' not found in sandbox; opening a shell instead.\" >&2; exec \$SHELL -l; fi"
+    exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh "$name" -- /bin/sh -l
   fi
 
-  # `msb ssh NAME -- CMD` runs CMD (msb's default SSH user is root); we drop to
-  # the agent user via `su` so the agent runs unprivileged in its own HOME, the
-  # same posture as sbx. `su - agent` gives a login environment (PATH/HOME).
-  msb ssh "$name" -- su - agent -c "$remote"
+  # Pre-check the agent binary AS the agent user; fall back to a shell (with a
+  # notice) rather than launching into a broken/blank session if it's missing.
+  if ! msb exec -u agent "$name" -- sh -c "command -v '$agent'" </dev/null >/dev/null 2>&1; then
+    echo "acq(msb): '$agent' not found in sandbox '$name'; opening a shell instead." >&2
+    exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh "$name" -- /bin/sh -l
+  fi
+
+  exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh "$name" -- "$agent" "$@"
 }
 
 # ---------------------------------------------------------------------------

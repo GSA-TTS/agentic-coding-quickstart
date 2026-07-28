@@ -1152,38 +1152,60 @@ assert_not_contains "msb: shell agent does not npm install" "$shell_log" "npm in
 assert_not_contains "msb: shell agent adds no npm net-rule" "$shell_log" "allow@registry.npmjs.org"
 cleanup_stubs
 
-# 8n5. Attach LAUNCHES the recorded agent as the `agent` user in the workspace —
-#      NOT a bare root shell (the reported bug). `msb ssh NAME` alone drops you in
-#      as root; acq must `su - agent` + exec the recorded agent.
+# 8n5. Attach LAUNCHES the recorded agent as the `agent` user in the workspace,
+#      with a PTY — NOT a bare root shell (the reported bug) and NOT msb's Node
+#      REPL default. Uses `msb exec -t -u agent -w <ws>` (not `msb ssh`, which has
+#      no tty flag and hung the TUI).
 make_stubs; load_acq
 : > "$CALLS"
 (
   export STUB_RECORDED_AGENT="opencode"
   export STUB_RECORDED_WORKSPACE="/tmp/myrepo"
+  export STUB_AGENT_PRESENT=1     # opencode binary present -> attach execs it
   . "${REPO_ROOT}/acq.backends/msb.sh"
   acq_backend_attach attachbox >/dev/null 2>&1
 )
 attach_log=$(cat "$CALLS")
-assert_contains "msb: attach uses msb ssh" "$attach_log" "msb ssh attachbox"
-assert_contains "msb: attach drops to the agent user (su - agent)" "$attach_log" "su - agent"
-assert_contains "msb: attach execs the recorded agent" "$attach_log" "exec 'opencode'"
-assert_contains "msb: attach cds into the recorded workspace" "$attach_log" "cd '/tmp/myrepo'"
-assert_not_contains "msb: attach is NOT a bare root ssh" "$attach_log" "msb ssh attachbox
-"
+assert_contains "msb: attach allocates a PTY (msb exec -t)" "$attach_log" "msb exec -t -u agent"
+assert_contains "msb: attach runs as the agent user" "$attach_log" "-u agent -w /tmp/myrepo"
+assert_contains "msb: attach sets a sane SHELL" "$attach_log" "-e SHELL=/bin/sh"
+assert_contains "msb: attach execs the recorded agent in the workspace" "$attach_log" "attachbox -- opencode"
+assert_not_contains "msb: attach does NOT use msb ssh (no PTY / TUI hang)" "$attach_log" "msb ssh"
+assert_not_contains "msb: attach does NOT su - agent (msb exec -u handles it)" "$attach_log" "su - agent"
 cleanup_stubs
 
-# 8n6. Attach on a `shell` sandbox (or an unrecorded agent) opens a shell as the
-#      agent user — still never a root shell.
+# 8n5b. Attach FALLS BACK to a shell (with notice) when the recorded agent binary
+#       is missing — never leaves the user in a broken/blank session.
+make_stubs; load_acq
+: > "$CALLS"
+missing_out=$(
+  export STUB_RECORDED_AGENT="opencode"
+  export STUB_RECORDED_WORKSPACE="/tmp/myrepo"
+  export STUB_AGENT_PRESENT=0     # opencode absent -> fall back to /bin/sh -l
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_attach attachbox 2>&1
+)
+missing_log=$(cat "$CALLS")
+assert_contains "msb: attach falls back to shell when agent binary missing" "$missing_log" "attachbox -- /bin/sh -l"
+assert_contains "msb: attach warns when agent binary missing" "$missing_out" "not found in sandbox"
+cleanup_stubs
+
+# 8n6. Attach on a `shell` sandbox (or an unrecorded agent) opens a login shell
+#      as the agent user with a PTY — never a root shell, never msb's Node REPL
+#      (so it must pass an explicit `/bin/sh -l`, not omit the command).
 make_stubs; load_acq
 : > "$CALLS"
 (
   export STUB_RECORDED_AGENT="shell"
+  export STUB_RECORDED_WORKSPACE="/tmp/wsp"
   . "${REPO_ROOT}/acq.backends/msb.sh"
   acq_backend_attach shellattach >/dev/null 2>&1
 )
 shellattach_log=$(cat "$CALLS")
-assert_contains "msb: shell attach drops to agent user" "$shellattach_log" "su - agent"
-assert_not_contains "msb: shell attach does not exec a named agent" "$shellattach_log" "exec 'shell'"
+assert_contains "msb: shell attach uses msb exec -t as agent" "$shellattach_log" "msb exec -t -u agent -w /tmp/wsp"
+assert_contains "msb: shell attach execs an explicit /bin/sh -l" "$shellattach_log" "shellattach -- /bin/sh -l"
+assert_not_contains "msb: shell attach does not exec a named agent" "$shellattach_log" "shellattach -- shell"
+assert_not_contains "msb: shell attach does NOT use msb ssh" "$shellattach_log" "msb ssh"
 cleanup_stubs
 
 # 8o. Regression: msb applies ALL kit files and ALL kit commands, not just the
