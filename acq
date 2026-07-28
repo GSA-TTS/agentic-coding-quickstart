@@ -88,6 +88,8 @@ Subcommands:
   secret set [-g|SANDBOX] SERVICE [...]    Store a secret (--host/--env for a
                                            custom endpoint).
   secret rm  [-g|SANDBOX] SERVICE          Remove a secret acq manages.
+  github-scope SANDBOX [PATH]              Scope a GitHub token to the
+                                           workspace's repos (least-privilege PAT).
   usai-rotate-api-key                      Rotate the USAi API key.
   version                                  Show acq version + backend info.
   doctor                                   Backend health check + write config.
@@ -375,10 +377,23 @@ case "$subcommand" in
     shift
     acq_backend_prepare
     # Pre-flight: validate the workspace path before provisioning (#issue).
-    preflight_workspace_path "$(workspace_path "$@")" || exit 1
+    ws=$(workspace_path "$@")
+    preflight_workspace_path "$ws" || exit 1
     local_name=$(derive_name "$@") || exit 1
     [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
     acq_backend_provision "$local_name" "$@"
+
+    # Non-blocking USAi key advisory. `create` is detached and never attaches,
+    # so unlike `run` we don't gate on the key or offer interactive rotation —
+    # just warn if it's already invalid so a create-only user knows before they
+    # later `acq run`.
+    advise_valid_key "$local_name"
+
+    # Nudge toward a per-sandbox scoped GitHub token, same as `run`. `create`
+    # is detached (no attached agent), but the advisory is informational plus
+    # an optional interactive prompt, so it applies equally here.
+    [ -n "$ws" ] || ws="$PWD"
+    advise_github_scope "$local_name" "$ws"
     ;;
 
   run)
@@ -429,6 +444,7 @@ case "$subcommand" in
 
       [ -n "$ws" ] || ws="$PWD"
       warn_if_no_git_identity "$ws"
+      advise_github_scope "$local_name" "$ws"
 
       if [ "${#agent_args[@]}" -gt 0 ]; then
         acq_backend_attach "$local_name" -- "${agent_args[@]}"
@@ -560,6 +576,17 @@ SECRETUSAGE
         command "${ACQ_RESOLVED_BACKEND}" secret "$@"
         ;;
     esac
+    ;;
+
+  github-scope)
+    # Guide the user through minting a fine-grained PAT scoped to the workspace's
+    # repos and store it sandbox-scoped (ADR-0013).
+    shift
+    acq_backend_prepare
+    gs_sandbox="${1:-}"
+    [ -n "$gs_sandbox" ] || { echo "acq: github-scope: missing sandbox name" >&2; echo "     usage: acq github-scope SANDBOX [WORKSPACE_PATH]" >&2; exit 1; }
+    gs_ws="${2:-$PWD}"
+    github_scope_sandbox "$gs_sandbox" "$gs_ws"
     ;;
 
   "")

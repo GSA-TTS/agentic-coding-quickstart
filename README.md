@@ -199,6 +199,15 @@ sbx policy allow network "api.gsa.usai.gov"
 sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
 
 # 4. Store GitHub token (for code access)
+#
+# RECOMMENDED — scope a token per-sandbox to just the repos you mount. On
+# `acq run`, if a sandbox has no repo-scoped token, acq detects the repos in
+# your workspace and walks you through creating a fine-grained token limited to
+# them. You can also do it explicitly:
+#   acq github-scope <sandbox-name> /path/to/your/project
+#
+# DEPRECATED (broad) — a single GLOBAL token grants EVERY sandbox access to ALL
+# your repositories. Kept for back-compat; prefer per-sandbox scoping above.
 # If you are using the GitHub CLI
 brew install gh # (if not already installed)
 gh auth login # (if not already authenticated to Github cli)
@@ -207,6 +216,16 @@ gh auth token | sbx secret set -g github --force
 # If you are using a personal access token (classic); you will be prompted
 sbx secret set -g github
 ```
+
+> [!WARNING]
+> `gh auth token` and classic PATs carry **account-wide** scopes (`repo`,
+> `workflow`, `delete_repo`, …). Stored globally (`-g`), that broad authority is
+> injected into **every** sandbox — an agent working on one project can act as
+> you on **all** your repositories. Prefer a per-sandbox fine-grained token
+> scoped to the mounted repos (see `acq github-scope` above and
+> [ADR-0013](docs/adr/0013-per-sandbox-github-token-downscoping.md)).
+> Fine-grained tokens can't contribute to public repos you're not a member of or
+> call the Checks API — fall back to the global token for those cases.
 
 **Check it worked:** run `sbx policy ls` — you should see `api.gsa.usai.gov`
 in the list of allowed network destinations.

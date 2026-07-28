@@ -309,6 +309,35 @@ assert_contains "dispatch: create includes usai kit" "$log" "acq-kits/usai-provi
 rm -rf "$_projdir"
 cleanup_stubs
 
+# `acq create` must also run the github-scope advisory (same as `run`). Use a
+# workspace that has a GitHub remote so advise_github_scope has something to say,
+# and force the file secret store so no real global/scoped secret is consulted.
+# Non-TTY here (stdout captured), so it advises + returns without prompting.
+make_stubs
+_ghproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-ghcreate.XXXXXX")
+( cd "$_ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
+out=$(ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$_ghproj/.secrets" \
+  "$ACQ" create opencode "$_ghproj" 2>&1)
+assert_contains "dispatch: create runs github-scope advisory" "$out" "no repo-scoped GitHub token"
+rm -rf "$_ghproj"
+cleanup_stubs
+
+# `acq create` runs a NON-BLOCKING USAi key advisory: it warns on a definitively
+# invalid key but never aborts (create is detached). Drive the stub's key status
+# via STUB_KEY_STATUS. Use a bare temp workspace (no git remote) so the github
+# advisory stays quiet and doesn't confuse the assertion.
+make_stubs
+_keyproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-keycreate.XXXXXX")
+# Bad key -> advisory fires, but create still succeeds (exit 0).
+out=$(STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" create opencode "$_keyproj" 2>&1); rc=$?
+assert_contains "dispatch: create warns on invalid USAi key" "$out" "invalid or expired (HTTP 401)"
+assert_eq       "dispatch: create does not abort on invalid key" "0" "$rc"
+# Healthy key -> no advisory.
+out=$(STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" create opencode "$_keyproj" 2>&1)
+assert_not_contains "dispatch: create silent on valid USAi key" "$out" "invalid or expired"
+rm -rf "$_keyproj"
+cleanup_stubs
+
 # Verify `acq stop mybox` calls sbx stop.
 make_stubs
 out=$(ACQ_BACKEND=sbx "$ACQ" stop mybox 2>/dev/null)
@@ -487,11 +516,11 @@ assert_contains "secret: existing github -> rm hint" "$out" "sbx secret rm -g gi
 assert_not_contains "secret: existing github -> no set call" "$log" "sbx secret set -g github"
 cleanup_stubs
 
-# 5d1. Scope-awareness regression: github existing under a DIFFERENT scope must
-#      NOT block seeding the target scope. Previously a blind substring match
-#      over the whole `sbx secret ls` produced a false "already exists" whenever
-#      any other sandbox had github (the verify-backends sbx seed skip). The
-#      fixture has github under `otherbox` only; setting `-g github` (global
+# 5d1. Scope-awareness regression (issue #229): github existing under a DIFFERENT
+#      scope must NOT block seeding the target scope. Previously a blind substring
+#      match over the whole `sbx secret ls` produced a false "already exists"
+#      whenever any other sandbox had github (the verify-backends sbx seed skip).
+#      The fixture has github under `otherbox` only; setting `-g github` (global
 #      scope) must PROCEED to the feed call.
 make_stubs
 printf 'SCOPE      TYPE      NAME     SECRET\notherbox   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
@@ -504,7 +533,8 @@ assert_not_contains "secret: github under other scope -> no false rm hint" "$out
 cleanup_stubs
 
 # 5d2. Same, sandbox-scoped: setting `mybox github` when github exists only under
-#      `otherbox` must proceed (this is exactly the verify-backends seed case).
+#      `otherbox` must proceed (this is exactly the verify-backends seed case,
+#      and issue #229: a token scoped to sandbox A must not block sandbox B).
 make_stubs
 printf 'SCOPE      TYPE      NAME     SECRET\notherbox   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
 export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
@@ -512,6 +542,18 @@ out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set mybox github 2>&1 || 
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
 assert_contains "secret: sandbox github not blocked by other scope (feeds sbx)" "$log" "sbx secret set mybox github"
+cleanup_stubs
+
+# 5d2b. Positive case (issue #229): the SAME sandbox already having github IS a
+#       real collision -> stop with a sandbox-scoped rm hint, no set call.
+make_stubs
+printf 'SCOPE                     TYPE      NAME     SECRET\nopencode-agentic-coding   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
+export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set opencode-agentic-coding github 2>&1 || true)
+unset SBX_LS_FIXTURE
+log=$(cat "$CALLS")
+assert_contains "secret: same-sandbox github -> scoped rm hint" "$out" "sbx secret rm opencode-agentic-coding github"
+assert_not_contains "secret: same-sandbox github -> no set call" "$log" "sbx secret set opencode-agentic-coding github"
 cleanup_stubs
 
 # 5d3. Section-awareness: a BUILT-IN service (github) must be matched in the
@@ -2082,6 +2124,73 @@ assert_eq "identity (d): non-dir is silent" "" "$(_id "$wt/does-not-exist")"
 
 rm -rf "$wt"
 unset -f _id _pf _pfo
+
+# ===========================================================================
+# 13. GitHub token down-scoping helpers (ADR-0013)
+# ===========================================================================
+# Pure string / filesystem logic — no backend, no network. Covers remote-URL
+# parsing, pre-filled PAT URL construction, workspace repo detection, and the
+# advisory gate (fires iff repos present AND no sandbox-scoped github secret,
+# regardless of a global one).
+
+gwt=$(mktemp -d "${TMPDIR:-/tmp}/acq-gh.XXXXXX")
+(
+  mkdir -p "$gwt/repoGH" "$gwt/wsMulti/a" "$gwt/wsMulti/b" "$gwt/wsGL" "$gwt/empty"
+  ( cd "$gwt/repoGH" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
+  ( cd "$gwt/wsMulti/a" && git init -q && git remote add origin git@github.com:orgOne/repo1.git )
+  ( cd "$gwt/wsMulti/b" && git init -q && git remote add origin https://github.com/orgTwo/repo2 )
+  ( cd "$gwt/wsGL" && git init -q && git remote add origin https://gitlab.com/x/y.git )
+)
+
+# _acq_parse_github_nwo
+_pnwo() { ( export ACQ_SCRIPT_DIR="$REPO_ROOT"; . "${REPO_ROOT}/acq.backends/common.sh"; _acq_parse_github_nwo "$1" ); }
+assert_eq   "gh-parse: https + .git"      "GSA-TTS/quickstart" "$(_pnwo 'https://github.com/GSA-TTS/quickstart.git')"
+assert_eq   "gh-parse: scp-style ssh"     "owner/repo"         "$(_pnwo 'git@github.com:owner/repo.git')"
+assert_eq   "gh-parse: ssh:// url"        "o/r"                "$(_pnwo 'ssh://git@github.com/o/r')"
+assert_eq   "gh-parse: deep path trimmed" "o/r"                "$(_pnwo 'https://github.com/o/r/tree/main')"
+assert_eq   "gh-parse: non-github empty"  ""                   "$(_pnwo 'https://gitlab.com/x/y.git')"
+
+# _acq_github_pat_url
+_purl() { ( export ACQ_SCRIPT_DIR="$REPO_ROOT"; . "${REPO_ROOT}/acq.backends/common.sh"; _acq_github_pat_url "$1" "$2" ); }
+assert_contains "gh-url: targets the owner"       "$(_purl 'GSA-TTS' 'opencode-proj')" "target_name=GSA-TTS"
+assert_contains "gh-url: names token after sandbox" "$(_purl 'GSA-TTS' 'opencode-proj')" "name=acq-opencode-proj"
+assert_contains "gh-url: default contents=write"  "$(_purl 'o' 's')" "contents=write"
+assert_contains "gh-url: default pull_requests=write" "$(_purl 'o' 's')" "pull_requests=write"
+assert_contains "gh-url: default issues=write"     "$(_purl 'o' 's')" "issues=write"
+
+# detect_workspace_repos
+_dwr() { ( export ACQ_SCRIPT_DIR="$REPO_ROOT"; . "${REPO_ROOT}/acq.backends/common.sh"; detect_workspace_repos "$1" ); }
+assert_eq       "gh-detect: single repo"          "GSA-TTS/quickstart" "$(_dwr "$gwt/repoGH" | tr -d '\n')"
+assert_contains "gh-detect: multi finds orgOne"   "$(_dwr "$gwt/wsMulti")" "orgOne/repo1"
+assert_contains "gh-detect: multi finds orgTwo"   "$(_dwr "$gwt/wsMulti")" "orgTwo/repo2"
+assert_eq       "gh-detect: non-github repo empty" ""  "$(_dwr "$gwt/wsGL" | tr -d '\n')"
+assert_eq       "gh-detect: empty dir empty"      ""  "$(_dwr "$gwt/empty" | tr -d '\n')"
+
+# advise_github_scope gate — force file secret store into a temp dir so we can
+# plant/remove sandbox-scoped and global github secrets deterministically. Each
+# call is given an EXPLICIT unique store dir by the caller (a shared counter
+# wouldn't survive the command-substitution subshell the asserts run in, and
+# $RANDOM can repeat across sequential subshells and leak a planted secret).
+_advise() {
+  # $1 = workspace, $2 = unique tag, $3 = "global"?, $4 = "scoped"?
+  ( export ACQ_SCRIPT_DIR="$REPO_ROOT"
+    unset ACQ_SECRET_STORE_DIR
+    export ACQ_SECRET_FORCE_FILE=1
+    export ACQ_SECRET_FILE_DIR="$gwt/secrets.$2"
+    . "${REPO_ROOT}/acq.backends/common.sh"
+    [ "${3:-}" = "global" ] && printf 'gho_x\n' | acq_secret_store "$(_acq_secret_key github)" >/dev/null 2>&1
+    [ "${4:-}" = "scoped" ] && printf 'ghp_x\n' | acq_secret_store "$(_acq_secret_key github sb1)" >/dev/null 2>&1
+    # non-TTY (stdin not a tty here) so it advises + returns without prompting
+    advise_github_scope sb1 "$1" 2>&1 )
+}
+assert_contains "gh-advise: fires when repos + no scoped (no global)" "$(_advise "$gwt/repoGH" t1)" "no repo-scoped GitHub token"
+assert_contains "gh-advise: warns broad when global present"          "$(_advise "$gwt/repoGH" t2 global)" "grants this sandbox access to ALL"
+assert_contains "gh-advise: no-global path says none set"             "$(_advise "$gwt/repoGH" t3)" "No GitHub token is set for this sandbox"
+assert_eq       "gh-advise: silent when already scoped"               ""  "$(_advise "$gwt/repoGH" t4 global scoped)"
+assert_eq       "gh-advise: silent when no github repos"              ""  "$(_advise "$gwt/wsGL" t5)"
+
+rm -rf "$gwt"
+unset -f _pnwo _purl _dwr _advise
 
 # ===========================================================================
 echo ""
