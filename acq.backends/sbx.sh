@@ -747,39 +747,176 @@ acq_backend_secret_set() {
 }
 
 # ---------------------------------------------------------------------------
+# acq_backend_secret_rm [-g | SANDBOX] SERVICE  (sbx backend)
+# ---------------------------------------------------------------------------
+# Remove a secret acq owns: delete it from the acq store AND clear sbx's proxy
+# entry, so no injected value lingers. Idempotent (absent secret is success).
+# Scope parsing mirrors acq_backend_secret_set: -g/--global, or a leading bare
+# sandbox name before the service. This is the counterpart to `acq secret set`;
+# for a raw sbx placeholder removal the user can still call `sbx secret rm`
+# directly (that path is passed through by the acq dispatcher).
+acq_backend_secret_rm() {
+  local service="${1:-}"
+  shift || true
+
+  local scope_flag="" scope_name=""
+  case "$service" in
+    -g|--global)
+      scope_flag="-g"; service="${1:-}"; shift || true ;;
+    -*)
+      ;;
+    *)
+      local _next="${1:-}"
+      case "$_next" in
+        ""|-*) ;;
+        *) scope_name="$service"; service="$_next"; shift || true ;;
+      esac
+      ;;
+  esac
+
+  if [ -z "$service" ]; then
+    echo "acq: secret rm: missing service name" >&2
+    echo "     usage: acq secret rm [-g | SANDBOX] <service>" >&2
+    return 1
+  fi
+  if [ -z "$scope_flag" ] && [ -z "$scope_name" ]; then
+    echo "acq: secret rm: scope required — use -g for global or provide a sandbox name" >&2
+    echo "     usage: acq secret rm [-g | SANDBOX] <service>" >&2
+    return 1
+  fi
+
+  local acq_sandbox=""
+  [ -n "$scope_name" ] && acq_sandbox="$scope_name"
+
+  # 1) Remove from the acq store (source of truth). Idempotent.
+  local removed_store=0
+  if command -v acq_secret_delete >/dev/null 2>&1; then
+    local key
+    key=$(_acq_secret_key "$service" "$acq_sandbox")
+    acq_secret_delete "$key" && removed_store=1
+  fi
+
+  # 2) Clear sbx's proxy entry so it stops injecting. Built-in services are
+  #    removed by service name; custom services (usai, ...) by their placeholder.
+  #    ALWAYS pass -f: `sbx secret rm` otherwise prompts "Remove? (y/N)" on a TTY
+  #    and BLOCKS waiting for input (observed hanging verify-backends). acq's rm
+  #    is non-interactive by contract. Also </dev/null as belt-and-suspenders so
+  #    no sbx prompt can ever consume our stdin. Best-effort — a missing sbx
+  #    entry is not an error.
+  local is_builtin=0
+  case "$_ACQ_SBX_BUILTIN_SERVICES" in
+    *" $service "*) is_builtin=1 ;;
+  esac
+  local scope_arg
+  if [ -n "$scope_flag" ]; then scope_arg="-g"; else scope_arg="$scope_name"; fi
+
+  if [ "$is_builtin" -eq 1 ]; then
+    sbx secret rm "$scope_arg" "$service" -f </dev/null >/dev/null 2>&1 || true
+  else
+    # Custom endpoint (usai, ...): sbx removes a custom secret by its PLACEHOLDER
+    # (there is no --host on `secret rm`). Look up the placeholder from the custom
+    # secrets table for this scope + env var, then remove it by --placeholder.
+    local env_var placeholder
+    env_var=$(_acq_service_hosts_env "$service" | cut -f2)
+    placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" "$env_var")
+    if [ -n "$placeholder" ]; then
+      sbx secret rm "$scope_arg" --placeholder "$placeholder" -f </dev/null >/dev/null 2>&1 || true
+    fi
+  fi
+
+  local where="global"
+  [ -n "$scope_name" ] && where="sandbox '$scope_name'"
+  if [ "$removed_store" -eq 1 ]; then
+    echo "acq: removed '$service' secret (${where}) from the acq store and sbx proxy." >&2
+  else
+    echo "acq: no '$service' secret found in the acq store (${where}); cleared sbx proxy anyway." >&2
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # _acq_sbx_secret_exists SCOPE_FLAG SCOPE_NAME SERVICE ENV_VAR -> 0 if present
 # ---------------------------------------------------------------------------
-# Best-effort existence check against `sbx secret ls`. Built-in services show
-# their service name; custom secrets show the env var name. The match MUST be
-# constrained to the requested SCOPE — sbx secrets are scoped per-sandbox (plus
-# a global scope), so a `github` secret in sandbox A must NOT be reported as
-# "already exists" when we're setting `github` for sandbox B, or for the global
-# scope. `sbx secret ls` prints one row per secret with a leading SCOPE column
-# (the sandbox name, or `(global)` for global secrets). We match the row whose
-# scope equals the requested scope AND whose name/env column equals the needle.
-# Returns 0 (exists) only on a confident, scope-matched hit; on any listing
-# failure, returns 1 (treat as absent) so we don't block the user — sbx will
-# still error clearly if it does in fact exist.
+# Scope- AND section-AWARE existence check against `sbx secret ls`. The listing
+# has TWO tables:
+#
+#   SCOPE      TYPE     NAME    SECRET                 <- built-in services
+#   <scope>    service  github  (stored)
+#
+#   CUSTOM SECRETS
+#   SCOPE      TARGETS  ENV     PLACEHOLDER  SECRET    <- custom secrets
+#   <scope>    <host>   USAI_…  sbx-cs-…     ****
+#
+# A built-in service (github, ...) is identified by its NAME in the built-in
+# table; a custom service (usai, ...) by its ENV var in the CUSTOM table. We must
+# match in the CORRECT section, and only when the row's SCOPE column equals the
+# request scope — an earlier version blind-substring-matched the whole listing,
+# so github under ANY scope (or a stray token in either table) produced a false
+# positive that wrongly refused to seed the target scope.
+#
+# Args: SCOPE_FLAG (`-g` or empty), SCOPE_NAME (sandbox, or empty for global),
+#       SERVICE, ENV_VAR (empty for a built-in service).
+# Target scope string: `(global)` for -g, else the sandbox name.
+# Returns 0 only on a scoped, section-correct match; 1 otherwise / on ls failure.
 _acq_sbx_secret_exists() {
   local scope_flag="$1" scope_name="$2" service="$3" env_var="$4"
-  local listing needle want_scope
+  local listing want_scope
   listing=$(sbx secret ls 2>/dev/null) || return 1
-  if [ -n "$env_var" ]; then needle="$env_var"; else needle="$service"; fi
-
-  # The scope token as it appears in the SCOPE column: global secrets render as
-  # "(global)"; sandbox-scoped secrets render as the sandbox name.
   if [ -n "$scope_flag" ]; then want_scope="(global)"; else want_scope="$scope_name"; fi
 
-  # Scan each row: field 1 is the scope, and the needle (service or env var)
-  # must appear as a whole field on that same row. Header/blank/section lines
-  # (e.g. "SCOPE ...", "CUSTOM SECRETS") don't match a real scope+needle pair,
-  # so they're naturally skipped.
-  printf '%s\n' "$listing" | awk -v scope="$want_scope" -v needle="$needle" '
+  # want_section: "builtin" (match NAME) for a built-in service, else "custom"
+  # (match ENV). needle is the token to find in that section's row.
+  local want_section needle
+  if [ -n "$env_var" ]; then want_section="custom"; needle="$env_var"
+  else want_section="builtin"; needle="$service"; fi
+
+  printf '%s\n' "$listing" | awk \
+    -v scope="$want_scope" -v needle="$needle" -v want="$want_section" '
+    # Section tracking: everything before the "CUSTOM SECRETS" marker is the
+    # built-in table; everything after is the custom table.
+    /^CUSTOM SECRETS/ { section = "custom"; next }
+    NF == 0 { next }
+    # Skip each table header row (starts with the literal SCOPE column label).
+    $1 == "SCOPE" { next }
     {
-      if ($1 != scope) next
-      for (i = 2; i <= NF; i++) if ($i == needle) { found = 1; exit }
+      cur = (section == "custom") ? "custom" : "builtin"
+      if (cur == want && $1 == scope) {
+        # Built-in: NAME is field 3 (SCOPE TYPE NAME). Custom: ENV is field 3
+        # (SCOPE TARGETS ENV). Both live at $3 given single-token scope/target;
+        # also scan remaining fields defensively in case of extra spacing.
+        for (i = 2; i <= NF; i++) if ($i == needle) { found = 1; exit }
+      }
     }
     END { exit(found ? 0 : 1) }
+  '
+}
+
+# ---------------------------------------------------------------------------
+# _acq_sbx_custom_placeholder SCOPE_FLAG SCOPE_NAME ENV_VAR -> placeholder|empty
+# ---------------------------------------------------------------------------
+# Look up the PLACEHOLDER of a CUSTOM secret (from the CUSTOM SECRETS table of
+# `sbx secret ls`) for a given scope + env var, so `sbx secret rm --placeholder`
+# can target it. Echoes the placeholder (e.g. sbx-cs-…) or nothing if absent.
+_acq_sbx_custom_placeholder() {
+  local scope_flag="$1" scope_name="$2" env_var="$3"
+  [ -n "$env_var" ] || return 0
+  local listing want_scope
+  listing=$(sbx secret ls 2>/dev/null) || return 0
+  if [ -n "$scope_flag" ]; then want_scope="(global)"; else want_scope="$scope_name"; fi
+
+  # CUSTOM table columns: SCOPE TARGETS ENV PLACEHOLDER SECRET. Find the row in
+  # the custom section whose SCOPE == want_scope and ENV == env_var, print its
+  # PLACEHOLDER. We locate ENV by value (not fixed index) and take the NEXT field
+  # as the placeholder, robust to a multi-token TARGETS cell.
+  printf '%s\n' "$listing" | awk \
+    -v scope="$want_scope" -v env="$env_var" '
+    /^CUSTOM SECRETS/ { in_custom = 1; next }
+    !in_custom { next }
+    NF == 0 { next }
+    $1 == "SCOPE" { next }
+    $1 == scope {
+      for (i = 2; i < NF; i++) if ($i == env) { print $(i+1); exit }
+    }
   '
 }
 

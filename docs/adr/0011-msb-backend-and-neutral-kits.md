@@ -96,11 +96,16 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   with `--tls-intercept` (required for substitution), read from the acq secret
   store at provision into a transient env var (never argv, never the kit spec;
   the guest gets only a placeholder). `acq secret set` re-feeds running sandboxes
-  via `msb modify --secret`. The **GitHub token is deliberately NOT bound on
-  msb**: msb 0.6.6 does not substitute the placeholder for git's HTTPS clone to
-  github.com (verified; the header path for USAi works, git does not — see
-  microsandbox #756/#768/#1170), so the private playbook-clone kit is skipped on
-  msb (non-fatal, warns). Unlike sbx (whose
+  via `msb modify --secret`. The **GitHub token is bound to the REST API host
+  only** (`GITHUB_TOKEN@api.github.com`): msb substitutes the `Authorization:
+  Bearer` header on the wire to `api.github.com` (verified msb 0.6.7) but NOT
+  git's smart-HTTP transport to github.com/codeload (microsandbox
+  #756/#768/#1170). So kits authenticate to GitHub via the REST API, not `git
+  clone`: the playbook kit fetches a **source tarball** from
+  `api.github.com/repos/<repo>/tarball/<ref>` and now works on msb (this
+  supersedes the earlier decision to leave github unbound / skip the playbook
+  kit on msb; see quickstart#203). A single host is bound to avoid microsandbox
+  #1170 (multi-host binding). Unlike sbx (whose
   templates supply the image), msb runs a plain OCI image: the default is the
   public `node:22-bookworm` (built on buildpack-deps, so it already ships
   node/git/curl/ca-certificates — the four kits' prerequisites — and pulls
@@ -111,9 +116,10 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   user (HOME=/home/agent)** the kits assume (the sbx agent-template contract) —
   a plain base has no such user (node:22-bookworm has `node` at uid 1000) — and
   runs the kits' uid-1000 commands as `agent` (by name, with HOME set), chowning
-  staged `/home/agent` files to it. It **mounts the host workspace at a fixed
-  guest path** (`ACQ_MSB_WORKSPACE`, default `/home/agent/workspace`) because msb
-  won't create the host path and mishandles an identical host:guest `/tmp` mount.
+  staged `/home/agent` files to it. It **mounts each host workspace at the same
+  absolute path in the guest** (sbx-parity; see the workspace-mount note below) —
+  an earlier revision remapped to a fixed `/home/agent/workspace`, which failed
+  because `msb create` mounts before the `agent` user/home exist.
   It passes **`--dns-nameserver`** (default `1.1.1.1`) because msb hands the
   guest the host's resolvers, which for a corporate/VPN resolver are unreachable
   from the microVM (otherwise the guest can't resolve even allow-listed hosts).
@@ -172,6 +178,91 @@ at create/run time via `-p HOST:GUEST`; the flag gates the sbx-style post-hoc
   state-preserving in-place add (msb has no `sbx kit add` equivalent); it never
   silently destroys state.
 
+### Agent install + base-image contract + attach (fix for quickstart#228)
+
+The initial 1.2.0 msb adapter provisioned a sandbox with the four kits but
+**never installed or launched the requested agent** (`opencode`): `msb create`
+booted a plain `node:22-bookworm`, no step installed opencode, and
+`acq_backend_attach` ran a bare `msb ssh NAME` — dropping the user into a **root
+shell with no agent** (reported in
+[quickstart#228](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/228)).
+Both defects stem from the adapter ignoring the AGENT token that
+`acq_backend_provision`/`attach` receive. On sbx this "just works" because the
+agent **template supplies the binary and its launch wiring**; msb runs a plain
+base and must reproduce that itself. The fix makes the msb adapter satisfy the
+same contract sbx's templates provide, keyed off the
+[Docker base-image requirements](https://docs.docker.com/ai/sandboxes/customize/kit-reference/#base-image-requirements)
+for `docker/sandbox-templates:shell-docker`:
+
+- **Install the agent** (`_acq_msb_install_agent`). The AGENT token is read from
+  the first positional at provision. `opencode` → `npm install -g opencode-ai`
+  (node is already a verified prerequisite), with the npm registry host
+  (`registry.npmjs.org`) allow-listed at create so the default-deny egress
+  permits the download. Idempotent: skipped if the binary is already present
+  (a pre-baked `ACQ_MSB_IMAGE`) and marker-gated. `shell` is a no-op; an unknown,
+  absent agent warns (bake it into `ACQ_MSB_IMAGE`). Tunables:
+  `ACQ_MSB_OPENCODE_PKG`, `ACQ_MSB_NPM_HOSTS`.
+- **Satisfy the base-image contract** (`_acq_msb_ensure_agent_user`, extended).
+  In addition to the `agent`/`/home/agent` user it already created, it now adds
+  **passwordless sudo** (`/etc/sudoers.d/90-acq-agent`) and preserves the
+  **HTTP proxy env across sudo** (`env_keep` in `/etc/sudoers.d/91-acq-proxy-env`)
+  — the two remaining published requirements a plain base lacks. Idempotent +
+  marker-gated; a base without `sudo` is non-fatal (acq runs root steps as
+  `-u 0` directly).
+- **Launch the agent on attach** (`acq_backend_attach` → `_acq_msb_attach`).
+  Reproduces `sbx run --name`'s "re-launch the baked-in agent" behavior with
+  `msb exec -t -u agent -w <workspace> -e SHELL=/bin/sh NAME -- <agent>` — the one
+  msb primitive that allocates a PTY (so a full-screen agent TUI renders; `msb
+  ssh` has no tty flag), runs as the unprivileged `agent` user, and starts in the
+  workspace. The agent to run is recorded at provision (`/var/lib/acq/agent`) so
+  the name-only re-attach path (`acq run <sandbox>`) still launches it. Falls back
+  to an interactive `/bin/sh -l` **as the agent user** (never root, never msb's
+  Node-REPL default) for `shell` sandboxes or a missing binary.
+
+Egress note: this adds one create-time allow-list host (the npm registry) only
+when an installable agent is requested; it does not widen egress for `shell`.
+
+### Guest sizing (follow-up to quickstart#228)
+
+Installing and launching the agent (above) exposed a further defect on the same
+report: `opencode` **started and was immediately `Killed`**. msb defaults a
+sandbox to **512 MiB of RAM and 1 vCPU** and the microVM has **no swap**, so a
+Node.js TUI that exceeds guest RAM is OOM-killed by the guest kernel (surfacing
+only as `Killed`). sbx's agent templates are sized generously; a plain msb base
+inherits the small default. The adapter therefore passes **`--memory 4G --cpus 2`**
+at create, tunable via `ACQ_MSB_MEMORY` / `ACQ_MSB_CPUS` (empty = fall back to
+msb's own default). Values are validated before reaching the create line (memory
+to msb's `[0-9GMgm.]` SIZE grammar, cpus to a positive integer) so a stray value
+cannot smuggle another flag onto `msb create`.
+
+### Workspace mount at the host path (fix for PR #230)
+
+An earlier revision mounted the host workspace at a **fixed guest path**
+(`/home/agent/workspace`). That failed on a plain base image with
+`mount ...: Not a directory (os error 20)`: `msb create` performs the mount at
+**create time**, which is *before* the adapter can create the `agent` user and
+its `/home/agent` directory (that happens post-create, once the guest is
+exec-ready). Mounting into a not-yet-existent `/home/agent` therefore aborted
+the sandbox boot.
+
+The adapter now mounts **each workspace at its own absolute host path in the
+guest** (`--volume <host>:<host>[:ro]`), matching sbx's multi-workspace
+semantics (`docs/QUICKSTART_SBX.md`: "All workspaces appear inside the sandbox at
+their absolute host paths"). This sidesteps the create-time ordering problem and
+restores sbx parity. Multiple workspaces and a trailing `:ro` marker are
+supported (`workspace_paths` in `common.sh` enumerates them). The agent's
+starting directory is recorded at provision (`/var/lib/acq/workspace`) for the
+name-only re-attach path: it is the **primary (first) workspace**, matching sbx.
+`ACQ_MSB_WORKSPACE` overrides the start dir.
+
+A second, related failure: msb **cannot mount a symlinked host path**. It fails
+to start with the same `os error 20` even mapped to a shallow guest target
+(verified on msb 0.6.6). The common case is **macOS `$TMPDIR`**, a per-user
+`/var/folders/...` tree reached through the `/var` → `/private/var` symlink. The
+adapter therefore canonicalizes each workspace to its real, symlink-free path
+(`canonicalize_path` in `common.sh`) before mounting, and `scripts/verify-backends`
+no longer places its test workspace under `$TMPDIR`.
+
 ### msb CLI flag verification
 
 The msb flag/subcommand shapes used by the adapter were **verified against
@@ -214,12 +305,16 @@ allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
   ports. This is a broader/less-transparent posture than sbx's proxy injection;
   it is the microsandbox model and the price of the microVM boundary. Disable
   with `ACQ_MSB_NO_TLS_INTERCEPT` (secrets then won't substitute).
-- **Known limitation (tracked):** on msb the private `agentic-coding-playbook`
-  clone is skipped — msb 0.6.6 does not substitute the credential placeholder
-  for git's HTTPS smart-transport to github.com (upstream microsandbox
-  #756/#768/#1170). The kit is non-fatal; the sandbox is otherwise fully usable
-  (USAi, git-ssh-sign, zscaler all work). The sbx backend is unaffected. Tracked
-  in quickstart#203 for when upstream git substitution lands.
+- **Private GitHub content via the REST API (quickstart#203, resolved):** msb
+  does NOT substitute the credential placeholder for git's HTTPS smart-transport
+  to github.com/codeload (upstream microsandbox #756/#768/#1170), so a private
+  `git clone` cannot authenticate on msb. It DOES substitute the `Authorization:
+  Bearer` header for the REST API (`api.github.com`, verified msb 0.6.7). So kits
+  fetch private GitHub content via the REST API: the `agentic-coding-playbook`
+  kit binds `GITHUB_TOKEN@api.github.com` and fetches a **source tarball**
+  (verified against a pinned AGENTS.md sha256) instead of cloning. It now works
+  on msb. (This supersedes the earlier "clone skipped on msb" limitation. The
+  underlying git-transport gap remains upstream, but no kit depends on it.)
 
 ### `environment` vocabulary (guest env vars)
 
@@ -251,21 +346,23 @@ credential/secret path (sbx proxy, msb `--secret ENV@HOST`), never the kit spec.
 
 > **Cross-repo dependency (satisfied):** the authoritative `environment` schema
 > property + the field-level validator live in the **patterns** repo
-> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`, PR #227 + the review
-> follow-up #228). Both merged and shipped in patterns **v1.7.0**, and
-> `PATTERNS_KIT_REF` (`acq.backends/common.sh`) is pinned to the v1.7.0 release
-> commit `9c277c09ed4ad45fd11709d6b048a58adc785443` (schema with `environment`
-> verified present). The pin was held at v1.6.0 until v1.7.0 existed, per the
-> fail-closed cross-repo gating.
+> (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`, PR #227), and the
+> playbook kit's REST-tarball fetch (the quickstart#203 fix) landed in
+> patterns#269. Both are merged to patterns `main`, and `PATTERNS_KIT_REF`
+> (`acq.backends/common.sh`) is pinned to `3fcde8e` (the #269 merge commit on
+> `main`, which includes #227). The release gate is satisfied.
 
 ## Live verification (msb, on a KVM host)
 
-Confirmed working end-to-end on a sandbox-capable host during bring-up:
+Confirmed working end-to-end on a sandbox-capable host (msb 0.6.7) via
+`scripts/verify-backends` (15/15) and an interactive `acq run opencode`:
 `msb create` (with `--dns-nameserver`, `--tls-intercept`, `--trust-host-cas`,
-workspace mount at `/home/agent/workspace`, `agent` user creation), USAi key
-substitution (models API returns a real status over intercepted TLS),
-git-ssh-sign config, zscaler CA trust, and all kit files/commands applied. The
-one gap is the private playbook clone (above). Several msb behaviors were
+each workspace mounted at its **own absolute host path**, `agent` user created
+at a free uid with an agent-owned `/home/agent`), USAi key substitution (models
+API returns a real status over intercepted TLS), the playbook fetched via the
+REST tarball and linked, git-ssh-sign config, zscaler CA trust, and all kit
+files/commands applied. The agent is launched with `msb exec -t` (PTY) as the
+unprivileged `agent` user in the workspace. Several msb behaviors were
 discovered and worked around here (recorded so they aren't re-litigated):
 `msb create` returns 0 even on async start failure (→ exec-ready gate);
 identical host:guest `/tmp` mounts silently fail (→ fixed guest mount point);
@@ -277,18 +374,23 @@ secret substitution requires `--tls-intercept` and only covers the
 ## Validation
 
 - `bash -n acq acq.backends/*.sh scripts/test-acq scripts/verify-backends` clean.
-- `./scripts/test-acq` passes (135 checks, incl. msb + kit + translation +
-  untrusted-input-hardening cases).
+- `./scripts/test-acq` passes (incl. msb + kit + translation +
+  untrusted-input-hardening cases, and the quickstart#228 regression cases:
+  agent install, base-image contract — passwordless sudo + proxy `env_keep` —
+  and attach-launches-agent-as-agent-user).
 - Neutral→sbx-v2 synthesis for all four kits parses as valid YAML (verified with
   a YAML parser during development).
 - `npm run lint` (markdownlint, shellcheck, gitleaks, YAML/JSON) — run in CI.
 - **Deferred, requires a sandbox-capable host (no nested sandboxes):**
-  the full `acq run … --backend msb` create→exec→attach loop and the
-  `scripts/verify-backends` msb row cannot run inside an sbx/msb sandbox and need
-  host virtualization (`/dev/kvm` on Linux). The msb CLI flag shapes were
+  the full `acq run … --backend msb` create→install→exec→attach loop and the
+  `scripts/verify-backends` msb rows (now including the `opencode`-installed
+  assertion added for quickstart#228) cannot run inside an sbx/msb sandbox and
+  need host virtualization (`/dev/kvm` on Linux). The msb CLI flag shapes were
   verified against `msb 0.6.6`; the live loop is deferred and mirrors how
   ADR-0009/ADR-0010 defer live verification. Run `./scripts/verify-backends`
-  on a sandbox-capable host and attach the transcript.
+  on a sandbox-capable host and attach the transcript. **The quickstart#228 fix
+  (agent install + attach launch) is verified offline via the stubbed harness;
+  its live create→install→attach path still needs a KVM host run.**
 
 ## Release gate (satisfied)
 

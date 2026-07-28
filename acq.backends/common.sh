@@ -21,16 +21,18 @@
 # acq.backends/kit-translate.sh, which fetches a kit's neutral spec.yaml and
 # emits the active backend's native operations.
 #
-# PATTERNS_KIT_REF is pinned to the agentic-coding-patterns v1.7.0 release commit
-# on main. v1.7.0 adds the `environment` vocabulary to the hybrid/v1 schema
-# (patterns #227, consumed by kit-translate.sh's kit_spec_env), on top of the
-# Part A neutral acq-kits + schema (#221) and the openchamber conversion (#224).
-# Pinning to a release tag mirrors Phase 1 (which pinned patterns v1.5.0). The
-# acq-kits and the kit-hybrid-v1 schema (with `environment`) are present at this
-# commit (verified).
+# PATTERNS_KIT_REF is pinned to an agentic-coding-patterns commit on `main`.
+# It provides the neutral acq-kits + the hybrid/v1 schema with the `environment`
+# vocabulary (patterns #227, consumed by kit-translate.sh's kit_spec_env) and the
+# playbook kit's REST-tarball fetch (patterns #269, fixes quickstart#203 — private
+# playbook auth on msb via the GitHub REST API instead of git clone).
 # ============================================================================
 PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-PATTERNS_KIT_REF="9c277c09ed4ad45fd11709d6b048a58adc785443"   # patterns v1.7.0 (adds environment vocabulary / #227)
+# patterns main @ 3fcde8e — playbook REST-tarball fetch (#269, quickstart#203),
+# on top of the environment vocabulary (#227) and neutral acq-kits (#221/#224).
+# Full 40-char SHA (not an abbreviation): this ref drives a credential-bearing
+# cross-repo kit fetch, so pin it unambiguously for reproducibility.
+PATTERNS_KIT_REF="3fcde8ee396bf9841de47f6f7886db088164243d"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider"
@@ -85,10 +87,41 @@ fi
 
 # Debug trace. Set ACQ_DEBUG=1 to emit "acq[debug]: ..." diagnostics to stderr
 # (backend CLI invocations, kit fetch/translate steps). Off by default; safe to
-# leave in — it never prints secret VALUES, only command shapes.
+# leave in — it never prints secret VALUES, only command shapes. Each line is
+# timestamped (HH:MM:SS) so that when a step hangs, the LAST debug line shows
+# both which sub-call was entered and when — the gap to the wall clock is the
+# stall. (verify-backends -x relies on this to localize a hang.)
 acq_debug() {
   [ -n "${ACQ_DEBUG:-}" ] || return 0
-  printf 'acq[debug]: %s\n' "$*" >&2
+  printf 'acq[debug %s]: %s\n' "$(date +%H:%M:%S 2>/dev/null || printf '??:??:??')" "$*" >&2
+}
+
+# Services acq manages in its own secret store (and knows how to inject). Used to
+# decide whether `acq secret rm` should route to the acq-owned removal path vs.
+# pass a raw placeholder token through to the backend secret CLI.
+ACQ_MANAGED_SECRET_SERVICES=" usai github gitlab "
+
+# _acq_is_managed_secret_rm ARGS... -> 0 if the `acq secret rm` args name an
+# acq-managed secret (scope + known service), else 1 (pass through to backend).
+# Recognizes:  -g SERVICE  |  --global SERVICE  |  SANDBOX SERVICE
+_acq_is_managed_secret_rm() {
+  local a1="${1:-}" a2="${2:-}" svc=""
+  case "$a1" in
+    -g|--global) svc="$a2" ;;
+    -*)          return 1 ;;              # some other flag/placeholder
+    *)
+      # SANDBOX SERVICE form only (two positionals); a lone token is a raw
+      # placeholder for the backend to handle.
+      [ -n "$a2" ] || return 1
+      case "$a2" in -*) return 1 ;; esac
+      svc="$a2"
+      ;;
+  esac
+  [ -n "$svc" ] || return 1
+  case "$ACQ_MANAGED_SECRET_SERVICES" in
+    *" $svc "*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Word-split a whitespace-separated env value into the named array WITHOUT
@@ -210,6 +243,46 @@ workspace_path() {
     fi
     prev="$arg"
   done
+}
+
+# List ALL workspace positionals in an AGENT-form create/run arg list: every
+# non-flag positional AFTER the agent (primary workspace first, then any extra
+# mounts). Each is emitted on its own line, VERBATIM (including any `:ro`
+# suffix) so a caller can preserve read-only intent. Mirrors sbx's
+# multi-workspace syntax: `acq run opencode ~/app ~/lib:ro`.
+workspace_paths() {
+  local agent="" prev=""
+  for arg in "$@"; do
+    if _takes_value "$prev"; then prev="$arg"; continue; fi
+    case "$arg" in
+      --backend=*) prev="$arg"; continue ;;
+      -*) prev="$arg"; continue ;;
+    esac
+    if [ -z "$agent" ]; then
+      agent="$arg"
+    else
+      printf '%s\n' "$arg"
+    fi
+    prev="$arg"
+  done
+}
+
+# Canonicalize a filesystem path to its real, symlink-free absolute form.
+# Echoes the resolved path, or the input unchanged if it cannot be resolved
+# (e.g. a nonexistent path, or no realpath/readlink available). Pure stdout;
+# never mutates the filesystem. Used so a backend mounts the REAL host path —
+# e.g. on macOS $TMPDIR is a /var -> /private/var symlink, and msb cannot mount
+# the symlinked form (see docs/BACKEND_GUIDE.md, msb workspace mounting).
+canonicalize_path() {
+  local p="${1:-}"
+  [ -n "$p" ] || return 0
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$p" 2>/dev/null && return 0
+  fi
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -f "$p" 2>/dev/null && return 0
+  fi
+  printf '%s\n' "$p"
 }
 
 # Find the first non-flag positional in a create/run arg list.

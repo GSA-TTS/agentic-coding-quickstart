@@ -37,8 +37,8 @@
 #
 # Exit 0 = every installed backend passed (skipped backends don't fail the run).
 # Non-zero = at least one installed backend failed a check.
-# WARN lines are known, tracked limitations (e.g. the msb private-repo playbook
-# clone, quickstart#203) — surfaced every run but NOT counted as failures.
+# WARN lines are known, tracked limitations — surfaced every run but NOT counted
+# as failures.
 
 set -uo pipefail
 
@@ -48,11 +48,17 @@ ACQ="$REPO_ROOT/acq"
 
 VERBOSE="${VERIFY_VERBOSE:-}"
 KEEP="${VERIFY_KEEP:-}"
+# Live, timestamped step tracing. VERIFY_TRACE=1 (or -x/--trace) turns on a
+# heartbeat before/after each acq step AND forces acq's own ACQ_DEBUG trace to
+# stream live, so a step that hangs is visible (which internal call stalled)
+# instead of silently buffering inside a command substitution. See trace().
+TRACE="${VERIFY_TRACE:-}"
 POSITIONAL=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -v|--verbose) VERBOSE=1 ;;
     -k|--keep)    KEEP=1 ;;
+    -x|--trace)   TRACE=1 ;;
     -h|--help)
       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
@@ -61,6 +67,24 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
+
+# When tracing, acq's internal debug trace is streamed live so we can see which
+# msb/sbx sub-call is executing when a step hangs. Enabling TRACE implies live
+# streaming of the create step (see run_acq).
+if [ -n "$TRACE" ]; then
+  export ACQ_DEBUG="${ACQ_DEBUG:-1}"
+  VERBOSE=1
+fi
+
+# Monotonic-ish timestamp (HH:MM:SS) for trace lines.
+_ts() { date +%H:%M:%S 2>/dev/null || printf '??:??:??'; }
+
+# trace MSG — emit a timestamped heartbeat line to stderr when tracing is on.
+# Used to bracket long/blocking steps so a hang shows the LAST line reached.
+trace() {
+  [ -n "$TRACE" ] || return 0
+  printf '        [trace %s] %s\n' "$(_ts)" "$*" >&2
+}
 
 # Refuse to run inside a sandbox (no nested sandboxes).
 if [ -f /.dockerenv ] || [ -n "${SBX_SANDBOX:-}" ] || [ -n "${MSB_SANDBOX:-}" ]; then
@@ -78,8 +102,7 @@ pass() { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
 fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
 skip() { SKIP=$((SKIP + 1)); printf '  skip  %s\n' "$1"; }
 # warn(): a known, tracked limitation — surfaced loudly every run but NOT counted
-# as a failure (the run still exits 0). Use for deferred gaps like the msb
-# private-repo playbook clone (quickstart#203).
+# as a failure (the run still exits 0). Use for deferred gaps.
 warn() { WARN=$((WARN + 1)); printf '  WARN  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
 
 # Print a captured block indented under a heading (only when non-empty).
@@ -94,25 +117,115 @@ dump() {
 # Run an acq command, capturing combined stdout+stderr into LAST_OUT and
 # returning its exit status. The first arg is a short label for the step; in
 # verbose mode it and the exact command line are streamed live.
+#
+# When TRACE is on, a timestamped heartbeat brackets the step (START ... DONE
+# rc=N) so a step that hangs shows its START line with no matching DONE — that
+# names the exact acq step that stalled. Live streaming (VERBOSE) is forced in
+# trace mode so acq's own ACQ_DEBUG output appears in real time rather than
+# being buffered inside the command substitution until the step returns.
 run_acq() {
   local desc="$1"; shift
+  trace "START ${desc}: acq $*"
+  local _rc
   if [ -n "$VERBOSE" ]; then
     printf '        $ acq %s   # %s\n' "$*" "$desc" >&2
-    LAST_OUT=$("$ACQ" "$@" 2>&1 | tee /dev/stderr); return "${PIPESTATUS[0]}"
+    LAST_OUT=$("$ACQ" "$@" 2>&1 | tee /dev/stderr); _rc="${PIPESTATUS[0]}"
+  else
+    LAST_OUT=$("$ACQ" "$@" 2>&1); _rc=$?
   fi
-  LAST_OUT=$("$ACQ" "$@" 2>&1); return $?
+  trace "DONE  ${desc}: rc=${_rc}"
+  return "$_rc"
 }
 
 # Workspace to mount.
+#
+# NOTE: do NOT default to $TMPDIR / /tmp. On macOS, msb cannot mount a host path
+# under $TMPDIR (a per-user /var/folders/... tree, itself reached via the /var ->
+# /private/var symlink): `msb create` fails to start with
+# "mount ...: Not a directory (os error 20)" for ANY such path, even mapped to a
+# shallow guest target (verified on msb 0.6.6). A real directory under $HOME
+# mounts fine. So the verify workspace lives under a stable cache dir, and we
+# resolve it to its canonical (symlink-free) path before mounting.
 WORKDIR="${1:-}"
 if [ -z "$WORKDIR" ]; then
-  WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-verify-ws.XXXXXX")
+  _verify_base="${XDG_CACHE_HOME:-$HOME/.cache}/acq/verify"
+  mkdir -p "$_verify_base"
+  WORKDIR=$(mktemp -d "${_verify_base}/ws.XXXXXX")
   ( cd "$WORKDIR" && git init -q && git config user.email test@example.com \
       && git config user.name "acq verify" && echo hi > README.md ) || true
 fi
 
+# Canonicalize (resolve symlinks) so the mounted host path is the real one. acq
+# does this too, but resolving here keeps the derived sandbox name and any direct
+# msb/sbx checks below consistent with what acq actually mounts.
+if command -v realpath >/dev/null 2>&1; then
+  WORKDIR=$(realpath "$WORKDIR" 2>/dev/null || printf '%s' "$WORKDIR")
+fi
+
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
+
+# ---------------------------------------------------------------------------
+# GitHub token seeding for the private-repo playbook kit.
+# ---------------------------------------------------------------------------
+# The playbook kit fetches a PRIVATE repo tarball from api.github.com, which
+# needs a github token. We DISCOURAGE storing a global github token, and the
+# user is normally already authenticated via `gh`. So for the throwaway verify
+# sandboxes we seed a SANDBOX-SCOPED github secret from `gh auth token` just for
+# that sandbox, via `acq secret set <sandbox> github` — which both records it in
+# the acq store (msb reads it at create) AND feeds the sbx proxy. We clean it up
+# afterward. If `gh` is absent / logged out, the playbook check SKIPs (not fails)
+# so a token-less run still passes.
+#
+# GH_SEEDED_FOR is set to the sandbox name once a seed succeeds, so the playbook
+# check knows whether to assert (seeded) or skip (not seeded), and cleanup knows
+# what to remove. It is reset per sandbox.
+GH_SEEDED_FOR=""
+
+# _gh_token — echo a github token for seeding, or empty if none is available.
+# Prefer an already-exported GH_TOKEN / GITHUB_TOKEN (how many users, incl. CI,
+# authenticate) — note that when GH_TOKEN is set in the env, `gh auth token`
+# prints NOTHING (gh treats the env var as authoritative and won't echo it), so
+# we must read the env var directly. Fall back to `gh auth token` (keyring) when
+# no env token is set and gh is installed + logged in.
+_gh_token() {
+  if [ -n "${GH_TOKEN:-}" ]; then printf '%s' "$GH_TOKEN"; return 0; fi
+  if [ -n "${GITHUB_TOKEN:-}" ]; then printf '%s' "$GITHUB_TOKEN"; return 0; fi
+  command -v gh >/dev/null 2>&1 || return 0
+  gh auth token 2>/dev/null || true
+}
+
+# seed_github_secret BACKEND SANDBOX — seed a sandbox-scoped github secret from
+# `gh` for this sandbox, BEFORE provision. Sets GH_SEEDED_FOR on success. No-op
+# (leaves GH_SEEDED_FOR empty) when no gh token is available.
+seed_github_secret() {
+  local backend="$1" sandbox="$2" tok
+  GH_SEEDED_FOR=""
+  tok=$(_gh_token)
+  if [ -z "$tok" ]; then
+    return 0
+  fi
+  # `acq secret set <sandbox> github` reads the value on stdin (never argv). On
+  # sbx this also runs `sbx secret set <sandbox> github` so the proxy has it; on
+  # msb it lands in the acq store, which provision binds at create.
+  if printf '%s\n' "$tok" | run_acq "seed-github" --backend "$backend" secret set "$sandbox" github >/dev/null 2>&1; then
+    GH_SEEDED_FOR="$sandbox"
+    trace "seeded sandbox-scoped github secret for $sandbox ($backend)"
+  else
+    trace "could not seed github secret for $sandbox ($backend); playbook check will skip"
+  fi
+  tok=""
+}
+
+# unseed_github_secret BACKEND SANDBOX — remove the sandbox-scoped github secret
+# we seeded, via `acq secret rm` (removes it from the acq store and clears the
+# backend injector). Best-effort; never fails the run.
+unseed_github_secret() {
+  local backend="$1" sandbox="$2"
+  [ -n "$GH_SEEDED_FOR" ] || return 0
+  run_acq "unseed-github" --backend "$backend" secret rm "$sandbox" github >/dev/null 2>&1 || true
+  GH_SEEDED_FOR=""
+}
 
 # ---------------------------------------------------------------------------
 # Per-backend verification. $1 = backend name. Assumes it is installed.
@@ -158,11 +271,16 @@ verify_backend() {
   [ -n "$name" ] || name="shell-$(basename "$WORKDIR" | tr '[:upper:]' '[:lower:]')"
   printf '        sandbox name: %s\n' "$name"
 
+  # Seed a sandbox-scoped github token (from `gh`) BEFORE create so the private
+  # playbook tarball fetch can authenticate. No-op if gh is unavailable.
+  seed_github_secret "$backend" "$name"
+
   # Create a sandbox with the four kits applied via acq's normal provision path.
   if ! run_acq "create" --backend "$backend" create shell "$WORKDIR"; then
     fail "${backend}: provision (acq create shell) failed" \
          "command: acq --backend ${backend} create shell ${WORKDIR}"
     dump "acq create output" "$LAST_OUT"
+    unseed_github_secret "$backend" "$name"
     if [ -n "$KEEP" ]; then
       printf '        (keeping sandbox %s for inspection; --keep set)\n' "$name"
     else
@@ -247,21 +365,47 @@ verify_backend() {
     dump "exec output" "$LAST_OUT"
   fi
 
-  # 4) playbook clone symlink appears (AGENTS.md linked into OpenCode config).
-  #    On msb the private-repo clone is a KNOWN, TRACKED gap (quickstart#203):
-  #    msb 0.6.6 doesn't substitute the git credential for github.com HTTPS. So
-  #    on msb a missing clone is a WARN (surfaced, but the run still passes);
-  #    on sbx it remains a hard requirement.
-  if run_acq "exec playbook" --backend "$backend" exec "$name" -- sh -c \
-      'test -e "$HOME/.agentic-coding-playbook/.git" || test -L "$HOME/.config/opencode/AGENTS.md"'; then
-    pass "${backend}: playbook kit applied (clone or AGENTS.md link present)"
-  elif [ "$backend" = "msb" ]; then
-    warn "${backend}: playbook clone absent — known msb private-repo git-auth gap" \
-         "tracked in quickstart#203 (msb git-over-HTTPS secret substitution); non-fatal"
+  # 3b) Agent home is owned by the agent user. A root-owned /home/agent silently
+  #     breaks every agent-user kit (the playbook regression: fetch ran, mkdir
+  #     denied, degraded silently). msb creates the agent user at provision (uid
+  #     may differ from 1000 — it collides with the base image's user); sbx bakes
+  #     it into the template. Assert ownership on both so the bug can't silently
+  #     return. Checked as the DEFAULT exec user (root on msb, agent on sbx): we
+  #     compare the owner of $HOME's /home/agent to the agent user by name.
+  if run_acq "exec home-owner" --backend "$backend" exec "$name" -- sh -c \
+      'test "$(stat -c %U /home/agent 2>/dev/null || stat -f %Su /home/agent 2>/dev/null)" = agent'; then
+    pass "${backend}: /home/agent owned by the agent user"
   else
-    fail "${backend}: playbook clone/symlink not found"
+    fail "${backend}: /home/agent not owned by agent (agent-user setup regressed)"
     dump "exec output" "$LAST_OUT"
   fi
+
+  # 4) playbook fetch appears (AGENTS.md present in the tree AND linked into the
+  #    OpenCode config). The kit fetches the repo SOURCE TARBALL via the REST API
+  #    (api.github.com), which BOTH backends substitute the github token for
+  #    (msb 0.6.7 verified) — so given a token this is a hard requirement on both
+  #    (quickstart#203 is resolved by the tarball approach). We seed a
+  #    sandbox-scoped token from `gh` before create; if `gh` was unavailable
+  #    (GH_SEEDED_FOR empty) there is no token and we SKIP rather than fail — a
+  #    token-less run still passes.
+  #
+  #    NOTE: the kit runs as the `agent` user and links into /home/agent. Do NOT
+  #    rely on $HOME here — a plain `msb exec` runs as ROOT ($HOME=/root), so an
+  #    unqualified "$HOME/.agentic-coding-playbook" checks the wrong path and
+  #    always fails even when the kit succeeded. Check the literal /home/agent
+  #    paths instead (the agent's home, on both backends).
+  if [ -z "$GH_SEEDED_FOR" ]; then
+    skip "${backend}: playbook fetch (no github token; gh not available/logged in)"
+  elif run_acq "exec playbook" --backend "$backend" exec "$name" -- sh -c \
+      'test -f /home/agent/.agentic-coding-playbook/AGENTS.md && test -L /home/agent/.config/opencode/AGENTS.md'; then
+    pass "${backend}: playbook kit applied (AGENTS.md fetched + linked)"
+  else
+    fail "${backend}: playbook AGENTS.md not fetched/linked (token was seeded from gh)"
+    dump "exec output" "$LAST_OUT"
+  fi
+
+  # Remove the sandbox-scoped github secret we seeded (best-effort).
+  unseed_github_secret "$backend" "$name"
 
   # Clean up the throwaway sandbox.
   if [ -n "$KEEP" ] && [ "$FAIL" -gt 0 ]; then
@@ -271,12 +415,67 @@ verify_backend() {
   fi
 }
 
+# verify_agent_install BACKEND — provision an `opencode` sandbox (not `shell`)
+# and assert the agent binary is actually installed and launchable. This catches
+# the class of bug where a sandbox comes up but the agent was never installed
+# (quickstart#228): on sbx the template bakes it in; on msb acq installs it.
+verify_agent_install() {
+  local backend="$1"
+  echo ""
+  echo "== backend: ${backend} (agent install) =="
+
+  local aname
+  aname=$(
+    # shellcheck disable=SC1090
+    ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
+    derive_name opencode "$WORKDIR" 2>/dev/null
+  )
+  [ -n "$aname" ] || aname="opencode-$(basename "$WORKDIR" | tr '[:upper:]' '[:lower:]')"
+  printf '        sandbox name: %s\n' "$aname"
+
+  if ! run_acq "create-opencode" --backend "$backend" create opencode "$WORKDIR"; then
+    fail "${backend}: provision (acq create opencode) failed"
+    dump "acq create output" "$LAST_OUT"
+    run_acq "rm" --backend "$backend" rm "$aname" >/dev/null 2>&1 || true
+    return
+  fi
+
+  # The agent binary must be on PATH inside the sandbox (the bug: it wasn't).
+  if run_acq "exec opencode-present" --backend "$backend" exec "$aname" -- sh -c "command -v opencode >/dev/null 2>&1"; then
+    pass "${backend}: opencode binary installed and on PATH"
+  else
+    fail "${backend}: opencode binary NOT found in sandbox (agent install failed)"
+    dump "exec output" "$LAST_OUT"
+  fi
+
+  # The guest must have enough RAM to actually RUN a Node.js agent TUI. msb's
+  # 512 MiB default OOM-kills opencode on launch (quickstart#228 follow-up: it
+  # started, then the terminal died with "Killed"). Assert a generous ceiling
+  # (>= ~2 GiB) so a regression that drops the sizing flags is caught live, not
+  # just at exec-present. MemTotal is in kB; 2 GiB ~= 2000000 kB.
+  local memkb
+  run_acq "exec memtotal" --backend "$backend" exec "$aname" -- sh -c "awk '/MemTotal/{print \$2}' /proc/meminfo" >/dev/null 2>&1 || true
+  memkb=$(printf '%s' "$LAST_OUT" | tr -dc '0-9')
+  if [ -n "$memkb" ] && [ "$memkb" -ge 2000000 ] 2>/dev/null; then
+    pass "${backend}: guest has RAM headroom for the agent (${memkb} kB)"
+  else
+    fail "${backend}: guest RAM too small for a Node.js agent (MemTotal='${memkb}' kB); opencode will be OOM-killed"
+  fi
+
+  if [ -n "$KEEP" ] && [ "$FAIL" -gt 0 ]; then
+    printf '        (keeping sandbox %s; --keep set)\n' "$aname"
+  else
+    run_acq "rm" --backend "$backend" rm "$aname" >/dev/null 2>&1 || true
+  fi
+}
+
 echo "verify-backends"
 echo "  workspace: $WORKDIR"
 
 # sbx
 if command -v sbx >/dev/null 2>&1; then
   verify_backend sbx
+  verify_agent_install sbx
 else
   echo ""; echo "== backend: sbx =="; skip "sbx: not installed"
 fi
@@ -284,6 +483,7 @@ fi
 # msb
 if command -v msb >/dev/null 2>&1; then
   verify_backend msb
+  verify_agent_install msb
 else
   echo ""; echo "== backend: msb =="; skip "msb: not installed"
 fi

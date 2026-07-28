@@ -3,7 +3,7 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-07-15"
+last_updated: "2026-07-24"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
 related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -158,8 +158,11 @@ Tunables:
 |---------|---------|---------|
 | `ACQ_MSB_IMAGE` | `docker.io/library/node:22-bookworm` | Base OCI image (must be pullable and ship node/git/curl/ca-certificates) |
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
-| `ACQ_MSB_AGENT_UID` | `1000` | Preferred uid for the provisioned `agent` user |
-| `ACQ_MSB_WORKSPACE` | `/home/agent/workspace` | Guest mount point for the host workspace |
+| `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
+| `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
+| `ACQ_MSB_WORKSPACE` | (first workspace) | Agent's **starting directory** (`-w`) on attach. Does NOT change the mount, which is always host-path:host-path; overrides only where the agent starts. |
+| `ACQ_MSB_MEMORY` | `4G` | Guest RAM at create (`-m`); `4G`/`4096`/`512M` (bare = MiB). Set empty to use msb's 512 MiB default |
+| `ACQ_MSB_CPUS` | `2` | Guest vCPU count at create (`-c`); set empty to use msb's 1-vCPU default |
 | `ACQ_MSB_DNS_NAMESERVER` | `1.1.1.1` | Guest DNS resolver (set empty to use msb's default) |
 | `ACQ_MSB_KIT_CACHE` | `$XDG_CACHE_HOME/acq/kits` | where fetched neutral kits are materialized |
 
@@ -175,14 +178,57 @@ microVM) to `msb create`. Override `ACQ_MSB_DNS_NAMESERVER` if `1.1.1.1` is
 blocked in your environment, or set it empty to fall back to msb's default (only
 if your host resolver is reachable from the guest).
 
+### Guest memory and vCPU
+
+msb defaults a sandbox to **512 MiB of RAM and 1 vCPU**, and the microVM has
+**no swap** — so a process that exceeds guest RAM is OOM-killed by the guest
+kernel and simply prints `Killed`. A Node.js agent TUI like `opencode` blows past
+512 MiB immediately, which looked like "opencode starts, then the terminal dies"
+(quickstart#228 follow-up). sbx sizes its agent templates generously; a plain msb
+base does not, so the msb backend passes `--memory 4G --cpus 2` at create by
+default. Tune with `ACQ_MSB_MEMORY` / `ACQ_MSB_CPUS` (set either empty to fall
+back to msb's own default). Memory takes a single-char unit suffix — `G`/`g` =
+GiB, `M`/`m` = MiB, bare number = MiB — so `4G`, `4096`, and `4g` are equivalent.
+
 ### Workspace mounting
 
-msb does **not** create the host mount path and will not reliably mount a guest
-path that mirrors an absolute host path under `/tmp` (the mount silently does
-not appear). So the msb backend mounts your host workspace at a fixed guest path
-(`ACQ_MSB_WORKSPACE`, default `/home/agent/workspace`) rather than at its host
-path. The host path must already exist — `acq` errors clearly if it does not.
-This differs from sbx, which mounts the workspace at its original path.
+msb does **not** create the host mount path, so each host workspace path must
+already exist — `acq` errors clearly if one does not.
+
+The msb backend mounts every workspace at the **same absolute path inside the
+guest** (matching sbx's multi-workspace semantics — see
+`docs/QUICKSTART_SBX.md`): `acq run opencode /my/repo` makes the repo appear at
+`/my/repo` in the sandbox. Extra workspaces and a trailing `:ro` marker work the
+same as sbx:
+
+```bash
+acq --backend msb run opencode ~/projects/app ~/projects/lib:ro
+# mounts ~/projects/app (rw) and ~/projects/lib (ro), each at its host path
+```
+
+**Starting directory:** the agent starts in the **primary** (first) workspace,
+matching sbx (`docs/QUICKSTART_SBX.md`: "Primary workspace — the first path;
+agent starts here"). Override the start dir with `ACQ_MSB_WORKSPACE`.
+
+**Symlinked host paths are canonicalized.** msb cannot mount a symlinked host
+path — it fails to start with `mount ...: Not a directory (os error 20)`, even
+when mapped to a shallow guest target (verified on msb 0.6.6). The most common
+case is **macOS `$TMPDIR`**, a per-user `/var/folders/...` tree reached through
+the `/var` → `/private/var` symlink: any workspace under `$TMPDIR` / `/tmp`
+fails. `acq` therefore resolves each workspace to its real, symlink-free path
+(e.g. `/private/var/...`) before mounting. A directory under `$HOME` mounts
+fine; prefer one over a temp dir if you hit this.
+
+> **Why not remap under `/home/agent`?** An earlier version mounted the
+> workspace under the agent home (`/home/agent/workspace`). But `msb create`
+> performs the mount *before* `acq` can create the `agent` user and its
+> `/home/agent` directory (that happens post-create, once the guest is
+> exec-ready), so on a plain base image the mount failed with
+> `mount ...: Not a directory (os error 20)`. Mounting at the
+> host's own (canonicalized) absolute path avoids that ordering problem entirely
+> and matches what sbx does.
+
+Note the async-boot caveat:
 
 > **`msb create` starts asynchronously.** `msb create` returns success even if
 > the sandbox later fails to *start* (e.g. a bad mount). `acq` therefore treats
@@ -206,15 +252,42 @@ ships all four tools and pulls from Docker Hub without auth. Before applying
 kits, the adapter **verifies** the tools are present and warns if any are
 missing (it does not try to install them).
 
-**The `agent` user contract.** The kits stage files under `/home/agent` and run
-their unprivileged commands as an `agent` user (uid 1000) — the contract sbx's
-agent template guarantees. A plain OCI base does not provide this (e.g.
-`node:22-bookworm` has a `node` user at uid 1000 and no `agent`). So at provision
-the msb adapter **creates an `agent` user with `HOME=/home/agent`** (idempotent,
-offline via `useradd`/`adduser`), chowns the staged `/home/agent` files to it,
-and runs the kits' uid-1000 commands as `agent` with `HOME=/home/agent` (it
-addresses the user by name, not by the literal uid 1000, so it works even when
-1000 is already taken). Set `ACQ_MSB_AGENT_UID` to prefer a specific uid.
+**The agent binary.** sbx's agent templates bake the requested agent (e.g.
+`opencode`) into the image; a plain msb base has no agent. So at provision the
+msb adapter **installs the agent it was asked to run**. For `opencode` this is
+`npm install -g opencode-ai` (node is a verified prerequisite), and the adapter
+allow-lists the npm registry host (`registry.npmjs.org`) at create so the
+default-deny guest egress permits the download. The install is idempotent: it is
+skipped when the binary is already present (e.g. a pre-baked `ACQ_MSB_IMAGE`) and
+marker-gated against re-apply. `shell` installs nothing; an agent with no known
+recipe that is also absent from the base image produces a clear warning (bake it
+into `ACQ_MSB_IMAGE`). Tunables: `ACQ_MSB_OPENCODE_PKG` (npm spec, e.g.
+`opencode-ai@1.2.3`), `ACQ_MSB_NPM_HOSTS` (registry host(s) to allow-list, for an
+internal mirror).
+
+**The base-image contract (Docker `shell-docker`).** sbx's templates are built on
+`docker/sandbox-templates:shell-docker`, whose
+[published base-image requirements](https://docs.docker.com/ai/sandboxes/customize/kit-reference/#base-image-requirements)
+are: a non-root `agent` user at UID 1000 **with passwordless sudo**, a
+`/home/agent` home owned by `agent`, **HTTP proxy env (`HTTP_PROXY`/`HTTPS_PROXY`/
+`NO_PROXY`) preserved across sudo**, and the agent binary present. A plain OCI
+base (e.g. `node:22-bookworm`, which has `node` at uid 1000 and no `agent`, no
+sudoers rule) meets none of the first three. So at provision the msb adapter
+**idempotently synthesizes** them: it creates the `agent` user with
+`HOME=/home/agent` (offline via `useradd`/`adduser`), chowns the staged
+`/home/agent` files to it, drops a passwordless-sudo rule in `/etc/sudoers.d`,
+and adds a sudoers `env_keep` for the proxy variables. It addresses the user by
+name (not the literal uid 1000), so it works even when 1000 is already taken by
+the base image (e.g. `node` on node:22-bookworm).
+
+**How attach launches the agent.** sbx's `sbx run --name` re-launches the
+baked-in agent. On msb the adapter reproduces that with `msb exec -t` — the one
+primitive that allocates a PTY (so a full-screen agent TUI renders), runs as the
+unprivileged `agent` user (`-u agent`), starts in the workspace (`-w`), and gives
+the session a sane `$SHELL`. It execs the agent recorded at provision, falling
+back to an interactive `/bin/sh -l` as `agent` — never a root shell, never msb's
+default interactive shell (the base image's Node REPL) — for a `shell` sandbox or
+if the agent binary is somehow missing.
 
 To use your own image, set `ACQ_MSB_IMAGE` to one that also provides node, git,
 curl, and ca-certificates:
@@ -287,25 +360,29 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 
 ### Known limitations (msb)
 
-- **Private GitHub repos: the playbook kit clone is skipped on msb.** The
-  `agentic-coding-playbook` kit clones a private GitHub repo over HTTPS. msb
-  0.6.6 does not substitute the credential placeholder for git's HTTPS
-  smart-transport to `github.com` — the request is blocked/unsubstituted
-  regardless of request shape (verified extensively; msb's `Authorization:
-  Bearer` substitution works for the USAi header path but not for git). Binding
-  the same placeholder across multiple github hosts also trips microsandbox
-  [#1170](https://github.com/superradcompany/microsandbox/issues/1170). acq
-  therefore does **not** bind a GitHub secret on msb; the playbook kit is
-  non-fatal and warns, and the sandbox comes up fully usable otherwise. This is
-  tracked in
-  [quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203)
-  for a fix once upstream git substitution works (see microsandbox
+- **Private GitHub repos: use the REST API, not `git clone`.** msb substitutes
+  an injected credential for the `Authorization: Bearer` header on the
+  **REST API** (`api.github.com`) — verified on msb 0.6.7 (an authenticated
+  request returns full rate-limit headers; a private-repo source-tarball fetch
+  succeeds). It does **not** substitute git's smart-HTTP transport to
+  `github.com` / `codeload.github.com`, so a `git clone` (or `gh repo clone`,
+  which shells out to git) of a private repo fails auth/TLS there. This was the
+  origin of
+  [quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203).
+
+  **Resolution:** kits that need private GitHub content fetch it via the REST
+  API instead of git. The `agentic-coding-playbook` kit now fetches the repo
+  **source tarball** from `api.github.com/repos/<repo>/tarball/<ref>` (verifying
+  the extracted `AGENTS.md` against a pinned sha256), so it works on **both**
+  backends. acq binds `GITHUB_TOKEN@api.github.com` on msb (single host — a
+  multi-host binding trips microsandbox
+  [#1170](https://github.com/superradcompany/microsandbox/issues/1170)). Store a
+  token with `acq secret set -g github` (or `gh auth token | acq secret set -g
+  github`); absent a token the kit degrades gracefully (warns, no rules/skills).
+  Upstream git-transport substitution remains unfixed (microsandbox
   [#756](https://github.com/superradcompany/microsandbox/issues/756) /
-  [#768](https://github.com/superradcompany/microsandbox/pull/768) /
-  [#1170](https://github.com/superradcompany/microsandbox/issues/1170)). On the
-  **sbx** backend the playbook clone works (its proxy injects the token
-  transparently). Workarounds on msb: make the repo readable without auth, use a
-  base image with the playbook pre-cloned, or use the sbx backend.
+  [#768](https://github.com/superradcompany/microsandbox/pull/768)), but kits no
+  longer depend on it.
 
 ### Capability flags
 
@@ -314,7 +391,7 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 | `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 0 | No post-hoc `acq ports`; publish at create/run via `-p HOST:GUEST` |
 | `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 1 | `msb snapshot` save/restore |
 | `ACQ_BACKEND_CAN_RESUME` | 1 | `msb stop` / `msb start` preserve state |
-| `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (header substitution; git HTTPS not yet supported by msb) |
+| `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (header substitution on REST/API hosts; git smart-HTTP transport not substituted — use the REST API) |
 
 ### Differences from sbx
 
@@ -390,10 +467,10 @@ inspection):
 ./scripts/verify-backends -v
 ```
 
-A `WARN` line marks a known, tracked limitation (e.g. the msb private-repo
-playbook clone, [quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203))
-— it is surfaced every run but does **not** count as a failure, so a clean msb
-run still exits 0.
+A `WARN` line marks a known, tracked limitation — it is surfaced every run but
+does **not** count as a failure, so a clean run still exits 0. (The former msb
+private-repo playbook `WARN` is gone: the playbook kit now fetches via the REST
+API and is a hard-required `pass` on both backends, given a stored github token.)
 
 ---
 
@@ -460,7 +537,6 @@ Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 
 - Full Go/keychain swap-on-access secret component of design §7.5 (age fallback,
   `CredentialRewriteRule`); acq ships the bash keychain subset (see Secrets)
-- msb private-repo git auth ([quickstart#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203))
 - `acq policy …` — network policy subcommands
 - `ppp` (Podman-Plus-Proxy) backend — Phase 3, in development at
   [GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)

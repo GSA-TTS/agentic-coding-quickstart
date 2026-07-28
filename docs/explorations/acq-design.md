@@ -908,9 +908,9 @@ kit vocabulary** with a translation layer. Recorded in
    silently dropped every file/command after the first (this was the actual
    cause of the missing `merge-global-config.mjs`, not the earlier copy-race
    theory; `msb` exec/copy persistence itself was verified fine);
-   (ii) the host workspace is mounted at a fixed guest path
-   (`/home/agent/workspace`), because msb won't create the host path and
-   mishandles an identical host:guest `/tmp` mount;
+   (ii) each host workspace is mounted at its SAME absolute guest path
+   (sbx-parity), after an earlier fixed `/home/agent/workspace` remap failed
+   because `msb create` mounts before the agent user/home exist;
    (iii) `--dns-nameserver` (default `1.1.1.1`) is passed to `msb create`,
    because the host's corporate/VPN resolver is unreachable from the microVM
    (verified: with it, the models API resolves and returns 401/200 and github
