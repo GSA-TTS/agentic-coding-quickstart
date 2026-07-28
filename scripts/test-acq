@@ -776,8 +776,8 @@ out=$(ACQ_BACKEND=sbx "$ACQ" version 2>&1); rc=$?
 assert_eq "version exits 0" "0" "$rc"
 assert_contains "version: script path" "$out" "$REPO_ROOT/acq"
 # Assert `version` reports the CONFIGURED pin (read from common.sh), not a
-# hardcoded SHA — so this holds across pin bumps (incl. the temporary
-# patterns#269 pin and its eventual finalize). Tests the invariant, not a commit.
+# hardcoded SHA — so this holds across pin bumps. Tests the invariant, not a commit.
+# shellcheck disable=SC1090
 _want_ref=$(ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1; printf '%s' "$PATTERNS_KIT_REF")
 assert_contains "version: patterns kit ref" "$out" "$_want_ref"
 assert_contains "version: backend line" "$out" "backend:"
@@ -1695,6 +1695,7 @@ fi
 make_stubs
 out=$("$ACQ" kit list 2>&1)
 # Assert the CONFIGURED pin (not a hardcoded SHA) so this survives pin bumps.
+# shellcheck disable=SC1090
 _want_ref=$(ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1; printf '%s' "$PATTERNS_KIT_REF")
 assert_contains "kit: list shows patterns ref" "$out" "$_want_ref"
 assert_contains "kit: list shows acq-kits dir" "$out" "acq-kits"
