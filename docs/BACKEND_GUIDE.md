@@ -160,7 +160,7 @@ Tunables:
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
 | `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
 | `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
-| `ACQ_MSB_WORKSPACE` | (host path) | Guest mount point for the host workspace (default: the same absolute path as on the host, matching sbx) |
+| `ACQ_MSB_WORKSPACE` | (first workspace) | Agent's **starting directory** (`-w`) on attach. Does NOT change the mount, which is always host-path:host-path; overrides only where the agent starts. |
 | `ACQ_MSB_MEMORY` | `4G` | Guest RAM at create (`-m`); `4G`/`4096`/`512M` (bare = MiB). Set empty to use msb's 512 MiB default |
 | `ACQ_MSB_CPUS` | `2` | Guest vCPU count at create (`-c`); set empty to use msb's 1-vCPU default |
 | `ACQ_MSB_DNS_NAMESERVER` | `1.1.1.1` | Guest DNS resolver (set empty to use msb's default) |

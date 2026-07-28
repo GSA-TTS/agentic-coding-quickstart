@@ -96,11 +96,16 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   with `--tls-intercept` (required for substitution), read from the acq secret
   store at provision into a transient env var (never argv, never the kit spec;
   the guest gets only a placeholder). `acq secret set` re-feeds running sandboxes
-  via `msb modify --secret`. The **GitHub token is deliberately NOT bound on
-  msb**: msb 0.6.6 does not substitute the placeholder for git's HTTPS clone to
-  github.com (verified; the header path for USAi works, git does not — see
-  microsandbox #756/#768/#1170), so the private playbook-clone kit is skipped on
-  msb (non-fatal, warns). Unlike sbx (whose
+  via `msb modify --secret`. The **GitHub token is bound to the REST API host
+  only** (`GITHUB_TOKEN@api.github.com`): msb substitutes the `Authorization:
+  Bearer` header on the wire to `api.github.com` (verified msb 0.6.7) but NOT
+  git's smart-HTTP transport to github.com/codeload (microsandbox
+  #756/#768/#1170). So kits authenticate to GitHub via the REST API, not `git
+  clone`: the playbook kit fetches a **source tarball** from
+  `api.github.com/repos/<repo>/tarball/<ref>` and now works on msb (this
+  supersedes the earlier decision to leave github unbound / skip the playbook
+  kit on msb; see quickstart#203). A single host is bound to avoid microsandbox
+  #1170 (multi-host binding). Unlike sbx (whose
   templates supply the image), msb runs a plain OCI image: the default is the
   public `node:22-bookworm` (built on buildpack-deps, so it already ships
   node/git/curl/ca-certificates — the four kits' prerequisites — and pulls
@@ -300,12 +305,16 @@ allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
   ports. This is a broader/less-transparent posture than sbx's proxy injection;
   it is the microsandbox model and the price of the microVM boundary. Disable
   with `ACQ_MSB_NO_TLS_INTERCEPT` (secrets then won't substitute).
-- **Known limitation (tracked):** on msb the private `agentic-coding-playbook`
-  clone is skipped — msb 0.6.6 does not substitute the credential placeholder
-  for git's HTTPS smart-transport to github.com (upstream microsandbox
-  #756/#768/#1170). The kit is non-fatal; the sandbox is otherwise fully usable
-  (USAi, git-ssh-sign, zscaler all work). The sbx backend is unaffected. Tracked
-  in quickstart#203 for when upstream git substitution lands.
+- **Private GitHub content via the REST API (quickstart#203, resolved):** msb
+  does NOT substitute the credential placeholder for git's HTTPS smart-transport
+  to github.com/codeload (upstream microsandbox #756/#768/#1170), so a private
+  `git clone` cannot authenticate on msb. It DOES substitute the `Authorization:
+  Bearer` header for the REST API (`api.github.com`, verified msb 0.6.7). So kits
+  fetch private GitHub content via the REST API: the `agentic-coding-playbook`
+  kit binds `GITHUB_TOKEN@api.github.com` and fetches a **source tarball**
+  (verified against a pinned AGENTS.md sha256) instead of cloning. It now works
+  on msb. (This supersedes the earlier "clone skipped on msb" limitation. The
+  underlying git-transport gap remains upstream, but no kit depends on it.)
 
 ### `environment` vocabulary (guest env vars)
 
@@ -335,23 +344,31 @@ reported by `acq kit validate`), because a name reaches the guest environment an
 possibly a shell. **Secrets do NOT go here** — they continue through the backend
 credential/secret path (sbx proxy, msb `--secret ENV@HOST`), never the kit spec.
 
-> **Cross-repo dependency (satisfied):** the authoritative `environment` schema
-> property + the field-level validator live in the **patterns** repo
+> **Cross-repo dependency:** the authoritative `environment` schema property +
+> the field-level validator live in the **patterns** repo
 > (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`, PR #227 + the review
-> follow-up #228). Both merged and shipped in patterns **v1.7.0**, and
-> `PATTERNS_KIT_REF` (`acq.backends/common.sh`) is pinned to the v1.7.0 release
-> commit `9c277c09ed4ad45fd11709d6b048a58adc785443` (schema with `environment`
-> verified present). The pin was held at v1.6.0 until v1.7.0 existed, per the
-> fail-closed cross-repo gating.
+> follow-up #228), merged and shipped in patterns **v1.7.0**.
+>
+> **Pin status (TEMPORARY — see quickstart#203 / patterns#269):** `PATTERNS_KIT_REF`
+> (`acq.backends/common.sh`) is currently pinned to the **tip of patterns
+> `feat/fix-playbook-clones`** (`379756a…`), which carries the playbook kit's
+> REST-tarball fetch (the #203 fix) and is **not yet on patterns `main`**. This
+> is an explicit, in-code-documented temporary pin for validation. The release
+> gate is **not** satisfied until patterns#269 merges and this pin is finalized
+> to the merge commit / next release tag (and the two pin assertions in
+> `scripts/test-acq` are restored). Do not cut a release in the interim.
 
 ## Live verification (msb, on a KVM host)
 
-Confirmed working end-to-end on a sandbox-capable host during bring-up:
+Confirmed working end-to-end on a sandbox-capable host (msb 0.6.7) via
+`scripts/verify-backends` (15/15) and an interactive `acq run opencode`:
 `msb create` (with `--dns-nameserver`, `--tls-intercept`, `--trust-host-cas`,
-workspace mount at `/home/agent/workspace`, `agent` user creation), USAi key
-substitution (models API returns a real status over intercepted TLS),
-git-ssh-sign config, zscaler CA trust, and all kit files/commands applied. The
-one gap is the private playbook clone (above). Several msb behaviors were
+each workspace mounted at its **own absolute host path**, `agent` user created
+at a free uid with an agent-owned `/home/agent`), USAi key substitution (models
+API returns a real status over intercepted TLS), the playbook fetched via the
+REST tarball and linked, git-ssh-sign config, zscaler CA trust, and all kit
+files/commands applied. The agent is launched with `msb exec -t` (PTY) as the
+unprivileged `agent` user in the workspace. Several msb behaviors were
 discovered and worked around here (recorded so they aren't re-litigated):
 `msb create` returns 0 even on async start failure (→ exec-ready gate);
 identical host:guest `/tmp` mounts silently fail (→ fixed guest mount point);

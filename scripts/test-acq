@@ -764,6 +764,29 @@ assert_eq "help: bare acq exits 2" "2" "$bare_rc"
 assert_contains "help: bare acq shows usage" "$bare_out" "acq — agentic coding quickstart wrapper"
 # --backend msb surfaces the msb backend's own help under the separator.
 assert_contains "help: --backend msb appends msb help" "$(ACQ_BACKEND=sbx "$ACQ" --backend msb help 2>&1)" "msb"
+# A `--help`/`-h` AFTER `--` must NOT be hijacked into acq's help — it belongs to
+# the agent/inner command and must pass through verbatim.
+: > "$CALLS"
+ACQ_BACKEND=sbx "$ACQ" exec mybox -- mycmd --help >/dev/null 2>&1 || true
+afterdd_log=$(cat "$CALLS")
+assert_contains "help: --help after -- passes through to backend exec" "$afterdd_log" "mycmd --help"
+assert_not_contains "help: --help after -- did NOT print acq help" "$afterdd_log" "agentic coding quickstart wrapper"
+cleanup_stubs
+
+# 7c. `acq secret ls|import|set-custom` pass through to the backend WITHOUT
+#     doubling the subcommand token (regression: `sbx secret ls ls`). The set/rm
+#     branches shift; this branch must too.
+make_stubs
+: > "$CALLS"
+ACQ_BACKEND=sbx "$ACQ" secret ls -q >/dev/null 2>&1 || true
+ls_log=$(cat "$CALLS")
+assert_contains "secret ls: forwards a single ls token" "$ls_log" "sbx secret ls -q"
+assert_not_contains "secret ls: does NOT double the token" "$ls_log" "secret ls ls"
+: > "$CALLS"
+ACQ_BACKEND=sbx "$ACQ" secret set-custom -g --host h --env E >/dev/null 2>&1 || true
+sc_log=$(cat "$CALLS")
+assert_contains "secret set-custom: single token" "$sc_log" "sbx secret set-custom -g --host h --env E"
+assert_not_contains "secret set-custom: not doubled" "$sc_log" "set-custom set-custom"
 cleanup_stubs
 
 # ===========================================================================

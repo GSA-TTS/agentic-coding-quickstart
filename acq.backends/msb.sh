@@ -481,7 +481,9 @@ _acq_msb_copy_file_verified() {
       *) echo "acq(msb): refusing chmod: non-octal mode '$mode' for '$path'" >&2; mode="" ;;
     esac
   fi
-  [ -n "$mode" ] && msb exec "$name" -u 0 -- chmod "$mode" "$path" >/dev/null 2>&1 || true
+  if [ -n "$mode" ]; then
+    msb exec "$name" -u 0 -- chmod "$mode" "$path" >/dev/null 2>&1 || true
+  fi
   case "$path" in
     /home/agent/*)
       msb exec "$name" -u 0 -- chown agent "$path" >/dev/null 2>&1 || true
@@ -500,13 +502,13 @@ _acq_msb_run_commands() {
   # already validates each NAME (^[A-Za-z_][A-Za-z0-9_]*$) and drops unsafe ones,
   # so these are safe to pass as exec env. Values are passed as a single argv
   # element (never re-split by a shell).
-  local _kit_env=() eline ekey eval
+  local _kit_env=() eline ekey eval_v
   while IFS= read -r eline; do
     [ -n "$eline" ] || continue
     ekey=$(printf '%s' "$eline" | cut -f1)
-    eval=$(printf '%s' "$eline" | cut -f2-)
+    eval_v=$(printf '%s' "$eline" | cut -f2-)
     [ -n "$ekey" ] || continue
-    _kit_env+=("${ekey}=${eval}")
+    _kit_env+=("${ekey}=${eval_v}")
   done <<EOF
 $(kit_spec_env "$spec")
 EOF
@@ -995,12 +997,21 @@ EOF
     esac
   fi
 
-  # Apply each kit's files + commands.
+  # Apply each kit's files + commands. Best-effort per kit: a single kit that
+  # fails to fully apply (e.g. a transient `msb copy` verify failure) must NOT
+  # abort provision under `set -e` and leave an already-created, agent-installed
+  # sandbox half-configured with no diagnostic. Warn and continue — the kits are
+  # individually non-fatal (the playbook kit already self-heals on next start),
+  # matching acq_backend_ensure_kits_applied's best-effort heal loop.
   local kd
   for kd in "${kitdirs[@]}"; do
     acq_debug "msb provision: applying kit dir $kd ($name)"
-    _acq_msb_apply_kit_dir "$name" "$kd"
-    acq_debug "msb provision: applied kit dir $kd ($name)"
+    if _acq_msb_apply_kit_dir "$name" "$kd"; then
+      acq_debug "msb provision: applied kit dir $kd ($name)"
+    else
+      echo "acq(msb): warning: kit did not fully apply: $kd" >&2
+      echo "acq(msb):   the sandbox is up; re-run 'acq run' to re-apply, or inspect with ACQ_DEBUG=1." >&2
+    fi
   done
   acq_debug "msb provision: all kits applied; provision complete ($name)"
 }
@@ -1287,7 +1298,7 @@ _acq_msb_attach() {
 
   # Read the agent recorded at provision. Default to `shell` if unset.
   local agent
-  agent=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null | tr -d '\r\n[:space:]')
+  agent=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null | tr -d '[:space:]')
   [ -n "$agent" ] || agent="shell"
 
   # Common flags for the interactive attach: PTY, agent user, workspace cwd, and
