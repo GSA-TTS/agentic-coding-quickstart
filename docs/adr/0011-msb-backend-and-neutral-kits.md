@@ -204,12 +204,15 @@ for `docker/sandbox-templates:shell-docker`:
   — the two remaining published requirements a plain base lacks. Idempotent +
   marker-gated; a base without `sudo` is non-fatal (acq runs root steps as
   `-u 0` directly).
-- **Launch the agent on attach** (`acq_backend_attach` → `_acq_msb_ssh_agent`).
-  Reproduces `sbx run --name`'s "re-launch the baked-in agent" behavior:
-  `msb ssh NAME -- su - agent -c "cd <workspace>; exec <agent>"`. The agent to
-  run is recorded at provision (`/var/lib/acq/agent`) so the name-only re-attach
-  path (`acq run <sandbox>`) still launches it. Falls back to a shell **as the
-  agent user** (never root) for `shell` sandboxes or a missing binary.
+- **Launch the agent on attach** (`acq_backend_attach` → `_acq_msb_attach`).
+  Reproduces `sbx run --name`'s "re-launch the baked-in agent" behavior with
+  `msb exec -t -u agent -w <workspace> -e SHELL=/bin/sh NAME -- <agent>` — the one
+  msb primitive that allocates a PTY (so a full-screen agent TUI renders; `msb
+  ssh` has no tty flag), runs as the unprivileged `agent` user, and starts in the
+  workspace. The agent to run is recorded at provision (`/var/lib/acq/agent`) so
+  the name-only re-attach path (`acq run <sandbox>`) still launches it. Falls back
+  to an interactive `/bin/sh -l` **as the agent user** (never root, never msb's
+  Node-REPL default) for `shell` sandboxes or a missing binary.
 
 Egress note: this adds one create-time allow-list host (the npm registry) only
 when an installable agent is requested; it does not widen egress for `shell`.

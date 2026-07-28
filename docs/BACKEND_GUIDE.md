@@ -158,7 +158,6 @@ Tunables:
 |---------|---------|---------|
 | `ACQ_MSB_IMAGE` | `docker.io/library/node:22-bookworm` | Base OCI image (must be pullable and ship node/git/curl/ca-certificates) |
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
-| `ACQ_MSB_AGENT_UID` | `1000` | Preferred uid for the provisioned `agent` user |
 | `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
 | `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
 | `ACQ_MSB_WORKSPACE` | (host path) | Guest mount point for the host workspace (default: the same absolute path as on the host, matching sbx) |
@@ -278,15 +277,17 @@ sudoers rule) meets none of the first three. So at provision the msb adapter
 `HOME=/home/agent` (offline via `useradd`/`adduser`), chowns the staged
 `/home/agent` files to it, drops a passwordless-sudo rule in `/etc/sudoers.d`,
 and adds a sudoers `env_keep` for the proxy variables. It addresses the user by
-name (not the literal uid 1000), so it works even when 1000 is already taken. Set
-`ACQ_MSB_AGENT_UID` to prefer a specific uid.
+name (not the literal uid 1000), so it works even when 1000 is already taken by
+the base image (e.g. `node` on node:22-bookworm).
 
-**How attach launches the agent.** sbx's `sbx run --name` re-launches the baked-in
-agent; msb's `msb ssh NAME` only opens a shell (as root, msb's default SSH user).
-So on attach the msb adapter reproduces sbx's behavior itself: it `su - agent`s to
-the unprivileged `agent` user, `cd`s into the workspace, and execs the agent that
-was recorded at provision (falling back to an interactive shell as `agent` — never
-a root shell — for a `shell` sandbox or if the binary is somehow missing).
+**How attach launches the agent.** sbx's `sbx run --name` re-launches the
+baked-in agent. On msb the adapter reproduces that with `msb exec -t` — the one
+primitive that allocates a PTY (so a full-screen agent TUI renders), runs as the
+unprivileged `agent` user (`-u agent`), starts in the workspace (`-w`), and gives
+the session a sane `$SHELL`. It execs the agent recorded at provision, falling
+back to an interactive `/bin/sh -l` as `agent` — never a root shell, never msb's
+default interactive shell (the base image's Node REPL) — for a `shell` sandbox or
+if the agent binary is somehow missing.
 
 To use your own image, set `ACQ_MSB_IMAGE` to one that also provides node, git,
 curl, and ca-certificates:

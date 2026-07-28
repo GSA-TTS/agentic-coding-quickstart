@@ -102,7 +102,16 @@ ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-api.github.com}"
 
 # _acq_msb_service_binding SERVICE -> "ENVVAR<TAB>HOST" for services the msb
 # adapter binds via `--secret ENV@HOST`, or empty for services it does not bind.
-# Single source of truth for the bind (provision) and unbind (secret rm) paths.
+# Single source of truth for the bind (provision), rotate (set), and unbind
+# (secret rm) paths.
+#
+# NOTE (quickstart#226, gap C): this is still a fixed table (usai + github), not
+# generic. An arbitrary stored custom endpoint (`acq secret set SANDBOX --host
+# api.example.com --env API_KEY`) is NOT yet bound on msb — closing that requires
+# the acq secret store to persist the per-service host/env pair (msb's
+# `acq_backend_secret_set` does not yet accept/store --host/--env) and this
+# function to read it back. Tracked in #226; out of scope for this PR, which
+# generalized the re-feed/rotate machinery and added github via the REST path.
 _acq_msb_service_binding() {
   case "$1" in
     usai)   printf '%s\t%s\n' "USAI_API_KEY" "$ACQ_MSB_USAI_HOST" ;;
@@ -113,9 +122,9 @@ _acq_msb_service_binding() {
 
 # The kits expect an unprivileged `agent` user with HOME=/home/agent (the sbx
 # agent-template contract). Plain OCI bases don't provide it, so the adapter
-# creates it at provision (see _acq_msb_ensure_agent_user). uid 1000 is the
-# preferred id but not required — kit commands address the user by name.
-ACQ_MSB_AGENT_UID="${ACQ_MSB_AGENT_UID:-1000}"
+# creates it at provision (see _acq_msb_ensure_agent_user), addressing it by
+# NAME — the uid is whatever the base image leaves free (1000 is often taken by
+# a pre-existing user, e.g. `node` on node:22-bookworm).
 
 # Guest memory and vCPU allocation.
 # ---------------------------------------------------------------------------

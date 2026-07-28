@@ -66,6 +66,7 @@ make_stubs() {
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
 case "${1:-}" in
   version) printf 'sbx version: v0.35.1 abc123\n' ;;
+  --help|-h) printf 'SBX-TOPLEVEL-HELP\n' ;;
   ls)
     [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"
     exit 0 ;;
@@ -78,7 +79,7 @@ case "${1:-}" in
       *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
       *) exit 0 ;;
     esac ;;
-  run)  exit 0 ;;
+  run)  [ "${2:-}" = "--help" ] && printf 'SBX-RUN-HELP\n'; exit 0 ;;
   stop) exit 0 ;;
   rm)   exit 0 ;;
   cp)   exit 0 ;;
@@ -109,6 +110,7 @@ STUB
 _msb_sub="${1:-}"
 case "$_msb_sub" in
   --version|-V) printf 'msb 0.6.6\n' ;;
+  --help|-h) printf 'MSB-TOPLEVEL-HELP for msb\n' ;;
   doctor) exit 0 ;;
   create) : >"$STUBDIR/.msb_created" ;;
   list|ls)
@@ -737,6 +739,31 @@ assert_contains "version: script path" "$out" "$REPO_ROOT/acq"
 _want_ref=$(ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1; printf '%s' "$PATTERNS_KIT_REF")
 assert_contains "version: patterns kit ref" "$out" "$_want_ref"
 assert_contains "version: backend line" "$out" "backend:"
+cleanup_stubs
+
+# ===========================================================================
+# 7b. acq help — acq's own usage + backend passthrough, and --backend {sbx,msb}
+# ===========================================================================
+make_stubs
+# `acq help` prints acq usage, lists --backend sbx|msb, then the backend's help.
+help_out=$(ACQ_BACKEND=sbx "$ACQ" help 2>&1); help_rc=$?
+assert_eq "help: exits 0" "0" "$help_rc"
+assert_contains "help: shows acq banner" "$help_out" "acq — agentic coding quickstart wrapper"
+assert_contains "help: documents --backend sbx|msb" "$help_out" "--backend sbx|msb"
+assert_contains "help: mentions msb backend" "$help_out" "microsandbox (msb)"
+assert_contains "help: appends backend help" "$help_out" "SBX-TOPLEVEL-HELP"
+# `acq --help` and `acq -h` behave the same.
+assert_contains "help: --help form" "$(ACQ_BACKEND=sbx "$ACQ" --help 2>&1)" "acq — agentic coding quickstart wrapper"
+assert_contains "help: -h form" "$(ACQ_BACKEND=sbx "$ACQ" -h 2>&1)" "acq — agentic coding quickstart wrapper"
+# `acq help run` and `acq run --help` delegate to the backend's per-subcommand help.
+assert_contains "help: 'help run' -> backend run --help" "$(ACQ_BACKEND=sbx "$ACQ" help run 2>&1)" "SBX-RUN-HELP"
+assert_contains "help: 'run --help' -> backend run --help" "$(ACQ_BACKEND=sbx "$ACQ" run --help 2>&1)" "SBX-RUN-HELP"
+# A bare `acq` (no subcommand) prints help but is a usage error (exit 2).
+bare_out=$(ACQ_BACKEND=sbx "$ACQ" 2>&1); bare_rc=$?
+assert_eq "help: bare acq exits 2" "2" "$bare_rc"
+assert_contains "help: bare acq shows usage" "$bare_out" "acq — agentic coding quickstart wrapper"
+# --backend msb surfaces the msb backend's own help under the separator.
+assert_contains "help: --backend msb appends msb help" "$(ACQ_BACKEND=sbx "$ACQ" --backend msb help 2>&1)" "msb"
 cleanup_stubs
 
 # ===========================================================================
