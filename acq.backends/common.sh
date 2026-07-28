@@ -212,6 +212,46 @@ workspace_path() {
   done
 }
 
+# List ALL workspace positionals in an AGENT-form create/run arg list: every
+# non-flag positional AFTER the agent (primary workspace first, then any extra
+# mounts). Each is emitted on its own line, VERBATIM (including any `:ro`
+# suffix) so a caller can preserve read-only intent. Mirrors sbx's
+# multi-workspace syntax: `acq run opencode ~/app ~/lib:ro`.
+workspace_paths() {
+  local agent="" prev=""
+  for arg in "$@"; do
+    if _takes_value "$prev"; then prev="$arg"; continue; fi
+    case "$arg" in
+      --backend=*) prev="$arg"; continue ;;
+      -*) prev="$arg"; continue ;;
+    esac
+    if [ -z "$agent" ]; then
+      agent="$arg"
+    else
+      printf '%s\n' "$arg"
+    fi
+    prev="$arg"
+  done
+}
+
+# Canonicalize a filesystem path to its real, symlink-free absolute form.
+# Echoes the resolved path, or the input unchanged if it cannot be resolved
+# (e.g. a nonexistent path, or no realpath/readlink available). Pure stdout;
+# never mutates the filesystem. Used so a backend mounts the REAL host path —
+# e.g. on macOS $TMPDIR is a /var -> /private/var symlink, and msb cannot mount
+# the symlinked form (see docs/BACKEND_GUIDE.md, msb workspace mounting).
+canonicalize_path() {
+  local p="${1:-}"
+  [ -n "$p" ] || return 0
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$p" 2>/dev/null && return 0
+  fi
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -f "$p" 2>/dev/null && return 0
+  fi
+  printf '%s\n' "$p"
+}
+
 # Find the first non-flag positional in a create/run arg list.
 first_positional() {
   local prev=""

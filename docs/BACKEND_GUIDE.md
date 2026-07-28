@@ -161,7 +161,7 @@ Tunables:
 | `ACQ_MSB_AGENT_UID` | `1000` | Preferred uid for the provisioned `agent` user |
 | `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
 | `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
-| `ACQ_MSB_WORKSPACE` | `/home/agent/workspace` | Guest mount point for the host workspace |
+| `ACQ_MSB_WORKSPACE` | (host path) | Guest mount point for the host workspace (default: the same absolute path as on the host, matching sbx) |
 | `ACQ_MSB_MEMORY` | `4G` | Guest RAM at create (`-m`); `4G`/`4096`/`512M` (bare = MiB). Set empty to use msb's 512 MiB default |
 | `ACQ_MSB_CPUS` | `2` | Guest vCPU count at create (`-c`); set empty to use msb's 1-vCPU default |
 | `ACQ_MSB_DNS_NAMESERVER` | `1.1.1.1` | Guest DNS resolver (set empty to use msb's default) |
@@ -193,12 +193,43 @@ GiB, `M`/`m` = MiB, bare number = MiB — so `4G`, `4096`, and `4g` are equivale
 
 ### Workspace mounting
 
-msb does **not** create the host mount path and will not reliably mount a guest
-path that mirrors an absolute host path under `/tmp` (the mount silently does
-not appear). So the msb backend mounts your host workspace at a fixed guest path
-(`ACQ_MSB_WORKSPACE`, default `/home/agent/workspace`) rather than at its host
-path. The host path must already exist — `acq` errors clearly if it does not.
-This differs from sbx, which mounts the workspace at its original path.
+msb does **not** create the host mount path, so each host workspace path must
+already exist — `acq` errors clearly if one does not.
+
+The msb backend mounts every workspace at the **same absolute path inside the
+guest** (matching sbx's multi-workspace semantics — see
+`docs/QUICKSTART_SBX.md`): `acq run opencode /my/repo` makes the repo appear at
+`/my/repo` in the sandbox. Extra workspaces and a trailing `:ro` marker work the
+same as sbx:
+
+```bash
+acq --backend msb run opencode ~/projects/app ~/projects/lib:ro
+# mounts ~/projects/app (rw) and ~/projects/lib (ro), each at its host path
+```
+
+**Starting directory:** the agent starts in the **primary** (first) workspace,
+matching sbx (`docs/QUICKSTART_SBX.md`: "Primary workspace — the first path;
+agent starts here"). Override the start dir with `ACQ_MSB_WORKSPACE`.
+
+**Symlinked host paths are canonicalized.** msb cannot mount a symlinked host
+path — it fails to start with `mount ...: Not a directory (os error 20)`, even
+when mapped to a shallow guest target (verified on msb 0.6.6). The most common
+case is **macOS `$TMPDIR`**, a per-user `/var/folders/...` tree reached through
+the `/var` → `/private/var` symlink: any workspace under `$TMPDIR` / `/tmp`
+fails. `acq` therefore resolves each workspace to its real, symlink-free path
+(e.g. `/private/var/...`) before mounting. A directory under `$HOME` mounts
+fine; prefer one over a temp dir if you hit this.
+
+> **Why not remap under `/home/agent`?** An earlier version mounted the
+> workspace under the agent home (`/home/agent/workspace`). But `msb create`
+> performs the mount *before* `acq` can create the `agent` user and its
+> `/home/agent` directory (that happens post-create, once the guest is
+> exec-ready), so on a plain base image the mount failed with
+> `mount ...: Not a directory (os error 20)`. Mounting at the
+> host's own (canonicalized) absolute path avoids that ordering problem entirely
+> and matches what sbx does.
+
+Note the async-boot caveat:
 
 > **`msb create` starts asynchronously.** `msb create` returns success even if
 > the sandbox later fails to *start* (e.g. a bad mount). `acq` therefore treats

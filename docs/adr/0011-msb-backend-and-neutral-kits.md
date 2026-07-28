@@ -111,9 +111,10 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   user (HOME=/home/agent)** the kits assume (the sbx agent-template contract) —
   a plain base has no such user (node:22-bookworm has `node` at uid 1000) — and
   runs the kits' uid-1000 commands as `agent` (by name, with HOME set), chowning
-  staged `/home/agent` files to it. It **mounts the host workspace at a fixed
-  guest path** (`ACQ_MSB_WORKSPACE`, default `/home/agent/workspace`) because msb
-  won't create the host path and mishandles an identical host:guest `/tmp` mount.
+  staged `/home/agent` files to it. It **mounts each host workspace at the same
+  absolute path in the guest** (sbx-parity; see the workspace-mount note below) —
+  an earlier revision remapped to a fixed `/home/agent/workspace`, which failed
+  because `msb create` mounts before the `agent` user/home exist.
   It passes **`--dns-nameserver`** (default `1.1.1.1`) because msb hands the
   guest the host's resolvers, which for a corporate/VPN resolver are unreachable
   from the microVM (otherwise the guest can't resolve even allow-listed hosts).
@@ -225,6 +226,34 @@ at create, tunable via `ACQ_MSB_MEMORY` / `ACQ_MSB_CPUS` (empty = fall back to
 msb's own default). Values are validated before reaching the create line (memory
 to msb's `[0-9GMgm.]` SIZE grammar, cpus to a positive integer) so a stray value
 cannot smuggle another flag onto `msb create`.
+
+### Workspace mount at the host path (fix for PR #230)
+
+An earlier revision mounted the host workspace at a **fixed guest path**
+(`/home/agent/workspace`). That failed on a plain base image with
+`mount ...: Not a directory (os error 20)`: `msb create` performs the mount at
+**create time**, which is *before* the adapter can create the `agent` user and
+its `/home/agent` directory (that happens post-create, once the guest is
+exec-ready). Mounting into a not-yet-existent `/home/agent` therefore aborted
+the sandbox boot.
+
+The adapter now mounts **each workspace at its own absolute host path in the
+guest** (`--volume <host>:<host>[:ro]`), matching sbx's multi-workspace
+semantics (`docs/QUICKSTART_SBX.md`: "All workspaces appear inside the sandbox at
+their absolute host paths"). This sidesteps the create-time ordering problem and
+restores sbx parity. Multiple workspaces and a trailing `:ro` marker are
+supported (`workspace_paths` in `common.sh` enumerates them). The agent's
+starting directory is recorded at provision (`/var/lib/acq/workspace`) for the
+name-only re-attach path: it is the **primary (first) workspace**, matching sbx.
+`ACQ_MSB_WORKSPACE` overrides the start dir.
+
+A second, related failure: msb **cannot mount a symlinked host path**. It fails
+to start with the same `os error 20` even mapped to a shallow guest target
+(verified on msb 0.6.6). The common case is **macOS `$TMPDIR`**, a per-user
+`/var/folders/...` tree reached through the `/var` → `/private/var` symlink. The
+adapter therefore canonicalizes each workspace to its real, symlink-free path
+(`canonicalize_path` in `common.sh`) before mounting, and `scripts/verify-backends`
+no longer places its test workspace under `$TMPDIR`.
 
 ### msb CLI flag verification
 

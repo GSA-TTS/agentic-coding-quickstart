@@ -131,6 +131,7 @@ case "$_msb_sub" in
       *"test -f "*) exit 1 ;;       # markers absent
       *"test -s "*) exit 0 ;;       # copied files present
       *"cat /var/lib/acq/agent"*) printf '%s' "${STUB_RECORDED_AGENT:-}" ;;
+      *"cat /var/lib/acq/workspace"*) printf '%s' "${STUB_RECORDED_WORKSPACE:-}" ;;
       *) : ;;
     esac ;;
   ssh)  : ;;
@@ -704,10 +705,71 @@ assert_contains "msb: provision enables --tls-intercept (needed for substitution
 assert_contains "msb: provision binds USAi via --secret" "$prov_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
 assert_not_contains "msb: provision does NOT bind github (git substitution unsupported)" "$prov_log" "GITHUB_TOKEN@"
 assert_eq "msb: provision never leaks secret values to argv" "CLEAN" "$prov_leaks"
-# Workspace is mounted at the fixed guest path (NOT host:host), and the host
-# path (/tmp) exists so no error.
-assert_contains "msb: workspace mounted at guest path" "$prov_log" "--volume /tmp:/home/agent/workspace"
-assert_not_contains "msb: workspace NOT mounted host:host" "$prov_log" "--volume /tmp:/tmp"
+# Workspace is mounted at the SAME absolute path in the guest (sbx-parity), not
+# remapped under /home/agent (which fails to mount pre-user-create).
+assert_contains "msb: workspace mounted at same guest path (sbx-parity)" "$prov_log" "--volume /tmp:/tmp"
+assert_not_contains "msb: workspace NOT remapped under /home/agent" "$prov_log" "--volume /tmp:/home/agent/workspace"
+cleanup_stubs
+
+# 8m1b. Multi-workspace: every workspace positional after the agent is mounted at
+#       its own absolute host path (sbx-parity), a trailing :ro is preserved, and
+#       the recorded start dir is the FIRST (primary) workspace regardless of how
+#       many mounts are given (docs/QUICKSTART_SBX.md: "Primary workspace — the
+#       first path; agent starts here").
+make_stubs; load_acq
+# Two real host dirs to mount (a nonexistent path would hard-fail provision).
+mkdir -p "$STUBDIR/ws-app" "$STUBDIR/ws-lib"
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/mw-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision mwbox opencode "$STUBDIR/ws-app" "$STUBDIR/ws-lib:ro" >/dev/null 2>&1
+)
+mw_log=$(cat "$CALLS")
+assert_contains "msb: multi-ws mounts primary at its host path" "$mw_log" "--volume ${STUBDIR}/ws-app:${STUBDIR}/ws-app"
+assert_contains "msb: multi-ws mounts extra ro at its host path" "$mw_log" "--volume ${STUBDIR}/ws-lib:${STUBDIR}/ws-lib:ro"
+assert_contains "msb: multi-ws start dir is the FIRST (primary) workspace" "$mw_log" "'${STUBDIR}/ws-app' > /var/lib/acq/workspace"
+assert_not_contains "msb: multi-ws does NOT fall back to /home/agent/workspace" "$mw_log" "'/home/agent/workspace' > /var/lib/acq/workspace"
+
+# Single workspace records that mount as the start dir.
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/sw-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  acq_backend_provision swbox opencode "$STUBDIR/ws-app" >/dev/null 2>&1
+)
+sw_log=$(cat "$CALLS")
+assert_contains "msb: single-ws records that mount as start dir" "$sw_log" "'${STUBDIR}/ws-app' > /var/lib/acq/workspace"
+cleanup_stubs
+
+# 8m1c. Symlinked host workspace is canonicalized before mounting. msb cannot
+#       mount a symlinked host path (macOS $TMPDIR is /var -> /private/var), so
+#       acq resolves it to its real path first. Simulate with a symlink dir ->
+#       real dir and assert the --volume uses the REAL target, not the link.
+make_stubs; load_acq
+mkdir -p "$STUBDIR/real-ws"
+ln -sf "$STUBDIR/real-ws" "$STUBDIR/link-ws"
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/sym-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision symbox opencode "$STUBDIR/link-ws" >/dev/null 2>&1
+)
+sym_log=$(cat "$CALLS")
+# realpath of the symlink is the real dir; assert the mount uses it.
+_real_ws=$(realpath "$STUBDIR/real-ws" 2>/dev/null || printf '%s' "$STUBDIR/real-ws")
+assert_contains "msb: symlinked workspace canonicalized to real path" "$sym_log" "--volume ${_real_ws}:${_real_ws}"
+assert_not_contains "msb: symlinked workspace NOT mounted via the link" "$sym_log" "--volume ${STUBDIR}/link-ws:"
 cleanup_stubs
 
 # 8m2. msb provision aborts (hard fail) when the sandbox never becomes
@@ -884,6 +946,7 @@ make_stubs; load_acq
 : > "$CALLS"
 (
   export STUB_RECORDED_AGENT="opencode"
+  export STUB_RECORDED_WORKSPACE="/tmp/myrepo"
   . "${REPO_ROOT}/acq.backends/msb.sh"
   acq_backend_attach attachbox >/dev/null 2>&1
 )
@@ -891,7 +954,7 @@ attach_log=$(cat "$CALLS")
 assert_contains "msb: attach uses msb ssh" "$attach_log" "msb ssh attachbox"
 assert_contains "msb: attach drops to the agent user (su - agent)" "$attach_log" "su - agent"
 assert_contains "msb: attach execs the recorded agent" "$attach_log" "exec 'opencode'"
-assert_contains "msb: attach cds into the workspace" "$attach_log" "cd '/home/agent/workspace'"
+assert_contains "msb: attach cds into the recorded workspace" "$attach_log" "cd '/tmp/myrepo'"
 assert_not_contains "msb: attach is NOT a bare root ssh" "$attach_log" "msb ssh attachbox
 "
 cleanup_stubs

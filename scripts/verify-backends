@@ -104,11 +104,28 @@ run_acq() {
 }
 
 # Workspace to mount.
+#
+# NOTE: do NOT default to $TMPDIR / /tmp. On macOS, msb cannot mount a host path
+# under $TMPDIR (a per-user /var/folders/... tree, itself reached via the /var ->
+# /private/var symlink): `msb create` fails to start with
+# "mount ...: Not a directory (os error 20)" for ANY such path, even mapped to a
+# shallow guest target (verified on msb 0.6.6). A real directory under $HOME
+# mounts fine. So the verify workspace lives under a stable cache dir, and we
+# resolve it to its canonical (symlink-free) path before mounting.
 WORKDIR="${1:-}"
 if [ -z "$WORKDIR" ]; then
-  WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-verify-ws.XXXXXX")
+  _verify_base="${XDG_CACHE_HOME:-$HOME/.cache}/acq/verify"
+  mkdir -p "$_verify_base"
+  WORKDIR=$(mktemp -d "${_verify_base}/ws.XXXXXX")
   ( cd "$WORKDIR" && git init -q && git config user.email test@example.com \
       && git config user.name "acq verify" && echo hi > README.md ) || true
+fi
+
+# Canonicalize (resolve symlinks) so the mounted host path is the real one. acq
+# does this too, but resolving here keeps the derived sandbox name and any direct
+# msb/sbx checks below consistent with what acq actually mounts.
+if command -v realpath >/dev/null 2>&1; then
+  WORKDIR=$(realpath "$WORKDIR" 2>/dev/null || printf '%s' "$WORKDIR")
 fi
 
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"

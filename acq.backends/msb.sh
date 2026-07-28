@@ -704,25 +704,71 @@ acq_backend_provision() {
     esac
   fi
 
-  # Translate the caller's workspace path into a --volume mount. The agent token
-  # is the first positional; the workspace path follows. msb does NOT create the
-  # host mount path and it FAILS to mount when the guest path mirrors an absolute
-  # host path under /tmp (verified: identical host:guest under /tmp starts but
-  # the mount silently doesn't appear). So we mount the host workspace at a fixed
-  # conventional guest path under the agent home (ACQ_MSB_WORKSPACE), which works
-  # reliably. The chosen guest path is exported so the run/attach path can cd there.
-  local ws
-  ws=$(workspace_path "$@")
+  # Translate the caller's workspace path(s) into --volume mounts.
+  #
+  # CONTRACT (matches sbx semantics — see docs/QUICKSTART_SBX.md "Multiple
+  # Workspaces"): every workspace positional after the agent is mounted at its
+  # SAME absolute path inside the guest ("All workspaces appear inside the
+  # sandbox at their absolute host paths."). A trailing `:ro` marks that mount
+  # read-only. `acq run opencode ~/app ~/lib:ro` therefore mounts ~/app rw and
+  # ~/lib ro, each at its own host path.
+  #
+  # STARTING DIRECTORY (ACQ_MSB_GUEST_WORKSPACE, consumed by attach): the FIRST
+  # workspace positional is the "primary" — the agent starts there — regardless
+  # of how many mounts are given (docs/QUICKSTART_SBX.md: "Primary workspace —
+  # The first path; agent starts here."). ACQ_MSB_WORKSPACE overrides it.
+  #
+  # Why mount at the host path (not remapped under /home/agent): `msb create`
+  # performs the mount at create time, BEFORE acq can create the `agent` user and
+  # /home/agent (that happens post-create, once the guest is exec-ready). A plain
+  # base (node:22-bookworm) has no /home/agent, so mounting into it failed with
+  # "mount ...: Not a directory (os error 20)". Mounting at the host's own
+  # absolute path sidesteps the ordering problem and matches sbx. NOTE: msb also
+  # cannot mount a SYMLINKED host path (e.g. macOS $TMPDIR under /var ->
+  # /private/var); each path is canonicalized below before the mount.
+  local _ws_recs=() wline
+  while IFS= read -r wline; do
+    [ -n "$wline" ] && _ws_recs+=("$wline")
+  done <<EOF
+$(workspace_paths "$@")
+EOF
+
   ACQ_MSB_GUEST_WORKSPACE=""
-  if [ -n "$ws" ]; then
-    if [ ! -d "$ws" ]; then
-      echo "acq(msb): error: workspace path does not exist on the host: $ws" >&2
+  local _wi _wspec _wpath _wro _first_guest=""
+  for _wi in ${_ws_recs[@]+"${!_ws_recs[@]}"}; do
+    _wspec="${_ws_recs[$_wi]}"
+    # Split an optional trailing ":ro" (read-only) marker from the path.
+    _wro=""
+    case "$_wspec" in
+      *:ro) _wpath="${_wspec%:ro}"; _wro=":ro" ;;
+      *)    _wpath="$_wspec" ;;
+    esac
+    if [ ! -d "$_wpath" ]; then
+      echo "acq(msb): error: workspace path does not exist on the host: $_wpath" >&2
       echo "acq(msb):   msb cannot mount a nonexistent host path. Create it first." >&2
       return 1
     fi
-    ACQ_MSB_GUEST_WORKSPACE="${ACQ_MSB_WORKSPACE:-/home/agent/workspace}"
-    create_flags+=(--volume "${ws}:${ACQ_MSB_GUEST_WORKSPACE}")
-    acq_debug "msb volume: ${ws} -> ${ACQ_MSB_GUEST_WORKSPACE}"
+    # Canonicalize to the real, symlink-free path before mounting. msb cannot
+    # mount a symlinked host path (verified on 0.6.6: a macOS $TMPDIR path under
+    # the /var -> /private/var symlink fails to start with
+    # "mount ...: Not a directory (os error 20)", even mapped to a shallow guest
+    # target). Resolving to /private/var/... lets the mount succeed. Falls back
+    # to the original path if it cannot be resolved.
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      _wpath=$(canonicalize_path "$_wpath")
+    fi
+    # Mount at the same absolute path in the guest (sbx-parity), preserving :ro.
+    create_flags+=(--volume "${_wpath}:${_wpath}${_wro}")
+    acq_debug "msb volume: ${_wpath} -> ${_wpath}${_wro}"
+    [ -z "$_first_guest" ] && _first_guest="$_wpath"
+  done
+
+  # Decide the agent's starting directory (recorded for attach). Explicit
+  # override wins; otherwise the FIRST (primary) workspace, matching sbx.
+  if [ -n "${ACQ_MSB_WORKSPACE:-}" ]; then
+    ACQ_MSB_GUEST_WORKSPACE="$ACQ_MSB_WORKSPACE"
+  elif [ -n "$_first_guest" ]; then
+    ACQ_MSB_GUEST_WORKSPACE="$_first_guest"
   fi
 
   # Credentials: read from the acq-owned secret store (keychain/file), scoped to
@@ -835,6 +881,20 @@ acq_backend_provision() {
     *[!a-z-]*) : ;;  # defensive: never write an odd token
     *) msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && printf '%s' '$agent' > /var/lib/acq/agent" >/dev/null 2>&1 || true ;;
   esac
+
+  # Record the guest workspace path too. attach only gets the sandbox NAME, so it
+  # cannot recompute the host→guest mapping (which now mirrors the host path);
+  # persist it so a name-only re-attach cds into the right place. The path was
+  # validated as an existing host dir above; guard the charset before it enters a
+  # root sh -c string.
+  if [ -n "$ACQ_MSB_GUEST_WORKSPACE" ]; then
+    case "$ACQ_MSB_GUEST_WORKSPACE" in
+      *[!A-Za-z0-9._/-]*)
+        acq_debug "msb: not recording unsafe guest workspace path: $ACQ_MSB_GUEST_WORKSPACE" ;;
+      *)
+        msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && printf '%s' '$ACQ_MSB_GUEST_WORKSPACE' > /var/lib/acq/workspace" >/dev/null 2>&1 || true ;;
+    esac
+  fi
 
   # Apply each kit's files + commands.
   local kd
@@ -1077,7 +1137,15 @@ _acq_msb_ssh_agent() {
   local name="$1"
   shift
 
-  local ws="${ACQ_MSB_WORKSPACE:-/home/agent/workspace}"
+  # Determine the workspace to cd into. Prefer an explicit ACQ_MSB_WORKSPACE
+  # override; otherwise read the guest path recorded at provision (which now
+  # mirrors the host mount path, so it can't be recomputed from NAME alone).
+  # Fall back to the agent home only if nothing was recorded (older sandbox).
+  local ws="${ACQ_MSB_WORKSPACE:-}"
+  if [ -z "$ws" ]; then
+    ws=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' 2>/dev/null | tr -d '\r\n')
+  fi
+  [ -n "$ws" ] || ws="/home/agent"
 
   # Read the agent recorded at provision. Default to `shell` if unset (older
   # sandbox, or a `shell` sandbox).
