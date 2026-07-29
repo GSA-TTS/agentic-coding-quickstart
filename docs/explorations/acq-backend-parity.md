@@ -4,8 +4,15 @@
 > **Scope:** the gaps between the `sbx` and `msb` backends of `acq` as they
 > stand after quickstart 2.0.1 (patterns `PATTERNS_KIT_REF` v1.7.0), and how each
 > gap is dispositioned — schedule, accept, or upstream-blocked.
-> **Companion ADR:** [ADR-0013](../adr/0013-neutral-port-publish-and-background-vocab.md)
+> **Companion ADR:** [ADR-0014](../adr/0014-neutral-port-publish-and-background-vocab.md)
 > (the neutral port-publish + background vocabulary, gap A below).
+>
+> **Rebase note (main moved under us):** several referenced PRs have since merged
+> to `main` — #221/#223 (sbx port-publish carry + `--kit` interception, gap A
+> sbx-half), #229 (per-sandbox GitHub token, new ADR-0013), and #230 (msb agent
+> install/launch + GitHub-via-REST secret binding, which closed #203). Gap C and
+> gap F below are updated accordingly; the companion ADR was renumbered
+> 0013→**0014** because #229 landed a different ADR-0013.
 
 This document is the shared map for bringing `msb` up to parity with `sbx`. It
 does not itself change behavior; it records what differs, why, and what the
@@ -34,16 +41,16 @@ absent), not a gap. This document lists only the real divergences.
 
 | # | Gap | State | Disposition |
 |---|-----|-------|-------------|
-| A | No neutral port-publish / background vocabulary | [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224), patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233) | **Schedule** (ADR-0013) |
+| A | No neutral port-publish / background vocabulary (sbx-half landed via #221/#223) | [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224), patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233) | **Schedule** (ADR-0014) |
 | B | msb `SUPPORTS_SNAPSHOTS=1` is unreachable (no `acq snapshot` verb / contract fn) | [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225) | **Schedule** (drop flag to 0) |
-| C | msb secret binding is USAi-only (sbx feeds 7 built-ins + custom endpoints) | [#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226) | **Schedule** (generic custom-endpoint); github stays blocked by F |
+| C | msb secret binding is a fixed table (usai + github via REST); arbitrary custom endpoints stored-not-bound | [#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226) | **Schedule** (generic custom-endpoint) |
 | D | `opencode-web.sh` is sbx-only | untracked | **Accept** (retire when #233 closes; openchamber supersedes) |
 | E | No state-preserving in-place kit heal on msb | ADR-0011 accepted | **Accept** + minor runtime UX note |
-| F | Private GitHub clone (playbook kit) skipped on msb | [#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203) | **Accept** (upstream-blocked) |
+| F | Private GitHub clone (playbook kit) on msb — RESOLVED via REST tarball on msb 0.6.7 (#230) | [#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203) (closed) | **Resolved** (git-over-HTTPS still upstream-blocked) |
 | G | `validate-kits.py` doesn't reject malformed `mode`/`user` | patterns [#225](https://github.com/GSA-TTS/agentic-coding-patterns/issues/225) | **Schedule** (patterns repo) |
 | H | test-acq msb auto-detect flaky when real `sbx` on PATH | [#217](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/217) | **Schedule** (test hygiene) |
 | I | `verify-backends` msb row never runs in CI (needs KVM) | ADR-noted | **Accept** (document cadence) |
-| J | Doc drift in BACKEND_GUIDE (version banner + differences table) | [#227](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/227) | **Schedule** (docs) |
+| J | Doc drift in BACKEND_GUIDE (version banner + differences table) | [#227](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/227) | **In progress** (banner + tables refreshed this branch) |
 
 ---
 
@@ -63,7 +70,17 @@ kit that needs to expose a port or run a non-exiting supervisor (e.g.
 the neutral schema lives in patterns (`schemas/kit-hybrid-v1.schema.json`,
 `validate-kits.py`).
 
-**Disposition.** Design in [ADR-0013](../adr/0013-neutral-port-publish-and-background-vocab.md);
+**Landed on main (rebase).** The sbx half is already in: PR #221 made
+`kit_translate_to_sbx` emit `backend_extras.sbx.publishedPorts` into the sbx-v2
+spec (closing #219) and single-quote wildcard allow hosts (closing #220), while
+PR #223 taught `acq run/create` to intercept a user `--kit <ref>` and translate
+it.
+So the remaining gap-A work is narrower than when this map was written: promote
+the field to the **neutral** level (out of `backend_extras.sbx`) and add the
+**msb consumer**; the sbx path becomes a rename + one-release deprecated
+fallback rather than a new carry.
+
+**Disposition.** Design in [ADR-0014](../adr/0014-neutral-port-publish-and-background-vocab.md);
 implement the neutral fields + msb consumer in quickstart; land the schema
 property in patterns; then flip openchamber to `backends: [sbx, msb]`
 (patterns #233 Increment B).
@@ -86,22 +103,28 @@ cannot invoke is misleading. Set `ACQ_BACKEND_SUPPORTS_SNAPSHOTS=0` in
 snapshots are actually surfaced. This keeps the capability matrix honest without
 committing to the larger snapshot UX now.
 
-### C. msb secret binding is USAi-only — **Schedule**
+### C. msb secret binding is a fixed table (usai + github-via-REST) — **Schedule**
 
 **Evidence.** `sbx.sh` feeds 7 built-in services
 (`anthropic github gitlab google-cloud openai aws azure`) plus custom
-`--host/--env` endpoints. `msb.sh` `acq_backend_secret_set` stores every service
-in the acq store but only *binds* `usai` at provision
-(`--secret USAI_API_KEY@api.gsa.usai.gov`); `github` and any other service are
-stored-but-not-wired (the `*)` arm says so explicitly).
+`--host/--env` endpoints. On msb, #230 generalized the re-feed/rotate machinery
+and added a `github` binding via the REST host: `_acq_msb_service_binding` is now
+a fixed two-entry table — `usai` → `USAI_API_KEY@api.gsa.usai.gov` and `github`
+→ `GITHUB_TOKEN@api.github.com` (REST only; see gap F). Any *other* service
+(`acq secret set SANDBOX --host api.example.com --env API_KEY`) is still stored
+in the acq store but **not bound** at provision (the `*)` arm returns empty).
 
-**Why it matters.** A user who `acq secret set`s a custom endpoint on msb gets no
-`--secret ENV@HOST` binding — a silent no-op relative to sbx.
+**Why it matters.** A user who `acq secret set`s an arbitrary custom endpoint on
+msb gets no `--secret ENV@HOST` binding — a silent no-op relative to sbx's
+`set-custom` breadth. Closing this needs the acq secret store to persist the
+per-service `--host`/`--env` pair (msb's `acq_backend_secret_set` does not yet
+accept/store it) and `_acq_msb_service_binding` to read it back.
 
-**Disposition.** Extend the msb provision path to bind generic custom-endpoint
-services (any service with a resolved `--host`/`--env`) via `--secret ENV@HOST`,
-mirroring sbx's `set-custom` breadth. **GitHub specifically stays unbound** — see
-gap F; that is upstream-blocked, not a scope choice.
+**Disposition.** **Schedule** — extend the msb provision path to bind generic
+custom-endpoint services (any service with a resolved `--host`/`--env`) via
+`--secret ENV@HOST`, mirroring sbx's `set-custom` breadth. GitHub is already
+bound (REST host only); the git-over-HTTPS transport remains upstream-limited
+(gap F). Tracked in #226.
 
 ### D. `opencode-web.sh` is sbx-only — **Accept** (retire on #233)
 
@@ -138,21 +161,27 @@ consider a one-line note that heal re-applies rather than adds in place.
 **Trigger to revisit:** a microsandbox release that ships a state-preserving
 in-place kit-add primitive.
 
-### F. Private GitHub clone (playbook kit) skipped on msb — **Accept**
+### F. Private GitHub clone (playbook kit) on msb — **Resolved** (#230)
 
-**Evidence.** microsandbox 0.6.6 does not substitute the credential placeholder
-for git's HTTPS smart-transport to `github.com` (verified extensively; the
-`Authorization: Bearer` header path for USAi works, git does not). acq therefore
-does not bind a GitHub `--secret` on msb; the playbook clone warns and continues
-(non-fatal). Fully documented in ADR-0011 and BACKEND_GUIDE, tracked in #203.
+**Evidence.** microsandbox ≤ 0.6.6 did not substitute the credential placeholder
+for git's HTTPS smart-transport to `github.com` (the `Authorization: Bearer`
+header path for USAi worked, `git clone` did not). **Resolved on main:** msb
+0.6.7 shipped the upstream fix for #1170, and #230 reworked the playbook kit to
+fetch the repo **source tarball via the REST API**
+(`api.github.com/repos/<repo>/tarball/<ref>`), which msb *does* substitute
+(verified 0.6.7). acq now binds `GITHUB_TOKEN@api.github.com` on msb, so the
+playbook kit works on msb. #203 is **closed** (on main, not yet in a tagged
+release).
 
-**Disposition.** **Accept** — upstream-blocked. **Trigger to revisit:**
-microsandbox [#756](https://github.com/superradcompany/microsandbox/issues/756) /
-[#1170](https://github.com/superradcompany/microsandbox/issues/1170) fixed (git
-HTTPS substitution works). Then bind `GITHUB_TOKEN` for the github hosts and
-have the guest git clone carry the placeholder. Interim workarounds
-(documented): use sbx for the playbook kit, or ship a base image with the
-playbook pre-cloned, or make the repo public. #203 stays open as the watch.
+**Disposition.** **Resolved.** The generic `git clone` over HTTPS to
+`github.com`/`codeload.github.com` is still not substituted upstream, so the
+adapter deliberately binds the **REST host only** (`api.github.com`) and kits
+that need github auth must use the REST API rather than `git clone`. **Residual
+watch:** microsandbox git-transport substitution for `github.com`
+([#756](https://github.com/superradcompany/microsandbox/issues/756) /
+[#1170](https://github.com/superradcompany/microsandbox/issues/1170) fixed the
+header path but not the git smart-transport) — if that lands, the adapter could
+bind the git hosts too. No open quickstart issue remains for this gap.
 
 ### G. `validate-kits.py` doesn't reject malformed `mode`/`user` — **Schedule**
 
@@ -193,39 +222,47 @@ after each release / after ≥3 behavior-affecting fixes, per AGENTS.md §8.3) a
 capture the transcript. **Trigger to revisit:** availability of a KVM-capable CI
 runner.
 
-### J. Doc drift in BACKEND_GUIDE — **Schedule**
+### J. Doc drift in BACKEND_GUIDE — **In progress** (partially refreshed)
 
-**Evidence.** BACKEND_GUIDE.md says "As of 1.2.0" and lists msb/sbx table
-versions as 1.1.0/1.2.0, while the repo is at 2.0.1. The "Differences from sbx"
-table does not mention gaps B (snapshots unwired), C (secret breadth), or D
-(opencode-web).
+**Evidence.** BACKEND_GUIDE.md said "As of 1.2.0" and listed msb/sbx table
+versions as 1.1.0/1.2.0, while the repo is on the 2.x line. The "Differences
+from sbx" table did not mention gaps B (snapshots unwired), C (secret breadth),
+or D (opencode-web).
 
-**Disposition.** **Schedule** — refresh the version banner and the differences
-table so the guide matches shipped behavior. Fold in the outcomes of A–C as they
-land, and record the openchamber-supersedes-opencode-web relationship (gap D).
+**Disposition.** **Refreshed in this branch:** the version banner is delinked
+from a stale point release (2.x line), the per-backend version columns are
+dropped, and the "Differences from sbx" + "Known limitations (msb)" sections now
+fold in gaps B (snapshots inert, #225), C (fixed usai+github secret table, in
+issue #226), D (opencode-web sbx-only, openchamber supersedes), and the gap I
+verify-backends cadence. The msb secret section and capability flags reflect
+the github-via-REST binding from #230. #227 stays open to track any residual
+drift as gaps A–C actually *land* (the guide currently describes them as
+scheduled, not done).
 
 ---
 
 ## Sequencing
 
 ```
-ADR-0013 (gap A design, accepted)   ── design gate
+ADR-0014 (gap A design, accepted)   ── design gate
         │
         └─> A impl (quickstart translator + msb consumer)  ── unblocks patterns #233 Increment B
+                (sbx half already merged: #221 carry + #223 --kit intercept)
 
         B (drop msb snapshot flag to 0 + follow-up wiring)  ── independent, low-risk
-        C (msb generic secret binding)      ── independent (github still blocked by F)
+        C (msb generic secret binding)      ── independent (github REST bound via #230; arbitrary endpoints remain)
         H (test-acq PATH robustness)        ── independent, low-risk (#217)
         J (BACKEND_GUIDE refresh)           ── trails A–C
 
 patterns, in parallel:
         G (validate-kits.py mode/user)      ── shared security choke point (#225)
-        #233 Increment A (adopt quickstart#221, drop manual publish workaround)
+        #233 Increment A (adopt quickstart#221, drop manual publish workaround)  ── unblocked now (#221 merged)
 ```
 
 **Accepted / not scheduled** (documented above with triggers): **D**
-(opencode-web — retire when #233 closes), **E** (heal), **F** (#203, upstream),
-**I** (verify-backends CI).
+(opencode-web — retire when #233 closes), **E** (heal), **I**
+(verify-backends CI). **F** (playbook clone on msb) is now **Resolved** (#230,
+msb 0.6.7); its residual is an upstream git-transport watch, not a tracked gap.
 
 ---
 
@@ -234,13 +271,14 @@ patterns, in parallel:
 **Quickstart repo (new):**
 
 1. [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224) —
-   implement ADR-0013 neutral port-publish + background vocab and the msb
-   consumer (gap A).
+   implement ADR-0014 neutral port-publish + background vocab and the msb
+   consumer (gap A). Sbx half already merged (#221, #223).
 2. [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225) —
    drop msb `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` to 0; follow-up to wire a real
    `acq snapshot` + `acq_backend_snapshot` (gap B).
 3. [#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226) —
    broaden msb secret binding to generic custom-endpoint services (gap C).
+   (github REST binding already landed via #230.)
 4. [#227](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/227) —
    refresh BACKEND_GUIDE version banner + differences table (gap J).
 
@@ -253,13 +291,17 @@ patterns, in parallel:
 
 1. [#225](https://github.com/GSA-TTS/agentic-coding-patterns/issues/225) —
    harden `validate-kits.py` (reject malformed `mode`/`user`/`path` + fixtures)
-   (gap G); commented to confirm scope + the ADR-0013 intersection.
+   (gap G); commented to confirm scope + the ADR-0014 intersection.
 2. [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233) —
-   openchamber msb/ppp parity (gap A Increment B); commented that ADR-0013 +
-   quickstart#224 unblock it, and Increment A is unblocked now.
+   openchamber msb/ppp parity (gap A Increment B); commented that ADR-0014 +
+   quickstart#224 unblock it, and Increment A is unblocked now (#221 merged).
 
 **Accepted (no new issue; keep existing watches):**
-[#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203) (gap F);
 the ADR-0011 record for gap E; gap D retires when patterns #233 closes; the
 verify-backends cadence (gap I) is documented in the BACKEND_GUIDE refresh
 (quickstart #227).
+
+**Resolved (closed):**
+[#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203) (gap F) —
+closed by #230 on main (msb 0.6.7 + REST-tarball playbook fetch); residual is an
+upstream microsandbox git-transport watch only.

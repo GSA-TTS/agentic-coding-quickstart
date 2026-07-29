@@ -11,7 +11,7 @@ risk_treatment: accept
 supersedes: []
 ---
 
-# ADR-0013: Neutral Port-Publish and Background-Command Kit Vocabulary
+# ADR-0014: Neutral Port-Publish and Background-Command Kit Vocabulary
 
 ## Context and Problem Statement
 
@@ -38,6 +38,17 @@ field (verified: no `publishedPorts`/`background` reference in
 [`docs/explorations/acq-backend-parity.md`](../explorations/acq-backend-parity.md)
 and the largest blocker to a kit declaring `backends: [sbx, msb]`
 (patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)).
+
+> **Update (main after rebase):** the sbx half of the port path already landed —
+> quickstart [#221](https://github.com/GSA-TTS/agentic-coding-quickstart/pull/221)
+> made `kit_translate_to_sbx` carry `backend_extras.sbx.publishedPorts` into the
+> synthesized sbx-v2 spec (closing [#219](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/219))
+> and quote wildcard allow hosts (closing [#220](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/220)),
+> and [#223](https://github.com/GSA-TTS/agentic-coding-quickstart/pull/223) taught
+> `acq run/create` to intercept and translate a user `--kit <ref>`. This ADR's
+> remaining work is the **neutral** promotion of the field (out of the sbx-only
+> extras block) plus the **msb consumer** — the sbx side is now a rename +
+> deprecated-fallback, not a from-scratch carry.
 
 The neutral schema is owned by the **patterns** repo
 (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`); the translator and
@@ -93,7 +104,11 @@ same fail-closed gating ADR-0011 used: quickstart pins a released
   publish; there is no post-hoc verb, per ADR-0011 — `SUPPORTS_PORT_FORWARD=0`
   is unchanged). A `background: true` startup command is run detached
   (`msb exec -d` / `nohup … &` equivalent) so it does not block provision, the
-  same reason the sbx path backgrounds it.
+  same reason the sbx path backgrounds it. The msb adapter already backgrounds
+  its own agent launch and marker-gates install commands (quickstart
+  [#230](https://github.com/GSA-TTS/agentic-coding-quickstart/pull/230),
+  **merged to main**), so the detached-command plumbing this ADR needs is now in
+  place to build on.
 
 ### Validation (SI-10)
 
@@ -157,4 +172,6 @@ via `-p` is a separate mechanism and is what this ADR wires.
 - Related security gate: patterns [#225](https://github.com/GSA-TTS/agentic-coding-patterns/issues/225)
   (validate-kits.py field validation)
 - Prior port fix: quickstart [#221](https://github.com/GSA-TTS/agentic-coding-quickstart/pull/221)
-  (sbx translator carried `backend_extras.sbx.publishedPorts`)
+  (sbx translator carried `backend_extras.sbx.publishedPorts`; **merged to main**)
+  and [#223](https://github.com/GSA-TTS/agentic-coding-quickstart/pull/223)
+  (`--kit <ref>` interception on run/create; **merged to main**)
