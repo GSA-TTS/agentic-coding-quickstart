@@ -6,7 +6,7 @@ tier: 2
 last_updated: "2026-07-29"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
-related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md"]
+related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -123,8 +123,11 @@ automation story.
   GitHub token are bound from host env vars at create time
   (`--secret USAI_API_KEY@api.gsa.usai.gov`, `--secret GITHUB_TOKEN@api.github.com`);
   the real values never enter the VM
-- **Snapshots**: microsandbox has a snapshot primitive, but `acq` does not yet
-  expose it (the `SUPPORTS_SNAPSHOTS` flag is unwired — see Known limitations)
+- **Snapshots**: microsandbox has a full `msb snapshot` CLI verb
+  (create/list/inspect/verify/remove/save/load, `run --from-snapshot`), but
+  `acq` does not surface it — wiring `acq snapshot` is beyond sbx parity and
+  deferred (the `SUPPORTS_SNAPSHOTS` flag is being reconciled — see Known
+  limitations)
 
 ### Requirements
 
@@ -395,8 +398,8 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 
 | Flag | Value | Meaning |
 |------|-------|---------|
-| `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 0 | No post-hoc `acq ports`; publish at create/run via `-p HOST:GUEST` |
-| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 1 | microsandbox has a snapshot primitive, but `acq` has **no `snapshot` verb** to invoke it — the flag is currently unwired and slated to drop to `0` ([#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)) |
+| `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 0 | No post-hoc `acq ports` **yet**; publish at create/run via `-p HOST:GUEST`. A post-hoc path via `msb ssh serve` + `ssh -L` is planned (ADR-0015, [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)) and will flip this to `1` |
+| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 1 | msb has a full `msb snapshot` CLI verb, but `acq` exposes **no `snapshot` verb** to invoke it. Wiring is beyond sbx parity; the flag is being reconciled to `0` until/unless a verb is added ([#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)) |
 | `ACQ_BACKEND_CAN_RESUME` | 1 | `msb stop` / `msb start` preserve state |
 | `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (header substitution on REST/API hosts; git smart-HTTP transport not substituted — use the REST API) |
 
@@ -409,24 +412,34 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 | Zscaler CA | file-drop + `update-ca-certificates` | native `--trust-host-cas` shortcut |
 | Secret model | proxy `secret set-custom` | host-env `--secret ENV@HOST` |
 | Secret binding breadth | 7 built-in services + any custom `--host/--env` endpoint | fixed table: `usai` + `github` (REST host); arbitrary custom endpoints stored-but-not-bound ([#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226)) |
-| Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | native primitive exists but **not surfaced by `acq`** (flag unwired, [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)) |
-| Port forwarding | `acq ports` (post-hoc) | published at create/run (`-p`) only |
+| Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; flag being reconciled, [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)) |
+| Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) now; post-hoc via `ssh serve` planned ([#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)) |
 | Agent binary | supplied by the sbx agent template | installed at provision on a plain base (`npm install -g opencode-ai`), then launched on attach |
 | OpenCode web UI | `openchamber` acq kit (publishes port 4096); sbx-only until ADR-0014 lands | same kit once it reaches `backends: [sbx, msb]` (patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)) |
 | In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+) | re-apply kits idempotently (no state-preserving add) |
 
 ### Known limitations
 
-- **Ports are set at create/run time**, not post-hoc. `acq --backend msb ports`
-  prints the correct mechanism instead of forwarding. A **neutral** port-publish
-  + background vocabulary (so a kit can declare `backends: [sbx, msb]`) is
-  designed in [ADR-0014](adr/0014-neutral-port-publish-and-background-vocab.md)
-  and tracked in [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224).
+- **Ports are published at create/run time** via `-p HOST:GUEST`, not post-hoc
+  today. `acq --backend msb ports` currently prints the create/run mechanism
+  instead of forwarding. A **neutral** port-publish + background vocabulary (so a
+  kit can declare `backends: [sbx, msb]`) is designed in
+  [ADR-0014](adr/0014-neutral-port-publish-and-background-vocab.md) and tracked
+  in [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224). A
+  **post-hoc** publish path — `msb ssh serve` + OpenSSH `-L` against a running
+  sandbox, no re-create — is designed incrementally in
+  [ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md) and tracked in
+  [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238); it
+  will make `acq ports --publish` work on msb and flip
+  `SUPPORTS_PORT_FORWARD=1`. (`msb -p` also accepts `BIND_ADDR:HOST:GUEST` and
+  `/udp`, but acq stays TCP + loopback for sbx parity.)
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
-- **Snapshots not surfaced.** microsandbox has a snapshot primitive, but `acq`
-  has no `snapshot` verb, so the advertised `SUPPORTS_SNAPSHOTS=1` is inert; it
-  is slated to drop to `0` ([#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)).
+- **Snapshots not surfaced.** `msb snapshot` is a full CLI verb, but `acq`
+  exposes no `snapshot` verb, so the advertised `SUPPORTS_SNAPSHOTS=1` is inert.
+  Wiring it is beyond sbx parity (sbx has no snapshots), so the flag is being
+  reconciled rather than the verb built
+  ([#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)).
 - **Secret binding is a fixed table.** Only `usai` and `github` (REST host) are
   bound at provision; an arbitrary custom `--host/--env` endpoint is stored in
   the acq secret store but not bound
@@ -445,8 +458,9 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 > virtualization (`/dev/kvm` on Linux), so they do **not** run in CI. Run
 > `scripts/verify-backends` **on a KVM-capable host after each release and after
 > ≥3 behavior-affecting fixes** (per the AGENTS.md §8.3 periodic-validation
-> cadence) and capture the transcript. The msb CLI flag shapes used by the
-> adapter were verified against `msb 0.6.7`. See
+> cadence) and capture the transcript. The msb CLI command/flag surface used by
+> the adapter was confirmed against a live `msb --tree` on **msb 0.6.7**
+> (released 2026-07-27). See
 > [ADR-0011](adr/0011-msb-backend-and-neutral-kits.md).
 
 ---
@@ -568,8 +582,10 @@ Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 
 - Neutral port-publish + background vocab and the msb consumer
   ([ADR-0014](adr/0014-neutral-port-publish-and-background-vocab.md), #224)
+- Post-hoc port publish on msb via `ssh serve` + `ssh -L`
+  ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md), #238)
 - Generic custom-endpoint secret binding on msb (#226)
-- `acq snapshot` verb + `acq_backend_snapshot` contract fn (#225)
+- `acq snapshot` verb (beyond sbx parity; flag reconciled in #225)
 - Full Go/keychain swap-on-access secret component of design §7.5 (age fallback,
   `CredentialRewriteRule`); acq ships the bash keychain subset (see Secrets)
 - `acq policy …` — network policy subcommands
