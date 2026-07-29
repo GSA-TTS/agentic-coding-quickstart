@@ -412,7 +412,7 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 | Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | native primitive exists but **not surfaced by `acq`** (flag unwired, [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)) |
 | Port forwarding | `acq ports` (post-hoc) | published at create/run (`-p`) only |
 | Agent binary | supplied by the sbx agent template | installed at provision on a plain base (`npm install -g opencode-ai`), then launched on attach |
-| OpenCode web UI | `opencode-web.sh` (sbx-only) | not supported by `opencode-web.sh`; the `openchamber` kit supersedes it once it reaches `backends: [sbx, msb]` (patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)) |
+| OpenCode web UI | `openchamber` acq kit (publishes port 4096); sbx-only until ADR-0014 lands | same kit once it reaches `backends: [sbx, msb]` (patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)) |
 | In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+) | re-apply kits idempotently (no state-preserving add) |
 
 ### Known limitations
@@ -431,9 +431,13 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
   bound at provision; an arbitrary custom `--host/--env` endpoint is stored in
   the acq secret store but not bound
   ([#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226)).
-- **`opencode-web.sh` is sbx-only.** The browser-based OpenCode flow does not
-  have an msb path; the `openchamber` kit supersedes it once it reaches msb
-  parity (patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)).
+- **Browser-based OpenCode is via the `openchamber` kit.** The former
+  `opencode-web.sh` helper has been removed; use the `openchamber` acq kit, which
+  publishes the OpenCode server port (4096) plus the OpenChamber UI (3000) with a
+  supervised lifecycle. The kit is sbx-only until the neutral port/background
+  vocabulary lands (ADR-0014 / patterns
+  [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)), so there
+  is an interim msb coverage gap for the browser UI.
 
 > **Live end-to-end note (msb verification cadence).** The full
 > `acq run … --backend msb` loop and the `scripts/verify-backends` msb row

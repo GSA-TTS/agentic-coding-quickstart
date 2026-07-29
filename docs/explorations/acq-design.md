@@ -279,7 +279,8 @@ package.json                # acq shell completion helpers
 
 **Removed (no longer needed for v2):**
 - `qsbx` (replaced by `acq`)
-- `opencode-web.sh` (stays too — still useful; backend-agnostic — `acq run` mounts the same files)
+- `opencode-web.sh` (removed — superseded by the `openchamber` acq kit, which
+  publishes the OpenCode server port with a supervised lifecycle; patterns #233)
 - ADRs 0003, 0004 (superseded by 0005; kept for history)
 - `docs/QUICKSTART_SBX.md` (replaced by `docs/QUICKSTART.md` + per-backend sections)
 

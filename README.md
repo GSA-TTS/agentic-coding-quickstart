@@ -510,10 +510,12 @@ export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
   [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations)
   repo under `integrations/`. (For example, the Zed editor integration is at
   `integrations/editors/zed/`.)
-- **OpenCode Web** — Run OpenCode Web in the sandbox and reach it from your host
-  browser for clipboard support and richer markdown rendering. The
-  [`opencode-web.sh`](opencode-web.sh) script automates it; see the
-  [OpenCode Web documentation](https://opencode.ai/docs/web).
+- **OpenCode Web** — Run OpenCode in the sandbox and reach it from your host
+  browser for clipboard support and richer markdown rendering. Use the
+  [`openchamber` acq kit](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations/isolation/acq-kits/openchamber),
+  which runs `opencode serve` on host-published port 4096 (plus the OpenChamber
+  UI on 3000) via a supervised lifecycle. (This supersedes the former
+  `opencode-web.sh` helper, which has been removed.)
 
 ---
 

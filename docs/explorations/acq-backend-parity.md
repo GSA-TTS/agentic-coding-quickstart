@@ -44,7 +44,7 @@ absent), not a gap. This document lists only the real divergences.
 | A | No neutral port-publish / background vocabulary (sbx-half landed via #221/#223) | [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224), patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233) | **Schedule** (ADR-0014) |
 | B | msb `SUPPORTS_SNAPSHOTS=1` is unreachable (no `acq snapshot` verb / contract fn) | [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225) | **Schedule** (drop flag to 0) |
 | C | msb secret binding is a fixed table (usai + github via REST); arbitrary custom endpoints stored-not-bound | [#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226) | **Schedule** (generic custom-endpoint) |
-| D | `opencode-web.sh` is sbx-only | untracked | **Accept** (retire when #233 closes; openchamber supersedes) |
+| D | `opencode-web.sh` — removed; openchamber kit supersedes it | folded into #233 | **Removed** (see gap D) |
 | E | No state-preserving in-place kit heal on msb | ADR-0011 accepted | **Accept** + minor runtime UX note |
 | F | Private GitHub clone (playbook kit) on msb — RESOLVED via REST tarball on msb 0.6.7 (#230) | [#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203) (closed) | **Resolved** (git-over-HTTPS still upstream-blocked) |
 | G | `validate-kits.py` doesn't reject malformed `mode`/`user` | patterns [#225](https://github.com/GSA-TTS/agentic-coding-patterns/issues/225) | **Schedule** (patterns repo) |
@@ -126,26 +126,27 @@ custom-endpoint services (any service with a resolved `--host`/`--env`) via
 bound (REST host only); the git-over-HTTPS transport remains upstream-limited
 (gap F). Tracked in #226.
 
-### D. `opencode-web.sh` is sbx-only — **Accept** (retire on #233)
+### D. `opencode-web.sh` — **Removed** (superseded by the openchamber kit)
 
-**Evidence.** `opencode-web.sh` hardcodes `sbx exec -d …` and prints
-`sbx ports … --publish`. There is no msb branch.
+**Evidence.** `opencode-web.sh` hardcoded `sbx exec -d …` and printed
+`sbx ports … --publish`; it had no msb branch and depended on gap A (a port must
+be publishable) for any non-sbx future.
 
-**Why it matters.** The documented "run OpenCode in the browser" flow only works
-on sbx. It also depends on gap A (a port must be publishable on msb).
+**Decision (updated).** The script has been **deleted**. The `openchamber` acq
+kit is a functional superset — it runs `opencode serve` on host-published port
+4096 (plus the OpenChamber UI on 3000) via `publishedPorts`, with a supervised
+lifecycle — so the standalone helper no longer earns its keep as a separate
+maintained entry point. This supersedes the earlier "keep it as a
+zero-dependency escape hatch until #233 closes" disposition: rather than carry a
+second, sbx-only code path, we consolidate on the kit.
 
-**Disposition.** **Keep the script; do not add an msb path.** The `openchamber`
-acq kit (patterns v1.8.0, PR #234) is a functional superset — it runs
-`opencode serve` on host-published port 4096 (plus the OpenChamber UI on 3000)
-via `publishedPorts`, with a robust supervised lifecycle. But it is **not** a
-drop-in replacement today: it is opt-in and applied only at sandbox-create time,
-pulls in the OpenChamber UI + a native module, and is itself sbx-only until the
-gap-A port vocabulary lands (patterns #233). `opencode-web.sh` remains the
-zero-dependency, backend-agnostic escape hatch for a bare/existing sandbox — a
-conclusion the design doc (`acq-design.md:282`) already reached ("stays too —
-still useful"). **Trigger to retire:** patterns #233 closes (openchamber reaches
-`backends: [sbx, msb]` parity). At that point, delete `opencode-web.sh` and
-update the two references (README "OpenCode Web" bullet, `acq-design.md:282`).
+**Consequence / dependency.** openchamber itself is still sbx-only until the
+neutral port/background vocabulary lands (gap A / ADR-0014 / patterns
+[#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)). So on
+**msb** there is a browser-OpenCode coverage gap in the interim — this is folded
+into the gap-A / #233 work (the openchamber kit reaching `backends: [sbx, msb]`)
+rather than tracked as a separate item. Users needing the browser UI today use
+the openchamber kit on sbx.
 
 ### E. No state-preserving in-place kit heal on msb — **Accept**
 
@@ -233,7 +234,7 @@ or D (opencode-web).
 from a stale point release (2.x line), the per-backend version columns are
 dropped, and the "Differences from sbx" + "Known limitations (msb)" sections now
 fold in gaps B (snapshots inert, #225), C (fixed usai+github secret table, in
-issue #226), D (opencode-web sbx-only, openchamber supersedes), and the gap I
+issue #226), D (opencode-web removed, openchamber supersedes), and the gap I
 verify-backends cadence. The msb secret section and capability flags reflect
 the github-via-REST binding from #230. #227 stays open to track any residual
 drift as gaps A–C actually *land* (the guide currently describes them as
@@ -259,10 +260,12 @@ patterns, in parallel:
         #233 Increment A (adopt quickstart#221, drop manual publish workaround)  ── unblocked now (#221 merged)
 ```
 
-**Accepted / not scheduled** (documented above with triggers): **D**
-(opencode-web — retire when #233 closes), **E** (heal), **I**
-(verify-backends CI). **F** (playbook clone on msb) is now **Resolved** (#230,
-msb 0.6.7); its residual is an upstream git-transport watch, not a tracked gap.
+**Accepted / not scheduled** (documented above with triggers): **E** (heal),
+**I** (verify-backends CI). **D** (opencode-web) is now **Removed** — the
+standalone helper is deleted; the openchamber kit reaching `backends: [sbx, msb]`
+is folded into gap A / #233. **F** (playbook clone on msb) is now **Resolved**
+(#230, msb 0.6.7); its residual is an upstream git-transport watch, not a
+tracked gap.
 
 ---
 
@@ -295,11 +298,14 @@ msb 0.6.7); its residual is an upstream git-transport watch, not a tracked gap.
 2. [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233) —
    openchamber msb/ppp parity (gap A Increment B); commented that ADR-0014 +
    quickstart#224 unblock it, and Increment A is unblocked now (#221 merged).
+   Now also the tracked home for gap D: with `opencode-web.sh` removed,
+   openchamber is the sole browser-OpenCode path and its msb parity is what
+   closes the interim msb coverage gap.
 
 **Accepted (no new issue; keep existing watches):**
-the ADR-0011 record for gap E; gap D retires when patterns #233 closes; the
-verify-backends cadence (gap I) is documented in the BACKEND_GUIDE refresh
-(quickstart #227).
+the ADR-0011 record for gap E; the verify-backends cadence (gap I) is documented
+in the BACKEND_GUIDE refresh (quickstart #227). Gap D (opencode-web) is
+**Removed** — no watch needed; its msb successor is patterns #233.
 
 **Resolved (closed):**
 [#203](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/203) (gap F) —
