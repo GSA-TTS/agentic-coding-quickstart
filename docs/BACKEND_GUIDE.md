@@ -6,7 +6,7 @@ tier: 2
 last_updated: "2026-07-29"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
-related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/explorations/acq-backend-parity.md"]
+related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---

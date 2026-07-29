@@ -34,8 +34,8 @@ modeled in the neutral vocabulary and live only under `backend_extras.sbx`:
 Because both live under the sbx-only extras block, `openchamber` can only
 declare `backends: [sbx]`. The `msb` adapter has **zero** consumption of either
 field (verified: no `publishedPorts`/`background` reference in
-`acq.backends/msb.sh`). This is gap **A** in
-[`docs/explorations/acq-backend-parity.md`](../explorations/acq-backend-parity.md)
+`acq.backends/msb.sh`). This is gap **A** in the
+[sbx↔msb backend parity epic (#234)](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/234)
 and the largest blocker to a kit declaring `backends: [sbx, msb]`
 (patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)).
 
@@ -162,7 +162,7 @@ via `-p` is a separate mechanism and is what this ADR wires.
 
 ## Links
 
-- Parity map: [`docs/explorations/acq-backend-parity.md`](../explorations/acq-backend-parity.md)
+- Parity tracking: [sbx↔msb backend parity epic (#234)](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/234)
   (gap A)
 - Implementation: quickstart [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224)
 - Builds on: [ADR-0011](0011-msb-backend-and-neutral-kits.md) (neutral vocabulary),
