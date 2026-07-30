@@ -37,13 +37,8 @@ repos:
       - id: markdownlint-cli2
         args: ["--fix"]
 
-  # Shell script linting. Uses the SYSTEM `shellcheck` binary (preinstalled on
-  # GitHub's ubuntu runners; `brew install shellcheck` / `apt install shellcheck`
-  # locally) rather than the shellcheck-py hook. shellcheck-py fetches a
-  # shellcheck binary from GitHub releases on a cold run; that fetch has been
-  # hanging and getting SIGTERM-killed in CI (#242). The system binary removes
-  # that network dependency entirely. Enforcement (severity=warning over the
-  # same shell files) is unchanged.
+  # Shell script linting via the system shellcheck binary
+  # (`brew install shellcheck` / `apt install shellcheck`; preinstalled on CI).
   - repo: local
     hooks:
       - id: shellcheck
@@ -51,9 +46,6 @@ repos:
         entry: shellcheck --severity=warning
         language: system
         types: [shell]
-        # Skip if shellcheck is not installed locally (CI always has it); a
-        # missing local binary should not block a commit of non-shell files.
-        require_serial: false
 
   # acq offline unit suite — runs the host-side logic (backend resolution, name
   # derivation, kit-translate, git-identity/path pre-flight) on every push. This
