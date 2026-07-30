@@ -408,7 +408,7 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 
 | Flag | Value | Meaning |
 |------|-------|---------|
-| `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 0 | No post-hoc `acq ports` **yet**. Ports are published at create/run via neutral `publishedPorts` → `-p HOST:GUEST` (gap A, [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224), shipped). A post-hoc path via `msb ssh serve` + `ssh -L` is designed (ADR-0015, [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238), in progress) and will flip this to `1` |
+| `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 1 | Post-hoc `acq ports <sandbox> --publish HOST:GUEST` is **implemented**: `acq_backend_ports` opens `msb ssh serve` on an ephemeral loopback port against a running sandbox and tunnels the guest port to the host with OpenSSH `-L` (no re-create), using an acq-managed ed25519 key and tearing the serve/ssh pair down on `acq stop`/`rm` (gap K, [ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md), [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)). Create/run publish via neutral `publishedPorts` → `-p HOST:GUEST` also ships (gap A, [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224)). **Caveat:** implemented but **not yet live end-to-end verified** — the real forward requires a KVM-capable host; run `scripts/verify-backends` per the ADR-0011 cadence (see the live end-to-end note below) |
 | `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 0 | msb has a full `msb snapshot` CLI verb, but `acq` exposes **no `snapshot` verb** to invoke it. Wiring one is beyond sbx parity (sbx has none), so the flag reflects what `acq` surfaces (`0`), not what msb can do (gap B, [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)) |
 | `ACQ_BACKEND_CAN_RESUME` | 1 | `msb stop` / `msb start` preserve state |
 | `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (header substitution on REST/API hosts; git smart-HTTP transport not substituted — use the REST API) |
@@ -423,15 +423,15 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 | Secret model | proxy `secret set-custom` | host-env `--secret ENV@HOST` |
 | Secret binding breadth | 7 built-in services + any custom `--host/--env` endpoint | usai + github + **any** custom `--host/--env` endpoint bound generically via `--secret ENV@HOST` (gap C, [#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226), shipped) |
 | Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; `SUPPORTS_SNAPSHOTS=0`, [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)) |
-| Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (gap A, [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224), shipped); post-hoc via `ssh serve` in progress (ADR-0015, [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)) |
+| Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (gap A, [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224), shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` now implemented (gap K, ADR-0015, [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)) — live end-to-end verification pending a KVM host |
 | Agent binary | supplied by the sbx agent template | installed at provision on a plain base (`npm install -g opencode-ai`), then launched on attach |
 | OpenCode web UI | `openchamber` acq kit (publishes port 4096) | same kit once it declares `backends: [sbx, msb]` against the released patterns schema (neutral port/background vocab consumed by both backends; patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)) |
 | In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+) | re-apply kits idempotently (no state-preserving add) |
 
 ### Known limitations
 
-- **Ports: create/run publish shipped; post-hoc still pending.** Kits declare
-  ports in the **neutral top-level `publishedPorts`** vocabulary
+- **Ports: create/run publish shipped; post-hoc implemented (live e2e pending).**
+  Kits declare ports in the **neutral top-level `publishedPorts`** vocabulary
   (`{guest, host?, protocol?, name?}`), which both backends now consume — on msb
   each entry maps to a create/run-time `-p HOST:GUEST` (gap A,
   [ADR-0014](adr/0014-neutral-port-publish-and-background-vocab.md),
@@ -441,15 +441,20 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
   neutral fields are read *defensively* (absence is a silent no-op), so they only
   fully light up end-to-end once the patterns `hybrid/v1` schema is released and
   `PATTERNS_KIT_REF` is bumped to a kit that declares them — that bump is
-  deliberately deferred. There is still **no post-hoc** publish today:
-  `acq --backend msb ports` prints the create/run mechanism instead of forwarding.
-  A post-hoc path — `msb ssh serve` + OpenSSH `-L` against a running sandbox, no
-  re-create — is designed in
-  [ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md) and tracked in
-  [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)
-  (in progress on another branch); it will make `acq ports --publish` work on msb
-  and flip `SUPPORTS_PORT_FORWARD=1`. (`msb -p` also accepts `BIND_ADDR:HOST:GUEST`
-  and `/udp`, but acq stays TCP + loopback for sbx parity.)
+  deliberately deferred. A **post-hoc** path is now **implemented** (gap K):
+  `acq --backend msb ports <sandbox> --publish HOST:GUEST` runs `msb ssh serve`
+  on an ephemeral loopback port against a running sandbox and tunnels the guest
+  port to the host over OpenSSH `-L` with no re-create, using an acq-managed
+  ed25519 key (never the user's `~/.ssh`) and tearing the serve/ssh pair down on
+  `acq stop`/`rm`
+  ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md),
+  [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)); this
+  is what flips `SUPPORTS_PORT_FORWARD=1`. **Live end-to-end verification is
+  still pending** — the real forward needs a KVM-capable host, so run
+  `scripts/verify-backends` on such a host per the ADR-0011 periodic-validation
+  cadence (see the live end-to-end note below) before treating it as verified
+  working. (`msb -p` also accepts `BIND_ADDR:HOST:GUEST` and `/udp`, but acq
+  stays TCP + loopback for sbx parity.)
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
 - **Snapshots not surfaced.** `msb snapshot` is a full CLI verb, but `acq`
@@ -603,11 +608,20 @@ Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 - Generic custom-endpoint secret binding on msb — usai + github + **any** custom
   `--host/--env` endpoint bound via `--secret ENV@HOST` from a non-secret endpoint
   sidecar (#226)
+- Post-hoc port publish on msb (gap K) — `acq ports <sandbox> --publish HOST:GUEST`
+  via `msb ssh serve` + OpenSSH `-L` against a running sandbox (acq-managed ed25519
+  key, serve/ssh teardown on `acq stop`/`rm`); flips `SUPPORTS_PORT_FORWARD=1`
+  ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md), #238). **Implemented,
+  not yet live-verified** — live end-to-end run needs a KVM host per the ADR-0011
+  `scripts/verify-backends` cadence
 
 ## Still deferred
 
-- Post-hoc port publish on msb via `ssh serve` + `ssh -L`
-  ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md), #238)
+- Live end-to-end verification of msb post-hoc port publish (gap K) on a
+  KVM-capable host — code is implemented (#238); the real `msb ssh serve` + `ssh -L`
+  forward has not yet been exercised end-to-end (no KVM host in CI), so run
+  `scripts/verify-backends` per the [ADR-0011](adr/0011-msb-backend-and-neutral-kits.md)
+  periodic-validation cadence before treating it as verified working
 - `PATTERNS_KIT_REF` bump to a patterns release that declares the neutral
   `publishedPorts`/`background` schema (needed for the neutral port fields to
   light up end-to-end; deliberately held pending the schema release)
