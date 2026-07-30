@@ -1553,6 +1553,94 @@ assert_contains "msb env: command still runs with env" "$env_log" "echo CMD_WITH
 assert_not_contains "msb env: unsafe env var name dropped" "$env_log" "1BAD"
 cleanup_stubs
 
+# 8o1b. quickstart#239 DECISION GUARD: kit commands are staged via `msb exec …
+#        -- <argv>` (kit content as SEPARATE ARGV ELEMENTS), NOT registered via
+#        msb 0.6.7's create-time `--script`/`--script-path` flags and NOT
+#        interpolated into an `sh -c` string built from kit content. This is the
+#        reason the exec-based path is kept (see the DESIGN NOTE in msb.sh): the
+#        argv never enters an interpolated shell string, so the safety win
+#        --script offers is already present. If someone later switches the kit-
+#        command path to --script (or to an interpolated sh -c), these assertions
+#        fail and force a re-read of the #239 rationale. Uses a kit whose command
+#        body carries shell metacharacters that WOULD be dangerous if interpolated.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/noscript-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  nsk="${STUBDIR}/noscriptkit"; mkdir -p "$nsk"
+  cat >"$nsk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: noscript-kit
+displayName: NoScript Kit
+description: command body with metachars stays argv, never --script, never interpolated
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - printf
+      - "%s\n"
+      - "hello; rm -rf /tmp/NS_PWNED"
+SPEC
+  _acq_msb_apply_kit_dir noscriptbox "$nsk"
+)
+noscript_log=$(cat "$CALLS")
+# The command is dispatched through `msb exec … -- printf …` (argv), not registered.
+assert_contains "239: kit command staged via msb exec (argv path)" "$noscript_log" "msb exec noscriptbox"
+assert_contains "239: kit command argv reaches exec verbatim" "$noscript_log" "-- printf"
+# The metachar-bearing body travels as a single argv token AFTER the `--`, so it
+# is data, not a command — the injected `rm -rf` is never its own argv word.
+assert_contains "239: metachar body carried as one argv token" "$noscript_log" "hello; rm -rf /tmp/NS_PWNED"
+# NEVER via msb's create-time script-registration flags (the refactor we declined).
+assert_not_contains "239: kit command NOT registered via --script" "$noscript_log" "--script"
+assert_not_contains "239: kit command NOT registered via --script-path" "$noscript_log" "--script-path"
+# NEVER by interpolating the kit command into an `sh -c "<kit content>"` wrapper.
+# This startup (non-background) kit emits a plain `msb exec … -- <argv>` with NO
+# `sh -c` at all (unlike the fixed marker/mkdir helpers, whose sh -c strings are
+# adapter-owned, not kit content). A regression that assembled this kit's argv
+# into a shell string would surface as `sh -c … printf …` (the command name
+# interpolated after `sh -c`); assert that never happens for this kit's command.
+assert_not_contains "239: kit command not wrapped in sh -c interpolation" "$noscript_log" "sh -c printf"
+cleanup_stubs
+
+# 8o1c. quickstart#239 DECISION GUARD (idempotency): an install-phase kit command
+#        stays run-once via the root-owned marker in _acq_msb_exec_command — that
+#        gate lives in the EXEC path (test+write /var/lib/acq/install-<cksum> as
+#        uid 0), which is exactly why registering the command as a create-time
+#        --script (fire-and-forget, no marker) would be a behavior change. Assert
+#        the marker gate is exercised for an install command.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/instmarker-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  imk="${STUBDIR}/instmarkerkit"; mkdir -p "$imk"
+  cat >"$imk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: instmarker-kit
+displayName: InstMarker Kit
+description: install command is marker-gated in the exec path (not fire-and-forget --script)
+commands:
+  - phase: install
+    user: "0"
+    command:
+      - true
+SPEC
+  _acq_msb_apply_kit_dir instmarkerbox "$imk"
+)
+instmarker_log=$(cat "$CALLS")
+# Marker gate is tested (test -f) and, on a miss, written (touch) under
+# /var/lib/acq — both as `-u 0`. This machinery is the run-once semantics that a
+# create-time --script registration would NOT reproduce.
+assert_contains "239: install cmd is marker-gated (test -f /var/lib/acq/install-)" "$instmarker_log" "test -f '/var/lib/acq/install-"
+assert_contains "239: install cmd marker is written after run (touch)" "$instmarker_log" "touch '/var/lib/acq/install-"
+assert_contains "239: install marker tested/written as root" "$instmarker_log" "msb exec instmarkerbox -u 0"
+cleanup_stubs
+
 # 8o2. SECURITY: a hostile kit `mode` must not reach a root shell. kit_spec_files
 #      drops the record; the msb chmod uses argv (no sh -c interpolation); and
 #      the injected command must never appear in the recorded msb calls.
