@@ -119,15 +119,17 @@ automation story.
 - **Zscaler CA shortcut**: the `zscaler-ca-certificate` kit takes msb's native
   `--trust-host-cas` path instead of the file-drop + `update-ca-certificates`
   dance (behavioral parity — the guest trusts the Zscaler CA either way)
-- **Secret injection**: the USAi key and (as of the per-sandbox GitHub work) a
-  GitHub token are bound from host env vars at create time
-  (`--secret USAI_API_KEY@api.gsa.usai.gov`, `--secret GITHUB_TOKEN@api.github.com`);
-  the real values never enter the VM
+- **Secret injection**: the USAi key and a GitHub token are bound from host env
+  vars at create time (`--secret USAI_API_KEY@api.gsa.usai.gov`,
+  `--secret GITHUB_TOKEN@api.github.com`); the real values never enter the VM.
+  As of gap C ([#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226)),
+  **any** custom-endpoint secret stored with `acq secret set SVC --host H --env E`
+  is bound generically the same way — no fixed usai/github table
 - **Snapshots**: microsandbox has a full `msb snapshot` CLI verb
   (create/list/inspect/verify/remove/save/load, `run --from-snapshot`), but
-  `acq` does not surface it — wiring `acq snapshot` is beyond sbx parity and
-  deferred (the `SUPPORTS_SNAPSHOTS` flag is being reconciled — see Known
-  limitations)
+  `acq` does not surface it — wiring `acq snapshot` is beyond sbx parity, so
+  `SUPPORTS_SNAPSHOTS=0` reflects what `acq` surfaces (not what msb can do); see
+  Known limitations
 
 ### Requirements
 
@@ -340,6 +342,14 @@ rotated key takes effect without recreating the sandbox.
   private GitHub content via the REST API. A `git clone` over HTTPS to
   `github.com`/`codeload.github.com` is **not** substituted — see the known
   limitation below.
+- **Any other custom endpoint** (gap C,
+  [#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226)): a
+  service stored with `acq secret set SVC --host H --env E` records a **non-secret
+  endpoint sidecar** (host + env only) in the acq store; the msb backend then binds
+  it generically at provision via `--secret ENV@HOST` — no fixed usai/github table.
+  `HOST` may be a comma-separated multi-host list. Absent a sidecar, a service with
+  no compiled-in mapping is stored but not bound (acq tells you to supply
+  `--host`/`--env`).
 
 Feeding the **sbx** proxy depends on the sbx secret type (per the sbx CLI):
 
@@ -398,8 +408,8 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 
 | Flag | Value | Meaning |
 |------|-------|---------|
-| `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 0 | No post-hoc `acq ports` **yet**; publish at create/run via `-p HOST:GUEST`. A post-hoc path via `msb ssh serve` + `ssh -L` is planned (ADR-0015, [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)) and will flip this to `1` |
-| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 1 | msb has a full `msb snapshot` CLI verb, but `acq` exposes **no `snapshot` verb** to invoke it. Wiring is beyond sbx parity; the flag is being reconciled to `0` until/unless a verb is added ([#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)) |
+| `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 0 | No post-hoc `acq ports` **yet**. Ports are published at create/run via neutral `publishedPorts` → `-p HOST:GUEST` (gap A, [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224), shipped). A post-hoc path via `msb ssh serve` + `ssh -L` is designed (ADR-0015, [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238), in progress) and will flip this to `1` |
+| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 0 | msb has a full `msb snapshot` CLI verb, but `acq` exposes **no `snapshot` verb** to invoke it. Wiring one is beyond sbx parity (sbx has none), so the flag reflects what `acq` surfaces (`0`), not what msb can do (gap B, [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)) |
 | `ACQ_BACKEND_CAN_RESUME` | 1 | `msb stop` / `msb start` preserve state |
 | `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (header substitution on REST/API hosts; git smart-HTTP transport not substituted — use the REST API) |
 
@@ -411,46 +421,51 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 | Kit format | Neutral `hybrid/v1` → sbx-v2 (synthesized) | Neutral `hybrid/v1` → `msb` operations |
 | Zscaler CA | file-drop + `update-ca-certificates` | native `--trust-host-cas` shortcut |
 | Secret model | proxy `secret set-custom` | host-env `--secret ENV@HOST` |
-| Secret binding breadth | 7 built-in services + any custom `--host/--env` endpoint | fixed table: `usai` + `github` (REST host); arbitrary custom endpoints stored-but-not-bound ([#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226)) |
-| Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; flag being reconciled, [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)) |
-| Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) now; post-hoc via `ssh serve` planned ([#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)) |
+| Secret binding breadth | 7 built-in services + any custom `--host/--env` endpoint | usai + github + **any** custom `--host/--env` endpoint bound generically via `--secret ENV@HOST` (gap C, [#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226), shipped) |
+| Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; `SUPPORTS_SNAPSHOTS=0`, [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)) |
+| Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (gap A, [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224), shipped); post-hoc via `ssh serve` in progress (ADR-0015, [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)) |
 | Agent binary | supplied by the sbx agent template | installed at provision on a plain base (`npm install -g opencode-ai`), then launched on attach |
-| OpenCode web UI | `openchamber` acq kit (publishes port 4096); sbx-only until ADR-0014 lands | same kit once it reaches `backends: [sbx, msb]` (patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)) |
+| OpenCode web UI | `openchamber` acq kit (publishes port 4096) | same kit once it declares `backends: [sbx, msb]` against the released patterns schema (neutral port/background vocab consumed by both backends; patterns [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)) |
 | In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+) | re-apply kits idempotently (no state-preserving add) |
 
 ### Known limitations
 
-- **Ports are published at create/run time** via `-p HOST:GUEST`, not post-hoc
-  today. `acq --backend msb ports` currently prints the create/run mechanism
-  instead of forwarding. A **neutral** port-publish + background vocabulary (so a
-  kit can declare `backends: [sbx, msb]`) is designed in
-  [ADR-0014](adr/0014-neutral-port-publish-and-background-vocab.md) and tracked
-  in [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224). A
-  **post-hoc** publish path — `msb ssh serve` + OpenSSH `-L` against a running
-  sandbox, no re-create — is designed incrementally in
+- **Ports: create/run publish shipped; post-hoc still pending.** Kits declare
+  ports in the **neutral top-level `publishedPorts`** vocabulary
+  (`{guest, host?, protocol?, name?}`), which both backends now consume — on msb
+  each entry maps to a create/run-time `-p HOST:GUEST` (gap A,
+  [ADR-0014](adr/0014-neutral-port-publish-and-background-vocab.md),
+  [#224](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/224), shipped
+  on `feat/msb-parity`). The legacy sbx-only `backend_extras.sbx.publishedPorts`
+  block still works for one release with a deprecation warning. **Note:** the
+  neutral fields are read *defensively* (absence is a silent no-op), so they only
+  fully light up end-to-end once the patterns `hybrid/v1` schema is released and
+  `PATTERNS_KIT_REF` is bumped to a kit that declares them — that bump is
+  deliberately deferred. There is still **no post-hoc** publish today:
+  `acq --backend msb ports` prints the create/run mechanism instead of forwarding.
+  A post-hoc path — `msb ssh serve` + OpenSSH `-L` against a running sandbox, no
+  re-create — is designed in
   [ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md) and tracked in
-  [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238); it
-  will make `acq ports --publish` work on msb and flip
-  `SUPPORTS_PORT_FORWARD=1`. (`msb -p` also accepts `BIND_ADDR:HOST:GUEST` and
-  `/udp`, but acq stays TCP + loopback for sbx parity.)
+  [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)
+  (in progress on another branch); it will make `acq ports --publish` work on msb
+  and flip `SUPPORTS_PORT_FORWARD=1`. (`msb -p` also accepts `BIND_ADDR:HOST:GUEST`
+  and `/udp`, but acq stays TCP + loopback for sbx parity.)
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
 - **Snapshots not surfaced.** `msb snapshot` is a full CLI verb, but `acq`
-  exposes no `snapshot` verb, so the advertised `SUPPORTS_SNAPSHOTS=1` is inert.
-  Wiring it is beyond sbx parity (sbx has no snapshots), so the flag is being
-  reconciled rather than the verb built
-  ([#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)).
-- **Secret binding is a fixed table.** Only `usai` and `github` (REST host) are
-  bound at provision; an arbitrary custom `--host/--env` endpoint is stored in
-  the acq secret store but not bound
-  ([#226](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/226)).
+  exposes no `snapshot` verb, so `SUPPORTS_SNAPSHOTS=0`. Wiring it is beyond sbx
+  parity (sbx has no snapshots), so the flag reflects what `acq` surfaces rather
+  than the verb being built (gap B,
+  [#225](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/225)).
 - **Browser-based OpenCode is via the `openchamber` kit.** The former
   `opencode-web.sh` helper has been removed; use the `openchamber` acq kit, which
   publishes the OpenCode server port (4096) plus the OpenChamber UI (3000) with a
-  supervised lifecycle. The kit is sbx-only until the neutral port/background
-  vocabulary lands (ADR-0014 / patterns
-  [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)), so there
-  is an interim msb coverage gap for the browser UI.
+  supervised lifecycle. Now that the neutral port/background vocabulary is
+  consumed by both backends (ADR-0014), the kit can declare `backends: [sbx, msb]`
+  once it is republished against the released patterns schema (patterns
+  [#233](https://github.com/GSA-TTS/agentic-coding-patterns/issues/233)); until
+  that kit + the `PATTERNS_KIT_REF` bump land, there is an interim msb coverage
+  gap for the browser UI.
 
 > **Live end-to-end note (msb verification cadence).** The full
 > `acq run … --backend msb` loop and the `scripts/verify-backends` msb row
@@ -577,15 +592,27 @@ Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 - Backend-neutral USAi key rotation ([ADR-0012](adr/0012-backend-neutral-key-rotation.md))
 - Per-sandbox GitHub token downscoping ([ADR-0013](adr/0013-per-sandbox-github-token-downscoping.md))
 - sbx port-publish carry + `--kit <ref>` interception (#221, #223)
+- Neutral top-level `publishedPorts` + `background` vocab consumed by **both**
+  backends (msb maps to create/run `-p HOST:GUEST`; background startup commands
+  run detached), with a deprecated `backend_extras.sbx.publishedPorts` fallback
+  ([ADR-0014](adr/0014-neutral-port-publish-and-background-vocab.md), #224) — the
+  neutral fields fully light up once the patterns schema releases and
+  `PATTERNS_KIT_REF` is bumped (deferred)
+- msb `SUPPORTS_SNAPSHOTS=0` — `acq` surfaces no snapshot verb (msb's own verb
+  exists; wiring is beyond parity) (#225)
+- Generic custom-endpoint secret binding on msb — usai + github + **any** custom
+  `--host/--env` endpoint bound via `--secret ENV@HOST` from a non-secret endpoint
+  sidecar (#226)
 
 ## Still deferred
 
-- Neutral port-publish + background vocab and the msb consumer
-  ([ADR-0014](adr/0014-neutral-port-publish-and-background-vocab.md), #224)
 - Post-hoc port publish on msb via `ssh serve` + `ssh -L`
   ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md), #238)
-- Generic custom-endpoint secret binding on msb (#226)
-- `acq snapshot` verb (beyond sbx parity; flag reconciled in #225)
+- `PATTERNS_KIT_REF` bump to a patterns release that declares the neutral
+  `publishedPorts`/`background` schema (needed for the neutral port fields to
+  light up end-to-end; deliberately held pending the schema release)
+- `acq snapshot` verb (beyond sbx parity; msb's own `msb snapshot` verb is not
+  surfaced, #225)
 - Full Go/keychain swap-on-access secret component of design §7.5 (age fallback,
   `CredentialRewriteRule`); acq ships the bash keychain subset (see Secrets)
 - `acq policy …` — network policy subcommands
