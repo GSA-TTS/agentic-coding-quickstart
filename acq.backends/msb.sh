@@ -36,11 +36,13 @@
 # shellcheck disable=SC2034
 ACQ_BACKEND_NAME="msb"
 # ACQ_BACKEND_SUPPORTS_PORT_FORWARD gates the POST-HOC `acq ports` verb (matching
-# sbx's meaning). msb 0.6.6 has NO post-hoc ports command — ports are published
-# only at create/run time via `-p HOST:GUEST` — so this is 0. acq_backend_ports
-# accordingly prints the create/run-time mechanism instead of forwarding.
+# sbx's meaning). msb has no post-hoc NAT publish, but it DOES have a post-hoc
+# path (confirmed via `msb --tree` on msb 0.6.7): `msb ssh serve <sandbox>` opens
+# a host-side SSH listener against a RUNNING sandbox, and OpenSSH `-L` local
+# forwarding then tunnels a guest port to the host with no restart. acq_backend_ports
+# wires that (ADR-0015), so this is now 1 — post-hoc `acq ports --publish H:G` works.
 # shellcheck disable=SC2034
-ACQ_BACKEND_SUPPORTS_PORT_FORWARD=0        # msb publishes ports at create/run only (-p HOST:GUEST), no post-hoc verb
+ACQ_BACKEND_SUPPORTS_PORT_FORWARD=1        # post-hoc publish via `msb ssh serve` + OpenSSH -L forwarding (ADR-0015)
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_SNAPSHOTS=0           # msb HAS `msb snapshot`, but acq exposes NO `snapshot` verb; wiring one is beyond sbx parity (sbx has none), so this flag reflects what acq surfaces (0), not what msb can do (#225)
 # shellcheck disable=SC2034
@@ -199,6 +201,23 @@ ACQ_MSB_OPENCODE_PKG="${ACQ_MSB_OPENCODE_PKG:-opencode-ai}"
 # serves metadata; the tarballs are on the same host for the public registry.
 # Override for an internal mirror via ACQ_MSB_NPM_HOSTS (space-separated).
 ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
+
+# ---------------------------------------------------------------------------
+# Post-hoc port publish state (ADR-0015)
+# ---------------------------------------------------------------------------
+# acq manages its OWN ssh keypair (never the user's ~/.ssh) under its state dir,
+# and records the `msb ssh serve` + `ssh -L` PIDs per sandbox so `acq rm`/stop can
+# tear them down. State lives under $XDG_STATE_HOME/acq (falling back to
+# ~/.local/state/acq); override the whole root with ACQ_STATE_DIR (tests do).
+ACQ_STATE_DIR="${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}"
+ACQ_MSB_SSH_DIR="${ACQ_MSB_SSH_DIR:-${ACQ_STATE_DIR}/ssh}"
+ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR}/msb_id_ed25519}"
+ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR}/known_hosts}"
+ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR}/ports}"
+# SSH user for the serve listener. `msb ssh serve` authorizes a key host-wide;
+# the login user on the loopback listener defaults to root (override if a
+# deployment's msb serve expects a different account).
+ACQ_MSB_SSH_USER="${ACQ_MSB_SSH_USER:-root}"
 
 # ---------------------------------------------------------------------------
 # Version comparison (shared shape with sbx.sh; kept local to avoid coupling)
@@ -1472,10 +1491,18 @@ _acq_msb_attach() {
 # ---------------------------------------------------------------------------
 
 acq_backend_stop() {
+  # Tear down any post-hoc published-port tunnels first (ADR-0015): a stopped
+  # sandbox can no longer serve them, and the serve/ssh process pair would
+  # otherwise linger. Defensive — no recorded ports is a no-op.
+  _acq_msb_ports_teardown "$1"
   msb stop "$1"
 }
 
 acq_backend_terminate() {
+  # Tear down any post-hoc published-port tunnels (serve + ssh PIDs, state file)
+  # before removing the sandbox (ADR-0015). Killing a dead PID / missing state
+  # file is a no-op.
+  _acq_msb_ports_teardown "$1"
   msb remove --force "$1"
 }
 
@@ -1488,16 +1515,206 @@ acq_backend_cp() {
 }
 
 acq_backend_ports() {
-  # msb publishes ports at create/run time via -p HOST:GUEST; there is no
-  # standalone post-hoc "ports" verb in msb 0.6.6. Surface a clear message and
-  # the correct mechanism rather than silently failing.
   local name="$1"
   shift
-  echo "acq(msb): msb publishes ports at create/run time, not post-hoc." >&2
-  echo "      Re-create the sandbox with a published port, e.g.:" >&2
-  echo "        acq --backend msb run opencode <path> -- -p 8080:8080" >&2
-  echo "      (msb run/create accept -p HOST:GUEST; args after -- pass through.)" >&2
-  return 1
+
+  # Only --publish H:G is supported post-hoc on msb (ADR-0015). Parse it out.
+  local mapping=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --publish=*) mapping="${1#--publish=}"; shift ;;
+      --publish)   mapping="${2:-}"; shift 2 ;;
+      *)
+        echo "acq(msb): ports: unsupported argument '$1' (only --publish H:G)." >&2
+        return 1
+        ;;
+    esac
+  done
+
+  if [ -z "$mapping" ]; then
+    echo "acq(msb): ports: missing --publish HOST:GUEST." >&2
+    echo "     usage: acq ports <sandbox> --publish HOST:GUEST" >&2
+    return 1
+  fi
+
+  # SI-10: validate HOST:GUEST (both ints 1..65535) BEFORE either reaches an
+  # `ssh -L` argv or a listener bind. Fail closed on anything else.
+  local hport gport
+  hport="${mapping%%:*}"
+  gport="${mapping#*:}"
+  if ! _acq_msb_valid_publish "$mapping" "$hport" "$gport"; then
+    return 1
+  fi
+
+  # 1) Ensure the acq-managed key exists and is authorized (idempotent).
+  _acq_msb_ssh_key_ensure || return 1
+  _acq_msb_ssh_authorize || return 1
+
+  # 2) Start `msb ssh serve` on an ephemeral loopback port.
+  local sport serve_pid
+  sport=$(_acq_msb_pick_ephemeral_port)
+  _acq_msb_serve_start "$name" "$sport" || return 1
+  serve_pid=$!
+
+  # 3) Open the backgrounded `ssh -L` tunnel: host H -> guest (sandbox) G.
+  local ssh_pid
+  _acq_msb_forward_start "$sport" "$hport" "$gport" || {
+    kill "$serve_pid" 2>/dev/null || true
+    return 1
+  }
+  ssh_pid=$!
+
+  # 4) Record the serve+ssh PIDs (and the mapping) so teardown can clean up.
+  _acq_msb_ports_record "$name" "$serve_pid" "$ssh_pid" "$sport" "$mapping"
+
+  echo "acq(msb): published host 127.0.0.1:${hport} -> sandbox ${name} 127.0.0.1:${gport}" >&2
+  echo "acq(msb):   via 'msb ssh serve' on 127.0.0.1:${sport} + ssh -L (ADR-0015)." >&2
+  echo "acq(msb):   tear down with 'acq rm ${name}' (or 'acq stop ${name}')." >&2
+}
+
+# _acq_msb_valid_publish MAPPING HPORT GPORT — 0 if H:G is two ints 1..65535.
+# SI-10 gate: unvalidated input must never reach `ssh -L` argv or a bind.
+_acq_msb_valid_publish() {
+  local mapping="$1" h="$2" g="$3" p
+  case "$mapping" in
+    *:*) ;;
+    *) echo "acq(msb): ports: --publish must be HOST:GUEST, got '$mapping'." >&2; return 1 ;;
+  esac
+  for p in "$h" "$g"; do
+    case "$p" in
+      ""|*[!0-9]*)
+        echo "acq(msb): ports: invalid port '$p' in '$mapping' (want integer 1..65535)." >&2
+        return 1
+        ;;
+    esac
+    if [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
+      echo "acq(msb): ports: port '$p' out of range in '$mapping' (want 1..65535)." >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+# _acq_msb_ssh_key_ensure — create the acq-managed ed25519 key on first use.
+# 0700 dir, 0600 key, under acq state (NOT the user's ~/.ssh). Idempotent.
+_acq_msb_ssh_key_ensure() {
+  if [ -f "$ACQ_MSB_SSH_KEY" ]; then
+    return 0
+  fi
+  mkdir -p "$ACQ_MSB_SSH_DIR" || {
+    echo "acq(msb): ports: cannot create key dir '$ACQ_MSB_SSH_DIR'." >&2; return 1
+  }
+  chmod 0700 "$ACQ_MSB_SSH_DIR" 2>/dev/null || true
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    echo "acq(msb): ports: ssh-keygen not found on PATH (needed for the tunnel key)." >&2
+    return 1
+  fi
+  # -N "" = no passphrase (non-interactive). We never print the key material.
+  if ! ssh-keygen -t ed25519 -N "" -f "$ACQ_MSB_SSH_KEY" >/dev/null 2>&1; then
+    echo "acq(msb): ports: ssh-keygen failed to create the acq tunnel key." >&2
+    return 1
+  fi
+  chmod 0600 "$ACQ_MSB_SSH_KEY" 2>/dev/null || true
+  acq_debug "msb ports: generated acq-managed ssh key (${ACQ_MSB_SSH_KEY})"
+  return 0
+}
+
+# _acq_msb_ssh_authorize — seat the acq public key via `msb ssh authorize` once.
+# Authorizing twice is harmless; a marker guards against re-running each publish.
+_acq_msb_ssh_authorize() {
+  local marker="${ACQ_MSB_SSH_DIR}/.authorized"
+  if [ -f "$marker" ]; then
+    return 0
+  fi
+  if ! msb ssh authorize --file "${ACQ_MSB_SSH_KEY}.pub" >/dev/null 2>&1; then
+    echo "acq(msb): ports: 'msb ssh authorize' failed for the acq tunnel key." >&2
+    return 1
+  fi
+  : >"$marker" 2>/dev/null || true
+  acq_debug "msb ports: authorized acq tunnel public key (once)"
+  return 0
+}
+
+# _acq_msb_pick_ephemeral_port — echo a loopback port for the serve listener.
+# Uses the shell PID for a deterministic-per-process value in the high range;
+# the listener binds loopback only, so a collision just fails the serve start.
+_acq_msb_pick_ephemeral_port() {
+  echo $(( 20000 + ($$ % 40000) ))
+}
+
+# _acq_msb_serve_start NAME SPORT — background `msb ssh serve` on 127.0.0.1:SPORT.
+# Leaves the serve PID in $! for the caller to capture.
+_acq_msb_serve_start() {
+  local name="$1" sport="$2"
+  acq_debug "msb ssh serve $name --host 127.0.0.1 --port $sport (backgrounded)"
+  msb ssh serve "$name" --host 127.0.0.1 --port "$sport" >/dev/null 2>&1 &
+  return 0
+}
+
+# _acq_msb_forward_start SPORT HPORT GPORT — background OpenSSH -L local forward.
+# Binds host 127.0.0.1:HPORT to the SANDBOX's 127.0.0.1:GPORT (the -L destination
+# resolves INSIDE the guest, per ADR-0015). Uses the acq key + a dedicated
+# known_hosts under acq state (accept-new against the ephemeral loopback listener).
+# Leaves the ssh PID in $!.
+_acq_msb_forward_start() {
+  local sport="$1" hport="$2" gport="$3"
+  if ! command -v ssh >/dev/null 2>&1; then
+    echo "acq(msb): ports: ssh not found on PATH (needed for -L forwarding)." >&2
+    return 1
+  fi
+  acq_debug "ssh -p $sport -N -L 127.0.0.1:${hport}:127.0.0.1:${gport} ${ACQ_MSB_SSH_USER}@127.0.0.1"
+  ssh -p "$sport" -N \
+    -i "$ACQ_MSB_SSH_KEY" \
+    -o StrictHostKeyChecking=accept-new \
+    -o "UserKnownHostsFile=${ACQ_MSB_SSH_KNOWN_HOSTS}" \
+    -o ExitOnForwardFailure=yes \
+    -L "127.0.0.1:${hport}:127.0.0.1:${gport}" \
+    "${ACQ_MSB_SSH_USER}@127.0.0.1" >/dev/null 2>&1 &
+  return 0
+}
+
+# _acq_msb_ports_pidfile NAME — echo the per-sandbox PID state file path, but ONLY
+# for a safe sandbox name. The name interpolates into a filesystem path used by
+# `rm -f` (teardown) and `>>` (record); a name with a slash or a leading '..'
+# would escape ACQ_MSB_PORTS_DIR. Fail closed (empty output, non-zero) on anything
+# outside the sandbox-name charset acq itself produces (slugify -> [a-z0-9-]).
+_acq_msb_ports_pidfile() {
+  local name="$1"
+  case "$name" in
+    ""|*[!A-Za-z0-9_-]*|-*)
+      echo "acq(msb): ports: refusing unsafe sandbox name '$name' for state path." >&2
+      return 1
+      ;;
+  esac
+  printf '%s/%s.pids' "$ACQ_MSB_PORTS_DIR" "$name"
+}
+
+# _acq_msb_ports_record NAME SERVE_PID SSH_PID SPORT MAPPING — append a tracking
+# record so teardown can find and kill the pair. One line per publish:
+#   <serve_pid> <ssh_pid> <sport> <mapping>
+_acq_msb_ports_record() {
+  local name="$1" serve_pid="$2" ssh_pid="$3" sport="$4" mapping="$5" pidfile
+  pidfile=$(_acq_msb_ports_pidfile "$name") || return 0
+  mkdir -p "$ACQ_MSB_PORTS_DIR" 2>/dev/null || true
+  printf '%s %s %s %s\n' "$serve_pid" "$ssh_pid" "$sport" "$mapping" \
+    >>"$pidfile" 2>/dev/null || true
+}
+
+# _acq_msb_ports_teardown NAME — kill any recorded serve/ssh PIDs for NAME and
+# remove its state file. Defensive: killing a dead PID is a no-op; a missing
+# state file is fine (a sandbox with no published port has nothing to clean up).
+_acq_msb_ports_teardown() {
+  local name="$1" pidfile
+  pidfile=$(_acq_msb_ports_pidfile "$name") || return 0
+  [ -f "$pidfile" ] || return 0
+  local serve_pid ssh_pid _rest
+  while read -r serve_pid ssh_pid _rest; do
+    [ -n "$serve_pid" ] && kill "$serve_pid" 2>/dev/null || true
+    [ -n "$ssh_pid" ] && kill "$ssh_pid" 2>/dev/null || true
+  done <"$pidfile"
+  rm -f "$pidfile" 2>/dev/null || true
+  acq_debug "msb ports: tore down published-port tunnels for $name"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
