@@ -1239,6 +1239,50 @@ assert_contains "234(compat): legacy dotted global not mis-listed for unrelated 
 assert_contains "234(compat): legacy dotted global not mis-listed globally"             "$legacy_out" "list-none=[clean ]"
 cleanup_stubs
 
+# 8m0f. `acq secret ls` (msb): lists acq-managed secrets — scope, service, whether
+#       a VALUE is present, and the ENV@HOST binding — and NEVER prints a value.
+#       Covers a global built-in (usai), a global custom endpoint (its sidecar
+#       binding), and a scoped built-in (github). Also checks scope filtering.
+make_stubs; load_acq
+ls_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ls-secrets"
+  export ACQ_SECRET_TEST_VALUE="LS-SECRET-VALUE"
+  ACQ_BACKEND=msb "$ACQ" secret set -g usai >/dev/null 2>&1
+  ACQ_BACKEND=msb "$ACQ" secret set -g myapi --host api.example.com --env API_KEY >/dev/null 2>&1
+  ACQ_BACKEND=msb "$ACQ" secret set lsbox github >/dev/null 2>&1
+  echo "=== all ==="
+  ACQ_BACKEND=msb "$ACQ" secret ls 2>&1
+  echo "=== global ==="
+  ACQ_BACKEND=msb "$ACQ" secret ls -g 2>&1
+  echo "=== scoped ==="
+  ACQ_BACKEND=msb "$ACQ" secret ls lsbox 2>&1
+)
+assert_contains "secret ls(msb): header present"              "$ls_out" "SCOPE"
+assert_contains "secret ls(msb): global usai binding shown"   "$ls_out" "USAI_API_KEY@api.gsa.usai.gov"
+assert_contains "secret ls(msb): global custom endpoint shown" "$ls_out" "API_KEY@api.example.com"
+assert_contains "secret ls(msb): scoped github row shown"     "$ls_out" "GITHUB_TOKEN@api.github.com"
+# The value must NEVER be printed by `ls`.
+assert_not_contains "secret ls(msb): never prints a secret value" "$ls_out" "LS-SECRET-VALUE"
+# Scope filtering: `-g` excludes the scoped github row; `lsbox` includes only it.
+g_only=$(printf '%s\n' "$ls_out" | sed -n '/=== global ===/,/=== scoped ===/p')
+assert_not_contains "secret ls -g(msb): excludes scoped github" "$g_only" "GITHUB_TOKEN@api.github.com"
+s_only=$(printf '%s\n' "$ls_out" | sed -n '/=== scoped ===/,$p')
+assert_contains     "secret ls SANDBOX(msb): includes scoped github" "$s_only" "GITHUB_TOKEN@api.github.com"
+assert_not_contains "secret ls SANDBOX(msb): excludes global usai"   "$s_only" "USAI_API_KEY@api.gsa.usai.gov"
+cleanup_stubs
+
+# 8m0g. `acq secret ls` with an empty store prints just the header (exit 0, no
+#       rows, no crash).
+make_stubs; load_acq
+empty_ls=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/empty-ls-secrets"
+  ACQ_BACKEND=msb "$ACQ" secret ls 2>&1
+)
+empty_rc=$?
+assert_contains "secret ls(msb): empty store still prints header" "$empty_ls" "SCOPE"
+assert_eq "secret ls(msb): empty store exits 0" "0" "$empty_rc"
+cleanup_stubs
+
 
 #       its own absolute host path (sbx-parity), a trailing :ro is preserved, and
 #       the recorded start dir is the FIRST (primary) workspace regardless of how
