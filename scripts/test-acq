@@ -844,6 +844,9 @@ make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  # Pin PATH to ONLY the stub dir so a real sbx/msb on the developer's host
+  # PATH cannot leak into auto-detection (issue #217).
+  PATH="$STUBDIR"; export PATH
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
@@ -858,6 +861,10 @@ make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  # Pin PATH to ONLY the stub dir first, THEN remove the stub sbx so msb is the
+  # only backend on PATH. Without this pin a real host sbx would still be found
+  # by _auto_detect_backend and wrongly win (issue #217).
+  PATH="$STUBDIR"; export PATH
   rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
   # shellcheck disable=SC1090
   ACQ_SOURCE_ONLY=1 . "$ACQ"
