@@ -883,6 +883,18 @@ make_stubs; load_acq
 ) 2>/dev/null; pass "msb: --backend msb accepted"
 cleanup_stubs
 
+# 8c1. Capability flags: msb advertises SUPPORTS_SNAPSHOTS=0 (#225). msb DOES have
+#      a `msb snapshot` verb, but acq exposes no `snapshot` command and wiring one
+#      is beyond sbx parity — so the matrix reflects what acq surfaces, not what
+#      msb can do. Load the adapter in a subshell and read the declared flag.
+make_stubs; load_acq
+snap_flag=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  printf '%s' "$ACQ_BACKEND_SUPPORTS_SNAPSHOTS"
+)
+assert_eq "msb: SUPPORTS_SNAPSHOTS=0 (matches acq's surfaced verbs, #225)" "0" "$snap_flag"
+cleanup_stubs
+
 # 8d. Dispatch: `acq --backend msb ls` calls `msb list` (or ls alias).
 make_stubs
 out=$(ACQ_BACKEND=msb "$ACQ" ls 2>/dev/null)
