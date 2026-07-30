@@ -87,6 +87,38 @@ difference is whether acq publishes at create-time (`-p`) or post-hoc (tunnel).
 - The managed key is generated with `0600`/`0700` perms; acq never authorizes
   the user's personal key implicitly.
 
+### Listing published ports (`acq ports <sandbox>`, no `--publish`)
+
+`acq ports <sandbox>` with no `--publish` is a **query** and lists both
+create-time `-p` NAT mappings and acq-recorded post-hoc tunnels. The create-time
+half reads `msb inspect <sandbox> --format json`, whose port shape is
+**canonical, not guessed** — it is the serialized `PublishedPort` struct from the
+microsandbox source:
+
+```jsonc
+// msb inspect --format json →
+//   .active_config.network.ports[]   (active/running config)
+//   .config.network.ports[]          (requested config, mirror)
+{
+  "host_port":  3000,          // u16
+  "guest_port": 3000,          // u16
+  "protocol":   "tcp",         // "tcp" | "udp"  (default "tcp")
+  "host_bind":  "127.0.0.1"    // IpAddr, defaults to loopback
+}
+```
+
+Source of truth (pinned to msb 0.6.7):
+[`crates/network/lib/config.rs` → `struct PublishedPort`](https://github.com/superradcompany/microsandbox/blob/main/crates/network/lib/config.rs)
+and the `--format json` assembly in
+[`crates/cli/lib/commands/inspect.rs`](https://github.com/superradcompany/microsandbox/blob/main/crates/cli/lib/commands/inspect.rs).
+The parser (`_acq_msb_ports_from_inspect`) keys on the explicit `host_port` /
+`guest_port` fields and deliberately ignores `host_bind` so its dotted IP is
+never mistaken for port digits. This matters because `host_bind` can serialize
+with a trailing `:port` (a `SocketAddr`-style form): the earlier
+numeric-pairing parser split that colon and emitted junk ports (e.g.
+`guest 9 -> host 127.0.0.1:1`); keying on `*_port` field names removes that
+failure mode entirely.
+
 ## Consequences
 
 - **Better:** `acq ports … --publish` works on msb; sbx↔msb port parity is
@@ -116,3 +148,7 @@ difference is whether acq publishes at create-time (`-p`) or post-hoc (tunnel).
 - Parity tracking: [sbx↔msb backend parity epic (#234)](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/234)
   (gap K)
 - Implementation: [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)
+- msb `inspect --format json` port shape (canonical):
+  [`crates/network/lib/config.rs`](https://github.com/superradcompany/microsandbox/blob/main/crates/network/lib/config.rs)
+  (`struct PublishedPort`) and
+  [`crates/cli/lib/commands/inspect.rs`](https://github.com/superradcompany/microsandbox/blob/main/crates/cli/lib/commands/inspect.rs)

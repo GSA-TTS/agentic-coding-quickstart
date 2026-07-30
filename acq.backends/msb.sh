@@ -1928,65 +1928,82 @@ _acq_msb_ports_list() {
   return 0
 }
 
-# _acq_msb_ports_from_inspect NAME — best-effort extract create-time HOST:GUEST
-# port mappings from `msb inspect NAME --format json` and print one per line as
-# `guest <G> -> host <H> (create-time -p)`. msb's exact JSON field name for
-# published ports is not pinned, so this is DEFENSIVE: prefer `jq` when present
-# (try a few plausible field paths), else a dependency-free grep/sed of any
-# "H:G"-shaped tokens. Missing tool, missing field, or no output are all silent
-# no-ops (return 0) — never a hard failure on a query.
+# _acq_msb_ports_from_inspect NAME — extract create-time host/guest port mappings
+# from `msb inspect NAME --format json` and print one per line as
+# `guest <G> -> host <H> (create-time -p)`.
+#
+# Canonical JSON shape (do NOT re-guess this — it is defined in the microsandbox
+# source, not just observed): `msb inspect --format json` emits the sandbox's
+# active config under `.active_config` (with the requested config mirrored under
+# `.config`), and published ports live at `<config>.network.ports[]`. Each entry
+# is a `PublishedPort` struct serialized as:
+#     { "host_port": <u16>, "guest_port": <u16>,
+#       "protocol": "tcp"|"udp", "host_bind": "<ip>" }
+# See microsandbox `crates/network/lib/config.rs` (`struct PublishedPort`) and
+# `crates/cli/lib/commands/inspect.rs` (the `--format json` assembly) — pinned to
+# msb 0.6.7. `host_bind` defaults to loopback (127.0.0.1).
+#
+# Prefer `jq`; else a dependency-free `host_port`/`guest_port` scan (which
+# deliberately ignores `host_bind`, whose dotted IP would otherwise be mistaken
+# for port digits). Missing tool/field or no output are silent no-ops (return 0)
+# — a query must never hard-fail.
 _acq_msb_ports_from_inspect() {
-  local name="$1" json pair h g
+  local name="$1" json line h g
   json=$(msb inspect "$name" --format json 2>/dev/null) || return 0
   [ -n "$json" ] || return 0
-  local pairs=""
+  local lines=""
   if command -v jq >/dev/null 2>&1; then
-    # Try common shapes: array of {host,guest|container}, or "H:G" strings, or a
-    # ports object. `?//empty` keeps a missing path from erroring.
-    pairs=$(printf '%s' "$json" | jq -r '
-      [ (.ports? // .portMappings? // .published_ports? // .publishedPorts? // [])[]?
+    # msb 0.6.7 shape first; fall back to a few plausible legacy field names.
+    # `?//empty` keeps a missing path from erroring; each port -> "H:G".
+    lines=$(printf '%s' "$json" | jq -r '
+      [ ((.active_config.network.ports?) // (.config.network.ports?)
+          // .ports? // .portMappings? // .publishedPorts? // [])[]?
         | if type=="string" then .
           elif type=="object" then
-            (((.host // .hostPort // .host_port)|tostring) + ":" +
-             ((.guest // .container // .containerPort // .guestPort)|tostring))
+            (((.host_port // .hostPort // .host)|tostring) + ":" +
+             ((.guest_port // .guestPort // .guest // .container)|tostring))
           else empty end ]
       | .[]?' 2>/dev/null)
   fi
-  if [ -z "$pairs" ]; then
-    # jq absent or field not found: dependency-free best-effort. First try any
-    # literal HOST:GUEST integer token (e.g. a "3000:3000" string form). If none,
-    # fall back to pairing adjacent host/guest-like numeric fields so an object
-    # shape ({"host":3000,"guest":3000}) still yields "3000:3000".
-    pairs=$(printf '%s' "$json" \
-      | tr ',{}[]" ' '\n\n\n\n\n\n\n' \
-      | grep -Eo '[0-9]{1,5}:[0-9]{1,5}' 2>/dev/null)
-    if [ -z "$pairs" ]; then
-      pairs=$(printf '%s' "$json" \
-        | tr -d '"' \
-        | tr ',{}[]' '\n\n\n\n\n' \
-        | grep -Eio '(host|guest|container)(port|_port)?[[:space:]]*:[[:space:]]*[0-9]{1,5}' 2>/dev/null \
-        | grep -Eo '[0-9]{1,5}' 2>/dev/null \
-        | _acq_msb_pair_lines)
-    fi
+  if [ -z "$lines" ]; then
+    # jq absent/failed: dependency-free. Read the ports array as flat key:value
+    # tokens and pull explicit host_port/guest_port pairs. We match ONLY the
+    # *_port keys so `host_bind: "127.0.0.1"` can't leak dotted-IP digits.
+    lines=$(printf '%s' "$json" \
+      | tr -d '" ' \
+      | tr ',{}[]' '\n\n\n\n\n' \
+      | grep -E '^(host_port|guest_port):[0-9]{1,5}$' 2>/dev/null \
+      | _acq_msb_pair_lines)
   fi
-  [ -n "$pairs" ] || return 0
-  printf '%s\n' "$pairs" | while IFS= read -r pair; do
-    [ -n "$pair" ] || continue
-    h="${pair%%:*}"; g="${pair#*:}"
-    case "$h$g" in ""|*[!0-9]*) continue ;; esac
+  [ -n "$lines" ] || return 0
+  printf '%s\n' "$lines" | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    h="${line%%:*}"; g="${line#*:}"
+    case "$h" in ""|*[!0-9]*) continue ;; esac
+    case "$g" in ""|*[!0-9]*) continue ;; esac
     printf 'guest %s -> host 127.0.0.1:%s (create-time -p)\n' "$g" "$h"
   done
   return 0
 }
 
-# _acq_msb_pair_lines — read a flat stream of integers on stdin (host, guest,
-# host, guest, …) and emit "host:guest" per pair. Dependency-free helper for the
-# jq-absent fallback in _acq_msb_ports_from_inspect. An odd trailing value is
-# dropped (incomplete pair). bash-3.2 safe.
+# _acq_msb_pair_lines — read a flat stream of `<key>:<value>` port tokens on
+# stdin (host_port:N, guest_port:N, …, in msb's array order) and emit "H:G" per
+# host/guest pair, keyed by name so ordering variations still pair correctly.
+# Dependency-free helper for the jq-absent fallback in
+# _acq_msb_ports_from_inspect. A dangling host without a following guest (or
+# vice versa) is dropped. bash-3.2 safe.
 _acq_msb_pair_lines() {
-  local a="" n
-  while read -r n; do
-    if [ -z "$a" ]; then a="$n"; else printf '%s:%s\n' "$a" "$n"; a=""; fi
+  local h="" g="" tok k v
+  while read -r tok; do
+    k="${tok%%:*}"; v="${tok#*:}"
+    case "$k" in
+      host_port)  h="$v" ;;
+      guest_port) g="$v" ;;
+      *) continue ;;
+    esac
+    if [ -n "$h" ] && [ -n "$g" ]; then
+      printf '%s:%s\n' "$h" "$g"; h=""; g=""
+    fi
   done
 }
 # ---------------------------------------------------------------------------

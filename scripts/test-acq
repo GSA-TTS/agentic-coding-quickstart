@@ -2868,8 +2868,15 @@ cleanup_stubs
 #       (a) create-time `-p` NAT mappings via `msb inspect --format json`, and
 #       (b) acq-recorded post-hoc ssh -L tunnels. Both surfaced together.
 make_stubs; load_acq
-# (a) plant a create-time published-ports JSON fixture for `msb inspect`.
-printf '{"ports":[{"host":3000,"guest":3000},{"host":4096,"guest":4096}]}\n' \
+# (a) plant a create-time published-ports JSON fixture for `msb inspect` using the
+#     REAL msb 0.6.7 shape: ports live under active_config.network.ports[] as
+#     {host_port, guest_port, host_bind, protocol}. host_bind carries a dotted IP
+#     (127.0.0.1) that must NOT be mistaken for port digits. The third entry binds
+#     host_bind to a colon-bearing "127.0.0.1:9" form (the exact shape that caused
+#     the live bug) so the no-junk assert below is a TRUE regression guard: the old
+#     parser split that colon and emitted `guest 9 -> host 127.0.0.1:1`, while the
+#     current parser keys on the explicit *_port fields and yields 8443 correctly.
+printf '%s\n' '{"active_config":{"network":{"ports":[{"guest_port":3000,"host_bind":"127.0.0.1","host_port":3000,"protocol":"tcp"},{"guest_port":4096,"host_bind":"127.0.0.1","host_port":4096,"protocol":"tcp"},{"guest_port":8443,"host_bind":"127.0.0.1:9","host_port":8443,"protocol":"tcp"}]}},"name":"listbox","status":"Running"}' \
   >"$STUBDIR/.msb_inspect_json"
 list_out=$(
   . "${REPO_ROOT}/acq.backends/msb.sh"
@@ -2887,6 +2894,19 @@ printf '%s\n' "$list_out" | grep -q 4096 \
 printf '%s\n' "$list_out" | grep -q 8080 \
   && pass "msb ports: LIST surfaces post-hoc recorded guest port 8080" \
   || fail "msb ports: LIST surfaces post-hoc recorded guest port 8080" "out=[$list_out]"
+# The create-time lines must be EXACT (no host_bind dotted-IP or SocketAddr digits
+# leaking in as ports). The old numeric-pairing parser split the colon in the
+# third entry's host_bind ("127.0.0.1:9") and emitted `guest 9 -> host 127.0.0.1:1`
+# instead of the real 8443:8443 mapping — these asserts fail against that old code.
+printf '%s\n' "$list_out" | grep -q 'guest 3000 -> host 127.0.0.1:3000 (create-time -p)' \
+  && pass "msb ports: LIST prints exact create-time mapping for 3000 (no host_bind leak)" \
+  || fail "msb ports: LIST exact create-time mapping for 3000" "out=[$list_out]"
+printf '%s\n' "$list_out" | grep -q 'guest 8443 -> host 127.0.0.1:8443 (create-time -p)' \
+  && pass "msb ports: LIST maps colon-bearing host_bind entry to real port 8443 (not split)" \
+  || fail "msb ports: LIST exact create-time mapping for 8443 (colon-bearing host_bind)" "out=[$list_out]"
+printf '%s\n' "$list_out" | grep -Eq '127\.0\.0\.1:(1|9|16|00|256)( |$)' \
+  && fail "msb ports: LIST must NOT emit host_bind-derived junk ports" "out=[$list_out]" \
+  || pass "msb ports: LIST emits no host_bind-derived junk ports (IP/SocketAddr not split)"
 cleanup_stubs
 
 # 10b9. LIST mode is graceful when there are NO ports at all (no inspect fixture,
