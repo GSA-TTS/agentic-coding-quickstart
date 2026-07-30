@@ -525,6 +525,28 @@ the kit spec never carries a secret value.
 
 Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 
+### Kit-bundle provenance and stale-sandbox refresh
+
+`acq` records, host-side, which built-in bundle ref each sandbox was built from
+(under `${XDG_STATE_HOME:-$HOME/.local/state}/acq/provenance/<backend>/<name>.env`;
+override with `ACQ_PROVENANCE_DIR`). It compares that against the **local**
+`PATTERNS_KIT_REF` to detect drift:
+
+- `acq kit check SANDBOX` — report `current` / `stale` / `unknown` (read-only).
+- `acq kit update SANDBOX [--yes]` — reapply the bundle in place to the pinned
+  ref, preserving sandbox state. `--yes` is honored **only** on this explicit
+  command.
+- `acq run` on an existing sandbox that is behind the pin **offers** a refresh:
+  interactive, default No, EOF declines, and it **never blocks** a launch. A
+  non-interactive run prints one advisory and continues.
+- Opt out with `ACQ_UPDATE_CHECK=0` or `acq run --no-update-check`.
+
+Backend behavior: **sbx** injects any absent built-in kits during the heal pass;
+**msb** re-applies all built-in kits idempotently. Both rewrite provenance only
+after a successful apply. Staleness is an exact-ref mismatch against the local
+pin (no git ancestry, no network) — the local checkout is the source of truth.
+See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
+
 ---
 
 ## Shipped in 1.2.0
@@ -532,6 +554,11 @@ Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 - `acq kit apply|list|validate` — kit management subcommands
 - Neutral `hybrid/v1` kit spec + `kit-translate.sh` (multi-backend kits)
 - `msb` (microsandbox) backend
+
+## Shipped later
+
+- `acq kit check|update` + host-side kit-bundle provenance and stale-sandbox
+  refresh (quickstart#236, ADR-0016)
 
 ## Still deferred
 
@@ -541,3 +568,4 @@ Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 - `ppp` (Podman-Plus-Proxy) backend — Phase 3, in development at
   [GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)
 - Removal of `qsbx` (Phase 4 / 2.0.0)
+- Advisory "your Quickstart checkout is behind origin" check (quickstart#237)

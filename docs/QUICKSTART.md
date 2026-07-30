@@ -159,6 +159,32 @@ the active backend automatically. Inspect and manage them with:
 ./acq kit apply my-sandbox KITREF # apply a kit to an existing sandbox
 ```
 
+### Keeping existing sandboxes current
+
+`acq` pins the built-in kit bundle (USAi config, playbook, Zscaler CA,
+git-ssh-sign) to one commit of the patterns repo. When that pin is bumped,
+**new** sandboxes get the new bundle right away. For an **existing** sandbox,
+`acq` records which bundle ref it was built from and can tell you if it is behind:
+
+```bash
+./acq kit check my-sandbox        # is this sandbox on the pinned bundle?
+./acq kit update my-sandbox       # refresh the bundle in place (asks first)
+./acq kit update my-sandbox --yes # refresh without the prompt
+```
+
+- `acq run` on an existing sandbox that is behind the pin **offers** a refresh.
+  It is interactive, defaults to **No**, and **never blocks** a launch — declining
+  (or a non-interactive run) just continues.
+- A refresh updates the kits **in place**. Your sessions, secrets, unrelated
+  config, and project files are kept. It never deletes or recreates the sandbox.
+- To skip the automatic check: `ACQ_UPDATE_CHECK=0` (whole session) or
+  `./acq run --no-update-check ...` (one run).
+- A sandbox created before this feature has **no record**; `acq` reports it as
+  `unknown` and offers a refresh. Refreshing is safe and idempotent.
+
+See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md) for the
+design and trust model.
+
 ---
 
 ## Migration from qsbx

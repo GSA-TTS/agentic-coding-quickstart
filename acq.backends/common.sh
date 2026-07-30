@@ -28,11 +28,15 @@
 # playbook auth on msb via the GitHub REST API instead of git clone).
 # ============================================================================
 PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-# patterns main @ 3fcde8e — playbook REST-tarball fetch (#269, quickstart#203),
-# on top of the environment vocabulary (#227) and neutral acq-kits (#221/#224).
-# Full 40-char SHA (not an abbreviation): this ref drives a credential-bearing
-# cross-repo kit fetch, so pin it unambiguously for reproducibility.
-PATTERNS_KIT_REF="3fcde8ee396bf9841de47f6f7886db088164243d"
+# patterns main @ 5c55bcf — bundle provenance schema + usai-provider provenance
+# block (patterns#273, quickstart#235), on top of the playbook REST-tarball fetch
+# (#269, quickstart#203), the environment vocabulary (#227) and neutral acq-kits
+# (#221/#224). Full 40-char SHA (not an abbreviation): this ref drives a
+# credential-bearing cross-repo kit fetch, so pin it unambiguously for
+# reproducibility. It is ALSO the bundle-version anchor recorded in a sandbox's
+# host-side provenance record (see ACQ_BUILTIN_BUNDLE below + the provenance
+# helpers) so acq can tell a stale sandbox from a current one.
+PATTERNS_KIT_REF="5c55bcf9fc77947b145a828f75877797ebd6d178"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider"
@@ -46,10 +50,28 @@ GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_
 # shellcheck disable=SC2034  # consumed by `acq kit list` in the acq entry point
 ACQ_KIT_NAMES=(usai-provider agentic-coding-playbook zscaler-ca-certificate git-ssh-sign)
 
+# Built-in bundle identity (quickstart#235 / patterns#273). This mirrors the
+# `provenance` block the usai-provider kit declares in the patterns repo at the
+# pinned PATTERNS_KIT_REF. acq records these in a sandbox's host-side provenance
+# record so a later `acq run` / `acq kit check` can tell whether an existing
+# sandbox was built from the CURRENTLY pinned bundle. The bundle name + repo are
+# stable identity; the applied SHA (PATTERNS_KIT_REF) is the currency signal.
+# shellcheck disable=SC2034  # consumed by the provenance helpers below
+ACQ_BUILTIN_BUNDLE="acq-builtin"
+# shellcheck disable=SC2034
+ACQ_BUILTIN_BUNDLE_REPO="GSA-TTS/agentic-coding-patterns"
+
 # Additional user-supplied kits. Set ACQ_EXTRA_KITS to a whitespace-separated
 # list of kit references. Set ACQ_EXTRA_KIT_SOURCES for their allowlist prefixes.
 ACQ_EXTRA_KITS="${ACQ_EXTRA_KITS:-}"
 ACQ_EXTRA_KIT_SOURCES="${ACQ_EXTRA_KIT_SOURCES:-}"
+
+# Update-check opt-out (quickstart#236). When ACQ_UPDATE_CHECK=0, `acq run` never
+# runs the stale-sandbox check (no provenance comparison, no prompt). The
+# explicit `acq kit check` / `acq kit update` commands still work — the opt-out
+# only silences the automatic per-run check. `acq run --no-update-check` sets
+# this for a single invocation (parsed in the acq entry point).
+ACQ_UPDATE_CHECK="${ACQ_UPDATE_CHECK:-1}"
 
 # Kits supplied on the command line via `--kit <ref>` (repeatable) on
 # run/create. These are extracted from the arg list by extract_kit_flags (below)
@@ -440,6 +462,233 @@ acq_resolve_backend() {
 
   _load_backend_adapter "$name"
   _build_kit_list
+}
+
+# ============================================================================
+# Kit-bundle provenance + staleness (quickstart#235 / #236)
+# ============================================================================
+# When acq applies the built-in kit bundle to a sandbox it records, HOST-SIDE, a
+# small provenance record naming the bundle and the exact PATTERNS_KIT_REF that
+# was applied. A later `acq run` / `acq kit check` compares that recorded ref
+# against the local checkout's CURRENT PATTERNS_KIT_REF: if they differ (or no
+# record exists), the sandbox is "stale/legacy" and acq offers a safe in-place
+# refresh.
+#
+# Design (per quickstart#235 consensus + #236 decisions):
+#   - Host-side only. The record lives under XDG_STATE_HOME on the machine
+#     running acq, keyed by backend + sandbox name. No guest exec is needed to
+#     read it, so the check is fast and works even for a stopped sandbox. If the
+#     host state is lost, the sandbox reads as "unknown" and acq simply re-offers
+#     a refresh — never a destructive default.
+#   - The LOCAL checkout's PATTERNS_KIT_REF is the source of truth (never the
+#     mutable patterns `main`).
+#   - Staleness = exact-ref mismatch (or missing record). No git ancestry / no
+#     network call: deterministic and offline-safe. A newer-but-different local
+#     pin correctly offers a refresh.
+#   - Written ONLY after a successful apply (the caller gates the write on the
+#     apply's exit status); a partial/failed apply must not claim currency.
+#   - Fail-open: any read/parse/detect error is treated as "cannot determine" and
+#     never blocks a run.
+#
+# Record format: a tiny, dependency-free `key=value` file (one pair per line).
+# We deliberately avoid a JSON/YAML dependency in the shell path — the fields are
+# flat scalars and this matches the awk-parsed acq config convention.
+
+# Provenance state directory (host-side). Overridable via ACQ_PROVENANCE_DIR for
+# tests and for users who relocate XDG state. Mirrors _acq_config_file's style.
+_acq_provenance_dir() {
+  if [ -n "${ACQ_PROVENANCE_DIR:-}" ]; then
+    printf '%s\n' "$ACQ_PROVENANCE_DIR"
+    return 0
+  fi
+  printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/acq/provenance"
+}
+
+# Path to one sandbox's provenance record. Keyed by backend + sandbox name so the
+# same name under two backends never collides. The sandbox name is sanitized to a
+# safe filename charset (defense-in-depth: a name reaches a filesystem path here).
+# A short checksum of the RAW name is appended so two distinct names that sanitize
+# to the same string (e.g. "a/b" and "a_b") do not alias onto one record.
+_acq_provenance_file() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  local safe_backend safe_name name_sum
+  safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
+  safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+  # cksum of the raw name disambiguates sanitizer collisions (fail-open: if cksum
+  # is somehow unavailable the name still resolves, just without the suffix).
+  name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+  printf '%s/%s/%s.%s.env\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+}
+
+# Write (or overwrite) a sandbox's provenance record. Call ONLY after a
+# successful bundle apply. Records the bundle identity + the exact applied ref +
+# an ISO-8601 UTC timestamp + the backend. Best-effort: a write failure warns
+# (debug) and returns non-zero but never aborts the caller (fail-open).
+# Usage: acq_provenance_write BACKEND SANDBOX_NAME
+acq_provenance_write() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  local file dir ts
+  file=$(_acq_provenance_file "$backend" "$name") || return 1
+  dir=$(dirname "$file")
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    acq_debug "provenance: could not create state dir: $dir"
+    return 1
+  fi
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+  # Write atomically via a temp file + mv so a crash mid-write can't leave a
+  # half-written record that later parses as a bogus "current" ref.
+  local tmp="${file}.tmp.$$"
+  {
+    printf 'schema=1\n'
+    printf 'bundle=%s\n' "$ACQ_BUILTIN_BUNDLE"
+    printf 'repo=%s\n' "$ACQ_BUILTIN_BUNDLE_REPO"
+    printf 'applied_ref=%s\n' "$PATTERNS_KIT_REF"
+    printf 'backend=%s\n' "$backend"
+    printf 'applied_at=%s\n' "$ts"
+  } > "$tmp" 2>/dev/null || { acq_debug "provenance: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$file" 2>/dev/null || { acq_debug "provenance: mv failed: $file"; rm -f "$tmp" 2>/dev/null; return 1; }
+  acq_debug "provenance: recorded $backend/$name applied_ref=$PATTERNS_KIT_REF"
+  return 0
+}
+
+# Read one field from a sandbox's provenance record. Echoes the value (empty if
+# absent/unreadable). Defensive flat key=value parse (no YAML/JSON dep), matching
+# the acq config awk convention. Only the first match wins.
+# Usage: acq_provenance_field BACKEND SANDBOX_NAME FIELD
+acq_provenance_field() {
+  local backend="${1:-}" name="${2:-}" field="${3:-}"
+  [ -n "$backend" ] && [ -n "$name" ] && [ -n "$field" ] || return 0
+  local file
+  file=$(_acq_provenance_file "$backend" "$name") || return 0
+  [ -f "$file" ] || return 0
+  awk -F= -v k="$field" '
+    $1 == k { sub(/^[^=]*=/, ""); print; exit }
+  ' "$file" 2>/dev/null || true
+}
+
+# Classify a sandbox's currency against the LOCAL pinned PATTERNS_KIT_REF.
+# Echoes exactly one of: current | stale | unknown.
+#   current — record exists and applied_ref == local PATTERNS_KIT_REF.
+#   stale   — record exists and applied_ref != local PATTERNS_KIT_REF.
+#   unknown — no record (legacy sandbox, or host state lost) or unreadable.
+# Fail-open: on any doubt it returns "unknown", which callers treat as "offer a
+# refresh" — never as "force" and never as a launch blocker.
+# Usage: acq_provenance_status BACKEND SANDBOX_NAME
+acq_provenance_status() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || { printf 'unknown\n'; return 0; }
+  local applied
+  applied=$(acq_provenance_field "$backend" "$name" applied_ref)
+  if [ -z "$applied" ]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if [ "$applied" = "$PATTERNS_KIT_REF" ]; then
+    printf 'current\n'
+  else
+    printf 'stale\n'
+  fi
+  return 0
+}
+
+# Reapply the built-in bundle to an existing sandbox and, on success, refresh its
+# host-side provenance record. Uses the backend's heal path
+# (acq_backend_ensure_kits_applied) with ACQ_FORCE_KIT_REAPPLY=1 so a
+# present-but-stale kit is actually re-applied (the sbx feature-probe would
+# otherwise skip a kit that is present but built from an older ref). msb already
+# re-applies all kits idempotently; the force flag is a no-op there. After a usai
+# refresh the kit's own startup global-merge re-runs on next attach, so the
+# refreshed model catalog reaches the config. State (sessions, secrets, unrelated
+# config, project overrides) is preserved: this is an in-place kit reapply, never
+# a sandbox delete/recreate.
+# Returns 0 on success (bundle applied + provenance updated by the heal path),
+# non-zero on apply failure (record left untouched, so the sandbox correctly
+# stays "stale/unknown").
+# Usage: acq_bundle_reapply BACKEND SANDBOX_NAME
+acq_bundle_reapply() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  if ! command -v acq_backend_ensure_kits_applied >/dev/null 2>&1; then
+    echo "acq: error: backend '$backend' cannot reapply kits (no ensure_kits_applied)." >&2
+    return 1
+  fi
+  echo "acq: refreshing the built-in kit bundle in '$name' (in place; state preserved)..." >&2
+  # ensure_kits_applied writes provenance itself on full success and returns
+  # non-zero on any built-in-kit failure, so we do not double-write here.
+  if ACQ_FORCE_KIT_REAPPLY=1 acq_backend_ensure_kits_applied "$name"; then
+    echo "acq: '$name' refreshed to patterns ref ${PATTERNS_KIT_REF}." >&2
+    echo "      Restart the agent (or re-run 'acq run') to pick up refreshed config." >&2
+    return 0
+  fi
+  echo "acq: warning: kit refresh for '$name' did not complete cleanly; leaving it as-is." >&2
+  echo "      The sandbox and its state are untouched. Re-run 'acq kit update $name' to retry," >&2
+  echo "      or 'acq rm $name && acq run ...' for a clean rebuild." >&2
+  return 1
+}
+
+# Automatic stale-sandbox advisory for `acq run` on an EXISTING sandbox. Compares
+# the sandbox's recorded bundle ref against the local pinned PATTERNS_KIT_REF and,
+# when they differ (or no record exists), OFFERS an in-place refresh. Contract
+# (quickstart#236):
+#   - Opt-out: ACQ_UPDATE_CHECK=0 (or `acq run --no-update-check`) skips entirely.
+#   - Interactive only. Non-interactive (no TTY on stdin) NEVER blocks: it prints
+#     one concise advisory and returns 0 so the run continues.
+#   - Default is No. A bare Enter, EOF (Ctrl-D / closed stdin), or anything other
+#     than an explicit yes declines — and a decline never prevents launch.
+#   - Fail-open: "unknown" status (legacy/lost record) is advisory, not forced.
+# The caller MUST pass the status captured BEFORE the pre-attach heal, because the
+# heal rewrites provenance to "current" — reading status here would then always
+# see "current" and never offer. $3 is that pre-heal status (current|stale|
+# unknown); when omitted we read it live (used by unit tests that seed a record).
+# This function always returns 0 (it must never abort a run); the refresh itself
+# is best-effort.
+# Usage: maybe_offer_bundle_refresh BACKEND SANDBOX_NAME [PRE_HEAL_STATUS]
+maybe_offer_bundle_refresh() {
+  local backend="${1:-}" name="${2:-}" status="${3:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+
+  # Opt-out short-circuits the entire check.
+  [ "${ACQ_UPDATE_CHECK:-1}" = "0" ] && return 0
+
+  [ -n "$status" ] || status=$(acq_provenance_status "$backend" "$name")
+  # Nothing to do when the sandbox is already on the pinned bundle.
+  [ "$status" = "current" ] && return 0
+
+  case "$status" in
+    stale)
+      echo "acq: note — '$name' was built from an older kit bundle than your pinned" >&2
+      echo "      version (local patterns ref ${PATTERNS_KIT_REF})." >&2
+      ;;
+    *)
+      # unknown: legacy sandbox (pre-provenance) or lost host record.
+      echo "acq: note — acq cannot confirm '$name' is on your pinned kit bundle" >&2
+      echo "      (no provenance record; it may predate provenance tracking)." >&2
+      ;;
+  esac
+  echo "      A refresh updates the built-in kits (USAi config, playbook, Zscaler CA," >&2
+  echo "      git-ssh-sign) in place. Your sessions, secrets, and project files are kept." >&2
+
+  # Non-interactive: advise how to do it explicitly, then continue. Never block.
+  if [ ! -t 0 ]; then
+    echo "      To refresh later: acq kit update $name" >&2
+    echo "      To silence this check: ACQ_UPDATE_CHECK=0 (or acq run --no-update-check)." >&2
+    return 0
+  fi
+
+  local ans=""
+  printf 'acq: refresh the kit bundle in %s now? [y/N] ' "$name" >&2
+  read -r ans 2>/dev/null || ans=""
+  case "$ans" in
+    y|Y|yes|YES)
+      acq_bundle_reapply "$backend" "$name" || true
+      ;;
+    *)
+      echo "acq: continuing without refreshing (run 'acq kit update $name' anytime)." >&2
+      ;;
+  esac
+  return 0
 }
 
 # ============================================================================
