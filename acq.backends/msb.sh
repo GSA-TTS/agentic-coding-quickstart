@@ -329,6 +329,71 @@ _acq_msb_wait_for_exec_ready() {
 # ---------------------------------------------------------------------------
 # Kit application helpers (msb drives the neutral spec itself)
 # ---------------------------------------------------------------------------
+#
+# DESIGN NOTE — why kit commands still stage via `msb exec`, not `--script`
+# (quickstart#239, evaluated against msb 0.6.7's create/run-time script flags).
+# ---------------------------------------------------------------------------
+# msb 0.6.7 offers first-class script registration on `create`/`run`:
+#   --script NAME=BODY        (inline; escape-decoded; shebang from --shell)
+#   --script-raw NAME=BODY    (exact bytes, no shebang)
+#   --script-path NAME:PATH   (body read verbatim from a host file)
+# Registered scripts land executable at /.msb/scripts/<name>, on the guest PATH.
+# The appeal is real: staging a kit command via --script-path passes the body as
+# a FILE (no assembling a shell string from kit-provided content). We evaluated
+# replacing the kit-command-injection path (_acq_msb_run_commands ->
+# _acq_msb_exec_command) with it and DELIBERATELY KEPT the exec-based path. The
+# refactor is not a clean net win as this adapter is currently shaped:
+#
+#   1) TIMING. `--script*` register ONLY at create/run time. But kit commands are
+#      NOT all applied at create: _acq_msb_apply_kit_dir is also driven MID-LIFE
+#      by acq_backend_apply_kit (`acq kit apply NAME KITREF`, acq:293) and by
+#      acq_backend_ensure_kits_applied (the re-attach heal loop, acq:434/461),
+#      long after the sandbox was created. A create-time flag cannot register a
+#      script into an already-running sandbox, so the mid-life path MUST stay
+#      exec-based regardless. Introducing --script only at provision would fork
+#      the code into two dissimilar command-dispatch paths (create=script,
+#      mid-life=exec) — MORE surface, MORE divergence, for the same observable
+#      behavior. A single exec-based path that works in both phases is simpler
+#      and is what the whole apply pipeline is already built around.
+#
+#   2) THE STRING WE WOULD AVOID ISN'T BUILT FROM KIT CONTENT. The safety win of
+#      --script is "stop interpolating kit-provided bytes into an `sh -c`
+#      string." But this adapter ALREADY does not do that for kit argv: a kit
+#      command is carried as base64-encoded argv tokens (kit_spec_commands ->
+#      __CMD__ records), decoded into a bash array, and handed to
+#      `msb exec … -- "$@"` as SEPARATE ARGV ELEMENTS. Kit content never enters
+#      an interpolated shell string on this path; the only `sh -c` around it is
+#      the fixed background-detach wrapper (`nohup "$@" … ` with the argv as
+#      positional params — gap A, still no interpolation). So the injection risk
+#      --script is designed to remove is already absent here; --script would
+#      restage the same already-safe argv through a different primitive without
+#      reducing attack surface.
+#
+#   3) IDEMPOTENCY/USER SEMANTICS LIVE IN THE EXEC PATH, NOT IN REGISTRATION.
+#      install-phase commands are run-once via a root-owned marker keyed on a
+#      hash of the argv (_acq_msb_exec_command: /var/lib/acq/install-<cksum>),
+#      tested+written as uid 0 so the gate is independent of the command's own
+#      user; initFiles/startup re-run every apply. Per-phase run-as-user
+#      (install=root, 1000/agent -> `-u agent` + HOME) and the non-interactive
+#      git guards (GIT_TERMINAL_PROMPT=0 …) are all applied at INVOCATION. A
+#      registered /.msb/scripts/<name> still has to be INVOKED (as the right
+#      user, marker-gated, with the right env) — i.e. we would keep the entire
+#      exec+marker+uflag/eflag machinery AND add a registration+guard step on
+#      top. Net: strictly more moving parts, identical behavior.
+#
+#   4) FILE STAGING IS ORTHOGONAL. files[] already stage via `msb copy` +
+#      verify + chown (_acq_msb_copy_file_verified); paths are charset-validated
+#      and never interpolated. --script-path would only cover the COMMAND body,
+#      not files[], so it cannot subsume that path either.
+#
+# CONCLUSION (per the #239 decision gate): keep the exec-based kit-command
+# staging. The one place --script/--script-path would be a clean, contained win
+# — a create-time-ONLY, run-once command whose body is genuinely a script file —
+# does not exist in the pinned neutral kit vocabulary today (kit commands are
+# argv sequences across three phases, applied both at create and mid-life). If a
+# future kit schema adds a create-time-only "script" concept, revisit this with
+# --script-path for that narrow case only; until then a second dispatch path is
+# net-negative. No behavior change; the mid-life exec path is load-bearing.
 
 # Fetch a kit ref into the cache and echo its local dir. Returns 1 on failure.
 _acq_msb_fetch_kit() {
