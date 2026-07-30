@@ -1984,7 +1984,7 @@ cleanup_stubs
 # 9p13. ACQ_UPDATE_CHECK=0 fully silences the run-check even when stale.
 make_stubs; load_acq
 _seed_stale_provenance sbx optout
-out=$( ACQ_UPDATE_CHECK=0; maybe_offer_bundle_refresh sbx optout </dev/null 2>&1 )
+out=$( ACQ_UPDATE_CHECK=0 maybe_offer_bundle_refresh sbx optout </dev/null 2>&1 )
 assert_eq "run-check: opt-out silences advisory" "" "$out"
 cleanup_stubs
 
