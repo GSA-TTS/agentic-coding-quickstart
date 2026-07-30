@@ -375,6 +375,62 @@ acq_secret_meta_list() {
   done
 }
 
+# acq_secret_list_keys -> every stored VALUE key (one per line), e.g.
+# `acq.usai`, `acq.mybox.github`. KEYS ONLY — never the secret values. Used by
+# `acq secret ls` to enumerate what the store holds. Scope/service is decoded by
+# the caller (see _acq_secret_decode_key). Order is unspecified; deduplicated.
+#
+# The file backend (and the macOS file fallback) is the authoritative on-disk
+# listing: even on a keychain host, acq_secret_store writes values to the 0600
+# file fallback by default (to keep values off argv — see acq_secret_store), so
+# the file dir reflects the acq-managed values. A pure keychain-only store (only
+# reachable with ACQ_SECRET_ALLOW_ARGV=1 at write time) is NOT enumerable via a
+# per-item API without a broad keychain dump, so those are reported best-effort:
+# a value that resolves is confirmed by acq_secret_resolve at display time.
+acq_secret_list_keys() {
+  local f base seen=" "
+  [ -d "$ACQ_SECRET_FILE_DIR" ] || return 0
+  for f in "$ACQ_SECRET_FILE_DIR"/*; do
+    [ -f "$f" ] || continue
+    base=$(basename "$f")
+    case "$base" in acq.*) ;; *) continue ;; esac
+    case "$seen" in *" $base "*) continue ;; esac
+    seen="$seen$base "
+    printf '%s\n' "$base"
+  done
+}
+
+# _acq_secret_decode_key KEY -> "SCOPE<TAB>SERVICE" where SCOPE is "-g" (global)
+# or the sandbox name. Mirrors _acq_secret_key's layout: `acq.<service>` (global)
+# vs `acq.<sandbox>.<service>` (scoped). A dotted remainder is a foreign/legacy
+# ambiguous key (see acq_secret_meta_list note) and is reported as scope "?" so
+# `ls` never mis-attributes it. Never emits the value.
+_acq_secret_decode_key() {
+  local key="$1" rest
+  case "$key" in acq.*) rest="${key#acq.}" ;; *) return 1 ;; esac
+  case "$rest" in
+    *.*.*)
+      # A multi-dot remainder cannot be produced by a current write: _acq_secret_key
+      # fails closed on a dotted service/sandbox, so acq.<sandbox>.<service> has
+      # exactly one dot. A multi-dot key is a foreign/legacy entry and is
+      # genuinely ambiguous by filename alone. Do NOT guess a sandbox — report
+      # scope "?" (matching acq_secret_meta_list, which skips such keys) so `ls`
+      # never mis-attributes it into a real scope. The full remainder is the
+      # service label so the row is still transparent.
+      printf '%s\t%s\n' "?" "$rest"
+      ;;
+    *.*)
+      # scoped acq.<sandbox>.<service>: split on the FIRST dot. A service or
+      # sandbox can no longer contain a dot (_acq_secret_key fails closed), so a
+      # single-dot remainder is unambiguously <sandbox>.<service>.
+      printf '%s\t%s\n' "${rest%%.*}" "${rest#*.}"
+      ;;
+    *)
+      printf '%s\t%s\n' "-g" "$rest"
+      ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # acq_secret_delete KEY  ->  0 if an entry was removed OR none existed
 # ---------------------------------------------------------------------------

@@ -2230,6 +2230,73 @@ acq_backend_secret_rm() {
 }
 
 # ---------------------------------------------------------------------------
+# acq_backend_secret_ls [-g | SANDBOX] — list acq-managed secrets for msb.
+# ---------------------------------------------------------------------------
+# Prints one row per acq-managed secret: SCOPE, SERVICE, whether a VALUE is
+# present, and the binding ENV@HOST the msb adapter would use at provision.
+# NEVER prints a secret value. With no scope, lists everything acq holds; with a
+# scope (-g or SANDBOX) it filters to that scope. Read-only.
+#
+# Sources: the value store (acq_secret_list_keys → decode scope/service). The
+# ENV@HOST column comes from _acq_msb_service_binding, so it shows exactly what
+# would be bound (built-in host for usai/github, or the custom-endpoint sidecar).
+acq_backend_secret_ls() {
+  local want_scope=""
+  case "${1:-}" in
+    -g|--global) want_scope="-g" ;;
+    "") want_scope="" ;;
+    -*) echo "acq(msb): secret ls: unknown flag '$1'" >&2; return 1 ;;
+    *)  want_scope="$1" ;;
+  esac
+  if ! command -v acq_secret_list_keys >/dev/null 2>&1; then
+    echo "acq(msb): internal error: secret store not loaded" >&2
+    return 1
+  fi
+  printf 'SCOPE\tSERVICE\tVALUE\tBINDING\n'
+  _acq_msb_secret_ls_rows "$want_scope" | LC_ALL=C sort -u
+}
+
+# _acq_msb_secret_ls_rows WANT_SCOPE — emit unsorted "scope\tservice\tvalue\tbinding"
+# rows (no header). Kept separate so acq_backend_secret_ls stays <=50 lines and
+# the sort/header live in one place.
+_acq_msb_secret_ls_rows() {
+  local want_scope="$1" key scope svc dec val binding
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    dec=$(_acq_secret_decode_key "$key") || continue
+    scope=$(printf '%s' "$dec" | cut -f1)
+    svc=$(printf '%s' "$dec" | cut -f2)
+    [ -n "$svc" ] || continue
+    case "$want_scope" in "") ;; *) [ "$scope" = "$want_scope" ] || continue ;; esac
+    if [ "$scope" = "-g" ]; then
+      acq_secret_has "$svc" && val="yes" || val="no"
+      binding=$(_acq_msb_secret_ls_binding "$svc" "")
+    else
+      acq_secret_has "$svc" "$scope" && val="yes" || val="no"
+      binding=$(_acq_msb_secret_ls_binding "$svc" "$scope")
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$scope" "$svc" "$val" "$binding"
+  done <<EOF
+$(acq_secret_list_keys)
+EOF
+}
+
+# _acq_msb_secret_ls_binding SERVICE SANDBOX -> "ENV@HOST" or "(unmapped)".
+# Reuses the adapter's real binding resolver so the listing matches what would
+# actually be bound. Never prints a value.
+_acq_msb_secret_ls_binding() {
+  local svc="$1" sandbox="${2:-}" b env host
+  b=$(_acq_msb_service_binding "$svc" "$sandbox")
+  env=$(printf '%s' "$b" | cut -f1)
+  host=$(printf '%s' "$b" | cut -f2)
+  if [ -n "$env" ] && [ -n "$host" ]; then
+    printf '%s@%s\n' "$env" "$host"
+  else
+    printf '(unmapped)\n'
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # acq_backend_rotate_key — rotate the global USAi key (per ADR-0012)
 # ---------------------------------------------------------------------------
 # msb has no proxy-placeholder concept: the acq-owned secret store is the source
