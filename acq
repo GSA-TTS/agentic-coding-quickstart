@@ -457,7 +457,9 @@ case "$subcommand" in
       fi
       case "$_a" in
         --) _acq_seen_sep=1; _acq_run_args+=("$_a") ;;
-        --no-update-check) ACQ_UPDATE_CHECK=0 ;;
+        # export: consumed by maybe_offer_bundle_refresh in the sourced
+        # acq.backends/common.sh (cross-file; shellcheck can't see the reader).
+        --no-update-check) export ACQ_UPDATE_CHECK=0 ;;
         *) _acq_run_args+=("$_a") ;;
       esac
     done
