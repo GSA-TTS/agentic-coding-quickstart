@@ -1950,8 +1950,11 @@ acq_backend_secret_rm() {
   local key removed=0
   local env_name
   env_name=$(_acq_msb_service_binding "$service" "$scope_name" | cut -f1)
-  key=$(_acq_secret_key "$service" "$scope_name")
-  acq_secret_delete "$key" && removed=1
+  # _acq_secret_key fails closed on an ambiguous (dotted) name (quickstart#234);
+  # such a name could never have been stored, so treat rm as a no-op success
+  # (the `|| key=""` keeps `set -e` from aborting the rm path).
+  key=$(_acq_secret_key "$service" "$scope_name") || key=""
+  [ -n "$key" ] && acq_secret_delete "$key" && removed=1
 
   # 2) Live-unbind from running sandboxes via `msb modify --secret-rm ENV`, for
   #    services the adapter actually binds (built-ins + any custom endpoint with

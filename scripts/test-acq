@@ -1118,6 +1118,111 @@ else
 fi
 cleanup_stubs
 
+# 8m0d. quickstart#234 (gap C): dotted service/sandbox names cannot make the
+#       shared `acq.<sandbox>.<service>` key non-injective. A GLOBAL service
+#       literally named "foo.bar" and a SCOPED service "bar" in sandbox "foo"
+#       would BOTH map to the key `acq.foo.bar` — colliding in the value store
+#       and mis-scoped by meta_list's old "split on the first dot". The store
+#       now fails closed on a dotted name (the choke point both stores share),
+#       and meta_list anchors scope on the requested sandbox rather than
+#       guessing from the first dot. These prove: (a) a dotted name is refused
+#       at the store boundary — the public `acq secret set` path cannot reach a
+#       collision; (b) meta_list + meta_resolve AGREE on scope; (c) scoped vs
+#       global services never collide.
+make_stubs
+dot_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/dot-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+
+  # (a) _acq_secret_key fails closed on a dotted service or sandbox — the single
+  # choke point both the value store and the meta sidecar route through.
+  if _acq_secret_key 'foo.bar' >/dev/null 2>&1; then printf 'key-dotted-svc=allowed\n'; else printf 'key-dotted-svc=refused\n'; fi
+  if _acq_secret_key 'svc' 'my.box' >/dev/null 2>&1; then printf 'key-dotted-sb=allowed\n'; else printf 'key-dotted-sb=refused\n'; fi
+  # A normal (dot-free) name still works.
+  printf 'key-ok=%s\n' "$(_acq_secret_key 'svc' 'mybox')"
+
+  # (a') The public set path (acq_secret_set_interactive) refuses a dotted
+  # service and stores NOTHING (no aliased value, no sidecar).
+  ACQ_SECRET_TEST_VALUE='V' acq_secret_set_interactive 'foo.bar' '' 'api.example.com' 'API_KEY' >/dev/null 2>&1 \
+    && printf 'set-dotted=stored\n' || printf 'set-dotted=refused\n'
+  # meta_store directly also refuses it (defense in depth).
+  acq_secret_meta_store 'foo.bar' '' 'api.example.com' 'API_KEY' >/dev/null 2>&1 \
+    && printf 'meta-dotted=stored\n' || printf 'meta-dotted=refused\n'
+
+  # (b) + (c): a GLOBAL service "gsvc", a service "svc" scoped to sandbox "foo",
+  # and a service "svc" scoped to a DIFFERENT sandbox "otherbox". meta_list for
+  # sandbox "foo" must show the global + foo-scoped services and NOT otherbox's;
+  # meta_resolve must agree for each listed entry, and the scoped/global "svc"
+  # values must NOT collide.
+  ACQ_SECRET_TEST_VALUE='GV'  acq_secret_set_interactive 'gsvc' ''         'api.g.com' 'GKEY' >/dev/null 2>&1
+  ACQ_SECRET_TEST_VALUE='FV'  acq_secret_set_interactive 'svc'  'foo'      'api.f.com' 'FKEY' >/dev/null 2>&1
+  ACQ_SECRET_TEST_VALUE='OV'  acq_secret_set_interactive 'svc'  'otherbox' 'api.o.com' 'OKEY' >/dev/null 2>&1
+
+  printf 'list-foo=[%s]\n'   "$(acq_secret_meta_list foo | sort | tr '\n' ' ')"
+  printf 'list-none=[%s]\n'  "$(acq_secret_meta_list    | sort | tr '\n' ' ')"
+
+  # meta_list(foo) lists a service iff meta_resolve(service, foo) finds it: agreement.
+  agree=yes
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    acq_secret_meta_resolve "$s" foo >/dev/null 2>&1 || agree=no
+  done <<LIST
+$(acq_secret_meta_list foo)
+LIST
+  printf 'list-resolve-agree=%s\n' "$agree"
+
+  # scoped vs global "svc" resolve to their OWN hosts — no collision.
+  printf 'resolve-foo-svc=%s\n'    "$(acq_secret_meta_resolve svc foo | cut -f1)"
+  printf 'resolve-global-svc=%s\n' "$(acq_secret_meta_resolve svc | cut -f1 || echo NONE)"
+  # A global "svc" was never set (only scoped) — meta_resolve svc (no sandbox)
+  # must NOT leak foo's or otherbox's scoped sidecar.
+  acq_secret_meta_resolve svc >/dev/null 2>&1 && printf 'global-svc-exists=yes\n' || printf 'global-svc-exists=no\n'
+
+  # Value store must NOT collide either: global "foo.bar" was refused, so the
+  # scoped ("svc"@"foo") and global ("gsvc") values stand alone.
+  printf 'val-foo-svc=%s\n' "$(acq_secret_resolve svc foo)"
+  printf 'val-gsvc=%s\n'    "$(acq_secret_resolve gsvc)"
+)
+assert_contains "234: dotted service name refused at key layer"        "$dot_out" "key-dotted-svc=refused"
+assert_contains "234: dotted sandbox name refused at key layer"        "$dot_out" "key-dotted-sb=refused"
+assert_contains "234: dot-free name still keys as acq.<sandbox>.<svc>" "$dot_out" "key-ok=acq.mybox.svc"
+assert_contains "234: public set refuses dotted service (nothing stored)" "$dot_out" "set-dotted=refused"
+assert_contains "234: meta_store refuses dotted service"               "$dot_out" "meta-dotted=refused"
+assert_contains "234: meta_list(foo) shows global service"             "$dot_out" "gsvc"
+assert_contains "234: meta_list(foo) shows foo-scoped service"         "$dot_out" "list-foo=[gsvc svc ]"
+assert_contains "234: meta_list(none) shows only global service"       "$dot_out" "list-none=[gsvc ]"
+assert_contains "234: meta_list and meta_resolve agree on scope"       "$dot_out" "list-resolve-agree=yes"
+assert_contains "234: foo-scoped svc resolves to foo host"             "$dot_out" "resolve-foo-svc=api.f.com"
+assert_contains "234: no global svc leaks from a scoped-only service"  "$dot_out" "global-svc-exists=no"
+assert_contains "234: value store — foo-scoped svc value intact"       "$dot_out" "val-foo-svc=FV"
+assert_contains "234: value store — global gsvc value intact"          "$dot_out" "val-gsvc=GV"
+cleanup_stubs
+
+# 8m0e. quickstart#234 backward-compat: a LEGACY dotted-global sidecar written
+#       by an OLDER build (e.g. the file `acq.foo.bar`, from before the store
+#       rejected dotted names) must never crash meta_list and must never be
+#       mis-bound. Under the requested sandbox "mybox" (which does not match the
+#       leading "foo" segment) it is simply not listed — the old "split on first
+#       dot" would have mis-scoped it as sandbox=foo/service=bar for ANY caller;
+#       now it is inert unless a caller explicitly targets that exact prefix.
+make_stubs
+legacy_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/legacy-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  mkdir -p "$ACQ_SECRET_META_DIR"
+  # Plant a legacy dotted-global sidecar directly (bypassing the new guard).
+  printf 'api.example.com\tAPI_KEY\n' > "$ACQ_SECRET_META_DIR/acq.foo.bar"
+  # Also a normal current-build global so we prove listing still works.
+  ACQ_SECRET_TEST_VALUE='V' acq_secret_set_interactive 'clean' '' 'api.clean.com' 'CKEY' >/dev/null 2>&1
+  # meta_list for an unrelated sandbox: no crash, legacy dotted key not surfaced
+  # as a bogus composite, clean global still listed.
+  printf 'list-mybox=[%s]\n' "$(acq_secret_meta_list mybox | sort | tr '\n' ' ')"
+  printf 'list-none=[%s]\n'  "$(acq_secret_meta_list       | sort | tr '\n' ' ')"
+)
+assert_contains "234(compat): legacy dotted global not mis-listed for unrelated sandbox" "$legacy_out" "list-mybox=[clean ]"
+assert_contains "234(compat): legacy dotted global not mis-listed globally"             "$legacy_out" "list-none=[clean ]"
+cleanup_stubs
+
 
 #       its own absolute host path (sbx-parity), a trailing :ro is preserved, and
 #       the recorded start dir is the FIRST (primary) workspace regardless of how
