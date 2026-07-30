@@ -1058,6 +1058,32 @@ assert_eq "msb: provision never leaks secret values to argv" "CLEAN" "$prov_leak
 # remapped under /home/agent (which fails to mount pre-user-create).
 assert_contains "msb: workspace mounted at same guest path (sbx-parity)" "$prov_log" "--volume /tmp:/tmp"
 assert_not_contains "msb: workspace NOT remapped under /home/agent" "$prov_log" "--volume /tmp:/home/agent/workspace"
+# Default base image: msb defaults to the sbx agent-template image (which ships
+# the `agent` user, sudo, prereqs, and an agent-writable npm prefix), matching
+# sbx by construction. The image is the trailing positional on `msb create`.
+assert_contains "msb: create uses the sbx agent-template default image" "$prov_log" "msb create --name provbox"
+assert_contains "msb: default image is docker/sandbox-templates:shell-docker" "$prov_log" "docker.io/docker/sandbox-templates:shell-docker"
+assert_not_contains "msb: default image is NOT plain node:22-bookworm" "$prov_log" "docker.io/library/node:22-bookworm"
+cleanup_stubs
+
+# 8m00. ACQ_MSB_IMAGE override: a user-supplied image is passed through verbatim
+#       to `msb create` (plain-OCI overrides remain supported; the agent-user /
+#       sudo synthesis handles them). Assert the override, not the default.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/imgover-secrets"
+  export ACQ_MSB_IMAGE="docker.io/library/node:22-bookworm"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision imgoverbox shell /tmp >/dev/null 2>&1
+)
+imgover_log=$(cat "$CALLS")
+assert_contains "msb: ACQ_MSB_IMAGE override passed through to create" "$imgover_log" "docker.io/library/node:22-bookworm"
+assert_not_contains "msb: override suppresses the default image" "$imgover_log" "docker.io/docker/sandbox-templates:shell-docker"
 cleanup_stubs
 
 # 8m0. GENERIC custom endpoint binding (quickstart#226, gap C): a service stored
@@ -1395,9 +1421,12 @@ assert_contains "msb: missing workspace is a hard failure" "$missing_ws_out" "RC
 cleanup_stubs
 
 # 8n. msb provision creates the agent user and runs a uid-1000 kit command as
-#     `agent` with HOME=/home/agent (NOT as the base image's uid-1000 user),
-#     and chowns staged /home/agent files to agent. Uses a kit fixture whose
-#     startup command runs as user "1000" and reads a /home/agent file.
+#     `agent` with HOME=/home/agent (NOT as a plain-OCI base's uid-1000 user,
+#     e.g. `node` on a node:22-bookworm override), and chowns staged /home/agent
+#     files to agent. Uses a kit fixture whose startup command runs as user
+#     "1000" and reads a /home/agent file. (The synthesis is a short-circuit on
+#     the default image, which already ships `agent`; this exercises the
+#     plain-OCI-override path it must still handle.)
 make_stubs; load_acq
 : > "$CALLS"
 (
@@ -1431,7 +1460,7 @@ SPEC
 agent_log=$(cat "$CALLS")
 assert_contains "msb: provision creates agent user" "$agent_log" "agent"
 # The uid-1000 startup command must run as `agent` with HOME=/home/agent,
-# never as `-u 1000` (which would be the base image's `node` user). acq also
+# never as `-u 1000` (which would be a plain-OCI base's `node` user). acq also
 # injects non-interactive git guards (GIT_TERMINAL_PROMPT=0 etc.) between the
 # HOME env and the argv, so assert the stable prefix rather than the full line.
 assert_contains "msb: uid-1000 kit cmd runs as agent" "$agent_log" "msb exec agentbox -u agent -e HOME=/home/agent"
@@ -1448,7 +1477,7 @@ assert_contains "msb: kit cmd gets GIT_TERMINAL_PROMPT=0 guard" "$agent_log" "-e
 # AND the file. By NAME (agent), never a numeric uid.
 assert_contains "msb: chowns staged /home/agent subtree to agent" "$agent_log" "chown -R agent /home/agent/usai-config"
 # Agent-user setup must create the user WITHOUT pinning uid 1000 (which collides
-# with the base image's pre-existing uid-1000 user, e.g. node) and must chown the
+# with a plain-OCI base's pre-existing uid-1000 user, e.g. node) and must chown the
 # home to agent so it is writable — otherwise every agent-user kit fails with
 # Permission denied (the playbook silent-fetch-failure regression).
 assert_not_contains "msb: agent user NOT created with a fixed -u 1000" "$agent_log" "useradd -m -d /home/agent -s /bin/sh -u 1000"

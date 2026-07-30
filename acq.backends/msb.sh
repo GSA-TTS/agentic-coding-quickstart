@@ -54,23 +54,28 @@ ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1  # msb --secret ENV@HOST + --tls-inter
 # rules, --trust-host-cas, and --secret used here.
 MIN_MSB_VERSION="0.6.0"
 
-# Default OCI image for provisioned sandboxes. Unlike sbx (whose templates
-# supply the agent image), msb runs a plain OCI image and acq layers the kits on
-# top. The default is the public `node:22-bookworm` image — it is built on
-# buildpack-deps:bookworm-scm, so it ALREADY ships node, git, curl, and
-# ca-certificates (exactly the four kits' runtime prerequisites), and it is
-# pullable from Docker Hub without registry auth.
+# Default OCI image for provisioned sandboxes. We default to the SAME image
+# family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
+# agent template. It ALREADY ships the non-root `agent` user (with passwordless
+# sudo), node, git, curl, and ca-certificates (the four kits' runtime
+# prerequisites), AND an agent-writable npm global prefix
+# (/usr/local/share/npm-global) — so `npm install -g` by the agent user works
+# without sudo and without EACCES. Defaulting here makes msb match sbx by
+# construction and removes the need to synthesize the agent user / sudo on a
+# plain OCI base. It is pullable from Docker Hub without registry auth.
 #
 # We deliberately do NOT apt-install prerequisites at runtime: the kit net-rules
 # lock egress to only the kits' own hosts (api.gsa.usai.gov, github.com, ...),
-# so a package mirror (deb.debian.org) is unreachable during provision. Baking
-# the tools into the base image avoids both the egress hole and the runtime
+# so a package mirror is unreachable during provision. This still matters for a
+# custom base — bake the tools into the image rather than expecting a runtime
 # install. Override with ACQ_MSB_IMAGE to bring your own (e.g. a lighter or
-# org-internal image) — see the prerequisite contract below.
-ACQ_MSB_IMAGE="${ACQ_MSB_IMAGE:-docker.io/library/node:22-bookworm}"
+# org-internal image, or a plain OCI base) — a custom image must still provide
+# the prerequisites; see the prerequisite contract below.
+ACQ_MSB_IMAGE="${ACQ_MSB_IMAGE:-docker.io/docker/sandbox-templates:shell-docker}"
 
 # Prerequisite tools the pinned four kits need at runtime, expected to be
-# PRESENT IN THE BASE IMAGE (the default node:22-bookworm provides all four):
+# PRESENT IN THE BASE IMAGE (the default sandbox-templates:shell-docker provides
+# all four):
 #   node          — usai-provider merge-global-config.mjs
 #   git           — agentic-coding-playbook clone + git-ssh-sign
 #   curl          — health/verification checks
@@ -139,10 +144,11 @@ _acq_msb_service_binding() {
 }
 
 # The kits expect an unprivileged `agent` user with HOME=/home/agent (the sbx
-# agent-template contract). Plain OCI bases don't provide it, so the adapter
-# creates it at provision (see _acq_msb_ensure_agent_user), addressing it by
-# NAME — the uid is whatever the base image leaves free (1000 is often taken by
-# a pre-existing user, e.g. `node` on node:22-bookworm).
+# agent-template contract). The default image already provides it; but a plain
+# OCI base override (e.g. node:22-bookworm) does not, so the adapter creates it
+# at provision (see _acq_msb_ensure_agent_user), addressing it by NAME — the uid
+# is whatever the base image leaves free (1000 is often taken by a pre-existing
+# user, e.g. `node` on node:22-bookworm).
 
 # Guest memory and vCPU allocation.
 # ---------------------------------------------------------------------------
@@ -772,9 +778,9 @@ _acq_msb_exec_flags_into() {
   eval "$_eflag=()"
 
   # The kits express the unprivileged agent as uid "1000" (the sbx agent-template
-  # contract). On a plain OCI base uid 1000 may be a DIFFERENT user (e.g. `node`
-  # in node:22-bookworm), so address our provisioned agent by NAME instead, and
-  # set HOME=/home/agent so `$HOME`-relative kit logic resolves correctly.
+  # contract). On a plain OCI base override uid 1000 may be a DIFFERENT user (e.g.
+  # `node` in node:22-bookworm), so address our provisioned agent by NAME instead,
+  # and set HOME=/home/agent so `$HOME`-relative kit logic resolves correctly.
   case "$_user" in
     ""|0|root)
       [ -n "$_user" ] && eval "$_uflag=(-u \"\$_user\")"
@@ -1056,7 +1062,8 @@ acq_backend_provision() {
   # Why mount at the host path (not remapped under /home/agent): `msb create`
   # performs the mount at create time, BEFORE acq can create the `agent` user and
   # /home/agent (that happens post-create, once the guest is exec-ready). A plain
-  # base (node:22-bookworm) has no /home/agent, so mounting into it failed with
+  # base override (e.g. node:22-bookworm) has no /home/agent, so mounting into it
+  # failed with
   # "mount ...: Not a directory (os error 20)". Mounting at the host's own
   # absolute path sidesteps the ordering problem and matches sbx. NOTE: msb also
   # cannot mount a SYMLINKED host path (e.g. macOS $TMPDIR under /var ->
@@ -1216,7 +1223,7 @@ EOF
     case "$ACQ_MSB_IMAGE" in
       ghcr.io/*|*.azurecr.io/*|*private*)
         echo "acq(msb):   hint: the image may require registry auth. Set ACQ_MSB_IMAGE to a" >&2
-        echo "acq(msb):         pullable image (default: docker.io/library/node:22-bookworm)." >&2
+        echo "acq(msb):         pullable image (default: docker.io/docker/sandbox-templates:shell-docker)." >&2
         ;;
     esac
     echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the full command trace)" >&2
@@ -1253,12 +1260,14 @@ EOF
 
   # Ensure the `agent` user with HOME=/home/agent exists AND that /home/agent is
   # writable by it. The pinned kits stage files under /home/agent and run startup
-  # commands as that user (the sbx agent template guarantees this user). A plain
-  # OCI base (e.g. node:22-bookworm) has no `agent` user — and uid 1000 is already
-  # taken there — so acq creates `agent` (any uid) and chowns its home. A failure
-  # here is FATAL: a root-owned /home/agent silently breaks every agent-user kit
-  # (playbook fetch, usai merge), which is exactly how the playbook stopped
-  # fetching. Abort provision rather than degrade silently.
+  # commands as that user (the sbx agent template guarantees this user, and so
+  # does the default image). A plain OCI base override (e.g. node:22-bookworm) has
+  # no `agent` user — and uid 1000 is already taken there — so acq creates `agent`
+  # (any uid) and chowns its home. On the default image `agent` already exists, so
+  # the ensure step short-circuits. A failure here is FATAL: a root-owned
+  # /home/agent silently breaks every agent-user kit (playbook fetch, usai merge),
+  # which is exactly how the playbook stopped fetching. Abort provision rather
+  # than degrade silently.
   acq_debug "msb provision: ensuring agent user ($name)"
   if ! _acq_msb_ensure_agent_user "$name"; then
     echo "acq(msb): error: agent-user setup failed for '$name'; aborting provision." >&2
@@ -1421,20 +1430,23 @@ _acq_msb_install_agent() {
 # ---------------------------------------------------------------------------
 # _acq_msb_ensure_agent_user NAME — satisfy the sbx/Docker base-image contract
 # ---------------------------------------------------------------------------
-# sbx's agent templates are built on `docker/sandbox-templates:shell-docker`,
-# whose PUBLISHED base-image requirements are (Docker kit-reference,
-# "Base image requirements"):
+# sbx's agent templates are built on `docker/sandbox-templates:shell-docker`
+# (which acq also uses as the default ACQ_MSB_IMAGE), whose PUBLISHED base-image
+# requirements are (Docker kit-reference, "Base image requirements"):
 #   - a non-root `agent` user at UID 1000 with PASSWORDLESS SUDO
 #   - a /home/agent home directory owned by `agent`
 #   - HTTP proxy env (HTTP_PROXY/HTTPS_PROXY/NO_PROXY) PRESERVED ACROSS SUDO
 #   - the agent binary (baked in, or installed via commands.install)
-# A plain OCI base (e.g. node:22-bookworm, which ships `node` at uid 1000 and no
-# `agent`, and no sudoers rule) meets NONE of the first three. The msb adapter
-# therefore synthesizes them here so both the kits (which run as `-u 1000`) and
-# the agent behave as they do on sbx. Idempotent + marker-gated; runs fully
-# offline (useradd/adduser/sudoers edits need no network). The uid defaults to
-# 1000; if 1000 is taken (e.g. by `node`), `agent` is created at the next free
-# uid and the kits' `-u 1000` commands still map to it by NAME (see
+# The default image satisfies the first three already, so this step is a
+# short-circuit there (the marker/`id agent` check returns early, and the
+# sudoers block merely re-asserts NOPASSWD, which is harmless). A plain OCI base
+# override (e.g. node:22-bookworm, which ships `node` at uid 1000 and no `agent`,
+# and no sudoers rule) meets NONE of the first three. The msb adapter therefore
+# synthesizes them here so both the kits (which run as `-u 1000`) and the agent
+# behave as they do on sbx. Idempotent + marker-gated; runs fully offline
+# (useradd/adduser/sudoers edits need no network). The uid defaults to 1000; if
+# 1000 is taken (e.g. by `node` on a plain base), `agent` is created at the next
+# free uid and the kits' `-u 1000` commands still map to it by NAME (see
 # _acq_msb_exec_command) with HOME exported.
 _acq_msb_ensure_agent_user() {
   local name="$1"
@@ -1444,17 +1456,18 @@ _acq_msb_ensure_agent_user() {
   fi
 
   acq_debug "msb: ensuring agent user + /home/agent + passwordless sudo + proxy-preserve in $name"
-  # Idempotent, distro-agnostic. If an `agent` user already exists, reuse it.
-  # Otherwise create it. NOTE: we do NOT pin uid 1000 — on common bases
-  # (node:22-bookworm) uid 1000 is already taken by a pre-existing user (`node`),
-  # so requesting -u 1000 fails and, worse, can leave /home/agent half-created or
-  # root-owned. The kits address the agent BY NAME (our exec translation maps
-  # user 1000/agent → `-u agent`), so the uid is irrelevant. What MUST hold is
-  # that /home/agent exists and is OWNED BY agent — otherwise every kit command
-  # that runs as the agent user (playbook fetch, usai merge) fails with
-  # Permission denied. So home creation + ownership is deterministic and its
-  # failure is FATAL (previously it was best-effort `|| true`, which silently
-  # degraded into a root-owned home and a playbook that never fetched).
+  # Idempotent, distro-agnostic. If an `agent` user already exists, reuse it
+  # (the default image already ships one, so this is the common path).
+  # Otherwise create it. NOTE: we do NOT pin uid 1000 — on a plain OCI base
+  # override (node:22-bookworm) uid 1000 is already taken by a pre-existing user
+  # (`node`), so requesting -u 1000 fails and, worse, can leave /home/agent
+  # half-created or root-owned. The kits address the agent BY NAME (our exec
+  # translation maps user 1000/agent → `-u agent`), so the uid is irrelevant.
+  # What MUST hold is that /home/agent exists and is OWNED BY agent — otherwise
+  # every kit command that runs as the agent user (playbook fetch, usai merge)
+  # fails with Permission denied. So home creation + ownership is deterministic
+  # and its failure is FATAL (previously it was best-effort `|| true`, which
+  # silently degraded into a root-owned home and a playbook that never fetched).
   msb exec "$name" -u 0 -- sh -c '
     set -e
     if id agent >/dev/null 2>&1; then
@@ -1486,7 +1499,8 @@ _acq_msb_ensure_agent_user() {
     # Set SHELL=/bin/sh in the agent profile. The passwd shell is /bin/sh, but
     # SHELL is not populated by `msb exec`/`su -c`, and msb interactive-exec
     # ignores the passwd shell entirely (it drops to the base image default, a
-    # Node REPL on node:22-bookworm). acq always execs an explicit shell/agent, so
+    # Node REPL on node:22-bookworm as an override). acq always execs an explicit
+    # shell/agent, so
     # this is cosmetic (tools that read SHELL) but correct and cheap. Idempotent.
     # NOTE: this whole block is a single-quoted `sh -c` string — do NOT use single
     # quotes here (they would close the outer quote). `echo` avoids both quotes
@@ -1514,9 +1528,10 @@ _acq_msb_ensure_agent_user() {
     echo "acq(msb): error: could not establish a writable agent home in '$name'." >&2
     echo "acq(msb):   /home/agent must exist and be owned by the 'agent' user — kit" >&2
     echo "acq(msb):   commands that run as agent (playbook fetch, usai merge) fail" >&2
-    echo "acq(msb):   otherwise. Use an ACQ_MSB_IMAGE built on" >&2
-    echo "acq(msb):   docker/sandbox-templates:shell-docker (agent user + sudo), or a" >&2
-    echo "acq(msb):   base with useradd/adduser. Re-run with ACQ_DEBUG=1 for details." >&2
+    echo "acq(msb):   otherwise. The default image" >&2
+    echo "acq(msb):   (docker/sandbox-templates:shell-docker) provides the agent user +" >&2
+    echo "acq(msb):   sudo; if you overrode ACQ_MSB_IMAGE, ensure your image ships them or" >&2
+    echo "acq(msb):   a base with useradd/adduser. Re-run with ACQ_DEBUG=1 for details." >&2
     return 1
   }
   msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
@@ -1526,8 +1541,8 @@ _acq_msb_ensure_agent_user() {
 # _acq_msb_check_prereqs NAME — verify kit prerequisites are in the base image
 # ---------------------------------------------------------------------------
 # The pinned kits assume node/git/curl/update-ca-certificates exist in the guest.
-# The default ACQ_MSB_IMAGE (node:22-bookworm) provides all four. If a custom
-# ACQ_MSB_IMAGE lacks one, warn clearly rather than fail silently later — we do
+# The default ACQ_MSB_IMAGE (docker/sandbox-templates:shell-docker) provides all
+# four. If a custom ACQ_MSB_IMAGE lacks one, warn clearly rather than fail silently later — we do
 # NOT apt-install (egress is locked to kit hosts). Skip with
 # ACQ_MSB_SKIP_PREREQ_CHECK=1.
 _acq_msb_check_prereqs() {
@@ -1546,7 +1561,8 @@ _acq_msb_check_prereqs() {
   if [ -n "$missing" ]; then
     echo "acq(msb): warning: base image is missing kit prerequisite(s):${missing}." >&2
     echo "acq(msb):   The pinned kits need node, git, curl, update-ca-certificates." >&2
-    echo "acq(msb):   The default image (node:22-bookworm) provides them; a custom" >&2
+    echo "acq(msb):   The default image (docker/sandbox-templates:shell-docker) provides" >&2
+    echo "acq(msb):   them; a custom" >&2
     echo "acq(msb):   ACQ_MSB_IMAGE must too (these are NOT installed at runtime because" >&2
     echo "acq(msb):   kit net-rules lock egress to the kits' hosts). Affected kits may" >&2
     echo "acq(msb):   not fully apply. Set ACQ_MSB_SKIP_PREREQ_CHECK=1 to silence." >&2

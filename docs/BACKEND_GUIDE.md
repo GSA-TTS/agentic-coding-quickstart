@@ -164,7 +164,7 @@ Tunables:
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `ACQ_MSB_IMAGE` | `docker.io/library/node:22-bookworm` | Base OCI image (must be pullable and ship node/git/curl/ca-certificates) |
+| `ACQ_MSB_IMAGE` | `docker.io/docker/sandbox-templates:shell-docker` | Base OCI image (the sbx agent-template: ships the `agent` user + passwordless sudo, node/git/curl/ca-certificates, and an agent-writable npm global prefix). A custom override must be pullable and ship these prerequisites. |
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
 | `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
 | `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
@@ -246,19 +246,22 @@ Note the async-boot caveat:
 
 ### Base image and prerequisites
 
-Unlike sbx (whose agent templates supply the image), the msb backend runs a
-**plain OCI image** and layers the kits on top. The four pinned kits need
+Unlike sbx (whose agent templates supply the image via a template mechanism),
+the msb backend runs an OCI image directly and layers the kits on top. By
+default it uses the **same** sbx agent-template image
+(`docker/sandbox-templates:shell-docker`); a custom override may be any OCI
+image. The four pinned kits need
 `node` (usai merge), `git` (playbook clone + signing), `curl`, and
 `ca-certificates`/`update-ca-certificates` (zscaler) **already present in the
 base image**.
 
 These are **not** installed at runtime: the kit network rules lock egress to the
 kits' own hosts (`api.gsa.usai.gov`, `github.com`, `codeload.github.com`), so a
-package mirror like `deb.debian.org` is unreachable during provision. The
-default `node:22-bookworm` image (built on `buildpack-deps:bookworm-scm`) already
+package mirror is unreachable during provision. The default
+`docker/sandbox-templates:shell-docker` image (the sbx agent-template) already
 ships all four tools and pulls from Docker Hub without auth. Before applying
 kits, the adapter **verifies** the tools are present and warns if any are
-missing (it does not try to install them).
+missing (it does not try to install them). A custom override must ship them too.
 
 **The agent binary.** sbx's agent templates bake the requested agent (e.g.
 `opencode`) into the image; a plain msb base has no agent. So at provision the
@@ -274,19 +277,21 @@ into `ACQ_MSB_IMAGE`). Tunables: `ACQ_MSB_OPENCODE_PKG` (npm spec, e.g.
 internal mirror).
 
 **The base-image contract (Docker `shell-docker`).** sbx's templates are built on
-`docker/sandbox-templates:shell-docker`, whose
+`docker/sandbox-templates:shell-docker` — which acq now also uses as the default
+`ACQ_MSB_IMAGE`, so msb matches sbx by construction. Its
 [published base-image requirements](https://docs.docker.com/ai/sandboxes/customize/kit-reference/#base-image-requirements)
 are: a non-root `agent` user at UID 1000 **with passwordless sudo**, a
 `/home/agent` home owned by `agent`, **HTTP proxy env (`HTTP_PROXY`/`HTTPS_PROXY`/
-`NO_PROXY`) preserved across sudo**, and the agent binary present. A plain OCI
-base (e.g. `node:22-bookworm`, which has `node` at uid 1000 and no `agent`, no
-sudoers rule) meets none of the first three. So at provision the msb adapter
-**idempotently synthesizes** them: it creates the `agent` user with
+`NO_PROXY`) preserved across sudo**, and the agent binary present. The default
+image satisfies the first three already (so the step below is a short-circuit
+there). A plain OCI **override** (e.g. `node:22-bookworm`, which has `node` at uid
+1000 and no `agent`, no sudoers rule) meets none of them. So at provision the msb
+adapter **idempotently synthesizes** them: it creates the `agent` user with
 `HOME=/home/agent` (offline via `useradd`/`adduser`), chowns the staged
 `/home/agent` files to it, drops a passwordless-sudo rule in `/etc/sudoers.d`,
 and adds a sudoers `env_keep` for the proxy variables. It addresses the user by
 name (not the literal uid 1000), so it works even when 1000 is already taken by
-the base image (e.g. `node` on node:22-bookworm).
+a plain-OCI override (e.g. `node` on node:22-bookworm).
 
 **How attach launches the agent.** sbx's `sbx run --name` re-launches the
 baked-in agent. On msb the adapter reproduces that with `msb exec -t` — the one
