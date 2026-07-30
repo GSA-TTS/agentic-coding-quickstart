@@ -52,7 +52,11 @@ export ACQ_SBX_KIT_PASSTHROUGH=1
 # Stub scaffolding
 # ---------------------------------------------------------------------------
 # Each test runs in its own temp dir with a stub `sbx` on PATH.
-# The stub logs every call to $CALLS.
+# The stub logs every call to $CALLS. Each stub builds its whole argv line in
+# one string and appends it with a SINGLE `printf … >>"$CALLS"` write: the
+# ADR-0015 port path backgrounds `msb ssh serve` and `ssh -L` concurrently, and
+# a multi-`printf` sequence into the same append fd can interleave into a
+# corrupted line under that concurrency (a source of the #234 test flake).
 
 make_stubs() {
   STUBDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-test.XXXXXX")
@@ -63,7 +67,11 @@ make_stubs() {
 
   cat >"$STUBDIR/sbx" <<'STUB'
 #!/usr/bin/env bash
-{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+# Build the whole call line in one string and append with a SINGLE write, so
+# concurrently-backgrounded stubs (msb ssh serve + ssh -L) can't interleave
+# their writes into a corrupted line on the shared $CALLS append fd (#234).
+_line="sbx"; for a in "$@"; do _line="$_line $a"; done
+printf '%s\n' "$_line" >>"$CALLS"
 case "${1:-}" in
   version) printf 'sbx version: v0.35.1 abc123\n' ;;
   --help|-h) printf 'SBX-TOPLEVEL-HELP\n' ;;
@@ -106,7 +114,8 @@ STUB
   # records after the first). Keeping the stub faithful guards against regressions.
   cat >"$STUBDIR/msb" <<'MSBSTUB'
 #!/usr/bin/env bash
-{ printf 'msb'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+_line="msb"; for a in "$@"; do _line="$_line $a"; done
+printf '%s\n' "$_line" >>"$CALLS"
 _msb_sub="${1:-}"
 case "$_msb_sub" in
   --version|-V) printf 'msb 0.6.6\n' ;;
@@ -167,14 +176,16 @@ MSBSTUB
   # writes throwaway key + .pub files so the key-ensure/authorize path proceeds.
   cat >"$STUBDIR/ssh" <<'SSHSTUB'
 #!/usr/bin/env bash
-{ printf 'ssh'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+_line="ssh"; for a in "$@"; do _line="$_line $a"; done
+printf '%s\n' "$_line" >>"$CALLS"
 exit 0
 SSHSTUB
   chmod +x "$STUBDIR/ssh"
 
   cat >"$STUBDIR/ssh-keygen" <<'KEYGENSTUB'
 #!/usr/bin/env bash
-{ printf 'ssh-keygen'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+_line="ssh-keygen"; for a in "$@"; do _line="$_line $a"; done
+printf '%s\n' "$_line" >>"$CALLS"
 # Emit throwaway key material at -f <path> so downstream authorize/forward runs.
 _f=""; _prev=""
 for a in "$@"; do [ "$_prev" = "-f" ] && { _f="$a"; break; }; _prev="$a"; done
@@ -2659,9 +2670,17 @@ cleanup_stubs
 #       state (NOT ~/.ssh); ports/PIDs are recorded for teardown.
 make_stubs; load_acq
 : > "$CALLS"
+# Pin the ephemeral serve port via the test seam (ACQ_MSB_FORCE_SERVE_PORT) so
+# the `msb ssh serve … --port <n>` and `ssh -p <n>` argv are deterministic and
+# the assertions below don't race the counter/$RANDOM value (#234).
 (
+  export ACQ_MSB_FORCE_SERVE_PORT=54321
   . "${REPO_ROOT}/acq.backends/msb.sh"
   acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
+  # `msb ssh serve` and `ssh -L` are BACKGROUNDED by acq; wait for the stubbed
+  # children to finish appending to $CALLS before the subshell exits, else the
+  # `cat "$CALLS"` below races an incomplete log (#234 test-side flake).
+  wait
 )
 pub_log=$(cat "$CALLS")
 assert_contains "msb ports: generates the acq-managed ssh key (ssh-keygen -t ed25519)" \
@@ -2669,7 +2688,7 @@ assert_contains "msb ports: generates the acq-managed ssh key (ssh-keygen -t ed2
 assert_contains "msb ports: authorizes the acq public key via msb ssh authorize" \
   "$pub_log" "msb ssh authorize --file $STUBDIR/state/ssh/msb_id_ed25519.pub"
 assert_contains "msb ports: starts msb ssh serve on an ephemeral loopback port" \
-  "$pub_log" "msb ssh serve pbox --host 127.0.0.1 --port"
+  "$pub_log" "msb ssh serve pbox --host 127.0.0.1 --port 54321"
 assert_contains "msb ports: opens ssh -L 127.0.0.1:8080:127.0.0.1:3000 tunnel" \
   "$pub_log" "-L 127.0.0.1:8080:127.0.0.1:3000"
 assert_contains "msb ports: ssh uses the acq-managed key (-i)" \
@@ -2688,13 +2707,33 @@ make_stubs; load_acq
 (
   . "${REPO_ROOT}/acq.backends/msb.sh"
   acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
+  wait                # let the 1st publish's backgrounded serve/ssh log first
   : > "$CALLS"   # clear, then a SECOND publish
   acq_backend_ports pbox --publish 9090:4000 >/dev/null 2>&1
+  wait                # drain the 2nd publish's backgrounded children before read
 )
 pub2_log=$(cat "$CALLS")
 assert_not_contains "msb ports: 2nd publish does not re-run ssh-keygen" "$pub2_log" "ssh-keygen"
 assert_not_contains "msb ports: 2nd publish does not re-authorize the key" "$pub2_log" "msb ssh authorize"
 assert_contains "msb ports: 2nd publish still opens its own -L tunnel" "$pub2_log" "-L 127.0.0.1:9090:127.0.0.1:4000"
+cleanup_stubs
+
+# 10b3a. #234: two publishes in the SAME process must get DISTINCT serve ports.
+#        No seam here — this exercises the real distinct-per-call selection. The
+#        recorded state file has one line per publish: `<serve_pid> <ssh_pid>
+#        <sport> <mapping>`; assert the two <sport> columns differ.
+make_stubs; load_acq
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports mpbox --publish 8080:3000 >/dev/null 2>&1
+  acq_backend_ports mpbox --publish 9090:4000 >/dev/null 2>&1
+  wait
+)
+mp_ports=$(awk '{print $3}' "$STUBDIR/state/ports/mpbox.pids" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+mp_lines=$(wc -l < "$STUBDIR/state/ports/mpbox.pids" 2>/dev/null | tr -d ' ')
+{ [ "$mp_lines" = "2" ] && [ "$mp_ports" = "2" ]; } \
+  && pass "msb ports: two publishes in one process get DISTINCT serve ports" \
+  || fail "msb ports: two publishes in one process get DISTINCT serve ports" "lines=$mp_lines distinct-ports=$mp_ports"
 cleanup_stubs
 
 # 10b4. SI-10: invalid --publish values are REJECTED before any ssh/serve call.

@@ -219,6 +219,22 @@ ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR}/ports}"
 # deployment's msb serve expects a different account).
 ACQ_MSB_SSH_USER="${ACQ_MSB_SSH_USER:-root}"
 
+# Module-level monotonic counter for ephemeral serve-port selection. The call
+# site is `sport=$(_acq_msb_pick_ephemeral_port)` — a COMMAND SUBSTITUTION, which
+# runs in a subshell, so a plain shell variable incremented inside the helper
+# would never persist back to the caller (every publish would recompute the same
+# value — exactly the #234 bug). The counter is therefore persisted in a small
+# file under the ports state dir so consecutive publishes in one process read
+# distinct, increasing values. Seeded from a per-process random base.
+_ACQ_MSB_PORT_SEQ_FILE="${ACQ_MSB_PORTS_DIR}/.port-seq"
+
+# Per-process random base offset for ephemeral serve-port selection, evaluated
+# ONCE when this file is sourced (not per call). Spreads different processes
+# across the range while the persisted per-call counter provides distinct
+# offsets WITHIN a process (#234). $$, $RANDOM (bash; empty under POSIX sh,
+# handled by the ${RANDOM:-0} default), and the seconds clock give spread.
+_ACQ_MSB_PORT_BASE="${_ACQ_MSB_PORT_BASE:-$(( ($$ + ${RANDOM:-0} + $(date +%s 2>/dev/null || echo 0)) % 40000 ))}"
+
 # ---------------------------------------------------------------------------
 # Version comparison (shared shape with sbx.sh; kept local to avoid coupling)
 # ---------------------------------------------------------------------------
@@ -1758,10 +1774,57 @@ _acq_msb_ssh_authorize() {
 }
 
 # _acq_msb_pick_ephemeral_port — echo a loopback port for the serve listener.
-# Uses the shell PID for a deterministic-per-process value in the high range;
-# the listener binds loopback only, so a collision just fails the serve start.
+#
+# Robustness (#234): the previous scheme was `20000 + ($$ % 40000)`, derived
+# ONLY from the shell PID. That returned the SAME value for every call in one
+# process, so a second `--publish` for the same sandbox collided with the first,
+# and rapid test subshells with nearby PIDs raced. The listener binds loopback
+# only, so a real collision just fails serve-start — but under the stubbed test
+# harness (no real listener) it produced nondeterministic pass/fail.
+#
+# The port is now DISTINCT per call within a process and stays in a sane high,
+# loopback-only range (20000..59999):
+#   * a fixed per-process random base (_ACQ_MSB_PORT_BASE, evaluated once at
+#     source time from $$/$RANDOM/seconds) spreads processes across the range, and
+#   * a file-backed monotonic counter adds a per-call delta. The call site uses
+#     command substitution ($(...)), which runs in a subshell, so an in-memory
+#     variable would not survive back to the caller — the counter is persisted in
+#     _ACQ_MSB_PORT_SEQ_FILE so base+1, base+2, … never collide within a process.
+#
+# Test seam: if ACQ_MSB_FORCE_SERVE_PORT is set to a valid 1..65535 integer, it
+# is echoed verbatim (the counter is still advanced for real callers). scripts/
+# test-acq pins this so it can assert the EXACT `msb ssh serve … --port` / `ssh
+# -p` argv without racing the base/counter value. Real use leaves it unset and
+# gets the distinct-per-call behavior above.
 _acq_msb_pick_ephemeral_port() {
-  echo $(( 20000 + ($$ % 40000) ))
+  local seq
+  # Read-modify-write the persisted counter (subshell-safe, see header). A
+  # missing/garbage file resets to 0; failures fall back to 0 (fail-open to a
+  # valid port — a same-value collision only re-fails a real serve bind, never
+  # corrupts state).
+  seq=$(cat "$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null)
+  case "$seq" in ""|*[!0-9]*) seq=0 ;; esac
+  seq=$(( seq + 1 ))
+  mkdir -p "$ACQ_MSB_PORTS_DIR" 2>/dev/null || true
+  printf '%s\n' "$seq" >"$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null || true
+
+  # Deterministic test seam: pin the serve port for exact-shape assertions.
+  case "${ACQ_MSB_FORCE_SERVE_PORT:-}" in
+    "") ;;
+    *[!0-9]*) ;;  # non-integer -> ignore the seam, fall through to selection
+    *)
+      if [ "$ACQ_MSB_FORCE_SERVE_PORT" -ge 1 ] && [ "$ACQ_MSB_FORCE_SERVE_PORT" -le 65535 ]; then
+        echo "$ACQ_MSB_FORCE_SERVE_PORT"
+        return 0
+      fi
+      ;;
+  esac
+
+  # base + counter, wrapped into a 40000-wide window at 20000. The counter is the
+  # only term that varies between two calls in one process, so consecutive calls
+  # are guaranteed distinct until it wraps (40000 calls — far beyond any publish
+  # burst). Loopback-only listener, valid 20000..59999 range.
+  echo $(( 20000 + ( (_ACQ_MSB_PORT_BASE + seq) % 40000 ) ))
 }
 
 # _acq_msb_serve_start NAME SPORT — background `msb ssh serve` on 127.0.0.1:SPORT.
