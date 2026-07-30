@@ -343,6 +343,44 @@ $(kit_spec_net_allow "$_spec")
 EOF
 }
 
+# Emit the create-time `-p HOST:GUEST` flags for a kit's published ports into the
+# named array. Usage: _acq_msb_port_flags_into ARRVAR SPEC
+#
+# ADR-0014 (gap A): kit_spec_published_ports reads the NEUTRAL top-level
+# `publishedPorts` first (deprecated backend_extras.sbx fallback) and emits
+# validated `guest<TAB>proto<TAB>name<TAB>host` records (ports are ints 1..65535,
+# so they cannot smuggle shell metacharacters). host defaults to guest. We map
+# each to a plain `-p HOST:GUEST` — msb's create/run-time NAT publish. msb -p also
+# accepts BIND_ADDR:HOST:GUEST and /udp, but the neutral schema stays TCP +
+# default loopback bind for sbx parity, so bind-addr and /udp are deliberately
+# NOT emitted. Uses the eval-by-name array pattern (macOS bash 3.2 compat), like
+# _acq_msb_net_rules_into. Absence of publishedPorts is a silent no-op: the
+# neutral field is read DEFENSIVELY (ADR-0014 cross-repo gate). PATTERNS_KIT_REF
+# in common.sh is INTENTIONALLY held at its current pin and NOT bumped here — the
+# `publishedPorts`/`background` schema property lives on an unreleased patterns
+# branch. Reading defensively (absence = no-op, never an error) lets this consumer
+# land now and light up automatically once the patterns schema is released and the
+# pin is later bumped.
+_acq_msb_port_flags_into() {
+  local _arr="$1" _spec="$2" _rec _guest _host
+  eval "$_arr=()"
+  while IFS="$(printf '\t')" read -r _guest _ _ _host; do
+    [ -n "$_guest" ] || continue
+    [ -n "$_host" ] || _host="$_guest"
+    # Defense-in-depth: the validator already guarantees integer ports, but
+    # re-check before the value reaches an argv via eval.
+    case "$_guest$_host" in
+      *[!0-9]*)
+        echo "acq(msb): warning: skipping non-integer published port: ${_host}:${_guest}" >&2
+        continue
+        ;;
+    esac
+    eval "$_arr+=(-p \"\${_host}:\${_guest}\")"
+  done <<EOF
+$(kit_spec_published_ports "$_spec")
+EOF
+}
+
 # Apply a single fetched kit directory to a running sandbox NAME.
 # Honors backend_shortcuts.msb (currently: zscaler trust_host_cas, handled at
 # provision time — see acq_backend_provision; here we skip the file/command
@@ -524,20 +562,22 @@ EOF
 $(kit_spec_commands "$spec")
 EOF
 
-  local phase="" user="" argv=() reading=0 _i
+  local phase="" user="" argv=() reading=0 _i background="false"
   for _i in ${_lines[@]+"${!_lines[@]}"}; do
     line="${_lines[$_i]}"
     case "$line" in
       "__CMD__"*)
-        # __CMD__<TAB>phase<TAB>user
+        # __CMD__<TAB>phase<TAB>user<TAB>background
         phase=$(printf '%s' "$line" | cut -f2)
         user=$(printf '%s' "$line" | cut -f3)
+        background=$(printf '%s' "$line" | cut -f4)
+        [ -n "$background" ] || background="false"
         argv=()
         reading=1
         ;;
       "__END__")
         reading=0
-        _acq_msb_exec_command "$name" "$phase" "$user" \
+        _acq_msb_exec_command "$name" "$phase" "$user" "$background" \
           ${_kit_env[@]+"${_kit_env[@]}"} -- ${argv[@]+"${argv[@]}"}
         ;;
       *)
@@ -554,13 +594,21 @@ EOF
 # Execute one command record. install-phase commands are gated by a per-command
 # marker file so they run once per sandbox even across re-applies.
 #
-# Args: NAME PHASE USER [NAME=value ...] -- ARGV...
+# Args: NAME PHASE USER BACKGROUND [NAME=value ...] -- ARGV...
 # The optional NAME=value tokens before the literal `--` are the kit's
 # environment[] entries; each is threaded to `msb exec` as `-e NAME=value`.
 # kit_spec_env already validated the names, so they are safe to pass here.
+#
+# BACKGROUND (ADR-0014): when "true" (only meaningful for a startup command), the
+# command is DETACHED rather than awaited, so a never-exiting supervisor loop
+# does not block provision. We reproduce this with the same pattern the adapter
+# already uses to keep non-blocking work from stalling the guest: wrap the argv
+# in `nohup sh -c '"$@"' … &` inside a single `msb exec` so the process survives
+# the exec returning. (msb 0.6.x has no `exec -d`; nohup+& is the portable
+# equivalent, matching how sbx's startup semantics detach a background hook.)
 _acq_msb_exec_command() {
-  local name="$1" phase="$2" user="$3"
-  shift 3
+  local name="$1" phase="$2" user="$3" background="$4"
+  shift 4
 
   # Split leading NAME=value env tokens (up to the `--` sentinel) from argv.
   local _kit_env=() _tok
@@ -633,12 +681,27 @@ _acq_msb_exec_command() {
     msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" </dev/null >/dev/null 2>&1 || true
   else
     # initFiles / startup — run every apply (they are written idempotent).
-    acq_debug "msb cmd[${phase}] START (user=${user:-0}): $*"
-    msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" </dev/null || {
-      acq_debug "msb cmd[${phase}] FAILED: $*"
-      echo "acq(msb): warning: ${phase} command failed for '$name'" >&2
-    }
-    acq_debug "msb cmd[${phase}] DONE: $*"
+    if [ "$phase" = "startup" ] && [ "$background" = "true" ]; then
+      # Detached startup command (ADR-0014): a never-exiting supervisor loop must
+      # not block provision. Run it under nohup in the background inside a single
+      # `msb exec`, so the exec returns immediately and the process outlives it.
+      # The argv is passed as positional params to an inner `sh -c '… "$@"'` so no
+      # token is re-split or re-quoted (the same safety the direct-argv path has).
+      acq_debug "msb cmd[startup:background] DETACH (user=${user:-0}): $*"
+      msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} \
+        -- sh -c 'nohup "$@" >/dev/null 2>&1 & exit 0' sh "$@" </dev/null || {
+        acq_debug "msb cmd[startup:background] FAILED to launch: $*"
+        echo "acq(msb): warning: background startup command failed to launch for '$name'" >&2
+      }
+      acq_debug "msb cmd[startup:background] LAUNCHED: $*"
+    else
+      acq_debug "msb cmd[${phase}] START (user=${user:-0}): $*"
+      msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" </dev/null || {
+        acq_debug "msb cmd[${phase}] FAILED: $*"
+        echo "acq(msb): warning: ${phase} command failed for '$name'" >&2
+      }
+      acq_debug "msb cmd[${phase}] DONE: $*"
+    fi
   fi
 }
 
@@ -702,6 +765,17 @@ acq_backend_provision() {
     local nr=()
     _acq_msb_net_rules_into nr "$spec"
     [ "${#nr[@]}" -gt 0 ] && create_flags+=("${nr[@]}")
+
+    # Published ports (ADR-0014, gap A) → create-time `-p HOST:GUEST` flags. The
+    # neutral top-level `publishedPorts` is read first by kit_spec_published_ports
+    # (with a deprecated backend_extras.sbx fallback). Each surviving record is
+    # `guest<TAB>proto<TAB>name<TAB>host` (validated to ints 1..65535). msb -p also
+    # accepts BIND_ADDR:HOST:GUEST and /udp, but the neutral schema stays TCP +
+    # default loopback bind for sbx parity, so we emit a plain `-p HOST:GUEST`
+    # (no bind-addr, no /udp — out of parity scope). Absence is a silent no-op.
+    local pp=()
+    _acq_msb_port_flags_into pp "$spec"
+    [ "${#pp[@]}" -gt 0 ] && create_flags+=("${pp[@]}")
   done
 
   [ "$trust_host_cas" -eq 1 ] && create_flags+=(--trust-host-cas)
