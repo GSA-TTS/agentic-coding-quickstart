@@ -1009,7 +1009,83 @@ assert_contains "msb: workspace mounted at same guest path (sbx-parity)" "$prov_
 assert_not_contains "msb: workspace NOT remapped under /home/agent" "$prov_log" "--volume /tmp:/home/agent/workspace"
 cleanup_stubs
 
-# 8m1b. Multi-workspace: every workspace positional after the agent is mounted at
+# 8m0. GENERIC custom endpoint binding (quickstart#226, gap C): a service stored
+#      via `acq secret set SVC --host H --env E` records a non-secret endpoint
+#      sidecar; msb provision must then bind it generically via `--secret E@H`,
+#      the real value never touching argv — mirroring usai/github which stay
+#      bound exactly as before. A service with NO recorded host/env must NOT emit
+#      a bogus flag (the old `*)`-arm empty behavior).
+make_stubs; load_acq
+: > "$CALLS"
+gen_leaks=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/gen-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  # A custom endpoint stored via `acq secret set -g SBX --host … --env …`.
+  ACQ_SECRET_TEST_VALUE="SBX-REAL-VALUE" acq_secret_set_interactive SBX "" "api.example.com" "API_KEY" >/dev/null 2>&1
+  # usai + github so their explicit bindings still fire (regression guard).
+  printf 'USAI-REAL-VALUE\n' | acq_secret_store "$(_acq_secret_key usai)"
+  printf 'GH-REAL-VALUE\n'   | acq_secret_store "$(_acq_secret_key github)"
+  # A service stored with NO host/env sidecar (value only) — must NOT be bound.
+  printf 'NOMAP-VALUE\n'     | acq_secret_store "$(_acq_secret_key nomap)"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision genbox shell /tmp >/dev/null 2>&1
+  # No real secret value may appear in the recorded msb calls.
+  if grep -q 'SBX-REAL-VALUE\|USAI-REAL-VALUE\|GH-REAL-VALUE\|NOMAP-VALUE' "$CALLS"; then echo LEAK; else echo CLEAN; fi
+)
+gen_log=$(cat "$CALLS")
+assert_contains "msb#226: custom endpoint bound generically (--secret API_KEY@api.example.com)" "$gen_log" "--secret API_KEY@api.example.com"
+assert_contains "msb#226: usai still bound as before"   "$gen_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
+assert_contains "msb#226: github still bound as before" "$gen_log" "--secret GITHUB_TOKEN@api.github.com"
+# A value-only service (no host/env sidecar) must not emit a bogus flag.
+assert_not_contains "msb#226: no bogus flag for service without host/env" "$gen_log" "--secret @"
+assert_not_contains "msb#226: value-only service 'nomap' not bound" "$gen_log" "nomap"
+assert_eq "msb#226: no secret value ever leaks to argv" "CLEAN" "$gen_leaks"
+cleanup_stubs
+
+# 8m0b. The endpoint sidecar is NON-SECRET (host + env only) and 0600. Setting a
+#       custom endpoint must NOT persist the value in the sidecar file.
+make_stubs; load_acq
+side_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/side-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  ACQ_SECRET_TEST_VALUE="SIDE-SECRET-VALUE" acq_secret_set_interactive SBX "" "api.example.com" "API_KEY" >/dev/null 2>&1
+  # Resolve the sidecar back (host<TAB>env) and show it (safe — non-secret).
+  printf 'meta=%s\n' "$(acq_secret_meta_resolve SBX | tr '\t' '/')"
+  # The sidecar file itself must not contain the secret value.
+  metafile="$STUBDIR/side-secrets/meta/acq.SBX"
+  if [ -f "$metafile" ] && grep -q 'SIDE-SECRET-VALUE' "$metafile"; then echo VALUE_IN_META; else echo META_CLEAN; fi
+  # Perms are 0600.
+  stat -c '%a' "$metafile" 2>/dev/null || stat -f '%Lp' "$metafile" 2>/dev/null || echo "?"
+)
+assert_contains "msb#226: sidecar resolves host/env" "$side_out" "meta=api.example.com/API_KEY"
+assert_contains "msb#226: sidecar never stores the secret value" "$side_out" "META_CLEAN"
+assert_contains "msb#226: sidecar file is 0600" "$side_out" "600"
+cleanup_stubs
+
+# 8m0c. `acq secret set -g SBX --host … --env …` on the msb backend (through the
+#       real dispatcher) records the sidecar AND live-binds a running sandbox via
+#       `msb modify <box> --secret API_KEY@api.example.com`, value never on argv.
+make_stubs; load_acq
+printf 'genrunbox\n' > "$STUBDIR/.msb_sandbox_list"
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/genrun-secrets"
+  export ACQ_SECRET_TEST_VALUE="GENRUN-SECRET"
+  ACQ_BACKEND=msb "$ACQ" secret set genrunbox SBX --host api.example.com --env API_KEY >/dev/null 2>&1
+)
+genrun_log=$(cat "$CALLS")
+assert_contains "msb#226: custom endpoint live-binds running sandbox" "$genrun_log" "msb modify genrunbox --secret API_KEY@api.example.com"
+if grep -q 'GENRUN-SECRET' "$CALLS"; then
+  fail "msb#226: custom endpoint value must NOT appear in msb argv" "leaked into $CALLS"
+else
+  pass "msb#226: custom endpoint value never leaks to msb argv (passed via env)"
+fi
+cleanup_stubs
+
+
 #       its own absolute host path (sbx-parity), a trailing :ro is preserved, and
 #       the recorded start dir is the FIRST (primary) workspace regardless of how
 #       many mounts are given (docs/QUICKSTART_SBX.md: "Primary workspace — the

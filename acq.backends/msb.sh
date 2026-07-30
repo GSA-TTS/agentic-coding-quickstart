@@ -100,24 +100,40 @@ ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
 # name is GITHUB_TOKEN (the neutral service→env mapping; kits also accept GH_TOKEN).
 ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-api.github.com}"
 
-# _acq_msb_service_binding SERVICE -> "ENVVAR<TAB>HOST" for services the msb
-# adapter binds via `--secret ENV@HOST`, or empty for services it does not bind.
-# Single source of truth for the bind (provision), rotate (set), and unbind
-# (secret rm) paths.
+# _acq_msb_service_binding SERVICE [SANDBOX] -> "ENVVAR<TAB>HOST" for services
+# the msb adapter binds via `--secret ENV@HOST`, or empty for services it does
+# not bind. Single source of truth for the bind (provision), rotate (set), and
+# unbind (secret rm) paths.
 #
-# NOTE (quickstart#226, gap C): this is still a fixed table (usai + github), not
-# generic. An arbitrary stored custom endpoint (`acq secret set SANDBOX --host
-# api.example.com --env API_KEY`) is NOT yet bound on msb — closing that requires
-# the acq secret store to persist the per-service host/env pair (msb's
-# `acq_backend_secret_set` does not yet accept/store --host/--env) and this
-# function to read it back. Tracked in #226; out of scope for this PR, which
-# generalized the re-feed/rotate machinery and added github via the REST path.
+# quickstart#226 (gap C) — GENERIC custom endpoints: usai + github keep their
+# compiled-in mapping (so their behavior/tests are unchanged), but ANY OTHER
+# service now resolves its (env, host) from the acq secret store's non-secret
+# endpoint sidecar (acq_secret_meta_resolve, written by `acq secret set SVC
+# --host H --env E`). So an arbitrary custom endpoint stored with a host/env is
+# bound generically instead of being stored-but-inert. Absence of a sidecar =>
+# empty (no binding), preserving prior behavior for services with no mapping.
+#
+# HOST may be a comma-separated multi-host list (mirroring sbx set-custom);
+# msb's `--secret ENV@HOST[,HOST...]` accepts that form (verified msb 0.6.7).
+# The optional SANDBOX arg gives scoped-sidecar precedence over the global one.
 _acq_msb_service_binding() {
-  case "$1" in
-    usai)   printf '%s\t%s\n' "USAI_API_KEY" "$ACQ_MSB_USAI_HOST" ;;
-    github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST" ;;
-    *)      printf '\t\n' ;;
+  local _service="$1" _sandbox="${2:-}" _meta _host _env
+  case "$_service" in
+    usai)   printf '%s\t%s\n' "USAI_API_KEY" "$ACQ_MSB_USAI_HOST"; return 0 ;;
+    github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
   esac
+  # Generic path: read the persisted (host, env) sidecar for a custom endpoint.
+  if command -v acq_secret_meta_resolve >/dev/null 2>&1; then
+    if _meta=$(acq_secret_meta_resolve "$_service" "$_sandbox" 2>/dev/null) && [ -n "$_meta" ]; then
+      _host=$(printf '%s' "$_meta" | cut -f1)
+      _env=$(printf '%s' "$_meta" | cut -f2)
+      if [ -n "$_host" ] && [ -n "$_env" ]; then
+        printf '%s\t%s\n' "$_env" "$_host"
+        return 0
+      fi
+    fi
+  fi
+  printf '\t\n'
 }
 
 # The kits expect an unprivileged `agent` user with HOME=/home/agent (the sbx
@@ -964,6 +980,37 @@ EOF
       create_flags+=(--secret "GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST}")
       acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from GH_TOKEN env)"
     fi
+
+    # GENERIC custom endpoints (quickstart#226, gap C). usai + github were bound
+    # explicitly above (unchanged). Any OTHER service stored via `acq secret set
+    # SVC --host H --env E` recorded a non-secret (host, env) sidecar; bind each
+    # such service generically here so it is no longer stored-but-inert. Iterate
+    # the endpoint sidecars for this sandbox scope + global, deduping by env var
+    # (a scoped mapping shadows the global; usai/github are skipped — already
+    # bound). The real value moves via a TRANSIENT env var (never argv), exactly
+    # like usai/github, and msb reads it from that host env var at create.
+    if command -v acq_secret_meta_list >/dev/null 2>&1; then
+      local _svc _binding _env _host _val
+      while IFS= read -r _svc; do
+        [ -n "$_svc" ] || continue
+        case "$_svc" in usai|github) continue ;; esac  # bound explicitly above
+        _binding=$(_acq_msb_service_binding "$_svc" "$name")
+        _env=$(printf '%s' "$_binding" | cut -f1)
+        _host=$(printf '%s' "$_binding" | cut -f2)
+        [ -n "$_env" ] && [ -n "$_host" ] || continue
+        # Skip if this env var was already bound (e.g. usai/github, or a dup).
+        case " ${_secret_env_names[*]-} " in *" $_env "*) continue ;; esac
+        if _val=$(acq_secret_resolve "$_svc" "$name" 2>/dev/null) && [ -n "$_val" ]; then
+          # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
+          export "$_env=$_val"; _val=""
+          _secret_env_names+=("$_env")
+          create_flags+=(--secret "${_env}@${_host}")
+          acq_debug "msb secret: binding ${_env}@${_host} for custom service '$_svc' (from acq store)"
+        fi
+      done <<EOF
+$(acq_secret_meta_list "$name")
+EOF
+    fi
   elif [ -n "${USAI_API_KEY:-}" ]; then
     create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
   fi
@@ -1531,9 +1578,25 @@ acq_backend_secret_set() {
 
   if [ -z "$service" ]; then
     echo "acq(msb): secret set: missing service name" >&2
-    echo "     usage: acq secret set [-g | SANDBOX] <service>" >&2
+    echo "     usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]" >&2
     return 1
   fi
+
+  # Parse optional --host/--env (a CUSTOM endpoint's mapping). These are recorded
+  # as a non-secret sidecar so the provision path can bind the service generically
+  # via `msb --secret ENV@HOST` (quickstart#226). Built-ins (usai, github) need no
+  # flags — their mapping is compiled in.
+  local host="" env_var="" prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--host" ]; then host="$arg"; prev=""; continue
+    elif [ "$prev" = "--env" ]; then env_var="$arg"; prev=""; continue; fi
+    case "$arg" in
+      --host=*) host="${arg#--host=}" ;;
+      --env=*)  env_var="${arg#--env=}" ;;
+      --host)   prev="--host" ;;
+      --env)    prev="--env" ;;
+    esac
+  done
 
   if ! command -v acq_secret_set_interactive >/dev/null 2>&1; then
     echo "acq(msb): internal error: secret store not loaded" >&2
@@ -1541,7 +1604,8 @@ acq_backend_secret_set() {
   fi
 
   # Store into the acq-owned store (keychain/file); value read from TTY/stdin.
-  acq_secret_set_interactive "$service" "$scope_name" || return 1
+  # host/env (when supplied) are persisted as a non-secret endpoint sidecar.
+  acq_secret_set_interactive "$service" "$scope_name" "$host" "$env_var" || return 1
 
   # Live add/rotate: re-feed running sandboxes so a newly-set or rotated secret
   # takes effect without recreate (`msb modify --secret ENV@HOST`; the guest keeps
@@ -1557,7 +1621,7 @@ acq_backend_secret_set() {
   # and would leak the token to any `ps -ww` for the life of the child. The var
   # is unset immediately after each call.
   local _env _host _binding val applied=0 sb
-  _binding=$(_acq_msb_service_binding "$service")
+  _binding=$(_acq_msb_service_binding "$service" "$scope_name")
   _env=$(printf '%s' "$_binding" | cut -f1)
   _host=$(printf '%s' "$_binding" | cut -f2)
   if [ -n "$_env" ] && [ -n "$_host" ]; then
@@ -1605,9 +1669,18 @@ EOF
       [ "$applied" -gt 0 ] && echo "      Re-fed $applied running sandbox(es) via 'msb modify' (no recreate needed)." >&2
       ;;
     *)
-      echo "acq(msb): stored '$service' in the acq secret store. Note: the msb adapter" >&2
-      echo "      only binds known services (usai, github) at create today; other" >&2
-      echo "      services are stored but not yet wired to a --secret host mapping." >&2
+      if [ -n "$_env" ] && [ -n "$_host" ]; then
+        echo "acq(msb): stored '$service' in the acq secret store with endpoint" >&2
+        echo "      ${_env}@${_host}. At 'acq run/create' the msb backend binds it via" >&2
+        echo "      --secret ${_env}@${_host}; the real value is swapped in on the wire and" >&2
+        echo "      never enters the guest." >&2
+        [ "$applied" -gt 0 ] && echo "      Re-fed $applied running sandbox(es) via 'msb modify' (no recreate needed)." >&2
+      else
+        echo "acq(msb): stored '$service' in the acq secret store, but it has no endpoint" >&2
+        echo "      mapping so the msb backend cannot bind it. Provide --host HOST --env ENV" >&2
+        echo "      (e.g. 'acq secret set -g $service --host api.example.com --env API_KEY')" >&2
+        echo "      so it is bound via --secret ENV@HOST at create." >&2
+      fi
       ;;
   esac
   return 0
@@ -1654,16 +1727,20 @@ acq_backend_secret_rm() {
     return 1
   fi
 
-  # 1) Delete the acq-store value (idempotent).
+  # 1) Delete the acq-store value (idempotent). Resolve the binding's env var
+  #    FIRST (for a custom endpoint it comes from the non-secret sidecar, which
+  #    step 3 removes), so the live-unbind below still knows what to unbind.
   local key removed=0
+  local env_name
+  env_name=$(_acq_msb_service_binding "$service" "$scope_name" | cut -f1)
   key=$(_acq_secret_key "$service" "$scope_name")
   acq_secret_delete "$key" && removed=1
 
   # 2) Live-unbind from running sandboxes via `msb modify --secret-rm ENV`, for
-  #    services the adapter actually binds. A named scope targets that sandbox;
-  #    a global rm sweeps every running sandbox. Best-effort per sandbox.
-  local env_name unbound=0
-  env_name=$(_acq_msb_service_binding "$service" | cut -f1)
+  #    services the adapter actually binds (built-ins + any custom endpoint with
+  #    a recorded env). A named scope targets that sandbox; a global rm sweeps
+  #    every running sandbox. Best-effort per sandbox.
+  local unbound=0
   if [ -n "$env_name" ]; then
     local sb
     if [ -n "$scope_name" ]; then
@@ -1686,6 +1763,12 @@ EOF
     fi
     [ "$unbound" -gt 0 ] && acq_debug "msb modify --secret-rm $env_name: unbound from $unbound sandbox(es)"
   fi
+
+  # 3) Drop the non-secret endpoint sidecar for this service/scope (idempotent),
+  #    so a re-set does not resurrect a stale host/env mapping. Done AFTER the
+  #    unbind above, which needed the env name it records.
+  command -v acq_secret_meta_delete >/dev/null 2>&1 && \
+    acq_secret_meta_delete "$service" "$scope_name" || true
 
   local where="global"
   [ -n "$scope_name" ] && where="sandbox '$scope_name'"

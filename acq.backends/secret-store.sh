@@ -190,6 +190,130 @@ _acq_secret_get_file() {
 }
 
 # ---------------------------------------------------------------------------
+# Per-service ENDPOINT METADATA (host/env) — non-secret sidecar (quickstart#226)
+# ---------------------------------------------------------------------------
+# The value store above holds only the raw secret. To bind a CUSTOM-endpoint
+# service generically (e.g. `msb --secret ENV@HOST`) both backends need to know
+# WHICH host(s) and env var a stored service maps to. Built-ins (usai, github)
+# have a compiled-in table (_acq_service_hosts_env / _acq_msb_service_binding);
+# an arbitrary `acq secret set SVC --host H --env E` had nowhere to record H/E.
+#
+# We persist that mapping as a NON-SECRET sidecar (host + env only — never the
+# value) under $ACQ_SECRET_META_DIR, keyed like the value store
+# (acq.<service> / acq.<sandbox>.<service>). It is deliberately a plain file
+# (not the keychain): it carries no secret, and both backends must read it at
+# provision. Format is a single line "HOST<TAB>ENV" (HOST may be a
+# comma-separated multi-host list, mirroring sbx set-custom breadth).
+#
+# BACKWARD COMPATIBILITY: absence of a sidecar => no metadata => callers fall
+# back to their existing built-in table / prior behavior. Existing stored
+# secrets (value-only, no sidecar) are unaffected.
+ACQ_SECRET_META_DIR="${ACQ_SECRET_META_DIR:-${ACQ_SECRET_FILE_DIR%/secrets}/secret-meta}"
+if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
+  # Offline-test escape hatch: keep metadata beside the forced file store.
+  ACQ_SECRET_META_DIR="${ACQ_SECRET_STORE_DIR%/}/meta"
+fi
+
+_acq_secret_meta_file_for() {
+  local key="$1"
+  printf '%s/%s\n' "$ACQ_SECRET_META_DIR" "$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')"
+}
+
+# acq_secret_meta_store SERVICE SANDBOX HOST ENV
+# Persist the (host, env) endpoint mapping for a service. HOST/ENV are validated
+# (charset-restricted) so a hostile value can never smuggle a flag into a later
+# `--secret ENV@HOST` argv. A comma-separated multi-host HOST is allowed. Empty
+# HOST or ENV => nothing stored (nothing to bind). Never touches the value store.
+acq_secret_meta_store() {
+  local service="$1" sandbox="${2:-}" host="$3" env="$4" key f
+  [ -n "$host" ] && [ -n "$env" ] || return 0
+  # Env var name must be a POSIX-ish identifier; hosts are DNS names/wildcards
+  # optionally comma-separated. Reject anything else (defense before argv use).
+  case "$env" in
+    ""|*[!A-Za-z0-9_]*) acq_debug "secret meta: refusing unsafe env '$env' for '$service'"; return 1 ;;
+  esac
+  case "$host" in
+    ""|*[!A-Za-z0-9.,*_-]*) acq_debug "secret meta: refusing unsafe host '$host' for '$service'"; return 1 ;;
+  esac
+  key=$(_acq_secret_key "$service" "$sandbox")
+  f=$(_acq_secret_meta_file_for "$key")
+  ( umask 077; mkdir -p "$ACQ_SECRET_META_DIR" ) || return 1
+  ( umask 077; printf '%s\t%s\n' "$host" "$env" > "$f" ) || {
+    echo "acq: secret meta: write failed for '$key'." >&2; return 1; }
+  acq_debug "secret meta: stored host/env for $key"
+  return 0
+}
+
+# acq_secret_meta_resolve SERVICE [SANDBOX] -> "HOST<TAB>ENV" on STDOUT
+# Sandbox-scope precedence (like acq_secret_resolve): try the scoped sidecar
+# first, then global. Empty + non-zero if neither exists. Non-secret; safe to
+# print (host + env only).
+acq_secret_meta_resolve() {
+  local service="$1" sandbox="${2:-}" f line
+  if [ -n "$sandbox" ]; then
+    f=$(_acq_secret_meta_file_for "$(_acq_secret_key "$service" "$sandbox")")
+    if [ -f "$f" ] && IFS= read -r line < "$f" && [ -n "$line" ]; then
+      printf '%s\n' "$line"; return 0
+    fi
+  fi
+  f=$(_acq_secret_meta_file_for "$(_acq_secret_key "$service")")
+  if [ -f "$f" ] && IFS= read -r line < "$f" && [ -n "$line" ]; then
+    printf '%s\n' "$line"; return 0
+  fi
+  return 1
+}
+
+# acq_secret_meta_delete SERVICE [SANDBOX] — remove the sidecar (idempotent).
+acq_secret_meta_delete() {
+  local service="$1" sandbox="${2:-}" f
+  f=$(_acq_secret_meta_file_for "$(_acq_secret_key "$service" "$sandbox")")
+  [ -e "$f" ] && rm -f "$f" 2>/dev/null
+  return 0
+}
+
+# acq_secret_meta_list [SANDBOX] -> service names (one per line) that have an
+# endpoint sidecar in this SANDBOX scope OR the global scope. Used by the msb
+# adapter at provision to discover every custom-endpoint service to bind
+# generically (quickstart#226). Deduplicated; order is unspecified. Non-secret.
+#
+# Sidecar files are named after the store key with non-[A-Za-z0-9._-] chars
+# mapped to '_' (see _acq_secret_meta_file_for). We recover the service name
+# from the key: global keys are `acq.<service>`; scoped keys are
+# `acq.<sandbox>.<service>`. Only entries matching the requested scope (scoped
+# for SANDBOX, plus all global) are emitted.
+acq_secret_meta_list() {
+  local sandbox="${1:-}" f base svc seen=" "
+  [ -d "$ACQ_SECRET_META_DIR" ] || return 0
+  for f in "$ACQ_SECRET_META_DIR"/*; do
+    [ -f "$f" ] || continue
+    base=$(basename "$f")
+    svc=""
+    # Recover the key form. The filename sanitizer maps '.' -> '.', so key
+    # separators survive as literal dots for our safe service/sandbox charset
+    # (slugified sandbox names and service names are [a-z0-9-]). Parse:
+    #   acq.<service>              -> global scope
+    #   acq.<sandbox>.<service>    -> sandbox scope
+    case "$base" in
+      acq.*.*)
+        # sandbox-scoped: acq.<sandbox>.<service>
+        local rest="${base#acq.}"
+        local sb="${rest%%.*}"
+        local s="${rest#*.}"
+        if [ -n "$sandbox" ] && [ "$sb" = "$sandbox" ]; then svc="$s"; fi
+        ;;
+      acq.*)
+        # global: acq.<service>
+        svc="${base#acq.}"
+        ;;
+    esac
+    [ -n "$svc" ] || continue
+    case "$seen" in *" $svc "*) continue ;; esac
+    seen="$seen$svc "
+    printf '%s\n' "$svc"
+  done
+}
+
+# ---------------------------------------------------------------------------
 # acq_secret_delete KEY  ->  0 if an entry was removed OR none existed
 # ---------------------------------------------------------------------------
 # Remove a secret from the active store backend. Idempotent: returns 0 whether
@@ -260,14 +384,19 @@ acq_secret_has() {
 }
 
 # ---------------------------------------------------------------------------
-# acq_secret_set_interactive SERVICE [SANDBOX]
+# acq_secret_set_interactive SERVICE [SANDBOX] [HOST] [ENV]
 # ---------------------------------------------------------------------------
 # Read a secret from a TTY (silent) or piped stdin (no prompt) and store it
 # under the resolved key. Never places the value in argv. Used by
 # `acq secret set` in the adapters. ACQ_SECRET_TEST_VALUE is an offline-test
 # escape hatch (no TTY in CI); never set it in production.
+#
+# When HOST and ENV are both supplied (a custom-endpoint service), the non-secret
+# (host, env) endpoint mapping is persisted alongside the value (see
+# acq_secret_meta_store) so both backends can bind the service generically at
+# provision (quickstart#226). HOST/ENV are metadata only — never the value.
 acq_secret_set_interactive() {
-  local service="$1" sandbox="${2:-}" key value
+  local service="$1" sandbox="${2:-}" host="${3:-}" env="${4:-}" key value
   key=$(_acq_secret_key "$service" "$sandbox")
 
   if [ -n "${ACQ_SECRET_TEST_VALUE:-}" ]; then
@@ -289,6 +418,9 @@ acq_secret_set_interactive() {
   local rc=$?
   value=""
   if [ "$rc" -eq 0 ]; then
+    # Persist the non-secret endpoint mapping for custom services (host/env only;
+    # a no-op when either is empty, e.g. built-ins whose mapping is compiled in).
+    acq_secret_meta_store "$service" "$sandbox" "$host" "$env" || true
     echo "acq: ${service} secret stored (${key})." >&2
   fi
   return "$rc"
