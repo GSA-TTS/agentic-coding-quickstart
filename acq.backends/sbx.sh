@@ -350,7 +350,9 @@ acq_backend_provision() {
 acq_backend_run() {
   local name="$1"
   shift
-  # Expect `-- CMD...` separator
+  # Expect `-- CMD...` separator. No `-u agent` needed: sbx's agent templates
+  # bake the unprivileged `agent` user (UID 1000, HOME=/home/agent) as the
+  # default exec user, unlike a plain msb OCI base (which defaults to root).
   sbx exec "$name" "$@"
 }
 

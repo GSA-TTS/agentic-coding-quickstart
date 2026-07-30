@@ -1538,11 +1538,19 @@ _acq_msb_check_prereqs() {
 # acq_backend_run — run a command inside a sandbox; return its exit status
 # ---------------------------------------------------------------------------
 # acq passes `-- CMD...`; msb exec uses the same `-- CMD...` separator.
-
+#
+# Run as the unprivileged `agent` user with HOME=/home/agent by default — never
+# root. A bare `msb exec NAME -- CMD` runs as root with HOME unset (or /root),
+# which broke `$HOME` / `~`-relative probes (e.g. the openchamber verify script's
+# `~/.local/bin/opencode` check missed the files staged into /home/agent). This
+# aligns `acq exec` with every other msb path: attach uses `-u agent` (see
+# _acq_msb_attach) and kit commands map user->`-u agent -e HOME=/home/agent`
+# (see _acq_msb_exec_flags_into). Flags precede NAME; the `-- CMD...` passthrough
+# in "$@" follows NAME unchanged (matches the attach path's `msb exec … NAME -- CMD`).
 acq_backend_run() {
   local name="$1"
   shift
-  msb exec "$name" "$@"
+  msb exec -u agent -e HOME=/home/agent "$name" "$@"
 }
 
 # ---------------------------------------------------------------------------

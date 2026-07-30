@@ -972,11 +972,13 @@ log=$(cat "$CALLS")
 assert_contains "msb: rm -> msb remove --force" "$log" "msb remove --force mybox"
 cleanup_stubs
 
-# 8g. Dispatch: `acq --backend msb exec mybox -- echo hi` calls `msb exec`.
+# 8g. Dispatch: `acq --backend msb exec mybox -- echo hi` calls `msb exec` as the
+#      agent user (-u agent, HOME=/home/agent) — never root (see 8n6b). Flags
+#      precede NAME; the `-- CMD` passthrough follows NAME unchanged.
 make_stubs
 out=$(ACQ_BACKEND=msb "$ACQ" exec mybox -- echo hi 2>/dev/null)
 log=$(cat "$CALLS")
-assert_contains "msb: exec -> msb exec" "$log" "msb exec mybox"
+assert_contains "msb: exec -> msb exec (as agent, HOME set)" "$log" "msb exec -u agent -e HOME=/home/agent mybox -- echo hi"
 cleanup_stubs
 
 # 8h. `acq --backend msb version` reports msb backend + version.
@@ -1595,6 +1597,26 @@ assert_contains "msb: shell attach uses msb exec -t as agent" "$shellattach_log"
 assert_contains "msb: shell attach execs an explicit /bin/sh -l" "$shellattach_log" "shellattach -- /bin/sh -l"
 assert_not_contains "msb: shell attach does not exec a named agent" "$shellattach_log" "shellattach -- shell"
 assert_not_contains "msb: shell attach does NOT use msb ssh" "$shellattach_log" "msb ssh"
+cleanup_stubs
+
+# 8n6b. `acq exec` (acq_backend_run) runs the command as the unprivileged `agent`
+#       user with HOME=/home/agent — NOT root with HOME unset (the reported bug).
+#       A bare `msb exec NAME -- CMD` runs as root; the `~`/$HOME-relative probes
+#       downstream (e.g. openchamber verify's `~/.local/bin/opencode`) then miss
+#       the files staged into /home/agent. Flags precede NAME; the `-- CMD…`
+#       passthrough survives after NAME unchanged.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_run execbox -- sh -c 'ls ~/.local/bin/opencode' >/dev/null 2>&1
+)
+execrun_log=$(cat "$CALLS")
+assert_contains "msb: exec runs as the agent user (-u agent)" "$execrun_log" "msb exec -u agent"
+assert_contains "msb: exec sets HOME=/home/agent" "$execrun_log" "-u agent -e HOME=/home/agent"
+assert_contains "msb: exec places flags before the sandbox name" "$execrun_log" "-e HOME=/home/agent execbox"
+assert_contains "msb: exec preserves the -- CMD passthrough" "$execrun_log" "execbox -- sh -c ls ~/.local/bin/opencode"
+assert_not_contains "msb: exec does NOT run as root (bare msb exec NAME)" "$execrun_log" "msb exec execbox --"
 cleanup_stubs
 
 # 8n7. SECURITY: a hostile agent token must never break out of the
