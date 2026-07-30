@@ -1656,7 +1656,10 @@ acq_backend_ports() {
   local name="$1"
   shift
 
-  # Only --publish H:G is supported post-hoc on msb (ADR-0015). Parse it out.
+  # Two modes on msb:
+  #   * `acq ports <name>` (NO args)          -> LIST published ports (query).
+  #   * `acq ports <name> --publish H:G`       -> post-hoc publish (ADR-0015).
+  # Only --publish H:G is supported for the publish action. Parse it out.
   local mapping=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1669,10 +1672,12 @@ acq_backend_ports() {
     esac
   done
 
+  # No --publish -> LIST mode. Surface create-time `-p` NAT mappings (ADR-0014)
+  # plus acq's recorded post-hoc ssh -L tunnels (ADR-0015). An empty list is not
+  # an error (exit 0); this is a query, matching sbx's `sbx ports <name>`.
   if [ -z "$mapping" ]; then
-    echo "acq(msb): ports: missing --publish HOST:GUEST." >&2
-    echo "     usage: acq ports <sandbox> --publish HOST:GUEST" >&2
-    return 1
+    _acq_msb_ports_list "$name"
+    return 0
   fi
 
   # SI-10: validate HOST:GUEST (both ints 1..65535) BEFORE either reaches an
@@ -1902,6 +1907,88 @@ _acq_msb_ports_teardown() {
   return 0
 }
 
+# _acq_msb_ports_list NAME — print NAME's published port mappings to stdout, one
+# per line, each line CONTAINING the port digits so a `grep -q <port>` matches
+# (openchamber verify relies on this). Two sources, both DEFENSIVE (a query must
+# never hard-fail): (a) create-time `-p HOST:GUEST` NAT mappings known to msb,
+# read from `msb inspect <name> --format json`; (b) acq's recorded post-hoc
+# ssh -L tunnels from the ADR-0015 state file. Empty list -> just exit 0.
+_acq_msb_ports_list() {
+  local name="$1" pidfile _sport _map _serve _ssh
+  # (a) create-time NAT mappings (best-effort; absent field/tool is not an error).
+  _acq_msb_ports_from_inspect "$name"
+  # (b) recorded post-hoc ssh -L tunnels: `<serve_pid> <ssh_pid> <sport> <H:G>`.
+  pidfile=$(_acq_msb_ports_pidfile "$name") || return 0
+  [ -f "$pidfile" ] || return 0
+  while read -r _serve _ssh _sport _map; do
+    [ -n "$_map" ] || continue
+    printf 'guest %s -> host 127.0.0.1:%s (post-hoc ssh -L)\n' \
+      "${_map#*:}" "${_map%%:*}"
+  done <"$pidfile"
+  return 0
+}
+
+# _acq_msb_ports_from_inspect NAME — best-effort extract create-time HOST:GUEST
+# port mappings from `msb inspect NAME --format json` and print one per line as
+# `guest <G> -> host <H> (create-time -p)`. msb's exact JSON field name for
+# published ports is not pinned, so this is DEFENSIVE: prefer `jq` when present
+# (try a few plausible field paths), else a dependency-free grep/sed of any
+# "H:G"-shaped tokens. Missing tool, missing field, or no output are all silent
+# no-ops (return 0) — never a hard failure on a query.
+_acq_msb_ports_from_inspect() {
+  local name="$1" json pair h g
+  json=$(msb inspect "$name" --format json 2>/dev/null) || return 0
+  [ -n "$json" ] || return 0
+  local pairs=""
+  if command -v jq >/dev/null 2>&1; then
+    # Try common shapes: array of {host,guest|container}, or "H:G" strings, or a
+    # ports object. `?//empty` keeps a missing path from erroring.
+    pairs=$(printf '%s' "$json" | jq -r '
+      [ (.ports? // .portMappings? // .published_ports? // .publishedPorts? // [])[]?
+        | if type=="string" then .
+          elif type=="object" then
+            (((.host // .hostPort // .host_port)|tostring) + ":" +
+             ((.guest // .container // .containerPort // .guestPort)|tostring))
+          else empty end ]
+      | .[]?' 2>/dev/null)
+  fi
+  if [ -z "$pairs" ]; then
+    # jq absent or field not found: dependency-free best-effort. First try any
+    # literal HOST:GUEST integer token (e.g. a "3000:3000" string form). If none,
+    # fall back to pairing adjacent host/guest-like numeric fields so an object
+    # shape ({"host":3000,"guest":3000}) still yields "3000:3000".
+    pairs=$(printf '%s' "$json" \
+      | tr ',{}[]" ' '\n\n\n\n\n\n\n' \
+      | grep -Eo '[0-9]{1,5}:[0-9]{1,5}' 2>/dev/null)
+    if [ -z "$pairs" ]; then
+      pairs=$(printf '%s' "$json" \
+        | tr -d '"' \
+        | tr ',{}[]' '\n\n\n\n\n' \
+        | grep -Eio '(host|guest|container)(port|_port)?[[:space:]]*:[[:space:]]*[0-9]{1,5}' 2>/dev/null \
+        | grep -Eo '[0-9]{1,5}' 2>/dev/null \
+        | _acq_msb_pair_lines)
+    fi
+  fi
+  [ -n "$pairs" ] || return 0
+  printf '%s\n' "$pairs" | while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    h="${pair%%:*}"; g="${pair#*:}"
+    case "$h$g" in ""|*[!0-9]*) continue ;; esac
+    printf 'guest %s -> host 127.0.0.1:%s (create-time -p)\n' "$g" "$h"
+  done
+  return 0
+}
+
+# _acq_msb_pair_lines — read a flat stream of integers on stdin (host, guest,
+# host, guest, …) and emit "host:guest" per pair. Dependency-free helper for the
+# jq-absent fallback in _acq_msb_ports_from_inspect. An odd trailing value is
+# dropped (incomplete pair). bash-3.2 safe.
+_acq_msb_pair_lines() {
+  local a="" n
+  while read -r n; do
+    if [ -z "$a" ]; then a="$n"; else printf '%s:%s\n' "$a" "$n"; a=""; fi
+  done
+}
 # ---------------------------------------------------------------------------
 # acq_backend_apply_kit — apply a kit into an existing sandbox mid-life
 # ---------------------------------------------------------------------------

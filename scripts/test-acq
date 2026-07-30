@@ -122,6 +122,11 @@ case "$_msb_sub" in
   --help|-h) printf 'MSB-TOPLEVEL-HELP for msb\n' ;;
   doctor) exit 0 ;;
   create) : >"$STUBDIR/.msb_created" ;;
+  inspect)
+    # `msb inspect <name> --format json` — emit a create-time published-ports
+    # JSON fixture if the test planted one, else nothing (models an absent field
+    # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
+    [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
   list|ls)
     [ -f "$STUBDIR/.msb_sandbox_list" ] && cat "$STUBDIR/.msb_sandbox_list" ;;
   exec)
@@ -2811,6 +2816,69 @@ printf 'DO-NOT-DELETE\n' >"$canary"
   && pass "msb ports: unsafe sandbox name records no state file" \
   || fail "msb ports: unsafe sandbox name records no state file" "escaped record written"
 rm -f "$canary" 2>/dev/null || true
+cleanup_stubs
+
+# 10b8. LIST mode (#234): `acq ports <name>` with NO --publish is a QUERY, not an
+#       error. It must exit 0 and print lines CONTAINING the published port
+#       numbers so openchamber verify's `grep -q <port>` matches. Two sources:
+#       (a) create-time `-p` NAT mappings via `msb inspect --format json`, and
+#       (b) acq-recorded post-hoc ssh -L tunnels. Both surfaced together.
+make_stubs; load_acq
+# (a) plant a create-time published-ports JSON fixture for `msb inspect`.
+printf '{"ports":[{"host":3000,"guest":3000},{"host":4096,"guest":4096}]}\n' \
+  >"$STUBDIR/.msb_inspect_json"
+list_out=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # (b) also seed a recorded post-hoc tunnel so both sources appear.
+  _acq_msb_ports_record listbox 111 222 54321 9090:8080
+  acq_backend_ports listbox
+) ; list_rc=$?
+assert_eq "msb ports: LIST mode (no --publish) exits 0 (query, not error)" "0" "$list_rc"
+printf '%s\n' "$list_out" | grep -q 3000 \
+  && pass "msb ports: LIST surfaces create-time port 3000 (grep -q 3000 matches)" \
+  || fail "msb ports: LIST surfaces create-time port 3000" "out=[$list_out]"
+printf '%s\n' "$list_out" | grep -q 4096 \
+  && pass "msb ports: LIST surfaces create-time port 4096 (grep -q 4096 matches)" \
+  || fail "msb ports: LIST surfaces create-time port 4096" "out=[$list_out]"
+printf '%s\n' "$list_out" | grep -q 8080 \
+  && pass "msb ports: LIST surfaces post-hoc recorded guest port 8080" \
+  || fail "msb ports: LIST surfaces post-hoc recorded guest port 8080" "out=[$list_out]"
+cleanup_stubs
+
+# 10b9. LIST mode is graceful when there are NO ports at all (no inspect fixture,
+#       no recorded tunnel): exit 0, no crash, empty (or portless) output.
+make_stubs; load_acq
+none_out=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports emptybox
+) ; none_rc=$?
+assert_eq "msb ports: LIST with zero ports exits 0 (empty list not an error)" "0" "$none_rc"
+cleanup_stubs
+
+# 10b10. LIST mode degrades gracefully when msb's JSON has NO recognizable port
+#        field (defensive: unknown field name / jq absent). Must NOT crash; still
+#        exit 0. Here inspect returns JSON with an unrelated shape.
+make_stubs; load_acq
+printf '{"name":"absentbox","state":"running"}\n' >"$STUBDIR/.msb_inspect_json"
+absent_out=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports absentbox
+) ; absent_rc=$?
+assert_eq "msb ports: LIST exits 0 when no port field found in msb JSON" "0" "$absent_rc"
+cleanup_stubs
+
+# 10b11. Genuinely bad args still error (unsupported argument), LIST mode does
+#        NOT swallow a bogus flag like --frobnicate.
+make_stubs; load_acq
+bad_rc=0
+bad_out=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports badargbox --frobnicate 2>&1
+) || bad_rc=$?
+[ "$bad_rc" -ne 0 ] \
+  && pass "msb ports: unsupported arg (--frobnicate) still errors non-zero" \
+  || fail "msb ports: unsupported arg (--frobnicate) still errors non-zero" "rc=$bad_rc"
+assert_contains "msb ports: unsupported arg names the offending flag" "$bad_out" "unsupported argument"
 cleanup_stubs
 
 # 10c. msb prerequisite check: warns when the base image lacks a kit tool, and
