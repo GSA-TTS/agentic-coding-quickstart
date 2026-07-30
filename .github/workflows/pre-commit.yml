@@ -31,10 +31,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
-      # Cache the pre-commit hook environments (incl. the shellcheck-py binary
-      # that is otherwise re-fetched every run). Keyed on the config so a pin
-      # bump busts the cache. This removes the per-run binary download that was
-      # hanging and killing the shellcheck step with SIGTERM (exit 143). See #242.
+      # The shellcheck hook uses the SYSTEM shellcheck binary (preinstalled on
+      # ubuntu runners) to avoid the shellcheck-py cold-run binary fetch that was
+      # hanging and SIGTERM-killing the job (#242). Fail loudly if a future runner
+      # image ever drops it, rather than silently skipping the lint.
+      - name: Verify shellcheck is available
+        run: shellcheck --version
+      # Cache the remaining pre-commit hook environments (node for markdownlint,
+      # etc.), keyed on the config so a pin bump busts the cache.
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: ~/.cache/pre-commit
