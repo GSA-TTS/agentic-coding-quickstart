@@ -73,9 +73,38 @@ _acq_secret_backend() {
 # _acq_secret_key SERVICE [SANDBOX] — compute the store key.
 #   acq.<service>              (global)
 #   acq.<sandbox>.<service>    (sandbox-scoped)
-# ---------------------------------------------------------------------------
+#
+# The key format uses '.' as the scope separator, so it is only injective when
+# the SERVICE and SANDBOX segments contain no '.' themselves. If they could, a
+# GLOBAL service literally named "foo.bar" would produce `acq.foo.bar` — the
+# SAME key a SCOPED service "bar" in sandbox "foo" produces — colliding in BOTH
+# the value store and the meta sidecar (and mis-scoping meta_list). Sandbox
+# names are always slugified dot-free upstream (common.sh slugify -> [a-z0-9-])
+# and acq's own service names are dot-free, so this collision is latent today
+# (quickstart#234, gap C). We enforce that invariant here — the single choke
+# point both the value store and the meta sidecar share — so no caller can
+# smuggle a dotted (or otherwise separator-breaking) name past the store and
+# silently alias another scope. Fail closed rather than emit an ambiguous key.
 _acq_secret_key() {
   local service="$1" sandbox="${2:-}"
+  # A '.' in either segment breaks the acq.<sandbox>.<service> separator and
+  # makes the key non-injective; an empty service has no key. Reject both. This
+  # is a defensive assertion: legitimate service/sandbox names never contain a
+  # dot (see the invariant note above), so this only fires on a would-be
+  # collision. Emit no key and return non-zero so the caller fails visibly
+  # rather than reading/writing an aliased entry.
+  case "$service" in
+    ""|*.*)
+      acq_debug "secret key: refusing ambiguous service name '$service' (empty or contains '.')"
+      return 1
+      ;;
+  esac
+  case "$sandbox" in
+    *.*)
+      acq_debug "secret key: refusing ambiguous sandbox name '$sandbox' (contains '.')"
+      return 1
+      ;;
+  esac
   if [ -n "$sandbox" ]; then
     printf 'acq.%s.%s\n' "$sandbox" "$service"
   else
@@ -235,7 +264,13 @@ acq_secret_meta_store() {
   case "$host" in
     ""|*[!A-Za-z0-9.,*_-]*) acq_debug "secret meta: refusing unsafe host '$host' for '$service'"; return 1 ;;
   esac
-  key=$(_acq_secret_key "$service" "$sandbox")
+  # _acq_secret_key fails closed (empty output, non-zero) on a name that would
+  # make the key non-injective (a dotted service/sandbox — quickstart#234).
+  # Refuse to write a sidecar in that case rather than aliasing another scope.
+  key=$(_acq_secret_key "$service" "$sandbox") || {
+    echo "acq: secret meta: refusing to store '$service' — ambiguous scope name." >&2
+    return 1
+  }
   f=$(_acq_secret_meta_file_for "$key")
   ( umask 077; mkdir -p "$ACQ_SECRET_META_DIR" ) || return 1
   ( umask 077; printf '%s\t%s\n' "$host" "$env" > "$f" ) || {
@@ -249,24 +284,33 @@ acq_secret_meta_store() {
 # first, then global. Empty + non-zero if neither exists. Non-secret; safe to
 # print (host + env only).
 acq_secret_meta_resolve() {
-  local service="$1" sandbox="${2:-}" f line
+  local service="$1" sandbox="${2:-}" f line key
   if [ -n "$sandbox" ]; then
-    f=$(_acq_secret_meta_file_for "$(_acq_secret_key "$service" "$sandbox")")
+    # _acq_secret_key fails closed on an ambiguous (dotted) name; skip that
+    # lookup rather than probing a malformed path (quickstart#234).
+    if key=$(_acq_secret_key "$service" "$sandbox"); then
+      f=$(_acq_secret_meta_file_for "$key")
+      if [ -f "$f" ] && IFS= read -r line < "$f" && [ -n "$line" ]; then
+        printf '%s\n' "$line"; return 0
+      fi
+    fi
+  fi
+  if key=$(_acq_secret_key "$service"); then
+    f=$(_acq_secret_meta_file_for "$key")
     if [ -f "$f" ] && IFS= read -r line < "$f" && [ -n "$line" ]; then
       printf '%s\n' "$line"; return 0
     fi
-  fi
-  f=$(_acq_secret_meta_file_for "$(_acq_secret_key "$service")")
-  if [ -f "$f" ] && IFS= read -r line < "$f" && [ -n "$line" ]; then
-    printf '%s\n' "$line"; return 0
   fi
   return 1
 }
 
 # acq_secret_meta_delete SERVICE [SANDBOX] — remove the sidecar (idempotent).
 acq_secret_meta_delete() {
-  local service="$1" sandbox="${2:-}" f
-  f=$(_acq_secret_meta_file_for "$(_acq_secret_key "$service" "$sandbox")")
+  local service="$1" sandbox="${2:-}" f key
+  # An ambiguous (dotted) name has no valid key, hence no sidecar to remove;
+  # treat as a no-op success (quickstart#234).
+  key=$(_acq_secret_key "$service" "$sandbox") || return 0
+  f=$(_acq_secret_meta_file_for "$key")
   [ -e "$f" ] && rm -f "$f" 2>/dev/null
   return 0
 }
@@ -281,31 +325,49 @@ acq_secret_meta_delete() {
 # from the key: global keys are `acq.<service>`; scoped keys are
 # `acq.<sandbox>.<service>`. Only entries matching the requested scope (scoped
 # for SANDBOX, plus all global) are emitted.
+#
+# ROBUSTNESS (quickstart#234, gap C): the `acq.<sandbox>.<service>` layout uses
+# '.' as the scope separator, so the old "split on the FIRST dot" mis-scoped a
+# key whose scope segment itself contained a dot — a GLOBAL service literally
+# named "foo.bar" (`acq.foo.bar`) was misread as sandbox="foo" service="bar".
+# New writes can no longer create such a key (_acq_secret_key now rejects a
+# dotted service/sandbox — see its note), so a dotted key is only reachable from
+# a sidecar written by an OLDER build. We classify without guessing:
+#
+#   1. A key scoped to the REQUESTED sandbox is recognized by the exact
+#      `acq.<sandbox>.` prefix (anchored on the known sandbox, not a blind
+#      split); the remainder is the service.
+#   2. A dot-free `acq.<service>` key is the (current-build) GLOBAL case.
+#   3. Any OTHER dotted `acq.<rest>` key is either a DIFFERENT sandbox's scope
+#      or a legacy dotted global. Both are ambiguous by filename alone, both are
+#      unreachable by construction going forward, and neither should bind for
+#      the requested scope — so it is SKIPPED (never mis-attributed to global,
+#      never mis-scoped to this sandbox). This preserves the pre-fix semantics
+#      that foreign scopes are invisible, and removes the mis-scope entirely.
+#
+# meta_list and meta_resolve therefore agree: meta_list emits only the global
+# services meta_resolve(svc) (no sandbox) would find, plus this sandbox's scoped
+# services meta_resolve(svc, sandbox) would find.
 acq_secret_meta_list() {
-  local sandbox="${1:-}" f base svc seen=" "
+  local sandbox="${1:-}" f base svc rest seen=" "
   [ -d "$ACQ_SECRET_META_DIR" ] || return 0
   for f in "$ACQ_SECRET_META_DIR"/*; do
     [ -f "$f" ] || continue
     base=$(basename "$f")
     svc=""
-    # Recover the key form. The filename sanitizer maps '.' -> '.', so key
-    # separators survive as literal dots for our safe service/sandbox charset
-    # (slugified sandbox names and service names are [a-z0-9-]). Parse:
-    #   acq.<service>              -> global scope
-    #   acq.<sandbox>.<service>    -> sandbox scope
     case "$base" in
-      acq.*.*)
-        # sandbox-scoped: acq.<sandbox>.<service>
-        local rest="${base#acq.}"
-        local sb="${rest%%.*}"
-        local s="${rest#*.}"
-        if [ -n "$sandbox" ] && [ "$sb" = "$sandbox" ]; then svc="$s"; fi
-        ;;
-      acq.*)
-        # global: acq.<service>
-        svc="${base#acq.}"
-        ;;
+      acq.*) rest="${base#acq.}" ;;
+      *) continue ;;   # foreign file — not one of our keys
     esac
+    if [ -n "$sandbox" ] && [ "${base#acq.${sandbox}.}" != "$base" ]; then
+      # (1) Scoped to the requested sandbox.
+      svc="${base#acq.${sandbox}.}"
+    else
+      case "$rest" in
+        *.*) svc="" ;;   # (3) foreign/legacy dotted key — skip (see note above)
+        *)   svc="$rest" ;;   # (2) dot-free global service
+      esac
+    fi
     [ -n "$svc" ] || continue
     case "$seen" in *" $svc "*) continue ;; esac
     seen="$seen$svc "
@@ -364,14 +426,19 @@ _acq_secret_delete_file() {
 # acq.<sandbox>.<service> first, then fall back to acq.<service>. Empty +
 # non-zero if neither exists. This is the read path adapters use at provision.
 acq_secret_resolve() {
-  local service="$1" sandbox="${2:-}" v
-  if [ -n "$sandbox" ]; then
-    if v=$(acq_secret_get "$(_acq_secret_key "$service" "$sandbox")" 2>/dev/null) && [ -n "$v" ]; then
+  local service="$1" sandbox="${2:-}" v key
+  # _acq_secret_key fails closed on an ambiguous (dotted) name (quickstart#234);
+  # such a name has no valid entry, so skip its lookup rather than probing an
+  # empty/aliased key.
+  if [ -n "$sandbox" ] && key=$(_acq_secret_key "$service" "$sandbox"); then
+    if v=$(acq_secret_get "$key" 2>/dev/null) && [ -n "$v" ]; then
       printf '%s' "$v"; return 0
     fi
   fi
-  if v=$(acq_secret_get "$(_acq_secret_key "$service")" 2>/dev/null) && [ -n "$v" ]; then
-    printf '%s' "$v"; return 0
+  if key=$(_acq_secret_key "$service"); then
+    if v=$(acq_secret_get "$key" 2>/dev/null) && [ -n "$v" ]; then
+      printf '%s' "$v"; return 0
+    fi
   fi
   return 1
 }
@@ -397,7 +464,13 @@ acq_secret_has() {
 # provision (quickstart#226). HOST/ENV are metadata only — never the value.
 acq_secret_set_interactive() {
   local service="$1" sandbox="${2:-}" host="${3:-}" env="${4:-}" key value
-  key=$(_acq_secret_key "$service" "$sandbox")
+  # _acq_secret_key fails closed on an ambiguous (dotted) service/sandbox that
+  # would alias another scope in the shared store (quickstart#234). Refuse the
+  # set before reading a value so nothing is stored under an aliased key.
+  if ! key=$(_acq_secret_key "$service" "$sandbox"); then
+    echo "acq: secret set: refusing '$service'${sandbox:+ (sandbox '$sandbox')} — a service or sandbox name may not contain '.'" >&2
+    return 1
+  fi
 
   if [ -n "${ACQ_SECRET_TEST_VALUE:-}" ]; then
     value="$ACQ_SECRET_TEST_VALUE"

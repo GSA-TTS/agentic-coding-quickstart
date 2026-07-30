@@ -795,8 +795,11 @@ acq_backend_secret_rm() {
   local removed_store=0
   if command -v acq_secret_delete >/dev/null 2>&1; then
     local key
-    key=$(_acq_secret_key "$service" "$acq_sandbox")
-    acq_secret_delete "$key" && removed_store=1
+    # _acq_secret_key fails closed on an ambiguous (dotted) name (quickstart#234);
+    # such a name could never have been stored, so treat rm as a no-op success
+    # (the `|| key=""` keeps `set -e` from aborting the rm path).
+    key=$(_acq_secret_key "$service" "$acq_sandbox") || key=""
+    [ -n "$key" ] && acq_secret_delete "$key" && removed_store=1
   fi
   # Also drop the non-secret endpoint sidecar for this service/scope (idempotent).
   command -v acq_secret_meta_delete >/dev/null 2>&1 && \
