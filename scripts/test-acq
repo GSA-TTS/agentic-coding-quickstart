@@ -1440,7 +1440,13 @@ assert_not_contains "msb: uid-1000 kit cmd not run as -u 1000" "$agent_log" "msb
 # kit that would prompt (e.g. private `git clone`) fails fast instead of hanging
 # provision. Assert the guard env is threaded onto the startup command.
 assert_contains "msb: kit cmd gets GIT_TERMINAL_PROMPT=0 guard" "$agent_log" "-e GIT_TERMINAL_PROMPT=0"
-assert_contains "msb: chowns staged /home/agent file to agent" "$agent_log" "chown agent /home/agent/usai-config/merge-global-config.mjs"
+# The staged /home/agent file must end up agent-owned — but as of the home-dir
+# ownership fix acq chowns the TOP-MOST created subdir under the home
+# recursively (so intermediate dirs it created as root become agent-owned too),
+# not merely the leaf file. For ~/usai-config/merge-global-config.mjs the top
+# is `usai-config`, so `chown -R agent /home/agent/usai-config` covers the dir
+# AND the file. By NAME (agent), never a numeric uid.
+assert_contains "msb: chowns staged /home/agent subtree to agent" "$agent_log" "chown -R agent /home/agent/usai-config"
 # Agent-user setup must create the user WITHOUT pinning uid 1000 (which collides
 # with the base image's pre-existing uid-1000 user, e.g. node) and must chown the
 # home to agent so it is writable — otherwise every agent-user kit fails with
@@ -1873,6 +1879,44 @@ assert_contains "sec: non-octal mode refused" "$sec_out" "non-octal mode"
 assert_contains "sec: unsafe path refused" "$sec_out" "unsafe path"
 assert_not_contains "sec: chmod never via sh -c string" "$sec_log" "chmod 0644;"
 assert_not_contains "sec: injected command never reaches msb argv" "$sec_log" "PWNED"
+cleanup_stubs
+
+# 8o3b. HOME-DIR OWNERSHIP (#234): when a kit drops a file under a nested
+#       agent-home path (e.g. the openchamber wrapper at ~/.local/bin/opencode),
+#       acq creates the parent chain as root then must chown the TOP-MOST
+#       created subdir under /home/agent RECURSIVELY to the agent user — so
+#       .local, .local/bin AND the file all become agent-owned. Chowning only
+#       the leaf left .local/.local/bin root-owned; the agent-user startup's
+#       `mkdir -p ~/.local/state/...` then hit EACCES and (set -eu, detached)
+#       died silently. Assert the subtree chown, by NAME, never a numeric uid.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/home-own-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # Nested drop (the reported openchamber wrapper shape) …
+  _acq_msb_copy_file_verified hobox /etc/hostname '/home/agent/.local/bin/opencode' '0755' >/dev/null 2>&1
+  # … and a file dropped directly in the home (no subdir).
+  _acq_msb_copy_file_verified hobox /etc/hostname '/home/agent/direct-file' '0644' >/dev/null 2>&1
+)
+home_own_log=$(cat "$CALLS")
+# Nested: the intermediate subtree (top-most component .local) is chowned, not
+# merely the leaf file — this is the actual fix.
+assert_contains "234: chowns top-most created subtree under home (recursive)" \
+  "$home_own_log" "chown -R agent /home/agent/.local"
+assert_not_contains "234: does NOT chown only the leaf file" \
+  "$home_own_log" "chown -R agent /home/agent/.local/bin/opencode"
+# Never recurse all of /home/agent (would stomp other kits' root-owned drops).
+assert_not_contains "234: does NOT recursively chown all of /home/agent" \
+  "$home_own_log" "chown -R agent /home/agent "
+# Ownership is by NAME (agent), never a numeric uid (provisioned uid != 1000).
+assert_not_contains "234: chown uses agent by name, not numeric uid" \
+  "$home_own_log" "chown -R 1000"
+# Direct-in-home drop: `top` is the filename, so the chown targets that file
+# (recursive chown of a file == chowning the file; correct, no regression).
+assert_contains "234: file dropped directly in ~ chowns that file" \
+  "$home_own_log" "chown -R agent /home/agent/direct-file"
 cleanup_stubs
 
 # 8o4. SECURITY: a hostile command `user` is dropped by kit_spec_commands (it is

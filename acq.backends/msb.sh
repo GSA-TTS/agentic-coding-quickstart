@@ -640,7 +640,28 @@ _acq_msb_copy_file_verified() {
   fi
   case "$path" in
     /home/agent/*)
-      msb exec "$name" -u 0 -- chown agent "$path" >/dev/null 2>&1 || true
+      # The parent chain was created as root above (mkdir -p as -u 0), so the
+      # intermediate dirs this file introduced under the home (e.g. .local,
+      # .local/bin for ~/.local/bin/opencode) are root-owned. A later kit
+      # startup command runs AS THE AGENT USER and its `mkdir -p ~/.local/...`
+      # then hits EACCES, killing a `set -eu` detached startup silently. Chown
+      # the TOP-MOST created subdir under /home/agent recursively so the whole
+      # chain (dirs + file) is agent-owned — not merely the leaf file. Do NOT
+      # chown /home/agent itself (already agent-owned; recursing all of home
+      # would stomp other kits' intentional root-owned drops). By NAME (agent),
+      # never a numeric uid — the agent uid is provisioned, not necessarily 1000.
+      local rel top
+      rel=${path#/home/agent/}   # e.g. .local/bin/opencode  (or FILE if dropped in ~)
+      top=${rel%%/*}             # e.g. .local               (or FILE)
+      # top must be a real, non-traversing component. (The entry-point charset
+      # check permits `.`, so `..` could slip through; guard it explicitly so we
+      # never chown outside the home, e.g. /home/agent/.. == /home.)
+      case "$top" in
+        ''|.|..) : ;;
+        *)
+          msb exec "$name" -u 0 -- chown -R agent "/home/agent/$top" >/dev/null 2>&1 || true
+          ;;
+      esac
       ;;
   esac
   acq_debug "msb copy verified: ${name}:${path}"
