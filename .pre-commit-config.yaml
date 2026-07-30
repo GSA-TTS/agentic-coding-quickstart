@@ -37,12 +37,15 @@ repos:
       - id: markdownlint-cli2
         args: ["--fix"]
 
-  # Shell script linting (shellcheck-py: native binary, no Docker required)
-  - repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: 745eface02aef23e168a8afb6b5737818efbea95  # v0.11.0.1
+  # Shell script linting via the system shellcheck binary
+  # (`brew install shellcheck` / `apt install shellcheck`; preinstalled on CI).
+  - repo: local
     hooks:
       - id: shellcheck
-        args: ["--severity=warning"]
+        name: shellcheck (system binary)
+        entry: shellcheck --severity=warning
+        language: system
+        types: [shell]
 
   # acq offline unit suite — runs the host-side logic (backend resolution, name
   # derivation, kit-translate, git-identity/path pre-flight) on every push. This
