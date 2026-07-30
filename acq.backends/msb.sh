@@ -641,42 +641,56 @@ EOF
 # in `nohup sh -c '"$@"' … &` inside a single `msb exec` so the process survives
 # the exec returning. (msb 0.6.x has no `exec -d`; nohup+& is the portable
 # equivalent, matching how sbx's startup semantics detach a background hook.)
-_acq_msb_exec_command() {
-  local name="$1" phase="$2" user="$3" background="$4"
-  shift 4
-
-  # Split leading NAME=value env tokens (up to the `--` sentinel) from argv.
-  local _kit_env=() _tok
+# _acq_msb_split_env_argv KITENV_ARRVAR ARGV_ARRVAR TOKEN... — split the leading
+# NAME=value env tokens (up to the `--` sentinel) from the trailing argv, into
+# the two named arrays. Uses the codebase's eval-by-name array pattern (see
+# common.sh split_noglob) for macOS bash 3.2 compat, storing each token via
+# `set --`/`"$@"` so no value is re-split or re-quoted.
+_acq_msb_split_env_argv() {
+  local _envarr="$1" _argvarr="$2"
+  shift 2
+  eval "$_envarr=()"
+  local _tok
   while [ "$#" -gt 0 ]; do
     _tok="$1"; shift
     if [ "$_tok" = "--" ]; then break; fi
-    _kit_env+=("$_tok")
+    eval "$_envarr+=(\"\$_tok\")"
   done
+  eval "$_argvarr=(\"\$@\")"
+}
 
-  [ "$#" -gt 0 ] || return 0
+# _acq_msb_exec_flags_into UFLAG_ARRVAR EFLAG_ARRVAR USER KITENV_ARRVAR — build
+# the `msb exec` -u/-e flag arrays for one kit command. Maps the sbx uid contract
+# (1000/agent) onto our by-name agent user, threads the kit's declared env as
+# `-e NAME=value`, and injects git non-interactive guards unless the kit set
+# GIT_TERMINAL_PROMPT itself. Arrays passed/returned by name (bash 3.2 compat).
+_acq_msb_exec_flags_into() {
+  local _uflag="$1" _eflag="$2" _user="$3" _envarr="$4"
+  eval "$_uflag=()"
+  eval "$_eflag=()"
 
   # The kits express the unprivileged agent as uid "1000" (the sbx agent-template
   # contract). On a plain OCI base uid 1000 may be a DIFFERENT user (e.g. `node`
   # in node:22-bookworm), so address our provisioned agent by NAME instead, and
   # set HOME=/home/agent so `$HOME`-relative kit logic resolves correctly.
-  local uflag=() eflag=()
-  case "$user" in
+  case "$_user" in
     ""|0|root)
-      [ -n "$user" ] && uflag=(-u "$user")
+      [ -n "$_user" ] && eval "$_uflag=(-u \"\$_user\")"
       ;;
     1000|agent)
-      uflag=(-u agent)
-      eflag=(-e "HOME=/home/agent")
+      eval "$_uflag=(-u agent)"
+      eval "$_eflag=(-e \"HOME=/home/agent\")"
       ;;
     *)
-      uflag=(-u "$user")
+      eval "$_uflag=(-u \"\$_user\")"
       ;;
   esac
 
   # Append the kit's declared guest env as additional `-e NAME=value` flags.
   local _ev
-  for _ev in ${_kit_env[@]+"${_kit_env[@]}"}; do
-    eflag+=(-e "$_ev")
+  eval "set -- \${${_envarr}[@]+\"\${${_envarr}[@]}\"}"
+  for _ev in "$@"; do
+    eval "$_eflag+=(-e \"\$_ev\")"
   done
 
   # NON-INTERACTIVE ENFORCEMENT. Kit lifecycle commands run before the agent
@@ -689,54 +703,97 @@ _acq_msb_exec_command() {
   #   - GIT_TERMINAL_PROMPT=0 (+ GIT_ASKPASS/SSH_ASKPASS=false) so git fails fast
   #     instead of prompting. These are injected only if the kit did not already
   #     set GIT_TERMINAL_PROMPT (kits may override intentionally).
-  case " ${_kit_env[*]-} " in
+  local _kit_env_str
+  eval "_kit_env_str=\" \${${_envarr}[*]-} \""
+  case "$_kit_env_str" in
     *" GIT_TERMINAL_PROMPT="*) : ;;
-    *) eflag+=(-e "GIT_TERMINAL_PROMPT=0" -e "GIT_ASKPASS=/bin/false" -e "SSH_ASKPASS=/bin/false") ;;
+    *) eval "$_eflag+=(-e \"GIT_TERMINAL_PROMPT=0\" -e \"GIT_ASKPASS=/bin/false\" -e \"SSH_ASKPASS=/bin/false\")" ;;
   esac
+}
+
+# _acq_msb_exec_install NAME USER UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV... — run an
+# install-phase command, gated by a per-command marker (hash of argv) so it runs
+# once per sandbox even across re-applies. The marker lives under /var/lib/acq
+# (root-owned) and is both TESTED and WRITTEN as uid 0, so the gate is
+# independent of the install command's own user.
+_acq_msb_exec_install() {
+  local _name="$1" _user="$2" _uflagn="$3" _eflagn="$4"
+  shift 4
+  [ "$1" = "--" ] && shift
+  # Distinct internal names (_uf/_ef) so they cannot collide with a caller array
+  # named `uflag`/`eflag` (a `local uflag` would blank the caller's before the
+  # eval-by-name read).
+  local _uf=() _ef=()
+  eval "_uf=(\${${_uflagn}[@]+\"\${${_uflagn}[@]}\"})"
+  eval "_ef=(\${${_eflagn}[@]+\"\${${_eflagn}[@]}\"})"
+
+  local marker
+  marker="/var/lib/acq/install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
+  if msb exec "$_name" -u 0 -- sh -c "test -f '$marker'" </dev/null >/dev/null 2>&1; then
+    acq_debug "msb cmd[install] already done (marker hit): $*"
+    return 0
+  fi
+  acq_debug "msb cmd[install] START (user=${_user:-0}): $*"
+  msb exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
+    acq_debug "msb cmd[install] FAILED: $*"
+    echo "acq(msb): warning: install command failed for '$_name'" >&2
+    return 0
+  }
+  acq_debug "msb cmd[install] DONE: $*"
+  msb exec "$_name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" </dev/null >/dev/null 2>&1 || true
+}
+
+# _acq_msb_exec_run NAME PHASE USER BACKGROUND UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV...
+# — run an initFiles/startup command every apply (they are written idempotent).
+# A startup command marked background (ADR-0014) is DETACHED under nohup inside a
+# single `msb exec` so a never-exiting supervisor loop does not block provision;
+# the argv is passed as positional params to an inner `sh -c '… "$@"'` so no
+# token is re-split or re-quoted (the same safety the direct-argv path has).
+_acq_msb_exec_run() {
+  local _name="$1" _phase="$2" _user="$3" _background="$4" _uflagn="$5" _eflagn="$6"
+  shift 6
+  [ "$1" = "--" ] && shift
+  # Distinct internal names (_uf/_ef): see _acq_msb_exec_install.
+  local _uf=() _ef=()
+  eval "_uf=(\${${_uflagn}[@]+\"\${${_uflagn}[@]}\"})"
+  eval "_ef=(\${${_eflagn}[@]+\"\${${_eflagn}[@]}\"})"
+
+  if [ "$_phase" = "startup" ] && [ "$_background" = "true" ]; then
+    acq_debug "msb cmd[startup:background] DETACH (user=${_user:-0}): $*"
+    msb exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} \
+      -- sh -c 'nohup "$@" >/dev/null 2>&1 & exit 0' sh "$@" </dev/null || {
+      acq_debug "msb cmd[startup:background] FAILED to launch: $*"
+      echo "acq(msb): warning: background startup command failed to launch for '$_name'" >&2
+    }
+    acq_debug "msb cmd[startup:background] LAUNCHED: $*"
+  else
+    acq_debug "msb cmd[${_phase}] START (user=${_user:-0}): $*"
+    msb exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
+      acq_debug "msb cmd[${_phase}] FAILED: $*"
+      echo "acq(msb): warning: ${_phase} command failed for '$_name'" >&2
+    }
+    acq_debug "msb cmd[${_phase}] DONE: $*"
+  fi
+}
+
+_acq_msb_exec_command() {
+  local name="$1" phase="$2" user="$3" background="$4"
+  shift 4
+
+  # Split leading NAME=value env tokens (up to the `--` sentinel) from argv.
+  local _kit_env=() _argv=()
+  _acq_msb_split_env_argv _kit_env _argv "$@"
+
+  [ "${#_argv[@]}" -gt 0 ] || return 0
+
+  # Build the `msb exec` -u/-e flag arrays (uid mapping, kit env, git guards).
+  local uflag=() eflag=()
+  _acq_msb_exec_flags_into uflag eflag "$user" _kit_env
 
   if [ "$phase" = "install" ]; then
-    # Idempotency marker keyed by a hash of the argv. The marker lives under
-    # /var/lib/acq (root-owned) and is both TESTED and WRITTEN as uid 0, so the
-    # gate is independent of the install command's own user — a non-root install
-    # phase is still run-once (the command's uid may not be able to read a
-    # root-created marker, which would otherwise re-run it every apply).
-    local marker
-    marker="/var/lib/acq/install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
-    if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" </dev/null >/dev/null 2>&1; then
-      acq_debug "msb cmd[install] already done (marker hit): $*"
-      return 0
-    fi
-    acq_debug "msb cmd[install] START (user=${user:-0}): $*"
-    msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" </dev/null || {
-      acq_debug "msb cmd[install] FAILED: $*"
-      echo "acq(msb): warning: install command failed for '$name'" >&2
-      return 0
-    }
-    acq_debug "msb cmd[install] DONE: $*"
-    msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" </dev/null >/dev/null 2>&1 || true
+    _acq_msb_exec_install "$name" "$user" uflag eflag -- "${_argv[@]}"
   else
-    # initFiles / startup — run every apply (they are written idempotent).
-    if [ "$phase" = "startup" ] && [ "$background" = "true" ]; then
-      # Detached startup command (ADR-0014): a never-exiting supervisor loop must
-      # not block provision. Run it under nohup in the background inside a single
-      # `msb exec`, so the exec returns immediately and the process outlives it.
-      # The argv is passed as positional params to an inner `sh -c '… "$@"'` so no
-      # token is re-split or re-quoted (the same safety the direct-argv path has).
-      acq_debug "msb cmd[startup:background] DETACH (user=${user:-0}): $*"
-      msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} \
-        -- sh -c 'nohup "$@" >/dev/null 2>&1 & exit 0' sh "$@" </dev/null || {
-        acq_debug "msb cmd[startup:background] FAILED to launch: $*"
-        echo "acq(msb): warning: background startup command failed to launch for '$name'" >&2
-      }
-      acq_debug "msb cmd[startup:background] LAUNCHED: $*"
-    else
-      acq_debug "msb cmd[${phase}] START (user=${user:-0}): $*"
-      msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" </dev/null || {
-        acq_debug "msb cmd[${phase}] FAILED: $*"
-        echo "acq(msb): warning: ${phase} command failed for '$name'" >&2
-      }
-      acq_debug "msb cmd[${phase}] DONE: $*"
-    fi
+    _acq_msb_exec_run "$name" "$phase" "$user" "$background" uflag eflag -- "${_argv[@]}"
   fi
 }
 
@@ -1771,104 +1828,112 @@ acq_backend_ensure_kits_applied() {
 #
 # Usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]
 
-acq_backend_secret_set() {
-  local service="${1:-}"
-  shift || true
-
-  # Parse scope (mirrors the sbx wrapper): -g/--global -> global;
-  # a leading bare token before the service -> sandbox name.
-  local scope_name=""
-  case "$service" in
+# _acq_msb_parse_secret_scope SERVICE_OUT SCOPE_OUT ARG... — parse the leading
+# `-g/--global | SANDBOX | <service>` scope token shared by secret set/rm.
+# Writes the resolved service name to the var named by SERVICE_OUT, the scope
+# (sandbox name, empty for global/default) to SCOPE_OUT, and the number of
+# positional args the scope+service consumed to the global
+# _ACQ_MSB_SCOPE_CONSUMED so the caller can `shift` past them. (A count is passed
+# via a global rather than stdout because writing the by-name out-vars must happen
+# in the caller's shell, not a `$(...)` subshell.) Mirrors the sbx wrapper:
+# -g/--global -> global; a leading bare token before the service -> sandbox name;
+# a leading -flag or a lone token -> service itself.
+_acq_msb_parse_secret_scope() {
+  local _svc_out="$1" _scope_out="$2"
+  shift 2
+  local _service="${1:-}" _scope="" _consumed=1
+  case "$_service" in
     -g|--global)
-      service="${1:-}"; shift || true
+      _service="${2:-}"; _consumed=2
       ;;
     -*)
       ;;
     *)
-      local _next="${1:-}"
+      local _next="${2:-}"
       case "$_next" in
         ""|-*) ;;
-        *) scope_name="$service"; service="$_next"; shift || true ;;
+        *) _scope="$_service"; _service="$_next"; _consumed=2 ;;
       esac
       ;;
   esac
+  # Clamp to the args actually present: for `secret set` (0 args) or `secret set
+  # -g` (1 arg) the scope+service is incomplete, but the caller still `shift`s
+  # this count under `set -euo pipefail` — an over-shift would abort BEFORE the
+  # "missing service name" usage message (the OLD code used `shift || true`).
+  [ "$_consumed" -gt "$#" ] && _consumed="$#"
+  eval "$_svc_out=\$_service"
+  eval "$_scope_out=\$_scope"
+  _ACQ_MSB_SCOPE_CONSUMED="$_consumed"
+}
 
-  if [ -z "$service" ]; then
-    echo "acq(msb): secret set: missing service name" >&2
-    echo "     usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]" >&2
-    return 1
-  fi
-
-  # Parse optional --host/--env (a CUSTOM endpoint's mapping). These are recorded
-  # as a non-secret sidecar so the provision path can bind the service generically
-  # via `msb --secret ENV@HOST` (quickstart#226). Built-ins (usai, github) need no
-  # flags — their mapping is compiled in.
-  local host="" env_var="" prev=""
-  for arg in "$@"; do
-    if [ "$prev" = "--host" ]; then host="$arg"; prev=""; continue
-    elif [ "$prev" = "--env" ]; then env_var="$arg"; prev=""; continue; fi
-    case "$arg" in
-      --host=*) host="${arg#--host=}" ;;
-      --env=*)  env_var="${arg#--env=}" ;;
-      --host)   prev="--host" ;;
-      --env)    prev="--env" ;;
+# _acq_msb_parse_host_env HOST_OUT ENV_OUT ARG... — parse optional --host/--env
+# (a custom endpoint's mapping) from the trailing args into the named vars.
+# Accepts both `--host H`/`--env E` and `--host=H`/`--env=E` forms. Built-ins
+# (usai, github) need no flags — their mapping is compiled in.
+_acq_msb_parse_host_env() {
+  local _host_out="$1" _env_out="$2"
+  shift 2
+  local _host="" _env_var="" _prev="" _arg
+  for _arg in "$@"; do
+    if [ "$_prev" = "--host" ]; then _host="$_arg"; _prev=""; continue
+    elif [ "$_prev" = "--env" ]; then _env_var="$_arg"; _prev=""; continue; fi
+    case "$_arg" in
+      --host=*) _host="${_arg#--host=}" ;;
+      --env=*)  _env_var="${_arg#--env=}" ;;
+      --host)   _prev="--host" ;;
+      --env)    _prev="--env" ;;
     esac
   done
+  eval "$_host_out=\$_host"
+  eval "$_env_out=\$_env_var"
+}
 
-  if ! command -v acq_secret_set_interactive >/dev/null 2>&1; then
-    echo "acq(msb): internal error: secret store not loaded" >&2
-    return 1
-  fi
-
-  # Store into the acq-owned store (keychain/file); value read from TTY/stdin.
-  # host/env (when supplied) are persisted as a non-secret endpoint sidecar.
-  acq_secret_set_interactive "$service" "$scope_name" "$host" "$env_var" || return 1
-
-  # Live add/rotate: re-feed running sandboxes so a newly-set or rotated secret
-  # takes effect without recreate (`msb modify --secret ENV@HOST`; the guest keeps
-  # its placeholder, only the injected value changes). Driven off the single
-  # binding table so EVERY bound service (usai, github, ...) rotates in place —
-  # not just usai. A named scope targets that sandbox; a global set sweeps all
-  # running sandboxes. The real value is read from the acq store into a TRANSIENT
-  # env var (never argv) that `msb modify` reads, then cleared.
-  #
-  # SECRET NEVER ON ARGV: the value is placed in the environment via a dynamic
-  # `export "$_env=$val"` (an env ENTRY, invisible to `ps`/`/proc/<pid>/cmdline`),
-  # NOT via `env NAME=VAL msb …` — there NAME=VAL is an OPERAND on env(1)'s argv
-  # and would leak the token to any `ps -ww` for the life of the child. The var
-  # is unset immediately after each call.
-  local _env _host _binding val applied=0 sb
-  _binding=$(_acq_msb_service_binding "$service" "$scope_name")
-  _env=$(printf '%s' "$_binding" | cut -f1)
-  _host=$(printf '%s' "$_binding" | cut -f2)
-  if [ -n "$_env" ] && [ -n "$_host" ]; then
-    if val=$(acq_secret_resolve "$service" "$scope_name" 2>/dev/null) && [ -n "$val" ]; then
-      # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
-      export "$_env=$val"
-      if [ -n "$scope_name" ]; then
-        if acq_backend_exists "$scope_name"; then
-          msb modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
-            && applied=$((applied + 1))
-        fi
-      else
-        # stdin from /dev/null so `msb modify` can't consume the `while read`
-        # heredoc (else only the first sandbox is processed — a real msb drains
-        # stdin). Same trap guarded in acq_backend_secret_rm's sweep.
-        while IFS= read -r sb; do
-          [ -n "$sb" ] || continue
-          msb modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
-            && applied=$((applied + 1))
-        done <<EOF
+# _acq_msb_secret_refeed SERVICE SCOPE ENV HOST — live add/rotate: re-feed a
+# newly-set/rotated secret to running sandboxes via `msb modify --secret ENV@HOST`
+# (the guest keeps its placeholder; only the injected value changes) so it takes
+# effect without recreate. A named SCOPE targets that sandbox; empty SCOPE sweeps
+# all running sandboxes. Echoes the count of sandboxes re-fed.
+#
+# SECRET NEVER ON ARGV: the value is placed in the environment via a dynamic
+# `export "$ENV=$val"` (an env ENTRY, invisible to `ps`/`/proc/<pid>/cmdline`),
+# NOT via `env NAME=VAL msb …` — there NAME=VAL is an OPERAND on env(1)'s argv and
+# would leak the token to any `ps -ww` for the life of the child. The var is
+# unset immediately after the sweep.
+_acq_msb_secret_refeed() {
+  local service="$1" scope_name="$2" _env="$3" _host="$4"
+  local val applied=0 sb
+  [ -n "$_env" ] && [ -n "$_host" ] || { printf '0\n'; return 0; }
+  val=$(acq_secret_resolve "$service" "$scope_name" 2>/dev/null) && [ -n "$val" ] || { printf '0\n'; return 0; }
+  # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
+  export "$_env=$val"
+  if [ -n "$scope_name" ]; then
+    if acq_backend_exists "$scope_name"; then
+      msb modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+        && applied=$((applied + 1))
+    fi
+  else
+    # stdin from /dev/null so `msb modify` can't consume the `while read`
+    # heredoc (else only the first sandbox is processed — a real msb drains
+    # stdin). Same trap guarded in acq_backend_secret_rm's sweep.
+    while IFS= read -r sb; do
+      [ -n "$sb" ] || continue
+      msb modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+        && applied=$((applied + 1))
+    done <<EOF
 $(msb list -q 2>/dev/null)
 EOF
-      fi
-      unset "$_env"
-      val=""
-      [ "$applied" -gt 0 ] && acq_debug "msb modify: re-fed $service (${_env}@${_host}) to $applied sandbox(es)"
-    fi
   fi
+  unset "$_env"
+  val=""
+  [ "$applied" -gt 0 ] && acq_debug "msb modify: re-fed $service (${_env}@${_host}) to $applied sandbox(es)"
+  printf '%s\n' "$applied"
+}
 
-  # Service-specific guidance.
+# _acq_msb_secret_set_guidance SERVICE ENV HOST APPLIED — print the
+# service-specific post-set guidance (built-ins get bespoke wording; a custom
+# endpoint reports its ENV@HOST binding, or how to add one if unmapped).
+_acq_msb_secret_set_guidance() {
+  local service="$1" _env="$2" _host="$3" applied="$4"
   case "$service" in
     usai)
       echo "acq(msb): stored USAi key in the acq secret store. At 'acq run/create'" >&2
@@ -1900,6 +1965,45 @@ EOF
       fi
       ;;
   esac
+}
+
+acq_backend_secret_set() {
+  local service scope_name
+  _acq_msb_parse_secret_scope service scope_name "$@"
+  shift "$_ACQ_MSB_SCOPE_CONSUMED"
+
+  if [ -z "$service" ]; then
+    echo "acq(msb): secret set: missing service name" >&2
+    echo "     usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]" >&2
+    return 1
+  fi
+
+  # Parse optional --host/--env (a CUSTOM endpoint's mapping). These are recorded
+  # as a non-secret sidecar so the provision path can bind the service generically
+  # via `msb --secret ENV@HOST` (quickstart#226). Built-ins (usai, github) need no
+  # flags — their mapping is compiled in.
+  local host env_var
+  _acq_msb_parse_host_env host env_var "$@"
+
+  if ! command -v acq_secret_set_interactive >/dev/null 2>&1; then
+    echo "acq(msb): internal error: secret store not loaded" >&2
+    return 1
+  fi
+
+  # Store into the acq-owned store (keychain/file); value read from TTY/stdin.
+  # host/env (when supplied) are persisted as a non-secret endpoint sidecar.
+  acq_secret_set_interactive "$service" "$scope_name" "$host" "$env_var" || return 1
+
+  # Live add/rotate: re-feed running sandboxes so a newly-set or rotated secret
+  # takes effect without recreate. Driven off the single binding table so EVERY
+  # bound service (usai, github, ...) rotates in place — not just usai.
+  local _env _host _binding applied
+  _binding=$(_acq_msb_service_binding "$service" "$scope_name")
+  _env=$(printf '%s' "$_binding" | cut -f1)
+  _host=$(printf '%s' "$_binding" | cut -f2)
+  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
+
+  _acq_msb_secret_set_guidance "$service" "$_env" "$_host" "$applied"
   return 0
 }
 
@@ -1914,24 +2018,39 @@ EOF
 # so the injected value stops flowing immediately — a named scope targets that
 # sandbox; a global rm sweeps all running sandboxes. Idempotent (absent secret /
 # absent binding are both success). Scope parsing mirrors acq_backend_secret_set.
-acq_backend_secret_rm() {
-  local service="${1:-}"
-  shift || true
+# _acq_msb_secret_unbind SCOPE ENV — live-unbind a secret from running sandboxes
+# via `msb modify --secret-rm ENV`, for services the adapter actually binds. A
+# named SCOPE targets that sandbox; empty SCOPE sweeps every running sandbox.
+# Best-effort per sandbox; echoes the count unbound. Empty ENV => nothing to do.
+_acq_msb_secret_unbind() {
+  local scope_name="$1" env_name="$2" unbound=0 sb
+  [ -n "$env_name" ] || { printf '0\n'; return 0; }
+  if [ -n "$scope_name" ]; then
+    if acq_backend_exists "$scope_name"; then
+      msb modify "$scope_name" --secret-rm "$env_name" >/dev/null 2>&1 \
+        && unbound=$((unbound + 1))
+    fi
+  else
+    # NOTE: redirect each `msb modify` stdin from /dev/null. Without it, the
+    # command inside the loop consumes the heredoc that feeds `while read`, so
+    # only the FIRST sandbox is processed (a real `msb` drains stdin). This is
+    # the same stdin-consumption trap the test stub deliberately reproduces.
+    while IFS= read -r sb; do
+      [ -n "$sb" ] || continue
+      msb modify "$sb" --secret-rm "$env_name" </dev/null >/dev/null 2>&1 \
+        && unbound=$((unbound + 1))
+    done <<EOF
+$(msb list -q 2>/dev/null)
+EOF
+  fi
+  [ "$unbound" -gt 0 ] && acq_debug "msb modify --secret-rm $env_name: unbound from $unbound sandbox(es)"
+  printf '%s\n' "$unbound"
+}
 
-  local scope_name=""
-  case "$service" in
-    -g|--global)
-      service="${1:-}"; shift || true ;;
-    -*)
-      ;;
-    *)
-      local _next="${1:-}"
-      case "$_next" in
-        ""|-*) ;;
-        *) scope_name="$service"; service="$_next"; shift || true ;;
-      esac
-      ;;
-  esac
+acq_backend_secret_rm() {
+  local service scope_name
+  _acq_msb_parse_secret_scope service scope_name "$@"
+  shift "$_ACQ_MSB_SCOPE_CONSUMED"
 
   if [ -z "$service" ]; then
     echo "acq(msb): secret rm: missing service name" >&2
@@ -1956,30 +2075,9 @@ acq_backend_secret_rm() {
   # 2) Live-unbind from running sandboxes via `msb modify --secret-rm ENV`, for
   #    services the adapter actually binds (built-ins + any custom endpoint with
   #    a recorded env). A named scope targets that sandbox; a global rm sweeps
-  #    every running sandbox. Best-effort per sandbox.
-  local unbound=0
-  if [ -n "$env_name" ]; then
-    local sb
-    if [ -n "$scope_name" ]; then
-      if acq_backend_exists "$scope_name"; then
-        msb modify "$scope_name" --secret-rm "$env_name" >/dev/null 2>&1 \
-          && unbound=$((unbound + 1))
-      fi
-    else
-      # NOTE: redirect each `msb modify` stdin from /dev/null. Without it, the
-      # command inside the loop consumes the heredoc that feeds `while read`, so
-      # only the FIRST sandbox is processed (a real `msb` drains stdin). This is
-      # the same stdin-consumption trap the test stub deliberately reproduces.
-      while IFS= read -r sb; do
-        [ -n "$sb" ] || continue
-        msb modify "$sb" --secret-rm "$env_name" </dev/null >/dev/null 2>&1 \
-          && unbound=$((unbound + 1))
-      done <<EOF
-$(msb list -q 2>/dev/null)
-EOF
-    fi
-    [ "$unbound" -gt 0 ] && acq_debug "msb modify --secret-rm $env_name: unbound from $unbound sandbox(es)"
-  fi
+  #    every running sandbox.
+  local unbound
+  unbound=$(_acq_msb_secret_unbind "$scope_name" "$env_name")
 
   # 3) Drop the non-secret endpoint sidecar for this service/scope (idempotent),
   #    so a re-set does not resurrect a stale host/env mapping. Done AFTER the
