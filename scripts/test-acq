@@ -143,7 +143,11 @@ case "$_msb_sub" in
       *"cat /var/lib/acq/workspace"*) printf '%s' "${STUB_RECORDED_WORKSPACE:-}" ;;
       *) : ;;
     esac ;;
-  ssh)  : ;;
+  ssh)
+    # `msb ssh serve …` / `msb ssh authorize …` are logged (above) and no-op
+    # here; a plain `msb ssh` is likewise a no-op. The ADR-0015 port path only
+    # asserts on the logged argv, so the stub does not need to fork a listener.
+    : ;;
   stop) : ;;
   remove|rm) : ;;
   copy|cp) : ;;
@@ -157,6 +161,32 @@ exit 0
 MSBSTUB
   chmod +x "$STUBDIR/msb"
 
+  # Stub `ssh` and `ssh-keygen` for the ADR-0015 post-hoc port path. Both log
+  # every call to $CALLS. `ssh -N -L …` would normally block foregrounded; the
+  # stub returns immediately (acq backgrounds it), and `ssh-keygen -f <path>`
+  # writes throwaway key + .pub files so the key-ensure/authorize path proceeds.
+  cat >"$STUBDIR/ssh" <<'SSHSTUB'
+#!/usr/bin/env bash
+{ printf 'ssh'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+exit 0
+SSHSTUB
+  chmod +x "$STUBDIR/ssh"
+
+  cat >"$STUBDIR/ssh-keygen" <<'KEYGENSTUB'
+#!/usr/bin/env bash
+{ printf 'ssh-keygen'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+# Emit throwaway key material at -f <path> so downstream authorize/forward runs.
+_f=""; _prev=""
+for a in "$@"; do [ "$_prev" = "-f" ] && { _f="$a"; break; }; _prev="$a"; done
+if [ -n "$_f" ]; then
+  mkdir -p "$(dirname "$_f")" 2>/dev/null || true
+  printf 'STUB-PRIVATE-KEY\n' >"$_f"
+  printf 'ssh-ed25519 AAAASTUBPUBKEY acq-msb\n' >"${_f}.pub"
+fi
+exit 0
+KEYGENSTUB
+  chmod +x "$STUBDIR/ssh-keygen"
+
   PATH="$STUBDIR:$PATH"
   export PATH CALLS STUBDIR
   # Export ACQ_SCRIPT_DIR so acq can locate its backends.
@@ -164,6 +194,9 @@ MSBSTUB
   # Force the acq secret store to a throwaway file backend (never touch the real
   # OS keychain in tests).
   export ACQ_SECRET_STORE_DIR="$STUBDIR/secrets"
+  # Force acq's state dir (ssh keys, port PIDs — ADR-0015) under the throwaway
+  # STUBDIR so tests never write to the real ~/.local/state/acq.
+  export ACQ_STATE_DIR="$STUBDIR/state"
 }
 
 cleanup_stubs() { [ -n "${STUBDIR:-}" ] && rm -rf "$STUBDIR"; }
@@ -2425,6 +2458,127 @@ assert_contains "msb: net-rule uses bare FQDN target" "$nr_out" "allow@api.gsa.u
 assert_contains "msb: net-rule strips :port" "$nr_out" "allow@github.com"
 assert_not_contains "msb: net-rule avoids domain= prefix" "$nr_out" "allow@domain="
 assert_not_contains "msb: net-rule avoids ambiguous domain: form" "$nr_out" "allow@domain:"
+cleanup_stubs
+
+# 10b2. ADR-0015: post-hoc `acq ports <sandbox> --publish H:G` on the msb backend
+#       authorizes the acq-managed key (once), starts `msb ssh serve … --port <n>`,
+#       and opens `ssh … -L 127.0.0.1:H:127.0.0.1:G …`. The key lives under acq
+#       state (NOT ~/.ssh); ports/PIDs are recorded for teardown.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
+)
+pub_log=$(cat "$CALLS")
+assert_contains "msb ports: generates the acq-managed ssh key (ssh-keygen -t ed25519)" \
+  "$pub_log" "ssh-keygen -t ed25519 -N  -f $STUBDIR/state/ssh/msb_id_ed25519"
+assert_contains "msb ports: authorizes the acq public key via msb ssh authorize" \
+  "$pub_log" "msb ssh authorize --file $STUBDIR/state/ssh/msb_id_ed25519.pub"
+assert_contains "msb ports: starts msb ssh serve on an ephemeral loopback port" \
+  "$pub_log" "msb ssh serve pbox --host 127.0.0.1 --port"
+assert_contains "msb ports: opens ssh -L 127.0.0.1:8080:127.0.0.1:3000 tunnel" \
+  "$pub_log" "-L 127.0.0.1:8080:127.0.0.1:3000"
+assert_contains "msb ports: ssh uses the acq-managed key (-i)" \
+  "$pub_log" "-i $STUBDIR/state/ssh/msb_id_ed25519"
+assert_contains "msb ports: ssh pins a dedicated known_hosts under acq state" \
+  "$pub_log" "UserKnownHostsFile=$STUBDIR/state/ssh/known_hosts"
+# The recorded PID/state file exists after publishing (teardown target).
+[ -f "$STUBDIR/state/ports/pbox.pids" ] \
+  && pass "msb ports: records serve/ssh PIDs in acq state" \
+  || fail "msb ports: records serve/ssh PIDs in acq state" "pbox.pids missing"
+cleanup_stubs
+
+# 10b3. `acq ports --publish` authorizes the key ONCE — a second publish reuses
+#       the existing key and the .authorized marker (no re-keygen, no re-authorize).
+make_stubs; load_acq
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
+  : > "$CALLS"   # clear, then a SECOND publish
+  acq_backend_ports pbox --publish 9090:4000 >/dev/null 2>&1
+)
+pub2_log=$(cat "$CALLS")
+assert_not_contains "msb ports: 2nd publish does not re-run ssh-keygen" "$pub2_log" "ssh-keygen"
+assert_not_contains "msb ports: 2nd publish does not re-authorize the key" "$pub2_log" "msb ssh authorize"
+assert_contains "msb ports: 2nd publish still opens its own -L tunnel" "$pub2_log" "-L 127.0.0.1:9090:127.0.0.1:4000"
+cleanup_stubs
+
+# 10b4. SI-10: invalid --publish values are REJECTED before any ssh/serve call.
+#       0, 70000 (>65535), and non-integer "abc:def" all fail non-zero with no
+#       ssh/serve/keygen in the call log.
+for bad in "0:3000" "8080:70000" "abc:def" "8080"; do
+  make_stubs; load_acq
+  : > "$CALLS"
+  rc=0
+  bad_out=$(
+    . "${REPO_ROOT}/acq.backends/msb.sh"
+    acq_backend_ports badbox --publish "$bad" 2>&1
+  ) || rc=$?
+  bad_log=$(cat "$CALLS")
+  [ "$rc" -ne 0 ] && pass "msb ports: rejects invalid --publish '$bad' (non-zero exit)" \
+    || fail "msb ports: rejects invalid --publish '$bad' (non-zero exit)" "rc=$rc"
+  assert_not_contains "msb ports: '$bad' reaches no ssh -L" "$bad_log" "-L 127.0.0.1"
+  assert_not_contains "msb ports: '$bad' reaches no msb ssh serve" "$bad_log" "msb ssh serve"
+  cleanup_stubs
+done
+
+# 10b5. Capability flag: msb now advertises post-hoc port forwarding (ADR-0015).
+flag_val=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh" 2>/dev/null
+  printf '%s' "$ACQ_BACKEND_SUPPORTS_PORT_FORWARD"
+)
+assert_eq "msb: SUPPORTS_PORT_FORWARD is now 1 (post-hoc publish wired)" "1" "$flag_val"
+
+# 10b6. TEARDOWN: acq_backend_terminate (rm) and acq_backend_stop both clean up
+#       the recorded serve/ssh PIDs + state file for the sandbox (defensive:
+#       killing dead PIDs is a no-op, and a missing state file is fine).
+make_stubs; load_acq
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports rmbox --publish 8080:3000 >/dev/null 2>&1
+  [ -f "$STUBDIR/state/ports/rmbox.pids" ] || exit 3
+  acq_backend_terminate rmbox >/dev/null 2>&1
+)
+[ ! -f "$STUBDIR/state/ports/rmbox.pids" ] \
+  && pass "msb ports: acq rm tears down recorded port state" \
+  || fail "msb ports: acq rm tears down recorded port state" "rmbox.pids still present"
+# stop path + defensive no-op on a sandbox that never published a port.
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports stopbox --publish 7000:7000 >/dev/null 2>&1
+  acq_backend_stop stopbox >/dev/null 2>&1
+  acq_backend_terminate neverbox >/dev/null 2>&1   # no state file -> must not error
+) && pass "msb ports: stop tears down; teardown of an un-published sandbox is a no-op" \
+  || fail "msb ports: stop tears down; teardown of an un-published sandbox is a no-op" "teardown errored"
+[ ! -f "$STUBDIR/state/ports/stopbox.pids" ] \
+  && pass "msb ports: acq stop removes recorded port state" \
+  || fail "msb ports: acq stop removes recorded port state" "stopbox.pids still present"
+cleanup_stubs
+
+# 10b7. Path-traversal guard: an unsafe sandbox name (slash / leading '..') must
+#       NOT let the per-sandbox PID state path escape ACQ_MSB_PORTS_DIR on either
+#       the record (>>) or teardown (rm -f) path. record is a fail-closed no-op;
+#       teardown of an unsafe name touches no file outside the ports dir.
+make_stubs; load_acq
+: > "$CALLS"
+mkdir -p "$STUBDIR/state/ports"
+canary="$STUBDIR/state/traversal-canary.pids"
+printf 'DO-NOT-DELETE\n' >"$canary"
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # record with a traversal name must write nothing outside the ports dir.
+  _acq_msb_ports_record "../traversal-canary" 111 222 20001 8080:3000 >/dev/null 2>&1
+  # teardown with a traversal name must not rm -f the canary above it.
+  _acq_msb_ports_teardown "../traversal-canary" >/dev/null 2>&1
+)
+[ -f "$canary" ] \
+  && pass "msb ports: unsafe sandbox name cannot escape state dir (rm -f/append guarded)" \
+  || fail "msb ports: unsafe sandbox name cannot escape state dir (rm -f/append guarded)" "canary deleted"
+[ ! -e "$STUBDIR/state/traversal-canary.pids.pids" ] \
+  && pass "msb ports: unsafe sandbox name records no state file" \
+  || fail "msb ports: unsafe sandbox name records no state file" "escaped record written"
+rm -f "$canary" 2>/dev/null || true
 cleanup_stubs
 
 # 10c. msb prerequisite check: warns when the base image lacks a kit tool, and
