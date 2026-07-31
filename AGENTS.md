@@ -350,7 +350,7 @@ The agent MUST:
 | Service | Method | Notes |
 |---------|--------|-------|
 | USAi | Custom secret (`sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY`) | Custom endpoint not supported by SBX proxy |
-| GitHub | SBX proxy (`sbx secret set -g github`) | Recommended; agent never sees token |
+| GitHub | SBX proxy, **per-sandbox scoped** (`acq` fine-grained flow, or `sbx secret set <sandbox> github`) | Recommended default: least-privilege, per-sandbox. Global `sbx secret set -g github` kept for back-compat. Agent never sees the token. See [ADR-0013](docs/adr/0013-per-sandbox-github-token-downscoping.md) |
 | GitLab | Custom secret (`sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN`) | Not a built-in SBX service |
 
 See `docs/QUICKSTART_SBX.md` for detailed credential injection patterns.
