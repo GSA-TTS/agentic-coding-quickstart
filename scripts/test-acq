@@ -862,6 +862,13 @@ make_stubs; load_acq
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
   rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
+  # Constrain PATH to the stub dir ONLY (#217): _auto_detect_backend runs
+  # `command -v sbx`, which would otherwise find a REAL sbx on the developer's
+  # base PATH and make this fall back-to-msb assertion flake to "sbx". Provide a
+  # coreutils dir so the sourced scripts still find standard tools.
+  _coreutils_dir=$(dirname "$(command -v env)")
+  PATH="$STUBDIR:$_coreutils_dir"
+  export PATH
   # shellcheck disable=SC1090
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   # shellcheck source=acq.backends/msb.sh
