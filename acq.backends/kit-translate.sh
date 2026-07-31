@@ -819,6 +819,11 @@ kit_translate_to_sbx() {
       printf 'publishedPorts:\n'
       printf '%s\n' "$portrecs" | while IFS="$(printf '\t')" read -r pguest pproto pname phost; do
         [ -n "$pguest" ] || continue
+        # phost (the neutral host column) is intentionally NOT re-emitted: sbx-v2
+        # keys on `container` (the guest port) and assigns the host port itself,
+        # matching the pre-neutral observable shape. Reference it so the field is
+        # consumed by `read` without tripping shellcheck SC2034.
+        : "${phost:-}"
         printf '  - container: %s\n' "$pguest"
         [ -n "$pproto" ] && printf '    protocol: %s\n' "$pproto"
         [ -n "$pname" ]  && printf '    name: %s\n' "$(_kit_yaml_quote "$pname")"

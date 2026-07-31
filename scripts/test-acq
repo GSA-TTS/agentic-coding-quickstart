@@ -3019,10 +3019,11 @@ cleanup_stubs
 #        exit 0. Here inspect returns JSON with an unrelated shape.
 make_stubs; load_acq
 printf '{"name":"absentbox","state":"running"}\n' >"$STUBDIR/.msb_inspect_json"
-absent_out=$(
+absent_rc=0
+(
   . "${REPO_ROOT}/acq.backends/msb.sh"
   acq_backend_ports absentbox
-) ; absent_rc=$?
+) >/dev/null 2>&1 || absent_rc=$?
 assert_eq "msb ports: LIST exits 0 when no port field found in msb JSON" "0" "$absent_rc"
 cleanup_stubs
 
