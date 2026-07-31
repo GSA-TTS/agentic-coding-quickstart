@@ -1,6 +1,6 @@
 ---
 title: "Post-Hoc Port Publish on msb via SSH serve + Local Forwarding"
-status: proposed
+status: accepted
 date: 2026-07-29
 decision_makers: ["Bret Mogilefsky"]
 category: architecture
@@ -126,6 +126,15 @@ failure mode entirely.
 - **Tradeoff:** a background `msb ssh serve` + `ssh` process pair per published
   port; acq must track and tear these down on `acq rm`/stop. An authorized key
   is seated in msb's global authorized_keys (host-scoped, documented).
+- **Liveness reporting (best-effort):** after backgrounding each of the serve
+  listener and the `ssh -L` forward, acq waits a short settle window and probes
+  the process with `kill -0` before reporting the publish as succeeded (and
+  before recording its teardown PID). This catches the common fast-failure modes
+  (serve cannot bind, `ExitOnForwardFailure` fires) so a dead tunnel is not
+  reported as published. It is **not** a durable health guarantee: a tunnel that
+  dies *after* the settle window is still reported as published, and teardown
+  later kills an already-dead PID (harmless). A future enhancement could add a
+  host-port probe or a supervisor; out of scope here.
 - **Security (AC-6/AC-17/SC-7):** exposure is loopback by default and gated on an
   acq-managed key; no remote bind without explicit opt-in. Tunnels obey the
   sandbox's egress/ingress policy.

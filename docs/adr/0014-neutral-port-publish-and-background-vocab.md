@@ -120,8 +120,21 @@ same fail-closed gating ADR-0011 used: quickstart pins a released
 - **sbx.** `kit_spec_published_ports` reads the neutral `publishedPorts` first,
   falling back to `backend_extras.sbx.publishedPorts` for one release
   (deprecation warning). The synthesized sbx-v2 kit is unchanged in shape, so
-  the observable sbx result is identical. `background` maps to the sbx-v2
-  startup-command semantics already in use.
+  the observable sbx result is identical. **`background` has no sbx-v2 detach
+  primitive to map onto**: sbx-v2's `commands.startup[]` schema exposes only
+  `command:` (an argv sequence) and an optional `user:` — there is no
+  `background`/`detach`/`async` field. The translator therefore does **not**
+  synthesize a detach wrapper on the sbx path; it preserves the startup
+  command's argv verbatim, and a `background: true` startup command relies on the
+  command **self-backgrounding** (a trailing `&` in its `sh -c` body, or an inner
+  `( … ) &`), which is exactly the shape sbx kits used before the neutral
+  migration. Auto-appending `&` was rejected: the one kit that sets
+  `background: true` (openchamber) already self-backgrounds, so a blind append
+  would emit `… & &` (a shell syntax error) or double-fork an orphaned
+  duplicate. Kit authors targeting sbx MUST self-background a `background: true`
+  startup command; `kit validate` should warn when one does not (tracked
+  follow-up). This asymmetry with msb — which DOES wrap the argv (below) — is
+  intentional and bounded by sbx-v2's schema.
 - **msb.** The msb adapter gains a consumer that maps each neutral
   `publishedPorts` entry to `msb create/run -p HOST:GUEST` (msb's create/run-time
   publish). `msb -p` also accepts `BIND_ADDR:HOST:GUEST` and `/udp`, but the
@@ -130,8 +143,9 @@ same fail-closed gating ADR-0011 used: quickstart pins a released
   publish path; post-hoc publishing via `msb ssh serve` is a distinct capability
   handled in the incremental post-hoc-publish ADR (see Links), not here. A
   `background: true` startup command is run detached (`msb exec -d` /
-  `nohup … &` equivalent) so it does not block provision, the same reason the
-  sbx path backgrounds it. The msb adapter already backgrounds its own agent
+  `nohup … &` equivalent — msb wraps the argv itself, so it does NOT depend on
+  the command self-backgrounding the way the sbx path does) so it does not block
+  provision. The msb adapter already backgrounds its own agent
   launch and marker-gates install commands (quickstart
   [#230](https://github.com/GSA-TTS/agentic-coding-quickstart/pull/230),
   **merged to main**), so the detached-command plumbing this ADR needs is now in
@@ -183,9 +197,10 @@ that path is wired in the incremental post-hoc-publish ADR (see Links), not here
 - `bash -n acq acq.backends/*.sh` clean.
 - `scripts/test-acq` gains cases: neutral `publishedPorts` → sbx-v2 + msb `-p`;
   `backend_extras.sbx.publishedPorts` fallback still translates (with the
-  deprecation warning); `background` command is emitted detached on both
-  backends; invalid port/protocol/background values are dropped and reported by
-  `acq kit validate`.
+  deprecation warning); on msb a `background: true` command is emitted detached
+  (`nohup … &`); on sbx the startup command's self-backgrounding argv (trailing
+  `&`) survives translation verbatim and is NOT double-wrapped; invalid
+  port/protocol/background values are dropped and reported by `acq kit validate`.
 - Live end-to-end (openchamber on sbx and msb) is deferred to a sandbox-capable
   host via `scripts/verify-backends`, per ADR-0011 (no nested sandboxes; msb
   needs `/dev/kvm`).

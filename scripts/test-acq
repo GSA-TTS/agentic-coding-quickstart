@@ -158,10 +158,17 @@ case "$_msb_sub" in
       *) : ;;
     esac ;;
   ssh)
-    # `msb ssh serve …` / `msb ssh authorize …` are logged (above) and no-op
-    # here; a plain `msb ssh` is likewise a no-op. The ADR-0015 port path only
-    # asserts on the logged argv, so the stub does not need to fork a listener.
-    : ;;
+    # `msb ssh authorize …` is logged (above) and is a no-op. `msb ssh serve …`
+    # is BACKGROUNDED by acq, which then probes it with kill -0 after a settle
+    # window to confirm the listener came up; stay alive past that window so the
+    # publish path sees a healthy serve (STUB_MSB_SERVE_DIE=1 models a serve that
+    # dies immediately, e.g. bind failure). A plain `msb ssh` is a no-op.
+    case "${2:-}" in
+      serve)
+        [ "${STUB_MSB_SERVE_DIE:-0}" = "1" ] && exit 1
+        sleep "${STUB_MSB_SERVE_ALIVE:-3}" ;;
+      *) : ;;
+    esac ;;
   stop) : ;;
   remove|rm) : ;;
   copy|cp) : ;;
@@ -177,12 +184,19 @@ MSBSTUB
 
   # Stub `ssh` and `ssh-keygen` for the ADR-0015 post-hoc port path. Both log
   # every call to $CALLS. `ssh -N -L …` would normally block foregrounded; the
-  # stub returns immediately (acq backgrounds it), and `ssh-keygen -f <path>`
+  # stub logs, then stays alive briefly so acq's post-background liveness probe
+  # (kill -0 after ACQ_MSB_*_SETTLE) sees a HEALTHY forward — modelling a
+  # successful publish. A test that wants to model an immediately-dying forward
+  # sets STUB_SSH_DIE=1 (exit at once, before the settle window). `ssh-keygen -f`
   # writes throwaway key + .pub files so the key-ensure/authorize path proceeds.
   cat >"$STUBDIR/ssh" <<'SSHSTUB'
 #!/usr/bin/env bash
 _line="ssh"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
+[ "${STUB_SSH_DIE:-0}" = "1" ] && exit 1
+# Stay alive past acq's liveness settle window (default 1s) so kill -0 sees the
+# forward as established, then exit. acq backgrounds this, so it does not block.
+sleep "${STUB_SSH_ALIVE:-3}"
 exit 0
 SSHSTUB
   chmod +x "$STUBDIR/ssh"
@@ -205,6 +219,10 @@ KEYGENSTUB
 
   PATH="$STUBDIR:$PATH"
   export PATH CALLS STUBDIR
+  # Keep acq's post-background liveness probe fast in tests (real default is 1s):
+  # the stubbed serve/ssh children stay alive ~3s (STUB_*_ALIVE), comfortably
+  # past this settle window, so a healthy publish is observed without slow tests.
+  export ACQ_MSB_SERVE_SETTLE="0.3" ACQ_MSB_FORWARD_SETTLE="0.3"
   # Export ACQ_SCRIPT_DIR so acq can locate its backends.
   export ACQ_SCRIPT_DIR="$REPO_ROOT"
   # Force the acq secret store to a throwaway file backend (never touch the real
@@ -1487,9 +1505,9 @@ assert_contains "msb: kit cmd gets GIT_TERMINAL_PROMPT=0 guard" "$agent_log" "-e
 # ownership fix acq chowns the TOP-MOST created subdir under the home
 # recursively (so intermediate dirs it created as root become agent-owned too),
 # not merely the leaf file. For ~/usai-config/merge-global-config.mjs the top
-# is `usai-config`, so `chown -R agent /home/agent/usai-config` covers the dir
+# is `usai-config`, so `chown -R -P agent /home/agent/usai-config` covers the dir
 # AND the file. By NAME (agent), never a numeric uid.
-assert_contains "msb: chowns staged /home/agent subtree to agent" "$agent_log" "chown -R agent /home/agent/usai-config"
+assert_contains "msb: chowns staged /home/agent subtree to agent" "$agent_log" "chown -R -P agent /home/agent/usai-config"
 # Agent-user setup must create the user WITHOUT pinning uid 1000 (which collides
 # with a plain-OCI base's pre-existing uid-1000 user, e.g. node) and must chown the
 # home to agent so it is writable — otherwise every agent-user kit fails with
@@ -1947,19 +1965,19 @@ home_own_log=$(cat "$CALLS")
 # Nested: the intermediate subtree (top-most component .local) is chowned, not
 # merely the leaf file — this is the actual fix.
 assert_contains "234: chowns top-most created subtree under home (recursive)" \
-  "$home_own_log" "chown -R agent /home/agent/.local"
+  "$home_own_log" "chown -R -P agent /home/agent/.local"
 assert_not_contains "234: does NOT chown only the leaf file" \
-  "$home_own_log" "chown -R agent /home/agent/.local/bin/opencode"
+  "$home_own_log" "chown -R -P agent /home/agent/.local/bin/opencode"
 # Never recurse all of /home/agent (would stomp other kits' root-owned drops).
 assert_not_contains "234: does NOT recursively chown all of /home/agent" \
-  "$home_own_log" "chown -R agent /home/agent "
+  "$home_own_log" "chown -R -P agent /home/agent "
 # Ownership is by NAME (agent), never a numeric uid (provisioned uid != 1000).
 assert_not_contains "234: chown uses agent by name, not numeric uid" \
   "$home_own_log" "chown -R 1000"
 # Direct-in-home drop: `top` is the filename, so the chown targets that file
 # (recursive chown of a file == chowning the file; correct, no regression).
 assert_contains "234: file dropped directly in ~ chowns that file" \
-  "$home_own_log" "chown -R agent /home/agent/direct-file"
+  "$home_own_log" "chown -R -P agent /home/agent/direct-file"
 cleanup_stubs
 
 # 8o4. SECURITY: a hostile command `user` is dropped by kit_spec_commands (it is
@@ -2965,10 +2983,12 @@ assert_contains "bg(msb): detached command is the supervisor loop" "$bg_log" "su
 assert_contains "bg(msb): foreground startup command still awaited (no nohup wrap)" "$bg_log" "-- foreground-cmd"
 cleanup_stubs
 
-# 10a4h. sbx path: a background:true startup command is unchanged in observable
-#        sbx-v2 shape (sbx's startup semantics already detach). The command is
-#        still emitted as a startup argv sequence — background is an msb-side
-#        detach hint, not an sbx spec field.
+# 10a4h. sbx path: sbx-v2 has NO startup detach field, so a `background: true`
+#        startup command relies on the command SELF-backgrounding. The translator
+#        must (a) still emit it as a startup argv sequence, and (b) preserve a
+#        self-backgrounding `sh -c '… &'` body VERBATIM — never double-wrap it in
+#        a nohup/extra `sh -c`, and never append a second `&` (which would be a
+#        `& &` syntax error). See ADR-0014 "Translation → sbx".
 make_stubs; load_acq
 sbgkit="$STUBDIR/sbgkit"; mkdir -p "$sbgkit"
 cat >"$sbgkit/spec.yaml" <<'SPEC'
@@ -2982,14 +3002,25 @@ commands:
     user: "1000"
     background: true
     command:
-      - node
-      - /home/agent/supervisor.mjs
+      - sh
+      - -c
+      - |
+        sh /home/agent/supervisor.sh &
 SPEC
 sbgout="$STUBDIR/sbgout"
 ( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_translate_to_sbx "$sbgkit" "$sbgout" >/dev/null ) 2>/dev/null
 sbgspec=$(cat "$sbgout/spec.yaml" 2>/dev/null || true)
-assert_contains "bg(sbx): background startup emits a startup argv seq" "$sbgspec" "- node"
 assert_contains "bg(sbx): startup phase present" "$sbgspec" "startup:"
+assert_contains "bg(sbx): self-backgrounding argv emitted as startup command" "$sbgspec" "- sh"
+# The self-backgrounding trailing & is preserved verbatim (single &, in the body).
+assert_contains "bg(sbx): trailing & preserved in the sh -c body" "$sbgspec" "sh /home/agent/supervisor.sh &"
+# NOT double-wrapped: no nohup injected, and no double-background (same-line
+# `& &` OR a second `&` on its own line). Count backgrounding `&` tokens in the
+# emitted spec: the source body has exactly one, so the translation must too.
+assert_not_contains "bg(sbx): translator does NOT wrap in nohup" "$sbgspec" "nohup"
+assert_not_contains "bg(sbx): translator does NOT emit a double-background & &" "$sbgspec" "& &"
+_amp_count=$(printf '%s\n' "$sbgspec" | grep -cE '(^|[^&])&([^&]|$)')
+assert_eq "bg(sbx): exactly one backgrounding & survives translation" "1" "$_amp_count"
 cleanup_stubs
 
 
@@ -3053,10 +3084,56 @@ assert_contains "msb ports: ssh uses the acq-managed key (-i)" \
   "$pub_log" "-i $STUBDIR/state/ssh/msb_id_ed25519"
 assert_contains "msb ports: ssh pins a dedicated known_hosts under acq state" \
   "$pub_log" "UserKnownHostsFile=$STUBDIR/state/ssh/known_hosts"
+# NIT (review): ssh uses ONLY the acq -i key and ignores the user's ssh_config,
+# so a loaded agent key can't burn MaxAuthTries and ~/.ssh/config can't alter
+# the hermetic loopback tunnel.
+assert_contains "msb ports: ssh pins IdentitiesOnly=yes (only the acq -i key)" \
+  "$pub_log" "IdentitiesOnly=yes"
+assert_contains "msb ports: ssh ignores user ssh_config (-F none)" \
+  "$pub_log" "-F none"
 # The recorded PID/state file exists after publishing (teardown target).
 [ -f "$STUBDIR/state/ports/pbox.pids" ] \
   && pass "msb ports: records serve/ssh PIDs in acq state" \
   || fail "msb ports: records serve/ssh PIDs in acq state" "pbox.pids missing"
+cleanup_stubs
+
+# 10b2a. (review S2) A backgrounded `msb ssh serve` that dies immediately (e.g.
+#        cannot bind) must NOT be reported as a successful publish: acq's
+#        liveness probe should fail the publish non-zero, print no "published
+#        host" line, and record no PID state file (nothing was actually forwarded).
+make_stubs; load_acq
+: > "$CALLS"
+serve_die_out=$(
+  export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_MSB_SERVE_DIE=1
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports pbox --publish 8080:3000 2>&1
+  echo "RC=$?"
+  wait
+)
+assert_contains "msb ports(S2): dead serve fails the publish non-zero" "$serve_die_out" "RC=1"
+assert_not_contains "msb ports(S2): dead serve prints no 'published host' success" "$serve_die_out" "published host"
+[ ! -f "$STUBDIR/state/ports/pbox.pids" ] \
+  && pass "msb ports(S2): dead serve records no PID state file" \
+  || fail "msb ports(S2): dead serve records no PID state file" "pbox.pids should not exist"
+cleanup_stubs
+
+# 10b2b. (review S2) A backgrounded `ssh -L` forward that dies immediately (e.g.
+#        ExitOnForwardFailure fires) must NOT be reported as success: the publish
+#        fails non-zero, tears the serve listener back down, and records no state.
+make_stubs; load_acq
+: > "$CALLS"
+fwd_die_out=$(
+  export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_SSH_DIE=1
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports pbox --publish 8080:3000 2>&1
+  echo "RC=$?"
+  wait
+)
+assert_contains "msb ports(S2): dead forward fails the publish non-zero" "$fwd_die_out" "RC=1"
+assert_not_contains "msb ports(S2): dead forward prints no 'published host' success" "$fwd_die_out" "published host"
+[ ! -f "$STUBDIR/state/ports/pbox.pids" ] \
+  && pass "msb ports(S2): dead forward records no PID state file" \
+  || fail "msb ports(S2): dead forward records no PID state file" "pbox.pids should not exist"
 cleanup_stubs
 
 # 10b3. `acq ports --publish` authorizes the key ONCE — a second publish reuses

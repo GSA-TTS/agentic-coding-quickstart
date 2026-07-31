@@ -17,7 +17,13 @@
 # `msb --tree` and per-command `--help`. Confirmed present in 0.6.6:
 #   - `msb create --name … --net-rule <TOKENS> --trust-host-cas --tls-intercept
 #      --secret <ENV@HOST> --copy-file <SRC:DST> --env <K=V> IMAGE`
-#   - `msb exec <NAME> [-u USER] -- CMD…`
+#   - `msb exec [FLAGS] <NAME> [-u USER] -- CMD…` — msb 0.6.7 accepts the option
+#      flags (`-u`, `-t`, `-w`, `-e`) either BEFORE or AFTER <NAME> (getopt-style,
+#      order-independent, verified via `msb --tree` / the live openchamber-on-msb
+#      verify). This adapter uses flags-after-NAME for the kit-command/marker
+#      paths and flags-before-NAME for the interactive attach + `acq exec` paths;
+#      both are valid. (Tracked: normalize to one order once re-checked against a
+#      newer msb — quickstart#234.)
 #   - `msb list|ls [-q] [--running]`, `msb stop`, `msb remove|rm [-f]`,
 #     `msb copy|cp SRC DST`, `msb ssh [SANDBOX] [-- CMD…]`, `msb ssh authorize`,
 #     `msb run … -p HOST:GUEST` (published ports), `msb doctor`.
@@ -665,7 +671,12 @@ _acq_msb_copy_file_verified() {
       case "$top" in
         ''|.|..) : ;;
         *)
-          msb exec "$name" -u 0 -- chown -R agent "/home/agent/$top" >/dev/null 2>&1 || true
+          # -P (no-dereference, the chown default but stated explicitly): never
+          # follow a symlink a kit may have staged under the tree, so `chown -R`
+          # cannot be redirected to chown files OUTSIDE /home/agent. Defense in
+          # depth — the tree is inside the ephemeral guest and the top component
+          # is already ../. guarded above.
+          msb exec "$name" -u 0 -- chown -R -P agent "/home/agent/$top" >/dev/null 2>&1 || true
           ;;
       esac
       ;;
@@ -1742,19 +1753,24 @@ acq_backend_ports() {
   _acq_msb_ssh_key_ensure || return 1
   _acq_msb_ssh_authorize || return 1
 
-  # 2) Start `msb ssh serve` on an ephemeral loopback port.
+  # 2) Start `msb ssh serve` on an ephemeral loopback port. The helper confirms
+  #    the listener is actually alive before returning (dead serve => non-zero),
+  #    and publishes the live PID via _ACQ_MSB_LAST_BG_PID ($! is clobbered by the
+  #    helper's own liveness probe).
   local sport serve_pid
   sport=$(_acq_msb_pick_ephemeral_port)
   _acq_msb_serve_start "$name" "$sport" || return 1
-  serve_pid=$!
+  serve_pid="$_ACQ_MSB_LAST_BG_PID"
 
-  # 3) Open the backgrounded `ssh -L` tunnel: host H -> guest (sandbox) G.
+  # 3) Open the backgrounded `ssh -L` tunnel: host H -> guest (sandbox) G. The
+  #    helper confirms the forward established (dead ssh => non-zero); tear the
+  #    serve listener down if it did not.
   local ssh_pid
   _acq_msb_forward_start "$sport" "$hport" "$gport" || {
     kill "$serve_pid" 2>/dev/null || true
     return 1
   }
-  ssh_pid=$!
+  ssh_pid="$_ACQ_MSB_LAST_BG_PID"
 
   # 4) Record the serve+ssh PIDs (and the mapping) so teardown can clean up.
   _acq_msb_ports_record "$name" "$serve_pid" "$ssh_pid" "$sport" "$mapping"
@@ -1882,11 +1898,32 @@ _acq_msb_pick_ephemeral_port() {
 }
 
 # _acq_msb_serve_start NAME SPORT — background `msb ssh serve` on 127.0.0.1:SPORT.
-# Leaves the serve PID in $! for the caller to capture.
+# Publishes the live serve PID in _ACQ_MSB_LAST_BG_PID for the caller to capture
+# ($! is not reliably the helper's background job across a function boundary, so
+# the caller cannot read its own $!). Returns non-zero if the backgrounded serve
+# dies within the settle window (e.g. cannot bind the loopback port), so a dead
+# listener is never reported as a successful publish (was: unconditional return
+# 0, which made the caller's `|| return 1` guard dead for async failures). NOTE:
+# this is a best-effort liveness probe, not a durable health guarantee — a serve
+# that dies just AFTER the settle window will still be recorded (teardown then
+# kills an already-dead pid, which is harmless).
 _acq_msb_serve_start() {
   local name="$1" sport="$2"
   acq_debug "msb ssh serve $name --host 127.0.0.1 --port $sport (backgrounded)"
   msb ssh serve "$name" --host 127.0.0.1 --port "$sport" >/dev/null 2>&1 &
+  local pid=$!
+  # Give the listener a beat to fail fast (bind error, bad sandbox), then confirm
+  # it is still alive. kill -0 probes liveness without signalling. `command sleep`
+  # bypasses any shell-function `sleep` override so the settle window is real.
+  command sleep "${ACQ_MSB_SERVE_SETTLE:-1}" 2>/dev/null || sleep "${ACQ_MSB_SERVE_SETTLE:-1}"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    echo "acq(msb): ports: 'msb ssh serve' on 127.0.0.1:${sport} exited immediately (could not start listener)." >&2
+    return 1
+  fi
+  # Publish the pid explicitly: the caller cannot read its own $! for a job this
+  # function backgrounded, so hand it over by name.
+  _ACQ_MSB_LAST_BG_PID="$pid"
   return 0
 }
 
@@ -1894,7 +1931,11 @@ _acq_msb_serve_start() {
 # Binds host 127.0.0.1:HPORT to the SANDBOX's 127.0.0.1:GPORT (the -L destination
 # resolves INSIDE the guest, per ADR-0015). Uses the acq key + a dedicated
 # known_hosts under acq state (accept-new against the ephemeral loopback listener).
-# Leaves the ssh PID in $!.
+# Publishes the live ssh PID in _ACQ_MSB_LAST_BG_PID. Returns non-zero if the
+# forward dies within the settle window (ExitOnForwardFailure makes ssh exit fast
+# when the local bind/forward fails), so a failed tunnel is never reported as a
+# successful publish. Best-effort liveness probe (see _acq_msb_serve_start): a
+# forward that dies just after the settle window will still be recorded.
 _acq_msb_forward_start() {
   local sport="$1" hport="$2" gport="$3"
   if ! command -v ssh >/dev/null 2>&1; then
@@ -1902,13 +1943,26 @@ _acq_msb_forward_start() {
     return 1
   fi
   acq_debug "ssh -p $sport -N -L 127.0.0.1:${hport}:127.0.0.1:${gport} ${ACQ_MSB_SSH_USER}@127.0.0.1"
+  # -o IdentitiesOnly=yes: use ONLY the acq -i key, so a loaded agent/other keys
+  #   can't burn MaxAuthTries before it. -F none: ignore the user's ~/.ssh/config
+  #   so the loopback tunnel is hermetic and cannot be altered out from under acq.
   ssh -p "$sport" -N \
+    -F none \
     -i "$ACQ_MSB_SSH_KEY" \
+    -o IdentitiesOnly=yes \
     -o StrictHostKeyChecking=accept-new \
     -o "UserKnownHostsFile=${ACQ_MSB_SSH_KNOWN_HOSTS}" \
     -o ExitOnForwardFailure=yes \
     -L "127.0.0.1:${hport}:127.0.0.1:${gport}" \
     "${ACQ_MSB_SSH_USER}@127.0.0.1" >/dev/null 2>&1 &
+  local pid=$!
+  command sleep "${ACQ_MSB_FORWARD_SETTLE:-1}" 2>/dev/null || sleep "${ACQ_MSB_FORWARD_SETTLE:-1}"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    echo "acq(msb): ports: ssh -L 127.0.0.1:${hport} -> 127.0.0.1:${gport} failed to establish (forward rejected or bind in use)." >&2
+    return 1
+  fi
+  _ACQ_MSB_LAST_BG_PID="$pid"
   return 0
 }
 
