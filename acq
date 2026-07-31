@@ -78,6 +78,8 @@ Subcommands:
   run AGENT PATH [...] [-- AGENT_ARGS...]  Create+attach a sandbox, or re-attach
                                            an existing one, and launch AGENT
                                            (e.g. opencode) or a shell.
+                                           (--no-update-check skips the stale-
+                                           bundle check for this run.)
   create AGENT PATH [...]                  Create a sandbox (detached).
   ls                                       List sandboxes.
   stop NAME                                Stop a sandbox (without removing).
@@ -98,6 +100,10 @@ Subcommands:
   kit list                                 Show the pinned kits (+ extras).
   kit validate PATH                        Validate a neutral hybrid/v1 kit.
   kit apply NAME KITREF                    Apply a kit to an existing sandbox.
+  kit check SANDBOX                        Report if a sandbox is on the pinned
+                                           built-in kit bundle.
+  kit update SANDBOX [--yes]               Refresh the built-in kit bundle in a
+                                           sandbox, in place (state preserved).
   help                                     Show this help.
 
 Any other subcommand is passed through to the active backend's CLI.
@@ -293,6 +299,89 @@ case "$subcommand" in
         acq_backend_apply_kit "$local_name" "$local_kitref"
         exit $?
         ;;
+      check)
+        # Report whether a sandbox is on the locally pinned built-in bundle.
+        # Read-only: never mutates the sandbox or its provenance record.
+        shift
+        local_name="${1:-}"
+        if [ -z "$local_name" ]; then
+          echo "acq: kit check: usage: acq kit check SANDBOX" >&2
+          exit 1
+        fi
+        acq_resolve_backend "${explicit_backend}"
+        if ! acq_backend_exists "$local_name"; then
+          echo "acq: kit check: no such sandbox '$local_name'." >&2
+          exit 1
+        fi
+        local_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$local_name")
+        local_applied=$(acq_provenance_field "${ACQ_RESOLVED_BACKEND}" "$local_name" applied_ref)
+        printf 'sandbox:       %s (backend: %s)\n' "$local_name" "${ACQ_RESOLVED_BACKEND}"
+        printf 'local pinned:  %s\n' "$PATTERNS_KIT_REF"
+        printf 'applied ref:   %s\n' "${local_applied:-<none recorded>}"
+        case "$local_status" in
+          current)
+            printf 'status:        current (on the pinned bundle)\n'
+            exit 0
+            ;;
+          stale)
+            printf 'status:        stale (does not match the pinned bundle)\n'
+            printf '\nRefresh in place with: acq kit update %s\n' "$local_name"
+            exit 0
+            ;;
+          *)
+            printf 'status:        unknown (no provenance record; may predate tracking)\n'
+            printf '\nRefresh in place with: acq kit update %s\n' "$local_name"
+            exit 0
+            ;;
+        esac
+        ;;
+      update)
+        # Reapply the built-in bundle in place to the locally pinned ref.
+        # `--yes` skips the confirmation (only honored on this explicit command;
+        # the automatic `acq run` check never auto-updates).
+        shift
+        local_name=""
+        local_assume_yes=0
+        for _karg in "$@"; do
+          case "$_karg" in
+            --yes|-y) local_assume_yes=1 ;;
+            -*) echo "acq: kit update: unknown option '$_karg'" >&2; exit 1 ;;
+            *) [ -z "$local_name" ] && local_name="$_karg" ;;
+          esac
+        done
+        if [ -z "$local_name" ]; then
+          echo "acq: kit update: usage: acq kit update SANDBOX [--yes]" >&2
+          exit 1
+        fi
+        acq_resolve_backend "${explicit_backend}"
+        if ! acq_backend_exists "$local_name"; then
+          echo "acq: kit update: no such sandbox '$local_name'." >&2
+          exit 1
+        fi
+        local_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$local_name")
+        if [ "$local_status" = "current" ]; then
+          echo "acq: '$local_name' is already on the pinned bundle (${PATTERNS_KIT_REF}); nothing to do." >&2
+          exit 0
+        fi
+        if [ "$local_assume_yes" -ne 1 ]; then
+          if [ ! -t 0 ]; then
+            echo "acq: kit update: refusing to update non-interactively without --yes." >&2
+            echo "     Re-run: acq kit update $local_name --yes" >&2
+            exit 1
+          fi
+          _kans=""
+          printf 'acq: refresh the kit bundle in %s to %s? [y/N] ' "$local_name" "$PATTERNS_KIT_REF" >&2
+          read -r _kans 2>/dev/null || _kans=""
+          case "$_kans" in
+            y|Y|yes|YES) ;;
+            *) echo "acq: kit update: cancelled." >&2; exit 0 ;;
+          esac
+        fi
+        if acq_bundle_reapply "${ACQ_RESOLVED_BACKEND}" "$local_name"; then
+          exit 0
+        fi
+        exit 1
+        ;;
       --help|-h|"")
         cat >&2 <<'KITUSAGE'
 acq kit — manage neutral hybrid/v1 kits
@@ -301,13 +390,15 @@ Usage:
   acq kit list                 Show the pinned built-in kits (+ extras)
   acq kit validate PATH        Validate a neutral kit (dir or spec.yaml)
   acq kit apply NAME KITREF    Apply a kit to an existing sandbox (mid-life)
+  acq kit check SANDBOX        Report if a sandbox is on the pinned bundle
+  acq kit update SANDBOX [--yes]  Refresh the built-in bundle in place
 
 See docs/BACKEND_GUIDE.md and docs/adr/0011-msb-backend-and-neutral-kits.md.
 KITUSAGE
         exit 1
         ;;
       *)
-        echo "acq: unknown kit subcommand '${sub2}'. Try: acq kit list | validate PATH | apply NAME KITREF" >&2
+        echo "acq: unknown kit subcommand '${sub2}'. Try: acq kit list | validate PATH | apply NAME KITREF | check SANDBOX | update SANDBOX [--yes]" >&2
         exit 1
         ;;
     esac
@@ -351,6 +442,28 @@ case "$subcommand" in
   run|create)
     _sub="$subcommand"
     shift                       # drop the subcommand token; $@ is now its args
+    # Strip acq-owned `--no-update-check` BEFORE kit extraction
+    # and dispatch so it never reaches the backend CLI. It disables the automatic
+    # stale-sandbox check for this one invocation (same effect as
+    # ACQ_UPDATE_CHECK=0). Only honored BEFORE the `--` separator, so an
+    # identically-named flag meant for the inner agent (after `--`) passes
+    # through verbatim. Equivalent for the whole session: export ACQ_UPDATE_CHECK=0.
+    _acq_run_args=()
+    _acq_seen_sep=0
+    for _a in "$@"; do
+      if [ "$_acq_seen_sep" -eq 1 ]; then
+        _acq_run_args+=("$_a")
+        continue
+      fi
+      case "$_a" in
+        --) _acq_seen_sep=1; _acq_run_args+=("$_a") ;;
+        # export: consumed by maybe_offer_bundle_refresh in the sourced
+        # acq.backends/common.sh (cross-file; shellcheck can't see the reader).
+        --no-update-check) export ACQ_UPDATE_CHECK=0 ;;
+        *) _acq_run_args+=("$_a") ;;
+      esac
+    done
+    set -- ${_acq_run_args[@]+"${_acq_run_args[@]}"}
     extract_kit_flags "$@"
     [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _build_kit_list   # re-fold with CLI kits
     # Rebuild positional args as: <subcommand> <remaining args w/o --kit>.
@@ -431,7 +544,16 @@ case "$subcommand" in
       fi
 
       if acq_backend_exists "$local_name"; then
-        acq_backend_ensure_kits_applied "$local_name"
+        # Capture staleness BEFORE the heal — ensure_kits_applied rewrites the
+        # provenance record to "current", so reading status after it would never
+        # see stale/unknown and the offer below would be dead.
+        _pre_heal_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$local_name")
+        acq_backend_ensure_kits_applied "$local_name" || true
+        # Existing sandbox: offer a refresh if it predates the pinned bundle.
+        # Never blocks; skipped under --no-update-check / ACQ_UPDATE_CHECK=0. A
+        # just-provisioned sandbox (else branch) is current by construction, so
+        # the offer is intentionally only on this path.
+        maybe_offer_bundle_refresh "${ACQ_RESOLVED_BACKEND}" "$local_name" "$_pre_heal_status"
       else
         acq_backend_provision "$local_name" "${create_args[@]}"
       fi
@@ -458,7 +580,12 @@ case "$subcommand" in
       # create args needed to provision a fresh validation sandbox, and
       # attaching by name is a re-attach to a running session where the key
       # was already validated on the original acq run. Matches qsbx behavior.
-      acq_backend_ensure_kits_applied "$first"
+      # Capture staleness BEFORE the heal (the heal rewrites provenance to
+      # "current"), then heal, then offer a refresh. Never
+      # blocks; skipped under --no-update-check / ACQ_UPDATE_CHECK=0.
+      _pre_heal_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$first")
+      acq_backend_ensure_kits_applied "$first" || true
+      maybe_offer_bundle_refresh "${ACQ_RESOLVED_BACKEND}" "$first" "$_pre_heal_status"
       warn_if_no_ssh_signing_key
 
       # Rebuild arg list without the sandbox name (first occurrence only).

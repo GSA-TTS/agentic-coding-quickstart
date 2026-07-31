@@ -341,6 +341,13 @@ acq_backend_provision() {
   else
     sbx create --name "$name" "${kf[@]}"
   fi
+  local _rc=$?
+  # Record host-side bundle provenance ONLY after a successful create — a failed
+  # create must not leave a record claiming the sandbox is current.
+  if [ "$_rc" -eq 0 ]; then
+    acq_provenance_write sbx "$name" || true
+  fi
+  return "$_rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -409,9 +416,18 @@ acq_backend_apply_kit() {
 # acq_backend_ensure_kits_applied — heal a pre-kit sandbox in place
 # (carries ensure_kit_applied logic from qsbx)
 # ---------------------------------------------------------------------------
+# Injects any ABSENT built-in kit. When ACQ_FORCE_KIT_REAPPLY=1 (set by
+# acq_bundle_reapply for a stale-bundle refresh) it re-adds ALL
+# built-in kits even when present, so a kit built from an older ref is actually
+# refreshed — the feature-probe alone would skip a present-but-stale kit.
+# Returns 0 only if every built-in kit is present-or-successfully-applied, so a
+# caller can gate a provenance write on real success (never claim currency after
+# a failed apply).
 
 acq_backend_ensure_kits_applied() {
   local name="$1"
+  local force="${ACQ_FORCE_KIT_REAPPLY:-0}"
+  local ok=1
 
   _acq_sbx_ensure_kit_sources_allowed
 
@@ -422,7 +438,7 @@ acq_backend_ensure_kits_applied() {
   zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT")
 
   # 1) USAi provider kit
-  if _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
+  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "acq: '$name' is missing the USAi kit; injecting with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$usai_local" </dev/null >/dev/null 2>&1; then
       sbx exec "$name" -- sh -c \
@@ -432,34 +448,53 @@ acq_backend_ensure_kits_applied() {
     else
       echo "acq: warning: 'sbx kit add' (USAi kit) failed for '$name'." >&2
       echo "      Recover with: sbx kit add '$name' '$usai_local'" >&2
+      ok=0
     fi
   fi
 
   # 2) Playbook kit
-  if _acq_sbx_kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/.git" && echo present'; then
+  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/.git" && echo present'; then
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$playbook_local" </dev/null >/dev/null 2>&1; then
       echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2
     else
       echo "acq: warning: 'sbx kit add' (playbook kit) failed for '$name'." >&2
       echo "      Recover with: sbx kit add '$name' '$playbook_local'" >&2
+      ok=0
     fi
   fi
 
   # 3) Zscaler CA kit
-  if _acq_sbx_kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
+  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
     echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$zscaler_local" </dev/null >/dev/null 2>&1; then
       echo "acq: Zscaler CA kit injected into '$name'." >&2
     else
       echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name'." >&2
       echo "      Recover with: sbx kit add '$name' '$zscaler_local'" >&2
+      ok=0
+    fi
+  fi
+
+  # 3b) git-ssh-sign kit. The original heal loop omitted this built-in kit; a
+  # forced reapply (stale-bundle refresh) MUST cover the whole bundle, so
+  # re-add it when forcing. On a normal heal we leave the historical behavior
+  # (the kit self-heals via the playbook clone) unchanged.
+  if [ "$force" = "1" ]; then
+    local gitsshsign_local
+    gitsshsign_local=$(_acq_sbx_translate_kit "$GITSSHSIGN_KIT")
+    if sbx kit add "$name" "$gitsshsign_local" </dev/null >/dev/null 2>&1; then
+      echo "acq: git-ssh-sign kit refreshed in '$name'." >&2
+    else
+      echo "acq: warning: 'sbx kit add' (git-ssh-sign kit) failed for '$name'." >&2
+      ok=0
     fi
   fi
 
   # 4) Extra kits (tracked by marker file). Extra kits may be neutral or already
   #    sbx-v2; _acq_sbx_translate_kit handles both. The marker uses the original
-  #    ref (stable across runs), not the translated local dir.
+  #    ref (stable across runs), not the translated local dir. Extra-kit failures
+  #    do not affect the built-in bundle's provenance verdict.
   local applied k local_extra
   applied=$(sbx exec "$name" -- sh -c 'cat "$HOME/.acq-extra-kits" 2>/dev/null' </dev/null 2>/dev/null || true)
   local _extras=()
@@ -477,6 +512,15 @@ acq_backend_ensure_kits_applied() {
       echo "      Recover with: sbx kit add '$name' '$local_extra'" >&2
     fi
   done
+
+  # Record host-side provenance ONLY if every built-in kit is present-or-applied.
+  # A failed apply must not write a record claiming the sandbox
+  # is current. Best-effort write: a provenance write failure never fails the run.
+  if [ "$ok" -eq 1 ]; then
+    acq_provenance_write sbx "$name" || true
+    return 0
+  fi
+  return 1
 }
 
 # ---------------------------------------------------------------------------
