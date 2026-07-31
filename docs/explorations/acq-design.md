@@ -1,5 +1,11 @@
 # agentic-coding-quickstart v2 — Design Summary
 
+> **Update (2026-07-31):** This is a point-in-time design exploration. The default
+> `ACQ_MSB_IMAGE` is now `docker.io/docker/sandbox-templates:shell-docker` (the sbx
+> agent-template), **not** `node:22-bookworm`; references to `node:22-bookworm` as
+> the msb base below are now the plain-OCI **override** example. See
+> `docs/BACKEND_GUIDE.md` §"Base image requirements" for the current contract.
+
 A pluggable isolation layer for the GSA agentic-coding-quickstart ecosystem. One `acq` command, three isolation backends, one consistent developer experience.
 
 ---

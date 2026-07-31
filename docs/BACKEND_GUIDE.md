@@ -173,6 +173,12 @@ Tunables:
 | `ACQ_MSB_CPUS` | `2` | Guest vCPU count at create (`-c`); set empty to use msb's 1-vCPU default |
 | `ACQ_MSB_DNS_NAMESERVER` | `1.1.1.1` | Guest DNS resolver (set empty to use msb's default) |
 | `ACQ_MSB_KIT_CACHE` | `$XDG_CACHE_HOME/acq/kits` | where fetched neutral kits are materialized |
+| `ACQ_MSB_EXEC_READY_TIMEOUT` | `60` | Seconds to wait for a freshly-created sandbox to accept `msb exec` (create starts asynchronously) |
+| `ACQ_MSB_SSH_DIR` | `$XDG_STATE_HOME/acq/ssh` | Directory holding acq's managed SSH key for post-hoc port publishing (ADR-0015) |
+| `ACQ_MSB_SSH_KEY` | `$ACQ_MSB_SSH_DIR/msb_id_ed25519` | Managed SSH private key used to open `ssh -L` port tunnels |
+| `ACQ_MSB_SSH_KNOWN_HOSTS` | `$ACQ_MSB_SSH_DIR/known_hosts` | known_hosts file for the managed port-forward SSH |
+| `ACQ_MSB_SSH_USER` | `root` | Guest user for the post-hoc port-forward SSH session |
+| `ACQ_MSB_PORTS_DIR` | `$XDG_STATE_HOME/acq/ports` | Per-sandbox state for post-hoc published-port tunnels (serve + ssh PIDs) |
 
 ### DNS / name resolution
 
@@ -278,20 +284,35 @@ internal mirror).
 
 **The base-image contract (Docker `shell-docker`).** sbx's templates are built on
 `docker/sandbox-templates:shell-docker` — which acq now also uses as the default
-`ACQ_MSB_IMAGE`, so msb matches sbx by construction. Its
-[published base-image requirements](https://docs.docker.com/ai/sandboxes/customize/kit-reference/#base-image-requirements)
-are: a non-root `agent` user at UID 1000 **with passwordless sudo**, a
-`/home/agent` home owned by `agent`, **HTTP proxy env (`HTTP_PROXY`/`HTTPS_PROXY`/
-`NO_PROXY`) preserved across sudo**, and the agent binary present. The default
-image satisfies the first three already (so the step below is a short-circuit
-there). A plain OCI **override** (e.g. `node:22-bookworm`, which has `node` at uid
-1000 and no `agent`, no sudoers rule) meets none of them. So at provision the msb
-adapter **idempotently synthesizes** them: it creates the `agent` user with
+`ACQ_MSB_IMAGE`, so msb matches sbx by construction. The synthesis below exists
+only for a plain-OCI **override**: on the default image it is a short-circuit.
+
+#### Base image requirements
+
+A base image for the msb backend (a custom `ACQ_MSB_IMAGE` override) must provide,
+mirroring the sbx
+[published base-image requirements](https://docs.docker.com/ai/sandboxes/customize/kit-reference/#base-image-requirements):
+
+- A non-root **`agent` user with passwordless sudo**. (Unlike sbx, acq does **not**
+  require this user to be UID 1000 — it is addressed by name, so it works even when
+  1000 is already taken, e.g. by `node` on `node:22-bookworm`.)
+- A **`/home/agent`** home directory owned by `agent`.
+- **HTTP proxy env** (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) **preserved across sudo**.
+- The **agent binary** (baked into the image, or installed via a kit's install
+  command — for `opencode`, acq runs `npm install -g opencode-ai`).
+- The four kit prerequisites present: `node`, `git`, `curl`,
+  `update-ca-certificates`.
+
+**Build on `docker/sandbox-templates:shell-docker` to get all of these for free**
+— it is the default `ACQ_MSB_IMAGE`, so msb matches sbx out of the box.
+
+For a plain-OCI override (e.g. `node:22-bookworm`, which has `node` at uid 1000 and
+no `agent`, no sudoers rule) that meets none of the first three, the msb adapter
+**idempotently synthesizes** them at provision: it creates the `agent` user with
 `HOME=/home/agent` (offline via `useradd`/`adduser`), chowns the staged
-`/home/agent` files to it, drops a passwordless-sudo rule in `/etc/sudoers.d`,
-and adds a sudoers `env_keep` for the proxy variables. It addresses the user by
-name (not the literal uid 1000), so it works even when 1000 is already taken by
-a plain-OCI override (e.g. `node` on node:22-bookworm).
+`/home/agent` files to it, drops a passwordless-sudo rule in `/etc/sudoers.d`, and
+adds a sudoers `env_keep` for the proxy variables. It addresses the user by name
+(not the literal uid 1000), so it works even when 1000 is already taken.
 
 **How attach launches the agent.** sbx's `sbx run --name` re-launches the
 baked-in agent. On msb the adapter reproduces that with `msb exec -t` — the one
