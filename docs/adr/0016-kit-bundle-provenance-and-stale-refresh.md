@@ -118,6 +118,10 @@ in-place refresh.
 
 - The record format is a dependency-free flat `key=value` file, matching the
   awk-parsed acq config convention (no YAML/JSON parser added to the shell path).
+- The provenance records under `~/.local/state/acq/provenance` are inert data:
+  they can be deleted with no effect on a sandbox — acq simply re-offers a
+  refresh next run (safe and idempotent). The feature carries no state migration,
+  so it can be reverted with no sandbox-state impact.
 
 ## Alternatives Considered
 
@@ -141,12 +145,6 @@ in-place refresh.
   refresh fetches exactly that ref, never mutable `main`.
 - The backend abstraction is preserved: the shared logic lives in `common.sh`;
   each adapter only calls `acq_provenance_write` after its own successful apply.
-
-## Rollback
-
-Revert the commits on the feature branch. The provenance records under
-`~/.local/state/acq/provenance` are inert data; they can be left in place or
-removed with no effect on sandboxes. No sandbox state is touched by a rollback.
 
 ## References
 
