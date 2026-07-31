@@ -913,11 +913,14 @@ make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
-  # Pin PATH to ONLY the stub dir first, THEN remove the stub sbx so msb is the
-  # only backend on PATH. Without this pin a real host sbx would still be found
-  # by _auto_detect_backend and wrongly win (issue #217).
-  PATH="$STUBDIR"; export PATH
   rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
+  # Constrain PATH to the stub dir ONLY (#217): _auto_detect_backend runs
+  # `command -v sbx`, which would otherwise find a REAL sbx on the developer's
+  # base PATH and make this fall back-to-msb assertion flake to "sbx". Provide a
+  # coreutils dir so the sourced scripts still find standard tools.
+  _coreutils_dir=$(dirname "$(command -v env)")
+  PATH="$STUBDIR:$_coreutils_dir"
+  export PATH
   # shellcheck disable=SC1090
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   # shellcheck source=acq.backends/msb.sh
@@ -1058,9 +1061,13 @@ assert_not_contains "msb: provision does NOT bind github to github.com (git tran
 assert_not_contains "msb: provision does NOT bind github to codeload" "$prov_log" "GITHUB_TOKEN@codeload"
 assert_eq "msb: provision never leaks secret values to argv" "CLEAN" "$prov_leaks"
 # Workspace is mounted at the SAME absolute path in the guest (sbx-parity), not
-# remapped under /home/agent (which fails to mount pre-user-create).
-assert_contains "msb: workspace mounted at same guest path (sbx-parity)" "$prov_log" "--volume /tmp:/tmp"
-assert_not_contains "msb: workspace NOT remapped under /home/agent" "$prov_log" "--volume /tmp:/home/agent/workspace"
+# Workspace is mounted at the SAME absolute path in the guest (sbx-parity), not
+# remapped under /home/agent (which fails to mount pre-user-create). acq
+# canonicalizes the host path first (macOS /tmp -> /private/tmp symlink), so the
+# assertion must compare against the canonicalized form, not the literal /tmp.
+_prov_ws=$(canonicalize_path /tmp)
+assert_contains "msb: workspace mounted at same guest path (sbx-parity)" "$prov_log" "--volume ${_prov_ws}:${_prov_ws}"
+assert_not_contains "msb: workspace NOT remapped under /home/agent" "$prov_log" "--volume ${_prov_ws}:/home/agent/workspace"
 # Default base image: msb defaults to the sbx agent-template image (which ships
 # the `agent` user, sudo, prereqs, and an agent-writable npm prefix), matching
 # sbx by construction. The image is the trailing positional on `msb create`.
@@ -1333,9 +1340,13 @@ mkdir -p "$STUBDIR/ws-app" "$STUBDIR/ws-lib"
   acq_backend_provision mwbox opencode "$STUBDIR/ws-app" "$STUBDIR/ws-lib:ro" >/dev/null 2>&1
 )
 mw_log=$(cat "$CALLS")
-assert_contains "msb: multi-ws mounts primary at its host path" "$mw_log" "--volume ${STUBDIR}/ws-app:${STUBDIR}/ws-app"
-assert_contains "msb: multi-ws mounts extra ro at its host path" "$mw_log" "--volume ${STUBDIR}/ws-lib:${STUBDIR}/ws-lib:ro"
-assert_contains "msb: multi-ws start dir is the FIRST (primary) workspace" "$mw_log" "'${STUBDIR}/ws-app' > /var/lib/acq/workspace"
+# acq canonicalizes host workspace paths before mounting (macOS $TMPDIR is a
+# /var -> /private/var symlink), so compare against the resolved real paths.
+_ws_app=$(canonicalize_path "$STUBDIR/ws-app")
+_ws_lib=$(canonicalize_path "$STUBDIR/ws-lib")
+assert_contains "msb: multi-ws mounts primary at its host path" "$mw_log" "--volume ${_ws_app}:${_ws_app}"
+assert_contains "msb: multi-ws mounts extra ro at its host path" "$mw_log" "--volume ${_ws_lib}:${_ws_lib}:ro"
+assert_contains "msb: multi-ws start dir is the FIRST (primary) workspace" "$mw_log" "'${_ws_app}' > /var/lib/acq/workspace"
 assert_not_contains "msb: multi-ws does NOT fall back to /home/agent/workspace" "$mw_log" "'/home/agent/workspace' > /var/lib/acq/workspace"
 
 # Single workspace records that mount as the start dir.
@@ -1348,7 +1359,7 @@ assert_not_contains "msb: multi-ws does NOT fall back to /home/agent/workspace" 
   acq_backend_provision swbox opencode "$STUBDIR/ws-app" >/dev/null 2>&1
 )
 sw_log=$(cat "$CALLS")
-assert_contains "msb: single-ws records that mount as start dir" "$sw_log" "'${STUBDIR}/ws-app' > /var/lib/acq/workspace"
+assert_contains "msb: single-ws records that mount as start dir" "$sw_log" "'${_ws_app}' > /var/lib/acq/workspace"
 cleanup_stubs
 
 # 8m1c. Symlinked host workspace is canonicalized before mounting. msb cannot
