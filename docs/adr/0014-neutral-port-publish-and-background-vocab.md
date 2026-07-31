@@ -186,11 +186,14 @@ that path is wired in the incremental post-hoc-publish ADR (see Links), not here
   (CM-2/CM-3/CM-6); egress is still allow-listed per kit (SC-7); the new fields
   are validated before reaching a shell/argv (SI-10). Structural adapter +
   translator change (SA-8/SA-15/SA-17).
-- **Cross-repo gate (must hold before merge):** `PATTERNS_KIT_REF` is bumped to
-  a **released** patterns commit that includes the `publishedPorts`/`background`
-  schema properties and validator — mirroring ADR-0011's v1.7.0 pin discipline.
-  Until that release exists, the quickstart pin is held and the neutral fields
-  are read defensively (absence is a no-op, not an error).
+- **Cross-repo gate (satisfied):** `PATTERNS_KIT_REF` is bumped to a **released**
+  patterns commit that includes the `publishedPorts`/`background` schema
+  properties and validator — mirroring ADR-0011's v1.7.0 pin discipline. This is
+  now met: patterns#276 released the schema and patterns#283 republished the
+  openchamber kit against it, both merged to patterns `main`; the quickstart pin
+  is bumped to `6230faa` (this PR). Before that release the pin was held and the
+  neutral fields were read defensively (absence a no-op, not an error); that
+  defensive read remains, but the fields now light up end-to-end.
 
 ## Validation
 

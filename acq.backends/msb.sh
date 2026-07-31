@@ -22,8 +22,8 @@
 #      order-independent, verified via `msb --tree` / the live openchamber-on-msb
 #      verify). This adapter uses flags-after-NAME for the kit-command/marker
 #      paths and flags-before-NAME for the interactive attach + `acq exec` paths;
-#      both are valid. (Tracked: normalize to one order once re-checked against a
-#      newer msb — quickstart#234.)
+#      both are valid. (A future cleanup could normalize to one order once
+#      re-checked against a newer msb; both forms work on the pinned msb.)
 #   - `msb list|ls [-q] [--running]`, `msb stop`, `msb remove|rm [-f]`,
 #     `msb copy|cp SRC DST`, `msb ssh [SANDBOX] [-- CMD…]`, `msb ssh authorize`,
 #     `msb run … -p HOST:GUEST` (published ports), `msb doctor`.
@@ -50,7 +50,7 @@ ACQ_BACKEND_NAME="msb"
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_PORT_FORWARD=1        # post-hoc publish via `msb ssh serve` + OpenSSH -L forwarding (ADR-0015)
 # shellcheck disable=SC2034
-ACQ_BACKEND_SUPPORTS_SNAPSHOTS=0           # msb HAS `msb snapshot`, but acq exposes NO `snapshot` verb; wiring one is beyond sbx parity (sbx has none), so this flag reflects what acq surfaces (0), not what msb can do (#225)
+ACQ_BACKEND_SUPPORTS_SNAPSHOTS=0           # msb HAS `msb snapshot`, but acq exposes NO `snapshot` verb; wiring one is beyond sbx parity (sbx has none), so this flag reflects what acq surfaces (0), not what msb can do
 # shellcheck disable=SC2034
 ACQ_BACKEND_CAN_RESUME=1                   # msb stop / msb start preserve state
 # shellcheck disable=SC2034
@@ -106,9 +106,9 @@ ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
 # GitHub credential host for the msb --secret binding. We bind the github token
 # to the REST API host ONLY (api.github.com), which msb substitutes on the wire
 # (verified msb 0.6.7). We deliberately do NOT bind github.com/codeload.github.com
-# because msb does not substitute git's smart-HTTP transport there (quickstart#203)
-# and a multi-host binding also trips microsandbox #1170 (ineligible entry blocks
-# eligible). Kits that need github auth must use the REST API (e.g. the playbook
+# because msb does not substitute git's smart-HTTP transport there
+# and a multi-host binding also trips a known microsandbox bug where an ineligible
+# entry blocks eligible ones. Kits that need github auth must use the REST API (e.g. the playbook
 # kit fetches a source tarball from api.github.com), not `git clone`. The env var
 # name is GITHUB_TOKEN (the neutral service→env mapping; kits also accept GH_TOKEN).
 ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-api.github.com}"
@@ -118,7 +118,7 @@ ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-api.github.com}"
 # not bind. Single source of truth for the bind (provision), rotate (set), and
 # unbind (secret rm) paths.
 #
-# quickstart#226 (gap C) — GENERIC custom endpoints: usai + github keep their
+# GENERIC custom endpoints: usai + github keep their
 # compiled-in mapping (so their behavior/tests are unchanged), but ANY OTHER
 # service now resolves its (env, host) from the acq secret store's non-secret
 # endpoint sidecar (acq_secret_meta_resolve, written by `acq secret set SVC
@@ -163,7 +163,7 @@ _acq_msb_service_binding() {
 # swap, so a process that exceeds guest RAM is OOM-killed by the guest kernel and
 # simply prints "Killed". A Node.js agent TUI like opencode blows past 512 MiB
 # immediately, so a create with no memory flag left the user with an agent that
-# started and was instantly killed (quickstart#228 follow-up). sbx sizes its
+# started and was instantly killed. sbx sizes its
 # agent templates generously; msb runs a plain base and must be told, so acq
 # passes a generous default here (4 GiB / 2 vCPU) and lets it be tuned.
 #
@@ -235,7 +235,7 @@ ACQ_MSB_SSH_USER="${ACQ_MSB_SSH_USER:-root}"
 # site is `sport=$(_acq_msb_pick_ephemeral_port)` — a COMMAND SUBSTITUTION, which
 # runs in a subshell, so a plain shell variable incremented inside the helper
 # would never persist back to the caller (every publish would recompute the same
-# value — exactly the #234 bug). The counter is therefore persisted in a small
+# value — exactly the bug this avoids). The counter is therefore persisted in a small
 # file under the ports state dir so consecutive publishes in one process read
 # distinct, increasing values. Seeded from a per-process random base.
 _ACQ_MSB_PORT_SEQ_FILE="${ACQ_MSB_PORTS_DIR}/.port-seq"
@@ -243,7 +243,7 @@ _ACQ_MSB_PORT_SEQ_FILE="${ACQ_MSB_PORTS_DIR}/.port-seq"
 # Per-process random base offset for ephemeral serve-port selection, evaluated
 # ONCE when this file is sourced (not per call). Spreads different processes
 # across the range while the persisted per-call counter provides distinct
-# offsets WITHIN a process (#234). $$, $RANDOM (bash; empty under POSIX sh,
+# offsets WITHIN a process. $$, $RANDOM (bash; empty under POSIX sh,
 # handled by the ${RANDOM:-0} default), and the seconds clock give spread.
 _ACQ_MSB_PORT_BASE="${_ACQ_MSB_PORT_BASE:-$(( ($$ + ${RANDOM:-0} + $(date +%s 2>/dev/null || echo 0)) % 40000 ))}"
 
@@ -359,7 +359,7 @@ _acq_msb_wait_for_exec_ready() {
 # ---------------------------------------------------------------------------
 #
 # DESIGN NOTE — why kit commands still stage via `msb exec`, not `--script`
-# (quickstart#239, evaluated against msb 0.6.7's create/run-time script flags).
+# (evaluated against msb 0.6.7's create/run-time script flags).
 # ---------------------------------------------------------------------------
 # msb 0.6.7 offers first-class script registration on `create`/`run`:
 #   --script NAME=BODY        (inline; escape-decoded; shebang from --shell)
@@ -392,7 +392,7 @@ _acq_msb_wait_for_exec_ready() {
 #      `msb exec … -- "$@"` as SEPARATE ARGV ELEMENTS. Kit content never enters
 #      an interpolated shell string on this path; the only `sh -c` around it is
 #      the fixed background-detach wrapper (`nohup "$@" … ` with the argv as
-#      positional params — gap A, still no interpolation). So the injection risk
+#      positional params — still no interpolation). So the injection risk
 #      --script is designed to remove is already absent here; --script would
 #      restage the same already-safe argv through a different primitive without
 #      reducing attack surface.
@@ -414,7 +414,7 @@ _acq_msb_wait_for_exec_ready() {
 #      and never interpolated. --script-path would only cover the COMMAND body,
 #      not files[], so it cannot subsume that path either.
 #
-# CONCLUSION (per the #239 decision gate): keep the exec-based kit-command
+# CONCLUSION: keep the exec-based kit-command
 # staging. The one place --script/--script-path would be a clean, contained win
 # — a create-time-ONLY, run-once command whose body is genuinely a script file —
 # does not exist in the pinned neutral kit vocabulary today (kit commands are
@@ -474,7 +474,7 @@ EOF
 # Emit the create-time `-p HOST:GUEST` flags for a kit's published ports into the
 # named array. Usage: _acq_msb_port_flags_into ARRVAR SPEC
 #
-# ADR-0014 (gap A): kit_spec_published_ports reads the NEUTRAL top-level
+# ADR-0014: kit_spec_published_ports reads the NEUTRAL top-level
 # `publishedPorts` first (deprecated backend_extras.sbx fallback) and emits
 # validated `guest<TAB>proto<TAB>name<TAB>host` records (ports are ints 1..65535,
 # so they cannot smuggle shell metacharacters). host defaults to guest. We map
@@ -483,12 +483,10 @@ EOF
 # default loopback bind for sbx parity, so bind-addr and /udp are deliberately
 # NOT emitted. Uses the eval-by-name array pattern (macOS bash 3.2 compat), like
 # _acq_msb_net_rules_into. Absence of publishedPorts is a silent no-op: the
-# neutral field is read DEFENSIVELY (ADR-0014 cross-repo gate). PATTERNS_KIT_REF
-# in common.sh is INTENTIONALLY held at its current pin and NOT bumped here — the
-# `publishedPorts`/`background` schema property lives on an unreleased patterns
-# branch. Reading defensively (absence = no-op, never an error) lets this consumer
-# land now and light up automatically once the patterns schema is released and the
-# pin is later bumped.
+# neutral field is read DEFENSIVELY so a kit that omits it — or an older pinned
+# kit predating the neutral schema — is a clean no-op rather than an error. The
+# schema and a consuming kit are released at the current PATTERNS_KIT_REF, so the
+# field lights up end-to-end (see ADR-0014).
 _acq_msb_port_flags_into() {
   local _arr="$1" _spec="$2" _rec _guest _host
   eval "$_arr=()"
@@ -518,12 +516,12 @@ EOF
 # RESOLVED (agentic-coding-playbook kit on msb): the playbook kit fetches a
 # PRIVATE GitHub repo. It used to `git clone` over HTTPS, but msb does not
 # substitute the credential placeholder for git's smart-HTTP transport to
-# github.com/codeload (quickstart#203). The kit now fetches the repo SOURCE
+# github.com/codeload. The kit now fetches the repo SOURCE
 # TARBALL via the REST API (api.github.com/repos/<repo>/tarball/<ref>), which msb
 # DOES substitute (verified msb 0.6.7), and acq binds GITHUB_TOKEN@api.github.com
 # above. So the playbook now works on msb. USAi, git-ssh-sign, and zscaler kits
-# are unaffected. (Upstream git-transport substitution remains unfixed —
-# microsandbox #756/#768/#1170 — but the kit no longer depends on it.)
+# are unaffected. (Upstream git-transport substitution remains unfixed
+# in microsandbox — but the kit no longer depends on it.)
 _acq_msb_apply_kit_dir() {
   local name="$1" kitdir="$2"
   local spec="${kitdir}/spec.yaml"
@@ -977,7 +975,7 @@ acq_backend_provision() {
     _acq_msb_net_rules_into nr "$spec"
     [ "${#nr[@]}" -gt 0 ] && create_flags+=("${nr[@]}")
 
-    # Published ports (ADR-0014, gap A) → create-time `-p HOST:GUEST` flags. The
+    # Published ports (ADR-0014) → create-time `-p HOST:GUEST` flags. The
     # neutral top-level `publishedPorts` is read first by kit_spec_published_ports
     # (with a deprecated backend_extras.sbx fallback). Each surviving record is
     # `guest<TAB>proto<TAB>name<TAB>host` (validated to ints 1..65535). msb -p also
@@ -1139,9 +1137,9 @@ EOF
   #     api.github.com returns 5000-rate-limit headers; a private-repo tarball
   #     fetch succeeds). msb does NOT substitute git's smart-HTTP transport to
   #     github.com/codeload (a `git clone`/`gh repo clone` of a private repo fails
-  #     auth/TLS there) — this is quickstart#203. So kits authenticate via the REST
+  #     auth/TLS there). So kits authenticate via the REST
   #     API, not git: the playbook kit fetches a source tarball from
-  #     api.github.com. Binding a single host also avoids microsandbox #1170
+  #     api.github.com. Binding a single host also avoids a known microsandbox bug
   #     (multi-host binding: ineligible entry blocks eligible).
   local _secret_env_names=()   # env vars we set transiently, cleared after create
   if command -v acq_secret_resolve >/dev/null 2>&1; then
@@ -1177,7 +1175,7 @@ EOF
       acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from GH_TOKEN env)"
     fi
 
-    # GENERIC custom endpoints (quickstart#226, gap C). usai + github were bound
+    # GENERIC custom endpoints. usai + github were bound
     # explicitly above (unchanged). Any OTHER service stored via `acq secret set
     # SVC --host H --env E` recorded a non-secret (host, env) sidecar; bind each
     # such service generically here so it is no longer stored-but-inert. Iterate
@@ -1845,7 +1843,7 @@ _acq_msb_ssh_authorize() {
 
 # _acq_msb_pick_ephemeral_port — echo a loopback port for the serve listener.
 #
-# Robustness (#234): the previous scheme was `20000 + ($$ % 40000)`, derived
+# Robustness: the previous scheme was `20000 + ($$ % 40000)`, derived
 # ONLY from the shell PID. That returned the SAME value for every call in one
 # process, so a second `--publish` for the same sandbox collided with the first,
 # and rapid test subshells with nearby PIDs raced. The listener binds loopback
@@ -2298,7 +2296,7 @@ _acq_msb_secret_set_guidance() {
       echo "      the real value is swapped in on the wire to the REST API and never enters" >&2
       echo "      the guest. Kits authenticate via the REST API (e.g. the playbook kit" >&2
       echo "      fetches a source tarball from api.github.com) — NOT 'git clone', which" >&2
-      echo "      msb does not substitute for github.com/codeload (quickstart#203)." >&2
+      echo "      msb does not substitute for github.com/codeload." >&2
       [ "$applied" -gt 0 ] && echo "      Re-fed $applied running sandbox(es) via 'msb modify' (no recreate needed)." >&2
       ;;
     *)
@@ -2331,7 +2329,7 @@ acq_backend_secret_set() {
 
   # Parse optional --host/--env (a CUSTOM endpoint's mapping). These are recorded
   # as a non-secret sidecar so the provision path can bind the service generically
-  # via `msb --secret ENV@HOST` (quickstart#226). Built-ins (usai, github) need no
+  # via `msb --secret ENV@HOST`. Built-ins (usai, github) need no
   # flags — their mapping is compiled in.
   local host env_var
   _acq_msb_parse_host_env host env_var "$@"
@@ -2420,7 +2418,7 @@ acq_backend_secret_rm() {
   local key removed=0
   local env_name
   env_name=$(_acq_msb_service_binding "$service" "$scope_name" | cut -f1)
-  # _acq_secret_key fails closed on an ambiguous (dotted) name (quickstart#234);
+  # _acq_secret_key fails closed on an ambiguous (dotted) name;
   # such a name could never have been stored, so treat rm as a no-op success
   # (the `|| key=""` keeps `set -e` from aborting the rm path).
   key=$(_acq_secret_key "$service" "$scope_name") || key=""

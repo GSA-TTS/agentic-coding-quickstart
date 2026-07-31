@@ -81,7 +81,7 @@ _acq_secret_backend() {
 # the value store and the meta sidecar (and mis-scoping meta_list). Sandbox
 # names are always slugified dot-free upstream (common.sh slugify -> [a-z0-9-])
 # and acq's own service names are dot-free, so this collision is latent today
-# (quickstart#234, gap C). We enforce that invariant here — the single choke
+# We enforce that invariant here — the single choke
 # point both the value store and the meta sidecar share — so no caller can
 # smuggle a dotted (or otherwise separator-breaking) name past the store and
 # silently alias another scope. Fail closed rather than emit an ambiguous key.
@@ -219,7 +219,7 @@ _acq_secret_get_file() {
 }
 
 # ---------------------------------------------------------------------------
-# Per-service ENDPOINT METADATA (host/env) — non-secret sidecar (quickstart#226)
+# Per-service ENDPOINT METADATA (host/env) — non-secret sidecar
 # ---------------------------------------------------------------------------
 # The value store above holds only the raw secret. To bind a CUSTOM-endpoint
 # service generically (e.g. `msb --secret ENV@HOST`) both backends need to know
@@ -265,7 +265,7 @@ acq_secret_meta_store() {
     ""|*[!A-Za-z0-9.,*_-]*) acq_debug "secret meta: refusing unsafe host '$host' for '$service'"; return 1 ;;
   esac
   # _acq_secret_key fails closed (empty output, non-zero) on a name that would
-  # make the key non-injective (a dotted service/sandbox — quickstart#234).
+  # make the key non-injective (a dotted service/sandbox).
   # Refuse to write a sidecar in that case rather than aliasing another scope.
   key=$(_acq_secret_key "$service" "$sandbox") || {
     echo "acq: secret meta: refusing to store '$service' — ambiguous scope name." >&2
@@ -287,7 +287,7 @@ acq_secret_meta_resolve() {
   local service="$1" sandbox="${2:-}" f line key
   if [ -n "$sandbox" ]; then
     # _acq_secret_key fails closed on an ambiguous (dotted) name; skip that
-    # lookup rather than probing a malformed path (quickstart#234).
+    # lookup rather than probing a malformed path.
     if key=$(_acq_secret_key "$service" "$sandbox"); then
       f=$(_acq_secret_meta_file_for "$key")
       if [ -f "$f" ] && IFS= read -r line < "$f" && [ -n "$line" ]; then
@@ -308,7 +308,7 @@ acq_secret_meta_resolve() {
 acq_secret_meta_delete() {
   local service="$1" sandbox="${2:-}" f key
   # An ambiguous (dotted) name has no valid key, hence no sidecar to remove;
-  # treat as a no-op success (quickstart#234).
+  # treat as a no-op success.
   key=$(_acq_secret_key "$service" "$sandbox") || return 0
   f=$(_acq_secret_meta_file_for "$key")
   [ -e "$f" ] && rm -f "$f" 2>/dev/null
@@ -318,7 +318,7 @@ acq_secret_meta_delete() {
 # acq_secret_meta_list [SANDBOX] -> service names (one per line) that have an
 # endpoint sidecar in this SANDBOX scope OR the global scope. Used by the msb
 # adapter at provision to discover every custom-endpoint service to bind
-# generically (quickstart#226). Deduplicated; order is unspecified. Non-secret.
+# generically. Deduplicated; order is unspecified. Non-secret.
 #
 # Sidecar files are named after the store key with non-[A-Za-z0-9._-] chars
 # mapped to '_' (see _acq_secret_meta_file_for). We recover the service name
@@ -326,7 +326,7 @@ acq_secret_meta_delete() {
 # `acq.<sandbox>.<service>`. Only entries matching the requested scope (scoped
 # for SANDBOX, plus all global) are emitted.
 #
-# ROBUSTNESS (quickstart#234, gap C): the `acq.<sandbox>.<service>` layout uses
+# ROBUSTNESS: the `acq.<sandbox>.<service>` layout uses
 # '.' as the scope separator, so the old "split on the FIRST dot" mis-scoped a
 # key whose scope segment itself contained a dot — a GLOBAL service literally
 # named "foo.bar" (`acq.foo.bar`) was misread as sandbox="foo" service="bar".
@@ -483,7 +483,7 @@ _acq_secret_delete_file() {
 # non-zero if neither exists. This is the read path adapters use at provision.
 acq_secret_resolve() {
   local service="$1" sandbox="${2:-}" v key
-  # _acq_secret_key fails closed on an ambiguous (dotted) name (quickstart#234);
+  # _acq_secret_key fails closed on an ambiguous (dotted) name;
   # such a name has no valid entry, so skip its lookup rather than probing an
   # empty/aliased key.
   if [ -n "$sandbox" ] && key=$(_acq_secret_key "$service" "$sandbox"); then
@@ -517,11 +517,11 @@ acq_secret_has() {
 # When HOST and ENV are both supplied (a custom-endpoint service), the non-secret
 # (host, env) endpoint mapping is persisted alongside the value (see
 # acq_secret_meta_store) so both backends can bind the service generically at
-# provision (quickstart#226). HOST/ENV are metadata only — never the value.
+# provision. HOST/ENV are metadata only — never the value.
 acq_secret_set_interactive() {
   local service="$1" sandbox="${2:-}" host="${3:-}" env="${4:-}" key value
   # _acq_secret_key fails closed on an ambiguous (dotted) service/sandbox that
-  # would alias another scope in the shared store (quickstart#234). Refuse the
+  # would alias another scope in the shared store. Refuse the
   # set before reading a value so nothing is stored under an aliased key.
   if ! key=$(_acq_secret_key "$service" "$sandbox"); then
     echo "acq: secret set: refusing '$service'${sandbox:+ (sandbox '$sandbox')} — a service or sandbox name may not contain '.'" >&2

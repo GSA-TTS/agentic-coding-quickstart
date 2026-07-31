@@ -56,7 +56,7 @@ export ACQ_SBX_KIT_PASSTHROUGH=1
 # one string and appends it with a SINGLE `printf … >>"$CALLS"` write: the
 # ADR-0015 port path backgrounds `msb ssh serve` and `ssh -L` concurrently, and
 # a multi-`printf` sequence into the same append fd can interleave into a
-# corrupted line under that concurrency (a source of the #234 test flake).
+# corrupted line under that concurrency (a source of the concurrency flake this avoids).
 
 make_stubs() {
   STUBDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-test.XXXXXX")
@@ -69,7 +69,7 @@ make_stubs() {
 #!/usr/bin/env bash
 # Build the whole call line in one string and append with a SINGLE write, so
 # concurrently-backgrounded stubs (msb ssh serve + ssh -L) can't interleave
-# their writes into a corrupted line on the shared $CALLS append fd (#234).
+# their writes into a corrupted line on the shared $CALLS append fd.
 _line="sbx"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
 case "${1:-}" in
@@ -231,7 +231,7 @@ KEYGENSTUB
   # Force acq's state dir (ssh keys, port PIDs — ADR-0015) under the throwaway
   # STUBDIR so tests never write to the real ~/.local/state/acq.
   export ACQ_STATE_DIR="$STUBDIR/state"
-  # Isolate the host-side kit-bundle provenance store (quickstart#236) to this
+  # Isolate the host-side kit-bundle provenance store to this
   # test's temp dir so provenance reads/writes never touch the real XDG state.
   export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
 }
@@ -436,7 +436,7 @@ log=$(cat "$CALLS")
 assert_contains "dispatch: unknown passthrough -> sbx" "$log" "sbx policy"
 cleanup_stubs
 
-# --kit interception (#222): a user-supplied `--kit <ref>` on run/create MUST be
+# --kit interception: a user-supplied `--kit <ref>` on run/create MUST be
 # folded into acq's translated kit list, NOT forwarded to the backend as a raw
 # flag+value trailing the create args. With ACQ_SBX_KIT_PASSTHROUGH=1 kit refs
 # pass through untranslated, so the ref appears in the sbx create line as a
@@ -444,7 +444,7 @@ cleanup_stubs
 # the create positionals are clean.
 #
 # NOTE: the workspace positional MUST be a real, existing directory — acq's
-# pre-flight (#216) aborts create/run on a nonexistent path before it ever
+# pre-flight aborts create/run on a nonexistent path before it ever
 # reaches `sbx create`. Use a throwaway temp dir as the workspace.
 _kitproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-kitproj.XXXXXX")
 make_stubs
@@ -586,7 +586,7 @@ assert_contains "secret: existing github -> rm hint" "$out" "sbx secret rm -g gi
 assert_not_contains "secret: existing github -> no set call" "$log" "sbx secret set -g github"
 cleanup_stubs
 
-# 5d1. Scope-awareness regression (issue #229): github existing under a DIFFERENT
+# 5d1. Scope-awareness regression: github existing under a DIFFERENT
 #      scope must NOT block seeding the target scope. Previously a blind substring
 #      match over the whole `sbx secret ls` produced a false "already exists"
 #      whenever any other sandbox had github (the verify-backends sbx seed skip).
@@ -604,7 +604,7 @@ cleanup_stubs
 
 # 5d2. Same, sandbox-scoped: setting `mybox github` when github exists only under
 #      `otherbox` must proceed (this is exactly the verify-backends seed case,
-#      and issue #229: a token scoped to sandbox A must not block sandbox B).
+#      and a token scoped to sandbox A must not block sandbox B).
 make_stubs
 printf 'SCOPE      TYPE      NAME     SECRET\notherbox   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
 export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
@@ -614,7 +614,7 @@ log=$(cat "$CALLS")
 assert_contains "secret: sandbox github not blocked by other scope (feeds sbx)" "$log" "sbx secret set mybox github"
 cleanup_stubs
 
-# 5d2b. Positive case (issue #229): the SAME sandbox already having github IS a
+# 5d2b. Positive case: the SAME sandbox already having github IS a
 #       real collision -> stop with a sandbox-scoped rm hint, no set call.
 make_stubs
 printf 'SCOPE                     TYPE      NAME     SECRET\nopencode-agentic-coding   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
@@ -915,7 +915,7 @@ make_stubs; load_acq
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
   # Pin PATH to ONLY the stub dir so a real sbx/msb on the developer's host
-  # PATH cannot leak into auto-detection (issue #217).
+  # PATH cannot leak into auto-detection.
   PATH="$STUBDIR"; export PATH
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
@@ -932,7 +932,7 @@ make_stubs; load_acq
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
   rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
-  # Constrain PATH to the stub dir ONLY (#217): _auto_detect_backend runs
+  # Constrain PATH to the stub dir ONLY: _auto_detect_backend runs
   # `command -v sbx`, which would otherwise find a REAL sbx on the developer's
   # base PATH and make this fall back-to-msb assertion flake to "sbx". Provide a
   # coreutils dir so the sourced scripts still find standard tools.
@@ -963,7 +963,7 @@ make_stubs; load_acq
 ) 2>/dev/null; pass "msb: --backend msb accepted"
 cleanup_stubs
 
-# 8c1. Capability flags: msb advertises SUPPORTS_SNAPSHOTS=0 (#225). msb DOES have
+# 8c1. Capability flags: msb advertises SUPPORTS_SNAPSHOTS=0. msb DOES have
 #      a `msb snapshot` verb, but acq exposes no `snapshot` command and wiring one
 #      is beyond sbx parity — so the matrix reflects what acq surfaces, not what
 #      msb can do. Load the adapter in a subshell and read the declared flag.
@@ -1073,7 +1073,7 @@ assert_contains "msb: provision enables --tls-intercept (needed for substitution
 assert_contains "msb: provision binds USAi via --secret" "$prov_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
 # GitHub IS now bound — to the REST API host ONLY (api.github.com), the path msb
 # substitutes. The playbook kit fetches a tarball there instead of git-cloning
-# github.com/codeload (which msb does not substitute — quickstart#203).
+# github.com/codeload (which msb does not substitute).
 assert_contains "msb: provision binds github to api.github.com (REST path msb substitutes)" "$prov_log" "--secret GITHUB_TOKEN@api.github.com"
 assert_not_contains "msb: provision does NOT bind github to github.com (git transport unsubstituted)" "$prov_log" "GITHUB_TOKEN@github.com"
 assert_not_contains "msb: provision does NOT bind github to codeload" "$prov_log" "GITHUB_TOKEN@codeload"
@@ -1114,7 +1114,7 @@ assert_contains "msb: ACQ_MSB_IMAGE override passed through to create" "$imgover
 assert_not_contains "msb: override suppresses the default image" "$imgover_log" "docker.io/docker/sandbox-templates:shell-docker"
 cleanup_stubs
 
-# 8m0. GENERIC custom endpoint binding (quickstart#226, gap C): a service stored
+# 8m0. GENERIC custom endpoint binding: a service stored
 #      via `acq secret set SVC --host H --env E` records a non-secret endpoint
 #      sidecar; msb provision must then bind it generically via `--secret E@H`,
 #      the real value never touching argv — mirroring usai/github which stay
@@ -1190,7 +1190,7 @@ else
 fi
 cleanup_stubs
 
-# 8m0d. quickstart#234 (gap C): dotted service/sandbox names cannot make the
+# 8m0d. Dotted service/sandbox names cannot make the
 #       shared `acq.<sandbox>.<service>` key non-injective. A GLOBAL service
 #       literally named "foo.bar" and a SCOPED service "bar" in sandbox "foo"
 #       would BOTH map to the key `acq.foo.bar` — colliding in the value store
@@ -1270,7 +1270,7 @@ assert_contains "234: value store — foo-scoped svc value intact"       "$dot_o
 assert_contains "234: value store — global gsvc value intact"          "$dot_out" "val-gsvc=GV"
 cleanup_stubs
 
-# 8m0e. quickstart#234 backward-compat: a LEGACY dotted-global sidecar written
+# 8m0e. Backward-compat: a LEGACY dotted-global sidecar written
 #       by an OLDER build (e.g. the file `acq.foo.bar`, from before the store
 #       rejected dotted names) must never crash meta_list and must never be
 #       mis-bound. Under the requested sandbox "mybox" (which does not match the
@@ -1807,7 +1807,7 @@ assert_contains "msb env: command still runs with env" "$env_log" "echo CMD_WITH
 assert_not_contains "msb env: unsafe env var name dropped" "$env_log" "1BAD"
 cleanup_stubs
 
-# 8o1b. quickstart#239 DECISION GUARD: kit commands are staged via `msb exec …
+# 8o1b. DECISION GUARD: kit commands are staged via `msb exec …
 #        -- <argv>` (kit content as SEPARATE ARGV ELEMENTS), NOT registered via
 #        msb 0.6.7's create-time `--script`/`--script-path` flags and NOT
 #        interpolated into an `sh -c` string built from kit content. This is the
@@ -1815,7 +1815,7 @@ cleanup_stubs
 #        argv never enters an interpolated shell string, so the safety win
 #        --script offers is already present. If someone later switches the kit-
 #        command path to --script (or to an interpolated sh -c), these assertions
-#        fail and force a re-read of the #239 rationale. Uses a kit whose command
+#        fail and force a re-read of the design rationale. Uses a kit whose command
 #        body carries shell metacharacters that WOULD be dangerous if interpolated.
 make_stubs; load_acq
 : > "$CALLS"
@@ -1859,7 +1859,7 @@ assert_not_contains "239: kit command NOT registered via --script-path" "$noscri
 assert_not_contains "239: kit command not wrapped in sh -c interpolation" "$noscript_log" "sh -c printf"
 cleanup_stubs
 
-# 8o1c. quickstart#239 DECISION GUARD (idempotency): an install-phase kit command
+# 8o1c. DECISION GUARD (idempotency): an install-phase kit command
 #        stays run-once via the root-owned marker in _acq_msb_exec_command — that
 #        gate lives in the EXEC path (test+write /var/lib/acq/install-<cksum> as
 #        uid 0), which is exactly why registering the command as a create-time
@@ -1942,7 +1942,7 @@ assert_not_contains "sec: chmod never via sh -c string" "$sec_log" "chmod 0644;"
 assert_not_contains "sec: injected command never reaches msb argv" "$sec_log" "PWNED"
 cleanup_stubs
 
-# 8o3b. HOME-DIR OWNERSHIP (#234): when a kit drops a file under a nested
+# 8o3b. HOME-DIR OWNERSHIP: when a kit drops a file under a nested
 #       agent-home path (e.g. the openchamber wrapper at ~/.local/bin/opencode),
 #       acq creates the parent chain as root then must chown the TOP-MOST
 #       created subdir under /home/agent RECURSIVELY to the agent user — so
@@ -2332,7 +2332,7 @@ assert_contains "kit: apply (msb) runs msb exec" "$log" "msb exec mybox"
 cleanup_stubs
 
 # ===========================================================================
-# 9p. Kit-bundle provenance + staleness (quickstart#236)
+# 9p. Kit-bundle provenance + staleness
 # ===========================================================================
 # These drive the provenance helpers directly (host-side, no sandbox exec) and
 # the `acq kit check|update` subcommands via the stubbed backends. ACQ_PROVENANCE_DIR
@@ -2591,12 +2591,12 @@ assert_contains "translate: carries caps.network.allow" "$sbxspec" "api.example.
 assert_contains "translate: has install phase" "$sbxspec" "install:"
 assert_contains "translate: has startup phase" "$sbxspec" "startup:"
 assert_contains "translate: preserves multi-line block body" "$sbxspec" "line two"
-# Regression (#220): a wildcard-subdomain allow host (leading `*`) MUST be
+# Regression: a wildcard-subdomain allow host (leading `*`) MUST be
 # quoted, or YAML parses the `*` as an alias and the sbx spec is invalid. The
 # host:port form also contains a `:` and must survive. Assert both are quoted.
 assert_contains "translate: quotes wildcard allow host (#220)" "$sbxspec" "- '*.example.com'"
 assert_contains "translate: quotes host:port allow entry (#220)" "$sbxspec" "- 'api.example.com:443'"
-# ADR-0014 (#224): the NEUTRAL top-level publishedPorts MUST synthesize the same
+# ADR-0014: the NEUTRAL top-level publishedPorts MUST synthesize the same
 # top-level sbx-v2 publishedPorts block (keyed on `container` = the guest port)
 # so the observable sbx shape is unchanged from the old backend_extras.sbx path.
 assert_contains "translate: emits publishedPorts block (#224)" "$sbxspec" "publishedPorts:"
@@ -2653,7 +2653,7 @@ assert_contains "translate: sh -c startup emits argv seq (- sh)" "$sh_startup_bl
 assert_not_contains "translate: sh -c startup is not a bare string" "$sh_startup_block" "command: |"
 cleanup_stubs
 
-# 10a2b. #207: a git+https kit fetch MUST be NON-INTERACTIVE. Stub `git` to
+# 10a2b. A git+https kit fetch MUST be NON-INTERACTIVE. Stub `git` to
 #        record its env + args; drive _resolve_kit against a git+https ref and
 #        assert the fetch ran with GIT_TERMINAL_PROMPT=0 and the anonymous
 #        credential-neutralizing -c flags — i.e. it can never hang on a
@@ -2687,7 +2687,7 @@ assert_contains "#207: anon fetch neutralizes credential.helper" "$anonline" "cr
 assert_contains "#207: anon fetch neutralizes github insteadOf" "$anonline" "insteadOf="
 cleanup_stubs
 
-# 10a2c. #207 hardening: a hostile dir= (path traversal) must be rejected before
+# 10a2c. Hardening: a hostile dir= (path traversal) must be rejected before
 #        any git call — no absolute paths, no '..', safe charset only.
 make_stubs; load_acq
 : >"$STUBDIR/git-invocations.log"
@@ -2752,7 +2752,7 @@ assert_not_contains "env: sbx-v2 drops unsafe var name" "$espec" "1BAD"
 cleanup_stubs
 
 # ===========================================================================
-# 10a4. ADR-0014 (#224): neutral publishedPorts + background vocabulary
+# 10a4. ADR-0014: neutral publishedPorts + background vocabulary
 # ===========================================================================
 # Promotes publishedPorts to a NEUTRAL top-level list and background to a
 # commands[] flag, consumed by BOTH backends. Covers: neutral parse -> sbx-v2 +
@@ -3061,14 +3061,14 @@ make_stubs; load_acq
 : > "$CALLS"
 # Pin the ephemeral serve port via the test seam (ACQ_MSB_FORCE_SERVE_PORT) so
 # the `msb ssh serve … --port <n>` and `ssh -p <n>` argv are deterministic and
-# the assertions below don't race the counter/$RANDOM value (#234).
+# the assertions below don't race the counter/$RANDOM value.
 (
   export ACQ_MSB_FORCE_SERVE_PORT=54321
   . "${REPO_ROOT}/acq.backends/msb.sh"
   acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
   # `msb ssh serve` and `ssh -L` are BACKGROUNDED by acq; wait for the stubbed
   # children to finish appending to $CALLS before the subshell exits, else the
-  # `cat "$CALLS"` below races an incomplete log (#234 test-side flake).
+  # `cat "$CALLS"` below races an incomplete log (test-side flake).
   wait
 )
 pub_log=$(cat "$CALLS")
@@ -3153,7 +3153,7 @@ assert_not_contains "msb ports: 2nd publish does not re-authorize the key" "$pub
 assert_contains "msb ports: 2nd publish still opens its own -L tunnel" "$pub2_log" "-L 127.0.0.1:9090:127.0.0.1:4000"
 cleanup_stubs
 
-# 10b3a. #234: two publishes in the SAME process must get DISTINCT serve ports.
+# 10b3a. Two publishes in the SAME process must get DISTINCT serve ports.
 #        No seam here — this exercises the real distinct-per-call selection. The
 #        recorded state file has one line per publish: `<serve_pid> <ssh_pid>
 #        <sport> <mapping>`; assert the two <sport> columns differ.
@@ -3248,7 +3248,7 @@ printf 'DO-NOT-DELETE\n' >"$canary"
 rm -f "$canary" 2>/dev/null || true
 cleanup_stubs
 
-# 10b8. LIST mode (#234): `acq ports <name>` with NO --publish is a QUERY, not an
+# 10b8. LIST mode: `acq ports <name>` with NO --publish is a QUERY, not an
 #       error. It must exit 0 and print lines CONTAINING the published port
 #       numbers so openchamber verify's `grep -q <port>` matches. Two sources:
 #       (a) create-time `-p` NAT mappings via `msb inspect --format json`, and

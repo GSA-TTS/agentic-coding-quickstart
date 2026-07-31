@@ -661,7 +661,7 @@ acq_backend_secret_set() {
   [ -n "$scope_name" ] && acq_sandbox="$scope_name"
   if command -v acq_secret_set_interactive >/dev/null 2>&1; then
     # Pass the resolved host/env so a CUSTOM endpoint's mapping is persisted as a
-    # non-secret sidecar (quickstart#226); built-ins pass empty host/env (their
+    # non-secret sidecar; built-ins pass empty host/env (their
     # mapping is compiled in) so nothing extra is recorded.
     acq_secret_set_interactive "$service" "$acq_sandbox" "$host" "$env_var" || return 1
   else
@@ -841,8 +841,8 @@ acq_backend_secret_rm() {
   local removed_store=0
   if command -v acq_secret_delete >/dev/null 2>&1; then
     local key
-    # _acq_secret_key fails closed on an ambiguous (dotted) name (quickstart#234);
-    # such a name could never have been stored, so treat rm as a no-op success
+    # _acq_secret_key fails closed on an ambiguous (dotted) name; such a name
+    # could never have been stored, so treat rm as a no-op success
     # (the `|| key=""` keeps `set -e` from aborting the rm path).
     key=$(_acq_secret_key "$service" "$acq_sandbox") || key=""
     [ -n "$key" ] && acq_secret_delete "$key" && removed_store=1
