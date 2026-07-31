@@ -1322,6 +1322,10 @@ EOF
     fi
   done
   acq_debug "msb provision: all kits applied; provision complete ($name)"
+  # Record host-side bundle provenance now the built-in bundle is applied.
+  # Best-effort: a provenance write failure never affects the
+  # sandbox. Reached only when provision did not abort earlier under set -e.
+  acq_provenance_write msb "$name" || true
 }
 
 # ---------------------------------------------------------------------------
@@ -2078,19 +2082,35 @@ acq_backend_apply_kit() {
 acq_backend_ensure_kits_applied() {
   local name="$1"
   local kits=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT" "$GITSSHSIGN_KIT")
+  local builtin_count="${#kits[@]}"
   if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
     local _extras=()
     split_noglob _extras "$ACQ_EXTRA_KITS"
     kits+=("${_extras[@]}")
   fi
-  local kitref kitdir
+  local kitref kitdir i=0 ok=1
   for kitref in "${kits[@]}"; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
       echo "acq(msb): warning: could not fetch kit for healing: $kitref" >&2
+      # A built-in kit that can't even be fetched means we cannot claim the
+      # bundle is current. Extra-kit fetch failures don't affect the verdict.
+      [ "$i" -lt "$builtin_count" ] && ok=0
+      i=$((i + 1))
       continue
     }
-    _acq_msb_apply_kit_dir "$name" "$kitdir" || true
+    if ! _acq_msb_apply_kit_dir "$name" "$kitdir"; then
+      [ "$i" -lt "$builtin_count" ] && ok=0
+    fi
+    i=$((i + 1))
   done
+  # Record host-side bundle provenance ONLY when every built-in kit applied.
+  # msb re-applies all built-in kits idempotently, so on full
+  # success the sandbox carries the currently pinned bundle. Best-effort write.
+  if [ "$ok" -eq 1 ]; then
+    acq_provenance_write msb "$name" || true
+    return 0
+  fi
+  return 1
 }
 
 # ---------------------------------------------------------------------------
