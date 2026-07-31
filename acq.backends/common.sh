@@ -21,21 +21,17 @@
 # acq.backends/kit-translate.sh, which fetches a kit's neutral spec.yaml and
 # emits the active backend's native operations.
 #
-# PATTERNS_KIT_REF is pinned to an agentic-coding-patterns commit on `main`.
-# It provides the neutral acq-kits + the hybrid/v1 schema with the `environment`
-# vocabulary (patterns #227, consumed by kit-translate.sh's kit_spec_env) and the
-# playbook kit's REST-tarball fetch (patterns #269, fixes quickstart#203 — private
-# playbook auth on msb via the GitHub REST API instead of git clone).
+# PATTERNS_KIT_REF is pinned to an agentic-coding-patterns commit that provides
+# the neutral acq-kits, the hybrid/v1 schema (including the kit-bundle
+# `provenance` block that the currency check below reads), and the playbook
+# kit's REST-tarball fetch.
 # ============================================================================
 PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-# patterns main @ 5c55bcf — bundle provenance schema + usai-provider provenance
-# block (patterns#273, quickstart#235), on top of the playbook REST-tarball fetch
-# (#269, quickstart#203), the environment vocabulary (#227) and neutral acq-kits
-# (#221/#224). Full 40-char SHA (not an abbreviation): this ref drives a
-# credential-bearing cross-repo kit fetch, so pin it unambiguously for
-# reproducibility. It is ALSO the bundle-version anchor recorded in a sandbox's
-# host-side provenance record (see ACQ_BUILTIN_BUNDLE below + the provenance
-# helpers) so acq can tell a stale sandbox from a current one.
+# Full 40-char SHA (not an abbreviation): this ref drives a credential-bearing
+# cross-repo kit fetch, so pin it unambiguously for reproducibility. It is also
+# the bundle-version anchor recorded in a sandbox's host-side provenance record
+# (see ACQ_BUILTIN_BUNDLE below + the provenance helpers) so acq can tell a
+# stale sandbox from a current one.
 PATTERNS_KIT_REF="5c55bcf9fc77947b145a828f75877797ebd6d178"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
@@ -50,9 +46,8 @@ GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_
 # shellcheck disable=SC2034  # consumed by `acq kit list` in the acq entry point
 ACQ_KIT_NAMES=(usai-provider agentic-coding-playbook zscaler-ca-certificate git-ssh-sign)
 
-# Built-in bundle identity (quickstart#235 / patterns#273). This mirrors the
-# `provenance` block the usai-provider kit declares in the patterns repo at the
-# pinned PATTERNS_KIT_REF. acq records these in a sandbox's host-side provenance
+# Built-in bundle identity. This mirrors the `provenance` block the usai-provider
+# kit declares at the pinned PATTERNS_KIT_REF. acq records these in a sandbox's
 # record so a later `acq run` / `acq kit check` can tell whether an existing
 # sandbox was built from the CURRENTLY pinned bundle. The bundle name + repo are
 # stable identity; the applied SHA (PATTERNS_KIT_REF) is the currency signal.
@@ -66,7 +61,7 @@ ACQ_BUILTIN_BUNDLE_REPO="GSA-TTS/agentic-coding-patterns"
 ACQ_EXTRA_KITS="${ACQ_EXTRA_KITS:-}"
 ACQ_EXTRA_KIT_SOURCES="${ACQ_EXTRA_KIT_SOURCES:-}"
 
-# Update-check opt-out (quickstart#236). When ACQ_UPDATE_CHECK=0, `acq run` never
+# Update-check opt-out. When ACQ_UPDATE_CHECK=0, `acq run` never
 # runs the stale-sandbox check (no provenance comparison, no prompt). The
 # explicit `acq kit check` / `acq kit update` commands still work — the opt-out
 # only silences the automatic per-run check. `acq run --no-update-check` sets
@@ -465,7 +460,7 @@ acq_resolve_backend() {
 }
 
 # ============================================================================
-# Kit-bundle provenance + staleness (quickstart#235 / #236)
+# Kit-bundle provenance + staleness
 # ============================================================================
 # When acq applies the built-in kit bundle to a sandbox it records, HOST-SIDE, a
 # small provenance record naming the bundle and the exact PATTERNS_KIT_REF that
@@ -474,7 +469,7 @@ acq_resolve_backend() {
 # record exists), the sandbox is "stale/legacy" and acq offers a safe in-place
 # refresh.
 #
-# Design (per quickstart#235 consensus + #236 decisions):
+# Design:
 #   - Host-side only. The record lives under XDG_STATE_HOME on the machine
 #     running acq, keyed by backend + sandbox name. No guest exec is needed to
 #     read it, so the check is fast and works even for a stopped sandbox. If the
@@ -630,8 +625,7 @@ acq_bundle_reapply() {
 
 # Automatic stale-sandbox advisory for `acq run` on an EXISTING sandbox. Compares
 # the sandbox's recorded bundle ref against the local pinned PATTERNS_KIT_REF and,
-# when they differ (or no record exists), OFFERS an in-place refresh. Contract
-# (quickstart#236):
+# when they differ (or no record exists), OFFERS an in-place refresh. Contract:
 #   - Opt-out: ACQ_UPDATE_CHECK=0 (or `acq run --no-update-check`) skips entirely.
 #   - Interactive only. Non-interactive (no TTY on stdin) NEVER blocks: it prints
 #     one concise advisory and returns 0 so the run continues.

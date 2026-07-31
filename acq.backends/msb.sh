@@ -1014,8 +1014,8 @@ EOF
     fi
   done
   acq_debug "msb provision: all kits applied; provision complete ($name)"
-  # Record host-side bundle provenance now the built-in bundle is applied
-  # (quickstart#236). Best-effort: a provenance write failure never affects the
+  # Record host-side bundle provenance now the built-in bundle is applied.
+  # Best-effort: a provenance write failure never affects the
   # sandbox. Reached only when provision did not abort earlier under set -e.
   acq_provenance_write msb "$name" || true
 }
@@ -1431,8 +1431,8 @@ acq_backend_ensure_kits_applied() {
     fi
     i=$((i + 1))
   done
-  # Record host-side bundle provenance ONLY when every built-in kit applied
-  # (quickstart#236). msb re-applies all built-in kits idempotently, so on full
+  # Record host-side bundle provenance ONLY when every built-in kit applied.
+  # msb re-applies all built-in kits idempotently, so on full
   # success the sandbox carries the currently pinned bundle. Best-effort write.
   if [ "$ok" -eq 1 ]; then
     acq_provenance_write msb "$name" || true

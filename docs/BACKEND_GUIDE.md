@@ -558,7 +558,7 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
 ## Shipped later
 
 - `acq kit check|update` + host-side kit-bundle provenance and stale-sandbox
-  refresh (quickstart#236, ADR-0016)
+  refresh (see ADR-0016)
 
 ## Still deferred
 
@@ -568,4 +568,4 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
 - `ppp` (Podman-Plus-Proxy) backend — Phase 3, in development at
   [GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)
 - Removal of `qsbx` (Phase 4 / 2.0.0)
-- Advisory "your Quickstart checkout is behind origin" check (quickstart#237)
+- Advisory "your Quickstart checkout is behind origin" check

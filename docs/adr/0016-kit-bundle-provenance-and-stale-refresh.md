@@ -32,9 +32,9 @@ not:
 Nothing inside or beside a sandbox recorded **which** bundle ref was applied, so
 "is this sandbox current?" was unanswerable. Users silently drifted.
 
-This is issue quickstart#236 (PR2 of the epic quickstart#235). PR1 landed the
-additive `provenance` block on the hybrid/v1 kit schema in the patterns repo
-(GSA-TTS/agentic-coding-patterns#273, merged as `5c55bcf`).
+The prerequisite for this work — an additive `provenance` block on the
+`hybrid/v1` kit schema — is provided by the pinned `PATTERNS_KIT_REF` in the
+patterns repo.
 
 ## Decision
 
@@ -98,8 +98,8 @@ in-place refresh.
 - `acq kit check` answers "is this sandbox current?" deterministically and
   offline.
 - No new network or trust surface: provenance is local, and the source of truth
-  stays the pinned SHA. The deferred "checkout behind origin" network check
-  (quickstart#237) is intentionally separate.
+  stays the pinned SHA. A separately-tracked "checkout behind origin" network
+  check is intentionally out of scope here.
 - Fail-open throughout: a lost record, an unreadable file, or a non-TTY run never
   blocks a launch.
 
@@ -123,7 +123,7 @@ in-place refresh.
 
 - **Guest-side provenance** (write inside each sandbox). Survives host-state
   loss, but costs an `exec` per check and needs per-backend paths/ownership.
-  Rejected for PR2 as heavier; revisit if host-local proves insufficient.
+  Rejected as heavier; revisit if host-local proves insufficient.
 - **Git-ancestry staleness** (flag only when the recorded ref is a true ancestor
   of the local pin). More precise, but needs a git call against patterns history,
   adds a network/trust surface, and cannot run offline. Rejected: exact-ref
@@ -150,8 +150,4 @@ removed with no effect on sandboxes. No sandbox state is touched by a rollback.
 
 ## References
 
-- Epic: quickstart#235 (safe kit-bundle update propagation)
-- This PR: quickstart#236
-- Deferred follow-up: quickstart#237 (advisory "checkout behind origin" check)
-- Patterns PR1 (provenance schema): GSA-TTS/agentic-coding-patterns#273 (`5c55bcf`)
 - ADR-0009 (in-place kit healing), ADR-0011 (msb backend and neutral kits)

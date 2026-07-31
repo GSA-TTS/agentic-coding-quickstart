@@ -161,28 +161,21 @@ the active backend automatically. Inspect and manage them with:
 
 ### Keeping existing sandboxes current
 
-`acq` pins the built-in kit bundle (USAi config, playbook, Zscaler CA,
-git-ssh-sign) to one commit of the patterns repo. When that pin is bumped,
-**new** sandboxes get the new bundle right away. For an **existing** sandbox,
-`acq` records which bundle ref it was built from and can tell you if it is behind:
+`acq` pins the built-in kit bundle to one commit of the patterns repo. **New**
+sandboxes get the pinned bundle automatically; for an **existing** sandbox, `acq`
+can tell you if it is behind and refresh it in place:
 
 ```bash
 ./acq kit check my-sandbox        # is this sandbox on the pinned bundle?
 ./acq kit update my-sandbox       # refresh the bundle in place (asks first)
-./acq kit update my-sandbox --yes # refresh without the prompt
 ```
 
-- `acq run` on an existing sandbox that is behind the pin **offers** a refresh.
-  It is interactive, defaults to **No**, and **never blocks** a launch — declining
-  (or a non-interactive run) just continues.
-- A refresh updates the kits **in place**. Your sessions, secrets, unrelated
-  config, and project files are kept. It never deletes or recreates the sandbox.
-- To skip the automatic check: `ACQ_UPDATE_CHECK=0` (whole session) or
-  `./acq run --no-update-check ...` (one run).
-- A sandbox created before this feature has **no record**; `acq` reports it as
-  `unknown` and offers a refresh. Refreshing is safe and idempotent.
+`acq run` also offers a refresh when a sandbox is behind; it defaults to No and
+never blocks a launch. Refreshes are in place (sessions, secrets, and project
+files are kept). Skip the automatic check with `ACQ_UPDATE_CHECK=0` or
+`./acq run --no-update-check`.
 
-See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md) for the
+See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md) for the full
 design and trust model.
 
 ---

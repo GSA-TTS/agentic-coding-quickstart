@@ -442,7 +442,7 @@ case "$subcommand" in
   run|create)
     _sub="$subcommand"
     shift                       # drop the subcommand token; $@ is now its args
-    # Strip acq-owned `--no-update-check` (quickstart#236) BEFORE kit extraction
+    # Strip acq-owned `--no-update-check` BEFORE kit extraction
     # and dispatch so it never reaches the backend CLI. It disables the automatic
     # stale-sandbox check for this one invocation (same effect as
     # ACQ_UPDATE_CHECK=0). Only honored BEFORE the `--` separator, so an
@@ -546,7 +546,7 @@ case "$subcommand" in
       if acq_backend_exists "$local_name"; then
         # Capture staleness BEFORE the heal — ensure_kits_applied rewrites the
         # provenance record to "current", so reading status after it would never
-        # see stale/unknown and the offer below would be dead (quickstart#236).
+        # see stale/unknown and the offer below would be dead.
         _pre_heal_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$local_name")
         acq_backend_ensure_kits_applied "$local_name" || true
         # Existing sandbox: offer a refresh if it predates the pinned bundle.
@@ -581,7 +581,7 @@ case "$subcommand" in
       # attaching by name is a re-attach to a running session where the key
       # was already validated on the original acq run. Matches qsbx behavior.
       # Capture staleness BEFORE the heal (the heal rewrites provenance to
-      # "current"), then heal, then offer a refresh (quickstart#236). Never
+      # "current"), then heal, then offer a refresh. Never
       # blocks; skipped under --no-update-check / ACQ_UPDATE_CHECK=0.
       _pre_heal_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$first")
       acq_backend_ensure_kits_applied "$first" || true

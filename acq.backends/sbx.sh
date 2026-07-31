@@ -343,7 +343,7 @@ acq_backend_provision() {
   fi
   local _rc=$?
   # Record host-side bundle provenance ONLY after a successful create — a failed
-  # create must not leave a record claiming the sandbox is current (#236).
+  # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
     acq_provenance_write sbx "$name" || true
   fi
@@ -417,7 +417,7 @@ acq_backend_apply_kit() {
 # (carries ensure_kit_applied logic from qsbx)
 # ---------------------------------------------------------------------------
 # Injects any ABSENT built-in kit. When ACQ_FORCE_KIT_REAPPLY=1 (set by
-# acq_bundle_reapply for a stale-bundle refresh, quickstart#236) it re-adds ALL
+# acq_bundle_reapply for a stale-bundle refresh) it re-adds ALL
 # built-in kits even when present, so a kit built from an older ref is actually
 # refreshed — the feature-probe alone would skip a present-but-stale kit.
 # Returns 0 only if every built-in kit is present-or-successfully-applied, so a
@@ -477,7 +477,7 @@ acq_backend_ensure_kits_applied() {
   fi
 
   # 3b) git-ssh-sign kit. The original heal loop omitted this built-in kit; a
-  # forced reapply (stale-bundle refresh, #236) MUST cover the whole bundle, so
+  # forced reapply (stale-bundle refresh) MUST cover the whole bundle, so
   # re-add it when forcing. On a normal heal we leave the historical behavior
   # (the kit self-heals via the playbook clone) unchanged.
   if [ "$force" = "1" ]; then
@@ -513,8 +513,8 @@ acq_backend_ensure_kits_applied() {
     fi
   done
 
-  # Record host-side provenance ONLY if every built-in kit is present-or-applied
-  # (quickstart#236). A failed apply must not write a record claiming the sandbox
+  # Record host-side provenance ONLY if every built-in kit is present-or-applied.
+  # A failed apply must not write a record claiming the sandbox
   # is current. Best-effort write: a provenance write failure never fails the run.
   if [ "$ok" -eq 1 ]; then
     acq_provenance_write sbx "$name" || true
