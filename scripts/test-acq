@@ -166,7 +166,12 @@ case "$_msb_sub" in
     case "${2:-}" in
       serve)
         [ "${STUB_MSB_SERVE_DIE:-0}" = "1" ] && exit 1
-        sleep "${STUB_MSB_SERVE_ALIVE:-3}" ;;
+        # Stay alive just past acq's liveness settle window so the kill -0 probe
+        # sees a healthy listener, then exit. Detach stdout/stderr FIRST so this
+        # backgrounded child never holds the harness's capture pipe open (a
+        # lingering fd here blocks the parent's output read → CI hangs).
+        exec >/dev/null 2>&1
+        sleep "${STUB_MSB_SERVE_ALIVE:-0.6}" ;;
       *) : ;;
     esac ;;
   stop) : ;;
@@ -194,9 +199,12 @@ MSBSTUB
 _line="ssh"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
 [ "${STUB_SSH_DIE:-0}" = "1" ] && exit 1
-# Stay alive past acq's liveness settle window (default 1s) so kill -0 sees the
-# forward as established, then exit. acq backgrounds this, so it does not block.
-sleep "${STUB_SSH_ALIVE:-3}"
+# Stay alive just past acq's liveness settle window so kill -0 sees the forward
+# established, then exit. Detach stdout/stderr FIRST so this backgrounded child
+# never holds the harness's capture pipe open (a lingering fd blocks the parent's
+# output read → CI hangs).
+exec >/dev/null 2>&1
+sleep "${STUB_SSH_ALIVE:-0.6}"
 exit 0
 SSHSTUB
   chmod +x "$STUBDIR/ssh"
