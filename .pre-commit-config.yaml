@@ -43,21 +43,16 @@ repos:
     hooks:
       - id: shellcheck
         name: shellcheck (system binary)
-        # `--` terminates option parsing so filenames are never mistaken for
-        # flags; `require_serial` + `pass_filenames` keep pre-commit from ever
-        # invoking shellcheck with an empty argument list (argless shellcheck
-        # reads from stdin and blocks forever, which hangs CI until it is
-        # SIGTERM'd → exit 143). Running once with all files also avoids the
-        # per-batch fan-out that could yield an empty batch.
-        #
-        # `--extended-analysis=false`: shellcheck 0.11's dataflow analysis has a
-        # pathological blow-up when several large scripts (notably
-        # acq.backends/msb.sh + scripts/test-acq) are analyzed in ONE invocation
-        # — it runs effectively forever, hanging CI to the 15-minute cap. The
-        # per-file lint results are unchanged without it; we still get every
-        # syntax/quoting/severity>=warning finding. (Re-enable if a future
-        # shellcheck fixes the slowdown.)
-        entry: shellcheck --severity=warning --extended-analysis=false --
+        # ShellCheck's dataflow analysis blows up pathologically when several
+        # large scripts (notably acq.backends/msb.sh + scripts/test-acq) are
+        # analyzed in ONE invocation — it runs effectively forever, hanging CI to
+        # the 15-minute cap (SIGTERM → exit 143). Each file ALONE lints in 1–3s.
+        # So force ONE FILE PER INVOCATION via `xargs -n1`: this sidesteps the
+        # blow-up on every shellcheck version (the `--extended-analysis` flag only
+        # exists in >=0.9, and CI's shellcheck is older). `bash -c … --` with a
+        # `_` $0 keeps filenames as positional args; `xargs -r` skips an empty
+        # batch (never runs argless, which would block reading stdin).
+        entry: bash -c 'printf "%s\n" "$@" | xargs -r -n1 shellcheck --severity=warning' --
         language: system
         types: [shell]
         pass_filenames: true
