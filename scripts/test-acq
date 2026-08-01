@@ -3318,6 +3318,24 @@ absent_rc=0
 assert_eq "msb ports: LIST exits 0 when no port field found in msb JSON" "0" "$absent_rc"
 cleanup_stubs
 
+# 10b10a. LIST mode under the REAL `set -euo pipefail` acq runs with. This is the
+#         regression guard for the live-host bug: when inspect has no ports, the
+#         dependency-free `grep` (and jq) emit nothing and exit non-zero, which
+#         under `set -e` aborted _acq_msb_ports_from_inspect BEFORE its return 0,
+#         unwinding out of acq_backend_ports past its `return 0` and surfacing
+#         rc=1 to the caller. The rest of test-acq runs WITHOUT -e, so it could
+#         not catch this — assert it explicitly here with errexit ON.
+make_stubs; load_acq
+printf '{"active_config":{"network":{"ports":[]}}}\n' >"$STUBDIR/.msb_inspect_json"
+strict_rc=0
+(
+  set -euo pipefail
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports emptybox
+) >/dev/null 2>&1 || strict_rc=$?
+assert_eq "msb ports: LIST exits 0 under set -euo pipefail with empty ports (live-host regression)" "0" "$strict_rc"
+cleanup_stubs
+
 # 10b11. Genuinely bad args still error (unsupported argument), LIST mode does
 #        NOT swallow a bogus flag like --frobnicate.
 make_stubs; load_acq

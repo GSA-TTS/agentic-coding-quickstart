@@ -145,9 +145,15 @@ failure mode entirely.
 
 - `bash -n acq acq.backends/*.sh` clean.
 - `scripts/test-acq` gains cases (stubbed `msb`/`ssh`): `acq ports --publish H:G`
-  authorizes once, serves, and opens `-L`; invalid ports are rejected before argv.
-- Live end-to-end (`acq ports` against a running msb sandbox, curl the host port)
-  is deferred to a KVM-capable host via `scripts/verify-backends`, per ADR-0011.
+  authorizes once, serves, and opens `-L`; invalid ports are rejected before argv;
+  a serve/forward that dies within the settle window fails the publish closed
+  (no false success, no recorded state); and LIST mode exits 0 under
+  `set -euo pipefail` even with no ports (a query must never hard-fail).
+- Live end-to-end is covered by `scripts/verify-ports-live` (a KVM-capable host,
+  per ADR-0011): it stands up a throwaway msb sandbox + guest listener, then
+  asserts the happy-path publish (host reaches guest through the tunnel), LIST,
+  the fail-closed negative (host port already in use), and teardown. This is the
+  path `scripts/verify-backends` does not exercise.
 
 ## Links
 

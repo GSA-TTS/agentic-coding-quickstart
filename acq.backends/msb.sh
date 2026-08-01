@@ -2056,6 +2056,8 @@ _acq_msb_ports_from_inspect() {
   if command -v jq >/dev/null 2>&1; then
     # msb 0.6.7 shape first; fall back to a few plausible legacy field names.
     # `?//empty` keeps a missing path from erroring; each port -> "H:G".
+    # `|| true`: acq runs under `set -euo pipefail`; a jq that emits nothing (no
+    # ports) can still exit non-zero and would otherwise abort this query.
     lines=$(printf '%s' "$json" | jq -r '
       [ ((.active_config.network.ports?) // (.config.network.ports?)
           // .ports? // .portMappings? // .publishedPorts? // [])[]?
@@ -2064,17 +2066,20 @@ _acq_msb_ports_from_inspect() {
             (((.host_port // .hostPort // .host)|tostring) + ":" +
              ((.guest_port // .guestPort // .guest // .container)|tostring))
           else empty end ]
-      | .[]?' 2>/dev/null)
+      | .[]?' 2>/dev/null) || true
   fi
   if [ -z "$lines" ]; then
     # jq absent/failed: dependency-free. Read the ports array as flat key:value
     # tokens and pull explicit host_port/guest_port pairs. We match ONLY the
     # *_port keys so `host_bind: "127.0.0.1"` can't leak dotted-IP digits.
+    # `|| true`: with no ports the `grep` matches nothing and exits 1, which under
+    # `set -euo pipefail` would abort this LIST query (a query must never hard-
+    # fail); swallow it so an empty result stays a clean rc=0.
     lines=$(printf '%s' "$json" \
       | tr -d '" ' \
       | tr ',{}[]' '\n\n\n\n\n' \
       | grep -E '^(host_port|guest_port):[0-9]{1,5}$' 2>/dev/null \
-      | _acq_msb_pair_lines)
+      | _acq_msb_pair_lines) || true
   fi
   [ -n "$lines" ] || return 0
   printf '%s\n' "$lines" | while IFS= read -r line; do
