@@ -675,5 +675,5 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
 - `acq policy …` — network policy subcommands
 - `ppp` (Podman-Plus-Proxy) backend — Phase 3, in development at
   [GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)
-- Removal of `qsbx` (Phase 4 / 2.0.0)
+- Removal of `qsbx` (slated for 3.0.0)
 - Advisory "your Quickstart checkout is behind origin" check

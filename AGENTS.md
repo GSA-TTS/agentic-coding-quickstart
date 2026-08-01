@@ -38,7 +38,7 @@ my-workspace/                       # Parent folder (user creates this)
 │   ├── AGENTS.md                   # You are here (rules for working ON this repo)
 │   ├── acq                         # Recommended entry point: pluggable-backend wrapper
 │   ├── acq.backends/               # Backend adapters (sbx, msb)
-│   ├── qsbx                        # DEPRECATED: use acq instead (removed in 2.0.0)
+│   ├── qsbx                        # DEPRECATED: use acq instead (slated for removal in 3.0.0)
 │   ├── scripts/                    # helper scripts (USAi key rotation, tests)
 │   └── docs/                       # Setup guides and references
 └── my-app/                         # User's project(s)

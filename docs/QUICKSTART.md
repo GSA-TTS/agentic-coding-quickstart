@@ -13,11 +13,11 @@ review_cycle: "quarterly"
 
 # acq Backend Quickstart
 
-> **`acq` is the recommended entry point.** It replaces `qsbx` and adds a
-> pluggable-backend architecture. As of 1.2.0 it supports two backends —
-> **sbx** (Docker Sandboxes) and **msb** (microsandbox) — sharing one neutral
-> kit vocabulary. Migration from `qsbx` is seamless: replace `./qsbx` with
-> `./acq` — the commands are identical on the sbx backend.
+> **`acq` is the recommended entry point.** It replaces the deprecated `qsbx`
+> and adds a pluggable-backend architecture. As of 1.2.0 it supports two
+> backends — **sbx** (Docker Sandboxes) and **msb** (microsandbox) — sharing one
+> neutral kit vocabulary. Migration from `qsbx` is seamless: replace `./qsbx`
+> with `./acq` — the commands are identical on the sbx backend.
 
 ---
 
@@ -182,7 +182,7 @@ design and trust model.
 
 ## Migration from qsbx
 
-`qsbx` is deprecated as of 1.1.0 and will be removed in 2.0.0. Migration is
+`qsbx` is deprecated as of 1.1.0 and is slated for removal in 3.0.0. Migration is
 **fully backward-compatible**: replace `./qsbx` with `./acq` in all commands.
 
 | Old command | New command | Notes |
