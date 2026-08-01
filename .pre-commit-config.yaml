@@ -43,9 +43,18 @@ repos:
     hooks:
       - id: shellcheck
         name: shellcheck (system binary)
-        entry: shellcheck --severity=warning
+        # Invoke shellcheck ONE FILE PER PROCESS via `xargs -n1`. ShellCheck's
+        # dataflow analysis blows up pathologically when several large scripts
+        # (notably acq.backends/msb.sh + scripts/test-acq) are analyzed in one
+        # invocation — it can run effectively forever, hanging CI to the
+        # timeout cap (SIGTERM → exit 143). Each file alone lints in 1–3s.
+        # `xargs -r` skips an empty batch (never runs argless, which would block
+        # reading stdin). Version-agnostic (no shellcheck-version-gated flags).
+        entry: bash -c 'printf "%s\n" "$@" | xargs -r -n1 shellcheck --severity=warning' --
         language: system
         types: [shell]
+        pass_filenames: true
+        require_serial: true
 
   # acq offline unit suite — runs the host-side logic (backend resolution, name
   # derivation, kit-translate, git-identity/path pre-flight) on every push. This

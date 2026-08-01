@@ -603,8 +603,23 @@ case "$subcommand" in
         acq_backend_attach "$first"
       fi
     else
-      # Pass through.
-      acq_backend_attach "${create_args[@]+"${create_args[@]}"}"
+      # No resolvable target. `acq run` is create-and-attach for a KNOWN AGENT
+      # (`acq run opencode .`) or a re-attach to an EXISTING sandbox by name
+      # (`acq run <sandbox>`). Anything else — no positional at all (e.g.
+      # `acq run --name X -- CMD`), or a first token that is neither a known
+      # agent nor an existing sandbox — is ambiguous. Fail closed with an
+      # actionable message rather than silently no-op'ing an attach (which drops
+      # any post-`--` command and creates nothing).
+      if [ -z "$first" ]; then
+        echo "acq: run: no agent or sandbox specified." >&2
+      else
+        echo "acq: run: '$first' is not a known agent or an existing sandbox." >&2
+      fi
+      echo "  Usage: acq run <agent|sandbox-name> [create-args] [-- CMD]" >&2
+      echo "  Known agents: ${KNOWN_AGENTS# }" >&2
+      echo "  - To run a command in an existing sandbox:  acq exec <name> -- CMD" >&2
+      echo "  - To list sandboxes:                        acq ls" >&2
+      exit 2
     fi
     ;;
 
