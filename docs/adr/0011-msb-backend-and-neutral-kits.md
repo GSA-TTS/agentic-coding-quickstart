@@ -13,6 +13,17 @@ supersedes: []
 
 # ADR-0011: Add msb (microsandbox) Backend and Neutral hybrid/v1 Kit Translation
 
+> **Update (2026-07-31):** The default `ACQ_MSB_IMAGE` is now
+> **`docker.io/docker/sandbox-templates:shell-docker`** — the same Ubuntu-based sbx
+> agent-template image — **not** `node:22-bookworm`. The default therefore already
+> ships the `agent` user, passwordless sudo, the four kit prerequisites, and an
+> agent-writable npm global prefix, so the agent-user/sudo synthesis described
+> below is now a *short-circuit* on the default image and applies only to a
+> plain-OCI **override**. Where this ADR's original text (below) frames
+> `node:22-bookworm` as the default, read it as the override example. See
+> `docs/BACKEND_GUIDE.md` §"Base image requirements" for the current contract.
+> (The original decision text is preserved unchanged for the historical record.)
+
 ## Context and Problem Statement
 
 [ADR-0010](0010-acq-pluggable-backends.md) introduced `acq`, a pluggable-backend

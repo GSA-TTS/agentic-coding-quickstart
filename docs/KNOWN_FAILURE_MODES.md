@@ -590,38 +590,36 @@ Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
 
 ### Root Cause
 
-The USAi provider config is not loaded in the sandbox. With `qsbx`, it is
-delivered by the `usai-provider` sbx **kit** (applied by pinned remote reference
+The USAi provider config is not loaded in the sandbox. With `acq`, it is
+delivered by the `usai-provider` **kit** (applied by pinned remote reference
 from the agentic-coding-patterns repo), which stages an `opencode.jsonc` at
 `~/usai-config/` and, at startup, merges it into OpenCode's global config at
 `~/.config/opencode/opencode.jsonc` (the kit no longer sets `OPENCODE_CONFIG`).
-`qsbx` applies it alongside the `agentic-coding-playbook` and
+`acq` applies it alongside the `agentic-coding-playbook` and
 `zscaler-ca-certificate` kits. This symptom appears when the sandbox was created
-without `qsbx` (so the kits were not applied), or with plain `sbx run` without
-the kit refs.
+without `acq` (so the kits were not applied), or with a plain backend `run`
+(e.g. `sbx run` / `msb run`) without the kit refs.
 
-**Upgrading an existing sandbox (pre-kit).** A sandbox created with an *older*
-`qsbx` (before the kit migration) has no USAi provider config and no playbook
-clone. `qsbx` now **heals it in place**: the next time you `qsbx run` against
-such a sandbox, it detects the missing kit(s) and injects them with `sbx kit
-add`. As of `sbx` 0.35.0 `sbx kit add` **recreates the sandbox container with the
-augmented kit set and preserves state**, so your work and sessions survive — no
-export/recreate/import dance, and no manual steps.
+**Upgrading an existing sandbox (pre-kit).** A sandbox created before the kit
+migration has no USAi provider config and no playbook clone. `acq` now **heals
+it in place**: the next time you `acq run` against such a sandbox, it detects the
+missing kit(s) and injects them (on sbx via `sbx kit add`). As of `sbx` 0.35.0
+`sbx kit add` **recreates the sandbox container with the augmented kit set and
+preserves state**, so your work and sessions survive — no export/recreate/import
+dance, and no manual steps.
 
-> **Historical note.** Earlier `qsbx` releases could *not* auto-heal in place: on
+> **Historical note.** Earlier releases could *not* auto-heal in place: on
 > `sbx` ≤ 0.34.x, `sbx kit add` failed (`failed to read tar header: unexpected
 > EOF`) on any kit shipping a static file — including the `usai-provider` kit
-> ([docker/sbx-releases#133][sbx133]). Those releases gated healing off behind
-> `QSBX_AUTOHEAL_KITS` and offered a destructive session migration instead. `sbx`
-> 0.35.0 fixed #133, so `qsbx` requires `sbx` >= 0.35.0 and heals unconditionally.
+> ([docker/sbx-releases#133][sbx133]). `sbx` 0.35.0 fixed this, so `acq` requires
+> `sbx` >= 0.35.0 on the sbx backend and heals unconditionally.
 
-`qsbx` waits for the sandbox to be ready for `sbx exec` before probing (right
-after a create or a cold start, exec fails with `inspect exec: context deadline
-exceeded` for a few seconds; qsbx polls until a trivial exec succeeds, up to
-`QSBX_EXEC_READY_TIMEOUT`, default 60s) so a cold-start delay is not misread as
-"kit absent".
+`acq` waits for the sandbox to be ready for exec before probing (right after a
+create or a cold start, exec fails with `inspect exec: context deadline
+exceeded` for a few seconds; `acq` polls until a trivial exec succeeds) so a
+cold-start delay is not misread as "kit absent".
 
-> **Detecting a pre-kit sandbox.** qsbx decides a kit is missing by checking for
+> **Detecting a pre-kit sandbox.** `acq` decides a kit is missing by checking for
 > the kit's footprint (e.g. the USAi config file), classifying on the probe's
 > **stdout** (`present`/`absent`), never its exit status — `test -f` exits
 > non-zero when the file is absent, which is indistinguishable from a genuine
@@ -632,18 +630,18 @@ exceeded` for a few seconds; qsbx polls until a trivial exec succeeds, up to
 
 ### Fix
 
-Usually there is nothing to do — re-running `qsbx run opencode <path>` against
-the sandbox heals it in place with `sbx kit add` (state preserved). If a kit
-injection fails, `qsbx` prints the exact manual recovery command. You can also
-run it yourself; remote kit sources must be allowlisted first (`qsbx` does this
-automatically, but by hand it is):
+Usually there is nothing to do — re-running `acq run opencode <path>` against
+the sandbox heals it in place (state preserved). If a kit injection fails, `acq`
+prints the exact manual recovery command. You can also run it yourself; remote
+kit sources must be allowlisted first (`acq` does this automatically, but by hand
+on the sbx backend it is):
 
 ```bash
 sbx settings set kit.allowedSources '["docker.io/","github.com/GSA-TTS/"]'
 REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
-DIR="integrations/isolation/sbx-kits"
-sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/usai-provider-kit"
-sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/playbook-kit"
+DIR="integrations/isolation/acq-kits"
+sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/usai-provider"
+sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/agentic-coding-playbook"
 sbx kit add SANDBOX "${REPO}#ref=<sha>&dir=${DIR}/zscaler-ca-certificate"
 ```
 
@@ -652,7 +650,7 @@ session/context):
 
 ```bash
 sbx rm --force SANDBOX          # discard the sandbox (irreversible)
-./qsbx run opencode /path/to/your/project
+./acq run opencode /path/to/your/project
 ```
 
 ---
@@ -688,7 +686,7 @@ sbx rm <sandbox-name>
 
 ### Symptoms
 
-- `qsbx run opencode ...` exits after printing an OCI runtime error
+- `acq run opencode ...` exits after printing an OCI runtime error
 - Error includes: `OCI runtime exec failed: chdir to '/Users/.../your-project': no such file or directory`
 - The agent process may exit before opening an interactive session
 
@@ -703,21 +701,23 @@ Find the stale sandbox and recreate it from the current workspace:
 ```bash
 sbx ls
 sbx rm <sandbox-name>
-./qsbx run opencode /path/to/your/project
+./acq run opencode /path/to/your/project
 ```
 
-For this quickstart clone itself, the default `qsbx` sandbox name is `qsbx-quickstart-config`:
+For this quickstart clone itself, the default sandbox name is derived as
+`<agent>-<clone-folder>` — for `./acq run opencode .` in a clone named
+`agentic-coding-quickstart` that is `opencode-agentic-coding-quickstart`:
 
 ```bash
-sbx rm qsbx-quickstart-config
-./qsbx run opencode .
+sbx rm opencode-agentic-coding-quickstart
+./acq run opencode .
 ```
 
 If you used an explicit sandbox name, remove that same name and rerun with the same `--name` value:
 
 ```bash
 sbx rm my-project
-./qsbx run --name my-project opencode /path/to/your/project
+./acq run --name my-project opencode /path/to/your/project
 ```
 
 ---
@@ -728,7 +728,7 @@ sbx rm my-project
 
 - Commits made inside a sandbox are signed (`git log --show-signature` looks
   fine locally) but GitHub shows an **Unverified** badge, or no badge.
-- `qsbx` printed a note before attaching: *"no repo-local git user.email is set
+- `acq` printed a note before attaching: *"no repo-local git user.email is set
   for this project."*
 
 ### Root Cause
@@ -759,11 +759,11 @@ git config user.name  "Your Name"
 ```
 
 Then register the **public** half of your signing key on GitHub as a **Signing
-Key**, and make a **new** commit — verification applies going forward. `qsbx`
+Key**, and make a **new** commit — verification applies going forward. `acq`
 checks the project's **repo-local** `user.email` before attaching (the only tier
 the sandbox can see) and warns if it is unset. For signing mechanics and more
 failure modes, see the kit's
-[`TROUBLESHOOTING.md`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/sbx-kits/git-ssh-sign/TROUBLESHOOTING.md).
+[`TROUBLESHOOTING.md`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/acq-kits/git-ssh-sign/TROUBLESHOOTING.md).
 
 > The end-to-end verification/identity gap in the kits themselves is tracked
 > upstream in
@@ -780,9 +780,9 @@ failure modes, see the kit's
 - A **fresh** sandbox authenticates to USAi fine, but an **existing** sandbox
   keeps failing with **HTTP 401** from the models API.
 - You recently **deleted the global USAi secret and re-added it** (rather than
-  using `qsbx usai-rotate-api-key`), and/or you had a stray `USAI_API_KEY`
+  using `acq usai-rotate-api-key`), and/or you had a stray `USAI_API_KEY`
   exported in your shell (`.zshrc`/`.bashrc`) that you commented out.
-- `qsbx run` printed something like:
+- `acq run` printed something like:
 
   ```text
   The global USAi key works in a fresh sandbox, but 'opencode-workspace' still
@@ -809,41 +809,40 @@ place), sbx mints a **new placeholder**. A newly created sandbox picks up the ne
 placeholder, but an **existing** sandbox still carries the **old** placeholder —
 which the proxy can no longer resolve. The proxy then injects an **empty**
 `USAI_API_KEY`, so USAi returns 401. Reading the sandbox's baked-in value can
-even come back **empty**, which is why older `qsbx` versions hit a hard
+even come back **empty**, which is why older versions hit a hard
 `Could not read the sandbox's USAI_API_KEY placeholder. Aborting attach.`
 dead-end here.
 
-> Contrast with `qsbx usai-rotate-api-key` (`scripts/rotate-apikey`), which
+> Contrast with `acq usai-rotate-api-key` (`scripts/rotate-apikey`), which
 > **preserves the existing placeholder** across rotation on purpose — so running
 > sandboxes keep resolving. Deleting + re-adding the secret defeats that.
 
 ### Fix (automatic)
 
-Current `qsbx` detects this exact case — sandbox 401 while a fresh sandbox
-returns 200 — and offers two recovery routes, in order:
-
-1. **Recreate the sandbox, preserving your sessions** (recommended). `qsbx`
-   exports your chat sessions (sanitized), recreates the sandbox the current way
-   (so it gets the correct, current placeholder), and imports the sessions back.
-   This is the same session-preserving migration used for pre-kit sandboxes.
-2. **Non-destructive rebind.** If you decline the recreate, `qsbx` can add a
-   **sandbox-scoped** USAi secret bound to the **current global placeholder** and
-   re-validate — keeping the sandbox as-is. You are prompted for the current USAi
-   key (never passed on the command line).
-
-Just re-run and answer the prompts:
+On attach, `acq run` validates the sandbox's USAi key (`check_key`) and, when it
+is not `200`, prints the rotate steps and offers to **rotate the key in place**
+(`acq usai-rotate-api-key`), then re-validates before attaching. Rotation
+preserves the placeholder, so this resolves the common expired-key case:
 
 ```bash
-./qsbx run opencode /path/to/your/project
+./acq run opencode /path/to/your/project
 ```
+
+> **Note (stale-placeholder recovery).** The deeper two-route recovery for this
+> exact 401-after-delete-and-re-add case — session-preserving recreate, or a
+> non-destructive sandbox-scoped rebind to the current global placeholder — is a
+> `qsbx`-only feature (see [ADR-0008](adr/0008-usai-placeholder-recovery.md)) and
+> is **not yet ported to `acq`**. On `acq`, if an in-place rotate does not clear
+> the 401 (because the stored *placeholder* — not the key value — is stale), use
+> the manual rebind below or recreate the sandbox.
 
 ### Fix (manual)
 
-If you prefer to do it by hand, either recreate the sandbox:
+Either recreate the sandbox:
 
 ```bash
 sbx rm --force <sandbox-name>
-./qsbx run opencode /path/to/your/project
+./acq run opencode /path/to/your/project
 ```
 
 …or rebind the existing sandbox to the current global placeholder. First read
@@ -863,7 +862,7 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
 
 ### Prevention
 
-- Rotate with `qsbx usai-rotate-api-key`, which preserves the placeholder so
+- Rotate with `acq usai-rotate-api-key`, which preserves the placeholder so
   existing sandboxes keep working. Avoid deleting + re-adding the global secret.
 - Remove any `export USAI_API_KEY=...` from your shell profile — the sandbox gets
   its value from sbx injection, and a host env var only causes confusion.
@@ -877,15 +876,15 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
 
 ---
 
-## 24. Pulled/Switched a Branch but qsbx Still Shows Old Behavior
+## 24. Pulled/Switched a Branch but acq Still Shows Old Behavior
 
 ### Symptoms
 
-- You `git pull` or `git checkout` a branch with a fix, but `qsbx`/`qsb` still
+- You `git pull` or `git checkout` a branch with a fix, but `acq` still
   prints wording or behaves in a way that only exists in an **older** version.
 - `git pull origin <branch>` prints **`Already up to date.`** yet nothing changes.
 - You are `cd`'d into a quickstart clone, but the behavior does not match the
-  code you see in that clone's `qsbx`.
+  code you see in that clone's `acq`.
 
 ### Root Cause
 
@@ -895,12 +894,12 @@ Two independent traps, often combined:
    `fetch` + `merge FETCH_HEAD` into the branch you are **currently on**.
    `Already up to date` means the *merge* was a no-op — **not** that your working
    tree now contains the branch. If you never ran `git switch <branch>` /
-   `git checkout <branch>`, your working tree still has the old `qsbx`.
+   `git checkout <branch>`, your working tree still has the old `acq`.
 
-2. **A `qsbx`/`qsb` on your `PATH` points at a *different* clone.** If `qsb` is an
-   alias for the bare name `qsbx` (not `./qsbx`), the shell resolves it via
+2. **An `acq` on your `PATH` points at a *different* clone.** If `acq` is
+   invoked by bare name (not `./acq`), the shell resolves it via
    `PATH`. A symlink in `~/bin` or `/usr/local/bin` may point at a **different
-   clone** than the one you edited/pulled. `qsbx` follows that symlink to find
+   clone** than the one you edited/pulled. `acq` follows that symlink to find
    its own directory, so it runs the *other* clone's code — you update clone A
    and execute clone B.
 
@@ -909,10 +908,10 @@ scripts are located, which can also make "which clone is in effect" confusing.
 
 ### Fix
 
-First, ask qsbx which file and clone are actually running:
+First, ask acq which file and clone are actually running:
 
 ```bash
-qsbx version
+acq version
 ```
 
 It prints the resolved script path, the clone directory, and that clone's git
@@ -933,21 +932,21 @@ Then, depending on which trap you hit:
 
   ```bash
   # Run the clone you actually updated:
-  ./qsbx run opencode <your-project>
+  ./acq run opencode <your-project>
 
   # …or see where the installed one lives and re-point it:
-  readlink -f "$(command -v qsbx)"
+  readlink -f "$(command -v acq)"
   ```
 
-When you run `qsbx run` from inside one quickstart clone while the executing
-`qsbx` lives in another, qsbx now prints a startup note pointing this out.
+When you run `acq run` from inside one quickstart clone while the executing
+`acq` lives in another, acq now prints a startup note pointing this out.
 
 ### Prevention
 
 - Use `git switch <branch>` to change branches; treat `Already up to date` as a
   signal to check `git rev-parse --abbrev-ref HEAD`, not confirmation.
-- Keep a single canonical clone, and make any `qsbx`/`qsb` on `PATH` a symlink to
-  that clone's `qsbx`. Run `qsbx version` when in doubt.
+- Keep a single canonical clone, and make any `acq` on `PATH` a symlink to
+  that clone's `acq`. Run `acq version` when in doubt.
 
 ---
 

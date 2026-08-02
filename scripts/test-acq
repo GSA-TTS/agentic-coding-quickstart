@@ -52,7 +52,11 @@ export ACQ_SBX_KIT_PASSTHROUGH=1
 # Stub scaffolding
 # ---------------------------------------------------------------------------
 # Each test runs in its own temp dir with a stub `sbx` on PATH.
-# The stub logs every call to $CALLS.
+# The stub logs every call to $CALLS. Each stub builds its whole argv line in
+# one string and appends it with a SINGLE `printf … >>"$CALLS"` write: the
+# ADR-0015 port path backgrounds `msb ssh serve` and `ssh -L` concurrently, and
+# a multi-`printf` sequence into the same append fd can interleave into a
+# corrupted line under that concurrency (a source of the concurrency flake this avoids).
 
 make_stubs() {
   STUBDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-test.XXXXXX")
@@ -63,7 +67,11 @@ make_stubs() {
 
   cat >"$STUBDIR/sbx" <<'STUB'
 #!/usr/bin/env bash
-{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+# Build the whole call line in one string and append with a SINGLE write, so
+# concurrently-backgrounded stubs (msb ssh serve + ssh -L) can't interleave
+# their writes into a corrupted line on the shared $CALLS append fd.
+_line="sbx"; for a in "$@"; do _line="$_line $a"; done
+printf '%s\n' "$_line" >>"$CALLS"
 case "${1:-}" in
   version) printf 'sbx version: v0.35.1 abc123\n' ;;
   --help|-h) printf 'SBX-TOPLEVEL-HELP\n' ;;
@@ -106,13 +114,19 @@ STUB
   # records after the first). Keeping the stub faithful guards against regressions.
   cat >"$STUBDIR/msb" <<'MSBSTUB'
 #!/usr/bin/env bash
-{ printf 'msb'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+_line="msb"; for a in "$@"; do _line="$_line $a"; done
+printf '%s\n' "$_line" >>"$CALLS"
 _msb_sub="${1:-}"
 case "$_msb_sub" in
   --version|-V) printf 'msb 0.6.6\n' ;;
   --help|-h) printf 'MSB-TOPLEVEL-HELP for msb\n' ;;
   doctor) exit 0 ;;
   create) : >"$STUBDIR/.msb_created" ;;
+  inspect)
+    # `msb inspect <name> --format json` — emit a create-time published-ports
+    # JSON fixture if the test planted one, else nothing (models an absent field
+    # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
+    [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
   list|ls)
     [ -f "$STUBDIR/.msb_sandbox_list" ] && cat "$STUBDIR/.msb_sandbox_list" ;;
   exec)
@@ -143,7 +157,23 @@ case "$_msb_sub" in
       *"cat /var/lib/acq/workspace"*) printf '%s' "${STUB_RECORDED_WORKSPACE:-}" ;;
       *) : ;;
     esac ;;
-  ssh)  : ;;
+  ssh)
+    # `msb ssh authorize …` is logged (above) and is a no-op. `msb ssh serve …`
+    # is BACKGROUNDED by acq, which then probes it with kill -0 after a settle
+    # window to confirm the listener came up; stay alive past that window so the
+    # publish path sees a healthy serve (STUB_MSB_SERVE_DIE=1 models a serve that
+    # dies immediately, e.g. bind failure). A plain `msb ssh` is a no-op.
+    case "${2:-}" in
+      serve)
+        [ "${STUB_MSB_SERVE_DIE:-0}" = "1" ] && exit 1
+        # Stay alive just past acq's liveness settle window so the kill -0 probe
+        # sees a healthy listener, then exit. Detach stdout/stderr FIRST so this
+        # backgrounded child never holds the harness's capture pipe open (a
+        # lingering fd here blocks the parent's output read → CI hangs).
+        exec >/dev/null 2>&1
+        sleep "${STUB_MSB_SERVE_ALIVE:-0.6}" ;;
+      *) : ;;
+    esac ;;
   stop) : ;;
   remove|rm) : ;;
   copy|cp) : ;;
@@ -157,14 +187,59 @@ exit 0
 MSBSTUB
   chmod +x "$STUBDIR/msb"
 
+  # Stub `ssh` and `ssh-keygen` for the ADR-0015 post-hoc port path. Both log
+  # every call to $CALLS. `ssh -N -L …` would normally block foregrounded; the
+  # stub logs, then stays alive briefly so acq's post-background liveness probe
+  # (kill -0 after ACQ_MSB_*_SETTLE) sees a HEALTHY forward — modelling a
+  # successful publish. A test that wants to model an immediately-dying forward
+  # sets STUB_SSH_DIE=1 (exit at once, before the settle window). `ssh-keygen -f`
+  # writes throwaway key + .pub files so the key-ensure/authorize path proceeds.
+  cat >"$STUBDIR/ssh" <<'SSHSTUB'
+#!/usr/bin/env bash
+_line="ssh"; for a in "$@"; do _line="$_line $a"; done
+printf '%s\n' "$_line" >>"$CALLS"
+[ "${STUB_SSH_DIE:-0}" = "1" ] && exit 1
+# Stay alive just past acq's liveness settle window so kill -0 sees the forward
+# established, then exit. Detach stdout/stderr FIRST so this backgrounded child
+# never holds the harness's capture pipe open (a lingering fd blocks the parent's
+# output read → CI hangs).
+exec >/dev/null 2>&1
+sleep "${STUB_SSH_ALIVE:-0.6}"
+exit 0
+SSHSTUB
+  chmod +x "$STUBDIR/ssh"
+
+  cat >"$STUBDIR/ssh-keygen" <<'KEYGENSTUB'
+#!/usr/bin/env bash
+_line="ssh-keygen"; for a in "$@"; do _line="$_line $a"; done
+printf '%s\n' "$_line" >>"$CALLS"
+# Emit throwaway key material at -f <path> so downstream authorize/forward runs.
+_f=""; _prev=""
+for a in "$@"; do [ "$_prev" = "-f" ] && { _f="$a"; break; }; _prev="$a"; done
+if [ -n "$_f" ]; then
+  mkdir -p "$(dirname "$_f")" 2>/dev/null || true
+  printf 'STUB-PRIVATE-KEY\n' >"$_f"
+  printf 'ssh-ed25519 AAAASTUBPUBKEY acq-msb\n' >"${_f}.pub"
+fi
+exit 0
+KEYGENSTUB
+  chmod +x "$STUBDIR/ssh-keygen"
+
   PATH="$STUBDIR:$PATH"
   export PATH CALLS STUBDIR
+  # Keep acq's post-background liveness probe fast in tests (real default is 1s):
+  # the stubbed serve/ssh children stay alive ~3s (STUB_*_ALIVE), comfortably
+  # past this settle window, so a healthy publish is observed without slow tests.
+  export ACQ_MSB_SERVE_SETTLE="0.3" ACQ_MSB_FORWARD_SETTLE="0.3"
   # Export ACQ_SCRIPT_DIR so acq can locate its backends.
   export ACQ_SCRIPT_DIR="$REPO_ROOT"
   # Force the acq secret store to a throwaway file backend (never touch the real
   # OS keychain in tests).
   export ACQ_SECRET_STORE_DIR="$STUBDIR/secrets"
-  # Isolate the host-side kit-bundle provenance store (quickstart#236) to this
+  # Force acq's state dir (ssh keys, port PIDs — ADR-0015) under the throwaway
+  # STUBDIR so tests never write to the real ~/.local/state/acq.
+  export ACQ_STATE_DIR="$STUBDIR/state"
+  # Isolate the host-side kit-bundle provenance store to this
   # test's temp dir so provenance reads/writes never touch the real XDG state.
   export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
 }
@@ -369,7 +444,7 @@ log=$(cat "$CALLS")
 assert_contains "dispatch: unknown passthrough -> sbx" "$log" "sbx policy"
 cleanup_stubs
 
-# --kit interception (#222): a user-supplied `--kit <ref>` on run/create MUST be
+# --kit interception: a user-supplied `--kit <ref>` on run/create MUST be
 # folded into acq's translated kit list, NOT forwarded to the backend as a raw
 # flag+value trailing the create args. With ACQ_SBX_KIT_PASSTHROUGH=1 kit refs
 # pass through untranslated, so the ref appears in the sbx create line as a
@@ -377,7 +452,7 @@ cleanup_stubs
 # the create positionals are clean.
 #
 # NOTE: the workspace positional MUST be a real, existing directory — acq's
-# pre-flight (#216) aborts create/run on a nonexistent path before it ever
+# pre-flight aborts create/run on a nonexistent path before it ever
 # reaches `sbx create`. Use a throwaway temp dir as the workspace.
 _kitproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-kitproj.XXXXXX")
 make_stubs
@@ -519,7 +594,7 @@ assert_contains "secret: existing github -> rm hint" "$out" "sbx secret rm -g gi
 assert_not_contains "secret: existing github -> no set call" "$log" "sbx secret set -g github"
 cleanup_stubs
 
-# 5d1. Scope-awareness regression (issue #229): github existing under a DIFFERENT
+# 5d1. Scope-awareness regression: github existing under a DIFFERENT
 #      scope must NOT block seeding the target scope. Previously a blind substring
 #      match over the whole `sbx secret ls` produced a false "already exists"
 #      whenever any other sandbox had github (the verify-backends sbx seed skip).
@@ -537,7 +612,7 @@ cleanup_stubs
 
 # 5d2. Same, sandbox-scoped: setting `mybox github` when github exists only under
 #      `otherbox` must proceed (this is exactly the verify-backends seed case,
-#      and issue #229: a token scoped to sandbox A must not block sandbox B).
+#      and a token scoped to sandbox A must not block sandbox B).
 make_stubs
 printf 'SCOPE      TYPE      NAME     SECRET\notherbox   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
 export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
@@ -547,7 +622,7 @@ log=$(cat "$CALLS")
 assert_contains "secret: sandbox github not blocked by other scope (feeds sbx)" "$log" "sbx secret set mybox github"
 cleanup_stubs
 
-# 5d2b. Positive case (issue #229): the SAME sandbox already having github IS a
+# 5d2b. Positive case: the SAME sandbox already having github IS a
 #       real collision -> stop with a sandbox-scoped rm hint, no set call.
 make_stubs
 printf 'SCOPE                     TYPE      NAME     SECRET\nopencode-agentic-coding   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
@@ -847,6 +922,9 @@ make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  # Pin PATH to ONLY the stub dir so a real sbx/msb on the developer's host
+  # PATH cannot leak into auto-detection.
+  PATH="$STUBDIR"; export PATH
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
@@ -862,7 +940,7 @@ make_stubs; load_acq
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
   rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
-  # Constrain PATH to the stub dir ONLY (#217): _auto_detect_backend runs
+  # Constrain PATH to the stub dir ONLY: _auto_detect_backend runs
   # `command -v sbx`, which would otherwise find a REAL sbx on the developer's
   # base PATH and make this fall back-to-msb assertion flake to "sbx". Provide a
   # coreutils dir so the sourced scripts still find standard tools.
@@ -893,6 +971,18 @@ make_stubs; load_acq
 ) 2>/dev/null; pass "msb: --backend msb accepted"
 cleanup_stubs
 
+# 8c1. Capability flags: msb advertises SUPPORTS_SNAPSHOTS=0. msb DOES have
+#      a `msb snapshot` verb, but acq exposes no `snapshot` command and wiring one
+#      is beyond sbx parity — so the matrix reflects what acq surfaces, not what
+#      msb can do. Load the adapter in a subshell and read the declared flag.
+make_stubs; load_acq
+snap_flag=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  printf '%s' "$ACQ_BACKEND_SUPPORTS_SNAPSHOTS"
+)
+assert_eq "msb: SUPPORTS_SNAPSHOTS=0 (matches acq's surfaced verbs, #225)" "0" "$snap_flag"
+cleanup_stubs
+
 # 8d. Dispatch: `acq --backend msb ls` calls `msb list` (or ls alias).
 make_stubs
 out=$(ACQ_BACKEND=msb "$ACQ" ls 2>/dev/null)
@@ -914,11 +1004,13 @@ log=$(cat "$CALLS")
 assert_contains "msb: rm -> msb remove --force" "$log" "msb remove --force mybox"
 cleanup_stubs
 
-# 8g. Dispatch: `acq --backend msb exec mybox -- echo hi` calls `msb exec`.
+# 8g. Dispatch: `acq --backend msb exec mybox -- echo hi` calls `msb exec` as the
+#      agent user (-u agent, HOME=/home/agent) — never root (see 8n6b). Flags
+#      precede NAME; the `-- CMD` passthrough follows NAME unchanged.
 make_stubs
 out=$(ACQ_BACKEND=msb "$ACQ" exec mybox -- echo hi 2>/dev/null)
 log=$(cat "$CALLS")
-assert_contains "msb: exec -> msb exec" "$log" "msb exec mybox"
+assert_contains "msb: exec -> msb exec (as agent, HOME set)" "$log" "msb exec -u agent -e HOME=/home/agent mybox -- echo hi"
 cleanup_stubs
 
 # 8h. `acq --backend msb version` reports msb backend + version.
@@ -989,11 +1081,12 @@ assert_contains "msb: provision enables --tls-intercept (needed for substitution
 assert_contains "msb: provision binds USAi via --secret" "$prov_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
 # GitHub IS now bound — to the REST API host ONLY (api.github.com), the path msb
 # substitutes. The playbook kit fetches a tarball there instead of git-cloning
-# github.com/codeload (which msb does not substitute — quickstart#203).
+# github.com/codeload (which msb does not substitute).
 assert_contains "msb: provision binds github to api.github.com (REST path msb substitutes)" "$prov_log" "--secret GITHUB_TOKEN@api.github.com"
 assert_not_contains "msb: provision does NOT bind github to github.com (git transport unsubstituted)" "$prov_log" "GITHUB_TOKEN@github.com"
 assert_not_contains "msb: provision does NOT bind github to codeload" "$prov_log" "GITHUB_TOKEN@codeload"
 assert_eq "msb: provision never leaks secret values to argv" "CLEAN" "$prov_leaks"
+# Workspace is mounted at the SAME absolute path in the guest (sbx-parity), not
 # Workspace is mounted at the SAME absolute path in the guest (sbx-parity), not
 # remapped under /home/agent (which fails to mount pre-user-create). acq
 # canonicalizes the host path first (macOS /tmp -> /private/tmp symlink), so the
@@ -1001,9 +1094,260 @@ assert_eq "msb: provision never leaks secret values to argv" "CLEAN" "$prov_leak
 _prov_ws=$(canonicalize_path /tmp)
 assert_contains "msb: workspace mounted at same guest path (sbx-parity)" "$prov_log" "--volume ${_prov_ws}:${_prov_ws}"
 assert_not_contains "msb: workspace NOT remapped under /home/agent" "$prov_log" "--volume ${_prov_ws}:/home/agent/workspace"
+# Default base image: msb defaults to the sbx agent-template image (which ships
+# the `agent` user, sudo, prereqs, and an agent-writable npm prefix), matching
+# sbx by construction. The image is the trailing positional on `msb create`.
+assert_contains "msb: create uses the sbx agent-template default image" "$prov_log" "msb create --name provbox"
+assert_contains "msb: default image is docker/sandbox-templates:shell-docker" "$prov_log" "docker.io/docker/sandbox-templates:shell-docker"
+assert_not_contains "msb: default image is NOT plain node:22-bookworm" "$prov_log" "docker.io/library/node:22-bookworm"
 cleanup_stubs
 
-# 8m1b. Multi-workspace: every workspace positional after the agent is mounted at
+# 8m00. ACQ_MSB_IMAGE override: a user-supplied image is passed through verbatim
+#       to `msb create` (plain-OCI overrides remain supported; the agent-user /
+#       sudo synthesis handles them). Assert the override, not the default.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/imgover-secrets"
+  export ACQ_MSB_IMAGE="docker.io/library/node:22-bookworm"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision imgoverbox shell /tmp >/dev/null 2>&1
+)
+imgover_log=$(cat "$CALLS")
+assert_contains "msb: ACQ_MSB_IMAGE override passed through to create" "$imgover_log" "docker.io/library/node:22-bookworm"
+assert_not_contains "msb: override suppresses the default image" "$imgover_log" "docker.io/docker/sandbox-templates:shell-docker"
+cleanup_stubs
+
+# 8m0. GENERIC custom endpoint binding: a service stored
+#      via `acq secret set SVC --host H --env E` records a non-secret endpoint
+#      sidecar; msb provision must then bind it generically via `--secret E@H`,
+#      the real value never touching argv — mirroring usai/github which stay
+#      bound exactly as before. A service with NO recorded host/env must NOT emit
+#      a bogus flag (the old `*)`-arm empty behavior).
+make_stubs; load_acq
+: > "$CALLS"
+gen_leaks=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/gen-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  # A custom endpoint stored via `acq secret set -g SBX --host … --env …`.
+  ACQ_SECRET_TEST_VALUE="SBX-REAL-VALUE" acq_secret_set_interactive SBX "" "api.example.com" "API_KEY" >/dev/null 2>&1
+  # usai + github so their explicit bindings still fire (regression guard).
+  printf 'USAI-REAL-VALUE\n' | acq_secret_store "$(_acq_secret_key usai)"
+  printf 'GH-REAL-VALUE\n'   | acq_secret_store "$(_acq_secret_key github)"
+  # A service stored with NO host/env sidecar (value only) — must NOT be bound.
+  printf 'NOMAP-VALUE\n'     | acq_secret_store "$(_acq_secret_key nomap)"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision genbox shell /tmp >/dev/null 2>&1
+  # No real secret value may appear in the recorded msb calls.
+  if grep -q 'SBX-REAL-VALUE\|USAI-REAL-VALUE\|GH-REAL-VALUE\|NOMAP-VALUE' "$CALLS"; then echo LEAK; else echo CLEAN; fi
+)
+gen_log=$(cat "$CALLS")
+assert_contains "msb#226: custom endpoint bound generically (--secret API_KEY@api.example.com)" "$gen_log" "--secret API_KEY@api.example.com"
+assert_contains "msb#226: usai still bound as before"   "$gen_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
+assert_contains "msb#226: github still bound as before" "$gen_log" "--secret GITHUB_TOKEN@api.github.com"
+# A value-only service (no host/env sidecar) must not emit a bogus flag.
+assert_not_contains "msb#226: no bogus flag for service without host/env" "$gen_log" "--secret @"
+assert_not_contains "msb#226: value-only service 'nomap' not bound" "$gen_log" "nomap"
+assert_eq "msb#226: no secret value ever leaks to argv" "CLEAN" "$gen_leaks"
+cleanup_stubs
+
+# 8m0b. The endpoint sidecar is NON-SECRET (host + env only) and 0600. Setting a
+#       custom endpoint must NOT persist the value in the sidecar file.
+make_stubs; load_acq
+side_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/side-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  ACQ_SECRET_TEST_VALUE="SIDE-SECRET-VALUE" acq_secret_set_interactive SBX "" "api.example.com" "API_KEY" >/dev/null 2>&1
+  # Resolve the sidecar back (host<TAB>env) and show it (safe — non-secret).
+  printf 'meta=%s\n' "$(acq_secret_meta_resolve SBX | tr '\t' '/')"
+  # The sidecar file itself must not contain the secret value.
+  metafile="$STUBDIR/side-secrets/meta/acq.SBX"
+  if [ -f "$metafile" ] && grep -q 'SIDE-SECRET-VALUE' "$metafile"; then echo VALUE_IN_META; else echo META_CLEAN; fi
+  # Perms are 0600.
+  stat -c '%a' "$metafile" 2>/dev/null || stat -f '%Lp' "$metafile" 2>/dev/null || echo "?"
+)
+assert_contains "msb#226: sidecar resolves host/env" "$side_out" "meta=api.example.com/API_KEY"
+assert_contains "msb#226: sidecar never stores the secret value" "$side_out" "META_CLEAN"
+assert_contains "msb#226: sidecar file is 0600" "$side_out" "600"
+cleanup_stubs
+
+# 8m0c. `acq secret set -g SBX --host … --env …` on the msb backend (through the
+#       real dispatcher) records the sidecar AND live-binds a running sandbox via
+#       `msb modify <box> --secret API_KEY@api.example.com`, value never on argv.
+make_stubs; load_acq
+printf 'genrunbox\n' > "$STUBDIR/.msb_sandbox_list"
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/genrun-secrets"
+  export ACQ_SECRET_TEST_VALUE="GENRUN-SECRET"
+  ACQ_BACKEND=msb "$ACQ" secret set genrunbox SBX --host api.example.com --env API_KEY >/dev/null 2>&1
+)
+genrun_log=$(cat "$CALLS")
+assert_contains "msb#226: custom endpoint live-binds running sandbox" "$genrun_log" "msb modify genrunbox --secret API_KEY@api.example.com"
+if grep -q 'GENRUN-SECRET' "$CALLS"; then
+  fail "msb#226: custom endpoint value must NOT appear in msb argv" "leaked into $CALLS"
+else
+  pass "msb#226: custom endpoint value never leaks to msb argv (passed via env)"
+fi
+cleanup_stubs
+
+# 8m0d. Dotted service/sandbox names cannot make the
+#       shared `acq.<sandbox>.<service>` key non-injective. A GLOBAL service
+#       literally named "foo.bar" and a SCOPED service "bar" in sandbox "foo"
+#       would BOTH map to the key `acq.foo.bar` — colliding in the value store
+#       and mis-scoped by meta_list's old "split on the first dot". The store
+#       now fails closed on a dotted name (the choke point both stores share),
+#       and meta_list anchors scope on the requested sandbox rather than
+#       guessing from the first dot. These prove: (a) a dotted name is refused
+#       at the store boundary — the public `acq secret set` path cannot reach a
+#       collision; (b) meta_list + meta_resolve AGREE on scope; (c) scoped vs
+#       global services never collide.
+make_stubs
+dot_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/dot-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+
+  # (a) _acq_secret_key fails closed on a dotted service or sandbox — the single
+  # choke point both the value store and the meta sidecar route through.
+  if _acq_secret_key 'foo.bar' >/dev/null 2>&1; then printf 'key-dotted-svc=allowed\n'; else printf 'key-dotted-svc=refused\n'; fi
+  if _acq_secret_key 'svc' 'my.box' >/dev/null 2>&1; then printf 'key-dotted-sb=allowed\n'; else printf 'key-dotted-sb=refused\n'; fi
+  # A normal (dot-free) name still works.
+  printf 'key-ok=%s\n' "$(_acq_secret_key 'svc' 'mybox')"
+
+  # (a') The public set path (acq_secret_set_interactive) refuses a dotted
+  # service and stores NOTHING (no aliased value, no sidecar).
+  ACQ_SECRET_TEST_VALUE='V' acq_secret_set_interactive 'foo.bar' '' 'api.example.com' 'API_KEY' >/dev/null 2>&1 \
+    && printf 'set-dotted=stored\n' || printf 'set-dotted=refused\n'
+  # meta_store directly also refuses it (defense in depth).
+  acq_secret_meta_store 'foo.bar' '' 'api.example.com' 'API_KEY' >/dev/null 2>&1 \
+    && printf 'meta-dotted=stored\n' || printf 'meta-dotted=refused\n'
+
+  # (b) + (c): a GLOBAL service "gsvc", a service "svc" scoped to sandbox "foo",
+  # and a service "svc" scoped to a DIFFERENT sandbox "otherbox". meta_list for
+  # sandbox "foo" must show the global + foo-scoped services and NOT otherbox's;
+  # meta_resolve must agree for each listed entry, and the scoped/global "svc"
+  # values must NOT collide.
+  ACQ_SECRET_TEST_VALUE='GV'  acq_secret_set_interactive 'gsvc' ''         'api.g.com' 'GKEY' >/dev/null 2>&1
+  ACQ_SECRET_TEST_VALUE='FV'  acq_secret_set_interactive 'svc'  'foo'      'api.f.com' 'FKEY' >/dev/null 2>&1
+  ACQ_SECRET_TEST_VALUE='OV'  acq_secret_set_interactive 'svc'  'otherbox' 'api.o.com' 'OKEY' >/dev/null 2>&1
+
+  printf 'list-foo=[%s]\n'   "$(acq_secret_meta_list foo | sort | tr '\n' ' ')"
+  printf 'list-none=[%s]\n'  "$(acq_secret_meta_list    | sort | tr '\n' ' ')"
+
+  # meta_list(foo) lists a service iff meta_resolve(service, foo) finds it: agreement.
+  agree=yes
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    acq_secret_meta_resolve "$s" foo >/dev/null 2>&1 || agree=no
+  done <<LIST
+$(acq_secret_meta_list foo)
+LIST
+  printf 'list-resolve-agree=%s\n' "$agree"
+
+  # scoped vs global "svc" resolve to their OWN hosts — no collision.
+  printf 'resolve-foo-svc=%s\n'    "$(acq_secret_meta_resolve svc foo | cut -f1)"
+  printf 'resolve-global-svc=%s\n' "$(acq_secret_meta_resolve svc | cut -f1 || echo NONE)"
+  # A global "svc" was never set (only scoped) — meta_resolve svc (no sandbox)
+  # must NOT leak foo's or otherbox's scoped sidecar.
+  acq_secret_meta_resolve svc >/dev/null 2>&1 && printf 'global-svc-exists=yes\n' || printf 'global-svc-exists=no\n'
+
+  # Value store must NOT collide either: global "foo.bar" was refused, so the
+  # scoped ("svc"@"foo") and global ("gsvc") values stand alone.
+  printf 'val-foo-svc=%s\n' "$(acq_secret_resolve svc foo)"
+  printf 'val-gsvc=%s\n'    "$(acq_secret_resolve gsvc)"
+)
+assert_contains "234: dotted service name refused at key layer"        "$dot_out" "key-dotted-svc=refused"
+assert_contains "234: dotted sandbox name refused at key layer"        "$dot_out" "key-dotted-sb=refused"
+assert_contains "234: dot-free name still keys as acq.<sandbox>.<svc>" "$dot_out" "key-ok=acq.mybox.svc"
+assert_contains "234: public set refuses dotted service (nothing stored)" "$dot_out" "set-dotted=refused"
+assert_contains "234: meta_store refuses dotted service"               "$dot_out" "meta-dotted=refused"
+assert_contains "234: meta_list(foo) shows global service"             "$dot_out" "gsvc"
+assert_contains "234: meta_list(foo) shows foo-scoped service"         "$dot_out" "list-foo=[gsvc svc ]"
+assert_contains "234: meta_list(none) shows only global service"       "$dot_out" "list-none=[gsvc ]"
+assert_contains "234: meta_list and meta_resolve agree on scope"       "$dot_out" "list-resolve-agree=yes"
+assert_contains "234: foo-scoped svc resolves to foo host"             "$dot_out" "resolve-foo-svc=api.f.com"
+assert_contains "234: no global svc leaks from a scoped-only service"  "$dot_out" "global-svc-exists=no"
+assert_contains "234: value store — foo-scoped svc value intact"       "$dot_out" "val-foo-svc=FV"
+assert_contains "234: value store — global gsvc value intact"          "$dot_out" "val-gsvc=GV"
+cleanup_stubs
+
+# 8m0e. Backward-compat: a LEGACY dotted-global sidecar written
+#       by an OLDER build (e.g. the file `acq.foo.bar`, from before the store
+#       rejected dotted names) must never crash meta_list and must never be
+#       mis-bound. Under the requested sandbox "mybox" (which does not match the
+#       leading "foo" segment) it is simply not listed — the old "split on first
+#       dot" would have mis-scoped it as sandbox=foo/service=bar for ANY caller;
+#       now it is inert unless a caller explicitly targets that exact prefix.
+make_stubs
+legacy_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/legacy-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  mkdir -p "$ACQ_SECRET_META_DIR"
+  # Plant a legacy dotted-global sidecar directly (bypassing the new guard).
+  printf 'api.example.com\tAPI_KEY\n' > "$ACQ_SECRET_META_DIR/acq.foo.bar"
+  # Also a normal current-build global so we prove listing still works.
+  ACQ_SECRET_TEST_VALUE='V' acq_secret_set_interactive 'clean' '' 'api.clean.com' 'CKEY' >/dev/null 2>&1
+  # meta_list for an unrelated sandbox: no crash, legacy dotted key not surfaced
+  # as a bogus composite, clean global still listed.
+  printf 'list-mybox=[%s]\n' "$(acq_secret_meta_list mybox | sort | tr '\n' ' ')"
+  printf 'list-none=[%s]\n'  "$(acq_secret_meta_list       | sort | tr '\n' ' ')"
+)
+assert_contains "234(compat): legacy dotted global not mis-listed for unrelated sandbox" "$legacy_out" "list-mybox=[clean ]"
+assert_contains "234(compat): legacy dotted global not mis-listed globally"             "$legacy_out" "list-none=[clean ]"
+cleanup_stubs
+
+# 8m0f. `acq secret ls` (msb): lists acq-managed secrets — scope, service, whether
+#       a VALUE is present, and the ENV@HOST binding — and NEVER prints a value.
+#       Covers a global built-in (usai), a global custom endpoint (its sidecar
+#       binding), and a scoped built-in (github). Also checks scope filtering.
+make_stubs; load_acq
+ls_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ls-secrets"
+  export ACQ_SECRET_TEST_VALUE="LS-SECRET-VALUE"
+  ACQ_BACKEND=msb "$ACQ" secret set -g usai >/dev/null 2>&1
+  ACQ_BACKEND=msb "$ACQ" secret set -g myapi --host api.example.com --env API_KEY >/dev/null 2>&1
+  ACQ_BACKEND=msb "$ACQ" secret set lsbox github >/dev/null 2>&1
+  echo "=== all ==="
+  ACQ_BACKEND=msb "$ACQ" secret ls 2>&1
+  echo "=== global ==="
+  ACQ_BACKEND=msb "$ACQ" secret ls -g 2>&1
+  echo "=== scoped ==="
+  ACQ_BACKEND=msb "$ACQ" secret ls lsbox 2>&1
+)
+assert_contains "secret ls(msb): header present"              "$ls_out" "SCOPE"
+assert_contains "secret ls(msb): global usai binding shown"   "$ls_out" "USAI_API_KEY@api.gsa.usai.gov"
+assert_contains "secret ls(msb): global custom endpoint shown" "$ls_out" "API_KEY@api.example.com"
+assert_contains "secret ls(msb): scoped github row shown"     "$ls_out" "GITHUB_TOKEN@api.github.com"
+# The value must NEVER be printed by `ls`.
+assert_not_contains "secret ls(msb): never prints a secret value" "$ls_out" "LS-SECRET-VALUE"
+# Scope filtering: `-g` excludes the scoped github row; `lsbox` includes only it.
+g_only=$(printf '%s\n' "$ls_out" | sed -n '/=== global ===/,/=== scoped ===/p')
+assert_not_contains "secret ls -g(msb): excludes scoped github" "$g_only" "GITHUB_TOKEN@api.github.com"
+s_only=$(printf '%s\n' "$ls_out" | sed -n '/=== scoped ===/,$p')
+assert_contains     "secret ls SANDBOX(msb): includes scoped github" "$s_only" "GITHUB_TOKEN@api.github.com"
+assert_not_contains "secret ls SANDBOX(msb): excludes global usai"   "$s_only" "USAI_API_KEY@api.gsa.usai.gov"
+cleanup_stubs
+
+# 8m0g. `acq secret ls` with an empty store prints just the header (exit 0, no
+#       rows, no crash).
+make_stubs; load_acq
+empty_ls=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/empty-ls-secrets"
+  ACQ_BACKEND=msb "$ACQ" secret ls 2>&1
+)
+empty_rc=$?
+assert_contains "secret ls(msb): empty store still prints header" "$empty_ls" "SCOPE"
+assert_eq "secret ls(msb): empty store exits 0" "0" "$empty_rc"
+cleanup_stubs
+
+
 #       its own absolute host path (sbx-parity), a trailing :ro is preserved, and
 #       the recorded start dir is the FIRST (primary) workspace regardless of how
 #       many mounts are given (docs/QUICKSTART_SBX.md: "Primary workspace — the
@@ -1117,9 +1461,12 @@ assert_contains "msb: missing workspace is a hard failure" "$missing_ws_out" "RC
 cleanup_stubs
 
 # 8n. msb provision creates the agent user and runs a uid-1000 kit command as
-#     `agent` with HOME=/home/agent (NOT as the base image's uid-1000 user),
-#     and chowns staged /home/agent files to agent. Uses a kit fixture whose
-#     startup command runs as user "1000" and reads a /home/agent file.
+#     `agent` with HOME=/home/agent (NOT as a plain-OCI base's uid-1000 user,
+#     e.g. `node` on a node:22-bookworm override), and chowns staged /home/agent
+#     files to agent. Uses a kit fixture whose startup command runs as user
+#     "1000" and reads a /home/agent file. (The synthesis is a short-circuit on
+#     the default image, which already ships `agent`; this exercises the
+#     plain-OCI-override path it must still handle.)
 make_stubs; load_acq
 : > "$CALLS"
 (
@@ -1153,7 +1500,7 @@ SPEC
 agent_log=$(cat "$CALLS")
 assert_contains "msb: provision creates agent user" "$agent_log" "agent"
 # The uid-1000 startup command must run as `agent` with HOME=/home/agent,
-# never as `-u 1000` (which would be the base image's `node` user). acq also
+# never as `-u 1000` (which would be a plain-OCI base's `node` user). acq also
 # injects non-interactive git guards (GIT_TERMINAL_PROMPT=0 etc.) between the
 # HOME env and the argv, so assert the stable prefix rather than the full line.
 assert_contains "msb: uid-1000 kit cmd runs as agent" "$agent_log" "msb exec agentbox -u agent -e HOME=/home/agent"
@@ -1162,9 +1509,15 @@ assert_not_contains "msb: uid-1000 kit cmd not run as -u 1000" "$agent_log" "msb
 # kit that would prompt (e.g. private `git clone`) fails fast instead of hanging
 # provision. Assert the guard env is threaded onto the startup command.
 assert_contains "msb: kit cmd gets GIT_TERMINAL_PROMPT=0 guard" "$agent_log" "-e GIT_TERMINAL_PROMPT=0"
-assert_contains "msb: chowns staged /home/agent file to agent" "$agent_log" "chown agent /home/agent/usai-config/merge-global-config.mjs"
+# The staged /home/agent file must end up agent-owned — but as of the home-dir
+# ownership fix acq chowns the TOP-MOST created subdir under the home
+# recursively (so intermediate dirs it created as root become agent-owned too),
+# not merely the leaf file. For ~/usai-config/merge-global-config.mjs the top
+# is `usai-config`, so `chown -R -P agent /home/agent/usai-config` covers the dir
+# AND the file. By NAME (agent), never a numeric uid.
+assert_contains "msb: chowns staged /home/agent subtree to agent" "$agent_log" "chown -R -P agent /home/agent/usai-config"
 # Agent-user setup must create the user WITHOUT pinning uid 1000 (which collides
-# with the base image's pre-existing uid-1000 user, e.g. node) and must chown the
+# with a plain-OCI base's pre-existing uid-1000 user, e.g. node) and must chown the
 # home to agent so it is writable — otherwise every agent-user kit fails with
 # Permission denied (the playbook silent-fetch-failure regression).
 assert_not_contains "msb: agent user NOT created with a fixed -u 1000" "$agent_log" "useradd -m -d /home/agent -s /bin/sh -u 1000"
@@ -1321,6 +1674,26 @@ assert_not_contains "msb: shell attach does not exec a named agent" "$shellattac
 assert_not_contains "msb: shell attach does NOT use msb ssh" "$shellattach_log" "msb ssh"
 cleanup_stubs
 
+# 8n6b. `acq exec` (acq_backend_run) runs the command as the unprivileged `agent`
+#       user with HOME=/home/agent — NOT root with HOME unset (the reported bug).
+#       A bare `msb exec NAME -- CMD` runs as root; the `~`/$HOME-relative probes
+#       downstream (e.g. openchamber verify's `~/.local/bin/opencode`) then miss
+#       the files staged into /home/agent. Flags precede NAME; the `-- CMD…`
+#       passthrough survives after NAME unchanged.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_run execbox -- sh -c 'ls ~/.local/bin/opencode' >/dev/null 2>&1
+)
+execrun_log=$(cat "$CALLS")
+assert_contains "msb: exec runs as the agent user (-u agent)" "$execrun_log" "msb exec -u agent"
+assert_contains "msb: exec sets HOME=/home/agent" "$execrun_log" "-u agent -e HOME=/home/agent"
+assert_contains "msb: exec places flags before the sandbox name" "$execrun_log" "-e HOME=/home/agent execbox"
+assert_contains "msb: exec preserves the -- CMD passthrough" "$execrun_log" "execbox -- sh -c ls ~/.local/bin/opencode"
+assert_not_contains "msb: exec does NOT run as root (bare msb exec NAME)" "$execrun_log" "msb exec execbox --"
+cleanup_stubs
+
 # 8n7. SECURITY: a hostile agent token must never break out of the
 #      `sh -c "command -v '$agent'"` single-quoting. (1) install path with a
 #      metachar-laden `acq create` agent arg, and (2) attach reading a tampered
@@ -1442,6 +1815,94 @@ assert_contains "msb env: command still runs with env" "$env_log" "echo CMD_WITH
 assert_not_contains "msb env: unsafe env var name dropped" "$env_log" "1BAD"
 cleanup_stubs
 
+# 8o1b. DECISION GUARD: kit commands are staged via `msb exec …
+#        -- <argv>` (kit content as SEPARATE ARGV ELEMENTS), NOT registered via
+#        msb 0.6.7's create-time `--script`/`--script-path` flags and NOT
+#        interpolated into an `sh -c` string built from kit content. This is the
+#        reason the exec-based path is kept (see the DESIGN NOTE in msb.sh): the
+#        argv never enters an interpolated shell string, so the safety win
+#        --script offers is already present. If someone later switches the kit-
+#        command path to --script (or to an interpolated sh -c), these assertions
+#        fail and force a re-read of the design rationale. Uses a kit whose command
+#        body carries shell metacharacters that WOULD be dangerous if interpolated.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/noscript-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  nsk="${STUBDIR}/noscriptkit"; mkdir -p "$nsk"
+  cat >"$nsk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: noscript-kit
+displayName: NoScript Kit
+description: command body with metachars stays argv, never --script, never interpolated
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - printf
+      - "%s\n"
+      - "hello; rm -rf /tmp/NS_PWNED"
+SPEC
+  _acq_msb_apply_kit_dir noscriptbox "$nsk"
+)
+noscript_log=$(cat "$CALLS")
+# The command is dispatched through `msb exec … -- printf …` (argv), not registered.
+assert_contains "239: kit command staged via msb exec (argv path)" "$noscript_log" "msb exec noscriptbox"
+assert_contains "239: kit command argv reaches exec verbatim" "$noscript_log" "-- printf"
+# The metachar-bearing body travels as a single argv token AFTER the `--`, so it
+# is data, not a command — the injected `rm -rf` is never its own argv word.
+assert_contains "239: metachar body carried as one argv token" "$noscript_log" "hello; rm -rf /tmp/NS_PWNED"
+# NEVER via msb's create-time script-registration flags (the refactor we declined).
+assert_not_contains "239: kit command NOT registered via --script" "$noscript_log" "--script"
+assert_not_contains "239: kit command NOT registered via --script-path" "$noscript_log" "--script-path"
+# NEVER by interpolating the kit command into an `sh -c "<kit content>"` wrapper.
+# This startup (non-background) kit emits a plain `msb exec … -- <argv>` with NO
+# `sh -c` at all (unlike the fixed marker/mkdir helpers, whose sh -c strings are
+# adapter-owned, not kit content). A regression that assembled this kit's argv
+# into a shell string would surface as `sh -c … printf …` (the command name
+# interpolated after `sh -c`); assert that never happens for this kit's command.
+assert_not_contains "239: kit command not wrapped in sh -c interpolation" "$noscript_log" "sh -c printf"
+cleanup_stubs
+
+# 8o1c. DECISION GUARD (idempotency): an install-phase kit command
+#        stays run-once via the root-owned marker in _acq_msb_exec_command — that
+#        gate lives in the EXEC path (test+write /var/lib/acq/install-<cksum> as
+#        uid 0), which is exactly why registering the command as a create-time
+#        --script (fire-and-forget, no marker) would be a behavior change. Assert
+#        the marker gate is exercised for an install command.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/instmarker-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  imk="${STUBDIR}/instmarkerkit"; mkdir -p "$imk"
+  cat >"$imk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: instmarker-kit
+displayName: InstMarker Kit
+description: install command is marker-gated in the exec path (not fire-and-forget --script)
+commands:
+  - phase: install
+    user: "0"
+    command:
+      - true
+SPEC
+  _acq_msb_apply_kit_dir instmarkerbox "$imk"
+)
+instmarker_log=$(cat "$CALLS")
+# Marker gate is tested (test -f) and, on a miss, written (touch) under
+# /var/lib/acq — both as `-u 0`. This machinery is the run-once semantics that a
+# create-time --script registration would NOT reproduce.
+assert_contains "239: install cmd is marker-gated (test -f /var/lib/acq/install-)" "$instmarker_log" "test -f '/var/lib/acq/install-"
+assert_contains "239: install cmd marker is written after run (touch)" "$instmarker_log" "touch '/var/lib/acq/install-"
+assert_contains "239: install marker tested/written as root" "$instmarker_log" "msb exec instmarkerbox -u 0"
+cleanup_stubs
+
 # 8o2. SECURITY: a hostile kit `mode` must not reach a root shell. kit_spec_files
 #      drops the record; the msb chmod uses argv (no sh -c interpolation); and
 #      the injected command must never appear in the recorded msb calls.
@@ -1487,6 +1948,44 @@ assert_contains "sec: non-octal mode refused" "$sec_out" "non-octal mode"
 assert_contains "sec: unsafe path refused" "$sec_out" "unsafe path"
 assert_not_contains "sec: chmod never via sh -c string" "$sec_log" "chmod 0644;"
 assert_not_contains "sec: injected command never reaches msb argv" "$sec_log" "PWNED"
+cleanup_stubs
+
+# 8o3b. HOME-DIR OWNERSHIP: when a kit drops a file under a nested
+#       agent-home path (e.g. the openchamber wrapper at ~/.local/bin/opencode),
+#       acq creates the parent chain as root then must chown the TOP-MOST
+#       created subdir under /home/agent RECURSIVELY to the agent user — so
+#       .local, .local/bin AND the file all become agent-owned. Chowning only
+#       the leaf left .local/.local/bin root-owned; the agent-user startup's
+#       `mkdir -p ~/.local/state/...` then hit EACCES and (set -eu, detached)
+#       died silently. Assert the subtree chown, by NAME, never a numeric uid.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/home-own-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # Nested drop (the reported openchamber wrapper shape) …
+  _acq_msb_copy_file_verified hobox /etc/hostname '/home/agent/.local/bin/opencode' '0755' >/dev/null 2>&1
+  # … and a file dropped directly in the home (no subdir).
+  _acq_msb_copy_file_verified hobox /etc/hostname '/home/agent/direct-file' '0644' >/dev/null 2>&1
+)
+home_own_log=$(cat "$CALLS")
+# Nested: the intermediate subtree (top-most component .local) is chowned, not
+# merely the leaf file — this is the actual fix.
+assert_contains "234: chowns top-most created subtree under home (recursive)" \
+  "$home_own_log" "chown -R -P agent /home/agent/.local"
+assert_not_contains "234: does NOT chown only the leaf file" \
+  "$home_own_log" "chown -R -P agent /home/agent/.local/bin/opencode"
+# Never recurse all of /home/agent (would stomp other kits' root-owned drops).
+assert_not_contains "234: does NOT recursively chown all of /home/agent" \
+  "$home_own_log" "chown -R -P agent /home/agent "
+# Ownership is by NAME (agent), never a numeric uid (provisioned uid != 1000).
+assert_not_contains "234: chown uses agent by name, not numeric uid" \
+  "$home_own_log" "chown -R 1000"
+# Direct-in-home drop: `top` is the filename, so the chown targets that file
+# (recursive chown of a file == chowning the file; correct, no regression).
+assert_contains "234: file dropped directly in ~ chowns that file" \
+  "$home_own_log" "chown -R -P agent /home/agent/direct-file"
 cleanup_stubs
 
 # 8o4. SECURITY: a hostile command `user` is dropped by kit_spec_commands (it is
@@ -1841,7 +2340,7 @@ assert_contains "kit: apply (msb) runs msb exec" "$log" "msb exec mybox"
 cleanup_stubs
 
 # ===========================================================================
-# 9p. Kit-bundle provenance + staleness (quickstart#236)
+# 9p. Kit-bundle provenance + staleness
 # ===========================================================================
 # These drive the provenance helpers directly (host-side, no sandbox exec) and
 # the `acq kit check|update` subcommands via the stubbed backends. ACQ_PROVENANCE_DIR
@@ -2082,16 +2581,14 @@ commands:
     command:
       - node
       - /home/agent/tool/run.mjs
-backend_extras:
-  sbx:
-    publishedPorts:
-      - container: 3000
-        protocol: tcp
-        name: web-ui
-      - container: 4096
-        protocol: tcp
-        name: api
-    background: true
+publishedPorts:
+  - guest: 3000
+    host: 3000
+    protocol: tcp
+    name: web-ui
+  - guest: 4096
+    protocol: tcp
+    name: api
 SPEC
 tout="$STUBDIR/tout"
 ( . "${REPO_ROOT}/acq.backends/kit-translate.sh"
@@ -2102,18 +2599,19 @@ assert_contains "translate: carries caps.network.allow" "$sbxspec" "api.example.
 assert_contains "translate: has install phase" "$sbxspec" "install:"
 assert_contains "translate: has startup phase" "$sbxspec" "startup:"
 assert_contains "translate: preserves multi-line block body" "$sbxspec" "line two"
-# Regression (#220): a wildcard-subdomain allow host (leading `*`) MUST be
+# Regression: a wildcard-subdomain allow host (leading `*`) MUST be
 # quoted, or YAML parses the `*` as an alias and the sbx spec is invalid. The
 # host:port form also contains a `:` and must survive. Assert both are quoted.
 assert_contains "translate: quotes wildcard allow host (#220)" "$sbxspec" "- '*.example.com'"
 assert_contains "translate: quotes host:port allow entry (#220)" "$sbxspec" "- 'api.example.com:443'"
-# Regression (#219): backend_extras.sbx.publishedPorts MUST be emitted as a
-# top-level sbx-v2 publishedPorts block so acq-applied kits get host port maps.
-assert_contains "translate: emits publishedPorts block (#219)" "$sbxspec" "publishedPorts:"
-assert_contains "translate: publishedPorts carries container 3000 (#219)" "$sbxspec" "- container: 3000"
-assert_contains "translate: publishedPorts carries container 4096 (#219)" "$sbxspec" "- container: 4096"
-assert_contains "translate: publishedPorts carries protocol (#219)" "$sbxspec" "protocol: tcp"
-assert_contains "translate: publishedPorts carries name (#219)" "$sbxspec" "name: web-ui"
+# ADR-0014: the NEUTRAL top-level publishedPorts MUST synthesize the same
+# top-level sbx-v2 publishedPorts block (keyed on `container` = the guest port)
+# so the observable sbx shape is unchanged from the old backend_extras.sbx path.
+assert_contains "translate: emits publishedPorts block (#224)" "$sbxspec" "publishedPorts:"
+assert_contains "translate: neutral publishedPorts carries container 3000 (#224)" "$sbxspec" "- container: 3000"
+assert_contains "translate: neutral publishedPorts carries container 4096 (#224)" "$sbxspec" "- container: 4096"
+assert_contains "translate: publishedPorts carries protocol (#224)" "$sbxspec" "protocol: tcp"
+assert_contains "translate: publishedPorts carries name (#224)" "$sbxspec" "name: web-ui"
 # The static payload file is copied under files/.
 if [ -f "$tout/files/home/tool/config" ]; then
   pass "translate: copies files/ payload tree"
@@ -2163,7 +2661,7 @@ assert_contains "translate: sh -c startup emits argv seq (- sh)" "$sh_startup_bl
 assert_not_contains "translate: sh -c startup is not a bare string" "$sh_startup_block" "command: |"
 cleanup_stubs
 
-# 10a2b. #207: a git+https kit fetch MUST be NON-INTERACTIVE. Stub `git` to
+# 10a2b. A git+https kit fetch MUST be NON-INTERACTIVE. Stub `git` to
 #        record its env + args; drive _resolve_kit against a git+https ref and
 #        assert the fetch ran with GIT_TERMINAL_PROMPT=0 and the anonymous
 #        credential-neutralizing -c flags — i.e. it can never hang on a
@@ -2197,7 +2695,7 @@ assert_contains "#207: anon fetch neutralizes credential.helper" "$anonline" "cr
 assert_contains "#207: anon fetch neutralizes github insteadOf" "$anonline" "insteadOf="
 cleanup_stubs
 
-# 10a2c. #207 hardening: a hostile dir= (path traversal) must be rejected before
+# 10a2c. Hardening: a hostile dir= (path traversal) must be rejected before
 #        any git call — no absolute paths, no '..', safe charset only.
 make_stubs; load_acq
 : >"$STUBDIR/git-invocations.log"
@@ -2261,7 +2759,279 @@ assert_contains "env: sbx-v2 emits OPENCODE_CONFIG var" "$espec" "OPENCODE_CONFI
 assert_not_contains "env: sbx-v2 drops unsafe var name" "$espec" "1BAD"
 cleanup_stubs
 
-# 10b. msb net-rule uses the bare-FQDN target form `allow@HOST` (matching msb's
+# ===========================================================================
+# 10a4. ADR-0014: neutral publishedPorts + background vocabulary
+# ===========================================================================
+# Promotes publishedPorts to a NEUTRAL top-level list and background to a
+# commands[] flag, consumed by BOTH backends. Covers: neutral parse -> sbx-v2 +
+# msb -p; deprecated backend_extras.sbx fallback WITH warning; background emitted
+# detached on both backends; invalid port/protocol/name/background dropped+warned;
+# absence is a no-op.
+
+# 10a4a. Neutral publishedPorts parses to guest/proto/name/host (host defaults to
+#        guest), and msb maps each to `-p HOST:GUEST`.
+make_stubs; load_acq
+ppkit="$STUBDIR/ppkit"; mkdir -p "$ppkit"
+cat >"$ppkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: pp-kit
+displayName: PP Kit
+description: neutral publishedPorts
+publishedPorts:
+  - guest: 3000
+    host: 8080
+    protocol: tcp
+    name: ui
+  - guest: 4096
+    protocol: tcp
+    name: api
+SPEC
+pp_parse=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_spec_published_ports "$ppkit/spec.yaml" 2>/dev/null )
+assert_contains "pp: neutral parse maps guest 3000 -> host 8080" "$pp_parse" "$(printf '3000\ttcp\tui\t8080')"
+assert_contains "pp: neutral host defaults to guest when omitted" "$pp_parse" "$(printf '4096\ttcp\tapi\t4096')"
+# msb consumer: -p HOST:GUEST flags into the create array.
+pp_flags=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh" 2>/dev/null
+  arr=(); _acq_msb_port_flags_into arr "$ppkit/spec.yaml"; printf '%s\n' "${arr[@]}"
+)
+assert_contains "pp: msb emits -p 8080:3000 (explicit host)" "$pp_flags" "8080:3000"
+assert_contains "pp: msb emits -p 4096:4096 (host defaults to guest)" "$pp_flags" "4096:4096"
+assert_contains "pp: msb emits a -p flag token" "$pp_flags" "-p"
+# sbx-v2 synthesis: the neutral source produces the same top-level publishedPorts.
+ppout="$STUBDIR/ppout"
+( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_translate_to_sbx "$ppkit" "$ppout" >/dev/null ) 2>/dev/null
+ppspec=$(cat "$ppout/spec.yaml" 2>/dev/null || true)
+assert_contains "pp: sbx-v2 emits publishedPorts from neutral source" "$ppspec" "- container: 3000"
+assert_contains "pp: sbx-v2 emits second neutral port" "$ppspec" "- container: 4096"
+cleanup_stubs
+
+# 10a4b. Legacy backend_extras.sbx.publishedPorts STILL translates (one release)
+#        but emits a DEPRECATION warning to stderr. sbx-v2 shape is unchanged.
+make_stubs; load_acq
+lpkit="$STUBDIR/lpkit"; mkdir -p "$lpkit"
+cat >"$lpkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: legacy-pp-kit
+displayName: Legacy PP Kit
+description: deprecated sbx-only ports
+backend_extras:
+  sbx:
+    publishedPorts:
+      - container: 3000
+        protocol: tcp
+        name: web
+SPEC
+lp_out=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_spec_published_ports "$lpkit/spec.yaml" 2>/dev/null )
+lp_warn=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_spec_published_ports "$lpkit/spec.yaml" 2>&1 >/dev/null )
+assert_contains "pp: legacy backend_extras.sbx still translates" "$lp_out" "$(printf '3000\ttcp\tweb\t3000')"
+assert_contains "pp: legacy path warns DEPRECATION" "$lp_warn" "DEPRECATION"
+assert_contains "pp: legacy warning names backend_extras.sbx.publishedPorts" "$lp_warn" "backend_extras.sbx.publishedPorts"
+# msb consumer honors the legacy fallback too (-p HOST:GUEST for the sbx block).
+lp_flags=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh" 2>/dev/null
+  arr=(); _acq_msb_port_flags_into arr "$lpkit/spec.yaml" 2>/dev/null; printf '%s\n' "${arr[@]}"
+)
+assert_contains "pp: msb -p from legacy fallback" "$lp_flags" "3000:3000"
+cleanup_stubs
+
+# 10a4c. A neutral list SUPPRESSES the deprecated fallback (no warning when the
+#        neutral field is present, even if a stray backend_extras.sbx also is).
+make_stubs; load_acq
+bothkit="$STUBDIR/bothkit"; mkdir -p "$bothkit"
+cat >"$bothkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: both-kit
+displayName: Both Kit
+description: neutral wins over legacy
+publishedPorts:
+  - guest: 5000
+    name: neutral-port
+backend_extras:
+  sbx:
+    publishedPorts:
+      - container: 9999
+        name: legacy-port
+SPEC
+both_out=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_spec_published_ports "$bothkit/spec.yaml" 2>/dev/null )
+both_warn=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_spec_published_ports "$bothkit/spec.yaml" 2>&1 >/dev/null )
+assert_contains "pp: neutral list wins (guest 5000)" "$both_out" "5000"
+assert_not_contains "pp: legacy port ignored when neutral present" "$both_out" "9999"
+assert_not_contains "pp: no deprecation warning when neutral present" "$both_warn" "DEPRECATION"
+cleanup_stubs
+
+# 10a4d. Validation (SI-10): invalid port/protocol/name are DROPPED with a
+#        stderr warning; only the valid entry survives.
+make_stubs; load_acq
+badpkit="$STUBDIR/badpkit"; mkdir -p "$badpkit"
+cat >"$badpkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: bad-pp-kit
+displayName: Bad PP Kit
+description: invalid published ports dropped
+publishedPorts:
+  - guest: 99999
+    name: too-big
+  - guest: 3000
+    protocol: sctp
+    name: bad-proto
+  - guest: 3001
+    name: "bad name!"
+  - guest: 3002
+    host: notanumber
+  - guest: 3003
+    protocol: tcp
+    name: ok
+SPEC
+bad_out=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_spec_published_ports "$badpkit/spec.yaml" 2>/dev/null )
+bad_warn=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_spec_published_ports "$badpkit/spec.yaml" 2>&1 >/dev/null )
+assert_contains "pp: valid entry survives validation" "$bad_out" "3003"
+assert_not_contains "pp: out-of-range port dropped" "$bad_out" "99999"
+assert_not_contains "pp: bad protocol entry dropped" "$bad_out" "3000"
+assert_not_contains "pp: unsafe name entry dropped" "$bad_out" "3001"
+assert_not_contains "pp: non-integer host entry dropped" "$bad_out" "3002"
+assert_contains "pp: warns invalid guest port" "$bad_warn" "invalid guest port"
+assert_contains "pp: warns invalid protocol" "$bad_warn" "invalid protocol"
+assert_contains "pp: warns unsafe name" "$bad_warn" "unsafe name"
+assert_contains "pp: warns invalid host port" "$bad_warn" "invalid host port"
+# `acq kit validate` REPORTS these (not silently dropped).
+val_out=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_validate "$badpkit/spec.yaml" 2>&1 )
+assert_contains "pp: kit validate reports invalid publishedPorts" "$val_out" "invalid publishedPorts entry"
+cleanup_stubs
+
+# 10a4e. Absence of publishedPorts is a NO-OP (empty output, no error) — the
+#        neutral fields are read DEFENSIVELY (cross-repo gate: schema unreleased).
+make_stubs; load_acq
+nonekit="$STUBDIR/nonekit"; mkdir -p "$nonekit"
+cat >"$nonekit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: none-kit
+displayName: None Kit
+description: no ports at all
+SPEC
+none_out=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_spec_published_ports "$nonekit/spec.yaml" 2>&1 )
+assert_eq "pp: absence of publishedPorts is a no-op" "" "$none_out"
+none_flags=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh" 2>/dev/null
+  arr=(); _acq_msb_port_flags_into arr "$nonekit/spec.yaml" 2>&1; printf '%s' "${arr[@]:-}"
+)
+assert_eq "pp: msb emits no -p flags when absent" "" "$none_flags"
+cleanup_stubs
+
+# 10a4f. background: a commands[] entry with background:true surfaces in the
+#        __CMD__ record as the 4th field; a non-boolean is coerced to false+warn.
+make_stubs; load_acq
+bgkit="$STUBDIR/bgkit"; mkdir -p "$bgkit"
+cat >"$bgkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: bg-kit
+displayName: BG Kit
+description: background startup command
+commands:
+  - phase: startup
+    user: "1000"
+    background: true
+    command:
+      - sh
+      - -c
+      - |
+        while true; do sleep 5; done
+  - phase: startup
+    user: "1000"
+    background: maybe
+    command:
+      - node
+      - /home/agent/run.mjs
+SPEC
+bg_cmds=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_spec_commands "$bgkit/spec.yaml" 2>/dev/null )
+assert_contains "bg: background:true surfaces in __CMD__ record" "$bg_cmds" "$(printf '__CMD__\tstartup\t1000\ttrue')"
+assert_contains "bg: non-boolean coerced to false in record" "$bg_cmds" "$(printf '__CMD__\tstartup\t1000\tfalse')"
+bg_warn=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_spec_commands "$bgkit/spec.yaml" 2>&1 >/dev/null )
+assert_contains "bg: non-boolean background warns" "$bg_warn" "background must be true|false"
+val_bg=$( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_validate "$bgkit/spec.yaml" 2>&1 )
+assert_contains "bg: kit validate reports non-boolean background" "$val_bg" "command background must be true|false"
+cleanup_stubs
+
+# 10a4g. msb runs a background:true startup command DETACHED (nohup … &) so it
+#        does not block provision; a foreground startup command is awaited.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/bg-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  bgk="$STUBDIR/bgk2"; mkdir -p "$bgk"
+  cat >"$bgk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: bg2-kit
+displayName: BG2 Kit
+description: background + foreground startup
+commands:
+  - phase: startup
+    user: "0"
+    background: true
+    command:
+      - supervisor-loop
+  - phase: startup
+    user: "0"
+    command:
+      - foreground-cmd
+SPEC
+  _acq_msb_run_commands bgbox "$bgk/spec.yaml"
+)
+bg_log=$(cat "$CALLS")
+assert_contains "bg(msb): background startup runs detached (nohup &)" "$bg_log" "nohup"
+assert_contains "bg(msb): detached command is the supervisor loop" "$bg_log" "supervisor-loop"
+assert_contains "bg(msb): foreground startup command still awaited (no nohup wrap)" "$bg_log" "-- foreground-cmd"
+cleanup_stubs
+
+# 10a4h. sbx path: sbx-v2 has NO startup detach field, so a `background: true`
+#        startup command relies on the command SELF-backgrounding. The translator
+#        must (a) still emit it as a startup argv sequence, and (b) preserve a
+#        self-backgrounding `sh -c '… &'` body VERBATIM — never double-wrap it in
+#        a nohup/extra `sh -c`, and never append a second `&` (which would be a
+#        `& &` syntax error). See ADR-0014 "Translation → sbx".
+make_stubs; load_acq
+sbgkit="$STUBDIR/sbgkit"; mkdir -p "$sbgkit"
+cat >"$sbgkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: sbg-kit
+displayName: SBG Kit
+description: background startup on sbx
+commands:
+  - phase: startup
+    user: "1000"
+    background: true
+    command:
+      - sh
+      - -c
+      - |
+        sh /home/agent/supervisor.sh &
+SPEC
+sbgout="$STUBDIR/sbgout"
+( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_translate_to_sbx "$sbgkit" "$sbgout" >/dev/null ) 2>/dev/null
+sbgspec=$(cat "$sbgout/spec.yaml" 2>/dev/null || true)
+assert_contains "bg(sbx): startup phase present" "$sbgspec" "startup:"
+assert_contains "bg(sbx): self-backgrounding argv emitted as startup command" "$sbgspec" "- sh"
+# The self-backgrounding trailing & is preserved verbatim (single &, in the body).
+assert_contains "bg(sbx): trailing & preserved in the sh -c body" "$sbgspec" "sh /home/agent/supervisor.sh &"
+# NOT double-wrapped: no nohup injected, and no double-background (same-line
+# `& &` OR a second `&` on its own line). Count backgrounding `&` tokens in the
+# emitted spec: the source body has exactly one, so the translation must too.
+assert_not_contains "bg(sbx): translator does NOT wrap in nohup" "$sbgspec" "nohup"
+assert_not_contains "bg(sbx): translator does NOT emit a double-background & &" "$sbgspec" "& &"
+_amp_count=$(printf '%s\n' "$sbgspec" | grep -cE '(^|[^&])&([^&]|$)')
+assert_eq "bg(sbx): exactly one backgrounding & survives translation" "1" "$_amp_count"
+cleanup_stubs
+
+
 #      own --help example `allow@example.com:tcp:443`), strips any :port, and
 #      does NOT use the `domain=`/`domain:` prefixes (domain= can break DNS;
 #      domain: is the ambiguous single-label form msb rejects).
@@ -2289,6 +3059,303 @@ assert_contains "msb: net-rule uses bare FQDN target" "$nr_out" "allow@api.gsa.u
 assert_contains "msb: net-rule strips :port" "$nr_out" "allow@github.com"
 assert_not_contains "msb: net-rule avoids domain= prefix" "$nr_out" "allow@domain="
 assert_not_contains "msb: net-rule avoids ambiguous domain: form" "$nr_out" "allow@domain:"
+cleanup_stubs
+
+# 10b2. ADR-0015: post-hoc `acq ports <sandbox> --publish H:G` on the msb backend
+#       authorizes the acq-managed key (once), starts `msb ssh serve … --port <n>`,
+#       and opens `ssh … -L 127.0.0.1:H:127.0.0.1:G …`. The key lives under acq
+#       state (NOT ~/.ssh); ports/PIDs are recorded for teardown.
+make_stubs; load_acq
+: > "$CALLS"
+# Pin the ephemeral serve port via the test seam (ACQ_MSB_FORCE_SERVE_PORT) so
+# the `msb ssh serve … --port <n>` and `ssh -p <n>` argv are deterministic and
+# the assertions below don't race the counter/$RANDOM value.
+(
+  export ACQ_MSB_FORCE_SERVE_PORT=54321
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
+  # `msb ssh serve` and `ssh -L` are BACKGROUNDED by acq; wait for the stubbed
+  # children to finish appending to $CALLS before the subshell exits, else the
+  # `cat "$CALLS"` below races an incomplete log (test-side flake).
+  wait
+)
+pub_log=$(cat "$CALLS")
+assert_contains "msb ports: generates the acq-managed ssh key (ssh-keygen -t ed25519)" \
+  "$pub_log" "ssh-keygen -t ed25519 -N  -f $STUBDIR/state/ssh/msb_id_ed25519"
+assert_contains "msb ports: authorizes the acq public key via msb ssh authorize" \
+  "$pub_log" "msb ssh authorize --file $STUBDIR/state/ssh/msb_id_ed25519.pub"
+assert_contains "msb ports: starts msb ssh serve on an ephemeral loopback port" \
+  "$pub_log" "msb ssh serve pbox --host 127.0.0.1 --port 54321"
+assert_contains "msb ports: opens ssh -L 127.0.0.1:8080:127.0.0.1:3000 tunnel" \
+  "$pub_log" "-L 127.0.0.1:8080:127.0.0.1:3000"
+assert_contains "msb ports: ssh uses the acq-managed key (-i)" \
+  "$pub_log" "-i $STUBDIR/state/ssh/msb_id_ed25519"
+assert_contains "msb ports: ssh pins a dedicated known_hosts under acq state" \
+  "$pub_log" "UserKnownHostsFile=$STUBDIR/state/ssh/known_hosts"
+# NIT (review): ssh uses ONLY the acq -i key and ignores the user's ssh_config,
+# so a loaded agent key can't burn MaxAuthTries and ~/.ssh/config can't alter
+# the hermetic loopback tunnel.
+assert_contains "msb ports: ssh pins IdentitiesOnly=yes (only the acq -i key)" \
+  "$pub_log" "IdentitiesOnly=yes"
+assert_contains "msb ports: ssh ignores user ssh_config (-F none)" \
+  "$pub_log" "-F none"
+# The recorded PID/state file exists after publishing (teardown target).
+[ -f "$STUBDIR/state/ports/pbox.pids" ] \
+  && pass "msb ports: records serve/ssh PIDs in acq state" \
+  || fail "msb ports: records serve/ssh PIDs in acq state" "pbox.pids missing"
+cleanup_stubs
+
+# 10b2a. (review S2) A backgrounded `msb ssh serve` that dies immediately (e.g.
+#        cannot bind) must NOT be reported as a successful publish: acq's
+#        liveness probe should fail the publish non-zero, print no "published
+#        host" line, and record no PID state file (nothing was actually forwarded).
+make_stubs; load_acq
+: > "$CALLS"
+serve_die_out=$(
+  export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_MSB_SERVE_DIE=1
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports pbox --publish 8080:3000 2>&1
+  echo "RC=$?"
+  wait
+)
+assert_contains "msb ports(S2): dead serve fails the publish non-zero" "$serve_die_out" "RC=1"
+assert_not_contains "msb ports(S2): dead serve prints no 'published host' success" "$serve_die_out" "published host"
+[ ! -f "$STUBDIR/state/ports/pbox.pids" ] \
+  && pass "msb ports(S2): dead serve records no PID state file" \
+  || fail "msb ports(S2): dead serve records no PID state file" "pbox.pids should not exist"
+cleanup_stubs
+
+# 10b2b. (review S2) A backgrounded `ssh -L` forward that dies immediately (e.g.
+#        ExitOnForwardFailure fires) must NOT be reported as success: the publish
+#        fails non-zero, tears the serve listener back down, and records no state.
+make_stubs; load_acq
+: > "$CALLS"
+fwd_die_out=$(
+  export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_SSH_DIE=1
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports pbox --publish 8080:3000 2>&1
+  echo "RC=$?"
+  wait
+)
+assert_contains "msb ports(S2): dead forward fails the publish non-zero" "$fwd_die_out" "RC=1"
+assert_not_contains "msb ports(S2): dead forward prints no 'published host' success" "$fwd_die_out" "published host"
+[ ! -f "$STUBDIR/state/ports/pbox.pids" ] \
+  && pass "msb ports(S2): dead forward records no PID state file" \
+  || fail "msb ports(S2): dead forward records no PID state file" "pbox.pids should not exist"
+cleanup_stubs
+
+# 10b3. `acq ports --publish` authorizes the key ONCE — a second publish reuses
+#       the existing key and the .authorized marker (no re-keygen, no re-authorize).
+make_stubs; load_acq
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
+  wait                # let the 1st publish's backgrounded serve/ssh log first
+  : > "$CALLS"   # clear, then a SECOND publish
+  acq_backend_ports pbox --publish 9090:4000 >/dev/null 2>&1
+  wait                # drain the 2nd publish's backgrounded children before read
+)
+pub2_log=$(cat "$CALLS")
+assert_not_contains "msb ports: 2nd publish does not re-run ssh-keygen" "$pub2_log" "ssh-keygen"
+assert_not_contains "msb ports: 2nd publish does not re-authorize the key" "$pub2_log" "msb ssh authorize"
+assert_contains "msb ports: 2nd publish still opens its own -L tunnel" "$pub2_log" "-L 127.0.0.1:9090:127.0.0.1:4000"
+cleanup_stubs
+
+# 10b3a. Two publishes in the SAME process must get DISTINCT serve ports.
+#        No seam here — this exercises the real distinct-per-call selection. The
+#        recorded state file has one line per publish: `<serve_pid> <ssh_pid>
+#        <sport> <mapping>`; assert the two <sport> columns differ.
+make_stubs; load_acq
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports mpbox --publish 8080:3000 >/dev/null 2>&1
+  acq_backend_ports mpbox --publish 9090:4000 >/dev/null 2>&1
+  wait
+)
+mp_ports=$(awk '{print $3}' "$STUBDIR/state/ports/mpbox.pids" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+mp_lines=$(wc -l < "$STUBDIR/state/ports/mpbox.pids" 2>/dev/null | tr -d ' ')
+{ [ "$mp_lines" = "2" ] && [ "$mp_ports" = "2" ]; } \
+  && pass "msb ports: two publishes in one process get DISTINCT serve ports" \
+  || fail "msb ports: two publishes in one process get DISTINCT serve ports" "lines=$mp_lines distinct-ports=$mp_ports"
+cleanup_stubs
+
+# 10b4. SI-10: invalid --publish values are REJECTED before any ssh/serve call.
+#       0, 70000 (>65535), and non-integer "abc:def" all fail non-zero with no
+#       ssh/serve/keygen in the call log.
+for bad in "0:3000" "8080:70000" "abc:def" "8080"; do
+  make_stubs; load_acq
+  : > "$CALLS"
+  rc=0
+  bad_out=$(
+    . "${REPO_ROOT}/acq.backends/msb.sh"
+    acq_backend_ports badbox --publish "$bad" 2>&1
+  ) || rc=$?
+  bad_log=$(cat "$CALLS")
+  [ "$rc" -ne 0 ] && pass "msb ports: rejects invalid --publish '$bad' (non-zero exit)" \
+    || fail "msb ports: rejects invalid --publish '$bad' (non-zero exit)" "rc=$rc"
+  assert_not_contains "msb ports: '$bad' reaches no ssh -L" "$bad_log" "-L 127.0.0.1"
+  assert_not_contains "msb ports: '$bad' reaches no msb ssh serve" "$bad_log" "msb ssh serve"
+  cleanup_stubs
+done
+
+# 10b5. Capability flag: msb now advertises post-hoc port forwarding (ADR-0015).
+flag_val=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh" 2>/dev/null
+  printf '%s' "$ACQ_BACKEND_SUPPORTS_PORT_FORWARD"
+)
+assert_eq "msb: SUPPORTS_PORT_FORWARD is now 1 (post-hoc publish wired)" "1" "$flag_val"
+
+# 10b6. TEARDOWN: acq_backend_terminate (rm) and acq_backend_stop both clean up
+#       the recorded serve/ssh PIDs + state file for the sandbox (defensive:
+#       killing dead PIDs is a no-op, and a missing state file is fine).
+make_stubs; load_acq
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports rmbox --publish 8080:3000 >/dev/null 2>&1
+  [ -f "$STUBDIR/state/ports/rmbox.pids" ] || exit 3
+  acq_backend_terminate rmbox >/dev/null 2>&1
+)
+[ ! -f "$STUBDIR/state/ports/rmbox.pids" ] \
+  && pass "msb ports: acq rm tears down recorded port state" \
+  || fail "msb ports: acq rm tears down recorded port state" "rmbox.pids still present"
+# stop path + defensive no-op on a sandbox that never published a port.
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports stopbox --publish 7000:7000 >/dev/null 2>&1
+  acq_backend_stop stopbox >/dev/null 2>&1
+  acq_backend_terminate neverbox >/dev/null 2>&1   # no state file -> must not error
+) && pass "msb ports: stop tears down; teardown of an un-published sandbox is a no-op" \
+  || fail "msb ports: stop tears down; teardown of an un-published sandbox is a no-op" "teardown errored"
+[ ! -f "$STUBDIR/state/ports/stopbox.pids" ] \
+  && pass "msb ports: acq stop removes recorded port state" \
+  || fail "msb ports: acq stop removes recorded port state" "stopbox.pids still present"
+cleanup_stubs
+
+# 10b7. Path-traversal guard: an unsafe sandbox name (slash / leading '..') must
+#       NOT let the per-sandbox PID state path escape ACQ_MSB_PORTS_DIR on either
+#       the record (>>) or teardown (rm -f) path. record is a fail-closed no-op;
+#       teardown of an unsafe name touches no file outside the ports dir.
+make_stubs; load_acq
+: > "$CALLS"
+mkdir -p "$STUBDIR/state/ports"
+canary="$STUBDIR/state/traversal-canary.pids"
+printf 'DO-NOT-DELETE\n' >"$canary"
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # record with a traversal name must write nothing outside the ports dir.
+  _acq_msb_ports_record "../traversal-canary" 111 222 20001 8080:3000 >/dev/null 2>&1
+  # teardown with a traversal name must not rm -f the canary above it.
+  _acq_msb_ports_teardown "../traversal-canary" >/dev/null 2>&1
+)
+[ -f "$canary" ] \
+  && pass "msb ports: unsafe sandbox name cannot escape state dir (rm -f/append guarded)" \
+  || fail "msb ports: unsafe sandbox name cannot escape state dir (rm -f/append guarded)" "canary deleted"
+[ ! -e "$STUBDIR/state/traversal-canary.pids.pids" ] \
+  && pass "msb ports: unsafe sandbox name records no state file" \
+  || fail "msb ports: unsafe sandbox name records no state file" "escaped record written"
+rm -f "$canary" 2>/dev/null || true
+cleanup_stubs
+
+# 10b8. LIST mode: `acq ports <name>` with NO --publish is a QUERY, not an
+#       error. It must exit 0 and print lines CONTAINING the published port
+#       numbers so openchamber verify's `grep -q <port>` matches. Two sources:
+#       (a) create-time `-p` NAT mappings via `msb inspect --format json`, and
+#       (b) acq-recorded post-hoc ssh -L tunnels. Both surfaced together.
+make_stubs; load_acq
+# (a) plant a create-time published-ports JSON fixture for `msb inspect` using the
+#     REAL msb 0.6.7 shape: ports live under active_config.network.ports[] as
+#     {host_port, guest_port, host_bind, protocol}. host_bind carries a dotted IP
+#     (127.0.0.1) that must NOT be mistaken for port digits. The third entry binds
+#     host_bind to a colon-bearing "127.0.0.1:9" form (the exact shape that caused
+#     the live bug) so the no-junk assert below is a TRUE regression guard: the old
+#     parser split that colon and emitted `guest 9 -> host 127.0.0.1:1`, while the
+#     current parser keys on the explicit *_port fields and yields 8443 correctly.
+printf '%s\n' '{"active_config":{"network":{"ports":[{"guest_port":3000,"host_bind":"127.0.0.1","host_port":3000,"protocol":"tcp"},{"guest_port":4096,"host_bind":"127.0.0.1","host_port":4096,"protocol":"tcp"},{"guest_port":8443,"host_bind":"127.0.0.1:9","host_port":8443,"protocol":"tcp"}]}},"name":"listbox","status":"Running"}' \
+  >"$STUBDIR/.msb_inspect_json"
+list_out=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # (b) also seed a recorded post-hoc tunnel so both sources appear.
+  _acq_msb_ports_record listbox 111 222 54321 9090:8080
+  acq_backend_ports listbox
+) ; list_rc=$?
+assert_eq "msb ports: LIST mode (no --publish) exits 0 (query, not error)" "0" "$list_rc"
+printf '%s\n' "$list_out" | grep -q 3000 \
+  && pass "msb ports: LIST surfaces create-time port 3000 (grep -q 3000 matches)" \
+  || fail "msb ports: LIST surfaces create-time port 3000" "out=[$list_out]"
+printf '%s\n' "$list_out" | grep -q 4096 \
+  && pass "msb ports: LIST surfaces create-time port 4096 (grep -q 4096 matches)" \
+  || fail "msb ports: LIST surfaces create-time port 4096" "out=[$list_out]"
+printf '%s\n' "$list_out" | grep -q 8080 \
+  && pass "msb ports: LIST surfaces post-hoc recorded guest port 8080" \
+  || fail "msb ports: LIST surfaces post-hoc recorded guest port 8080" "out=[$list_out]"
+# The create-time lines must be EXACT (no host_bind dotted-IP or SocketAddr digits
+# leaking in as ports). The old numeric-pairing parser split the colon in the
+# third entry's host_bind ("127.0.0.1:9") and emitted `guest 9 -> host 127.0.0.1:1`
+# instead of the real 8443:8443 mapping — these asserts fail against that old code.
+printf '%s\n' "$list_out" | grep -q 'guest 3000 -> host 127.0.0.1:3000 (create-time -p)' \
+  && pass "msb ports: LIST prints exact create-time mapping for 3000 (no host_bind leak)" \
+  || fail "msb ports: LIST exact create-time mapping for 3000" "out=[$list_out]"
+printf '%s\n' "$list_out" | grep -q 'guest 8443 -> host 127.0.0.1:8443 (create-time -p)' \
+  && pass "msb ports: LIST maps colon-bearing host_bind entry to real port 8443 (not split)" \
+  || fail "msb ports: LIST exact create-time mapping for 8443 (colon-bearing host_bind)" "out=[$list_out]"
+printf '%s\n' "$list_out" | grep -Eq '127\.0\.0\.1:(1|9|16|00|256)( |$)' \
+  && fail "msb ports: LIST must NOT emit host_bind-derived junk ports" "out=[$list_out]" \
+  || pass "msb ports: LIST emits no host_bind-derived junk ports (IP/SocketAddr not split)"
+cleanup_stubs
+
+# 10b9. LIST mode is graceful when there are NO ports at all (no inspect fixture,
+#       no recorded tunnel): exit 0, no crash, empty (or portless) output.
+make_stubs; load_acq
+none_out=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports emptybox
+) ; none_rc=$?
+assert_eq "msb ports: LIST with zero ports exits 0 (empty list not an error)" "0" "$none_rc"
+cleanup_stubs
+
+# 10b10. LIST mode degrades gracefully when msb's JSON has NO recognizable port
+#        field (defensive: unknown field name / jq absent). Must NOT crash; still
+#        exit 0. Here inspect returns JSON with an unrelated shape.
+make_stubs; load_acq
+printf '{"name":"absentbox","state":"running"}\n' >"$STUBDIR/.msb_inspect_json"
+absent_rc=0
+(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports absentbox
+) >/dev/null 2>&1 || absent_rc=$?
+assert_eq "msb ports: LIST exits 0 when no port field found in msb JSON" "0" "$absent_rc"
+cleanup_stubs
+
+# 10b10a. LIST mode under the REAL `set -euo pipefail` acq runs with. This is the
+#         regression guard for the live-host bug: when inspect has no ports, the
+#         dependency-free `grep` (and jq) emit nothing and exit non-zero, which
+#         under `set -e` aborted _acq_msb_ports_from_inspect BEFORE its return 0,
+#         unwinding out of acq_backend_ports past its `return 0` and surfacing
+#         rc=1 to the caller. The rest of test-acq runs WITHOUT -e, so it could
+#         not catch this — assert it explicitly here with errexit ON.
+make_stubs; load_acq
+printf '{"active_config":{"network":{"ports":[]}}}\n' >"$STUBDIR/.msb_inspect_json"
+strict_rc=0
+(
+  set -euo pipefail
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports emptybox
+) >/dev/null 2>&1 || strict_rc=$?
+assert_eq "msb ports: LIST exits 0 under set -euo pipefail with empty ports (live-host regression)" "0" "$strict_rc"
+cleanup_stubs
+
+# 10b11. Genuinely bad args still error (unsupported argument), LIST mode does
+#        NOT swallow a bogus flag like --frobnicate.
+make_stubs; load_acq
+bad_rc=0
+bad_out=$(
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ports badargbox --frobnicate 2>&1
+) || bad_rc=$?
+[ "$bad_rc" -ne 0 ] \
+  && pass "msb ports: unsupported arg (--frobnicate) still errors non-zero" \
+  || fail "msb ports: unsupported arg (--frobnicate) still errors non-zero" "rc=$bad_rc"
+assert_contains "msb ports: unsupported arg names the offending flag" "$bad_out" "unsupported argument"
 cleanup_stubs
 
 # 10c. msb prerequisite check: warns when the base image lacks a kit tool, and
