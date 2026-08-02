@@ -90,6 +90,7 @@ Subcommands:
   secret set [-g|SANDBOX] SERVICE [...]    Store a secret (--host/--env for a
                                            custom endpoint).
   secret rm  [-g|SANDBOX] SERVICE          Remove a secret acq manages.
+  secret ls  [-g|SANDBOX]                  List acq-managed secrets (no values).
   github-scope SANDBOX [PATH]              Scope a GitHub token to the
                                            workspace's repos (least-privilege PAT).
   usai-rotate-api-key                      Rotate the USAi API key.
@@ -685,10 +686,22 @@ case "$subcommand" in
             command "${ACQ_RESOLVED_BACKEND}" secret rm "$@"
         fi
         ;;
-      ls|import|set-custom)
+      ls)
+        # `acq secret ls [-g|SANDBOX]` — if the backend defines a native acq
+        # secret listing (msb: the acq store is the source of truth, and there is
+        # no `msb secret ls`), use it. Otherwise pass through to the backend's own
+        # secret CLI unchanged (sbx: `sbx secret ls` shows the proxy table).
+        shift
+        if command -v acq_backend_secret_ls >/dev/null 2>&1; then
+          acq_backend_secret_ls "$@"
+        else
+          command "${ACQ_RESOLVED_BACKEND}" secret ls "$@"
+        fi
+        ;;
+      import|set-custom)
         # Pass through to the backend secret CLI unchanged. shift so $sub2 is not
         # ALSO left in $@ (that would double the subcommand token, e.g.
-        # `sbx secret ls ls`); re-supply it explicitly.
+        # `sbx secret import import`); re-supply it explicitly.
         shift
         command "${ACQ_RESOLVED_BACKEND}" secret "$sub2" "$@"
         ;;
@@ -701,13 +714,15 @@ Usage:
   acq secret set [-g | SANDBOX] SERVICE [--host HOST --env ENV]
   acq secret rm  [-g | SANDBOX] SERVICE      # remove an acq-managed secret
   acq secret rm  [-g | SANDBOX] <placeholder>  # (raw sbx placeholder → passthrough)
-  acq secret ls
+  acq secret ls [-g | SANDBOX]               # list acq-managed secrets
   acq secret import [SERVICE] [--all] [--force] [--dry-run]
   acq secret set-custom [-g | SANDBOX] --host HOST --env ENV
 
 `acq secret rm SERVICE` (usai/github/gitlab) deletes the value from the acq
-store and clears the backend's injector. All other subcommands pass through
-directly to sbx secret.
+store and clears the backend's injector. `acq secret ls` lists the secrets acq
+manages (scope, service, whether a value is stored, and the ENV@HOST binding) —
+never the values themselves; on msb the acq store is the source of truth, on sbx
+this shows the sbx proxy table. Other subcommands pass through to the backend.
 
 Full sbx reference:
 SECRETUSAGE

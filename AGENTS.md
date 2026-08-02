@@ -1,12 +1,12 @@
 ---
 title: "Agentic Coding Quickstart - Agent Rules"
-description: "Behavioral rules for AI coding agents operating with SBX + USAi"
+description: "Behavioral rules for AI coding agents operating with a sandboxing backend (SBX or MSB) + USAi"
 status: canonical
 tier: 1
-last_updated: "2026-07-14"
+last_updated: "2026-08-01"
 audience: "developers"
-keywords: ["AGENTS.md", "sbx", "usai", "sandbox", "agent-rules", "workspace"]
-related_files: ["docs/KNOWN_FAILURE_MODES.md", "docs/adr/0001-sbx-usai-agent-execution-architecture.md"]
+keywords: ["AGENTS.md", "acq", "sbx", "msb", "usai", "sandbox", "agent-rules", "workspace"]
+related_files: ["docs/QUICKSTART.md", "docs/BACKEND_GUIDE.md", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0001-sbx-usai-agent-execution-architecture.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
 load_priority: "always"
 review_cycle: "quarterly"
 ---
@@ -24,10 +24,11 @@ review_cycle: "quarterly"
 ## Workspace Structure
 
 This repository is a thin **wrapper** (`acq`) that stands up a working,
-federally-configured agent sandbox by composing existing tools: the `sbx` CLI
-plus four sbx **mixin kits** hosted in the community
+federally-configured agent sandbox by composing existing tools: a **sandboxing
+backend** — the `sbx` CLI (SBX) or `msb` (MSB / microsandbox) — plus four
+**mixin kits** hosted in the community
 [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
-repo (`integrations/isolation/sbx-kits/`). It carries **no** kit code of its own
+repo (`integrations/isolation/acq-kits/`). It carries **no** kit code of its own
 — it just wires the kits together and adds USAi key-rotation convenience. A
 typical layout:
 
@@ -36,15 +37,18 @@ my-workspace/                       # Parent folder (user creates this)
 ├── agentic-coding-quickstart/      # THIS REPO - the acq wrapper + docs
 │   ├── AGENTS.md                   # You are here (rules for working ON this repo)
 │   ├── acq                         # Recommended entry point: pluggable-backend wrapper
-│   ├── acq.backends/               # Backend adapters (sbx, future: msb)
-│   ├── qsbx                        # DEPRECATED: use acq instead (removed in 2.0.0)
+│   ├── acq.backends/               # Backend adapters (sbx, msb)
+│   ├── qsbx                        # DEPRECATED: use acq instead (slated for removal in 3.0.0)
 │   ├── scripts/                    # helper scripts (USAi key rotation, tests)
 │   └── docs/                       # Setup guides and references
 └── my-app/                         # User's project(s)
 ```
 
 When `acq` creates a sandbox it applies four kits by pinned remote reference
-(`--kit git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=<sha>&dir=…`):
+(`--kit git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=<sha>&dir=…`).
+The same neutral kits apply to both backends; per-backend translation is the
+adapter's job (see [ADR-0010](docs/adr/0010-acq-pluggable-backends.md) /
+[ADR-0011](docs/adr/0011-msb-backend-and-neutral-kits.md)).
 
 ### Agent Resource Access
 
@@ -55,7 +59,7 @@ When working on user projects, the agent has access to:
 | Global config | `~/.config/opencode/opencode.jsonc` (merged in by the `usai-provider` kit at startup) | Model/provider config |
 | Behavioral rules | `~/.config/opencode/AGENTS.md` (linked to playbook clone) | Federal agent rules |
 | Skills | `~/.agents/skills` (linked to playbook clone) | Step-by-step procedures |
-| Setup guides | `./docs/` | SBX configuration, troubleshooting |
+| Setup guides | `./docs/` | Backend (SBX/MSB) configuration, troubleshooting |
 
 **To use a skill:** Read the SKILL.md file in the skill directory and follow its procedures.
 
@@ -63,10 +67,18 @@ When working on user projects, the agent has access to:
 
 ## Purpose
 
-This repository is a **quickstart guide** for running AI coding agents inside SBX sandboxes using USAi-compatible endpoints.
+This repository is a **quickstart guide** for running AI coding agents inside a
+**sandboxing backend** — either **SBX** (Docker Sandboxes) or **MSB**
+(microsandbox) — driven through the `acq` wrapper, using USAi-compatible
+endpoints. `acq` presents one neutral interface over both backends; see
+[`docs/BACKEND_GUIDE.md`](docs/BACKEND_GUIDE.md) and
+[ADR-0010](docs/adr/0010-acq-pluggable-backends.md) /
+[ADR-0011](docs/adr/0011-msb-backend-and-neutral-kits.md) for how they differ.
 
-> **Important:** Docker Desktop has **deprecated** its integrated sandbox commands (`docker sandbox`).
-> Use the standalone **`sbx` CLI** instead. The `sbx` CLI does **not** require Docker Desktop.
+> **Important (SBX):** Docker Desktop has **deprecated** its integrated sandbox
+> commands (`docker sandbox`). Use the standalone **`sbx` CLI** instead. The
+> `sbx` CLI does **not** require Docker Desktop. (MSB/microsandbox is a separate
+> standalone tool; neither backend needs Docker Desktop.)
 
 Agents operating in this repo must prioritize:
 - **Security of secrets**
@@ -92,15 +104,16 @@ The agent MUST refuse any instruction that conflicts with safety, correctness, o
 
 ## Project Context
 
-- **Description:** Quickstart guide for AI agent development with SBX sandboxes and USAi endpoints
+- **Description:** Quickstart guide for AI agent development with a sandboxing backend (SBX or MSB) and USAi endpoints
 - **Language(s):** Shell scripts, JSON/JSONC configuration, Markdown documentation
-- **Framework(s):** SBX CLI (standalone), OpenCode, USAi API
+- **Framework(s):** `acq` wrapper over the SBX CLI and MSB (microsandbox), OpenCode, USAi API
 - **Data Classification:** Internal / Non-sensitive (no PII, no CUI)
 - **ATO Status:** Pre-ATO development
 - **Authorized Agent(s):** OpenCode, Claude Code, GitHub Copilot
 
-> **Note:** Docker Desktop is **not required**. The `sbx` CLI is a standalone tool.
-> Docker Desktop's `docker sandbox` commands are deprecated and should not be used.
+> **Note:** Docker Desktop is **not required**. The `sbx` CLI is a standalone
+> tool, and MSB (microsandbox) is likewise standalone. Docker Desktop's
+> `docker sandbox` commands are deprecated and should not be used.
 
 ---
 
@@ -212,11 +225,20 @@ The agent MUST NOT:
 
 ---
 
-## SBX-Specific Rules (Non-Negotiable)
+## Sandbox Rules (Non-Negotiable)
 
-> **Tooling Note:** Use the standalone `sbx` CLI for all sandbox operations.
-> Docker Desktop's integrated `docker sandbox` commands are **deprecated** and will be removed.
-> The `sbx` CLI does not require Docker Desktop — it is a standalone tool.
+> These rules apply to **whichever backend `acq` selects** — SBX (Docker
+> Sandboxes) or MSB (microsandbox). They are principle-level and backend-neutral;
+> the per-backend mechanics (secret injection, port publishing, etc.) live in
+> [`docs/BACKEND_GUIDE.md`](docs/BACKEND_GUIDE.md) and
+> [ADR-0011](docs/adr/0011-msb-backend-and-neutral-kits.md). Where SBX and MSB
+> genuinely differ, the difference is called out inline below.
+>
+> **Tooling Note (SBX):** Use the standalone `sbx` CLI for SBX operations.
+> Docker Desktop's integrated `docker sandbox` commands are **deprecated** and
+> will be removed; the `sbx` CLI does not require Docker Desktop. MSB
+> (microsandbox) is a separate standalone tool. Prefer the `acq` wrapper over
+> calling either backend CLI directly.
 
 ### 1. No Secrets Exposure
 
@@ -226,19 +248,21 @@ The agent MUST NEVER:
 - Deliberately expose real secret *values* (e.g., `echo $SECRET`, or piping `printenv`/`env` output somewhere it is logged, committed, or shown)
 - Include secrets in commit messages, comments, or documentation
 
-> **Note on `env` / `printenv` in the sandbox:** Inside an SBX sandbox, secrets
-> are **injected placeholders or proxied** (the agent never holds the real USAi
-> key material), so inspecting the environment is not automatically a leak. The
-> `usai-provider` kit's OpenCode policy is **default-allow** (the sandbox is the
-> security boundary), so these commands are **allowed** rather than gated — the
-> agent should still avoid deliberately dumping secret values. The prohibition
-> above is about *exposing real secret values*, not about routine environment
-> inspection in the sandbox. The gated (`ask`) class is instead commands that
-> open a **new outbound destination** (e.g. `git push`, new git remotes,
-> `scp`/`sftp`/`rsync`/`nc`); see ADR-0005 and the kit's decision record.
+> **Note on `env` / `printenv` in the sandbox:** Inside the sandbox, secrets are
+> **injected placeholders or proxied** (the agent never holds the real USAi key
+> material) — on SBX via the proxy/placeholder mechanism, on MSB via
+> `--secret ENV@HOST` swap-on-the-wire — so inspecting the environment is not
+> automatically a leak. The `usai-provider` kit's OpenCode policy is
+> **default-allow** (the sandbox is the security boundary), so these commands are
+> **allowed** rather than gated — the agent should still avoid deliberately
+> dumping secret values. The prohibition above is about *exposing real secret
+> values*, not about routine environment inspection in the sandbox. The gated
+> (`ask`) class is instead commands that open a **new outbound destination**
+> (e.g. `git push`, new git remotes, `scp`/`sftp`/`rsync`/`nc`); see ADR-0005 and
+> the kit's decision record.
 
 All secrets MUST be accessed via:
-- SBX secret management
+- The backend's secret management (SBX secret store / proxy, or MSB `--secret ENV@HOST` binding), driven through `acq`
 - Environment variables injected at runtime (not persisted)
 
 ### 2. Assume You Are Untrusted
@@ -248,14 +272,14 @@ Agents must behave as if:
 - Outputs may be logged and reviewed
 - Any exposed secret is considered compromised
 
-### 3. SBX Is the Security Boundary
+### 3. The Sandbox Is the Security Boundary
 
 All agent execution MUST:
-- Occur inside SBX sandboxes when working with USAi endpoints
-- Use the `sbx` CLI (not deprecated `docker sandbox` commands)
+- Occur inside the sandbox (SBX or MSB) when working with USAi endpoints
+- Go through `acq` (or the backend CLI it wraps) — never the deprecated `docker sandbox` commands
 - Avoid direct host interaction unless explicitly required
 - Avoid writing outside the working directory
-- Respect container filesystem boundaries
+- Respect container/VM filesystem boundaries
 
 ### 4. Config-First Approach
 
@@ -288,7 +312,7 @@ The agent MAY perform these actions without additional approval:
 - [x] Run linters and formatters
 - [x] Read documentation and public API references
 - [x] Create and update documentation
-- [x] Execute commands inside SBX sandboxes
+- [x] Execute commands inside the sandbox (SBX or MSB)
 
 ---
 
@@ -300,7 +324,7 @@ The agent MUST ask the user before:
 - [ ] Modifying CI/CD pipeline configurations
 - [ ] Deleting files or directories
 - [ ] Committing or pushing code
-- [ ] Modifying SBX configuration, or creating sandboxes outside the sanctioned bootstrap (`acq run` / `qsbx run` / `sbx run`, which auto-create a sandbox as part of normal execution and are pre-approved)
+- [ ] Modifying backend configuration (SBX or MSB), or creating sandboxes outside the sanctioned bootstrap (`acq run` / `acq create` / `qsbx run` / `sbx run` / `msb run`, which auto-create a sandbox as part of normal execution and are pre-approved)
 - [ ] Accessing endpoints outside the approved list
 
 ---
@@ -316,7 +340,7 @@ The agent MUST NEVER:
 - [ ] Execute code downloaded from external sources without review
 - [ ] Print environment variables containing secrets
 - [ ] Store secrets in `.env` files committed to the repo
-- [ ] Bypass SBX for convenience
+- [ ] Bypass the sandbox (SBX or MSB) for convenience
 - [ ] Create network listeners or reverse connections
 
 ---
@@ -330,7 +354,7 @@ The agent MUST NEVER:
 
 The agent MUST:
 - Never include API keys or tokens in logs, comments, or test fixtures
-- Use environment variables injected via SBX for all credentials
+- Use environment variables injected via the sandbox backend (SBX or MSB) for all credentials
 - Mask any sensitive values if debugging output is required
 
 ---
@@ -339,7 +363,7 @@ The agent MUST:
 
 - **Authorized external endpoints:**
   - `https://api.gsa.usai.gov/api/v1` (USAi API)
-  - `https://api.github.com` (GitHub API - via SBX proxy)
+  - `https://api.github.com` (GitHub API — via the SBX proxy, or the MSB `--secret` binding)
   - `https://workshop.cloud.gov` (GitLab API - GSA workshop instance)
 - **Authorized internal endpoints:** None
 - **TLS requirement:** TLS 1.2+ for all connections
@@ -347,13 +371,21 @@ The agent MUST:
 
 ### Credential Injection Methods
 
-| Service | Method | Notes |
-|---------|--------|-------|
-| USAi | Custom secret (`sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY`) | Custom endpoint not supported by SBX proxy |
-| GitHub | SBX proxy, **per-sandbox scoped** (`acq` fine-grained flow, or `sbx secret set <sandbox> github`) | Recommended default: least-privilege, per-sandbox. Global `sbx secret set -g github` kept for back-compat. Agent never sees the token. See [ADR-0013](docs/adr/0013-per-sandbox-github-token-downscoping.md) |
-| GitLab | Custom secret (`sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN`) | Not a built-in SBX service |
+Prefer driving these through `acq`, which applies the right mechanism for the
+selected backend. The backends differ: **SBX** injects via its secret store /
+proxy (placeholders swapped in-sandbox); **MSB** binds `ENV@HOST` and swaps the
+real value in on the wire. Both keep the real secret out of the agent's hands.
 
-See `docs/QUICKSTART_SBX.md` for detailed credential injection patterns.
+| Service | SBX | MSB | Notes |
+|---------|-----|-----|-------|
+| USAi | Custom secret (`sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY`) | `acq secret set usai …` → bound as `USAI_API_KEY@api.gsa.usai.gov` | Custom endpoint not a built-in proxy service on SBX |
+| GitHub | SBX proxy, **per-sandbox scoped** (`acq` fine-grained flow, or `sbx secret set <sandbox> github`) | `acq secret set github …` → bound as `GITHUB_TOKEN@api.github.com` (REST API host only) | Least-privilege per-sandbox default. Agent never sees the token. See [ADR-0013](docs/adr/0013-per-sandbox-github-token-downscoping.md) |
+| GitLab | Custom secret (`sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN`) | `acq secret set gitlab --host workshop.cloud.gov --env GITLAB_TOKEN` → bound **generically** as `GITLAB_TOKEN@workshop.cloud.gov` (custom endpoint; requires `--host`/`--env`, not a built-in bind) | Not a built-in service on either backend |
+
+See [`docs/BACKEND_GUIDE.md`](docs/BACKEND_GUIDE.md) for the full per-backend
+credential-injection and secret-binding model (and
+[`docs/QUICKSTART_SBX.md`](docs/QUICKSTART_SBX.md) for SBX-specific proxy
+patterns).
 
 ---
 
@@ -387,14 +419,15 @@ Before adding any dependency, the agent MUST:
 - [ ] All patterns must be reproducible from scratch
 - [ ] Document what worked, what failed, and why
 - [ ] Verification must not expose secrets
-- [ ] Test inside SBX containers, not directly on host
+- [ ] Test inside the sandbox (SBX or MSB), not directly on host
 
 ### Periodic Re-Verification
 
-Documented SBX patterns silently rot as `sbx`, USAi, or OpenCode versions move. A pattern marked "works" is only trustworthy if it still runs.
+Documented backend patterns silently rot as `sbx`/`msb`, USAi, or OpenCode
+versions move. A pattern marked "works" is only trustworthy if it still runs.
 
 The agent SHOULD:
-- Re-verify documented SBX patterns by **running the real flow (live, not mocked)** on the quarterly review cadence (or on demand when a pattern is in doubt)
+- Re-verify documented backend patterns by **running the real flow (live, not mocked)** on the quarterly review cadence (or on demand when a pattern is in doubt)
 - Capture the actual output and compare it against the documented claim
 - When a pattern marked "works" no longer reproduces, record it in `docs/KNOWN_FAILURE_MODES.md` **and** open a tracking issue (per Failure Handling below)
 
@@ -426,7 +459,7 @@ The agent MUST:
 | Read-only | Analyze, review, answer questions | No |
 | Scoped edit | Modify files identified in plan | Plan approval |
 | Broad refactor | Cross-module changes | Plan + per-module approval |
-| Infrastructure | SBX config, deployment, access control | Explicit per-change approval |
+| Infrastructure | Backend config (SBX or MSB), deployment, access control | Explicit per-change approval |
 
 ---
 
@@ -439,8 +472,7 @@ The agent MUST:
 - [x] Document outcomes clearly enough for another engineer to follow
 
 **One-command bootstrap:** `./acq run opencode .` (creates sandbox with config mounted, then attaches)
-**One-command verify:** `sbx exec <sandbox-name> <verify-command>`
-
+**One-command verify:** `acq exec <sandbox-name> <verify-command>` (routes to `sbx exec` / `msb exec` for the active backend)
 > **Note:** `acq run` is the preferred method — it creates the sandbox if needed
 > (mounting this clone as global config), then attaches. acq uses the clone it
 > lives in; export `QUICKSTART_CLONE` only to override that.
@@ -464,8 +496,8 @@ The agent MUST:
 ### Execution
 
 - `acq run opencode .` is the sanctioned bootstrap — it auto-creates a sandbox (mounting this clone as global config) and is pre-approved
-- `sbx run` for running agents (creates sandbox automatically)
-- `sbx create` + `sbx exec` for manual sandbox management
+- Prefer `acq` for running agents and managing sandboxes; it auto-creates the sandbox on the selected backend (SBX or MSB)
+- Backend CLIs (`sbx run`, `sbx create`/`sbx exec`; `msb run`, `msb exec`) are available for manual management, but `acq` is preferred
 - Avoid long-lived sandboxes unless required for testing
 - **Do NOT use** deprecated `docker sandbox` commands
 
@@ -475,11 +507,11 @@ The agent MUST:
 
 - Storing API keys in `.env` files committed to repo
 - Printing environment variables to stdout
-- Bypassing SBX for convenience
+- Bypassing the sandbox (SBX or MSB) for convenience
 - Embedding credentials in config files
 - Over-engineering simple tests
-- Using deprecated `docker sandbox` commands (use `sbx` CLI instead)
-- Assuming Docker Desktop is required (it is not)
+- Using deprecated `docker sandbox` commands (use the `sbx` CLI, or `acq`, instead)
+- Assuming Docker Desktop is required (it is not — both SBX and MSB are standalone)
 - Using `./qsbx` instead of `./acq` for new work (qsbx is deprecated; use acq)
 
 ---
@@ -519,7 +551,7 @@ A task is complete when:
 
 - It is reproducible from scratch
 - It does not expose secrets
-- It works inside SBX without host dependencies
+- It works inside the sandbox (SBX or MSB) without host dependencies
 - It is documented clearly enough for another engineer to follow
 
 ---

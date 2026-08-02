@@ -24,7 +24,11 @@
 # PATTERNS_KIT_REF is pinned to an agentic-coding-patterns commit that provides
 # the neutral acq-kits, the hybrid/v1 schema (including the kit-bundle
 # `provenance` block that the currency check below reads), and the playbook
-# kit's REST-tarball fetch.
+# kit's REST-tarball fetch. The pinned release also carries the openchamber kit
+# republished against the neutral `publishedPorts`/`background` schema, so
+# ADR-0014's cross-repo gate is satisfied: the neutral port/background fields
+# light up end-to-end rather than being read only defensively against an
+# unreleased schema.
 # ============================================================================
 PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # Full 40-char SHA (not an abbreviation): this ref drives a credential-bearing
@@ -32,7 +36,7 @@ PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # the bundle-version anchor recorded in a sandbox's host-side provenance record
 # (see ACQ_BUILTIN_BUNDLE below + the provenance helpers) so acq can tell a
 # stale sandbox from a current one.
-PATTERNS_KIT_REF="5c55bcf9fc77947b145a828f75877797ebd6d178"
+PATTERNS_KIT_REF="6230faa53ae88e125f04521ab8eee932eeaacdbc"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider"

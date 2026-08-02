@@ -17,7 +17,13 @@
 # `msb --tree` and per-command `--help`. Confirmed present in 0.6.6:
 #   - `msb create --name … --net-rule <TOKENS> --trust-host-cas --tls-intercept
 #      --secret <ENV@HOST> --copy-file <SRC:DST> --env <K=V> IMAGE`
-#   - `msb exec <NAME> [-u USER] -- CMD…`
+#   - `msb exec [FLAGS] <NAME> [-u USER] -- CMD…` — msb 0.6.7 accepts the option
+#      flags (`-u`, `-t`, `-w`, `-e`) either BEFORE or AFTER <NAME> (getopt-style,
+#      order-independent, verified via `msb --tree` / the live openchamber-on-msb
+#      verify). This adapter uses flags-after-NAME for the kit-command/marker
+#      paths and flags-before-NAME for the interactive attach + `acq exec` paths;
+#      both are valid. (A future cleanup could normalize to one order once
+#      re-checked against a newer msb; both forms work on the pinned msb.)
 #   - `msb list|ls [-q] [--running]`, `msb stop`, `msb remove|rm [-f]`,
 #     `msb copy|cp SRC DST`, `msb ssh [SANDBOX] [-- CMD…]`, `msb ssh authorize`,
 #     `msb run … -p HOST:GUEST` (published ports), `msb doctor`.
@@ -36,13 +42,15 @@
 # shellcheck disable=SC2034
 ACQ_BACKEND_NAME="msb"
 # ACQ_BACKEND_SUPPORTS_PORT_FORWARD gates the POST-HOC `acq ports` verb (matching
-# sbx's meaning). msb 0.6.6 has NO post-hoc ports command — ports are published
-# only at create/run time via `-p HOST:GUEST` — so this is 0. acq_backend_ports
-# accordingly prints the create/run-time mechanism instead of forwarding.
+# sbx's meaning). msb has no post-hoc NAT publish, but it DOES have a post-hoc
+# path (confirmed via `msb --tree` on msb 0.6.7): `msb ssh serve <sandbox>` opens
+# a host-side SSH listener against a RUNNING sandbox, and OpenSSH `-L` local
+# forwarding then tunnels a guest port to the host with no restart. acq_backend_ports
+# wires that (ADR-0015), so this is now 1 — post-hoc `acq ports --publish H:G` works.
 # shellcheck disable=SC2034
-ACQ_BACKEND_SUPPORTS_PORT_FORWARD=0        # msb publishes ports at create/run only (-p HOST:GUEST), no post-hoc verb
+ACQ_BACKEND_SUPPORTS_PORT_FORWARD=1        # post-hoc publish via `msb ssh serve` + OpenSSH -L forwarding (ADR-0015)
 # shellcheck disable=SC2034
-ACQ_BACKEND_SUPPORTS_SNAPSHOTS=1           # msb snapshot create/export/import
+ACQ_BACKEND_SUPPORTS_SNAPSHOTS=0           # msb HAS `msb snapshot`, but acq exposes NO `snapshot` verb; wiring one is beyond sbx parity (sbx has none), so this flag reflects what acq surfaces (0), not what msb can do
 # shellcheck disable=SC2034
 ACQ_BACKEND_CAN_RESUME=1                   # msb stop / msb start preserve state
 # shellcheck disable=SC2034
@@ -52,23 +60,28 @@ ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1  # msb --secret ENV@HOST + --tls-inter
 # rules, --trust-host-cas, and --secret used here.
 MIN_MSB_VERSION="0.6.0"
 
-# Default OCI image for provisioned sandboxes. Unlike sbx (whose templates
-# supply the agent image), msb runs a plain OCI image and acq layers the kits on
-# top. The default is the public `node:22-bookworm` image — it is built on
-# buildpack-deps:bookworm-scm, so it ALREADY ships node, git, curl, and
-# ca-certificates (exactly the four kits' runtime prerequisites), and it is
-# pullable from Docker Hub without registry auth.
+# Default OCI image for provisioned sandboxes. We default to the SAME image
+# family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
+# agent template. It ALREADY ships the non-root `agent` user (with passwordless
+# sudo), node, git, curl, and ca-certificates (the four kits' runtime
+# prerequisites), AND an agent-writable npm global prefix
+# (/usr/local/share/npm-global) — so `npm install -g` by the agent user works
+# without sudo and without EACCES. Defaulting here makes msb match sbx by
+# construction and removes the need to synthesize the agent user / sudo on a
+# plain OCI base. It is pullable from Docker Hub without registry auth.
 #
 # We deliberately do NOT apt-install prerequisites at runtime: the kit net-rules
 # lock egress to only the kits' own hosts (api.gsa.usai.gov, github.com, ...),
-# so a package mirror (deb.debian.org) is unreachable during provision. Baking
-# the tools into the base image avoids both the egress hole and the runtime
+# so a package mirror is unreachable during provision. This still matters for a
+# custom base — bake the tools into the image rather than expecting a runtime
 # install. Override with ACQ_MSB_IMAGE to bring your own (e.g. a lighter or
-# org-internal image) — see the prerequisite contract below.
-ACQ_MSB_IMAGE="${ACQ_MSB_IMAGE:-docker.io/library/node:22-bookworm}"
+# org-internal image, or a plain OCI base) — a custom image must still provide
+# the prerequisites; see the prerequisite contract below.
+ACQ_MSB_IMAGE="${ACQ_MSB_IMAGE:-docker.io/docker/sandbox-templates:shell-docker}"
 
 # Prerequisite tools the pinned four kits need at runtime, expected to be
-# PRESENT IN THE BASE IMAGE (the default node:22-bookworm provides all four):
+# PRESENT IN THE BASE IMAGE (the default sandbox-templates:shell-docker provides
+# all four):
 #   node          — usai-provider merge-global-config.mjs
 #   git           — agentic-coding-playbook clone + git-ssh-sign
 #   curl          — health/verification checks
@@ -93,38 +106,55 @@ ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
 # GitHub credential host for the msb --secret binding. We bind the github token
 # to the REST API host ONLY (api.github.com), which msb substitutes on the wire
 # (verified msb 0.6.7). We deliberately do NOT bind github.com/codeload.github.com
-# because msb does not substitute git's smart-HTTP transport there (quickstart#203)
-# and a multi-host binding also trips microsandbox #1170 (ineligible entry blocks
-# eligible). Kits that need github auth must use the REST API (e.g. the playbook
+# because msb does not substitute git's smart-HTTP transport there
+# and a multi-host binding also trips a known microsandbox bug where an ineligible
+# entry blocks eligible ones. Kits that need github auth must use the REST API (e.g. the playbook
 # kit fetches a source tarball from api.github.com), not `git clone`. The env var
 # name is GITHUB_TOKEN (the neutral service→env mapping; kits also accept GH_TOKEN).
 ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-api.github.com}"
 
-# _acq_msb_service_binding SERVICE -> "ENVVAR<TAB>HOST" for services the msb
-# adapter binds via `--secret ENV@HOST`, or empty for services it does not bind.
-# Single source of truth for the bind (provision), rotate (set), and unbind
-# (secret rm) paths.
+# _acq_msb_service_binding SERVICE [SANDBOX] -> "ENVVAR<TAB>HOST" for services
+# the msb adapter binds via `--secret ENV@HOST`, or empty for services it does
+# not bind. Single source of truth for the bind (provision), rotate (set), and
+# unbind (secret rm) paths.
 #
-# NOTE (quickstart#226, gap C): this is still a fixed table (usai + github), not
-# generic. An arbitrary stored custom endpoint (`acq secret set SANDBOX --host
-# api.example.com --env API_KEY`) is NOT yet bound on msb — closing that requires
-# the acq secret store to persist the per-service host/env pair (msb's
-# `acq_backend_secret_set` does not yet accept/store --host/--env) and this
-# function to read it back. Tracked in #226; out of scope for this PR, which
-# generalized the re-feed/rotate machinery and added github via the REST path.
+# GENERIC custom endpoints: usai + github keep their
+# compiled-in mapping (so their behavior/tests are unchanged), but ANY OTHER
+# service now resolves its (env, host) from the acq secret store's non-secret
+# endpoint sidecar (acq_secret_meta_resolve, written by `acq secret set SVC
+# --host H --env E`). So an arbitrary custom endpoint stored with a host/env is
+# bound generically instead of being stored-but-inert. Absence of a sidecar =>
+# empty (no binding), preserving prior behavior for services with no mapping.
+#
+# HOST may be a comma-separated multi-host list (mirroring sbx set-custom);
+# msb's `--secret ENV@HOST[,HOST...]` accepts that form (verified msb 0.6.7).
+# The optional SANDBOX arg gives scoped-sidecar precedence over the global one.
 _acq_msb_service_binding() {
-  case "$1" in
-    usai)   printf '%s\t%s\n' "USAI_API_KEY" "$ACQ_MSB_USAI_HOST" ;;
-    github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST" ;;
-    *)      printf '\t\n' ;;
+  local _service="$1" _sandbox="${2:-}" _meta _host _env
+  case "$_service" in
+    usai)   printf '%s\t%s\n' "USAI_API_KEY" "$ACQ_MSB_USAI_HOST"; return 0 ;;
+    github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
   esac
+  # Generic path: read the persisted (host, env) sidecar for a custom endpoint.
+  if command -v acq_secret_meta_resolve >/dev/null 2>&1; then
+    if _meta=$(acq_secret_meta_resolve "$_service" "$_sandbox" 2>/dev/null) && [ -n "$_meta" ]; then
+      _host=$(printf '%s' "$_meta" | cut -f1)
+      _env=$(printf '%s' "$_meta" | cut -f2)
+      if [ -n "$_host" ] && [ -n "$_env" ]; then
+        printf '%s\t%s\n' "$_env" "$_host"
+        return 0
+      fi
+    fi
+  fi
+  printf '\t\n'
 }
 
 # The kits expect an unprivileged `agent` user with HOME=/home/agent (the sbx
-# agent-template contract). Plain OCI bases don't provide it, so the adapter
-# creates it at provision (see _acq_msb_ensure_agent_user), addressing it by
-# NAME — the uid is whatever the base image leaves free (1000 is often taken by
-# a pre-existing user, e.g. `node` on node:22-bookworm).
+# agent-template contract). The default image already provides it; but a plain
+# OCI base override (e.g. node:22-bookworm) does not, so the adapter creates it
+# at provision (see _acq_msb_ensure_agent_user), addressing it by NAME — the uid
+# is whatever the base image leaves free (1000 is often taken by a pre-existing
+# user, e.g. `node` on node:22-bookworm).
 
 # Guest memory and vCPU allocation.
 # ---------------------------------------------------------------------------
@@ -133,7 +163,7 @@ _acq_msb_service_binding() {
 # swap, so a process that exceeds guest RAM is OOM-killed by the guest kernel and
 # simply prints "Killed". A Node.js agent TUI like opencode blows past 512 MiB
 # immediately, so a create with no memory flag left the user with an agent that
-# started and was instantly killed (quickstart#228 follow-up). sbx sizes its
+# started and was instantly killed. sbx sizes its
 # agent templates generously; msb runs a plain base and must be told, so acq
 # passes a generous default here (4 GiB / 2 vCPU) and lets it be tuned.
 #
@@ -183,6 +213,39 @@ ACQ_MSB_OPENCODE_PKG="${ACQ_MSB_OPENCODE_PKG:-opencode-ai}"
 # serves metadata; the tarballs are on the same host for the public registry.
 # Override for an internal mirror via ACQ_MSB_NPM_HOSTS (space-separated).
 ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
+
+# ---------------------------------------------------------------------------
+# Post-hoc port publish state (ADR-0015)
+# ---------------------------------------------------------------------------
+# acq manages its OWN ssh keypair (never the user's ~/.ssh) under its state dir,
+# and records the `msb ssh serve` + `ssh -L` PIDs per sandbox so `acq rm`/stop can
+# tear them down. State lives under $XDG_STATE_HOME/acq (falling back to
+# ~/.local/state/acq); override the whole root with ACQ_STATE_DIR (tests do).
+ACQ_STATE_DIR="${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}"
+ACQ_MSB_SSH_DIR="${ACQ_MSB_SSH_DIR:-${ACQ_STATE_DIR}/ssh}"
+ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR}/msb_id_ed25519}"
+ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR}/known_hosts}"
+ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR}/ports}"
+# SSH user for the serve listener. `msb ssh serve` authorizes a key host-wide;
+# the login user on the loopback listener defaults to root (override if a
+# deployment's msb serve expects a different account).
+ACQ_MSB_SSH_USER="${ACQ_MSB_SSH_USER:-root}"
+
+# Module-level monotonic counter for ephemeral serve-port selection. The call
+# site is `sport=$(_acq_msb_pick_ephemeral_port)` — a COMMAND SUBSTITUTION, which
+# runs in a subshell, so a plain shell variable incremented inside the helper
+# would never persist back to the caller (every publish would recompute the same
+# value — exactly the bug this avoids). The counter is therefore persisted in a small
+# file under the ports state dir so consecutive publishes in one process read
+# distinct, increasing values. Seeded from a per-process random base.
+_ACQ_MSB_PORT_SEQ_FILE="${ACQ_MSB_PORTS_DIR}/.port-seq"
+
+# Per-process random base offset for ephemeral serve-port selection, evaluated
+# ONCE when this file is sourced (not per call). Spreads different processes
+# across the range while the persisted per-call counter provides distinct
+# offsets WITHIN a process. $$, $RANDOM (bash; empty under POSIX sh,
+# handled by the ${RANDOM:-0} default), and the seconds clock give spread.
+_ACQ_MSB_PORT_BASE="${_ACQ_MSB_PORT_BASE:-$(( ($$ + ${RANDOM:-0} + $(date +%s 2>/dev/null || echo 0)) % 40000 ))}"
 
 # ---------------------------------------------------------------------------
 # Version comparison (shared shape with sbx.sh; kept local to avoid coupling)
@@ -294,6 +357,71 @@ _acq_msb_wait_for_exec_ready() {
 # ---------------------------------------------------------------------------
 # Kit application helpers (msb drives the neutral spec itself)
 # ---------------------------------------------------------------------------
+#
+# DESIGN NOTE — why kit commands still stage via `msb exec`, not `--script`
+# (evaluated against msb 0.6.7's create/run-time script flags).
+# ---------------------------------------------------------------------------
+# msb 0.6.7 offers first-class script registration on `create`/`run`:
+#   --script NAME=BODY        (inline; escape-decoded; shebang from --shell)
+#   --script-raw NAME=BODY    (exact bytes, no shebang)
+#   --script-path NAME:PATH   (body read verbatim from a host file)
+# Registered scripts land executable at /.msb/scripts/<name>, on the guest PATH.
+# The appeal is real: staging a kit command via --script-path passes the body as
+# a FILE (no assembling a shell string from kit-provided content). We evaluated
+# replacing the kit-command-injection path (_acq_msb_run_commands ->
+# _acq_msb_exec_command) with it and DELIBERATELY KEPT the exec-based path. The
+# refactor is not a clean net win as this adapter is currently shaped:
+#
+#   1) TIMING. `--script*` register ONLY at create/run time. But kit commands are
+#      NOT all applied at create: _acq_msb_apply_kit_dir is also driven MID-LIFE
+#      by acq_backend_apply_kit (`acq kit apply NAME KITREF`, acq:293) and by
+#      acq_backend_ensure_kits_applied (the re-attach heal loop, acq:434/461),
+#      long after the sandbox was created. A create-time flag cannot register a
+#      script into an already-running sandbox, so the mid-life path MUST stay
+#      exec-based regardless. Introducing --script only at provision would fork
+#      the code into two dissimilar command-dispatch paths (create=script,
+#      mid-life=exec) — MORE surface, MORE divergence, for the same observable
+#      behavior. A single exec-based path that works in both phases is simpler
+#      and is what the whole apply pipeline is already built around.
+#
+#   2) THE STRING WE WOULD AVOID ISN'T BUILT FROM KIT CONTENT. The safety win of
+#      --script is "stop interpolating kit-provided bytes into an `sh -c`
+#      string." But this adapter ALREADY does not do that for kit argv: a kit
+#      command is carried as base64-encoded argv tokens (kit_spec_commands ->
+#      __CMD__ records), decoded into a bash array, and handed to
+#      `msb exec … -- "$@"` as SEPARATE ARGV ELEMENTS. Kit content never enters
+#      an interpolated shell string on this path; the only `sh -c` around it is
+#      the fixed background-detach wrapper (`nohup "$@" … ` with the argv as
+#      positional params — still no interpolation). So the injection risk
+#      --script is designed to remove is already absent here; --script would
+#      restage the same already-safe argv through a different primitive without
+#      reducing attack surface.
+#
+#   3) IDEMPOTENCY/USER SEMANTICS LIVE IN THE EXEC PATH, NOT IN REGISTRATION.
+#      install-phase commands are run-once via a root-owned marker keyed on a
+#      hash of the argv (_acq_msb_exec_command: /var/lib/acq/install-<cksum>),
+#      tested+written as uid 0 so the gate is independent of the command's own
+#      user; initFiles/startup re-run every apply. Per-phase run-as-user
+#      (install=root, 1000/agent -> `-u agent` + HOME) and the non-interactive
+#      git guards (GIT_TERMINAL_PROMPT=0 …) are all applied at INVOCATION. A
+#      registered /.msb/scripts/<name> still has to be INVOKED (as the right
+#      user, marker-gated, with the right env) — i.e. we would keep the entire
+#      exec+marker+uflag/eflag machinery AND add a registration+guard step on
+#      top. Net: strictly more moving parts, identical behavior.
+#
+#   4) FILE STAGING IS ORTHOGONAL. files[] already stage via `msb copy` +
+#      verify + chown (_acq_msb_copy_file_verified); paths are charset-validated
+#      and never interpolated. --script-path would only cover the COMMAND body,
+#      not files[], so it cannot subsume that path either.
+#
+# CONCLUSION: keep the exec-based kit-command
+# staging. The one place --script/--script-path would be a clean, contained win
+# — a create-time-ONLY, run-once command whose body is genuinely a script file —
+# does not exist in the pinned neutral kit vocabulary today (kit commands are
+# argv sequences across three phases, applied both at create and mid-life). If a
+# future kit schema adds a create-time-only "script" concept, revisit this with
+# --script-path for that narrow case only; until then a second dispatch path is
+# net-negative. No behavior change; the mid-life exec path is load-bearing.
 
 # Fetch a kit ref into the cache and echo its local dir. Returns 1 on failure.
 _acq_msb_fetch_kit() {
@@ -343,6 +471,42 @@ $(kit_spec_net_allow "$_spec")
 EOF
 }
 
+# Emit the create-time `-p HOST:GUEST` flags for a kit's published ports into the
+# named array. Usage: _acq_msb_port_flags_into ARRVAR SPEC
+#
+# ADR-0014: kit_spec_published_ports reads the NEUTRAL top-level
+# `publishedPorts` first (deprecated backend_extras.sbx fallback) and emits
+# validated `guest<TAB>proto<TAB>name<TAB>host` records (ports are ints 1..65535,
+# so they cannot smuggle shell metacharacters). host defaults to guest. We map
+# each to a plain `-p HOST:GUEST` — msb's create/run-time NAT publish. msb -p also
+# accepts BIND_ADDR:HOST:GUEST and /udp, but the neutral schema stays TCP +
+# default loopback bind for sbx parity, so bind-addr and /udp are deliberately
+# NOT emitted. Uses the eval-by-name array pattern (macOS bash 3.2 compat), like
+# _acq_msb_net_rules_into. Absence of publishedPorts is a silent no-op: the
+# neutral field is read DEFENSIVELY so a kit that omits it — or an older pinned
+# kit predating the neutral schema — is a clean no-op rather than an error. The
+# schema and a consuming kit are released at the current PATTERNS_KIT_REF, so the
+# field lights up end-to-end (see ADR-0014).
+_acq_msb_port_flags_into() {
+  local _arr="$1" _spec="$2" _rec _guest _host
+  eval "$_arr=()"
+  while IFS="$(printf '\t')" read -r _guest _ _ _host; do
+    [ -n "$_guest" ] || continue
+    [ -n "$_host" ] || _host="$_guest"
+    # Defense-in-depth: the validator already guarantees integer ports, but
+    # re-check before the value reaches an argv via eval.
+    case "$_guest$_host" in
+      *[!0-9]*)
+        echo "acq(msb): warning: skipping non-integer published port: ${_host}:${_guest}" >&2
+        continue
+        ;;
+    esac
+    eval "$_arr+=(-p \"\${_host}:\${_guest}\")"
+  done <<EOF
+$(kit_spec_published_ports "$_spec")
+EOF
+}
+
 # Apply a single fetched kit directory to a running sandbox NAME.
 # Honors backend_shortcuts.msb (currently: zscaler trust_host_cas, handled at
 # provision time — see acq_backend_provision; here we skip the file/command
@@ -352,12 +516,12 @@ EOF
 # RESOLVED (agentic-coding-playbook kit on msb): the playbook kit fetches a
 # PRIVATE GitHub repo. It used to `git clone` over HTTPS, but msb does not
 # substitute the credential placeholder for git's smart-HTTP transport to
-# github.com/codeload (quickstart#203). The kit now fetches the repo SOURCE
+# github.com/codeload. The kit now fetches the repo SOURCE
 # TARBALL via the REST API (api.github.com/repos/<repo>/tarball/<ref>), which msb
 # DOES substitute (verified msb 0.6.7), and acq binds GITHUB_TOKEN@api.github.com
 # above. So the playbook now works on msb. USAi, git-ssh-sign, and zscaler kits
-# are unaffected. (Upstream git-transport substitution remains unfixed —
-# microsandbox #756/#768/#1170 — but the kit no longer depends on it.)
+# are unaffected. (Upstream git-transport substitution remains unfixed
+# in microsandbox — but the kit no longer depends on it.)
 _acq_msb_apply_kit_dir() {
   local name="$1" kitdir="$2"
   local spec="${kitdir}/spec.yaml"
@@ -486,7 +650,33 @@ _acq_msb_copy_file_verified() {
   fi
   case "$path" in
     /home/agent/*)
-      msb exec "$name" -u 0 -- chown agent "$path" >/dev/null 2>&1 || true
+      # The parent chain was created as root above (mkdir -p as -u 0), so the
+      # intermediate dirs this file introduced under the home (e.g. .local,
+      # .local/bin for ~/.local/bin/opencode) are root-owned. A later kit
+      # startup command runs AS THE AGENT USER and its `mkdir -p ~/.local/...`
+      # then hits EACCES, killing a `set -eu` detached startup silently. Chown
+      # the TOP-MOST created subdir under /home/agent recursively so the whole
+      # chain (dirs + file) is agent-owned — not merely the leaf file. Do NOT
+      # chown /home/agent itself (already agent-owned; recursing all of home
+      # would stomp other kits' intentional root-owned drops). By NAME (agent),
+      # never a numeric uid — the agent uid is provisioned, not necessarily 1000.
+      local rel top
+      rel=${path#/home/agent/}   # e.g. .local/bin/opencode  (or FILE if dropped in ~)
+      top=${rel%%/*}             # e.g. .local               (or FILE)
+      # top must be a real, non-traversing component. (The entry-point charset
+      # check permits `.`, so `..` could slip through; guard it explicitly so we
+      # never chown outside the home, e.g. /home/agent/.. == /home.)
+      case "$top" in
+        ''|.|..) : ;;
+        *)
+          # -P (no-dereference, the chown default but stated explicitly): never
+          # follow a symlink a kit may have staged under the tree, so `chown -R`
+          # cannot be redirected to chown files OUTSIDE /home/agent. Defense in
+          # depth — the tree is inside the ephemeral guest and the top component
+          # is already ../. guarded above.
+          msb exec "$name" -u 0 -- chown -R -P agent "/home/agent/$top" >/dev/null 2>&1 || true
+          ;;
+      esac
       ;;
   esac
   acq_debug "msb copy verified: ${name}:${path}"
@@ -524,20 +714,22 @@ EOF
 $(kit_spec_commands "$spec")
 EOF
 
-  local phase="" user="" argv=() reading=0 _i
+  local phase="" user="" argv=() reading=0 _i background="false"
   for _i in ${_lines[@]+"${!_lines[@]}"}; do
     line="${_lines[$_i]}"
     case "$line" in
       "__CMD__"*)
-        # __CMD__<TAB>phase<TAB>user
+        # __CMD__<TAB>phase<TAB>user<TAB>background
         phase=$(printf '%s' "$line" | cut -f2)
         user=$(printf '%s' "$line" | cut -f3)
+        background=$(printf '%s' "$line" | cut -f4)
+        [ -n "$background" ] || background="false"
         argv=()
         reading=1
         ;;
       "__END__")
         reading=0
-        _acq_msb_exec_command "$name" "$phase" "$user" \
+        _acq_msb_exec_command "$name" "$phase" "$user" "$background" \
           ${_kit_env[@]+"${_kit_env[@]}"} -- ${argv[@]+"${argv[@]}"}
         ;;
       *)
@@ -554,46 +746,68 @@ EOF
 # Execute one command record. install-phase commands are gated by a per-command
 # marker file so they run once per sandbox even across re-applies.
 #
-# Args: NAME PHASE USER [NAME=value ...] -- ARGV...
+# Args: NAME PHASE USER BACKGROUND [NAME=value ...] -- ARGV...
 # The optional NAME=value tokens before the literal `--` are the kit's
 # environment[] entries; each is threaded to `msb exec` as `-e NAME=value`.
 # kit_spec_env already validated the names, so they are safe to pass here.
-_acq_msb_exec_command() {
-  local name="$1" phase="$2" user="$3"
-  shift 3
-
-  # Split leading NAME=value env tokens (up to the `--` sentinel) from argv.
-  local _kit_env=() _tok
+#
+# BACKGROUND (ADR-0014): when "true" (only meaningful for a startup command), the
+# command is DETACHED rather than awaited, so a never-exiting supervisor loop
+# does not block provision. We reproduce this with the same pattern the adapter
+# already uses to keep non-blocking work from stalling the guest: wrap the argv
+# in `nohup sh -c '"$@"' … &` inside a single `msb exec` so the process survives
+# the exec returning. (msb 0.6.x has no `exec -d`; nohup+& is the portable
+# equivalent, matching how sbx's startup semantics detach a background hook.)
+# _acq_msb_split_env_argv KITENV_ARRVAR ARGV_ARRVAR TOKEN... — split the leading
+# NAME=value env tokens (up to the `--` sentinel) from the trailing argv, into
+# the two named arrays. Uses the codebase's eval-by-name array pattern (see
+# common.sh split_noglob) for macOS bash 3.2 compat, storing each token via
+# `set --`/`"$@"` so no value is re-split or re-quoted.
+_acq_msb_split_env_argv() {
+  local _envarr="$1" _argvarr="$2"
+  shift 2
+  eval "$_envarr=()"
+  local _tok
   while [ "$#" -gt 0 ]; do
     _tok="$1"; shift
     if [ "$_tok" = "--" ]; then break; fi
-    _kit_env+=("$_tok")
+    eval "$_envarr+=(\"\$_tok\")"
   done
+  eval "$_argvarr=(\"\$@\")"
+}
 
-  [ "$#" -gt 0 ] || return 0
+# _acq_msb_exec_flags_into UFLAG_ARRVAR EFLAG_ARRVAR USER KITENV_ARRVAR — build
+# the `msb exec` -u/-e flag arrays for one kit command. Maps the sbx uid contract
+# (1000/agent) onto our by-name agent user, threads the kit's declared env as
+# `-e NAME=value`, and injects git non-interactive guards unless the kit set
+# GIT_TERMINAL_PROMPT itself. Arrays passed/returned by name (bash 3.2 compat).
+_acq_msb_exec_flags_into() {
+  local _uflag="$1" _eflag="$2" _user="$3" _envarr="$4"
+  eval "$_uflag=()"
+  eval "$_eflag=()"
 
   # The kits express the unprivileged agent as uid "1000" (the sbx agent-template
-  # contract). On a plain OCI base uid 1000 may be a DIFFERENT user (e.g. `node`
-  # in node:22-bookworm), so address our provisioned agent by NAME instead, and
-  # set HOME=/home/agent so `$HOME`-relative kit logic resolves correctly.
-  local uflag=() eflag=()
-  case "$user" in
+  # contract). On a plain OCI base override uid 1000 may be a DIFFERENT user (e.g.
+  # `node` in node:22-bookworm), so address our provisioned agent by NAME instead,
+  # and set HOME=/home/agent so `$HOME`-relative kit logic resolves correctly.
+  case "$_user" in
     ""|0|root)
-      [ -n "$user" ] && uflag=(-u "$user")
+      [ -n "$_user" ] && eval "$_uflag=(-u \"\$_user\")"
       ;;
     1000|agent)
-      uflag=(-u agent)
-      eflag=(-e "HOME=/home/agent")
+      eval "$_uflag=(-u agent)"
+      eval "$_eflag=(-e \"HOME=/home/agent\")"
       ;;
     *)
-      uflag=(-u "$user")
+      eval "$_uflag=(-u \"\$_user\")"
       ;;
   esac
 
   # Append the kit's declared guest env as additional `-e NAME=value` flags.
   local _ev
-  for _ev in ${_kit_env[@]+"${_kit_env[@]}"}; do
-    eflag+=(-e "$_ev")
+  eval "set -- \${${_envarr}[@]+\"\${${_envarr}[@]}\"}"
+  for _ev in "$@"; do
+    eval "$_eflag+=(-e \"\$_ev\")"
   done
 
   # NON-INTERACTIVE ENFORCEMENT. Kit lifecycle commands run before the agent
@@ -606,39 +820,97 @@ _acq_msb_exec_command() {
   #   - GIT_TERMINAL_PROMPT=0 (+ GIT_ASKPASS/SSH_ASKPASS=false) so git fails fast
   #     instead of prompting. These are injected only if the kit did not already
   #     set GIT_TERMINAL_PROMPT (kits may override intentionally).
-  case " ${_kit_env[*]-} " in
+  local _kit_env_str
+  eval "_kit_env_str=\" \${${_envarr}[*]-} \""
+  case "$_kit_env_str" in
     *" GIT_TERMINAL_PROMPT="*) : ;;
-    *) eflag+=(-e "GIT_TERMINAL_PROMPT=0" -e "GIT_ASKPASS=/bin/false" -e "SSH_ASKPASS=/bin/false") ;;
+    *) eval "$_eflag+=(-e \"GIT_TERMINAL_PROMPT=0\" -e \"GIT_ASKPASS=/bin/false\" -e \"SSH_ASKPASS=/bin/false\")" ;;
   esac
+}
+
+# _acq_msb_exec_install NAME USER UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV... — run an
+# install-phase command, gated by a per-command marker (hash of argv) so it runs
+# once per sandbox even across re-applies. The marker lives under /var/lib/acq
+# (root-owned) and is both TESTED and WRITTEN as uid 0, so the gate is
+# independent of the install command's own user.
+_acq_msb_exec_install() {
+  local _name="$1" _user="$2" _uflagn="$3" _eflagn="$4"
+  shift 4
+  [ "$1" = "--" ] && shift
+  # Distinct internal names (_uf/_ef) so they cannot collide with a caller array
+  # named `uflag`/`eflag` (a `local uflag` would blank the caller's before the
+  # eval-by-name read).
+  local _uf=() _ef=()
+  eval "_uf=(\${${_uflagn}[@]+\"\${${_uflagn}[@]}\"})"
+  eval "_ef=(\${${_eflagn}[@]+\"\${${_eflagn}[@]}\"})"
+
+  local marker
+  marker="/var/lib/acq/install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
+  if msb exec "$_name" -u 0 -- sh -c "test -f '$marker'" </dev/null >/dev/null 2>&1; then
+    acq_debug "msb cmd[install] already done (marker hit): $*"
+    return 0
+  fi
+  acq_debug "msb cmd[install] START (user=${_user:-0}): $*"
+  msb exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
+    acq_debug "msb cmd[install] FAILED: $*"
+    echo "acq(msb): warning: install command failed for '$_name'" >&2
+    return 0
+  }
+  acq_debug "msb cmd[install] DONE: $*"
+  msb exec "$_name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" </dev/null >/dev/null 2>&1 || true
+}
+
+# _acq_msb_exec_run NAME PHASE USER BACKGROUND UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV...
+# — run an initFiles/startup command every apply (they are written idempotent).
+# A startup command marked background (ADR-0014) is DETACHED under nohup inside a
+# single `msb exec` so a never-exiting supervisor loop does not block provision;
+# the argv is passed as positional params to an inner `sh -c '… "$@"'` so no
+# token is re-split or re-quoted (the same safety the direct-argv path has).
+_acq_msb_exec_run() {
+  local _name="$1" _phase="$2" _user="$3" _background="$4" _uflagn="$5" _eflagn="$6"
+  shift 6
+  [ "$1" = "--" ] && shift
+  # Distinct internal names (_uf/_ef): see _acq_msb_exec_install.
+  local _uf=() _ef=()
+  eval "_uf=(\${${_uflagn}[@]+\"\${${_uflagn}[@]}\"})"
+  eval "_ef=(\${${_eflagn}[@]+\"\${${_eflagn}[@]}\"})"
+
+  if [ "$_phase" = "startup" ] && [ "$_background" = "true" ]; then
+    acq_debug "msb cmd[startup:background] DETACH (user=${_user:-0}): $*"
+    msb exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} \
+      -- sh -c 'nohup "$@" >/dev/null 2>&1 & exit 0' sh "$@" </dev/null || {
+      acq_debug "msb cmd[startup:background] FAILED to launch: $*"
+      echo "acq(msb): warning: background startup command failed to launch for '$_name'" >&2
+    }
+    acq_debug "msb cmd[startup:background] LAUNCHED: $*"
+  else
+    acq_debug "msb cmd[${_phase}] START (user=${_user:-0}): $*"
+    msb exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
+      acq_debug "msb cmd[${_phase}] FAILED: $*"
+      echo "acq(msb): warning: ${_phase} command failed for '$_name'" >&2
+    }
+    acq_debug "msb cmd[${_phase}] DONE: $*"
+  fi
+}
+
+_acq_msb_exec_command() {
+  local name="$1" phase="$2" user="$3" background="$4"
+  shift 4
+
+  # Split leading NAME=value env tokens (up to the `--` sentinel) from argv.
+  local _kit_env=() _argv=()
+  _acq_msb_split_env_argv _kit_env _argv "$@"
+
+  [ "${#_argv[@]}" -gt 0 ] || return 0
+
+  # Build the `msb exec` -u/-e flag arrays (uid mapping, kit env, git guards).
+  local uflag=() eflag=()
+  _acq_msb_exec_flags_into uflag eflag "$user" _kit_env
 
   if [ "$phase" = "install" ]; then
-    # Idempotency marker keyed by a hash of the argv. The marker lives under
-    # /var/lib/acq (root-owned) and is both TESTED and WRITTEN as uid 0, so the
-    # gate is independent of the install command's own user — a non-root install
-    # phase is still run-once (the command's uid may not be able to read a
-    # root-created marker, which would otherwise re-run it every apply).
-    local marker
-    marker="/var/lib/acq/install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
-    if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" </dev/null >/dev/null 2>&1; then
-      acq_debug "msb cmd[install] already done (marker hit): $*"
-      return 0
-    fi
-    acq_debug "msb cmd[install] START (user=${user:-0}): $*"
-    msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" </dev/null || {
-      acq_debug "msb cmd[install] FAILED: $*"
-      echo "acq(msb): warning: install command failed for '$name'" >&2
-      return 0
-    }
-    acq_debug "msb cmd[install] DONE: $*"
-    msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" </dev/null >/dev/null 2>&1 || true
+    _acq_msb_exec_install "$name" "$user" uflag eflag -- "${_argv[@]}"
   else
-    # initFiles / startup — run every apply (they are written idempotent).
-    acq_debug "msb cmd[${phase}] START (user=${user:-0}): $*"
-    msb exec "$name" "${uflag[@]}" ${eflag[@]+"${eflag[@]}"} -- "$@" </dev/null || {
-      acq_debug "msb cmd[${phase}] FAILED: $*"
-      echo "acq(msb): warning: ${phase} command failed for '$name'" >&2
-    }
-    acq_debug "msb cmd[${phase}] DONE: $*"
+    _acq_msb_exec_run "$name" "$phase" "$user" "$background" uflag eflag -- "${_argv[@]}"
   fi
 }
 
@@ -702,6 +974,17 @@ acq_backend_provision() {
     local nr=()
     _acq_msb_net_rules_into nr "$spec"
     [ "${#nr[@]}" -gt 0 ] && create_flags+=("${nr[@]}")
+
+    # Published ports (ADR-0014) → create-time `-p HOST:GUEST` flags. The
+    # neutral top-level `publishedPorts` is read first by kit_spec_published_ports
+    # (with a deprecated backend_extras.sbx fallback). Each surviving record is
+    # `guest<TAB>proto<TAB>name<TAB>host` (validated to ints 1..65535). msb -p also
+    # accepts BIND_ADDR:HOST:GUEST and /udp, but the neutral schema stays TCP +
+    # default loopback bind for sbx parity, so we emit a plain `-p HOST:GUEST`
+    # (no bind-addr, no /udp — out of parity scope). Absence is a silent no-op.
+    local pp=()
+    _acq_msb_port_flags_into pp "$spec"
+    [ "${#pp[@]}" -gt 0 ] && create_flags+=("${pp[@]}")
   done
 
   [ "$trust_host_cas" -eq 1 ] && create_flags+=(--trust-host-cas)
@@ -788,7 +1071,8 @@ acq_backend_provision() {
   # Why mount at the host path (not remapped under /home/agent): `msb create`
   # performs the mount at create time, BEFORE acq can create the `agent` user and
   # /home/agent (that happens post-create, once the guest is exec-ready). A plain
-  # base (node:22-bookworm) has no /home/agent, so mounting into it failed with
+  # base override (e.g. node:22-bookworm) has no /home/agent, so mounting into it
+  # failed with
   # "mount ...: Not a directory (os error 20)". Mounting at the host's own
   # absolute path sidesteps the ordering problem and matches sbx. NOTE: msb also
   # cannot mount a SYMLINKED host path (e.g. macOS $TMPDIR under /var ->
@@ -853,9 +1137,9 @@ EOF
   #     api.github.com returns 5000-rate-limit headers; a private-repo tarball
   #     fetch succeeds). msb does NOT substitute git's smart-HTTP transport to
   #     github.com/codeload (a `git clone`/`gh repo clone` of a private repo fails
-  #     auth/TLS there) — this is quickstart#203. So kits authenticate via the REST
+  #     auth/TLS there). So kits authenticate via the REST
   #     API, not git: the playbook kit fetches a source tarball from
-  #     api.github.com. Binding a single host also avoids microsandbox #1170
+  #     api.github.com. Binding a single host also avoids a known microsandbox bug
   #     (multi-host binding: ineligible entry blocks eligible).
   local _secret_env_names=()   # env vars we set transiently, cleared after create
   if command -v acq_secret_resolve >/dev/null 2>&1; then
@@ -890,6 +1174,37 @@ EOF
       create_flags+=(--secret "GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST}")
       acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from GH_TOKEN env)"
     fi
+
+    # GENERIC custom endpoints. usai + github were bound
+    # explicitly above (unchanged). Any OTHER service stored via `acq secret set
+    # SVC --host H --env E` recorded a non-secret (host, env) sidecar; bind each
+    # such service generically here so it is no longer stored-but-inert. Iterate
+    # the endpoint sidecars for this sandbox scope + global, deduping by env var
+    # (a scoped mapping shadows the global; usai/github are skipped — already
+    # bound). The real value moves via a TRANSIENT env var (never argv), exactly
+    # like usai/github, and msb reads it from that host env var at create.
+    if command -v acq_secret_meta_list >/dev/null 2>&1; then
+      local _svc _binding _env _host _val
+      while IFS= read -r _svc; do
+        [ -n "$_svc" ] || continue
+        case "$_svc" in usai|github) continue ;; esac  # bound explicitly above
+        _binding=$(_acq_msb_service_binding "$_svc" "$name")
+        _env=$(printf '%s' "$_binding" | cut -f1)
+        _host=$(printf '%s' "$_binding" | cut -f2)
+        [ -n "$_env" ] && [ -n "$_host" ] || continue
+        # Skip if this env var was already bound (e.g. usai/github, or a dup).
+        case " ${_secret_env_names[*]-} " in *" $_env "*) continue ;; esac
+        if _val=$(acq_secret_resolve "$_svc" "$name" 2>/dev/null) && [ -n "$_val" ]; then
+          # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
+          export "$_env=$_val"; _val=""
+          _secret_env_names+=("$_env")
+          create_flags+=(--secret "${_env}@${_host}")
+          acq_debug "msb secret: binding ${_env}@${_host} for custom service '$_svc' (from acq store)"
+        fi
+      done <<EOF
+$(acq_secret_meta_list "$name")
+EOF
+    fi
   elif [ -n "${USAI_API_KEY:-}" ]; then
     create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
   fi
@@ -917,7 +1232,7 @@ EOF
     case "$ACQ_MSB_IMAGE" in
       ghcr.io/*|*.azurecr.io/*|*private*)
         echo "acq(msb):   hint: the image may require registry auth. Set ACQ_MSB_IMAGE to a" >&2
-        echo "acq(msb):         pullable image (default: docker.io/library/node:22-bookworm)." >&2
+        echo "acq(msb):         pullable image (default: docker.io/docker/sandbox-templates:shell-docker)." >&2
         ;;
     esac
     echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the full command trace)" >&2
@@ -954,12 +1269,14 @@ EOF
 
   # Ensure the `agent` user with HOME=/home/agent exists AND that /home/agent is
   # writable by it. The pinned kits stage files under /home/agent and run startup
-  # commands as that user (the sbx agent template guarantees this user). A plain
-  # OCI base (e.g. node:22-bookworm) has no `agent` user — and uid 1000 is already
-  # taken there — so acq creates `agent` (any uid) and chowns its home. A failure
-  # here is FATAL: a root-owned /home/agent silently breaks every agent-user kit
-  # (playbook fetch, usai merge), which is exactly how the playbook stopped
-  # fetching. Abort provision rather than degrade silently.
+  # commands as that user (the sbx agent template guarantees this user, and so
+  # does the default image). A plain OCI base override (e.g. node:22-bookworm) has
+  # no `agent` user — and uid 1000 is already taken there — so acq creates `agent`
+  # (any uid) and chowns its home. On the default image `agent` already exists, so
+  # the ensure step short-circuits. A failure here is FATAL: a root-owned
+  # /home/agent silently breaks every agent-user kit (playbook fetch, usai merge),
+  # which is exactly how the playbook stopped fetching. Abort provision rather
+  # than degrade silently.
   acq_debug "msb provision: ensuring agent user ($name)"
   if ! _acq_msb_ensure_agent_user "$name"; then
     echo "acq(msb): error: agent-user setup failed for '$name'; aborting provision." >&2
@@ -1126,20 +1443,23 @@ _acq_msb_install_agent() {
 # ---------------------------------------------------------------------------
 # _acq_msb_ensure_agent_user NAME — satisfy the sbx/Docker base-image contract
 # ---------------------------------------------------------------------------
-# sbx's agent templates are built on `docker/sandbox-templates:shell-docker`,
-# whose PUBLISHED base-image requirements are (Docker kit-reference,
-# "Base image requirements"):
+# sbx's agent templates are built on `docker/sandbox-templates:shell-docker`
+# (which acq also uses as the default ACQ_MSB_IMAGE), whose PUBLISHED base-image
+# requirements are (Docker kit-reference, "Base image requirements"):
 #   - a non-root `agent` user at UID 1000 with PASSWORDLESS SUDO
 #   - a /home/agent home directory owned by `agent`
 #   - HTTP proxy env (HTTP_PROXY/HTTPS_PROXY/NO_PROXY) PRESERVED ACROSS SUDO
 #   - the agent binary (baked in, or installed via commands.install)
-# A plain OCI base (e.g. node:22-bookworm, which ships `node` at uid 1000 and no
-# `agent`, and no sudoers rule) meets NONE of the first three. The msb adapter
-# therefore synthesizes them here so both the kits (which run as `-u 1000`) and
-# the agent behave as they do on sbx. Idempotent + marker-gated; runs fully
-# offline (useradd/adduser/sudoers edits need no network). The uid defaults to
-# 1000; if 1000 is taken (e.g. by `node`), `agent` is created at the next free
-# uid and the kits' `-u 1000` commands still map to it by NAME (see
+# The default image satisfies the first three already, so this step is a
+# short-circuit there (the marker/`id agent` check returns early, and the
+# sudoers block merely re-asserts NOPASSWD, which is harmless). A plain OCI base
+# override (e.g. node:22-bookworm, which ships `node` at uid 1000 and no `agent`,
+# and no sudoers rule) meets NONE of the first three. The msb adapter therefore
+# synthesizes them here so both the kits (which run as `-u 1000`) and the agent
+# behave as they do on sbx. Idempotent + marker-gated; runs fully offline
+# (useradd/adduser/sudoers edits need no network). The uid defaults to 1000; if
+# 1000 is taken (e.g. by `node` on a plain base), `agent` is created at the next
+# free uid and the kits' `-u 1000` commands still map to it by NAME (see
 # _acq_msb_exec_command) with HOME exported.
 _acq_msb_ensure_agent_user() {
   local name="$1"
@@ -1149,17 +1469,18 @@ _acq_msb_ensure_agent_user() {
   fi
 
   acq_debug "msb: ensuring agent user + /home/agent + passwordless sudo + proxy-preserve in $name"
-  # Idempotent, distro-agnostic. If an `agent` user already exists, reuse it.
-  # Otherwise create it. NOTE: we do NOT pin uid 1000 — on common bases
-  # (node:22-bookworm) uid 1000 is already taken by a pre-existing user (`node`),
-  # so requesting -u 1000 fails and, worse, can leave /home/agent half-created or
-  # root-owned. The kits address the agent BY NAME (our exec translation maps
-  # user 1000/agent → `-u agent`), so the uid is irrelevant. What MUST hold is
-  # that /home/agent exists and is OWNED BY agent — otherwise every kit command
-  # that runs as the agent user (playbook fetch, usai merge) fails with
-  # Permission denied. So home creation + ownership is deterministic and its
-  # failure is FATAL (previously it was best-effort `|| true`, which silently
-  # degraded into a root-owned home and a playbook that never fetched).
+  # Idempotent, distro-agnostic. If an `agent` user already exists, reuse it
+  # (the default image already ships one, so this is the common path).
+  # Otherwise create it. NOTE: we do NOT pin uid 1000 — on a plain OCI base
+  # override (node:22-bookworm) uid 1000 is already taken by a pre-existing user
+  # (`node`), so requesting -u 1000 fails and, worse, can leave /home/agent
+  # half-created or root-owned. The kits address the agent BY NAME (our exec
+  # translation maps user 1000/agent → `-u agent`), so the uid is irrelevant.
+  # What MUST hold is that /home/agent exists and is OWNED BY agent — otherwise
+  # every kit command that runs as the agent user (playbook fetch, usai merge)
+  # fails with Permission denied. So home creation + ownership is deterministic
+  # and its failure is FATAL (previously it was best-effort `|| true`, which
+  # silently degraded into a root-owned home and a playbook that never fetched).
   msb exec "$name" -u 0 -- sh -c '
     set -e
     if id agent >/dev/null 2>&1; then
@@ -1191,7 +1512,8 @@ _acq_msb_ensure_agent_user() {
     # Set SHELL=/bin/sh in the agent profile. The passwd shell is /bin/sh, but
     # SHELL is not populated by `msb exec`/`su -c`, and msb interactive-exec
     # ignores the passwd shell entirely (it drops to the base image default, a
-    # Node REPL on node:22-bookworm). acq always execs an explicit shell/agent, so
+    # Node REPL on node:22-bookworm as an override). acq always execs an explicit
+    # shell/agent, so
     # this is cosmetic (tools that read SHELL) but correct and cheap. Idempotent.
     # NOTE: this whole block is a single-quoted `sh -c` string — do NOT use single
     # quotes here (they would close the outer quote). `echo` avoids both quotes
@@ -1219,9 +1541,10 @@ _acq_msb_ensure_agent_user() {
     echo "acq(msb): error: could not establish a writable agent home in '$name'." >&2
     echo "acq(msb):   /home/agent must exist and be owned by the 'agent' user — kit" >&2
     echo "acq(msb):   commands that run as agent (playbook fetch, usai merge) fail" >&2
-    echo "acq(msb):   otherwise. Use an ACQ_MSB_IMAGE built on" >&2
-    echo "acq(msb):   docker/sandbox-templates:shell-docker (agent user + sudo), or a" >&2
-    echo "acq(msb):   base with useradd/adduser. Re-run with ACQ_DEBUG=1 for details." >&2
+    echo "acq(msb):   otherwise. The default image" >&2
+    echo "acq(msb):   (docker/sandbox-templates:shell-docker) provides the agent user +" >&2
+    echo "acq(msb):   sudo; if you overrode ACQ_MSB_IMAGE, ensure your image ships them or" >&2
+    echo "acq(msb):   a base with useradd/adduser. Re-run with ACQ_DEBUG=1 for details." >&2
     return 1
   }
   msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
@@ -1231,8 +1554,8 @@ _acq_msb_ensure_agent_user() {
 # _acq_msb_check_prereqs NAME — verify kit prerequisites are in the base image
 # ---------------------------------------------------------------------------
 # The pinned kits assume node/git/curl/update-ca-certificates exist in the guest.
-# The default ACQ_MSB_IMAGE (node:22-bookworm) provides all four. If a custom
-# ACQ_MSB_IMAGE lacks one, warn clearly rather than fail silently later — we do
+# The default ACQ_MSB_IMAGE (docker/sandbox-templates:shell-docker) provides all
+# four. If a custom ACQ_MSB_IMAGE lacks one, warn clearly rather than fail silently later — we do
 # NOT apt-install (egress is locked to kit hosts). Skip with
 # ACQ_MSB_SKIP_PREREQ_CHECK=1.
 _acq_msb_check_prereqs() {
@@ -1251,7 +1574,8 @@ _acq_msb_check_prereqs() {
   if [ -n "$missing" ]; then
     echo "acq(msb): warning: base image is missing kit prerequisite(s):${missing}." >&2
     echo "acq(msb):   The pinned kits need node, git, curl, update-ca-certificates." >&2
-    echo "acq(msb):   The default image (node:22-bookworm) provides them; a custom" >&2
+    echo "acq(msb):   The default image (docker/sandbox-templates:shell-docker) provides" >&2
+    echo "acq(msb):   them; a custom" >&2
     echo "acq(msb):   ACQ_MSB_IMAGE must too (these are NOT installed at runtime because" >&2
     echo "acq(msb):   kit net-rules lock egress to the kits' hosts). Affected kits may" >&2
     echo "acq(msb):   not fully apply. Set ACQ_MSB_SKIP_PREREQ_CHECK=1 to silence." >&2
@@ -1264,11 +1588,19 @@ _acq_msb_check_prereqs() {
 # acq_backend_run — run a command inside a sandbox; return its exit status
 # ---------------------------------------------------------------------------
 # acq passes `-- CMD...`; msb exec uses the same `-- CMD...` separator.
-
+#
+# Run as the unprivileged `agent` user with HOME=/home/agent by default — never
+# root. A bare `msb exec NAME -- CMD` runs as root with HOME unset (or /root),
+# which broke `$HOME` / `~`-relative probes (e.g. the openchamber verify script's
+# `~/.local/bin/opencode` check missed the files staged into /home/agent). This
+# aligns `acq exec` with every other msb path: attach uses `-u agent` (see
+# _acq_msb_attach) and kit commands map user->`-u agent -e HOME=/home/agent`
+# (see _acq_msb_exec_flags_into). Flags precede NAME; the `-- CMD...` passthrough
+# in "$@" follows NAME unchanged (matches the attach path's `msb exec … NAME -- CMD`).
 acq_backend_run() {
   local name="$1"
   shift
-  msb exec "$name" "$@"
+  msb exec -u agent -e HOME=/home/agent "$name" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -1355,10 +1687,18 @@ _acq_msb_attach() {
 # ---------------------------------------------------------------------------
 
 acq_backend_stop() {
+  # Tear down any post-hoc published-port tunnels first (ADR-0015): a stopped
+  # sandbox can no longer serve them, and the serve/ssh process pair would
+  # otherwise linger. Defensive — no recorded ports is a no-op.
+  _acq_msb_ports_teardown "$1"
   msb stop "$1"
 }
 
 acq_backend_terminate() {
+  # Tear down any post-hoc published-port tunnels (serve + ssh PIDs, state file)
+  # before removing the sandbox (ADR-0015). Killing a dead PID / missing state
+  # file is a no-op.
+  _acq_msb_ports_teardown "$1"
   msb remove --force "$1"
 }
 
@@ -1371,18 +1711,407 @@ acq_backend_cp() {
 }
 
 acq_backend_ports() {
-  # msb publishes ports at create/run time via -p HOST:GUEST; there is no
-  # standalone post-hoc "ports" verb in msb 0.6.6. Surface a clear message and
-  # the correct mechanism rather than silently failing.
   local name="$1"
   shift
-  echo "acq(msb): msb publishes ports at create/run time, not post-hoc." >&2
-  echo "      Re-create the sandbox with a published port, e.g.:" >&2
-  echo "        acq --backend msb run opencode <path> -- -p 8080:8080" >&2
-  echo "      (msb run/create accept -p HOST:GUEST; args after -- pass through.)" >&2
-  return 1
+
+  # Two modes on msb:
+  #   * `acq ports <name>` (NO args)          -> LIST published ports (query).
+  #   * `acq ports <name> --publish H:G`       -> post-hoc publish (ADR-0015).
+  # Only --publish H:G is supported for the publish action. Parse it out.
+  local mapping=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --publish=*) mapping="${1#--publish=}"; shift ;;
+      --publish)   mapping="${2:-}"; shift 2 ;;
+      *)
+        echo "acq(msb): ports: unsupported argument '$1' (only --publish H:G)." >&2
+        return 1
+        ;;
+    esac
+  done
+
+  # No --publish -> LIST mode. Surface create-time `-p` NAT mappings (ADR-0014)
+  # plus acq's recorded post-hoc ssh -L tunnels (ADR-0015). An empty list is not
+  # an error (exit 0); this is a query, matching sbx's `sbx ports <name>`.
+  if [ -z "$mapping" ]; then
+    _acq_msb_ports_list "$name"
+    return 0
+  fi
+
+  # SI-10: validate HOST:GUEST (both ints 1..65535) BEFORE either reaches an
+  # `ssh -L` argv or a listener bind. Fail closed on anything else.
+  local hport gport
+  hport="${mapping%%:*}"
+  gport="${mapping#*:}"
+  if ! _acq_msb_valid_publish "$mapping" "$hport" "$gport"; then
+    return 1
+  fi
+
+  # 1) Ensure the acq-managed key exists and is authorized (idempotent).
+  _acq_msb_ssh_key_ensure || return 1
+  _acq_msb_ssh_authorize || return 1
+
+  # 2) Start `msb ssh serve` on an ephemeral loopback port. The helper confirms
+  #    the listener is actually alive before returning (dead serve => non-zero),
+  #    and publishes the live PID via _ACQ_MSB_LAST_BG_PID ($! is clobbered by the
+  #    helper's own liveness probe).
+  local sport serve_pid
+  sport=$(_acq_msb_pick_ephemeral_port)
+  _acq_msb_serve_start "$name" "$sport" || return 1
+  serve_pid="$_ACQ_MSB_LAST_BG_PID"
+
+  # 3) Open the backgrounded `ssh -L` tunnel: host H -> guest (sandbox) G. The
+  #    helper confirms the forward established (dead ssh => non-zero); tear the
+  #    serve listener down if it did not.
+  local ssh_pid
+  _acq_msb_forward_start "$sport" "$hport" "$gport" || {
+    kill "$serve_pid" 2>/dev/null || true
+    return 1
+  }
+  ssh_pid="$_ACQ_MSB_LAST_BG_PID"
+
+  # 4) Record the serve+ssh PIDs (and the mapping) so teardown can clean up.
+  _acq_msb_ports_record "$name" "$serve_pid" "$ssh_pid" "$sport" "$mapping"
+
+  echo "acq(msb): published host 127.0.0.1:${hport} -> sandbox ${name} 127.0.0.1:${gport}" >&2
+  echo "acq(msb):   via 'msb ssh serve' on 127.0.0.1:${sport} + ssh -L (ADR-0015)." >&2
+  echo "acq(msb):   tear down with 'acq rm ${name}' (or 'acq stop ${name}')." >&2
 }
 
+# _acq_msb_valid_publish MAPPING HPORT GPORT — 0 if H:G is two ints 1..65535.
+# SI-10 gate: unvalidated input must never reach `ssh -L` argv or a bind.
+_acq_msb_valid_publish() {
+  local mapping="$1" h="$2" g="$3" p
+  case "$mapping" in
+    *:*) ;;
+    *) echo "acq(msb): ports: --publish must be HOST:GUEST, got '$mapping'." >&2; return 1 ;;
+  esac
+  for p in "$h" "$g"; do
+    case "$p" in
+      ""|*[!0-9]*)
+        echo "acq(msb): ports: invalid port '$p' in '$mapping' (want integer 1..65535)." >&2
+        return 1
+        ;;
+    esac
+    if [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
+      echo "acq(msb): ports: port '$p' out of range in '$mapping' (want 1..65535)." >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+# _acq_msb_ssh_key_ensure — create the acq-managed ed25519 key on first use.
+# 0700 dir, 0600 key, under acq state (NOT the user's ~/.ssh). Idempotent.
+_acq_msb_ssh_key_ensure() {
+  if [ -f "$ACQ_MSB_SSH_KEY" ]; then
+    return 0
+  fi
+  mkdir -p "$ACQ_MSB_SSH_DIR" || {
+    echo "acq(msb): ports: cannot create key dir '$ACQ_MSB_SSH_DIR'." >&2; return 1
+  }
+  chmod 0700 "$ACQ_MSB_SSH_DIR" 2>/dev/null || true
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    echo "acq(msb): ports: ssh-keygen not found on PATH (needed for the tunnel key)." >&2
+    return 1
+  fi
+  # -N "" = no passphrase (non-interactive). We never print the key material.
+  if ! ssh-keygen -t ed25519 -N "" -f "$ACQ_MSB_SSH_KEY" >/dev/null 2>&1; then
+    echo "acq(msb): ports: ssh-keygen failed to create the acq tunnel key." >&2
+    return 1
+  fi
+  chmod 0600 "$ACQ_MSB_SSH_KEY" 2>/dev/null || true
+  acq_debug "msb ports: generated acq-managed ssh key (${ACQ_MSB_SSH_KEY})"
+  return 0
+}
+
+# _acq_msb_ssh_authorize — seat the acq public key via `msb ssh authorize` once.
+# Authorizing twice is harmless; a marker guards against re-running each publish.
+_acq_msb_ssh_authorize() {
+  local marker="${ACQ_MSB_SSH_DIR}/.authorized"
+  if [ -f "$marker" ]; then
+    return 0
+  fi
+  if ! msb ssh authorize --file "${ACQ_MSB_SSH_KEY}.pub" >/dev/null 2>&1; then
+    echo "acq(msb): ports: 'msb ssh authorize' failed for the acq tunnel key." >&2
+    return 1
+  fi
+  : >"$marker" 2>/dev/null || true
+  acq_debug "msb ports: authorized acq tunnel public key (once)"
+  return 0
+}
+
+# _acq_msb_pick_ephemeral_port — echo a loopback port for the serve listener.
+#
+# Robustness: the previous scheme was `20000 + ($$ % 40000)`, derived
+# ONLY from the shell PID. That returned the SAME value for every call in one
+# process, so a second `--publish` for the same sandbox collided with the first,
+# and rapid test subshells with nearby PIDs raced. The listener binds loopback
+# only, so a real collision just fails serve-start — but under the stubbed test
+# harness (no real listener) it produced nondeterministic pass/fail.
+#
+# The port is now DISTINCT per call within a process and stays in a sane high,
+# loopback-only range (20000..59999):
+#   * a fixed per-process random base (_ACQ_MSB_PORT_BASE, evaluated once at
+#     source time from $$/$RANDOM/seconds) spreads processes across the range, and
+#   * a file-backed monotonic counter adds a per-call delta. The call site uses
+#     command substitution ($(...)), which runs in a subshell, so an in-memory
+#     variable would not survive back to the caller — the counter is persisted in
+#     _ACQ_MSB_PORT_SEQ_FILE so base+1, base+2, … never collide within a process.
+#
+# Test seam: if ACQ_MSB_FORCE_SERVE_PORT is set to a valid 1..65535 integer, it
+# is echoed verbatim (the counter is still advanced for real callers). scripts/
+# test-acq pins this so it can assert the EXACT `msb ssh serve … --port` / `ssh
+# -p` argv without racing the base/counter value. Real use leaves it unset and
+# gets the distinct-per-call behavior above.
+_acq_msb_pick_ephemeral_port() {
+  local seq
+  # Read-modify-write the persisted counter (subshell-safe, see header). A
+  # missing/garbage file resets to 0; failures fall back to 0 (fail-open to a
+  # valid port — a same-value collision only re-fails a real serve bind, never
+  # corrupts state).
+  seq=$(cat "$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null)
+  case "$seq" in ""|*[!0-9]*) seq=0 ;; esac
+  seq=$(( seq + 1 ))
+  mkdir -p "$ACQ_MSB_PORTS_DIR" 2>/dev/null || true
+  printf '%s\n' "$seq" >"$_ACQ_MSB_PORT_SEQ_FILE" 2>/dev/null || true
+
+  # Deterministic test seam: pin the serve port for exact-shape assertions.
+  case "${ACQ_MSB_FORCE_SERVE_PORT:-}" in
+    "") ;;
+    *[!0-9]*) ;;  # non-integer -> ignore the seam, fall through to selection
+    *)
+      if [ "$ACQ_MSB_FORCE_SERVE_PORT" -ge 1 ] && [ "$ACQ_MSB_FORCE_SERVE_PORT" -le 65535 ]; then
+        echo "$ACQ_MSB_FORCE_SERVE_PORT"
+        return 0
+      fi
+      ;;
+  esac
+
+  # base + counter, wrapped into a 40000-wide window at 20000. The counter is the
+  # only term that varies between two calls in one process, so consecutive calls
+  # are guaranteed distinct until it wraps (40000 calls — far beyond any publish
+  # burst). Loopback-only listener, valid 20000..59999 range.
+  echo $(( 20000 + ( (_ACQ_MSB_PORT_BASE + seq) % 40000 ) ))
+}
+
+# _acq_msb_serve_start NAME SPORT — background `msb ssh serve` on 127.0.0.1:SPORT.
+# Publishes the live serve PID in _ACQ_MSB_LAST_BG_PID for the caller to capture
+# ($! is not reliably the helper's background job across a function boundary, so
+# the caller cannot read its own $!). Returns non-zero if the backgrounded serve
+# dies within the settle window (e.g. cannot bind the loopback port), so a dead
+# listener is never reported as a successful publish (was: unconditional return
+# 0, which made the caller's `|| return 1` guard dead for async failures). NOTE:
+# this is a best-effort liveness probe, not a durable health guarantee — a serve
+# that dies just AFTER the settle window will still be recorded (teardown then
+# kills an already-dead pid, which is harmless).
+_acq_msb_serve_start() {
+  local name="$1" sport="$2"
+  acq_debug "msb ssh serve $name --host 127.0.0.1 --port $sport (backgrounded)"
+  msb ssh serve "$name" --host 127.0.0.1 --port "$sport" >/dev/null 2>&1 &
+  local pid=$!
+  # Give the listener a beat to fail fast (bind error, bad sandbox), then confirm
+  # it is still alive. kill -0 probes liveness without signalling. `command sleep`
+  # bypasses any shell-function `sleep` override so the settle window is real.
+  command sleep "${ACQ_MSB_SERVE_SETTLE:-1}" 2>/dev/null || sleep "${ACQ_MSB_SERVE_SETTLE:-1}"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    echo "acq(msb): ports: 'msb ssh serve' on 127.0.0.1:${sport} exited immediately (could not start listener)." >&2
+    return 1
+  fi
+  # Publish the pid explicitly: the caller cannot read its own $! for a job this
+  # function backgrounded, so hand it over by name.
+  _ACQ_MSB_LAST_BG_PID="$pid"
+  return 0
+}
+
+# _acq_msb_forward_start SPORT HPORT GPORT — background OpenSSH -L local forward.
+# Binds host 127.0.0.1:HPORT to the SANDBOX's 127.0.0.1:GPORT (the -L destination
+# resolves INSIDE the guest, per ADR-0015). Uses the acq key + a dedicated
+# known_hosts under acq state (accept-new against the ephemeral loopback listener).
+# Publishes the live ssh PID in _ACQ_MSB_LAST_BG_PID. Returns non-zero if the
+# forward dies within the settle window (ExitOnForwardFailure makes ssh exit fast
+# when the local bind/forward fails), so a failed tunnel is never reported as a
+# successful publish. Best-effort liveness probe (see _acq_msb_serve_start): a
+# forward that dies just after the settle window will still be recorded.
+_acq_msb_forward_start() {
+  local sport="$1" hport="$2" gport="$3"
+  if ! command -v ssh >/dev/null 2>&1; then
+    echo "acq(msb): ports: ssh not found on PATH (needed for -L forwarding)." >&2
+    return 1
+  fi
+  acq_debug "ssh -p $sport -N -L 127.0.0.1:${hport}:127.0.0.1:${gport} ${ACQ_MSB_SSH_USER}@127.0.0.1"
+  # -o IdentitiesOnly=yes: use ONLY the acq -i key, so a loaded agent/other keys
+  #   can't burn MaxAuthTries before it. -F none: ignore the user's ~/.ssh/config
+  #   so the loopback tunnel is hermetic and cannot be altered out from under acq.
+  ssh -p "$sport" -N \
+    -F none \
+    -i "$ACQ_MSB_SSH_KEY" \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o "UserKnownHostsFile=${ACQ_MSB_SSH_KNOWN_HOSTS}" \
+    -o ExitOnForwardFailure=yes \
+    -L "127.0.0.1:${hport}:127.0.0.1:${gport}" \
+    "${ACQ_MSB_SSH_USER}@127.0.0.1" >/dev/null 2>&1 &
+  local pid=$!
+  command sleep "${ACQ_MSB_FORWARD_SETTLE:-1}" 2>/dev/null || sleep "${ACQ_MSB_FORWARD_SETTLE:-1}"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    echo "acq(msb): ports: ssh -L 127.0.0.1:${hport} -> 127.0.0.1:${gport} failed to establish (forward rejected or bind in use)." >&2
+    return 1
+  fi
+  _ACQ_MSB_LAST_BG_PID="$pid"
+  return 0
+}
+
+# _acq_msb_ports_pidfile NAME — echo the per-sandbox PID state file path, but ONLY
+# for a safe sandbox name. The name interpolates into a filesystem path used by
+# `rm -f` (teardown) and `>>` (record); a name with a slash or a leading '..'
+# would escape ACQ_MSB_PORTS_DIR. Fail closed (empty output, non-zero) on anything
+# outside the sandbox-name charset acq itself produces (slugify -> [a-z0-9-]).
+_acq_msb_ports_pidfile() {
+  local name="$1"
+  case "$name" in
+    ""|*[!A-Za-z0-9_-]*|-*)
+      echo "acq(msb): ports: refusing unsafe sandbox name '$name' for state path." >&2
+      return 1
+      ;;
+  esac
+  printf '%s/%s.pids' "$ACQ_MSB_PORTS_DIR" "$name"
+}
+
+# _acq_msb_ports_record NAME SERVE_PID SSH_PID SPORT MAPPING — append a tracking
+# record so teardown can find and kill the pair. One line per publish:
+#   <serve_pid> <ssh_pid> <sport> <mapping>
+_acq_msb_ports_record() {
+  local name="$1" serve_pid="$2" ssh_pid="$3" sport="$4" mapping="$5" pidfile
+  pidfile=$(_acq_msb_ports_pidfile "$name") || return 0
+  mkdir -p "$ACQ_MSB_PORTS_DIR" 2>/dev/null || true
+  printf '%s %s %s %s\n' "$serve_pid" "$ssh_pid" "$sport" "$mapping" \
+    >>"$pidfile" 2>/dev/null || true
+}
+
+# _acq_msb_ports_teardown NAME — kill any recorded serve/ssh PIDs for NAME and
+# remove its state file. Defensive: killing a dead PID is a no-op; a missing
+# state file is fine (a sandbox with no published port has nothing to clean up).
+_acq_msb_ports_teardown() {
+  local name="$1" pidfile
+  pidfile=$(_acq_msb_ports_pidfile "$name") || return 0
+  [ -f "$pidfile" ] || return 0
+  local serve_pid ssh_pid _rest
+  while read -r serve_pid ssh_pid _rest; do
+    [ -n "$serve_pid" ] && kill "$serve_pid" 2>/dev/null || true
+    [ -n "$ssh_pid" ] && kill "$ssh_pid" 2>/dev/null || true
+  done <"$pidfile"
+  rm -f "$pidfile" 2>/dev/null || true
+  acq_debug "msb ports: tore down published-port tunnels for $name"
+  return 0
+}
+
+# _acq_msb_ports_list NAME — print NAME's published port mappings to stdout, one
+# per line, each line CONTAINING the port digits so a `grep -q <port>` matches
+# (openchamber verify relies on this). Two sources, both DEFENSIVE (a query must
+# never hard-fail): (a) create-time `-p HOST:GUEST` NAT mappings known to msb,
+# read from `msb inspect <name> --format json`; (b) acq's recorded post-hoc
+# ssh -L tunnels from the ADR-0015 state file. Empty list -> just exit 0.
+_acq_msb_ports_list() {
+  local name="$1" pidfile _sport _map _serve _ssh
+  # (a) create-time NAT mappings (best-effort; absent field/tool is not an error).
+  _acq_msb_ports_from_inspect "$name"
+  # (b) recorded post-hoc ssh -L tunnels: `<serve_pid> <ssh_pid> <sport> <H:G>`.
+  pidfile=$(_acq_msb_ports_pidfile "$name") || return 0
+  [ -f "$pidfile" ] || return 0
+  while read -r _serve _ssh _sport _map; do
+    [ -n "$_map" ] || continue
+    printf 'guest %s -> host 127.0.0.1:%s (post-hoc ssh -L)\n' \
+      "${_map#*:}" "${_map%%:*}"
+  done <"$pidfile"
+  return 0
+}
+
+# _acq_msb_ports_from_inspect NAME — extract create-time host/guest port mappings
+# from `msb inspect NAME --format json` and print one per line as
+# `guest <G> -> host <H> (create-time -p)`.
+#
+# Canonical JSON shape (do NOT re-guess this — it is defined in the microsandbox
+# source, not just observed): `msb inspect --format json` emits the sandbox's
+# active config under `.active_config` (with the requested config mirrored under
+# `.config`), and published ports live at `<config>.network.ports[]`. Each entry
+# is a `PublishedPort` struct serialized as:
+#     { "host_port": <u16>, "guest_port": <u16>,
+#       "protocol": "tcp"|"udp", "host_bind": "<ip>" }
+# See microsandbox `crates/network/lib/config.rs` (`struct PublishedPort`) and
+# `crates/cli/lib/commands/inspect.rs` (the `--format json` assembly) — pinned to
+# msb 0.6.7. `host_bind` defaults to loopback (127.0.0.1).
+#
+# Prefer `jq`; else a dependency-free `host_port`/`guest_port` scan (which
+# deliberately ignores `host_bind`, whose dotted IP would otherwise be mistaken
+# for port digits). Missing tool/field or no output are silent no-ops (return 0)
+# — a query must never hard-fail.
+_acq_msb_ports_from_inspect() {
+  local name="$1" json line h g
+  json=$(msb inspect "$name" --format json 2>/dev/null) || return 0
+  [ -n "$json" ] || return 0
+  local lines=""
+  if command -v jq >/dev/null 2>&1; then
+    # msb 0.6.7 shape first; fall back to a few plausible legacy field names.
+    # `?//empty` keeps a missing path from erroring; each port -> "H:G".
+    # `|| true`: acq runs under `set -euo pipefail`; a jq that emits nothing (no
+    # ports) can still exit non-zero and would otherwise abort this query.
+    lines=$(printf '%s' "$json" | jq -r '
+      [ ((.active_config.network.ports?) // (.config.network.ports?)
+          // .ports? // .portMappings? // .publishedPorts? // [])[]?
+        | if type=="string" then .
+          elif type=="object" then
+            (((.host_port // .hostPort // .host)|tostring) + ":" +
+             ((.guest_port // .guestPort // .guest // .container)|tostring))
+          else empty end ]
+      | .[]?' 2>/dev/null) || true
+  fi
+  if [ -z "$lines" ]; then
+    # jq absent/failed: dependency-free. Read the ports array as flat key:value
+    # tokens and pull explicit host_port/guest_port pairs. We match ONLY the
+    # *_port keys so `host_bind: "127.0.0.1"` can't leak dotted-IP digits.
+    # `|| true`: with no ports the `grep` matches nothing and exits 1, which under
+    # `set -euo pipefail` would abort this LIST query (a query must never hard-
+    # fail); swallow it so an empty result stays a clean rc=0.
+    lines=$(printf '%s' "$json" \
+      | tr -d '" ' \
+      | tr ',{}[]' '\n\n\n\n\n' \
+      | grep -E '^(host_port|guest_port):[0-9]{1,5}$' 2>/dev/null \
+      | _acq_msb_pair_lines) || true
+  fi
+  [ -n "$lines" ] || return 0
+  printf '%s\n' "$lines" | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    h="${line%%:*}"; g="${line#*:}"
+    case "$h" in ""|*[!0-9]*) continue ;; esac
+    case "$g" in ""|*[!0-9]*) continue ;; esac
+    printf 'guest %s -> host 127.0.0.1:%s (create-time -p)\n' "$g" "$h"
+  done
+  return 0
+}
+
+# _acq_msb_pair_lines — read a flat stream of `<key>:<value>` port tokens on
+# stdin (host_port:N, guest_port:N, …, in msb's array order) and emit "H:G" per
+# host/guest pair, keyed by name so ordering variations still pair correctly.
+# Dependency-free helper for the jq-absent fallback in
+# _acq_msb_ports_from_inspect. A dangling host without a following guest (or
+# vice versa) is dropped. bash-3.2 safe.
+_acq_msb_pair_lines() {
+  local h="" g="" tok k v
+  while read -r tok; do
+    k="${tok%%:*}"; v="${tok#*:}"
+    case "$k" in
+      host_port)  h="$v" ;;
+      guest_port) g="$v" ;;
+      *) continue ;;
+    esac
+    if [ -n "$h" ] && [ -n "$g" ]; then
+      printf '%s:%s\n' "$h" "$g"; h=""; g=""
+    fi
+  done
+}
 # ---------------------------------------------------------------------------
 # acq_backend_apply_kit — apply a kit into an existing sandbox mid-life
 # ---------------------------------------------------------------------------
@@ -1453,87 +2182,112 @@ acq_backend_ensure_kits_applied() {
 #
 # Usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]
 
-acq_backend_secret_set() {
-  local service="${1:-}"
-  shift || true
-
-  # Parse scope (mirrors the sbx wrapper): -g/--global -> global;
-  # a leading bare token before the service -> sandbox name.
-  local scope_name=""
-  case "$service" in
+# _acq_msb_parse_secret_scope SERVICE_OUT SCOPE_OUT ARG... — parse the leading
+# `-g/--global | SANDBOX | <service>` scope token shared by secret set/rm.
+# Writes the resolved service name to the var named by SERVICE_OUT, the scope
+# (sandbox name, empty for global/default) to SCOPE_OUT, and the number of
+# positional args the scope+service consumed to the global
+# _ACQ_MSB_SCOPE_CONSUMED so the caller can `shift` past them. (A count is passed
+# via a global rather than stdout because writing the by-name out-vars must happen
+# in the caller's shell, not a `$(...)` subshell.) Mirrors the sbx wrapper:
+# -g/--global -> global; a leading bare token before the service -> sandbox name;
+# a leading -flag or a lone token -> service itself.
+_acq_msb_parse_secret_scope() {
+  local _svc_out="$1" _scope_out="$2"
+  shift 2
+  local _service="${1:-}" _scope="" _consumed=1
+  case "$_service" in
     -g|--global)
-      service="${1:-}"; shift || true
+      _service="${2:-}"; _consumed=2
       ;;
     -*)
       ;;
     *)
-      local _next="${1:-}"
+      local _next="${2:-}"
       case "$_next" in
         ""|-*) ;;
-        *) scope_name="$service"; service="$_next"; shift || true ;;
+        *) _scope="$_service"; _service="$_next"; _consumed=2 ;;
       esac
       ;;
   esac
+  # Clamp to the args actually present: for `secret set` (0 args) or `secret set
+  # -g` (1 arg) the scope+service is incomplete, but the caller still `shift`s
+  # this count under `set -euo pipefail` — an over-shift would abort BEFORE the
+  # "missing service name" usage message (the OLD code used `shift || true`).
+  [ "$_consumed" -gt "$#" ] && _consumed="$#"
+  eval "$_svc_out=\$_service"
+  eval "$_scope_out=\$_scope"
+  _ACQ_MSB_SCOPE_CONSUMED="$_consumed"
+}
 
-  if [ -z "$service" ]; then
-    echo "acq(msb): secret set: missing service name" >&2
-    echo "     usage: acq secret set [-g | SANDBOX] <service>" >&2
-    return 1
-  fi
+# _acq_msb_parse_host_env HOST_OUT ENV_OUT ARG... — parse optional --host/--env
+# (a custom endpoint's mapping) from the trailing args into the named vars.
+# Accepts both `--host H`/`--env E` and `--host=H`/`--env=E` forms. Built-ins
+# (usai, github) need no flags — their mapping is compiled in.
+_acq_msb_parse_host_env() {
+  local _host_out="$1" _env_out="$2"
+  shift 2
+  local _host="" _env_var="" _prev="" _arg
+  for _arg in "$@"; do
+    if [ "$_prev" = "--host" ]; then _host="$_arg"; _prev=""; continue
+    elif [ "$_prev" = "--env" ]; then _env_var="$_arg"; _prev=""; continue; fi
+    case "$_arg" in
+      --host=*) _host="${_arg#--host=}" ;;
+      --env=*)  _env_var="${_arg#--env=}" ;;
+      --host)   _prev="--host" ;;
+      --env)    _prev="--env" ;;
+    esac
+  done
+  eval "$_host_out=\$_host"
+  eval "$_env_out=\$_env_var"
+}
 
-  if ! command -v acq_secret_set_interactive >/dev/null 2>&1; then
-    echo "acq(msb): internal error: secret store not loaded" >&2
-    return 1
-  fi
-
-  # Store into the acq-owned store (keychain/file); value read from TTY/stdin.
-  acq_secret_set_interactive "$service" "$scope_name" || return 1
-
-  # Live add/rotate: re-feed running sandboxes so a newly-set or rotated secret
-  # takes effect without recreate (`msb modify --secret ENV@HOST`; the guest keeps
-  # its placeholder, only the injected value changes). Driven off the single
-  # binding table so EVERY bound service (usai, github, ...) rotates in place —
-  # not just usai. A named scope targets that sandbox; a global set sweeps all
-  # running sandboxes. The real value is read from the acq store into a TRANSIENT
-  # env var (never argv) that `msb modify` reads, then cleared.
-  #
-  # SECRET NEVER ON ARGV: the value is placed in the environment via a dynamic
-  # `export "$_env=$val"` (an env ENTRY, invisible to `ps`/`/proc/<pid>/cmdline`),
-  # NOT via `env NAME=VAL msb …` — there NAME=VAL is an OPERAND on env(1)'s argv
-  # and would leak the token to any `ps -ww` for the life of the child. The var
-  # is unset immediately after each call.
-  local _env _host _binding val applied=0 sb
-  _binding=$(_acq_msb_service_binding "$service")
-  _env=$(printf '%s' "$_binding" | cut -f1)
-  _host=$(printf '%s' "$_binding" | cut -f2)
-  if [ -n "$_env" ] && [ -n "$_host" ]; then
-    if val=$(acq_secret_resolve "$service" "$scope_name" 2>/dev/null) && [ -n "$val" ]; then
-      # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
-      export "$_env=$val"
-      if [ -n "$scope_name" ]; then
-        if acq_backend_exists "$scope_name"; then
-          msb modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
-            && applied=$((applied + 1))
-        fi
-      else
-        # stdin from /dev/null so `msb modify` can't consume the `while read`
-        # heredoc (else only the first sandbox is processed — a real msb drains
-        # stdin). Same trap guarded in acq_backend_secret_rm's sweep.
-        while IFS= read -r sb; do
-          [ -n "$sb" ] || continue
-          msb modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
-            && applied=$((applied + 1))
-        done <<EOF
+# _acq_msb_secret_refeed SERVICE SCOPE ENV HOST — live add/rotate: re-feed a
+# newly-set/rotated secret to running sandboxes via `msb modify --secret ENV@HOST`
+# (the guest keeps its placeholder; only the injected value changes) so it takes
+# effect without recreate. A named SCOPE targets that sandbox; empty SCOPE sweeps
+# all running sandboxes. Echoes the count of sandboxes re-fed.
+#
+# SECRET NEVER ON ARGV: the value is placed in the environment via a dynamic
+# `export "$ENV=$val"` (an env ENTRY, invisible to `ps`/`/proc/<pid>/cmdline`),
+# NOT via `env NAME=VAL msb …` — there NAME=VAL is an OPERAND on env(1)'s argv and
+# would leak the token to any `ps -ww` for the life of the child. The var is
+# unset immediately after the sweep.
+_acq_msb_secret_refeed() {
+  local service="$1" scope_name="$2" _env="$3" _host="$4"
+  local val applied=0 sb
+  [ -n "$_env" ] && [ -n "$_host" ] || { printf '0\n'; return 0; }
+  val=$(acq_secret_resolve "$service" "$scope_name" 2>/dev/null) && [ -n "$val" ] || { printf '0\n'; return 0; }
+  # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
+  export "$_env=$val"
+  if [ -n "$scope_name" ]; then
+    if acq_backend_exists "$scope_name"; then
+      msb modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+        && applied=$((applied + 1))
+    fi
+  else
+    # stdin from /dev/null so `msb modify` can't consume the `while read`
+    # heredoc (else only the first sandbox is processed — a real msb drains
+    # stdin). Same trap guarded in acq_backend_secret_rm's sweep.
+    while IFS= read -r sb; do
+      [ -n "$sb" ] || continue
+      msb modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+        && applied=$((applied + 1))
+    done <<EOF
 $(msb list -q 2>/dev/null)
 EOF
-      fi
-      unset "$_env"
-      val=""
-      [ "$applied" -gt 0 ] && acq_debug "msb modify: re-fed $service (${_env}@${_host}) to $applied sandbox(es)"
-    fi
   fi
+  unset "$_env"
+  val=""
+  [ "$applied" -gt 0 ] && acq_debug "msb modify: re-fed $service (${_env}@${_host}) to $applied sandbox(es)"
+  printf '%s\n' "$applied"
+}
 
-  # Service-specific guidance.
+# _acq_msb_secret_set_guidance SERVICE ENV HOST APPLIED — print the
+# service-specific post-set guidance (built-ins get bespoke wording; a custom
+# endpoint reports its ENV@HOST binding, or how to add one if unmapped).
+_acq_msb_secret_set_guidance() {
+  local service="$1" _env="$2" _host="$3" applied="$4"
   case "$service" in
     usai)
       echo "acq(msb): stored USAi key in the acq secret store. At 'acq run/create'" >&2
@@ -1547,15 +2301,63 @@ EOF
       echo "      the real value is swapped in on the wire to the REST API and never enters" >&2
       echo "      the guest. Kits authenticate via the REST API (e.g. the playbook kit" >&2
       echo "      fetches a source tarball from api.github.com) — NOT 'git clone', which" >&2
-      echo "      msb does not substitute for github.com/codeload (quickstart#203)." >&2
+      echo "      msb does not substitute for github.com/codeload." >&2
       [ "$applied" -gt 0 ] && echo "      Re-fed $applied running sandbox(es) via 'msb modify' (no recreate needed)." >&2
       ;;
     *)
-      echo "acq(msb): stored '$service' in the acq secret store. Note: the msb adapter" >&2
-      echo "      only binds known services (usai, github) at create today; other" >&2
-      echo "      services are stored but not yet wired to a --secret host mapping." >&2
+      if [ -n "$_env" ] && [ -n "$_host" ]; then
+        echo "acq(msb): stored '$service' in the acq secret store with endpoint" >&2
+        echo "      ${_env}@${_host}. At 'acq run/create' the msb backend binds it via" >&2
+        echo "      --secret ${_env}@${_host}; the real value is swapped in on the wire and" >&2
+        echo "      never enters the guest." >&2
+        [ "$applied" -gt 0 ] && echo "      Re-fed $applied running sandbox(es) via 'msb modify' (no recreate needed)." >&2
+      else
+        echo "acq(msb): stored '$service' in the acq secret store, but it has no endpoint" >&2
+        echo "      mapping so the msb backend cannot bind it. Provide --host HOST --env ENV" >&2
+        echo "      (e.g. 'acq secret set -g $service --host api.example.com --env API_KEY')" >&2
+        echo "      so it is bound via --secret ENV@HOST at create." >&2
+      fi
       ;;
   esac
+}
+
+acq_backend_secret_set() {
+  local service scope_name
+  _acq_msb_parse_secret_scope service scope_name "$@"
+  shift "$_ACQ_MSB_SCOPE_CONSUMED"
+
+  if [ -z "$service" ]; then
+    echo "acq(msb): secret set: missing service name" >&2
+    echo "     usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]" >&2
+    return 1
+  fi
+
+  # Parse optional --host/--env (a CUSTOM endpoint's mapping). These are recorded
+  # as a non-secret sidecar so the provision path can bind the service generically
+  # via `msb --secret ENV@HOST`. Built-ins (usai, github) need no
+  # flags — their mapping is compiled in.
+  local host env_var
+  _acq_msb_parse_host_env host env_var "$@"
+
+  if ! command -v acq_secret_set_interactive >/dev/null 2>&1; then
+    echo "acq(msb): internal error: secret store not loaded" >&2
+    return 1
+  fi
+
+  # Store into the acq-owned store (keychain/file); value read from TTY/stdin.
+  # host/env (when supplied) are persisted as a non-secret endpoint sidecar.
+  acq_secret_set_interactive "$service" "$scope_name" "$host" "$env_var" || return 1
+
+  # Live add/rotate: re-feed running sandboxes so a newly-set or rotated secret
+  # takes effect without recreate. Driven off the single binding table so EVERY
+  # bound service (usai, github, ...) rotates in place — not just usai.
+  local _env _host _binding applied
+  _binding=$(_acq_msb_service_binding "$service" "$scope_name")
+  _env=$(printf '%s' "$_binding" | cut -f1)
+  _host=$(printf '%s' "$_binding" | cut -f2)
+  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
+
+  _acq_msb_secret_set_guidance "$service" "$_env" "$_host" "$applied"
   return 0
 }
 
@@ -1570,24 +2372,39 @@ EOF
 # so the injected value stops flowing immediately — a named scope targets that
 # sandbox; a global rm sweeps all running sandboxes. Idempotent (absent secret /
 # absent binding are both success). Scope parsing mirrors acq_backend_secret_set.
-acq_backend_secret_rm() {
-  local service="${1:-}"
-  shift || true
+# _acq_msb_secret_unbind SCOPE ENV — live-unbind a secret from running sandboxes
+# via `msb modify --secret-rm ENV`, for services the adapter actually binds. A
+# named SCOPE targets that sandbox; empty SCOPE sweeps every running sandbox.
+# Best-effort per sandbox; echoes the count unbound. Empty ENV => nothing to do.
+_acq_msb_secret_unbind() {
+  local scope_name="$1" env_name="$2" unbound=0 sb
+  [ -n "$env_name" ] || { printf '0\n'; return 0; }
+  if [ -n "$scope_name" ]; then
+    if acq_backend_exists "$scope_name"; then
+      msb modify "$scope_name" --secret-rm "$env_name" >/dev/null 2>&1 \
+        && unbound=$((unbound + 1))
+    fi
+  else
+    # NOTE: redirect each `msb modify` stdin from /dev/null. Without it, the
+    # command inside the loop consumes the heredoc that feeds `while read`, so
+    # only the FIRST sandbox is processed (a real `msb` drains stdin). This is
+    # the same stdin-consumption trap the test stub deliberately reproduces.
+    while IFS= read -r sb; do
+      [ -n "$sb" ] || continue
+      msb modify "$sb" --secret-rm "$env_name" </dev/null >/dev/null 2>&1 \
+        && unbound=$((unbound + 1))
+    done <<EOF
+$(msb list -q 2>/dev/null)
+EOF
+  fi
+  [ "$unbound" -gt 0 ] && acq_debug "msb modify --secret-rm $env_name: unbound from $unbound sandbox(es)"
+  printf '%s\n' "$unbound"
+}
 
-  local scope_name=""
-  case "$service" in
-    -g|--global)
-      service="${1:-}"; shift || true ;;
-    -*)
-      ;;
-    *)
-      local _next="${1:-}"
-      case "$_next" in
-        ""|-*) ;;
-        *) scope_name="$service"; service="$_next"; shift || true ;;
-      esac
-      ;;
-  esac
+acq_backend_secret_rm() {
+  local service scope_name
+  _acq_msb_parse_secret_scope service scope_name "$@"
+  shift "$_ACQ_MSB_SCOPE_CONSUMED"
 
   if [ -z "$service" ]; then
     echo "acq(msb): secret rm: missing service name" >&2
@@ -1600,38 +2417,30 @@ acq_backend_secret_rm() {
     return 1
   fi
 
-  # 1) Delete the acq-store value (idempotent).
+  # 1) Delete the acq-store value (idempotent). Resolve the binding's env var
+  #    FIRST (for a custom endpoint it comes from the non-secret sidecar, which
+  #    step 3 removes), so the live-unbind below still knows what to unbind.
   local key removed=0
-  key=$(_acq_secret_key "$service" "$scope_name")
-  acq_secret_delete "$key" && removed=1
+  local env_name
+  env_name=$(_acq_msb_service_binding "$service" "$scope_name" | cut -f1)
+  # _acq_secret_key fails closed on an ambiguous (dotted) name;
+  # such a name could never have been stored, so treat rm as a no-op success
+  # (the `|| key=""` keeps `set -e` from aborting the rm path).
+  key=$(_acq_secret_key "$service" "$scope_name") || key=""
+  [ -n "$key" ] && acq_secret_delete "$key" && removed=1
 
   # 2) Live-unbind from running sandboxes via `msb modify --secret-rm ENV`, for
-  #    services the adapter actually binds. A named scope targets that sandbox;
-  #    a global rm sweeps every running sandbox. Best-effort per sandbox.
-  local env_name unbound=0
-  env_name=$(_acq_msb_service_binding "$service" | cut -f1)
-  if [ -n "$env_name" ]; then
-    local sb
-    if [ -n "$scope_name" ]; then
-      if acq_backend_exists "$scope_name"; then
-        msb modify "$scope_name" --secret-rm "$env_name" >/dev/null 2>&1 \
-          && unbound=$((unbound + 1))
-      fi
-    else
-      # NOTE: redirect each `msb modify` stdin from /dev/null. Without it, the
-      # command inside the loop consumes the heredoc that feeds `while read`, so
-      # only the FIRST sandbox is processed (a real `msb` drains stdin). This is
-      # the same stdin-consumption trap the test stub deliberately reproduces.
-      while IFS= read -r sb; do
-        [ -n "$sb" ] || continue
-        msb modify "$sb" --secret-rm "$env_name" </dev/null >/dev/null 2>&1 \
-          && unbound=$((unbound + 1))
-      done <<EOF
-$(msb list -q 2>/dev/null)
-EOF
-    fi
-    [ "$unbound" -gt 0 ] && acq_debug "msb modify --secret-rm $env_name: unbound from $unbound sandbox(es)"
-  fi
+  #    services the adapter actually binds (built-ins + any custom endpoint with
+  #    a recorded env). A named scope targets that sandbox; a global rm sweeps
+  #    every running sandbox.
+  local unbound
+  unbound=$(_acq_msb_secret_unbind "$scope_name" "$env_name")
+
+  # 3) Drop the non-secret endpoint sidecar for this service/scope (idempotent),
+  #    so a re-set does not resurrect a stale host/env mapping. Done AFTER the
+  #    unbind above, which needed the env name it records.
+  command -v acq_secret_meta_delete >/dev/null 2>&1 && \
+    acq_secret_meta_delete "$service" "$scope_name" || true
 
   local where="global"
   [ -n "$scope_name" ] && where="sandbox '$scope_name'"
@@ -1644,6 +2453,73 @@ EOF
     echo "      Live-unbound it from $unbound running sandbox(es) (msb modify --secret-rm)." >&2
   fi
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_secret_ls [-g | SANDBOX] — list acq-managed secrets for msb.
+# ---------------------------------------------------------------------------
+# Prints one row per acq-managed secret: SCOPE, SERVICE, whether a VALUE is
+# present, and the binding ENV@HOST the msb adapter would use at provision.
+# NEVER prints a secret value. With no scope, lists everything acq holds; with a
+# scope (-g or SANDBOX) it filters to that scope. Read-only.
+#
+# Sources: the value store (acq_secret_list_keys → decode scope/service). The
+# ENV@HOST column comes from _acq_msb_service_binding, so it shows exactly what
+# would be bound (built-in host for usai/github, or the custom-endpoint sidecar).
+acq_backend_secret_ls() {
+  local want_scope=""
+  case "${1:-}" in
+    -g|--global) want_scope="-g" ;;
+    "") want_scope="" ;;
+    -*) echo "acq(msb): secret ls: unknown flag '$1'" >&2; return 1 ;;
+    *)  want_scope="$1" ;;
+  esac
+  if ! command -v acq_secret_list_keys >/dev/null 2>&1; then
+    echo "acq(msb): internal error: secret store not loaded" >&2
+    return 1
+  fi
+  printf 'SCOPE\tSERVICE\tVALUE\tBINDING\n'
+  _acq_msb_secret_ls_rows "$want_scope" | LC_ALL=C sort -u
+}
+
+# _acq_msb_secret_ls_rows WANT_SCOPE — emit unsorted "scope\tservice\tvalue\tbinding"
+# rows (no header). Kept separate so acq_backend_secret_ls stays <=50 lines and
+# the sort/header live in one place.
+_acq_msb_secret_ls_rows() {
+  local want_scope="$1" key scope svc dec val binding
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    dec=$(_acq_secret_decode_key "$key") || continue
+    scope=$(printf '%s' "$dec" | cut -f1)
+    svc=$(printf '%s' "$dec" | cut -f2)
+    [ -n "$svc" ] || continue
+    case "$want_scope" in "") ;; *) [ "$scope" = "$want_scope" ] || continue ;; esac
+    if [ "$scope" = "-g" ]; then
+      acq_secret_has "$svc" && val="yes" || val="no"
+      binding=$(_acq_msb_secret_ls_binding "$svc" "")
+    else
+      acq_secret_has "$svc" "$scope" && val="yes" || val="no"
+      binding=$(_acq_msb_secret_ls_binding "$svc" "$scope")
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$scope" "$svc" "$val" "$binding"
+  done <<EOF
+$(acq_secret_list_keys)
+EOF
+}
+
+# _acq_msb_secret_ls_binding SERVICE SANDBOX -> "ENV@HOST" or "(unmapped)".
+# Reuses the adapter's real binding resolver so the listing matches what would
+# actually be bound. Never prints a value.
+_acq_msb_secret_ls_binding() {
+  local svc="$1" sandbox="${2:-}" b env host
+  b=$(_acq_msb_service_binding "$svc" "$sandbox")
+  env=$(printf '%s' "$b" | cut -f1)
+  host=$(printf '%s' "$b" | cut -f2)
+  if [ -n "$env" ] && [ -n "$host" ]; then
+    printf '%s@%s\n' "$env" "$host"
+  else
+    printf '(unmapped)\n'
+  fi
 }
 
 # ---------------------------------------------------------------------------
