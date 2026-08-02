@@ -33,7 +33,7 @@
 # ---------------------------------------------------------------------------
 #   kit_spec_field       SPEC KEY            -> top-level scalar (name, kind, …)
 #   kit_spec_net_allow   SPEC                -> one host[:port] per line
-#   kit_spec_published_ports SPEC            -> one "container<TAB>proto<TAB>name" per line
+#   kit_spec_published_ports SPEC            -> one "guest<TAB>proto<TAB>name<TAB>host" per line
 #   kit_spec_files       SPEC                -> one "path|mode|phase|source" per line
 #   kit_spec_commands    SPEC                -> command records (see format below)
 #   kit_spec_env         SPEC                -> one "NAME<TAB>value" per line
@@ -229,38 +229,112 @@ kit_spec_net_allow() {
 # ---------------------------------------------------------------------------
 # kit_spec_published_ports SPEC
 # ---------------------------------------------------------------------------
-# Echo one record per backend_extras.sbx.publishedPorts[] entry, tab-separated:
-#   container <TAB> protocol <TAB> name
-# protocol/name are empty if unspecified. Only the sbx backend's block is read
-# (the neutral spec leaves backend_extras as free-form per-backend objects; the
-# sbx adapter is the consumer of this well-known shape). The list lives at:
+# Echo one record per published-port entry, tab-separated:
+#   guest <TAB> protocol <TAB> name <TAB> host
+# protocol/name are empty if unspecified; host defaults to guest when omitted.
+#
+# SOURCE PRECEDENCE (ADR-0014): the NEUTRAL top-level `publishedPorts` is read
+# FIRST. Each neutral entry is `{guest, host?, protocol?(tcp|udp), name?}`:
+#
+#   publishedPorts:
+#     - guest: 3000
+#       host: 3000
+#       protocol: tcp
+#       name: openchamber
+#
+# If (and only if) no neutral list is present, this FALLS BACK for one release
+# to the legacy sbx-only block `backend_extras.sbx.publishedPorts` (whose entries
+# use the OLD key `container:` instead of `guest:`, and have no `host:`), emitting
+# a one-time deprecation warning to stderr. That legacy fallback is removed in the
+# following minor (see ADR-0014 "Tradeoff"):
+#
 #   backend_extras:
 #     sbx:
 #       publishedPorts:
 #         - container: 3000
 #           protocol: tcp
 #           name: openchamber
+#
+# VALIDATION (SI-10): guest/host must be integers 1..65535; protocol must be
+# tcp|udp when present; name is charset-restricted ([A-Za-z0-9._-]). Offending
+# entries are DROPPED with a stderr warning (mirroring kit_spec_files/env). These
+# values reach an msb `-p HOST:GUEST` argv and an sbx-v2 spec, so they are
+# untrusted input.
+#
+# NOTE (>50 lines): this function must both parse two YAML shapes (neutral vs the
+# legacy sbx block) and validate four sub-fields; splitting it would fragment the
+# single-pass awk parser. It is kept as one cohesive parser + one validation gate.
 kit_spec_published_ports() {
   local spec="$1"
   [ -f "$spec" ] || return 0
+
+  # 1) Prefer the NEUTRAL top-level publishedPorts. Emit guest/proto/name/host.
+  local neutral
+  neutral=$(_kit_pp_parse_neutral "$spec")
+  if [ -n "$neutral" ]; then
+    printf '%s\n' "$neutral" | _kit_pp_validate
+    return 0
+  fi
+
+  # 2) Fall back to the DEPRECATED backend_extras.sbx.publishedPorts (one release).
+  local legacy
+  legacy=$(_kit_pp_parse_legacy "$spec")
+  if [ -n "$legacy" ]; then
+    echo "kit-translate: DEPRECATION: backend_extras.sbx.publishedPorts is deprecated;" >&2
+    echo "kit-translate:   move ports to the neutral top-level 'publishedPorts:' list" >&2
+    echo "kit-translate:   ({guest, host?, protocol?, name?}). The sbx-only fallback is" >&2
+    echo "kit-translate:   removed in the next minor release (ADR-0014)." >&2
+    printf '%s\n' "$legacy" | _kit_pp_validate
+  fi
+}
+
+# Parse the NEUTRAL top-level `publishedPorts:` list into raw (unvalidated)
+# tab-separated `guest<TAB>proto<TAB>name<TAB>host` records. host defaults to
+# guest when omitted. Reads only the top-level block (dedent ends it).
+_kit_pp_parse_neutral() {
   awk '
     function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); gsub(/^"|"$/,"",s); return s }
-    function flush(){ if (cur_c != "") printf "%s\t%s\t%s\n", cur_c, cur_p, cur_n; cur_c=""; cur_p=""; cur_n="" }
+    function flush(){ if (cur_g != "") printf "%s\t%s\t%s\t%s\n", cur_g, cur_p, cur_n, (cur_h==""?cur_g:cur_h); cur_g=""; cur_p=""; cur_n=""; cur_h="" }
+    /^publishedPorts:[[:space:]]*$/ { in_pp=1; flush(); next }
+    /^[A-Za-z]/ { if (in_pp) { flush(); in_pp=0 } }
+    in_pp {
+      if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#/) next
+      if ($0 ~ /^[[:space:]]+-[[:space:]]/) {
+        flush()
+        line=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",line)
+        k=line; sub(/:.*/,"",k); k=trim(k)
+        v=line; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); v=trim(v)
+        if (k=="guest") cur_g=v; else if (k=="host") cur_h=v; else if (k=="protocol") cur_p=v; else if (k=="name") cur_n=v
+        next
+      }
+      if ($0 ~ /^[[:space:]]+[A-Za-z]/) {
+        k=$0; sub(/:.*/,"",k); k=trim(k)
+        v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); v=trim(v)
+        if (k=="guest") cur_g=v; else if (k=="host") cur_h=v; else if (k=="protocol") cur_p=v; else if (k=="name") cur_n=v
+        next
+      }
+    }
+    END { if (in_pp) flush() }
+  ' "$1"
+}
+
+# Parse the DEPRECATED backend_extras.sbx.publishedPorts list into raw
+# tab-separated `guest<TAB>proto<TAB>name<TAB>host` records (legacy uses the old
+# `container:` key and has no `host:`, so host==guest).
+_kit_pp_parse_legacy() {
+  awk '
+    function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); gsub(/^"|"$/,"",s); return s }
+    function flush(){ if (cur_c != "") printf "%s\t%s\t%s\t%s\n", cur_c, cur_p, cur_n, cur_c; cur_c=""; cur_p=""; cur_n="" }
     function indent_of(s,   i){ i=match(s,/[^ ]/); return (i==0? 0 : i-1) }
     /^backend_extras:/  { in_be=1; next }
     /^[A-Za-z]/         { if (in_be) { flush(); in_be=0; in_sbx=0; in_pp=0 } }
     in_be {
-      # `  sbx:` at one indent level under backend_extras.
       if ($0 ~ /^[[:space:]]+sbx:[[:space:]]*$/) { in_sbx=1; in_pp=0; sbx_ind=indent_of($0); next }
-      # Another backend key at the same indent as sbx ends the sbx block.
       if (in_sbx && $0 ~ /^[[:space:]]+[A-Za-z_]+:/ && indent_of($0) <= sbx_ind && $0 !~ /publishedPorts:/) {
-        # Could be a sibling backend (msb:/ppp:) or a sibling sbx key (background:).
-        # Only leave the sbx block if this key is at sbx_ind (a sibling backend).
         if (indent_of($0) == sbx_ind) { flush(); in_sbx=0; in_pp=0 }
       }
       if (in_sbx && $0 ~ /publishedPorts:[[:space:]]*$/) { in_pp=1; flush(); next }
       if (in_pp) {
-        # A new list item: "        - container: 3000"
         if ($0 ~ /^[[:space:]]+-[[:space:]]/) {
           flush()
           line=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",line)
@@ -269,19 +343,35 @@ kit_spec_published_ports() {
           if (k=="container") cur_c=v; else if (k=="protocol") cur_p=v; else if (k=="name") cur_n=v
           next
         }
-        # Continuation keys of the current item.
         if ($0 ~ /^[[:space:]]+[A-Za-z]/) {
           k=$0; sub(/:.*/,"",k); k=trim(k)
           v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); v=trim(v)
           if (k=="container") cur_c=v; else if (k=="protocol") cur_p=v; else if (k=="name") cur_n=v
-          # A dedent to sbx-level key (e.g. background:) ends the port list.
           if (indent_of($0) <= sbx_ind + 2 && k != "container" && k != "protocol" && k != "name") { flush(); in_pp=0 }
           next
         }
       }
     }
     END { if (in_be) flush() }
-  ' "$spec"
+  ' "$1"
+}
+
+# Validate raw `guest<TAB>proto<TAB>name<TAB>host` records on stdin (SI-10):
+# guest/host ints 1..65535; protocol tcp|udp when present; name [A-Za-z0-9._-].
+# Drops offending records with a stderr warning; emits the survivors unchanged.
+_kit_pp_validate() {
+  awk -F'\t' '
+    function is_port(p){ return (p ~ /^[0-9]+$/ && p+0 >= 1 && p+0 <= 65535) }
+    {
+      g=$1; p=$2; n=$3; h=$4
+      if (g=="") next
+      if (!is_port(g))                    { print "kit-translate: skipping published port with invalid guest port: " g > "/dev/stderr"; next }
+      if (h!="" && !is_port(h))           { print "kit-translate: skipping published port with invalid host port: " h > "/dev/stderr"; next }
+      if (p!="" && p!="tcp" && p!="udp")  { print "kit-translate: skipping published port with invalid protocol: " p > "/dev/stderr"; next }
+      if (n!="" && n !~ /^[A-Za-z0-9._-]+$/) { print "kit-translate: skipping published port with unsafe name: " n > "/dev/stderr"; next }
+      printf "%s\t%s\t%s\t%s\n", g, p, n, h
+    }
+  '
 }
 
 # ---------------------------------------------------------------------------
@@ -347,7 +437,7 @@ kit_spec_files() {
 # kit_spec_commands SPEC
 # ---------------------------------------------------------------------------
 # Echo one record per commands[] entry. Each record is:
-#   __CMD__ <TAB> phase <TAB> user
+#   __CMD__ <TAB> phase <TAB> user <TAB> background
 #   <base64 argv token 1>
 #   <base64 argv token 2>
 #   ...
@@ -357,10 +447,16 @@ kit_spec_files() {
 # that would otherwise be indistinguishable from token boundaries). Consumers
 # read between __CMD__ and __END__ and base64-decode each line to recover argv.
 #
+# background is "true" or "false" (default false). It marks a startup command
+# that must be DETACHED (run in the background) rather than awaited — see
+# ADR-0014. Validation (SI-10): any `background:` value that is not a boolean is
+# treated as false with a stderr warning, and the whole command is otherwise
+# preserved.
+#
 # Parser scope: the hybrid/v1 commands: list as the four acq kits write it —
-# a sequence of `- phase:`/`user:`/`description:`/`command:` mappings, where
-# command: is an argv list of plain scalars and/or a single `- |` literal block.
-# Comment lines (bare `#`) and blank lines are ignored everywhere.
+# a sequence of `- phase:`/`user:`/`description:`/`background:`/`command:`
+# mappings, where command: is an argv list of plain scalars and/or a single
+# `- |` literal block. Comment lines (bare `#`) and blank lines are ignored.
 kit_spec_commands() {
   local spec="$1"
   [ -f "$spec" ] || return 0
@@ -458,22 +554,30 @@ kit_spec_commands() {
       v=l; sub(/^[^:]*:[[:space:]]*/,"",v)
       if (k=="phase")            phase=trim(v)
       else if (k=="user")        user=trim(v)
+      else if (k=="background")  background=trim(v)
       else if (k=="description") { }
       else if (k=="command")     in_argv=1
     }
-    function end_cmd(   i,tok) {
+    function end_cmd(   i,tok,bg) {
       if (have) {
         # Validate the fields that later reach a shell/exec context. user is
         # interpolated into `msb exec -u <user>`; phase selects the lifecycle
         # branch. A hostile or mistyped kit spec must not smuggle anything here:
         # user must be a bare uid or a safe username token; phase must be one of
         # the known lifecycle phases. Drop the whole command on violation.
+        # background must be a boolean; anything else is coerced to false with a
+        # warning (SI-10) — the command itself is still emitted.
+        bg="false"
+        if (background=="true" || background=="false") bg=background
+        else if (background!="") {
+          print "kit-translate: command background must be true|false (got: " background "); treating as false" > "/dev/stderr"
+        }
         if (user != "" && user !~ /^[A-Za-z0-9_-]+$/) {
           print "kit-translate: skipping command with unsafe user: " user > "/dev/stderr"
         } else if (phase != "" && phase !~ /^(install|initFiles|startup)$/) {
           print "kit-translate: skipping command with unknown phase: " phase > "/dev/stderr"
         } else {
-          printf "__CMD__\t%s\t%s\n", phase, user
+          printf "__CMD__\t%s\t%s\t%s\n", phase, user, bg
           for (i=0;i<n;i++) {
             tok = argv[i]
             # Strip a single trailing newline left by a YAML block scalar so the
@@ -484,7 +588,7 @@ kit_spec_commands() {
           printf "__END__\n"
         }
       }
-      have=0; phase=""; user=""; in_argv=0; n=0
+      have=0; phase=""; user=""; background=""; in_argv=0; n=0
       delete argv
     }
   ' "$spec"
@@ -638,7 +742,8 @@ kit_spec_agent_context() {
 #   commands[phase=initFiles]       -> commands.initFiles[]  (command form)
 #   commands[phase=startup]         -> commands.startup[]
 #   agentContext                    -> agentContext            (identical)
-#   backend_extras.sbx.publishedPorts -> publishedPorts[]      (top-level, sbx-v2)
+#   publishedPorts (neutral, top-level; or deprecated backend_extras.sbx) ->
+#                                      publishedPorts[]         (top-level, sbx-v2)
 #   backend_shortcuts.sbx           -> (none defined for the four kits; ignored)
 #
 # Usage: kit_translate_to_sbx NEUTRAL_KIT_DIR OUT_DIR
@@ -699,17 +804,27 @@ kit_translate_to_sbx() {
       done
     fi
 
-    # backend_extras.sbx.publishedPorts -> sbx-v2 top-level publishedPorts. sbx
-    # maps each declared CONTAINER port to an ephemeral host loopback port at
-    # create time. Without this, an acq-applied kit that exposes a service is
-    # unreachable from the host until the user runs `acq ports --publish`.
+    # publishedPorts -> sbx-v2 top-level publishedPorts. sbx maps each declared
+    # CONTAINER (guest) port to an ephemeral host loopback port at create time.
+    # Without this, an acq-applied kit that exposes a service is unreachable from
+    # the host until the user runs `acq ports --publish`. The neutral source is
+    # read FIRST by kit_spec_published_ports (with a deprecated backend_extras.sbx
+    # fallback), so the emitted sbx-v2 shape is UNCHANGED regardless of source.
+    # Records are `guest<TAB>proto<TAB>name<TAB>host`; sbx-v2 keys on `container`
+    # (the guest port), so the host column is not re-emitted here (sbx assigns the
+    # host port; this matches the pre-neutral observable shape).
     local portrecs
     portrecs=$(kit_spec_published_ports "$spec")
     if [ -n "$portrecs" ]; then
       printf 'publishedPorts:\n'
-      printf '%s\n' "$portrecs" | while IFS="$(printf '\t')" read -r pcont pproto pname; do
-        [ -n "$pcont" ] || continue
-        printf '  - container: %s\n' "$pcont"
+      printf '%s\n' "$portrecs" | while IFS="$(printf '\t')" read -r pguest pproto pname phost; do
+        [ -n "$pguest" ] || continue
+        # phost (the neutral host column) is intentionally NOT re-emitted: sbx-v2
+        # keys on `container` (the guest port) and assigns the host port itself,
+        # matching the pre-neutral observable shape. Reference it so the field is
+        # consumed by `read` without tripping shellcheck SC2034.
+        : "${phost:-}"
+        printf '  - container: %s\n' "$pguest"
         [ -n "$pproto" ] && printf '    protocol: %s\n' "$pproto"
         [ -n "$pname" ]  && printf '    name: %s\n' "$(_kit_yaml_quote "$pname")"
       done
@@ -1003,6 +1118,57 @@ EOF
       [ -n "$en" ] && { echo "kit: validate: invalid env var name (must match [A-Za-z_][A-Za-z0-9_]*): '$en'" >&2; errs=$((errs + 1)); }
     done <<EOF
 $bad_env
+EOF
+  fi
+
+  # publishedPorts[] (neutral top-level) + backend_extras.sbx.publishedPorts
+  # (deprecated). kit_spec_published_ports DROPS entries with an invalid port /
+  # protocol / name (defense-in-depth for the argv/-p they reach), so scan the RAW
+  # spec here — otherwise a bad value would be silently dropped rather than
+  # reported by `acq kit validate`. guest/host/container must be 1..65535 ints;
+  # protocol tcp|udp; name [A-Za-z0-9._-]. (ADR-0014, SI-10)
+  local bad_ports
+  bad_ports=$(awk '
+    function bad_port(v){ return (v !~ /^[0-9]+$/ || v+0 < 1 || v+0 > 65535) }
+    function val(l,   v){ v=l; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); gsub(/^["'\'' ]+|["'\'' ]+$/,"",v); return v }
+    /^publishedPorts:/  { in_pp=1; in_bpp=0; next }
+    /^backend_extras:/  { in_be=1 }
+    /^[A-Za-z]/         { if ($0 !~ /^publishedPorts:/) in_pp=0 }
+    in_be && /^[[:space:]]+publishedPorts:/ { in_bpp=1; next }
+    in_be && /^[[:space:]]+[A-Za-z_]+:[[:space:]]*$/ && $0 !~ /publishedPorts:/ { in_bpp=0 }
+    (in_pp || in_bpp) {
+      if ($0 ~ /^[[:space:]]+-?[[:space:]]*(guest|host|container):/) {
+        v=val($0); if (bad_port(v)) print "port:" v
+      } else if ($0 ~ /^[[:space:]]+-?[[:space:]]*protocol:/) {
+        v=val($0); if (v!="" && v!="tcp" && v!="udp") print "protocol:" v
+      } else if ($0 ~ /^[[:space:]]+-?[[:space:]]*name:/) {
+        v=val($0); if (v!="" && v !~ /^[A-Za-z0-9._-]+$/) print "name:" v
+      }
+    }' "$spec")
+  if [ -n "$bad_ports" ]; then
+    while IFS= read -r bp; do
+      [ -n "$bp" ] && { echo "kit: validate: invalid publishedPorts entry (${bp%%:*}='${bp#*:}'; ports 1..65535, protocol tcp|udp, name [A-Za-z0-9._-])" >&2; errs=$((errs + 1)); }
+    done <<EOF
+$bad_ports
+EOF
+  fi
+
+  # commands[].background must be a boolean. kit_spec_commands coerces a
+  # non-boolean to false (defense-in-depth), so scan the RAW spec to REPORT it.
+  local bad_bg
+  bad_bg=$(awk '
+    /^commands:/ { in_c=1; next }
+    /^[A-Za-z]/  { in_c=0 }
+    in_c && /^[[:space:]]+-?[[:space:]]*background:/ {
+      v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v)
+      gsub(/^["'\'' ]+|["'\'' ]+$/,"",v)
+      if (v != "true" && v != "false") print v
+    }' "$spec")
+  if [ -n "$bad_bg" ]; then
+    while IFS= read -r b; do
+      [ -n "$b" ] && { echo "kit: validate: command background must be true|false: '$b'" >&2; errs=$((errs + 1)); }
+    done <<EOF
+$bad_bg
 EOF
   fi
 

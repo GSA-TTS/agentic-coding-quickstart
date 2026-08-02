@@ -357,7 +357,9 @@ acq_backend_provision() {
 acq_backend_run() {
   local name="$1"
   shift
-  # Expect `-- CMD...` separator
+  # Expect `-- CMD...` separator. No `-u agent` needed: sbx's agent templates
+  # bake the unprivileged `agent` user (UID 1000, HOME=/home/agent) as the
+  # default exec user, unlike a plain msb OCI base (which defaults to root).
   sbx exec "$name" "$@"
 }
 
@@ -658,7 +660,10 @@ acq_backend_secret_set() {
   local acq_sandbox=""
   [ -n "$scope_name" ] && acq_sandbox="$scope_name"
   if command -v acq_secret_set_interactive >/dev/null 2>&1; then
-    acq_secret_set_interactive "$service" "$acq_sandbox" || return 1
+    # Pass the resolved host/env so a CUSTOM endpoint's mapping is persisted as a
+    # non-secret sidecar; built-ins pass empty host/env (their
+    # mapping is compiled in) so nothing extra is recorded.
+    acq_secret_set_interactive "$service" "$acq_sandbox" "$host" "$env_var" || return 1
   else
     echo "acq: internal error: secret store not loaded" >&2
     return 1
@@ -836,9 +841,15 @@ acq_backend_secret_rm() {
   local removed_store=0
   if command -v acq_secret_delete >/dev/null 2>&1; then
     local key
-    key=$(_acq_secret_key "$service" "$acq_sandbox")
-    acq_secret_delete "$key" && removed_store=1
+    # _acq_secret_key fails closed on an ambiguous (dotted) name; such a name
+    # could never have been stored, so treat rm as a no-op success
+    # (the `|| key=""` keeps `set -e` from aborting the rm path).
+    key=$(_acq_secret_key "$service" "$acq_sandbox") || key=""
+    [ -n "$key" ] && acq_secret_delete "$key" && removed_store=1
   fi
+  # Also drop the non-secret endpoint sidecar for this service/scope (idempotent).
+  command -v acq_secret_meta_delete >/dev/null 2>&1 && \
+    acq_secret_meta_delete "$service" "$acq_sandbox" || true
 
   # 2) Clear sbx's proxy entry so it stops injecting. Built-in services are
   #    removed by service name; custom services (usai, ...) by their placeholder.

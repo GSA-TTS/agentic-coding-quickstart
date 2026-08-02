@@ -8,7 +8,7 @@ nist_controls: ["RA-3", "RA-5"]
 frameworks: ["NIST AI RMF 1.0", "OWASP Top 10 LLM 2025", "OWASP Top 10 Agentic 2026"]
 audience: "isso"
 keywords: ["risk-assessment", "AI-RMF", "threat-analysis", "OWASP", "ATO"]
-related_files: ["qsbx", "AGENTS.md"]
+related_files: ["acq", "AGENTS.md"]
 load_priority: "reference-only"
 review_cycle: "semi-annually"
 ---
@@ -137,7 +137,7 @@ Rate each threat for your specific deployment. **Likelihood**: 1 (Rare) to 5 (Al
 | T9 | **Audit trail gaps** — Agent actions cannot be reconstructed from logs | Agentic-02 | | | | | |
 | T10 | **Human trust exploitation** — User over-trusts agent output without review | Agentic-05 | | | | | |
 
-> **Project-specific note (qsbx kit sourcing).** `qsbx` applies its four sbx
+> **Project-specific note (acq kit sourcing).** `acq` applies its four
 > kits by **pinned commit SHA** from `GSA-TTS/agentic-coding-patterns`, fetched
 > at sandbox-create time. This adds two dependencies to weigh under **T3 (supply
 > chain)** and availability:

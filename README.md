@@ -8,7 +8,7 @@
 **`acq`** is the recommended entry point as of version 1.1.0. It wraps `sbx` — a command-line tool from Docker — providing a pluggable-backend architecture that will support additional isolation runtimes in future releases.
 
 > **Migrating from `qsbx`?** Replace `./qsbx` with `./acq` — all commands are
-> identical on the sbx backend. `qsbx` is deprecated and will be removed in 2.0.0.
+> identical on the sbx backend. `qsbx` is deprecated and will be removed in 3.0.0.
 
 ## Agentic Coding Ecosystem
 
@@ -158,7 +158,7 @@ See [Docker's apt install docs](https://docs.docker.com/engine/install/ubuntu/#i
 You should see a line like `sbx version: v0.35.0 <sha>`.
 
 > [!IMPORTANT]
-> **acq (and qsbx) require `sbx` ≥ 0.35.0.** This is the release where `sbx kit add`
+> **acq requires `sbx` ≥ 0.35.0.** This is the release where `sbx kit add`
 > recreates a sandbox with the added kit while preserving its state, which is how
 > `acq` heals sandboxes created by an older version (see
 > [Staying Current](#staying-current)).
@@ -353,16 +353,16 @@ Then make a **new** commit — verification applies going forward.
 > `git config --global` on your host will **not** carry into the sandbox.
 
 For the signing mechanics and more failure modes, see the kit's
-[`TROUBLESHOOTING.md`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/sbx-kits/git-ssh-sign/TROUBLESHOOTING.md).
+[`TROUBLESHOOTING.md`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/acq-kits/git-ssh-sign/TROUBLESHOOTING.md).
 
 </details>
 
 <details>
-<summary><strong>Pulled a branch but acq/qsbx behaves like the old version</strong> (click to expand)</summary>
+<summary><strong>Pulled a branch but acq behaves like the old version</strong> (click to expand)</summary>
 
 `git pull origin <branch>` does **not** switch you to that branch — it merges
 into the branch you are already on, so `Already up to date` does not mean your
-working tree changed. Also, if `acq`/`qsbx`/`qsb` is on your `PATH` (e.g. a symlink in
+working tree changed. Also, if `acq` is on your `PATH` (e.g. a symlink in
 `~/bin`), it may resolve to a **different clone** than the one you edited.
 
 Ask acq which file and clone are actually running:
@@ -421,7 +421,7 @@ repo) when it creates a sandbox, delivering everything declaratively:
 - **`git-ssh-sign`** — signs git commits and tags with the SSH key forwarded
   from your host's SSH agent; the private key never enters the sandbox. Load a
   key on the host first (`ssh-add ~/.ssh/id_ed25519`) — without one, commits fail
-  with a clear error, and `qsbx` warns you before attaching. Signing alone does
+  with a clear error, and `acq` warns you before attaching. Signing alone does
   not make a commit GitHub-**Verified**; see
   [Commits show "Unverified" on GitHub](#troubleshooting).
 
@@ -471,7 +471,7 @@ repo. To customize:
 - **Change USAi models / provider config, rules, or skills:** contribute to the
   kits in the
   [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
-  repo (`integrations/isolation/sbx-kits/`), where each kit and its design notes
+  repo (`integrations/isolation/acq-kits/`), where each kit and its design notes
   live.
 
 ---
@@ -510,10 +510,12 @@ export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
   [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations)
   repo under `integrations/`. (For example, the Zed editor integration is at
   `integrations/editors/zed/`.)
-- **OpenCode Web** — Run OpenCode Web in the sandbox and reach it from your host
-  browser for clipboard support and richer markdown rendering. The
-  [`opencode-web.sh`](opencode-web.sh) script automates it; see the
-  [OpenCode Web documentation](https://opencode.ai/docs/web).
+- **OpenCode Web** — Run OpenCode in the sandbox and reach it from your host
+  browser for clipboard support and richer markdown rendering. Use the
+  [`openchamber` acq kit](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations/isolation/acq-kits/openchamber),
+  which runs `opencode serve` on host-published port 4096 (plus the OpenChamber
+  UI on 3000) via a supervised lifecycle. (This supersedes the former
+  `opencode-web.sh` helper, which has been removed.)
 
 ---
 
@@ -527,11 +529,12 @@ when it expires (see [Troubleshooting](#troubleshooting)).
 git fetch && git pull
 
 # Adopt newer kits (USAi config, playbook, CA): bump PATTERNS_KIT_REF near the
-# top of qsbx to a newer agentic-coding-patterns commit, then recreate sandboxes.
+# top of acq.backends/common.sh to a newer agentic-coding-patterns commit, then
+# recreate sandboxes.
 ```
 
 > [!NOTE]
-> **Resuming a sandbox created by an older `acq` or `qsbx`.** Sandboxes created before the
+> **Resuming a sandbox created by an older `acq`.** Sandboxes created before the
 > kit migration have an outdated provider config or no playbook. The next time you
 > `acq run opencode <path>` against such a sandbox, `acq` detects the missing
 > kit(s) and injects them with `sbx kit add` — no action needed. On `sbx` ≥
@@ -545,7 +548,7 @@ git fetch && git pull
 Earlier versions vendored the playbook as a git submodule at
 `agentic-coding-playbook/`. The kits now live in the
 [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
-repo and `qsbx` fetches them at sandbox-create time, so the submodule is gone. If
+repo and `acq` fetches them at sandbox-create time, so the submodule is gone. If
 you cloned before that change, `git pull` leaves an orphaned submodule directory;
 clean it up once:
 
@@ -570,7 +573,7 @@ kit, not the submodule.
 
 The playbook provides reusable **agent skills** — step-by-step procedures for
 common tasks. Skills follow the [agentskills.io](https://agentskills.io)
-standard. When you launch a sandbox with `qsbx`, the `agentic-coding-playbook`
+standard. When you launch a sandbox with `acq`, the `agentic-coding-playbook`
 kit clones the playbook at startup and symlinks these into `~/.agents/skills`
 (and per-agent roots) so your agent discovers them automatically; no separate
 clone is needed.
@@ -602,8 +605,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 | File/Directory                      | Purpose                                                    |
 | ----------------------------------- | ---------------------------------------------------------- |
 | `acq`                               | Recommended entry point — pluggable-backend wrapper (sbx by default) |
-| `acq.backends/`                     | Backend adapters (`common.sh`, `sbx.sh`) |
-| `qsbx`                              | **Deprecated** sbx wrapper (use `acq` instead; removed in 2.0.0) |
+| `acq.backends/`                     | Backend adapters (`common.sh`, `sbx.sh`, `msb.sh`, `kit-translate.sh`, `secret-store.sh`) |
+| `qsbx`                              | **Deprecated** sbx wrapper (use `acq` instead; slated for removal in 3.0.0) |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`acq usai-rotate-api-key`) |
 | `scripts/test-acq`                  | Offline unit harness for acq |
 | `scripts/test-migrate-or-halt`      | Offline unit harness for qsbx session migration |

@@ -93,10 +93,10 @@ npm ci --prefix .github/linters
 > `npm run check` auto-fixes some issues (markdown, whitespace, EOF) — review and stage the changes it makes.
 
 This repo carries almost no application code, so it has no broad test suite. The
-sbx kits it applies — and their tests (permission-matrix, model-sync, per-kit
+kits it applies — and their tests (permission-matrix, model-sync, per-kit
 `scripts/verify`) — live in the
 [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
-repo under `integrations/isolation/sbx-kits/`. Changes to provider config,
+repo under `integrations/isolation/acq-kits/`. Changes to provider config,
 rules, skills, or CA trust belong there.
 
 There are two offline unit harnesses (stubbed `sbx`/`opencode`, no Docker or network):
