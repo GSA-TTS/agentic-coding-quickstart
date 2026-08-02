@@ -131,15 +131,46 @@ Per NIST AI RMF and SP 800-218A, AI-generated code requires **traceability** but
 | Level | Required? | How |
 |-------|-----------|-----|
 | **PR Description** | RECOMMENDED | Include "AI-assisted" disclosure in PR description |
-| **Commit Message** | OPTIONAL | `Co-authored-by: AI Agent <ai-agent@gsa.gov>` in footer |
+| **Commit Message** | OPTIONAL | `Co-authored-by:` trailer in footer (format below) |
 | **Documentation** | REQUIRED | This AGENTS.md documents AI agent authorization |
 
 **Rationale:** Federal guidance (NIST AI RMF, SP 800-218A) emphasizes system-level traceability over granular per-commit attribution. PR-level disclosure provides auditable records without commit noise.
 
-When AI attribution IS included in commits, use:
+When AI attribution IS included in a commit, add a `Co-authored-by:` trailer whose
+name identifies the **agent harness**, optionally the **model**, and whose email
+is the **responsible human's** GSA address. The trailer has the shape:
+
+- `Co-authored-by: NAME <EMAIL>`
+
+where:
+
+- **NAME** = the agent harness, optionally followed by the model in square
+  brackets — `HARNESS` or `HARNESS [MODEL]`
+- **EMAIL** = the responsible human's GSA email (`first.last@gsa.gov`), NOT a
+  generic agent address — this keeps every AI-assisted commit tied to an
+  accountable person.
+
+The name-and-email together sit between a literal space, a `<`, and a `>`, exactly
+as Git requires for a co-author trailer. Concretely:
+
+```text
+Co-authored-by: OpenCode [claude-opus-4] <first.last@gsa.gov>
 ```
-Co-authored-by: AI Agent <ai-agent@gsa.gov>
+
+More examples (all valid):
+
+```text
+Co-authored-by: OpenCode <jane.doe@gsa.gov>
+Co-authored-by: Claude Code [claude-sonnet-4.5] <john.smith@gsa.gov>
+Co-authored-by: GitHub Copilot [gpt-5] <first.last@gsa.gov>
 ```
+
+Notes for getting the punctuation right:
+
+- The email MUST be wrapped in angle brackets `<…>`; the model (when present) MUST
+  be wrapped in square brackets `[…]` and placed BEFORE the angle-bracketed email.
+- Do not put the model inside the angle brackets — only the email goes there.
+- Omit the `[MODEL]` segment if the model is unknown; never invent one.
 
 ---
 
@@ -396,6 +427,65 @@ patterns).
 - Maximum function length: 50 lines
 - All external input MUST be validated before use
 - Use parameterized queries for any database operations
+
+### Durable References: Cross-Link Code, Docs, and ADRs — Not Trackers
+
+This repository must remain **self-contained and outlive the issue tracker.**
+GitHub issue/PR numbers, and internal epic labels ("gap A", "gap K", etc.), are
+ephemeral SaaS-dependent tracking artifacts — useful during development, but an
+obstacle to review and long-term maintenance once merged. The durable homes for
+rationale are **ADRs and docs**; the durable homes for behavior are the **code
+and its tests**.
+
+The agent MUST:
+
+- Keep **code comments self-contained.** Explain *why* in prose. A comment MAY
+  point to an **ADR** (e.g. "see ADR-0015") — that is the correct durable anchor
+  for a design decision. A comment MUST NOT rely on a bare `#NNN` /
+  `quickstart#NNN` / `patterns#NNN` issue-or-PR reference, or an epic "gap X"
+  label, to carry meaning: rewrite it as prose (and cite an ADR if one applies).
+- Point **docs → code and ADRs** (what/where it is, why it was decided), and
+  point **code → docs and ADRs** (the durable rationale). Prefer docs pointing at
+  code over the reverse, except to cite an ADR.
+- Before opening a PR, **strip ephemeral tracker references from any code comment
+  or doc it added or touched.** Durable, cross-repo-relevant facts (a pinned
+  release SHA, an upstream bug's observable behavior) belong in prose/ADRs, not as
+  a bare tracker number.
+
+The agent MAY leave issue/PR references in **ephemeral, non-durable contexts**:
+commit messages, PR descriptions, `CHANGELOG.md` (release automation), and an
+ADR's own *Links / tracking* section (where issue references are acceptable,
+though prose or ADR cross-links are preferred). Test **names** that already encode
+a regression's id MAY keep it as a stable identifier.
+
+### Fully Qualify Issue/PR References in Anything Durable
+
+Shorthand like `#233` is **fine when talking to a human in this session** — but
+it MUST NOT land, unqualified, in anything durable or auto-linked (commit
+messages, PR titles/descriptions, review comments, tracking issues, ADRs). Once
+auto-linked, a bare `#233` resolves **relative to whatever repository renders
+it** — so a `#233` written for `GSA-TTS/agentic-coding-quickstart` can silently
+point at `GSA-TTS/agentic-coding-patterns#233` (a different thing) when quoted or
+cross-posted.
+
+Therefore, in any durable or cross-posted artifact, the agent MUST write
+issue/PR references **fully qualified**:
+
+- Cross-repo, always safe: `GSA-TTS/agentic-coding-quickstart#233` (or a full
+  URL). Use this form in every commit message, PR body, review comment, and
+  tracking issue — including when referring to the current repo — because these
+  are read and auto-linked outside their origin.
+- A bare `#233` is acceptable **only** within the same repository's PR/issue
+  body where the target is unambiguous by construction, and even then the
+  qualified form is preferred. When in doubt, fully qualify.
+
+This does not change the durable-reference rule above (code comments and docs
+prose still avoid tracker numbers entirely, qualified or not); it governs the
+*ephemeral* contexts where a reference is allowed at all.
+
+> Rationale: this is enforcement of the existing "docs-as-code" / self-contained
+> repository discipline. Doing this continuously means no later "de-reference" or
+> "re-qualify" cleanup pass is ever needed.
 
 ---
 
