@@ -1,5 +1,11 @@
 # agentic-coding-quickstart v2 — Design Summary
 
+> **Update (2026-07-31):** This is a point-in-time design exploration. The default
+> `ACQ_MSB_IMAGE` is now `docker.io/docker/sandbox-templates:shell-docker` (the sbx
+> agent-template), **not** `node:22-bookworm`; references to `node:22-bookworm` as
+> the msb base below are now the plain-OCI **override** example. See
+> `docs/BACKEND_GUIDE.md` §"Base image requirements" for the current contract.
+
 A pluggable isolation layer for the GSA agentic-coding-quickstart ecosystem. One `acq` command, three isolation backends, one consistent developer experience.
 
 ---
@@ -279,7 +285,8 @@ package.json                # acq shell completion helpers
 
 **Removed (no longer needed for v2):**
 - `qsbx` (replaced by `acq`)
-- `opencode-web.sh` (stays too — still useful; backend-agnostic — `acq run` mounts the same files)
+- `opencode-web.sh` (removed — superseded by the `openchamber` acq kit, which
+  publishes the OpenCode server port with a supervised lifecycle; patterns #233)
 - ADRs 0003, 0004 (superseded by 0005; kept for history)
 - `docs/QUICKSTART_SBX.md` (replaced by `docs/QUICKSTART.md` + per-backend sections)
 
