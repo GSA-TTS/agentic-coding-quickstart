@@ -511,8 +511,36 @@ assert_contains "kit-flag: agent --kit after -- forwarded intact (#222)" "$log" 
 cleanup_stubs
 rm -rf "$_kitproj"
 
-# ===========================================================================
-# 4. qsbx deprecation notice
+# 3z. `acq run` fails CLOSED on an unresolvable target (issue #253). `run` is
+#     create-and-attach for a KNOWN AGENT or a re-attach to an EXISTING sandbox
+#     by name. With no positional (e.g. `run --name X -- CMD`) or an unknown
+#     first token, it must exit non-zero with an actionable message — never
+#     silently no-op an attach (which drops the post-`--` command and creates
+#     nothing).
+make_stubs
+# No agent positional: only a --name flag and a post-`--` command.
+noagent_out=$(ACQ_BACKEND=sbx "$ACQ" run --name s2verify -- sh -lc 'echo hi' 2>&1); noagent_rc=$?
+noagent_log=$(cat "$CALLS")
+assert_eq "run(#253): no agent positional exits non-zero" "2" "$noagent_rc"
+assert_contains "run(#253): no-agent message names the problem" "$noagent_out" "no agent or sandbox specified"
+assert_contains "run(#253): message shows usage" "$noagent_out" "Usage: acq run <agent|sandbox-name>"
+assert_contains "run(#253): message lists known agents" "$noagent_out" "opencode"
+assert_contains "run(#253): message points at acq exec" "$noagent_out" "acq exec <name> -- CMD"
+# Fail closed = no sandbox created: no `sbx create` was issued.
+assert_not_contains "run(#253): no-agent does NOT provision a sandbox" "$noagent_log" "sbx create"
+cleanup_stubs
+
+# 3z1. An unknown first token (neither a known agent nor an existing sandbox)
+#      also fails closed, naming the offending token.
+make_stubs
+unk_out=$(ACQ_BACKEND=sbx "$ACQ" run notanagent /some/proj 2>&1); unk_rc=$?
+unk_log=$(cat "$CALLS")
+assert_eq "run(#253): unknown target exits non-zero" "2" "$unk_rc"
+assert_contains "run(#253): unknown-target message names the token" "$unk_out" "'notanagent' is not a known agent"
+assert_not_contains "run(#253): unknown target does NOT provision" "$unk_log" "sbx create"
+cleanup_stubs
+
+
 # (Added to qsbx in §7 of the handoff)
 # ===========================================================================
 
