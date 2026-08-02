@@ -386,6 +386,23 @@ acq_backend_stop() {
   sbx stop "$1"
 }
 
+# acq_backend_start NAME — start (resume) a stopped sandbox (ADR-0017 / #247).
+# sbx exposes `sbx start` and preserves state on stop (ACQ_BACKEND_CAN_RESUME=1),
+# so this mirrors the msb verb: a thin resume primitive. The acq `start`/`restart`
+# dispatcher re-drives acq_backend_ensure_kits_applied after this to re-run the
+# idempotent kit apply (which restores startup services), same as the msb path.
+#
+# READINESS (S1): the msb adapter blocks on _acq_msb_wait_for_exec_ready inside
+# acq_backend_start because `msb exec` races the async guest boot after a resume.
+# sbx is left as a bare `sbx start` here: sbx has no post-resume readiness
+# primitive in use — _acq_sbx_wait_for_exec_ready exists but is not invoked after
+# provision/start today, and sbx's own `sbx exec` waits for the sandbox to become
+# ready — so there is no analogous mirror to add. If a live race is later observed
+# on sbx resume, mirror the msb approach here (add the wait after `sbx start`).
+acq_backend_start() {
+  sbx start "$1"
+}
+
 acq_backend_terminate() {
   sbx rm --force "$1"
 }

@@ -328,6 +328,65 @@ acq_backend_exists() {
 }
 
 # ---------------------------------------------------------------------------
+# _acq_msb_is_running NAME — 0 if the named sandbox is currently RUNNING, else 1
+# ---------------------------------------------------------------------------
+# `msb list --running -q` prints one RUNNING sandbox name per line (the `-q`
+# name-only contract from acq_backend_exists, plus the `--running` filter
+# documented at the top of this file: `msb list|ls [-q] [--running]`). A sandbox
+# that exists (acq_backend_exists) but is absent from the running list is stopped.
+# We reuse the SAME `msb list -q` line-match pattern acq_backend_exists uses (no
+# new probe shape is invented — only the `--running` filter is added), so the
+# stopped-state detection tracks the established inspection convention.
+# NOTE: like acq_backend_exists, the `--running` column contract is from the CLI
+# help and is not live-verified against a running daemon; if the layout differs on
+# a real host, adjust here and in acq_backend_exists together.
+_acq_msb_is_running() {
+  msb list --running -q 2>/dev/null | grep -Fxq -- "$1"
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_start NAME — start (resume) a stopped sandbox (ADR-0017 / #247)
+# ---------------------------------------------------------------------------
+# `msb start` resumes a stopped sandbox, preserving its persisted state
+# (ACQ_BACKEND_CAN_RESUME=1). Microsandbox's `start_detached` replays only a
+# persisted `runtime.entrypoint`/`runtime.cmd` on start — NOT a bare
+# `--script-path`-registered script (source-verified; see ADR-0017 and
+# _acq_msb_stage_startup_script). So starting alone does NOT deterministically
+# bring kit `startup`/`background` services back up; that restoration is done by
+# the acq `start`/`restart` verb re-driving acq_backend_ensure_kits_applied
+# (which re-runs startup via the idempotent exec path). This function is the thin
+# resume primitive; the dispatcher owns the heal that follows.
+#
+# PORT SYMMETRY: acq_backend_stop tears down post-hoc `msb ssh serve` + `ssh -L`
+# port tunnels (ADR-0015) because a stopped guest can no longer serve them. There
+# is NO matching re-establish primitive here: those tunnels are created on demand
+# by `acq ports --publish` against a RUNNING sandbox and are not persisted, so a
+# resumed sandbox simply has no post-hoc tunnels until the user re-publishes.
+# (Create-time `-p HOST:GUEST` NAT mappings are part of the sandbox config and
+# are restored by msb itself on start.) Left as a deliberate no-op with this note.
+#
+# READINESS (S1 fix): `msb start` returns as soon as the resume is registered,
+# but the guest boots asynchronously — so the FIRST `msb exec` after a start can
+# race the boot (same failure mode as post-create). We therefore BLOCK on
+# _acq_msb_wait_for_exec_ready here so that EVERY caller (the acq start/restart
+# verb, the start-if-stopped block inside acq_backend_ensure_kits_applied, and
+# any future caller) gets a booted, exec-ready guest — the heal's first exec can
+# never race the boot regardless of entry path. On the verb path,
+# acq_backend_start runs BEFORE ensure_kits_applied's _acq_msb_is_running check;
+# without a wait here that check would see the sandbox already running and skip
+# its own readiness wait, letting the first heal exec race the boot. Encapsulating
+# the wait in the resume primitive keeps the dispatcher backend-neutral (no
+# msb-specific readiness logic leaks into acq). _acq_msb_wait_for_exec_ready is
+# defined below in this file (single source, reused by the post-create and the
+# start-if-stopped paths). The wait is best-effort: a timeout emits a warning
+# rather than aborting, mirroring the start-if-stopped path.
+acq_backend_start() {
+  msb start "$1"
+  _acq_msb_wait_for_exec_ready "$1" || \
+    echo "acq(msb): warning: $1 did not become exec-ready after start." >&2
+}
+
+# ---------------------------------------------------------------------------
 # _acq_msb_wait_for_exec_ready NAME — block until `msb exec` works in the guest
 # ---------------------------------------------------------------------------
 # msb create returns as soon as the sandbox is registered, but the guest boots
@@ -421,16 +480,31 @@ _acq_msb_wait_for_exec_ready() {
 #      interpolated. `--script-path` covers only the startup COMMAND body, not
 #      files[], so it does not subsume that path.
 #
-# INCREMENT BOUNDARY (ADR-0017 delivers this in two steps). THIS increment is
-# runtime-neutral: it GENERATES the startup script body and REGISTERS it at
-# `msb create` via `--script-path acq-startup:<hostpath>`, but it does NOT yet
-# invoke it, wire it into microsandbox's persisted startup, or remove the exec-
-# based startup application that still runs after create. Registering a script
-# with no invocation is a deliberate no-op in msb 0.6.7 for now; the point of
-# this increment is to land the staging plumbing, the flag, and the generated-
-# body correctness under test. The persisted-restart wiring (making startup
-# re-run on a native restart, and retiring the now-redundant post-create exec
-# application of startup) is the FOLLOW-UP increment.
+# INCREMENT BOUNDARY (ADR-0017 delivers this in two steps). This adapter now
+# implements BOTH the create-time startup-script staging AND the restart-durable
+# behavior that consumes it:
+#
+#   * MECHANISM 1 (deterministic, DEFAULT): the acq `start`/`restart` verb calls
+#     acq_backend_start (`msb start`) then re-drives acq_backend_ensure_kits_applied,
+#     which re-applies the pinned kits idempotently and RE-RUNS the startup phase
+#     via `msb exec` — restoring kit `startup`/`background` services on resume. A
+#     stopped sandbox is also started automatically at the TOP of
+#     ensure_kits_applied, so `acq run <stopped-sandbox>` heals then attaches. This
+#     is the deterministic path and needs no native persistence.
+#
+#   * MECHANISM 2 (experimental, OPT-IN via ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1):
+#     the staged acq-startup script is ALSO designated `--entrypoint
+#     /.msb/scripts/acq-startup` at create, so microsandbox's start_detached
+#     replays it on a NATIVE `msb start`/reboot (outside acq). This OVERRIDES the
+#     image entrypoint and depends on 0.6.7 launch_intent/init semantics that are
+#     UNVERIFIED, so it is DEFAULT OFF and requires live verification on a KVM host
+#     (see _acq_msb_stage_startup_script). When off, mechanism 1 provides restart
+#     durability with no boot risk.
+#
+# The `--script-path` registration itself remains runtime-neutral: a bare
+# registration only stages the body on the guest PATH (/.msb/scripts/acq-startup);
+# microsandbox does not auto-run it at start unless it is enrolled as the
+# entrypoint (mechanism 2). install + mid-life apply stay exec-based.
 
 # Fetch a kit ref into the cache and echo its local dir. Returns 1 on failure.
 _acq_msb_fetch_kit() {
@@ -937,14 +1011,16 @@ _acq_msb_exec_command() {
 }
 
 # ---------------------------------------------------------------------------
-# Create-time startup-script staging (ADR-0017, increment 1)
+# Create-time startup-script staging (ADR-0017)
 # ---------------------------------------------------------------------------
 # These helpers GENERATE a single host-side `/bin/sh` script that reproduces the
 # semantics the exec path applies to STARTUP-phase kit commands, and stage it as
 # a `--script-path acq-startup:<hostpath>` create flag. See the DESIGN NOTE above
 # for the boundary: only the `startup` phase is staged here; install and mid-life
-# apply stay exec-based, and this increment REGISTERS the script without invoking
-# it (the persisted-restart wiring is the follow-up).
+# apply stay exec-based. A bare `--script-path` registration is runtime-neutral
+# (staged on the guest PATH, not auto-run at boot); the acq `start`/`restart`
+# verb re-runs startup via exec (mechanism 1), and the optional gated
+# `--entrypoint` designation (mechanism 2) makes microsandbox replay it natively.
 #
 # TRANSLATION from the exec path to an IN-GUEST script:
 #   - The exec path picks run-as-user via `msb exec -u agent`/`-u <user>`. Inside
@@ -1185,12 +1261,13 @@ _acq_msb_generate_startup_script() {
 # for cleanup by the caller after create. A kit with no startup commands stages
 # nothing (no empty script is registered).
 #
-# NOTE (increment 1): only the FIRST kit that contributes startup commands stakes
+# NOTE (single-stake): only the FIRST kit that contributes startup commands stakes
 # the fixed `acq-startup` script name; if multiple kits carried startup commands
 # they would need a merged/uniquely-named script — but the pinned built-in kits
-# put startup commands in a single kit, and the follow-up increment that actually
-# invokes/persists the script will finalize multi-kit merging. Guarded here so a
-# second contributing kit does not silently overwrite the first's registration.
+# put startup commands in a single kit, and multi-kit merging is deferred. Guarded
+# here so a second contributing kit does not silently overwrite the first's
+# registration; the exec-based apply path still runs EVERY kit's startup after
+# create, so nothing is dropped at runtime.
 #
 # VERIFIED NEUTRALITY ASSUMPTION (ADR-0017): registering a script via
 # `--script-path acq-startup:<file>` only STAGES the body on the guest PATH (as
@@ -1240,6 +1317,40 @@ _acq_msb_stage_startup_script() {
     _ACQ_MSB_STARTUP_STAGE_FILES+=("$_file")
     _ACQ_MSB_STARTUP_STAGED=1
     acq_debug "msb startup-script staged: --script-path ${ACQ_MSB_STARTUP_SCRIPT_NAME}:${_file}"
+
+    # MECHANISM 2 (EXPERIMENTAL, default OFF) — native restart persistence via
+    # --entrypoint (ADR-0017 / #247). Microsandbox's start_detached replays the
+    # persisted runtime.entrypoint/runtime.cmd on a native `msb start`/reboot, but
+    # NOT a bare --script-path-registered script. Designating the staged
+    # acq-startup script as the sandbox ENTRYPOINT therefore makes microsandbox
+    # replay it on a native restart WITHOUT going through the acq start/restart
+    # verb — closing the "raw msb start comes back bare" gap natively.
+    #
+    # WHY GATED OFF BY DEFAULT:
+    #   * --entrypoint OVERRIDES the image's own entrypoint/init. The default
+    #     image (docker.io/docker/sandbox-templates:shell-docker) relies on its
+    #     init/agentd; replacing it with a oneshot startup script could break the
+    #     guest's normal boot (and the acq-startup body currently ends after
+    #     emitting each command — as an entrypoint it may exit 0 immediately and
+    #     stop the VM inappropriately, OR need to exec the real init at its tail).
+    #   * The start_detached replay additionally depends on internal
+    #     launch_intent/init semantics that are UNCERTAIN on the pinned msb 0.6.7
+    #     (launch_intent is serde-skipped), so this path is UNVERIFIED and requires
+    #     LIVE verification on a KVM host before it can be trusted.
+    # When OFF (the default), restart durability is delivered deterministically by
+    # the acq `start`/`restart` verb + start-if-stopped-on-`acq run` (mechanism 1),
+    # which re-runs kit startup via the idempotent exec heal — no entrypoint
+    # override, no boot risk. Opt in with ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1 to
+    # exercise/verify the native path on a sandbox-capable host.
+    #
+    # ENTRYPOINT-vs-ONESHOT CONSIDERATION (validate live): the generated body must
+    # not exit-0 in a way that halts the VM if it is the entrypoint. The body is
+    # NOT hardened for that here — this increment only wires the flag behind the
+    # gate. Do NOT over-engineer the body until the native replay is confirmed live.
+    if [ -n "${ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT:-}" ]; then
+      eval "$_arrn+=(--entrypoint \"/.msb/scripts/${ACQ_MSB_STARTUP_SCRIPT_NAME}\")"
+      acq_debug "msb startup-script: EXPERIMENTAL --entrypoint /.msb/scripts/${ACQ_MSB_STARTUP_SCRIPT_NAME} (ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1; UNVERIFIED on 0.6.7)"
+    fi
   else
     # No startup commands in this kit — remove the empty temp file.
     rm -f "$_file" 2>/dev/null || true
@@ -1325,12 +1436,15 @@ acq_backend_provision() {
     [ "${#pp[@]}" -gt 0 ] && create_flags+=("${pp[@]}")
 
     # Startup-phase commands → a create-time `--script-path acq-startup:<file>`
-    # (ADR-0017, increment 1). Runtime-neutral: the script is REGISTERED at create
-    # but not yet invoked or wired into microsandbox's persisted startup (the
-    # follow-up increment). install + mid-life apply stay exec-based (see the
-    # DESIGN NOTE and _acq_msb_apply_kit_dir, which still applies startup via
-    # exec after create for now). Only the first kit with startup commands stakes
-    # the fixed script name this increment (see _acq_msb_stage_startup_script).
+    # (ADR-0017). The script is REGISTERED at create; a bare registration is
+    # runtime-neutral (staged on the guest PATH, not auto-run at start). Restart
+    # durability is delivered by the acq `start`/`restart` verb re-running startup
+    # via exec (mechanism 1, default), and OPTIONALLY by designating the script as
+    # `--entrypoint` for native replay (mechanism 2, gated behind
+    # ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1, default OFF — see
+    # _acq_msb_stage_startup_script). install + mid-life apply stay exec-based (see
+    # the DESIGN NOTE and _acq_msb_apply_kit_dir). Only the first kit with startup
+    # commands stakes the fixed script name (see _acq_msb_stage_startup_script).
     _acq_msb_stage_startup_script "$spec" create_flags
   done
 
@@ -2496,6 +2610,25 @@ acq_backend_apply_kit() {
 
 acq_backend_ensure_kits_applied() {
   local name="$1"
+  # START-IF-STOPPED (ADR-0017 / #247). This heal loop drives `msb exec` against
+  # the guest for every kit (feature-probe, file drops, startup re-run). Those
+  # exec calls FAIL against a STOPPED guest, so a stopped sandbox must be started
+  # BEFORE any healing. This is also what makes `acq run <stopped-sandbox>` work
+  # end-to-end: the dispatcher's `run` path (and the `start`/`restart` verb) call
+  # ensure_kits_applied BEFORE acq_backend_attach, and attach's own `msb exec`
+  # would likewise fail on a stopped guest — so starting here, at the TOP of the
+  # heal, covers both the heal and the subsequent attach with a single guarded
+  # start. Idempotent: an already-running sandbox is a harmless no-op (guarded by
+  # _acq_msb_is_running). acq_backend_start itself BLOCKS on exec-readiness before
+  # returning (see its definition — the S1 readiness fix), so we do not repeat the
+  # exec-ready wait here: the guest is booted and exec-ready by the time the resume
+  # returns. Starting is best-effort — a start/readiness failure emits a warning
+  # (from acq_backend_start) but does not abort the heal.
+  if ! _acq_msb_is_running "$name"; then
+    acq_debug "msb ensure_kits_applied: $name is stopped; starting before heal"
+    acq_backend_start "$name" >/dev/null 2>&1 || \
+      echo "acq(msb): warning: 'msb start $name' failed; healing may not apply." >&2
+  fi
   local kits=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT" "$GITSSHSIGN_KIT")
   local builtin_count="${#kits[@]}"
   if [ -n "${ACQ_EXTRA_KITS:-}" ]; then

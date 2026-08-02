@@ -103,6 +103,7 @@ case "${1:-}" in
     esac ;;
   run)  [ "${2:-}" = "--help" ] && printf 'SBX-RUN-HELP\n'; exit 0 ;;
   stop) exit 0 ;;
+  start) exit 0 ;;
   rm)   exit 0 ;;
   cp)   exit 0 ;;
   ports) exit 0 ;;
@@ -142,7 +143,17 @@ case "$_msb_sub" in
     # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
     [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
   list|ls)
-    [ -f "$STUBDIR/.msb_sandbox_list" ] && cat "$STUBDIR/.msb_sandbox_list" ;;
+    # `msb list --running -q` (running-state probe, ADR-0017 stopped detection):
+    # emit the RUNNING fixture if the caller asked for --running, else the full
+    # existence fixture. A test that wants a sandbox to appear STOPPED plants it
+    # in .msb_sandbox_list (exists) but NOT in .msb_running_list (not running).
+    _want_running=0
+    for a in "$@"; do [ "$a" = "--running" ] && _want_running=1; done
+    if [ "$_want_running" = "1" ]; then
+      [ -f "$STUBDIR/.msb_running_list" ] && cat "$STUBDIR/.msb_running_list"
+    else
+      [ -f "$STUBDIR/.msb_sandbox_list" ] && cat "$STUBDIR/.msb_sandbox_list"
+    fi ;;
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
@@ -188,7 +199,12 @@ case "$_msb_sub" in
         sleep "${STUB_MSB_SERVE_ALIVE:-0.6}" ;;
       *) : ;;
     esac ;;
-  stop) : ;;
+  stop)
+    # STUB_MSB_STOP_FAIL=1 models a `msb stop` that errors (e.g. the sandbox was
+    # already stopped) so the `acq restart` best-effort-bounce path (N1) can be
+    # exercised: the dispatcher must NOT abort and must still proceed to `start`.
+    [ "${STUB_MSB_STOP_FAIL:-0}" = "1" ] && exit 1 || : ;;
+  start) : ;;
   remove|rm) : ;;
   copy|cp) : ;;
   modify) : ;;
@@ -2487,6 +2503,231 @@ assert_contains "0017: named-user startup emits su <user> -c" "$named_body" "su 
 assert_contains "0017: named-user startup command body present" "$named_body" "echo NAMED_USER_MARKER"
 # Not routed through the agent runuser path (that is only for the uid-1000 case).
 assert_not_contains "0017: named-user startup not run as agent" "$named_body" "runuser -u agent"
+cleanup_stubs
+
+# ---------------------------------------------------------------------------
+# 8o1L–8o1R. ADR-0017 / #247 RESTART DURABILITY — acq start/restart verb,
+# acq_backend_start, start-if-stopped-on-attach, and gated --entrypoint (mech 2).
+# ---------------------------------------------------------------------------
+
+# 8o1L. acq_backend_start exists for BOTH backends and calls the right CLI.
+make_stubs; load_acq
+: > "$CALLS"
+( . "${REPO_ROOT}/acq.backends/msb.sh"; acq_backend_start msbstartbox >/dev/null 2>&1 )
+msb_start_log=$(cat "$CALLS")
+assert_contains "0017: msb acq_backend_start calls 'msb start NAME'" "$msb_start_log" "msb start msbstartbox"
+cleanup_stubs
+make_stubs; load_acq
+: > "$CALLS"
+( acq_backend_start sbxstartbox >/dev/null 2>&1 )   # sbx adapter already loaded by load_acq
+sbx_start_log=$(cat "$CALLS")
+assert_contains "0017: sbx acq_backend_start calls 'sbx start NAME'" "$sbx_start_log" "sbx start sbxstartbox"
+cleanup_stubs
+
+# 8o1M. `acq start NAME` (msb): calls `msb start NAME` AND re-drives the kit heal
+#        (the healing `msb exec` feature-probe/startup calls appear). The sandbox
+#        is RUNNING (present in the running fixture) so start-if-stopped is a
+#        no-op inside ensure_kits_applied and the heal's exec calls flow.
+#        S1 REGRESSION: acq_backend_start (called FIRST on the verb path) now
+#        BLOCKS on _acq_msb_wait_for_exec_ready — a `msb exec … echo ok` readiness
+#        probe — before returning, so the readiness probe MUST precede the first
+#        kit-heal `msb exec`. Without the S1 fix the heal exec would race the boot
+#        because ensure_kits_applied sees the sandbox already running and skips its
+#        own wait.
+make_stubs; load_acq
+printf 'startbox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'startbox\n' > "$STUBDIR/.msb_running_list"
+: > "$CALLS"
+out=$(ACQ_BACKEND=msb "$ACQ" start startbox 2>&1)
+start_log=$(cat "$CALLS")
+assert_contains "0017: acq start -> msb start NAME" "$start_log" "msb start startbox"
+# Heal re-drives kit apply => `msb exec` against the guest for the built-in kits.
+assert_contains "0017: acq start re-drives kit heal (msb exec)" "$start_log" "msb exec"
+assert_contains "0017: acq start prints a status line" "$out" "started 'startbox'"
+# S1 ordering: the readiness probe (`msb exec … echo ok` from acq_backend_start's
+# _acq_msb_wait_for_exec_ready) must precede the FIRST kit-heal exec. The probe
+# runs `sh -c 'echo ok'`; kit-heal exec calls carry other snippets, so the first
+# `msb exec` line overall is the readiness probe on the verb path.
+_probe_ln=$(printf '%s\n' "$start_log" | grep -n "msb exec startbox -- sh -c echo ok" | head -n1 | cut -d: -f1)
+_firstexec_ln=$(printf '%s\n' "$start_log" | grep -n "msb exec" | head -n1 | cut -d: -f1)
+if [ -n "$_probe_ln" ] && [ -n "$_firstexec_ln" ] && [ "$_probe_ln" -le "$_firstexec_ln" ]; then
+  pass "0017 S1: start-verb readiness probe precedes first heal exec"
+else
+  fail "0017 S1: start-verb readiness probe precedes first heal exec" "probe=$_probe_ln first_exec=$_firstexec_ln"
+fi
+cleanup_stubs
+
+# 8o1N. `acq restart NAME` (msb): stop, THEN start, THEN heal — in that order.
+make_stubs; load_acq
+printf 'restartbox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'restartbox\n' > "$STUBDIR/.msb_running_list"
+: > "$CALLS"
+out=$(ACQ_BACKEND=msb "$ACQ" restart restartbox 2>&1)
+restart_log=$(cat "$CALLS")
+assert_contains "0017: acq restart calls msb stop NAME" "$restart_log" "msb stop restartbox"
+assert_contains "0017: acq restart calls msb start NAME" "$restart_log" "msb start restartbox"
+assert_contains "0017: acq restart re-drives kit heal (msb exec)" "$restart_log" "msb exec"
+# Ordering: stop precedes start precedes the first heal exec.
+_stop_ln=$(printf '%s\n' "$restart_log" | grep -n "msb stop restartbox" | head -n1 | cut -d: -f1)
+_start_ln=$(printf '%s\n' "$restart_log" | grep -n "msb start restartbox" | head -n1 | cut -d: -f1)
+_exec_ln=$(printf '%s\n' "$restart_log" | grep -n "msb exec" | head -n1 | cut -d: -f1)
+if [ -n "$_stop_ln" ] && [ -n "$_start_ln" ] && [ -n "$_exec_ln" ] \
+   && [ "$_stop_ln" -lt "$_start_ln" ] && [ "$_start_ln" -lt "$_exec_ln" ]; then
+  pass "0017: acq restart order is stop < start < heal-exec"
+else
+  fail "0017: acq restart order is stop < start < heal-exec" "stop=$_stop_ln start=$_start_ln exec=$_exec_ln"
+fi
+cleanup_stubs
+
+# 8o1O. Dispatcher guards: `acq start` / `acq restart` with NO name error + exit
+#        nonzero (like the stop arm).
+make_stubs; load_acq
+out=$(ACQ_BACKEND=msb "$ACQ" start 2>&1); rc=$?
+assert_contains "0017: acq start missing name errors" "$out" "start: missing sandbox name"
+if [ "$rc" -ne 0 ]; then pass "0017: acq start missing name exits nonzero"; else fail "0017: acq start missing name exits nonzero" "rc=$rc"; fi
+cleanup_stubs
+make_stubs; load_acq
+out=$(ACQ_BACKEND=msb "$ACQ" restart 2>&1); rc=$?
+assert_contains "0017: acq restart missing name errors" "$out" "restart: missing sandbox name"
+if [ "$rc" -ne 0 ]; then pass "0017: acq restart missing name exits nonzero"; else fail "0017: acq restart missing name exits nonzero" "rc=$rc"; fi
+cleanup_stubs
+
+# 8o1P. START-IF-STOPPED (the `acq run <stopped-sandbox>` path). A sandbox that
+#        EXISTS but is NOT running must be started by ensure_kits_applied BEFORE
+#        any healing `msb exec` (which would fail against a stopped guest) — and
+#        thus before attach. Assert `msb start` precedes the first heal `msb exec`.
+make_stubs; load_acq
+printf 'stoppedbox\n' > "$STUBDIR/.msb_sandbox_list"   # exists
+: > "$STUBDIR/.msb_running_list"                        # but NOT running
+: > "$CALLS"
+( . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ensure_kits_applied stoppedbox >/dev/null 2>&1 )
+stopped_log=$(cat "$CALLS")
+assert_contains "0017: stopped sandbox is started during heal" "$stopped_log" "msb start stoppedbox"
+_pstart_ln=$(printf '%s\n' "$stopped_log" | grep -n "msb start stoppedbox" | head -n1 | cut -d: -f1)
+_pexec_ln=$(printf '%s\n' "$stopped_log" | grep -n "msb exec" | head -n1 | cut -d: -f1)
+if [ -n "$_pstart_ln" ] && [ -n "$_pexec_ln" ] && [ "$_pstart_ln" -lt "$_pexec_ln" ]; then
+  pass "0017: msb start precedes the first heal exec (stopped sandbox)"
+else
+  fail "0017: msb start precedes the first heal exec (stopped sandbox)" "start=$_pstart_ln exec=$_pexec_ln"
+fi
+cleanup_stubs
+
+# 8o1Q. START-IF-RUNNING no-op: a RUNNING sandbox is NOT re-started during heal
+#        (idempotent — no wasted `msb start`).
+make_stubs; load_acq
+printf 'livebox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'livebox\n' > "$STUBDIR/.msb_running_list"
+: > "$CALLS"
+( . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ensure_kits_applied livebox >/dev/null 2>&1 )
+live_log=$(cat "$CALLS")
+assert_not_contains "0017: running sandbox not re-started during heal" "$live_log" "msb start livebox"
+cleanup_stubs
+
+# 8o1R. MECHANISM 2 GATING: provisioning a kit WITH a startup command does NOT
+#        add `--entrypoint /.msb/scripts/acq-startup` by default; with
+#        ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1 it DOES (both asserted on $CALLS).
+_ep_kit_spec() {
+  cat <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: ep-kit
+displayName: EP Kit
+description: one startup command to drive the entrypoint gate
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - echo EP_MARKER
+SPEC
+}
+# Default OFF.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ep-off-secrets"
+  export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/ep-off-stage"
+  unset ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT 2>/dev/null || true
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  epk="$STUBDIR/epkit"; mkdir -p "$epk"; _ep_kit_spec > "$epk/spec.yaml"
+  _acq_msb_fetch_kit() { printf '%s\n' "$epk"; }
+  acq_backend_provision epoffbox shell /tmp >/dev/null 2>&1
+)
+ep_off_log=$(cat "$CALLS")
+assert_contains "0017 mech2: startup still staged via --script-path (default)" "$ep_off_log" "--script-path acq-startup:"
+assert_not_contains "0017 mech2: NO --entrypoint by default (safe-by-default)" "$ep_off_log" "--entrypoint /.msb/scripts/acq-startup"
+cleanup_stubs
+# Opt-in ON.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ep-on-secrets"
+  export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/ep-on-stage"
+  export ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  epk="$STUBDIR/epkit"; mkdir -p "$epk"; _ep_kit_spec > "$epk/spec.yaml"
+  _acq_msb_fetch_kit() { printf '%s\n' "$epk"; }
+  acq_backend_provision eponbox shell /tmp >/dev/null 2>&1
+)
+ep_on_log=$(cat "$CALLS")
+assert_contains "0017 mech2: --entrypoint added when opt-in enabled" "$ep_on_log" "--entrypoint /.msb/scripts/acq-startup"
+cleanup_stubs
+unset -f _ep_kit_spec
+
+# 8o1S. Dispatch: `acq --backend msb start mybox` calls `msb start` (verb wired).
+make_stubs
+printf 'mybox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'mybox\n' > "$STUBDIR/.msb_running_list"
+out=$(ACQ_BACKEND=msb "$ACQ" start mybox 2>/dev/null)
+log=$(cat "$CALLS")
+assert_contains "msb: start -> msb start" "$log" "msb start mybox"
+cleanup_stubs
+
+# 8o1T. N1 — restart is a BEST-EFFORT bounce: when `msb stop` FAILS, the dispatcher
+#        (under `set -euo pipefail`) must NOT abort — it must still proceed to
+#        `msb start` and the heal. STUB_MSB_STOP_FAIL=1 makes the stub's stop arm
+#        exit 1; assert both the "attempting start anyway" notice and that
+#        `msb start` still appears in the recorded calls.
+make_stubs; load_acq
+printf 'bouncebox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'bouncebox\n' > "$STUBDIR/.msb_running_list"
+: > "$CALLS"
+out=$(STUB_MSB_STOP_FAIL=1 ACQ_BACKEND=msb "$ACQ" restart bouncebox 2>&1); rc=$?
+bounce_log=$(cat "$CALLS")
+assert_contains "0017 N1: restart calls msb stop even when it fails" "$bounce_log" "msb stop bouncebox"
+assert_contains "0017 N1: restart proceeds to msb start after stop failure" "$bounce_log" "msb start bouncebox"
+assert_contains "0017 N1: restart warns it is attempting start anyway" "$out" "stop failed; attempting start anyway"
+if [ "$rc" -eq 0 ]; then pass "0017 N1: restart does not abort on stop failure"; else fail "0017 N1: restart does not abort on stop failure" "rc=$rc"; fi
+cleanup_stubs
+
+# 8o1U. N2b — "backend does not support start/restart" guard. Both adapters define
+#        acq_backend_start today, so the dispatcher-level `command -v
+#        acq_backend_start` guard is future-adapter-only. Exercise it directly by
+#        running the SAME guard-then-message logic the dispatcher uses, in a
+#        subshell where acq_backend_start is undefined. This asserts the guard's
+#        contract (clear "does not support" message + nonzero exit) without
+#        contorting the harness to force an adapter to omit the function.
+make_stubs; load_acq
+guard_out=$(
+  {
+    unset -f acq_backend_start 2>/dev/null || true
+    ACQ_RESOLVED_BACKEND=faux
+    if ! command -v acq_backend_start >/dev/null 2>&1; then
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support start" >&2
+      echo "     (acq_backend_start). Start the sandbox manually, then re-run." >&2
+      exit 1
+    fi
+    exit 0
+  } 2>&1
+)
+guard_rc=$?
+assert_contains "0017 N2b: unsupported-backend guard emits clear message" "$guard_out" "does not support start"
+if [ "$guard_rc" -ne 0 ]; then pass "0017 N2b: unsupported-backend guard exits nonzero"; else fail "0017 N2b: unsupported-backend guard exits nonzero" "rc=$guard_rc"; fi
 cleanup_stubs
 
 # 8o2. SECURITY: a hostile kit `mode` must not reach a root shell. kit_spec_files
