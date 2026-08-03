@@ -603,27 +603,26 @@ _acq_msb_wait_for_exec_ready() {
 # implements BOTH the create-time startup-script staging AND the restart-durable
 # behavior that consumes it:
 #
-#   * MECHANISM 1 (deterministic, DEFAULT): the acq `start`/`restart` verb calls
-#     acq_backend_start (`msb start`) then re-drives acq_backend_ensure_kits_applied,
-#     which re-applies the pinned kits idempotently and RE-RUNS the startup phase
-#     via `msb exec` — restoring kit `startup`/`background` services on resume. A
-#     stopped sandbox is also started automatically at the TOP of
-#     ensure_kits_applied, so `acq run <stopped-sandbox>` heals then attaches. This
-#     is the deterministic path and needs no native persistence.
+#   * The acq `start`/`restart` verb calls acq_backend_start (`msb start`) then
+#     re-drives acq_backend_ensure_kits_applied, which re-applies the pinned kits
+#     idempotently and RE-RUNS the startup phase via `msb exec` — restoring kit
+#     `startup`/`background` services on resume. A stopped sandbox is also started
+#     automatically at the TOP of ensure_kits_applied, so `acq run
+#     <stopped-sandbox>` heals then attaches. This is the deterministic path and
+#     needs no native persistence.
 #
-#   * MECHANISM 2 (experimental, OPT-IN via ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1):
-#     the staged acq-startup script is ALSO designated `--entrypoint
-#     /.msb/scripts/acq-startup` at create, so microsandbox's start_detached
-#     replays it on a NATIVE `msb start`/reboot (outside acq). This OVERRIDES the
-#     image entrypoint and depends on 0.6.7 launch_intent/init semantics that are
-#     UNVERIFIED, so it is DEFAULT OFF and requires live verification on a KVM host
-#     (see _acq_msb_stage_startup_script). When off, mechanism 1 provides restart
-#     durability with no boot risk.
+# A native `msb start` OUTSIDE acq is intentionally NOT supported: microsandbox's
+# start_detached replays only runtime.entrypoint/runtime.cmd (not the
+# --script-path-registered script), AND — more fundamentally — `msb start`
+# requires the sandbox's `--secret ENV@HOST` host env vars to be present, which
+# only acq injects (see acq_backend_start). So a raw `msb start` of a
+# secret-bound sandbox fails before any startup question arises. Always resume
+# via `acq start`/`acq restart`.
 #
-# The `--script-path` registration itself remains runtime-neutral: a bare
-# registration only stages the body on the guest PATH (/.msb/scripts/acq-startup);
-# microsandbox does not auto-run it at start unless it is enrolled as the
-# entrypoint (mechanism 2). install + mid-life apply stay exec-based.
+# The `--script-path` registration itself is runtime-neutral: it only stages the
+# body on the guest PATH (/.msb/scripts/acq-startup) so a kit author or the exec
+# heal can invoke it by name; microsandbox does not auto-run it at start.
+# install + mid-life apply stay exec-based.
 
 # Fetch a kit ref into the cache and echo its local dir. Returns 1 on failure.
 _acq_msb_fetch_kit() {
@@ -1138,8 +1137,7 @@ _acq_msb_exec_command() {
 # for the boundary: only the `startup` phase is staged here; install and mid-life
 # apply stay exec-based. A bare `--script-path` registration is runtime-neutral
 # (staged on the guest PATH, not auto-run at boot); the acq `start`/`restart`
-# verb re-runs startup via exec (mechanism 1), and the optional gated
-# `--entrypoint` designation (mechanism 2) makes microsandbox replay it natively.
+# verb re-runs startup via the exec heal.
 #
 # TRANSLATION from the exec path to an IN-GUEST script:
 #   - The exec path picks run-as-user via `msb exec -u agent`/`-u <user>`. Inside
@@ -1393,14 +1391,18 @@ _acq_msb_generate_startup_script() {
 # /.msb/scripts/acq-startup) — it does NOT enroll the script in microsandbox's
 # persisted startup, so microsandbox does NOT auto-run it at guest boot. This was
 # confirmed against microsandbox source: `crates/cli/lib/commands/start.rs` and
-# `restart.rs` re-run a persisted `LaunchConfig.startup` on
-# `Sandbox::start_detached()`, and acq never populates `LaunchConfig.startup`.
-# Only an explicit startup registration is replayed at boot; a plain
-# `--script-path` registration is not. This is what makes increment 1
-# runtime-neutral: the script is present but inert. Enrolling it in the persisted
-# startup (so it replays on a native restart) is the follow-up increment's job.
+# `restart.rs` re-run a persisted startup command derived from
+# runtime.entrypoint/runtime.cmd on `Sandbox::start_detached()`, NOT from
+# runtime.scripts. So a bare `--script-path` registration is present but inert at
+# boot. Restart durability is therefore provided by the acq `start`/`restart`
+# verb + start-if-stopped-on-`acq run`, which re-runs the startup phase via the
+# exec heal (the deterministic mechanism). A native `msb start` OUTSIDE acq
+# cannot re-run startup on its own — and, more fundamentally, cannot even boot a
+# secret-bound sandbox, because `msb start` requires the `--secret` host env vars
+# that only acq injects (see acq_backend_start). Native-restart-outside-acq is
+# therefore out of scope by construction; go through `acq start`/`acq restart`.
 #
-# This assumption is load-bearing and unverifiable from this repo, so it MUST be
+# This inertness is load-bearing and unverifiable from this repo, so it MUST be
 # re-verified on each msb version bump — if a future msb auto-runs a registered
 # `--script-path` at boot, kit startup would double-run (boot replay + acq heal).
 # See docs/KNOWN_FAILURE_MODES.md ("msb May Auto-Run a --script-path-Registered
@@ -1436,40 +1438,6 @@ _acq_msb_stage_startup_script() {
     _ACQ_MSB_STARTUP_STAGE_FILES+=("$_file")
     _ACQ_MSB_STARTUP_STAGED=1
     acq_debug "msb startup-script staged: --script-path ${ACQ_MSB_STARTUP_SCRIPT_NAME}:${_file}"
-
-    # MECHANISM 2 (EXPERIMENTAL, default OFF) — native restart persistence via
-    # --entrypoint (ADR-0017 / #247). Microsandbox's start_detached replays the
-    # persisted runtime.entrypoint/runtime.cmd on a native `msb start`/reboot, but
-    # NOT a bare --script-path-registered script. Designating the staged
-    # acq-startup script as the sandbox ENTRYPOINT therefore makes microsandbox
-    # replay it on a native restart WITHOUT going through the acq start/restart
-    # verb — closing the "raw msb start comes back bare" gap natively.
-    #
-    # WHY GATED OFF BY DEFAULT:
-    #   * --entrypoint OVERRIDES the image's own entrypoint/init. The default
-    #     image (docker.io/docker/sandbox-templates:shell-docker) relies on its
-    #     init/agentd; replacing it with a oneshot startup script could break the
-    #     guest's normal boot (and the acq-startup body currently ends after
-    #     emitting each command — as an entrypoint it may exit 0 immediately and
-    #     stop the VM inappropriately, OR need to exec the real init at its tail).
-    #   * The start_detached replay additionally depends on internal
-    #     launch_intent/init semantics that are UNCERTAIN on the pinned msb 0.6.7
-    #     (launch_intent is serde-skipped), so this path is UNVERIFIED and requires
-    #     LIVE verification on a KVM host before it can be trusted.
-    # When OFF (the default), restart durability is delivered deterministically by
-    # the acq `start`/`restart` verb + start-if-stopped-on-`acq run` (mechanism 1),
-    # which re-runs kit startup via the idempotent exec heal — no entrypoint
-    # override, no boot risk. Opt in with ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1 to
-    # exercise/verify the native path on a sandbox-capable host.
-    #
-    # ENTRYPOINT-vs-ONESHOT CONSIDERATION (validate live): the generated body must
-    # not exit-0 in a way that halts the VM if it is the entrypoint. The body is
-    # NOT hardened for that here — this increment only wires the flag behind the
-    # gate. Do NOT over-engineer the body until the native replay is confirmed live.
-    if [ -n "${ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT:-}" ]; then
-      eval "$_arrn+=(--entrypoint \"/.msb/scripts/${ACQ_MSB_STARTUP_SCRIPT_NAME}\")"
-      acq_debug "msb startup-script: EXPERIMENTAL --entrypoint /.msb/scripts/${ACQ_MSB_STARTUP_SCRIPT_NAME} (ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1; UNVERIFIED on 0.6.7)"
-    fi
   else
     # No startup commands in this kit — remove the empty temp file.
     rm -f "$_file" 2>/dev/null || true
@@ -1558,12 +1526,9 @@ acq_backend_provision() {
     # (ADR-0017). The script is REGISTERED at create; a bare registration is
     # runtime-neutral (staged on the guest PATH, not auto-run at start). Restart
     # durability is delivered by the acq `start`/`restart` verb re-running startup
-    # via exec (mechanism 1, default), and OPTIONALLY by designating the script as
-    # `--entrypoint` for native replay (mechanism 2, gated behind
-    # ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1, default OFF — see
-    # _acq_msb_stage_startup_script). install + mid-life apply stay exec-based (see
-    # the DESIGN NOTE and _acq_msb_apply_kit_dir). Only the first kit with startup
-    # commands stakes the fixed script name (see _acq_msb_stage_startup_script).
+    # via the exec heal. install + mid-life apply stay exec-based (see the DESIGN
+    # NOTE and _acq_msb_apply_kit_dir). Only the first kit with startup commands
+    # stakes the fixed script name (see _acq_msb_stage_startup_script).
     _acq_msb_stage_startup_script "$spec" create_flags
   done
 

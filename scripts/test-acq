@@ -2514,7 +2514,7 @@ cleanup_stubs
 
 # ---------------------------------------------------------------------------
 # 8o1L–8o1R. ADR-0017 / #247 RESTART DURABILITY — acq start/restart verb,
-# acq_backend_start, start-if-stopped-on-attach, and gated --entrypoint (mech 2).
+# acq_backend_start, start-if-stopped-on-attach, and startup staging.
 # ---------------------------------------------------------------------------
 
 # 8o1L. acq_backend_start exists for BOTH backends and calls the right CLI.
@@ -2632,16 +2632,22 @@ live_log=$(cat "$CALLS")
 assert_not_contains "0017: running sandbox not re-started during heal" "$live_log" "msb start livebox"
 cleanup_stubs
 
-# 8o1R. MECHANISM 2 GATING: provisioning a kit WITH a startup command does NOT
-#        add `--entrypoint /.msb/scripts/acq-startup` by default; with
-#        ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1 it DOES (both asserted on $CALLS).
+# 8o1R. NO NATIVE-ENTRYPOINT PERSISTENCE: provisioning a kit WITH a startup
+#        command stages the script via `--script-path` but MUST NOT designate it
+#        as `--entrypoint`. A native `msb start` outside acq cannot re-run startup
+#        (start_detached replays only runtime.entrypoint/cmd) AND cannot even boot
+#        a secret-bound sandbox (msb start needs the --secret host env vars only
+#        acq injects), so native-restart-outside-acq is out of scope; restart
+#        durability is delivered solely by the acq start/restart verb. The
+#        ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT knob was removed; setting it must have
+#        NO effect.
 _ep_kit_spec() {
   cat <<'SPEC'
 schemaVersion: "hybrid/v1"
 kind: mixin
 name: ep-kit
 displayName: EP Kit
-description: one startup command to drive the entrypoint gate
+description: one startup command
 commands:
   - phase: startup
     user: "0"
@@ -2651,13 +2657,13 @@ commands:
       - echo EP_MARKER
 SPEC
 }
-# Default OFF.
 make_stubs; load_acq
 : > "$CALLS"
 (
   export ACQ_SECRET_STORE_DIR="$STUBDIR/ep-off-secrets"
   export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/ep-off-stage"
-  unset ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT 2>/dev/null || true
+  # Even with the removed knob set, no --entrypoint may appear.
+  export ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1
   . "${REPO_ROOT}/acq.backends/secret-store.sh"
   . "${REPO_ROOT}/acq.backends/msb.sh"
   epk="$STUBDIR/epkit"; mkdir -p "$epk"; _ep_kit_spec > "$epk/spec.yaml"
@@ -2665,24 +2671,9 @@ make_stubs; load_acq
   acq_backend_provision epoffbox shell /tmp >/dev/null 2>&1
 )
 ep_off_log=$(cat "$CALLS")
-assert_contains "0017 mech2: startup still staged via --script-path (default)" "$ep_off_log" "--script-path acq-startup:"
-assert_not_contains "0017 mech2: NO --entrypoint by default (safe-by-default)" "$ep_off_log" "--entrypoint /.msb/scripts/acq-startup"
-cleanup_stubs
-# Opt-in ON.
-make_stubs; load_acq
-: > "$CALLS"
-(
-  export ACQ_SECRET_STORE_DIR="$STUBDIR/ep-on-secrets"
-  export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/ep-on-stage"
-  export ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1
-  . "${REPO_ROOT}/acq.backends/secret-store.sh"
-  . "${REPO_ROOT}/acq.backends/msb.sh"
-  epk="$STUBDIR/epkit"; mkdir -p "$epk"; _ep_kit_spec > "$epk/spec.yaml"
-  _acq_msb_fetch_kit() { printf '%s\n' "$epk"; }
-  acq_backend_provision eponbox shell /tmp >/dev/null 2>&1
-)
-ep_on_log=$(cat "$CALLS")
-assert_contains "0017 mech2: --entrypoint added when opt-in enabled" "$ep_on_log" "--entrypoint /.msb/scripts/acq-startup"
+assert_contains "0017: startup staged via --script-path" "$ep_off_log" "--script-path acq-startup:"
+assert_not_contains "0017: never designates the startup script as --entrypoint" "$ep_off_log" "--entrypoint /.msb/scripts/acq-startup"
+assert_not_contains "0017: removed ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT knob has no effect" "$ep_off_log" "--entrypoint"
 cleanup_stubs
 unset -f _ep_kit_spec
 
