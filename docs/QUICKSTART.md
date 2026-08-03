@@ -3,7 +3,7 @@ title: "acq Backend Quickstart"
 description: "Get running with acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-07-15"
+last_updated: "2026-08-03"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "quickstart", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -13,11 +13,10 @@ review_cycle: "quarterly"
 
 # acq Backend Quickstart
 
-> **`acq` is the recommended entry point.** It replaces the deprecated `qsbx`
-> and adds a pluggable-backend architecture. As of 1.2.0 it supports two
-> backends — **sbx** (Docker Sandboxes) and **msb** (microsandbox) — sharing one
-> neutral kit vocabulary. Migration from `qsbx` is seamless: replace `./qsbx`
-> with `./acq` — the commands are identical on the sbx backend.
+> **`acq` is the entry point.** It provides a pluggable-backend architecture
+> supporting two backends — **msb** (microsandbox, the default) and **sbx**
+> (Docker Sandboxes) — sharing one neutral kit vocabulary. Install a backend and
+> `acq` runs the same commands on either one.
 
 ---
 
@@ -28,18 +27,23 @@ once (install one, and it auto-detects). Pick the one that fits your environment
 
 | Backend | Install | Fits when |
 |---------|---------|-----------|
-| **sbx** | `brew install docker/tap/sbx && sbx login` | You have Docker and want the commercial product |
 | **msb** | `curl -fsSL https://install.microsandbox.dev \| sh` | You want a FOSS microVM runtime, no Docker seat, snapshots |
+| **sbx** | `brew install docker/tap/sbx && sbx login` | You have Docker and want the commercial product |
 
 See [docs/BACKEND_GUIDE.md](BACKEND_GUIDE.md) for a full comparison. `acq`
-auto-detects an installed backend (sbx preferred when both are present); persist
+auto-detects an installed backend (msb preferred when both are present); persist
 a choice with `acq backend set <sbx|msb>` or `acq doctor`.
 
 ---
 
-## Quick Start (sbx backend)
+## Quick Start
 
-### Step 1: Prerequisites
+> **msb is the default backend.** If you have msb installed, see
+> [Running on the msb backend](#running-on-the-msb-backend) below. The steps in
+> this section walk the **sbx** path; the common commands, secrets, and rotation
+> subsections apply to either backend.
+
+### Step 1: Prerequisites (sbx)
 
 Complete the standard setup in [README.md](../README.md#5-minute-quickstart):
 
@@ -101,18 +105,18 @@ kits, validates your USAi key, and attaches the agent.
 1. `--backend <name>` flag (per-invocation override)
 2. `ACQ_BACKEND` environment variable
 3. `backend:` in `~/.config/acq/config.yaml`
-4. Auto-detect: first installed backend found
+4. Auto-detect: first installed backend found (msb preferred, then sbx)
 
-**Today (1.2.x), two backends ship: `sbx` and `msb`.** See
+**Today (1.2.x), two backends ship: `msb` (default) and `sbx`.** See
 [docs/BACKEND_GUIDE.md](BACKEND_GUIDE.md) for per-backend details. A third
 backend (`ppp` — Podman-Plus-Proxy) is deferred.
 
 ### Persist the default backend
 
 ```bash
-# Write `backend: sbx` (or msb) to ~/.config/acq/config.yaml
-./acq backend set sbx
+# Write `backend: msb` (or sbx) to ~/.config/acq/config.yaml
 ./acq backend set msb
+./acq backend set sbx
 
 # Or run doctor and answer the prompt
 ./acq doctor
@@ -177,24 +181,6 @@ files are kept). Skip the automatic check with `ACQ_UPDATE_CHECK=0` or
 
 See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md) for the full
 design and trust model.
-
----
-
-## Migration from qsbx
-
-`qsbx` is deprecated as of 1.1.0 and is slated for removal in 3.0.0. Migration is
-**fully backward-compatible**: replace `./qsbx` with `./acq` in all commands.
-
-| Old command | New command | Notes |
-|-------------|-------------|-------|
-| `./qsbx run opencode /proj` | `./acq run opencode /proj` | Identical semantics |
-| `./qsbx create opencode /proj` | `./acq create opencode /proj` | Identical |
-| `./qsbx ls` | `./acq ls` | Identical |
-| `./qsbx usai-rotate-api-key` | `./acq usai-rotate-api-key` | Identical |
-| `./qsbx version` | `./acq version` | Shows backend info too |
-
-`QSBX_EXTRA_KITS` and `QSBX_EXTRA_KIT_SOURCES` are now `ACQ_EXTRA_KITS` and
-`ACQ_EXTRA_KIT_SOURCES`. The `QSBX_*` vars are not read by `acq`.
 
 ---
 

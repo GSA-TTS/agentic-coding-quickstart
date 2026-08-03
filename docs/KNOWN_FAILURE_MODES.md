@@ -830,11 +830,11 @@ preserves the placeholder, so this resolves the common expired-key case:
 
 > **Note (stale-placeholder recovery).** The deeper two-route recovery for this
 > exact 401-after-delete-and-re-add case — session-preserving recreate, or a
-> non-destructive sandbox-scoped rebind to the current global placeholder — is a
-> `qsbx`-only feature (see [ADR-0008](adr/0008-usai-placeholder-recovery.md)) and
-> is **not yet ported to `acq`**. On `acq`, if an in-place rotate does not clear
-> the 401 (because the stored *placeholder* — not the key value — is stale), use
-> the manual rebind below or recreate the sandbox.
+> non-destructive sandbox-scoped rebind to the current global placeholder — is
+> **not implemented in `acq`** (see [ADR-0008](adr/0008-usai-placeholder-recovery.md)
+> for the design). If an in-place rotate does not clear the 401 (because the
+> stored *placeholder* — not the key value — is stale), use the manual rebind
+> below or recreate the sandbox.
 
 ### Fix (manual)
 
