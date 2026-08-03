@@ -2804,13 +2804,9 @@ printf 'customstartbox\n' > "$STUBDIR/.msb_running_list"
   acq_secret_meta_store mysvc "" "api.example.gov" "MYCUSTOM_TOKEN"
   printf 'CUSTOM-REAL-VALUE\n' | acq_secret_store "$(_acq_secret_key mysvc)"
   . "${REPO_ROOT}/acq.backends/msb.sh"
-  # The generic-endpoint start arm reports presence for arbitrary bound env vars
-  # only if the stub is taught them; instead assert via a wrapper that records the
-  # exported var. Simplest: have acq_backend_start run, and check the value did
-  # NOT leak while the binding flag set was derived. Presence is proven by the
-  # custom env being exported into msb start's environment (captured below).
-  MYCUSTOM_TOKEN_SEEN=""
-  # Shadow msb to capture the custom env var at the moment of `start`.
+  # Prove the custom-endpoint value is re-exported before `msb start`: shadow msb
+  # to record a marker when MYCUSTOM_TOKEN is present in the environment at the
+  # moment of `start`, then delegate to the real stub.
   msb() { if [ "${1:-}" = "start" ] && [ -n "${MYCUSTOM_TOKEN:-}" ]; then printf 'MYCUSTOM_TOKEN=present\n' >>"$CALLS"; fi; command "$STUBDIR/msb" "$@"; }
   acq_backend_start customstartbox >/dev/null 2>&1
 )
