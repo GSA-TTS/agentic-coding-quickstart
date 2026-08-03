@@ -454,6 +454,47 @@ assert_not_contains "dispatch: create silent on valid USAi key" "$out" "invalid 
 rm -rf "$_keyproj"
 cleanup_stubs
 
+# `acq run` GATES on the USAi key (ensure_valid_key): a non-200 aborts attach
+# unless the user sets/rotates. The message distinguishes "never set" from
+# "expired", and declining (empty answer on the [y/N] prompt) aborts in both
+# cases. Drive the stub's key status via STUB_KEY_STATUS and decline by feeding
+# an empty line on stdin. Bare workspace (no git remote) keeps the github
+# advisory quiet.
+
+# 3k1. No usai secret stored + bad status -> "no USAi API key is set" + "Set it
+#      now"; declining aborts the run (non-zero).
+make_stubs
+_keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
+out=$(printf '\n' | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
+assert_contains "run: never-set key names the setup case" "$out" "No USAi API key is set"
+assert_contains "run: never-set key prompts to set" "$out" "Set it now"
+assert_not_contains "run: never-set key does NOT say expired" "$out" "invalid or expired"
+assert_eq "run: never-set + decline aborts attach" "1" "$rc"
+rm -rf "$_keyrun"
+cleanup_stubs
+
+# 3k2. usai secret PRESENT + bad status -> "invalid or expired" + "Rotate now"
+#      (regression: the set-but-rejected wording is unchanged); declining aborts.
+make_stubs
+_keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+out=$(printf '\n' | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
+assert_contains "run: expired key names the rotate case" "$out" "invalid or expired"
+assert_contains "run: expired key prompts to rotate" "$out" "Rotate now"
+assert_not_contains "run: expired key does NOT say 'no USAi API key'" "$out" "No USAi API key is set"
+assert_eq "run: expired + decline aborts attach" "1" "$rc"
+rm -rf "$_keyrun"
+cleanup_stubs
+
+# 3k3. Healthy status attaches regardless of store state (no gate message).
+make_stubs
+_keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
+out=$(STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
+assert_not_contains "run: healthy key -> no gate message" "$out" "Aborting attach"
+assert_eq "run: healthy key attaches" "0" "$rc"
+rm -rf "$_keyrun"
+cleanup_stubs
+
 # Verify `acq stop mybox` calls sbx stop.
 make_stubs
 out=$(ACQ_BACKEND=sbx "$ACQ" stop mybox 2>/dev/null)

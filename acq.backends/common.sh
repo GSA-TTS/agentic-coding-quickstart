@@ -1109,35 +1109,53 @@ ensure_valid_key() {
     return 0
   fi
 
+  # Distinguish "no key stored yet" (first-time setup) from "key present but
+  # rejected" (expired/invalid), so the guidance and prompt match reality. If
+  # the store helper isn't loaded, assume a key is present so wording never
+  # regresses to the wrong direction.
+  local have_key=1
+  if command -v acq_secret_has >/dev/null 2>&1; then
+    acq_secret_has usai "$name" || have_key=0
+  fi
+
   echo >&2
-  echo "Your USAi API key looks invalid or expired (HTTP $status from the models API)." >&2
-  echo "USAi keys expire every 7 days." >&2
-  echo >&2
-  echo "To rotate it:" >&2
-  echo "  1. Open $KEY_MGMT_URL" >&2
-  echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
-  echo "  3. Copy the new key using the console copy button" >&2
+  if [ "$have_key" -eq 0 ]; then
+    echo "No USAi API key is set for '$name' (HTTP $status from the models API)." >&2
+    echo "USAi keys are created at $KEY_MGMT_URL and expire every 7 days." >&2
+    echo >&2
+    echo "To set one:" >&2
+    echo "  1. Open $KEY_MGMT_URL" >&2
+    echo "  2. Create a key (or copy an existing one) with the console copy button" >&2
+  else
+    echo "Your USAi API key looks invalid or expired (HTTP $status from the models API)." >&2
+    echo "USAi keys expire every 7 days." >&2
+    echo >&2
+    echo "To rotate it:" >&2
+    echo "  1. Open $KEY_MGMT_URL" >&2
+    echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
+    echo "  3. Copy the new key using the console copy button" >&2
+  fi
   echo >&2
 
-  local rotate_via_backend=1
   if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
-    rotate_via_backend=0
-    echo "The '${ACQ_RESOLVED_BACKEND:-active}' backend does not implement key rotation." >&2
-    echo "Rotate manually, then re-run." >&2
+    echo "The '${ACQ_RESOLVED_BACKEND:-active}' backend does not implement key setup." >&2
+    echo "Set the key manually, then re-run." >&2
     return 1
   fi
 
-  printf 'Have the new key ready to paste? Rotate now? [y/N] ' >&2
   local answer=""
+  if [ "$have_key" -eq 0 ]; then
+    printf 'Have your USAi key ready to paste? Set it now? [y/N] ' >&2
+  else
+    printf 'Have the new key ready to paste? Rotate now? [y/N] ' >&2
+  fi
   read -r answer || true
   case "$answer" in
     [yY]|[yY][eE][sS])
-      if [ "$rotate_via_backend" -eq 1 ]; then
-        acq_backend_rotate_key || {
-          echo "Rotation did not complete. Aborting attach." >&2
-          return 1
-        }
-      fi
+      acq_backend_rotate_key || {
+        echo "Key setup did not complete. Aborting attach." >&2
+        return 1
+      }
       status=$(check_key "$name")
       if [ "$status" = "200" ]; then
         echo "Key validated. Continuing." >&2
@@ -1147,7 +1165,7 @@ ensure_valid_key() {
       return 1
       ;;
     *)
-      echo "Skipping rotation. Aborting attach; re-run when your key is rotated." >&2
+      echo "Skipping. Aborting attach; re-run when your USAi key is set." >&2
       return 1
       ;;
   esac
