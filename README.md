@@ -264,7 +264,7 @@ quickstart for when you want to customize or troubleshoot.
 
 ### What happened when I ran the `acq` command?
 
-`acq run` created the sandbox for that path (if it didn't exist yet), making sure that this clone was accessible inside it. Then it configured the coding agent (`opencode`) to pick up configuration for using the USAi provider and made sure the agent was provisioned with custom guidance and relevant skills for working in the federal context.
+`acq run` created the sandbox for that path (if it didn't exist yet) and mounted your project into it. Then it configured the coding agent (`opencode`) to pick up configuration for using the USAi provider and made sure the agent was provisioned with custom guidance and relevant skills for working in the federal context — all delivered by kits fetched from the pinned patterns release, not from this clone.
 
 ### What `acq` applies
 
