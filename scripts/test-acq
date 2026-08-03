@@ -3,13 +3,12 @@
 # test-acq — offline unit harness for acq
 #
 # Tests the acq entry point and adapter layer against STUBBED backends —
-# no Docker, no real sandbox, no network. Models scripts/test-migrate-or-halt.
+# no Docker, no real sandbox, no network.
 #
 # What is tested:
 #   - Backend resolution order (flag > env > XDG config > auto-detect)
-#   - Name derivation (slugify / derive_name) matches qsbx
+#   - Name derivation (slugify / derive_name)
 #   - Dispatch routing (each subcommand calls the right adapter function)
-#   - qsbx deprecation notice prints and is silenced by QSBX_SILENCE_DEPRECATION=1
 #   - acq secret set builds the correct sbx command for built-in vs custom services
 #     and never puts a secret in argv
 #
@@ -22,7 +21,6 @@ set -uo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ACQ="$REPO_ROOT/acq"
-QSBX="$REPO_ROOT/qsbx"
 
 PASS=0
 FAIL=0
@@ -300,7 +298,7 @@ echo "test-acq"
 echo ""
 
 # ===========================================================================
-# 1. slugify / derive_name: must match qsbx behavior
+# 1. slugify / derive_name: name-derivation behavior
 # ===========================================================================
 
 make_stubs; load_acq
@@ -381,18 +379,21 @@ make_stubs; load_acq
 ) 2>/dev/null; pass "backend: XDG config file accepted"
 cleanup_stubs
 
-# 2d. Auto-detect (sbx on PATH).
+# 2d. Auto-detect (only sbx on PATH -> sbx).
 make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  rm -f "$STUBDIR/msb"          # remove msb so only sbx remains
+  _coreutils_dir=$(dirname "$(command -v env)")
+  PATH="$STUBDIR:$_coreutils_dir"; export PATH
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   set +e
   acq_resolve_backend ""
   assert_eq "backend: auto-detect sbx" "sbx" "$ACQ_RESOLVED_BACKEND"
-) 2>/dev/null; pass "backend: auto-detect sbx (sbx on PATH)"
+) 2>/dev/null; pass "backend: auto-detect sbx (only sbx on PATH)"
 cleanup_stubs
 
 # ===========================================================================
@@ -575,29 +576,6 @@ unk_log=$(cat "$CALLS")
 assert_eq "run(#253): unknown target exits non-zero" "2" "$unk_rc"
 assert_contains "run(#253): unknown-target message names the token" "$unk_out" "'notanagent' is not a known agent"
 assert_not_contains "run(#253): unknown target does NOT provision" "$unk_log" "sbx create"
-cleanup_stubs
-
-
-# (Added to qsbx in §7 of the handoff)
-# ===========================================================================
-
-# 4a. Notice prints on stderr (requires the deprecation notice to be added to qsbx).
-make_stubs
-dep_out2=$(bash -c "
-  PATH='$STUBDIR:$_STUB_BASE_PATH'
-  '$QSBX' version 2>&1 || true
-")
-# This test passes once the deprecation notice is present in qsbx (added in §7).
-assert_contains "qsbx: deprecation notice prints" "$dep_out2" "deprecated"
-cleanup_stubs
-
-# 4b. QSBX_SILENCE_DEPRECATION=1 suppresses the notice.
-make_stubs
-dep_silent=$(bash -c "
-  PATH='$STUBDIR:$_STUB_BASE_PATH'
-  QSBX_SILENCE_DEPRECATION=1 '$QSBX' version 2>&1 || true
-")
-assert_not_contains "qsbx: notice silenced" "$dep_silent" "deprecated"
 cleanup_stubs
 
 # ===========================================================================
@@ -903,7 +881,7 @@ assert_contains "classify: unknown service is passthrough" "$classify_out" "g-un
 cleanup_stubs
 
 # ===========================================================================
-# 6. Kit list completeness (same four kits as qsbx)
+# 6. Kit list completeness (the four built-in kits)
 # ===========================================================================
 
 make_stubs; load_acq
@@ -982,7 +960,7 @@ cleanup_stubs
 # 8. msb backend — resolution, dispatch, doctor/list, version
 # ===========================================================================
 
-# 8a. Auto-detect prefers sbx when both present.
+# 8a. Auto-detect prefers msb when both present.
 make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
@@ -992,34 +970,34 @@ make_stubs; load_acq
   PATH="$STUBDIR"; export PATH
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
-  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
   set +e
   detected=$(_auto_detect_backend)
-  assert_eq "msb: auto-detect prefers sbx over msb" "sbx" "$detected"
-) 2>/dev/null; pass "msb: auto-detect order sbx>msb (both stubbed)"
+  assert_eq "msb: auto-detect prefers msb over sbx" "msb" "$detected"
+) 2>/dev/null; pass "msb: auto-detect order msb>sbx (both stubbed)"
 cleanup_stubs
 
-# 8b. Auto-detect falls back to msb when only msb is present.
+# 8b. Auto-detect falls back to sbx when only sbx is present.
 make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
-  rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
+  rm -f "$STUBDIR/msb"          # remove msb so only sbx remains
   # Constrain PATH to the stub dir ONLY: _auto_detect_backend runs
-  # `command -v sbx`, which would otherwise find a REAL sbx on the developer's
-  # base PATH and make this fall back-to-msb assertion flake to "sbx". Provide a
+  # `command -v msb`, which would otherwise find a REAL msb on the developer's
+  # base PATH and make this fall back-to-sbx assertion flake to "msb". Provide a
   # coreutils dir so the sourced scripts still find standard tools.
   _coreutils_dir=$(dirname "$(command -v env)")
   PATH="$STUBDIR:$_coreutils_dir"
   export PATH
   # shellcheck disable=SC1090
   ACQ_SOURCE_ONLY=1 . "$ACQ"
-  # shellcheck source=acq.backends/msb.sh
-  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # shellcheck source=acq.backends/sbx.sh
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
   set +e
   detected=$(_auto_detect_backend)
-  assert_eq "msb: auto-detect falls back to msb" "msb" "$detected"
-) 2>/dev/null; pass "msb: auto-detect fallback to msb (sbx absent)"
+  assert_eq "msb: auto-detect falls back to sbx" "sbx" "$detected"
+) 2>/dev/null; pass "msb: auto-detect fallback to sbx (msb absent)"
 cleanup_stubs
 
 # 8c. --backend msb resolves and loads the msb adapter.

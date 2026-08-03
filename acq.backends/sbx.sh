@@ -43,11 +43,11 @@ USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 # are materialized for this run.
 ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/sbx-kits}"
 
-# Agents recognized by `sbx run` (mirrors qsbx).
+# Agents recognized by `sbx run`.
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
 # ---------------------------------------------------------------------------
-# Version comparison (carried from qsbx verbatim)
+# Version comparison
 # ---------------------------------------------------------------------------
 
 version_ge() {
@@ -120,7 +120,6 @@ acq_backend_exists() {
 
 # ---------------------------------------------------------------------------
 # Ensure kit source prefixes are on sbx's kit.allowedSources allowlist.
-# Carried from qsbx (ensure_kit_sources_allowed / _kit_sources_manual_hint).
 # ---------------------------------------------------------------------------
 
 _acq_sbx_kit_sources_manual_hint() {
@@ -278,7 +277,7 @@ _acq_sbx_wait_for_exec_ready() {
 # does not include it will produce a malformed wrapped command silently.
 # Note: >/dev/null 2>&1 suppresses the test's stderr, so a probe that fails
 # for an unexpected reason (e.g. bad path syntax) returns "absent" and triggers
-# a spurious kit-add rather than a hard error. This matches qsbx's behavior.
+# a spurious kit-add rather than a hard error.
 _acq_sbx_kit_feature_absent() {
   local name="$1" snippet="$2" out tries=0
   # Defensive: catch callers that forget the " && echo present" suffix.
@@ -433,7 +432,6 @@ acq_backend_apply_kit() {
 
 # ---------------------------------------------------------------------------
 # acq_backend_ensure_kits_applied — heal a pre-kit sandbox in place
-# (carries ensure_kit_applied logic from qsbx)
 # ---------------------------------------------------------------------------
 # Injects any ABSENT built-in kit. When ACQ_FORCE_KIT_REAPPLY=1 (set by
 # acq_bundle_reapply for a stale-bundle refresh) it re-adds ALL
