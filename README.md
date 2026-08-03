@@ -3,12 +3,23 @@
 > **Audience:** GSA teams using AI coding agents
 > **Purpose:** Get AI coding agents running safely inside isolated sandboxes, connected to USAi
 
-**In one sentence:** this quickstart gets you running an AI coding agent connected to USAi in under 5 minutes, using `acq`, a CLI tool provided here (backed by `sbx`).
+**In one sentence:** this quickstart gets you running an AI coding agent connected to USAi in under 5 minutes, using `acq`, a CLI tool provided here.
 
-**`acq`** is the recommended entry point as of version 1.1.0. It wraps `sbx` — a command-line tool from Docker — providing a pluggable-backend architecture that will support additional isolation runtimes in future releases.
+**`acq`** is the entry point. It presents one command surface over two
+pluggable isolation backends and applies a federally-configured set of kits:
 
-> **Migrating from `qsbx`?** Replace `./qsbx` with `./acq` — all commands are
-> identical on the sbx backend. `qsbx` is deprecated and will be removed in 3.0.0.
+| Backend | What it is | Needs |
+| ------- | ---------- | ----- |
+| **msb** (microsandbox) — **default** | FOSS microVM runtime | Host virtualization (KVM/HVF/WHP). No Docker account or seat. |
+| **sbx** (Docker Sandboxes) | Docker's sandbox CLI | A Docker account (your org may require a paid seat). Docker Desktop **not** required. |
+
+`acq` auto-detects an installed backend — **msb is preferred when both are
+present** — or you can pick one explicitly with `--backend`, `ACQ_BACKEND`, or
+`acq backend set`. The same commands and the same kits work on either backend;
+see [docs/BACKEND_GUIDE.md](docs/BACKEND_GUIDE.md) for the full comparison.
+
+This guide leads with the default **msb** path. If you'd rather use Docker
+Sandboxes, jump to [Using the sbx backend](#using-the-sbx-backend).
 
 ## Agentic Coding Ecosystem
 
@@ -43,8 +54,7 @@ Then make sure you have each of these ready:
 
 | Requirement     | Notes                                                      |
 | --------------- | ---------------------------------------------------------- |
-| Package manager | Homebrew on macOS, `winget` on Windows, or `apt` on Ubuntu |
-| Docker account | A Docker account to sign in with `sbx login`. Your organization may require a paid Docker subscription seat (see the note below). Docker Desktop is not required. |
+| Host virtualization | msb runs a microVM, so it needs hardware virtualization: **KVM** (`/dev/kvm`) on Linux, **HVF** on Apple Silicon macOS, **WHP** on Windows. Run `msb doctor` after Step 2 to check (and `msb doctor --fix` to set up). |
 | USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
 | GitHub CLI (`gh`) | (optional) GitHub's official command-line tool ([install](https://cli.github.com/)). It lets the coding agent work with your repos without you handling a token by hand. |
 | GitHub personal access token | (optional) Needed only if you are **not** using the GitHub CLI |
@@ -54,23 +64,12 @@ Then make sure you have each of these ready:
 
 Run each command in your terminal. If a command isn't found, that requirement isn't installed yet.
 
-- **Package manager** — `brew --version` (macOS), `winget --version` (Windows), or `apt --version` (Ubuntu). You should see a version number.
-- **Docker account** — this is the one prerequisite you can't confirm until Step 2, since `sbx` isn't installed yet. It's confirmed when `sbx login` succeeds there.
+- **Host virtualization** — you can't confirm this until Step 2, since `msb` isn't installed yet. It's confirmed when `msb doctor` reports the host is ready.
 - **USAi API key** — visit [the key-management console](https://console.gsa.usai.gov/key-management); you should see (or be able to create) a key. Have the token string ready to paste in Step 3.
 - **GitHub CLI** — `gh auth status` should report that you're logged in.
 - **GitHub personal access token** — only needed without the GitHub CLI; have the token string ready to paste in Step 3.
 
 </details>
-
-> [!NOTE]
-> **About the Docker subscription.** `sbx login` signs in with a Docker account.
-> In at least one organization we've seen, sign-in fails with a "Not enough
-> seats" error unless you have a paid Docker subscription seat (see the
-> troubleshooting callout in Step 2). Docker Desktop itself is **not required**
-> to run `sbx` — but if you do have a Docker Desktop subscription, that already
-> provides your seat. If you hit the seats error, ask your organization's Docker
-> administrator to assign you one. For how Docker licensing works, see
-> [Docker's subscription docs](https://docs.docker.com/subscription/).
 
 ### Step 1: Clone this repo
 
@@ -81,10 +80,110 @@ cd agentic-coding-quickstart
 
 The remaining steps must be run from inside this cloned folder.
 
-### Step 2: Install sbx CLI
+### Step 2: Install microsandbox (msb)
+
+msb is a standalone, open-source (Apache-2.0) microVM runtime — **no Docker
+account or seat is required.**
+
+```bash
+curl -fsSL https://install.microsandbox.dev | sh    # macOS / Linux
+# or, with Homebrew:
+brew install superradcompany/tap/microsandbox
+```
+
+**Check it worked:** run `msb doctor`. It reports whether your host is ready to
+run microVMs (KVM on Linux, HVF on Apple Silicon, WHP on Windows). If something
+is missing, `msb doctor --fix` attempts to set it up.
+
+> [!IMPORTANT]
+> **acq requires `msb` ≥ 0.6.0** — the release where the `--net-rule`,
+> `--trust-host-cas`, and `--secret` flags that `acq` relies on are available.
+> Update at any time with `msb self update`.
+>
+> **On Linux, your user needs access to `/dev/kvm`.** If `msb doctor` reports a
+> permission problem, add yourself to the `kvm` group once:
+>
+> ```bash
+> sudo usermod -aG kvm "$USER" && newgrp kvm
+> ```
+
+### Step 3: Configure secrets (once)
+
+`acq` owns a backend-neutral secret store, so you set your secrets once and they
+work on whichever backend you run. msb binds each secret to its endpoint at
+create time; the real value **never enters the guest** (msb substitutes it on
+the wire over intercepted TLS).
+
+```bash
+# 1. Store your USAi API key (you will be prompted for it)
+./acq secret set -g usai
+
+# 2. Store a GitHub token (for code access)
+#
+# RECOMMENDED — scope a token per-sandbox to just the repos you mount. On
+# `acq run`, if a sandbox has no repo-scoped token, acq detects the repos in
+# your workspace and walks you through creating a fine-grained token limited to
+# them. You can also do it explicitly:
+#   acq github-scope <sandbox-name> /path/to/your/project
+#
+# If you use the GitHub CLI:
+gh auth login                          # if not already authenticated
+gh auth token | ./acq secret set -g github
+
+# Or store a personal access token directly (you will be prompted):
+./acq secret set -g github
+```
+
+> [!WARNING]
+> `gh auth token` and classic PATs carry **account-wide** scopes (`repo`,
+> `workflow`, `delete_repo`, …). Stored globally (`-g`), that broad authority is
+> injected into **every** sandbox — an agent working on one project can act as
+> you on **all** your repositories. Prefer a per-sandbox fine-grained token
+> scoped to the mounted repos (see `acq github-scope` above and
+> [ADR-0013](docs/adr/0013-per-sandbox-github-token-downscoping.md)).
+> Fine-grained tokens can't contribute to public repos you're not a member of or
+> call the Checks API — fall back to the global token for those cases.
+
+**Check it worked:** run `./acq secret ls` — you should see your `usai` (and
+`github`) entries in the store.
+
+> [!NOTE]
+> USAi API keys expire every 7 days; when one does, see
+> [Troubleshooting](#troubleshooting) to rotate it.
+>
+> Sandboxes also sign your git commits with your host SSH key. For those commits
+> to show **Verified** on GitHub you need, one time: a GitHub-verified
+> `user.email` set **in the project** (repo-local config, since the sandbox has
+> its own home and does not see your host global git config) and your **public**
+> signing key registered on GitHub as a _Signing Key_. See
+> [Commits show "Unverified" on GitHub](#troubleshooting) below.
+
+### Step 4: Create and run a sandbox (as often as you like)
+
+```bash
+./acq run opencode /path/to/your/project
+```
+
+That's it. You're now running an AI coding agent with USAi access and restricted filesystem and network access. Repeat this to create sandboxes for each project you want to work on.
+
+**Want to know more about what `acq` is doing under the hood?** See [How It Works](#how-it-works).
+
+**Need more details?** See the [acq Quickstart](docs/QUICKSTART.md) and the [Backend Guide](docs/BACKEND_GUIDE.md).
+
+**Working across multiple repos?** See [Multiple Workspaces](docs/QUICKSTART_SBX.md#multiple-workspaces) for mounting extra directories.
+
+---
+
+## Using the sbx backend
+
+Prefer Docker's sandbox runtime? `acq` runs the exact same commands on **sbx**.
+The only differences are installation and how secrets are injected (via the sbx
+proxy rather than msb's on-the-wire substitution).
+
+### Step 1: Install the sbx CLI
 
 The `sbx` CLI is a standalone tool — Docker Desktop is **not required** (you do
-need a Docker account, and your org may require a paid seat; see the note in Step 0).
+need a Docker account, and your org may require a paid seat; see the note below).
 
 <details>
 <summary>Show macOS install steps (click to expand)</summary>
@@ -96,36 +195,17 @@ sbx login
 ```
 
 > [!NOTE]
-> **macOS Gatekeeper may block `mkfs.erofs` at first sandbox build — this is an
-> `sbx` PATH-resolution bug, not a Quickstart/`acq` bug.** On macOS (including
-> Tahoe/26) the block commonly appears at **Step 3** (`sbx policy init balanced`)
-> with *"mkfs.erofs cannot be opened because the developer cannot be verified."*
-> It only happens if you also have Homebrew `erofs-utils` installed:
+> macOS may prompt you to approve helper binaries the first time you use `sbx`. Allow these if
+> prompted:
 >
-> `sbx` ships its **own notarized** `mkfs.erofs` (in its Caskroom `libexec/`),
-> but invokes it via `$PATH`. If Homebrew `erofs-utils` is installed,
-> `/opt/homebrew/bin/mkfs.erofs` — which is **ad-hoc-signed / not notarized** —
-> is earlier on `$PATH` and shadows sbx's bundled copy, so Gatekeeper rejects it.
+> - `mkfs.erofs`
+> - `mkfs.ext4`
+> - `containerd-shim-nerdbox-v1`
 >
-> **Fix (reliable): make sbx use its own notarized binary.**
+> ---
 >
-> ```bash
-> brew uninstall erofs-utils   # if nothing else needs it
-> ```
->
-> If you can't remove it, approve the Homebrew binary via **System Settings →
-> Privacy & Security → "Allow Anyway"**, re-run the command, then click **"Open"**.
->
-> > **Do NOT bother with `xattr`.** `xattr -d com.apple.quarantine <path>` does
-> > **not** clear this, even with `sudo` — for an unnotarized binary the block is
-> > enforced by macOS code-signing assessment, not the quarantine attribute.
-> > (macOS may also block the `sbx` binary itself the same way — allow it via the
-> > same System Settings flow, then run `sbx login` again.)
->
-> This is in the external `sbx` tool. See
-> [`docs/KNOWN_FAILURE_MODES.md`](docs/KNOWN_FAILURE_MODES.md) for details; the
-> upstream fix (have sbx call its bundled binary by absolute path) is tracked at
-> [docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392).
+> macOS may say sbx is not from a "trusted developer" and block it. In this case you will need to open System Preferences/Privacy
+> & Security/Security, and click the "Allow anyway" button. Run `sbx login` again and click "Allow anyway" in the popup.
 
 </details>
 
@@ -169,116 +249,51 @@ See [Docker's apt install docs](https://docs.docker.com/engine/install/ubuntu/#i
 
 </details>
 
-> **Tip (macOS):** install `sbx` via Homebrew (shown above) rather than a
-> downloaded installer, so Homebrew verifies the formula and keeps it updatable
-> with `brew upgrade`.
-
 **Check it worked:** after `sbx login` finishes with no error, run `sbx version`.
 You should see a line like `sbx version: v0.35.0 <sha>`.
 
 > [!IMPORTANT]
-> **acq requires `sbx` ≥ 0.35.0.** This is the release where `sbx kit add`
-> recreates a sandbox with the added kit while preserving its state, which is how
-> `acq` heals sandboxes created by an older version (see
+> **The sbx backend requires `sbx` ≥ 0.35.0.** This is the release where `sbx
+> kit add` recreates a sandbox with the added kit while preserving its state,
+> which is how `acq` heals sandboxes created by an older version (see
 > [Staying Current](#staying-current)).
 >
 > **Linux/ARM64 note:** sbx `0.35.x` publishes **no Linux/ARM64 build** (deferred
 > to `0.36.x` per the sbx release notes). On a Linux/ARM64 host you can't yet
-> install a version that meets this floor — run `acq` on an x86_64 host, or wait
-> for the `0.36.x` release. `acq` detects this arch and prints the same guidance.
-
----
-
-> [!IMPORTANT]
-> **If `sbx login` fails with a "Not enough seats" error**, like this:
+> install a version that meets this floor — use the msb backend instead, run
+> `acq` on an x86_64 host, or wait for the `0.36.x` release.
 >
-> ```
-> ERROR: sign-in failed: auth login failed: completing login: oauth2:
-> "access_denied" "Not enough seats in organization '<your-org>'. Add more
-> seats or contact your company administrator."
-> ```
->
-> you don't have a paid Docker seat yet (you may also see a red X in the browser
-> tab that opened). Ask your organization's Docker administrator to assign you a
-> seat, then run `sbx login` again.
+> **About the Docker subscription.** `sbx login` signs in with a Docker account.
+> In at least one organization we've seen, sign-in fails with a "Not enough
+> seats" error unless you have a paid Docker subscription seat. Docker Desktop
+> itself is **not required** to run `sbx` — but if you do have a Docker Desktop
+> subscription, that already provides your seat. If you hit the seats error, ask
+> your organization's Docker administrator to assign you one. For how Docker
+> licensing works, see [Docker's subscription docs](https://docs.docker.com/subscription/).
 
-### Step 3: Configure secrets and policy (once)
+### Step 2: Configure secrets and run
 
-You only need to do this once per machine. Your USAi key and GitHub token are
-stored in sbx's secret manager, and the network policy persists across sandboxes.
+Secrets are still owned by `acq`'s backend-neutral store, so the same
+`./acq secret set` commands from [Step 3 above](#step-3-configure-secrets-once)
+apply. On sbx, `acq` feeds the value into sbx's own secret manager (custom
+endpoints like USAi are entered once at sbx's interactive prompt so the value
+never lands on the command line). Then run against sbx explicitly:
 
 ```bash
-# 1. Set network policy (first-time only)
-sbx policy init balanced
+./acq --backend sbx run opencode /path/to/your/project
 
-# 2. Allow USAi endpoint
-sbx policy allow network "api.gsa.usai.gov"
-
-# 3. Store your USAi API key securely (you will be prompted for it)
-sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
-
-# 4. Store GitHub token (for code access)
-#
-# RECOMMENDED — scope a token per-sandbox to just the repos you mount. On
-# `acq run`, if a sandbox has no repo-scoped token, acq detects the repos in
-# your workspace and walks you through creating a fine-grained token limited to
-# them. You can also do it explicitly:
-#   acq github-scope <sandbox-name> /path/to/your/project
-#
-# DEPRECATED (broad) — a single GLOBAL token grants EVERY sandbox access to ALL
-# your repositories. Kept for back-compat; prefer per-sandbox scoping above.
-# If you are using the GitHub CLI
-brew install gh # (if not already installed)
-gh auth login # (if not already authenticated to Github cli)
-gh auth token | sbx secret set -g github --force
-
-# If you are using a personal access token (classic); you will be prompted
-sbx secret set -g github
+# Or persist sbx as your backend so you don't repeat the flag:
+./acq backend set sbx
 ```
 
-> [!WARNING]
-> `gh auth token` and classic PATs carry **account-wide** scopes (`repo`,
-> `workflow`, `delete_repo`, …). Stored globally (`-g`), that broad authority is
-> injected into **every** sandbox — an agent working on one project can act as
-> you on **all** your repositories. Prefer a per-sandbox fine-grained token
-> scoped to the mounted repos (see `acq github-scope` above and
-> [ADR-0013](docs/adr/0013-per-sandbox-github-token-downscoping.md)).
-> Fine-grained tokens can't contribute to public repos you're not a member of or
-> call the Checks API — fall back to the global token for those cases.
-
-**Check it worked:** run `sbx policy ls` — you should see `api.gsa.usai.gov`
-in the list of allowed network destinations.
-
-> [!NOTE]
-> USAi API keys expire every 7 days; when one does, see
-> [Troubleshooting](#troubleshooting) to rotate it.
->
-> Sandboxes also sign your git commits with your host SSH key. For those commits
-> to show **Verified** on GitHub you need, one time: a GitHub-verified
-> `user.email` set **in the project** (repo-local config, since the sandbox has
-> its own home and does not see your host global git config) and your **public**
-> signing key registered on GitHub as a *Signing Key*. See
-> [Commits show "Unverified" on GitHub](#troubleshooting) below.
-
-### Step 4: Create and run a sandbox (as often as you like)
-
-```bash
-./acq run opencode /path/to/your/project
-```
-
-That's it. You're now running an AI coding agent with USAi access and restricted filesystem and network access. Repeat this to create sandboxes for each project you want to work on.
-
-**Want to know more about what `acq` is doing under the hood?** See [How It Works](#how-it-works).
-
-**Need more details?** See the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md) and the [acq Quickstart](docs/QUICKSTART.md).
-
-**Working across multiple repos?** See [Multiple Workspaces](docs/QUICKSTART_SBX.md#multiple-workspaces) for mounting extra directories.
+For the full sbx CLI reference (network policy, multiple workspaces, proxy
+patterns), see the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
 
 ---
 
 ## Troubleshooting
 
-If the happy path above didn't work, the two most common issues are below. For
+If the happy path above didn't work, the most common issues are below. For
 everything else (wrong providers, auth failures, TLS/certificate errors, and
 more), see **[docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md)**.
 
@@ -308,29 +323,34 @@ To rotate the key explicitly outside that workflow:
    (or run the underlying `scripts/rotate-apikey` directly — a thin shim that
    forwards to `acq usai-rotate-api-key`). It prompts for the new key, then
    validates it in a temporary sandbox. Rotation runs through the active
-   backend (sbx or msb), so it works regardless of which backend you use.
+   backend (msb or sbx), so it works regardless of which backend you use.
 
 </details>
 
 <details>
-<summary><strong>Network policy blocks USAi</strong> (click to expand)</summary>
+<summary><strong>msb: guest can't resolve hosts / every request fails</strong> (click to expand)</summary>
+
+If outbound requests fail with `Could not resolve host`, your host's DNS
+resolver is likely a corporate/VPN address that is unreachable from the
+microVM's network namespace. `acq` passes a public resolver (`1.1.1.1`) to the
+guest by default; override it if `1.1.1.1` is blocked in your environment:
+
+```bash
+export ACQ_MSB_DNS_NAMESERVER=<a-resolver-reachable-from-the-guest>
+```
+
+See [docs/BACKEND_GUIDE.md](docs/BACKEND_GUIDE.md#dns--name-resolution) for details.
+
+</details>
+
+<details>
+<summary><strong>sbx: network policy blocks USAi</strong> (click to expand)</summary>
 
 ```bash
 sbx policy allow network -g "api.gsa.usai.gov"
 ```
 
 > Do NOT use "Open" policy on GFE — it exposes internal GSA resources to the agent.
-
-</details>
-
-<details>
-<summary><strong>"sbx policy init" fails right after first-time setup</strong> (click to expand)</summary>
-
-The policy service may not have settled yet after `sbx login`. Retry the command:
-
-```bash
-sbx policy init balanced
-```
 
 </details>
 
@@ -361,8 +381,8 @@ git config user.name  "Your Name"
 ```
 
 **Step 2 — register your signing key on GitHub.** Add the **public** half of your
-signing key as a **Signing Key**: *Settings → SSH and GPG keys → New SSH key →
-Key type: **Signing Key***. (The same key may already be an authentication key;
+signing key as a **Signing Key**: _Settings → SSH and GPG keys → New SSH key →
+Key type: **Signing Key**_. (The same key may already be an authentication key;
 add it again as a signing key.)
 
 Then make a **new** commit — verification applies going forward.
@@ -404,11 +424,11 @@ clone you run from, or re-point your `acq` symlink. See
 AI coding agents can read files, write code, and execute commands. That makes them potent agents of chaos if they're compromised. Running them in sandboxes provides:
 
 - **Isolation** — Agent shouldn't be able to access the full host system; they should be limited both the filesystem and network access
-- **Secret protection** — By using proxy that injects secrets into outgoing requests, the actual secret is never available to the agent for exfiltration
+- **Secret protection** — Secrets are injected into outgoing requests (msb substitutes them on the wire; sbx uses a proxy), so the actual secret is never available to the agent for exfiltration
 - **Reproducibility** — Agents should have a consistent configuration tailored to their operating context every time they run
 - **Audit trail** — Hard boundaries for what the agent can do, potentially logging violations
 
-For more details on this sandbox implementation and discussion of advanced patterns, see [docs/QUICKSTART_SBX.md](docs/QUICKSTART_SBX.md).
+For a full comparison of the two backends and their tradeoffs, see [docs/BACKEND_GUIDE.md](docs/BACKEND_GUIDE.md).
 
 ---
 
@@ -419,13 +439,15 @@ quickstart for when you want to customize or troubleshoot.
 
 ### What happened when I ran the `acq` command?
 
-`acq run` created the sandbox for that path (if it didn't exist yet) using the active backend (`sbx` by default), making sure that this clone was accessible inside it. Then it configured the coding agent (`opencode`) to pick up configuration for using the USAi provider and made sure the agent was provisioned with custom guidance and relevant skills for working in the federal context.
+`acq run` created the sandbox for that path (if it didn't exist yet) using the active backend (`msb` by default), making sure that this clone was accessible inside it. Then it configured the coding agent (`opencode`) to pick up configuration for using the USAi provider and made sure the agent was provisioned with custom guidance and relevant skills for working in the federal context.
 
 ### What `acq` applies
 
-`acq` applies **four sbx mixin kits** (by pinned remote reference from the
+`acq` applies **four mixin kits** (by pinned remote reference from the
 community [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
-repo) when it creates a sandbox, delivering everything declaratively:
+repo) when it creates a sandbox, delivering everything declaratively. Kits are
+authored once in a neutral vocabulary and translated to whichever backend is
+active:
 
 - **`usai-provider`** — stages the USAi config at `~/usai-config/opencode.jsonc`
   and, at startup, merges it into OpenCode's global config at
@@ -436,7 +458,8 @@ repo) when it creates a sandbox, delivering everything declaratively:
   `~/.agentic-coding-playbook` and symlinks its `AGENTS.md` into each agent's
   rules path and its skills into `~/.agents/skills` (+ per-agent roots).
 - **`zscaler-ca-certificate`** — installs the public Zscaler Root CA into the
-  sandbox trust store (harmless off-Zscaler).
+  sandbox trust store (harmless off-Zscaler). On msb this uses the native
+  `--trust-host-cas` shortcut instead of the file-drop mechanism.
 - **`git-ssh-sign`** — signs git commits and tags with the SSH key forwarded
   from your host's SSH agent; the private key never enters the sandbox. Load a
   key on the host first (`ssh-add ~/.ssh/id_ed25519`) — without one, commits fail
@@ -444,19 +467,22 @@ repo) when it creates a sandbox, delivering everything declaratively:
   not make a commit GitHub-**Verified**; see
   [Commits show "Unverified" on GitHub](#troubleshooting).
 
-`acq` also handles the `sbx` prerequisites for you: it adds the kit source to
-`sbx settings kit.allowedSources` (the remote-kit allowlist) and requires
-`sbx` ≥ 0.35.0 — no manual setup.
+On the sbx backend, `acq` also handles the `sbx` prerequisites for you: it adds
+the kit source to `sbx settings kit.allowedSources` (the remote-kit allowlist)
+and requires `sbx` ≥ 0.35.0 — no manual setup.
 
 > While the playbook repo is private (during rollout), the clone needs a GitHub
-> token — set it once with `sbx secret set -g github`. The sbx proxy injects it;
+> token — set it once with `./acq secret set -g github`. The backend injects it;
 > the container never sees it. Once the repo is public this is unnecessary.
 
-### Why the USAi key uses `set-custom`
+### How the USAi key is injected
 
-USAi is not a built-in sbx service, so we store its key with
-`sbx secret set-custom` (with an explicit `--host`) instead of `sbx secret set -g`.
-The built-in `set -g` form only recognizes known providers.
+USAi is not a built-in service on either backend, so `acq` stores its key in its
+own backend-neutral secret store (`./acq secret set -g usai`) with an explicit
+endpoint (`api.gsa.usai.gov`). At create time msb binds it with
+`--secret USAI_API_KEY@api.gsa.usai.gov` (substituted on the wire), and on sbx
+`acq` feeds it to `sbx secret set-custom`. Either way the real value stays out of
+the guest.
 
 ### Key pre-validation
 
@@ -507,18 +533,15 @@ export ACQ_EXTRA_KITS="./my-local-kit git+https://github.com/acme/kits.git#ref=<
 
 Extras are applied **after** the built-in kits (so they win on any overlapping
 config). They also work when re-running against an existing sandbox: adding a new
-entry and re-running `acq run <existing-sandbox>` injects just the new kit via
-`sbx kit add`.
+entry and re-running `acq run <existing-sandbox>` injects just the new kit.
 
 If an extra kit is hosted somewhere other than `github.com/GSA-TTS/`, add its
-scheme-less prefix so `acq` allowlists it on `sbx settings kit.allowedSources`:
+scheme-less prefix so `acq` allowlists it (on sbx, this is added to
+`sbx settings kit.allowedSources`):
 
 ```bash
 export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 ```
-
-> **Migrating from qsbx?** Rename `QSBX_EXTRA_KITS` → `ACQ_EXTRA_KITS` and
-> `QSBX_EXTRA_KIT_SOURCES` → `ACQ_EXTRA_KIT_SOURCES`.
 
 ---
 
@@ -533,8 +556,7 @@ export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
   browser for clipboard support and richer markdown rendering. Use the
   [`openchamber` acq kit](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations/isolation/acq-kits/openchamber),
   which runs `opencode serve` on host-published port 4096 (plus the OpenChamber
-  UI on 3000) via a supervised lifecycle. (This supersedes the former
-  `opencode-web.sh` helper, which has been removed.)
+  UI on 3000) via a supervised lifecycle, on both backends.
 
 ---
 
@@ -556,11 +578,11 @@ git fetch && git pull
 > **Resuming a sandbox created by an older `acq`.** Sandboxes created before the
 > kit migration have an outdated provider config or no playbook. The next time you
 > `acq run opencode <path>` against such a sandbox, `acq` detects the missing
-> kit(s) and injects them with `sbx kit add` — no action needed. On `sbx` ≥
-> 0.35.0 `sbx kit add` recreates the sandbox with the added kit while **preserving
-> its state**, so your work and sessions survive. Restart the agent (or start a
-> fresh session) so it re-reads the config and picks up the playbook. Requires
-> `sbx` >= 0.35.0, which `acq` enforces.
+> kit(s) and re-applies them. On the sbx backend (≥ 0.35.0) `sbx kit add`
+> recreates the sandbox with the added kit while **preserving its state**, so your
+> work and sessions survive; on msb the built-in kits are re-applied idempotently.
+> Restart the agent (or start a fresh session) so it re-reads the config and picks
+> up the playbook.
 
 ### Migrating an existing clone off the playbook submodule
 
@@ -623,15 +645,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 | File/Directory                      | Purpose                                                    |
 | ----------------------------------- | ---------------------------------------------------------- |
-| `acq`                               | Recommended entry point — pluggable-backend wrapper (sbx by default) |
+| `acq`                               | Entry point — pluggable-backend wrapper (msb by default, or sbx) |
 | `acq.backends/`                     | Backend adapters (`common.sh`, `sbx.sh`, `msb.sh`, `kit-translate.sh`, `secret-store.sh`) |
-| `qsbx`                              | **Deprecated** sbx wrapper (use `acq` instead; slated for removal in 3.0.0) |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`acq usai-rotate-api-key`) |
 | `scripts/test-acq`                  | Offline unit harness for acq |
-| `scripts/test-migrate-or-halt`      | Offline unit harness for qsbx session migration |
+| `scripts/verify-backends`           | Live end-to-end backend verification (needs Docker or KVM) |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
-| `docs/QUICKSTART.md`                | acq quickstart and migration guide                        |
+| `docs/QUICKSTART.md`                | acq quickstart and backend selection guide                |
 | `docs/BACKEND_GUIDE.md`             | Per-backend strengths, tradeoffs, and configuration       |
 | `docs/QUICKSTART_SBX.md`            | Full sbx CLI setup guide                                   |
 | `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
