@@ -90,6 +90,15 @@ sbx policy allow network "api.gsa.usai.gov"
 sbx policy ls
 ```
 
+> **macOS:** the first time `sbx policy init balanced` builds a sandbox
+> filesystem, macOS Gatekeeper may block an unnotarized `sbx` helper binary
+> (`mkfs.erofs`, `mkfs.ext4`, or `containerd-shim-nerdbox-v1`) with *"…cannot be
+> opened because the developer cannot be verified."* Approve it via **System
+> Settings → Privacy & Security → "Allow Anyway"**, then re-run and click "Open".
+> `xattr -d com.apple.quarantine` does **not** work. This is an external `sbx`
+> dependency issue — see
+> [KNOWN_FAILURE_MODES.md](KNOWN_FAILURE_MODES.md#26-macos-gatekeeper-blocks-mkfserofs-an-sbx-helper-at-sbx-policy-init).
+
 ### Understanding Network Policies
 
 | Policy | Description | Use Case |
