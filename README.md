@@ -193,9 +193,9 @@ Sandboxes sign commits with the SSH key forwarded from your host (the
 No kit sets your identity, and — importantly — the sandbox has its **own home
 directory**, so your host's **global** git config (`~/.gitconfig`) is **not
 visible inside it**. Only the project's **repo-local** identity (stored in the
-workspace, which is mounted) reaches the sandbox. So `acq` checks the project's
-local `user.email` before attaching and warns if it's unset. To fix it (one
-time, in the project):
+workspace, which is mounted) reaches the sandbox. So `acq` checks the repo's
+effective git `user.email` before attaching and warns if it's unset. To fix it
+(one time, in the project):
 
 **Step 1 — set a GitHub-verified identity in the project** (repo-local, so the
 sandbox sees it — run this inside the project directory):
