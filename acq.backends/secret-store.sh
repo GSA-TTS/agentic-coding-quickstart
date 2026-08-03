@@ -163,6 +163,10 @@ acq_secret_store() {
         acq_key "$key" >/dev/null 2>&1 || {
           echo "acq: secret store: keychain write failed for '$key'." >&2; value=""; return 1; }
       value=""
+      # Record the key in the enumeration index so `acq secret ls` can list it:
+      # secret-tool cannot enumerate items by attribute name alone (see the
+      # ACQ_SECRET_INDEX_FILE note), so the keychain store is otherwise opaque.
+      _acq_secret_index_add "$key"
       return 0
       ;;
     file)
@@ -242,6 +246,56 @@ if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
   # Offline-test escape hatch: keep metadata beside the forced file store.
   ACQ_SECRET_META_DIR="${ACQ_SECRET_STORE_DIR%/}/meta"
 fi
+
+# Enumerable KEY INDEX (keychain-linux only) — a NON-SECRET plain file listing
+# one stored `acq.*` key per line. The Linux keychain (libsecret via
+# secret-tool) can look a value up BY attribute value but cannot list every item
+# by attribute NAME, so a keychain-linux store has no way to answer "what keys do
+# I hold?" without knowing the keys in advance. We record each stored key here so
+# `acq secret ls` can enumerate the keychain store the same way the file backend
+# enumerates its directory. Like the endpoint sidecar, this holds KEYS ONLY (no
+# secret values, no hosts) and is a plain 0600 file, not the keychain. The file
+# and macOS backends do NOT use this index — their file directory is already the
+# authoritative on-disk listing — so it is maintained only on keychain-linux to
+# avoid changing macOS/file behavior.
+ACQ_SECRET_INDEX_FILE="${ACQ_SECRET_INDEX_FILE:-${ACQ_SECRET_FILE_DIR%/secrets}/secret-index}"
+if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
+  # Offline-test escape hatch: keep the index beside the forced file store.
+  ACQ_SECRET_INDEX_FILE="${ACQ_SECRET_STORE_DIR%/}/index"
+fi
+
+# _acq_secret_index_add KEY — record KEY in the keychain-linux enumeration index
+# (deduplicated, 0600). Non-secret (a key name only). Best-effort: a failure to
+# update the index never fails the store — it only degrades later enumeration.
+_acq_secret_index_add() {
+  local key="$1" dir line
+  dir=$(dirname "$ACQ_SECRET_INDEX_FILE")
+  ( umask 077; mkdir -p "$dir" ) || return 0
+  # Already present? Nothing to do (keeps the file deduplicated).
+  if [ -f "$ACQ_SECRET_INDEX_FILE" ]; then
+    while IFS= read -r line; do
+      [ "$line" = "$key" ] && return 0
+    done < "$ACQ_SECRET_INDEX_FILE"
+  fi
+  ( umask 077; printf '%s\n' "$key" >> "$ACQ_SECRET_INDEX_FILE" ) || true
+  return 0
+}
+
+# _acq_secret_index_remove KEY — drop KEY from the keychain-linux enumeration
+# index (idempotent). Best-effort: never fails delete.
+_acq_secret_index_remove() {
+  local key="$1" tmp
+  [ -f "$ACQ_SECRET_INDEX_FILE" ] || return 0
+  tmp="${ACQ_SECRET_INDEX_FILE}.tmp.$$"
+  ( umask 077
+    while IFS= read -r line; do
+      [ "$line" = "$key" ] && continue
+      printf '%s\n' "$line"
+    done < "$ACQ_SECRET_INDEX_FILE" > "$tmp"
+  ) || { rm -f "$tmp" 2>/dev/null; return 0; }
+  mv -f "$tmp" "$ACQ_SECRET_INDEX_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
 
 _acq_secret_meta_file_for() {
   local key="$1"
@@ -380,14 +434,40 @@ acq_secret_meta_list() {
 # `acq secret ls` to enumerate what the store holds. Scope/service is decoded by
 # the caller (see _acq_secret_decode_key). Order is unspecified; deduplicated.
 #
-# The file backend (and the macOS file fallback) is the authoritative on-disk
-# listing: even on a keychain host, acq_secret_store writes values to the 0600
-# file fallback by default (to keep values off argv — see acq_secret_store), so
-# the file dir reflects the acq-managed values. A pure keychain-only store (only
-# reachable with ACQ_SECRET_ALLOW_ARGV=1 at write time) is NOT enumerable via a
-# per-item API without a broad keychain dump, so those are reported best-effort:
-# a value that resolves is confirmed by acq_secret_resolve at display time.
+# Enumeration is BACKEND-AWARE, because the two store shapes are enumerated
+# differently:
+#
+#   file / keychain-macos: the file directory IS the authoritative listing. On
+#     macOS the default write path is the 0600 file fallback (keeping values off
+#     argv — see acq_secret_store), so acq-managed values live in the file dir on
+#     both backends. We glob the directory for `acq.*` filenames exactly as
+#     before. On macOS with ACQ_SECRET_ALLOW_ARGV=1, a keychain-only write lands
+#     in the keychain instead of the file dir, so it is NOT enumerated by `ls`
+#     (the glob only sees the file dir). Such an entry still resolves normally at
+#     provision time — it just does not appear in the `ls` listing.
+#
+#   keychain-linux: the secret VALUES live in the Linux keychain, NOT in the file
+#     dir — so the file glob above would find nothing. libsecret (secret-tool)
+#     can look a value up by attribute value but cannot list every item by
+#     attribute name, so the keychain cannot answer "what keys do I hold?" on its
+#     own. We therefore enumerate from an acq-maintained NON-SECRET key index
+#     (ACQ_SECRET_INDEX_FILE, written by acq_secret_store / acq_secret_delete),
+#     UNIONED with keys reconstructed from the endpoint sidecar (belt and
+#     suspenders, in case the index lags), and VERIFY each candidate still
+#     resolves via acq_secret_get before emitting it — so a stale index entry for
+#     a deleted secret never shows. This is best-effort and never fails `ls`.
 acq_secret_list_keys() {
+  local backend
+  backend=$(_acq_secret_backend)
+  case "$backend" in
+    keychain-linux) _acq_secret_list_keys_keychain_linux ;;
+    *)              _acq_secret_list_keys_file ;;
+  esac
+}
+
+# File-backend enumeration: glob the value directory for `acq.*` filenames. Used
+# by the file and macOS backends (see acq_secret_list_keys).
+_acq_secret_list_keys_file() {
   local f base seen=" "
   [ -d "$ACQ_SECRET_FILE_DIR" ] || return 0
   for f in "$ACQ_SECRET_FILE_DIR"/*; do
@@ -398,6 +478,48 @@ acq_secret_list_keys() {
     seen="$seen$base "
     printf '%s\n' "$base"
   done
+}
+
+# keychain-linux enumeration: union the acq-maintained key index with keys
+# reconstructed from the endpoint sidecar, verify each still resolves, emit
+# deduplicated `acq.*` keys. See acq_secret_list_keys for the rationale.
+_acq_secret_list_keys_keychain_linux() {
+  local key seen=" " svc
+  # The resolve-check below is inlined at each emit site rather than factored into
+  # a nested helper: a nested function plus `unset -f` would clobber a caller's
+  # same-named function if one existed. Each site: skip non-`acq.*`, skip already
+  # seen, verify the value still resolves (acq_secret_get output discarded — only
+  # its exit status is used; a stale index entry or sidecar-without-value is thus
+  # dropped), then record and emit the raw key.
+
+  # (a) The key index — the primary, self-maintained source of stored keys.
+  if [ -f "$ACQ_SECRET_INDEX_FILE" ]; then
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      case "$key" in acq.*) ;; *) continue ;; esac
+      case "$seen" in *" $key "*) continue ;; esac
+      acq_secret_get "$key" >/dev/null 2>&1 || continue
+      seen="$seen$key "
+      printf '%s\n' "$key"
+    done < "$ACQ_SECRET_INDEX_FILE"
+  fi
+
+  # (b) Belt and suspenders: reconstruct `acq.*` keys from any endpoint sidecars
+  # the index somehow lacks (self-healing if the index file is missing/stale).
+  # Sidecar files are named after the store key (see _acq_secret_meta_file_for),
+  # so the filename IS the `acq.*` key. Only real (resolving) values are emitted,
+  # so a sidecar without a matching value is silently skipped.
+  if [ -d "$ACQ_SECRET_META_DIR" ]; then
+    for svc in "$ACQ_SECRET_META_DIR"/*; do
+      [ -f "$svc" ] || continue
+      key=$(basename "$svc")
+      case "$key" in acq.*) ;; *) continue ;; esac
+      case "$seen" in *" $key "*) continue ;; esac
+      acq_secret_get "$key" >/dev/null 2>&1 || continue
+      seen="$seen$key "
+      printf '%s\n' "$key"
+    done
+  fi
 }
 
 # _acq_secret_decode_key KEY -> "SCOPE<TAB>SERVICE" where SCOPE is "-g" (global)
@@ -455,6 +577,7 @@ acq_secret_delete() {
       # secret-tool clear removes all items matching the attribute; a no-match is
       # not an error for our idempotent contract.
       secret-tool clear acq_key "$key" >/dev/null 2>&1 || true
+      _acq_secret_index_remove "$key"
       _acq_secret_delete_file "$key" || rc=$?
       ;;
     file)
