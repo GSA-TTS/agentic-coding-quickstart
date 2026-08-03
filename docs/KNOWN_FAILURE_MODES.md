@@ -1004,6 +1004,89 @@ prompt; a genuine failure now prints this remedy.
 
 ---
 
+## 27. `500 failed to create network` After a Host Restart (sbx)
+
+> Numbered 27 to avoid colliding with entry 26 (macOS Gatekeeper / `mkfs.erofs`),
+> which is landing in a separate change.
+
+### Symptoms
+
+A sandbox that worked before is refused after a **host reboot/restart**. The
+image pull succeeds ("Already exists" / "Image is up to date"), then sandbox
+creation fails:
+
+```
+Status: Image is up to date for docker/sandbox-templates:opencode-docker
+ERROR: request failed: 500 Internal Server Error: failed to create network
+```
+
+(Sometimes with the daemon detail `Error response from daemon: already exists`.)
+`./acq run …` and a direct `sbx run …` fail identically — `acq` only passes the
+command through to `sbx`.
+
+### Root Cause
+
+This is an **`sbx` daemon-lifecycle bug**, not a Quickstart / `acq` / `msb` issue
+and not a network-policy problem. On an unclean shutdown/reboot, `sbx`'s daemon
+(`sandboxd`) does not tear down a sandbox's network, so a **stale network record
+survives the restart**. On the next `sbx run`, sandboxd tries to (re)create that
+network, hits the leftover entry, and returns `500 … already exists`. The
+successful image pull just before the error is unrelated — the failure is the
+network-create step that follows it.
+
+Tracked upstream (already open — no new report needed):
+
+- [docker/sbx-releases#181](https://github.com/docker/sbx-releases/issues/181) —
+  `500 failed to create network: … already exists`.
+- [docker/sbx-releases#353](https://github.com/docker/sbx-releases/issues/353) —
+  sandboxd crash during dead-VM cleanup orphans a sandbox; the only documented
+  recovery is a full `sbx reset`.
+
+### Fix
+
+Recover least-destructive first:
+
+1. **List and clear the stale sandbox.** See what `sbx` still thinks exists, then
+   remove the orphaned one and retry:
+
+   ```bash
+   sbx ls
+   sbx rm <name> --force      # <name> from the list; stop it first if running
+   ./acq run opencode <path>
+   ```
+
+   (If `sbx rm --force` reports "not found" but the name is still claimed, that is
+   [docker/sbx-releases#129](https://github.com/docker/sbx-releases/issues/129) —
+   go to step 2.)
+
+2. **Full reset, preserving secrets** — the recovery the upstream issues cite.
+   This clears stale daemon/network state but keeps your USAi/GitHub secrets so
+   you do not redo secret setup:
+
+   ```bash
+   sbx reset --preserve-secrets
+   ```
+
+   After a reset you may need to re-apply the network policy before running:
+
+   ```bash
+   sbx policy init balanced
+   sbx policy allow network "api.gsa.usai.gov"
+   ./acq run opencode <path>
+   ```
+
+### Prevention / Status
+
+- This is an upstream `sbx` daemon-shutdown bug; we cannot fix it in this repo.
+  Follow [docker/sbx-releases#181](https://github.com/docker/sbx-releases/issues/181)
+  / [#353](https://github.com/docker/sbx-releases/issues/353) for the daemon-side
+  fix.
+- Until then, `sbx reset --preserve-secrets` is the reliable recovery after a
+  restart leaves a sandbox unusable. (`--preserve-secrets` avoids re-running the
+  Step 3 secret setup.)
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:
