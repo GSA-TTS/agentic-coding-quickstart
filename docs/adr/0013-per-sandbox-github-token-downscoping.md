@@ -53,9 +53,19 @@ Concretely:
   creation URL** (`https://github.com/settings/personal-access-tokens/new?…`)
   with `target_name=<owner>`, a name derived from the sandbox, `expires_in=30`,
   and the minimal default permissions `contents=write` + `pull_requests=write` +
-  `issues=write` (`metadata:read` and the read levels are implied). The user
-  clicks it, selects **only** the named repositories, generates the token, and
-  pastes it back.
+  `issues=write` + `actions=read` (`metadata:read` and the read levels are
+  implied). `actions=read` lets the agent read the Actions workflow-run status
+  that surfaces most PR checks (fine-grained PATs cannot call the Checks API — a
+  GitHub limitation, see Consequences). The default is deliberately held to
+  least privilege: `actions` is **read-only** (write additionally grants
+  cancel-runs and delete-logs/artifacts, which cut against the AU-2 audit
+  consequence below), and **no `workflows` scope** is requested by default
+  (`workflows=write` grants create/edit of `.github/workflows/*` — a CI
+  privilege-escalation vector: a workflow the agent can author runs with the
+  repo's `GITHUB_TOKEN` and secrets). Users who need agent-driven re-runs or
+  workflow edits widen the scope in the GitHub form (the notice tells them how).
+  The user clicks it, selects **only** the named repositories, generates the
+  token, and pastes it back.
 - The token is read from the TTY (never argv), stored in the acq-neutral secret
   store keyed `acq.<sandbox>.github`, and fed to the sbx proxy as the `github`
   built-in for that sandbox — the same injection path as a global github secret,

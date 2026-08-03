@@ -4070,6 +4070,12 @@ assert_contains "gh-url: names token after sandbox" "$(_purl 'GSA-TTS' 'opencode
 assert_contains "gh-url: default contents=write"  "$(_purl 'o' 's')" "contents=write"
 assert_contains "gh-url: default pull_requests=write" "$(_purl 'o' 's')" "pull_requests=write"
 assert_contains "gh-url: default issues=write"     "$(_purl 'o' 's')" "issues=write"
+assert_contains "gh-url: default actions=read"     "$(_purl 'o' 's')" "actions=read"
+# Least-privilege guards (ADR-0013): never default to admin, never grant
+# actions=write (cancel/delete-logs) or any workflows scope (edit CI files).
+assert_not_contains "gh-url: never defaults to admin"      "$(_purl 'o' 's')" "admin"
+assert_not_contains "gh-url: no actions=write by default"  "$(_purl 'o' 's')" "actions=write"
+assert_not_contains "gh-url: no workflows scope by default" "$(_purl 'o' 's')" "workflows="
 
 # detect_workspace_repos
 _dwr() { ( export ACQ_SCRIPT_DIR="$REPO_ROOT"; . "${REPO_ROOT}/acq.backends/common.sh"; detect_workspace_repos "$1" ); }
