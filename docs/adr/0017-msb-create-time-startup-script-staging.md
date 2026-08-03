@@ -30,16 +30,18 @@ serde-skipped).
 
 **Chosen resolution (this increment ships it):**
 
-- **The acq `start`/`restart` verb — the sole, deterministic mechanism.** Add an
-  acq `start`/`restart` verb backed by `acq_backend_start` (`msb start` /
-  `sbx start`). After the backend resume, re-drive
-  `acq_backend_ensure_kits_applied`, which re-applies the pinned kits
-  idempotently and **re-runs the startup phase via the exec path** — the actual
-  mechanism that brings kit `startup`/`background` services back up. A **stopped**
-  sandbox is also started automatically at the top of
-  `acq_backend_ensure_kits_applied`, so `acq run <stopped-sandbox>` works
-  end-to-end (start → heal/startup → attach). This closes the stated gap without
-  any native-persistence uncertainty.
+ - **The acq `start`/`restart` verb — the sole, deterministic mechanism.** Add an
+   acq `start`/`restart` verb backed by `acq_backend_start` (`msb start` /
+   `sbx start`). After the backend resume, re-drive
+   `acq_backend_ensure_kits_applied`, which re-applies the pinned kits
+   idempotently and **re-runs the startup phase via the exec path** — the actual
+   mechanism that brings kit `startup`/`background` services back up. On the
+   **msb** backend, a **stopped** sandbox is also started automatically at the top
+   of `acq_backend_ensure_kits_applied`, so `acq run <stopped-sandbox>` works
+   end-to-end on msb (start → heal/startup → attach) — this closes the stated gap
+   without any native-persistence uncertainty. The **sbx** backend does not yet
+   have this start-if-stopped guard in its `acq_backend_ensure_kits_applied`; the
+   sbx `acq run <stopped-sandbox>` path is tracked as a follow-up (see Links).
 
 **Native restart OUTSIDE acq is out of scope (found in live testing).** An
 earlier revision of this increment also, behind an opt-in flag
@@ -163,7 +165,8 @@ testing proved native restart outside acq is infeasible — see the Update note.
 ### Positive Consequences
 
 - Kit `startup`/`background` services are restored on resume deterministically
-  via `acq start` / `acq restart` and `acq run <stopped-sandbox>`.
+  via `acq start` / `acq restart` (both backends) and, on the msb backend, via
+  `acq run <stopped-sandbox>` (start-if-stopped heal).
 - Command bodies are staged as files, not interpolated shell strings (SI-10).
 - No change to the neutral kit vocabulary or to install/idempotency semantics.
 - Safe-by-default: no image-entrypoint override; resume never changes the guest
@@ -206,3 +209,6 @@ testing proved native restart outside acq is infeasible — see the Update note.
   that startup re-runs on `acq run`/`acq start`/`acq restart` (acq re-drives the
   idempotent apply), and that a raw `msb start` outside acq is not a supported
   resume path.
+- Follow-up: the sbx adapter has no start-if-stopped guard in
+  `acq_backend_ensure_kits_applied`, so `acq run <stopped-sandbox>` on sbx heals
+  against a stopped guest — tracked in GSA-TTS/agentic-coding-quickstart#265.

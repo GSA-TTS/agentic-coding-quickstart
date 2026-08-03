@@ -386,7 +386,7 @@ acq_backend_stop() {
   sbx stop "$1"
 }
 
-# acq_backend_start NAME — start (resume) a stopped sandbox (ADR-0017 / #247).
+# acq_backend_start NAME — start (resume) a stopped sandbox (ADR-0017).
 # sbx exposes `sbx start` and preserves state on stop (ACQ_BACKEND_CAN_RESUME=1),
 # so this mirrors the msb verb: a thin resume primitive. The acq `start`/`restart`
 # dispatcher re-drives acq_backend_ensure_kits_applied after this to re-run the

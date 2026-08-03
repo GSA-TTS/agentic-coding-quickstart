@@ -642,7 +642,7 @@ case "$subcommand" in
 
   start)
     # Resume a stopped sandbox and re-run its kit startup services deterministically
-    # (ADR-0017 / #247). `msb start`/`sbx start` alone do NOT reliably replay kit
+    # (ADR-0017). `msb start`/`sbx start` alone do NOT reliably replay kit
     # `startup`/`background` commands (a bare create-time `--script-path` is not
     # enrolled in microsandbox's persisted startup), so after the backend resume we
     # re-drive acq_backend_ensure_kits_applied: it re-applies the pinned kits
@@ -665,7 +665,7 @@ case "$subcommand" in
     ;;
 
   restart)
-    # Best-effort bounce (ADR-0017 / #247): stop, THEN start+heal, guaranteeing
+    # Best-effort bounce (ADR-0017): stop, THEN start+heal, guaranteeing
     # kit startup services are re-run afterward via the same heal path as `start`.
     # The dispatcher runs under `set -euo pipefail`, so a nonzero stop would
     # otherwise abort the restart before start is reached. That is NOT the intended

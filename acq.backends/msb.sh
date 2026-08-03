@@ -345,6 +345,22 @@ _acq_msb_is_running() {
 }
 
 # ---------------------------------------------------------------------------
+# _acq_msb_bind_one ARRVAR NAMESVAR SVC NAME ENV HOST — resolve one service's
+# secret value (acq store, scoped→global) and, if found, export it into the ENV
+# host var (transient) + collect a `--secret ENV@HOST` flag. Returns 0 if a
+# store value was bound, 1 otherwise (so the caller can try an env fallback).
+# The real value moves via a TRANSIENT exported env var, never argv.
+_acq_msb_bind_one() {
+  local _arrn="$1" _namesn="$2" _svc="$3" _name="$4" _env="$5" _host="$6" _val
+  _val=$(acq_secret_resolve "$_svc" "$_name" 2>/dev/null) && [ -n "$_val" ] || return 1
+  # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
+  export "$_env=$_val"; _val=""
+  eval "$_namesn+=(\"\$_env\")"
+  eval "$_arrn+=(--secret \"\${_env}@\${_host}\")"
+  acq_debug "msb secret: binding ${_env}@${_host} for '$_svc' (from acq store)"
+  return 0
+}
+
 # _acq_msb_bind_secrets_into ARRVAR NAMESVAR NAME — resolve + export the secret
 # values a sandbox needs, and collect the matching `--secret ENV@HOST` flags.
 # ---------------------------------------------------------------------------
@@ -369,41 +385,33 @@ _acq_msb_is_running() {
 # (conditionally), and any generic custom endpoint recorded via
 # `acq secret set SVC --host H --env E` (enumerated from the non-secret sidecar).
 # This mirrors the SCOPE notes at the top of this file; see also
-# _acq_msb_service_binding.
+# _acq_msb_service_binding and _acq_msb_bind_one (the per-service primitive).
 _acq_msb_bind_secrets_into() {
   local _arrn="$1" _namesn="$2" _name="$3"
 
   if command -v acq_secret_resolve >/dev/null 2>&1; then
-    local _usai_val
-    if _usai_val=$(acq_secret_resolve usai "$_name" 2>/dev/null) && [ -n "$_usai_val" ]; then
-      export USAI_API_KEY="$_usai_val"; _usai_val=""
-      eval "$_namesn+=(\"USAI_API_KEY\")"
-      eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
-      acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from acq store)"
-    elif [ -n "${USAI_API_KEY:-}" ]; then
-      # Fallback: a pre-exported USAI_API_KEY (e.g. CI) still works.
-      eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
-      acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from env)"
+    # USAi: acq store first, else a pre-exported USAI_API_KEY (e.g. CI).
+    if ! _acq_msb_bind_one "$_arrn" "$_namesn" usai "$_name" USAI_API_KEY "$ACQ_MSB_USAI_HOST"; then
+      if [ -n "${USAI_API_KEY:-}" ]; then
+        eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
+        acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from env)"
+      fi
     fi
 
     # GitHub: bind GITHUB_TOKEN@api.github.com so kits can authenticate to the
-    # REST API (the substituted path). Resolve from the acq store first, then a
-    # pre-exported GITHUB_TOKEN/GH_TOKEN (CI). Absent token => no binding; the
-    # playbook kit then degrades gracefully (warns, no rules/skills).
-    local _gh_val
-    if _gh_val=$(acq_secret_resolve github "$_name" 2>/dev/null) && [ -n "$_gh_val" ]; then
-      export GITHUB_TOKEN="$_gh_val"; _gh_val=""
-      eval "$_namesn+=(\"GITHUB_TOKEN\")"
-      eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
-      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from acq store)"
-    elif [ -n "${GITHUB_TOKEN:-}" ]; then
-      eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
-      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from env)"
-    elif [ -n "${GH_TOKEN:-}" ]; then
-      export GITHUB_TOKEN="$GH_TOKEN"
-      eval "$_namesn+=(\"GITHUB_TOKEN\")"
-      eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
-      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from GH_TOKEN env)"
+    # REST API (the substituted path). acq store first, then a pre-exported
+    # GITHUB_TOKEN, then GH_TOKEN (CI). Absent token => no binding; the playbook
+    # kit then degrades gracefully (warns, no rules/skills).
+    if ! _acq_msb_bind_one "$_arrn" "$_namesn" github "$_name" GITHUB_TOKEN "$ACQ_MSB_GITHUB_HOST"; then
+      if [ -n "${GITHUB_TOKEN:-}" ]; then
+        eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
+        acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from env)"
+      elif [ -n "${GH_TOKEN:-}" ]; then
+        export GITHUB_TOKEN="$GH_TOKEN"
+        eval "$_namesn+=(\"GITHUB_TOKEN\")"
+        eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
+        acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from GH_TOKEN env)"
+      fi
     fi
 
     # GENERIC custom endpoints. usai + github were bound explicitly above. Any
@@ -411,10 +419,9 @@ _acq_msb_bind_secrets_into() {
     # non-secret (host, env) sidecar; bind each such service generically here so
     # it is no longer stored-but-inert. Iterate the endpoint sidecars for this
     # sandbox scope + global, deduping by env var (a scoped mapping shadows the
-    # global; usai/github are skipped — already bound). The real value moves via
-    # a TRANSIENT env var (never argv), exactly like usai/github.
+    # global; usai/github are skipped — already bound).
     if command -v acq_secret_meta_list >/dev/null 2>&1; then
-      local _svc _binding _env _host _val _names_snapshot
+      local _svc _binding _env _host _names_snapshot
       while IFS= read -r _svc; do
         [ -n "$_svc" ] || continue
         case "$_svc" in usai|github) continue ;; esac  # bound explicitly above
@@ -425,13 +432,7 @@ _acq_msb_bind_secrets_into() {
         # Skip if this env var was already collected (e.g. usai/github, or a dup).
         eval "_names_snapshot=\" \${${_namesn}[*]-} \""
         case "$_names_snapshot" in *" $_env "*) continue ;; esac
-        if _val=$(acq_secret_resolve "$_svc" "$_name" 2>/dev/null) && [ -n "$_val" ]; then
-          # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
-          export "$_env=$_val"; _val=""
-          eval "$_namesn+=(\"\$_env\")"
-          eval "$_arrn+=(--secret \"\${_env}@\${_host}\")"
-          acq_debug "msb secret: binding ${_env}@${_host} for custom service '$_svc' (from acq store)"
-        fi
+        _acq_msb_bind_one "$_arrn" "$_namesn" "$_svc" "$_name" "$_env" "$_host" || true
       done <<EOF
 $(acq_secret_meta_list "$_name")
 EOF
@@ -442,7 +443,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_start NAME — start (resume) a stopped sandbox (ADR-0017 / #247)
+# acq_backend_start NAME — start (resume) a stopped sandbox (ADR-0017)
 # ---------------------------------------------------------------------------
 # `msb start` resumes a stopped sandbox, preserving its persisted state
 # (ACQ_BACKEND_CAN_RESUME=1). Microsandbox's `start_detached` replays only a
@@ -2636,7 +2637,7 @@ acq_backend_apply_kit() {
 
 acq_backend_ensure_kits_applied() {
   local name="$1"
-  # START-IF-STOPPED (ADR-0017 / #247). This heal loop drives `msb exec` against
+  # START-IF-STOPPED (ADR-0017). This heal loop drives `msb exec` against
   # the guest for every kit (feature-probe, file drops, startup re-run). Those
   # exec calls FAIL against a STOPPED guest, so a stopped sandbox must be started
   # BEFORE any healing. This is also what makes `acq run <stopped-sandbox>` work
@@ -2649,11 +2650,14 @@ acq_backend_ensure_kits_applied() {
   # returning (see its definition — the S1 readiness fix), so we do not repeat the
   # exec-ready wait here: the guest is booted and exec-ready by the time the resume
   # returns. Starting is best-effort — a start/readiness failure emits a warning
-  # (from acq_backend_start) but does not abort the heal.
+  # but does not abort the heal. We do NOT suppress acq_backend_start's stderr:
+  # `msb start` diagnoses the real cause (e.g. a missing bound secret) on its own
+  # stderr, and masking it with only a generic warning would hide the root cause
+  # (repo Failure-Handling rule: report and diagnose, don't mask).
   if ! _acq_msb_is_running "$name"; then
     acq_debug "msb ensure_kits_applied: $name is stopped; starting before heal"
-    acq_backend_start "$name" >/dev/null 2>&1 || \
-      echo "acq(msb): warning: 'msb start $name' failed; healing may not apply." >&2
+    acq_backend_start "$name" >/dev/null || \
+      echo "acq(msb): warning: 'msb start $name' failed (see the error above); healing may not apply." >&2
   fi
   local kits=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT" "$GITSSHSIGN_KIT")
   local builtin_count="${#kits[@]}"
