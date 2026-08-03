@@ -46,37 +46,24 @@ Then make sure you have each of these ready:
 
 | Requirement     | Notes                                                      |
 | --------------- | ---------------------------------------------------------- |
-| A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li></ul>Inside a cloud VM or CI runner, the outer environment must expose **nested virtualization**. See [msb host setup](docs/QUICKSTART.md#msb-host-setup) for per-platform details; `msb doctor` (Step 2) is the authoritative check. |
+| A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li></ul>See [msb host setup](docs/QUICKSTART.md#msb-host-setup) for per-platform details; `msb doctor` (Step 2) is the authoritative check. |
 | USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
-| GitHub CLI (`gh`) | (optional) GitHub's official command-line tool ([install](https://cli.github.com/)). It lets the coding agent work with your repos without you handling a token by hand. |
-| GitHub personal access token | (optional) Needed only if you are **not** using the GitHub CLI |
+| GitHub token | (recommended) Lets the agent authenticate to GitHub — to fetch the `acq` kits, work with private repositories, and act on your behalf (open PRs, push). `acq` can walk you through creating a repo-scoped one on first run. A token is needed today to fetch the kits while the [patterns repo](https://github.com/GSA-TTS/agentic-coding-patterns) is private; that requirement goes away once it is public. |
 
 <details>
 <summary>How to verify each requirement (click to expand)</summary>
 
 Run each command in your terminal. If a command isn't found, that requirement isn't installed yet.
 
-- **microVM support** — Linux users can check now with `test -e /dev/kvm && echo ok`. macOS (Apple Silicon) and Windows 11 have nothing to enable ahead of time beyond the platform above. `msb doctor` in Step 2 is the authoritative check; for per-platform setup and fixes, see [msb host setup](docs/QUICKSTART.md#msb-host-setup).
+- **microVM support** — Linux users can check now with `test -e /dev/kvm && echo ok`. macOS (Apple Silicon) and Windows 11 have nothing to enable ahead of time beyond the platform above. `msb doctor` in Step 1 is the authoritative check; for per-platform setup and fixes, see [msb host setup](docs/QUICKSTART.md#msb-host-setup).
 - **USAi API key** — visit [the key-management console](https://console.gsa.usai.gov/key-management); you should see (or be able to create) a key. Have the token string ready to paste in Step 3.
-- **GitHub CLI** — `gh auth status` should report that you're logged in.
-- **GitHub personal access token** — only needed without the GitHub CLI; have the token string ready to paste in Step 3.
+- **GitHub token** — either have a fine-grained personal access token ready to paste in Step 3, or let `acq` walk you through creating a repo-scoped one on first run.
 
 </details>
 
-### Step 1: Clone this repo
+### Step 1: Install microsandbox (msb)
 
-```bash
-git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
-cd agentic-coding-quickstart
-```
-
-The `acq` commands in Steps 3–4 are run from inside this cloned folder.
-
-### Step 2: Install microsandbox (msb)
-
-msb is a standalone, open-source (Apache-2.0) microVM runtime — **no Docker
-account or seat is required.** Install it anywhere on your machine (it is a
-host-level tool, independent of this checkout):
+msb is a standalone, open-source (Apache-2.0) microVM runtime (a host-level tool, independent of this repository). Install it on your machine:
 
 ```bash
 curl -fsSL https://install.microsandbox.dev | sh    # macOS / Linux
@@ -87,6 +74,15 @@ brew install superradcompany/tap/microsandbox
 **Check it worked:** run `msb doctor`. It reports whether your host is ready to
 run microVMs and can attempt to set up anything missing with `msb doctor --fix`.
 `acq` requires `msb` ≥ 0.6.0; update any time with `msb self update`.
+
+### Step 2: Clone this repo
+
+```bash
+git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
+cd agentic-coding-quickstart
+```
+
+The `acq` commands in Steps 3–4 are run from inside this cloned folder.
 
 ### Step 3: Configure secrets (once)
 
@@ -102,26 +98,25 @@ the sandbox at runtime — the real values **never enter the guest**.
 # RECOMMENDED — scope a token per-sandbox to just the repos you mount. On
 # `acq run`, if a sandbox has no repo-scoped token, acq detects the repos in
 # your workspace and walks you through creating a fine-grained token limited to
-# them. You can also do it explicitly:
+# them (in the browser — no extra tooling needed). You can also do it explicitly:
 #   acq github-scope <sandbox-name> /path/to/your/project
 #
-# If you use the GitHub CLI:
-gh auth login                          # if not already authenticated
-gh auth token | ./acq secret set -g github
-
-# Or store a personal access token directly (you will be prompted):
+# Or store a token directly (you will be prompted; input hidden):
 ./acq secret set -g github
+
+# If you already use the GitHub CLI, you can pipe its token instead:
+#   gh auth token | ./acq secret set -g github
 ```
 
 > [!WARNING]
-> `gh auth token` and classic PATs carry **account-wide** scopes (`repo`,
-> `workflow`, `delete_repo`, …). Stored globally (`-g`), that broad authority is
-> injected into **every** sandbox — an agent working on one project can act as
-> you on **all** your repositories. Prefer a per-sandbox fine-grained token
-> scoped to the mounted repos (see `acq github-scope` above and
+> A token from `gh auth token`, or a classic PAT, carries **account-wide**
+> scopes (`repo`, `workflow`, `delete_repo`, …). Stored globally (`-g`), that
+> broad authority is injected into **every** sandbox — an agent working on one
+> project can act as you on **all** your repositories. Prefer a per-sandbox
+> fine-grained token scoped to the mounted repos (see `acq github-scope` above and
 > [ADR-0013](docs/adr/0013-per-sandbox-github-token-downscoping.md)).
 > Fine-grained tokens can't contribute to public repos you're not a member of or
-> call the Checks API — fall back to the global token for those cases.
+> call the Checks API — fall back to a global token for those cases.
 
 **Check it worked:** run `./acq secret ls` — you should see your `usai` (and
 `github`) entries in the store.
