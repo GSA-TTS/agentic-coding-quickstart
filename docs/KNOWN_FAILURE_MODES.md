@@ -1267,7 +1267,8 @@ code-signing gate on an unnotarized binary.
 
 - We cannot fix this in this repo (the helper is shipped and invoked by the
   external Docker `sbx` tool). An **upstream request to notarize these helper
-  binaries has been filed with the Docker `sbx` team.**
+  binaries has been filed with the Docker `sbx` team:
+  [docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392).**
 - Until sbx notarizes them, the System Settings "Allow Anyway" flow above is the
   expected one-time step per new macOS machine.
 

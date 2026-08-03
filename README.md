@@ -127,7 +127,7 @@ sbx login
 > This affects the external `sbx` tool (we do not ship or invoke these binaries).
 > See [`docs/KNOWN_FAILURE_MODES.md`](docs/KNOWN_FAILURE_MODES.md) for details; an
 > upstream request to notarize these helpers has been filed with the Docker `sbx`
-> team.
+> team ([docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392)).
 
 </details>
 
