@@ -435,6 +435,19 @@ _acq_msb_wait_for_exec_ready() {
 # Fetch a kit ref into the cache and echo its local dir. Returns 1 on failure.
 _acq_msb_fetch_kit() {
   local kitref="$1" slug dest
+  # Offline/test escape hatch: when ACQ_MSB_KIT_LOCAL_DIR is set, resolve REMOTE
+  # (git+) kit refs to that local directory instead of fetching. Mirrors the sbx
+  # adapter's ACQ_SBX_KIT_PASSTHROUGH: it keeps the offline unit harness fully
+  # network-free even when acq is invoked as a CHILD process (e.g. `acq start`),
+  # where a test cannot shadow this function. LOCAL kit paths are still used
+  # as-is (a test that passes an explicit local kit dir must get THAT dir), so
+  # the hatch only diverts refs that would otherwise hit the network. Never set
+  # in production — a real kit body is required there.
+  if [ -n "${ACQ_MSB_KIT_LOCAL_DIR:-}" ]; then
+    case "$kitref" in
+      git+*|*://*) printf '%s\n' "$ACQ_MSB_KIT_LOCAL_DIR"; return 0 ;;
+    esac
+  fi
   # Derive a stable cache subdir from the ref (sha + dir tail).
   slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_' )
   dest="${ACQ_MSB_KIT_CACHE}/${slug}"

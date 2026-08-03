@@ -48,6 +48,20 @@ sleep() { :; }
 # translation itself is exercised separately (see the kit-translate section).
 export ACQ_SBX_KIT_PASSTHROUGH=1
 
+# msb equivalent: resolve every REMOTE kit ref to a local empty spec dir instead
+# of a real git fetch. This keeps the suite network-free for the msb
+# heal/provision paths (acq_backend_provision / acq_backend_ensure_kits_applied),
+# including when acq is invoked as a CHILD process, where a test cannot shadow
+# _acq_msb_fetch_kit. Local kit paths still pass through unchanged, so tests that
+# supply an explicit local kit dir (e.g. mid-life apply) are unaffected;
+# in-process tests that override _acq_msb_fetch_kit still win for the refs they
+# pass. On a CI host with git + network this prevents a real fetch that would
+# otherwise hang.
+_ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-nokit.XXXXXX")
+printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml"
+export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
+trap 'rm -rf "$_ACQ_MSB_OFFLINE_KIT_DIR"' EXIT
+
 # ---------------------------------------------------------------------------
 # Stub scaffolding
 # ---------------------------------------------------------------------------
@@ -2396,10 +2410,19 @@ commands:
       - echo MULTI_STARTUP_TWO
 SPEC
   # Point the four built-in kit refs at our two fixtures (the 3rd/4th reuse the
-  # empty nokit) so the REAL provision loop fetches and applies both.
+  # empty nokit) so the REAL provision loop fetches and applies both. These are
+  # consumed by acq_backend_provision's built-in kit list, then routed through the
+  # _acq_msb_fetch_kit override below (indirection shellcheck cannot see).
   mkdir -p "$STUBDIR/nokit"
   printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$STUBDIR/nokit/spec.yaml"
-  USAI_KIT="k1"; PLAYBOOK_KIT="k2"; ZSCALER_KIT="k3"; GITSSHSIGN_KIT="k4"
+  # shellcheck disable=SC2034  # all four assigned here, read by the provision loop
+  USAI_KIT="k1"
+  # shellcheck disable=SC2034
+  PLAYBOOK_KIT="k2"
+  # shellcheck disable=SC2034
+  ZSCALER_KIT="k3"
+  # shellcheck disable=SC2034
+  GITSSHSIGN_KIT="k4"
   _acq_msb_fetch_kit() {
     case "$1" in
       k1) printf '%s\n' "$mk1" ;;
