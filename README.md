@@ -270,20 +270,17 @@ quickstart for when you want to customize or troubleshoot.
 
 `acq` applies **four mixin kits** (by pinned remote reference from the
 community [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
-repo) when it creates a sandbox, delivering everything declaratively. Kits are
-authored once in a neutral vocabulary and translated to whichever backend is
-active:
+repo) when it creates a sandbox:
 
 - **`usai-provider`** — stages the USAi config at `~/usai-config/opencode.jsonc`
   and, at startup, merges it into OpenCode's global config at
   `~/.config/opencode/opencode.jsonc` (allow-listing USAi egress). It composes
-  with, rather than clobbers, any existing global config, and no longer sets
-  `OPENCODE_CONFIG`.
+  with, rather than clobbers, any existing global config.
 - **`agentic-coding-playbook`** — clones the playbook at startup into
   `~/.agentic-coding-playbook` and symlinks its `AGENTS.md` into each agent's
   rules path and its skills into `~/.agents/skills` (+ per-agent roots).
 - **`zscaler-ca-certificate`** — installs the public Zscaler Root CA into the
-  sandbox trust store (harmless off-Zscaler).
+  sandbox trust store (harmless if Zscaler isn't in use).
 - **`git-ssh-sign`** — signs git commits and tags with the SSH key forwarded
   from your host's SSH agent; the private key never enters the sandbox. Load a
   key on the host first (`ssh-add ~/.ssh/id_ed25519`) — without one, commits fail
@@ -291,15 +288,11 @@ active:
   not make a commit GitHub-**Verified**; see
   [Commits show "Unverified" on GitHub](#troubleshooting).
 
-> While the playbook repo is private (during rollout), the clone needs a GitHub
-> token — set it once with `./acq secret set -g github`. `acq` injects it; the
-> sandbox never sees it. Once the repo is public this is unnecessary.
-
 ### How the USAi key is injected
 
-USAi is not a built-in service, so `acq` stores its key in its own secret store
-(`./acq secret set -g usai`) with an explicit endpoint (`api.gsa.usai.gov`) and
-injects it into the sandbox at runtime — the real value stays out of the guest.
+`acq` stores the USAi API key in its own secret store
+(`./acq secret set -g usai`) with an explicit associated endpoint (`api.gsa.usai.gov`) and
+injects it into requests at runtime — the real value stays out of the guest.
 
 ### Key pre-validation
 
@@ -311,16 +304,7 @@ yet, or it has expired, `acq` prompts you to paste a key (or
 
 The `usai-provider` kit ships an `opencode.jsonc` with a generated USAi model
 catalog, kept in sync with the USAi `/models` API so new projects start from a
-current baseline. Default model policy:
-
-- `model` tracks the highest available Opus generation
-- `agent.compaction.model` tracks the highest available GPT generation
-- `small_model` stays a curated fast/cheap fallback
-
-It is still possible for a model listed by `/models` to fail at runtime for a
-specific key or request. See
-[docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md) for troubleshooting.
-The catalog and its refresh tooling live with the kit in the patterns repo.
+current baseline. See the kit definition in the agentic-coding-patterns repository for details.
 
 ---
 ## Customizing your setup
@@ -328,13 +312,13 @@ The catalog and its refresh tooling live with the kit in the patterns repo.
 `acq` applies a fixed set of four kits, pinned to a commit of the patterns
 repo. To customize:
 
-- **Adopt newer kits:** bump `PATTERNS_KIT_REF` near the top of `acq.backends/common.sh`.
 - **Add your own kits on every run:** see [Advanced: extra kits](#advanced-extra-kits).
 - **Change USAi models / provider config, rules, or skills:** contribute to the
   kits in the
   [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
   repo (`integrations/isolation/acq-kits/`), where each kit and its design notes
   live.
+- **Adopt newer kit versions:** bump `PATTERNS_KIT_REF` near the top of `acq.backends/common.sh`.
 
 ---
 
@@ -363,16 +347,16 @@ export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 
 ## Optional Integrations
 
+- **OpenCode Web** — Run OpenCode in the sandbox and reach it from your host
+  browser for clipboard support and richer markdown rendering. Use the
+  [`openchamber` acq kit](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations/isolation/acq-kits/openchamber),
+  which runs `opencode serve` on host-published port 4096 (plus the OpenChamber
+  UI on 3000).
 - **Editor integrations (Zed, etc.)** — Editor task configs and setup guides now
   live in the community
   [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations)
   repo under `integrations/`. (For example, the Zed editor integration is at
   `integrations/editors/zed/`.)
-- **OpenCode Web** — Run OpenCode in the sandbox and reach it from your host
-  browser for clipboard support and richer markdown rendering. Use the
-  [`openchamber` acq kit](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations/isolation/acq-kits/openchamber),
-  which runs `opencode serve` on host-published port 4096 (plus the OpenChamber
-  UI on 3000) via a supervised lifecycle, on both backends.
 
 ---
 
@@ -385,36 +369,7 @@ when it expires (see [Troubleshooting](#troubleshooting)).
 # Update the quickstart clone
 git fetch && git pull
 
-# Adopt newer kits (USAi config, playbook, CA): bump PATTERNS_KIT_REF near the
-# top of acq.backends/common.sh to a newer agentic-coding-patterns commit, then
-# recreate sandboxes.
 ```
-
-> [!NOTE]
-> **Resuming a sandbox created by an older `acq`.** Sandboxes created before the
-> kit migration have an outdated provider config or no playbook. The next time you
-> `acq run opencode <path>` against such a sandbox, `acq` detects the missing
-> kit(s) and re-applies them in place, preserving your work and sessions. Restart
-> the agent (or start a fresh session) so it re-reads the config and picks up the
-> playbook.
-
-### Migrating an existing clone off the playbook submodule
-
-Earlier versions vendored the playbook as a git submodule at
-`agentic-coding-playbook/`. The kits now live in the
-[agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
-repo and `acq` fetches them at sandbox-create time, so the submodule is gone. If
-you cloned before that change, `git pull` leaves an orphaned submodule directory;
-clean it up once:
-
-```bash
-git submodule deinit -f agentic-coding-playbook 2>/dev/null || true
-git rm -f agentic-coding-playbook 2>/dev/null || true
-rm -rf .git/modules/agentic-coding-playbook agentic-coding-playbook
-```
-
-No sandbox impact — the playbook is delivered by the `agentic-coding-playbook`
-kit, not the submodule.
 
 ---
 
