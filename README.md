@@ -6,7 +6,7 @@
 **In one sentence:** this quickstart gets you running an AI coding agent connected to USAi in under 5 minutes, using `acq`, a CLI tool provided here.
 
 **`acq`** is the entry point. It runs your agent inside an isolated sandbox and
-configures the environment for federal usage. To provide that isolation, it uses **msb**
+configures the environment for federal usage. To provide that isolation, it uses **`msb`**
 (microsandbox), a lightweight, open-source microVM runtime.
 
 > acq is designed to support multiple isolation backends. A Docker Sandboxes (**`sbx`**) backend
@@ -48,7 +48,7 @@ Then make sure you have each of these ready:
 | --------------- | ---------------------------------------------------------- |
 | A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li></ul>See [msb host setup](docs/QUICKSTART.md#msb-host-setup) for per-platform details; `msb doctor` (Step 2) is the authoritative check. |
 | USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
-| GitHub token | (recommended) Lets the agent authenticate to GitHub — to fetch the `acq` kits, work with private repositories, and act on your behalf (open PRs, push). `acq` can walk you through creating a repo-scoped one on first run. A token is needed today to fetch the kits while the [patterns repo](https://github.com/GSA-TTS/agentic-coding-patterns) is private; that requirement goes away once it is public. |
+| GitHub token | (recommended) Lets the agent authenticate to GitHub, work with private repositories, and act on your behalf (open PRs, push). `acq` can walk you through creating a repo-scoped one on first run. A token is needed today to fetch the kits while the [patterns repo](https://github.com/GSA-TTS/agentic-coding-patterns) is private; that requirement goes away once it is public. |
 
 <details>
 <summary>How to verify each requirement (click to expand)</summary>
@@ -56,8 +56,8 @@ Then make sure you have each of these ready:
 Run each command in your terminal. If a command isn't found, that requirement isn't installed yet.
 
 - **microVM support** — Linux users can check now with `test -e /dev/kvm && echo ok`. macOS (Apple Silicon) and Windows 11 have nothing to enable ahead of time beyond the platform above. `msb doctor` in Step 1 is the authoritative check; for per-platform setup and fixes, see [msb host setup](docs/QUICKSTART.md#msb-host-setup).
-- **USAi API key** — visit [the key-management console](https://console.gsa.usai.gov/key-management); you should see (or be able to create) a key. Have the token string ready to paste in Step 3.
-- **GitHub token** — either have a fine-grained personal access token ready to paste in Step 3, or let `acq` walk you through creating a repo-scoped one on first run.
+- **USAi API key** — visit [the key-management console](https://console.gsa.usai.gov/key-management); you should see (or be able to create) a key. Keep the token string handy — `acq` prompts for it on first run.
+- **GitHub token** — optional up front: `acq` can walk you through creating a repo-scoped one on first run, or have a fine-grained personal access token ready to paste.
 
 </details>
 
@@ -82,63 +82,40 @@ git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
 cd agentic-coding-quickstart
 ```
 
-The `acq` commands in Steps 3–4 are run from inside this cloned folder.
+The `acq` command in Step 3 is run from inside this cloned folder.
 
-### Step 3: Configure secrets (once)
-
-`acq` owns a secret store, so you set your secrets once. `acq` injects them into
-the sandbox at runtime — the real values **never enter the guest**.
-
-```bash
-# 1. Store your USAi API key (you will be prompted for it)
-./acq secret set -g usai
-
-# 2. Store a GitHub token (for code access)
-#
-# RECOMMENDED — scope a token per-sandbox to just the repos you mount. On
-# `acq run`, if a sandbox has no repo-scoped token, acq detects the repos in
-# your workspace and walks you through creating a fine-grained token limited to
-# them (in the browser — no extra tooling needed). You can also do it explicitly:
-#   acq github-scope <sandbox-name> /path/to/your/project
-#
-# Or store a token directly (you will be prompted; input hidden):
-./acq secret set -g github
-
-# If you already use the GitHub CLI, you can pipe its token instead:
-#   gh auth token | ./acq secret set -g github
-```
-
-> [!WARNING]
-> A token from `gh auth token`, or a classic PAT, carries **account-wide**
-> scopes (`repo`, `workflow`, `delete_repo`, …). Stored globally (`-g`), that
-> broad authority is injected into **every** sandbox — an agent working on one
-> project can act as you on **all** your repositories. Prefer a per-sandbox
-> fine-grained token scoped to the mounted repos (see `acq github-scope` above and
-> [ADR-0013](docs/adr/0013-per-sandbox-github-token-downscoping.md)).
-> Fine-grained tokens can't contribute to public repos you're not a member of or
-> call the Checks API — fall back to a global token for those cases.
-
-**Check it worked:** run `./acq secret ls` — you should see your `usai` (and
-`github`) entries in the store.
-
-> [!NOTE]
-> USAi API keys expire every 7 days; when one does, see
-> [Troubleshooting](#troubleshooting) to rotate it.
->
-> Sandboxes also sign your git commits with your host SSH key. For those commits
-> to show **Verified** on GitHub you need, one time: a GitHub-verified
-> `user.email` set **in the project** (repo-local config, since the sandbox has
-> its own home and does not see your host global git config) and your **public**
-> signing key registered on GitHub as a _Signing Key_. See
-> [Commits show "Unverified" on GitHub](#troubleshooting) below.
-
-### Step 4: Create and run a sandbox (as often as you like)
+### Step 3: Create and run a sandbox
 
 ```bash
 ./acq run opencode /path/to/your/project
 ```
 
-That's it. You're now running an AI coding agent with USAi access and restricted filesystem and network access. Repeat this to create sandboxes for each project you want to work on.
+That's it. You're now running an AI coding agent with USAi access and restricted
+filesystem and network access. Repeat this to create sandboxes for each project
+you want to work on.
+
+On first run, `acq` sets you up interactively — nothing to configure beforehand:
+
+- **USAi key** — `acq` validates your key and, if none is set (or it has
+  expired), prompts you to paste one and stores it. Have your key from the
+  [prerequisites](#step-0-prerequisites) handy.
+- **GitHub token** — when your workspace contains GitHub repos, `acq` offers to
+  walk you through creating a repo-scoped token so the agent can access them.
+  You can decline and add one later.
+- **Git signing** — `acq` warns if your host has no SSH key loaded or the repo
+  has no `user.email`, so your sandbox commits sign and verify correctly.
+
+`acq` injects secrets into the sandbox at runtime — the real values **never
+enter the guest**. To set secrets ahead of time (for CI or scripted setups),
+see [Secrets](docs/QUICKSTART.md#secrets) in the acq Quickstart.
+
+> [!NOTE]
+> Sandboxes sign your git commits with your host SSH key. For those commits to
+> show **Verified** on GitHub you need, one time: a GitHub-verified `user.email`
+> set **in the project** (repo-local config, since the sandbox has its own home
+> and does not see your host global git config) and your **public** signing key
+> registered on GitHub as a _Signing Key_. See
+> [Commits show "Unverified" on GitHub](#troubleshooting) below.
 
 **Want to know more about what `acq` is doing under the hood?** See [How It Works](#how-it-works).
 
@@ -326,9 +303,9 @@ injects it into the sandbox at runtime — the real value stays out of the guest
 
 ### Key pre-validation
 
-Before attaching, `acq` checks that the sandbox's USAi key still works. If it
-has expired, it walks you through [rotating it](#troubleshooting) and
-re-validates before launching the agent.
+Before attaching, `acq` checks that the sandbox's USAi key works. If none is set
+yet, or it has expired, `acq` prompts you to paste a key (or
+[rotate it](#troubleshooting)) and re-validates before launching the agent.
 
 ### How default USAi models are chosen
 
