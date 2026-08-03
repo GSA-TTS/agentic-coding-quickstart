@@ -1,17 +1,16 @@
 # Agentic Coding Quickstart
 
-> **Audience:** GSA teams using AI coding agents
+> **Audience:** Federal teams using AI coding agents \
 > **Purpose:** Get AI coding agents running safely inside isolated sandboxes, connected to USAi
 
 **In one sentence:** this quickstart gets you running an AI coding agent connected to USAi in under 5 minutes, using `acq`, a CLI tool provided here.
 
 **`acq`** is the entry point. It runs your agent inside an isolated sandbox and
-applies a federally-configured set of kits. By default it uses **msb**
-(microsandbox), a lightweight, open-source microVM runtime that needs no Docker
-account.
+configures the environment for federal usage. To provide that isolation, it uses **msb**
+(microsandbox), a lightweight, open-source microVM runtime.
 
-> Prefer Docker Sandboxes? `acq` runs the same commands on the **sbx** backend
-> too. See [docs/QUICKSTART_SBX.md](docs/QUICKSTART_SBX.md) for sbx setup and
+> acq is designed to support multiple isolation backends. A Docker Sandboxes (**`sbx`**) backend
+> is also supported. See [docs/QUICKSTART_SBX.md](docs/QUICKSTART_SBX.md) for sbx setup and
 > [docs/BACKEND_GUIDE.md](docs/BACKEND_GUIDE.md) for how the two backends compare.
 
 ## Agentic Coding Ecosystem
@@ -32,7 +31,7 @@ Once you complete this Quickstart to get your environment working, use the Playb
 
 ### Step 0: Prerequisites
 
-You will run the commands in this guide from a terminal. Open one now:
+You will run the commands in this guide from a terminal. Open one now...
 
 <details>
 <summary>How to open a terminal (click to expand)</summary>
@@ -47,7 +46,7 @@ Then make sure you have each of these ready:
 
 | Requirement     | Notes                                                      |
 | --------------- | ---------------------------------------------------------- |
-| A machine that can run microVMs | msb needs hardware virtualization. You'll confirm this in Step 2 with `msb doctor`. |
+| A supported host for microVMs | msb uses hardware virtualization, so you need one of: **glibc-based Linux with KVM enabled** (`/dev/kvm` present), **macOS on Apple Silicon** (Intel Macs are not supported), or **Windows 11 with the Windows Hypervisor Platform enabled** (preview). Inside a cloud VM or CI runner, the outer environment must expose **nested virtualization**. You'll confirm your host in Step 2 with `msb doctor`. |
 | USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
 | GitHub CLI (`gh`) | (optional) GitHub's official command-line tool ([install](https://cli.github.com/)). It lets the coding agent work with your repos without you handling a token by hand. |
 | GitHub personal access token | (optional) Needed only if you are **not** using the GitHub CLI |
@@ -57,7 +56,7 @@ Then make sure you have each of these ready:
 
 Run each command in your terminal. If a command isn't found, that requirement isn't installed yet.
 
-- **microVM support** — you can't confirm this until Step 2, since `msb` isn't installed yet. It's confirmed when `msb doctor` reports the host is ready.
+- **microVM support** — Linux users can check now with `test -e /dev/kvm && echo ok` (a missing `/dev/kvm` means KVM is disabled in firmware, unavailable, or hidden by an outer VM without nested virtualization). macOS (Apple Silicon) and Windows 11 have nothing to enable ahead of time beyond the platform above. Either way, `msb doctor` in Step 2 is the authoritative check.
 - **USAi API key** — visit [the key-management console](https://console.gsa.usai.gov/key-management); you should see (or be able to create) a key. Have the token string ready to paste in Step 3.
 - **GitHub CLI** — `gh auth status` should report that you're logged in.
 - **GitHub personal access token** — only needed without the GitHub CLI; have the token string ready to paste in Step 3.
