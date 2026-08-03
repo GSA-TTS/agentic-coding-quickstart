@@ -150,6 +150,50 @@ msb takes native shortcuts where it has a strictly-better primitive — e.g. the
 Zscaler CA kit uses `--trust-host-cas` instead of the file-drop mechanism. Kit
 behavior is otherwise identical across backends.
 
+### msb host setup
+
+msb runs each sandbox as a lightweight microVM, so the host must provide
+hardware virtualization. `msb doctor` is the authoritative check (and
+`msb doctor --fix` attempts supported setup changes); the per-platform
+requirements below mirror the [microsandbox docs](https://microsandbox.dev):
+
+**Linux** — a glibc-based distribution with KVM enabled.
+
+```bash
+# KVM device present?
+test -e /dev/kvm && echo ok
+
+# CPU virtualization exposed? (non-zero = vmx/svm present)
+grep -Ec '(vmx|svm)' /proc/cpuinfo
+```
+
+A missing `/dev/kvm` (or a `0` from the second command) means virtualization is
+disabled in firmware, unavailable on the machine, or hidden by an outer VM. If
+your user lacks access to the device, add yourself to the `kvm` group once:
+
+```bash
+sudo usermod -aG kvm "$USER" && newgrp kvm
+```
+
+**macOS** — Apple Silicon (M-series). Intel Macs are **not supported** for the
+local runtime, and Rosetta does not change that. Nothing to enable ahead of
+time: Apple Silicon Macs include the hypervisor support msb uses.
+
+**Windows 11** — Windows support is in **preview**. Local sandboxes need the
+**Windows Hypervisor Platform** feature (this is separate from the
+`VirtualMachinePlatform` feature that WSL2 and Docker Desktop enable):
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart
+```
+
+`msb doctor --fix` can apply this for you from an elevated PowerShell window.
+
+**Inside a cloud VM, CI runner, or another hypervisor** — the outer environment
+must expose **nested virtualization** before `/dev/kvm` (or the equivalent) is
+available to msb. Many hosted CI runners and cloud VMs do not enable it by
+default.
+
 ---
 
 ## Managing kits

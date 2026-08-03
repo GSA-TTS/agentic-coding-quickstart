@@ -46,7 +46,7 @@ Then make sure you have each of these ready:
 
 | Requirement     | Notes                                                      |
 | --------------- | ---------------------------------------------------------- |
-| A supported host for microVMs | msb uses hardware virtualization, so you need one of: **glibc-based Linux with KVM enabled** (`/dev/kvm` present), **macOS on Apple Silicon** (Intel Macs are not supported), or **Windows 11 with the Windows Hypervisor Platform enabled** (preview). Inside a cloud VM or CI runner, the outer environment must expose **nested virtualization**. You'll confirm your host in Step 2 with `msb doctor`. |
+| A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li></ul>Inside a cloud VM or CI runner, the outer environment must expose **nested virtualization**. See [msb host setup](docs/QUICKSTART.md#msb-host-setup) for per-platform details; `msb doctor` (Step 2) is the authoritative check. |
 | USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
 | GitHub CLI (`gh`) | (optional) GitHub's official command-line tool ([install](https://cli.github.com/)). It lets the coding agent work with your repos without you handling a token by hand. |
 | GitHub personal access token | (optional) Needed only if you are **not** using the GitHub CLI |
@@ -56,7 +56,7 @@ Then make sure you have each of these ready:
 
 Run each command in your terminal. If a command isn't found, that requirement isn't installed yet.
 
-- **microVM support** — Linux users can check now with `test -e /dev/kvm && echo ok` (a missing `/dev/kvm` means KVM is disabled in firmware, unavailable, or hidden by an outer VM without nested virtualization). macOS (Apple Silicon) and Windows 11 have nothing to enable ahead of time beyond the platform above. Either way, `msb doctor` in Step 2 is the authoritative check.
+- **microVM support** — Linux users can check now with `test -e /dev/kvm && echo ok`. macOS (Apple Silicon) and Windows 11 have nothing to enable ahead of time beyond the platform above. `msb doctor` in Step 2 is the authoritative check; for per-platform setup and fixes, see [msb host setup](docs/QUICKSTART.md#msb-host-setup).
 - **USAi API key** — visit [the key-management console](https://console.gsa.usai.gov/key-management); you should see (or be able to create) a key. Have the token string ready to paste in Step 3.
 - **GitHub CLI** — `gh auth status` should report that you're logged in.
 - **GitHub personal access token** — only needed without the GitHub CLI; have the token string ready to paste in Step 3.
