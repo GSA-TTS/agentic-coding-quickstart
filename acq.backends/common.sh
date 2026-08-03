@@ -408,15 +408,15 @@ _read_config_backend() {
   awk '/^[[:space:]]*backend[[:space:]]*:/ { gsub(/^[[:space:]]*backend[[:space:]]*:[[:space:]]*/,""); gsub(/[[:space:]]*$/,""); print; exit }' "$cfg"
 }
 
-# Try to auto-detect an available backend. Prefers sbx (the mature default),
-# then msb (microsandbox). First one found wins.
+# Try to auto-detect an available backend. Prefers msb (microsandbox, the
+# default), then sbx. First one found wins.
 _auto_detect_backend() {
-  if command -v sbx >/dev/null 2>&1; then
-    printf 'sbx\n'
-    return 0
-  fi
   if command -v msb >/dev/null 2>&1; then
     printf 'msb\n'
+    return 0
+  fi
+  if command -v sbx >/dev/null 2>&1; then
+    printf 'sbx\n'
     return 0
   fi
   return 1
@@ -451,7 +451,7 @@ acq_resolve_backend() {
       name="$cfg_name"
     else
       name=$(_auto_detect_backend) || {
-        echo "acq: error: no backend detected. Install sbx (>= 0.35.0) or msb (>= 0.6.0)," >&2
+        echo "acq: error: no backend detected. Install msb (>= 0.6.0) or sbx (>= 0.35.0)," >&2
         echo "     or set ACQ_BACKEND." >&2
         echo "     Run 'acq doctor' for installation hints." >&2
         exit 1
@@ -1208,7 +1208,7 @@ acq_print_doctor() {
   fi
 
   echo ""
-  printf "  Write '%s' as the default backend to %s? [y/N] " "${ACQ_RESOLVED_BACKEND:-sbx}" "$config_file" >&2
+  printf "  Write '%s' as the default backend to %s? [y/N] " "${ACQ_RESOLVED_BACKEND:-msb}" "$config_file" >&2
   local answer=""
   read -r answer || true
   case "$answer" in
@@ -1216,7 +1216,7 @@ acq_print_doctor() {
       local cfg_dir
       cfg_dir=$(dirname "$config_file")
       mkdir -p "$cfg_dir"
-      printf 'backend: %s\n' "${ACQ_RESOLVED_BACKEND:-sbx}" > "$config_file"
+      printf 'backend: %s\n' "${ACQ_RESOLVED_BACKEND:-msb}" > "$config_file"
       echo "  Wrote default backend to ${config_file}." >&2
       ;;
     *)

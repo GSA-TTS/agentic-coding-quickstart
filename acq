@@ -2,9 +2,8 @@
 #
 # acq — pluggable-backend wrapper for agentic-coding-quickstart
 #
-# acq is the forward path; qsbx is frozen and deprecated. acq wraps a sandbox
-# backend (sbx or msb) and applies the shared neutral kits. See `acq help` for
-# usage, or docs/QUICKSTART.md and docs/BACKEND_GUIDE.md.
+# acq wraps a sandbox backend (msb or sbx) and applies the shared neutral kits.
+# See `acq help` for usage, or docs/QUICKSTART.md and docs/BACKEND_GUIDE.md.
 
 set -euo pipefail
 
@@ -116,8 +115,8 @@ Any other subcommand is passed through to the active backend's CLI.
 Global flags (before the subcommand):
   --backend sbx|msb    Override the active backend for this invocation.
                        Default: the persisted backend (`acq backend set`),
-                       else sbx. `sbx` runs Docker sandboxes via the sbx CLI;
-                       `msb` runs microVMs via the microsandbox (msb) CLI.
+                       else msb. `msb` runs microVMs via the microsandbox (msb)
+                       CLI; `sbx` runs Docker sandboxes via the sbx CLI.
 
 run/create flag:
   --kit REF            Apply an extra kit (repeatable). REF is a local dir or a
@@ -584,7 +583,7 @@ case "$subcommand" in
       # ensure_valid_key is intentionally omitted here: we don't have the
       # create args needed to provision a fresh validation sandbox, and
       # attaching by name is a re-attach to a running session where the key
-      # was already validated on the original acq run. Matches qsbx behavior.
+      # was already validated on the original acq run.
       # Capture staleness BEFORE the heal (the heal rewrites provenance to
       # "current"), then heal, then offer a refresh. Never
       # blocks; skipped under --no-update-check / ACQ_UPDATE_CHECK=0.
