@@ -1083,29 +1083,34 @@ _acq_msb_startup_emit_command() {
   esac
 }
 
-# _acq_msb_generate_startup_script SPEC OUTFILE — write the guest startup script
-# for one kit spec's STARTUP-phase commands into OUTFILE. Returns 0 and writes a
-# non-empty script iff the kit HAS at least one startup command; returns 1 (and
-# writes nothing) when there are none, so the caller registers no empty script.
-# Parses the same __CMD__/base64-argv stream _acq_msb_run_commands consumes, but
-# keeps ONLY startup-phase records.
-_acq_msb_generate_startup_script() {
-  local _spec="$1" _out="$2"
-
-  # Collect the kit's environment[] entries (same validation as the exec path).
-  local _kit_env=() eline ekey eval_v
+# _acq_msb_collect_kit_env_into ARRVAR SPEC — read SPEC's environment[] entries
+# (via kit_spec_env, same validation as the exec path) and append each as a
+# NAME=value element to the array named ARRVAR.
+_acq_msb_collect_kit_env_into() {
+  local _arrn="$1" _spec="$2" eline ekey eval_v
   while IFS= read -r eline; do
     [ -n "$eline" ] || continue
     ekey=$(printf '%s' "$eline" | cut -f1)
     eval_v=$(printf '%s' "$eline" | cut -f2-)
     [ -n "$ekey" ] || continue
-    _kit_env+=("${ekey}=${eval_v}")
+    eval "$_arrn+=(\"\${ekey}=\${eval_v}\")"
   done <<EOF
 $(kit_spec_env "$_spec")
 EOF
+}
 
-  # Buffer the command stream first (kit_spec_commands runs its own subshell; no
-  # msb exec here, but keep the buffer-then-parse shape for consistency).
+# _acq_msb_startup_body_into BODYVAR SPEC — parse SPEC's __CMD__/base64-argv
+# command stream (the same stream _acq_msb_run_commands consumes) and append one
+# guest command line per STARTUP-phase record to the variable named BODYVAR.
+# Returns 0 iff at least one startup command line was emitted. Non-startup phases
+# are ignored here (install/initFiles stay on the exec path — ADR-0017).
+_acq_msb_startup_body_into() {
+  local _bodyn="$1" _spec="$2"
+
+  local _kit_env=()
+  _acq_msb_collect_kit_env_into _kit_env "$_spec"
+
+  # Buffer the command stream first (kit_spec_commands runs its own subshell).
   local _lines=() line
   while IFS= read -r line; do
     _lines+=("$line")
@@ -1113,8 +1118,7 @@ EOF
 $(kit_spec_commands "$_spec")
 EOF
 
-  # Build the body in a temp buffer; only write OUTFILE if we found a startup cmd.
-  local _body="" _emitted=0
+  local _emitted=0
   local phase="" user="" argv=() reading=0 _i background="false"
   for _i in ${_lines[@]+"${!_lines[@]}"}; do
     line="${_lines[$_i]}"
@@ -1130,13 +1134,12 @@ EOF
       "__END__")
         reading=0
         if [ "$phase" = "startup" ] && [ "${#argv[@]}" -gt 0 ]; then
-          # Build the env prefix + one guest command line for this record.
           local _prefix=() _cmdline
           _acq_msb_startup_env_prefix_into _prefix "$user" _kit_env
           _cmdline=$(_acq_msb_startup_emit_command "$user" "$background" _prefix argv)
           if [ -n "$_cmdline" ]; then
-            _body="${_body}${_cmdline}
-"
+            # Append "<cmdline>\n" by name; $'\n' is a literal newline (ANSI-C).
+            eval "$_bodyn=\${$_bodyn}\$_cmdline\$'\\n'"
             _emitted=1
           fi
         fi
@@ -1149,7 +1152,17 @@ EOF
     esac
   done
 
-  [ "$_emitted" -eq 1 ] || return 1
+  [ "$_emitted" -eq 1 ]
+}
+
+# _acq_msb_generate_startup_script SPEC OUTFILE — write the guest startup script
+# for one kit spec's STARTUP-phase commands into OUTFILE. Returns 0 and writes a
+# non-empty script iff the kit HAS at least one startup command; returns 1 (and
+# writes nothing) when there are none, so the caller registers no empty script.
+_acq_msb_generate_startup_script() {
+  local _spec="$1" _out="$2" _body=""
+
+  _acq_msb_startup_body_into _body "$_spec" || return 1
 
   # Emit the file: a self-contained /bin/sh with its own shebang (so --script-path
   # reads a complete verbatim body; no --shell shebang derivation dependency).
@@ -1190,6 +1203,12 @@ EOF
 # `--script-path` registration is not. This is what makes increment 1
 # runtime-neutral: the script is present but inert. Enrolling it in the persisted
 # startup (so it replays on a native restart) is the follow-up increment's job.
+#
+# This assumption is load-bearing and unverifiable from this repo, so it MUST be
+# re-verified on each msb version bump — if a future msb auto-runs a registered
+# `--script-path` at boot, kit startup would double-run (boot replay + acq heal).
+# See docs/KNOWN_FAILURE_MODES.md ("msb May Auto-Run a --script-path-Registered
+# Script at Boot") for the re-verification procedure and remediation.
 ACQ_MSB_STARTUP_SCRIPT_NAME="acq-startup"
 _acq_msb_stage_startup_script() {
   local _spec="$1" _arrn="$2"
@@ -1207,7 +1226,13 @@ _acq_msb_stage_startup_script() {
   chmod 700 "$_dir" 2>/dev/null || true
 
   local _file
-  _file=$(mktemp "${_dir}/acq-startup.XXXXXX" 2>/dev/null) || return 0
+  _file=$(mktemp "${_dir}/acq-startup.XXXXXX" 2>/dev/null) || {
+    # Staging is best-effort (the script is inert until a later increment
+    # invokes it), but a silent no-op would be undiagnosable — warn so the
+    # cause is visible rather than a mysteriously missing --script-path.
+    echo "acq(msb): warning: could not create startup-script staging file in ${_dir}; skipping --script-path." >&2
+    return 0
+  }
   chmod 600 "$_file" 2>/dev/null || true
 
   if _acq_msb_generate_startup_script "$_spec" "$_file"; then

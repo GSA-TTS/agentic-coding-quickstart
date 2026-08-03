@@ -2316,6 +2316,14 @@ assert_contains "0017: metachar startup body carried as single-quoted data" "$in
 # No secret VALUE anywhere in the generated script or the create line.
 assert_not_contains "0017: secret value never in generated startup script" "$inj_body" "SUPER_SECRET_VALUE_0017"
 assert_not_contains "0017: secret value never on the create line" "$inj_log" "SUPER_SECRET_VALUE_0017"
+# Hermetic escaping lock-in: the generated body must be syntactically valid sh —
+# a broken single-quote escape (breakout) would make `sh -n` fail. This catches
+# deep-nesting/backtick/$() escaping regressions without executing the body.
+if [ -n "$inj_file" ] && sh -n "$inj_file" 2>/dev/null; then
+  pass "0017: generated startup body is valid sh (no quote breakout)"
+else
+  fail "0017: generated startup body is valid sh (no quote breakout)" "sh -n failed on $inj_file"
+fi
 cleanup_stubs
 
 # 8o1i. ADR-0017 BODY FIDELITY: the generated startup body reproduces the SAME
