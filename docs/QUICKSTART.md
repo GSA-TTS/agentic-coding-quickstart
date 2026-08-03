@@ -76,6 +76,11 @@ kits, validates your USAi key, and attaches the agent.
 
 ### Secrets
 
+Setting secrets up front is **optional** — `acq run` validates your USAi key and
+prompts you to set or rotate it when it's missing or expired, and offers to
+scope a GitHub token when your workspace has GitHub repos. Set them explicitly
+when you want to pre-seed a machine, script setup, or run in CI:
+
 ```bash
 # USAi key — global (available to all sandboxes)
 ./acq secret set -g usai
@@ -89,6 +94,25 @@ kits, validates your USAi key, and attaches the agent.
 # Arbitrary custom endpoint — global
 ./acq secret set -g myservice --host api.example.com --env MY_API_KEY
 ```
+
+`acq` injects secrets into the sandbox at runtime; the real values never enter
+the guest.
+
+> [!WARNING]
+> A broad token — one from `gh auth token`, or a classic PAT — carries
+> **account-wide** scopes (`repo`, `workflow`, `delete_repo`, …). Stored globally
+> (`-g`), it is injected into **every** sandbox, so an agent working on one
+> project can act as you on **all** your repositories. Prefer a per-sandbox
+> fine-grained token scoped to just the mounted repos:
+>
+> ```bash
+> ./acq github-scope <sandbox-name> /path/to/your/project
+> ```
+>
+> This is also what `acq run` offers interactively. Fine-grained tokens can't
+> contribute to public repos you're not a member of or call the Checks API — fall
+> back to a global token for those cases. See
+> [ADR-0013](adr/0013-per-sandbox-github-token-downscoping.md).
 
 ### Rotate your USAi key
 
