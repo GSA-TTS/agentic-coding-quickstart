@@ -345,6 +345,103 @@ _acq_msb_is_running() {
 }
 
 # ---------------------------------------------------------------------------
+# _acq_msb_bind_secrets_into ARRVAR NAMESVAR NAME — resolve + export the secret
+# values a sandbox needs, and collect the matching `--secret ENV@HOST` flags.
+# ---------------------------------------------------------------------------
+# Single source of truth for WHICH secrets a sandbox binds and HOW their real
+# values reach the msb child process. Both `msb create` (provision) and
+# `msb start` (resume) read each bound secret's value from a HOST environment
+# variable named in the persisted `--secret ENV@HOST` binding; msb never keeps
+# the value, so the value must be present in the environment at BOTH create and
+# every start. Provision used to inline this; resume (acq_backend_start) omitted
+# it entirely, which made `msb start` fail with "host environment variable
+# USAI_API_KEY is not set". Factoring it here guarantees start binds the
+# identical set create did.
+#
+# The caller passes the NAMES of two arrays by reference: ARRVAR receives the
+# `--secret ENV@HOST` flag tokens (for create; start ignores them since msb
+# already persisted the bindings), and NAMESVAR receives the exported env-var
+# names so the caller can unset them after the msb child has read them. The real
+# value moves via a TRANSIENT exported env var (never argv, never the kit spec),
+# exactly as before.
+#
+# SCOPE: usai (always, if a value resolves or is pre-exported), github
+# (conditionally), and any generic custom endpoint recorded via
+# `acq secret set SVC --host H --env E` (enumerated from the non-secret sidecar).
+# This mirrors the SCOPE notes at the top of this file; see also
+# _acq_msb_service_binding.
+_acq_msb_bind_secrets_into() {
+  local _arrn="$1" _namesn="$2" _name="$3"
+
+  if command -v acq_secret_resolve >/dev/null 2>&1; then
+    local _usai_val
+    if _usai_val=$(acq_secret_resolve usai "$_name" 2>/dev/null) && [ -n "$_usai_val" ]; then
+      export USAI_API_KEY="$_usai_val"; _usai_val=""
+      eval "$_namesn+=(\"USAI_API_KEY\")"
+      eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
+      acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from acq store)"
+    elif [ -n "${USAI_API_KEY:-}" ]; then
+      # Fallback: a pre-exported USAI_API_KEY (e.g. CI) still works.
+      eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
+      acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from env)"
+    fi
+
+    # GitHub: bind GITHUB_TOKEN@api.github.com so kits can authenticate to the
+    # REST API (the substituted path). Resolve from the acq store first, then a
+    # pre-exported GITHUB_TOKEN/GH_TOKEN (CI). Absent token => no binding; the
+    # playbook kit then degrades gracefully (warns, no rules/skills).
+    local _gh_val
+    if _gh_val=$(acq_secret_resolve github "$_name" 2>/dev/null) && [ -n "$_gh_val" ]; then
+      export GITHUB_TOKEN="$_gh_val"; _gh_val=""
+      eval "$_namesn+=(\"GITHUB_TOKEN\")"
+      eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
+      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from acq store)"
+    elif [ -n "${GITHUB_TOKEN:-}" ]; then
+      eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
+      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from env)"
+    elif [ -n "${GH_TOKEN:-}" ]; then
+      export GITHUB_TOKEN="$GH_TOKEN"
+      eval "$_namesn+=(\"GITHUB_TOKEN\")"
+      eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
+      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from GH_TOKEN env)"
+    fi
+
+    # GENERIC custom endpoints. usai + github were bound explicitly above. Any
+    # OTHER service stored via `acq secret set SVC --host H --env E` recorded a
+    # non-secret (host, env) sidecar; bind each such service generically here so
+    # it is no longer stored-but-inert. Iterate the endpoint sidecars for this
+    # sandbox scope + global, deduping by env var (a scoped mapping shadows the
+    # global; usai/github are skipped — already bound). The real value moves via
+    # a TRANSIENT env var (never argv), exactly like usai/github.
+    if command -v acq_secret_meta_list >/dev/null 2>&1; then
+      local _svc _binding _env _host _val _names_snapshot
+      while IFS= read -r _svc; do
+        [ -n "$_svc" ] || continue
+        case "$_svc" in usai|github) continue ;; esac  # bound explicitly above
+        _binding=$(_acq_msb_service_binding "$_svc" "$_name")
+        _env=$(printf '%s' "$_binding" | cut -f1)
+        _host=$(printf '%s' "$_binding" | cut -f2)
+        [ -n "$_env" ] && [ -n "$_host" ] || continue
+        # Skip if this env var was already collected (e.g. usai/github, or a dup).
+        eval "_names_snapshot=\" \${${_namesn}[*]-} \""
+        case "$_names_snapshot" in *" $_env "*) continue ;; esac
+        if _val=$(acq_secret_resolve "$_svc" "$_name" 2>/dev/null) && [ -n "$_val" ]; then
+          # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
+          export "$_env=$_val"; _val=""
+          eval "$_namesn+=(\"\$_env\")"
+          eval "$_arrn+=(--secret \"\${_env}@\${_host}\")"
+          acq_debug "msb secret: binding ${_env}@${_host} for custom service '$_svc' (from acq store)"
+        fi
+      done <<EOF
+$(acq_secret_meta_list "$_name")
+EOF
+    fi
+  elif [ -n "${USAI_API_KEY:-}" ]; then
+    eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # acq_backend_start NAME — start (resume) a stopped sandbox (ADR-0017 / #247)
 # ---------------------------------------------------------------------------
 # `msb start` resumes a stopped sandbox, preserving its persisted state
@@ -380,10 +477,32 @@ _acq_msb_is_running() {
 # defined below in this file (single source, reused by the post-create and the
 # start-if-stopped paths). The wait is best-effort: a timeout emits a warning
 # rather than aborting, mirroring the start-if-stopped path.
+#
+# SECRETS (fix): `msb start` re-reads the sandbox's persisted `--secret ENV@HOST`
+# bindings and REQUIRES each named value to be present in the host environment at
+# start time — msb does not retain the value across a stop. Provision exported
+# these before `msb create`; resume must do the SAME before `msb start`, or msb
+# fails with "host environment variable USAI_API_KEY is not set". We re-derive
+# the identical binding set from the acq store via _acq_msb_bind_secrets_into
+# (shared with provision), export the values transiently, run `msb start`, then
+# unset them so the values never linger. The collected --secret flags are unused
+# here (msb already persisted the bindings at create); only the exported values
+# matter for start.
 acq_backend_start() {
-  msb start "$1"
-  _acq_msb_wait_for_exec_ready "$1" || \
-    echo "acq(msb): warning: $1 did not become exec-ready after start." >&2
+  local _name="$1"
+  local _start_secret_flags=() _start_secret_names=()
+  _acq_msb_bind_secrets_into _start_secret_flags _start_secret_names "$_name"
+  local _start_rc=0
+  msb start "$_name" || _start_rc=$?
+  # Clear the transient secret env vars immediately after `msb start` read them
+  # (runs on both success and failure so no exported value lingers).
+  local _sev
+  for _sev in ${_start_secret_names[@]+"${_start_secret_names[@]}"}; do
+    unset "$_sev"
+  done
+  [ "$_start_rc" -eq 0 ] || return "$_start_rc"
+  _acq_msb_wait_for_exec_ready "$_name" || \
+    echo "acq(msb): warning: $_name did not become exec-ready after start." >&2
 }
 
 # ---------------------------------------------------------------------------
@@ -1602,73 +1721,15 @@ EOF
   #     API, not git: the playbook kit fetches a source tarball from
   #     api.github.com. Binding a single host also avoids a known microsandbox bug
   #     (multi-host binding: ineligible entry blocks eligible).
+  #
+  # The resolve+export+flag-collect is shared with the resume path
+  # (acq_backend_start) via _acq_msb_bind_secrets_into so create and start always
+  # bind the identical set. It exports each real value into a TRANSIENT env var
+  # (recorded in _secret_env_names) and appends the matching `--secret ENV@HOST`
+  # flags to create_flags; we unset the env vars right after `msb create` reads
+  # them.
   local _secret_env_names=()   # env vars we set transiently, cleared after create
-  if command -v acq_secret_resolve >/dev/null 2>&1; then
-    local usai_val
-    if usai_val=$(acq_secret_resolve usai "$name" 2>/dev/null) && [ -n "$usai_val" ]; then
-      export USAI_API_KEY="$usai_val"; usai_val=""
-      _secret_env_names+=("USAI_API_KEY")
-      create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
-      acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from acq store)"
-    elif [ -n "${USAI_API_KEY:-}" ]; then
-      # Fallback: a pre-exported USAI_API_KEY (e.g. CI) still works.
-      create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
-      acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from env)"
-    fi
-
-    # GitHub: bind GITHUB_TOKEN@api.github.com so kits can authenticate to the
-    # REST API (the substituted path). Resolve from the acq store first, then a
-    # pre-exported GITHUB_TOKEN/GH_TOKEN (CI). Absent token => no binding; the
-    # playbook kit then degrades gracefully (warns, no rules/skills).
-    local gh_val
-    if gh_val=$(acq_secret_resolve github "$name" 2>/dev/null) && [ -n "$gh_val" ]; then
-      export GITHUB_TOKEN="$gh_val"; gh_val=""
-      _secret_env_names+=("GITHUB_TOKEN")
-      create_flags+=(--secret "GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST}")
-      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from acq store)"
-    elif [ -n "${GITHUB_TOKEN:-}" ]; then
-      create_flags+=(--secret "GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST}")
-      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from env)"
-    elif [ -n "${GH_TOKEN:-}" ]; then
-      export GITHUB_TOKEN="$GH_TOKEN"
-      _secret_env_names+=("GITHUB_TOKEN")
-      create_flags+=(--secret "GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST}")
-      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from GH_TOKEN env)"
-    fi
-
-    # GENERIC custom endpoints. usai + github were bound
-    # explicitly above (unchanged). Any OTHER service stored via `acq secret set
-    # SVC --host H --env E` recorded a non-secret (host, env) sidecar; bind each
-    # such service generically here so it is no longer stored-but-inert. Iterate
-    # the endpoint sidecars for this sandbox scope + global, deduping by env var
-    # (a scoped mapping shadows the global; usai/github are skipped — already
-    # bound). The real value moves via a TRANSIENT env var (never argv), exactly
-    # like usai/github, and msb reads it from that host env var at create.
-    if command -v acq_secret_meta_list >/dev/null 2>&1; then
-      local _svc _binding _env _host _val
-      while IFS= read -r _svc; do
-        [ -n "$_svc" ] || continue
-        case "$_svc" in usai|github) continue ;; esac  # bound explicitly above
-        _binding=$(_acq_msb_service_binding "$_svc" "$name")
-        _env=$(printf '%s' "$_binding" | cut -f1)
-        _host=$(printf '%s' "$_binding" | cut -f2)
-        [ -n "$_env" ] && [ -n "$_host" ] || continue
-        # Skip if this env var was already bound (e.g. usai/github, or a dup).
-        case " ${_secret_env_names[*]-} " in *" $_env "*) continue ;; esac
-        if _val=$(acq_secret_resolve "$_svc" "$name" 2>/dev/null) && [ -n "$_val" ]; then
-          # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
-          export "$_env=$_val"; _val=""
-          _secret_env_names+=("$_env")
-          create_flags+=(--secret "${_env}@${_host}")
-          acq_debug "msb secret: binding ${_env}@${_host} for custom service '$_svc' (from acq store)"
-        fi
-      done <<EOF
-$(acq_secret_meta_list "$name")
-EOF
-    fi
-  elif [ -n "${USAI_API_KEY:-}" ]; then
-    create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
-  fi
+  _acq_msb_bind_secrets_into create_flags _secret_env_names "$name"
 
   # Create the sandbox (detached; msb create boots in the background).
   # NOTE: acq runs under `set -euo pipefail`, so capture the status with

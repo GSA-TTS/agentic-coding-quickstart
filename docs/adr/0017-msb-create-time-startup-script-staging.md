@@ -58,6 +58,17 @@ The original decision text below is preserved for the audit record; treat the
 "only option that makes startup re-run on a microsandbox-native restart" claim in
 the original Decision Outcome as **corrected** by this note.
 
+**Secret re-injection on resume (found in live testing).** `msb start` re-reads
+the sandbox's persisted `--secret ENV@HOST` bindings and requires each named
+value to be present in the *host* environment at start time — microsandbox does
+not retain the value across a stop. So `acq_backend_start` must resolve and
+export the same secrets `acq_backend_provision` bound at create, or `msb start`
+fails with `invalid config: secret USAI_API_KEY: host environment variable
+USAI_API_KEY is not set`. The resolve/export/`--secret`-collect logic is
+therefore shared between create and resume via a single helper
+(`_acq_msb_bind_secrets_into`), and the exported values are unset immediately
+after the msb child reads them (on both success and failure).
+
 ---
 
 # ADR-0017: Stage msb kit startup commands as a create-time script for restart durability (original)

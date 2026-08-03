@@ -204,7 +204,14 @@ case "$_msb_sub" in
     # already stopped) so the `acq restart` best-effort-bounce path (N1) can be
     # exercised: the dispatcher must NOT abort and must still proceed to `start`.
     [ "${STUB_MSB_STOP_FAIL:-0}" = "1" ] && exit 1 || : ;;
-  start) : ;;
+  start)
+    # Model the real `msb start`, which re-reads the sandbox's persisted
+    # `--secret ENV@HOST` bindings and REQUIRES the value to be present in the
+    # host env. Record which of the bound secret env vars were present at start
+    # time so a test can assert acq_backend_start exported them before starting.
+    { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
+    { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
+    : ;;
   remove|rm) : ;;
   copy|cp) : ;;
   modify) : ;;
@@ -2728,6 +2735,121 @@ guard_out=$(
 guard_rc=$?
 assert_contains "0017 N2b: unsupported-backend guard emits clear message" "$guard_out" "does not support start"
 if [ "$guard_rc" -ne 0 ]; then pass "0017 N2b: unsupported-backend guard exits nonzero"; else fail "0017 N2b: unsupported-backend guard exits nonzero" "rc=$guard_rc"; fi
+cleanup_stubs
+
+# 8o1V. SECRET RE-EXPORT ON START (ADR-0017). `msb start` re-reads the
+#        sandbox's persisted `--secret ENV@HOST` bindings and requires the value
+#        in the host env — so acq_backend_start MUST resolve+export the same
+#        secrets provision did, or `msb start` fails with "host environment
+#        variable USAI_API_KEY is not set". The msb stub's `start` arm records a
+#        `USAI_API_KEY=present` / `GITHUB_TOKEN=present` line when the var is set
+#        in its environment at start time. Assert both were exported before start,
+#        and that the real VALUES never leaked to argv, and that the vars do not
+#        linger in the caller's environment afterward.
+make_stubs; load_acq
+printf 'secretstartbox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'secretstartbox\n' > "$STUBDIR/.msb_running_list"
+: > "$CALLS"
+sstart_leak=$(
+  # Hermetic: clear any ambient secret vars from the caller's environment so the
+  # assertions prove acq_backend_start's own export/unset, not the outer shell.
+  unset USAI_API_KEY GITHUB_TOKEN GH_TOKEN
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/sstart-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL-VALUE\n' | acq_secret_store "$(_acq_secret_key usai)"
+  printf 'GH-REAL-VALUE\n'   | acq_secret_store "$(_acq_secret_key github)"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_start secretstartbox >/dev/null 2>&1
+  # The vars must NOT linger in this shell after start returns.
+  printf 'usai-lingers=%s\n' "${USAI_API_KEY:+yes}"
+  printf 'github-lingers=%s\n' "${GITHUB_TOKEN:+yes}"
+  if grep -q 'USAI-REAL-VALUE\|GH-REAL-VALUE' "$CALLS"; then echo LEAK; else echo CLEAN; fi
+)
+sstart_log=$(cat "$CALLS")
+assert_contains "0017 fix: start exports USAI_API_KEY before msb start" "$sstart_log" "USAI_API_KEY=present"
+assert_contains "0017 fix: start exports GITHUB_TOKEN before msb start" "$sstart_log" "GITHUB_TOKEN=present"
+# The `USAI_API_KEY=present` marker must be logged AFTER `msb start` begins, i.e.
+# the export happened before the start read it (marker is emitted by the start arm).
+assert_contains "0017 fix: start still invokes msb start NAME" "$sstart_log" "msb start secretstartbox"
+assert_contains "0017 fix: start never leaks secret values to argv" "$sstart_leak" "CLEAN"
+assert_not_contains "0017 fix: USAI_API_KEY does not linger after start" "$sstart_leak" "usai-lingers=yes"
+assert_not_contains "0017 fix: GITHUB_TOKEN does not linger after start" "$sstart_leak" "github-lingers=yes"
+cleanup_stubs
+
+# 8o1W. SECRET RE-EXPORT reaches the `acq run <stopped-sandbox>` path too: the
+#        start-if-stopped block inside ensure_kits_applied calls acq_backend_start,
+#        which must export the secret so the underlying `msb start` succeeds.
+make_stubs; load_acq
+printf 'stoppedsecbox\n' > "$STUBDIR/.msb_sandbox_list"   # exists
+: > "$STUBDIR/.msb_running_list"                           # but NOT running
+: > "$CALLS"
+(
+  unset USAI_API_KEY GITHUB_TOKEN GH_TOKEN
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/stoppedsec-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL-VALUE\n' | acq_secret_store "$(_acq_secret_key usai)"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  acq_backend_ensure_kits_applied stoppedsecbox >/dev/null 2>&1
+)
+stoppedsec_log=$(cat "$CALLS")
+assert_contains "0017 fix: run<stopped> exports USAI_API_KEY before msb start" "$stoppedsec_log" "USAI_API_KEY=present"
+assert_contains "0017 fix: run<stopped> still invokes msb start" "$stoppedsec_log" "msb start stoppedsecbox"
+cleanup_stubs
+
+# 8o1W2. SECRET RE-EXPORT covers GENERIC custom endpoints on start too (not just
+#        usai/github). A custom endpoint recorded via `acq secret set SVC --host H
+#        --env E` must have its value re-exported before `msb start`, exactly like
+#        the built-ins. The stub start arm records any bound env var it sees; here
+#        we assert the custom env var (MYCUSTOM_TOKEN) is present at start time.
+make_stubs; load_acq
+printf 'customstartbox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'customstartbox\n' > "$STUBDIR/.msb_running_list"
+: > "$CALLS"
+(
+  unset USAI_API_KEY GITHUB_TOKEN GH_TOKEN
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/customstart-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  # Record the non-secret endpoint sidecar + store the value for a custom service.
+  acq_secret_meta_store mysvc "" "api.example.gov" "MYCUSTOM_TOKEN"
+  printf 'CUSTOM-REAL-VALUE\n' | acq_secret_store "$(_acq_secret_key mysvc)"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # The generic-endpoint start arm reports presence for arbitrary bound env vars
+  # only if the stub is taught them; instead assert via a wrapper that records the
+  # exported var. Simplest: have acq_backend_start run, and check the value did
+  # NOT leak while the binding flag set was derived. Presence is proven by the
+  # custom env being exported into msb start's environment (captured below).
+  MYCUSTOM_TOKEN_SEEN=""
+  # Shadow msb to capture the custom env var at the moment of `start`.
+  msb() { if [ "${1:-}" = "start" ] && [ -n "${MYCUSTOM_TOKEN:-}" ]; then printf 'MYCUSTOM_TOKEN=present\n' >>"$CALLS"; fi; command "$STUBDIR/msb" "$@"; }
+  acq_backend_start customstartbox >/dev/null 2>&1
+)
+customstart_log=$(cat "$CALLS")
+assert_contains "0017 fix: start re-exports generic custom-endpoint secret" "$customstart_log" "MYCUSTOM_TOKEN=present"
+assert_not_contains "0017 fix: custom-endpoint value never leaks to argv" "$customstart_log" "CUSTOM-REAL-VALUE"
+cleanup_stubs
+
+# 8o1X. REFACTOR NON-REGRESSION: provision (which now shares
+#        _acq_msb_bind_secrets_into with start) still binds USAi + GitHub via
+#        --secret and still never leaks values — the behavior asserted in 8m,
+#        re-checked here to guard the shared-helper refactor.
+make_stubs; load_acq
+: > "$CALLS"
+prov_refactor_leak=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/provref-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL-VALUE\n' | acq_secret_store "$(_acq_secret_key usai)"
+  printf 'GH-REAL-VALUE\n'   | acq_secret_store "$(_acq_secret_key github)"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision provrefbox shell /tmp >/dev/null 2>&1
+  if grep -q 'USAI-REAL-VALUE\|GH-REAL-VALUE' "$CALLS"; then echo LEAK; else echo CLEAN; fi
+)
+prov_refactor_log=$(cat "$CALLS")
+assert_contains "0017 refactor: provision still binds USAi via --secret" "$prov_refactor_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
+assert_contains "0017 refactor: provision still binds github via --secret" "$prov_refactor_log" "--secret GITHUB_TOKEN@api.github.com"
+assert_contains "0017 refactor: provision still never leaks values to argv" "$prov_refactor_leak" "CLEAN"
 cleanup_stubs
 
 # 8o2. SECURITY: a hostile kit `mode` must not reach a root shell. kit_spec_files
