@@ -1066,7 +1066,7 @@ acq_backend_rotate_key() {
   # particular pre-existing sandbox. Created here, removed on exit.
   local validation_sbx="acq-keycheck-$$"
   # shellcheck disable=SC2064
-  trap "sbx rm '$validation_sbx' >/dev/null 2>&1 || true" EXIT
+  trap "sbx rm '$validation_sbx' -f >/dev/null 2>&1 || true" EXIT
 
   echo "Validating new key in a temporary sandbox..." >&2
   # `sbx create` needs an authenticated sbx session. If it has expired, sbx
@@ -1101,7 +1101,7 @@ acq_backend_rotate_key() {
       -H \"Authorization: Bearer \$USAI_API_KEY\" \
       $usai_models_url" 2>/dev/null || true)
 
-  sbx rm "$validation_sbx" >/dev/null 2>&1 || true
+  acq_backend_terminate "$validation_sbx" >/dev/null 2>&1 || true
   trap - EXIT
 
   if [ "$status" = "200" ]; then
