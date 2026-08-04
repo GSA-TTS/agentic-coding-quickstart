@@ -96,38 +96,36 @@ sbx login
 ```
 
 > [!NOTE]
-> **macOS Gatekeeper will block `sbx` helper binaries — this is an `sbx`
-> dependency issue, not a Quickstart/`acq` bug, and it is expected.** On recent
-> macOS (including Tahoe/26), the block commonly appears at **Step 3**
-> (`sbx policy init balanced`) — the first command that builds a sandbox
-> filesystem — not only at `sbx login`. `sbx` invokes helper binaries that are
-> not Apple-notarized, so macOS blocks their first run with
-> *"…cannot be opened because the developer cannot be verified."* Affected
-> helpers:
+> **macOS Gatekeeper may block `mkfs.erofs` at first sandbox build — this is an
+> `sbx` PATH-resolution bug, not a Quickstart/`acq` bug.** On macOS (including
+> Tahoe/26) the block commonly appears at **Step 3** (`sbx policy init balanced`)
+> with *"mkfs.erofs cannot be opened because the developer cannot be verified."*
+> It only happens if you also have Homebrew `erofs-utils` installed:
 >
-> - `mkfs.erofs` (from the Homebrew `erofs-utils` package, a `docker/tap/sbx` dependency)
-> - `mkfs.ext4`
-> - `containerd-shim-nerdbox-v1`
+> `sbx` ships its **own notarized** `mkfs.erofs` (in its Caskroom `libexec/`),
+> but invokes it via `$PATH`. If Homebrew `erofs-utils` is installed,
+> `/opt/homebrew/bin/mkfs.erofs` — which is **ad-hoc-signed / not notarized** —
+> is earlier on `$PATH` and shadows sbx's bundled copy, so Gatekeeper rejects it.
 >
-> **Fix (do this — it is the reliable one):**
+> **Fix (reliable): make sbx use its own notarized binary.**
 >
-> 1. Open **System Settings → Privacy & Security**.
-> 2. Find the blocked binary and click **"Allow Anyway"**.
-> 3. Re-run the command, then click **"Open"** on the pop-up.
+> ```bash
+> brew uninstall erofs-utils   # if nothing else needs it
+> ```
 >
-> Repeat for each helper if prompted. macOS may also block the `sbx` binary
-> itself the same way (*"sbx is not from a trusted developer"*) — allow it via
-> the same flow, then run `sbx login` again and click "Allow Anyway" in the popup.
+> If you can't remove it, approve the Homebrew binary via **System Settings →
+> Privacy & Security → "Allow Anyway"**, re-run the command, then click **"Open"**.
 >
 > > **Do NOT bother with `xattr`.** `xattr -d com.apple.quarantine <path>` does
 > > **not** clear this, even with `sudo` — for an unnotarized binary the block is
-> > enforced by macOS code-signing assessment, not just the quarantine attribute.
-> > Only the System Settings "Allow Anyway" step above works.
+> > enforced by macOS code-signing assessment, not the quarantine attribute.
+> > (macOS may also block the `sbx` binary itself the same way — allow it via the
+> > same System Settings flow, then run `sbx login` again.)
 >
-> This affects the external `sbx` tool (we do not ship or invoke these binaries).
-> See [`docs/KNOWN_FAILURE_MODES.md`](docs/KNOWN_FAILURE_MODES.md) for details; an
-> upstream request to notarize these helpers has been filed with the Docker `sbx`
-> team ([docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392)).
+> This is in the external `sbx` tool. See
+> [`docs/KNOWN_FAILURE_MODES.md`](docs/KNOWN_FAILURE_MODES.md) for details; the
+> upstream fix (have sbx call its bundled binary by absolute path) is tracked at
+> [docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392).
 
 </details>
 
