@@ -1180,14 +1180,30 @@ a fresh image pull just fetched a newer opencode build with this gap.
 
 ### Fix
 
-Run opencode's own postinstall inside the sandbox, then re-run:
+Apply the fix with **`sbx exec`**, not `sbx run` / `acq run`. `sbx run` and
+`acq run` **launch opencode**, which re-hits the missing-binary guard and exits
+before you can do anything — so you cannot fix it from a `run`. `sbx exec` runs a
+command in the sandbox **without launching the agent**, so it works even when
+`run` fails.
 
 ```bash
+# 1. Find the sandbox that was created (its name, e.g. opencode-<project>):
+sbx ls
+
+# 2. Run opencode's postinstall inside it via sbx exec (no agent launch):
 sbx exec <sandbox-name> -- sh -c 'cd "$(npm root -g)/opencode-ai" && node postinstall.mjs'
 sbx exec <sandbox-name> -- opencode --version   # confirm the binary now runs
+
+# 3. Now attach normally:
+./acq run opencode <path>          # or: sbx run <sandbox-name>
 ```
 
-Then `./acq run opencode <path>` (or `sbx run <sandbox>`) works.
+If `sbx exec` reports the sandbox is not running, start it first
+(`sbx start <sandbox-name>`) then re-run the exec.
+
+> Do **not** try to "run the fix inside the sandbox" by launching it — a fresh
+> `./acq run` / `sbx run` just re-triggers the error. The `sbx exec` path above
+> is what works from a failed launch (confirmed by affected users).
 
 ### Prevention / Status
 
