@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-07-08"
+last_updated: "2026-08-03"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -1084,6 +1084,57 @@ Recover least-destructive first:
 - Until then, `sbx reset --preserve-secrets` is the reliable recovery after a
   restart leaves a sandbox unusable. (`--preserve-secrets` avoids re-running the
   Step 3 secret setup.)
+
+---
+
+## 28. msb May Auto-Run a `--script-path`-Registered Script at Boot (Re-Verify on Version Bump)
+
+### Symptoms
+
+Not a bug you hit today — a **latent** failure to watch for after a microsandbox
+(`msb`) version bump. If a future msb release starts auto-executing a registered
+`--script-path` script at guest boot, kit `startup` commands could run **twice**
+on a resume: once from microsandbox's own boot replay, and again from acq's
+`start`/`restart` heal (which re-runs the startup phase via `msb exec`).
+
+### Root Cause
+
+The acq msb adapter stages kit `startup` commands as a create-time script
+registered with `--script-path acq-startup:<hostfile>` (ADR-0017). This is only
+safe/runtime-neutral because, on the pinned msb version, a bare `--script-path`
+registration merely places the script on the guest PATH
+(`/.msb/scripts/acq-startup`) — microsandbox does **not** auto-run it at boot.
+Boot replay is driven only by a persisted `LaunchConfig.startup`
+(`runtime.entrypoint`/`runtime.cmd`), which acq never populates. This was
+confirmed against microsandbox source (`crates/cli/lib/commands/start.rs`,
+`restart.rs`, `Sandbox::start_detached()`).
+
+This is a **load-bearing, unverifiable-from-this-repo assumption**: it depends on
+microsandbox internals that could change in a future release.
+
+### Prevention / Re-Verification
+
+On each msb version bump (part of the quarterly re-verification cadence), confirm
+`--script-path` boot-inertness still holds:
+
+```bash
+# Create a sandbox with a sentinel startup command staged via --script-path,
+# then stop + start it WITHOUT going through acq, and check the sentinel ran
+# 0 times (inert) rather than 1 (auto-run at boot):
+msb create --name inert-probe --script-path acq-startup:/path/to/sentinel.sh <image>
+msb stop inert-probe && msb start inert-probe
+# inspect: the sentinel's side effect must NOT have fired on the bare start
+msb rm inert-probe
+```
+
+If a future msb **does** auto-run the registered script at boot, the adapter must
+stop double-running startup — e.g. drop the acq `start`/`restart` heal's
+startup re-run for msb, or stop staging the script. See the "VERIFIED NEUTRALITY
+ASSUMPTION" note in `_acq_msb_stage_startup_script` (`acq.backends/msb.sh`).
+
+### Related
+
+- ADR-0017 (msb create-time startup-script staging).
 
 ---
 

@@ -226,6 +226,11 @@ ACQ_MSB_SSH_DIR="${ACQ_MSB_SSH_DIR:-${ACQ_STATE_DIR}/ssh}"
 ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR}/msb_id_ed25519}"
 ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR}/known_hosts}"
 ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR}/ports}"
+# Create-time startup-script staging state (ADR-0017). The staged host file list
+# is reset per provision; declare it at module scope so cleanup references are
+# always defined even if provision is not the entry point.
+_ACQ_MSB_STARTUP_STAGE_FILES=()
+_ACQ_MSB_STARTUP_STAGED=""
 # SSH user for the serve listener. `msb ssh serve` authorizes a key host-wide;
 # the login user on the loopback listener defaults to root (override if a
 # deployment's msb serve expects a different account).
@@ -358,74 +363,91 @@ _acq_msb_wait_for_exec_ready() {
 # Kit application helpers (msb drives the neutral spec itself)
 # ---------------------------------------------------------------------------
 #
-# DESIGN NOTE — why kit commands still stage via `msb exec`, not `--script`
-# (evaluated against msb 0.6.7's create/run-time script flags).
+# DESIGN NOTE — the staging boundary: create-time `--script-path` for the
+# startup phase, `msb exec` for install and every mid-life apply (ADR-0017).
 # ---------------------------------------------------------------------------
 # msb 0.6.7 offers first-class script registration on `create`/`run`:
 #   --script NAME=BODY        (inline; escape-decoded; shebang from --shell)
 #   --script-raw NAME=BODY    (exact bytes, no shebang)
 #   --script-path NAME:PATH   (body read verbatim from a host file)
 # Registered scripts land executable at /.msb/scripts/<name>, on the guest PATH.
-# The appeal is real: staging a kit command via --script-path passes the body as
-# a FILE (no assembling a shell string from kit-provided content). We evaluated
-# replacing the kit-command-injection path (_acq_msb_run_commands ->
-# _acq_msb_exec_command) with it and DELIBERATELY KEPT the exec-based path. The
-# refactor is not a clean net win as this adapter is currently shaped:
 #
-#   1) TIMING. `--script*` register ONLY at create/run time. But kit commands are
-#      NOT all applied at create: _acq_msb_apply_kit_dir is also driven MID-LIFE
-#      by acq_backend_apply_kit (`acq kit apply NAME KITREF`, acq:293) and by
-#      acq_backend_ensure_kits_applied (the re-attach heal loop, acq:434/461),
-#      long after the sandbox was created. A create-time flag cannot register a
-#      script into an already-running sandbox, so the mid-life path MUST stay
-#      exec-based regardless. Introducing --script only at provision would fork
-#      the code into two dissimilar command-dispatch paths (create=script,
-#      mid-life=exec) — MORE surface, MORE divergence, for the same observable
-#      behavior. A single exec-based path that works in both phases is simpler
-#      and is what the whole apply pipeline is already built around.
+# An earlier revision of this adapter kept ALL kit-command staging on `msb exec`
+# and treated `--script*` as net-negative, on the grounds that kit commands run
+# both at create AND mid-life and that the exec path never interpolates kit
+# bytes into a shell string. Both of those observations are still true — but they
+# do NOT apply to one specific slice, and ADR-0017 carves that slice out:
 #
-#   2) THE STRING WE WOULD AVOID ISN'T BUILT FROM KIT CONTENT. The safety win of
-#      --script is "stop interpolating kit-provided bytes into an `sh -c`
-#      string." But this adapter ALREADY does not do that for kit argv: a kit
-#      command is carried as base64-encoded argv tokens (kit_spec_commands ->
-#      __CMD__ records), decoded into a bash array, and handed to
-#      `msb exec … -- "$@"` as SEPARATE ARGV ELEMENTS. Kit content never enters
-#      an interpolated shell string on this path; the only `sh -c` around it is
-#      the fixed background-detach wrapper (`nohup "$@" … ` with the argv as
-#      positional params — still no interpolation). So the injection risk
-#      --script is designed to remove is already absent here; --script would
-#      restage the same already-safe argv through a different primitive without
-#      reducing attack surface.
+#   THE ONE CLEAN WIN IS THE CREATE-TIME, RE-RUNNABLE STARTUP BODY.
+#   A kit's `startup`-phase commands are re-run on EVERY apply (they carry no
+#   run-once marker — unlike install), and they are exactly what a microsandbox-
+#   native restart (`msb stop`+`msb start`, or a reboot that restarts the guest)
+#   must replay to bring kit background supervisors back up. microsandbox can
+#   replay them itself only if it holds them as a registered startup script. So
+#   we now STAGE the startup phase as a single create-time script registered via
+#   `--script-path` (see _acq_msb_stage_startup_script). That is a genuinely
+#   create-time-only, re-runnable command body whose natural form is a script
+#   file — the narrow case the older note itself named as the clean win, which
+#   ADR-0017 confirms now exists in the pinned vocabulary (the `startup` phase).
 #
-#   3) IDEMPOTENCY/USER SEMANTICS LIVE IN THE EXEC PATH, NOT IN REGISTRATION.
-#      install-phase commands are run-once via a root-owned marker keyed on a
-#      hash of the argv (_acq_msb_exec_command: /var/lib/acq/install-<cksum>),
-#      tested+written as uid 0 so the gate is independent of the command's own
-#      user; initFiles/startup re-run every apply. Per-phase run-as-user
-#      (install=root, 1000/agent -> `-u agent` + HOME) and the non-interactive
-#      git guards (GIT_TERMINAL_PROMPT=0 …) are all applied at INVOCATION. A
-#      registered /.msb/scripts/<name> still has to be INVOKED (as the right
-#      user, marker-gated, with the right env) — i.e. we would keep the entire
-#      exec+marker+uflag/eflag machinery AND add a registration+guard step on
-#      top. Net: strictly more moving parts, identical behavior.
+#   WHY `--script-path` (not --script / --script-raw): the body is read VERBATIM
+#   from a host file, so we never hand microsandbox a shell string assembled from
+#   kit content, and we do not depend on shebang derivation from --shell — the
+#   generated body carries its own `#!/bin/sh`. The generated file emits each kit
+#   argv token single-quote-escaped (SI-10): kit bytes become quoted data inside
+#   a here-shaped command line, never an interpolated program fragment.
 #
-#   4) FILE STAGING IS ORTHOGONAL. files[] already stage via `msb copy` +
-#      verify + chown (_acq_msb_copy_file_verified); paths are charset-validated
-#      and never interpolated. --script-path would only cover the COMMAND body,
-#      not files[], so it cannot subsume that path either.
+# THE BOUNDARY — what stays on `msb exec`, and WHY it MUST:
 #
-# CONCLUSION: keep the exec-based kit-command
-# staging. The one place --script/--script-path would be a clean, contained win
-# — a create-time-ONLY, run-once command whose body is genuinely a script file —
-# does not exist in the pinned neutral kit vocabulary today (kit commands are
-# argv sequences across three phases, applied both at create and mid-life). If a
-# future kit schema adds a create-time-only "script" concept, revisit this with
-# --script-path for that narrow case only; until then a second dispatch path is
-# net-negative. No behavior change; the mid-life exec path is load-bearing.
+#   1) INSTALL PHASE stays exec-based. install commands are run-once, gated by a
+#      root-owned marker keyed on a hash of the argv
+#      (_acq_msb_exec_install: /var/lib/acq/install-<cksum>), tested+written as
+#      uid 0 so the gate is independent of the command's own user. A create-time
+#      script re-runs on every restart by design — the OPPOSITE of run-once — so
+#      folding install into the startup script would break its idempotency
+#      contract. install therefore stays out of the staged script entirely.
+#
+#   2) MID-LIFE APPLY stays exec-based. _acq_msb_apply_kit_dir is also driven
+#      long after create by acq_backend_apply_kit (`acq kit apply NAME KITREF`)
+#      and by acq_backend_ensure_kits_applied (the re-attach heal loop). A
+#      create-time flag cannot register a script into an ALREADY-RUNNING sandbox,
+#      so the mid-life path MUST stay exec-based regardless. Create-time staging
+#      owns the reboot/`msb start` replay path; exec owns the in-place kit-add /
+#      heal path. They are complementary, not a fork: do not collapse one into
+#      the other.
+#
+#   3) FILE STAGING IS ORTHOGONAL. files[] stage via `msb copy` + verify + chown
+#      (_acq_msb_copy_file_verified); paths are charset-validated and never
+#      interpolated. `--script-path` covers only the startup COMMAND body, not
+#      files[], so it does not subsume that path.
+#
+# INCREMENT BOUNDARY (ADR-0017 delivers this in two steps). THIS increment is
+# runtime-neutral: it GENERATES the startup script body and REGISTERS it at
+# `msb create` via `--script-path acq-startup:<hostpath>`, but it does NOT yet
+# invoke it, wire it into microsandbox's persisted startup, or remove the exec-
+# based startup application that still runs after create. Registering a script
+# with no invocation is a deliberate no-op in msb 0.6.7 for now; the point of
+# this increment is to land the staging plumbing, the flag, and the generated-
+# body correctness under test. The persisted-restart wiring (making startup
+# re-run on a native restart, and retiring the now-redundant post-create exec
+# application of startup) is the FOLLOW-UP increment.
 
 # Fetch a kit ref into the cache and echo its local dir. Returns 1 on failure.
 _acq_msb_fetch_kit() {
   local kitref="$1" slug dest
+  # Offline/test escape hatch: when ACQ_MSB_KIT_LOCAL_DIR is set, resolve REMOTE
+  # (git+) kit refs to that local directory instead of fetching. Mirrors the sbx
+  # adapter's ACQ_SBX_KIT_PASSTHROUGH: it keeps the offline unit harness fully
+  # network-free even when acq is invoked as a CHILD process (e.g. `acq start`),
+  # where a test cannot shadow this function. LOCAL kit paths are still used
+  # as-is (a test that passes an explicit local kit dir must get THAT dir), so
+  # the hatch only diverts refs that would otherwise hit the network. Never set
+  # in production — a real kit body is required there.
+  if [ -n "${ACQ_MSB_KIT_LOCAL_DIR:-}" ]; then
+    case "$kitref" in
+      git+*|*://*) printf '%s\n' "$ACQ_MSB_KIT_LOCAL_DIR"; return 0 ;;
+    esac
+  fi
   # Derive a stable cache subdir from the ref (sha + dir tail).
   slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_' )
   dest="${ACQ_MSB_KIT_CACHE}/${slug}"
@@ -915,6 +937,316 @@ _acq_msb_exec_command() {
 }
 
 # ---------------------------------------------------------------------------
+# Create-time startup-script staging (ADR-0017, increment 1)
+# ---------------------------------------------------------------------------
+# These helpers GENERATE a single host-side `/bin/sh` script that reproduces the
+# semantics the exec path applies to STARTUP-phase kit commands, and stage it as
+# a `--script-path acq-startup:<hostpath>` create flag. See the DESIGN NOTE above
+# for the boundary: only the `startup` phase is staged here; install and mid-life
+# apply stay exec-based, and this increment REGISTERS the script without invoking
+# it (the persisted-restart wiring is the follow-up).
+#
+# TRANSLATION from the exec path to an IN-GUEST script:
+#   - The exec path picks run-as-user via `msb exec -u agent`/`-u <user>`. Inside
+#     the guest the script cannot use `msb exec`, so it runs each command through
+#     `su`/`runuser` (whichever exists) for the agent/uid-1000 case, and directly
+#     for root. HOME=/home/agent is set for the agent case exactly as the exec
+#     path sets `-e HOME=/home/agent`.
+#   - The kit environment[] vars and the non-interactive git guards
+#     (GIT_TERMINAL_PROMPT=0, GIT_ASKPASS/SSH_ASKPASS=/bin/false unless the kit
+#     set GIT_TERMINAL_PROMPT) are emitted as an `env NAME=value …` prefix on the
+#     command — the in-guest equivalent of the exec path's `-e` flags. The prefix
+#     uses the portable, busybox-safe `env NAME=value … sh -c 'exec "$@"' sh ARGV`
+#     form: NO `--` terminator (unsupported by busybox/alpine `env`); see
+#     _acq_msb_startup_emit_command for the full rationale.
+#   - A `background:true` startup command is detached with the SAME nohup wrapper
+#     the exec path uses (`nohup … >/dev/null 2>&1 & exit-through`), so a
+#     never-exiting supervisor does not block the script.
+#
+# SI-10 / ESCAPING: kit-provided argv tokens and env values are NEVER interpolated
+# as shell fragments. Each argv token and each env value is single-quote-escaped
+# by _acq_msb_sq (embedded single quotes become '\'' ) before it is written to
+# the file, so kit bytes are emitted as inert quoted DATA, not executable syntax.
+# The body is a FILE read verbatim by `--script-path`; acq never assembles a
+# shell string from kit content and hands it to msb.
+
+# _acq_msb_sq STRING — echo STRING single-quote-escaped for safe emission into a
+# generated /bin/sh script line. Embedded single quotes become the classic
+# '\'' close/escape/reopen sequence.
+_acq_msb_sq() {
+  local _s="$1" _q="'\\''"
+  # Replace every ' with '\'' then wrap the whole thing in single quotes.
+  printf "'%s'" "${_s//\'/$_q}"
+}
+
+# _acq_msb_startup_env_prefix_into PREFIX_ARRVAR USER KITENV_ARRVAR — build the
+# in-guest `env NAME=value …` prefix tokens for one startup command: HOME for the
+# agent user, the kit env vars, and the git non-interactive guards (unless the
+# kit set GIT_TERMINAL_PROMPT). Mirrors _acq_msb_exec_flags_into's -e set, but as
+# `env` argv rather than `msb exec -e`. Tokens are RAW here (NAME=value); the
+# caller single-quote-escapes each before writing it to the script.
+_acq_msb_startup_env_prefix_into() {
+  local _prefixn="$1" _user="$2" _envarrn="$3"
+  eval "$_prefixn=()"
+
+  case "$_user" in
+    1000|agent) eval "$_prefixn+=(\"HOME=/home/agent\")" ;;
+  esac
+
+  # Kit-declared env vars (already NAME-validated by kit_spec_env).
+  local _ev
+  eval "set -- \${${_envarrn}[@]+\"\${${_envarrn}[@]}\"}"
+  for _ev in "$@"; do
+    eval "$_prefixn+=(\"\$_ev\")"
+  done
+
+  # Non-interactive git guards, unless the kit set GIT_TERMINAL_PROMPT itself.
+  local _kit_env_str
+  eval "_kit_env_str=\" \${${_envarrn}[*]-} \""
+  case "$_kit_env_str" in
+    *" GIT_TERMINAL_PROMPT="*) : ;;
+    *) eval "$_prefixn+=(\"GIT_TERMINAL_PROMPT=0\" \"GIT_ASKPASS=/bin/false\" \"SSH_ASKPASS=/bin/false\")" ;;
+  esac
+}
+
+# _acq_msb_startup_emit_command USER BACKGROUND PREFIX_ARRVAR ARGV_ARRVAR — echo
+# one /bin/sh line that runs one startup command in the guest with the correct
+# run-as-user, env prefix, and (if background) nohup detach. Every kit-derived
+# token is single-quote-escaped (SI-10); the run-as-user/su/nohup scaffolding is
+# adapter-owned fixed text.
+_acq_msb_startup_emit_command() {
+  local _user="$1" _background="$2" _prefixn="$3" _argvn="$4"
+
+  # PORTABLE ENV PREFIX (busybox/alpine-safe). The exec path threads env via
+  # `msb exec -e NAME=value`; the in-guest equivalent is the shell/POSIX `env`
+  # utility. We MUST NOT use the `env NAME=value -- argv` form: the `--`
+  # end-of-options terminator is a GNU coreutils >= 8.30 extension and is NOT
+  # accepted by busybox `env` (alpine) or older coreutils — there
+  # `env FOO=bar -- echo hi` fails with `env: '--': No such file or directory`.
+  # Since the git non-interactive guards are injected into nearly every command
+  # and the adapter supports plain-OCI base images (alpine/node), the emitted
+  # body must be portable.
+  #
+  # Portable construct: `env NAME=value … sh -c 'exec "$@"' sh ARGV…`. Per POSIX,
+  # `env` consumes only the leading NAME=value operands and treats the first
+  # non-assignment operand (`sh`) as the utility to run; no `--` is needed and
+  # none is emitted. Passing the kit argv as positional parameters to
+  # `sh -c 'exec "$@"' sh …` (rather than as bare `env` operands) means an env
+  # value or an argv token that *looks* like an option is never re-interpreted
+  # as one — `exec "$@"` runs argv[0] as the program with the rest as its args,
+  # verbatim. Every env token and argv token is single-quote-escaped by
+  # _acq_msb_sq (SI-10), so kit bytes stay inert quoted DATA.
+  local _payload="" _tok
+  eval "set -- \${${_prefixn}[@]+\"\${${_prefixn}[@]}\"}"
+  if [ "$#" -gt 0 ]; then
+    _payload="env"
+    for _tok in "$@"; do
+      _payload="$_payload $(_acq_msb_sq "$_tok")"
+    done
+  fi
+  # Argv follows via `sh -c 'exec "$@"' sh ARGV…`: this is the utility `env` runs
+  # (or, when there is no env prefix, the command itself). The literal
+  # `sh -c 'exec "$@"' sh` is adapter-owned fixed text; only the argv tokens are
+  # kit-derived and escaped. `sh` (argv0 for the -c shell, then $0 placeholder)
+  # is never a flag, so `env` always has a valid non-assignment utility operand.
+  eval "set -- \${${_argvn}[@]+\"\${${_argvn}[@]}\"}"
+  [ "$#" -gt 0 ] || return 0
+  _payload="$_payload sh -c 'exec \"\$@\"' sh"
+  for _tok in "$@"; do
+    _payload="$_payload $(_acq_msb_sq "$_tok")"
+  done
+
+  # background:true -> detach under nohup so a supervisor loop doesn't block.
+  if [ "$_background" = "true" ]; then
+    _payload="nohup sh -c $(_acq_msb_sq "$_payload") >/dev/null 2>&1 & :"
+  fi
+
+  # Run-as-user: root runs directly; the agent/uid-1000 contract runs via
+  # su/runuser (whichever the guest has) as the `agent` user. The inner command
+  # is passed to `sh -c` so the env prefix / nohup form is honored.
+  case "$_user" in
+    ""|0|root)
+      printf '%s\n' "$_payload"
+      ;;
+    1000|agent)
+      # Prefer runuser (util-linux) if present, else su. Both invoke the agent
+      # user's login-ish shell with our command. The command string is single-
+      # quote-escaped so kit content stays inert.
+      printf 'if command -v runuser >/dev/null 2>&1; then runuser -u agent -- sh -c %s; else su agent -c %s; fi\n' \
+        "$(_acq_msb_sq "$_payload")" "$(_acq_msb_sq "$_payload")"
+      ;;
+    *)
+      # A named non-root user: run via su as that user (name already validated by
+      # kit_spec_commands to ^[A-Za-z0-9_-]+$, but escape defensively anyway).
+      printf 'su %s -c %s\n' "$(_acq_msb_sq "$_user")" "$(_acq_msb_sq "$_payload")"
+      ;;
+  esac
+}
+
+# _acq_msb_collect_kit_env_into ARRVAR SPEC — read SPEC's environment[] entries
+# (via kit_spec_env, same validation as the exec path) and append each as a
+# NAME=value element to the array named ARRVAR.
+_acq_msb_collect_kit_env_into() {
+  local _arrn="$1" _spec="$2" eline ekey eval_v
+  while IFS= read -r eline; do
+    [ -n "$eline" ] || continue
+    ekey=$(printf '%s' "$eline" | cut -f1)
+    eval_v=$(printf '%s' "$eline" | cut -f2-)
+    [ -n "$ekey" ] || continue
+    eval "$_arrn+=(\"\${ekey}=\${eval_v}\")"
+  done <<EOF
+$(kit_spec_env "$_spec")
+EOF
+}
+
+# _acq_msb_startup_body_into BODYVAR SPEC — parse SPEC's __CMD__/base64-argv
+# command stream (the same stream _acq_msb_run_commands consumes) and append one
+# guest command line per STARTUP-phase record to the variable named BODYVAR.
+# Returns 0 iff at least one startup command line was emitted. Non-startup phases
+# are ignored here (install/initFiles stay on the exec path — ADR-0017).
+_acq_msb_startup_body_into() {
+  local _bodyn="$1" _spec="$2"
+
+  local _kit_env=()
+  _acq_msb_collect_kit_env_into _kit_env "$_spec"
+
+  # Buffer the command stream first (kit_spec_commands runs its own subshell).
+  local _lines=() line
+  while IFS= read -r line; do
+    _lines+=("$line")
+  done <<EOF
+$(kit_spec_commands "$_spec")
+EOF
+
+  local _emitted=0
+  local phase="" user="" argv=() reading=0 _i background="false"
+  for _i in ${_lines[@]+"${!_lines[@]}"}; do
+    line="${_lines[$_i]}"
+    case "$line" in
+      "__CMD__"*)
+        phase=$(printf '%s' "$line" | cut -f2)
+        user=$(printf '%s' "$line" | cut -f3)
+        background=$(printf '%s' "$line" | cut -f4)
+        [ -n "$background" ] || background="false"
+        argv=()
+        reading=1
+        ;;
+      "__END__")
+        reading=0
+        if [ "$phase" = "startup" ] && [ "${#argv[@]}" -gt 0 ]; then
+          local _prefix=() _cmdline
+          _acq_msb_startup_env_prefix_into _prefix "$user" _kit_env
+          _cmdline=$(_acq_msb_startup_emit_command "$user" "$background" _prefix argv)
+          if [ -n "$_cmdline" ]; then
+            # Append "<cmdline>\n" by name; $'\n' is a literal newline (ANSI-C).
+            eval "$_bodyn=\${$_bodyn}\$_cmdline\$'\\n'"
+            _emitted=1
+          fi
+        fi
+        ;;
+      *)
+        if [ "$reading" -eq 1 ]; then
+          argv+=("$(printf '%s' "$line" | base64 -d)")
+        fi
+        ;;
+    esac
+  done
+
+  [ "$_emitted" -eq 1 ]
+}
+
+# _acq_msb_generate_startup_script SPEC OUTFILE — write the guest startup script
+# for one kit spec's STARTUP-phase commands into OUTFILE. Returns 0 and writes a
+# non-empty script iff the kit HAS at least one startup command; returns 1 (and
+# writes nothing) when there are none, so the caller registers no empty script.
+_acq_msb_generate_startup_script() {
+  local _spec="$1" _out="$2" _body=""
+
+  _acq_msb_startup_body_into _body "$_spec" || return 1
+
+  # Emit the file: a self-contained /bin/sh with its own shebang (so --script-path
+  # reads a complete verbatim body; no --shell shebang derivation dependency).
+  {
+    printf '#!/bin/sh\n'
+    printf '# acq-generated msb startup script (ADR-0017). Reproduces kit startup\n'
+    printf '# commands so microsandbox can replay them on a native restart.\n'
+    printf '# Generated verbatim into a host file and registered via --script-path;\n'
+    printf '# kit argv/env tokens are single-quote-escaped (SI-10), never interpolated.\n'
+    printf '%s' "$_body"
+  } > "$_out"
+  return 0
+}
+
+# _acq_msb_stage_startup_script SPEC ARRVAR — generate the startup script for one
+# kit SPEC and, if non-empty, append a `--script-path acq-startup:<hostfile>`
+# entry into the create-flags array named ARRVAR. The host file is created under
+# ACQ_MSB_STARTUP_STAGE_DIR (a private 0700 dir under the acq state tree, so kit
+# content is never world-readable) and recorded in _ACQ_MSB_STARTUP_STAGE_FILES
+# for cleanup by the caller after create. A kit with no startup commands stages
+# nothing (no empty script is registered).
+#
+# NOTE (increment 1): only the FIRST kit that contributes startup commands stakes
+# the fixed `acq-startup` script name; if multiple kits carried startup commands
+# they would need a merged/uniquely-named script — but the pinned built-in kits
+# put startup commands in a single kit, and the follow-up increment that actually
+# invokes/persists the script will finalize multi-kit merging. Guarded here so a
+# second contributing kit does not silently overwrite the first's registration.
+#
+# VERIFIED NEUTRALITY ASSUMPTION (ADR-0017): registering a script via
+# `--script-path acq-startup:<file>` only STAGES the body on the guest PATH (as
+# /.msb/scripts/acq-startup) — it does NOT enroll the script in microsandbox's
+# persisted startup, so microsandbox does NOT auto-run it at guest boot. This was
+# confirmed against microsandbox source: `crates/cli/lib/commands/start.rs` and
+# `restart.rs` re-run a persisted `LaunchConfig.startup` on
+# `Sandbox::start_detached()`, and acq never populates `LaunchConfig.startup`.
+# Only an explicit startup registration is replayed at boot; a plain
+# `--script-path` registration is not. This is what makes increment 1
+# runtime-neutral: the script is present but inert. Enrolling it in the persisted
+# startup (so it replays on a native restart) is the follow-up increment's job.
+#
+# This assumption is load-bearing and unverifiable from this repo, so it MUST be
+# re-verified on each msb version bump — if a future msb auto-runs a registered
+# `--script-path` at boot, kit startup would double-run (boot replay + acq heal).
+# See docs/KNOWN_FAILURE_MODES.md ("msb May Auto-Run a --script-path-Registered
+# Script at Boot") for the re-verification procedure and remediation.
+ACQ_MSB_STARTUP_SCRIPT_NAME="acq-startup"
+_acq_msb_stage_startup_script() {
+  local _spec="$1" _arrn="$2"
+
+  # One staged script per sandbox provision. If we already staged one, skip
+  # (increment-1 scope; see NOTE above).
+  if [ -n "${_ACQ_MSB_STARTUP_STAGED:-}" ]; then
+    return 0
+  fi
+
+  # Private staging dir (0700) under the acq state tree — not a world-readable
+  # /tmp. Mirrors how ssh keys/state are kept under ACQ_STATE_DIR.
+  local _dir="${ACQ_MSB_STARTUP_STAGE_DIR:-${ACQ_STATE_DIR}/msb-startup}"
+  mkdir -p "$_dir" 2>/dev/null || true
+  chmod 700 "$_dir" 2>/dev/null || true
+
+  local _file
+  _file=$(mktemp "${_dir}/acq-startup.XXXXXX" 2>/dev/null) || {
+    # Staging is best-effort (the script is inert until a later increment
+    # invokes it), but a silent no-op would be undiagnosable — warn so the
+    # cause is visible rather than a mysteriously missing --script-path.
+    echo "acq(msb): warning: could not create startup-script staging file in ${_dir}; skipping --script-path." >&2
+    return 0
+  }
+  chmod 600 "$_file" 2>/dev/null || true
+
+  if _acq_msb_generate_startup_script "$_spec" "$_file"; then
+    eval "$_arrn+=(--script-path \"${ACQ_MSB_STARTUP_SCRIPT_NAME}:\$_file\")"
+    _ACQ_MSB_STARTUP_STAGE_FILES+=("$_file")
+    _ACQ_MSB_STARTUP_STAGED=1
+    acq_debug "msb startup-script staged: --script-path ${ACQ_MSB_STARTUP_SCRIPT_NAME}:${_file}"
+  else
+    # No startup commands in this kit — remove the empty temp file.
+    rm -f "$_file" 2>/dev/null || true
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # acq_backend_provision — create a sandbox and apply the kits
 # ---------------------------------------------------------------------------
 # msb create takes an IMAGE + flags. acq derives the sandbox name at the acq
@@ -940,6 +1272,12 @@ acq_backend_provision() {
   local create_flags=()
   local trust_host_cas=0
   local kitdirs=()
+
+  # Create-time startup-script staging (ADR-0017, increment 1). Reset the
+  # per-provision guard + staged-file list so a prior provision in the same
+  # process does not leak into this one; the files are cleaned up after create.
+  _ACQ_MSB_STARTUP_STAGED=""
+  _ACQ_MSB_STARTUP_STAGE_FILES=()
 
   # Fetch each built-in kit and gather its create-time contributions.
   local kitref kitdir
@@ -985,6 +1323,15 @@ acq_backend_provision() {
     local pp=()
     _acq_msb_port_flags_into pp "$spec"
     [ "${#pp[@]}" -gt 0 ] && create_flags+=("${pp[@]}")
+
+    # Startup-phase commands → a create-time `--script-path acq-startup:<file>`
+    # (ADR-0017, increment 1). Runtime-neutral: the script is REGISTERED at create
+    # but not yet invoked or wired into microsandbox's persisted startup (the
+    # follow-up increment). install + mid-life apply stay exec-based (see the
+    # DESIGN NOTE and _acq_msb_apply_kit_dir, which still applies startup via
+    # exec after create for now). Only the first kit with startup commands stakes
+    # the fixed script name this increment (see _acq_msb_stage_startup_script).
+    _acq_msb_stage_startup_script "$spec" create_flags
   done
 
   [ "$trust_host_cas" -eq 1 ] && create_flags+=(--trust-host-cas)
@@ -1225,6 +1572,17 @@ EOF
   for _ev in ${_secret_env_names[@]+"${_secret_env_names[@]}"}; do
     unset "$_ev"
   done
+  # Remove the staged startup-script host file(s) now that `msb create` has read
+  # the --script-path body (ADR-0017). Runs on success and failure so kit content
+  # never lingers in the private staging dir. The registration lives in the
+  # sandbox; the host copy is transient (mirrors the transient-secret scrub).
+  # ACQ_MSB_KEEP_STARTUP_STAGE=1 preserves the file (used by the offline test
+  # harness to inspect the generated body; never set in normal operation).
+  local _sf
+  for _sf in ${_ACQ_MSB_STARTUP_STAGE_FILES[@]+"${_ACQ_MSB_STARTUP_STAGE_FILES[@]}"}; do
+    [ -n "${ACQ_MSB_KEEP_STARTUP_STAGE:-}" ] || rm -f "$_sf" 2>/dev/null || true
+  done
+  [ -n "${ACQ_MSB_KEEP_STARTUP_STAGE:-}" ] || _ACQ_MSB_STARTUP_STAGE_FILES=()
   if [ "$_create_rc" -ne 0 ]; then
     echo "acq(msb): error: 'msb create' failed for '$name'." >&2
     echo "acq(msb):   flags: ${create_flags[*]}" >&2
