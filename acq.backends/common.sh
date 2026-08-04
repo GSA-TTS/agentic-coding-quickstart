@@ -902,15 +902,24 @@ _acq_urlencode() {
 }
 
 # Build a pre-filled fine-grained-PAT creation URL for one owner. Selects the
-# minimal default permissions for the normal agent loop — code, PRs, and issues
-# (write implies read; metadata:read is always included by GitHub). The user
-# still picks the specific repositories in the form (fine-grained PATs are
-# single-owner).
+# minimal default permissions for the normal agent loop — code (contents),
+# PRs, and issues at read/write, plus actions=read so the agent can read the
+# Actions workflow-run status that surfaces PR checks. Deliberately scoped to
+# least privilege (ADR-0013): actions is read-only (not write — write also
+# grants cancel-runs and delete logs/artifacts, working against the AU-2 audit
+# goal), and no workflows scope (workflows=write grants create/edit of
+# .github/workflows/* — a CI privilege-escalation vector). write implies read;
+# metadata:read is always included by GitHub. Note: fine-grained PATs cannot
+# call the Checks API (a GitHub limitation, see ADR-0013); actions=read covers
+# the Actions workflow-run status that surfaces most PR checks. Users can widen
+# scopes (e.g. actions=write to re-run, or add workflows) in the GitHub form.
+# The user still picks the specific repositories in the form (fine-grained PATs
+# are single-owner).
 # Args: OWNER SANDBOX_NAME
 _acq_github_pat_url() {
   local owner="$1" sandbox="$2" name
   name=$(_acq_urlencode "acq-${sandbox}")
-  printf 'https://github.com/settings/personal-access-tokens/new?name=%s&target_name=%s&expires_in=30&contents=write&pull_requests=write&issues=write\n' \
+  printf 'https://github.com/settings/personal-access-tokens/new?name=%s&target_name=%s&expires_in=30&contents=write&pull_requests=write&issues=write&actions=read\n' \
     "$name" "$(_acq_urlencode "$owner")"
 }
 
@@ -944,7 +953,10 @@ EOF
   echo "      'Only select repositories' and choose the repo(s) listed below," >&2
   echo "      then generate the token and paste it back here." >&2
   echo "      Default permissions: Contents=Read/Write, Pull requests=Read/Write," >&2
-  echo "      Issues=Read/Write (widen/narrow in the form as needed)." >&2
+  echo "      Issues=Read/Write, Actions=Read (lets the agent read the PR-check" >&2
+  echo "      workflow runs). Widen in the form if you need more — e.g." >&2
+  echo "      Actions=Read/Write to re-run checks, or add Workflows to edit" >&2
+  echo "      .github/workflows/* files." >&2
 
   local o
   local _oldifs="$IFS"; IFS='|'
