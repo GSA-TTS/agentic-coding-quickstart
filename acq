@@ -83,6 +83,10 @@ Subcommands:
   create AGENT PATH [...]                  Create a sandbox (detached).
   ls                                       List sandboxes.
   stop NAME                                Stop a sandbox (without removing).
+  start NAME                               Start a stopped sandbox and re-run its
+                                           kit startup services.
+  restart NAME                             Stop then start a sandbox, re-running
+                                           kit startup services.
   rm NAME                                  Remove a sandbox.
   exec NAME -- CMD...                      Run a command inside a sandbox.
   cp SRC DST                               Copy files in/out (NAME:path syntax).
@@ -634,6 +638,54 @@ case "$subcommand" in
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: stop: missing sandbox name" >&2; exit 1; }
     acq_backend_stop "$local_name"
+    ;;
+
+  start)
+    # Resume a stopped sandbox and re-run its kit startup services deterministically
+    # (ADR-0017). `msb start`/`sbx start` alone do NOT reliably replay kit
+    # `startup`/`background` commands (a bare create-time `--script-path` is not
+    # enrolled in microsandbox's persisted startup), so after the backend resume we
+    # re-drive acq_backend_ensure_kits_applied: it re-applies the pinned kits
+    # idempotently and RE-RUNS the startup phase via the exec path — the actual,
+    # deterministic mechanism that brings supervised services back up.
+    shift
+    local_name="${1:-}"
+    [ -n "$local_name" ] || { echo "acq: start: missing sandbox name" >&2; exit 1; }
+    if ! command -v acq_backend_start >/dev/null 2>&1; then
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support start" >&2
+      echo "     (acq_backend_start). Start the sandbox manually, then re-run." >&2
+      exit 1
+    fi
+    acq_backend_start "$local_name"
+    # Heal re-runs kit startup (idempotent). ensure_kits_applied on msb also
+    # start-if-stopped guards internally, so this is safe even if the resume above
+    # was a no-op on an already-running sandbox.
+    acq_backend_ensure_kits_applied "$local_name" || true
+    echo "acq: started '$local_name' and re-applied kit startup." >&2
+    ;;
+
+  restart)
+    # Best-effort bounce (ADR-0017): stop, THEN start+heal, guaranteeing
+    # kit startup services are re-run afterward via the same heal path as `start`.
+    # The dispatcher runs under `set -euo pipefail`, so a nonzero stop would
+    # otherwise abort the restart before start is reached. That is NOT the intended
+    # semantics: restart is a best-effort bounce that STILL attempts start+heal even
+    # if the stop failed (e.g. the sandbox was already stopped, or stop errored) —
+    # so the stop is guarded with `|| ...` and never aborts. start+heal always
+    # follows.
+    shift
+    local_name="${1:-}"
+    [ -n "$local_name" ] || { echo "acq: restart: missing sandbox name" >&2; exit 1; }
+    if ! command -v acq_backend_start >/dev/null 2>&1; then
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support restart" >&2
+      echo "     (acq_backend_start). Restart the sandbox manually, then re-run." >&2
+      exit 1
+    fi
+    acq_backend_stop "$local_name" \
+      || echo "acq: restart: stop failed; attempting start anyway." >&2
+    acq_backend_start "$local_name"
+    acq_backend_ensure_kits_applied "$local_name" || true
+    echo "acq: restarted '$local_name' and re-applied kit startup." >&2
     ;;
 
   rm)

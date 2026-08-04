@@ -153,7 +153,7 @@ backend_extras:
 |---|---|---|---|---|---|
 | `install` | root | create time, once | `commands.install` | one-off `msb exec --user 0` post-create, idempotent | first-boot part of `provision.sh` (gated by `/var/lib/sbx/.provisioned`) |
 | `initFiles` | agent uid (1000) | every start, after base image setup | `commands.initFiles` | `msb exec` post-start | every-boot part of `provision.sh` |
-| `startup` | configurable (default agent uid) | every start, after initFiles | `commands.startup` | `msb exec` post-start, after initFiles | every-boot part of `provision.sh` after initFiles block |
+| `startup` | configurable (default agent uid) | on acq resume (see note), after initFiles | `commands.startup` | `msb exec` on `acq run`/`acq start`/`acq restart` (acq re-drives the idempotent apply); a raw `msb start` outside acq is not a supported resume path — it cannot boot a secret-bound sandbox (ADR-0017) | every-boot part of `provision.sh` after initFiles block |
 | `agent_context` | n/a | always present in agent's context root | `agentContext` (in `~/.agents/context/`) | written to `~/.agents/context/<kit-name>.md` after start | same |
 
 Adapters are allowed to collapse phases when the backend has no semantic difference (e.g., msb has no "install at create" hook — `install` becomes "exec once, gated by a marker file").
@@ -199,7 +199,7 @@ Per-backend implementation:
 | Backend | What the adapter does |
 |---|---|
 | sbx | Emit sbx v2 `caps.network.allow`, `files`, `commands.startup`, `agentContext` — identical to today's kit |
-| msb | `msb create` with `--net-rule "allow@domain:api.gsa.usai.gov"`; `msb exec` to drop `files`; `msb exec` to run the startup command after every `msb start`. Kit's `caps.network.allow` lines become `--net-rule` flags at create time. |
+| msb | `msb create` with `--net-rule "allow@domain:api.gsa.usai.gov"`; `msb exec` to drop `files`; `msb exec` to run the startup command. Kit's `caps.network.allow` lines become `--net-rule` flags at create time. Restart durability: acq re-runs the startup command via `msb exec` on `acq run`/`acq start`/`acq restart` (the idempotent apply); a raw `msb start` outside acq is not supported — it cannot boot a secret-bound sandbox because it needs the `--secret` host env vars only acq injects (ADR-0017). |
 | ppp | Append `api.gsa.usai.gov` to `$PPP_STATE/sandboxes/<name>/policy.yaml`; copy `files/` in via `podman machine ssh` + `podman cp`; append the startup command to the every-boot provision script |
 
 Secret: the USAi API key is **not** in this kit. `acq` owns the secret model end-to-end via the unified swap-on-access mechanism documented in section 7.5 (Secret model). The user runs `acq secret set usai --host api.gsa.usai.gov` once for a global key (used by all sandboxes), and optionally `acq secret set usai --host api.gsa.usai.gov --sandbox <name>` for a per-sandbox key (overrides the global key for that sandbox). This supports USAi's anticipated billing-code charge-back model: each sandbox can carry its own key associated with a specific billing code. `acq` stores the key in its host keychain and writes a `CredentialRewriteRule` into the active backend's MITM path (sbx's proxy / msb's `--tls-intercept` / ppp's mitmproxy addon). The agent makes requests with no `Authorization` header; the MITM proxy injects it on the way out. The real USAi key never enters the sandbox.

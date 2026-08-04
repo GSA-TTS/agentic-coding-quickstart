@@ -328,6 +328,185 @@ acq_backend_exists() {
 }
 
 # ---------------------------------------------------------------------------
+# _acq_msb_is_running NAME — 0 if the named sandbox is currently RUNNING, else 1
+# ---------------------------------------------------------------------------
+# `msb list --running -q` prints one RUNNING sandbox name per line (the `-q`
+# name-only contract from acq_backend_exists, plus the `--running` filter
+# documented at the top of this file: `msb list|ls [-q] [--running]`). A sandbox
+# that exists (acq_backend_exists) but is absent from the running list is stopped.
+# We reuse the SAME `msb list -q` line-match pattern acq_backend_exists uses (no
+# new probe shape is invented — only the `--running` filter is added), so the
+# stopped-state detection tracks the established inspection convention.
+# NOTE: like acq_backend_exists, the `--running` column contract is from the CLI
+# help and is not live-verified against a running daemon; if the layout differs on
+# a real host, adjust here and in acq_backend_exists together.
+_acq_msb_is_running() {
+  msb list --running -q 2>/dev/null | grep -Fxq -- "$1"
+}
+
+# ---------------------------------------------------------------------------
+# _acq_msb_bind_one ARRVAR NAMESVAR SVC NAME ENV HOST — resolve one service's
+# secret value (acq store, scoped→global) and, if found, export it into the ENV
+# host var (transient) + collect a `--secret ENV@HOST` flag. Returns 0 if a
+# store value was bound, 1 otherwise (so the caller can try an env fallback).
+# The real value moves via a TRANSIENT exported env var, never argv.
+_acq_msb_bind_one() {
+  local _arrn="$1" _namesn="$2" _svc="$3" _name="$4" _env="$5" _host="$6" _val
+  _val=$(acq_secret_resolve "$_svc" "$_name" 2>/dev/null) && [ -n "$_val" ] || return 1
+  # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
+  export "$_env=$_val"; _val=""
+  eval "$_namesn+=(\"\$_env\")"
+  eval "$_arrn+=(--secret \"\${_env}@\${_host}\")"
+  acq_debug "msb secret: binding ${_env}@${_host} for '$_svc' (from acq store)"
+  return 0
+}
+
+# _acq_msb_bind_secrets_into ARRVAR NAMESVAR NAME — resolve + export the secret
+# values a sandbox needs, and collect the matching `--secret ENV@HOST` flags.
+# ---------------------------------------------------------------------------
+# Single source of truth for WHICH secrets a sandbox binds and HOW their real
+# values reach the msb child process. Both `msb create` (provision) and
+# `msb start` (resume) read each bound secret's value from a HOST environment
+# variable named in the persisted `--secret ENV@HOST` binding; msb never keeps
+# the value, so the value must be present in the environment at BOTH create and
+# every start. Provision used to inline this; resume (acq_backend_start) omitted
+# it entirely, which made `msb start` fail with "host environment variable
+# USAI_API_KEY is not set". Factoring it here guarantees start binds the
+# identical set create did.
+#
+# The caller passes the NAMES of two arrays by reference: ARRVAR receives the
+# `--secret ENV@HOST` flag tokens (for create; start ignores them since msb
+# already persisted the bindings), and NAMESVAR receives the exported env-var
+# names so the caller can unset them after the msb child has read them. The real
+# value moves via a TRANSIENT exported env var (never argv, never the kit spec),
+# exactly as before.
+#
+# SCOPE: usai (always, if a value resolves or is pre-exported), github
+# (conditionally), and any generic custom endpoint recorded via
+# `acq secret set SVC --host H --env E` (enumerated from the non-secret sidecar).
+# This mirrors the SCOPE notes at the top of this file; see also
+# _acq_msb_service_binding and _acq_msb_bind_one (the per-service primitive).
+_acq_msb_bind_secrets_into() {
+  local _arrn="$1" _namesn="$2" _name="$3"
+
+  if command -v acq_secret_resolve >/dev/null 2>&1; then
+    # USAi: acq store first, else a pre-exported USAI_API_KEY (e.g. CI).
+    if ! _acq_msb_bind_one "$_arrn" "$_namesn" usai "$_name" USAI_API_KEY "$ACQ_MSB_USAI_HOST"; then
+      if [ -n "${USAI_API_KEY:-}" ]; then
+        eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
+        acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from env)"
+      fi
+    fi
+
+    # GitHub: bind GITHUB_TOKEN@api.github.com so kits can authenticate to the
+    # REST API (the substituted path). acq store first, then a pre-exported
+    # GITHUB_TOKEN, then GH_TOKEN (CI). Absent token => no binding; the playbook
+    # kit then degrades gracefully (warns, no rules/skills).
+    if ! _acq_msb_bind_one "$_arrn" "$_namesn" github "$_name" GITHUB_TOKEN "$ACQ_MSB_GITHUB_HOST"; then
+      if [ -n "${GITHUB_TOKEN:-}" ]; then
+        eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
+        acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from env)"
+      elif [ -n "${GH_TOKEN:-}" ]; then
+        export GITHUB_TOKEN="$GH_TOKEN"
+        eval "$_namesn+=(\"GITHUB_TOKEN\")"
+        eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
+        acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from GH_TOKEN env)"
+      fi
+    fi
+
+    # GENERIC custom endpoints. usai + github were bound explicitly above. Any
+    # OTHER service stored via `acq secret set SVC --host H --env E` recorded a
+    # non-secret (host, env) sidecar; bind each such service generically here so
+    # it is no longer stored-but-inert. Iterate the endpoint sidecars for this
+    # sandbox scope + global, deduping by env var (a scoped mapping shadows the
+    # global; usai/github are skipped — already bound).
+    if command -v acq_secret_meta_list >/dev/null 2>&1; then
+      local _svc _binding _env _host _names_snapshot
+      while IFS= read -r _svc; do
+        [ -n "$_svc" ] || continue
+        case "$_svc" in usai|github) continue ;; esac  # bound explicitly above
+        _binding=$(_acq_msb_service_binding "$_svc" "$_name")
+        _env=$(printf '%s' "$_binding" | cut -f1)
+        _host=$(printf '%s' "$_binding" | cut -f2)
+        [ -n "$_env" ] && [ -n "$_host" ] || continue
+        # Skip if this env var was already collected (e.g. usai/github, or a dup).
+        eval "_names_snapshot=\" \${${_namesn}[*]-} \""
+        case "$_names_snapshot" in *" $_env "*) continue ;; esac
+        _acq_msb_bind_one "$_arrn" "$_namesn" "$_svc" "$_name" "$_env" "$_host" || true
+      done <<EOF
+$(acq_secret_meta_list "$_name")
+EOF
+    fi
+  elif [ -n "${USAI_API_KEY:-}" ]; then
+    eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_start NAME — start (resume) a stopped sandbox (ADR-0017)
+# ---------------------------------------------------------------------------
+# `msb start` resumes a stopped sandbox, preserving its persisted state
+# (ACQ_BACKEND_CAN_RESUME=1). Microsandbox's `start_detached` replays only a
+# persisted `runtime.entrypoint`/`runtime.cmd` on start — NOT a bare
+# `--script-path`-registered script (source-verified; see ADR-0017 and
+# _acq_msb_stage_startup_script). So starting alone does NOT deterministically
+# bring kit `startup`/`background` services back up; that restoration is done by
+# the acq `start`/`restart` verb re-driving acq_backend_ensure_kits_applied
+# (which re-runs startup via the idempotent exec path). This function is the thin
+# resume primitive; the dispatcher owns the heal that follows.
+#
+# PORT SYMMETRY: acq_backend_stop tears down post-hoc `msb ssh serve` + `ssh -L`
+# port tunnels (ADR-0015) because a stopped guest can no longer serve them. There
+# is NO matching re-establish primitive here: those tunnels are created on demand
+# by `acq ports --publish` against a RUNNING sandbox and are not persisted, so a
+# resumed sandbox simply has no post-hoc tunnels until the user re-publishes.
+# (Create-time `-p HOST:GUEST` NAT mappings are part of the sandbox config and
+# are restored by msb itself on start.) Left as a deliberate no-op with this note.
+#
+# READINESS (S1 fix): `msb start` returns as soon as the resume is registered,
+# but the guest boots asynchronously — so the FIRST `msb exec` after a start can
+# race the boot (same failure mode as post-create). We therefore BLOCK on
+# _acq_msb_wait_for_exec_ready here so that EVERY caller (the acq start/restart
+# verb, the start-if-stopped block inside acq_backend_ensure_kits_applied, and
+# any future caller) gets a booted, exec-ready guest — the heal's first exec can
+# never race the boot regardless of entry path. On the verb path,
+# acq_backend_start runs BEFORE ensure_kits_applied's _acq_msb_is_running check;
+# without a wait here that check would see the sandbox already running and skip
+# its own readiness wait, letting the first heal exec race the boot. Encapsulating
+# the wait in the resume primitive keeps the dispatcher backend-neutral (no
+# msb-specific readiness logic leaks into acq). _acq_msb_wait_for_exec_ready is
+# defined below in this file (single source, reused by the post-create and the
+# start-if-stopped paths). The wait is best-effort: a timeout emits a warning
+# rather than aborting, mirroring the start-if-stopped path.
+#
+# SECRETS (fix): `msb start` re-reads the sandbox's persisted `--secret ENV@HOST`
+# bindings and REQUIRES each named value to be present in the host environment at
+# start time — msb does not retain the value across a stop. Provision exported
+# these before `msb create`; resume must do the SAME before `msb start`, or msb
+# fails with "host environment variable USAI_API_KEY is not set". We re-derive
+# the identical binding set from the acq store via _acq_msb_bind_secrets_into
+# (shared with provision), export the values transiently, run `msb start`, then
+# unset them so the values never linger. The collected --secret flags are unused
+# here (msb already persisted the bindings at create); only the exported values
+# matter for start.
+acq_backend_start() {
+  local _name="$1"
+  local _start_secret_flags=() _start_secret_names=()
+  _acq_msb_bind_secrets_into _start_secret_flags _start_secret_names "$_name"
+  local _start_rc=0
+  msb start "$_name" || _start_rc=$?
+  # Clear the transient secret env vars immediately after `msb start` read them
+  # (runs on both success and failure so no exported value lingers).
+  local _sev
+  for _sev in ${_start_secret_names[@]+"${_start_secret_names[@]}"}; do
+    unset "$_sev"
+  done
+  [ "$_start_rc" -eq 0 ] || return "$_start_rc"
+  _acq_msb_wait_for_exec_ready "$_name" || \
+    echo "acq(msb): warning: $_name did not become exec-ready after start." >&2
+}
+
+# ---------------------------------------------------------------------------
 # _acq_msb_wait_for_exec_ready NAME — block until `msb exec` works in the guest
 # ---------------------------------------------------------------------------
 # msb create returns as soon as the sandbox is registered, but the guest boots
@@ -421,16 +600,30 @@ _acq_msb_wait_for_exec_ready() {
 #      interpolated. `--script-path` covers only the startup COMMAND body, not
 #      files[], so it does not subsume that path.
 #
-# INCREMENT BOUNDARY (ADR-0017 delivers this in two steps). THIS increment is
-# runtime-neutral: it GENERATES the startup script body and REGISTERS it at
-# `msb create` via `--script-path acq-startup:<hostpath>`, but it does NOT yet
-# invoke it, wire it into microsandbox's persisted startup, or remove the exec-
-# based startup application that still runs after create. Registering a script
-# with no invocation is a deliberate no-op in msb 0.6.7 for now; the point of
-# this increment is to land the staging plumbing, the flag, and the generated-
-# body correctness under test. The persisted-restart wiring (making startup
-# re-run on a native restart, and retiring the now-redundant post-create exec
-# application of startup) is the FOLLOW-UP increment.
+# INCREMENT BOUNDARY (ADR-0017 delivers this in two steps). This adapter now
+# implements BOTH the create-time startup-script staging AND the restart-durable
+# behavior that consumes it:
+#
+#   * The acq `start`/`restart` verb calls acq_backend_start (`msb start`) then
+#     re-drives acq_backend_ensure_kits_applied, which re-applies the pinned kits
+#     idempotently and RE-RUNS the startup phase via `msb exec` — restoring kit
+#     `startup`/`background` services on resume. A stopped sandbox is also started
+#     automatically at the TOP of ensure_kits_applied, so `acq run
+#     <stopped-sandbox>` heals then attaches. This is the deterministic path and
+#     needs no native persistence.
+#
+# A native `msb start` OUTSIDE acq is intentionally NOT supported: microsandbox's
+# start_detached replays only runtime.entrypoint/runtime.cmd (not the
+# --script-path-registered script), AND — more fundamentally — `msb start`
+# requires the sandbox's `--secret ENV@HOST` host env vars to be present, which
+# only acq injects (see acq_backend_start). So a raw `msb start` of a
+# secret-bound sandbox fails before any startup question arises. Always resume
+# via `acq start`/`acq restart`.
+#
+# The `--script-path` registration itself is runtime-neutral: it only stages the
+# body on the guest PATH (/.msb/scripts/acq-startup) so a kit author or the exec
+# heal can invoke it by name; microsandbox does not auto-run it at start.
+# install + mid-life apply stay exec-based.
 
 # Fetch a kit ref into the cache and echo its local dir. Returns 1 on failure.
 _acq_msb_fetch_kit() {
@@ -937,14 +1130,15 @@ _acq_msb_exec_command() {
 }
 
 # ---------------------------------------------------------------------------
-# Create-time startup-script staging (ADR-0017, increment 1)
+# Create-time startup-script staging (ADR-0017)
 # ---------------------------------------------------------------------------
 # These helpers GENERATE a single host-side `/bin/sh` script that reproduces the
 # semantics the exec path applies to STARTUP-phase kit commands, and stage it as
 # a `--script-path acq-startup:<hostpath>` create flag. See the DESIGN NOTE above
 # for the boundary: only the `startup` phase is staged here; install and mid-life
-# apply stay exec-based, and this increment REGISTERS the script without invoking
-# it (the persisted-restart wiring is the follow-up).
+# apply stay exec-based. A bare `--script-path` registration is runtime-neutral
+# (staged on the guest PATH, not auto-run at boot); the acq `start`/`restart`
+# verb re-runs startup via the exec heal.
 #
 # TRANSLATION from the exec path to an IN-GUEST script:
 #   - The exec path picks run-as-user via `msb exec -u agent`/`-u <user>`. Inside
@@ -1185,26 +1379,31 @@ _acq_msb_generate_startup_script() {
 # for cleanup by the caller after create. A kit with no startup commands stages
 # nothing (no empty script is registered).
 #
-# NOTE (increment 1): only the FIRST kit that contributes startup commands stakes
+# NOTE (single-stake): only the FIRST kit that contributes startup commands stakes
 # the fixed `acq-startup` script name; if multiple kits carried startup commands
 # they would need a merged/uniquely-named script — but the pinned built-in kits
-# put startup commands in a single kit, and the follow-up increment that actually
-# invokes/persists the script will finalize multi-kit merging. Guarded here so a
-# second contributing kit does not silently overwrite the first's registration.
+# put startup commands in a single kit, and multi-kit merging is deferred. Guarded
+# here so a second contributing kit does not silently overwrite the first's
+# registration; the exec-based apply path still runs EVERY kit's startup after
+# create, so nothing is dropped at runtime.
 #
 # VERIFIED NEUTRALITY ASSUMPTION (ADR-0017): registering a script via
 # `--script-path acq-startup:<file>` only STAGES the body on the guest PATH (as
 # /.msb/scripts/acq-startup) — it does NOT enroll the script in microsandbox's
 # persisted startup, so microsandbox does NOT auto-run it at guest boot. This was
 # confirmed against microsandbox source: `crates/cli/lib/commands/start.rs` and
-# `restart.rs` re-run a persisted `LaunchConfig.startup` on
-# `Sandbox::start_detached()`, and acq never populates `LaunchConfig.startup`.
-# Only an explicit startup registration is replayed at boot; a plain
-# `--script-path` registration is not. This is what makes increment 1
-# runtime-neutral: the script is present but inert. Enrolling it in the persisted
-# startup (so it replays on a native restart) is the follow-up increment's job.
+# `restart.rs` re-run a persisted startup command derived from
+# runtime.entrypoint/runtime.cmd on `Sandbox::start_detached()`, NOT from
+# runtime.scripts. So a bare `--script-path` registration is present but inert at
+# boot. Restart durability is therefore provided by the acq `start`/`restart`
+# verb + start-if-stopped-on-`acq run`, which re-runs the startup phase via the
+# exec heal (the deterministic mechanism). A native `msb start` OUTSIDE acq
+# cannot re-run startup on its own — and, more fundamentally, cannot even boot a
+# secret-bound sandbox, because `msb start` requires the `--secret` host env vars
+# that only acq injects (see acq_backend_start). Native-restart-outside-acq is
+# therefore out of scope by construction; go through `acq start`/`acq restart`.
 #
-# This assumption is load-bearing and unverifiable from this repo, so it MUST be
+# This inertness is load-bearing and unverifiable from this repo, so it MUST be
 # re-verified on each msb version bump — if a future msb auto-runs a registered
 # `--script-path` at boot, kit startup would double-run (boot replay + acq heal).
 # See docs/KNOWN_FAILURE_MODES.md ("msb May Auto-Run a --script-path-Registered
@@ -1325,12 +1524,12 @@ acq_backend_provision() {
     [ "${#pp[@]}" -gt 0 ] && create_flags+=("${pp[@]}")
 
     # Startup-phase commands → a create-time `--script-path acq-startup:<file>`
-    # (ADR-0017, increment 1). Runtime-neutral: the script is REGISTERED at create
-    # but not yet invoked or wired into microsandbox's persisted startup (the
-    # follow-up increment). install + mid-life apply stay exec-based (see the
-    # DESIGN NOTE and _acq_msb_apply_kit_dir, which still applies startup via
-    # exec after create for now). Only the first kit with startup commands stakes
-    # the fixed script name this increment (see _acq_msb_stage_startup_script).
+    # (ADR-0017). The script is REGISTERED at create; a bare registration is
+    # runtime-neutral (staged on the guest PATH, not auto-run at start). Restart
+    # durability is delivered by the acq `start`/`restart` verb re-running startup
+    # via the exec heal. install + mid-life apply stay exec-based (see the DESIGN
+    # NOTE and _acq_msb_apply_kit_dir). Only the first kit with startup commands
+    # stakes the fixed script name (see _acq_msb_stage_startup_script).
     _acq_msb_stage_startup_script "$spec" create_flags
   done
 
@@ -1488,73 +1687,15 @@ EOF
   #     API, not git: the playbook kit fetches a source tarball from
   #     api.github.com. Binding a single host also avoids a known microsandbox bug
   #     (multi-host binding: ineligible entry blocks eligible).
+  #
+  # The resolve+export+flag-collect is shared with the resume path
+  # (acq_backend_start) via _acq_msb_bind_secrets_into so create and start always
+  # bind the identical set. It exports each real value into a TRANSIENT env var
+  # (recorded in _secret_env_names) and appends the matching `--secret ENV@HOST`
+  # flags to create_flags; we unset the env vars right after `msb create` reads
+  # them.
   local _secret_env_names=()   # env vars we set transiently, cleared after create
-  if command -v acq_secret_resolve >/dev/null 2>&1; then
-    local usai_val
-    if usai_val=$(acq_secret_resolve usai "$name" 2>/dev/null) && [ -n "$usai_val" ]; then
-      export USAI_API_KEY="$usai_val"; usai_val=""
-      _secret_env_names+=("USAI_API_KEY")
-      create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
-      acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from acq store)"
-    elif [ -n "${USAI_API_KEY:-}" ]; then
-      # Fallback: a pre-exported USAI_API_KEY (e.g. CI) still works.
-      create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
-      acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from env)"
-    fi
-
-    # GitHub: bind GITHUB_TOKEN@api.github.com so kits can authenticate to the
-    # REST API (the substituted path). Resolve from the acq store first, then a
-    # pre-exported GITHUB_TOKEN/GH_TOKEN (CI). Absent token => no binding; the
-    # playbook kit then degrades gracefully (warns, no rules/skills).
-    local gh_val
-    if gh_val=$(acq_secret_resolve github "$name" 2>/dev/null) && [ -n "$gh_val" ]; then
-      export GITHUB_TOKEN="$gh_val"; gh_val=""
-      _secret_env_names+=("GITHUB_TOKEN")
-      create_flags+=(--secret "GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST}")
-      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from acq store)"
-    elif [ -n "${GITHUB_TOKEN:-}" ]; then
-      create_flags+=(--secret "GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST}")
-      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from env)"
-    elif [ -n "${GH_TOKEN:-}" ]; then
-      export GITHUB_TOKEN="$GH_TOKEN"
-      _secret_env_names+=("GITHUB_TOKEN")
-      create_flags+=(--secret "GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST}")
-      acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from GH_TOKEN env)"
-    fi
-
-    # GENERIC custom endpoints. usai + github were bound
-    # explicitly above (unchanged). Any OTHER service stored via `acq secret set
-    # SVC --host H --env E` recorded a non-secret (host, env) sidecar; bind each
-    # such service generically here so it is no longer stored-but-inert. Iterate
-    # the endpoint sidecars for this sandbox scope + global, deduping by env var
-    # (a scoped mapping shadows the global; usai/github are skipped — already
-    # bound). The real value moves via a TRANSIENT env var (never argv), exactly
-    # like usai/github, and msb reads it from that host env var at create.
-    if command -v acq_secret_meta_list >/dev/null 2>&1; then
-      local _svc _binding _env _host _val
-      while IFS= read -r _svc; do
-        [ -n "$_svc" ] || continue
-        case "$_svc" in usai|github) continue ;; esac  # bound explicitly above
-        _binding=$(_acq_msb_service_binding "$_svc" "$name")
-        _env=$(printf '%s' "$_binding" | cut -f1)
-        _host=$(printf '%s' "$_binding" | cut -f2)
-        [ -n "$_env" ] && [ -n "$_host" ] || continue
-        # Skip if this env var was already bound (e.g. usai/github, or a dup).
-        case " ${_secret_env_names[*]-} " in *" $_env "*) continue ;; esac
-        if _val=$(acq_secret_resolve "$_svc" "$name" 2>/dev/null) && [ -n "$_val" ]; then
-          # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
-          export "$_env=$_val"; _val=""
-          _secret_env_names+=("$_env")
-          create_flags+=(--secret "${_env}@${_host}")
-          acq_debug "msb secret: binding ${_env}@${_host} for custom service '$_svc' (from acq store)"
-        fi
-      done <<EOF
-$(acq_secret_meta_list "$name")
-EOF
-    fi
-  elif [ -n "${USAI_API_KEY:-}" ]; then
-    create_flags+=(--secret "USAI_API_KEY@${ACQ_MSB_USAI_HOST}")
-  fi
+  _acq_msb_bind_secrets_into create_flags _secret_env_names "$name"
 
   # Create the sandbox (detached; msb create boots in the background).
   # NOTE: acq runs under `set -euo pipefail`, so capture the status with
@@ -2496,6 +2637,28 @@ acq_backend_apply_kit() {
 
 acq_backend_ensure_kits_applied() {
   local name="$1"
+  # START-IF-STOPPED (ADR-0017). This heal loop drives `msb exec` against
+  # the guest for every kit (feature-probe, file drops, startup re-run). Those
+  # exec calls FAIL against a STOPPED guest, so a stopped sandbox must be started
+  # BEFORE any healing. This is also what makes `acq run <stopped-sandbox>` work
+  # end-to-end: the dispatcher's `run` path (and the `start`/`restart` verb) call
+  # ensure_kits_applied BEFORE acq_backend_attach, and attach's own `msb exec`
+  # would likewise fail on a stopped guest — so starting here, at the TOP of the
+  # heal, covers both the heal and the subsequent attach with a single guarded
+  # start. Idempotent: an already-running sandbox is a harmless no-op (guarded by
+  # _acq_msb_is_running). acq_backend_start itself BLOCKS on exec-readiness before
+  # returning (see its definition — the S1 readiness fix), so we do not repeat the
+  # exec-ready wait here: the guest is booted and exec-ready by the time the resume
+  # returns. Starting is best-effort — a start/readiness failure emits a warning
+  # but does not abort the heal. We do NOT suppress acq_backend_start's stderr:
+  # `msb start` diagnoses the real cause (e.g. a missing bound secret) on its own
+  # stderr, and masking it with only a generic warning would hide the root cause
+  # (repo Failure-Handling rule: report and diagnose, don't mask).
+  if ! _acq_msb_is_running "$name"; then
+    acq_debug "msb ensure_kits_applied: $name is stopped; starting before heal"
+    acq_backend_start "$name" >/dev/null || \
+      echo "acq(msb): warning: 'msb start $name' failed (see the error above); healing may not apply." >&2
+  fi
   local kits=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT" "$GITSSHSIGN_KIT")
   local builtin_count="${#kits[@]}"
   if [ -n "${ACQ_EXTRA_KITS:-}" ]; then

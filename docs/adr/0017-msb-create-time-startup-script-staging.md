@@ -13,6 +13,79 @@ supersedes: []
 
 # ADR-0017: Stage msb kit startup commands as a create-time script for restart durability
 
+## Update (2026-08-02)
+
+**Corrected mechanism (source-verified).** The original decision below assumed
+that registering the startup body with `--script-path acq-startup:<file>` would
+be enough for microsandbox to replay it on a native restart. That is **not**
+correct: microsandbox's `msb start`/`msb restart` call `Sandbox::start_detached`,
+which replays a persisted startup command derived **only** from
+`runtime.entrypoint` / `runtime.cmd` — **never** from `runtime.scripts`. A bare
+`--script-path acq-startup:<file>` only STAGES the script on the guest PATH at
+`/.msb/scripts/acq-startup`; it is **not** executed at start. `msb create` has no
+trailing command and no `--start`/`--on-start`/`--exec` flag, and the
+persisted-startup replay additionally depends on internal `launch_intent`/init
+semantics that are **uncertain** on the pinned msb 0.6.7 (`launch_intent` is
+serde-skipped).
+
+**Chosen resolution (this increment ships it):**
+
+ - **The acq `start`/`restart` verb — the sole, deterministic mechanism.** Add an
+   acq `start`/`restart` verb backed by `acq_backend_start` (`msb start` /
+   `sbx start`). After the backend resume, re-drive
+   `acq_backend_ensure_kits_applied`, which re-applies the pinned kits
+   idempotently and **re-runs the startup phase via the exec path** — the actual
+   mechanism that brings kit `startup`/`background` services back up. On the
+   **msb** backend, a **stopped** sandbox is also started automatically at the top
+   of `acq_backend_ensure_kits_applied`, so `acq run <stopped-sandbox>` works
+   end-to-end on msb (start → heal/startup → attach) — this closes the stated gap
+   without any native-persistence uncertainty. The **sbx** backend does not yet
+   have this start-if-stopped guard in its `acq_backend_ensure_kits_applied`; the
+   sbx `acq run <stopped-sandbox>` path is tracked as a follow-up (see Links).
+
+**Native restart OUTSIDE acq is out of scope (found in live testing).** An
+earlier revision of this increment also, behind an opt-in flag
+(`ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT`), designated the staged script as
+`--entrypoint /.msb/scripts/acq-startup` so microsandbox's `start_detached` would
+replay it on a raw `msb start`/reboot. **That approach was removed.** Live
+testing showed a raw `msb start` of a secret-bound sandbox fails *before* any
+startup question arises:
+
+```
+error: invalid config: secret USAI_API_KEY: host environment variable USAI_API_KEY is not set
+```
+
+`msb start` re-reads the sandbox's persisted `--secret ENV@HOST` bindings and
+requires each value present in the host environment — and only acq injects those
+(see `acq_backend_start` and the secret note below). So a native `msb start`
+outside acq cannot boot a secret-bound sandbox at all, which makes the
+`--entrypoint` persistence path moot: there is no supported way to resume such a
+sandbox except through acq. Rather than ship a gated, unverified,
+image-init-overriding flag that could never deliver on its promise, the flag and
+its wiring were removed. **Restart durability is therefore provided solely by the
+acq `start`/`restart` verb.** Always resume via `acq start` / `acq restart` (or
+`acq run <name>`), never a bare `msb start`.
+
+The original decision text below is preserved for the audit record; treat the
+"only option that makes startup re-run on a microsandbox-native restart" claim in
+the original Decision Outcome as **corrected** by this note.
+
+**Secret re-injection on resume (found in live testing).** `msb start` re-reads
+the sandbox's persisted `--secret ENV@HOST` bindings and requires each named
+value to be present in the *host* environment at start time — microsandbox does
+not retain the value across a stop. So `acq_backend_start` must resolve and
+export the same secrets `acq_backend_provision` bound at create, or `msb start`
+fails with `invalid config: secret USAI_API_KEY: host environment variable
+USAI_API_KEY is not set`. The resolve/export/`--secret`-collect logic is
+therefore shared between create and resume via a single helper
+(`_acq_msb_bind_secrets_into`), and the exported values are unset immediately
+after the msb child reads them (on both success and failure). This is also the
+reason native-restart-outside-acq is infeasible (above).
+
+---
+
+# ADR-0017: Stage msb kit startup commands as a create-time script for restart durability (original)
+
 ## Context and Problem Statement
 
 On the msb backend, kit `startup` commands (including long-lived `background`
@@ -61,35 +134,55 @@ exactly the mechanism microsandbox needs to re-run startup on restart.
 
 ## Decision Outcome
 
-Chosen option: **Option 2**, because it is the only option that makes startup
-re-run on a microsandbox-native restart (the actual gap), and it does so through
-the exact create-time-only, re-runnable-script case that the ADR-0011 design
-note identified as the clean, contained win for `--script-path`. The exec path
-is retained unchanged for install (run-once marker gating) and mid-life
+> **Corrected by the Update (2026-08-02) note above.** Option 2 alone does **not**
+> make startup re-run on a native restart — `start_detached` replays only
+> `runtime.entrypoint`/`runtime.cmd`, not a bare `--script-path` registration.
+> Moreover, a native `msb start` outside acq cannot even boot a secret-bound
+> sandbox (it needs the `--secret` host env vars only acq injects), so native
+> restart is out of scope entirely. The shipped resolution is the acq
+> `start`/`restart` verb re-running the idempotent kit apply — the deterministic
+> path that re-runs startup via exec on resume. The `--entrypoint` native-
+> persistence experiment described in the original Option 2 below was removed
+> (see the Update note). The original Option 2 rationale is retained for the
+> audit record only.
+
+Chosen option (original): **Option 2**, because it is the only option that makes
+startup re-run on a microsandbox-native restart (the actual gap), and it does so
+through the exact create-time-only, re-runnable-script case that the ADR-0011
+design note identified as the clean, contained win for `--script-path`. The exec
+path is retained unchanged for install (run-once marker gating) and mid-life
 apply/heal, so the two mechanisms are complementary, not a fork: create-time
 staging owns the reboot/`msb start` path; exec owns the in-place kit-add path.
 
-This ADR is delivered in two increments. The first (this ADR's enabling change)
-introduces the create-time `--script-path` staging of startup commands and
-rewrites the design note; it is runtime-neutral. The second wires that staged
-script into microsandbox's persisted startup so the observable restart-durable
-behavior lands.
+This ADR is delivered in two increments. The first (the enabling change)
+introduced the create-time `--script-path` staging of startup commands and
+rewrote the design note; it was runtime-neutral. The second (this increment)
+wires restart durability via the acq `start`/`restart` verb + `acq_backend_start`
++ start-if-stopped-on-`acq run`. (An experimental `--entrypoint` native-
+persistence path was prototyped in this increment and then removed once live
+testing proved native restart outside acq is infeasible — see the Update note.)
 
 ### Positive Consequences
 
-- Kit `startup`/`background` services survive `msb stop`/`msb start` and reboots
-  without an `acq run` re-attach.
+- Kit `startup`/`background` services are restored on resume deterministically
+  via `acq start` / `acq restart` (both backends) and, on the msb backend, via
+  `acq run <stopped-sandbox>` (start-if-stopped heal).
 - Command bodies are staged as files, not interpolated shell strings (SI-10).
 - No change to the neutral kit vocabulary or to install/idempotency semantics.
+- Safe-by-default: no image-entrypoint override; resume never changes the guest
+  boot path.
 
 ### Negative Consequences
 
-- Two staging mechanisms now coexist (create-time script for startup persistence
-  + exec for install and mid-life). The design note documents the boundary so a
-  future maintainer does not collapse them incorrectly.
+- The startup script is staged at create for use by the exec heal, while install
+  and mid-life apply also use the exec path. The design note documents the
+  boundary so a future maintainer does not collapse them incorrectly.
 - The create-time script must reproduce the per-command run-as-user and
   non-interactive git guards the exec path applies at invocation, so that logic
-  is shared/duplicated into the staged body.
+  is shared into the staged body.
+- Resume works only through acq (`acq start`/`acq restart`/`acq run`); a raw
+  `msb start` cannot boot a secret-bound sandbox, so it is not a supported resume
+  path. This is inherent to acq-injected `--secret` bindings, not a regression.
 
 ### Compliance Consequences
 
@@ -108,8 +201,14 @@ behavior lands.
 - ADR-0014 (neutral port-publish and background-command vocabulary) — defines the
   `background` command flag whose supervisors this ADR keeps alive across
   restarts.
-- `acq.backends/msb.sh` design note — rewritten to reflect this decision.
-- `docs/explorations/acq-design.md` — will be reconciled with the
-  restart-durable behavior by the follow-up increment that wires the persisted
-  startup. Increment 1 (this ADR) ships only create-time script *staging* and
-  does not touch that document or introduce restart-durable behavior.
+- `acq.backends/msb.sh` design note — rewritten to reflect this decision (the
+  deterministic acq `start`/`restart` heal; native restart outside acq is out of
+  scope because `msb start` needs acq-injected secrets).
+- `docs/explorations/acq-design.md` — reconciled with the shipped restart-durable
+  behavior: the lifecycle-phase table and the usai-provider msb row now describe
+  that startup re-runs on `acq run`/`acq start`/`acq restart` (acq re-drives the
+  idempotent apply), and that a raw `msb start` outside acq is not a supported
+  resume path.
+- Follow-up: the sbx adapter has no start-if-stopped guard in
+  `acq_backend_ensure_kits_applied`, so `acq run <stopped-sandbox>` on sbx heals
+  against a stopped guest — tracked in GSA-TTS/agentic-coding-quickstart#265.
