@@ -1138,6 +1138,142 @@ ASSUMPTION" note in `_acq_msb_stage_startup_script` (`acq.backends/msb.sh`).
 
 ---
 
+## 29. `opencode-ai's postinstall script was not run` on a Fresh sbx Sandbox
+
+### Symptoms
+
+A newly created **sbx** `opencode` sandbox fails at launch (the image pull
+succeeds, then the agent exits 1):
+
+```
+Error: opencode-ai's postinstall script was not run.
+
+This occurs when using --ignore-scripts during installation, or when using a
+package manager like pnpm that does not run postinstall scripts by default.
+
+To fix this, run the postinstall script manually:
+  cd node_modules/opencode-ai && node postinstall.mjs
+```
+
+Often appears right after a fresh image pull. Seen with `opencode-ai@1.18.12` on
+macOS/Apple Silicon, sbx v0.37.1.
+
+### Root Cause
+
+This is in the **Docker `sandbox-templates:opencode-docker` image**, not in
+`acq`, the quickstart, or your local setup. On the **sbx** backend opencode is
+baked into that image (acq does not install it — that only happens on the msb
+backend). Since opencode v1.15.1, the `opencode-ai` npm package needs its
+**postinstall** step to fetch the actual platform binary. The image appears to
+install `opencode-ai` at **build time** with lifecycle scripts skipped (e.g.
+`npm ci --ignore-scripts`, or pnpm/bun which skip postinstall by default), so the
+binary is missing in the shipped image and opencode's guard fires on first run.
+
+Evidence it is a build-time script-skip, not your environment (run inside the
+sandbox): `npm config get ignore-scripts` returns `false` (so nothing is
+disabling scripts at runtime), yet `npm ls -g opencode-ai` shows the package
+present without a working binary — the postinstall simply never ran when the
+image was built.
+
+Not a supply-chain compromise and not related to the recent quickstart changes;
+a fresh image pull just fetched a newer opencode build with this gap.
+
+### Fix
+
+Run opencode's own postinstall inside the sandbox, then re-run:
+
+```bash
+sbx exec <sandbox-name> -- sh -c 'cd "$(npm root -g)/opencode-ai" && node postinstall.mjs'
+sbx exec <sandbox-name> -- opencode --version   # confirm the binary now runs
+```
+
+Then `./acq run opencode <path>` (or `sbx run <sandbox>`) works.
+
+### Prevention / Status
+
+- We cannot fix this in this repo — the image is built and shipped by Docker.
+  An upstream report has been filed:
+  [docker/sbx-releases#395](https://github.com/docker/sbx-releases/issues/395).
+  Related upstream: [anomalyco/opencode#27906](https://github.com/anomalyco/opencode/issues/27906)
+  (opencode requires postinstall to fetch its binary since v1.15.1).
+- If a rebuilt image still ships the gap, the manual `node postinstall.mjs` above
+  is the reliable per-sandbox workaround.
+- The **msb** backend installs opencode itself (`npm install -g`, scripts
+  enabled) rather than using this image, so it is a possible alternative if the
+  sbx image stays broken — though it may hit the same opencode packaging issue.
+
+---
+
+## 26. macOS Gatekeeper Blocks `mkfs.erofs` (an sbx Helper) at `sbx policy init`
+
+### Symptoms
+
+On a clean `sbx` install on macOS (seen on **Tahoe / macOS 26**, Apple Silicon),
+**Step 3** of the quickstart — `sbx policy init balanced` — fails when macOS
+blocks a helper binary:
+
+```
+"mkfs.erofs" cannot be opened because the developer cannot be verified.
+macOS cannot verify that this app is free from malware.
+```
+
+The same block can appear for `mkfs.ext4` and `containerd-shim-nerdbox-v1`, and
+sometimes for the `sbx` binary itself. It often surfaces at
+`sbx policy init balanced` (the first command that builds a sandbox filesystem),
+not only at `sbx login`.
+
+`xattr -d com.apple.quarantine /opt/homebrew/bin/mkfs.erofs` does **not** clear
+it — even run with `sudo`.
+
+### Root Cause
+
+This is an **`sbx` dependency + macOS notarization** interaction, **not** a
+Quickstart, `acq`, or `msb` issue, and **not** a supply-chain compromise:
+
+- `sbx` invokes `mkfs.erofs` to build its sandbox rootfs/overlay layer.
+- `mkfs.erofs` ships from the Homebrew `erofs-utils` formula, which the
+  `docker/tap/sbx` formula pulls in as a dependency. This repo never installs or
+  invokes it.
+- That helper is **not Apple-notarized**. On recent macOS (Tahoe removed the
+  lenient CLI "open anyway" path), first execution of an unnotarized binary is
+  blocked by the code-signing assessment (AMFI / `syspolicyd`), not merely by the
+  `com.apple.quarantine` extended attribute — which is why removing the xattr
+  does nothing.
+- On a **clean install** the freshly downloaded helper is quarantined, so the
+  first sandbox operation (`sbx policy init balanced`) triggers the block
+  deterministically for new macOS users.
+
+The `erofs-utils` Homebrew formula itself was reviewed (source is kernel.org,
+tarball + bottles are SHA256-pinned, recent history is routine maintainer version
+bumps) — no tampering. The problem is purely the missing notarization of an
+sbx-bundled helper.
+
+### Fix
+
+Approve the blocked binary via System Settings — this is the reliable fix:
+
+1. Open **System Settings → Privacy & Security**.
+2. Scroll to the security prompt for the blocked binary (e.g. `mkfs.erofs`) and
+   click **"Allow Anyway"**.
+3. Re-run the command (`sbx policy init balanced`), then click **"Open"** on the
+   confirmation pop-up.
+4. Repeat for `mkfs.ext4` / `containerd-shim-nerdbox-v1` (and the `sbx` binary
+   itself) if you are prompted for them too.
+
+Do **not** rely on `xattr -d com.apple.quarantine` — it does not satisfy the
+code-signing gate on an unnotarized binary.
+
+### Prevention / Status
+
+- We cannot fix this in this repo (the helper is shipped and invoked by the
+  external Docker `sbx` tool). An **upstream request to notarize these helper
+  binaries has been filed with the Docker `sbx` team:
+  [docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392).**
+- Until sbx notarizes them, the System Settings "Allow Anyway" flow above is the
+  expected one-time step per new macOS machine.
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:
