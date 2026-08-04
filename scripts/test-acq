@@ -903,6 +903,27 @@ else
 fi
 cleanup_stubs
 
+# 5e2. masked secret entry (_acq_read_secret_masked): echoes one '*' per char to
+#       stderr for visual feedback, captures the real value on stdout, and never
+#       echoes the actual characters. Driven over a pipe (read -rsn1 works on a
+#       non-tty too), so it is deterministic offline. Also checks that backspace
+#       erases a char and an empty line yields an empty value.
+make_stubs; load_acq
+(
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  set +e
+  v=$(printf 'sk-SECRET\n' | _acq_read_secret_masked 2>"$STUBDIR/stars")
+  stars=$(cat "$STUBDIR/stars")
+  assert_eq "mask: captures the entered value" "sk-SECRET" "$v"
+  assert_contains "mask: shows a star per char (feedback)" "$stars" "*"
+  assert_not_contains "mask: never echoes the plaintext" "$stars" "sk-SECRET"
+  vb=$(printf 'ab\177c\n' | _acq_read_secret_masked 2>/dev/null)
+  assert_eq "mask: backspace erases last char" "ac" "$vb"
+  ve=$(printf '\n' | _acq_read_secret_masked 2>/dev/null)
+  assert_eq "mask: empty entry yields empty value" "" "$ve"
+) 2>/dev/null; pass "mask: masked secret entry (feedback + capture + backspace)"
+cleanup_stubs
+
 # 5f. `my-sandbox usai` (custom, piped) -> stored scoped + prints sandbox-scoped cmd.
 make_stubs
 out=$(printf 'k\n' | ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox usai 2>&1 || true)

@@ -1103,7 +1103,7 @@ $repos
 EOF
 
   echo "" >&2
-  echo "      When you have a token, paste it at the prompt (input hidden)." >&2
+  echo "      When you have a token, paste it at the prompt (shown as *)." >&2
   echo "      To skip for now, press Enter on an empty line." >&2
 
   # Store sandbox-scoped via the backend secret path (feeds the sbx proxy too).
