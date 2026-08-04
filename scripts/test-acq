@@ -385,8 +385,12 @@ make_stubs; load_acq
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
   rm -f "$STUBDIR/msb"          # remove msb so only sbx remains
-  _coreutils_dir=$(dirname "$(command -v env)")
-  PATH="$STUBDIR:$_coreutils_dir"; export PATH
+  # Pin PATH to ONLY the stub dir. Do NOT add a "coreutils dir" (e.g.
+  # dirname(env)): on hosts where `env` lives alongside real backends — Homebrew
+  # puts coreutils' `env` in the same bin dir as `msb`/`sbx` — that dir would
+  # re-leak a REAL msb into auto-detection and flip this sbx-only case to
+  # both-*. Tests 2f/2g show PATH=$STUBDIR alone is sufficient for this path.
+  PATH="$STUBDIR"; export PATH
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
@@ -406,8 +410,9 @@ make_stubs; load_acq
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
   rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
-  _coreutils_dir=$(dirname "$(command -v env)")
-  PATH="$STUBDIR:$_coreutils_dir"; export PATH
+  # PATH = stub dir ONLY (see 2d): a coreutils dir could re-leak a real sbx and
+  # flip this msb-only case to both-*.
+  PATH="$STUBDIR"; export PATH
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/msb.sh"
@@ -511,7 +516,7 @@ make_stubs
 _ghproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-ghcreate.XXXXXX")
 ( cd "$_ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
 out=$(ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$_ghproj/.secrets" \
-  "$ACQ" create opencode "$_ghproj" 2>&1)
+  "$ACQ" create opencode "$_ghproj" </dev/null 2>&1)
 assert_contains "dispatch: create runs github-scope advisory" "$out" "no repo-scoped GitHub token"
 rm -rf "$_ghproj"
 cleanup_stubs
@@ -1104,12 +1109,10 @@ make_stubs; load_acq
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
   rm -f "$STUBDIR/msb"          # remove msb so only sbx remains
-  # Constrain PATH to the stub dir ONLY: _auto_detect_backend runs
-  # `command -v msb`, which would otherwise find a REAL msb on the developer's
-  # base PATH and make this fall back-to-sbx assertion flake to "msb". Provide a
-  # coreutils dir so the sourced scripts still find standard tools.
-  _coreutils_dir=$(dirname "$(command -v env)")
-  PATH="$STUBDIR:$_coreutils_dir"
+  # Constrain PATH to the stub dir ONLY. Adding a "coreutils dir"
+  # (dirname(env)) would re-leak a REAL msb on hosts where Homebrew puts
+  # coreutils' `env` in the same bin dir as the backends, flipping this to msb.
+  PATH="$STUBDIR"
   export PATH
   # shellcheck disable=SC1090
   ACQ_SOURCE_ONLY=1 . "$ACQ"
