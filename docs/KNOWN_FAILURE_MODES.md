@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-08-03"
+last_updated: "2026-08-04"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -1180,11 +1180,17 @@ a fresh image pull just fetched a newer opencode build with this gap.
 
 ### Fix
 
-Apply the fix with **`sbx exec`**, not `sbx run` / `acq run`. `sbx run` and
-`acq run` **launch opencode**, which re-hits the missing-binary guard and exits
-before you can do anything — so you cannot fix it from a `run`. `sbx exec` runs a
-command in the sandbox **without launching the agent**, so it works even when
-`run` fails.
+**As of the current `acq`, `acq run opencode <path>` remediates this
+automatically:** before attaching an opencode agent, acq probes
+`opencode --version` in the sandbox and, if the binary is not functional, runs
+the package's `postinstall.mjs` (on either backend), then attaches. So the
+normal flow should now just work; if it still fails, apply the manual fix below.
+
+Apply the manual fix with **`sbx exec`**, not `sbx run`. `sbx run` (the raw
+backend command, without acq's remediation) **launches opencode**, which
+re-hits the missing-binary guard and exits before you can do anything. `sbx
+exec` runs a command in the sandbox **without launching the agent**, so it works
+even when a raw `run` fails.
 
 ```bash
 # 1. Find the sandbox that was created (its name, e.g. opencode-<project>):
@@ -1201,19 +1207,21 @@ sbx exec <sandbox-name> -- opencode --version   # confirm the binary now runs
 If `sbx exec` reports the sandbox is not running, start it first
 (`sbx start <sandbox-name>`) then re-run the exec.
 
-> Do **not** try to "run the fix inside the sandbox" by launching it — a fresh
-> `./acq run` / `sbx run` just re-triggers the error. The `sbx exec` path above
-> is what works from a failed launch (confirmed by affected users).
+> Note: a raw `sbx run <sandbox-name>` (bypassing acq) just re-triggers the
+> error. Prefer `acq run`, which remediates automatically; the `sbx exec` path
+> above is the manual fallback if remediation ever fails.
 
 ### Prevention / Status
 
-- We cannot fix this in this repo — the image is built and shipped by Docker.
-  An upstream report has been filed:
+- `acq run opencode` now runs the postinstall automatically before attach (both
+  backends), so the common case is handled without user action.
+- The underlying image gap is built and shipped by Docker; we cannot fix it in
+  this repo. An upstream report has been filed:
   [docker/sbx-releases#395](https://github.com/docker/sbx-releases/issues/395).
   Related upstream: [anomalyco/opencode#27906](https://github.com/anomalyco/opencode/issues/27906)
   (opencode requires postinstall to fetch its binary since v1.15.1).
-- If a rebuilt image still ships the gap, the manual `node postinstall.mjs` above
-  is the reliable per-sandbox workaround.
+- If acq's automatic remediation ever fails, the manual `node postinstall.mjs`
+  above is the reliable per-sandbox workaround.
 - The **msb** backend installs opencode itself (`npm install -g`, scripts
   enabled) rather than using this image, so it is a possible alternative if the
   sbx image stays broken — though it may hit the same opencode packaging issue.
