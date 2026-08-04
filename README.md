@@ -48,7 +48,7 @@ Then make sure you have each of these ready:
 | --------------- | ---------------------------------------------------------- |
 | A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li></ul>See [msb host setup](docs/QUICKSTART.md#msb-host-setup) for per-platform details; `msb doctor` (Step 1) is the authoritative check. |
 | USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
-| GitHub token | (recommended) Lets the agent authenticate to GitHub, work with private repositories, and act on your behalf (open PRs, push). `acq` can walk you through creating a repo-scoped one on first run. A token is needed today to fetch the kits while the [patterns repo](https://github.com/GSA-TTS/agentic-coding-patterns) is private; that requirement goes away once it is public. |
+| GitHub token | (recommended) Lets the agent authenticate to GitHub, work with private repositories, and act on your behalf (open PRs, push). `acq` can walk you through creating a repo-scoped one on first run. |
 
 <details>
 <summary>How to verify each requirement (click to expand)</summary>
