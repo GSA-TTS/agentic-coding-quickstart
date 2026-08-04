@@ -1748,7 +1748,7 @@ EOF
   if ! _acq_msb_wait_for_exec_ready "$name"; then
     echo "acq(msb): error: sandbox '$name' did not become exec-ready within" >&2
     echo "acq(msb):   ${ACQ_MSB_EXEC_READY_TIMEOUT}s. 'msb create' returns 0 even when the" >&2
-    echo "acq(msb):   guest fails to START (async boot) — a bad mount, image, or host" >&2
+    echo "acq(msb):   sandbox VM fails to START (async boot) — a bad mount, image, or host" >&2
     echo "acq(msb):   virtualization issue. Diagnose with:" >&2
     echo "acq(msb):     msb logs --source system $name" >&2
     echo "acq(msb):     msb list          # is it running?" >&2
@@ -2522,7 +2522,7 @@ _acq_msb_ports_list() {
   [ -f "$pidfile" ] || return 0
   while read -r _serve _ssh _sport _map; do
     [ -n "$_map" ] || continue
-    printf 'guest %s -> host 127.0.0.1:%s (post-hoc ssh -L)\n' \
+    printf 'sandbox %s -> host 127.0.0.1:%s (post-hoc ssh -L)\n' \
       "${_map#*:}" "${_map%%:*}"
   done <"$pidfile"
   return 0
@@ -2586,7 +2586,7 @@ _acq_msb_ports_from_inspect() {
     h="${line%%:*}"; g="${line#*:}"
     case "$h" in ""|*[!0-9]*) continue ;; esac
     case "$g" in ""|*[!0-9]*) continue ;; esac
-    printf 'guest %s -> host 127.0.0.1:%s (create-time -p)\n' "$g" "$h"
+    printf 'sandbox %s -> host 127.0.0.1:%s (create-time -p)\n' "$g" "$h"
   done
   return 0
 }
@@ -2804,39 +2804,26 @@ EOF
   printf '%s\n' "$applied"
 }
 
-# _acq_msb_secret_set_guidance SERVICE ENV HOST APPLIED — print the
-# service-specific post-set guidance (built-ins get bespoke wording; a custom
-# endpoint reports its ENV@HOST binding, or how to add one if unmapped).
+# _acq_msb_secret_set_guidance SERVICE ENV HOST APPLIED — print a concise
+# post-set confirmation. Storage/injection mechanics (bindings, on-the-wire
+# substitution) are documented in the README and docs; the CLI only confirms
+# what happened. An unmapped custom endpoint still needs the actionable
+# --host/--env hint so the user can make it bindable.
 _acq_msb_secret_set_guidance() {
   local service="$1" _env="$2" _host="$3" applied="$4"
   case "$service" in
-    usai)
-      echo "acq(msb): stored USAi key in the acq secret store. At 'acq run/create'" >&2
-      echo "      the msb backend binds it via --secret USAI_API_KEY@${ACQ_MSB_USAI_HOST};" >&2
-      echo "      the real value is swapped in on the wire and never enters the guest." >&2
-      [ "$applied" -gt 0 ] && echo "      Re-fed $applied running sandbox(es) via 'msb modify' (no recreate needed)." >&2
-      ;;
-    github)
-      echo "acq(msb): stored GitHub token in the acq secret store. At 'acq run/create'" >&2
-      echo "      the msb backend binds it via --secret GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST};" >&2
-      echo "      the real value is swapped in on the wire to the REST API and never enters" >&2
-      echo "      the guest. Kits authenticate via the REST API (e.g. the playbook kit" >&2
-      echo "      fetches a source tarball from api.github.com) — NOT 'git clone', which" >&2
-      echo "      msb does not substitute for github.com/codeload." >&2
-      [ "$applied" -gt 0 ] && echo "      Re-fed $applied running sandbox(es) via 'msb modify' (no recreate needed)." >&2
+    usai|github)
+      echo "acq: stored '$service' in the acq secret store." >&2
+      [ "$applied" -gt 0 ] && echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
       ;;
     *)
       if [ -n "$_env" ] && [ -n "$_host" ]; then
-        echo "acq(msb): stored '$service' in the acq secret store with endpoint" >&2
-        echo "      ${_env}@${_host}. At 'acq run/create' the msb backend binds it via" >&2
-        echo "      --secret ${_env}@${_host}; the real value is swapped in on the wire and" >&2
-        echo "      never enters the guest." >&2
-        [ "$applied" -gt 0 ] && echo "      Re-fed $applied running sandbox(es) via 'msb modify' (no recreate needed)." >&2
+        echo "acq: stored '$service' in the acq secret store (bound as ${_env}@${_host})." >&2
+        [ "$applied" -gt 0 ] && echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
       else
-        echo "acq(msb): stored '$service' in the acq secret store, but it has no endpoint" >&2
-        echo "      mapping so the msb backend cannot bind it. Provide --host HOST --env ENV" >&2
-        echo "      (e.g. 'acq secret set -g $service --host api.example.com --env API_KEY')" >&2
-        echo "      so it is bound via --secret ENV@HOST at create." >&2
+        echo "acq: stored '$service' in the acq secret store, but it has no endpoint" >&2
+        echo "      mapping, so it cannot be bound. Provide --host HOST --env ENV, e.g.:" >&2
+        echo "      acq secret set -g $service --host api.example.com --env API_KEY" >&2
       fi
       ;;
   esac

@@ -919,7 +919,6 @@ cleanup_stubs
 make_stubs
 out=$(printf 'k\n' | ACQ_BACKEND=msb "$ACQ" secret set -g usai 2>&1 || true)
 assert_contains "secret(msb): usai stored" "$out" "acq secret store"
-assert_contains "secret(msb): usai mentions --secret binding" "$out" "USAI_API_KEY@api.gsa.usai.gov"
 assert_not_contains "secret(msb): usai does not print sbx set-custom" "$out" "sbx secret set-custom"
 cleanup_stubs
 
@@ -1282,10 +1281,10 @@ assert_contains "msb: doctor shows msb installed" "$out" "msb: installed v0.6.6"
 assert_not_contains "msb: doctor drops 'coming in 1.2.x'" "$out" "coming in 1.2.x"
 cleanup_stubs
 
-# 8k. msb secret set usai stores in the acq store + prints binding guidance.
+# 8k. msb secret set usai stores in the acq store + confirms concisely.
 make_stubs
 out=$(ACQ_SECRET_TEST_VALUE="my-usai-key" ACQ_BACKEND=msb "$ACQ" secret set -g usai 2>&1 || true)
-assert_contains "msb: secret set usai mentions USAI_API_KEY binding" "$out" "USAI_API_KEY"
+assert_contains "msb: secret set usai confirms store" "$out" "acq secret store"
 if [ -f "$STUBDIR/secrets/acq.usai" ]; then
   pass "msb: secret set usai stored in acq store"
 else
@@ -1293,11 +1292,10 @@ else
 fi
 cleanup_stubs
 
-# 8l. msb secret set github stores in the acq store + explains it is NOT bound on
-#     msb (git substitution unsupported), pointing at the known limitation.
+# 8l. msb secret set github stores in the acq store + confirms concisely.
 make_stubs
 out=$(ACQ_SECRET_TEST_VALUE="ghp_x" ACQ_BACKEND=msb "$ACQ" secret set -g github 2>&1 || true)
-assert_contains "msb: secret set github notes REST-API binding" "$out" "GITHUB_TOKEN@api.github.com"
+assert_contains "msb: secret set github confirms store" "$out" "acq secret store"
 if [ -f "$STUBDIR/secrets/acq.github" ]; then
   pass "msb: secret set github stored in acq store"
 else
@@ -4416,10 +4414,10 @@ printf '%s\n' "$list_out" | grep -q 8080 \
 # leaking in as ports). The old numeric-pairing parser split the colon in the
 # third entry's host_bind ("127.0.0.1:9") and emitted `guest 9 -> host 127.0.0.1:1`
 # instead of the real 8443:8443 mapping — these asserts fail against that old code.
-printf '%s\n' "$list_out" | grep -q 'guest 3000 -> host 127.0.0.1:3000 (create-time -p)' \
+printf '%s\n' "$list_out" | grep -q 'sandbox 3000 -> host 127.0.0.1:3000 (create-time -p)' \
   && pass "msb ports: LIST prints exact create-time mapping for 3000 (no host_bind leak)" \
   || fail "msb ports: LIST exact create-time mapping for 3000" "out=[$list_out]"
-printf '%s\n' "$list_out" | grep -q 'guest 8443 -> host 127.0.0.1:8443 (create-time -p)' \
+printf '%s\n' "$list_out" | grep -q 'sandbox 8443 -> host 127.0.0.1:8443 (create-time -p)' \
   && pass "msb ports: LIST maps colon-bearing host_bind entry to real port 8443 (not split)" \
   || fail "msb ports: LIST exact create-time mapping for 8443 (colon-bearing host_bind)" "out=[$list_out]"
 printf '%s\n' "$list_out" | grep -Eq '127\.0\.0\.1:(1|9|16|00|256)( |$)' \

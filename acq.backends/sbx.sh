@@ -780,8 +780,7 @@ acq_backend_secret_set() {
 
     if [ -t 0 ] && [ -z "${ACQ_SECRET_TEST_VALUE:-}" ]; then
       # Interactive TTY: let sbx prompt for the value once.
-      echo "acq: now configuring sbx's injector for '$service' — enter the SAME value" >&2
-      echo "     at sbx's prompt (already saved in the acq secret store):" >&2
+      echo "acq: enter the SAME value at sbx's prompt to finish configuring '$service':" >&2
       sbx "${cmd_args[@]}"
       exit_code=$?
     else
@@ -791,11 +790,10 @@ acq_backend_secret_set() {
       if [ "${ACQ_BACKEND:-}" = "msb" ] || [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ]; then
         : # msb reads the acq store directly at provision; no sbx step needed.
       else
-        echo "acq: to configure the sbx injector for a CUSTOM endpoint non-interactively," >&2
-        echo "     sbx requires the value on the command line (visible in shell history):" >&2
+        echo "acq: to finish non-interactively, sbx needs the value on the command line" >&2
+        echo "     (visible in shell history):" >&2
         echo "       sbx ${cmd_args[*]} --value <the-secret>" >&2
-        echo "     Or run 'acq secret set ${scope_flag:-$scope_name} ${service}' from a terminal" >&2
-        echo "     to enter it at sbx's own prompt." >&2
+        echo "     Or run 'acq secret set ${scope_flag:-$scope_name} ${service}' from a terminal." >&2
       fi
       exit_code=0
     fi
