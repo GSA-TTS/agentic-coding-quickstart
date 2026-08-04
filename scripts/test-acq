@@ -384,13 +384,11 @@ make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
-  rm -f "$STUBDIR/msb"          # remove msb so only sbx remains
-  # Pin PATH to ONLY the stub dir. Do NOT add a "coreutils dir" (e.g.
-  # dirname(env)): on hosts where `env` lives alongside real backends — Homebrew
-  # puts coreutils' `env` in the same bin dir as `msb`/`sbx` — that dir would
-  # re-leak a REAL msb into auto-detection and flip this sbx-only case to
-  # both-*. Tests 2f/2g show PATH=$STUBDIR alone is sufficient for this path.
-  PATH="$STUBDIR"; export PATH
+  # Pin exactly which backends auto-detect "sees" via the test override, rather
+  # than manipulating PATH: a developer's real msb/sbx share PATH dirs with the
+  # coreutils the sourced scripts need (e.g. Homebrew's `env` sits beside
+  # `msb`), so PATH tricks either leak a real backend or break the harness.
+  export ACQ_TEST_INSTALLED_BACKENDS="sbx"
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
@@ -409,10 +407,7 @@ make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
-  rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
-  # PATH = stub dir ONLY (see 2d): a coreutils dir could re-leak a real sbx and
-  # flip this msb-only case to both-*.
-  PATH="$STUBDIR"; export PATH
+  export ACQ_TEST_INSTALLED_BACKENDS="msb"   # only msb "installed" (see 2d)
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/msb.sh"
@@ -429,8 +424,8 @@ make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  export ACQ_TEST_INSTALLED_BACKENDS="msb sbx"
   rm -f "$STUBDIR/.sandbox_list"   # sbx ls -q returns empty -> no sbx sandboxes
-  PATH="$STUBDIR"; export PATH
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/msb.sh"
@@ -447,8 +442,9 @@ make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  export ACQ_TEST_INSTALLED_BACKENDS="msb sbx"
   printf 'my-existing-box\n' > "$STUBDIR/.sandbox_list"  # sbx ls -q non-empty
-  PATH="$STUBDIR"; export PATH
+  PATH="$STUBDIR:$PATH"; export PATH   # ensure the stub sbx (for `sbx ls -q`) wins
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
@@ -465,8 +461,8 @@ cleanup_stubs
 make_stubs; load_acq
 (
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  export ACQ_TEST_INSTALLED_BACKENDS="msb sbx"
   printf 'my-existing-box\n' > "$STUBDIR/.sandbox_list"
-  PATH="$STUBDIR"; export PATH
   ACQ_BACKEND="msb"; export ACQ_BACKEND
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
@@ -1089,10 +1085,9 @@ make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  export ACQ_TEST_INSTALLED_BACKENDS="msb sbx"
   rm -f "$STUBDIR/.sandbox_list"    # sbx ls -q empty -> no sbx sandboxes to keep
-  # Pin PATH to ONLY the stub dir so a real sbx/msb on the developer's host
-  # PATH cannot leak into auto-detection.
-  PATH="$STUBDIR"; export PATH
+  PATH="$STUBDIR:$PATH"; export PATH   # stub sbx (for `sbx ls -q`) wins
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/msb.sh"
@@ -1108,12 +1103,10 @@ make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
-  rm -f "$STUBDIR/msb"          # remove msb so only sbx remains
-  # Constrain PATH to the stub dir ONLY. Adding a "coreutils dir"
-  # (dirname(env)) would re-leak a REAL msb on hosts where Homebrew puts
-  # coreutils' `env` in the same bin dir as the backends, flipping this to msb.
-  PATH="$STUBDIR"
-  export PATH
+  # Pin which backends auto-detect "sees" via the test override rather than
+  # PATH: a real msb on the developer's PATH (esp. beside Homebrew coreutils)
+  # would otherwise leak in and flip this sbx-only case to both-*.
+  export ACQ_TEST_INSTALLED_BACKENDS="sbx"
   # shellcheck disable=SC1090
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   # shellcheck source=acq.backends/sbx.sh

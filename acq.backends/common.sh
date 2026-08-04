@@ -408,13 +408,31 @@ _read_config_backend() {
   awk '/^[[:space:]]*backend[[:space:]]*:/ { gsub(/^[[:space:]]*backend[[:space:]]*:[[:space:]]*/,""); gsub(/[[:space:]]*$/,""); print; exit }' "$cfg"
 }
 
+# _backend_installed BACKEND — 0 if the named backend CLI is available.
+# Honors a test-only override, ACQ_TEST_INSTALLED_BACKENDS, a space-separated
+# allowlist (e.g. "sbx" or "msb sbx"). Tests set it to pin exactly which
+# backends auto-detect "sees" — `command -v` alone can't, because a developer's
+# real msb/sbx (and the coreutils the sourced scripts need) share PATH dirs, so
+# restricting PATH cannot hide one backend without also breaking the harness.
+# When the override is unset (production), falls back to a real `command -v`.
+_backend_installed() {
+  local be="$1"
+  if [ -n "${ACQ_TEST_INSTALLED_BACKENDS+x}" ]; then
+    case " $ACQ_TEST_INSTALLED_BACKENDS " in
+      *" $be "*) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  command -v "$be" >/dev/null 2>&1
+}
+
 # _sbx_has_sandboxes — 0 if the sbx CLI reports at least one existing sandbox.
 # Used only on the both-installed auto-detect path to keep users on sbx when
 # they already have sbx sandboxes. Runs BEFORE any adapter is sourced, so it
 # calls `sbx ls -q` directly rather than acq_backend_exists. Fail-open: any
 # error (sbx missing, not logged in, transient) is treated as "no sandboxes".
 _sbx_has_sandboxes() {
-  command -v sbx >/dev/null 2>&1 || return 1
+  _backend_installed sbx || return 1
   [ -n "$(sbx ls -q 2>/dev/null)" ]
 }
 
@@ -436,8 +454,8 @@ _auto_detect_backend() {
   ACQ_AUTODETECT_BACKEND=""
   ACQ_AUTODETECT_REASON=""
   local have_msb=0 have_sbx=0
-  command -v msb >/dev/null 2>&1 && have_msb=1
-  command -v sbx >/dev/null 2>&1 && have_sbx=1
+  _backend_installed msb && have_msb=1
+  _backend_installed sbx && have_sbx=1
 
   if [ "$have_msb" -eq 1 ] && [ "$have_sbx" -eq 1 ]; then
     if _sbx_has_sandboxes; then
