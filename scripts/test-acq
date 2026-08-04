@@ -215,9 +215,16 @@ case "$_msb_sub" in
   modify) : ;;
   *) : ;;
 esac
-# Drain any piped stdin exactly like a real remote exec would, so the test
-# harness catches loops that leak their stdin into an inner msb call.
-cat >/dev/null 2>&1 || true
+# Drain piped stdin ONLY for subcommands a real `msb` actually reads it on
+# (a remote exec / ssh forwards stdin). For everything else — modify, list,
+# start, stop, create, … — real msb does NOT touch stdin, so draining here
+# would block on an inherited TTY when a test invokes such a subcommand
+# foreground without redirecting stdin (a false interactive hang). Keeping the
+# drain scoped to exec/ssh still catches the loop-stdin-consumption bug it
+# exists for, without hanging the harness.
+case "$_msb_sub" in
+  exec|ssh) cat >/dev/null 2>&1 || true ;;
+esac
 exit 0
 MSBSTUB
   chmod +x "$STUBDIR/msb"
