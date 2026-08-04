@@ -19,6 +19,17 @@
 
 set -uo pipefail
 
+# Run the whole harness with stdin detached from any terminal. acq's
+# interactive prompts (key-gate rotate, github-scope advisory, stale-bundle
+# refresh, doctor default-write) gate on `[ -t 0 ]` and READ stdin when it is a
+# TTY. Individual tests redirect stdin where they exercise a prompt on purpose,
+# but a test that reaches a prompt path incidentally would otherwise BLOCK when
+# the suite is run from an interactive terminal (CI pipes stdin, so it never
+# hung there). Reopening stdin from /dev/null once, here, makes every prompt
+# take its non-interactive branch regardless of how the suite was launched.
+# Tests that need to feed input still pipe it explicitly (that overrides this).
+exec </dev/null
+
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ACQ="$REPO_ROOT/acq"
 
@@ -216,14 +227,14 @@ case "$_msb_sub" in
   *) : ;;
 esac
 # Drain piped stdin ONLY for subcommands a real `msb` actually reads it on
-# (a remote exec / ssh forwards stdin). For everything else — modify, list,
-# start, stop, create, … — real msb does NOT touch stdin, so draining here
-# would block on an inherited TTY when a test invokes such a subcommand
-# foreground without redirecting stdin (a false interactive hang). Keeping the
-# drain scoped to exec/ssh still catches the loop-stdin-consumption bug it
-# exists for, without hanging the harness.
+# (a remote exec / ssh forwards stdin), and ONLY when stdin is not a TTY.
+# Real msb never blocks on an interactive terminal here; draining a TTY would
+# hang forever waiting for EOF when a test invokes `msb exec` foreground
+# without redirecting stdin. Restricting to non-TTY still models a real remote
+# exec consuming a PIPE, which is what surfaces the loop-stdin-consumption bug
+# this guard exists for (a `while read … done <<heredoc` whose body calls msb).
 case "$_msb_sub" in
-  exec|ssh) cat >/dev/null 2>&1 || true ;;
+  exec|ssh) [ -t 0 ] || cat >/dev/null 2>&1 || true ;;
 esac
 exit 0
 MSBSTUB
@@ -4545,6 +4556,10 @@ assert_eq       "gh-detect: empty dir empty"      ""  "$(_dwr "$gwt/empty" | tr 
 # $RANDOM can repeat across sequential subshells and leak a planted secret).
 _advise() {
   # $1 = workspace, $2 = unique tag, $3 = "global"?, $4 = "scoped"?
+  # Redirect stdin from /dev/null so advise_github_scope takes its
+  # non-interactive branch (it gates on `[ ! -t 0 ]`). Without this, running the
+  # suite from an interactive terminal leaves stdin as the TTY inside this
+  # command substitution, so the advisory would block on its [y/N] read.
   ( export ACQ_SCRIPT_DIR="$REPO_ROOT"
     unset ACQ_SECRET_STORE_DIR
     export ACQ_SECRET_FORCE_FILE=1
@@ -4552,8 +4567,7 @@ _advise() {
     . "${REPO_ROOT}/acq.backends/common.sh"
     [ "${3:-}" = "global" ] && printf 'gho_x\n' | acq_secret_store "$(_acq_secret_key github)" >/dev/null 2>&1
     [ "${4:-}" = "scoped" ] && printf 'ghp_x\n' | acq_secret_store "$(_acq_secret_key github sb1)" >/dev/null 2>&1
-    # non-TTY (stdin not a tty here) so it advises + returns without prompting
-    advise_github_scope sb1 "$1" 2>&1 )
+    advise_github_scope sb1 "$1" 2>&1 </dev/null )
 }
 assert_contains "gh-advise: fires when repos + no scoped (no global)" "$(_advise "$gwt/repoGH" t1)" "no repo-scoped GitHub token"
 assert_contains "gh-advise: warns broad when global present"          "$(_advise "$gwt/repoGH" t2 global)" "grants this sandbox access to ALL"
