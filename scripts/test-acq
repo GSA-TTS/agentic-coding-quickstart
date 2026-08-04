@@ -1206,6 +1206,25 @@ assert_contains "msb: backend list shows msb version" "$out" "msb  v0.6.6"
 assert_not_contains "msb: backend list drops 'coming in 1.2.x'" "$out" "Coming in 1.2.x"
 cleanup_stubs
 
+# 8i2. `acq backend set NAME` persists, then `acq backend unset` clears it so
+#      resolution falls back to auto-detect. Uses an isolated XDG config dir.
+make_stubs
+(
+  export XDG_CONFIG_HOME="$STUBDIR/xdg"
+  cfg="$XDG_CONFIG_HOME/acq/config.yaml"
+  "$ACQ" backend set sbx >/dev/null 2>&1
+  [ -f "$cfg" ] && grep -q '^backend: sbx' "$cfg" && printf 'set=yes\n' || printf 'set=no\n'
+  "$ACQ" backend unset >/dev/null 2>&1
+  [ -f "$cfg" ] && printf 'file-after=present\n' || printf 'file-after=gone\n'
+  # unset is idempotent: a second call still succeeds.
+  "$ACQ" backend unset >/dev/null 2>&1 && printf 'unset-idempotent=yes\n' || printf 'unset-idempotent=no\n'
+) > "$STUBDIR/bu.out" 2>&1
+bu_out=$(cat "$STUBDIR/bu.out")
+assert_contains "backend set: persists to config" "$bu_out" "set=yes"
+assert_contains "backend unset: removes the config" "$bu_out" "file-after=gone"
+assert_contains "backend unset: idempotent" "$bu_out" "unset-idempotent=yes"
+cleanup_stubs
+
 # 8j. `acq doctor` probes msb with a real version (not the old placeholder).
 make_stubs
 out=$(printf 'n\n' | "$ACQ" doctor 2>&1)

@@ -101,6 +101,7 @@ Subcommands:
   doctor                                   Backend health check + write config.
   backend list                             List detected backends (sbx, msb).
   backend set NAME                         Persist the default backend.
+  backend unset                            Clear the persisted default (auto-detect).
   kit list                                 Show the pinned kits (+ extras).
   kit validate PATH                        Validate a neutral hybrid/v1 kit.
   kit apply NAME KITREF                    Apply a kit to an existing sandbox.
@@ -246,8 +247,20 @@ case "$subcommand" in
         printf 'backend: %s\n' "$local_backend" > "$local_config_file"
         echo "acq: default backend set to '${local_backend}' in ${local_config_file}" >&2
         ;;
+      unset)
+        # Clear the persisted default so acq falls back to auto-detection (see
+        # the resolution order in `acq help`). Idempotent: succeeds whether or
+        # not a default was set.
+        local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+        if [ -f "$local_config_file" ]; then
+          rm -f "$local_config_file"
+          echo "acq: cleared the persisted default backend (${local_config_file}); acq will auto-detect." >&2
+        else
+          echo "acq: no persisted default backend was set; acq already auto-detects." >&2
+        fi
+        ;;
       *)
-        echo "acq: unknown backend subcommand '${sub2}'. Try: acq backend list | set NAME" >&2
+        echo "acq: unknown backend subcommand '${sub2}'. Try: acq backend list | set NAME | unset" >&2
         exit 1
         ;;
     esac
