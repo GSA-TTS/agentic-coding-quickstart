@@ -96,17 +96,36 @@ sbx login
 ```
 
 > [!NOTE]
-> macOS may prompt you to approve helper binaries the first time you use `sbx`. Allow these if
-> prompted:
+> **macOS Gatekeeper may block `mkfs.erofs` at first sandbox build — this is an
+> `sbx` PATH-resolution bug, not a Quickstart/`acq` bug.** On macOS (including
+> Tahoe/26) the block commonly appears at **Step 3** (`sbx policy init balanced`)
+> with *"mkfs.erofs cannot be opened because the developer cannot be verified."*
+> It only happens if you also have Homebrew `erofs-utils` installed:
 >
-> - `mkfs.erofs`
-> - `mkfs.ext4`
-> - `containerd-shim-nerdbox-v1`
+> `sbx` ships its **own notarized** `mkfs.erofs` (in its Caskroom `libexec/`),
+> but invokes it via `$PATH`. If Homebrew `erofs-utils` is installed,
+> `/opt/homebrew/bin/mkfs.erofs` — which is **ad-hoc-signed / not notarized** —
+> is earlier on `$PATH` and shadows sbx's bundled copy, so Gatekeeper rejects it.
 >
-> ---
+> **Fix (reliable): make sbx use its own notarized binary.**
 >
-> macOS may say sbx is not from a "trusted developer" and block it. In this case you will need to open System Preferences/Privacy
-> & Security/Security, and click the "Allow anyway" button. Run `sbx login` again and click "Allow anyway" in the popup.
+> ```bash
+> brew uninstall erofs-utils   # if nothing else needs it
+> ```
+>
+> If you can't remove it, approve the Homebrew binary via **System Settings →
+> Privacy & Security → "Allow Anyway"**, re-run the command, then click **"Open"**.
+>
+> > **Do NOT bother with `xattr`.** `xattr -d com.apple.quarantine <path>` does
+> > **not** clear this, even with `sudo` — for an unnotarized binary the block is
+> > enforced by macOS code-signing assessment, not the quarantine attribute.
+> > (macOS may also block the `sbx` binary itself the same way — allow it via the
+> > same System Settings flow, then run `sbx login` again.)
+>
+> This is in the external `sbx` tool. See
+> [`docs/KNOWN_FAILURE_MODES.md`](docs/KNOWN_FAILURE_MODES.md) for details; the
+> upstream fix (have sbx call its bundled binary by absolute path) is tracked at
+> [docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392).
 
 </details>
 
@@ -238,7 +257,7 @@ in the list of allowed network destinations.
 > to show **Verified** on GitHub you need, one time: a GitHub-verified
 > `user.email` set **in the project** (repo-local config, since the sandbox has
 > its own home and does not see your host global git config) and your **public**
-> signing key registered on GitHub as a _Signing Key_. See
+> signing key registered on GitHub as a *Signing Key*. See
 > [Commits show "Unverified" on GitHub](#troubleshooting) below.
 
 ### Step 4: Create and run a sandbox (as often as you like)
@@ -342,8 +361,8 @@ git config user.name  "Your Name"
 ```
 
 **Step 2 — register your signing key on GitHub.** Add the **public** half of your
-signing key as a **Signing Key**: _Settings → SSH and GPG keys → New SSH key →
-Key type: **Signing Key**_. (The same key may already be an authentication key;
+signing key as a **Signing Key**: *Settings → SSH and GPG keys → New SSH key →
+Key type: **Signing Key***. (The same key may already be an authentication key;
 add it again as a signing key.)
 
 Then make a **new** commit — verification applies going forward.

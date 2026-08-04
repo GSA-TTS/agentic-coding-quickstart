@@ -90,6 +90,16 @@ sbx policy allow network "api.gsa.usai.gov"
 sbx policy ls
 ```
 
+> **macOS:** the first time `sbx policy init balanced` builds a sandbox
+> filesystem, macOS Gatekeeper may block `mkfs.erofs` with *"…cannot be opened
+> because the developer cannot be verified"* — but only if you also have Homebrew
+> `erofs-utils` installed (sbx invokes `mkfs.erofs` from `$PATH` and picks up the
+> unnotarized Homebrew copy instead of its own notarized bundled one). Fix:
+> `brew uninstall erofs-utils` (so sbx uses its bundled binary), or approve the
+> Homebrew binary via **System Settings → Privacy & Security → "Allow Anyway"**
+> and re-run. `xattr -d com.apple.quarantine` does **not** work. Details:
+> [KNOWN_FAILURE_MODES.md](KNOWN_FAILURE_MODES.md#26-macos-gatekeeper-blocks-mkfserofs-at-sbx-policy-init-path-shadowing).
+
 ### Understanding Network Policies
 
 | Policy | Description | Use Case |

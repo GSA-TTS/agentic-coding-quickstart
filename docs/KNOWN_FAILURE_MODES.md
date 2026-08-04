@@ -1138,6 +1138,139 @@ ASSUMPTION" note in `_acq_msb_stage_startup_script` (`acq.backends/msb.sh`).
 
 ---
 
+## 29. `opencode-ai's postinstall script was not run` on a Fresh sbx Sandbox
+
+### Symptoms
+
+A newly created **sbx** `opencode` sandbox fails at launch (the image pull
+succeeds, then the agent exits 1):
+
+```
+Error: opencode-ai's postinstall script was not run.
+
+This occurs when using --ignore-scripts during installation, or when using a
+package manager like pnpm that does not run postinstall scripts by default.
+
+To fix this, run the postinstall script manually:
+  cd node_modules/opencode-ai && node postinstall.mjs
+```
+
+Often appears right after a fresh image pull. Seen with `opencode-ai@1.18.12` on
+macOS/Apple Silicon, sbx v0.37.1.
+
+### Root Cause
+
+This is in the **Docker `sandbox-templates:opencode-docker` image**, not in
+`acq`, the quickstart, or your local setup. On the **sbx** backend opencode is
+baked into that image (acq does not install it — that only happens on the msb
+backend). Since opencode v1.15.1, the `opencode-ai` npm package needs its
+**postinstall** step to fetch the actual platform binary. The image appears to
+install `opencode-ai` at **build time** with lifecycle scripts skipped (e.g.
+`npm ci --ignore-scripts`, or pnpm/bun which skip postinstall by default), so the
+binary is missing in the shipped image and opencode's guard fires on first run.
+
+Evidence it is a build-time script-skip, not your environment (run inside the
+sandbox): `npm config get ignore-scripts` returns `false` (so nothing is
+disabling scripts at runtime), yet `npm ls -g opencode-ai` shows the package
+present without a working binary — the postinstall simply never ran when the
+image was built.
+
+Not a supply-chain compromise and not related to the recent quickstart changes;
+a fresh image pull just fetched a newer opencode build with this gap.
+
+### Fix
+
+Run opencode's own postinstall inside the sandbox, then re-run:
+
+```bash
+sbx exec <sandbox-name> -- sh -c 'cd "$(npm root -g)/opencode-ai" && node postinstall.mjs'
+sbx exec <sandbox-name> -- opencode --version   # confirm the binary now runs
+```
+
+Then `./acq run opencode <path>` (or `sbx run <sandbox>`) works.
+
+### Prevention / Status
+
+- We cannot fix this in this repo — the image is built and shipped by Docker.
+  An upstream report has been filed:
+  [docker/sbx-releases#395](https://github.com/docker/sbx-releases/issues/395).
+  Related upstream: [anomalyco/opencode#27906](https://github.com/anomalyco/opencode/issues/27906)
+  (opencode requires postinstall to fetch its binary since v1.15.1).
+- If a rebuilt image still ships the gap, the manual `node postinstall.mjs` above
+  is the reliable per-sandbox workaround.
+- The **msb** backend installs opencode itself (`npm install -g`, scripts
+  enabled) rather than using this image, so it is a possible alternative if the
+  sbx image stays broken — though it may hit the same opencode packaging issue.
+
+---
+
+## 26. macOS Gatekeeper Blocks `mkfs.erofs` at `sbx policy init` (PATH shadowing)
+
+### Symptoms
+
+On macOS (seen on **Tahoe / macOS 26**, Apple Silicon), `sbx policy init balanced`
+— the first command that builds a sandbox filesystem — fails when macOS blocks a
+helper binary:
+
+```
+"mkfs.erofs" cannot be opened because the developer cannot be verified.
+macOS cannot verify that this app is free from malware.
+```
+
+`xattr -d com.apple.quarantine /opt/homebrew/bin/mkfs.erofs` does **not** clear
+it — even run with `sudo`. It only happens on machines that also have Homebrew
+`erofs-utils` installed; users without it never see the block.
+
+### Root Cause
+
+This is an **`sbx` PATH-resolution bug**, **not** a Quickstart / `acq` / `msb`
+issue, and **not** a supply-chain compromise. sbx ships its own **notarized**
+`mkfs.erofs`, but invokes it via `$PATH`, so a Homebrew `erofs-utils` shadows the
+bundled copy:
+
+- sbx v0.37.1 bundles a notarized `mkfs.erofs` at
+  `/opt/homebrew/Caskroom/sbx/<version>/libexec/mkfs.erofs`
+  (`spctl` → *accepted*; Developer ID: **Docker Inc (9BNSXJN65R)**).
+- If Homebrew `erofs-utils` is also installed, `/opt/homebrew/bin/mkfs.erofs`
+  (a symlink into `Cellar/erofs-utils/…`) is earlier on `$PATH`. That binary is
+  **ad-hoc-signed / not notarized** (`spctl` → *rejected*, `Signature=adhoc`,
+  no TeamIdentifier).
+- sbx resolves `mkfs.erofs` from `$PATH`, picks up the unnotarized Homebrew
+  binary instead of its own, and macOS Gatekeeper rejects it.
+- There is **no `com.apple.quarantine` xattr** on the rejected binary — the block
+  is the code-signing / AMFI (`syspolicyd`) assessment, which is why removing the
+  xattr does nothing.
+
+The `erofs-utils` Homebrew formula itself is fine (kernel.org source,
+SHA256-pinned bottles). The problem is purely that sbx's PATH lookup picks the
+unnotarized system copy over its own notarized bundled one.
+
+### Fix
+
+Make sbx use its own notarized binary — remove the shadowing Homebrew copy from
+PATH:
+
+```bash
+brew uninstall erofs-utils    # if nothing else needs it; sbx then uses its bundled, notarized mkfs.erofs
+```
+
+If you cannot remove it, approve the Homebrew binary via **System Settings →
+Privacy & Security → "Allow Anyway"**, then re-run the command and click **"Open"**
+on the pop-up. Do **not** rely on `xattr -d com.apple.quarantine` — it does not
+satisfy the code-signing gate on an unnotarized binary.
+
+### Prevention / Status
+
+- The durable fix is upstream in `sbx`: invoke the bundled
+  `libexec/mkfs.erofs` by absolute path rather than resolving `mkfs.erofs` from
+  `$PATH`. The bundled binary is already notarized, so no notarization change is
+  needed. Tracked at
+  [docker/sbx-releases#392](https://github.com/docker/sbx-releases/issues/392).
+- Until sbx pins the path, `brew uninstall erofs-utils` (or the "Allow Anyway"
+  fallback) unblocks affected machines.
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:
