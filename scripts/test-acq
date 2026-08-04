@@ -379,7 +379,7 @@ make_stubs; load_acq
 ) 2>/dev/null; pass "backend: XDG config file accepted"
 cleanup_stubs
 
-# 2d. Auto-detect (only sbx on PATH -> sbx).
+# 2d. Auto-detect (only sbx on PATH -> sbx, with msb-nudge notice).
 make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
@@ -391,9 +391,87 @@ make_stubs; load_acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   set +e
-  acq_resolve_backend ""
+  # Run in THIS subshell (not a command-substitution) so ACQ_RESOLVED_BACKEND
+  # is observable; capture the stderr notice to a file.
+  acq_resolve_backend "" 2>"$STUBDIR/note"
+  note=$(cat "$STUBDIR/note")
   assert_eq "backend: auto-detect sbx" "sbx" "$ACQ_RESOLVED_BACKEND"
-) 2>/dev/null; pass "backend: auto-detect sbx (only sbx on PATH)"
+  assert_contains "backend: sbx-only nudges toward msb" "$note" "msb is now the default"
+) 2>/dev/null; pass "backend: auto-detect sbx (only sbx on PATH) + nudge"
+cleanup_stubs
+
+# 2e. Auto-detect (only msb on PATH -> msb, NO notice — already on default).
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
+  _coreutils_dir=$(dirname "$(command -v env)")
+  PATH="$STUBDIR:$_coreutils_dir"; export PATH
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  acq_resolve_backend "" 2>"$STUBDIR/note"
+  note=$(cat "$STUBDIR/note")
+  assert_eq "backend: auto-detect msb" "msb" "$ACQ_RESOLVED_BACKEND"
+  assert_not_contains "backend: msb-only is silent" "$note" "acq: using"
+) 2>/dev/null; pass "backend: auto-detect msb (only msb on PATH) is silent"
+cleanup_stubs
+
+# 2f. Auto-detect both installed, NO existing sbx sandboxes -> msb + notice.
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  rm -f "$STUBDIR/.sandbox_list"   # sbx ls -q returns empty -> no sbx sandboxes
+  PATH="$STUBDIR"; export PATH
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  acq_resolve_backend "" 2>"$STUBDIR/note"
+  note=$(cat "$STUBDIR/note")
+  assert_eq "backend: both + no sbx sandboxes -> msb" "msb" "$ACQ_RESOLVED_BACKEND"
+  assert_contains "backend: both-msb notice" "$note" "using msb, the default backend"
+) 2>/dev/null; pass "backend: both installed, no sbx sandboxes -> msb + notice"
+cleanup_stubs
+
+# 2g. Auto-detect both installed, existing sbx sandboxes -> keep sbx + notice.
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  printf 'my-existing-box\n' > "$STUBDIR/.sandbox_list"  # sbx ls -q non-empty
+  PATH="$STUBDIR"; export PATH
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  set +e
+  acq_resolve_backend "" 2>"$STUBDIR/note"
+  note=$(cat "$STUBDIR/note")
+  assert_eq "backend: both + sbx sandboxes -> sbx" "sbx" "$ACQ_RESOLVED_BACKEND"
+  assert_contains "backend: both-sbx notice keeps sbx" "$note" "existing sbx sandboxes"
+  assert_contains "backend: both-sbx notice names msb default" "$note" "msb is now the default"
+) 2>/dev/null; pass "backend: both installed, sbx sandboxes -> sbx + notice"
+cleanup_stubs
+
+# 2h. Explicit selection is silent (no auto-detect nudge) even with both present.
+make_stubs; load_acq
+(
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  printf 'my-existing-box\n' > "$STUBDIR/.sandbox_list"
+  PATH="$STUBDIR"; export PATH
+  ACQ_BACKEND="msb"; export ACQ_BACKEND
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  acq_resolve_backend "" 2>"$STUBDIR/note"
+  note=$(cat "$STUBDIR/note")
+  assert_eq "backend: explicit env wins" "msb" "$ACQ_RESOLVED_BACKEND"
+  assert_not_contains "backend: explicit selection is silent" "$note" "acq: using"
+) 2>/dev/null; pass "backend: explicit ACQ_BACKEND is silent (no nudge)"
 cleanup_stubs
 
 # ===========================================================================
@@ -1001,11 +1079,12 @@ cleanup_stubs
 # 8. msb backend — resolution, dispatch, doctor/list, version
 # ===========================================================================
 
-# 8a. Auto-detect prefers msb when both present.
+# 8a. Auto-detect prefers msb when both present (no existing sbx sandboxes).
 make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  rm -f "$STUBDIR/.sandbox_list"    # sbx ls -q empty -> no sbx sandboxes to keep
   # Pin PATH to ONLY the stub dir so a real sbx/msb on the developer's host
   # PATH cannot leak into auto-detection.
   PATH="$STUBDIR"; export PATH
@@ -1013,8 +1092,9 @@ make_stubs; load_acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/msb.sh"
   set +e
-  detected=$(_auto_detect_backend)
-  assert_eq "msb: auto-detect prefers msb over sbx" "msb" "$detected"
+  _auto_detect_backend
+  assert_eq "msb: auto-detect prefers msb over sbx" "msb" "$ACQ_AUTODETECT_BACKEND"
+  assert_eq "msb: auto-detect reason both-msb" "both-msb" "$ACQ_AUTODETECT_REASON"
 ) 2>/dev/null; pass "msb: auto-detect order msb>sbx (both stubbed)"
 cleanup_stubs
 
@@ -1036,8 +1116,9 @@ make_stubs; load_acq
   # shellcheck source=acq.backends/sbx.sh
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   set +e
-  detected=$(_auto_detect_backend)
-  assert_eq "msb: auto-detect falls back to sbx" "sbx" "$detected"
+  _auto_detect_backend
+  assert_eq "msb: auto-detect falls back to sbx" "sbx" "$ACQ_AUTODETECT_BACKEND"
+  assert_eq "msb: auto-detect reason sbx-only" "sbx-only" "$ACQ_AUTODETECT_REASON"
 ) 2>/dev/null; pass "msb: auto-detect fallback to sbx (msb absent)"
 cleanup_stubs
 

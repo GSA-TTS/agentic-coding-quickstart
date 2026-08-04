@@ -408,18 +408,73 @@ _read_config_backend() {
   awk '/^[[:space:]]*backend[[:space:]]*:/ { gsub(/^[[:space:]]*backend[[:space:]]*:[[:space:]]*/,""); gsub(/[[:space:]]*$/,""); print; exit }' "$cfg"
 }
 
-# Try to auto-detect an available backend. Prefers msb (microsandbox, the
-# default), then sbx. First one found wins.
+# _sbx_has_sandboxes — 0 if the sbx CLI reports at least one existing sandbox.
+# Used only on the both-installed auto-detect path to keep users on sbx when
+# they already have sbx sandboxes. Runs BEFORE any adapter is sourced, so it
+# calls `sbx ls -q` directly rather than acq_backend_exists. Fail-open: any
+# error (sbx missing, not logged in, transient) is treated as "no sandboxes".
+_sbx_has_sandboxes() {
+  command -v sbx >/dev/null 2>&1 || return 1
+  [ -n "$(sbx ls -q 2>/dev/null)" ]
+}
+
+# Auto-detect an available backend when nothing is explicitly pinned. Sets, IN
+# THE CURRENT SHELL, ACQ_AUTODETECT_BACKEND (the chosen backend) and
+# ACQ_AUTODETECT_REASON (consumed by _announce_autodetect_backend) to one of:
+#   msb-only           — only msb installed (the default; no nudge needed)
+#   sbx-only           — only sbx installed (nudge toward the msb default)
+#   both-msb           — both installed, no existing sbx sandboxes -> msb
+#   both-sbx           — both installed, existing sbx sandboxes -> keep sbx
+# msb is the default: it wins unless the user already has sbx sandboxes to
+# preserve. Returns non-zero (both vars empty) when no backend is installed.
+#
+# NOTE: this MUST run in the current shell (not `$( … )`) so the two globals it
+# sets are visible to the caller — auto-detect's nudge depends on the reason.
+ACQ_AUTODETECT_BACKEND=""
+ACQ_AUTODETECT_REASON=""
 _auto_detect_backend() {
-  if command -v msb >/dev/null 2>&1; then
-    printf 'msb\n'
-    return 0
+  ACQ_AUTODETECT_BACKEND=""
+  ACQ_AUTODETECT_REASON=""
+  local have_msb=0 have_sbx=0
+  command -v msb >/dev/null 2>&1 && have_msb=1
+  command -v sbx >/dev/null 2>&1 && have_sbx=1
+
+  if [ "$have_msb" -eq 1 ] && [ "$have_sbx" -eq 1 ]; then
+    if _sbx_has_sandboxes; then
+      ACQ_AUTODETECT_BACKEND="sbx"; ACQ_AUTODETECT_REASON="both-sbx"; return 0
+    fi
+    ACQ_AUTODETECT_BACKEND="msb"; ACQ_AUTODETECT_REASON="both-msb"; return 0
   fi
-  if command -v sbx >/dev/null 2>&1; then
-    printf 'sbx\n'
-    return 0
+  if [ "$have_msb" -eq 1 ]; then
+    ACQ_AUTODETECT_BACKEND="msb"; ACQ_AUTODETECT_REASON="msb-only"; return 0
+  fi
+  if [ "$have_sbx" -eq 1 ]; then
+    ACQ_AUTODETECT_BACKEND="sbx"; ACQ_AUTODETECT_REASON="sbx-only"; return 0
   fi
   return 1
+}
+
+# Emit a one-time stderr nudge toward the msb default when the backend was
+# auto-detected (no --backend, ACQ_BACKEND, or saved config). msb is now the
+# default backend and the best-supported option going forward, so every
+# auto-detect case that isn't already on msb steers the user there and shows how
+# to pin their choice (which also silences the notice). No notice on msb-only —
+# already on the default, nothing to nudge.
+_announce_autodetect_backend() {
+  case "$ACQ_AUTODETECT_REASON" in
+    both-sbx)
+      echo "acq: using sbx (you have existing sbx sandboxes). msb is now the default backend." >&2
+      echo "     Pin your choice: 'acq backend set sbx' (keep sbx) or 'acq backend set msb' (switch)." >&2
+      ;;
+    both-msb)
+      echo "acq: using msb, the default backend. Pin with 'acq backend set msb' to silence this." >&2
+      ;;
+    sbx-only)
+      echo "acq: using sbx. msb is now the default backend and the recommended option going forward —" >&2
+      echo "     consider 'acq backend set msb'. Pin sbx with 'acq backend set sbx' to silence this." >&2
+      ;;
+    *) : ;;  # msb-only (or unset): already on the default — no nudge.
+  esac
 }
 
 # Source the adapter for a named backend. Fails closed if the file is missing.
@@ -439,6 +494,7 @@ _load_backend_adapter() {
 acq_resolve_backend() {
   local explicit="${1:-}"
   local name=""
+  local autodetected=0
 
   if [ -n "$explicit" ]; then
     name="$explicit"
@@ -450,14 +506,21 @@ acq_resolve_backend() {
     if [ -n "$cfg_name" ]; then
       name="$cfg_name"
     else
-      name=$(_auto_detect_backend) || {
+      _auto_detect_backend || {
         echo "acq: error: no backend detected. Install msb (>= 0.6.0) or sbx (>= 0.35.0)," >&2
         echo "     or set ACQ_BACKEND." >&2
         echo "     Run 'acq doctor' for installation hints." >&2
         exit 1
       }
+      name="$ACQ_AUTODETECT_BACKEND"
+      autodetected=1
     fi
   fi
+
+  # Nudge toward the msb default ONLY when the backend was auto-detected — an
+  # explicit --backend / ACQ_BACKEND / saved config is the user's pin and stays
+  # silent.
+  [ "$autodetected" -eq 1 ] && _announce_autodetect_backend
 
   _load_backend_adapter "$name"
   _build_kit_list
@@ -1226,6 +1289,9 @@ acq_print_doctor() {
   fi
 
   echo ""
+  # ACQ_RESOLVED_BACKEND is always set by acq_resolve_backend before doctor runs,
+  # so the ':-msb' here is only a defensive fallback — it mirrors auto-detect's
+  # default and does NOT let doctor independently pick a backend.
   printf "  Write '%s' as the default backend to %s? [y/N] " "${ACQ_RESOLVED_BACKEND:-msb}" "$config_file" >&2
   local answer=""
   read -r answer || true
