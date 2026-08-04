@@ -590,6 +590,14 @@ case "$subcommand" in
       warn_if_no_git_identity "$ws"
       advise_github_scope "$local_name" "$ws"
 
+      # opencode (since v1.15.1) fetches its binary in a postinstall step that
+      # some sandbox images skip, so a fresh launch fails with "postinstall
+      # script was not run". Run it here — on any backend — before attaching an
+      # opencode agent. Best-effort; never blocks the run.
+      if [ "$first" = "opencode" ]; then
+        ensure_opencode_postinstall "$local_name"
+      fi
+
       if [ "${#agent_args[@]}" -gt 0 ]; then
         acq_backend_attach "$local_name" -- "${agent_args[@]}"
       else

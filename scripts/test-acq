@@ -105,9 +105,25 @@ case "${1:-}" in
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    # `opencode --version` is the postinstall functionality probe (bare argv,
+    # not an `sh -c`). By default model the BROKEN state (exit 1) so the
+    # postinstall path runs; STUB_OPENCODE_OK=1 makes it "already runnable".
+    # A test can also plant $STUBDIR/.opencode_fixed so the FIRST probe fails
+    # but a later one (after postinstall ran) succeeds.
+    case " $* " in
+      *" opencode --version "*)
+        if [ "${STUB_OPENCODE_OK:-0}" = "1" ] || [ -f "$STUBDIR/.opencode_fixed" ]; then
+          printf 'opencode 1.18.12\n'; exit 0
+        fi
+        exit 1 ;;
+    esac
     case "$snippet" in
       *"echo ok"*) printf 'ok\n' ;;
       *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
+      *"postinstall.mjs"*)
+        # Model a successful postinstall: mark opencode fixed so the follow-up
+        # `opencode --version` probe passes.
+        touch "$STUBDIR/.opencode_fixed"; exit 0 ;;
       *) exit 0 ;;
     esac ;;
   run)  [ "${2:-}" = "--help" ] && printf 'SBX-RUN-HELP\n'; exit 0 ;;
@@ -166,9 +182,21 @@ case "$_msb_sub" in
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    # `opencode --version` postinstall functionality probe (bare argv). Default
+    # broken (exit 1) so the postinstall path runs; STUB_OPENCODE_OK=1 or a
+    # planted .opencode_fixed marker (written by a successful postinstall.mjs
+    # below) makes it succeed.
+    case " $* " in
+      *" opencode --version "*)
+        if [ "${STUB_OPENCODE_OK:-0}" = "1" ] || [ -f "$STUBDIR/.opencode_fixed" ]; then
+          printf 'opencode 1.18.12\n'; exit 0
+        fi
+        exit 1 ;;
+    esac
     case "$snippet" in
       *"echo ok"*) printf 'ok\n' ;;
       *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
+      *"postinstall.mjs"*) touch "$STUBDIR/.opencode_fixed"; exit 0 ;;
       # The ensure-agent-user block is one big `sh -c` (useradd/mkdir/chown + a
       # `su agent … test -w /home/agent` writability check). Match it FIRST (it
       # also contains `command -v useradd`, which the generic command-v case
@@ -586,10 +614,32 @@ cleanup_stubs
 # 3k3. Healthy status attaches regardless of store state (no gate message).
 make_stubs
 _keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
-out=$(STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
+out=$(STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
 assert_not_contains "run: healthy key -> no gate message" "$out" "Aborting attach"
 assert_eq "run: healthy key attaches" "0" "$rc"
 rm -rf "$_keyrun"
+cleanup_stubs
+
+# 3k4. `acq run opencode` runs opencode's postinstall when the binary is not yet
+#       functional (the "postinstall script was not run" gap), then attaches.
+#       The stub reports opencode broken until postinstall.mjs runs.
+make_stubs
+_ocrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-ocrun.XXXXXX")
+out=$(STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_ocrun" 2>&1); rc=$?
+log=$(cat "$CALLS")
+assert_contains "run(opencode): runs postinstall.mjs when binary not functional" "$log" "postinstall.mjs"
+assert_not_contains "run(opencode): no postinstall-failure warning after fix" "$out" "does not appear runnable"
+assert_eq "run(opencode): attaches after postinstall" "0" "$rc"
+rm -rf "$_ocrun"
+cleanup_stubs
+
+# 3k5. When opencode is ALREADY functional, acq does NOT re-run postinstall.
+make_stubs
+_ocrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-ocok.XXXXXX")
+out=$(STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_ocrun" 2>&1)
+log=$(cat "$CALLS")
+assert_not_contains "run(opencode): skips postinstall when already runnable" "$log" "postinstall.mjs"
+rm -rf "$_ocrun"
 cleanup_stubs
 
 # Verify `acq stop mybox` calls sbx stop.

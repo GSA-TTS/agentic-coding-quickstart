@@ -774,6 +774,51 @@ maybe_offer_bundle_refresh() {
 # Advisory functions (USAi key, SSH signing, git identity)
 # ============================================================================
 
+# Ensure opencode's postinstall has run inside the sandbox.
+#
+# Since opencode v1.15.1 the `opencode-ai` npm package fetches its actual binary
+# in a postinstall step. Some sandbox images (notably the prebuilt sbx
+# opencode-docker template) install the package with lifecycle scripts skipped,
+# so the first launch fails with:
+#   Error: opencode-ai's postinstall script was not run.
+# This is backend-agnostic (the msb npm install can hit the same gap), so run
+# the fix on any backend before attaching an opencode agent.
+#
+# Idempotent and cheap: if opencode already runs (`opencode --version`), do
+# nothing. Otherwise locate the installed package via `npm root -g` and run its
+# postinstall.mjs. Best-effort — never aborts the run; a genuinely broken
+# install still surfaces its own error on attach. Runs as the sandbox's default
+# exec user (acq_backend_run), matching how the agent itself is launched.
+ensure_opencode_postinstall() {
+  local name="$1"
+
+  # Already functional? Nothing to do.
+  if acq_backend_run "$name" -- opencode --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  acq_debug "opencode not runnable in '$name'; attempting postinstall"
+  # Run the package's own postinstall from its global install dir. `npm root -g`
+  # resolves the global node_modules; the package dir is opencode-ai within it.
+  # Both the cd and node invocation happen in one sh -c so the resolved path is
+  # used atomically. Output is suppressed; we re-probe below to decide success.
+  acq_backend_run "$name" -- sh -c \
+    'cd "$(npm root -g)/opencode-ai" 2>/dev/null && node postinstall.mjs' \
+    >/dev/null 2>&1 || true
+
+  if acq_backend_run "$name" -- opencode --version >/dev/null 2>&1; then
+    acq_debug "opencode postinstall succeeded in '$name'"
+    return 0
+  fi
+
+  # Still not runnable — warn but don't block; attach will surface the real
+  # error, and the user has the manual recovery in docs/KNOWN_FAILURE_MODES.md.
+  echo "acq: warning: opencode does not appear runnable in '$name' yet." >&2
+  echo "      Tried its postinstall automatically; if attach still fails with" >&2
+  echo "      \"postinstall script was not run\", see docs/KNOWN_FAILURE_MODES.md." >&2
+  return 0
+}
+
 # Probe the USAi API from inside the sandbox.
 check_key() {
   local name="$1"
