@@ -562,8 +562,13 @@ case "$subcommand" in
         acq_backend_provision "$local_name" "${create_args[@]}"
       fi
 
-      # Validate USAi key before attaching.
-      ensure_valid_key "$local_name" "${create_args[@]}"
+      # Validate USAi key before attaching. This gate must fail closed, so
+      # abort explicitly on a non-zero return rather than relying on `set -e`
+      # to propagate from a bare function call (its behavior for a function
+      # used as the tested command is not portable across bash versions).
+      if ! ensure_valid_key "$local_name" "${create_args[@]}"; then
+        exit 1
+      fi
 
       # Advisories.
       warn_if_no_ssh_signing_key
