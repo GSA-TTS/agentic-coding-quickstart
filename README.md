@@ -91,7 +91,7 @@ msb doctor
 ```
 
 You should see a report that your host is ready to
-run microVMs. If anything looks awry, you can attempt to fix it with `msb doctor --fix`. If you still see problems, then you're not ready to proceed to the next step. See if you can resolve this first! [...support details pending...]
+run microVMs. If anything looks awry, you can attempt to fix it with `msb doctor --fix`. If you still see problems, then you're not ready to proceed to the next step. See if you can resolve this first! You can ask us for help via [agentic-coding@gsa.gov](mailto:agentic-coding@gsa.gov).
 
 ### Step 2: Clone this repo
 
