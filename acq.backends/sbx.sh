@@ -454,7 +454,22 @@ acq_backend_ensure_kits_applied() {
   playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT")
   zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT")
 
-  # 1) USAi provider kit
+  # 1) Zscaler CA kit — FIRST, so its CA trust is in place before any later kit
+  # makes an outbound HTTPS request. Behind a TLS-intercepting proxy (Zscaler),
+  # the USAi and playbook kits fail with a TLS 'unexpected eof' unless the
+  # intercepting CA is already trusted.
+  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
+    echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
+    if sbx kit add "$name" "$zscaler_local" </dev/null >/dev/null 2>&1; then
+      echo "acq: Zscaler CA kit injected into '$name'." >&2
+    else
+      echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name'." >&2
+      echo "      Recover with: sbx kit add '$name' '$zscaler_local'" >&2
+      ok=0
+    fi
+  fi
+
+  # 2) USAi provider kit
   if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "acq: '$name' is missing the USAi kit; injecting with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$usai_local" </dev/null >/dev/null 2>&1; then
@@ -469,7 +484,7 @@ acq_backend_ensure_kits_applied() {
     fi
   fi
 
-  # 2) Playbook kit
+  # 3) Playbook kit
   if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/.git" && echo present'; then
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$playbook_local" </dev/null >/dev/null 2>&1; then
@@ -477,18 +492,6 @@ acq_backend_ensure_kits_applied() {
     else
       echo "acq: warning: 'sbx kit add' (playbook kit) failed for '$name'." >&2
       echo "      Recover with: sbx kit add '$name' '$playbook_local'" >&2
-      ok=0
-    fi
-  fi
-
-  # 3) Zscaler CA kit
-  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
-    echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$zscaler_local" </dev/null >/dev/null 2>&1; then
-      echo "acq: Zscaler CA kit injected into '$name'." >&2
-    else
-      echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$zscaler_local'" >&2
       ok=0
     fi
   fi

@@ -1228,6 +1228,76 @@ If `sbx exec` reports the sandbox is not running, start it first
 
 ---
 
+---
+
+## 30. USAi/kit fetch fails with TLS `unexpected eof` / HTTP 000 (network, not the key)
+
+### Symptoms
+
+Early in `acq run`, the kit fetch and the USAi key check both fail with a TLS
+connection error, and (before this was fixed) acq mis-reported it as an expired
+key and prompted to rotate:
+
+```
+agentic-coding-playbook: fetch of GSA-TTS/agentic-coding-playbook@… tarball failed
+  curl: (56) OpenSSL SSL_read: … unexpected eof while reading, errno 0
+
+Your USAi API key looks invalid or expired (HTTP …000 from the models API).
+```
+
+Rotating the key does not help: the freshly-pasted key fails validation the same
+way (`HTTP 000`).
+
+### Root Cause
+
+This is a **network reachability / TLS-interception problem, not a key problem.**
+`curl (56) unexpected eof` and an HTTP status of `000` mean the outbound TLS
+connection was cut before any HTTP response came back. That **two independent
+hosts** (`api.github.com` for the kit tarball and `api.gsa.usai.gov` for the key
+check) fail identically is the tell: the failure is in the network path out of
+the sandbox, not in USAi or your key.
+
+The common trigger is a **corporate TLS-intercepting proxy (e.g. Zscaler)**: the
+sandbox's outbound HTTPS is intercepted, and if the intercepting proxy's root CA
+is not trusted for the sandbox's own outbound connection, the handshake is
+terminated and curl reports `unexpected eof`.
+
+### Diagnosis
+
+`acq` now detects this and reports it as a network problem instead of an expired
+key (it does not prompt to rotate). To confirm what is failing, probe the two
+hosts from inside the sandbox — a `curl (35)/(56)` or `000` here (rather than a
+`200`/`401`) confirms the connection is being cut, not rejected by USAi:
+
+```bash
+# msb
+msb exec <sandbox> -- curl -sS -o /dev/null -w '%{http_code}\n' -v https://api.gsa.usai.gov/api/v1/models
+msb exec <sandbox> -- curl -sS -o /dev/null -w '%{http_code}\n' -v https://api.github.com
+# sbx
+sbx exec <sandbox> -- curl -sS -o /dev/null -w '%{http_code}\n' -v https://api.gsa.usai.gov/api/v1/models
+```
+
+A machine on the **same corporate network where these connections are NOT
+intercepted (or where the intercepting CA is trusted) succeeds**, which is why
+the same command can work on one host and fail on another. The remedy depends on
+your environment's proxy/CA configuration and is outside acq's control; resolve
+it with your network/endpoint administrators.
+
+### Prevention / Status
+
+- `acq` classifies a connection failure (curl nonzero exit / HTTP 000) as
+  `unreachable` and reports a network diagnosis, never "invalid or expired," and
+  does not prompt to rotate a good key. It fails closed (aborts the run) rather
+  than attach a session that cannot reach USAi.
+- The built-in kits are ordered so `zscaler-ca-certificate` is applied first, so
+  CA trust is established before the other kits make network requests (this
+  matters on the sbx backend, whose kits apply sequentially).
+- Making the sandbox's outbound TLS traverse a corporate proxy is a
+  host/network-configuration matter (trusting the corporate root CA, proxy
+  settings), not something acq can set for you.
+
+---
+
 ## 26. macOS Gatekeeper Blocks `mkfs.erofs` at `sbx policy init` (PATH shadowing)
 
 ### Symptoms
