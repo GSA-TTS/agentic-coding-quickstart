@@ -47,8 +47,16 @@ GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_
 # Neutral kit directory names (relative to PATTERNS_KIT_DIR), in apply order.
 # kit-translate.sh resolves a kit's spec.yaml + files/ from these names. The
 # built-in kit set maps 1:1 to the four *_KIT refs above.
+#
+# ORDER MATTERS: zscaler-ca-certificate is applied FIRST so its CA trust is in
+# place before any later kit makes an outbound HTTPS request. Behind a
+# TLS-intercepting proxy (e.g. Zscaler), a kit that fetches over the network
+# (the playbook kit clones from api.github.com; the USAi provider validates
+# against api.gsa.usai.gov) fails with a TLS 'unexpected eof' unless the
+# intercepting CA is already trusted. Establishing trust first makes the rest
+# of the bundle succeed on corporate networks.
 # shellcheck disable=SC2034  # consumed by `acq kit list` in the acq entry point
-ACQ_KIT_NAMES=(usai-provider agentic-coding-playbook zscaler-ca-certificate git-ssh-sign)
+ACQ_KIT_NAMES=(zscaler-ca-certificate usai-provider agentic-coding-playbook git-ssh-sign)
 
 # Built-in bundle identity. This mirrors the `provenance` block the usai-provider
 # kit declares at the pinned PATTERNS_KIT_REF. acq records these in a sandbox's
@@ -157,8 +165,10 @@ split_noglob() {
 }
 
 # Assemble the full kit list: built-ins, then extras.
+# Zscaler CA trust FIRST (see ACQ_KIT_NAMES) so later network-fetching kits
+# succeed behind a TLS-intercepting proxy.
 _build_kit_list() {
-  KITS=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT" "$GITSSHSIGN_KIT")
+  KITS=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
   if [ -n "$ACQ_EXTRA_KITS" ]; then
     local _extra_kits=()
     split_noglob _extra_kits "$ACQ_EXTRA_KITS"
@@ -819,13 +829,60 @@ ensure_opencode_postinstall() {
   return 0
 }
 
-# Probe the USAi API from inside the sandbox.
+# Probe the USAi API from inside the sandbox. Emits ONE clean token on stdout:
+#   - a 3-digit HTTP status (e.g. 200, 401) on a real HTTP response,
+#   - the literal "unreachable" when curl could not complete a request at all
+#     (TLS reset, DNS failure, proxy/Zscaler interception, offline — curl exits
+#     non-zero and writes http_code 000), or
+#   - "" (empty) only when the probe is genuinely indeterminate.
+# The caller distinguishes these: "unreachable" is a NETWORK problem, NOT a bad
+# key, so it must never be reported as "invalid or expired" or trigger a rotate.
+#
+# Sanitize hard: curl's stderr can leak through the backend exec (which may merge
+# streams), so we emit the raw curl output as `<http_code>|<exit>` and reduce it
+# to a bare code here. Only ^[0-9]{3}$ or "unreachable" or "" can ever escape —
+# no free-form error text can splice into the caller's "(HTTP …)" message.
 check_key() {
   local name="$1"
-  acq_backend_run "$name" -- sh -c \
+  local raw code exit_code
+  raw=$(acq_backend_run "$name" -- sh -c \
     "curl -sS -o /dev/null -w '%{http_code}' \
      -H \"Authorization: Bearer \$USAI_API_KEY\" \
-     $USAI_MODELS_URL" 2>/dev/null || true
+     $USAI_MODELS_URL; printf '|%s' \"\$?\"" 2>/dev/null || true)
+  _classify_key_status "$raw"
+}
+
+# Reduce a raw `<http_code>|<curl_exit>` probe result (possibly polluted with
+# curl error text) to a clean status token: a 3-digit HTTP code, "unreachable",
+# or "". Shared by check_key and check_fresh_sandbox_key.
+_classify_key_status() {
+  local raw="$1" code exit_code
+  # The curl exit code is the last field after the final '|'. Keep only digits.
+  exit_code="${raw##*|}"
+  exit_code=$(printf '%s' "$exit_code" | tr -cd '0-9')
+  # The http_code is the last 3-digit run before that '|' (curl's %{http_code}).
+  code="${raw%%|*}"
+  code=$(printf '%s' "$code" | tr -cd '0-9')
+  # Keep only the trailing 3 digits (guards against any leading leaked digits).
+  code="${code: -3}"
+
+  # curl succeeded (exit 0) AND returned a plausible non-000 HTTP code.
+  if [ "$exit_code" = "0" ] && [ -n "$code" ] && [ "$code" != "000" ]; then
+    printf '%s\n' "$code"
+    return 0
+  fi
+  # curl failed to get any response (nonzero exit, or http_code 000): the request
+  # never reached USAi — treat as a network reachability problem, not a key one.
+  if [ -n "$exit_code" ] && [ "$exit_code" != "0" ]; then
+    printf 'unreachable\n'
+    return 0
+  fi
+  if [ "$code" = "000" ]; then
+    printf 'unreachable\n'
+    return 0
+  fi
+  # Indeterminate (no exit code captured, no usable http_code): stay silent.
+  printf '\n'
 }
 
 # Check USAi key in a fresh temporary sandbox (to distinguish bad key from stale
@@ -840,10 +897,12 @@ check_fresh_sandbox_key() {
   fi
   # shellcheck disable=SC2064
   trap "acq_backend_terminate '$validation_name' </dev/null >/dev/null 2>&1 || true" EXIT
-  status=$(acq_backend_run "$validation_name" -- sh -c \
+  local raw
+  raw=$(acq_backend_run "$validation_name" -- sh -c \
     "curl -sS -o /dev/null -w '%{http_code}' \
      -H \"Authorization: Bearer \$USAI_API_KEY\" \
-     $USAI_MODELS_URL" </dev/null 2>/dev/null || true)
+     $USAI_MODELS_URL; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
+  status=$(_classify_key_status "$raw")
   acq_backend_terminate "$validation_name" </dev/null >/dev/null 2>&1 || true
   trap - EXIT
   printf '%s\n' "$status"
@@ -1212,12 +1271,36 @@ advise_valid_key() {
   [ "$status" = "200" ] && return 0
   [ -z "$status" ] && return 0
 
+  if [ "$status" = "unreachable" ]; then
+    _report_usai_unreachable
+    return 0
+  fi
+
   echo "acq: note — your USAi API key looks invalid or expired (HTTP $status)." >&2
   echo "      USAi keys expire every 7 days. This sandbox was created, but the" >&2
   echo "      key must be valid before an agent can use it." >&2
   echo "      To rotate: acq usai-rotate-api-key   (or re-run via 'acq run', which" >&2
   echo "      validates and offers to rotate before attaching)." >&2
   return 0
+}
+
+# Print a network-oriented diagnosis when the USAi models API could not be
+# reached from the sandbox at all (curl connection failure / HTTP 000). This is
+# a reachability problem — NOT an invalid or expired key — so it deliberately
+# does not mention rotating the key. The point is an accurate diagnosis, not a
+# prescription: it states what failed and the signal to look for, and points at
+# the docs rather than guessing the user's network fix.
+_report_usai_unreachable() {
+  echo >&2
+  echo "acq: could not reach the USAi API ($USAI_MODELS_URL) from the sandbox." >&2
+  echo "      The request did not complete (no HTTP response) — this is a network" >&2
+  echo "      reachability problem, NOT an invalid or expired key, so rotating the" >&2
+  echo "      key will not help." >&2
+  echo "      If the playbook/kit fetch also failed with a TLS 'unexpected eof'," >&2
+  echo "      both outbound connections are being cut — a strong sign of a network" >&2
+  echo "      or TLS-interception (e.g. corporate proxy) issue rather than USAi." >&2
+  echo "      See docs/KNOWN_FAILURE_MODES.md for diagnosis steps." >&2
+  echo >&2
 }
 
 ensure_valid_key() {
@@ -1233,6 +1316,15 @@ ensure_valid_key() {
   if [ -z "$status" ]; then
     echo "warning: could not validate USAI_API_KEY for '$name' (skipping check)" >&2
     return 0
+  fi
+
+  # The request never reached USAi (TLS reset / DNS / proxy interception /
+  # offline) — a NETWORK problem, not a key problem. Rotating a key cannot fix
+  # this, so DO NOT prompt to rotate. Fail closed (attaching would just fail on
+  # the first USAi call) with a network-oriented diagnosis.
+  if [ "$status" = "unreachable" ]; then
+    _report_usai_unreachable
+    return 1
   fi
 
   # Distinguish "no key stored yet" (first-time setup) from "key present but

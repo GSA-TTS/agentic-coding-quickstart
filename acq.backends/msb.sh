@@ -1479,8 +1479,10 @@ acq_backend_provision() {
   _ACQ_MSB_STARTUP_STAGE_FILES=()
 
   # Fetch each built-in kit and gather its create-time contributions.
+  # Zscaler CA trust FIRST so later network-fetching kits (playbook clone, USAi
+  # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
   local kitref kitdir
-  local kits=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT" "$GITSSHSIGN_KIT")
+  local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
   # Include any extra kits (env-supplied) and CLI-supplied --kit refs.
   if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
     local _extras=()
@@ -2659,7 +2661,7 @@ acq_backend_ensure_kits_applied() {
     acq_backend_start "$name" >/dev/null || \
       echo "acq(msb): warning: 'msb start $name' failed (see the error above); healing may not apply." >&2
   fi
-  local kits=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT" "$GITSSHSIGN_KIT")
+  local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
   local builtin_count="${#kits[@]}"
   if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
     local _extras=()
@@ -3070,6 +3072,18 @@ acq_backend_rotate_key() {
   if [ "$status" = "200" ]; then
     echo "Key validated (HTTP 200). You're good to go." >&2
     return 0
+  fi
+  if [ "$status" = "unreachable" ]; then
+    # The validation request never reached USAi — a network/egress problem, not
+    # the key. Report it as such (no "double-check the key") via the shared
+    # helper when available.
+    if command -v _report_usai_unreachable >/dev/null 2>&1; then
+      _report_usai_unreachable
+    else
+      echo "acq(msb): could not reach the USAi API to validate — a network/egress" >&2
+      echo "      problem (proxy/Zscaler/DNS/offline), not the key itself." >&2
+    fi
+    return 1
   fi
   echo "acq(msb): key validation failed (HTTP ${status}). Double-check the key and rotate again." >&2
   return 1

@@ -119,7 +119,16 @@ case "${1:-}" in
     esac
     case "$snippet" in
       *"echo ok"*) printf 'ok\n' ;;
-      *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
+      *'%{http_code}'*)
+        # check_key runs `curl … -w '%{http_code}'; printf '|%s' "$?"`, so the
+        # real probe emits `<http_code>|<curl_exit>`. Model that shape.
+        # STUB_KEY_UNREACHABLE=1 models curl failing to connect (TLS reset /
+        # HTTP 000 / nonzero exit) — the network-unreachable case.
+        if [ "${STUB_KEY_UNREACHABLE:-0}" = "1" ]; then
+          printf '000|56'
+        else
+          printf '%s|0' "${STUB_KEY_STATUS:-200}"
+        fi ;;
       *"postinstall.mjs"*)
         # Model a successful postinstall: mark opencode fixed so the follow-up
         # `opencode --version` probe passes.
@@ -195,7 +204,13 @@ case "$_msb_sub" in
     esac
     case "$snippet" in
       *"echo ok"*) printf 'ok\n' ;;
-      *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
+      *'%{http_code}'*)
+        # Match check_key's `<http_code>|<curl_exit>` shape (see the sbx stub).
+        if [ "${STUB_KEY_UNREACHABLE:-0}" = "1" ]; then
+          printf '000|56'
+        else
+          printf '%s|0' "${STUB_KEY_STATUS:-200}"
+        fi ;;
       *"postinstall.mjs"*) touch "$STUBDIR/.opencode_fixed"; exit 0 ;;
       # The ensure-agent-user block is one big `sh -c` (useradd/mkdir/chown + a
       # `su agent … test -w /home/agent` writability check). Match it FIRST (it
@@ -640,6 +655,41 @@ out=$(STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode
 log=$(cat "$CALLS")
 assert_not_contains "run(opencode): skips postinstall when already runnable" "$log" "postinstall.mjs"
 rm -rf "$_ocrun"
+cleanup_stubs
+
+# 3k6. USAi API UNREACHABLE (curl connection failure / HTTP 000, not a real
+#       status): the gate must diagnose a NETWORK problem, must NOT claim the key
+#       is invalid/expired, must NOT prompt to rotate, and must abort the run
+#       (fail closed rather than attach a broken session). A stored key is
+#       present, so the ONLY reason it doesn't say "invalid or expired" is the
+#       unreachable classification.
+make_stubs
+_keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-unreach.XXXXXX")
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+out=$(STUB_KEY_UNREACHABLE=1 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
+assert_contains "run: unreachable names a network problem" "$out" "could not reach the USAi API"
+assert_contains "run: unreachable says not a key problem" "$out" "NOT an invalid or expired key"
+assert_not_contains "run: unreachable does NOT prompt to rotate" "$out" "Rotate now"
+assert_not_contains "run: unreachable does NOT print a mangled curl error" "$out" "curl:"
+assert_eq "run: unreachable aborts the run (fail closed)" "1" "$rc"
+rm -rf "$_keyrun"
+cleanup_stubs
+
+# 3k7. check_key returns a CLEAN token even when curl output is polluted: a real
+#       HTTP status classifies as that status; a connection failure classifies as
+#       "unreachable"; never free-form curl error text.
+make_stubs; load_acq
+(
+  . "${REPO_ROOT}/acq.backends/common.sh"
+  set +e
+  assert_eq "classify: clean 200"          "200"         "$(_classify_key_status '200|0')"
+  assert_eq "classify: clean 401"          "401"         "$(_classify_key_status '401|0')"
+  assert_eq "classify: 000 -> unreachable" "unreachable" "$(_classify_key_status '000|56')"
+  assert_eq "classify: nonzero exit -> unreachable" "unreachable" "$(_classify_key_status '000|7')"
+  # Polluted output (curl error leaked before the code) must not escape as text.
+  polluted='curl: (56) OpenSSL SSL_read: unexpected eof000|56'
+  assert_eq "classify: polluted curl error -> unreachable" "unreachable" "$(_classify_key_status "$polluted")"
+) 2>/dev/null; pass "classify: key-status classification is clean (code|unreachable|empty)"
 cleanup_stubs
 
 # Verify `acq stop mybox` calls sbx stop.
@@ -1098,6 +1148,10 @@ assert_contains "kits: usai-provider" "$kits_joined" "acq-kits/usai-provider"
 assert_contains "kits: playbook" "$kits_joined" "acq-kits/agentic-coding-playbook"
 assert_contains "kits: zscaler" "$kits_joined" "acq-kits/zscaler-ca-certificate"
 assert_contains "kits: git-ssh-sign" "$kits_joined" "acq-kits/git-ssh-sign"
+# ORDER: zscaler-ca-certificate MUST be first so CA trust is established before
+# any later kit makes a network request (matters on sbx, whose kits apply
+# sequentially; harmless on msb, where trust is a create-time flag).
+assert_contains "kits: zscaler applied first" "${KITS[0]}" "acq-kits/zscaler-ca-certificate"
 cleanup_stubs
 
 # ===========================================================================
