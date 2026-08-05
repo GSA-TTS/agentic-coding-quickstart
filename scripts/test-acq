@@ -3,13 +3,12 @@
 # test-acq — offline unit harness for acq
 #
 # Tests the acq entry point and adapter layer against STUBBED backends —
-# no Docker, no real sandbox, no network. Models scripts/test-migrate-or-halt.
+# no Docker, no real sandbox, no network.
 #
 # What is tested:
 #   - Backend resolution order (flag > env > XDG config > auto-detect)
-#   - Name derivation (slugify / derive_name) matches qsbx
+#   - Name derivation (slugify / derive_name)
 #   - Dispatch routing (each subcommand calls the right adapter function)
-#   - qsbx deprecation notice prints and is silenced by QSBX_SILENCE_DEPRECATION=1
 #   - acq secret set builds the correct sbx command for built-in vs custom services
 #     and never puts a secret in argv
 #
@@ -20,9 +19,19 @@
 
 set -uo pipefail
 
+# Run the whole harness with stdin detached from any terminal. acq's
+# interactive prompts (key-gate rotate, github-scope advisory, stale-bundle
+# refresh, doctor default-write) gate on `[ -t 0 ]` and READ stdin when it is a
+# TTY. Individual tests redirect stdin where they exercise a prompt on purpose,
+# but a test that reaches a prompt path incidentally would otherwise BLOCK when
+# the suite is run from an interactive terminal (CI pipes stdin, so it never
+# hung there). Reopening stdin from /dev/null once, here, makes every prompt
+# take its non-interactive branch regardless of how the suite was launched.
+# Tests that need to feed input still pipe it explicitly (that overrides this).
+exec </dev/null
+
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ACQ="$REPO_ROOT/acq"
-QSBX="$REPO_ROOT/qsbx"
 
 PASS=0
 FAIL=0
@@ -96,9 +105,34 @@ case "${1:-}" in
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    # `opencode --version` is the postinstall functionality probe (bare argv,
+    # not an `sh -c`). By default model the BROKEN state (exit 1) so the
+    # postinstall path runs; STUB_OPENCODE_OK=1 makes it "already runnable".
+    # A test can also plant $STUBDIR/.opencode_fixed so the FIRST probe fails
+    # but a later one (after postinstall ran) succeeds.
+    case " $* " in
+      *" opencode --version "*)
+        if [ "${STUB_OPENCODE_OK:-0}" = "1" ] || [ -f "$STUBDIR/.opencode_fixed" ]; then
+          printf 'opencode 1.18.12\n'; exit 0
+        fi
+        exit 1 ;;
+    esac
     case "$snippet" in
       *"echo ok"*) printf 'ok\n' ;;
-      *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
+      *'%{http_code}'*)
+        # check_key runs `curl … -w '%{http_code}'; printf '|%s' "$?"`, so the
+        # real probe emits `<http_code>|<curl_exit>`. Model that shape.
+        # STUB_KEY_UNREACHABLE=1 models curl failing to connect (TLS reset /
+        # HTTP 000 / nonzero exit) — the network-unreachable case.
+        if [ "${STUB_KEY_UNREACHABLE:-0}" = "1" ]; then
+          printf '000|56'
+        else
+          printf '%s|0' "${STUB_KEY_STATUS:-200}"
+        fi ;;
+      *"postinstall.mjs"*)
+        # Model a successful postinstall: mark opencode fixed so the follow-up
+        # `opencode --version` probe passes.
+        touch "$STUBDIR/.opencode_fixed"; exit 0 ;;
       *) exit 0 ;;
     esac ;;
   run)  [ "${2:-}" = "--help" ] && printf 'SBX-RUN-HELP\n'; exit 0 ;;
@@ -157,9 +191,27 @@ case "$_msb_sub" in
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    # `opencode --version` postinstall functionality probe (bare argv). Default
+    # broken (exit 1) so the postinstall path runs; STUB_OPENCODE_OK=1 or a
+    # planted .opencode_fixed marker (written by a successful postinstall.mjs
+    # below) makes it succeed.
+    case " $* " in
+      *" opencode --version "*)
+        if [ "${STUB_OPENCODE_OK:-0}" = "1" ] || [ -f "$STUBDIR/.opencode_fixed" ]; then
+          printf 'opencode 1.18.12\n'; exit 0
+        fi
+        exit 1 ;;
+    esac
     case "$snippet" in
       *"echo ok"*) printf 'ok\n' ;;
-      *'%{http_code}'*) printf '%s' "${STUB_KEY_STATUS:-200}" ;;
+      *'%{http_code}'*)
+        # Match check_key's `<http_code>|<curl_exit>` shape (see the sbx stub).
+        if [ "${STUB_KEY_UNREACHABLE:-0}" = "1" ]; then
+          printf '000|56'
+        else
+          printf '%s|0' "${STUB_KEY_STATUS:-200}"
+        fi ;;
+      *"postinstall.mjs"*) touch "$STUBDIR/.opencode_fixed"; exit 0 ;;
       # The ensure-agent-user block is one big `sh -c` (useradd/mkdir/chown + a
       # `su agent … test -w /home/agent` writability check). Match it FIRST (it
       # also contains `command -v useradd`, which the generic command-v case
@@ -217,9 +269,16 @@ case "$_msb_sub" in
   modify) : ;;
   *) : ;;
 esac
-# Drain any piped stdin exactly like a real remote exec would, so the test
-# harness catches loops that leak their stdin into an inner msb call.
-cat >/dev/null 2>&1 || true
+# Drain piped stdin ONLY for subcommands a real `msb` actually reads it on
+# (a remote exec / ssh forwards stdin), and ONLY when stdin is not a TTY.
+# Real msb never blocks on an interactive terminal here; draining a TTY would
+# hang forever waiting for EOF when a test invokes `msb exec` foreground
+# without redirecting stdin. Restricting to non-TTY still models a real remote
+# exec consuming a PIPE, which is what surfaces the loop-stdin-consumption bug
+# this guard exists for (a `while read … done <<heredoc` whose body calls msb).
+case "$_msb_sub" in
+  exec|ssh) [ -t 0 ] || cat >/dev/null 2>&1 || true ;;
+esac
 exit 0
 MSBSTUB
   chmod +x "$STUBDIR/msb"
@@ -300,7 +359,7 @@ echo "test-acq"
 echo ""
 
 # ===========================================================================
-# 1. slugify / derive_name: must match qsbx behavior
+# 1. slugify / derive_name: name-derivation behavior
 # ===========================================================================
 
 make_stubs; load_acq
@@ -381,18 +440,100 @@ make_stubs; load_acq
 ) 2>/dev/null; pass "backend: XDG config file accepted"
 cleanup_stubs
 
-# 2d. Auto-detect (sbx on PATH).
+# 2d. Auto-detect (only sbx on PATH -> sbx, with msb-nudge notice).
 make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  # Pin exactly which backends auto-detect "sees" via the test override, rather
+  # than manipulating PATH: a developer's real msb/sbx share PATH dirs with the
+  # coreutils the sourced scripts need (e.g. Homebrew's `env` sits beside
+  # `msb`), so PATH tricks either leak a real backend or break the harness.
+  export ACQ_TEST_INSTALLED_BACKENDS="sbx"
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   set +e
-  acq_resolve_backend ""
+  # Run in THIS subshell (not a command-substitution) so ACQ_RESOLVED_BACKEND
+  # is observable; capture the stderr notice to a file.
+  acq_resolve_backend "" 2>"$STUBDIR/note"
+  note=$(cat "$STUBDIR/note")
   assert_eq "backend: auto-detect sbx" "sbx" "$ACQ_RESOLVED_BACKEND"
-) 2>/dev/null; pass "backend: auto-detect sbx (sbx on PATH)"
+  assert_contains "backend: sbx-only nudges toward msb" "$note" "msb is now the default"
+) 2>/dev/null; pass "backend: auto-detect sbx (only sbx on PATH) + nudge"
+cleanup_stubs
+
+# 2e. Auto-detect (only msb on PATH -> msb, NO notice — already on default).
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  export ACQ_TEST_INSTALLED_BACKENDS="msb"   # only msb "installed" (see 2d)
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  acq_resolve_backend "" 2>"$STUBDIR/note"
+  note=$(cat "$STUBDIR/note")
+  assert_eq "backend: auto-detect msb" "msb" "$ACQ_RESOLVED_BACKEND"
+  assert_not_contains "backend: msb-only is silent" "$note" "acq: using"
+) 2>/dev/null; pass "backend: auto-detect msb (only msb on PATH) is silent"
+cleanup_stubs
+
+# 2f. Auto-detect both installed, NO existing sbx sandboxes -> msb + notice.
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  export ACQ_TEST_INSTALLED_BACKENDS="msb sbx"
+  rm -f "$STUBDIR/.sandbox_list"   # sbx ls -q returns empty -> no sbx sandboxes
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  acq_resolve_backend "" 2>"$STUBDIR/note"
+  note=$(cat "$STUBDIR/note")
+  assert_eq "backend: both + no sbx sandboxes -> msb" "msb" "$ACQ_RESOLVED_BACKEND"
+  assert_contains "backend: both-msb notice" "$note" "using msb, the default backend"
+) 2>/dev/null; pass "backend: both installed, no sbx sandboxes -> msb + notice"
+cleanup_stubs
+
+# 2g. Auto-detect both installed, existing sbx sandboxes -> keep sbx + notice.
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  export ACQ_TEST_INSTALLED_BACKENDS="msb sbx"
+  printf 'my-existing-box\n' > "$STUBDIR/.sandbox_list"  # sbx ls -q non-empty
+  PATH="$STUBDIR:$PATH"; export PATH   # ensure the stub sbx (for `sbx ls -q`) wins
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  set +e
+  acq_resolve_backend "" 2>"$STUBDIR/note"
+  note=$(cat "$STUBDIR/note")
+  assert_eq "backend: both + sbx sandboxes -> sbx" "sbx" "$ACQ_RESOLVED_BACKEND"
+  assert_contains "backend: both-sbx notice keeps sbx" "$note" "existing sbx sandboxes"
+  assert_contains "backend: both-sbx notice names msb default" "$note" "msb is now the default"
+) 2>/dev/null; pass "backend: both installed, sbx sandboxes -> sbx + notice"
+cleanup_stubs
+
+# 2h. Explicit selection is silent (no auto-detect nudge) even with both present.
+make_stubs; load_acq
+(
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  export ACQ_TEST_INSTALLED_BACKENDS="msb sbx"
+  printf 'my-existing-box\n' > "$STUBDIR/.sandbox_list"
+  ACQ_BACKEND="msb"; export ACQ_BACKEND
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  acq_resolve_backend "" 2>"$STUBDIR/note"
+  note=$(cat "$STUBDIR/note")
+  assert_eq "backend: explicit env wins" "msb" "$ACQ_RESOLVED_BACKEND"
+  assert_not_contains "backend: explicit selection is silent" "$note" "acq: using"
+) 2>/dev/null; pass "backend: explicit ACQ_BACKEND is silent (no nudge)"
 cleanup_stubs
 
 # ===========================================================================
@@ -432,7 +573,7 @@ make_stubs
 _ghproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-ghcreate.XXXXXX")
 ( cd "$_ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
 out=$(ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$_ghproj/.secrets" \
-  "$ACQ" create opencode "$_ghproj" 2>&1)
+  "$ACQ" create opencode "$_ghproj" </dev/null 2>&1)
 assert_contains "dispatch: create runs github-scope advisory" "$out" "no repo-scoped GitHub token"
 rm -rf "$_ghproj"
 cleanup_stubs
@@ -451,6 +592,108 @@ assert_eq       "dispatch: create does not abort on invalid key" "0" "$rc"
 out=$(STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" create opencode "$_keyproj" 2>&1)
 assert_not_contains "dispatch: create silent on valid USAi key" "$out" "invalid or expired"
 rm -rf "$_keyproj"
+cleanup_stubs
+
+# `acq run` GATES on the USAi key (ensure_valid_key): a non-200 aborts attach
+# unless the user sets/rotates. The message distinguishes "never set" from
+# "expired", and declining (empty answer on the [y/N] prompt) aborts in both
+# cases. Drive the stub's key status via STUB_KEY_STATUS and decline by feeding
+# an empty line on stdin. Bare workspace (no git remote) keeps the github
+# advisory quiet.
+
+# 3k1. No usai secret stored + bad status -> "no USAi API key is set" + "Set it
+#      now"; declining aborts the run (non-zero).
+make_stubs
+_keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
+out=$(printf '\n' | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
+assert_contains "run: never-set key names the setup case" "$out" "No USAi API key is set"
+assert_contains "run: never-set key prompts to set" "$out" "Set it now"
+assert_not_contains "run: never-set key does NOT say expired" "$out" "invalid or expired"
+assert_eq "run: never-set + decline aborts attach" "1" "$rc"
+rm -rf "$_keyrun"
+cleanup_stubs
+
+# 3k2. usai secret PRESENT + bad status -> "invalid or expired" + "Rotate now"
+#      (regression: the set-but-rejected wording is unchanged); declining aborts.
+make_stubs
+_keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+out=$(printf '\n' | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
+assert_contains "run: expired key names the rotate case" "$out" "invalid or expired"
+assert_contains "run: expired key prompts to rotate" "$out" "Rotate now"
+assert_not_contains "run: expired key does NOT say 'no USAi API key'" "$out" "No USAi API key is set"
+assert_eq "run: expired + decline aborts attach" "1" "$rc"
+rm -rf "$_keyrun"
+cleanup_stubs
+
+# 3k3. Healthy status attaches regardless of store state (no gate message).
+make_stubs
+_keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
+out=$(STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
+assert_not_contains "run: healthy key -> no gate message" "$out" "Aborting attach"
+assert_eq "run: healthy key attaches" "0" "$rc"
+rm -rf "$_keyrun"
+cleanup_stubs
+
+# 3k4. `acq run opencode` runs opencode's postinstall when the binary is not yet
+#       functional (the "postinstall script was not run" gap), then attaches.
+#       The stub reports opencode broken until postinstall.mjs runs.
+make_stubs
+_ocrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-ocrun.XXXXXX")
+out=$(STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_ocrun" 2>&1); rc=$?
+log=$(cat "$CALLS")
+assert_contains "run(opencode): runs postinstall.mjs when binary not functional" "$log" "postinstall.mjs"
+# The postinstall runs under a guest-side `timeout` guard so a wedged registry
+# fetch cannot hang `acq run` (review SHOULD-FIX). The stub's exec log records
+# the sh -c body, so the bound is observable there.
+assert_contains "run(opencode): postinstall wrapped in a timeout guard" "$log" "timeout"
+assert_not_contains "run(opencode): no postinstall-failure warning after fix" "$out" "does not appear runnable"
+assert_eq "run(opencode): attaches after postinstall" "0" "$rc"
+rm -rf "$_ocrun"
+cleanup_stubs
+
+# 3k5. When opencode is ALREADY functional, acq does NOT re-run postinstall.
+make_stubs
+_ocrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-ocok.XXXXXX")
+out=$(STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_ocrun" 2>&1)
+log=$(cat "$CALLS")
+assert_not_contains "run(opencode): skips postinstall when already runnable" "$log" "postinstall.mjs"
+rm -rf "$_ocrun"
+cleanup_stubs
+
+# 3k6. USAi API UNREACHABLE (curl connection failure / HTTP 000, not a real
+#       status): the gate must diagnose a NETWORK problem, must NOT claim the key
+#       is invalid/expired, must NOT prompt to rotate, and must abort the run
+#       (fail closed rather than attach a broken session). A stored key is
+#       present, so the ONLY reason it doesn't say "invalid or expired" is the
+#       unreachable classification.
+make_stubs
+_keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-unreach.XXXXXX")
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+out=$(STUB_KEY_UNREACHABLE=1 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
+assert_contains "run: unreachable names a network problem" "$out" "could not reach the USAi API"
+assert_contains "run: unreachable says not a key problem" "$out" "NOT an invalid or expired key"
+assert_not_contains "run: unreachable does NOT prompt to rotate" "$out" "Rotate now"
+assert_not_contains "run: unreachable does NOT print a mangled curl error" "$out" "curl:"
+assert_eq "run: unreachable aborts the run (fail closed)" "1" "$rc"
+rm -rf "$_keyrun"
+cleanup_stubs
+
+# 3k7. check_key returns a CLEAN token even when curl output is polluted: a real
+#       HTTP status classifies as that status; a connection failure classifies as
+#       "unreachable"; never free-form curl error text.
+make_stubs; load_acq
+(
+  . "${REPO_ROOT}/acq.backends/common.sh"
+  set +e
+  assert_eq "classify: clean 200"          "200"         "$(_classify_key_status '200|0')"
+  assert_eq "classify: clean 401"          "401"         "$(_classify_key_status '401|0')"
+  assert_eq "classify: 000 -> unreachable" "unreachable" "$(_classify_key_status '000|56')"
+  assert_eq "classify: nonzero exit -> unreachable" "unreachable" "$(_classify_key_status '000|7')"
+  # Polluted output (curl error leaked before the code) must not escape as text.
+  polluted='curl: (56) OpenSSL SSL_read: unexpected eof000|56'
+  assert_eq "classify: polluted curl error -> unreachable" "unreachable" "$(_classify_key_status "$polluted")"
+) 2>/dev/null; pass "classify: key-status classification is clean (code|unreachable|empty)"
 cleanup_stubs
 
 # Verify `acq stop mybox` calls sbx stop.
@@ -575,29 +818,6 @@ unk_log=$(cat "$CALLS")
 assert_eq "run(#253): unknown target exits non-zero" "2" "$unk_rc"
 assert_contains "run(#253): unknown-target message names the token" "$unk_out" "'notanagent' is not a known agent"
 assert_not_contains "run(#253): unknown target does NOT provision" "$unk_log" "sbx create"
-cleanup_stubs
-
-
-# (Added to qsbx in §7 of the handoff)
-# ===========================================================================
-
-# 4a. Notice prints on stderr (requires the deprecation notice to be added to qsbx).
-make_stubs
-dep_out2=$(bash -c "
-  PATH='$STUBDIR:$_STUB_BASE_PATH'
-  '$QSBX' version 2>&1 || true
-")
-# This test passes once the deprecation notice is present in qsbx (added in §7).
-assert_contains "qsbx: deprecation notice prints" "$dep_out2" "deprecated"
-cleanup_stubs
-
-# 4b. QSBX_SILENCE_DEPRECATION=1 suppresses the notice.
-make_stubs
-dep_silent=$(bash -c "
-  PATH='$STUBDIR:$_STUB_BASE_PATH'
-  QSBX_SILENCE_DEPRECATION=1 '$QSBX' version 2>&1 || true
-")
-assert_not_contains "qsbx: notice silenced" "$dep_silent" "deprecated"
 cleanup_stubs
 
 # ===========================================================================
@@ -737,6 +957,27 @@ else
 fi
 cleanup_stubs
 
+# 5e2. masked secret entry (_acq_read_secret_masked): echoes one '*' per char to
+#       stderr for visual feedback, captures the real value on stdout, and never
+#       echoes the actual characters. Driven over a pipe (read -rsn1 works on a
+#       non-tty too), so it is deterministic offline. Also checks that backspace
+#       erases a char and an empty line yields an empty value.
+make_stubs; load_acq
+(
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  set +e
+  v=$(printf 'sk-SECRET\n' | _acq_read_secret_masked 2>"$STUBDIR/stars")
+  stars=$(cat "$STUBDIR/stars")
+  assert_eq "mask: captures the entered value" "sk-SECRET" "$v"
+  assert_contains "mask: shows a star per char (feedback)" "$stars" "*"
+  assert_not_contains "mask: never echoes the plaintext" "$stars" "sk-SECRET"
+  vb=$(printf 'ab\177c\n' | _acq_read_secret_masked 2>/dev/null)
+  assert_eq "mask: backspace erases last char" "ac" "$vb"
+  ve=$(printf '\n' | _acq_read_secret_masked 2>/dev/null)
+  assert_eq "mask: empty entry yields empty value" "" "$ve"
+) 2>/dev/null; pass "mask: masked secret entry (feedback + capture + backspace)"
+cleanup_stubs
+
 # 5f. `my-sandbox usai` (custom, piped) -> stored scoped + prints sandbox-scoped cmd.
 make_stubs
 out=$(printf 'k\n' | ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox usai 2>&1 || true)
@@ -753,7 +994,6 @@ cleanup_stubs
 make_stubs
 out=$(printf 'k\n' | ACQ_BACKEND=msb "$ACQ" secret set -g usai 2>&1 || true)
 assert_contains "secret(msb): usai stored" "$out" "acq secret store"
-assert_contains "secret(msb): usai mentions --secret binding" "$out" "USAI_API_KEY@api.gsa.usai.gov"
 assert_not_contains "secret(msb): usai does not print sbx set-custom" "$out" "sbx secret set-custom"
 cleanup_stubs
 
@@ -903,7 +1143,7 @@ assert_contains "classify: unknown service is passthrough" "$classify_out" "g-un
 cleanup_stubs
 
 # ===========================================================================
-# 6. Kit list completeness (same four kits as qsbx)
+# 6. Kit list completeness (the four built-in kits)
 # ===========================================================================
 
 make_stubs; load_acq
@@ -912,6 +1152,10 @@ assert_contains "kits: usai-provider" "$kits_joined" "acq-kits/usai-provider"
 assert_contains "kits: playbook" "$kits_joined" "acq-kits/agentic-coding-playbook"
 assert_contains "kits: zscaler" "$kits_joined" "acq-kits/zscaler-ca-certificate"
 assert_contains "kits: git-ssh-sign" "$kits_joined" "acq-kits/git-ssh-sign"
+# ORDER: zscaler-ca-certificate MUST be first so CA trust is established before
+# any later kit makes a network request (matters on sbx, whose kits apply
+# sequentially; harmless on msb, where trust is a create-time flag).
+assert_contains "kits: zscaler applied first" "${KITS[0]}" "acq-kits/zscaler-ca-certificate"
 cleanup_stubs
 
 # ===========================================================================
@@ -982,44 +1226,42 @@ cleanup_stubs
 # 8. msb backend — resolution, dispatch, doctor/list, version
 # ===========================================================================
 
-# 8a. Auto-detect prefers sbx when both present.
+# 8a. Auto-detect prefers msb when both present (no existing sbx sandboxes).
 make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
-  # Pin PATH to ONLY the stub dir so a real sbx/msb on the developer's host
-  # PATH cannot leak into auto-detection.
-  PATH="$STUBDIR"; export PATH
+  export ACQ_TEST_INSTALLED_BACKENDS="msb sbx"
+  rm -f "$STUBDIR/.sandbox_list"    # sbx ls -q empty -> no sbx sandboxes to keep
+  PATH="$STUBDIR:$PATH"; export PATH   # stub sbx (for `sbx ls -q`) wins
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
-  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
   set +e
-  detected=$(_auto_detect_backend)
-  assert_eq "msb: auto-detect prefers sbx over msb" "sbx" "$detected"
-) 2>/dev/null; pass "msb: auto-detect order sbx>msb (both stubbed)"
+  _auto_detect_backend
+  assert_eq "msb: auto-detect prefers msb over sbx" "msb" "$ACQ_AUTODETECT_BACKEND"
+  assert_eq "msb: auto-detect reason both-msb" "both-msb" "$ACQ_AUTODETECT_REASON"
+) 2>/dev/null; pass "msb: auto-detect order msb>sbx (both stubbed)"
 cleanup_stubs
 
-# 8b. Auto-detect falls back to msb when only msb is present.
+# 8b. Auto-detect falls back to sbx when only sbx is present.
 make_stubs; load_acq
 (
   unset ACQ_BACKEND 2>/dev/null || true
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
-  rm -f "$STUBDIR/sbx"          # remove sbx so only msb remains
-  # Constrain PATH to the stub dir ONLY: _auto_detect_backend runs
-  # `command -v sbx`, which would otherwise find a REAL sbx on the developer's
-  # base PATH and make this fall back-to-msb assertion flake to "sbx". Provide a
-  # coreutils dir so the sourced scripts still find standard tools.
-  _coreutils_dir=$(dirname "$(command -v env)")
-  PATH="$STUBDIR:$_coreutils_dir"
-  export PATH
+  # Pin which backends auto-detect "sees" via the test override rather than
+  # PATH: a real msb on the developer's PATH (esp. beside Homebrew coreutils)
+  # would otherwise leak in and flip this sbx-only case to both-*.
+  export ACQ_TEST_INSTALLED_BACKENDS="sbx"
   # shellcheck disable=SC1090
   ACQ_SOURCE_ONLY=1 . "$ACQ"
-  # shellcheck source=acq.backends/msb.sh
-  . "${REPO_ROOT}/acq.backends/msb.sh"
+  # shellcheck source=acq.backends/sbx.sh
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
   set +e
-  detected=$(_auto_detect_backend)
-  assert_eq "msb: auto-detect falls back to msb" "msb" "$detected"
-) 2>/dev/null; pass "msb: auto-detect fallback to msb (sbx absent)"
+  _auto_detect_backend
+  assert_eq "msb: auto-detect falls back to sbx" "sbx" "$ACQ_AUTODETECT_BACKEND"
+  assert_eq "msb: auto-detect reason sbx-only" "sbx-only" "$ACQ_AUTODETECT_REASON"
+) 2>/dev/null; pass "msb: auto-detect fallback to sbx (msb absent)"
 cleanup_stubs
 
 # 8c. --backend msb resolves and loads the msb adapter.
@@ -1092,6 +1334,25 @@ assert_contains "msb: backend list shows msb version" "$out" "msb  v0.6.6"
 assert_not_contains "msb: backend list drops 'coming in 1.2.x'" "$out" "Coming in 1.2.x"
 cleanup_stubs
 
+# 8i2. `acq backend set NAME` persists, then `acq backend unset` clears it so
+#      resolution falls back to auto-detect. Uses an isolated XDG config dir.
+make_stubs
+(
+  export XDG_CONFIG_HOME="$STUBDIR/xdg"
+  cfg="$XDG_CONFIG_HOME/acq/config.yaml"
+  "$ACQ" backend set sbx >/dev/null 2>&1
+  [ -f "$cfg" ] && grep -q '^backend: sbx' "$cfg" && printf 'set=yes\n' || printf 'set=no\n'
+  "$ACQ" backend unset >/dev/null 2>&1
+  [ -f "$cfg" ] && printf 'file-after=present\n' || printf 'file-after=gone\n'
+  # unset is idempotent: a second call still succeeds.
+  "$ACQ" backend unset >/dev/null 2>&1 && printf 'unset-idempotent=yes\n' || printf 'unset-idempotent=no\n'
+) > "$STUBDIR/bu.out" 2>&1
+bu_out=$(cat "$STUBDIR/bu.out")
+assert_contains "backend set: persists to config" "$bu_out" "set=yes"
+assert_contains "backend unset: removes the config" "$bu_out" "file-after=gone"
+assert_contains "backend unset: idempotent" "$bu_out" "unset-idempotent=yes"
+cleanup_stubs
+
 # 8j. `acq doctor` probes msb with a real version (not the old placeholder).
 make_stubs
 out=$(printf 'n\n' | "$ACQ" doctor 2>&1)
@@ -1099,10 +1360,10 @@ assert_contains "msb: doctor shows msb installed" "$out" "msb: installed v0.6.6"
 assert_not_contains "msb: doctor drops 'coming in 1.2.x'" "$out" "coming in 1.2.x"
 cleanup_stubs
 
-# 8k. msb secret set usai stores in the acq store + prints binding guidance.
+# 8k. msb secret set usai stores in the acq store + confirms concisely.
 make_stubs
 out=$(ACQ_SECRET_TEST_VALUE="my-usai-key" ACQ_BACKEND=msb "$ACQ" secret set -g usai 2>&1 || true)
-assert_contains "msb: secret set usai mentions USAI_API_KEY binding" "$out" "USAI_API_KEY"
+assert_contains "msb: secret set usai confirms store" "$out" "acq secret store"
 if [ -f "$STUBDIR/secrets/acq.usai" ]; then
   pass "msb: secret set usai stored in acq store"
 else
@@ -1110,11 +1371,10 @@ else
 fi
 cleanup_stubs
 
-# 8l. msb secret set github stores in the acq store + explains it is NOT bound on
-#     msb (git substitution unsupported), pointing at the known limitation.
+# 8l. msb secret set github stores in the acq store + confirms concisely.
 make_stubs
 out=$(ACQ_SECRET_TEST_VALUE="ghp_x" ACQ_BACKEND=msb "$ACQ" secret set -g github 2>&1 || true)
-assert_contains "msb: secret set github notes REST-API binding" "$out" "GITHUB_TOKEN@api.github.com"
+assert_contains "msb: secret set github confirms store" "$out" "acq secret store"
 if [ -f "$STUBDIR/secrets/acq.github" ]; then
   pass "msb: secret set github stored in acq store"
 else
@@ -4233,10 +4493,10 @@ printf '%s\n' "$list_out" | grep -q 8080 \
 # leaking in as ports). The old numeric-pairing parser split the colon in the
 # third entry's host_bind ("127.0.0.1:9") and emitted `guest 9 -> host 127.0.0.1:1`
 # instead of the real 8443:8443 mapping — these asserts fail against that old code.
-printf '%s\n' "$list_out" | grep -q 'guest 3000 -> host 127.0.0.1:3000 (create-time -p)' \
+printf '%s\n' "$list_out" | grep -q 'sandbox 3000 -> host 127.0.0.1:3000 (create-time -p)' \
   && pass "msb ports: LIST prints exact create-time mapping for 3000 (no host_bind leak)" \
   || fail "msb ports: LIST exact create-time mapping for 3000" "out=[$list_out]"
-printf '%s\n' "$list_out" | grep -q 'guest 8443 -> host 127.0.0.1:8443 (create-time -p)' \
+printf '%s\n' "$list_out" | grep -q 'sandbox 8443 -> host 127.0.0.1:8443 (create-time -p)' \
   && pass "msb ports: LIST maps colon-bearing host_bind entry to real port 8443 (not split)" \
   || fail "msb ports: LIST exact create-time mapping for 8443 (colon-bearing host_bind)" "out=[$list_out]"
 printf '%s\n' "$list_out" | grep -Eq '127\.0\.0\.1:(1|9|16|00|256)( |$)' \
@@ -4442,6 +4702,10 @@ assert_eq       "gh-detect: empty dir empty"      ""  "$(_dwr "$gwt/empty" | tr 
 # $RANDOM can repeat across sequential subshells and leak a planted secret).
 _advise() {
   # $1 = workspace, $2 = unique tag, $3 = "global"?, $4 = "scoped"?
+  # Redirect stdin from /dev/null so advise_github_scope takes its
+  # non-interactive branch (it gates on `[ ! -t 0 ]`). Without this, running the
+  # suite from an interactive terminal leaves stdin as the TTY inside this
+  # command substitution, so the advisory would block on its [y/N] read.
   ( export ACQ_SCRIPT_DIR="$REPO_ROOT"
     unset ACQ_SECRET_STORE_DIR
     export ACQ_SECRET_FORCE_FILE=1
@@ -4449,8 +4713,7 @@ _advise() {
     . "${REPO_ROOT}/acq.backends/common.sh"
     [ "${3:-}" = "global" ] && printf 'gho_x\n' | acq_secret_store "$(_acq_secret_key github)" >/dev/null 2>&1
     [ "${4:-}" = "scoped" ] && printf 'ghp_x\n' | acq_secret_store "$(_acq_secret_key github sb1)" >/dev/null 2>&1
-    # non-TTY (stdin not a tty here) so it advises + returns without prompting
-    advise_github_scope sb1 "$1" 2>&1 )
+    advise_github_scope sb1 "$1" 2>&1 </dev/null )
 }
 assert_contains "gh-advise: fires when repos + no scoped (no global)" "$(_advise "$gwt/repoGH" t1)" "no repo-scoped GitHub token"
 assert_contains "gh-advise: warns broad when global present"          "$(_advise "$gwt/repoGH" t2 global)" "grants this sandbox access to ALL"

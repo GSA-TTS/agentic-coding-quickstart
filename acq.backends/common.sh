@@ -36,7 +36,7 @@ PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # the bundle-version anchor recorded in a sandbox's host-side provenance record
 # (see ACQ_BUILTIN_BUNDLE below + the provenance helpers) so acq can tell a
 # stale sandbox from a current one.
-PATTERNS_KIT_REF="6230faa53ae88e125f04521ab8eee932eeaacdbc"
+PATTERNS_KIT_REF="f5fb88759aa3007e24186a25e5f2d5d4a8b6e573"  # agentic-coding-patterns v1.8.0
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider"
@@ -47,8 +47,16 @@ GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_
 # Neutral kit directory names (relative to PATTERNS_KIT_DIR), in apply order.
 # kit-translate.sh resolves a kit's spec.yaml + files/ from these names. The
 # built-in kit set maps 1:1 to the four *_KIT refs above.
+#
+# ORDER MATTERS: zscaler-ca-certificate is applied FIRST so its CA trust is in
+# place before any later kit makes an outbound HTTPS request. Behind a
+# TLS-intercepting proxy (e.g. Zscaler), a kit that fetches over the network
+# (the playbook kit clones from api.github.com; the USAi provider validates
+# against api.gsa.usai.gov) fails with a TLS 'unexpected eof' unless the
+# intercepting CA is already trusted. Establishing trust first makes the rest
+# of the bundle succeed on corporate networks.
 # shellcheck disable=SC2034  # consumed by `acq kit list` in the acq entry point
-ACQ_KIT_NAMES=(usai-provider agentic-coding-playbook zscaler-ca-certificate git-ssh-sign)
+ACQ_KIT_NAMES=(zscaler-ca-certificate usai-provider agentic-coding-playbook git-ssh-sign)
 
 # Built-in bundle identity. This mirrors the `provenance` block the usai-provider
 # kit declares at the pinned PATTERNS_KIT_REF. acq records these in a sandbox's
@@ -157,8 +165,10 @@ split_noglob() {
 }
 
 # Assemble the full kit list: built-ins, then extras.
+# Zscaler CA trust FIRST (see ACQ_KIT_NAMES) so later network-fetching kits
+# succeed behind a TLS-intercepting proxy.
 _build_kit_list() {
-  KITS=("$USAI_KIT" "$PLAYBOOK_KIT" "$ZSCALER_KIT" "$GITSSHSIGN_KIT")
+  KITS=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
   if [ -n "$ACQ_EXTRA_KITS" ]; then
     local _extra_kits=()
     split_noglob _extra_kits "$ACQ_EXTRA_KITS"
@@ -408,18 +418,91 @@ _read_config_backend() {
   awk '/^[[:space:]]*backend[[:space:]]*:/ { gsub(/^[[:space:]]*backend[[:space:]]*:[[:space:]]*/,""); gsub(/[[:space:]]*$/,""); print; exit }' "$cfg"
 }
 
-# Try to auto-detect an available backend. Prefers sbx (the mature default),
-# then msb (microsandbox). First one found wins.
-_auto_detect_backend() {
-  if command -v sbx >/dev/null 2>&1; then
-    printf 'sbx\n'
-    return 0
+# _backend_installed BACKEND — 0 if the named backend CLI is available.
+# Honors a test-only override, ACQ_TEST_INSTALLED_BACKENDS, a space-separated
+# allowlist (e.g. "sbx" or "msb sbx"). Tests set it to pin exactly which
+# backends auto-detect "sees" — `command -v` alone can't, because a developer's
+# real msb/sbx (and the coreutils the sourced scripts need) share PATH dirs, so
+# restricting PATH cannot hide one backend without also breaking the harness.
+# When the override is unset (production), falls back to a real `command -v`.
+_backend_installed() {
+  local be="$1"
+  if [ -n "${ACQ_TEST_INSTALLED_BACKENDS+x}" ]; then
+    case " $ACQ_TEST_INSTALLED_BACKENDS " in
+      *" $be "*) return 0 ;;
+      *) return 1 ;;
+    esac
   fi
-  if command -v msb >/dev/null 2>&1; then
-    printf 'msb\n'
-    return 0
+  command -v "$be" >/dev/null 2>&1
+}
+
+# _sbx_has_sandboxes — 0 if the sbx CLI reports at least one existing sandbox.
+# Used only on the both-installed auto-detect path to keep users on sbx when
+# they already have sbx sandboxes. Runs BEFORE any adapter is sourced, so it
+# calls `sbx ls -q` directly rather than acq_backend_exists. Fail-open: any
+# error (sbx missing, not logged in, transient) is treated as "no sandboxes".
+_sbx_has_sandboxes() {
+  _backend_installed sbx || return 1
+  [ -n "$(sbx ls -q 2>/dev/null)" ]
+}
+
+# Auto-detect an available backend when nothing is explicitly pinned. Sets, IN
+# THE CURRENT SHELL, ACQ_AUTODETECT_BACKEND (the chosen backend) and
+# ACQ_AUTODETECT_REASON (consumed by _announce_autodetect_backend) to one of:
+#   msb-only           — only msb installed (the default; no nudge needed)
+#   sbx-only           — only sbx installed (nudge toward the msb default)
+#   both-msb           — both installed, no existing sbx sandboxes -> msb
+#   both-sbx           — both installed, existing sbx sandboxes -> keep sbx
+# msb is the default: it wins unless the user already has sbx sandboxes to
+# preserve. Returns non-zero (both vars empty) when no backend is installed.
+#
+# NOTE: this MUST run in the current shell (not `$( … )`) so the two globals it
+# sets are visible to the caller — auto-detect's nudge depends on the reason.
+ACQ_AUTODETECT_BACKEND=""
+ACQ_AUTODETECT_REASON=""
+_auto_detect_backend() {
+  ACQ_AUTODETECT_BACKEND=""
+  ACQ_AUTODETECT_REASON=""
+  local have_msb=0 have_sbx=0
+  _backend_installed msb && have_msb=1
+  _backend_installed sbx && have_sbx=1
+
+  if [ "$have_msb" -eq 1 ] && [ "$have_sbx" -eq 1 ]; then
+    if _sbx_has_sandboxes; then
+      ACQ_AUTODETECT_BACKEND="sbx"; ACQ_AUTODETECT_REASON="both-sbx"; return 0
+    fi
+    ACQ_AUTODETECT_BACKEND="msb"; ACQ_AUTODETECT_REASON="both-msb"; return 0
+  fi
+  if [ "$have_msb" -eq 1 ]; then
+    ACQ_AUTODETECT_BACKEND="msb"; ACQ_AUTODETECT_REASON="msb-only"; return 0
+  fi
+  if [ "$have_sbx" -eq 1 ]; then
+    ACQ_AUTODETECT_BACKEND="sbx"; ACQ_AUTODETECT_REASON="sbx-only"; return 0
   fi
   return 1
+}
+
+# Emit a one-time stderr nudge toward the msb default when the backend was
+# auto-detected (no --backend, ACQ_BACKEND, or saved config). msb is now the
+# default backend and the best-supported option going forward, so every
+# auto-detect case that isn't already on msb steers the user there and shows how
+# to pin their choice (which also silences the notice). No notice on msb-only —
+# already on the default, nothing to nudge.
+_announce_autodetect_backend() {
+  case "$ACQ_AUTODETECT_REASON" in
+    both-sbx)
+      echo "acq: using sbx (you have existing sbx sandboxes). msb is now the default backend." >&2
+      echo "     Pin your choice: 'acq backend set sbx' (keep sbx) or 'acq backend set msb' (switch)." >&2
+      ;;
+    both-msb)
+      echo "acq: using msb, the default backend. Pin with 'acq backend set msb' to silence this." >&2
+      ;;
+    sbx-only)
+      echo "acq: using sbx. msb is now the default backend and the recommended option going forward —" >&2
+      echo "     consider 'acq backend set msb'. Pin sbx with 'acq backend set sbx' to silence this." >&2
+      ;;
+    *) : ;;  # msb-only (or unset): already on the default — no nudge.
+  esac
 }
 
 # Source the adapter for a named backend. Fails closed if the file is missing.
@@ -439,6 +522,7 @@ _load_backend_adapter() {
 acq_resolve_backend() {
   local explicit="${1:-}"
   local name=""
+  local autodetected=0
 
   if [ -n "$explicit" ]; then
     name="$explicit"
@@ -450,14 +534,21 @@ acq_resolve_backend() {
     if [ -n "$cfg_name" ]; then
       name="$cfg_name"
     else
-      name=$(_auto_detect_backend) || {
-        echo "acq: error: no backend detected. Install sbx (>= 0.35.0) or msb (>= 0.6.0)," >&2
+      _auto_detect_backend || {
+        echo "acq: error: no backend detected. Install msb (>= 0.6.0) or sbx (>= 0.35.0)," >&2
         echo "     or set ACQ_BACKEND." >&2
         echo "     Run 'acq doctor' for installation hints." >&2
         exit 1
       }
+      name="$ACQ_AUTODETECT_BACKEND"
+      autodetected=1
     fi
   fi
+
+  # Nudge toward the msb default ONLY when the backend was auto-detected — an
+  # explicit --backend / ACQ_BACKEND / saved config is the user's pin and stays
+  # silent.
+  [ "$autodetected" -eq 1 ] && _announce_autodetect_backend
 
   _load_backend_adapter "$name"
   _build_kit_list
@@ -693,13 +784,118 @@ maybe_offer_bundle_refresh() {
 # Advisory functions (USAi key, SSH signing, git identity)
 # ============================================================================
 
-# Probe the USAi API from inside the sandbox.
+# Ensure opencode's postinstall has run inside the sandbox.
+#
+# Since opencode v1.15.1 the `opencode-ai` npm package fetches its actual binary
+# in a postinstall step. Some sandbox images (notably the prebuilt sbx
+# opencode-docker template) install the package with lifecycle scripts skipped,
+# so the first launch fails with:
+#   Error: opencode-ai's postinstall script was not run.
+# This is backend-agnostic (the msb npm install can hit the same gap), so run
+# the fix on any backend before attaching an opencode agent.
+#
+# Idempotent and cheap: if opencode already runs (`opencode --version`), do
+# nothing. Otherwise locate the installed package via `npm root -g` and run its
+# postinstall.mjs. Best-effort — never aborts the run; a genuinely broken
+# install still surfaces its own error on attach. Runs as the sandbox's default
+# exec user (acq_backend_run), matching how the agent itself is launched.
+ensure_opencode_postinstall() {
+  local name="$1"
+
+  # Already functional? Nothing to do.
+  if acq_backend_run "$name" -- opencode --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  acq_debug "opencode not runnable in '$name'; attempting postinstall"
+  # Run the package's own postinstall from its global install dir. `npm root -g`
+  # resolves the global node_modules; the package dir is opencode-ai within it.
+  # Both the cd and node invocation happen in one sh -c so the resolved path is
+  # used atomically. Output is suppressed; we re-probe below to decide success.
+  #
+  # BOUND THE WAIT: postinstall.mjs fetches a platform binary over the network, so
+  # a wedged/slow registry could otherwise hang `acq run` before attach. Wrap it
+  # in a guest-side `timeout` when available (fall back to an unbounded run if the
+  # guest has no `timeout`, e.g. a minimal base). ACQ_OPENCODE_POSTINSTALL_TIMEOUT
+  # tunes the bound (default 120s). This is belt-and-suspenders: the create-time
+  # egress allow-list already limits where the fetch can go.
+  local _pi_timeout="${ACQ_OPENCODE_POSTINSTALL_TIMEOUT:-120}"
+  acq_backend_run "$name" -- sh -c \
+    'cd "$(npm root -g)/opencode-ai" 2>/dev/null || exit 0
+     if command -v timeout >/dev/null 2>&1; then
+       timeout '"$_pi_timeout"' node postinstall.mjs
+     else
+       node postinstall.mjs
+     fi' \
+    >/dev/null 2>&1 || true
+
+  if acq_backend_run "$name" -- opencode --version >/dev/null 2>&1; then
+    acq_debug "opencode postinstall succeeded in '$name'"
+    return 0
+  fi
+
+  # Still not runnable — warn but don't block; attach will surface the real
+  # error, and the user has the manual recovery in docs/KNOWN_FAILURE_MODES.md.
+  echo "acq: warning: opencode does not appear runnable in '$name' yet." >&2
+  echo "      Tried its postinstall automatically; if attach still fails with" >&2
+  echo "      \"postinstall script was not run\", see docs/KNOWN_FAILURE_MODES.md." >&2
+  return 0
+}
+
+# Probe the USAi API from inside the sandbox. Emits ONE clean token on stdout:
+#   - a 3-digit HTTP status (e.g. 200, 401) on a real HTTP response,
+#   - the literal "unreachable" when curl could not complete a request at all
+#     (TLS reset, DNS failure, proxy/Zscaler interception, offline — curl exits
+#     non-zero and writes http_code 000), or
+#   - "" (empty) only when the probe is genuinely indeterminate.
+# The caller distinguishes these: "unreachable" is a NETWORK problem, NOT a bad
+# key, so it must never be reported as "invalid or expired" or trigger a rotate.
+#
+# Sanitize hard: curl's stderr can leak through the backend exec (which may merge
+# streams), so we emit the raw curl output as `<http_code>|<exit>` and reduce it
+# to a bare code here. Only ^[0-9]{3}$ or "unreachable" or "" can ever escape —
+# no free-form error text can splice into the caller's "(HTTP …)" message.
 check_key() {
   local name="$1"
-  acq_backend_run "$name" -- sh -c \
+  local raw code exit_code
+  raw=$(acq_backend_run "$name" -- sh -c \
     "curl -sS -o /dev/null -w '%{http_code}' \
      -H \"Authorization: Bearer \$USAI_API_KEY\" \
-     $USAI_MODELS_URL" 2>/dev/null || true
+     $USAI_MODELS_URL; printf '|%s' \"\$?\"" 2>/dev/null || true)
+  _classify_key_status "$raw"
+}
+
+# Reduce a raw `<http_code>|<curl_exit>` probe result (possibly polluted with
+# curl error text) to a clean status token: a 3-digit HTTP code, "unreachable",
+# or "". Shared by check_key and check_fresh_sandbox_key.
+_classify_key_status() {
+  local raw="$1" code exit_code
+  # The curl exit code is the last field after the final '|'. Keep only digits.
+  exit_code="${raw##*|}"
+  exit_code=$(printf '%s' "$exit_code" | tr -cd '0-9')
+  # The http_code is the last 3-digit run before that '|' (curl's %{http_code}).
+  code="${raw%%|*}"
+  code=$(printf '%s' "$code" | tr -cd '0-9')
+  # Keep only the trailing 3 digits (guards against any leading leaked digits).
+  code="${code: -3}"
+
+  # curl succeeded (exit 0) AND returned a plausible non-000 HTTP code.
+  if [ "$exit_code" = "0" ] && [ -n "$code" ] && [ "$code" != "000" ]; then
+    printf '%s\n' "$code"
+    return 0
+  fi
+  # curl failed to get any response (nonzero exit, or http_code 000): the request
+  # never reached USAi — treat as a network reachability problem, not a key one.
+  if [ -n "$exit_code" ] && [ "$exit_code" != "0" ]; then
+    printf 'unreachable\n'
+    return 0
+  fi
+  if [ "$code" = "000" ]; then
+    printf 'unreachable\n'
+    return 0
+  fi
+  # Indeterminate (no exit code captured, no usable http_code): stay silent.
+  printf '\n'
 }
 
 # Check USAi key in a fresh temporary sandbox (to distinguish bad key from stale
@@ -714,10 +910,12 @@ check_fresh_sandbox_key() {
   fi
   # shellcheck disable=SC2064
   trap "acq_backend_terminate '$validation_name' </dev/null >/dev/null 2>&1 || true" EXIT
-  status=$(acq_backend_run "$validation_name" -- sh -c \
+  local raw
+  raw=$(acq_backend_run "$validation_name" -- sh -c \
     "curl -sS -o /dev/null -w '%{http_code}' \
      -H \"Authorization: Bearer \$USAI_API_KEY\" \
-     $USAI_MODELS_URL" </dev/null 2>/dev/null || true)
+     $USAI_MODELS_URL; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
+  status=$(_classify_key_status "$raw")
   acq_backend_terminate "$validation_name" </dev/null >/dev/null 2>&1 || true
   trap - EXIT
   printf '%s\n' "$status"
@@ -977,7 +1175,7 @@ $repos
 EOF
 
   echo "" >&2
-  echo "      When you have a token, paste it at the prompt (input hidden)." >&2
+  echo "      When you have a token, paste it at the prompt (shown as *)." >&2
   echo "      To skip for now, press Enter on an empty line." >&2
 
   # Store sandbox-scoped via the backend secret path (feeds the sbx proxy too).
@@ -1086,12 +1284,36 @@ advise_valid_key() {
   [ "$status" = "200" ] && return 0
   [ -z "$status" ] && return 0
 
+  if [ "$status" = "unreachable" ]; then
+    _report_usai_unreachable
+    return 0
+  fi
+
   echo "acq: note — your USAi API key looks invalid or expired (HTTP $status)." >&2
   echo "      USAi keys expire every 7 days. This sandbox was created, but the" >&2
   echo "      key must be valid before an agent can use it." >&2
   echo "      To rotate: acq usai-rotate-api-key   (or re-run via 'acq run', which" >&2
   echo "      validates and offers to rotate before attaching)." >&2
   return 0
+}
+
+# Print a network-oriented diagnosis when the USAi models API could not be
+# reached from the sandbox at all (curl connection failure / HTTP 000). This is
+# a reachability problem — NOT an invalid or expired key — so it deliberately
+# does not mention rotating the key. The point is an accurate diagnosis, not a
+# prescription: it states what failed and the signal to look for, and points at
+# the docs rather than guessing the user's network fix.
+_report_usai_unreachable() {
+  echo >&2
+  echo "acq: could not reach the USAi API ($USAI_MODELS_URL) from the sandbox." >&2
+  echo "      The request did not complete (no HTTP response) — this is a network" >&2
+  echo "      reachability problem, NOT an invalid or expired key, so rotating the" >&2
+  echo "      key will not help." >&2
+  echo "      If the playbook/kit fetch also failed with a TLS 'unexpected eof'," >&2
+  echo "      both outbound connections are being cut — a strong sign of a network" >&2
+  echo "      or TLS-interception (e.g. corporate proxy) issue rather than USAi." >&2
+  echo "      See docs/KNOWN_FAILURE_MODES.md for diagnosis steps." >&2
+  echo >&2
 }
 
 ensure_valid_key() {
@@ -1109,35 +1331,62 @@ ensure_valid_key() {
     return 0
   fi
 
-  echo >&2
-  echo "Your USAi API key looks invalid or expired (HTTP $status from the models API)." >&2
-  echo "USAi keys expire every 7 days." >&2
-  echo >&2
-  echo "To rotate it:" >&2
-  echo "  1. Open $KEY_MGMT_URL" >&2
-  echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
-  echo "  3. Copy the new key using the console copy button" >&2
-  echo >&2
-
-  local rotate_via_backend=1
-  if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
-    rotate_via_backend=0
-    echo "The '${ACQ_RESOLVED_BACKEND:-active}' backend does not implement key rotation." >&2
-    echo "Rotate manually, then re-run." >&2
+  # The request never reached USAi (TLS reset / DNS / proxy interception /
+  # offline) — a NETWORK problem, not a key problem. Rotating a key cannot fix
+  # this, so DO NOT prompt to rotate. Fail closed (attaching would just fail on
+  # the first USAi call) with a network-oriented diagnosis.
+  if [ "$status" = "unreachable" ]; then
+    _report_usai_unreachable
     return 1
   fi
 
-  printf 'Have the new key ready to paste? Rotate now? [y/N] ' >&2
+  # Distinguish "no key stored yet" (first-time setup) from "key present but
+  # rejected" (expired/invalid), so the guidance and prompt match reality. If
+  # the store helper isn't loaded, assume a key is present so wording never
+  # regresses to the wrong direction.
+  local have_key=1
+  if command -v acq_secret_has >/dev/null 2>&1; then
+    acq_secret_has usai "$name" || have_key=0
+  fi
+
+  echo >&2
+  if [ "$have_key" -eq 0 ]; then
+    echo "No USAi API key is set for '$name' (HTTP $status from the models API)." >&2
+    echo "USAi keys are created at $KEY_MGMT_URL and expire every 7 days." >&2
+    echo >&2
+    echo "To set one:" >&2
+    echo "  1. Open $KEY_MGMT_URL" >&2
+    echo "  2. Create a key (or copy an existing one) with the console copy button" >&2
+  else
+    echo "Your USAi API key looks invalid or expired (HTTP $status from the models API)." >&2
+    echo "USAi keys expire every 7 days." >&2
+    echo >&2
+    echo "To rotate it:" >&2
+    echo "  1. Open $KEY_MGMT_URL" >&2
+    echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
+    echo "  3. Copy the new key using the console copy button" >&2
+  fi
+  echo >&2
+
+  if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
+    echo "The '${ACQ_RESOLVED_BACKEND:-active}' backend does not implement key setup." >&2
+    echo "Set the key manually, then re-run." >&2
+    return 1
+  fi
+
   local answer=""
+  if [ "$have_key" -eq 0 ]; then
+    printf 'Have your USAi key ready to paste? Set it now? [y/N] ' >&2
+  else
+    printf 'Have the new key ready to paste? Rotate now? [y/N] ' >&2
+  fi
   read -r answer || true
   case "$answer" in
     [yY]|[yY][eE][sS])
-      if [ "$rotate_via_backend" -eq 1 ]; then
-        acq_backend_rotate_key || {
-          echo "Rotation did not complete. Aborting attach." >&2
-          return 1
-        }
-      fi
+      acq_backend_rotate_key || {
+        echo "Key setup did not complete. Aborting attach." >&2
+        return 1
+      }
       status=$(check_key "$name")
       if [ "$status" = "200" ]; then
         echo "Key validated. Continuing." >&2
@@ -1147,7 +1396,7 @@ ensure_valid_key() {
       return 1
       ;;
     *)
-      echo "Skipping rotation. Aborting attach; re-run when your key is rotated." >&2
+      echo "Skipping. Aborting attach; re-run when your USAi key is set." >&2
       return 1
       ;;
   esac
@@ -1208,7 +1457,10 @@ acq_print_doctor() {
   fi
 
   echo ""
-  printf "  Write '%s' as the default backend to %s? [y/N] " "${ACQ_RESOLVED_BACKEND:-sbx}" "$config_file" >&2
+  # ACQ_RESOLVED_BACKEND is always set by acq_resolve_backend before doctor runs,
+  # so the ':-msb' here is only a defensive fallback — it mirrors auto-detect's
+  # default and does NOT let doctor independently pick a backend.
+  printf "  Write '%s' as the default backend to %s? [y/N] " "${ACQ_RESOLVED_BACKEND:-msb}" "$config_file" >&2
   local answer=""
   read -r answer || true
   case "$answer" in
@@ -1216,7 +1468,7 @@ acq_print_doctor() {
       local cfg_dir
       cfg_dir=$(dirname "$config_file")
       mkdir -p "$cfg_dir"
-      printf 'backend: %s\n' "${ACQ_RESOLVED_BACKEND:-sbx}" > "$config_file"
+      printf 'backend: %s\n' "${ACQ_RESOLVED_BACKEND:-msb}" > "$config_file"
       echo "  Wrote default backend to ${config_file}." >&2
       ;;
     *)

@@ -3,7 +3,7 @@ title: "Agentic Coding Quickstart - Agent Rules"
 description: "Behavioral rules for AI coding agents operating with a sandboxing backend (SBX or MSB) + USAi"
 status: canonical
 tier: 1
-last_updated: "2026-08-01"
+last_updated: "2026-08-04"
 audience: "developers"
 keywords: ["AGENTS.md", "acq", "sbx", "msb", "usai", "sandbox", "agent-rules", "workspace"]
 related_files: ["docs/QUICKSTART.md", "docs/BACKEND_GUIDE.md", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0001-sbx-usai-agent-execution-architecture.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -38,7 +38,6 @@ my-workspace/                       # Parent folder (user creates this)
 │   ├── AGENTS.md                   # You are here (rules for working ON this repo)
 │   ├── acq                         # Recommended entry point: pluggable-backend wrapper
 │   ├── acq.backends/               # Backend adapters (sbx, msb)
-│   ├── qsbx                        # DEPRECATED: use acq instead (slated for removal in 3.0.0)
 │   ├── scripts/                    # helper scripts (USAi key rotation, tests)
 │   └── docs/                       # Setup guides and references
 └── my-app/                         # User's project(s)
@@ -355,7 +354,7 @@ The agent MUST ask the user before:
 - [ ] Modifying CI/CD pipeline configurations
 - [ ] Deleting files or directories
 - [ ] Committing or pushing code
-- [ ] Modifying backend configuration (SBX or MSB), or creating sandboxes outside the sanctioned bootstrap (`acq run` / `acq create` / `qsbx run` / `sbx run` / `msb run`, which auto-create a sandbox as part of normal execution and are pre-approved)
+- [ ] Modifying backend configuration (SBX or MSB), or creating sandboxes outside the sanctioned bootstrap (`acq run` / `acq create` / `sbx run` / `msb run`, which auto-create a sandbox as part of normal execution and are pre-approved)
 - [ ] Accessing endpoints outside the approved list
 
 ---
@@ -561,15 +560,10 @@ The agent MUST:
 - [x] Prefer 1 config file + 1 command over complex setups
 - [x] Document outcomes clearly enough for another engineer to follow
 
-**One-command bootstrap:** `./acq run opencode .` (creates sandbox with config mounted, then attaches)
+**One-command bootstrap:** `./acq run opencode .` (creates the sandbox, mounts your project, then attaches)
 **One-command verify:** `acq exec <sandbox-name> <verify-command>` (routes to `sbx exec` / `msb exec` for the active backend)
-> **Note:** `acq run` is the preferred method — it creates the sandbox if needed
-> (mounting this clone as global config), then attaches. acq uses the clone it
-> lives in; export `QUICKSTART_CLONE` only to override that.
->
-> **Migrating from qsbx?** `qsbx` is deprecated; replace `./qsbx` with `./acq`
-> — commands are identical on the sbx backend. Set `QSBX_SILENCE_DEPRECATION=1`
-> to suppress the deprecation notice in scripts/CI.
+> **Note:** `acq run` is the preferred method — it creates the sandbox if needed,
+> mounts your project, and applies the pinned kits, then attaches.
 
 **ADR location:** `docs/adr/`
 
@@ -602,7 +596,6 @@ The agent MUST:
 - Over-engineering simple tests
 - Using deprecated `docker sandbox` commands (use the `sbx` CLI, or `acq`, instead)
 - Assuming Docker Desktop is required (it is not — both SBX and MSB are standalone)
-- Using `./qsbx` instead of `./acq` for new work (qsbx is deprecated; use acq)
 
 ---
 

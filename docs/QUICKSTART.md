@@ -3,7 +3,7 @@ title: "acq Backend Quickstart"
 description: "Get running with acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-07-15"
+last_updated: "2026-08-03"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "quickstart", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -13,11 +13,10 @@ review_cycle: "quarterly"
 
 # acq Backend Quickstart
 
-> **`acq` is the recommended entry point.** It replaces the deprecated `qsbx`
-> and adds a pluggable-backend architecture. As of 1.2.0 it supports two
-> backends — **sbx** (Docker Sandboxes) and **msb** (microsandbox) — sharing one
-> neutral kit vocabulary. Migration from `qsbx` is seamless: replace `./qsbx`
-> with `./acq` — the commands are identical on the sbx backend.
+> **`acq` is the entry point.** It provides a pluggable-backend architecture
+> supporting two backends — **msb** (microsandbox, the default) and **sbx**
+> (Docker Sandboxes) — sharing one neutral kit vocabulary. Install a backend and
+> `acq` runs the same commands on either one.
 
 ---
 
@@ -28,18 +27,23 @@ once (install one, and it auto-detects). Pick the one that fits your environment
 
 | Backend | Install | Fits when |
 |---------|---------|-----------|
-| **sbx** | `brew install docker/tap/sbx && sbx login` | You have Docker and want the commercial product |
 | **msb** | `curl -fsSL https://install.microsandbox.dev \| sh` | You want a FOSS microVM runtime, no Docker seat, snapshots |
+| **sbx** | `brew install docker/tap/sbx && sbx login` | You have Docker and want the commercial product |
 
 See [docs/BACKEND_GUIDE.md](BACKEND_GUIDE.md) for a full comparison. `acq`
-auto-detects an installed backend (sbx preferred when both are present); persist
+auto-detects an installed backend (msb preferred when both are present); persist
 a choice with `acq backend set <sbx|msb>` or `acq doctor`.
 
 ---
 
-## Quick Start (sbx backend)
+## Quick Start
 
-### Step 1: Prerequisites
+> **msb is the default backend.** If you have msb installed, see
+> [Running on the msb backend](#running-on-the-msb-backend) below. The steps in
+> this section walk the **sbx** path; the common commands, secrets, and rotation
+> subsections apply to either backend.
+
+### Step 1: Prerequisites (sbx)
 
 Complete the standard setup in [README.md](../README.md#5-minute-quickstart):
 
@@ -72,6 +76,11 @@ kits, validates your USAi key, and attaches the agent.
 
 ### Secrets
 
+Setting secrets up front is **optional** — `acq run` validates your USAi key and
+prompts you to set or rotate it when it's missing or expired, and offers to
+scope a GitHub token when your workspace has GitHub repos. Set them explicitly
+when you want to pre-seed a machine, script setup, or run in CI:
+
 ```bash
 # USAi key — global (available to all sandboxes)
 ./acq secret set -g usai
@@ -85,6 +94,25 @@ kits, validates your USAi key, and attaches the agent.
 # Arbitrary custom endpoint — global
 ./acq secret set -g myservice --host api.example.com --env MY_API_KEY
 ```
+
+`acq` injects secrets into the sandbox at runtime; the real values never enter
+the guest.
+
+> [!WARNING]
+> A broad token — one from `gh auth token`, or a classic PAT — carries
+> **account-wide** scopes (`repo`, `workflow`, `delete_repo`, …). Stored globally
+> (`-g`), it is injected into **every** sandbox, so an agent working on one
+> project can act as you on **all** your repositories. Prefer a per-sandbox
+> fine-grained token scoped to just the mounted repos:
+>
+> ```bash
+> ./acq github-scope <sandbox-name> /path/to/your/project
+> ```
+>
+> This is also what `acq run` offers interactively. Fine-grained tokens can't
+> contribute to public repos you're not a member of or call the Checks API — fall
+> back to a global token for those cases. See
+> [ADR-0013](adr/0013-per-sandbox-github-token-downscoping.md).
 
 ### Rotate your USAi key
 
@@ -101,18 +129,18 @@ kits, validates your USAi key, and attaches the agent.
 1. `--backend <name>` flag (per-invocation override)
 2. `ACQ_BACKEND` environment variable
 3. `backend:` in `~/.config/acq/config.yaml`
-4. Auto-detect: first installed backend found
+4. Auto-detect: first installed backend found (msb preferred, then sbx)
 
-**Today (1.2.x), two backends ship: `sbx` and `msb`.** See
+**Today (1.2.x), two backends ship: `msb` (default) and `sbx`.** See
 [docs/BACKEND_GUIDE.md](BACKEND_GUIDE.md) for per-backend details. A third
 backend (`ppp` — Podman-Plus-Proxy) is deferred.
 
 ### Persist the default backend
 
 ```bash
-# Write `backend: sbx` (or msb) to ~/.config/acq/config.yaml
-./acq backend set sbx
+# Write `backend: msb` (or sbx) to ~/.config/acq/config.yaml
 ./acq backend set msb
+./acq backend set sbx
 
 # Or run doctor and answer the prompt
 ./acq doctor
@@ -146,6 +174,50 @@ msb takes native shortcuts where it has a strictly-better primitive — e.g. the
 Zscaler CA kit uses `--trust-host-cas` instead of the file-drop mechanism. Kit
 behavior is otherwise identical across backends.
 
+### msb host setup
+
+msb runs each sandbox as a lightweight microVM, so the host must provide
+hardware virtualization. `msb doctor` is the authoritative check (and
+`msb doctor --fix` attempts supported setup changes); the per-platform
+requirements below mirror the [microsandbox docs](https://microsandbox.dev):
+
+**Linux** — a glibc-based distribution with KVM enabled.
+
+```bash
+# KVM device present?
+test -e /dev/kvm && echo ok
+
+# CPU virtualization exposed? (non-zero = vmx/svm present)
+grep -Ec '(vmx|svm)' /proc/cpuinfo
+```
+
+A missing `/dev/kvm` (or a `0` from the second command) means virtualization is
+disabled in firmware, unavailable on the machine, or hidden by an outer VM. If
+your user lacks access to the device, add yourself to the `kvm` group once:
+
+```bash
+sudo usermod -aG kvm "$USER" && newgrp kvm
+```
+
+**macOS** — Apple Silicon (M-series). Intel Macs are **not supported** for the
+local runtime, and Rosetta does not change that. Nothing to enable ahead of
+time: Apple Silicon Macs include the hypervisor support msb uses.
+
+**Windows 11** — Windows support is in **preview**. Local sandboxes need the
+**Windows Hypervisor Platform** feature (this is separate from the
+`VirtualMachinePlatform` feature that WSL2 and Docker Desktop enable):
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart
+```
+
+`msb doctor --fix` can apply this for you from an elevated PowerShell window.
+
+**Inside a cloud VM, CI runner, or another hypervisor** — the outer environment
+must expose **nested virtualization** before `/dev/kvm` (or the equivalent) is
+available to msb. Many hosted CI runners and cloud VMs do not enable it by
+default.
+
 ---
 
 ## Managing kits
@@ -177,24 +249,6 @@ files are kept). Skip the automatic check with `ACQ_UPDATE_CHECK=0` or
 
 See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md) for the full
 design and trust model.
-
----
-
-## Migration from qsbx
-
-`qsbx` is deprecated as of 1.1.0 and is slated for removal in 3.0.0. Migration is
-**fully backward-compatible**: replace `./qsbx` with `./acq` in all commands.
-
-| Old command | New command | Notes |
-|-------------|-------------|-------|
-| `./qsbx run opencode /proj` | `./acq run opencode /proj` | Identical semantics |
-| `./qsbx create opencode /proj` | `./acq create opencode /proj` | Identical |
-| `./qsbx ls` | `./acq ls` | Identical |
-| `./qsbx usai-rotate-api-key` | `./acq usai-rotate-api-key` | Identical |
-| `./qsbx version` | `./acq version` | Shows backend info too |
-
-`QSBX_EXTRA_KITS` and `QSBX_EXTRA_KIT_SOURCES` are now `ACQ_EXTRA_KITS` and
-`ACQ_EXTRA_KIT_SOURCES`. The `QSBX_*` vars are not read by `acq`.
 
 ---
 

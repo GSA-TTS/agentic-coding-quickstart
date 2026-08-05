@@ -2,9 +2,8 @@
 #
 # acq — pluggable-backend wrapper for agentic-coding-quickstart
 #
-# acq is the forward path; qsbx is frozen and deprecated. acq wraps a sandbox
-# backend (sbx or msb) and applies the shared neutral kits. See `acq help` for
-# usage, or docs/QUICKSTART.md and docs/BACKEND_GUIDE.md.
+# acq wraps a sandbox backend (msb or sbx) and applies the shared neutral kits.
+# See `acq help` for usage, or docs/QUICKSTART.md and docs/BACKEND_GUIDE.md.
 
 set -euo pipefail
 
@@ -102,6 +101,7 @@ Subcommands:
   doctor                                   Backend health check + write config.
   backend list                             List detected backends (sbx, msb).
   backend set NAME                         Persist the default backend.
+  backend unset                            Clear the persisted default (auto-detect).
   kit list                                 Show the pinned kits (+ extras).
   kit validate PATH                        Validate a neutral hybrid/v1 kit.
   kit apply NAME KITREF                    Apply a kit to an existing sandbox.
@@ -116,8 +116,8 @@ Any other subcommand is passed through to the active backend's CLI.
 Global flags (before the subcommand):
   --backend sbx|msb    Override the active backend for this invocation.
                        Default: the persisted backend (`acq backend set`),
-                       else sbx. `sbx` runs Docker sandboxes via the sbx CLI;
-                       `msb` runs microVMs via the microsandbox (msb) CLI.
+                       else msb. `msb` runs microVMs via the microsandbox (msb)
+                       CLI; `sbx` runs Docker sandboxes via the sbx CLI.
 
 run/create flag:
   --kit REF            Apply an extra kit (repeatable). REF is a local dir or a
@@ -247,8 +247,20 @@ case "$subcommand" in
         printf 'backend: %s\n' "$local_backend" > "$local_config_file"
         echo "acq: default backend set to '${local_backend}' in ${local_config_file}" >&2
         ;;
+      unset)
+        # Clear the persisted default so acq falls back to auto-detection (see
+        # the resolution order in `acq help`). Idempotent: succeeds whether or
+        # not a default was set.
+        local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
+        if [ -f "$local_config_file" ]; then
+          rm -f "$local_config_file"
+          echo "acq: cleared the persisted default backend (${local_config_file}); acq will auto-detect." >&2
+        else
+          echo "acq: no persisted default backend was set; acq already auto-detects." >&2
+        fi
+        ;;
       *)
-        echo "acq: unknown backend subcommand '${sub2}'. Try: acq backend list | set NAME" >&2
+        echo "acq: unknown backend subcommand '${sub2}'. Try: acq backend list | set NAME | unset" >&2
         exit 1
         ;;
     esac
@@ -563,8 +575,13 @@ case "$subcommand" in
         acq_backend_provision "$local_name" "${create_args[@]}"
       fi
 
-      # Validate USAi key before attaching.
-      ensure_valid_key "$local_name" "${create_args[@]}"
+      # Validate USAi key before attaching. This gate must fail closed, so
+      # abort explicitly on a non-zero return rather than relying on `set -e`
+      # to propagate from a bare function call (its behavior for a function
+      # used as the tested command is not portable across bash versions).
+      if ! ensure_valid_key "$local_name" "${create_args[@]}"; then
+        exit 1
+      fi
 
       # Advisories.
       warn_if_no_ssh_signing_key
@@ -572,6 +589,14 @@ case "$subcommand" in
       [ -n "$ws" ] || ws="$PWD"
       warn_if_no_git_identity "$ws"
       advise_github_scope "$local_name" "$ws"
+
+      # opencode (since v1.15.1) fetches its binary in a postinstall step that
+      # some sandbox images skip, so a fresh launch fails with "postinstall
+      # script was not run". Run it here — on any backend — before attaching an
+      # opencode agent. Best-effort; never blocks the run.
+      if [ "$first" = "opencode" ]; then
+        ensure_opencode_postinstall "$local_name"
+      fi
 
       if [ "${#agent_args[@]}" -gt 0 ]; then
         acq_backend_attach "$local_name" -- "${agent_args[@]}"
@@ -584,7 +609,7 @@ case "$subcommand" in
       # ensure_valid_key is intentionally omitted here: we don't have the
       # create args needed to provision a fresh validation sandbox, and
       # attaching by name is a re-attach to a running session where the key
-      # was already validated on the original acq run. Matches qsbx behavior.
+      # was already validated on the original acq run.
       # Capture staleness BEFORE the heal (the heal rewrites provenance to
       # "current"), then heal, then offer a refresh. Never
       # blocks; skipped under --no-update-check / ACQ_UPDATE_CHECK=0.
@@ -592,6 +617,14 @@ case "$subcommand" in
       acq_backend_ensure_kits_applied "$first" || true
       maybe_offer_bundle_refresh "${ACQ_RESOLVED_BACKEND}" "$first" "$_pre_heal_status"
       warn_if_no_ssh_signing_key
+
+      # NOTE: opencode's postinstall self-heal (ensure_opencode_postinstall) is
+      # intentionally NOT run on this re-attach-by-name path. The agent is not
+      # named here (it is recorded in the sandbox and resolved inside the
+      # backend's attach), and a sandbox that reached a re-attach has already
+      # been through the create-and-attach path where the fix ran. A sandbox
+      # left with a still-broken opencode is recovered by the documented manual
+      # step (docs/KNOWN_FAILURE_MODES.md #29) or by re-running create-and-attach.
 
       # Rebuild arg list without the sandbox name (first occurrence only).
       rest=(); dropped=0

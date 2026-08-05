@@ -630,6 +630,54 @@ acq_secret_has() {
 }
 
 # ---------------------------------------------------------------------------
+# _acq_read_secret_masked  ->  prints the entered value on stdout
+# ---------------------------------------------------------------------------
+# Read a secret from the TTY WITHOUT echoing it, but print a `*` per character
+# to stderr so the user gets visual feedback that their paste registered (UX:
+# a fully silent prompt makes users think nothing happened and re-paste). Never
+# echoes the actual characters and never places the value in argv.
+#
+# Reads character-by-character from STDIN in silent mode (the caller only takes
+# this path when stdin is a TTY). Handles Backspace/Delete (erase one star), and
+# finishes on Enter (newline) or EOF. Falls back to a plain silent line read if
+# per-char reads are unavailable, then to a visible read as a last resort
+# (matching the prior behavior) so a secret can always be entered.
+_acq_read_secret_masked() {
+  local value="" char
+
+  # Fallback path: if the shell can't do a 1-char silent read, use the previous
+  # behavior (silent line read, else visible). Detected by trying it once.
+  if ! IFS= read -rsn1 char 2>/dev/null; then
+    local v
+    # shellcheck disable=SC2162
+    read -rs v 2>/dev/null || read -r v
+    printf '%s' "$v"
+    return 0
+  fi
+
+  # `char` now holds the first character (empty if Enter was pressed first).
+  while :; do
+    case "$char" in
+      ""|$'\r')  # Enter/newline (or a bare CR from an exotic pty) terminates.
+        break
+        ;;
+      $'\177'|$'\b')  # Backspace / Delete: drop last char, erase a star.
+        if [ -n "$value" ]; then
+          value="${value%?}"
+          printf '\b \b' >&2
+        fi
+        ;;
+      *)
+        value="$value$char"
+        printf '*' >&2
+        ;;
+    esac
+    IFS= read -rsn1 char 2>/dev/null || break
+  done
+  printf '%s' "$value"
+}
+
+# ---------------------------------------------------------------------------
 # acq_secret_set_interactive SERVICE [SANDBOX] [HOST] [ENV]
 # ---------------------------------------------------------------------------
 # Read a secret from a TTY (silent) or piped stdin (no prompt) and store it
@@ -657,8 +705,7 @@ acq_secret_set_interactive() {
     IFS= read -r value || true
   else
     printf 'Enter %s secret: ' "$service" >&2
-    # shellcheck disable=SC2162
-    read -rs value 2>/dev/null || read -r value
+    value=$(_acq_read_secret_masked)
     printf '\n' >&2
   fi
 

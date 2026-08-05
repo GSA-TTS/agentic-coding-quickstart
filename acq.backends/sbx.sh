@@ -43,11 +43,11 @@ USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 # are materialized for this run.
 ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/sbx-kits}"
 
-# Agents recognized by `sbx run` (mirrors qsbx).
+# Agents recognized by `sbx run`.
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
 # ---------------------------------------------------------------------------
-# Version comparison (carried from qsbx verbatim)
+# Version comparison
 # ---------------------------------------------------------------------------
 
 version_ge() {
@@ -120,7 +120,6 @@ acq_backend_exists() {
 
 # ---------------------------------------------------------------------------
 # Ensure kit source prefixes are on sbx's kit.allowedSources allowlist.
-# Carried from qsbx (ensure_kit_sources_allowed / _kit_sources_manual_hint).
 # ---------------------------------------------------------------------------
 
 _acq_sbx_kit_sources_manual_hint() {
@@ -278,7 +277,7 @@ _acq_sbx_wait_for_exec_ready() {
 # does not include it will produce a malformed wrapped command silently.
 # Note: >/dev/null 2>&1 suppresses the test's stderr, so a probe that fails
 # for an unexpected reason (e.g. bad path syntax) returns "absent" and triggers
-# a spurious kit-add rather than a hard error. This matches qsbx's behavior.
+# a spurious kit-add rather than a hard error.
 _acq_sbx_kit_feature_absent() {
   local name="$1" snippet="$2" out tries=0
   # Defensive: catch callers that forget the " && echo present" suffix.
@@ -433,7 +432,6 @@ acq_backend_apply_kit() {
 
 # ---------------------------------------------------------------------------
 # acq_backend_ensure_kits_applied — heal a pre-kit sandbox in place
-# (carries ensure_kit_applied logic from qsbx)
 # ---------------------------------------------------------------------------
 # Injects any ABSENT built-in kit. When ACQ_FORCE_KIT_REAPPLY=1 (set by
 # acq_bundle_reapply for a stale-bundle refresh) it re-adds ALL
@@ -456,7 +454,22 @@ acq_backend_ensure_kits_applied() {
   playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT")
   zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT")
 
-  # 1) USAi provider kit
+  # 1) Zscaler CA kit — FIRST, so its CA trust is in place before any later kit
+  # makes an outbound HTTPS request. Behind a TLS-intercepting proxy (Zscaler),
+  # the USAi and playbook kits fail with a TLS 'unexpected eof' unless the
+  # intercepting CA is already trusted.
+  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
+    echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
+    if sbx kit add "$name" "$zscaler_local" </dev/null >/dev/null 2>&1; then
+      echo "acq: Zscaler CA kit injected into '$name'." >&2
+    else
+      echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name'." >&2
+      echo "      Recover with: sbx kit add '$name' '$zscaler_local'" >&2
+      ok=0
+    fi
+  fi
+
+  # 2) USAi provider kit
   if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "acq: '$name' is missing the USAi kit; injecting with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$usai_local" </dev/null >/dev/null 2>&1; then
@@ -471,7 +484,7 @@ acq_backend_ensure_kits_applied() {
     fi
   fi
 
-  # 2) Playbook kit
+  # 3) Playbook kit
   if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/.git" && echo present'; then
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
     if sbx kit add "$name" "$playbook_local" </dev/null >/dev/null 2>&1; then
@@ -479,18 +492,6 @@ acq_backend_ensure_kits_applied() {
     else
       echo "acq: warning: 'sbx kit add' (playbook kit) failed for '$name'." >&2
       echo "      Recover with: sbx kit add '$name' '$playbook_local'" >&2
-      ok=0
-    fi
-  fi
-
-  # 3) Zscaler CA kit
-  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
-    echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$zscaler_local" </dev/null >/dev/null 2>&1; then
-      echo "acq: Zscaler CA kit injected into '$name'." >&2
-    else
-      echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$zscaler_local'" >&2
       ok=0
     fi
   fi
@@ -782,8 +783,7 @@ acq_backend_secret_set() {
 
     if [ -t 0 ] && [ -z "${ACQ_SECRET_TEST_VALUE:-}" ]; then
       # Interactive TTY: let sbx prompt for the value once.
-      echo "acq: now configuring sbx's injector for '$service' — enter the SAME value" >&2
-      echo "     at sbx's prompt (already saved in the acq secret store):" >&2
+      echo "acq: enter the SAME value at sbx's prompt to finish configuring '$service':" >&2
       sbx "${cmd_args[@]}"
       exit_code=$?
     else
@@ -793,11 +793,10 @@ acq_backend_secret_set() {
       if [ "${ACQ_BACKEND:-}" = "msb" ] || [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ]; then
         : # msb reads the acq store directly at provision; no sbx step needed.
       else
-        echo "acq: to configure the sbx injector for a CUSTOM endpoint non-interactively," >&2
-        echo "     sbx requires the value on the command line (visible in shell history):" >&2
+        echo "acq: to finish non-interactively, sbx needs the value on the command line" >&2
+        echo "     (visible in shell history):" >&2
         echo "       sbx ${cmd_args[*]} --value <the-secret>" >&2
-        echo "     Or run 'acq secret set ${scope_flag:-$scope_name} ${service}' from a terminal" >&2
-        echo "     to enter it at sbx's own prompt." >&2
+        echo "     Or run 'acq secret set ${scope_flag:-$scope_name} ${service}' from a terminal." >&2
       fi
       exit_code=0
     fi

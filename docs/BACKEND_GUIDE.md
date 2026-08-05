@@ -3,7 +3,7 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-07-29"
+last_updated: "2026-08-04"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
 related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
@@ -22,12 +22,12 @@ vocabulary and translated to each backend's native mechanism (see
 | Backend | Status | Description |
 |---------|--------|-------------|
 | **sbx** | Shipped | Docker-based sbx CLI from Docker Inc |
-| **msb** | Shipped | microsandbox — lightweight microVM isolation (FOSS) |
+| **msb** | Shipped | microsandbox — lightweight microVM isolation (FOSS); **default backend** |
 | **ppp** | Phase 3 / in development | Podman-Plus-Proxy backend ([GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)) |
 
 ---
 
-## sbx Backend (default)
+## sbx Backend
 
 ### Overview
 
@@ -68,7 +68,7 @@ install instructions for macOS, Windows, and Linux.
 ### Configuration
 
 ```bash
-# Persist sbx as the default backend
+# Persist sbx as the backend
 ./acq backend set sbx
 
 # Per-invocation override
@@ -97,7 +97,7 @@ export ACQ_BACKEND=sbx
 
 ---
 
-## msb Backend (microsandbox)
+## msb Backend (microsandbox, default)
 
 The **msb** backend wraps [microsandbox](https://github.com/superradcompany/microsandbox),
 an open-source (Apache-2.0) microVM runtime. It is a good fit when you want a
@@ -457,9 +457,9 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
   ([ADR-0014](adr/0014-neutral-port-publish-and-background-vocab.md), shipped
   on `feat/msb-parity`). The legacy sbx-only `backend_extras.sbx.publishedPorts`
   block still works for one release with a deprecation warning. The neutral
-  fields are read *defensively* (absence is a silent no-op); as of the
-  `PATTERNS_KIT_REF` bump to `6230faa` (patterns schema + openchamber
-  kit, both merged) they now light up end-to-end — the openchamber kit declares
+  fields are read *defensively* (absence is a silent no-op); with the released
+  patterns schema + openchamber kit (both merged) they now light up
+  end-to-end — the openchamber kit declares
   `publishedPorts`/`background` neutrally and both backends consume it.
   A **post-hoc** path is now **implemented**:
   `acq --backend msb ports <sandbox> --publish HOST:GUEST` runs `msb ssh serve`
@@ -486,8 +486,7 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
   supervised lifecycle. The neutral port/background vocabulary is consumed by
   both backends (ADR-0014), and the openchamber kit has been republished against
   the released patterns schema to declare `backends: [sbx, msb]` (merged);
-  with the `PATTERNS_KIT_REF` bump to `6230faa` the browser-OpenCode path is now
-  covered on msb, not just sbx.
+  the browser-OpenCode path is now covered on msb, not just sbx.
 
 > **Live end-to-end note (msb verification cadence).** The full
 > `acq run … --backend msb` loop and the `scripts/verify-backends` msb row
@@ -521,11 +520,11 @@ paths. See `docs/explorations/acq-design.md` §"ppp" for the intended mapping.
 1. `--backend <name>` flag (per-invocation override)
 2. `ACQ_BACKEND` environment variable
 3. `backend:` key in `~/.config/acq/config.yaml`
-4. Auto-detect: first installed backend (`sbx` preferred, then `msb`)
+4. Auto-detect: first installed backend (`msb` preferred, then `sbx`)
 
 If multiple backends are installed and none is explicitly selected, `acq`
-auto-detects in the order above (sbx wins when both are present). Use
-`--backend`, `ACQ_BACKEND`, or `acq backend set` to pick msb explicitly.
+auto-detects in the order above (msb wins when both are present). Use
+`--backend`, `ACQ_BACKEND`, or `acq backend set` to pick sbx explicitly.
 
 ---
 
@@ -598,8 +597,8 @@ the kit spec never carries a secret value.
 > **Note (cross-repo, satisfied):** the authoritative `environment` schema
 > property and its field-level validator live in the patterns repo
 > (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`), shipped in patterns
-> **v1.7.0**. `PATTERNS_KIT_REF` is pinned to the v1.7.0
-> release commit (`9c277c0`); the pin was held at v1.6.0 until v1.7.0 existed,
+> **v1.7.0**. `PATTERNS_KIT_REF` is pinned to the patterns **v1.8.0**
+> release commit (`f5fb887`); the pin is only advanced to a tagged release,
 > per the fail-closed cross-repo gating.
 
 Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
@@ -640,8 +639,8 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
   backends (msb maps to create/run `-p HOST:GUEST`; background startup commands
   run detached), with a deprecated `backend_extras.sbx.publishedPorts` fallback
   ([ADR-0014](adr/0014-neutral-port-publish-and-background-vocab.md)) — the
-  neutral fields now light up end-to-end with the `PATTERNS_KIT_REF` bump to
-  `6230faa` (patterns schema + openchamber kit, merged)
+  neutral fields light up end-to-end with the released patterns schema +
+  openchamber kit (merged)
 - msb `SUPPORTS_SNAPSHOTS=0` — `acq` surfaces no snapshot verb (msb's own verb
   exists; wiring is beyond parity)
 - Generic custom-endpoint secret binding on msb — usai + github + **any** custom
@@ -658,6 +657,7 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
 
 - `acq kit check|update` + host-side kit-bundle provenance and stale-sandbox
   refresh (see ADR-0016)
+- Removal of the deprecated `qsbx` wrapper (3.0.0)
 
 ## Still deferred
 
@@ -675,5 +675,4 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
 - `acq policy …` — network policy subcommands
 - `ppp` (Podman-Plus-Proxy) backend — Phase 3, in development at
   [GSA-TTS/ppp](https://github.com/GSA-TTS/ppp)
-- Removal of `qsbx` (slated for 3.0.0)
 - Advisory "your Quickstart checkout is behind origin" check

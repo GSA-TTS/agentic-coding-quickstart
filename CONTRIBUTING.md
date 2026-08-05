@@ -99,40 +99,25 @@ kits it applies — and their tests (permission-matrix, model-sync, per-kit
 repo under `integrations/isolation/acq-kits/`. Changes to provider config,
 rules, skills, or CA trust belong there.
 
-There are two offline unit harnesses (stubbed `sbx`/`opencode`, no Docker or network):
+There is one offline unit harness (stubbed `sbx`/`msb`/`opencode`, no Docker or network):
 
 - **`scripts/test-acq`** — covers `acq` dispatch, backend resolution, secret
-  command shapes, kit list completeness, and the qsbx deprecation notice. Run
-  after changing `acq`, `acq.backends/common.sh`, or `acq.backends/sbx.sh`.
+  command shapes, and kit list completeness. Run after changing `acq`,
+  `acq.backends/common.sh`, `acq.backends/sbx.sh`, or `acq.backends/msb.sh`.
 
   ```bash
   ./scripts/test-acq
   ```
 
-- **`scripts/test-migrate-or-halt`** — covers `qsbx`'s session-preserving
-  recreate path (route 1 of the USAi stale-placeholder recovery; see
-  ADR-0008/ADR-0009). Run after changing `migrate_or_halt`, `halt_with_options`, or
-  `offer_update_stale_placeholder`.
+To verify the backends end-to-end against the **real** toolchain (requires a
+host that can create sandboxes — Docker for sbx, or KVM for msb):
 
 ```bash
-./scripts/test-migrate-or-halt
+./scripts/verify-backends
 ```
 
-It asserts, among other things, that a sandbox
-is **never** removed without a verified session export.
-
-To verify `acq`/`qsbx`'s in-place healing of a pre-kit sandbox end-to-end against the
-**real** toolchain (requires a host that can create sandboxes — Docker + KVM,
-`sbx login` done, sbx >= 0.35.0):
-
-```bash
-./scripts/verify-migrate-live
-```
-
-It creates a throwaway pre-kit sandbox, plants a state marker, runs `acq` to
-heal it in place with `sbx kit add`, and asserts the sandbox has a working USAi
-provider with its state preserved — then removes the throwaway sandbox. It cannot
-run inside a sandbox.
+It exercises the kit/agent/USAi flow on each installed backend. It cannot run
+inside a sandbox (no nested sandboxes).
 
 ### Quick pre-push check
 

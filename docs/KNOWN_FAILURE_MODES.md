@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-08-03"
+last_updated: "2026-08-04"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -830,11 +830,11 @@ preserves the placeholder, so this resolves the common expired-key case:
 
 > **Note (stale-placeholder recovery).** The deeper two-route recovery for this
 > exact 401-after-delete-and-re-add case — session-preserving recreate, or a
-> non-destructive sandbox-scoped rebind to the current global placeholder — is a
-> `qsbx`-only feature (see [ADR-0008](adr/0008-usai-placeholder-recovery.md)) and
-> is **not yet ported to `acq`**. On `acq`, if an in-place rotate does not clear
-> the 401 (because the stored *placeholder* — not the key value — is stale), use
-> the manual rebind below or recreate the sandbox.
+> non-destructive sandbox-scoped rebind to the current global placeholder — is
+> **not implemented in `acq`** (see [ADR-0008](adr/0008-usai-placeholder-recovery.md)
+> for the design). If an in-place rotate does not clear the 401 (because the
+> stored *placeholder* — not the key value — is stale), use the manual rebind
+> below or recreate the sandbox.
 
 ### Fix (manual)
 
@@ -1180,11 +1180,17 @@ a fresh image pull just fetched a newer opencode build with this gap.
 
 ### Fix
 
-Apply the fix with **`sbx exec`**, not `sbx run` / `acq run`. `sbx run` and
-`acq run` **launch opencode**, which re-hits the missing-binary guard and exits
-before you can do anything — so you cannot fix it from a `run`. `sbx exec` runs a
-command in the sandbox **without launching the agent**, so it works even when
-`run` fails.
+**As of the current `acq`, `acq run opencode <path>` remediates this
+automatically:** before attaching an opencode agent, acq probes
+`opencode --version` in the sandbox and, if the binary is not functional, runs
+the package's `postinstall.mjs` (on either backend), then attaches. So the
+normal flow should now just work; if it still fails, apply the manual fix below.
+
+Apply the manual fix with **`sbx exec`**, not `sbx run`. `sbx run` (the raw
+backend command, without acq's remediation) **launches opencode**, which
+re-hits the missing-binary guard and exits before you can do anything. `sbx
+exec` runs a command in the sandbox **without launching the agent**, so it works
+even when a raw `run` fails.
 
 ```bash
 # 1. Find the sandbox that was created (its name, e.g. opencode-<project>):
@@ -1201,22 +1207,94 @@ sbx exec <sandbox-name> -- opencode --version   # confirm the binary now runs
 If `sbx exec` reports the sandbox is not running, start it first
 (`sbx start <sandbox-name>`) then re-run the exec.
 
-> Do **not** try to "run the fix inside the sandbox" by launching it — a fresh
-> `./acq run` / `sbx run` just re-triggers the error. The `sbx exec` path above
-> is what works from a failed launch (confirmed by affected users).
+> Note: a raw `sbx run <sandbox-name>` (bypassing acq) just re-triggers the
+> error. Prefer `acq run`, which remediates automatically; the `sbx exec` path
+> above is the manual fallback if remediation ever fails.
 
 ### Prevention / Status
 
-- We cannot fix this in this repo — the image is built and shipped by Docker.
-  An upstream report has been filed:
+- `acq run opencode` now runs the postinstall automatically before attach (both
+  backends), so the common case is handled without user action.
+- The underlying image gap is built and shipped by Docker; we cannot fix it in
+  this repo. An upstream report has been filed:
   [docker/sbx-releases#395](https://github.com/docker/sbx-releases/issues/395).
   Related upstream: [anomalyco/opencode#27906](https://github.com/anomalyco/opencode/issues/27906)
   (opencode requires postinstall to fetch its binary since v1.15.1).
-- If a rebuilt image still ships the gap, the manual `node postinstall.mjs` above
-  is the reliable per-sandbox workaround.
+- If acq's automatic remediation ever fails, the manual `node postinstall.mjs`
+  above is the reliable per-sandbox workaround.
 - The **msb** backend installs opencode itself (`npm install -g`, scripts
   enabled) rather than using this image, so it is a possible alternative if the
   sbx image stays broken — though it may hit the same opencode packaging issue.
+
+---
+
+---
+
+## 30. USAi/kit fetch fails with TLS `unexpected eof` / HTTP 000 (network, not the key)
+
+### Symptoms
+
+Early in `acq run`, the kit fetch and the USAi key check both fail with a TLS
+connection error, and (before this was fixed) acq mis-reported it as an expired
+key and prompted to rotate:
+
+```
+agentic-coding-playbook: fetch of GSA-TTS/agentic-coding-playbook@… tarball failed
+  curl: (56) OpenSSL SSL_read: … unexpected eof while reading, errno 0
+
+Your USAi API key looks invalid or expired (HTTP …000 from the models API).
+```
+
+Rotating the key does not help: the freshly-pasted key fails validation the same
+way (`HTTP 000`).
+
+### Root Cause
+
+This is a **network reachability / TLS-interception problem, not a key problem.**
+`curl (56) unexpected eof` and an HTTP status of `000` mean the outbound TLS
+connection was cut before any HTTP response came back. That **two independent
+hosts** (`api.github.com` for the kit tarball and `api.gsa.usai.gov` for the key
+check) fail identically is the tell: the failure is in the network path out of
+the sandbox, not in USAi or your key.
+
+The common trigger is a **corporate TLS-intercepting proxy (e.g. Zscaler)**: the
+sandbox's outbound HTTPS is intercepted, and if the intercepting proxy's root CA
+is not trusted for the sandbox's own outbound connection, the handshake is
+terminated and curl reports `unexpected eof`.
+
+### Diagnosis
+
+`acq` now detects this and reports it as a network problem instead of an expired
+key (it does not prompt to rotate). To confirm what is failing, probe the two
+hosts from inside the sandbox — a `curl (35)/(56)` or `000` here (rather than a
+`200`/`401`) confirms the connection is being cut, not rejected by USAi:
+
+```bash
+# msb
+msb exec <sandbox> -- curl -sS -o /dev/null -w '%{http_code}\n' -v https://api.gsa.usai.gov/api/v1/models
+msb exec <sandbox> -- curl -sS -o /dev/null -w '%{http_code}\n' -v https://api.github.com
+# sbx
+sbx exec <sandbox> -- curl -sS -o /dev/null -w '%{http_code}\n' -v https://api.gsa.usai.gov/api/v1/models
+```
+
+A machine on the **same corporate network where these connections are NOT
+intercepted (or where the intercepting CA is trusted) succeeds**, which is why
+the same command can work on one host and fail on another. The remedy depends on
+your environment's proxy/CA configuration and is outside acq's control; resolve
+it with your network/endpoint administrators.
+
+### Prevention / Status
+
+- `acq` classifies a connection failure (curl nonzero exit / HTTP 000) as
+  `unreachable` and reports a network diagnosis, never "invalid or expired," and
+  does not prompt to rotate a good key. It fails closed (aborts the run) rather
+  than attach a session that cannot reach USAi.
+- The built-in kits are ordered so `zscaler-ca-certificate` is applied first, so
+  CA trust is established before the other kits make network requests (this
+  matters on the sbx backend, whose kits apply sequentially).
+- Making the sandbox's outbound TLS traverse a corporate proxy is a
+  host/network-configuration matter (trusting the corporate root CA, proxy
+  settings), not something acq can set for you.
 
 ---
 
