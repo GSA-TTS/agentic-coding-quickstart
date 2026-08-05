@@ -643,6 +643,10 @@ _ocrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-ocrun.XXXXXX")
 out=$(STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_ocrun" 2>&1); rc=$?
 log=$(cat "$CALLS")
 assert_contains "run(opencode): runs postinstall.mjs when binary not functional" "$log" "postinstall.mjs"
+# The postinstall runs under a guest-side `timeout` guard so a wedged registry
+# fetch cannot hang `acq run` (review SHOULD-FIX). The stub's exec log records
+# the sh -c body, so the bound is observable there.
+assert_contains "run(opencode): postinstall wrapped in a timeout guard" "$log" "timeout"
 assert_not_contains "run(opencode): no postinstall-failure warning after fix" "$out" "does not appear runnable"
 assert_eq "run(opencode): attaches after postinstall" "0" "$rc"
 rm -rf "$_ocrun"

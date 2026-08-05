@@ -812,8 +812,21 @@ ensure_opencode_postinstall() {
   # resolves the global node_modules; the package dir is opencode-ai within it.
   # Both the cd and node invocation happen in one sh -c so the resolved path is
   # used atomically. Output is suppressed; we re-probe below to decide success.
+  #
+  # BOUND THE WAIT: postinstall.mjs fetches a platform binary over the network, so
+  # a wedged/slow registry could otherwise hang `acq run` before attach. Wrap it
+  # in a guest-side `timeout` when available (fall back to an unbounded run if the
+  # guest has no `timeout`, e.g. a minimal base). ACQ_OPENCODE_POSTINSTALL_TIMEOUT
+  # tunes the bound (default 120s). This is belt-and-suspenders: the create-time
+  # egress allow-list already limits where the fetch can go.
+  local _pi_timeout="${ACQ_OPENCODE_POSTINSTALL_TIMEOUT:-120}"
   acq_backend_run "$name" -- sh -c \
-    'cd "$(npm root -g)/opencode-ai" 2>/dev/null && node postinstall.mjs' \
+    'cd "$(npm root -g)/opencode-ai" 2>/dev/null || exit 0
+     if command -v timeout >/dev/null 2>&1; then
+       timeout '"$_pi_timeout"' node postinstall.mjs
+     else
+       node postinstall.mjs
+     fi' \
     >/dev/null 2>&1 || true
 
   if acq_backend_run "$name" -- opencode --version >/dev/null 2>&1; then
