@@ -66,22 +66,6 @@ or
 curl -fsSL https://install.microsandbox.dev | sh
 ```
 
-Try running `msb`; you should see the help output.
-
-<details>
-<summary>If you see a message saying the command is not found... (click to expand)</summary>
-You need to ensure the `msb` binary is on your PATH:
-
-```
-case ":$PATH:" in
-  *":$HOME/.local/bin:"*) ;;
-  *) export PATH="$HOME/.local/bin:$PATH" ;;
-esac
-```
-
-...then try again. If this solved the problem, you should make sure that this is copied into the configuration file for your shell, eg `.bashrc`.
-</details>
-
 **Verify that you're ready to run sandboxes**
 
 Run

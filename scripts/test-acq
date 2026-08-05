@@ -536,6 +536,60 @@ make_stubs; load_acq
 ) 2>/dev/null; pass "backend: explicit ACQ_BACKEND is silent (no nudge)"
 cleanup_stubs
 
+# 2i. PATH self-repair: a backend installed ONLY in ~/.local/bin (not on PATH)
+#     is recovered by _ensure_local_bin_on_path — acq adds ~/.local/bin to PATH
+#     for the run, prints a one-time durable-fix hint, and detection succeeds.
+#     Regression guard for the "installed but not on PATH -> command not found"
+#     bug: acq must self-repair rather than fail.
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND ACQ_TEST_INSTALLED_BACKENDS 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  # Put the msb stub ONLY in a fake ~/.local/bin, NOT on PATH.
+  fake_home="$STUBDIR/home"
+  mkdir -p "$fake_home/.local/bin"
+  mv "$STUBDIR/msb" "$fake_home/.local/bin/msb"
+  # PATH has coreutils but neither backend dir; HOME points at the fake home.
+  _coreutils_dir=$(dirname "$(command -v env)")
+  HOME="$fake_home"; export HOME
+  PATH="$_coreutils_dir"; export PATH
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  _backend_installed msb 2>"$STUBDIR/rep_note"
+  rc=$?
+  note=$(cat "$STUBDIR/rep_note")
+  assert_eq "self-repair: backend in ~/.local/bin is detected" "0" "$rc"
+  assert_contains "self-repair: ~/.local/bin added to PATH for this run" "$PATH" "$fake_home/.local/bin"
+  assert_contains "self-repair: prints a durable-fix hint" "$note" "export PATH="
+) 2>/dev/null; pass "self-repair: backend recovered from ~/.local/bin"
+cleanup_stubs
+
+# 2j. PATH self-repair applies on the EXPLICIT path too (not just auto-detect):
+#     _load_backend_adapter recovers a pinned backend that lives only in
+#     ~/.local/bin, so `--backend`/ACQ_BACKEND/config users are not left with
+#     "command not found".
+make_stubs; load_acq
+(
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  fake_home="$STUBDIR/home2"
+  mkdir -p "$fake_home/.local/bin"
+  mv "$STUBDIR/msb" "$fake_home/.local/bin/msb"
+  _coreutils_dir=$(dirname "$(command -v env)")
+  HOME="$fake_home"; export HOME
+  PATH="$_coreutils_dir"; export PATH
+  ACQ_BACKEND="msb"; export ACQ_BACKEND
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  acq_resolve_backend "" >/dev/null 2>&1
+  assert_eq "self-repair (explicit): resolved backend is msb" "msb" "$ACQ_RESOLVED_BACKEND"
+  assert_contains "self-repair (explicit): msb now resolvable on PATH" "$(command -v msb 2>/dev/null)" "$fake_home/.local/bin/msb"
+) 2>/dev/null; pass "self-repair: explicit backend recovered from ~/.local/bin"
+cleanup_stubs
+
 # ===========================================================================
 # 3. Dispatch routing — each subcommand calls the right adapter function
 # ===========================================================================
