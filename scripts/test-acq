@@ -169,7 +169,17 @@ _msb_sub="${1:-}"
 case "$_msb_sub" in
   --version|-V) printf 'msb 0.6.6\n' ;;
   --help|-h) printf 'MSB-TOPLEVEL-HELP for msb\n' ;;
-  doctor) exit 0 ;;
+  doctor)
+    # Model host-readiness. Default: ready (exit 0), so the happy path is silent.
+    # STUB_MSB_DOCTOR_UNFIT=1 models a not-ready host that STAYS unfit even after
+    # --fix. STUB_MSB_DOCTOR_FIXABLE=1 models a host that is unfit until
+    # `msb doctor --fix` runs, then ready (the --fix call plants a marker).
+    case " $* " in
+      *" --fix "*) [ "${STUB_MSB_DOCTOR_FIXABLE:-0}" = "1" ] && : >"$STUBDIR/.msb_fixed"; exit 0 ;;
+    esac
+    if [ "${STUB_MSB_DOCTOR_FIXABLE:-0}" = "1" ] && [ -f "$STUBDIR/.msb_fixed" ]; then exit 0; fi
+    if [ "${STUB_MSB_DOCTOR_UNFIT:-0}" = "1" ] || [ "${STUB_MSB_DOCTOR_FIXABLE:-0}" = "1" ]; then exit 1; fi
+    exit 0 ;;
   create) : >"$STUBDIR/.msb_created" ;;
   inspect)
     # `msb inspect <name> --format json` — emit a create-time published-ports
@@ -1412,6 +1422,63 @@ make_stubs
 out=$(printf 'n\n' | "$ACQ" doctor 2>&1)
 assert_contains "msb: doctor shows msb installed" "$out" "msb: installed v0.6.6"
 assert_not_contains "msb: doctor drops 'coming in 1.2.x'" "$out" "coming in 1.2.x"
+cleanup_stubs
+
+# 8j2. acq runs the msb host-readiness check itself (no manual `msb doctor`
+#      step). Happy path: host ready -> acq_backend_prepare is SILENT.
+make_stubs; load_acq
+(
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  out=$(acq_backend_prepare 2>&1)
+  assert_not_contains "msb: ready host -> prepare is silent" "$out" "isn't ready"
+) 2>/dev/null; pass "msb: host-readiness check silent on the happy path"
+cleanup_stubs
+
+# 8j3. Host unfit but fixable: acq runs `msb doctor --fix` itself and, once the
+#      re-check passes, stays SILENT (user does nothing, sees nothing).
+make_stubs; load_acq
+(
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  out=$(STUB_MSB_DOCTOR_FIXABLE=1 acq_backend_prepare 2>&1)
+  log=$(cat "$CALLS")
+  assert_contains "msb: prepare auto-runs 'msb doctor --fix'" "$log" "msb doctor --fix"
+  assert_not_contains "msb: fixable host -> silent after --fix" "$out" "isn't ready"
+) 2>/dev/null; pass "msb: auto-fixes a fixable host and stays silent"
+cleanup_stubs
+
+# 8j4. Host unfit and NOT fixable: after auto --fix fails, acq surfaces ONE clear
+#      not-ready message pointing at help — and does not hard-fail (exit 0).
+make_stubs; load_acq
+(
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  out=$(STUB_MSB_DOCTOR_UNFIT=1 acq_backend_prepare 2>&1); rc=$?
+  assert_contains "msb: unfit host -> clear not-ready message" "$out" "isn't ready to run microVMs"
+  assert_contains "msb: unfit host -> points at help" "$out" "agentic-coding@gsa.gov"
+  assert_eq "msb: readiness check does not hard-fail" "0" "$rc"
+) 2>/dev/null; pass "msb: unfit host surfaces one actionable message, no hard-fail"
+cleanup_stubs
+
+# 8j5. ACQ_SKIP_MSB_DOCTOR=1 opts out of the readiness check entirely.
+make_stubs; load_acq
+(
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  out=$(STUB_MSB_DOCTOR_UNFIT=1 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1)
+  log=$(cat "$CALLS")
+  assert_not_contains "msb: skip flag -> no not-ready message" "$out" "isn't ready"
+  assert_not_contains "msb: skip flag -> no doctor call" "$log" "msb doctor"
+) 2>/dev/null; pass "msb: ACQ_SKIP_MSB_DOCTOR opts out of the readiness check"
 cleanup_stubs
 
 # 8k. msb secret set usai stores in the acq store + confirms concisely.
