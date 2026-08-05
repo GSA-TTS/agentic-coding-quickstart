@@ -580,6 +580,5 @@ The Docker Desktop-integrated `docker sandbox` command is deprecated. For the
 
 ## Getting Help
 
-- **Slack:** #agentic-coding (GSA internal)
 - **GitHub Issues:** [agentic-coding-quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart/issues)
 - **Docker Docs:** [docs.docker.com/ai/sandboxes](https://docs.docker.com/ai/sandboxes/)
