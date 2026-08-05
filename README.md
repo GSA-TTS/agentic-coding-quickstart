@@ -82,9 +82,9 @@ esac
 ...then try again. If this solved the problem, you should make sure that this is copied into the configuration file for your shell, eg `.bashrc`.
 </details>
 
-**Verify that you're ready to run sandboxes** 
+**Verify that you're ready to run sandboxes**
 
-Run 
+Run
 
 ```
 msb doctor
