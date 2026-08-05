@@ -46,34 +46,52 @@ Then make sure you have each of these ready:
 
 | Requirement     | Notes                                                      |
 | --------------- | ---------------------------------------------------------- |
-| A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li></ul>See [msb host setup](docs/QUICKSTART.md#msb-host-setup) for per-platform details; `msb doctor` (Step 1) is the authoritative check. |
+| A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li></ul>If you need more detail than this, see [msb host setup](docs/QUICKSTART.md#msb-host-setup) for per-platform particulars. |
 | USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
-| GitHub token | (recommended) Lets the agent authenticate to GitHub, work with private repositories, and act on your behalf (open PRs, push). `acq` can walk you through creating a repo-scoped one on first run. |
-
-<details>
-<summary>How to verify each requirement (click to expand)</summary>
-
-Run each command in your terminal. If a command isn't found, that requirement isn't installed yet.
-
-- **microVM support** — Linux users can check now with `test -e /dev/kvm && echo ok`. macOS (Apple Silicon) and Windows 11 have nothing to enable ahead of time beyond the platform above. `msb doctor` in Step 1 is the authoritative check; for per-platform setup and fixes, see [msb host setup](docs/QUICKSTART.md#msb-host-setup).
-- **USAi API key** — visit [the key-management console](https://console.gsa.usai.gov/key-management); you should see (or be able to create) a key. Keep the token string handy — `acq` prompts for it on first run.
-- **GitHub token** — optional up front: `acq` can walk you through creating a repo-scoped one on first run, or have a fine-grained personal access token ready to paste.
-
-</details>
+| GitHub token | <p>(recommended) Allows the agent authenticate to GitHub, work with private repositories, and act on your behalf (open PRs, push to branches, etc).</p><p>**`acq` can walk you through creating a repo-scoped token on first run.**</p> |
 
 ### Step 1: Install microsandbox (msb)
 
 msb is a standalone, open-source (Apache-2.0) microVM runtime (a host-level tool, independent of this repository). Install it on your machine:
 
 ```bash
-curl -fsSL https://install.microsandbox.dev | sh    # macOS / Linux
-# or, with Homebrew:
+# With Homebrew, our preference at GSA TTS:
 brew install superradcompany/tap/microsandbox
 ```
 
-**Check it worked:** run `msb doctor`. It reports whether your host is ready to
-run microVMs and can attempt to set up anything missing with `msb doctor --fix`.
-`acq` requires `msb` ≥ 0.6.0; update any time with `msb self update`.
+or
+
+```bash
+# More generally, on macOS, Linux, or WSL (Windows):
+curl -fsSL https://install.microsandbox.dev | sh
+```
+
+Try running `msb`; you should see the help output.
+
+<details>
+<summary>If you see a message saying the command is not found... (click to expand)</summary>
+You need to ensure the `msb` binary is on your PATH:
+
+```
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+```
+
+...then try again. If this solved the problem, you should make sure that this is copied into the configuration file for your shell, eg `.bashrc`.
+</details>
+
+**Verify that you're ready to run sandboxes** 
+
+Run 
+
+```
+msb doctor
+```
+
+You should see a report that your host is ready to
+run microVMs. If anything looks awry, you can attempt to fix it with `msb doctor --fix`. If you still see problems, then you're not ready to proceed to the next step. See if you can resolve this first! [...support details pending...]
 
 ### Step 2: Clone this repo
 
