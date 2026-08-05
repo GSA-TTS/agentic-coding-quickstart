@@ -658,7 +658,7 @@ _acq_read_secret_masked() {
   # `char` now holds the first character (empty if Enter was pressed first).
   while :; do
     case "$char" in
-      "")  # Enter/newline terminates.
+      ""|$'\r')  # Enter/newline (or a bare CR from an exotic pty) terminates.
         break
         ;;
       $'\177'|$'\b')  # Backspace / Delete: drop last char, erase a star.

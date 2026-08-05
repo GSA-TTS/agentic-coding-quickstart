@@ -618,6 +618,14 @@ case "$subcommand" in
       maybe_offer_bundle_refresh "${ACQ_RESOLVED_BACKEND}" "$first" "$_pre_heal_status"
       warn_if_no_ssh_signing_key
 
+      # NOTE: opencode's postinstall self-heal (ensure_opencode_postinstall) is
+      # intentionally NOT run on this re-attach-by-name path. The agent is not
+      # named here (it is recorded in the sandbox and resolved inside the
+      # backend's attach), and a sandbox that reached a re-attach has already
+      # been through the create-and-attach path where the fix ran. A sandbox
+      # left with a still-broken opencode is recovered by the documented manual
+      # step (docs/KNOWN_FAILURE_MODES.md #29) or by re-running create-and-attach.
+
       # Rebuild arg list without the sandbox name (first occurrence only).
       rest=(); dropped=0
       for arg in "${create_args[@]}"; do
