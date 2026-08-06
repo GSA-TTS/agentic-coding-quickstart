@@ -94,6 +94,8 @@ Subcommands:
                                            custom endpoint).
   secret rm  [-g|SANDBOX] SERVICE          Remove a secret acq manages.
   secret ls  [-g|SANDBOX]                  List acq-managed secrets (no values).
+  secret import [SERVICE] [-g|SANDBOX]     Import known service tokens from the
+                                           host environment into the acq store.
   github-scope SANDBOX [PATH]              Scope a GitHub token to the
                                            workspace's repos (least-privilege PAT).
   usai-rotate-api-key                      Rotate the USAi API key.
@@ -111,7 +113,8 @@ Subcommands:
                                            sandbox, in place (state preserved).
   help                                     Show this help.
 
-Any other subcommand is passed through to the active backend's CLI.
+Any other subcommand is passed through to the active backend's CLI (acq prints
+a notice first so you know the output/errors below it are the backend's).
 
 Global flags (before the subcommand):
   --backend sbx|msb    Override the active backend for this invocation.
@@ -126,6 +129,83 @@ run/create flag:
 
 See docs/QUICKSTART.md and docs/BACKEND_GUIDE.md for more.
 HELP
+}
+
+# _acq_secret_usage / _acq_kit_usage — acq's OWN per-verb usage blocks. Printed
+# by both the per-verb `--help` case in the dispatch AND the early help router
+# (_acq_print_topic_help), so `acq secret --help` and `acq secret` show the same
+# acq usage rather than the top-level banner. Kept as functions (single source)
+# so the two call sites can never drift.
+_acq_secret_usage() {
+  cat >&2 <<'SECRETUSAGE'
+acq secret — manage sandbox secrets (via acq's own backend-neutral store)
+
+Usage:
+  acq secret set [-g | SANDBOX] SERVICE [--host HOST --env ENV]
+  acq secret rm  [-g | SANDBOX] SERVICE      # remove an acq-managed secret
+  acq secret rm  [-g | SANDBOX] <placeholder>  # (sbx only: raw placeholder → passthrough)
+  acq secret ls  [-g | SANDBOX]              # list acq-managed secrets
+  acq secret import [SERVICE] [-g | SANDBOX] [--all] [--force] [--dry-run]
+
+Custom endpoints: use `acq secret set SERVICE --host HOST --env ENV` — it stores
+the value in the acq store (off argv), records the host/env binding, and works
+on both backends. The raw backend `secret set-custom` is intentionally NOT
+exposed through acq (it would bypass the acq store).
+
+`acq secret import` scans your host environment for known service tokens
+(usai/github/gitlab) and stores each in the acq store (global by default; pass a
+SANDBOX to scope it — a second bare token after a SERVICE is the SANDBOX, not a
+second service). Existing entries are never overwritten silently: interactive
+mode prompts, --all skips overwrites, --force (-f) replaces. --dry-run previews only.
+
+`acq secret rm SERVICE` (usai/github/gitlab) deletes the value from the acq
+store and clears the backend's injector. `acq secret ls` lists the secrets acq
+manages (scope, service, whether a value is stored, and the ENV@HOST binding) —
+never the values themselves; on msb the acq store is the source of truth, on sbx
+this shows the sbx proxy table.
+SECRETUSAGE
+}
+
+_acq_kit_usage() {
+  cat >&2 <<'KITUSAGE'
+acq kit — manage neutral hybrid/v1 kits
+
+Usage:
+  acq kit list                 Show the pinned built-in kits (+ extras)
+  acq kit validate PATH        Validate a neutral kit (dir or spec.yaml)
+  acq kit apply NAME KITREF    Apply a kit to an existing sandbox (mid-life)
+  acq kit check SANDBOX        Report if a sandbox is on the pinned bundle
+  acq kit update SANDBOX [--yes]  Refresh the built-in bundle in place
+
+See docs/BACKEND_GUIDE.md and docs/adr/0011-msb-backend-and-neutral-kits.md.
+KITUSAGE
+}
+
+_acq_backend_subcmd_usage() {
+  cat >&2 <<'BACKENDUSAGE'
+acq backend — select the sandbox backend
+
+Usage:
+  acq backend list        List detected/installed backends (sbx, msb)
+  acq backend set NAME    Persist the default backend (sbx | msb)
+  acq backend unset       Clear the persisted default (fall back to auto-detect)
+BACKENDUSAGE
+}
+
+# _acq_print_topic_help TOPIC — print acq's OWN help for a known top-level verb
+# TOPIC (so `acq <verb> --help` documents the acq verb, not just the backend).
+# Returns 0 if TOPIC was a known acq verb (help printed), 1 otherwise (caller
+# should fall back to the top-level banner + backend help). The first WORD of
+# TOPIC is matched, so a multi-word topic like "secret set" routes to `secret`.
+_acq_print_topic_help() {
+  local topic="$1" head
+  head="${topic%% *}"
+  case "$head" in
+    secret)  _acq_secret_usage; return 0 ;;
+    kit)     _acq_kit_usage; return 0 ;;
+    backend) _acq_backend_subcmd_usage; return 0 ;;
+    *)       return 1 ;;
+  esac
 }
 
 # _acq_backend_help SUBCOMMAND — best-effort: print the resolved backend's own
@@ -145,6 +225,23 @@ _acq_backend_help() {
     echo "──────── ${be} --help ────────"
     "$be" --help 2>&1 || true
   fi
+}
+
+# _acq_backend_passthrough VERB ARGS... — forward `VERB ARGS...` verbatim to the
+# active backend CLI, but ANNOUNCE the handoff first (stderr, always). This is
+# acq's documented escape hatch (ADR-0010; acq-design §4.4) for verbs acq does
+# not own — but the user must know (a) the handoff happened and (b) any
+# usage/errors they see next come from the backend, not acq. Without the notice,
+# a raw backend error (e.g. `unrecognized subcommand`) reads as an acq bug. The
+# notice goes to stderr so stdout stays clean for a user who is intentionally
+# piping backend output. VERB is BOTH the announced label and the forwarded
+# subcommand — callers pass the verb once (do not also leave it in the remaining
+# args, or it would be doubled).
+_acq_backend_passthrough() {
+  local be="${ACQ_RESOLVED_BACKEND:-the backend}"
+  echo "acq: '$1' is not an acq subcommand — forwarding to '${be}'." >&2
+  echo "     (output and any errors below are from '${be}', not acq)" >&2
+  command "${ACQ_RESOLVED_BACKEND}" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -186,25 +283,43 @@ _acq_wants_help=""
 _acq_help_topic=""
 case "$subcommand" in
   help|--help|-h|"")
-    _acq_wants_help=1
     _acq_help_topic="${2:-}"   # `acq help run` -> backend `run --help`
+    _acq_wants_help=1
     ;;
   *)
-    # `acq <sub> --help|-h` -> help for that subcommand. Only honor a help flag
-    # that belongs to acq/the subcommand itself — STOP at the `--` separator, so
-    # args meant for the agent/inner command (`acq run opencode /app -- tool -h`,
-    # `acq exec box -- cmd --help`) pass through verbatim instead of being
-    # hijacked into acq's help.
+    # `acq <sub> [subsub] --help|-h` -> help for that subcommand. Only honor a
+    # help flag that belongs to acq/the subcommand itself — STOP at the `--`
+    # separator, so args meant for the agent/inner command
+    # (`acq run opencode /app -- tool -h`, `acq exec box -- cmd --help`) pass
+    # through verbatim instead of being hijacked into acq's help. Capture the
+    # sub-subcommand too (e.g. `acq secret set --help` -> topic "secret set") so
+    # the topic router / backend help can be verb-precise.
     for _a in "$@"; do
       case "$_a" in
         --) break ;;
-        --help|-h) _acq_wants_help=1; _acq_help_topic="$subcommand"; break ;;
+        --help|-h)
+          _acq_wants_help=1
+          _acq_help_topic="$subcommand"
+          # If the token right after the subcommand is a plain sub-subcommand
+          # (not a flag), include it in the topic (`secret set`, `kit apply`).
+          case "${2:-}" in
+            ""|-*) ;;
+            *) _acq_help_topic="$subcommand ${2}" ;;
+          esac
+          break
+          ;;
       esac
     done
     ;;
 esac
 if [ -n "$_acq_wants_help" ]; then
-  print_help
+  # Prefer acq's OWN per-verb usage for verbs acq owns (secret/kit/backend), so
+  # `acq secret --help` documents the acq verb rather than only the top banner.
+  # For anything else, print the top-level banner. Then append the backend's own
+  # help (best-effort) for additional context.
+  if ! _acq_print_topic_help "$_acq_help_topic"; then
+    print_help
+  fi
   acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
   _acq_backend_help "$_acq_help_topic"
   # A bare `acq` (no subcommand) is a usage error (exit 2); an explicit help
@@ -400,18 +515,9 @@ case "$subcommand" in
         exit 1
         ;;
       --help|-h|"")
-        cat >&2 <<'KITUSAGE'
-acq kit — manage neutral hybrid/v1 kits
-
-Usage:
-  acq kit list                 Show the pinned built-in kits (+ extras)
-  acq kit validate PATH        Validate a neutral kit (dir or spec.yaml)
-  acq kit apply NAME KITREF    Apply a kit to an existing sandbox (mid-life)
-  acq kit check SANDBOX        Report if a sandbox is on the pinned bundle
-  acq kit update SANDBOX [--yes]  Refresh the built-in bundle in place
-
-See docs/BACKEND_GUIDE.md and docs/adr/0011-msb-backend-and-neutral-kits.md.
-KITUSAGE
+        # `acq kit` (no subverb) reaches here; `acq kit --help` is intercepted
+        # earlier by the help router. Print acq's own kit usage (shared source).
+        _acq_kit_usage
         exit 1
         ;;
       *)
@@ -760,22 +866,40 @@ case "$subcommand" in
       rm)
         shift
         # `acq secret rm [-g | SANDBOX] SERVICE` removes an acq-owned secret from
-        # the acq store (and clears the sbx proxy entry). If the args look like a
-        # scope + service (a known acq service, with -g or a sandbox name), route
-        # to the backend rm. Otherwise (e.g. a raw sbx placeholder token) pass
-        # through to the backend secret CLI unchanged for back-compat.
+        # the acq store (and clears the backend's injector). If the args name a
+        # scope + known acq service (-g or a sandbox name), route to the backend
+        # rm. Otherwise the token is only meaningful to a backend that has its own
+        # `secret` CLI whose placeholder table we can pass a raw token through to
+        # (sbx). msb has NO `secret` subcommand, so a raw passthrough there
+        # produced a confusing `unrecognized subcommand 'secret'` from msb itself.
+        # Detect that case and emit acq's own usage error instead — a scope is
+        # required for a managed removal, and there is no raw-placeholder path.
         if _acq_is_managed_secret_rm "$@"; then
           acq_backend_secret_rm "$@"
+        elif command -v acq_backend_secret_ls >/dev/null 2>&1; then
+          # Backend owns the acq secret store natively (msb): there is no backend
+          # `secret` CLI to fall through to, so a non-managed token cannot be a
+          # raw placeholder. Fail closed with a clear, backend-appropriate error.
+          echo "acq: secret rm: scope required — use -g for global or provide a sandbox name" >&2
+          echo "     usage: acq secret rm [-g | SANDBOX] SERVICE" >&2
+          echo "     examples:" >&2
+          echo "       acq secret rm -g ${1:-SERVICE}            # global" >&2
+          echo "       acq secret rm my-sandbox ${1:-SERVICE}    # sandbox-scoped" >&2
+          exit 1
         else
-          acq_backend_run "" secret rm "$@" 2>/dev/null || \
-            command "${ACQ_RESOLVED_BACKEND}" secret rm "$@"
+          # Backend has its own secret CLI with a placeholder table (sbx): a raw
+          # token is a valid placeholder to remove. Pass through unchanged.
+          command "${ACQ_RESOLVED_BACKEND}" secret rm "$@"
         fi
         ;;
       ls)
         # `acq secret ls [-g|SANDBOX]` — if the backend defines a native acq
         # secret listing (msb: the acq store is the source of truth, and there is
-        # no `msb secret ls`), use it. Otherwise pass through to the backend's own
-        # secret CLI unchanged (sbx: `sbx secret ls` shows the proxy table).
+        # no `msb secret ls`), use it. Otherwise the backend has its own secret
+        # CLI whose listing we surface (sbx: `sbx secret ls` shows the proxy
+        # table). This is NOT an escape-hatch passthrough — `secret ls` is an
+        # acq-owned verb and sbx's `secret ls` is its intended acq-store view — so
+        # it is delegated silently (no forwarding notice).
         shift
         if command -v acq_backend_secret_ls >/dev/null 2>&1; then
           acq_backend_secret_ls "$@"
@@ -783,39 +907,51 @@ case "$subcommand" in
           command "${ACQ_RESOLVED_BACKEND}" secret ls "$@"
         fi
         ;;
-      import|set-custom)
-        # Pass through to the backend secret CLI unchanged. shift so $sub2 is not
-        # ALSO left in $@ (that would double the subcommand token, e.g.
-        # `sbx secret import import`); re-supply it explicitly.
+      set-custom)
+        # FAIL CLOSED — do NOT forward to the backend. Raw `set-custom` is a
+        # strict, store-BYPASSING subset of acq's managed custom-endpoint path:
+        # it writes only the backend's own table (invisible to `acq secret ls`,
+        # never re-fed on rotation, not removable via `acq secret rm SERVICE`),
+        # exposes the value on argv (sbx --value), and on msb there is no `secret`
+        # CLI at all so it just errors. The acq-store-aware equivalent already
+        # does everything it does, better, on BOTH backends:
+        #     acq secret set SERVICE --host HOST --env ENV
+        # (value read off-argv, host/env sidecar recorded, bound at provision).
+        echo "acq: 'secret set-custom' is not supported — it would bypass the acq secret store." >&2
+        echo "     Use the acq-store-aware equivalent (works on both backends, keeps the value off argv):" >&2
+        echo "       acq secret set [-g | SANDBOX] SERVICE --host HOST --env ENV" >&2
+        exit 1
+        ;;
+      import)
+        # Populate the acq store from known service tokens in the host
+        # environment (usai/github/gitlab). This is the store-POPULATING helper —
+        # the inverse of the removed store-BYPASSING backend passthrough. It
+        # writes only the acq-owned store (both backends read it at provision);
+        # it never invokes the backend's own `secret` CLI. See acq_secret_import
+        # in acq.backends/common.sh and docs/BACKEND_GUIDE.md "Migration".
         shift
-        command "${ACQ_RESOLVED_BACKEND}" secret "$sub2" "$@"
+        acq_secret_import "$@"
         ;;
       --help|-h|"")
-        # Print acq's own summary, then delegate to backend for full detail.
-        cat >&2 <<'SECRETUSAGE'
-acq secret — manage sandbox secrets
-
-Usage:
-  acq secret set [-g | SANDBOX] SERVICE [--host HOST --env ENV]
-  acq secret rm  [-g | SANDBOX] SERVICE      # remove an acq-managed secret
-  acq secret rm  [-g | SANDBOX] <placeholder>  # (raw sbx placeholder → passthrough)
-  acq secret ls [-g | SANDBOX]               # list acq-managed secrets
-  acq secret import [SERVICE] [--all] [--force] [--dry-run]
-  acq secret set-custom [-g | SANDBOX] --host HOST --env ENV
-
-`acq secret rm SERVICE` (usai/github/gitlab) deletes the value from the acq
-store and clears the backend's injector. `acq secret ls` lists the secrets acq
-manages (scope, service, whether a value is stored, and the ENV@HOST binding) —
-never the values themselves; on msb the acq store is the source of truth, on sbx
-this shows the sbx proxy table. Other subcommands pass through to the backend.
-
-Full sbx reference:
-SECRETUSAGE
+        # `acq secret` (no subverb) reaches here; `acq secret --help` is
+        # intercepted earlier by the help router. Print acq's own secret usage
+        # (shared source), then the backend's own reference for context.
+        _acq_secret_usage
+        echo "" >&2
+        echo "The backend's own secret reference follows for context; acq deliberately" >&2
+        echo "routes all secret storage through its own store (above)." >&2
+        echo "" >&2
+        echo "Full backend reference:" >&2
         command "${ACQ_RESOLVED_BACKEND}" secret --help
         ;;
       *)
-        # Unknown subcommand — pass through to backend.
-        command "${ACQ_RESOLVED_BACKEND}" secret "$@"
+        # `secret` is an acq-owned verb, so an unrecognized subverb is a user
+        # mistake in acq's vocabulary — fail closed with acq's own error rather
+        # than forwarding a token acq claimed to a backend that may reject it
+        # differently (or accept something acq never meant to expose).
+        echo "acq: unknown secret subcommand '${sub2}'." >&2
+        echo "     Try: acq secret set | rm | ls | import | --help" >&2
+        exit 1
         ;;
     esac
     ;;
@@ -839,8 +975,13 @@ SECRETUSAGE
     ;;
 
   *)
-    # Pass unknown subcommands through to the active backend CLI unchanged.
-    # For sbx: `sbx <subcommand> [args...]`
-    command "${ACQ_RESOLVED_BACKEND}" "$subcommand" "$@"
+    # Pass unknown subcommands through to the active backend CLI unchanged, but
+    # announce the handoff (see _acq_backend_passthrough) so the user knows the
+    # verb is not acq's and that any output/errors below come from the backend.
+    # $1 is still the subcommand token here (this case block did not shift), so
+    # drop it before forwarding the remaining args — otherwise the verb would be
+    # doubled (e.g. `acq policy init` → `sbx policy policy init`).
+    shift
+    _acq_backend_passthrough "$subcommand" "$@"
     ;;
 esac
