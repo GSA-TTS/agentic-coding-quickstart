@@ -1941,6 +1941,26 @@ assert_contains "msb#226: github still bound as before" "$gen_log" "--secret GIT
 assert_not_contains "msb#226: no bogus flag for service without host/env" "$gen_log" "--secret @"
 assert_not_contains "msb#226: value-only service 'nomap' not bound" "$gen_log" "nomap"
 assert_eq "msb#226: no secret value ever leaks to argv" "CLEAN" "$gen_leaks"
+# Progress feedback (issue #287): the real provision path emits plain status
+# lines on stderr even under the harness (non-TTY -> no animation, but the
+# acq_status phase markers still print). Capture provision stderr and assert a
+# couple of the phase markers are present, and that NO animation leaked.
+make_stubs; load_acq
+: > "$CALLS"
+prog_err=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/prog-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL-VALUE\n' | acq_secret_store "$(_acq_secret_key usai)"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision progbox opencode /tmp 2>&1 >/dev/null
+)
+assert_contains     "progress#287: provision announces sandbox creation" "$prog_err" "Creating sandbox"
+assert_contains     "progress#287: provision announces the boot wait"     "$prog_err" "Waiting for the sandbox to finish booting"
+assert_not_contains "progress#287: provision leaks no spinner frame"      "$prog_err" "⠋"
+assert_not_contains "progress#287: provision leaks no carriage return"    "$prog_err" "$(printf '\r')"
 cleanup_stubs
 
 # 8m0b. The endpoint sidecar is NON-SECRET (host + env only) and 0600. Setting a
@@ -5210,6 +5230,74 @@ assert_eq       "gh-advise: silent when no github repos"              ""  "$(_ad
 
 rm -rf "$gwt"
 unset -f _pnwo _purl _dwr _advise
+
+# ===========================================================================
+# 14. Progress feedback helpers (issue #287) — acq.backends/progress.sh
+# ===========================================================================
+# The suite captures stderr into a variable (a PIPE, not a TTY), which is
+# exactly the condition under which the spinner MUST stay silent. So these run
+# the helpers in-process with stderr captured and assert:
+#   - acq_status ALWAYS prints its line (interactive + CI/piped)
+#   - acq_spin_start degrades to a plain status line off-TTY (no animation)
+#   - NO spinner frame chars, carriage returns, or cursor escapes leak
+#   - acq_spin_stop is a safe no-op / idempotent (double-stop, stop-without-start)
+#   - the frame selector picks braille for UTF-8 locales and ASCII otherwise
+# Animation-on-a-real-TTY is verified out-of-band (a PTY harness); it cannot run
+# inside this pipe-captured suite by construction.
+
+# Load the module in a subshell so its trap installs / state don't touch the
+# harness. Each helper block captures its own stderr.
+_prog() { ( export ACQ_SCRIPT_DIR="$REPO_ROOT"; . "$REPO_ROOT/acq.backends/progress.sh"; "$@" ) 2>&1; }
+
+# acq_status always prints.
+_st=$(_prog acq_status "creating sandbox")
+assert_contains "progress: acq_status prints its message" "$_st" "creating sandbox"
+assert_contains "progress: acq_status uses the acq: prefix"  "$_st" "acq: creating sandbox"
+
+# Off-TTY (captured), a start/stop pair emits a plain status line and NOTHING
+# animated. Assert no frame chars (braille or ASCII), no carriage return, no
+# ANSI cursor hide/show escape.
+_run=$( ( export ACQ_SCRIPT_DIR="$REPO_ROOT"; unset LC_ALL LC_CTYPE; export LANG=en_US.UTF-8
+          . "$REPO_ROOT/acq.backends/progress.sh"
+          acq_spin_start "booting the sandbox"
+          acq_spin_stop  "booting the sandbox"
+          printf 'REACHED_END' ) 2>&1 )
+assert_contains     "progress: spin_start degrades to a status line off-TTY" "$_run" "booting the sandbox"
+assert_contains     "progress: start/stop returns control (no hang)"          "$_run" "REACHED_END"
+assert_not_contains "progress: no braille frame leaks off-TTY"                "$_run" "⠋"
+assert_not_contains "progress: no braille frame (alt) leaks off-TTY"          "$_run" "⠙"
+assert_not_contains "progress: no carriage return leaks off-TTY"              "$_run" "$(printf '\r')"
+assert_not_contains "progress: no cursor-hide escape leaks off-TTY"           "$_run" "$(printf '\033')[?25l"
+
+# Explicit opt-out (ACQ_NO_PROGRESS) — same silence, even if a TTY were present.
+_noprog=$( ( export ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_NO_PROGRESS=1
+             . "$REPO_ROOT/acq.backends/progress.sh"
+             acq_spin_start "installing agent"; acq_spin_stop "installing agent" ) 2>&1 )
+assert_contains     "progress: ACQ_NO_PROGRESS still shows a status line" "$_noprog" "installing agent"
+assert_not_contains "progress: ACQ_NO_PROGRESS emits no frames"           "$_noprog" "⠋"
+
+# acq_spin_stop with no spinner running is a silent no-op (no error, no output).
+_bare=$(_prog acq_spin_stop)
+assert_eq "progress: spin_stop without start is silent" "" "$_bare"
+
+# Double-stop is idempotent (no error, no stray output beyond the single line).
+_dbl=$( ( export ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_NO_PROGRESS=1
+          . "$REPO_ROOT/acq.backends/progress.sh"
+          acq_spin_start "phase X"; acq_spin_stop "phase X"; acq_spin_stop "phase X"
+          printf 'OK' ) 2>&1 )
+assert_contains "progress: double spin_stop is safe" "$_dbl" "OK"
+
+# Frame selector: braille for UTF-8, ASCII pipe/slash otherwise.
+_utf=$( ( export ACQ_SCRIPT_DIR="$REPO_ROOT"; unset LC_ALL LC_CTYPE; export LANG=en_US.UTF-8
+          . "$REPO_ROOT/acq.backends/progress.sh"; _acq_spin_frames ) )
+assert_contains "progress: UTF-8 locale selects braille frames" "$_utf" "⠋"
+_asc=$( ( export ACQ_SCRIPT_DIR="$REPO_ROOT"; unset LANG LC_CTYPE; export LC_ALL=C
+          . "$REPO_ROOT/acq.backends/progress.sh"; _acq_spin_frames ) )
+assert_contains     "progress: non-UTF-8 locale selects ASCII frames" "$_asc" "|"
+assert_not_contains "progress: non-UTF-8 locale has no braille"       "$_asc" "⠋"
+
+unset -f _prog
+unset _st _run _noprog _bare _dbl _utf _asc
 
 # ===========================================================================
 echo ""
