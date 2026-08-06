@@ -723,7 +723,10 @@ cleanup_stubs
 make_stubs
 out=$(ACQ_BACKEND=sbx "$ACQ" policy init balanced 2>&1; true)
 log=$(cat "$CALLS")
-assert_contains "dispatch: unknown passthrough -> sbx" "$log" "sbx policy"
+assert_contains "dispatch: unknown passthrough -> sbx" "$log" "sbx policy init balanced"
+# Regression: the verb must NOT be doubled (`sbx policy policy init balanced`).
+# The dispatch case block must shift the subcommand before forwarding.
+assert_not_contains "dispatch: passthrough does NOT double the verb" "$log" "sbx policy policy"
 assert_contains "dispatch: unknown passthrough is announced" "$out" "not an acq subcommand — forwarding to 'sbx'"
 assert_contains "dispatch: passthrough notice attributes output to backend" "$out" "from 'sbx', not acq"
 cleanup_stubs
@@ -1335,6 +1338,36 @@ none_out=$(USAI_API_KEY='' GITHUB_TOKEN='' GH_TOKEN='' GITLAB_TOKEN='' \
 assert_eq "secret import (none found): exits 0" "0" "$none_rc"
 assert_contains "secret import (none found): says nothing found" "$none_out" "no known service tokens found"
 rm -rf "$_impdir"
+cleanup_stubs
+
+# 7c3-integrity. A secret VALUE that the single-line store cannot round-trip
+#      (newline or tab) must be REJECTED (fail closed) — never truncated-and-
+#      stored, and no fragment of the value may leak to stderr. Regression for
+#      the review BLOCKER (framing on TAB + single-line read truncated multi-line
+#      values and leaked the 2nd line).
+make_stubs
+_intdir=$(mktemp -d "${TMPDIR:-/tmp}/acq-int.XXXXXX")
+# Multi-line value: rejected, not stored, and "SECRET2" never appears in output.
+ml_out=$(USAI_API_KEY="$(printf 'line1\nSECRET2')" GITHUB_TOKEN='' GH_TOKEN='' GITLAB_TOKEN='' \
+  ACQ_SECRET_STORE_DIR="$_intdir/ml" ACQ_BACKEND=sbx "$ACQ" secret import --all 2>&1); ml_rc=$?
+assert_eq "secret import (multi-line): run completes rc 0" "0" "$ml_rc"
+assert_contains "secret import (multi-line): rejected with a clear reason" "$ml_out" "contains a newline or tab"
+assert_not_contains "secret import (multi-line): 2nd line never leaks to stderr" "$ml_out" "SECRET2"
+[ ! -e "$_intdir/ml/acq.usai" ] && pass "secret import (multi-line): nothing stored" \
+  || fail "secret import (multi-line): must not store a truncated value" "found acq.usai"
+# Tab value: rejected, not stored, fragment never leaks.
+tab_out=$(USAI_API_KEY="$(printf 'aaa\tTABBED')" GITHUB_TOKEN='' GH_TOKEN='' GITLAB_TOKEN='' \
+  ACQ_SECRET_STORE_DIR="$_intdir/tab" ACQ_BACKEND=sbx "$ACQ" secret import --all 2>&1)
+assert_contains "secret import (tab): rejected" "$tab_out" "contains a newline or tab"
+assert_not_contains "secret import (tab): fragment never leaks" "$tab_out" "TABBED"
+[ ! -e "$_intdir/tab/acq.usai" ] && pass "secret import (tab): nothing stored" \
+  || fail "secret import (tab): must not store" "found acq.usai"
+# A well-formed single-line value with shell-special chars round-trips EXACTLY.
+USAI_API_KEY='a b=c;d$e' GITHUB_TOKEN='' GH_TOKEN='' GITLAB_TOKEN='' \
+  ACQ_SECRET_STORE_DIR="$_intdir/ok" ACQ_BACKEND=sbx "$ACQ" secret import usai --force >/dev/null 2>&1
+[ "$(cat "$_intdir/ok/acq.usai" 2>/dev/null)" = 'a b=c;d$e' ] && pass "secret import: single-line value round-trips exactly" \
+  || fail "secret import: value corrupted" "$(cat "$_intdir/ok/acq.usai" 2>/dev/null)"
+rm -rf "$_intdir"
 cleanup_stubs
 
 # 7c3b. `acq secret import` on msb ALSO never invokes the backend `secret` CLI
