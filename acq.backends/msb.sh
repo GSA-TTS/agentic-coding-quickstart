@@ -316,13 +316,20 @@ acq_backend_prepare() {
   # is treated as "cannot determine" and stays silent).
   [ -n "${ACQ_SKIP_MSB_DOCTOR:-}" ] && return 0
   command -v msb >/dev/null 2>&1 || return 0
-  if msb doctor >/dev/null 2>&1; then
+  # All `msb doctor` invocations redirect stdin from /dev/null (file convention):
+  # `msb doctor --fix` may prompt, and acq holds stdin open, so an un-redirected
+  # call would hang indefinitely on the exact unfit-host path this targets.
+  if msb doctor </dev/null >/dev/null 2>&1; then
     return 0
   fi
-  # Not ready — attempt the fix automatically, then re-check quietly.
-  acq_debug "msb doctor reports host not ready; attempting 'msb doctor --fix'"
-  msb doctor --fix >/dev/null 2>&1 || true
-  if msb doctor >/dev/null 2>&1; then
+  # Not ready — attempt the fix automatically, then re-check. `msb doctor --fix`
+  # MUTATES host state (kvm group, device permissions), so announce it on stderr
+  # BEFORE running rather than mutating silently (AGENTS.md classifies infra
+  # changes as approval-worthy; ACQ_SKIP_MSB_DOCTOR=1 opts out entirely).
+  echo "acq: host not ready for microVMs — running 'msb doctor --fix' to set it up" >&2
+  echo "      (set ACQ_SKIP_MSB_DOCTOR=1 to skip this and fix it yourself)." >&2
+  msb doctor --fix </dev/null >/dev/null 2>&1 || true
+  if msb doctor </dev/null >/dev/null 2>&1; then
     acq_debug "msb doctor: host ready after --fix"
     return 0
   fi

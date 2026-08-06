@@ -554,8 +554,10 @@ _load_backend_adapter() {
   # already probes via _backend_installed, but the explicit/env/config paths set
   # the name directly — so a user who pinned a backend that lives only in
   # ~/.local/bin would otherwise still hit "command not found" in the adapter.
-  # No-op when the backend is already on PATH or not in ~/.local/bin.
-  _ensure_local_bin_on_path "$name" >/dev/null 2>&1 || true
+  # Only attempt the recovery when the backend is NOT already resolvable, so a
+  # user-writable ~/.local/bin copy never shadows a legit system binary that the
+  # agent (and everything acq subsequently execs) would otherwise use.
+  command -v "$name" >/dev/null 2>&1 || _ensure_local_bin_on_path "$name" >/dev/null 2>&1 || true
   # shellcheck disable=SC1090
   . "$adapter"
   ACQ_RESOLVED_BACKEND="$name"
