@@ -398,7 +398,15 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 
 > **Migration:** if you previously stored the USAi key with `sbx secret …`, run
 > `acq secret set -g usai` once to move it into the acq store (the value is
-> re-prompted). A future `acq secret import` will automate this.
+> re-prompted). To pull tokens straight from your shell environment instead, run
+> `acq secret import` — it scans for known service vars (`USAI_API_KEY`,
+> `GITHUB_TOKEN`/`GH_TOKEN`, `GITLAB_TOKEN`) and stores each in the acq store
+> (global by default; pass a SANDBOX to scope — a second bare token after a
+> SERVICE is the SANDBOX, not a second service). It prompts before each import
+> and before overwriting; `--all` imports non-interactively (skipping existing),
+> `--force` (or `-f`) overwrites, and `--dry-run` previews without writing. A
+> value containing a newline or tab is refused (the single-line store cannot hold
+> it intact).
 >
 > **Overwriting:** `acq secret set` is non-destructive toward sbx — if sbx
 > already holds the secret it stops with an `sbx secret rm …` hint rather than

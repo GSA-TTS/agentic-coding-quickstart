@@ -130,6 +130,301 @@ acq_debug() {
 # pass a raw placeholder token through to the backend secret CLI.
 ACQ_MANAGED_SECRET_SERVICES=" usai github gitlab "
 
+# _acq_import_env_vars_for SERVICE — echo the host environment variable name(s)
+# that `acq secret import` reads to populate SERVICE, most-preferred first (space
+# separated). These mirror the env vars each backend already honors when binding
+# the service (see the sbx/msb adapters and the kits' env expectations):
+#   usai   <- USAI_API_KEY
+#   github <- GITHUB_TOKEN, then GH_TOKEN (gh CLI's variable)
+#   gitlab <- GITLAB_TOKEN
+# Only acq-managed services are importable; an unknown service echoes nothing.
+_acq_import_env_vars_for() {
+  case "$1" in
+    usai)   printf 'USAI_API_KEY\n' ;;
+    github) printf 'GITHUB_TOKEN GH_TOKEN\n' ;;
+    gitlab) printf 'GITLAB_TOKEN\n' ;;
+    *)      printf '\n' ;;
+  esac
+}
+
+# _acq_import_detect_var SERVICE -> prints the NAME of the FIRST of SERVICE's
+# candidate env vars that is set and non-empty; empty output (rc 1) if none is
+# set. Returns the variable NAME ONLY — never the value — so the secret value is
+# never packed into a string that is later re-parsed or echoed (which previously
+# truncated multi-line values and leaked a fragment to stderr). Callers read the
+# value directly from the named variable at the point of use and pipe it straight
+# to the store.
+_acq_import_detect_var() {
+  local service="$1" var val
+  for var in $(_acq_import_env_vars_for "$service"); do
+    eval "val=\${$var:-}"
+    if [ -n "$val" ]; then
+      printf '%s\n' "$var"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# _acq_import_value_is_storable ENVVAR -> 0 if the value in ENVVAR is safe to
+# store in acq's single-line secret store; 1 otherwise. The store persists a
+# single line, so a value containing a newline or TAB cannot round-trip intact —
+# storing it would silently truncate the credential. Fail closed on such values
+# (the caller reports the rejection WITHOUT ever printing the value). Reads the
+# value by name; never echoes or copies it into argv.
+_acq_import_value_is_storable() {
+  local val nl tab
+  eval "val=\${$1:-}"
+  nl=$(printf '\n_'); nl=${nl%_}   # a literal newline (command subst strips it otherwise)
+  tab=$(printf '\t')
+  case "$val" in
+    *"$nl"*) return 1 ;;
+    *"$tab"*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# _acq_secret_last4_of ENVVAR -> a masked preview "…WXYZ" (last 4 chars) of the
+# value held in ENVVAR, for a Y/n prompt. Reads the value BY NAME (never via
+# argv) and prints at most the last 4 characters; a short value is fully masked.
+# Used only for interactive confirmation feedback. A newline/tab in the value is
+# irrelevant here (such values are rejected before this is called), but the
+# last-4 slice is inherently bounded regardless.
+_acq_secret_last4_of() {
+  local v n
+  eval "v=\${$1:-}"
+  n=${#v}
+  if [ "$n" -le 4 ]; then
+    printf '…%s\n' "$(printf '%*s' "$n" '' | tr ' ' '*')"
+  else
+    printf '…%s\n' "${v#"${v%????}"}"
+  fi
+}
+
+# _acq_is_managed_service SERVICE -> 0 if SERVICE is an acq-managed service.
+_acq_is_managed_service() {
+  case "$ACQ_MANAGED_SECRET_SERVICES" in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# _acq_import_decide MODE DRY_RUN EXISTS -> prints one of "import", "skip", or
+# "prompt" on stdout: the decision for a single detected service under MODE
+# (interactive|all|force), whether this is a DRY_RUN (1/0), and whether an entry
+# already EXISTS (1/0). Keeps acq_secret_import's per-service loop small (≤50
+# lines) and the mode/overwrite policy in one testable place. Never touches the
+# secret value.
+_acq_import_decide() {
+  local mode="$1" dry_run="$2" exists="$3"
+  case "$mode" in
+    all)   [ "$exists" -eq 1 ] && { printf 'skip\n'; return 0; }; printf 'import\n' ;;
+    force) printf 'import\n' ;;
+    *)     printf 'prompt\n' ;;   # interactive
+  esac
+}
+
+# _acq_import_confirm SVC ENVVAR SCOPE_DESC EXISTS PREVIEW -> 0 to proceed, 1 to
+# skip. Handles the interactive Y/n gate: honors ACQ_SECRET_IMPORT_ASSUME_YES
+# (test/non-interactive override), skips (rc 1) when stdin is not a TTY, else
+# prompts. All prompt text is built from names/labels only — never the value.
+_acq_import_confirm() {
+  local svc="$1" envvar="$2" scope_desc="$3" exists="$4" preview="$5" ans=""
+  if [ ! -t 0 ] && [ -z "${ACQ_SECRET_IMPORT_ASSUME_YES:-}" ]; then
+    echo "acq: '$svc' detected in \$${envvar} but stdin is not a TTY; skipping (use --all/--force)." >&2
+    return 1
+  fi
+  if [ -n "${ACQ_SECRET_IMPORT_ASSUME_YES:-}" ]; then
+    return 0
+  fi
+  if [ "$exists" -eq 1 ]; then
+    printf 'acq: overwrite stored %s (%s) with $%s (%s)? [y/N] ' "$svc" "$scope_desc" "$envvar" "$preview" >&2
+  else
+    printf 'acq: import %s from $%s (%s) into %s? [y/N] ' "$svc" "$envvar" "$preview" "$scope_desc" >&2
+  fi
+  read -r ans 2>/dev/null || ans=""
+  case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+# _acq_import_one SVC ENVVAR KEY SCOPE_DESC MODE DRY_RUN EXISTS
+# ---------------------------------------------------------------------------
+# Handle a single detected service: apply the mode/overwrite decision, prompt if
+# interactive, and (unless --dry-run) store the value. The value is read DIRECTLY
+# from the named env var ($ENVVAR) and piped straight to the store — it is never
+# packed into a parsed string, never placed on argv, and never interpolated into
+# a message (all user-facing text is built from $SVC/$ENVVAR/$SCOPE_DESC only).
+# Prints its own progress to stderr. Echoes a single result token on stdout:
+# "imported", "skipped", or "" + non-zero on a store write failure.
+_acq_import_one() {
+  local svc="$1" envvar="$2" key="$3" scope_desc="$4" mode="$5" dry_run="$6" exists="$7"
+  local preview decision _v
+  preview=$(_acq_secret_last4_of "$envvar")
+
+  if [ "$dry_run" -eq 1 ]; then
+    if [ "$exists" -eq 1 ] && [ "$mode" = "all" ]; then
+      echo "acq: [dry-run] '$svc' already stored (${scope_desc}); would SKIP (use --force)." >&2
+      printf 'skipped\n'
+    elif [ "$exists" -eq 1 ]; then
+      echo "acq: [dry-run] would OVERWRITE '$svc' (${scope_desc}) from \$${envvar} (${preview})." >&2
+      printf 'imported\n'
+    else
+      echo "acq: [dry-run] would import '$svc' from \$${envvar} (${preview}) into ${scope_desc}." >&2
+      printf 'imported\n'
+    fi
+    return 0
+  fi
+
+  decision=$(_acq_import_decide "$mode" "$dry_run" "$exists")
+  if [ "$decision" = "skip" ]; then
+    echo "acq: '$svc' already stored (${scope_desc}); skipping (use --force to overwrite)." >&2
+    printf 'skipped\n'; return 0
+  fi
+  if [ "$decision" = "prompt" ] && ! _acq_import_confirm "$svc" "$envvar" "$scope_desc" "$exists" "$preview"; then
+    # Non-TTY skip already logged its reason; an explicit "no" gets a generic note.
+    [ -t 0 ] && echo "acq: skipped '$svc'." >&2
+    printf 'skipped\n'; return 0
+  fi
+
+  # Store the value read DIRECTLY from the named env var (never argv, never a
+  # parsed copy) piped straight to the single-line store. Read by name into a
+  # local, then pipe — no command substitution (which would strip a trailing
+  # newline) and no interpolation into any message.
+  eval "_v=\${$envvar}"
+  if printf '%s' "$_v" | acq_secret_store "$key"; then
+    _v=""
+    echo "acq: imported '$svc' (${scope_desc}) from \$${envvar}." >&2
+    printf 'imported\n'; return 0
+  fi
+  _v=""
+  echo "acq: error: failed to store '$svc' (${scope_desc})." >&2
+  return 1
+}
+
+# _acq_import_parse_args ARGS... -> on success prints "MODE<TAB>DRY_RUN<TAB>SERVICE<TAB>SANDBOX"
+# (SERVICE/SANDBOX may be empty), rc 0; on a usage error prints nothing and
+# returns 1 (the caller emits the error — this parser writes the specific
+# message to stderr itself before returning). MODE is interactive|all|force.
+# These fields are all flags/short identifiers (never a secret), so the TAB
+# framing is safe here (unlike a secret value). Recognizes: an optional leading
+# managed-SERVICE, then a scope (-g/--global or a bare SANDBOX token), plus
+# --all / --force|-f / --dry-run in any order.
+_acq_import_parse_args() {
+  local only_service="" scope_sandbox="" mode="interactive" dry_run=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --all)       mode="all" ;;
+      --force|-f)  mode="force" ;;
+      --dry-run)   dry_run=1 ;;
+      -g|--global) scope_sandbox="" ;;   # global is already the default
+      -*)
+        echo "acq: secret import: unknown flag '$arg'" >&2
+        echo "     usage: acq secret import [SERVICE] [-g | SANDBOX] [--all] [--force] [--dry-run]" >&2
+        return 1
+        ;;
+      *)
+        # First bare token that is a managed service -> restrict to it; a second
+        # bare token is the SANDBOX scope (NOT a second service).
+        if [ -z "$only_service" ] && _acq_is_managed_service "$arg"; then
+          only_service="$arg"
+        elif [ -z "$scope_sandbox" ]; then
+          scope_sandbox="$arg"
+        else
+          echo "acq: secret import: unexpected extra argument '$arg'" >&2
+          return 1
+        fi
+        ;;
+    esac
+  done
+  printf '%s\t%s\t%s\t%s\n' "$mode" "$dry_run" "$only_service" "$scope_sandbox"
+}
+
+# acq_secret_import [SERVICE] [-g|--global|SANDBOX] [--all] [--force] [--dry-run]
+# ---------------------------------------------------------------------------
+# Scan the host environment for known acq-managed service tokens (usai, github,
+# gitlab) and store each into the acq secret store — the same store `acq secret
+# set` writes and both backends read at provision. This is acq's store-POPULATING
+# migration helper (the inverse of the removed store-BYPASSING backend passthrough);
+# see docs/BACKEND_GUIDE.md "Migration".
+#
+# Scope: GLOBAL by default (like sbx's global keychain — available to every
+# sandbox); pass a SANDBOX name (or -g explicitly) to scope. A second bare token
+# after a SERVICE is treated as the SANDBOX scope, NOT a second service. Existing
+# stored entries are never overwritten silently:
+#   - interactive (default): prompt Y/n per detected service (last-4 preview),
+#     and prompt again before overwriting an existing entry;
+#   - --all: import newly-detected services without prompting, but SKIP any that
+#     already have a stored value (use --force / -f to replace);
+#   - --force / -f: import unconditionally, overwriting existing entries;
+#   - --dry-run: show what WOULD be imported/skipped, write nothing.
+# The value moves from the environment into the store without ever appearing on
+# argv (acq_secret_store reads it from stdin). A value containing a newline or TAB
+# is REJECTED (fail closed) because the single-line store cannot round-trip it —
+# the rejection never prints the value.
+#
+# Returns 0 if the run completed (even if nothing was imported), non-zero only on
+# a usage error or a store write failure.
+acq_secret_import() {
+  local parsed mode dry_run only_service scope_sandbox
+  parsed=$(_acq_import_parse_args "$@") || return 1
+  mode=$(printf '%s' "$parsed" | cut -f1)
+  dry_run=$(printf '%s' "$parsed" | cut -f2)
+  only_service=$(printf '%s' "$parsed" | cut -f3)
+  scope_sandbox=$(printf '%s' "$parsed" | cut -f4)
+
+  if ! command -v acq_secret_store >/dev/null 2>&1; then
+    echo "acq: internal error: secret store not loaded" >&2
+    return 1
+  fi
+
+  # Which services to consider: a single named one, or all managed services.
+  local services="$ACQ_MANAGED_SECRET_SERVICES"
+  [ -n "$only_service" ] && services="$only_service"
+
+  local scope_desc="global"
+  [ -n "$scope_sandbox" ] && scope_desc="sandbox '$scope_sandbox'"
+  echo "acq: scanning host environment for known service tokens (scope: ${scope_desc})…" >&2
+  [ "$dry_run" -eq 1 ] && echo "acq: --dry-run: no values will be written." >&2
+
+  local svc envvar key exists result imported=0 skipped=0 none=1
+  for svc in $services; do
+    envvar=$(_acq_import_detect_var "$svc") || continue
+    none=0
+    # Reject values the single-line store cannot round-trip (fail closed; the
+    # value is never printed).
+    if ! _acq_import_value_is_storable "$envvar"; then
+      echo "acq: refusing '$svc' — \$${envvar} contains a newline or tab, which the acq secret store cannot store intact. Set a single-line value and retry." >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if ! key=$(_acq_secret_key "$svc" "$scope_sandbox"); then
+      echo "acq: secret import: skipping '$svc' — ambiguous scope/service name." >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    exists=0
+    acq_secret_has "$svc" "$scope_sandbox" && exists=1
+    result=$(_acq_import_one "$svc" "$envvar" "$key" "$scope_desc" "$mode" "$dry_run" "$exists") \
+      || return 1
+    case "$result" in
+      imported) imported=$((imported + 1)) ;;
+      skipped)  skipped=$((skipped + 1)) ;;
+    esac
+  done
+
+  if [ "$none" -eq 1 ]; then
+    echo "acq: no known service tokens found in the environment." >&2
+    if [ -n "$only_service" ]; then
+      echo "     '$only_service' reads: $(_acq_import_env_vars_for "$only_service")" >&2
+    else
+      echo "     Looked for: USAI_API_KEY, GITHUB_TOKEN/GH_TOKEN, GITLAB_TOKEN." >&2
+    fi
+    return 0
+  fi
+  echo "acq: secret import done — ${imported} imported, ${skipped} skipped." >&2
+  return 0
+}
+
+
 # _acq_is_managed_secret_rm ARGS... -> 0 if the `acq secret rm` args name an
 # acq-managed secret (scope + known service), else 1 (pass through to backend).
 # Recognizes:  -g SERVICE  |  --global SERVICE  |  SANDBOX SERVICE
