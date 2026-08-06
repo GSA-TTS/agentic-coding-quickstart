@@ -83,9 +83,10 @@ Subcommands:
   ls                                       List sandboxes.
   stop NAME                                Stop a sandbox (without removing).
   start NAME                               Start a stopped sandbox and re-run its
-                                           kit startup services.
+                                           kit startup services (msb only; on sbx
+                                           a sandbox resumes automatically on 'acq run').
   restart NAME                             Stop then start a sandbox, re-running
-                                           kit startup services.
+                                           kit startup services (msb only; see 'start').
   rm NAME                                  Remove a sandbox.
   exec NAME -- CMD...                      Run a command inside a sandbox.
   cp SRC DST                               Copy files in/out (NAME:path syntax).
@@ -675,18 +676,23 @@ case "$subcommand" in
 
   start)
     # Resume a stopped sandbox and re-run its kit startup services deterministically
-    # (ADR-0017). `msb start`/`sbx start` alone do NOT reliably replay kit
+    # (ADR-0017). On msb, `msb start` alone does NOT reliably replay kit
     # `startup`/`background` commands (a bare create-time `--script-path` is not
     # enrolled in microsandbox's persisted startup), so after the backend resume we
     # re-drive acq_backend_ensure_kits_applied: it re-applies the pinned kits
     # idempotently and RE-RUNS the startup phase via the exec path — the actual,
-    # deterministic mechanism that brings supervised services back up.
+    # deterministic mechanism that brings supervised services back up. sbx has no
+    # 'start' verb (acq_backend_start is undefined there); this arm is
+    # capability-gated below to point sbx users at `acq run`, which auto-resumes.
     shift
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: start: missing sandbox name" >&2; exit 1; }
     if ! command -v acq_backend_start >/dev/null 2>&1; then
-      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support start" >&2
-      echo "     (acq_backend_start). Start the sandbox manually, then re-run." >&2
+      # e.g. sbx: no 'start' verb, and no detached-resume model — a stopped
+      # sandbox is auto-resumed by the next attach, so 'acq run' is the path.
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend has no separate 'start' verb." >&2
+      echo "     A stopped sandbox resumes automatically on attach — just run:" >&2
+      echo "       acq run $local_name" >&2
       exit 1
     fi
     acq_backend_start "$local_name"
@@ -710,8 +716,11 @@ case "$subcommand" in
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: restart: missing sandbox name" >&2; exit 1; }
     if ! command -v acq_backend_start >/dev/null 2>&1; then
-      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support restart" >&2
-      echo "     (acq_backend_start). Restart the sandbox manually, then re-run." >&2
+      # e.g. sbx: no 'restart' verb. Attach auto-resumes a stopped sandbox, so
+      # bouncing it is just 'acq run' (optionally 'acq stop' first).
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend has no separate 'restart' verb." >&2
+      echo "     A stopped sandbox resumes automatically on attach — just run:" >&2
+      echo "       acq run $local_name        # (optionally 'acq stop $local_name' first)" >&2
       exit 1
     fi
     acq_backend_stop "$local_name" \
