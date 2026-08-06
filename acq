@@ -760,15 +760,30 @@ case "$subcommand" in
       rm)
         shift
         # `acq secret rm [-g | SANDBOX] SERVICE` removes an acq-owned secret from
-        # the acq store (and clears the sbx proxy entry). If the args look like a
-        # scope + service (a known acq service, with -g or a sandbox name), route
-        # to the backend rm. Otherwise (e.g. a raw sbx placeholder token) pass
-        # through to the backend secret CLI unchanged for back-compat.
+        # the acq store (and clears the backend's injector). If the args name a
+        # scope + known acq service (-g or a sandbox name), route to the backend
+        # rm. Otherwise the token is only meaningful to a backend that has its own
+        # `secret` CLI whose placeholder table we can pass a raw token through to
+        # (sbx). msb has NO `secret` subcommand, so a raw passthrough there
+        # produced a confusing `unrecognized subcommand 'secret'` from msb itself.
+        # Detect that case and emit acq's own usage error instead — a scope is
+        # required for a managed removal, and there is no raw-placeholder path.
         if _acq_is_managed_secret_rm "$@"; then
           acq_backend_secret_rm "$@"
+        elif command -v acq_backend_secret_ls >/dev/null 2>&1; then
+          # Backend owns the acq secret store natively (msb): there is no backend
+          # `secret` CLI to fall through to, so a non-managed token cannot be a
+          # raw placeholder. Fail closed with a clear, backend-appropriate error.
+          echo "acq: secret rm: scope required — use -g for global or provide a sandbox name" >&2
+          echo "     usage: acq secret rm [-g | SANDBOX] SERVICE" >&2
+          echo "     examples:" >&2
+          echo "       acq secret rm -g ${1:-SERVICE}            # global" >&2
+          echo "       acq secret rm my-sandbox ${1:-SERVICE}    # sandbox-scoped" >&2
+          exit 1
         else
-          acq_backend_run "" secret rm "$@" 2>/dev/null || \
-            command "${ACQ_RESOLVED_BACKEND}" secret rm "$@"
+          # Backend has its own secret CLI with a placeholder table (sbx): a raw
+          # token is a valid placeholder to remove. Pass through unchanged.
+          command "${ACQ_RESOLVED_BACKEND}" secret rm "$@"
         fi
         ;;
       ls)
@@ -798,7 +813,7 @@ acq secret — manage sandbox secrets
 Usage:
   acq secret set [-g | SANDBOX] SERVICE [--host HOST --env ENV]
   acq secret rm  [-g | SANDBOX] SERVICE      # remove an acq-managed secret
-  acq secret rm  [-g | SANDBOX] <placeholder>  # (raw sbx placeholder → passthrough)
+  acq secret rm  [-g | SANDBOX] <placeholder>  # (sbx only: raw placeholder → passthrough)
   acq secret ls [-g | SANDBOX]               # list acq-managed secrets
   acq secret import [SERVICE] [--all] [--force] [--dry-run]
   acq secret set-custom [-g | SANDBOX] --host HOST --env ENV

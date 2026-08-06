@@ -1142,6 +1142,22 @@ assert_contains "classify: lone placeholder is passthrough" "$classify_out" "lon
 assert_contains "classify: unknown service is passthrough" "$classify_out" "g-unknown=passthru"
 cleanup_stubs
 
+# 5h3b. Regression: on msb, `acq secret rm SERVICE` with NO scope (a lone token)
+#       must NOT be passed through to a nonexistent `msb secret` CLI (which
+#       produced a confusing "unrecognized subcommand 'secret'" from msb). Since
+#       the msb backend owns the acq secret store natively (it defines
+#       acq_backend_secret_ls) there is no raw-placeholder passthrough — acq must
+#       fail closed with its own scope-required usage error and never invoke msb.
+make_stubs; load_acq
+: > "$CALLS"
+lone_out=$(ACQ_BACKEND=msb "$ACQ" secret rm openchamber-setup 2>&1); lone_rc=$?
+lone_log=$(cat "$CALLS")
+assert_contains "secret rm(msb): lone token errors with scope-required" "$lone_out" "scope required"
+[ "$lone_rc" -ne 0 ] && pass "secret rm(msb): lone token exits non-zero" \
+  || fail "secret rm(msb): lone token must exit non-zero" "rc=$lone_rc"
+assert_not_contains "secret rm(msb): lone token never invokes 'msb secret'" "$lone_log" "msb secret"
+cleanup_stubs
+
 # ===========================================================================
 # 6. Kit list completeness (the four built-in kits)
 # ===========================================================================
