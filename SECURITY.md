@@ -1,60 +1,46 @@
 # Security Policy
 
+## About this repository
+
+The `agentic-coding-quickstart` provides the `acq` sandbox tooling and setup
+guidance for running AI coding agents in isolated environments. It is shell and
+documentation — there is no hosted service, and it processes no user data.
+
+Because of that, the security issues that matter here are things like: unsafe
+example commands, a supply-chain problem in the tooling, credentials accidentally
+committed to the repository, or a sandbox-isolation weakness in the `acq`
+scripts.
+
+## Reporting a vulnerability
+
+**Please do not open a public issue for a security vulnerability.**
+
+1. **Preferred — GitHub private Security Advisories.** Open a report from this
+   repository's **Security → Report a vulnerability** tab. This keeps the details
+   private while we look into them.
+2. **Email.** If you can't use Security Advisories, email
+   **agentic-coding@gsa.gov** with the subject prefixed `[SECURITY]`.
+
+Please include what you found, where (file, path, or command), and how to
+reproduce it.
+
 ## Scope
 
-This repository is part of the **Agentic Coding Capability Assessment** — an internal GSA initiative. It contains:
+This policy covers **this repository's own content and tooling**. These repos are
+**out of scope** for GSA's official Vulnerability Disclosure Policy. If your
+report concerns an actual GSA system or service (rather than this repository),
+please use GSA's Vulnerability Disclosure Policy instead:
+<https://www.gsa.gov/website-information/vulnerability-disclosure-policy>.
 
-- Documentation for setting up Docker Sandboxes (SBX) with USAi endpoints
-- Configuration files for AI coding agents
-- Templates for bootstrapping projects
+## What to expect
 
-There are no deployed services or production infrastructure in this repository.
+We're a small maintainer team, and we take security reports seriously. We'll
+acknowledge your report as soon as we reasonably can, and we'll keep you posted
+as we look into it. We can't commit to a formal response timeline, but we
+genuinely appreciate you taking the time to help — thank you for making this
+project better and safer for everyone who uses it.
 
-## Reporting and Fixing Security Issues
+## A note on licensing
 
-This is an **internal assessment repository** with trusted contributors. The appropriate response to most issues is to fix them directly.
-
-### For Content Issues
-
-If you find content that could lead to insecure implementations (incorrect configuration, unsafe patterns, etc.):
-
-1. **Submit a PR to fix it** — This is the preferred approach for internal repos
-2. **Open an issue** if you're unsure how to fix it or want to discuss first
-3. **Ask in the agentic-coding Slack channel** if you have questions or need help coordinating
-
-### For Repository Infrastructure Issues
-
-If you find a security issue with the repository infrastructure (CI/CD, GitHub Actions, dependencies, scripts):
-
-1. **Submit a PR to fix it** — You have access, so fix it directly when possible
-2. **Open an issue** to track the problem if you need help or it requires discussion
-3. **Contact channel admins** if you're unsure about the right approach
-
-Since this is an internal repository, formal security advisories are not required. Use your judgment — if something seems sensitive, discuss with channel admins before posting details publicly.
-
-### For GSA Platform Issues (Outside This Repo)
-
-For security concerns related to GSA systems, USAi platform, or other infrastructure outside the scope of this repository:
-
-- **Follow your normal GSA security reporting processes**
-- **Submit a ticket** or **email GSA security** as appropriate for your organization
-- **USAi-specific issues:** Contact support@usai.gov
-
-These repos are for the assessment — platform and infrastructure security follows standard GSA procedures.
-
-## Security Best Practices
-
-When using this repository:
-
-1. **Never commit secrets** — API keys, tokens, and credentials belong in environment variables
-2. **Use SBX isolation** — Run AI agents inside Docker Sandboxes, not on your host system
-3. **Follow AGENTS.md rules** — The behavioral contract helps prevent unsafe agent actions
-4. **Review agent output** — AI-generated code requires human review before production use
-
-## Supported Versions
-
-This is an active assessment project. Security updates are applied to the `main` branch only.
-
----
-
-**Last Updated:** 2026-05-21
+This project is dedicated to the public domain under
+[CC0 1.0 Universal](./LICENSE).

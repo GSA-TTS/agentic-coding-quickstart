@@ -12,11 +12,11 @@ This repo is one of three in the agentic coding ecosystem:
 | **[Playbook](https://github.com/GSA-TTS/agentic-coding-playbook)** | Standards & practices | Coding standards, skills, templates |
 | **[Patterns](https://github.com/GSA-TTS/agentic-coding-patterns)** | Community sharing | Workflows, lessons learned, tool examples |
 
-**Not sure where your contribution belongs?** Ask in the [agentic-coding Slack channel](https://gsa.enterprise.slack.com/archives/C0B44531QLE).
+**Not sure where your contribution belongs?** Open a GitHub issue to discuss.
 
 ## Getting Help
 
-- **Questions:** Ask in the [agentic-coding Slack channel](https://gsa.enterprise.slack.com/archives/C0B44531QLE) (others benefit too)
+- **Questions:** Open a GitHub issue or start a discussion (others benefit too)
 - **Bugs:** Open a GitHub issue with steps to reproduce
 - **Security issues:** See [SECURITY.md](SECURITY.md) — direct fixes preferred
 
@@ -366,8 +366,8 @@ Releases are **fully automated** via GitHub Actions and release-please:
 
 ## Questions or Issues?
 
-- **Questions:** Ask in the agentic-coding Slack channel
-- **Security issues:** See [SECURITY.md](SECURITY.md) — direct fixes preferred
+- **Questions:** Open a GitHub issue or start a discussion
+- **Security issues:** See [SECURITY.md](SECURITY.md)
 - **Bug reports:** Open a GitHub Issue with:
   - Steps to reproduce
   - Expected vs actual behavior
@@ -380,9 +380,16 @@ Releases are **fully automated** via GitHub Actions and release-please:
 
 ---
 
-## License
+## Public domain
 
-This project is released under the CC0 1.0 Universal license. See `LICENSE` for details.
+This project is in the public domain within the United States, and copyright and
+related rights in the work worldwide are waived through the
+[CC0 1.0 Universal public domain dedication](https://creativecommons.org/publicdomain/zero/1.0/).
+See [`LICENSE`](LICENSE) for details.
+
+All contributions to this project will be released under the CC0 dedication. By
+submitting a pull request or issue, you are agreeing to comply with this waiver
+of copyright interest.
 
 ---
 

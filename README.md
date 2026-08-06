@@ -390,7 +390,7 @@ clone is needed.
 
 1. **Troubleshooting:** [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md)
 2. **Agent behavior:** [AGENTS.md](AGENTS.md)
-3. **Questions:** [agentic-coding Slack channel](https://gsa.enterprise.slack.com/archives/C0B44531QLE)
+3. **Questions:** Open a [GitHub issue](https://github.com/GSA-TTS/agentic-coding-quickstart/issues)
 4. **Platform issues:** support@usai.gov
 
 ---
