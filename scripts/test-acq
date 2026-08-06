@@ -1285,22 +1285,75 @@ assert_contains "secret set-custom: points at the managed equivalent" "$sc_out" 
 assert_not_contains "secret set-custom: never forwards to the backend" "$sc_log" "sbx secret"
 cleanup_stubs
 
-# 7c3. `acq secret import` FAILS CLOSED — not implemented. The forwarded backend
-#      `secret import` would bypass the acq store (and errors on msb); the
-#      intended acq import is the inverse (store-populating migration). acq must
-#      NOT forward it and must say it is not implemented yet.
+# 7c3. `acq secret import` populates the acq store from known host env vars
+#      (usai/github/gitlab) WITHOUT ever invoking the backend's `secret` CLI and
+#      WITHOUT the value touching argv. --dry-run writes nothing; --all imports
+#      detected services and skips existing; --force overwrites; a scope arg
+#      scopes the entry. Global by default.
 make_stubs
+_impdir=$(mktemp -d "${TMPDIR:-/tmp}/acq-import.XXXXXX")
 : > "$CALLS"
-imp_out=$(ACQ_BACKEND=sbx "$ACQ" secret import usai 2>&1); imp_rc=$?
+# --dry-run: detects github from GH_TOKEN, writes nothing, never calls backend.
+imp_out=$(GH_TOKEN=ghp_DRY1234 USAI_API_KEY='' GITHUB_TOKEN='' GITLAB_TOKEN='' \
+  ACQ_SECRET_STORE_DIR="$_impdir/dry" ACQ_BACKEND=sbx "$ACQ" secret import --dry-run 2>&1); imp_rc=$?
 imp_log=$(cat "$CALLS")
-[ "$imp_rc" -ne 0 ] && pass "secret import: exits non-zero" \
-  || fail "secret import: must exit non-zero" "rc=$imp_rc"
-assert_contains "secret import: says not implemented yet" "$imp_out" "not implemented yet"
-assert_not_contains "secret import: never forwards to the backend" "$imp_log" "sbx secret"
+assert_eq "secret import --dry-run: exits 0" "0" "$imp_rc"
+assert_contains "secret import --dry-run: detects github via GH_TOKEN" "$imp_out" "would import 'github' from \$GH_TOKEN"
+assert_contains "secret import --dry-run: previews only last 4 (…1234)" "$imp_out" "…1234"
+assert_not_contains "secret import: value never leaks in output" "$imp_out" "ghp_DRY1234"
+assert_not_contains "secret import: never invokes the backend secret CLI" "$imp_log" "sbx secret"
+[ ! -e "$_impdir/dry/acq.github" ] && pass "secret import --dry-run: wrote nothing" \
+  || fail "secret import --dry-run: must not write" "found acq.github"
+# --all: actually imports usai + github, stores the real values off argv.
+: > "$CALLS"
+USAI_API_KEY=sk-usai-AAAA GITHUB_TOKEN=ghp_BBBB GITLAB_TOKEN='' GH_TOKEN='' \
+  ACQ_SECRET_STORE_DIR="$_impdir/all" ACQ_BACKEND=sbx "$ACQ" secret import --all >/dev/null 2>&1
+all_log=$(cat "$CALLS")
+assert_not_contains "secret import --all: never invokes the backend secret CLI" "$all_log" "sbx secret"
+[ "$(cat "$_impdir/all/acq.usai" 2>/dev/null)" = "sk-usai-AAAA" ] && pass "secret import --all: stored usai value" \
+  || fail "secret import --all: usai value wrong" "$(cat "$_impdir/all/acq.usai" 2>/dev/null)"
+[ "$(cat "$_impdir/all/acq.github" 2>/dev/null)" = "ghp_BBBB" ] && pass "secret import --all: stored github value" \
+  || fail "secret import --all: github value wrong" "$(cat "$_impdir/all/acq.github" 2>/dev/null)"
+# Re-run --all: existing entries are SKIPPED (not overwritten).
+reall_out=$(USAI_API_KEY=sk-usai-CCCC GITHUB_TOKEN=ghp_BBBB \
+  ACQ_SECRET_STORE_DIR="$_impdir/all" ACQ_BACKEND=sbx "$ACQ" secret import --all 2>&1)
+assert_contains "secret import --all: skips existing" "$reall_out" "already stored"
+[ "$(cat "$_impdir/all/acq.usai" 2>/dev/null)" = "sk-usai-AAAA" ] && pass "secret import --all: did NOT overwrite" \
+  || fail "secret import --all: overwrote without --force" "$(cat "$_impdir/all/acq.usai" 2>/dev/null)"
+# --force overwrites.
+USAI_API_KEY=sk-usai-CCCC ACQ_SECRET_STORE_DIR="$_impdir/all" ACQ_BACKEND=sbx "$ACQ" secret import usai --force >/dev/null 2>&1
+[ "$(cat "$_impdir/all/acq.usai" 2>/dev/null)" = "sk-usai-CCCC" ] && pass "secret import --force: overwrote" \
+  || fail "secret import --force: did not overwrite" "$(cat "$_impdir/all/acq.usai" 2>/dev/null)"
+# SANDBOX scope writes a scoped key.
+GITLAB_TOKEN=glpat-DDDD ACQ_SECRET_STORE_DIR="$_impdir/all" ACQ_BACKEND=sbx "$ACQ" secret import gitlab mybox --all >/dev/null 2>&1
+[ -e "$_impdir/all/acq.mybox.gitlab" ] && pass "secret import SANDBOX: wrote scoped key" \
+  || fail "secret import SANDBOX: no scoped key" "missing acq.mybox.gitlab"
+# No tokens detected -> exits 0 with a clear message, no backend call.
+: > "$CALLS"
+none_out=$(USAI_API_KEY='' GITHUB_TOKEN='' GH_TOKEN='' GITLAB_TOKEN='' \
+  ACQ_SECRET_STORE_DIR="$_impdir/none" ACQ_BACKEND=sbx "$ACQ" secret import --all 2>&1); none_rc=$?
+assert_eq "secret import (none found): exits 0" "0" "$none_rc"
+assert_contains "secret import (none found): says nothing found" "$none_out" "no known service tokens found"
+rm -rf "$_impdir"
 cleanup_stubs
 
-# 7c4. Same fail-closed behavior on msb (which has no `secret` CLI at all) — the
-#      handoff must never even reach `msb secret`.
+# 7c3b. `acq secret import` on msb ALSO never invokes the backend `secret` CLI
+#       (msb has none) — it writes only the acq store, same as sbx.
+make_stubs
+_impmdir=$(mktemp -d "${TMPDIR:-/tmp}/acq-importm.XXXXXX")
+: > "$CALLS"
+USAI_API_KEY=sk-usai-MMMM GITHUB_TOKEN='' GH_TOKEN='' GITLAB_TOKEN='' \
+  ACQ_SECRET_STORE_DIR="$_impmdir/store" ACQ_BACKEND=msb "$ACQ" secret import --all >/dev/null 2>&1; impm_rc=$?
+impm_log=$(cat "$CALLS")
+assert_eq "secret import(msb): exits 0" "0" "$impm_rc"
+assert_not_contains "secret import(msb): never invokes 'msb secret'" "$impm_log" "msb secret"
+[ "$(cat "$_impmdir/store/acq.usai" 2>/dev/null)" = "sk-usai-MMMM" ] && pass "secret import(msb): stored usai value" \
+  || fail "secret import(msb): usai value wrong" "$(cat "$_impmdir/store/acq.usai" 2>/dev/null)"
+rm -rf "$_impmdir"
+cleanup_stubs
+
+# 7c4. `acq secret set-custom` still FAILS CLOSED on msb (no `secret` CLI at all)
+#      — the handoff must never even reach `msb secret`.
 make_stubs
 : > "$CALLS"
 ACQ_BACKEND=msb "$ACQ" secret set-custom -g --host h --env E >/dev/null 2>&1; scm_rc=$?
@@ -1308,12 +1361,6 @@ scm_log=$(cat "$CALLS")
 [ "$scm_rc" -ne 0 ] && pass "secret set-custom(msb): exits non-zero" \
   || fail "secret set-custom(msb): must exit non-zero" "rc=$scm_rc"
 assert_not_contains "secret set-custom(msb): never invokes 'msb secret'" "$scm_log" "msb secret"
-: > "$CALLS"
-ACQ_BACKEND=msb "$ACQ" secret import usai >/dev/null 2>&1; impm_rc=$?
-impm_log=$(cat "$CALLS")
-[ "$impm_rc" -ne 0 ] && pass "secret import(msb): exits non-zero" \
-  || fail "secret import(msb): must exit non-zero" "rc=$impm_rc"
-assert_not_contains "secret import(msb): never invokes 'msb secret'" "$impm_log" "msb secret"
 cleanup_stubs
 
 # 7d. An unrecognized `secret` subverb is an acq-vocabulary mistake — acq owns

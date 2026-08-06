@@ -919,17 +919,14 @@ case "$subcommand" in
         exit 1
         ;;
       import)
-        # FAIL CLOSED — not implemented. The forwarded backend `secret import`
-        # would bypass the acq store (and errors on msb, which has no `secret`
-        # CLI). The INTENDED `acq secret import` is the inverse: a helper that
-        # migrates existing backend secrets INTO the acq store (see
-        # docs/BACKEND_GUIDE.md, "Migration"). Reserve the verb rather than ship
-        # store-bypassing behavior under its name.
-        echo "acq: 'secret import' is not implemented yet." >&2
-        echo "     Planned: migrate existing backend secrets into the acq store" >&2
-        echo "     (see docs/BACKEND_GUIDE.md, \"Migration\"). For now, re-store each" >&2
-        echo "     secret through acq, e.g.: acq secret set -g usai" >&2
-        exit 1
+        # Populate the acq store from known service tokens in the host
+        # environment (usai/github/gitlab). This is the store-POPULATING helper —
+        # the inverse of the removed store-BYPASSING backend passthrough. It
+        # writes only the acq-owned store (both backends read it at provision);
+        # it never invokes the backend's own `secret` CLI. See acq_secret_import
+        # in acq.backends/common.sh and docs/BACKEND_GUIDE.md "Migration".
+        shift
+        acq_secret_import "$@"
         ;;
       --help|-h|"")
         # `acq secret` (no subverb) reaches here; `acq secret --help` is
@@ -949,7 +946,7 @@ case "$subcommand" in
         # than forwarding a token acq claimed to a backend that may reject it
         # differently (or accept something acq never meant to expose).
         echo "acq: unknown secret subcommand '${sub2}'." >&2
-        echo "     Try: acq secret set | rm | ls | --help" >&2
+        echo "     Try: acq secret set | rm | ls | import | --help" >&2
         exit 1
         ;;
     esac

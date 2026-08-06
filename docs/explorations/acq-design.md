@@ -832,10 +832,12 @@ can distinguish "not done yet" from "done differently":
     prevents accidentally overwriting the global USAi key during testing.
     Use `acq secret set -g usai` for global, or `acq secret set SANDBOX usai`
     to scope to a single sandbox. `acq secret rm`/`ls` also route through the acq
-    store. The store-bypassing backend subverbs `set-custom` and `import` are NOT
-    exposed through acq: `set-custom` fails closed with a pointer to
-    `acq secret set … --host … --env …` (the store-aware equivalent), and
-    `import` is reserved for a future store-migration helper (not implemented).
+    store. `acq secret import` scans the host environment for known service
+    tokens (usai/github/gitlab) and stores each in the acq store (global by
+    default, SANDBOX-scopable; interactive with `--all`/`--force`/`--dry-run`) —
+    the store-populating counterpart to `set`. The store-BYPASSING backend
+    subverb `set-custom` is NOT exposed through acq: it fails closed with a
+    pointer to `acq secret set … --host … --env …` (the store-aware equivalent).
 
 ### What is implemented (Phase 2 / 1.2.0)
 
