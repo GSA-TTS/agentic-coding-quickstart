@@ -30,18 +30,30 @@ serde-skipped).
 
 **Chosen resolution (this increment ships it):**
 
- - **The acq `start`/`restart` verb — the sole, deterministic mechanism.** Add an
-   acq `start`/`restart` verb backed by `acq_backend_start` (`msb start` /
-   `sbx start`). After the backend resume, re-drive
+ - **The acq `start`/`restart` verb — the sole, deterministic mechanism (msb).** Add an
+   acq `start`/`restart` verb backed by `acq_backend_start` (`msb start` on the
+   msb backend). After the backend resume, re-drive
    `acq_backend_ensure_kits_applied`, which re-applies the pinned kits
    idempotently and **re-runs the startup phase via the exec path** — the actual
    mechanism that brings kit `startup`/`background` services back up. On the
    **msb** backend, a **stopped** sandbox is also started automatically at the top
    of `acq_backend_ensure_kits_applied`, so `acq run <stopped-sandbox>` works
    end-to-end on msb (start → heal/startup → attach) — this closes the stated gap
-   without any native-persistence uncertainty. The **sbx** backend does not yet
-   have this start-if-stopped guard in its `acq_backend_ensure_kits_applied`; the
-   sbx `acq run <stopped-sandbox>` path is tracked as a follow-up (see Links).
+   without any native-persistence uncertainty.
+
+ - **sbx has no `start`/`restart` verb — resume is automatic on attach.** The sbx
+   CLI exposes no `start` (or `restart`) subcommand (`sbx --help`: create, exec,
+   run, stop, rm, …), and sbx has no analogue of msb's "start but stay detached":
+   with no attached session sbx auto-idles a sandbox to the stopped state, and the
+   next `sbx run` / `sbx exec` transparently resumes it (verified by hand). So on
+   sbx there is nothing for a standalone resume primitive to do:
+   `acq_backend_start` is **deliberately not defined** on the sbx adapter, and the
+   acq `start`/`restart` verbs are **capability-gated** — they exit with an
+   actionable message pointing at `acq run <name>` rather than shelling out to a
+   non-existent `sbx start`. `acq run <stopped-sbx-sandbox>` already works because
+   the heal (`sbx kit add`/`sbx exec`) and attach (`sbx run`) auto-start the
+   sandbox. (An earlier revision of this ADR wrongly listed `sbx start` as the sbx
+   resume primitive; no such subcommand exists — corrected here.)
 
 **Native restart OUTSIDE acq is out of scope (found in live testing).** An
 earlier revision of this increment also, behind an opt-in flag
@@ -165,8 +177,11 @@ testing proved native restart outside acq is infeasible — see the Update note.
 ### Positive Consequences
 
 - Kit `startup`/`background` services are restored on resume deterministically
-  via `acq start` / `acq restart` (both backends) and, on the msb backend, via
-  `acq run <stopped-sandbox>` (start-if-stopped heal).
+  via `acq start` / `acq restart` on **msb**, and, on **both** backends, via
+  `acq run <stopped-sandbox>` — on msb through the start-if-stopped heal, on sbx
+  through `sbx run`/`sbx exec` auto-resuming the sandbox. On sbx, `acq start`/
+  `acq restart` are capability-gated (no such verb exists) and direct the user to
+  `acq run`.
 - Command bodies are staged as files, not interpolated shell strings (SI-10).
 - No change to the neutral kit vocabulary or to install/idempotency semantics.
 - Safe-by-default: no image-entrypoint override; resume never changes the guest
@@ -209,6 +224,9 @@ testing proved native restart outside acq is infeasible — see the Update note.
   that startup re-runs on `acq run`/`acq start`/`acq restart` (acq re-drives the
   idempotent apply), and that a raw `msb start` outside acq is not a supported
   resume path.
-- Follow-up: the sbx adapter has no start-if-stopped guard in
-  `acq_backend_ensure_kits_applied`, so `acq run <stopped-sandbox>` on sbx heals
-  against a stopped guest — tracked in GSA-TTS/agentic-coding-quickstart#265.
+- Resolved: the sbx lifecycle model was reconciled with the real `sbx` CLI —
+  there is no `sbx start`/`restart` subcommand, and a stopped sbx sandbox is
+  auto-resumed by the next `sbx run`/`sbx exec`. `acq_backend_start` is therefore
+  intentionally undefined on sbx, `acq start`/`restart` are capability-gated to
+  point at `acq run`, and `acq run <stopped-sbx-sandbox>` works via that
+  auto-resume (GSA-TTS/agentic-coding-quickstart#265).

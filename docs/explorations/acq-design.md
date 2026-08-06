@@ -79,7 +79,7 @@ The `acq` command surface mirrors the subset of `sbx`/`msb`/`ppp` operations the
   - Warn if no SSH signing key in `ssh-add -L` (for git-ssh-sign kit).
   - Warn if no repo-local `user.email` (for GitHub-verified commits).
 - **Multi-workspace:** `acq run opencode ~/my-app ~/my-other-app:ro` — forward the extra mounts to the backend's mount mechanism.
-- **Pass-through:** unknown `acq` subcommands are forwarded to the active backend's CLI untouched (rare; documented escape hatch).
+- **Pass-through:** unknown `acq` subcommands are forwarded to the active backend's CLI (rare; documented escape hatch). acq prints a one-line stderr notice before forwarding so the user knows the verb is not acq's and that any output/errors below come from the backend, not acq. Verbs acq _owns_ (`run`, `create`, `secret`, `kit`, `backend`, …) never fall through — a malformed invocation of an owned verb fails closed with acq's own usage error.
 - **Config search path:** `~/.acq/config.yaml` → `<repo>/.acqrc` → env vars → CLI flags.
 - **`acq doctor`** is platform-aware: it checks what's installed, prints a matrix `[sbx: installed v0.34.0] [ppp: not found] [msb: installed v0.6.1]`, and asks `Choose default backend [sbx/msb/ppp]:` to write to `~/.acq/config.yaml`.
 
@@ -478,7 +478,7 @@ class IsolationBackend(ABC):
         """List all sandboxes known to this backend. Default raises."""
 ```
 
-The wrapper's common logic (name derivation, USAi key check via `run(curl)`, git identity check, SSH agent check, kit translations) lives in `common.sh` and calls the adapter's abstract methods. Each backend adapter is the only place that knows its backend's specific CLI shape; unknown subcommands pass through untouched (escape hatch).
+The wrapper's common logic (name derivation, USAi key check via `run(curl)`, git identity check, SSH agent check, kit translations) lives in `common.sh` and calls the adapter's abstract methods. Each backend adapter is the only place that knows its backend's specific CLI shape; unknown subcommands pass through to the backend (escape hatch) with an announced stderr notice, while malformed invocations of acq-owned verbs fail closed with acq's own error rather than leaking a raw backend error.
 
 ### Concrete adapter hookups
 
@@ -750,7 +750,8 @@ Both will reference this document (`docs/adr/agentic-coding-quickstart-v2-design
   qsbx-parity subset plus `backend`/`doctor`:
   `run`, `create`, `ls`, `stop`, `rm`, `exec`, `cp`, `ports`, `secret set`,
   `usai-rotate-api-key`, `version`, `doctor`, `backend list`, `backend set`.
-  Unknown subcommands pass through to the active backend CLI.
+  Unknown subcommands pass through to the active backend CLI (announced on
+  stderr).
 - **`acq.backends/common.sh`** — backend-agnostic logic: kit constants (same
   four sbx-kit refs, same pinned `PATTERNS_KIT_REF` as qsbx), backend
   resolution (`--backend` flag → `ACQ_BACKEND` env → XDG config → auto-detect),
@@ -830,8 +831,13 @@ can distinguish "not done yet" from "done differently":
     defaulting to global. This mirrors `sbx secret set` / `set-custom` and
     prevents accidentally overwriting the global USAi key during testing.
     Use `acq secret set -g usai` for global, or `acq secret set SANDBOX usai`
-    to scope to a single sandbox. All other `acq secret` subcommands
-    (`ls`, `rm`, `import`, `set-custom`, `--help`) pass through to sbx unchanged.
+    to scope to a single sandbox. `acq secret rm`/`ls` also route through the acq
+    store. `acq secret import` scans the host environment for known service
+    tokens (usai/github/gitlab) and stores each in the acq store (global by
+    default, SANDBOX-scopable; interactive with `--all`/`--force`/`--dry-run`) —
+    the store-populating counterpart to `set`. The store-BYPASSING backend
+    subverb `set-custom` is NOT exposed through acq: it fails closed with a
+    pointer to `acq secret set … --host … --env …` (the store-aware equivalent).
 
 ### What is implemented (Phase 2 / 1.2.0)
 

@@ -165,6 +165,8 @@ Tunables:
 |---------|---------|---------|
 | `ACQ_MSB_IMAGE` | `docker.io/docker/sandbox-templates:shell-docker` | Base OCI image (the sbx agent-template: ships the `agent` user + passwordless sudo, node/git/curl/ca-certificates, and an agent-writable npm global prefix). A custom override must be pullable and ship these prerequisites. |
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
+| `ACQ_SKIP_MSB_DOCTOR` | (unset) | Skip the automatic host-readiness check (`msb doctor`, and the `msb doctor --fix` it runs when the host is not ready). Set when the check is unreliable in your environment or you prefer to run it yourself. |
+| `ACQ_OPENCODE_POSTINSTALL_TIMEOUT` | `120` | Seconds to bound opencode's in-guest `postinstall.mjs` (which fetches a platform binary) so a wedged registry can't hang `acq run`; used only when the guest provides `timeout` |
 | `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
 | `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
 | `ACQ_MSB_WORKSPACE` | (first workspace) | Agent's **starting directory** (`-w`) on attach. Does NOT change the mount, which is always host-path:host-path; overrides only where the agent starts. |
@@ -396,7 +398,15 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 
 > **Migration:** if you previously stored the USAi key with `sbx secret …`, run
 > `acq secret set -g usai` once to move it into the acq store (the value is
-> re-prompted). A future `acq secret import` will automate this.
+> re-prompted). To pull tokens straight from your shell environment instead, run
+> `acq secret import` — it scans for known service vars (`USAI_API_KEY`,
+> `GITHUB_TOKEN`/`GH_TOKEN`, `GITLAB_TOKEN`) and stores each in the acq store
+> (global by default; pass a SANDBOX to scope — a second bare token after a
+> SERVICE is the SANDBOX, not a second service). It prompts before each import
+> and before overwriting; `--all` imports non-interactively (skipping existing),
+> `--force` (or `-f`) overwrites, and `--dry-run` previews without writing. A
+> value containing a newline or tab is refused (the single-line store cannot hold
+> it intact).
 >
 > **Overwriting:** `acq secret set` is non-destructive toward sbx — if sbx
 > already holds the secret it stops with an `sbx secret rm …` hint rather than
