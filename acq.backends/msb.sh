@@ -306,13 +306,39 @@ acq_backend_prepare() {
   fi
 
   # msb needs host virtualization (KVM on Linux, HVF on macOS, WHP on Windows).
-  # `msb doctor` reports readiness; surface a clear hint but do not hard-fail
-  # here (provision will fail closed with msb's own error if the host is unfit).
-  if ! msb doctor >/dev/null 2>&1; then
-    echo "acq: note — 'msb doctor' reports the host virtualization prerequisites are not" >&2
-    echo "      fully met (e.g. /dev/kvm missing). Sandbox creation may fail. Run" >&2
-    echo "      'msb doctor --fix' or see docs/BACKEND_GUIDE.md (msb requirements)." >&2
+  # Run the readiness check FOR the user (so the happy path needs no manual `msb
+  # doctor` step and shows nothing). Only speak up when the host is NOT ready:
+  # try an automatic `msb doctor --fix`, re-check, and — if still unfit — surface
+  # an actionable message with where to get help. Do not hard-fail here:
+  # provision fails closed with msb's own error if the host is truly unusable,
+  # and ACQ_SKIP_MSB_DOCTOR=1 opts out entirely (e.g. an environment where the
+  # check is unreliable). The check itself is best-effort (any error running it
+  # is treated as "cannot determine" and stays silent).
+  [ -n "${ACQ_SKIP_MSB_DOCTOR:-}" ] && return 0
+  command -v msb >/dev/null 2>&1 || return 0
+  # All `msb doctor` invocations redirect stdin from /dev/null (file convention):
+  # `msb doctor --fix` may prompt, and acq holds stdin open, so an un-redirected
+  # call would hang indefinitely on the exact unfit-host path this targets.
+  if msb doctor </dev/null >/dev/null 2>&1; then
+    return 0
   fi
+  # Not ready — attempt the fix automatically, then re-check. `msb doctor --fix`
+  # MUTATES host state (kvm group, device permissions), so announce it on stderr
+  # BEFORE running rather than mutating silently (AGENTS.md classifies infra
+  # changes as approval-worthy; ACQ_SKIP_MSB_DOCTOR=1 opts out entirely).
+  echo "acq: host not ready for microVMs — running 'msb doctor --fix' to set it up" >&2
+  echo "      (set ACQ_SKIP_MSB_DOCTOR=1 to skip this and fix it yourself)." >&2
+  msb doctor --fix </dev/null >/dev/null 2>&1 || true
+  if msb doctor </dev/null >/dev/null 2>&1; then
+    acq_debug "msb doctor: host ready after --fix"
+    return 0
+  fi
+  echo "acq: your machine isn't ready to run microVMs yet." >&2
+  echo "      msb needs host virtualization (KVM on Linux, Apple Silicon's" >&2
+  echo "      hypervisor on macOS, or the Windows Hypervisor Platform on Windows)." >&2
+  echo "      acq tried 'msb doctor --fix' automatically but the host is still not" >&2
+  echo "      ready. For details run 'msb doctor', see docs/QUICKSTART.md#msb-host-setup," >&2
+  echo "      or ask us for help at agentic-coding@gsa.gov." >&2
 }
 
 # ---------------------------------------------------------------------------

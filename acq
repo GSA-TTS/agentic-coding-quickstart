@@ -337,7 +337,11 @@ case "$subcommand" in
     sub2="${1:-}"
     case "$sub2" in
       list)
-        # List detected/installed backends.
+        # List detected/installed backends. Recover a backend installed in
+        # ~/.local/bin but not on PATH first, so the listing matches what
+        # `acq run` auto-detect will find.
+        _ensure_local_bin_on_path sbx >/dev/null 2>&1 || true
+        _ensure_local_bin_on_path msb >/dev/null 2>&1 || true
         printf 'Installed backends:\n'
         if command -v sbx >/dev/null 2>&1; then
           local_ver=$(sbx version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 | sed 's/^v//' || echo "?")

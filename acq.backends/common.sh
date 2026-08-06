@@ -713,13 +713,47 @@ _read_config_backend() {
   awk '/^[[:space:]]*backend[[:space:]]*:/ { gsub(/^[[:space:]]*backend[[:space:]]*:[[:space:]]*/,""); gsub(/[[:space:]]*$/,""); print; exit }' "$cfg"
 }
 
+# _ensure_local_bin_on_path — if a backend CLI is not on PATH but IS present in
+# ~/.local/bin (the default install location for `curl … | sh` installers, e.g.
+# microsandbox), prepend ~/.local/bin to PATH for THIS process so acq and the
+# backend adapter can find it. This spares a user who installed msb/sbx but never
+# added ~/.local/bin to their shell PATH from a confusing "command not found".
+# The change is process-local (not persisted); acq prints a one-time hint so the
+# user can make it durable. Idempotent (announces at most once per process).
+_ACQ_LOCAL_BIN_ANNOUNCED=""
+_ensure_local_bin_on_path() {
+  local be="$1"
+  local lb="${HOME:-}/.local/bin"
+  [ -n "${HOME:-}" ] || return 1
+  [ -x "$lb/$be" ] || return 1
+
+  # Already on PATH? Then nothing to do (defensive; caller only reaches here
+  # after `command -v "$be"` failed, but PATH may contain the dir unreadably).
+  case ":$PATH:" in
+    *":$lb:"*) return 1 ;;
+  esac
+
+  PATH="$lb:$PATH"
+  export PATH
+  if [ -z "$_ACQ_LOCAL_BIN_ANNOUNCED" ]; then
+    _ACQ_LOCAL_BIN_ANNOUNCED=1
+    echo "acq: found '$be' in $lb and added it to PATH for this run." >&2
+    echo "      To make this permanent, add the following to your shell startup" >&2
+    echo "      file (e.g. ~/.zshrc or ~/.bashrc):" >&2
+    echo "        export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
+  fi
+  return 0
+}
+
 # _backend_installed BACKEND — 0 if the named backend CLI is available.
 # Honors a test-only override, ACQ_TEST_INSTALLED_BACKENDS, a space-separated
 # allowlist (e.g. "sbx" or "msb sbx"). Tests set it to pin exactly which
 # backends auto-detect "sees" — `command -v` alone can't, because a developer's
 # real msb/sbx (and the coreutils the sourced scripts need) share PATH dirs, so
 # restricting PATH cannot hide one backend without also breaking the harness.
-# When the override is unset (production), falls back to a real `command -v`.
+# When the override is unset (production), falls back to a real `command -v`, and
+# if that misses, tries to recover a copy sitting in ~/.local/bin (see
+# _ensure_local_bin_on_path) before giving up.
 _backend_installed() {
   local be="$1"
   if [ -n "${ACQ_TEST_INSTALLED_BACKENDS+x}" ]; then
@@ -728,7 +762,9 @@ _backend_installed() {
       *) return 1 ;;
     esac
   fi
-  command -v "$be" >/dev/null 2>&1
+  command -v "$be" >/dev/null 2>&1 && return 0
+  # Not on PATH — self-repair if it is installed in ~/.local/bin.
+  _ensure_local_bin_on_path "$be" && command -v "$be" >/dev/null 2>&1
 }
 
 # _sbx_has_sandboxes — 0 if the sbx CLI reports at least one existing sandbox.
@@ -808,6 +844,15 @@ _load_backend_adapter() {
     echo "acq: error: no backend adapter found for '${name}' (expected: ${adapter})" >&2
     exit 1
   fi
+  # Self-repair PATH for the RESOLVED backend regardless of how it was chosen
+  # (explicit --backend, ACQ_BACKEND, saved config, or auto-detect). Auto-detect
+  # already probes via _backend_installed, but the explicit/env/config paths set
+  # the name directly — so a user who pinned a backend that lives only in
+  # ~/.local/bin would otherwise still hit "command not found" in the adapter.
+  # Only attempt the recovery when the backend is NOT already resolvable, so a
+  # user-writable ~/.local/bin copy never shadows a legit system binary that the
+  # agent (and everything acq subsequently execs) would otherwise use.
+  command -v "$name" >/dev/null 2>&1 || _ensure_local_bin_on_path "$name" >/dev/null 2>&1 || true
   # shellcheck disable=SC1090
   . "$adapter"
   ACQ_RESOLVED_BACKEND="$name"
@@ -830,8 +875,10 @@ acq_resolve_backend() {
       name="$cfg_name"
     else
       _auto_detect_backend || {
-        echo "acq: error: no backend detected. Install msb (>= 0.6.0) or sbx (>= 0.35.0)," >&2
-        echo "     or set ACQ_BACKEND." >&2
+        echo "acq: error: no backend detected (looked on PATH and in ~/.local/bin)." >&2
+        echo "     Install msb (>= 0.6.0) or sbx (>= 0.35.0), or set ACQ_BACKEND." >&2
+        echo "     If it is already installed elsewhere, add its directory to PATH," >&2
+        echo "     e.g.:  export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
         echo "     Run 'acq doctor' for installation hints." >&2
         exit 1
       }
@@ -1703,6 +1750,11 @@ ensure_valid_key() {
 
 acq_print_doctor() {
   local sbx_status msb_status
+
+  # Recover a backend installed in ~/.local/bin but not on PATH, so doctor's
+  # verdict matches what `acq run` will actually find (self-repair parity).
+  _ensure_local_bin_on_path sbx >/dev/null 2>&1 || true
+  _ensure_local_bin_on_path msb >/dev/null 2>&1 || true
 
   # Check sbx
   if command -v sbx >/dev/null 2>&1; then

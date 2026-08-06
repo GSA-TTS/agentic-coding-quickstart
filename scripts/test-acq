@@ -169,7 +169,21 @@ _msb_sub="${1:-}"
 case "$_msb_sub" in
   --version|-V) printf 'msb 0.6.6\n' ;;
   --help|-h) printf 'MSB-TOPLEVEL-HELP for msb\n' ;;
-  doctor) exit 0 ;;
+  doctor)
+    # Model host-readiness. Default: ready (exit 0), so the happy path is silent.
+    # STUB_MSB_DOCTOR_UNFIT=1 models a not-ready host that STAYS unfit even after
+    # --fix. STUB_MSB_DOCTOR_FIXABLE=1 models a host that is unfit until
+    # `msb doctor --fix` runs, then ready (the --fix call plants a marker).
+    # STUB_MSB_DOCTOR_READS_STDIN=1 makes the call READ stdin (like a prompting
+    # `msb doctor --fix`); acq must redirect </dev/null or it would hang — the
+    # `cat` drains and returns promptly only because acq closed stdin.
+    [ "${STUB_MSB_DOCTOR_READS_STDIN:-0}" = "1" ] && cat >/dev/null 2>&1
+    case " $* " in
+      *" --fix "*) [ "${STUB_MSB_DOCTOR_FIXABLE:-0}" = "1" ] && : >"$STUBDIR/.msb_fixed"; exit 0 ;;
+    esac
+    if [ "${STUB_MSB_DOCTOR_FIXABLE:-0}" = "1" ] && [ -f "$STUBDIR/.msb_fixed" ]; then exit 0; fi
+    if [ "${STUB_MSB_DOCTOR_UNFIT:-0}" = "1" ] || [ "${STUB_MSB_DOCTOR_FIXABLE:-0}" = "1" ]; then exit 1; fi
+    exit 0 ;;
   create) : >"$STUBDIR/.msb_created" ;;
   inspect)
     # `msb inspect <name> --format json` — emit a create-time published-ports
@@ -534,6 +548,113 @@ make_stubs; load_acq
   assert_eq "backend: explicit env wins" "msb" "$ACQ_RESOLVED_BACKEND"
   assert_not_contains "backend: explicit selection is silent" "$note" "acq: using"
 ) 2>/dev/null; pass "backend: explicit ACQ_BACKEND is silent (no nudge)"
+cleanup_stubs
+
+# 2i. PATH self-repair: a backend installed ONLY in ~/.local/bin (not on PATH)
+#     is recovered by _ensure_local_bin_on_path — acq adds ~/.local/bin to PATH
+#     for the run, prints a one-time durable-fix hint, and detection succeeds.
+#     Regression guard for the "installed but not on PATH -> command not found"
+#     bug: acq must self-repair rather than fail.
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND ACQ_TEST_INSTALLED_BACKENDS 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  # Put the msb stub ONLY in a fake ~/.local/bin, NOT on PATH.
+  fake_home="$STUBDIR/home"
+  mkdir -p "$fake_home/.local/bin"
+  mv "$STUBDIR/msb" "$fake_home/.local/bin/msb"
+  # PATH has coreutils but neither backend dir; HOME points at the fake home.
+  _coreutils_dir=$(dirname "$(command -v env)")
+  HOME="$fake_home"; export HOME
+  PATH="$_coreutils_dir"; export PATH
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  _backend_installed msb 2>"$STUBDIR/rep_note"
+  rc=$?
+  note=$(cat "$STUBDIR/rep_note")
+  assert_eq "self-repair: backend in ~/.local/bin is detected" "0" "$rc"
+  assert_contains "self-repair: ~/.local/bin added to PATH for this run" "$PATH" "$fake_home/.local/bin"
+  assert_contains "self-repair: prints a durable-fix hint" "$note" "export PATH="
+) 2>/dev/null; pass "self-repair: backend recovered from ~/.local/bin"
+cleanup_stubs
+
+# 2j. PATH self-repair applies on the EXPLICIT path too (not just auto-detect):
+#     _load_backend_adapter recovers a pinned backend that lives only in
+#     ~/.local/bin, so `--backend`/ACQ_BACKEND/config users are not left with
+#     "command not found".
+make_stubs; load_acq
+(
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  fake_home="$STUBDIR/home2"
+  mkdir -p "$fake_home/.local/bin"
+  mv "$STUBDIR/msb" "$fake_home/.local/bin/msb"
+  _coreutils_dir=$(dirname "$(command -v env)")
+  HOME="$fake_home"; export HOME
+  PATH="$_coreutils_dir"; export PATH
+  ACQ_BACKEND="msb"; export ACQ_BACKEND
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  acq_resolve_backend "" >/dev/null 2>&1
+  assert_eq "self-repair (explicit): resolved backend is msb" "msb" "$ACQ_RESOLVED_BACKEND"
+  assert_contains "self-repair (explicit): msb now resolvable on PATH" "$(command -v msb 2>/dev/null)" "$fake_home/.local/bin/msb"
+) 2>/dev/null; pass "self-repair: explicit backend recovered from ~/.local/bin"
+cleanup_stubs
+
+# 2k. The durable-fix hint is announced at most ONCE per process
+#     (_ACQ_LOCAL_BIN_ANNOUNCED): a second recovery in the same process is silent.
+make_stubs; load_acq
+(
+  unset ACQ_BACKEND ACQ_TEST_INSTALLED_BACKENDS 2>/dev/null || true
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  fake_home="$STUBDIR/home3"
+  mkdir -p "$fake_home/.local/bin"
+  mv "$STUBDIR/msb" "$fake_home/.local/bin/msb"
+  _coreutils_dir=$(dirname "$(command -v env)")
+  HOME="$fake_home"; export HOME
+  PATH="$_coreutils_dir"; export PATH
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  _ensure_local_bin_on_path msb 2>"$STUBDIR/n1"    # first: prepends + announces
+  _ensure_local_bin_on_path msb 2>"$STUBDIR/n2"    # second: already on PATH, silent
+  assert_contains "self-repair: first call announces" "$(cat "$STUBDIR/n1")" "export PATH="
+  assert_eq "self-repair: second call is silent" "" "$(cat "$STUBDIR/n2")"
+) 2>/dev/null; pass "self-repair: durable-fix hint announced at most once per process"
+cleanup_stubs
+
+# 2l. _load_backend_adapter must NOT prepend ~/.local/bin when the backend is
+#     already resolvable on PATH — a user-writable ~/.local/bin copy must never
+#     shadow a legit system binary for what acq (and the agent) subsequently exec.
+make_stubs; load_acq
+(
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  # System msb: keep the stub in $STUBDIR (on PATH). ALSO plant a decoy in
+  # ~/.local/bin; if the gate is wrong it would jump ahead of the system copy.
+  fake_home="$STUBDIR/home4"
+  mkdir -p "$fake_home/.local/bin"
+  printf '#!/bin/sh\necho DECOY\n' > "$fake_home/.local/bin/msb"
+  chmod +x "$fake_home/.local/bin/msb"
+  HOME="$fake_home"; export HOME
+  PATH="$STUBDIR:$(dirname "$(command -v env)")"; export PATH
+  ACQ_BACKEND="msb"; export ACQ_BACKEND
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  acq_resolve_backend "" >/dev/null 2>&1
+  # ~/.local/bin must NOT have been prepended (system msb already resolved).
+  case ":$PATH:" in
+    *":$fake_home/.local/bin:"*) resolved_shadow=yes ;;
+    *) resolved_shadow=no ;;
+  esac
+  assert_eq "self-repair: does not shadow a system backend" "no" "$resolved_shadow"
+  assert_eq "self-repair: system msb still first on PATH" "$STUBDIR/msb" "$(command -v msb)"
+) 2>/dev/null; pass "self-repair: gated so it never shadows a system backend"
 cleanup_stubs
 
 # ===========================================================================
@@ -1548,6 +1669,90 @@ out=$(printf 'n\n' | "$ACQ" doctor 2>&1)
 assert_contains "msb: doctor shows msb installed" "$out" "msb: installed v0.6.6"
 assert_not_contains "msb: doctor drops 'coming in 1.2.x'" "$out" "coming in 1.2.x"
 cleanup_stubs
+
+# 8j2. acq runs the msb host-readiness check itself (no manual `msb doctor`
+#      step). Happy path: host ready -> acq_backend_prepare is SILENT.
+make_stubs; load_acq
+(
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  out=$(acq_backend_prepare 2>&1)
+  assert_not_contains "msb: ready host -> prepare is silent" "$out" "isn't ready"
+) 2>/dev/null; pass "msb: host-readiness check silent on the happy path"
+cleanup_stubs
+
+# 8j3. Host unfit but fixable: acq runs `msb doctor --fix` itself and, once the
+#      re-check passes, stays SILENT (user does nothing, sees nothing).
+make_stubs; load_acq
+(
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  out=$(STUB_MSB_DOCTOR_FIXABLE=1 acq_backend_prepare 2>&1)
+  log=$(cat "$CALLS")
+  assert_contains "msb: prepare auto-runs 'msb doctor --fix'" "$log" "msb doctor --fix"
+  # The host-mutating --fix must be ANNOUNCED on stderr before it runs (never a
+  # silent infra change), and name the opt-out.
+  assert_contains "msb: announces before running --fix" "$out" "running 'msb doctor --fix'"
+  assert_contains "msb: announcement names the opt-out" "$out" "ACQ_SKIP_MSB_DOCTOR=1"
+  assert_not_contains "msb: fixable host -> no not-ready message after --fix" "$out" "isn't ready"
+) 2>/dev/null; pass "msb: auto-fixes a fixable host and stays silent"
+cleanup_stubs
+
+# 8j4. Host unfit and NOT fixable: after auto --fix fails, acq surfaces ONE clear
+#      not-ready message pointing at help — and does not hard-fail (exit 0).
+make_stubs; load_acq
+(
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  out=$(STUB_MSB_DOCTOR_UNFIT=1 acq_backend_prepare 2>&1); rc=$?
+  assert_contains "msb: unfit host -> clear not-ready message" "$out" "isn't ready to run microVMs"
+  assert_contains "msb: unfit host -> points at help" "$out" "agentic-coding@gsa.gov"
+  assert_eq "msb: readiness check does not hard-fail" "0" "$rc"
+) 2>/dev/null; pass "msb: unfit host surfaces one actionable message, no hard-fail"
+cleanup_stubs
+
+# 8j5. ACQ_SKIP_MSB_DOCTOR=1 opts out of the readiness check entirely.
+make_stubs; load_acq
+(
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  out=$(STUB_MSB_DOCTOR_UNFIT=1 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1)
+  log=$(cat "$CALLS")
+  assert_not_contains "msb: skip flag -> no not-ready message" "$out" "isn't ready"
+  assert_not_contains "msb: skip flag -> no doctor call" "$log" "msb doctor"
+) 2>/dev/null; pass "msb: ACQ_SKIP_MSB_DOCTOR opts out of the readiness check"
+cleanup_stubs
+
+# 8j6. The msb doctor calls redirect stdin from /dev/null, so a prompting
+#      `msb doctor`/`--fix` cannot hang acq (the reviewer reproduced a real
+#      indefinite hang here). The stub READS stdin when STUB_MSB_DOCTOR_READS_STDIN
+#      is set. We give the run a stdin that never reaches EOF on its own (a
+#      background sleep feeding a pipe): if acq failed to redirect the doctor
+#      calls to </dev/null, the stub's `cat` would read that pipe and block until
+#      the sleep ends. `timeout` turns any regression into a loud failure (124)
+#      rather than a hung suite. Skipped only if `timeout` is unavailable.
+if command -v timeout >/dev/null 2>&1; then
+  make_stubs; load_acq
+  hang_rc=0
+  { sleep 30; } | timeout 8 sh -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'"
+    . "'"${REPO_ROOT}"'/acq.backends/msb.sh"
+    STUB_MSB_DOCTOR_FIXABLE=1 STUB_MSB_DOCTOR_READS_STDIN=1 acq_backend_prepare
+  ' >/dev/null 2>&1 || hang_rc=$?
+  # 124 = timed out (would-be hang -> redirect regression); anything else = returned.
+  assert_not_contains "msb: doctor calls do not hang on open stdin" "TIMEOUT-$hang_rc" "TIMEOUT-124"
+  cleanup_stubs
+else
+  pass "msb: msb doctor stdin-hang guard skipped (no 'timeout' available)"
+fi
 
 # 8k. msb secret set usai stores in the acq store + confirms concisely.
 make_stubs
