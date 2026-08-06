@@ -816,17 +816,33 @@ case "$subcommand" in
           command "${ACQ_RESOLVED_BACKEND}" secret ls "$@"
         fi
         ;;
-      import|set-custom)
-        # Delegate to the backend's own secret CLI, but ANNOUNCE it: these
-        # subverbs are NOT wired through the acq secret store (unlike set/rm/ls),
-        # so the user must know the handoff happened and that any output/errors
-        # come from the backend, not acq. shift so $sub2 is not ALSO left in $@
-        # (that would double the subcommand token, e.g. `sbx secret import
-        # import`); re-supply it explicitly.
-        shift
-        echo "acq: 'secret $sub2' is not wired through the acq secret store — forwarding to '${ACQ_RESOLVED_BACKEND}'." >&2
-        echo "     (output and any errors below are from '${ACQ_RESOLVED_BACKEND}', not acq)" >&2
-        command "${ACQ_RESOLVED_BACKEND}" secret "$sub2" "$@"
+      set-custom)
+        # FAIL CLOSED — do NOT forward to the backend. Raw `set-custom` is a
+        # strict, store-BYPASSING subset of acq's managed custom-endpoint path:
+        # it writes only the backend's own table (invisible to `acq secret ls`,
+        # never re-fed on rotation, not removable via `acq secret rm SERVICE`),
+        # exposes the value on argv (sbx --value), and on msb there is no `secret`
+        # CLI at all so it just errors. The acq-store-aware equivalent already
+        # does everything it does, better, on BOTH backends:
+        #     acq secret set SERVICE --host HOST --env ENV
+        # (value read off-argv, host/env sidecar recorded, bound at provision).
+        echo "acq: 'secret set-custom' is not supported — it would bypass the acq secret store." >&2
+        echo "     Use the acq-store-aware equivalent (works on both backends, keeps the value off argv):" >&2
+        echo "       acq secret set [-g | SANDBOX] SERVICE --host HOST --env ENV" >&2
+        exit 1
+        ;;
+      import)
+        # FAIL CLOSED — not implemented. The forwarded backend `secret import`
+        # would bypass the acq store (and errors on msb, which has no `secret`
+        # CLI). The INTENDED `acq secret import` is the inverse: a helper that
+        # migrates existing backend secrets INTO the acq store (see
+        # docs/BACKEND_GUIDE.md, "Migration"). Reserve the verb rather than ship
+        # store-bypassing behavior under its name.
+        echo "acq: 'secret import' is not implemented yet." >&2
+        echo "     Planned: migrate existing backend secrets into the acq store" >&2
+        echo "     (see docs/BACKEND_GUIDE.md, \"Migration\"). For now, re-store each" >&2
+        echo "     secret through acq, e.g.: acq secret set -g usai" >&2
+        exit 1
         ;;
       --help|-h|"")
         # Print acq's own summary, then delegate to backend for full detail.
@@ -838,16 +854,23 @@ Usage:
   acq secret rm  [-g | SANDBOX] SERVICE      # remove an acq-managed secret
   acq secret rm  [-g | SANDBOX] <placeholder>  # (sbx only: raw placeholder → passthrough)
   acq secret ls [-g | SANDBOX]               # list acq-managed secrets
-  acq secret import [SERVICE] [--all] [--force] [--dry-run]
-  acq secret set-custom [-g | SANDBOX] --host HOST --env ENV
+
+Custom endpoints: use `acq secret set SERVICE --host HOST --env ENV` — it stores
+the value in the acq store (off argv), records the host/env binding, and works
+on both backends. The raw backend `secret set-custom` is intentionally NOT
+exposed through acq (it would bypass the acq store). `acq secret import` (a
+planned store-migration helper) is not implemented yet.
 
 `acq secret rm SERVICE` (usai/github/gitlab) deletes the value from the acq
 store and clears the backend's injector. `acq secret ls` lists the secrets acq
 manages (scope, service, whether a value is stored, and the ENV@HOST binding) —
 never the values themselves; on msb the acq store is the source of truth, on sbx
-this shows the sbx proxy table. Other subcommands pass through to the backend.
+this shows the sbx proxy table.
 
-Full sbx reference:
+The backend's own secret reference follows for context; acq deliberately routes
+all secret storage through its own store (above) rather than the backend's CLI.
+
+Full backend reference:
 SECRETUSAGE
         command "${ACQ_RESOLVED_BACKEND}" secret --help
         ;;
@@ -857,7 +880,7 @@ SECRETUSAGE
         # than forwarding a token acq claimed to a backend that may reject it
         # differently (or accept something acq never meant to expose).
         echo "acq: unknown secret subcommand '${sub2}'." >&2
-        echo "     Try: acq secret set | rm | ls | import | set-custom | --help" >&2
+        echo "     Try: acq secret set | rm | ls | --help" >&2
         exit 1
         ;;
     esac

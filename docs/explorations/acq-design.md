@@ -79,7 +79,7 @@ The `acq` command surface mirrors the subset of `sbx`/`msb`/`ppp` operations the
   - Warn if no SSH signing key in `ssh-add -L` (for git-ssh-sign kit).
   - Warn if no repo-local `user.email` (for GitHub-verified commits).
 - **Multi-workspace:** `acq run opencode ~/my-app ~/my-other-app:ro` — forward the extra mounts to the backend's mount mechanism.
-- **Pass-through:** unknown `acq` subcommands are forwarded to the active backend's CLI (rare; documented escape hatch). acq prints a one-line stderr notice before forwarding so the user knows the verb is not acq's and that any output/errors below come from the backend, not acq. Verbs acq *owns* (`run`, `create`, `secret`, `kit`, `backend`, …) never fall through — a malformed invocation of an owned verb fails closed with acq's own usage error.
+- **Pass-through:** unknown `acq` subcommands are forwarded to the active backend's CLI (rare; documented escape hatch). acq prints a one-line stderr notice before forwarding so the user knows the verb is not acq's and that any output/errors below come from the backend, not acq. Verbs acq _owns_ (`run`, `create`, `secret`, `kit`, `backend`, …) never fall through — a malformed invocation of an owned verb fails closed with acq's own usage error.
 - **Config search path:** `~/.acq/config.yaml` → `<repo>/.acqrc` → env vars → CLI flags.
 - **`acq doctor`** is platform-aware: it checks what's installed, prints a matrix `[sbx: installed v0.34.0] [ppp: not found] [msb: installed v0.6.1]`, and asks `Choose default backend [sbx/msb/ppp]:` to write to `~/.acq/config.yaml`.
 
@@ -831,8 +831,11 @@ can distinguish "not done yet" from "done differently":
     defaulting to global. This mirrors `sbx secret set` / `set-custom` and
     prevents accidentally overwriting the global USAi key during testing.
     Use `acq secret set -g usai` for global, or `acq secret set SANDBOX usai`
-    to scope to a single sandbox. All other `acq secret` subcommands
-    (`ls`, `rm`, `import`, `set-custom`, `--help`) pass through to sbx unchanged.
+    to scope to a single sandbox. `acq secret rm`/`ls` also route through the acq
+    store. The store-bypassing backend subverbs `set-custom` and `import` are NOT
+    exposed through acq: `set-custom` fails closed with a pointer to
+    `acq secret set … --host … --env …` (the store-aware equivalent), and
+    `import` is reserved for a future store-migration helper (not implemented).
 
 ### What is implemented (Phase 2 / 1.2.0)
 

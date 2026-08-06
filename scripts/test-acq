@@ -1226,11 +1226,9 @@ assert_contains "help: --help after -- passes through to backend exec" "$afterdd
 assert_not_contains "help: --help after -- did NOT print acq help" "$afterdd_log" "agentic coding quickstart wrapper"
 cleanup_stubs
 
-# 7c. `acq secret ls|import|set-custom` pass through to the backend WITHOUT
-#     doubling the subcommand token (regression: `sbx secret ls ls`). The set/rm
-#     branches shift; this branch must too. import/set-custom additionally
-#     ANNOUNCE the handoff (they skip the acq secret store) while ls is a silent
-#     acq-store view (no notice).
+# 7c. `acq secret ls` is a silent acq-store view (delegates to the backend on
+#     sbx WITHOUT doubling the token and WITHOUT a passthrough notice — it is an
+#     acq-owned verb, not an escape hatch).
 make_stubs
 : > "$CALLS"
 ls_out=$(ACQ_BACKEND=sbx "$ACQ" secret ls -q 2>&1 || true)
@@ -1238,13 +1236,52 @@ ls_log=$(cat "$CALLS")
 assert_contains "secret ls: forwards a single ls token" "$ls_log" "sbx secret ls -q"
 assert_not_contains "secret ls: does NOT double the token" "$ls_log" "secret ls ls"
 assert_not_contains "secret ls: not announced as a passthrough" "$ls_out" "forwarding to"
+cleanup_stubs
+
+# 7c2. `acq secret set-custom` FAILS CLOSED — it would bypass the acq secret
+#      store (write only the backend's own table, expose the value on argv, and
+#      on msb error outright). acq must NOT forward it to the backend and must
+#      point the user at the acq-store-aware `acq secret set … --host … --env …`.
+make_stubs
 : > "$CALLS"
-sc_out=$(ACQ_BACKEND=sbx "$ACQ" secret set-custom -g --host h --env E 2>&1 || true)
+sc_out=$(ACQ_BACKEND=sbx "$ACQ" secret set-custom -g --host h --env E 2>&1); sc_rc=$?
 sc_log=$(cat "$CALLS")
-assert_contains "secret set-custom: single token" "$sc_log" "sbx secret set-custom -g --host h --env E"
-assert_not_contains "secret set-custom: not doubled" "$sc_log" "set-custom set-custom"
-assert_contains "secret set-custom: announces it skips the acq store" "$sc_out" "not wired through the acq secret store"
-assert_contains "secret set-custom: attributes output to backend" "$sc_out" "from 'sbx', not acq"
+[ "$sc_rc" -ne 0 ] && pass "secret set-custom: exits non-zero" \
+  || fail "secret set-custom: must exit non-zero" "rc=$sc_rc"
+assert_contains "secret set-custom: says it would bypass the acq store" "$sc_out" "bypass the acq secret store"
+assert_contains "secret set-custom: points at the managed equivalent" "$sc_out" "acq secret set [-g | SANDBOX] SERVICE --host HOST --env ENV"
+assert_not_contains "secret set-custom: never forwards to the backend" "$sc_log" "sbx secret"
+cleanup_stubs
+
+# 7c3. `acq secret import` FAILS CLOSED — not implemented. The forwarded backend
+#      `secret import` would bypass the acq store (and errors on msb); the
+#      intended acq import is the inverse (store-populating migration). acq must
+#      NOT forward it and must say it is not implemented yet.
+make_stubs
+: > "$CALLS"
+imp_out=$(ACQ_BACKEND=sbx "$ACQ" secret import usai 2>&1); imp_rc=$?
+imp_log=$(cat "$CALLS")
+[ "$imp_rc" -ne 0 ] && pass "secret import: exits non-zero" \
+  || fail "secret import: must exit non-zero" "rc=$imp_rc"
+assert_contains "secret import: says not implemented yet" "$imp_out" "not implemented yet"
+assert_not_contains "secret import: never forwards to the backend" "$imp_log" "sbx secret"
+cleanup_stubs
+
+# 7c4. Same fail-closed behavior on msb (which has no `secret` CLI at all) — the
+#      handoff must never even reach `msb secret`.
+make_stubs
+: > "$CALLS"
+ACQ_BACKEND=msb "$ACQ" secret set-custom -g --host h --env E >/dev/null 2>&1; scm_rc=$?
+scm_log=$(cat "$CALLS")
+[ "$scm_rc" -ne 0 ] && pass "secret set-custom(msb): exits non-zero" \
+  || fail "secret set-custom(msb): must exit non-zero" "rc=$scm_rc"
+assert_not_contains "secret set-custom(msb): never invokes 'msb secret'" "$scm_log" "msb secret"
+: > "$CALLS"
+ACQ_BACKEND=msb "$ACQ" secret import usai >/dev/null 2>&1; impm_rc=$?
+impm_log=$(cat "$CALLS")
+[ "$impm_rc" -ne 0 ] && pass "secret import(msb): exits non-zero" \
+  || fail "secret import(msb): must exit non-zero" "rc=$impm_rc"
+assert_not_contains "secret import(msb): never invokes 'msb secret'" "$impm_log" "msb secret"
 cleanup_stubs
 
 # 7d. An unrecognized `secret` subverb is an acq-vocabulary mistake — acq owns
