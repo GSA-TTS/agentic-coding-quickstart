@@ -385,22 +385,22 @@ acq_backend_stop() {
   sbx stop "$1"
 }
 
-# acq_backend_start NAME — start (resume) a stopped sandbox (ADR-0017).
-# sbx exposes `sbx start` and preserves state on stop (ACQ_BACKEND_CAN_RESUME=1),
-# so this mirrors the msb verb: a thin resume primitive. The acq `start`/`restart`
-# dispatcher re-drives acq_backend_ensure_kits_applied after this to re-run the
-# idempotent kit apply (which restores startup services), same as the msb path.
+# NO acq_backend_start on sbx — DELIBERATELY.
 #
-# READINESS (S1): the msb adapter blocks on _acq_msb_wait_for_exec_ready inside
-# acq_backend_start because `msb exec` races the async guest boot after a resume.
-# sbx is left as a bare `sbx start` here: sbx has no post-resume readiness
-# primitive in use — _acq_sbx_wait_for_exec_ready exists but is not invoked after
-# provision/start today, and sbx's own `sbx exec` waits for the sandbox to become
-# ready — so there is no analogous mirror to add. If a live race is later observed
-# on sbx resume, mirror the msb approach here (add the wait after `sbx start`).
-acq_backend_start() {
-  sbx start "$1"
-}
+# The sbx CLI has no `start` (or `restart`) subcommand (`sbx --help`: create,
+# exec, run, stop, rm, … — no start). sbx also has no equivalent of msb's
+# "start but stay detached": with no attached session, sbx auto-idles a sandbox
+# to the stopped state, and it is transparently resumed by the next `sbx run` /
+# `sbx exec` (verified by hand). So there is nothing for a standalone resume
+# primitive to do, and an earlier `sbx start "$1"` here was calling a
+# non-existent subcommand (would fail with an unknown-command error).
+#
+# Because this function is intentionally undefined, the acq `start`/`restart`
+# dispatcher's `command -v acq_backend_start` guard capability-gates those verbs
+# on sbx with a clear message. The resume-on-attach path (`acq run <stopped>`)
+# still works: acq_backend_ensure_kits_applied heals via `sbx kit add`/`sbx exec`
+# and attach via `sbx run`, all of which auto-start a stopped sandbox — no
+# explicit start needed. See ADR-0017 for the reconciled sbx lifecycle model.
 
 acq_backend_terminate() {
   sbx rm --force "$1"

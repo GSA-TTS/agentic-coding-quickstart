@@ -3171,18 +3171,22 @@ cleanup_stubs
 # acq_backend_start, start-if-stopped-on-attach, and startup staging.
 # ---------------------------------------------------------------------------
 
-# 8o1L. acq_backend_start exists for BOTH backends and calls the right CLI.
+# 8o1L. acq_backend_start exists for msb and calls the right CLI. On sbx it is
+#        DELIBERATELY absent (sbx has no 'start' verb; a stopped sandbox resumes
+#        on the next `sbx run`/`sbx exec`), so acq must NOT define it or emit
+#        `sbx start` (which is not a real subcommand).
 make_stubs; load_acq
 : > "$CALLS"
 ( . "${REPO_ROOT}/acq.backends/msb.sh"; acq_backend_start msbstartbox >/dev/null 2>&1 )
 msb_start_log=$(cat "$CALLS")
 assert_contains "0017: msb acq_backend_start calls 'msb start NAME'" "$msb_start_log" "msb start msbstartbox"
 cleanup_stubs
-make_stubs; load_acq
-: > "$CALLS"
-( acq_backend_start sbxstartbox >/dev/null 2>&1 )   # sbx adapter already loaded by load_acq
-sbx_start_log=$(cat "$CALLS")
-assert_contains "0017: sbx acq_backend_start calls 'sbx start NAME'" "$sbx_start_log" "sbx start sbxstartbox"
+make_stubs; load_acq   # load_acq sources the sbx adapter
+if command -v acq_backend_start >/dev/null 2>&1; then
+  fail "sbx: acq_backend_start is NOT defined (sbx has no 'start' verb)" "it is defined"
+else
+  pass "sbx: acq_backend_start is NOT defined (sbx has no 'start' verb)"
+fi
 cleanup_stubs
 
 # 8o1M. `acq start NAME` (msb): calls `msb start NAME` AND re-drives the kit heal
@@ -3251,6 +3255,29 @@ make_stubs; load_acq
 out=$(ACQ_BACKEND=msb "$ACQ" restart 2>&1); rc=$?
 assert_contains "0017: acq restart missing name errors" "$out" "restart: missing sandbox name"
 if [ "$rc" -ne 0 ]; then pass "0017: acq restart missing name exits nonzero"; else fail "0017: acq restart missing name exits nonzero" "rc=$rc"; fi
+cleanup_stubs
+
+# 8o1O2. sbx capability-gating: `acq start`/`acq restart` on sbx (which has no
+#         'start'/'restart' verb and auto-resumes on attach) must fail cleanly
+#         with an actionable message pointing at `acq run`, and must NEVER emit a
+#         (non-existent) `sbx start`/`sbx restart` subcommand.
+make_stubs; load_acq
+: > "$CALLS"
+out=$(ACQ_BACKEND=sbx "$ACQ" start sbxbox 2>&1); rc=$?
+log=$(cat "$CALLS")
+assert_contains "sbx: acq start explains no 'start' verb" "$out" "no separate 'start' verb"
+assert_contains "sbx: acq start points at 'acq run'" "$out" "acq run sbxbox"
+assert_not_contains "sbx: acq start never calls 'sbx start'" "$log" "sbx start"
+if [ "$rc" -ne 0 ]; then pass "sbx: acq start exits nonzero (capability-gated)"; else fail "sbx: acq start exits nonzero (capability-gated)" "rc=$rc"; fi
+cleanup_stubs
+make_stubs; load_acq
+: > "$CALLS"
+out=$(ACQ_BACKEND=sbx "$ACQ" restart sbxbox 2>&1); rc=$?
+log=$(cat "$CALLS")
+assert_contains "sbx: acq restart explains no 'restart' verb" "$out" "no separate 'restart' verb"
+assert_not_contains "sbx: acq restart never calls 'sbx start'" "$log" "sbx start"
+assert_not_contains "sbx: acq restart never calls 'sbx restart'" "$log" "sbx restart"
+if [ "$rc" -ne 0 ]; then pass "sbx: acq restart exits nonzero (capability-gated)"; else fail "sbx: acq restart exits nonzero (capability-gated)" "rc=$rc"; fi
 cleanup_stubs
 
 # 8o1P. START-IF-STOPPED (the `acq run <stopped-sandbox>` path). A sandbox that
