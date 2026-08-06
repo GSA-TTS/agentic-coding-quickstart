@@ -1,0 +1,32 @@
+# Gitleaks Configuration for agentic-coding-quickstart
+# https://github.com/gitleaks/gitleaks
+#
+# Named .gitleaks.toml so the pre-commit gitleaks hook auto-loads it.
+# Extends the default ruleset and allowlists intentional example/test secrets.
+
+title = "Agentic Coding Quickstart Gitleaks Config"
+
+minVersion = "v8.25.0"
+
+[extend]
+# Use the default gitleaks rules as the base configuration
+useDefault = true
+
+[allowlist]
+description = "Allow documented example secrets and deliberate test fixtures"
+
+# Documentation + test paths that contain intentional, non-sensitive example
+# secrets. A full-history scan (public-readiness) flagged these; all are fake by
+# design — doc illustrations and sample-vulnerable-code the security tooling
+# scans for. Notably docs/explorations/downscoping-...md quotes GitHub's own
+# example client_id/client_secret and the gh CLI's PUBLIC OAuth client secret
+# (documented upstream as "safe to be embedded in version control").
+paths = [
+  '''docs/explorations/downscoping-github-credentials-for-local-agents\.md''',
+  '''docs/getting-started\.md''',
+  '''docs/safety-guidance\.md''',
+  '''docs/test-cases-schema\.md''',
+  '''\.agents/skills/secure-code-review/tests/.*''',
+  '''scripts/tests/test_validate_sensitive_terms\.py''',
+  '''test/sandbox-unit\.sh''',
+]
