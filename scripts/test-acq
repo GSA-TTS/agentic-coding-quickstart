@@ -717,11 +717,15 @@ log=$(cat "$CALLS")
 assert_contains "dispatch: exec -> sbx exec" "$log" "sbx exec mybox"
 cleanup_stubs
 
-# Verify unknown subcommand passes through to sbx.
+# Verify unknown subcommand passes through to sbx, and that the handoff is
+# ANNOUNCED on stderr (the user must know it left acq's vocabulary and that
+# subsequent output/errors are the backend's, not acq's).
 make_stubs
-out=$(ACQ_BACKEND=sbx "$ACQ" policy init balanced 2>/dev/null; true)
+out=$(ACQ_BACKEND=sbx "$ACQ" policy init balanced 2>&1; true)
 log=$(cat "$CALLS")
 assert_contains "dispatch: unknown passthrough -> sbx" "$log" "sbx policy"
+assert_contains "dispatch: unknown passthrough is announced" "$out" "not an acq subcommand — forwarding to 'sbx'"
+assert_contains "dispatch: passthrough notice attributes output to backend" "$out" "from 'sbx', not acq"
 cleanup_stubs
 
 # --kit interception: a user-supplied `--kit <ref>` on run/create MUST be
@@ -1224,18 +1228,38 @@ cleanup_stubs
 
 # 7c. `acq secret ls|import|set-custom` pass through to the backend WITHOUT
 #     doubling the subcommand token (regression: `sbx secret ls ls`). The set/rm
-#     branches shift; this branch must too.
+#     branches shift; this branch must too. import/set-custom additionally
+#     ANNOUNCE the handoff (they skip the acq secret store) while ls is a silent
+#     acq-store view (no notice).
 make_stubs
 : > "$CALLS"
-ACQ_BACKEND=sbx "$ACQ" secret ls -q >/dev/null 2>&1 || true
+ls_out=$(ACQ_BACKEND=sbx "$ACQ" secret ls -q 2>&1 || true)
 ls_log=$(cat "$CALLS")
 assert_contains "secret ls: forwards a single ls token" "$ls_log" "sbx secret ls -q"
 assert_not_contains "secret ls: does NOT double the token" "$ls_log" "secret ls ls"
+assert_not_contains "secret ls: not announced as a passthrough" "$ls_out" "forwarding to"
 : > "$CALLS"
-ACQ_BACKEND=sbx "$ACQ" secret set-custom -g --host h --env E >/dev/null 2>&1 || true
+sc_out=$(ACQ_BACKEND=sbx "$ACQ" secret set-custom -g --host h --env E 2>&1 || true)
 sc_log=$(cat "$CALLS")
 assert_contains "secret set-custom: single token" "$sc_log" "sbx secret set-custom -g --host h --env E"
 assert_not_contains "secret set-custom: not doubled" "$sc_log" "set-custom set-custom"
+assert_contains "secret set-custom: announces it skips the acq store" "$sc_out" "not wired through the acq secret store"
+assert_contains "secret set-custom: attributes output to backend" "$sc_out" "from 'sbx', not acq"
+cleanup_stubs
+
+# 7d. An unrecognized `secret` subverb is an acq-vocabulary mistake — acq owns
+#     the `secret` verb, so it must fail closed with acq's own error and NOT
+#     forward the token to the backend (which would surface a confusing raw
+#     backend error, or worse, silently accept something acq never meant to
+#     expose).
+make_stubs
+: > "$CALLS"
+bad_out=$(ACQ_BACKEND=sbx "$ACQ" secret bogus-verb 2>&1); bad_rc=$?
+bad_log=$(cat "$CALLS")
+assert_contains "secret bogus: acq's own unknown-subcommand error" "$bad_out" "unknown secret subcommand 'bogus-verb'"
+[ "$bad_rc" -ne 0 ] && pass "secret bogus: exits non-zero" \
+  || fail "secret bogus: must exit non-zero" "rc=$bad_rc"
+assert_not_contains "secret bogus: never forwards to the backend" "$bad_log" "sbx secret"
 cleanup_stubs
 
 # ===========================================================================

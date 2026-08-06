@@ -111,7 +111,8 @@ Subcommands:
                                            sandbox, in place (state preserved).
   help                                     Show this help.
 
-Any other subcommand is passed through to the active backend's CLI.
+Any other subcommand is passed through to the active backend's CLI (acq prints
+a notice first so you know the output/errors below it are the backend's).
 
 Global flags (before the subcommand):
   --backend sbx|msb    Override the active backend for this invocation.
@@ -145,6 +146,20 @@ _acq_backend_help() {
     echo "──────── ${be} --help ────────"
     "$be" --help 2>&1 || true
   fi
+}
+
+# _acq_backend_passthrough ARGS... — forward ARGS verbatim to the active backend
+# CLI, but ANNOUNCE the handoff first (stderr, always). This is acq's documented
+# escape hatch (ADR-0010; acq-design §4.4) for verbs acq does not own — but the
+# user must know (a) the handoff happened and (b) any usage/errors they see next
+# come from the backend, not acq. Without the notice, a raw backend error (e.g.
+# `unrecognized subcommand`) reads as an acq bug. The notice goes to stderr so
+# stdout stays clean for a user who is intentionally piping backend output.
+_acq_backend_passthrough() {
+  local be="${ACQ_RESOLVED_BACKEND:-the backend}"
+  echo "acq: '$1' is not an acq subcommand — forwarding to '${be}'." >&2
+  echo "     (output and any errors below are from '${be}', not acq)" >&2
+  command "${ACQ_RESOLVED_BACKEND}" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -789,8 +804,11 @@ case "$subcommand" in
       ls)
         # `acq secret ls [-g|SANDBOX]` — if the backend defines a native acq
         # secret listing (msb: the acq store is the source of truth, and there is
-        # no `msb secret ls`), use it. Otherwise pass through to the backend's own
-        # secret CLI unchanged (sbx: `sbx secret ls` shows the proxy table).
+        # no `msb secret ls`), use it. Otherwise the backend has its own secret
+        # CLI whose listing we surface (sbx: `sbx secret ls` shows the proxy
+        # table). This is NOT an escape-hatch passthrough — `secret ls` is an
+        # acq-owned verb and sbx's `secret ls` is its intended acq-store view — so
+        # it is delegated silently (no forwarding notice).
         shift
         if command -v acq_backend_secret_ls >/dev/null 2>&1; then
           acq_backend_secret_ls "$@"
@@ -799,10 +817,15 @@ case "$subcommand" in
         fi
         ;;
       import|set-custom)
-        # Pass through to the backend secret CLI unchanged. shift so $sub2 is not
-        # ALSO left in $@ (that would double the subcommand token, e.g.
-        # `sbx secret import import`); re-supply it explicitly.
+        # Delegate to the backend's own secret CLI, but ANNOUNCE it: these
+        # subverbs are NOT wired through the acq secret store (unlike set/rm/ls),
+        # so the user must know the handoff happened and that any output/errors
+        # come from the backend, not acq. shift so $sub2 is not ALSO left in $@
+        # (that would double the subcommand token, e.g. `sbx secret import
+        # import`); re-supply it explicitly.
         shift
+        echo "acq: 'secret $sub2' is not wired through the acq secret store — forwarding to '${ACQ_RESOLVED_BACKEND}'." >&2
+        echo "     (output and any errors below are from '${ACQ_RESOLVED_BACKEND}', not acq)" >&2
         command "${ACQ_RESOLVED_BACKEND}" secret "$sub2" "$@"
         ;;
       --help|-h|"")
@@ -829,8 +852,13 @@ SECRETUSAGE
         command "${ACQ_RESOLVED_BACKEND}" secret --help
         ;;
       *)
-        # Unknown subcommand — pass through to backend.
-        command "${ACQ_RESOLVED_BACKEND}" secret "$@"
+        # `secret` is an acq-owned verb, so an unrecognized subverb is a user
+        # mistake in acq's vocabulary — fail closed with acq's own error rather
+        # than forwarding a token acq claimed to a backend that may reject it
+        # differently (or accept something acq never meant to expose).
+        echo "acq: unknown secret subcommand '${sub2}'." >&2
+        echo "     Try: acq secret set | rm | ls | import | set-custom | --help" >&2
+        exit 1
         ;;
     esac
     ;;
@@ -854,8 +882,9 @@ SECRETUSAGE
     ;;
 
   *)
-    # Pass unknown subcommands through to the active backend CLI unchanged.
-    # For sbx: `sbx <subcommand> [args...]`
-    command "${ACQ_RESOLVED_BACKEND}" "$subcommand" "$@"
+    # Pass unknown subcommands through to the active backend CLI unchanged, but
+    # announce the handoff (see _acq_backend_passthrough) so the user knows the
+    # verb is not acq's and that any output/errors below come from the backend.
+    _acq_backend_passthrough "$subcommand" "$@"
     ;;
 esac
