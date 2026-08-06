@@ -1226,6 +1226,38 @@ assert_contains "help: --help after -- passes through to backend exec" "$afterdd
 assert_not_contains "help: --help after -- did NOT print acq help" "$afterdd_log" "agentic coding quickstart wrapper"
 cleanup_stubs
 
+# 7b2. Per-subcommand `--help` prints acq's OWN per-verb usage for verbs acq owns
+#      (secret/kit/backend), not merely the top-level banner. `acq secret set
+#      --help` (a sub-subcommand) routes to the `secret` usage too. Non-owned
+#      topics (run) still show the top-level banner. All exit 0.
+make_stubs
+# secret family
+sec_help=$(ACQ_BACKEND=sbx "$ACQ" secret --help 2>&1); sec_rc=$?
+assert_eq "help: 'secret --help' exits 0" "0" "$sec_rc"
+assert_contains "help: 'secret --help' shows acq secret usage" "$sec_help" "acq secret — manage sandbox secrets"
+assert_contains "help: 'secret --help' documents import" "$sec_help" "acq secret import"
+assert_not_contains "help: 'secret --help' is NOT just the top banner" "$sec_help" "agentic coding quickstart wrapper"
+secset_help=$(ACQ_BACKEND=sbx "$ACQ" secret set --help 2>&1)
+assert_contains "help: 'secret set --help' routes to secret usage" "$secset_help" "acq secret — manage sandbox secrets"
+secimp_help=$(ACQ_BACKEND=sbx "$ACQ" secret import --help 2>&1)
+assert_contains "help: 'secret import --help' routes to secret usage" "$secimp_help" "acq secret import"
+# kit family
+kit_help=$(ACQ_BACKEND=sbx "$ACQ" kit --help 2>&1); kit_rc=$?
+assert_eq "help: 'kit --help' exits 0" "0" "$kit_rc"
+assert_contains "help: 'kit --help' shows acq kit usage" "$kit_help" "acq kit — manage neutral hybrid/v1 kits"
+kitapply_help=$(ACQ_BACKEND=sbx "$ACQ" kit apply --help 2>&1)
+assert_contains "help: 'kit apply --help' routes to kit usage" "$kitapply_help" "acq kit — manage neutral hybrid/v1 kits"
+# backend family
+be_help=$(ACQ_BACKEND=sbx "$ACQ" backend --help 2>&1); be_rc=$?
+assert_eq "help: 'backend --help' exits 0" "0" "$be_rc"
+assert_contains "help: 'backend --help' shows acq backend usage" "$be_help" "acq backend — select the sandbox backend"
+beset_help=$(ACQ_BACKEND=sbx "$ACQ" backend set --help 2>&1)
+assert_contains "help: 'backend set --help' routes to backend usage" "$beset_help" "acq backend — select the sandbox backend"
+# non-owned verb: still the top-level banner
+run_help=$(ACQ_BACKEND=sbx "$ACQ" run --help 2>&1)
+assert_contains "help: 'run --help' shows the top-level banner" "$run_help" "agentic coding quickstart wrapper"
+cleanup_stubs
+
 # 7c. `acq secret ls` is a silent acq-store view (delegates to the backend on
 #     sbx WITHOUT doubling the token and WITHOUT a passthrough notice — it is an
 #     acq-owned verb, not an escape hatch).
