@@ -678,6 +678,7 @@ cleanup_stubs
 # Verify `acq create opencode /proj` calls sbx create with --name and --kit flags.
 make_stubs
 _projdir=$(mktemp -d "${TMPDIR:-/tmp}/acq-proj.XXXXXX")
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 out=$(ACQ_BACKEND=sbx "$ACQ" create opencode "$_projdir" 2>/dev/null)
 log=$(cat "$CALLS")
 assert_contains "dispatch: create -> sbx create --name" "$log" "sbx create --name"
@@ -693,6 +694,7 @@ cleanup_stubs
 make_stubs
 _ghproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-ghcreate.XXXXXX")
 ( cd "$_ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 out=$(ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$_ghproj/.secrets" \
   "$ACQ" create opencode "$_ghproj" </dev/null 2>&1)
 assert_contains "dispatch: create runs github-scope advisory" "$out" "no repo-scoped GitHub token"
@@ -700,11 +702,14 @@ rm -rf "$_ghproj"
 cleanup_stubs
 
 # `acq create` runs a NON-BLOCKING USAi key advisory: it warns on a definitively
-# invalid key but never aborts (create is detached). Drive the stub's key status
-# via STUB_KEY_STATUS. Use a bare temp workspace (no git remote) so the github
-# advisory stays quiet and doesn't confuse the assertion.
+# invalid key but never aborts (create is detached). A key must be stored first
+# (create now gates on key PRESENCE pre-provision, since msb binds at create);
+# the advisory then reflects the models-API status of the stored key. Drive the
+# stub's key status via STUB_KEY_STATUS. Use a bare temp workspace (no git
+# remote) so the github advisory stays quiet and doesn't confuse the assertion.
 make_stubs
 _keyproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-keycreate.XXXXXX")
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 # Bad key -> advisory fires, but create still succeeds (exit 0).
 out=$(STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" create opencode "$_keyproj" 2>&1); rc=$?
 assert_contains "dispatch: create warns on invalid USAi key" "$out" "invalid or expired (HTTP 401)"
@@ -715,34 +720,41 @@ assert_not_contains "dispatch: create silent on valid USAi key" "$out" "invalid 
 rm -rf "$_keyproj"
 cleanup_stubs
 
-# `acq run` GATES on the USAi key (ensure_valid_key): a non-200 aborts attach
-# unless the user sets/rotates. The message distinguishes "never set" from
-# "expired", and declining (empty answer on the [y/N] prompt) aborts in both
-# cases. Drive the stub's key status via STUB_KEY_STATUS and decline by feeding
-# an empty line on stdin. Bare workspace (no git remote) keeps the github
-# advisory quiet.
+# `acq run` GATES on the USAi key: on a fresh create it FIRST requires a key to
+# be stored (ensure_key_present, PRE-create, because msb binds secrets only at
+# create), then post-create validates that same real sandbox (ensure_valid_key).
+# A non-200 aborts unless the user sets/rotates; declining (empty answer on the
+# [y/N] prompt) aborts. Drive the stub's key status via STUB_KEY_STATUS and
+# decline by feeding an empty line on stdin. Bare workspace (no git remote) keeps
+# the github advisory quiet.
 
-# 3k1. No usai secret stored + bad status -> "no USAi API key is set" + "Set it
-#      now"; declining aborts the run (non-zero).
+# 3k1. No usai key stored -> PRE-create gate names the setup case + prompts to
+#      set; declining aborts the run (non-zero) BEFORE the sandbox is created.
 make_stubs
 _keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
+rm -f "$STUBDIR/.created"
 out=$(printf '\n' | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
-assert_contains "run: never-set key names the setup case" "$out" "No USAi API key is set"
+assert_contains "run: never-set key names the setup case" "$out" "No USAi API key is stored yet"
 assert_contains "run: never-set key prompts to set" "$out" "Set it now"
 assert_not_contains "run: never-set key does NOT say expired" "$out" "invalid or expired"
-assert_eq "run: never-set + decline aborts attach" "1" "$rc"
+assert_eq "run: never-set + decline aborts run" "1" "$rc"
+if [ -f "$STUBDIR/.created" ]; then
+  fail "run: never-set + decline must NOT create a sandbox" "sandbox was created before key was set"
+else
+  pass "run: never-set + decline does not create a sandbox"
+fi
 rm -rf "$_keyrun"
 cleanup_stubs
 
-# 3k2. usai secret PRESENT + bad status -> "invalid or expired" + "Rotate now"
-#      (regression: the set-but-rejected wording is unchanged); declining aborts.
+# 3k2. usai key PRESENT + bad status -> post-create gate says "invalid or
+#      expired" + "Rotate now"; declining aborts.
 make_stubs
 _keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 out=$(printf '\n' | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
 assert_contains "run: expired key names the rotate case" "$out" "invalid or expired"
 assert_contains "run: expired key prompts to rotate" "$out" "Rotate now"
-assert_not_contains "run: expired key does NOT say 'no USAi API key'" "$out" "No USAi API key is set"
+assert_not_contains "run: expired key does NOT say 'no USAi API key'" "$out" "No USAi API key is stored"
 assert_eq "run: expired + decline aborts attach" "1" "$rc"
 rm -rf "$_keyrun"
 cleanup_stubs
@@ -750,6 +762,7 @@ cleanup_stubs
 # 3k3. Healthy status attaches regardless of store state (no gate message).
 make_stubs
 _keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 out=$(STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
 assert_not_contains "run: healthy key -> no gate message" "$out" "Aborting attach"
 assert_eq "run: healthy key attaches" "0" "$rc"
@@ -761,6 +774,7 @@ cleanup_stubs
 #       The stub reports opencode broken until postinstall.mjs runs.
 make_stubs
 _ocrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-ocrun.XXXXXX")
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 out=$(STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_ocrun" 2>&1); rc=$?
 log=$(cat "$CALLS")
 assert_contains "run(opencode): runs postinstall.mjs when binary not functional" "$log" "postinstall.mjs"
@@ -776,6 +790,7 @@ cleanup_stubs
 # 3k5. When opencode is ALREADY functional, acq does NOT re-run postinstall.
 make_stubs
 _ocrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-ocok.XXXXXX")
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 out=$(STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_ocrun" 2>&1)
 log=$(cat "$CALLS")
 assert_not_contains "run(opencode): skips postinstall when already runnable" "$log" "postinstall.mjs"
@@ -864,6 +879,7 @@ cleanup_stubs
 # reaches `sbx create`. Use a throwaway temp dir as the workspace.
 _kitproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-kitproj.XXXXXX")
 make_stubs
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/mykit "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
@@ -880,6 +896,7 @@ cleanup_stubs
 
 # --kit=<ref> (equals form) is also intercepted.
 make_stubs
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit=/tmp/eqkit "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
@@ -889,6 +906,7 @@ cleanup_stubs
 
 # Multiple --kit flags are all intercepted.
 make_stubs
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/k1 --kit /tmp/k2 "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
@@ -899,6 +917,7 @@ cleanup_stubs
 
 # run form also intercepts --kit (routes through provision -> sbx create).
 make_stubs
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 out=$(ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/runkit "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
@@ -909,6 +928,7 @@ cleanup_stubs
 # A `--kit` AFTER the `--` separator belongs to the AGENT, not acq: it MUST NOT
 # be hijacked into the kit list, and it MUST survive intact in the agent args.
 make_stubs
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
 out=$(ACQ_BACKEND=sbx "$ACQ" run opencode "$_kitproj" -- --kit evil-agent-arg 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')

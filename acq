@@ -622,6 +622,14 @@ case "$subcommand" in
     preflight_workspace_path "$ws" || exit 1
     local_name=$(derive_name "$@") || exit 1
     [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
+
+    # The USAi API key must be stored before provisioning: msb binds secrets only
+    # at create time, so a sandbox created before the key exists carries no USAi
+    # binding. Gate on key presence first (fail closed if declined) so create
+    # picks it up. `create` is otherwise detached and never attaches.
+    if ! ensure_key_present; then
+      exit 1
+    fi
     acq_backend_provision "$local_name" "$@"
 
     # Non-blocking USAi key advisory. `create` is detached and never attaches,
@@ -683,6 +691,15 @@ case "$subcommand" in
         # the offer is intentionally only on this path.
         maybe_offer_bundle_refresh "${ACQ_RESOLVED_BACKEND}" "$local_name" "$_pre_heal_status"
       else
+        # Fresh create: the USAi API key MUST be stored before we provision,
+        # because a backend (msb) binds secrets only at create time. Creating the
+        # sandbox first and setting the key after would leave the real sandbox
+        # with no USAi binding — the exact split that made validation report 200
+        # (in a throwaway sandbox) yet 401 (in the real one). Gate on key
+        # presence first; fail closed if the user declines.
+        if ! ensure_key_present; then
+          exit 1
+        fi
         acq_backend_provision "$local_name" "${create_args[@]}"
       fi
 
