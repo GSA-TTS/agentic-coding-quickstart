@@ -154,8 +154,9 @@ exposed through acq (it would bypass the acq store).
 
 `acq secret import` scans your host environment for known service tokens
 (usai/github/gitlab) and stores each in the acq store (global by default; pass a
-SANDBOX to scope it). Existing entries are never overwritten silently: interactive
-mode prompts, --all skips overwrites, --force replaces. --dry-run previews only.
+SANDBOX to scope it — a second bare token after a SERVICE is the SANDBOX, not a
+second service). Existing entries are never overwritten silently: interactive
+mode prompts, --all skips overwrites, --force (-f) replaces. --dry-run previews only.
 
 `acq secret rm SERVICE` (usai/github/gitlab) deletes the value from the acq
 store and clears the backend's injector. `acq secret ls` lists the secrets acq
@@ -226,13 +227,16 @@ _acq_backend_help() {
   fi
 }
 
-# _acq_backend_passthrough ARGS... — forward ARGS verbatim to the active backend
-# CLI, but ANNOUNCE the handoff first (stderr, always). This is acq's documented
-# escape hatch (ADR-0010; acq-design §4.4) for verbs acq does not own — but the
-# user must know (a) the handoff happened and (b) any usage/errors they see next
-# come from the backend, not acq. Without the notice, a raw backend error (e.g.
-# `unrecognized subcommand`) reads as an acq bug. The notice goes to stderr so
-# stdout stays clean for a user who is intentionally piping backend output.
+# _acq_backend_passthrough VERB ARGS... — forward `VERB ARGS...` verbatim to the
+# active backend CLI, but ANNOUNCE the handoff first (stderr, always). This is
+# acq's documented escape hatch (ADR-0010; acq-design §4.4) for verbs acq does
+# not own — but the user must know (a) the handoff happened and (b) any
+# usage/errors they see next come from the backend, not acq. Without the notice,
+# a raw backend error (e.g. `unrecognized subcommand`) reads as an acq bug. The
+# notice goes to stderr so stdout stays clean for a user who is intentionally
+# piping backend output. VERB is BOTH the announced label and the forwarded
+# subcommand — callers pass the verb once (do not also leave it in the remaining
+# args, or it would be doubled).
 _acq_backend_passthrough() {
   local be="${ACQ_RESOLVED_BACKEND:-the backend}"
   echo "acq: '$1' is not an acq subcommand — forwarding to '${be}'." >&2
@@ -974,6 +978,10 @@ case "$subcommand" in
     # Pass unknown subcommands through to the active backend CLI unchanged, but
     # announce the handoff (see _acq_backend_passthrough) so the user knows the
     # verb is not acq's and that any output/errors below come from the backend.
+    # $1 is still the subcommand token here (this case block did not shift), so
+    # drop it before forwarding the remaining args — otherwise the verb would be
+    # doubled (e.g. `acq policy init` → `sbx policy policy init`).
+    shift
     _acq_backend_passthrough "$subcommand" "$@"
     ;;
 esac
