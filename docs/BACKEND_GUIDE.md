@@ -169,6 +169,8 @@ Tunables:
 | `ACQ_OPENCODE_POSTINSTALL_TIMEOUT` | `120` | Seconds to bound opencode's in-guest `postinstall.mjs` (which fetches a platform binary) so a wedged registry can't hang `acq run`; used only when the guest provides `timeout` |
 | `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
 | `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
+| `ACQ_MSB_BALANCED_EGRESS` | `1` (on) | Apply the sbx-`balanced` egress baseline at create (`--net-default deny` + an `allow@host:tcp:port` rule per vendored entry + `allow@dns`). Set `0`/`false`/`no`/`off`/empty to disable and fall back to kit-only egress (no deny-default emitted). See ADR-0018. |
+| `ACQ_MSB_BALANCED_HOSTS_FILE` | `<repo>/acq.backends/msb-balanced-hosts.txt` | Path to the vendored host list (a verbatim mirror of `sbx policy inspect local-policy`). Override for a site-specific egress set. |
 | `ACQ_MSB_WORKSPACE` | (first workspace) | Agent's **starting directory** (`-w`) on attach. Does NOT change the mount, which is always host-path:host-path; overrides only where the agent starts. |
 | `ACQ_MSB_MEMORY` | `4G` | Guest RAM at create (`-m`); `4G`/`4096`/`512M` (bare = MiB). Set empty to use msb's 512 MiB default |
 | `ACQ_MSB_CPUS` | `2` | Guest vCPU count at create (`-c`); set empty to use msb's 1-vCPU default |
@@ -192,6 +194,37 @@ request fails with `Could not resolve host`. The msb backend therefore passes
 microVM) to `msb create`. Override `ACQ_MSB_DNS_NAMESERVER` if `1.1.1.1` is
 blocked in your environment, or set it empty to fall back to msb's default (only
 if your host resolver is reachable from the guest).
+
+### Network egress (sbx-`balanced` parity)
+
+sbx ships a **`balanced`** network policy (the recommended sbx default) that
+allows a broad set of developer hosts — AI services, package registries,
+code/container hosts, cloud infrastructure, OS package mirrors, and
+certificate-validation endpoints — and blocks everything else. msb has no
+equivalent default; its egress is deny-by-default with only the hosts the kits
+declare (plus the npm registry when installing an agent).
+
+To reach parity, the msb backend applies the **same host set as sbx `balanced`
+by default**: at create it emits `--net-default deny` plus one
+`allow@<host>:tcp:<port>` rule per entry in the vendored list
+`acq.backends/msb-balanced-hosts.txt` (a verbatim mirror of `sbx policy inspect
+local-policy`), plus `allow@dns` for name resolution. Egress is therefore
+*restricted to* the balanced set (deny-by-default + allowlist), composed with the
+kits' own `caps.network.allow` rules.
+
+- **Disable** with `ACQ_MSB_BALANCED_EGRESS=0` (falls back to kit-only egress; no
+  deny-default is emitted, so `acq` does not restrict egress in that mode).
+- **Customize** by pointing `ACQ_MSB_BALANCED_HOSTS_FILE` at your own list.
+- **Wildcards / ports:** sbx `**.host` / `*.host` become msb domain-suffix
+  `*.host`; the intra-label glob `crl*.digicert.com` is broadened to
+  `*.digicert.com` (msb has no intra-label glob — this is logged and is the one
+  spot the msb set is intentionally wider than sbx); a host on both `:80` and
+  `:443` yields two rules.
+- **Drift:** the vendored file is a point-in-time snapshot. Re-sync it from `sbx
+  policy inspect local-policy` on the quarterly review cadence (see
+  `docs/KNOWN_FAILURE_MODES.md`).
+
+See [ADR-0018](adr/0018-msb-balanced-egress-baseline.md) for the full rationale.
 
 ### Guest memory and vCPU
 

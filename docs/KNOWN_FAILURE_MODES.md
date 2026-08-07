@@ -1365,6 +1365,58 @@ satisfy the code-signing gate on an unnotarized binary.
 
 ---
 
+## 31. msb Balanced-Egress Host List Drifts from the sbx `balanced` Policy
+
+### Symptoms
+
+On the **msb** backend a host that works on sbx (which uses the `balanced`
+policy) is refused from inside the sandbox — a `curl`/package-manager fetch fails
+to connect, or an install that succeeds on sbx times out on msb. Conversely, the
+msb host list may reference hosts sbx `balanced` has since removed.
+
+### Root Cause
+
+The msb backend mirrors the sbx `balanced` egress set from a **vendored,
+point-in-time snapshot** at `acq.backends/msb-balanced-hosts.txt` (see ADR-0018).
+sbx generates its `balanced` policy in the daemon; that list is **not** stored in
+this repo, so when sbx updates `balanced`, the vendored mirror goes stale until a
+human re-syncs it. (This is a deliberate tradeoff — the alternative, shelling out
+to `sbx policy inspect` at msb-create time, requires sbx installed on an msb-only
+host and couples the backends.)
+
+### Fix / Re-sync
+
+Re-sync the vendored file from a machine that has sbx with the `balanced` policy:
+
+```bash
+# 1. Inspect the active sbx policy and copy the network `allow` host:port rows.
+sbx policy inspect local-policy
+
+# 2. Diff them against the vendored mirror (network rows only; NOT the
+#    filesystem:read/write rows).
+$EDITOR acq.backends/msb-balanced-hosts.txt
+```
+
+Copy each `allow … network` `host:port` row verbatim into the matching group in
+the file (do **not** pre-translate wildcards or ports — the msb adapter's
+`_acq_msb_balanced_rules_into` does that). Commit the diff. The offline test
+`scripts/test-acq` re-parses the real file and fails if any line is malformed, so
+run it after editing.
+
+As a stopgap for a single missing host, either add it to a site-specific list and
+point `ACQ_MSB_BALANCED_HOSTS_FILE` at it, or (for a one-off) create with an extra
+`--net-rule allow@<host>:tcp:443`.
+
+### Prevention / Status
+
+- Re-verify on the **quarterly review cadence** (per `AGENTS.md` periodic
+  re-verification): re-run `sbx policy inspect local-policy` and diff the network
+  rows against `acq.backends/msb-balanced-hosts.txt`.
+- A future option (ADR-0018 "Alternatives considered") is to move the list into a
+  shared neutral kit consumed by both backends, removing the manual re-sync.
+
+---
+
 ## Debugging Checklist
 
 When something fails, work through this list:
