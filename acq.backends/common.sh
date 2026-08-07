@@ -110,6 +110,21 @@ if [ -n "${ACQ_SCRIPT_DIR:-}" ] && [ -f "${ACQ_SCRIPT_DIR}/acq.backends/secret-s
   . "${ACQ_SCRIPT_DIR}/acq.backends/secret-store.sh"
 fi
 
+# Source the TTY-aware progress helpers (acq_status / acq_spin_start /
+# acq_spin_stop). Used by the backend adapters to give friendly feedback during
+# the long, quiet provision/heal/rotate phases. Animation is TTY-gated and never
+# leaks into a captured/piped stream (see progress.sh). If the file is missing
+# (e.g. an older partial checkout), define no-op fallbacks so callers never break.
+if [ -n "${ACQ_SCRIPT_DIR:-}" ] && [ -f "${ACQ_SCRIPT_DIR}/acq.backends/progress.sh" ]; then
+  # shellcheck disable=SC1091
+  . "${ACQ_SCRIPT_DIR}/acq.backends/progress.sh"
+fi
+if ! command -v acq_status >/dev/null 2>&1; then
+  acq_status()     { printf 'acq: %s\n' "$*" >&2; }
+  acq_spin_start() { acq_status "$*"; }
+  acq_spin_stop()  { :; }
+fi
+
 # ============================================================================
 # Utility functions
 # ============================================================================

@@ -1733,7 +1733,9 @@ EOF
   acq_debug "msb create --name $name ${create_flags[*]} $ACQ_MSB_IMAGE"
   local _create_rc=0
   acq_debug "msb create: invoking (this returns fast; guest boots in background)"
+  acq_spin_start "Creating sandbox '$name'"
   msb create --name "$name" "${create_flags[@]}" "$ACQ_MSB_IMAGE" || _create_rc=$?
+  acq_spin_stop "Creating sandbox '$name'"
   acq_debug "msb create: returned rc=${_create_rc}"
   # Clear the transient secret env vars immediately after create reads them
   # (runs on both success and failure so the exported key never lingers).
@@ -1773,7 +1775,9 @@ EOF
   # otherwise kit application (and every downstream check) runs against a
   # sandbox that isn't really up, which looks like success but silently isn't.
   acq_debug "msb provision: waiting for exec-ready ($name)"
+  acq_spin_start "Waiting for the sandbox to finish booting"
   if ! _acq_msb_wait_for_exec_ready "$name"; then
+    acq_spin_stop "Waiting for the sandbox to finish booting"
     echo "acq(msb): error: sandbox '$name' did not become exec-ready within" >&2
     echo "acq(msb):   ${ACQ_MSB_EXEC_READY_TIMEOUT}s. 'msb create' returns 0 even when the" >&2
     echo "acq(msb):   sandbox VM fails to START (async boot) — a bad mount, image, or host" >&2
@@ -1784,6 +1788,7 @@ EOF
     # Leave the sandbox in place for inspection; caller decides whether to rm.
     return 1
   fi
+  acq_spin_stop "Waiting for the sandbox to finish booting"
   acq_debug "msb provision: exec-ready OK ($name)"
 
   # Verify the kits' runtime prerequisites are present in the base image
@@ -1815,7 +1820,13 @@ EOF
   # a plain msb base acq must install it). Idempotent + marker-gated; a no-op for
   # `shell`, a clear warning for an agent with no known recipe.
   acq_debug "msb provision: installing agent '$agent' ($name)"
-  _acq_msb_install_agent "$name" "$agent"
+  if _acq_msb_agent_has_install_recipe "$agent"; then
+    acq_spin_start "Installing the '$agent' agent"
+    _acq_msb_install_agent "$name" "$agent"
+    acq_spin_stop "Installing the '$agent' agent"
+  else
+    _acq_msb_install_agent "$name" "$agent"
+  fi
   acq_debug "msb provision: agent install step done ($name)"
 
   # Record which agent this sandbox runs, so acq_backend_attach (which only gets
@@ -1848,6 +1859,7 @@ EOF
   # individually non-fatal (the playbook kit already self-heals on next start),
   # matching acq_backend_ensure_kits_applied's best-effort heal loop.
   local kd
+  acq_spin_start "Applying configuration kits"
   for kd in "${kitdirs[@]}"; do
     acq_debug "msb provision: applying kit dir $kd ($name)"
     if _acq_msb_apply_kit_dir "$name" "$kd"; then
@@ -1857,6 +1869,7 @@ EOF
       echo "acq(msb):   the sandbox is up; re-run 'acq run' to re-apply, or inspect with ACQ_DEBUG=1." >&2
     fi
   done
+  acq_spin_stop "Applying configuration kits"
   acq_debug "msb provision: all kits applied; provision complete ($name)"
   # Record host-side bundle provenance now the built-in bundle is applied.
   # Best-effort: a provenance write failure never affects the
@@ -2695,6 +2708,7 @@ acq_backend_ensure_kits_applied() {
     kits+=("${_extras[@]}")
   fi
   local kitref kitdir i=0 ok=1
+  acq_spin_start "Refreshing configuration kits"
   for kitref in "${kits[@]}"; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
       echo "acq(msb): warning: could not fetch kit for healing: $kitref" >&2
@@ -2709,6 +2723,7 @@ acq_backend_ensure_kits_applied() {
     fi
     i=$((i + 1))
   done
+  acq_spin_stop "Refreshing configuration kits"
   # Record host-side bundle provenance ONLY when every built-in kit applied.
   # msb re-applies all built-in kits idempotently, so on full
   # success the sandbox carries the currently pinned bundle. Best-effort write.
@@ -3092,10 +3107,11 @@ acq_backend_rotate_key() {
   # use the throwaway to surface a hard-negative early (invalid key / network),
   # and leave the authoritative "validated" verdict to ensure_valid_key's
   # real-sandbox check_key on next attach.
-  echo "Validating new key in a temporary sandbox..." >&2
   local status=""
   if command -v check_fresh_sandbox_key >/dev/null 2>&1; then
+    acq_spin_start "Validating the new key in a temporary sandbox"
     status=$(check_fresh_sandbox_key)
+    acq_spin_stop "Validating the new key in a temporary sandbox"
   fi
 
   if [ -z "$status" ] || [ "$status" = "200" ]; then

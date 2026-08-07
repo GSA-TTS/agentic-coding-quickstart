@@ -121,11 +121,12 @@ filesystem and network access. Repeat this to create sandboxes for each project
 you want to work on.
 
 > [!NOTE]
-> **The first run does real work and may pause quietly for a minute or two.**
-> `acq` boots a microVM, installs the coding agent, and fetches its
-> configuration kits — all with little output while it happens. A quiet terminal
-> here is expected; it is not stuck. Later runs against the same project are much
-> faster.
+> **The first run does real work and takes a minute or two.** `acq` boots a
+> microVM, installs the coding agent, and fetches its configuration kits. It
+> shows a progress spinner and status lines as it goes, so you can watch each
+> phase — later runs against the same project are much faster. (To silence the
+> animation, e.g. in a script, set `ACQ_NO_PROGRESS=1`; plain status lines still
+> print.)
 
 On first run, `acq` sets you up interactively — nothing to configure beforehand:
 
@@ -448,7 +449,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 | File/Directory                      | Purpose                                                    |
 | ----------------------------------- | ---------------------------------------------------------- |
 | `acq`                               | Entry point — pluggable-backend wrapper (msb by default, or sbx) |
-| `acq.backends/`                     | Backend adapters (`common.sh`, `sbx.sh`, `msb.sh`, `kit-translate.sh`, `secret-store.sh`) |
+| `acq.backends/`                     | Backend adapters (`common.sh`, `sbx.sh`, `msb.sh`, `kit-translate.sh`, `secret-store.sh`, `progress.sh`) |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`acq usai-rotate-api-key`) |
 | `scripts/test-acq`                  | Offline unit harness for acq |
 | `scripts/verify-backends`           | Live end-to-end backend verification (needs Docker or KVM) |

@@ -133,5 +133,5 @@ Rejected because:
 
 - [NIST SP 800-53 Rev 5 — AC-6 Least Privilege](https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final)
 - [NIST SP 800-53 Rev 5 — SC-7 Boundary Protection](https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final)
-- [SBX Documentation](https://sbx.dev/docs) (if available)
+- [SBX releases (`docker/sbx-releases`)](https://github.com/docker/sbx-releases)
 - Related: `AGENTS.md` — Agent behavioral rules for this repository

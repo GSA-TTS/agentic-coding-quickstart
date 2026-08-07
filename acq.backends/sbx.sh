@@ -335,12 +335,14 @@ acq_backend_provision() {
   while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
 
   acq_debug "sbx create --name $name ${kf[*]} ${_stripped[*]:-}"
+  acq_spin_start "Creating sandbox '$name'"
   if [ "${#_stripped[@]}" -gt 0 ]; then
     sbx create --name "$name" "${kf[@]}" "${_stripped[@]}"
   else
     sbx create --name "$name" "${kf[@]}"
   fi
   local _rc=$?
+  acq_spin_stop "Creating sandbox '$name'"
   # Record host-side bundle provenance ONLY after a successful create — a failed
   # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
@@ -1084,7 +1086,6 @@ acq_backend_rotate_key() {
   # shellcheck disable=SC2064
   trap "sbx rm '$validation_sbx' -f >/dev/null 2>&1 || true" EXIT
 
-  echo "Validating new key in a temporary sandbox..." >&2
   # `sbx create` needs an authenticated sbx session. If it has expired, sbx
   # triggers an interactive browser login — and if its output is swallowed and
   # it's unbounded, rotation appears to hang with no explanation (quickstart
@@ -1094,11 +1095,13 @@ acq_backend_rotate_key() {
   # auth-status probe, so the timeout is the safety net.
   local create_timeout="${ROTATE_VALIDATE_TIMEOUT:-120}"
   local rc=0
+  acq_spin_start "Validating the new key in a temporary sandbox"
   if command -v timeout >/dev/null 2>&1; then
     timeout "$create_timeout" sbx create --name "$validation_sbx" shell . >/dev/null || rc=$?
   else
     sbx create --name "$validation_sbx" shell . >/dev/null || rc=$?
   fi
+  acq_spin_stop "Validating the new key in a temporary sandbox"
   if [ "$rc" != "0" ]; then
     if [ "$rc" = "124" ]; then
       echo "Validation timed out after ${create_timeout}s — sbx likely needed an interactive login." >&2

@@ -70,9 +70,11 @@ That's it. `acq run` creates the sandbox if it doesn't exist, heals any missing
 kits, validates your USAi key, and attaches the agent.
 
 > [!NOTE]
-> The **first** run boots a microVM, installs the agent, and fetches kits — it
-> may pause quietly for a minute or two with little output. That is expected,
-> not a hang; later runs are much faster.
+> The **first** run boots a microVM, installs the agent, and fetches kits — a
+> minute or two, with a progress spinner and status lines so you can follow
+> along. Later runs are much faster. Set `ACQ_NO_PROGRESS=1` to silence the
+> animation (plain status lines still print); `ACQ_DEBUG=1` also disables it in
+> favor of a timestamped trace.
 
 ### Step 3: Common commands
 
@@ -288,6 +290,22 @@ acq create opencode --kit ./kit-a --kit git+https://github.com/acme/kits.git#ref
 `--kit` refs are translated by `acq` exactly like `ACQ_EXTRA_KITS` entries (a
 neutral `hybrid/v1` kit is converted to the active backend's format), so they
 work with any backend — they are **not** forwarded raw to the backend CLI.
+
+---
+
+## Progress output
+
+During the long, quiet phases of `acq run` (booting the microVM, installing the
+agent, fetching/applying kits), `acq` prints status lines and — on an
+interactive terminal — an animated spinner, so you can tell work is happening.
+
+- **Interactive terminal:** spinner + status lines.
+- **Piped / redirected / CI:** plain status lines only (no animation), so logs
+  stay clean.
+- `ACQ_NO_PROGRESS=1` — never animate; still print the plain status lines.
+- `ACQ_DEBUG=1` — disables the spinner in favor of a timestamped trace.
+
+Progress output goes to **stderr**, so a piped stdout stays uncluttered.
 
 ---
 
