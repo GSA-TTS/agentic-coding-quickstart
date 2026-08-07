@@ -1658,6 +1658,80 @@ _report_usai_unreachable() {
   echo >&2
 }
 
+# ensure_key_present — pre-create gate: make sure a USAi API key is stored in the
+# acq secret store BEFORE the sandbox is created. This must run before
+# acq_backend_provision on a fresh run because msb binds secrets only at create
+# time (--secret ENV@HOST): a sandbox created with no stored key carries no USAi
+# binding, and no post-create re-feed can fix it (the binding is create-time).
+# Storing the key first means create picks it up for both backends.
+#
+# Returns 0 if a key is present (already, or after the user pastes one), 1 if the
+# user declines or setup fails. A no-op (returns 0) when the store helper isn't
+# loaded — the post-create ensure_valid_key gate still catches a bad key.
+ensure_key_present() {
+  if ! command -v acq_secret_has >/dev/null 2>&1; then
+    return 0
+  fi
+  if acq_secret_has usai; then
+    return 0
+  fi
+
+  # Backend mismatch: msb provision also accepts a host-exported USAI_API_KEY and
+  # binds it at create time (see _acq_msb_bind_secrets_into in msb.sh), so an empty
+  # acq store is NOT a blocker under msb when the env var is set (e.g. CI). Treat
+  # that as present to avoid prompting/aborting a create msb would have satisfied.
+  # sbx does NOT read host env at provision, so this short-circuit is msb-only.
+  if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ] && [ -n "${USAI_API_KEY:-}" ]; then
+    return 0
+  fi
+
+  # Non-interactive (CI / piped stdin): no one can answer the prompt below, so
+  # emit a single terse line and fail closed rather than the full interactive
+  # help (mirrors the non-tty guard in the kit-update path above).
+  if [ ! -t 0 ]; then
+    echo "acq: no USAi API key stored; set one with 'acq secret set -g usai' (see $KEY_MGMT_URL). Aborting." >&2
+    return 1
+  fi
+
+  echo >&2
+  echo "No USAi API key is stored yet." >&2
+  echo "USAi keys are created at $KEY_MGMT_URL and expire every 7 days." >&2
+  echo >&2
+  echo "To set one:" >&2
+  echo "  1. Open $KEY_MGMT_URL" >&2
+  echo "  2. Create a key (or copy an existing one) with the console copy button" >&2
+  echo >&2
+
+  if ! command -v acq_backend_secret_set >/dev/null 2>&1; then
+    echo "The '${ACQ_RESOLVED_BACKEND:-active}' backend does not implement key setup." >&2
+    echo "Set the key manually (acq secret set -g usai), then re-run." >&2
+    return 1
+  fi
+
+  local answer=""
+  printf 'Have your USAi API key ready to paste? Set it now? [y/N] ' >&2
+  read -r answer || true
+  case "$answer" in
+    [yY]|[yY][eE][sS])
+      # Store the key in the acq store (read from the TTY; never argv). This does
+      # NOT create a sandbox — the value just needs to be present before create.
+      acq_backend_secret_set -g usai || {
+        echo "Key setup did not complete. Aborting." >&2
+        return 1
+      }
+      if acq_secret_has usai; then
+        return 0
+      fi
+      echo "No USAi API key was stored. Aborting." >&2
+      return 1
+      ;;
+    *)
+      echo "Skipping. Aborting; re-run when your USAi API key is set." >&2
+      return 1
+      ;;
+  esac
+}
+
 ensure_valid_key() {
   local name="$1"
   shift
@@ -1682,32 +1756,18 @@ ensure_valid_key() {
     return 1
   fi
 
-  # Distinguish "no key stored yet" (first-time setup) from "key present but
-  # rejected" (expired/invalid), so the guidance and prompt match reality. If
-  # the store helper isn't loaded, assume a key is present so wording never
-  # regresses to the wrong direction.
-  local have_key=1
-  if command -v acq_secret_has >/dev/null 2>&1; then
-    acq_secret_has usai "$name" || have_key=0
-  fi
-
+  # A key IS stored (ensure_key_present gated create on that) but the models API
+  # rejected it: it is expired or invalid. Offer an in-place rotation, then
+  # re-validate THIS sandbox — the same one the agent will attach to, so a 200
+  # here is truthful (no throwaway-sandbox result stands in for the real one).
   echo >&2
-  if [ "$have_key" -eq 0 ]; then
-    echo "No USAi API key is set for '$name' (HTTP $status from the models API)." >&2
-    echo "USAi keys are created at $KEY_MGMT_URL and expire every 7 days." >&2
-    echo >&2
-    echo "To set one:" >&2
-    echo "  1. Open $KEY_MGMT_URL" >&2
-    echo "  2. Create a key (or copy an existing one) with the console copy button" >&2
-  else
-    echo "Your USAi API key looks invalid or expired (HTTP $status from the models API)." >&2
-    echo "USAi keys expire every 7 days." >&2
-    echo >&2
-    echo "To rotate it:" >&2
-    echo "  1. Open $KEY_MGMT_URL" >&2
-    echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
-    echo "  3. Copy the new key using the console copy button" >&2
-  fi
+  echo "Your USAi API key looks invalid or expired (HTTP $status from the models API)." >&2
+  echo "USAi keys expire every 7 days." >&2
+  echo >&2
+  echo "To rotate it:" >&2
+  echo "  1. Open $KEY_MGMT_URL" >&2
+  echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
+  echo "  3. Copy the new key using the console copy button" >&2
   echo >&2
 
   if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
@@ -1717,11 +1777,7 @@ ensure_valid_key() {
   fi
 
   local answer=""
-  if [ "$have_key" -eq 0 ]; then
-    printf 'Have your USAi key ready to paste? Set it now? [y/N] ' >&2
-  else
-    printf 'Have the new key ready to paste? Rotate now? [y/N] ' >&2
-  fi
+  printf 'Have the new API key ready to paste? Rotate now? [y/N] ' >&2
   read -r answer || true
   case "$answer" in
     [yY]|[yY][eE][sS])
@@ -1738,7 +1794,7 @@ ensure_valid_key() {
       return 1
       ;;
     *)
-      echo "Skipping. Aborting attach; re-run when your USAi key is set." >&2
+      echo "Skipping. Aborting attach; re-run when your USAi API key is set." >&2
       return 1
       ;;
   esac
