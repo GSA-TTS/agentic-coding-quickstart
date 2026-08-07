@@ -3084,19 +3084,24 @@ acq_backend_rotate_key() {
   }
 
   # Validate the new key in a fresh throwaway sandbox (backend-neutral helper).
+  # NOTE: on msb the throwaway sandbox is NOT the sandbox the agent attaches to.
+  # The real running sandbox is re-fed via `msb modify --secret`, which can apply
+  # to 0 sandboxes if the real one is still booting. So a throwaway "HTTP 200"
+  # here does NOT prove the real sandbox will authenticate — printing it would
+  # reproduce the exact 200-then-401 split this change set out to kill. We only
+  # use the throwaway to surface a hard-negative early (invalid key / network),
+  # and leave the authoritative "validated" verdict to ensure_valid_key's
+  # real-sandbox check_key on next attach.
   echo "Validating new key in a temporary sandbox..." >&2
   local status=""
   if command -v check_fresh_sandbox_key >/dev/null 2>&1; then
     status=$(check_fresh_sandbox_key)
   fi
 
-  if [ -z "$status" ]; then
-    echo "Could not run a validation sandbox; skipping check." >&2
-    echo "The key was rotated. Re-run 'acq run' to validate on next attach." >&2
-    return 0
-  fi
-  if [ "$status" = "200" ]; then
-    echo "Key validated (HTTP 200). You're good to go." >&2
+  if [ -z "$status" ] || [ "$status" = "200" ]; then
+    # No throwaway result, or the throwaway accepted the key. Do NOT claim the
+    # real sandbox is validated — the re-feed may not have reached it yet.
+    echo "Key stored. It will be validated against the running sandbox on next attach." >&2
     return 0
   fi
   if [ "$status" = "unreachable" ]; then

@@ -704,7 +704,14 @@ acq_secret_set_interactive() {
   elif [ ! -t 0 ]; then
     IFS= read -r value || true
   else
-    printf 'Enter %s secret: ' "$service" >&2
+    # "usai" is the service KEY, but users think of it as their "API key", not a
+    # "secret" (which in this project means the sbx/msb credential-injection
+    # concept). Prompt with the friendlier term for the well-known services.
+    case "$service" in
+      usai)   printf 'Enter USAi API key: ' >&2 ;;
+      github) printf 'Enter GitHub token: ' >&2 ;;
+      *)      printf 'Enter %s API key: ' "$service" >&2 ;;
+    esac
     value=$(_acq_read_secret_masked)
     printf '\n' >&2
   fi

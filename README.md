@@ -42,13 +42,16 @@ You will run the commands in this guide from a terminal. Open one now...
 
 </details>
 
-Then make sure you have each of these ready:
+Good news: there's very little to gather in advance. You need a supported
+computer and a way to run these commands — `acq` walks you through the USAi key
+and GitHub access interactively on first run (see [Step 3](#step-3-create-and-run-a-sandbox)).
 
 | Requirement     | Notes                                                      |
 | --------------- | ---------------------------------------------------------- |
 | A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li></ul>If you need more detail than this, see [msb host setup](docs/QUICKSTART.md#msb-host-setup) for per-platform particulars. |
-| USAi API key    | [Create one](https://console.gsa.usai.gov/key-management), record it safely, and keep it handy            |
-| GitHub token | <p>(recommended) Allows the agent authenticate to GitHub, work with private repositories, and act on your behalf (open PRs, push to branches, etc).</p><p>**`acq` can walk you through creating a repo-scoped token on first run.**</p> |
+| `git`           | Already installed on macOS and on the supported Linux hosts — **nothing to do**. (On macOS, the first time you run a `git` command the system may offer to install the Command Line Tools; accept it.) Check with `git --version`. |
+| USAi API key    | **Nothing to get in advance** — `acq` prompts you for a key and validates it on first run. <p>(Optional) If you'd rather set it up ahead of time, [create one](https://console.gsa.usai.gov/key-management) and keep it handy; note that USAi keys expire every 7 days.</p> |
+| GitHub token | **Nothing to get in advance** — `acq` offers to walk you through creating a repo-scoped token on first run, when your project contains GitHub repos. You can decline and add one later. <p>(A token lets the agent authenticate to GitHub, work with private repositories, and act on your behalf — open PRs, push to branches, etc.)</p> |
 
 ### Step 1: Install microsandbox (msb)
 
@@ -58,6 +61,9 @@ msb is a standalone, open-source (Apache-2.0) microVM runtime (a host-level tool
 # With Homebrew, our preference at GSA TTS:
 brew install superradcompany/tap/microsandbox
 ```
+
+> Don't have Homebrew? Install it from [brew.sh](https://brew.sh), or use the
+> `curl` installer below (which needs no Homebrew).
 
 or
 
@@ -75,15 +81,51 @@ cd agentic-coding-quickstart
 
 The `acq` command in Step 3 is run from inside this cloned folder.
 
+<details>
+<summary>Testing a specific tagged release? (click to expand)</summary>
+
+To try a specific tagged version, check it out after cloning:
+
+```bash
+git checkout v3.0.0-rc1
+```
+
+Git will print a message about being in a **"detached HEAD" state**. That is
+**normal — it is not an error.** It just means you're looking at a specific
+tagged snapshot rather than a branch. You can run `acq` exactly as described
+below. To go back to the latest development version, run `git switch main`.
+
+</details>
+
 ### Step 3: Create and run a sandbox
 
 ```bash
 ./acq run opencode /path/to/your/project
 ```
 
+`/path/to/your/project` is the folder you want the agent to work in. It can be
+an **existing project** or a **new, empty folder** you just made for this — your
+choice. If the folder is (or will be) a software project, initialize git in it
+first so the agent can track its changes:
+
+```bash
+mkdir -p ~/my-project        # a new folder, if you don't have one yet
+cd ~/my-project
+git init .                   # recommended if this is for software development
+```
+
+Then point `acq` at it (e.g. `./acq run opencode ~/my-project`).
+
 That's it. You're now running an AI coding agent with USAi access and restricted
 filesystem and network access. Repeat this to create sandboxes for each project
 you want to work on.
+
+> [!NOTE]
+> **The first run does real work and may pause quietly for a minute or two.**
+> `acq` boots a microVM, installs the coding agent, and fetches its
+> configuration kits — all with little output while it happens. A quiet terminal
+> here is expected; it is not stuck. Later runs against the same project are much
+> faster.
 
 On first run, `acq` sets you up interactively — nothing to configure beforehand:
 
