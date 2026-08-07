@@ -53,6 +53,48 @@
 _ACQ_SPIN_PID=""
 _ACQ_SPIN_MSG=""
 
+# Prior EXIT/INT/TERM trap COMMANDS captured at acq_spin_start time, so the
+# spinner's own cleanup traps COMPOSE with (rather than clobber) a caller's
+# pre-existing handler. A caller may already have a security-relevant EXIT trap
+# installed (e.g. sbx.sh removes its throwaway validation sandbox on exit); the
+# spinner must run that handler too, or Ctrl-C during a long create would leak
+# the sandbox. "" means no prior handler was installed for that signal.
+_ACQ_SPIN_PRIOR_EXIT_TRAP=""
+_ACQ_SPIN_PRIOR_INT_TRAP=""
+_ACQ_SPIN_PRIOR_TERM_TRAP=""
+
+# _acq_sanitize_msg TEXT — echo TEXT with C0 control bytes and DEL stripped, so
+# an untrusted caller-supplied label (e.g. a --name value that reaches the
+# spinner BEFORE the backend validates it) cannot inject raw terminal escape
+# sequences (clear-screen, cursor moves) into the animated line. Applies ONLY to
+# caller data — the spinner's own fixed escapes (cursor hide/show, \r, \033[K)
+# are emitted separately as literal format strings. Stripping all of \000-\037
+# also drops embedded newlines/tabs, which is fine for single-line phase labels.
+_acq_sanitize_msg() {
+  printf '%s' "$*" | LC_ALL=C tr -d '\000-\037\177'
+}
+
+# _acq_capture_prior_trap SIG — echo the COMMAND currently bound to SIG, or "".
+# `trap -p SIG` prints `trap -- 'the command' SIG` (or nothing if unset). Parse
+# out just 'the command'. Used so the spinner traps can re-invoke it on exit.
+_acq_capture_prior_trap() {
+  local line
+  line=$(trap -p "$1")
+  [ -n "$line" ] || { printf ''; return 0; }
+  # Strip the leading `trap -- ` and the trailing ` SIG`, then unquote.
+  line=${line#trap -- }
+  line=${line% "$1"}
+  # Bash single-quotes the command; eval to reduce it back to the raw string.
+  eval "printf '%s' $line"
+}
+
+# _acq_run_prior_trap COMMAND — run a previously-captured trap COMMAND once, if
+# non-empty. Errors in the prior handler must not abort our own cleanup.
+_acq_run_prior_trap() {
+  [ -n "$1" ] || return 0
+  eval "$1" || true
+}
+
 # _acq_progress_enabled — 0 (true) when animated progress may run, 1 otherwise.
 # Animate only when ALL hold:
 #   - stderr is an interactive TTY            ([ -t 2 ])
@@ -86,14 +128,17 @@ _acq_spin_frames() {
 # acq_status MESSAGE — always-on, non-animated phase announcement (stderr).
 # ---------------------------------------------------------------------------
 acq_status() {
-  printf 'acq: %s\n' "$*" >&2
+  local msg
+  msg=$(_acq_sanitize_msg "$*")
+  printf 'acq: %s\n' "$msg" >&2
 }
 
 # ---------------------------------------------------------------------------
 # acq_spin_start MESSAGE — start a spinner (interactive) or announce (otherwise).
 # ---------------------------------------------------------------------------
 acq_spin_start() {
-  local msg="$*"
+  local msg
+  msg=$(_acq_sanitize_msg "$*")
   # Stop any spinner still running (defensive: callers should pair start/stop,
   # but never stack two animations on one line).
   acq_spin_stop
@@ -128,10 +173,19 @@ acq_spin_start() {
     done
   ) &
   _ACQ_SPIN_PID=$!
-  # Ensure a crash/Ctrl-C between start and stop cleans up. Additive: we only
-  # install progress cleanup on these signals; acq does not set competing global
-  # traps on EXIT/INT/TERM (verified). The handler re-raises for INT/TERM after
-  # cleanup so the exit status is honest.
+  _acq_spin_install_traps
+}
+
+# _acq_spin_install_traps — COMPOSE the spinner's cleanup with any pre-existing
+# EXIT/INT/TERM handler. We capture the caller's current trap command FIRST, then
+# install our own; the cleanup functions re-invoke the captured command so a
+# caller's security-relevant cleanup (e.g. `sbx rm` of a throwaway validation
+# sandbox) still runs on Ctrl-C or error. acq_spin_stop restores the prior EXIT
+# trap on the normal path so no lingering no-op trap is left behind (NIT 3).
+_acq_spin_install_traps() {
+  _ACQ_SPIN_PRIOR_EXIT_TRAP=$(_acq_capture_prior_trap EXIT)
+  _ACQ_SPIN_PRIOR_INT_TRAP=$(_acq_capture_prior_trap INT)
+  _ACQ_SPIN_PRIOR_TERM_TRAP=$(_acq_capture_prior_trap TERM)
   trap '_acq_spin_cleanup_exit' EXIT
   trap '_acq_spin_cleanup_signal INT'  INT
   trap '_acq_spin_cleanup_signal TERM' TERM
@@ -143,7 +197,8 @@ acq_spin_start() {
 # Idempotent: a no-op when no spinner is running. FINAL overrides the label shown
 # on the completed line (defaults to the started message).
 acq_spin_stop() {
-  local final="${1:-$_ACQ_SPIN_MSG}"
+  local final
+  final=$(_acq_sanitize_msg "${1:-$_ACQ_SPIN_MSG}")
 
   if [ -n "$_ACQ_SPIN_PID" ]; then
     # Kill the animator and reap it silently (suppress the shell's "Terminated"
@@ -155,12 +210,41 @@ acq_spin_stop() {
     printf '\r\033[K\033[?25h' >&2
     # Print a completion marker for the phase, if we have a label.
     [ -n "$final" ] && printf 'acq: %s… done\n' "$final" >&2
+    # Restore the caller's prior EXIT/INT/TERM traps so we do not leave a
+    # lingering composed spinner trap behind (NIT 3). Only meaningful when the
+    # spinner actually installed traps (i.e. it was animating).
+    _acq_spin_restore_traps
   fi
   _ACQ_SPIN_MSG=""
 }
 
+# _acq_spin_restore_traps — put back the trap commands captured at start time.
+# An empty captured command means the caller had none, so we clear our trap.
+_acq_spin_restore_traps() {
+  if [ -n "$_ACQ_SPIN_PRIOR_EXIT_TRAP" ]; then
+    trap "$_ACQ_SPIN_PRIOR_EXIT_TRAP" EXIT
+  else
+    trap - EXIT
+  fi
+  if [ -n "$_ACQ_SPIN_PRIOR_INT_TRAP" ]; then
+    trap "$_ACQ_SPIN_PRIOR_INT_TRAP" INT
+  else
+    trap - INT
+  fi
+  if [ -n "$_ACQ_SPIN_PRIOR_TERM_TRAP" ]; then
+    trap "$_ACQ_SPIN_PRIOR_TERM_TRAP" TERM
+  else
+    trap - TERM
+  fi
+  _ACQ_SPIN_PRIOR_EXIT_TRAP=""
+  _ACQ_SPIN_PRIOR_INT_TRAP=""
+  _ACQ_SPIN_PRIOR_TERM_TRAP=""
+}
+
 # _acq_spin_cleanup_exit — EXIT trap: stop any spinner without printing a
-# spurious "done" (an exit may be an error path). Just clear the line + cursor.
+# spurious "done" (an exit may be an error path). Clear the line + cursor, then
+# re-invoke the caller's prior EXIT handler (once) so its cleanup (e.g. sbx rm of
+# a throwaway validation sandbox) still runs even though we composed over it.
 _acq_spin_cleanup_exit() {
   if [ -n "$_ACQ_SPIN_PID" ]; then
     kill "$_ACQ_SPIN_PID" 2>/dev/null || true
@@ -169,12 +253,22 @@ _acq_spin_cleanup_exit() {
     printf '\r\033[K\033[?25h' >&2
   fi
   _ACQ_SPIN_MSG=""
+  local prior="$_ACQ_SPIN_PRIOR_EXIT_TRAP"
+  _ACQ_SPIN_PRIOR_EXIT_TRAP=""
+  _acq_run_prior_trap "$prior"
 }
 
-# _acq_spin_cleanup_signal SIG — INT/TERM trap: clean up, then re-raise the
-# signal with the default disposition so the process exits with the right status.
+# _acq_spin_cleanup_signal SIG — INT/TERM trap: clean up, chain any prior handler
+# for SIG (once), then re-raise the signal with the default disposition so the
+# process exits with the right status.
 _acq_spin_cleanup_signal() {
   _acq_spin_cleanup_exit
+  local prior=""
+  case "$1" in
+    INT)  prior="$_ACQ_SPIN_PRIOR_INT_TRAP";  _ACQ_SPIN_PRIOR_INT_TRAP="" ;;
+    TERM) prior="$_ACQ_SPIN_PRIOR_TERM_TRAP"; _ACQ_SPIN_PRIOR_TERM_TRAP="" ;;
+  esac
+  _acq_run_prior_trap "$prior"
   trap - "$1"
   kill -s "$1" "$$" 2>/dev/null || true
 }
