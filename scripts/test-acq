@@ -4863,7 +4863,8 @@ bal_out=$(
   _acq_msb_balanced_rules_into arr 2>/dev/null
   printf '%s\n' "${arr[@]}"
 )
-assert_contains "msb: balanced rules emit allow@dns" "$bal_out" "allow@dns"
+assert_contains "msb: balanced rules emit gateway DNS (udp/53)" "$bal_out" "allow@host:udp:53"
+assert_contains "msb: balanced rules emit gateway DNS (tcp/53)" "$bal_out" "allow@host:tcp:53"
 assert_contains "msb: balanced rules translate **.h wildcard" "$bal_out" "allow@*.github.com:tcp:443"
 assert_contains "msb: balanced rules keep exact domain" "$bal_out" "allow@github.com:tcp:443"
 assert_contains "msb: balanced rules keep dual-port :443" "$bal_out" "allow@dhi.io:tcp:443"
@@ -4875,7 +4876,10 @@ assert_not_contains "msb: balanced rules never emit an empty target" "$bal_out" 
 cleanup_stubs
 
 # 10b1g. `_acq_msb_balanced_rules_into` skips a malformed line (a host with a
-#        shell metacharacter) with a warning, but still emits `allow@dns`.
+#        shell metacharacter) with a warning, but still emits the gateway-DNS
+#        rules. It must NOT emit the bare `allow@dns` macro, which is broken on
+#        released msb (release builds drop the debug_assert that advances past the
+#        `dns` target, so `dns` is re-read as the protocol and msb rejects it).
 make_stubs; load_acq
 cat >"$STUBDIR/bal-bad.txt" <<'HOSTS'
 bad;host:443
@@ -4889,7 +4893,8 @@ bad_out=$(
   printf '%s\n' "${arr[@]}"
 )
 assert_not_contains "msb: balanced rules skip malformed host" "$bad_out" "bad;host"
-assert_contains "msb: balanced rules still emit allow@dns after skip" "$bad_out" "allow@dns"
+assert_contains "msb: balanced rules still emit gateway DNS after skip" "$bad_out" "allow@host:udp:53"
+assert_not_contains "msb: balanced rules never emit the broken allow@dns macro" "$bad_out" "allow@dns"
 cleanup_stubs
 
 # 10b1h. The REAL vendored balanced-hosts file parses cleanly: no "skipping"
@@ -4910,8 +4915,9 @@ assert_eq "msb: real balanced file yields > 190 rules" "GT" "$real_gt"
 cleanup_stubs
 
 # 10b1i. Provision (default, ACQ_MSB_BALANCED_EGRESS unset) emits the balanced
-#        egress baseline: `--net-default deny`, `allow@dns`, and a representative
-#        translated host rule appear in the recorded `msb create` argv.
+#        egress baseline: `--net-default deny`, the gateway-DNS rules, and a
+#        representative translated host rule appear in the recorded `msb create`
+#        argv.
 make_stubs; load_acq
 : > "$CALLS"
 (
@@ -4924,7 +4930,8 @@ make_stubs; load_acq
 )
 bal_prov_log=$(cat "$CALLS")
 assert_contains "msb: default provision emits --net-default deny" "$bal_prov_log" "--net-default deny"
-assert_contains "msb: default provision emits allow@dns" "$bal_prov_log" "allow@dns"
+assert_contains "msb: default provision emits gateway DNS (udp/53)" "$bal_prov_log" "allow@host:udp:53"
+assert_contains "msb: default provision emits gateway DNS (tcp/53)" "$bal_prov_log" "allow@host:tcp:53"
 assert_contains "msb: default provision emits a balanced host rule" "$bal_prov_log" "allow@api.anthropic.com:tcp:443"
 cleanup_stubs
 

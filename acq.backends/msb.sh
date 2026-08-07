@@ -827,9 +827,12 @@ _acq_msb_balanced_parse_line() {
 #   - PORT: trailing `:port` -> `:tcp:<port>` (sbx "balanced" is TCP; a host on
 #     both :80 and :443 yields TWO rules, one per line, preserved).
 #   - WILDCARD / intra-label glob: see _acq_msb_balanced_target.
-#   - Also emits `allow@dns` FIRST so the guest can resolve the allowed hosts:
-#     under `--net-default deny` the high-level DNS auto-grant does not apply, so
-#     low-level rules must grant it explicitly. Pairs with --dns-nameserver.
+#   - Also emits gateway-DNS rules FIRST so the guest can resolve the allowed
+#     hosts: under `--net-default deny` the high-level DNS auto-grant does not
+#     apply, so low-level rules must grant it explicitly. We emit the expanded
+#     `allow@host:udp:53` + `allow@host:tcp:53` rather than the `allow@dns` macro,
+#     which is broken on released msb (see the DNS block below). Pairs with
+#     --dns-nameserver.
 # A missing/unreadable file is a non-fatal warning (kits still add their egress).
 # Uses the eval-by-name array pattern (macOS bash 3.2 compat), like the siblings.
 _acq_msb_balanced_rules_into() {
@@ -843,8 +846,23 @@ _acq_msb_balanced_rules_into() {
   fi
 
   # DNS first: without it the guest cannot resolve any allowed host under
-  # --net-default deny. `dns` is msb's semantic gateway DNS target (UDP/53+TCP/53).
-  eval "$_arr+=(--net-rule \"allow@dns\")"
+  # --net-default deny, since the high-level gateway-DNS auto-grant only fires for
+  # the `--net` PROFILES (public/private/host), not for a rule-only deny default.
+  #
+  # We DELIBERATELY do NOT use msb's semantic `allow@dns` macro. That macro is
+  # broken in released msb (reproduced on 0.6.8): its parser guards the target
+  # token with `debug_assert_eq!(parts.next(), Some("dns"))`, which is compiled
+  # OUT of the release binary — so the iterator is never advanced past the `dns`
+  # target and the SAME `dns` token is then read as the PROTOCOL slot, failing
+  # with `the dns target supports tcp, udp, or any, not dns`. A bare `allow@dns`
+  # therefore hard-fails `msb create`/`msb run` on a release build.
+  #
+  # Instead we emit exactly what the macro is SPECIFIED to expand to — the gateway
+  # `host` group on port 53 for both UDP and TCP — as two explicit rules that go
+  # through the ordinary (assert-free) target/proto/port parse path. This is
+  # equivalent to the intended `allow@dns` and is unaffected by the upstream bug.
+  eval "$_arr+=(--net-rule \"allow@host:udp:53\")"
+  eval "$_arr+=(--net-rule \"allow@host:tcp:53\")"
 
   local _line _host _port _target _warned_crl=0
   while IFS= read -r _line || [ -n "$_line" ]; do
@@ -1729,7 +1747,8 @@ acq_backend_provision() {
   # Balanced egress baseline (ADR-0018): mirror the sbx "balanced" host set so an
   # msb sandbox reaches the same dev hosts. msb defaults egress to none, so we
   # make the restriction explicit and deterministic: `--net-default deny` +
-  # `allow@<host>:tcp:<port>` per vendored entry (plus `allow@dns`). These compose
+  # `allow@<host>:tcp:<port>` per vendored entry (plus explicit gateway-DNS rules,
+  # `allow@host:udp:53` + `allow@host:tcp:53`). These compose
   # with the kit/npm/secret `allow@…` rules under first-match-wins. Emitted BEFORE
   # the npm-host rule so all allow rules sit together after the deny-default.
   # Toggle off with ACQ_MSB_BALANCED_EGRESS=0 (falls back to kit-only egress; no

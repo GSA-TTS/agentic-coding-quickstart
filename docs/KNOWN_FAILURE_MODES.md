@@ -1417,7 +1417,57 @@ point `ACQ_MSB_BALANCED_HOSTS_FILE` at it, or (for a one-off) create with an ext
 
 ---
 
-## Debugging Checklist
+## 32. msb `create`/`run` Fails: `the dns target supports tcp, udp, or any, not dns`
+
+### Symptoms
+
+On the **msb** backend, `acq run`/`acq create` (or a raw `msb create`/`msb run`)
+aborts during "Creating sandbox …" with:
+
+```
+error: the `dns` target supports `tcp`, `udp`, or `any`, not `dns`
+acq(msb): error: 'msb create' failed for '<sandbox>'.
+```
+
+Reproduces with the minimal case on a released msb (confirmed on msb 0.6.8):
+
+```bash
+msb run --net-default deny --net-rule "allow@dns" alpine -- true
+```
+
+### Root Cause
+
+An **upstream msb bug** in the `--net-rule` parser, not an acq misconfiguration.
+msb's semantic `allow@dns` macro is parsed by advancing past the `dns` target
+token inside a `debug_assert_eq!(parts.next(), Some("dns"))`. `debug_assert!` is
+compiled **out** of a release binary, so in the shipped `msb` the iterator is
+never advanced past `dns`; the same `dns` token is then read as the **protocol**
+field, which only accepts `tcp`/`udp`/`any` — hence the error. A bare
+`allow@dns` therefore hard-fails on every release build that has the macro
+(0.6.7+), even though the macro is documented as valid.
+
+The balanced-egress baseline (ADR-0018) needs a gateway-DNS grant under
+`--net-default deny`, and originally emitted `allow@dns`, tripping this bug.
+
+### Fix
+
+The msb adapter no longer emits the `allow@dns` macro. It emits the **expanded**
+equivalent instead — exactly what the macro is specified to produce — which takes
+the ordinary (assert-free) parse path and is unaffected by the bug:
+
+```
+--net-rule allow@host:udp:53 --net-rule allow@host:tcp:53
+```
+
+This is in `_acq_msb_balanced_rules_into` in `acq.backends/msb.sh`. If you script
+raw `msb` calls yourself, use the same expanded form rather than `allow@dns`.
+
+### Prevention / Status
+
+- Re-verify on the **quarterly review cadence**: once upstream msb fixes the
+  macro (moving the target advance out of the `debug_assert`), a bare `allow@dns`
+  becomes safe again and the expanded pair MAY be collapsed back. Confirm with the
+  minimal `msb run … --net-rule "allow@dns"` case above before changing it.
 
 When something fails, work through this list:
 

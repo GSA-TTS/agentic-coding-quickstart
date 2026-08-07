@@ -60,10 +60,19 @@ default**, composed on top of the kits' own `caps.network.allow`.
      to the parent suffix `*.digicert.com`, with a one-time warning recording the
      widening. This preserves CRL / certificate-revocation reachability on `:80`,
      a real TLS-path dependency, at the cost of a slightly wider match than sbx.
-   - A leading `allow@dns` rule is emitted so the guest can resolve the allowed
-     hosts — under `--net-default deny` the high-level DNS auto-grant does not
-     apply, so DNS must be granted explicitly. This pairs with the existing
-     `--dns-nameserver`.
+   - A leading gateway-DNS grant is emitted so the guest can resolve the
+     allowed hosts — under `--net-default deny` the high-level DNS auto-grant
+     does not apply, so DNS must be granted explicitly. This pairs with the
+     existing `--dns-nameserver`. We emit the **expanded** form
+     `allow@host:udp:53` + `allow@host:tcp:53` rather than msb's semantic
+     `allow@dns` macro: that macro is **broken in released msb** (reproduced on
+     0.6.8). Its parser advances past the `dns` target only inside a
+     `debug_assert_eq!`, which is compiled out of a release binary, so the
+     `dns` token is re-read as the protocol slot and `msb create` fails with
+     `the dns target supports tcp, udp, or any, not dns`. The two explicit
+     rules are exactly what the macro is specified to expand to (the gateway
+     `host` group on UDP/TCP port 53) and take the ordinary, assert-free parse
+     path, so they are unaffected by the upstream bug.
 
 3. **Restrict, don't merely widen.** At create, when the baseline is enabled the
    adapter emits `--net-default deny` **plus** the generated `allow@…` rules, so
@@ -131,9 +140,10 @@ default**, composed on top of the kits' own `caps.network.allow`.
 ## Verification
 
 - Offline: `scripts/test-acq` covers target translation (`**.`, `crl*`, exact,
-  single-label rejection), port validation, dual-port hosts, the DNS rule,
-  malformed-line skipping, a full parse of the real vendored file with no skips,
-  and the default-on / `=0`-off provision paths.
+  single-label rejection), port validation, dual-port hosts, the gateway-DNS
+  rules (expanded `allow@host:udp:53` + `allow@host:tcp:53`, never the broken
+  `allow@dns` macro), malformed-line skipping, a full parse of the real vendored
+  file with no skips, and the default-on / `=0`-off provision paths.
 - Live (deferred; requires a KVM-capable host — cannot run inside a sandbox):
   create an msb sandbox and confirm a `balanced`-only host that no kit allows
   (e.g. `pypi.org:443`) is reachable while an unlisted host is refused. Run per
@@ -145,3 +155,5 @@ default**, composed on top of the kits' own `caps.network.allow`.
 - Emitter: `_acq_msb_balanced_rules_into` in `acq.backends/msb.sh`
 - Related: ADR-0011 (msb backend + neutral kits), ADR-0010 (pluggable backends)
 - Drift / re-sync note: `docs/KNOWN_FAILURE_MODES.md`
+- Upstream `allow@dns` macro bug + expanded-rule workaround:
+  `docs/KNOWN_FAILURE_MODES.md` (msb `dns` target failure mode)
