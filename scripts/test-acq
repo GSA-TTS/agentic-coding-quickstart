@@ -5296,8 +5296,62 @@ _asc=$( ( export ACQ_SCRIPT_DIR="$REPO_ROOT"; unset LANG LC_CTYPE; export LC_ALL
 assert_contains     "progress: non-UTF-8 locale selects ASCII frames" "$_asc" "|"
 assert_not_contains "progress: non-UTF-8 locale has no braille"       "$_asc" "⠋"
 
+# Trap composition: a caller's PRE-EXISTING EXIT trap must SURVIVE a
+# start/stop pair. This is the regression the reviewer proved — the spinner
+# used to hard-overwrite the caller's EXIT trap, leaking a validation sandbox
+# on Ctrl-C. Off-TTY, acq_spin_start degrades and never installs traps, so we
+# call the trap install/restore bookkeeping DIRECTLY (it is TTY-independent) to
+# exercise the composition/restore logic itself. First: a sentinel EXIT trap
+# survives install+restore, and no lingering spinner trap is left after restore.
+_trap=$( ( export ACQ_SCRIPT_DIR="$REPO_ROOT"
+           . "$REPO_ROOT/acq.backends/progress.sh"
+           trap 'echo SENTINEL_CLEANUP' EXIT
+           _acq_spin_install_traps       # compose over the sentinel
+           _acq_spin_restore_traps       # restore on normal stop
+           # Print the EXIT trap still installed after restore.
+           trap -p EXIT ) 2>&1 )
+assert_contains "progress: pre-existing EXIT trap survives spin install/restore" \
+  "$_trap" "SENTINEL_CLEANUP"
+assert_not_contains "progress: no lingering spinner EXIT trap after restore" \
+  "$_trap" "_acq_spin_cleanup_exit"
+
+# Second: while the spinner trap is composed IN (before restore), a triggered
+# EXIT cleanup must still RE-INVOKE the caller's prior handler (so `sbx rm`
+# runs on Ctrl-C). Install the sentinel, compose, then fire the cleanup and
+# assert the sentinel command actually ran.
+_trap_fire=$( ( export ACQ_SCRIPT_DIR="$REPO_ROOT"
+                . "$REPO_ROOT/acq.backends/progress.sh"
+                trap 'echo SENTINEL_RAN' EXIT
+                _acq_spin_install_traps
+                _acq_spin_cleanup_exit ) 2>&1 )
+assert_contains "progress: composed EXIT cleanup re-invokes prior handler" \
+  "$_trap_fire" "SENTINEL_RAN"
+
+# And with NO prior EXIT trap, restore clears our trap (no lingering spinner
+# trap, no error).
+_trap_none=$( ( export ACQ_SCRIPT_DIR="$REPO_ROOT"
+                . "$REPO_ROOT/acq.backends/progress.sh"
+                _acq_spin_install_traps
+                _acq_spin_restore_traps
+                trap -p EXIT
+                printf 'NONE_OK' ) 2>&1 )
+assert_contains     "progress: restore with no prior trap is clean" "$_trap_none" "NONE_OK"
+assert_not_contains "progress: restore with no prior trap leaves no spinner trap" \
+  "$_trap_none" "_acq_spin_cleanup_exit"
+
+# Escape sanitization: a control byte in a message (e.g. from an untrusted
+# --name reaching the spinner before validation) must NOT reach the terminal
+# raw. Assert the captured stderr has no ESC byte; printable letters may remain.
+_esc=$( ( export ACQ_SCRIPT_DIR="$REPO_ROOT"
+          . "$REPO_ROOT/acq.backends/progress.sh"
+          acq_status "$(printf 'evil\033[2J\033[Hgotcha')" ) 2>&1 )
+assert_not_contains "progress: acq_status strips raw ESC control byte" \
+  "$_esc" "$(printf '\033')"
+assert_contains     "progress: acq_status keeps printable message text" \
+  "$_esc" "gotcha"
+
 unset -f _prog
-unset _st _run _noprog _bare _dbl _utf _asc
+unset _st _run _noprog _bare _dbl _utf _asc _trap _trap_fire _trap_none _esc
 
 # ===========================================================================
 echo ""
