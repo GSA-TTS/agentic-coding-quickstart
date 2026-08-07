@@ -18,3 +18,39 @@ updates:
       actions:
         patterns:
           - "*"
+
+  # npm (repo tooling — e.g. markdown lint deps)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "javascript"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      npm:
+        patterns:
+          - "*"
+
+  # npm (linter toolchain)
+  - package-ecosystem: "npm"
+    directory: "/.github/linters"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "javascript"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      linters:
+        patterns:
+          - "*"
