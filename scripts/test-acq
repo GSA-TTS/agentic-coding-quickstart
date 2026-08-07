@@ -2575,11 +2575,19 @@ make_stubs; load_acq
 assert_not_contains "msb: skips npm install when agent already present" "$(cat "$CALLS")" "npm install"
 cleanup_stubs
 
-# 8n4. `shell` sandbox: no agent binary install, no npm registry allow-list.
+# 8n4. `shell` sandbox: no agent binary install, and — in kit-only egress mode
+#       (ACQ_MSB_BALANCED_EGRESS=0) — no npm registry allow-list. The npm host is
+#       added ONLY for an agent with an install recipe (ADR-0011); a `shell`
+#       sandbox needs no npm egress. This test pins that agent-conditional gate,
+#       so it runs with the balanced baseline OFF: with the baseline ON,
+#       registry.npmjs.org is in the sbx-"balanced" set and IS allow-listed for
+#       every sandbox by design (see 10b1j and ADR-0018) — a separate concern
+#       from the agent-install gate exercised here.
 make_stubs; load_acq
 : > "$CALLS"
 (
   export ACQ_SECRET_STORE_DIR="$STUBDIR/shell-secrets"
+  export ACQ_MSB_BALANCED_EGRESS=0
   . "${REPO_ROOT}/acq.backends/secret-store.sh"
   . "${REPO_ROOT}/acq.backends/msb.sh"
   _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
@@ -2589,7 +2597,7 @@ make_stubs; load_acq
 )
 shell_log=$(cat "$CALLS")
 assert_not_contains "msb: shell agent does not npm install" "$shell_log" "npm install"
-assert_not_contains "msb: shell agent adds no npm net-rule" "$shell_log" "allow@registry.npmjs.org"
+assert_not_contains "msb: shell agent adds no npm net-rule (kit-only egress)" "$shell_log" "allow@registry.npmjs.org"
 cleanup_stubs
 
 # 8n5. Attach LAUNCHES the recorded agent as the `agent` user in the workspace,

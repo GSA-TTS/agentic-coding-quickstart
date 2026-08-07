@@ -786,13 +786,37 @@ _acq_msb_balanced_target() {
 }
 
 # _acq_msb_balanced_port_ok PORT — 0 if PORT is a valid TCP port (integer
-# 1..65535), else 1. An empty PORT means "any port" and is handled by the caller
-# (not passed here). Guards a kit-derived value before it reaches an argv.
+# 1..65535, no leading zero), else 1. An empty PORT means "any port" and is
+# handled by the caller (not passed here). Guards a kit-derived value before it
+# reaches an argv. Rejects a leading zero (e.g. `0443`) so a custom hosts file
+# can't emit an octal-looking `:tcp:0443` token.
 _acq_msb_balanced_port_ok() {
   case "$1" in
-    ""|*[!0-9]*) return 1 ;;
+    ""|0*|*[!0-9]*) return 1 ;;
   esac
   [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+# _acq_msb_balanced_parse_line LINE HOSTVAR PORTVAR — strip a trailing comment,
+# trim surrounding whitespace, and split the remaining `host[:port]` into the
+# named HOSTVAR/PORTVAR (port empty when absent). Returns 1 (host set empty) for
+# a blank/comment-only line so the caller can `continue`. Keeps the parse out of
+# _acq_msb_balanced_rules_into so that stays under the 50-line limit.
+_acq_msb_balanced_parse_line() {
+  local _l="$1" _hn="$2" _pn="$3"
+  _l="${_l%%#*}"                          # strip trailing comment
+  _l="${_l#"${_l%%[![:space:]]*}"}"       # ltrim
+  _l="${_l%"${_l##*[![:space:]]}"}"       # rtrim
+  if [ -z "$_l" ]; then
+    eval "$_hn=''"; eval "$_pn=''"
+    return 1
+  fi
+  # Split host/port on the LAST colon (hosts have no other colon).
+  case "$_l" in
+    *:*) eval "$_pn=\"\${_l##*:}\""; eval "$_hn=\"\${_l%:*}\"" ;;
+    *)   eval "$_hn=\"\$_l\""; eval "$_pn=''" ;;
+  esac
+  return 0
 }
 
 # _acq_msb_balanced_rules_into ARRVAR — append the sbx-"balanced" egress baseline
@@ -824,16 +848,7 @@ _acq_msb_balanced_rules_into() {
 
   local _line _host _port _target _warned_crl=0
   while IFS= read -r _line || [ -n "$_line" ]; do
-    _line="${_line%%#*}"                                  # strip trailing comment
-    _line="${_line#"${_line%%[![:space:]]*}"}"            # ltrim
-    _line="${_line%"${_line##*[![:space:]]}"}"            # rtrim
-    [ -n "$_line" ] || continue
-
-    # Split host/port on the LAST colon (hosts have no other colon).
-    case "$_line" in
-      *:*) _port="${_line##*:}"; _host="${_line%:*}" ;;
-      *)   _host="$_line"; _port="" ;;
-    esac
+    _acq_msb_balanced_parse_line "$_line" _host _port || continue
 
     # One-time widening warning for the intra-label glob (keyed off the input).
     case "$_host" in

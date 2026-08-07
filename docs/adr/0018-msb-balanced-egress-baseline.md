@@ -90,6 +90,16 @@ default**, composed on top of the kits' own `caps.network.allow`.
   the msb set is intentionally wider than sbx; it is logged. Operators who need a
   tighter posture set `ACQ_MSB_BALANCED_EGRESS=0` (kit-only) or point
   `ACQ_MSB_BALANCED_HOSTS_FILE` at a narrower list.
+- **Interaction with the npm-install allow-rule:** the adapter separately
+  allow-lists the npm registry (`registry.npmjs.org`) only when installing an
+  agent (ADR-0011). That host is ALSO in the `balanced` set, so with the baseline
+  ON **every** sandbox — including a `shell` sandbox with no agent — can reach the
+  registry, exactly as it can under sbx `balanced`. This is intended parity, not a
+  leak: the agent-conditional npm gate still matters only in kit-only mode
+  (`ACQ_MSB_BALANCED_EGRESS=0`), where a `shell` sandbox gets no npm egress.
+  Because kit `caps.network.allow` rules are emitted as broader bare `allow@host`
+  (any proto/port) BEFORE the balanced block, a host present in both composes
+  harmlessly under first-match-wins.
 - **Untrusted-input hardening (SI-10):** the host list is semi-trusted data that
   drives create-time flags, so every translated target is charset-validated
   (`[A-Za-z0-9.*_-]`), single-label suffixes (`*.com`) are rejected (msb refuses
