@@ -228,9 +228,15 @@ ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
 #
 # Toggle: on by default. Set ACQ_MSB_BALANCED_EGRESS=0 (or empty) to skip the
 # baseline and fall back to kit-only egress (the kits still add their own allow
-# rules, but no deny-default is emitted, so egress is not restricted by acq). Uses
-# `-` (not `:-`) so an explicitly-empty value disables it.
+# rules, but no deny-default is emitted, so egress is not restricted by acq).
+# Normalized to exactly "1" (on) or "" (off) here so downstream `[ -n … ]` guards
+# read cleanly: an unset value defaults on; "0"/"false"/"no"/"off"/empty are off
+# (case-insensitive); anything else is on.
 ACQ_MSB_BALANCED_EGRESS="${ACQ_MSB_BALANCED_EGRESS-1}"
+case "$(printf '%s' "$ACQ_MSB_BALANCED_EGRESS" | tr '[:upper:]' '[:lower:]')" in
+  ""|0|false|no|off) ACQ_MSB_BALANCED_EGRESS="" ;;
+  *)                 ACQ_MSB_BALANCED_EGRESS="1" ;;
+esac
 
 # Path to the vendored host list (a verbatim mirror of `sbx policy inspect
 # local-policy`; see acq.backends/msb-balanced-hosts.txt). Override to point at a
