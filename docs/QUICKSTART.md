@@ -3,7 +3,7 @@ title: "acq Backend Quickstart"
 description: "Get running with acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-08-03"
+last_updated: "2026-08-06"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "quickstart", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -49,7 +49,12 @@ Complete the standard setup in [README.md](../README.md#5-minute-quickstart):
 
 - Install the `sbx` CLI (>= 0.35.0)
 - Run `sbx login`
-- Set your network policy and secrets (USAi key, GitHub token)
+- Set your network policy
+
+You do **not** need to gather a USAi key or GitHub token in advance — `acq`
+prompts you for the USAi key on first run and offers to scope a GitHub token
+when your workspace has GitHub repos. Set them ahead of time only when
+pre-seeding a machine or scripting setup (see [Secrets](#secrets) below).
 
 ### Step 2: Run a sandbox
 
@@ -57,8 +62,17 @@ Complete the standard setup in [README.md](../README.md#5-minute-quickstart):
 ./acq run opencode /path/to/your/project
 ```
 
+`/path/to/your/project` is the folder the agent works in — an **existing
+project** or a **new, empty folder** you just created. If it's a software
+project, run `git init .` in it first so the agent can track its changes.
+
 That's it. `acq run` creates the sandbox if it doesn't exist, heals any missing
 kits, validates your USAi key, and attaches the agent.
+
+> [!NOTE]
+> The **first** run boots a microVM, installs the agent, and fetches kits — it
+> may pause quietly for a minute or two with little output. That is expected,
+> not a hang; later runs are much faster.
 
 ### Step 3: Common commands
 
