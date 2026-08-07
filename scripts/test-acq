@@ -728,14 +728,17 @@ cleanup_stubs
 # decline by feeding an empty line on stdin. Bare workspace (no git remote) keeps
 # the github advisory quiet.
 
-# 3k1. No usai key stored -> PRE-create gate names the setup case + prompts to
-#      set; declining aborts the run (non-zero) BEFORE the sandbox is created.
+# 3k1. No usai key stored, non-interactive stdin (piped) -> PRE-create gate emits
+#      the TERSE non-tty line (no full interactive help) and aborts the run
+#      (non-zero) BEFORE the sandbox is created. Piped stdin makes `[ ! -t 0 ]`
+#      true, so ensure_key_present takes the terse branch — the full "Set it now"
+#      prompt is TTY-only (see 3k1b).
 make_stubs
 _keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
 rm -f "$STUBDIR/.created"
 out=$(printf '\n' | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
-assert_contains "run: never-set key names the setup case" "$out" "No USAi API key is stored yet"
-assert_contains "run: never-set key prompts to set" "$out" "Set it now"
+assert_contains "run: never-set key (non-tty) names the setup case" "$out" "no USAi API key stored"
+assert_not_contains "run: never-set key (non-tty) omits full interactive help" "$out" "Set it now"
 assert_not_contains "run: never-set key does NOT say expired" "$out" "invalid or expired"
 assert_eq "run: never-set + decline aborts run" "1" "$rc"
 if [ -f "$STUBDIR/.created" ]; then
@@ -744,6 +747,49 @@ else
   pass "run: never-set + decline does not create a sandbox"
 fi
 rm -rf "$_keyrun"
+cleanup_stubs
+
+# 3k1a. `acq create` with an EMPTY key store + non-interactive stdin: the
+#       PRE-create key gate (ensure_key_present) must abort the create WITHOUT
+#       provisioning a sandbox — no `.created` marker and no `sbx create` in the
+#       call log. This is the create-side mirror of 3k1: create binds the key at
+#       provision time, so a create with no key must not proceed.
+make_stubs
+_kc=$(mktemp -d "${TMPDIR:-/tmp}/acq-keycreate-decline.XXXXXX")
+rm -f "$STUBDIR/.created"
+out=$(printf '\n' | ACQ_BACKEND=sbx "$ACQ" create opencode "$_kc" 2>&1); rc=$?
+log=$(cat "$CALLS")
+assert_contains "create: empty store (non-tty) aborts with terse gate" "$out" "no USAi API key stored"
+assert_eq "create: empty store aborts (non-zero)" "1" "$rc"
+assert_not_contains "create: empty store does NOT call sbx create" "$log" "sbx create"
+if [ -f "$STUBDIR/.created" ]; then
+  fail "create: empty store must NOT create a sandbox" "sandbox was created before key was set"
+else
+  pass "create: empty store does not create a sandbox"
+fi
+rm -rf "$_kc"
+cleanup_stubs
+
+# 3k1b. CI host-env scenario (SHOULD-FIX): msb backend, EMPTY acq store, but a
+#       host-exported USAI_API_KEY (as in CI), non-interactive stdin. msb binds
+#       the host env var at provision (_acq_msb_bind_secrets_into), so the key
+#       gate must treat it as PRESENT and NOT abort the create — provision must
+#       proceed (`msb create` appears in the call log). This guards the
+#       false-negative that would otherwise abort a create provision could
+#       satisfy. sbx does NOT read host env, so the short-circuit is msb-only.
+make_stubs
+_kc=$(mktemp -d "${TMPDIR:-/tmp}/acq-keycreate-ci.XXXXXX")
+rm -f "$STUBDIR/.msb_created"
+out=$(printf '' | USAI_API_KEY="sk-ci-host" ACQ_BACKEND=msb "$ACQ" create opencode "$_kc" 2>&1); rc=$?
+log=$(cat "$CALLS")
+assert_not_contains "create(msb): host env key not aborted by gate" "$out" "no USAi API key stored"
+assert_contains "create(msb): host env key -> provision proceeds (msb create)" "$log" "msb create"
+if [ -f "$STUBDIR/.msb_created" ]; then
+  pass "create(msb): host env key provisions a sandbox"
+else
+  fail "create(msb): host env key must provision a sandbox" "no .msb_created marker"
+fi
+rm -rf "$_kc"
 cleanup_stubs
 
 # 3k2. usai key PRESENT + bad status -> post-create gate says "invalid or
