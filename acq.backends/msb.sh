@@ -215,6 +215,30 @@ ACQ_MSB_OPENCODE_PKG="${ACQ_MSB_OPENCODE_PKG:-opencode-ai}"
 ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
 
 # ---------------------------------------------------------------------------
+# Balanced egress baseline (ADR-0018)
+# ---------------------------------------------------------------------------
+# msb defaults guest egress to NONE, so without a baseline an msb sandbox is far
+# more locked down than an sbx one (whose "balanced" policy allows a broad set of
+# dev hosts: AI services, package registries, code/container hosts, cloud infra,
+# OS packages, cert-validation hosts). To reach parity, acq applies the SAME host
+# set as the sbx "balanced" policy by default: it emits `--net-default deny` plus
+# an `allow@<host>:tcp:<port>` rule per entry in the vendored host list, on top of
+# the kits' own caps.network.allow. Egress is therefore restricted TO the balanced
+# set (deny-by-default + allowlist), matching sbx "balanced".
+#
+# Toggle: on by default. Set ACQ_MSB_BALANCED_EGRESS=0 (or empty) to skip the
+# baseline and fall back to kit-only egress (the kits still add their own allow
+# rules, but no deny-default is emitted, so egress is not restricted by acq). Uses
+# `-` (not `:-`) so an explicitly-empty value disables it.
+ACQ_MSB_BALANCED_EGRESS="${ACQ_MSB_BALANCED_EGRESS-1}"
+
+# Path to the vendored host list (a verbatim mirror of `sbx policy inspect
+# local-policy`; see acq.backends/msb-balanced-hosts.txt). Override to point at a
+# site-specific list. ACQ_SCRIPT_DIR is exported by the acq entry point (and set
+# by the offline test harness before this adapter is sourced).
+ACQ_MSB_BALANCED_HOSTS_FILE="${ACQ_MSB_BALANCED_HOSTS_FILE:-${ACQ_SCRIPT_DIR:-.}/acq.backends/msb-balanced-hosts.txt}"
+
+# ---------------------------------------------------------------------------
 # Post-hoc port publish state (ADR-0015)
 # ---------------------------------------------------------------------------
 # acq manages its OWN ssh keypair (never the user's ~/.ssh) under its state dir,
@@ -710,6 +734,124 @@ _acq_msb_net_rules_into() {
   done <<EOF
 $(kit_spec_net_allow "$_spec")
 EOF
+}
+
+# _acq_msb_balanced_target HOST — echo the msb `--net-rule` TARGET for one sbx
+# "balanced" host token, or nothing (rc 1) if it must be dropped. Translates the
+# wildcard forms (ADR-0018):
+#   - `**.h`  (sbx multi-label glob) -> msb suffix `*.h` (apex + any depth)
+#   - `crl*.h` (intra-label glob msb can't express) -> broadened to `*.<parent>`;
+#     the CALLER emits the one-time widening warning (keyed off the `crl*.` input)
+#   - anything else -> the host unchanged (exact domain)
+# The result is charset-guarded ([A-Za-z0-9.*_-]) and single-label `*.` suffixes
+# (which msb rejects for blast radius) are dropped, so the value is safe to place
+# in an argv via the caller's eval-by-name append (SI-10).
+_acq_msb_balanced_target() {
+  local _host="$1" _target
+  case "$_host" in
+    "**."*)   _target="*.${_host#**.}" ;;
+    "crl*."*) _target="*.${_host#crl*.}" ;;
+    *)        _target="$_host" ;;
+  esac
+
+  # Charset-guard the FINAL target (defense-in-depth before any eval append).
+  case "$_target" in
+    ""|*[!A-Za-z0-9.*_-]*)
+      echo "acq(msb): warning: skipping non-hostname balanced entry: ${_host}" >&2
+      return 1
+      ;;
+  esac
+
+  # Reject a single-label suffix (`*.com`): msb refuses it (accidental blast
+  # radius), so drop it here rather than let `msb create` hard-fail on the set.
+  case "$_target" in
+    "*."*)
+      case "${_target#*.}" in
+        *.*) : ;;  # two+ labels after `*.` -> OK
+        *)
+          echo "acq(msb): warning: skipping single-label suffix (msb rejects it): ${_target}" >&2
+          return 1
+          ;;
+      esac
+      ;;
+  esac
+
+  printf '%s\n' "$_target"
+}
+
+# _acq_msb_balanced_port_ok PORT — 0 if PORT is a valid TCP port (integer
+# 1..65535), else 1. An empty PORT means "any port" and is handled by the caller
+# (not passed here). Guards a kit-derived value before it reaches an argv.
+_acq_msb_balanced_port_ok() {
+  case "$1" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+# _acq_msb_balanced_rules_into ARRVAR — append the sbx-"balanced" egress baseline
+# (ADR-0018) as msb `--net-rule` tokens to the array named ARRVAR. Reads the
+# vendored host list (ACQ_MSB_BALANCED_HOSTS_FILE, a verbatim mirror of `sbx
+# policy inspect local-policy`) and translates each `host:port` line into a rule,
+# per the msb grammar (`allow[:egress]@<target>[:<proto>[:<ports>]]`):
+#   - PORT: trailing `:port` -> `:tcp:<port>` (sbx "balanced" is TCP; a host on
+#     both :80 and :443 yields TWO rules, one per line, preserved).
+#   - WILDCARD / intra-label glob: see _acq_msb_balanced_target.
+#   - Also emits `allow@dns` FIRST so the guest can resolve the allowed hosts:
+#     under `--net-default deny` the high-level DNS auto-grant does not apply, so
+#     low-level rules must grant it explicitly. Pairs with --dns-nameserver.
+# A missing/unreadable file is a non-fatal warning (kits still add their egress).
+# Uses the eval-by-name array pattern (macOS bash 3.2 compat), like the siblings.
+_acq_msb_balanced_rules_into() {
+  local _arr="$1" _file="${ACQ_MSB_BALANCED_HOSTS_FILE}"
+  eval "$_arr=()"
+
+  if [ ! -r "$_file" ]; then
+    echo "acq(msb): warning: balanced-egress host list not readable: ${_file}" >&2
+    echo "acq(msb):   msb sandbox egress will be limited to the kits' own hosts." >&2
+    return 0
+  fi
+
+  # DNS first: without it the guest cannot resolve any allowed host under
+  # --net-default deny. `dns` is msb's semantic gateway DNS target (UDP/53+TCP/53).
+  eval "$_arr+=(--net-rule \"allow@dns\")"
+
+  local _line _host _port _target _warned_crl=0
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _line="${_line%%#*}"                                  # strip trailing comment
+    _line="${_line#"${_line%%[![:space:]]*}"}"            # ltrim
+    _line="${_line%"${_line##*[![:space:]]}"}"            # rtrim
+    [ -n "$_line" ] || continue
+
+    # Split host/port on the LAST colon (hosts have no other colon).
+    case "$_line" in
+      *:*) _port="${_line##*:}"; _host="${_line%:*}" ;;
+      *)   _host="$_line"; _port="" ;;
+    esac
+
+    # One-time widening warning for the intra-label glob (keyed off the input).
+    case "$_host" in
+      "crl*."*)
+        if [ "$_warned_crl" -eq 0 ]; then
+          echo "acq(msb): note: broadening 'crl*.' balanced entries to a parent domain" >&2
+          echo "acq(msb):   suffix (msb has no intra-label glob; widens vs. sbx 'balanced')." >&2
+          _warned_crl=1
+        fi
+        ;;
+    esac
+
+    _target=$(_acq_msb_balanced_target "$_host") || continue
+
+    if [ -n "$_port" ]; then
+      if ! _acq_msb_balanced_port_ok "$_port"; then
+        echo "acq(msb): warning: skipping balanced entry with bad port: ${_line}" >&2
+        continue
+      fi
+      eval "$_arr+=(--net-rule \"allow@\${_target}:tcp:\${_port}\")"
+    else
+      eval "$_arr+=(--net-rule \"allow@\${_target}\")"
+    fi
+  done < "$_file"
 }
 
 # Emit the create-time `-p HOST:GUEST` flags for a kit's published ports into the
@@ -1562,6 +1704,24 @@ acq_backend_provision() {
   done
 
   [ "$trust_host_cas" -eq 1 ] && create_flags+=(--trust-host-cas)
+
+  # Balanced egress baseline (ADR-0018): mirror the sbx "balanced" host set so an
+  # msb sandbox reaches the same dev hosts. msb defaults egress to none, so we
+  # make the restriction explicit and deterministic: `--net-default deny` +
+  # `allow@<host>:tcp:<port>` per vendored entry (plus `allow@dns`). These compose
+  # with the kit/npm/secret `allow@…` rules under first-match-wins. Emitted BEFORE
+  # the npm-host rule so all allow rules sit together after the deny-default.
+  # Toggle off with ACQ_MSB_BALANCED_EGRESS=0 (falls back to kit-only egress; no
+  # deny-default is emitted, so acq does not restrict egress in that mode).
+  if [ -n "$ACQ_MSB_BALANCED_EGRESS" ]; then
+    local _balanced=()
+    _acq_msb_balanced_rules_into _balanced
+    if [ "${#_balanced[@]}" -gt 0 ]; then
+      create_flags+=(--net-default deny)
+      create_flags+=("${_balanced[@]}")
+      acq_debug "msb balanced-egress: added ${#_balanced[@]} --net-rule token(s) + --net-default deny"
+    fi
+  fi
 
   # Allow-list the agent installer's registry host(s) so the (default-deny) guest
   # egress permits the npm download. Only when we will actually install an agent
