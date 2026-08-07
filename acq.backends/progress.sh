@@ -196,6 +196,7 @@ _acq_spin_install_traps() {
 # ---------------------------------------------------------------------------
 # Idempotent: a no-op when no spinner is running. FINAL overrides the label shown
 # on the completed line (defaults to the started message).
+# shellcheck disable=SC2120  # FINAL is optional; callers (sbx.sh) do pass it.
 acq_spin_stop() {
   local final
   final=$(_acq_sanitize_msg "${1:-$_ACQ_SPIN_MSG}")
@@ -222,16 +223,21 @@ acq_spin_stop() {
 # An empty captured command means the caller had none, so we clear our trap.
 _acq_spin_restore_traps() {
   if [ -n "$_ACQ_SPIN_PRIOR_EXIT_TRAP" ]; then
+    # Intentional expansion now: restore the exact prior trap command captured
+    # at start time, not a re-evaluation at signal time.
+    # shellcheck disable=SC2064
     trap "$_ACQ_SPIN_PRIOR_EXIT_TRAP" EXIT
   else
     trap - EXIT
   fi
   if [ -n "$_ACQ_SPIN_PRIOR_INT_TRAP" ]; then
+    # shellcheck disable=SC2064
     trap "$_ACQ_SPIN_PRIOR_INT_TRAP" INT
   else
     trap - INT
   fi
   if [ -n "$_ACQ_SPIN_PRIOR_TERM_TRAP" ]; then
+    # shellcheck disable=SC2064
     trap "$_ACQ_SPIN_PRIOR_TERM_TRAP" TERM
   else
     trap - TERM
