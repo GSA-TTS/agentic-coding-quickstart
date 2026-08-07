@@ -6,6 +6,5 @@
 
 # Security-sensitive files require additional review
 /.github/workflows/ @GSA-TTS/agentic-coding-team
-/opencode.jsonc @GSA-TTS/agentic-coding-team
 /AGENTS.md @GSA-TTS/agentic-coding-team
 /SECURITY.md @GSA-TTS/agentic-coding-team
