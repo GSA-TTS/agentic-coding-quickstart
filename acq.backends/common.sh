@@ -1676,6 +1676,23 @@ ensure_key_present() {
     return 0
   fi
 
+  # Backend mismatch: msb provision also accepts a host-exported USAI_API_KEY and
+  # binds it at create time (see _acq_msb_bind_secrets_into in msb.sh), so an empty
+  # acq store is NOT a blocker under msb when the env var is set (e.g. CI). Treat
+  # that as present to avoid prompting/aborting a create msb would have satisfied.
+  # sbx does NOT read host env at provision, so this short-circuit is msb-only.
+  if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ] && [ -n "${USAI_API_KEY:-}" ]; then
+    return 0
+  fi
+
+  # Non-interactive (CI / piped stdin): no one can answer the prompt below, so
+  # emit a single terse line and fail closed rather than the full interactive
+  # help (mirrors the non-tty guard in the kit-update path above).
+  if [ ! -t 0 ]; then
+    echo "acq: no USAi API key stored; set one with 'acq secret set -g usai' (see $KEY_MGMT_URL). Aborting." >&2
+    return 1
+  fi
+
   echo >&2
   echo "No USAi API key is stored yet." >&2
   echo "USAi keys are created at $KEY_MGMT_URL and expire every 7 days." >&2
