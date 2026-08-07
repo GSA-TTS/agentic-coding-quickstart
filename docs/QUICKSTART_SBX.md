@@ -33,8 +33,8 @@ For federal compliance and automation, sbx CLI is the recommended approach.
 |-------------|--------------|-------|
 | sbx CLI | `sbx version` | Standalone tool, Docker Desktop not required |
 | Docker account | `sbx login` succeeds | Your org may require a paid Docker subscription seat |
-| USAi API key | From your GSA account | For Anthropic/Claude access |
-| GitHub token | `gh auth token` | Optional, for code access |
+| USAi API key | — | **Nothing to get in advance** — `acq` prompts you and validates it on first run. Set ahead of time only when pre-seeding/scripting. |
+| GitHub token | — | **Nothing to get in advance** — `acq` offers to scope one on first run when your workspace has GitHub repos. Optional, for code access. |
 
 > [!NOTE]
 > Docker Desktop is **not required** to use sbx. The sbx CLI is a standalone tool.
@@ -52,7 +52,11 @@ For federal compliance and automation, sbx CLI is the recommended approach.
 ```bash
 # macOS
 brew install docker/tap/sbx && sbx login
+```
 
+> Don't have Homebrew? Install it from [brew.sh](https://brew.sh) first.
+
+```bash
 # Windows
 winget install -h Docker.sbx && sbx login
 
