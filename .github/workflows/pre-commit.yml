@@ -36,7 +36,7 @@ jobs:
         run: shellcheck --version
       # Cache the pre-commit hook environments (node for markdownlint, etc.),
       # keyed on the config so a pin bump busts the cache.
-      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
