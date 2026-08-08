@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# verify-net-default-egress — live end-to-end check for the ADR-0019 fix: the
+# msb balanced-egress baseline emits `--net-default-egress deny` (egress-only),
+# so a CREATE-TIME published port (`-p HOST:GUEST`) is reachable from the host
+# with NO `acq ports --publish`, while guest egress stays deny-by-default.
+#
+# This is the regression guard for the ERR_CONNECTION_RESET failure mode where a
+# symmetric `--net-default deny` RST-rejected inbound traffic to published ports.
+# It complements scripts/verify-ports-live (which covers the ADR-0015 POST-HOC
+# ssh -L path); this script covers the CREATE-TIME NAT publish path instead.
+#
+# acq has no raw `-p` CLI flag — create-time published ports come from a kit's
+# neutral top-level `publishedPorts:` block (ADR-0014), which the msb backend
+# translates to `msb -p HOST:GUEST` at create. So this script writes a tiny
+# throwaway `--kit` declaring the port and passes a real workspace dir.
+#
+# Requires a KVM-capable host with msb + acq (this cannot run inside a sandbox).
+# It is self-contained and idempotent: stands up a throwaway sandbox with a
+# published port, starts a guest listener (auto-detecting an HTTP-ish tool),
+# probes it from the host, checks egress is still locked, and always cleans up.
+#
+# Usage:
+#   ./scripts/verify-net-default-egress [SANDBOX_NAME] [GUEST_PORT] [HOST_PORT]
+# Defaults: nde-verify 3000 18090
+set -u
+
+SANDBOX="${1:-nde-verify}"
+GPORT="${2:-3000}"
+HPORT="${3:-18090}"
+
+SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+ACQ="$SCRIPT_DIR/acq"
+BE=(--backend msb)
+
+# Throwaway workspace + kit dirs (a create needs a real workspace path, and the
+# published port is declared by a kit's neutral `publishedPorts:` block).
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/nde-ws.XXXXXX")
+KITDIR=$(mktemp -d "${TMPDIR:-/tmp}/nde-kit.XXXXXX")
+
+# An egress host that is NOT in the balanced allowlist. example.com/.org/.net are
+# reserved-for-documentation domains and are deliberately absent from the sbx
+# "balanced" set, so a deny-by-default egress must refuse them.
+EGRESS_DENY_HOST="${EGRESS_DENY_HOST:-example.com}"
+
+PASS=0; FAIL=0
+ok()   { PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "$1"; }
+bad()  { FAIL=$((FAIL+1)); printf '  \033[31mBAD \033[0m %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
+info() { printf '\n== %s ==\n' "$1"; }
+
+cleanup() {
+  info "cleanup"
+  "$ACQ" "${BE[@]}" rm "$SANDBOX" >/dev/null 2>&1 && echo "  removed sandbox $SANDBOX" || true
+  rm -rf "$WORKDIR" "$KITDIR" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# --- 0. Preconditions ------------------------------------------------------
+info "preconditions"
+command -v msb >/dev/null 2>&1 && ok "msb on PATH ($(msb --version 2>/dev/null | head -1))" || { bad "msb not on PATH"; exit 1; }
+case "$(uname -s)" in
+  Linux)
+    [ -e /dev/kvm ] && ok "/dev/kvm present (Linux KVM)" || bad "/dev/kvm absent (msb create will likely fail on Linux)" ;;
+  Darwin)
+    ok "macOS host — msb uses Virtualization.framework (no /dev/kvm expected)" ;;
+  *)
+    ok "$(uname -s) host — assuming msb provides its own virtualization" ;;
+esac
+command -v curl >/dev/null 2>&1 && ok "curl on PATH (host-side probe)" || bad "curl missing"
+# The balanced baseline must be ON for this test to mean anything; if the caller
+# disabled it, no deny-default is emitted and the test is vacuous.
+case "$(printf '%s' "${ACQ_MSB_BALANCED_EGRESS:-1}" | tr 'A-Z' 'a-z')" in
+  0|false|no|off|"") bad "ACQ_MSB_BALANCED_EGRESS is OFF — the deny-default under test is not emitted; unset it and re-run"; exit 1 ;;
+  *) ok "balanced egress baseline is ON (deny-default will be emitted)" ;;
+esac
+
+# Fresh start: remove any stale sandbox of this name.
+"$ACQ" "${BE[@]}" rm "$SANDBOX" >/dev/null 2>&1 || true
+
+# --- 1. Create the sandbox WITH a create-time published port ---------------
+# acq exposes no raw `-p` flag; a create-time published port is declared by a
+# kit's neutral top-level `publishedPorts:` block (ADR-0014), which the msb
+# backend translates to `msb -p HOST:GUEST`. Write a minimal throwaway kit that
+# publishes GUEST->HOST, and pass it with --kit plus a real workspace path.
+cat > "$KITDIR/spec.yaml" <<EOF
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: nde-port
+displayName: NDE Port
+description: publishes a port for the net-default-egress live check
+publishedPorts:
+  - guest: $GPORT
+    host: $HPORT
+    protocol: tcp
+    name: nde
+EOF
+
+info "create sandbox ($SANDBOX) with published port $HPORT:$GPORT (via --kit)"
+# Non-interactive: decline the github-scope prompt by feeding "N" on stdin.
+if printf 'N\n' | "$ACQ" "${BE[@]}" create shell "$WORKDIR" --name "$SANDBOX" --kit "$KITDIR" >/tmp/nde-create.log 2>&1; then
+  ok "acq create (published-port kit) returned 0"
+else
+  bad "acq create failed" "$(tail -8 /tmp/nde-create.log)"; exit 1
+fi
+if msb ls 2>/dev/null | grep -q "$SANDBOX"; then ok "sandbox is listed/running"; else bad "sandbox not listed"; exit 1; fi
+
+# NOTE: `msb inspect` (0.6.8) prints no network-policy / published-port section,
+# so we can't assert the mapping or the egress-only default from it. The real,
+# behavioral proof is below: the host reaches the published port (ingress OK) AND
+# in-guest egress to an unlisted host is refused (egress deny-default intact).
+# Those two together are exactly what distinguishes the ADR-0019 fix from the bug.
+
+# --- 2. Start a guest listener on GPORT (auto-detect a server tool) --------
+info "start guest listener on 0.0.0.0:$GPORT"
+listen_probe=$("$ACQ" "${BE[@]}" exec "$SANDBOX" -- sh -lc '
+  gp='"$GPORT"'
+  start_ok=""
+  if command -v python3 >/dev/null 2>&1; then
+    nohup python3 -u -m http.server "$gp" --bind 0.0.0.0 >/tmp/srv.log 2>&1 &
+    start_ok="python3"
+  elif command -v python >/dev/null 2>&1; then
+    nohup python -u -m SimpleHTTPServer "$gp" >/tmp/srv.log 2>&1 &
+    start_ok="python2"
+  elif command -v busybox >/dev/null 2>&1; then
+    mkdir -p /tmp/webroot; printf ok > /tmp/webroot/index.html
+    nohup busybox httpd -f -p "$gp" -h /tmp/webroot >/tmp/srv.log 2>&1 &
+    start_ok="busybox-httpd"
+  elif command -v nc >/dev/null 2>&1; then
+    nohup sh -c "while :; do printf \"HTTP/1.1 200 OK\r\nContent-Length:2\r\n\r\nok\" | nc -l -p $gp; done" >/tmp/srv.log 2>&1 &
+    start_ok="nc-loop"
+  else
+    echo "TOOL=none"; exit 0
+  fi
+  srv_pid=$!
+  echo "TOOL=$start_ok"
+  hexp=$(printf "%04X" "$gp")
+  i=0; up=""
+  while [ "$i" -lt 16 ]; do
+    if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q "[:.]$gp[^0-9]"; then up="ss"; break; fi
+    if command -v netstat >/dev/null 2>&1 && netstat -ltn 2>/dev/null | grep -q "[:.]$gp[^0-9]"; then up="netstat"; break; fi
+    if command -v curl >/dev/null 2>&1 && curl -sS -m 2 "http://127.0.0.1:$gp/" >/dev/null 2>&1; then up="curl"; break; fi
+    if command -v wget >/dev/null 2>&1 && wget -q -T 2 -O /dev/null "http://127.0.0.1:$gp/" 2>/dev/null; then up="wget"; break; fi
+    if [ -r /proc/net/tcp ] && awk "{print \$2}" /proc/net/tcp 2>/dev/null | grep -qi ":$hexp\$"; then up="proc"; break; fi
+    kill -0 "$srv_pid" 2>/dev/null || { up=""; break; }
+    i=$((i+1)); sleep 0.5
+  done
+  if [ -n "$up" ]; then
+    echo "LISTENING=yes (via $up)"
+  else
+    echo "LISTENING=no"
+    kill -0 "$srv_pid" 2>/dev/null && echo "server-proc: still alive (probe tools may be absent)" || echo "server-proc: EXITED"
+    echo "---srv.log---"; tail -10 /tmp/srv.log 2>/dev/null
+  fi
+' 2>&1)
+printf '%s\n' "$listen_probe" | sed 's/^/    | /'
+_tool=$(printf '%s\n' "$listen_probe" | sed -n 's/^TOOL=//p' | tr -d '\r')
+case "$_tool" in
+  none|"") bad "no HTTP server tool in the base image (python3/python/busybox/nc all absent)" \
+             "install one in the image, or pass a base image that has python3, then re-run"; exit 1 ;;
+  *)       ok "guest listener started via $_tool" ;;
+esac
+printf '%s\n' "$listen_probe" | grep -q "LISTENING=yes" \
+  && ok "guest port $GPORT is LISTENING" \
+  || { bad "guest port $GPORT never came up"; exit 1; }
+
+# --- 3. THE FIX: host reaches the CREATE-TIME published port (no --publish) --
+info "HOST -> create-time published port (no acq ports --publish)"
+sleep 1
+if curl -sS -m 5 "http://127.0.0.1:$HPORT/" >/tmp/nde-curl.out 2>/tmp/nde-curl.err; then
+  ok "host reached guest :$GPORT via create-time -p (ADR-0019 fix works)"
+else
+  bad "host could NOT reach the published port — likely ingress denied (the bug)" \
+      "$(cat /tmp/nde-curl.err)  [was ERR_CONNECTION_RESET before ADR-0019]"
+fi
+
+# --- 4. Egress is STILL locked (deny-by-default egress intact) -------------
+info "guest egress to an unlisted host ($EGRESS_DENY_HOST) must be DENIED"
+egr=$("$ACQ" "${BE[@]}" exec "$SANDBOX" -- sh -lc '
+  h='"$EGRESS_DENY_HOST"'
+  if command -v curl >/dev/null 2>&1; then
+    curl -sS -m 6 -o /dev/null -w "HTTP=%{http_code}\n" "http://$h/" 2>&1 || echo "EGRESS_FAILED"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -T 6 -O /dev/null "http://$h/" 2>&1 && echo "HTTP=200" || echo "EGRESS_FAILED"
+  else
+    echo "NO_HTTP_CLIENT"
+  fi
+' 2>&1)
+printf '%s\n' "$egr" | sed 's/^/    | /'
+case "$egr" in
+  *NO_HTTP_CLIENT*) ok "no in-guest HTTP client to test egress (skipping egress assertion)" ;;
+  *EGRESS_FAILED*|*HTTP=000*) ok "egress to $EGRESS_DENY_HOST was refused (deny-default egress intact)" ;;
+  *HTTP=2*|*HTTP=3*)          bad "egress to $EGRESS_DENY_HOST SUCCEEDED — deny-default egress is NOT in effect" ;;
+  *)                          bad "egress probe inconclusive" "$egr" ;;
+esac
+
+# --- Summary ---------------------------------------------------------------
+printf '\n  passed: %d   failed: %d\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

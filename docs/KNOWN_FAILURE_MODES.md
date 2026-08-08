@@ -1365,7 +1365,109 @@ satisfy the code-signing gate on an unnotarized binary.
 
 ---
 
-## Debugging Checklist
+## 31. msb Balanced-Egress Host List Drifts from the sbx `balanced` Policy
+
+### Symptoms
+
+On the **msb** backend a host that works on sbx (which uses the `balanced`
+policy) is refused from inside the sandbox — a `curl`/package-manager fetch fails
+to connect, or an install that succeeds on sbx times out on msb. Conversely, the
+msb host list may reference hosts sbx `balanced` has since removed.
+
+### Root Cause
+
+The msb backend mirrors the sbx `balanced` egress set from a **vendored,
+point-in-time snapshot** at `acq.backends/msb-balanced-hosts.txt` (see ADR-0018).
+sbx generates its `balanced` policy in the daemon; that list is **not** stored in
+this repo, so when sbx updates `balanced`, the vendored mirror goes stale until a
+human re-syncs it. (This is a deliberate tradeoff — the alternative, shelling out
+to `sbx policy inspect` at msb-create time, requires sbx installed on an msb-only
+host and couples the backends.)
+
+### Fix / Re-sync
+
+Re-sync the vendored file from a machine that has sbx with the `balanced` policy:
+
+```bash
+# 1. Inspect the active sbx policy and copy the network `allow` host:port rows.
+sbx policy inspect local-policy
+
+# 2. Diff them against the vendored mirror (network rows only; NOT the
+#    filesystem:read/write rows).
+$EDITOR acq.backends/msb-balanced-hosts.txt
+```
+
+Copy each `allow … network` `host:port` row verbatim into the matching group in
+the file (do **not** pre-translate wildcards or ports — the msb adapter's
+`_acq_msb_balanced_rules_into` does that). Commit the diff. The offline test
+`scripts/test-acq` re-parses the real file and fails if any line is malformed, so
+run it after editing.
+
+As a stopgap for a single missing host, either add it to a site-specific list and
+point `ACQ_MSB_BALANCED_HOSTS_FILE` at it, or (for a one-off) create with an extra
+`--net-rule allow@<host>:tcp:443`.
+
+### Prevention / Status
+
+- Re-verify on the **quarterly review cadence** (per `AGENTS.md` periodic
+  re-verification): re-run `sbx policy inspect local-policy` and diff the network
+  rows against `acq.backends/msb-balanced-hosts.txt`.
+- A future option (ADR-0018 "Alternatives considered") is to move the list into a
+  shared neutral kit consumed by both backends, removing the manual re-sync.
+
+---
+
+## 32. msb `create`/`run` Fails: `the dns target supports tcp, udp, or any, not dns`
+
+### Symptoms
+
+On the **msb** backend, `acq run`/`acq create` (or a raw `msb create`/`msb run`)
+aborts during "Creating sandbox …" with:
+
+```
+error: the `dns` target supports `tcp`, `udp`, or `any`, not `dns`
+acq(msb): error: 'msb create' failed for '<sandbox>'.
+```
+
+Reproduces with the minimal case on a released msb (confirmed on msb 0.6.8):
+
+```bash
+msb run --net-default deny --net-rule "allow@dns" alpine -- true
+```
+
+### Root Cause
+
+An **upstream msb bug** in the `--net-rule` parser, not an acq misconfiguration.
+msb's semantic `allow@dns` macro is parsed by advancing past the `dns` target
+token inside a `debug_assert_eq!(parts.next(), Some("dns"))`. `debug_assert!` is
+compiled **out** of a release binary, so in the shipped `msb` the iterator is
+never advanced past `dns`; the same `dns` token is then read as the **protocol**
+field, which only accepts `tcp`/`udp`/`any` — hence the error. A bare
+`allow@dns` therefore hard-fails on every release build that has the macro
+(0.6.7+), even though the macro is documented as valid.
+
+The balanced-egress baseline (ADR-0018) needs a gateway-DNS grant under
+`--net-default deny`, and originally emitted `allow@dns`, tripping this bug.
+
+### Fix
+
+The msb adapter no longer emits the `allow@dns` macro. It emits the **expanded**
+equivalent instead — exactly what the macro is specified to produce — which takes
+the ordinary (assert-free) parse path and is unaffected by the bug:
+
+```
+--net-rule allow@host:udp:53 --net-rule allow@host:tcp:53
+```
+
+This is in `_acq_msb_balanced_rules_into` in `acq.backends/msb.sh`. If you script
+raw `msb` calls yourself, use the same expanded form rather than `allow@dns`.
+
+### Prevention / Status
+
+- Re-verify on the **quarterly review cadence**: once upstream msb fixes the
+  macro (moving the target advance out of the `debug_assert`), a bare `allow@dns`
+  becomes safe again and the expanded pair MAY be collapsed back. Confirm with the
+  minimal `msb run … --net-rule "allow@dns"` case above before changing it.
 
 When something fails, work through this list:
 
