@@ -13,6 +13,15 @@ supersedes: []
 
 # ADR-0018: Mirror the sbx "balanced" network policy as the msb default egress baseline
 
+> **Update (ADR-0019):** the deny-default described below is scoped to **egress
+> only** — the emitter uses `--net-default-egress deny`, not the symmetric
+> `--net-default deny` this ADR originally specified. msb's `--net-default` sets
+> **both** directions, which RST-rejected inbound traffic to create-time
+> `-p HOST:GUEST` published ports. Ingress now keeps msb's baseline `allow`. See
+> [ADR-0019](0019-msb-balanced-egress-is-egress-only.md). References to
+> `--net-default deny` in the text below should be read as
+> `--net-default-egress deny`.
+
 ## Context
 
 sbx ships a **`balanced`** network policy that allows a broad, curated set of

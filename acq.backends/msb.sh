@@ -221,10 +221,13 @@ ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
 # more locked down than an sbx one (whose "balanced" policy allows a broad set of
 # dev hosts: AI services, package registries, code/container hosts, cloud infra,
 # OS packages, cert-validation hosts). To reach parity, acq applies the SAME host
-# set as the sbx "balanced" policy by default: it emits `--net-default deny` plus
-# an `allow@<host>:tcp:<port>` rule per entry in the vendored host list, on top of
-# the kits' own caps.network.allow. Egress is therefore restricted TO the balanced
-# set (deny-by-default + allowlist), matching sbx "balanced".
+# set as the sbx "balanced" policy by default: it emits `--net-default-egress deny`
+# plus an `allow@<host>:tcp:<port>` rule per entry in the vendored host list, on top
+# of the kits' own caps.network.allow. Egress is therefore restricted TO the balanced
+# set (deny-by-default + allowlist), matching sbx "balanced". The deny-default is
+# scoped to EGRESS only (ADR-0019): ingress keeps msb's baseline `allow` so
+# create-time `-p HOST:GUEST` published ports stay reachable (a symmetric
+# `--net-default deny` would RST inbound to them).
 #
 # Toggle: on by default. Set ACQ_MSB_BALANCED_EGRESS=0 (or empty) to skip the
 # baseline and fall back to kit-only egress (the kits still add their own allow
@@ -828,8 +831,8 @@ _acq_msb_balanced_parse_line() {
 #     both :80 and :443 yields TWO rules, one per line, preserved).
 #   - WILDCARD / intra-label glob: see _acq_msb_balanced_target.
 #   - Also emits gateway-DNS rules FIRST so the guest can resolve the allowed
-#     hosts: under `--net-default deny` the high-level DNS auto-grant does not
-#     apply, so low-level rules must grant it explicitly. We emit the expanded
+#     hosts: under `--net-default-egress deny` the high-level DNS auto-grant does
+#     not apply, so low-level rules must grant it explicitly. We emit the expanded
 #     `allow@host:udp:53` + `allow@host:tcp:53` rather than the `allow@dns` macro,
 #     which is broken on released msb (see the DNS block below). Pairs with
 #     --dns-nameserver.
@@ -846,8 +849,9 @@ _acq_msb_balanced_rules_into() {
   fi
 
   # DNS first: without it the guest cannot resolve any allowed host under
-  # --net-default deny, since the high-level gateway-DNS auto-grant only fires for
-  # the `--net` PROFILES (public/private/host), not for a rule-only deny default.
+  # --net-default-egress deny, since the high-level gateway-DNS auto-grant only
+  # fires for the `--net` PROFILES (public/private/host), not for a rule-only deny
+  # default.
   #
   # We DELIBERATELY do NOT use msb's semantic `allow@dns` macro. That macro is
   # broken in released msb (reproduced on 0.6.8): its parser guards the target
@@ -1746,20 +1750,34 @@ acq_backend_provision() {
 
   # Balanced egress baseline (ADR-0018): mirror the sbx "balanced" host set so an
   # msb sandbox reaches the same dev hosts. msb defaults egress to none, so we
-  # make the restriction explicit and deterministic: `--net-default deny` +
+  # make the restriction explicit and deterministic: `--net-default-egress deny` +
   # `allow@<host>:tcp:<port>` per vendored entry (plus explicit gateway-DNS rules,
   # `allow@host:udp:53` + `allow@host:tcp:53`). These compose
   # with the kit/npm/secret `allow@…` rules under first-match-wins. Emitted BEFORE
   # the npm-host rule so all allow rules sit together after the deny-default.
   # Toggle off with ACQ_MSB_BALANCED_EGRESS=0 (falls back to kit-only egress; no
   # deny-default is emitted, so acq does not restrict egress in that mode).
+  #
+  # EGRESS-ONLY, DELIBERATELY (ADR-0019): we emit `--net-default-egress deny`, NOT
+  # the symmetric `--net-default deny`. msb's `--net-default` sets BOTH directions
+  # (verified in msb 0.6.8 `--help`: "Sets egress and ingress symmetrically") and
+  # there is NO implicit ingress-allow for a published port — every inbound
+  # connection is evaluated against the ingress default, so a symmetric deny RSTs
+  # inbound traffic to a create-time `-p HOST:GUEST` port (the connection completes
+  # the handshake via msb's host proxy, then resets on data → ERR_CONNECTION_RESET
+  # on the host). Restricting only egress leaves the ingress default at msb's
+  # baseline `allow`, so published ports stay reachable with no per-port ingress
+  # rule. A future "strict" profile can layer ingress deny-default + explicit
+  # per-port `allow:ingress@…` rules; the balanced default intentionally does not.
+  # Requires msb >= 0.6.8 (the `--net-default-egress`/`--net-default-ingress` split;
+  # confirmed present on the pinned msb).
   if [ -n "$ACQ_MSB_BALANCED_EGRESS" ]; then
     local _balanced=()
     _acq_msb_balanced_rules_into _balanced
     if [ "${#_balanced[@]}" -gt 0 ]; then
-      create_flags+=(--net-default deny)
+      create_flags+=(--net-default-egress deny)
       create_flags+=("${_balanced[@]}")
-      acq_debug "msb balanced-egress: added ${#_balanced[@]} --net-rule token(s) + --net-default deny"
+      acq_debug "msb balanced-egress: added ${#_balanced[@]} --net-rule token(s) + --net-default-egress deny"
     fi
   fi
 

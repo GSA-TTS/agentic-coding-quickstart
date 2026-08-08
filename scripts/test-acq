@@ -4915,9 +4915,11 @@ assert_eq "msb: real balanced file yields > 190 rules" "GT" "$real_gt"
 cleanup_stubs
 
 # 10b1i. Provision (default, ACQ_MSB_BALANCED_EGRESS unset) emits the balanced
-#        egress baseline: `--net-default deny`, the gateway-DNS rules, and a
-#        representative translated host rule appear in the recorded `msb create`
-#        argv.
+#        egress baseline: `--net-default-egress deny`, the gateway-DNS rules, and
+#        a representative translated host rule appear in the recorded `msb create`
+#        argv. The deny-default is EGRESS-ONLY (ADR-0019): it must NOT emit the
+#        symmetric `--net-default deny` (which would RST inbound to published
+#        ports) nor an ingress deny-default.
 make_stubs; load_acq
 : > "$CALLS"
 (
@@ -4929,14 +4931,16 @@ make_stubs; load_acq
   acq_backend_provision balprovbox shell /tmp >/dev/null 2>&1
 )
 bal_prov_log=$(cat "$CALLS")
-assert_contains "msb: default provision emits --net-default deny" "$bal_prov_log" "--net-default deny"
+assert_contains "msb: default provision emits --net-default-egress deny" "$bal_prov_log" "--net-default-egress deny"
+assert_not_contains "msb: default provision does NOT emit symmetric --net-default deny" "$bal_prov_log" "--net-default deny"
+assert_not_contains "msb: default provision does NOT deny ingress" "$bal_prov_log" "--net-default-ingress deny"
 assert_contains "msb: default provision emits gateway DNS (udp/53)" "$bal_prov_log" "allow@host:udp:53"
 assert_contains "msb: default provision emits gateway DNS (tcp/53)" "$bal_prov_log" "allow@host:tcp:53"
 assert_contains "msb: default provision emits a balanced host rule" "$bal_prov_log" "allow@api.anthropic.com:tcp:443"
 cleanup_stubs
 
 # 10b1j. Provision with ACQ_MSB_BALANCED_EGRESS=0 emits NONE of the balanced
-#        baseline: no `--net-default deny`, no representative balanced host rule.
+#        baseline: no egress deny-default, no representative balanced host rule.
 make_stubs; load_acq
 : > "$CALLS"
 (
@@ -4949,7 +4953,7 @@ make_stubs; load_acq
   acq_backend_provision baloffbox shell /tmp >/dev/null 2>&1
 )
 bal_off_log=$(cat "$CALLS")
-assert_not_contains "msb: BALANCED_EGRESS=0 omits --net-default deny" "$bal_off_log" "--net-default deny"
+assert_not_contains "msb: BALANCED_EGRESS=0 omits --net-default-egress deny" "$bal_off_log" "--net-default-egress deny"
 assert_not_contains "msb: BALANCED_EGRESS=0 omits balanced host rules" "$bal_off_log" "allow@api.anthropic.com"
 cleanup_stubs
 
