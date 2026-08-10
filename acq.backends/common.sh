@@ -1777,22 +1777,31 @@ _report_usai_unreachable() {
   echo >&2
 }
 
-# ensure_key_present — pre-create gate: make sure a USAi API key is stored in the
-# acq secret store BEFORE the sandbox is created. This must run before
+# ensure_key_present — pre-create gate: make sure a USAi API key is available to
+# the active backend BEFORE the sandbox is created. This must run before
 # acq_backend_provision on a fresh run because msb binds secrets only at create
-# time (--secret ENV@HOST): a sandbox created with no stored key carries no USAi
-# binding, and no post-create re-feed can fix it (the binding is create-time).
-# Storing the key first means create picks it up for both backends.
+# time (--secret ENV@HOST), and sbx snapshots custom secret placeholders from its
+# proxy table at create time. A sandbox created without the backend-visible key
+# binding carries no working USAi credential.
 #
 # Returns 0 if a key is present (already, or after the user pastes one), 1 if the
 # user declines or setup fails. A no-op (returns 0) when the store helper isn't
 # loaded — the post-create ensure_valid_key gate still catches a bad key.
 ensure_key_present() {
+  local scope_sandbox="${1:-}"
   if ! command -v acq_secret_has >/dev/null 2>&1; then
     return 0
   fi
-  if acq_secret_has usai; then
-    return 0
+  if acq_secret_has usai "$scope_sandbox"; then
+    if command -v acq_backend_key_present >/dev/null 2>&1; then
+      acq_backend_key_present usai "$scope_sandbox" && return 0
+    else
+      return 0
+    fi
+
+    echo "acq: USAi API key is stored, but the active backend is not configured to inject it." >&2
+    echo "     Run 'acq secret set -g usai' from a terminal so the backend can bind it, then retry." >&2
+    return 1
   fi
 
   # Backend mismatch: msb provision also accepts a host-exported USAI_API_KEY and

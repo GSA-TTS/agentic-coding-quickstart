@@ -627,7 +627,7 @@ case "$subcommand" in
     # at create time, so a sandbox created before the key exists carries no USAi
     # binding. Gate on key presence first (fail closed if declined) so create
     # picks it up. `create` is otherwise detached and never attaches.
-    if ! ensure_key_present; then
+    if ! ensure_key_present "$local_name"; then
       exit 1
     fi
     acq_backend_provision "$local_name" "$@"
@@ -697,7 +697,7 @@ case "$subcommand" in
         # with no USAi binding — the exact split that made validation report 200
         # (in a throwaway sandbox) yet 401 (in the real one). Gate on key
         # presence first; fail closed if the user declines.
-        if ! ensure_key_present; then
+        if ! ensure_key_present "$local_name"; then
           exit 1
         fi
         acq_backend_provision "$local_name" "${create_args[@]}"
