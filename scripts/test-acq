@@ -1816,6 +1816,7 @@ make_stubs; load_acq
   # The pinned/current floor version (0.6.8) passes.
   out2=$(STUB_MSB_VERSION=0.6.8 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); rc2=$?
   assert_eq "msb: 0.6.8 binary clears the version floor" "0" "$rc2"
+  assert_not_contains "msb: 0.6.8 binary emits no version-floor error" "$out2" "0.6.8"
 ) 2>/dev/null; pass "msb: version floor rejects sub-0.6.8, accepts 0.6.8"
 cleanup_stubs
 
