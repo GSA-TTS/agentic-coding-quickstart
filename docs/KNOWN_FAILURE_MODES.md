@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-08-04"
+last_updated: "2026-08-10"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -1468,6 +1468,84 @@ raw `msb` calls yourself, use the same expanded form rather than `allow@dns`.
   macro (moving the target advance out of the `debug_assert`), a bare `allow@dns`
   becomes safe again and the expanded pair MAY be collapsed back. Confirm with the
   minimal `msb run … --net-rule "allow@dns"` case above before changing it.
+
+---
+
+## 33. `--kit` Services Dead After a Resume/Reboot on msb — Ports Mapped, Nothing Listening
+
+### Symptoms
+
+On the **msb** backend, after a host reboot (or any `acq stop`/`acq start`,
+`acq restart`, or `acq run <existing-sandbox>` that resumes a stopped sandbox),
+a sandbox created with an extra CLI kit — e.g.
+`acq run opencode --kit …/acq-kits/openchamber …` — comes back with the kit's
+published ports still mapped, but **nothing answering behind them**:
+
+```
+$ acq ports opencode-agentic-coding
+sandbox 3000 -> host 127.0.0.1:3000 (create-time -p)
+sandbox 4096 -> host 127.0.0.1:4096 (create-time -p)
+
+$ opencode attach http://127.0.0.1:4096
+Error: Unable to connect. Is the computer able to access the url?
+```
+
+An `acq exec <sandbox> -- ps -ef` shows **no `opencode serve`, no `openchamber`,
+and — the tell — no `supervisor:` respawn loops** at all. This is distinct from a
+startup *race* (§ the wrapper's "shared server not answering yet on :4096"),
+where the supervisor processes ARE present and merely still warming up: here the
+supervisors were never (re-)launched, so the ports forward into a guest with the
+kit's services entirely absent.
+
+### Root Cause
+
+A kit's `startup`-phase commands (which, for the openchamber kit, launch the
+supervised shared `opencode serve` on :4096 and the OpenChamber UI on :3000) are
+re-run on a resume **only** by acq's heal (`acq_backend_ensure_kits_applied`) —
+`msb start` alone does not replay them (ADR-0017). The heal, however, only
+re-applied the four **built-in** kits and any `ACQ_EXTRA_KITS`; it did **not**
+fold in kits supplied on the command line via `--kit` (`ACQ_CLI_KITS`). The
+provision path *does* fold those in, so the create-time `-p` port mappings for a
+`--kit` kit are part of the persisted sandbox config and are restored by msb on
+start — but the heal skipped the kit whose `startup` phase brings the services
+up. Result: ports restored, services not — exactly the "mapped but dead" state
+above.
+
+### Fix
+
+`acq_backend_ensure_kits_applied` in `acq.backends/msb.sh` now appends
+`ACQ_CLI_KITS` to the heal's kit list (after the built-ins and `ACQ_EXTRA_KITS`),
+matching how `acq_backend_provision` assembles the kit set. To recover an
+existing sandbox on a fixed `acq`, resume it with the SAME `--kit` ref you
+created it with, so the heal re-runs that kit's startup:
+
+```bash
+acq run opencode --kit …/acq-kits/openchamber <path>   # heals + re-runs kit startup
+# or, if you don't need to attach:
+acq restart <sandbox>       # note: acq restart heals the built-ins + extras;
+                            # pass --kit via `acq run <sandbox> --kit …` to also
+                            # re-run a CLI kit's startup
+```
+
+If a resumed sandbox is already up but its services are dead, the quickest manual
+kick is to re-run the kit's startup script directly:
+
+```bash
+acq exec <sandbox> -- sh /home/agent/openchamber-start.sh &
+```
+
+### Prevention / Status
+
+- Fixed in `acq.backends/msb.sh`; covered by the `clikit-heal` unit test in
+  `scripts/test-acq` (asserts a CLI `--kit` ref's files are re-applied during the
+  heal).
+- Note the operational fact behind the original report: a live in-VM session does
+  **not** survive a host reboot — the microVM is ephemeral; only the sandbox
+  definition, its port config, and your mounted repos persist. Always commit work
+  to the mounted repos before shutting down, and expect to start a fresh agent
+  session (not reattach the old one) after a reboot.
+
+---
 
 When something fails, work through this list:
 

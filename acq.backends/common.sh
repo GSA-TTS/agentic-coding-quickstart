@@ -1278,6 +1278,110 @@ check_fresh_sandbox_key() {
   printf '%s\n' "$status"
 }
 
+# Warn (do not block) if a sandbox has published ports with nothing listening
+# behind them inside the guest. This is a backend-NEUTRAL diagnostic: it uses
+# only `acq_backend_ports` (to learn the guest ports the sandbox publishes) and
+# `acq_backend_run` (to probe inside the guest), both of which every adapter
+# implements — so it adds no backend-specific health logic to acq.
+#
+# WHY: a kit that publishes ports and supervises services in its `startup` phase
+# (e.g. openchamber's shared `opencode serve` + web UI) can end up with the port
+# MAPPED but the service DEAD — most visibly after a resume where the heal failed
+# to re-run the kit's startup (see docs/KNOWN_FAILURE_MODES.md #33). The port map
+# then looks healthy while `opencode attach` / the browser fail with "Unable to
+# connect". Surfacing "port published but nothing listening" at attach time turns
+# that silent, confusing failure into an actionable note.
+#
+# Never blocks, never prompts, always returns 0. Best-effort throughout: any
+# probe that cannot run (no ports published, no `ss`/`curl`/`nc` in the guest,
+# an exec miss) is treated as "cannot tell" and stays silent rather than emitting
+# a false warning — we only warn when a listen-probe DEFINITIVELY finds the guest
+# port closed. Bounded: probes a small, capped number of ports with short guest-
+# side timeouts so it can never stall the attach.
+warn_if_published_ports_dead() {
+  local name="${1:-}"
+  [ -n "$name" ] || return 0
+  command -v acq_backend_ports >/dev/null 2>&1 || return 0
+  command -v acq_backend_run   >/dev/null 2>&1 || return 0
+
+  # Collect the GUEST port numbers this sandbox publishes. acq_backend_ports
+  # prints human lines like "sandbox 4096 -> host 127.0.0.1:5xxxx (…)"; the guest
+  # port is the first integer token after "sandbox". Parse defensively — an
+  # unexpected format simply yields no ports (silent).
+  local ports_out guest_ports="" line g
+  ports_out=$(acq_backend_ports "$name" 2>/dev/null) || return 0
+  [ -n "$ports_out" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      sandbox\ *)
+        # Second whitespace-delimited field is the guest port.
+        g=$(printf '%s\n' "$line" | awk '{print $2}')
+        case "$g" in
+          ''|*[!0-9]*) continue ;;
+        esac
+        # Dedupe.
+        case " $guest_ports " in *" $g "*) continue ;; esac
+        guest_ports="$guest_ports $g"
+        ;;
+    esac
+  done <<EOF
+$ports_out
+EOF
+  [ -n "$guest_ports" ] || return 0
+
+  # Probe each guest port from INSIDE the sandbox. Prefer `ss`, then a bounded
+  # `curl`, then `nc` — whichever the guest has. Emit exactly one of:
+  #   listening   — something is bound to the port (healthy)
+  #   closed      — the probe ran and the port is definitively not listening
+  #   unknown     — no probe tool available / indeterminate (stay silent)
+  # The whole probe is one `sh -c` so it runs in a single guest exec per port.
+  local dead="" checked=0 p verdict
+  for p in $guest_ports; do
+    # Cap the number of ports probed so a pathological kit can't stall attach.
+    checked=$((checked + 1))
+    [ "$checked" -gt 8 ] && break
+    verdict=$(acq_backend_run "$name" -- sh -c '
+      port="$1"
+      if command -v ss >/dev/null 2>&1; then
+        if ss -ltn 2>/dev/null | grep -Eq "[:.]$port[[:space:]]"; then
+          echo listening; exit 0
+        fi
+        echo closed; exit 0
+      fi
+      if command -v curl >/dev/null 2>&1; then
+        # A refused connection => closed; any HTTP response (even an error
+        # status) => something is listening. --max-time bounds the probe.
+        # Capture the curl exit status directly (NOT via a preceding if-test,
+        # which would overwrite the status with the if-test result): exit 7 ==
+        # connection refused (nothing listening); any other outcome (0, or an
+        # HTTP-level failure like 22/52) still proves a listener answered.
+        curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$port/" 2>/dev/null
+        _rc=$?
+        [ "$_rc" -eq 7 ] && { echo closed; exit 0; }
+        echo listening; exit 0
+      fi
+      if command -v nc >/dev/null 2>&1; then
+        if nc -z -w 3 127.0.0.1 "$port" 2>/dev/null; then echo listening; else echo closed; fi
+        exit 0
+      fi
+      echo unknown
+    ' sh "$p" 2>/dev/null | tr -d '[:space:]')
+    case "$verdict" in
+      closed) dead="$dead $p" ;;
+    esac
+  done
+
+  [ -n "$dead" ] || return 0
+  echo "acq: note — published port(s) with nothing listening inside '$name':${dead}." >&2
+  echo "      The port(s) are mapped to your host, but no service is answering them" >&2
+  echo "      in the sandbox yet. If a kit is supposed to run a server there, its" >&2
+  echo "      startup may still be coming up — or, after a resume/reboot, may not" >&2
+  echo "      have been re-run. Re-run with the SAME '--kit …' you created it with" >&2
+  echo "      to re-apply kit startup, or check the kit's server log." >&2
+  echo "      See docs/KNOWN_FAILURE_MODES.md #33." >&2
+  return 0
+}
+
 # Warn (do not block) if no SSH key is loaded in the host's SSH agent.
 warn_if_no_ssh_signing_key() {
   local keys=""
