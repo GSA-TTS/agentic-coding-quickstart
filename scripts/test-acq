@@ -49,8 +49,21 @@ assert_not_contains() {
   case "$2" in *"$3"*) fail "$1" "unexpected [$3] in output" ;; *) pass "$1" ;; esac
 }
 
+seed_sbx_usai_proxy_fixture() {
+  cat > "$STUBDIR/sbx_ls" <<'LS'
+SCOPE      TYPE      NAME     SECRET
+
+CUSTOM SECRETS
+SCOPE      TARGETS            ENV            PLACEHOLDER               SECRET
+(global)   api.gsa.usai.gov   USAI_API_KEY   sbx-cs-0lrfssn3YnvE8P2j   api-ke***tJ63
+LS
+  export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+}
+
 # Neutralize retry backoff.
 sleep() { :; }
+
+MSB_GITHUB_SECRET_BINDING="GITHUB_TOKEN@github.com,api.github.com,codeload.github.com"
 
 # Force the sbx adapter to pass kit refs through unchanged (no git fetch /
 # translation) so the harness stays fully offline. The neutral→sbx-v2
@@ -679,6 +692,7 @@ cleanup_stubs
 make_stubs
 _projdir=$(mktemp -d "${TMPDIR:-/tmp}/acq-proj.XXXXXX")
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(ACQ_BACKEND=sbx "$ACQ" create opencode "$_projdir" 2>/dev/null)
 log=$(cat "$CALLS")
 assert_contains "dispatch: create -> sbx create --name" "$log" "sbx create --name"
@@ -695,6 +709,7 @@ make_stubs
 _ghproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-ghcreate.XXXXXX")
 ( cd "$_ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$_ghproj/.secrets" \
   "$ACQ" create opencode "$_ghproj" </dev/null 2>&1)
 assert_contains "dispatch: create runs github-scope advisory" "$out" "no repo-scoped GitHub token"
@@ -710,6 +725,7 @@ cleanup_stubs
 make_stubs
 _keyproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-keycreate.XXXXXX")
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 # Bad key -> advisory fires, but create still succeeds (exit 0).
 out=$(STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" create opencode "$_keyproj" 2>&1); rc=$?
 assert_contains "dispatch: create warns on invalid USAi key" "$out" "invalid or expired (HTTP 401)"
@@ -770,6 +786,53 @@ fi
 rm -rf "$_kc"
 cleanup_stubs
 
+# 3k1a2. sbx-specific split: the acq store can contain usai while the sbx proxy
+#        custom secret is missing. That is NOT sufficient for a fresh sbx create:
+#        the sandbox would snapshot no working USAi placeholder and later return
+#        HTTP 401. Fail closed before `sbx create` so the user re-runs
+#        `acq secret set -g usai` from a terminal to bind sbx's proxy table.
+make_stubs
+_kc=$(mktemp -d "${TMPDIR:-/tmp}/acq-keycreate-sbx-unbound.XXXXXX")
+mkdir -p "$STUBDIR/secrets"
+printf 'sk-stored-only\n' > "$STUBDIR/secrets/acq.usai"
+rm -f "$STUBDIR/.created"
+out=$(printf '' | ACQ_BACKEND=sbx "$ACQ" create opencode "$_kc" 2>&1); rc=$?
+log=$(cat "$CALLS")
+assert_contains "create(sbx): stored-only key says backend not configured" "$out" "backend is not configured to inject it"
+assert_contains "create(sbx): stored-only key points at secret set" "$out" "acq secret set -g usai"
+assert_eq "create(sbx): stored-only key aborts" "1" "$rc"
+assert_not_contains "create(sbx): stored-only key does NOT call sbx create" "$log" "sbx create"
+if [ -f "$STUBDIR/.created" ]; then
+  fail "create(sbx): stored-only key must NOT create a sandbox" "sandbox was created without sbx proxy binding"
+else
+  pass "create(sbx): stored-only key does not create a sandbox"
+fi
+rm -rf "$_kc"
+cleanup_stubs
+
+# 3k1a3. Same acq-store state, but sbx's CUSTOM SECRETS table includes the
+#        global USAI_API_KEY binding. That is backend-visible, so provisioning may
+#        proceed.
+make_stubs
+_kc=$(mktemp -d "${TMPDIR:-/tmp}/acq-keycreate-sbx-bound.XXXXXX")
+mkdir -p "$STUBDIR/secrets"
+printf 'sk-stored-and-bound\n' > "$STUBDIR/secrets/acq.usai"
+seed_sbx_usai_proxy_fixture
+rm -f "$STUBDIR/.created"
+out=$(STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" create opencode "$_kc" 2>&1); rc=$?
+unset SBX_LS_FIXTURE
+log=$(cat "$CALLS")
+assert_not_contains "create(sbx): bound key not rejected" "$out" "backend is not configured"
+assert_contains "create(sbx): bound key proceeds to sbx create" "$log" "sbx create"
+assert_eq "create(sbx): bound key create succeeds" "0" "$rc"
+if [ -f "$STUBDIR/.created" ]; then
+  pass "create(sbx): bound key provisions a sandbox"
+else
+  fail "create(sbx): bound key must provision a sandbox" "no .created marker"
+fi
+rm -rf "$_kc"
+cleanup_stubs
+
 # 3k1b. CI host-env scenario (SHOULD-FIX): msb backend, EMPTY acq store, but a
 #       host-exported USAI_API_KEY (as in CI), non-interactive stdin. msb binds
 #       the host env var at provision (_acq_msb_bind_secrets_into), so the key
@@ -797,6 +860,7 @@ cleanup_stubs
 make_stubs
 _keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(printf '\n' | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
 assert_contains "run: expired key names the rotate case" "$out" "invalid or expired"
 assert_contains "run: expired key prompts to rotate" "$out" "Rotate now"
@@ -809,6 +873,7 @@ cleanup_stubs
 make_stubs
 _keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-keyrun.XXXXXX")
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
 assert_not_contains "run: healthy key -> no gate message" "$out" "Aborting attach"
 assert_eq "run: healthy key attaches" "0" "$rc"
@@ -821,6 +886,7 @@ cleanup_stubs
 make_stubs
 _ocrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-ocrun.XXXXXX")
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_ocrun" 2>&1); rc=$?
 log=$(cat "$CALLS")
 assert_contains "run(opencode): runs postinstall.mjs when binary not functional" "$log" "postinstall.mjs"
@@ -837,6 +903,7 @@ cleanup_stubs
 make_stubs
 _ocrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-ocok.XXXXXX")
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$_ocrun" 2>&1)
 log=$(cat "$CALLS")
 assert_not_contains "run(opencode): skips postinstall when already runnable" "$log" "postinstall.mjs"
@@ -852,6 +919,7 @@ cleanup_stubs
 make_stubs
 _keyrun=$(mktemp -d "${TMPDIR:-/tmp}/acq-unreach.XXXXXX")
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(STUB_KEY_UNREACHABLE=1 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun" 2>&1); rc=$?
 assert_contains "run: unreachable names a network problem" "$out" "could not reach the USAi API"
 assert_contains "run: unreachable says not a key problem" "$out" "NOT an invalid or expired key"
@@ -926,6 +994,7 @@ cleanup_stubs
 _kitproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-kitproj.XXXXXX")
 make_stubs
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/mykit "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
@@ -943,6 +1012,7 @@ cleanup_stubs
 # --kit=<ref> (equals form) is also intercepted.
 make_stubs
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit=/tmp/eqkit "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
@@ -953,6 +1023,7 @@ cleanup_stubs
 # Multiple --kit flags are all intercepted.
 make_stubs
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/k1 --kit /tmp/k2 "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
@@ -964,6 +1035,7 @@ cleanup_stubs
 # run form also intercepts --kit (routes through provision -> sbx create).
 make_stubs
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/runkit "$_kitproj" 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
@@ -975,6 +1047,7 @@ cleanup_stubs
 # be hijacked into the kit list, and it MUST survive intact in the agent args.
 make_stubs
 printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
 out=$(ACQ_BACKEND=sbx "$ACQ" run opencode "$_kitproj" -- --kit evil-agent-arg 2>/dev/null)
 log=$(cat "$CALLS")
 create_line=$(printf '%s\n' "$log" | grep '^sbx create')
@@ -1282,8 +1355,8 @@ cleanup_stubs
 
 # 5h2c. `acq secret set` (msb) live add/rotates into running sandboxes for EVERY
 #       bound service, not just usai. github into a named running sandbox must
-#       re-feed via `msb modify <box> --secret GITHUB_TOKEN@api.github.com`, and
-#       the real value must NOT leak into argv.
+#       re-feed via `msb modify <box> --secret GITHUB_TOKEN@...`, and the real
+#       value must NOT leak into argv.
 make_stubs; load_acq
 printf 'setbox\n' > "$STUBDIR/.msb_sandbox_list"
 : > "$CALLS"
@@ -1293,7 +1366,7 @@ printf 'setbox\n' > "$STUBDIR/.msb_sandbox_list"
   ACQ_BACKEND=msb "$ACQ" secret set setbox github >/dev/null 2>&1
 )
 set_log=$(cat "$CALLS")
-assert_contains "secret set: github live-rotates into running sandbox" "$set_log" "msb modify setbox --secret GITHUB_TOKEN@api.github.com"
+assert_contains "secret set: github live-rotates into running sandbox" "$set_log" "msb modify setbox --secret $MSB_GITHUB_SECRET_BINDING"
 if grep -q 'ghp_SECRETVALUE' "$CALLS"; then
   fail "secret set: value must NOT appear in msb argv" "leaked into $CALLS"
 else
@@ -1865,9 +1938,9 @@ else
 fi
 cleanup_stubs
 
-# 8m. msb provision binds USAi via --secret ENV@HOST (with --tls-intercept),
-#     does NOT bind GitHub (msb git substitution unsupported — see BACKEND_GUIDE),
-#     and the real secret VALUES never appear in the msb command line.
+# 8m. msb provision binds USAi and GitHub via --secret ENV@HOST (with
+#     --tls-intercept), and the real secret VALUES never appear in the msb
+#     command line.
 make_stubs; load_acq
 : > "$CALLS"
 prov_leaks=$(
@@ -1887,12 +1960,9 @@ prov_leaks=$(
 prov_log=$(cat "$CALLS")
 assert_contains "msb: provision enables --tls-intercept (needed for substitution)" "$prov_log" "--tls-intercept"
 assert_contains "msb: provision binds USAi via --secret" "$prov_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
-# GitHub IS now bound — to the REST API host ONLY (api.github.com), the path msb
-# substitutes. The playbook kit fetches a tarball there instead of git-cloning
-# github.com/codeload (which msb does not substitute).
-assert_contains "msb: provision binds github to api.github.com (REST path msb substitutes)" "$prov_log" "--secret GITHUB_TOKEN@api.github.com"
-assert_not_contains "msb: provision does NOT bind github to github.com (git transport unsubstituted)" "$prov_log" "GITHUB_TOKEN@github.com"
-assert_not_contains "msb: provision does NOT bind github to codeload" "$prov_log" "GITHUB_TOKEN@codeload"
+# GitHub binds to both REST and git-transport hosts so msb can substitute for
+# API calls, HTTPS clones, and HTTPS pushes.
+assert_contains "msb: provision binds github to API and git hosts" "$prov_log" "--secret $MSB_GITHUB_SECRET_BINDING"
 assert_eq "msb: provision never leaks secret values to argv" "CLEAN" "$prov_leaks"
 # Workspace is mounted at the SAME absolute path in the guest (sbx-parity), not
 # Workspace is mounted at the SAME absolute path in the guest (sbx-parity), not
@@ -1959,7 +2029,7 @@ gen_leaks=$(
 gen_log=$(cat "$CALLS")
 assert_contains "msb#226: custom endpoint bound generically (--secret API_KEY@api.example.com)" "$gen_log" "--secret API_KEY@api.example.com"
 assert_contains "msb#226: usai still bound as before"   "$gen_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
-assert_contains "msb#226: github still bound as before" "$gen_log" "--secret GITHUB_TOKEN@api.github.com"
+assert_contains "msb#226: github still bound as before" "$gen_log" "--secret $MSB_GITHUB_SECRET_BINDING"
 # A value-only service (no host/env sidecar) must not emit a bogus flag.
 assert_not_contains "msb#226: no bogus flag for service without host/env" "$gen_log" "--secret @"
 assert_not_contains "msb#226: value-only service 'nomap' not bound" "$gen_log" "nomap"
@@ -2152,14 +2222,14 @@ ls_out=$(
 assert_contains "secret ls(msb): header present"              "$ls_out" "SCOPE"
 assert_contains "secret ls(msb): global usai binding shown"   "$ls_out" "USAI_API_KEY@api.gsa.usai.gov"
 assert_contains "secret ls(msb): global custom endpoint shown" "$ls_out" "API_KEY@api.example.com"
-assert_contains "secret ls(msb): scoped github row shown"     "$ls_out" "GITHUB_TOKEN@api.github.com"
+assert_contains "secret ls(msb): scoped github row shown"     "$ls_out" "$MSB_GITHUB_SECRET_BINDING"
 # The value must NEVER be printed by `ls`.
 assert_not_contains "secret ls(msb): never prints a secret value" "$ls_out" "LS-SECRET-VALUE"
 # Scope filtering: `-g` excludes the scoped github row; `lsbox` includes only it.
 g_only=$(printf '%s\n' "$ls_out" | sed -n '/=== global ===/,/=== scoped ===/p')
-assert_not_contains "secret ls -g(msb): excludes scoped github" "$g_only" "GITHUB_TOKEN@api.github.com"
+assert_not_contains "secret ls -g(msb): excludes scoped github" "$g_only" "$MSB_GITHUB_SECRET_BINDING"
 s_only=$(printf '%s\n' "$ls_out" | sed -n '/=== scoped ===/,$p')
-assert_contains     "secret ls SANDBOX(msb): includes scoped github" "$s_only" "GITHUB_TOKEN@api.github.com"
+assert_contains     "secret ls SANDBOX(msb): includes scoped github" "$s_only" "$MSB_GITHUB_SECRET_BINDING"
 assert_not_contains "secret ls SANDBOX(msb): excludes global usai"   "$s_only" "USAI_API_KEY@api.gsa.usai.gov"
 cleanup_stubs
 
@@ -3667,7 +3737,7 @@ prov_refactor_leak=$(
 )
 prov_refactor_log=$(cat "$CALLS")
 assert_contains "0017 refactor: provision still binds USAi via --secret" "$prov_refactor_log" "--secret USAI_API_KEY@api.gsa.usai.gov"
-assert_contains "0017 refactor: provision still binds github via --secret" "$prov_refactor_log" "--secret GITHUB_TOKEN@api.github.com"
+assert_contains "0017 refactor: provision still binds github via --secret" "$prov_refactor_log" "--secret $MSB_GITHUB_SECRET_BINDING"
 assert_contains "0017 refactor: provision still never leaks values to argv" "$prov_refactor_leak" "CLEAN"
 cleanup_stubs
 
@@ -4318,7 +4388,8 @@ cleanup_stubs
 
 make_stubs; load_acq
 # Build a local neutral kit and translate it to an sbx-v2 kit dir; assert the
-# synthesized spec is sbx schemaVersion "2" and carries the payload + command.
+# synthesized spec is sbx schemaVersion "2" and carries only fields current sbx
+# accepts.
 tkit="$STUBDIR/tkit"
 mkdir -p "$tkit/files/home/tool"
 printf 'payload\n' > "$tkit/files/home/tool/config"
@@ -4362,25 +4433,33 @@ publishedPorts:
   - guest: 4096
     protocol: tcp
     name: api
+agentContext: |
+  Translate kit context.
 SPEC
 tout="$STUBDIR/tout"
 ( . "${REPO_ROOT}/acq.backends/kit-translate.sh"
   kit_translate_to_sbx "$tkit" "$tout" >/dev/null ) 2>/dev/null
 sbxspec=$(cat "$tout/spec.yaml" 2>/dev/null || true)
 assert_contains "translate: emits sbx schemaVersion 2" "$sbxspec" 'schemaVersion: "2"'
-assert_contains "translate: carries caps.network.allow" "$sbxspec" "api.example.com:443"
-assert_contains "translate: has install phase" "$sbxspec" "install:"
-assert_contains "translate: has startup phase" "$sbxspec" "startup:"
-assert_contains "translate: preserves multi-line block body" "$sbxspec" "line two"
+assert_contains "translate: emits permissions block" "$sbxspec" "permissions:"
+assert_contains "translate: carries permissions.network.allow" "$sbxspec" "api.example.com:443"
+assert_not_contains "translate: omits unsupported caps field" "$sbxspec" "caps:"
+assert_not_contains "translate: omits unsupported commands field" "$sbxspec" "commands:"
+assert_contains "translate: emits setup block" "$sbxspec" "setup:"
+assert_contains "translate: emits setup install phase" "$sbxspec" "  install:"
+assert_contains "translate: emits setup startup phase" "$sbxspec" "  startup:"
+assert_contains "translate: preserves multi-line command body" "$sbxspec" "line two"
+assert_contains "translate: emits agentInstructions block" "$sbxspec" "agentInstructions:"
+assert_contains "translate: carries agent context" "$sbxspec" "Translate kit context."
 # Regression: a wildcard-subdomain allow host (leading `*`) MUST be
 # quoted, or YAML parses the `*` as an alias and the sbx spec is invalid. The
 # host:port form also contains a `:` and must survive. Assert both are quoted.
 assert_contains "translate: quotes wildcard allow host (#220)" "$sbxspec" "- '*.example.com'"
 assert_contains "translate: quotes host:port allow entry (#220)" "$sbxspec" "- 'api.example.com:443'"
-# ADR-0014: the NEUTRAL top-level publishedPorts MUST synthesize the same
-# top-level sbx-v2 publishedPorts block (keyed on `container` = the guest port)
-# so the observable sbx shape is unchanged from the old backend_extras.sbx path.
-assert_contains "translate: emits publishedPorts block (#224)" "$sbxspec" "publishedPorts:"
+# ADR-0014: the NEUTRAL top-level publishedPorts MUST synthesize the sbx-v2
+# ports block (keyed on `container` = the guest port).
+assert_contains "translate: emits ports block (#224)" "$sbxspec" "ports:"
+assert_not_contains "translate: omits unsupported publishedPorts block (#224)" "$sbxspec" "publishedPorts:"
 assert_contains "translate: neutral publishedPorts carries container 3000 (#224)" "$sbxspec" "- container: 3000"
 assert_contains "translate: neutral publishedPorts carries container 4096 (#224)" "$sbxspec" "- container: 4096"
 assert_contains "translate: publishedPorts carries protocol (#224)" "$sbxspec" "protocol: tcp"
@@ -4391,22 +4470,10 @@ if [ -f "$tout/files/home/tool/config" ]; then
 else
   fail "translate: copies files/ payload tree" "missing $tout/files/home/tool/config"
 fi
-# Regression (sbx unmarshal typing): commands.install[].command MUST be a shell
-# STRING (`command: |`), while commands.startup[]/initFiles[] MUST be an argv
-# SEQUENCE — mismatching yields "cannot unmarshal !!seq into string" (install)
-# or "!!str into []string" (startup). The tkit above has a `sh -c` INSTALL and a
-# node STARTUP.
-install_block=$(printf '%s\n' "$sbxspec" | sed -n '/^  install:/,/^  [a-z]/p')
-assert_contains "translate: install emits command string" "$install_block" "command: |"
-assert_not_contains "translate: install is not an argv seq" "$install_block" "        - sh"
-# A non-shell argv (node ...) startup MUST stay an argv sequence.
-startup_block=$(printf '%s\n' "$sbxspec" | sed -n '/^  startup:/,$p')
-assert_contains "translate: node startup emits argv seq" "$startup_block" "- node"
 cleanup_stubs
 
-# 10a2. A `sh -c` STARTUP command (zscaler/playbook shape) MUST be an argv SEQ,
-#       not a string — sbx types startup as []string. Regression for the second
-#       unmarshal error ("!!str ... into []string").
+# 10a2. A `sh -c` STARTUP command (zscaler/playbook shape) emits under the v2
+#       setup.startup argv list.
 make_stubs; load_acq
 shkit="$STUBDIR/shkit"; mkdir -p "$shkit"
 cat >"$shkit/spec.yaml" <<'SPEC'
@@ -4429,9 +4496,11 @@ shout="$STUBDIR/shout"
 ( . "${REPO_ROOT}/acq.backends/kit-translate.sh"
   kit_translate_to_sbx "$shkit" "$shout" >/dev/null ) 2>/dev/null
 shspec=$(cat "$shout/spec.yaml" 2>/dev/null || true)
-sh_startup_block=$(printf '%s\n' "$shspec" | sed -n '/^  startup:/,$p')
-assert_contains "translate: sh -c startup emits argv seq (- sh)" "$sh_startup_block" "        - sh"
-assert_not_contains "translate: sh -c startup is not a bare string" "$sh_startup_block" "command: |"
+assert_not_contains "translate: sh -c startup omits unsupported commands key" "$shspec" "commands:"
+assert_contains "translate: sh -c startup emits setup" "$shspec" "setup:"
+assert_contains "translate: sh -c startup emits startup phase" "$shspec" "  startup:"
+assert_contains "translate: sh -c startup emits argv seq (- sh)" "$shspec" "        - sh"
+assert_contains "translate: sh -c body emitted under setup.startup" "$shspec" "echo hello"
 cleanup_stubs
 
 # 10a2b. A git+https kit fetch MUST be NON-INTERACTIVE. Stub `git` to
@@ -4571,16 +4640,18 @@ pp_flags=$(
 assert_contains "pp: msb emits -p 8080:3000 (explicit host)" "$pp_flags" "8080:3000"
 assert_contains "pp: msb emits -p 4096:4096 (host defaults to guest)" "$pp_flags" "4096:4096"
 assert_contains "pp: msb emits a -p flag token" "$pp_flags" "-p"
-# sbx-v2 synthesis: the neutral source produces the same top-level publishedPorts.
+# sbx-v2 synthesis: the neutral source produces the top-level ports block.
 ppout="$STUBDIR/ppout"
 ( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_translate_to_sbx "$ppkit" "$ppout" >/dev/null ) 2>/dev/null
 ppspec=$(cat "$ppout/spec.yaml" 2>/dev/null || true)
-assert_contains "pp: sbx-v2 emits publishedPorts from neutral source" "$ppspec" "- container: 3000"
+assert_contains "pp: sbx-v2 emits ports block from neutral source" "$ppspec" "ports:"
+assert_not_contains "pp: sbx-v2 omits unsupported publishedPorts key" "$ppspec" "publishedPorts:"
+assert_contains "pp: sbx-v2 emits port from neutral source" "$ppspec" "- container: 3000"
 assert_contains "pp: sbx-v2 emits second neutral port" "$ppspec" "- container: 4096"
 cleanup_stubs
 
 # 10a4b. Legacy backend_extras.sbx.publishedPorts STILL translates (one release)
-#        but emits a DEPRECATION warning to stderr. sbx-v2 shape is unchanged.
+#        but emits a DEPRECATION warning to stderr. sbx-v2 shape remains ports.
 make_stubs; load_acq
 lpkit="$STUBDIR/lpkit"; mkdir -p "$lpkit"
 cat >"$lpkit/spec.yaml" <<'SPEC'
@@ -4764,12 +4835,8 @@ assert_contains "bg(msb): detached command is the supervisor loop" "$bg_log" "su
 assert_contains "bg(msb): foreground startup command still awaited (no nohup wrap)" "$bg_log" "-- foreground-cmd"
 cleanup_stubs
 
-# 10a4h. sbx path: sbx-v2 has NO startup detach field, so a `background: true`
-#        startup command relies on the command SELF-backgrounding. The translator
-#        must (a) still emit it as a startup argv sequence, and (b) preserve a
-#        self-backgrounding `sh -c '… &'` body VERBATIM — never double-wrap it in
-#        a nohup/extra `sh -c`, and never append a second `&` (which would be a
-#        `& &` syntax error). See ADR-0014 "Translation → sbx".
+# 10a4h. sbx path: v2 setup.startup supports `background: true`, so the
+#        translator preserves the flag without wrapping the command in nohup.
 make_stubs; load_acq
 sbgkit="$STUBDIR/sbgkit"; mkdir -p "$sbgkit"
 cat >"$sbgkit/spec.yaml" <<'SPEC'
@@ -4791,13 +4858,10 @@ SPEC
 sbgout="$STUBDIR/sbgout"
 ( . "${REPO_ROOT}/acq.backends/kit-translate.sh"; kit_translate_to_sbx "$sbgkit" "$sbgout" >/dev/null ) 2>/dev/null
 sbgspec=$(cat "$sbgout/spec.yaml" 2>/dev/null || true)
-assert_contains "bg(sbx): startup phase present" "$sbgspec" "startup:"
-assert_contains "bg(sbx): self-backgrounding argv emitted as startup command" "$sbgspec" "- sh"
-# The self-backgrounding trailing & is preserved verbatim (single &, in the body).
+assert_contains "bg(sbx): setup startup phase present" "$sbgspec" "  startup:"
+assert_contains "bg(sbx): self-backgrounding argv emitted as startup command" "$sbgspec" "        - sh"
 assert_contains "bg(sbx): trailing & preserved in the sh -c body" "$sbgspec" "sh /home/agent/supervisor.sh &"
-# NOT double-wrapped: no nohup injected, and no double-background (same-line
-# `& &` OR a second `&` on its own line). Count backgrounding `&` tokens in the
-# emitted spec: the source body has exactly one, so the translation must too.
+assert_contains "bg(sbx): background flag preserved" "$sbgspec" "background: true"
 assert_not_contains "bg(sbx): translator does NOT wrap in nohup" "$sbgspec" "nohup"
 assert_not_contains "bg(sbx): translator does NOT emit a double-background & &" "$sbgspec" "& &"
 _amp_count=$(printf '%s\n' "$sbgspec" | grep -cE '(^|[^&])&([^&]|$)')
