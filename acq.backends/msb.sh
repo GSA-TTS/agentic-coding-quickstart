@@ -56,9 +56,15 @@ ACQ_BACKEND_CAN_RESUME=1                   # msb stop / msb start preserve state
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1  # msb --secret ENV@HOST + --tls-intercept
 
-# Minimum msb version required. 0.6.x is the first line with the neutral net
-# rules, --trust-host-cas, and --secret used here.
-MIN_MSB_VERSION="0.6.0"
+# Minimum msb version required. 0.6.8 is the first release with the
+# `--net-default-egress` / `--net-default-ingress` split that the balanced-egress
+# baseline (on by default, ADR-0018/0019) relies on — earlier 0.6.x had the
+# neutral net rules, --trust-host-cas, and --secret used here, but only the
+# symmetric `--net-default`, so a plain `acq create` would pass an unknown flag to
+# a 0.6.0-0.6.7 binary and clap would hard-error. Fail closed on the floor instead
+# (acq_backend_prepare) so the failure mode is a clear version message, not a raw
+# clap error mid-create.
+MIN_MSB_VERSION="0.6.8"
 
 # Default OCI image for provisioned sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
@@ -1769,8 +1775,12 @@ acq_backend_provision() {
   # baseline `allow`, so published ports stay reachable with no per-port ingress
   # rule. A future "strict" profile can layer ingress deny-default + explicit
   # per-port `allow:ingress@…` rules; the balanced default intentionally does not.
-  # Requires msb >= 0.6.8 (the `--net-default-egress`/`--net-default-ingress` split;
-  # confirmed present on the pinned msb).
+  # Requires msb >= 0.6.8 (the `--net-default-egress`/`--net-default-ingress`
+  # split); MIN_MSB_VERSION is 0.6.8, so acq_backend_prepare has already failed
+  # closed on anything older before we reach here — this flag is always known.
+  # Track the hosts the balanced block allow-listed so the npm block below can
+  # de-dupe against them (space-delimited, space-padded for whole-token match).
+  local _balanced_hosts=" "
   if [ -n "$ACQ_MSB_BALANCED_EGRESS" ]; then
     local _balanced=()
     _acq_msb_balanced_rules_into _balanced
@@ -1778,18 +1788,44 @@ acq_backend_provision() {
       create_flags+=(--net-default-egress deny)
       create_flags+=("${_balanced[@]}")
       acq_debug "msb balanced-egress: added ${#_balanced[@]} --net-rule token(s) + --net-default-egress deny"
+      # Record the bare host of each emitted rule (strip the `allow@` prefix and
+      # any `:proto:port` suffix) for the npm de-dupe below.
+      local _tok _bh
+      for _tok in "${_balanced[@]}"; do
+        case "$_tok" in
+          allow@*)
+            _bh=${_tok#allow@}; _bh=${_bh%%:*}
+            _balanced_hosts="${_balanced_hosts}${_bh} "
+            ;;
+        esac
+      done
     fi
   fi
 
   # Allow-list the agent installer's registry host(s) so the (default-deny) guest
   # egress permits the npm download. Only when we will actually install an agent
   # (a known recipe exists); `shell` and unknown agents add no rule.
+  #
+  # De-dupe against the balanced set: when the baseline is ON, registry.npmjs.org
+  # is already allow-listed, so a second bare `allow@registry.npmjs.org` would be
+  # dead weight (both allow; no deny to shadow). We therefore skip any npm host
+  # that the balanced block ALREADY emitted a rule for, rather than skipping the
+  # whole block — an operator who overrides ACQ_MSB_NPM_HOSTS to an internal
+  # mirror NOT in the balanced set still gets its rule. In kit-only mode
+  # (ACQ_MSB_BALANCED_EGRESS=0) nothing is elided, since the balanced set is empty.
   if _acq_msb_agent_has_install_recipe "$agent"; then
     local _npm_host
     for _npm_host in $ACQ_MSB_NPM_HOSTS; do
       case "$_npm_host" in
         ""|*[!A-Za-z0-9.*_-]*)
           echo "acq(msb): warning: skipping non-hostname npm host: $_npm_host" >&2
+          continue
+          ;;
+      esac
+      # Already covered by a balanced rule? Skip the redundant bare allow.
+      case "$_balanced_hosts" in
+        *" ${_npm_host} "*)
+          acq_debug "msb: npm host ${_npm_host} already in balanced set; skipping redundant rule"
           continue
           ;;
       esac
@@ -2924,6 +2960,18 @@ acq_backend_ensure_kits_applied() {
     local _extras=()
     split_noglob _extras "$ACQ_EXTRA_KITS"
     kits+=("${_extras[@]}")
+  fi
+  # CLI-supplied `--kit <ref>` refs (ACQ_CLI_KITS) MUST be healed too, exactly as
+  # the provision path folds them in (see acq_backend_provision's kit assembly).
+  # These kits' STARTUP-phase commands (e.g. openchamber's supervisor loops for
+  # the shared `opencode serve` and the web UI) are re-run only by this heal —
+  # `msb start` alone does not replay them (ADR-0017). Omitting them here meant a
+  # resumed/rebooted sandbox came back with the create-time `-p` port mappings
+  # intact but NOTHING listening behind them, because the kit's startup was never
+  # re-run: `acq ports` showed the ports mapped while the services were dead. Fold
+  # ACQ_CLI_KITS in so `acq run --kit … <existing-sandbox>` heals its full kit set.
+  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
+    kits+=("${ACQ_CLI_KITS[@]}")
   fi
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"

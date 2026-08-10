@@ -91,7 +91,12 @@ emitted (kit-only egress).
   connection is not evaluated as ingress — which is why it kept working while
   create-time `-p` did not. No change needed there.
 - **Version floor:** requires the `--net-default-egress` / `--net-default-ingress`
-  split, present on the pinned msb (confirmed on msb 0.6.8 `msb create --help`).
+  split, first present in **msb 0.6.8** (confirmed on msb 0.6.8 `msb create
+  --help`). Because the balanced-egress baseline is ON by default, `acq` raises
+  its floor to `MIN_MSB_VERSION = 0.6.8` and `acq_backend_prepare` fails closed
+  with a clear version message on any older binary — otherwise a plain
+  `acq create` would pass an unknown flag to a 0.6.0-0.6.7 `msb` and clap would
+  hard-error mid-create. `scripts/test-acq` asserts the sub-0.6.8 rejection.
 
 ## Alternatives considered
 

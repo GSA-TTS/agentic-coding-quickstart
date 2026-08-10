@@ -134,7 +134,7 @@ automation story.
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `msb` CLI | >= 0.6.0 | `--net-rule`, `--trust-host-cas`, `--secret` used by acq |
+| `msb` CLI | >= 0.6.8 | `--net-rule`, `--trust-host-cas`, `--secret`, and the `--net-default-egress` split (0.6.8) used by acq's balanced-egress default |
 | Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
 
 Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
@@ -228,6 +228,16 @@ kits' own `caps.network.allow` rules.
 - **Drift:** the vendored file is a point-in-time snapshot. Re-sync it from `sbx
   policy inspect local-policy` on the quarterly review cadence (see
   `docs/KNOWN_FAILURE_MODES.md`).
+- **QUIC / HTTP-3.** The balanced rules are `tcp:443` only, and `--tls-intercept`
+  (required for secret substitution) blocks QUIC unless `--no-block-quic` is set.
+  So HTTP/3-only egress to an allowed `:443` host is denied and a well-behaved
+  client falls back to TLS-over-TCP automatically — the same behavior as sbx
+  `balanced`. A one-time slow first connection while a client tries QUIC and falls
+  back is expected, not a bug.
+- **Requires msb >= 0.6.8.** The egress-only deny-default uses the
+  `--net-default-egress` flag, which first appears in msb 0.6.8. `acq` enforces
+  this floor (`MIN_MSB_VERSION`) and fails closed with a clear version message on
+  an older binary, rather than passing an unknown flag to `msb create`.
 
 See [ADR-0018](adr/0018-msb-balanced-egress-baseline.md) for the full rationale,
 and [ADR-0019](adr/0019-msb-balanced-egress-is-egress-only.md) for why the

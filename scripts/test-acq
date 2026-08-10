@@ -167,7 +167,7 @@ _line="msb"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
 _msb_sub="${1:-}"
 case "$_msb_sub" in
-  --version|-V) printf 'msb 0.6.6\n' ;;
+  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.6.8}" ;;
   --help|-h) printf 'MSB-TOPLEVEL-HELP for msb\n' ;;
   doctor)
     # Model host-readiness. Default: ready (exit 0), so the happy path is silent.
@@ -1700,13 +1700,13 @@ cleanup_stubs
 make_stubs
 out=$(ACQ_BACKEND=msb "$ACQ" version 2>&1)
 assert_contains "msb: version reports backend msb" "$out" "backend:     msb"
-assert_contains "msb: version reports msb ver" "$out" "0.6.6"
+assert_contains "msb: version reports msb ver" "$out" "0.6.8"
 cleanup_stubs
 
 # 8i. `acq backend list` shows a real msb row (not "coming in 1.2.x").
 make_stubs
 out=$("$ACQ" backend list 2>&1)
-assert_contains "msb: backend list shows msb version" "$out" "msb  v0.6.6"
+assert_contains "msb: backend list shows msb version" "$out" "msb  v0.6.8"
 assert_not_contains "msb: backend list drops 'coming in 1.2.x'" "$out" "Coming in 1.2.x"
 cleanup_stubs
 
@@ -1732,7 +1732,7 @@ cleanup_stubs
 # 8j. `acq doctor` probes msb with a real version (not the old placeholder).
 make_stubs
 out=$(printf 'n\n' | "$ACQ" doctor 2>&1)
-assert_contains "msb: doctor shows msb installed" "$out" "msb: installed v0.6.6"
+assert_contains "msb: doctor shows msb installed" "$out" "msb: installed v0.6.8"
 assert_not_contains "msb: doctor drops 'coming in 1.2.x'" "$out" "coming in 1.2.x"
 cleanup_stubs
 
@@ -1795,6 +1795,28 @@ make_stubs; load_acq
   assert_not_contains "msb: skip flag -> no not-ready message" "$out" "isn't ready"
   assert_not_contains "msb: skip flag -> no doctor call" "$log" "msb doctor"
 ) 2>/dev/null; pass "msb: ACQ_SKIP_MSB_DOCTOR opts out of the readiness check"
+cleanup_stubs
+
+# 8j5b. Version floor (BLOCKING fix): the balanced-egress default emits
+#        `--net-default-egress deny`, a flag that first appears in msb 0.6.8.
+#        MIN_MSB_VERSION is 0.6.8, so acq_backend_prepare MUST fail closed
+#        (nonzero exit + clear message) on any 0.6.0-0.6.7 binary, rather than
+#        letting `msb create` hit an unknown flag mid-create. The stub honors
+#        STUB_MSB_VERSION.
+make_stubs; load_acq
+(
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  set +e
+  # A sub-floor binary (0.6.7) must be rejected before any create.
+  out=$(STUB_MSB_VERSION=0.6.7 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); rc=$?
+  assert_eq "msb: sub-0.6.8 binary fails the version floor" "1" "$rc"
+  assert_contains "msb: sub-floor message names the required version" "$out" "0.6.8"
+  # The pinned/current floor version (0.6.8) passes.
+  out2=$(STUB_MSB_VERSION=0.6.8 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); rc2=$?
+  assert_eq "msb: 0.6.8 binary clears the version floor" "0" "$rc2"
+) 2>/dev/null; pass "msb: version floor rejects sub-0.6.8, accepts 0.6.8"
 cleanup_stubs
 
 # 8j6. The msb doctor calls redirect stdin from /dev/null, so a prompting
@@ -2396,7 +2418,7 @@ cat >"$STUBDIR/msb" <<'MSBSTUB2'
 #!/usr/bin/env bash
 { printf 'msb'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
 case "${1:-}" in
-  --version|-V) printf 'msb 0.6.6\n' ;;
+  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.6.8}" ;;
   create) exit 0 ;;              # create "succeeds" but the guest never starts
   exec)   exit 1 ;;              # every exec fails -> never exec-ready
   *) exit 0 ;;
@@ -3405,6 +3427,40 @@ printf 'livebox\n' > "$STUBDIR/.msb_running_list"
   acq_backend_ensure_kits_applied livebox >/dev/null 2>&1 )
 live_log=$(cat "$CALLS")
 assert_not_contains "0017: running sandbox not re-started during heal" "$live_log" "msb start livebox"
+cleanup_stubs
+
+# 8o1Q2. HEAL FOLDS CLI KITS. A `--kit <ref>` supplied on `acq run <existing>`
+#        (ACQ_CLI_KITS) MUST be healed too, exactly as provision folds it in —
+#        otherwise a resumed/rebooted sandbox comes back with the kit's create-time
+#        `-p` ports still mapped but its STARTUP-phase supervisors (e.g.
+#        openchamber's shared `opencode serve` + web UI) never re-run, so `acq
+#        ports` shows the ports while nothing listens behind them. Assert the heal
+#        FETCHES and applies the CLI kit dir (its files land via `msb copy`).
+make_stubs; load_acq
+printf 'clikitbox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'clikitbox\n' > "$STUBDIR/.msb_running_list"
+: > "$CALLS"
+_clikit="$STUBDIR/clikit"; mkdir -p "$_clikit/files"
+cat > "$_clikit/spec.yaml" <<'CLIKITSPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: clikit
+displayName: CLI Kit
+description: a CLI-supplied kit with a staged file
+files:
+  - path: /home/agent/clikit-marker
+    mode: "0644"
+    source: files/marker
+CLIKITSPEC
+printf 'CLIKIT_MARKER\n' > "$_clikit/files/marker"
+( . "${REPO_ROOT}/acq.backends/msb.sh"
+  # shellcheck disable=SC2034  # read by the sourced msb.sh (ensure_kits_applied)
+  ACQ_CLI_KITS=("$_clikit")
+  _acq_msb_fetch_kit() { printf '%s\n' "$_clikit"; }
+  acq_backend_ensure_kits_applied clikitbox >/dev/null 2>&1 )
+clikit_log=$(cat "$CALLS")
+assert_contains "clikit-heal: CLI --kit ref applied during heal (file copied)" \
+  "$clikit_log" "clikitbox:/home/agent/clikit-marker"
 cleanup_stubs
 
 # 8o1R. NO NATIVE-ENTRYPOINT PERSISTENCE: provisioning a kit WITH a startup
@@ -4957,6 +5013,46 @@ assert_not_contains "msb: BALANCED_EGRESS=0 omits --net-default-egress deny" "$b
 assert_not_contains "msb: BALANCED_EGRESS=0 omits balanced host rules" "$bal_off_log" "allow@api.anthropic.com"
 cleanup_stubs
 
+# 10b1k. npm-registry de-dupe: registry.npmjs.org is IN the balanced set, so with
+#        the baseline ON and an agent that has an install recipe (opencode), the
+#        adapter must NOT emit a SECOND bare `allow@registry.npmjs.org` (the
+#        balanced block already covers it). The balanced rule (with :tcp:443) is
+#        still present. Guards against the double-emit the reviewer flagged.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/npm-dedupe-secrets"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision npmdedupebox opencode /tmp >/dev/null 2>&1
+)
+npm_dedupe_log=$(cat "$CALLS")
+# The balanced rule (port-qualified) is present ...
+assert_contains "msb: npm de-dupe keeps the balanced registry rule" "$npm_dedupe_log" "allow@registry.npmjs.org:tcp:443"
+# ... but the redundant bare rule is NOT emitted.
+assert_not_contains "msb: npm de-dupe drops the redundant bare registry rule" "$npm_dedupe_log" "allow@registry.npmjs.org "
+cleanup_stubs
+
+# 10b1l. npm rule for an OVERRIDE host NOT in the balanced set is still emitted:
+#        de-dupe elides only hosts the balanced block already covers, so an
+#        internal-mirror override (ACQ_MSB_NPM_HOSTS) still gets its allow rule.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/npm-override-secrets"
+  export ACQ_MSB_NPM_HOSTS="npm.internal.example.gov"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision npmoverridebox opencode /tmp >/dev/null 2>&1
+)
+npm_override_log=$(cat "$CALLS")
+assert_contains "msb: npm override host (not in balanced set) still gets a rule" "$npm_override_log" "allow@npm.internal.example.gov"
+cleanup_stubs
+
 # 10b2. ADR-0015: post-hoc `acq ports <sandbox> --publish H:G` on the msb backend
 #       authorizes the acq-managed key (once), starts `msb ssh serve … --port <n>`,
 #       and opens `ssh … -L 127.0.0.1:H:127.0.0.1:G …`. The key lives under acq
@@ -5262,7 +5358,7 @@ PQSTUB="$STUBDIR/pq"; mkdir -p "$PQSTUB"
 cat >"$PQSTUB/msb" <<'PQ'
 #!/usr/bin/env bash
 snip=""; prev=""; for a in "$@"; do [ "$prev" = "-c" ] && { snip="$a"; break; }; prev="$a"; done
-case "$1" in --version) echo "msb 0.6.6"; exit 0;; esac
+case "$1" in --version) echo "msb 0.6.8"; exit 0;; esac
 # The prereq check runs a snippet containing "command -v"; emit MSB_MISSING.
 case "$snip" in *"command -v"*) printf '%s' "${MSB_MISSING:-}"; exit 0;; esac
 exit 0
@@ -5342,6 +5438,37 @@ assert_eq "identity (d): non-dir is silent" "" "$(_id "$wt/does-not-exist")"
 
 rm -rf "$wt"
 unset -f _id _pf _pfo
+
+# --- warn_if_published_ports_dead (backend-neutral health note) ---
+# Pure common.sh logic: it depends only on acq_backend_ports (guest ports the
+# sandbox publishes) and acq_backend_run (probe inside the guest), both stubbable
+# as shell functions here. No backend, no network.
+_wppd() {
+  # $1 = ports-output fixture; $2 = per-port verdict ("listening"/"closed"/"unknown").
+  ( . "${REPO_ROOT}/acq.backends/common.sh"
+    _PORTS_OUT="$1"; _VERDICT="$2"
+    acq_backend_ports() { printf '%s\n' "$_PORTS_OUT"; }
+    # The probe is `acq_backend_run NAME -- sh -c '…' sh PORT`; echo the fixed
+    # verdict so we exercise the parse/branch logic, not a real guest.
+    acq_backend_run() { printf '%s\n' "$_VERDICT"; }
+    warn_if_published_ports_dead somebox 2>&1 )
+}
+_PORTS_FIXTURE='sandbox 3000 -> host 127.0.0.1:3000 (create-time -p)
+sandbox 4096 -> host 127.0.0.1:4096 (create-time -p)'
+assert_contains "ports-dead: warns when a published port is closed" \
+  "$(_wppd "$_PORTS_FIXTURE" closed)" "nothing listening inside 'somebox'"
+assert_contains "ports-dead: closed warning names the dead port(s)" \
+  "$(_wppd "$_PORTS_FIXTURE" closed)" "4096"
+assert_contains "ports-dead: closed warning points at the failure mode doc" \
+  "$(_wppd "$_PORTS_FIXTURE" closed)" "KNOWN_FAILURE_MODES.md #33"
+assert_eq "ports-dead: silent when the port is listening" \
+  "" "$(_wppd "$_PORTS_FIXTURE" listening)"
+assert_eq "ports-dead: silent (no false warn) when the probe is indeterminate" \
+  "" "$(_wppd "$_PORTS_FIXTURE" unknown)"
+assert_eq "ports-dead: silent when the sandbox publishes no ports" \
+  "" "$(_wppd "" closed)"
+unset -f _wppd
+unset _PORTS_FIXTURE
 
 # ===========================================================================
 # 13. GitHub token down-scoping helpers (ADR-0013)

@@ -114,10 +114,13 @@ default**, composed on top of the kits' own `caps.network.allow`.
   ON **every** sandbox — including a `shell` sandbox with no agent — can reach the
   registry, exactly as it can under sbx `balanced`. This is intended parity, not a
   leak: the agent-conditional npm gate still matters only in kit-only mode
-  (`ACQ_MSB_BALANCED_EGRESS=0`), where a `shell` sandbox gets no npm egress.
-  Because kit `caps.network.allow` rules are emitted as broader bare `allow@host`
-  (any proto/port) BEFORE the balanced block, a host present in both composes
-  harmlessly under first-match-wins.
+  (`ACQ_MSB_BALANCED_EGRESS=0`), where a `shell` sandbox gets no npm egress. To
+  avoid a redundant rule, the npm block de-dupes: it skips any `ACQ_MSB_NPM_HOSTS`
+  entry the balanced block already emitted (the default `registry.npmjs.org`), and
+  only emits a rule for an override host NOT in the balanced set (e.g. an internal
+  mirror). Because kit `caps.network.allow` rules are emitted as broader bare
+  `allow@host` (any proto/port) BEFORE the balanced block, a host present in both
+  composes harmlessly under first-match-wins.
 - **Untrusted-input hardening (SI-10):** the host list is semi-trusted data that
   drives create-time flags, so every translated target is charset-validated
   (`[A-Za-z0-9.*_-]`), single-label suffixes (`*.com`) are rejected (msb refuses
