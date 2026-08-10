@@ -109,15 +109,11 @@ ACQ_MSB_EXEC_READY_TIMEOUT="${ACQ_MSB_EXEC_READY_TIMEOUT:-${ACQ_EXEC_READY_TIMEO
 # USAi models path (matches common.sh USAI_MODELS_URL host) for --secret host.
 ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
 
-# GitHub credential host for the msb --secret binding. We bind the github token
-# to the REST API host ONLY (api.github.com), which msb substitutes on the wire
-# (verified msb 0.6.7). We deliberately do NOT bind github.com/codeload.github.com
-# because msb does not substitute git's smart-HTTP transport there
-# and a multi-host binding also trips a known microsandbox bug where an ineligible
-# entry blocks eligible ones. Kits that need github auth must use the REST API (e.g. the playbook
-# kit fetches a source tarball from api.github.com), not `git clone`. The env var
-# name is GITHUB_TOKEN (the neutral service→env mapping; kits also accept GH_TOKEN).
-ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-api.github.com}"
+# GitHub credential hosts for the msb --secret binding. Bind the REST API and
+# git-transport hosts so both API calls and HTTPS git clone/push can substitute
+# the token on the wire. The env var name is GITHUB_TOKEN (the neutral
+# service->env mapping; kits also accept GH_TOKEN).
+ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-github.com,api.github.com,codeload.github.com}"
 
 # _acq_msb_service_binding SERVICE [SANDBOX] -> "ENVVAR<TAB>HOST" for services
 # the msb adapter binds via `--secret ENV@HOST`, or empty for services it does
@@ -463,10 +459,9 @@ _acq_msb_bind_secrets_into() {
       fi
     fi
 
-    # GitHub: bind GITHUB_TOKEN@api.github.com so kits can authenticate to the
-    # REST API (the substituted path). acq store first, then a pre-exported
-    # GITHUB_TOKEN, then GH_TOKEN (CI). Absent token => no binding; the playbook
-    # kit then degrades gracefully (warns, no rules/skills).
+    # GitHub: bind the token to the API and git-transport hosts. acq store first,
+    # then a pre-exported GITHUB_TOKEN, then GH_TOKEN (CI). Absent token => no
+    # binding; the playbook kit then degrades gracefully (warns, no rules/skills).
     if ! _acq_msb_bind_one "$_arrn" "$_namesn" github "$_name" GITHUB_TOKEN "$ACQ_MSB_GITHUB_HOST"; then
       if [ -n "${GITHUB_TOKEN:-}" ]; then
         eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
@@ -945,15 +940,10 @@ EOF
 # path for a shortcut kit). Drops files and runs install/initFiles/startup
 # commands via `msb exec`.
 #
-# RESOLVED (agentic-coding-playbook kit on msb): the playbook kit fetches a
-# PRIVATE GitHub repo. It used to `git clone` over HTTPS, but msb does not
-# substitute the credential placeholder for git's smart-HTTP transport to
-# github.com/codeload. The kit now fetches the repo SOURCE
-# TARBALL via the REST API (api.github.com/repos/<repo>/tarball/<ref>), which msb
-# DOES substitute (verified msb 0.6.7), and acq binds GITHUB_TOKEN@api.github.com
-# above. So the playbook now works on msb. USAi, git-ssh-sign, and zscaler kits
-# are unaffected. (Upstream git-transport substitution remains unfixed
-# in microsandbox — but the kit no longer depends on it.)
+# RESOLVED (agentic-coding-playbook kit on msb): the playbook kit fetches private
+# GitHub content via a pinned source tarball for reproducibility. Current msb
+# also substitutes the GitHub token on the wire for the API and HTTPS
+# git-transport hosts bound above, so direct HTTPS clone/push is eligible too.
 _acq_msb_apply_kit_dir() {
   local name="$1" kitdir="$2"
   local spec="${kitdir}/spec.yaml"
@@ -1957,18 +1947,13 @@ EOF
   # on the wire to the allowed host (requires --tls-intercept, set above). The
   # real value never enters the guest.
   #
-  # SCOPE (verified against msb 0.6.7):
+  # SCOPE:
   #   - USAi: bind USAI_API_KEY@api.gsa.usai.gov ONLY. The USAi provider sends the
   #     key as an `Authorization: Bearer` header, which msb substitutes correctly.
-  #   - GitHub: bind GITHUB_TOKEN@api.github.com ONLY. msb substitutes the token on
-  #     the wire to the REST API (verified: an authenticated GET to
-  #     api.github.com returns 5000-rate-limit headers; a private-repo tarball
-  #     fetch succeeds). msb does NOT substitute git's smart-HTTP transport to
-  #     github.com/codeload (a `git clone`/`gh repo clone` of a private repo fails
-  #     auth/TLS there). So kits authenticate via the REST
-  #     API, not git: the playbook kit fetches a source tarball from
-  #     api.github.com. Binding a single host also avoids a known microsandbox bug
-  #     (multi-host binding: ineligible entry blocks eligible).
+  #   - GitHub: bind GITHUB_TOKEN@github.com,api.github.com,codeload.github.com.
+  #     msb substitutes the token on the wire for both REST API calls and HTTPS
+  #     git transport, so private tarball fetches, clones, and pushes can
+  #     authenticate without the real token entering the guest.
   #
   # The resolve+export+flag-collect is shared with the resume path
   # (acq_backend_start) via _acq_msb_bind_secrets_into so create and start always
