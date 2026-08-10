@@ -38,23 +38,35 @@ a choice with `acq backend set <sbx|msb>` or `acq doctor`.
 
 ## Quick Start
 
-> **msb is the default backend.** If you have msb installed, see
-> [Running on the msb backend](#running-on-the-msb-backend) below. The steps in
-> this section walk the **sbx** path; the common commands, secrets, and rotation
-> subsections apply to either backend.
+> **msb is the default backend.** The steps below walk the **msb** path (what
+> `acq` uses by default). If you specifically want the **sbx** backend, see
+> [Prerequisites (sbx)](#step-1-alt-prerequisites-sbx) and
+> [Running on the sbx backend](#running-on-the-sbx-backend). The common commands,
+> secrets, and rotation subsections apply to either backend.
 
-### Step 1: Prerequisites (sbx)
+### Step 1: Prerequisites (msb)
 
 Complete the standard setup in [README.md](../README.md#5-minute-quickstart):
 
-- Install the `sbx` CLI (>= 0.35.0)
-- Run `sbx login`
+- Install the `msb` CLI: `curl -fsSL https://install.microsandbox.dev | sh`
+- Run `msb doctor` (add `--fix` to set up KVM/HVF/WHP virtualization)
 - Set your network policy
 
 You do **not** need to gather a USAi key or GitHub token in advance — `acq`
 prompts you for the USAi key on first run and offers to scope a GitHub token
 when your workspace has GitHub repos. Set them ahead of time only when
 pre-seeding a machine or scripting setup (see [Secrets](#secrets) below).
+
+<h4 id="step-1-alt-prerequisites-sbx">Step 1 (alternate): Prerequisites (sbx)</h4>
+
+To use the **sbx** backend instead:
+
+- Install the `sbx` CLI (>= 0.35.0)
+- Run `sbx login`
+- Set your network policy
+
+See [Running on the sbx backend](#running-on-the-sbx-backend) for the full sbx
+walkthrough.
 
 ### Step 2: Run a sandbox
 
@@ -171,7 +183,7 @@ backend (`ppp` — Podman-Plus-Proxy) is deferred.
 
 ---
 
-## Running on the msb backend
+## Running on the msb backend (default)
 
 ```bash
 # 1. Install msb (microsandbox) and confirm the host is ready
@@ -189,6 +201,23 @@ export USAI_API_KEY=<your-usai-key>
 msb takes native shortcuts where it has a strictly-better primitive — e.g. the
 Zscaler CA kit uses `--trust-host-cas` instead of the file-drop mechanism. Kit
 behavior is otherwise identical across backends.
+
+## Running on the sbx backend
+
+```bash
+# 1. Install the sbx CLI (>= 0.35.0) and authenticate
+#    (see https://docs.docker.com/ai/sandboxes/ — the standalone sbx CLI,
+#     NOT the deprecated `docker sandbox`)
+sbx login
+sbx policy set <your-network-policy>
+
+# 2. Run — acq uses sbx when it is your only backend or you have existing sbx
+#    sandboxes, or force it with --backend sbx
+./acq --backend sbx run opencode /path/to/your/project
+```
+
+For sbx-specific detail (proxy secrets, multiple workspaces, network policy),
+see the [full sbx guide](QUICKSTART_SBX.md).
 
 ### msb host setup
 
@@ -311,8 +340,8 @@ Progress output goes to **stderr**, so a piped stdout stays uncluttered.
 
 ## Exec timeout tuning
 
-The default timeout for waiting for `sbx exec` to become ready after a sandbox
-starts is 60 seconds. Override:
+The default timeout for waiting for the backend's exec (`sbx exec` / `msb exec`,
+via `acq exec`) to become ready after a sandbox starts is 60 seconds. Override:
 
 ```bash
 export ACQ_EXEC_READY_TIMEOUT=120
