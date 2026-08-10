@@ -119,22 +119,12 @@ same fail-closed gating ADR-0011 used: quickstart pins a released
 
 - **sbx.** `kit_spec_published_ports` reads the neutral `publishedPorts` first,
   falling back to `backend_extras.sbx.publishedPorts` for one release
-  (deprecation warning). The synthesized sbx-v2 kit is unchanged in shape, so
-  the observable sbx result is identical. **`background` has no sbx-v2 detach
-  primitive to map onto**: sbx-v2's `commands.startup[]` schema exposes only
-  `command:` (an argv sequence) and an optional `user:` — there is no
-  `background`/`detach`/`async` field. The translator therefore does **not**
-  synthesize a detach wrapper on the sbx path; it preserves the startup
-  command's argv verbatim, and a `background: true` startup command relies on the
-  command **self-backgrounding** (a trailing `&` in its `sh -c` body, or an inner
-  `( … ) &`), which is exactly the shape sbx kits used before the neutral
-  migration. Auto-appending `&` was rejected: the one kit that sets
-  `background: true` (openchamber) already self-backgrounds, so a blind append
-  would emit `… & &` (a shell syntax error) or double-fork an orphaned
-  duplicate. Kit authors targeting sbx MUST self-background a `background: true`
-  startup command; `kit validate` should warn when one does not (tracked
-  follow-up). This asymmetry with msb — which DOES wrap the argv (below) — is
-  intentional and bounded by sbx-v2's schema.
+  (deprecation warning), and the synthesizer emits the sbx-v2 `ports` block.
+  `background` maps directly onto `setup.startup[].background`; the translator
+  preserves the startup command's argv verbatim and does not synthesize a
+  `nohup` wrapper. A command that already self-backgrounds remains valid, and
+  the explicit v2 `background: true` flag lets sbx detach it without acq adding a
+  second `&`.
 - **msb.** The msb adapter gains a consumer that maps each neutral
   `publishedPorts` entry to `msb create/run -p HOST:GUEST` (msb's create/run-time
   publish). `msb -p` also accepts `BIND_ADDR:HOST:GUEST` and `/udp`, but the
