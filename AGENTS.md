@@ -394,6 +394,7 @@ The agent MUST:
 - **Authorized external endpoints:**
   - `https://api.gsa.usai.gov/api/v1` (USAi API)
   - `https://api.github.com` (GitHub API — via the SBX proxy, or the MSB `--secret` binding)
+  - `https://github.com` and `https://codeload.github.com` (GitHub HTTPS git/tarball transport — via the SBX proxy, or the MSB `--secret` binding)
   - `https://workshop.cloud.gov` (GitLab API - GSA workshop instance)
 - **Authorized internal endpoints:** None
 - **TLS requirement:** TLS 1.2+ for all connections
@@ -409,7 +410,7 @@ real value in on the wire. Both keep the real secret out of the agent's hands.
 | Service | SBX | MSB | Notes |
 |---------|-----|-----|-------|
 | USAi | Custom secret (`sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY`) | `acq secret set usai …` → bound as `USAI_API_KEY@api.gsa.usai.gov` | Custom endpoint not a built-in proxy service on SBX |
-| GitHub | SBX proxy, **per-sandbox scoped** (`acq` fine-grained flow, or `sbx secret set <sandbox> github`) | `acq secret set github …` → bound as `GITHUB_TOKEN@api.github.com` (REST API host only) | Least-privilege per-sandbox default. Agent never sees the token. See [ADR-0013](docs/adr/0013-per-sandbox-github-token-downscoping.md) |
+| GitHub | SBX proxy, **per-sandbox scoped** (`acq` fine-grained flow, or `sbx secret set <sandbox> github`) | `acq secret set github …` → bound as `GITHUB_TOKEN@github.com,api.github.com,codeload.github.com` | Least-privilege per-sandbox default. Agent never sees the token. See [ADR-0013](docs/adr/0013-per-sandbox-github-token-downscoping.md) |
 | GitLab | Custom secret (`sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN`) | `acq secret set gitlab --host workshop.cloud.gov --env GITLAB_TOKEN` → bound **generically** as `GITLAB_TOKEN@workshop.cloud.gov` (custom endpoint; requires `--host`/`--env`, not a built-in bind) | Not a built-in service on either backend |
 
 See [`docs/BACKEND_GUIDE.md`](docs/BACKEND_GUIDE.md) for the full per-backend

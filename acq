@@ -627,7 +627,7 @@ case "$subcommand" in
     # at create time, so a sandbox created before the key exists carries no USAi
     # binding. Gate on key presence first (fail closed if declined) so create
     # picks it up. `create` is otherwise detached and never attaches.
-    if ! ensure_key_present; then
+    if ! ensure_key_present "$local_name"; then
       exit 1
     fi
     acq_backend_provision "$local_name" "$@"
@@ -697,7 +697,7 @@ case "$subcommand" in
         # with no USAi binding — the exact split that made validation report 200
         # (in a throwaway sandbox) yet 401 (in the real one). Gate on key
         # presence first; fail closed if the user declines.
-        if ! ensure_key_present; then
+        if ! ensure_key_present "$local_name"; then
           exit 1
         fi
         acq_backend_provision "$local_name" "${create_args[@]}"
@@ -726,6 +726,14 @@ case "$subcommand" in
         ensure_opencode_postinstall "$local_name"
       fi
 
+      # Backend-neutral health note: if this sandbox publishes ports but nothing
+      # is listening behind them in the guest, say so now rather than let a later
+      # `opencode attach` / browser connect fail opaquely. Best-effort, never
+      # blocks. Catches the "ports mapped, kit services dead" state
+      # (docs/KNOWN_FAILURE_MODES.md #33), e.g. after a resume that didn't re-run
+      # a --kit kit's startup.
+      warn_if_published_ports_dead "$local_name"
+
       if [ "${#agent_args[@]}" -gt 0 ]; then
         acq_backend_attach "$local_name" -- "${agent_args[@]}"
       else
@@ -745,6 +753,13 @@ case "$subcommand" in
       acq_backend_ensure_kits_applied "$first" || true
       maybe_offer_bundle_refresh "${ACQ_RESOLVED_BACKEND}" "$first" "$_pre_heal_status"
       warn_if_no_ssh_signing_key
+
+      # Backend-neutral health note (same as the create-and-attach path): if the
+      # sandbox publishes ports with nothing listening behind them, surface it
+      # before attach. This re-attach-by-name path is exactly where a resumed
+      # sandbox lands, so it is the most important place to catch the "ports
+      # mapped, services dead" state (docs/KNOWN_FAILURE_MODES.md #33).
+      warn_if_published_ports_dead "$first"
 
       # NOTE: opencode's postinstall self-heal (ensure_opencode_postinstall) is
       # intentionally NOT run on this re-attach-by-name path. The agent is not

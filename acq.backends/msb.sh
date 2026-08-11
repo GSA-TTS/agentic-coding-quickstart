@@ -56,9 +56,15 @@ ACQ_BACKEND_CAN_RESUME=1                   # msb stop / msb start preserve state
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1  # msb --secret ENV@HOST + --tls-intercept
 
-# Minimum msb version required. 0.6.x is the first line with the neutral net
-# rules, --trust-host-cas, and --secret used here.
-MIN_MSB_VERSION="0.6.0"
+# Minimum msb version required. 0.6.8 is the first release with the
+# `--net-default-egress` / `--net-default-ingress` split that the balanced-egress
+# baseline (on by default, ADR-0018/0019) relies on — earlier 0.6.x had the
+# neutral net rules, --trust-host-cas, and --secret used here, but only the
+# symmetric `--net-default`, so a plain `acq create` would pass an unknown flag to
+# a 0.6.0-0.6.7 binary and clap would hard-error. Fail closed on the floor instead
+# (acq_backend_prepare) so the failure mode is a clear version message, not a raw
+# clap error mid-create.
+MIN_MSB_VERSION="0.6.8"
 
 # Default OCI image for provisioned sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
@@ -103,15 +109,11 @@ ACQ_MSB_EXEC_READY_TIMEOUT="${ACQ_MSB_EXEC_READY_TIMEOUT:-${ACQ_EXEC_READY_TIMEO
 # USAi models path (matches common.sh USAI_MODELS_URL host) for --secret host.
 ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
 
-# GitHub credential host for the msb --secret binding. We bind the github token
-# to the REST API host ONLY (api.github.com), which msb substitutes on the wire
-# (verified msb 0.6.7). We deliberately do NOT bind github.com/codeload.github.com
-# because msb does not substitute git's smart-HTTP transport there
-# and a multi-host binding also trips a known microsandbox bug where an ineligible
-# entry blocks eligible ones. Kits that need github auth must use the REST API (e.g. the playbook
-# kit fetches a source tarball from api.github.com), not `git clone`. The env var
-# name is GITHUB_TOKEN (the neutral service→env mapping; kits also accept GH_TOKEN).
-ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-api.github.com}"
+# GitHub credential hosts for the msb --secret binding. Bind the REST API and
+# git-transport hosts so both API calls and HTTPS git clone/push can substitute
+# the token on the wire. The env var name is GITHUB_TOKEN (the neutral
+# service->env mapping; kits also accept GH_TOKEN).
+ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-github.com,api.github.com,codeload.github.com}"
 
 # _acq_msb_service_binding SERVICE [SANDBOX] -> "ENVVAR<TAB>HOST" for services
 # the msb adapter binds via `--secret ENV@HOST`, or empty for services it does
@@ -213,6 +215,39 @@ ACQ_MSB_OPENCODE_PKG="${ACQ_MSB_OPENCODE_PKG:-opencode-ai}"
 # serves metadata; the tarballs are on the same host for the public registry.
 # Override for an internal mirror via ACQ_MSB_NPM_HOSTS (space-separated).
 ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
+
+# ---------------------------------------------------------------------------
+# Balanced egress baseline (ADR-0018)
+# ---------------------------------------------------------------------------
+# msb defaults guest egress to NONE, so without a baseline an msb sandbox is far
+# more locked down than an sbx one (whose "balanced" policy allows a broad set of
+# dev hosts: AI services, package registries, code/container hosts, cloud infra,
+# OS packages, cert-validation hosts). To reach parity, acq applies the SAME host
+# set as the sbx "balanced" policy by default: it emits `--net-default-egress deny`
+# plus an `allow@<host>:tcp:<port>` rule per entry in the vendored host list, on top
+# of the kits' own caps.network.allow. Egress is therefore restricted TO the balanced
+# set (deny-by-default + allowlist), matching sbx "balanced". The deny-default is
+# scoped to EGRESS only (ADR-0019): ingress keeps msb's baseline `allow` so
+# create-time `-p HOST:GUEST` published ports stay reachable (a symmetric
+# `--net-default deny` would RST inbound to them).
+#
+# Toggle: on by default. Set ACQ_MSB_BALANCED_EGRESS=0 (or empty) to skip the
+# baseline and fall back to kit-only egress (the kits still add their own allow
+# rules, but no deny-default is emitted, so egress is not restricted by acq).
+# Normalized to exactly "1" (on) or "" (off) here so downstream `[ -n … ]` guards
+# read cleanly: an unset value defaults on; "0"/"false"/"no"/"off"/empty are off
+# (case-insensitive); anything else is on.
+ACQ_MSB_BALANCED_EGRESS="${ACQ_MSB_BALANCED_EGRESS-1}"
+case "$(printf '%s' "$ACQ_MSB_BALANCED_EGRESS" | tr '[:upper:]' '[:lower:]')" in
+  ""|0|false|no|off) ACQ_MSB_BALANCED_EGRESS="" ;;
+  *)                 ACQ_MSB_BALANCED_EGRESS="1" ;;
+esac
+
+# Path to the vendored host list (a verbatim mirror of `sbx policy inspect
+# local-policy`; see acq.backends/msb-balanced-hosts.txt). Override to point at a
+# site-specific list. ACQ_SCRIPT_DIR is exported by the acq entry point (and set
+# by the offline test harness before this adapter is sourced).
+ACQ_MSB_BALANCED_HOSTS_FILE="${ACQ_MSB_BALANCED_HOSTS_FILE:-${ACQ_SCRIPT_DIR:-.}/acq.backends/msb-balanced-hosts.txt}"
 
 # ---------------------------------------------------------------------------
 # Post-hoc port publish state (ADR-0015)
@@ -424,10 +459,9 @@ _acq_msb_bind_secrets_into() {
       fi
     fi
 
-    # GitHub: bind GITHUB_TOKEN@api.github.com so kits can authenticate to the
-    # REST API (the substituted path). acq store first, then a pre-exported
-    # GITHUB_TOKEN, then GH_TOKEN (CI). Absent token => no binding; the playbook
-    # kit then degrades gracefully (warns, no rules/skills).
+    # GitHub: bind the token to the API and git-transport hosts. acq store first,
+    # then a pre-exported GITHUB_TOKEN, then GH_TOKEN (CI). Absent token => no
+    # binding; the playbook kit then degrades gracefully (warns, no rules/skills).
     if ! _acq_msb_bind_one "$_arrn" "$_namesn" github "$_name" GITHUB_TOKEN "$ACQ_MSB_GITHUB_HOST"; then
       if [ -n "${GITHUB_TOKEN:-}" ]; then
         eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
@@ -712,6 +746,158 @@ $(kit_spec_net_allow "$_spec")
 EOF
 }
 
+# _acq_msb_balanced_target HOST — echo the msb `--net-rule` TARGET for one sbx
+# "balanced" host token, or nothing (rc 1) if it must be dropped. Translates the
+# wildcard forms (ADR-0018):
+#   - `**.h`  (sbx multi-label glob) -> msb suffix `*.h` (apex + any depth)
+#   - `crl*.h` (intra-label glob msb can't express) -> broadened to `*.<parent>`;
+#     the CALLER emits the one-time widening warning (keyed off the `crl*.` input)
+#   - anything else -> the host unchanged (exact domain)
+# The result is charset-guarded ([A-Za-z0-9.*_-]) and single-label `*.` suffixes
+# (which msb rejects for blast radius) are dropped, so the value is safe to place
+# in an argv via the caller's eval-by-name append (SI-10).
+_acq_msb_balanced_target() {
+  local _host="$1" _target
+  case "$_host" in
+    "**."*)   _target="*.${_host#**.}" ;;
+    "crl*."*) _target="*.${_host#crl*.}" ;;
+    *)        _target="$_host" ;;
+  esac
+
+  # Charset-guard the FINAL target (defense-in-depth before any eval append).
+  case "$_target" in
+    ""|*[!A-Za-z0-9.*_-]*)
+      echo "acq(msb): warning: skipping non-hostname balanced entry: ${_host}" >&2
+      return 1
+      ;;
+  esac
+
+  # Reject a single-label suffix (`*.com`): msb refuses it (accidental blast
+  # radius), so drop it here rather than let `msb create` hard-fail on the set.
+  case "$_target" in
+    "*."*)
+      case "${_target#*.}" in
+        *.*) : ;;  # two+ labels after `*.` -> OK
+        *)
+          echo "acq(msb): warning: skipping single-label suffix (msb rejects it): ${_target}" >&2
+          return 1
+          ;;
+      esac
+      ;;
+  esac
+
+  printf '%s\n' "$_target"
+}
+
+# _acq_msb_balanced_port_ok PORT — 0 if PORT is a valid TCP port (integer
+# 1..65535, no leading zero), else 1. An empty PORT means "any port" and is
+# handled by the caller (not passed here). Guards a kit-derived value before it
+# reaches an argv. Rejects a leading zero (e.g. `0443`) so a custom hosts file
+# can't emit an octal-looking `:tcp:0443` token.
+_acq_msb_balanced_port_ok() {
+  case "$1" in
+    ""|0*|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+# _acq_msb_balanced_parse_line LINE HOSTVAR PORTVAR — strip a trailing comment,
+# trim surrounding whitespace, and split the remaining `host[:port]` into the
+# named HOSTVAR/PORTVAR (port empty when absent). Returns 1 (host set empty) for
+# a blank/comment-only line so the caller can `continue`. Keeps the parse out of
+# _acq_msb_balanced_rules_into so that stays under the 50-line limit.
+_acq_msb_balanced_parse_line() {
+  local _l="$1" _hn="$2" _pn="$3"
+  _l="${_l%%#*}"                          # strip trailing comment
+  _l="${_l#"${_l%%[![:space:]]*}"}"       # ltrim
+  _l="${_l%"${_l##*[![:space:]]}"}"       # rtrim
+  if [ -z "$_l" ]; then
+    eval "$_hn=''"; eval "$_pn=''"
+    return 1
+  fi
+  # Split host/port on the LAST colon (hosts have no other colon).
+  case "$_l" in
+    *:*) eval "$_pn=\"\${_l##*:}\""; eval "$_hn=\"\${_l%:*}\"" ;;
+    *)   eval "$_hn=\"\$_l\""; eval "$_pn=''" ;;
+  esac
+  return 0
+}
+
+# _acq_msb_balanced_rules_into ARRVAR — append the sbx-"balanced" egress baseline
+# (ADR-0018) as msb `--net-rule` tokens to the array named ARRVAR. Reads the
+# vendored host list (ACQ_MSB_BALANCED_HOSTS_FILE, a verbatim mirror of `sbx
+# policy inspect local-policy`) and translates each `host:port` line into a rule,
+# per the msb grammar (`allow[:egress]@<target>[:<proto>[:<ports>]]`):
+#   - PORT: trailing `:port` -> `:tcp:<port>` (sbx "balanced" is TCP; a host on
+#     both :80 and :443 yields TWO rules, one per line, preserved).
+#   - WILDCARD / intra-label glob: see _acq_msb_balanced_target.
+#   - Also emits gateway-DNS rules FIRST so the guest can resolve the allowed
+#     hosts: under `--net-default-egress deny` the high-level DNS auto-grant does
+#     not apply, so low-level rules must grant it explicitly. We emit the expanded
+#     `allow@host:udp:53` + `allow@host:tcp:53` rather than the `allow@dns` macro,
+#     which is broken on released msb (see the DNS block below). Pairs with
+#     --dns-nameserver.
+# A missing/unreadable file is a non-fatal warning (kits still add their egress).
+# Uses the eval-by-name array pattern (macOS bash 3.2 compat), like the siblings.
+_acq_msb_balanced_rules_into() {
+  local _arr="$1" _file="${ACQ_MSB_BALANCED_HOSTS_FILE}"
+  eval "$_arr=()"
+
+  if [ ! -r "$_file" ]; then
+    echo "acq(msb): warning: balanced-egress host list not readable: ${_file}" >&2
+    echo "acq(msb):   msb sandbox egress will be limited to the kits' own hosts." >&2
+    return 0
+  fi
+
+  # DNS first: without it the guest cannot resolve any allowed host under
+  # --net-default-egress deny, since the high-level gateway-DNS auto-grant only
+  # fires for the `--net` PROFILES (public/private/host), not for a rule-only deny
+  # default.
+  #
+  # We DELIBERATELY do NOT use msb's semantic `allow@dns` macro. That macro is
+  # broken in released msb (reproduced on 0.6.8): its parser guards the target
+  # token with `debug_assert_eq!(parts.next(), Some("dns"))`, which is compiled
+  # OUT of the release binary — so the iterator is never advanced past the `dns`
+  # target and the SAME `dns` token is then read as the PROTOCOL slot, failing
+  # with `the dns target supports tcp, udp, or any, not dns`. A bare `allow@dns`
+  # therefore hard-fails `msb create`/`msb run` on a release build.
+  #
+  # Instead we emit exactly what the macro is SPECIFIED to expand to — the gateway
+  # `host` group on port 53 for both UDP and TCP — as two explicit rules that go
+  # through the ordinary (assert-free) target/proto/port parse path. This is
+  # equivalent to the intended `allow@dns` and is unaffected by the upstream bug.
+  eval "$_arr+=(--net-rule \"allow@host:udp:53\")"
+  eval "$_arr+=(--net-rule \"allow@host:tcp:53\")"
+
+  local _line _host _port _target _warned_crl=0
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _acq_msb_balanced_parse_line "$_line" _host _port || continue
+
+    # One-time widening warning for the intra-label glob (keyed off the input).
+    case "$_host" in
+      "crl*."*)
+        if [ "$_warned_crl" -eq 0 ]; then
+          echo "acq(msb): note: broadening 'crl*.' balanced entries to a parent domain" >&2
+          echo "acq(msb):   suffix (msb has no intra-label glob; widens vs. sbx 'balanced')." >&2
+          _warned_crl=1
+        fi
+        ;;
+    esac
+
+    _target=$(_acq_msb_balanced_target "$_host") || continue
+
+    if [ -n "$_port" ]; then
+      if ! _acq_msb_balanced_port_ok "$_port"; then
+        echo "acq(msb): warning: skipping balanced entry with bad port: ${_line}" >&2
+        continue
+      fi
+      eval "$_arr+=(--net-rule \"allow@\${_target}:tcp:\${_port}\")"
+    else
+      eval "$_arr+=(--net-rule \"allow@\${_target}\")"
+    fi
+  done < "$_file"
+}
+
 # Emit the create-time `-p HOST:GUEST` flags for a kit's published ports into the
 # named array. Usage: _acq_msb_port_flags_into ARRVAR SPEC
 #
@@ -754,15 +940,10 @@ EOF
 # path for a shortcut kit). Drops files and runs install/initFiles/startup
 # commands via `msb exec`.
 #
-# RESOLVED (agentic-coding-playbook kit on msb): the playbook kit fetches a
-# PRIVATE GitHub repo. It used to `git clone` over HTTPS, but msb does not
-# substitute the credential placeholder for git's smart-HTTP transport to
-# github.com/codeload. The kit now fetches the repo SOURCE
-# TARBALL via the REST API (api.github.com/repos/<repo>/tarball/<ref>), which msb
-# DOES substitute (verified msb 0.6.7), and acq binds GITHUB_TOKEN@api.github.com
-# above. So the playbook now works on msb. USAi, git-ssh-sign, and zscaler kits
-# are unaffected. (Upstream git-transport substitution remains unfixed
-# in microsandbox — but the kit no longer depends on it.)
+# RESOLVED (agentic-coding-playbook kit on msb): the playbook kit fetches private
+# GitHub content via a pinned source tarball for reproducibility. Current msb
+# also substitutes the GitHub token on the wire for the API and HTTPS
+# git-transport hosts bound above, so direct HTTPS clone/push is eligible too.
 _acq_msb_apply_kit_dir() {
   local name="$1" kitdir="$2"
   local spec="${kitdir}/spec.yaml"
@@ -1563,15 +1744,78 @@ acq_backend_provision() {
 
   [ "$trust_host_cas" -eq 1 ] && create_flags+=(--trust-host-cas)
 
+  # Balanced egress baseline (ADR-0018): mirror the sbx "balanced" host set so an
+  # msb sandbox reaches the same dev hosts. msb defaults egress to none, so we
+  # make the restriction explicit and deterministic: `--net-default-egress deny` +
+  # `allow@<host>:tcp:<port>` per vendored entry (plus explicit gateway-DNS rules,
+  # `allow@host:udp:53` + `allow@host:tcp:53`). These compose
+  # with the kit/npm/secret `allow@…` rules under first-match-wins. Emitted BEFORE
+  # the npm-host rule so all allow rules sit together after the deny-default.
+  # Toggle off with ACQ_MSB_BALANCED_EGRESS=0 (falls back to kit-only egress; no
+  # deny-default is emitted, so acq does not restrict egress in that mode).
+  #
+  # EGRESS-ONLY, DELIBERATELY (ADR-0019): we emit `--net-default-egress deny`, NOT
+  # the symmetric `--net-default deny`. msb's `--net-default` sets BOTH directions
+  # (verified in msb 0.6.8 `--help`: "Sets egress and ingress symmetrically") and
+  # there is NO implicit ingress-allow for a published port — every inbound
+  # connection is evaluated against the ingress default, so a symmetric deny RSTs
+  # inbound traffic to a create-time `-p HOST:GUEST` port (the connection completes
+  # the handshake via msb's host proxy, then resets on data → ERR_CONNECTION_RESET
+  # on the host). Restricting only egress leaves the ingress default at msb's
+  # baseline `allow`, so published ports stay reachable with no per-port ingress
+  # rule. A future "strict" profile can layer ingress deny-default + explicit
+  # per-port `allow:ingress@…` rules; the balanced default intentionally does not.
+  # Requires msb >= 0.6.8 (the `--net-default-egress`/`--net-default-ingress`
+  # split); MIN_MSB_VERSION is 0.6.8, so acq_backend_prepare has already failed
+  # closed on anything older before we reach here — this flag is always known.
+  # Track the hosts the balanced block allow-listed so the npm block below can
+  # de-dupe against them (space-delimited, space-padded for whole-token match).
+  local _balanced_hosts=" "
+  if [ -n "$ACQ_MSB_BALANCED_EGRESS" ]; then
+    local _balanced=()
+    _acq_msb_balanced_rules_into _balanced
+    if [ "${#_balanced[@]}" -gt 0 ]; then
+      create_flags+=(--net-default-egress deny)
+      create_flags+=("${_balanced[@]}")
+      acq_debug "msb balanced-egress: added ${#_balanced[@]} --net-rule token(s) + --net-default-egress deny"
+      # Record the bare host of each emitted rule (strip the `allow@` prefix and
+      # any `:proto:port` suffix) for the npm de-dupe below.
+      local _tok _bh
+      for _tok in "${_balanced[@]}"; do
+        case "$_tok" in
+          allow@*)
+            _bh=${_tok#allow@}; _bh=${_bh%%:*}
+            _balanced_hosts="${_balanced_hosts}${_bh} "
+            ;;
+        esac
+      done
+    fi
+  fi
+
   # Allow-list the agent installer's registry host(s) so the (default-deny) guest
   # egress permits the npm download. Only when we will actually install an agent
   # (a known recipe exists); `shell` and unknown agents add no rule.
+  #
+  # De-dupe against the balanced set: when the baseline is ON, registry.npmjs.org
+  # is already allow-listed, so a second bare `allow@registry.npmjs.org` would be
+  # dead weight (both allow; no deny to shadow). We therefore skip any npm host
+  # that the balanced block ALREADY emitted a rule for, rather than skipping the
+  # whole block — an operator who overrides ACQ_MSB_NPM_HOSTS to an internal
+  # mirror NOT in the balanced set still gets its rule. In kit-only mode
+  # (ACQ_MSB_BALANCED_EGRESS=0) nothing is elided, since the balanced set is empty.
   if _acq_msb_agent_has_install_recipe "$agent"; then
     local _npm_host
     for _npm_host in $ACQ_MSB_NPM_HOSTS; do
       case "$_npm_host" in
         ""|*[!A-Za-z0-9.*_-]*)
           echo "acq(msb): warning: skipping non-hostname npm host: $_npm_host" >&2
+          continue
+          ;;
+      esac
+      # Already covered by a balanced rule? Skip the redundant bare allow.
+      case "$_balanced_hosts" in
+        *" ${_npm_host} "*)
+          acq_debug "msb: npm host ${_npm_host} already in balanced set; skipping redundant rule"
           continue
           ;;
       esac
@@ -1703,18 +1947,13 @@ EOF
   # on the wire to the allowed host (requires --tls-intercept, set above). The
   # real value never enters the guest.
   #
-  # SCOPE (verified against msb 0.6.7):
+  # SCOPE:
   #   - USAi: bind USAI_API_KEY@api.gsa.usai.gov ONLY. The USAi provider sends the
   #     key as an `Authorization: Bearer` header, which msb substitutes correctly.
-  #   - GitHub: bind GITHUB_TOKEN@api.github.com ONLY. msb substitutes the token on
-  #     the wire to the REST API (verified: an authenticated GET to
-  #     api.github.com returns 5000-rate-limit headers; a private-repo tarball
-  #     fetch succeeds). msb does NOT substitute git's smart-HTTP transport to
-  #     github.com/codeload (a `git clone`/`gh repo clone` of a private repo fails
-  #     auth/TLS there). So kits authenticate via the REST
-  #     API, not git: the playbook kit fetches a source tarball from
-  #     api.github.com. Binding a single host also avoids a known microsandbox bug
-  #     (multi-host binding: ineligible entry blocks eligible).
+  #   - GitHub: bind GITHUB_TOKEN@github.com,api.github.com,codeload.github.com.
+  #     msb substitutes the token on the wire for both REST API calls and HTTPS
+  #     git transport, so private tarball fetches, clones, and pushes can
+  #     authenticate without the real token entering the guest.
   #
   # The resolve+export+flag-collect is shared with the resume path
   # (acq_backend_start) via _acq_msb_bind_secrets_into so create and start always
@@ -2706,6 +2945,18 @@ acq_backend_ensure_kits_applied() {
     local _extras=()
     split_noglob _extras "$ACQ_EXTRA_KITS"
     kits+=("${_extras[@]}")
+  fi
+  # CLI-supplied `--kit <ref>` refs (ACQ_CLI_KITS) MUST be healed too, exactly as
+  # the provision path folds them in (see acq_backend_provision's kit assembly).
+  # These kits' STARTUP-phase commands (e.g. openchamber's supervisor loops for
+  # the shared `opencode serve` and the web UI) are re-run only by this heal —
+  # `msb start` alone does not replay them (ADR-0017). Omitting them here meant a
+  # resumed/rebooted sandbox came back with the create-time `-p` port mappings
+  # intact but NOTHING listening behind them, because the kit's startup was never
+  # re-run: `acq ports` showed the ports mapped while the services were dead. Fold
+  # ACQ_CLI_KITS in so `acq run --kit … <existing-sandbox>` heals its full kit set.
+  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
+    kits+=("${ACQ_CLI_KITS[@]}")
   fi
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"

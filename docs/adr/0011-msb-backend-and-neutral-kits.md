@@ -107,16 +107,13 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   with `--tls-intercept` (required for substitution), read from the acq secret
   store at provision into a transient env var (never argv, never the kit spec;
   the guest gets only a placeholder). `acq secret set` re-feeds running sandboxes
-  via `msb modify --secret`. The **GitHub token is bound to the REST API host
-  only** (`GITHUB_TOKEN@api.github.com`): msb substitutes the `Authorization:
-  Bearer` header on the wire to `api.github.com` (verified msb 0.6.7) but NOT
-  git's smart-HTTP transport to github.com/codeload (microsandbox
-  #756/#768/#1170). So kits authenticate to GitHub via the REST API, not `git
-  clone`: the playbook kit fetches a **source tarball** from
-  `api.github.com/repos/<repo>/tarball/<ref>` and now works on msb (this
-  supersedes the earlier decision to leave github unbound / skip the playbook
-  kit on msb; see quickstart#203). A single host is bound to avoid microsandbox
-  #1170 (multi-host binding). Unlike sbx (whose
+  via `msb modify --secret`. The **GitHub token is bound to the REST API and
+  git-transport hosts**
+  (`GITHUB_TOKEN@github.com,api.github.com,codeload.github.com`): msb substitutes
+  the token on the wire for REST API calls and HTTPS git clone/push, so the real
+  token never enters the guest. Kits still may use REST tarballs for
+  reproducibility, but HTTPS git transport is now eligible for substitution.
+  Unlike sbx (whose
   templates supply the image), msb runs a plain OCI image: the default is the
   public `node:22-bookworm` (built on buildpack-deps, so it already ships
   node/git/curl/ca-certificates — the four kits' prerequisites — and pulls
@@ -138,11 +135,13 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   `msb create` returns 0 even when the guest fails to START (async boot), so the
   only reliable readiness signal is that `msb exec` works.
 
-- **sbx-v2 command typing (translation):** sbx types `commands.install[].command`
-  as a shell **string** but `commands.startup[]`/`initFiles[]` as an argv
-  **sequence**. The synthesizer emits per-phase accordingly (install → block
-  string, startup/initFiles → argv seq); mismatching yields sbx's "cannot
-  unmarshal !!seq into string" / "!!str into []string".
+- **sbx-v2 command typing (translation):** sbx v2 expresses lifecycle hooks under
+  `setup`. It types `setup.install[].command` as a shell **string** and
+  `setup.startup[].command` as an argv **sequence**. The synthesizer emits
+  per-phase accordingly (install → block string, startup/initFiles → argv seq,
+  with neutral `initFiles` ordered before `startup` under `setup.startup`);
+  mismatching yields sbx's "cannot unmarshal !!seq into string" / "!!str into
+  []string".
 
 ### Changed modules
 
@@ -316,16 +315,12 @@ allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
   ports. This is a broader/less-transparent posture than sbx's proxy injection;
   it is the microsandbox model and the price of the microVM boundary. Disable
   with `ACQ_MSB_NO_TLS_INTERCEPT` (secrets then won't substitute).
-- **Private GitHub content via the REST API (quickstart#203, resolved):** msb
-  does NOT substitute the credential placeholder for git's HTTPS smart-transport
-  to github.com/codeload (upstream microsandbox #756/#768/#1170), so a private
-  `git clone` cannot authenticate on msb. It DOES substitute the `Authorization:
-  Bearer` header for the REST API (`api.github.com`, verified msb 0.6.7). So kits
-  fetch private GitHub content via the REST API: the `agentic-coding-playbook`
-  kit binds `GITHUB_TOKEN@api.github.com` and fetches a **source tarball**
-  (verified against a pinned AGENTS.md sha256) instead of cloning. It now works
-  on msb. (This supersedes the earlier "clone skipped on msb" limitation. The
-  underlying git-transport gap remains upstream, but no kit depends on it.)
+- **Private GitHub content:** kits may fetch private GitHub content via pinned
+  REST tarballs for reproducibility, and acq now binds GitHub credentials to the
+  REST API plus HTTPS git-transport hosts
+  (`GITHUB_TOKEN@github.com,api.github.com,codeload.github.com`). Current msb
+  substitutes the placeholder on those hosts, so direct HTTPS clone/push is
+  eligible for secret injection without the real token entering the guest.
 
 ### `environment` vocabulary (guest env vars)
 

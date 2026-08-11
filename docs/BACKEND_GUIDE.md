@@ -121,7 +121,7 @@ automation story.
   dance (behavioral parity — the guest trusts the Zscaler CA either way)
 - **Secret injection**: the USAi key and a GitHub token are bound from host env
   vars at create time (`--secret USAI_API_KEY@api.gsa.usai.gov`,
-  `--secret GITHUB_TOKEN@api.github.com`); the real values never enter the VM.
+  `--secret GITHUB_TOKEN@github.com,api.github.com,codeload.github.com`); the real values never enter the VM.
   **Any** custom-endpoint secret stored with `acq secret set SVC --host H --env E`
   is bound generically the same way — no fixed usai/github table
 - **Snapshots**: microsandbox has a full `msb snapshot` CLI verb
@@ -134,7 +134,7 @@ automation story.
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `msb` CLI | >= 0.6.0 | `--net-rule`, `--trust-host-cas`, `--secret` used by acq |
+| `msb` CLI | >= 0.6.8 | `--net-rule`, `--trust-host-cas`, `--secret`, and the `--net-default-egress` split (0.6.8) used by acq's balanced-egress default |
 | Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
 
 Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
@@ -169,6 +169,8 @@ Tunables:
 | `ACQ_OPENCODE_POSTINSTALL_TIMEOUT` | `120` | Seconds to bound opencode's in-guest `postinstall.mjs` (which fetches a platform binary) so a wedged registry can't hang `acq run`; used only when the guest provides `timeout` |
 | `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
 | `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
+| `ACQ_MSB_BALANCED_EGRESS` | `1` (on) | Apply the sbx-`balanced` egress baseline at create (`--net-default-egress deny` + an `allow@host:tcp:port` rule per vendored entry + gateway-DNS rules `allow@host:udp:53` + `allow@host:tcp:53`). The deny-default is **egress only** — ingress keeps msb's baseline `allow` so published ports stay reachable (ADR-0019). Set `0`/`false`/`no`/`off`/empty to disable and fall back to kit-only egress (no deny-default emitted). See ADR-0018. |
+| `ACQ_MSB_BALANCED_HOSTS_FILE` | `<repo>/acq.backends/msb-balanced-hosts.txt` | Path to the vendored host list (a verbatim mirror of `sbx policy inspect local-policy`). Override for a site-specific egress set. |
 | `ACQ_MSB_WORKSPACE` | (first workspace) | Agent's **starting directory** (`-w`) on attach. Does NOT change the mount, which is always host-path:host-path; overrides only where the agent starts. |
 | `ACQ_MSB_MEMORY` | `4G` | Guest RAM at create (`-m`); `4G`/`4096`/`512M` (bare = MiB). Set empty to use msb's 512 MiB default |
 | `ACQ_MSB_CPUS` | `2` | Guest vCPU count at create (`-c`); set empty to use msb's 1-vCPU default |
@@ -192,6 +194,54 @@ request fails with `Could not resolve host`. The msb backend therefore passes
 microVM) to `msb create`. Override `ACQ_MSB_DNS_NAMESERVER` if `1.1.1.1` is
 blocked in your environment, or set it empty to fall back to msb's default (only
 if your host resolver is reachable from the guest).
+
+### Network egress (sbx-`balanced` parity)
+
+sbx ships a **`balanced`** network policy (the recommended sbx default) that
+allows a broad set of developer hosts — AI services, package registries,
+code/container hosts, cloud infrastructure, OS package mirrors, and
+certificate-validation endpoints — and blocks everything else. msb has no
+equivalent default; its egress is deny-by-default with only the hosts the kits
+declare (plus the npm registry when installing an agent).
+
+To reach parity, the msb backend applies the **same host set as sbx `balanced`
+by default**: at create it emits `--net-default-egress deny` plus one
+`allow@<host>:tcp:<port>` rule per entry in the vendored list
+`acq.backends/msb-balanced-hosts.txt` (a verbatim mirror of `sbx policy inspect
+local-policy`), plus gateway-DNS rules (`allow@host:udp:53` +
+`allow@host:tcp:53`) for name resolution. Egress is therefore
+*restricted to* the balanced set (deny-by-default + allowlist), composed with the
+kits' own `caps.network.allow` rules.
+
+- **Egress only.** The deny-default is scoped to egress (`--net-default-egress`,
+  not the symmetric `--net-default`). Ingress keeps msb's baseline `allow`, so
+  create-time `-p HOST:GUEST` published ports stay reachable — a symmetric deny
+  would RST inbound to them (see [ADR-0019](adr/0019-msb-balanced-egress-is-egress-only.md)).
+- **Disable** with `ACQ_MSB_BALANCED_EGRESS=0` (falls back to kit-only egress; no
+  deny-default is emitted, so `acq` does not restrict egress in that mode).
+- **Customize** by pointing `ACQ_MSB_BALANCED_HOSTS_FILE` at your own list.
+- **Wildcards / ports:** sbx `**.host` / `*.host` become msb domain-suffix
+  `*.host`; the intra-label glob `crl*.digicert.com` is broadened to
+  `*.digicert.com` (msb has no intra-label glob — this is logged and is the one
+  spot the msb set is intentionally wider than sbx); a host on both `:80` and
+  `:443` yields two rules.
+- **Drift:** the vendored file is a point-in-time snapshot. Re-sync it from `sbx
+  policy inspect local-policy` on the quarterly review cadence (see
+  `docs/KNOWN_FAILURE_MODES.md`).
+- **QUIC / HTTP-3.** The balanced rules are `tcp:443` only, and `--tls-intercept`
+  (required for secret substitution) blocks QUIC unless `--no-block-quic` is set.
+  So HTTP/3-only egress to an allowed `:443` host is denied and a well-behaved
+  client falls back to TLS-over-TCP automatically — the same behavior as sbx
+  `balanced`. A one-time slow first connection while a client tries QUIC and falls
+  back is expected, not a bug.
+- **Requires msb >= 0.6.8.** The egress-only deny-default uses the
+  `--net-default-egress` flag, which first appears in msb 0.6.8. `acq` enforces
+  this floor (`MIN_MSB_VERSION`) and fails closed with a clear version message on
+  an older binary, rather than passing an unknown flag to `msb create`.
+
+See [ADR-0018](adr/0018-msb-balanced-egress-baseline.md) for the full rationale,
+and [ADR-0019](adr/0019-msb-balanced-egress-is-egress-only.md) for why the
+deny-default is egress-only.
 
 ### Guest memory and vCPU
 
@@ -364,11 +414,10 @@ rotated key takes effect without recreating the sandbox.
 
 - **USAi** binds to `api.gsa.usai.gov`. The USAi provider sends the key as an
   `Authorization: Bearer` header, which msb substitutes correctly.
-- **GitHub** binds to `api.github.com` **only** (the REST host). msb substitutes
-  the token on the `Authorization: Bearer` header path there, so kits fetch
-  private GitHub content via the REST API. A `git clone` over HTTPS to
-  `github.com`/`codeload.github.com` is **not** substituted — see the known
-  limitation below.
+- **GitHub** binds to `github.com`, `api.github.com`, and
+  `codeload.github.com`. msb substitutes the token on the wire for REST API calls
+  and HTTPS git transport, so private GitHub tarball fetches, clones, and pushes
+  can authenticate without the real token entering the guest.
 - **Any other custom endpoint**: a
   service stored with `acq secret set SVC --host H --env E` records a **non-secret
   endpoint sidecar** (host + env only) in the acq store; the msb backend then binds
@@ -412,27 +461,22 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 > already holds the secret it stops with an `sbx secret rm …` hint rather than
 > silently replacing it. The acq store copy is always updated.
 
-### Known limitations (msb)
+### Historical limitations (msb)
 
-- **Private GitHub repos: use the REST API, not `git clone`.** msb substitutes
-  an injected credential for the `Authorization: Bearer` header on the
-  **REST API** (`api.github.com`) — verified on msb 0.6.7 (an authenticated
-  request returns full rate-limit headers; a private-repo source-tarball fetch
-  succeeds). It does **not** substitute git's smart-HTTP transport to
-  `github.com` / `codeload.github.com`, so a `git clone` (or `gh repo clone`,
-  which shells out to git) of a private repo fails auth/TLS there. This was the
-  origin of the private-repo `git clone` limitation.
+- **Private GitHub repos previously had to use the REST API, not `git clone`.**
+  Older msb releases substituted an injected credential for the REST API host
+  (`api.github.com`) but not for git's smart-HTTP transport to `github.com` /
+  `codeload.github.com`. That was the origin of the private-repo `git clone`
+  limitation and the earlier REST-tarball workaround.
 
-  **Resolution:** kits that need private GitHub content fetch it via the REST
-  API instead of git. The `agentic-coding-playbook` kit now fetches the repo
-  **source tarball** from `api.github.com/repos/<repo>/tarball/<ref>` (verifying
-  the extracted `AGENTS.md` against a pinned sha256), so it works on **both**
-  backends. acq binds `GITHUB_TOKEN@api.github.com` on msb (single host — a
-  multi-host binding trips a known microsandbox bug). Store a
+  **Resolution:** current acq binds
+  `GITHUB_TOKEN@github.com,api.github.com,codeload.github.com` on msb. Store a
   token with `acq secret set -g github` (or `gh auth token | acq secret set -g
   github`); absent a token the kit degrades gracefully (warns, no rules/skills).
-  Upstream git-transport substitution remains unfixed in microsandbox, but kits no
-  longer depend on it.
+  Kits still may use REST tarballs for reproducibility, but HTTPS git clone/push
+  is no longer intentionally excluded from secret substitution. Older msb builds
+  may still show the historical limitation, so use `scripts/verify-backends` to
+  confirm the live git-transport and codeload paths on a sandbox-capable host.
 
 ### Capability flags
 
@@ -441,7 +485,7 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 | `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 1 | Post-hoc `acq ports <sandbox> --publish HOST:GUEST` is **implemented**: `acq_backend_ports` opens `msb ssh serve` on an ephemeral loopback port against a running sandbox and tunnels the guest port to the host with OpenSSH `-L` (no re-create), using an acq-managed ed25519 key and tearing the serve/ssh pair down on `acq stop`/`rm` ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md)). Create/run publish via neutral `publishedPorts` → `-p HOST:GUEST` also ships. **Live-verified** on a KVM-capable host via `scripts/verify-ports-live` (happy-path publish + host-reaches-guest, LIST, fail-closed on a busy host port, teardown) |
 | `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 0 | msb has a full `msb snapshot` CLI verb, but `acq` exposes **no `snapshot` verb** to invoke it. Wiring one is beyond sbx parity (sbx has none), so the flag reflects what `acq` surfaces (`0`), not what msb can do |
 | `ACQ_BACKEND_CAN_RESUME` | 1 | `msb stop` / `msb start` preserve state |
-| `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (header substitution on REST/API hosts; git smart-HTTP transport not substituted — use the REST API) |
+| `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (host-scoped substitution for REST/API hosts and HTTPS git transport hosts) |
 
 ### Differences from sbx
 
@@ -586,7 +630,8 @@ under `integrations/isolation/acq-kits/`) and translated per backend by
 
 - **sbx** — the neutral spec is synthesized into an sbx-v2 kit directory
   (`spec.yaml` + `files/`), then applied via `sbx --kit` / `sbx kit add`. The
-  observable result is identical to the pre-1.2 sbx kits.
+  synthesizer maps neutral fields onto the strict sbx-v2 grammar
+  (`permissions.network`, `setup`, `ports`, and `agentInstructions`).
 - **msb** — the neutral spec is fetched and driven directly: network allows
   become `--net-rule` flags, files are `msb copy`'d in, and `commands` run via
   `msb exec`. A `backend_shortcuts.msb` (e.g. zscaler `trust_host_cas`) uses the
