@@ -276,6 +276,31 @@ right after `_acq_msb_ensure_agent_user`.
   hitting quay/failing for users migrating from Docker. Rejected in favour of the
   Docker-Hub-first default (Decision 5) to minimize migration burden; the behavior
   is documented and user-overridable.
+- **Disk-backed named volume for container storage (the msb dind recipe's
+  approach) instead of fuse-overlayfs — DEFERRED, uncertain payoff.** The msb
+  [docker-in-sandbox recipe](https://github.com/superradcompany/microsandbox/blob/main/docs/recipes/docker/docker-in-sandbox.mdx)
+  mounts a `--mount-named …:/var/lib/docker:kind=disk` ext4 volume so the engine's
+  storage sits on a real filesystem, letting it use the **native kernel `overlay`**
+  driver instead of fuse-overlayfs. Applied to our rootless design this could give
+  native-overlay performance AND drop the `/dev/fuse` grant. We deferred it because:
+  - **The performance payoff is unquantified.** fuse-overlayfs adds FUSE overhead,
+    but for the target agent workflows (pull/build/run) it is unmeasured whether
+    native overlay is meaningfully faster here; the current path is already
+    verified working end-to-end.
+  - **It adds a persistent, per-sandbox stateful artifact acq must own.** A named
+    volume survives `msb rm` (the recipe calls out `msb volume rm` as a separate
+    cleanup), so acq would take on volume create/reuse/GC lifecycle — reintroducing
+    exactly the "per-sandbox disk-backed volume" statefulness we cited as a reason
+    to avoid the dind recipe in the first place.
+  - **Empirical unknowns.** Rootless podman's graphroot is under `$HOME`, not
+    `/var/lib/docker`; whether native kernel overlay works rootless on that ext4
+    mount without `/dev/fuse`, and whether `msb create` (not just `msb run`)
+    threads `--mount-named …kind=disk`, are unverified and need a host spike.
+  This is recorded as a **future option with an uncertain efficiency payoff**, to
+  be pursued only if fuse-overlayfs overhead is shown to matter and the
+  volume-lifecycle cost is judged worth it. The disk-backed volume is orthogonal to
+  the (rejected) dind *daemon* strategy — only the recipe's storage half is in
+  scope here.
 
 ## Verification
 
