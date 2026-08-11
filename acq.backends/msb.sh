@@ -3264,15 +3264,26 @@ EOF
 # --host/--env hint so the user can make it bindable.
 _acq_msb_secret_set_guidance() {
   local service="$1" _env="$2" _host="$3" applied="$4"
+  # NOTE: every `[ "$applied" -gt 0 ] && echo …` below is written as a full
+  # if/then, NOT a bare `test && echo`. Under `set -e` a trailing bare `test`
+  # that evaluates false makes this function return non-zero, which then
+  # propagates through the caller (acq_backend_secret_set) BEFORE its `return 0`
+  # — so `acq secret set` exits 1 even though the key was stored (this silently
+  # broke both `acq secret set` under a strict shell and the verify-backends
+  # seed). The if/then form always leaves a zero status on the false branch.
   case "$service" in
     usai|github)
       echo "acq: stored '$service' in the acq secret store." >&2
-      [ "$applied" -gt 0 ] && echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
+      if [ "$applied" -gt 0 ]; then
+        echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
+      fi
       ;;
     *)
       if [ -n "$_env" ] && [ -n "$_host" ]; then
         echo "acq: stored '$service' in the acq secret store (bound as ${_env}@${_host})." >&2
-        [ "$applied" -gt 0 ] && echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
+        if [ "$applied" -gt 0 ]; then
+          echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
+        fi
       else
         echo "acq: stored '$service' in the acq secret store, but it has no endpoint" >&2
         echo "      mapping, so it cannot be bound. Provide --host HOST --env ENV, e.g.:" >&2
@@ -3280,6 +3291,7 @@ _acq_msb_secret_set_guidance() {
       fi
       ;;
   esac
+  return 0
 }
 
 acq_backend_secret_set() {

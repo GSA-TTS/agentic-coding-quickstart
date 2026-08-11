@@ -1277,6 +1277,73 @@ make_stubs
 out=$(printf 'k\n' | ACQ_BACKEND=msb "$ACQ" secret set -g usai 2>&1 || true)
 assert_contains "secret(msb): usai stored" "$out" "acq secret store"
 assert_not_contains "secret(msb): usai does not print sbx set-custom" "$out" "sbx secret set-custom"
+# REGRESSION: `acq secret set` must EXIT 0 on success. The msb guidance helper
+# ended its usai/github arm with a bare `[ "$applied" -gt 0 ] && echo …`; when
+# no running sandbox was re-fed (applied=0) that test is false, so under the
+# dispatcher's `set -e` the whole `acq secret set` exited 1 even though the key
+# was stored — which made every scripted seed (incl. verify-backends) treat a
+# successful set as a failure. Assert a zero exit explicitly.
+make_stubs
+printf 'k\n' | ACQ_BACKEND=msb "$ACQ" secret set -g usai >/dev/null 2>&1; set_rc=$?
+assert_eq "secret(msb): 'secret set' exits 0 on success (set -e regression)" "0" "$set_rc"
+cleanup_stubs
+
+# 5g2. `acq secret has [-g|SANDBOX] SERVICE` — silent predicate mirroring the
+#      create-time key-present gate (acq_secret_has AND, when the backend defines
+#      it, acq_backend_key_present, via the shared common.sh acq_key_injectable).
+#      Tested through the REAL dispatch with the stubbed backends.
+#
+#   - present in the acq store + backend can inject -> rc 0
+#   - absent from the store                          -> rc 1
+#   - store-present but the BACKEND injector is missing (sbx: acq store has usai
+#     but the sbx proxy CUSTOM SECRETS table has no binding) -> rc 1
+#      (this is the case only a backend that DEFINES acq_backend_key_present can
+#      distinguish; msb has no such hook so store-present == injectable.)
+
+# 5g2a. msb: store-present usai (msb has no acq_backend_key_present, so the store
+#       alone is authoritative) -> rc 0.
+make_stubs; load_acq
+mkdir -p "$STUBDIR/secrets"
+printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+ACQ_BACKEND=msb "$ACQ" secret has -g usai >/dev/null 2>&1; has_rc=$?
+assert_eq "secret has(msb): store-present usai -> rc 0" "0" "$has_rc"
+# Absent service -> rc 1.
+ACQ_BACKEND=msb "$ACQ" secret has -g nope >/dev/null 2>&1; has_rc=$?
+assert_eq "secret has(msb): absent service -> rc 1" "1" "$has_rc"
+# Silent by default: no output on either exit.
+has_out=$(ACQ_BACKEND=msb "$ACQ" secret has -g usai 2>&1 || true)
+assert_eq "secret has(msb): silent on success" "" "$has_out"
+has_out=$(ACQ_BACKEND=msb "$ACQ" secret has -g nope 2>&1 || true)
+assert_eq "secret has(msb): silent on failure" "" "$has_out"
+cleanup_stubs
+
+# 5g2b. sbx: acq store HAS usai but the sbx proxy CUSTOM SECRETS table does NOT
+#       bind it (no fixture) -> acq_backend_key_present fails -> rc 1. This is the
+#       store-present-but-backend-absent split the predicate must catch.
+make_stubs; load_acq
+mkdir -p "$STUBDIR/secrets"
+printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+# No seed_sbx_usai_proxy_fixture -> `sbx secret ls` shows an empty custom table.
+ACQ_BACKEND=sbx "$ACQ" secret has -g usai >/dev/null 2>&1; has_rc=$?
+assert_eq "secret has(sbx): store-present but proxy-absent -> rc 1" "1" "$has_rc"
+cleanup_stubs
+
+# 5g2c. sbx: acq store HAS usai AND the sbx proxy binds it (fixture present) ->
+#       both checks pass -> rc 0.
+make_stubs; load_acq
+mkdir -p "$STUBDIR/secrets"
+printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+seed_sbx_usai_proxy_fixture
+ACQ_BACKEND=sbx "$ACQ" secret has -g usai >/dev/null 2>&1; has_rc=$?
+unset SBX_LS_FIXTURE
+assert_eq "secret has(sbx): store-present + proxy-bound -> rc 0" "0" "$has_rc"
+cleanup_stubs
+
+# 5g2d. Missing service name -> usage error on stderr, non-zero (rc 2).
+make_stubs; load_acq
+has_out=$(ACQ_BACKEND=msb "$ACQ" secret has -g 2>&1); has_rc=$?
+assert_contains "secret has: missing service -> usage" "$has_out" "missing service name"
+assert_eq "secret has: missing service -> rc 2" "2" "$has_rc"
 cleanup_stubs
 
 # ===========================================================================
@@ -1721,6 +1788,7 @@ make_stubs
 bad_out=$(ACQ_BACKEND=sbx "$ACQ" secret bogus-verb 2>&1); bad_rc=$?
 bad_log=$(cat "$CALLS")
 assert_contains "secret bogus: acq's own unknown-subcommand error" "$bad_out" "unknown secret subcommand 'bogus-verb'"
+assert_contains "secret bogus: error lists the 'has' verb" "$bad_out" "set | rm | ls | has | import | --help"
 [ "$bad_rc" -ne 0 ] && pass "secret bogus: exits non-zero" \
   || fail "secret bogus: must exit non-zero" "rc=$bad_rc"
 assert_not_contains "secret bogus: never forwards to the backend" "$bad_log" "sbx secret"

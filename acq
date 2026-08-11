@@ -146,6 +146,7 @@ Usage:
   acq secret rm  [-g | SANDBOX] SERVICE      # remove an acq-managed secret
   acq secret rm  [-g | SANDBOX] <placeholder>  # (sbx only: raw placeholder → passthrough)
   acq secret ls  [-g | SANDBOX]              # list acq-managed secrets
+  acq secret has [-g | SANDBOX] SERVICE      # exit 0 if the backend can inject it (silent)
   acq secret import [SERVICE] [-g | SANDBOX] [--all] [--force] [--dry-run]
 
 Custom endpoints: use `acq secret set SERVICE --host HOST --env ENV` — it stores
@@ -164,6 +165,11 @@ store and clears the backend's injector. `acq secret ls` lists the secrets acq
 manages (scope, service, whether a value is stored, and the ENV@HOST binding) —
 never the values themselves; on msb the acq store is the source of truth, on sbx
 this shows the sbx proxy table.
+
+`acq secret has [-g | SANDBOX] SERVICE` is a SILENT predicate for scripting: it
+exits 0 when the active backend can actually inject SERVICE for that scope (the
+same check `acq create` makes before provisioning) and 1 otherwise. It prints
+nothing and never forwards to the backend CLI.
 SECRETUSAGE
 }
 
@@ -937,6 +943,52 @@ case "$subcommand" in
           command "${ACQ_RESOLVED_BACKEND}" secret rm "$@"
         fi
         ;;
+      has)
+        # `acq secret has [-g | SANDBOX] SERVICE` — SILENT predicate for scripting:
+        # exit 0 if the ACTIVE BACKEND can inject SERVICE for that scope, else 1.
+        # This is exactly the composed check `ensure_key_present` uses as its
+        # pre-create gate (acq_secret_has AND, when the backend defines it,
+        # acq_backend_key_present) — factored into the shared common.sh helper
+        # acq_key_injectable so the two can never drift. Fail closed; never forward
+        # to the backend CLI.
+        shift
+        # Parse scope the same way secret set/rm do: `-g`/`--global` -> global; a
+        # leading bare token before the service -> sandbox; a lone token -> service.
+        secret_has_scope=""
+        secret_has_service=""
+        case "${1:-}" in
+          -g|--global)
+            secret_has_service="${2:-}"
+            ;;
+          "")
+            : # no args -> missing service, handled below
+            ;;
+          -*)
+            secret_has_service="${1:-}"
+            ;;
+          *)
+            if [ -n "${2:-}" ]; then
+              case "${2:-}" in
+                -*) secret_has_service="${1:-}" ;;
+                *)  secret_has_scope="${1:-}"; secret_has_service="${2:-}" ;;
+              esac
+            else
+              secret_has_service="${1:-}"
+            fi
+            ;;
+        esac
+        if [ -z "$secret_has_service" ]; then
+          echo "acq: secret has: missing service name" >&2
+          echo "     usage: acq secret has [-g | SANDBOX] SERVICE" >&2
+          exit 2
+        fi
+        if ! command -v acq_key_injectable >/dev/null 2>&1; then
+          # secret store helper not loaded -> cannot confirm injectability; fail closed.
+          exit 1
+        fi
+        acq_key_injectable "$secret_has_service" "$secret_has_scope" && exit 0
+        exit 1
+        ;;
       ls)
         # `acq secret ls [-g|SANDBOX]` — if the backend defines a native acq
         # secret listing (msb: the acq store is the source of truth, and there is
@@ -995,7 +1047,7 @@ case "$subcommand" in
         # than forwarding a token acq claimed to a backend that may reject it
         # differently (or accept something acq never meant to expose).
         echo "acq: unknown secret subcommand '${sub2}'." >&2
-        echo "     Try: acq secret set | rm | ls | import | --help" >&2
+        echo "     Try: acq secret set | rm | ls | has | import | --help" >&2
         exit 1
         ;;
     esac

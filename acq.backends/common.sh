@@ -1791,6 +1791,26 @@ _report_usai_unreachable() {
   echo >&2
 }
 
+# acq_key_injectable SERVICE [SANDBOX] -> 0 if the ACTIVE BACKEND can inject
+# SERVICE for that scope, else 1. Single source of truth for the "is this
+# credential actually usable at provision?" predicate, composed of two checks:
+#   1. acq_secret_has SERVICE SANDBOX     — a value resolves in the acq store, and
+#   2. acq_backend_key_present SERVICE SANDBOX (when the backend defines it) — the
+#      BACKEND (not just the acq store) can inject it. sbx defines this (checks its
+#      proxy table); msb does NOT (it binds from the acq store at create, so
+#      store-present == injectable), in which case check 1 alone is authoritative.
+# Silent (a predicate). Both `ensure_key_present` (the pre-create gate) and the
+# `acq secret has` subcommand call this so they can never drift.
+acq_key_injectable() {
+  local service="$1" scope_sandbox="${2:-}"
+  command -v acq_secret_has >/dev/null 2>&1 || return 1
+  acq_secret_has "$service" "$scope_sandbox" || return 1
+  if command -v acq_backend_key_present >/dev/null 2>&1; then
+    acq_backend_key_present "$service" "$scope_sandbox" || return 1
+  fi
+  return 0
+}
+
 # ensure_key_present — pre-create gate: make sure a USAi API key is available to
 # the active backend BEFORE the sandbox is created. This must run before
 # acq_backend_provision on a fresh run because msb binds secrets only at create
@@ -1807,11 +1827,9 @@ ensure_key_present() {
     return 0
   fi
   if acq_secret_has usai "$scope_sandbox"; then
-    if command -v acq_backend_key_present >/dev/null 2>&1; then
-      acq_backend_key_present usai "$scope_sandbox" && return 0
-    else
-      return 0
-    fi
+    # acq_key_injectable composes the store check (already true here) with the
+    # backend-inject check; it is the shared predicate `acq secret has` also uses.
+    acq_key_injectable usai "$scope_sandbox" && return 0
 
     echo "acq: USAi API key is stored, but the active backend is not configured to inject it." >&2
     echo "     Run 'acq secret set -g usai' from a terminal so the backend can bind it, then retry." >&2
