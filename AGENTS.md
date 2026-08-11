@@ -25,7 +25,8 @@ review_cycle: "quarterly"
 
 This repository is a thin **wrapper** (`acq`) that stands up a working,
 federally-configured agent sandbox by composing existing tools: a **sandboxing
-backend** — the `sbx` CLI (SBX) or `msb` (MSB / microsandbox) — plus four
+backend** — the `sbx` CLI (SBX) or `msb` (MSB / microsandbox) — plus its
+built-in
 **mixin kits** hosted in the community
 [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
 repo (`integrations/isolation/acq-kits/`). It carries **no** kit code of its own
@@ -43,7 +44,7 @@ my-workspace/                       # Parent folder (user creates this)
 └── my-app/                         # User's project(s)
 ```
 
-When `acq` creates a sandbox it applies four kits by pinned remote reference
+When `acq` creates a sandbox it applies its built-in kits by pinned remote reference
 (`--kit git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=<sha>&dir=…`).
 The same neutral kits apply to both backends; per-backend translation is the
 adapter's job (see [ADR-0010](docs/adr/0010-acq-pluggable-backends.md) /

@@ -1426,7 +1426,7 @@ assert_not_contains "secret rm(msb): lone token never invokes 'msb secret'" "$lo
 cleanup_stubs
 
 # ===========================================================================
-# 6. Kit list completeness (the four built-in kits)
+# 6. Kit list completeness (the built-in kits) + doc count-drift guard
 # ===========================================================================
 
 make_stubs; load_acq
@@ -1439,6 +1439,17 @@ assert_contains "kits: git-ssh-sign" "$kits_joined" "acq-kits/git-ssh-sign"
 # any later kit makes a network request (matters on sbx, whose kits apply
 # sequentially; harmless on msb, where trust is a create-time flag).
 assert_contains "kits: zscaler applied first" "${KITS[0]}" "acq-kits/zscaler-ca-certificate"
+# Count-drift guard (#278): the authority is ACQ_KIT_NAMES in common.sh. If a
+# doc still spells out a hardcoded English count ("four kits"), it will silently
+# lie the moment the built-in set changes size. Prefer countless prose ("its
+# built-in kits"); this asserts no such stale English-number count survives in
+# the user-facing docs.
+_kit_count="${#ACQ_KIT_NAMES[@]}"
+assert_eq "kit count is the documented set" "4" "$_kit_count"
+for _doc in "$REPO_ROOT/README.md" "$REPO_ROOT/AGENTS.md"; do
+  _bad=$(grep -Eic "\b(four|five|three|six|two) (built-in |mixin )?kits\b" "$_doc" || true)
+  assert_eq "no hardcoded English kit count in $(basename "$_doc")" "0" "$_bad"
+done
 cleanup_stubs
 
 # ===========================================================================
