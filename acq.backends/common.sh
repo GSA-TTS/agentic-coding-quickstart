@@ -443,8 +443,15 @@ acq_secret_import() {
 # _acq_is_managed_secret_rm ARGS... -> 0 if the `acq secret rm` args name an
 # acq-managed secret (scope + known service), else 1 (pass through to backend).
 # Recognizes:  -g SERVICE  |  --global SERVICE  |  SANDBOX SERVICE
+#
+# "Managed" is EITHER a built-in service (usai/github/gitlab) OR any entry that
+# actually exists in the acq store under the resolved scope. The store check
+# means an entry `acq secret ls` shows can always be removed by `acq secret rm`,
+# even if it was created with an arbitrary (e.g. sandbox-shaped) service name —
+# otherwise such entries become un-removable orphans. A lone token with no scope
+# is still NOT managed (it is a raw placeholder for a backend that has one).
 _acq_is_managed_secret_rm() {
-  local a1="${1:-}" a2="${2:-}" svc=""
+  local a1="${1:-}" a2="${2:-}" svc="" sandbox=""
   case "$a1" in
     -g|--global) svc="$a2" ;;
     -*)          return 1 ;;              # some other flag/placeholder
@@ -453,14 +460,21 @@ _acq_is_managed_secret_rm() {
       # placeholder for the backend to handle.
       [ -n "$a2" ] || return 1
       case "$a2" in -*) return 1 ;; esac
-      svc="$a2"
+      svc="$a2"; sandbox="$a1"
       ;;
   esac
   [ -n "$svc" ] || return 1
   case "$ACQ_MANAGED_SECRET_SERVICES" in
     *" $svc "*) return 0 ;;
-    *) return 1 ;;
   esac
+  # Not a built-in: managed iff the entry exists in the acq store at this scope.
+  # (Only checkable when the neutral store is loaded — the native-store backends.)
+  if command -v _acq_secret_key >/dev/null 2>&1 && command -v acq_secret_get >/dev/null 2>&1; then
+    local key
+    key=$(_acq_secret_key "$svc" "$sandbox") || return 1
+    acq_secret_get "$key" >/dev/null 2>&1 && return 0
+  fi
+  return 1
 }
 
 # Word-split a whitespace-separated env value into the named array WITHOUT

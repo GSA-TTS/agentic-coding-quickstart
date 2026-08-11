@@ -1409,6 +1409,35 @@ assert_contains "classify: lone placeholder is passthrough" "$classify_out" "lon
 assert_contains "classify: unknown service is passthrough" "$classify_out" "g-unknown=passthru"
 cleanup_stubs
 
+# 5h3a. Regression (GSA-TTS/agentic-coding-quickstart#300): a NON-built-in secret
+#       that actually EXISTS in the acq store (e.g. an orphan created with a
+#       sandbox-shaped service name) must be removable — the classifier treats a
+#       stored entry as managed, and `acq secret rm` deletes it. Otherwise such
+#       entries become un-removable orphans (`ls` shows them, `rm` refuses).
+make_stubs
+_orphan_store=$(mktemp -d "${TMPDIR:-/tmp}/acq-orphan.XXXXXX")
+orphan_out=$(
+  export ACQ_SECRET_STORE_DIR="$_orphan_store/secrets"   # force the file store
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/common.sh"
+  _k=$(_acq_secret_key opencode-pic-blm-cxworks)
+  printf 'orphan-value' | acq_secret_store "$_k" >/dev/null 2>&1
+  # before removal: stored + classified managed
+  acq_secret_get "$_k" >/dev/null 2>&1 && printf 'stored=yes\n'
+  _acq_is_managed_secret_rm -g opencode-pic-blm-cxworks && printf 'orphan=managed\n' || printf 'orphan=passthru\n'
+  # an absent non-built-in is still NOT managed (must not swallow a real placeholder)
+  _acq_is_managed_secret_rm -g never-stored-svc && printf 'absent=managed\n' || printf 'absent=passthru\n'
+  # remove it, then confirm gone
+  acq_secret_delete "$_k" >/dev/null 2>&1
+  acq_secret_get "$_k" >/dev/null 2>&1 && printf 'after=present\n' || printf 'after=gone\n'
+)
+rm -rf "$_orphan_store"
+assert_contains "orphan(#300): stored" "$orphan_out" "stored=yes"
+assert_contains "orphan(#300): stored entry is managed (removable)" "$orphan_out" "orphan=managed"
+assert_contains "orphan(#300): absent non-builtin stays passthrough" "$orphan_out" "absent=passthru"
+assert_contains "orphan(#300): removed" "$orphan_out" "after=gone"
+cleanup_stubs
+
 # 5h3b. Regression: on msb, `acq secret rm SERVICE` with NO scope (a lone token)
 #       must NOT be passed through to a nonexistent `msb secret` CLI (which
 #       produced a confusing "unrecognized subcommand 'secret'" from msb). Since
