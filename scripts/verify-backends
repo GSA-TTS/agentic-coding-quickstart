@@ -12,8 +12,12 @@
 # For each backend that is INSTALLED, it creates a tiny throwaway sandbox and
 # asserts (design §9):
 #   1. The four pinned kits apply cleanly (no hard failure).
-#   2. The USAi key round-trips to HTTP 200 from the models API (requires a
-#      valid key: USAI_API_KEY exported, or already stored for the backend).
+#   2. The USAi key is bound and the models host is reachable from the guest.
+#      NOTE: this does NOT require a valid USAi key. On both backends the guest
+#      holds only a PLACEHOLDER (sbx bakes a custom-secret placeholder + proxy
+#      swap; msb binds `--secret ENV@HOST` + on-the-wire rewrite), so the check
+#      verifies acq's wiring (bind + egress), not USAi auth. The verifier seeds a
+#      synthetic dummy value — no real key, no pasting.
 #   3. Git commit signing config is present (git-ssh-sign kit landed).
 #   4. The playbook clone symlink appears at the agent's AGENTS.md path.
 # A backend that is NOT installed is SKIPPED (its row prints "skipped").
@@ -32,6 +36,11 @@
 #     -k | --keep    | VERIFY_KEEP=1      Keep the throwaway sandbox on failure
 #                                         (default: always remove) for manual poking.
 #
+# No USAi key is required or prompted for: the verifier seeds a synthetic dummy
+# USAi value at global scope, in a hermetic secret store, and suppresses acq's
+# live-refeed sweep (ACQ_SECRET_NO_LIVE_REFEED) so it can never touch the USAi
+# binding of your OWN running sandboxes.
+#
 # On ANY step failure the real command line and its captured stderr/stdout are
 # printed, so a single run tells you what broke (no separate manual re-run).
 #
@@ -41,6 +50,25 @@
 # as failures.
 
 set -uo pipefail
+
+# macOS ships an ancient /bin/bash (3.2, 2007). Its lexer mis-parses a
+# double-quoted word that contains BOTH a multibyte UTF-8 char (e.g. an em-dash)
+# and later parentheses when LC_CTYPE is not a UTF-8 locale — the high bytes
+# desync the quote scan, so the '(' looks unquoted and it dies with
+# "syntax error near unexpected token `('" at the offending line. This script is
+# ASCII-clean in its executable statements to avoid that, but as belt-and-braces
+# we (a) force a UTF-8 ctype when the current one is C/POSIX, and (b) warn once if
+# running under bash 3.x so the cause is named rather than mysterious.
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+  *[Uu][Tt][Ff]*) : ;;
+  *) export LC_CTYPE=C.UTF-8 2>/dev/null || export LC_CTYPE=en_US.UTF-8 ;;
+esac
+case "${BASH_VERSINFO:-0}" in
+  ""|0|1|2|3)
+    echo "verify-backends: note: running under bash ${BASH_VERSION:-<3.x>}." >&2
+    echo "                 Prefer bash 4+ (e.g. \`brew install bash\`) for best results." >&2
+    ;;
+esac
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
@@ -128,6 +156,16 @@ export ACQ_SECRET_FORCE_FILE=1
 export ACQ_SECRET_STORE_DIR="$VERIFY_STATE/secrets"
 export ACQ_STATE_DIR="$VERIFY_STATE/state"
 export ACQ_PROVENANCE_DIR="$VERIFY_STATE/provenance"
+# CRITICAL for not clobbering the user's LIVE sandboxes: the acq secret store is
+# redirected above, but a GLOBAL `acq secret set -g usai` / `secret rm -g usai`
+# on the msb backend otherwise sweeps EVERY running sandbox with
+# `msb modify --secret[-rm]` to live-rotate the key. That reaches OUTSIDE this
+# hermetic state and rebinds/unbinds USAi on the user's own running sandbox —
+# the observed breakage where verify-backends left the user's msb agent without a
+# working USAi key. ACQ_SECRET_NO_LIVE_REFEED=1 makes secret set/rm store-only
+# (no `msb modify` against running VMs); the throwaway sandboxes this script
+# creates still bind the key at create time, which is all the checks need.
+export ACQ_SECRET_NO_LIVE_REFEED=1
 mkdir -p "$XDG_CONFIG_HOME" "$ACQ_SECRET_STORE_DIR" "$ACQ_STATE_DIR" "$ACQ_PROVENANCE_DIR"
 
 # Run an acq command, capturing combined stdout+stderr into LAST_OUT and
@@ -244,114 +282,41 @@ unseed_github_secret() {
   GH_SEEDED_FOR=""
 }
 
-# seed_usai_secret BACKEND SANDBOX — ensure a USAi key is present+injectable
-# before provision. Seeds the key at GLOBAL scope (`-g`), NOT sandbox-scoped, for
-# two reasons discovered on the host:
-#   1. sbx rejects a sandbox-SCOPED custom secret whose sandbox does not exist yet
-#      — `sbx create` validates custom secrets and returns
-#      `400 Bad Request: invalid custom secrets` for an orphan scope. A GLOBAL
-#      custom secret has no such dependency and is applied to every sandbox.
-#   2. acq's key-present gate and secret resolution fall back to the global scope
-#      (acq_secret_resolve tries acq.<sandbox>.usai then acq.usai), so a global
-#      key satisfies create for BOTH backends and is injected all the same.
-# msb can be seeded non-interactively from a host-exported USAI_API_KEY; otherwise
-# (and always for sbx, whose proxy needs the value) we prompt. Non-interactive
-# runs (CI) skip rather than reuse an ambient global secret they can't verify.
+# seed_usai_secret BACKEND SANDBOX — seed an injectable USAi key for BOTH
+# backends at GLOBAL scope, NON-INTERACTIVELY (no manual pasting, no real key).
 #
-# After seeding we confirm injectability with `acq secret has -g usai`; only then
-# is USAI_SEEDED_FOR set. This means a seed that didn't actually land where create
-# looks degrades to a clean SKIP instead of a phantom success that hard-fails
-# create. USAI_SEEDED_FOR carries the SANDBOX name (for the per-sandbox reporting
-# and unseed), but the underlying secret is global.
+# WHY A DUMMY IS ENOUGH: on BOTH sbx and msb the guest only ever holds a
+# PLACEHOLDER, never the real key — sbx bakes a custom-secret placeholder and its
+# proxy swaps it on the wire; msb binds `--secret ENV@HOST` and rewrites on the
+# wire (see the "USAi key check" comment below). So the verifier never
+# authenticates the key against USAi (that is USAi's concern, not acq's wiring).
+# All the checks need is a NON-EMPTY value so provision can bind it and the guest
+# can reach the models host through the proxy — a synthetic constant does that,
+# and keeps the run fully hermetic with zero credential handling.
+#
+# GLOBAL scope (`-g`) is used because sbx rejects a sandbox-SCOPED custom secret
+# for a sandbox that does not exist yet (`400 invalid custom secrets` at create),
+# and acq resolution falls back to the global scope for both backends. The
+# throwaway sandboxes still bind it at create; the global secret store is
+# redirected to VERIFY_STATE (hermetic) and ACQ_SECRET_NO_LIVE_REFEED=1 stops any
+# `msb modify` sweep from touching the user's own running sandboxes.
+#
+# USAI_SEEDED_FOR carries the SANDBOX name for per-sandbox reporting/unseed; the
+# underlying secret is global. On any seed failure it stays empty -> clean SKIP.
+
+# A synthetic, non-secret USAi value. NOT a real credential: the wiring checks
+# (bind + host reachability) never authenticate it against USAi, so its only job
+# is to be non-empty so provision has something to bind.
+VERIFY_USAI_DUMMY="acq-verify-dummy-usai-key"
+
 seed_usai_secret() {
   local backend="$1" sandbox="$2"
   USAI_SEEDED_FOR=""
-  case "$backend" in
-    msb)
-      # Non-interactive fast path: a host-exported key seeds the global scope
-      # silently (msb binds it from the acq store at create).
-      if [ -n "${USAI_API_KEY:-}" ] && printf '%s\n' "$USAI_API_KEY" | run_acq "seed-usai" --backend "$backend" secret set -g usai >/dev/null 2>&1; then
-        if run_acq "usai-present" --backend "$backend" secret has -g usai; then
-          USAI_SEEDED_FOR="$sandbox"
-          return 0
-        fi
-      fi
-      if [ ! -t 0 ]; then
-        return 0
-      fi
-      printf '        msb USAi check needs a USAi key.\n' >&2
-      if _prompt_and_seed_usai "$backend"; then
-        USAI_SEEDED_FOR="$sandbox"
-      fi
-      ;;
-    sbx)
-      if [ ! -t 0 ]; then
-        return 0
-      fi
-      printf '        sbx USAi check needs a USAi key.\n' >&2
-      if _prompt_and_seed_usai "$backend"; then
-        USAI_SEEDED_FOR="$sandbox"
-      fi
-      ;;
-  esac
-}
-
-# _prompt_and_seed_usai BACKEND — ask [y/N]; on yes, seed a GLOBAL usai key and
-# confirm it is injectable via `acq secret has -g usai`. Returns 0 iff the key
-# ended up where `acq create` will find it. Backend-aware:
-#   - msb: read the key HERE (silent) and pipe it into acq's non-interactive path,
-#     so acq's own prompt (which our >/dev/null would swallow) never runs.
-#   - sbx: acq must feed sbx's egress proxy, which it can only do via sbx's own
-#     interactive `set-custom` prompt — so we let acq run interactively (output
-#     visible). Seeding GLOBAL (not sandbox-scoped) avoids the orphan-scope
-#     `400 invalid custom secrets` at create. sbx's set-custom still prompts once
-#     for the proxy in addition to acq's masked store prompt; that second entry is
-#     acq's existing sbx behavior, and seeding once globally means it only happens
-#     a single time for the whole run rather than per sandbox.
-#
-# READ SOURCE (bug fix): both the [y/N] answer and the pasted key are read from
-# the SAME source — /dev/tty when readable, else stdin. Reading the answer from
-# stdin but the key from /dev/tty (the prior code) could return an empty key when
-# the two diverge, silently skipping the seed.
-_prompt_and_seed_usai() {
-  local backend="$1" key="" answer="" src="/dev/stdin"
-  [ -r /dev/tty ] && src="/dev/tty"
-  printf '        Paste it now? [y/N] ' >&2
-  IFS= read -r answer < "$src" || true
-  case "$answer" in
-    [yY]|[yY][eE][sS]) ;;
-    *) return 1 ;;
-  esac
-
-  if [ "$backend" = "sbx" ]; then
-    # sbx: let acq run interactively (masked store prompt + sbx's own proxy
-    # prompt), output visible. GLOBAL scope avoids the orphan-scope 400 at create.
-    "$ACQ" --backend "$backend" secret set -g usai < "$src" || true
+  if printf '%s\n' "$VERIFY_USAI_DUMMY" | run_acq "seed-usai" --backend "$backend" secret set -g usai >/dev/null 2>&1; then
     if run_acq "usai-present" --backend "$backend" secret has -g usai; then
-      return 0
+      USAI_SEEDED_FOR="$sandbox"
     fi
-    printf '        (sbx did not record an injectable usai key; skipping this backend)\n' >&2
-    return 1
   fi
-
-  # msb: read the key here (silent, no echo) from the SAME source as the [y/N]
-  # answer, then pipe it into acq's non-interactive path.
-  printf '        Enter USAi API key (input hidden): ' >&2
-  IFS= read -rs key < "$src" || true
-  printf '\n' >&2
-  if [ -z "$key" ]; then
-    printf '        (no key entered; skipping)\n' >&2
-    return 1
-  fi
-
-  # Pipe on stdin -> acq secret set takes the non-interactive path (no hidden
-  # prompt). Output is discarded; the key never appears in argv or the log.
-  if printf '%s\n' "$key" | run_acq "seed-usai" --backend "$backend" secret set "$sandbox" usai >/dev/null 2>&1; then
-    key=""
-    return 0
-  fi
-  key=""
-  return 1
 }
 
 unseed_usai_secret() {
@@ -419,6 +384,7 @@ verify_backend() {
   fi
 
   # Create a sandbox with the four kits applied via acq's normal provision path.
+  printf '        creating sandbox %s (booting + applying 4 kits; this can take a minute)...\n' "$name"
   if ! run_acq "create" --backend "$backend" create shell "$WORKDIR"; then
     fail "${backend}: provision (acq create shell) failed" \
          "command: acq --backend ${backend} create shell ${WORKDIR}"
@@ -441,63 +407,41 @@ verify_backend() {
     dump "exec output" "$LAST_OUT"
   fi
 
-  # 2) USAi key check — backend-aware.
-  #    sbx injects the key via its egress proxy: the guest holds the real value
-  #    in $USAI_API_KEY, so a raw bearer curl to the models API returns 200.
-  #    msb binds the key with `--secret ENV@HOST`: the guest's $USAI_API_KEY is a
-  #    proxy-managed SENTINEL (the real value is swapped in on the wire only for
-  #    requests to the allowed host and never enters the VM). A raw bearer curl
-  #    from the guest therefore does NOT prove the key the way it does for sbx —
-  #    so for msb we assert the binding + host reachability instead of a 200 on a
-  #    guest-held key.
-  case "$backend" in
-    sbx)
-      if [ "$USAI_SEEDED_FOR" != "$name" ]; then
-        skip "${backend}: USAi auth check (not seeded by verifier; avoiding ambient global state)"
-      else
-        run_acq "exec usai-200" --backend "$backend" exec "$name" -- sh -c \
-          "curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$USAI_API_KEY\" $USAI_MODELS_URL"
-        local status="$LAST_OUT"
-        case "$status" in
-          *200*) pass "${backend}: USAi key round-trips to 200" ;;
-          "")    fail "${backend}: USAi key check produced no HTTP status" ;;
-          *)     fail "${backend}: verifier-seeded USAi key returned HTTP '$status' (expected 200)"
-                 dump "curl output" "$LAST_OUT" ;;
-        esac
-      fi
+  # 2) USAi key check — SYMMETRIC across both backends.
+  #    IMPORTANT: on BOTH sbx and msb the guest's $USAI_API_KEY is a PLACEHOLDER,
+  #    not the real key. sbx bakes a custom-secret placeholder (e.g.
+  #    sbx-cs-XXXX) into the sandbox and its egress proxy swaps the placeholder
+  #    for the real value on the wire for the allowed host; msb binds the key
+  #    with `--secret ENV@HOST` and likewise rewrites it on the wire. In NEITHER
+  #    case does the guest hold the real secret, so a guest-side bearer curl can
+  #    NOT prove key validity (an earlier version wrongly asserted a 200 on sbx,
+  #    claiming the guest held the real value — it does not; see docs
+  #    KNOWN_FAILURE_MODES "USAi custom secret" and ADR-0011). What acq's wiring
+  #    CAN prove, identically on both backends, is:
+  #      (a) the verifier seeded an injectable key, so provision could bind it;
+  #      (b) the models host resolves + connects from the guest (egress allowed),
+  #          i.e. ANY real HTTP status comes back (even 401/403) — a transport
+  #          failure (000 / could-not-resolve) means the net-rule/egress is wrong.
+  #    Validating the KEY itself against USAi's auth is USAi's concern, not acq's,
+  #    and would need a real key on the host purely to test a third party — so we
+  #    deliberately do not do it here (that also removes the manual key paste).
+  if [ "$USAI_SEEDED_FOR" = "$name" ]; then
+    pass "${backend}: USAi key seeded + bound by verifier"
+  else
+    skip "${backend}: USAi key not seeded by verifier"
+  fi
+  run_acq "exec usai-reach" --backend "$backend" exec "$name" -- sh -c \
+    "curl -sS -o /dev/null -w '%{http_code}' --max-time 15 $USAI_MODELS_URL"
+  local ustatus="$LAST_OUT"
+  case "$ustatus" in
+    000|*"resolve"*|*"curl:"*|"")
+      fail "${backend}: USAi host not reachable from guest (egress/net-rule?)"
+      dump "curl output" "$LAST_OUT"
+      printf '        note: with kit net-rules, egress is default-deny; the models\n' >&2
+      printf '              host must be allow-listed AND DNS must resolve. See ADR-0011.\n' >&2
       ;;
-    msb)
-      # msb binds the USAi key with `--secret ENV@HOST`: the guest's
-      # $USAI_API_KEY is a proxy-managed SENTINEL, not the real value. So we do
-      # NOT assert a guest-side 200. Instead:
-      #   (a) the acq secret store (or a host env fallback) must HAVE the key, so
-      #       provision could bind it;
-      #   (b) the models host must resolve/connect from the guest (egress OK).
-      if [ "$USAI_SEEDED_FOR" = "$name" ]; then
-        pass "${backend}: USAi key seeded by verifier"
-      else
-        skip "${backend}: USAi key not seeded by verifier (export USAI_API_KEY to enable auth binding)"
-      fi
-      # (b) The models host must resolve/connect from the guest (egress allow).
-      #     msb rewrites the auth header on the wire, so any HTTP status back from
-      #     the endpoint (even 401/403) proves resolution + egress worked; a curl
-      #     transport failure (000 / could-not-resolve) means the net-rule/egress
-      #     is wrong. We accept a real HTTP status; we do NOT require 200 because
-      #     the guest never holds the real key to authenticate itself.
-      run_acq "exec usai-reach" --backend "$backend" exec "$name" -- sh -c \
-        "curl -sS -o /dev/null -w '%{http_code}' --max-time 15 $USAI_MODELS_URL"
-      local mstatus="$LAST_OUT"
-      case "$mstatus" in
-        000|*"resolve"*|*"curl:"*|"")
-          fail "${backend}: USAi host not reachable from guest (egress/net-rule?)"
-          dump "curl output" "$LAST_OUT"
-          printf '        note: with kit net-rules, egress is default-deny; the models\n' >&2
-          printf '              host must be allow-listed AND DNS must resolve. See ADR-0011.\n' >&2
-          ;;
-        *)
-          pass "${backend}: USAi host reachable from guest (HTTP $mstatus; auth rewritten on wire)"
-          ;;
-      esac
+    *)
+      pass "${backend}: USAi host reachable from guest (HTTP $ustatus; auth rewritten on wire)"
       ;;
   esac
 
@@ -555,8 +499,14 @@ verify_backend() {
   #     on the wire for github.com and codeload.github.com. The token value is
   #     never printed and never appears in argv.
   if [ "$backend" = "msb" ] && [ -n "$GH_SEEDED_FOR" ]; then
+    # GIT_TERMINAL_PROMPT=0 makes git FAIL FAST instead of blocking on a
+    # "Username for 'https://github.com'" prompt when the substituted token is
+    # not accepted (the observed "terminal prompts disabled" fatal). We also cap
+    # the network wait with http.lowSpeed{Limit,Time} so a stalled connection
+    # (no bytes for 20s) aborts rather than hanging the whole run — git has no
+    # single "connect timeout" knob, and lowSpeed is the portable equivalent.
     if run_acq "exec github-git-transport" --backend "$backend" exec "$name" -- sh -c \
-        'GIT_TERMINAL_PROMPT=0 git -c "http.extraHeader=Authorization: Bearer $GITHUB_TOKEN" ls-remote https://github.com/GSA-TTS/agentic-coding-quickstart.git HEAD >/dev/null'; then
+        'GIT_TERMINAL_PROMPT=0 git -c "http.lowSpeedLimit=1" -c "http.lowSpeedTime=20" -c "http.extraHeader=Authorization: Bearer $GITHUB_TOKEN" ls-remote https://github.com/GSA-TTS/agentic-coding-quickstart.git HEAD >/dev/null'; then
       pass "${backend}: GitHub HTTPS git transport accepts substituted token"
     else
       fail "${backend}: GitHub HTTPS git transport did not accept substituted token"
@@ -642,6 +592,7 @@ verify_agent_install() {
     return
   fi
 
+  printf '        creating sandbox %s (booting + installing the agent; this can take a minute)...\n' "$aname"
   if ! run_acq "create-opencode" --backend "$backend" create opencode "$WORKDIR"; then
     fail "${backend}: provision (acq create opencode) failed"
     dump "acq create output" "$LAST_OUT"
@@ -702,6 +653,6 @@ fi
 echo ""
 echo "  passed: $PASS   failed: $FAIL   skipped: $SKIP   warnings: $WARN"
 if [ "$WARN" -gt 0 ]; then
-  echo "  ($WARN warning(s): known, tracked limitations — not failures. See notes above.)"
+  echo "  ($WARN warning(s): known, tracked limitations -- not failures. See notes above.)"
 fi
 [ "$FAIL" -eq 0 ]

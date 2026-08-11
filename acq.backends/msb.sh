@@ -3231,6 +3231,18 @@ _acq_msb_secret_refeed() {
   local service="$1" scope_name="$2" _env="$3" _host="$4"
   local val applied=0 sb
   [ -n "$_env" ] && [ -n "$_host" ] || { printf '0\n'; return 0; }
+  # OPT-OUT of the live-refeed sweep. A GLOBAL `acq secret set -g <svc>` normally
+  # re-feeds EVERY running sandbox so a rotated key takes effect without recreate.
+  # That is correct for an operator, but destructive for an out-of-band caller
+  # (notably scripts/verify-backends) that seeds a throwaway global key while the
+  # user has their OWN live sandbox running: the sweep rebinds — and the paired
+  # `secret rm -g` UNBINDS — the user's sandbox, breaking its USAi injection.
+  # ACQ_SECRET_NO_LIVE_REFEED=1 makes set/rm store-only (no `msb modify` against
+  # running VMs). The verifier sets it; interactive users never do.
+  if [ -n "${ACQ_SECRET_NO_LIVE_REFEED:-}" ]; then
+    acq_debug "msb modify: live refeed suppressed (ACQ_SECRET_NO_LIVE_REFEED)"
+    printf '0\n'; return 0
+  fi
   val=$(acq_secret_resolve "$service" "$scope_name" 2>/dev/null) && [ -n "$val" ] || { printf '0\n'; return 0; }
   # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
   export "$_env=$val"
@@ -3352,6 +3364,14 @@ acq_backend_secret_set() {
 _acq_msb_secret_unbind() {
   local scope_name="$1" env_name="$2" unbound=0 sb
   [ -n "$env_name" ] || { printf '0\n'; return 0; }
+  # Symmetric opt-out with _acq_msb_secret_refeed: when live refeed is suppressed
+  # (ACQ_SECRET_NO_LIVE_REFEED=1, e.g. scripts/verify-backends), do NOT reach into
+  # running VMs with `msb modify --secret-rm`. Otherwise a throwaway global
+  # `secret rm -g` would unbind the secret from the user's OWN live sandbox.
+  if [ -n "${ACQ_SECRET_NO_LIVE_REFEED:-}" ]; then
+    acq_debug "msb modify --secret-rm: live unbind suppressed (ACQ_SECRET_NO_LIVE_REFEED)"
+    printf '0\n'; return 0
+  fi
   if [ -n "$scope_name" ]; then
     if acq_backend_exists "$scope_name"; then
       msb modify "$scope_name" --secret-rm "$env_name" >/dev/null 2>&1 \
