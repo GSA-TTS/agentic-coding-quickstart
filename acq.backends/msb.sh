@@ -243,6 +243,54 @@ case "$(printf '%s' "$ACQ_MSB_BALANCED_EGRESS" | tr '[:upper:]' '[:lower:]')" in
   *)                 ACQ_MSB_BALANCED_EGRESS="1" ;;
 esac
 
+# ---------------------------------------------------------------------------
+# OCI container engine (podman) — ensure agents can run OCI images (ADR-0020)
+# ---------------------------------------------------------------------------
+# Agents frequently need to run OCI images inside the sandbox (e.g. `docker run`,
+# bringing up a docker-compose.yaml). The default image ships the Docker CLI +
+# compose plugin, but msb's microVM init (/init.krun) never starts dockerd, so
+# the Docker socket is dead; and dockerd's overlay2 storage driver cannot sit on
+# the sandbox's already-overlay root without a disk-backed data volume. Rather
+# than retrofit the msb docker:dind entrypoint recipe (a daemon we would have to
+# start and keep alive across restarts, plus a per-sandbox disk-backed volume),
+# the adapter provisions **podman** — a daemonless engine that forks runc/crun
+# per invocation (no socket, no restart lifecycle), uses fuse-overlayfs on the
+# overlay root (no disk-backed volume), and needs no nested virtualization. We
+# run podman ROOTFUL (the agent user has passwordless sudo, guaranteed by the
+# base-image contract / _acq_msb_ensure_agent_user), which sidesteps the rootless
+# prerequisites (newuidmap/newgidmap from uidmap, passt/pasta) that a lean base
+# lacks. See ADR-0020 and _acq_msb_ensure_oci.
+#
+# podman is CLI-compatible with docker for the run/build/compose workflows this
+# targets, and the bundled Docker CLI is non-functional here anyway (dead
+# socket), so we alias `docker` -> podman (in /usr/local/bin, ahead of /usr/bin)
+# so both `docker run …` and `docker compose …` route to podman. `docker compose`
+# resolves to `podman compose`, which drives the installed podman-compose
+# provider — this is what makes docker-compose.yaml files usable (the standalone
+# `docker-compose` CLI is deprecated in favour of the `docker compose`
+# subcommand, so we do not provide a separate `docker-compose` binary).
+#
+# Toggle: on by default. Set ACQ_MSB_ENSURE_OCI=0 (or empty) to skip the step
+# entirely (e.g. a base image that bakes its own working engine, or a lean
+# sandbox that needs no OCI support). Normalized to exactly "1"/"" like
+# ACQ_MSB_BALANCED_EGRESS.
+ACQ_MSB_ENSURE_OCI="${ACQ_MSB_ENSURE_OCI-1}"
+case "$(printf '%s' "$ACQ_MSB_ENSURE_OCI" | tr '[:upper:]' '[:lower:]')" in
+  ""|0|false|no|off) ACQ_MSB_ENSURE_OCI="" ;;
+  *)                 ACQ_MSB_ENSURE_OCI="1" ;;
+esac
+
+# The packages installed to provide the OCI engine (space-separated). Override
+# for a different set or an internal mirror's package names. podman-compose is
+# the `docker compose` / `podman compose` provider. The install uses the OS
+# package mirror (apt/dnf/apk), which under the default balanced egress baseline
+# (ADR-0018) is already reachable (archive.ubuntu.com / ports.ubuntu.com /
+# security.ubuntu.com / *.debian.org are in the vendored host list). With
+# ACQ_MSB_BALANCED_EGRESS=0, or a base whose egress is otherwise narrowed, the
+# mirror is unreachable and the install fails soft (a clear warning; provision
+# continues; OCI is simply unavailable).
+ACQ_MSB_PODMAN_PKGS="${ACQ_MSB_PODMAN_PKGS:-podman podman-compose}"
+
 # Path to the vendored host list (a verbatim mirror of `sbx policy inspect
 # local-policy`; see acq.backends/msb-balanced-hosts.txt). Override to point at a
 # site-specific list. ACQ_SCRIPT_DIR is exported by the acq entry point (and set
@@ -2055,6 +2103,18 @@ EOF
   fi
   acq_debug "msb provision: agent user ready ($name)"
 
+  # Ensure an OCI container engine (podman) so agents can run OCI images
+  # (docker run / docker compose). Idempotent + marker-gated; FAILS SOFT (a
+  # warning, never aborting provision) if the engine cannot be installed — e.g.
+  # the OS package mirror is unreachable under a narrowed egress. See ADR-0020.
+  acq_debug "msb provision: ensuring OCI engine ($name)"
+  if [ -n "$ACQ_MSB_ENSURE_OCI" ]; then
+    acq_spin_start "Ensuring an OCI engine (podman)"
+    _acq_msb_ensure_oci "$name"
+    acq_spin_stop "Ensuring an OCI engine (podman)"
+  fi
+  acq_debug "msb provision: OCI engine step done ($name)"
+
   # Install the requested agent binary (sbx bakes it into the template image; on
   # a plain msb base acq must install it). Idempotent + marker-gated; a no-op for
   # `shell`, a clear warning for an agent with no known recipe.
@@ -2361,6 +2421,101 @@ _acq_msb_check_prereqs() {
   else
     acq_debug "msb prereqs present (node/git/curl/update-ca-certificates) in $name"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# _acq_msb_ensure_oci NAME — ensure an OCI container engine (podman) is usable
+# ---------------------------------------------------------------------------
+# Guarantee agents can run OCI images inside the sandbox (`docker run`,
+# `docker compose up`, etc.). See the ACQ_MSB_ENSURE_OCI block above for the
+# rationale (podman over dind; rootful via sudo; alias docker->podman). This step
+# is idempotent + marker-gated and FAILS SOFT: if the engine cannot be
+# provisioned (mirror unreachable under a narrowed egress, unknown package
+# manager, etc.) it warns and returns 0 — provision continues, OCI is simply
+# unavailable, exactly like the agent-install and prereq-check steps. Everything
+# runs as root (`-u 0`); the agent uses passwordless sudo at runtime.
+_acq_msb_ensure_oci() {
+  local name="$1"
+  [ -n "$ACQ_MSB_ENSURE_OCI" ] || return 0
+
+  local marker="/var/lib/acq/oci-ready"
+  if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # ACQ_MSB_PODMAN_PKGS is operator-controlled config, but it is interpolated
+  # into a root `sh -c` string below, so charset-guard it (package names are
+  # word-safe: letters, digits, . _ + - and spaces). Refuse anything else rather
+  # than risk shell injection into the elevated install.
+  case "$ACQ_MSB_PODMAN_PKGS" in
+    *[!A-Za-z0-9._+\ -]*)
+      echo "acq(msb): warning: ACQ_MSB_PODMAN_PKGS contains unsafe characters; skipping OCI setup." >&2
+      return 0
+      ;;
+  esac
+
+  acq_debug "msb: ensuring an OCI engine (podman) in $name"
+
+  # One root `sh -c`: install podman if absent (distro-detected, non-interactive),
+  # create the docker->podman alias, and verify the engine works. The whole block
+  # is best-effort; a non-zero exit is caught below and treated as non-fatal.
+  # The alias is created ONLY when no real `docker` binary exists on PATH... except
+  # that the default image DOES ship a (non-functional) docker CLI, so we place
+  # our wrapper in /usr/local/bin (ahead of /usr/bin on the default PATH) to shadow
+  # it — the bundled docker talks to a dead socket, whereas our wrapper routes to
+  # the working podman engine. We overwrite our own wrapper idempotently but never
+  # touch the base image's /usr/bin/docker.
+  if msb exec "$name" -u 0 -e "PODMAN_PKGS=$ACQ_MSB_PODMAN_PKGS" -- sh -c '
+    set -e
+    # 1) Ensure the podman binary is present (idempotent).
+    if ! command -v podman >/dev/null 2>&1; then
+      if command -v apt-get >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        # shellcheck disable=SC2086
+        apt-get install -y --no-install-recommends $PODMAN_PKGS
+      elif command -v dnf >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        dnf install -y $PODMAN_PKGS
+      elif command -v apk >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        apk add --no-cache $PODMAN_PKGS
+      else
+        echo "acq(msb): no supported package manager (apt-get/dnf/apk) to install podman" >&2
+        exit 1
+      fi
+    fi
+    # 2) Confirm the engine actually works before wiring the alias.
+    command -v podman >/dev/null 2>&1
+    podman info >/dev/null 2>&1
+    # 3) Alias docker -> podman in /usr/local/bin (ahead of /usr/bin on PATH), so
+    #    `docker run …` and `docker compose …` route to the working podman engine.
+    #    A tiny exec wrapper (not a symlink) so `docker compose` -> `podman compose`
+    #    dispatches through podmans compose provider (podman-compose).
+    mkdir -p /usr/local/bin
+    cat > /usr/local/bin/docker <<EOF
+#!/bin/sh
+exec podman "\$@"
+EOF
+    chmod 0755 /usr/local/bin/docker
+  ' >/dev/null 2>&1; then
+    # Best-effort: mark ready so we do not re-run the (network-bound) install on
+    # every provision/restart.
+    msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+    acq_debug "msb: OCI engine (podman) ready in $name"
+    return 0
+  fi
+
+  # Fail soft (ADR-0020 / the balanced-egress-off case). Name the mirror hosts so
+  # the operator can allow-list them or bake podman into ACQ_MSB_IMAGE.
+  echo "acq(msb): warning: could not provision an OCI engine (podman) in '$name'." >&2
+  echo "acq(msb):   Agents will not be able to run OCI images (docker run / docker compose)." >&2
+  echo "acq(msb):   Most likely the OS package mirror is unreachable: the default balanced" >&2
+  echo "acq(msb):   egress (ADR-0018) allows it, but ACQ_MSB_BALANCED_EGRESS=0 or a narrowed" >&2
+  echo "acq(msb):   custom base blocks archive.ubuntu.com / ports.ubuntu.com / *.debian.org." >&2
+  echo "acq(msb):   Bake podman + podman-compose into ACQ_MSB_IMAGE, widen egress, or set" >&2
+  echo "acq(msb):   ACQ_MSB_ENSURE_OCI=0 to silence this warning." >&2
+  return 0
 }
 
 # ---------------------------------------------------------------------------
