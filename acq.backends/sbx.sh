@@ -964,6 +964,21 @@ _acq_sbx_secret_exists() {
   '
 }
 
+acq_backend_key_present() {
+  local service="${1:-}" scope_sandbox="${2:-}"
+  case "$service" in
+    usai)
+      if [ -n "$scope_sandbox" ] && _acq_sbx_secret_exists "" "$scope_sandbox" usai USAI_API_KEY; then
+        return 0
+      fi
+      _acq_sbx_secret_exists -g "" usai USAI_API_KEY
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # _acq_sbx_custom_placeholder SCOPE_FLAG SCOPE_NAME ENV_VAR -> placeholder|empty
 # ---------------------------------------------------------------------------

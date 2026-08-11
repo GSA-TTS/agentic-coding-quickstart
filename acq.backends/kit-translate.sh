@@ -727,7 +727,7 @@ kit_spec_agent_context() {
 # the synthesized local kit exactly as it applied the old sbx-kits.
 #
 # Mapping (neutral hybrid/v1 -> sbx schemaVersion "2"):
-#   caps.network.allow[]            -> caps.network.allow[]        (identical)
+#   caps.network.allow[]            -> permissions.network.allow[]
 #   environment{NAME:value}         -> environment.variables{NAME:value}
 #     sbx v2 sets guest env via an `environment.variables` map (the mechanism
 #     the pre-Phase-2 playbook-kit/openchamber kits used). The neutral flat map
@@ -736,14 +736,13 @@ kit_spec_agent_context() {
 #     The whole files/ tree is copied verbatim; sbx v2 auto-maps files/home/...
 #     -> /home/... at create time. The neutral `phase:` hint (e.g. initFiles) is
 #     NOT re-emitted as a command — the static file-drop is sbx's create-time
-#     mechanism and already lands the payload before commands run, matching the
-#     former sbx kits (which likewise relied on the implicit files/ drop).
-#   commands[phase=install]         -> commands.install[]
-#   commands[phase=initFiles]       -> commands.initFiles[]  (command form)
-#   commands[phase=startup]         -> commands.startup[]
-#   agentContext                    -> agentContext            (identical)
+#     mechanism and already lands the payload before setup hooks run.
+#   commands[phase=install]         -> setup.install[]
+#   commands[phase=initFiles]       -> setup.startup[]
+#   commands[phase=startup]         -> setup.startup[]
+#   agentContext                    -> agentInstructions.content
 #   publishedPorts (neutral, top-level; or deprecated backend_extras.sbx) ->
-#                                      publishedPorts[]         (top-level, sbx-v2)
+#                                      ports[]                  (top-level, sbx-v2)
 #   backend_shortcuts.sbx           -> (none defined for the four kits; ignored)
 #
 # Usage: kit_translate_to_sbx NEUTRAL_KIT_DIR OUT_DIR
@@ -778,7 +777,8 @@ kit_translate_to_sbx() {
     [ -n "$display" ] && printf 'displayName: %s\n' "$(_kit_yaml_quote "$display")"
     [ -n "$desc" ] && printf 'description: %s\n' "$(_kit_yaml_quote "$desc")"
 
-    # caps.network.allow. Route each host through _kit_yaml_quote: a neutral
+    # caps.network.allow -> permissions.network.allow. Route each host through
+    # _kit_yaml_quote: a neutral
     # allow entry may legitimately contain a YAML-special character — most
     # commonly a leading `*` for a wildcard subdomain (e.g. "*.npmjs.org"). Emit
     # it bare and YAML reads the `*` as an ALIAS, producing an invalid sbx spec
@@ -787,7 +787,7 @@ kit_translate_to_sbx() {
     local hosts
     hosts=$(kit_spec_net_allow "$spec")
     if [ -n "$hosts" ]; then
-      printf 'caps:\n  network:\n    allow:\n'
+      printf 'permissions:\n  network:\n    allow:\n'
       printf '%s\n' "$hosts" | while IFS= read -r h; do
         [ -n "$h" ] && printf '      - %s\n' "$(_kit_yaml_quote "$h")"
       done
@@ -804,19 +804,19 @@ kit_translate_to_sbx() {
       done
     fi
 
-    # publishedPorts -> sbx-v2 top-level publishedPorts. sbx maps each declared
+    # publishedPorts -> sbx-v2 top-level ports. sbx maps each declared
     # CONTAINER (guest) port to an ephemeral host loopback port at create time.
     # Without this, an acq-applied kit that exposes a service is unreachable from
     # the host until the user runs `acq ports --publish`. The neutral source is
     # read FIRST by kit_spec_published_ports (with a deprecated backend_extras.sbx
-    # fallback), so the emitted sbx-v2 shape is UNCHANGED regardless of source.
+    # fallback), so the emitted sbx-v2 shape is valid regardless of source.
     # Records are `guest<TAB>proto<TAB>name<TAB>host`; sbx-v2 keys on `container`
     # (the guest port), so the host column is not re-emitted here (sbx assigns the
-    # host port; this matches the pre-neutral observable shape).
+    # host port).
     local portrecs
     portrecs=$(kit_spec_published_ports "$spec")
     if [ -n "$portrecs" ]; then
-      printf 'publishedPorts:\n'
+      printf 'ports:\n'
       printf '%s\n' "$portrecs" | while IFS="$(printf '\t')" read -r pguest pproto pname phost; do
         [ -n "$pguest" ] || continue
         # phost (the neutral host column) is intentionally NOT re-emitted: sbx-v2
@@ -831,54 +831,56 @@ kit_translate_to_sbx() {
     fi
   } > "$sbxspec"
 
-  # commands: group by phase. We stream the neutral commands and emit sbx-v2
-  # command entries under commands.<phase>.
-  _kit_sbx_emit_commands "$spec" "$sbxspec"
+  _kit_sbx_emit_setup "$spec" "$sbxspec"
 
-  # agentContext (verbatim block scalar).
   local ctx
   ctx=$(kit_spec_agent_context "$spec")
   if [ -n "$ctx" ]; then
     {
-      printf 'agentContext: |\n'
-      printf '%s\n' "$ctx" | while IFS= read -r cl; do printf '  %s\n' "$cl"; done
+      printf 'agentInstructions:\n  content: |\n'
+      printf '%s\n' "$ctx" | while IFS= read -r cl; do printf '    %s\n' "$cl"; done
     } >> "$sbxspec"
   fi
 
   printf '%s\n' "$out"
 }
 
-# Emit commands.<phase> blocks into an sbx-v2 spec from the neutral commands.
-# Groups records by phase so sbx sees `commands: { install: [...], initFiles:
-# [...], startup: [...] }`.
-_kit_sbx_emit_commands() {
+# Emit setup.install/setup.startup blocks into an sbx-v2 spec from the neutral
+# commands. v2 has no initFiles command phase, so neutral initFiles commands are
+# emitted before startup commands under setup.startup.
+_kit_sbx_emit_setup() {
   local spec="$1" out="$2"
   local phases="install initFiles startup"
-  local phase have_any=0 tmp
+  local phase have_setup=0 have_install=0 have_startup=0 tmp
   tmp=$(mktemp)
 
   for phase in $phases; do
-    local emitted_header=0
-    local cur_phase="" cur_user="" argv=() reading=0 line
+    local cur_phase="" cur_user="" cur_bg="false" argv=() reading=0 line
     # Re-parse the neutral commands each phase (kits are tiny).
     while IFS= read -r line; do
       case "$line" in
         "__CMD__"*)
           cur_phase=$(printf '%s' "$line" | cut -f2)
           cur_user=$(printf '%s' "$line" | cut -f3)
+          cur_bg=$(printf '%s' "$line" | cut -f4)
           argv=(); reading=1
           ;;
         "__END__")
           reading=0
           if [ "$cur_phase" = "$phase" ]; then
-            if [ "$have_any" -eq 0 ]; then printf 'commands:\n' >> "$tmp"; have_any=1; fi
-            if [ "$emitted_header" -eq 0 ]; then printf '  %s:\n' "$phase" >> "$tmp"; emitted_header=1; fi
+            if [ "$have_setup" -eq 0 ]; then printf 'setup:\n' >> "$tmp"; have_setup=1; fi
+            if [ "$cur_phase" = "install" ] && [ "$have_install" -eq 0 ]; then
+              printf '  install:\n' >> "$tmp"; have_install=1
+            fi
+            if [ "$cur_phase" != "install" ] && [ "$have_startup" -eq 0 ]; then
+              printf '  startup:\n' >> "$tmp"; have_startup=1
+            fi
             # Decode the base64 argv tokens back to raw strings.
             local decoded=() b
             for b in "${argv[@]}"; do
               decoded+=("$(printf '%s' "$b" | base64 -d)")
             done
-            _kit_sbx_emit_one_command "$phase" "$cur_user" "$tmp" "${decoded[@]}"
+            _kit_sbx_emit_one_setup_command "$cur_phase" "$cur_user" "$cur_bg" "$tmp" "${decoded[@]}"
           fi
           ;;
         *)
@@ -894,25 +896,13 @@ EOF
   rm -f "$tmp"
 }
 
-# Emit one sbx-v2 command list entry from a decoded argv, keyed by PHASE.
-#
-# sbx v2 types the `command:` field DIFFERENTLY per phase (verified against the
-# pre-Phase-2 sbx kits and sbx's own unmarshaler):
-#   - commands.install[].command   : a shell STRING  (git-ssh-sign used `command: |`)
-#   - commands.startup[].command   : a []string SEQUENCE (usai/playbook/zscaler)
-#   - commands.initFiles[].command : a []string SEQUENCE (same as startup)
-# Feeding a seq where sbx wants a string (or vice-versa) yields
-# "cannot unmarshal !!seq into string" / "!!str into []string".
-#
-# So: emit install as a string, and startup/initFiles as an argv sequence. For
-# the install string we unwrap a `sh -c SCRIPT` argv to just SCRIPT (its natural
-# shell-string form); any other install argv is space-joined as a fallback.
-_kit_sbx_emit_one_command() {
-  local phase="$1" user="$2" out="$3"
-  shift 3
+# Emit one sbx-v2 setup command from a decoded neutral argv.
+_kit_sbx_emit_one_setup_command() {
+  local phase="$1" user="$2" background="$3" out="$4"
+  shift 4
 
   if [ "$phase" = "install" ]; then
-    # install => shell STRING.
+    # setup.install[].command => shell STRING.
     local script
     if [ "$#" -eq 3 ] && [ "$1" = "sh" ] && [ "$2" = "-c" ]; then
       script="$3"
@@ -924,13 +914,14 @@ _kit_sbx_emit_one_command() {
     fi
     printf '    - command: |\n' >> "$out"
     printf '%s\n' "$script" | while IFS= read -r bl; do
-      printf '        %s\n' "$bl" >> "$out"
+        printf '        %s\n' "$bl" >> "$out"
     done
     [ -n "$user" ] && printf '      user: "%s"\n' "$user" >> "$out"
     return 0
   fi
 
-  # startup / initFiles => argv SEQUENCE.
+  # setup.startup[].command => argv SEQUENCE. Neutral initFiles commands also
+  # land here, before startup commands, because v2 has no initFiles command list.
   printf '    - command:\n' >> "$out"
   local tok
   for tok in "$@"; do
@@ -953,6 +944,7 @@ _kit_sbx_emit_one_command() {
     esac
   done
   [ -n "$user" ] && printf '      user: "%s"\n' "$user" >> "$out"
+  [ "$background" = "true" ] && printf '      background: true\n' >> "$out"
 }
 
 # Minimal YAML scalar quoting: single-quote if the token contains YAML-special

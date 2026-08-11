@@ -98,6 +98,7 @@ FAIL=0
 SKIP=0
 WARN=0
 LAST_OUT=""          # captured combined output of the most recent run_acq call
+VERIFY_STATE=""
 pass() { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
 fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
 skip() { SKIP=$((SKIP + 1)); printf '  skip  %s\n' "$1"; }
@@ -113,6 +114,21 @@ dump() {
   printf '%s\n' "$body" | sed 's/^/        | /'
   printf '        --- end ---\n'
 }
+
+cleanup_verify_state() {
+  [ -n "$VERIFY_STATE" ] && rm -rf "$VERIFY_STATE"
+}
+trap cleanup_verify_state EXIT
+
+# Keep acq's per-run state hermetic. The verifier should not read the user's
+# default backend, acq-owned secret store, provenance cache, or port/ssh state.
+VERIFY_STATE=$(mktemp -d "${TMPDIR:-/tmp}/acq-verify-state.XXXXXX") || exit 1
+export XDG_CONFIG_HOME="$VERIFY_STATE/config"
+export ACQ_SECRET_FORCE_FILE=1
+export ACQ_SECRET_STORE_DIR="$VERIFY_STATE/secrets"
+export ACQ_STATE_DIR="$VERIFY_STATE/state"
+export ACQ_PROVENANCE_DIR="$VERIFY_STATE/provenance"
+mkdir -p "$XDG_CONFIG_HOME" "$ACQ_SECRET_STORE_DIR" "$ACQ_STATE_DIR" "$ACQ_PROVENANCE_DIR"
 
 # Run an acq command, capturing combined stdout+stderr into LAST_OUT and
 # returning its exit status. The first arg is a short label for the step; in
@@ -181,6 +197,7 @@ USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 # check knows whether to assert (seeded) or skip (not seeded), and cleanup knows
 # what to remove. It is reset per sandbox.
 GH_SEEDED_FOR=""
+USAI_SEEDED_FOR=""
 
 # _gh_token — echo a github token for seeding, or empty if none is available.
 # Prefer an already-exported GH_TOKEN / GITHUB_TOKEN (how many users, incl. CI,
@@ -225,6 +242,62 @@ unseed_github_secret() {
   [ -n "$GH_SEEDED_FOR" ] || return 0
   run_acq "unseed-github" --backend "$backend" secret rm "$sandbox" github >/dev/null 2>&1 || true
   GH_SEEDED_FOR=""
+}
+
+# seed_usai_secret BACKEND SANDBOX — seed a sandbox-scoped USAi key before
+# provision. MSB can be seeded non-interactively from host USAI_API_KEY because it
+# binds directly from acq's store. SBX custom secrets cannot be fed securely from
+# stdin (sbx set-custom prompts or takes argv-visible --value), so an interactive
+# verifier may prompt; non-interactive SBX skips the auth check instead of using a
+# stale ambient global secret.
+seed_usai_secret() {
+  local backend="$1" sandbox="$2"
+  USAI_SEEDED_FOR=""
+  case "$backend" in
+    msb)
+      if [ -n "${USAI_API_KEY:-}" ] && printf '%s\n' "$USAI_API_KEY" | run_acq "seed-usai" --backend "$backend" secret set "$sandbox" usai >/dev/null 2>&1; then
+        USAI_SEEDED_FOR="$sandbox"
+        return 0
+      fi
+      if [ ! -t 0 ]; then
+        return 0
+      fi
+      printf '        msb USAi check needs a sandbox-scoped key for %s.\n' "$sandbox" >&2
+      printf '        Paste it now? [y/N] ' >&2
+      local answer=""
+      read -r answer || true
+      case "$answer" in
+        [yY]|[yY][eE][sS])
+          if run_acq "seed-usai" --backend "$backend" secret set "$sandbox" usai >/dev/null 2>&1; then
+            USAI_SEEDED_FOR="$sandbox"
+          fi
+          ;;
+      esac
+      ;;
+    sbx)
+      if [ ! -t 0 ]; then
+        return 0
+      fi
+      printf '        sbx USAi check needs a sandbox-scoped key for %s.\n' "$sandbox" >&2
+      printf '        Paste it now? [y/N] ' >&2
+      local answer=""
+      read -r answer || true
+      case "$answer" in
+        [yY]|[yY][eE][sS])
+          if run_acq "seed-usai" --backend "$backend" secret set "$sandbox" usai >/dev/null 2>&1; then
+            USAI_SEEDED_FOR="$sandbox"
+          fi
+          ;;
+      esac
+      ;;
+  esac
+}
+
+unseed_usai_secret() {
+  local backend="$1" sandbox="$2"
+  [ -n "$USAI_SEEDED_FOR" ] || return 0
+  run_acq "unseed-usai" --backend "$backend" secret rm "$sandbox" usai >/dev/null 2>&1 || true
+  USAI_SEEDED_FOR=""
 }
 
 # ---------------------------------------------------------------------------
@@ -274,12 +347,19 @@ verify_backend() {
   # Seed a sandbox-scoped github token (from `gh`) BEFORE create so the private
   # playbook tarball fetch can authenticate. No-op if gh is unavailable.
   seed_github_secret "$backend" "$name"
+  seed_usai_secret "$backend" "$name"
+  if [ "$USAI_SEEDED_FOR" != "$name" ]; then
+    skip "${backend}: skipped (verifier did not seed sandbox-scoped USAi key)"
+    unseed_github_secret "$backend" "$name"
+    return
+  fi
 
   # Create a sandbox with the four kits applied via acq's normal provision path.
   if ! run_acq "create" --backend "$backend" create shell "$WORKDIR"; then
     fail "${backend}: provision (acq create shell) failed" \
          "command: acq --backend ${backend} create shell ${WORKDIR}"
     dump "acq create output" "$LAST_OUT"
+    unseed_usai_secret "$backend" "$name"
     unseed_github_secret "$backend" "$name"
     if [ -n "$KEEP" ]; then
       printf '        (keeping sandbox %s for inspection; --keep set)\n' "$name"
@@ -308,15 +388,19 @@ verify_backend() {
   #    guest-held key.
   case "$backend" in
     sbx)
-      run_acq "exec usai-200" --backend "$backend" exec "$name" -- sh -c \
-        "curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$USAI_API_KEY\" $USAI_MODELS_URL"
-      local status="$LAST_OUT"
-      case "$status" in
-        *200*) pass "${backend}: USAi key round-trips to 200" ;;
-        "")    skip "${backend}: USAi key check (could not reach models API — no key?)" ;;
-        *)     fail "${backend}: USAi key check returned HTTP '$status' (expected 200)"
-               dump "curl output" "$LAST_OUT" ;;
-      esac
+      if [ "$USAI_SEEDED_FOR" != "$name" ]; then
+        skip "${backend}: USAi auth check (not seeded by verifier; avoiding ambient global state)"
+      else
+        run_acq "exec usai-200" --backend "$backend" exec "$name" -- sh -c \
+          "curl -sS -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$USAI_API_KEY\" $USAI_MODELS_URL"
+        local status="$LAST_OUT"
+        case "$status" in
+          *200*) pass "${backend}: USAi key round-trips to 200" ;;
+          "")    fail "${backend}: USAi key check produced no HTTP status" ;;
+          *)     fail "${backend}: verifier-seeded USAi key returned HTTP '$status' (expected 200)"
+                 dump "curl output" "$LAST_OUT" ;;
+        esac
+      fi
       ;;
     msb)
       # msb binds the USAi key with `--secret ENV@HOST`: the guest's
@@ -325,13 +409,10 @@ verify_backend() {
       #   (a) the acq secret store (or a host env fallback) must HAVE the key, so
       #       provision could bind it;
       #   (b) the models host must resolve/connect from the guest (egress OK).
-      if [ -n "${USAI_API_KEY:-}" ] || \
-         ( # shellcheck disable=SC1090
-           ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1;
-           command -v acq_secret_has >/dev/null 2>&1 && acq_secret_has usai ); then
-        pass "${backend}: USAi key available to bind (acq store or host env)"
+      if [ "$USAI_SEEDED_FOR" = "$name" ]; then
+        pass "${backend}: USAi key seeded by verifier"
       else
-        skip "${backend}: USAi key not available (run 'acq secret set -g usai' or export USAI_API_KEY)"
+        skip "${backend}: USAi key not seeded by verifier (export USAI_API_KEY to enable auth binding)"
       fi
       # (b) The models host must resolve/connect from the guest (egress allow).
       #     msb rewrites the auth header on the wire, so any HTTP status back from
@@ -404,7 +485,30 @@ verify_backend() {
     dump "exec output" "$LAST_OUT"
   fi
 
+  # 4b) msb GitHub git-transport substitution. The guest sees only msb's
+  #     placeholder in $GITHUB_TOKEN; this forces git/codeload traffic to carry
+  #     that placeholder in an Authorization header and relies on msb to swap it
+  #     on the wire for github.com and codeload.github.com. The token value is
+  #     never printed and never appears in argv.
+  if [ "$backend" = "msb" ] && [ -n "$GH_SEEDED_FOR" ]; then
+    if run_acq "exec github-git-transport" --backend "$backend" exec "$name" -- sh -c \
+        'GIT_TERMINAL_PROMPT=0 git -c "http.extraHeader=Authorization: Bearer $GITHUB_TOKEN" ls-remote https://github.com/GSA-TTS/agentic-coding-quickstart.git HEAD >/dev/null'; then
+      pass "${backend}: GitHub HTTPS git transport accepts substituted token"
+    else
+      fail "${backend}: GitHub HTTPS git transport did not accept substituted token"
+      dump "git ls-remote output" "$LAST_OUT"
+    fi
+    if run_acq "exec github-codeload" --backend "$backend" exec "$name" -- sh -c \
+        'curl -fsS -L --max-time 30 -o /dev/null -H "Authorization: Bearer $GITHUB_TOKEN" https://codeload.github.com/GSA-TTS/agentic-coding-quickstart/tar.gz/refs/heads/main'; then
+      pass "${backend}: GitHub codeload transport accepts substituted token"
+    else
+      fail "${backend}: GitHub codeload transport did not accept substituted token"
+      dump "codeload curl output" "$LAST_OUT"
+    fi
+  fi
+
   # Remove the sandbox-scoped github secret we seeded (best-effort).
+  unseed_usai_secret "$backend" "$name"
   unseed_github_secret "$backend" "$name"
 
   # Clean up the throwaway sandbox.
@@ -433,9 +537,16 @@ verify_agent_install() {
   [ -n "$aname" ] || aname="opencode-$(basename "$WORKDIR" | tr '[:upper:]' '[:lower:]')"
   printf '        sandbox name: %s\n' "$aname"
 
+  seed_usai_secret "$backend" "$aname"
+  if [ "$USAI_SEEDED_FOR" != "$aname" ]; then
+    skip "${backend}: agent install skipped (verifier did not seed sandbox-scoped USAi key)"
+    return
+  fi
+
   if ! run_acq "create-opencode" --backend "$backend" create opencode "$WORKDIR"; then
     fail "${backend}: provision (acq create opencode) failed"
     dump "acq create output" "$LAST_OUT"
+    unseed_usai_secret "$backend" "$aname"
     run_acq "rm" --backend "$backend" rm "$aname" >/dev/null 2>&1 || true
     return
   fi
@@ -467,6 +578,7 @@ verify_agent_install() {
   else
     run_acq "rm" --backend "$backend" rm "$aname" >/dev/null 2>&1 || true
   fi
+  unseed_usai_secret "$backend" "$aname"
 }
 
 echo "verify-backends"
