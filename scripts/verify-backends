@@ -308,22 +308,79 @@ unseed_github_secret() {
 # (bind + host reachability) never authenticate it against USAi, so its only job
 # is to be non-empty so provision has something to bind.
 VERIFY_USAI_DUMMY="acq-verify-dummy-usai-key"
+USAI_HOST="api.gsa.usai.gov"
 
+# seed_usai_secret BACKEND SANDBOX — seed the synthetic USAi value so BOTH the
+# acq store AND (on sbx) the sbx proxy table hold it.
+#
+# WHY SBX NEEDS A SECOND STEP: `acq secret set -g usai` stores the value in the
+# acq store and, for msb, that is ALL that is needed (msb binds --secret ENV@HOST
+# straight from the acq store at create; `acq secret has` on msb is store-only).
+# On sbx, however, `acq secret has` also requires the value to be present in sbx's
+# OWN proxy table (acq_backend_key_present -> greps `sbx secret ls`), because sbx
+# snapshots the custom-secret placeholder from that table at create time. But
+# `acq secret set` for a CUSTOM endpoint (usai) over PIPED stdin deliberately does
+# NOT run `sbx set-custom` — it cannot feed the value without exposing it on argv,
+# which the production path refuses. So a piped seed leaves the sbx proxy table
+# empty, `acq secret has` returns 1, and sbx would be SKIPPED (the observed bug).
+#
+# The verifier is a test harness seeding a SYNTHETIC, non-secret constant, so here
+# argv exposure of that dummy is acceptable: we feed sbx's proxy directly with
+# `sbx secret set-custom --value <dummy>`. This is the ONLY place that dummy is
+# put on argv, and it is not a real credential. See docs/VERIFY_BACKENDS_HANDOFF.md
+# "Round-2 item 1".
 seed_usai_secret() {
   local backend="$1" sandbox="$2"
   USAI_SEEDED_FOR=""
-  if printf '%s\n' "$VERIFY_USAI_DUMMY" | run_acq "seed-usai" --backend "$backend" secret set -g usai >/dev/null 2>&1; then
-    if run_acq "usai-present" --backend "$backend" secret has -g usai; then
-      USAI_SEEDED_FOR="$sandbox"
+  # Step 1: store in the acq store (source of truth for both backends).
+  #
+  # IMPORTANT (round-2 item 1, second cause): do NOT treat a non-zero rc here as
+  # fatal on sbx. On sbx, `acq secret set` runs an existence pre-check and returns
+  # 1 (non-destructively) when sbx ALREADY holds a global USAI_API_KEY custom row
+  # — e.g. one a PRIOR verify run left behind (the run's unseed only fires when the
+  # seed succeeded, so a skipped run never cleans up). Early-returning on that rc
+  # made every subsequent run skip sbx forever. The acq-store write still happens
+  # (it precedes the pre-check), which is all step 1 needs; the sbx-proxy row is
+  # handled by step 2 and CONFIRMED by step 3. So we ignore step-1 rc and let
+  # step 3 be the sole authority. (On msb a hard failure to store is still caught
+  # by step 3 returning non-zero, so we do not special-case the backend here.)
+  printf '%s\n' "$VERIFY_USAI_DUMMY" | run_acq "seed-usai" --backend "$backend" secret set -g usai >/dev/null 2>&1 || true
+
+  # Step 2 (sbx only): also feed the sbx proxy table so acq_backend_key_present
+  # (and thus `acq secret has`) can see it. Idempotent: if a matching custom
+  # secret already exists, this grep guard no-ops (a pre-existing row is exactly
+  # what step 3 wants present).
+  #
+  # NOTE: sbx's `secret set-custom` REMOVED the `-g`/`--global` flag — custom
+  # secrets are GLOBAL BY DEFAULT now, and a specific sandbox is scoped with
+  # `--sandbox NAME` (see docs/VERIFY_BACKENDS_HANDOFF.md "sbx CLI secret
+  # scope-flag change"). We omit the flag (global is what we want).
+  if [ "$backend" = "sbx" ]; then
+    if ! sbx secret ls 2>/dev/null | grep -q 'USAI_API_KEY'; then
+      sbx secret set-custom --host "$USAI_HOST" --env USAI_API_KEY \
+        --value "$VERIFY_USAI_DUMMY" >/dev/null 2>&1 || true
     fi
+  fi
+
+  # Step 3: confirm the ACTIVE BACKEND can inject it (store on msb; store+proxy
+  # on sbx). Only then declare the seed usable. This is the SOLE authority for
+  # USAI_SEEDED_FOR — a pre-existing sbx row satisfies it just as a freshly
+  # seeded one does.
+  if run_acq "usai-present" --backend "$backend" secret has -g usai; then
+    USAI_SEEDED_FOR="$sandbox"
   fi
 }
 
 unseed_usai_secret() {
   local backend="$1" sandbox="$2"
-  [ -n "$USAI_SEEDED_FOR" ] || return 0
   # The verifier seeds at GLOBAL scope (see seed_usai_secret), so remove the
   # global secret. SANDBOX is unused but kept for call-site symmetry.
+  #
+  # ALWAYS attempt cleanup (not gated on USAI_SEEDED_FOR): a run that SKIPPED still
+  # may have left a global sbx row from a prior step-2 set-custom, and leaving it
+  # behind is exactly what made later runs skip (round-2 item 1, second cause). A
+  # best-effort global rm here keeps the sbx proxy table from accumulating a stale
+  # USAI_API_KEY row across runs.
   : "${sandbox:=}"
   run_acq "unseed-usai" --backend "$backend" secret rm -g usai >/dev/null 2>&1 || true
   USAI_SEEDED_FOR=""
@@ -495,18 +552,37 @@ verify_backend() {
 
   # 4b) msb GitHub git-transport substitution. The guest sees only msb's
   #     placeholder in $GITHUB_TOKEN; this forces git/codeload traffic to carry
-  #     that placeholder in an Authorization header and relies on msb to swap it
-  #     on the wire for github.com and codeload.github.com. The token value is
-  #     never printed and never appears in argv.
+  #     that placeholder and relies on msb to swap it on the wire for github.com
+  #     and codeload.github.com. The token value is never printed and never
+  #     appears in argv (it is dereferenced INSIDE the guest as $GITHUB_TOKEN).
+  #
+  #     IMPORTANT — auth SCHEME matters (this is the round-2 item-2 fix). GitHub's
+  #     git smart-HTTP transport on github.com authenticates with HTTP **Basic**
+  #     auth (username:token), NOT a `Authorization: Bearer <token>` header. An
+  #     earlier version of this check injected a Bearer header for the git
+  #     endpoint; GitHub REJECTS a Bearer credential on git-transport (even a
+  #     VALID token) with 401, so git falls back to prompting for a username and
+  #     dies with "could not read Username" — a WRONG-SCHEME failure that looked
+  #     like an msb substitution gap but was actually the check's construction
+  #     (the same class of bug as the old USAi "200" assertion; see the handoff
+  #     doc "Round-2 item 2"). msb substitutes correctly on this host — the
+  #     codeload check below (which legitimately uses Bearer, accepted by
+  #     codeload/REST) PASSes, and msb's Basic-auth path is handled too. So we
+  #     assert the wiring the RIGHT way: use git's real Basic-auth path via URL
+  #     userinfo (https://x-access-token:$GITHUB_TOKEN@github.com/...), exactly how
+  #     the playbook clone authenticates. msb decodes the Basic credential, swaps
+  #     the placeholder for the real token on the wire, and GitHub accepts it.
   if [ "$backend" = "msb" ] && [ -n "$GH_SEEDED_FOR" ]; then
     # GIT_TERMINAL_PROMPT=0 makes git FAIL FAST instead of blocking on a
-    # "Username for 'https://github.com'" prompt when the substituted token is
-    # not accepted (the observed "terminal prompts disabled" fatal). We also cap
-    # the network wait with http.lowSpeed{Limit,Time} so a stalled connection
-    # (no bytes for 20s) aborts rather than hanging the whole run — git has no
-    # single "connect timeout" knob, and lowSpeed is the portable equivalent.
+    # "Username for 'https://github.com'" prompt if the token is not substituted
+    # /accepted. We also cap the network wait with http.lowSpeed{Limit,Time} so a
+    # stalled connection (no bytes for 20s) aborts rather than hanging the whole
+    # run — git has no single "connect timeout" knob, and lowSpeed is the portable
+    # equivalent. The username `x-access-token` is GitHub's documented value for
+    # PAT-over-Basic git auth; the placeholder rides in the password field and msb
+    # substitutes it inside the Basic credential on the wire.
     if run_acq "exec github-git-transport" --backend "$backend" exec "$name" -- sh -c \
-        'GIT_TERMINAL_PROMPT=0 git -c "http.lowSpeedLimit=1" -c "http.lowSpeedTime=20" -c "http.extraHeader=Authorization: Bearer $GITHUB_TOKEN" ls-remote https://github.com/GSA-TTS/agentic-coding-quickstart.git HEAD >/dev/null'; then
+        'GIT_TERMINAL_PROMPT=0 git -c "http.lowSpeedLimit=1" -c "http.lowSpeedTime=20" ls-remote "https://x-access-token:${GITHUB_TOKEN}@github.com/GSA-TTS/agentic-coding-quickstart.git" HEAD >/dev/null'; then
       pass "${backend}: GitHub HTTPS git transport accepts substituted token"
     else
       fail "${backend}: GitHub HTTPS git transport did not accept substituted token"
@@ -535,9 +611,14 @@ verify_backend() {
       ""|0|false|no|off)
         skip "${backend}: OCI engine check (ACQ_MSB_ENSURE_OCI disabled)" ;;
       *)
-        # docker (our wrapper) resolves to podman, and podman reports info.
+        # docker (our wrapper) resolves to podman, and the engine reports info.
+        # IMPORTANT: the engine is ROOTFUL (ADR-0020); the agent user runs
+        # unprivileged, so a bare `podman info` here would be ROOTLESS and fail on
+        # the default image (no newuidmap). Probe it the way agents actually use
+        # it — through the `docker` alias, which execs `sudo -n podman` (rootful).
+        # `docker info` therefore exercises BOTH the alias AND the working engine.
         if run_acq "exec oci-engine" --backend "$backend" exec "$name" -- sh -c \
-            'command -v podman >/dev/null 2>&1 && command -v docker >/dev/null 2>&1 && podman info >/dev/null 2>&1'; then
+            'command -v podman >/dev/null 2>&1 && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1'; then
           pass "${backend}: OCI engine (podman) present and docker->podman aliased"
         else
           fail "${backend}: OCI engine (podman) not usable (see ADR-0020)"

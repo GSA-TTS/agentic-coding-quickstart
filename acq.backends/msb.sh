@@ -282,14 +282,18 @@ esac
 
 # The packages installed to provide the OCI engine (space-separated). Override
 # for a different set or an internal mirror's package names. podman-compose is
-# the `docker compose` / `podman compose` provider. The install uses the OS
-# package mirror (apt/dnf/apk), which under the default balanced egress baseline
-# (ADR-0018) is already reachable (archive.ubuntu.com / ports.ubuntu.com /
-# security.ubuntu.com / *.debian.org are in the vendored host list). With
+# the `docker compose` / `podman compose` provider. fuse-overlayfs lets rootful
+# podman use the `overlay` graph driver on msb's overlay ROOT filesystem (the
+# kernel `overlay` driver refuses to stack on overlayfs); without it the adapter
+# falls back to the `vfs` driver, which works everywhere but is disk-heavy. See
+# ADR-0020 and _acq_msb_ensure_oci's storage-driver selection. The install uses
+# the OS package mirror (apt/dnf/apk), which under the default balanced egress
+# baseline (ADR-0018) is already reachable (archive.ubuntu.com / ports.ubuntu.com
+# / security.ubuntu.com / *.debian.org are in the vendored host list). With
 # ACQ_MSB_BALANCED_EGRESS=0, or a base whose egress is otherwise narrowed, the
 # mirror is unreachable and the install fails soft (a clear warning; provision
 # continues; OCI is simply unavailable).
-ACQ_MSB_PODMAN_PKGS="${ACQ_MSB_PODMAN_PKGS:-podman podman-compose}"
+ACQ_MSB_PODMAN_PKGS="${ACQ_MSB_PODMAN_PKGS:-podman podman-compose fuse-overlayfs}"
 
 # Path to the vendored host list (a verbatim mirror of `sbx policy inspect
 # local-policy`; see acq.backends/msb-balanced-hosts.txt). Override to point at a
@@ -2457,13 +2461,30 @@ _acq_msb_ensure_oci() {
   acq_debug "msb: ensuring an OCI engine (podman) in $name"
 
   # One root `sh -c`: install podman if absent (distro-detected, non-interactive),
-  # create the docker->podman alias, and verify the engine works. The whole block
-  # is best-effort; a non-zero exit is caught below and treated as non-fatal.
+  # configure a storage driver that works on msb's overlay root, create the
+  # docker->podman alias, and verify the engine works. The whole block is
+  # best-effort; a non-zero exit is caught below and treated as non-fatal.
   # The default image ships a (non-functional) docker CLI, so rather than gate on
   # its absence we place our wrapper in /usr/local/bin (ahead of /usr/bin on the
   # default PATH) to SHADOW it — the bundled docker talks to a dead socket,
   # whereas our wrapper routes to the working podman engine. We overwrite our own
   # wrapper idempotently but never touch the base image's /usr/bin/docker.
+  #
+  # STORAGE DRIVER (round-2 item 3 fix): msb's sandbox root filesystem is itself
+  # an overlay mount (/.msb/rootfs/...). Rootful podman defaults to the KERNEL
+  # `overlay` graph driver, which CANNOT stack on an overlay root — `podman info`
+  # fails with "'overlay' is not supported over overlayfs, a mount_program is
+  # required". That aborted the old `set -e` block at step 2, so ensure-oci
+  # fail-softed and verify-backends' `podman info` check FAILed (the whole point
+  # of this branch). Fix: write /etc/containers/storage.conf BEFORE `podman info`
+  # selecting a driver that works on an overlay root:
+  #   - PREFER `overlay` + `mount_program=fuse-overlayfs` when fuse-overlayfs is
+  #     present (msb provides /dev/fuse; this is the fast, thin-on-disk path), else
+  #   - FALL BACK to `vfs`, which works everywhere with no extra package or
+  #     /dev/fuse (correct but disk-heavy — full copy per layer).
+  # We add fuse-overlayfs to the install set so the preferred path is available on
+  # the default (apt) image; if the mirror lacks it or the base uses another PM,
+  # the vfs fallback still yields a working engine.
   if msb exec "$name" -u 0 -e "PODMAN_PKGS=$ACQ_MSB_PODMAN_PKGS" -- sh -c '
     set -e
     # 1) Ensure the podman binary is present (idempotent).
@@ -2484,13 +2505,49 @@ _acq_msb_ensure_oci() {
         exit 1
       fi
     fi
-    # 2) Confirm the engine actually works before wiring the alias.
+    # 2) Select a storage driver that works on msb'"'"'s overlay root. Only write
+    #    the config if we have not already (idempotent); do not clobber an operator
+    #    file that already names a driver. Prefer fuse-overlayfs, else vfs.
+    if ! grep -q '"'"'^[[:space:]]*driver'"'"' /etc/containers/storage.conf 2>/dev/null; then
+      mkdir -p /etc/containers
+      _fuse=""
+      for _c in /usr/bin/fuse-overlayfs /usr/local/bin/fuse-overlayfs /bin/fuse-overlayfs; do
+        [ -x "$_c" ] && _fuse="$_c" && break
+      done
+      if [ -z "$_fuse" ] && command -v fuse-overlayfs >/dev/null 2>&1; then
+        _fuse=$(command -v fuse-overlayfs)
+      fi
+      if [ -n "$_fuse" ] && [ -e /dev/fuse ]; then
+        printf "[storage]\ndriver = \"overlay\"\n[storage.options.overlay]\nmount_program = \"%s\"\n" "$_fuse" \
+          > /etc/containers/storage.conf
+      else
+        printf "[storage]\ndriver = \"vfs\"\n" > /etc/containers/storage.conf
+      fi
+    fi
+    # 3) Confirm the engine actually works before wiring the alias. If podman info
+    #    still fails with the configured driver, force vfs as a last resort and
+    #    retry once (covers a base whose overlay+fuse combo is still rejected).
+    #    NOTE: everything here runs as ROOT (-u 0), and the engine is ROOTFUL by
+    #    design (ADR-0020) — rootless podman needs newuidmap/passt, absent on the
+    #    default image. So we verify with rootful `podman info`.
+    if ! podman info >/dev/null 2>&1; then
+      printf "[storage]\ndriver = \"vfs\"\n" > /etc/containers/storage.conf
+      podman info >/dev/null 2>&1
+    fi
     command -v podman >/dev/null 2>&1
-    podman info >/dev/null 2>&1
-    # 3) Alias docker -> podman in /usr/local/bin (ahead of /usr/bin on PATH), so
+    # 4) Alias docker -> podman in /usr/local/bin (ahead of /usr/bin on PATH), so
     #    `docker run …` and `docker compose …` route to the working podman engine.
     #    A tiny exec wrapper (not a symlink) so `docker compose` -> `podman compose`
     #    dispatches through podman'"'"'s compose provider (podman-compose).
+    #
+    #    ROOTFUL via sudo (the fix for round-2 item 3): the engine is rootful
+    #    (ADR-0020), but the AGENT user runs unprivileged — a bare `podman` as the
+    #    agent is ROOTLESS and fails on the default image (`newuidmap` missing, and
+    #    the root-created storage db conflicts with the rootless overlay default).
+    #    The agent has passwordless sudo (base-image contract), so the wrapper
+    #    execs `sudo -n podman …` to reach the working rootful engine. `sudo -n`
+    #    never prompts; if sudo were unavailable it fails fast rather than hanging.
+    #
     #    The heredoc below is deliberately FLUSH-LEFT: a plain `<<EOF` (not
     #    `<<-EOF`) performs no leading-whitespace stripping, so indenting it would
     #    prepend spaces to the wrapper'"'"'s shebang line and break it. `\$@` is
@@ -2499,7 +2556,7 @@ _acq_msb_ensure_oci() {
     mkdir -p /usr/local/bin
     cat > /usr/local/bin/docker <<EOF
 #!/bin/sh
-exec podman "\$@"
+exec sudo -n podman "\$@"
 EOF
     chmod 0755 /usr/local/bin/docker
   ' >/dev/null 2>&1; then

@@ -69,6 +69,23 @@ the sandbox. Implemented as a new idempotent, marker-gated step
    virtualization**. And it is CLI-compatible with docker for the
    run/build/compose workflows this targets.
 
+   **Storage driver on an overlay root (added after live verification).** Rootful
+   podman defaults to the **kernel `overlay`** graph driver, which **cannot stack
+   on msb's overlay root** — `podman info` fails with `'overlay' is not supported
+   over overlayfs, a mount_program is required`. This was the concrete reason the
+   engine came up unusable in practice (the failure this branch exists to fix).
+   The adapter therefore writes `/etc/containers/storage.conf` **before** the
+   `podman info` verify, selecting a driver that works on an overlay root:
+   - **Preferred:** `overlay` + `mount_program = fuse-overlayfs` when
+     `fuse-overlayfs` is installed (fast, thin-on-disk; msb provides `/dev/fuse`).
+     `fuse-overlayfs` is added to `ACQ_MSB_PODMAN_PKGS` so the apt path gets it.
+   - **Fallback:** `vfs`, which works everywhere with no extra package and no
+     `/dev/fuse` (correct but disk-heavy — a full copy per layer). Used when
+     `fuse-overlayfs` is unavailable, and as a last-resort retry if `podman info`
+     still fails with the configured driver.
+   The adapter does not clobber an operator-provided `storage.conf` that already
+   names a `driver`.
+
 2. **Rootful, via the agent's passwordless sudo.** The install and engine run as
    root (`msb exec -u 0`). Rootless podman would additionally require
    `newuidmap`/`newgidmap` (the `uidmap` package) and `passt`/pasta — both
@@ -82,6 +99,18 @@ the sandbox. Implemented as a new idempotent, marker-gated step
    never touch the base image's `/usr/bin/docker`. Because the bundled Docker CLI
    does not work here anyway (dead socket), shadowing it loses nothing and makes
    both `docker run` and `docker compose` route to the working podman engine.
+
+   **The wrapper execs `sudo -n podman "$@"`, not a bare `podman`.** The engine is
+   ROOTFUL (rung 2), but agents run as the unprivileged `agent` user, and a bare
+   `podman` as that user is ROOTLESS — which FAILS on the default image
+   (`newuidmap`/`passt` absent; and a root-created storage db conflicts with the
+   rootless overlay default). Verified live: as the agent user, rootless
+   `podman info` → rc 125, while `sudo -n podman info` (vfs storage) → rc 0. The
+   agent has passwordless sudo (base-image contract), so the wrapper reaches the
+   working rootful engine; `sudo -n` never prompts (fails fast if sudo were
+   unavailable). This is also why the `scripts/verify-backends` OCI check probes
+   `docker info` (→ rootful via the wrapper) rather than a bare rootless
+   `podman info`.
 
 4. **`docker compose`, not `docker-compose`.** The standalone `docker-compose`
    CLI is deprecated in favour of the `docker compose` subcommand. With the alias
@@ -161,11 +190,16 @@ the sandbox. Implemented as a new idempotent, marker-gated step
   `/usr/local/bin/docker`, touches the marker), marker-gated skip, the
   `ACQ_MSB_ENSURE_OCI=0` toggle-off, fail-soft on setup failure (rc 0, warning,
   no marker), and the `ACQ_MSB_PODMAN_PKGS` charset-guard against injection.
-- Live (deferred; requires a KVM-capable host — cannot run inside a sandbox, per
-  [ADR-0011](0011-msb-backend-and-neutral-kits.md)): create an msb sandbox and
-  confirm `docker run --rm hello-world` (→ podman) and `docker compose up` from a
-  small `docker-compose.yaml` both succeed. Run on the quarterly re-verification
-  cadence via `scripts/verify-backends`.
+- Live (verified on the assessment host inside an msb sandbox, 2026-08-11):
+  rootful `podman info` FAILED with the kernel `overlay`-over-overlayfs error
+  until `/etc/containers/storage.conf` selected `vfs` (or overlay +
+  fuse-overlayfs), after which `podman info` reported the expected
+  `graphDriverName`. This is the observation that drove the storage-driver
+  selection above. A full `docker run --rm hello-world` (→ podman) end-to-end run
+  additionally needs registry egress; re-confirm it plus `docker compose up` from
+  a small `docker-compose.yaml` on a KVM-capable host via
+  `scripts/verify-backends` on the quarterly re-verification cadence (cannot run
+  inside a sandbox, per [ADR-0011](0011-msb-backend-and-neutral-kits.md)).
 
 ## Links / tracking
 

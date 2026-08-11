@@ -1124,11 +1124,13 @@ log=$(cat "$CALLS")
 assert_not_contains "secret: no scope -> sbx not called" "$log" "sbx secret set"
 cleanup_stubs
 
-# 5b. `-g github` (built-in, absent) -> `sbx secret set -g github` via stdin + stored.
+# 5b. `-g github` (built-in, absent) -> `sbx secret set github` via stdin + stored.
+#     sbx global scope is now the DEFAULT (no `-g`); the flag was deprecated.
 make_stubs
 (printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github) >/dev/null 2>/dev/null || true
 log=$(cat "$CALLS")
-assert_contains "secret: -g github -> sbx secret set -g github" "$log" "sbx secret set -g github"
+assert_contains "secret: -g github -> sbx secret set github" "$log" "sbx secret set github"
+assert_not_contains "secret: -g github -> no deprecated -g flag" "$log" "sbx secret set -g github"
 if [ -f "$STUBDIR/secrets/acq.github" ]; then
   pass "secret: -g github stored in acq store"
 else
@@ -1137,10 +1139,11 @@ fi
 cleanup_stubs
 
 # 5c. `my-sandbox github` -> built-in feed scoped to sandbox + stored scoped.
+#     sbx sandbox scope is `--sandbox NAME` now.
 make_stubs
 (printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox github) >/dev/null 2>/dev/null || true
 log=$(cat "$CALLS")
-assert_contains "secret: sandbox github -> sbx secret set my-sandbox" "$log" "sbx secret set my-sandbox github"
+assert_contains "secret: sandbox github -> sbx secret set --sandbox my-sandbox" "$log" "sbx secret set --sandbox my-sandbox github"
 if [ -f "$STUBDIR/secrets/acq.my-sandbox.github" ]; then
   pass "secret: sandbox github stored scoped in acq store"
 else
@@ -1157,8 +1160,8 @@ export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "secret: existing github -> rm hint" "$out" "sbx secret rm -g github"
-assert_not_contains "secret: existing github -> no set call" "$log" "sbx secret set -g github"
+assert_contains "secret: existing github -> rm hint" "$out" "sbx secret rm github"
+assert_not_contains "secret: existing github -> no set call" "$log" "sbx secret set github"
 cleanup_stubs
 
 # 5d1. Scope-awareness regression: github existing under a DIFFERENT
@@ -1173,8 +1176,8 @@ export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "secret: github under other scope does NOT block -g (feeds sbx)" "$log" "sbx secret set -g github"
-assert_not_contains "secret: github under other scope -> no false rm hint" "$out" "sbx secret rm -g github"
+assert_contains "secret: github under other scope does NOT block -g (feeds sbx)" "$log" "sbx secret set github"
+assert_not_contains "secret: github under other scope -> no false rm hint" "$out" "sbx secret rm github"
 cleanup_stubs
 
 # 5d2. Same, sandbox-scoped: setting `mybox github` when github exists only under
@@ -1186,7 +1189,7 @@ export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set mybox github 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "secret: sandbox github not blocked by other scope (feeds sbx)" "$log" "sbx secret set mybox github"
+assert_contains "secret: sandbox github not blocked by other scope (feeds sbx)" "$log" "sbx secret set --sandbox mybox github"
 cleanup_stubs
 
 # 5d2b. Positive case: the SAME sandbox already having github IS a
@@ -1197,8 +1200,8 @@ export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set opencode-agentic-coding github 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "secret: same-sandbox github -> scoped rm hint" "$out" "sbx secret rm opencode-agentic-coding github"
-assert_not_contains "secret: same-sandbox github -> no set call" "$log" "sbx secret set opencode-agentic-coding github"
+assert_contains "secret: same-sandbox github -> scoped rm hint" "$out" "sbx secret rm github --sandbox opencode-agentic-coding"
+assert_not_contains "secret: same-sandbox github -> no set call" "$log" "sbx secret set --sandbox opencode-agentic-coding github"
 cleanup_stubs
 
 # 5d3. Section-awareness: a BUILT-IN service (github) must be matched in the
@@ -1219,7 +1222,7 @@ gh_out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || 
 # usai IS present in the CUSTOM table at (global) -> should block with rm hint.
 usai_out=$(printf 'x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai 2>&1 || true)
 unset SBX_LS_FIXTURE
-assert_contains "secret: github found in built-in section (blocks)" "$gh_out" "sbx secret rm -g github"
+assert_contains "secret: github found in built-in section (blocks)" "$gh_out" "sbx secret rm github"
 assert_contains "secret: usai found in custom section (blocks)" "$usai_out" "already has"
 cleanup_stubs
 
@@ -1229,7 +1232,7 @@ make_stubs
 out=$(printf 'SUPERSECRETVALUE123\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai 2>&1 || true)
 log=$(cat "$CALLS")
 assert_contains "secret: -g usai stored msg" "$out" "stored 'usai' in the acq secret store"
-assert_contains "secret: -g usai prints set-custom cmd" "$out" "sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY"
+assert_contains "secret: -g usai prints set-custom cmd" "$out" "sbx secret set-custom --host api.gsa.usai.gov --env USAI_API_KEY"
 assert_not_contains "secret: -g usai value never in argv (stdout)" "$out" "SUPERSECRETVALUE123"
 assert_not_contains "secret: -g usai value never in sbx argv" "$log" "SUPERSECRETVALUE123"
 if [ -f "$STUBDIR/secrets/acq.usai" ]; then
@@ -1263,7 +1266,7 @@ cleanup_stubs
 # 5f. `my-sandbox usai` (custom, piped) -> stored scoped + prints sandbox-scoped cmd.
 make_stubs
 out=$(printf 'k\n' | ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox usai 2>&1 || true)
-assert_contains "secret: sandbox usai prints set-custom my-sandbox" "$out" "sbx secret set-custom my-sandbox --host api.gsa.usai.gov"
+assert_contains "secret: sandbox usai prints set-custom --sandbox my-sandbox" "$out" "sbx secret set-custom --sandbox my-sandbox --host api.gsa.usai.gov"
 if [ -f "$STUBDIR/secrets/acq.my-sandbox.usai" ]; then
   pass "secret: sandbox usai stored scoped in acq store"
 else
@@ -2946,6 +2949,20 @@ oci_log=$(cat "$CALLS")
 assert_contains "msb: OCI setup threads the podman packages (PODMAN_PKGS=)" "$oci_log" "PODMAN_PKGS="
 assert_contains "msb: OCI setup wires the docker->podman alias" "$oci_log" "/usr/local/bin/docker"
 assert_contains "msb: OCI setup marks ready (touch marker) on success" "$oci_log" "touch '/var/lib/acq/oci-ready'"
+# The OCI setup MUST configure a storage driver that works on msb's overlay root
+# (round-2 item 3): rootful podman's default kernel `overlay` driver cannot stack
+# on the overlay-backed sandbox FS, so the snippet writes /etc/containers/storage.conf
+# selecting fuse-overlayfs (preferred) or vfs (fallback) BEFORE `podman info`.
+assert_contains "msb: OCI setup configures a storage driver (storage.conf)" "$oci_log" "/etc/containers/storage.conf"
+assert_contains "msb: OCI setup includes the vfs fallback driver" "$oci_log" 'driver = \"vfs\"'
+assert_contains "msb: OCI setup prefers fuse-overlayfs mount_program" "$oci_log" "mount_program"
+# fuse-overlayfs is in the default install set so the preferred (fast) driver is
+# available on the apt image.
+assert_contains "msb: OCI setup installs fuse-overlayfs by default" "$oci_log" "fuse-overlayfs"
+# The docker->podman alias must route to the ROOTFUL engine via sudo (round-2
+# item 3): the agent user is unprivileged and rootless podman fails on the default
+# image (no newuidmap), so the wrapper execs `sudo -n podman`.
+assert_contains "msb: docker alias routes to rootful podman via sudo" "$oci_log" "exec sudo -n podman"
 # The elevated install/verify/alias MUST run as root, never as the agent user.
 assert_contains "msb: OCI setup exec runs as root (-u 0)" "$oci_log" "msb exec ocibox -u 0 -e PODMAN_PKGS="
 assert_not_contains "msb: OCI setup exec does NOT run as -u agent" "$oci_log" "-u agent -e PODMAN_PKGS="
@@ -4263,7 +4280,7 @@ export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(ACQ_BACKEND=sbx "$ACQ" usai-rotate-api-key </dev/null 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "rotate(sbx): uses sbx secret set-custom" "$log" "sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY"
+assert_contains "rotate(sbx): uses sbx secret set-custom" "$log" "sbx secret set-custom --host api.gsa.usai.gov --env USAI_API_KEY"
 assert_contains "rotate(sbx): validates in a throwaway sandbox" "$log" "sbx create --name acq-keycheck-"
 cleanup_stubs
 
