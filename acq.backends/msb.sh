@@ -2459,12 +2459,11 @@ _acq_msb_ensure_oci() {
   # One root `sh -c`: install podman if absent (distro-detected, non-interactive),
   # create the docker->podman alias, and verify the engine works. The whole block
   # is best-effort; a non-zero exit is caught below and treated as non-fatal.
-  # The alias is created ONLY when no real `docker` binary exists on PATH... except
-  # that the default image DOES ship a (non-functional) docker CLI, so we place
-  # our wrapper in /usr/local/bin (ahead of /usr/bin on the default PATH) to shadow
-  # it — the bundled docker talks to a dead socket, whereas our wrapper routes to
-  # the working podman engine. We overwrite our own wrapper idempotently but never
-  # touch the base image's /usr/bin/docker.
+  # The default image ships a (non-functional) docker CLI, so rather than gate on
+  # its absence we place our wrapper in /usr/local/bin (ahead of /usr/bin on the
+  # default PATH) to SHADOW it — the bundled docker talks to a dead socket,
+  # whereas our wrapper routes to the working podman engine. We overwrite our own
+  # wrapper idempotently but never touch the base image's /usr/bin/docker.
   if msb exec "$name" -u 0 -e "PODMAN_PKGS=$ACQ_MSB_PODMAN_PKGS" -- sh -c '
     set -e
     # 1) Ensure the podman binary is present (idempotent).
@@ -2491,7 +2490,12 @@ _acq_msb_ensure_oci() {
     # 3) Alias docker -> podman in /usr/local/bin (ahead of /usr/bin on PATH), so
     #    `docker run …` and `docker compose …` route to the working podman engine.
     #    A tiny exec wrapper (not a symlink) so `docker compose` -> `podman compose`
-    #    dispatches through podmans compose provider (podman-compose).
+    #    dispatches through podman'"'"'s compose provider (podman-compose).
+    #    The heredoc below is deliberately FLUSH-LEFT: a plain `<<EOF` (not
+    #    `<<-EOF`) performs no leading-whitespace stripping, so indenting it would
+    #    prepend spaces to the wrapper'"'"'s shebang line and break it. `\$@` is
+    #    backslash-escaped so the guest shell writes the LITERAL `"$@"` into the
+    #    wrapper (forwarding all args to podman) rather than expanding it here.
     mkdir -p /usr/local/bin
     cat > /usr/local/bin/docker <<EOF
 #!/bin/sh
