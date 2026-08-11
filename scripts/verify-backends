@@ -35,6 +35,13 @@
 #                                         output live (not just on failure).
 #     -k | --keep    | VERIFY_KEEP=1      Keep the throwaway sandbox on failure
 #                                         (default: always remove) for manual poking.
+#     --only BACKEND                      Run just one backend (sbx|msb), skipping
+#                                         the other — handy when iterating.
+#     --oci-only                          Skip the slow create + kit-apply and run
+#                                         ONLY the OCI (podman) checks against an
+#                                         already-existing exec-ready sandbox.
+#                                         Pair with a prior `--only msb -k` run so
+#                                         the sandbox is left in place to reuse.
 #
 # No USAi key is required or prompted for: the verifier seeds a synthetic dummy
 # USAi value at global scope, in a hermetic secret store, and suppresses acq's
@@ -87,6 +94,9 @@ while [ "$#" -gt 0 ]; do
     -v|--verbose) VERBOSE=1 ;;
     -k|--keep)    KEEP=1 ;;
     -x|--trace)   TRACE=1 ;;
+    --only)       shift; ONLY_BACKEND="${1:-}" ;;
+    --only=*)     ONLY_BACKEND="${1#--only=}" ;;
+    --oci-only)   OCI_ONLY=1 ;;
     -h|--help)
       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
@@ -95,6 +105,13 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
+
+# _verify_backend_enabled BACKEND — honor --only <backend> (run just that one).
+# Empty ONLY_BACKEND means "all". Used to skip work when iterating on one backend.
+_verify_backend_enabled() {
+  [ -z "${ONLY_BACKEND:-}" ] && return 0
+  [ "$1" = "$ONLY_BACKEND" ]
+}
 
 # When tracing, acq's internal debug trace is streamed live so we can see which
 # msb/sbx sub-call is executing when a step hangs. Enabling TRACE implies live
@@ -441,6 +458,20 @@ verify_backend() {
   fi
 
   # Create a sandbox with the four kits applied via acq's normal provision path.
+  #
+  # FAST PATH (--oci-only): if a sandbox of this name already exists AND is
+  # exec-ready, skip the (slow) create + kit-apply and jump straight to the OCI
+  # checks. Lets you iterate on the podman/OCI path without re-running everything
+  # that already passes: create a kept sandbox once (`verify-backends --only msb
+  # -k`), then re-run `verify-backends --only msb --oci-only` repeatedly.
+  if [ -n "${OCI_ONLY:-}" ] && run_acq "exists" --backend "$backend" exec "$name" -- true >/dev/null 2>&1; then
+    printf '        (--oci-only: reusing existing exec-ready sandbox %s)\n' "$name"
+    _verify_oci_checks "$backend" "$name"
+    unseed_usai_secret "$backend" "$name"
+    unseed_github_secret "$backend" "$name"
+    return
+  fi
+
   printf '        creating sandbox %s (booting + applying 4 kits; this can take a minute)...\n' "$name"
   if ! run_acq "create" --backend "$backend" create shell "$WORKDIR"; then
     fail "${backend}: provision (acq create shell) failed" \
@@ -601,45 +632,8 @@ verify_backend() {
   unseed_usai_secret "$backend" "$name"
   unseed_github_secret "$backend" "$name"
 
-  # 5) OCI engine (podman) usable — msb only (ADR-0020). acq provisions podman
-  #    and aliases docker->podman so agents can run OCI images. Verify the engine
-  #    is present and can run a container end-to-end. Gated to msb because sbx has
-  #    its own container story; skipped when ACQ_MSB_ENSURE_OCI=0 (the operator
-  #    opted out) since no engine is expected then.
-  if [ "$backend" = "msb" ]; then
-    case "$(printf '%s' "${ACQ_MSB_ENSURE_OCI-1}" | tr '[:upper:]' '[:lower:]')" in
-      ""|0|false|no|off)
-        skip "${backend}: OCI engine check (ACQ_MSB_ENSURE_OCI disabled)" ;;
-      *)
-        # docker (our wrapper) resolves to podman, and the engine reports info.
-        # IMPORTANT: the engine is ROOTFUL (ADR-0020); the agent user runs
-        # unprivileged, so a bare `podman info` here would be ROOTLESS and fail on
-        # the default image (no newuidmap). Probe it the way agents actually use
-        # it — through the `docker` alias, which execs `sudo -n podman` (rootful).
-        # `docker info` therefore exercises BOTH the alias AND the working engine.
-        if run_acq "exec oci-engine" --backend "$backend" exec "$name" -- sh -c \
-            'command -v podman >/dev/null 2>&1 && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1'; then
-          pass "${backend}: OCI engine (podman) present and docker->podman aliased"
-        else
-          fail "${backend}: OCI engine (podman) not usable (see ADR-0020)"
-          dump "oci-engine output" "$LAST_OUT"
-        fi
-        # End-to-end: run a trivial container through the docker alias. Uses
-        # hello-world (tiny) via the alias so both the alias AND the engine's
-        # image pull + run path are exercised. Requires registry egress (Docker
-        # Hub); under the balanced baseline that is allowed. A pull/egress failure
-        # here is a WARN (image-registry reachability is environmental), not a hard
-        # fail of the engine wiring which the check above already proved.
-        if run_acq "exec oci-run" --backend "$backend" exec "$name" -- sh -c \
-            'docker run --rm hello-world >/dev/null 2>&1'; then
-          pass "${backend}: 'docker run' (via podman) executes an OCI image"
-        else
-          warn "${backend}: 'docker run hello-world' did not complete (registry egress?); engine wiring OK"
-          dump "oci-run output" "$LAST_OUT"
-        fi
-        ;;
-    esac
-  fi
+  # 5) OCI engine (podman) usable — msb only (ADR-0020).
+  _verify_oci_checks "$backend" "$name"
 
   # Clean up the throwaway sandbox.
   if [ -n "$KEEP" ] && [ "$FAIL" -gt 0 ]; then
@@ -647,6 +641,88 @@ verify_backend() {
   else
     run_acq "rm" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
   fi
+}
+
+# _verify_oci_checks BACKEND NAME — the OCI engine + run checks (msb only,
+# ADR-0020). Factored out of verify_backend so the --oci-only fast path can
+# re-run JUST these against an existing sandbox without the slow create/kit-apply.
+# acq provisions rootless podman and aliases docker->podman so agents can run OCI
+# images; skipped when ACQ_MSB_ENSURE_OCI=0 (operator opted out).
+_verify_oci_checks() {
+  local backend="$1" name="$2"
+  [ "$backend" = "msb" ] || return 0
+  case "$(printf '%s' "${ACQ_MSB_ENSURE_OCI-1}" | tr '[:upper:]' '[:lower:]')" in
+    ""|0|false|no|off)
+      skip "${backend}: OCI engine check (ACQ_MSB_ENSURE_OCI disabled)" ;;
+    *)
+      # docker (our wrapper) resolves to podman, and the engine reports info.
+      # The engine runs ROOTLESS as the agent user (ADR-0020), and `acq exec`
+      # already runs as the agent, so `docker info` (= plain `podman info`)
+      # exercises the real usable path: the rootless prereqs, the storage driver
+      # on the overlay root, and the docker->podman alias.
+      if run_acq "exec oci-engine" --backend "$backend" exec "$name" -- sh -c \
+          'command -v podman >/dev/null 2>&1 && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1'; then
+        pass "${backend}: OCI engine (rootless podman) present and docker->podman aliased"
+      else
+        fail "${backend}: OCI engine (podman) not usable (see ADR-0020)"
+        dump "oci-engine output" "$LAST_OUT"
+      fi
+      # LOCAL BUILD (no registry): build a trivial `FROM scratch` image. This
+      # exercises the storage-driver LAYER MOUNT — the exact operation that
+      # `docker info` does NOT perform but every real build/run does. It is what
+      # caught the rootless /dev/fuse regression: with the fuse-overlayfs driver
+      # but /dev/fuse ungranted, `docker info` PASSES yet the layer mount fails
+      # ("fuse: failed to open /dev/fuse: Permission denied"). Because it needs
+      # neither egress nor a registry, a failure here is UNAMBIGUOUSLY an
+      # engine/storage fault (unlike the hello-world run below, which depends on
+      # Docker Hub egress) — and `docker build` is itself a capability agents use.
+      # We assert the BUILD succeeds; the build mounts layers, which is the mount
+      # path we need to prove. `FROM scratch` needs no base image (no pull).
+      if run_acq "exec oci-build" --backend "$backend" exec "$name" -- sh -c '
+          set -e
+          d=$(mktemp -d)
+          printf "FROM scratch\nCOPY hi /hi\n" > "$d/Containerfile"
+          echo hi > "$d/hi"
+          docker build -q -t acq-oci-selftest:local "$d" >/dev/null 2>&1
+          rc=$?
+          docker rmi -f acq-oci-selftest:local >/dev/null 2>&1 || true
+          rm -rf "$d"
+          exit $rc'; then
+        pass "${backend}: local 'docker build' (rootless, fuse-overlayfs mount) works"
+      else
+        fail "${backend}: local 'docker build' failed — storage-driver mount fault (see ADR-0020)"
+        dump "oci-build output" "$LAST_OUT"
+      fi
+      # End-to-end: run a trivial container through the docker alias. We use the
+      # FULLY-QUALIFIED docker.io/library/hello-world (NOT the bare `hello-world`
+      # short name, which podman's stock shortnames map to quay.io/podman/hello —
+      # whose blob CDN cdn01.quay.io is NOT in the balanced baseline). Docker
+      # Hub's blob CDNs (**.production.cloudflare.docker.com /
+      # **.production.cloudfront.docker.com) ARE in the balanced baseline, so this
+      # pull+run succeeds under the default policy.
+      #
+      # Escalation: distinguish "engine can't run a container" (a real FAIL) from
+      # "registry egress is blocked" (environmental WARN). If the run fails, probe
+      # registry reachability (a 401 from registry-1.docker.io/v2/ means egress is
+      # fine and the failure is the engine → FAIL; anything else means egress is
+      # the culprit → WARN).
+      if run_acq "exec oci-run" --backend "$backend" exec "$name" -- sh -c \
+          'docker run --rm docker.io/library/hello-world >/dev/null 2>&1'; then
+        pass "${backend}: 'docker run' (via podman) executes an OCI image"
+      else
+        local _oci_run_out="$LAST_OUT"
+        if run_acq "exec oci-egress-probe" --backend "$backend" exec "$name" -- sh -c \
+            '[ "$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://registry-1.docker.io/v2/)" = "401" ]'; then
+          # Registry egress works, but the container did not run -> genuine engine fault.
+          fail "${backend}: 'docker run' failed though Docker Hub egress is reachable (engine fault)"
+          dump "oci-run output" "$_oci_run_out"
+        else
+          warn "${backend}: 'docker run hello-world' did not complete (registry egress?); engine wiring OK"
+          dump "oci-run output" "$_oci_run_out"
+        fi
+      fi
+      ;;
+  esac
 }
 
 # verify_agent_install BACKEND — provision an `opencode` sandbox (not `shell`)
@@ -717,18 +793,26 @@ echo "  workspace: $WORKDIR"
 
 # sbx
 if command -v sbx >/dev/null 2>&1; then
-  verify_backend sbx
-  verify_agent_install sbx
+  if _verify_backend_enabled sbx; then
+    verify_backend sbx
+    verify_agent_install sbx
+  fi
 else
-  echo ""; echo "== backend: sbx =="; skip "sbx: not installed"
+  if _verify_backend_enabled sbx; then
+    echo ""; echo "== backend: sbx =="; skip "sbx: not installed"
+  fi
 fi
 
 # msb
 if command -v msb >/dev/null 2>&1; then
-  verify_backend msb
-  verify_agent_install msb
+  if _verify_backend_enabled msb; then
+    verify_backend msb
+    verify_agent_install msb
+  fi
 else
-  echo ""; echo "== backend: msb =="; skip "msb: not installed"
+  if _verify_backend_enabled msb; then
+    echo ""; echo "== backend: msb =="; skip "msb: not installed"
+  fi
 fi
 
 echo ""

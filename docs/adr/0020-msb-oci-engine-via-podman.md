@@ -1,5 +1,5 @@
 ---
-title: "Ensure an OCI container engine in msb sandboxes via rootful podman, not docker-in-docker"
+title: "Ensure an OCI container engine in msb sandboxes via rootless podman, not docker-in-docker"
 status: accepted
 date: 2026-08-11
 decision_makers: ["Bret Mogilefsky"]
@@ -11,7 +11,19 @@ risk_treatment: accept
 supersedes: []
 ---
 
-# ADR-0020: Ensure an OCI container engine in msb sandboxes via rootful podman
+# ADR-0020: Ensure an OCI container engine in msb sandboxes via rootless podman
+
+> **Revision note (2026-08-11, pre-merge, no PR yet):** This ADR originally chose
+> **rootful** podman to avoid a create-time download dependency on the rootless
+> prerequisites (`uidmap`, `passt`). Once we had a working implementation, that
+> premise did not hold: the adapter *already* installs `podman podman-compose
+> fuse-overlayfs` from the OS mirror at provision, so the rootless prereqs are two
+> more packages from the *same mirror in the same install step* — not a new
+> dependency class. Meanwhile rootful required a `sudo`-wrapping `docker` alias and
+> produced a rootful/rootless probe mismatch (containers ran as root inside the
+> VM, and the verifier had to probe via sudo). We therefore **reversed the decision
+> to rootless** and revised this ADR in place (the branch had never merged). The
+> superseded rootful reasoning is preserved under *Alternatives considered*.
 
 ## Context
 
@@ -43,6 +55,13 @@ inside an msb sandbox:
   nested *VMs*, not containers, which run as ordinary `runc`/`crun` processes.
 - The agent user has **passwordless sudo** (guaranteed by the base-image
   contract), and `/dev/fuse` is present.
+- The kernel supports **unprivileged user namespaces** (`max_user_namespaces` is
+  large, no restrictive `unprivileged_userns_clone` knob), and `/etc/subuid` +
+  `/etc/subgid` already grant the `agent` user a `100000:65536` range — the
+  prerequisites for **rootless** containers. The rootless *userland* tools
+  (`newuidmap`/`newgidmap` from `uidmap`, `passt`/`slirp4netns` for networking)
+  are **not** preinstalled, and `/dev/net/tun` is root-only (`crw------- root
+  root`) — both fixable at provision.
 
 So the bundled Docker is inert here, and the blessed way to make it work (the
 dind recipe) is an *image/entrypoint* strategy that does not fit our adapter:
@@ -55,11 +74,11 @@ already wrestles with), and (c) provision a per-sandbox disk-backed
 
 ## Decision
 
-Provision **podman** (rootful) at provision time as the OCI engine, and alias
-`docker` → `podman` so both `docker run …` and `docker compose …` work inside
-the sandbox. Implemented as a new idempotent, marker-gated step
-`_acq_msb_ensure_oci`, called from `acq_backend_provision` right after
-`_acq_msb_ensure_agent_user`.
+Provision **podman** at provision time as the OCI engine, run it **rootless as
+the agent user**, and alias `docker` → `podman` so both `docker run …` and
+`docker compose …` work inside the sandbox. Implemented as a new idempotent,
+marker-gated step `_acq_msb_ensure_oci`, called from `acq_backend_provision`
+right after `_acq_msb_ensure_agent_user`.
 
 1. **podman over docker-in-docker.** podman is **daemonless** — each invocation
    forks `runc`/`crun` directly, so there is no socket to start, poll, or keep
@@ -69,29 +88,48 @@ the sandbox. Implemented as a new idempotent, marker-gated step
    virtualization**. And it is CLI-compatible with docker for the
    run/build/compose workflows this targets.
 
-   **Storage driver on an overlay root (added after live verification).** Rootful
-   podman defaults to the **kernel `overlay`** graph driver, which **cannot stack
-   on msb's overlay root** — `podman info` fails with `'overlay' is not supported
-   over overlayfs, a mount_program is required`. This was the concrete reason the
-   engine came up unusable in practice (the failure this branch exists to fix).
-   The adapter therefore writes `/etc/containers/storage.conf` **before** the
-   `podman info` verify, selecting a driver that works on an overlay root:
+   **Storage driver on an overlay root.** podman's default **kernel `overlay`**
+   graph driver **cannot stack on msb's overlay root** — `podman info` fails with
+   `'overlay' is not supported over overlayfs, a mount_program is required`. This
+   applies to **both** rootful and rootless. The adapter therefore writes
+   `/etc/containers/storage.conf` **before** the engine verify, selecting a driver
+   that works on an overlay root:
    - **Preferred:** `overlay` + `mount_program = fuse-overlayfs` when
      `fuse-overlayfs` is installed (fast, thin-on-disk; msb provides `/dev/fuse`).
-     `fuse-overlayfs` is added to `ACQ_MSB_PODMAN_PKGS` so the apt path gets it.
    - **Fallback:** `vfs`, which works everywhere with no extra package and no
      `/dev/fuse` (correct but disk-heavy — a full copy per layer). Used when
-     `fuse-overlayfs` is unavailable, and as a last-resort retry if `podman info`
-     still fails with the configured driver.
+     `fuse-overlayfs` is unavailable, and as a last-resort retry (a **user-level**
+     `~/.config/containers/storage.conf`) if the rootless verify still fails.
+   The system file is honored by rootless podman as its lowest-precedence source.
    The adapter does not clobber an operator-provided `storage.conf` that already
    names a `driver`.
 
-2. **Rootful, via the agent's passwordless sudo.** The install and engine run as
-   root (`msb exec -u 0`). Rootless podman would additionally require
-   `newuidmap`/`newgidmap` (the `uidmap` package) and `passt`/pasta — both
-   **absent** on the default image (confirmed live) — so rootful sidesteps the
-   rootless prerequisites a lean base lacks. `/etc/subuid`/`/etc/subgid` do exist
-   for `agent`, so a future rootless variant remains possible if desired.
+2. **Rootless, run as the agent user.** The package **install** runs as root
+   (`msb exec -u 0`, needed to install), but the **engine runs rootless** as the
+   unprivileged `agent`. Rootless needs four things the default image lacks,
+   which the adapter provides at provision:
+   - **`uidmap`** (`newuidmap`/`newgidmap`) — the setuid helpers that map the
+     agent's `/etc/subuid`/`/etc/subgid` `100000:65536` range (already present).
+   - **`passt` + `slirp4netns`** — rootless container networking backends.
+   - **`/dev/net/tun` access** — root-only by default (`crw------- root root`);
+     the rootless network backend must open it. The adapter **group-scopes** it to
+     the agent (`chown root:agent`, `chmod 0660`) — see item 6.
+   - **`/dev/fuse` access** — likewise root-only by default; the `fuse-overlayfs`
+     storage driver (our preferred driver on the overlay root) must open it to
+     mount image layers. Without it `podman info` still passes but `podman run`
+     fails at mount time (`fuse: failed to open /dev/fuse: Permission denied`) —
+     the exact info-OK-but-run-FAILS split first seen on the host. Group-scoped to
+     the agent the same way — see item 6.
+
+   These are installed from the **same OS mirror in the same `apt-get install`**
+   as podman itself, so rootless adds **no new dependency class** over the engine
+   we already download. Running rootless keeps containers **unprivileged even
+   inside the microVM** (defense-in-depth), **aligns container/host UIDs** for
+   bind mounts, and lets the agent invoke podman **directly** (no sudo wrapper,
+   no rootful/rootless probe mismatch). Verified live: with the prereqs installed,
+   a `driver="vfs"` (or fuse-overlayfs) storage config, and `/dev/net/tun` +
+   `/dev/fuse` group-scoped, `podman info` and `docker run --rm docker.io/library/hello-world`
+   both succeed **as the agent user** (`rootless=true`).
 
 3. **Alias `docker` → `podman` (do not fix the bundled Docker).** A tiny exec
    wrapper is written to **`/usr/local/bin/docker`** (ahead of `/usr/bin` on the
@@ -100,32 +138,53 @@ the sandbox. Implemented as a new idempotent, marker-gated step
    does not work here anyway (dead socket), shadowing it loses nothing and makes
    both `docker run` and `docker compose` route to the working podman engine.
 
-   **The wrapper execs `sudo -n podman "$@"`, not a bare `podman`.** The engine is
-   ROOTFUL (rung 2), but agents run as the unprivileged `agent` user, and a bare
-   `podman` as that user is ROOTLESS — which FAILS on the default image
-   (`newuidmap`/`passt` absent; and a root-created storage db conflicts with the
-   rootless overlay default). Verified live: as the agent user, rootless
-   `podman info` → rc 125, while `sudo -n podman info` (vfs storage) → rc 0. The
-   agent has passwordless sudo (base-image contract), so the wrapper reaches the
-   working rootful engine; `sudo -n` never prompts (fails fast if sudo were
-   unavailable). This is also why the `scripts/verify-backends` OCI check probes
-   `docker info` (→ rootful via the wrapper) rather than a bare rootless
-   `podman info`.
+   **The wrapper execs a plain `podman "$@"`** (no sudo): the engine runs rootless
+   as the agent, so the agent invokes podman directly. This is why the
+   `scripts/verify-backends` OCI check probes `docker info` **as the agent** (via
+   `acq exec`, which already runs as the agent) — it exercises the real usable
+   path (rootless prereqs + storage driver + alias) with no privilege escalation.
 
 4. **`docker compose`, not `docker-compose`.** The standalone `docker-compose`
    CLI is deprecated in favour of the `docker compose` subcommand. With the alias
    in place, `docker compose …` becomes `podman compose …`, which dispatches
    through the installed **`podman-compose`** provider. So we install
-   `podman podman-compose` (`ACQ_MSB_PODMAN_PKGS`) and do **not** ship a separate
-   `docker-compose` binary. The goal is that `docker-compose.yaml` files work,
-   not that the deprecated CLI name exists.
+   `podman podman-compose` (plus the storage/rootless prereqs, `ACQ_MSB_PODMAN_PKGS`)
+   and do **not** ship a separate `docker-compose` binary. The goal is that
+   `docker-compose.yaml` files work, not that the deprecated CLI name exists.
 
-5. **Idempotent + marker-gated + fail-soft.** The step returns early if the
-   marker `/var/lib/acq/oci-ready` exists or if `podman` is already present. It
-   verifies `podman info` before writing the marker. If the engine cannot be
-   provisioned it **warns and returns 0** — provision continues and OCI is simply
-   unavailable — mirroring the agent-install and prereq-check steps
-   (§Failure Handling, `AGENTS.md`). Toggle off with `ACQ_MSB_ENSURE_OCI=0`.
+5. **Docker-Hub-first image resolution.** Stock podman resolves many unadorned
+   short names to **quay.io** (e.g. `hello-world` → `quay.io/podman/hello`) and
+   ships **no** default unqualified search registry, so `docker run nginx` does
+   not "just work" the way Docker users expect. To reduce migration burden for
+   users whose code assumes Docker Hub, the adapter writes system drop-ins:
+   - `registries.conf.d/00-acq-docker-first.conf`:
+     `unqualified-search-registries = ["docker.io"]` + `short-name-mode = "permissive"`.
+   - `registries.conf.d/01-acq-shortnames.conf`: `[aliases]` remapping
+     `hello`/`hello-world` to `docker.io/library/hello-world` (a user drop-in
+     override cleanly wins over the stock alias — no merge conflict).
+   These are system-level so they apply to the rootless agent. This **deliberately
+   diverges from stock podman**; it is a config-only change and Docker Hub's CDNs
+   are in the balanced egress baseline (see Consequences).
+
+6. **Idempotent + marker-gated + fail-soft, with an un-gated device-node
+   grant.** The heavy install/config step returns early if the marker
+   `/var/lib/acq/oci-ready` exists. It verifies **rootless** `podman info` (as the
+   agent) before writing the marker. If the engine cannot be provisioned it
+   **warns and returns 0** — provision continues, OCI is simply unavailable —
+   mirroring the agent-install and prereq-check steps (§Failure Handling,
+   `AGENTS.md`). Toggle off with `ACQ_MSB_ENSURE_OCI=0`.
+
+   The device-node grants (`/dev/net/tun` for networking, `/dev/fuse` for
+   fuse-overlayfs) are handled by a **separate `_acq_msb_grant_oci_devs` helper
+   called on EVERY provision pass (before the install-marker gate) AND on restart
+   (`acq_backend_start`)** — because `/dev` is a devtmpfs re-created at each boot,
+   a grant baked behind the persistent marker would be lost after `msb start`. The
+   helper is cheap, idempotent, and a best-effort no-op for any device that is
+   absent or when `ACQ_MSB_ENSURE_OCI` is disabled. NOTE: because rootless
+   `podman info` (the verify) does NOT open `/dev/fuse` but `podman run` does, the
+   grant covering `/dev/fuse` must NOT be gated behind the `podman info` verify —
+   omitting it caused a real host regression where the engine check passed but
+   `docker run` failed at layer-mount time.
 
 ## Consequences
 
@@ -149,17 +208,30 @@ the sandbox. Implemented as a new idempotent, marker-gated step
   edge cases (Docker build-secret syntax, some compose v3 keys, `buildx`-specific
   features) may differ. Acceptable for agent workflows; the bundled Docker was
   non-functional here regardless.
-- **Security posture (SC-7 / SI-10).** No new external services; a
-  configuration/adapter change (CM-2/CM-6/CM-7; SA-8/SA-15). `ACQ_MSB_PODMAN_PKGS`
-  is charset-guarded (`[A-Za-z0-9._+ -]`) before it is interpolated into the root
-  `sh -c`, so operator config cannot inject shell into the elevated install
-  (SI-10). Rootful podman runs containers as root *inside the microVM* — the
-  microVM is the security boundary (the sandbox is untrusted-by-design), so this
-  does not expand the host attack surface; it is consistent with the "sandbox is
-  the boundary" model in `AGENTS.md`.
+- **Unadorned image names resolve to Docker Hub, not stock podman defaults.** The
+  Docker-Hub-first drop-ins (Decision 5) mean `docker run nginx` / `hello-world`
+  behave as Docker users expect, at the cost of a deliberate divergence from stock
+  podman resolution. A user who wants stock behavior can remove/override the acq
+  drop-ins with their own `~/.config/containers/registries.conf.d/*` (user config
+  wins). Docker Hub's blob CDNs (`**.production.cloudflare.docker.com`,
+  `**.production.cloudfront.docker.com`) are in the balanced egress baseline, so
+  the default pull path is reachable; arbitrary other registries are not
+  guaranteed reachable under the default policy.
+- **Security posture (SC-7 / SI-10) — improved vs. the superseded rootful design.**
+  No new external services; a configuration/adapter change (CM-2/CM-6/CM-7;
+  SA-8/SA-15). `ACQ_MSB_PODMAN_PKGS` is charset-guarded (`[A-Za-z0-9._+ -]`)
+  before it is interpolated into the root `sh -c`, so operator config cannot
+  inject shell into the elevated install (SI-10). **Containers run rootless (as
+  the agent) inside the microVM** — strictly less privilege than the superseded
+  rootful design, which ran containers as root. The `/dev/net/tun` and
+  `/dev/fuse` group-scopes to the agent are inside the microVM only (the sandbox
+  is the security boundary per `AGENTS.md`), and are narrower than the
+  world-writable alternative; they do not expand the host attack surface.
 - **Adds a runtime package install to provision.** First provision on a fresh
-  sandbox pays an `apt-get install` cost; the marker makes it a one-time cost per
-  sandbox (skipped on restart / re-provision).
+  sandbox pays an `apt-get install` cost (now `podman podman-compose fuse-overlayfs
+  uidmap passt slirp4netns`); the marker makes it a one-time cost per sandbox
+  (skipped on restart / re-provision). The rootless prereqs come from the same
+  mirror in the same step — no additional dependency class over the engine itself.
 
 ## Alternatives considered
 
@@ -170,11 +242,25 @@ the sandbox. Implemented as a new idempotent, marker-gated step
   poll, a daemon kept alive across restarts, and a per-sandbox disk-backed volume
   with its own teardown. Rejected as materially more complex and stateful than
   podman for no benefit in the target workflows.
-- **Rootless podman.** More defense-in-depth in principle, but requires
-  `uidmap` (`newuidmap`/`newgidmap`) and `passt`/pasta, both absent on the
-  default image — more packages to install, for a container that already runs
-  inside an untrusted-by-design microVM. Deferred; the subuid/subgid ranges exist
-  if we revisit.
+- **Rootful podman via the agent's passwordless sudo (the ORIGINAL, now
+  SUPERSEDED decision).** The first version of this ADR chose rootful to avoid a
+  create-time download of the rootless prerequisites (`uidmap`, `passt`). We
+  reversed it because:
+  - The premise did not hold: the adapter already downloads `podman
+    podman-compose fuse-overlayfs` from the OS mirror at provision, so the
+    rootless prereqs (`uidmap`, `passt`, `slirp4netns`) are two-to-three more
+    packages from the *same mirror in the same install step* — not a new
+    dependency class or failure mode.
+  - Rootful forced a `docker` alias that shells through `sudo -n podman` and a
+    rootful/rootless probe mismatch (the engine was provisioned/verified rootful
+    as root, but agents and the verifier run unprivileged), which was the source
+    of a real, subtle verifier failure and general fragility.
+  - Rootful ran containers **as root** inside the microVM; rootless is strictly
+    less privilege for the same capability.
+  Rootless does require granting the agent access to `/dev/net/tun` and
+  `/dev/fuse` for its network backend and fuse-overlayfs storage, but those are
+  small, group-scoped, in-VM changes. Net: rootless removes complexity *and*
+  improves the security posture, so rootful was rejected.
 - **Do nothing when `dockerd` is present (literal task reading).** Would leave
   the default image's dead socket / broken `docker compose` as-is. Rejected: the
   bundled engine does not actually work under msb, so "present" is not "usable."
@@ -182,29 +268,62 @@ the sandbox. Implemented as a new idempotent, marker-gated step
   place the wrapper in `/usr/local/bin` and never remove `/usr/bin/docker`; an
   operator who bakes a genuinely working Docker into a custom `ACQ_MSB_IMAGE` can
   set `ACQ_MSB_ENSURE_OCI=0`.
+- **World-writable device nodes (`chmod 0666` on `/dev/net/tun`, `/dev/fuse`).**
+  Simpler than group-scoping, but broader than necessary. We chose `chown
+  root:agent` + `chmod 0660` to scope device access to the agent.
+- **Leave stock podman image resolution (document a user opt-in instead).**
+  Lowest surprise vs. upstream podman, but leaves `docker run hello-world`/`nginx`
+  hitting quay/failing for users migrating from Docker. Rejected in favour of the
+  Docker-Hub-first default (Decision 5) to minimize migration burden; the behavior
+  is documented and user-overridable.
 
 ## Verification
 
-- Offline: `scripts/test-acq` covers the default install path (runs as root
-  `-u 0`, threads `ACQ_MSB_PODMAN_PKGS` via `-e PODMAN_PKGS=`, wires
-  `/usr/local/bin/docker`, touches the marker), marker-gated skip, the
-  `ACQ_MSB_ENSURE_OCI=0` toggle-off, fail-soft on setup failure (rc 0, warning,
-  no marker), and the `ACQ_MSB_PODMAN_PKGS` charset-guard against injection.
-- Live (verified on the assessment host inside an msb sandbox, 2026-08-11):
-  rootful `podman info` FAILED with the kernel `overlay`-over-overlayfs error
-  until `/etc/containers/storage.conf` selected `vfs` (or overlay +
-  fuse-overlayfs), after which `podman info` reported the expected
-  `graphDriverName`. This is the observation that drove the storage-driver
-  selection above. A full `docker run --rm hello-world` (→ podman) end-to-end run
-  additionally needs registry egress; re-confirm it plus `docker compose up` from
-  a small `docker-compose.yaml` on a KVM-capable host via
-  `scripts/verify-backends` on the quarterly re-verification cadence (cannot run
-  inside a sandbox, per [ADR-0011](0011-msb-backend-and-neutral-kits.md)).
+- Offline: `scripts/test-acq` covers the default path — the root (`-u 0`)
+  install/config block (threads `ACQ_MSB_PODMAN_PKGS` via `-e PODMAN_PKGS=`,
+  writes the storage driver, the Docker-Hub-first registries drop-ins, and the
+  plain `docker`→`podman` alias) AND the separate rootless verify block
+  (`-u agent`), the `/dev/net/tun` + `/dev/fuse` group-scope grants, the rootless
+  prereq packages (uidmap/passt/slirp4netns), marker-gated skip, the `ACQ_MSB_ENSURE_OCI=0`
+  toggle-off, fail-soft on setup/verify failure (rc 0, warning, no marker), and the
+  `ACQ_MSB_PODMAN_PKGS` charset-guard against injection.
+- Live (verified on the assessment host / in an msb-equivalent sandbox,
+  2026-08-11):
+  - `podman info` FAILED with the kernel `overlay`-over-overlayfs error until
+    `storage.conf` selected `vfs` (or overlay + fuse-overlayfs); afterward it
+    reported the expected `graphDriverName`.
+  - **Rootless as the agent user:** with `uidmap`/`passt`/`slirp4netns` installed,
+    a vfs/fuse-overlayfs storage config, and `/dev/net/tun` + `/dev/fuse`
+    group-scoped to the agent, `podman info` reported `rootless=true` and
+    `docker run --rm docker.io/library/hello-world` printed "Hello from Docker!"
+    (rc 0) — all as the unprivileged agent, no sudo.
+  - **`/dev/fuse` gotcha (found on the first host run):** with only `/dev/net/tun`
+    granted and the PREFERRED overlay+fuse-overlayfs driver selected, `podman info`
+    (rootless) PASSED but `podman run`/`podman build` FAILED at mount time with
+    `fuse: failed to open /dev/fuse: Permission denied` — because `podman info`
+    does not open `/dev/fuse` but the fuse-overlayfs layer mount does. Group-scoping
+    `/dev/fuse` to the agent (alongside `/dev/net/tun`) fixed it. This is why the
+    grant helper covers BOTH devices and is not gated behind the `podman info`
+    verify. `scripts/verify-backends` now includes a **local `docker build` (FROM
+    scratch)** check that exercises exactly this layer-mount path with no registry
+    egress, so the regression class is caught unambiguously (verified live: build
+    succeeds with `/dev/fuse` granted, fails with it denied).
+  - **Registry/egress:** the bare `hello-world` short name resolves to
+    `quay.io/podman/hello`, whose blob CDN `cdn01.quay.io` is NOT in the balanced
+    baseline (this was the perennial WARN). The fully-qualified
+    `docker.io/library/hello-world` pulls via the balanced-allowlisted Docker Hub
+    CDNs and succeeds — hence both the Docker-Hub-first default AND the verifier's
+    use of the fully-qualified image.
+  - Re-confirm end-to-end (plus `docker compose up` from a small
+    `docker-compose.yaml`) on a KVM-capable host via `scripts/verify-backends` on
+    the quarterly re-verification cadence (cannot run inside a sandbox, per
+    [ADR-0011](0011-msb-backend-and-neutral-kits.md)).
 
 ## Links / tracking
 
-- Emitter: `_acq_msb_ensure_oci` in `acq.backends/msb.sh`; wired in
-  `acq_backend_provision`
+- Emitter: `_acq_msb_ensure_oci` + `_acq_msb_grant_oci_devs` in
+  `acq.backends/msb.sh`; wired in `acq_backend_provision` (both) and
+  `acq_backend_start` (grant-oci-devs, for restart)
 - Toggles: `ACQ_MSB_ENSURE_OCI` (default on), `ACQ_MSB_PODMAN_PKGS`
 - Related: [ADR-0011](0011-msb-backend-and-neutral-kits.md) (msb backend +
   base-image contract), [ADR-0018](0018-msb-balanced-egress-baseline.md)

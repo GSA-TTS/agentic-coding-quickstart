@@ -109,7 +109,7 @@ make_stubs() {
 _line="sbx"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
 case "${1:-}" in
-  version) printf 'sbx version: v0.35.1 abc123\n' ;;
+  version) printf 'sbx version: v%s abc123\n' "${STUB_SBX_VERSION:-0.38.0}" ;;
   --help|-h) printf 'SBX-TOPLEVEL-HELP\n' ;;
   ls)
     [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"
@@ -246,15 +246,19 @@ case "$_msb_sub" in
       # unwritable home so the block exits 1 and provision must abort.
       *"test -w /home/agent"*)
         [ "${STUB_HOME_NOT_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
-      # The OCI-engine setup block (_acq_msb_ensure_oci) is ONE big root `sh -c`
-      # carrying install + verify + docker->podman alias, so its snippet contains
-      # `command -v podman`, `apt-get`/`dnf`/`apk`, `podman info`, AND
-      # `/usr/local/bin/docker`. Match it FIRST (before the generic command-v /
-      # test-f cases below would swallow it). STUB_OCI_SETUP_FAIL=1 models the
-      # whole block failing (mirror unreachable, verify fails, …) so provision
-      # must FAIL SOFT (warn, rc 0, no marker). Default: succeeds (exit 0).
+      # The OCI-engine setup is TWO msb-exec `sh -c` blocks: (1) a root (`-u 0`)
+      # install/config block carrying `/usr/local/bin/docker`, and (2) a rootless
+      # verify block (`-u agent`) that runs a `podman build` layer-mount self-test
+      # (tagged acq-oci-selftest). Match the root block by its docker-alias marker
+      # and the verify block by the self-test image tag. STUB_OCI_SETUP_FAIL=1
+      # models the ROOT block failing; STUB_OCI_VERIFY_FAIL=1 models the rootless
+      # build self-test failing (engine/storage unusable). Either failure must make
+      # provision FAIL SOFT (warn, rc 0, no marker). Match these FIRST (before the
+      # generic command-v / test-f cases below would swallow them).
       *"/usr/local/bin/docker"*)
         [ "${STUB_OCI_SETUP_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
+      *"acq-oci-selftest"*)
+        [ "${STUB_OCI_VERIFY_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
       # The OCI-ready marker probe (`test -f '/var/lib/acq/oci-ready'`) gates the
       # setup block. Match it BEFORE the generic `test -f` (markers absent) case
       # below. Default ABSENT (exit 1) so the OCI step runs; STUB_OCI_READY=1
@@ -2949,23 +2953,40 @@ oci_log=$(cat "$CALLS")
 assert_contains "msb: OCI setup threads the podman packages (PODMAN_PKGS=)" "$oci_log" "PODMAN_PKGS="
 assert_contains "msb: OCI setup wires the docker->podman alias" "$oci_log" "/usr/local/bin/docker"
 assert_contains "msb: OCI setup marks ready (touch marker) on success" "$oci_log" "touch '/var/lib/acq/oci-ready'"
-# The OCI setup MUST configure a storage driver that works on msb's overlay root
-# (round-2 item 3): rootful podman's default kernel `overlay` driver cannot stack
-# on the overlay-backed sandbox FS, so the snippet writes /etc/containers/storage.conf
-# selecting fuse-overlayfs (preferred) or vfs (fallback) BEFORE `podman info`.
+# The OCI setup MUST configure a storage driver that works on msb's overlay root:
+# podman's default kernel `overlay` driver cannot stack on the overlay-backed
+# sandbox FS, so the snippet writes /etc/containers/storage.conf selecting
+# fuse-overlayfs (preferred) or vfs (fallback).
 assert_contains "msb: OCI setup configures a storage driver (storage.conf)" "$oci_log" "/etc/containers/storage.conf"
 assert_contains "msb: OCI setup includes the vfs fallback driver" "$oci_log" 'driver = \"vfs\"'
 assert_contains "msb: OCI setup prefers fuse-overlayfs mount_program" "$oci_log" "mount_program"
-# fuse-overlayfs is in the default install set so the preferred (fast) driver is
-# available on the apt image.
+# fuse-overlayfs + the rootless prereqs are in the default install set.
 assert_contains "msb: OCI setup installs fuse-overlayfs by default" "$oci_log" "fuse-overlayfs"
-# The docker->podman alias must route to the ROOTFUL engine via sudo (round-2
-# item 3): the agent user is unprivileged and rootless podman fails on the default
-# image (no newuidmap), so the wrapper execs `sudo -n podman`.
-assert_contains "msb: docker alias routes to rootful podman via sudo" "$oci_log" "exec sudo -n podman"
-# The elevated install/verify/alias MUST run as root, never as the agent user.
-assert_contains "msb: OCI setup exec runs as root (-u 0)" "$oci_log" "msb exec ocibox -u 0 -e PODMAN_PKGS="
-assert_not_contains "msb: OCI setup exec does NOT run as -u agent" "$oci_log" "-u agent -e PODMAN_PKGS="
+assert_contains "msb: OCI setup installs rootless prereq uidmap" "$oci_log" "uidmap"
+assert_contains "msb: OCI setup installs rootless prereq passt" "$oci_log" "passt"
+assert_contains "msb: OCI setup installs rootless prereq slirp4netns" "$oci_log" "slirp4netns"
+# The docker->podman alias must route to PLAIN podman (rootless engine runs as the
+# agent user; NO sudo wrapper).
+assert_contains "msb: docker alias routes to plain podman" "$oci_log" "exec podman"
+assert_not_contains "msb: docker alias does NOT use sudo" "$oci_log" "exec sudo -n podman"
+# Rootless device access: the agent is granted group-scoped access to BOTH
+# /dev/net/tun (networking) and /dev/fuse (fuse-overlayfs storage), via
+# _acq_msb_grant_oci_devs (a device loop run un-gated on every provision pass).
+assert_contains "msb: OCI setup grants agent access to /dev/net/tun" "$oci_log" "/dev/net/tun"
+assert_contains "msb: OCI setup grants agent access to /dev/fuse" "$oci_log" "/dev/fuse"
+assert_contains "msb: OCI setup group-scopes the device to agent" "$oci_log" 'chown root:agent "$_dev"'
+# Docker-Hub-first registry resolution (ADR-0020): unqualified-search + shortname
+# alias override so unadorned names resolve to Docker Hub, not quay.io.
+assert_contains "msb: OCI setup writes Docker-Hub-first search registry" "$oci_log" 'unqualified-search-registries = [\"docker.io\"]'
+assert_contains "msb: OCI setup remaps hello-world alias to Docker Hub" "$oci_log" 'docker.io/library/hello-world'
+# The package INSTALL/config MUST run as root; the engine VERIFY runs rootless as
+# the agent user.
+assert_contains "msb: OCI install/config runs as root (-u 0)" "$oci_log" "msb exec ocibox -u 0 -e PODMAN_PKGS="
+assert_contains "msb: OCI engine verified rootless as the agent user" "$oci_log" "msb exec ocibox -u agent -e HOME=/home/agent"
+# The rootless verify must exercise a real LAYER MOUNT (a FROM-scratch build),
+# not just `podman info` — `podman info` doesn't open /dev/fuse, so it would pass
+# even when the fuse-overlayfs mount fails. The self-test builds acq-oci-selftest.
+assert_contains "msb: OCI verify does a real build (layer mount), not just info" "$oci_log" "acq-oci-selftest"
 cleanup_stubs
 
 # 8n9. Marker-gated skip: when /var/lib/acq/oci-ready already exists
@@ -4262,7 +4283,12 @@ mem_bad_out=$(
 mem4_log=$(cat "$CALLS")
 assert_contains "msb: invalid ACQ_MSB_MEMORY warns" "$mem_bad_out" "ignoring invalid ACQ_MSB_MEMORY"
 assert_contains "msb: invalid ACQ_MSB_CPUS warns" "$mem_bad_out" "ignoring invalid ACQ_MSB_CPUS"
-assert_not_contains "msb: invalid memory value not passed to create" "$mem4_log" "rm -rf"
+# The injected payload (`4G; rm -rf /`) must never reach `msb create` as a memory
+# value. Assert the specific injection is absent from the create invocation rather
+# than the bare substring `rm -rf` (which legitimately appears elsewhere, e.g. the
+# OCI self-test's temp-dir cleanup).
+assert_not_contains "msb: invalid memory value not passed to create" "$mem4_log" "rm -rf /"
+assert_not_contains "msb: injected memory not on msb create" "$mem4_log" "msb create --name mem4box --memory 4G"
 cleanup_stubs
 
 # ===========================================================================
