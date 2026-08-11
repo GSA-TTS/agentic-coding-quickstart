@@ -157,7 +157,9 @@ see [Secrets](docs/QUICKSTART.md#secrets) in the acq Quickstart.
 [acq Quickstart](docs/QUICKSTART.md), the [Backend Guide](docs/BACKEND_GUIDE.md),
 and the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
 
-**Working across multiple repos?** See [Multiple Workspaces](docs/QUICKSTART_SBX.md#multiple-workspaces) for mounting extra directories.
+**Working across multiple repos?** Mounting extra directories works on either
+backend via `acq`; the command syntax and examples are documented in
+[Multiple Workspaces](docs/QUICKSTART_SBX.md#multiple-workspaces).
 
 ---
 
