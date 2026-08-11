@@ -304,7 +304,7 @@ quickstart for when you want to customize or troubleshoot.
 
 ### What `acq` applies
 
-`acq` applies **four mixin kits** (by pinned remote reference from the
+`acq` applies its **built-in mixin kits** (by pinned remote reference from the
 community [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
 repo) when it creates a sandbox:
 
@@ -345,7 +345,7 @@ current baseline. See the kit definition in the agentic-coding-patterns reposito
 ---
 ## Customizing your setup
 
-`acq` applies a fixed set of four kits, pinned to a commit of the patterns
+`acq` applies a fixed set of built-in kits, pinned to a commit of the patterns
 repo. To customize:
 
 - **Add your own kits on every run:** see [Advanced: extra kits](#advanced-extra-kits).
@@ -360,7 +360,7 @@ repo. To customize:
 
 ## Advanced: extra kits
 
-`acq` always applies its four built-in kits. To apply **additional** kits on
+`acq` always applies its built-in kits. To apply **additional** kits on
 every invocation without repeating `--kit` flags, set `ACQ_EXTRA_KITS` to a
 whitespace-separated list of kit references (local paths or remote refs):
 
