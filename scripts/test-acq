@@ -246,6 +246,21 @@ case "$_msb_sub" in
       # unwritable home so the block exits 1 and provision must abort.
       *"test -w /home/agent"*)
         [ "${STUB_HOME_NOT_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
+      # The OCI-engine setup block (_acq_msb_ensure_oci) is ONE big root `sh -c`
+      # carrying install + verify + docker->podman alias, so its snippet contains
+      # `command -v podman`, `apt-get`/`dnf`/`apk`, `podman info`, AND
+      # `/usr/local/bin/docker`. Match it FIRST (before the generic command-v /
+      # test-f cases below would swallow it). STUB_OCI_SETUP_FAIL=1 models the
+      # whole block failing (mirror unreachable, verify fails, …) so provision
+      # must FAIL SOFT (warn, rc 0, no marker). Default: succeeds (exit 0).
+      *"/usr/local/bin/docker"*)
+        [ "${STUB_OCI_SETUP_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
+      # The OCI-ready marker probe (`test -f '/var/lib/acq/oci-ready'`) gates the
+      # setup block. Match it BEFORE the generic `test -f` (markers absent) case
+      # below. Default ABSENT (exit 1) so the OCI step runs; STUB_OCI_READY=1
+      # makes the marker present (exit 0) to exercise the marker-gated skip.
+      *"test -f '/var/lib/acq/oci-ready'"*)
+        [ "${STUB_OCI_READY:-0}" = "1" ] && exit 0 || exit 1 ;;
       # `command -v <agent>` (agent-presence probe): controllable so the install
       # path can be exercised. By default the agent is ABSENT (exit 1) so install
       # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq
@@ -2840,6 +2855,110 @@ make_stubs; load_acq
 injattach_log=$(cat "$CALLS")
 assert_not_contains "msb: attach never runs the injected marker in sh -c" "$injattach_log" "touch /tmp/acq_pwn"
 assert_contains "msb: attach falls back to /bin/sh on tampered marker" "$injattach_log" "injattach -- /bin/sh -l"
+cleanup_stubs
+
+# 8n8. msb provision ensures an OCI engine (podman) by default: when the
+#      oci-ready marker is absent, acq runs ONE big root (`-u 0`) `sh -c` that
+#      installs podman + wires the docker->podman alias, then touches the marker.
+#      The install is operator config (ACQ_MSB_PODMAN_PKGS) threaded via `-e
+#      PODMAN_PKGS=…`; it MUST run as root (never as `-u agent`), and the marker
+#      touch confirms success was recorded (idempotence on re-provision).
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/oci-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocibox shell /tmp >/dev/null 2>&1
+)
+oci_log=$(cat "$CALLS")
+assert_contains "msb: OCI setup threads the podman packages (PODMAN_PKGS=)" "$oci_log" "PODMAN_PKGS="
+assert_contains "msb: OCI setup wires the docker->podman alias" "$oci_log" "/usr/local/bin/docker"
+assert_contains "msb: OCI setup marks ready (touch marker) on success" "$oci_log" "touch '/var/lib/acq/oci-ready'"
+# The elevated install/verify/alias MUST run as root, never as the agent user.
+assert_contains "msb: OCI setup exec runs as root (-u 0)" "$oci_log" "msb exec ocibox -u 0 -e PODMAN_PKGS="
+assert_not_contains "msb: OCI setup exec does NOT run as -u agent" "$oci_log" "-u agent -e PODMAN_PKGS="
+cleanup_stubs
+
+# 8n9. Marker-gated skip: when /var/lib/acq/oci-ready already exists
+#      (STUB_OCI_READY=1), the (network-bound) OCI setup exec is short-circuited
+#      — no install block runs and the marker is not re-touched.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ociready-secrets" STUB_OCI_READY=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocirdybox shell /tmp >/dev/null 2>&1
+)
+ocirdy_log=$(cat "$CALLS")
+assert_contains "msb: OCI marker probed when gating the skip" "$ocirdy_log" "test -f '/var/lib/acq/oci-ready'"
+assert_not_contains "msb: OCI setup skipped when marker present (no PODMAN_PKGS exec)" "$ocirdy_log" "PODMAN_PKGS="
+assert_not_contains "msb: OCI alias not re-wired when marker present" "$ocirdy_log" "/usr/local/bin/docker"
+cleanup_stubs
+
+# 8n10. Toggle off: with ACQ_MSB_ENSURE_OCI=0 the OCI step is skipped entirely —
+#       neither the marker probe nor the setup exec appears.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ocioff-secrets" ACQ_MSB_ENSURE_OCI=0
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocioffbox shell /tmp >/dev/null 2>&1
+)
+ocioff_log=$(cat "$CALLS")
+assert_not_contains "msb: OCI setup never runs when toggled off" "$ocioff_log" "PODMAN_PKGS="
+assert_not_contains "msb: OCI marker never probed when toggled off" "$ocioff_log" "oci-ready"
+cleanup_stubs
+
+# 8n11. FAIL SOFT: when the OCI setup exec fails (STUB_OCI_SETUP_FAIL=1, modelling
+#       an unreachable mirror / failed `podman info`), provision still returns
+#       rc 0, a "could not provision an OCI engine" warning is emitted, and the
+#       ready marker is NOT touched (so a later provision retries).
+make_stubs; load_acq
+ocifail_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ocifail-secrets" STUB_OCI_SETUP_FAIL=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocifailbox shell /tmp 2>&1
+  echo "RC=$?"
+)
+ocifail_log=$(cat "$CALLS")
+assert_contains "msb: OCI setup failure is fail-soft (rc 0)" "$ocifail_out" "RC=0"
+assert_contains "msb: OCI setup failure warns clearly" "$ocifail_out" "could not provision an OCI engine"
+assert_not_contains "msb: OCI ready marker NOT touched on setup failure" "$ocifail_log" "touch '/var/lib/acq/oci-ready'"
+cleanup_stubs
+
+# 8n12. SECURITY: ACQ_MSB_PODMAN_PKGS is charset-guarded (it is interpolated into
+#       a root `sh -c`). A value with a shell metachar is refused with an "unsafe
+#       characters" warning and the injected string never reaches an exec.
+make_stubs; load_acq
+ociinj_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ociinj-secrets"
+  export ACQ_MSB_PODMAN_PKGS="podman;rm -rf"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ociinjbox shell /tmp 2>&1
+)
+ociinj_log=$(cat "$CALLS")
+assert_contains "msb: unsafe ACQ_MSB_PODMAN_PKGS is refused" "$ociinj_out" "unsafe characters"
+assert_not_contains "msb: injected pkg string never reaches an exec" "$ociinj_log" "rm -rf"
 cleanup_stubs
 
 # 8o. Regression: msb applies ALL kit files and ALL kit commands, not just the
