@@ -250,6 +250,16 @@ unseed_github_secret() {
 # stdin (sbx set-custom prompts or takes argv-visible --value), so an interactive
 # verifier may prompt; non-interactive SBX skips the auth check instead of using a
 # stale ambient global secret.
+#
+# The interactive seed is BACKEND-AWARE (see _prompt_and_seed_usai), because the
+# two backends store the key in different places:
+#   - msb binds from acq's own store, so we read the key in the verifier and pipe
+#     it into `acq secret set` (acq's non-interactive path) — quiet and scriptable.
+#   - sbx must ALSO feed its egress proxy, which acq can only do via sbx's own
+#     interactive prompt (piping would store into the acq store but leave the sbx
+#     proxy empty, so `acq create` then aborts in the key-present gate). So for sbx
+#     we let acq run interactively with its output VISIBLE (the original bug was
+#     only that the caller redirected acq's prompt to /dev/null).
 seed_usai_secret() {
   local backend="$1" sandbox="$2"
   USAI_SEEDED_FOR=""
@@ -263,34 +273,75 @@ seed_usai_secret() {
         return 0
       fi
       printf '        msb USAi check needs a sandbox-scoped key for %s.\n' "$sandbox" >&2
-      printf '        Paste it now? [y/N] ' >&2
-      local answer=""
-      read -r answer || true
-      case "$answer" in
-        [yY]|[yY][eE][sS])
-          if run_acq "seed-usai" --backend "$backend" secret set "$sandbox" usai >/dev/null 2>&1; then
-            USAI_SEEDED_FOR="$sandbox"
-          fi
-          ;;
-      esac
+      if _prompt_and_seed_usai "$backend" "$sandbox"; then
+        USAI_SEEDED_FOR="$sandbox"
+      fi
       ;;
     sbx)
       if [ ! -t 0 ]; then
         return 0
       fi
       printf '        sbx USAi check needs a sandbox-scoped key for %s.\n' "$sandbox" >&2
-      printf '        Paste it now? [y/N] ' >&2
-      local answer=""
-      read -r answer || true
-      case "$answer" in
-        [yY]|[yY][eE][sS])
-          if run_acq "seed-usai" --backend "$backend" secret set "$sandbox" usai >/dev/null 2>&1; then
-            USAI_SEEDED_FOR="$sandbox"
-          fi
-          ;;
-      esac
+      if _prompt_and_seed_usai "$backend" "$sandbox"; then
+        USAI_SEEDED_FOR="$sandbox"
+      fi
       ;;
   esac
+}
+
+# _prompt_and_seed_usai BACKEND SANDBOX — ask [y/N]; on yes, seed a sandbox-scoped
+# usai key. Backend-aware (see seed_usai_secret): msb reads the key in the verifier
+# and pipes it into acq (quiet); sbx runs `acq secret set` INTERACTIVELY with its
+# output visible so acq can feed sbx's own set-custom prompt AND its proxy. Returns
+# 0 iff the key ended up where `acq create` will find it (verified via
+# acq_backend_key_present, so a phantom success can't slip through and hard-fail
+# create). All prompts go to stderr (stdout is result data).
+_prompt_and_seed_usai() {
+  local backend="$1" sandbox="$2" answer="" key=""
+  printf '        Paste it now? [y/N] ' >&2
+  read -r answer || true
+  case "$answer" in
+    [yY]|[yY][eE][sS]) ;;
+    *) return 1 ;;
+  esac
+
+  if [ "$backend" = "sbx" ]; then
+    # sbx: let acq run interactively (its own masked prompt) with output VISIBLE.
+    # acq feeds BOTH the acq store and the sbx proxy. Piping here would seed only
+    # the acq store, leaving the proxy empty so `acq create` aborts later.
+    "$ACQ" --backend "$backend" secret set "$sandbox" usai || true
+    # Confirm the key landed where create's key-present gate looks (the sbx proxy),
+    # so we never report a phantom success that then hard-fails at create.
+    if _usai_key_present "$backend" "$sandbox"; then
+      return 0
+    fi
+    printf '        (sbx did not record the usai key; skipping this backend)\n' >&2
+    return 1
+  fi
+
+  # msb: read the key here (silent, no echo) and pipe it into acq's
+  # non-interactive path. acq's own prompt would be swallowed by the >/dev/null
+  # redirect below, so reading it in the verifier is what makes the prompt visible.
+  printf '        Enter USAi API key (input hidden): ' >&2
+  if [ -r /dev/tty ]; then
+    IFS= read -rs key < /dev/tty || true
+  else
+    IFS= read -rs key || true
+  fi
+  printf '\n' >&2
+  if [ -z "$key" ]; then
+    printf '        (no key entered; skipping)\n' >&2
+    return 1
+  fi
+
+  # Pipe on stdin -> acq secret set takes the non-interactive path (no hidden
+  # prompt). Output is discarded; the key never appears in argv or the log.
+  if printf '%s\n' "$key" | run_acq "seed-usai" --backend "$backend" secret set "$sandbox" usai >/dev/null 2>&1; then
+    key=""
+    return 0
+  fi
+  key=""
+  return 1
 }
 
 unseed_usai_secret() {
@@ -298,6 +349,26 @@ unseed_usai_secret() {
   [ -n "$USAI_SEEDED_FOR" ] || return 0
   run_acq "unseed-usai" --backend "$backend" secret rm "$sandbox" usai >/dev/null 2>&1 || true
   USAI_SEEDED_FOR=""
+}
+
+# _usai_key_present BACKEND SANDBOX — true iff acq's create-time key-present gate
+# would find a usai key for this sandbox (checks where the BACKEND actually looks:
+# the sbx proxy for sbx, the acq store for msb). Sourced in a subshell so the
+# adapter's functions are available without polluting the verifier. Used to guard
+# against a phantom-success seed (a set that stored nowhere create can see, which
+# would otherwise hard-fail create instead of skipping the backend).
+_usai_key_present() {
+  local backend="$1" sandbox="$2"
+  (
+    # shellcheck disable=SC1090
+    ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
+    # shellcheck disable=SC1090
+    . "$REPO_ROOT/acq.backends/secret-store.sh" >/dev/null 2>&1 || true
+    # shellcheck disable=SC1090
+    . "$REPO_ROOT/acq.backends/${backend}.sh" >/dev/null 2>&1 || true
+    command -v acq_backend_key_present >/dev/null 2>&1 || exit 0
+    acq_backend_key_present usai "$sandbox"
+  )
 }
 
 # ---------------------------------------------------------------------------
@@ -510,6 +581,41 @@ verify_backend() {
   # Remove the sandbox-scoped github secret we seeded (best-effort).
   unseed_usai_secret "$backend" "$name"
   unseed_github_secret "$backend" "$name"
+
+  # 5) OCI engine (podman) usable — msb only (ADR-0020). acq provisions podman
+  #    and aliases docker->podman so agents can run OCI images. Verify the engine
+  #    is present and can run a container end-to-end. Gated to msb because sbx has
+  #    its own container story; skipped when ACQ_MSB_ENSURE_OCI=0 (the operator
+  #    opted out) since no engine is expected then.
+  if [ "$backend" = "msb" ]; then
+    case "$(printf '%s' "${ACQ_MSB_ENSURE_OCI-1}" | tr '[:upper:]' '[:lower:]')" in
+      ""|0|false|no|off)
+        skip "${backend}: OCI engine check (ACQ_MSB_ENSURE_OCI disabled)" ;;
+      *)
+        # docker (our wrapper) resolves to podman, and podman reports info.
+        if run_acq "exec oci-engine" --backend "$backend" exec "$name" -- sh -c \
+            'command -v podman >/dev/null 2>&1 && command -v docker >/dev/null 2>&1 && podman info >/dev/null 2>&1'; then
+          pass "${backend}: OCI engine (podman) present and docker->podman aliased"
+        else
+          fail "${backend}: OCI engine (podman) not usable (see ADR-0020)"
+          dump "oci-engine output" "$LAST_OUT"
+        fi
+        # End-to-end: run a trivial container through the docker alias. Uses
+        # hello-world (tiny) via the alias so both the alias AND the engine's
+        # image pull + run path are exercised. Requires registry egress (Docker
+        # Hub); under the balanced baseline that is allowed. A pull/egress failure
+        # here is a WARN (image-registry reachability is environmental), not a hard
+        # fail of the engine wiring which the check above already proved.
+        if run_acq "exec oci-run" --backend "$backend" exec "$name" -- sh -c \
+            'docker run --rm hello-world >/dev/null 2>&1'; then
+          pass "${backend}: 'docker run' (via podman) executes an OCI image"
+        else
+          warn "${backend}: 'docker run hello-world' did not complete (registry egress?); engine wiring OK"
+          dump "oci-run output" "$LAST_OUT"
+        fi
+        ;;
+    esac
+  fi
 
   # Clean up the throwaway sandbox.
   if [ -n "$KEEP" ] && [ "$FAIL" -gt 0 ]; then
