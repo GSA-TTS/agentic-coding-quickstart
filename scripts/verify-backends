@@ -244,36 +244,43 @@ unseed_github_secret() {
   GH_SEEDED_FOR=""
 }
 
-# seed_usai_secret BACKEND SANDBOX — seed a sandbox-scoped USAi key before
-# provision. MSB can be seeded non-interactively from host USAI_API_KEY because it
-# binds directly from acq's store. SBX custom secrets cannot be fed securely from
-# stdin (sbx set-custom prompts or takes argv-visible --value), so an interactive
-# verifier may prompt; non-interactive SBX skips the auth check instead of using a
-# stale ambient global secret.
+# seed_usai_secret BACKEND SANDBOX — ensure a USAi key is present+injectable
+# before provision. Seeds the key at GLOBAL scope (`-g`), NOT sandbox-scoped, for
+# two reasons discovered on the host:
+#   1. sbx rejects a sandbox-SCOPED custom secret whose sandbox does not exist yet
+#      — `sbx create` validates custom secrets and returns
+#      `400 Bad Request: invalid custom secrets` for an orphan scope. A GLOBAL
+#      custom secret has no such dependency and is applied to every sandbox.
+#   2. acq's key-present gate and secret resolution fall back to the global scope
+#      (acq_secret_resolve tries acq.<sandbox>.usai then acq.usai), so a global
+#      key satisfies create for BOTH backends and is injected all the same.
+# msb can be seeded non-interactively from a host-exported USAI_API_KEY; otherwise
+# (and always for sbx, whose proxy needs the value) we prompt. Non-interactive
+# runs (CI) skip rather than reuse an ambient global secret they can't verify.
 #
-# The interactive seed is BACKEND-AWARE (see _prompt_and_seed_usai), because the
-# two backends store the key in different places:
-#   - msb binds from acq's own store, so we read the key in the verifier and pipe
-#     it into `acq secret set` (acq's non-interactive path) — quiet and scriptable.
-#   - sbx must ALSO feed its egress proxy, which acq can only do via sbx's own
-#     interactive prompt (piping would store into the acq store but leave the sbx
-#     proxy empty, so `acq create` then aborts in the key-present gate). So for sbx
-#     we let acq run interactively with its output VISIBLE (the original bug was
-#     only that the caller redirected acq's prompt to /dev/null).
+# After seeding we confirm injectability with `acq secret has -g usai`; only then
+# is USAI_SEEDED_FOR set. This means a seed that didn't actually land where create
+# looks degrades to a clean SKIP instead of a phantom success that hard-fails
+# create. USAI_SEEDED_FOR carries the SANDBOX name (for the per-sandbox reporting
+# and unseed), but the underlying secret is global.
 seed_usai_secret() {
   local backend="$1" sandbox="$2"
   USAI_SEEDED_FOR=""
   case "$backend" in
     msb)
-      if [ -n "${USAI_API_KEY:-}" ] && printf '%s\n' "$USAI_API_KEY" | run_acq "seed-usai" --backend "$backend" secret set "$sandbox" usai >/dev/null 2>&1; then
-        USAI_SEEDED_FOR="$sandbox"
-        return 0
+      # Non-interactive fast path: a host-exported key seeds the global scope
+      # silently (msb binds it from the acq store at create).
+      if [ -n "${USAI_API_KEY:-}" ] && printf '%s\n' "$USAI_API_KEY" | run_acq "seed-usai" --backend "$backend" secret set -g usai >/dev/null 2>&1; then
+        if run_acq "usai-present" --backend "$backend" secret has -g usai; then
+          USAI_SEEDED_FOR="$sandbox"
+          return 0
+        fi
       fi
       if [ ! -t 0 ]; then
         return 0
       fi
-      printf '        msb USAi check needs a sandbox-scoped key for %s.\n' "$sandbox" >&2
-      if _prompt_and_seed_usai "$backend" "$sandbox"; then
+      printf '        msb USAi check needs a USAi key.\n' >&2
+      if _prompt_and_seed_usai "$backend"; then
         USAI_SEEDED_FOR="$sandbox"
       fi
       ;;
@@ -281,53 +288,56 @@ seed_usai_secret() {
       if [ ! -t 0 ]; then
         return 0
       fi
-      printf '        sbx USAi check needs a sandbox-scoped key for %s.\n' "$sandbox" >&2
-      if _prompt_and_seed_usai "$backend" "$sandbox"; then
+      printf '        sbx USAi check needs a USAi key.\n' >&2
+      if _prompt_and_seed_usai "$backend"; then
         USAI_SEEDED_FOR="$sandbox"
       fi
       ;;
   esac
 }
 
-# _prompt_and_seed_usai BACKEND SANDBOX — ask [y/N]; on yes, seed a sandbox-scoped
-# usai key. Backend-aware (see seed_usai_secret): msb reads the key in the verifier
-# and pipes it into acq (quiet); sbx runs `acq secret set` INTERACTIVELY with its
-# output visible so acq can feed sbx's own set-custom prompt AND its proxy. Returns
-# 0 iff the key ended up where `acq create` will find it (verified via
-# acq_backend_key_present, so a phantom success can't slip through and hard-fail
-# create). All prompts go to stderr (stdout is result data).
+# _prompt_and_seed_usai BACKEND — ask [y/N]; on yes, seed a GLOBAL usai key and
+# confirm it is injectable via `acq secret has -g usai`. Returns 0 iff the key
+# ended up where `acq create` will find it. Backend-aware:
+#   - msb: read the key HERE (silent) and pipe it into acq's non-interactive path,
+#     so acq's own prompt (which our >/dev/null would swallow) never runs.
+#   - sbx: acq must feed sbx's egress proxy, which it can only do via sbx's own
+#     interactive `set-custom` prompt — so we let acq run interactively (output
+#     visible). Seeding GLOBAL (not sandbox-scoped) avoids the orphan-scope
+#     `400 invalid custom secrets` at create. sbx's set-custom still prompts once
+#     for the proxy in addition to acq's masked store prompt; that second entry is
+#     acq's existing sbx behavior, and seeding once globally means it only happens
+#     a single time for the whole run rather than per sandbox.
+#
+# READ SOURCE (bug fix): both the [y/N] answer and the pasted key are read from
+# the SAME source — /dev/tty when readable, else stdin. Reading the answer from
+# stdin but the key from /dev/tty (the prior code) could return an empty key when
+# the two diverge, silently skipping the seed.
 _prompt_and_seed_usai() {
-  local backend="$1" sandbox="$2" answer="" key=""
+  local backend="$1" key="" answer="" src="/dev/stdin"
+  [ -r /dev/tty ] && src="/dev/tty"
   printf '        Paste it now? [y/N] ' >&2
-  read -r answer || true
+  IFS= read -r answer < "$src" || true
   case "$answer" in
     [yY]|[yY][eE][sS]) ;;
     *) return 1 ;;
   esac
 
   if [ "$backend" = "sbx" ]; then
-    # sbx: let acq run interactively (its own masked prompt) with output VISIBLE.
-    # acq feeds BOTH the acq store and the sbx proxy. Piping here would seed only
-    # the acq store, leaving the proxy empty so `acq create` aborts later.
-    "$ACQ" --backend "$backend" secret set "$sandbox" usai || true
-    # Confirm the key landed where create's key-present gate looks (the sbx proxy),
-    # so we never report a phantom success that then hard-fails at create.
-    if _usai_key_present "$backend" "$sandbox"; then
+    # sbx: let acq run interactively (masked store prompt + sbx's own proxy
+    # prompt), output visible. GLOBAL scope avoids the orphan-scope 400 at create.
+    "$ACQ" --backend "$backend" secret set -g usai < "$src" || true
+    if run_acq "usai-present" --backend "$backend" secret has -g usai; then
       return 0
     fi
-    printf '        (sbx did not record the usai key; skipping this backend)\n' >&2
+    printf '        (sbx did not record an injectable usai key; skipping this backend)\n' >&2
     return 1
   fi
 
-  # msb: read the key here (silent, no echo) and pipe it into acq's
-  # non-interactive path. acq's own prompt would be swallowed by the >/dev/null
-  # redirect below, so reading it in the verifier is what makes the prompt visible.
+  # msb: read the key here (silent, no echo) from the SAME source as the [y/N]
+  # answer, then pipe it into acq's non-interactive path.
   printf '        Enter USAi API key (input hidden): ' >&2
-  if [ -r /dev/tty ]; then
-    IFS= read -rs key < /dev/tty || true
-  else
-    IFS= read -rs key || true
-  fi
+  IFS= read -rs key < "$src" || true
   printf '\n' >&2
   if [ -z "$key" ]; then
     printf '        (no key entered; skipping)\n' >&2
@@ -347,28 +357,11 @@ _prompt_and_seed_usai() {
 unseed_usai_secret() {
   local backend="$1" sandbox="$2"
   [ -n "$USAI_SEEDED_FOR" ] || return 0
-  run_acq "unseed-usai" --backend "$backend" secret rm "$sandbox" usai >/dev/null 2>&1 || true
+  # The verifier seeds at GLOBAL scope (see seed_usai_secret), so remove the
+  # global secret. SANDBOX is unused but kept for call-site symmetry.
+  : "${sandbox:=}"
+  run_acq "unseed-usai" --backend "$backend" secret rm -g usai >/dev/null 2>&1 || true
   USAI_SEEDED_FOR=""
-}
-
-# _usai_key_present BACKEND SANDBOX — true iff acq's create-time key-present gate
-# would find a usai key for this sandbox (checks where the BACKEND actually looks:
-# the sbx proxy for sbx, the acq store for msb). Sourced in a subshell so the
-# adapter's functions are available without polluting the verifier. Used to guard
-# against a phantom-success seed (a set that stored nowhere create can see, which
-# would otherwise hard-fail create instead of skipping the backend).
-_usai_key_present() {
-  local backend="$1" sandbox="$2"
-  (
-    # shellcheck disable=SC1090
-    ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
-    # shellcheck disable=SC1090
-    . "$REPO_ROOT/acq.backends/secret-store.sh" >/dev/null 2>&1 || true
-    # shellcheck disable=SC1090
-    . "$REPO_ROOT/acq.backends/${backend}.sh" >/dev/null 2>&1 || true
-    command -v acq_backend_key_present >/dev/null 2>&1 || exit 0
-    acq_backend_key_present usai "$sandbox"
-  )
 }
 
 # ---------------------------------------------------------------------------
