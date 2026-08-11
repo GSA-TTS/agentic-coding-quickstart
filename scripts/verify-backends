@@ -5,7 +5,7 @@
 # Unlike scripts/test-acq (which stubs sbx/msb and runs anywhere), this exercises
 # the REAL toolchain and therefore must run on a machine that can create
 # sandboxes:
-#   - sbx: Docker + KVM, `sbx login` done, sbx >= 0.35.0
+#   - sbx: Docker + KVM, `sbx login` done, sbx >= 0.38.0
 #   - msb: host virtualization (KVM on Linux, HVF on macOS, WHP on Windows),
 #          msb >= 0.6.0
 #

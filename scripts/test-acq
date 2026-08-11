@@ -2023,6 +2023,30 @@ make_stubs; load_acq
 ) 2>/dev/null; pass "msb: version floor rejects sub-0.6.8, accepts 0.6.8"
 cleanup_stubs
 
+# 8j5c. sbx version floor (BLOCKING): acq's neutral-kit translator emits the sbx
+#        v2 kit grammar, which only sbx >= 0.38.0 accepts; older builds fail with
+#        an opaque decode error ("field permissions not found") mid-create. So
+#        MIN_SBX_VERSION is 0.38.0 and acq_backend_prepare MUST fail closed with a
+#        clear, self-diagnosing message on a sub-floor sbx. The sbx stub honors
+#        STUB_SBX_VERSION.
+make_stubs; load_acq
+(
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  set +e
+  # A sub-floor binary (0.37.9) must be rejected before any create.
+  out=$(STUB_SBX_VERSION=0.37.9 acq_backend_prepare 2>&1); rc=$?
+  assert_eq "sbx: sub-0.38.0 binary fails the version floor" "1" "$rc"
+  assert_contains "sbx: sub-floor message names the required version" "$out" "0.38.0"
+  assert_contains "sbx: sub-floor message explains the v2 grammar cause" "$out" "v2 kit grammar"
+  # The current floor version (0.38.0) passes silently.
+  out2=$(STUB_SBX_VERSION=0.38.0 acq_backend_prepare 2>&1); rc2=$?
+  assert_eq "sbx: 0.38.0 binary clears the version floor" "0" "$rc2"
+  assert_not_contains "sbx: 0.38.0 binary emits no version-floor error" "$out2" "requires sbx"
+) 2>/dev/null; pass "sbx: version floor rejects sub-0.38.0, accepts 0.38.0"
+cleanup_stubs
+
 # 8j6. The msb doctor calls redirect stdin from /dev/null, so a prompting
 #      `msb doctor`/`--fix` cannot hang acq (the reviewer reproduced a real
 #      indefinite hang here). The stub READS stdin when STUB_MSB_DOCTOR_READS_STDIN

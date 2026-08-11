@@ -31,7 +31,16 @@ ACQ_BACKEND_CAN_RESUME=1
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1
 
 # Minimum sbx version required.
-MIN_SBX_VERSION="0.35.0"
+#
+# Bumped 0.35.0 -> 0.38.0: the neutral-kit translator now emits the sbx **v2 kit
+# grammar**, which only sbx >= 0.38.0 accepts. On 0.37.x the v2 fields are not
+# understood and sbx fails with a RAW decode error (e.g. `field permissions not
+# found`) instead of a version message — an opaque, self-inflicted mismatch. A
+# real floor here makes that self-diagnosing: acq refuses up front with a clear
+# "requires sbx >= 0.38.0" rather than letting a create fail deep inside sbx's
+# kit decoder. (0.35.0 was originally required so `sbx kit add` recreated the
+# sandbox preserving state; the v2-grammar requirement supersedes that.)
+MIN_SBX_VERSION="0.38.0"
 
 # Max seconds to wait for `sbx exec` to become usable.
 ACQ_EXEC_READY_TIMEOUT="${ACQ_EXEC_READY_TIMEOUT:-60}"
@@ -90,21 +99,11 @@ acq_backend_prepare() {
   fi
 
   if [ "$(version_ge "$current" "$MIN_SBX_VERSION")" -ne 0 ]; then
-    local os arch
-    os=$(uname -s 2>/dev/null || echo unknown)
-    arch=$(uname -m 2>/dev/null || echo unknown)
-    if [ "$os" = "Linux" ] && { [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; }; then
-      echo "error: acq requires sbx >= $MIN_SBX_VERSION, but found $current, and" >&2
-      echo "       sbx $MIN_SBX_VERSION.x publishes NO Linux/ARM64 build (deferred to" >&2
-      echo "       0.36.x per the sbx release notes). On Linux/ARM64 you cannot yet" >&2
-      echo "       install a version that satisfies this floor. Options:" >&2
-      echo "         - run acq on an x86_64 host (sbx has a 0.35.x build there), or" >&2
-      echo "         - wait for the sbx 0.36.x release, which restores ARM64 builds." >&2
-      exit 1
-    fi
     echo "error: acq requires sbx >= $MIN_SBX_VERSION, but found $current." >&2
-    echo "       sbx 0.35.0 is required so that 'sbx kit add' recreates the sandbox" >&2
-    echo "       preserving state when healing pre-kit sandboxes." >&2
+    echo "       sbx >= $MIN_SBX_VERSION is required because acq's neutral-kit" >&2
+    echo "       translator emits the sbx v2 kit grammar, which older sbx builds" >&2
+    echo "       reject with an opaque decode error (e.g. 'field permissions not" >&2
+    echo "       found') rather than a version message." >&2
     echo "       Upgrade sbx (see README.md, Step 2) and retry." >&2
     exit 1
   fi

@@ -55,10 +55,9 @@ from Docker Inc. It provides:
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `sbx` CLI | >= 0.35.0 | `sbx kit add` requires 0.35.0 for in-place healing |
+| `sbx` CLI | >= 0.38.0 | acq's neutral-kit translator emits the sbx v2 kit grammar, which only sbx >= 0.38.0 accepts (older builds fail with an opaque `field permissions not found` decode error). `sbx kit add` in-place healing needs >= 0.35.0. |
 | Docker account | any | Required for `sbx login` |
 | Docker subscription seat | (org-dependent) | Some orgs require paid seats |
-| Linux/ARM64 | 0.36.x+ | sbx 0.35.x has no Linux/ARM64 build; wait for 0.36.x |
 
 ### Installation
 
@@ -89,7 +88,6 @@ export ACQ_BACKEND=sbx
 
 ### Known limitations
 
-- No Linux/ARM64 build for sbx 0.35.x; wait for sbx 0.36.x
 - `sbx kit add` (healing) is experimental; see
   [KNOWN_FAILURE_MODES.md](KNOWN_FAILURE_MODES.md)
 - The sbx `docker sandbox` commands (deprecated by Docker) must not be used;
