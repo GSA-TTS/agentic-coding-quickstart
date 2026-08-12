@@ -3003,6 +3003,16 @@ assert_contains "msb: OCI setup group-scopes the device to agent" "$oci_log" 'ch
 # alias override so unadorned names resolve to Docker Hub, not quay.io.
 assert_contains "msb: OCI setup writes Docker-Hub-first search registry" "$oci_log" 'unqualified-search-registries = [\"docker.io\"]'
 assert_contains "msb: OCI setup remaps hello-world alias to Docker Hub" "$oci_log" 'docker.io/library/hello-world'
+# short-name-mode DEFAULT is "enforcing" (PR #302 review): least-privilege /
+# prompt-injection defense. The single search-registry keeps unqualified names
+# resolving to Docker Hub, so enforcing costs ~no ergonomics but fails closed on
+# ambiguous short names (no silent typosquatting/substitution). NOT permissive.
+# The written config line templates the value from the guest env var
+# ($SHORT_NAME_MODE), which acq threads in via `-e SHORT_NAME_MODE=<value>`, so we
+# assert on the threaded env var (that IS the effective config value).
+assert_contains "msb: OCI setup templates short-name-mode from the env var" "$oci_log" 'short-name-mode = \"$SHORT_NAME_MODE\"'
+assert_contains "msb: OCI setup defaults short-name-mode to enforcing" "$oci_log" "SHORT_NAME_MODE=enforcing"
+assert_not_contains "msb: OCI setup does NOT default to permissive short-name-mode" "$oci_log" "SHORT_NAME_MODE=permissive"
 # The package INSTALL/config MUST run as root; the engine VERIFY runs rootless as
 # the agent user.
 assert_contains "msb: OCI install/config runs as root (-u 0)" "$oci_log" "msb exec ocibox -u 0 -e PODMAN_PKGS="
@@ -3011,6 +3021,46 @@ assert_contains "msb: OCI engine verified rootless as the agent user" "$oci_log"
 # not just `podman info` — `podman info` doesn't open /dev/fuse, so it would pass
 # even when the fuse-overlayfs mount fails. The self-test builds acq-oci-selftest.
 assert_contains "msb: OCI verify does a real build (layer mount), not just info" "$oci_log" "acq-oci-selftest"
+cleanup_stubs
+
+# 8n8b. short-name-mode OPT-IN: ACQ_MSB_SHORT_NAME_MODE=permissive removes the
+#       enforcing guardrail — the written config must carry the permissive value.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/oci-perm-secrets" ACQ_MSB_SHORT_NAME_MODE=permissive
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocipermbox shell /tmp >/dev/null 2>&1
+)
+oci_perm_log=$(cat "$CALLS")
+# The config line templates $SHORT_NAME_MODE from the guest env var, so the
+# effective value is carried in the threaded `-e SHORT_NAME_MODE=<value>` arg.
+assert_contains "msb: ACQ_MSB_SHORT_NAME_MODE=permissive opt-in threads permissive" "$oci_perm_log" "SHORT_NAME_MODE=permissive"
+assert_not_contains "msb: permissive opt-in does not also thread enforcing" "$oci_perm_log" "SHORT_NAME_MODE=enforcing"
+cleanup_stubs
+
+# 8n8c. short-name-mode FAIL-CLOSED: an invalid ACQ_MSB_SHORT_NAME_MODE value is
+#       rejected (warning) and falls back to "enforcing" — never the bad value.
+make_stubs; load_acq
+: > "$CALLS"
+oci_bad_warn=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/oci-bad-secrets" ACQ_MSB_SHORT_NAME_MODE="bogus; rm -rf /"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh" 2>&1 1>/dev/null
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocibadbox shell /tmp >/dev/null 2>&1
+)
+oci_bad_log=$(cat "$CALLS")
+assert_contains "msb: invalid ACQ_MSB_SHORT_NAME_MODE emits a warning" "$oci_bad_warn" "invalid ACQ_MSB_SHORT_NAME_MODE"
+assert_contains "msb: invalid short-name-mode falls back to enforcing" "$oci_bad_log" "SHORT_NAME_MODE=enforcing"
+assert_not_contains "msb: invalid short-name-mode value is not threaded" "$oci_bad_log" "SHORT_NAME_MODE=bogus"
+assert_not_contains "msb: invalid short-name-mode value is not interpolated" "$oci_bad_log" "rm -rf /"
 cleanup_stubs
 
 # 8n9. Marker-gated skip: when /var/lib/acq/oci-ready already exists

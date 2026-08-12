@@ -158,13 +158,33 @@ right after `_acq_msb_ensure_agent_user`.
    not "just work" the way Docker users expect. To reduce migration burden for
    users whose code assumes Docker Hub, the adapter writes system drop-ins:
    - `registries.conf.d/00-acq-docker-first.conf`:
-     `unqualified-search-registries = ["docker.io"]` + `short-name-mode = "permissive"`.
+     `unqualified-search-registries = ["docker.io"]` + `short-name-mode = "enforcing"`.
    - `registries.conf.d/01-acq-shortnames.conf`: `[aliases]` remapping
      `hello`/`hello-world` to `docker.io/library/hello-world` (a user drop-in
      override cleanly wins over the stock alias — no merge conflict).
    These are system-level so they apply to the rootless agent. This **deliberately
    diverges from stock podman**; it is a config-only change and Docker Hub's CDNs
    are in the balanced egress baseline (see Consequences).
+
+   **Short-name mode defaults to `enforcing` (least-privilege / prompt-injection
+   defense).** Because there is a **single** unqualified search registry
+   (`docker.io`), unqualified names still resolve **deterministically** to Docker
+   Hub — migration ergonomics are preserved. `enforcing` only fails **closed** on
+   interactively-ambiguous short names instead of silently resolving them, so an
+   injected `docker run nginx` on the prompt-injectable agent path cannot be
+   silently substituted (typosquatting / image substitution). With one search
+   registry, enforcing costs essentially no day-to-day ergonomics. Operators MAY
+   opt into `permissive` (or `disabled`) via **`ACQ_MSB_SHORT_NAME_MODE`**; an
+   invalid value warns and falls back to `enforcing` (fail-closed). Setting
+   `permissive` is an explicit operator override that **removes** the
+   typosquatting / image-substitution guardrail.
+
+   > **Revision note (post PR #302 review).** The permissive default was
+   > reconsidered after review: a 3-model consensus plus the reviewer recommended
+   > **AGAINST** `permissive` as a federal-sandbox default, because it removes the
+   > defense against image substitution / typosquatting for a prompt-injectable
+   > agent. The default was changed to `enforcing`; `permissive` remains available
+   > as an explicit opt-in.
 
 6. **Idempotent + marker-gated + fail-soft, with an un-gated device-node
    grant.** The heavy install/config step returns early if the marker
@@ -276,6 +296,17 @@ right after `_acq_msb_ensure_agent_user`.
   hitting quay/failing for users migrating from Docker. Rejected in favour of the
   Docker-Hub-first default (Decision 5) to minimize migration burden; the behavior
   is documented and user-overridable.
+- **`short-name-mode = "permissive"` as the DEFAULT (the ORIGINAL Decision 5).**
+  The first version of this ADR shipped `permissive` so ambiguous short names
+  resolve without prompting. Reconsidered after PR #302 review (a 3-model
+  consensus plus the reviewer recommended against it) and **rejected as the
+  default**: `permissive` removes the defense against image substitution /
+  typosquatting on the prompt-injectable agent path (an injected
+  `docker run nginx` could silently resolve to `docker.io/<attacker>/nginx`), and
+  it yields **no DX benefit** here because the single `unqualified-search-registries
+  = ["docker.io"]` entry already gives deterministic Docker-Hub resolution. The
+  default is now `enforcing` (fail-closed on ambiguity); `permissive`/`disabled`
+  remain available as an explicit operator opt-in via `ACQ_MSB_SHORT_NAME_MODE`.
 - **Disk-backed named volume for container storage (the msb dind recipe's
   approach) instead of fuse-overlayfs — DEFERRED, uncertain payoff.** The msb
   [docker-in-sandbox recipe](https://github.com/superradcompany/microsandbox/blob/main/docs/recipes/docker/docker-in-sandbox.mdx)
@@ -349,7 +380,8 @@ right after `_acq_msb_ensure_agent_user`.
 - Emitter: `_acq_msb_ensure_oci` + `_acq_msb_grant_oci_devs` in
   `acq.backends/msb.sh`; wired in `acq_backend_provision` (both) and
   `acq_backend_start` (grant-oci-devs, for restart)
-- Toggles: `ACQ_MSB_ENSURE_OCI` (default on), `ACQ_MSB_PODMAN_PKGS`
+- Toggles: `ACQ_MSB_ENSURE_OCI` (default on), `ACQ_MSB_PODMAN_PKGS`,
+  `ACQ_MSB_SHORT_NAME_MODE` (default `enforcing`)
 - Related: [ADR-0011](0011-msb-backend-and-neutral-kits.md) (msb backend +
   base-image contract), [ADR-0018](0018-msb-balanced-egress-baseline.md)
   (balanced egress — the mirror hosts the install relies on),

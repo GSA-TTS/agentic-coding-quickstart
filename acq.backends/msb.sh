@@ -306,6 +306,39 @@ esac
 # continues; OCI is simply unavailable).
 ACQ_MSB_PODMAN_PKGS="${ACQ_MSB_PODMAN_PKGS:-podman podman-compose fuse-overlayfs uidmap passt slirp4netns}"
 
+# podman short-name resolution mode written into the docker-first registries
+# drop-in (/etc/containers/registries.conf.d/00-acq-docker-first.conf). This
+# governs what happens when the agent runs an UNQUALIFIED image name (e.g.
+# `docker run nginx`) that is not already fully qualified to a registry.
+#
+# DEFAULT: "enforcing" (least-privilege / prompt-injection defense). Per the
+# PR #302 review (3-model consensus + reviewer), "permissive" is the WRONG
+# default for a federal sandbox running a prompt-injectable agent: it silently
+# resolves ambiguous short names, which removes the defense against image
+# substitution / typosquatting (an injected `docker run nginx` could resolve to
+# docker.io/<attacker>/nginx without any prompt). We KEEP
+# unqualified-search-registries = ["docker.io"] below, so unqualified names
+# still resolve deterministically to Docker Hub and migration ergonomics are
+# preserved; "enforcing" only fails closed on interactively-ambiguous short
+# names instead of silently resolving them. Because there is a single search
+# registry, "enforcing" costs essentially no day-to-day ergonomics.
+#
+# Setting ACQ_MSB_SHORT_NAME_MODE=permissive is an EXPLICIT operator override
+# that REMOVES the typosquatting / image-substitution guardrail. Only podman's
+# accepted values are allowed: enforcing | permissive | disabled. Any other
+# value (including empty) is rejected and falls back to "enforcing"
+# (fail-closed), with a warning.
+ACQ_MSB_SHORT_NAME_MODE="${ACQ_MSB_SHORT_NAME_MODE:-enforcing}"
+_acq_msb_short_name_mode_lc="$(printf '%s' "$ACQ_MSB_SHORT_NAME_MODE" | tr '[:upper:]' '[:lower:]')"
+case "$_acq_msb_short_name_mode_lc" in
+  enforcing|permissive|disabled) ACQ_MSB_SHORT_NAME_MODE="$_acq_msb_short_name_mode_lc" ;;
+  *)
+    printf 'msb: WARNING: invalid ACQ_MSB_SHORT_NAME_MODE=%s (expected enforcing|permissive|disabled); falling back to enforcing\n' "$ACQ_MSB_SHORT_NAME_MODE" >&2
+    ACQ_MSB_SHORT_NAME_MODE="enforcing"
+    ;;
+esac
+unset _acq_msb_short_name_mode_lc
+
 # Path to the vendored host list (a verbatim mirror of `sbx policy inspect
 # local-policy`; see acq.backends/msb-balanced-hosts.txt). Override to point at a
 # site-specific list. ACQ_SCRIPT_DIR is exported by the acq entry point (and set
@@ -2555,15 +2588,25 @@ _acq_msb_ensure_oci() {
   # and has no default unqualified search registry. Users migrating from Docker
   # assume `docker run nginx` means Docker Hub. So we write a system
   # registries.conf setting unqualified-search-registries=["docker.io"] +
-  # short-name-mode="permissive", and a shortnames drop-in remapping the podman
-  # `hello`/`hello-world` aliases back to docker.io/library/hello-world. This
-  # diverges from stock podman deliberately to reduce migration burden.
+  # short-name-mode="$SHORT_NAME_MODE", and a shortnames drop-in remapping the
+  # podman `hello`/`hello-world` aliases back to docker.io/library/hello-world.
+  # This diverges from stock podman deliberately to reduce migration burden.
+  #
+  # SHORT-NAME MODE (PR #302 review): the default is "enforcing", NOT permissive.
+  # Because there is a single search registry (docker.io), unqualified names STILL
+  # resolve deterministically to Docker Hub — migration ergonomics are preserved.
+  # "enforcing" only fails closed on interactively-ambiguous short names instead
+  # of silently resolving them, which is the least-privilege / prompt-injection
+  # defense a federal sandbox wants: an injected `docker run nginx` cannot be
+  # silently substituted (typosquatting / image substitution) without a qualified
+  # name or an explicit alias. Operators MAY opt into "permissive" (removing that
+  # guardrail) via ACQ_MSB_SHORT_NAME_MODE; see the env-var comment above.
   #
   # We add fuse-overlayfs + the rootless prereqs (uidmap, passt, slirp4netns) to
   # the install set so the preferred path is available on the default (apt) image;
   # if the mirror lacks fuse-overlayfs the vfs fallback still yields a working
   # engine.
-  if msb exec "$name" -u 0 -e "PODMAN_PKGS=$ACQ_MSB_PODMAN_PKGS" -- sh -c '
+  if msb exec "$name" -u 0 -e "PODMAN_PKGS=$ACQ_MSB_PODMAN_PKGS" -e "SHORT_NAME_MODE=$ACQ_MSB_SHORT_NAME_MODE" -- sh -c '
     set -e
     # 1) Ensure the podman binary is present (idempotent).
     if ! command -v podman >/dev/null 2>&1; then
@@ -2610,7 +2653,7 @@ _acq_msb_ensure_oci() {
     #    applies to the rootless agent (read as the lowest-precedence source).
     #    Idempotent: overwrite our own files each pass.
     mkdir -p /etc/containers/registries.conf.d
-    printf "unqualified-search-registries = [\"docker.io\"]\nshort-name-mode = \"permissive\"\n" \
+    printf "unqualified-search-registries = [\"docker.io\"]\nshort-name-mode = \"$SHORT_NAME_MODE\"\n" \
       > /etc/containers/registries.conf.d/00-acq-docker-first.conf
     printf "[aliases]\n\"hello-world\" = \"docker.io/library/hello-world\"\n\"hello\" = \"docker.io/library/hello-world\"\n" \
       > /etc/containers/registries.conf.d/01-acq-shortnames.conf
