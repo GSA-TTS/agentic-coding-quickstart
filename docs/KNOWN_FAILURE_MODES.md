@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-08-10"
+last_updated: "2026-08-12"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -770,6 +770,15 @@ failure modes, see the kit's
 > [agentic-coding-patterns#211](https://github.com/GSA-TTS/agentic-coding-patterns/issues/211);
 > the quickstart-side decision (docs + advisory) is recorded in
 > [ADR-0007](adr/0007-commit-verification-identity-guidance.md).
+>
+> **Backend note (`msb`):** the `git-ssh-sign` kit currently works on the `sbx`
+> backend but **not** on `msb`. `sbx` forwards the host ssh-agent into the
+> sandbox by default, so in-guest signing "just works"; `msb` has no equivalent
+> host-socket forwarding, so a guest cannot reach the host agent. This parity gap
+> is blocked on a tagged `msb` release that ships the upstream vsock/unix-socket
+> forwarding work (microsandbox `--vsock`), and is tracked — with the upstream
+> watch-list and our follow-on `acq`/kit checklist — in
+> [quickstart#303](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/303).
 
 ---
 
