@@ -31,7 +31,16 @@ ACQ_BACKEND_CAN_RESUME=1
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1
 
 # Minimum sbx version required.
-MIN_SBX_VERSION="0.35.0"
+#
+# Bumped 0.35.0 -> 0.38.0: the neutral-kit translator now emits the sbx **v2 kit
+# grammar**, which only sbx >= 0.38.0 accepts. On 0.37.x the v2 fields are not
+# understood and sbx fails with a RAW decode error (e.g. `field permissions not
+# found`) instead of a version message — an opaque, self-inflicted mismatch. A
+# real floor here makes that self-diagnosing: acq refuses up front with a clear
+# "requires sbx >= 0.38.0" rather than letting a create fail deep inside sbx's
+# kit decoder. (0.35.0 was originally required so `sbx kit add` recreated the
+# sandbox preserving state; the v2-grammar requirement supersedes that.)
+MIN_SBX_VERSION="0.38.0"
 
 # Max seconds to wait for `sbx exec` to become usable.
 ACQ_EXEC_READY_TIMEOUT="${ACQ_EXEC_READY_TIMEOUT:-60}"
@@ -90,21 +99,11 @@ acq_backend_prepare() {
   fi
 
   if [ "$(version_ge "$current" "$MIN_SBX_VERSION")" -ne 0 ]; then
-    local os arch
-    os=$(uname -s 2>/dev/null || echo unknown)
-    arch=$(uname -m 2>/dev/null || echo unknown)
-    if [ "$os" = "Linux" ] && { [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; }; then
-      echo "error: acq requires sbx >= $MIN_SBX_VERSION, but found $current, and" >&2
-      echo "       sbx $MIN_SBX_VERSION.x publishes NO Linux/ARM64 build (deferred to" >&2
-      echo "       0.36.x per the sbx release notes). On Linux/ARM64 you cannot yet" >&2
-      echo "       install a version that satisfies this floor. Options:" >&2
-      echo "         - run acq on an x86_64 host (sbx has a 0.35.x build there), or" >&2
-      echo "         - wait for the sbx 0.36.x release, which restores ARM64 builds." >&2
-      exit 1
-    fi
     echo "error: acq requires sbx >= $MIN_SBX_VERSION, but found $current." >&2
-    echo "       sbx 0.35.0 is required so that 'sbx kit add' recreates the sandbox" >&2
-    echo "       preserving state when healing pre-kit sandboxes." >&2
+    echo "       sbx >= $MIN_SBX_VERSION is required because acq's neutral-kit" >&2
+    echo "       translator emits the sbx v2 kit grammar, which older sbx builds" >&2
+    echo "       reject with an opaque decode error (e.g. 'field permissions not" >&2
+    echo "       found') rather than a version message." >&2
     echo "       Upgrade sbx (see README.md, Step 2) and retry." >&2
     exit 1
   fi
@@ -715,8 +714,13 @@ acq_backend_secret_set() {
   # Existence pre-check (idempotency): sbx errors/prompts if the secret exists.
   # We list and match by service (built-in) or env var (custom). If present,
   # stop with a precise rm hint (non-destructive per project decision).
+  #
+  # sbx scope translation for the hints: GLOBAL is the DEFAULT now, so a global
+  # `sbx secret rm` passes NO scope arg; a sandbox scope is `--sandbox NAME`. The
+  # old `-g` is deprecated/removed on set/rm/set-custom (see the "sbx CLI secret
+  # scope-flag change" note in docs/VERIFY_BACKENDS_HANDOFF.md).
   local scope_desc rm_scope
-  if [ -n "$scope_flag" ]; then scope_desc="global"; rm_scope="-g"; else scope_desc="sandbox '$scope_name'"; rm_scope="$scope_name"; fi
+  if [ -n "$scope_flag" ]; then scope_desc="global"; rm_scope=""; else scope_desc="sandbox '$scope_name'"; rm_scope="--sandbox $scope_name"; fi
 
   if _acq_sbx_secret_exists "$scope_flag" "$scope_name" "$service" "$env_var"; then
     echo "acq: stored '$service' in the acq secret store, but sbx already has a" >&2
@@ -724,9 +728,9 @@ acq_backend_secret_set() {
     echo "     Remove the existing sbx secret, then re-run to re-feed the proxy:" >&2
     echo "       sbx secret ls" >&2
     if [ "$is_builtin" -eq 1 ]; then
-      echo "       sbx secret rm ${rm_scope} ${service}" >&2
+      echo "       sbx secret rm ${service}${rm_scope:+ $rm_scope}" >&2
     else
-      echo "       sbx secret rm ${rm_scope} <placeholder-for-${env_var}>" >&2
+      echo "       sbx secret rm --placeholder <placeholder-for-${env_var}>${rm_scope:+ $rm_scope}" >&2
     fi
     if [ -n "$scope_flag" ]; then
       echo "       acq secret set -g ${service}" >&2
@@ -744,7 +748,11 @@ acq_backend_secret_set() {
       echo "acq: warning: stored '$service' but could not read it back to feed sbx." >&2
       return 1
     fi
-    if [ -n "$scope_flag" ]; then builtin_scope_args+=("$scope_flag"); else builtin_scope_args+=("$scope_name"); fi
+    # sbx scope translation: GLOBAL is the DEFAULT for service secrets now, so a
+    # global set passes NO scope flag (the old `-g`/`--global` is deprecated and
+    # emits a warning). A sandbox scope is `--sandbox NAME`. See the "sbx CLI
+    # secret scope-flag change" note in docs/VERIFY_BACKENDS_HANDOFF.md.
+    if [ -z "$scope_flag" ]; then builtin_scope_args+=(--sandbox "$scope_name"); fi
     printf '%s\n' "$secret_value" | sbx secret set "${builtin_scope_args[@]}" "$service"
     exit_code=$?
     secret_value=""
@@ -765,7 +773,11 @@ acq_backend_secret_set() {
       return 1
     fi
     local cmd_args=("secret" "set-custom")
-    if [ -n "$scope_flag" ]; then cmd_args+=("$scope_flag"); else cmd_args+=("$scope_name"); fi
+    # sbx scope translation for set-custom: GLOBAL is the DEFAULT (the `-g`/
+    # `--global` flag was REMOVED from set-custom), a sandbox scope is
+    # `--sandbox NAME`. See docs/VERIFY_BACKENDS_HANDOFF.md "sbx CLI secret
+    # scope-flag change".
+    if [ -z "$scope_flag" ]; then cmd_args+=(--sandbox "$scope_name"); fi
     local svc_hosts h
     svc_hosts=$(_acq_service_hosts_env "$service" | cut -f1)
     [ -z "$svc_hosts" ] && svc_hosts="$host"
@@ -798,7 +810,11 @@ acq_backend_secret_set() {
         echo "acq: to finish non-interactively, sbx needs the value on the command line" >&2
         echo "     (visible in shell history):" >&2
         echo "       sbx ${cmd_args[*]} --value <the-secret>" >&2
-        echo "     Or run 'acq secret set ${scope_flag:-$scope_name} ${service}' from a terminal." >&2
+        if [ -n "$scope_flag" ]; then
+          echo "     Or run 'acq secret set -g ${service}' from a terminal." >&2
+        else
+          echo "     Or run 'acq secret set ${scope_name} ${service}' from a terminal." >&2
+        fi
       fi
       exit_code=0
     fi
@@ -808,7 +824,7 @@ acq_backend_secret_set() {
     echo "" >&2
     echo "acq: value stored in the acq secret store, but feeding the sbx proxy failed." >&2
     echo "     If sbx says 'already exists', remove it and retry:" >&2
-    echo "       sbx secret ls && sbx secret rm ${rm_scope} <placeholder>" >&2
+    echo "       sbx secret ls && sbx secret rm --placeholder <placeholder>${rm_scope:+ $rm_scope}" >&2
   fi
   return "$exit_code"
 }
@@ -870,7 +886,11 @@ acq_backend_secret_rm() {
     acq_secret_meta_delete "$service" "$acq_sandbox" || true
 
   # 2) Clear sbx's proxy entry so it stops injecting. Built-in services are
-  #    removed by service name; custom services (usai, ...) by their placeholder.
+  #    removed by service name (positional); custom services (usai, ...) by their
+  #    placeholder (--placeholder). GLOBAL is the DEFAULT now, so a global rm
+  #    passes NO scope arg; a sandbox scope is `--sandbox NAME` (the old
+  #    `-g`/`--global` is deprecated — see the "sbx CLI secret scope-flag change"
+  #    note in docs/VERIFY_BACKENDS_HANDOFF.md).
   #    ALWAYS pass -f: `sbx secret rm` otherwise prompts "Remove? (y/N)" on a TTY
   #    and BLOCKS waiting for input (observed hanging verify-backends). acq's rm
   #    is non-interactive by contract. Also </dev/null as belt-and-suspenders so
@@ -880,11 +900,11 @@ acq_backend_secret_rm() {
   case "$_ACQ_SBX_BUILTIN_SERVICES" in
     *" $service "*) is_builtin=1 ;;
   esac
-  local scope_arg
-  if [ -n "$scope_flag" ]; then scope_arg="-g"; else scope_arg="$scope_name"; fi
+  local scope_args=()
+  [ -z "$scope_flag" ] && scope_args+=(--sandbox "$scope_name")
 
   if [ "$is_builtin" -eq 1 ]; then
-    sbx secret rm "$scope_arg" "$service" -f </dev/null >/dev/null 2>&1 || true
+    sbx secret rm "$service" "${scope_args[@]}" -f </dev/null >/dev/null 2>&1 || true
   else
     # Custom endpoint (usai, ...): sbx removes a custom secret by its PLACEHOLDER
     # (there is no --host on `secret rm`). Look up the placeholder from the custom
@@ -893,7 +913,7 @@ acq_backend_secret_rm() {
     env_var=$(_acq_service_hosts_env "$service" | cut -f2)
     placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" "$env_var")
     if [ -n "$placeholder" ]; then
-      sbx secret rm "$scope_arg" --placeholder "$placeholder" -f </dev/null >/dev/null 2>&1 || true
+      sbx secret rm --placeholder "$placeholder" "${scope_args[@]}" -f </dev/null >/dev/null 2>&1 || true
     fi
   fi
 
@@ -1050,12 +1070,18 @@ acq_backend_rotate_key() {
   if [ "${row_count:-0}" -gt 1 ]; then
     # --- Cleanup path for data corrupted by the pre-fix rotation bug ----------
     # Only taken when duplicates exist. We must remove every custom secret for
-    # the host (`sbx secret rm -g --host` deletes ALL matching entries) and
-    # recreate a single one — there's no in-place "dedupe". This is destructive
-    # and non-atomic: between the rm and the set-custom the host has NO USAi
-    # secret, so a Ctrl-C or a failed/cancelled set-custom would leave the host
-    # with no key at all. Guard that window with a trap that prints exact
+    # the host and recreate a single one — there's no in-place "dedupe". This is
+    # destructive and non-atomic: between the rm and the set-custom the host has
+    # NO USAi secret, so a Ctrl-C or a failed/cancelled set-custom would leave the
+    # host with no key at all. Guard that window with a trap that prints exact
     # recovery steps, and disarm it once set-custom succeeds.
+    #
+    # sbx CLI scope/flag change (see docs/VERIFY_BACKENDS_HANDOFF.md "sbx CLI
+    # secret scope-flag change"): GLOBAL is the DEFAULT (no `-g`), and `secret rm`
+    # has NO `--host` flag — a custom secret is removed by its `--placeholder`.
+    # We hold the placeholder already, so remove EACH duplicate row by placeholder
+    # (rm by placeholder targets the one row; loop while any remain), then recreate
+    # a single canonical entry.
     echo "Found $row_count USAI_API_KEY entries; consolidating to a single secret." >&2
 
     local _ph="$placeholder" _host="$usai_host"
@@ -1065,19 +1091,29 @@ acq_backend_rotate_key() {
       echo 'ERROR: rotation was interrupted while the USAI_API_KEY secret was removed' >&2
       echo 'but before the new value was set. Your sandboxes currently have NO USAi key.' >&2
       echo 'Recover by re-running this rotation, or manually:' >&2
-      echo '  sbx secret set-custom -g --host ${_host} --env USAI_API_KEY --placeholder ${_ph}' >&2
+      echo '  sbx secret set-custom --host ${_host} --env USAI_API_KEY --placeholder ${_ph}' >&2
     }" EXIT
 
-    local rm_err
-    if ! rm_err=$(sbx secret rm -g --host "$usai_host" -f 2>&1); then
-      trap - EXIT
-      echo "acq(sbx): failed to remove existing secrets: $rm_err" >&2
-      return 1
-    fi
+    # Remove every USAI_API_KEY custom row. Each row's placeholder is re-read from
+    # a fresh listing so we clear duplicates that may share OR differ in
+    # placeholder; -f avoids the confirm prompt, </dev/null guards our stdin.
+    local _guard=0 _dup_ph rm_err
+    while :; do
+      _dup_ph=$(sbx secret ls -g 2>/dev/null \
+        | awk '{ for (i = 1; i <= NF; i++) if ($i == "USAI_API_KEY") { print $(i+1); exit } }')
+      [ -n "$_dup_ph" ] || break
+      if ! rm_err=$(sbx secret rm --placeholder "$_dup_ph" -f </dev/null 2>&1); then
+        trap - EXIT
+        echo "acq(sbx): failed to remove existing secrets: $rm_err" >&2
+        return 1
+      fi
+      _guard=$((_guard + 1))
+      [ "$_guard" -ge "${row_count:-0}" ] && break
+    done
 
     # Recreate the single secret with the preserved placeholder. Omitting
     # --value makes sbx prompt for the new key (keeps it out of shell history).
-    sbx secret set-custom -g --host "$usai_host" \
+    sbx secret set-custom --host "$usai_host" \
           --env USAI_API_KEY --placeholder "$placeholder" || {
       echo "acq(sbx): 'sbx secret set-custom' failed. See recovery steps above." >&2
       return 1
@@ -1088,7 +1124,8 @@ acq_backend_rotate_key() {
     # Healthy single-row case: set-custom updates the existing entry in place, so
     # there's no need for the destructive rm (which would only add risk here).
     # Omitting --value makes sbx prompt for the new key (no shell-history leak).
-    sbx secret set-custom -g --host "$usai_host" \
+    # Global is the default (no `-g`); see the CLI-change note above.
+    sbx secret set-custom --host "$usai_host" \
           --env USAI_API_KEY --placeholder "$placeholder" || {
       echo "acq(sbx): 'sbx secret set-custom' failed." >&2
       return 1

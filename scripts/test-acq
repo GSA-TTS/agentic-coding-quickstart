@@ -109,7 +109,7 @@ make_stubs() {
 _line="sbx"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
 case "${1:-}" in
-  version) printf 'sbx version: v0.35.1 abc123\n' ;;
+  version) printf 'sbx version: v%s abc123\n' "${STUB_SBX_VERSION:-0.38.0}" ;;
   --help|-h) printf 'SBX-TOPLEVEL-HELP\n' ;;
   ls)
     [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"
@@ -246,6 +246,25 @@ case "$_msb_sub" in
       # unwritable home so the block exits 1 and provision must abort.
       *"test -w /home/agent"*)
         [ "${STUB_HOME_NOT_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
+      # The OCI-engine setup is TWO msb-exec `sh -c` blocks: (1) a root (`-u 0`)
+      # install/config block carrying `/usr/local/bin/docker`, and (2) a rootless
+      # verify block (`-u agent`) that runs a `podman build` layer-mount self-test
+      # (tagged acq-oci-selftest). Match the root block by its docker-alias marker
+      # and the verify block by the self-test image tag. STUB_OCI_SETUP_FAIL=1
+      # models the ROOT block failing; STUB_OCI_VERIFY_FAIL=1 models the rootless
+      # build self-test failing (engine/storage unusable). Either failure must make
+      # provision FAIL SOFT (warn, rc 0, no marker). Match these FIRST (before the
+      # generic command-v / test-f cases below would swallow them).
+      *"/usr/local/bin/docker"*)
+        [ "${STUB_OCI_SETUP_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
+      *"acq-oci-selftest"*)
+        [ "${STUB_OCI_VERIFY_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
+      # The OCI-ready marker probe (`test -f '/var/lib/acq/oci-ready'`) gates the
+      # setup block. Match it BEFORE the generic `test -f` (markers absent) case
+      # below. Default ABSENT (exit 1) so the OCI step runs; STUB_OCI_READY=1
+      # makes the marker present (exit 0) to exercise the marker-gated skip.
+      *"test -f '/var/lib/acq/oci-ready'"*)
+        [ "${STUB_OCI_READY:-0}" = "1" ] && exit 0 || exit 1 ;;
       # `command -v <agent>` (agent-presence probe): controllable so the install
       # path can be exercised. By default the agent is ABSENT (exit 1) so install
       # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq
@@ -1109,11 +1128,13 @@ log=$(cat "$CALLS")
 assert_not_contains "secret: no scope -> sbx not called" "$log" "sbx secret set"
 cleanup_stubs
 
-# 5b. `-g github` (built-in, absent) -> `sbx secret set -g github` via stdin + stored.
+# 5b. `-g github` (built-in, absent) -> `sbx secret set github` via stdin + stored.
+#     sbx global scope is now the DEFAULT (no `-g`); the flag was deprecated.
 make_stubs
 (printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github) >/dev/null 2>/dev/null || true
 log=$(cat "$CALLS")
-assert_contains "secret: -g github -> sbx secret set -g github" "$log" "sbx secret set -g github"
+assert_contains "secret: -g github -> sbx secret set github" "$log" "sbx secret set github"
+assert_not_contains "secret: -g github -> no deprecated -g flag" "$log" "sbx secret set -g github"
 if [ -f "$STUBDIR/secrets/acq.github" ]; then
   pass "secret: -g github stored in acq store"
 else
@@ -1122,10 +1143,11 @@ fi
 cleanup_stubs
 
 # 5c. `my-sandbox github` -> built-in feed scoped to sandbox + stored scoped.
+#     sbx sandbox scope is `--sandbox NAME` now.
 make_stubs
 (printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox github) >/dev/null 2>/dev/null || true
 log=$(cat "$CALLS")
-assert_contains "secret: sandbox github -> sbx secret set my-sandbox" "$log" "sbx secret set my-sandbox github"
+assert_contains "secret: sandbox github -> sbx secret set --sandbox my-sandbox" "$log" "sbx secret set --sandbox my-sandbox github"
 if [ -f "$STUBDIR/secrets/acq.my-sandbox.github" ]; then
   pass "secret: sandbox github stored scoped in acq store"
 else
@@ -1142,8 +1164,8 @@ export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "secret: existing github -> rm hint" "$out" "sbx secret rm -g github"
-assert_not_contains "secret: existing github -> no set call" "$log" "sbx secret set -g github"
+assert_contains "secret: existing github -> rm hint" "$out" "sbx secret rm github"
+assert_not_contains "secret: existing github -> no set call" "$log" "sbx secret set github"
 cleanup_stubs
 
 # 5d1. Scope-awareness regression: github existing under a DIFFERENT
@@ -1158,8 +1180,8 @@ export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "secret: github under other scope does NOT block -g (feeds sbx)" "$log" "sbx secret set -g github"
-assert_not_contains "secret: github under other scope -> no false rm hint" "$out" "sbx secret rm -g github"
+assert_contains "secret: github under other scope does NOT block -g (feeds sbx)" "$log" "sbx secret set github"
+assert_not_contains "secret: github under other scope -> no false rm hint" "$out" "sbx secret rm github"
 cleanup_stubs
 
 # 5d2. Same, sandbox-scoped: setting `mybox github` when github exists only under
@@ -1171,7 +1193,7 @@ export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set mybox github 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "secret: sandbox github not blocked by other scope (feeds sbx)" "$log" "sbx secret set mybox github"
+assert_contains "secret: sandbox github not blocked by other scope (feeds sbx)" "$log" "sbx secret set --sandbox mybox github"
 cleanup_stubs
 
 # 5d2b. Positive case: the SAME sandbox already having github IS a
@@ -1182,8 +1204,8 @@ export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set opencode-agentic-coding github 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "secret: same-sandbox github -> scoped rm hint" "$out" "sbx secret rm opencode-agentic-coding github"
-assert_not_contains "secret: same-sandbox github -> no set call" "$log" "sbx secret set opencode-agentic-coding github"
+assert_contains "secret: same-sandbox github -> scoped rm hint" "$out" "sbx secret rm github --sandbox opencode-agentic-coding"
+assert_not_contains "secret: same-sandbox github -> no set call" "$log" "sbx secret set --sandbox opencode-agentic-coding github"
 cleanup_stubs
 
 # 5d3. Section-awareness: a BUILT-IN service (github) must be matched in the
@@ -1204,7 +1226,7 @@ gh_out=$(printf 'ghp_x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g github 2>&1 || 
 # usai IS present in the CUSTOM table at (global) -> should block with rm hint.
 usai_out=$(printf 'x\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai 2>&1 || true)
 unset SBX_LS_FIXTURE
-assert_contains "secret: github found in built-in section (blocks)" "$gh_out" "sbx secret rm -g github"
+assert_contains "secret: github found in built-in section (blocks)" "$gh_out" "sbx secret rm github"
 assert_contains "secret: usai found in custom section (blocks)" "$usai_out" "already has"
 cleanup_stubs
 
@@ -1214,7 +1236,7 @@ make_stubs
 out=$(printf 'SUPERSECRETVALUE123\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai 2>&1 || true)
 log=$(cat "$CALLS")
 assert_contains "secret: -g usai stored msg" "$out" "stored 'usai' in the acq secret store"
-assert_contains "secret: -g usai prints set-custom cmd" "$out" "sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY"
+assert_contains "secret: -g usai prints set-custom cmd" "$out" "sbx secret set-custom --host api.gsa.usai.gov --env USAI_API_KEY"
 assert_not_contains "secret: -g usai value never in argv (stdout)" "$out" "SUPERSECRETVALUE123"
 assert_not_contains "secret: -g usai value never in sbx argv" "$log" "SUPERSECRETVALUE123"
 if [ -f "$STUBDIR/secrets/acq.usai" ]; then
@@ -1248,7 +1270,7 @@ cleanup_stubs
 # 5f. `my-sandbox usai` (custom, piped) -> stored scoped + prints sandbox-scoped cmd.
 make_stubs
 out=$(printf 'k\n' | ACQ_BACKEND=sbx "$ACQ" secret set my-sandbox usai 2>&1 || true)
-assert_contains "secret: sandbox usai prints set-custom my-sandbox" "$out" "sbx secret set-custom my-sandbox --host api.gsa.usai.gov"
+assert_contains "secret: sandbox usai prints set-custom --sandbox my-sandbox" "$out" "sbx secret set-custom --sandbox my-sandbox --host api.gsa.usai.gov"
 if [ -f "$STUBDIR/secrets/acq.my-sandbox.usai" ]; then
   pass "secret: sandbox usai stored scoped in acq store"
 else
@@ -1262,6 +1284,73 @@ make_stubs
 out=$(printf 'k\n' | ACQ_BACKEND=msb "$ACQ" secret set -g usai 2>&1 || true)
 assert_contains "secret(msb): usai stored" "$out" "acq secret store"
 assert_not_contains "secret(msb): usai does not print sbx set-custom" "$out" "sbx secret set-custom"
+# REGRESSION: `acq secret set` must EXIT 0 on success. The msb guidance helper
+# ended its usai/github arm with a bare `[ "$applied" -gt 0 ] && echo …`; when
+# no running sandbox was re-fed (applied=0) that test is false, so under the
+# dispatcher's `set -e` the whole `acq secret set` exited 1 even though the key
+# was stored — which made every scripted seed (incl. verify-backends) treat a
+# successful set as a failure. Assert a zero exit explicitly.
+make_stubs
+printf 'k\n' | ACQ_BACKEND=msb "$ACQ" secret set -g usai >/dev/null 2>&1; set_rc=$?
+assert_eq "secret(msb): 'secret set' exits 0 on success (set -e regression)" "0" "$set_rc"
+cleanup_stubs
+
+# 5g2. `acq secret has [-g|SANDBOX] SERVICE` — silent predicate mirroring the
+#      create-time key-present gate (acq_secret_has AND, when the backend defines
+#      it, acq_backend_key_present, via the shared common.sh acq_key_injectable).
+#      Tested through the REAL dispatch with the stubbed backends.
+#
+#   - present in the acq store + backend can inject -> rc 0
+#   - absent from the store                          -> rc 1
+#   - store-present but the BACKEND injector is missing (sbx: acq store has usai
+#     but the sbx proxy CUSTOM SECRETS table has no binding) -> rc 1
+#      (this is the case only a backend that DEFINES acq_backend_key_present can
+#      distinguish; msb has no such hook so store-present == injectable.)
+
+# 5g2a. msb: store-present usai (msb has no acq_backend_key_present, so the store
+#       alone is authoritative) -> rc 0.
+make_stubs; load_acq
+mkdir -p "$STUBDIR/secrets"
+printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+ACQ_BACKEND=msb "$ACQ" secret has -g usai >/dev/null 2>&1; has_rc=$?
+assert_eq "secret has(msb): store-present usai -> rc 0" "0" "$has_rc"
+# Absent service -> rc 1.
+ACQ_BACKEND=msb "$ACQ" secret has -g nope >/dev/null 2>&1; has_rc=$?
+assert_eq "secret has(msb): absent service -> rc 1" "1" "$has_rc"
+# Silent by default: no output on either exit.
+has_out=$(ACQ_BACKEND=msb "$ACQ" secret has -g usai 2>&1 || true)
+assert_eq "secret has(msb): silent on success" "" "$has_out"
+has_out=$(ACQ_BACKEND=msb "$ACQ" secret has -g nope 2>&1 || true)
+assert_eq "secret has(msb): silent on failure" "" "$has_out"
+cleanup_stubs
+
+# 5g2b. sbx: acq store HAS usai but the sbx proxy CUSTOM SECRETS table does NOT
+#       bind it (no fixture) -> acq_backend_key_present fails -> rc 1. This is the
+#       store-present-but-backend-absent split the predicate must catch.
+make_stubs; load_acq
+mkdir -p "$STUBDIR/secrets"
+printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+# No seed_sbx_usai_proxy_fixture -> `sbx secret ls` shows an empty custom table.
+ACQ_BACKEND=sbx "$ACQ" secret has -g usai >/dev/null 2>&1; has_rc=$?
+assert_eq "secret has(sbx): store-present but proxy-absent -> rc 1" "1" "$has_rc"
+cleanup_stubs
+
+# 5g2c. sbx: acq store HAS usai AND the sbx proxy binds it (fixture present) ->
+#       both checks pass -> rc 0.
+make_stubs; load_acq
+mkdir -p "$STUBDIR/secrets"
+printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+seed_sbx_usai_proxy_fixture
+ACQ_BACKEND=sbx "$ACQ" secret has -g usai >/dev/null 2>&1; has_rc=$?
+unset SBX_LS_FIXTURE
+assert_eq "secret has(sbx): store-present + proxy-bound -> rc 0" "0" "$has_rc"
+cleanup_stubs
+
+# 5g2d. Missing service name -> usage error on stderr, non-zero (rc 2).
+make_stubs; load_acq
+has_out=$(ACQ_BACKEND=msb "$ACQ" secret has -g 2>&1); has_rc=$?
+assert_contains "secret has: missing service -> usage" "$has_out" "missing service name"
+assert_eq "secret has: missing service -> rc 2" "2" "$has_rc"
 cleanup_stubs
 
 # ===========================================================================
@@ -1706,6 +1795,7 @@ make_stubs
 bad_out=$(ACQ_BACKEND=sbx "$ACQ" secret bogus-verb 2>&1); bad_rc=$?
 bad_log=$(cat "$CALLS")
 assert_contains "secret bogus: acq's own unknown-subcommand error" "$bad_out" "unknown secret subcommand 'bogus-verb'"
+assert_contains "secret bogus: error lists the 'has' verb" "$bad_out" "set | rm | ls | has | import | --help"
 [ "$bad_rc" -ne 0 ] && pass "secret bogus: exits non-zero" \
   || fail "secret bogus: must exit non-zero" "rc=$bad_rc"
 assert_not_contains "secret bogus: never forwards to the backend" "$bad_log" "sbx secret"
@@ -1931,6 +2021,30 @@ make_stubs; load_acq
   assert_eq "msb: 0.6.8 binary clears the version floor" "0" "$rc2"
   assert_not_contains "msb: 0.6.8 binary emits no version-floor error" "$out2" "0.6.8"
 ) 2>/dev/null; pass "msb: version floor rejects sub-0.6.8, accepts 0.6.8"
+cleanup_stubs
+
+# 8j5c. sbx version floor (BLOCKING): acq's neutral-kit translator emits the sbx
+#        v2 kit grammar, which only sbx >= 0.38.0 accepts; older builds fail with
+#        an opaque decode error ("field permissions not found") mid-create. So
+#        MIN_SBX_VERSION is 0.38.0 and acq_backend_prepare MUST fail closed with a
+#        clear, self-diagnosing message on a sub-floor sbx. The sbx stub honors
+#        STUB_SBX_VERSION.
+make_stubs; load_acq
+(
+  # shellcheck source=acq
+  ACQ_SOURCE_ONLY=1 . "$ACQ"
+  . "${REPO_ROOT}/acq.backends/sbx.sh"
+  set +e
+  # A sub-floor binary (0.37.9) must be rejected before any create.
+  out=$(STUB_SBX_VERSION=0.37.9 acq_backend_prepare 2>&1); rc=$?
+  assert_eq "sbx: sub-0.38.0 binary fails the version floor" "1" "$rc"
+  assert_contains "sbx: sub-floor message names the required version" "$out" "0.38.0"
+  assert_contains "sbx: sub-floor message explains the v2 grammar cause" "$out" "v2 kit grammar"
+  # The current floor version (0.38.0) passes silently.
+  out2=$(STUB_SBX_VERSION=0.38.0 acq_backend_prepare 2>&1); rc2=$?
+  assert_eq "sbx: 0.38.0 binary clears the version floor" "0" "$rc2"
+  assert_not_contains "sbx: 0.38.0 binary emits no version-floor error" "$out2" "requires sbx"
+) 2>/dev/null; pass "sbx: version floor rejects sub-0.38.0, accepts 0.38.0"
 cleanup_stubs
 
 # 8j6. The msb doctor calls redirect stdin from /dev/null, so a prompting
@@ -2840,6 +2954,191 @@ make_stubs; load_acq
 injattach_log=$(cat "$CALLS")
 assert_not_contains "msb: attach never runs the injected marker in sh -c" "$injattach_log" "touch /tmp/acq_pwn"
 assert_contains "msb: attach falls back to /bin/sh on tampered marker" "$injattach_log" "injattach -- /bin/sh -l"
+cleanup_stubs
+
+# 8n8. msb provision ensures an OCI engine (podman) by default: when the
+#      oci-ready marker is absent, acq runs ONE big root (`-u 0`) `sh -c` that
+#      installs podman + wires the docker->podman alias, then touches the marker.
+#      The install is operator config (ACQ_MSB_PODMAN_PKGS) threaded via `-e
+#      PODMAN_PKGS=…`; it MUST run as root (never as `-u agent`), and the marker
+#      touch confirms success was recorded (idempotence on re-provision).
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/oci-secrets"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocibox shell /tmp >/dev/null 2>&1
+)
+oci_log=$(cat "$CALLS")
+assert_contains "msb: OCI setup threads the podman packages (PODMAN_PKGS=)" "$oci_log" "PODMAN_PKGS="
+assert_contains "msb: OCI setup wires the docker->podman alias" "$oci_log" "/usr/local/bin/docker"
+assert_contains "msb: OCI setup marks ready (touch marker) on success" "$oci_log" "touch '/var/lib/acq/oci-ready'"
+# The OCI setup MUST configure a storage driver that works on msb's overlay root:
+# podman's default kernel `overlay` driver cannot stack on the overlay-backed
+# sandbox FS, so the snippet writes /etc/containers/storage.conf selecting
+# fuse-overlayfs (preferred) or vfs (fallback).
+assert_contains "msb: OCI setup configures a storage driver (storage.conf)" "$oci_log" "/etc/containers/storage.conf"
+assert_contains "msb: OCI setup includes the vfs fallback driver" "$oci_log" 'driver = \"vfs\"'
+assert_contains "msb: OCI setup prefers fuse-overlayfs mount_program" "$oci_log" "mount_program"
+# fuse-overlayfs + the rootless prereqs are in the default install set.
+assert_contains "msb: OCI setup installs fuse-overlayfs by default" "$oci_log" "fuse-overlayfs"
+assert_contains "msb: OCI setup installs rootless prereq uidmap" "$oci_log" "uidmap"
+assert_contains "msb: OCI setup installs rootless prereq passt" "$oci_log" "passt"
+assert_contains "msb: OCI setup installs rootless prereq slirp4netns" "$oci_log" "slirp4netns"
+# The docker->podman alias must route to PLAIN podman (rootless engine runs as the
+# agent user; NO sudo wrapper).
+assert_contains "msb: docker alias routes to plain podman" "$oci_log" "exec podman"
+assert_not_contains "msb: docker alias does NOT use sudo" "$oci_log" "exec sudo -n podman"
+# Rootless device access: the agent is granted group-scoped access to BOTH
+# /dev/net/tun (networking) and /dev/fuse (fuse-overlayfs storage), via
+# _acq_msb_grant_oci_devs (a device loop run un-gated on every provision pass).
+assert_contains "msb: OCI setup grants agent access to /dev/net/tun" "$oci_log" "/dev/net/tun"
+assert_contains "msb: OCI setup grants agent access to /dev/fuse" "$oci_log" "/dev/fuse"
+assert_contains "msb: OCI setup group-scopes the device to agent" "$oci_log" 'chown root:agent "$_dev"'
+# Docker-Hub-first registry resolution (ADR-0020): unqualified-search + shortname
+# alias override so unadorned names resolve to Docker Hub, not quay.io.
+assert_contains "msb: OCI setup writes Docker-Hub-first search registry" "$oci_log" 'unqualified-search-registries = [\"docker.io\"]'
+assert_contains "msb: OCI setup remaps hello-world alias to Docker Hub" "$oci_log" 'docker.io/library/hello-world'
+# short-name-mode DEFAULT is "enforcing" (PR #302 review): least-privilege /
+# prompt-injection defense. The single search-registry keeps unqualified names
+# resolving to Docker Hub, so enforcing costs ~no ergonomics but fails closed on
+# ambiguous short names (no silent typosquatting/substitution). NOT permissive.
+# The written config line templates the value from the guest env var
+# ($SHORT_NAME_MODE), which acq threads in via `-e SHORT_NAME_MODE=<value>`, so we
+# assert on the threaded env var (that IS the effective config value).
+assert_contains "msb: OCI setup templates short-name-mode from the env var" "$oci_log" 'short-name-mode = \"$SHORT_NAME_MODE\"'
+assert_contains "msb: OCI setup defaults short-name-mode to enforcing" "$oci_log" "SHORT_NAME_MODE=enforcing"
+assert_not_contains "msb: OCI setup does NOT default to permissive short-name-mode" "$oci_log" "SHORT_NAME_MODE=permissive"
+# The package INSTALL/config MUST run as root; the engine VERIFY runs rootless as
+# the agent user.
+assert_contains "msb: OCI install/config runs as root (-u 0)" "$oci_log" "msb exec ocibox -u 0 -e PODMAN_PKGS="
+assert_contains "msb: OCI engine verified rootless as the agent user" "$oci_log" "msb exec ocibox -u agent -e HOME=/home/agent"
+# The rootless verify must exercise a real LAYER MOUNT (a FROM-scratch build),
+# not just `podman info` — `podman info` doesn't open /dev/fuse, so it would pass
+# even when the fuse-overlayfs mount fails. The self-test builds acq-oci-selftest.
+assert_contains "msb: OCI verify does a real build (layer mount), not just info" "$oci_log" "acq-oci-selftest"
+cleanup_stubs
+
+# 8n8b. short-name-mode OPT-IN: ACQ_MSB_SHORT_NAME_MODE=permissive removes the
+#       enforcing guardrail — the written config must carry the permissive value.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/oci-perm-secrets" ACQ_MSB_SHORT_NAME_MODE=permissive
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocipermbox shell /tmp >/dev/null 2>&1
+)
+oci_perm_log=$(cat "$CALLS")
+# The config line templates $SHORT_NAME_MODE from the guest env var, so the
+# effective value is carried in the threaded `-e SHORT_NAME_MODE=<value>` arg.
+assert_contains "msb: ACQ_MSB_SHORT_NAME_MODE=permissive opt-in threads permissive" "$oci_perm_log" "SHORT_NAME_MODE=permissive"
+assert_not_contains "msb: permissive opt-in does not also thread enforcing" "$oci_perm_log" "SHORT_NAME_MODE=enforcing"
+cleanup_stubs
+
+# 8n8c. short-name-mode FAIL-CLOSED: an invalid ACQ_MSB_SHORT_NAME_MODE value is
+#       rejected (warning) and falls back to "enforcing" — never the bad value.
+make_stubs; load_acq
+: > "$CALLS"
+oci_bad_warn=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/oci-bad-secrets" ACQ_MSB_SHORT_NAME_MODE="bogus; rm -rf /"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh" 2>&1 1>/dev/null
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocibadbox shell /tmp >/dev/null 2>&1
+)
+oci_bad_log=$(cat "$CALLS")
+assert_contains "msb: invalid ACQ_MSB_SHORT_NAME_MODE emits a warning" "$oci_bad_warn" "invalid ACQ_MSB_SHORT_NAME_MODE"
+assert_contains "msb: invalid short-name-mode falls back to enforcing" "$oci_bad_log" "SHORT_NAME_MODE=enforcing"
+assert_not_contains "msb: invalid short-name-mode value is not threaded" "$oci_bad_log" "SHORT_NAME_MODE=bogus"
+assert_not_contains "msb: invalid short-name-mode value is not interpolated" "$oci_bad_log" "rm -rf /"
+cleanup_stubs
+
+# 8n9. Marker-gated skip: when /var/lib/acq/oci-ready already exists
+#      (STUB_OCI_READY=1), the (network-bound) OCI setup exec is short-circuited
+#      — no install block runs and the marker is not re-touched.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ociready-secrets" STUB_OCI_READY=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocirdybox shell /tmp >/dev/null 2>&1
+)
+ocirdy_log=$(cat "$CALLS")
+assert_contains "msb: OCI marker probed when gating the skip" "$ocirdy_log" "test -f '/var/lib/acq/oci-ready'"
+assert_not_contains "msb: OCI setup skipped when marker present (no PODMAN_PKGS exec)" "$ocirdy_log" "PODMAN_PKGS="
+assert_not_contains "msb: OCI alias not re-wired when marker present" "$ocirdy_log" "/usr/local/bin/docker"
+cleanup_stubs
+
+# 8n10. Toggle off: with ACQ_MSB_ENSURE_OCI=0 the OCI step is skipped entirely —
+#       neither the marker probe nor the setup exec appears.
+make_stubs; load_acq
+: > "$CALLS"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ocioff-secrets" ACQ_MSB_ENSURE_OCI=0
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocioffbox shell /tmp >/dev/null 2>&1
+)
+ocioff_log=$(cat "$CALLS")
+assert_not_contains "msb: OCI setup never runs when toggled off" "$ocioff_log" "PODMAN_PKGS="
+assert_not_contains "msb: OCI marker never probed when toggled off" "$ocioff_log" "oci-ready"
+cleanup_stubs
+
+# 8n11. FAIL SOFT: when the OCI setup exec fails (STUB_OCI_SETUP_FAIL=1, modelling
+#       an unreachable mirror / failed `podman info`), provision still returns
+#       rc 0, a "could not provision an OCI engine" warning is emitted, and the
+#       ready marker is NOT touched (so a later provision retries).
+make_stubs; load_acq
+ocifail_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ocifail-secrets" STUB_OCI_SETUP_FAIL=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ocifailbox shell /tmp 2>&1
+  echo "RC=$?"
+)
+ocifail_log=$(cat "$CALLS")
+assert_contains "msb: OCI setup failure is fail-soft (rc 0)" "$ocifail_out" "RC=0"
+assert_contains "msb: OCI setup failure warns clearly" "$ocifail_out" "could not provision an OCI engine"
+assert_not_contains "msb: OCI ready marker NOT touched on setup failure" "$ocifail_log" "touch '/var/lib/acq/oci-ready'"
+cleanup_stubs
+
+# 8n12. SECURITY: ACQ_MSB_PODMAN_PKGS is charset-guarded (it is interpolated into
+#       a root `sh -c`). A value with a shell metachar is refused with an "unsafe
+#       characters" warning and the injected string never reaches an exec.
+make_stubs; load_acq
+ociinj_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/ociinj-secrets"
+  export ACQ_MSB_PODMAN_PKGS="podman;rm -rf"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision ociinjbox shell /tmp 2>&1
+)
+ociinj_log=$(cat "$CALLS")
+assert_contains "msb: unsafe ACQ_MSB_PODMAN_PKGS is refused" "$ociinj_out" "unsafe characters"
+assert_not_contains "msb: injected pkg string never reaches an exec" "$ociinj_log" "rm -rf"
 cleanup_stubs
 
 # 8o. Regression: msb applies ALL kit files and ALL kit commands, not just the
@@ -4058,7 +4357,12 @@ mem_bad_out=$(
 mem4_log=$(cat "$CALLS")
 assert_contains "msb: invalid ACQ_MSB_MEMORY warns" "$mem_bad_out" "ignoring invalid ACQ_MSB_MEMORY"
 assert_contains "msb: invalid ACQ_MSB_CPUS warns" "$mem_bad_out" "ignoring invalid ACQ_MSB_CPUS"
-assert_not_contains "msb: invalid memory value not passed to create" "$mem4_log" "rm -rf"
+# The injected payload (`4G; rm -rf /`) must never reach `msb create` as a memory
+# value. Assert the specific injection is absent from the create invocation rather
+# than the bare substring `rm -rf` (which legitimately appears elsewhere, e.g. the
+# OCI self-test's temp-dir cleanup).
+assert_not_contains "msb: invalid memory value not passed to create" "$mem4_log" "rm -rf /"
+assert_not_contains "msb: injected memory not on msb create" "$mem4_log" "msb create --name mem4box --memory 4G"
 cleanup_stubs
 
 # ===========================================================================
@@ -4076,7 +4380,7 @@ export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
 out=$(ACQ_BACKEND=sbx "$ACQ" usai-rotate-api-key </dev/null 2>&1 || true)
 unset SBX_LS_FIXTURE
 log=$(cat "$CALLS")
-assert_contains "rotate(sbx): uses sbx secret set-custom" "$log" "sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY"
+assert_contains "rotate(sbx): uses sbx secret set-custom" "$log" "sbx secret set-custom --host api.gsa.usai.gov --env USAI_API_KEY"
 assert_contains "rotate(sbx): validates in a throwaway sandbox" "$log" "sbx create --name acq-keycheck-"
 cleanup_stubs
 

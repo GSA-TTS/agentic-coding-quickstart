@@ -13,6 +13,16 @@ supersedes: []
 
 # ADR-0009: Require sbx >= 0.35.0 and Heal Pre-Kit Sandboxes In Place with `sbx kit add`
 
+> **Update (2026-08-11): the sbx version floor has since been raised to 0.38.0.**
+> This ADR records why 0.35.0 was originally required (in-place `sbx kit add`
+> healing). The floor was later bumped to **0.38.0** because acq's neutral-kit
+> translator emits the sbx **v2 kit grammar**, which only sbx >= 0.38.0 accepts —
+> older builds fail with an opaque `field permissions not found` decode error
+> mid-create rather than a version message. The 0.35.0 rationale below still holds
+> (it is a lower bound satisfied by 0.38.0); the effective floor in
+> `acq.backends/sbx.sh` (`MIN_SBX_VERSION`) is now 0.38.0. The Linux/ARM64 "no
+> 0.35.x build, wait for 0.36.x" caveat is moot at the 0.38.0 floor.
+
 ## Context and Problem Statement
 
 [ADR-0005](0005-kits-from-patterns-and-agent-trust-model.md) had `qsbx` deliver

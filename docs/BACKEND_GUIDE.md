@@ -55,10 +55,9 @@ from Docker Inc. It provides:
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `sbx` CLI | >= 0.35.0 | `sbx kit add` requires 0.35.0 for in-place healing |
+| `sbx` CLI | >= 0.38.0 | acq's neutral-kit translator emits the sbx v2 kit grammar, which only sbx >= 0.38.0 accepts (older builds fail with an opaque `field permissions not found` decode error). `sbx kit add` in-place healing needs >= 0.35.0. |
 | Docker account | any | Required for `sbx login` |
 | Docker subscription seat | (org-dependent) | Some orgs require paid seats |
-| Linux/ARM64 | 0.36.x+ | sbx 0.35.x has no Linux/ARM64 build; wait for 0.36.x |
 
 ### Installation
 
@@ -89,7 +88,6 @@ export ACQ_BACKEND=sbx
 
 ### Known limitations
 
-- No Linux/ARM64 build for sbx 0.35.x; wait for sbx 0.36.x
 - `sbx kit add` (healing) is experimental; see
   [KNOWN_FAILURE_MODES.md](KNOWN_FAILURE_MODES.md)
 - The sbx `docker sandbox` commands (deprecated by Docker) must not be used;
@@ -169,6 +167,8 @@ Tunables:
 | `ACQ_OPENCODE_POSTINSTALL_TIMEOUT` | `120` | Seconds to bound opencode's in-guest `postinstall.mjs` (which fetches a platform binary) so a wedged registry can't hang `acq run`; used only when the guest provides `timeout` |
 | `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
 | `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
+| `ACQ_MSB_ENSURE_OCI` | `1` (on) | Provision an OCI container engine (podman) at create so agents can run OCI images (`docker run`, `docker compose`). Installs `ACQ_MSB_PODMAN_PKGS` and aliases `docker` → `podman`. Set `0`/`false`/`no`/`off`/empty to skip (e.g. a base that bakes its own working engine). Fails soft if the OS package mirror is unreachable. See ADR-0020. |
+| `ACQ_MSB_PODMAN_PKGS` | `podman podman-compose` | Packages installed to provide the OCI engine (space-separated). `podman-compose` is the `docker compose` / `podman compose` provider. Override for a different set or an internal mirror's names. |
 | `ACQ_MSB_BALANCED_EGRESS` | `1` (on) | Apply the sbx-`balanced` egress baseline at create (`--net-default-egress deny` + an `allow@host:tcp:port` rule per vendored entry + gateway-DNS rules `allow@host:udp:53` + `allow@host:tcp:53`). The deny-default is **egress only** — ingress keeps msb's baseline `allow` so published ports stay reachable (ADR-0019). Set `0`/`false`/`no`/`off`/empty to disable and fall back to kit-only egress (no deny-default emitted). See ADR-0018. |
 | `ACQ_MSB_BALANCED_HOSTS_FILE` | `<repo>/acq.backends/msb-balanced-hosts.txt` | Path to the vendored host list (a verbatim mirror of `sbx policy inspect local-policy`). Override for a site-specific egress set. |
 | `ACQ_MSB_WORKSPACE` | (first workspace) | Agent's **starting directory** (`-w`) on attach. Does NOT change the mount, which is always host-path:host-path; overrides only where the agent starts. |
@@ -354,6 +354,12 @@ mirroring the sbx
 - The four kit prerequisites present: `node`, `git`, `curl`,
   `update-ca-certificates`.
 
+For OCI-run support (`docker run` / `docker compose`), the adapter installs
+podman at provision (see [Running OCI images inside the sandbox](#running-oci-images-inside-the-sandbox-podman)),
+so a base image does **not** need a container engine baked in — only a supported
+package manager (apt-get/dnf/apk) and mirror reachability. Bake podman in (and
+set `ACQ_MSB_ENSURE_OCI=0`) only if you want to skip the runtime install.
+
 **Build on `docker/sandbox-templates:shell-docker` to get all of these for free**
 — it is the default `ACQ_MSB_IMAGE`, so msb matches sbx out of the box.
 
@@ -384,6 +390,42 @@ export ACQ_MSB_IMAGE=ghcr.io/your-org/agent-base:latest   # must have node/git/c
 
 If the image requires registry auth, log in with your container tooling (e.g.
 `docker login ghcr.io`) before running `acq`.
+
+### Running OCI images inside the sandbox (podman)
+
+Agents often need to run OCI images from inside the sandbox — `docker run` an
+image, or bring up a `docker-compose.yaml`. The msb adapter guarantees this
+capability the same way it guarantees the base-image contract: idempotently, no
+matter what the base image brings.
+
+The default image ships the Docker CLI, but msb's microVM init (`/init.krun`)
+never starts `dockerd`, so the Docker socket is dead — and Docker's `overlay2`
+storage driver cannot sit on the sandbox's already-overlay root without a
+disk-backed data volume. Rather than retrofit the msb docker-in-docker recipe (a
+daemon to start and keep alive across restarts, plus a per-sandbox disk-backed
+volume), the adapter provisions **podman** at create time and aliases `docker` →
+`podman`:
+
+- **podman is daemonless** — no socket to start/poll, no restart lifecycle — uses
+  `fuse-overlayfs` on the overlay root (no disk-backed volume), and needs no
+  nested virtualization (containers are `runc`/`crun` processes, not VMs).
+- It runs **rootful** via the agent's passwordless sudo, which avoids the
+  rootless prerequisites (`uidmap`, `passt`/pasta) a lean base lacks.
+- A tiny `docker` → `podman` wrapper is placed in `/usr/local/bin` (ahead of
+  `/usr/bin`), so `docker run …` **and** `docker compose …` route to podman. The
+  base image's `/usr/bin/docker` is never modified. `docker compose` resolves to
+  `podman compose`, driven by the installed `podman-compose` provider — so
+  `docker-compose.yaml` files work. (The standalone `docker-compose` CLI is
+  deprecated in favour of the `docker compose` subcommand, so no separate
+  `docker-compose` binary is provided.)
+
+The install uses the OS package mirror, which under the default balanced egress
+baseline (ADR-0018) is already reachable — no extra net-rule needed. With
+`ACQ_MSB_BALANCED_EGRESS=0`, or a custom base whose egress is narrowed, the
+mirror is unreachable and the step **fails soft** (a warning; provision
+continues; OCI is simply unavailable). Turn the step off entirely with
+`ACQ_MSB_ENSURE_OCI=0` (e.g. a base that bakes its own working engine), or point
+`ACQ_MSB_PODMAN_PKGS` at a different package set / internal mirror. See ADR-0020.
 
 ### Secrets
 
