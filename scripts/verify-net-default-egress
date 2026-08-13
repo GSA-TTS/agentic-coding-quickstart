@@ -66,11 +66,14 @@ case "$(uname -s)" in
     ok "$(uname -s) host — assuming msb provides its own virtualization" ;;
 esac
 command -v curl >/dev/null 2>&1 && ok "curl on PATH (host-side probe)" || bad "curl missing"
-# The balanced baseline must be ON for this test to mean anything; if the caller
-# disabled it, no deny-default is emitted and the test is vacuous.
-case "$(printf '%s' "${ACQ_MSB_BALANCED_EGRESS:-1}" | tr 'A-Z' 'a-z')" in
-  0|false|no|off|"") bad "ACQ_MSB_BALANCED_EGRESS is OFF — the deny-default under test is not emitted; unset it and re-run"; exit 1 ;;
-  *) ok "balanced egress baseline is ON (deny-default will be emitted)" ;;
+# A deny-default must be emitted for this test to mean anything. That holds for
+# every tier EXCEPT `open` (which disables the deny-default). `strict` and
+# `balanced` both emit `--net-default-egress deny`; the deprecated
+# ACQ_MSB_BALANCED_EGRESS=0 now maps to `strict`, so it too emits a deny-default.
+# Only `open` makes the test vacuous.
+case "$(printf '%s' "${ACQ_NETWORK_TIER:-balanced}" | tr 'A-Z' 'a-z')" in
+  open) bad "ACQ_NETWORK_TIER=open disables the deny-default under test; set strict or balanced and re-run"; exit 1 ;;
+  *) ok "network tier '${ACQ_NETWORK_TIER:-balanced}' emits a deny-default" ;;
 esac
 
 # Fresh start: remove any stale sandbox of this name.

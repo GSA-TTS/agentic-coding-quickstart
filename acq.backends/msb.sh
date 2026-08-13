@@ -231,17 +231,73 @@ ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
 # create-time `-p HOST:GUEST` published ports stay reachable (a symmetric
 # `--net-default deny` would RST inbound to them).
 #
-# Toggle: on by default. Set ACQ_MSB_BALANCED_EGRESS=0 (or empty) to skip the
-# baseline and fall back to kit-only egress (the kits still add their own allow
-# rules, but no deny-default is emitted, so egress is not restricted by acq).
-# Normalized to exactly "1" (on) or "" (off) here so downstream `[ -n … ]` guards
-# read cleanly: an unset value defaults on; "0"/"false"/"no"/"off"/empty are off
-# (case-insensitive); anything else is on.
-ACQ_MSB_BALANCED_EGRESS="${ACQ_MSB_BALANCED_EGRESS-1}"
-case "$(printf '%s' "$ACQ_MSB_BALANCED_EGRESS" | tr '[:upper:]' '[:lower:]')" in
-  ""|0|false|no|off) ACQ_MSB_BALANCED_EGRESS="" ;;
-  *)                 ACQ_MSB_BALANCED_EGRESS="1" ;;
+# Network egress posture is selected by the NEUTRAL tier vocabulary
+# `ACQ_NETWORK_TIER` (strict|balanced|open, default balanced), which the patterns
+# network-tiers contract (agentic-coding-patterns ADR-0002) defines for all
+# backends. This adapter maps the tier to msb's native egress primitive at
+# provision time (see acq_backend_provision):
+#
+#   strict   = deny-by-default egress, kit caps.network.allow ONLY (no baseline).
+#              The most locked-down posture; recommended for GFE / high-assurance.
+#   balanced = deny-by-default egress + the curated baseline (the sbx "balanced"
+#              mirror in msb-balanced-hosts.txt, ADR-0018) UNIONED with the kits'
+#              own allow rules. The default when unspecified.
+#   open     = unrestricted egress (no deny-default). Testing only, never GFE;
+#              gated behind an explicit confirmation (see ACQ_NETWORK_TIER below).
+#
+# ALL tiers keep deny-by-default EXCEPT open; the tier only sizes the baseline
+# allowlist. This normalizes to a lowercase enum, fail-closed to `balanced` on an
+# invalid value (matching ACQ_MSB_SHORT_NAME_MODE's validator).
+#
+# DEPRECATED ALIAS — `ACQ_MSB_BALANCED_EGRESS` predates the neutral tier and is
+# retained for one deprecation window. It maps into the tier fail-safe (tighter,
+# never looser): a "1"/on value -> `balanced`; a "0"/off/empty value -> `strict`
+# (NOT the old permissive no-deny-default behavior — an upgrade must never
+# silently loosen egress). `ACQ_NETWORK_TIER` wins when both are set. A one-time
+# notice points the user at the neutral selector. The alias is removed in a
+# future major (the msb-emitter rename is tracked separately).
+_acq_msb_balanced_egress_alias=""    # "" = unset, "balanced"/"strict" once resolved
+if [ "${ACQ_MSB_BALANCED_EGRESS+set}" = set ]; then
+  case "$(printf '%s' "$ACQ_MSB_BALANCED_EGRESS" | tr '[:upper:]' '[:lower:]')" in
+    ""|0|false|no|off) _acq_msb_balanced_egress_alias="strict" ;;
+    *)                 _acq_msb_balanced_egress_alias="balanced" ;;
+  esac
+fi
+
+if [ -n "${ACQ_NETWORK_TIER+set}" ] && [ -n "$ACQ_NETWORK_TIER" ]; then
+  # Neutral selector present and non-empty: it wins outright.
+  _acq_net_tier_source="$ACQ_NETWORK_TIER"
+elif [ -n "$_acq_msb_balanced_egress_alias" ]; then
+  # Only the deprecated alias is set: honor it (fail-safe mapping above) and warn
+  # once. Kept a plain guarded stderr note (no reusable warn-once helper exists).
+  _acq_net_tier_source="$_acq_msb_balanced_egress_alias"
+  if [ -z "${_ACQ_NETWORK_TIER_ALIAS_WARNED:-}" ]; then
+    printf 'acq(msb): notice: ACQ_MSB_BALANCED_EGRESS is deprecated; use ACQ_NETWORK_TIER (strict|balanced|open).\n' >&2
+    printf 'acq(msb):   mapped ACQ_MSB_BALANCED_EGRESS=%s -> ACQ_NETWORK_TIER=%s. A former "off" now means strict\n' "$ACQ_MSB_BALANCED_EGRESS" "$_acq_msb_balanced_egress_alias" >&2
+    printf 'acq(msb):   (deny-by-default, kit hosts only) — set ACQ_NETWORK_TIER=open if you truly need unrestricted egress.\n' >&2
+    _ACQ_NETWORK_TIER_ALIAS_WARNED=1
+  fi
+else
+  _acq_net_tier_source="balanced"
+fi
+
+ACQ_NETWORK_TIER="$(printf '%s' "$_acq_net_tier_source" | tr '[:upper:]' '[:lower:]')"
+case "$ACQ_NETWORK_TIER" in
+  strict|balanced|open) ;;
+  *)
+    printf 'acq(msb): WARNING: invalid ACQ_NETWORK_TIER=%s (expected strict|balanced|open); falling back to balanced\n' "$_acq_net_tier_source" >&2
+    ACQ_NETWORK_TIER="balanced"
+    ;;
 esac
+unset _acq_net_tier_source _acq_msb_balanced_egress_alias
+
+# The `open` tier disables deny-by-default egress entirely — an explicit,
+# audited escape hatch, never a default and never appropriate for GFE. It is
+# gated like `--privileged`: it requires an explicit confirmation token
+# (ACQ_NETWORK_TIER_CONFIRM_OPEN=1) or acq fails closed at provision time. This
+# is validated in acq_backend_provision (not here) so a stale env var that is
+# never used to provision cannot abort an unrelated acq invocation.
+ACQ_NETWORK_TIER_CONFIRM_OPEN="${ACQ_NETWORK_TIER_CONFIRM_OPEN:-}"
 
 # ---------------------------------------------------------------------------
 # OCI container engine (podman) — ensure agents can run OCI images (ADR-0020)
@@ -280,8 +336,9 @@ esac
 #
 # Toggle: on by default. Set ACQ_MSB_ENSURE_OCI=0 (or empty) to skip the step
 # entirely (e.g. a base image that bakes its own working engine, or a lean
-# sandbox that needs no OCI support). Normalized to exactly "1"/"" like
-# ACQ_MSB_BALANCED_EGRESS.
+# sandbox that needs no OCI support). Normalized to exactly "1" (on) or "" (off):
+# an unset value defaults on; "0"/"false"/"no"/"off"/empty are off
+# (case-insensitive); anything else is on.
 ACQ_MSB_ENSURE_OCI="${ACQ_MSB_ENSURE_OCI-1}"
 case "$(printf '%s' "$ACQ_MSB_ENSURE_OCI" | tr '[:upper:]' '[:lower:]')" in
   ""|0|false|no|off) ACQ_MSB_ENSURE_OCI="" ;;
@@ -301,9 +358,9 @@ esac
 # uses the OS package mirror (apt/dnf/apk), which under the default balanced egress
 # baseline (ADR-0018) is already reachable (archive.ubuntu.com / ports.ubuntu.com
 # / security.ubuntu.com / *.debian.org are in the vendored host list). With
-# ACQ_MSB_BALANCED_EGRESS=0, or a base whose egress is otherwise narrowed, the
-# mirror is unreachable and the install fails soft (a clear warning; provision
-# continues; OCI is simply unavailable).
+# ACQ_NETWORK_TIER=strict (kit hosts only), or a base whose egress is otherwise
+# narrowed, the mirror is unreachable and the install fails soft (a clear warning;
+# provision continues; OCI is simply unavailable).
 ACQ_MSB_PODMAN_PKGS="${ACQ_MSB_PODMAN_PKGS:-podman podman-compose fuse-overlayfs uidmap passt slirp4netns}"
 
 # podman short-name resolution mode written into the docker-first registries
@@ -1846,13 +1903,22 @@ acq_backend_provision() {
 
   # Balanced egress baseline (ADR-0018): mirror the sbx "balanced" host set so an
   # msb sandbox reaches the same dev hosts. msb defaults egress to none, so we
-  # make the restriction explicit and deterministic: `--net-default-egress deny` +
-  # `allow@<host>:tcp:<port>` per vendored entry (plus explicit gateway-DNS rules,
-  # `allow@host:udp:53` + `allow@host:tcp:53`). These compose
-  # with the kit/npm/secret `allow@…` rules under first-match-wins. Emitted BEFORE
-  # the npm-host rule so all allow rules sit together after the deny-default.
-  # Toggle off with ACQ_MSB_BALANCED_EGRESS=0 (falls back to kit-only egress; no
-  # deny-default is emitted, so acq does not restrict egress in that mode).
+  # make the restriction explicit and deterministic. The NEUTRAL network tier
+  # (ACQ_NETWORK_TIER; strict|balanced|open, default balanced — see the module
+  # header and agentic-coding-patterns ADR-0002) selects how much egress the
+  # sandbox gets, all deny-by-default except `open`:
+  #   balanced -> `--net-default-egress deny` + the curated baseline
+  #               (`allow@<host>:tcp:<port>` per vendored entry + gateway DNS
+  #               `allow@host:udp:53`/`:tcp:53`) UNIONED with the kit/npm/secret
+  #               `allow@…` rules under first-match-wins.
+  #   strict   -> `--net-default-egress deny` + gateway DNS, but NO baseline:
+  #               egress is the kits' own `allow@…` hosts ONLY. Same deny-default
+  #               posture as balanced, smaller allowlist.
+  #   open     -> NO deny-default emitted; kit/npm/secret allows ride msb's own
+  #               (permissive) egress default. Gated behind an explicit confirm
+  #               token; validated below before we reach here.
+  # The baseline rules are emitted BEFORE the npm-host rule so all allow rules sit
+  # together after the deny-default.
   #
   # EGRESS-ONLY, DELIBERATELY (ADR-0019): we emit `--net-default-egress deny`, NOT
   # the symmetric `--net-default deny`. msb's `--net-default` sets BOTH directions
@@ -1863,21 +1929,45 @@ acq_backend_provision() {
   # the handshake via msb's host proxy, then resets on data → ERR_CONNECTION_RESET
   # on the host). Restricting only egress leaves the ingress default at msb's
   # baseline `allow`, so published ports stay reachable with no per-port ingress
-  # rule. A future "strict" profile can layer ingress deny-default + explicit
-  # per-port `allow:ingress@…` rules; the balanced default intentionally does not.
+  # rule. A future "strict" ingress profile can layer ingress deny-default + explicit
+  # per-port `allow:ingress@…` rules; the tiers here intentionally set egress only.
   # Requires msb >= 0.6.8 (the `--net-default-egress`/`--net-default-ingress`
   # split); MIN_MSB_VERSION is 0.6.8, so acq_backend_prepare has already failed
   # closed on anything older before we reach here — this flag is always known.
+  #
+  # `open` is a privileged, audited escape hatch (never a default, never for GFE):
+  # it requires ACQ_NETWORK_TIER_CONFIRM_OPEN=1 or acq fails closed here, warns on
+  # every use, and is recorded via acq_debug.
+  if [ "$ACQ_NETWORK_TIER" = open ]; then
+    if [ "$ACQ_NETWORK_TIER_CONFIRM_OPEN" != 1 ]; then
+      echo "acq(msb): error: ACQ_NETWORK_TIER=open disables deny-by-default egress and is refused" >&2
+      echo "acq(msb):   without explicit confirmation. Set ACQ_NETWORK_TIER_CONFIRM_OPEN=1 to proceed" >&2
+      echo "acq(msb):   (testing only; never for GFE). Prefer ACQ_NETWORK_TIER=strict or balanced." >&2
+      return 1
+    fi
+    echo "acq(msb): WARNING: ACQ_NETWORK_TIER=open — egress is UNRESTRICTED (no deny-default)." >&2
+    echo "acq(msb):   This sandbox can reach any host. Do not use for GFE or production agents." >&2
+    acq_debug "msb network tier: open (deny-default NOT emitted; confirmed via ACQ_NETWORK_TIER_CONFIRM_OPEN)"
+  fi
   # Track the hosts the balanced block allow-listed so the npm block below can
   # de-dupe against them (space-delimited, space-padded for whole-token match).
   local _balanced_hosts=" "
-  if [ -n "$ACQ_MSB_BALANCED_EGRESS" ]; then
+  if [ "$ACQ_NETWORK_TIER" = strict ] || [ "$ACQ_NETWORK_TIER" = balanced ]; then
     local _balanced=()
-    _acq_msb_balanced_rules_into _balanced
+    if [ "$ACQ_NETWORK_TIER" = balanced ]; then
+      # balanced: deny-default + curated baseline (+ gateway DNS from the emitter).
+      _acq_msb_balanced_rules_into _balanced
+    else
+      # strict: deny-default + gateway DNS ONLY, no baseline hosts. Emit the same
+      # explicit gateway-DNS rules the baseline emitter prepends (the high-level
+      # DNS auto-grant does not fire under a rule-only deny-default), so kit
+      # `allow@…` hosts remain resolvable. NOTHING else is added.
+      _balanced=(--net-rule "allow@host:udp:53" --net-rule "allow@host:tcp:53")
+    fi
     if [ "${#_balanced[@]}" -gt 0 ]; then
       create_flags+=(--net-default-egress deny)
       create_flags+=("${_balanced[@]}")
-      acq_debug "msb balanced-egress: added ${#_balanced[@]} --net-rule token(s) + --net-default-egress deny"
+      acq_debug "msb network tier=${ACQ_NETWORK_TIER}: added ${#_balanced[@]} --net-rule token(s) + --net-default-egress deny"
       # Record the bare host of each emitted rule (strip the `allow@` prefix and
       # any `:proto:port` suffix) for the npm de-dupe below.
       local _tok _bh
@@ -1901,8 +1991,8 @@ acq_backend_provision() {
   # dead weight (both allow; no deny to shadow). We therefore skip any npm host
   # that the balanced block ALREADY emitted a rule for, rather than skipping the
   # whole block — an operator who overrides ACQ_MSB_NPM_HOSTS to an internal
-  # mirror NOT in the balanced set still gets its rule. In kit-only mode
-  # (ACQ_MSB_BALANCED_EGRESS=0) nothing is elided, since the balanced set is empty.
+  # mirror NOT in the balanced set still gets its rule. Under the `strict` tier
+  # (or `open`) the balanced set is empty, so nothing is elided.
   if _acq_msb_agent_has_install_recipe "$agent"; then
     local _npm_host
     for _npm_host in $ACQ_MSB_NPM_HOSTS; do
@@ -2713,7 +2803,7 @@ EOF
   echo "acq(msb): warning: could not provision an OCI engine (rootless podman) in '$name'." >&2
   echo "acq(msb):   Agents will not be able to run OCI images (docker run / docker compose)." >&2
   echo "acq(msb):   Most likely the OS package mirror is unreachable: the default balanced" >&2
-  echo "acq(msb):   egress (ADR-0018) allows it, but ACQ_MSB_BALANCED_EGRESS=0 or a narrowed" >&2
+  echo "acq(msb):   egress (ADR-0018) allows it, but ACQ_NETWORK_TIER=strict or a narrowed" >&2
   echo "acq(msb):   custom base blocks archive.ubuntu.com / ports.ubuntu.com / *.debian.org," >&2
   echo "acq(msb):   or the rootless prereqs (podman, fuse-overlayfs, uidmap, passt," >&2
   echo "acq(msb):   slirp4netns) could not be installed / rootless podman could not start." >&2
