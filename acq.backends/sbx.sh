@@ -753,7 +753,12 @@ acq_backend_secret_set() {
     # emits a warning). A sandbox scope is `--sandbox NAME`. See the "sbx CLI
     # secret scope-flag change" note in docs/VERIFY_BACKENDS_HANDOFF.md.
     if [ -z "$scope_flag" ]; then builtin_scope_args+=(--sandbox "$scope_name"); fi
-    printf '%s\n' "$secret_value" | sbx secret set "${builtin_scope_args[@]}" "$service"
+    # Empty-array-safe expansion: for the GLOBAL scope builtin_scope_args stays
+    # empty (no --sandbox), and `"${arr[@]}"` on an empty array is a fatal
+    # "unbound variable" under `set -u` on bash 3.2 (the macOS system bash). The
+    # `[@]+…` guard expands to nothing when the array is empty. bash 4+ tolerates
+    # the bare form, so this only bit macOS users on the `acq secret set -g` path.
+    printf '%s\n' "$secret_value" | sbx secret set ${builtin_scope_args[@]+"${builtin_scope_args[@]}"} "$service"
     exit_code=$?
     secret_value=""
   else
