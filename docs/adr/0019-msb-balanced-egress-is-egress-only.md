@@ -74,6 +74,13 @@ per-port ingress rule.
 `ACQ_MSB_BALANCED_EGRESS=0` is unchanged: no deny-default of either kind is
 emitted (kit-only egress).
 
+> **Update (network tiers):** `ACQ_MSB_BALANCED_EGRESS` is now a deprecated
+> alias for `ACQ_NETWORK_TIER`, and `=0` maps to the `strict` tier — which
+> **does** emit `--net-default-egress deny` (kit hosts only), not the
+> "no deny-default" behavior described here. The egress-only decision in this
+> ADR is unaffected; only the toggle's off-mapping changed. See ADR-0018's
+> network-tiers banner and the `ACQ_NETWORK_TIER` section of `BACKEND_GUIDE.md`.
+
 ## Consequences
 
 - **Better:** create-time published ports (openchamber UI on 3000, OpenCode

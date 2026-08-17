@@ -13,6 +13,17 @@ supersedes: []
 
 # ADR-0018: Mirror the sbx "balanced" network policy as the msb default egress baseline
 
+> **Update (network tiers):** the `ACQ_MSB_BALANCED_EGRESS` toggle described
+> below is now a **deprecated alias** for the neutral `ACQ_NETWORK_TIER`
+> selector (`strict|balanced|open`, default `balanced`) defined by the
+> agentic-coding-patterns network-tiers contract. `ACQ_MSB_BALANCED_EGRESS=1`
+> maps to `balanced` (this baseline); `=0` now maps to `strict` — still
+> deny-by-default with the kits' own hosts, NOT the former permissive
+> no-deny-default behavior (an upgrade never silently loosens egress). See the
+> `ACQ_NETWORK_TIER` section of [`docs/BACKEND_GUIDE.md`](../BACKEND_GUIDE.md).
+> References to `ACQ_MSB_BALANCED_EGRESS=0` as "kit-only, no deny-default" below
+> reflect the original toggle and are superseded by the `strict` tier mapping.
+>
 > **Update (ADR-0019):** the deny-default described below is scoped to **egress
 > only** — the emitter uses `--net-default-egress deny`, not the symmetric
 > `--net-default deny` this ADR originally specified. msb's `--net-default` sets
