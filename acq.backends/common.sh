@@ -1451,6 +1451,8 @@ ensure_opencode_postinstall() {
 
 # Probe the USAi API from inside the sandbox. Emits ONE clean token on stdout:
 #   - a 3-digit HTTP status (e.g. 200, 401) on a real HTTP response,
+#   - "unresolved" when the guest resolver returned no answer for the name
+#     (curl exit 6 / NXDOMAIN) — the split-horizon-DNS tell,
 #   - the literal "unreachable" when curl could not complete a request at all
 #     (TLS reset, DNS failure, proxy/Zscaler interception, offline — curl exits
 #     non-zero and writes http_code 000), or
@@ -1473,8 +1475,18 @@ check_key() {
 }
 
 # Reduce a raw `<http_code>|<curl_exit>` probe result (possibly polluted with
-# curl error text) to a clean status token: a 3-digit HTTP code, "unreachable",
-# or "". Shared by check_key and check_fresh_sandbox_key.
+# curl error text) to a clean status token: a 3-digit HTTP code, "unresolved"
+# (DNS did not resolve the name — curl exit 6), "unreachable" (resolved but the
+# connection never completed — TLS reset / connect refused / HTTP 000), or "".
+# Shared by check_key and check_fresh_sandbox_key.
+#
+# WHY "unresolved" is split out from "unreachable": a curl exit 6 means the guest
+# resolver returned NXDOMAIN for the name. For a split-horizon host like
+# api.gsa.usai.gov (whose real address lives in an internal, tunnel-only zone the
+# guest's public resolver can't see), that is the diagnostic tell — a distinct
+# remedy (a resolver that can reach the internal zone) from a broad TLS/egress
+# cut. Keeping them separate lets the caller give the right advice instead of a
+# generic "network problem". See docs/KNOWN_FAILURE_MODES.md §30.
 _classify_key_status() {
   local raw="$1" code exit_code
   # The curl exit code is the last field after the final '|'. Keep only digits.
@@ -1489,6 +1501,13 @@ _classify_key_status() {
   # curl succeeded (exit 0) AND returned a plausible non-000 HTTP code.
   if [ "$exit_code" = "0" ] && [ -n "$code" ] && [ "$code" != "000" ]; then
     printf '%s\n' "$code"
+    return 0
+  fi
+  # curl exit 6 = "couldn't resolve host": DNS returned no answer for the name.
+  # This is the split-horizon-DNS signature (the public guest resolver can't see
+  # an internal-only zone), NOT a broad connection cut — report it distinctly.
+  if [ "$exit_code" = "6" ]; then
+    printf 'unresolved\n'
     return 0
   fi
   # curl failed to get any response (nonzero exit, or http_code 000): the request
@@ -2000,6 +2019,11 @@ advise_valid_key() {
     return 0
   fi
 
+  if [ "$status" = "unresolved" ]; then
+    _report_usai_unresolved
+    return 0
+  fi
+
   echo "acq: note — your USAi API key looks invalid or expired (HTTP $status)." >&2
   echo "      USAi keys expire every 7 days. This sandbox was created, but the" >&2
   echo "      key must be valid before an agent can use it." >&2
@@ -2024,6 +2048,31 @@ _report_usai_unreachable() {
   echo "      both outbound connections are being cut — a strong sign of a network" >&2
   echo "      or TLS-interception (e.g. corporate proxy) issue rather than USAi." >&2
   echo "      See docs/KNOWN_FAILURE_MODES.md for diagnosis steps." >&2
+  echo >&2
+}
+
+# Print a DNS-oriented diagnosis when the USAi models API name did not RESOLVE
+# from the sandbox (curl exit 6 / NXDOMAIN). This is distinct from the broad
+# "unreachable" cut: the tell is that the name has no answer for the guest
+# resolver, while other public hosts (GitHub, npm) resolve and connect fine.
+#
+# The usual cause on GFE is split-horizon DNS — the USAi host resolves to an
+# INTERNAL address that only exists in the corporate/tunnel zone, which the
+# guest's default public resolver (ACQ_MSB_DNS_NAMESERVER, 1.1.1.1) cannot see.
+# A key rotation cannot fix this, and neither can a msb data wipe; the remedy is
+# a resolver that can reach the internal USAi zone. State the signal and point
+# at the docs rather than guessing the user's network fix.
+_report_usai_unresolved() {
+  echo >&2
+  echo "acq: the USAi API host in $USAI_MODELS_URL did not RESOLVE from the sandbox" >&2
+  echo "      (DNS returned no address). This is a name-resolution problem, NOT an" >&2
+  echo "      invalid or expired key, so rotating the key will not help." >&2
+  echo "      If other public hosts (GitHub, npm) work from the sandbox but only" >&2
+  echo "      USAi fails to resolve, USAi is likely a split-horizon name whose" >&2
+  echo "      address lives in an internal/tunnel-only zone the guest's default" >&2
+  echo "      resolver cannot see. Point the guest at a resolver that can reach the" >&2
+  echo "      internal USAi zone via ACQ_MSB_DNS_NAMESERVER." >&2
+  echo "      See docs/KNOWN_FAILURE_MODES.md §30 (USAi-only NXDOMAIN)." >&2
   echo >&2
 }
 
@@ -2149,6 +2198,14 @@ ensure_valid_key() {
   # the first USAi call) with a network-oriented diagnosis.
   if [ "$status" = "unreachable" ]; then
     _report_usai_unreachable
+    return 1
+  fi
+
+  # DNS returned no address for the USAi host (curl exit 6). Distinct from a
+  # broad cut: the split-horizon-DNS case, where only USAi fails to resolve. A
+  # rotation cannot fix it, so fail closed with a resolver-oriented diagnosis.
+  if [ "$status" = "unresolved" ]; then
+    _report_usai_unresolved
     return 1
   fi
 
