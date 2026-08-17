@@ -18,7 +18,11 @@
 #      swap; msb binds `--secret ENV@HOST` + on-the-wire rewrite), so the check
 #      verifies acq's wiring (bind + egress), not USAi auth. The verifier seeds a
 #      synthetic dummy value — no real key, no pasting.
-#   3. Git commit signing config is present (git-ssh-sign kit landed).
+#   3. Git commit signing config is present (git-ssh-sign kit landed), and — on
+#      msb — the host ssh-agent is actually reachable inside the guest (the live
+#      --vsock + socat forward, ADR-0021), exercised against a hermetic throwaway
+#      ssh-agent the verifier spins up itself (no dependence on the caller's
+#      agent).
 #   4. The playbook clone symlink appears at the agent's AGENTS.md path.
 # A backend that is NOT installed is SKIPPED (its row prints "skipped").
 #
@@ -144,6 +148,15 @@ SKIP=0
 WARN=0
 LAST_OUT=""          # captured combined output of the most recent run_acq call
 VERIFY_STATE=""
+# Ephemeral throwaway ssh-agent state (see _start_ephemeral_agent). Declared here
+# so the EXIT trap's _stop_ephemeral_agent can reference them even if the run
+# aborts before an agent is started.
+EPHEMERAL_AGENT_PID=""
+EPHEMERAL_AGENT_SOCK=""
+EPHEMERAL_AGENT_DIR=""
+EPHEMERAL_AGENT_SOCKDIR=""
+EPHEMERAL_KEY_PUB=""
+EPHEMERAL_KEY_TAG=""
 pass() { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
 fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
 skip() { SKIP=$((SKIP + 1)); printf '  skip  %s\n' "$1"; }
@@ -161,6 +174,7 @@ dump() {
 }
 
 cleanup_verify_state() {
+  _stop_ephemeral_agent
   [ -n "$VERIFY_STATE" ] && rm -rf "$VERIFY_STATE"
 }
 trap cleanup_verify_state EXIT
@@ -473,6 +487,16 @@ verify_backend() {
   fi
 
   printf '        creating sandbox %s (booting + applying 4 kits; this can take a minute)...\n' "$name"
+  # For msb, start a hermetic throwaway ssh-agent BEFORE create so acq emits the
+  # host ssh-agent `--vsock` route at create time (the route is a create-time
+  # flag) and the later _ssh_agent_forwarding_check can exercise it end-to-end.
+  # This sets SSH_AUTH_SOCK for the create below. Best-effort: if the host lacks
+  # ssh-agent tooling the check SKIPs later. Only for msb (sbx forwards
+  # implicitly and is unaffected by this work). See ADR-0021.
+  if [ "$backend" = "msb" ]; then
+    _start_ephemeral_agent || \
+      printf '        note: could not start an ephemeral ssh-agent; the ssh-agent forwarding check will SKIP.\n'
+  fi
   if ! run_acq "create" --backend "$backend" create shell "$WORKDIR"; then
     fail "${backend}: provision (acq create shell) failed" \
          "command: acq --backend ${backend} create shell ${WORKDIR}"
@@ -632,6 +656,28 @@ verify_backend() {
   unseed_usai_secret "$backend" "$name"
   unseed_github_secret "$backend" "$name"
 
+  # 4c) Host ssh-agent forwarding (git-ssh-sign parity, ADR-0021). On msb, acq
+  #     forwards the host ssh-agent into the guest via `--vsock` + an in-guest
+  #     socat bridge whenever the host SSH_AUTH_SOCK is set, exporting the guest
+  #     SSH_AUTH_SOCK so git/ssh can sign with the host's already-unlocked keys.
+  #     The static gpg.format check above only proves the kit CONFIG landed; it
+  #     does NOT prove the agent is reachable. This asserts the live forward:
+  #       - the guest session has SSH_AUTH_SOCK exported to the bridge socket, and
+  #       - `ssh-add -L` inside the guest lists the SAME identities the (throwaway)
+  #         agent holds (i.e. the vsock route + socat bridge reach the host).
+  #     HERMETIC: the agent is the verifier's OWN throwaway (started before create
+  #     by _start_ephemeral_agent), so this exercises on every run and never
+  #     depends on / disturbs the invoking shell's agent. Only meaningful on msb
+  #     (sbx forwards implicitly, unchanged by this work). SKIPs when the host
+  #     lacks ssh-agent tooling, msb < 0.6.9 (the --vsock floor), or socat is
+  #     absent in the guest. Only PUBLIC keys are ever printed (ssh-add -L).
+  if [ "$backend" = "msb" ]; then
+    _ssh_agent_forwarding_check "$backend" "$name"
+    # Tear the throwaway agent down as soon as the check is done (also covered by
+    # the EXIT trap, but stop it promptly so it never outlives its use).
+    _stop_ephemeral_agent
+  fi
+
   # 5) OCI engine (podman) usable — msb only (ADR-0020).
   _verify_oci_checks "$backend" "$name"
 
@@ -641,6 +687,252 @@ verify_backend() {
   else
     run_acq "rm" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Ephemeral, hermetic ssh-agent for the ssh-agent-forwarding check.
+# ---------------------------------------------------------------------------
+# The forward is opt-in via the host SSH_AUTH_SOCK. To exercise it on EVERY run
+# without depending on (or disturbing) whatever agent the invoking shell happens
+# to have, the verifier spins up its OWN throwaway ssh-agent, with a single
+# freshly-generated throwaway key. That agent becomes SSH_AUTH_SOCK for the msb
+# create + the in-guest checks, and is torn down afterward (and on EXIT) — at
+# which point the caller's ORIGINAL SSH_AUTH_SOCK/SSH_AGENT_PID are restored so a
+# later step (e.g. the opencode-install pass) does not inherit a dangling socket.
+# Nothing touches ~/.ssh or the user's real agent.
+# EPHEMERAL_AGENT_PID / _SOCK / _DIR (declared up top) track it for teardown.
+#
+# The agent socket lives under a SHORT /tmp root, NOT under VERIFY_STATE: an
+# AF_UNIX path is capped at ~104 bytes (sun_path), and a macOS per-user $TMPDIR
+# (/var/folders/…) plus VERIFY_STATE's nested mktemp dirs can approach that
+# limit; a short root keeps `ssh-agent -a` well clear. The throwaway KEY still
+# lives under VERIFY_STATE (removed with it); only the tiny socket dir is here,
+# and it is rm -rf'd on teardown.
+
+# _stop_ephemeral_agent — kill the throwaway agent, remove its key/socket, and
+# RESTORE the caller's original SSH_AUTH_SOCK/SSH_AGENT_PID. Idempotent; safe to
+# call from the check, the per-backend cleanup, and the EXIT trap.
+_stop_ephemeral_agent() {
+  [ -n "$EPHEMERAL_AGENT_PID" ] || return 0
+  # `ssh-agent -k` reads SSH_AGENT_PID; kill is the portable fallback. We target
+  # ONLY the PID we started (never the caller's agent).
+  SSH_AGENT_PID="$EPHEMERAL_AGENT_PID" ssh-agent -k >/dev/null 2>&1 || \
+    kill "$EPHEMERAL_AGENT_PID" >/dev/null 2>&1 || true
+  [ -n "$EPHEMERAL_AGENT_DIR" ] && rm -rf "$EPHEMERAL_AGENT_DIR"
+  [ -n "$EPHEMERAL_AGENT_SOCKDIR" ] && rm -rf "$EPHEMERAL_AGENT_SOCKDIR"
+  EPHEMERAL_AGENT_PID=""; EPHEMERAL_AGENT_SOCK=""; EPHEMERAL_AGENT_DIR=""
+  EPHEMERAL_AGENT_SOCKDIR=""; EPHEMERAL_KEY_PUB=""; EPHEMERAL_KEY_TAG=""
+  # Restore the caller's env so no later step inherits a now-dead socket. The
+  # snapshot vars are set by _start_ephemeral_agent; empty means "was unset".
+  if [ -n "${_SAVED_SSH_AUTH_SOCK+x}" ]; then
+    if [ -n "$_SAVED_SSH_AUTH_SOCK" ]; then export SSH_AUTH_SOCK="$_SAVED_SSH_AUTH_SOCK"; else unset SSH_AUTH_SOCK; fi
+    if [ -n "$_SAVED_SSH_AGENT_PID" ]; then export SSH_AGENT_PID="$_SAVED_SSH_AGENT_PID"; else unset SSH_AGENT_PID; fi
+    unset _SAVED_SSH_AUTH_SOCK _SAVED_SSH_AGENT_PID
+  fi
+}
+
+# _start_ephemeral_agent — start a throwaway ssh-agent with one throwaway key.
+# On success, snapshots the caller's SSH_AUTH_SOCK/SSH_AGENT_PID (so _stop can
+# restore them), exports SSH_AUTH_SOCK to the throwaway socket, and returns 0;
+# on failure returns non-zero (caller SKIPs). Requires ssh-agent + ssh-keygen +
+# ssh-add on the host.
+_start_ephemeral_agent() {
+  command -v ssh-agent  >/dev/null 2>&1 || return 1
+  command -v ssh-keygen >/dev/null 2>&1 || return 1
+  command -v ssh-add    >/dev/null 2>&1 || return 1
+
+  # Key material under VERIFY_STATE; socket under a SHORT /tmp root (sun_path).
+  EPHEMERAL_AGENT_DIR=$(mktemp -d "${VERIFY_STATE}/ssh-agent.XXXXXX") || return 1
+  EPHEMERAL_AGENT_SOCKDIR=$(mktemp -d "/tmp/acq-va.XXXXXX" 2>/dev/null) \
+    || EPHEMERAL_AGENT_SOCKDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-va.XXXXXX") \
+    || { _stop_ephemeral_agent; return 1; }
+  EPHEMERAL_AGENT_SOCK="${EPHEMERAL_AGENT_SOCKDIR}/s"
+  local key="${EPHEMERAL_AGENT_DIR}/id_ed25519"
+
+  # Snapshot the caller's env BEFORE we overwrite it, so teardown can restore it.
+  _SAVED_SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}"
+  _SAVED_SSH_AGENT_PID="${SSH_AGENT_PID:-}"
+
+  # Bind the agent to a known socket path so we control SSH_AUTH_SOCK exactly.
+  # `-a PATH` makes ssh-agent listen there; the eval sets SSH_AGENT_PID and
+  # (authoritatively) SSH_AUTH_SOCK. We trust the socket path SSH-AGENT REPORTS,
+  # not the one we requested: on some platforms (notably macOS, where /tmp is a
+  # symlink to /private/tmp) the two differ, and acq canonicalizes the value it
+  # forwards — so we canonicalize to the same real path to keep the host-side
+  # enumeration, the value acq forwards, and teardown all pointing at one inode.
+  local agent_env
+  agent_env=$(ssh-agent -s -a "$EPHEMERAL_AGENT_SOCK" 2>/dev/null) || { _stop_ephemeral_agent; return 1; }
+  eval "$agent_env" >/dev/null 2>&1
+  EPHEMERAL_AGENT_PID="${SSH_AGENT_PID:-}"
+  # Adopt the reported socket, resolved to its real path (matches acq's own
+  # canonicalize_path). Fall back to the requested path if resolution fails.
+  local _reported="${SSH_AUTH_SOCK:-$EPHEMERAL_AGENT_SOCK}" _real
+  if command -v realpath >/dev/null 2>&1; then
+    _real=$(realpath "$_reported" 2>/dev/null || printf '%s' "$_reported")
+  else
+    _real="$_reported"
+  fi
+  EPHEMERAL_AGENT_SOCK="$_real"
+  [ -n "$EPHEMERAL_AGENT_PID" ] && [ -S "$EPHEMERAL_AGENT_SOCK" ] || { _stop_ephemeral_agent; return 1; }
+
+  # Generate a passphrase-less throwaway key and load it into (only) this
+  # ephemeral agent. The check asserts the guest sees THIS EXACT public key body
+  # (type + base64) — a cryptographic identity match, immune to how many keys any
+  # other agent on the host happens to hold. The -C comment is cosmetic only
+  # (uniqueness comes from the random key body, not the tag); it just labels the
+  # key in `ssh-add -L` output. Never touches ~/.ssh.
+  EPHEMERAL_KEY_TAG="acq-verify-$$-$(date +%s 2>/dev/null || printf '0')"
+  ssh-keygen -q -t ed25519 -N "" -C "$EPHEMERAL_KEY_TAG" -f "$key" >/dev/null 2>&1 \
+    || { _stop_ephemeral_agent; return 1; }
+  # Capture the public key body (type + base64, comment stripped) — this is what
+  # the guest greps its own `ssh-add -L` for (a `-L` line is "type base64 comment",
+  # so a fixed-string match on the body matches despite the trailing comment).
+  EPHEMERAL_KEY_PUB=$(awk '{print $1" "$2}' "${key}.pub" 2>/dev/null)
+  SSH_AUTH_SOCK="$EPHEMERAL_AGENT_SOCK" ssh-add "$key" >/dev/null 2>&1 \
+    || { _stop_ephemeral_agent; return 1; }
+
+  # Point the whole check (and the pending msb create) at the throwaway agent.
+  export SSH_AUTH_SOCK="$EPHEMERAL_AGENT_SOCK"
+  return 0
+}
+
+# _ssh_agent_forwarding_check BACKEND NAME — assert the LIVE host ssh-agent
+# forward on msb (ADR-0021), not just that the git-ssh-sign kit config landed.
+#
+# HERMETIC: the verifier starts its OWN throwaway ssh-agent (one throwaway key)
+# BEFORE the msb create, so the forward is exercised on every run and does not
+# depend on — or disturb — the invoking shell's agent. See _start_ephemeral_agent
+# (called by verify_backend before create) which sets EPHEMERAL_AGENT_* and
+# points SSH_AUTH_SOCK at the throwaway socket.
+#
+# This asserts only when the forward can actually be exercised:
+#   - the ephemeral agent came up (EPHEMERAL_AGENT_PID set) with >=1 key,
+#   - the running msb is >= 0.6.9 (the --vsock floor; older is a documented
+#     no-op), and
+#   - socat is present in the guest (the bridge needs it; a missing socat is a
+#     documented prereq gap, not a forwarding regression).
+# Any of those unmet => SKIP with the reason (so a host lacking ssh-agent tools
+# or on old msb still passes). When they ARE met, assert the two things that
+# prove the live path end-to-end:
+#   (a) the guest session has SSH_AUTH_SOCK exported (acq wires it on exec), and
+#   (b) the guest's forwarded agent holds THIS EXACT ephemeral key (matched by
+#       key body, not a count) — proving the vsock route + socat bridge reach
+#       OUR agent specifically, not merely "an" agent.
+# Only PUBLIC keys are ever printed (ssh-add -L); no private material is exposed.
+_ssh_agent_forwarding_check() {
+  local backend="$1" name="$2"
+
+  # Precondition: the verifier's ephemeral agent must have started (it is started
+  # in verify_backend before create). If it did not (missing ssh-agent tooling),
+  # SKIP — a host without ssh-agent still passes.
+  if [ -z "$EPHEMERAL_AGENT_PID" ] || [ -z "${SSH_AUTH_SOCK:-}" ]; then
+    skip "${backend}: host ssh-agent forwarding (no ephemeral ssh-agent; ssh-agent/ssh-keygen/ssh-add on host?)"
+    return 0
+  fi
+  local host_keys
+  # Enumerate the ephemeral agent's keys. `ssh-add -L` exits non-zero when empty
+  # and `grep -c` exits 1 on zero matches; take the FIRST line and normalize a
+  # missing/non-numeric result to 0 so the count is robust (defensive — this is
+  # an unchecked command substitution). SSH_AUTH_SOCK was exported to the
+  # ephemeral socket by _start_ephemeral_agent, so this counts OUR agent.
+  host_keys=$(ssh-add -L 2>/dev/null | grep -c '^ssh-' 2>/dev/null | head -n1)
+  case "$host_keys" in ""|*[!0-9]*) host_keys=0 ;; esac
+  if [ "$host_keys" -lt 1 ] || [ -z "$EPHEMERAL_KEY_PUB" ]; then
+    skip "${backend}: host ssh-agent forwarding (ephemeral agent holds no keys — unexpected)"
+    return 0
+  fi
+
+  # Feature precondition: msb >= 0.6.9 (the --vsock floor). Below it, the forward
+  # is a no-op by design, so there is nothing to assert.
+  local mver
+  mver=$(msb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)
+  if [ -n "$mver" ] && ! _verify_ver_ge "$mver" "0.6.9"; then
+    skip "${backend}: host ssh-agent forwarding (msb ${mver} < 0.6.9; --vsock unavailable)"
+    return 0
+  fi
+
+  # Guest precondition: socat present (the bridge needs it; documented prereq).
+  if ! run_acq "exec socat-present" --backend "$backend" exec "$name" -- sh -c \
+      'command -v socat >/dev/null 2>&1'; then
+    skip "${backend}: host ssh-agent forwarding (socat not in the guest image; bake it into ACQ_MSB_IMAGE)"
+    return 0
+  fi
+
+  # (a) The guest session exports SSH_AUTH_SOCK (acq wires it on exec). A bare,
+  #     non-empty value is the assertion — acq points it at the in-guest bridge.
+  if run_acq "exec ssh-auth-sock" --backend "$backend" exec "$name" -- sh -c \
+      'test -n "${SSH_AUTH_SOCK:-}"'; then
+    pass "${backend}: guest session has SSH_AUTH_SOCK exported (ssh-agent forward wired)"
+  else
+    fail "${backend}: guest SSH_AUTH_SOCK not exported (ssh-agent forward not wired)"
+    dump "exec output" "$LAST_OUT"
+    return 0
+  fi
+
+  # (b) The guest's forwarded agent must contain THIS EXACT ephemeral public key.
+  #     We match on the key body (type + base64), not a count: a count can be
+  #     satisfied by the WRONG agent (e.g. if the guest were somehow wired to a
+  #     different host agent that happens to hold keys), whereas the unique
+  #     throwaway key we just generated proves the guest is reaching OUR agent
+  #     specifically — the real end-to-end proof of the --vsock + socat path.
+  #
+  #     The guest emits deterministic ACQVK_MATCH=yes/no and ACQVK_COUNT=<n>
+  #     lines (always exits 0). We use DISTINCTIVE keys (ACQVK_ prefix) and parse
+  #     them UNANCHORED, because msb prints a `• Backend  local` banner into the
+  #     exec stream that can prepend onto the probe's first output line — an
+  #     anchored `^COUNT=` match would then miss it and misread 0. We pass the key
+  #     body as a positional arg to the guest sh -c (a PUBLIC key, safe to pass).
+  local _probe='
+    body="$1"
+    out=$(ssh-add -L 2>/dev/null)
+    n=$(printf "%s\n" "$out" | grep -c "^ssh-")
+    if printf "%s\n" "$out" | grep -qF "$body"; then m=yes; else m=no; fi
+    printf "\nACQVK_COUNT=%s\nACQVK_MATCH=%s\n" "${n:-0}" "$m"
+  '
+  if run_acq "exec ssh-add-L" --backend "$backend" exec "$name" -- sh -c \
+      "$_probe" acq-ssh-probe "$EPHEMERAL_KEY_PUB"; then
+    local guest_match guest_keys
+    # Unanchored parse (tolerates the msb banner prepended onto the line).
+    guest_match=$(printf '%s\n' "$LAST_OUT" | sed -n 's/.*ACQVK_MATCH=\([a-z][a-z]*\).*/\1/p' | tail -n1)
+    guest_keys=$(printf '%s\n' "$LAST_OUT" | sed -n 's/.*ACQVK_COUNT=\([0-9][0-9]*\).*/\1/p' | tail -n1)
+    case "$guest_keys" in ""|*[!0-9]*) guest_keys=0 ;; esac
+    if [ "$guest_match" = "yes" ]; then
+      pass "${backend}: guest ssh-add -L exposes the ephemeral host key (vsock + socat forward reaches the host agent)"
+    elif [ "$guest_keys" -ge 1 ]; then
+      # The guest reached SOME agent (keys present) but NOT ours — the forward is
+      # wired to the wrong agent (e.g. acq forwarded a different SSH_AUTH_SOCK
+      # than the one we started). Fail with the count so the cause is visible.
+      fail "${backend}: guest agent does not hold the ephemeral key (guest has ${guest_keys} key(s), none match ours — forward wired to the wrong agent?)"
+      dump "guest ssh-add -L output" "$LAST_OUT"
+    else
+      fail "${backend}: guest ssh-add -L found no keys (vsock route / socat bridge not reaching the host agent)"
+      dump "guest ssh-add -L output" "$LAST_OUT"
+    fi
+  else
+    fail "${backend}: guest ssh-add -L probe did not run (msb exec failed)"
+    dump "guest ssh-add -L output" "$LAST_OUT"
+  fi
+}
+
+# _verify_ver_ge A B — succeed (0) iff dotted version A >= B (numeric, 3 fields).
+# Local to the verifier (mirrors the adapters' own comparison shape) so the
+# ssh-agent check can gate on the msb --vsock floor without sourcing an adapter.
+_verify_ver_ge() {
+  local a="$1" b="$2" i ap bp
+  local oldifs="$IFS"; IFS='.'
+  # shellcheck disable=SC2086
+  set -- $a; local a1="${1:-0}" a2="${2:-0}" a3="${3:-0}"
+  # shellcheck disable=SC2086
+  set -- $b; local b1="${1:-0}" b2="${2:-0}" b3="${3:-0}"
+  IFS="$oldifs"
+  for i in "$a1:$b1" "$a2:$b2" "$a3:$b3"; do
+    ap="${i%%:*}"; bp="${i##*:}"
+    ap="${ap%%[!0-9]*}"; bp="${bp%%[!0-9]*}"
+    ap="${ap:-0}"; bp="${bp:-0}"
+    if [ "$ap" -gt "$bp" ]; then return 0; fi
+    if [ "$ap" -lt "$bp" ]; then return 1; fi
+  done
+  return 0
 }
 
 # _verify_oci_checks BACKEND NAME — the OCI engine + run checks (msb only,

@@ -424,6 +424,60 @@ _ACQ_MSB_STARTUP_STAGED=""
 # deployment's msb serve expects a different account).
 ACQ_MSB_SSH_USER="${ACQ_MSB_SSH_USER:-root}"
 
+# ---------------------------------------------------------------------------
+# Host ssh-agent / socket forwarding over msb --vsock (ADR-0021)
+# ---------------------------------------------------------------------------
+# msb >= 0.6.9 exposes a HOST unix socket at guest AF_VSOCK CID 2:PORT via a
+# create-time `--vsock HOST_PATH:PORT[/stream|/dgram]` flag. git/ssh in the guest
+# speak a unix socket path (SSH_AUTH_SOCK), not vsock, so an in-guest socat
+# bridge translates the vsock route back to a unix socket. See ADR-0021.
+#
+# Fixed guest vsock port for the ssh-agent route (avoids msb's reserved 123).
+# SINGLE SOURCE OF TRUTH for the port: the neutral helper in common.sh emits the
+# --vsock route on this port and the in-guest socat bridge connects to it, so
+# they must never diverge. If a user overrides ACQ_SSH_AGENT_VSOCK_PORT (the
+# neutral name common.sh reads), honor it here too so the route and the bridge
+# stay in lockstep; otherwise both default to 3552.
+ACQ_MSB_SSH_AGENT_VSOCK_PORT="${ACQ_MSB_SSH_AGENT_VSOCK_PORT:-${ACQ_SSH_AGENT_VSOCK_PORT:-3552}}"
+# Where SSH_AUTH_SOCK points inside the guest — the unix socket the socat bridge
+# listens on and forwards to the host agent over vsock.
+ACQ_MSB_SSH_AGENT_GUEST_SOCK="${ACQ_MSB_SSH_AGENT_GUEST_SOCK:-/home/agent/.acq/ssh-agent.sock}"
+# Defense-in-depth: the guest sock path is interpolated into a root/agent `sh -c`
+# string when starting the socat bridge and writing the marker. It is acq's own
+# constant, but a user MAY override it — reject anything but an absolute path in a
+# word-safe charset so a stray quote/space can never break out of the `sh -c`.
+# Validate the WHOLE string with a negated character class (a `/[chars]*` glob
+# would only check the second character), and require a leading slash.
+case "$ACQ_MSB_SSH_AGENT_GUEST_SOCK" in
+  /*) : ;;  # must be absolute
+  *)
+    echo "acq(msb): warning: ignoring non-absolute ACQ_MSB_SSH_AGENT_GUEST_SOCK='$ACQ_MSB_SSH_AGENT_GUEST_SOCK'; using default." >&2
+    ACQ_MSB_SSH_AGENT_GUEST_SOCK="/home/agent/.acq/ssh-agent.sock"
+    ;;
+esac
+case "$ACQ_MSB_SSH_AGENT_GUEST_SOCK" in
+  *[!A-Za-z0-9._/-]*)
+    echo "acq(msb): warning: ignoring unsafe ACQ_MSB_SSH_AGENT_GUEST_SOCK='$ACQ_MSB_SSH_AGENT_GUEST_SOCK'; using default." >&2
+    ACQ_MSB_SSH_AGENT_GUEST_SOCK="/home/agent/.acq/ssh-agent.sock"
+    ;;
+esac
+# The ssh-agent forward feature needs msb >= 0.6.9 (first release with --vsock).
+# The global MIN_MSB_VERSION floor stays 0.6.8; this gates ONLY the forward.
+MIN_MSB_VSOCK_VERSION="0.6.9"
+# Share the ssh-agent guest port with common.sh's neutral helper so both sides
+# agree on the port (the helper emits it, this adapter translates it). This is
+# the SAME value as ACQ_MSB_SSH_AGENT_VSOCK_PORT above by construction, so the
+# published --vsock route and the socat bridge's VSOCK-CONNECT target match.
+ACQ_SSH_AGENT_VSOCK_PORT="${ACQ_SSH_AGENT_VSOCK_PORT:-$ACQ_MSB_SSH_AGENT_VSOCK_PORT}"
+# Module-scope flag: set to 1 during provision when an ssh-agent forward is
+# emitted, so provision knows to start the bridge and record the marker. Reset
+# per provision. acq_backend_start reads the persisted marker instead.
+_ACQ_MSB_SSH_AGENT_FORWARDING=0
+# Module-scope flag: set to 1 once the ssh-agent trust-boundary notice has been
+# printed, so the "forwarding host ssh-agent" notice appears at most once per
+# process even if the vsock-flag helper runs more than once. See ADR-0021.
+_ACQ_MSB_SSH_AGENT_NOTICE_SHOWN=0
+
 # Module-level monotonic counter for ephemeral serve-port selection. The call
 # site is `sport=$(_acq_msb_pick_ephemeral_port)` — a COMMAND SUBSTITUTION, which
 # runs in a subshell, so a plain shell variable incremented inside the helper
@@ -721,6 +775,11 @@ acq_backend_start() {
   # devtmpfs re-created each boot, so the provision-time grant is lost across
   # restart. Cheap + idempotent; no-op when ENSURE_OCI is disabled or absent.
   _acq_msb_grant_oci_devs "$_name"
+  # The host ssh-agent forward's --vsock route persists in the sandbox config
+  # across stop/start, but the in-guest socat bridge process dies on stop, so it
+  # must be (re)started here too. Gated on the persisted marker (no provision ran
+  # this path, so _ACQ_MSB_SSH_AGENT_FORWARDING is not set). See ADR-0021.
+  _acq_msb_start_ssh_agent_bridge "$_name"
 }
 
 # ---------------------------------------------------------------------------
@@ -1376,6 +1435,15 @@ _acq_msb_exec_flags_into() {
     1000|agent)
       eval "$_uflag=(-u agent)"
       eval "$_eflag=(-e \"HOME=/home/agent\")"
+      # When host ssh-agent forwarding is active, also point the agent user's
+      # kit commands at the in-guest bridge socket. The git-ssh-sign kit resolves
+      # the signing key via `ssh-add -L` in its initFiles/startup commands, which
+      # need SSH_AUTH_SOCK to reach the forwarded agent. This is belt-and-
+      # suspenders (git signing itself runs as a child of the attached agent
+      # process, which already gets SSH_AUTH_SOCK via attach/run). See ADR-0021.
+      if [ "${_ACQ_MSB_SSH_AGENT_FORWARDING:-0}" = "1" ]; then
+        eval "$_eflag+=(-e \"SSH_AUTH_SOCK=\$ACQ_MSB_SSH_AGENT_GUEST_SOCK\")"
+      fi
       ;;
     *)
       eval "$_uflag=(-u \"\$_user\")"
@@ -1842,6 +1910,10 @@ acq_backend_provision() {
   _ACQ_MSB_STARTUP_STAGED=""
   _ACQ_MSB_STARTUP_STAGE_FILES=()
 
+  # Reset the host ssh-agent forwarding flag for this provision; it is set later
+  # by _acq_msb_vsock_flags_into when an ssh-agent forward is emitted. See ADR-0021.
+  _ACQ_MSB_SSH_AGENT_FORWARDING=0
+
   # Fetch each built-in kit and gather its create-time contributions.
   # Zscaler CA trust FIRST so later network-fetching kits (playbook clone, USAi
   # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
@@ -2130,6 +2202,14 @@ EOF
     ACQ_MSB_GUEST_WORKSPACE="$_first_guest"
   fi
 
+  # Host ssh-agent / socket forwarding (ADR-0021). Translate the neutral
+  # host-socket forwards into msb `--vsock HOST:PORT/KIND` create flags. Gated on
+  # msb >= 0.6.9; a lower version warns once and skips (forwarding is opt-in
+  # convenience, never a hard failure).
+  local _vsock_flags=()
+  _acq_msb_vsock_flags_into _vsock_flags
+  [ "${#_vsock_flags[@]}" -gt 0 ] && create_flags+=("${_vsock_flags[@]}")
+
   # Credentials: read from the acq-owned secret store (keychain/file), scoped to
   # this sandbox first, then global. The real value is read into a TRANSIENT env
   # var (never argv, never the kit spec) and bound with `msb --secret ENV@HOST`,
@@ -2312,6 +2392,14 @@ EOF
   done
   acq_spin_stop "Applying configuration kits"
   acq_debug "msb provision: all kits applied; provision complete ($name)"
+
+  # Start the in-guest socat bridge for the host ssh-agent forward (ADR-0021).
+  # The --vsock route only exposes the host socket at guest AF_VSOCK CID 2:PORT;
+  # git/ssh speak a unix socket path, so socat bridges the two. Only starts when
+  # forwarding is active AND socat is present in the guest (checked first so a
+  # missing socat is a clear warning, not a broken bridge). Fail-soft.
+  _acq_msb_check_socat "$name" && _acq_msb_start_ssh_agent_bridge "$name"
+
   # Record host-side bundle provenance now the built-in bundle is applied.
   # Best-effort: a provenance write failure never affects the
   # sandbox. Reached only when provision did not abort earlier under set -e.
@@ -2563,6 +2651,133 @@ _acq_msb_check_prereqs() {
   else
     acq_debug "msb prereqs present (node/git/curl/update-ca-certificates) in $name"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Host ssh-agent / socket forwarding over msb --vsock (ADR-0021)
+# ---------------------------------------------------------------------------
+
+# _acq_msb_vsock_flags_into ARRVAR — translate the neutral host-socket forwards
+# (common.sh acq_host_socket_forwards) into msb `--vsock HOST:PORT/KIND` create
+# flags appended to the named array. Gated on msb >= 0.6.9 (the first release
+# with --vsock): a lower version WARNS ONCE and emits nothing, because
+# forwarding is opt-in convenience and must never turn a create into a hard
+# failure. Sets _ACQ_MSB_SSH_AGENT_FORWARDING=1 when an ssh-agent forward is
+# emitted, so provision knows to start the in-guest socat bridge and record the
+# persistence marker. See ADR-0021.
+_acq_msb_vsock_flags_into() {
+  local _arr="$1" _line _path _port _kind _label _current
+  # Collect the requested forwards first so the version gate can decide whether
+  # anything is even being asked for (only warn when a forward was requested).
+  local _forwards=()
+  while IFS= read -r _line; do
+    [ -n "$_line" ] && _forwards+=("$_line")
+  done <<EOF
+$(acq_host_socket_forwards)
+EOF
+  [ "${#_forwards[@]}" -gt 0 ] || return 0
+
+  _current=$(_acq_msb_version)
+  if [ "$(_acq_msb_version_ge "$_current" "$MIN_MSB_VSOCK_VERSION")" -ne 0 ]; then
+    echo "acq(msb): host ssh-agent/socket forwarding needs msb >= ${MIN_MSB_VSOCK_VERSION}" \
+         "(found ${_current}); skipping. Upgrade msb to forward the host ssh-agent" \
+         "into the guest." >&2
+    return 0
+  fi
+
+  local _f
+  for _f in "${_forwards[@]}"; do
+    # Each line is "HOST_PATH<TAB>PORT<TAB>KIND<TAB>LABEL" (see common.sh).
+    _path=$(printf '%s' "$_f" | cut -f1)
+    _port=$(printf '%s' "$_f" | cut -f2)
+    _kind=$(printf '%s' "$_f" | cut -f3)
+    _label=$(printf '%s' "$_f" | cut -f4)
+    eval "$_arr+=(--vsock \"\${_path}:\${_port}/\${_kind}\")"
+    if [ "$_label" = "ssh-agent" ]; then
+      _ACQ_MSB_SSH_AGENT_FORWARDING=1
+      # Make the implicit opt-in a CONSCIOUS choice (ADR-0021 trust-boundary):
+      # SSH_AUTH_SOCK being set is the only trigger, so a user who always exports
+      # it (tmux/screen/profile persistence) could forward their agent into a
+      # guest running untrusted code without a deliberate per-run decision. Print
+      # a one-time notice naming the opt-out and the ssh-add -c mitigation so the
+      # forward is never silent. Guarded by a module flag so it prints once even
+      # if the helper runs more than once in a process (create + a later probe).
+      if [ "${_ACQ_MSB_SSH_AGENT_NOTICE_SHOWN:-0}" != "1" ]; then
+        _ACQ_MSB_SSH_AGENT_NOTICE_SHOWN=1
+        echo "acq(msb): forwarding your host ssh-agent into the guest because SSH_AUTH_SOCK" \
+             "is set. Guest code can use every key the agent holds while the sandbox runs;" \
+             "unset SSH_AUTH_SOCK to opt out, or run 'ssh-add -c' to confirm each use. See ADR-0021." >&2
+      fi
+    fi
+  done
+}
+
+# _acq_msb_check_socat NAME — return 0 iff socat is present in the guest, else
+# warn and return non-zero. Only meaningful when host ssh-agent forwarding is
+# active (the socat bridge translates the --vsock route back to a unix socket).
+# We warn rather than install: egress is locked to the kits' hosts, so a package
+# mirror is unreachable during provision. See ADR-0021.
+_acq_msb_check_socat() {
+  local name="$1"
+  [ "${_ACQ_MSB_SSH_AGENT_FORWARDING:-0}" = "1" ] || return 1
+  if msb exec "$name" -- sh -c 'command -v socat >/dev/null 2>&1' </dev/null >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "acq(msb): warning: socat not found in the guest; host ssh-agent forwarding" \
+       "needs socat to bridge the vsock route to a unix socket. Bake socat into" \
+       "ACQ_MSB_IMAGE. git signing will fail until then." >&2
+  return 1
+}
+
+# _acq_msb_start_ssh_agent_bridge NAME — (re)start the in-guest socat bridge that
+# exposes the forwarded host ssh-agent as a unix socket at
+# ACQ_MSB_SSH_AGENT_GUEST_SOCK. The --vsock route persists across msb stop/start,
+# but the socat process dies on stop, so this runs on provision AND on
+# acq_backend_start (mirrors _acq_msb_grant_oci_devs). Fail-soft: warns, never
+# aborts. Works from EITHER the in-provision flag OR the persisted marker (start
+# has no provision flag set), so the guest sock path is resolved from whichever
+# source is authoritative for the call. See ADR-0021.
+_acq_msb_start_ssh_agent_bridge() {
+  local name="$1" _sock="" _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT"
+  if [ "${_ACQ_MSB_SSH_AGENT_FORWARDING:-0}" = "1" ]; then
+    _sock="$ACQ_MSB_SSH_AGENT_GUEST_SOCK"
+  else
+    # No provision ran this path (e.g. acq_backend_start): read the persisted
+    # marker recorded at provision. Empty marker => forwarding not configured.
+    _sock=$(_acq_msb_ssh_auth_sock_for "$name")
+    [ -n "$_sock" ] || return 0
+  fi
+
+  # The guest sock path and port are acq's own constants (word-safe charset), so
+  # there is no injection risk; still keep them as fixed literals in the sh -c.
+  # A SINGLE socat under nohup (detached): the --vsock route reconnects lazily,
+  # and the bridge is re-launched fresh on each provision/start, so no supervisor
+  # loop is needed. `rm -f` clears any stale socket before re-listening.
+  msb exec "$name" -u agent -- sh -c "
+    mkdir -p \"\$(dirname '$_sock')\" 2>/dev/null || true
+    rm -f '$_sock' 2>/dev/null || true
+    nohup socat UNIX-LISTEN:'$_sock',fork,reuseaddr VSOCK-CONNECT:2:'$_port' >/dev/null 2>&1 &
+  " </dev/null >/dev/null 2>&1 || {
+    echo "acq(msb): warning: failed to start the ssh-agent bridge in '$name'." >&2
+    return 0
+  }
+
+  # Record the guest sock path so attach/exec/start can resolve SSH_AUTH_SOCK
+  # even when no provision flag is set. Only written when forwarding is active.
+  msb exec "$name" -u 0 -- sh -c \
+    "mkdir -p /var/lib/acq && printf '%s' '$_sock' > /var/lib/acq/ssh-auth-sock" \
+    </dev/null >/dev/null 2>&1 || true
+  acq_debug "msb: ssh-agent bridge started at $_sock (vsock port $_port) in $name"
+}
+
+# _acq_msb_ssh_auth_sock_for NAME — echo the recorded guest ssh-agent sock path
+# (the SSH_AUTH_SOCK value git/ssh should use in the guest), or empty when
+# forwarding was never configured for this sandbox. Read from the persisted
+# marker so run/attach on a name-only re-entry still find it. See ADR-0021.
+_acq_msb_ssh_auth_sock_for() {
+  local name="$1"
+  msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/ssh-auth-sock 2>/dev/null' \
+    </dev/null 2>/dev/null | tr -d '[:space:]'
 }
 
 # ---------------------------------------------------------------------------
@@ -2828,7 +3043,15 @@ EOF
 acq_backend_run() {
   local name="$1"
   shift
-  msb exec -u agent -e HOME=/home/agent "$name" "$@"
+  # If the host ssh-agent is forwarded, git/ssh in the guest must see
+  # SSH_AUTH_SOCK pointing at the in-guest bridge socket. See ADR-0021.
+  local _sock
+  _sock=$(_acq_msb_ssh_auth_sock_for "$name")
+  if [ -n "$_sock" ]; then
+    msb exec -u agent -e HOME=/home/agent -e "SSH_AUTH_SOCK=$_sock" "$name" "$@"
+  else
+    msb exec -u agent -e HOME=/home/agent "$name" "$@"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -2896,18 +3119,27 @@ _acq_msb_attach() {
   # Common flags for the interactive attach: PTY, agent user, workspace cwd, and
   # a sane $SHELL (msb's default interactive shell is the base image's Node REPL).
   # exec so acq hands the terminal straight to msb (no wrapper between TTY & PTY).
+  #
+  # When the host ssh-agent is forwarded, also point the session at the in-guest
+  # bridge socket so git signing (and any ssh) reaches the agent. Held in an
+  # optional array so the flag is simply absent when forwarding is inactive; the
+  # ${arr[@]+…} guard keeps it bash 3.2 + set -u safe. See ADR-0021.
+  local _sock _sockflag=()
+  _sock=$(_acq_msb_ssh_auth_sock_for "$name")
+  [ -n "$_sock" ] && _sockflag=(-e "SSH_AUTH_SOCK=$_sock")
+
   if [ "$agent" = "shell" ]; then
-    exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh "$name" -- /bin/sh -l
+    exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} "$name" -- /bin/sh -l
   fi
 
   # Pre-check the agent binary AS the agent user; fall back to a shell (with a
   # notice) rather than launching into a broken/blank session if it's missing.
   if ! msb exec -u agent "$name" -- sh -c "command -v '$agent'" </dev/null >/dev/null 2>&1; then
     echo "acq(msb): '$agent' not found in sandbox '$name'; opening a shell instead." >&2
-    exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh "$name" -- /bin/sh -l
+    exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} "$name" -- /bin/sh -l
   fi
 
-  exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh "$name" -- "$agent" "$@"
+  exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} "$name" -- "$agent" "$@"
 }
 
 # ---------------------------------------------------------------------------
