@@ -218,7 +218,8 @@ right after `_acq_msb_ensure_agent_user`.
   `security.ubuntu.com`, `**.debian.org`, `launchpad.net`) are **already in the
   default balanced egress baseline** ([ADR-0018](0018-msb-balanced-egress-baseline.md)),
   so no new net-rule is needed under the default policy. With
-  `ACQ_MSB_BALANCED_EGRESS=0`, or a custom base whose egress is otherwise
+  `ACQ_NETWORK_TIER=strict` (or the deprecated `ACQ_MSB_BALANCED_EGRESS=0`, which
+  now maps to `strict`), or a custom base whose egress is otherwise
   narrowed, the mirror is unreachable and the step **fails soft** — chosen
   deliberately so an operator's explicit egress narrowing is respected rather
   than silently re-widened (the warning names the mirror hosts and the

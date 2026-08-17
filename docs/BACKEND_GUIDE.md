@@ -169,7 +169,9 @@ Tunables:
 | `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
 | `ACQ_MSB_ENSURE_OCI` | `1` (on) | Provision an OCI container engine (podman) at create so agents can run OCI images (`docker run`, `docker compose`). Installs `ACQ_MSB_PODMAN_PKGS` and aliases `docker` → `podman`. Set `0`/`false`/`no`/`off`/empty to skip (e.g. a base that bakes its own working engine). Fails soft if the OS package mirror is unreachable. See ADR-0020. |
 | `ACQ_MSB_PODMAN_PKGS` | `podman podman-compose` | Packages installed to provide the OCI engine (space-separated). `podman-compose` is the `docker compose` / `podman compose` provider. Override for a different set or an internal mirror's names. |
-| `ACQ_MSB_BALANCED_EGRESS` | `1` (on) | Apply the sbx-`balanced` egress baseline at create (`--net-default-egress deny` + an `allow@host:tcp:port` rule per vendored entry + gateway-DNS rules `allow@host:udp:53` + `allow@host:tcp:53`). The deny-default is **egress only** — ingress keeps msb's baseline `allow` so published ports stay reachable (ADR-0019). Set `0`/`false`/`no`/`off`/empty to disable and fall back to kit-only egress (no deny-default emitted). See ADR-0018. |
+| `ACQ_NETWORK_TIER` | `balanced` | Neutral egress posture (`strict`\|`balanced`\|`open`), the backend-agnostic selector defined by the agentic-coding-patterns network-tiers contract (ADR-0002). **All tiers are deny-by-default except `open`**; the tier only sizes the baseline allowlist. `strict` = `--net-default-egress deny` + gateway DNS + the kits' own `caps.network.allow` hosts ONLY (recommended for GFE / high-assurance). `balanced` = the same deny-default + the curated sbx-`balanced` baseline (ADR-0018) unioned with the kit hosts. `open` = **unrestricted egress** (no deny-default); testing only, never for GFE, and refused unless `ACQ_NETWORK_TIER_CONFIRM_OPEN=1`. Invalid values fail closed to `balanced`. |
+| `ACQ_NETWORK_TIER_CONFIRM_OPEN` | (unset) | Required confirmation for `ACQ_NETWORK_TIER=open`. Set to `1` to acknowledge that the sandbox runs with unrestricted egress; otherwise `open` is refused at provision time (fail-closed). Treated like `--privileged` — never a default. |
+| `ACQ_MSB_BALANCED_EGRESS` | (deprecated) | **Deprecated alias** for `ACQ_NETWORK_TIER`; retained for one deprecation window and removed in a future major. A `1`/on value maps to `ACQ_NETWORK_TIER=balanced`; a `0`/`false`/`no`/`off`/empty value maps to `ACQ_NETWORK_TIER=strict` (deny-by-default, kit hosts only — a former "off" no longer means permissive; an upgrade never silently loosens egress). `ACQ_NETWORK_TIER` wins when both are set, and a one-time notice is printed. Migrate to `ACQ_NETWORK_TIER`; use `open` if you truly need unrestricted egress. |
 | `ACQ_MSB_BALANCED_HOSTS_FILE` | `<repo>/acq.backends/msb-balanced-hosts.txt` | Path to the vendored host list (a verbatim mirror of `sbx policy inspect local-policy`). Override for a site-specific egress set. |
 | `ACQ_MSB_WORKSPACE` | (first workspace) | Agent's **starting directory** (`-w`) on attach. Does NOT change the mount, which is always host-path:host-path; overrides only where the agent starts. |
 | `ACQ_MSB_MEMORY` | `4G` | Guest RAM at create (`-m`); `4G`/`4096`/`512M` (bare = MiB). Set empty to use msb's 512 MiB default |
@@ -195,7 +197,23 @@ microVM) to `msb create`. Override `ACQ_MSB_DNS_NAMESERVER` if `1.1.1.1` is
 blocked in your environment, or set it empty to fall back to msb's default (only
 if your host resolver is reachable from the guest).
 
-### Network egress (sbx-`balanced` parity)
+### Network egress tiers (`ACQ_NETWORK_TIER`)
+
+Egress posture is selected by the **neutral network tier**, `ACQ_NETWORK_TIER`
+(`strict` | `balanced` | `open`, default `balanced`). This is the
+backend-agnostic vocabulary defined by the agentic-coding-patterns
+network-tiers contract (its ADR-0002); each backend maps the tier to its native
+egress primitive. **All tiers are deny-by-default except `open`** — the tier
+only sizes the baseline allowlist:
+
+| Tier | Meaning | msb emission |
+|------|---------|--------------|
+| `strict` | Deny-by-default; the kits' own `caps.network.allow` hosts ONLY. Recommended for GFE / high-assurance. | `--net-default-egress deny` + gateway DNS (`allow@host:udp:53`/`:tcp:53`) + the kit `allow@…` rules. No baseline. |
+| `balanced` (default) | Deny-by-default + the curated sbx-`balanced` baseline, unioned with the kit hosts. | `--net-default-egress deny` + the vendored baseline rules + gateway DNS + the kit `allow@…` rules. |
+| `open` | Unrestricted egress. **Testing only, never for GFE.** | No deny-default emitted; kit/npm/secret `allow@…` rules ride msb's own (permissive) egress default. Refused unless `ACQ_NETWORK_TIER_CONFIRM_OPEN=1`. |
+
+The effective allowlist is `tier baseline ∪ per-kit caps.network.allow ∪ any
+per-sandbox additions`, always under deny-by-default (for `strict`/`balanced`).
 
 sbx ships a **`balanced`** network policy (the recommended sbx default) that
 allows a broad set of developer hosts — AI services, package registries,
@@ -204,8 +222,8 @@ certificate-validation endpoints — and blocks everything else. msb has no
 equivalent default; its egress is deny-by-default with only the hosts the kits
 declare (plus the npm registry when installing an agent).
 
-To reach parity, the msb backend applies the **same host set as sbx `balanced`
-by default**: at create it emits `--net-default-egress deny` plus one
+To reach parity, the msb backend's `balanced` tier applies the **same host set
+as sbx `balanced`**: at create it emits `--net-default-egress deny` plus one
 `allow@<host>:tcp:<port>` rule per entry in the vendored list
 `acq.backends/msb-balanced-hosts.txt` (a verbatim mirror of `sbx policy inspect
 local-policy`), plus gateway-DNS rules (`allow@host:udp:53` +
@@ -217,9 +235,15 @@ kits' own `caps.network.allow` rules.
   not the symmetric `--net-default`). Ingress keeps msb's baseline `allow`, so
   create-time `-p HOST:GUEST` published ports stay reachable — a symmetric deny
   would RST inbound to them (see [ADR-0019](adr/0019-msb-balanced-egress-is-egress-only.md)).
-- **Disable** with `ACQ_MSB_BALANCED_EGRESS=0` (falls back to kit-only egress; no
-  deny-default is emitted, so `acq` does not restrict egress in that mode).
-- **Customize** by pointing `ACQ_MSB_BALANCED_HOSTS_FILE` at your own list.
+- **Select the tier** with `ACQ_NETWORK_TIER` (default `balanced`). Use `strict`
+  for kit-hosts-only deny-by-default; `open` (with `ACQ_NETWORK_TIER_CONFIRM_OPEN=1`)
+  to disable the deny-default for testing only.
+- **Customize** the `balanced` baseline by pointing `ACQ_MSB_BALANCED_HOSTS_FILE`
+  at your own list.
+- **`ACQ_MSB_BALANCED_EGRESS` is deprecated** — it now aliases `ACQ_NETWORK_TIER`:
+  a `1`/on value maps to `balanced`; a `0`/off/empty value maps to `strict` (a
+  former "off" is now deny-by-default with kit hosts only, NOT permissive — an
+  upgrade never silently loosens egress). Migrate to `ACQ_NETWORK_TIER`.
 - **Wildcards / ports:** sbx `**.host` / `*.host` become msb domain-suffix
   `*.host`; the intra-label glob `crl*.digicert.com` is broadened to
   `*.digicert.com` (msb has no intra-label glob — this is logged and is the one
@@ -421,7 +445,7 @@ volume), the adapter provisions **podman** at create time and aliases `docker` �
 
 The install uses the OS package mirror, which under the default balanced egress
 baseline (ADR-0018) is already reachable — no extra net-rule needed. With
-`ACQ_MSB_BALANCED_EGRESS=0`, or a custom base whose egress is narrowed, the
+`ACQ_NETWORK_TIER=strict`, or a custom base whose egress is narrowed, the
 mirror is unreachable and the step **fails soft** (a warning; provision
 continues; OCI is simply unavailable). Turn the step off entirely with
 `ACQ_MSB_ENSURE_OCI=0` (e.g. a base that bakes its own working engine), or point
