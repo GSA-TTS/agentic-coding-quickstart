@@ -6337,7 +6337,7 @@ if _mk_unix_socket "$STUBDIR/agent15.sock"; then
   c15_err=$(
     export SSH_AUTH_SOCK="$STUBDIR/agent15.sock" STUB_MSB_VERSION=0.6.9
     . "${REPO_ROOT}/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null
+    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s\n' "${f[@]}" >/dev/null
   )
   assert_contains "msb vsock(10c15): forward prints a trust-boundary notice" "$c15_err" "forwarding your host ssh-agent"
   assert_contains "msb vsock(10c15): notice names the SSH_AUTH_SOCK opt-out" "$c15_err" "unset SSH_AUTH_SOCK to opt out"
@@ -6346,8 +6346,11 @@ if _mk_unix_socket "$STUBDIR/agent15.sock"; then
   c15_count=$(
     export SSH_AUTH_SOCK="$STUBDIR/agent15.sock" STUB_MSB_VERSION=0.6.9
     . "${REPO_ROOT}/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null
-    g=(); _acq_msb_vsock_flags_into g 2>&1 1>/dev/null
+    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s\n' "${f[@]}" >/dev/null
+    # Invoke a SECOND time in the same process: the notice must NOT repeat
+    # (guarded by the module-scope _ACQ_MSB_SSH_AGENT_NOTICE_SHOWN flag). Reuse
+    # the same array and read it so shellcheck sees the assignment used.
+    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s\n' "${f[@]}" >/dev/null
   ) 2>&1
   n=$(printf '%s\n' "$c15_count" | grep -c "forwarding your host ssh-agent" || true)
   assert_eq "msb vsock(10c15): notice prints at most once per process" "1" "$n"

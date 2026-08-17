@@ -48,7 +48,7 @@ inside an msb sandbox:
   (`/.msb/rootfs/...`). Docker's default `overlay2` storage driver **cannot be
   stacked on an overlay root** without a dedicated lower-level filesystem —
   which is exactly why the msb project's own
-  [docker-in-a-sandbox recipe](https://github.com/superradcompany/microsandbox/blob/main/docs/recipes/docker/docker-in-sandbox.mdx)
+  [docker-in-a-sandbox recipe](https://github.com/superradcompany/microsandbox/blob/main/docs/examples/docker/docker-in-sandbox.mdx)
   boots the `docker:dind` image *as the sandbox entrypoint* and mounts a
   **disk-backed** named volume at `/var/lib/docker`.
 - **`/dev/kvm` is absent** (no nested virtualization) — but that only rules out
@@ -310,7 +310,7 @@ right after `_acq_msb_ensure_agent_user`.
   remain available as an explicit operator opt-in via `ACQ_MSB_SHORT_NAME_MODE`.
 - **Disk-backed named volume for container storage (the msb dind recipe's
   approach) instead of fuse-overlayfs — DEFERRED, uncertain payoff.** The msb
-  [docker-in-sandbox recipe](https://github.com/superradcompany/microsandbox/blob/main/docs/recipes/docker/docker-in-sandbox.mdx)
+  [docker-in-sandbox recipe](https://github.com/superradcompany/microsandbox/blob/main/docs/examples/docker/docker-in-sandbox.mdx)
   mounts a `--mount-named …:/var/lib/docker:kind=disk` ext4 volume so the engine's
   storage sits on a real filesystem, letting it use the **native kernel `overlay`**
   driver instead of fuse-overlayfs. Applied to our rootless design this could give
@@ -390,7 +390,7 @@ right after `_acq_msb_ensure_agent_user`.
   problem that dind would have re-introduced)
 - msb evidence: docker-in-sandbox recipe requires `docker:dind` entrypoint +
   disk-backed `/var/lib/docker`
-  (`docs/recipes/docker/docker-in-sandbox.mdx`); microVM init is `/init.krun`
+  (`docs/examples/docker/docker-in-sandbox.mdx`); microVM init is `/init.krun`
   (no service manager); root FS is overlay-backed (observed live)
 - podman evidence: daemonless run model and rootless prerequisites
   (`newuidmap`/`newgidmap` from shadow-utils, `passt`/pasta) — podman rootless
