@@ -386,16 +386,9 @@ export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 
 ## Optional Integrations
 
-- **OpenCode Web** — Run OpenCode in the sandbox and reach it from your host
-  browser for clipboard support and richer markdown rendering. Use the
-  [`openchamber` acq kit](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations/isolation/acq-kits/openchamber),
-  which runs `opencode serve` on host-published port 4096 (plus the OpenChamber
-  UI on 3000).
-- **Editor integrations (Zed, etc.)** — Editor task configs and setup guides now
-  live in the community
-  [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations)
-  repo under `integrations/`. (For example, the Zed editor integration is at
-  `integrations/editors/zed/`.)
+- **Web UI** — The OpenCode text UI is functional but constraining. By running the Paseo kit, you can interact with sandboxed agents via a feature-rich web UI that includes clipboard support and richer markdown rendering. Use the
+  [`paseo` acq kit](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations/isolation/acq-kits/paseo), then open <http://localhost:6767> in your browser.
+- **Editor integrations** — Editor task configs and setup guides now live in the community [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns/tree/main/integrations) repo under `integrations/`. (For example, the Zed editor integration is at `integrations/editors/zed/`.)
 
 ---
 
