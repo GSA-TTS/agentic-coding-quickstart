@@ -108,7 +108,7 @@ microsandbox source:
 ```
 
 Source of truth (pinned to msb 0.6.7):
-[`crates/network/lib/config.rs` → `struct PublishedPort`](https://github.com/superradcompany/microsandbox/blob/main/crates/network/lib/config.rs)
+[`crates/network/lib/config/types.rs` → `struct PublishedPort`](https://github.com/superradcompany/microsandbox/blob/main/crates/network/lib/config/types.rs)
 and the `--format json` assembly in
 [`crates/cli/lib/commands/inspect.rs`](https://github.com/superradcompany/microsandbox/blob/main/crates/cli/lib/commands/inspect.rs).
 The parser (`_acq_msb_ports_from_inspect`) keys on the explicit `host_port` /
@@ -164,6 +164,6 @@ failure mode entirely.
   (gap K)
 - Implementation: [#238](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/238)
 - msb `inspect --format json` port shape (canonical):
-  [`crates/network/lib/config.rs`](https://github.com/superradcompany/microsandbox/blob/main/crates/network/lib/config.rs)
+  [`crates/network/lib/config/types.rs`](https://github.com/superradcompany/microsandbox/blob/main/crates/network/lib/config/types.rs)
   (`struct PublishedPort`) and
   [`crates/cli/lib/commands/inspect.rs`](https://github.com/superradcompany/microsandbox/blob/main/crates/cli/lib/commands/inspect.rs)
