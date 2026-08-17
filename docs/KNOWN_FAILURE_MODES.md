@@ -778,9 +778,11 @@ failure modes, see the kit's
 > into the msb guest **automatically when `SSH_AUTH_SOCK` is set** (via `--vsock`
 > plus an in-guest `socat` bridge, see
 > [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)), so
-> `git-ssh-sign` works on msb at parity with sbx. Live end-to-end verification is
-> pending a KVM host per the ADR-0011 periodic-validation cadence. The upstream
-> watch-list and follow-on `acq`/kit checklist are tracked in
+> `git-ssh-sign` works on msb at parity with sbx. Verified end-to-end on a
+> macOS/HVF host (2026-08-17) via `scripts/verify-backends` (the guest's forwarded
+> agent exposes a hermetic throwaway key over the `--vsock` + socat path); re-run
+> on the ADR-0011 periodic-validation cadence. The upstream watch-list and
+> follow-on `acq`/kit checklist are tracked in
 > [`GSA-TTS/agentic-coding-quickstart#303`](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/303).
 
 ---

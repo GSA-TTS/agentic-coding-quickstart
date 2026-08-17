@@ -137,11 +137,22 @@ provide it.
 
 ### Live verification
 
-End-to-end verification — in-guest `ssh-add -L` listing the host identities and a
-signed commit that verifies — requires a **KVM-capable host** and cannot run in CI
-or inside a sandbox (no nested sandboxes). This change could not run it here, so it
-is marked **BLOCKED / pending on a KVM host** per the ADR-0011 periodic-validation
-cadence and `scripts/verify-backends`.
+End-to-end verification — a hermetic throwaway ssh-agent on the host, forwarded
+into the guest, with in-guest `ssh-add -L` exposing that exact ephemeral key —
+requires a **KVM-capable host** and cannot run in CI or inside a sandbox (no
+nested sandboxes). It was **verified on a macOS/HVF host on 2026-08-17** via
+`scripts/verify-backends`:
+
+```
+ok    msb: guest session has SSH_AUTH_SOCK exported (ssh-agent forward wired)
+ok    msb: guest ssh-add -L exposes the ephemeral host key (vsock + socat
+      forward reaches the host agent)
+```
+
+`scripts/verify-backends` spins up its own throwaway agent (one throwaway key),
+lets acq forward it via `--vsock`, and asserts the guest's forwarded agent holds
+that exact public-key body — proving the vsock route + socat bridge reach the
+host agent. Re-run it on the ADR-0011 periodic-validation cadence.
 
 ## Security / Trust Boundary
 
@@ -183,18 +194,19 @@ property that the sandbox holds no key it could exfiltrate (SC-8, IA-5).
 ## Validation
 
 - Offline unit coverage in `scripts/test-acq` (stubbed `msb`/`socat`, no Docker or
-  network), cases **10c1–10c11**: the version gate (warn+skip on msb < 0.6.9),
+  network), cases **10c1–10c14**: the version gate (warn+skip on msb < 0.6.9),
   `--vsock` flag emission when `SSH_AUTH_SOCK` is set, the `socat` prereq check,
   bridge start on **provision** and on **start** (resume), `SSH_AUTH_SOCK`
   injection on attach/`acq exec`/kit commands, and SI-10 validation of the host
   socket path (absolute + existing socket) and the vsock port (integer in
   `1..4294967294`, `!= 123`) — invalid values are rejected before reaching
   `msb create`.
-- **Live end-to-end is deferred to a KVM host** per ADR-0011: in-guest
-  `ssh-add -L` lists the host identities and a signed commit verifies. Run
-  `scripts/verify-backends` on a sandbox-capable host and attach the transcript
-  before treating the forward as verified working (currently **BLOCKED** — no KVM
-  host in CI / inside a sandbox).
+- **Live end-to-end VERIFIED** on a macOS/HVF host (2026-08-17) via
+  `scripts/verify-backends`, which forwards a hermetic throwaway agent and
+  confirms the guest's forwarded agent exposes that exact ephemeral key
+  (`guest ssh-add -L exposes the ephemeral host key`). Re-run on the ADR-0011
+  periodic-validation cadence (it cannot run in CI / inside a sandbox — no nested
+  sandboxes).
 
 ## Links
 

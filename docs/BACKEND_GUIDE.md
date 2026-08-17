@@ -525,9 +525,10 @@ and exports it as `SSH_AUTH_SOCK` on attach, `acq exec`, and kit commands.
   `SSH_AUTH_SOCK` — **unset it to disable** — and only agent *operations* (not key
   material) traverse the socket. Where your agent supports it, use `ssh-add -c` /
   `ssh-add -h` to constrain use.
-- **Live end-to-end verification is pending a KVM host** (in-guest `ssh-add -L`
-  lists host identities, a signed commit verifies); it cannot run in CI or inside
-  a sandbox.
+- **Live end-to-end verified** on a macOS/HVF host (2026-08-17) via
+  `scripts/verify-backends`: the guest's forwarded agent exposes the verifier's
+  hermetic throwaway key over the `--vsock` + socat path. It cannot run in CI or
+  inside a sandbox (no nested sandboxes); re-run on the ADR-0011 cadence.
 
 See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md) for the full
 rationale, the fixed vsock port (3552), and the trust-boundary discussion.
