@@ -132,7 +132,7 @@ automation story.
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `msb` CLI | >= 0.6.8 | `--net-rule`, `--trust-host-cas`, `--secret`, and the `--net-default-egress` split (0.6.8) used by acq's balanced-egress default |
+| `msb` CLI | >= 0.6.8 | `--net-rule`, `--trust-host-cas`, `--secret`, and the `--net-default-egress` split (0.6.8) used by acq's balanced-egress default. Host ssh-agent forwarding for git signing additionally needs msb >= 0.6.9 (`--vsock`; [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)) — it warns and skips on older msb without changing this 0.6.8 floor. |
 | Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
 
 Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
@@ -182,6 +182,9 @@ Tunables:
 | `ACQ_MSB_SSH_KNOWN_HOSTS` | `$ACQ_MSB_SSH_DIR/known_hosts` | known_hosts file for the managed port-forward SSH |
 | `ACQ_MSB_SSH_USER` | `root` | Guest user for the post-hoc port-forward SSH session |
 | `ACQ_MSB_PORTS_DIR` | `$XDG_STATE_HOME/acq/ports` | Per-sandbox state for post-hoc published-port tunnels (serve + ssh PIDs) |
+| `ACQ_MSB_SSH_AGENT_VSOCK_PORT` | `3552` | Guest `AF_VSOCK` port the host ssh-agent is forwarded to (`--vsock`; avoids msb's reserved 123). Host ssh-agent forwarding, [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md) |
+| `ACQ_MSB_SSH_AGENT_GUEST_SOCK` | `/home/agent/.acq/ssh-agent.sock` | In-guest unix socket the `socat` bridge exposes and exports as `SSH_AUTH_SOCK` (git signing) |
+| `ACQ_FORWARD_HOST_SOCKETS` | (unset) | General host-socket forwarding: `PATH:PORT[/stream|/dgram][,...]` emitted as `--vsock` routes. The host ssh-agent forward is the automatic special case built on this vocab (ADR-0021) |
 
 ### DNS / name resolution
 
@@ -503,6 +506,32 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 > already holds the secret it stops with an `sbx secret rm …` hint rather than
 > silently replacing it. The acq store copy is always updated.
 
+### Host ssh-agent forwarding (git signing)
+
+The `git-ssh-sign` kit signs guest commits with the **host's** SSH agent, so no
+private key material ever enters the sandbox. On msb this is **automatic whenever
+the host `SSH_AUTH_SOCK` env var is set** (the same opt-in signal sbx uses): at
+create, acq forwards the host agent socket into the guest with
+`--vsock $SSH_AUTH_SOCK:3552/stream`, then starts an in-guest `socat` bridge that
+re-exposes the vsock route as a unix socket at `/home/agent/.acq/ssh-agent.sock`
+and exports it as `SSH_AUTH_SOCK` on attach, `acq exec`, and kit commands.
+
+- **Needs msb >= 0.6.9** (the release that adds `--vsock`) **and `socat` in the
+  base image** (the default `docker/sandbox-templates:shell-docker` ships it). On
+  an older msb, or a guest without `socat`, acq **warns and skips** the forward
+  (fail-soft) — the 0.6.8 floor is unchanged.
+- **It widens the host↔microVM trust boundary:** guest code can exercise every
+  key the host agent holds while the socket is reachable. It is **opt-in** via
+  `SSH_AUTH_SOCK` — **unset it to disable** — and only agent *operations* (not key
+  material) traverse the socket. Where your agent supports it, use `ssh-add -c` /
+  `ssh-add -h` to constrain use.
+- **Live end-to-end verification is pending a KVM host** (in-guest `ssh-add -L`
+  lists host identities, a signed commit verifies); it cannot run in CI or inside
+  a sandbox.
+
+See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md) for the full
+rationale, the fixed vsock port (3552), and the trust-boundary discussion.
+
 ### Historical limitations (msb)
 
 - **Private GitHub repos previously had to use the REST API, not `git clone`.**
@@ -537,6 +566,7 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 | Kit format | Neutral `hybrid/v1` → sbx-v2 (synthesized) | Neutral `hybrid/v1` → `msb` operations |
 | Zscaler CA | file-drop + `update-ca-certificates` | native `--trust-host-cas` shortcut |
 | Secret model | proxy `secret set-custom` | host-env `--secret ENV@HOST` |
+| Git commit signing / ssh-agent | host SSH agent forwarded implicitly by the sbx CLI (when SSH_AUTH_SOCK set) | host SSH agent forwarded via `--vsock` + an in-guest socat bridge when SSH_AUTH_SOCK set, msb >= 0.6.9 (ADR-0021) |
 | Secret binding breadth | 7 built-in services + any custom `--host/--env` endpoint | usai + github + **any** custom `--host/--env` endpoint bound generically via `--secret ENV@HOST` (shipped) |
 | Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; `SUPPORTS_SNAPSHOTS=0`) |
 | Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` now implemented (ADR-0015) — live end-to-end verification pending a KVM host |
@@ -592,7 +622,10 @@ swap-on-access placeholders) remains a larger future effort tracked separately.
 > ≥3 behavior-affecting fixes** (per the AGENTS.md §8.3 periodic-validation
 > cadence) and capture the transcript. The msb CLI command/flag surface used by
 > the adapter was confirmed against a live `msb --tree` on **msb 0.6.7**
-> (released 2026-07-27). See
+> (released 2026-07-27); the `--vsock` host-socket forwarding surface (host
+> ssh-agent forwarding, [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md))
+> was confirmed against a live `msb --tree` on **msb 0.6.9** (released
+> 2026-08-15). See
 > [ADR-0011](adr/0011-msb-backend-and-neutral-kits.md).
 
 ---

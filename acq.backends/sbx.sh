@@ -314,6 +314,13 @@ _acq_sbx_exec_retry() {
 # ---------------------------------------------------------------------------
 # acq_backend_provision — create a sandbox with kits applied
 # ---------------------------------------------------------------------------
+# Host ssh-agent forwarding: sbx forwards the host ssh-agent IMPLICITLY — the
+# sbx CLI wires it into the guest whenever the host SSH_AUTH_SOCK is set (the
+# same opt-in signal acq's neutral helper uses). So the neutral host-socket
+# forwarding vocabulary (common.sh acq_host_socket_forwards) is a NO-OP on sbx:
+# there is nothing to translate here, and adding an explicit forward would
+# duplicate what the sbx CLI already does. Only msb needs the --vsock + in-guest
+# socat bridge translation. See ADR-0021.
 
 acq_backend_provision() {
   _acq_sbx_ensure_kit_sources_allowed
