@@ -144,7 +144,10 @@ enter the guest**. To set secrets ahead of time (for CI or scripted setups),
 see [Secrets](docs/QUICKSTART.md#secrets) in the acq Quickstart.
 
 > [!NOTE]
-> Sandboxes sign your git commits with your host SSH key. For those commits to
+> Sandboxes sign your git commits with your host SSH key on **both** backends —
+> sbx forwards the host ssh-agent implicitly, and msb forwards it via `--vsock`
+> (msb >= 0.6.9) — both triggered simply by having your host `SSH_AUTH_SOCK` set,
+> so `ssh-add` your signing key first. For those commits to
 > show **Verified** on GitHub you need, one time: a GitHub-verified `user.email`
 > set **in the project** (repo-local config, since the sandbox has its own home
 > and does not see your host global git config) and your **public** signing key

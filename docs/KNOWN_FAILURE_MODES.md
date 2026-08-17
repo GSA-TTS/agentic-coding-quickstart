@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-08-12"
+last_updated: "2026-08-17"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -771,14 +771,19 @@ failure modes, see the kit's
 > the quickstart-side decision (docs + advisory) is recorded in
 > [ADR-0007](adr/0007-commit-verification-identity-guidance.md).
 >
-> **Backend note (`msb`):** the `git-ssh-sign` kit currently works on the `sbx`
-> backend but **not** on `msb`. `sbx` forwards the host ssh-agent into the
-> sandbox by default, so in-guest signing "just works"; `msb` has no equivalent
-> host-socket forwarding, so a guest cannot reach the host agent. This parity gap
-> is blocked on a tagged `msb` release that ships the upstream vsock/unix-socket
-> forwarding work (microsandbox `--vsock`), and is tracked — with the upstream
-> watch-list and our follow-on `acq`/kit checklist — in
-> [quickstart#303](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/303).
+> **Backend note (`msb`):** the `git-ssh-sign` kit works on **both** the `sbx`
+> and `msb` backends. `sbx` forwards the host ssh-agent into the sandbox
+> implicitly whenever `SSH_AUTH_SOCK` is set. `msb` 0.6.9 shipped `--vsock`
+> (superradcompany/microsandbox#1297), and `acq` now forwards the host ssh-agent
+> into the msb guest **automatically when `SSH_AUTH_SOCK` is set** (via `--vsock`
+> plus an in-guest `socat` bridge, see
+> [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)), so
+> `git-ssh-sign` works on msb at parity with sbx. Verified end-to-end on a
+> macOS/HVF host (2026-08-17) via `scripts/verify-backends` (the guest's forwarded
+> agent exposes a hermetic throwaway key over the `--vsock` + socat path); re-run
+> on the ADR-0011 periodic-validation cadence. The upstream watch-list and
+> follow-on `acq`/kit checklist are tracked in
+> [`GSA-TTS/agentic-coding-quickstart#303`](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/303).
 
 ---
 
@@ -1569,6 +1574,56 @@ acq exec <sandbox> -- sh /home/agent/openchamber-start.sh &
   definition, its port config, and your mounted repos persist. Always commit work
   to the mounted repos before shutting down, and expect to start a fresh agent
   session (not reattach the old one) after a reboot.
+
+---
+
+## 34. Git signing fails on msb: socat missing or msb < 0.6.9
+
+### Symptoms
+
+On the **msb** backend, committing inside the guest fails to sign:
+
+```
+[git-ssh-sign] no SSH agent - cannot sign commits
+```
+
+or `acq` printed a warning at create/attach about `socat` not being found in the
+guest image, or a *"host ssh-agent forwarding needs msb >= 0.6.9"* warning and
+then skipped the forward.
+
+### Root Cause
+
+`acq` forwards the host ssh-agent into an msb guest with
+`--vsock $SSH_AUTH_SOCK:3552/stream` and then runs an **in-guest `socat` bridge**
+that re-exposes the vsock route as the unix socket
+`/home/agent/.acq/ssh-agent.sock` (exported as `SSH_AUTH_SOCK`). Two things must
+hold for that to work:
+
+1. **msb >= 0.6.9** — `--vsock` first appears in msb 0.6.9. On an older msb, acq
+   warns and **skips** the forward (fail-soft), so the guest has no agent.
+2. **`socat` present in the guest image** — the bridge is `socat`. It is **not**
+   auto-installed (guest egress is locked, so a package mirror is unreachable);
+   acq warns if it is missing and the bridge cannot start.
+
+The forward is also **opt-in via the host `SSH_AUTH_SOCK`**: if no agent is
+running on the host (or no key is loaded), there is nothing to forward.
+
+### Fix
+
+- **Upgrade msb** to >= 0.6.9 (`msb self update`).
+- **Ensure `socat` is in `ACQ_MSB_IMAGE`** — the default
+  `docker/sandbox-templates:shell-docker` ships it; a custom override must too.
+- **Ensure the host has an agent with a key loaded** before running `acq`:
+
+  ```bash
+  eval "$(ssh-agent -s)"   # if none is running
+  ssh-add ~/.ssh/id_ed25519 # load your signing key
+  echo "$SSH_AUTH_SOCK"     # must be set — this is the opt-in signal
+  ```
+
+Then re-run `acq run …`; the forward is applied automatically. See
+[ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md) for the full
+mechanism and the trust-boundary discussion.
 
 ---
 

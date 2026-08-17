@@ -640,6 +640,135 @@ canonicalize_path() {
   printf '%s\n' "$p"
 }
 
+# _acq_valid_vsock_port PORT — succeed (return 0) iff PORT is an integer in
+# 1..4294967294 and not the reserved value 123. msb rejects port 0 and reserves
+# 123 (see ADR-0021); we mirror that validation host-side so a bad port is
+# skipped with a warning rather than surfacing as an opaque msb create failure.
+_acq_valid_vsock_port() {
+  local p="${1:-}"
+  case "$p" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  # Numeric range check; 4294967294 is u32 max minus one (msb's upper bound).
+  [ "$p" -ge 1 ] 2>/dev/null || return 1
+  [ "$p" -le 4294967294 ] 2>/dev/null || return 1
+  [ "$p" -ne 123 ] 2>/dev/null || return 1
+  return 0
+}
+
+# acq_host_socket_forwards — emit the neutral host->guest socket forwards, one
+# per line as "HOST_PATH<TAB>PORT<TAB>KIND<TAB>LABEL". This is the neutral
+# vocabulary for widening the host<->guest trust boundary with a host unix
+# socket (e.g. the ssh-agent). Backends translate each line to their native
+# mechanism (msb: --vsock; sbx: implicit, no-op). Two sources:
+#   1. AUTOMATIC ssh-agent: if the host has SSH_AUTH_SOCK set to an existing
+#      socket, forward it (LABEL=ssh-agent, PORT from ACQ_SSH_AGENT_VSOCK_PORT
+#      default 3552). This mirrors sbx, which forwards the agent whenever
+#      SSH_AUTH_SOCK is set; unsetting SSH_AUTH_SOCK is the opt-out.
+#   2. GENERAL: ACQ_FORWARD_HOST_SOCKETS="PATH:PORT[/stream|/dgram][,PATH:PORT...]"
+#      for arbitrary host sockets (LABEL=custom).
+# Host paths are canonicalized (symlink-free) and validated ABSOLUTE; a
+# non-absolute or missing entry is skipped with a warning (fail-closed on the
+# individual entry, never abort). Ports validated 1..4294967294, != 123.
+# See ADR-0021.
+# _acq_path_has_ctl PATH — succeed (0) iff PATH contains a TAB or newline. Such a
+# path is filesystem-legal but would corrupt the TAB-separated forward records
+# that acq_host_socket_forwards emits (the msb consumer re-splits with `cut -f`),
+# so a matching path is rejected upstream. Uses a literal-TAB glob built with a
+# real tab byte (portable across bash 3.2 and dash; a `$'\t'` glob is not).
+_acq_path_has_ctl() {
+  local _tab
+  _tab=$(printf '\t')
+  case "$1" in
+    *"$_tab"*) return 0 ;;
+  esac
+  case "$1" in
+    *"
+"*) return 0 ;;
+  esac
+  return 1
+}
+
+acq_host_socket_forwards() {
+  # (1) Automatic ssh-agent forward — opt-in via the host SSH_AUTH_SOCK env.
+  local _agent_port="${ACQ_SSH_AGENT_VSOCK_PORT:-3552}"
+  if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+    if [ -S "$SSH_AUTH_SOCK" ]; then
+      local _p="$SSH_AUTH_SOCK"
+      if command -v canonicalize_path >/dev/null 2>&1; then
+        _p=$(canonicalize_path "$SSH_AUTH_SOCK")
+      fi
+      # Validate the port the SAME way as the general path (SI-10): a user may
+      # override ACQ_SSH_AGENT_VSOCK_PORT, so a bad value must be rejected host-
+      # side rather than surface as an opaque `msb create` failure. Reject a
+      # path with a TAB/newline too: the fields are emitted TAB-separated and the
+      # msb consumer re-splits with `cut -f`, so an embedded TAB would corrupt
+      # the port/kind fields (a filesystem-legal but pathological socket path).
+      if ! _acq_valid_vsock_port "$_agent_port"; then
+        printf 'acq: ACQ_SSH_AGENT_VSOCK_PORT %s is invalid (need 1..4294967294, != 123); skipping ssh-agent forwarding\n' "$_agent_port" >&2
+      elif _acq_path_has_ctl "$_p"; then
+        printf 'acq: SSH_AUTH_SOCK path contains a tab/newline; skipping ssh-agent forwarding\n' >&2
+      else
+        case "$_p" in
+          /*) printf '%s\t%s\t%s\t%s\n' "$_p" "$_agent_port" "stream" "ssh-agent" ;;
+          *) printf 'acq: SSH_AUTH_SOCK path is not absolute; skipping ssh-agent forwarding\n' >&2 ;;
+        esac
+      fi
+    else
+      printf 'acq: SSH_AUTH_SOCK is set but not a socket; skipping ssh-agent forwarding\n' >&2
+    fi
+  fi
+
+  # (2) General arbitrary host-socket forwards from ACQ_FORWARD_HOST_SOCKETS.
+  [ -n "${ACQ_FORWARD_HOST_SOCKETS:-}" ] || return 0
+  local _oldifs="$IFS" _entry
+  # Disable pathname expansion while word-splitting on commas so a socket path
+  # containing a glob metacharacter (*, ?, [) is treated literally, not expanded
+  # against the cwd. Restored immediately after.
+  set -f
+  IFS=','
+  # shellcheck disable=SC2086
+  set -- $ACQ_FORWARD_HOST_SOCKETS
+  IFS="$_oldifs"
+  set +f
+  for _entry in "$@"; do
+    [ -n "$_entry" ] || continue
+    # Optional trailing /stream|/dgram selects the socket kind (default stream).
+    local _kind="stream" _spec="$_entry"
+    case "$_spec" in
+      */stream) _kind="stream"; _spec="${_spec%/stream}" ;;
+      */dgram) _kind="dgram"; _spec="${_spec%/dgram}" ;;
+    esac
+    # PATH is everything before the LAST colon; PORT is the trailing field.
+    # Unix socket paths rarely contain colons, and splitting on the last colon
+    # keeps ":PORT" unambiguous.
+    local _port="${_spec##*:}" _path="${_spec%:*}"
+    if [ "$_path" = "$_spec" ]; then
+      printf 'acq: malformed host-socket forward %s (expected PATH:PORT); skipping\n' "$_entry" >&2
+      continue
+    fi
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      _path=$(canonicalize_path "$_path")
+    fi
+    case "$_path" in
+      /*) : ;;
+      *) printf 'acq: host-socket path %s is not absolute; skipping\n' "$_path" >&2; continue ;;
+    esac
+    if _acq_path_has_ctl "$_path"; then
+      printf 'acq: host-socket path contains a tab/newline; skipping\n' >&2; continue
+    fi
+    if [ ! -S "$_path" ]; then
+      printf 'acq: host-socket path %s is not an existing socket; skipping\n' "$_path" >&2
+      continue
+    fi
+    if ! _acq_valid_vsock_port "$_port"; then
+      printf 'acq: host-socket port %s is invalid (need 1..4294967294, != 123); skipping\n' "$_port" >&2
+      continue
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$_path" "$_port" "$_kind" "custom"
+  done
+}
+
 # Find the first non-flag positional in a create/run arg list.
 first_positional() {
   local prev=""

@@ -291,6 +291,14 @@ The agent MUST NEVER:
 > (`ask`) class is instead commands that open a **new outbound destination**
 > (e.g. `git push`, new git remotes, `scp`/`sftp`/`rsync`/`nc`); see ADR-0005 and
 > the kit's decision record.
+>
+> **Note on `git push`:** Pushing to an authorized GitHub remote **works** inside
+> the sandbox — the per-sandbox `GITHUB_TOKEN` is bound to the GitHub hosts and
+> `gh` uses it. If HTTPS push prompts for credentials, run `gh auth setup-git`
+> once to install the `gh` credential helper, then `git push`. Being gated on
+> `git push` means the agent needs **user approval** for the push (it opens an
+> outbound write to the remote), **not** that the agent is technically unable to
+> authenticate.
 
 All secrets MUST be accessed via:
 - The backend's secret management (SBX secret store / proxy, or MSB `--secret ENV@HOST` binding), driven through `acq`
@@ -354,7 +362,7 @@ The agent MUST ask the user before:
 - [ ] Making network requests to external services (except USAi endpoints)
 - [ ] Modifying CI/CD pipeline configurations
 - [ ] Deleting files or directories
-- [ ] Committing or pushing code
+- [ ] Committing or pushing code — pushing to an authorized GitHub remote is **technically supported** in the sandbox (via the per-sandbox `GITHUB_TOKEN` and `gh`; run `gh auth setup-git` once if HTTPS push prompts); this gate is about obtaining **user approval** for the outbound write, not a claim that the agent cannot authenticate
 - [ ] Modifying backend configuration (SBX or MSB), or creating sandboxes outside the sanctioned bootstrap (`acq run` / `acq create` / `sbx run` / `msb run`, which auto-create a sandbox as part of normal execution and are pre-approved)
 - [ ] Accessing endpoints outside the approved list
 
