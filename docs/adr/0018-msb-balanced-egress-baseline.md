@@ -32,6 +32,18 @@ supersedes: []
 > [ADR-0019](0019-msb-balanced-egress-is-egress-only.md). References to
 > `--net-default deny` in the text below should be read as
 > `--net-default-egress deny`.
+>
+> **Update (2026-08-17, msb 0.6.9):** acq now requires **msb >= 0.6.9**
+> (`MIN_MSB_VERSION`). microsandbox 0.6.9 shipped the upstream release-build
+> parser fix for the semantic `allow@dns` macro (the target-iterator advance was
+> moved out of the `debug_assert` so it now runs on release binaries too). With
+> the floor raised, the emitter no longer needs the expanded
+> `allow@host:udp:53` + `allow@host:tcp:53` workaround: it emits the native
+> **`allow@dns`** macro for the gateway-DNS grant in both the `balanced` and
+> `strict` tiers. The "broken macro" / expanded-pair descriptions in the body
+> below reflect the pre-0.6.9 workaround and are superseded by this note; the
+> `docs/KNOWN_FAILURE_MODES.md` DNS failure mode is now resolved for supported
+> versions.
 
 ## Context
 
@@ -83,16 +95,18 @@ default**, composed on top of the kits' own `caps.network.allow`.
    - A leading gateway-DNS grant is emitted so the guest can resolve the
      allowed hosts — under `--net-default deny` the high-level DNS auto-grant
      does not apply, so DNS must be granted explicitly. This pairs with the
-     existing `--dns-nameserver`. We emit the **expanded** form
-     `allow@host:udp:53` + `allow@host:tcp:53` rather than msb's semantic
-     `allow@dns` macro: that macro is **broken in released msb** (reproduced on
-     0.6.8). Its parser advances past the `dns` target only inside a
-     `debug_assert_eq!`, which is compiled out of a release binary, so the
-     `dns` token is re-read as the protocol slot and `msb create` fails with
-     `the dns target supports tcp, udp, or any, not dns`. The two explicit
-     rules are exactly what the macro is specified to expand to (the gateway
-     `host` group on UDP/TCP port 53) and take the ordinary, assert-free parse
-     path, so they are unaffected by the upstream bug.
+     existing `--dns-nameserver`. The emitter uses msb's semantic **`allow@dns`**
+     macro (the gateway `host` group on UDP/TCP port 53). This macro was broken
+     on released msb builds up to and including 0.6.8 — its parser advanced past
+     the `dns` target only inside a `debug_assert_eq!`, which is compiled out of
+     a release binary, so the `dns` token was re-read as the protocol slot and
+     `msb create` failed with `the dns target supports tcp, udp, or any, not
+     dns`. microsandbox 0.6.9 fixed this (the release-build parser fix moves the
+     iterator advance out of the assert), and acq requires msb >= 0.6.9
+     (`MIN_MSB_VERSION`), so the macro is safe to emit directly. (Before the
+     floor was raised, the emitter used the expanded
+     `allow@host:udp:53` + `allow@host:tcp:53` pair as a workaround; see the
+     0.6.9 update note above.)
 
 3. **Restrict, don't merely widen.** At create, when the baseline is enabled the
    adapter emits `--net-default deny` **plus** the generated `allow@…` rules, so
@@ -164,9 +178,9 @@ default**, composed on top of the kits' own `caps.network.allow`.
 
 - Offline: `scripts/test-acq` covers target translation (`**.`, `crl*`, exact,
   single-label rejection), port validation, dual-port hosts, the gateway-DNS
-  rules (expanded `allow@host:udp:53` + `allow@host:tcp:53`, never the broken
-  `allow@dns` macro), malformed-line skipping, a full parse of the real vendored
-  file with no skips, and the default-on / `=0`-off provision paths.
+  grant (the `allow@dns` macro, no longer the expanded `allow@host:udp:53` +
+  `allow@host:tcp:53` pair), malformed-line skipping, a full parse of the real
+  vendored file with no skips, and the default-on / `=0`-off provision paths.
 - Live (deferred; requires a KVM-capable host — cannot run inside a sandbox):
   create an msb sandbox and confirm a `balanced`-only host that no kit allows
   (e.g. `pypi.org:443`) is reachable while an unlisted host is refused. Run per
@@ -178,5 +192,6 @@ default**, composed on top of the kits' own `caps.network.allow`.
 - Emitter: `_acq_msb_balanced_rules_into` in `acq.backends/msb.sh`
 - Related: ADR-0011 (msb backend + neutral kits), ADR-0010 (pluggable backends)
 - Drift / re-sync note: `docs/KNOWN_FAILURE_MODES.md`
-- Upstream `allow@dns` macro bug + expanded-rule workaround:
-  `docs/KNOWN_FAILURE_MODES.md` (msb `dns` target failure mode)
+- Upstream `allow@dns` macro history (broken <= 0.6.8, fixed in 0.6.9) and the
+  former expanded-rule workaround: `docs/KNOWN_FAILURE_MODES.md` (msb `dns`
+  target failure mode, now resolved for supported versions)

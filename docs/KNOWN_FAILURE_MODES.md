@@ -1433,7 +1433,16 @@ point `ACQ_MSB_BALANCED_HOSTS_FILE` at it, or (for a one-off) create with an ext
 
 ## 32. msb `create`/`run` Fails: `the dns target supports tcp, udp, or any, not dns`
 
-### Symptoms
+> **Status: RESOLVED for supported versions.** microsandbox **0.6.9** shipped the
+> upstream release-build parser fix for the `allow@dns` macro, and acq now
+> requires **msb >= 0.6.9** (`MIN_MSB_VERSION` in `acq.backends/msb.sh`). The msb
+> adapter emits the native `allow@dns` macro for the gateway-DNS grant again; the
+> expanded `allow@host:udp:53` + `allow@host:tcp:53` workaround has been removed.
+> Because the floor fails closed on anything older than 0.6.9, a supported acq
+> install can no longer hit this failure. The reproduction and root-cause history
+> below is retained for context.
+
+### Symptoms (historical, msb <= 0.6.8)
 
 On the **msb** backend, `acq run`/`acq create` (or a raw `msb create`/`msb run`)
 aborts during "Creating sandbox …" with:
@@ -1449,39 +1458,46 @@ Reproduces with the minimal case on a released msb (confirmed on msb 0.6.8):
 msb run --net-default deny --net-rule "allow@dns" alpine -- true
 ```
 
-### Root Cause
+### Root Cause (historical, msb 0.6.7–0.6.8)
 
 An **upstream msb bug** in the `--net-rule` parser, not an acq misconfiguration.
-msb's semantic `allow@dns` macro is parsed by advancing past the `dns` target
+msb's semantic `allow@dns` macro was parsed by advancing past the `dns` target
 token inside a `debug_assert_eq!(parts.next(), Some("dns"))`. `debug_assert!` is
-compiled **out** of a release binary, so in the shipped `msb` the iterator is
-never advanced past `dns`; the same `dns` token is then read as the **protocol**
+compiled **out** of a release binary, so in the shipped `msb` the iterator was
+never advanced past `dns`; the same `dns` token was then read as the **protocol**
 field, which only accepts `tcp`/`udp`/`any` — hence the error. A bare
-`allow@dns` therefore hard-fails on every release build that has the macro
-(0.6.7+), even though the macro is documented as valid.
+`allow@dns` therefore hard-failed on release builds **from 0.6.7 through 0.6.8**
+(fixed in 0.6.9; see Fix below), even though the macro was documented as valid.
 
 The balanced-egress baseline (ADR-0018) needs a gateway-DNS grant under
-`--net-default deny`, and originally emitted `allow@dns`, tripping this bug.
+`--net-default deny`, and originally emitted `allow@dns`, tripping this bug on
+pre-0.6.9 release builds.
 
 ### Fix
 
-The msb adapter no longer emits the `allow@dns` macro. It emits the **expanded**
-equivalent instead — exactly what the macro is specified to produce — which takes
-the ordinary (assert-free) parse path and is unaffected by the bug:
+microsandbox **0.6.9** fixed the parser: the target-iterator advance was moved
+OUT of the `debug_assert_eq!`, so it now runs on release binaries too and a bare
+`allow@dns` parses correctly. acq raised `MIN_MSB_VERSION` to **0.6.9** and
+collapsed the former expanded workaround back to the native macro:
 
 ```
---net-rule allow@host:udp:53 --net-rule allow@host:tcp:53
+--net-rule allow@dns
 ```
 
-This is in `_acq_msb_balanced_rules_into` in `acq.backends/msb.sh`. If you script
-raw `msb` calls yourself, use the same expanded form rather than `allow@dns`.
+This is emitted in `_acq_msb_balanced_rules_into` (and the strict-tier path) in
+`acq.backends/msb.sh`. The earlier workaround emitted the expanded equivalent
+(`--net-rule allow@host:udp:53 --net-rule allow@host:tcp:53`) so that pre-0.6.9
+release builds could still resolve DNS under a deny-default; that is no longer
+needed now that the floor guarantees a fixed parser. If you script raw `msb`
+calls against a 0.6.9+ binary, `allow@dns` is safe to use directly.
 
 ### Prevention / Status
 
-- Re-verify on the **quarterly review cadence**: once upstream msb fixes the
-  macro (moving the target advance out of the `debug_assert`), a bare `allow@dns`
-  becomes safe again and the expanded pair MAY be collapsed back. Confirm with the
-  minimal `msb run … --net-rule "allow@dns"` case above before changing it.
+- **Resolved.** The version floor (`MIN_MSB_VERSION=0.6.9`) fails closed on any
+  older binary before a create is attempted, so acq cannot reach this failure on
+  a supported install. If a future regression is suspected, re-run the minimal
+  `msb run … --net-rule "allow@dns"` case above on the quarterly review cadence to
+  confirm the macro still parses.
 
 ---
 

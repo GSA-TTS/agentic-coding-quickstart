@@ -56,15 +56,21 @@ ACQ_BACKEND_CAN_RESUME=1                   # msb stop / msb start preserve state
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1  # msb --secret ENV@HOST + --tls-intercept
 
-# Minimum msb version required. 0.6.8 is the first release with the
-# `--net-default-egress` / `--net-default-ingress` split that the balanced-egress
-# baseline (on by default, ADR-0018/0019) relies on — earlier 0.6.x had the
-# neutral net rules, --trust-host-cas, and --secret used here, but only the
-# symmetric `--net-default`, so a plain `acq create` would pass an unknown flag to
-# a 0.6.0-0.6.7 binary and clap would hard-error. Fail closed on the floor instead
-# (acq_backend_prepare) so the failure mode is a clear version message, not a raw
-# clap error mid-create.
-MIN_MSB_VERSION="0.6.8"
+# Minimum msb version required. Two reasons pin this to 0.6.9:
+#   1. 0.6.8 is the first release with the `--net-default-egress` /
+#      `--net-default-ingress` split that the balanced-egress baseline (on by
+#      default, ADR-0018/0019) relies on — earlier 0.6.x had the neutral net
+#      rules, --trust-host-cas, and --secret used here, but only the symmetric
+#      `--net-default`, so a plain `acq create` would pass an unknown flag to a
+#      0.6.0-0.6.7 binary and clap would hard-error.
+#   2. 0.6.9 is the first release where the semantic `allow@dns` macro parses
+#      correctly on release builds (the upstream release-build parser fix). On
+#      <= 0.6.8 that macro hard-failed on release binaries, so the gateway-DNS
+#      grant had to be emitted as an expanded udp/tcp:53 pair. The baseline
+#      emitter now uses `allow@dns` directly (see ADR-0018), which requires 0.6.9.
+# Fail closed on the floor instead (acq_backend_prepare) so the failure mode is a
+# clear version message, not a raw clap error or DNS parse failure mid-create.
+MIN_MSB_VERSION="0.6.9"
 
 # Default OCI image for provisioned sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
@@ -1047,12 +1053,12 @@ _acq_msb_balanced_parse_line() {
 #   - PORT: trailing `:port` -> `:tcp:<port>` (sbx "balanced" is TCP; a host on
 #     both :80 and :443 yields TWO rules, one per line, preserved).
 #   - WILDCARD / intra-label glob: see _acq_msb_balanced_target.
-#   - Also emits gateway-DNS rules FIRST so the guest can resolve the allowed
+#   - Also emits a gateway-DNS rule FIRST so the guest can resolve the allowed
 #     hosts: under `--net-default-egress deny` the high-level DNS auto-grant does
-#     not apply, so low-level rules must grant it explicitly. We emit the expanded
-#     `allow@host:udp:53` + `allow@host:tcp:53` rather than the `allow@dns` macro,
-#     which is broken on released msb (see the DNS block below). Pairs with
-#     --dns-nameserver.
+#     not apply, so a low-level rule must grant it explicitly. We use msb's
+#     semantic `allow@dns` macro, which acq can rely on because it requires
+#     msb >= 0.6.9 (the upstream release-build parser fix). Pairs with
+#     --dns-nameserver. (See the DNS block below and ADR-0018.)
 # A missing/unreadable file is a non-fatal warning (kits still add their egress).
 # Uses the eval-by-name array pattern (macOS bash 3.2 compat), like the siblings.
 _acq_msb_balanced_rules_into() {
@@ -1070,20 +1076,16 @@ _acq_msb_balanced_rules_into() {
   # fires for the `--net` PROFILES (public/private/host), not for a rule-only deny
   # default.
   #
-  # We DELIBERATELY do NOT use msb's semantic `allow@dns` macro. That macro is
-  # broken in released msb (reproduced on 0.6.8): its parser guards the target
-  # token with `debug_assert_eq!(parts.next(), Some("dns"))`, which is compiled
-  # OUT of the release binary — so the iterator is never advanced past the `dns`
-  # target and the SAME `dns` token is then read as the PROTOCOL slot, failing
-  # with `the dns target supports tcp, udp, or any, not dns`. A bare `allow@dns`
-  # therefore hard-fails `msb create`/`msb run` on a release build.
-  #
-  # Instead we emit exactly what the macro is SPECIFIED to expand to — the gateway
-  # `host` group on port 53 for both UDP and TCP — as two explicit rules that go
-  # through the ordinary (assert-free) target/proto/port parse path. This is
-  # equivalent to the intended `allow@dns` and is unaffected by the upstream bug.
-  eval "$_arr+=(--net-rule \"allow@host:udp:53\")"
-  eval "$_arr+=(--net-rule \"allow@host:tcp:53\")"
+  # We use msb's semantic `allow@dns` macro, which expands to the gateway `host`
+  # group on port 53 for both UDP and TCP. This macro was broken on released msb
+  # builds up to and including 0.6.8: its parser guarded the target token with a
+  # `debug_assert_eq!` that is compiled OUT of release binaries, so the iterator
+  # was never advanced past the `dns` target and the same token was re-read as the
+  # protocol slot, hard-failing with `the dns target supports tcp, udp, or any,
+  # not dns`. microsandbox 0.6.9 fixed this (the upstream release-build parser fix
+  # now advances the target iterator before the assert), and acq requires
+  # msb >= 0.6.9 (MIN_MSB_VERSION), so the macro is safe to use here. See ADR-0018.
+  eval "$_arr+=(--net-rule \"allow@dns\")"
 
   local _line _host _port _target _warned_crl=0
   while IFS= read -r _line || [ -n "$_line" ]; do
@@ -1980,8 +1982,8 @@ acq_backend_provision() {
   # header and agentic-coding-patterns ADR-0002) selects how much egress the
   # sandbox gets, all deny-by-default except `open`:
   #   balanced -> `--net-default-egress deny` + the curated baseline
-  #               (`allow@<host>:tcp:<port>` per vendored entry + gateway DNS
-  #               `allow@host:udp:53`/`:tcp:53`) UNIONED with the kit/npm/secret
+  #               (`allow@<host>:tcp:<port>` per vendored entry + gateway DNS via
+  #               the `allow@dns` macro) UNIONED with the kit/npm/secret
   #               `allow@…` rules under first-match-wins.
   #   strict   -> `--net-default-egress deny` + gateway DNS, but NO baseline:
   #               egress is the kits' own `allow@…` hosts ONLY. Same deny-default
@@ -2004,7 +2006,7 @@ acq_backend_provision() {
   # rule. A future "strict" ingress profile can layer ingress deny-default + explicit
   # per-port `allow:ingress@…` rules; the tiers here intentionally set egress only.
   # Requires msb >= 0.6.8 (the `--net-default-egress`/`--net-default-ingress`
-  # split); MIN_MSB_VERSION is 0.6.8, so acq_backend_prepare has already failed
+  # split); MIN_MSB_VERSION is 0.6.9, so acq_backend_prepare has already failed
   # closed on anything older before we reach here — this flag is always known.
   #
   # `open` is a privileged, audited escape hatch (never a default, never for GFE):
@@ -2031,10 +2033,11 @@ acq_backend_provision() {
       _acq_msb_balanced_rules_into _balanced
     else
       # strict: deny-default + gateway DNS ONLY, no baseline hosts. Emit the same
-      # explicit gateway-DNS rules the baseline emitter prepends (the high-level
-      # DNS auto-grant does not fire under a rule-only deny-default), so kit
-      # `allow@…` hosts remain resolvable. NOTHING else is added.
-      _balanced=(--net-rule "allow@host:udp:53" --net-rule "allow@host:tcp:53")
+      # gateway-DNS rule the baseline emitter prepends (the high-level DNS
+      # auto-grant does not fire under a rule-only deny-default), so kit `allow@…`
+      # hosts remain resolvable. Uses msb's `allow@dns` macro, safe because acq
+      # requires msb >= 0.6.9 (the upstream parser fix). NOTHING else is added.
+      _balanced=(--net-rule "allow@dns")
     fi
     if [ "${#_balanced[@]}" -gt 0 ]; then
       create_flags+=(--net-default-egress deny)

@@ -180,7 +180,7 @@ _line="msb"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
 _msb_sub="${1:-}"
 case "$_msb_sub" in
-  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.6.8}" ;;
+  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.6.9}" ;;
   --help|-h) printf 'MSB-TOPLEVEL-HELP for msb\n' ;;
   doctor)
     # Model host-readiness. Default: ready (exit 0), so the happy path is silent.
@@ -1920,13 +1920,13 @@ cleanup_stubs
 make_stubs
 out=$(ACQ_BACKEND=msb "$ACQ" version 2>&1)
 assert_contains "msb: version reports backend msb" "$out" "backend:     msb"
-assert_contains "msb: version reports msb ver" "$out" "0.6.8"
+assert_contains "msb: version reports msb ver" "$out" "0.6.9"
 cleanup_stubs
 
 # 8i. `acq backend list` shows a real msb row (not "coming in 1.2.x").
 make_stubs
 out=$("$ACQ" backend list 2>&1)
-assert_contains "msb: backend list shows msb version" "$out" "msb  v0.6.8"
+assert_contains "msb: backend list shows msb version" "$out" "msb  v0.6.9"
 assert_not_contains "msb: backend list drops 'coming in 1.2.x'" "$out" "Coming in 1.2.x"
 cleanup_stubs
 
@@ -1952,7 +1952,7 @@ cleanup_stubs
 # 8j. `acq doctor` probes msb with a real version (not the old placeholder).
 make_stubs
 out=$(printf 'n\n' | "$ACQ" doctor 2>&1)
-assert_contains "msb: doctor shows msb installed" "$out" "msb: installed v0.6.8"
+assert_contains "msb: doctor shows msb installed" "$out" "msb: installed v0.6.9"
 assert_not_contains "msb: doctor drops 'coming in 1.2.x'" "$out" "coming in 1.2.x"
 cleanup_stubs
 
@@ -2018,26 +2018,29 @@ make_stubs; load_acq
 cleanup_stubs
 
 # 8j5b. Version floor (BLOCKING fix): the balanced-egress default emits
-#        `--net-default-egress deny`, a flag that first appears in msb 0.6.8.
-#        MIN_MSB_VERSION is 0.6.8, so acq_backend_prepare MUST fail closed
-#        (nonzero exit + clear message) on any 0.6.0-0.6.7 binary, rather than
-#        letting `msb create` hit an unknown flag mid-create. The stub honors
-#        STUB_MSB_VERSION.
+#        `--net-default-egress deny` (first in msb 0.6.8) AND relies on the
+#        semantic `allow@dns` macro, which only parses correctly on release
+#        builds from msb 0.6.9 onward (the upstream release-build parser fix).
+#        MIN_MSB_VERSION is therefore 0.6.9, so acq_backend_prepare MUST fail
+#        closed (nonzero exit + clear message) on any binary older than 0.6.9,
+#        rather than letting `msb create` hit an unknown flag or DNS parse error
+#        mid-create. The stub honors STUB_MSB_VERSION.
 make_stubs; load_acq
 (
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/msb.sh"
   set +e
-  # A sub-floor binary (0.6.7) must be rejected before any create.
-  out=$(STUB_MSB_VERSION=0.6.7 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); rc=$?
-  assert_eq "msb: sub-0.6.8 binary fails the version floor" "1" "$rc"
-  assert_contains "msb: sub-floor message names the required version" "$out" "0.6.8"
-  # The pinned/current floor version (0.6.8) passes.
-  out2=$(STUB_MSB_VERSION=0.6.8 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); rc2=$?
-  assert_eq "msb: 0.6.8 binary clears the version floor" "0" "$rc2"
-  assert_not_contains "msb: 0.6.8 binary emits no version-floor error" "$out2" "0.6.8"
-) 2>/dev/null; pass "msb: version floor rejects sub-0.6.8, accepts 0.6.8"
+  # A sub-floor binary (0.6.8, previously accepted) must now be rejected before
+  # any create, because the 0.6.9 floor is required for the `allow@dns` macro.
+  out=$(STUB_MSB_VERSION=0.6.8 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); rc=$?
+  assert_eq "msb: sub-0.6.9 binary fails the version floor" "1" "$rc"
+  assert_contains "msb: sub-floor message names the required version" "$out" "0.6.9"
+  # The pinned/current floor version (0.6.9) passes.
+  out2=$(STUB_MSB_VERSION=0.6.9 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); rc2=$?
+  assert_eq "msb: 0.6.9 binary clears the version floor" "0" "$rc2"
+  assert_not_contains "msb: 0.6.9 binary emits no version-floor error" "$out2" "0.6.9"
+) 2>/dev/null; pass "msb: version floor rejects sub-0.6.9, accepts 0.6.9"
 cleanup_stubs
 
 # 8j5c. sbx version floor (BLOCKING): acq's neutral-kit translator emits the sbx
@@ -2660,7 +2663,7 @@ cat >"$STUBDIR/msb" <<'MSBSTUB2'
 #!/usr/bin/env bash
 { printf 'msb'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
 case "${1:-}" in
-  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.6.8}" ;;
+  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.6.9}" ;;
   create) exit 0 ;;              # create "succeeds" but the guest never starts
   exec)   exit 1 ;;              # every exec fails -> never exec-ready
   *) exit 0 ;;
@@ -5345,9 +5348,10 @@ assert_not_contains "msb: port_ok empty invalid" "rc-$5" "rc-0"
 assert_not_contains "msb: port_ok non-integer invalid" "rc-$6" "rc-0"
 cleanup_stubs
 
-# 10b1f. `_acq_msb_balanced_rules_into` on a small custom hosts file: emits
-#        `allow@dns` first, translates wildcards/crl*, preserves dual-port hosts,
-#        emits bare (no :tcp:) for a port-less entry, and skips comments/blanks.
+# 10b1f. `_acq_msb_balanced_rules_into` on a small custom hosts file: emits the
+#        `allow@dns` macro first, translates wildcards/crl*, preserves dual-port
+#        hosts, emits bare (no :tcp:) for a port-less entry, and skips
+#        comments/blanks.
 make_stubs; load_acq
 cat >"$STUBDIR/bal-hosts.txt" <<'HOSTS'
 # a comment line
@@ -5366,8 +5370,9 @@ bal_out=$(
   _acq_msb_balanced_rules_into arr 2>/dev/null
   printf '%s\n' "${arr[@]}"
 )
-assert_contains "msb: balanced rules emit gateway DNS (udp/53)" "$bal_out" "allow@host:udp:53"
-assert_contains "msb: balanced rules emit gateway DNS (tcp/53)" "$bal_out" "allow@host:tcp:53"
+assert_contains "msb: balanced rules emit gateway DNS via allow@dns macro" "$bal_out" "allow@dns"
+assert_not_contains "msb: balanced rules do not emit expanded udp/53 pair" "$bal_out" "allow@host:udp:53"
+assert_not_contains "msb: balanced rules do not emit expanded tcp/53 pair" "$bal_out" "allow@host:tcp:53"
 assert_contains "msb: balanced rules translate **.h wildcard" "$bal_out" "allow@*.github.com:tcp:443"
 assert_contains "msb: balanced rules keep exact domain" "$bal_out" "allow@github.com:tcp:443"
 assert_contains "msb: balanced rules keep dual-port :443" "$bal_out" "allow@dhi.io:tcp:443"
@@ -5380,9 +5385,9 @@ cleanup_stubs
 
 # 10b1g. `_acq_msb_balanced_rules_into` skips a malformed line (a host with a
 #        shell metacharacter) with a warning, but still emits the gateway-DNS
-#        rules. It must NOT emit the bare `allow@dns` macro, which is broken on
-#        released msb (release builds drop the debug_assert that advances past the
-#        `dns` target, so `dns` is re-read as the protocol and msb rejects it).
+#        rule. That rule is the semantic `allow@dns` macro (safe since acq
+#        requires msb >= 0.6.9, the upstream release-build parser fix), NOT the
+#        old expanded udp/tcp:53 pair.
 make_stubs; load_acq
 cat >"$STUBDIR/bal-bad.txt" <<'HOSTS'
 bad;host:443
@@ -5396,8 +5401,8 @@ bad_out=$(
   printf '%s\n' "${arr[@]}"
 )
 assert_not_contains "msb: balanced rules skip malformed host" "$bad_out" "bad;host"
-assert_contains "msb: balanced rules still emit gateway DNS after skip" "$bad_out" "allow@host:udp:53"
-assert_not_contains "msb: balanced rules never emit the broken allow@dns macro" "$bad_out" "allow@dns"
+assert_contains "msb: balanced rules still emit gateway DNS (allow@dns) after skip" "$bad_out" "allow@dns"
+assert_not_contains "msb: balanced rules no longer emit the expanded DNS pair" "$bad_out" "allow@host:udp:53"
 cleanup_stubs
 
 # 10b1h. The REAL vendored balanced-hosts file parses cleanly: no "skipping"
@@ -5437,8 +5442,8 @@ bal_prov_log=$(cat "$CALLS")
 assert_contains "msb: default provision emits --net-default-egress deny" "$bal_prov_log" "--net-default-egress deny"
 assert_not_contains "msb: default provision does NOT emit symmetric --net-default deny" "$bal_prov_log" "--net-default deny"
 assert_not_contains "msb: default provision does NOT deny ingress" "$bal_prov_log" "--net-default-ingress deny"
-assert_contains "msb: default provision emits gateway DNS (udp/53)" "$bal_prov_log" "allow@host:udp:53"
-assert_contains "msb: default provision emits gateway DNS (tcp/53)" "$bal_prov_log" "allow@host:tcp:53"
+assert_contains "msb: default provision emits gateway DNS (allow@dns)" "$bal_prov_log" "allow@dns"
+assert_not_contains "msb: default provision does NOT emit expanded udp/53 pair" "$bal_prov_log" "allow@host:udp:53"
 assert_contains "msb: default provision emits a balanced host rule" "$bal_prov_log" "allow@api.anthropic.com:tcp:443"
 cleanup_stubs
 
@@ -5459,7 +5464,7 @@ make_stubs; load_acq
 )
 bal_off_log=$(cat "$CALLS")
 assert_contains "msb: deprecated =0 maps to strict — still emits deny-default" "$bal_off_log" "--net-default-egress deny"
-assert_contains "msb: deprecated =0 (strict) still emits gateway DNS" "$bal_off_log" "allow@host:udp:53"
+assert_contains "msb: deprecated =0 (strict) still emits gateway DNS (allow@dns)" "$bal_off_log" "allow@dns"
 assert_not_contains "msb: deprecated =0 (strict) omits balanced host rules" "$bal_off_log" "allow@api.anthropic.com"
 
 # 10b1j2. The deprecated alias prints a one-time deprecation notice on stderr,
@@ -5526,8 +5531,8 @@ make_stubs; load_acq
 )
 strict_log=$(cat "$CALLS")
 assert_contains "msb: strict emits deny-default" "$strict_log" "--net-default-egress deny"
-assert_contains "msb: strict emits gateway DNS (udp/53)" "$strict_log" "allow@host:udp:53"
-assert_contains "msb: strict emits gateway DNS (tcp/53)" "$strict_log" "allow@host:tcp:53"
+assert_contains "msb: strict emits gateway DNS (allow@dns)" "$strict_log" "allow@dns"
+assert_not_contains "msb: strict does NOT emit expanded udp/53 pair" "$strict_log" "allow@host:udp:53"
 assert_not_contains "msb: strict omits the curated baseline" "$strict_log" "allow@api.anthropic.com"
 cleanup_stubs
 
@@ -6397,7 +6402,7 @@ PQSTUB="$STUBDIR/pq"; mkdir -p "$PQSTUB"
 cat >"$PQSTUB/msb" <<'PQ'
 #!/usr/bin/env bash
 snip=""; prev=""; for a in "$@"; do [ "$prev" = "-c" ] && { snip="$a"; break; }; prev="$a"; done
-case "$1" in --version) echo "msb 0.6.8"; exit 0;; esac
+case "$1" in --version) echo "msb 0.6.9"; exit 0;; esac
 # The prereq check runs a snippet containing "command -v"; emit MSB_MISSING.
 case "$snip" in *"command -v"*) printf '%s' "${MSB_MISSING:-}"; exit 0;; esac
 exit 0
