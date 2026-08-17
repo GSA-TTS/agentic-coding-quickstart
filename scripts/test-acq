@@ -4743,6 +4743,27 @@ acq_backend_ensure_kits_applied healbox >/dev/null 2>&1 || true
 assert_eq "heal(sbx): records provenance" "current" "$(acq_provenance_status sbx healbox)"
 cleanup_stubs
 
+# 9p16. (review NON-BLOCKING, ADR-0021) sbx forwards the host ssh-agent
+#       IMPLICITLY when SSH_AUTH_SOCK is set; acq surfaces that as a conscious
+#       choice with a one-time provision notice naming the opt-out and ssh-add -c.
+#       When SSH_AUTH_SOCK is UNSET, no notice fires (nothing is forwarded).
+make_stubs; load_acq
+sbx_note=$(
+  export SSH_AUTH_SOCK="$STUBDIR/does-not-matter.sock"
+  acq_backend_provision notebox shell /tmp 2>&1 >/dev/null
+)
+assert_contains "provision(sbx): SSH_AUTH_SOCK set prints a trust-boundary notice" "$sbx_note" "forwards your host ssh-agent"
+assert_contains "provision(sbx): notice names the SSH_AUTH_SOCK opt-out" "$sbx_note" "unset SSH_AUTH_SOCK to opt out"
+assert_contains "provision(sbx): notice surfaces the ssh-add -c mitigation" "$sbx_note" "ssh-add -c"
+cleanup_stubs
+make_stubs; load_acq
+sbx_nonote=$(
+  unset SSH_AUTH_SOCK
+  acq_backend_provision quietbox shell /tmp 2>&1 >/dev/null
+)
+assert_not_contains "provision(sbx): no notice when SSH_AUTH_SOCK is unset" "$sbx_nonote" "forwards your host ssh-agent"
+cleanup_stubs
+
 # ===========================================================================
 # 10. kit-translate: neutral hybrid/v1 -> sbx-v2 synthesis (offline)
 # ===========================================================================
@@ -6139,6 +6160,35 @@ if _mk_unix_socket "$STUBDIR/agent.sock"; then
     "$c13" "VSOCK-CONNECT:2:'9000'"
 else
   pass "msb vsock(10c13): SKIPPED (python3 AF_UNIX socket unavailable)"
+fi
+
+# 10c15. (review NON-BLOCKING) The implicit ssh-agent forward is surfaced as a
+#        CONSCIOUS choice: when a forward is emitted, the msb helper prints a
+#        one-time notice naming the SSH_AUTH_SOCK opt-out and the ssh-add -c
+#        mitigation (ADR-0021). A user who always exports SSH_AUTH_SOCK otherwise
+#        forwards their agent silently. (Uses a DISTINCT socket path: 10c13 above
+#        already bound $STUBDIR/agent.sock, and _mk_unix_socket cannot re-bind an
+#        existing socket path.)
+if _mk_unix_socket "$STUBDIR/agent15.sock"; then
+  c15_err=$(
+    export SSH_AUTH_SOCK="$STUBDIR/agent15.sock" STUB_MSB_VERSION=0.6.9
+    . "${REPO_ROOT}/acq.backends/msb.sh"
+    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null
+  )
+  assert_contains "msb vsock(10c15): forward prints a trust-boundary notice" "$c15_err" "forwarding your host ssh-agent"
+  assert_contains "msb vsock(10c15): notice names the SSH_AUTH_SOCK opt-out" "$c15_err" "unset SSH_AUTH_SOCK to opt out"
+  assert_contains "msb vsock(10c15): notice surfaces the ssh-add -c mitigation" "$c15_err" "ssh-add -c"
+  # The notice is printed at most ONCE per process even if the helper runs twice.
+  c15_count=$(
+    export SSH_AUTH_SOCK="$STUBDIR/agent15.sock" STUB_MSB_VERSION=0.6.9
+    . "${REPO_ROOT}/acq.backends/msb.sh"
+    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null
+    g=(); _acq_msb_vsock_flags_into g 2>&1 1>/dev/null
+  ) 2>&1
+  n=$(printf '%s\n' "$c15_count" | grep -c "forwarding your host ssh-agent" || true)
+  assert_eq "msb vsock(10c15): notice prints at most once per process" "1" "$n"
+else
+  pass "msb vsock(10c15): SKIPPED (python3 AF_UNIX socket unavailable)"
 fi
 unset -f _mk_unix_socket
 cleanup_stubs

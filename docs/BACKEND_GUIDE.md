@@ -524,7 +524,10 @@ and exports it as `SSH_AUTH_SOCK` on attach, `acq exec`, and kit commands.
   key the host agent holds while the socket is reachable. It is **opt-in** via
   `SSH_AUTH_SOCK` — **unset it to disable** — and only agent *operations* (not key
   material) traverse the socket. Where your agent supports it, use `ssh-add -c` /
-  `ssh-add -h` to constrain use.
+  `ssh-add -h` to constrain use. Because a set `SSH_AUTH_SOCK` is the *only*
+  trigger, acq prints a **one-time startup notice** (on both backends) when the
+  forward is active — naming the `unset SSH_AUTH_SOCK` opt-out and the `ssh-add -c`
+  mitigation — so the forward is a conscious choice, never silent.
 - **Live end-to-end verified** on a macOS/HVF host (2026-08-17) via
   `scripts/verify-backends`: the guest's forwarded agent exposes the verifier's
   hermetic throwaway key over the `--vsock` + socat path. It cannot run in CI or

@@ -416,6 +416,10 @@ ACQ_SSH_AGENT_VSOCK_PORT="${ACQ_SSH_AGENT_VSOCK_PORT:-$ACQ_MSB_SSH_AGENT_VSOCK_P
 # emitted, so provision knows to start the bridge and record the marker. Reset
 # per provision. acq_backend_start reads the persisted marker instead.
 _ACQ_MSB_SSH_AGENT_FORWARDING=0
+# Module-scope flag: set to 1 once the ssh-agent trust-boundary notice has been
+# printed, so the "forwarding host ssh-agent" notice appears at most once per
+# process even if the vsock-flag helper runs more than once. See ADR-0021.
+_ACQ_MSB_SSH_AGENT_NOTICE_SHOWN=0
 
 # Module-level monotonic counter for ephemeral serve-port selection. The call
 # site is `sport=$(_acq_msb_pick_ephemeral_port)` — a COMMAND SUBSTITUTION, which
@@ -2601,6 +2605,19 @@ EOF
     eval "$_arr+=(--vsock \"\${_path}:\${_port}/\${_kind}\")"
     if [ "$_label" = "ssh-agent" ]; then
       _ACQ_MSB_SSH_AGENT_FORWARDING=1
+      # Make the implicit opt-in a CONSCIOUS choice (ADR-0021 trust-boundary):
+      # SSH_AUTH_SOCK being set is the only trigger, so a user who always exports
+      # it (tmux/screen/profile persistence) could forward their agent into a
+      # guest running untrusted code without a deliberate per-run decision. Print
+      # a one-time notice naming the opt-out and the ssh-add -c mitigation so the
+      # forward is never silent. Guarded by a module flag so it prints once even
+      # if the helper runs more than once in a process (create + a later probe).
+      if [ "${_ACQ_MSB_SSH_AGENT_NOTICE_SHOWN:-0}" != "1" ]; then
+        _ACQ_MSB_SSH_AGENT_NOTICE_SHOWN=1
+        echo "acq(msb): forwarding your host ssh-agent into the guest because SSH_AUTH_SOCK" \
+             "is set. Guest code can use every key the agent holds while the sandbox runs;" \
+             "unset SSH_AUTH_SOCK to opt out, or run 'ssh-add -c' to confirm each use. See ADR-0021." >&2
+      fi
     fi
   done
 }

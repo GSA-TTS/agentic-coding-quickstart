@@ -55,6 +55,10 @@ ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/sbx-
 # Agents recognized by `sbx run`.
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
+# Module-scope flag: set to 1 once the ssh-agent trust-boundary notice has been
+# printed, so it appears at most once per process. See ADR-0021.
+_ACQ_SBX_SSH_AGENT_NOTICE_SHOWN=0
+
 # ---------------------------------------------------------------------------
 # Version comparison
 # ---------------------------------------------------------------------------
@@ -321,11 +325,28 @@ _acq_sbx_exec_retry() {
 # there is nothing to translate here, and adding an explicit forward would
 # duplicate what the sbx CLI already does. Only msb needs the --vsock + in-guest
 # socat bridge translation. See ADR-0021.
+#
+# acq still surfaces a one-time trust-boundary notice here (see the top of
+# acq_backend_provision) so the implicit forward is a conscious choice, mirroring
+# the notice msb prints when it actively wires the forward.
 
 acq_backend_provision() {
   _acq_sbx_ensure_kit_sources_allowed
   local name="$1"
   shift
+  # Host ssh-agent trust-boundary notice (ADR-0021). sbx forwards the host
+  # ssh-agent into the guest IMPLICITLY whenever SSH_AUTH_SOCK is set, so — as on
+  # msb — a user who always exports it (tmux/screen/profile persistence) could
+  # forward their agent into a guest running untrusted code without a deliberate
+  # per-run choice. Print a one-time notice naming the opt-out and the ssh-add -c
+  # mitigation so the forward is a conscious choice, not silent. The sbx CLI owns
+  # the actual forwarding; acq only surfaces the decision.
+  if [ -n "${SSH_AUTH_SOCK:-}" ] && [ "${_ACQ_SBX_SSH_AGENT_NOTICE_SHOWN:-0}" != "1" ]; then
+    _ACQ_SBX_SSH_AGENT_NOTICE_SHOWN=1
+    echo "acq(sbx): sbx forwards your host ssh-agent into the guest because SSH_AUTH_SOCK" \
+         "is set. Guest code can use every key the agent holds while the sandbox runs;" \
+         "unset SSH_AUTH_SOCK to opt out, or run 'ssh-add -c' to confirm each use. See ADR-0021." >&2
+  fi
   # Strip any user-supplied --name since we pass it explicitly.
   local _stripped=(); local skip=0
   for arg in "$@"; do

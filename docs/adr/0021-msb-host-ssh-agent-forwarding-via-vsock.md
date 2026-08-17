@@ -174,6 +174,31 @@ Crucially, **private key material never enters the guest**: only agent
 *operations* (sign/list) traverse the vsock→unix socket. This preserves the sbx
 property that the sandbox holds no key it could exfiltrate (SC-8, IA-5).
 
+### Making the implicit opt-in a conscious choice
+
+Because the *only* trigger is a set `SSH_AUTH_SOCK`, a user who **always** exports
+it (tmux/screen/shell-profile persistence) could forward their agent into a guest
+running untrusted or prompt-injectable code without a deliberate per-run decision.
+To keep the widened trust boundary a **conscious choice** rather than a silent
+default, acq prints a **one-time startup notice** on **both** backends whenever a
+forward is active:
+
+```
+acq(msb): forwarding your host ssh-agent into the guest because SSH_AUTH_SOCK
+is set. Guest code can use every key the agent holds while the sandbox runs;
+unset SSH_AUTH_SOCK to opt out, or run 'ssh-add -c' to confirm each use. See ADR-0021.
+```
+
+- On **msb** the notice is emitted from `_acq_msb_vsock_flags_into` when the
+  ssh-agent `--vsock` route is emitted (acq actively wires the forward).
+- On **sbx** the notice is emitted from `acq_backend_provision` when
+  `SSH_AUTH_SOCK` is set (the sbx CLI owns the forward; acq only surfaces it).
+
+Both are guarded by a module-scope flag so the notice prints at most once per
+process. It names the opt-out (`unset SSH_AUTH_SOCK`) and the recommended
+agent-side mitigation (`ssh-add -c`) directly, so the choice is informed at the
+point of use, not only in this ADR.
+
 ## Consequences
 
 - **Positive:** `git-ssh-sign` works on msb at parity with sbx; the same
