@@ -155,6 +155,8 @@ EPHEMERAL_AGENT_PID=""
 EPHEMERAL_AGENT_SOCK=""
 EPHEMERAL_AGENT_DIR=""
 EPHEMERAL_AGENT_SOCKDIR=""
+EPHEMERAL_KEY_PUB=""
+EPHEMERAL_KEY_TAG=""
 pass() { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
 fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
 skip() { SKIP=$((SKIP + 1)); printf '  skip  %s\n' "$1"; }
@@ -719,7 +721,7 @@ _stop_ephemeral_agent() {
   [ -n "$EPHEMERAL_AGENT_DIR" ] && rm -rf "$EPHEMERAL_AGENT_DIR"
   [ -n "$EPHEMERAL_AGENT_SOCKDIR" ] && rm -rf "$EPHEMERAL_AGENT_SOCKDIR"
   EPHEMERAL_AGENT_PID=""; EPHEMERAL_AGENT_SOCK=""; EPHEMERAL_AGENT_DIR=""
-  EPHEMERAL_AGENT_SOCKDIR=""
+  EPHEMERAL_AGENT_SOCKDIR=""; EPHEMERAL_KEY_PUB=""; EPHEMERAL_KEY_TAG=""
   # Restore the caller's env so no later step inherits a now-dead socket. The
   # snapshot vars are set by _start_ephemeral_agent; empty means "was unset".
   if [ -n "${_SAVED_SSH_AUTH_SOCK+x}" ]; then
@@ -752,17 +754,40 @@ _start_ephemeral_agent() {
   _SAVED_SSH_AGENT_PID="${SSH_AGENT_PID:-}"
 
   # Bind the agent to a known socket path so we control SSH_AUTH_SOCK exactly.
-  # `-a PATH` makes ssh-agent listen there; the eval sets SSH_AGENT_PID.
+  # `-a PATH` makes ssh-agent listen there; the eval sets SSH_AGENT_PID and
+  # (authoritatively) SSH_AUTH_SOCK. We trust the socket path SSH-AGENT REPORTS,
+  # not the one we requested: on some platforms (notably macOS, where /tmp is a
+  # symlink to /private/tmp) the two differ, and acq canonicalizes the value it
+  # forwards — so we canonicalize to the same real path to keep the host-side
+  # enumeration, the value acq forwards, and teardown all pointing at one inode.
   local agent_env
   agent_env=$(ssh-agent -s -a "$EPHEMERAL_AGENT_SOCK" 2>/dev/null) || { _stop_ephemeral_agent; return 1; }
   eval "$agent_env" >/dev/null 2>&1
   EPHEMERAL_AGENT_PID="${SSH_AGENT_PID:-}"
+  # Adopt the reported socket, resolved to its real path (matches acq's own
+  # canonicalize_path). Fall back to the requested path if resolution fails.
+  local _reported="${SSH_AUTH_SOCK:-$EPHEMERAL_AGENT_SOCK}" _real
+  if command -v realpath >/dev/null 2>&1; then
+    _real=$(realpath "$_reported" 2>/dev/null || printf '%s' "$_reported")
+  else
+    _real="$_reported"
+  fi
+  EPHEMERAL_AGENT_SOCK="$_real"
   [ -n "$EPHEMERAL_AGENT_PID" ] && [ -S "$EPHEMERAL_AGENT_SOCK" ] || { _stop_ephemeral_agent; return 1; }
 
-  # Generate a passphrase-less throwaway key and load it. This is a SIGNING key
-  # only ever held by this ephemeral agent; it never touches ~/.ssh.
-  ssh-keygen -q -t ed25519 -N "" -C "acq-verify-ephemeral" -f "$key" >/dev/null 2>&1 \
+  # Generate a passphrase-less throwaway key and load it into (only) this
+  # ephemeral agent. The check asserts the guest sees THIS EXACT public key body
+  # (type + base64) — a cryptographic identity match, immune to how many keys any
+  # other agent on the host happens to hold. The -C comment is cosmetic only
+  # (uniqueness comes from the random key body, not the tag); it just labels the
+  # key in `ssh-add -L` output. Never touches ~/.ssh.
+  EPHEMERAL_KEY_TAG="acq-verify-$$-$(date +%s 2>/dev/null || printf '0')"
+  ssh-keygen -q -t ed25519 -N "" -C "$EPHEMERAL_KEY_TAG" -f "$key" >/dev/null 2>&1 \
     || { _stop_ephemeral_agent; return 1; }
+  # Capture the public key body (type + base64, comment stripped) — this is what
+  # the guest greps its own `ssh-add -L` for (a `-L` line is "type base64 comment",
+  # so a fixed-string match on the body matches despite the trailing comment).
+  EPHEMERAL_KEY_PUB=$(awk '{print $1" "$2}' "${key}.pub" 2>/dev/null)
   SSH_AUTH_SOCK="$EPHEMERAL_AGENT_SOCK" ssh-add "$key" >/dev/null 2>&1 \
     || { _stop_ephemeral_agent; return 1; }
 
@@ -790,8 +815,9 @@ _start_ephemeral_agent() {
 # or on old msb still passes). When they ARE met, assert the two things that
 # prove the live path end-to-end:
 #   (a) the guest session has SSH_AUTH_SOCK exported (acq wires it on exec), and
-#   (b) `ssh-add -L` INSIDE the guest returns the same NUMBER of keys as the
-#       ephemeral agent — i.e. the vsock route + socat bridge reach the host.
+#   (b) the guest's forwarded agent holds THIS EXACT ephemeral key (matched by
+#       key body, not a count) — proving the vsock route + socat bridge reach
+#       OUR agent specifically, not merely "an" agent.
 # Only PUBLIC keys are ever printed (ssh-add -L); no private material is exposed.
 _ssh_agent_forwarding_check() {
   local backend="$1" name="$2"
@@ -807,10 +833,11 @@ _ssh_agent_forwarding_check() {
   # Enumerate the ephemeral agent's keys. `ssh-add -L` exits non-zero when empty
   # and `grep -c` exits 1 on zero matches; take the FIRST line and normalize a
   # missing/non-numeric result to 0 so the count is robust (defensive — this is
-  # an unchecked command substitution).
+  # an unchecked command substitution). SSH_AUTH_SOCK was exported to the
+  # ephemeral socket by _start_ephemeral_agent, so this counts OUR agent.
   host_keys=$(ssh-add -L 2>/dev/null | grep -c '^ssh-' 2>/dev/null | head -n1)
   case "$host_keys" in ""|*[!0-9]*) host_keys=0 ;; esac
-  if [ "$host_keys" -lt 1 ]; then
+  if [ "$host_keys" -lt 1 ] || [ -z "$EPHEMERAL_KEY_PUB" ]; then
     skip "${backend}: host ssh-agent forwarding (ephemeral agent holds no keys — unexpected)"
     return 0
   fi
@@ -842,27 +869,41 @@ _ssh_agent_forwarding_check() {
     return 0
   fi
 
-  # (b) `ssh-add -L` inside the guest reaches the ephemeral agent and lists the
-  #     same number of keys. This is the real end-to-end proof: the --vsock route
-  #     + socat bridge carry agent traffic from guest to host. We compare COUNTS
-  #     (public-key lines) rather than printing key bodies.
+  # (b) The guest's forwarded agent must contain THIS EXACT ephemeral public key.
+  #     We match on the key body (type + base64), not a count: a count can be
+  #     satisfied by the WRONG agent (e.g. if the guest were somehow wired to a
+  #     different host agent that happens to hold keys), whereas the unique
+  #     throwaway key we just generated proves the guest is reaching OUR agent
+  #     specifically — the real end-to-end proof of the --vsock + socat path.
   #
-  #     The guest command ALWAYS exits 0 and prints a bare integer: `ssh-add -L`
-  #     exits non-zero when the agent is unreachable OR simply empty, and
-  #     `grep -c` exits 1 on zero matches — an rc alone cannot tell "0 keys" from
-  #     "no agent". So we emit a deterministic `COUNT=<n>` line and judge on the
-  #     number, not the exit status.
+  #     The guest emits deterministic ACQVK_MATCH=yes/no and ACQVK_COUNT=<n>
+  #     lines (always exits 0). We use DISTINCTIVE keys (ACQVK_ prefix) and parse
+  #     them UNANCHORED, because msb prints a `• Backend  local` banner into the
+  #     exec stream that can prepend onto the probe's first output line — an
+  #     anchored `^COUNT=` match would then miss it and misread 0. We pass the key
+  #     body as a positional arg to the guest sh -c (a PUBLIC key, safe to pass).
+  local _probe='
+    body="$1"
+    out=$(ssh-add -L 2>/dev/null)
+    n=$(printf "%s\n" "$out" | grep -c "^ssh-")
+    if printf "%s\n" "$out" | grep -qF "$body"; then m=yes; else m=no; fi
+    printf "\nACQVK_COUNT=%s\nACQVK_MATCH=%s\n" "${n:-0}" "$m"
+  '
   if run_acq "exec ssh-add-L" --backend "$backend" exec "$name" -- sh -c \
-      'n=$(ssh-add -L 2>/dev/null | grep -c "^ssh-"); printf "COUNT=%s\n" "${n:-0}"'; then
-    local guest_keys
-    guest_keys=$(printf '%s\n' "$LAST_OUT" | sed -n 's/^COUNT=\([0-9][0-9]*\)$/\1/p' | tail -n1)
+      "$_probe" acq-ssh-probe "$EPHEMERAL_KEY_PUB"; then
+    local guest_match guest_keys
+    # Unanchored parse (tolerates the msb banner prepended onto the line).
+    guest_match=$(printf '%s\n' "$LAST_OUT" | sed -n 's/.*ACQVK_MATCH=\([a-z][a-z]*\).*/\1/p' | tail -n1)
+    guest_keys=$(printf '%s\n' "$LAST_OUT" | sed -n 's/.*ACQVK_COUNT=\([0-9][0-9]*\).*/\1/p' | tail -n1)
     case "$guest_keys" in ""|*[!0-9]*) guest_keys=0 ;; esac
-    if [ "$guest_keys" -ge 1 ] && [ "$guest_keys" = "$host_keys" ]; then
-      pass "${backend}: guest ssh-add -L reaches the host agent (${guest_keys} key(s), matches ephemeral agent)"
+    if [ "$guest_match" = "yes" ]; then
+      pass "${backend}: guest ssh-add -L exposes the ephemeral host key (vsock + socat forward reaches the host agent)"
     elif [ "$guest_keys" -ge 1 ]; then
-      # Reachable but count differs — still proves the bridge works; warn on the
-      # mismatch rather than fail, since the forwarding path is demonstrably live.
-      warn "${backend}: guest ssh-add -L reaches the agent but key count differs (guest ${guest_keys} vs ephemeral ${host_keys})"
+      # The guest reached SOME agent (keys present) but NOT ours — the forward is
+      # wired to the wrong agent (e.g. acq forwarded a different SSH_AUTH_SOCK
+      # than the one we started). Fail with the count so the cause is visible.
+      fail "${backend}: guest agent does not hold the ephemeral key (guest has ${guest_keys} key(s), none match ours — forward wired to the wrong agent?)"
+      dump "guest ssh-add -L output" "$LAST_OUT"
     else
       fail "${backend}: guest ssh-add -L found no keys (vsock route / socat bridge not reaching the host agent)"
       dump "guest ssh-add -L output" "$LAST_OUT"
