@@ -18,7 +18,9 @@
 #      swap; msb binds `--secret ENV@HOST` + on-the-wire rewrite), so the check
 #      verifies acq's wiring (bind + egress), not USAi auth. The verifier seeds a
 #      synthetic dummy value — no real key, no pasting.
-#   3. Git commit signing config is present (git-ssh-sign kit landed).
+#   3. Git commit signing config is present (git-ssh-sign kit landed), and — on
+#      msb, when the host has a loaded ssh-agent — the host agent is actually
+#      reachable inside the guest (the live --vsock + socat forward, ADR-0021).
 #   4. The playbook clone symlink appears at the agent's AGENTS.md path.
 # A backend that is NOT installed is SKIPPED (its row prints "skipped").
 #
@@ -632,6 +634,27 @@ verify_backend() {
   unseed_usai_secret "$backend" "$name"
   unseed_github_secret "$backend" "$name"
 
+  # 4c) Host ssh-agent forwarding (git-ssh-sign parity, ADR-0021). On msb, acq
+  #     forwards the host ssh-agent into the guest via `--vsock` + an in-guest
+  #     socat bridge whenever the host SSH_AUTH_SOCK is set, exporting the guest
+  #     SSH_AUTH_SOCK so git/ssh can sign with the host's already-unlocked keys.
+  #     The static gpg.format check above only proves the kit CONFIG landed; it
+  #     does NOT prove the agent is reachable. This asserts the live forward:
+  #       - the guest session has SSH_AUTH_SOCK exported to the bridge socket, and
+  #       - `ssh-add -L` inside the guest lists the SAME identities the host agent
+  #         holds (i.e. the vsock route + socat bridge actually reach the host).
+  #     GATING: only meaningful on msb (sbx forwards implicitly and is unchanged
+  #     by this work) and only when the HOST actually has an ssh-agent with at
+  #     least one key loaded — otherwise there is nothing to forward. When the
+  #     host has no agent / no keys / no socat in the guest, SKIP (a token-less,
+  #     agent-less run must still pass), naming the reason. The FEATURE also needs
+  #     msb >= 0.6.9 (the --vsock floor); on older msb the forward is a no-op and
+  #     we skip. The private key never enters the guest — `ssh-add -L` returns
+  #     only PUBLIC keys, so nothing sensitive is printed.
+  if [ "$backend" = "msb" ]; then
+    _ssh_agent_forwarding_check "$backend" "$name"
+  fi
+
   # 5) OCI engine (podman) usable — msb only (ADR-0020).
   _verify_oci_checks "$backend" "$name"
 
@@ -641,6 +664,127 @@ verify_backend() {
   else
     run_acq "rm" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
   fi
+}
+
+# _ssh_agent_forwarding_check BACKEND NAME — assert the LIVE host ssh-agent
+# forward on msb (ADR-0021), not just that the git-ssh-sign kit config landed.
+#
+# The forward is opt-in via the host SSH_AUTH_SOCK (the same signal sbx uses).
+# So this check only asserts when there is actually something to forward:
+#   - the host has SSH_AUTH_SOCK set to a socket AND `ssh-add -L` lists >=1 key,
+#   - the running msb is >= 0.6.9 (the --vsock floor; older is a documented
+#     no-op), and
+#   - socat is present in the guest (the bridge needs it; a missing socat is a
+#     documented prereq gap, not a forwarding regression).
+# Any of those unmet => SKIP with the reason (a run without a loaded host agent
+# must still pass). When they ARE met, assert the two things that prove the live
+# path end-to-end:
+#   (a) the guest session has SSH_AUTH_SOCK exported (acq wires it on exec), and
+#   (b) `ssh-add -L` INSIDE the guest returns the same NUMBER of keys as the
+#       host agent — i.e. the vsock route + socat bridge actually reach the host.
+# Only PUBLIC keys are ever printed (ssh-add -L); no private material is exposed.
+_ssh_agent_forwarding_check() {
+  local backend="$1" name="$2"
+
+  # Host precondition: an ssh-agent with at least one loaded key.
+  if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+    skip "${backend}: host ssh-agent forwarding (host SSH_AUTH_SOCK not set; nothing to forward)"
+    return 0
+  fi
+  if ! command -v ssh-add >/dev/null 2>&1; then
+    skip "${backend}: host ssh-agent forwarding (ssh-add not on host PATH; cannot enumerate host keys)"
+    return 0
+  fi
+  local host_keys
+  # `ssh-add -L` exits non-zero when the agent is empty/unreachable and `grep -c`
+  # exits 1 on zero matches; take only the FIRST line and normalize a
+  # missing/non-numeric result to 0 so the count is robust regardless of the
+  # pipe's exit status (defensive — this is an unchecked command substitution).
+  host_keys=$(ssh-add -L 2>/dev/null | grep -c '^ssh-' 2>/dev/null | head -n1)
+  case "$host_keys" in ""|*[!0-9]*) host_keys=0 ;; esac
+  if [ "$host_keys" -lt 1 ]; then
+    skip "${backend}: host ssh-agent forwarding (host agent holds no keys; run 'ssh-add' first)"
+    return 0
+  fi
+
+  # Feature precondition: msb >= 0.6.9 (the --vsock floor). Below it, the forward
+  # is a no-op by design, so there is nothing to assert.
+  local mver
+  mver=$(msb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)
+  if [ -n "$mver" ] && ! _verify_ver_ge "$mver" "0.6.9"; then
+    skip "${backend}: host ssh-agent forwarding (msb ${mver} < 0.6.9; --vsock unavailable)"
+    return 0
+  fi
+
+  # Guest precondition: socat present (the bridge needs it; documented prereq).
+  if ! run_acq "exec socat-present" --backend "$backend" exec "$name" -- sh -c \
+      'command -v socat >/dev/null 2>&1'; then
+    skip "${backend}: host ssh-agent forwarding (socat not in the guest image; bake it into ACQ_MSB_IMAGE)"
+    return 0
+  fi
+
+  # (a) The guest session exports SSH_AUTH_SOCK (acq wires it on exec). A bare,
+  #     non-empty value is the assertion — acq points it at the in-guest bridge.
+  if run_acq "exec ssh-auth-sock" --backend "$backend" exec "$name" -- sh -c \
+      'test -n "${SSH_AUTH_SOCK:-}"'; then
+    pass "${backend}: guest session has SSH_AUTH_SOCK exported (ssh-agent forward wired)"
+  else
+    fail "${backend}: guest SSH_AUTH_SOCK not exported (ssh-agent forward not wired)"
+    dump "exec output" "$LAST_OUT"
+    return 0
+  fi
+
+  # (b) `ssh-add -L` inside the guest reaches the host agent and lists the same
+  #     number of keys. This is the real end-to-end proof: the --vsock route +
+  #     socat bridge carry agent traffic from guest to host. We compare COUNTS
+  #     (public-key lines) rather than printing key bodies.
+  #
+  #     The guest command ALWAYS exits 0 and prints a bare integer: `ssh-add -L`
+  #     exits non-zero when the agent is unreachable OR simply empty, and
+  #     `grep -c` exits 1 on zero matches — under `set -o pipefail` an rc alone
+  #     cannot tell "0 keys" from "no agent". So we emit a deterministic
+  #     `COUNT=<n>` line and judge on the number, not the exit status.
+  if run_acq "exec ssh-add-L" --backend "$backend" exec "$name" -- sh -c \
+      'n=$(ssh-add -L 2>/dev/null | grep -c "^ssh-"); printf "COUNT=%s\n" "${n:-0}"'; then
+    local guest_keys
+    guest_keys=$(printf '%s\n' "$LAST_OUT" | sed -n 's/^COUNT=\([0-9][0-9]*\)$/\1/p' | tail -n1)
+    case "$guest_keys" in ""|*[!0-9]*) guest_keys=0 ;; esac
+    if [ "$guest_keys" -ge 1 ] && [ "$guest_keys" = "$host_keys" ]; then
+      pass "${backend}: guest ssh-add -L reaches the host agent (${guest_keys} key(s), matches host)"
+    elif [ "$guest_keys" -ge 1 ]; then
+      # Reachable but count differs — still proves the bridge works; warn on the
+      # mismatch (e.g. the host agent changed between the two reads) rather than
+      # fail, since the forwarding path itself is demonstrably live.
+      warn "${backend}: guest ssh-add -L reaches the agent but key count differs (guest ${guest_keys} vs host ${host_keys})"
+    else
+      fail "${backend}: guest ssh-add -L found no keys (vsock route / socat bridge not reaching the host agent)"
+      dump "guest ssh-add -L output" "$LAST_OUT"
+    fi
+  else
+    fail "${backend}: guest ssh-add -L probe did not run (msb exec failed)"
+    dump "guest ssh-add -L output" "$LAST_OUT"
+  fi
+}
+
+# _verify_ver_ge A B — succeed (0) iff dotted version A >= B (numeric, 3 fields).
+# Local to the verifier (mirrors the adapters' own comparison shape) so the
+# ssh-agent check can gate on the msb --vsock floor without sourcing an adapter.
+_verify_ver_ge() {
+  local a="$1" b="$2" i ap bp
+  local oldifs="$IFS"; IFS='.'
+  # shellcheck disable=SC2086
+  set -- $a; local a1="${1:-0}" a2="${2:-0}" a3="${3:-0}"
+  # shellcheck disable=SC2086
+  set -- $b; local b1="${1:-0}" b2="${2:-0}" b3="${3:-0}"
+  IFS="$oldifs"
+  for i in "$a1:$b1" "$a2:$b2" "$a3:$b3"; do
+    ap="${i%%:*}"; bp="${i##*:}"
+    ap="${ap%%[!0-9]*}"; bp="${bp%%[!0-9]*}"
+    ap="${ap:-0}"; bp="${bp:-0}"
+    if [ "$ap" -gt "$bp" ]; then return 0; fi
+    if [ "$ap" -lt "$bp" ]; then return 1; fi
+  done
+  return 0
 }
 
 # _verify_oci_checks BACKEND NAME — the OCI engine + run checks (msb only,
