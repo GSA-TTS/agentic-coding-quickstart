@@ -110,9 +110,12 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   via `msb modify --secret`. The **GitHub token is bound to the REST API and
   git-transport hosts**
   (`GITHUB_TOKEN@github.com,api.github.com,codeload.github.com`): msb substitutes
-  the token on the wire for REST API calls and HTTPS git clone/push, so the real
-  token never enters the guest. Kits still may use REST tarballs for
-  reproducibility, but HTTPS git transport is now eligible for substitution.
+  the token on the wire for REST API calls, and git smart-HTTP is **eligible**
+  because git carries its credential in an `Authorization: Basic` header that
+  msb's substitution path rewrites (see the "GitHub git-HTTPS substitution
+  eligibility" note below), so the real token never enters the guest. Kits still
+  may use REST tarballs for reproducibility, but HTTPS git transport is eligible
+  for substitution.
   Unlike sbx (whose
   templates supply the image), msb runs a plain OCI image: the default is the
   public `node:22-bookworm` (built on buildpack-deps, so it already ships
@@ -316,11 +319,41 @@ allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
   it is the microsandbox model and the price of the microVM boundary. Disable
   with `ACQ_MSB_NO_TLS_INTERCEPT` (secrets then won't substitute).
 - **Private GitHub content:** kits may fetch private GitHub content via pinned
-  REST tarballs for reproducibility, and acq now binds GitHub credentials to the
+  REST tarballs for reproducibility, and acq binds GitHub credentials to the
   REST API plus HTTPS git-transport hosts
-  (`GITHUB_TOKEN@github.com,api.github.com,codeload.github.com`). Current msb
+  (`GITHUB_TOKEN@github.com,api.github.com,codeload.github.com`). msb
   substitutes the placeholder on those hosts, so direct HTTPS clone/push is
-  eligible for secret injection without the real token entering the guest.
+  eligible for secret injection without the real token entering the guest — see
+  the eligibility note immediately below for the static-vs-live status of the
+  git-transport claim.
+- **GitHub git-HTTPS substitution eligibility (re-verified statically against
+  msb 0.6.9; live git clone/push still pending on a KVM host):** the msb
+  secret-substitution engine substitutes a placeholder only on a TLS-intercepted
+  connection whose SNI/authority matches the bound host (the `--tls-intercept`
+  requirement is unchanged in 0.6.9). Its request rewriting covers HTTP request
+  **headers** — including an `Authorization: Basic <base64(user:token)>` value,
+  which it base64-decodes, substitutes the placeholder in, and re-encodes — plus
+  URL query params and (opt-in) identity-encoded request bodies. Git's
+  smart-HTTP transport carries its credential in exactly that `Authorization:
+  Basic` header on every request (both the `GET .../info/refs` and the `POST
+  .../git-upload-pack` / `git-receive-pack`), and the credential does **not**
+  ride the request body. The 0.6.9 engine does **not** rewrite non-identity
+  (e.g. gzipped) bodies, HTTP/2 DATA-frame bodies, or fixed-length bodies larger
+  than 16 MiB — it blocks a request rather than send a placeholder wrong — but
+  git's gzipped pack-negotiation body carries no credential, so that limit does
+  not gate the auth header. On paper, therefore, a git clone/push over
+  intercepted HTTPS to a bound github host is **eligible** for header
+  substitution in 0.6.9. This is the static reading of the 0.6.9 source
+  (`crates/network/lib/secrets/handler.rs`, `.../config.rs`) and docs
+  (`docs/security/secrets.mdx`); the 0.6.6→0.6.9 diff shows no change to the
+  header/Basic-auth substitution path and nothing added or removed for
+  git/smart-HTTP specifically. **What the static review does not prove:** that
+  msb actually intercepts and rewrites git's connection end-to-end (git's
+  credential-helper prompt, TLS handshake against the interception CA, and the
+  authority checks must all line up at run time). That confirmation requires a
+  live `git clone`/`git ls-remote` of a private repo on a KVM-capable host and is
+  still pending; run `scripts/verify-git-https-secret-msb` there to settle it
+  (it prints an explicit PASS/FAIL/BLOCKED verdict and never echoes the token).
 
 ### `environment` vocabulary (guest env vars)
 
@@ -374,8 +407,12 @@ discovered and worked around here (recorded so they aren't re-litigated):
 identical host:guest `/tmp` mounts silently fail (→ fixed guest mount point);
 the host resolver is unreachable from the microVM (→ `--dns-nameserver`); the
 kits assume an `agent`/`/home/agent` user a plain base lacks (→ create it);
-secret substitution requires `--tls-intercept` and only covers the
-`Authorization` header path, not git HTTPS.
+secret substitution requires `--tls-intercept` and, per a static re-verification
+against msb 0.6.9, rewrites HTTP request headers (including the
+`Authorization: Basic` value git smart-HTTP uses) — so git-over-HTTPS is
+eligible on paper, though the live git clone/push confirmation is still pending
+on a KVM host (see the eligibility note above and
+`scripts/verify-git-https-secret-msb`).
 
 ## Validation
 
@@ -392,7 +429,10 @@ secret substitution requires `--tls-intercept` and only covers the
   `scripts/verify-backends` msb rows (now including the `opencode`-installed
   assertion added for quickstart#228) cannot run inside an sbx/msb sandbox and
   need host virtualization (`/dev/kvm` on Linux). The msb CLI flag shapes were
-  verified against `msb 0.6.6`; the live loop is deferred and mirrors how
+  verified against `msb 0.6.6` and the secret-substitution behavior was
+  re-verified statically against `msb 0.6.9` (0.6.9 is the installed version;
+  see the git-HTTPS eligibility note above — the live git clone/push loop is the
+  one piece still deferred to a KVM host); the live loop mirrors how
   ADR-0009/ADR-0010 defer live verification. Run `./scripts/verify-backends`
   on a sandbox-capable host and attach the transcript. **The quickstart#228 fix
   (agent install + attach launch) is verified offline via the stubbed harness;

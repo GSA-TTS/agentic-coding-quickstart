@@ -147,10 +147,14 @@ wrapper that only holds the user's `gh` token:
   collaborators, cannot access multiple orgs at once, and cannot call the Checks
   API. The docs note these so users know when to fall back to the (broader)
   global token.
-- **msb backend:** `msb` does not bind the `github` secret at all
-  (`msb.sh` — upstream microsandbox git-substitution limitation, ADR-0011). The
-  scoped token is still stored in the acq-neutral store on msb, and the flow
-  notes that msb does not inject it. No behavior regression for msb.
+- **msb backend:** `msb` binds the `github` secret to the REST API and
+  git-transport hosts (`msb.sh`; see ADR-0011). A static re-verification against
+  msb 0.6.9 found the substitution engine rewrites the `Authorization: Basic`
+  header git smart-HTTP uses, so a scoped token is eligible for injection on both
+  REST and HTTPS git transport without the real value entering the guest — the
+  same least-privilege scoping this ADR describes applies unchanged. The live
+  git clone/push confirmation on a KVM host is still pending (ADR-0011), so treat
+  msb git-HTTPS auth as eligible-but-not-yet-live-verified.
 - **Deprecation, not removal:** the global path keeps working, so existing setups
   are not broken; new guidance steers to per-sandbox scoping.
 - **Audit (AU-2):** scoping is per-sandbox and named, so which credential a
@@ -173,7 +177,7 @@ wrapper that only holds the user's `gh` token:
 - Exploration: `docs/explorations/downscoping-github-credentials-for-local-agents.md`
 - Related: ADR-0001 (SBX isolation is the complementary boundary),
   ADR-0005 (github token needed for the private playbook clone),
-  ADR-0011 (msb does not bind the github secret),
+  ADR-0011 (msb github-secret binding + git-HTTPS substitution eligibility),
   ADR-0012 (backend-neutral secret handling)
 - GitHub docs: "Managing your personal access tokens" (fine-grained PAT URL
   pre-fill parameters), "Create a scoped access token" (requires client secret),
