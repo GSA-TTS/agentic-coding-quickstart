@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+#
+# diagnose-tls-intercept - HOST-SIDE, READ-ONLY diagnostic for an msb sandbox
+# that cannot reach USAi / GitHub / npm.
+#
+# WHY THIS EXISTS
+#   "The sandbox can't reach the network" is not one problem. This probe helps
+#   sort a failure into one of the three signatures documented in
+#   docs/KNOWN_FAILURE_MODES.md section 30, because each has a different fix:
+#
+#   SIGNATURE 1 - broad connection cut (curl (56) unexpected eof / HTTP 000) on
+#     MULTIPLE hosts at once. In the field this has been corrupted/stale msb
+#     state: it did not reproduce on a clean install, and a full msb data wipe +
+#     reinstall (then `msb doctor`) cleared it. Steps 4-7 help confirm the "broad
+#     cut" shape; the fix is a reinstall, not a certificate change.
+#
+#   SIGNATURE 2 - USAi ONLY fails to RESOLVE (curl exit 6 / NXDOMAIN) while
+#     GitHub and npm work. USAi is a split-horizon name whose real address lives
+#     in an internal, tunnel-only zone the guest's public resolver cannot see.
+#     Step 4 reads this directly (an "exit=6" for USAi but 200/301 for the
+#     others). The fix is a resolver that can reach the internal zone
+#     (ACQ_MSB_DNS_NAMESERVER), not a reinstall and not a cert change.
+#
+#   SIGNATURE 3 - a genuinely TLS-intercepted endpoint (a corporate proxy
+#     terminates the domain and presents its own leaf). msb's `--tls-intercept`
+#     (which acq enables to substitute secrets on the wire) runs a HOST-SIDE MITM
+#     proxy whose UPSTREAM leg verifies the real server against the HOST trust
+#     store - NOT the guest bundle, and NOT `--trust-host-cas`. If step 5 shows
+#     the corporate proxy as the served-leaf issuer AND the host's native-cert
+#     enumeration does not surface that root, the upstream handshake fails after
+#     the guest-facing TLS completed -> `unexpected eof`. Fix: pass the root
+#     explicitly via `--tls-upstream-ca-cert` (acq does this by default; override
+#     with ACQ_MSB_UPSTREAM_CA_CERT). Steps 1-5 characterize this case.
+#
+#   Step 6 is the DECISIVE discriminator between Signature 3 (cert trust) and a
+#   below-TLS egress cut (Signature 1 shape): if egress still fails with msb
+#   interception fully DISABLED, no certificate change can help. Step 7 then
+#   LOCALIZES a broad cut - it compares msb's VM egress against another VM
+#   runtime (podman machine) on the same host: if podman's VM reaches an endpoint
+#   msb cannot, msb's libkrun/vmnet path is being singled out (evidence for an
+#   msb-specific bug worth an upstream report) versus a blanket network block of
+#   all non-tunneled VM egress. Step 8 checks a cheap IPv6-first variant of that
+#   msb bug (a guest with no usable IPv6 egress that never falls back to IPv4);
+#   steps 6 and 7 probe each host both default (dual-stack) and IPv4-forced
+#   (curl -4) so step 8 can read whether forcing IPv4 fixes it.
+#
+# SAFETY: read-only. Prints cert identity METADATA only (labels, subject/issuer
+#   CN, SHA-1 fingerprints) and HTTP status codes. No private keys, no secrets,
+#   no environment dump. Review before running/sharing the output.
+#
+# PLATFORM: macOS (uses the `security` keychain tool). On other OSes it prints
+#   what it can (reachability + interception check) and skips the keychain steps.
+#
+# USAGE:
+#   ./scripts/diagnose-tls-intercept [HOST ...]
+#     HOST ...  Optional extra hostnames to test for reachability + interception
+#               (in addition to the built-in USAi + GitHub set). Override the
+#               whole set with ACQ_DIAGNOSE_HOSTS="h1 h2 ...".
+#     ACQ_DIAGNOSE_CA_NAMES="Zscaler Netskope ..."  Override the CA-name scan list.
+#     ACQ_DIAGNOSE_RUN_STEP6=1  Opt in to an AUTOMATED step-6 reproduction: create
+#               a throwaway `ACQ_MSB_NO_TLS_INTERCEPT=1` sandbox, curl the key
+#               hosts from INSIDE the guest, then remove it. Off by default (the
+#               printed manual command is the primary, always-safe path).
+#
+#   Fully UNPRIVILEGED - it never calls `sudo`. On GSA-managed Macs `sudo`
+#   triggers a PIV/SSH askpass that loops on the smart-card PIN, and it is
+#   unnecessary here: root CAs are readable over the default keychain search
+#   list (only private keys need privilege, which this probe never touches).
+set -u
+
+# Hosts to test. Default = the endpoints acq actually depends on. Callers can
+# add more as positional args, or replace the whole set via ACQ_DIAGNOSE_HOSTS.
+DEFAULT_HOSTS="api.gsa.usai.gov api.github.com codeload.github.com github.com"
+if [ -n "${ACQ_DIAGNOSE_HOSTS:-}" ]; then
+  # shellcheck disable=SC2206  # intentional word-split of a space-separated list
+  HOSTS=(${ACQ_DIAGNOSE_HOSTS})
+else
+  # shellcheck disable=SC2206
+  HOSTS=(${DEFAULT_HOSTS} "$@")
+fi
+
+# CA display names to scan for in the keychains / trust-settings domains.
+# Broadened beyond Zscaler so this stays useful for other intercepting proxies.
+DEFAULT_CA_NAMES="Zscaler Netskope Palo Cloudflare Forcepoint Corporate GSA Federal Root CA"
+# shellcheck disable=SC2206
+CA_NAMES=(${ACQ_DIAGNOSE_CA_NAMES:-$DEFAULT_CA_NAMES})
+
+is_macos() { [ "$(uname -s 2>/dev/null)" = "Darwin" ]; }
+have() { command -v "$1" >/dev/null 2>&1; }
+hr() { printf '\n===== %s =====\n' "$1"; }
+
+hr "host / OS"
+if is_macos; then sw_vers 2>/dev/null || true; fi
+uname -a 2>/dev/null || true
+echo "msb:      $(command -v msb || echo 'not on PATH')"
+have msb && { msb --version 2>/dev/null || true; }
+echo "openssl:  $(command -v openssl || echo 'not on PATH')"
+echo "curl:     $(command -v curl || echo 'not on PATH')"
+
+# All keychain queries run UNPRIVILEGED. We deliberately do NOT `sudo` here:
+# on GSA-managed Macs `sudo` invokes a PIV/SSH askpass and loops on the smart-
+# card PIN, and it buys nothing - `security find-certificate` over the default
+# search list already enumerates the System keychain (roots are world-readable;
+# it is private KEYS that need privilege, and this probe never touches those).
+if is_macos && have security; then
+  hr "1. Corporate/intercepting-proxy roots by name (all search-list keychains)"
+  echo "  (the default search list already includes the System keychain; roots"
+  echo "   are readable without sudo - only private keys would need privilege)"
+  found_any=0
+  for n in "${CA_NAMES[@]}"; do
+    out=$(security find-certificate -a -c "$n" -Z 2>/dev/null | grep -E 'SHA-1|"labl"')
+    [ -n "$out" ] && { found_any=1; printf '%s\n' "$out" | sed "s/^/  [$n] /"; }
+  done
+  [ "$found_any" -eq 0 ] && echo "  (nothing matched those names in the search-list keychains)"
+
+  hr "2. User (login) trust-settings domain"
+  security dump-trust-settings 2>/dev/null \
+    | grep -iE 'zscaler|netskope|palo|cloudflare|forcepoint|root|corp|gsa|federal' \
+    || echo "  (no user-domain trust-settings entries matched those names)"
+  echo "  (admin/System trust-settings would need sudo - deliberately skipped to"
+  echo "   avoid the PIV-PIN prompt; step 1 + step 3 already establish presence)"
+
+  hr "3. Cert COUNT visible to a native-certs-style enumeration"
+  echo "  This is the closest unprivileged proxy for what rustls_native_certs"
+  echo "  load_native_certs() sees - it reads the same search-list keychains."
+  security find-certificate -a -p 2>/dev/null | grep -c 'BEGIN CERTIFICATE' \
+    | sed 's/^/  search-list roots+intermediates (incl. System): /'
+else
+  hr "keychain steps skipped"
+  echo "  Not macOS (or 'security' unavailable): the load_native_certs() source"
+  echo "  differs per OS. Reachability + interception checks below still apply."
+fi
+
+hr "4. HOST reachability (does the host itself trust the intercepted chain?)"
+if have curl; then
+  for h in "${HOSTS[@]}"; do
+    url="https://${h}/"
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "$url" 2>/dev/null; printf '|exit=%s' "$?")
+    echo "  $url -> ${code}"
+  done
+  echo
+  echo "  Interpretation: 'exit=6' means the NAME did not resolve (NXDOMAIN). If"
+  echo "  ONLY api.gsa.usai.gov shows exit=6 while GitHub/npm return 200/301, that"
+  echo "  is SIGNATURE 2 (split-horizon DNS): USAi resolves to an internal,"
+  echo "  tunnel-only zone the guest's public resolver cannot see. Fix with a"
+  echo "  resolver that can reach it (ACQ_MSB_DNS_NAMESERVER) - not a reinstall or"
+  echo "  a cert change. exit=35/56 (or code 000) instead means the name resolved"
+  echo "  but the connection was cut - continue to steps 5-8."
+else
+  echo "  (curl not available; skipped)"
+fi
+
+hr "5. Is egress actually being TLS-intercepted right now? (issuer of served leaf)"
+if have openssl; then
+  for h in "${HOSTS[@]}"; do
+    echo "  --- $h ---"
+    echo | openssl s_client -connect "${h}:443" -servername "$h" 2>/dev/null \
+      | openssl x509 -noout -issuer -subject 2>/dev/null | sed 's/^/    /' \
+      || echo "    (openssl probe failed)"
+  done
+  echo
+  echo "  Interpretation: if 'issuer' names the corporate proxy (e.g. Zscaler),"
+  echo "  egress IS being intercepted at the HOST level - this points at SIGNATURE 3"
+  echo "  (msb's upstream verifier must trust that root; acq passes host roots via"
+  echo "  --tls-upstream-ca-cert by default, override with ACQ_MSB_UPSTREAM_CA_CERT)."
+  echo "  If instead 'issuer' names the REAL public CA (Amazon/Sectigo/etc.) AND"
+  echo "  step 4 reached every host, then the host's own egress is fine and NOT"
+  echo "  intercepted for these domains - so a sandbox that still fails is a"
+  echo "  below-TLS egress cut (the SIGNATURE 1 shape). Step 6 decides it."
+else
+  echo "  (openssl not available; skipped)"
+fi
+
+hr "6. DECISIVE: does egress fail even with msb interception DISABLED?"
+echo "  This is the discriminator between SIGNATURE 3 (cert trust) and a below-TLS"
+echo "  egress cut. With ACQ_MSB_NO_TLS_INTERCEPT=1 msb adds no --tls-intercept and"
+echo "  no --tls-upstream-ca-cert: its proxy is entirely out of the path and the"
+echo "  guest's TLS goes straight out. If egress STILL fails identically, the"
+echo "  failure is below msb's TLS layer and no certificate change can help - most"
+echo "  often corrupted/stale msb state (SIGNATURE 1: wipe msb data + reinstall,"
+echo "  then 'msb doctor')."
+echo
+# Locate the acq wrapper next to this script so the printed commands are copy-paste
+# ready regardless of the caller's CWD.
+acq_bin=""
+if [ -x "${ACQ_SCRIPT_DIR:-}/acq" ]; then
+  acq_bin="${ACQ_SCRIPT_DIR}/acq"
+elif [ -x "$(dirname "$0")/../acq" ]; then
+  acq_bin="$(cd "$(dirname "$0")/.." && pwd)/acq"
+fi
+[ -n "$acq_bin" ] && acq_show="$acq_bin" || acq_show="./acq"
+
+if [ "${ACQ_DIAGNOSE_RUN_STEP6:-0}" = "1" ] && have msb && [ -n "$acq_bin" ]; then
+  # Opt-in automated reproduction. Off by default: it creates and removes a
+  # throwaway sandbox and, on a first run, msb secret binding / key prompts can
+  # interfere. The manual command below is the primary, always-safe path.
+  probe_name="acq-diagnose-noicept-$$"
+  echo "  ACQ_DIAGNOSE_RUN_STEP6=1: running an interception-DISABLED in-guest probe"
+  echo "  in a throwaway sandbox (name: ${probe_name}). It does NOT touch your"
+  echo "  normal 'opencode-*' sandbox."
+  echo
+  # For each host, probe default (dual-stack) AND IPv4-forced. If default fails
+  # but -4 succeeds, the guest is going out IPv6-first and stalling - the guest
+  # gets a v6 address / AAAA answers on a host with no usable v6 egress, the
+  # gateway answers the v6 SYN locally, so Happy Eyeballs never falls back to v4.
+  # See step 8.
+  probe_cmd='for h in api.gsa.usai.gov api.github.com registry.npmjs.org; do printf "  in-guest https://%s/ default -> " "$h"; curl -sS -o /dev/null -w "%{http_code}|exit=%{exitcode}\n" --max-time 15 "https://$h/" 2>&1 || echo "exit=$?"; printf "  in-guest https://%s/ -4      -> " "$h"; curl -4 -sS -o /dev/null -w "%{http_code}|exit=%{exitcode}\n" --max-time 15 "https://$h/" 2>&1 || echo "exit=$?"; done'
+  if ACQ_MSB_NO_TLS_INTERCEPT=1 "$acq_bin" create --name "$probe_name" opencode . >/dev/null 2>&1; then
+    # NOTE the `--` before the command: `acq exec` forwards to `msb exec [OPTS]
+    # <NAME> -- <CMD…>`, which REQUIRES the `--` separator. Without it msb rejects
+    # the first word of the command ("error: unexpected argument 'sh' found").
+    ACQ_MSB_NO_TLS_INTERCEPT=1 "$acq_bin" exec "$probe_name" -- sh -c "$probe_cmd" 2>&1 \
+      | sed 's/^/  /' || echo "  (in-guest probe could not run)"
+    "$acq_bin" rm "$probe_name" >/dev/null 2>&1 || \
+      echo "  (note: could not auto-remove ${probe_name}; remove with: ${acq_show} rm ${probe_name})"
+  else
+    echo "  Could not create the throwaway sandbox automatically (a key/secret"
+    echo "  prompt may be required on a first run). Use the manual command below."
+  fi
+  echo
+else
+  echo "  Run this reproduction from the repo root and paste the last ~15 lines of"
+  echo "  its output here (set ACQ_DIAGNOSE_RUN_STEP6=1 to have this script attempt"
+  echo "  it automatically in a throwaway sandbox instead):"
+  echo
+  echo "    ACQ_MSB_NO_TLS_INTERCEPT=1 ${acq_show} run opencode ."
+  echo
+fi
+echo "  READ THE RESULT: if that startup (or the in-guest curls) still FAIL with"
+echo "  'curl: (56) ... unexpected eof' / an npm registry.npmjs.org error while"
+echo "  step 4 (host-side) SUCCEEDED, the microVM's egress is being cut below"
+echo "  msb's TLS/cert handling. If it fails on MULTIPLE hosts at once, that is the"
+echo "  SIGNATURE 1 shape - most often stale msb state (wipe + reinstall). Use"
+echo "  step 7 to localize whether it is a network block or an msb-specific"
+echo "  VM-networking issue, and step 8 for the IPv6-first discriminator."
+
+hr "7. LOCALIZE a broad cut: network block, or an msb VM-networking issue?"
+echo "  A broad egress cut splits into two sub-cases. The distinguishing test:"
+echo "  does ANOTHER VM runtime on THIS host reach the same endpoint msb cannot?"
+echo
+echo "  If a podman-machine (or Docker/Lima/etc.) VM CAN curl an endpoint msb"
+echo "  CANNOT, then this host's Zero-Trust tunnel IS carrying VM egress in"
+echo "  general - and msb's libkrun/vmnet path is being singled out. That points"
+echo "  at an msb-specific VM-networking issue (worth an upstream report), not a"
+echo "  blanket network-policy block. If NO VM runtime can reach it, the network"
+echo "  is blocking all non-tunneled VM egress (a host/security-admin matter)."
+echo
+if have podman; then
+  echo "  podman detected - comparison probe (in-VM curl via podman machine):"
+  # Best-effort: only meaningful if a podman machine is already running. We do
+  # NOT start/stop machines or pull images beyond a tiny one; keep it read-only-ish.
+  pm_cmd='for h in api.gsa.usai.gov api.github.com registry.npmjs.org; do printf "    podman-VM https://%s/ default -> " "$h"; curl -sS -o /dev/null -w "%{http_code}|exit=%{exitcode}\n" --max-time 15 "https://$h/" 2>&1 || echo "exit=$?"; printf "    podman-VM https://%s/ -4      -> " "$h"; curl -4 -sS -o /dev/null -w "%{http_code}|exit=%{exitcode}\n" --max-time 15 "https://$h/" 2>&1 || echo "exit=$?"; done'
+  if podman machine inspect >/dev/null 2>&1; then
+    # Run curl INSIDE the podman machine VM (not a container) to mirror msb's
+    # VM-NIC egress path as closely as possible.
+    podman machine ssh "sh -c '$pm_cmd'" 2>&1 | sed 's/^/  /' \
+      || echo "    (podman machine ssh probe could not run; try manually - see below)"
+  else
+    echo "    (no running podman machine detected; start one and re-run, or probe"
+    echo "     manually - see below)"
+  fi
+  echo
+fi
+echo "  Manual comparison (run whichever VM runtime you have and compare to the"
+echo "  msb step-6 result above):"
+echo
+echo "    # podman machine (VM-level, closest analog to msb's libkrun VM):"
+echo "    podman machine ssh 'curl -sS -o /dev/null -w \"%{http_code}\\n\" -v https://api.github.com'"
+echo
+echo "  If the podman VM returns 200/301 for hosts msb cannot reach, capture that"
+echo "  side by side with step 6 - it is the strongest signal of an msb VM-"
+echo "  networking issue and belongs in an upstream microsandbox report."
+echo
+echo "  NOTE on Zscaler: what a host-vs-host difference ESTABLISHES is only that"
+echo "  this host's msb egress differs from a working host's (and, per step 7,"
+echo "  possibly from another VM runtime on THIS host). WHY they differ is a"
+echo "  hypothesis, not a measured fact: a password-gated 'Exit Zscaler' is at"
+echo "  most a correlated symptom, and a working host reproduces the good case"
+echo "  with Zscaler fully active and never exited - so do NOT treat exiting"
+echo "  Zscaler as the mechanism. To actually confirm a policy difference, compare"
+echo "  the two hosts' Zscaler status/policy + routes (netstat -rn, route get, the"
+echo "  Zscaler app's About/Status). See docs/KNOWN_FAILURE_MODES.md section 30."
+
+hr "8. IPv6-FIRST discriminator: does forcing IPv4 fix it?"
+echo "  A cheap-to-confirm variant of the msb VM-networking case: on a host with"
+echo "  no usable IPv6 egress (common under Zscaler/ZTNA force-tunneling), the msb"
+echo "  guest can still get an IPv6 address and AAAA DNS answers. The microVM"
+echo "  gateway then answers the guest's IPv6 SYN LOCALLY (connect returns success"
+echo "  instantly), so Happy Eyeballs never falls back to IPv4 - and every"
+echo "  dual-stack host stalls to timeout / 'unexpected eof'. (This matches a"
+echo "  known upstream microsandbox IPv6-first report.)"
+echo
+echo "  DECISIVE TEST: steps 6 and 7 above already probe each host BOTH ways -"
+echo "  default (dual-stack) and IPv4-forced (curl -4). Compare the two lines"
+echo "  per host in the step-6 (msb) output:"
+echo
+echo "    - default FAILS (56/000) but '-4' SUCCEEDS (200/301) -> IPv6-first stall."
+echo "      In-guest workaround: force IPv4 (curl -4) or disable guest IPv6, and"
+echo "      report it to the upstream microsandbox IPv6-first issue rather than"
+echo "      filing a new one."
+echo "    - BOTH default and '-4' fail -> NOT the IPv6-first case; egress is cut"
+echo "      regardless of address family (stay with the step-7 split)."
+echo "    - both succeed -> egress is actually fine for these hosts right now."
+echo
+echo "  (If your msb has no ACQ_MSB_NO_TLS_INTERCEPT auto-run, run step 6 manually"
+echo "   and read the default-vs--4 pair; the podman step-7 output pairs them too,"
+echo "   so you can confirm whether podman's VM also needs -4 or not.)"
+
+hr "DONE - review output; cert metadata + status codes only, no secrets"
