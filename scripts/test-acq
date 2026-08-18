@@ -4859,6 +4859,40 @@ assert_contains "heal(sbx): non-refusal failure surfaces sbx stderr" "$out" "som
 assert_not_contains "heal(sbx): non-refusal failure is NOT the recreate message" "$out" "cannot extend a live sandbox"
 cleanup_stubs
 
+# 9q4b. A REWORDED 0.38 refusal (sbx changes its exact wording but still names
+#       startup + recreate) is STILL classified as a refusal, not degraded to a
+#       generic failure. Guards the heuristic pattern in _acq_sbx_kit_add against
+#       upstream rewording (review finding: the match is prose-anchored).
+make_stubs; load_acq
+cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
+  kit)
+    if [ "${2:-}" = "add" ]; then
+      # Reworded refusal: no literal "setup.startup" token, but still says the
+      # kit declares startup commands and must recreate the sandbox.
+      printf 'Error: this kit declares startup commands; recreate the sandbox to apply it\n' >&2
+      exit 1
+    fi
+    exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in *present*) printf 'absent\n' ;; *) exit 0 ;; esac ;;
+  settings) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$STUBDIR/sbx"
+printf 'rewordbox\n' > "$STUBDIR/.sandbox_list"
+out=$(acq_backend_ensure_kits_applied rewordbox 2>&1) || true
+assert_contains "heal(sbx): reworded refusal still classified as recreate" "$out" "cannot extend a live sandbox with startup-bearing kits"
+assert_not_contains "heal(sbx): reworded refusal is not surfaced as a raw failure" "$out" "declares startup commands; recreate the sandbox to apply it"
+cleanup_stubs
+
 # 9q5. STALE PLAYBOOK PROBE: the heal probes the tarball-era footprint
 #      (~/.agentic-coding-playbook/AGENTS.md), NOT the git-clone-era /.git. When
 #      AGENTS.md is present the playbook add is skipped; the probe snippet must
@@ -4909,6 +4943,29 @@ make_stubs; load_acq
   acq_backend_provision climarkerbox shell /tmp >/dev/null 2>&1 ) || true
 log=$(cat "$CALLS")
 assert_contains "provision(sbx): marks CLI --kit ref into ~/.acq-extra-kits at create" "$log" "cli-kit-x"
+cleanup_stubs
+
+# 9q7b. CREATE FAILURE writes NO marker: if `sbx create` fails, the marker block
+#       is gated behind the success check, so no ~/.acq-extra-kits write happens
+#       (mirrors the provenance-write contract — a failed create claims nothing).
+make_stubs; load_acq
+# sbx stub whose `create` FAILS; everything else no-ops.
+cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  create) printf 'ERROR: create failed\n' >&2; exit 1 ;;
+  exec) printf 'ok\n' ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$STUBDIR/sbx"
+: > "$CALLS"
+( export ACQ_EXTRA_KITS="git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=fail-extra-kit"
+  acq_backend_provision failbox shell /tmp >/dev/null 2>&1 ) || true
+log=$(cat "$CALLS")
+assert_not_contains "provision(sbx): failed create writes NO extra-kit marker" "$log" ".acq-extra-kits"
 cleanup_stubs
 
 # 9q8. MARKER SUPPRESSES RE-APPLY: with the marker present, the re-attach heal

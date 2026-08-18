@@ -374,26 +374,48 @@ acq_backend_provision() {
   # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
     acq_provenance_write sbx "$name" || true
-    # Seed the ~/.acq-extra-kits marker with the kits applied at CREATE. The
-    # re-attach heal decides whether an extra kit is already applied by reading
-    # this marker (see acq_backend_ensure_kits_applied step 4); previously only
-    # the heal path wrote it, so a sandbox created WITH ACQ_EXTRA_KITS / --kit
-    # refs never got the marker and every re-attach re-attempted every extra kit
-    # (and, under sbx 0.38, warn-failed each time). Write the same marker here so
-    # the create and heal paths agree. Marker every extra/CLI kit (ACQ_EXTRA_KITS
-    # + ACQ_CLI_KITS) by its ORIGINAL ref (stable across runs), matching the
-    # heal's append form. Built-in kits are tracked by feature-probe, not the
-    # marker, so they are intentionally not listed here.
-    local _mk=()
-    [ -n "$ACQ_EXTRA_KITS" ] && split_noglob _mk "$ACQ_EXTRA_KITS"
-    [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _mk+=("${ACQ_CLI_KITS[@]}")
-    local _mkk
-    for _mkk in ${_mk[@]+"${_mk[@]}"}; do
-      sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$_mkk" \
-        </dev/null >/dev/null 2>&1 || true
-    done
+    _acq_sbx_seed_extra_kit_marker "$name"
   fi
   return "$_rc"
+}
+
+# ---------------------------------------------------------------------------
+# _acq_sbx_seed_extra_kit_marker — write ~/.acq-extra-kits at CREATE
+# ---------------------------------------------------------------------------
+# The re-attach heal decides whether an extra kit is already applied by reading
+# this marker (see acq_backend_ensure_kits_applied step 4); previously only the
+# heal path wrote it, so a sandbox created WITH ACQ_EXTRA_KITS / --kit refs never
+# got the marker and every re-attach re-attempted every extra kit (and, under
+# sbx 0.38, warn-failed each time). Write the same marker here so the create and
+# heal paths agree: one ORIGINAL ref per line (stable across runs), matching the
+# heal's append form (so the heal's exact-line match detects it). Built-in kits
+# are tracked by feature-probe, not the marker, so they are not listed here.
+#
+# ACQ_CLI_KITS (`--kit` on the CLI) are recorded for completeness even though the
+# current heal loop only re-drives ACQ_EXTRA_KITS — the marker is the honest
+# record of what was applied at create.
+_acq_sbx_seed_extra_kit_marker() {
+  local name="$1" _mkk
+  local _mk=()
+  [ -n "$ACQ_EXTRA_KITS" ] && split_noglob _mk "$ACQ_EXTRA_KITS"
+  [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _mk+=("${ACQ_CLI_KITS[@]}")
+  # Nothing to record — skip the (potentially slow) exec-ready wait entirely.
+  [ "${#_mk[@]}" -gt 0 ] || return 0
+  # A freshly-created sandbox is not immediately exec-able; the heal path guards
+  # its probes the same way. Without this, the marker write can race the sandbox
+  # becoming ready, silently write nothing, and reintroduce the re-attempt bug.
+  if ! _acq_sbx_wait_for_exec_ready "$name"; then
+    echo "acq: warning: sandbox '$name' not exec-ready; could not record the" \
+         "extra-kit marker (~/.acq-extra-kits). Re-attach may re-attempt extra kits." >&2
+    return 0
+  fi
+  for _mkk in ${_mk[@]+"${_mk[@]}"}; do
+    if ! sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$_mkk" \
+        </dev/null >/dev/null 2>&1; then
+      echo "acq: warning: could not record extra kit '$_mkk' in ~/.acq-extra-kits" \
+           "for '$name'; re-attach may re-attempt it." >&2
+    fi
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -496,7 +518,16 @@ _acq_sbx_kit_add() {
     return 0
   fi
   case "$err" in
-    *setup.startup*|*"can only be used when creating a new sandbox"*|*"recreate the sandbox"*)
+    # Heuristic: the classification is pinned to sbx 0.38's wording (see ADR-0009
+    # and the doc link above). `setup.startup` is the primary discriminator; the
+    # prose alternates catch reworded variants sbx may emit for the same refusal
+    # (e.g. "declares startup", "startup … recreate", "create a new sandbox").
+    # If sbx reworks the message past all of these, a genuine refusal degrades to
+    # rc=1 (real stderr surfaced, ok=0) — safe (no false "current"), but the
+    # noise this fix removes could return; broaden here if that happens.
+    *setup.startup*|*"declares startup"*|*startup*recreate*|\
+    *"can only be used when creating a new sandbox"*|\
+    *"create a new sandbox"*|*"recreate the sandbox"*)
       return 3
       ;;
   esac
@@ -510,7 +541,7 @@ _acq_sbx_kit_add() {
 _ACQ_SBX_RECREATE_NOTICE_SHOWN=0
 
 # Print the consolidated "recreate to extend/refresh" message (once). $1 is the
-# sandbox name; $2 (optional) is extra context appended to the intro line.
+# sandbox name.
 _acq_sbx_print_recreate_notice() {
   local name="$1"
   [ "${_ACQ_SBX_RECREATE_NOTICE_SHOWN:-0}" = "1" ] && return 0
@@ -629,17 +660,20 @@ acq_backend_ensure_kits_applied() {
   fi
 
   # 4) Extra kits (tracked by marker file). Extra kits may be neutral or already
-  #    sbx-v2; _acq_sbx_translate_kit handles both. The marker uses the original
-  #    ref (stable across runs), not the translated local dir. Extra-kit failures
-  #    do not affect the built-in bundle's provenance verdict.
+  #    sbx-v2; _acq_sbx_translate_kit handles both. The marker records one
+  #    ORIGINAL ref per line (stable across runs), not the translated local dir.
+  #    Extra-kit failures do not affect the built-in bundle's provenance verdict.
   local applied k local_extra
   applied=$(sbx exec "$name" -- sh -c 'cat "$HOME/.acq-extra-kits" 2>/dev/null' </dev/null 2>/dev/null || true)
   local _extras=()
   [ -n "$ACQ_EXTRA_KITS" ] && split_noglob _extras "$ACQ_EXTRA_KITS"
   for k in ${_extras[@]+"${_extras[@]}"}; do
-    case "$applied" in
-      *"$k"*) continue ;;
-    esac
+    # Whole-line match (the marker is written one ref per line via printf
+    # '%s\n'). A substring test would wrongly treat a ref that is a prefix of an
+    # already-applied ref (e.g. `…&dir=kit` vs `…&dir=kit-extended`) as applied.
+    if printf '%s\n' "$applied" | grep -Fxq -- "$k"; then
+      continue
+    fi
     echo "acq: applying extra kit to '$name': $k" >&2
     local_extra=$(_acq_sbx_translate_kit "$k")
     _acq_sbx_kit_add "$name" "$local_extra"

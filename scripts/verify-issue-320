@@ -64,9 +64,30 @@ if [ -f /.dockerenv ] || [ -n "${SBX_SANDBOX:-}" ] || [ -n "${MSB_SANDBOX:-}" ];
 fi
 command -v sbx >/dev/null 2>&1 && ok "sbx on PATH ($(sbx version 2>/dev/null | head -1))" || { bad "sbx not on PATH"; exit 1; }
 # The fixes target sbx 0.38+ behavior; older sbx will still pass the quiet-heal
-# assertions but the refusal path (#1) only fires on >= 0.38. Note the version.
+# assertions but the refusal path (#1) only fires on >= 0.38. Parse the numeric
+# version and compare NUMERICALLY (not by globbing version ranges, which would
+# silently miss 0.6.x / 0.100.x / 2.x and skip the fix-#1 assertion on a future
+# host). SBX_IS_038 is 1 when sbx >= 0.38.0.
 _sbxver=$(sbx version 2>/dev/null | head -1)
 printf '        sbx version: %s\n' "$_sbxver"
+# _ver_ge A B — echo "yes" if version A >= B (major.minor.patch, missing parts=0).
+_ver_ge() {
+  _va=$(printf '%s' "$1" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)
+  _vb="$2"
+  IFS='.' read -r a1 a2 a3 <<EOF
+$_va
+EOF
+  IFS='.' read -r b1 b2 b3 <<EOF
+$_vb
+EOF
+  a1=${a1:-0}; a2=${a2:-0}; a3=${a3:-0}
+  b1=${b1:-0}; b2=${b2:-0}; b3=${b3:-0}
+  if [ "$a1" -ne "$b1" ]; then [ "$a1" -gt "$b1" ] && echo yes || echo no; return; fi
+  if [ "$a2" -ne "$b2" ]; then [ "$a2" -gt "$b2" ] && echo yes || echo no; return; fi
+  if [ "$a3" -ge "$b3" ]; then echo yes; else echo no; fi
+}
+SBX_IS_038=0
+[ "$(_ver_ge "$_sbxver" 0.38.0)" = "yes" ] && SBX_IS_038=1
 
 # A real workspace the create can mount.
 ( cd "$WORKDIR" && git init -q 2>/dev/null && echo hi > README.md ) || true
@@ -196,24 +217,21 @@ info "FIX #1: forced mid-life re-add surfaces one recreate message"
 force_out=$(ACQ_FORCE_KIT_REAPPLY=1 "$ACQ" "${BE[@]}" run "$SANDBOX" -- sh -c ':' 2>&1 || true)
 printf '%s\n' "$force_out" | sed 's/^/    | /'
 _notice_count=$(printf '%s\n' "$force_out" | grep -c "cannot extend a live sandbox with startup-bearing kits" || true)
-case "$_sbxver" in
-  *0.3[89]*|*0.4*|*0.5*|*1.*)
-    # sbx >= 0.38: the refusal path should fire and be consolidated to one notice.
-    if [ "$_notice_count" -ge 1 ]; then
-      ok "printed the sbx-0.38 recreate notice on forced mid-life re-add"
-    else
-      bad "no recreate notice on forced re-add (expected on sbx >= 0.38)" "count=$_notice_count"
-    fi
-    if [ "$_notice_count" -le 1 ]; then
-      ok "recreate notice emitted at most once (not per-kit)"
-    else
-      bad "recreate notice emitted $_notice_count times (should be once per heal)"
-    fi
-    ;;
-  *)
-    ok "sbx < 0.38 detected — startup-kit refusal path not applicable, skipping notice assertion"
-    ;;
-esac
+if [ "$SBX_IS_038" = "1" ]; then
+  # sbx >= 0.38: the refusal path should fire and be consolidated to one notice.
+  if [ "$_notice_count" -ge 1 ]; then
+    ok "printed the sbx-0.38 recreate notice on forced mid-life re-add"
+  else
+    bad "no recreate notice on forced re-add (expected on sbx >= 0.38)" "count=$_notice_count"
+  fi
+  if [ "$_notice_count" -le 1 ]; then
+    ok "recreate notice emitted at most once (not per-kit)"
+  else
+    bad "recreate notice emitted $_notice_count times (should be once per heal)"
+  fi
+else
+  ok "sbx < 0.38 detected — startup-kit refusal path not applicable, skipping notice assertion"
+fi
 
 # --- 6. FIX #1: `acq kit update` fails fast --------------------------------
 # On a stale/unknown sandbox under sbx 0.38, `acq kit update --yes` must fail
