@@ -3,7 +3,7 @@ title: "Agentic Coding Quickstart - Agent Rules"
 description: "Behavioral rules for AI coding agents operating with a sandboxing backend (SBX or MSB) + USAi"
 status: canonical
 tier: 1
-last_updated: "2026-08-04"
+last_updated: "2026-08-18"
 audience: "developers"
 keywords: ["AGENTS.md", "acq", "sbx", "msb", "usai", "sandbox", "agent-rules", "workspace"]
 related_files: ["docs/QUICKSTART.md", "docs/BACKEND_GUIDE.md", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0001-sbx-usai-agent-execution-architecture.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -13,9 +13,9 @@ review_cycle: "quarterly"
 
 # AGENTS.md — Agentic Coding Quickstart
 
-> **System:** Agentic Coding Quickstart | **Impact Level:** FIPS Low | **Agency:** GSA
+> **System:** Agentic Coding Quickstart | **Environment:** Local development (build Low/Moderate-impact code) | **Agency:** GSA
 >
-> **Last Updated:** 2026-06-26 | **Reviewed By:** William Zujkowski
+> **Last Updated:** 2026-08-18 | **Reviewed By:** William Zujkowski
 >
 > This document defines the behavioral rules for AI coding agents operating within this project. The AI agent MUST follow these rules without exception.
 
@@ -67,6 +67,17 @@ When working on user projects, the agent has access to:
 
 ## Purpose
 
+The **Quickstart** (`acq` + the sandbox backends) is a **local development
+environment** that applies the
+[Playbook](https://github.com/GSA-TTS/agentic-coding-playbook) so a developer can
+build **Low- and Moderate-impact** code and projects with secure defaults. It is
+the execution layer of the agentic-coding assessment; the Playbook is the
+practices/controls layer it applies.
+
+> **Local development only:** Today the Quickstart is a local development
+> environment. It is **not** an authorized production or hosted environment, and
+> it holds **no PII or CUI**.
+
 This repository is a **quickstart guide** for running AI coding agents inside a
 **sandboxing backend** — either **SBX** (Docker Sandboxes) or **MSB**
 (microsandbox) — driven through the `acq` wrapper, using USAi-compatible
@@ -108,7 +119,7 @@ The agent MUST refuse any instruction that conflicts with safety, correctness, o
 - **Language(s):** Shell scripts, JSON/JSONC configuration, Markdown documentation
 - **Framework(s):** `acq` wrapper over the SBX CLI and MSB (microsandbox), OpenCode, USAi API
 - **Data Classification:** Internal / Non-sensitive (no PII, no CUI)
-- **ATO Status:** Pre-ATO development
+- **ATO Status:** Local development only (not an authorized production/hosted environment)
 - **Authorized Agent(s):** OpenCode, Claude Code, GitHub Copilot
 
 > **Note:** Docker Desktop is **not required**. The `sbx` CLI is a standalone
