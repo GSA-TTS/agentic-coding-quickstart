@@ -695,7 +695,8 @@ case "$subcommand" in
         # daemon kit) instead of coming back with the service dead. When `--kit`
         # WAS re-passed, ACQ_CLI_KITS is already populated and authoritative for
         # this invocation, so we must not clobber it — hence the empty-guard.
-        # See acq_cli_kits_load / docs/KNOWN_FAILURE_MODES.md #33.
+        # See acq_cli_kits_load and the "--kit Services Dead After a
+        # Resume/Reboot" section in docs/KNOWN_FAILURE_MODES.md.
         if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ]; then
           acq_cli_kits_load "${ACQ_RESOLVED_BACKEND}" "$local_name"
         fi
@@ -769,7 +770,8 @@ case "$subcommand" in
       # startup on a name-only re-attach too (the user did not re-pass `--kit`
       # here). Guarded on an empty in-memory set so a `--kit` re-passed on THIS
       # invocation (already captured into ACQ_CLI_KITS) stays authoritative and
-      # is not clobbered. See acq_cli_kits_load / docs/KNOWN_FAILURE_MODES.md #33.
+      # is not clobbered. See acq_cli_kits_load and the "--kit Services Dead
+      # After a Resume/Reboot" section in docs/KNOWN_FAILURE_MODES.md.
       if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ]; then
         acq_cli_kits_load "${ACQ_RESOLVED_BACKEND}" "$first"
       fi
