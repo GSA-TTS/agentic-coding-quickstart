@@ -1746,6 +1746,23 @@ the kit-add flow may return; if it does, in-place healing can be re-enabled. See
 the update note in
 [ADR-0009](adr/0009-require-sbx-0.35.0-in-place-kit-healing.md).
 
+### Verifying the fix (live)
+
+On a real sbx host (this cannot run inside a sandbox — no nested sandboxes), one
+command reproduces the exact scenario and asserts all three fixes:
+
+```bash
+./scripts/verify-issue-320
+```
+
+It provisions a throwaway sandbox with a startup-bearing extra kit, re-attaches,
+and checks that: the extra-kit marker was written at create; the re-attach heal
+is a quiet no-op (no "missing the playbook kit", no extra-kit re-attempt, no
+bogus "Recover with" hint); a forced mid-life re-add surfaces exactly one
+recreate notice; and `acq kit update` fails fast (or short-circuits when already
+current). The offline regression guard is in `scripts/test-acq` (the sbx
+heal-loop cases).
+
 ---
 
 When something fails, work through this list:

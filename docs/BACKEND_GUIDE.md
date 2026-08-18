@@ -3,7 +3,7 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-08-04"
+last_updated: "2026-08-18"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
 related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
@@ -103,6 +103,7 @@ export ACQ_BACKEND=sbx
   print that guidance instead of failing opaquely. msb is unaffected (it
   re-applies kits idempotently via `msb exec`). See the update note in
   [ADR-0009](adr/0009-require-sbx-0.35.0-in-place-kit-healing.md).
+  Live-verify this behavior on an sbx host with `./scripts/verify-issue-320`.
 - The sbx `docker sandbox` commands (deprecated by Docker) must not be used;
   use `sbx` CLI directly
 

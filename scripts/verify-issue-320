@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# verify-issue-320 — live end-to-end check for the sbx-0.38 re-attach heal-loop
+# fix (GSA-TTS/agentic-coding-quickstart#320). This is the ONE host-side command
+# that reproduces the exact issue scenario against the real sbx toolchain and
+# asserts all three fixes:
+#
+#   1. sbx 0.38 `kit add` refuses startup-bearing kits — a genuine mid-life add
+#      surfaces ONE consolidated "recreate to extend/refresh" message (not
+#      per-kit warnings with bogus "Recover with: sbx kit add" hints), and
+#      `acq kit update` fails fast with the same guidance.
+#   2. The playbook feature-probe uses ~/.agentic-coding-playbook/AGENTS.md
+#      (survives the tarball delivery), so a correctly-provisioned sandbox does
+#      NOT report "missing the playbook kit" on re-attach.
+#   3. The ~/.acq-extra-kits marker is written at CREATE for extra/CLI kits, so
+#      re-attach treats them as applied and does NOT re-attempt them.
+#
+# The net observable win is: a second `acq run <name>` (re-attach) is a QUIET
+# no-op for a correctly-provisioned sandbox — no per-attach heal noise.
+#
+# Requires a real sbx-capable host with sbx 0.38+ and acq (this CANNOT run inside
+# a sandbox — no nested sandboxes). It is self-contained and idempotent: it
+# stands up a throwaway sandbox WITH an extra startup-bearing kit, detaches,
+# re-attaches, asserts the fixed behavior, and always cleans up.
+#
+# Usage:
+#   ./scripts/verify-issue-320 [SANDBOX_NAME]
+# Default sandbox name: v320
+set -u
+
+SANDBOX="${1:-v320}"
+
+SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+ACQ="$SCRIPT_DIR/acq"
+BE=(--backend sbx)
+
+# Throwaway workspace + extra-kit dirs. The extra kit declares a `startup`
+# command so it is exactly the class sbx 0.38 refuses to add mid-life — that is
+# what exercises fixes #1 and #3.
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/v320-ws.XXXXXX")
+KITDIR=$(mktemp -d "${TMPDIR:-/tmp}/v320-kit.XXXXXX")
+
+PASS=0; FAIL=0
+ok()   { PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "$1"; }
+bad()  { FAIL=$((FAIL+1)); printf '  \033[31mBAD \033[0m %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
+info() { printf '\n== %s ==\n' "$1"; }
+
+cleanup() {
+  info "cleanup"
+  "$ACQ" "${BE[@]}" rm "$SANDBOX" >/dev/null 2>&1 && echo "  removed sandbox $SANDBOX" || true
+  rm -rf "$WORKDIR" "$KITDIR" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# --- 0. Preconditions ------------------------------------------------------
+info "preconditions"
+if [ -f /.dockerenv ] || [ -n "${SBX_SANDBOX:-}" ] || [ -n "${MSB_SANDBOX:-}" ]; then
+  bad "refusing to run inside a sandbox (no nested sandboxes) — run on an sbx host"
+  exit 2
+fi
+command -v sbx >/dev/null 2>&1 && ok "sbx on PATH ($(sbx version 2>/dev/null | head -1))" || { bad "sbx not on PATH"; exit 1; }
+# The fixes target sbx 0.38+ behavior; older sbx will still pass the quiet-heal
+# assertions but the refusal path (#1) only fires on >= 0.38. Note the version.
+_sbxver=$(sbx version 2>/dev/null | head -1)
+printf '        sbx version: %s\n' "$_sbxver"
+
+# A real workspace the create can mount.
+( cd "$WORKDIR" && git init -q 2>/dev/null && echo hi > README.md ) || true
+
+# Fresh start: remove any stale sandbox of this name.
+"$ACQ" "${BE[@]}" rm "$SANDBOX" >/dev/null 2>&1 || true
+
+# --- 1. Write a throwaway extra kit that DECLARES a startup command ---------
+# This is the crux: a startup-bearing kit is exactly what sbx 0.38 `kit add`
+# refuses mid-life. Applied at CREATE via --kit, it must (a) get markered in
+# ~/.acq-extra-kits (fix #3) and (b) NOT be re-attempted on re-attach.
+cat > "$KITDIR/spec.yaml" <<'EOF'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: v320-extra
+displayName: Issue-320 Extra Kit
+description: startup-bearing extra kit for the #320 re-attach live check
+commands:
+  - phase: startup
+    command:
+      - sh
+      - -c
+      - 'echo v320-extra-startup-ran > /tmp/v320-extra.marker'
+EOF
+
+# --- 2. Create the sandbox WITH the extra startup-bearing kit --------------
+info "create sandbox ($SANDBOX) with a startup-bearing extra kit (via --kit)"
+# Non-interactive: decline the github-scope prompt by feeding "N" on stdin.
+if printf 'N\n' | "$ACQ" "${BE[@]}" create shell "$WORKDIR" --name "$SANDBOX" --kit "$KITDIR" >/tmp/v320-create.log 2>&1; then
+  ok "acq create (with startup-bearing --kit) returned 0"
+else
+  bad "acq create failed" "$(tail -8 /tmp/v320-create.log)"; exit 1
+fi
+if sbx ls 2>/dev/null | grep -q "$SANDBOX"; then ok "sandbox is listed"; else bad "sandbox not listed"; exit 1; fi
+
+# --- 3. FIX #3: the extra-kit marker was written AT CREATE -----------------
+info "FIX #3: ~/.acq-extra-kits marker written at create"
+marker=$("$ACQ" "${BE[@]}" exec "$SANDBOX" -- sh -c 'cat "$HOME/.acq-extra-kits" 2>/dev/null' 2>/dev/null || true)
+printf '%s\n' "$marker" | sed 's/^/    | /'
+if printf '%s\n' "$marker" | grep -q "$KITDIR"; then
+  ok "marker lists the extra kit ref applied at create"
+else
+  bad "marker missing the create-time extra kit (fix #3 regression)" "marker was: $marker"
+fi
+
+# --- 4. FIX #2 + #3: re-attach is a QUIET no-op ----------------------------
+# The heal runs on re-attach. With the AGENTS.md probe (fix #2) and the
+# create-time marker (fix #3), a correctly-provisioned sandbox must NOT report a
+# missing playbook kit and must NOT re-attempt the extra kit. We drive just the
+# heal (not a full interactive attach) via `acq kit check`, which does not heal;
+# instead re-run the code path by invoking `acq run` non-interactively is
+# awkward (it would attach). So exercise the heal directly through a re-attach
+# with a no-op agent command and capture its stderr.
+info "FIX #2/#3: re-attach heal produces no per-attach noise"
+# `acq run <name> -- true` re-attaches to the existing sandbox, runs the heal,
+# then runs `true` and exits — capturing the heal's stderr without an
+# interactive session.
+reattach_out=$(printf 'N\n' | "$ACQ" "${BE[@]}" run "$SANDBOX" -- true 2>&1 || true)
+printf '%s\n' "$reattach_out" | sed 's/^/    | /'
+if printf '%s\n' "$reattach_out" | grep -q "missing the playbook kit"; then
+  bad "re-attach reported 'missing the playbook kit' (fix #2 regression)"
+else
+  ok "re-attach did NOT report a missing playbook kit (fix #2)"
+fi
+if printf '%s\n' "$reattach_out" | grep -q "applying extra kit to '$SANDBOX': $KITDIR"; then
+  bad "re-attach re-attempted the create-time extra kit (fix #3 regression)"
+else
+  ok "re-attach did NOT re-attempt the create-time extra kit (fix #3)"
+fi
+if printf '%s\n' "$reattach_out" | grep -q "Recover with: sbx kit add"; then
+  bad "re-attach printed the bogus 'Recover with: sbx kit add' hint (fix #1 regression)"
+else
+  ok "re-attach did not print the bogus per-kit recover hint (fix #1)"
+fi
+
+# --- 5. FIX #1: a genuine mid-life add is refused with ONE clear message ----
+# Force the heal to try re-adding the whole built-in bundle mid-life
+# (ACQ_FORCE_KIT_REAPPLY=1, as `acq kit update` does). On sbx 0.38 every
+# startup-bearing built-in is refused; acq must print exactly ONE consolidated
+# recreate notice, not per-kit warnings.
+info "FIX #1: forced mid-life re-add surfaces one recreate message"
+force_out=$(ACQ_FORCE_KIT_REAPPLY=1 "$ACQ" "${BE[@]}" run "$SANDBOX" -- true 2>&1 || true)
+printf '%s\n' "$force_out" | sed 's/^/    | /'
+_notice_count=$(printf '%s\n' "$force_out" | grep -c "cannot extend a live sandbox with startup-bearing kits" || true)
+case "$_sbxver" in
+  *0.3[89]*|*0.4*|*0.5*|*1.*)
+    # sbx >= 0.38: the refusal path should fire and be consolidated to one notice.
+    if [ "$_notice_count" -ge 1 ]; then
+      ok "printed the sbx-0.38 recreate notice on forced mid-life re-add"
+    else
+      bad "no recreate notice on forced re-add (expected on sbx >= 0.38)" "count=$_notice_count"
+    fi
+    if [ "$_notice_count" -le 1 ]; then
+      ok "recreate notice emitted at most once (not per-kit)"
+    else
+      bad "recreate notice emitted $_notice_count times (should be once per heal)"
+    fi
+    ;;
+  *)
+    ok "sbx < 0.38 detected — startup-kit refusal path not applicable, skipping notice assertion"
+    ;;
+esac
+
+# --- 6. FIX #1: `acq kit update` fails fast --------------------------------
+# On a stale/unknown sandbox under sbx 0.38, `acq kit update --yes` must fail
+# fast (non-zero) rather than loop per-kit. (If the sandbox is already "current"
+# acq short-circuits with exit 0 and prints "already on the pinned bundle" —
+# that is also acceptable, since there is nothing to re-add.)
+info "FIX #1: acq kit update fails fast (or is a no-op if already current)"
+ku_out=$("$ACQ" "${BE[@]}" kit update "$SANDBOX" --yes 2>&1); ku_rc=$?
+printf '%s\n' "$ku_out" | sed 's/^/    | /'
+if printf '%s\n' "$ku_out" | grep -q "already on the pinned bundle"; then
+  ok "kit update short-circuited (sandbox already current) — nothing to re-add"
+elif [ "$ku_rc" -ne 0 ]; then
+  ok "kit update failed fast (rc=$ku_rc) with guidance instead of per-kit looping"
+  printf '%s\n' "$ku_out" | grep -q "cannot extend a live sandbox with startup-bearing kits" \
+    && ok "kit update surfaced the recreate guidance" \
+    || bad "kit update failed but without the recreate guidance"
+else
+  bad "kit update returned 0 without being 'already current' (expected fail-fast on 0.38)"
+fi
+
+# --- Summary ---------------------------------------------------------------
+printf '\n  passed: %d   failed: %d\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

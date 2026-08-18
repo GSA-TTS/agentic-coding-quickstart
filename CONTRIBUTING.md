@@ -119,6 +119,14 @@ host that can create sandboxes — Docker for sbx, or KVM for msb):
 It exercises the kit/agent/USAi flow on each installed backend. It cannot run
 inside a sandbox (no nested sandboxes).
 
+Focused live checks for specific fixes (also require a sandbox-capable host):
+
+```bash
+./scripts/verify-issue-320          # sbx 0.38 re-attach heal loop (#320)
+./scripts/verify-ports-live         # msb post-hoc port publish (ADR-0015)
+./scripts/verify-net-default-egress # msb create-time published port (ADR-0019)
+```
+
 ### Quick pre-push check
 
 ```bash
