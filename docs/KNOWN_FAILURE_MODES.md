@@ -482,7 +482,7 @@ The real security boundary is:
 
 ### Acceptable for MVP Because
 
-1. **Pre-ATO environment** with low-impact data (no PII, no CUI)
+1. **Local development environment** with low-impact data (no PII, no CUI)
 2. **Tokens are scoped** - not admin/owner tokens
 3. **Sandbox provides isolation** from host system
 4. **Direct injection is a documented SBX pattern** - shown in their own docs

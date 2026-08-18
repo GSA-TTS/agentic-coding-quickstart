@@ -467,4 +467,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 
-**Data Classification:** Internal/Non-sensitive
+**Data Classification:** Internal/Non-sensitive — the Quickstart is a **local development environment** for building Low/Moderate-impact code and projects, not an authorized production/hosted environment (no PII, no CUI).
