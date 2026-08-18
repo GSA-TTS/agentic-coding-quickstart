@@ -46,10 +46,15 @@ info() { printf '\n== %s ==\n' "$1"; }
 
 cleanup() {
   info "cleanup"
+  _unseed_github
   "$ACQ" "${BE[@]}" rm "$SANDBOX" >/dev/null 2>&1 && echo "  removed sandbox $SANDBOX" || true
   rm -rf "$WORKDIR" "$KITDIR" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
+
+# _unseed_github is defined later (after SANDBOX/GH_SEEDED are known); guard the
+# trap against firing before it exists.
+_unseed_github() { :; }
 
 # --- 0. Preconditions ------------------------------------------------------
 info "preconditions"
@@ -65,6 +70,42 @@ printf '        sbx version: %s\n' "$_sbxver"
 
 # A real workspace the create can mount.
 ( cd "$WORKDIR" && git init -q 2>/dev/null && echo hi > README.md ) || true
+
+# --- 0b. Seed a GitHub token so the (private) playbook tarball fetch works --
+# The built-in agentic-coding-playbook kit fetches a PRIVATE repo source tarball
+# from api.github.com at create; without a token the fetch fails and
+# ~/.agentic-coding-playbook/AGENTS.md never lands — which would make the
+# "playbook present on re-attach" assertion (fix #2) fail for an ENVIRONMENTAL
+# reason, not a real regression. Mirror scripts/verify-backends: seed a
+# sandbox-scoped github secret from an env token or `gh auth token` BEFORE
+# create. If none is available, the playbook assertion is SKIPPED (not failed) —
+# a token-less run still validates fixes #1 and #3.
+_gh_token() {
+  if [ -n "${GH_TOKEN:-}" ]; then printf '%s' "$GH_TOKEN"; return 0; fi
+  if [ -n "${GITHUB_TOKEN:-}" ]; then printf '%s' "$GITHUB_TOKEN"; return 0; fi
+  command -v gh >/dev/null 2>&1 || return 0
+  gh auth token 2>/dev/null || true
+}
+GH_SEEDED=0
+_gt=$(_gh_token)
+if [ -n "$_gt" ]; then
+  # `acq secret set <sandbox> github` reads the value on stdin (never argv).
+  if printf '%s\n' "$_gt" | "$ACQ" "${BE[@]}" secret set "$SANDBOX" github >/dev/null 2>&1; then
+    GH_SEEDED=1
+    ok "seeded sandbox-scoped github token (playbook fetch can authenticate)"
+  else
+    printf '        note: could not seed github token; playbook assertion will be skipped\n'
+  fi
+else
+  printf '        note: no github token (env or gh); playbook assertion will be skipped\n'
+fi
+_gt=""
+
+# Clean up the seeded secret on exit (in addition to sandbox teardown).
+_unseed_github() {
+  [ "$GH_SEEDED" = "1" ] || return 0
+  "$ACQ" "${BE[@]}" secret rm "$SANDBOX" github >/dev/null 2>&1 || true
+}
 
 # Fresh start: remove any stale sandbox of this name.
 "$ACQ" "${BE[@]}" rm "$SANDBOX" >/dev/null 2>&1 || true
@@ -110,21 +151,30 @@ fi
 # --- 4. FIX #2 + #3: re-attach is a QUIET no-op ----------------------------
 # The heal runs on re-attach. With the AGENTS.md probe (fix #2) and the
 # create-time marker (fix #3), a correctly-provisioned sandbox must NOT report a
-# missing playbook kit and must NOT re-attempt the extra kit. We drive just the
-# heal (not a full interactive attach) via `acq kit check`, which does not heal;
-# instead re-run the code path by invoking `acq run` non-interactively is
-# awkward (it would attach). So exercise the heal directly through a re-attach
-# with a no-op agent command and capture its stderr.
+# missing playbook kit and must NOT re-attempt the extra kit. We exercise the
+# heal by re-attaching with a no-op agent command and capturing its stderr (the
+# heal runs before the agent command on the re-attach path).
 info "FIX #2/#3: re-attach heal produces no per-attach noise"
-# `acq run <name> -- true` re-attaches to the existing sandbox, runs the heal,
-# then runs `true` and exits — capturing the heal's stderr without an
-# interactive session.
-reattach_out=$(printf 'N\n' | "$ACQ" "${BE[@]}" run "$SANDBOX" -- true 2>&1 || true)
+# `acq run <name> -- CMD` re-attaches to the existing sandbox, runs the heal,
+# then runs CMD and exits — capturing the heal's stderr without an interactive
+# session. Use `sh -c :` (a shell builtin no-op) rather than `true`: the sbx
+# agent templates route `-- CMD` through a shell, and a bare `true` was observed
+# to hit the guest's non-executable /usr/bin/true ("cannot execute binary
+# file" / exit 126) on the shell agent. `sh -c :` always succeeds and never
+# needs an executable lookup.
+reattach_out=$(printf 'N\n' | "$ACQ" "${BE[@]}" run "$SANDBOX" -- sh -c ':' 2>&1 || true)
 printf '%s\n' "$reattach_out" | sed 's/^/    | /'
-if printf '%s\n' "$reattach_out" | grep -q "missing the playbook kit"; then
-  bad "re-attach reported 'missing the playbook kit' (fix #2 regression)"
+if [ "$GH_SEEDED" = "1" ]; then
+  if printf '%s\n' "$reattach_out" | grep -q "missing the playbook kit"; then
+    bad "re-attach reported 'missing the playbook kit' (fix #2 regression)"
+  else
+    ok "re-attach did NOT report a missing playbook kit (fix #2)"
+  fi
 else
-  ok "re-attach did NOT report a missing playbook kit (fix #2)"
+  # Without a token the playbook tarball fetch could not run at create, so the
+  # playbook is legitimately absent — the "missing" line here is expected and
+  # NOT a fix-#2 regression. Skip the assertion rather than fail spuriously.
+  printf '        skip  fix #2 playbook-present assertion (no github token seeded)\n'
 fi
 if printf '%s\n' "$reattach_out" | grep -q "applying extra kit to '$SANDBOX': $KITDIR"; then
   bad "re-attach re-attempted the create-time extra kit (fix #3 regression)"
@@ -143,7 +193,7 @@ fi
 # startup-bearing built-in is refused; acq must print exactly ONE consolidated
 # recreate notice, not per-kit warnings.
 info "FIX #1: forced mid-life re-add surfaces one recreate message"
-force_out=$(ACQ_FORCE_KIT_REAPPLY=1 "$ACQ" "${BE[@]}" run "$SANDBOX" -- true 2>&1 || true)
+force_out=$(ACQ_FORCE_KIT_REAPPLY=1 "$ACQ" "${BE[@]}" run "$SANDBOX" -- sh -c ':' 2>&1 || true)
 printf '%s\n' "$force_out" | sed 's/^/    | /'
 _notice_count=$(printf '%s\n' "$force_out" | grep -c "cannot extend a live sandbox with startup-bearing kits" || true)
 case "$_sbxver" in
