@@ -3947,6 +3947,99 @@ log=$(cat "$CALLS")
 assert_contains "msb: start -> msb start" "$log" "msb start mybox"
 cleanup_stubs
 
+# 8o1S2. Dispatch WIRING for the cli-kits reload (#320 restart durability). The
+#        `acq start` / `acq restart` verbs and the name-only `acq run <sandbox>`
+#        re-attach MUST call acq_cli_kits_load before the heal, so a sandbox
+#        created with `--kit <daemon-kit>` re-runs that kit's startup on resume
+#        WITHOUT the user re-passing --kit. Verified at the DISPATCH level (a
+#        child `acq` process — not a direct function call), which is the only
+#        place the wiring itself is exercised. Because the child cannot shadow
+#        _acq_msb_fetch_kit, the reloaded kit ref is resolved through the offline
+#        ACQ_MSB_KIT_LOCAL_DIR hatch to a local kit dir carrying one staged file;
+#        we assert that file lands via `msb copy` (i.e. the reloaded kit was
+#        healed). A CONTROL sub-case with NO record asserts no such copy happens,
+#        proving the reload — not some always-on path — is what applied it.
+#
+# The reloaded kit dir: a hybrid/v1 mixin with a single staged marker file, whose
+# in-guest path is unique per case so the assertion can key on it.
+_mk_reload_kit() {
+  local _dir="$1" _marker="$2"
+  mkdir -p "$_dir/files"
+  cat > "$_dir/spec.yaml" <<RELOADSPEC
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: reload-kit
+displayName: Reload Kit
+description: a persisted --kit whose file proves the resume reload ran
+files:
+  - path: ${_marker}
+    mode: "0644"
+    source: files/marker
+RELOADSPEC
+  printf 'RELOAD_MARKER\n' > "$_dir/files/marker"
+}
+
+# --- start: reloads the persisted --kit and heals it ---
+make_stubs; load_acq
+printf 'startreloadbox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'startreloadbox\n' > "$STUBDIR/.msb_running_list"
+_rk="$STUBDIR/reloadkit"; _mk_reload_kit "$_rk" "/home/agent/start-reload-marker"
+# Seed the persisted record the run/create arm would have written at provision,
+# using the REAL helper so the cksum-suffixed filename matches what acq looks up.
+( load_acq; ACQ_CLI_KITS=("$_rk"); ACQ_EXTRA_KITS=""; acq_cli_kits_write msb startreloadbox )
+: > "$CALLS"
+# Route the reloaded ref through the offline kit-local hatch (child acq process).
+out=$( ACQ_MSB_KIT_LOCAL_DIR="$_rk" ACQ_BACKEND=msb "$ACQ" start startreloadbox 2>&1 )
+startreload_log=$(cat "$CALLS")
+assert_contains "cli-kits(dispatch): acq start reloads + heals the persisted --kit" \
+  "$startreload_log" "startreloadbox:/home/agent/start-reload-marker"
+cleanup_stubs
+
+# --- start CONTROL: no record => no reloaded-kit copy (proves reload caused it) ---
+# NOTE: we must NOT point ACQ_MSB_KIT_LOCAL_DIR at the marker kit here — that hatch
+# diverts EVERY remote (git+) ref, including the built-ins, so it would copy the
+# marker via the built-in heal regardless of the reload and mask the very thing
+# under test. Leave the harness's default offline kit dir (an empty, file-less
+# spec) in place: with no persisted record there is no marker-bearing ref at all,
+# so the marker path must never appear.
+make_stubs; load_acq
+printf 'startnorecbox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'startnorecbox\n' > "$STUBDIR/.msb_running_list"
+: > "$CALLS"
+out=$( ACQ_BACKEND=msb "$ACQ" start startnorecbox 2>&1 )
+startnorec_log=$(cat "$CALLS")
+assert_not_contains "cli-kits(dispatch): acq start with NO record heals no extra kit" \
+  "$startnorec_log" "/home/agent/start-norec-marker"
+cleanup_stubs
+
+# --- restart: reloads the persisted --kit and heals it ---
+make_stubs; load_acq
+printf 'restartreloadbox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'restartreloadbox\n' > "$STUBDIR/.msb_running_list"
+_rk3="$STUBDIR/reloadkit3"; _mk_reload_kit "$_rk3" "/home/agent/restart-reload-marker"
+( load_acq; ACQ_CLI_KITS=("$_rk3"); ACQ_EXTRA_KITS=""; acq_cli_kits_write msb restartreloadbox )
+: > "$CALLS"
+out=$( ACQ_MSB_KIT_LOCAL_DIR="$_rk3" ACQ_BACKEND=msb "$ACQ" restart restartreloadbox 2>&1 )
+restartreload_log=$(cat "$CALLS")
+assert_contains "cli-kits(dispatch): acq restart reloads + heals the persisted --kit" \
+  "$restartreload_log" "restartreloadbox:/home/agent/restart-reload-marker"
+cleanup_stubs
+
+# --- run <sandbox> name-only re-attach: reloads the persisted --kit and heals it ---
+make_stubs; load_acq
+printf 'runreloadbox\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'runreloadbox\n' > "$STUBDIR/.msb_running_list"
+_rk4="$STUBDIR/reloadkit4"; _mk_reload_kit "$_rk4" "/home/agent/run-reload-marker"
+( load_acq; ACQ_CLI_KITS=("$_rk4"); ACQ_EXTRA_KITS=""; acq_cli_kits_write msb runreloadbox )
+: > "$CALLS"
+# Name-only `acq run <existing-sandbox>` (no agent token, no --kit re-passed).
+out=$( ACQ_UPDATE_CHECK=0 ACQ_MSB_KIT_LOCAL_DIR="$_rk4" ACQ_BACKEND=msb "$ACQ" run runreloadbox 2>&1 )
+runreload_log=$(cat "$CALLS")
+assert_contains "cli-kits(dispatch): acq run <sandbox> reloads + heals the persisted --kit" \
+  "$runreload_log" "runreloadbox:/home/agent/run-reload-marker"
+cleanup_stubs
+unset -f _mk_reload_kit
+
 # 8o1T. N1 — restart is a BEST-EFFORT bounce: when `msb stop` FAILS, the dispatcher
 #        (under `set -euo pipefail`) must NOT abort — it must still proceed to
 #        `msb start` and the heal. STUB_MSB_STOP_FAIL=1 makes the stub's stop arm
