@@ -350,7 +350,7 @@ sbx cp ./opencode.jsonc my-sandbox:/workspace/
 
 ---
 
-## 14. SBX Proxy Doesn't Work with Custom baseURL (Security Implication)
+## 14. SBX Built-in Proxy Doesn't Auto-Cover USAi's Custom baseURL (Use `set-custom`)
 
 ### Symptoms
 
@@ -361,35 +361,70 @@ sbx cp ./opencode.jsonc my-sandbox:/workspace/
 
 ### Root Cause
 
-SBX's secret proxy intercepts requests to **known provider endpoints** (like `api.openai.com`) and injects credentials. Custom `baseURL` endpoints like USAi (`api.gsa.usai.gov`) are not proxied.
+SBX's **default** provider proxy intercepts requests to a fixed set of **known
+provider endpoints** (like `api.openai.com`) and injects credentials there. A
+custom `baseURL` endpoint like USAi (`api.gsa.usai.gov`) is not one of those
+built-in services, so `sbx secret set -g openai` never applies to it — you must
+register USAi as a **custom secret** (`sbx secret set-custom`) instead. `acq`
+does exactly this for you (`acq secret set usai`, routed through the
+`secret set-custom` branch of `acq.backends/sbx.sh`).
 
 ### Security Implication
 
-**For custom endpoints, the agent CAN see the API key.**
+**Under the sanctioned `acq` setup, the agent does NOT hold the raw USAi key.**
+`set-custom` is proxied the same way the built-in services are — it just has to
+be configured explicitly because USAi is not a built-in endpoint.
 
-With proxy-based injection (standard providers):
-- Agent sees: `OPENAI_API_KEY=proxy-managed`
-- Real key is injected at the proxy level
-- Agent never has access to the raw credential
+Concretely, `sbx secret set-custom` bakes a **placeholder token** into the
+sandbox's `USAI_API_KEY` at creation time, and the sbx proxy resolves that
+placeholder to the real secret value **at request time**, on the wire to
+`api.gsa.usai.gov`. So:
 
-With a custom secret (USAi/custom endpoints):
-- Agent sees: `USAI_API_KEY=<actual-key-value>`
-- Key exists in container environment
-- Agent process can read it
+- Agent sees: `USAI_API_KEY=<placeholder>` (not the real key value)
+- The real credential lives in the sbx secret store on the host, never in the
+  container environment
+- The agent process cannot read the raw key from its own environment
+
+This matches the built-in proxy posture (and the MSB `--secret ENV@HOST`
+swap-on-the-wire model), and it is what `AGENTS.md` states: secrets are
+**injected placeholders or proxied — the agent never holds the real USAi key
+material**. (The placeholder mechanism is described in more detail in
+[Section 23](#23-usai-401-in-an-existing-sandbox-after-deletingrecreating-the-global-secret).)
+
+### Narrow caveat: non-default paths that DO expose the value
+
+The raw value only reaches the container if you deliberately bypass the
+sanctioned flow:
+
+- Passing `sbx secret set-custom … --value <the-secret>` on the command line
+  puts the value in argv (and shell history). `acq` never does this — it prompts
+  interactively or stores the value in the acq store and prints the manual
+  command as a last resort; it does not echo the value on argv.
+- A hand-rolled setup that exports the raw key into the container env (e.g.
+  `export USAI_API_KEY=<real-key>` in a profile, or `--value` in a script)
+  defeats the placeholder mechanism.
+
+These are non-default, unsupported configurations. Under `acq run` the agent
+sees a placeholder, not the key.
 
 ### Mitigations
 
-1. **AGENTS.md rules** prohibit printing/logging secrets
-2. **Container isolation** limits exposure scope
-3. **No persistence** - key never written to disk
-4. **Memory only** - key exists only during execution
+1. **Placeholder injection** - the agent's env holds a placeholder, not the key
+2. **AGENTS.md rules** prohibit printing/logging secrets
+3. **Container isolation** limits exposure scope
+4. **No persistence** - key never written to disk in the sandbox
 
 ### Fix
 
-Store the key as a custom secret so sbx injects it into the sandbox:
+Register USAi as a custom secret so sbx injects the placeholder (prefer `acq`,
+which does this for you):
 
 ```bash
-sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
+# Preferred: acq configures the custom secret for both backends
+acq secret set usai
+
+# Equivalent raw sbx command (interactive prompt for the value — no --value):
+sbx secret set-custom --host api.gsa.usai.gov --env USAI_API_KEY
 ```
 
 Your `opencode.jsonc` should use variable substitution:
@@ -407,9 +442,13 @@ Your `opencode.jsonc` should use variable substitution:
 
 ### Upstream Tracking
 
-This limitation is tracked in **[docker/sbx-releases#35](https://github.com/docker/sbx-releases/issues/35)** - "Feature Request: Configurable Secret Injection for Custom Services"
-
-When implemented, this will allow defining custom service mappings so the proxy can inject credentials for endpoints like USAi without exposing the raw key to the agent.
+A convenience request to let the proxy inject credentials for custom endpoints
+without an explicit `set-custom` step is tracked in
+**[docker/sbx-releases#35](https://github.com/docker/sbx-releases/issues/35)** -
+"Feature Request: Configurable Secret Injection for Custom Services". Note this
+is an ergonomics improvement (auto-mapping custom services), **not** a security
+gap: `set-custom` already proxies the credential today, so the agent does not see
+the raw key under the current setup.
 
 ---
 
@@ -471,7 +510,7 @@ gh auth token | sbx secret set -g github --force
 
 ### Related
 
-See also: [Section 14 - SBX Proxy Doesn't Work with Custom baseURL](#14-sbx-proxy-doesnt-work-with-custom-baseurl-security-implication)
+See also: [Section 14 - SBX Built-in Proxy Doesn't Auto-Cover USAi's Custom baseURL](#14-sbx-built-in-proxy-doesnt-auto-cover-usais-custom-baseurl-use-set-custom)
 
 ---
 
@@ -814,9 +853,12 @@ failure modes, see the kit's
 ### Root Cause
 
 USAi is injected as a **custom secret** (`sbx secret set-custom`), which is
-**not** proxied. Instead, sbx bakes a **placeholder token** into each sandbox's
-`USAI_API_KEY` at creation time, and the sbx proxy resolves that placeholder to
-the real global secret value at request time.
+**not** covered by sbx's built-in provider proxy automatically — but it is still
+proxied via the placeholder mechanism. sbx bakes a **placeholder token** into
+each sandbox's `USAI_API_KEY` at creation time, and the sbx proxy resolves that
+placeholder to the real global secret value at request time (so the agent's env
+holds the placeholder, not the raw key — see
+[Section 14](#14-sbx-built-in-proxy-doesnt-auto-cover-usais-custom-baseurl-use-set-custom)).
 
 When you **delete and re-add** the global secret (as opposed to rotating it in
 place), sbx mints a **new placeholder**. A newly created sandbox picks up the new
@@ -884,7 +926,7 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
 ### Related
 
 - [Section 3 — Agent Cannot See API Key / USAi Authentication Fails](#3-agent-cannot-see-api-key--usai-authentication-fails)
-- [Section 14 — SBX Proxy Doesn't Work with Custom baseURL](#14-sbx-proxy-doesnt-work-with-custom-baseurl-security-implication)
+- [Section 14 — SBX Built-in Proxy Doesn't Auto-Cover USAi's Custom baseURL](#14-sbx-built-in-proxy-doesnt-auto-cover-usais-custom-baseurl-use-set-custom)
 - [Section 20 — Authentication Failed After Copying a New Key](#20-authentication-failed-after-copying-a-new-key)
 - Decision record: [ADR-0008](adr/0008-usai-placeholder-recovery.md)
 
