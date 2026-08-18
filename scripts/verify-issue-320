@@ -169,21 +169,32 @@ else
   bad "marker missing the create-time extra kit (fix #3 regression)" "marker was: $marker"
 fi
 
-# --- 4. FIX #2 + #3: re-attach is a QUIET no-op ----------------------------
+# --- 4. FIX #2 + #3: re-attach heal is a QUIET no-op ----------------------
 # The heal runs on re-attach. With the AGENTS.md probe (fix #2) and the
 # create-time marker (fix #3), a correctly-provisioned sandbox must NOT report a
-# missing playbook kit and must NOT re-attempt the extra kit. We exercise the
-# heal by re-attaching with a no-op agent command and capturing its stderr (the
-# heal runs before the agent command on the re-attach path).
+# missing playbook kit and must NOT re-attempt the extra kit.
+#
+# We invoke the EXACT function the re-attach path calls
+# (acq_backend_ensure_kits_applied) directly, by sourcing acq in a subshell with
+# ACQ_SOURCE_ONLY=1 — the same pattern scripts/verify-backends uses to reach acq
+# internals. This exercises the real heal with NO agent attach, so we avoid the
+# sbx shell-agent's `-- CMD` execution path entirely (a bare `acq run <name> --
+# CMD` routes CMD to the guest's non-executable /bin/sh and prints a confusing
+# "agent exited with code 126" that has nothing to do with the heal under test).
 info "FIX #2/#3: re-attach heal produces no per-attach noise"
-# `acq run <name> -- CMD` re-attaches to the existing sandbox, runs the heal,
-# then runs CMD and exits — capturing the heal's stderr without an interactive
-# session. Use `sh -c :` (a shell builtin no-op) rather than `true`: the sbx
-# agent templates route `-- CMD` through a shell, and a bare `true` was observed
-# to hit the guest's non-executable /usr/bin/true ("cannot execute binary
-# file" / exit 126) on the shell agent. `sh -c :` always succeeds and never
-# needs an executable lookup.
-reattach_out=$(printf 'N\n' | "$ACQ" "${BE[@]}" run "$SANDBOX" -- sh -c ':' 2>&1 || true)
+_run_heal() {
+  # $1: extra env assignments (e.g. "ACQ_FORCE_KIT_REAPPLY=1"), or empty.
+  # acq is a bash script (arrays, BASH_SOURCE), so source it with `bash`, not the
+  # host /bin/sh. ACQ_SOURCE_ONLY=1 makes acq return after loading its functions
+  # (and common.sh) without dispatching. Resolve the sbx backend, then run the
+  # real heal for $SANDBOX; capture stdout+stderr.
+  env $1 bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    acq_resolve_backend sbx >/dev/null 2>&1
+    acq_backend_ensure_kits_applied "'"$SANDBOX"'"
+  ' 2>&1 || true
+}
+reattach_out=$(_run_heal "")
 printf '%s\n' "$reattach_out" | sed 's/^/    | /'
 if [ "$GH_SEEDED" = "1" ]; then
   if printf '%s\n' "$reattach_out" | grep -q "missing the playbook kit"; then
@@ -214,7 +225,7 @@ fi
 # startup-bearing built-in is refused; acq must print exactly ONE consolidated
 # recreate notice, not per-kit warnings.
 info "FIX #1: forced mid-life re-add surfaces one recreate message"
-force_out=$(ACQ_FORCE_KIT_REAPPLY=1 "$ACQ" "${BE[@]}" run "$SANDBOX" -- sh -c ':' 2>&1 || true)
+force_out=$(_run_heal "ACQ_FORCE_KIT_REAPPLY=1")
 printf '%s\n' "$force_out" | sed 's/^/    | /'
 _notice_count=$(printf '%s\n' "$force_out" | grep -c "cannot extend a live sandbox with startup-bearing kits" || true)
 if [ "$SBX_IS_038" = "1" ]; then
