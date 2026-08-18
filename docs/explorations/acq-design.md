@@ -898,14 +898,13 @@ kit vocabulary** with a translation layer. Recorded in
     re-verification against msb 0.6.9 (the installed version) confirms the
     substitution engine still requires `--tls-intercept` and rewrites HTTP
     request headers — including the `Authorization: Basic` value git smart-HTTP
-    carries its credential in — so git-over-HTTPS is **eligible** for placeholder
-    substitution on paper (the earlier "msb doesn't substitute git's HTTPS clone,
-    so GitHub is NOT bound" reading, last checked against 0.6.6, is superseded by
-    the 0.6.9 re-verify + the git-transport binding). The live git clone/push
-    confirmation on a KVM host is still pending; run
-    `scripts/verify-git-https-secret-msb` there for an explicit PASS/FAIL/BLOCKED
-    verdict. Kits still may use REST tarballs for reproducibility. This is the
-    bash subset of §7.5; the full
+    carries its credential in — and a live
+    `scripts/verify-git-https-secret-msb` run against a private repo confirmed
+    `git ls-remote` succeeds using only the guest placeholder. The earlier
+    0.6.6-era non-binding assumption is superseded by the 0.6.9 re-verify, the
+    git-transport binding, and the live git-HTTPS confirmation. Kits still may
+    use REST tarballs for reproducibility. This is the bash subset of §7.5; the
+    full
    Go/`go-keyring`/`age` + MITM `CredentialRewriteRule` + swap-on-access
    placeholder component remains a larger future effort. The earlier "msb uses
    raw host-env `--secret`, unified store deferred" note is superseded.
@@ -944,11 +943,11 @@ kit vocabulary** with a translation layer. Recorded in
     auto-trusted in the guest). A static re-verification against msb 0.6.9 (the
     installed version) confirms the engine rewrites HTTP request headers,
     including the `Authorization: Basic` value git smart-HTTP uses, so
-    git-over-HTTPS to a bound github host is **eligible** for substitution on
-    paper (the earlier 0.6.6 reading that it "does NOT work for git's HTTPS clone"
-    is superseded — GitHub is now bound on msb, see the secret-model note above).
-    The live git clone/push confirmation on a KVM host is still pending; run
-    `scripts/verify-git-https-secret-msb` there for an explicit verdict.
+    git-over-HTTPS to a bound github host is eligible for substitution, and a
+    live private-repo `git ls-remote` with
+    `scripts/verify-git-https-secret-msb` confirmed that substitution path works
+    at runtime. The earlier 0.6.6-era negative reading is superseded — GitHub is
+    now bound on msb, see the secret-model note above.
 
 6. **`PATTERNS_KIT_REF` is pinned to the patterns v1.7.0 release commit**
    (`9c277c09ed4ad45fd11709d6b048a58adc785443`), which includes Part A (#221),
