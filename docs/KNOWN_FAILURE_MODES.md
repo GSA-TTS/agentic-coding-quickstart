@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-08-17"
+last_updated: "2026-08-18"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -640,13 +640,19 @@ without `acq` (so the kits were not applied), or with a plain backend `run`
 (e.g. `sbx run` / `msb run`) without the kit refs.
 
 **Upgrading an existing sandbox (pre-kit).** A sandbox created before the kit
-migration has no USAi provider config and no playbook clone. `acq` now **heals
-it in place**: the next time you `acq run` against such a sandbox, it detects the
-missing kit(s) and injects them (on sbx via `sbx kit add`). As of `sbx` 0.35.0
-`sbx kit add` **recreates the sandbox container with the augmented kit set and
-preserves state**, so your work and sessions survive — no export/recreate/import
-dance, and no manual steps.
+migration has no USAi provider config and no playbook clone. `acq` attempts to
+**heal it in place**: the next time you `acq run` against such a sandbox, it
+detects the missing kit(s) and injects them (on sbx via `sbx kit add`). This
+worked on sbx 0.35.0–0.37.x, where `sbx kit add` recreated the container with the
+augmented kit set while preserving state.
 
+> **sbx 0.38 caveat.** On sbx >= 0.38, `sbx kit add` no longer applies
+> startup-bearing kits mid-life (see [Section 35](#35-re-attach-heal-loop-warns-every-time-on-sbx-038--sbx-kit-add-refuses-startup-bearing-kits)),
+> and every built-in acq kit declares startup commands. In-place healing of the
+> built-in bundle therefore does **not** work on 0.38+: to add or refresh the
+> bundle you must recreate the sandbox (`acq rm && acq run`). acq detects the
+> refusal and prints that guidance.
+>
 > **Historical note.** Earlier releases could *not* auto-heal in place: on
 > `sbx` ≤ 0.34.x, `sbx kit add` failed (`failed to read tar header: unexpected
 > EOF`) on any kit shipping a static file — including the `usai-provider` kit
@@ -1666,6 +1672,79 @@ running on the host (or no key is loaded), there is nothing to forward.
 Then re-run `acq run …`; the forward is applied automatically. See
 [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md) for the full
 mechanism and the trust-boundary discussion.
+
+---
+
+## 35. Re-attach Heal Loop Warns Every Time on sbx 0.38 — `sbx kit add` Refuses Startup-Bearing Kits
+
+### Symptoms
+
+On the **sbx** backend (sbx >= 0.38), every re-attach to an existing sandbox
+(`acq run <name>`) reports the sandbox is "missing the playbook kit", re-attempts
+every extra kit, and each `sbx kit add` warn-fails — on **every** attach, even
+for a sandbox that was provisioned correctly. Running the printed recover command
+by hand shows the real cause:
+
+```
+$ sbx kit add <sandbox> <translated-playbook-kit-dir>
+ERROR: kit "agentic-coding-playbook" declares setup.startup, which the kit-add
+recreate flow does not yet apply; recreate the sandbox from scratch via
+`sbx rm` + `sbx create --kit` to use this kit
+```
+
+### Root Cause
+
+Three issues compounded:
+
+1. **sbx 0.38 refuses startup-bearing kits mid-life.** `sbx kit add` on 0.38 only
+   applies mixin kits declaring exclusively `environment.variables`,
+   `setup.install`, and `permissions.network.allow`
+   ([Docker kits docs](https://docs.docker.com/ai/sandboxes/customize/kits/)). Every
+   built-in acq kit declares startup commands (translated into `setup.startup`), so
+   **all** mid-life built-in kit adds are refused. acq swallowed sbx's stderr
+   (`sbx kit add … >/dev/null 2>&1`) and printed a generic warning plus a
+   "Recover with: sbx kit add …" hint that could never succeed.
+2. **A stale playbook feature-probe.** The heal probed the playbook with
+   `test -e "$HOME/.agentic-coding-playbook/.git"`. Since patterns v1.8.0 moved
+   playbook delivery from a git clone to a REST tarball (the #203 fix), the tree
+   has **no `.git`**, so the probe reported the playbook absent on every re-attach,
+   forever — re-triggering the (now-refused) add each time.
+3. **The `~/.acq-extra-kits` marker was never written at create.** The re-attach
+   heal decided whether an extra kit was already applied by reading
+   `~/.acq-extra-kits`, but only the heal path wrote it. A sandbox created **with**
+   `ACQ_EXTRA_KITS` (or `--kit`) never got the marker, so every re-attach
+   re-attempted every extra kit (and, under (1), warn-failed).
+
+### Fix
+
+`acq` (this repo):
+
+- Captures `sbx kit add` stderr and **detects the startup refusal**, printing a
+  single actionable "recreate to extend/refresh" message
+  (`acq rm <name> && acq run …`) instead of per-kit warnings with recover
+  commands that cannot work. Other (genuine) failures now surface sbx's own
+  diagnostic rather than being hidden. `acq kit update` fails with the same
+  guidance. acq does **not** auto-recreate (a recreate discards the sandbox's
+  session/context — it stays a deliberate, user-consented action).
+- Probes the playbook with `test -e "$HOME/.agentic-coding-playbook/AGENTS.md"`,
+  which matches **both** the historical git-clone and the current tarball
+  delivery.
+- Writes `~/.acq-extra-kits` at **create** for every extra/CLI kit, so re-attach
+  correctly sees them as already applied.
+
+To pick up a refreshed built-in bundle on sbx 0.38 you must recreate the sandbox
+(this discards its session/context):
+
+```bash
+acq rm <sandbox>
+acq run opencode /path/to/your/project
+```
+
+**msb is unaffected** — it re-applies kits idempotently via `msb exec` and has no
+`sbx kit add`. The upstream "not yet" in the sbx error suggests startup support in
+the kit-add flow may return; if it does, in-place healing can be re-enabled. See
+the update note in
+[ADR-0009](adr/0009-require-sbx-0.35.0-in-place-kit-healing.md).
 
 ---
 

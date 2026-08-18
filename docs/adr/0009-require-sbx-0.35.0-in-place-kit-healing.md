@@ -22,6 +22,30 @@ supersedes: []
 > (it is a lower bound satisfied by 0.38.0); the effective floor in
 > `acq.backends/sbx.sh` (`MIN_SBX_VERSION`) is now 0.38.0. The Linux/ARM64 "no
 > 0.35.x build, wait for 0.36.x" caveat is moot at the 0.38.0 floor.
+>
+> **Update (2026-08-18): sbx 0.38 no longer supports in-place healing of the
+> built-in bundle.** sbx 0.38's `sbx kit add` only applies mixin kits that
+> declare *exclusively* `environment.variables`, `setup.install`, and
+> `permissions.network.allow`. A kit that declares `setup.startup` is **refused
+> mid-life** with an error naming `setup.startup` and directing the user to
+> recreate the sandbox (`sbx rm` + `sbx create --kit`). See the
+> [Docker kits docs](https://docs.docker.com/ai/sandboxes/customize/kits/) —
+> *"`sbx kit add` … supports mixin kits limited to `environment.variables`,
+> `setup.install`, and `permissions.network.allow`. To use other fields, recreate
+> the sandbox with `--kit`."* Every kit in acq's built-in bundle declares startup
+> commands (they are translated into `setup.startup`), so on sbx 0.38 **every
+> mid-life built-in kit add is refused** and the state-preserving in-place heal
+> this ADR relied on no longer applies. The heal path
+> (`acq_backend_ensure_kits_applied`), `acq kit apply`, and `acq kit update`
+> therefore **detect this refusal and print a single actionable "recreate to
+> extend/refresh" message** (`acq rm && acq run`) rather than per-kit warnings
+> with recover commands that cannot work; provenance is left unchanged so the
+> sandbox correctly stays stale/unknown. acq does **not** auto-recreate — a
+> recreate discards the sandbox's session/context, so it stays a deliberate,
+> user-consented action (safety > convenience). The "not yet" in the upstream
+> error suggests sbx may restore startup support in the kit-add flow; if it does,
+> in-place healing can be re-enabled. This limitation drove
+> [quickstart#320](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/320).
 
 ## Context and Problem Statement
 
