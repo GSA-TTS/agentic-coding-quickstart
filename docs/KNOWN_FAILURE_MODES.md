@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-08-17"
+last_updated: "2026-08-18"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -1572,31 +1572,52 @@ kit's services entirely absent.
 ### Root Cause
 
 A kit's `startup`-phase commands (which, for the openchamber kit, launch the
-supervised shared `opencode serve` on :4096 and the OpenChamber UI on :3000) are
-re-run on a resume **only** by acq's heal (`acq_backend_ensure_kits_applied`) —
-`msb start` alone does not replay them (ADR-0017). The heal, however, only
-re-applied the four **built-in** kits and any `ACQ_EXTRA_KITS`; it did **not**
-fold in kits supplied on the command line via `--kit` (`ACQ_CLI_KITS`). The
-provision path *does* fold those in, so the create-time `-p` port mappings for a
-`--kit` kit are part of the persisted sandbox config and are restored by msb on
-start — but the heal skipped the kit whose `startup` phase brings the services
-up. Result: ports restored, services not — exactly the "mapped but dead" state
-above.
+supervised shared `opencode serve` on :4096 and the OpenChamber UI on :3000; for
+the paseo kit, the daemon supervisor on :6767) are re-run on a resume **only** by
+acq's heal (`acq_backend_ensure_kits_applied`) — `msb start` alone does not replay
+them (ADR-0017). Two compounding gaps kept those services dead on resume:
+
+1. **The heal skipped CLI `--kit` kits.** It re-applied only the built-in kits and
+   any `ACQ_EXTRA_KITS`; it did not fold in kits supplied on the command line via
+   `--kit` (`ACQ_CLI_KITS`). Fixed by appending `ACQ_CLI_KITS` to the heal's kit
+   list — but that only helps when the array is populated.
+
+2. **The `--kit`/extra refs were never persisted.** `ACQ_CLI_KITS` is populated by
+   `extract_kit_flags` in the `run`/`create` dispatch arm only, and
+   `ACQ_EXTRA_KITS` is a bare environment variable. A later `acq start` /
+   `acq restart` (or a name-only `acq run <sandbox>`) does not re-parse `--kit` and
+   may run in a shell that never exported `ACQ_EXTRA_KITS`, so the heal ran with an
+   **empty** CLI/extra set and re-ran only the built-ins' startup. The provision
+   path *does* fold `--kit` in, so the create-time `-p` port mappings are part of
+   the persisted sandbox config and are restored by msb on start — but the heal
+   skipped the kit whose `startup` phase brings the services up. Result: ports
+   restored, services not — exactly the "mapped but dead" state above.
 
 ### Fix
 
-`acq_backend_ensure_kits_applied` in `acq.backends/msb.sh` now appends
-`ACQ_CLI_KITS` to the heal's kit list (after the built-ins and `ACQ_EXTRA_KITS`),
-matching how `acq_backend_provision` assembles the kit set. To recover an
-existing sandbox on a fixed `acq`, resume it with the SAME `--kit` ref you
-created it with, so the heal re-runs that kit's startup:
+Both gaps are closed:
+
+- `acq_backend_ensure_kits_applied` (msb) appends `ACQ_CLI_KITS` to the heal's kit
+  list, matching how `acq_backend_provision` assembles the kit set.
+- acq now **persists** the CLI (`--kit`) and `ACQ_EXTRA_KITS` refs host-side at
+  provision (a small `*.kits` record beside the bundle-provenance record, keyed by
+  backend + sandbox name) and **reloads** them in the `acq start` / `acq restart`
+  verbs and on a name-only `acq run <sandbox>` re-attach, *before* the heal. So a
+  `msb stop` + `acq start` cycle now re-runs a `--kit` kit's startup automatically
+  — **you no longer have to re-pass `--kit`.** The record's presence is
+  authoritative: a sandbox created with no CLI/extra kits reloads nothing, and a
+  legacy sandbox with no record behaves exactly as before (reload is a no-op).
+
+To recover a **legacy** sandbox (created before this fix, so it has no persisted
+record) without recreating it, resume it once with the SAME `--kit` ref you
+created it with, which both re-runs the kit's startup and writes the record for
+next time:
 
 ```bash
 acq run opencode --kit …/acq-kits/openchamber <path>   # heals + re-runs kit startup
 # or, if you don't need to attach:
-acq restart <sandbox>       # note: acq restart heals the built-ins + extras;
-                            # pass --kit via `acq run <sandbox> --kit …` to also
-                            # re-run a CLI kit's startup
+acq restart <sandbox>       # on a sandbox created by a fixed acq, this now
+                            # restores CLI-kit startup on its own
 ```
 
 If a resumed sandbox is already up but its services are dead, the quickest manual
@@ -1604,13 +1625,17 @@ kick is to re-run the kit's startup script directly:
 
 ```bash
 acq exec <sandbox> -- sh /home/agent/openchamber-start.sh &
+# (paseo kit: sh /home/agent/paseo-start.sh)
 ```
 
 ### Prevention / Status
 
-- Fixed in `acq.backends/msb.sh`; covered by the `clikit-heal` unit test in
-  `scripts/test-acq` (asserts a CLI `--kit` ref's files are re-applied during the
-  heal).
+- Fixed in `acq.backends/msb.sh` (heal folds CLI kits), `acq.backends/common.sh`
+  (`acq_cli_kits_write`/`acq_cli_kits_load` persistence), `acq.backends/sbx.sh`
+  (parity write), and the `acq` `start`/`restart`/`run` verbs (reload before
+  heal). Covered by the `clikit-heal` and `cli-kits:*` unit tests in
+  `scripts/test-acq` (persist-then-reload round-trip; a reloaded `--kit` ref is
+  re-applied during a resume heal).
 - Note the operational fact behind the original report: a live in-VM session does
   **not** survive a host reboot — the microVM is ephemeral; only the sandbox
   definition, its port config, and your mounted repos persist. Always commit work
