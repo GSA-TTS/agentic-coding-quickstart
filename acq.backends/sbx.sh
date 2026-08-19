@@ -512,8 +512,15 @@ acq_backend_ports() {
 # Usage: _acq_sbx_kit_add SANDBOX LOCAL_KIT_DIR
 _acq_sbx_kit_add() {
   local name="$1" local_kit="$2" err rc
-  err=$(sbx kit add "$name" "$local_kit" </dev/null 2>&1 >/dev/null)
-  rc=$?
+  # CRITICAL: acq runs under `set -e`. A refusal (the common case this whole
+  # helper exists to classify) makes `sbx kit add` exit non-zero, which would
+  # abort the entire heal at THIS assignment — before rc/classification run —
+  # if it were not guarded. Capture stderr and the real exit code without
+  # letting `set -e` fire: run the command, then read `$?` on the next line.
+  # The `|| rc=$?` idiom both suppresses `set -e` AND records the true status
+  # (a bare `err=$(...)` followed by `rc=$?` would abort under `set -e`; a
+  # trailing `|| true` would clobber the status to 0).
+  err=$(sbx kit add "$name" "$local_kit" </dev/null 2>&1 >/dev/null) && rc=0 || rc=$?
   if [ "$rc" -eq 0 ]; then
     return 0
   fi
@@ -561,8 +568,10 @@ _acq_sbx_print_recreate_notice() {
 acq_backend_apply_kit() {
   local name="$1" kitref="$2" local_kit rc
   local_kit=$(_acq_sbx_translate_kit "$kitref")
-  _acq_sbx_kit_add "$name" "$local_kit"
-  rc=$?
+  # `set -e`-safe: _acq_sbx_kit_add returns 3 (refusal) or 1 (other failure) as
+  # its NORMAL signalling. A bare call on its own line would abort under `set -e`
+  # before we read $?. Capture the status inline.
+  rc=0; _acq_sbx_kit_add "$name" "$local_kit" || rc=$?
   if [ "$rc" -eq 3 ]; then
     _acq_sbx_print_recreate_notice "$name"
     return 1
@@ -585,6 +594,7 @@ acq_backend_ensure_kits_applied() {
   local name="$1"
   local force="${ACQ_FORCE_KIT_REAPPLY:-0}"
   local ok=1
+  local _kadd_rc=0
   # Reset the once-per-heal sbx-0.38 recreate advisory guard (see
   # _acq_sbx_print_recreate_notice). Without this reset, a second heal in the
   # same process would suppress the notice.
@@ -604,8 +614,10 @@ acq_backend_ensure_kits_applied() {
   # intercepting CA is already trusted.
   if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
     echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
-    _acq_sbx_kit_add "$name" "$zscaler_local"
-    case $? in
+    # `set -e`-safe: _acq_sbx_kit_add's non-zero returns (3=refusal, 1=other) are
+    # normal signalling — capture the status inline so the loop is not aborted.
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$zscaler_local" || _kadd_rc=$?
+    case $_kadd_rc in
       0) echo "acq: Zscaler CA kit injected into '$name'." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name' (see error above)." >&2; ok=0 ;;
@@ -615,8 +627,8 @@ acq_backend_ensure_kits_applied() {
   # 2) USAi provider kit
   if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "acq: '$name' is missing the USAi kit; injecting with 'sbx kit add'..." >&2
-    _acq_sbx_kit_add "$name" "$usai_local"
-    case $? in
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$usai_local" || _kadd_rc=$?
+    case $_kadd_rc in
       0)
         sbx exec "$name" -- sh -c \
           'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
@@ -636,8 +648,8 @@ acq_backend_ensure_kits_applied() {
   # playbook "absent" forever on tarball-provisioned sandboxes.
   if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/AGENTS.md" && echo present'; then
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
-    _acq_sbx_kit_add "$name" "$playbook_local"
-    case $? in
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$playbook_local" || _kadd_rc=$?
+    case $_kadd_rc in
       0) echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (playbook kit) failed for '$name' (see error above)." >&2; ok=0 ;;
@@ -651,8 +663,8 @@ acq_backend_ensure_kits_applied() {
   if [ "$force" = "1" ]; then
     local gitsshsign_local
     gitsshsign_local=$(_acq_sbx_translate_kit "$GITSSHSIGN_KIT")
-    _acq_sbx_kit_add "$name" "$gitsshsign_local"
-    case $? in
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$gitsshsign_local" || _kadd_rc=$?
+    case $_kadd_rc in
       0) echo "acq: git-ssh-sign kit refreshed in '$name'." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (git-ssh-sign kit) failed for '$name' (see error above)." >&2; ok=0 ;;
@@ -676,8 +688,8 @@ acq_backend_ensure_kits_applied() {
     fi
     echo "acq: applying extra kit to '$name': $k" >&2
     local_extra=$(_acq_sbx_translate_kit "$k")
-    _acq_sbx_kit_add "$name" "$local_extra"
-    case $? in
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$local_extra" || _kadd_rc=$?
+    case $_kadd_rc in
       0)
         sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$k" </dev/null >/dev/null 2>&1 || true
         ;;
