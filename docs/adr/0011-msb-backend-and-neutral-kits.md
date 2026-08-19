@@ -323,11 +323,11 @@ allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
   REST API plus HTTPS git-transport hosts
   (`GITHUB_TOKEN@github.com,api.github.com,codeload.github.com`). msb
   substitutes the placeholder on those hosts, so direct HTTPS clone/push is
-  eligible for secret injection without the real token entering the guest — see
-  the eligibility note immediately below for the static-vs-live status of the
-  git-transport claim.
-- **GitHub git-HTTPS substitution eligibility (re-verified statically against
-  msb 0.6.9; live git clone/push still pending on a KVM host):** the msb
+  eligible for secret injection without the real token entering the guest. The
+  credential-substitution path for git smart-HTTP was live-confirmed against
+  msb 0.6.9 with `scripts/verify-git-https-secret-msb`, which authenticated a
+  private-repo `git ls-remote` using only the guest placeholder.
+- **GitHub git-HTTPS substitution (live-confirmed against msb 0.6.9):** the msb
   secret-substitution engine substitutes a placeholder only on a TLS-intercepted
   connection whose SNI/authority matches the bound host (the `--tls-intercept`
   requirement is unchanged in 0.6.9). Its request rewriting covers HTTP request
@@ -347,13 +347,11 @@ allow@HOST --trust-host-cas --tls-intercept --secret ENV@HOST --volume`,
   (`crates/network/lib/secrets/handler.rs`, `.../config.rs`) and docs
   (`docs/security/secrets.mdx`); the 0.6.6→0.6.9 diff shows no change to the
   header/Basic-auth substitution path and nothing added or removed for
-  git/smart-HTTP specifically. **What the static review does not prove:** that
-  msb actually intercepts and rewrites git's connection end-to-end (git's
-  credential-helper prompt, TLS handshake against the interception CA, and the
-  authority checks must all line up at run time). That confirmation requires a
-  live `git clone`/`git ls-remote` of a private repo on a KVM-capable host and is
-  still pending; run `scripts/verify-git-https-secret-msb` there to settle it
-  (it prints an explicit PASS/FAIL/BLOCKED verdict and never echoes the token).
+  git/smart-HTTP specifically. The runtime path was then live-confirmed on a
+  KVM-capable host with `scripts/verify-git-https-secret-msb`: a private-repo
+  `git ls-remote` succeeded using only the guest placeholder as the URL
+  credential, proving msb intercepted the TLS connection and rewrote git's
+  `Authorization: Basic` header without the real token entering the guest.
 
 ### `environment` vocabulary (guest env vars)
 
@@ -408,11 +406,11 @@ identical host:guest `/tmp` mounts silently fail (→ fixed guest mount point);
 the host resolver is unreachable from the microVM (→ `--dns-nameserver`); the
 kits assume an `agent`/`/home/agent` user a plain base lacks (→ create it);
 secret substitution requires `--tls-intercept` and, per a static re-verification
-against msb 0.6.9, rewrites HTTP request headers (including the
-`Authorization: Basic` value git smart-HTTP uses) — so git-over-HTTPS is
-eligible on paper, though the live git clone/push confirmation is still pending
-on a KVM host (see the eligibility note above and
-`scripts/verify-git-https-secret-msb`).
+against msb 0.6.9 plus live verification with
+`scripts/verify-git-https-secret-msb`, rewrites HTTP request headers (including
+the `Authorization: Basic` value git smart-HTTP uses). git-over-HTTPS auth to a
+bound GitHub host is therefore live-confirmed for a private-repo `git ls-remote`
+using only the guest placeholder.
 
 ## Validation
 
@@ -429,10 +427,9 @@ on a KVM host (see the eligibility note above and
   `scripts/verify-backends` msb rows (now including the `opencode`-installed
   assertion added for quickstart#228) cannot run inside an sbx/msb sandbox and
   need host virtualization (`/dev/kvm` on Linux). The msb CLI flag shapes were
-  verified against `msb 0.6.6` and the secret-substitution behavior was
-  re-verified statically against `msb 0.6.9` (0.6.9 is the installed version;
-  see the git-HTTPS eligibility note above — the live git clone/push loop is the
-  one piece still deferred to a KVM host); the live loop mirrors how
+  verified against `msb 0.6.6`, and the git-HTTPS secret-substitution behavior
+  was re-verified statically and live-confirmed with a private-repo
+  `git ls-remote` against `msb 0.6.9`; the remaining live loop mirrors how
   ADR-0009/ADR-0010 defer live verification. Run `./scripts/verify-backends`
   on a sandbox-capable host and attach the transcript. **The quickstart#228 fix
   (agent install + attach launch) is verified offline via the stubbed harness;

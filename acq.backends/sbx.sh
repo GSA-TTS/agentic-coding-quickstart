@@ -375,6 +375,9 @@ acq_backend_provision() {
   if [ "$_rc" -eq 0 ]; then
     acq_provenance_write sbx "$name" || true
     _acq_sbx_seed_extra_kit_marker "$name"
+    # Persist the CLI (`--kit`) / extra kit refs alongside provenance so a later
+    # resume heal can reload them (see acq_cli_kits_write). Best-effort.
+    acq_cli_kits_write sbx "$name" || true
   fi
   return "$_rc"
 }

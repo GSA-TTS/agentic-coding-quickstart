@@ -690,6 +690,16 @@ case "$subcommand" in
         # provenance record to "current", so reading status after it would never
         # see stale/unknown and the offer below would be dead.
         _pre_heal_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$local_name")
+        # If the user did NOT re-pass `--kit` on this re-attach, reload the refs
+        # persisted at create so the heal re-runs their startup (e.g. a `--kit`
+        # daemon kit) instead of coming back with the service dead. When `--kit`
+        # WAS re-passed, ACQ_CLI_KITS is already populated and authoritative for
+        # this invocation, so we must not clobber it — hence the empty-guard.
+        # See acq_cli_kits_load and the "--kit Services Dead After a
+        # Resume/Reboot" section in docs/KNOWN_FAILURE_MODES.md.
+        if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ]; then
+          acq_cli_kits_load "${ACQ_RESOLVED_BACKEND}" "$local_name"
+        fi
         acq_backend_ensure_kits_applied "$local_name" || true
         # Existing sandbox: offer a refresh if it predates the pinned bundle.
         # Never blocks; skipped under --no-update-check / ACQ_UPDATE_CHECK=0. A
@@ -756,6 +766,15 @@ case "$subcommand" in
       # "current"), then heal, then offer a refresh. Never
       # blocks; skipped under --no-update-check / ACQ_UPDATE_CHECK=0.
       _pre_heal_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$first")
+      # Reload persisted CLI (`--kit`) / extra kit refs so the heal re-runs their
+      # startup on a name-only re-attach too (the user did not re-pass `--kit`
+      # here). Guarded on an empty in-memory set so a `--kit` re-passed on THIS
+      # invocation (already captured into ACQ_CLI_KITS) stays authoritative and
+      # is not clobbered. See acq_cli_kits_load and the "--kit Services Dead
+      # After a Resume/Reboot" section in docs/KNOWN_FAILURE_MODES.md.
+      if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ]; then
+        acq_cli_kits_load "${ACQ_RESOLVED_BACKEND}" "$first"
+      fi
       acq_backend_ensure_kits_applied "$first" || true
       maybe_offer_bundle_refresh "${ACQ_RESOLVED_BACKEND}" "$first" "$_pre_heal_status"
       warn_if_no_ssh_signing_key
@@ -844,6 +863,12 @@ case "$subcommand" in
       exit 1
     fi
     acq_backend_start "$local_name"
+    # Reload the CLI (`--kit`) / extra kit refs persisted at provision so the
+    # heal below re-runs THEIR startup too, not just the built-ins. Without this
+    # a sandbox created with `--kit <daemon-kit>` resumes with that kit's
+    # supervised service dead (ports mapped, nothing listening). No-op for a
+    # legacy sandbox with no record. See acq_cli_kits_load.
+    acq_cli_kits_load "${ACQ_RESOLVED_BACKEND}" "$local_name"
     # Heal re-runs kit startup (idempotent). ensure_kits_applied on msb also
     # start-if-stopped guards internally, so this is safe even if the resume above
     # was a no-op on an already-running sandbox.
@@ -874,6 +899,9 @@ case "$subcommand" in
     acq_backend_stop "$local_name" \
       || echo "acq: restart: stop failed; attempting start anyway." >&2
     acq_backend_start "$local_name"
+    # Reload persisted CLI/extra kit refs so the heal re-runs their startup too
+    # (same rationale as the 'start' arm above). No-op for a legacy sandbox.
+    acq_cli_kits_load "${ACQ_RESOLVED_BACKEND}" "$local_name"
     acq_backend_ensure_kits_applied "$local_name" || true
     echo "acq: restarted '$local_name' and re-applied kit startup." >&2
     ;;
