@@ -1,7 +1,7 @@
 # Pre-commit - Runs all pre-commit hooks on all files
 # Enforces shellcheck, gitleaks, markdownlint, and other hooks in CI
 #
-# Security hardening per NIST SA-12 (Supply Chain) and AC-6 (Least Privilege)
+# Security hardening per NIST SR-3 (Supply Chain Controls and Processes; supersedes withdrawn SA-12) and AC-6 (Least Privilege)
 
 name: Pre-commit
 
