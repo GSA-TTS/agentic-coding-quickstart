@@ -2407,6 +2407,14 @@ EOF
   # Best-effort: a provenance write failure never affects the
   # sandbox. Reached only when provision did not abort earlier under set -e.
   acq_provenance_write msb "$name" || true
+
+  # Persist the CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs so a later
+  # `acq start`/`acq restart` can reload them and re-run their startup services
+  # (see acq_cli_kits_write). Without this, a resume heals only the built-ins +
+  # whatever ACQ_EXTRA_KITS the resume shell happens to export, leaving a
+  # `--kit` kit's supervised daemon dead (ports mapped, nothing listening).
+  # Best-effort; never affects the sandbox.
+  acq_cli_kits_write msb "$name" || true
 }
 
 # ---------------------------------------------------------------------------

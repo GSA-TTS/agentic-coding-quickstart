@@ -94,6 +94,40 @@ therefore shared between create and resume via a single helper
 after the msb child reads them (on both success and failure). This is also the
 reason native-restart-outside-acq is infeasible (above).
 
+## Update (2026-08-18): CLI/extra kit refs must be persisted for the resume heal
+
+The resume-heal mechanism above (`acq_backend_ensure_kits_applied` re-runs the
+`startup` phase) is only as complete as the **kit set** it iterates. Two follow-on
+gaps meant a sandbox created with `acq run … --kit <ref>` — the intended path for
+a supervised-daemon kit such as `paseo` or `openchamber` — still came back from a
+`msb stop` + `acq start` with its ports mapped but its daemon dead:
+
+1. `acq_backend_ensure_kits_applied` originally iterated only the built-in kits +
+   `ACQ_EXTRA_KITS`, skipping CLI `--kit` refs (`ACQ_CLI_KITS`). Fixed by folding
+   `ACQ_CLI_KITS` into the heal's kit list, matching `acq_backend_provision`.
+
+2. More fundamentally, the CLI/extra refs were **in-memory only**: `ACQ_CLI_KITS`
+   is populated by `extract_kit_flags` in the `run`/`create` dispatch arm, and
+   `ACQ_EXTRA_KITS` is a bare env var. The `start`/`restart` verbs do not re-parse
+   `--kit` and may run in a shell that never exported `ACQ_EXTRA_KITS`, so the heal
+   iterated an **empty** CLI/extra set and re-ran only the built-ins' startup.
+
+**Resolution.** acq persists the CLI (`--kit`) and `ACQ_EXTRA_KITS` refs
+host-side at provision — a small `*.kits` record beside the bundle-provenance
+record, keyed by backend + sandbox name, using the same sanitized-filename +
+raw-name-checksum scheme (`acq_cli_kits_write` / `acq_cli_kits_load` in
+`acq.backends/common.sh`; written from both `acq_backend_provision` on msb and
+`acq_backend_create` on sbx). The `start` / `restart` verbs and the name-only
+`acq run <sandbox>` re-attach **reload** that record into `ACQ_CLI_KITS` /
+`ACQ_EXTRA_KITS` *before* the heal, so a resume re-runs a `--kit` kit's startup
+**without the user re-passing `--kit`**. The record's presence is authoritative
+(an empty record clears stale in-memory refs; a legacy sandbox with no record is a
+no-op reload, preserving pre-fix behavior), and the reload is guarded so a `--kit`
+re-passed on the same invocation stays authoritative. This is consistent with the
+"restart durability is delivered by the acq verb, not native msb replay" posture
+above: the verb now restores the *full* kit set, not just the built-ins. See
+`docs/KNOWN_FAILURE_MODES.md` §33.
+
 ---
 
 # ADR-0017: Stage msb kit startup commands as a create-time script for restart durability (original)

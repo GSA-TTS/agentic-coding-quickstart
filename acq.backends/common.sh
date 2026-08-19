@@ -1218,6 +1218,113 @@ acq_bundle_reapply() {
   return 1
 }
 
+# ============================================================================
+# CLI / extra kit-reference persistence (restart durability)
+# ============================================================================
+# A sandbox created with `acq run … --kit <ref>` (ACQ_CLI_KITS) or with
+# ACQ_EXTRA_KITS in the environment carries kits whose `startup`-phase commands
+# (e.g. a supervised daemon) are re-run on a resume ONLY by acq's heal
+# (acq_backend_ensure_kits_applied); the backend's own `start`/resume does NOT
+# replay them. But those refs previously lived ONLY in-memory: `extract_kit_flags`
+# populates ACQ_CLI_KITS in the run/create dispatch arm, and ACQ_EXTRA_KITS is a
+# bare env var. So a later `acq start`/`acq restart` (which does not re-parse
+# `--kit` and runs in a shell that may not have ACQ_EXTRA_KITS exported) healed
+# with an EMPTY CLI/extra set and never re-ran those kits' startup — the sandbox
+# came back with the create-time ports mapped but nothing listening behind them.
+#
+# To close that gap we persist the CLI/extra kit refs HOST-SIDE at provision
+# (alongside the bundle provenance record) and reload them in the start/restart
+# verbs before the heal, so kit startup services are restored deterministically
+# without the user having to re-pass `--kit` or re-export ACQ_EXTRA_KITS.
+#
+# Design mirrors the provenance record: host-side only, keyed by backend +
+# sandbox name (same sanitized-filename + raw-name-checksum scheme), a tiny
+# dependency-free record, atomic temp+mv write, fail-open on any error. One kit
+# ref per line under a `kit=` key so a ref may safely contain characters that a
+# single-line list could not (refs are newline-free by construction). The
+# record's PRESENCE is authoritative: a sandbox created with no CLI/extra kits
+# writes an empty record, so reload never resurrects a stale ref, and a legacy
+# sandbox with no record simply reloads nothing (the pre-fix behavior).
+
+# Path to one sandbox's CLI/extra kit record. Same keying as the provenance file
+# so the two records sit side by side and never collide across backends/names.
+_acq_cli_kits_file() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  local safe_backend safe_name name_sum
+  safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
+  safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+  name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+  printf '%s/%s/%s.%s.kits\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+}
+
+# Persist the current CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs for a
+# sandbox. Call ONLY after a successful provision. Writes an empty record when
+# there are no such kits, so the record's presence is authoritative on reload.
+# Best-effort: a write failure warns (debug) and returns non-zero but never
+# aborts the caller (fail-open).
+# Usage: acq_cli_kits_write BACKEND SANDBOX_NAME
+acq_cli_kits_write() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  local file dir
+  file=$(_acq_cli_kits_file "$backend" "$name") || return 1
+  dir=$(dirname "$file")
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    acq_debug "cli-kits: could not create state dir: $dir"
+    return 1
+  fi
+  local tmp="${file}.tmp.$$" ref
+  {
+    printf 'schema=1\n'
+    # Extra (env-supplied) kits, split on whitespace like _build_kit_list.
+    if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
+      local _extra=()
+      split_noglob _extra "$ACQ_EXTRA_KITS"
+      for ref in ${_extra[@]+"${_extra[@]}"}; do
+        [ -n "$ref" ] && printf 'extra=%s\n' "$ref"
+      done
+    fi
+    # CLI (`--kit`) refs, one per array element (already un-split).
+    for ref in ${ACQ_CLI_KITS[@]+"${ACQ_CLI_KITS[@]}"}; do
+      [ -n "$ref" ] && printf 'kit=%s\n' "$ref"
+    done
+  } > "$tmp" 2>/dev/null || { acq_debug "cli-kits: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file" 2>/dev/null || { acq_debug "cli-kits: mv failed: $file"; rm -f "$tmp" 2>/dev/null; return 1; }
+  acq_debug "cli-kits: recorded $backend/$name (kit=$(printf '%s ' ${ACQ_CLI_KITS[@]+"${ACQ_CLI_KITS[@]}"}))"
+  return 0
+}
+
+# Reload a sandbox's persisted CLI (`--kit`) and extra kit refs into ACQ_CLI_KITS
+# / ACQ_EXTRA_KITS for the CURRENT shell, so a subsequent heal re-runs their
+# startup. Called by the start/restart verbs before ensure_kits_applied. No-op
+# (leaves the in-memory values untouched) when no record exists — a legacy
+# sandbox reloads nothing, exactly the pre-fix behavior. Fail-open.
+# Usage: acq_cli_kits_load BACKEND SANDBOX_NAME
+acq_cli_kits_load() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  local file
+  file=$(_acq_cli_kits_file "$backend" "$name") || return 0
+  [ -f "$file" ] || return 0
+  # A record exists: it is authoritative for this sandbox. Reset both to reflect
+  # exactly what was persisted (an empty record clears them).
+  ACQ_CLI_KITS=()
+  local _extras="" line val
+  while IFS= read -r line; do
+    case "$line" in
+      kit=*)   ACQ_CLI_KITS+=("${line#kit=}") ;;
+      extra=*) val="${line#extra=}"; [ -n "$val" ] && _extras="${_extras:+$_extras }$val" ;;
+    esac
+  done < "$file"
+  # Only overwrite ACQ_EXTRA_KITS from the record if the record carried extras;
+  # otherwise leave any env-supplied value in place (do not clobber the env).
+  [ -n "$_extras" ] && ACQ_EXTRA_KITS="$_extras"
+  acq_debug "cli-kits: reloaded $backend/$name (${#ACQ_CLI_KITS[@]} cli kit(s))"
+  return 0
+}
+
 # Automatic stale-sandbox advisory for `acq run` on an EXISTING sandbox. Compares
 # the sandbox's recorded bundle ref against the local pinned PATTERNS_KIT_REF and,
 # when they differ (or no record exists), OFFERS an in-place refresh. Contract:
