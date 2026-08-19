@@ -4822,6 +4822,34 @@ _notice_count=$(printf '%s\n' "$out" | grep -c "cannot extend a live sandbox wit
 assert_eq "heal(sbx 0.38): recreate notice printed exactly once" "1" "$_notice_count"
 cleanup_stubs
 
+# 9q2b. REGRESSION (live-run #3): under `set -e` — how real acq and
+#       verify-issue-320 run — a refusal must NOT abort the heal at the first
+#       kit. The harness normally runs `set +e`, which masked a bug where
+#       `_acq_sbx_kit_add` (returning 3/1 as normal signalling) aborted the whole
+#       heal before the recreate notice or the remaining kits ran. Reproduce the
+#       REAL path: a fresh subshell that sources acq (which sets `set -e`),
+#       resolves the backend, and runs the forced heal — with the refusal stub on
+#       PATH. Assert the notice prints AND all three built-ins are attempted.
+make_stubs; load_acq
+_plant_sbx_startup_refusal_stub
+printf 'sebox\n' > "$STUBDIR/.sandbox_list"
+# Point the stub's $CALLS/$STUBDIR at this test's dirs, put the stub sbx first on
+# PATH, and run the heal in a subshell that sources acq exactly as the live
+# re-attach path does (ACQ_SOURCE_ONLY keeps `set -e` active from acq's header).
+out=$(
+  CALLS="$CALLS" STUBDIR="$STUBDIR" PATH="$STUBDIR:$PATH" \
+  ACQ_FORCE_KIT_REAPPLY=1 bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    acq_resolve_backend sbx >/dev/null 2>&1
+    acq_backend_ensure_kits_applied sebox
+  ' 2>&1
+) || true
+assert_contains "heal(sbx 0.38, set -e): recreate notice still prints" "$out" "cannot extend a live sandbox with startup-bearing kits"
+assert_contains "heal(sbx 0.38, set -e): Zscaler kit attempted" "$out" "missing the Zscaler CA kit"
+assert_contains "heal(sbx 0.38, set -e): USAi kit still attempted (no early abort)" "$out" "missing the USAi kit"
+assert_contains "heal(sbx 0.38, set -e): playbook kit still attempted (no early abort)" "$out" "missing the playbook kit"
+cleanup_stubs
+
 # 9q3. `acq kit update` fails fast with the recreate guidance under the refusal
 #      (rather than looping per-kit warnings).
 make_stubs; load_acq
