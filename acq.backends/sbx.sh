@@ -374,11 +374,57 @@ acq_backend_provision() {
   # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
     acq_provenance_write sbx "$name" || true
+    _acq_sbx_seed_extra_kit_marker "$name"
     # Persist the CLI (`--kit`) / extra kit refs alongside provenance so a later
     # resume heal can reload them (see acq_cli_kits_write). Best-effort.
     acq_cli_kits_write sbx "$name" || true
   fi
   return "$_rc"
+}
+
+# ---------------------------------------------------------------------------
+# _acq_sbx_seed_extra_kit_marker — write ~/.acq-extra-kits at CREATE
+# ---------------------------------------------------------------------------
+# The re-attach heal decides whether an extra kit is already applied by reading
+# this marker (see acq_backend_ensure_kits_applied step 4); previously only the
+# heal path wrote it, so a sandbox created WITH ACQ_EXTRA_KITS / --kit refs never
+# got the marker and every re-attach re-attempted every extra kit (and, under
+# sbx 0.38, warn-failed each time). Write the same marker here so the create and
+# heal paths agree: one ORIGINAL ref per line (stable across runs), matching the
+# heal's append form (so the heal's exact-line match detects it). Built-in kits
+# are tracked by feature-probe, not the marker, so they are not listed here.
+#
+# ACQ_CLI_KITS (`--kit` on the CLI) are recorded for completeness even though the
+# current sbx heal loop only re-drives ACQ_EXTRA_KITS. This is safe, not a
+# functional suppression input: on sbx, `--kit` refs are baked in as create-time
+# `sbx create --kit` flags and never re-applied mid-life (unlike msb, which folds
+# ACQ_CLI_KITS into its heal). The marker is a suppression list, so a recorded CLI
+# ref can only ever be matched if the SAME ref is also supplied via ACQ_EXTRA_KITS
+# — and in that degenerate case skipping re-apply is the correct outcome (the kit
+# was already applied at create). So the CLI entries are a truthful record of what
+# was applied at create; they can never wrongly suppress a needed apply.
+_acq_sbx_seed_extra_kit_marker() {
+  local name="$1" _mkk
+  local _mk=()
+  [ -n "$ACQ_EXTRA_KITS" ] && split_noglob _mk "$ACQ_EXTRA_KITS"
+  [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _mk+=("${ACQ_CLI_KITS[@]}")
+  # Nothing to record — skip the (potentially slow) exec-ready wait entirely.
+  [ "${#_mk[@]}" -gt 0 ] || return 0
+  # A freshly-created sandbox is not immediately exec-able; the heal path guards
+  # its probes the same way. Without this, the marker write can race the sandbox
+  # becoming ready, silently write nothing, and reintroduce the re-attempt bug.
+  if ! _acq_sbx_wait_for_exec_ready "$name"; then
+    echo "acq: warning: sandbox '$name' not exec-ready; could not record the" \
+         "extra-kit marker (~/.acq-extra-kits). Re-attach may re-attempt extra kits." >&2
+    return 0
+  fi
+  for _mkk in ${_mk[@]+"${_mk[@]}"}; do
+    if ! sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$_mkk" \
+        </dev/null >/dev/null 2>&1; then
+      echo "acq: warning: could not record extra kit '$_mkk' in ~/.acq-extra-kits" \
+           "for '$name'; re-attach may re-attempt it." >&2
+    fi
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -453,13 +499,98 @@ acq_backend_ports() {
 }
 
 # ---------------------------------------------------------------------------
+# _acq_sbx_kit_add — run `sbx kit add` and classify the outcome
+# ---------------------------------------------------------------------------
+# sbx 0.38 restricts `sbx kit add` to mixin kits that declare ONLY
+# environment.variables, setup.install, and permissions.network.allow. A kit
+# that declares setup.startup (every built-in kit acq ships, and any realistic
+# extra kit) is REFUSED mid-life with an error like:
+#   ERROR: kit "…" declares setup.startup, which the kit-add recreate flow does
+#   not yet apply; recreate the sandbox from scratch via `sbx rm` + `sbx create
+#   --kit` …
+# (See https://docs.docker.com/ai/sandboxes/customize/kits/#using-kits — "sbx
+# kit add … supports mixin kits limited to environment.variables, setup.install,
+# and permissions.network.allow. To use other fields, recreate …".)
+#
+# Older acq swallowed sbx's stderr (`sbx kit add … >/dev/null 2>&1`) and printed
+# a generic per-kit warning plus a "Recover with: sbx kit add …" hint that could
+# never work — hiding the real cause. This helper CAPTURES stderr and classifies:
+#   0 — success
+#   3 — refused because the kit declares setup.startup (recreate required)
+#   1 — any other failure (stderr echoed so the real cause is visible)
+# Usage: _acq_sbx_kit_add SANDBOX LOCAL_KIT_DIR
+_acq_sbx_kit_add() {
+  local name="$1" local_kit="$2" err rc
+  # CRITICAL: acq runs under `set -e`. A refusal (the common case this whole
+  # helper exists to classify) makes `sbx kit add` exit non-zero, which would
+  # abort the entire heal at THIS assignment — before rc/classification run —
+  # if it were not guarded. Capture stderr and the real exit code without
+  # letting `set -e` fire: run the command, then read `$?` on the next line.
+  # The `|| rc=$?` idiom both suppresses `set -e` AND records the true status
+  # (a bare `err=$(...)` followed by `rc=$?` would abort under `set -e`; a
+  # trailing `|| true` would clobber the status to 0).
+  err=$(sbx kit add "$name" "$local_kit" </dev/null 2>&1 >/dev/null) && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  case "$err" in
+    # Heuristic: the classification is pinned to sbx 0.38's wording (see ADR-0009
+    # and the doc link above). This only ever runs when sbx is already confirmed
+    # >= MIN_SBX_VERSION (0.38.0) — acq_backend_prepare enforces that version floor
+    # at every dispatch entry point before any heal — so the match is bounded to
+    # the versions whose wording it targets, not applied blindly to arbitrary
+    # future/older sbx. `setup.startup` is the primary discriminator; the prose
+    # alternates catch reworded variants sbx may emit for the same refusal (e.g.
+    # "declares startup", "startup … recreate", "create a new sandbox"). If a
+    # future sbx reworks the message past all of these, a genuine refusal degrades
+    # to rc=1 (real stderr surfaced, ok=0) — safe (no false "current"), but the
+    # noise this fix removes could return; the MIN_SBX_VERSION bump that ships that
+    # rewording is the re-verify trigger to broaden the patterns here.
+    *setup.startup*|*"declares startup"*|*startup*recreate*|\
+    *"can only be used when creating a new sandbox"*|\
+    *"create a new sandbox"*|*"recreate the sandbox"*)
+      return 3
+      ;;
+  esac
+  # Any other failure: surface sbx's own diagnostic (no silent failure).
+  [ -n "$err" ] && printf '%s\n' "$err" >&2
+  return 1
+}
+
+# One-shot guard so the sbx-0.38 recreate advisory prints at most once per heal,
+# not once per refused kit. Reset at the top of acq_backend_ensure_kits_applied.
+_ACQ_SBX_RECREATE_NOTICE_SHOWN=0
+
+# Print the consolidated "recreate to extend/refresh" message (once). $1 is the
+# sandbox name.
+_acq_sbx_print_recreate_notice() {
+  local name="$1"
+  [ "${_ACQ_SBX_RECREATE_NOTICE_SHOWN:-0}" = "1" ] && return 0
+  _ACQ_SBX_RECREATE_NOTICE_SHOWN=1
+  echo "acq: sbx >= 0.38 cannot extend a live sandbox with startup-bearing kits" >&2
+  echo "     (every built-in acq kit declares startup commands). The kit set is" >&2
+  echo "     fixed at create time on this sbx version." >&2
+  echo "     To pick up the current bundle, recreate the sandbox (this discards" >&2
+  echo "     its session/context):" >&2
+  echo "       acq rm '$name' && acq run opencode /path/to/your/project" >&2
+}
+
+# ---------------------------------------------------------------------------
 # acq_backend_apply_kit — inject a kit into an existing sandbox mid-life
 # ---------------------------------------------------------------------------
 
 acq_backend_apply_kit() {
-  local name="$1" kitref="$2" local_kit
+  local name="$1" kitref="$2" local_kit rc
   local_kit=$(_acq_sbx_translate_kit "$kitref")
-  sbx kit add "$name" "$local_kit"
+  # `set -e`-safe: _acq_sbx_kit_add returns 3 (refusal) or 1 (other failure) as
+  # its NORMAL signalling. A bare call on its own line would abort under `set -e`
+  # before we read $?. Capture the status inline.
+  rc=0; _acq_sbx_kit_add "$name" "$local_kit" || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    _acq_sbx_print_recreate_notice "$name"
+    return 1
+  fi
+  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -477,6 +608,11 @@ acq_backend_ensure_kits_applied() {
   local name="$1"
   local force="${ACQ_FORCE_KIT_REAPPLY:-0}"
   local ok=1
+  local _kadd_rc=0
+  # Reset the once-per-heal sbx-0.38 recreate advisory guard (see
+  # _acq_sbx_print_recreate_notice). Without this reset, a second heal in the
+  # same process would suppress the notice.
+  _ACQ_SBX_RECREATE_NOTICE_SHOWN=0
 
   _acq_sbx_ensure_kit_sources_allowed
 
@@ -492,40 +628,46 @@ acq_backend_ensure_kits_applied() {
   # intercepting CA is already trusted.
   if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
     echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$zscaler_local" </dev/null >/dev/null 2>&1; then
-      echo "acq: Zscaler CA kit injected into '$name'." >&2
-    else
-      echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$zscaler_local'" >&2
-      ok=0
-    fi
+    # `set -e`-safe: _acq_sbx_kit_add's non-zero returns (3=refusal, 1=other) are
+    # normal signalling — capture the status inline so the loop is not aborted.
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$zscaler_local" || _kadd_rc=$?
+    case $_kadd_rc in
+      0) echo "acq: Zscaler CA kit injected into '$name'." >&2 ;;
+      3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
+      *) echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name' (see error above)." >&2; ok=0 ;;
+    esac
   fi
 
   # 2) USAi provider kit
   if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "acq: '$name' is missing the USAi kit; injecting with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$usai_local" </dev/null >/dev/null 2>&1; then
-      sbx exec "$name" -- sh -c \
-        'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
-        </dev/null >/dev/null 2>&1 || true
-      echo "acq: USAi kit injected into '$name'." >&2
-    else
-      echo "acq: warning: 'sbx kit add' (USAi kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$usai_local'" >&2
-      ok=0
-    fi
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$usai_local" || _kadd_rc=$?
+    case $_kadd_rc in
+      0)
+        sbx exec "$name" -- sh -c \
+          'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
+          </dev/null >/dev/null 2>&1 || true
+        echo "acq: USAi kit injected into '$name'." >&2
+        ;;
+      3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
+      *) echo "acq: warning: 'sbx kit add' (USAi kit) failed for '$name' (see error above)." >&2; ok=0 ;;
+    esac
   fi
 
-  # 3) Playbook kit
-  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/.git" && echo present'; then
+  # 3) Playbook kit. Probe the playbook footprint that survives BOTH delivery
+  # eras: the historical git clone (~/.agentic-coding-playbook/.git) AND the
+  # current REST-tarball delivery (patterns v1.8.0+), which lands the tree with
+  # NO .git. The symlink farm consumes AGENTS.md, so its presence is the
+  # delivery-agnostic signal; probing for .git reported the playbook "absent"
+  # forever on tarball-provisioned sandboxes.
+  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/AGENTS.md" && echo present'; then
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
-    if sbx kit add "$name" "$playbook_local" </dev/null >/dev/null 2>&1; then
-      echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2
-    else
-      echo "acq: warning: 'sbx kit add' (playbook kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$playbook_local'" >&2
-      ok=0
-    fi
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$playbook_local" || _kadd_rc=$?
+    case $_kadd_rc in
+      0) echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2 ;;
+      3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
+      *) echo "acq: warning: 'sbx kit add' (playbook kit) failed for '$name' (see error above)." >&2; ok=0 ;;
+    esac
   fi
 
   # 3b) git-ssh-sign kit. The original heal loop omitted this built-in kit; a
@@ -535,34 +677,39 @@ acq_backend_ensure_kits_applied() {
   if [ "$force" = "1" ]; then
     local gitsshsign_local
     gitsshsign_local=$(_acq_sbx_translate_kit "$GITSSHSIGN_KIT")
-    if sbx kit add "$name" "$gitsshsign_local" </dev/null >/dev/null 2>&1; then
-      echo "acq: git-ssh-sign kit refreshed in '$name'." >&2
-    else
-      echo "acq: warning: 'sbx kit add' (git-ssh-sign kit) failed for '$name'." >&2
-      ok=0
-    fi
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$gitsshsign_local" || _kadd_rc=$?
+    case $_kadd_rc in
+      0) echo "acq: git-ssh-sign kit refreshed in '$name'." >&2 ;;
+      3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
+      *) echo "acq: warning: 'sbx kit add' (git-ssh-sign kit) failed for '$name' (see error above)." >&2; ok=0 ;;
+    esac
   fi
 
   # 4) Extra kits (tracked by marker file). Extra kits may be neutral or already
-  #    sbx-v2; _acq_sbx_translate_kit handles both. The marker uses the original
-  #    ref (stable across runs), not the translated local dir. Extra-kit failures
-  #    do not affect the built-in bundle's provenance verdict.
+  #    sbx-v2; _acq_sbx_translate_kit handles both. The marker records one
+  #    ORIGINAL ref per line (stable across runs), not the translated local dir.
+  #    Extra-kit failures do not affect the built-in bundle's provenance verdict.
   local applied k local_extra
   applied=$(sbx exec "$name" -- sh -c 'cat "$HOME/.acq-extra-kits" 2>/dev/null' </dev/null 2>/dev/null || true)
   local _extras=()
   [ -n "$ACQ_EXTRA_KITS" ] && split_noglob _extras "$ACQ_EXTRA_KITS"
   for k in ${_extras[@]+"${_extras[@]}"}; do
-    case "$applied" in
-      *"$k"*) continue ;;
-    esac
+    # Whole-line match (the marker is written one ref per line via printf
+    # '%s\n'). A substring test would wrongly treat a ref that is a prefix of an
+    # already-applied ref (e.g. `…&dir=kit` vs `…&dir=kit-extended`) as applied.
+    if printf '%s\n' "$applied" | grep -Fxq -- "$k"; then
+      continue
+    fi
     echo "acq: applying extra kit to '$name': $k" >&2
     local_extra=$(_acq_sbx_translate_kit "$k")
-    if sbx kit add "$name" "$local_extra" </dev/null >/dev/null 2>&1; then
-      sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$k" </dev/null >/dev/null 2>&1 || true
-    else
-      echo "acq: warning: 'sbx kit add' (extra kit) failed for '$name'." >&2
-      echo "      Recover with: sbx kit add '$name' '$local_extra'" >&2
-    fi
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$local_extra" || _kadd_rc=$?
+    case $_kadd_rc in
+      0)
+        sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$k" </dev/null >/dev/null 2>&1 || true
+        ;;
+      3) _acq_sbx_print_recreate_notice "$name" ;;
+      *) echo "acq: warning: 'sbx kit add' (extra kit) failed for '$name' (see error above)." >&2 ;;
+    esac
   done
 
   # Record host-side provenance ONLY if every built-in kit is present-or-applied.

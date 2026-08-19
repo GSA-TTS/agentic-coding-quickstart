@@ -3,7 +3,7 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-08-17"
+last_updated: "2026-08-18"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
 related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
@@ -48,7 +48,10 @@ from Docker Inc. It provides:
 - **Kit ecosystem**: Reuses all four community kits unchanged (`usai-provider`,
   `agentic-coding-playbook`, `zscaler-ca-certificate`, `git-ssh-sign`)
 - **In-place healing**: Missing kits are added with `sbx kit add` on reconnect
-  without losing sandbox state (requires sbx >= 0.35.0)
+  without losing sandbox state (requires sbx >= 0.35.0). **Note (sbx 0.38+):**
+  `sbx kit add` no longer applies startup-bearing kits mid-life (see the
+  limitation note below), so the built-in bundle can only be
+  extended/refreshed by recreating the sandbox.
 - **Port forwarding**: Supports `--publish` for exposing agent web UIs
 
 ### Requirements
@@ -90,6 +93,17 @@ export ACQ_BACKEND=sbx
 
 - `sbx kit add` (healing) is experimental; see
   [KNOWN_FAILURE_MODES.md](KNOWN_FAILURE_MODES.md)
+- **sbx 0.38 cannot extend a live sandbox with startup-bearing kits.**
+  `sbx kit add` on 0.38 only applies mixin kits declaring exclusively
+  `environment.variables`, `setup.install`, and `permissions.network.allow`; a
+  kit declaring `setup.startup` is refused mid-life. Every built-in acq kit
+  declares startup commands, so on sbx 0.38 the built-in bundle can be
+  extended/refreshed **only by recreating the sandbox** (`acq rm && acq run`).
+  acq's heal path, `acq kit apply`, and `acq kit update` detect the refusal and
+  print that guidance instead of failing opaquely. msb is unaffected (it
+  re-applies kits idempotently via `msb exec`). See the update note in
+  [ADR-0009](adr/0009-require-sbx-0.35.0-in-place-kit-healing.md).
+  Live-verify this behavior on an sbx host with `./scripts/verify-issue-320`.
 - The sbx `docker sandbox` commands (deprecated by Docker) must not be used;
   use `sbx` CLI directly
 
@@ -600,7 +614,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 | Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` now implemented (ADR-0015) — live end-to-end verification pending a KVM host |
 | Agent binary | supplied by the sbx agent template | installed at provision on a plain base (`npm install -g opencode-ai`), then launched on attach |
 | OpenCode web UI | `openchamber` acq kit (publishes port 4096) | same kit once it declares `backends: [sbx, msb]` against the released patterns schema (neutral port/background vocab consumed by both backends; the patterns repo's openchamber kit) |
-| In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+) | re-apply kits idempotently (no state-preserving add) |
+| In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+; **no startup-bearing kits on 0.38+ — recreate to extend/refresh**) | re-apply kits idempotently (no state-preserving add) |
 
 ### Known limitations
 
