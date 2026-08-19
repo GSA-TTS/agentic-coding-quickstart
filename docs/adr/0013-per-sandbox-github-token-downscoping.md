@@ -150,11 +150,11 @@ wrapper that only holds the user's `gh` token:
 - **msb backend:** `msb` binds the `github` secret to the REST API and
   git-transport hosts (`msb.sh`; see ADR-0011). A static re-verification against
   msb 0.6.9 found the substitution engine rewrites the `Authorization: Basic`
-  header git smart-HTTP uses, so a scoped token is eligible for injection on both
-  REST and HTTPS git transport without the real value entering the guest — the
-  same least-privilege scoping this ADR describes applies unchanged. The live
-  git clone/push confirmation on a KVM host is still pending (ADR-0011), so treat
-  msb git-HTTPS auth as eligible-but-not-yet-live-verified.
+  header git smart-HTTP uses, and a live `scripts/verify-git-https-secret-msb`
+  run against a private repo confirmed `git ls-remote` succeeds using only the
+  guest placeholder. A scoped token is therefore injected for both REST and HTTPS
+  git transport without the real value entering the guest, so the same
+  least-privilege scoping this ADR describes applies unchanged.
 - **Deprecation, not removal:** the global path keeps working, so existing setups
   are not broken; new guidance steers to per-sandbox scoping.
 - **Audit (AU-2):** scoping is per-sandbox and named, so which credential a
