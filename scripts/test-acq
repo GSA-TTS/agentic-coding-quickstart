@@ -4833,12 +4833,13 @@ cleanup_stubs
 make_stubs; load_acq
 _plant_sbx_startup_refusal_stub
 printf 'sebox\n' > "$STUBDIR/.sandbox_list"
-# Point the stub's $CALLS/$STUBDIR at this test's dirs, put the stub sbx first on
-# PATH, and run the heal in a subshell that sources acq exactly as the live
-# re-attach path does (ACQ_SOURCE_ONLY keeps `set -e` active from acq's header).
+# Run the heal in a subshell that sources acq exactly as the live re-attach path
+# does (ACQ_SOURCE_ONLY keeps `set -e` active from acq's header). Export the
+# stub env in the subshell so the child `bash -c` inherits $CALLS/$STUBDIR/$PATH
+# and the refusal stub is first on PATH.
 out=$(
-  CALLS="$CALLS" STUBDIR="$STUBDIR" PATH="$STUBDIR:$PATH" \
-  ACQ_FORCE_KIT_REAPPLY=1 bash -c '
+  export CALLS STUBDIR ACQ_FORCE_KIT_REAPPLY=1
+  PATH="$STUBDIR:$PATH" bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
     acq_resolve_backend sbx >/dev/null 2>&1
     acq_backend_ensure_kits_applied sebox
@@ -4967,6 +4968,7 @@ cleanup_stubs
 # 9q7. CREATE-TIME MARKER covers CLI --kit refs (ACQ_CLI_KITS) too.
 make_stubs; load_acq
 : > "$CALLS"
+# shellcheck disable=SC2034  # ACQ_CLI_KITS is consumed by acq_backend_provision (sourced)
 ( ACQ_CLI_KITS=("git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=cli-kit-x")
   acq_backend_provision climarkerbox shell /tmp >/dev/null 2>&1 ) || true
 log=$(cat "$CALLS")
