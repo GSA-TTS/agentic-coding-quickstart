@@ -8,7 +8,7 @@
 # Run without installing hooks:
 #   pre-commit run --all-files
 #
-# All hooks pinned to commit SHAs for supply chain security (NIST SA-12)
+# All hooks pinned to commit SHAs for supply chain security (NIST SR-3, supersedes withdrawn SA-12)
 
 # CHANGELOG.md is release-please-generated; don't lint/reformat it.
 exclude: '^CHANGELOG\.md$'
