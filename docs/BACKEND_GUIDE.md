@@ -721,6 +721,23 @@ does **not** count as a failure, so a clean run still exits 0. (The former msb
 private-repo playbook `WARN` is gone: the playbook kit now fetches via the REST
 API and is a hard-required `pass` on both backends, given a stored github token.)
 
+**msb: broad egress failure on an established setup.** If an msb sandbox that
+used to work starts failing *every* outbound call at once (USAi, GitHub, and npm
+all cut with `curl (56) unexpected eof` / HTTP `000`), the likeliest cause is
+corrupted local msb state, not a network or certificate change. Wipe msb's data
+and reinstall, then confirm host readiness:
+
+```bash
+curl -fsSL https://install.microsandbox.dev | sh   # reinstall (re-lays runtime state)
+msb doctor                                          # verify virtualization + prerequisites
+msb doctor --fix                                    # apply supported setup fixes
+```
+
+If a broad cut persists on a clean reinstall — or if only USAi fails (a
+split-horizon-DNS symptom) — see
+[`docs/KNOWN_FAILURE_MODES.md` §30](KNOWN_FAILURE_MODES.md) for the three-signature
+triage and the `scripts/diagnose-*` probes.
+
 ---
 
 ## Adding a new backend (implementer notes)

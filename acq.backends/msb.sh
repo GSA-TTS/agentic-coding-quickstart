@@ -197,6 +197,68 @@ ACQ_MSB_CPUS="${ACQ_MSB_CPUS-2}"
 # so an explicitly-empty value disables the flag rather than re-defaulting.
 ACQ_MSB_DNS_NAMESERVER="${ACQ_MSB_DNS_NAMESERVER-1.1.1.1}"
 
+# ---------------------------------------------------------------------------
+# TLS-interception UPSTREAM trust (corporate MITM proxy, e.g. Zscaler)
+# ---------------------------------------------------------------------------
+# SCOPE: this block is defense-in-depth for the case where a corporate
+# TLS-intercepting proxy GENUINELY TERMINATES an outbound endpoint (presents its
+# own corporate-signed leaf). It is NOT a cure-all for "the guest can't reach the
+# network"; see docs/KNOWN_FAILURE_MODES.md §30, which separates that broad-egress
+# failure (stale msb state; fixed by a data wipe + reinstall) and the USAi
+# split-horizon DNS failure (needs a resolver that can see the internal zone) from
+# this genuine-interception case.
+#
+# acq enables msb `--tls-intercept` so msb can substitute injected secrets on the
+# wire (see the --tls-intercept block in acq_backend_provision). That runs a
+# HOST-SIDE TLS proxy which re-originates an outbound TLS connection to the real
+# server. Behind a terminating corporate proxy that "real server" is the proxy
+# itself, presenting a corporate-signed leaf, so msb's proxy must trust the
+# CORPORATE ROOT on its UPSTREAM leg.
+#
+# msb verifies that upstream leg against the host's native trust store. Crucially,
+# `--trust-host-cas` does NOT help here — it only ships host CAs into the GUEST,
+# not into the proxy's upstream verifier. When the host's native-cert enumeration
+# does not surface the corporate root (uneven on macOS: it depends on which
+# keychain / trust-settings domain the root lives in), the upstream handshake
+# fails AFTER the guest-facing TLS already completed, and the guest client sees
+# `curl: (56) … unexpected eof` for every terminated host — not a 401.
+#
+# FIX: pass the corporate root explicitly to msb's UPSTREAM verifier via
+# `--tls-upstream-ca-cert <PEM>` (msb ADDS it to the native roots; the flag is
+# repeatable / a file may bundle multiple certs). Two ways to supply it:
+#
+#   1. ACQ_MSB_UPSTREAM_CA_CERT — explicit path(s) to PEM file(s) (colon- or
+#      space-separated). Highest precedence; passed through verbatim. Use this
+#      when you already have the corporate root on disk, or on non-macOS hosts.
+#
+#   2. Auto-detect (macOS default, on). When no explicit path is set, acq exports
+#      the host's search-list root CAs to a PEM under its state dir and passes
+#      THAT. This captures the corporate root exactly as the host trusts it,
+#      sidestepping the native-cert loader's keychain/trust-settings gaps. Toggle
+#      off with ACQ_MSB_UPSTREAM_CA_AUTODETECT=0.
+#
+# Normalized like the other on/off toggles. Auto-detect only runs on macOS (it
+# uses the `security` tool); elsewhere it is a no-op and only the explicit path
+# (option 1) applies.
+ACQ_MSB_UPSTREAM_CA_CERT="${ACQ_MSB_UPSTREAM_CA_CERT:-}"
+ACQ_MSB_UPSTREAM_CA_AUTODETECT="${ACQ_MSB_UPSTREAM_CA_AUTODETECT-1}"
+case "$(printf '%s' "$ACQ_MSB_UPSTREAM_CA_AUTODETECT" | tr '[:upper:]' '[:lower:]')" in
+  ""|0|false|no|off) ACQ_MSB_UPSTREAM_CA_AUTODETECT="" ;;
+  *)                 ACQ_MSB_UPSTREAM_CA_AUTODETECT="1" ;;
+esac
+
+# Where the auto-detected host CA bundle is written for the upstream verifier.
+ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}/msb/host-upstream-cas.pem}"
+
+# REPRODUCTION / TESTING toggle. A host whose corporate proxy does NOT intercept
+# api.gsa.usai.gov / github.com (e.g. those domains are on a proxy bypass list)
+# cannot locally reproduce the upstream-trust failure, because the msb proxy talks
+# straight to the real endpoints. Setting ACQ_MSB_NO_UPSTREAM_CA=1 SUPPRESSES the
+# fix (emits no --tls-upstream-ca-cert even when one is available), so the sandbox
+# behaves as an environment where native-cert loading misses the corporate root.
+# Use it to confirm the failure and that the fix resolves it. Off by default.
+ACQ_MSB_NO_UPSTREAM_CA="${ACQ_MSB_NO_UPSTREAM_CA:-}"
+
 # Agents recognized by acq's run dispatch (mirrors sbx.sh KNOWN_AGENTS).
 # shellcheck disable=SC2034
 KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
@@ -1875,8 +1937,111 @@ _acq_msb_stage_startup_script() {
     acq_debug "msb startup-script staged: --script-path ${ACQ_MSB_STARTUP_SCRIPT_NAME}:${_file}"
   else
     # No startup commands in this kit — remove the empty temp file.
-    rm -f "$_file" 2>/dev/null || true
+     rm -f "$_file" 2>/dev/null || true
+   fi
+ }
+
+# ---------------------------------------------------------------------------
+# _acq_msb_upstream_ca_flags_into ARRVAR — TLS-intercept upstream CA trust
+# ---------------------------------------------------------------------------
+# Emit `--tls-upstream-ca-cert <PEM>` create flags (one per resolved PEM) into
+# the named array so msb's host-side interception proxy trusts a corporate MITM
+# proxy's root on its UPSTREAM leg. See the ACQ_MSB_UPSTREAM_CA_* block near the
+# top of this file for the full rationale.
+#
+# Scope: this helps ONLY the genuinely-terminated-endpoint case (a corporate
+# proxy terminates the domain and presents its own leaf). It is defense-in-depth;
+# it does not help a broad-egress failure (stale msb state) or USAi split-horizon
+# DNS. See docs/KNOWN_FAILURE_MODES.md §30.
+#
+# Precedence:
+#   0. ACQ_MSB_NO_UPSTREAM_CA — suppress entirely (reproduction/testing toggle).
+#   1. ACQ_MSB_UPSTREAM_CA_CERT — explicit path(s), colon- or space-separated;
+#      each existing, non-empty, readable file is passed through verbatim.
+#   2. Auto-detect (macOS only, on unless ACQ_MSB_UPSTREAM_CA_AUTODETECT=0): export
+#      the host search-list root CAs to a single PEM and pass THAT one file.
+#
+# Non-fatal throughout: any failure warns and emits nothing (the sandbox still
+# creates; msb falls back to its own native-cert loading, i.e. today's behavior).
+_acq_msb_upstream_ca_flags_into() {
+  local _arr="$1"
+  eval "$_arr=()"
+
+  # (0) Reproduction/testing override: behave as if no upstream CA is available.
+  if [ -n "${ACQ_MSB_NO_UPSTREAM_CA:-}" ]; then
+    acq_debug "msb upstream-CA: suppressed via ACQ_MSB_NO_UPSTREAM_CA (reproduction mode)"
+    return 0
   fi
+
+  # (1) Explicit path(s) win. Split on ':' and whitespace; keep only readable,
+  # non-empty files. A configured-but-missing path is a warning, not silent.
+  if [ -n "${ACQ_MSB_UPSTREAM_CA_CERT:-}" ]; then
+    local _p _added=0 _oldifs="$IFS" _nl
+    # Split on ':' plus every whitespace char (space, tab, newline). Build the
+    # separator set with printf into a variable so no literal trailing space/tab
+    # sits on a source line (the trailing-whitespace pre-commit hook would strip
+    # it and silently break the split). $(...) drops trailing newlines, so append
+    # the newline separately via a dedicated _nl.
+    _nl=$(printf '\n_')   # capture a real newline (the trailing _ survives $(...) )
+    _nl=${_nl%_}          # ... then strip the guard char, leaving just "\n"
+    IFS=":$(printf ' \t')${_nl}"
+    # shellcheck disable=SC2086  # deliberate split of the path list on IFS
+    set -- $ACQ_MSB_UPSTREAM_CA_CERT
+    IFS="$_oldifs"
+    for _p in "$@"; do
+      [ -n "$_p" ] || continue
+      if [ -r "$_p" ] && [ -s "$_p" ]; then
+        eval "$_arr+=(--tls-upstream-ca-cert \"\$_p\")"
+        _added=$((_added + 1))
+        acq_debug "msb upstream-CA: trusting explicit PEM ${_p}"
+      else
+        echo "acq(msb): warning: ACQ_MSB_UPSTREAM_CA_CERT path not readable, skipping: ${_p}" >&2
+      fi
+    done
+    [ "$_added" -gt 0 ] && return 0
+    # Fall through to auto-detect if every explicit path was unusable.
+  fi
+
+  # (2) Auto-detect the host trust store (macOS only). Exports every root CA on
+  # the default keychain search list to one PEM and trusts that on the upstream
+  # leg — capturing the corporate root exactly as the host trusts it, whether or
+  # not msb's own native-cert loader would have surfaced it. This covers the
+  # genuine-interception case only (see docs/KNOWN_FAILURE_MODES.md §30), not a
+  # broad-egress or split-horizon-DNS failure. Unprivileged (roots are readable
+  # without sudo, which would otherwise trigger a PIV-PIN loop on managed Macs).
+  [ -n "${ACQ_MSB_UPSTREAM_CA_AUTODETECT:-}" ] || return 0
+  [ "$(uname -s 2>/dev/null)" = "Darwin" ] || return 0
+  command -v security >/dev/null 2>&1 || return 0
+
+  local _out="$ACQ_MSB_UPSTREAM_CA_FILE" _dir
+  _dir=$(dirname -- "$_out")
+  if ! mkdir -p "$_dir" 2>/dev/null; then
+    echo "acq(msb): warning: cannot create upstream-CA dir ${_dir}; skipping auto-detect" >&2
+    return 0
+  fi
+
+  # `security find-certificate -a -p` emits every search-list cert as PEM. Write
+  # to a temp file first, then atomically move into place, and only keep it if it
+  # actually contains a certificate (an empty/garbled dump must not be trusted).
+  local _tmp
+  _tmp=$(mktemp "${_out}.XXXXXX" 2>/dev/null) || {
+    echo "acq(msb): warning: cannot create temp file for upstream-CA bundle; skipping auto-detect" >&2
+    return 0
+  }
+  if security find-certificate -a -p >"$_tmp" 2>/dev/null && grep -q 'BEGIN CERTIFICATE' "$_tmp"; then
+    chmod 0644 "$_tmp" 2>/dev/null || true
+    mv -f "$_tmp" "$_out" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
+    eval "$_arr+=(--tls-upstream-ca-cert \"\$_out\")"
+    acq_debug "msb upstream-CA: exported host search-list roots to ${_out} and trusting them upstream"
+  else
+    rm -f "$_tmp" 2>/dev/null
+    echo "acq(msb): note: could not export host CAs for the TLS-intercept upstream verifier;" >&2
+    echo "acq(msb):   msb will fall back to its own native-cert loading. If egress fails with" >&2
+    echo "acq(msb):   a TLS 'unexpected eof' behind a corporate proxy that terminates the" >&2
+    echo "acq(msb):   endpoint, set ACQ_MSB_UPSTREAM_CA_CERT to your proxy's root CA PEM." >&2
+    echo "acq(msb):   See docs/KNOWN_FAILURE_MODES.md §30." >&2
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -2097,6 +2262,15 @@ acq_backend_provision() {
   # cannot use interception (secrets then won't substitute).
   if [ -z "${ACQ_MSB_NO_TLS_INTERCEPT:-}" ]; then
     create_flags+=(--tls-intercept)
+
+    # When interception is on and a corporate proxy genuinely terminates an
+    # endpoint, msb's host-side proxy must trust the corporate root on its
+    # UPSTREAM leg (defense-in-depth; see _acq_msb_upstream_ca_flags_into and
+    # docs/KNOWN_FAILURE_MODES.md §30). Emitted only alongside --tls-intercept:
+    # with interception off there is no upstream leg to verify.
+    local _upstream_ca=()
+    _acq_msb_upstream_ca_flags_into _upstream_ca
+    [ "${#_upstream_ca[@]}" -gt 0 ] && create_flags+=("${_upstream_ca[@]}")
   fi
 
   # Guest DNS: use a resolver reachable from the microVM. The host's resolvers
@@ -2444,6 +2618,76 @@ _acq_msb_safe_agent_token() {
 }
 
 # ---------------------------------------------------------------------------
+# _acq_msb_report_npm_install_failure NAME — diagnose a failed in-guest npm
+# install, distinguishing a genuinely-missing npm from an UNREACHABLE registry.
+# ---------------------------------------------------------------------------
+# A network-cut install (corporate TLS interception → curl (56) unexpected eof /
+# HTTP 000, or a resolver that can't see the registry → NXDOMAIN) otherwise reads
+# identically to "node/npm isn't installed", which sends users down the wrong
+# path (reinstalling node on the HOST, which never touches the guest). Probe the
+# actual cause in-guest and print the message that matches it.
+#
+# Branches:
+#   - npm binary absent in-guest      → genuinely-missing message.
+#   - npm present + registry probe:
+#       unresolved (curl exit 6)       → registry name did not resolve; DNS.
+#       unreachable (curl exit / 000)  → TLS/network cut; point at KFM §30.
+#       responded / inconclusive       → registry rejected it or a real npm error.
+# Reuses the shared _classify_key_status fingerprint so the npm path and the
+# USAi path classify curl results identically.
+_acq_msb_report_npm_install_failure() {
+  local name="$1"
+  echo "acq(msb): warning: 'npm install -g $ACQ_MSB_OPENCODE_PKG' failed in '$name'." >&2
+  echo "acq(msb):   opencode will not be available on attach." >&2
+
+  # Is npm actually present in the guest? If not, that is the cause outright.
+  if ! msb exec "$name" -u 0 -- sh -c 'command -v npm' >/dev/null 2>&1; then
+    echo "acq(msb):   Cause: npm is not present in the guest. Use a base image that" >&2
+    echo "acq(msb):   ships node/npm, or bake opencode into ACQ_MSB_IMAGE." >&2
+    return 0
+  fi
+
+  # npm exists — classify reachability of the registry from INSIDE the guest,
+  # using the same curl `<http_code>|<exit>` fingerprint as the USAi key probe.
+  # Probe the first configured registry host over HTTPS; any HTTP response (even
+  # a 404) proves the connection completed, i.e. NOT a network cut.
+  local _reg _first_host _raw _status
+  _first_host=""
+  for _reg in $ACQ_MSB_NPM_HOSTS; do _first_host="$_reg"; break; done
+  if [ -n "$_first_host" ] && command -v _classify_key_status >/dev/null 2>&1; then
+    _raw=$(msb exec "$name" -u 0 -- sh -c \
+      "curl -sS -o /dev/null -w '%{http_code}' https://${_first_host}/; printf '|%s' \"\$?\"" \
+      2>/dev/null || true)
+    _status=$(_classify_key_status "$_raw")
+    case "$_status" in
+      unresolved)
+        echo "acq(msb):   Cause: the npm registry host (${_first_host}) did not RESOLVE from" >&2
+        echo "acq(msb):   the guest. This is DNS, not a missing npm. Point the guest at a" >&2
+        echo "acq(msb):   usable resolver via ACQ_MSB_DNS_NAMESERVER, or set ACQ_MSB_NPM_HOSTS" >&2
+        echo "acq(msb):   to a mirror the guest can resolve. See docs/KNOWN_FAILURE_MODES.md §30." >&2
+        return 0
+        ;;
+      unreachable)
+        echo "acq(msb):   Cause: the npm registry host (${_first_host}) is NOT REACHABLE from" >&2
+        echo "acq(msb):   the guest — the connection was cut (TLS 'unexpected eof' / HTTP 000)," >&2
+        echo "acq(msb):   NOT a missing npm. This is a network / TLS-interception problem." >&2
+        echo "acq(msb):   See docs/KNOWN_FAILURE_MODES.md §30 for diagnosis." >&2
+        return 0
+        ;;
+    esac
+  fi
+
+  # npm present and the registry either responded (an HTTP error) or the probe
+  # was inconclusive: give neutral guidance without implying node is missing.
+  echo "acq(msb):   npm is present and the registry appears reachable, so the install" >&2
+  echo "acq(msb):   itself failed (registry rejected the request, disk, or a package" >&2
+  echo "acq(msb):   error). Re-run with ACQ_DEBUG=1 to see npm's output, set" >&2
+  echo "acq(msb):   ACQ_MSB_NPM_HOSTS for an internal mirror, or bake opencode into" >&2
+  echo "acq(msb):   ACQ_MSB_IMAGE." >&2
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # _acq_msb_install_agent NAME AGENT — install the agent binary into the guest
 # ---------------------------------------------------------------------------
 # sbx's agent templates ship the binary; msb runs a plain base, so acq installs
@@ -2501,11 +2745,7 @@ _acq_msb_install_agent() {
       # controlled tunable. `npm` is present (node prerequisite). npm needs the
       # registry host, allow-listed at create.
       if ! msb exec "$name" -u 0 -- npm install -g --no-fund --no-audit "$ACQ_MSB_OPENCODE_PKG" >/dev/null 2>&1; then
-        echo "acq(msb): warning: 'npm install -g $ACQ_MSB_OPENCODE_PKG' failed in '$name'." >&2
-        echo "acq(msb):   opencode will not be available on attach. Common causes: the npm" >&2
-        echo "acq(msb):   registry host (${ACQ_MSB_NPM_HOSTS}) is not reachable/allow-listed," >&2
-        echo "acq(msb):   or npm is missing. Set ACQ_MSB_NPM_HOSTS for an internal mirror," >&2
-        echo "acq(msb):   or bake opencode into ACQ_MSB_IMAGE." >&2
+        _acq_msb_report_npm_install_failure "$name"
         return 0
       fi
       ;;

@@ -1292,13 +1292,13 @@ If `sbx exec` reports the sandbox is not running, start it first
 
 ---
 
-## 30. USAi/kit fetch fails with TLS `unexpected eof` / HTTP 000 (network, not the key)
+## 30. Sandbox can't reach USAi / GitHub / npm — three signatures, three fixes
 
 ### Symptoms
 
-Early in `acq run`, the kit fetch and the USAi key check both fail with a TLS
-connection error, and (before this was fixed) acq mis-reported it as an expired
-key and prompted to rotate:
+Early in `acq run`, an outbound request from inside the sandbox fails and (before
+this was disambiguated) acq could mis-report it as an expired key and prompt to
+rotate:
 
 ```
 agentic-coding-playbook: fetch of GSA-TTS/agentic-coding-playbook@… tarball failed
@@ -1307,29 +1307,22 @@ agentic-coding-playbook: fetch of GSA-TTS/agentic-coding-playbook@… tarball fa
 Your USAi API key looks invalid or expired (HTTP …000 from the models API).
 ```
 
-Rotating the key does not help: the freshly-pasted key fails validation the same
-way (`HTTP 000`).
+Rotating the key never helps here — the failure is in the network path, not the
+key. But "the sandbox can't reach the network" is not one problem: three distinct
+failures share overlapping symptoms and need **different** remedies. Identify
+which one you have before acting.
 
-### Root Cause
+### Triage — which signature is it?
 
-This is a **network reachability / TLS-interception problem, not a key problem.**
-`curl (56) unexpected eof` and an HTTP status of `000` mean the outbound TLS
-connection was cut before any HTTP response came back. That **two independent
-hosts** (`api.github.com` for the kit tarball and `api.gsa.usai.gov` for the key
-check) fail identically is the tell: the failure is in the network path out of
-the sandbox, not in USAi or your key.
+| Signature (from inside the guest) | Cause | Fix |
+|---|---|---|
+| **Broad** `curl (56) unexpected eof` / HTTP `000` on **multiple** hosts at once (USAi *and* GitHub *and* npm) | Corrupted / stale **msb state** (not a clean-install behavior) | **Wipe msb data + reinstall, then `msb doctor`** (below) |
+| **USAi only** fails with `NXDOMAIN` / `curl rc=6` (or `rc=35` if a public address is pinned), while GitHub + npm work fine | **Split-horizon DNS** — the USAi host resolves to an internal, tunnel-only address the guest's public resolver can't see | Try pointing the guest at a resolver that can reach the internal USAi zone (`ACQ_MSB_DNS_NAMESERVER`) — but the internal resolver may itself not be routable from the guest; verify guest→resolver reachability and coordinate with your network team if it isn't |
+| A **genuinely intercepted** endpoint fails its TLS handshake behind a corporate proxy that terminates it | The proxy's **root CA** isn't trusted on msb's upstream (proxy→server) leg | acq passes it via `--tls-upstream-ca-cert` (defense-in-depth; below) |
 
-The common trigger is a **corporate TLS-intercepting proxy (e.g. Zscaler)**: the
-sandbox's outbound HTTPS is intercepted, and if the intercepting proxy's root CA
-is not trusted for the sandbox's own outbound connection, the handshake is
-terminated and curl reports `unexpected eof`.
-
-### Diagnosis
-
-`acq` now detects this and reports it as a network problem instead of an expired
-key (it does not prompt to rotate). To confirm what is failing, probe the two
-hosts from inside the sandbox — a `curl (35)/(56)` or `000` here (rather than a
-`200`/`401`) confirms the connection is being cut, not rejected by USAi:
+Probe from inside the sandbox to read the signature — the curl exit code is the
+discriminator (`6` = didn't resolve; `35`/`56` or `000` = resolved but the
+connection was cut):
 
 ```bash
 # msb
@@ -1339,24 +1332,116 @@ msb exec <sandbox> -- curl -sS -o /dev/null -w '%{http_code}\n' -v https://api.g
 sbx exec <sandbox> -- curl -sS -o /dev/null -w '%{http_code}\n' -v https://api.gsa.usai.gov/api/v1/models
 ```
 
-A machine on the **same corporate network where these connections are NOT
-intercepted (or where the intercepting CA is trusted) succeeds**, which is why
-the same command can work on one host and fail on another. The remedy depends on
-your environment's proxy/CA configuration and is outside acq's control; resolve
-it with your network/endpoint administrators.
+For a deeper host-side characterization (interception vs egress path, DNS,
+host-vs-host comparison), run the bundled read-only probes:
+
+```bash
+./scripts/diagnose-tls-intercept        # classify interception / cert-trust / egress path
+./scripts/diagnose-host-egress-diff      # compare a failing host to a working one
+```
+
+### Signature 1 — broad `unexpected eof` on multiple hosts (stale msb state)
+
+Observed in the field on a Zscaler-enrolled macOS host: **every** outbound HTTPS
+call from the guest failed at once with `curl (56) unexpected eof`. It did **not**
+reproduce on a clean install — a machine with the same Zscaler configuration
+worked fine — and it was cleared by a **full msb data wipe + reinstall**. The
+matching upstream report ([superradcompany/microsandbox#1344](https://github.com/superradcompany/microsandbox/issues/1344))
+was **closed as non-reproducible**: something in the local msb state was corrupt,
+not a defect in a clean msb.
+
+**Fix:** wipe msb's data/state and reinstall, then confirm host readiness:
+
+```bash
+# Reinstall msb (removes and re-lays its runtime state)
+curl -fsSL https://install.microsandbox.dev | sh
+
+# Verify host virtualization + runtime prerequisites; --fix applies supported setup
+msb doctor
+msb doctor --fix
+```
+
+If a broad `unexpected eof` **recurs on a clean install**, that would be new
+evidence of an msb bug — capture the `diagnose-*` output and reopen
+[superradcompany/microsandbox#1344](https://github.com/superradcompany/microsandbox/issues/1344).
+
+### Signature 2 — USAi-only NXDOMAIN (split-horizon DNS)
+
+On a clean msb install on a GFE/Zscaler host, GitHub and npm resolve and return
+`200` from the guest, but `api.gsa.usai.gov` fails to **resolve** (`curl rc=6` /
+NXDOMAIN); pinning its public address instead fails to connect (`rc=35`). USAi is
+a **split-horizon** name — the host resolves it to an *internal* address reachable
+only over the corporate tunnel, and the guest's default public resolver
+(`ACQ_MSB_DNS_NAMESERVER=1.1.1.1`) cannot see that zone. A msb data wipe does not
+fix this; a key rotation does not fix this.
+
+`acq` now reports this distinctly ("did not RESOLVE … likely a split-horizon
+name") rather than as a generic network cut or a bad key.
+
+**Try this — but it is not a guaranteed fix:** point the guest at a resolver that
+can reach the internal USAi zone:
+
+```bash
+export ACQ_MSB_DNS_NAMESERVER=<a-resolver-that-can-reach-the-internal-USAi-zone>
+```
+
+**Important:** the internal resolver may not itself be routable from the guest.
+Measured on GFE, the internal resolver was not reachable from the guest, and even
+pinning USAi's public address still failed to connect (`rc=35`) — the endpoint
+appeared reachable only via the corporate tunnel. So setting
+`ACQ_MSB_DNS_NAMESERVER` is worth trying, but it is not a "set this and it works"
+fix. **Verify guest→resolver reachability first** (e.g. with
+`./scripts/diagnose-host-egress-diff`), and if the resolver (or USAi itself) is
+not routable from the guest, **coordinate with your network team** — the guest
+may need tunnel access it does not currently have.
+
+(See the `ACQ_MSB_DNS_NAMESERVER` notes in `docs/BACKEND_GUIDE.md` and the
+README's msb DNS section.)
+
+### Signature 3 — genuine TLS interception (upstream CA trust, defense-in-depth)
+
+When a corporate proxy (Zscaler, Netskope, …) **genuinely terminates** an
+endpoint, acq's `--tls-intercept` (which msb needs to substitute injected secrets
+on the wire) makes msb's host-side proxy re-originate an *upstream* TLS connection
+to that proxy — which presents a corporate-signed leaf. That upstream leg must
+trust the **corporate root**. `--trust-host-cas` does not help (it only ships CAs
+into the guest, not into the proxy's upstream verifier), and msb's native-cert
+loader surfaces enterprise roots unevenly on macOS. When the root isn't surfaced,
+the upstream handshake fails *after* the guest-facing TLS completed and the guest
+sees `unexpected eof`.
+
+acq passes the host's root CAs to that upstream verifier via
+`--tls-upstream-ca-cert` whenever interception is on, so a genuinely-terminated
+endpoint verifies even when native-cert loading would miss the root. Controls:
+
+- `ACQ_MSB_UPSTREAM_CA_CERT=/path/to/root.pem` — trust an explicit PEM
+  (colon- or space-separated for several). Highest precedence; use it on
+  non-macOS hosts or when you already have the root on disk.
+- `ACQ_MSB_UPSTREAM_CA_AUTODETECT=0` — disable the macOS auto-export of the host
+  search-list roots (on by default).
+- `ACQ_MSB_NO_UPSTREAM_CA=1` — reproduction/testing only: withhold the upstream CA
+  even when available.
+
+This is **defense-in-depth for the interception case only** — it does not address
+Signature 1 (stale state) or Signature 2 (split-horizon DNS).
 
 ### Prevention / Status
 
-- `acq` classifies a connection failure (curl nonzero exit / HTTP 000) as
-  `unreachable` and reports a network diagnosis, never "invalid or expired," and
-  does not prompt to rotate a good key. It fails closed (aborts the run) rather
-  than attach a session that cannot reach USAi.
+- `acq` classifies an in-guest curl result and reports the matching diagnosis:
+  `unresolved` (DNS/split-horizon) vs `unreachable` (connection cut) vs a real
+  HTTP status — never "invalid or expired" for a network failure, and it does not
+  prompt to rotate a good key. It fails closed (aborts the run) rather than attach
+  a session that cannot reach USAi.
+- The in-guest `npm install` failure message is likewise disambiguated: it
+  distinguishes a genuinely-missing npm from an unreachable / unresolvable
+  registry, so a network cut is not misread as "node isn't installed."
 - The built-in kits are ordered so `zscaler-ca-certificate` is applied first, so
-  CA trust is established before the other kits make network requests (this
-  matters on the sbx backend, whose kits apply sequentially).
-- Making the sandbox's outbound TLS traverse a corporate proxy is a
-  host/network-configuration matter (trusting the corporate root CA, proxy
-  settings), not something acq can set for you.
+  guest-side CA trust is established before the other kits make network requests
+  (this matters on the sbx backend, whose kits apply sequentially).
+- Making the sandbox's outbound TLS traverse a corporate proxy, and giving the
+  guest a resolver that can see internal zones, are host/network-configuration
+  matters — resolve them with your network/endpoint administrators where acq's
+  tunables don't cover your environment.
 
 ---
 
