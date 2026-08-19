@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+#
+# diagnose-host-egress-diff - HOST-SIDE comparison probe for a broad msb microVM
+# egress failure.
+#
+# WHY THIS EXISTS
+#   One shape of msb network failure is a broad cut: `curl: (56) ... unexpected
+#   eof` from inside every msb guest, while the host process (and often a
+#   same-host podman-machine VM) reach the same endpoints. In the field this has
+#   turned out to be corrupted/stale msb state on the affected host - it did not
+#   reproduce on a clean install, and a full msb data wipe + reinstall cleared it
+#   (see docs/KNOWN_FAILURE_MODES.md section 30, Signature 1). When a reinstall
+#   does NOT clear it and the guest's egress still differs from a working host's,
+#   the open question is:
+#
+#       what is DIFFERENT about the failing host's network/VM plumbing?
+#
+#   This probe captures a paste-friendly snapshot of the host's routing,
+#   interfaces/MTU, DNS, system network-extensions/content-filters, and (if a
+#   sandbox is up) the libkrun/vmnet NIC - so a FAILING host and a WORKING host
+#   can be diffed side by side. It is NOT the cert/TLS probe: for the interception
+#   / split-horizon-DNS / IPv6-first discriminators use
+#   scripts/diagnose-tls-intercept. This one assumes a broad cut that survived a
+#   reinstall and hunts the host-to-host delta.
+#
+# SAFETY
+#   * The default run is FULLY UNPRIVILEGED and read-only - routes, interfaces,
+#     DNS config, extension inventory, version strings. No `sudo`, no prompts.
+#     Anyone (including users without sudo) can run and paste it.
+#   * An OPT-IN privileged block (pfctl ruleset + a short header-only tcpdump
+#     during a live guest curl) runs ONLY if you pass ACQ_DIFF_SUDO=1. It calls
+#     `sudo` AT MOST ONCE (a single `sudo -v` up front, then reuses the cached
+#     credential) to minimize PIV/admin prompts. Omit it (the default) and the
+#     probe never touches sudo - so a user without admin can still contribute
+#     the unprivileged snapshot.
+#   * Output is config METADATA and packet HEADERS only (tcpdump runs with no
+#     payload capture: interface, addresses, ports, TCP flags). No secrets, no
+#     packet bodies, no environment dump. Review before sharing.
+#
+# PLATFORM: macOS (the failing/working hosts are all macOS). On other OSes it
+#   prints what it can and skips the macOS-specific tools.
+#
+# USAGE
+#   ./scripts/diagnose-host-egress-diff [HOST ...]
+#       HOST ...  Extra hostnames to probe routing for (added to the built-in
+#                 USAi + GitHub + npm set). Override the set with
+#                 ACQ_DIFF_HOSTS="h1 h2 ...".
+#
+#   ACQ_DIFF_SUDO=1   Opt in to the single privileged block (pfctl + tcpdump).
+#                     Prompts for sudo ONCE. Leave unset to stay unprivileged.
+#   ACQ_DIFF_SANDBOX=<name>   msb sandbox name to use for the live-capture curl
+#                     in the privileged block (default: the first running msb
+#                     sandbox, else the acq default 'opencode-*' name is tried).
+#   ACQ_DIFF_CAPTURE_HOST=<host>  endpoint the guest curls during the tcpdump
+#                     (default: api.github.com).
+#
+# Run this on BOTH a failing and a working host and diff the two outputs.
+set -u
+
+# ---------------------------------------------------------------------------
+# Hosts to characterize routing for. Default = what acq depends on.
+# ---------------------------------------------------------------------------
+DEFAULT_HOSTS="api.gsa.usai.gov api.github.com registry.npmjs.org"
+if [ -n "${ACQ_DIFF_HOSTS:-}" ]; then
+  # shellcheck disable=SC2206  # intentional word-split of a space-separated list
+  HOSTS=(${ACQ_DIFF_HOSTS})
+else
+  # shellcheck disable=SC2206
+  HOSTS=(${DEFAULT_HOSTS} "$@")
+fi
+
+CAPTURE_HOST="${ACQ_DIFF_CAPTURE_HOST:-api.github.com}"
+
+is_macos() { [ "$(uname -s 2>/dev/null)" = "Darwin" ]; }
+have() { command -v "$1" >/dev/null 2>&1; }
+hr() { printf '\n===== %s =====\n' "$1"; }
+sub() { printf '\n--- %s ---\n' "$1"; }
+indent() { sed 's/^/  /'; }
+
+# ---------------------------------------------------------------------------
+hr "host / OS / tooling"
+# ---------------------------------------------------------------------------
+if is_macos; then sw_vers 2>/dev/null || true; fi
+uname -a 2>/dev/null || true
+echo "msb:      $(command -v msb || echo 'not on PATH')"
+have msb && { msb --version 2>/dev/null || true; }
+echo "podman:   $(command -v podman || echo 'not on PATH')"
+have podman && { podman --version 2>/dev/null || true; }
+echo "curl:     $(command -v curl || echo 'not on PATH')"
+
+# ---------------------------------------------------------------------------
+hr "1. Default routes (split-tunnel tell: which iface is the default gateway?)"
+# ---------------------------------------------------------------------------
+echo "  A Zscaler/ZTNA force-tunnel installs a utun* default route. If the"
+echo "  FAILING host routes its default via utun but a WORKING host does not"
+echo "  (or vice-versa), that difference is the prime suspect for why the"
+echo "  microVM's non-tunneled egress is treated differently."
+if have netstat; then
+  sub "netstat -rn (IPv4 + IPv6 default entries)"
+  netstat -rn 2>/dev/null | grep -iE '^(default|Destination|Internet|::)' | indent
+elif have ip; then
+  sub "ip route (default) / ip -6 route (default)"
+  { ip route show default 2>/dev/null; ip -6 route show default 2>/dev/null; } | indent \
+    || echo "  (no default route reported)"
+else
+  echo "  (neither netstat nor ip available; skipped)"
+fi
+if is_macos && have route; then
+  sub "route -n get default (IPv4)"
+  route -n get default 2>/dev/null | grep -iE 'gateway|interface' | indent || echo "  (none)"
+  sub "route -n get -inet6 default (IPv6)"
+  route -n get -inet6 default 2>/dev/null | grep -iE 'gateway|interface' | indent || echo "  (no IPv6 default)"
+fi
+
+# ---------------------------------------------------------------------------
+hr "2. Per-host route (does each endpoint egress via utun/tunnel or physical?)"
+# ---------------------------------------------------------------------------
+echo "  If the endpoints route out a DIFFERENT interface on the failing host,"
+echo "  that pins the split-tunnel difference to specific destinations."
+if is_macos && have route; then
+  for h in "${HOSTS[@]}"; do
+    [ -n "$h" ] || continue
+    line=$(route -n get "$h" 2>/dev/null | grep -iE 'interface:' | head -1 | awk '{print $2}')
+    printf '  %-24s -> iface %s\n' "$h" "${line:-<unresolved>}"
+  done
+else
+  echo "  (route lookup is macOS-specific; skipped)"
+fi
+
+# ---------------------------------------------------------------------------
+hr "3. Interfaces + MTU (utun*, vmnet*, bridge*, en*)"
+# ---------------------------------------------------------------------------
+echo "  An MTU mismatch on the VM NIC / tunnel is a classic cause of a TLS"
+echo "  handshake that connects then dies mid-read ('unexpected eof'). Compare"
+echo "  the utun/vmnet MTUs between hosts."
+if is_macos && have ifconfig; then
+  for pfx in utun vmnet bridge en feth; do
+    for i in $(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep -E "^${pfx}[0-9]" 2>/dev/null); do
+      mtu=$(ifconfig "$i" 2>/dev/null | grep -oE 'mtu [0-9]+' | awk '{print $2}')
+      inet=$(ifconfig "$i" 2>/dev/null | grep -E 'inet ' | awk '{print $2}' | tr '\n' ',' | sed 's/,$//')
+      stat=$(ifconfig "$i" 2>/dev/null | grep -oE 'status: [a-z]+' | awk '{print $2}')
+      printf '  %-9s mtu=%-5s status=%-8s inet=%s\n' "$i" "${mtu:-?}" "${stat:-?}" "${inet:-none}"
+    done
+  done
+else
+  echo "  (macOS ifconfig-specific; skipped)"
+fi
+
+# ---------------------------------------------------------------------------
+hr "4. DNS configuration (resolver order / scoped resolvers)"
+# ---------------------------------------------------------------------------
+if is_macos && have scutil; then
+  scutil --dns 2>/dev/null \
+    | grep -iE 'nameserver|domain|if_index|flags|reach' \
+    | head -40 | indent || echo "  (scutil --dns returned nothing)"
+else
+  echo "  (macOS scutil-specific; skipped)"
+fi
+
+# ---------------------------------------------------------------------------
+hr "5. System network extensions / content filters (Zscaler installs one)"
+# ---------------------------------------------------------------------------
+echo "  A version or activation-state difference in the Zscaler network"
+echo "  extension / socket filter between hosts is a strong candidate."
+if is_macos && have systemextensionsctl; then
+  sub "systemextensionsctl list"
+  systemextensionsctl list 2>/dev/null \
+    | grep -iE 'zscaler|netskope|palo|crowdstrike|filter|proxy|\[activated|enabled\]|teamID' \
+    | indent || echo "  (no matching system extensions listed)"
+fi
+if is_macos; then
+  sub "Zscaler app + version (if installed)"
+  if [ -d "/Applications/Zscaler/Zscaler.app" ]; then
+    /usr/bin/defaults read /Applications/Zscaler/Zscaler.app/Contents/Info.plist CFBundleShortVersionString 2>/dev/null \
+      | sed 's/^/  Zscaler.app version: /' || echo "  (version unreadable)"
+  else
+    echo "  (/Applications/Zscaler/Zscaler.app not present)"
+  fi
+  sub "loaded network kexts/daemons matching zscaler/netskope"
+  # pgrep is unprivileged.
+  pgrep -fl -i 'zscaler|netskope|ZSATunnel|ZSAService' 2>/dev/null | indent \
+    || echo "  (no matching processes)"
+fi
+
+# ---------------------------------------------------------------------------
+hr "6. libkrun / vmnet NIC (present only while a sandbox is running)"
+# ---------------------------------------------------------------------------
+echo "  If an msb sandbox is up, this shows the NIC msb created (subnet, MTU)."
+echo "  Compare its MTU/subnet to the working host's."
+if is_macos && have ifconfig; then
+  # vmnet-backed interfaces on macOS commonly appear as bridge*/vmenet*/feth*.
+  found_vm=0
+  for i in $(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep -E '^(vmenet|bridge|feth)[0-9]' 2>/dev/null); do
+    found_vm=1
+    sub "ifconfig $i"
+    ifconfig "$i" 2>/dev/null | grep -iE 'flags|inet |member|mtu' | indent
+  done
+  [ "$found_vm" -eq 0 ] && echo "  (no vmenet/bridge/feth interfaces up right now - start a sandbox to capture)"
+fi
+if have msb; then
+  sub "running msb sandboxes"
+  msb list 2>/dev/null | indent || echo "  (msb list returned nothing)"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. OPT-IN PRIVILEGED BLOCK - pfctl ruleset + short header-only tcpdump during
+#    a live guest curl. Single sudo, only if ACQ_DIFF_SUDO=1.
+# ---------------------------------------------------------------------------
+hr "7. OPTIONAL privileged capture (pf rules + guest-egress packet path)"
+if [ "${ACQ_DIFF_SUDO:-0}" != "1" ]; then
+  echo "  SKIPPED (unprivileged mode). This block needs one sudo, so it is OFF by"
+  echo "  default - users without admin can still paste everything above."
+  echo
+  echo "  To include it (captures pf rules + whether the guest's SYN leaves the"
+  echo "  host and what comes back - the decisive packet-path evidence),"
+  echo "  re-run with:"
+  echo
+  echo "    ACQ_DIFF_SUDO=1 ./scripts/diagnose-host-egress-diff"
+  echo
+  echo "  It calls sudo AT MOST ONCE and captures packet HEADERS only (no"
+  echo "  payloads, no secrets)."
+elif ! is_macos; then
+  echo "  (privileged capture is macOS-specific; skipped)"
+elif ! have sudo; then
+  echo "  ACQ_DIFF_SUDO=1 was set but 'sudo' is not available; skipping."
+else
+  echo "  ACQ_DIFF_SUDO=1: acquiring sudo ONCE (cached for this block only)..."
+  if ! sudo -v 2>/dev/null; then
+    echo "  sudo authentication was declined/failed; skipping the privileged block."
+    echo "  (Everything above is still valid unprivileged output.)"
+  else
+    sub "pfctl -s info (packet-filter state)"
+    sudo -n pfctl -s info 2>/dev/null | grep -iE 'status|Debug' | indent \
+      || echo "  (pfctl -s info returned nothing)"
+
+    sub "pfctl -s rules (NAT/filter rules; Zscaler/ZTNA rules that reset VM egress show here)"
+    # Rules only - no state table (which could list active connection tuples).
+    sudo -n pfctl -s rules 2>/dev/null | indent \
+      || echo "  (no readable pf rules, or pf disabled)"
+    sudo -n pfctl -s nat 2>/dev/null | indent || true
+
+    # Determine the sandbox to curl from.
+    sandbox="${ACQ_DIFF_SANDBOX:-}"
+    if [ -z "$sandbox" ] && have msb; then
+      sandbox=$(msb list 2>/dev/null | awk 'NR>1 {print $1; exit}')
+    fi
+
+    sub "live guest-egress packet path (header-only tcpdump during a guest curl)"
+    if [ -z "$sandbox" ] || ! have msb; then
+      echo "  (no running msb sandbox found and none given via ACQ_DIFF_SANDBOX;"
+      echo "   start one - e.g. 'acq run opencode .' - and re-run to capture this.)"
+    else
+      echo "  sandbox: $sandbox   endpoint: https://${CAPTURE_HOST}/"
+      echo "  Capturing TCP SYN/RST/FIN headers on all interfaces for ~8s while the"
+      echo "  guest curls the endpoint. This shows whether the guest's SYN leaves"
+      echo "  the host, and whether it is RST/unanswered - the VM-egress"
+      echo "  discriminator. (No payload is captured: -s on headers, flags only.)"
+      cap=$(mktemp -t acqdiff.XXXXXX) || cap=/tmp/acqdiff.$$
+      # tcpdump on 'any', restricted to TCP control packets to the target port,
+      # header snaplen, printing the interface (-e) so we can see which NIC each
+      # packet crosses. No -w (no pcap file) and a tiny snaplen -> headers only,
+      # no payload. Pipe root tcpdump's stdout through `sudo tee` rather than a
+      # plain redirect (the redirect would run as the unprivileged shell; see
+      # ShellCheck SC2024).
+      sudo -n tcpdump -l -n -e -i any -c 200 -s 96 \
+        "tcp and port 443 and (tcp[tcpflags] & (tcp-syn|tcp-rst|tcp-fin) != 0)" \
+        2>/dev/null | sudo -n tee "$cap" >/dev/null &
+      tdpid=$!
+      sleep 1
+      # Fire the guest curl (best-effort; the point is the packets, not the body).
+      msb exec "$sandbox" -- curl -sS -o /dev/null --max-time 8 \
+        -w 'guest curl -> %{http_code} exit=%{exitcode}\n' \
+        "https://${CAPTURE_HOST}/" 2>&1 | indent || true
+      sleep 6
+      # Stop the capture. tcpdump runs as root, so kill it via sudo (by pid and,
+      # as a belt-and-suspenders for the piped-through-tee case, by name). The
+      # local pipeline head is reaped by `wait`.
+      sudo -n pkill -f 'tcpdump .* port 443' 2>/dev/null || true
+      kill "$tdpid" 2>/dev/null || true
+      wait "$tdpid" 2>/dev/null || true
+      sub "captured TCP control packets (SYN/RST/FIN) to :443"
+      if [ -s "$cap" ]; then
+        indent <"$cap"
+        echo
+        echo "  READ: a guest SYN that appears on the vmnet/bridge iface but NEVER"
+        echo "  on utun/en (the real egress), or that is met by an immediate RST,"
+        echo "  localizes where the microVM's egress dies. Compare to a working host"
+        echo "  (its SYN should traverse to the physical/tunnel iface and get a"
+        echo "  SYN-ACK back)."
+      else
+        echo "  (no matching control packets captured - the guest curl may have"
+        echo "   failed before emitting a SYN, or tcpdump could not attach)"
+      fi
+      rm -f "$cap" 2>/dev/null || true
+    fi
+  fi
+fi
+
+hr "DONE - config metadata + packet headers only, no secrets. Diff a failing vs working host."

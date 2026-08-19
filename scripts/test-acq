@@ -137,7 +137,19 @@ case "${1:-}" in
         # real probe emits `<http_code>|<curl_exit>`. Model that shape.
         # STUB_KEY_UNREACHABLE=1 models curl failing to connect (TLS reset /
         # HTTP 000 / nonzero exit) — the network-unreachable case.
-        if [ "${STUB_KEY_UNREACHABLE:-0}" = "1" ]; then
+        # STUB_KEY_UNREACHABLE=35 models the Sig 2 "pinned public address"
+        # variant (KFM §30): DNS was bypassed by pinning USAi's public IP, so the
+        # name resolved but the TLS/connect handshake still failed (curl exit 35)
+        # because the endpoint is reachable only via the corporate tunnel. Like
+        # any other connect failure it must classify as "unreachable", NOT a bad
+        # key and NOT a DNS-resolver hint.
+        # STUB_KEY_UNRESOLVED=1 models DNS NXDOMAIN (curl exit 6) — the
+        # split-horizon-DNS case.
+        if [ "${STUB_KEY_UNRESOLVED:-0}" = "1" ]; then
+          printf '000|6'
+        elif [ "${STUB_KEY_UNREACHABLE:-0}" = "35" ]; then
+          printf '000|35'
+        elif [ "${STUB_KEY_UNREACHABLE:-0}" != "0" ]; then
           printf '000|56'
         else
           printf '%s|0' "${STUB_KEY_STATUS:-200}"
@@ -218,6 +230,14 @@ case "$_msb_sub" in
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    # `npm install -g …` is run as DIRECT argv (no `sh -c`), so it is matched on
+    # the full arg list, not on $snippet. STUB_NPM_FAIL=1 models the install
+    # failing so the #321 disambiguation path runs. Match it up front (before the
+    # bare-argv opencode-version probe and the $snippet cases below).
+    case " $* " in
+      *" npm install "*)
+        [ "${STUB_NPM_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
+    esac
     # `opencode --version` postinstall functionality probe (bare argv). Default
     # broken (exit 1) so the postinstall path runs; STUB_OPENCODE_OK=1 or a
     # planted .opencode_fixed marker (written by a successful postinstall.mjs
@@ -231,6 +251,23 @@ case "$_msb_sub" in
     esac
     case "$snippet" in
       *"echo ok"*) printf 'ok\n' ;;
+      # #321: the registry reachability probe curls `https://<host>/` and prints
+      # the `<http_code>|<curl_exit>` shape _classify_key_status reads. Default
+      # models a reachable registry (200). STUB_NPM_REGISTRY=unreachable models a
+      # TLS/connection cut (000|56); =unresolved models NXDOMAIN (000|6);
+      # =responded models the registry answering with an HTTP ERROR (500|0) —
+      # the connection completed, so it is NOT a DNS/TLS problem and MUST fall
+      # through to the neutral "registry rejected it / real npm error" branch.
+      # Match BEFORE the generic `%{http_code}` arm below (that one is the USAi
+      # key probe with an Authorization header; this one has neither header nor
+      # USAi host). Must precede the generic arm because both contain `%{http_code}`.
+      *"registry.npmjs.org"*'%{http_code}'*|*'%{http_code}'*"registry.npmjs.org"*)
+        case "${STUB_NPM_REGISTRY:-reachable}" in
+          unreachable) printf '000|56' ;;
+          unresolved)  printf '000|6'  ;;
+          responded)   printf '500|0'  ;;
+          *)           printf '200|0'  ;;
+        esac ;;
       *'%{http_code}'*)
         # Match check_key's `<http_code>|<curl_exit>` shape (see the sbx stub).
         if [ "${STUB_KEY_UNREACHABLE:-0}" = "1" ]; then
@@ -279,6 +316,13 @@ case "$_msb_sub" in
       # tool (socat included) as present and make STUB_SOCAT_PRESENT inert.
       *"command -v socat"*)
         [ "${STUB_SOCAT_PRESENT:-1}" = "0" ] && exit 1 || exit 0 ;;
+      # #321 npm-install-failure disambiguation: on a failed `npm install`, acq
+      # probes whether npm is present in-guest (`command -v npm`) and, if so,
+      # curls the registry host. Model npm as present by default; STUB_NPM_MISSING=1
+      # makes `command -v npm` miss (exit 1) so the genuinely-missing-npm branch is
+      # exercised. This arm MUST precede the generic `command -v` catch-all.
+      *"command -v npm"*)
+        [ "${STUB_NPM_MISSING:-0}" = "1" ] && exit 1 || exit 0 ;;
       # ADR-0021: the in-guest socat bridge (`nohup socat UNIX-LISTEN:…
       # VSOCK-CONNECT:2:<port>`) started by _acq_msb_start_ssh_agent_bridge.
       # Model a successful bridge start (exit 0). Match BEFORE the generic cases.
@@ -965,6 +1009,28 @@ assert_eq "run: unreachable aborts the run (fail closed)" "1" "$rc"
 rm -rf "$_keyrun"
 cleanup_stubs
 
+# 3k6a. Sig 2 "pinned public address" variant (KFM §30): the split-horizon name
+#        was bypassed by pinning USAi's PUBLIC IP, so DNS resolved but the
+#        TLS/connect handshake still failed (curl exit 35) — the endpoint is only
+#        reachable via the corporate tunnel. This must be treated exactly like the
+#        broad unreachable case (network problem, fail closed, no rotate prompt),
+#        and must NOT emit the DNS "did not RESOLVE" / ACQ_MSB_DNS_NAMESERVER hint,
+#        which belongs only to the NXDOMAIN (exit 6) branch. Guards against a
+#        pinned-public failure being misfiled as a resolver problem.
+make_stubs
+_keyrun35=$(mktemp -d "${TMPDIR:-/tmp}/acq-pinned35.XXXXXX")
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
+out35=$(STUB_KEY_UNREACHABLE=35 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun35" 2>&1); rc35=$?
+assert_contains "run(rc=35): pinned-public names a network problem" "$out35" "could not reach the USAi API"
+assert_contains "run(rc=35): pinned-public says not a key problem" "$out35" "NOT an invalid or expired key"
+assert_not_contains "run(rc=35): pinned-public does NOT prompt to rotate" "$out35" "Rotate now"
+assert_not_contains "run(rc=35): pinned-public does NOT emit a DNS resolver hint" "$out35" "ACQ_MSB_DNS_NAMESERVER"
+assert_not_contains "run(rc=35): pinned-public does NOT say 'did not RESOLVE'" "$out35" "did not RESOLVE"
+assert_eq "run(rc=35): pinned-public aborts the run (fail closed)" "1" "$rc35"
+rm -rf "$_keyrun35"
+cleanup_stubs
+
 # 3k7. check_key returns a CLEAN token even when curl output is polluted: a real
 #       HTTP status classifies as that status; a connection failure classifies as
 #       "unreachable"; never free-form curl error text.
@@ -976,11 +1042,36 @@ make_stubs; load_acq
   assert_eq "classify: clean 401"          "401"         "$(_classify_key_status '401|0')"
   assert_eq "classify: 000 -> unreachable" "unreachable" "$(_classify_key_status '000|56')"
   assert_eq "classify: nonzero exit -> unreachable" "unreachable" "$(_classify_key_status '000|7')"
+  # curl exit 6 = NXDOMAIN: split-horizon-DNS tell, distinct from a broad cut.
+  assert_eq "classify: exit 6 -> unresolved" "unresolved" "$(_classify_key_status '000|6')"
+  # curl exit 35 = TLS/connect handshake failure. This is the Sig 2 "pinned
+  # public address" variant (KFM §30): the split-horizon name was bypassed by
+  # pinning USAi's PUBLIC IP, so DNS resolved but the connection still could not
+  # complete (the endpoint is reachable only via the corporate tunnel). It must
+  # classify as "unreachable" (a network-path problem), NOT "unresolved" and NOT
+  # a bad key — the caller must not emit a DNS-resolver hint for it.
+  assert_eq "classify: exit 35 (pinned-public) -> unreachable" "unreachable" "$(_classify_key_status '000|35')"
   # Polluted output (curl error leaked before the code) must not escape as text.
   polluted='curl: (56) OpenSSL SSL_read: unexpected eof000|56'
   assert_eq "classify: polluted curl error -> unreachable" "unreachable" "$(_classify_key_status "$polluted")"
-) 2>/dev/null; pass "classify: key-status classification is clean (code|unreachable|empty)"
+) 2>/dev/null; pass "classify: key-status classification is clean (code|unresolved|unreachable|empty)"
 cleanup_stubs
+
+# 3k7a. A USAi NXDOMAIN (curl exit 6) is reported as a DNS/split-horizon problem
+#        with a resolver hint — NOT as unreachable, and NOT as a bad key. Reuses
+#        the sbx key-check path with STUB_KEY_UNRESOLVED=1 (same seeding as 3k6).
+make_stubs
+_keyrun2=$(mktemp -d "${TMPDIR:-/tmp}/acq-unres.XXXXXX")
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
+unres_out=$(STUB_KEY_UNRESOLVED=1 ACQ_BACKEND=sbx "$ACQ" run opencode "$_keyrun2" 2>&1); unres_rc=$?
+assert_contains "run: NXDOMAIN names a resolution problem" "$unres_out" "did not RESOLVE"
+assert_contains "run: NXDOMAIN points at ACQ_MSB_DNS_NAMESERVER" "$unres_out" "ACQ_MSB_DNS_NAMESERVER"
+assert_not_contains "run: NXDOMAIN does NOT prompt to rotate" "$unres_out" "Rotate now"
+assert_eq "run: NXDOMAIN aborts the run (fail closed)" "1" "$unres_rc"
+rm -rf "$_keyrun2"
+cleanup_stubs
+
 
 # Verify `acq stop mybox` calls sbx stop.
 make_stubs
@@ -2154,6 +2245,73 @@ assert_contains "msb: default image is docker/sandbox-templates:shell-docker" "$
 assert_not_contains "msb: default image is NOT plain node:22-bookworm" "$prov_log" "docker.io/library/node:22-bookworm"
 cleanup_stubs
 
+# 8m0a. TLS-intercept UPSTREAM CA trust (defense-in-depth). With an explicit
+#        ACQ_MSB_UPSTREAM_CA_CERT PEM and interception ON (default), provision
+#        emits `--tls-upstream-ca-cert <PEM>` so msb's host-side proxy trusts a
+#        corporate root on its upstream leg. Uses an explicit path (portable;
+#        avoids the macOS-only keychain auto-export).
+make_stubs; load_acq
+: > "$CALLS"
+printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' > "$STUBDIR/corp-root.pem"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/upca-secrets"
+  export ACQ_MSB_UPSTREAM_CA_CERT="$STUBDIR/corp-root.pem"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision upcabox shell /tmp >/dev/null 2>&1
+)
+upca_log=$(cat "$CALLS")
+assert_contains "msb: emits --tls-upstream-ca-cert for explicit PEM (interception on)" "$upca_log" "--tls-upstream-ca-cert $STUBDIR/corp-root.pem"
+cleanup_stubs
+
+# 8m0b. The upstream CA is emitted ONLY when interception is on. With
+#        ACQ_MSB_NO_TLS_INTERCEPT=1 there is no upstream leg to verify, so neither
+#        --tls-intercept nor --tls-upstream-ca-cert appears — even with an
+#        explicit PEM configured.
+make_stubs; load_acq
+: > "$CALLS"
+printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' > "$STUBDIR/corp-root2.pem"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/upca2-secrets"
+  export ACQ_MSB_UPSTREAM_CA_CERT="$STUBDIR/corp-root2.pem"
+  export ACQ_MSB_NO_TLS_INTERCEPT=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision upca2box shell /tmp >/dev/null 2>&1
+)
+upca2_log=$(cat "$CALLS")
+assert_not_contains "msb: no --tls-intercept when disabled" "$upca2_log" "--tls-intercept"
+assert_not_contains "msb: no --tls-upstream-ca-cert when interception disabled" "$upca2_log" "--tls-upstream-ca-cert"
+cleanup_stubs
+
+# 8m0c. ACQ_MSB_NO_UPSTREAM_CA=1 suppresses the upstream CA even when a PEM is
+#        configured and interception is on (reproduction/testing toggle).
+make_stubs; load_acq
+: > "$CALLS"
+printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' > "$STUBDIR/corp-root3.pem"
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/upca3-secrets"
+  export ACQ_MSB_UPSTREAM_CA_CERT="$STUBDIR/corp-root3.pem"
+  export ACQ_MSB_NO_UPSTREAM_CA=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision upca3box shell /tmp >/dev/null 2>&1
+)
+upca3_log=$(cat "$CALLS")
+assert_contains "msb: interception still on under NO_UPSTREAM_CA" "$upca3_log" "--tls-intercept"
+assert_not_contains "msb: NO_UPSTREAM_CA suppresses the upstream CA flag" "$upca3_log" "--tls-upstream-ca-cert"
+cleanup_stubs
+
+
 # 8m00. ACQ_MSB_IMAGE override: a user-supplied image is passed through verbatim
 #       to `msb create` (plain-OCI overrides remain supported; the agent-user /
 #       sudo synthesis handles them). Assert the override, not the default.
@@ -2865,6 +3023,96 @@ make_stubs; load_acq
 shell_log=$(cat "$CALLS")
 assert_not_contains "msb: shell agent does not npm install" "$shell_log" "npm install"
 assert_not_contains "msb: shell agent adds no npm net-rule (strict tier)" "$shell_log" "allow@registry.npmjs.org"
+cleanup_stubs
+
+# 8n4a. #321: a FAILED npm install is DISAMBIGUATED, not conflated. When npm is
+#        present in-guest but the registry is UNREACHABLE (TLS cut), acq must say
+#        "not reachable / network" and point at KNOWN_FAILURE_MODES §30 — and must
+#        NOT imply npm is missing (the misdiagnosis that sent #305's reporter to
+#        reinstall node on the host).
+make_stubs; load_acq
+: > "$CALLS"
+npm_unreach_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/npmunreach-secrets"
+  export STUB_NPM_FAIL=1 STUB_NPM_REGISTRY=unreachable
+  . "${REPO_ROOT}/acq.backends/common.sh"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision npmunreachbox opencode /tmp 2>&1
+)
+assert_contains "msb #321: unreachable registry reported as NOT REACHABLE" "$npm_unreach_out" "NOT REACHABLE"
+assert_contains "msb #321: unreachable registry points at KFM §30" "$npm_unreach_out" "KNOWN_FAILURE_MODES.md §30"
+assert_not_contains "msb #321: unreachable registry does NOT claim npm is missing" "$npm_unreach_out" "npm is not present"
+cleanup_stubs
+
+# 8n4b. #321: when npm is present but the registry NXDOMAINs (curl exit 6), acq
+#        reports it as DNS (split-horizon) and points at ACQ_MSB_DNS_NAMESERVER —
+#        again NOT "npm missing".
+make_stubs; load_acq
+: > "$CALLS"
+npm_unres_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/npmunres-secrets"
+  export STUB_NPM_FAIL=1 STUB_NPM_REGISTRY=unresolved
+  . "${REPO_ROOT}/acq.backends/common.sh"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision npmunresbox opencode /tmp 2>&1
+)
+assert_contains "msb #321: unresolved registry reported as did not RESOLVE" "$npm_unres_out" "did not RESOLVE"
+assert_contains "msb #321: unresolved registry points at ACQ_MSB_DNS_NAMESERVER" "$npm_unres_out" "ACQ_MSB_DNS_NAMESERVER"
+cleanup_stubs
+
+# 8n4c. #321: when npm is genuinely MISSING in-guest, acq says so (the one case
+#        where "use a base image that ships node/npm" is the right advice).
+make_stubs; load_acq
+: > "$CALLS"
+npm_missing_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/npmmissing-secrets"
+  export STUB_NPM_FAIL=1 STUB_NPM_MISSING=1
+  . "${REPO_ROOT}/acq.backends/common.sh"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision npmmissingbox opencode /tmp 2>&1
+)
+assert_contains "msb #321: genuinely-missing npm reported as not present" "$npm_missing_out" "npm is not present"
+assert_not_contains "msb #321: missing-npm case does not claim unreachable" "$npm_missing_out" "NOT REACHABLE"
+cleanup_stubs
+
+# 8n4d. #321: guard against classification BLEED. When npm is present AND the
+#        registry RESPONDED (an HTTP error — connection completed), the failure
+#        is a real npm/registry error, not a network path problem. acq must give
+#        the NEUTRAL guidance and must NOT emit a DNS hint (ACQ_MSB_DNS_NAMESERVER
+#        / "did not RESOLVE") or a TLS/reachability hint ("NOT REACHABLE") — those
+#        belong only to the unresolved/unreachable branches. This pins the
+#        boundary so a future edit can't let the DNS/TLS advice bleed into the
+#        neutral case.
+make_stubs; load_acq
+: > "$CALLS"
+npm_responded_out=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/npmresp-secrets"
+  export STUB_NPM_FAIL=1 STUB_NPM_REGISTRY=responded
+  . "${REPO_ROOT}/acq.backends/common.sh"
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  . "${REPO_ROOT}/acq.backends/msb.sh"
+  _acq_msb_fetch_kit() { printf '%s\n' "${STUBDIR}/nokit"; }
+  mkdir -p "${STUBDIR}/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "${STUBDIR}/nokit/spec.yaml"
+  acq_backend_provision npmrespbox opencode /tmp 2>&1
+)
+assert_contains "msb #321: responded registry -> neutral 'appears reachable' branch" "$npm_responded_out" "registry appears reachable"
+assert_not_contains "msb #321: neutral branch emits NO DNS resolver hint" "$npm_responded_out" "ACQ_MSB_DNS_NAMESERVER"
+assert_not_contains "msb #321: neutral branch does NOT say 'did not RESOLVE'" "$npm_responded_out" "did not RESOLVE"
+assert_not_contains "msb #321: neutral branch emits NO TLS/reachability hint" "$npm_responded_out" "NOT REACHABLE"
+assert_not_contains "msb #321: neutral branch does not claim npm is missing" "$npm_responded_out" "npm is not present"
 cleanup_stubs
 
 # 8n5. Attach LAUNCHES the recorded agent as the `agent` user in the workspace,

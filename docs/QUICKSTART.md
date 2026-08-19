@@ -3,7 +3,7 @@ title: "acq Backend Quickstart"
 description: "Get running with acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-08-06"
+last_updated: "2026-08-17"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "quickstart", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -51,6 +51,12 @@ Complete the standard setup in [README.md](../README.md#5-minute-quickstart):
 - Install the `msb` CLI: `curl -fsSL https://install.microsandbox.dev | sh`
 - Run `msb doctor` (add `--fix` to set up KVM/HVF/WHP virtualization)
 - Set your network policy
+
+Re-run `msb doctor` once more after setup — a clean `doctor` pass is the quickest
+way to confirm the host is ready before your first `acq run` (and, if an
+established setup later starts failing every outbound call at once, a wipe +
+reinstall then `msb doctor` is the first thing to try; see
+[Troubleshooting](BACKEND_GUIDE.md#troubleshooting)).
 
 You do **not** need to gather a USAi key or GitHub token in advance — `acq`
 prompts you for the USAi key on first run and offers to scope a GitHub token
