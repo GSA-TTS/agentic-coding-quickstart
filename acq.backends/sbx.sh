@@ -395,8 +395,14 @@ acq_backend_provision() {
 # are tracked by feature-probe, not the marker, so they are not listed here.
 #
 # ACQ_CLI_KITS (`--kit` on the CLI) are recorded for completeness even though the
-# current heal loop only re-drives ACQ_EXTRA_KITS — the marker is the honest
-# record of what was applied at create.
+# current sbx heal loop only re-drives ACQ_EXTRA_KITS. This is safe, not a
+# functional suppression input: on sbx, `--kit` refs are baked in as create-time
+# `sbx create --kit` flags and never re-applied mid-life (unlike msb, which folds
+# ACQ_CLI_KITS into its heal). The marker is a suppression list, so a recorded CLI
+# ref can only ever be matched if the SAME ref is also supplied via ACQ_EXTRA_KITS
+# — and in that degenerate case skipping re-apply is the correct outcome (the kit
+# was already applied at create). So the CLI entries are a truthful record of what
+# was applied at create; they can never wrongly suppress a needed apply.
 _acq_sbx_seed_extra_kit_marker() {
   local name="$1" _mkk
   local _mk=()
@@ -529,12 +535,17 @@ _acq_sbx_kit_add() {
   fi
   case "$err" in
     # Heuristic: the classification is pinned to sbx 0.38's wording (see ADR-0009
-    # and the doc link above). `setup.startup` is the primary discriminator; the
-    # prose alternates catch reworded variants sbx may emit for the same refusal
-    # (e.g. "declares startup", "startup … recreate", "create a new sandbox").
-    # If sbx reworks the message past all of these, a genuine refusal degrades to
-    # rc=1 (real stderr surfaced, ok=0) — safe (no false "current"), but the
-    # noise this fix removes could return; broaden here if that happens.
+    # and the doc link above). This only ever runs when sbx is already confirmed
+    # >= MIN_SBX_VERSION (0.38.0) — acq_backend_prepare enforces that version floor
+    # at every dispatch entry point before any heal — so the match is bounded to
+    # the versions whose wording it targets, not applied blindly to arbitrary
+    # future/older sbx. `setup.startup` is the primary discriminator; the prose
+    # alternates catch reworded variants sbx may emit for the same refusal (e.g.
+    # "declares startup", "startup … recreate", "create a new sandbox"). If a
+    # future sbx reworks the message past all of these, a genuine refusal degrades
+    # to rc=1 (real stderr surfaced, ok=0) — safe (no false "current"), but the
+    # noise this fix removes could return; the MIN_SBX_VERSION bump that ships that
+    # rewording is the re-verify trigger to broaden the patterns here.
     *setup.startup*|*"declares startup"*|*startup*recreate*|\
     *"can only be used when creating a new sandbox"*|\
     *"create a new sandbox"*|*"recreate the sandbox"*)
@@ -645,10 +656,10 @@ acq_backend_ensure_kits_applied() {
 
   # 3) Playbook kit. Probe the playbook footprint that survives BOTH delivery
   # eras: the historical git clone (~/.agentic-coding-playbook/.git) AND the
-  # current REST-tarball delivery (patterns v1.8.0+, quickstart #203), which
-  # lands the tree with NO .git. The symlink farm consumes AGENTS.md, so its
-  # presence is the delivery-agnostic signal; probing for .git reported the
-  # playbook "absent" forever on tarball-provisioned sandboxes.
+  # current REST-tarball delivery (patterns v1.8.0+), which lands the tree with
+  # NO .git. The symlink farm consumes AGENTS.md, so its presence is the
+  # delivery-agnostic signal; probing for .git reported the playbook "absent"
+  # forever on tarball-provisioned sandboxes.
   if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/AGENTS.md" && echo present'; then
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$playbook_local" || _kadd_rc=$?
