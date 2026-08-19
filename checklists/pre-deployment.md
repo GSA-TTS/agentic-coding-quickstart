@@ -4,7 +4,7 @@ description: "62-item security checklist for deploying AI-assisted code — secr
 status: canonical
 tier: 3
 last_updated: "2026-02-25"
-nist_controls: ["SA-11", "SA-12", "CM-2", "SI-10", "IA-5", "SC-13", "AU-2"]
+nist_controls: ["SA-11", "SR-3", "CM-2", "SI-10", "IA-5", "SC-13", "AU-2"]
 frameworks: ["NIST SP 800-53 Rev 5.2", "OWASP Top 10 LLM 2025", "OWASP Top 10 Agentic 2026"]
 audience: "developers"
 keywords: ["checklist", "pre-deployment", "security-review", "sign-off"]
@@ -105,7 +105,7 @@ review_cycle: "semi-annually"
 
 ## 5. Dependency Security
 
-<!-- NIST SP 800-53: SA-12, SR-3 -->
+<!-- NIST SP 800-53: SR-3 (supersedes withdrawn SA-12) -->
 <!-- OWASP LLM: LLM03 (Supply Chain), OWASP Agentic: Supply Chain Vulnerabilities -->
 
 | # | Check | Status | Notes |

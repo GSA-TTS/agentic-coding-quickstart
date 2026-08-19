@@ -4,7 +4,7 @@ status: accepted
 date: 2026-07-01
 decision_makers: ["Bret Mogilefsky"]
 category: configuration-management
-nist_controls: ["CM-2", "CM-3", "SA-10", "SA-12", "SC-7", "SI-7"]
+nist_controls: ["CM-2", "CM-3", "SA-10", "SR-3", "SC-7", "SI-7"]
 impact_level: low
 ato_relevance: yes-process
 risk_treatment: mitigate
@@ -13,6 +13,12 @@ supersedes: ["0003", "0004"]
 
 # ADR-0005: Deliver Kits from agentic-coding-patterns by Pinned Reference; New Agent Trust Model
 
+> **Editorial note (control correction):** In-text mappings below cite the NIST
+> SP 800-53 control **SA-12 (Supply Chain Protection)**, which was **withdrawn in
+> Rev 5** and incorporated into **SR-3 (Supply Chain Controls and Processes)**.
+> The original prose is preserved as a historical record; read every "SA-12" here
+> as its successor **SR-3**. (The frontmatter mapping has been updated to SR-3.)
+>
 > Supersedes [ADR-0003](0003-usai-model-sync-and-default-selection.md) and
 > [ADR-0004](0004-playbook-submodule-shared-config.md).
 
