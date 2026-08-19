@@ -1311,7 +1311,7 @@ which one you have before acting.
 | Signature (from inside the guest) | Cause | Fix |
 |---|---|---|
 | **Broad** `curl (56) unexpected eof` / HTTP `000` on **multiple** hosts at once (USAi *and* GitHub *and* npm) | Corrupted / stale **msb state** (not a clean-install behavior) | **Wipe msb data + reinstall, then `msb doctor`** (below) |
-| **USAi only** fails with `NXDOMAIN` / `curl rc=6` (or `rc=35` if a public address is pinned), while GitHub + npm work fine | **Split-horizon DNS** — the USAi host resolves to an internal, tunnel-only address the guest's public resolver can't see | Point the guest at a resolver that can reach the internal USAi zone (`ACQ_MSB_DNS_NAMESERVER`) |
+| **USAi only** fails with `NXDOMAIN` / `curl rc=6` (or `rc=35` if a public address is pinned), while GitHub + npm work fine | **Split-horizon DNS** — the USAi host resolves to an internal, tunnel-only address the guest's public resolver can't see | Try pointing the guest at a resolver that can reach the internal USAi zone (`ACQ_MSB_DNS_NAMESERVER`) — but the internal resolver may itself not be routable from the guest; verify guest→resolver reachability and coordinate with your network team if it isn't |
 | A **genuinely intercepted** endpoint fails its TLS handshake behind a corporate proxy that terminates it | The proxy's **root CA** isn't trusted on msb's upstream (proxy→server) leg | acq passes it via `--tls-upstream-ca-cert` (defense-in-depth; below) |
 
 Probe from inside the sandbox to read the signature — the curl exit code is the
@@ -1372,11 +1372,22 @@ fix this; a key rotation does not fix this.
 `acq` now reports this distinctly ("did not RESOLVE … likely a split-horizon
 name") rather than as a generic network cut or a bad key.
 
-**Fix:** give the guest a resolver that can reach the internal USAi zone:
+**Try this — but it is not a guaranteed fix:** point the guest at a resolver that
+can reach the internal USAi zone:
 
 ```bash
 export ACQ_MSB_DNS_NAMESERVER=<a-resolver-that-can-reach-the-internal-USAi-zone>
 ```
+
+**Important:** the internal resolver may not itself be routable from the guest.
+Measured on GFE, the internal resolver was not reachable from the guest, and even
+pinning USAi's public address still failed to connect (`rc=35`) — the endpoint
+appeared reachable only via the corporate tunnel. So setting
+`ACQ_MSB_DNS_NAMESERVER` is worth trying, but it is not a "set this and it works"
+fix. **Verify guest→resolver reachability first** (e.g. with
+`./scripts/diagnose-host-egress-diff`), and if the resolver (or USAi itself) is
+not routable from the guest, **coordinate with your network team** — the guest
+may need tunnel access it does not currently have.
 
 (See the `ACQ_MSB_DNS_NAMESERVER` notes in `docs/BACKEND_GUIDE.md` and the
 README's msb DNS section.)
