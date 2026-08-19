@@ -1875,6 +1875,78 @@ heal-loop cases).
 
 ---
 
+## 36. msb Create-Time Published Port Returns Empty Response for a Loopback-Only Guest Service
+
+### Symptoms
+
+On the **msb** backend, `acq ports <sandbox>` shows a create-time published port,
+and the service answers from inside the sandbox:
+
+```bash
+$ acq ports paseo-test
+sandbox 6767 -> host 127.0.0.1:6767 (create-time -p)
+
+$ acq exec paseo-test -- curl http://127.0.0.1:6767/
+<!doctype html>
+...
+```
+
+But the same port fails from the host:
+
+```bash
+$ curl http://127.0.0.1:6767/
+curl: (52) Empty reply from server
+```
+
+Chrome shows `(failed) net::ERR_EMPTY_RESPONSE`. This is distinct from the older
+ingress-deny failure (`ERR_CONNECTION_RESET`) in
+[ADR-0019](adr/0019-msb-balanced-egress-is-egress-only.md): here the TCP connect
+to the host listener succeeds, but the msb publisher cannot complete the
+guest-side connection.
+
+### Root Cause
+
+The service is listening only on **guest loopback** (`127.0.0.1:GUEST`). For
+example, `/proc/net/tcp` shows `0100007F:1A6F`, which is `127.0.0.1:6767`.
+
+msb create-time publishing (`-p HOST:GUEST`, which acq emits from neutral
+`publishedPorts`) binds a listener on the **host** loopback by default, but the
+publisher connects to the sandbox's **guest network IP** for `GUEST`; it does not
+dial guest `127.0.0.1`. A loopback-only service can therefore be healthy from
+inside the sandbox while unreachable through create-time `-p` from the host.
+
+### Fix
+
+Bind the guest service to `0.0.0.0:GUEST` (or the guest interface address) when
+you want it reachable through create-time `publishedPorts` / msb `-p`:
+
+```bash
+# Example shape; exact flag/env depends on the service
+service --host 0.0.0.0 --port 6767
+```
+
+If the service must stay loopback-only, use acq's msb post-hoc publish path:
+
+```bash
+acq --backend msb ports <sandbox> --publish 16767:6767
+curl http://127.0.0.1:16767/
+```
+
+That path uses `msb ssh serve` plus OpenSSH `-L`, so the connection originates
+from inside the sandbox and can reach guest `127.0.0.1:6767`.
+
+### Prevention / Status
+
+- Documented in [BACKEND_GUIDE.md](BACKEND_GUIDE.md) under msb port limitations.
+- When adding a kit that declares `publishedPorts`, make its supervised service
+  listen on `0.0.0.0` unless it intentionally requires loopback-only access and
+  documents the post-hoc `acq ports --publish` path.
+- A quick discriminator is: if `acq exec <sandbox> -- curl http://127.0.0.1:GUEST`
+  works but host curl returns `Empty reply from server`, inspect the guest
+  listener bind address before chasing ingress policy or browser issues.
+
+---
+
 When something fails, work through this list:
 
 1. [ ] Is the secret actually in the container? (`echo $VAR_NAME`)
