@@ -6719,7 +6719,7 @@ if _mk_unix_socket "$STUBDIR/agent.sock"; then
   c1_out=$(
     export SSH_AUTH_SOCK="$STUBDIR/agent.sock" STUB_MSB_VERSION=0.6.9
     . "${REPO_ROOT}/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f; printf '%s\n' "${f[@]}"
+    f=(); _acq_msb_vsock_flags_into f; printf '%s\n' "${f[@]+"${f[@]}"}"
   )
   assert_contains "msb vsock(10c1): emits a --vsock flag for the host ssh-agent" "$c1_out" "--vsock"
   # canonicalize_path may resolve /tmp symlinks (e.g. macOS /var->/private/var),
@@ -6737,7 +6737,7 @@ c2_out=$(
   unset SSH_AUTH_SOCK; unset ACQ_FORWARD_HOST_SOCKETS
   export STUB_MSB_VERSION=0.6.9
   . "${REPO_ROOT}/acq.backends/msb.sh"
-  f=(); _acq_msb_vsock_flags_into f; printf '%s\n' "${f[@]}"
+  f=(); _acq_msb_vsock_flags_into f; printf '%s\n' "${f[@]+"${f[@]}"}"
 )
 assert_not_contains "msb vsock(10c2): no --vsock when no forward is requested" "$c2_out" "--vsock"
 cleanup_stubs
@@ -6750,13 +6750,13 @@ if _mk_unix_socket "$STUBDIR/agent.sock"; then
   c3_err=$(
     export SSH_AUTH_SOCK="$STUBDIR/agent.sock" STUB_MSB_VERSION=0.6.8
     . "${REPO_ROOT}/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s' "${f[@]}"
+    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s' "${f[@]+"${f[@]}"}"
   )
   assert_contains "msb vsock(10c3): sub-0.6.9 warns it needs the newer msb" "$c3_err" "needs msb >= 0.6.9"
   c3_out=$(
     export SSH_AUTH_SOCK="$STUBDIR/agent.sock" STUB_MSB_VERSION=0.6.8
     . "${REPO_ROOT}/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf '%s\n' "${f[@]}"
+    f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf '%s\n' "${f[@]+"${f[@]}"}"
   )
   assert_not_contains "msb vsock(10c3): sub-0.6.9 emits no --vsock flag" "$c3_out" "--vsock"
 else
@@ -6772,13 +6772,13 @@ touch "$STUBDIR/not-a-socket"
 c4_err=$(
   export SSH_AUTH_SOCK="$STUBDIR/not-a-socket" STUB_MSB_VERSION=0.6.9
   . "${REPO_ROOT}/acq.backends/msb.sh"
-  f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s' "${f[@]}"
+  f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s' "${f[@]+"${f[@]}"}"
 )
 assert_contains "msb vsock(10c4): non-socket SSH_AUTH_SOCK warns 'not a socket'" "$c4_err" "not a socket"
 c4_out=$(
   export SSH_AUTH_SOCK="$STUBDIR/not-a-socket" STUB_MSB_VERSION=0.6.9
   . "${REPO_ROOT}/acq.backends/msb.sh"
-  f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf '%s\n' "${f[@]}"
+  f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf '%s\n' "${f[@]+"${f[@]}"}"
 )
 assert_not_contains "msb vsock(10c4): non-socket SSH_AUTH_SOCK emits no --vsock" "$c4_out" "--vsock"
 cleanup_stubs
@@ -6791,7 +6791,7 @@ if _mk_unix_socket "$STUBDIR/custom.sock"; then
     unset SSH_AUTH_SOCK
     export ACQ_FORWARD_HOST_SOCKETS="$STUBDIR/custom.sock:6000/stream" STUB_MSB_VERSION=0.6.9
     . "${REPO_ROOT}/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf '%s\n' "${f[@]}"
+    f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf '%s\n' "${f[@]+"${f[@]}"}"
   )
   assert_contains "msb vsock(10c5): general forward emits the requested :6000/stream" "$c5_out" ":6000/stream"
 else
@@ -7007,7 +7007,7 @@ if _mk_unix_socket "$STUBDIR/agent.sock"; then
   c12_bad=$(
     export SSH_AUTH_SOCK="$STUBDIR/agent.sock" STUB_MSB_VERSION=0.6.9 ACQ_SSH_AGENT_VSOCK_PORT=123
     . "${REPO_ROOT}/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f 2>"$STUBDIR/c12.err"; printf '%s\n' "${f[@]}"
+    f=(); _acq_msb_vsock_flags_into f 2>"$STUBDIR/c12.err"; printf '%s\n' "${f[@]+"${f[@]}"}"
     cat "$STUBDIR/c12.err"
   )
   assert_not_contains "msb vsock(10c12): invalid ssh-agent port emits no --vsock" "$c12_bad" "--vsock"
@@ -7016,7 +7016,7 @@ if _mk_unix_socket "$STUBDIR/agent.sock"; then
   c12_ok=$(
     export SSH_AUTH_SOCK="$STUBDIR/agent.sock" STUB_MSB_VERSION=0.6.9 ACQ_SSH_AGENT_VSOCK_PORT=9000
     . "${REPO_ROOT}/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf '%s\n' "${f[@]}"
+    f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf '%s\n' "${f[@]+"${f[@]}"}"
   )
   assert_contains "msb vsock(10c12): valid ssh-agent port override is honored" "$c12_ok" ":9000/stream"
 else
@@ -7036,7 +7036,7 @@ if _mk_unix_socket "$STUBDIR/agent.sock"; then
     . "${REPO_ROOT}/acq.backends/msb.sh"
     # Route port (what --vsock publishes) and bridge port (what socat connects to)
     # both derive from the SAME resolved constant.
-    f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf 'ROUTE %s\n' "${f[@]}"
+    f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf 'ROUTE %s\n' "${f[@]+"${f[@]}"}"
     _acq_msb_start_ssh_agent_bridge sbox >/dev/null 2>&1
     wait
   )
@@ -7044,7 +7044,7 @@ if _mk_unix_socket "$STUBDIR/agent.sock"; then
   c13_route=$(
     export SSH_AUTH_SOCK="$STUBDIR/agent.sock" STUB_MSB_VERSION=0.6.9 ACQ_SSH_AGENT_VSOCK_PORT=9000
     . "${REPO_ROOT}/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf '%s\n' "${f[@]}"
+    f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf '%s\n' "${f[@]+"${f[@]}"}"
   )
   assert_contains "msb vsock(10c13): route uses the overridden port" "$c13_route" ":9000/stream"
   assert_contains "msb vsock(10c13): socat bridge connects to the SAME overridden port" \
@@ -7064,7 +7064,7 @@ if _mk_unix_socket "$STUBDIR/agent15.sock"; then
   c15_err=$(
     export SSH_AUTH_SOCK="$STUBDIR/agent15.sock" STUB_MSB_VERSION=0.6.9
     . "${REPO_ROOT}/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s\n' "${f[@]}" >/dev/null
+    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s\n' "${f[@]+"${f[@]}"}" >/dev/null
   )
   assert_contains "msb vsock(10c15): forward prints a trust-boundary notice" "$c15_err" "forwarding your host ssh-agent"
   assert_contains "msb vsock(10c15): notice names the SSH_AUTH_SOCK opt-out" "$c15_err" "unset SSH_AUTH_SOCK to opt out"
@@ -7073,11 +7073,11 @@ if _mk_unix_socket "$STUBDIR/agent15.sock"; then
   c15_count=$(
     export SSH_AUTH_SOCK="$STUBDIR/agent15.sock" STUB_MSB_VERSION=0.6.9
     . "${REPO_ROOT}/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s\n' "${f[@]}" >/dev/null
+    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s\n' "${f[@]+"${f[@]}"}" >/dev/null
     # Invoke a SECOND time in the same process: the notice must NOT repeat
     # (guarded by the module-scope _ACQ_MSB_SSH_AGENT_NOTICE_SHOWN flag). Reuse
     # the same array and read it so shellcheck sees the assignment used.
-    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s\n' "${f[@]}" >/dev/null
+    f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf '%s\n' "${f[@]+"${f[@]}"}" >/dev/null
   ) 2>&1
   n=$(printf '%s\n' "$c15_count" | grep -c "forwarding your host ssh-agent" || true)
   assert_eq "msb vsock(10c15): notice prints at most once per process" "1" "$n"

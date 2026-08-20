@@ -1,0 +1,129 @@
+# bash 3.2 compatibility gate — runs scripts/test-acq under bash 3.2.57.
+#
+# Why this exists:
+#   The macOS system bash is 3.2.57 (Apple's last GPLv2 bash), so it is the
+#   PRIMARY dev/CI target for anyone on a Mac. bash 3.2 treats expanding an
+#   empty array under `set -u` (`"${arr[@]}"`) as an unbound-variable error and
+#   aborts — bash 4.4+ does not. That class of bug is INVISIBLE to the existing
+#   lanes, which all run on ubuntu-latest (bash 5.x). This gate reproduces the
+#   3.2 interpreter so the class is caught pre-merge instead of only when someone
+#   runs the suite locally on a Mac (see quickstart#331 for the 10c12 instance).
+#
+# Why build 3.2.57 from source instead of a bash:3.2 container:
+#   - 3.2.57 built against glibc on the runner is the exact version macOS ships;
+#     the docker `bash:3.2` image is musl (aarch64-unknown-linux-musl), a
+#     different libc.
+#   - The suite needs real git + python3 + coreutils (git-identity, GitHub
+#     down-scoping, and the AF_UNIX socket tests). ubuntu-latest already has all
+#     three, so nothing is stubbed/SKIPped; the Alpine image would need a
+#     network `apk add`.
+#
+# Supply-chain: the source tarball is authenticated with GNU's detached OpenPGP
+# signature, trust-anchored to Chet Ramey's release-signing key by full
+# fingerprint (see BASH_SIGNING_KEY_FPR). This authenticates the SIGNER, not
+# just the bytes, and fails closed if the key can't be imported by fingerprint.
+#
+# Why a separate, non-default workflow (not part of pre-commit):
+#   3.2-specific regressions are relatively rare and the build adds time, so this
+#   is NOT run on every default pre-commit pass. It runs as a REQUIRED PR check so
+#   the feedback lands before merge without slowing the common path.
+
+name: bash 3.2 compat
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'acq'
+      - 'acq.backends/**'
+      - 'scripts/test-acq'
+      - '.github/workflows/bash32-compat.yml'
+
+concurrency:
+  group: bash32-compat-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Apple's last GPLv2 bash; matches the macOS system-bash version string
+  # (3.2.57(1)-release).
+  BASH32_VERSION: "3.2.57"
+  # Supply-chain integrity: rather than pin a SHA-256, verify GNU's detached
+  # OpenPGP signature (bash-<v>.tar.gz.sig) against the tarball. Trust is
+  # anchored to Chet Ramey's release-signing key by its FULL 40-hex fingerprint
+  # (a stable, published value) — a keyserver can only satisfy this import if it
+  # returns that exact key, so a substituted key fails closed. This is stronger
+  # than a bare checksum: it authenticates the signer, not just the bytes.
+  # Chet Ramey <chet@case.edu> — https://tiswww.case.edu/php/chet/
+  BASH_SIGNING_KEY_FPR: "7C0135FB088AAF6C66C650B9BB5869F064EA74AB"
+
+jobs:
+  test-acq-bash32:
+    name: acq offline suite under bash 3.2
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Cache the built interpreter so the compile only happens on a version bump.
+      - id: cache-bash32
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /opt/bash32
+          key: bash32-${{ runner.os }}-${{ env.BASH32_VERSION }}
+
+      - name: Build bash ${{ env.BASH32_VERSION }} from source
+        if: steps.cache-bash32.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          tarball="bash-${BASH32_VERSION}.tar.gz"
+          base="https://ftp.gnu.org/gnu/bash"
+          curl -fsSL --retry 3 -o "$tarball"     "${base}/${tarball}"
+          curl -fsSL --retry 3 -o "${tarball}.sig" "${base}/${tarball}.sig"
+
+          # Authenticate the tarball via GNU's detached OpenPGP signature.
+          # Trust is anchored to Chet Ramey's release-signing key by its full
+          # 40-hex fingerprint: import BY fingerprint, then verify the fetched
+          # key's fingerprint matches exactly before trusting any signature.
+          export GNUPGHOME
+          GNUPGHOME="$(mktemp -d)"
+          got_fpr=""
+          for ks in \
+            hkps://keys.openpgp.org \
+            hkps://keyserver.ubuntu.com \
+            hkps://pgp.mit.edu ; do
+            if gpg --batch --keyserver "$ks" --recv-keys "$BASH_SIGNING_KEY_FPR" 2>/dev/null; then
+              got_fpr="$(gpg --batch --with-colons --fingerprint "$BASH_SIGNING_KEY_FPR" \
+                          | awk -F: '$1=="fpr"{print $10; exit}')"
+              [ "$got_fpr" = "$BASH_SIGNING_KEY_FPR" ] && break
+            fi
+          done
+          if [ "$got_fpr" != "$BASH_SIGNING_KEY_FPR" ]; then
+            echo "::error::could not import bash signing key $BASH_SIGNING_KEY_FPR from any keyserver" >&2
+            exit 1
+          fi
+          # Fail closed unless the signature verifies against that exact key.
+          gpg --batch --verify "${tarball}.sig" "$tarball"
+
+          tar -xzf "$tarball"
+          cd "bash-${BASH32_VERSION}"
+          # bash 3.2.57 (2007) predates modern GCC defaults; relax the two
+          # errors-by-default (implicit function/int) so it configures & builds.
+          CFLAGS="-Wno-implicit-function-declaration -Wno-implicit-int" \
+            ./configure --prefix=/opt/bash32
+          make -j"$(nproc)"
+          make install
+
+      - name: Confirm interpreter is bash 3.2
+        run: |
+          set -euo pipefail
+          /opt/bash32/bin/bash --version | head -1
+          /opt/bash32/bin/bash -c '[[ $BASH_VERSION == 3.2.* ]] || { echo "not bash 3.2: $BASH_VERSION" >&2; exit 1; }'
+
+      - name: Run acq offline suite under bash 3.2
+        run: /opt/bash32/bin/bash scripts/test-acq
