@@ -1,6 +1,9 @@
 # sbx CLI Quickstart Guide
 
-> **Recommended for federal users** — Better automation, audit trails, and secure credential storage.
+> **Note:** `msb` (microsandbox) is `acq`'s **default** backend. Use this `sbx`
+> guide when you specifically want the Docker Sandboxes backend (for example, you
+> already run Docker Sandboxes, or want its proxy-based credential store). See the
+> [Backend Guide](BACKEND_GUIDE.md) to choose between backends.
 
 This guide walks you through setting up Docker Sandboxes using the `sbx` command-line interface to run AI coding agents with USAi.
 
