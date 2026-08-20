@@ -4,14 +4,11 @@
 # Default owner for everything in the repo
 * @GSA-TTS/agentic-coding-team
 
-# Security-sensitive paths. These are owned by the same core team as the
-# catch-all above (there is no separate security reviewer group today), so the
-# effect is documentary + routing, NOT a second, independent review gate: every
-# code-owner-required review on these paths is still satisfied by the core team.
-# The list makes "this is security-sensitive" explicit and guarantees a change
-# here always requires a code-owner review (via branch protection), rather than
-# implying a stricter reviewer that does not exist. If a distinct security team
-# is ever created, reassign these lines to it to turn on a real second gate.
-/.github/workflows/ @GSA-TTS/agentic-coding-team
-/AGENTS.md @GSA-TTS/agentic-coding-team
-/SECURITY.md @GSA-TTS/agentic-coding-team
+# Security-sensitive paths require a review from the admins team. This IS a real
+# additional gate: agentic-coding-admins is a narrow subset of the broad
+# agentic-coding-team default owner above, so a change here needs sign-off from a
+# maintainer/admin, not just any team member. Branch protection must require
+# code-owner review for these lines to be enforced.
+/.github/workflows/ @GSA-TTS/agentic-coding-admins
+/AGENTS.md @GSA-TTS/agentic-coding-admins
+/SECURITY.md @GSA-TTS/agentic-coding-admins
