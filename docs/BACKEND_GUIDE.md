@@ -654,6 +654,12 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   tunnels with `ssh -L` from inside the guest and can reach guest loopback.
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
+- **`acq` can auto-install only `opencode` on msb.** On the msb base image `acq`
+  installs the agent at provision time, and today only `opencode` has an install
+  recipe (`shell` needs no binary). Any other agent must be pre-baked into your
+  own `ACQ_MSB_IMAGE`; `acq` warns at attach if the requested agent has no recipe.
+  (On sbx the agent is supplied by the sbx template, so this constraint is
+  msb-specific.)
 - **Snapshots not surfaced.** `msb snapshot` is a full CLI verb, but `acq`
   exposes no `snapshot` verb, so `SUPPORTS_SNAPSHOTS=0`. Wiring it is beyond sbx
   parity (sbx has no snapshots), so the flag reflects what `acq` surfaces rather

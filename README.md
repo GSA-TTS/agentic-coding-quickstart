@@ -1,7 +1,7 @@
 # Agentic Coding Quickstart
 
 > **Audience:** Federal teams using AI coding agents \
-> **Purpose:** Get AI coding agents running safely inside isolated sandboxes, connected to USAi
+> **Purpose:** Get AI coding agents running safely inside isolated sandboxes, connected to USAi (the GSA-hosted LLM gateway at `api.gsa.usai.gov`)
 
 **In one sentence:** this quickstart gets you running an AI coding agent connected to USAi in under 5 minutes, using `acq`, a CLI tool provided here.
 
@@ -50,7 +50,7 @@ and GitHub access interactively on first run (see [Step 3](#step-3-create-and-ru
 | --------------- | ---------------------------------------------------------- |
 | A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li></ul>If you need more detail than this, see [msb host setup](docs/QUICKSTART.md#msb-host-setup) for per-platform particulars. |
 | `git`           | Already installed on macOS and on the supported Linux hosts — **nothing to do**. (On macOS, the first time you run a `git` command the system may offer to install the Command Line Tools; accept it.) Check with `git --version`. |
-| USAi API key    | **Nothing to get in advance** — `acq` prompts you for a key and validates it on first run. <p>(Optional) If you'd rather set it up ahead of time, [create one](https://console.gsa.usai.gov/key-management) and keep it handy; note that USAi keys expire every 7 days.</p> |
+| USAi API key    | **Required, but `acq` guides you** — on first run `acq` prompts you to paste a key and validates it, so you need not configure anything beforehand. You will need to [create a key](https://console.gsa.usai.gov/key-management) (do it now or when prompted); USAi keys expire every 7 days. <p>Running **non-interactively** (CI/piped) has no prompt, so the key must be set in advance — see [Secrets](docs/QUICKSTART.md#secrets).</p> |
 | GitHub token | **Nothing to get in advance** — `acq` offers to walk you through creating a repo-scoped token on first run, when your project contains GitHub repos. You can decline and add one later. <p>(A token lets the agent authenticate to GitHub, work with private repositories, and act on your behalf — open PRs, push to branches, etc.)</p> |
 
 ### Step 1: Install microsandbox (msb)
@@ -315,8 +315,9 @@ repo) when it creates a sandbox:
   and, at startup, merges it into OpenCode's global config at
   `~/.config/opencode/opencode.jsonc` (allow-listing USAi egress). It composes
   with, rather than clobbers, any existing global config.
-- **`agentic-coding-playbook`** — clones the playbook at startup into
-  `~/.agentic-coding-playbook` and symlinks its `AGENTS.md` into each agent's
+- **`agentic-coding-playbook`** — installs the playbook at startup into
+  `~/.agentic-coding-playbook` (a pinned REST tarball on patterns v1.8.0+; older
+  bundles cloned it) and symlinks its `AGENTS.md` into each agent's
   rules path and its skills into `~/.agents/skills` (+ per-agent roots).
 - **`zscaler-ca-certificate`** — installs the public Zscaler Root CA into the
   sandbox trust store (harmless if Zscaler isn't in use).
@@ -416,9 +417,10 @@ git fetch && git pull
 The playbook provides reusable **agent skills** — step-by-step procedures for
 common tasks. Skills follow the [agentskills.io](https://agentskills.io)
 standard. When you launch a sandbox with `acq`, the `agentic-coding-playbook`
-kit clones the playbook at startup and symlinks these into `~/.agents/skills`
+kit installs the playbook at startup (a pinned tarball on patterns v1.8.0+) and
+symlinks these into `~/.agents/skills`
 (and per-agent roots) so your agent discovers them automatically; no separate
-clone is needed.
+checkout is needed.
 
 | Source       | Skills                       | Examples                                                                            |
 | ------------ | ---------------------------- | ----------------------------------------------------------------------------------- |

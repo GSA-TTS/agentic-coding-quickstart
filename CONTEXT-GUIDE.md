@@ -6,7 +6,7 @@ tier: 1
 load_priority: "always"
 audience: "all"
 keywords: ["context", "loading", "routing", "index"]
-related_files: ["AGENTS.md", "docs/CODING_PRACTICES.md"]
+related_files: ["AGENTS.md"]
 review_cycle: "quarterly"
 ---
 
@@ -28,8 +28,8 @@ These define the behavioral contract. Load for **every task**.
 | Document | What It Covers |
 |----------|----------------|
 | `AGENTS.md` | Agent rules: permissions, prohibitions, data handling, identity, meta-constraints |
-| `docs/CODING_PRACTICES.md` | Secure coding: input validation, secrets, dependencies, architecture, TDD, SOLID |
-| `~/.agentic-coding-playbook/docs/CODING_STANDARDS_COMPACT.md` | **Code generation shortcut** — load INSTEAD of full CODING_PRACTICES.md for routine code tasks (from the playbook, cloned into the sandbox by the `agentic-coding-playbook` kit) |
+| [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (GSA agentic-coding-playbook) | Secure coding: input validation, secrets, dependencies, architecture, TDD, SOLID |
+| `~/.agentic-coding-playbook/docs/CODING_STANDARDS_COMPACT.md` | **Code generation shortcut** — load INSTEAD of the full CODING_PRACTICES.md for routine code tasks (from the playbook, delivered into the sandbox by the `agentic-coding-playbook` kit) |
 
 ## Tier 2 — Load When Task Matches
 
