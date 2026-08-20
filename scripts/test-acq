@@ -663,6 +663,12 @@ make_stubs; load_acq
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/msb.sh"
+  # Reset the once-per-process announce guard: on a host where an earlier
+  # parent-scope backend resolve already fired the durable-fix hint (a real
+  # backend reachable only via ~/.local/bin), _ACQ_LOCAL_BIN_ANNOUNCED=1 is
+  # inherited here and would silence the announce this test asserts. Clearing it
+  # makes the test independent of parent process state (the macOS-only flake).
+  _ACQ_LOCAL_BIN_ANNOUNCED=""
   set +e
   _backend_installed msb 2>"$STUBDIR/rep_note"
   rc=$?
@@ -712,6 +718,9 @@ make_stubs; load_acq
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   . "${REPO_ROOT}/acq.backends/msb.sh"
+  # Clear the inherited once-per-process announce guard so the FIRST call below
+  # is guaranteed to announce regardless of parent process state (see 2i).
+  _ACQ_LOCAL_BIN_ANNOUNCED=""
   set +e
   _ensure_local_bin_on_path msb 2>"$STUBDIR/n1"    # first: prepends + announces
   _ensure_local_bin_on_path msb 2>"$STUBDIR/n2"    # second: already on PATH, silent
@@ -778,6 +787,20 @@ log=$(cat "$CALLS")
 assert_contains "dispatch: create -> sbx create --name" "$log" "sbx create --name"
 assert_contains "dispatch: create includes --kit" "$log" "--kit"
 assert_contains "dispatch: create includes usai kit" "$log" "acq-kits/usai-provider"
+# The workspace positional MUST survive --name stripping in the sbx create argv.
+# Regression: the provision arg scan re-appended the dropped --name VALUE, which
+# left a stray positional so sbx read the name as the workspace and the real
+# workspace as an extra mount (the intended workspace then looked "missing" and
+# create prompted, then cancelled). Assert the real workspace path is present and
+# the sandbox name is NOT sitting where sbx expects a workspace.
+# NOTE: sbx.sh forwards the workspace positional to `sbx create` VERBATIM (it does
+# not canonicalize on the create path — unlike the msb --volume mount path). So
+# assert against the RAW $_projdir, not canonicalize_path: on macOS the temp dir
+# is a /var -> /private/var symlink and the canonicalized form would not match the
+# literal path in the argv. Mirrors the sibling "kit-flag: create keeps workspace
+# positional" check.
+sbx_create_line=$(printf '%s\n' "$log" | grep '^sbx create')
+assert_contains "dispatch: create keeps workspace positional" "$sbx_create_line" "$_projdir"
 rm -rf "$_projdir"
 cleanup_stubs
 
@@ -1184,6 +1207,246 @@ assert_not_contains "kit-flag: agent --kit after -- not hijacked (#222)" "$creat
 assert_contains "kit-flag: agent --kit after -- forwarded intact (#222)" "$log" "--kit evil-agent-arg"
 cleanup_stubs
 rm -rf "$_kitproj"
+
+# ===========================================================================
+# 3y. Backend-neutral --image / ACQ_IMAGE (ADR-0022)
+# ===========================================================================
+# A neutral base image knob resolves flag > ACQ_IMAGE env > backend var/default.
+# On msb it becomes the trailing `msb create` image positional; on sbx it becomes
+# `sbx create --template <ref>`. `--image` is acq-owned: it must NOT survive as a
+# raw flag on the backend argv, and must not corrupt the workspace positional.
+# Workspace must be a real dir (pre-flight aborts otherwise); use a temp dir.
+_imgproj=$(mktemp -d "${TMPDIR:-/tmp}/acq-imgproj.XXXXXX")
+
+# --- msb: ACQ_IMAGE env reaches `msb create` as the image positional ----------
+make_stubs
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/img-msb-env-secrets"
+  export ACQ_MSB_KIT_PASSTHROUGH=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL\n' | acq_secret_store "$(_acq_secret_key usai)"
+  ACQ_IMAGE="localhost/acq-custom:test" ACQ_BACKEND=msb "$ACQ" \
+    create shell "$_imgproj" >/dev/null 2>&1
+)
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^msb create')
+assert_contains "image(msb): ACQ_IMAGE env reaches msb create positional" "$create_line" "localhost/acq-custom:test"
+assert_not_contains "image(msb): default image suppressed by ACQ_IMAGE" "$create_line" "docker.io/docker/sandbox-templates:shell-docker"
+assert_not_contains "image(msb): --image not forwarded raw to backend" "$create_line" "--image"
+cleanup_stubs
+
+# --- msb: --image FLAG reaches `msb create` (flag path == env path) -----------
+make_stubs
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/img-msb-flag-secrets"
+  export ACQ_MSB_KIT_PASSTHROUGH=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL\n' | acq_secret_store "$(_acq_secret_key usai)"
+  ACQ_BACKEND=msb "$ACQ" create shell --image localhost/acq-flag:test "$_imgproj" >/dev/null 2>&1
+)
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^msb create')
+assert_contains "image(msb): --image flag reaches msb create positional" "$create_line" "localhost/acq-flag:test"
+assert_not_contains "image(msb): --image flag not left on backend argv" "$create_line" "--image"
+assert_contains "image(msb): workspace positional survives --image" "$create_line" "$(canonicalize_path "$_imgproj")"
+cleanup_stubs
+
+# --- msb: --image=<ref> equals form is also intercepted -----------------------
+make_stubs
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/img-msb-eq-secrets"
+  export ACQ_MSB_KIT_PASSTHROUGH=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL\n' | acq_secret_store "$(_acq_secret_key usai)"
+  ACQ_BACKEND=msb "$ACQ" create shell --image=localhost/acq-eq:test "$_imgproj" >/dev/null 2>&1
+)
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^msb create')
+assert_contains "image(msb): --image=<ref> equals form intercepted" "$create_line" "localhost/acq-eq:test"
+assert_not_contains "image(msb): --image= not left raw" "$create_line" "--image=localhost/acq-eq:test"
+cleanup_stubs
+
+# --- msb: GLOBAL --image (BEFORE the subcommand) is intercepted ----------------
+# `acq --backend msb --image REF create shell …` — the position the live verifier
+# uses. The pre-subcommand global parser must consume --image so it never reaches
+# the backend CLI (regression: msb rejected a forwarded `--image`).
+make_stubs
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/img-msb-global-secrets"
+  export ACQ_MSB_KIT_PASSTHROUGH=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL\n' | acq_secret_store "$(_acq_secret_key usai)"
+  "$ACQ" --backend msb --image localhost/acq-global:test create shell --name gimg "$_imgproj" >/dev/null 2>&1
+)
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^msb create')
+assert_contains "image(msb): global --image reaches msb create positional" "$create_line" "localhost/acq-global:test"
+assert_not_contains "image(msb): global --image not forwarded raw to backend" "$create_line" "--image"
+cleanup_stubs
+
+# --- msb: ACQ_MSB_PULL maps to `msb create --pull <policy>` --------------------
+# A locally-loaded image (no registry behind it) needs --pull never so msb uses
+# its cache instead of trying to pull the un-pullable ref. acq forwards a valid
+# ACQ_MSB_PULL to `msb create --pull`; an invalid value is ignored with a notice.
+make_stubs
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/img-msb-pull-secrets"
+  export ACQ_MSB_KIT_PASSTHROUGH=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL\n' | acq_secret_store "$(_acq_secret_key usai)"
+  ACQ_MSB_PULL=never ACQ_IMAGE=localhost/acq-cached:test ACQ_BACKEND=msb "$ACQ" \
+    create shell --name pimg "$_imgproj" >/dev/null 2>&1
+)
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^msb create')
+assert_contains "image(msb): ACQ_MSB_PULL=never -> msb create --pull never" "$create_line" "--pull never"
+assert_contains "image(msb): cached image still passed with --pull never" "$create_line" "localhost/acq-cached:test"
+cleanup_stubs
+
+# Invalid ACQ_MSB_PULL is ignored (no --pull emitted) with a warning.
+make_stubs
+img_pull_err=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/img-msb-pullbad-secrets"
+  export ACQ_MSB_KIT_PASSTHROUGH=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL\n' | acq_secret_store "$(_acq_secret_key usai)"
+  ACQ_MSB_PULL=bogus ACQ_BACKEND=msb "$ACQ" create shell --name pbad "$_imgproj" 2>&1 >/dev/null
+)
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^msb create')
+assert_not_contains "image(msb): invalid ACQ_MSB_PULL not forwarded" "$create_line" "--pull"
+assert_contains "image(msb): invalid ACQ_MSB_PULL warns" "$img_pull_err" "invalid ACQ_MSB_PULL"
+cleanup_stubs
+
+# --- msb: GLOBAL --image=<ref> equals form (before subcommand) -----------------
+make_stubs
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/img-msb-globaleq-secrets"
+  export ACQ_MSB_KIT_PASSTHROUGH=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL\n' | acq_secret_store "$(_acq_secret_key usai)"
+  "$ACQ" --backend msb --image=localhost/acq-globaleq:test create shell --name gimgeq "$_imgproj" >/dev/null 2>&1
+)
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^msb create')
+assert_contains "image(msb): global --image=<ref> equals form intercepted" "$create_line" "localhost/acq-globaleq:test"
+assert_not_contains "image(msb): global --image= not left raw" "$create_line" "--image="
+cleanup_stubs
+
+# --- msb: PRECEDENCE — explicit ACQ_MSB_IMAGE beats neutral ACQ_IMAGE ----------
+# The most-specific backend var wins (ADR-0022), with a one-time notice.
+make_stubs
+img_prec_err=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/img-msb-prec-secrets"
+  export ACQ_MSB_KIT_PASSTHROUGH=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL\n' | acq_secret_store "$(_acq_secret_key usai)"
+  ACQ_MSB_IMAGE="localhost/backend-specific:test" ACQ_IMAGE="localhost/neutral:test" \
+    ACQ_BACKEND=msb "$ACQ" create shell "$_imgproj" 2>&1 >/dev/null
+)
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^msb create')
+assert_contains "image(msb): ACQ_MSB_IMAGE wins over ACQ_IMAGE" "$create_line" "localhost/backend-specific:test"
+assert_not_contains "image(msb): neutral image loses to backend var" "$create_line" "localhost/neutral:test"
+assert_contains "image(msb): precedence conflict prints a one-time notice" "$img_prec_err" "most-specific wins"
+cleanup_stubs
+
+# --- msb: no image set -> default image is used (regression guard) -------------
+make_stubs
+(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/img-msb-def-secrets"
+  export ACQ_MSB_KIT_PASSTHROUGH=1
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL\n' | acq_secret_store "$(_acq_secret_key usai)"
+  ACQ_BACKEND=msb "$ACQ" create shell "$_imgproj" >/dev/null 2>&1
+)
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^msb create')
+assert_contains "image(msb): no neutral image -> default shell-docker image" "$create_line" "docker.io/docker/sandbox-templates:shell-docker"
+cleanup_stubs
+
+# --- sbx: neutral image injects `sbx create --template <ref>` -----------------
+make_stubs
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
+ACQ_IMAGE="docker.io/my-org/my-template:v1" ACQ_BACKEND=sbx "$ACQ" \
+  create opencode "$_imgproj" >/dev/null 2>&1
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^sbx create')
+assert_contains "image(sbx): neutral image injects --template" "$create_line" "--template docker.io/my-org/my-template:v1"
+assert_not_contains "image(sbx): --image not forwarded raw" "$create_line" "--image"
+cleanup_stubs
+
+# --- sbx: --image flag path also injects --template ---------------------------
+make_stubs
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
+ACQ_BACKEND=sbx "$ACQ" create opencode --image docker.io/my-org/flag-tpl:v2 "$_imgproj" >/dev/null 2>&1
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^sbx create')
+assert_contains "image(sbx): --image flag injects --template" "$create_line" "--template docker.io/my-org/flag-tpl:v2"
+cleanup_stubs
+
+# --- sbx: GLOBAL --image (before the subcommand) injects --template -----------
+# Mirrors the live verifier's `acq --backend sbx --image REF create shell …`.
+make_stubs
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
+"$ACQ" --backend sbx --image docker.io/my-org/global-tpl:v3 create opencode "$_imgproj" >/dev/null 2>&1
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^sbx create')
+assert_contains "image(sbx): global --image injects --template" "$create_line" "--template docker.io/my-org/global-tpl:v3"
+assert_not_contains "image(sbx): global --image not forwarded raw" "$create_line" "--image"
+cleanup_stubs
+
+# --- sbx: an explicit user --template is NOT double-injected -------------------
+# When the user already passed --template, acq honors it and does NOT add its own
+# from --image (the explicit flag wins; a doubled --template is ambiguous).
+make_stubs
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
+img_dbl_err=$(ACQ_IMAGE="docker.io/my-org/neutral:v1" ACQ_BACKEND=sbx "$ACQ" \
+  create opencode --template docker.io/my-org/explicit:v9 "$_imgproj" 2>&1 >/dev/null)
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^sbx create')
+assert_contains "image(sbx): explicit --template preserved" "$create_line" "--template docker.io/my-org/explicit:v9"
+assert_not_contains "image(sbx): neutral image not injected over explicit --template" "$create_line" "docker.io/my-org/neutral:v1"
+assert_contains "image(sbx): conflict notice names the ignored --image" "$img_dbl_err" "ignoring --image"
+cleanup_stubs
+
+# --- sbx: no image set -> NO --template injected (regression guard) ------------
+make_stubs
+printf 'sk-test\n' | ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+seed_sbx_usai_proxy_fixture
+ACQ_BACKEND=sbx "$ACQ" create opencode "$_imgproj" >/dev/null 2>&1
+log=$(cat "$CALLS")
+create_line=$(printf '%s\n' "$log" | grep '^sbx create')
+assert_not_contains "image(sbx): no neutral image -> no --template injected" "$create_line" "--template"
+cleanup_stubs
+
+# --- re-attach with --image warns (does not silently ignore) ------------------
+# --image/ACQ_IMAGE only applies at CREATE (ADR-0022). On an AGENT-form re-attach
+# to an EXISTING sandbox, acq must NOT re-provision and must say the flag is
+# ignored rather than pretend it re-imaged the running sandbox.
+make_stubs; load_acq
+printf 'imgreattach\n' > "$STUBDIR/.msb_sandbox_list"
+printf 'imgreattach\n' > "$STUBDIR/.msb_running_list"
+: > "$CALLS"
+img_reattach_err=$(
+  export ACQ_SECRET_STORE_DIR="$STUBDIR/img-reattach-secrets"
+  export ACQ_MSB_KIT_PASSTHROUGH=1
+  export ACQ_UPDATE_CHECK=0
+  . "${REPO_ROOT}/acq.backends/secret-store.sh"
+  printf 'USAI-REAL\n' | acq_secret_store "$(_acq_secret_key usai)"
+  ACQ_IMAGE=localhost/ignored:test ACQ_BACKEND=msb "$ACQ" run shell --name imgreattach "$_imgproj" 2>&1 >/dev/null
+)
+reattach_log=$(cat "$CALLS")
+assert_contains "image(reattach): warns --image ignored on existing sandbox" "$img_reattach_err" "ignored when re-attaching"
+assert_not_contains "image(reattach): no msb create on re-attach" "$reattach_log" "msb create"
+cleanup_stubs
+
+rm -rf "$_imgproj"
+
 
 # 3z. `acq run` fails CLOSED on an unresolvable target (issue #253). `run` is
 #     create-and-attach for a KNOWN AGENT or a re-attach to an EXISTING sandbox

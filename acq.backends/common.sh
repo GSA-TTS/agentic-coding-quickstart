@@ -527,7 +527,7 @@ slugify() {
 # True if PREV is a flag that consumes the next argument as its value.
 _takes_value() {
   case "$1" in
-    --name|--template|-t|--profile|--cpus|--memory|-m|--kit|--backend) return 0 ;;
+    --name|--template|-t|--profile|--cpus|--memory|-m|--kit|--backend|--image) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -848,6 +848,65 @@ extract_kit_flags() {
   if [ "$expect_kit" -eq 1 ]; then
     echo "acq: --kit given with no value; ignoring" >&2
   fi
+}
+
+# Extract a user-supplied `--image <ref>` / `--image=<ref>` flag from a run/create
+# arg list (ADR-0022). Populates two things IN THE CURRENT SHELL (so callers must
+# not run this in a subshell/pipeline):
+#   ACQ_IMAGE_FLAG        — the image ref if `--image` was given (else empty)
+#   ACQ_IMAGE_REMAINING   — the arg list with the --image flag removed
+#
+# Like extract_kit_flags, scanning STOPS at the first `--` separator: everything
+# after it is agent args and is forwarded verbatim. `--image` is an acq-owned
+# neutral flag (ADR-0022); it must NOT reach the backend CLI (neither `sbx create`
+# nor `msb create` accepts a bare `--image`). The resolved value is exported as
+# ACQ_IMAGE so the backend adapters read it through acq_resolve_neutral_image.
+#
+# A last-wins policy applies if `--image` is repeated (matches how most CLIs treat
+# a repeated scalar flag).
+extract_image_flag() {
+  ACQ_IMAGE_FLAG=""
+  ACQ_IMAGE_REMAINING=()
+  local expect_image=0 arg
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    if [ "$expect_image" -eq 1 ]; then
+      ACQ_IMAGE_FLAG="$arg"
+      expect_image=0
+      shift
+      continue
+    fi
+    case "$arg" in
+      --)        ACQ_IMAGE_REMAINING+=("$@"); break ;;
+      --image)   expect_image=1 ;;
+      --image=*) ACQ_IMAGE_FLAG="${arg#--image=}" ;;
+      *)         ACQ_IMAGE_REMAINING+=("$arg") ;;
+    esac
+    shift
+  done
+  # A trailing `--image` with no value: warn but don't crash.
+  if [ "$expect_image" -eq 1 ]; then
+    echo "acq: --image given with no value; ignoring" >&2
+  fi
+}
+
+# Resolve the effective NEUTRAL base image per ADR-0022 precedence:
+#   --image flag  >  ACQ_IMAGE env  >  (empty)
+# The `--image` flag value is captured by extract_image_flag into ACQ_IMAGE_FLAG.
+# Backend-specific vars (e.g. ACQ_MSB_IMAGE) are NOT consulted here — a backend
+# adapter decides whether its own var out-ranks this neutral value (ADR-0022 says
+# the most-specific backend var wins, with a one-time notice). Echoes the neutral
+# image (or nothing if none was requested).
+acq_resolve_neutral_image() {
+  if [ -n "${ACQ_IMAGE_FLAG:-}" ]; then
+    printf '%s\n' "$ACQ_IMAGE_FLAG"
+    return 0
+  fi
+  if [ -n "${ACQ_IMAGE:-}" ]; then
+    printf '%s\n' "$ACQ_IMAGE"
+    return 0
+  fi
+  return 0
 }
 
 # ============================================================================

@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+# verify-image-override — live end-to-end check for the backend-neutral custom
+# base image knob (ADR-0022): `acq --image <ref>` / `ACQ_IMAGE`. It proves the
+# neutral image ACTUALLY reaches the sandbox on each installed backend:
+#   - msb : the image becomes the `msb create` OCI image positional.
+#   - sbx : the image becomes `sbx create --template <ref>`.
+#
+# This CANNOT run inside a sandbox (no nested sandboxes) and needs a host that
+# can create sandboxes (Docker for sbx; KVM/HVF for msb) AND a container engine
+# to BUILD the tiny test image. It prefers `docker`, falls back to `podman`
+# (Docker Desktop is NOT required — a podman with a `docker` alias also works).
+# A backend whose runtime or engine is absent is reported BLOCKED and SKIPPED,
+# not failed — mirroring the ADR-0011 live-validation cadence.
+#
+# The test image is built `FROM docker/sandbox-templates:shell` (the same family
+# as the msb default) plus a unique marker file, so we can confirm the CUSTOM
+# image — not the default — is what the sandbox booted.
+#
+# Usage:
+#   ./scripts/verify-image-override [--only sbx|msb]
+set -u
+
+ONLY=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --only)
+      # shift-once then read the value, so a trailing bare `--only` (no value)
+      # cannot leave $# unchanged and spin the loop forever under `set -u`.
+      shift
+      [ "$#" -ge 1 ] || { echo "--only needs a value (sbx|msb)" >&2; exit 2; }
+      ONLY="$1"; shift ;;
+    --only=*) ONLY="${1#--only=}"; shift ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+# Validate --only UP FRONT, before the (slow, network-bound) image build — an
+# invalid value should fail fast, not after wasting a base-image pull.
+case "$ONLY" in
+  sbx|msb|"") : ;;
+  *) echo "--only must be sbx or msb" >&2; exit 2 ;;
+esac
+
+SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+ACQ="$SCRIPT_DIR/acq"
+
+PASS=0; FAIL=0; BLOCKED=0
+ok()    { PASS=$((PASS+1));    printf '  \033[32mok  \033[0m %s\n' "$1"; }
+bad()   { FAIL=$((FAIL+1));    printf '  \033[31mBAD \033[0m %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
+block() { BLOCKED=$((BLOCKED+1)); printf '  \033[33mBLOCKED\033[0m %s\n' "$1"; }
+info()  { printf '\n== %s ==\n' "$1"; }
+
+# A unique marker baked into the custom image so we can prove the sandbox booted
+# OUR image and not the backend default.
+MARKER="acq-image-override-$$-$(date +%s)"
+BASE="docker.io/docker/sandbox-templates:shell"
+TAG="localhost/acq-verify-image:test"
+BUILD_DIR=""
+TARBALL=""
+# Throwaway workspace dir mounted into the sandbox. It MUST exist: acq's
+# create/run pre-flight prompts to create a missing workspace, and a piped `N`
+# cancels the whole create (the sbx failure seen on first live run). Created in
+# the run section below and removed in cleanup.
+WORKSPACE=""
+
+# --- Pick a container engine for the BUILD/SAVE step -----------------------
+# CRITICAL: presence of the CLI (`command -v docker`) is NOT enough — Docker
+# Desktop can be installed but its daemon down, in which case every docker call
+# fails at the socket. Probe that the engine is actually USABLE (a cheap `info`
+# that talks to the daemon), and prefer the FIRST engine that responds. This is
+# what makes the podman fallback real: a stopped docker yields to a working
+# podman instead of hard-blocking. `info` is bounded so a wedged daemon cannot
+# hang the probe (use `timeout` when available; docker/podman have no built-in).
+_engine_usable() {
+  local eng="$1"
+  command -v "$eng" >/dev/null 2>&1 || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 15 "$eng" info >/dev/null 2>&1
+  else
+    "$eng" info >/dev/null 2>&1
+  fi
+}
+ENGINE=""
+for _cand in docker podman; do
+  if _engine_usable "$_cand"; then ENGINE="$_cand"; break; fi
+done
+
+# Bounded, stdin-detached runner for cleanup calls so a wedged daemon / a
+# backend that would prompt cannot hang teardown (the reported Ctrl-C symptom).
+_bounded() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 30 "$@" </dev/null >/dev/null 2>&1 || true
+  else
+    "$@" </dev/null >/dev/null 2>&1 || true
+  fi
+}
+
+# Guard against re-entrancy: an INT/TERM during cleanup (a second Ctrl-C) must
+# not restart cleanup. Disable the trap on first entry.
+_CLEANED=0
+cleanup() {
+  [ "$_CLEANED" -eq 1 ] && return 0
+  _CLEANED=1
+  trap - EXIT INT TERM
+  info "cleanup"
+  [ -n "$BUILD_DIR" ] && rm -rf "$BUILD_DIR" 2>/dev/null || true
+  [ -n "$TARBALL" ] && rm -f "$TARBALL" 2>/dev/null || true
+  [ -n "$WORKSPACE" ] && rm -rf "$WORKSPACE" 2>/dev/null || true
+  # Remove throwaway sandboxes (ignore errors / absent backends). Only touch a
+  # backend whose CLI is present, and bound each call so a stuck backend or a
+  # prompt cannot wedge teardown.
+  command -v msb >/dev/null 2>&1 && _bounded "$ACQ" --backend msb rm imgverify-msb
+  command -v sbx >/dev/null 2>&1 && _bounded "$ACQ" --backend sbx rm imgverify-sbx
+  # Best-effort: drop the locally-built image (leave sbx's loaded template, which
+  # `sbx reset` clears, since there is no per-template rm guarantee across versions).
+  [ -n "$ENGINE" ] && _bounded "$ENGINE" rmi "$TAG"
+}
+trap cleanup EXIT INT TERM
+
+# --- Build the custom test image -------------------------------------------
+build_image() {
+  info "build custom image ($TAG, marker=$MARKER, engine=$ENGINE)"
+  if [ -z "$ENGINE" ]; then
+    block "no container engine (docker/podman) to build the test image — cannot verify --image live"
+    return 1
+  fi
+  BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-imgverify.XXXXXX")
+  # A `RUN` step executes as the image's current USER. The base
+  # (docker/sandbox-templates:shell) sets USER=agent, so a bare
+  # `RUN echo > /etc/...` fails EPERM. The contract does grant `agent`
+  # passwordless sudo, so `RUN sudo …` into /etc WOULD work — but we deliberately
+  # do NOT: the marker is a throwaway read-back artifact, and writing it to the
+  # contract-guaranteed agent-owned /home/agent is the least-privilege choice that
+  # works regardless of whether the custom base ships sudo or leaves USER=root.
+  # read_marker reads the same path.
+  cat > "$BUILD_DIR/Dockerfile" <<EOF
+FROM $BASE
+# Unique marker so the verifier can confirm the sandbox booted THIS image.
+# Written to agent-owned /home/agent (no sudo needed) rather than root-owned /etc.
+RUN echo "$MARKER" > /home/agent/.acq-image-marker
+EOF
+  if "$ENGINE" build -t "$TAG" "$BUILD_DIR" >/tmp/acq-imgbuild.log 2>&1; then
+    ok "built $TAG FROM $BASE via $ENGINE"
+    return 0
+  fi
+  block "image build failed (see /tmp/acq-imgbuild.log) — base pull may need auth or network"
+  tail -5 /tmp/acq-imgbuild.log 2>/dev/null | sed 's/^/        /'
+  return 1
+}
+
+# --- Read the marker back out of a running sandbox -------------------------
+read_marker() {  # $1 = backend, $2 = sandbox
+  "$ACQ" --backend "$1" exec "$2" -- sh -lc 'cat /home/agent/.acq-image-marker 2>/dev/null' 2>/dev/null | tr -d '\r'
+}
+
+# ===========================================================================
+# MSB
+# ===========================================================================
+verify_msb() {
+  info "MSB backend"
+  if ! command -v msb >/dev/null 2>&1; then
+    block "msb not on PATH — skipping msb"; return 0
+  fi
+  case "$(uname -s)" in
+    Linux) [ -e /dev/kvm ] || { block "/dev/kvm absent — msb create will fail on Linux; skipping msb"; return 0; } ;;
+  esac
+  # msb does NOT read the host engine's local image store: a bare tag like
+  # `localhost/acq-verify-image:test` is treated as a REGISTRY reference, so msb
+  # tries to pull `https://localhost/v2/...` and fails. For a locally-built image
+  # we must import it into msb's own cache first with `msb image load` (parallel
+  # to sbx's `sbx template load`). Then create with `--pull never` so msb uses the
+  # cached image instead of trying to re-pull the localhost ref.
+  #
+  # Stream `<engine> save` straight into `msb image load` (both use stdout/stdin
+  # by default) so no multi-hundred-MB tarball is ever written to disk — this
+  # host is disk-constrained, and a temp tar would double the footprint.
+  #
+  # `set -o pipefail` INSIDE the inner shell makes the pipeline's exit status
+  # reflect a failure in EITHER stage — critical here so a `save` failure is not
+  # masked by an `msb image load` that "succeeds" on truncated input. (An outer
+  # PIPESTATUS check would be wrong: from bash's view the pipeline is hidden
+  # inside a single `sh -c`, so PIPESTATUS[0] would be timeout/sh, not `save`.)
+  # A timeout bounds the whole thing.
+  info "msb: import the local image (engine save | msb image load, no temp tar)"
+  local _import_rc=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 180 sh -c 'set -o pipefail; "$1" save "$2" | msb image load -t "$2"' _ "$ENGINE" "$TAG" \
+      >/tmp/acq-msb-imgload.log 2>&1 || _import_rc=$?
+  else
+    sh -c 'set -o pipefail; "$1" save "$2" | msb image load -t "$2"' _ "$ENGINE" "$TAG" \
+      >/tmp/acq-msb-imgload.log 2>&1 || _import_rc=$?
+  fi
+  if [ "$_import_rc" -eq 0 ]; then
+    ok "streamed $TAG into msb image cache ($ENGINE save | msb image load)"
+  else
+    block "could not import the image into msb (see /tmp/acq-msb-imgload.log); skipping msb"
+    tail -5 /tmp/acq-msb-imgload.log 2>/dev/null | sed 's/^/        /'
+    return 0
+  fi
+  _bounded "$ACQ" --backend msb rm imgverify-msb
+  # ACQ_MSB_PULL=never so msb uses the just-loaded cache entry rather than trying
+  # to pull the localhost ref from a registry (see acq.backends/msb.sh).
+  info "msb: acq --image $TAG create shell (cached, --pull never)"
+  if printf 'N\n' | ACQ_MSB_PULL=never "$ACQ" --backend msb --image "$TAG" create shell --name imgverify-msb "$WORKSPACE" \
+       >/tmp/acq-imgverify-msb.log 2>&1; then
+    ok "msb create with --image returned 0"
+  else
+    bad "msb create with --image failed" "$(tail -5 /tmp/acq-imgverify-msb.log)"
+    return 0
+  fi
+  local got
+  got=$(read_marker msb imgverify-msb)
+  if [ "$got" = "$MARKER" ]; then
+    ok "msb booted the CUSTOM image (marker matched)"
+  else
+    bad "msb did not boot the custom image" "expected marker '$MARKER', got '$got'"
+  fi
+  _bounded "$ACQ" --backend msb rm imgverify-msb
+}
+
+# ===========================================================================
+# SBX
+# ===========================================================================
+verify_sbx() {
+  info "SBX backend"
+  if ! command -v sbx >/dev/null 2>&1; then
+    block "sbx not on PATH — skipping sbx"; return 0
+  fi
+  # sbx pulls templates from a registry, not the host engine's local store. For a
+  # locally-built image we must import it with `sbx template load <FILE>` first.
+  # Unlike `msb image load` (which reads stdin, so we stream into it), `sbx
+  # template load` takes a FILE path and does NOT accept `-` for stdin — so the
+  # sbx path must write a temp tar. It is removed in cleanup ($TARBALL).
+  info "sbx: import the local image via 'sbx template load'"
+  TARBALL=$(mktemp "${TMPDIR:-/tmp}/acq-imgverify.XXXXXX.tar")
+  if "$ENGINE" save "$TAG" -o "$TARBALL" >/tmp/acq-imgsave.log 2>&1; then
+    ok "saved $TAG to a tarball via $ENGINE save"
+  else
+    block "could not '$ENGINE save' the image; skipping sbx"; return 0
+  fi
+  if sbx template load "$TARBALL" >/tmp/acq-tplload.log 2>&1; then
+    ok "sbx template load imported the image"
+  else
+    block "sbx template load failed (see /tmp/acq-tplload.log); skipping sbx"
+    tail -5 /tmp/acq-tplload.log 2>/dev/null | sed 's/^/        /'
+    return 0
+  fi
+  _bounded "$ACQ" --backend sbx rm imgverify-sbx
+  # The base is the `shell` variant, so run the `shell` agent to match the variant.
+  # ACQ_DEBUG=1 so acq logs the exact `sbx create …` line for the trace assertion.
+  # A real workspace path is REQUIRED: without one acq prompts "workspace does not
+  # exist" and a piped `N` cancels the create. Use the throwaway WORKSPACE dir.
+  info "sbx: acq --image $TAG create shell $WORKSPACE"
+  if printf 'N\n' | ACQ_DEBUG=1 "$ACQ" --backend sbx --image "$TAG" create shell --name imgverify-sbx "$WORKSPACE" \
+       >/tmp/acq-imgverify-sbx.log 2>&1; then
+    ok "sbx create with --image returned 0"
+  else
+    bad "sbx create with --image failed" "$(tail -5 /tmp/acq-imgverify-sbx.log)"
+    return 0
+  fi
+  # Confirm acq actually issued `sbx create --template <tag>` (belt-and-suspenders
+  # over the marker read). The create log carries acq's own notice line.
+  if grep -q "sbx create --template $TAG" /tmp/acq-imgverify-sbx.log 2>/dev/null; then
+    ok "acq issued 'sbx create --template $TAG'"
+  fi
+  local got
+  got=$(read_marker sbx imgverify-sbx)
+  if [ "$got" = "$MARKER" ]; then
+    ok "sbx booted the CUSTOM template (marker matched)"
+  else
+    bad "sbx did not boot the custom template" "expected marker '$MARKER', got '$got'"
+  fi
+  _bounded "$ACQ" --backend sbx rm imgverify-sbx
+}
+
+# ===========================================================================
+# Run
+# ===========================================================================
+info "preconditions"
+if [ -n "$ENGINE" ]; then
+  ok "container engine for build: $ENGINE (daemon reachable)"
+else
+  # Distinguish "no CLI at all" from "CLI present but daemon down" so the user
+  # knows whether to install an engine or just start one (e.g. Docker Desktop
+  # not running, and podman also unreachable).
+  _present=""
+  command -v docker >/dev/null 2>&1 && _present="$_present docker"
+  command -v podman >/dev/null 2>&1 && _present="$_present podman"
+  if [ -n "$_present" ]; then
+    block "engine CLI present ($(echo "$_present" | sed 's/^ //')) but no daemon responded to '\''info'\'' — start Docker Desktop or the podman machine, then re-run"
+  else
+    block "no docker/podman CLI — install one (podman is fine; Docker Desktop is not required)"
+  fi
+fi
+command -v curl >/dev/null 2>&1 && ok "curl on PATH" || true
+
+if ! build_image; then
+  # Without a built image there is nothing to verify live; surface BLOCKED, not FAIL.
+  printf '\n  passed: %d   failed: %d   blocked: %d\n' "$PASS" "$FAIL" "$BLOCKED"
+  [ "$FAIL" -eq 0 ] && exit 0 || exit 1
+fi
+
+# Throwaway workspace to mount into the sandbox. It MUST exist: acq's create/run
+# pre-flight prompts to create a missing workspace, and the piped `N` we feed to
+# decline the github-scope prompt would cancel the whole create (the sbx failure
+# seen on the first live run). Removed in cleanup.
+WORKSPACE=$(mktemp -d "${TMPDIR:-/tmp}/acq-imgverify-ws.XXXXXX")
+
+case "$ONLY" in
+  sbx) verify_sbx ;;
+  msb) verify_msb ;;
+  "")  verify_msb; verify_sbx ;;
+esac
+
+printf '\n  passed: %d   failed: %d   blocked: %d\n' "$PASS" "$FAIL" "$BLOCKED"
+[ "$FAIL" -eq 0 ]
