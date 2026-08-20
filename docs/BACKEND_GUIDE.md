@@ -642,6 +642,16 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   cadence (see the live end-to-end note below) before treating it as verified
   working. (`msb -p` also accepts `BIND_ADDR:HOST:GUEST` and `/udp`, but acq
   stays TCP + loopback for sbx parity.)
+  **Loopback-only guest services need the post-hoc path or a wider bind.** The
+  host-side bind for `-p HOST:GUEST` is loopback by default, but the msb publisher
+  connects to the sandbox's guest network IP, not to guest `127.0.0.1`. A service
+  bound only to `127.0.0.1:GUEST` inside the sandbox can therefore answer
+  `acq exec <sandbox> -- curl http://127.0.0.1:GUEST` while host-side
+  `curl http://127.0.0.1:HOST` connects and then fails with `Empty reply from
+  server` / browser `ERR_EMPTY_RESPONSE`. Bind the service to `0.0.0.0:GUEST` (or
+  the guest interface address) for create-time `publishedPorts`, or use
+  `acq --backend msb ports <sandbox> --publish HOST:GUEST`; the post-hoc path
+  tunnels with `ssh -L` from inside the guest and can reach guest loopback.
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
 - **`acq` can auto-install only `opencode` on msb.** On the msb base image `acq`
