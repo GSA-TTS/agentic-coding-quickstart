@@ -145,13 +145,13 @@ Rate each threat for your specific deployment. **Likelihood**: 1 (Rare) to 5 (Al
 > - *Supply chain (T3):* the SHA pin means sbx verifies the fetched kit content
 >   against a specific commit, so substitution — even via the trusted ZScaler
 >   TLS-inspecting proxy — is detected. Bumping `PATTERNS_KIT_REF` is a
->   reviewable change. The playbook kit further SHA-verifies its own runtime
->   clone (`PLAYBOOK_SHA`).
+>   reviewable change. The playbook kit further SHA-verifies its own delivered
+>   runtime tree (`PLAYBOOK_SHA`).
 > - *Availability:* sandbox creation now requires network access to GitHub, and —
 >   while the playbook repo is private — a GitHub token
 >   (`sbx secret set -g github`). Offline/airgapped creation yields a sandbox
 >   without the kits rather than falling back to a vendored copy.
-> - *Trust model:* the playbook is cloned into a **writable** home dir, so an
+> - *Trust model:* the playbook is delivered (as a tarball) into a **writable** home dir, so an
 >   agent can modify its own rules/skills in-session (accepted at FIPS-Low; blast
 >   radius is one ephemeral sandbox). See `docs/adr/0005`.
 

@@ -36,7 +36,7 @@ This repo is one of three in the agentic coding ecosystem:
 This project operates under professional standards of conduct. All contributors:
 
 - Be respectful and constructive in all interactions
-- Follow security requirements outlined in `AGENTS.md` and `docs/CODING_PRACTICES.md`
+- Follow security requirements outlined in `AGENTS.md` and [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (in the GSA agentic-coding-playbook)
 - For security issues, see [SECURITY.md](SECURITY.md)
 
 ---
@@ -59,7 +59,7 @@ This project operates under professional standards of conduct. All contributors:
 
 2. Read the core documentation:
    - `AGENTS.md` — Behavioral rules for AI agents
-   - `docs/CODING_PRACTICES.md` — Secure coding standards
+   - [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (GSA agentic-coding-playbook) — Secure coding standards
    - `docs/QUICKSTART_SBX.md` — sbx CLI setup guide
 
 3. Follow the quickstart to set up your environment
@@ -279,7 +279,7 @@ squashed away), so focus on getting the PR title right.
    git checkout -b feat/your-feature-name
    ```
 
-2. **Make your changes** following the coding standards in `docs/CODING_PRACTICES.md`
+2. **Make your changes** following the coding standards in [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (GSA agentic-coding-playbook)
 
 3. **Write tests** if applicable — all new features should include tests
 
@@ -300,7 +300,7 @@ squashed away), so focus on getting the PR title right.
    - Test results (if applicable)
 
 7. **Address review feedback** — reviewers will check for:
-   - Compliance with `AGENTS.md` and `docs/CODING_PRACTICES.md`
+   - Compliance with `AGENTS.md` and [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (GSA agentic-coding-playbook)
    - Conventional commit format
    - Test coverage
    - Security implications
@@ -314,7 +314,7 @@ squashed away), so focus on getting the PR title right.
 All code must comply with:
 
 - **AGENTS.md** — Behavioral rules for AI agents
-- **docs/CODING_PRACTICES.md** — Secure coding standards including:
+- **[`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md)** (GSA agentic-coding-playbook) — Secure coding standards including:
   - Input validation and output encoding
   - Secrets management (no secrets in code!)
   - Dependency security (exact version pinning)
