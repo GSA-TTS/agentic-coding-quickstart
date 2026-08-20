@@ -4,7 +4,11 @@
 # Default owner for everything in the repo
 * @GSA-TTS/agentic-coding-team
 
-# Security-sensitive files require additional review
-/.github/workflows/ @GSA-TTS/agentic-coding-team
-/AGENTS.md @GSA-TTS/agentic-coding-team
-/SECURITY.md @GSA-TTS/agentic-coding-team
+# Security-sensitive paths require a review from the admins team. This IS a real
+# additional gate: agentic-coding-admins is a narrow subset of the broad
+# agentic-coding-team default owner above, so a change here needs sign-off from a
+# maintainer/admin, not just any team member. Branch protection must require
+# code-owner review for these lines to be enforced.
+/.github/workflows/ @GSA-TTS/agentic-coding-admins
+/AGENTS.md @GSA-TTS/agentic-coding-admins
+/SECURITY.md @GSA-TTS/agentic-coding-admins
