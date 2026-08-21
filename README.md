@@ -10,7 +10,7 @@ configures the environment for federal usage. To provide that isolation, it uses
 (microsandbox), a lightweight, open-source microVM runtime.
 
 > acq is designed to support multiple isolation backends. A Docker Sandboxes (**`sbx`**) backend
-> is also supported. See [docs/QUICKSTART_SBX.md](docs/QUICKSTART_SBX.md) for sbx setup and
+> is also supported. See [docs/howto/sbx.md](docs/howto/sbx.md) for sbx setup and
 > [docs/BACKEND_GUIDE.md](docs/BACKEND_GUIDE.md) for how the two backends compare.
 
 ## Agentic Coding Ecosystem
@@ -48,9 +48,9 @@ and GitHub access interactively on first run (see [Step 3](#step-3-create-and-ru
 
 | Requirement     | Notes                                                      |
 | --------------- | ---------------------------------------------------------- |
-| A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li></ul>If you need more detail than this, see [msb host setup](docs/QUICKSTART.md#msb-host-setup) for per-platform particulars. |
+| A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li></ul>If you need more detail than this, see [msb host setup](docs/howto/acq.md#msb-host-setup) for per-platform particulars. |
 | `git`           | Already installed on macOS and on the supported Linux hosts — **nothing to do**. (On macOS, the first time you run a `git` command the system may offer to install the Command Line Tools; accept it.) Check with `git --version`. |
-| USAi API key    | **Required, but `acq` guides you** — on first run `acq` prompts you to paste a key and validates it, so you need not configure anything beforehand. You will need to [create a key](https://console.gsa.usai.gov/key-management) (do it now or when prompted); USAi keys expire every 7 days. <p>Running **non-interactively** (CI/piped) has no prompt, so the key must be set in advance — see [Secrets](docs/QUICKSTART.md#secrets).</p> |
+| USAi API key    | **Required, but `acq` guides you** — on first run `acq` prompts you to paste a key and validates it, so you need not configure anything beforehand. You will need to [create a key](https://console.gsa.usai.gov/key-management) (do it now or when prompted); USAi keys expire every 7 days. <p>Running **non-interactively** (CI/piped) has no prompt, so the key must be set in advance — see [Secrets](docs/howto/acq.md#secrets).</p> |
 | GitHub token | **Nothing to get in advance** — `acq` offers to walk you through creating a repo-scoped token on first run, when your project contains GitHub repos. You can decline and add one later. <p>(A token lets the agent authenticate to GitHub, work with private repositories, and act on your behalf — open PRs, push to branches, etc.)</p> |
 
 ### Step 1: Install microsandbox (msb)
@@ -141,7 +141,7 @@ On first run, `acq` sets you up interactively — nothing to configure beforehan
 
 `acq` injects secrets into the sandbox at runtime — the real values **never
 enter the guest**. To set secrets ahead of time (for CI or scripted setups),
-see [Secrets](docs/QUICKSTART.md#secrets) in the acq Quickstart.
+see [Secrets](docs/howto/acq.md#secrets) in the acq how-to.
 
 > [!NOTE]
 > Sandboxes sign your git commits with your host SSH key on **both** backends —
@@ -157,8 +157,8 @@ see [Secrets](docs/QUICKSTART.md#secrets) in the acq Quickstart.
 **Want to know more about what `acq` is doing under the hood?** See [How It Works](#how-it-works).
 
 **Need more details, or want to use the sbx backend instead?** See the
-[acq Quickstart](docs/QUICKSTART.md), the [Backend Guide](docs/BACKEND_GUIDE.md),
-and the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
+[acq How-To](docs/howto/acq.md), the [Backend Guide](docs/BACKEND_GUIDE.md),
+and the [Full sbx CLI Guide](docs/howto/sbx.md).
 
 **Working across multiple repos?** Mounting extra directories works on either
 backend via `acq`; the command syntax and examples are documented in
@@ -455,9 +455,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 | `scripts/verify-backends`           | Live end-to-end backend verification (needs Docker or KVM) |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
-| `docs/QUICKSTART.md`                | acq quickstart and backend selection guide                |
+| `docs/howto/acq.md`                 | acq how-to guide and backend selection                     |
 | `docs/BACKEND_GUIDE.md`             | Per-backend strengths, tradeoffs, and configuration       |
-| `docs/QUICKSTART_SBX.md`            | Full sbx CLI setup guide                                   |
+| `docs/howto/sbx.md`                 | Full sbx CLI setup guide                                   |
 | `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
 
 ---

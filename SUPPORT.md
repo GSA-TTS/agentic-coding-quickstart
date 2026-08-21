@@ -6,7 +6,7 @@ guidance for running AI coding agents in isolated environments.
 ## Documentation
 
 - [README](README.md) — overview and 5-minute quick start
-- [docs/QUICKSTART.md](docs/QUICKSTART.md) — start here
+- [docs/howto/acq.md](docs/howto/acq.md) — start here
 - [docs/](docs/) — full documentation (backend guide, troubleshooting, ADRs)
 
 ## Questions or help
