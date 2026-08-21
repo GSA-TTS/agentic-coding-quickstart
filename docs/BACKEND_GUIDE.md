@@ -612,6 +612,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 | Secret binding breadth | 7 built-in services + any custom `--host/--env` endpoint | usai + github + **any** custom `--host/--env` endpoint bound generically via `--secret ENV@HOST` (shipped) |
 | Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; `SUPPORTS_SNAPSHOTS=0`) |
 | Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` now implemented (ADR-0015) — live end-to-end verification pending a KVM host |
+| Kit volumes | neutral `volumes:` passed through 1:1 to kit-spec v2 §5.7 (sized block device / tmpfs, mounted at create; dies with the sandbox) | neutral `volumes:` mapped to a derived named disk volume (`--mount-named acq-<sandbox>-<pathslug>:<path>:kind=disk,size=<size>`) or `--tmpfs <path>:<size>`; derived volumes removed on `acq rm` (ADR-0022) |
 | Agent binary | supplied by the sbx agent template | installed at provision on a plain base (`npm install -g opencode-ai`), then launched on attach |
 | OpenCode web UI | `openchamber` acq kit (publishes port 4096) | same kit once it declares `backends: [sbx, msb]` against the released patterns schema (neutral port/background vocab consumed by both backends; the patterns repo's openchamber kit) |
 | In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+; **no startup-bearing kits on 0.38+ — recreate to extend/refresh**) | re-apply kits idempotently (no state-preserving add) |
@@ -772,7 +773,8 @@ under `integrations/isolation/acq-kits/`) and translated per backend by
   native primitive instead.
 
 The neutral vocabulary is: `caps.network.allow`, `files[]`, `commands[]`,
-`environment`, `agentContext`, `backend_shortcuts`, and `backend_extras`.
+`environment`, `publishedPorts`, `volumes`, `agentContext`,
+`backend_shortcuts`, and `backend_extras`.
 
 **`environment` (guest env vars).** A flat map of `NAME → value` for
 **non-secret** guest environment variables (e.g. `OPENCODE_CONFIG`,
@@ -789,6 +791,33 @@ the kit spec never carries a secret value.
 > **v1.7.0**. `PATTERNS_KIT_REF` is pinned to the patterns **v1.8.0**
 > release commit (`f5fb887`); the pin is only advanced to a tagged release,
 > per the fail-closed cross-repo gating.
+
+**`volumes` (sized guest storage, [ADR-0022](adr/0022-neutral-volumes-kit-vocabulary.md)).**
+A top-level list of `{path, type?, size}` entries — `path` required and
+absolute, `type` empty (block-backed, the default) or `tmpfs`, `size` required
+(byte-size string, e.g. `20G`, `512m`). Volumes are **creation-time only** and
+mount **at boot, before any exec is possible**, so storage layout never races
+startup commands or early agent use. On sbx entries pass through 1:1 to the
+kit-spec v2 §5.7 `volumes` block (a dedicated ext4 block device of the declared
+size); on msb a block entry becomes a derived named disk volume
+(`acq-<sandbox>-<pathslug>`, removed again on `acq rm`) and a tmpfs entry
+becomes `--tmpfs`. Invalid entries are dropped with a warning and reported by
+`acq kit validate`. Don't declare tiny block volumes: msb refuses ext4 disk
+images below a minimum size (128M on msb 0.6.12, "image size is too small for
+ext4 formatting") — treat ~256m as a practical floor.
+
+> **Kit-authoring caveat: volumes mount UNSEEDED (both backends).** The mount
+> is an empty filesystem that shadows any image content at the path. A kit that
+> needs the image's content there (e.g. relocating a baked-in `/nix` store)
+> ships its own first-boot copy step; the shadowed content stays reachable
+> through a non-recursive bind mount of `/` (e.g.
+> `mount --bind / /mnt/rootfs`, then copy from `/mnt/rootfs/<path>`).
+>
+> **Note (cross-repo, open):** the authoritative `volumes` schema property is
+> not yet in the patterns repo's `kit-hybrid-v1.schema.json`. The field is read
+> defensively here (absence is a silent no-op), per the ADR-0014 gating
+> discipline; it lights up for the pinned kits once the patterns schema gains
+> the property and `PATTERNS_KIT_REF` advances past it.
 
 Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 
@@ -841,6 +870,14 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
   ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md)). **Implemented,
   not yet live-verified** — live end-to-end run needs a KVM host per the ADR-0011
   `scripts/verify-backends` cadence
+- Neutral top-level `volumes` vocab consumed by **both** backends (sbx: 1:1
+  into kit-spec v2 §5.7; msb: derived named disk volume / `--tmpfs`, with
+  derived-volume cleanup on `acq rm`)
+  ([ADR-0022](adr/0022-neutral-volumes-kit-vocabulary.md)). **Live-verified on
+  both backends** (`verify-backends`: msb 0.6.12 macOS HVF 17/17 — dedicated
+  virtio-blk mount at boot + derived-volume removal on rm; sbx 0.39.0 9/9 —
+  dedicated block-device mount of the declared size); the patterns schema
+  property is still pending, so the field is read defensively (absence a no-op)
 
 ## Shipped later
 

@@ -27,6 +27,15 @@
 #   - `msb list|ls [-q] [--running]`, `msb stop`, `msb remove|rm [-f]`,
 #     `msb copy|cp SRC DST`, `msb ssh [SANDBOX] [-- CMD…]`, `msb ssh authorize`,
 #     `msb run … -p HOST:GUEST` (published ports), `msb doctor`.
+#   - Volume surface (ADR-0022): `msb create … --mount-named
+#     NAME:PATH:kind=disk,size=SIZE` (create-or-reuse disk-backed named volume),
+#     `--tmpfs PATH:SIZE`, and `msb volume ls -q` / `msb volume rm NAME` for the
+#     terminate-time cleanup of derived volumes. LIVE-VERIFIED end-to-end on
+#     msb 0.6.12 (macOS HVF) via `scripts/verify-backends --only msb` (17/17):
+#     the derived disk volume mounts at boot on a dedicated virtio-blk device
+#     of the declared size, and is removed again on `acq rm`. NOTE: msb refuses
+#     tiny ext4 disk images ("image size is too small for ext4 formatting";
+#     floor 128M on 0.6.12) — kits should stay well above it (~256m floor).
 # net-rule grammar (verified from --help): `<action>[:<direction>]@<target>
 #   [:<proto>[:<ports>]]`. For a literal hostname the target is the BARE FQDN,
 #   e.g. `allow@api.gsa.usai.gov` (per the msb --help example
@@ -1197,7 +1206,15 @@ _acq_msb_balanced_rules_into() {
 _acq_msb_port_flags_into() {
   local _arr="$1" _spec="$2" _rec _guest _host
   eval "$_arr=()"
-  while IFS="$(printf '\t')" read -r _guest _ _ _host; do
+  # Parse fields with cut, NOT `IFS=<tab> read`: tab is IFS whitespace, so a
+  # bare read COLLAPSES adjacent empty fields — an entry with guest + host but
+  # no protocol/name ("3000<TAB><TAB><TAB>8080") would read the host column
+  # into the protocol position and emit `-p 3000:3000` instead of `-p 8080:3000`
+  # (same pitfall as the kit_spec_files consumer in _acq_msb_apply_kit_dir).
+  while IFS= read -r _rec; do
+    [ -n "$_rec" ] || continue
+    _guest=$(printf '%s' "$_rec" | cut -f1)
+    _host=$(printf '%s' "$_rec" | cut -f4)
     [ -n "$_guest" ] || continue
     [ -n "$_host" ] || _host="$_guest"
     # Defense-in-depth: the validator already guarantees integer ports, but
@@ -1212,6 +1229,91 @@ _acq_msb_port_flags_into() {
   done <<EOF
 $(kit_spec_published_ports "$_spec")
 EOF
+}
+
+# Emit the create-time storage flags for a kit's neutral `volumes:` entries into
+# the named array. Usage: _acq_msb_volume_flags_into ARRVAR SPEC SANDBOX
+#
+# ADR-0022: kit_spec_volumes emits validated `path<TAB>type<TAB>size` records
+# (path absolute + charset-safe, type ""|tmpfs, size byte-size grammar).
+# Mapping, mirroring the sbx kit-spec v2 §5.7 semantics:
+#   block (type "")  -> --mount-named acq-<sandbox>-<pathslug>:<path>:kind=disk,size=<size>
+#   tmpfs            -> --tmpfs <path>:<size>
+# The named volume is derived DETERMINISTICALLY from sandbox name + path slug so
+# acq_backend_terminate can find and remove it by prefix — msb named volumes
+# otherwise persist independently under ~/.microsandbox/volumes/ and would
+# silently accumulate (sbx kit volumes die with `sbx rm`; the derived name +
+# terminate cleanup restores that lifecycle). --mount-named is create-or-reuse:
+# a leftover same-name volume with incompatible settings fails the create loudly
+# rather than silently changing the volume. Mounts land at boot, before any exec
+# is possible — the same no-race-with-startup guarantee as sbx volumes. Like the
+# sbx side, mounts land UNSEEDED (msb named volumes shadow image content at the
+# path). Records are parsed with cut, not `IFS=<tab> read` (tab is IFS
+# whitespace, so a bare read collapses the empty type field into size). Uses the
+# eval-by-name array pattern (macOS bash 3.2 compat), like
+# _acq_msb_port_flags_into. Absence is a silent no-op (defensive neutral read).
+_acq_msb_volume_flags_into() {
+  local _arr="$1" _spec="$2" _name="$3" _rec _path _type _size _slug
+  eval "$_arr=()"
+  while IFS= read -r _rec; do
+    [ -n "$_rec" ] || continue
+    _path=$(printf '%s' "$_rec" | cut -f1)
+    _type=$(printf '%s' "$_rec" | cut -f2)
+    _size=$(printf '%s' "$_rec" | cut -f3)
+    [ -n "$_path" ] || continue
+    # Defense-in-depth: the validator already guarantees an absolute path and
+    # safe charsets, but re-check before the values reach an argv via eval.
+    case "$_path" in
+      /*) ;;
+      *)
+        echo "acq(msb): warning: skipping volume with non-absolute path: ${_path}" >&2
+        continue
+        ;;
+    esac
+    if printf '%s%s' "$_path" "$_size" | LC_ALL=C grep -q '[^A-Za-z0-9._/-]'; then
+      echo "acq(msb): warning: skipping volume with unsafe path/size: ${_path}:${_size}" >&2
+      continue
+    fi
+    if [ "$_type" = "tmpfs" ]; then
+      eval "$_arr+=(--tmpfs \"\${_path}:\${_size}\")"
+    else
+      # Slug: strip the leading /, map everything outside [A-Za-z0-9] to '-',
+      # squeeze runs (e.g. /var/lib/docker -> var-lib-docker).
+      _slug=$(printf '%s' "${_path#/}" | tr -c 'A-Za-z0-9' '-' | tr -s '-')
+      _slug="${_slug%-}"
+      eval "$_arr+=(--mount-named \"acq-\${_name}-\${_slug}:\${_path}:kind=disk,size=\${_size}\")"
+    fi
+  done <<EOF
+$(kit_spec_volumes "$_spec")
+EOF
+}
+
+# Remove the named volumes acq derived for SANDBOX's kit `volumes:` entries
+# (acq-<sandbox>-<pathslug>, see _acq_msb_volume_flags_into). Best-effort and
+# always returns 0: a host with no derived volumes is a quiet no-op. Volume
+# names are read into an array FIRST — `msb volume rm` inside a piped while
+# would drain the loop's stdin (the recorded loop-stdin-consumption pitfall).
+# NOTE: prefix-matched, so a sandbox name that is itself a prefix of another
+# sandbox's name + '-' (e.g. `web` vs `web-2`) could match the longer sandbox's
+# volumes; accepted for now — see ADR-0022.
+_acq_msb_remove_derived_volumes() {
+  local _name="$1" _vol _vols=()
+  while IFS= read -r _vol; do
+    case "$_vol" in
+      "acq-${_name}-"*) _vols+=("$_vol") ;;
+    esac
+  done <<EOF
+$(msb volume ls -q 2>/dev/null)
+EOF
+  local _i
+  for _i in ${_vols[@]+"${!_vols[@]}"}; do
+    if msb volume rm "${_vols[$_i]}" >/dev/null 2>&1 </dev/null; then
+      acq_debug "removed derived volume ${_vols[$_i]}"
+    else
+      echo "acq(msb): warning: could not remove derived volume: ${_vols[$_i]}" >&2
+    fi
+  done
+  return 0
 }
 
 # Apply a single fetched kit directory to a running sandbox NAME.
@@ -2127,6 +2229,16 @@ acq_backend_provision() {
     local pp=()
     _acq_msb_port_flags_into pp "$spec"
     [ "${#pp[@]}" -gt 0 ] && create_flags+=("${pp[@]}")
+
+    # Volumes (ADR-0022) → create-time storage flags: a block entry becomes a
+    # derived named disk volume (--mount-named acq-<name>-<pathslug>:<path>:
+    # kind=disk,size=<size>, removed again in acq_backend_terminate), a tmpfs
+    # entry becomes --tmpfs <path>:<size>. Mounts land at boot, before any exec
+    # is possible (the same no-race guarantee as sbx kit volumes). Absence is a
+    # silent no-op.
+    local vf=()
+    _acq_msb_volume_flags_into vf "$spec" "$name"
+    [ "${#vf[@]}" -gt 0 ] && create_flags+=("${vf[@]}")
 
     # Startup-phase commands → a create-time `--script-path acq-startup:<file>`
     # (ADR-0017). The script is REGISTERED at create; a bare registration is
@@ -3410,7 +3522,10 @@ acq_backend_terminate() {
   # before removing the sandbox (ADR-0015). Killing a dead PID / missing state
   # file is a no-op.
   _acq_msb_ports_teardown "$1"
-  msb remove --force "$1"
+  # On a failed remove the sandbox still exists (and may still use its derived
+  # volumes), so only clean the volumes up after a successful remove.
+  msb remove --force "$1" || return $?
+  _acq_msb_remove_derived_volumes "$1"
 }
 
 acq_backend_list() {

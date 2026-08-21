@@ -34,6 +34,7 @@
 #   kit_spec_field       SPEC KEY            -> top-level scalar (name, kind, …)
 #   kit_spec_net_allow   SPEC                -> one host[:port] per line
 #   kit_spec_published_ports SPEC            -> one "guest<TAB>proto<TAB>name<TAB>host" per line
+#   kit_spec_volumes     SPEC                -> one "path<TAB>type<TAB>size" per line
 #   kit_spec_files       SPEC                -> one "path|mode|phase|source" per line
 #   kit_spec_commands    SPEC                -> command records (see format below)
 #   kit_spec_env         SPEC                -> one "NAME<TAB>value" per line
@@ -370,6 +371,95 @@ _kit_pp_validate() {
       if (p!="" && p!="tcp" && p!="udp")  { print "kit-translate: skipping published port with invalid protocol: " p > "/dev/stderr"; next }
       if (n!="" && n !~ /^[A-Za-z0-9._-]+$/) { print "kit-translate: skipping published port with unsafe name: " n > "/dev/stderr"; next }
       printf "%s\t%s\t%s\t%s\n", g, p, n, h
+    }
+  '
+}
+
+# ---------------------------------------------------------------------------
+# kit_spec_volumes SPEC
+# ---------------------------------------------------------------------------
+# Echo one record per volumes[] entry, tab-separated:
+#   path <TAB> type <TAB> size
+# type is empty for the default (block-backed) volume; the only other value is
+# tmpfs. size is REQUIRED — the neutral schema deliberately does not inherit
+# sbx's unsized-volume default, which is still settling upstream (0.39-rc moved
+# it 50G -> 512M). The neutral top-level `volumes:` list is the ONLY source (the
+# field is brand new, so there is no backend_extras fallback to carry):
+#
+#   volumes:
+#     - path: /var/lib/docker   # required, absolute
+#       size: 20G               # required
+#     - path: /scratch
+#       type: tmpfs             # "" (block, default) | tmpfs
+#       size: 2G
+#
+# Volumes are CREATION-TIME ONLY on both backends (`sbx kit add` skips them; msb
+# mounts at create) and mount UNSEEDED: an empty filesystem shadows any image
+# content at the path, so a kit needing seeded content ships its own first-boot
+# copy step. Multiple kits union by path, last wins — sbx resolves that itself.
+# The neutral schema carries no `mode` (msb has no equivalent; kits chmod in a
+# startup step instead — see ADR-0022).
+#
+# VALIDATION (SI-10): these values reach a generated sbx-v2 spec and an msb
+# create argv, so they are untrusted. path must be absolute and
+# charset-restricted ([A-Za-z0-9._/-]); type must be empty or tmpfs; size must
+# match the kit-spec v2 §5.7 byte-size grammar (e.g. 20G, 512m, 2gib).
+# Offending entries are DROPPED with a stderr warning (mirroring
+# _kit_pp_validate). Absence is a silent no-op (defensive read, ADR-0014
+# precedent: the patterns schema property may lag the translator).
+kit_spec_volumes() {
+  local spec="$1"
+  [ -f "$spec" ] || return 0
+  _kit_vol_parse_neutral "$spec" | _kit_vol_validate
+}
+
+# Parse the neutral top-level `volumes:` list into raw (unvalidated)
+# tab-separated `path<TAB>type<TAB>size` records. Reads only the top-level
+# block (dedent ends it). A record is emitted when ANY field is present so a
+# pathless entry still reaches the validator (and `acq kit validate`) instead
+# of vanishing silently.
+_kit_vol_parse_neutral() {
+  awk '
+    function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); gsub(/^"|"$/,"",s); return s }
+    function flush(){ if (cur_p != "" || cur_t != "" || cur_s != "") printf "%s\t%s\t%s\n", cur_p, cur_t, cur_s; cur_p=""; cur_t=""; cur_s="" }
+    /^volumes:[[:space:]]*$/ { in_v=1; flush(); next }
+    /^[A-Za-z]/ { if (in_v) { flush(); in_v=0 } }
+    in_v {
+      if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#/) next
+      if ($0 ~ /^[[:space:]]+-[[:space:]]/) {
+        flush()
+        line=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",line)
+        k=line; sub(/:.*/,"",k); k=trim(k)
+        v=line; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); v=trim(v)
+        if (k=="path") cur_p=v; else if (k=="type") cur_t=v; else if (k=="size") cur_s=v
+        next
+      }
+      if ($0 ~ /^[[:space:]]+[A-Za-z]/) {
+        k=$0; sub(/:.*/,"",k); k=trim(k)
+        v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); v=trim(v)
+        if (k=="path") cur_p=v; else if (k=="type") cur_t=v; else if (k=="size") cur_s=v
+        next
+      }
+    }
+    END { if (in_v) flush() }
+  ' "$1"
+}
+
+# Validate raw `path<TAB>type<TAB>size` records on stdin (SI-10): path absolute
+# + safe charset; type "" or tmpfs; size required + byte-size grammar (integer
+# or decimal, optional k/m/g/t/p unit with optional i, optional b — the
+# units.RAMInBytes grammar kit-spec v2 uses). Drops offending records with a
+# stderr warning; emits the survivors unchanged.
+_kit_vol_validate() {
+  awk -F'\t' '
+    {
+      p=$1; t=$2; s=$3
+      if (p=="")                          { print "kit-translate: skipping volume with missing path (size: " s ")" > "/dev/stderr"; next }
+      if (p !~ /^\/[A-Za-z0-9._\/-]+$/)   { print "kit-translate: skipping volume with unsafe path: " p > "/dev/stderr"; next }
+      if (t!="" && t!="tmpfs")            { print "kit-translate: skipping volume with invalid type: " t > "/dev/stderr"; next }
+      if (s=="")                          { print "kit-translate: skipping volume with missing size: " p > "/dev/stderr"; next }
+      if (s !~ /^[0-9]+(\.[0-9]+)?([kKmMgGtTpP][iI]?)?[bB]?$/) { print "kit-translate: skipping volume with invalid size: " s > "/dev/stderr"; next }
+      printf "%s\t%s\t%s\n", p, t, s
     }
   '
 }
@@ -743,6 +833,7 @@ kit_spec_agent_context() {
 #   agentContext                    -> agentInstructions.content
 #   publishedPorts (neutral, top-level; or deprecated backend_extras.sbx) ->
 #                                      ports[]                  (top-level, sbx-v2)
+#   volumes (neutral, top-level)    -> volumes[]                (top-level, sbx-v2 §5.7)
 #   backend_shortcuts.sbx           -> (none defined for the four kits; ignored)
 #
 # Usage: kit_translate_to_sbx NEUTRAL_KIT_DIR OUT_DIR
@@ -817,16 +908,40 @@ kit_translate_to_sbx() {
     portrecs=$(kit_spec_published_ports "$spec")
     if [ -n "$portrecs" ]; then
       printf 'ports:\n'
-      printf '%s\n' "$portrecs" | while IFS="$(printf '\t')" read -r pguest pproto pname phost; do
+      # Parse each field with cut, NOT `IFS=<tab> read`: tab is IFS whitespace,
+      # so a bare read COLLAPSES adjacent empty fields — an entry with guest +
+      # host but no protocol/name ("3000<TAB><TAB><TAB>8080") would read the
+      # host column into pproto and emit `protocol: 8080` (same pitfall as the
+      # kit_spec_files consumer in msb.sh).
+      printf '%s\n' "$portrecs" | while IFS= read -r prec; do
+        pguest=$(printf '%s' "$prec" | cut -f1)
+        pproto=$(printf '%s' "$prec" | cut -f2)
+        pname=$(printf '%s' "$prec" | cut -f3)
         [ -n "$pguest" ] || continue
-        # phost (the neutral host column) is intentionally NOT re-emitted: sbx-v2
-        # keys on `container` (the guest port) and assigns the host port itself,
-        # matching the pre-neutral observable shape. Reference it so the field is
-        # consumed by `read` without tripping shellcheck SC2034.
-        : "${phost:-}"
+        # The neutral host column (field 4) is intentionally NOT re-emitted:
+        # sbx-v2 keys on `container` (the guest port) and assigns the host port
+        # itself, matching the pre-neutral observable shape.
         printf '  - container: %s\n' "$pguest"
         [ -n "$pproto" ] && printf '    protocol: %s\n' "$pproto"
         [ -n "$pname" ]  && printf '    name: %s\n' "$(_kit_yaml_quote "$pname")"
+      done
+    fi
+
+    # volumes -> sbx-v2 top-level volumes (kit-spec v2 §5.7), fields passed
+    # through 1:1. Creation-time only (`sbx kit add` skips them); sbx unions
+    # multiple kits by path itself (last wins), so no merging happens here.
+    local volrecs
+    volrecs=$(kit_spec_volumes "$spec")
+    if [ -n "$volrecs" ]; then
+      printf 'volumes:\n'
+      printf '%s\n' "$volrecs" | while IFS= read -r vrec; do
+        vpath=$(printf '%s' "$vrec" | cut -f1)
+        vtype=$(printf '%s' "$vrec" | cut -f2)
+        vsize=$(printf '%s' "$vrec" | cut -f3)
+        [ -n "$vpath" ] || continue
+        printf '  - path: %s\n' "$vpath"
+        [ -n "$vtype" ] && printf '    type: %s\n' "$vtype"
+        printf '    size: %s\n' "$vsize"
       done
     fi
   } > "$sbxspec"
@@ -1144,6 +1259,41 @@ EOF
 $bad_ports
 EOF
   fi
+
+  # volumes[] (neutral top-level). kit_spec_volumes DROPS entries with a
+  # missing/unsafe path, bad type, or missing/invalid size (defense-in-depth for
+  # the sbx-v2 spec + msb argv they reach), so validate the RAW parsed records
+  # here — otherwise a bad entry would be silently dropped rather than reported
+  # by `acq kit validate`. path absolute + [A-Za-z0-9._/-]; type "" | tmpfs;
+  # size required, byte-size grammar (kit-spec v2 §5.7). (ADR-0022, SI-10)
+  local vline vp vt vs
+  while IFS= read -r vline; do
+    [ -n "$vline" ] || continue
+    vp=$(printf '%s' "$vline" | cut -f1)
+    vt=$(printf '%s' "$vline" | cut -f2)
+    vs=$(printf '%s' "$vline" | cut -f3)
+    if [ -z "$vp" ]; then
+      echo "kit: validate: volume path is required" >&2; errs=$((errs + 1))
+    else
+      case "$vp" in
+        /*)
+          if printf '%s' "$vp" | LC_ALL=C grep -q '[^A-Za-z0-9._/-]'; then
+            echo "kit: validate: volume path has illegal characters: '$vp'" >&2; errs=$((errs + 1))
+          fi ;;
+        *) echo "kit: validate: volume path must be absolute: '$vp'" >&2; errs=$((errs + 1)) ;;
+      esac
+    fi
+    if [ -n "$vt" ] && [ "$vt" != "tmpfs" ]; then
+      echo "kit: validate: volume type must be \"\" (block) or tmpfs: '$vt'" >&2; errs=$((errs + 1))
+    fi
+    if [ -z "$vs" ]; then
+      echo "kit: validate: volume size is required (path: '${vp:-<missing>}')" >&2; errs=$((errs + 1))
+    elif ! printf '%s' "$vs" | LC_ALL=C grep -Eq '^[0-9]+(\.[0-9]+)?([kKmMgGtTpP][iI]?)?[bB]?$'; then
+      echo "kit: validate: volume size must be a byte-size (e.g. 20G, 512m): '$vs'" >&2; errs=$((errs + 1))
+    fi
+  done <<EOF
+$(_kit_vol_parse_neutral "$spec")
+EOF
 
   # commands[].background must be a boolean. kit_spec_commands coerces a
   # non-boolean to false (defense-in-depth), so scan the RAW spec to REPORT it.
