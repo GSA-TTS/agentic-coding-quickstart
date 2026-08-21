@@ -8,7 +8,7 @@ nist_controls: ["SA-11", "SR-3", "CM-2", "SI-10", "IA-5", "SC-13", "AU-2"]
 frameworks: ["NIST SP 800-53 Rev 5.2", "OWASP Top 10 LLM 2025", "OWASP Top 10 Agentic 2026"]
 audience: "developers"
 keywords: ["checklist", "pre-deployment", "security-review", "sign-off"]
-related_files: ["docs/CODING_PRACTICES.md", "AGENTS.md"]
+related_files: ["https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md", "AGENTS.md"]
 load_priority: "reference-only"
 review_cycle: "semi-annually"
 ---

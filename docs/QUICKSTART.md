@@ -196,9 +196,15 @@ backend (`ppp` — Podman-Plus-Proxy) is deferred.
 curl -fsSL https://install.microsandbox.dev | sh
 msb doctor          # checks KVM/HVF/WHP; msb doctor --fix to set up
 
-# 2. Export the USAi key (msb binds it from a host env var at create; the real
-#    value never enters the guest)
-export USAI_API_KEY=<your-usai-key>
+# 2. Provide the USAi key.
+#    INTERACTIVE (recommended): skip this line — `acq run` prompts you for the
+#    key on first run, or set it once with:  ./acq secret set -g usai
+#    (prompts for the value; it never lands in argv or your shell history).
+#
+#    NON-INTERACTIVE / scripting / CI only: msb binds the key from a host env var
+#    at create (the real value never enters the guest). Read it WITHOUT echoing
+#    so it does not leak into shell history:
+read -rs -p 'USAi API key: ' USAI_API_KEY; export USAI_API_KEY; echo
 
 # 3. Run — acq auto-detects msb, or force it with --backend msb
 ./acq --backend msb run opencode /path/to/your/project

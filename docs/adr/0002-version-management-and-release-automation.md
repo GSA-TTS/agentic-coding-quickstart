@@ -236,4 +236,4 @@ Migration guide: docs/migration/oauth-migration.md
 - [release-please-action](https://github.com/googleapis/release-please-action)
 - [NIST SP 800-53 Rev 5 — CM-2 Baseline Configuration](https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final)
 - [NIST SP 800-53 Rev 5 — CM-3 Configuration Change Control](https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final)
-- Related: `AGENTS.md`, `docs/CODING_PRACTICES.md`
+- Related: `AGENTS.md`, [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (GSA agentic-coding-playbook)
