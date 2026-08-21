@@ -6,7 +6,7 @@ tier: 2
 last_updated: "2026-08-18"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
-related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
+related_files: ["docs/QUICKSTART.md", "docs/QUICKSTART_SBX.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -304,10 +304,10 @@ msb does **not** create the host mount path, so each host workspace path must
 already exist — `acq` errors clearly if one does not.
 
 The msb backend mounts every workspace at the **same absolute path inside the
-guest** (matching sbx's multi-workspace semantics — see
-`docs/QUICKSTART_SBX.md`): `acq run opencode /my/repo` makes the repo appear at
-`/my/repo` in the sandbox. Extra workspaces and a trailing `:ro` marker work the
-same as sbx:
+guest** (matching sbx's multi-workspace semantics — see the canonical
+[Multiple Workspaces](CONCEPTS.md#multiple-workspaces) concept): `acq run
+opencode /my/repo` makes the repo appear at `/my/repo` in the sandbox. Extra
+workspaces and a trailing `:ro` marker work the same as sbx:
 
 ```bash
 acq --backend msb run opencode ~/projects/app ~/projects/lib:ro
@@ -315,8 +315,9 @@ acq --backend msb run opencode ~/projects/app ~/projects/lib:ro
 ```
 
 **Starting directory:** the agent starts in the **primary** (first) workspace,
-matching sbx (`docs/QUICKSTART_SBX.md`: "Primary workspace — the first path;
-agent starts here"). Override the start dir with `ACQ_MSB_WORKSPACE`.
+matching sbx (see [Multiple Workspaces](CONCEPTS.md#multiple-workspaces):
+"Primary workspace — the first path; the agent starts here"). Override the start
+dir with `ACQ_MSB_WORKSPACE`.
 
 **Symlinked host paths are canonicalized.** msb cannot mount a symlinked host
 path — it fails to start with `mount ...: Not a directory (os error 20)`, even

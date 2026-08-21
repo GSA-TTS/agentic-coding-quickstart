@@ -427,68 +427,15 @@ echo "$DOCKER_PAT" | sbx login --password-stdin --username "$DOCKER_USER"
 
 ## Multiple Workspaces
 
-You can mount additional directories alongside the primary workspace when creating a sandbox. This
-is useful when you need to reference multiple repos or folders from one sandbox session.
+Mounting extra directories alongside the primary workspace is a **backend-neutral**
+feature: the `acq run <agent> <primary> [extra][:ro] ...` syntax works
+identically on sbx and msb. The canonical description — syntax, semantics,
+constraints, and security guidance — lives in
+[Multiple Workspaces](CONCEPTS.md#multiple-workspaces).
 
-### Syntax
-
-```bash
-sbx run <agent> <primary-workspace> [extra-workspace]:ro [extra-workspace]:ro ...
-```
-
-- **Primary workspace** — The first path; agent starts here. Read/write by default.
-- **Extra workspaces** — Additional paths the agent can access.
-- **`:ro` suffix** — Mounts extra workspaces as read-only (recommended for reference repos).
-
-All workspaces appear inside the sandbox at their absolute host paths.
-
-### Example: App Repo + Playbook Reference
-
-```bash
-# Primary: your app (read/write)
-# Secondary: agentic-coding-playbook (read-only reference)
-sbx run opencode ~/projects/my-app ~/projects/agentic-coding-playbook:ro
-```
-
-The agent can edit `~/projects/my-app` and read from `~/projects/agentic-coding-playbook` without
-risk of modifying the playbook content.
-
-### Example: Frontend + Backend Repos
-
-```bash
-# Primary: backend (read/write)
-# Secondary: frontend (read-only for now)
-sbx run opencode ~/projects/backend ~/projects/frontend:ro
-```
-
-### Important Constraints
-
-| Constraint | Detail |
-|------------|--------|
-| Mounts are fixed at creation | You cannot add or remove workspaces from an existing sandbox |
-| Changing mounts requires recreation | `sbx rm <name>` then recreate with new paths |
-| `:ro` applies to extra workspaces only | Primary workspace is always read/write in direct mode |
-| Mounted content is visible to agent | Only mount what the agent needs to see |
-
-### When to Use Multi-Workspace
-
-| Use Case | Recommended Setup |
-|----------|-------------------|
-| Reference standards/skills from playbook | Primary: your app, Secondary: playbook `:ro` |
-| Cross-repo code review | Primary: repo under review, Secondary: related repos `:ro` |
-| Docs + implementation side by side | Primary: implementation, Secondary: docs `:ro` |
-| Monorepo-style multi-package work | Primary: one package, Secondary: shared libs `:ro` |
-
-### Security Recommendation
-
-Prefer read-only mounts for secondary workspaces unless the agent genuinely needs write access. This
-limits accidental modifications and reduces the blast radius of agent errors.
-
-> [!WARNING]
-> Mounted directories expose **all content** to the agent, including `.env` files, `.git/config`
-> (which may contain tokens), and any secrets in the mounted path. Avoid mounting directories that
-> contain sensitive files you do not want the agent to see. Use selective, targeted mounts rather
-> than mounting parent or home directories.
+The only sbx-specific angle is how multi-workspace mounts interact with the
+`--clone` remote-clone lifecycle, covered below under
+[Clone Mode + Multiple Workspaces](#clone-mode--multiple-workspaces).
 
 ---
 
