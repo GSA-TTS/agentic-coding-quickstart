@@ -909,6 +909,60 @@ acq_resolve_neutral_image() {
   return 0
 }
 
+# _acq_image_registry_host IMAGE — echo the registry host of an OCI image
+# reference, or nothing if the reference has no explicit registry (Docker Hub
+# short names like `ubuntu` or `library/ubuntu` carry no host). A leading path
+# component is a registry only when it looks like a host: it contains a `.` or a
+# `:` (port), or is exactly `localhost`. This mirrors the Docker/containers
+# reference grammar closely enough to decide whether pull creds are plausibly
+# needed. Used to make registry-auth hints precise instead of hardcoding a few
+# known hosts.
+_acq_image_registry_host() {
+  local ref="${1:-}"
+  [ -n "$ref" ] || return 0
+  local first="${ref%%/*}"
+  # No slash at all -> a bare Docker Hub name (e.g. `ubuntu`, `ubuntu:22.04`).
+  [ "$first" = "$ref" ] && return 0
+  case "$first" in
+    localhost|localhost:*) printf '%s\n' "$first" ;;
+    *.*|*:*)               printf '%s\n' "$first" ;;   # has a dot or a :port
+    *)                     return 0 ;;                 # `library/…` etc. -> Docker Hub
+  esac
+}
+
+# acq_registry_auth_hint BACKEND IMAGE — print, to stderr, a targeted hint for a
+# failed image pull, telling the user how to store registry credentials (or
+# import a local image) for the SPECIFIC registry the image came from. Backend
+# argument selects the correct command surface (msb vs sbx). Emits nothing for a
+# Docker Hub short name (host unknown) beyond the generic path, so callers should
+# still print the raw backend error alongside. Registry-agnostic: works for any
+# private host, not just a hardcoded few.
+acq_registry_auth_hint() {
+  local backend="$1" image="${2:-}"
+  local host
+  host=$(_acq_image_registry_host "$image")
+  case "$backend" in
+    msb)
+      if [ -n "$host" ] && [ "${host%%:*}" != "localhost" ]; then
+        echo "acq(msb):   hint: if the pull was denied, store credentials for this registry:" >&2
+        echo "acq(msb):           msb registry login ${host} -u <user> --password-stdin" >&2
+      fi
+      echo "acq(msb):   hint: for a locally-built image (no registry), import it first and skip the pull:" >&2
+      echo "acq(msb):           <docker|podman> save ${image:-<image>} -o /tmp/img.tar" >&2
+      echo "acq(msb):           msb image load -i /tmp/img.tar -t ${image:-<image>}" >&2
+      echo "acq(msb):           ACQ_MSB_PULL=never ./acq --backend msb --image ${image:-<image>} create <agent> <path>" >&2
+      ;;
+    sbx)
+      if [ -n "$host" ] && [ "${host%%:*}" != "localhost" ]; then
+        echo "acq(sbx):   hint: if the pull was denied, store credentials for this registry:" >&2
+        echo "acq(sbx):           sbx secret set --registry ${host} -u <user>" >&2
+      fi
+      echo "acq(sbx):   hint: for a locally-built image (no registry), import it first:" >&2
+      echo "acq(sbx):           <docker|podman> save ${image:-<image>} -o /tmp/img.tar && sbx template load /tmp/img.tar" >&2
+      ;;
+  esac
+}
+
 # ============================================================================
 # Backend resolution
 # ============================================================================

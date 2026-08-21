@@ -2506,14 +2506,12 @@ EOF
     echo "acq(msb): error: 'msb create' failed for '$name'." >&2
     echo "acq(msb):   flags: ${create_flags[*]}" >&2
     echo "acq(msb):   image: $_msb_image" >&2
-    case "$_msb_image" in
-      ghcr.io/*|*.azurecr.io/*|*private*)
-        echo "acq(msb):   hint: the image may require registry auth, or (for a locally-built" >&2
-        echo "acq(msb):         image) be imported first with 'msb image load' and created with" >&2
-        echo "acq(msb):         ACQ_MSB_PULL=never. Set the image via --image / ACQ_IMAGE (neutral)" >&2
-        echo "acq(msb):         or ACQ_MSB_IMAGE (default: docker.io/docker/sandbox-templates:shell-docker)." >&2
-        ;;
-    esac
+    # Targeted registry-auth / local-import hint for the SPECIFIC image host
+    # (registry-agnostic — not limited to a few hardcoded hosts). The raw msb
+    # stderr above is printed by msb itself; this adds the acq remediation.
+    if command -v acq_registry_auth_hint >/dev/null 2>&1; then
+      acq_registry_auth_hint msb "$_msb_image"
+    fi
     echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the full command trace)" >&2
     return 1
   fi

@@ -422,6 +422,13 @@ acq_backend_provision() {
     # Persist the CLI (`--kit`) / extra kit refs alongside provenance so a later
     # resume heal can reload them (see acq_cli_kits_write). Best-effort.
     acq_cli_kits_write sbx "$name" || true
+  elif [ -n "$_neutral_image" ] && command -v acq_registry_auth_hint >/dev/null 2>&1; then
+    # A custom --image/--template create failed. sbx already printed its raw
+    # error (e.g. "unauthorized"); add the acq remediation for THIS image's
+    # registry (store creds) or a locally-built image (import first), so the
+    # user is not left with only the backend's bare denial. ADR-0022.
+    echo "acq(sbx): 'sbx create' failed for '$name' with custom image '$_neutral_image'." >&2
+    acq_registry_auth_hint sbx "$_neutral_image"
   fi
   return "$_rc"
 }

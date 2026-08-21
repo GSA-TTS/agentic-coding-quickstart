@@ -157,6 +157,25 @@ the three things `acq` cannot do for the user:
   `sbx template load <tar>` (the tar can come from `docker save` **or** `podman
   save`).
 
+### Registry-auth failure messaging
+
+When a custom `--image` pull is **denied** (missing/incorrect credentials), the
+backend CLI prints its own raw error (e.g. `unauthorized`). On top of that, `acq`
+adds a **targeted, registry-agnostic** remediation hint derived from the *actual*
+image reference — not a hardcoded list of hosts:
+
+- `acq_registry_auth_hint` (in `acq.backends/common.sh`) parses the image's
+  registry host via `_acq_image_registry_host` (a host is a leading component with
+  a `.`, a `:port`, or exactly `localhost`; bare Docker Hub short names carry no
+  host) and prints the correct command for the failing backend:
+  `msb registry login <host> …` or `sbx secret set --registry <host> …`.
+- For a **local** (registry-less) image it instead points at the import path
+  (`msb image load` + `ACQ_MSB_PULL=never`, or `sbx template load`), and does not
+  emit a spurious "login to localhost" line.
+- Both backends' create-failure paths call this, so the sbx path is no longer
+  limited to the backend's bare error and the msb path is no longer limited to a
+  few hardcoded hosts.
+
 ## Consequences
 
 - **Positive:** one neutral image knob; sbx gains custom-template support through
