@@ -1,9 +1,12 @@
-# sbx CLI Quickstart Guide
+# sbx CLI How-To Guide
 
+> The [README](../../README.md) is the quickstart. This is the detailed sbx
+> how-to.
+>
 > **Note:** `msb` (microsandbox) is `acq`'s **default** backend. Use this `sbx`
 > guide when you specifically want the Docker Sandboxes backend (for example, you
 > already run Docker Sandboxes, or want its proxy-based credential store). See the
-> [Backend Guide](BACKEND_GUIDE.md) to choose between backends.
+> [Backend Guide](../BACKEND_GUIDE.md) to choose between backends.
 
 This guide walks you through setting up Docker Sandboxes using the `sbx` command-line interface to run AI coding agents with USAi.
 
@@ -105,7 +108,7 @@ sbx policy ls
 > `brew uninstall erofs-utils` (so sbx uses its bundled binary), or approve the
 > Homebrew binary via **System Settings → Privacy & Security → "Allow Anyway"**
 > and re-run. `xattr -d com.apple.quarantine` does **not** work. Details:
-> [KNOWN_FAILURE_MODES.md](KNOWN_FAILURE_MODES.md#26-macos-gatekeeper-blocks-mkfserofs-at-sbx-policy-init-path-shadowing).
+> [KNOWN_FAILURE_MODES.md](../KNOWN_FAILURE_MODES.md#26-macos-gatekeeper-blocks-mkfserofs-at-sbx-policy-init-path-shadowing).
 
 ### Understanding Network Policies
 
@@ -156,7 +159,7 @@ sbx secret set -g anthropic
 > acq github-scope <sandbox-name> /path/to/your/project
 > ```
 >
-> See [ADR-0013](adr/0013-per-sandbox-github-token-downscoping.md) for the
+> See [ADR-0013](../adr/0013-per-sandbox-github-token-downscoping.md) for the
 > rationale and the alternatives considered. Fine-grained tokens can't
 > contribute to public repos you're not a member of or call the Checks API —
 > use the global token below for those cases.
@@ -390,7 +393,7 @@ sbx reset --preserve-secrets
 1. Verify USAi endpoint is allowed: `sbx policy ls`
 2. Check your API key is set: `sbx secret ls`
 3. Check policy logs: `sbx policy log`
-4. See [Known Failure Modes](KNOWN_FAILURE_MODES.md) for more
+4. See [Known Failure Modes](../KNOWN_FAILURE_MODES.md) for more
 
 ---
 
@@ -431,7 +434,7 @@ Mounting extra directories alongside the primary workspace is a **backend-neutra
 feature: the `acq run <agent> <primary> [extra][:ro] ...` syntax works
 identically on sbx and msb. The canonical description — syntax, semantics,
 constraints, and security guidance — lives in
-[Multiple Workspaces](CONCEPTS.md#multiple-workspaces).
+[Multiple Workspaces](../CONCEPTS.md#multiple-workspaces).
 
 The only sbx-specific angle is how multi-workspace mounts interact with the
 `--clone` remote-clone lifecycle, covered below under
@@ -521,13 +524,13 @@ sbx create --clone --name feature-work opencode ~/my-app ~/shared-libs:ro
 
 The Docker Desktop-integrated `docker sandbox` command is deprecated. For the
 `sbx` equivalents, see
-[Known Failure Modes — Migrating from `docker sandbox`](KNOWN_FAILURE_MODES.md#18-migrating-from-docker-sandbox).
+[Known Failure Modes — Migrating from `docker sandbox`](../KNOWN_FAILURE_MODES.md#18-migrating-from-docker-sandbox).
 
 ---
 
 ## Next Steps
 
-- [Known Failure Modes](KNOWN_FAILURE_MODES.md) — Common issues and solutions
+- [Known Failure Modes](../KNOWN_FAILURE_MODES.md) — Common issues and solutions
 - [Coding Practices](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) — Secure coding standards (GSA agentic-coding-playbook)
 
 ---

@@ -694,7 +694,7 @@ acq_backend_prepare() {
   echo "      msb needs host virtualization (KVM on Linux, Apple Silicon's" >&2
   echo "      hypervisor on macOS, or the Windows Hypervisor Platform on Windows)." >&2
   echo "      acq tried 'msb doctor --fix' automatically but the host is still not" >&2
-  echo "      ready. For details run 'msb doctor', see docs/QUICKSTART.md#msb-host-setup," >&2
+  echo "      ready. For details run 'msb doctor', see docs/howto/acq.md#msb-host-setup," >&2
   echo "      or ask us for help at agentic-coding@gsa.gov." >&2
 }
 
@@ -2528,17 +2528,17 @@ EOF
 
   # Translate the caller's workspace path(s) into --volume mounts.
   #
-  # CONTRACT (matches sbx semantics — see docs/QUICKSTART_SBX.md "Multiple
+  # CONTRACT (matches sbx semantics — see docs/CONCEPTS.md "Multiple
   # Workspaces"): every workspace positional after the agent is mounted at its
-  # SAME absolute path inside the guest ("All workspaces appear inside the
-  # sandbox at their absolute host paths."). A trailing `:ro` marks that mount
+  # SAME absolute path inside the guest (all workspaces appear inside the
+  # sandbox at their absolute host paths). A trailing `:ro` marks that mount
   # read-only. `acq run opencode ~/app ~/lib:ro` therefore mounts ~/app rw and
   # ~/lib ro, each at its own host path.
   #
   # STARTING DIRECTORY (ACQ_MSB_GUEST_WORKSPACE, consumed by attach): the FIRST
   # workspace positional is the "primary" — the agent starts there — regardless
-  # of how many mounts are given (docs/QUICKSTART_SBX.md: "Primary workspace —
-  # The first path; agent starts here."). ACQ_MSB_WORKSPACE overrides it.
+  # of how many mounts are given (docs/CONCEPTS.md: the primary workspace is the
+  # first path and the agent starts there). ACQ_MSB_WORKSPACE overrides it.
   #
   # Why mount at the host path (not remapped under /home/agent): `msb create`
   # performs the mount at create time, BEFORE acq can create the `agent` user and

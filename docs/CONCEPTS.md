@@ -6,7 +6,7 @@ tier: 2
 last_updated: "2026-08-21"
 audience: "developers"
 keywords: ["acq", "concepts", "workspace", "mount", "backend-neutral", "sbx", "msb"]
-related_files: ["docs/QUICKSTART.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
+related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -91,5 +91,5 @@ has a few mechanics worth knowing. Rather than duplicate them here, see the
   host mount path), and symlinked host paths (notably macOS `$TMPDIR`) are
   canonicalized to their real path before mounting.
 - **sbx** — the `--clone` remote-clone lifecycle interacts with multi-workspace
-  mounts; see the [sbx how-to guide](QUICKSTART_SBX.md) for the sbx-specific
+  mounts; see the [sbx how-to guide](howto/sbx.md) for the sbx-specific
   clone story.
