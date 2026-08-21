@@ -6,7 +6,10 @@
 > **Note:** `msb` (microsandbox) is `acq`'s **default** backend. Use this `sbx`
 > guide when you specifically want the Docker Sandboxes backend (for example, you
 > already run Docker Sandboxes, or want its proxy-based credential store). See the
-> [Backend Guide](../BACKEND_GUIDE.md) to choose between backends.
+> [Backend Guide](../BACKEND_GUIDE.md) to choose between backends. This guide is
+> the sbx **alternative**, not the recommended default (see
+> [ADR-0024](../adr/0024-neutral-user-facing-docs-vs-backend-specific.md) for the
+> neutral-first documentation convention).
 
 This guide walks you through setting up Docker Sandboxes using the `sbx` command-line interface to run AI coding agents with USAi.
 
@@ -29,7 +32,10 @@ This guide walks you through setting up Docker Sandboxes using the `sbx` command
 | Audit trail | ✅ | Limited |
 | Scriptable setup | ✅ | ❌ |
 
-For federal compliance and automation, sbx CLI is the recommended approach.
+If you have chosen the sbx backend, use the sbx CLI (not the Docker Desktop
+UI) for federal compliance and automation. To choose between backends in the
+first place, see the [Backend Guide](../BACKEND_GUIDE.md) — `msb` is `acq`'s
+default.
 
 ---
 
