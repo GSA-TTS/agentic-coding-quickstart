@@ -401,12 +401,19 @@ _kit_pp_validate() {
 # startup step instead — see ADR-0022).
 #
 # VALIDATION (SI-10): these values reach a generated sbx-v2 spec and an msb
-# create argv, so they are untrusted. path must be absolute and
-# charset-restricted ([A-Za-z0-9._/-]); type must be empty or tmpfs; size must
-# match the kit-spec v2 §5.7 byte-size grammar (e.g. 20G, 512m, 2gib).
-# Offending entries are DROPPED with a stderr warning (mirroring
-# _kit_pp_validate). Absence is a silent no-op (defensive read, ADR-0014
-# precedent: the patterns schema property may lag the translator).
+# create argv, so they are untrusted. path must be absolute, charset-restricted
+# ([A-Za-z0-9._/-]), and NORMALIZED (no . or .. segments, no //, no trailing
+# /) — a volume mounts a whole unseeded filesystem, so /. would shadow the
+# guest root and /data/../etc would mount over /etc while reading as a /data
+# path; type must be empty or tmpfs; size must
+# be a non-zero byte-size in the PORTABLE grammar (e.g. 20G, 512m, 1.5G) —
+# the intersection of sbx's units.RAMInBytes and msb's size parser. sbx also
+# accepts b/ib suffixes (256MB, 2gib) but msb REJECTS them ("invalid digit
+# found in string", verified on msb 0.6.12), so the neutral grammar excludes
+# them: a size must work on every backend. Offending entries are DROPPED with
+# a stderr warning (mirroring _kit_pp_validate). Absence is a silent no-op
+# (defensive read, ADR-0014 precedent: the patterns schema property may lag
+# the translator).
 kit_spec_volumes() {
   local spec="$1"
   [ -f "$spec" ] || return 0
@@ -446,19 +453,28 @@ _kit_vol_parse_neutral() {
 }
 
 # Validate raw `path<TAB>type<TAB>size` records on stdin (SI-10): path absolute
-# + safe charset; type "" or tmpfs; size required + byte-size grammar (integer
-# or decimal, optional k/m/g/t/p unit with optional i, optional b — the
-# units.RAMInBytes grammar kit-spec v2 uses). Drops offending records with a
-# stderr warning; emits the survivors unchanged.
+# + safe charset; type "" or tmpfs; size required, non-zero, and in the
+# PORTABLE byte-size grammar (integer or decimal + optional bare k/m/g/t/p
+# unit). Deliberately NO b/ib suffixes: sbx's units.RAMInBytes accepts 256MB /
+# 2gib but msb's parser rejects them (verified on 0.6.12), and a neutral size
+# must work on every backend. Drops offending records with a stderr warning;
+# emits the survivors unchanged.
 _kit_vol_validate() {
   awk -F'\t' '
     {
       p=$1; t=$2; s=$3
       if (p=="")                          { print "kit-translate: skipping volume with missing path (size: " s ")" > "/dev/stderr"; next }
       if (p !~ /^\/[A-Za-z0-9._\/-]+$/)   { print "kit-translate: skipping volume with unsafe path: " p > "/dev/stderr"; next }
+      # Require a NORMALIZED path: a volume mounts a whole unseeded filesystem,
+      # so /. or // would shadow the guest root outright and /data/../etc would
+      # mount over /etc while reading as a /data path in review. Reject empty
+      # (//) and pure-dot (. / ..) segments and a trailing slash; dot-PREFIXED
+      # names like /data/..hidden remain legal.
+      if (p ~ /\/\// || p ~ /\/\.\.?(\/|$)/ || p ~ /\/$/) { print "kit-translate: skipping volume with non-normalized path (no . or .. segments, no //, no trailing /): " p > "/dev/stderr"; next }
       if (t!="" && t!="tmpfs")            { print "kit-translate: skipping volume with invalid type: " t > "/dev/stderr"; next }
       if (s=="")                          { print "kit-translate: skipping volume with missing size: " p > "/dev/stderr"; next }
-      if (s !~ /^[0-9]+(\.[0-9]+)?([kKmMgGtTpP][iI]?)?[bB]?$/) { print "kit-translate: skipping volume with invalid size: " s > "/dev/stderr"; next }
+      if (s !~ /^[0-9]+(\.[0-9]+)?[kKmMgGtTpP]?$/) { print "kit-translate: skipping volume with invalid size (portable grammar: 20G, 512m; no b/ib suffix): " s > "/dev/stderr"; next }
+      if (s ~ /^0+(\.0+)?[kKmMgGtTpP]?$/) { print "kit-translate: skipping volume with zero size: " s > "/dev/stderr"; next }
       printf "%s\t%s\t%s\n", p, t, s
     }
   '
@@ -1265,8 +1281,12 @@ EOF
   # the sbx-v2 spec + msb argv they reach), so validate the RAW parsed records
   # here — otherwise a bad entry would be silently dropped rather than reported
   # by `acq kit validate`. path absolute + [A-Za-z0-9._/-]; type "" | tmpfs;
-  # size required, byte-size grammar (kit-spec v2 §5.7). (ADR-0022, SI-10)
-  local vline vp vt vs
+  # size required, non-zero, portable grammar (no b/ib suffix — msb rejects
+  # them). A valid-but-small block size additionally gets a WARNING (not an
+  # error): msb refuses ext4 disk images under 128M, so a sub-floor size
+  # passes validate for sbx-only use but will fail an msb create.
+  # (ADR-0022, SI-10)
+  local vline vp vt vs vbytes
   while IFS= read -r vline; do
     [ -n "$vline" ] || continue
     vp=$(printf '%s' "$vline" | cut -f1)
@@ -1279,6 +1299,8 @@ EOF
         /*)
           if printf '%s' "$vp" | LC_ALL=C grep -q '[^A-Za-z0-9._/-]'; then
             echo "kit: validate: volume path has illegal characters: '$vp'" >&2; errs=$((errs + 1))
+          elif printf '%s' "$vp" | LC_ALL=C grep -Eq '//|/\.\.?(/|$)|/$'; then
+            echo "kit: validate: volume path must be normalized (no . or .. segments, no //, no trailing /): '$vp'" >&2; errs=$((errs + 1))
           fi ;;
         *) echo "kit: validate: volume path must be absolute: '$vp'" >&2; errs=$((errs + 1)) ;;
       esac
@@ -1288,8 +1310,22 @@ EOF
     fi
     if [ -z "$vs" ]; then
       echo "kit: validate: volume size is required (path: '${vp:-<missing>}')" >&2; errs=$((errs + 1))
-    elif ! printf '%s' "$vs" | LC_ALL=C grep -Eq '^[0-9]+(\.[0-9]+)?([kKmMgGtTpP][iI]?)?[bB]?$'; then
-      echo "kit: validate: volume size must be a byte-size (e.g. 20G, 512m): '$vs'" >&2; errs=$((errs + 1))
+    elif ! printf '%s' "$vs" | LC_ALL=C grep -Eq '^[0-9]+(\.[0-9]+)?[kKmMgGtTpP]?$'; then
+      echo "kit: validate: volume size must be a portable byte-size (e.g. 20G, 512m; no b/ib suffix — msb rejects them): '$vs'" >&2; errs=$((errs + 1))
+    elif printf '%s' "$vs" | LC_ALL=C grep -Eq '^0+(\.0+)?[kKmMgGtTpP]?$'; then
+      echo "kit: validate: volume size must be non-zero: '$vs'" >&2; errs=$((errs + 1))
+    elif [ "$vt" != "tmpfs" ]; then
+      vbytes=$(printf '%s' "$vs" | awk '{
+        n=$0; u=""
+        if (n ~ /[kKmMgGtTpP]$/) { u=tolower(substr(n,length(n),1)); n=substr(n,1,length(n)-1) }
+        m=1
+        if (u=="k") m=1024; else if (u=="m") m=1048576; else if (u=="g") m=1073741824
+        else if (u=="t") m=1099511627776; else if (u=="p") m=1125899906842624
+        printf "%.0f", n*m
+      }')
+      if [ -n "$vbytes" ] && [ "$vbytes" -lt 134217728 ] 2>/dev/null; then
+        echo "kit: validate: warning: block volume '$vp' size '$vs' is below msb's 128M ext4 floor (fails msb create; fine for sbx-only kits)" >&2
+      fi
     fi
   done <<EOF
 $(_kit_vol_parse_neutral "$spec")

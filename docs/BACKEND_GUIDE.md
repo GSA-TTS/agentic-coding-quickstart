@@ -612,7 +612,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 | Secret binding breadth | 7 built-in services + any custom `--host/--env` endpoint | usai + github + **any** custom `--host/--env` endpoint bound generically via `--secret ENV@HOST` (shipped) |
 | Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; `SUPPORTS_SNAPSHOTS=0`) |
 | Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` now implemented (ADR-0015) — live end-to-end verification pending a KVM host |
-| Kit volumes | neutral `volumes:` passed through 1:1 to kit-spec v2 §5.7 (sized block device / tmpfs, mounted at create; dies with the sandbox) | neutral `volumes:` mapped to a derived named disk volume (`--mount-named acq-<sandbox>-<pathslug>:<path>:kind=disk,size=<size>`) or `--tmpfs <path>:<size>`; derived volumes removed on `acq rm` (ADR-0022) |
+| Kit volumes | neutral `volumes:` passed through 1:1 to kit-spec v2 §5.7 (sized block device / tmpfs, mounted at create; dies with the sandbox) | neutral `volumes:` unioned across kits (last wins by path) and mapped to a derived named disk volume (`--mount-named acq-<sandbox>-<pathslug>-<crc>:<path>:kind=disk,size=<size>`) or `--tmpfs <path>:<size>`; derived volumes removed on `acq rm` (ADR-0022) |
 | Agent binary | supplied by the sbx agent template | installed at provision on a plain base (`npm install -g opencode-ai`), then launched on attach |
 | OpenCode web UI | `openchamber` acq kit (publishes port 4096) | same kit once it declares `backends: [sbx, msb]` against the released patterns schema (neutral port/background vocab consumed by both backends; the patterns repo's openchamber kit) |
 | In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+; **no startup-bearing kits on 0.38+ — recreate to extend/refresh**) | re-apply kits idempotently (no state-preserving add) |
@@ -793,18 +793,24 @@ the kit spec never carries a secret value.
 > per the fail-closed cross-repo gating.
 
 **`volumes` (sized guest storage, [ADR-0022](adr/0022-neutral-volumes-kit-vocabulary.md)).**
-A top-level list of `{path, type?, size}` entries — `path` required and
-absolute, `type` empty (block-backed, the default) or `tmpfs`, `size` required
-(byte-size string, e.g. `20G`, `512m`). Volumes are **creation-time only** and
-mount **at boot, before any exec is possible**, so storage layout never races
-startup commands or early agent use. On sbx entries pass through 1:1 to the
-kit-spec v2 §5.7 `volumes` block (a dedicated ext4 block device of the declared
-size); on msb a block entry becomes a derived named disk volume
-(`acq-<sandbox>-<pathslug>`, removed again on `acq rm`) and a tmpfs entry
-becomes `--tmpfs`. Invalid entries are dropped with a warning and reported by
-`acq kit validate`. Don't declare tiny block volumes: msb refuses ext4 disk
-images below a minimum size (128M on msb 0.6.12, "image size is too small for
-ext4 formatting") — treat ~256m as a practical floor.
+A top-level list of `{path, type?, size}` entries — `path` required, absolute,
+and normalized (no `.`/`..` segments, no `//`, no trailing `/` — a volume
+mounts a whole filesystem, so `/.` would shadow the guest root), `type` empty
+(block-backed, the default) or `tmpfs`, `size` required
+and non-zero, in the portable byte-size grammar (`20G`, `512m`, `1.5G` — no
+`b`/`ib` suffixes like `256MB`/`2gib`; msb's parser rejects those even though
+sbx accepts them). Volumes are **creation-time only** and mount **at boot,
+before any exec is possible**, so storage layout never races startup commands
+or early agent use; a mid-life `acq kit apply` warns that it cannot attach
+them. Multiple kits union by path, last wins, on both backends. On sbx entries
+pass through 1:1 to the kit-spec v2 §5.7 `volumes` block (a dedicated ext4
+block device of the declared size); on msb a block entry becomes a derived
+named disk volume (`acq-<sandbox>-<pathslug>-<crc>`, removed again on
+`acq rm`) and a tmpfs entry becomes `--tmpfs`. Invalid entries are dropped
+with a warning and reported by `acq kit validate`. Don't declare tiny block
+volumes: msb refuses ext4 disk images below a minimum size (128M on msb
+0.6.12, "image size is too small for ext4 formatting") — treat ~256m as a
+practical floor (`acq kit validate` warns below it).
 
 > **Kit-authoring caveat: volumes mount UNSEEDED (both backends).** The mount
 > is an empty filesystem that shadows any image content at the path. A kit that

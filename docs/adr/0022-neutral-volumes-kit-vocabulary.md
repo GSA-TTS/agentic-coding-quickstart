@@ -88,16 +88,25 @@ volumes:
 - **sbx.** `kit_translate_to_sbx` passes entries through 1:1 into the
   synthesized sbx-v2 `volumes:` block. Creation-time only (`sbx kit add` skips
   volumes); multiple kits union by path, last wins — sbx resolves that itself.
-- **msb.** `_acq_msb_volume_flags_into` maps a block entry to
-  `--mount-named acq-<sandbox>-<pathslug>:<path>:kind=disk,size=<size>` and a
-  tmpfs entry to `--tmpfs <path>:<size>` at create. The named volume is derived
-  **deterministically** from sandbox name + path slug so
-  `acq_backend_terminate` can find and remove it (`msb volume ls -q` +
-  `msb volume rm`, prefix `acq-<sandbox>-`) after a successful `msb remove` —
-  without the cleanup, named volumes would silently accumulate under
-  `~/.microsandbox/volumes/`. `--mount-named` is create-or-reuse: a leftover
-  same-name volume with incompatible settings fails the create loudly rather
-  than silently changing it.
+- **msb.** Provision UNIONS every kit's records by path (last wins,
+  `_acq_msb_volume_records_dedupe` — the same composition rule sbx applies),
+  then maps a block entry to
+  `--mount-named acq-<sandbox>-<pathslug>-<crc>:<path>:kind=disk,size=<size>`
+  and a tmpfs entry to `--tmpfs <path>:<size>` at create. The named volume is
+  derived **deterministically** from sandbox name + path slug + a POSIX-cksum
+  CRC of the raw path — the CRC is identity, not decoration: the slug is lossy
+  (`/data/app` and `/data.app` both slug to `data-app`), so without it two
+  distinct volumes could derive the same name and silently share one disk.
+  `acq_backend_terminate` finds and removes the derived volumes
+  (`msb volume ls -q` + `msb volume rm`, prefix `acq-<sandbox>-`) whenever the
+  sandbox is GONE after the remove attempt — including a failed remove of an
+  already-gone sandbox (removed out of band), which would otherwise orphan the
+  volumes forever under `~/.microsandbox/volumes/`; a failed remove of a
+  still-existing sandbox leaves its volumes untouched. A mid-life
+  `acq kit apply` cannot attach volumes (creation-time only) and says so with
+  a stderr note instead of silently skipping them. `--mount-named` is
+  create-or-reuse: a leftover same-name volume with incompatible settings
+  fails the create loudly rather than silently changing it.
 
 ### Unseeded mounts (both backends, by design)
 
@@ -114,10 +123,21 @@ from `/mnt/rootfs/<path>`).
 Volume fields are untrusted kit input that reach a generated YAML spec and an
 msb argv:
 
-- `path` MUST be absolute and charset-restricted (`[A-Za-z0-9._/-]`); `type`
-  MUST be empty or `tmpfs`; `size` MUST match the kit-spec v2 §5.7 byte-size
-  grammar (`units.RAMInBytes`, e.g. `20G`, `512m`, `2gib`). Offending entries
-  are dropped with a warning and reported by `acq kit validate`.
+- `path` MUST be absolute, charset-restricted (`[A-Za-z0-9._/-]`), and
+  NORMALIZED — no `.`/`..` segments, no `//`, no trailing `/` (dot-prefixed
+  names like `..hidden` stay legal). Normalization matters more for volumes
+  than for `files[].path`: a volume mounts a whole unseeded filesystem, so
+  `/.` or `//` would shadow the guest root outright and `/data/../etc` would
+  mount over `/etc` while reading as a `/data` path in human review. `type`
+  MUST be empty or `tmpfs`; `size` MUST be non-zero and match the PORTABLE
+  byte-size grammar (integer or decimal + optional bare `k/m/g/t/p` unit, e.g.
+  `20G`, `512m`, `1.5G`) — the intersection of sbx's `units.RAMInBytes` and
+  msb's size parser. sbx also accepts `b`/`ib` suffixes (`256MB`, `2gib`) but
+  msb rejects them ("invalid digit found in string", verified on 0.6.12), so
+  the neutral grammar excludes them: a declared size must work on every
+  backend. Offending entries are dropped with a warning and reported by
+  `acq kit validate`; a valid block size below msb's 128M ext4 floor gets a
+  validate-time WARNING (legitimate for sbx-only kits, fails msb create).
 - The msb adapter re-checks the charset before values reach the create argv
   (defense-in-depth, mirroring `_acq_msb_port_flags_into`).
 
@@ -142,7 +162,9 @@ released commit that includes it.
   of another sandbox's name + `-` (e.g. `web` vs `web-2`) could match the
   longer name's volumes at `rm` time. Accepted for now: acq's `derive_name`
   produces distinct agent-workspace slugs, and an exact-match cleanup would
-  require re-fetching kit specs at terminate.
+  require re-fetching kit specs at terminate. (The related CREATE-time hazard —
+  two distinct volumes deriving the same name via the lossy slug — is solved
+  outright by the CRC suffix, not accepted.)
 - **Tradeoff:** on msb a volume's contents do NOT survive `acq rm` (they die
   with the sandbox, like sbx). A user who wants sandbox-independent persistent
   storage manages a named volume outside acq.
