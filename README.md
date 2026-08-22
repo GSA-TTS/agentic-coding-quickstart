@@ -162,7 +162,7 @@ and the [Full sbx CLI Guide](docs/QUICKSTART_SBX.md).
 
 **Working across multiple repos?** Mounting extra directories works on either
 backend via `acq`; the command syntax and examples are documented in
-[Multiple Workspaces](docs/QUICKSTART_SBX.md#multiple-workspaces).
+[Multiple Workspaces](docs/CONCEPTS.md#multiple-workspaces).
 
 ---
 

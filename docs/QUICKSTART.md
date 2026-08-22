@@ -6,7 +6,7 @@ tier: 2
 last_updated: "2026-08-17"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "quickstart", "sandbox"]
-related_files: ["docs/BACKEND_GUIDE.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
+related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -228,8 +228,9 @@ sbx policy set <your-network-policy>
 ./acq --backend sbx run opencode /path/to/your/project
 ```
 
-For sbx-specific detail (proxy secrets, multiple workspaces, network policy),
-see the [full sbx guide](QUICKSTART_SBX.md).
+For sbx-specific detail (proxy secrets, network policy), see the
+[full sbx guide](QUICKSTART_SBX.md). For the backend-neutral way to mount
+multiple directories, see [Multiple Workspaces](CONCEPTS.md#multiple-workspaces).
 
 ### msb host setup
 
