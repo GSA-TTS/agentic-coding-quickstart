@@ -175,7 +175,9 @@ Tunables:
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `ACQ_MSB_IMAGE` | `docker.io/docker/sandbox-templates:shell-docker` | Base OCI image (the sbx agent-template: ships the `agent` user + passwordless sudo, node/git/curl/ca-certificates, and an agent-writable npm global prefix). A custom override must be pullable and ship these prerequisites. |
+| `ACQ_MSB_IMAGE` | `docker.io/docker/sandbox-templates:shell-docker` | Base OCI image (the sbx agent-template: ships the `agent` user + passwordless sudo, node/git/curl/ca-certificates, and an agent-writable npm global prefix). A custom override must be pullable and ship these prerequisites. **Precedence (ADR-0022):** an explicitly set `ACQ_MSB_IMAGE` wins over the backend-neutral `--image`/`ACQ_IMAGE` (a one-time notice is printed); if only the neutral knob is set, it is used; otherwise this default. |
+| `ACQ_IMAGE` | (unset) | Backend-**neutral** base image (ADR-0022). On msb it feeds `ACQ_MSB_IMAGE` (above); on sbx it maps to `sbx create --template <ref>`. Equivalent to the `acq run/create --image <ref>` flag (the flag wins over the env var). See [Custom base image](#custom-base-image---image--acq_image). |
+| `ACQ_MSB_PULL` | (unset → msb default `if-missing`) | Image pull policy forwarded to `msb create --pull` (`always` \| `if-missing` \| `never`). `msb create` treats the image as a **registry** reference; a locally-built/registry-less image must first be imported with `msb image load -i <tar> -t <ref>`, then created with `ACQ_MSB_PULL=never` so msb uses the cache instead of trying to pull it. |
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
 | `ACQ_SKIP_MSB_DOCTOR` | (unset) | Skip the automatic host-readiness check (`msb doctor`, and the `msb doctor --fix` it runs when the host is not ready). Set when the check is unreliable in your environment or you prefer to run it yourself. |
 | `ACQ_OPENCODE_POSTINSTALL_TIMEOUT` | `120` | Seconds to bound opencode's in-guest `postinstall.mjs` (which fetches a platform binary) so a wedged registry can't hang `acq run`; used only when the guest provides `timeout` |
@@ -342,6 +344,123 @@ Note the async-boot caveat:
 > provision failure** and points you at `msb logs --source system <name>` —
 > rather than proceeding against a sandbox that never came up.
 
+### Custom base image (`--image` / `ACQ_IMAGE`)
+
+`acq` exposes one **backend-neutral** way to select a custom base image
+([ADR-0022](adr/0022-neutral-image-override.md)), so the same reference works
+whichever backend is active:
+
+```bash
+# flag form (run or create)
+./acq run --image ghcr.io/your-org/agent-base:v1 opencode .
+# env form
+export ACQ_IMAGE=ghcr.io/your-org/agent-base:v1
+```
+
+**How each backend applies it:**
+
+| Backend | Neutral image becomes | Notes |
+|---------|-----------------------|-------|
+| msb | the OCI image positional on `msb create` (same slot as `ACQ_MSB_IMAGE`) | msb resolves it as a **registry** reference |
+| sbx | `sbx create --template <ref>` | injected only if you did **not** pass your own `--template`/`-t` |
+
+**Precedence:** `--image` flag **>** `ACQ_IMAGE` env **>** backend var/default. If
+you also set the backend-specific `ACQ_MSB_IMAGE`, the **backend var wins** (a
+one-time notice is printed) — a deliberately-set backend var is never silently
+overridden by the neutral knob.
+
+**Local (registry-less) images on msb.** `msb create` pulls the image from a
+registry (policy `if-missing` by default) and does **not** read the host
+engine's local store, so a locally-built tag like `localhost/foo:test` fails.
+Import it into msb's cache first, then disable the pull:
+
+```bash
+docker save localhost/foo:test -o /tmp/foo.tar   # or: podman save …
+msb image load -i /tmp/foo.tar -t localhost/foo:test
+ACQ_MSB_PULL=never ./acq --backend msb --image localhost/foo:test create shell .
+```
+
+Registry-hosted images (Docker Hub, ghcr.io, …) need no import; on sbx a local
+image is imported with `sbx template load` instead (see the caveats below).
+
+**Portable image contract.** To keep one reference usable on **both** backends,
+build an image that satisfies the stricter (sbx) form of the base-image contract
+([Docker Sandboxes kit reference](https://docs.docker.com/ai/sandboxes/customize/kit-reference/#sandbox-block)):
+
+- a non-root **`agent` user at UID 1000** with passwordless sudo;
+- a **`/home/agent`** home owned by `agent`;
+- **`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`** preserved across sudo;
+- **`node`, `git`, `curl`, `update-ca-certificates`** present (+ `socat` for git
+  signing);
+- the **agent binary** baked in or installable at provision.
+
+You do **not** have to build `FROM docker/sandbox-templates:shell` — the image
+only has to *meet* the contract — but building `FROM
+docker/sandbox-templates:shell` (or `shell-docker`) satisfies every point for
+free. `acq`'s msb adapter is more lenient (it addresses `agent` by name and can
+synthesize the user/sudo/proxy on a plain OCI base — see below), so an image that
+is portable by the sbx rule always works on msb; the reverse is not guaranteed.
+
+> **Building a derived image:** the contract sets `USER=agent`, so Dockerfile
+> `RUN` steps in a derived image execute as the non-root `agent`. Writing to
+> root-owned paths (e.g. `/etc`) needs `sudo` (the contract grants `agent`
+> passwordless sudo) or a temporary `USER root`; prefer writing under the
+> agent-owned `/home/agent`, where no elevation is required.
+
+**sbx caveats `acq` surfaces (but cannot handle for you):**
+
+- The **agent token must match the image's agent variant** (run `opencode`
+  against an `opencode`-derived template, `shell` against a `shell` one).
+- A **private or non-Docker-Hub** image needs pull creds first:
+  `sbx secret set --registry <host> …`.
+- A **locally-built** image (not in a registry) must be imported first:
+  `sbx template load <tar>` (the tar can come from `docker save` **or** `podman
+  save`).
+
+**Registry auth.** A private image (the common case for `ghcr.io`) needs
+credentials stored on the backend BEFORE `--image` can pull it:
+
+```bash
+# msb: store registry creds in the OS credential store
+msb registry login ghcr.io -u <username> --password-stdin   # paste a PAT, then Ctrl-D
+# sbx: the equivalent registry-credential step
+sbx secret set --registry ghcr.io -u <username>
+```
+
+A public image needs none of this.
+
+**Using a devcontainer image.** A `.devcontainer` image is a normal OCI image, so
+`--image ghcr.io/org/img:tag` works — **but only if it also meets the portable
+contract above.** Most devcontainer bases do **not** out of the box: they commonly
+run as a `vscode` (or `node`) user rather than `agent` at UID 1000, and may lack
+`socat` or the CA tooling. Two ways to reconcile:
+
+- **On msb (lenient):** the msb adapter addresses the agent user *by name* and
+  synthesizes the `agent` user / sudo / proxy contract on a plain base, and
+  installs `opencode` at provision — so a devcontainer image often works as-is on
+  msb provided `node`, `git`, `curl`, and `ca-certificates` are present. Missing
+  tools are the usual failure; add them to the image.
+- **For portability (works on sbx too):** add a thin wrapper layer that satisfies
+  the contract explicitly:
+
+  ```dockerfile
+  FROM ghcr.io/your-org/your-devcontainer:tag
+  USER root
+  RUN command -v useradd && useradd -m -u 1000 -s /bin/bash agent || adduser -D -u 1000 agent; \
+      mkdir -p /home/agent && chown agent /home/agent; \
+      (apt-get update && apt-get install -y sudo git curl ca-certificates socat nodejs || \
+       apk add --no-cache sudo git curl ca-certificates socat nodejs); \
+      printf 'agent ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/agent
+  USER agent
+  ```
+
+  Then `--image` that wrapper. (If the devcontainer already provides a UID-1000
+  sudo user and the four tools, you can skip the wrapper.)
+
+Verify the whole path live on a sandbox-capable host with
+`./scripts/verify-image-override` (builds a tiny marked image, creates a sandbox
+on each installed backend with `--image`, and confirms the custom image booted).
+
 ### Base image and prerequisites
 
 Unlike sbx (whose agent templates supply the image via a template mechanism),
@@ -422,7 +541,8 @@ default interactive shell (the base image's Node REPL) — for a `shell` sandbox
 if the agent binary is somehow missing.
 
 To use your own image, set `ACQ_MSB_IMAGE` to one that also provides node, git,
-curl, and ca-certificates:
+curl, and ca-certificates (or use the backend-neutral `--image`/`ACQ_IMAGE`, see
+[Custom base image](#custom-base-image---image--acq_image)):
 
 ```bash
 export ACQ_MSB_IMAGE=ghcr.io/your-org/agent-base:latest   # must have node/git/curl/ca-certificates

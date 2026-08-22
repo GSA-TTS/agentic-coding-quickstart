@@ -59,6 +59,10 @@ KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro openco
 # printed, so it appears at most once per process. See ADR-0021.
 _ACQ_SBX_SSH_AGENT_NOTICE_SHOWN=0
 
+# Module-scope flag: set to 1 once the ADR-0022 custom-image (--template) notice
+# has been printed, so it appears at most once per process.
+_ACQ_SBX_IMAGE_NOTICE_SHOWN=0
+
 # ---------------------------------------------------------------------------
 # Version comparison
 # ---------------------------------------------------------------------------
@@ -347,26 +351,66 @@ acq_backend_provision() {
          "is set. Guest code can use every key the agent holds while the sandbox runs;" \
          "unset SSH_AUTH_SOCK to opt out, or run 'ssh-add -c' to confirm each use. See ADR-0021." >&2
   fi
-  # Strip any user-supplied --name since we pass it explicitly.
-  local _stripped=(); local skip=0
+  # Strip any user-supplied --name (and its value) since we pass --name
+  # explicitly. While scanning, note whether the user passed their own
+  # --template/-t: if so, we must NOT inject a neutral --image (ADR-0022) on top
+  # of it (the explicit flag wins and double --template would be ambiguous).
+  #
+  # NOTE the `skip` branch must `continue` WITHOUT re-adding the arg: it is the
+  # value of a dropped `--name`, so appending it would leave a stray positional
+  # (e.g. `shell <name> <ws>` — sbx then reads <name> as the workspace and the
+  # real workspace as an extra mount, so the intended workspace looks "missing"
+  # and acq prompts to create it; the piped decline then cancels the create).
+  local _stripped=(); local skip=0; local _user_template=0
   for arg in "$@"; do
     if [ "$skip" -eq 1 ]; then skip=0; continue; fi
     case "$arg" in
       --name) skip=1; continue ;;
       --name=*) continue ;;
+      --template|-t) _user_template=1 ;;
+      --template=*|-t=*) _user_template=1 ;;
     esac
     _stripped+=("$arg")
   done
 
+  # Neutral base image (ADR-0022): map --image/ACQ_IMAGE to `sbx create --template
+  # <ref>`. sbx's --template accepts any OCI image ref that satisfies the published
+  # base-image contract (see docs/BACKEND_GUIDE.md). Only inject when the user did
+  # NOT already pass their own --template/-t. Surface the one-time caveats sbx
+  # cannot handle for the user: the agent token must match the image's agent
+  # variant; a private/non-Docker-Hub image needs `sbx secret set --registry`; a
+  # locally-built image needs `sbx template load` first.
+  local _tf=()
+  local _neutral_image=""
+  if command -v acq_resolve_neutral_image >/dev/null 2>&1; then
+    _neutral_image=$(acq_resolve_neutral_image)
+  fi
+  if [ -n "$_neutral_image" ]; then
+    if [ "$_user_template" -eq 1 ]; then
+      echo "acq(sbx): both --image ('$_neutral_image') and an explicit --template were given;" >&2
+      echo "acq(sbx):   honoring your --template and ignoring --image (ADR-0022)." >&2
+    else
+      _tf=(--template "$_neutral_image")
+      if [ "${_ACQ_SBX_IMAGE_NOTICE_SHOWN:-0}" != "1" ]; then
+        _ACQ_SBX_IMAGE_NOTICE_SHOWN=1
+        echo "acq(sbx): using custom base image via 'sbx create --template $_neutral_image' (ADR-0022)." >&2
+        echo "acq(sbx):   Ensure the AGENT matches the image's agent variant, the image meets the" >&2
+        echo "acq(sbx):   base-image contract (docs/BACKEND_GUIDE.md), and — for a private/non-Docker-Hub" >&2
+        echo "acq(sbx):   image — that pull creds are stored ('sbx secret set --registry <host>'), or a" >&2
+        echo "acq(sbx):   locally-built image is imported first ('sbx template load <tar>')." >&2
+      fi
+    fi
+  fi
+
   local kf=()
   while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
 
-  acq_debug "sbx create --name $name ${kf[*]} ${_stripped[*]:-}"
+  acq_debug "sbx create --name $name ${_tf[*]:-} ${kf[*]} ${_stripped[*]:-}"
   acq_spin_start "Creating sandbox '$name'"
   if [ "${#_stripped[@]}" -gt 0 ]; then
-    sbx create --name "$name" "${kf[@]}" "${_stripped[@]}"
+    sbx create --name "$name" ${_tf[@]+"${_tf[@]}"} "${kf[@]}" "${_stripped[@]}"
   else
-    sbx create --name "$name" "${kf[@]}"
+    sbx create --name "$name" ${_tf[@]+"${_tf[@]}"} "${kf[@]}"
   fi
   local _rc=$?
   acq_spin_stop "Creating sandbox '$name'"
@@ -378,6 +422,13 @@ acq_backend_provision() {
     # Persist the CLI (`--kit`) / extra kit refs alongside provenance so a later
     # resume heal can reload them (see acq_cli_kits_write). Best-effort.
     acq_cli_kits_write sbx "$name" || true
+  elif [ -n "$_neutral_image" ] && command -v acq_registry_auth_hint >/dev/null 2>&1; then
+    # A custom --image/--template create failed. sbx already printed its raw
+    # error (e.g. "unauthorized"); add the acq remediation for THIS image's
+    # registry (store creds) or a locally-built image (import first), so the
+    # user is not left with only the backend's bare denial. ADR-0022.
+    echo "acq(sbx): 'sbx create' failed for '$name' with custom image '$_neutral_image'." >&2
+    acq_registry_auth_hint sbx "$_neutral_image"
   fi
   return "$_rc"
 }

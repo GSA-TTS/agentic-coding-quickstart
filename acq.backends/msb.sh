@@ -98,7 +98,45 @@ MIN_MSB_VERSION="0.6.9"
 # install. Override with ACQ_MSB_IMAGE to bring your own (e.g. a lighter or
 # org-internal image, or a plain OCI base) — a custom image must still provide
 # the prerequisites; see the prerequisite contract below.
-ACQ_MSB_IMAGE="${ACQ_MSB_IMAGE:-docker.io/docker/sandbox-templates:shell-docker}"
+#
+# ADR-0022 (neutral --image / ACQ_IMAGE): the backend-agnostic image knob resolves
+# to this variable when ACQ_MSB_IMAGE is not itself set. Precedence: an explicitly
+# set ACQ_MSB_IMAGE (the most-specific, backend-scoped var) WINS over the neutral
+# ACQ_IMAGE, with a one-time notice, so a user who deliberately set the msb var is
+# never silently overridden. The resolution runs at provision time (not here at
+# source time) via _acq_msb_resolve_image, because the neutral value may be set by
+# the `--image` flag after this file is sourced.
+ACQ_MSB_IMAGE="${ACQ_MSB_IMAGE:-}"
+_ACQ_MSB_DEFAULT_IMAGE="docker.io/docker/sandbox-templates:shell-docker"
+_ACQ_MSB_IMAGE_NOTICE_SHOWN=0
+
+# _acq_msb_resolve_image — echo the OCI image `msb create` should use, applying
+# the ADR-0022 precedence: explicit ACQ_MSB_IMAGE > neutral --image/ACQ_IMAGE >
+# built-in default. Prints a one-time notice if BOTH the backend var and the
+# neutral image are set (backend var wins). Idempotent notice (once per process).
+_acq_msb_resolve_image() {
+  local neutral=""
+  if command -v acq_resolve_neutral_image >/dev/null 2>&1; then
+    neutral=$(acq_resolve_neutral_image)
+  fi
+  if [ -n "${ACQ_MSB_IMAGE:-}" ]; then
+    if [ -n "$neutral" ] && [ "$neutral" != "$ACQ_MSB_IMAGE" ] \
+       && [ "${_ACQ_MSB_IMAGE_NOTICE_SHOWN:-0}" != "1" ]; then
+      _ACQ_MSB_IMAGE_NOTICE_SHOWN=1
+      echo "acq(msb): both ACQ_MSB_IMAGE and a neutral image (--image/ACQ_IMAGE) are set;" >&2
+      echo "acq(msb):   using the backend-specific ACQ_MSB_IMAGE='$ACQ_MSB_IMAGE'" >&2
+      echo "acq(msb):   (most-specific wins; see ADR-0022). Unset ACQ_MSB_IMAGE to use the" >&2
+      echo "acq(msb):   neutral image '$neutral'." >&2
+    fi
+    printf '%s\n' "$ACQ_MSB_IMAGE"
+    return 0
+  fi
+  if [ -n "$neutral" ]; then
+    printf '%s\n' "$neutral"
+    return 0
+  fi
+  printf '%s\n' "$_ACQ_MSB_DEFAULT_IMAGE"
+}
 
 # Prerequisite tools the pinned four kits need at runtime, expected to be
 # PRESENT IN THE BASE IMAGE (the default sandbox-templates:shell-docker provides
@@ -2204,6 +2242,30 @@ acq_backend_provision() {
   local kitdirs=()
   local _volrecs=""
 
+  # Resolve the OCI image ONCE per provision (ADR-0022): explicit ACQ_MSB_IMAGE
+  # wins over the neutral --image/ACQ_IMAGE, which wins over the built-in default.
+  # Use this local everywhere below instead of $ACQ_MSB_IMAGE so the neutral knob
+  # and the one-time precedence notice are honored consistently.
+  local _msb_image
+  _msb_image=$(_acq_msb_resolve_image)
+
+  # Optional pull policy (ACQ_MSB_PULL): forwarded to `msb create --pull`.
+  # `msb create` reads an image REF and by default pulls if-missing from a
+  # registry — it does NOT read a locally-built image unless that image has been
+  # imported into msb's cache with `msb image load` first. When a caller has
+  # pre-loaded a local image (e.g. a locally-built tag like `localhost/…` that
+  # has no registry behind it), they set ACQ_MSB_PULL=never so msb uses the cache
+  # instead of attempting to pull the un-pullable ref. Accepted values match
+  # msb's own: always | if-missing | never. An unset var keeps msb's default.
+  case "${ACQ_MSB_PULL:-}" in
+    "") : ;;  # unset — leave msb's default (if-missing)
+    always|if-missing|never) create_flags+=(--pull "$ACQ_MSB_PULL") ;;
+    *)
+      echo "acq(msb): ignoring invalid ACQ_MSB_PULL='$ACQ_MSB_PULL'" \
+           "(expected: always | if-missing | never)" >&2
+      ;;
+  esac
+
   # Create-time startup-script staging (ADR-0017, increment 1). Reset the
   # per-provision guard + staged-file list so a prior provision in the same
   # process does not leak into this one; the files are cleaned up after create.
@@ -2569,11 +2631,11 @@ EOF
   # `|| _create_rc=$?` — a bare `msb create; local rc=$?` would abort the
   # function on failure BEFORE the error block and the transient-secret scrub
   # below ever run.
-  acq_debug "msb create --name $name ${create_flags[*]} $ACQ_MSB_IMAGE"
+  acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
   local _create_rc=0
   acq_debug "msb create: invoking (this returns fast; guest boots in background)"
   acq_spin_start "Creating sandbox '$name'"
-  msb create --name "$name" "${create_flags[@]}" "$ACQ_MSB_IMAGE" || _create_rc=$?
+  msb create --name "$name" "${create_flags[@]}" "$_msb_image" || _create_rc=$?
   acq_spin_stop "Creating sandbox '$name'"
   acq_debug "msb create: returned rc=${_create_rc}"
   # Clear the transient secret env vars immediately after create reads them
@@ -2596,13 +2658,13 @@ EOF
   if [ "$_create_rc" -ne 0 ]; then
     echo "acq(msb): error: 'msb create' failed for '$name'." >&2
     echo "acq(msb):   flags: ${create_flags[*]}" >&2
-    echo "acq(msb):   image: $ACQ_MSB_IMAGE" >&2
-    case "$ACQ_MSB_IMAGE" in
-      ghcr.io/*|*.azurecr.io/*|*private*)
-        echo "acq(msb):   hint: the image may require registry auth. Set ACQ_MSB_IMAGE to a" >&2
-        echo "acq(msb):         pullable image (default: docker.io/docker/sandbox-templates:shell-docker)." >&2
-        ;;
-    esac
+    echo "acq(msb):   image: $_msb_image" >&2
+    # Targeted registry-auth / local-import hint for the SPECIFIC image host
+    # (registry-agnostic — not limited to a few hardcoded hosts). The raw msb
+    # stderr above is printed by msb itself; this adds the acq remediation.
+    if command -v acq_registry_auth_hint >/dev/null 2>&1; then
+      acq_registry_auth_hint msb "$_msb_image"
+    fi
     echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the full command trace)" >&2
     return 1
   fi

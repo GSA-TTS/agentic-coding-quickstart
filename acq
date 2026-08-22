@@ -78,7 +78,9 @@ Subcommands:
                                            an existing one, and launch AGENT
                                            (e.g. opencode) or a shell.
                                            (--no-update-check skips the stale-
-                                           bundle check for this run.)
+                                           bundle check for this run;
+                                           --image REF sets a custom base image,
+                                           see ACQ_IMAGE below.)
   create AGENT PATH [...]                  Create a sandbox (detached).
   ls                                       List sandboxes.
   stop NAME                                Stop a sandbox (without removing).
@@ -122,11 +124,21 @@ Global flags (before the subcommand):
                        Default: the persisted backend (`acq backend set`),
                        else msb. `msb` runs microVMs via the microsandbox (msb)
                        CLI; `sbx` runs Docker sandboxes via the sbx CLI.
+  --image REF          Custom base image (ADR-0022). Also accepted after the
+                       run/create subcommand (see below). Backend-agnostic: on
+                       msb it sets the OCI image (like ACQ_MSB_IMAGE); on sbx it
+                       maps to `sbx create --template REF`. Equivalent env var:
+                       ACQ_IMAGE. Precedence: --image > ACQ_IMAGE > backend
+                       var/default (a set ACQ_MSB_IMAGE wins, with a notice). The
+                       image must satisfy the base-image contract in
+                       docs/BACKEND_GUIDE.md.
 
-run/create flag:
+run/create flags:
   --kit REF            Apply an extra kit (repeatable). REF is a local dir or a
                        git+https ref (like an ACQ_EXTRA_KITS entry); acq
                        translates it to the backend — it is NOT forwarded raw.
+  --image REF          Same as the global --image above; accepted here too so
+                       `acq create AGENT --image REF PATH` works.
 
 See docs/QUICKSTART.md and docs/BACKEND_GUIDE.md for more.
 HELP
@@ -257,7 +269,17 @@ _acq_backend_passthrough() {
 if [ -n "${ACQ_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
 # ---------------------------------------------------------------------------
-# Pre-parse global --backend flag (must appear before the subcommand).
+# Pre-parse global flags that may appear BEFORE the subcommand.
+#   --backend sbx|msb   pick the backend for this invocation
+#   --image REF         neutral base image (ADR-0022). Accepted here as a
+#                       convenience so `acq --backend msb --image REF create …`
+#                       works, mirroring --backend's global position. It is ALSO
+#                       accepted after the subcommand (`acq create … --image REF`)
+#                       by the run|create arm below; either position sets
+#                       ACQ_IMAGE. `--image` must never reach the backend CLI
+#                       (neither `sbx`/`msb` accepts it), so we strip it here too.
+# Only --backend/--image are consumed as pre-subcommand globals; the loop stops
+# at the first other token (the subcommand).
 # ---------------------------------------------------------------------------
 explicit_backend=""
 while [ "$#" -gt 0 ]; do
@@ -269,6 +291,19 @@ while [ "$#" -gt 0 ]; do
     --backend)
       shift
       explicit_backend="${1:-}"
+      shift
+      ;;
+    --image=*)
+      export ACQ_IMAGE="${1#--image=}"
+      shift
+      ;;
+    --image)
+      shift
+      if [ "$#" -eq 0 ]; then
+        echo "acq: --image given with no value" >&2
+        exit 2
+      fi
+      export ACQ_IMAGE="$1"
       shift
       ;;
     *)
@@ -598,6 +633,17 @@ case "$subcommand" in
       esac
     done
     set -- ${_acq_run_args[@]+"${_acq_run_args[@]}"}
+    # Extract acq-owned `--image <ref>` (ADR-0022) BEFORE kit extraction and
+    # dispatch, so it never reaches the backend CLI (neither `sbx create` nor
+    # `msb create` accepts a bare `--image`). It selects the neutral base image;
+    # the backend adapters read it via acq_resolve_neutral_image. Exporting
+    # ACQ_IMAGE lets the flag take the same code path as the env var and honors
+    # the ADR-0022 precedence (flag > env). Only honored BEFORE `--`.
+    extract_image_flag "$@"
+    if [ -n "${ACQ_IMAGE_FLAG:-}" ]; then
+      export ACQ_IMAGE="$ACQ_IMAGE_FLAG"
+    fi
+    set -- ${ACQ_IMAGE_REMAINING[@]+"${ACQ_IMAGE_REMAINING[@]}"}
     extract_kit_flags "$@"
     [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _build_kit_list   # re-fold with CLI kits
     # Rebuild positional args as: <subcommand> <remaining args w/o --kit>.
@@ -686,6 +732,15 @@ case "$subcommand" in
       fi
 
       if acq_backend_exists "$local_name"; then
+        # A neutral --image / ACQ_IMAGE only takes effect at CREATE (ADR-0022);
+        # a re-attach to an existing sandbox does not re-image it. Say so once,
+        # rather than silently ignoring the flag, so the user isn't misled into
+        # thinking the running sandbox was rebuilt on the requested image.
+        if [ -n "${ACQ_IMAGE:-}" ]; then
+          echo "acq: note: --image/ACQ_IMAGE is ignored when re-attaching an existing" \
+               "sandbox ('$local_name'); it applies only at create (ADR-0022). Remove the" \
+               "sandbox first ('acq $ACQ_RESOLVED_BACKEND rm $local_name') to recreate on a new image." >&2
+        fi
         # Capture staleness BEFORE the heal — ensure_kits_applied rewrites the
         # provenance record to "current", so reading status after it would never
         # see stale/unknown and the offer below would be dead.
