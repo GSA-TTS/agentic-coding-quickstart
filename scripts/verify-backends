@@ -199,6 +199,25 @@ export ACQ_PROVENANCE_DIR="$VERIFY_STATE/provenance"
 export ACQ_SECRET_NO_LIVE_REFEED=1
 mkdir -p "$XDG_CONFIG_HOME" "$ACQ_SECRET_STORE_DIR" "$ACQ_STATE_DIR" "$ACQ_PROVENANCE_DIR"
 
+# Fixture kit for the neutral `volumes:` vocabulary (ADR-0022): a tiny local kit
+# declaring a 256m block volume. Appended to ACQ_EXTRA_KITS so every create below
+# carries it; the volumes check inside verify_backend asserts the mount landed.
+# 256m, not smaller: msb refuses tiny ext4 disk images ("image size is too small
+# for ext4 formatting"; floor is 128M on msb 0.6.12), so stay well above it.
+VOLKIT_DIR="$VERIFY_STATE/verify-volumes-kit"
+mkdir -p "$VOLKIT_DIR"
+cat >"$VOLKIT_DIR/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: verify-volumes
+displayName: Verify Volumes
+description: verify-backends fixture exercising the neutral volumes vocabulary
+volumes:
+  - path: /acq-verify-vol
+    size: 256m
+SPEC
+export ACQ_EXTRA_KITS="${ACQ_EXTRA_KITS:+${ACQ_EXTRA_KITS} }${VOLKIT_DIR}"
+
 # Run an acq command, capturing combined stdout+stderr into LAST_OUT and
 # returning its exit status. The first arg is a short label for the step; in
 # verbose mode it and the exact command line are streamed live.
@@ -681,11 +700,49 @@ verify_backend() {
   # 5) OCI engine (podman) usable — msb only (ADR-0020).
   _verify_oci_checks "$backend" "$name"
 
+  # 6) Neutral kit volumes (ADR-0022): the verifier's fixture kit (appended to
+  #    ACQ_EXTRA_KITS at setup) declares a 256m block volume at /acq-verify-vol.
+  #    Assert the path is a MOUNTPOINT on a dedicated /dev block device of
+  #    roughly the declared size — df is used (not findmnt) because it is
+  #    present in every base image; the size window is wide because ext4
+  #    metadata + reserved blocks shrink the visible total.
+  local vol_line vol_dev vol_kb vol_mp vol_dev_ok
+  if run_acq "exec volume-df" --backend "$backend" exec "$name" -- sh -c \
+      "df -Pk /acq-verify-vol | sed -n 2p"; then
+    vol_line=$(printf '%s\n' "$LAST_OUT" | grep '/acq-verify-vol' | tail -1)
+    vol_dev=$(printf '%s' "$vol_line" | awk '{print $1}')
+    vol_kb=$(printf '%s' "$vol_line" | awk '{print $2}')
+    vol_mp=$(printf '%s' "$vol_line" | awk '{print $6}')
+    vol_dev_ok=0
+    case "$vol_dev" in /dev/*) vol_dev_ok=1 ;; esac
+    if [ "$vol_mp" = "/acq-verify-vol" ] && [ "$vol_dev_ok" = 1 ] && \
+       [ -n "$vol_kb" ] && [ "$vol_kb" -ge 180000 ] 2>/dev/null && [ "$vol_kb" -le 270000 ] 2>/dev/null; then
+      pass "${backend}: kit volumes: 256m block volume mounted at /acq-verify-vol (${vol_dev}, ${vol_kb} kB)"
+    else
+      fail "${backend}: kit volumes: /acq-verify-vol is not a dedicated ~256m block mountpoint" \
+           "dev='${vol_dev}' kb='${vol_kb}' mountpoint='${vol_mp}'"
+      dump "df output" "$LAST_OUT"
+    fi
+  else
+    fail "${backend}: kit volumes: df probe failed for /acq-verify-vol (volume not mounted?)"
+    dump "exec output" "$LAST_OUT"
+  fi
+
   # Clean up the throwaway sandbox.
   if [ -n "$KEEP" ] && [ "$FAIL" -gt 0 ]; then
     printf '        (keeping sandbox %s; --keep set)\n' "$name"
   else
     run_acq "rm" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
+    # ADR-0022: on msb the derived kit volumes (acq-<name>-*) must not outlive
+    # the sandbox — acq_backend_terminate removes them by prefix after a
+    # successful `msb remove`.
+    if [ "$backend" = "msb" ]; then
+      if msb volume ls -q 2>/dev/null | grep -q "^acq-${name}-"; then
+        fail "${backend}: kit volumes: derived volumes not removed on rm (acq-${name}-*)"
+      else
+        pass "${backend}: kit volumes: derived volumes removed on rm"
+      fi
+    fi
   fi
 }
 
