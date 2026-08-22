@@ -80,11 +80,12 @@ This is useful for:
 
 ## Using Pre-commit with OpenCode
 
-If you're using OpenCode inside SBX, the agent can run pre-commit checks on your behalf:
+If you're using OpenCode inside a sandbox, the agent can run pre-commit checks
+on your behalf:
 
 ```bash
 # After creating a sandbox and installing pre-commit
-sbx exec SANDBOX_NAME pre-commit run --all-files
+acq exec SANDBOX_NAME -- pre-commit run --all-files
 ```
 
 The agent should be configured to run pre-commit checks before committing if hooks are installed. If hooks are not installed, the agent will commit normally.
