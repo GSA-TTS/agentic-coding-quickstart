@@ -6,7 +6,7 @@ tier: 1
 last_updated: "2026-08-18"
 audience: "developers"
 keywords: ["AGENTS.md", "acq", "sbx", "msb", "usai", "sandbox", "agent-rules", "workspace"]
-related_files: ["docs/QUICKSTART.md", "docs/BACKEND_GUIDE.md", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0001-sbx-usai-agent-execution-architecture.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
+related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0001-sbx-usai-agent-execution-architecture.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
 load_priority: "always"
 review_cycle: "quarterly"
 ---
@@ -435,7 +435,7 @@ real value in on the wire. Both keep the real secret out of the agent's hands.
 
 See [`docs/BACKEND_GUIDE.md`](docs/BACKEND_GUIDE.md) for the full per-backend
 credential-injection and secret-binding model (and
-[`docs/QUICKSTART_SBX.md`](docs/QUICKSTART_SBX.md) for SBX-specific proxy
+[`docs/howto/sbx.md`](docs/howto/sbx.md) for SBX-specific proxy
 patterns).
 
 ---

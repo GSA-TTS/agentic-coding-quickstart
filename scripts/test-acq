@@ -3078,8 +3078,8 @@ cleanup_stubs
 
 #       its own absolute host path (sbx-parity), a trailing :ro is preserved, and
 #       the recorded start dir is the FIRST (primary) workspace regardless of how
-#       many mounts are given (docs/QUICKSTART_SBX.md: "Primary workspace — the
-#       first path; agent starts here").
+#       many mounts are given (docs/CONCEPTS.md: the primary workspace is the
+#       first path and the agent starts there).
 make_stubs; load_acq
 # Two real host dirs to mount (a nonexistent path would hard-fail provision).
 mkdir -p "$STUBDIR/ws-app" "$STUBDIR/ws-lib"

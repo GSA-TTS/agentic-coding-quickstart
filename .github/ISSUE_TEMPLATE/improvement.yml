@@ -27,7 +27,7 @@ body:
     id: location
     attributes:
       label: Which document?
-      description: File path or section (e.g., "README.md Quick Start" or "docs/QUICKSTART_SBX.md")
+      description: File path or section (e.g., "README.md Quick Start" or "docs/howto/sbx.md")
       placeholder: "README.md"
     validations:
       required: true
