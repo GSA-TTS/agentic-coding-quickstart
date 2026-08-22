@@ -27,7 +27,7 @@
 #   - `msb list|ls [-q] [--running]`, `msb stop`, `msb remove|rm [-f]`,
 #     `msb copy|cp SRC DST`, `msb ssh [SANDBOX] [-- CMD…]`, `msb ssh authorize`,
 #     `msb run … -p HOST:GUEST` (published ports), `msb doctor`.
-#   - Volume surface (ADR-0022): `msb create … --mount-named
+#   - Volume surface (ADR-0023): `msb create … --mount-named
 #     NAME:PATH:kind=disk,size=SIZE` (create-or-reuse disk-backed named volume),
 #     `--tmpfs PATH:SIZE`, and `msb volume ls -q` / `msb volume rm NAME` for the
 #     terminate-time cleanup of derived volumes. LIVE-VERIFIED end-to-end on
@@ -1273,7 +1273,7 @@ EOF
 # on STDIN into the named array. Usage:
 #   _acq_msb_volume_flags_from_records ARRVAR SANDBOX <<EOF ... records ... EOF
 #
-# ADR-0022: records come from kit_spec_volumes (path absolute + charset-safe,
+# ADR-0023: records come from kit_spec_volumes (path absolute + charset-safe,
 # type ""|tmpfs, size byte-size grammar), UNIONED across kits by
 # _acq_msb_volume_records_dedupe before reaching here. Mapping, mirroring the
 # sbx kit-spec v2 §5.7 semantics:
@@ -1363,7 +1363,7 @@ _acq_msb_volume_records_dedupe() {
 # would drain the loop's stdin (the recorded loop-stdin-consumption pitfall).
 # NOTE: prefix-matched, so a sandbox name that is itself a prefix of another
 # sandbox's name + '-' (e.g. `web` vs `web-2`) could match the longer sandbox's
-# volumes; accepted for now — see ADR-0022.
+# volumes; accepted for now — see ADR-0023.
 _acq_msb_remove_derived_volumes() {
   local _name="$1" _vol _vols=()
   while IFS= read -r _vol; do
@@ -2323,7 +2323,7 @@ acq_backend_provision() {
     _acq_msb_port_flags_into pp "$spec"
     [ "${#pp[@]}" -gt 0 ] && create_flags+=("${pp[@]}")
 
-    # Volumes (ADR-0022): ACCUMULATE this kit's validated records; they are
+    # Volumes (ADR-0023): ACCUMULATE this kit's validated records; they are
     # unioned across all kits (last wins by path, matching sbx's own
     # composition rule) and emitted as create flags AFTER the loop — emitting
     # per kit here would produce conflicting --mount-named flags when two kits
@@ -2341,7 +2341,7 @@ $(kit_spec_volumes "$spec")"
     _acq_msb_stage_startup_script "$spec" create_flags
   done
 
-  # Volumes (ADR-0022) → create-time storage flags, from the union of every
+  # Volumes (ADR-0023) → create-time storage flags, from the union of every
   # kit's records (last wins by path): a block entry becomes a derived named
   # disk volume (--mount-named acq-<name>-<pathslug>-<crc>:<path>:kind=disk,
   # size=<size>, removed again in acq_backend_terminate), a tmpfs entry becomes
@@ -3625,7 +3625,7 @@ acq_backend_terminate() {
   # before removing the sandbox (ADR-0015). Killing a dead PID / missing state
   # file is a no-op.
   _acq_msb_ports_teardown "$1"
-  # Clean up derived volumes (ADR-0022) whenever the sandbox is GONE after the
+  # Clean up derived volumes (ADR-0023) whenever the sandbox is GONE after the
   # remove attempt — not merely when remove succeeded. A failed remove of a
   # still-existing sandbox must not touch volumes that may be in use, but a
   # failed remove of an already-gone sandbox (removed via `msb rm` directly, or
@@ -4062,7 +4062,7 @@ acq_backend_apply_kit() {
     echo "acq(msb): error: could not fetch kit: $kitref" >&2
     return 1
   }
-  # Volumes are creation-time only (ADR-0022): a mid-life apply cannot attach
+  # Volumes are creation-time only (ADR-0023): a mid-life apply cannot attach
   # them, so say so instead of leaving the kit's storage requirement silently
   # unmet. (Provision-time applies do not pass here — their volumes were
   # mounted at create.)

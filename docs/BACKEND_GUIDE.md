@@ -733,7 +733,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 | Secret binding breadth | 7 built-in services + any custom `--host/--env` endpoint | usai + github + **any** custom `--host/--env` endpoint bound generically via `--secret ENV@HOST` (shipped) |
 | Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; `SUPPORTS_SNAPSHOTS=0`) |
 | Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` now implemented (ADR-0015) — live end-to-end verification pending a KVM host |
-| Kit volumes | neutral `volumes:` passed through 1:1 to kit-spec v2 §5.7 (sized block device / tmpfs, mounted at create; dies with the sandbox) | neutral `volumes:` unioned across kits (last wins by path) and mapped to a derived named disk volume (`--mount-named acq-<sandbox>-<pathslug>-<crc>:<path>:kind=disk,size=<size>`) or `--tmpfs <path>:<size>`; derived volumes removed on `acq rm` (ADR-0022) |
+| Kit volumes | neutral `volumes:` passed through 1:1 to kit-spec v2 §5.7 (sized block device / tmpfs, mounted at create; dies with the sandbox) | neutral `volumes:` unioned across kits (last wins by path) and mapped to a derived named disk volume (`--mount-named acq-<sandbox>-<pathslug>-<crc>:<path>:kind=disk,size=<size>`) or `--tmpfs <path>:<size>`; derived volumes removed on `acq rm` (ADR-0023) |
 | Agent binary | supplied by the sbx agent template | installed at provision on a plain base (`npm install -g opencode-ai`), then launched on attach |
 | OpenCode web UI | `openchamber` acq kit (publishes port 4096) | same kit once it declares `backends: [sbx, msb]` against the released patterns schema (neutral port/background vocab consumed by both backends; the patterns repo's openchamber kit) |
 | In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+; **no startup-bearing kits on 0.38+ — recreate to extend/refresh**) | re-apply kits idempotently (no state-preserving add) |
@@ -929,7 +929,7 @@ the kit spec never carries a secret value.
 > release commit (`f5fb887`); the pin is only advanced to a tagged release,
 > per the fail-closed cross-repo gating.
 
-**`volumes` (sized guest storage, [ADR-0022](adr/0022-neutral-volumes-kit-vocabulary.md)).**
+**`volumes` (sized guest storage, [ADR-0023](adr/0023-neutral-volumes-kit-vocabulary.md)).**
 A top-level list of `{path, type?, size}` entries — `path` required, absolute,
 and normalized (no `.`/`..` segments, no `//`, no trailing `/` — a volume
 mounts a whole filesystem, so `/.` would shadow the guest root), `type` empty
@@ -1016,7 +1016,7 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
 - Neutral top-level `volumes` vocab consumed by **both** backends (sbx: 1:1
   into kit-spec v2 §5.7; msb: derived named disk volume / `--tmpfs`, with
   derived-volume cleanup on `acq rm`)
-  ([ADR-0022](adr/0022-neutral-volumes-kit-vocabulary.md)). **Live-verified on
+  ([ADR-0023](adr/0023-neutral-volumes-kit-vocabulary.md)). **Live-verified on
   both backends** (`verify-backends`: msb 0.6.12 macOS HVF 17/17 — dedicated
   virtio-blk mount at boot + derived-volume removal on rm; sbx 0.39.0 9/9 —
   dedicated block-device mount of the declared size); the patterns schema

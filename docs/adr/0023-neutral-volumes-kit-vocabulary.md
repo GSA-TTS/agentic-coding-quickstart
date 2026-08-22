@@ -11,7 +11,7 @@ risk_treatment: accept
 supersedes: []
 ---
 
-# ADR-0022: Neutral Volumes Kit Vocabulary
+# ADR-0023: Neutral Volumes Kit Vocabulary
 
 ## Context and Problem Statement
 

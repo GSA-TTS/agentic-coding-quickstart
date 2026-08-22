@@ -398,7 +398,7 @@ _kit_pp_validate() {
 # content at the path, so a kit needing seeded content ships its own first-boot
 # copy step. Multiple kits union by path, last wins — sbx resolves that itself.
 # The neutral schema carries no `mode` (msb has no equivalent; kits chmod in a
-# startup step instead — see ADR-0022).
+# startup step instead — see ADR-0023).
 #
 # VALIDATION (SI-10): these values reach a generated sbx-v2 spec and an msb
 # create argv, so they are untrusted. path must be absolute, charset-restricted
@@ -1285,7 +1285,7 @@ EOF
   # them). A valid-but-small block size additionally gets a WARNING (not an
   # error): msb refuses ext4 disk images under 128M, so a sub-floor size
   # passes validate for sbx-only use but will fail an msb create.
-  # (ADR-0022, SI-10)
+  # (ADR-0023, SI-10)
   local vline vp vt vs vbytes
   while IFS= read -r vline; do
     [ -n "$vline" ] || continue
