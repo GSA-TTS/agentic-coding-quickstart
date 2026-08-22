@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v2.0.0...v3.0.0) (2026-08-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **acq:** on a host with both backends installed and no explicit selection, acq now resolves to msb instead of sbx.
+* **acq:** opencode-web.sh is removed. Use the openchamber acq kit to run OpenCode in the browser.
+
+### Features
+
+* **acq:** add backend-agnostic --image/ACQ_IMAGE base image override ([#358](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/358)) ([80ae257](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/80ae25722210c5ef85d2ce6edb7c25bb4c938a42))
+* **acq:** default to msb backend and remove qsbx for 3.0.0 ([#266](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/266)) ([21f7901](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/21f7901d751d42777778378afce8cde1ea6678f9))
+* **acq:** detect stale sandboxes + acq kit check|update ([#236](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/236)) ([#241](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/241)) ([f1693aa](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/f1693aa6e3c64f640bd84aab2e770c5e58184925))
+* **acq:** fix subcommand dispatch hygiene and implement 'secret import' ([#283](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/283)) ([5ae27c6](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/5ae27c682561e35e33d6f1002bcbb9dd79985413))
+* **acq:** sand rough edges off first-run onboarding (PATH self-repair + auto host check) ([#281](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/281)) ([71698d7](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/71698d73bc572f67394ffd8a450a2f0651538ebd))
+* **acq:** sbx↔msb backend parity, incl. live openchamber-on-msb (omnibus [#234](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/234)) ([#233](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/233)) ([32f9ae0](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/32f9ae0d5a4a70d35381732929766632cab7be35))
+* **acq:** scope GitHub token per-sandbox to mounted repos ([#229](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/229)) ([b355706](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/b3557061434607cc0646447444faa0ba956c0f30))
+* **kits:** add neutral volumes vocabulary (sbx v2 5.7 passthrough + msb parity) ([#357](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/357)) ([8029d2a](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/8029d2aec8220b6ed1b89d6be0b8e0d13ea32847))
+* **msb:** collapse gateway-DNS grant to allow@dns and re-verify git-HTTPS secret substitution vs msb 0.6.9 ([#318](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/318)) ([491c75c](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/491c75c4a38e3eb7409c075979107802c1953985))
+* **msb:** diagnose+disambiguate msb egress failures (three signatures) ([#306](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/306)) ([7a6d371](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/7a6d371e20be6e5a58087114e0cd21a2c56af550))
+* **msb:** ensure an OCI engine via rootless podman (+ verify-backends fixes, sbx 0.38 floor) ([#302](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/302)) ([8088dcc](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/8088dcca26cd75784769f4f4527393c08ea89851))
+* **msb:** forward the host ssh-agent into the guest via --vsock ([#316](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/316)) ([e4e8317](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/e4e831769e872095bdf299084a10242f8a1090cb))
+* **msb:** mirror the sbx `balanced` network policy as the msb default egress ([#295](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/295)) ([2c056cb](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/2c056cbed5abdef1f45ecb71ef26151e8bc7ac86))
+* **msb:** neutral ACQ_NETWORK_TIER egress selector + deprecate ACQ_MSB_BALANCED_EGRESS ([#310](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/310)) ([2242af4](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/2242af464c91220e423d088a8f8c2ad535c7783d))
+* **msb:** re-run kit startup on restart via acq start/restart ([#260](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/260)) ([7bbc999](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/7bbc9993437d0b6a9ae6af7125e2018c9046a40c))
+* **msb:** stage kit startup commands as a create-time script ([#259](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/259)) ([3ff736b](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/3ff736bc8f4fce620a1ccdbc2996f50af80e6545))
+* **progress:** TTY-aware progress feedback during long acq run phases ([#290](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/290)) ([ab44206](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/ab442060a78b74d122fd7ca9a38d26b1b6d3f9da))
+* **sbx:** add actions=read scope to PAT URL ([#262](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/262)) ([fbaa291](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/fbaa29179b0ce70ecfdfcc2b0a9f993e101b5ddc))
+
+
+### Bug Fixes
+
+* **acq:** accurate git-identity guidance + workspace path pre-flight ([#216](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/216)) ([546cc93](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/546cc9321e9937b96db5b0101a5b647ec80875cf))
+* **acq:** carry publishedPorts and quote allow hosts in kit-translate ([#221](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/221)) ([a36d783](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/a36d7835ca0f8fc384486345f2321c809a35fc30))
+* **acq:** don't hang key rotation when sbx needs a login ([#211](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/211)) ([#212](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/212)) ([bb0544d](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/bb0544d8c081a4eaba0481a9305a2f4c7a991dff))
+* **acq:** enumerate keychain-linux secrets in acq secret ls ([#258](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/258)) ([f4e1bb9](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/f4e1bb9c833f5e3c462c46b9587d8a2abd087c5f))
+* **acq:** intercept --kit &lt;ref&gt; on run/create and translate it ([#223](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/223)) ([a86d151](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/a86d1517536307355ae24754b2057a72e2aa9324))
+* **acq:** let secret rm remove any stored entry, not just built-ins ([#300](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/300)) ([#301](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/301)) ([ab506ed](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/ab506ed6a4b792dcc04b55588443af37adcd4bbf))
+* **acq:** make kit fetch non-interactive; never prompt for git creds ([#207](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/207)) ([#209](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/209)) ([b505336](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/b5053367a1f4996bfe036ec358ab5828bf0feb3f))
+* **acq:** make USAi key rotation backend-neutral ([#218](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/218)) ([4a5f8e1](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/4a5f8e1b1a5ee816940178c9d6a85868fb6ae9f3))
+* **acq:** persist --kit/extra refs and restore them on start/restart ([#328](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/328)) ([78ec68c](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/78ec68c1e9f2a6b5707c66454290a114123d831e))
+* **acq:** run fails closed on an unresolvable target instead of silent no-op ([#257](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/257)) ([c0b155c](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/c0b155cb5679fc74b52e5114ada96a8414eed8ef))
+* **acq:** store USAi key before sandbox create to end 200-vs-401 split ([#286](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/286)) ([c68ccb6](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/c68ccb6ed0c4af4b735cf7c99be2170023314928))
+* Add -f to sbx rm command to cleanup rotation validation sandbox ([#268](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/268)) ([6a21e48](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/6a21e48047e5c0e59a600dbdaf572e2615f8fa1e))
+* Avoid literal $MSB_ proxy token ([#324](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/324)) ([548e314](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/548e31483f6d64f07701b03fcc44cf58d76a4f03))
+* **http-test:** Ensure the test can install git in alpine ([#325](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/325)) ([a11ece2](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/a11ece2cf67e87bfdebe8755eb5181b500f68420))
+* **msb:** install/launch the agent + mount workspaces at their host path ([#230](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/230)) ([0d2bbd0](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/0d2bbd0e830154b412f928f655f20feafb9430ea))
+* **opencode-web:** background sbx exec command on host instead of opencode command inside sandbox ([#210](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/210)) ([0a2057e](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/0a2057e3355d4f1bd49703888eee4061ce61cc09))
+* **opencode-web:** use serve command and drop per-run port publish ([#204](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/204)) ([5364ffb](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/5364ffba405b2f2574747c9c55bee0c15cb38c93))
+* **sbx:** correct lifecycle verbs — sbx has no 'start'/'restart' ([#285](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/285)) ([b69b5d1](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/b69b5d1fae36245789f2cab9b5cd7ee3070d4c49))
+* **sbx:** make global secret-set bash-3.2-safe (empty-array under set -u) ([#309](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/309)) ([632a656](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/632a656ede0bddb9d3a4d9a7b3c70ebf2b2e3511))
+* **sbx:** stop the every-attach re-attach heal-loop noise on sbx 0.38 ([#327](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/327)) ([24ceb43](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/24ceb436cd457069939549ac814eaaffe3d28c93))
+
 ## [2.0.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v1.0.1...v2.0.0) (2026-07-21)
 
 
