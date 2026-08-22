@@ -211,6 +211,187 @@ Usage:
 BACKENDUSAGE
 }
 
+# _acq_simple_verb_usage VERB — acq's OWN one-verb usage for the remaining
+# acq-owned top-level verbs that are NOT the multi-word topics (secret/kit/
+# backend) handled above. Kept as a single source (one case) so `acq VERB --help`
+# and the topic router below never drift, and so acq documents ITS OWN semantics
+# for a verb rather than only surfacing the backend's help for it. Returns 0 if
+# VERB is known (usage printed to stderr), 1 otherwise (caller falls back to the
+# top-level banner). See docs/BACKEND_GUIDE.md for the backend-specific details.
+_acq_simple_verb_usage() {
+  case "$1" in
+    run)
+      cat >&2 <<'U'
+acq run — create+attach a sandbox, or re-attach an existing one
+
+Usage:
+  acq run AGENT PATH [--kit REF]... [--image REF] [--no-update-check] [-- AGENT_ARGS...]
+  acq run NAME [-- AGENT_ARGS...]     # re-attach an existing sandbox by name
+
+Creates a sandbox for AGENT (e.g. opencode) mounted at PATH if one does not
+already exist, applies the pinned kits, then attaches. Re-attaching an existing
+sandbox heals its kits and (on msb) resumes it if stopped. This is the verb that
+both resumes AND attaches — so an interactive session started via `acq run` gets
+the forwarded host ssh-agent (SSH_AUTH_SOCK) injected, unlike `acq start`.
+U
+      ;;
+    create)
+      cat >&2 <<'U'
+acq create — create a sandbox (detached; does not attach)
+
+Usage:
+  acq create AGENT PATH [--kit REF]... [--image REF]
+
+Provisions a sandbox for AGENT mounted at PATH and applies the pinned kits, then
+returns without attaching. Attach later with `acq run NAME`.
+U
+      ;;
+    ls)
+      cat >&2 <<'U'
+acq ls — list sandboxes
+
+Usage:
+  acq ls
+U
+      ;;
+    stop)
+      cat >&2 <<'U'
+acq stop — stop a sandbox without removing it
+
+Usage:
+  acq stop NAME
+
+State is preserved; resume with `acq run NAME` (or `acq start NAME` on msb).
+U
+      ;;
+    start)
+      cat >&2 <<'U'
+acq start — resume a stopped sandbox and re-run its kit startup (msb only)
+
+Usage:
+  acq start NAME
+
+Resumes NAME (`msb start`), restarts the in-guest ssh-agent bridge, then re-runs
+the pinned kits' startup phase via the exec heal — the deterministic mechanism
+that brings supervised services back up (a bare `msb start` does not replay them;
+see ADR-0017). `acq start` does NOT attach, so the resulting shell you enter by
+another route will not have SSH_AUTH_SOCK injected — use `acq run NAME` for an
+interactive session, or `acq exec NAME -- CMD` for a one-off command (both inject
+it). On sbx there is no `start` verb; a stopped sandbox resumes automatically on
+`acq run`.
+U
+      ;;
+    restart)
+      cat >&2 <<'U'
+acq restart — stop then start a sandbox, re-running kit startup (msb only)
+
+Usage:
+  acq restart NAME
+
+A best-effort bounce: `acq stop` then the same resume+heal as `acq start` (see
+`acq start --help`). Like `acq start`, it does NOT attach, so it does not inject
+SSH_AUTH_SOCK into a session you enter afterward by another route — use `acq run
+NAME` to attach. On sbx there is no `restart` verb; use `acq stop` then `acq run`.
+U
+      ;;
+    rm)
+      cat >&2 <<'U'
+acq rm — remove a sandbox
+
+Usage:
+  acq rm NAME
+
+Destroys the sandbox and all of its state (including uncommitted work in it).
+U
+      ;;
+    exec)
+      cat >&2 <<'U'
+acq exec — run a command inside a sandbox
+
+Usage:
+  acq exec NAME -- CMD...
+
+Runs CMD as the unprivileged agent user in the workspace. On msb, when the host
+ssh-agent is forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
+U
+      ;;
+    cp)
+      cat >&2 <<'U'
+acq cp — copy files in or out of a sandbox
+
+Usage:
+  acq cp SRC DST                # use NAME:path for the in-sandbox side
+U
+      ;;
+    ports)
+      cat >&2 <<'U'
+acq ports — list or publish a sandbox's ports
+
+Usage:
+  acq ports NAME [--publish HOST:GUEST ...]
+U
+      ;;
+    github-scope)
+      cat >&2 <<'U'
+acq github-scope — scope a GitHub token to a workspace's repos (least-privilege)
+
+Usage:
+  acq github-scope SANDBOX [WORKSPACE_PATH]
+
+Guides minting a fine-grained PAT scoped to the workspace's repos and stores it
+sandbox-scoped (ADR-0013). WORKSPACE_PATH defaults to the current directory.
+U
+      ;;
+    usai-rotate-api-key)
+      cat >&2 <<'U'
+acq usai-rotate-api-key — rotate the stored USAi API key
+
+Usage:
+  acq usai-rotate-api-key
+U
+      ;;
+    version)
+      cat >&2 <<'U'
+acq version — show acq version + backend info
+
+Usage:
+  acq version
+U
+      ;;
+    doctor)
+      cat >&2 <<'U'
+acq doctor — backend health check + write config
+
+Usage:
+  acq doctor
+U
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# _acq_verb_backend_help_kind VERB — classify an acq-owned VERB for the help
+# router's decision about whether to ALSO append the backend's own help:
+#   "shared"  -> the backend has a genuinely-corresponding subcommand whose help
+#                adds context (run/ls/stop/rm/exec/cp/ports; also the topic verbs
+#                secret/kit which map to backend refs).
+#   "acqonly" -> acq owns the verb outright; the backend either has no such verb
+#                or its help would be misleading/wrong (start/restart/create/
+#                version/doctor/github-scope/usai-rotate-api-key/backend). For
+#                these, suppress the backend block.
+#   ""        -> not an acq-owned verb (unknown / passthrough); caller decides.
+# The FIRST word of VERB is classified (so "secret set" -> secret).
+_acq_verb_backend_help_kind() {
+  case "${1%% *}" in
+    run|ls|stop|rm|exec|cp|ports|secret|kit) printf 'shared' ;;
+    start|restart|create|version|doctor|github-scope|usai-rotate-api-key|backend) printf 'acqonly' ;;
+    *) printf '' ;;
+  esac
+}
+
 # _acq_print_topic_help TOPIC — print acq's OWN help for a known top-level verb
 # TOPIC (so `acq <verb> --help` documents the acq verb, not just the backend).
 # Returns 0 if TOPIC was a known acq verb (help printed), 1 otherwise (caller
@@ -223,7 +404,7 @@ _acq_print_topic_help() {
     secret)  _acq_secret_usage; return 0 ;;
     kit)     _acq_kit_usage; return 0 ;;
     backend) _acq_backend_subcmd_usage; return 0 ;;
-    *)       return 1 ;;
+    *)       _acq_simple_verb_usage "$head"; return $? ;;
   esac
 }
 
@@ -355,15 +536,25 @@ case "$subcommand" in
     ;;
 esac
 if [ -n "$_acq_wants_help" ]; then
-  # Prefer acq's OWN per-verb usage for verbs acq owns (secret/kit/backend), so
-  # `acq secret --help` documents the acq verb rather than only the top banner.
-  # For anything else, print the top-level banner. Then append the backend's own
-  # help (best-effort) for additional context.
+  # Prefer acq's OWN per-verb usage for verbs acq owns, so `acq VERB --help`
+  # documents the acq verb rather than only the top banner. For anything acq
+  # does not own, print the top-level banner. Then append the backend's own help
+  # (best-effort) ONLY when it adds genuine context — i.e. for verbs the backend
+  # actually shares. For acq-only verbs (start/restart/create/version/doctor/…)
+  # the backend has no such subcommand, or its help would be MISLEADING (e.g.
+  # `msb restart --help` for the acq `restart` verb, which does not fall through
+  # to `msb restart`), so we suppress the backend block there. See
+  # _acq_verb_backend_help_kind. A bare help request (no topic) still shows the
+  # backend's top-level help for discoverability.
   if ! _acq_print_topic_help "$_acq_help_topic"; then
     print_help
   fi
   acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
-  _acq_backend_help "$_acq_help_topic"
+  if [ -z "$_acq_help_topic" ]; then
+    _acq_backend_help ""
+  elif [ "$(_acq_verb_backend_help_kind "$_acq_help_topic")" = "shared" ]; then
+    _acq_backend_help "$_acq_help_topic"
+  fi
   # A bare `acq` (no subcommand) is a usage error (exit 2); an explicit help
   # request is success (exit 0).
   [ -z "$subcommand" ] && exit 2 || exit 0

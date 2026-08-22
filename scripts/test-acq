@@ -2057,8 +2057,7 @@ cleanup_stubs
 
 # 7b2. Per-subcommand `--help` prints acq's OWN per-verb usage for verbs acq owns
 #      (secret/kit/backend), not merely the top-level banner. `acq secret set
-#      --help` (a sub-subcommand) routes to the `secret` usage too. Non-owned
-#      topics (run) still show the top-level banner. All exit 0.
+#      --help` (a sub-subcommand) routes to the `secret` usage too. All exit 0.
 make_stubs
 # secret family
 sec_help=$(ACQ_BACKEND=sbx "$ACQ" secret --help 2>&1); sec_rc=$?
@@ -2082,9 +2081,52 @@ assert_eq "help: 'backend --help' exits 0" "0" "$be_rc"
 assert_contains "help: 'backend --help' shows acq backend usage" "$be_help" "acq backend — select the sandbox backend"
 beset_help=$(ACQ_BACKEND=sbx "$ACQ" backend set --help 2>&1)
 assert_contains "help: 'backend set --help' routes to backend usage" "$beset_help" "acq backend — select the sandbox backend"
-# non-owned verb: still the top-level banner
-run_help=$(ACQ_BACKEND=sbx "$ACQ" run --help 2>&1)
-assert_contains "help: 'run --help' shows the top-level banner" "$run_help" "agentic coding quickstart wrapper"
+cleanup_stubs
+
+# 7b3. Every acq-OWNED verb now has its OWN per-verb usage on `--help` (exit 0),
+#      NOT the generic top-level banner. This is the fix for the reported gap
+#      where `acq start --help` / `acq restart --help` printed only the banner and
+#      then the backend's (misleading) help. Assert each verb's own usage header.
+make_stubs
+_assert_verb_help() { # NAME EXPECT_SUBSTRING
+  local _n="$1" _sub="$2" _out _rc
+  _out=$(ACQ_BACKEND=msb "$ACQ" "$_n" --help 2>&1); _rc=$?
+  assert_eq "help: '$_n --help' exits 0" "0" "$_rc"
+  assert_contains "help: '$_n --help' shows acq's own $_n usage" "$_out" "$_sub"
+  assert_not_contains "help: '$_n --help' is NOT the generic banner" "$_out" "Global flags (before the subcommand):"
+}
+_assert_verb_help run          "acq run — create+attach a sandbox"
+_assert_verb_help create       "acq create — create a sandbox (detached"
+_assert_verb_help ls           "acq ls — list sandboxes"
+_assert_verb_help stop         "acq stop — stop a sandbox"
+_assert_verb_help start        "acq start — resume a stopped sandbox"
+_assert_verb_help restart      "acq restart — stop then start a sandbox"
+_assert_verb_help rm           "acq rm — remove a sandbox"
+_assert_verb_help exec         "acq exec — run a command inside a sandbox"
+_assert_verb_help cp           "acq cp — copy files in or out"
+_assert_verb_help ports        "acq ports — list or publish"
+_assert_verb_help github-scope "acq github-scope — scope a GitHub token"
+_assert_verb_help usai-rotate-api-key "acq usai-rotate-api-key — rotate"
+_assert_verb_help version      "acq version — show acq version"
+_assert_verb_help doctor       "acq doctor — backend health check"
+cleanup_stubs
+
+# 7b4. Backend-help suppression policy: for acq-ONLY verbs (start/restart/create/
+#      version/doctor/github-scope/usai-rotate-api-key) the backend's own help is
+#      NOT appended (it is absent or misleading — the reported `msb restart`
+#      fallthrough). For SHARED verbs (run/exec/…) the backend help IS appended.
+make_stubs
+# acq-only: no backend separator line, no backend help body.
+start_help=$(ACQ_BACKEND=msb "$ACQ" start --help 2>&1)
+assert_not_contains "help: 'start --help' suppresses the backend help block" "$start_help" "msb start --help"
+assert_not_contains "help: 'start --help' shows no backend top-level help" "$start_help" "MSB-TOPLEVEL-HELP"
+restart_help=$(ACQ_BACKEND=msb "$ACQ" restart --help 2>&1)
+assert_not_contains "help: 'restart --help' suppresses the backend help block" "$restart_help" "msb restart --help"
+# start/restart usage cross-references acq run (the attach path that injects SSH_AUTH_SOCK).
+assert_contains "help: 'start --help' points at acq run for an attached session" "$start_help" "acq run"
+# shared verb: the backend's per-verb help IS appended (sbx run stub emits SBX-RUN-HELP).
+runh=$(ACQ_BACKEND=sbx "$ACQ" run --help 2>&1)
+assert_contains "help: 'run --help' still appends the backend's run help" "$runh" "SBX-RUN-HELP"
 cleanup_stubs
 
 # 7c. `acq secret ls` is a silent acq-store view (delegates to the backend on
