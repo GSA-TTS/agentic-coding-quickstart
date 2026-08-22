@@ -373,12 +373,12 @@ case "$_msb_sub" in
     : ;;
   remove|rm)
     # STUB_MSB_RM_FAIL=1 models a failed `msb remove` (e.g. sandbox not found)
-    # for the ADR-0022 terminate volume-cleanup matrix.
+    # for the ADR-0023 terminate volume-cleanup matrix.
     [ "${STUB_MSB_RM_FAIL:-0}" = "1" ] && exit 1 || : ;;
   copy|cp) : ;;
   modify) : ;;
   volume)
-    # ADR-0022 derived-volume cleanup: `msb volume ls -q` lists names from the
+    # ADR-0023 derived-volume cleanup: `msb volume ls -q` lists names from the
     # fixture a test plants; `msb volume rm NAME` is logged (above) and no-ops.
     if [ "${2:-}" = "ls" ]; then
       [ -f "$STUBDIR/.msb_volume_list" ] && cat "$STUBDIR/.msb_volume_list"
@@ -6336,7 +6336,7 @@ assert_not_contains "pp: sbx-v2 does not leak host column into protocol" "$hospe
 cleanup_stubs
 
 # ===========================================================================
-# 10a5. ADR-0022: neutral volumes vocabulary
+# 10a5. ADR-0023: neutral volumes vocabulary
 # ===========================================================================
 # Adds a neutral top-level `volumes:` list ({path, type?(""|tmpfs), size}),
 # consumed by BOTH backends: sbx-v2 passes entries through 1:1 (kit-spec v2

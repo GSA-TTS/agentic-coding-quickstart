@@ -199,7 +199,7 @@ export ACQ_PROVENANCE_DIR="$VERIFY_STATE/provenance"
 export ACQ_SECRET_NO_LIVE_REFEED=1
 mkdir -p "$XDG_CONFIG_HOME" "$ACQ_SECRET_STORE_DIR" "$ACQ_STATE_DIR" "$ACQ_PROVENANCE_DIR"
 
-# Fixture kit for the neutral `volumes:` vocabulary (ADR-0022): a tiny local kit
+# Fixture kit for the neutral `volumes:` vocabulary (ADR-0023): a tiny local kit
 # declaring a 256m block volume. Appended to ACQ_EXTRA_KITS so every create below
 # carries it; the volumes check inside verify_backend asserts the mount landed.
 # 256m, not smaller: msb refuses tiny ext4 disk images ("image size is too small
@@ -700,7 +700,7 @@ verify_backend() {
   # 5) OCI engine (podman) usable — msb only (ADR-0020).
   _verify_oci_checks "$backend" "$name"
 
-  # 6) Neutral kit volumes (ADR-0022): the verifier's fixture kit (appended to
+  # 6) Neutral kit volumes (ADR-0023): the verifier's fixture kit (appended to
   #    ACQ_EXTRA_KITS at setup) declares a 256m block volume at /acq-verify-vol.
   #    Assert the path is a MOUNTPOINT on a dedicated /dev block device of
   #    roughly the declared size — df is used (not findmnt) because it is
@@ -733,7 +733,7 @@ verify_backend() {
     printf '        (keeping sandbox %s; --keep set)\n' "$name"
   else
     run_acq "rm" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
-    # ADR-0022: on msb the derived kit volumes (acq-<name>-*) must not outlive
+    # ADR-0023: on msb the derived kit volumes (acq-<name>-*) must not outlive
     # the sandbox — acq_backend_terminate removes them by prefix after a
     # successful `msb remove`.
     if [ "$backend" = "msb" ]; then
