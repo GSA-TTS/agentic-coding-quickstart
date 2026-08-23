@@ -28,6 +28,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          # The bats pilot (ADR-0023) lives in test/vendor/* submodules (bats-core,
+          # bats-support, bats-assert), pinned by SHA. Fetch them so the bats hook
+          # can run. Submodules are read-only test tooling.
+          submodules: true
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'

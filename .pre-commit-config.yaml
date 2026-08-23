@@ -76,3 +76,25 @@ repos:
         language: system
         pass_filenames: false
         files: '^(acq|acq\.backends/.*|scripts/test-acq|scripts/test-acq-lib\.sh|scripts/test-acq\.d/.*\.sh)$'
+
+  # acq bats pilot (ADR-0025) — the bats-core port of a couple of suite parts,
+  # run via the vendored, pinned bats runner (test/vendor/bats-core). Coexists
+  # with the legacy test-acq suite during the pilot. Offline/stubbed, safe in CI.
+  - repo: local
+    hooks:
+      - id: test-acq-bats
+        name: acq bats pilot
+        entry: bash scripts/test-acq-bats
+        language: system
+        pass_filenames: false
+        files: '^(acq|acq\.backends/.*|scripts/test-acq-lib\.sh|scripts/test-acq-bats|test/bats/.*)$'
+
+      # Lint the .bats pilot files with ShellCheck (it treats .bats as a shell
+      # dialect). The main shellcheck hook's `types: [shell]` does not reliably
+      # tag .bats, so target them explicitly here. helper.bash is already covered
+      # by the main hook (it is tagged shell), but including it is harmless.
+      - id: shellcheck-bats
+        name: shellcheck (bats pilot)
+        entry: bash -c 'printf "%s\n" "$@" | xargs -r -n8 shellcheck --severity=warning' --
+        language: system
+        files: '^test/bats/.*\.(bats|bash)$'

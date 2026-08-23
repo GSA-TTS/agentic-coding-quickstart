@@ -116,6 +116,21 @@ There is one offline unit harness (stubbed `sbx`/`msb`/`opencode`, no Docker or 
   sharing the pass/fail counters). Add new tests as a new `NN-*.sh` part (or
   extend an existing one); the runner picks them up automatically.
 
+- **`scripts/test-acq-bats`** — a bats-core pilot (ADR-0025) porting a couple of
+  suite parts to [bats](https://github.com/bats-core/bats-core) for per-test
+  isolation and clearer assertions. bats and its helpers are pinned git
+  submodules under `test/vendor/`; initialize them once:
+
+  ```bash
+  git submodule update --init test/vendor/bats-core \
+    test/vendor/bats-support test/vendor/bats-assert
+  ./scripts/test-acq-bats
+  ```
+
+  The pilot (`test/bats/*.bats`) reuses the same stub layer as the legacy suite
+  (via `scripts/test-acq-lib.sh`); both suites run in CI while the pilot is
+  evaluated. See `docs/adr/0025-adopt-bats-core-for-test-suite.md`.
+
 To verify the backends end-to-end against the **real** toolchain (requires a
 host that can create sandboxes — Docker for sbx, or KVM for msb):
 

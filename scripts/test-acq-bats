@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+#
+# test-acq-bats — run the bats pilot suite (ADR-0025).
+#
+# Thin wrapper around the vendored, pinned bats-core runner (test/vendor/bats-core)
+# so contributors don't need bats installed system-wide and the version is fixed.
+# Runs every *.bats file under test/bats/.
+#
+# This coexists with scripts/test-acq (the legacy bespoke suite) during the
+# ADR-0025 pilot; both are wired into CI. Once/if the migration completes, the
+# legacy runner is retired in favor of this one.
+#
+# Usage:
+#   ./scripts/test-acq-bats                 # run all pilot .bats files
+#   ./scripts/test-acq-bats test/bats/X.bats  # run a specific file
+set -uo pipefail
+
+_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${_dir}/.." && pwd)"
+BATS="${REPO_ROOT}/test/vendor/bats-core/bin/bats"
+
+if [ ! -x "$BATS" ]; then
+  echo "test-acq-bats: vendored bats not found at $BATS" >&2
+  echo "  run: git submodule update --init test/vendor/bats-core \\" >&2
+  echo "       test/vendor/bats-support test/vendor/bats-assert" >&2
+  exit 2
+fi
+
+if [ "$#" -gt 0 ]; then
+  exec "$BATS" "$@"
+fi
+exec "$BATS" "${REPO_ROOT}/test/bats"
