@@ -43,19 +43,20 @@ repos:
     hooks:
       - id: shellcheck
         name: shellcheck (system binary)
-        # ShellCheck's dataflow analysis blows up pathologically when a very
-        # large script (notably acq.backends/msb.sh) is analyzed — it runs
-        # effectively forever, hanging CI to the 15-minute cap (SIGTERM → exit
-        # 143). Each file ALONE lints in 1–3s. So force ONE FILE PER INVOCATION
-        # via `xargs -n1`: this sidesteps the blow-up on every shellcheck version
-        # (the `--extended-analysis` flag only exists in >=0.9, and CI's
-        # shellcheck is older). `bash -c … --` with a `_` $0 keeps filenames as
-        # positional args; `xargs -r` skips an empty batch (never runs argless,
-        # which would block reading stdin). The former offender scripts/test-acq
-        # was split into scripts/test-acq-lib.sh + scripts/test-acq.d/NN-*.sh so
-        # each piece now lints in seconds too (all shell files are picked up by
-        # `types: [shell]`).
-        entry: bash -c 'printf "%s\n" "$@" | xargs -r -n1 shellcheck --severity=warning' --
+        # The repo-root .shellcheckrc sets `extended-analysis=false`, disabling
+        # ShellCheck's dataflow pass. That pass grew superlinearly in MEMORY and
+        # OOM-killed the process (~1.9 GB RSS) on this repo's largest scripts
+        # (notably acq.backends/msb.sh); with it off, memory is a non-issue
+        # (~135 MB even across all shell files). Core correctness/quoting checks
+        # (SC2086/2154/2034/1090/…) are unaffected. See .shellcheckrc.
+        #
+        # We still bound the batch size with `xargs -n8`: even with the dataflow
+        # pass off, ShellCheck's per-run wall-clock grows superlinearly with the
+        # number of files held in ONE invocation (all ~39 files at once takes
+        # >100s; batches of 8 finish in ~10s total). `xargs -r` skips an empty
+        # batch (never runs argless, which would block reading stdin); `bash -c
+        # … --` with a `_` $0 keeps filenames as positional args.
+        entry: bash -c 'printf "%s\n" "$@" | xargs -r -n8 shellcheck --severity=warning' --
         language: system
         types: [shell]
         pass_filenames: true
