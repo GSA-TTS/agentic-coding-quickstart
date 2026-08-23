@@ -589,19 +589,22 @@ The agent MUST:
 **ADR location:** `docs/adr/`
 
 > **Running shellcheck locally (avoid the hang):** Do NOT run
-> `shellcheck acq.backends/*.sh scripts/test-acq` in a single invocation. ShellCheck's
-> dataflow analysis blows up pathologically when several large scripts (notably
-> `acq.backends/msb.sh` + `scripts/test-acq`) are analyzed together — it runs
+> `shellcheck acq.backends/*.sh` in a single invocation. ShellCheck's dataflow
+> analysis blows up pathologically when a very large script (notably
+> `acq.backends/msb.sh`) is analyzed as part of a big batch — it runs
 > effectively forever (CI would hit its timeout). Each file ALONE lints in 1–3s.
+> (The former offender `scripts/test-acq` was split into `scripts/test-acq-lib.sh`
+> + `scripts/test-acq.d/NN-*.sh` so every piece now lints in seconds.)
 > Match the pre-commit hook and lint **one file per invocation**:
 >
 > ```sh
-> printf '%s\n' acq acq.backends/common.sh acq.backends/msb.sh acq.backends/sbx.sh scripts/test-acq \
+> { printf '%s\n' acq acq.backends/common.sh acq.backends/msb.sh acq.backends/sbx.sh \
+>     scripts/test-acq scripts/test-acq-lib.sh scripts/test-acq.d/*.sh; } \
 >   | xargs -r -n1 shellcheck --severity=warning
 > ```
 >
-> This is exactly what `.pre-commit-config.yaml`'s `shellcheck` hook does
-> (`xargs -r -n1`); `--severity=warning` matches the hook.
+> This mirrors `.pre-commit-config.yaml`'s `shellcheck` hook (`xargs -r -n1`);
+> `--severity=warning` matches the hook.
 
 ---
 
