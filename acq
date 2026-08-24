@@ -3,7 +3,7 @@
 # acq — pluggable-backend wrapper for agentic-coding-quickstart
 #
 # acq wraps a sandbox backend (msb or sbx) and applies the shared neutral kits.
-# See `acq help` for usage, or docs/QUICKSTART.md and docs/BACKEND_GUIDE.md.
+# See `acq help` for usage, or docs/howto/acq.md and docs/BACKEND_GUIDE.md.
 
 set -euo pipefail
 
@@ -140,7 +140,7 @@ run/create flags:
   --image REF          Same as the global --image above; accepted here too so
                        `acq create AGENT --image REF PATH` works.
 
-See docs/QUICKSTART.md and docs/BACKEND_GUIDE.md for more.
+See docs/howto/acq.md and docs/BACKEND_GUIDE.md for more.
 HELP
 }
 

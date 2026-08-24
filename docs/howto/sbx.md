@@ -1,9 +1,15 @@
-# sbx CLI Quickstart Guide
+# sbx CLI How-To Guide
 
+> The [README](../../README.md) is the quickstart. This is the detailed sbx
+> how-to.
+>
 > **Note:** `msb` (microsandbox) is `acq`'s **default** backend. Use this `sbx`
 > guide when you specifically want the Docker Sandboxes backend (for example, you
 > already run Docker Sandboxes, or want its proxy-based credential store). See the
-> [Backend Guide](BACKEND_GUIDE.md) to choose between backends.
+> [Backend Guide](../BACKEND_GUIDE.md) to choose between backends. This guide is
+> the sbx **alternative**, not the recommended default (see
+> [ADR-0024](../adr/0024-neutral-user-facing-docs-vs-backend-specific.md) for the
+> neutral-first documentation convention).
 
 This guide walks you through setting up Docker Sandboxes using the `sbx` command-line interface to run AI coding agents with USAi.
 
@@ -26,7 +32,10 @@ This guide walks you through setting up Docker Sandboxes using the `sbx` command
 | Audit trail | ✅ | Limited |
 | Scriptable setup | ✅ | ❌ |
 
-For federal compliance and automation, sbx CLI is the recommended approach.
+If you have chosen the sbx backend, use the sbx CLI (not the Docker Desktop
+UI) for federal compliance and automation. To choose between backends in the
+first place, see the [Backend Guide](../BACKEND_GUIDE.md) — `msb` is `acq`'s
+default.
 
 ---
 
@@ -105,7 +114,7 @@ sbx policy ls
 > `brew uninstall erofs-utils` (so sbx uses its bundled binary), or approve the
 > Homebrew binary via **System Settings → Privacy & Security → "Allow Anyway"**
 > and re-run. `xattr -d com.apple.quarantine` does **not** work. Details:
-> [KNOWN_FAILURE_MODES.md](KNOWN_FAILURE_MODES.md#26-macos-gatekeeper-blocks-mkfserofs-at-sbx-policy-init-path-shadowing).
+> [KNOWN_FAILURE_MODES.md](../KNOWN_FAILURE_MODES.md#26-macos-gatekeeper-blocks-mkfserofs-at-sbx-policy-init-path-shadowing).
 
 ### Understanding Network Policies
 
@@ -156,7 +165,7 @@ sbx secret set -g anthropic
 > acq github-scope <sandbox-name> /path/to/your/project
 > ```
 >
-> See [ADR-0013](adr/0013-per-sandbox-github-token-downscoping.md) for the
+> See [ADR-0013](../adr/0013-per-sandbox-github-token-downscoping.md) for the
 > rationale and the alternatives considered. Fine-grained tokens can't
 > contribute to public repos you're not a member of or call the Checks API —
 > use the global token below for those cases.
@@ -183,7 +192,7 @@ GitLab is **not a built-in sbx service**, so use `sbx secret set-custom`:
 sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN
 
 # Verify access inside sandbox
-sbx exec SANDBOX_NAME sh -c 'curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" https://workshop.cloud.gov/api/v4/user | jq .username'
+acq exec SANDBOX_NAME -- sh -c 'curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" https://workshop.cloud.gov/api/v4/user | jq .username'
 ```
 
 ### Verify Stored Secrets
@@ -253,7 +262,7 @@ sbx secret rm -g anthropic
 
 # Update a secret (set it again, then recreate sandbox)
 sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
-sbx rm my-sandbox && sbx create --name my-sandbox opencode .
+acq rm my-sandbox && acq create --name my-sandbox opencode .
 ```
 
 ---
@@ -265,7 +274,7 @@ sbx rm my-sandbox && sbx create --name my-sandbox opencode .
 cd /path/to/your/project
 
 # Create and run sandbox with OpenCode
-sbx run opencode .
+acq run opencode .
 ```
 
 The sandbox will start and you'll be inside the agent environment.
@@ -273,22 +282,22 @@ The sandbox will start and you'll be inside the agent environment.
 ### Other Supported Agents
 
 ```bash
-sbx run claude .      # Claude Code
-sbx run copilot .     # GitHub Copilot
-sbx run cursor .      # Cursor
-sbx run codex .       # OpenAI Codex
-sbx run gemini .      # Google Gemini
-sbx run shell .       # Just a shell (no agent)
+acq run claude .      # Claude Code
+acq run copilot .     # GitHub Copilot
+acq run cursor .      # Cursor
+acq run codex .       # OpenAI Codex
+acq run gemini .      # Google Gemini
+acq run shell .       # Just a shell (no agent)
 ```
 
 ### Create with Custom Name
 
 ```bash
 # Create with a specific name
-sbx create --name my-feature opencode .
+acq create --name my-feature opencode .
 
 # Then run it (re-attach by name)
-sbx run --name my-feature
+acq run my-feature
 ```
 
 ---
@@ -297,38 +306,53 @@ sbx run --name my-feature
 
 ```bash
 # List all sandboxes
-sbx ls
+acq ls
 
 # Stop a sandbox (preserves state)
-sbx stop my-sandbox
+acq stop my-sandbox
 
 # Resume a stopped sandbox (re-attach by name)
-sbx run --name my-sandbox
+acq run my-sandbox
 
 # Remove a sandbox permanently
-sbx rm my-sandbox
+acq rm my-sandbox
 
-# Remove all sandboxes
+# Shell into a running sandbox (interactive attach)
+acq run my-sandbox
+
+# Remove all sandboxes — no acq equivalent; this is an sbx-specific bulk op
 sbx rm --all
-
-# Shell into a running sandbox
-sbx exec -it my-sandbox bash
 ```
+
+> [!NOTE]
+> `acq` covers the common run/ls/stop/rm/exec operations on either backend.
+> Two forms shown here stay raw `sbx`: **`sbx rm --all`** (no `acq rm --all`
+> bulk removal exists), and the interactive **`sbx exec -it <name> bash`** shell
+> (`acq exec` runs a command via `acq exec <name> -- <cmd>` but does not attach
+> a TTY — use `acq run <name>` to attach interactively).
 
 ---
 
 ## Common Commands Reference
 
+| Task | acq command | Raw sbx equivalent |
+|------|-------------|--------------------|
+| List sandboxes | `acq ls` | `sbx ls` |
+| Create sandbox | `acq run <agent> .` | `sbx run <agent> .` |
+| Stop sandbox | `acq stop <name>` | `sbx stop <name>` |
+| Resume sandbox | `acq run <name>` | `sbx run --name <name>` |
+| Remove sandbox | `acq rm <name>` | `sbx rm <name>` |
+| Run a command | `acq exec <name> -- <cmd>` | `sbx exec <name> -- <cmd>` |
+| Interactive shell | `acq run <name>` (attach) | `sbx exec -it <name> bash` |
+| Copy files | `acq cp ./file.txt <name>:/path/` | `sbx cp ./file.txt <name>:/path/` |
+
+The following are genuinely sbx-specific mechanics the wrapper does not
+abstract — use the raw `sbx` command:
+
 | Task | Command |
 |------|---------|
 | Check version | `sbx version` |
-| List sandboxes | `sbx ls` |
-| Create sandbox | `sbx run <agent> .` |
-| Stop sandbox | `sbx stop <name>` |
-| Resume sandbox | `sbx run --name <name>` |
-| Remove sandbox | `sbx rm <name>` |
-| Shell access | `sbx exec -it <name> bash` |
-| Copy files | `sbx cp ./file.txt <name>:/path/` |
+| Remove all sandboxes | `sbx rm --all` |
 | **Secrets** | |
 | List secrets | `sbx secret ls` |
 | Add secret | `sbx secret set -g <service>` |
@@ -390,7 +414,7 @@ sbx reset --preserve-secrets
 1. Verify USAi endpoint is allowed: `sbx policy ls`
 2. Check your API key is set: `sbx secret ls`
 3. Check policy logs: `sbx policy log`
-4. See [Known Failure Modes](KNOWN_FAILURE_MODES.md) for more
+4. See [Known Failure Modes](../KNOWN_FAILURE_MODES.md) for more
 
 ---
 
@@ -431,7 +455,7 @@ Mounting extra directories alongside the primary workspace is a **backend-neutra
 feature: the `acq run <agent> <primary> [extra][:ro] ...` syntax works
 identically on sbx and msb. The canonical description — syntax, semantics,
 constraints, and security guidance — lives in
-[Multiple Workspaces](CONCEPTS.md#multiple-workspaces).
+[Multiple Workspaces](../CONCEPTS.md#multiple-workspaces).
 
 The only sbx-specific angle is how multi-workspace mounts interact with the
 `--clone` remote-clone lifecycle, covered below under
@@ -489,7 +513,7 @@ Alternatively, check out the branch on your host before creating the sandbox:
 git checkout feature/login
 
 # Create sandbox - it mounts the current branch
-sbx run opencode .
+acq run opencode .
 ```
 
 ### Clone Mode + Multiple Workspaces
@@ -521,13 +545,13 @@ sbx create --clone --name feature-work opencode ~/my-app ~/shared-libs:ro
 
 The Docker Desktop-integrated `docker sandbox` command is deprecated. For the
 `sbx` equivalents, see
-[Known Failure Modes — Migrating from `docker sandbox`](KNOWN_FAILURE_MODES.md#18-migrating-from-docker-sandbox).
+[Known Failure Modes — Migrating from `docker sandbox`](../KNOWN_FAILURE_MODES.md#18-migrating-from-docker-sandbox).
 
 ---
 
 ## Next Steps
 
-- [Known Failure Modes](KNOWN_FAILURE_MODES.md) — Common issues and solutions
+- [Known Failure Modes](../KNOWN_FAILURE_MODES.md) — Common issues and solutions
 - [Coding Practices](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) — Secure coding standards (GSA agentic-coding-playbook)
 
 ---
