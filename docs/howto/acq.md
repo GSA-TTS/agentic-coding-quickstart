@@ -1,22 +1,24 @@
 ---
-title: "acq Backend Quickstart"
-description: "Get running with acq, the pluggable-backend wrapper for agentic-coding-quickstart"
+title: "acq How-To Guide"
+description: "Detailed how-to for acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-08-17"
+last_updated: "2026-08-21"
 audience: "developers"
-keywords: ["acq", "backend", "sbx", "msb", "quickstart", "sandbox"]
-related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/QUICKSTART_SBX.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
+keywords: ["acq", "backend", "sbx", "msb", "howto", "sandbox"]
+related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
 
-# acq Backend Quickstart
+# acq How-To Guide
 
-> **`acq` is the entry point.** It provides a pluggable-backend architecture
-> supporting two backends — **msb** (microsandbox, the default) and **sbx**
-> (Docker Sandboxes) — sharing one neutral kit vocabulary. Install a backend and
-> `acq` runs the same commands on either one.
+> The [README](../../README.md) is the quickstart — the fast path to a running
+> sandbox. This guide is the deeper how-to for `acq`, the entry point. It
+> provides a pluggable-backend architecture supporting two backends — **msb**
+> (microsandbox, the default) and **sbx** (Docker Sandboxes) — sharing one
+> neutral kit vocabulary. Install a backend and `acq` runs the same commands on
+> either one.
 
 ---
 
@@ -30,7 +32,7 @@ once (install one, and it auto-detects). Pick the one that fits your environment
 | **msb** | `curl -fsSL https://install.microsandbox.dev \| sh` | You want a FOSS microVM runtime, no Docker seat, snapshots |
 | **sbx** | `brew install docker/tap/sbx && sbx login` | You have Docker and want the commercial product |
 
-See [docs/BACKEND_GUIDE.md](BACKEND_GUIDE.md) for a full comparison. `acq`
+See [docs/BACKEND_GUIDE.md](../BACKEND_GUIDE.md) for a full comparison. `acq`
 auto-detects an installed backend (msb preferred when both are present); persist
 a choice with `acq backend set <sbx|msb>` or `acq doctor`.
 
@@ -46,7 +48,7 @@ a choice with `acq backend set <sbx|msb>` or `acq doctor`.
 
 ### Step 1: Prerequisites (msb)
 
-Complete the standard setup in [README.md](../README.md#5-minute-quickstart):
+Complete the standard setup in [README.md](../../README.md#5-minute-quickstart):
 
 - Install the `msb` CLI: `curl -fsSL https://install.microsandbox.dev | sh`
 - Run `msb doctor` (add `--fix` to set up KVM/HVF/WHP virtualization)
@@ -56,7 +58,7 @@ Re-run `msb doctor` once more after setup — a clean `doctor` pass is the quick
 way to confirm the host is ready before your first `acq run` (and, if an
 established setup later starts failing every outbound call at once, a wipe +
 reinstall then `msb doctor` is the first thing to try; see
-[Troubleshooting](BACKEND_GUIDE.md#troubleshooting)).
+[Troubleshooting](../BACKEND_GUIDE.md#troubleshooting)).
 
 You do **not** need to gather a USAi key or GitHub token in advance — `acq`
 prompts you for the USAi key on first run and offers to scope a GitHub token
@@ -146,7 +148,7 @@ the guest.
 > This is also what `acq run` offers interactively. Fine-grained tokens can't
 > contribute to public repos you're not a member of or call the Checks API — fall
 > back to a global token for those cases. See
-> [ADR-0013](adr/0013-per-sandbox-github-token-downscoping.md).
+> [ADR-0013](../adr/0013-per-sandbox-github-token-downscoping.md).
 
 ### Rotate your USAi key
 
@@ -166,7 +168,7 @@ the guest.
 4. Auto-detect: first installed backend found (msb preferred, then sbx)
 
 **Today (1.2.x), two backends ship: `msb` (default) and `sbx`.** See
-[docs/BACKEND_GUIDE.md](BACKEND_GUIDE.md) for per-backend details. A third
+[docs/BACKEND_GUIDE.md](../BACKEND_GUIDE.md) for per-backend details. A third
 backend (`ppp` — Podman-Plus-Proxy) is deferred.
 
 ### Persist the default backend
@@ -229,8 +231,8 @@ sbx policy set <your-network-policy>
 ```
 
 For sbx-specific detail (proxy secrets, network policy), see the
-[full sbx guide](QUICKSTART_SBX.md). For the backend-neutral way to mount
-multiple directories, see [Multiple Workspaces](CONCEPTS.md#multiple-workspaces).
+[full sbx guide](sbx.md). For the backend-neutral way to mount
+multiple directories, see [Multiple Workspaces](../CONCEPTS.md#multiple-workspaces).
 
 ### msb host setup
 
@@ -305,7 +307,7 @@ never blocks a launch. Refreshes are in place (sessions, secrets, and project
 files are kept). Skip the automatic check with `ACQ_UPDATE_CHECK=0` or
 `./acq run --no-update-check`.
 
-See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md) for the full
+See [ADR-0016](../adr/0016-kit-bundle-provenance-and-stale-refresh.md) for the full
 design and trust model.
 
 ---
@@ -364,7 +366,7 @@ export ACQ_EXEC_READY_TIMEOUT=120
 
 ## See also
 
-- [docs/BACKEND_GUIDE.md](BACKEND_GUIDE.md) — per-backend strengths and tradeoffs
-- [docs/QUICKSTART_SBX.md](QUICKSTART_SBX.md) — detailed sbx CLI reference
-- [docs/adr/0010-acq-pluggable-backends.md](adr/0010-acq-pluggable-backends.md) — architecture decision
-- [docs/KNOWN_FAILURE_MODES.md](KNOWN_FAILURE_MODES.md) — troubleshooting
+- [docs/BACKEND_GUIDE.md](../BACKEND_GUIDE.md) — per-backend strengths and tradeoffs
+- [docs/howto/sbx.md](sbx.md) — detailed sbx CLI reference
+- [docs/adr/0010-acq-pluggable-backends.md](../adr/0010-acq-pluggable-backends.md) — architecture decision
+- [docs/KNOWN_FAILURE_MODES.md](../KNOWN_FAILURE_MODES.md) — troubleshooting

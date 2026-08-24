@@ -60,7 +60,7 @@ This project operates under professional standards of conduct. All contributors:
 2. Read the core documentation:
    - `AGENTS.md` — Behavioral rules for AI agents
    - [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (GSA agentic-coding-playbook) — Secure coding standards
-   - `docs/QUICKSTART_SBX.md` — sbx CLI setup guide
+   - `docs/howto/sbx.md` — sbx CLI setup guide
 
 3. Follow the quickstart to set up your environment
 

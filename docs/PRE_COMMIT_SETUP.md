@@ -133,5 +133,5 @@ echo "path/to/file:line-number" >> .gitleaksignore
 
 ## Next Steps
 
-- [sbx CLI Quickstart](QUICKSTART_SBX.md) — Main setup guide
+- [sbx CLI How-To](howto/sbx.md) — Main setup guide
 - [Known Failure Modes](KNOWN_FAILURE_MODES.md) — Common issues and solutions
