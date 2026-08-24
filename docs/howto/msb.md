@@ -119,6 +119,14 @@ and records the `ENV@HOST` binding msb applies at create. See
 the [Backend Guide](../BACKEND_GUIDE.md) for the full per-backend secret model.
 
 > [!NOTE]
+> Because msb binds secrets **at create time**, both the USAi key and any GitHub
+> token must be in place *before* the sandbox is created. `acq run` / `acq create`
+> handle this for you: on a fresh create they gate on the USAi key and offer to
+> scope a GitHub token **before** provisioning, so a token you supply binds to the
+> new sandbox. A token added after create would not bind to it (you can still add
+> it live with `acq secret set` / `acq github-scope`, which re-feeds a running
+> sandbox via `msb modify`).
+>
 > Because msb swaps the real value in on the wire, inspecting the guest
 > environment is not automatically a leak — but never deliberately dump secret
 > values (`echo $SECRET`, piping `env` to a log). See `AGENTS.md`.
