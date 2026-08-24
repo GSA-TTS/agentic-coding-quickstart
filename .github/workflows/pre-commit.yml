@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-          # The bats pilot (ADR-0023) lives in test/vendor/* submodules (bats-core,
+          # The bats suite (ADR-0025) lives in test/vendor/* submodules (bats-core,
           # bats-support, bats-assert), pinned by SHA. Fetch them so the bats hook
           # can run. Submodules are read-only test tooling.
           submodules: true
@@ -40,10 +40,19 @@ jobs:
         run: shellcheck --version
       # Cache the pre-commit hook environments (node for markdownlint, etc.),
       # keyed on the config so a pin bump busts the cache.
+      #
+      # We invoke pre-commit directly rather than via pre-commit/action: that
+      # composite pins a hardcoded actions/cache@v4 (Node.js 20), which GitHub is
+      # deprecating and force-runs on Node 24 with a warning. Running the two
+      # steps ourselves lets us use our SHA-pinned, Node-24 actions/cache above
+      # and drops a third-party action from the supply chain (NIST SR-3).
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
           restore-keys: |
             pre-commit-${{ runner.os }}-
-      - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd  # v3.0.1
+      - name: Install pre-commit
+        run: python -m pip install pre-commit
+      - name: Run pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure --color=always
