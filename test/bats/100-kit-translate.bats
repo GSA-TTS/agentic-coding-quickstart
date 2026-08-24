@@ -191,3 +191,22 @@ SPEC
   assert_regex "$spec" 'OPENCODE_CONFIG: /home/agent/usai-config/opencode\.jsonc'
   refute_regex "$spec" '1BAD'
 }
+
+# Regression guard: the files[].mode validator must NOT use a brace-interval
+# quantifier (/^[0-7]{3,4}$/). mawk — the default awk on Debian/Ubuntu — has no
+# interval-expression support, so that form matches NOTHING under mawk and every
+# kit's files are silently dropped. Both validator sites must stay longhand
+# (/^[0-7][0-7][0-7][0-7]?$/). This source-level check catches a regression
+# regardless of which awk the test runner ships (gawk/BSD-awk would not
+# reproduce the failure at runtime).
+@test "kit-translate: mode validator uses no {n,m} interval regex (mawk-safe)" {
+  run grep -nE 'cur_mode !~ /\^\[0-7\]\{|v !~ /\^\[0-7\]\{' "$REPO_ROOT/acq.backends/kit-translate.sh"
+  assert_failure   # no match -> exit 1 -> the interval form is absent
+}
+
+# The longhand octal pattern accepts 3- and 4-digit octal modes and rejects
+# non-octal / over-long values, portably across awk implementations.
+@test "kit-translate: longhand octal mode pattern accepts valid, rejects junk" {
+  run bash -c 'printf "0755\n755\nabc\n07555\n" | awk "\$0 ~ /^[0-7][0-7][0-7][0-7]?\$/ {print}"'
+  assert_output $'0755\n755'
+}
