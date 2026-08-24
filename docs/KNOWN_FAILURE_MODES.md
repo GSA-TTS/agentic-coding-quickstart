@@ -61,10 +61,9 @@ Ensure header format is correct:
 Authorization: Bearer <API_KEY>
 ```
 
-Confirm SBX injected env var is present inside container:
+Confirm the injected env var is present inside the sandbox:
 ```bash
-sbx exec -it <sandbox> sh
-echo $USAI_API_KEY
+acq exec <sandbox> -- sh -c 'echo $USAI_API_KEY'
 ```
 
 ---
@@ -243,7 +242,7 @@ Set explicit timeouts in config:
 
 Check network connectivity from inside container:
 ```bash
-sbx exec <sandbox> curl -I https://api.gsa.usai.gov/api/v1/models
+acq exec <sandbox> -- curl -I https://api.gsa.usai.gov/api/v1/models
 ```
 
 ---
@@ -334,18 +333,19 @@ Config file exists on host but not mounted into container.
 
 ### Fix
 
-Ensure config is in the mounted working directory. When using `sbx run` or `sbx create`, the current directory is automatically mounted:
+Ensure config is in the mounted working directory. When using `acq run` (or
+`acq create`), the current directory is automatically mounted:
 
 ```bash
 # Run from the directory containing your config
 cd /path/to/project-with-config
-sbx run opencode .
+acq run opencode .
 ```
 
 Or copy config into an existing container:
 
 ```bash
-sbx cp ./opencode.jsonc my-sandbox:/workspace/
+acq cp ./opencode.jsonc my-sandbox:/workspace/
 ```
 
 ---
@@ -722,7 +722,7 @@ sbx secret ls -g | grep USAI_API_KEY
 If problems persist, see [Section 2](#2-api-key-works-in-ui-but-fails-in-agent) and [Section 3](#3-agent-cannot-see-api-key--usai-authentication-fails). As a last resort, recreate the sandbox (this destroys all sandbox state, including uncommitted work):
 
 ```bash
-sbx rm <sandbox-name>
+acq rm <sandbox-name>
 ```
 
 ---
