@@ -158,7 +158,8 @@ see [Secrets](docs/howto/acq.md#secrets) in the acq how-to.
 
 **Need more details, or want to use the sbx backend instead?** See the
 [acq How-To](docs/howto/acq.md), the [Backend Guide](docs/BACKEND_GUIDE.md),
-and the [Full sbx CLI Guide](docs/howto/sbx.md).
+the [msb How-To](docs/howto/msb.md) (default backend), and the
+[sbx How-To](docs/howto/sbx.md).
 
 **Working across multiple repos?** Mounting extra directories works on either
 backend via `acq`; the command syntax and examples are documented in
@@ -457,7 +458,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 | `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
 | `docs/howto/acq.md`                 | acq how-to guide and backend selection                     |
 | `docs/BACKEND_GUIDE.md`             | Per-backend strengths, tradeoffs, and configuration       |
-| `docs/howto/sbx.md`                 | Full sbx CLI setup guide                                   |
+| `docs/howto/msb.md`                 | msb (microsandbox) setup guide — the default backend       |
+| `docs/howto/sbx.md`                 | sbx CLI setup guide — the alternative backend              |
 | `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
 
 ---

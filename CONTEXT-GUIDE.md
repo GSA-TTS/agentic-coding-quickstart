@@ -38,6 +38,7 @@ These define the behavioral contract. Load for **every task**.
 | `docs/howto/acq.md` | Setting up a sandbox with `acq`, running agents, USAi configuration, first-time setup (backend-neutral; default backend is msb) |
 | `docs/CONCEPTS.md` | Cross-cutting, backend-neutral concepts (e.g. mounting multiple workspaces) |
 | `docs/BACKEND_GUIDE.md` | Choosing between backends (msb, sbx); per-backend strengths, tradeoffs, and configuration |
+| `docs/howto/msb.md` | msb-specific setup and mechanics (host readiness, egress tiers, images, ssh-agent forwarding) — the default backend |
 | `docs/howto/sbx.md` | sbx-specific setup and mechanics (proxy secrets, `set-custom`, policy, `--clone`) — the sbx alternative to the default |
 | `docs/KNOWN_FAILURE_MODES.md` | Debugging sandbox/USAi issues, troubleshooting, error diagnosis (both backends) |
 | `docs/adr/0010-acq-pluggable-backends.md` | Understanding the acq pluggable-backend architecture |
@@ -59,6 +60,7 @@ Load only when the specific activity is being performed.
 |-----------|------|
 | Code generation/review | Tier 1 only |
 | Sandbox + USAi setup (default/neutral) | Tier 1 + docs/howto/acq.md (+ docs/BACKEND_GUIDE.md to choose a backend) |
+| msb-specific setup | Tier 1 + docs/howto/msb.md |
 | sbx-specific setup | Tier 1 + docs/howto/sbx.md |
 | Debugging agent issues | Tier 1 + KNOWN_FAILURE_MODES.md |
 | Pre-deployment review | Tier 1 + checklist |

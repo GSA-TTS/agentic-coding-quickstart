@@ -6,7 +6,7 @@ tier: 2
 last_updated: "2026-08-21"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "howto", "sandbox"]
-related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
+related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -367,6 +367,7 @@ export ACQ_EXEC_READY_TIMEOUT=120
 ## See also
 
 - [docs/BACKEND_GUIDE.md](../BACKEND_GUIDE.md) — per-backend strengths and tradeoffs
+- [docs/howto/msb.md](msb.md) — detailed msb (microsandbox) reference (the default backend)
 - [docs/howto/sbx.md](sbx.md) — detailed sbx CLI reference
 - [docs/adr/0010-acq-pluggable-backends.md](../adr/0010-acq-pluggable-backends.md) — architecture decision
 - [docs/KNOWN_FAILURE_MODES.md](../KNOWN_FAILURE_MODES.md) — troubleshooting
