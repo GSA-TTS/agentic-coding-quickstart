@@ -172,9 +172,19 @@ runner + `scripts/test-acq.d/` were removed. Final state:
   / `ACQ_STATE_DIR` / `ACQ_PROVENANCE_DIR` all rooted there) makes the files
   safe to run concurrently. `scripts/test-acq-bats` runs across files with
   `bats --jobs` when GNU parallel (or rush) is on `PATH` — measured ~115s → ~60s
-  — and falls back to serial otherwise. Within-file parallelism is intentionally
-  left off for now (`--no-parallelize-within-files`); revisit if further speedup
-  is wanted. CI installs GNU parallel so the fast path is deterministic.
+  — and falls back to serial otherwise. CI installs GNU parallel so the fast
+  path is deterministic.
+- Within-file parallelism is intentionally left OFF (`--no-parallelize-within-files`),
+  and this was measured, not assumed. Running the backgrounded-`ssh`/`socat` port
+  files (112/105/115) and the provision-heavy files (72/74) under `bats --jobs 4`
+  within files was **flake-free** (5/5 clean each; full suite 340/340 across
+  repeated runs) — the isolation holds. But on the 2–4 vCPU machines this suite
+  targets (dev laptops, CI runners) it is consistently **~2x slower**: across-files
+  already saturates the cores, so adding bats' per-`@test` worker orchestration
+  is pure overhead with no spare cores to exploit. Head-to-head at `-j4`:
+  across-only ~46–54s vs. across+within ~87–97s. So `--no-parallelize-within-files`
+  is a performance choice, not a safety one; revisit only if the suite ever runs
+  on a host with many idle cores relative to the file count.
 
 ## Links
 

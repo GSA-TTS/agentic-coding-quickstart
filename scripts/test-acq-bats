@@ -16,11 +16,13 @@
 # there; no test writes to $HOME, real XDG, a keychain, or a fixed /tmp path), so
 # files can run concurrently. bats' --jobs needs GNU parallel (or rush); when a
 # supported parallelizer is on PATH we run across files (measured ~115s -> ~60s).
-# We deliberately do NOT parallelize WITHIN a file yet (--no-parallelize-within-files):
-# across-files captures most of the win and avoids relying on any intra-file
-# ordering. When no parallelizer is present (e.g. the bash 3.2 gate, a bare dev
-# box) we fall back to serial — identical behavior, just slower. Override the job
-# count with ACQ_BATS_JOBS; set ACQ_BATS_JOBS=1 to force serial.
+# We do NOT parallelize WITHIN a file (--no-parallelize-within-files): it is
+# flake-free (measured) but ~2x SLOWER on the 2-4 vCPU machines this targets —
+# across-files already saturates the cores, so per-@test worker orchestration is
+# pure overhead. See ADR-0025 ("Within-file parallelism") for the measurements.
+# When no parallelizer is present (e.g. the bash 3.2 gate, a bare dev box) we
+# fall back to serial — identical behavior, just slower. Override the job count
+# with ACQ_BATS_JOBS; set ACQ_BATS_JOBS=1 to force serial.
 #
 # Usage:
 #   ./scripts/test-acq-bats                   # all .bats (parallel if available)
