@@ -1,4 +1,4 @@
-# bash 3.2 compatibility gate — runs scripts/test-acq under bash 3.2.57.
+# bash 3.2 compatibility gate — runs the acq offline suite under bash 3.2.57.
 #
 # Why this exists:
 #   The macOS system bash is 3.2.57 (Apple's last GPLv2 bash), so it is the
@@ -8,6 +8,11 @@
 #   lanes, which all run on ubuntu-latest (bash 5.x). This gate reproduces the
 #   3.2 interpreter so the class is caught pre-merge instead of only when someone
 #   runs the suite locally on a Mac (see quickstart#331 for the 10c12 instance).
+#
+#   The suite runs under bats-core (ADR-0025); bats supports bash 3.2.57, and the
+#   acq code + stub library it exercises are the 3.2 target. We invoke the
+#   vendored bats runner (test/vendor/bats-core) with the 3.2 interpreter as
+#   $BATS_SHELL so the @tests — and the acq/adapters they drive — run on 3.2.
 #
 # Why build 3.2.57 from source instead of a bash:3.2 container:
 #   - 3.2.57 built against glibc on the runner is the exact version macOS ships;
@@ -37,7 +42,9 @@ on:
     paths:
       - 'acq'
       - 'acq.backends/**'
-      - 'scripts/test-acq'
+      - 'scripts/test-acq-lib.sh'
+      - 'scripts/test-acq-bats'
+      - 'test/bats/**'
       - '.github/workflows/bash32-compat.yml'
 
 concurrency:
@@ -69,6 +76,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The suite runs under bats-core, vendored as submodules.
+          submodules: true
 
       # Cache the built interpreter so the compile only happens on a version bump.
       - id: cache-bash32
@@ -126,4 +135,9 @@ jobs:
           /opt/bash32/bin/bash -c '[[ $BASH_VERSION == 3.2.* ]] || { echo "not bash 3.2: $BASH_VERSION" >&2; exit 1; }'
 
       - name: Run acq offline suite under bash 3.2
-        run: /opt/bash32/bin/bash scripts/test-acq
+        # Put the 3.2 interpreter first on PATH so bats' `#!/usr/bin/env bash`
+        # shebangs — and the acq/adapters the @tests drive — all resolve to
+        # bash 3.2.57. bats-core supports >= 3.2 (its own bin/bats guards on it).
+        run: |
+          set -euo pipefail
+          PATH="/opt/bash32/bin:$PATH" /opt/bash32/bin/bash scripts/test-acq-bats

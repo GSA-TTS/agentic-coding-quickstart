@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 #
-# test-acq-bats — run the bats pilot suite (ADR-0025).
+# test-acq-bats — run the acq offline unit suite (ADR-0025).
 #
 # Thin wrapper around the vendored, pinned bats-core runner (test/vendor/bats-core)
 # so contributors don't need bats installed system-wide and the version is fixed.
 # Runs every *.bats file under test/bats/.
 #
-# This coexists with scripts/test-acq (the legacy bespoke suite) during the
-# ADR-0025 pilot; both are wired into CI. Once/if the migration completes, the
-# legacy runner is retired in favor of this one.
+# This is THE acq offline unit suite: the bespoke scripts/test-acq runner it
+# replaced was retired once the migration to bats completed (ADR-0025). The
+# stub layer those tests relied on lives on in scripts/test-acq-lib.sh, sourced
+# by test/bats/helper.bash.
 #
 # Usage:
-#   ./scripts/test-acq-bats                 # run all pilot .bats files
+#   ./scripts/test-acq-bats                 # run all .bats files
 #   ./scripts/test-acq-bats test/bats/X.bats  # run a specific file
 set -uo pipefail
 

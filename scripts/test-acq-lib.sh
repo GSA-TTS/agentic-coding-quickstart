@@ -1,57 +1,37 @@
 #!/usr/bin/env bash
 #
-# test-acq-lib.sh — shared harness for the acq offline unit suite.
+# test-acq-lib.sh — shared stub library for the acq bats test suite.
 #
-# This file is SOURCED (never executed directly) by scripts/test-acq and by each
-# scripts/test-acq.d/NN-*.sh part. It provides:
-#   - the assertion helpers (pass/fail/assert_eq/assert_contains/…)
-#   - the PASS/FAIL counters (shared in-process across every sourced part)
-#   - the stub scaffolding (make_stubs/cleanup_stubs) for sbx/msb/ssh/ssh-keygen
+# This file is SOURCED (never executed directly) by test/bats/helper.bash, which
+# every test/bats/*.bats file loads. It provides:
+#   - the stub scaffolding (make_stubs/cleanup_stubs) for sbx/msb/ssh/ssh-keygen,
+#     driven through $CALLS
 #   - load_acq (source acq + the sbx adapter with the ACQ_SOURCE_ONLY guard)
-#   - REPO_ROOT / ACQ and the offline kit-dir + backoff neutralization setup
+#   - REPO_ROOT / ACQ, the offline kit-dir, retry-backoff neutralization, and the
+#     shared MSB_GITHUB_SECRET_BINDING constant the .bats files assert against
 #
-# WHY A SEPARATE LIB + PARTS: the suite grew past 8k lines in a single file, and
-# ShellCheck's dataflow analysis blows up pathologically on a file that large
-# (it OOMs / runs effectively forever). Splitting the harness out and the tests
-# into scripts/test-acq.d/NN-*.sh keeps every file small enough to lint in
-# seconds, one file per invocation (matching the shellcheck pre-commit hook).
-#
-# The parts run IN-PROCESS (sourced sequentially by the runner) so they share the
-# PASS/FAIL counters and the harness functions exactly as the sections did when
-# they lived inline — behavior is unchanged, only the file layout differs.
-#
-# Run the suite via: ./scripts/test-acq   (exit 0 = all pass)
+# It began as the shared harness for the bespoke scripts/test-acq runner (and its
+# scripts/test-acq.d/NN-*.sh parts). That runner was retired once the suite was
+# migrated to bats-core (ADR-0025); this library survives because it is the
+# valuable, framework-agnostic STUB layer, now consumed by the bats helper. bats
+# provides the assertions (bats-assert) and the pass/fail tally, so the old
+# hand-rolled pass/fail/assert_* and PASS/FAIL counters are gone.
 
 set -uo pipefail
 
-# Run the whole harness with stdin detached from any terminal. acq's
-# interactive prompts (key-gate rotate, github-scope advisory, stale-bundle
-# refresh, doctor default-write) gate on `[ -t 0 ]` and READ stdin when it is a
-# TTY. Individual tests redirect stdin where they exercise a prompt on purpose,
-# but a test that reaches a prompt path incidentally would otherwise BLOCK when
-# the suite is run from an interactive terminal (CI pipes stdin, so it never
-# hung there). Reopening stdin from /dev/null once, here, makes every prompt
-# take its non-interactive branch regardless of how the suite was launched.
-# Tests that need to feed input still pipe it explicitly (that overrides this).
+# Detach stdin from any terminal for the whole suite. acq's interactive prompts
+# (key-gate rotate, github-scope advisory, stale-bundle refresh, doctor
+# default-write) gate on `[ -t 0 ]` and READ stdin when it is a TTY. A @test that
+# reaches a prompt path incidentally would otherwise BLOCK when run from an
+# interactive terminal (CI pipes stdin, so it never hung there). Reopening stdin
+# from /dev/null once, here, makes every prompt take its non-interactive branch
+# regardless of how the suite was launched. @tests that feed input still pipe it
+# explicitly (that overrides this). bats runs each @test in its own process, so
+# this redirect is inherited by every test that sources the helper.
+exec </dev/null
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ACQ="$REPO_ROOT/acq"
-
-PASS=0
-FAIL=0
-
-pass() { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
-fail() { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
-
-assert_eq() {
-  if [ "$2" = "$3" ]; then pass "$1"; else fail "$1" "expected [$2], got [$3]"; fi
-}
-assert_contains() {
-  case "$2" in *"$3"*) pass "$1" ;; *) fail "$1" "missing [$3] in output" ;; esac
-}
-assert_not_contains() {
-  case "$2" in *"$3"*) fail "$1" "unexpected [$3] in output" ;; *) pass "$1" ;; esac
-}
 
 seed_sbx_usai_proxy_fixture() {
   cat > "$STUBDIR/sbx_ls" <<'LS'
@@ -87,7 +67,19 @@ export ACQ_SBX_KIT_PASSTHROUGH=1
 # in-process tests that override _acq_msb_fetch_kit still win for the refs they
 # pass. On a CI host with git + network this prevents a real fetch that would
 # otherwise hang.
-_ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-nokit.XXXXXX")
+#
+# bats sources this helper once per @test (each in its own process), so a plain
+# `mktemp -d` here would leak one dir per test with no single EXIT trap to clean
+# them. Instead root a SINGLE shared offline-kit dir under bats' run-scoped
+# temp dir (BATS_RUN_TMPDIR, which bats removes at the end of the run); fall back
+# to a per-process mktemp only when run outside bats. The dir holds a stub spec
+# with no secrets, so sharing it across tests is safe.
+if [ -n "${BATS_RUN_TMPDIR:-}" ]; then
+  _ACQ_MSB_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR}/acq-offline-kit"
+  mkdir -p "$_ACQ_MSB_OFFLINE_KIT_DIR"
+else
+  _ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-nokit.XXXXXX")
+fi
 printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml"
 export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
 
