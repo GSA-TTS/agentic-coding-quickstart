@@ -29,141 +29,179 @@ Once you complete this Quickstart to get your environment working, use the Playb
 
 ## 5-Minute Quickstart
 
-### Step 0: Prerequisites
+You'll do three things: **open a terminal**, **install `acq`**, and **run it**.
+You do **not** need to be a developer, and you do **not** need administrator
+rights on your Mac.
 
-You will run the commands in this guide from a terminal. Open one now...
+### Step 1: Open a terminal
+
+- **macOS:** press ⌘-Space, type "Terminal", press Return. (Or find it in
+  Applications → Utilities.)
+
+You'll type (or paste) the commands below into this window.
+
+> **Not on an Apple Silicon Mac?** The sandbox needs hardware virtualization. See
+> [prerequisites and other platforms](#prerequisites-and-other-platforms) below.
+
+### Step 2: Install acq
+
+Paste this one line and press Return:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GSA-TTS/agentic-coding-quickstart/main/install.sh | sh
+```
+
+That's it — you don't have to choose *how* to install. The installer:
+
+- **picks the best method already on your Mac** — Homebrew if you have it, then
+  npm if you have it, otherwise a self-contained download — so you get automatic
+  upgrades/uninstall if you already use a package manager, and a working setup
+  either way,
+- puts the `acq` command on your computer so you can run it from **any folder**,
+- offers to install **msb** (the sandbox `acq` runs your agent inside), and
+- **asks before** changing anything about your setup — it never edits your
+  configuration without your OK, and it never needs administrator rights.
 
 <details>
-<summary>How to open a terminal (click to expand)</summary>
+<summary>Prompted to install "Command Line Tools"? (click to expand)</summary>
 
-- **macOS:** open **Terminal** — find it in Applications → Utilities, or press ⌘-Space, type "Terminal", and press Return.
-- **Windows:** open **Windows Terminal** or **PowerShell** — press the Start button, type "Terminal" (or "PowerShell"), and press Enter.
-- **Linux (Ubuntu):** press Ctrl-Alt-T, or search for "Terminal" in your applications menu.
+acq needs Apple's **Command Line Tools** (they provide `git`, which acq uses).
+If they aren't installed yet, the installer starts them for you and **waits**
+while they install — you'll see a window titled **"Install Command Line
+Developer Tools."** Click **Install** and accept the license. No administrator
+rights are required.
+
+**Can't find the window?** It sometimes opens **minimized in your Dock** rather
+than in front of you — look there. The installer keeps waiting until the tools
+finish, then continues on its own.
 
 </details>
 
-Good news: there's very little to gather in advance. You need a supported
-computer and a way to run these commands — `acq` walks you through the USAi key
-and GitHub access interactively on first run (see [Step 3](#step-3-create-and-run-a-sandbox)).
+<details>
+<summary>Prefer to look before you run it? (recommended) (click to expand)</summary>
 
-| Requirement     | Notes                                                      |
-| --------------- | ---------------------------------------------------------- |
-| A supported host for microVMs | msb uses hardware virtualization. You need one of:<ul><li>**macOS** — Apple Silicon (Intel Macs are not supported)</li><li>**Windows 11** — with the Windows Hypervisor Platform enabled (preview)</li><li>**Linux** — glibc-based, with KVM enabled (`/dev/kvm` present)</li></ul>If you need more detail than this, see [msb host setup](docs/howto/acq.md#msb-host-setup) for per-platform particulars. |
-| `git`           | Already installed on macOS and on the supported Linux hosts — **nothing to do**. Check with `git --version`. (On macOS, the first time you run a `git` command the system may offer to install the Command Line Tools; look for a pop-up window with a license agreement, then accept it to install the tools.)|
-| USAi API key    | **Required, but `acq` guides you** — on first run `acq` prompts you to paste a key and validates it, so you need not configure anything beforehand. You will need to [create a key](https://console.gsa.usai.gov/key-management) (do it now or when prompted); USAi keys expire every 7 days. <p>Running **non-interactively** (CI/piped) has no prompt, so the key must be set in advance — see [Secrets](docs/howto/acq.md#secrets).</p> |
-| GitHub token | **Nothing to get in advance** — `acq` offers to walk you through creating a repo-scoped token on first run, when your project contains GitHub repos. You can decline and add one later. <p>(A token lets the agent authenticate to GitHub, work with private repositories, and act on your behalf — open PRs, push to branches, etc.)</p> |
-
-### Step 1: Install microsandbox (msb)
-
-msb is a standalone, open-source (Apache-2.0) microVM runtime (a host-level tool, independent of this repository). Install it on your machine:
+You never have to pipe a script straight into your shell. Download it, read it,
+then run it:
 
 ```bash
-# With Homebrew, our preference at GSA TTS:
-brew install superradcompany/tap/microsandbox
+curl -fsSL -o install-acq.sh https://raw.githubusercontent.com/GSA-TTS/agentic-coding-quickstart/main/install.sh
+less install-acq.sh      # read it
+sh install-acq.sh --dry-run   # show what it WOULD do, changing nothing
+sh install-acq.sh             # actually install
 ```
 
-> Don't have Homebrew? Install it from [brew.sh](https://brew.sh), or use the
-> `curl` installer below (which needs no Homebrew).
+You can also force a specific method with `--method brew|npm|clone`.
 
-or
+</details>
+
+<details>
+<summary>Already use Homebrew or Node? (click to expand)</summary>
+
+You don't need to do anything special — the one-line installer above **detects
+Homebrew and npm automatically** and uses whichever you have (falling back to a
+self-contained download if you have neither). Package-manager installs give you
+`upgrade`/`uninstall` for free.
+
+If you'd rather run the direct command yourself:
 
 ```bash
-# More generally, on macOS, Linux, or WSL (Windows):
-curl -fsSL https://install.microsandbox.dev | sh
+npm install -g github:GSA-TTS/agentic-coding-quickstart   # if you use Node/npm — works today
+brew install GSA-TTS/tap/acq                              # if you use Homebrew — coming soon (tap not published yet)
 ```
 
-### Step 2: Clone this repo
+</details>
+
+### Step 3: Run it
+
+Point `acq` at the folder you want the agent to work in (an existing project, or
+a new empty folder you just made):
+
+```bash
+acq run opencode ~/my-project
+```
+
+That's it — you're now running an AI coding agent with USAi access and
+restricted filesystem and network access. Repeat Step 3 for each project.
+
+> [!NOTE]
+> **The first run takes a minute or two.** `acq` boots a microVM, installs the
+> coding agent, and fetches its configuration kits, showing progress as it goes.
+> Later runs against the same project are much faster.
+
+On first run, `acq` sets you up interactively — nothing to configure beforehand:
+
+- **USAi key** — `acq` prompts you to paste a key and validates it. Create one at
+  the [USAi key console](https://console.gsa.usai.gov/key-management) (keys expire
+  every 7 days).
+- **GitHub token** — when your project contains GitHub repos, `acq` offers to walk
+  you through creating a repo-scoped token. You can decline and add one later.
+- **Git signing** — `acq` warns if your commits won't sign/verify correctly, and
+  tells you how to fix it.
+
+`acq` injects secrets into the sandbox at runtime — the real values **never enter
+the guest**.
+
+---
+
+### Prerequisites and other platforms
+
+Almost nothing to gather in advance — `acq` walks you through the USAi key and
+GitHub access on first run. What you do need:
+
+| Requirement | Notes |
+| --- | --- |
+| A supported host | The sandbox uses hardware virtualization. You need **macOS on Apple Silicon** (Intel Macs are not supported), **Windows 11** with the Windows Hypervisor Platform (preview), or **Linux** (glibc, with `/dev/kvm`). More detail: [msb host setup](docs/howto/acq.md#msb-host-setup). |
+| A terminal | macOS: Terminal (⌘-Space → "Terminal"). Windows: Windows Terminal / PowerShell. Linux: Ctrl-Alt-T. |
+| USAi API key | `acq` prompts for it on first run. [Create one here](https://console.gsa.usai.gov/key-management). |
+
+**Manual install (developers).** If you'd rather clone and run from the clone —
+or want a specific tagged release — see [Manual install](#manual-install).
+
+**Want the sbx backend instead of msb?** See the
+[Backend Guide](docs/BACKEND_GUIDE.md) and [sbx How-To](docs/howto/sbx.md).
+
+**Want to know what `acq` is doing under the hood?** See
+[How It Works](#how-it-works).
+
+**Working across multiple repos?** See
+[Multiple Workspaces](docs/CONCEPTS.md#multiple-workspaces).
+
+---
+
+### Manual install
+
+If you're comfortable in a terminal and prefer to run `acq` from a clone:
 
 ```bash
 git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
 cd agentic-coding-quickstart
+./acq run opencode ~/my-project
 ```
 
-The `acq` command in Step 3 is run from inside this cloned folder.
+You'll also need the `msb` sandbox runtime — install it without admin via
+`curl -fsSL https://install.microsandbox.dev | sh` (or, if you have Homebrew,
+`brew install superradcompany/tap/microsandbox`).
+
+> **Running `./acq` from the clone?** It only works from **inside** the
+> `agentic-coding-quickstart` folder (that's where the `acq` file lives). If you
+> get "no such file `./acq`", `cd` back into that folder first. The one-line
+> installer in [Step 2](#step-2-install-acq) avoids this entirely by putting `acq`
+> on your PATH.
 
 <details>
 <summary>Testing a specific tagged release? (click to expand)</summary>
 
-To try a specific tagged version, check it out after cloning:
+After cloning, check out the tag:
 
 ```bash
-git checkout v3.0.0-rc1
+git checkout v3.0.0-rc2
 ```
 
-Git will print a message about being in a **"detached HEAD" state**. That is
-**normal — it is not an error.** It just means you're looking at a specific
-tagged snapshot rather than a branch. You can run `acq` exactly as described
-below. To go back to the latest development version, run `git switch main`.
+Git prints a message about a **"detached HEAD" state** — that's **normal, not an
+error.** It just means you're on a specific snapshot. Run `acq` as usual; to go
+back to the latest, run `git switch main`.
 
 </details>
-
-### Step 3: Create and run a sandbox
-
-```bash
-./acq run opencode /path/to/your/project
-```
-
-`/path/to/your/project` is the folder you want the agent to work in. It can be
-an **existing project** or a **new, empty folder** you just made for this — your
-choice. If the folder is (or will be) a software project, initialize git in it
-first so the agent can track its changes:
-
-```bash
-mkdir -p ~/my-project        # a new folder, if you don't have one yet
-cd ~/my-project
-git init .                   # recommended if this is for software development
-```
-
-Then point `acq` at it (e.g. `./acq run opencode ~/my-project`).
-
-That's it. You're now running an AI coding agent with USAi access and restricted
-filesystem and network access. Repeat this to create sandboxes for each project
-you want to work on.
-
-> [!NOTE]
-> **The first run does real work and takes a minute or two.** `acq` boots a
-> microVM, installs the coding agent, and fetches its configuration kits. It
-> shows a progress spinner and status lines as it goes, so you can watch each
-> phase — later runs against the same project are much faster. (To silence the
-> animation, e.g. in a script, set `ACQ_NO_PROGRESS=1`; plain status lines still
-> print.)
-
-On first run, `acq` sets you up interactively — nothing to configure beforehand:
-
-- **USAi key** — `acq` validates your key and, if none is set (or it has
-  expired), prompts you to paste one and stores it. Have your key from the
-  [prerequisites](#step-0-prerequisites) handy.
-- **GitHub token** — when your workspace contains GitHub repos, `acq` offers to
-  walk you through creating a repo-scoped token so the agent can access them.
-  You can decline and add one later.
-- **Git signing** — `acq` warns if your host has no SSH key loaded or the repo
-  has no `user.email`, so your sandbox commits sign and verify correctly.
-
-`acq` injects secrets into the sandbox at runtime — the real values **never
-enter the guest**. To set secrets ahead of time (for CI or scripted setups),
-see [Secrets](docs/howto/acq.md#secrets) in the acq how-to.
-
-> [!NOTE]
-> Sandboxes sign your git commits with your host SSH key on **both** backends —
-> sbx forwards the host ssh-agent implicitly, and msb forwards it via `--vsock`
-> (msb >= 0.6.9) — both triggered simply by having your host `SSH_AUTH_SOCK` set,
-> so `ssh-add` your signing key first. For those commits to
-> show **Verified** on GitHub you need, one time: a GitHub-verified `user.email`
-> set **in the project** (repo-local config, since the sandbox has its own home
-> and does not see your host global git config) and your **public** signing key
-> registered on GitHub as a _Signing Key_. See
-> [Commits show "Unverified" on GitHub](#troubleshooting) below.
-
-**Want to know more about what `acq` is doing under the hood?** See [How It Works](#how-it-works).
-
-**Need more details, or want to use the sbx backend instead?** See the
-[acq How-To](docs/howto/acq.md), the [Backend Guide](docs/BACKEND_GUIDE.md),
-the [msb How-To](docs/howto/msb.md) (default backend), and the
-[sbx How-To](docs/howto/sbx.md).
-
-**Working across multiple repos?** Mounting extra directories works on either
-backend via `acq`; the command syntax and examples are documented in
-[Multiple Workspaces](docs/CONCEPTS.md#multiple-workspaces).
 
 ---
 
@@ -172,6 +210,38 @@ backend via `acq`; the command syntax and examples are documented in
 If the happy path above didn't work, the most common issues are below. For
 everything else (wrong providers, auth failures, TLS/certificate errors, and
 more), see **[docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md)**.
+
+<details>
+<summary><strong>"no such file or directory: ./acq"</strong> (click to expand)</summary>
+
+This means `acq` isn't where you're typing the command. Two fixes:
+
+- **Recommended:** install `acq` with the one-line installer in
+  [Step 2](#step-2-install-acq). Then run `acq` (no `./`) from **any** folder.
+- **If you cloned manually:** `./acq` only works from **inside** the
+  `agentic-coding-quickstart` folder — that's where the `acq` file lives. `cd`
+  back into it first (`cd ~/agentic-coding-quickstart`, or wherever you cloned
+  it), then run `./acq run opencode ~/my-project`.
+
+</details>
+
+<details>
+<summary><strong>"No developer tools were found" / git won't run</strong> (click to expand)</summary>
+
+The first time your Mac uses `git`, it installs the Command Line Tools. If you
+see `xcode-select: note: No developer tools were found, requesting install`,
+run:
+
+```bash
+xcode-select --install
+```
+
+A pop-up window titled **"Install Command Line Developer Tools"** appears — click
+**Install** and accept the license. **If you can't find the window, look in your
+Dock** — it sometimes opens minimized there rather than in front of you. When it
+finishes, re-run your command. (No administrator rights are required.)
+
+</details>
 
 <details>
 <summary><strong>Authentication failures (expired USAi key)</strong> (click to expand)</summary>
@@ -246,8 +316,8 @@ git config user.name  "Your Name"
 ```
 
 **Step 2 — register your signing key on GitHub.** Add the **public** half of your
-signing key as a **Signing Key**: _Settings → SSH and GPG keys → New SSH key →
-Key type: **Signing Key**_. (The same key may already be an authentication key;
+signing key as a **Signing Key**: *Settings → SSH and GPG keys → New SSH key →
+Key type: **Signing Key***. (The same key may already be an authentication key;
 add it again as a signing key.)
 
 Then make a **new** commit — verification applies going forward.
