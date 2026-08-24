@@ -186,7 +186,7 @@ GitLab is **not a built-in sbx service**, so use `sbx secret set-custom`:
 sbx secret set-custom -g --host workshop.cloud.gov --env GITLAB_TOKEN
 
 # Verify access inside sandbox
-sbx exec SANDBOX_NAME sh -c 'curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" https://workshop.cloud.gov/api/v4/user | jq .username'
+acq exec SANDBOX_NAME -- sh -c 'curl -s -H "PRIVATE-TOKEN: $GITLAB_TOKEN" https://workshop.cloud.gov/api/v4/user | jq .username'
 ```
 
 ### Verify Stored Secrets
@@ -256,7 +256,7 @@ sbx secret rm -g anthropic
 
 # Update a secret (set it again, then recreate sandbox)
 sbx secret set-custom -g --host api.gsa.usai.gov --env USAI_API_KEY
-sbx rm my-sandbox && sbx create --name my-sandbox opencode .
+acq rm my-sandbox && acq create --name my-sandbox opencode .
 ```
 
 ---
@@ -268,7 +268,7 @@ sbx rm my-sandbox && sbx create --name my-sandbox opencode .
 cd /path/to/your/project
 
 # Create and run sandbox with OpenCode
-sbx run opencode .
+acq run opencode .
 ```
 
 The sandbox will start and you'll be inside the agent environment.
@@ -276,22 +276,22 @@ The sandbox will start and you'll be inside the agent environment.
 ### Other Supported Agents
 
 ```bash
-sbx run claude .      # Claude Code
-sbx run copilot .     # GitHub Copilot
-sbx run cursor .      # Cursor
-sbx run codex .       # OpenAI Codex
-sbx run gemini .      # Google Gemini
-sbx run shell .       # Just a shell (no agent)
+acq run claude .      # Claude Code
+acq run copilot .     # GitHub Copilot
+acq run cursor .      # Cursor
+acq run codex .       # OpenAI Codex
+acq run gemini .      # Google Gemini
+acq run shell .       # Just a shell (no agent)
 ```
 
 ### Create with Custom Name
 
 ```bash
 # Create with a specific name
-sbx create --name my-feature opencode .
+acq create --name my-feature opencode .
 
 # Then run it (re-attach by name)
-sbx run --name my-feature
+acq run my-feature
 ```
 
 ---
@@ -300,38 +300,53 @@ sbx run --name my-feature
 
 ```bash
 # List all sandboxes
-sbx ls
+acq ls
 
 # Stop a sandbox (preserves state)
-sbx stop my-sandbox
+acq stop my-sandbox
 
 # Resume a stopped sandbox (re-attach by name)
-sbx run --name my-sandbox
+acq run my-sandbox
 
 # Remove a sandbox permanently
-sbx rm my-sandbox
+acq rm my-sandbox
 
-# Remove all sandboxes
+# Shell into a running sandbox (interactive attach)
+acq run my-sandbox
+
+# Remove all sandboxes — no acq equivalent; this is an sbx-specific bulk op
 sbx rm --all
-
-# Shell into a running sandbox
-sbx exec -it my-sandbox bash
 ```
+
+> [!NOTE]
+> `acq` covers the common run/ls/stop/rm/exec operations on either backend.
+> Two forms shown here stay raw `sbx`: **`sbx rm --all`** (no `acq rm --all`
+> bulk removal exists), and the interactive **`sbx exec -it <name> bash`** shell
+> (`acq exec` runs a command via `acq exec <name> -- <cmd>` but does not attach
+> a TTY — use `acq run <name>` to attach interactively).
 
 ---
 
 ## Common Commands Reference
 
+| Task | acq command | Raw sbx equivalent |
+|------|-------------|--------------------|
+| List sandboxes | `acq ls` | `sbx ls` |
+| Create sandbox | `acq run <agent> .` | `sbx run <agent> .` |
+| Stop sandbox | `acq stop <name>` | `sbx stop <name>` |
+| Resume sandbox | `acq run <name>` | `sbx run --name <name>` |
+| Remove sandbox | `acq rm <name>` | `sbx rm <name>` |
+| Run a command | `acq exec <name> -- <cmd>` | `sbx exec <name> -- <cmd>` |
+| Interactive shell | `acq run <name>` (attach) | `sbx exec -it <name> bash` |
+| Copy files | `acq cp ./file.txt <name>:/path/` | `sbx cp ./file.txt <name>:/path/` |
+
+The following are genuinely sbx-specific mechanics the wrapper does not
+abstract — use the raw `sbx` command:
+
 | Task | Command |
 |------|---------|
 | Check version | `sbx version` |
-| List sandboxes | `sbx ls` |
-| Create sandbox | `sbx run <agent> .` |
-| Stop sandbox | `sbx stop <name>` |
-| Resume sandbox | `sbx run --name <name>` |
-| Remove sandbox | `sbx rm <name>` |
-| Shell access | `sbx exec -it <name> bash` |
-| Copy files | `sbx cp ./file.txt <name>:/path/` |
+| Remove all sandboxes | `sbx rm --all` |
 | **Secrets** | |
 | List secrets | `sbx secret ls` |
 | Add secret | `sbx secret set -g <service>` |
@@ -492,7 +507,7 @@ Alternatively, check out the branch on your host before creating the sandbox:
 git checkout feature/login
 
 # Create sandbox - it mounts the current branch
-sbx run opencode .
+acq run opencode .
 ```
 
 ### Clone Mode + Multiple Workspaces
