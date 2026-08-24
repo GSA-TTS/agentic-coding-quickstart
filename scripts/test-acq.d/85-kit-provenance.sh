@@ -229,4 +229,3 @@ sbx_nonote=$(
 )
 assert_not_contains "provision(sbx): no notice when SSH_AUTH_SOCK is unset" "$sbx_nonote" "forwards your host ssh-agent"
 cleanup_stubs
-

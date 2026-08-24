@@ -265,4 +265,3 @@ assert_contains "secret bogus: error lists the 'has' verb" "$bad_out" "set | rm 
   || fail "secret bogus: must exit non-zero" "rc=$bad_rc"
 assert_not_contains "secret bogus: never forwards to the backend" "$bad_log" "sbx secret"
 cleanup_stubs
-

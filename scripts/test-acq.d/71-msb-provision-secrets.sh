@@ -382,4 +382,3 @@ empty_rc=$?
 assert_contains "secret ls(msb): empty store still prints header" "$empty_ls" "SCOPE"
 assert_eq "secret ls(msb): empty store exits 0" "0" "$empty_rc"
 cleanup_stubs
-

@@ -170,4 +170,3 @@ SPEC
 assert_contains "kit validate: reports invalid env var name" "$env_val_out" "invalid env var name"
 assert_contains "kit validate: env-name failure (RC=1)" "$env_val_out" "RC=1"
 cleanup_stubs
-

@@ -473,4 +473,3 @@ skip_out=$(
 )
 assert_not_contains "msb: prereq check honors SKIP flag" "$skip_out" "missing kit prerequisite"
 cleanup_stubs
-

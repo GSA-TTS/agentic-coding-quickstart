@@ -302,4 +302,3 @@ else
   fail "msb: secret set github stored in acq store" "acq.github not found"
 fi
 cleanup_stubs
-

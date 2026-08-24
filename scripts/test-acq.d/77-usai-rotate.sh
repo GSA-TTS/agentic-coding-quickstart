@@ -65,4 +65,3 @@ if grep -qE '(^|[^[:alnum:]_])sbx[[:space:]]+secret' "$REPO_ROOT/scripts/rotate-
 else
   pass "rotate: scripts/rotate-apikey has no direct sbx call"
 fi
-

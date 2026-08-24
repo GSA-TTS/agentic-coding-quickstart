@@ -112,4 +112,3 @@ assert_contains "kit: apply (msb) runs msb exec" "$log" "msb exec mybox"
 assert_not_contains "0017: mid-life apply does NOT stage a create-time script" "$log" "--script-path acq-startup"
 assert_not_contains "0017: mid-life apply runs no msb create" "$log" "msb create"
 cleanup_stubs
-

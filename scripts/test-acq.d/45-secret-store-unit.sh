@@ -198,4 +198,3 @@ assert_contains "secret rm(msb): lone token errors with scope-required" "$lone_o
   || fail "secret rm(msb): lone token must exit non-zero" "rc=$lone_rc"
 assert_not_contains "secret rm(msb): lone token never invokes 'msb secret'" "$lone_log" "msb secret"
 cleanup_stubs
-

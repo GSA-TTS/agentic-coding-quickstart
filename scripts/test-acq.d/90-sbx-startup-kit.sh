@@ -272,4 +272,3 @@ log=$(cat "$CALLS")
 assert_not_contains "heal(sbx): marked extra kit is not re-applied" "$log" "sbx kit add skipbox"
 assert_not_contains "heal(sbx): marked extra kit yields no refusal noise" "$out" "cannot extend a live sandbox"
 cleanup_stubs
-

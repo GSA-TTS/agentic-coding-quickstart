@@ -91,4 +91,3 @@ assert_eq "ports-dead: silent when the sandbox publishes no ports" \
   "" "$(_wppd "" closed)"
 unset -f _wppd
 unset _PORTS_FIXTURE
-

@@ -255,4 +255,3 @@ has_out=$(ACQ_BACKEND=msb "$ACQ" secret has -g 2>&1); has_rc=$?
 assert_contains "secret has: missing service -> usage" "$has_out" "missing service name"
 assert_eq "secret has: missing service -> rc 2" "2" "$has_rc"
 cleanup_stubs
-

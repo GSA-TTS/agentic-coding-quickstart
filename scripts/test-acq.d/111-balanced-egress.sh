@@ -394,4 +394,3 @@ make_stubs; load_acq
 npm_override_log=$(cat "$CALLS")
 assert_contains "msb: npm override host (not in balanced set) still gets a rule" "$npm_override_log" "allow@npm.internal.example.gov"
 cleanup_stubs
-

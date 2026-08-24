@@ -307,4 +307,3 @@ bad_out=$(
   || fail "msb ports: unsupported arg (--frobnicate) still errors non-zero" "rc=$bad_rc"
 assert_contains "msb ports: unsupported arg names the offending flag" "$bad_out" "unsupported argument"
 cleanup_stubs
-

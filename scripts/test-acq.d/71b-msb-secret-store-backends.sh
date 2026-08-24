@@ -290,4 +290,3 @@ missing_ws_out=$(
 assert_contains "msb: missing workspace errors" "$missing_ws_out" "workspace path does not exist"
 assert_contains "msb: missing workspace is a hard failure" "$missing_ws_out" "RC=1"
 cleanup_stubs
-

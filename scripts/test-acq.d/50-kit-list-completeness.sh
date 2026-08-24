@@ -35,4 +35,3 @@ for _doc in "$REPO_ROOT/README.md" "$REPO_ROOT/AGENTS.md"; do
   assert_eq "no hardcoded English kit count in $(basename "$_doc")" "0" "$_bad"
 done
 cleanup_stubs
-

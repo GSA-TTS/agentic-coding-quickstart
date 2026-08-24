@@ -41,4 +41,3 @@ name=$(derive_name opencode)
 assert_eq "derive_name agent-only" "opencode-${cwd_base}" "$name"
 
 cleanup_stubs
-

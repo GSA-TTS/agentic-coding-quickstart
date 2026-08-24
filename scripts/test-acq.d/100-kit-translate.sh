@@ -227,4 +227,3 @@ assert_contains "env: sbx-v2 emits variables map" "$espec" "  variables:"
 assert_contains "env: sbx-v2 emits OPENCODE_CONFIG var" "$espec" "OPENCODE_CONFIG: /home/agent/usai-config/opencode.jsonc"
 assert_not_contains "env: sbx-v2 drops unsafe var name" "$espec" "1BAD"
 cleanup_stubs
-

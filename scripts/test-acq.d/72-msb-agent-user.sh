@@ -558,4 +558,3 @@ ociinj_log=$(cat "$CALLS")
 assert_contains "msb: unsafe ACQ_MSB_PODMAN_PKGS is refused" "$ociinj_out" "unsafe characters"
 assert_not_contains "msb: injected pkg string never reaches an exec" "$ociinj_log" "rm -rf"
 cleanup_stubs
-

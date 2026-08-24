@@ -84,4 +84,3 @@ assert_eq       "gh-advise: silent when no github repos"              ""  "$(_ad
 
 rm -rf "$gwt"
 unset -f _pnwo _purl _dwr _advise
-

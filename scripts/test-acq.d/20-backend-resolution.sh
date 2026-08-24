@@ -269,4 +269,3 @@ make_stubs; load_acq
   assert_eq "self-repair: system msb still first on PATH" "$STUBDIR/msb" "$(command -v msb)"
 ) 2>/dev/null; pass "self-repair: gated so it never shadows a system backend"
 cleanup_stubs
-

@@ -312,4 +312,3 @@ assert_contains "msb: net-rule strips :port" "$nr_out" "allow@github.com"
 assert_not_contains "msb: net-rule avoids domain= prefix" "$nr_out" "allow@domain="
 assert_not_contains "msb: net-rule avoids ambiguous domain: form" "$nr_out" "allow@domain:"
 cleanup_stubs
-

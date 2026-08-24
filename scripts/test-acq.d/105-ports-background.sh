@@ -306,4 +306,3 @@ hospec=$(cat "$hoout/spec.yaml" 2>/dev/null || true)
 assert_contains "pp: sbx-v2 emits container with no protocol/name" "$hospec" "- container: 3000"
 assert_not_contains "pp: sbx-v2 does not leak host column into protocol" "$hospec" "protocol: 8080"
 cleanup_stubs
-

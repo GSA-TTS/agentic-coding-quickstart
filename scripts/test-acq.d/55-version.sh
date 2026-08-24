@@ -24,4 +24,3 @@ _want_ref=$(ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>
 assert_contains "version: patterns kit ref" "$out" "$_want_ref"
 assert_contains "version: backend line" "$out" "backend:"
 cleanup_stubs
-

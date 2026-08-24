@@ -131,4 +131,3 @@ assert_contains "msb: invalid ACQ_MSB_CPUS warns" "$mem_bad_out" "ignoring inval
 assert_not_contains "msb: invalid memory value not passed to create" "$mem4_log" "rm -rf /"
 assert_not_contains "msb: injected memory not on msb create" "$mem4_log" "msb create --name mem4box --memory 4G"
 cleanup_stubs
-

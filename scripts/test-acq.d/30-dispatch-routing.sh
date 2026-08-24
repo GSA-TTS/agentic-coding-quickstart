@@ -457,4 +457,3 @@ assert_not_contains "kit-flag: agent --kit after -- not hijacked (#222)" "$creat
 assert_contains "kit-flag: agent --kit after -- forwarded intact (#222)" "$log" "--kit evil-agent-arg"
 cleanup_stubs
 rm -rf "$_kitproj"
-

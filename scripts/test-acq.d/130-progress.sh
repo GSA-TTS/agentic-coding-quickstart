@@ -130,4 +130,3 @@ assert_contains     "progress: acq_status keeps printable message text" \
 
 unset -f _prog
 unset _st _run _noprog _bare _dbl _utf _asc _trap _trap_fire _trap_none _esc
-

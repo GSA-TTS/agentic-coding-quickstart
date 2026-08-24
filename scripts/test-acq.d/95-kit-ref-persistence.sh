@@ -125,4 +125,3 @@ _heal_log=$(cat "$CALLS")
 assert_contains "cli-kits: resume heal re-applies the reloaded --kit (file copied)" \
   "$_heal_log" "clidurable:/home/agent/clidurable-marker"
 cleanup_stubs
-

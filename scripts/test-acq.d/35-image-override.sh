@@ -333,4 +333,3 @@ assert_eq "run(#253): unknown target exits non-zero" "2" "$unk_rc"
 assert_contains "run(#253): unknown-target message names the token" "$unk_out" "'notanagent' is not a known agent"
 assert_not_contains "run(#253): unknown target does NOT provision" "$unk_log" "sbx create"
 cleanup_stubs
-

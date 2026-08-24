@@ -490,4 +490,3 @@ assert_contains "0017 refactor: provision still binds USAi via --secret" "$prov_
 assert_contains "0017 refactor: provision still binds github via --secret" "$prov_refactor_log" "--secret $MSB_GITHUB_SECRET_BINDING"
 assert_contains "0017 refactor: provision still never leaks values to argv" "$prov_refactor_leak" "CLEAN"
 cleanup_stubs
-
