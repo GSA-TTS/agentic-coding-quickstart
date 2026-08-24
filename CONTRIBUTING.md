@@ -122,6 +122,13 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   picks up every `test/bats/*.bats` automatically. See
   `docs/adr/0025-adopt-bats-core-for-test-suite.md`.
 
+  The suite runs test files **in parallel** when [GNU
+  parallel](https://www.gnu.org/software/parallel/) (or `shenwei356/rush`) is on
+  `PATH` — roughly halving wall-clock on a 2-core machine — and falls back to
+  serial otherwise (identical results, just slower). Override the job count with
+  `ACQ_BATS_JOBS=<n>`, or force serial with `ACQ_BATS_JOBS=1` (handy when
+  debugging a failure, so TAP output isn't interleaved).
+
 To verify the backends end-to-end against the **real** toolchain (requires a
 host that can create sandboxes — Docker for sbx, or KVM for msb):
 

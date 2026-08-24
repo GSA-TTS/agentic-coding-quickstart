@@ -11,9 +11,21 @@
 # stub layer those tests relied on lives on in scripts/test-acq-lib.sh, sourced
 # by test/bats/helper.bash.
 #
+# PARALLELISM: every @test is fully isolated (setup() mktemps a private $STUBDIR
+# and points ACQ_SECRET_STORE_DIR / ACQ_STATE_DIR / ACQ_PROVENANCE_DIR / $CALLS
+# there; no test writes to $HOME, real XDG, a keychain, or a fixed /tmp path), so
+# files can run concurrently. bats' --jobs needs GNU parallel (or rush); when a
+# supported parallelizer is on PATH we run across files (measured ~115s -> ~60s).
+# We deliberately do NOT parallelize WITHIN a file yet (--no-parallelize-within-files):
+# across-files captures most of the win and avoids relying on any intra-file
+# ordering. When no parallelizer is present (e.g. the bash 3.2 gate, a bare dev
+# box) we fall back to serial — identical behavior, just slower. Override the job
+# count with ACQ_BATS_JOBS; set ACQ_BATS_JOBS=1 to force serial.
+#
 # Usage:
-#   ./scripts/test-acq-bats                 # run all .bats files
-#   ./scripts/test-acq-bats test/bats/X.bats  # run a specific file
+#   ./scripts/test-acq-bats                   # all .bats (parallel if available)
+#   ./scripts/test-acq-bats test/bats/X.bats  # a specific file (passed through)
+#   ACQ_BATS_JOBS=1 ./scripts/test-acq-bats   # force serial
 set -uo pipefail
 
 _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,7 +39,18 @@ if [ ! -x "$BATS" ]; then
   exit 2
 fi
 
+# Explicit file/dir args are passed straight through (no implicit parallelism),
+# so `./scripts/test-acq-bats test/bats/X.bats [--flags]` behaves like bats.
 if [ "$#" -gt 0 ]; then
   exec "$BATS" "$@"
+fi
+
+# Whole-suite run: opt into across-files parallelism when we can.
+#   - ACQ_BATS_JOBS overrides the job count; =1 forces serial.
+#   - bats --jobs needs GNU parallel or shenwei356/rush on PATH; without one it
+#     errors out, so we only pass --jobs when a parallelizer is present.
+_jobs="${ACQ_BATS_JOBS:-$( (command -v nproc >/dev/null 2>&1 && nproc) || echo 1 )}"
+if [ "$_jobs" -gt 1 ] 2>/dev/null && { command -v parallel >/dev/null 2>&1 || command -v rush >/dev/null 2>&1; }; then
+  exec "$BATS" --jobs "$_jobs" --no-parallelize-within-files "${REPO_ROOT}/test/bats"
 fi
 exec "$BATS" "${REPO_ROOT}/test/bats"

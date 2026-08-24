@@ -168,6 +168,13 @@ runner + `scripts/test-acq.d/` were removed. Final state:
   directives, all on one internal-function unit test that sets a global read by
   sourced production code (the irreducible case identified above); every
   CLI-driven test is suppression-free.
+- Parallelism: the per-`@test` isolation (private `$STUBDIR`; `ACQ_SECRET_STORE_DIR`
+  / `ACQ_STATE_DIR` / `ACQ_PROVENANCE_DIR` all rooted there) makes the files
+  safe to run concurrently. `scripts/test-acq-bats` runs across files with
+  `bats --jobs` when GNU parallel (or rush) is on `PATH` — measured ~115s → ~60s
+  — and falls back to serial otherwise. Within-file parallelism is intentionally
+  left off for now (`--no-parallelize-within-files`); revisit if further speedup
+  is wanted. CI installs GNU parallel so the fast path is deterministic.
 
 ## Links
 

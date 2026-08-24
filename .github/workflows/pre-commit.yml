@@ -38,6 +38,16 @@ jobs:
       # We double-check that shellcheck is here since the shellcheck hook needs it.
       - name: Verify shellcheck is available
         run: shellcheck --version
+      # GNU parallel lets the bats suite (scripts/test-acq-bats) run test files
+      # concurrently (~2x on the 2-core runner). ubuntu-latest usually ships it,
+      # but install it explicitly so the parallel path is deterministic; the
+      # runner falls back to serial if it is ever absent, so this is not fatal.
+      - name: Ensure GNU parallel is available
+        run: |
+          if ! command -v parallel >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y parallel
+          fi
+          parallel --version | head -1
       # Cache the pre-commit hook environments (node for markdownlint, etc.),
       # keyed on the config so a pin bump busts the cache.
       #
