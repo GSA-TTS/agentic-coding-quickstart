@@ -6,7 +6,7 @@ tier: 2
 last_updated: "2026-08-18"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
-related_files: ["docs/howto/acq.md", "docs/howto/sbx.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
+related_files: ["docs/howto/acq.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
