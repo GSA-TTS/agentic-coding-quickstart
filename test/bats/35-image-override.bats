@@ -31,7 +31,7 @@ _msb_create() { # [ENV KEY=VAL...] -- CREATE_ARGS...
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     printf "USAI-REAL\n" | acq_secret_store "$(_acq_secret_key usai)"
     ACQ_BACKEND=msb "'"$ACQ"'" "$@" 2>&1 >/dev/null
-  ' _ "$BATS_TEST_NUMBER" "${env_kv[@]}" -- "$@"
+  ' _ "$BATS_TEST_NUMBER" ${env_kv[@]+"${env_kv[@]}"} -- "$@"
 }
 _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
 
