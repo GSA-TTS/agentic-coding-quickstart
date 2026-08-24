@@ -1947,6 +1947,113 @@ from inside the sandbox and can reach guest `127.0.0.1:6767`.
 
 ---
 
+## 37. Commit signing fails in the sandbox: `user.signingKey needs to be set` / `No signature`
+
+### Symptoms
+
+Inside the sandbox, `git commit -S` (or any commit while `commit.gpgsign=true`)
+fails or silently produces an unsigned commit:
+
+```text
+error: user.signingKey needs to be set for ssh signing
+```
+
+or the commit is created but `git cat-file commit HEAD | grep '^gpgsig'` finds
+nothing, and `git log --show-signature` reports `No signature`. `ssh-add -l`
+reports `Could not open a connection to your authentication agent.`
+
+### Root Cause
+
+The sandbox reaches the host SSH signing key over a **forwarded ssh-agent**, but
+`SSH_AUTH_SOCK` is not exported into every shell/session by default. With no
+agent reachable, git's SSH signer has no key and either errors or (depending on
+config) writes an unsigned commit.
+
+This is environmental, not a git misconfiguration: `user.signingkey`,
+`gpg.format ssh`, and `commit.gpgsign true` can all be correct and signing still
+fails purely because the agent socket isn't wired into the current shell.
+
+### Fix
+
+Export the forwarded agent socket for the commands that need to sign, then
+commit/rebase as usual:
+
+```bash
+export SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
+ssh-add -l   # should now list the host signing key(s)
+
+git commit -S ...        # or: git rebase <base>   (replayed commits are signed)
+```
+
+Verify the signature is embedded (this check needs no `allowed_signers` file):
+
+```bash
+git cat-file commit HEAD | grep -q '^gpgsig' && echo SIGNED || echo UNSIGNED
+```
+
+Notes:
+
+- `git log --show-signature` may still print
+  `gpg.ssh.allowedSignersFile needs to be configured and exist` and show
+  `No signature` even when the commit **is** signed — that is a local
+  *verification* gap (no allowed-signers file), not a signing failure. GitHub
+  verifies against its own registered-key store on push and will show
+  **Verified**. Prefer the `git cat-file … | grep '^gpgsig'` check to confirm
+  signing.
+- `git rebase` re-signs each replayed commit automatically when the agent is
+  reachable, so a rebase with `SSH_AUTH_SOCK` set does not need a separate
+  `--amend -S` pass.
+
+## 38. Spurious `M` (modified) diffs on scripts across the host/sandbox mount
+
+### Symptoms
+
+`git status` shows tracked files (commonly `acq`, `scripts/test-acq`,
+`scripts/verify-backends`) as modified with no content change, and
+`git diff` shows only mode lines:
+
+```text
+old mode 100755
+new mode 100644
+```
+
+The noise breaks scripted branch work: a `git commit --amend` picks up the mode
+churn, leaving the working tree "dirty," so a following `git switch <branch>`
+aborts with *"Your local changes to the following files would be overwritten by
+checkout"* — and a loop that assumed the switch succeeded then operates on the
+**wrong** branch.
+
+### Root Cause
+
+The repository is worked on across a host↔sandbox boundary (the sandbox worktree
+lives under a mounted volume). The host (macOS) and the sandbox (Linux) disagree
+on the executable bit, so git sees the `+x` bit flip back and forth as
+`100755 ↔ 100644` filemode churn. It is not a real edit.
+
+### Fix
+
+Tell git to ignore the executable bit in **each** working tree (the setting is
+per-working-tree, so setting it on the host does not cover the sandbox worktree
+and vice versa):
+
+```bash
+git config core.fileMode false        # run in every clone/worktree of this repo
+```
+
+To make it the default for all future clones on a machine that routinely spans
+this mount:
+
+```bash
+git config --global core.fileMode false
+```
+
+Workflow guard: when scripting branch operations, do **not** loop `git switch`
+across a possibly-dirty tree. Run one branch per command, and guard switches
+(`git switch "$b" || break`) so a failed checkout cannot silently leave you
+amending the wrong branch.
+
+---
+
 When something fails, work through this list:
 
 1. [ ] Is the secret actually in the container? (`echo $VAR_NAME`)
