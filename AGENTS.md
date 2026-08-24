@@ -598,7 +598,7 @@ The agent MUST:
 >
 > ```sh
 > printf '%s\n' acq acq.backends/*.sh \
->   scripts/test-acq scripts/test-acq-lib.sh scripts/test-acq.d/*.sh \
+>   scripts/test-acq-lib.sh scripts/test-acq-bats test/bats/*.bats test/bats/helper.bash \
 >   | xargs -r -n8 shellcheck --severity=warning
 > ```
 >
@@ -606,8 +606,8 @@ The agent MUST:
 > root), so no extra flags are needed; `--severity=warning` matches the hook.
 > Core correctness checks (SC2086/2154/2034/1090/…) are unaffected by the
 > dataflow pass being off. **Do not pass `-x`/`--external-sources`** on the test
-> harness: it pulls the shared library into every part and re-triggers the
-> memory blow-up.
+> suite: it pulls the shared stub library into every `.bats` file and re-triggers
+> the memory blow-up.
 
 ---
 

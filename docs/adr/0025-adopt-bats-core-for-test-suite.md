@@ -1,6 +1,6 @@
 ---
 title: "Adopt bats-core for the acq offline unit suite"
-status: proposed
+status: accepted
 date: 2026-08-23
 decision_makers: ["Bret Mogilefsky"]
 category: development-process
@@ -83,8 +83,8 @@ findings established before this decision:
 The pilot converts one CLI-heavy part (`20-backend-resolution`) and one
 internal-unit part (`111-balanced-egress`) to measure the real isolation and
 SC2034-reduction gains on both ends of the spectrum before committing to the
-full 1,139-assertion migration. The bespoke runner and bats coexist during the
-pilot; both run in `scripts/test-acq` / CI.
+full migration. The bespoke runner and bats coexist during the pilot; both run
+in CI. (See "Migration Completed" below for the final outcome.)
 
 ### Positive Consequences
 
@@ -110,17 +110,9 @@ pilot; both run in `scripts/test-acq` / CI.
 - **SA-11 / SA-15** — strengthened developer testing and a more maintainable
   development process; no control gap introduced.
 - **SR-3** — new dependencies are vendored and pinned by commit SHA, with a
-  license/CVE review recorded at vendor time (see pilot commit).
+  license/CVE review recorded at vendor time (see the vendoring commit).
 - **ATO** — no boundary or data-flow change; the suite is offline/stubbed test
   tooling only. `ato_relevance: no`.
-
-## Links
-
-- `.shellcheckrc` — the `extended-analysis=false` dataflow-OOM fix this decision
-  must not regress.
-- `scripts/test-acq-lib.sh`, `scripts/test-acq.d/` — the current bespoke harness.
-- bats-core: https://github.com/bats-core/bats-core (MIT)
-- `docs/CODING_PRACTICES.md` §5 (dependency review), §12 (change safety).
 
 ## Pilot Results (measured 2026-08-23)
 
@@ -153,5 +145,35 @@ Measured against the goals and the SC2034 question:
 Conclusion: bats delivers the isolation and approachability gains and removes
 the SC2034 churn for these parts. Recommendation is to proceed with an
 incremental migration (part-by-part), keeping both runners green in CI until the
-last part is ported, then retire the bespoke runner. This ADR moves to
-`accepted` once a migration issue is filed and the maintainer signs off.
+last part is ported, then retire the bespoke runner.
+
+## Migration Completed (2026-08-24)
+
+The full migration is done and this ADR is `accepted` (maintainer:
+bret.mogilefsky@gsa.gov). All 22 `scripts/test-acq.d/NN-*.sh` parts were ported
+to `test/bats/*.bats` (one commit per part) and the bespoke `scripts/test-acq`
+runner + `scripts/test-acq.d/` were removed. Final state:
+
+- **340 `@test`s** across 31 `test/bats/*.bats` files; `./scripts/test-acq-bats`
+  green. (The legacy suite reported ~1,139 hand-rolled assertions; many collapsed
+  into single richer `@test`s, and the 12 unconditional-`pass` cases became real
+  assertions.)
+- `scripts/test-acq-lib.sh` is retained as the shared **stub library** (sbx/msb/
+  ssh stubs, `make_stubs`/`load_acq`, offline kit-dir, `MSB_GITHUB_SECRET_BINDING`),
+  sourced by `test/bats/helper.bash`. Its hand-rolled `pass`/`fail`/`assert_*`
+  and `PASS`/`FAIL` counters were removed (bats-assert + bats tally replace them).
+- CI: the `test-acq` pre-commit hook now runs `scripts/test-acq-bats`; the
+  bash 3.2 gate runs the bats suite under a built bash 3.2.57.
+- SC2034 churn: the ported `.bats` carry only three `# shellcheck disable=SC2034`
+  directives, all on one internal-function unit test that sets a global read by
+  sourced production code (the irreducible case identified above); every
+  CLI-driven test is suppression-free.
+
+## Links
+
+- `.shellcheckrc` — the `extended-analysis=false` dataflow-OOM fix this decision
+  must not regress.
+- `scripts/test-acq-lib.sh` — the retained shared stub library.
+- `test/bats/` — the suite; `scripts/test-acq-bats` — the runner.
+- bats-core: https://github.com/bats-core/bats-core (MIT)
+- `docs/CODING_PRACTICES.md` §5 (dependency review), §12 (change safety).

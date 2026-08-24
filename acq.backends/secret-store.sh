@@ -48,7 +48,7 @@ ACQ_KEYCHAIN_LABEL="acq-secret-store"
 ACQ_SECRET_FILE_DIR="${ACQ_SECRET_FILE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/acq/secrets}"
 
 # Offline-test escape hatch: when ACQ_SECRET_STORE_DIR is set, force the file
-# backend rooted there (no real keychain touched). Used by scripts/test-acq.
+# backend rooted there (no real keychain touched). Used by the offline test suite.
 if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
   ACQ_SECRET_FILE_DIR="$ACQ_SECRET_STORE_DIR"
   ACQ_SECRET_FORCE_FILE=1
