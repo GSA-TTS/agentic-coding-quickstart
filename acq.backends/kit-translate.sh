@@ -524,7 +524,17 @@ kit_spec_files() {
         # smuggle a command via mode, a metacharacter-bearing path, or a bad
         # source path. Drop the whole record on any violation and warn.
         # mode: octal only. path/source: no shell metacharacters or whitespace.
-        if (cur_mode != "" && cur_mode !~ /^[0-7]{3,4}$/) {
+        #
+        # The octal test is written longhand — /^[0-7][0-7][0-7][0-7]?$/ — NOT as
+        # the interval form /^[0-7]{3,4}$/ ON PURPOSE. mawk (the DEFAULT awk on
+        # Debian and Ubuntu, so most hosts that run acq) does not support POSIX
+        # interval expressions in regex; gawk does. Under mawk, /^[0-7]{3,4}$/
+        # matches NOTHING, so every files[] entry carrying a mode (i.e. every
+        # entry in every shipped kit) is dropped here as "invalid mode" and the
+        # kit stages no files at all — a silent, host-dependent failure, because
+        # the warning goes to stderr and the create path treats kit failures as
+        # best-effort. Do NOT "simplify" this back to an interval expression.
+        if (cur_mode != "" && cur_mode !~ /^[0-7][0-7][0-7][0-7]?$/) {
           print "kit-translate: skipping file with invalid mode: " cur_mode > "/dev/stderr"
         } else if (cur_path !~ /^[A-Za-z0-9._\/-]+$/) {
           print "kit-translate: skipping file with unsafe path: " cur_path > "/dev/stderr"
@@ -1172,7 +1182,13 @@ EOF
     /^[[:space:]]+mode:/ {
       v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v)
       gsub(/^["'\'' ]+|["'\'' ]+$/,"",v)
-      if (v !~ /^[0-7]{3,4}$/) print v
+      # Longhand /^[0-7][0-7][0-7][0-7]?$/, NOT the interval /^[0-7]{3,4}$/:
+      # mawk (Debian/Ubuntu default awk) has no interval expressions, so the
+      # interval form matches NOTHING under mawk. Here the test is INVERTED
+      # (collect modes that FAIL the pattern, to reject the spec), so under mawk
+      # EVERY mode looks invalid and the whole spec is wrongly rejected. See the
+      # detailed note in the files[] parser above. Do not "simplify" to {3,4}.
+      if (v !~ /^[0-7][0-7][0-7][0-7]?$/) print v
     }' "$spec")
   if [ -n "$bad_mode" ]; then
     while IFS= read -r m; do
