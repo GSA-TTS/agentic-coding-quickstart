@@ -93,6 +93,12 @@ forward as the automatic special case built on top of it.
     image, warning (not aborting) if missing;
   - `_acq_msb_start_ssh_agent_bridge` — starts the in-guest
     `socat UNIX-LISTEN:<sock>,fork,reuseaddr VSOCK-CONNECT:2:3552` bridge;
+  - `_acq_msb_ensure_ssh_agent_forward` — re-establishes the forward on a
+    re-attach to an **already-running** sandbox (re-starts the bridge + writes the
+    marker), gated on a requested host forward *and* the sandbox actually carrying
+    the create-time `--vsock` route (`_acq_msb_has_ssh_agent_vsock_route`, read
+    from `msb inspect --format json`); called at the top of
+    `acq_backend_ensure_kits_applied`. See "Re-attach to a running sandbox" below;
   - `_acq_msb_ssh_auth_sock_for` — resolves the guest `SSH_AUTH_SOCK` value
     injected on attach, `acq exec`, and kit commands.
   - Constants: `ACQ_MSB_SSH_AGENT_VSOCK_PORT` (default `3552`),
@@ -120,6 +126,44 @@ The `--vsock` route persists across `msb stop`/`start` (it is part of the sandbo
 config), but the `socat` bridge **process** dies on stop. So the bridge is
 re-started in `acq_backend_start`, the same way the OCI device-node re-grant is
 re-applied on resume.
+
+### Re-attach to a running sandbox (bridge + `SSH_AUTH_SOCK` must be re-driven)
+
+The guest-side `SSH_AUTH_SOCK` value is injected into the guest process env only
+when acq passes `-e SSH_AUTH_SOCK=<sock>` to `msb exec` on attach/`acq exec`/kit
+commands, and acq only does that when the persisted
+`/var/lib/acq/ssh-auth-sock` marker is non-empty. That marker is written solely
+by `_acq_msb_start_ssh_agent_bridge`. Provision runs the bridge starter directly,
+and the **stopped→resume** path runs it via `acq_backend_start`.
+
+A re-attach to an **already-running** sandbox (`acq run <name>` /
+`acq run <agent> .` against an existing, running sandbox) previously reached
+**neither**: the heal's start-if-stopped block is a no-op on a running sandbox, so
+nothing re-started the bridge or wrote the marker. The result was that the guest
+process env had **no `SSH_AUTH_SOCK`** on re-attach even though the create-time
+`--vsock` route was present and the host agent was available — the operator had to
+`export SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock` by hand before signing.
+(The socket/bridge worked; only the *env var injection* was missing — the two are
+independent: the `-e` flag names the socket, the bridge backs it.)
+
+`acq_backend_ensure_kits_applied` now calls `_acq_msb_ensure_ssh_agent_forward`
+at the top of the heal (right after the start-if-stopped block, before kit
+application), so every re-attach — running or resumed — re-establishes the
+forward. It is a cheap no-op unless **both** hold:
+
+1. a host ssh-agent forward is requested (`acq_host_socket_forwards` emits an
+   `ssh-agent` line — i.e. the same set `SSH_AUTH_SOCK` opt-in as provision), and
+2. the sandbox actually carries the create-time `--vsock` route
+   (`_acq_msb_has_ssh_agent_vsock_route`, read from `msb inspect --format json`).
+
+The `--vsock` route is **create-time only** — it cannot be added to a running
+sandbox — so a sandbox created *without* a forward still cannot gain one on
+re-attach (recreate it with `SSH_AUTH_SOCK` set to add the route). Requiring the
+route before wiring also prevents writing a **misleading** marker (which would
+advertise a working agent behind an inert bridge). When both conditions hold, the
+re-drive runs the exact provision sequence (`_acq_msb_check_socat` then
+`_acq_msb_start_ssh_agent_bridge`), which restarts the bridge and writes the
+marker, so the subsequent attach injects `SSH_AUTH_SOCK`.
 
 ### Version gate (MIN_MSB_VERSION stays 0.6.8)
 
@@ -218,20 +262,26 @@ point of use, not only in this ADR.
 
 ## Validation
 
-- Offline unit coverage in `scripts/test-acq` (stubbed `msb`/`socat`, no Docker or
-  network), cases **10c1–10c14**: the version gate (warn+skip on msb < 0.6.9),
+- Offline unit coverage in `test/bats/115-ssh-agent-forward.bats` (stubbed
+  `msb`/`socat`, no Docker or network; run via `scripts/test-acq-bats`), cases
+  **10c1–10c17**: the version gate (warn+skip on msb < 0.6.9),
   `--vsock` flag emission when `SSH_AUTH_SOCK` is set, the `socat` prereq check,
-  bridge start on **provision** and on **start** (resume), `SSH_AUTH_SOCK`
-  injection on attach/`acq exec`/kit commands, and SI-10 validation of the host
-  socket path (absolute + existing socket) and the vsock port (integer in
-  `1..4294967294`, `!= 123`) — invalid values are rejected before reaching
-  `msb create`.
+  bridge start on **provision** and on **start** (resume), the re-attach re-drive
+  on an **already-running** sandbox (**10c16**: bridge started + marker written
+  without an `msb start`; **10c17**: strict no-op when no forward is requested, or
+  when the sandbox has no create-time `--vsock` route), `SSH_AUTH_SOCK` injection
+  on attach/`acq exec`/kit commands, and SI-10 validation of the host socket path
+  (absolute + existing socket) and the vsock port (integer in `1..4294967294`,
+  `!= 123`) — invalid values are rejected before reaching `msb create`.
 - **Live end-to-end VERIFIED** on a macOS/HVF host (2026-08-17) via
   `scripts/verify-backends`, which forwards a hermetic throwaway agent and
   confirms the guest's forwarded agent exposes that exact ephemeral key
   (`guest ssh-add -L exposes the ephemeral host key`). Re-run on the ADR-0011
   periodic-validation cadence (it cannot run in CI / inside a sandbox — no nested
-  sandboxes).
+  sandboxes). NOTE: `scripts/verify-backends` exercises the **provision** path;
+  the running-re-attach re-drive (`_acq_msb_ensure_ssh_agent_forward`) still needs
+  a live end-to-end check on a KVM/HVF host — tracked in
+  [`GSA-TTS/agentic-coding-quickstart#388`](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/388).
 
 ## Links
 

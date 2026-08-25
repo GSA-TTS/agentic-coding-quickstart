@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-08-18"
+last_updated: "2026-08-25"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -1782,6 +1782,30 @@ running on the host (or no key is loaded), there is nothing to forward.
 Then re-run `acq run …`; the forward is applied automatically. See
 [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md) for the full
 mechanism and the trust-boundary discussion.
+
+### Variant: `SSH_AUTH_SOCK` unset on re-attach to a running sandbox
+
+A distinct signature of the same feature: signing works right after the initial
+`acq run` but **fails on a later re-attach** to the *same, still-running*
+sandbox, and it starts working again as soon as you
+`export SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock` by hand. Here the vsock
+route and the `socat` bridge are fine — what is missing is the
+**`SSH_AUTH_SOCK` env var in the agent's process**. acq injects that var
+(`-e SSH_AUTH_SOCK=…`) only when the persisted `/var/lib/acq/ssh-auth-sock`
+marker is present, and before the fix nothing re-established the bridge or wrote
+that marker when re-attaching to an already-running sandbox (the heal's
+start-if-stopped block is a no-op on a running sandbox, and only that path — or
+provision — wrote the marker).
+
+Fixed in `acq.backends/msb.sh`: `acq_backend_ensure_kits_applied` now calls
+`_acq_msb_ensure_ssh_agent_forward` at the top of the heal, which re-drives the
+forward (restart the bridge + write the marker) on every re-attach when both a
+host forward is requested (`SSH_AUTH_SOCK` set) **and** the sandbox carries the
+create-time `--vsock` route. The route is create-time only, so a sandbox created
+*without* a host agent still needs a recreate to gain forwarding — but one
+created *with* the route now re-injects `SSH_AUTH_SOCK` on every re-attach without
+a manual export. See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
+("Re-attach to a running sandbox").
 
 ---
 
