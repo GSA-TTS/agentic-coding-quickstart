@@ -40,14 +40,14 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   local line; line=$(_create_line msb)
   assert_regex "$line" 'localhost/acq-custom:test'
   refute_regex "$line" 'docker\.io/docker/sandbox-templates:shell-docker'
-  refute_regex "$line" -- '--image'
+  refute_regex "$line" '--image'
 }
 
 @test "image(msb): --image flag path equals the env path; workspace survives" {
   _msb_create -- create shell --image localhost/acq-flag:test "$IMGPROJ"
   local line; line=$(_create_line msb)
   assert_regex "$line" 'localhost/acq-flag:test'
-  refute_regex "$line" -- '--image'
+  refute_regex "$line" '--image'
   load_acq
   assert_regex "$line" "$(canonicalize_path "$IMGPROJ")"
 }
@@ -56,33 +56,33 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   _msb_create -- create shell --image=localhost/acq-eq:test "$IMGPROJ"
   local line; line=$(_create_line msb)
   assert_regex "$line" 'localhost/acq-eq:test'
-  refute_regex "$line" -- '--image=localhost/acq-eq:test'
+  refute_regex "$line" '--image=localhost/acq-eq:test'
 }
 
 @test "image(msb): a global --image (before the subcommand) is intercepted" {
   _msb_create -- --backend msb --image localhost/acq-global:test create shell --name gimg "$IMGPROJ"
   local line; line=$(_create_line msb)
   assert_regex "$line" 'localhost/acq-global:test'
-  refute_regex "$line" -- '--image'
+  refute_regex "$line" '--image'
 }
 
 @test "image(msb): ACQ_MSB_PULL maps to --pull; invalid is ignored with a warning" {
   _msb_create ACQ_MSB_PULL=never ACQ_IMAGE=localhost/acq-cached:test -- create shell --name pimg "$IMGPROJ"
   local line; line=$(_create_line msb)
-  assert_regex "$line" -- '--pull never'
+  assert_regex "$line" '--pull never'
   assert_regex "$line" 'localhost/acq-cached:test'
 
   : > "$CALLS"
   _msb_create ACQ_MSB_PULL=bogus -- create shell --name pbad "$IMGPROJ"
   assert_output --partial 'invalid ACQ_MSB_PULL'
-  refute_regex "$(_create_line msb)" -- '--pull'
+  refute_regex "$(_create_line msb)" '--pull'
 }
 
 @test "image(msb): global --image=<ref> equals form is intercepted" {
   _msb_create -- --backend msb --image=localhost/acq-globaleq:test create shell --name gimgeq "$IMGPROJ"
   local line; line=$(_create_line msb)
   assert_regex "$line" 'localhost/acq-globaleq:test'
-  refute_regex "$line" -- '--image='
+  refute_regex "$line" '--image='
 }
 
 @test "image(msb): explicit ACQ_MSB_IMAGE beats neutral ACQ_IMAGE (with notice)" {
@@ -108,34 +108,34 @@ _sbx_create() { # CREATE_ARGS... (with optional leading ENV via `env`)
 @test "image(sbx): neutral image injects --template, not raw --image" {
   _sbx_create ACQ_IMAGE=docker.io/my-org/my-template:v1 ACQ_BACKEND=sbx "$ACQ" create opencode "$IMGPROJ"
   local line; line=$(_create_line sbx)
-  assert_regex "$line" -- '--template docker\.io/my-org/my-template:v1'
-  refute_regex "$line" -- '--image'
+  assert_regex "$line" '--template docker\.io/my-org/my-template:v1'
+  refute_regex "$line" '--image'
 }
 
 @test "image(sbx): --image flag path also injects --template" {
   _sbx_create ACQ_BACKEND=sbx "$ACQ" create opencode --image docker.io/my-org/flag-tpl:v2 "$IMGPROJ"
-  assert_regex "$(_create_line sbx)" -- '--template docker\.io/my-org/flag-tpl:v2'
+  assert_regex "$(_create_line sbx)" '--template docker\.io/my-org/flag-tpl:v2'
 }
 
 @test "image(sbx): a global --image injects --template, not raw" {
   _sbx_create "$ACQ" --backend sbx --image docker.io/my-org/global-tpl:v3 create opencode "$IMGPROJ"
   local line; line=$(_create_line sbx)
-  assert_regex "$line" -- '--template docker\.io/my-org/global-tpl:v3'
-  refute_regex "$line" -- '--image'
+  assert_regex "$line" '--template docker\.io/my-org/global-tpl:v3'
+  refute_regex "$line" '--image'
 }
 
 @test "image(sbx): an explicit user --template is not double-injected" {
   _sbx_create ACQ_IMAGE=docker.io/my-org/neutral:v1 ACQ_BACKEND=sbx "$ACQ" \
     create opencode --template docker.io/my-org/explicit:v9 "$IMGPROJ"
   local line; line=$(_create_line sbx)
-  assert_regex "$line" -- '--template docker\.io/my-org/explicit:v9'
+  assert_regex "$line" '--template docker\.io/my-org/explicit:v9'
   refute_regex "$line" 'docker\.io/my-org/neutral:v1'
   assert_output --partial 'ignoring --image'
 }
 
 @test "image(sbx): no image set -> no --template injected" {
   _sbx_create ACQ_BACKEND=sbx "$ACQ" create opencode "$IMGPROJ"
-  refute_regex "$(_create_line sbx)" -- '--template'
+  refute_regex "$(_create_line sbx)" '--template'
 }
 
 @test "image(reattach): --image on an existing sandbox warns and does not re-provision" {
@@ -204,6 +204,7 @@ STUB
   : > "$CALLS"
   local imgfail="$STUBDIR/imgfail"; mkdir -p "$imgfail"
   run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
     ACQ_IMAGE=ghcr.io/org/priv:v1 acq_backend_provision imgfailbox shell "'"$imgfail"'" 2>&1 >/dev/null
   '

@@ -42,13 +42,15 @@ STSTUB
   chmod +x "$STUBDIR/secret-tool"
 }
 
-# Provision helper (as in 71): seed store, source msb, stub kit fetch, provision.
+# Provision helper (as in 71): source common (chains deps) + msb, seed store,
+# stub kit fetch, provision.
 _provision() { # NAME PRE_SNIPPET WS_ARGS...
   local name="$1" pre="$2"; shift 2
   : > "$CALLS"
   run bash -c '
     name="$1"; pre="$2"; shift 2
-    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     eval "$pre"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     mkdir -p "'"$STUBDIR"'/nokit"
@@ -125,8 +127,8 @@ _provision() { # NAME PRE_SNIPPET WS_ARGS...
   ws_app=$(canonicalize_path "$STUBDIR/ws-app")
   ws_lib=$(canonicalize_path "$STUBDIR/ws-lib")
   log=$(cat "$CALLS")
-  assert_regex "$log" -- "--volume ${ws_app}:${ws_app}"
-  assert_regex "$log" -- "--volume ${ws_lib}:${ws_lib}:ro"
+  assert_regex "$log" "--volume ${ws_app}:${ws_app}"
+  assert_regex "$log" "--volume ${ws_lib}:${ws_lib}:ro"
   assert_regex "$log" "'${ws_app}' > /var/lib/acq/workspace"
   refute_regex "$log" "'/home/agent/workspace' > /var/lib/acq/workspace"
 
@@ -142,8 +144,8 @@ _provision() { # NAME PRE_SNIPPET WS_ARGS...
   local real_ws log
   real_ws=$(realpath "$STUBDIR/real-ws" 2>/dev/null || printf '%s' "$STUBDIR/real-ws")
   log=$(cat "$CALLS")
-  assert_regex "$log" -- "--volume ${real_ws}:${real_ws}"
-  refute_regex "$log" -- "--volume ${STUBDIR}/link-ws:"
+  assert_regex "$log" "--volume ${real_ws}:${real_ws}"
+  refute_regex "$log" "--volume ${STUBDIR}/link-ws:"
 }
 
 @test "msb: provision aborts (hard fail) when the sandbox never becomes exec-ready" {
@@ -175,7 +177,8 @@ MSBSTUB
 @test "msb: provision errors clearly when the host workspace path does not exist" {
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/mw-secrets"
-    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     mkdir -p "'"$STUBDIR"'/nokit"
     printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "'"$STUBDIR"'/nokit/spec.yaml"

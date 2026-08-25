@@ -136,7 +136,9 @@ _with_adapter() { # ADAPTER BODY
 }
 
 @test "msb: version floor rejects sub-0.6.9, accepts 0.6.9" {
-  _with_adapter msb 'STUB_MSB_VERSION=0.6.8 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1; printf "RC=%s\n" "$?"'
+  # acq_backend_prepare `exit`s on the floor violation, so run it in a command
+  # substitution (a subshell) to keep this shell alive to report RC.
+  _with_adapter msb 'out=$(STUB_MSB_VERSION=0.6.8 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
   assert_output --partial '0.6.9'
   assert_output --partial 'RC=1'
   _with_adapter msb 'out=$(STUB_MSB_VERSION=0.6.9 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); printf "%s\nRC=%s\n" "$out" "$?"'
@@ -144,7 +146,8 @@ _with_adapter() { # ADAPTER BODY
 }
 
 @test "sbx: version floor rejects sub-0.38.0 with the v2-grammar cause, accepts 0.38.0" {
-  _with_adapter sbx 'STUB_SBX_VERSION=0.37.9 acq_backend_prepare 2>&1; printf "RC=%s\n" "$?"'
+  # Same subshell isolation as the msb floor test: prepare `exit`s on violation.
+  _with_adapter sbx 'out=$(STUB_SBX_VERSION=0.37.9 acq_backend_prepare 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
   assert_output --partial '0.38.0'
   assert_output --partial 'v2 kit grammar'
   assert_output --partial 'RC=1'

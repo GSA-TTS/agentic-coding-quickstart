@@ -159,15 +159,20 @@ load 'helper'
   assert_equal "$(cat "$d/acq.usai" 2>/dev/null)" 'sk-usai-AAAA'
   assert_equal "$(cat "$d/acq.github" 2>/dev/null)" 'ghp_BBBB'
 
-  run env USAI_API_KEY=sk-usai-CCCC GITHUB_TOKEN=ghp_BBBB \
+  # Blank every token var not under test in each step: an ambient GITLAB_TOKEN
+  # (etc.) from the developer's shell would import a stray GLOBAL entry, and the
+  # scoped --all step below would then skip via the global-fallback exists check.
+  run env USAI_API_KEY=sk-usai-CCCC GITHUB_TOKEN=ghp_BBBB GITLAB_TOKEN='' GH_TOKEN='' \
     ACQ_SECRET_STORE_DIR="$d" ACQ_BACKEND=sbx "$ACQ" secret import --all
   assert_output --partial 'already stored'
   assert_equal "$(cat "$d/acq.usai" 2>/dev/null)" 'sk-usai-AAAA'
 
-  run env USAI_API_KEY=sk-usai-CCCC ACQ_SECRET_STORE_DIR="$d" ACQ_BACKEND=sbx "$ACQ" secret import usai --force
+  run env USAI_API_KEY=sk-usai-CCCC GITHUB_TOKEN='' GH_TOKEN='' GITLAB_TOKEN='' \
+    ACQ_SECRET_STORE_DIR="$d" ACQ_BACKEND=sbx "$ACQ" secret import usai --force
   assert_equal "$(cat "$d/acq.usai" 2>/dev/null)" 'sk-usai-CCCC'
 
-  run env GITLAB_TOKEN=glpat-DDDD ACQ_SECRET_STORE_DIR="$d" ACQ_BACKEND=sbx "$ACQ" secret import gitlab mybox --all
+  run env GITLAB_TOKEN=glpat-DDDD USAI_API_KEY='' GITHUB_TOKEN='' GH_TOKEN='' \
+    ACQ_SECRET_STORE_DIR="$d" ACQ_BACKEND=sbx "$ACQ" secret import gitlab mybox --all
   assert [ -e "$d/acq.mybox.gitlab" ]
 }
 

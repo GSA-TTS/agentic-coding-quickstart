@@ -39,7 +39,7 @@ _seed_usai() {
   run env ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'sbx create --name'
-  assert_regex "$log" -- '--kit'
+  assert_regex "$log" '--kit'
   assert_regex "$log" 'acq-kits/usai-provider'
   local create_line; create_line=$(printf '%s\n' "$log" | grep '^sbx create')
   assert_regex "$create_line" "$proj"
@@ -233,7 +233,7 @@ _seed_usai() {
   _seed_usai
   run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/mykit "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" -- '--kit /tmp/mykit'
+  assert_regex "$create_line" '--kit /tmp/mykit'
   assert_regex "$create_line" "$proj"
   refute_regex "$create_line" "$proj --kit /tmp/mykit"
   refute_regex "$create_line" "$proj /tmp/mykit"
@@ -244,8 +244,8 @@ _seed_usai() {
   _seed_usai
   run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit=/tmp/eqkit "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" -- '--kit /tmp/eqkit'
-  refute_regex "$create_line" -- '--kit=/tmp/eqkit'
+  assert_regex "$create_line" '--kit /tmp/eqkit'
+  refute_regex "$create_line" '--kit=/tmp/eqkit'
 }
 
 @test "kit-flag: multiple --kit flags are all intercepted" {
@@ -253,8 +253,8 @@ _seed_usai() {
   _seed_usai
   run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/k1 --kit /tmp/k2 "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" -- '--kit /tmp/k1'
-  assert_regex "$create_line" -- '--kit /tmp/k2'
+  assert_regex "$create_line" '--kit /tmp/k1'
+  assert_regex "$create_line" '--kit /tmp/k2'
   assert_regex "$create_line" "$proj"
 }
 
@@ -263,7 +263,7 @@ _seed_usai() {
   _seed_usai
   run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/runkit "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" -- '--kit /tmp/runkit'
+  assert_regex "$create_line" '--kit /tmp/runkit'
   refute_regex "$create_line" "$proj --kit /tmp/runkit"
 }
 
@@ -273,6 +273,6 @@ _seed_usai() {
   run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj" -- --kit evil-agent-arg
   local log; log=$(cat "$CALLS")
   local create_line; create_line=$(printf '%s\n' "$log" | grep '^sbx create')
-  refute_regex "$create_line" -- '--kit evil-agent-arg'
-  assert_regex "$log" -- '--kit evil-agent-arg'
+  refute_regex "$create_line" '--kit evil-agent-arg'
+  assert_regex "$log" '--kit evil-agent-arg'
 }
