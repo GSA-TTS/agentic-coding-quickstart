@@ -1,0 +1,27 @@
+# .shellcheckrc — repo-wide ShellCheck configuration
+#
+# Discovered automatically by ShellCheck for every shell file in the repo
+# (ShellCheck walks the checked file's directory and each parent dir until it
+# finds a .shellcheckrc), so it applies to acq, acq.backends/*.sh, and the
+# scripts/ test harness alike without per-invocation flags.
+#
+# extended-analysis=false — disable ShellCheck's Dataflow Analysis.
+#
+#   ShellCheck's dataflow pass grows superlinearly in memory on large scripts
+#   and OOM-kills the process (RSS ~1.9 GB) on this repo's biggest files —
+#   notably acq.backends/msb.sh (~4600 lines) and the former 8k-line
+#   scripts/test-acq. With this pass off, the same files lint in ~160 MB and a
+#   couple of seconds, and MULTIPLE files can be checked in a single invocation
+#   again (measured: all shell files in one run stay well under the CI RAM cap).
+#
+#   Trade-off: the dataflow pass powers the SC2312-class "flow" checks. The core
+#   correctness/quoting/robustness warnings this project relies on (SC2086,
+#   SC2154, SC2034, SC1090/SC1091, …) are UNAFFECTED — verified by planting
+#   representative bugs and confirming they are still reported with the pass off.
+#
+#   This key is the documented remedy for the resource blow-up (see
+#   `man shellcheck`, "--extended-analysis"). Using the rc key rather than the
+#   `--extended-analysis=false` CLI flag keeps us compatible with ShellCheck
+#   versions older than 0.9 (which lack the flag but harmlessly ignore an
+#   unknown rc key), so CI runners with an older shellcheck do not break.
+extended-analysis=false

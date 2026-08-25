@@ -109,6 +109,13 @@ There is one offline unit harness (stubbed `sbx`/`msb`/`opencode`, no Docker or 
   ./scripts/test-acq
   ```
 
+  The harness is split so every file stays small enough to shellcheck quickly
+  (a single 8k-line file OOMs ShellCheck): `scripts/test-acq` is a thin runner
+  that sources the shared harness `scripts/test-acq-lib.sh` and then each
+  numbered part in `scripts/test-acq.d/NN-*.sh` (in filename order, in-process,
+  sharing the pass/fail counters). Add new tests as a new `NN-*.sh` part (or
+  extend an existing one); the runner picks them up automatically.
+
 To verify the backends end-to-end against the **real** toolchain (requires a
 host that can create sandboxes — Docker for sbx, or KVM for msb):
 

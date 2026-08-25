@@ -588,20 +588,26 @@ The agent MUST:
 
 **ADR location:** `docs/adr/`
 
-> **Running shellcheck locally (avoid the hang):** Do NOT run
-> `shellcheck acq.backends/*.sh scripts/test-acq` in a single invocation. ShellCheck's
-> dataflow analysis blows up pathologically when several large scripts (notably
-> `acq.backends/msb.sh` + `scripts/test-acq`) are analyzed together — it runs
-> effectively forever (CI would hit its timeout). Each file ALONE lints in 1–3s.
-> Match the pre-commit hook and lint **one file per invocation**:
+> **Running shellcheck locally:** The repo-root `.shellcheckrc` sets
+> `extended-analysis=false`, which disables ShellCheck's dataflow pass. That
+> pass is what used to OOM-kill the process (~1.9 GB RSS) on large scripts
+> (notably `acq.backends/msb.sh`) and forced the old one-file-per-invocation
+> workaround. With it off, memory is a non-issue (~135 MB), so you can lint in
+> small batches. Wall-clock still grows superlinearly with the number of files
+> in a *single* invocation, so batch with `xargs -n8` (matching the hook):
 >
 > ```sh
-> printf '%s\n' acq acq.backends/common.sh acq.backends/msb.sh acq.backends/sbx.sh scripts/test-acq \
->   | xargs -r -n1 shellcheck --severity=warning
+> printf '%s\n' acq acq.backends/*.sh \
+>   scripts/test-acq scripts/test-acq-lib.sh scripts/test-acq.d/*.sh \
+>   | xargs -r -n8 shellcheck --severity=warning
 > ```
 >
-> This is exactly what `.pre-commit-config.yaml`'s `shellcheck` hook does
-> (`xargs -r -n1`); `--severity=warning` matches the hook.
+> `.shellcheckrc` is picked up automatically (ShellCheck walks up to the repo
+> root), so no extra flags are needed; `--severity=warning` matches the hook.
+> Core correctness checks (SC2086/2154/2034/1090/…) are unaffected by the
+> dataflow pass being off. **Do not pass `-x`/`--external-sources`** on the test
+> harness: it pulls the shared library into every part and re-triggers the
+> memory blow-up.
 
 ---
 
