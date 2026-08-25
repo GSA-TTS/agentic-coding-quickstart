@@ -3246,6 +3246,88 @@ _acq_msb_ssh_auth_sock_for() {
     </dev/null 2>/dev/null | tr -d '[:space:]'
 }
 
+# _acq_msb_ensure_ssh_agent_forward NAME — (re)establish the host ssh-agent
+# forward on a RUNNING sandbox that acq is re-attaching to. See ADR-0021.
+#
+# WHY THIS EXISTS: the provision path wires the forward (emit --vsock, start the
+# socat bridge, write the /var/lib/acq/ssh-auth-sock marker), and the
+# stopped→resume path (acq_backend_start) restarts the bridge from that marker.
+# But re-attaching to an ALREADY-RUNNING sandbox goes through neither: the heal
+# loop skips acq_backend_start (the sandbox is already running), so nothing
+# re-drives forwarding. That left two live gaps where the guest process env got
+# NO `SSH_AUTH_SOCK` on re-attach (attach/exec/kit only inject it when the marker
+# is non-empty):
+#   1. the marker had never been written (sandbox created before forwarding was
+#      configured, or provision skipped the bridge), yet the host agent is now
+#      available and the create-time --vsock route is present; and
+#   2. the bridge process had died in-flight on a long-lived running sandbox.
+# Re-driving here, keyed off the SAME opt-in signal as provision (a host
+# SSH_AUTH_SOCK that yields a forward), closes both.
+#
+# Gated so it is a cheap no-op in the common case:
+#   - host forward requested? (acq_host_socket_forwards emits an ssh-agent line)
+#   - guest actually has the create-time --vsock route? (the route is create-time
+#     only — it cannot be added to a running sandbox, so if it is absent, a bridge
+#     would be inert and we must NOT write a misleading marker)
+# When both hold, flip the module forwarding flag (so _acq_msb_check_socat and
+# the bridge starter resolve the guest sock from the constant, not a possibly
+# empty marker), verify socat, then start the bridge + write the marker — exactly
+# the provision sequence. Fail-soft throughout: this is convenience, never fatal.
+_acq_msb_ensure_ssh_agent_forward() {
+  local name="$1"
+  # Cheap opt-out: no host forward requested => nothing to do. Reuse the neutral
+  # emitter's decision so this tracks the SSH_AUTH_SOCK opt-in exactly (a set,
+  # existing host socket on a supported port). Suppress the emitter's advisory
+  # stderr here; provision/attach already surface the trust-boundary notice.
+  local _fwd
+  _fwd=$(acq_host_socket_forwards 2>/dev/null)
+  # Each emitted line is TAB-separated "PATH<TAB>PORT<TAB>KIND<TAB>LABEL"; the
+  # ssh-agent forward is the line whose LABEL is exactly "ssh-agent". Match the
+  # tab+label token so a custom forward alone (LABEL=custom) does not trigger it.
+  case "$_fwd" in
+    *"	ssh-agent"*) : ;;             # an ssh-agent forward line was emitted
+    *) return 0 ;;                     # no ssh-agent forward requested
+  esac
+
+  # The --vsock route is create-time only. If this sandbox was created WITHOUT
+  # it, a socat bridge would be inert and the marker would falsely advertise a
+  # working agent, so require the route to actually be present before wiring.
+  _acq_msb_has_ssh_agent_vsock_route "$name" || return 0
+
+  # From here, treat forwarding as active: point the bridge starter at the guest
+  # sock constant (not the possibly-empty marker) and gate on socat as provision
+  # does. Set the module flag so _acq_msb_check_socat / the bridge starter both
+  # resolve from the constant. It is process-scoped and already reset per run.
+  _ACQ_MSB_SSH_AGENT_FORWARDING=1
+  _acq_msb_check_socat "$name" && _acq_msb_start_ssh_agent_bridge "$name"
+}
+
+# _acq_msb_has_ssh_agent_vsock_route NAME — return 0 iff the sandbox's persisted
+# config carries the ssh-agent --vsock route (guest AF_VSOCK CID 2:PORT for the
+# ssh-agent port). The route is create-time only, so its presence is the
+# authoritative signal that this sandbox CAN carry a forward. Read from
+# `msb inspect NAME --format json`; best-effort (a missing tool/field returns
+# non-zero, never hard-fails). See ADR-0021.
+_acq_msb_has_ssh_agent_vsock_route() {
+  local name="$1" json _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT"
+  json=$(msb inspect "$name" --format json 2>/dev/null) || return 1
+  [ -n "$json" ] || return 1
+  # Require BOTH a `vsock` key AND the ssh-agent guest-port token, so a published
+  # `ports:[{port:<vsock-port>}]` that merely happens to equal the (user-
+  # overridable) vsock port cannot masquerade as a route on a sandbox that has no
+  # vsock forwarding at all. We do not have a JSON parser here, so flatten the
+  # document (strip quotes/spaces; turn structural punctuation into newlines) and
+  # test the two facts independently against the whole flattened form. The real
+  # shape is `"vsock":{"routes":[{…,"port":3552}]}` — after flattening, `vsock:`
+  # and `port:3552` land on separate lines, so both greps must be run over the
+  # full text (not a single line). The port is anchored as a whole token so 3552
+  # can't match e.g. 35521. See ADR-0021; shape confirmed against msb 0.6.12.
+  local _flat
+  _flat=$(printf '%s' "$json" | tr -d '" ' | tr ',{}[]' '\n\n\n\n\n')
+  printf '%s\n' "$_flat" | grep -Eq '(^|:)vsock:?$' 2>/dev/null || return 1
+  printf '%s\n' "$_flat" | grep -Eq "port[:=]${_port}\$" 2>/dev/null
+}
+
 # ---------------------------------------------------------------------------
 # _acq_msb_grant_oci_devs NAME — grant the agent access to the device nodes
 #                                rootless podman needs (/dev/net/tun, /dev/fuse)
@@ -4106,6 +4188,16 @@ acq_backend_ensure_kits_applied() {
     acq_backend_start "$name" >/dev/null || \
       echo "acq(msb): warning: 'msb start $name' failed (see the error above); healing may not apply." >&2
   fi
+  # Re-establish the host ssh-agent forward on THIS re-attach (ADR-0021). The
+  # provision path wires it and acq_backend_start restarts the bridge on a
+  # stopped→resume; but a re-attach to an ALREADY-RUNNING sandbox reaches neither
+  # (the start-if-stopped block above is a no-op), so nothing would (re)start the
+  # bridge or write the SSH_AUTH_SOCK marker that attach/exec/kit injection keys
+  # off. Without this, re-attaching to a running sandbox left the guest process
+  # env with no SSH_AUTH_SOCK even though the create-time --vsock route was
+  # present — the reported "have to export SSH_AUTH_SOCK by hand" symptom. Cheap
+  # no-op when no host forward is requested or the sandbox has no vsock route.
+  _acq_msb_ensure_ssh_agent_forward "$name"
   local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
   local builtin_count="${#kits[@]}"
   if [ -n "${ACQ_EXTRA_KITS:-}" ]; then

@@ -289,6 +289,99 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   assert_output '/home/agent/.acq/ssh-agent.sock'
 }
 
+@test "vsock(10c16): re-attach to a RUNNING sandbox re-drives the forward (bridge + marker, no 'msb start')" {
+  _mk_unix_socket "$STUBDIR/agent16.sock" || skip "python3 AF_UNIX socket unavailable"
+  # Running sandbox that carries the create-time --vsock route on the ssh-agent
+  # port; a local empty kit dir so the heal's kit loop does no network fetch.
+  printf 'reattachbox\n' >"$STUBDIR/.msb_sandbox_list"
+  printf 'reattachbox\n' >"$STUBDIR/.msb_running_list"
+  printf '{"active_config":{"vsock":{"routes":[{"host_socket":"/private/var/run/x/Listeners","port":3552}]}}}\n' >"$STUBDIR/.msb_inspect_json"
+  mkdir -p "$STUBDIR/nokit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' >"$STUBDIR/nokit/spec.yaml"
+  : > "$CALLS"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent16.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_fetch_kit() { printf "%s\n" "'"$STUBDIR"'/nokit"; }
+    acq_backend_ensure_kits_applied reattachbox >/dev/null 2>&1
+    wait
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" "socat UNIX-LISTEN:'/home/agent/\.acq/ssh-agent\.sock'"
+  assert_regex "$log" '/var/lib/acq/ssh-auth-sock'
+  # A running sandbox must NOT be routed through acq_backend_start.
+  refute_regex "$log" 'msb start'
+}
+
+@test "vsock(10c17): the re-drive is a strict no-op without both a forward AND a --vsock route" {
+  _mk_unix_socket "$STUBDIR/agent17.sock" || skip "python3 AF_UNIX socket unavailable"
+  printf 'rbox\n' >"$STUBDIR/.msb_sandbox_list"
+  printf 'rbox\n' >"$STUBDIR/.msb_running_list"
+  # (a) route present, but NO host forward requested -> no bridge.
+  printf '{"active_config":{"vsock":{"routes":[{"host_socket":"/private/var/run/x/Listeners","port":3552}]}}}\n' >"$STUBDIR/.msb_inspect_json"
+  : > "$CALLS"
+  run bash -c '
+    unset SSH_AUTH_SOCK ACQ_FORWARD_HOST_SOCKETS
+    export STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_ensure_ssh_agent_forward rbox >/dev/null 2>&1
+    wait
+  '
+  refute_regex "$(cat "$CALLS")" 'socat UNIX-LISTEN'
+  # (b) forward requested, but the sandbox has NO --vsock route -> no bridge.
+  printf '{"active_config":{"network":{}}}\n' >"$STUBDIR/.msb_inspect_json"
+  : > "$CALLS"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent17.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_ensure_ssh_agent_forward rbox >/dev/null 2>&1
+    wait
+  '
+  refute_regex "$(cat "$CALLS")" 'socat UNIX-LISTEN'
+  # (c) forward requested, and a PUBLISHED PORT equals the vsock port but there is
+  #     NO vsock route: the route probe requires a `vsock` key too, so this must
+  #     NOT be mistaken for a route (review nit: tighten anchoring). No bridge.
+  printf '{"active_config":{"network":{"ports":[{"port":3552}]}}}\n' >"$STUBDIR/.msb_inspect_json"
+  : > "$CALLS"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent17.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_ensure_ssh_agent_forward rbox >/dev/null 2>&1
+    wait
+  '
+  refute_regex "$(cat "$CALLS")" 'socat UNIX-LISTEN'
+}
+
+@test "vsock(10c18): the route probe matches the real msb 0.6.12 vsock shape" {
+  # The real shape (confirmed on msb 0.6.12) is
+  #   "vsock":{"routes":[{"host_socket":"…/Listeners","port":3552}]}
+  # The probe must accept it (has both a `vsock` key and the port token) and must
+  # reject a same-port published port with no `vsock` key.
+  printf 'pbox\n' >"$STUBDIR/.msb_sandbox_list"
+  printf 'pbox\n' >"$STUBDIR/.msb_running_list"
+  printf '%s\n' '{"vsock":{"routes":[{"host_socket":"/private/var/run/x/Listeners","port":3552}]}}' \
+    >"$STUBDIR/.msb_inspect_json"
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_has_ssh_agent_vsock_route pbox; printf "RC=%s\n" "$?"
+  '
+  assert_output --partial 'RC=0'
+  printf '%s\n' '{"network":{"ports":[{"port":3552}]}}' >"$STUBDIR/.msb_inspect_json"
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_has_ssh_agent_vsock_route pbox; printf "RC=%s\n" "$?"
+  '
+  assert_output --partial 'RC=1'
+}
+
 @test "msb: the base-image prereq check warns on missing tools, silent when present or skipped" {
   local pq="$STUBDIR/pq"; mkdir -p "$pq"
   cat >"$pq/msb" <<'PQ'

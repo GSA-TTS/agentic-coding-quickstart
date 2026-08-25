@@ -41,3 +41,25 @@ acq_setup_stubs() {
 acq_teardown_stubs() {
   cleanup_stubs || true
 }
+
+# _acq_coreutils_path — echo a ':'-joined PATH holding the directories of the
+# core tools a test (and bats' own teardown, which runs `rm`) needs. Tests that
+# want to prove PATH self-repair narrow PATH down to "just coreutils" so the
+# backend CLI is provably absent; naively using `dirname $(command -v env)` can
+# yield a directory that lacks `rm`/`cat` on hosts where coreutils are split
+# across dirs (Homebrew, Nix, some distros) — which then breaks `run cat …` in
+# the test AND `rm` in bats-exec-test's own teardown. Union the dirs of every
+# tool we actually rely on so the narrowed PATH is complete regardless of layout.
+# De-dupes while preserving first-seen order. bash 3.2 safe.
+_acq_coreutils_path() {
+  local _tools="env rm cat mkdir mv chmod dirname sh grep sed awk printf"
+  local _t _d _seen="" _out=""
+  for _t in $_tools; do
+    _d=$(command -v "$_t" 2>/dev/null) || continue
+    _d=$(dirname "$_d")
+    case ":$_seen:" in *":$_d:"*) continue ;; esac
+    _seen="${_seen:+$_seen:}$_d"
+    _out="${_out:+$_out:}$_d"
+  done
+  printf '%s' "$_out"
+}

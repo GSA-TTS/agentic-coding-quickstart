@@ -237,6 +237,16 @@ run_acq() {
   else
     LAST_OUT=$("$ACQ" "$@" 2>&1); _rc=$?
   fi
+  # Normalize CRLF -> LF in the captured output. Guest command output reaches us
+  # over msb's PTY/ssh transport, which terminates lines with CRLF; the trailing
+  # CR survives into LAST_OUT and silently breaks downstream parses that compare
+  # or index the LAST field of a line (e.g. `awk '{print $6}'` on a df row keeps
+  # the CR, so a mountpoint compare `"/acq-verify-vol\r" = "/acq-verify-vol"`
+  # fails, and the CR then overwrites the closing quote in any diagnostic — the
+  # "not a dedicated block mountpoint" false negative). Strip CR once here so
+  # every consumer sees clean LF-delimited text; callers that already tolerated
+  # it (tr -dc, anchored sed) are unaffected. bash 3.2 safe.
+  LAST_OUT=${LAST_OUT//$'\r'/}
   trace "DONE  ${desc}: rc=${_rc}"
   return "$_rc"
 }
