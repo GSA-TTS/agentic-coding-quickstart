@@ -40,9 +40,9 @@
 #
 # TEST-SAFETY (issue #287 acceptance criteria):
 #   The animation is gated on stderr being a TTY (`[ -t 2 ]`). The offline test
-#   harness (scripts/test-acq) captures stderr into a variable (a pipe, not a
-#   TTY) and asserts on it, so the spinner NEVER starts there and no frame bytes
-#   or carriage returns leak into the captured output. acq_status lines DO print
+#   suite captures stderr into a variable (a pipe, not a TTY) and asserts on it,
+#   so the spinner NEVER starts there and no frame bytes or carriage returns leak
+#   into the captured output. acq_status lines DO print
 #   under the harness (by design), so tests may assert on the plain phase text.
 
 # ---------------------------------------------------------------------------

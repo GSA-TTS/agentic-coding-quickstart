@@ -63,16 +63,28 @@ repos:
         require_serial: true
 
   # acq offline unit suite — runs the host-side logic (backend resolution, name
-  # derivation, kit-translate, git-identity/path pre-flight) on every push. This
-  # is the Linux behavior gate (CI runs pre-commit on ubuntu-latest); the suite
-  # is stubbed/offline (no Docker/network) so it is safe in CI. Also portable to
-  # macOS bash 3.2. The runner sources scripts/test-acq-lib.sh and every
-  # scripts/test-acq.d/NN-*.sh part, so a change to any of them re-runs it.
+  # derivation, kit-translate, git-identity/path pre-flight) on every push via
+  # bats-core (ADR-0025). This is the Linux behavior gate (CI runs pre-commit on
+  # ubuntu-latest); the suite is stubbed/offline (no Docker/network) so it is
+  # safe in CI. The vendored bats runner (test/vendor/bats-core) and the tests
+  # (test/bats/*.bats) reuse the stub library scripts/test-acq-lib.sh via
+  # test/bats/helper.bash, so a change to acq, the adapters, the stub library, or
+  # any test re-runs it.
   - repo: local
     hooks:
       - id: test-acq
-        name: acq offline unit suite
-        entry: bash scripts/test-acq
+        name: acq offline unit suite (bats)
+        entry: bash scripts/test-acq-bats
         language: system
         pass_filenames: false
-        files: '^(acq|acq\.backends/.*|scripts/test-acq|scripts/test-acq-lib\.sh|scripts/test-acq\.d/.*\.sh)$'
+        files: '^(acq|acq\.backends/.*|scripts/test-acq-lib\.sh|scripts/test-acq-bats|test/bats/.*)$'
+
+      # Lint the .bats files with ShellCheck (it treats .bats as a shell dialect).
+      # The main shellcheck hook's `types: [shell]` does not reliably tag .bats,
+      # so target them explicitly here. helper.bash is already covered by the main
+      # hook (it is tagged shell), but including it is harmless.
+      - id: shellcheck-bats
+        name: shellcheck (bats suite)
+        entry: bash -c 'printf "%s\n" "$@" | xargs -r -n8 shellcheck --severity=warning' --
+        language: system
+        files: '^test/bats/.*\.(bats|bash)$'

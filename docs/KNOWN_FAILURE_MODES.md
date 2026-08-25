@@ -1547,8 +1547,8 @@ $EDITOR acq.backends/msb-balanced-hosts.txt
 Copy each `allow … network` `host:port` row verbatim into the matching group in
 the file (do **not** pre-translate wildcards or ports — the msb adapter's
 `_acq_msb_balanced_rules_into` does that). Commit the diff. The offline test
-`scripts/test-acq` re-parses the real file and fails if any line is malformed, so
-run it after editing.
+suite (`scripts/test-acq-bats`) re-parses the real file and fails if any line is
+malformed, so run it after editing.
 
 As a stopgap for a single missing host, either add it to a site-specific list and
 point `ACQ_MSB_BALANCED_HOSTS_FILE` at it, or (for a one-off) create with an extra
@@ -1725,7 +1725,7 @@ acq exec <sandbox> -- sh /home/agent/openchamber-start.sh &
   (`acq_cli_kits_write`/`acq_cli_kits_load` persistence), `acq.backends/sbx.sh`
   (parity write), and the `acq` `start`/`restart`/`run` verbs (reload before
   heal). Covered by the `clikit-heal` and `cli-kits:*` unit tests in
-  `scripts/test-acq` (persist-then-reload round-trip; a reloaded `--kit` ref is
+  `test/bats/` (persist-then-reload round-trip; a reloaded `--kit` ref is
   re-applied during a resume heal).
 - Note the operational fact behind the original report: a live in-VM session does
   **not** survive a host reboot — the microVM is ephemeral; only the sandbox
@@ -1870,7 +1870,7 @@ and checks that: the extra-kit marker was written at create; the re-attach heal
 is a quiet no-op (no "missing the playbook kit", no extra-kit re-attempt, no
 bogus "Recover with" hint); a forced mid-life re-add surfaces exactly one
 recreate notice; and `acq kit update` fails fast (or short-circuits when already
-current). The offline regression guard is in `scripts/test-acq` (the sbx
+current). The offline regression guard is in `test/bats/` (the sbx
 heal-loop cases).
 
 ---

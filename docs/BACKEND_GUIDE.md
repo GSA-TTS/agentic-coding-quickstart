@@ -888,8 +888,8 @@ triage and the `scripts/diagnose-*` probes.
    `backend_shortcuts.<name>`, then emit your backend's native operations).
 4. Add auto-detect to `_auto_detect_backend` in `acq.backends/common.sh`.
 5. Add the backend to `acq backend list` and `acq_print_doctor`.
-6. Write tests in `scripts/test-acq` (stub the CLI) and a row in
-   `scripts/verify-backends`.
+6. Write tests in `test/bats/*.bats` (stub the CLI via the
+   `scripts/test-acq-lib.sh` stub layer) and a row in `scripts/verify-backends`.
 7. Document it here.
 
 ---

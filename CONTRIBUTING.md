@@ -99,22 +99,35 @@ kits it applies — and their tests (permission-matrix, model-sync, per-kit
 repo under `integrations/isolation/acq-kits/`. Changes to provider config,
 rules, skills, or CA trust belong there.
 
-There is one offline unit harness (stubbed `sbx`/`msb`/`opencode`, no Docker or network):
+There is one offline unit suite (stubbed `sbx`/`msb`/`opencode`, no Docker or
+network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025):
 
-- **`scripts/test-acq`** — covers `acq` dispatch, backend resolution, secret
-  command shapes, and kit list completeness. Run after changing `acq`,
-  `acq.backends/common.sh`, `acq.backends/sbx.sh`, or `acq.backends/msb.sh`.
+- **`scripts/test-acq-bats`** — covers `acq` dispatch, backend resolution, secret
+  command shapes, kit translation, provisioning, and the msb restart/forwarding
+  paths. Run after changing `acq`, `acq.backends/*.sh`, or the stub library.
+  bats and its helpers are pinned git submodules under `test/vendor/`;
+  initialize them once, then run the suite:
 
   ```bash
-  ./scripts/test-acq
+  git submodule update --init test/vendor/bats-core \
+    test/vendor/bats-support test/vendor/bats-assert
+  ./scripts/test-acq-bats
   ```
 
-  The harness is split so every file stays small enough to shellcheck quickly
-  (a single 8k-line file OOMs ShellCheck): `scripts/test-acq` is a thin runner
-  that sources the shared harness `scripts/test-acq-lib.sh` and then each
-  numbered part in `scripts/test-acq.d/NN-*.sh` (in filename order, in-process,
-  sharing the pass/fail counters). Add new tests as a new `NN-*.sh` part (or
-  extend an existing one); the runner picks them up automatically.
+  The tests live in `test/bats/*.bats` (one file per topic). Each `@test` runs
+  in its own subshell for isolation; `test/bats/helper.bash` wires bats-assert
+  and sources the shared stub library `scripts/test-acq-lib.sh` (the sbx/msb/ssh
+  stubs, `make_stubs`/`load_acq`, the offline kit-dir). Add a new test as a new
+  `@test` in the relevant file, or add a new `NN-topic.bats` file — the runner
+  picks up every `test/bats/*.bats` automatically. See
+  `docs/adr/0025-adopt-bats-core-for-test-suite.md`.
+
+  The suite runs test files **in parallel** when [GNU
+  parallel](https://www.gnu.org/software/parallel/) (or `shenwei356/rush`) is on
+  `PATH` — roughly halving wall-clock on a 2-core machine — and falls back to
+  serial otherwise (identical results, just slower). Override the job count with
+  `ACQ_BATS_JOBS=<n>`, or force serial with `ACQ_BATS_JOBS=1` (handy when
+  debugging a failure, so TAP output isn't interleaved).
 
 To verify the backends end-to-end against the **real** toolchain (requires a
 host that can create sandboxes — Docker for sbx, or KVM for msb):
