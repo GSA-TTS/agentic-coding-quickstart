@@ -870,7 +870,9 @@ acq_backend_secret_set() {
   local prev=""
   for arg in "$@"; do
     if [ "$prev" = "--host" ]; then
-      host="$arg"; host_explicit=1
+      # Repeated --host flags ACCUMULATE (comma-joined, the multi-host form
+      # set-custom already takes) — last-wins would silently drop endpoints.
+      host="${host:+${host},}$arg"; host_explicit=1
       extra_flags+=("$arg")
       prev=""
       continue
@@ -881,7 +883,7 @@ acq_backend_secret_set() {
       continue
     fi
     case "$arg" in
-      --host=*) host="${arg#--host=}"; host_explicit=1; extra_flags+=("$arg") ;;
+      --host=*) host="${host:+${host},}${arg#--host=}"; host_explicit=1; extra_flags+=("$arg") ;;
       --env=*)  env_var="${arg#--env=}"; extra_flags+=("$arg") ;;
       --host)   prev="--host"; extra_flags+=("$arg") ;;
       --env)    prev="--env";  extra_flags+=("$arg") ;;
@@ -916,6 +918,26 @@ acq_backend_secret_set() {
     echo "     usage: acq secret set [-g | SANDBOX] <service> [--host HOST --env ENV]" >&2
     return 1
   fi
+  # Validate the env var name BEFORE storing: it reaches sbx set-custom argv and
+  # the endpoint sidecar (whose own charset refusal is best-effort — a swallowed
+  # refusal would leave rm with no key to find the placeholder later).
+  if [ -n "$env_var" ] && ! printf '%s' "$env_var" | LC_ALL=C grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+    echo "acq: secret set: invalid env var name '$env_var' (must match [A-Za-z_][A-Za-z0-9_]*)." >&2
+    return 1
+  fi
+  # --env ALONE on a built-in name is a contradiction: the native service route
+  # ignores env, but a set env var would steer the existence pre-check into the
+  # CUSTOM table — missing an existing native entry, whose overwrite prompt
+  # would then eat the piped secret value. Bind host+env together or neither.
+  case "$_ACQ_SBX_BUILTIN_SERVICES" in
+    *" $service "*)
+      if [ "$host_explicit" -eq 0 ] && [ -n "$env_var" ]; then
+        echo "acq: secret set: --env on built-in '$service' needs --host HOST too (a custom" >&2
+        echo "     endpoint binds host+env); omit both to feed sbx's native service." >&2
+        return 1
+      fi
+      ;;
+  esac
 
   # --- Step 1: store the value in the acq-owned secret store (keychain/file). --
   # This is the source of truth both backends read from. The value is read from
@@ -950,15 +972,22 @@ acq_backend_secret_set() {
   # In all cases the real value is already safely in the acq store; sbx is just
   # the injection runtime. We never place the value on argv.
   local exit_code=0
-  local is_builtin=0
+  local is_builtin=0 builtin_name=0
   case "$_ACQ_SBX_BUILTIN_SERVICES" in
-    *" $service "*) is_builtin=1 ;;
+    *" $service "*) is_builtin=1; builtin_name=1 ;;
   esac
   # An explicit --host overrides the compiled-in service binding (#384): a
   # self-hosted endpoint (e.g. gitlab.<agency>.gov) must go through set-custom.
   # Feeding `sbx secret set gitlab` would bind the token to sbx's gitlab.com
   # proxy service and silently discard the requested host.
   if [ "$host_explicit" -eq 1 ]; then is_builtin=0; fi
+
+  # A hostless (native) re-set supersedes any earlier --host mapping: drop a
+  # stale endpoint sidecar so msb provisioning and `acq secret rm` stop
+  # honoring an endpoint the user no longer intends.
+  if [ "$is_builtin" -eq 1 ] && command -v acq_secret_meta_delete >/dev/null 2>&1; then
+    acq_secret_meta_delete "$service" "$acq_sandbox" || true
+  fi
 
   # Existence pre-check (idempotency): sbx errors/prompts if the secret exists.
   # We list and match by service (built-in) or env var (custom). If present,
@@ -970,6 +999,19 @@ acq_backend_secret_set() {
   # scope-flag change" note in docs/VERIFY_BACKENDS_HANDOFF.md).
   local scope_desc rm_scope
   if [ -n "$scope_flag" ]; then scope_desc="global"; rm_scope=""; else scope_desc="sandbox '$scope_name'"; rm_scope="--sandbox $scope_name"; fi
+
+  # When a built-in NAME takes the custom route (explicit --host), also refuse
+  # on a stale NATIVE entry for that name — e.g. one created by the pre-#384
+  # behavior that discarded --host. Left in place, sbx would keep injecting the
+  # token to its native endpoint even after set-custom succeeds.
+  if [ "$builtin_name" -eq 1 ] && [ "$is_builtin" -eq 0 ] && \
+     _acq_sbx_secret_exists "$scope_flag" "$scope_name" "$service" ""; then
+    echo "acq: stored '$service' in the acq secret store, but sbx has a NATIVE" >&2
+    echo "     '$service' service entry in ${scope_desc} that would keep injecting to" >&2
+    echo "     sbx's own endpoint. Remove it, then re-run:" >&2
+    echo "       sbx secret rm ${service}${rm_scope:+ $rm_scope}" >&2
+    return 1
+  fi
 
   if _acq_sbx_secret_exists "$scope_flag" "$scope_name" "$service" "$env_var"; then
     echo "acq: stored '$service' in the acq secret store, but sbx already has a" >&2
@@ -1133,9 +1175,11 @@ acq_backend_secret_rm() {
   # Capture the endpoint sidecar BEFORE step 1 deletes it: a built-in name set
   # with an explicit --host (#384) was fed to sbx as a CUSTOM secret, and its
   # sidecar env is the only key that can find that placeholder in step 2.
+  # EXACT scope only — the resolve variant's sandbox->global fallback would let
+  # a global sidecar's env steer a sandbox-scoped destructive removal.
   local sidecar_env=""
-  if command -v acq_secret_meta_resolve >/dev/null 2>&1; then
-    sidecar_env=$(acq_secret_meta_resolve "$service" "$acq_sandbox" 2>/dev/null | cut -f2) || sidecar_env=""
+  if command -v acq_secret_meta_resolve_exact >/dev/null 2>&1; then
+    sidecar_env=$(acq_secret_meta_resolve_exact "$service" "$acq_sandbox" 2>/dev/null | cut -f2) || sidecar_env=""
   fi
 
   # 1) Remove from the acq store (source of truth). Idempotent.

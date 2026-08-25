@@ -124,6 +124,67 @@ LS
   assert_regex "$(cat "$CALLS")" 'sbx secret rm --placeholder sbx-cs-abc123'
 }
 
+@test "#384 review: re-set with --host stops on a stale NATIVE entry with an rm hint" {
+  # A pre-fix run left a native gitlab service entry; the custom route must not
+  # proceed past it (it would keep injecting to sbx's gitlab.com endpoint).
+  printf 'SCOPE      TYPE      NAME     SECRET\n(global)   service   gitlab   (stored)\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'printf "glpat-x\n" | SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret set -g gitlab --host gitlab.example.gov --env GITLAB_TOKEN' _ "$STUBDIR/sbx_ls" "$ACQ"
+  assert_failure
+  assert_output --partial 'sbx secret rm gitlab'
+  refute_output --partial 'set-custom'
+}
+
+@test "#384 review: hostless re-set of a built-in clears a stale --host sidecar" {
+  run bash -c 'printf "glpat-x\n" | ACQ_BACKEND=sbx "$1" secret set -g gitlab --host gitlab.example.gov --env GITLAB_TOKEN' _ "$ACQ"
+  assert [ -f "$STUBDIR/secrets/meta/acq.gitlab" ]
+  run bash -c 'printf "glpat-y\n" | ACQ_BACKEND=sbx "$1" secret set -g gitlab' _ "$ACQ"
+  assert_regex "$(cat "$CALLS")" 'sbx secret set gitlab'
+  assert [ ! -e "$STUBDIR/secrets/meta/acq.gitlab" ]
+}
+
+@test "#384 review: a scoped rm does not act on a GLOBAL sidecar's env" {
+  # Global sidecar exists; sandbox 'dev' has an UNRELATED custom secret with the
+  # same env. rm dev gitlab must not delete dev's placeholder off the global
+  # sidecar's say-so.
+  run bash -c 'printf "glpat-x\n" | ACQ_BACKEND=sbx "$1" secret set -g gitlab --host gh.agency.gov --env GITLAB_TOKEN' _ "$ACQ"
+  printf 'SCOPE      TYPE      NAME     SECRET\n\nCUSTOM SECRETS\nSCOPE      TARGETS  ENV     PLACEHOLDER  SECRET\ndev   other.example.gov  GITLAB_TOKEN  sbx-cs-devx  ****\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret rm dev gitlab' _ "$STUBDIR/sbx_ls" "$ACQ"
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'sbx secret rm --placeholder sbx-cs-devx'
+}
+
+@test "#384 review: an unsafe --env name is rejected before storing" {
+  run bash -c 'printf "glpat-x\n" | ACQ_BACKEND=sbx "$1" secret set -g gitlab --host gitlab.example.gov --env GITLAB-TOKEN' _ "$ACQ"
+  assert_failure
+  assert_output --partial 'env'
+  assert [ ! -e "$STUBDIR/secrets/acq.gitlab" ]
+}
+
+@test "#384 review: --env alone on a built-in is an error, not a mis-scoped native set" {
+  # Without this, the existence pre-check searches the CUSTOM table while the
+  # native route runs, so an existing native entry's overwrite prompt would eat
+  # the piped secret value.
+  run bash -c 'printf "ghp_x\n" | ACQ_BACKEND=sbx "$1" secret set -g github --env GITHUB_TOKEN' _ "$ACQ"
+  assert_failure
+  assert_output --partial '--host'
+  refute_regex "$(cat "$CALLS")" 'sbx secret set github'
+}
+
+@test "#384 review: repeated --host flags accumulate instead of last-wins" {
+  run bash -c 'printf "glpat-x\n" | ACQ_BACKEND=sbx "$1" secret set -g gitlab --host gitlab.example.gov --host api.gitlab.example.gov --env GITLAB_TOKEN' _ "$ACQ"
+  assert_output --partial '--host gitlab.example.gov --host api.gitlab.example.gov'
+}
+
+@test "#384 review: no unguarded scope_args expansion in sbx.sh (bash 3.2 pin)" {
+  # The empty-array crash only manifests under bash 3.2 + set -u (stock macOS
+  # /bin/bash); CI runners execute acq under a newer bash, so pin the guard at
+  # the source level like the mawk interval guard in 100-kit-translate.bats.
+  # Match only the UNGUARDED form: the safe `${scope_args[@]+"${scope_args[@]}"}`
+  # guard contains the same substring but is always preceded by `+`.
+  run grep -nE '(^|[^+])"\$\{scope_args\[@\]\}"' "$REPO_ROOT/acq.backends/sbx.sh"
+  assert_failure
+}
+
 @test "mask: masked entry captures the value, shows a star per char, handles backspace/empty" {
   load_acq
   run bash -c '
