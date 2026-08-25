@@ -129,10 +129,10 @@ _resolve() { # ADAPTER EXPLICIT  -> prints "<resolved>|<stderr-note>"
   local fake_home="$STUBDIR/home"
   mkdir -p "$fake_home/.local/bin"
   mv "$STUBDIR/msb" "$fake_home/.local/bin/msb"
-  local coreutils_dir
-  coreutils_dir="$(dirname "$(command -v env)")"
+  local coreutils_path
+  coreutils_path="$(_acq_coreutils_path)"
   export HOME="$fake_home"
-  export PATH="$coreutils_dir"
+  export PATH="$coreutils_path"
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   # shellcheck source=acq.backends/msb.sh
@@ -156,9 +156,9 @@ _resolve() { # ADAPTER EXPLICIT  -> prints "<resolved>|<stderr-note>"
   printf '#!/bin/sh\necho DECOY\n' > "$fake_home/.local/bin/msb"
   chmod +x "$fake_home/.local/bin/msb"
   export HOME="$fake_home"
-  local coreutils_dir
-  coreutils_dir="$(dirname "$(command -v env)")"
-  export PATH="$STUBDIR:$coreutils_dir"
+  local coreutils_path
+  coreutils_path="$(_acq_coreutils_path)"
+  export PATH="$STUBDIR:$coreutils_path"
   export ACQ_BACKEND=msb
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
