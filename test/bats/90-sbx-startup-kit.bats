@@ -173,10 +173,12 @@ STUB
 
 @test "provision(sbx): ACQ_EXTRA_KITS is marked into ~/.acq-extra-kits at create" {
   : > "$CALLS"
-  run bash -c '
+  # Subshell, NOT `bash -c`: acq_backend_provision is a sourced function, which
+  # a fresh bash never sees (the pre-#381 suite masked the resulting 127).
+  (
     export ACQ_EXTRA_KITS="git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=some-extra-kit"
-    acq_backend_provision markerbox shell /tmp >/dev/null 2>&1 || true
-  '
+    acq_backend_provision markerbox shell /tmp
+  ) >/dev/null 2>&1 || true
   local log; log=$(cat "$CALLS")
   assert_regex "$log" '\.acq-extra-kits'
   assert_regex "$log" 'some-extra-kit'
@@ -184,10 +186,11 @@ STUB
 
 @test "provision(sbx): a CLI --kit ref (ACQ_CLI_KITS) is also marked at create" {
   : > "$CALLS"
-  run bash -c '
+  # Subshell, NOT `bash -c` (see the ACQ_EXTRA_KITS marker test above).
+  (
     ACQ_CLI_KITS=("git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=cli-kit-x")
-    acq_backend_provision climarkerbox shell /tmp >/dev/null 2>&1 || true
-  '
+    acq_backend_provision climarkerbox shell /tmp
+  ) >/dev/null 2>&1 || true
   assert_regex "$(cat "$CALLS")" 'cli-kit-x'
 }
 
