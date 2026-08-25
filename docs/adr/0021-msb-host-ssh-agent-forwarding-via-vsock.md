@@ -264,15 +264,26 @@ point of use, not only in this ADR.
 
 - Offline unit coverage in `test/bats/115-ssh-agent-forward.bats` (stubbed
   `msb`/`socat`, no Docker or network; run via `scripts/test-acq-bats`), cases
-  **10c1–10c17**: the version gate (warn+skip on msb < 0.6.9),
+  **10c1–10c18**: the version gate (warn+skip on msb < 0.6.9),
   `--vsock` flag emission when `SSH_AUTH_SOCK` is set, the `socat` prereq check,
   bridge start on **provision** and on **start** (resume), the re-attach re-drive
   on an **already-running** sandbox (**10c16**: bridge started + marker written
-  without an `msb start`; **10c17**: strict no-op when no forward is requested, or
-  when the sandbox has no create-time `--vsock` route), `SSH_AUTH_SOCK` injection
-  on attach/`acq exec`/kit commands, and SI-10 validation of the host socket path
+  without an `msb start`; **10c17**: strict no-op when no forward is requested,
+  when the sandbox has no create-time `--vsock` route, or when a published port
+  merely equals the vsock port with no `vsock` key present), the route probe's
+  match against the **real msb 0.6.12** `vsock` shape and its rejection of a
+  same-port published port (**10c18**), `SSH_AUTH_SOCK` injection on
+  attach/`acq exec`/kit commands, and SI-10 validation of the host socket path
   (absolute + existing socket) and the vsock port (integer in `1..4294967294`,
   `!= 123`) — invalid values are rejected before reaching `msb create`.
+- **Route JSON shape CONFIRMED** against a live msb 0.6.12 sandbox created with a
+  host forward:
+  ```json
+  "vsock": { "routes": [ { "host_socket": "…/Listeners", "port": 3552 } ] }
+  ```
+  `_acq_msb_has_ssh_agent_vsock_route` requires **both** a `vsock` key and the
+  ssh-agent guest-port token in the flattened document, so a published port that
+  merely equals the (overridable) vsock port cannot be mistaken for a route.
 - **Live end-to-end VERIFIED** on a macOS/HVF host (2026-08-17) via
   `scripts/verify-backends`, which forwards a hermetic throwaway agent and
   confirms the guest's forwarded agent exposes that exact ephemeral key

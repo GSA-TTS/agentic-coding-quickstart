@@ -3312,14 +3312,20 @@ _acq_msb_has_ssh_agent_vsock_route() {
   local name="$1" json _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT"
   json=$(msb inspect "$name" --format json 2>/dev/null) || return 1
   [ -n "$json" ] || return 1
-  # The route serializes with the ssh-agent guest port; matching the port digits
-  # is enough to distinguish "route present" from "no vsock route at all".
-  # Flatten quotes/whitespace so a `port: 3552` or `"port":3552` both match, and
-  # anchor on the digits as a whole token so 3552 can't match e.g. 35521.
-  printf '%s' "$json" \
-    | tr -d '" ' \
-    | tr ',{}[]' '\n\n\n\n\n' \
-    | grep -Eq "(vsock|port)[:=]${_port}\$" 2>/dev/null
+  # Require BOTH a `vsock` key AND the ssh-agent guest-port token, so a published
+  # `ports:[{port:<vsock-port>}]` that merely happens to equal the (user-
+  # overridable) vsock port cannot masquerade as a route on a sandbox that has no
+  # vsock forwarding at all. We do not have a JSON parser here, so flatten the
+  # document (strip quotes/spaces; turn structural punctuation into newlines) and
+  # test the two facts independently against the whole flattened form. The real
+  # shape is `"vsock":{"routes":[{…,"port":3552}]}` — after flattening, `vsock:`
+  # and `port:3552` land on separate lines, so both greps must be run over the
+  # full text (not a single line). The port is anchored as a whole token so 3552
+  # can't match e.g. 35521. See ADR-0021; shape confirmed against msb 0.6.12.
+  local _flat
+  _flat=$(printf '%s' "$json" | tr -d '" ' | tr ',{}[]' '\n\n\n\n\n')
+  printf '%s\n' "$_flat" | grep -Eq '(^|:)vsock:?$' 2>/dev/null || return 1
+  printf '%s\n' "$_flat" | grep -Eq "port[:=]${_port}\$" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
