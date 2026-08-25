@@ -116,6 +116,116 @@ SPEC
   assert_regex "$spec" 'echo hello'
 }
 
+@test "#381: home-staged mode fields synthesize ONE combined setup.install chmod step" {
+  local mkit="$STUBDIR/mkit" mout="$STUBDIR/mout"
+  mkdir -p "$mkit/files/home/tool"
+  printf '#!/bin/sh\necho hi\n' > "$mkit/files/home/tool/run.sh"
+  printf 'cfg\n' > "$mkit/files/home/tool/config"
+  cat >"$mkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: mode-kit
+displayName: Mode Kit
+description: kit with declared file modes
+files:
+  - path: /home/agent/tool/run.sh
+    mode: "0755"
+    source: files/home/tool/run.sh
+  - path: /home/agent/tool/config
+    mode: "0644"
+    source: files/home/tool/config
+SPEC
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_translate_to_sbx "'"$mkit"'" "'"$mout"'" >/dev/null 2>&1'
+  local spec; spec=$(cat "$mout/spec.yaml")
+  assert_regex "$spec" 'setup:'
+  assert_regex "$spec" '  install:'
+  assert_regex "$spec" "chmod 0755 '/home/agent/tool/run\.sh'"
+  assert_regex "$spec" "chmod 0644 '/home/agent/tool/config'"
+  assert_regex "$spec" 'user: "0"'
+  assert_regex "$spec" 'description: .*sbx pins files/ payloads to 0644'
+  # ONE combined install entry, not one per file.
+  assert_equal "$(grep -c '    - command:' "$mout/spec.yaml")" "1"
+}
+
+@test "#381: the chmod install step is emitted BEFORE the kit's own install commands" {
+  local okit="$STUBDIR/okit" oout="$STUBDIR/oout"
+  mkdir -p "$okit/files/home"
+  printf '#!/bin/sh\n' > "$okit/files/home/tool.sh"
+  cat >"$okit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: order-kit
+displayName: Order Kit
+description: chmod must precede kit install commands
+files:
+  - path: /home/agent/tool.sh
+    mode: "0755"
+    source: files/home/tool.sh
+commands:
+  - phase: install
+    user: "0"
+    command:
+      - sh
+      - -c
+      - |
+        /home/agent/tool.sh
+SPEC
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_translate_to_sbx "'"$okit"'" "'"$oout"'" >/dev/null 2>&1'
+  local chmod_line install_line
+  chmod_line=$(grep -n "chmod 0755" "$oout/spec.yaml" | head -1 | cut -d: -f1)
+  install_line=$(grep -n '/home/agent/tool\.sh$' "$oout/spec.yaml" | tail -1 | cut -d: -f1)
+  assert [ -n "$chmod_line" ]
+  assert [ -n "$install_line" ]
+  assert [ "$chmod_line" -lt "$install_line" ]
+}
+
+@test "#381: a mode-less kit emits no chmod step (output unchanged)" {
+  local nkit="$STUBDIR/nkit" nout="$STUBDIR/nout"
+  mkdir -p "$nkit/files/home"
+  printf 'x\n' > "$nkit/files/home/f"
+  cat >"$nkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: nomode-kit
+displayName: Nomode Kit
+description: kit with no file modes
+files:
+  - path: /home/agent/f
+    source: files/home/f
+SPEC
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_translate_to_sbx "'"$nkit"'" "'"$nout"'" >/dev/null 2>&1'
+  local spec; spec=$(cat "$nout/spec.yaml")
+  refute_regex "$spec" 'chmod'
+  refute_regex "$spec" 'setup:'
+}
+
+@test "#381: a workspace-targeted mode warns and gets no chmod" {
+  local wkit="$STUBDIR/wkit" wout="$STUBDIR/wout"
+  mkdir -p "$wkit/files/home" "$wkit/files/workspace"
+  printf '#!/bin/sh\n' > "$wkit/files/home/h.sh"
+  printf '#!/bin/sh\n' > "$wkit/files/workspace/w.sh"
+  cat >"$wkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: wsmode-kit
+displayName: Wsmode Kit
+description: workspace-targeted modes cannot be applied on sbx
+files:
+  - path: /home/agent/h.sh
+    mode: "0755"
+    source: files/home/h.sh
+  - path: /workspace/w.sh
+    mode: "0755"
+    source: files/workspace/w.sh
+SPEC
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_translate_to_sbx "'"$wkit"'" "'"$wout"'" 2>&1 >/dev/null'
+  assert_output --partial 'mode'
+  assert_output --partial '/workspace/w.sh'
+  local spec; spec=$(cat "$wout/spec.yaml")
+  assert_regex "$spec" "chmod 0755 '/home/agent/h\.sh'"
+  refute_regex "$spec" "chmod 0755 '/workspace/w\.sh'"
+}
+
 @test "#207: a git+https kit fetch is non-interactive and neutralizes credentials" {
   local gitlog="$STUBDIR/git-invocations.log"; : >"$gitlog"
   cat >"$STUBDIR/git" <<GITSTUB
@@ -192,15 +302,17 @@ SPEC
   refute_regex "$spec" '1BAD'
 }
 
-# Regression guard: the files[].mode validator must NOT use a brace-interval
-# quantifier (/^[0-7]{3,4}$/). mawk — the default awk on Debian/Ubuntu — has no
-# interval-expression support, so that form matches NOTHING under mawk and every
-# kit's files are silently dropped. Both validator sites must stay longhand
-# (/^[0-7][0-7][0-7][0-7]?$/). This source-level check catches a regression
-# regardless of which awk the test runner ships (gawk/BSD-awk would not
-# reproduce the failure at runtime).
+# Regression guard: the files[].mode validators must NOT use a brace-interval
+# quantifier (/^[0-7]{3,4}$/ or /^0[0-7]{3}$/). mawk — the default awk on
+# Debian/Ubuntu — has no interval-expression support, so that form matches
+# NOTHING under mawk and every kit's files are silently dropped (parser site)
+# or every valid mode is reported invalid (kit_validate raw-scan site, whose
+# stricter leading-zero pattern is /^0[0-7][0-7][0-7]$/ — #381). All mode
+# validator sites must stay longhand. This source-level check catches a
+# regression regardless of which awk the test runner ships (gawk/BSD-awk would
+# not reproduce the failure at runtime).
 @test "kit-translate: mode validator uses no {n,m} interval regex (mawk-safe)" {
-  run grep -nE 'cur_mode !~ /\^\[0-7\]\{|v !~ /\^\[0-7\]\{' "$REPO_ROOT/acq.backends/kit-translate.sh"
+  run grep -nE '(cur_mode|v) !~ /\^0?\[0-7\]\{' "$REPO_ROOT/acq.backends/kit-translate.sh"
   assert_failure   # no match -> exit 1 -> the interval form is absent
 }
 

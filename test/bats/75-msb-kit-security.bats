@@ -116,7 +116,7 @@ commands:
 SPEC
     kit_validate "$vk" 2>&1; echo "RC=$?"
   '
-  assert_output --partial 'mode must be octal'
+  assert_output --partial 'mode must be a 4-digit octal string'
   assert_output --partial 'unknown command phase'
   assert_output --partial 'RC=1'
 }
