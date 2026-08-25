@@ -85,6 +85,45 @@ LS
   assert [ -f "$STUBDIR/secrets/acq.usai" ]
 }
 
+@test "#384: --host on a built-in routes to set-custom, not the native service" {
+  run bash -c 'printf "glpat-x\n" | ACQ_BACKEND=sbx "$1" secret set -g gitlab --host gitlab.example.gov --env GITLAB_TOKEN' _ "$ACQ"
+  assert_output --partial 'sbx secret set-custom --host gitlab.example.gov --env GITLAB_TOKEN'
+  refute_regex "$(cat "$CALLS")" 'sbx secret set gitlab'
+  assert [ -f "$STUBDIR/secrets/acq.gitlab" ]
+  # The endpoint mapping is persisted as a sidecar so msb (and rm) honor it too.
+  assert [ -f "$STUBDIR/secrets/meta/acq.gitlab" ]
+}
+
+@test "#384: --host on a built-in without --env is a hard error before storing" {
+  run bash -c 'printf "glpat-x\n" | ACQ_BACKEND=sbx "$1" secret set -g gitlab --host gitlab.example.gov' _ "$ACQ"
+  assert_failure
+  assert_output --partial '--env'
+  refute_regex "$(cat "$CALLS")" 'sbx secret set gitlab'
+  assert [ ! -e "$STUBDIR/secrets/acq.gitlab" ]
+}
+
+@test "#384: explicit --host wins over the compiled-in usai mapping" {
+  run bash -c 'printf "k\n" | ACQ_BACKEND=sbx "$1" secret set -g usai --host usai.alt.example.gov' _ "$ACQ"
+  assert_output --partial 'sbx secret set-custom --host usai.alt.example.gov --env USAI_API_KEY'
+  refute_output --partial 'api.gsa.usai.gov'
+}
+
+@test "#384: rm -g of a built-in does not crash (bash 3.2) and clears the native entry" {
+  mkdir -p "$STUBDIR/secrets" && printf 'x\n' > "$STUBDIR/secrets/acq.azure"
+  run env ACQ_BACKEND=sbx "$ACQ" secret rm -g azure
+  assert_success
+  assert_output --partial "removed 'azure'"
+  assert_regex "$(cat "$CALLS")" 'sbx secret rm azure -f'
+}
+
+@test "#384: rm -g of a --host-routed built-in also removes the custom placeholder" {
+  run bash -c 'printf "glpat-x\n" | ACQ_BACKEND=sbx "$1" secret set -g gitlab --host gitlab.example.gov --env GITLAB_TOKEN' _ "$ACQ"
+  printf 'SCOPE      TYPE      NAME     SECRET\n\nCUSTOM SECRETS\nSCOPE      TARGETS  ENV     PLACEHOLDER  SECRET\n(global)   gitlab.example.gov  GITLAB_TOKEN  sbx-cs-abc123  ****\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'SBX_LS_FIXTURE="$1" ACQ_BACKEND=sbx "$2" secret rm -g gitlab' _ "$STUBDIR/sbx_ls" "$ACQ"
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'sbx secret rm --placeholder sbx-cs-abc123'
+}
+
 @test "mask: masked entry captures the value, shows a star per char, handles backspace/empty" {
   load_acq
   run bash -c '
