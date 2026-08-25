@@ -302,15 +302,17 @@ SPEC
   refute_regex "$spec" '1BAD'
 }
 
-# Regression guard: the files[].mode validator must NOT use a brace-interval
-# quantifier (/^[0-7]{3,4}$/). mawk — the default awk on Debian/Ubuntu — has no
-# interval-expression support, so that form matches NOTHING under mawk and every
-# kit's files are silently dropped. Both validator sites must stay longhand
-# (/^[0-7][0-7][0-7][0-7]?$/). This source-level check catches a regression
-# regardless of which awk the test runner ships (gawk/BSD-awk would not
-# reproduce the failure at runtime).
+# Regression guard: the files[].mode validators must NOT use a brace-interval
+# quantifier (/^[0-7]{3,4}$/ or /^0[0-7]{3}$/). mawk — the default awk on
+# Debian/Ubuntu — has no interval-expression support, so that form matches
+# NOTHING under mawk and every kit's files are silently dropped (parser site)
+# or every valid mode is reported invalid (kit_validate raw-scan site, whose
+# stricter leading-zero pattern is /^0[0-7][0-7][0-7]$/ — #381). All mode
+# validator sites must stay longhand. This source-level check catches a
+# regression regardless of which awk the test runner ships (gawk/BSD-awk would
+# not reproduce the failure at runtime).
 @test "kit-translate: mode validator uses no {n,m} interval regex (mawk-safe)" {
-  run grep -nE 'cur_mode !~ /\^\[0-7\]\{|v !~ /\^\[0-7\]\{' "$REPO_ROOT/acq.backends/kit-translate.sh"
+  run grep -nE '(cur_mode|v) !~ /\^0?\[0-7\]\{' "$REPO_ROOT/acq.backends/kit-translate.sh"
   assert_failure   # no match -> exit 1 -> the interval form is absent
 }
 
