@@ -30,6 +30,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
   run bash -c '
     export SSH_AUTH_SOCK="'"$STUBDIR"'/agent.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     f=(); _acq_msb_vsock_flags_into f; printf "%s\n" "${f[@]+"${f[@]}"}"
   '
@@ -51,12 +52,14 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
   run bash -c '
     export SSH_AUTH_SOCK="'"$STUBDIR"'/agent.sock" STUB_MSB_VERSION=0.6.8
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf "%s" "${f[@]+"${f[@]}"}"
   '
   assert_output --partial 'needs msb >= 0.6.9'
   run bash -c '
     export SSH_AUTH_SOCK="'"$STUBDIR"'/agent.sock" STUB_MSB_VERSION=0.6.8
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf "%s\n" "${f[@]+"${f[@]}"}"
   '
@@ -67,12 +70,14 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   touch "$STUBDIR/not-a-socket"
   run bash -c '
     export SSH_AUTH_SOCK="'"$STUBDIR"'/not-a-socket" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf "%s" "${f[@]+"${f[@]}"}"
   '
   assert_output --partial 'not a socket'
   run bash -c '
     export SSH_AUTH_SOCK="'"$STUBDIR"'/not-a-socket" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf "%s\n" "${f[@]+"${f[@]}"}"
   '
@@ -84,6 +89,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   run bash -c '
     unset SSH_AUTH_SOCK
     export ACQ_FORWARD_HOST_SOCKETS="'"$STUBDIR"'/custom.sock:6000/stream" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf "%s\n" "${f[@]+"${f[@]}"}"
   '
@@ -209,6 +215,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
   run bash -c '
     export SSH_AUTH_SOCK="'"$STUBDIR"'/agent.sock" STUB_MSB_VERSION=0.6.9 ACQ_SSH_AGENT_VSOCK_PORT=123
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     f=(); _acq_msb_vsock_flags_into f 2>"'"$STUBDIR"'/c12.err"; printf "%s\n" "${f[@]+"${f[@]}"}"
     cat "'"$STUBDIR"'/c12.err"
@@ -217,6 +224,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   assert_output --partial 'ACQ_SSH_AGENT_VSOCK_PORT'
   run bash -c '
     export SSH_AUTH_SOCK="'"$STUBDIR"'/agent.sock" STUB_MSB_VERSION=0.6.9 ACQ_SSH_AGENT_VSOCK_PORT=9000
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf "%s\n" "${f[@]+"${f[@]}"}"
   '
@@ -228,6 +236,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   : > "$CALLS"
   run bash -c '
     export SSH_AUTH_SOCK="'"$STUBDIR"'/agent.sock" STUB_MSB_VERSION=0.6.9 ACQ_SSH_AGENT_VSOCK_PORT=9000
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf "ROUTE %s\n" "${f[@]+"${f[@]}"}"
     _acq_msb_start_ssh_agent_bridge sbox >/dev/null 2>&1
@@ -241,6 +250,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   _mk_unix_socket "$STUBDIR/agent15.sock" || skip "python3 AF_UNIX socket unavailable"
   run bash -c '
     export SSH_AUTH_SOCK="'"$STUBDIR"'/agent15.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     f=(); _acq_msb_vsock_flags_into f 2>&1 1>/dev/null; printf "%s\n" "${f[@]+"${f[@]}"}" >/dev/null
   '
@@ -250,6 +260,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   # At most once per process.
   run bash -c '
     export SSH_AUTH_SOCK="'"$STUBDIR"'/agent15.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     { f=(); _acq_msb_vsock_flags_into f; f=(); _acq_msb_vsock_flags_into f; } 2>&1 1>/dev/null
   '

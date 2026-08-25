@@ -47,8 +47,12 @@ _load_msb() { . "${REPO_ROOT}/acq.backends/msb.sh" 2>/dev/null; }
 }
 
 @test "balanced_target: single-label suffix *.com is dropped (nonzero, no output)" {
-  _load_msb
-  run _acq_msb_balanced_target '*.com'
+  # The drop is announced on stderr by design; "no output" means no stdout
+  # (nothing reaches the caller's argv), so discard stderr before capturing.
+  run bash -c '
+    . "'"${REPO_ROOT}"'/acq.backends/msb.sh" 2>/dev/null
+    _acq_msb_balanced_target "*.com" 2>/dev/null
+  '
   assert_failure
   assert_output ''
 }

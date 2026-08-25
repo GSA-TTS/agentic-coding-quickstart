@@ -22,6 +22,7 @@ load 'helper'
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/multi-secrets"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     mk="'"$STUBDIR"'/multikit"; mkdir -p "$mk/files/home"
     printf "A\n" > "$mk/files/home/file_one"
@@ -42,10 +43,16 @@ files:
 commands:
   - phase: startup
     user: "0"
-    command: [sh, -c, echo CMD_ALPHA]
+    command:
+      - sh
+      - -c
+      - echo CMD_ALPHA
   - phase: startup
     user: "0"
-    command: [sh, -c, echo CMD_BETA]
+    command:
+      - sh
+      - -c
+      - echo CMD_BETA
 SPEC
     _acq_msb_apply_kit_dir multibox "$mk"
   '
@@ -61,6 +68,7 @@ SPEC
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/env-secrets"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     ek="'"$STUBDIR"'/envkit"; mkdir -p "$ek"
     cat >"$ek/spec.yaml" <<'"'"'SPEC'"'"'
@@ -75,7 +83,10 @@ environment:
 commands:
   - phase: startup
     user: "0"
-    command: [sh, -c, echo CMD_WITH_ENV]
+    command:
+      - sh
+      - -c
+      - echo CMD_WITH_ENV
 SPEC
     _acq_msb_apply_kit_dir envbox "$ek"
   '
@@ -90,6 +101,7 @@ SPEC
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/noscript-secrets"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     nsk="'"$STUBDIR"'/noscriptkit"; mkdir -p "$nsk"
     cat >"$nsk/spec.yaml" <<'"'"'SPEC'"'"'
@@ -110,10 +122,10 @@ SPEC
   '
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'msb exec noscriptbox'
-  assert_regex "$log" -- '-- printf'
+  assert_regex "$log" '-- printf'
   assert_regex "$log" 'hello; rm -rf /tmp/NS_PWNED'
-  refute_regex "$log" -- '--script'
-  refute_regex "$log" -- '--script-path'
+  refute_regex "$log" '--script'
+  refute_regex "$log" '--script-path'
   refute_regex "$log" 'sh -c printf'
 }
 
@@ -122,6 +134,7 @@ SPEC
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/instmarker-secrets"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     imk="'"$STUBDIR"'/instmarkerkit"; mkdir -p "$imk"
     cat >"$imk/spec.yaml" <<'"'"'SPEC'"'"'
@@ -133,7 +146,8 @@ description: install command is marker-gated in the exec path
 commands:
   - phase: install
     user: "0"
-    command: [true]
+    command:
+      - true
 SPEC
     _acq_msb_apply_kit_dir instmarkerbox "$imk"
   '
@@ -165,6 +179,7 @@ _staged_body() { cat "$(find "$STUBDIR/$1" -type f 2>/dev/null | head -n1)" 2>/d
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/su-secrets"
     export ACQ_MSB_KEEP_STARTUP_STAGE=1 ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/startup-stage"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     suk="'"$STUBDIR"'/startupkit"; mkdir -p "$suk"
     cat >"$suk/spec.yaml" <<'"'"'SPEC'"'"'
@@ -176,21 +191,24 @@ description: one agent-user startup command staged as a create-time script
 commands:
   - phase: startup
     user: "1000"
-    command: [sh, -c, echo STARTUP_MARKER_ALPHA]
+    command:
+      - sh
+      - -c
+      - echo STARTUP_MARKER_ALPHA
 SPEC
     _acq_msb_fetch_kit() { printf "%s\n" "$suk"; }
     acq_backend_provision startupbox shell /tmp >/dev/null 2>&1
   '
   local log su_file body
   log=$(cat "$CALLS")
-  assert_regex "$log" -- '--script-path acq-startup:'
+  assert_regex "$log" '--script-path acq-startup:'
   su_file=$(find "$STUBDIR/startup-stage" -type f 2>/dev/null | head -n1)
   body=$(cat "$su_file" 2>/dev/null)
   assert_regex "$body" '#!/bin/sh'
   assert_regex "$body" 'echo STARTUP_MARKER_ALPHA'
   assert_regex "$body" 'runuser -u agent'
   assert_regex "$body" 'HOME=/home/agent'
-  assert_regex "$log" -- "--script-path acq-startup:${su_file}"
+  assert_regex "$log" "--script-path acq-startup:${su_file}"
 }
 
 @test "0017: a background startup command is staged with nohup detach" {
@@ -198,6 +216,7 @@ SPEC
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/bgsu-secrets"
     export ACQ_MSB_KEEP_STARTUP_STAGE=1 ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/bgstartup-stage"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     bsk="'"$STUBDIR"'/bgstartupkit"; mkdir -p "$bsk"
     cat >"$bsk/spec.yaml" <<'"'"'SPEC'"'"'
@@ -210,7 +229,8 @@ commands:
   - phase: startup
     user: "0"
     background: true
-    command: [supervisor-loop-0017]
+    command:
+      - supervisor-loop-0017
 SPEC
     _acq_msb_fetch_kit() { printf "%s\n" "$bsk"; }
     acq_backend_provision bgstartupbox shell /tmp >/dev/null 2>&1
@@ -226,6 +246,7 @@ SPEC
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/nostartup-secrets"
     export ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/nostartup-stage"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     nsk2="'"$STUBDIR"'/nostartupkit"; mkdir -p "$nsk2"
     cat >"$nsk2/spec.yaml" <<'"'"'SPEC'"'"'
@@ -237,12 +258,13 @@ description: only an install command, no startup phase
 commands:
   - phase: install
     user: "0"
-    command: [true]
+    command:
+      - true
 SPEC
     _acq_msb_fetch_kit() { printf "%s\n" "$nsk2"; }
     acq_backend_provision nostartupbox shell /tmp >/dev/null 2>&1
   '
-  refute_regex "$(cat "$CALLS")" -- '--script-path acq-startup'
+  refute_regex "$(cat "$CALLS")" '--script-path acq-startup'
 }
 
 @test "0017: install stays exec-based (marker-gated); only startup is staged" {
@@ -251,6 +273,7 @@ SPEC
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/mix-secrets"
     export ACQ_MSB_KEEP_STARTUP_STAGE=1 ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/mix-stage"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     mxk="'"$STUBDIR"'/mixkit"; mkdir -p "$mxk"
     cat >"$mxk/spec.yaml" <<'"'"'SPEC'"'"'
@@ -262,10 +285,16 @@ description: install stays exec-based; startup is staged
 commands:
   - phase: install
     user: "0"
-    command: [sh, -c, echo INSTALL_ONLY_0017]
+    command:
+      - sh
+      - -c
+      - echo INSTALL_ONLY_0017
   - phase: startup
     user: "0"
-    command: [sh, -c, echo STARTUP_ONLY_0017]
+    command:
+      - sh
+      - -c
+      - echo STARTUP_ONLY_0017
 SPEC
     _acq_msb_fetch_kit() { printf "%s\n" "$mxk"; }
     acq_backend_provision mixbox shell /tmp >/dev/null 2>&1
@@ -285,6 +314,7 @@ SPEC
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/inj-secrets"
     export ACQ_MSB_KEEP_STARTUP_STAGE=1 ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/inj-stage"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     printf "SUPER_SECRET_VALUE_0017\n" | acq_secret_store "$(_acq_secret_key usai injbox)" >/dev/null 2>&1
     injk="'"$STUBDIR"'/injstartupkit"; mkdir -p "$injk"
@@ -322,6 +352,7 @@ SPEC
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/fidel-secrets"
     export ACQ_MSB_KEEP_STARTUP_STAGE=1 ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/fidel-stage"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     fdk="'"$STUBDIR"'/fidelkit"; mkdir -p "$fdk"
     cat >"$fdk/spec.yaml" <<'"'"'SPEC'"'"'
@@ -335,7 +366,10 @@ environment:
 commands:
   - phase: startup
     user: "0"
-    command: [sh, -c, echo FIDELITY_MARKER]
+    command:
+      - sh
+      - -c
+      - echo FIDELITY_MARKER
 SPEC
     _acq_msb_fetch_kit() { printf "%s\n" "$fdk"; }
     acq_backend_provision fidelbox shell /tmp >/dev/null 2>&1
@@ -355,6 +389,7 @@ SPEC
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/multi2-secrets"
     export ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/multi2-stage"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     mk1="'"$STUBDIR"'/multikit1"; mkdir -p "$mk1"
     cat >"$mk1/spec.yaml" <<'"'"'SPEC'"'"'
@@ -366,7 +401,10 @@ description: first kit with a startup command
 commands:
   - phase: startup
     user: "0"
-    command: [sh, -c, echo MULTI_STARTUP_ONE]
+    command:
+      - sh
+      - -c
+      - echo MULTI_STARTUP_ONE
 SPEC
     mk2="'"$STUBDIR"'/multikit2"; mkdir -p "$mk2"
     cat >"$mk2/spec.yaml" <<'"'"'SPEC'"'"'
@@ -378,7 +416,10 @@ description: second kit with a startup command
 commands:
   - phase: startup
     user: "0"
-    command: [sh, -c, echo MULTI_STARTUP_TWO]
+    command:
+      - sh
+      - -c
+      - echo MULTI_STARTUP_TWO
 SPEC
     mkdir -p "'"$STUBDIR"'/nokit"
     printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "'"$STUBDIR"'/nokit/spec.yaml"
@@ -405,6 +446,7 @@ SPEC
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/named-secrets"
     export ACQ_MSB_KEEP_STARTUP_STAGE=1 ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/named-stage"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     nmk="'"$STUBDIR"'/namedkit"; mkdir -p "$nmk"
     cat >"$nmk/spec.yaml" <<'"'"'SPEC'"'"'
@@ -416,7 +458,10 @@ description: startup command as a named non-agent user
 commands:
   - phase: startup
     user: "postgres"
-    command: [sh, -c, echo NAMED_USER_MARKER]
+    command:
+      - sh
+      - -c
+      - echo NAMED_USER_MARKER
 SPEC
     _acq_msb_fetch_kit() { printf "%s\n" "$nmk"; }
     acq_backend_provision namedbox shell /tmp >/dev/null 2>&1

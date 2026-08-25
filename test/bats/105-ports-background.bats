@@ -38,6 +38,7 @@ SPEC
   assert_output --partial "$(printf '4096\ttcp\tapi\t4096')"
 
   run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
     arr=(); _acq_msb_port_flags_into arr "'"$ppkit"'/spec.yaml"; printf "%s\n" "${arr[@]}"
   '
@@ -74,6 +75,7 @@ SPEC
   assert_output --partial 'DEPRECATION'
   assert_output --partial 'backend_extras.sbx.publishedPorts'
   run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
     arr=(); _acq_msb_port_flags_into arr "'"$lpkit"'/spec.yaml" 2>/dev/null; printf "%s\n" "${arr[@]}"
   '
@@ -153,6 +155,7 @@ SPEC
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_spec_published_ports "'"$nonekit"'/spec.yaml" 2>&1'
   assert_output ''
   run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
     arr=(); _acq_msb_port_flags_into arr "'"$nonekit"'/spec.yaml" 2>&1; printf "%s" "${arr[@]:-}"
   '
@@ -215,13 +218,14 @@ SPEC
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/bg-secrets"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     _acq_msb_run_commands bgbox "'"$bgk"'/spec.yaml"
   '
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'nohup'
   assert_regex "$log" 'supervisor-loop'
-  assert_regex "$log" -- '-- foreground-cmd'
+  assert_regex "$log" '-- foreground-cmd'
 }
 
 @test "bg(sbx): the translator preserves background: true without wrapping in nohup" {
@@ -269,6 +273,7 @@ publishedPorts:
     host: 8080
 SPEC
   run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
     arr=(); _acq_msb_port_flags_into arr "'"$hokit"'/spec.yaml"; printf "%s\n" "${arr[@]}"
   '

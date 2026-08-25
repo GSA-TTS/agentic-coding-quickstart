@@ -15,7 +15,8 @@ teardown() { acq_teardown_stubs; }
 
 load 'helper'
 
-# Run a provision in a subshell: seed store, source secret-store + msb, stub the
+# Run a provision in a subshell: source common (which chains kit-translate,
+# secret-store, and progress via ACQ_SCRIPT_DIR) + msb, seed the store, stub the
 # kit fetch to a local no-op kit, and provision NAME. PRE is extra shell run
 # before provision (store seeding / env). Captures stderr+stdout via `run`.
 _provision() { # NAME PRE_SNIPPET
@@ -23,7 +24,8 @@ _provision() { # NAME PRE_SNIPPET
   : > "$CALLS"
   run bash -c '
     name="$1"; pre="$2"
-    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     eval "$pre"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     mkdir -p "'"$STUBDIR"'/nokit"
@@ -40,16 +42,16 @@ _provision() { # NAME PRE_SNIPPET
     printf "GH-REAL-VALUE\n"   | acq_secret_store "$(_acq_secret_key github)"
   '
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" -- '--tls-intercept'
-  assert_regex "$log" -- '--secret USAI_API_KEY@api\.gsa\.usai\.gov'
-  assert_regex "$log" -- "--secret $MSB_GITHUB_SECRET_BINDING"
+  assert_regex "$log" '--tls-intercept'
+  assert_regex "$log" '--secret USAI_API_KEY@api\.gsa\.usai\.gov'
+  assert_regex "$log" "--secret $MSB_GITHUB_SECRET_BINDING"
   refute_regex "$log" 'USAI-REAL-VALUE'
   refute_regex "$log" 'GH-REAL-VALUE'
   # Workspace mounted at the same canonical guest path (sbx-parity), default image.
   load_acq
   local ws; ws=$(canonicalize_path /tmp)
-  assert_regex "$log" -- "--volume ${ws}:${ws}"
-  refute_regex "$log" -- "--volume ${ws}:/home/agent/workspace"
+  assert_regex "$log" "--volume ${ws}:${ws}"
+  refute_regex "$log" "--volume ${ws}:/home/agent/workspace"
   assert_regex "$log" 'msb create --name provbox'
   assert_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
   refute_regex "$log" 'docker\.io/library/node:22-bookworm'
@@ -61,7 +63,7 @@ _provision() { # NAME PRE_SNIPPET
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/upca-secrets"
     export ACQ_MSB_UPSTREAM_CA_CERT="'"$STUBDIR"'/corp-root.pem"
   '
-  assert_regex "$(cat "$CALLS")" -- "--tls-upstream-ca-cert $STUBDIR/corp-root.pem"
+  assert_regex "$(cat "$CALLS")" "--tls-upstream-ca-cert $STUBDIR/corp-root.pem"
 }
 
 @test "msb: no --tls-intercept / upstream-CA when interception is disabled" {
@@ -72,8 +74,8 @@ _provision() { # NAME PRE_SNIPPET
     export ACQ_MSB_NO_TLS_INTERCEPT=1
   '
   local log; log=$(cat "$CALLS")
-  refute_regex "$log" -- '--tls-intercept'
-  refute_regex "$log" -- '--tls-upstream-ca-cert'
+  refute_regex "$log" '--tls-intercept'
+  refute_regex "$log" '--tls-upstream-ca-cert'
 }
 
 @test "msb: ACQ_MSB_NO_UPSTREAM_CA suppresses the CA flag but keeps interception" {
@@ -84,8 +86,8 @@ _provision() { # NAME PRE_SNIPPET
     export ACQ_MSB_NO_UPSTREAM_CA=1
   '
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" -- '--tls-intercept'
-  refute_regex "$log" -- '--tls-upstream-ca-cert'
+  assert_regex "$log" '--tls-intercept'
+  refute_regex "$log" '--tls-upstream-ca-cert'
 }
 
 @test "msb: ACQ_MSB_IMAGE override is passed through, suppressing the default" {
@@ -107,10 +109,10 @@ _provision() { # NAME PRE_SNIPPET
     printf "NOMAP-VALUE\n"     | acq_secret_store "$(_acq_secret_key nomap)"
   '
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" -- '--secret API_KEY@api\.example\.com'
-  assert_regex "$log" -- '--secret USAI_API_KEY@api\.gsa\.usai\.gov'
-  assert_regex "$log" -- "--secret $MSB_GITHUB_SECRET_BINDING"
-  refute_regex "$log" -- '--secret @'
+  assert_regex "$log" '--secret API_KEY@api\.example\.com'
+  assert_regex "$log" '--secret USAI_API_KEY@api\.gsa\.usai\.gov'
+  assert_regex "$log" "--secret $MSB_GITHUB_SECRET_BINDING"
+  refute_regex "$log" '--secret @'
   refute_regex "$log" 'nomap'
   refute_regex "$log" 'SBX-REAL-VALUE|USAI-REAL-VALUE|GH-REAL-VALUE|NOMAP-VALUE'
 }
