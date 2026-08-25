@@ -480,11 +480,18 @@ _acq_is_managed_secret_rm() {
 # Word-split a whitespace-separated env value into the named array WITHOUT
 # filename globbing (a literal `*` in a kit ref must not expand against the cwd).
 split_noglob() {
-  local _name="$1" _val="$2" _oldopts
-  _oldopts=$(set +o); set -f
+  local _name="$1" _val="$2" _had_noglob=0
+  # Save/restore ONLY noglob. Capturing the full option state with
+  # `_oldopts=$(set +o)` is a trap: a command-substitution subshell runs with
+  # errexit CLEARED (pre-inherit_errexit bash, incl. macOS 3.2), so the captured
+  # state says `set +o errexit` and the eval restore silently turned `set -e`
+  # OFF in the caller for the rest of the run (found via #381: it also disabled
+  # bats' failure detection whenever ACQ_EXTRA_KITS was set).
+  case "$-" in *f*) _had_noglob=1 ;; esac
+  set -f
   # shellcheck disable=SC2086
   set -- $_val
-  eval "$_oldopts"
+  if [ "$_had_noglob" -eq 0 ]; then set +f; fi
   eval "$_name=(\"\$@\")"
 }
 

@@ -455,6 +455,11 @@ KEYGENSTUB
   # Isolate the host-side kit-bundle provenance store to this
   # test's temp dir so provenance reads/writes never touch the real XDG state.
   export ACQ_PROVENANCE_DIR="$STUBDIR/provenance"
+  # Neutralize the developer's real kit customizations: an inherited
+  # ACQ_EXTRA_KITS changes _build_kit_list's output (and, pre-#381, triggered
+  # the split_noglob errexit loss), making local test runs diverge from CI.
+  # Tests that exercise extras set these themselves.
+  unset ACQ_EXTRA_KITS ACQ_EXTRA_KIT_SOURCES
 }
 
 cleanup_stubs() { [ -n "${STUBDIR:-}" ] && rm -rf "$STUBDIR"; }
@@ -468,5 +473,7 @@ load_acq() {
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   # Build the kit list (normally called by acq_resolve_backend).
   _build_kit_list
-  set +e
+  # Do NOT `set +e` here (the pre-ADR-0025 bespoke runner did): bats detects a
+  # failing command via errexit inherited into the @test body, so disabling it
+  # in setup() makes every assertion in the suite pass vacuously (#381 review).
 }

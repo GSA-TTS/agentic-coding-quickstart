@@ -124,12 +124,12 @@ files:
     source: files/marker
 SPEC
   printf 'CLIKIT_MARKER\n' > "$clikit/files/marker"
-  run bash -c '
-    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    ACQ_CLI_KITS=("'"$clikit"'")
-    _acq_msb_fetch_kit() { printf "%s\n" "'"$clikit"'"; }
-    acq_backend_ensure_kits_applied clikitbox >/dev/null 2>&1
-  '
+  # Subshell (not bash -c): the heal path needs the kit-translate/common
+  # functions load_acq sourced into this @test shell (see 90-sbx-startup-kit).
+  ( . "${REPO_ROOT}/acq.backends/msb.sh"
+    ACQ_CLI_KITS=("$clikit")
+    _acq_msb_fetch_kit() { printf '%s\n' "$clikit"; }
+    acq_backend_ensure_kits_applied clikitbox >/dev/null 2>&1 )
   assert_regex "$(cat "$CALLS")" 'clikitbox:/home/agent/clikit-marker'
 }
 
@@ -140,6 +140,7 @@ SPEC
     export ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/ep-off-stage"
     export ACQ_MSB_PERSIST_STARTUP_ENTRYPOINT=1
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     epk="'"$STUBDIR"'/epkit"; mkdir -p "$epk"
     cat >"$epk/spec.yaml" <<'"'"'SPEC'"'"'
@@ -151,14 +152,17 @@ description: one startup command
 commands:
   - phase: startup
     user: "0"
-    command: [sh, -c, echo EP_MARKER]
+    command:
+      - sh
+      - -c
+      - echo EP_MARKER
 SPEC
     _acq_msb_fetch_kit() { printf "%s\n" "$epk"; }
     acq_backend_provision epoffbox shell /tmp >/dev/null 2>&1
   '
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" -- '--script-path acq-startup:'
-  refute_regex "$log" -- '--entrypoint'
+  assert_regex "$log" '--script-path acq-startup:'
+  refute_regex "$log" '--entrypoint'
 }
 
 @test "msb: acq start dispatch calls msb start (verb wired)" {
@@ -332,8 +336,8 @@ RELOADSPEC
     acq_backend_provision provrefbox shell /tmp >/dev/null 2>&1
   '
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" -- '--secret USAI_API_KEY@api\.gsa\.usai\.gov'
-  assert_regex "$log" -- "--secret $MSB_GITHUB_SECRET_BINDING"
+  assert_regex "$log" '--secret USAI_API_KEY@api\.gsa\.usai\.gov'
+  assert_regex "$log" "--secret $MSB_GITHUB_SECRET_BINDING"
   refute_regex "$log" 'USAI-REAL-VALUE'
   refute_regex "$log" 'GH-REAL-VALUE'
 }

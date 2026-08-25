@@ -37,6 +37,7 @@ SPEC
   assert_output --partial "$(printf '/scratch\ttmpfs\t2G')"
 
   run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
     arr=(); _acq_msb_volume_flags_into arr "'"$vkit"'/spec.yaml" volbox; printf "%s\n" "${arr[@]}"
   '
@@ -158,6 +159,7 @@ SPEC
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_spec_volumes "'"$novkit"'/spec.yaml" 2>&1'
   assert_output ''
   run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
     arr=(); _acq_msb_volume_flags_into arr "'"$novkit"'/spec.yaml" volbox 2>&1; printf "%s" "${arr[@]:-}"
   '
@@ -232,12 +234,13 @@ volumes:
   - path: /late
     size: 1G
 SPEC
-  run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null; acq_backend_apply_kit volbox "'"$avkit"'" 2>&1'
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null; acq_backend_apply_kit volbox "'"$avkit"'" 2>&1'
   assert_output --partial 'CREATE time only'
 }
 
 @test "msb: net-rule uses a bare FQDN target, strips :port, avoids domain= / domain: forms" {
   run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
     nkit="'"$STUBDIR"'/nkit"; mkdir -p "$nkit"
     cat >"$nkit/spec.yaml" <<'"'"'SPEC'"'"'

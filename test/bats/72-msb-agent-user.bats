@@ -22,16 +22,19 @@ _provision() { # NAME AGENT PRE_SNIPPET [KITDIR]
   local name="$1" agent="$2" pre="$3" kitdir="${4:-}"
   : > "$CALLS"
   run bash -c '
-    name="$1"; agent="$2"; pre="$3"; kitdir="$4"
+    name="$1"; agent="$2"; pre="$3"; stub_kitdir="$4"
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     eval "$pre"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    if [ -z "$kitdir" ]; then
-      kitdir="'"$STUBDIR"'/nokit"; mkdir -p "$kitdir"
-      printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "$kitdir/spec.yaml"
+    if [ -z "$stub_kitdir" ]; then
+      stub_kitdir="'"$STUBDIR"'/nokit"; mkdir -p "$stub_kitdir"
+      printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "$stub_kitdir/spec.yaml"
     fi
-    _acq_msb_fetch_kit() { printf "%s\n" "$kitdir"; }
+    # NOTE: the stub must NOT read a variable named "kitdir" — provision declares
+    # a `local kitdir`, which dynamically shadows it at stub-call time.
+    _acq_msb_fetch_kit() { printf "%s\n" "$stub_kitdir"; }
     acq_backend_provision "$name" "$agent" /tmp 2>&1
     printf "PROVISION_RC=%s\n" "$?"
   ' _ "$name" "$agent" "$pre" "$kitdir"
@@ -63,7 +66,7 @@ SPEC
   assert_regex "$log" 'agent'
   assert_regex "$log" 'msb exec agentbox -u agent -e HOME=/home/agent'
   refute_regex "$log" 'msb exec agentbox -u 1000 -- node'
-  assert_regex "$log" -- '-e GIT_TERMINAL_PROMPT=0'
+  assert_regex "$log" '-e GIT_TERMINAL_PROMPT=0'
   assert_regex "$log" 'chown -R -P agent /home/agent/usai-config'
   refute_regex "$log" 'useradd -m -d /home/agent -s /bin/sh -u 1000'
   assert_regex "$log" 'chown "agent:'
@@ -209,7 +212,7 @@ _attach() { # PRE_SNIPPET NAME
   assert_regex "$log" '/usr/local/bin/docker'
   assert_regex "$log" "touch '/var/lib/acq/oci-ready'"
   assert_regex "$log" '/etc/containers/storage\.conf'
-  assert_regex "$log" 'driver = .vfs.'
+  assert_regex "$log" 'driver = ..vfs..'
   assert_regex "$log" 'mount_program'
   assert_regex "$log" 'fuse-overlayfs'
   assert_regex "$log" 'uidmap'
@@ -220,9 +223,9 @@ _attach() { # PRE_SNIPPET NAME
   assert_regex "$log" '/dev/net/tun'
   assert_regex "$log" '/dev/fuse'
   assert_regex "$log" 'chown root:agent'
-  assert_regex "$log" 'unqualified-search-registries = ..docker.io..'
+  assert_regex "$log" 'unqualified-search-registries = ...docker.io...'
   assert_regex "$log" 'docker\.io/library/hello-world'
-  assert_regex "$log" 'short-name-mode = ..SHORT_NAME_MODE.'
+  assert_regex "$log" 'short-name-mode = ...SHORT_NAME_MODE.'
   assert_regex "$log" 'SHORT_NAME_MODE=enforcing'
   refute_regex "$log" 'SHORT_NAME_MODE=permissive'
   assert_regex "$log" 'msb exec ocibox -u 0 -e PODMAN_PKGS='
