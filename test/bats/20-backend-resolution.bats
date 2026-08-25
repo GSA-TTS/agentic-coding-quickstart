@@ -133,6 +133,10 @@ _resolve() { # ADAPTER EXPLICIT  -> prints "<resolved>|<stderr-note>"
   coreutils_path="$(_acq_coreutils_path)"
   export HOME="$fake_home"
   export PATH="$coreutils_path"
+  # Premise: with PATH narrowed to coreutils, the backend MUST be absent —
+  # otherwise the self-repair path never exercises and the test is vacuous.
+  run command -v msb
+  assert_failure
   # shellcheck source=acq
   ACQ_SOURCE_ONLY=1 . "$ACQ"
   # shellcheck source=acq.backends/msb.sh
