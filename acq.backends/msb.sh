@@ -3695,17 +3695,44 @@ _acq_msb_attach() {
   [ -n "$_sock" ] && _sockflag=(-e "SSH_AUTH_SOCK=$_sock")
 
   if [ "$agent" = "shell" ]; then
-    exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} "$name" -- /bin/sh -l
+    _acq_msb_shell_exec "$name" "$ws"
   fi
 
   # Pre-check the agent binary AS the agent user; fall back to a shell (with a
   # notice) rather than launching into a broken/blank session if it's missing.
   if ! msb exec -u agent "$name" -- sh -c "command -v '$agent'" </dev/null >/dev/null 2>&1; then
     echo "acq(msb): '$agent' not found in sandbox '$name'; opening a shell instead." >&2
-    exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} "$name" -- /bin/sh -l
+    _acq_msb_shell_exec "$name" "$ws"
   fi
 
   exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} "$name" -- "$agent" "$@"
+}
+
+# _acq_msb_shell_exec NAME [WS] — exec into an interactive login shell as the
+# agent user: PTY, workspace cwd, sane $SHELL, and SSH_AUTH_SOCK when the host
+# ssh-agent is forwarded (a raw `msb exec` shell gets none of that). Shared by
+# _acq_msb_attach's shell paths and the neutral `acq shell` verb (#383). WS
+# skips the workspace lookup when the caller already resolved it.
+_acq_msb_shell_exec() {
+  local name="$1" ws="${2:-}"
+  if [ -z "$ws" ]; then
+    ws="${ACQ_MSB_WORKSPACE:-}"
+    if [ -z "$ws" ]; then
+      ws=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null | tr -d '\r\n')
+    fi
+    [ -n "$ws" ] || ws="/home/agent"
+  fi
+  local _sock _sockflag=()
+  _sock=$(_acq_msb_ssh_auth_sock_for "$name")
+  [ -n "$_sock" ] && _sockflag=(-e "SSH_AUTH_SOCK=$_sock")
+  exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} "$name" -- /bin/sh -l
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_shell — interactive human shell (#383)
+# ---------------------------------------------------------------------------
+acq_backend_shell() {
+  _acq_msb_shell_exec "$1"
 }
 
 # ---------------------------------------------------------------------------

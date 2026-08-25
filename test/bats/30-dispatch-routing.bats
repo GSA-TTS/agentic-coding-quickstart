@@ -27,6 +27,29 @@ _seed_usai() {
   assert_regex "$(cat "$CALLS")" 'sbx ls'
 }
 
+@test "#383: shell NAME -> interactive backend shell (sbx exec -it ... bash)" {
+  run env ACQ_BACKEND=sbx "$ACQ" shell mybox
+  assert_regex "$(cat "$CALLS")" 'sbx exec -it mybox bash'
+}
+
+@test "#383: shell NAME (msb) -> agent-user login shell with PTY in the workspace" {
+  run env ACQ_BACKEND=msb "$ACQ" shell mybox
+  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e SHELL=/bin/sh mybox -- /bin/sh -l'
+}
+
+@test "#383: shell without a name is a usage error, no backend call" {
+  run env ACQ_BACKEND=sbx "$ACQ" shell
+  assert_failure
+  assert_output --partial 'missing sandbox name'
+  refute_regex "$(cat "$CALLS")" 'sbx exec'
+}
+
+@test "#383: shell --help documents the verb (acq-owned, not a passthrough)" {
+  run env ACQ_BACKEND=sbx "$ACQ" shell --help
+  assert_output --partial 'interactive shell'
+  refute_output --partial 'passed through'
+}
+
 @test "dispatch: version reports backend and script path" {
   run env ACQ_BACKEND=sbx "$ACQ" version
   assert_output --partial 'backend:'

@@ -168,7 +168,8 @@ acq ls                      # list sandboxes
 acq stop my-sandbox         # stop (preserves state)
 acq run my-sandbox          # resume / re-attach by name
 acq rm my-sandbox           # remove permanently
-acq run my-sandbox          # interactive attach (acq exec runs a command, not a TTY)
+acq run my-sandbox          # interactive attach (relaunches the recorded agent)
+acq shell my-sandbox        # interactive human shell (acq exec runs a command, not a TTY)
 acq exec my-sandbox -- <cmd>   # run a one-off command in the sandbox
 ```
 

@@ -326,11 +326,10 @@ sbx rm --all
 ```
 
 > [!NOTE]
-> `acq` covers the common run/ls/stop/rm/exec operations on either backend.
-> Two forms shown here stay raw `sbx`: **`sbx rm --all`** (no `acq rm --all`
-> bulk removal exists), and the interactive **`sbx exec -it <name> bash`** shell
-> (`acq exec` runs a command via `acq exec <name> -- <cmd>` but does not attach
-> a TTY — use `acq run <name>` to attach interactively).
+> `acq` covers the common run/ls/stop/rm/shell/exec operations on either
+> backend. One form shown here stays raw `sbx`: **`sbx rm --all`** (no
+> `acq rm --all` bulk removal exists). An interactive human shell is
+> `acq shell <name>`; `acq run <name>` re-attaches the agent.
 
 ---
 
@@ -344,7 +343,7 @@ sbx rm --all
 | Resume sandbox | `acq run <name>` | `sbx run --name <name>` |
 | Remove sandbox | `acq rm <name>` | `sbx rm <name>` |
 | Run a command | `acq exec <name> -- <cmd>` | `sbx exec <name> -- <cmd>` |
-| Interactive shell | `acq run <name>` (attach) | `sbx exec -it <name> bash` |
+| Interactive shell | `acq shell <name>` | `sbx exec -it <name> bash` |
 | Copy files | `acq cp ./file.txt <name>:/path/` | `sbx cp ./file.txt <name>:/path/` |
 
 The following are genuinely sbx-specific mechanics the wrapper does not

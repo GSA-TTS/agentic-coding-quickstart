@@ -105,6 +105,7 @@ kits, validates your USAi key, and attaches the agent.
 | `./acq ls` | List your sandboxes |
 | `./acq stop NAME` | Stop a sandbox |
 | `./acq rm NAME` | Remove a sandbox |
+| `./acq shell NAME` | Open an interactive shell in a sandbox |
 | `./acq exec NAME -- CMD` | Run a command inside a sandbox |
 | `./acq cp SRC DST` | Copy files in/out (NAME:path syntax) |
 | `./acq version` | Show acq version + active backend |
