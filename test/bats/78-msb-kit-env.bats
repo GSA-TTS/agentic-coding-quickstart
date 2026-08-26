@@ -1,0 +1,130 @@
+#!/usr/bin/env bats
+#
+# 78-msb-kit-env.bats — msb kit environment[] persistence + session replay.
+#
+# A kit's environment[] block exists for agent-runtime config (see ADR-0011:
+# OPENCODE_CONFIG-style vars). On msb the entries were only threaded onto the
+# kit's own provisioning commands and never reached the agent session or
+# `acq exec`/`acq shell` — the kit env silently no-op'd at runtime. The fix
+# persists the validated entries to a root-owned guest marker
+# (/var/lib/acq/kit-env, same pattern as /var/lib/acq/agent and
+# /var/lib/acq/ssh-auth-sock) at apply time, and every session path reads the
+# marker back and threads each entry as `msb exec -e NAME=value`.
+#
+# shellcheck shell=bats
+
+setup() { acq_setup_stubs; load_acq; }
+teardown() { acq_teardown_stubs; }
+
+load 'helper'
+
+@test "msb kit env: apply persists environment[] to /var/lib/acq/kit-env; unsafe name is dropped" {
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/kitenv-secrets"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ek="'"$STUBDIR"'/persistkit"; mkdir -p "$ek"
+    cat >"$ek/spec.yaml" <<'"'"'SPEC'"'"'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: persist-kit
+displayName: Persist Kit
+description: environment vars persisted for session replay
+environment:
+  OPENCODE_CONFIG: /home/agent/.config/opencode/kit.jsonc
+  "1BAD": should-be-dropped
+SPEC
+    _acq_msb_apply_kit_dir envbox "$ek"
+  '
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '/var/lib/acq/kit-env'
+  assert_regex "$log" 'OPENCODE_CONFIG=/home/agent/\.config/opencode/kit\.jsonc'
+  refute_regex "$log" '1BAD'
+}
+
+@test "msb kit env: a kit with no environment[] writes no kit-env marker" {
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/noenv-secrets"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    nk="'"$STUBDIR"'/noenvkit"; mkdir -p "$nk"
+    cat >"$nk/spec.yaml" <<'"'"'SPEC'"'"'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: noenv-kit
+displayName: NoEnv Kit
+description: no environment block
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - echo CMD_NOENV
+SPEC
+    _acq_msb_apply_kit_dir envbox "$nk"
+  '
+  assert_success
+  refute_regex "$(cat "$CALLS")" '/var/lib/acq/kit-env'
+}
+
+@test "msb kit env: acq exec replays persisted entries as -e flags; none when marker empty" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9
+    export STUB_RECORDED_KIT_ENV="OPENCODE_CONFIG=/home/agent/oc.jsonc
+RUBOCOP_PARALLELISM=4"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run sbox -- printenv OPENCODE_CONFIG >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '-e OPENCODE_CONFIG=/home/agent/oc\.jsonc'
+  assert_regex "$log" '-e RUBOCOP_PARALLELISM=4'
+  : > "$CALLS"
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_KIT_ENV=
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run sbox -- git status >/dev/null 2>&1
+  '
+  refute_regex "$(cat "$CALLS")" 'OPENCODE_CONFIG'
+}
+
+@test "msb kit env: attach and shell replay persisted entries as -e flags" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_AGENT=opencode STUB_AGENT_PRESENT=1
+    export STUB_RECORDED_KIT_ENV="OPENCODE_CONFIG=/home/agent/oc.jsonc"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ( _acq_msb_attach sbox </dev/null >/dev/null 2>&1 )
+  '
+  assert_regex "$(cat "$CALLS")" '-e OPENCODE_CONFIG=/home/agent/oc\.jsonc'
+  : > "$CALLS"
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9
+    export STUB_RECORDED_KIT_ENV="OPENCODE_CONFIG=/home/agent/oc.jsonc"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ( _acq_msb_shell_exec sbox </dev/null >/dev/null 2>&1 )
+  '
+  assert_regex "$(cat "$CALLS")" '-e OPENCODE_CONFIG=/home/agent/oc\.jsonc'
+}
+
+@test "msb kit env: replay drops tampered names and keeps the last value for a duplicate" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9
+    export STUB_RECORDED_KIT_ENV="BAD-NAME=x
+GITLAB_HOST=gitlab.example.gov
+GITLAB_HOST=gitlab.override.gov"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run sbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  refute_regex "$log" 'BAD-NAME'
+  assert_regex "$log" '-e GITLAB_HOST=gitlab\.override\.gov'
+  refute_regex "$log" 'GITLAB_HOST=gitlab\.example\.gov'
+}

@@ -1464,7 +1464,24 @@ EOF
     fi
   done
 
-  # 2) Run commands[]. Reassemble each argv record and exec it as the given uid.
+  # 2) Persist environment[] for session replay. Threading `-e NAME=value` onto
+  #    the kit's own commands (step 3) covers provisioning only; the block exists
+  #    for agent-runtime config (see ADR-0011: OPENCODE_CONFIG-style vars), so
+  #    the validated entries are also appended to a root-owned guest marker that
+  #    run/attach/shell read back and replay as `-e` flags (same marker pattern
+  #    as /var/lib/acq/agent and /var/lib/acq/ssh-auth-sock). Entries are passed
+  #    as argv to a fixed `sh -c` body — kit bytes are never interpolated into
+  #    shell syntax (SI-10).
+  local _kit_env=()
+  _acq_msb_collect_kit_env_into _kit_env "$spec"
+  if [ "${#_kit_env[@]}" -gt 0 ]; then
+    msb exec -u 0 "$name" -- sh -c \
+      'mkdir -p /var/lib/acq && printf "%s\n" "$@" >> /var/lib/acq/kit-env' \
+      sh "${_kit_env[@]}" </dev/null >/dev/null 2>&1 || \
+      echo "acq(msb): warning: could not persist kit env for '$name'; its environment[] will not reach agent sessions" >&2
+  fi
+
+  # 3) Run commands[]. Reassemble each argv record and exec it as the given uid.
   #    install → run once (idempotent, marker-gated); initFiles/startup → every
   #    apply. msb has no create-time-only hook, so install collapses to a
   #    marker-gated exec (design §3 lifecycle table). The kit's environment[]
@@ -1582,16 +1599,8 @@ _acq_msb_run_commands() {
   # already validates each NAME (^[A-Za-z_][A-Za-z0-9_]*$) and drops unsafe ones,
   # so these are safe to pass as exec env. Values are passed as a single argv
   # element (never re-split by a shell).
-  local _kit_env=() eline ekey eval_v
-  while IFS= read -r eline; do
-    [ -n "$eline" ] || continue
-    ekey=$(printf '%s' "$eline" | cut -f1)
-    eval_v=$(printf '%s' "$eline" | cut -f2-)
-    [ -n "$ekey" ] || continue
-    _kit_env+=("${ekey}=${eval_v}")
-  done <<EOF
-$(kit_spec_env "$spec")
-EOF
+  local _kit_env=()
+  _acq_msb_collect_kit_env_into _kit_env "$spec"
 
   # Buffer the parsed command stream FIRST, then execute. The exec step calls
   # `msb exec`, which would consume this loop's stdin if we iterated the heredoc
@@ -3264,6 +3273,43 @@ _acq_msb_ssh_auth_sock_for() {
     </dev/null 2>/dev/null | tr -d '[:space:]'
 }
 
+# _acq_msb_kit_env_flags_into ARRVAR NAME — build the `-e NAME=value` flag array
+# for the kit environment[] entries persisted at /var/lib/acq/kit-env by
+# _acq_msb_apply_kit_dir, so every session path (run/attach/shell) sees the env
+# the kits declared for agent runtime (see ADR-0011). Empty array when no kit
+# declared environment[]. Array passed by name (bash 3.2 compat).
+#
+# The marker is root-owned but its content is kit-derived guest data: re-validate
+# each NAME (same ^[A-Za-z_][A-Za-z0-9_]*$ charset kit_spec_env enforces) so a
+# tampered line cannot smuggle an option-shaped or quote-bearing token, and keep
+# the LAST value for a duplicate name (kits append in application order, so a
+# later kit overrides an earlier one).
+_acq_msb_kit_env_flags_into() {
+  local _arrn="$1" _name="$2"
+  eval "$_arrn=()"
+  local _kvs
+  _kvs=$(msb exec "$_name" -u 0 -- sh -c 'cat /var/lib/acq/kit-env 2>/dev/null' \
+    </dev/null 2>/dev/null)
+  [ -n "$_kvs" ] || return 0
+  local _line
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    eval "$_arrn+=(-e \"\$_line\")"
+  done <<EOF
+$(printf '%s\n' "$_kvs" | awk '
+  {
+    i = index($0, "=")
+    if (i < 2) next
+    k = substr($0, 1, i - 1)
+    if (k !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next
+    v[k] = substr($0, i + 1)
+    if (!(k in seen)) { seen[k] = 1; order[++n] = k }
+  }
+  END { for (j = 1; j <= n; j++) printf "%s=%s\n", order[j], v[order[j]] }
+')
+EOF
+}
+
 # _acq_msb_ensure_ssh_agent_forward NAME — (re)establish the host ssh-agent
 # forward on a RUNNING sandbox that acq is re-attaching to. See ADR-0021.
 #
@@ -3611,12 +3657,17 @@ acq_backend_run() {
   shift
   # If the host ssh-agent is forwarded, git/ssh in the guest must see
   # SSH_AUTH_SOCK pointing at the in-guest bridge socket. See ADR-0021.
-  local _sock
+  # Kit-declared environment[] entries persisted at provision are replayed the
+  # same way, mirroring the flag order the provisioning execs use (HOME, sock,
+  # then kit env — see _acq_msb_exec_flags_into).
+  local _sock _kitenv=()
   _sock=$(_acq_msb_ssh_auth_sock_for "$name")
+  _acq_msb_kit_env_flags_into _kitenv "$name"
   if [ -n "$_sock" ]; then
-    msb exec -u agent -e HOME=/home/agent -e "SSH_AUTH_SOCK=$_sock" "$name" "$@"
+    msb exec -u agent -e HOME=/home/agent -e "SSH_AUTH_SOCK=$_sock" \
+      ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
   else
-    msb exec -u agent -e HOME=/home/agent "$name" "$@"
+    msb exec -u agent -e HOME=/home/agent ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
   fi
 }
 
@@ -3694,6 +3745,11 @@ _acq_msb_attach() {
   _sock=$(_acq_msb_ssh_auth_sock_for "$name")
   [ -n "$_sock" ] && _sockflag=(-e "SSH_AUTH_SOCK=$_sock")
 
+  # Replay the kit environment[] persisted at provision, so agent-runtime config
+  # (OPENCODE_CONFIG-style vars, see ADR-0011) reaches the agent session.
+  local _kitenv=()
+  _acq_msb_kit_env_flags_into _kitenv "$name"
+
   if [ "$agent" = "shell" ]; then
     _acq_msb_shell_exec "$name" "$ws"
   fi
@@ -3705,7 +3761,8 @@ _acq_msb_attach() {
     _acq_msb_shell_exec "$name" "$ws"
   fi
 
-  exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} "$name" -- "$agent" "$@"
+  exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} \
+    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
 }
 
 # _acq_msb_shell_exec NAME [WS] — exec into an interactive login shell as the
@@ -3722,10 +3779,12 @@ _acq_msb_shell_exec() {
     fi
     [ -n "$ws" ] || ws="/home/agent"
   fi
-  local _sock _sockflag=()
+  local _sock _sockflag=() _kitenv=()
   _sock=$(_acq_msb_ssh_auth_sock_for "$name")
   [ -n "$_sock" ] && _sockflag=(-e "SSH_AUTH_SOCK=$_sock")
-  exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} "$name" -- /bin/sh -l
+  _acq_msb_kit_env_flags_into _kitenv "$name"
+  exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} \
+    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- /bin/sh -l
 }
 
 # ---------------------------------------------------------------------------

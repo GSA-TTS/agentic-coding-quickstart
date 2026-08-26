@@ -339,6 +339,12 @@ case "$_msb_sub" in
       # default (forwarding not configured); STUB_RECORDED_SSH_AUTH_SOCK models a
       # sandbox that recorded the bridge sock at provision time.
       *"cat /var/lib/acq/ssh-auth-sock"*) printf '%s' "${STUB_RECORDED_SSH_AUTH_SOCK:-}" ;;
+      # The persisted kit environment[] marker read by the session paths
+      # (run/attach/shell) so kit-declared guest env survives past provisioning
+      # (see ADR-0011). Empty by default (no kit declared environment[]);
+      # STUB_RECORDED_KIT_ENV models a sandbox whose kits recorded NAME=value
+      # lines at provision time (multi-line values model multiple entries).
+      *"cat /var/lib/acq/kit-env"*) printf '%s' "${STUB_RECORDED_KIT_ENV:-}" ;;
       *) : ;;
     esac ;;
   ssh)
