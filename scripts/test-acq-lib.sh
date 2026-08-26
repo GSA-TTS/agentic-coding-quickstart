@@ -332,19 +332,35 @@ case "$_msb_sub" in
         [ "${STUB_NPM_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
       *"test -f "*) exit 1 ;;       # markers absent
       *"test -s "*) exit 0 ;;       # copied files present
-      *"cat /var/lib/acq/agent"*) printf '%s' "${STUB_RECORDED_AGENT:-}" ;;
-      *"cat /var/lib/acq/workspace"*) printf '%s' "${STUB_RECORDED_WORKSPACE:-}" ;;
+      # The /var/lib/acq marker reads (agent, workspace, ssh-auth-sock,
+      # kit-env). An UNSET STUB_RECORDED_* models an ABSENT marker faithfully:
+      # a real `sh -c 'cat …'` exits 1 there, and acq runs under
+      # `set -euo pipefail`, so every reader must survive that nonzero (a
+      # sandbox from before a marker existed, or one whose feature was never
+      # configured, still has to serve every session verb). A SET-but-empty
+      # value models a present-but-empty marker (cat exits 0).
+      *"cat /var/lib/acq/agent"*)
+        [ -n "${STUB_RECORDED_AGENT+x}" ] || exit 1
+        printf '%s' "$STUB_RECORDED_AGENT" ;;
+      *"cat /var/lib/acq/workspace"*)
+        [ -n "${STUB_RECORDED_WORKSPACE+x}" ] || exit 1
+        printf '%s' "$STUB_RECORDED_WORKSPACE" ;;
       # ADR-0021: the persisted ssh-agent guest sock marker read by
-      # _acq_msb_ssh_auth_sock_for (and, via it, run/attach/start). Empty by
-      # default (forwarding not configured); STUB_RECORDED_SSH_AUTH_SOCK models a
-      # sandbox that recorded the bridge sock at provision time.
-      *"cat /var/lib/acq/ssh-auth-sock"*) printf '%s' "${STUB_RECORDED_SSH_AUTH_SOCK:-}" ;;
+      # _acq_msb_ssh_auth_sock_for (and, via it, run/attach/start).
+      *"cat /var/lib/acq/ssh-auth-sock"*)
+        [ -n "${STUB_RECORDED_SSH_AUTH_SOCK+x}" ] || exit 1
+        printf '%s' "$STUB_RECORDED_SSH_AUTH_SOCK" ;;
       # The persisted kit environment[] marker read by the session paths
       # (run/attach/shell) so kit-declared guest env survives past provisioning
-      # (see ADR-0011). Empty by default (no kit declared environment[]);
-      # STUB_RECORDED_KIT_ENV models a sandbox whose kits recorded NAME=value
-      # lines at provision time (multi-line values model multiple entries).
-      *"cat /var/lib/acq/kit-env"*) printf '%s' "${STUB_RECORDED_KIT_ENV:-}" ;;
+      # (see ADR-0011). STUB_RECORDED_KIT_ENV models a sandbox whose kits
+      # recorded NAME=value lines at provision time (multi-line values model
+      # multiple entries). UNSET models an ABSENT marker faithfully: a real
+      # `sh -c 'cat …'` exits 1 there, and acq runs under `set -euo pipefail`,
+      # so the reader must survive that nonzero (a sandbox created before the
+      # kit-env feature has no marker; every session verb still has to work).
+      *"cat /var/lib/acq/kit-env"*)
+        [ -n "${STUB_RECORDED_KIT_ENV+x}" ] || exit 1
+        printf '%s' "$STUB_RECORDED_KIT_ENV" ;;
       *) : ;;
     esac ;;
   ssh)

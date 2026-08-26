@@ -3269,8 +3269,13 @@ _acq_msb_start_ssh_agent_bridge() {
 # marker so run/attach on a name-only re-entry still find it. See ADR-0021.
 _acq_msb_ssh_auth_sock_for() {
   local name="$1"
-  msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/ssh-auth-sock 2>/dev/null' \
-    </dev/null 2>/dev/null | tr -d '[:space:]'
+  # Failure-guarded: with the marker absent (forwarding never configured), the
+  # in-guest `cat` exits 1 and — under acq's `set -euo pipefail` — the pipeline
+  # would otherwise propagate that into the caller's command substitution and
+  # kill the whole session verb (the trailing `tr` does NOT mask it: pipefail
+  # takes the failing stage's status).
+  { msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/ssh-auth-sock 2>/dev/null' \
+    </dev/null 2>/dev/null || true; } | tr -d '[:space:]'
 }
 
 # _acq_msb_kit_env_flags_into ARRVAR NAME — build the `-e NAME=value` flag array
@@ -3287,9 +3292,13 @@ _acq_msb_ssh_auth_sock_for() {
 _acq_msb_kit_env_flags_into() {
   local _arrn="$1" _name="$2"
   eval "$_arrn=()"
+  # An ABSENT marker (sandbox created before the kit-env feature, or no kit
+  # declared environment[]) makes the in-guest `cat` exit 1; acq runs under
+  # `set -euo pipefail`, so the substitution MUST be failure-guarded or every
+  # session verb against such a sandbox dies before producing any output.
   local _kvs
   _kvs=$(msb exec "$_name" -u 0 -- sh -c 'cat /var/lib/acq/kit-env 2>/dev/null' \
-    </dev/null 2>/dev/null)
+    </dev/null 2>/dev/null) || _kvs=""
   [ -n "$_kvs" ] || return 0
   local _line
   while IFS= read -r _line; do
@@ -3716,9 +3725,13 @@ _acq_msb_attach() {
   # override; otherwise read the guest path recorded at provision (it mirrors the
   # host mount path, so it can't be recomputed from NAME alone). Fall back to the
   # agent home if nothing was recorded (older sandbox).
+  # Both marker reads below are failure-guarded (`|| true` before the pipe):
+  # an absent marker makes the in-guest `cat` exit 1, and under acq's
+  # `set -euo pipefail` an unguarded pipeline would kill the attach instead of
+  # taking the documented fallback.
   local ws="${ACQ_MSB_WORKSPACE:-}"
   if [ -z "$ws" ]; then
-    ws=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null | tr -d '\r\n')
+    ws=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
   fi
   [ -n "$ws" ] || ws="/home/agent"
 
@@ -3728,7 +3741,7 @@ _acq_msb_attach() {
   # otherwise break the single-quoting and run as the agent user. Fall back to a
   # plain shell on anything unexpected.
   local agent
-  agent=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null | tr -d '[:space:]')
+  agent=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '[:space:]')
   if [ -z "$agent" ] || ! _acq_msb_safe_agent_token "$agent"; then
     agent="shell"
   fi
@@ -3775,7 +3788,9 @@ _acq_msb_shell_exec() {
   if [ -z "$ws" ]; then
     ws="${ACQ_MSB_WORKSPACE:-}"
     if [ -z "$ws" ]; then
-      ws=$(msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null | tr -d '\r\n')
+      # Failure-guarded like the attach path: an absent marker must fall back,
+      # not kill the shell verb under `set -euo pipefail`.
+      ws=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
     fi
     [ -n "$ws" ] || ws="/home/agent"
   fi

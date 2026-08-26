@@ -113,6 +113,34 @@ RUBOCOP_PARALLELISM=4"
   assert_regex "$(cat "$CALLS")" '-e OPENCODE_CONFIG=/home/agent/oc\.jsonc'
 }
 
+@test "msb markers: ABSENT /var/lib/acq markers must not kill session verbs under set -e" {
+  # acq runs under `set -euo pipefail`. On a sandbox whose /var/lib/acq markers
+  # are absent (created before a marker existed, e.g. pre-kit-env sandboxes, or
+  # no ssh-agent forwarding configured), the in-guest `cat` exits 1 inside the
+  # command substitution and an unguarded assignment terminates acq before any
+  # output — every exec/shell/attach against such a sandbox dies with rc 1 and
+  # nothing on stdout/stderr (observed live for kit-env and ssh-auth-sock).
+  # All STUB_RECORDED_* stay UNSET here so the stub exits 1 like real cat.
+  : > "$CALLS"
+  run bash -c '
+    set -euo pipefail
+    export STUB_MSB_VERSION=0.6.9
+    unset STUB_RECORDED_KIT_ENV STUB_RECORDED_SSH_AUTH_SOCK STUB_RECORDED_AGENT STUB_RECORDED_WORKSPACE
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run sbox -- git status >/dev/null 2>&1
+    echo RUN-SURVIVED
+    ( _acq_msb_attach sbox </dev/null >/dev/null 2>&1 )
+    echo ATTACH-SURVIVED
+    ( _acq_msb_shell_exec sbox </dev/null >/dev/null 2>&1 )
+    echo SHELL-SURVIVED
+  '
+  assert_success
+  assert_output --partial 'RUN-SURVIVED'
+  assert_output --partial 'ATTACH-SURVIVED'
+  assert_output --partial 'SHELL-SURVIVED'
+  assert_regex "$(cat "$CALLS")" 'exec -u agent -e HOME=/home/agent sbox -- git status'
+}
+
 @test "msb kit env: replay drops tampered names and keeps the last value for a duplicate" {
   : > "$CALLS"
   run bash -c '
