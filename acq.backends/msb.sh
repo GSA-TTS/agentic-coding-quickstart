@@ -3711,8 +3711,8 @@ _acq_msb_attach() {
 # _acq_msb_shell_exec NAME [WS] — exec into an interactive login shell as the
 # agent user: PTY, workspace cwd, sane $SHELL, and SSH_AUTH_SOCK when the host
 # ssh-agent is forwarded (a raw `msb exec` shell gets none of that). Shared by
-# _acq_msb_attach's shell paths and the neutral `acq shell` verb (#383). WS
-# skips the workspace lookup when the caller already resolved it.
+# _acq_msb_attach's shell paths and the neutral `acq shell` verb. WS skips the
+# workspace lookup when the caller already resolved it.
 _acq_msb_shell_exec() {
   local name="$1" ws="${2:-}"
   if [ -z "$ws" ]; then
@@ -3729,7 +3729,8 @@ _acq_msb_shell_exec() {
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_shell — interactive human shell (#383)
+# acq_backend_shell — interactive human shell (the neutral `acq shell` verb;
+# `acq run` relaunches the recorded agent, `acq exec` is non-interactive)
 # ---------------------------------------------------------------------------
 acq_backend_shell() {
   _acq_msb_shell_exec "$1"

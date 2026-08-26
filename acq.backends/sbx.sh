@@ -492,7 +492,7 @@ acq_backend_run() {
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_shell — interactive human shell (#383)
+# acq_backend_shell — interactive human shell
 # ---------------------------------------------------------------------------
 # The one lifecycle moment the neutral surface didn't cover: `acq run NAME`
 # relaunches the recorded agent and `acq exec` is non-interactive. sbx
