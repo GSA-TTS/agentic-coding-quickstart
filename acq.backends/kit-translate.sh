@@ -397,8 +397,10 @@ _kit_pp_validate() {
 # mounts at create) and mount UNSEEDED: an empty filesystem shadows any image
 # content at the path, so a kit needing seeded content ships its own first-boot
 # copy step. Multiple kits union by path, last wins — sbx resolves that itself.
-# The neutral schema carries no `mode` (msb has no equivalent; kits chmod in a
-# startup step instead — see ADR-0023).
+# The neutral schema carries no volume `mode` (msb has no equivalent; kits
+# chmod in a startup step instead — see ADR-0023). files[].mode is different:
+# the translator synthesizes its chmod into setup.install itself (#381,
+# _kit_sbx_mode_chmod_script).
 #
 # VALIDATION (SI-10): these values reach a generated sbx-v2 spec and an msb
 # create argv, so they are untrusted. path must be absolute, charset-restricted
@@ -853,6 +855,10 @@ kit_spec_agent_context() {
 #     -> /home/... at create time. The neutral `phase:` hint (e.g. initFiles) is
 #     NOT re-emitted as a command — the static file-drop is sbx's create-time
 #     mechanism and already lands the payload before setup hooks run.
+#   files[].mode (home-staged)      -> setup.install[] combined chmod step
+#     sbx pins every files/ payload to 0644 at materialization (docker/
+#     sbx-releases#499), so declared modes are synthesized into one chmod
+#     install command — see _kit_sbx_mode_chmod_script (#381).
 #   commands[phase=install]         -> setup.install[]
 #   commands[phase=initFiles]       -> setup.startup[]
 #   commands[phase=startup]         -> setup.startup[]
@@ -986,14 +992,84 @@ kit_translate_to_sbx() {
   printf '%s\n' "$out"
 }
 
+# Build the combined chmod script for kit-declared file modes (#381). sbx pins
+# every kit files/ payload to 0644 at materialization (content-addressed,
+# reproducible layers — docker/sbx-releases#499; v0.39 extended the pin to
+# local/git kit loads), so a declared `mode:` only takes effect through the
+# maintainer-sanctioned workaround: a setup.install chmod that runs after
+# files/home/ staging. Emits one `chmod && echo || echo` line per home-staged
+# mode-bearing files[] entry, in SPEC ORDER (deterministic output). Non-home
+# (workspace-targeted) modes get a translate-time WARNING and no chmod:
+# files/workspace/ is written AFTER install commands run, so a chmod there
+# would always fail (same sbx#499 thread).
+#
+# VALIDATION (SI-10, mirroring _kit_vol_validate): mode reaches a generated
+# sbx-v2 spec as a root shell command, so it is untrusted input. Only a
+# 0-prefixed 4-digit octal string (0[0-7]{3}) is accepted — kit_spec_files
+# already drops non-octal modes, and this tighter gate additionally refuses
+# 3-digit and setuid/setgid/sticky (4-digit non-0-prefixed) forms; offenders
+# are dropped with a stderr warning (`acq kit validate` reports them as
+# errors). Paths were charset-validated by kit_spec_files ([A-Za-z0-9._/-]);
+# single-quote them anyway.
+_kit_sbx_mode_chmod_script() {
+  local spec="$1" fline fpath fmode script=""
+  while IFS= read -r fline; do
+    [ -n "$fline" ] || continue
+    fpath=$(printf '%s' "$fline" | cut -f1)
+    fmode=$(printf '%s' "$fline" | cut -f2)
+    [ -n "$fpath" ] && [ -n "$fmode" ] || continue
+    case "$fpath" in
+      /home/agent/*) ;;
+      *)
+        echo "kit-translate: warning: mode ${fmode} on ${fpath} cannot be applied on sbx (only home-staged files can be chmodded in setup.install; files/workspace/ is written after install commands — docker/sbx-releases#499)" >&2
+        continue
+        ;;
+    esac
+    case "$fmode" in
+      0[0-7][0-7][0-7]) ;;
+      *)
+        echo "kit-translate: skipping chmod for ${fpath}: mode must be a 0-prefixed octal string like \"0755\" (got: ${fmode})" >&2
+        continue
+        ;;
+    esac
+    script="${script:+${script}
+}chmod ${fmode} '${fpath}' && echo \"acq kit-modes: ${fmode} ${fpath}\" || echo \"acq kit-modes: FAILED ${fmode} ${fpath}\""
+  done <<EOF
+$(kit_spec_files "$spec")
+EOF
+  printf '%s' "$script"
+}
+
 # Emit setup.install/setup.startup blocks into an sbx-v2 spec from the neutral
 # commands. v2 has no initFiles command phase, so neutral initFiles commands are
 # emitted before startup commands under setup.startup.
+#
+# The synthesized file-mode chmod (#381, _kit_sbx_mode_chmod_script) is emitted
+# as ONE combined setup.install entry BEFORE the kit's own install commands, so
+# an install command may exec a kit-shipped script. One line per file (no set
+# -e) so a missing file doesn't skip the rest, and each line prints what it did
+# — sbx install-command failures are NON-fatal at create time (sbx#499), so the
+# startup log is the only place a failed chmod surfaces. Nothing is emitted for
+# a mode-less kit: its generated spec must stay byte-identical.
 _kit_sbx_emit_setup() {
   local spec="$1" out="$2"
   local phases="install initFiles startup"
   local phase have_setup=0 have_install=0 have_startup=0 tmp
   tmp=$(mktemp)
+
+  local chmod_script
+  chmod_script=$(_kit_sbx_mode_chmod_script "$spec")
+  if [ -n "$chmod_script" ]; then
+    printf 'setup:\n  install:\n' >> "$tmp"
+    have_setup=1; have_install=1
+    printf '    - command: |\n' >> "$tmp"
+    printf '%s\n' "$chmod_script" | while IFS= read -r cl; do
+      printf '        %s\n' "$cl" >> "$tmp"
+    done
+    printf '      user: "0"\n' >> "$tmp"
+    printf '      description: %s\n' \
+      "$(_kit_yaml_quote 'Apply kit-declared file modes (sbx pins files/ payloads to 0644 — see docker/sbx-releases#499)')" >> "$tmp"
+  fi
 
   for phase in $phases; do
     local cur_phase="" cur_user="" cur_bg="false" argv=() reading=0 line
@@ -1175,24 +1251,31 @@ kit_validate() {
 $(kit_spec_files "$spec")
 EOF
 
-  # Raw-spec scan: any `mode:` value that is not 3-4 octal digits is rejected
-  # (it would break out of the root `chmod $mode` in the msb adapter).
+  # Raw-spec scan: any `mode:` value that is not a 0-prefixed 4-digit octal
+  # string is rejected — it reaches the root `chmod $mode` in the msb adapter
+  # AND the synthesized sbx setup.install chmod (#381), so the accepted grammar
+  # is the strict intersection both emit safely (no 3-digit shorthand, no
+  # setuid/setgid/sticky leading digit).
   local bad_mode
   bad_mode=$(awk '
     /^[[:space:]]+mode:/ {
       v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v)
       gsub(/^["'\'' ]+|["'\'' ]+$/,"",v)
-      # Longhand /^[0-7][0-7][0-7][0-7]?$/, NOT the interval /^[0-7]{3,4}$/:
-      # mawk (Debian/Ubuntu default awk) has no interval expressions, so the
-      # interval form matches NOTHING under mawk. Here the test is INVERTED
-      # (collect modes that FAIL the pattern, to reject the spec), so under mawk
-      # EVERY mode looks invalid and the whole spec is wrongly rejected. See the
-      # detailed note in the files[] parser above. Do not "simplify" to {3,4}.
-      if (v !~ /^[0-7][0-7][0-7][0-7]?$/) print v
+      # Longhand /^0[0-7][0-7][0-7]$/, NOT an interval ({n,m}): mawk
+      # (Debian/Ubuntu default awk) has no interval expressions, so an interval
+      # form matches NOTHING there. The test is INVERTED (collect modes that
+      # FAIL the pattern, to reject the spec), so under mawk EVERY mode would
+      # look invalid and the whole spec would be wrongly rejected. See the
+      # detailed note in the files[] parser above; do not "simplify" to {n,m}.
+      # Stricter than the parser gate on purpose (#381): the leading zero is
+      # required and setuid/setgid/sticky forms are rejected — this value
+      # reaches a root chmod in the msb adapter AND the synthesized sbx
+      # setup.install chmod.
+      if (v !~ /^0[0-7][0-7][0-7]$/) print v
     }' "$spec")
   if [ -n "$bad_mode" ]; then
     while IFS= read -r m; do
-      [ -n "$m" ] && { echo "kit: validate: file mode must be octal (3-4 digits): '$m'" >&2; errs=$((errs + 1)); }
+      [ -n "$m" ] && { echo "kit: validate: file mode must be a 4-digit octal string with a leading zero (e.g. \"0755\"): '$m'" >&2; errs=$((errs + 1)); }
     done <<EOF
 $bad_mode
 EOF

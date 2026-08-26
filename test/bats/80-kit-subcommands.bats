@@ -85,6 +85,27 @@ SPEC
   assert_output --partial 'unknown command phase'
 }
 
+@test "#381: kit validate rejects a file mode without the leading zero" {
+  local zkit="$STUBDIR/zkit"
+  mkdir -p "$zkit/files/home"
+  printf '#!/bin/sh\n' > "$zkit/files/home/t.sh"
+  cat >"$zkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: zeroless-kit
+displayName: Zeroless Kit
+description: mode without a leading zero must be rejected
+files:
+  - path: /home/agent/t.sh
+    mode: "755"
+    source: files/home/t.sh
+SPEC
+  run "$ACQ" kit validate "$zkit"
+  assert_failure
+  assert_output --partial "'755'"
+  assert_output --partial 'leading zero'
+}
+
 @test "kit apply (msb): runs msb exec and stages NO create-time script (ADR-0017)" {
   local applykit="$STUBDIR/applykit"
   mkdir -p "$applykit"
