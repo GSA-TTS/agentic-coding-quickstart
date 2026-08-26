@@ -492,6 +492,16 @@ acq_backend_run() {
 }
 
 # ---------------------------------------------------------------------------
+# acq_backend_shell — interactive human shell
+# ---------------------------------------------------------------------------
+# The one lifecycle moment the neutral surface didn't cover: `acq run NAME`
+# relaunches the recorded agent and `acq exec` is non-interactive. sbx
+# allocates the PTY itself via `exec -it`; exec hands it the terminal directly.
+acq_backend_shell() {
+  exec sbx exec -it "$1" bash
+}
+
+# ---------------------------------------------------------------------------
 # acq_backend_attach — interactive attach
 # ---------------------------------------------------------------------------
 

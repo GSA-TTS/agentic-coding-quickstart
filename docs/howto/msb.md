@@ -176,7 +176,8 @@ acq ls                      # list sandboxes
 acq stop my-sandbox         # stop (preserves state)
 acq run my-sandbox          # resume / re-attach by name
 acq rm my-sandbox           # remove permanently
-acq run my-sandbox          # interactive attach (acq exec runs a command, not a TTY)
+acq run my-sandbox          # interactive attach (relaunches the recorded agent)
+acq shell my-sandbox        # interactive human shell (acq exec runs a command, not a TTY)
 acq exec my-sandbox -- <cmd>   # run a one-off command in the sandbox
 ```
 
@@ -195,7 +196,7 @@ known-limitations note).
 | Resume sandbox | `acq run <name>` | `msb run <name>` |
 | Remove sandbox | `acq rm <name>` | `msb remove <name>` |
 | Run a command | `acq exec <name> -- <cmd>` | `msb exec <name> -- <cmd>` |
-| Interactive shell | `acq run <name>` (attach) | `msb exec -it <name> -- bash` |
+| Interactive shell | `acq shell <name>` | `msb exec -it <name> -- bash` |
 
 The following are genuinely msb-specific mechanics the wrapper does not
 abstract — use the raw `msb` command:

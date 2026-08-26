@@ -90,6 +90,7 @@ Subcommands:
   restart NAME                             Stop then start a sandbox, re-running
                                            kit startup services (msb only; see 'start').
   rm NAME                                  Remove a sandbox.
+  shell NAME                               Open an interactive shell in a sandbox.
   exec NAME -- CMD...                      Run a command inside a sandbox.
   cp SRC DST                               Copy files in/out (NAME:path syntax).
   ports NAME [--publish ...]               List or publish ports.
@@ -315,6 +316,19 @@ Runs CMD as the unprivileged agent user in the workspace. On msb, when the host
 ssh-agent is forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
 U
       ;;
+    shell)
+      cat >&2 <<'U'
+acq shell — open an interactive shell in a sandbox
+
+Usage:
+  acq shell NAME
+
+Opens an interactive shell in an existing sandbox as the unprivileged agent
+user (the human counterpart to 'acq run NAME', which relaunches the recorded
+agent; 'acq exec' is non-interactive). On msb, when the host ssh-agent is
+forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
+U
+      ;;
     cp)
       cat >&2 <<'U'
 acq cp — copy files in or out of a sandbox
@@ -387,7 +401,7 @@ U
 _acq_verb_backend_help_kind() {
   case "${1%% *}" in
     run|ls|stop|rm|exec|cp|ports|secret|kit) printf 'shared' ;;
-    start|restart|create|version|doctor|github-scope|usai-rotate-api-key|backend) printf 'acqonly' ;;
+    start|restart|create|shell|version|doctor|github-scope|usai-rotate-api-key|backend) printf 'acqonly' ;;
     *) printf '' ;;
   esac
 }
@@ -1186,6 +1200,13 @@ case "$subcommand" in
     [ -n "$local_name" ] || { echo "acq: exec: missing sandbox name" >&2; exit 1; }
     shift
     acq_backend_run "$local_name" "$@"
+    ;;
+
+  shell)
+    shift
+    local_name="${1:-}"
+    [ -n "$local_name" ] || { echo "acq: shell: missing sandbox name" >&2; exit 1; }
+    acq_backend_shell "$local_name"
     ;;
 
   cp)
