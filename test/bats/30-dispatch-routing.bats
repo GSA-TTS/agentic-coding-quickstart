@@ -141,6 +141,23 @@ _seed_usai() {
   assert [ -f "$STUBDIR/.msb_created" ]
 }
 
+# The github-scope advisory MUST run BEFORE the sandbox is created. On msb the
+# GitHub token binds only at create time (--secret ENV@HOST), so a token stored
+# by the advisory after create would never bind to the sandbox — the same
+# ordering the USAi key gate uses (both precede provision). Assert the advisory's
+# line appears AND the create still proceeds (warn-not-block: a declined,
+# non-TTY advisory does not abort the create). Uses msb, where create-time
+# binding is the operative constraint.
+@test "create(msb): github advisory runs before provision; declined advisory still provisions" {
+  local ghproj="$STUBDIR/gh-mcreate"; mkdir -p "$ghproj"
+  ( cd "$ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
+  rm -f "$STUBDIR/.msb_created"
+  run bash -c 'printf "" | USAI_API_KEY="sk-ci-host" ACQ_BACKEND=msb ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$3/.secrets" "$1" create opencode "$2"' _ "$ACQ" "$ghproj" "$ghproj"
+  assert_output --partial 'no repo-scoped GitHub token'
+  assert_regex "$(cat "$CALLS")" 'msb create'
+  assert [ -f "$STUBDIR/.msb_created" ]
+}
+
 @test "run: present key + bad status -> post-create gate offers rotate; decline aborts" {
   local proj="$STUBDIR/keyrun2"; mkdir -p "$proj"
   _seed_usai
