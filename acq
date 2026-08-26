@@ -887,6 +887,16 @@ case "$subcommand" in
     if ! ensure_key_present "$local_name"; then
       exit 1
     fi
+
+    # Nudge toward a per-sandbox scoped GitHub token BEFORE provisioning, for the
+    # same reason as the USAi gate above: msb binds secrets only at create time
+    # (--secret ENV@HOST), so a GitHub token stored AFTER create would never bind
+    # to this sandbox. Prompting first lets a supplied token be picked up at
+    # create. Warn-not-block (ADR-0013): declining never aborts the create, it
+    # just proceeds without a scoped token (the token is optional).
+    [ -n "$ws" ] || ws="$PWD"
+    advise_github_scope "$local_name" "$ws"
+
     acq_backend_provision "$local_name" "$@"
 
     # Non-blocking USAi key advisory. `create` is detached and never attaches,
@@ -894,12 +904,6 @@ case "$subcommand" in
     # just warn if it's already invalid so a create-only user knows before they
     # later `acq run`.
     advise_valid_key "$local_name"
-
-    # Nudge toward a per-sandbox scoped GitHub token, same as `run`. `create`
-    # is detached (no attached agent), but the advisory is informational plus
-    # an optional interactive prompt, so it applies equally here.
-    [ -n "$ws" ] || ws="$PWD"
-    advise_github_scope "$local_name" "$ws"
     ;;
 
   run)
@@ -966,6 +970,14 @@ case "$subcommand" in
         # just-provisioned sandbox (else branch) is current by construction, so
         # the offer is intentionally only on this path.
         maybe_offer_bundle_refresh "${ACQ_RESOLVED_BACKEND}" "$local_name" "$_pre_heal_status"
+
+        # Re-attach GitHub-token advisory. A sandbox that already exists cannot
+        # re-bind a token at create, but it CAN be re-fed live (msb modify /
+        # sbx proxy), so still nudge toward a scoped token when one is missing.
+        # Fresh creates run the advisory BEFORE provision (below) so msb binds it
+        # at create; this re-attach case is the live-refeed path.
+        [ -n "$ws" ] || ws="$PWD"
+        advise_github_scope "$local_name" "$ws"
       else
         # Fresh create: the USAi API key MUST be stored before we provision,
         # because a backend (msb) binds secrets only at create time. Creating the
@@ -976,6 +988,16 @@ case "$subcommand" in
         if ! ensure_key_present "$local_name"; then
           exit 1
         fi
+
+        # Nudge toward a per-sandbox scoped GitHub token BEFORE provisioning, for
+        # the SAME reason as the USAi gate: msb binds secrets only at create time
+        # (--secret ENV@HOST), so a token stored AFTER create would never bind to
+        # this sandbox. Prompting first lets a supplied token be picked up at
+        # create. Warn-not-block (ADR-0013): declining never aborts, it just
+        # proceeds without a scoped token (the token is optional).
+        [ -n "$ws" ] || ws="$PWD"
+        advise_github_scope "$local_name" "$ws"
+
         acq_backend_provision "$local_name" "${create_args[@]}"
       fi
 
@@ -992,7 +1014,6 @@ case "$subcommand" in
 
       [ -n "$ws" ] || ws="$PWD"
       warn_if_no_git_identity "$ws"
-      advise_github_scope "$local_name" "$ws"
 
       # opencode (since v1.15.1) fetches its binary in a postinstall step that
       # some sandbox images skip, so a fresh launch fails with "postinstall

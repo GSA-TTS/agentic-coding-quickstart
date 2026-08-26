@@ -77,6 +77,16 @@ Concretely:
   **warn-not-block** convention
   (matching `warn_if_no_ssh_signing_key` / `warn_if_no_git_identity`) — it never
   blocks a run and is a no-op in CI / non-TTY.
+  On a **fresh create**, this advisory runs **before** `acq_backend_provision`,
+  not after. A backend that binds secrets only at create time (msb, via
+  `--secret ENV@HOST`) can only pick up a token that is already stored when the
+  sandbox is created; a token scoped after create would never bind to that
+  sandbox. Ordering the advisory before provision — the same reason the USAi key
+  gate precedes provision — lets a supplied token bind at create. It stays
+  warn-not-block: declining proceeds with the create (unlike the USAi gate, the
+  GitHub token is optional). On a **re-attach to an existing** sandbox the
+  advisory still runs (after the heal), but there it drives the live re-feed path
+  (`msb modify` / sbx proxy) rather than a create-time binding.
 - The global `sbx secret set -g github` path is **deprecated in the docs** (kept
   working for back-compat), and the per-sandbox scoped flow becomes the
   documented default.
