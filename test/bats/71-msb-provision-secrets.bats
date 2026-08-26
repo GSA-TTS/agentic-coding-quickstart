@@ -117,6 +117,16 @@ _provision() { # NAME PRE_SNIPPET
   refute_regex "$log" 'SBX-REAL-VALUE|USAI-REAL-VALUE|GH-REAL-VALUE|NOMAP-VALUE'
 }
 
+@test "#384(msb): a --host sidecar overrides the compiled-in usai binding" {
+  _provision altbox '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/alt-secrets"
+    ACQ_SECRET_TEST_VALUE="USAI-ALT-VALUE" acq_secret_set_interactive usai "" "usai.alt.example.gov" "USAI_API_KEY" >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '--secret USAI_API_KEY@usai\.alt\.example\.gov'
+  refute_regex "$log" '--secret USAI_API_KEY@api\.gsa\.usai\.gov'
+}
+
 @test "progress#287: provision emits plain phase markers on stderr, no animation" {
   _provision progbox '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/prog-secrets"

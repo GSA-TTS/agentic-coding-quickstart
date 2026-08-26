@@ -186,11 +186,12 @@ ACQ_MSB_GITHUB_HOST="${ACQ_MSB_GITHUB_HOST:-github.com,api.github.com,codeload.g
 # The optional SANDBOX arg gives scoped-sidecar precedence over the global one.
 _acq_msb_service_binding() {
   local _service="$1" _sandbox="${2:-}" _meta _host _env
-  case "$_service" in
-    usai)   printf '%s\t%s\n' "USAI_API_KEY" "$ACQ_MSB_USAI_HOST"; return 0 ;;
-    github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
-  esac
-  # Generic path: read the persisted (host, env) sidecar for a custom endpoint.
+  # Sidecar FIRST (#384): an explicit `--host` recorded at `acq secret set`
+  # must win over the compiled-in usai/github mapping — the sbx backend gives
+  # the user's host the same precedence, and a compiled-in short-circuit here
+  # silently re-bound a self-hosted token to the default endpoint. Absent
+  # sidecar => compiled-in mapping for usai/github, empty (no binding) for
+  # anything else — prior behavior unchanged.
   if command -v acq_secret_meta_resolve >/dev/null 2>&1; then
     if _meta=$(acq_secret_meta_resolve "$_service" "$_sandbox" 2>/dev/null) && [ -n "$_meta" ]; then
       _host=$(printf '%s' "$_meta" | cut -f1)
@@ -201,6 +202,10 @@ _acq_msb_service_binding() {
       fi
     fi
   fi
+  case "$_service" in
+    usai)   printf '%s\t%s\n' "USAI_API_KEY" "$ACQ_MSB_USAI_HOST"; return 0 ;;
+    github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
+  esac
   printf '\t\n'
 }
 
@@ -773,26 +778,39 @@ _acq_msb_bind_secrets_into() {
   local _arrn="$1" _namesn="$2" _name="$3"
 
   if command -v acq_secret_resolve >/dev/null 2>&1; then
+    # usai/github hosts resolve through the SAME binding table set/rm/refeed use
+    # (_acq_msb_service_binding), so a `--host` sidecar recorded at `acq secret
+    # set` overrides the compiled-in endpoint here too (#384) instead of being
+    # written-but-ignored at provision.
+    local _usai_binding _usai_env _usai_host
+    _usai_binding=$(_acq_msb_service_binding usai "$_name")
+    _usai_env=$(printf '%s' "$_usai_binding" | cut -f1)
+    _usai_host=$(printf '%s' "$_usai_binding" | cut -f2)
+
     # USAi: acq store first, else a pre-exported USAI_API_KEY (e.g. CI).
-    if ! _acq_msb_bind_one "$_arrn" "$_namesn" usai "$_name" USAI_API_KEY "$ACQ_MSB_USAI_HOST"; then
+    if ! _acq_msb_bind_one "$_arrn" "$_namesn" usai "$_name" "$_usai_env" "$_usai_host"; then
       if [ -n "${USAI_API_KEY:-}" ]; then
-        eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
-        acq_debug "msb secret: binding USAI_API_KEY@${ACQ_MSB_USAI_HOST} (from env)"
+        eval "$_arrn+=(--secret \"\${_usai_env}@\${_usai_host}\")"
+        acq_debug "msb secret: binding ${_usai_env}@${_usai_host} (from env)"
       fi
     fi
 
     # GitHub: bind the token to the API and git-transport hosts. acq store first,
     # then a pre-exported GITHUB_TOKEN, then GH_TOKEN (CI). Absent token => no
     # binding; the playbook kit then degrades gracefully (warns, no rules/skills).
-    if ! _acq_msb_bind_one "$_arrn" "$_namesn" github "$_name" GITHUB_TOKEN "$ACQ_MSB_GITHUB_HOST"; then
+    local _gh_binding _gh_env _gh_host
+    _gh_binding=$(_acq_msb_service_binding github "$_name")
+    _gh_env=$(printf '%s' "$_gh_binding" | cut -f1)
+    _gh_host=$(printf '%s' "$_gh_binding" | cut -f2)
+    if ! _acq_msb_bind_one "$_arrn" "$_namesn" github "$_name" "$_gh_env" "$_gh_host"; then
       if [ -n "${GITHUB_TOKEN:-}" ]; then
-        eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
-        acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from env)"
+        eval "$_arrn+=(--secret \"\${_gh_env}@\${_gh_host}\")"
+        acq_debug "msb secret: binding ${_gh_env}@${_gh_host} (from env)"
       elif [ -n "${GH_TOKEN:-}" ]; then
         export GITHUB_TOKEN="$GH_TOKEN"
         eval "$_namesn+=(\"GITHUB_TOKEN\")"
-        eval "$_arrn+=(--secret \"GITHUB_TOKEN@\${ACQ_MSB_GITHUB_HOST}\")"
-        acq_debug "msb secret: binding GITHUB_TOKEN@${ACQ_MSB_GITHUB_HOST} (from GH_TOKEN env)"
+        eval "$_arrn+=(--secret \"\${_gh_env}@\${_gh_host}\")"
+        acq_debug "msb secret: binding ${_gh_env}@${_gh_host} (from GH_TOKEN env)"
       fi
     fi
 
