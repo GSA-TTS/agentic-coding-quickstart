@@ -95,6 +95,20 @@ KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 KEY_MGMT_URL="https://console.gsa.usai.gov/key-management"
 
+# Source the shared agent catalog (single source of truth for agent tokens and
+# the sandbox-template image naming convention; issue #377). Both adapters also
+# source it defensively so they work when loaded without common.sh (some tests
+# source an adapter directly). Guard so a re-source is cheap.
+if ! command -v acq_is_known_agent >/dev/null 2>&1; then
+  if [ -n "${ACQ_SCRIPT_DIR:-}" ] && [ -f "${ACQ_SCRIPT_DIR}/acq.backends/agents.sh" ]; then
+    # shellcheck disable=SC1091
+    . "${ACQ_SCRIPT_DIR}/acq.backends/agents.sh"
+  else
+    # shellcheck source=acq.backends/agents.sh
+    . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
+  fi
+fi
+
 # Source the neutral-kit translation layer (spec.yaml parser + shortcut
 # dispatch). ACQ_SCRIPT_DIR is exported by the acq entry point; in the offline
 # test harness it is set before common.sh is sourced.

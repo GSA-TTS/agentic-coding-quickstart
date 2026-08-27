@@ -76,13 +76,21 @@ Both are resolved by a single helper, `acq_resolve_neutral_image` (in
 
 ### Precedence
 
-`--image` flag **>** `ACQ_IMAGE` env **>** backend-specific var / default.
+`ACQ_MSB_IMAGE` backend var **>** `--image` flag **>** `ACQ_IMAGE` env **>**
+agent-derived backend default.
 
 When a backend-specific var is **also** set (today only `ACQ_MSB_IMAGE`), the
 **most-specific backend var wins**, and `acq` prints a one-time notice so the
 override is not silent. Rationale: a user who set `ACQ_MSB_IMAGE` did so
 deliberately for that backend; the neutral knob is the broader default and
 should yield to the narrower one.
+
+For msb, the agent-derived default uses the same sandbox-template naming
+convention as sbx for known agent tokens:
+`docker.io/docker/sandbox-templates:<agent>-docker`. If that derived image is
+not found, acq retries once with
+`docker.io/docker/sandbox-templates:shell-docker`. Explicit image failures do not
+fall back silently.
 
 ### Per-backend mapping
 
@@ -189,12 +197,13 @@ image reference — not a hardcoded list of hosts:
 
 ## Validation
 
-- **Offline (`scripts/test-acq`, no Docker/KVM):** asserts `ACQ_IMAGE` and
+- **Offline (`scripts/test-acq-bats`, no Docker/KVM):** asserts `ACQ_IMAGE` and
   `--image` reach `msb create` as the image positional; that `ACQ_MSB_IMAGE`
   wins over `ACQ_IMAGE` (with the notice); that a neutral image injects `sbx
   create --template <ref>`; that a user-supplied `--template` is not
-  double-injected; and that with no image set, sbx omits `--template` and msb
-  uses its default.
+  double-injected; and that with no image set, sbx omits `--template` while msb
+  derives an agent-specific sandbox-template image and falls back to
+  `shell-docker` only when that derived image is not found.
 - **Live (`scripts/verify-image-override`, host with a sandbox-capable
   runtime):** builds a tiny image `FROM docker/sandbox-templates:shell` (via
   `docker` or `podman` — Docker Desktop is not required), imports it into each
@@ -215,5 +224,5 @@ image reference — not a hardcoded list of hosts:
   <https://docs.docker.com/ai/sandboxes/customize/kit-reference/#sandbox-block>
 - Docker Sandboxes custom templates:
   <https://docs.docker.com/ai/sandboxes/customize/templates/>
-- Related code: `acq`, `acq.backends/common.sh`, `acq.backends/sbx.sh`,
-  `acq.backends/msb.sh`, `docs/BACKEND_GUIDE.md`.
+- Related code: `acq`, `acq.backends/agents.sh`, `acq.backends/common.sh`,
+  `acq.backends/sbx.sh`, `acq.backends/msb.sh`, `docs/BACKEND_GUIDE.md`.

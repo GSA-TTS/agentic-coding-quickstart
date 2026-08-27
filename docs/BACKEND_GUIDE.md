@@ -175,7 +175,7 @@ Tunables:
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `ACQ_MSB_IMAGE` | `docker.io/docker/sandbox-templates:shell-docker` | Base OCI image (the sbx agent-template: ships the `agent` user + passwordless sudo, node/git/curl/ca-certificates, and an agent-writable npm global prefix). A custom override must be pullable and ship these prerequisites. **Precedence (ADR-0022):** an explicitly set `ACQ_MSB_IMAGE` wins over the backend-neutral `--image`/`ACQ_IMAGE` (a one-time notice is printed); if only the neutral knob is set, it is used; otherwise this default. |
+| `ACQ_MSB_IMAGE` | (unset) | Backend-specific base OCI image override. A custom override must be pullable and ship the base-image prerequisites. **Precedence (ADR-0022):** an explicitly set `ACQ_MSB_IMAGE` wins over the backend-neutral `--image`/`ACQ_IMAGE` (a one-time notice is printed); if only the neutral knob is set, it is used; otherwise msb derives `docker.io/docker/sandbox-templates:<agent>-docker` for known agents and falls back to `docker.io/docker/sandbox-templates:shell-docker` if that derived image is not found. |
 | `ACQ_IMAGE` | (unset) | Backend-**neutral** base image (ADR-0022). On msb it feeds `ACQ_MSB_IMAGE` (above); on sbx it maps to `sbx create --template <ref>`. Equivalent to the `acq run/create --image <ref>` flag (the flag wins over the env var). See [Custom base image](#custom-base-image---image--acq_image). |
 | `ACQ_MSB_PULL` | (unset → msb default `if-missing`) | Image pull policy forwarded to `msb create --pull` (`always` \| `if-missing` \| `never`). `msb create` treats the image as a **registry** reference; a locally-built/registry-less image must first be imported with `msb image load -i <tar> -t <ref>`, then created with `ACQ_MSB_PULL=never` so msb uses the cache instead of trying to pull it. |
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
@@ -465,21 +465,22 @@ on each installed backend with `--image`, and confirms the custom image booted).
 ### Base image and prerequisites
 
 Unlike sbx (whose agent templates supply the image via a template mechanism),
-the msb backend runs an OCI image directly and layers the kits on top. By
-default it uses the **same** sbx agent-template image
-(`docker/sandbox-templates:shell-docker`); a custom override may be any OCI
-image. The four pinned kits need
+the msb backend runs an OCI image directly and layers the kits on top. When no
+explicit image override is set, msb derives the same sbx agent-template image
+name from the requested agent (`docker/sandbox-templates:<agent>-docker`) and
+falls back to `docker/sandbox-templates:shell-docker` if that derived image is
+not found. A custom override may be any OCI image. The four pinned kits need
 `node` (usai merge), `git` (playbook clone + signing), `curl`, and
 `ca-certificates`/`update-ca-certificates` (zscaler) **already present in the
 base image**.
 
 These are **not** installed at runtime: the kit network rules lock egress to the
 kits' own hosts (`api.gsa.usai.gov`, `github.com`, `codeload.github.com`), so a
-package mirror is unreachable during provision. The default
-`docker/sandbox-templates:shell-docker` image (the sbx agent-template) already
-ships all four tools and pulls from Docker Hub without auth. Before applying
-kits, the adapter **verifies** the tools are present and warns if any are
-missing (it does not try to install them). A custom override must ship them too.
+package mirror is unreachable during provision. Docker's
+`sandbox-templates:<agent>-docker` images already ship all four tools and pull
+from Docker Hub without auth. Before applying kits, the adapter **verifies** the
+tools are present and warns if any are missing (it does not try to install
+them). A custom override must ship them too.
 
 **The agent binary.** sbx's agent templates bake the requested agent (e.g.
 `opencode`) into the image; a plain msb base has no agent. So at provision the
@@ -494,10 +495,11 @@ into `ACQ_MSB_IMAGE`). Tunables: `ACQ_MSB_OPENCODE_PKG` (npm spec, e.g.
 `opencode-ai@1.2.3`), `ACQ_MSB_NPM_HOSTS` (registry host(s) to allow-list, for an
 internal mirror).
 
-**The base-image contract (Docker `shell-docker`).** sbx's templates are built on
-`docker/sandbox-templates:shell-docker` — which acq now also uses as the default
-`ACQ_MSB_IMAGE`, so msb matches sbx by construction. The synthesis below exists
-only for a plain-OCI **override**: on the default image it is a short-circuit.
+**The base-image contract (Docker sandbox templates).** sbx's templates are built
+on `docker/sandbox-templates:<agent>-docker`, and acq now derives the same image
+name for msb when no explicit image override is set. The synthesis below exists
+only for a plain-OCI **override** or fallback image: on Docker's sandbox-template
+images it is a short-circuit.
 
 #### Base image requirements
 
@@ -521,8 +523,9 @@ so a base image does **not** need a container engine baked in — only a support
 package manager (apt-get/dnf/apk) and mirror reachability. Bake podman in (and
 set `ACQ_MSB_ENSURE_OCI=0`) only if you want to skip the runtime install.
 
-**Build on `docker/sandbox-templates:shell-docker` to get all of these for free**
-— it is the default `ACQ_MSB_IMAGE`, so msb matches sbx out of the box.
+**Build on Docker's `sandbox-templates:*` images to get all of these for free**
+— msb derives the same agent-specific image naming convention as sbx when no
+explicit image override is set.
 
 For a plain-OCI override (e.g. `node:22-bookworm`, which has `node` at uid 1000 and
 no `agent`, no sudoers rule) that meets none of the first three, the msb adapter

@@ -93,9 +93,41 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   assert_output --partial 'most-specific wins'
 }
 
-@test "image(msb): no image set -> default shell-docker image" {
+@test "image(msb): shell agent defaults to shell-docker image" {
   _msb_create -- create shell "$IMGPROJ"
   assert_regex "$(_create_line msb)" 'docker\.io/docker/sandbox-templates:shell-docker'
+}
+
+@test "image(msb): known agent defaults to matching sandbox-template image" {
+  _msb_create -- create opencode --name imgopencode "$IMGPROJ"
+  local line; line=$(_create_line msb)
+  assert_regex "$line" 'docker\.io/docker/sandbox-templates:opencode-docker'
+  refute_regex "$line" 'docker\.io/docker/sandbox-templates:shell-docker'
+}
+
+@test "image(msb): missing agent-specific default falls back to shell-docker" {
+  # The failure message is the VERBATIM msb stderr for a nonexistent Docker Hub
+  # tag (live-verified): the registry returns `manifest unknown`. This proves
+  # _acq_msb_image_not_found_error matches the real wording, not a paraphrase.
+  _msb_create \
+    STUB_MSB_CREATE_FAIL_IMAGE=docker.io/docker/sandbox-templates:opencode-docker \
+    STUB_MSB_CREATE_FAIL_MESSAGE="error: image error: registry error: Registry error: url https://index.docker.io/v2/docker/sandbox-templates/manifests/opencode-docker, envelope: OCI API errors: [OCI API error: manifest unknown]" \
+    -- create opencode --name imgfallback "$IMGPROJ"
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'docker\.io/docker/sandbox-templates:opencode-docker'
+  assert_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
+  assert_output --partial 'falling back'
+}
+
+@test "image(msb): auth failure for agent-specific default does not fall back" {
+  _msb_create \
+    STUB_MSB_CREATE_FAIL_IMAGE=docker.io/docker/sandbox-templates:opencode-docker \
+    STUB_MSB_CREATE_FAIL_MESSAGE="error: image error: registry error: unauthorized: authentication required" \
+    -- create opencode --name imgauthfail "$IMGPROJ"
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'docker\.io/docker/sandbox-templates:opencode-docker'
+  refute_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
+  refute_output --partial 'falling back'
 }
 
 # sbx image tests: store a global usai key + seed the proxy fixture.
