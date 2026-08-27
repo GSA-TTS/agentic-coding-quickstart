@@ -64,3 +64,5 @@ jobs:
           config-file: ".markdown-link-check.json"
           use-quiet-mode: "yes"
           folder-path: "."
+          check-modified-files-only: ${{ github.event_name == 'pull_request' && 'yes' || 'no' }}
+          base-branch: "main"
