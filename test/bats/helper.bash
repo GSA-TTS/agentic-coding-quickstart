@@ -51,11 +51,18 @@ acq_teardown_stubs() {
 # the test AND `rm` in bats-exec-test's own teardown. Union the dirs of every
 # tool we actually rely on so the narrowed PATH is complete regardless of layout.
 # De-dupes while preserving first-seen order. bash 3.2 safe.
+#
+# Only absolute paths are unioned: `command -v` resolves shell builtins (e.g.
+# printf) to a bare name with no directory, and `dirname` of a bare name yields
+# ".", which would silently put the *current directory* on the narrowed PATH —
+# a stray file in the CWD would then become callable and defeat the "backend
+# provably absent" premise. Skipping non-/-prefixed results keeps PATH clean.
 _acq_coreutils_path() {
   local _tools="env rm cat mkdir mv chmod dirname sh grep sed awk printf"
   local _t _d _seen="" _out=""
   for _t in $_tools; do
     _d=$(command -v "$_t" 2>/dev/null) || continue
+    case "$_d" in /*) ;; *) continue ;; esac
     _d=$(dirname "$_d")
     case ":$_seen:" in *":$_d:"*) continue ;; esac
     _seen="${_seen:+$_seen:}$_d"
