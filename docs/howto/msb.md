@@ -119,6 +119,14 @@ and records the `ENV@HOST` binding msb applies at create. See
 the [Backend Guide](../BACKEND_GUIDE.md) for the full per-backend secret model.
 
 > [!NOTE]
+> Because msb binds secrets **at create time**, both the USAi key and any GitHub
+> token must be in place *before* the sandbox is created. `acq run` / `acq create`
+> handle this for you: on a fresh create they gate on the USAi key and offer to
+> scope a GitHub token **before** provisioning, so a token you supply binds to the
+> new sandbox. A token added after create would not bind to it (you can still add
+> it live with `acq secret set` / `acq github-scope`, which re-feeds a running
+> sandbox via `msb modify`).
+>
 > Because msb swaps the real value in on the wire, inspecting the guest
 > environment is not automatically a leak — but never deliberately dump secret
 > values (`echo $SECRET`, piping `env` to a log). See `AGENTS.md`.
@@ -168,7 +176,8 @@ acq ls                      # list sandboxes
 acq stop my-sandbox         # stop (preserves state)
 acq run my-sandbox          # resume / re-attach by name
 acq rm my-sandbox           # remove permanently
-acq run my-sandbox          # interactive attach (acq exec runs a command, not a TTY)
+acq run my-sandbox          # interactive attach (relaunches the recorded agent)
+acq shell my-sandbox        # interactive human shell (acq exec runs a command, not a TTY)
 acq exec my-sandbox -- <cmd>   # run a one-off command in the sandbox
 ```
 
@@ -187,7 +196,7 @@ known-limitations note).
 | Resume sandbox | `acq run <name>` | `msb run <name>` |
 | Remove sandbox | `acq rm <name>` | `msb remove <name>` |
 | Run a command | `acq exec <name> -- <cmd>` | `msb exec <name> -- <cmd>` |
-| Interactive shell | `acq run <name>` (attach) | `msb exec -it <name> -- bash` |
+| Interactive shell | `acq shell <name>` | `msb exec -it <name> -- bash` |
 
 The following are genuinely msb-specific mechanics the wrapper does not
 abstract — use the raw `msb` command:

@@ -358,6 +358,21 @@ acq_secret_meta_resolve() {
   return 1
 }
 
+# acq_secret_meta_resolve_exact SERVICE [SANDBOX] -> "HOST<TAB>ENV" on STDOUT
+# EXACT-scope variant of acq_secret_meta_resolve: no sandbox->global fallback.
+# The sbx rm path uses it (#384 review): a GLOBAL sidecar must never steer a
+# sandbox-scoped DESTRUCTIVE placeholder removal toward an entry the sidecar
+# never described.
+acq_secret_meta_resolve_exact() {
+  local service="$1" sandbox="${2:-}" f line key
+  key=$(_acq_secret_key "$service" "$sandbox") || return 1
+  f=$(_acq_secret_meta_file_for "$key")
+  if [ -f "$f" ] && IFS= read -r line < "$f" && [ -n "$line" ]; then
+    printf '%s\n' "$line"; return 0
+  fi
+  return 1
+}
+
 # acq_secret_meta_delete SERVICE [SANDBOX] — remove the sidecar (idempotent).
 acq_secret_meta_delete() {
   local service="$1" sandbox="${2:-}" f key

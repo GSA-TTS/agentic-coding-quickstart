@@ -27,6 +27,29 @@ _seed_usai() {
   assert_regex "$(cat "$CALLS")" 'sbx ls'
 }
 
+@test "shell: NAME -> interactive backend shell (sbx exec -it ... bash)" {
+  run env ACQ_BACKEND=sbx "$ACQ" shell mybox
+  assert_regex "$(cat "$CALLS")" 'sbx exec -it mybox bash'
+}
+
+@test "shell: NAME (msb) -> agent-user login shell with PTY in the workspace" {
+  run env ACQ_BACKEND=msb "$ACQ" shell mybox
+  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e SHELL=/bin/sh mybox -- /bin/sh -l'
+}
+
+@test "shell: without a name is a usage error, no backend call" {
+  run env ACQ_BACKEND=sbx "$ACQ" shell
+  assert_failure
+  assert_output --partial 'missing sandbox name'
+  refute_regex "$(cat "$CALLS")" 'sbx exec'
+}
+
+@test "shell: --help documents the verb (acq-owned, not a passthrough)" {
+  run env ACQ_BACKEND=sbx "$ACQ" shell --help
+  assert_output --partial 'interactive shell'
+  refute_output --partial 'passed through'
+}
+
 @test "dispatch: version reports backend and script path" {
   run env ACQ_BACKEND=sbx "$ACQ" version
   assert_output --partial 'backend:'
@@ -114,6 +137,23 @@ _seed_usai() {
   rm -f "$STUBDIR/.msb_created"
   run bash -c 'printf "" | USAI_API_KEY="sk-ci-host" ACQ_BACKEND=msb "$1" create opencode "$2"' _ "$ACQ" "$proj"
   refute_output --partial 'no USAi API key stored'
+  assert_regex "$(cat "$CALLS")" 'msb create'
+  assert [ -f "$STUBDIR/.msb_created" ]
+}
+
+# The github-scope advisory MUST run BEFORE the sandbox is created. On msb the
+# GitHub token binds only at create time (--secret ENV@HOST), so a token stored
+# by the advisory after create would never bind to the sandbox — the same
+# ordering the USAi key gate uses (both precede provision). Assert the advisory's
+# line appears AND the create still proceeds (warn-not-block: a declined,
+# non-TTY advisory does not abort the create). Uses msb, where create-time
+# binding is the operative constraint.
+@test "create(msb): github advisory runs before provision; declined advisory still provisions" {
+  local ghproj="$STUBDIR/gh-mcreate"; mkdir -p "$ghproj"
+  ( cd "$ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
+  rm -f "$STUBDIR/.msb_created"
+  run bash -c 'printf "" | USAI_API_KEY="sk-ci-host" ACQ_BACKEND=msb ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$3/.secrets" "$1" create opencode "$2"' _ "$ACQ" "$ghproj" "$ghproj"
+  assert_output --partial 'no repo-scoped GitHub token'
   assert_regex "$(cat "$CALLS")" 'msb create'
   assert [ -f "$STUBDIR/.msb_created" ]
 }
