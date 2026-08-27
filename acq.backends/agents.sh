@@ -29,6 +29,20 @@ acq_agent_safe_token() {
   esac
 }
 
+# Docker's sandbox-templates tags are `<agent>-docker` for most agents, but two
+# use a longer product name than the short acq token: `claude` ships as
+# `claude-code-docker` and `cursor` ships as `cursor-agent-docker`. Map the acq
+# token to the template stem here; anything not listed uses the token verbatim.
+# Verified live against the Docker Hub tag API: claude-docker/cursor-docker 404,
+# claude-code-docker/cursor-agent-docker 200.
+acq_agent_template_stem() {
+  case "$1" in
+    claude) printf '%s\n' "claude-code" ;;
+    cursor) printf '%s\n' "cursor-agent" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
 acq_agent_template_image() {
   local agent="${1:-shell}"
   case "$agent" in
@@ -36,7 +50,7 @@ acq_agent_template_image() {
     *)
       acq_is_known_agent "$agent" || return 1
       acq_agent_safe_token "$agent" || return 1
-      printf 'docker.io/docker/sandbox-templates:%s-docker\n' "$agent"
+      printf 'docker.io/docker/sandbox-templates:%s-docker\n' "$(acq_agent_template_stem "$agent")"
       ;;
   esac
 }

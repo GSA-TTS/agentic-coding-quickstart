@@ -39,6 +39,35 @@ load 'helper'
   assert_output $'docker.io/docker/sandbox-templates:opencode-docker\ndocker.io/docker/sandbox-templates:shell-docker'
 }
 
+@test "agents: claude and cursor map to their real product template tags" {
+  # Docker Hub ships these two under longer product names than the short acq
+  # token; a naive <token>-docker would 404. Verified live: claude-docker and
+  # cursor-docker 404; claude-code-docker and cursor-agent-docker 200.
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/agents.sh"
+    acq_agent_template_image claude
+    acq_agent_template_image cursor
+  '
+  assert_success
+  assert_output $'docker.io/docker/sandbox-templates:claude-code-docker\ndocker.io/docker/sandbox-templates:cursor-agent-docker'
+}
+
+@test "agents: every known agent derives a template image with a safe tag" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/agents.sh"
+    rc=0
+    for agent in $(acq_known_agents); do
+      img=$(acq_agent_template_image "$agent") || { echo "no image for $agent"; rc=1; continue; }
+      case "$img" in
+        docker.io/docker/sandbox-templates:*-docker) ;;
+        *) echo "unexpected image for $agent: $img"; rc=1 ;;
+      esac
+    done
+    exit "$rc"
+  '
+  assert_success
+}
+
 @test "agents: known agent list is defined only in the shared catalog" {
   run bash -c '
     hits=$(grep -lE "^[[:space:]]*(ACQ_)?KNOWN_AGENTS=" \

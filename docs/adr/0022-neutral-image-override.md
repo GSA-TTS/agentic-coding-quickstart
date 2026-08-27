@@ -87,7 +87,10 @@ should yield to the narrower one.
 
 For msb, the agent-derived default uses the same sandbox-template naming
 convention as sbx for known agent tokens:
-`docker.io/docker/sandbox-templates:<agent>-docker`. If that derived image is
+`docker.io/docker/sandbox-templates:<agent>-docker`. Two agents are exceptions —
+Docker publishes them under a longer product name than the short acq token, so
+`claude` maps to `claude-code-docker` and `cursor` to `cursor-agent-docker` (all
+other known agents follow `<agent>-docker` verbatim). If that derived image is
 not found, acq retries once with
 `docker.io/docker/sandbox-templates:shell-docker`. Explicit image failures do not
 fall back silently.

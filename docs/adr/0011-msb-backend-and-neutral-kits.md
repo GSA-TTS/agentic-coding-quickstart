@@ -27,7 +27,8 @@ supersedes: []
 > **Update (2026-08-27):** When no explicit image override is set, msb now
 > derives the sbx agent-template image name from the requested agent
 > (`docker.io/docker/sandbox-templates:<agent>-docker`, matching how `sbx run
-> <agent>` selects its template) and falls back to
+> <agent>` selects its template; `claude` → `claude-code-docker` and `cursor` →
+> `cursor-agent-docker` are the two product-name exceptions) and falls back to
 > `docker.io/docker/sandbox-templates:shell-docker` only if the derived image is
 > not found. This shortens startup for agents (e.g. `opencode`) whose template
 > already bakes in the agent binary. See ADR-0022 and `docs/BACKEND_GUIDE.md`.

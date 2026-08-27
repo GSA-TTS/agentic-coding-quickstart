@@ -175,7 +175,7 @@ Tunables:
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `ACQ_MSB_IMAGE` | (unset) | Backend-specific base OCI image override. A custom override must be pullable and ship the base-image prerequisites. **Precedence (ADR-0022):** an explicitly set `ACQ_MSB_IMAGE` wins over the backend-neutral `--image`/`ACQ_IMAGE` (a one-time notice is printed); if only the neutral knob is set, it is used; otherwise msb derives `docker.io/docker/sandbox-templates:<agent>-docker` for known agents and falls back to `docker.io/docker/sandbox-templates:shell-docker` if that derived image is not found. |
+| `ACQ_MSB_IMAGE` | (unset) | Backend-specific base OCI image override. A custom override must be pullable and ship the base-image prerequisites. **Precedence (ADR-0022):** an explicitly set `ACQ_MSB_IMAGE` wins over the backend-neutral `--image`/`ACQ_IMAGE` (a one-time notice is printed); if only the neutral knob is set, it is used; otherwise msb derives `docker.io/docker/sandbox-templates:<agent>-docker` for known agents (with `claude` → `claude-code-docker` and `cursor` → `cursor-agent-docker`) and falls back to `docker.io/docker/sandbox-templates:shell-docker` if that derived image is not found. |
 | `ACQ_IMAGE` | (unset) | Backend-**neutral** base image (ADR-0022). On msb it feeds `ACQ_MSB_IMAGE` (above); on sbx it maps to `sbx create --template <ref>`. Equivalent to the `acq run/create --image <ref>` flag (the flag wins over the env var). See [Custom base image](#custom-base-image---image--acq_image). |
 | `ACQ_MSB_PULL` | (unset → msb default `if-missing`) | Image pull policy forwarded to `msb create --pull` (`always` \| `if-missing` \| `never`). `msb create` treats the image as a **registry** reference; a locally-built/registry-less image must first be imported with `msb image load -i <tar> -t <ref>`, then created with `ACQ_MSB_PULL=never` so msb uses the cache instead of trying to pull it. |
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
@@ -467,7 +467,9 @@ on each installed backend with `--image`, and confirms the custom image booted).
 Unlike sbx (whose agent templates supply the image via a template mechanism),
 the msb backend runs an OCI image directly and layers the kits on top. When no
 explicit image override is set, msb derives the same sbx agent-template image
-name from the requested agent (`docker/sandbox-templates:<agent>-docker`) and
+name from the requested agent (`docker/sandbox-templates:<agent>-docker`, with
+`claude` → `claude-code-docker` and `cursor` → `cursor-agent-docker` as the two
+product-name exceptions) and
 falls back to `docker/sandbox-templates:shell-docker` if that derived image is
 not found. A custom override may be any OCI image. The four pinned kits need
 `node` (usai merge), `git` (playbook clone + signing), `curl`, and

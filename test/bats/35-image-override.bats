@@ -105,6 +105,28 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   refute_regex "$line" 'docker\.io/docker/sandbox-templates:shell-docker'
 }
 
+@test "image(msb): claude/cursor derive their real product template tags" {
+  # These two exceptions ship under longer product names on Docker Hub
+  # (claude-code-docker, cursor-agent-docker); a naive <token>-docker would 404.
+  _msb_create -- create claude --name imgclaude "$IMGPROJ"
+  assert_regex "$(_create_line msb)" 'docker\.io/docker/sandbox-templates:claude-code-docker'
+  refute_regex "$(_create_line msb)" 'sandbox-templates:claude-docker'
+
+  : > "$CALLS"
+  _msb_create -- create cursor --name imgcursor "$IMGPROJ"
+  assert_regex "$(_create_line msb)" 'docker\.io/docker/sandbox-templates:cursor-agent-docker'
+  refute_regex "$(_create_line msb)" 'sandbox-templates:cursor-docker'
+}
+
+@test "image(msb): explicit ACQ_MSB_IMAGE beats the agent-derived default" {
+  # 3-way precedence: ACQ_MSB_IMAGE must win over a known agent's derived image
+  # (not just over the neutral --image/ACQ_IMAGE tier).
+  _msb_create ACQ_MSB_IMAGE=localhost/backend-specific:test -- create opencode --name img3way "$IMGPROJ"
+  local line; line=$(_create_line msb)
+  assert_regex "$line" 'localhost/backend-specific:test'
+  refute_regex "$line" 'docker\.io/docker/sandbox-templates:opencode-docker'
+}
+
 @test "image(msb): missing agent-specific default falls back to shell-docker" {
   # The failure message is the VERBATIM msb stderr for a nonexistent Docker Hub
   # tag (live-verified): the registry returns `manifest unknown`. This proves
