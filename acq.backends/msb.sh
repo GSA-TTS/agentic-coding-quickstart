@@ -65,6 +65,15 @@ ACQ_BACKEND_CAN_RESUME=1                   # msb stop / msb start preserve state
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1  # msb --secret ENV@HOST + --tls-intercept
 
+# Shared agent catalog (issue #377). common.sh normally sources this, but some
+# tests source this adapter directly; guard so a re-source is cheap and so the
+# catalog helpers (acq_is_known_agent, acq_agent_template_image, …) are always
+# defined when this file's functions run.
+if ! command -v acq_is_known_agent >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/agents.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
+fi
+
 # Minimum msb version required. Two reasons pin this to 0.6.9:
 #   1. 0.6.8 is the first release with the `--net-default-egress` /
 #      `--net-default-ingress` split that the balanced-egress baseline (on by
@@ -110,11 +119,15 @@ ACQ_MSB_IMAGE="${ACQ_MSB_IMAGE:-}"
 _ACQ_MSB_DEFAULT_IMAGE="docker.io/docker/sandbox-templates:shell-docker"
 _ACQ_MSB_IMAGE_NOTICE_SHOWN=0
 
-# _acq_msb_resolve_image — echo the OCI image `msb create` should use, applying
-# the ADR-0022 precedence: explicit ACQ_MSB_IMAGE > neutral --image/ACQ_IMAGE >
-# built-in default. Prints a one-time notice if BOTH the backend var and the
-# neutral image are set (backend var wins). Idempotent notice (once per process).
+# _acq_msb_resolve_image AGENT — set the OCI image `msb create` should use,
+# applying the ADR-0022 precedence: explicit ACQ_MSB_IMAGE > neutral
+# --image/ACQ_IMAGE > agent-derived sandbox-template image > built-in default.
+# Prints a one-time notice if BOTH the backend var and the neutral image are set
+# (backend var wins). Idempotent notice (once per process).
+_ACQ_MSB_RESOLVED_IMAGE=""
+_ACQ_MSB_RESOLVED_IMAGE_SOURCE=""
 _acq_msb_resolve_image() {
+  local agent="${1:-shell}"
   local neutral=""
   if command -v acq_resolve_neutral_image >/dev/null 2>&1; then
     neutral=$(acq_resolve_neutral_image)
@@ -128,14 +141,42 @@ _acq_msb_resolve_image() {
       echo "acq(msb):   (most-specific wins; see ADR-0022). Unset ACQ_MSB_IMAGE to use the" >&2
       echo "acq(msb):   neutral image '$neutral'." >&2
     fi
-    printf '%s\n' "$ACQ_MSB_IMAGE"
+    _ACQ_MSB_RESOLVED_IMAGE="$ACQ_MSB_IMAGE"
+    _ACQ_MSB_RESOLVED_IMAGE_SOURCE="backend"
     return 0
   fi
   if [ -n "$neutral" ]; then
-    printf '%s\n' "$neutral"
+    _ACQ_MSB_RESOLVED_IMAGE="$neutral"
+    _ACQ_MSB_RESOLVED_IMAGE_SOURCE="neutral"
     return 0
   fi
-  printf '%s\n' "$_ACQ_MSB_DEFAULT_IMAGE"
+  if _ACQ_MSB_RESOLVED_IMAGE=$(acq_agent_template_image "$agent" 2>/dev/null) \
+     && [ "$_ACQ_MSB_RESOLVED_IMAGE" != "$_ACQ_MSB_DEFAULT_IMAGE" ]; then
+    _ACQ_MSB_RESOLVED_IMAGE_SOURCE="agent-default"
+    return 0
+  fi
+  _ACQ_MSB_RESOLVED_IMAGE="$_ACQ_MSB_DEFAULT_IMAGE"
+  _ACQ_MSB_RESOLVED_IMAGE_SOURCE="builtin-default"
+}
+
+# _acq_msb_image_not_found_error STDERR — 0 if `msb create`'s error text means
+# the image REF does not exist (so an agent-derived default may fall back to the
+# shell image), 1 otherwise. Live-verified against msb on Docker Hub and ghcr.io:
+# BOTH a nonexistent Docker Hub tag AND a private/nonexistent ghcr.io repo report
+#   error: image error: registry error: ... OCI API errors: [OCI API error: manifest unknown]
+# i.e. the registry returns `manifest unknown` for not-found regardless of
+# whether the repo is private. We therefore treat `manifest unknown` (and the
+# other classic not-found phrasings) as fall-back-eligible, but NOT auth/network
+# failures (`unauthorized`, TLS, connection refused, …): those are real problems
+# with the requested image that must surface, not be papered over by a fallback.
+# The auth/network deny-list is checked FIRST so a message that somehow carries
+# both never falls back.
+_acq_msb_image_not_found_error() {
+  case "$1" in
+    *unauthorized*|*Unauthorized*|*authentication\ required*|*denied*|*Denied*|*forbidden*|*Forbidden*|*TLS*|*tls*|*timeout*|*connection\ refused*|*no\ route*) return 1 ;;
+    *manifest\ unknown*|*name\ unknown*|*not\ found*|*Not\ found*|*No\ such\ image*|*repository\ does\ not\ exist*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Prerequisite tools the pinned four kits need at runtime, expected to be
@@ -310,10 +351,6 @@ ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-${ACQ_STATE_DIR:-${XDG_STA
 # behaves as an environment where native-cert loading misses the corporate root.
 # Use it to confirm the failure and that the fix resolves it. Off by default.
 ACQ_MSB_NO_UPSTREAM_CA="${ACQ_MSB_NO_UPSTREAM_CA:-}"
-
-# Agents recognized by acq's run dispatch (mirrors sbx.sh KNOWN_AGENTS).
-# shellcheck disable=SC2034
-KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
 # Agent binary install.
 # ---------------------------------------------------------------------------
@@ -2284,11 +2321,13 @@ acq_backend_provision() {
   local _volrecs=""
 
   # Resolve the OCI image ONCE per provision (ADR-0022): explicit ACQ_MSB_IMAGE
-  # wins over the neutral --image/ACQ_IMAGE, which wins over the built-in default.
-  # Use this local everywhere below instead of $ACQ_MSB_IMAGE so the neutral knob
-  # and the one-time precedence notice are honored consistently.
-  local _msb_image
-  _msb_image=$(_acq_msb_resolve_image)
+  # wins over the neutral --image/ACQ_IMAGE, which wins over an agent-derived
+  # sandbox-template image, which wins over the built-in shell fallback. Use this
+  # local everywhere below instead of $ACQ_MSB_IMAGE so the neutral knob and the
+  # one-time precedence notice are honored consistently.
+  _acq_msb_resolve_image "$agent"
+  local _msb_image="$_ACQ_MSB_RESOLVED_IMAGE"
+  local _msb_image_source="$_ACQ_MSB_RESOLVED_IMAGE_SOURCE"
 
   # Optional pull policy (ACQ_MSB_PULL): forwarded to `msb create --pull`.
   # `msb create` reads an image REF and by default pulls if-missing from a
@@ -2674,10 +2713,27 @@ EOF
   # below ever run.
   acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
   local _create_rc=0
+  local _create_output=""
   acq_debug "msb create: invoking (this returns fast; guest boots in background)"
   acq_spin_start "Creating sandbox '$name'"
-  msb create --name "$name" "${create_flags[@]}" "$_msb_image" || _create_rc=$?
+  _create_output=$(msb create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
   acq_spin_stop "Creating sandbox '$name'"
+  [ -z "$_create_output" ] || printf '%s\n' "$_create_output" >&2
+  if [ "$_create_rc" -ne 0 ] && [ "$_msb_image_source" = "agent-default" ] \
+     && _acq_msb_image_not_found_error "$_create_output" \
+     && ! acq_backend_exists "$name"; then
+    echo "acq(msb): agent-specific image '$_msb_image' was not found;" >&2
+    echo "acq(msb):   falling back to '$_ACQ_MSB_DEFAULT_IMAGE'." >&2
+    _msb_image="$_ACQ_MSB_DEFAULT_IMAGE"
+    _msb_image_source="builtin-default"
+    _create_rc=0
+    _create_output=""
+    acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
+    acq_spin_start "Creating sandbox '$name'"
+    _create_output=$(msb create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
+    acq_spin_stop "Creating sandbox '$name'"
+    [ -z "$_create_output" ] || printf '%s\n' "$_create_output" >&2
+  fi
   acq_debug "msb create: returned rc=${_create_rc}"
   # Clear the transient secret env vars immediately after create reads them
   # (runs on both success and failure so the exported key never lingers).
@@ -2855,10 +2911,7 @@ EOF
 # into ACQ_MSB_IMAGE by the user (warned at install time). Keep this in sync with
 # _acq_msb_install_agent's case.
 _acq_msb_agent_has_install_recipe() {
-  case "$1" in
-    opencode) return 0 ;;
-    *) return 1 ;;
-  esac
+  acq_agent_has_msb_install_recipe "$1"
 }
 
 # _acq_msb_safe_agent_token AGENT -> 0 if AGENT is a safe agent token to
@@ -2868,10 +2921,7 @@ _acq_msb_agent_has_install_recipe() {
 # `acq create "x';…'"` arg or a tampered /var/lib/acq/agent marker). Callers
 # that build an `sh -c` string with $agent MUST gate on this first.
 _acq_msb_safe_agent_token() {
-  case "$1" in
-    ""|*[!a-z-]*) return 1 ;;
-    *) return 0 ;;
-  esac
+  acq_agent_safe_token "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -4830,8 +4880,5 @@ acq_backend_doctor() {
 # ---------------------------------------------------------------------------
 
 is_known_agent() {
-  case "$KNOWN_AGENTS" in
-    *" $1 "*) return 0 ;;
-    *) return 1 ;;
-  esac
+  acq_is_known_agent "$1"
 }

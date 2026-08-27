@@ -209,7 +209,13 @@ case "$_msb_sub" in
     if [ "${STUB_MSB_DOCTOR_FIXABLE:-0}" = "1" ] && [ -f "$STUBDIR/.msb_fixed" ]; then exit 0; fi
     if [ "${STUB_MSB_DOCTOR_UNFIT:-0}" = "1" ] || [ "${STUB_MSB_DOCTOR_FIXABLE:-0}" = "1" ]; then exit 1; fi
     exit 0 ;;
-  create) : >"$STUBDIR/.msb_created" ;;
+  create)
+    _image="${@: -1}"
+    if [ -n "${STUB_MSB_CREATE_FAIL_IMAGE:-}" ] && [ "$_image" = "$STUB_MSB_CREATE_FAIL_IMAGE" ]; then
+      printf '%s\n' "${STUB_MSB_CREATE_FAIL_MESSAGE:-manifest unknown}" >&2
+      exit "${STUB_MSB_CREATE_FAIL_RC:-1}"
+    fi
+    : >"$STUBDIR/.msb_created" ;;
   inspect)
     # `msb inspect <name> --format json` — emit a create-time published-ports
     # JSON fixture if the test planted one, else nothing (models an absent field

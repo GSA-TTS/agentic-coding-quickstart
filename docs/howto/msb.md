@@ -146,13 +146,19 @@ The sandbox boots and you land in the agent environment.
 ### Other supported agents
 
 ```bash
-acq run claude .      # Claude Code
-acq run copilot .     # GitHub Copilot
-acq run cursor .      # Cursor
-acq run codex .       # OpenAI Codex
-acq run gemini .      # Google Gemini
-acq run shell .       # Just a shell (no agent)
+acq run claude .        # Claude Code
+acq run codex .         # OpenAI Codex
+acq run copilot .       # GitHub Copilot
+acq run cursor .        # Cursor
+acq run docker-agent .  # Docker agent
+acq run droid .         # Droid
+acq run gemini .        # Google Gemini
+acq run kiro .          # Kiro
+acq run shell .         # Just a shell (no agent)
 ```
+
+This list is sourced from `acq.backends/agents.sh`; `prime-agent` is not added by
+this change.
 
 ### Create with a custom name
 

@@ -30,6 +30,14 @@ ACQ_BACKEND_CAN_RESUME=1
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE=1
 
+# Shared agent catalog (issue #377). common.sh normally sources this, but some
+# tests source this adapter directly; guard so a re-source is cheap and so the
+# catalog helpers (acq_is_known_agent, …) are always defined.
+if ! command -v acq_is_known_agent >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/agents.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
+fi
+
 # Minimum sbx version required.
 #
 # Bumped 0.35.0 -> 0.38.0: the neutral-kit translator now emits the sbx **v2 kit
@@ -51,9 +59,6 @@ USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 # Where synthesized sbx-v2 kits (translated from the neutral hybrid/v1 kits)
 # are materialized for this run.
 ACQ_SBX_KIT_CACHE="${ACQ_SBX_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/sbx-kits}"
-
-# Agents recognized by `sbx run`.
-KNOWN_AGENTS=" claude codex copilot cursor docker-agent droid gemini kiro opencode shell "
 
 # Module-scope flag: set to 1 once the ssh-agent trust-boundary notice has been
 # printed, so it appears at most once per process. See ADR-0021.
@@ -1538,8 +1543,5 @@ acq_backend_doctor() {
 # ---------------------------------------------------------------------------
 
 is_known_agent() {
-  case "$KNOWN_AGENTS" in
-    *" $1 "*) return 0 ;;
-    *) return 1 ;;
-  esac
+  acq_is_known_agent "$1"
 }
