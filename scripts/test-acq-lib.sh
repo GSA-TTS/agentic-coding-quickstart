@@ -332,13 +332,51 @@ case "$_msb_sub" in
         [ "${STUB_NPM_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
       *"test -f "*) exit 1 ;;       # markers absent
       *"test -s "*) exit 0 ;;       # copied files present
-      *"cat /var/lib/acq/agent"*) printf '%s' "${STUB_RECORDED_AGENT:-}" ;;
-      *"cat /var/lib/acq/workspace"*) printf '%s' "${STUB_RECORDED_WORKSPACE:-}" ;;
+      # The /var/lib/acq marker reads (agent, workspace, ssh-auth-sock,
+      # kit-env). An UNSET STUB_RECORDED_* models an ABSENT marker faithfully:
+      # a real `sh -c 'cat …'` exits 1 there, and acq runs under
+      # `set -euo pipefail`, so every reader must survive that nonzero (a
+      # sandbox from before a marker existed, or one whose feature was never
+      # configured, still has to serve every session verb). A SET-but-empty
+      # value models a present-but-empty marker (cat exits 0).
+      *"cat /var/lib/acq/agent"*)
+        [ -n "${STUB_RECORDED_AGENT+x}" ] || exit 1
+        printf '%s' "$STUB_RECORDED_AGENT" ;;
+      *"cat /var/lib/acq/workspace"*)
+        [ -n "${STUB_RECORDED_WORKSPACE+x}" ] || exit 1
+        printf '%s' "$STUB_RECORDED_WORKSPACE" ;;
       # ADR-0021: the persisted ssh-agent guest sock marker read by
-      # _acq_msb_ssh_auth_sock_for (and, via it, run/attach/start). Empty by
-      # default (forwarding not configured); STUB_RECORDED_SSH_AUTH_SOCK models a
-      # sandbox that recorded the bridge sock at provision time.
-      *"cat /var/lib/acq/ssh-auth-sock"*) printf '%s' "${STUB_RECORDED_SSH_AUTH_SOCK:-}" ;;
+      # _acq_msb_ssh_auth_sock_for (and, via it, run/attach/start).
+      *"cat /var/lib/acq/ssh-auth-sock"*)
+        [ -n "${STUB_RECORDED_SSH_AUTH_SOCK+x}" ] || exit 1
+        printf '%s' "$STUB_RECORDED_SSH_AUTH_SOCK" ;;
+      # The persisted kit environment[] marker (see ADR-0011). The write/reset
+      # arms keep a STATEFUL model in $STUBDIR/.kit_env so the full
+      # provision→heal→replay cycle is testable (stale-entry regression);
+      # STUB_RECORDED_KIT_ENV, when set, overrides it with fixed content
+      # (multi-line values model multiple entries). Absent/empty semantics per
+      # the marker-reads comment above.
+      *">> /var/lib/acq/kit-env"*)
+        # Append the env tokens: argv shape is `… -- sh -c '<script>' sh
+        # NAME=value…` — collect everything after the argv0 `sh` that follows
+        # the script.
+        _kes_c=0 _kes_script=0 _kes_argv0=0
+        for a in "$@"; do
+          if [ "$_kes_argv0" = 1 ]; then printf '%s\n' "$a" >>"$STUBDIR/.kit_env"
+          elif [ "$_kes_script" = 1 ] && [ "$a" = "sh" ]; then _kes_argv0=1
+          elif [ "$_kes_c" = 1 ]; then _kes_script=1; _kes_c=0
+          elif [ "$a" = "-c" ]; then _kes_c=1
+          fi
+        done ;;
+      *"rm -f /var/lib/acq/kit-env"*) rm -f "$STUBDIR/.kit_env" ;;
+      *"cat /var/lib/acq/kit-env"*)
+        if [ -n "${STUB_RECORDED_KIT_ENV+x}" ]; then
+          printf '%s' "$STUB_RECORDED_KIT_ENV"
+        elif [ -f "$STUBDIR/.kit_env" ]; then
+          cat "$STUBDIR/.kit_env"
+        else
+          exit 1
+        fi ;;
       *) : ;;
     esac ;;
   ssh)
