@@ -159,6 +159,59 @@ the guest.
 
 ---
 
+## Installing acq
+
+Most users should use the one-line installer in the
+[README quickstart](../../README.md#step-2-install-acq) — it auto-selects the
+best method already on your Mac (Homebrew → npm → self-contained download), puts
+`acq` on your `PATH`, and never needs administrator rights. This section covers
+the manual and developer paths.
+
+### Direct package-manager install
+
+The one-line installer detects Homebrew and npm automatically. To run the direct
+command yourself:
+
+```bash
+npm install -g github:GSA-TTS/agentic-coding-quickstart   # if you use Node/npm — works today
+brew install GSA-TTS/tap/acq                              # if you use Homebrew — coming soon (tap not published yet)
+```
+
+Package-manager installs give you `upgrade`/`uninstall` for free.
+
+### Manual install (from a clone)
+
+If you're comfortable in a terminal and prefer to run `acq` from a clone:
+
+```bash
+git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
+cd agentic-coding-quickstart
+./acq run opencode ~/my-project
+```
+
+You'll also need the `msb` sandbox runtime — install it without admin via
+`curl -fsSL https://install.microsandbox.dev | sh` (or, if you have Homebrew,
+`brew install superradcompany/tap/microsandbox`).
+
+> **Running `./acq` from the clone?** It only works from **inside** the
+> `agentic-coding-quickstart` folder (that's where the `acq` file lives). If you
+> get "no such file `./acq`", `cd` back into that folder first. The one-line
+> installer avoids this entirely by putting `acq` on your `PATH`.
+
+#### Testing a specific tagged release
+
+After cloning, check out the tag:
+
+```bash
+git checkout v3.0.0-rc2
+```
+
+Git prints a message about a **"detached HEAD" state** — that's **normal, not an
+error.** It just means you're on a specific snapshot. Run `acq` as usual; to go
+back to the latest, run `git switch main`.
+
+---
+
 ## Backend Selection
 
 `acq` resolves the active backend in this priority order:
