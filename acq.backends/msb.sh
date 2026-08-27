@@ -1491,6 +1491,20 @@ EOF
   _acq_msb_run_commands "$name" "$spec"
 }
 
+# _acq_msb_reset_kit_env NAME — remove the persisted kit-env marker so a
+# FULL-set kit application (provision, heal) rebuilds it from the current kits'
+# environment[] only. Without this, the per-kit append in _acq_msb_apply_kit_dir
+# would retain entries a kit no longer declares — removed runtime config
+# (feature toggles, host selectors) silently surviving every heal. The
+# single-kit `acq kit apply` verb deliberately does NOT reset: a mid-life add
+# is additive, and replay's last-value-wins handles its overrides. Best-effort:
+# a failed reset degrades to the previous stale-retention behavior, never
+# aborts the apply.
+_acq_msb_reset_kit_env() {
+  msb exec -u 0 "$1" -- sh -c 'rm -f /var/lib/acq/kit-env' \
+    </dev/null >/dev/null 2>&1 || true
+}
+
 # Copy a host file into the guest and VERIFY it is readable there before
 # returning. Also chown files under /home/agent to the agent user (they are
 # copied as root, but the kits' startup commands read them as the agent user;
@@ -2800,6 +2814,7 @@ EOF
   # matching acq_backend_ensure_kits_applied's best-effort heal loop.
   local kd
   acq_spin_start "Applying configuration kits"
+  _acq_msb_reset_kit_env "$name"
   for kd in "${kitdirs[@]}"; do
     acq_debug "msb provision: applying kit dir $kd ($name)"
     if _acq_msb_apply_kit_dir "$name" "$kd"; then
@@ -4335,6 +4350,7 @@ acq_backend_ensure_kits_applied() {
   fi
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"
+  _acq_msb_reset_kit_env "$name"
   for kitref in "${kits[@]}"; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
       echo "acq(msb): warning: could not fetch kit for healing: $kitref" >&2

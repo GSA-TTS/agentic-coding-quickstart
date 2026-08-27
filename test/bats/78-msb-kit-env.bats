@@ -141,6 +141,63 @@ RUBOCOP_PARALLELISM=4"
   assert_regex "$(cat "$CALLS")" 'exec -u agent -e HOME=/home/agent sbox -- git status'
 }
 
+@test "msb kit env: heal rebuilds the marker — a var the kit no longer declares stops reaching sessions" {
+  # The heal loop (and provision) applies the FULL effective kit set, so the
+  # marker must be rebuilt from the current kits' environment[] each time. An
+  # append-only marker would retain entries a kit stopped declaring: removed
+  # runtime config (feature toggles, host selectors) would keep influencing
+  # sessions indefinitely.
+  : > "$CALLS"
+  printf 'healbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'healbox\n' > "$STUBDIR/.msb_running_list"
+  local hk="$STUBDIR/healkit"; mkdir -p "$hk"
+  cat > "$hk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: heal-kit
+displayName: Heal Kit
+description: env entries across kit versions
+environment:
+  KEPT_VAR: stays
+  STALE_VAR: dropped-in-v2
+SPEC
+  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/heal-secrets"
+    export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/heal-stage"
+    . "${REPO_ROOT}/acq.backends/secret-store.sh"
+    . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+    . "${REPO_ROOT}/acq.backends/msb.sh"
+    ACQ_CLI_KITS=()
+    _acq_msb_fetch_kit() { printf '%s\n' "$hk"; }
+    acq_backend_ensure_kits_applied healbox >/dev/null 2>&1 )
+  # Kit v2 drops STALE_VAR; the next heal must rebuild the marker without it.
+  cat > "$hk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: heal-kit
+displayName: Heal Kit
+description: env entries across kit versions
+environment:
+  KEPT_VAR: stays
+SPEC
+  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/heal-secrets"
+    export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/heal-stage"
+    . "${REPO_ROOT}/acq.backends/secret-store.sh"
+    . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+    . "${REPO_ROOT}/acq.backends/msb.sh"
+    ACQ_CLI_KITS=()
+    _acq_msb_fetch_kit() { printf '%s\n' "$hk"; }
+    acq_backend_ensure_kits_applied healbox >/dev/null 2>&1 )
+  : > "$CALLS"
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run healbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '-e KEPT_VAR=stays'
+  refute_regex "$log" 'STALE_VAR'
+}
+
 @test "msb kit env: replay drops tampered names and keeps the last value for a duplicate" {
   : > "$CALLS"
   run bash -c '

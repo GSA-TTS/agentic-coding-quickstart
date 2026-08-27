@@ -350,13 +350,33 @@ case "$_msb_sub" in
       *"cat /var/lib/acq/ssh-auth-sock"*)
         [ -n "${STUB_RECORDED_SSH_AUTH_SOCK+x}" ] || exit 1
         printf '%s' "$STUB_RECORDED_SSH_AUTH_SOCK" ;;
-      # The persisted kit environment[] marker (see ADR-0011).
-      # STUB_RECORDED_KIT_ENV models the NAME=value lines recorded at
-      # provision (multi-line values model multiple entries); absent/empty
-      # semantics per the marker-reads comment above.
+      # The persisted kit environment[] marker (see ADR-0011). The write/reset
+      # arms keep a STATEFUL model in $STUBDIR/.kit_env so the full
+      # provision→heal→replay cycle is testable (stale-entry regression);
+      # STUB_RECORDED_KIT_ENV, when set, overrides it with fixed content
+      # (multi-line values model multiple entries). Absent/empty semantics per
+      # the marker-reads comment above.
+      *">> /var/lib/acq/kit-env"*)
+        # Append the env tokens: argv shape is `… -- sh -c '<script>' sh
+        # NAME=value…` — collect everything after the argv0 `sh` that follows
+        # the script.
+        _kes_c=0 _kes_script=0 _kes_argv0=0
+        for a in "$@"; do
+          if [ "$_kes_argv0" = 1 ]; then printf '%s\n' "$a" >>"$STUBDIR/.kit_env"
+          elif [ "$_kes_script" = 1 ] && [ "$a" = "sh" ]; then _kes_argv0=1
+          elif [ "$_kes_c" = 1 ]; then _kes_script=1; _kes_c=0
+          elif [ "$a" = "-c" ]; then _kes_c=1
+          fi
+        done ;;
+      *"rm -f /var/lib/acq/kit-env"*) rm -f "$STUBDIR/.kit_env" ;;
       *"cat /var/lib/acq/kit-env"*)
-        [ -n "${STUB_RECORDED_KIT_ENV+x}" ] || exit 1
-        printf '%s' "$STUB_RECORDED_KIT_ENV" ;;
+        if [ -n "${STUB_RECORDED_KIT_ENV+x}" ]; then
+          printf '%s' "$STUB_RECORDED_KIT_ENV"
+        elif [ -f "$STUBDIR/.kit_env" ]; then
+          cat "$STUBDIR/.kit_env"
+        else
+          exit 1
+        fi ;;
       *) : ;;
     esac ;;
   ssh)
