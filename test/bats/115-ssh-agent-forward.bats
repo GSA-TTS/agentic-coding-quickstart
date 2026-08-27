@@ -382,6 +382,111 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   assert_output --partial 'RC=1'
 }
 
+@test "vsock(10c19): a stale --vsock route (host reboot) warns with the recreate remedy, not silently" {
+  # After the bridge + marker are (re)placed, the forwarded-agent liveness probe
+  # runs `ssh-add -l` over the guest sock. The reboot dead-bridge signature is
+  # exit 1 with "communication with agent failed" (the socat listener socket is
+  # PRESENT, but its vsock backend is dead, so ssh-add connects then the agent
+  # protocol fails — NOT exit 2, which is only a missing socket). The starter
+  # must classify that as unreachable and SURFACE the recreate remedy.
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9 STUB_AGENT_UNREACHABLE=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _ACQ_MSB_SSH_AGENT_FORWARDING=1
+    _acq_msb_start_ssh_agent_bridge stalebox 2>&1
+    wait
+  '
+  assert_output --partial 'UNREACHABLE'
+  assert_output --partial 'HOST REBOOT'
+  assert_output --partial 'acq rm stalebox'
+}
+
+@test "vsock(10c19b): a missing agent socket (exit 2) also warns" {
+  # The other unreachable shape: the socket path itself cannot be opened,
+  # ssh-add exits 2 "Error connecting to agent". Must also warn.
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9 STUB_AGENT_NO_SOCKET=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _ACQ_MSB_SSH_AGENT_FORWARDING=1
+    _acq_msb_start_ssh_agent_bridge nosockbox 2>&1
+    wait
+  '
+  assert_output --partial 'UNREACHABLE'
+  assert_output --partial 'acq rm nosockbox'
+}
+
+@test "vsock(10c20): a reachable forwarded agent produces NO stale-route warning" {
+  # Default stub models ssh-add -l as reachable WITH keys (exit 0); the starter
+  # must stay quiet — no false stale-route warning on a healthy bridge.
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _ACQ_MSB_SSH_AGENT_FORWARDING=1
+    _acq_msb_start_ssh_agent_bridge livebox 2>&1
+    wait
+  '
+  refute_output --partial 'UNREACHABLE'
+  # Reachable but EMPTY keyring: exit 1 WITH the "no identities" message. This is
+  # a HEALTHY agent (just no keys loaded) and MUST NOT warn — the discriminator
+  # from the reboot case (also exit 1) is the message text, not the exit code.
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9 STUB_AGENT_NO_KEYS=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _ACQ_MSB_SSH_AGENT_FORWARDING=1
+    _acq_msb_start_ssh_agent_bridge emptybox 2>&1
+    wait
+  '
+  refute_output --partial 'UNREACHABLE'
+}
+
+@test "vsock(10c20b): the warn-return never aborts the caller under set -e" {
+  # _acq_msb_warn_if_agent_unreachable returns non-zero when it warns; every
+  # production caller must `|| true` it so a warning cannot abort a verb under
+  # `set -euo pipefail`. Assert the bridge starter (its caller) still returns 0
+  # even when the probe warns.
+  run bash -c '
+    set -euo pipefail
+    export STUB_MSB_VERSION=0.6.9 STUB_AGENT_UNREACHABLE=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _ACQ_MSB_SSH_AGENT_FORWARDING=1
+    _acq_msb_start_ssh_agent_bridge abortbox >/dev/null 2>&1
+    printf "RC=%s\n" "$?"
+    wait
+  '
+  assert_output --partial 'RC=0'
+}
+
+@test "vsock(10c21): the liveness probe is skipped (no warning) when ssh-add is absent in the guest" {
+  # Without ssh-add in the guest the probe cannot run; it must SKIP silently
+  # rather than warn (the forward may still be fine — we just cannot assert it).
+  local pq="$STUBDIR/pq21"; mkdir -p "$pq"
+  cat >"$pq/msb" <<'PQ'
+#!/usr/bin/env bash
+snip=""; prev=""; for a in "$@"; do [ "$prev" = "-c" ] && { snip="$a"; break; }; prev="$a"; done
+case "$1" in --version) echo "msb 0.6.9"; exit 0;; esac
+case "$snip" in
+  *"command -v ssh-add"*) exit 1 ;;   # ssh-add ABSENT
+  *) exit 0 ;;
+esac
+PQ
+  chmod +x "$pq/msb"
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9
+    export PATH="'"$pq"':$PATH"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_warn_if_agent_unreachable skipbox /home/agent/.acq/ssh-agent.sock 2>&1
+    printf "RC=%s\n" "$?"
+  '
+  refute_output --partial 'UNREACHABLE'
+  assert_output --partial 'RC=0'
+}
+
 @test "msb: the base-image prereq check warns on missing tools, silent when present or skipped" {
   local pq="$STUBDIR/pq"; mkdir -p "$pq"
   cat >"$pq/msb" <<'PQ'

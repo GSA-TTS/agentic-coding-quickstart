@@ -91,9 +91,29 @@ jobs:
         run: |
           set -euo pipefail
           tarball="bash-${BASH32_VERSION}.tar.gz"
-          base="https://ftp.gnu.org/gnu/bash"
-          curl -fsSL --retry 3 -o "$tarball"     "${base}/${tarball}"
-          curl -fsSL --retry 3 -o "${tarball}.sig" "${base}/${tarball}.sig"
+          # Fetch the tarball + its detached signature. `ftp.gnu.org` is a single
+          # host that intermittently refuses connections and red-flags healthy
+          # PRs (curl 28 "Failed to connect"); `ftpmirror.gnu.org` redirects to a
+          # live GNU mirror, so try it FIRST and fall back to the canonical host.
+          # Integrity does not depend on the source — the OpenPGP signature below
+          # authenticates the bytes regardless of which mirror served them.
+          fetch() {
+            # $1 = output path, $2 = path under /gnu/bash
+            local _out="$1" _path="$2" _m
+            for _m in \
+              https://ftpmirror.gnu.org/gnu/bash \
+              https://ftp.gnu.org/gnu/bash ; do
+              if curl -fsSL --connect-timeout 30 --retry 3 --retry-connrefused \
+                   -o "$_out" "${_m}/${_path}"; then
+                return 0
+              fi
+              echo "warn: fetch of ${_path} from ${_m} failed; trying next mirror" >&2
+            done
+            echo "::error::could not download ${_path} from any GNU mirror" >&2
+            return 1
+          }
+          fetch "$tarball"       "$tarball"
+          fetch "${tarball}.sig" "${tarball}.sig"
 
           # Authenticate the tarball via GNU's detached OpenPGP signature.
           # Trust is anchored to Chet Ramey's release-signing key by its full
