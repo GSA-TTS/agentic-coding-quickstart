@@ -373,6 +373,16 @@ strings). The translate layer:
   `msb exec -e NAME=value` (msb's native per-exec env flag, already used for
   `HOME=/home/agent`), scoping the env to the kit's own commands.
 
+> **Update (2026-08-26):** The command-only scoping above dropped exactly the
+> agent-runtime config (`OPENCODE_CONFIG`-style vars) this vocabulary was
+> motivated by. The msb adapter now also persists the validated entries to a
+> root-owned guest marker (`/var/lib/acq/kit-env`, the same pattern as
+> `/var/lib/acq/agent` and `/var/lib/acq/ssh-auth-sock`) and replays them as
+> `-e` flags on every session path (attach, `acq exec`, `acq shell`), matching
+> sbx's sandbox-level env semantics. Names are re-validated on replay (tampered
+> marker defense) and the last value wins for a duplicate name (kits append in
+> application order, so a later kit overrides an earlier one).
+
 Deliberately minimal (YAGNI): **static string values only** — no interpolation,
 no references to `files[]`-staged paths (a kit needing a computed value uses a
 `commands[]` step, as before). Env var **names** are validated against
