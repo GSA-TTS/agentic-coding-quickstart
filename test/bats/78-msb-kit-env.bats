@@ -166,6 +166,7 @@ SPEC
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/kit-translate.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
+    # shellcheck disable=SC2034  # consumed by the sourced acq_backend_ensure_kits_applied
     ACQ_CLI_KITS=()
     _acq_msb_fetch_kit() { printf '%s\n' "$hk"; }
     acq_backend_ensure_kits_applied healbox >/dev/null 2>&1 )
@@ -184,6 +185,7 @@ SPEC
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/kit-translate.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
+    # shellcheck disable=SC2034  # consumed by the sourced acq_backend_ensure_kits_applied
     ACQ_CLI_KITS=()
     _acq_msb_fetch_kit() { printf '%s\n' "$hk"; }
     acq_backend_ensure_kits_applied healbox >/dev/null 2>&1 )
