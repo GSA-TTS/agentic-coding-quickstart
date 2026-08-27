@@ -3326,6 +3326,80 @@ _acq_msb_start_ssh_agent_bridge() {
     "mkdir -p /var/lib/acq && printf '%s' '$_sock' > /var/lib/acq/ssh-auth-sock" \
     </dev/null >/dev/null 2>&1 || true
   acq_debug "msb: ssh-agent bridge started at $_sock (vsock port $_port) in $name"
+
+  # Liveness probe (ADR-0021): the bridge + marker are now in place, but the
+  # create-time --vsock route's HOST endpoint can be STALE — most commonly after
+  # a host reboot, which restarts the host ssh-agent under a NEW socket path
+  # while the sandbox's persisted route still points at the OLD one. msb start /
+  # re-attach resume the sandbox with that persisted route; nothing re-derives
+  # it (the route is create-time only). The bridge then connects to a dead host
+  # endpoint (`socat … VSOCK-CONNECT` → "Connection reset by peer"), so the guest
+  # has SSH_AUTH_SOCK set and socat running yet `ssh-add -l` fails and signing
+  # breaks — a silent dead bridge behind a present marker. Probe once and, on
+  # failure, surface the recreate remedy instead of failing silently (repo
+  # no-silent-failure rule). Best-effort: `|| true` so a warning can NEVER abort
+  # the caller (this is the last statement of the bridge starter, which is itself
+  # the last statement of acq_backend_start, called bare under `set -euo
+  # pipefail` by the start/restart verbs — an unguarded non-zero would abort the
+  # whole verb). See ADR-0021 / docs/KNOWN_FAILURE_MODES.md §34.
+  _acq_msb_warn_if_agent_unreachable "$name" "$_sock" || true
+}
+
+# _acq_msb_warn_if_agent_unreachable NAME SOCK — probe the forwarded agent from
+# inside the guest and, if it is unreachable, print an actionable warning naming
+# the stale-route-after-reboot cause and the recreate remedy. Returns 0 when the
+# agent is reachable (or the probe cannot run), non-zero when it warned, so
+# tests can distinguish; every PRODUCTION caller MUST `|| true` this so the
+# warn-return can never abort a verb under `set -e`.
+#
+# The authoritative probe is `ssh-add -l` over the guest sock. Its exit code
+# alone is NOT enough to classify the reboot case: when the socat listener socket
+# EXISTS (the bridge is running) but its vsock backend is dead, ssh-add connects,
+# the agent protocol then fails, and ssh-add exits **1** with
+# "error fetching identities: communication with agent failed" — the SAME exit
+# code as a healthy-but-empty agent ("The agent has no identities."). Exit 2 is
+# only produced when the socket path itself cannot be opened, which is not this
+# scenario (the bridge socket is present). So we classify on the MESSAGE:
+#   - exit 0                                  -> reachable, has keys        (quiet)
+#   - "no identities" / "has no identities"   -> reachable, empty keyring   (quiet)
+#   - anything else on failure (incl. the
+#     "communication with agent failed" text
+#     and a bare exit 2)                      -> dead bridge/route          (WARN)
+# A path-compare against the create-time host_socket is deliberately NOT used:
+# the host agent socket path is platform-dependent (launchd may keep it stable;
+# a plain ssh-agent rotates it), so only a live connect is authoritative. See
+# ADR-0021.
+_acq_msb_warn_if_agent_unreachable() {
+  local name="$1" _sock="$2"
+  # Need ssh-add in the guest to probe; if it is absent, skip silently (the
+  # forward may still be fine — we simply cannot assert it here).
+  msb exec "$name" -u agent -- sh -c 'command -v ssh-add >/dev/null 2>&1' \
+    </dev/null >/dev/null 2>&1 || return 0
+  # Capture combined output AND exit status. Give the freshly-started socat a
+  # brief moment to establish its listener before probing (a fresh create can
+  # race the probe); a short bounded wait, not a fixed 1s tax on the common
+  # already-running reattach where the listener is already up.
+  local _out="" _rc=0
+  _out=$(msb exec "$name" -u agent -- sh -c \
+    "for _i in 1 2 3; do SSH_AUTH_SOCK='$_sock' ssh-add -l 2>&1 && exit 0; sleep 0.3; done; SSH_AUTH_SOCK='$_sock' ssh-add -l 2>&1" \
+    </dev/null 2>/dev/null) || _rc=$?
+  # Reachable with keys => quiet.
+  [ "$_rc" = "0" ] && return 0
+  # Reachable but empty keyring (exit 1 with the "no identities" message) => quiet.
+  case "$_out" in
+    *"no identities"*) return 0 ;;
+  esac
+  # Otherwise: cannot talk to the agent (dead bridge/route — the reboot case,
+  # whose message is "communication with agent failed", exit 1; or a bare
+  # "cannot open a connection" exit 2). Warn with the recreate remedy.
+  echo "acq(msb): warning: the forwarded host ssh-agent is UNREACHABLE from the guest" \
+       "in '$name' (the create-time --vsock route's host endpoint is stale — most" \
+       "commonly after a HOST REBOOT, which gives the host ssh-agent a new socket" \
+       "path while the sandbox keeps the old one). SSH_AUTH_SOCK is set but git" \
+       "signing will fail. The --vsock route is create-time only, so recreate the" \
+       "sandbox to refresh it: 'acq rm $name' then re-run your 'acq run …' (with" \
+       "SSH_AUTH_SOCK set). See ADR-0021 / docs/KNOWN_FAILURE_MODES.md §34." >&2
+  return 1
 }
 
 # _acq_msb_ssh_auth_sock_for NAME — echo the recorded guest ssh-agent sock path

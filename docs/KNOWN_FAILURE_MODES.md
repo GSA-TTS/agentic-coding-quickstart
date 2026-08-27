@@ -1807,6 +1807,51 @@ created *with* the route now re-injects `SSH_AUTH_SOCK` on every re-attach witho
 a manual export. See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
 ("Re-attach to a running sandbox").
 
+### Variant: forwarded agent unreachable after a host reboot (stale `--vsock` route)
+
+Another distinct signature, and the one that a manual
+`export SSH_AUTH_SOCK=…` does **not** fix: signing worked before, then after the
+**host machine was rebooted** (especially an unclean reboot that did not stop the
+sandbox first) a resume + re-attach leaves the guest unable to reach the agent —
+`ssh-add -l` inside the guest returns `error fetching identities: communication
+with agent failed`, and committing fails to sign — even though `SSH_AUTH_SOCK` is
+set on both the host and in the guest, the host agent holds the key, and the
+in-guest `socat` bridge is running. Probing the bridge by hand shows the tell:
+
+```
+$ socat -T2 - VSOCK-CONNECT:2:3552 </dev/null
+E connect(…, cid:2 port:3552, …): Connection reset by peer
+```
+
+`Connection reset by peer` on the vsock connect means **the host side of the
+route has no live listener**. The `--vsock HOST_PATH:3552` route is emitted
+**only at create time** and pins `HOST_PATH` to the host's `SSH_AUTH_SOCK` path
+captured then; it is persisted in the sandbox config and **never re-derived** on
+`msb start` or re-attach. A host reboot restarts the host ssh-agent under a *new*
+socket path, so the persisted route now points at a dead host endpoint. This is
+distinct from the previous variant: there the guest env var was missing; here the
+env var and bridge are present but the route's host end is dead.
+
+`acq` now **detects and reports** this instead of leaving a silent dead bridge:
+after (re)starting the bridge, `_acq_msb_start_ssh_agent_bridge` runs a liveness
+probe (`ssh-add -l` over the guest sock) and, on failure, prints an actionable
+warning naming the host-reboot cause and the remedy. Because the bridge's
+listener socket is present (only its vsock backend is dead), `ssh-add` exits **1**
+with `communication with agent failed` here — the same exit code as a healthy but
+empty agent, so the probe classifies on the message (a "no identities" reply is
+treated as healthy and stays quiet). The `--vsock` route is create-time only, so
+the fix is to **recreate the sandbox** to refresh the route:
+
+```bash
+acq rm <sandbox>
+# then re-run your original create/run WITH the host agent available:
+eval "$(ssh-agent -s)"; ssh-add ~/.ssh/id_ed25519   # if needed
+acq run <agent> <workspace…>
+```
+
+See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
+("Re-attach to a running sandbox") for the full mechanism.
+
 ---
 
 ## 35. Re-attach Heal Loop Warns Every Time on sbx 0.38 — `sbx kit add` Refuses Startup-Bearing Kits

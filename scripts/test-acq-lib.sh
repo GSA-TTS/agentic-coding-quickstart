@@ -333,6 +333,37 @@ case "$_msb_sub" in
       # VSOCK-CONNECT:2:<port>`) started by _acq_msb_start_ssh_agent_bridge.
       # Model a successful bridge start (exit 0). Match BEFORE the generic cases.
       *"socat UNIX-LISTEN"*) exit 0 ;;
+      # ADR-0021: the forwarded-agent liveness probe run by
+      # _acq_msb_warn_if_agent_unreachable. The probe reads BOTH ssh-add's exit
+      # code AND its message, because the reboot dead-bridge case and a healthy
+      # empty keyring BOTH exit 1 — only the text disambiguates them (real
+      # ssh-add: dead backend => exit 1 "...communication with agent failed";
+      # empty keyring => exit 1 "The agent has no identities."; missing socket =>
+      # exit 2 "Error connecting to agent..."). The guest command runs
+      # `ssh-add -l 2>&1`, folding stderr into stdout, so the message is on the
+      # msb-exec STDOUT that acq captures — model that by emitting EVERY message
+      # to STDOUT here (the stub's stdout == the outer msb-exec stdout).
+      #   default                       -> exit 0, "<key>"          (has keys; quiet)
+      #   STUB_AGENT_NO_KEYS=1          -> exit 1, "no identities"  (empty; quiet)
+      #   STUB_AGENT_UNREACHABLE=1      -> exit 1, "communication with agent failed"
+      #                                     (the reboot dead-bridge case; WARN)
+      #   STUB_AGENT_NO_SOCKET=1        -> exit 2, "Error connecting to agent"
+      #                                     (socket path gone; WARN)
+      # The probe retries up to 3x then does a final `ssh-add -l`; every attempt
+      # hits this same arm, so a stable knob yields a stable classification. This
+      # arm MUST precede the generic `command -v` catch-all so `command -v ssh-add`
+      # (probed first, present by default) is unaffected while the -l probe is
+      # controllable.
+      *"ssh-add -l"*)
+        if [ "${STUB_AGENT_UNREACHABLE:-0}" = "1" ]; then
+          printf 'error fetching identities: communication with agent failed\n'; exit 1
+        elif [ "${STUB_AGENT_NO_SOCKET:-0}" = "1" ]; then
+          printf 'Error connecting to agent: No such file or directory\n'; exit 2
+        elif [ "${STUB_AGENT_NO_KEYS:-0}" = "1" ]; then
+          printf 'The agent has no identities.\n'; exit 1
+        else
+          printf '256 SHA256:stubkey stub@host (ED25519)\n'; exit 0
+        fi ;;
       *"command -v"*) : ;;          # prereqs "present" (empty missing set)
       *"npm install"*)
         [ "${STUB_NPM_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;

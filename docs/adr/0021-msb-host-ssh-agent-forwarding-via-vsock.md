@@ -165,6 +165,46 @@ re-drive runs the exact provision sequence (`_acq_msb_check_socat` then
 `_acq_msb_start_ssh_agent_bridge`), which restarts the bridge and writes the
 marker, so the subsequent attach injects `SSH_AUTH_SOCK`.
 
+### Stale route after a host reboot (detect-and-report)
+
+The `--vsock HOST_PATH:PORT` route pins `HOST_PATH` to the host's
+`SSH_AUTH_SOCK` path **captured at create time**; it is persisted in the sandbox
+config and is **never re-derived** on `msb start` or re-attach (the route is
+create-time only). A **host reboot** restarts the host ssh-agent under a *new*
+socket path, so the persisted route's host endpoint goes dead. Resume + re-attach
+faithfully restart the in-guest bridge and re-write the marker (the running-
+reattach fix above), but the bridge then connects to a dead host endpoint
+(`socat … VSOCK-CONNECT` → "Connection reset by peer"): the guest has
+`SSH_AUTH_SOCK` set and `socat` running, yet `ssh-add -l` fails and signing
+breaks — a silent dead bridge behind a present marker.
+
+Because the route cannot be updated on a running sandbox (create-time only), acq
+cannot transparently heal this; the honest remedy is a recreate. Rather than fail
+silently (repo no-silent-failure rule), `_acq_msb_start_ssh_agent_bridge` runs a
+**liveness probe** after (re)placing the bridge/marker
+(`_acq_msb_warn_if_agent_unreachable`): it runs `ssh-add -l` over the guest sock
+and classifies the result. Exit code alone is insufficient — because when the
+socat *listener socket exists* (the bridge is running) but its vsock backend is
+dead, `ssh-add` connects, the agent protocol then fails, and it exits **1** with
+`error fetching identities: communication with agent failed` — the **same exit
+code** as a healthy-but-empty agent (`The agent has no identities.`). Exit 2 is
+produced only when the socket path itself cannot be opened, which is *not* the
+reboot case (the bridge socket is present). The probe therefore classifies on the
+**message**: exit 0 (has keys) and exit 1 with a "no identities" message are both
+healthy and stay quiet; anything else on failure — the "communication with agent
+failed" text, or a bare exit 2 — is treated as a dead bridge/route and warns with
+the `acq rm` + re-run remedy. The warn-return is `|| true`-guarded at the call
+site so it can never abort a verb under `set -e`. A short bounded retry (3×0.3s)
+absorbs a fresh-create race without taxing the common already-running reattach.
+The probe skips silently when `ssh-add` is absent in the guest (it cannot assert
+either way). A path-compare against the create-time `host_socket` is deliberately
+not used — the host agent socket path is platform-dependent (launchd may keep it
+stable; a plain `ssh-agent` rotates it), so only a live connect is
+authoritative. Refreshing the route automatically on resume is left as future
+work pending an msb capability to update a `--vsock` route in place. See
+`docs/KNOWN_FAILURE_MODES.md` §34 ("forwarded agent unreachable after a host
+reboot").
+
 ### Version gate (MIN_MSB_VERSION stays 0.6.8)
 
 `--vsock` first appears in **msb 0.6.9**. The global `MIN_MSB_VERSION` floor stays
