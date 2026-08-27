@@ -207,7 +207,9 @@ finishes, re-run your command. (No administrator rights are required.)
 3. **Help improve these docs** — Found something unclear? Open an issue or submit a PR
 
 Once in a while, refresh your setup to pick up updates (via your package manager,
-or `git fetch && git pull` in a clone), and rotate your USAi key when it expires.
+or `git fetch && git pull` in a clone), and
+[rotate your USAi key](docs/howto/acq.md#rotate-your-usai-key) when it expires
+(every 7 days).
 
 The playbook also provides reusable **agent skills** — step-by-step procedures
 for common tasks, following the [agentskills.io](https://agentskills.io)

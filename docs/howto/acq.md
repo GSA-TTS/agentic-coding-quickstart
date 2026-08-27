@@ -153,9 +153,38 @@ the guest.
 
 ### Rotate your USAi key
 
-```bash
-./acq usai-rotate-api-key
+USAi API keys expire every **7 days**, which is the most common cause of
+authentication errors like:
+
+```text
+Unauthorized: {"detail":"Not authenticated"}
 ```
+
+**Rotate on the host without restarting your sandbox.** You do not need to tear
+down or re-attach a running sandbox to swap in a fresh key — run the rotation
+command from the host and the new value is stored in `acq`'s secret store, ready
+for the next request:
+
+1. Open <https://console.gsa.usai.gov/key-management>.
+2. Choose **Rotate** from the **Actions** menu for your key.
+3. Copy the new key using the console **copy button** (selecting the displayed
+   text by hand can truncate it).
+4. With the key in your paste buffer, run:
+
+   ```bash
+   ./acq usai-rotate-api-key
+   ```
+
+   (or run the underlying `scripts/rotate-apikey` directly — a thin shim that
+   forwards to `acq usai-rotate-api-key`). It prompts for the new key, then
+   validates it in a temporary sandbox. Rotation runs through the active backend
+   (msb or sbx), so it works regardless of which backend you use.
+
+`acq` also validates your key on attach and offers to rotate it then, but the
+subcommand above is the direct path — no session restart required.
+
+If a rotated key is still rejected, it was likely truncated on copy — see
+[Known Failure Modes §20](../KNOWN_FAILURE_MODES.md#20-authentication-failed-after-copying-a-new-key).
 
 ---
 
