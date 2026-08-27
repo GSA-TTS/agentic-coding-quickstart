@@ -4,7 +4,8 @@
     { "pattern": "^https://console\\.gsa\\.usai\\.gov" },
     { "pattern": "^https://workshop\\.cloud\\.gov" },
     { "pattern": "^https?://localhost" },
-    { "pattern": "^https?://127\\.0\\.0\\.1" }
+    { "pattern": "^https?://127\\.0\\.0\\.1" },
+    { "pattern": "^https://www\\.gnu\\.org/software/parallel" }
   ],
   "timeout": "20s",
   "retryOn429": true,

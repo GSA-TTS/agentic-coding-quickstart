@@ -153,9 +153,91 @@ the guest.
 
 ### Rotate your USAi key
 
-```bash
-./acq usai-rotate-api-key
+USAi API keys expire every **7 days**, which is the most common cause of
+authentication errors like:
+
+```text
+Unauthorized: {"detail":"Not authenticated"}
 ```
+
+**Rotate on the host without restarting your sandbox.** You do not need to tear
+down or re-attach a running sandbox to swap in a fresh key — run the rotation
+command from the host and the new value is stored in `acq`'s secret store, ready
+for the next request:
+
+1. Open <https://console.gsa.usai.gov/key-management>.
+2. Choose **Rotate** from the **Actions** menu for your key.
+3. Copy the new key using the console **copy button** (selecting the displayed
+   text by hand can truncate it).
+4. With the key in your paste buffer, run:
+
+   ```bash
+   ./acq usai-rotate-api-key
+   ```
+
+   (or run the underlying `scripts/rotate-apikey` directly — a thin shim that
+   forwards to `acq usai-rotate-api-key`). It prompts for the new key, then
+   validates it in a temporary sandbox. Rotation runs through the active backend
+   (msb or sbx), so it works regardless of which backend you use.
+
+`acq` also validates your key on attach and offers to rotate it then, but the
+subcommand above is the direct path — no session restart required.
+
+If a rotated key is still rejected, it was likely truncated on copy — see
+[Known Failure Modes §20](../KNOWN_FAILURE_MODES.md#20-authentication-failed-after-copying-a-new-key).
+
+---
+
+## Installing acq
+
+Most users should use the one-line installer in the
+[README quickstart](../../README.md#step-2-install-acq) — it auto-selects the
+best method already on your Mac (Homebrew → npm → self-contained download), puts
+`acq` on your `PATH`, and never needs administrator rights. This section covers
+the manual and developer paths.
+
+### Direct package-manager install
+
+The one-line installer detects Homebrew and npm automatically. To run the direct
+command yourself:
+
+```bash
+npm install -g github:GSA-TTS/agentic-coding-quickstart   # if you use Node/npm — works today
+brew install GSA-TTS/tap/acq                              # if you use Homebrew — coming soon (tap not published yet)
+```
+
+Package-manager installs give you `upgrade`/`uninstall` for free.
+
+### Manual install (from a clone)
+
+If you're comfortable in a terminal and prefer to run `acq` from a clone:
+
+```bash
+git clone https://github.com/GSA-TTS/agentic-coding-quickstart.git
+cd agentic-coding-quickstart
+./acq run opencode ~/my-project
+```
+
+You'll also need the `msb` sandbox runtime — install it without admin via
+`curl -fsSL https://install.microsandbox.dev | sh` (or, if you have Homebrew,
+`brew install superradcompany/tap/microsandbox`).
+
+> **Running `./acq` from the clone?** It only works from **inside** the
+> `agentic-coding-quickstart` folder (that's where the `acq` file lives). If you
+> get "no such file `./acq`", `cd` back into that folder first. The one-line
+> installer avoids this entirely by putting `acq` on your `PATH`.
+
+#### Testing a specific tagged release
+
+After cloning, check out the tag:
+
+```bash
+git checkout v3.0.0-rc2
+```
+
+Git prints a message about a **"detached HEAD" state** — that's **normal, not an
+error.** It just means you're on a specific snapshot. Run `acq` as usual; to go
+back to the latest, run `git switch main`.
 
 ---
 

@@ -64,6 +64,25 @@ This project operates under professional standards of conduct. All contributors:
 
 3. Follow the quickstart to set up your environment
 
+### What's in this repo
+
+| File/Directory                      | Purpose                                                    |
+| ----------------------------------- | ---------------------------------------------------------- |
+| `acq`                               | Entry point — pluggable-backend wrapper (msb by default, or sbx) |
+| `acq.backends/`                     | Backend adapters (`common.sh`, `sbx.sh`, `msb.sh`, `kit-translate.sh`, `secret-store.sh`, `progress.sh`) |
+| `install.sh`                        | One-line `curl \| sh` installer (auto-selects brew/npm/clone) |
+| `scripts/rotate-apikey`             | Rotate your USAi API key secret (`acq usai-rotate-api-key`) |
+| `scripts/test-acq-bats`             | Offline unit suite for acq (bats-core) |
+| `scripts/verify-backends`           | Live end-to-end backend verification (needs Docker or KVM) |
+| `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
+| `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
+| `docs/howto/acq.md`                 | acq how-to guide and backend selection                     |
+| `docs/BACKEND_GUIDE.md`             | Per-backend strengths, tradeoffs, and configuration       |
+| `docs/howto/msb.md`                 | msb (microsandbox) setup guide — the default backend       |
+| `docs/howto/sbx.md`                 | sbx CLI setup guide — the alternative backend              |
+| `docs/CONCEPTS.md`                  | How it works, customizing, extra kits, optional integrations |
+| `docs/KNOWN_FAILURE_MODES.md`       | Troubleshooting guide                                      |
+
 ---
 
 ## Local Development Checks
