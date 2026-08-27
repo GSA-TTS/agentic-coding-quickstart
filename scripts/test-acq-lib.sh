@@ -350,14 +350,10 @@ case "$_msb_sub" in
       *"cat /var/lib/acq/ssh-auth-sock"*)
         [ -n "${STUB_RECORDED_SSH_AUTH_SOCK+x}" ] || exit 1
         printf '%s' "$STUB_RECORDED_SSH_AUTH_SOCK" ;;
-      # The persisted kit environment[] marker read by the session paths
-      # (run/attach/shell) so kit-declared guest env survives past provisioning
-      # (see ADR-0011). STUB_RECORDED_KIT_ENV models a sandbox whose kits
-      # recorded NAME=value lines at provision time (multi-line values model
-      # multiple entries). UNSET models an ABSENT marker faithfully: a real
-      # `sh -c 'cat …'` exits 1 there, and acq runs under `set -euo pipefail`,
-      # so the reader must survive that nonzero (a sandbox created before the
-      # kit-env feature has no marker; every session verb still has to work).
+      # The persisted kit environment[] marker (see ADR-0011).
+      # STUB_RECORDED_KIT_ENV models the NAME=value lines recorded at
+      # provision (multi-line values model multiple entries); absent/empty
+      # semantics per the marker-reads comment above.
       *"cat /var/lib/acq/kit-env"*)
         [ -n "${STUB_RECORDED_KIT_ENV+x}" ] || exit 1
         printf '%s' "$STUB_RECORDED_KIT_ENV" ;;

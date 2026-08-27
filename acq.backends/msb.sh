@@ -3292,10 +3292,9 @@ _acq_msb_ssh_auth_sock_for() {
 _acq_msb_kit_env_flags_into() {
   local _arrn="$1" _name="$2"
   eval "$_arrn=()"
-  # An ABSENT marker (sandbox created before the kit-env feature, or no kit
-  # declared environment[]) makes the in-guest `cat` exit 1; acq runs under
-  # `set -euo pipefail`, so the substitution MUST be failure-guarded or every
-  # session verb against such a sandbox dies before producing any output.
+  # Failure-guarded: an absent marker (pre-kit-env sandbox, or no kit declared
+  # environment[]) must yield an empty result, not kill the session verb — see
+  # _acq_msb_ssh_auth_sock_for.
   local _kvs
   _kvs=$(msb exec "$_name" -u 0 -- sh -c 'cat /var/lib/acq/kit-env 2>/dev/null' \
     </dev/null 2>/dev/null) || _kvs=""
@@ -3725,10 +3724,9 @@ _acq_msb_attach() {
   # override; otherwise read the guest path recorded at provision (it mirrors the
   # host mount path, so it can't be recomputed from NAME alone). Fall back to the
   # agent home if nothing was recorded (older sandbox).
-  # Both marker reads below are failure-guarded (`|| true` before the pipe):
-  # an absent marker makes the in-guest `cat` exit 1, and under acq's
-  # `set -euo pipefail` an unguarded pipeline would kill the attach instead of
-  # taking the documented fallback.
+  # Both marker reads are failure-guarded so an absent marker takes the
+  # documented fallback instead of killing the attach (see
+  # _acq_msb_ssh_auth_sock_for).
   local ws="${ACQ_MSB_WORKSPACE:-}"
   if [ -z "$ws" ]; then
     ws=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
@@ -3788,8 +3786,6 @@ _acq_msb_shell_exec() {
   if [ -z "$ws" ]; then
     ws="${ACQ_MSB_WORKSPACE:-}"
     if [ -z "$ws" ]; then
-      # Failure-guarded like the attach path: an absent marker must fall back,
-      # not kill the shell verb under `set -euo pipefail`.
       ws=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
     fi
     [ -n "$ws" ] || ws="/home/agent"
