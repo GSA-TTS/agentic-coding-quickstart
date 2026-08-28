@@ -165,7 +165,7 @@ down or re-attach a running sandbox to swap in a fresh key — run the rotation
 command from the host and the new value is stored in `acq`'s secret store, ready
 for the next request:
 
-1. Open <https://console.gsa.usai.gov/key-management>.
+1. Open <https://gsa.usai.gov/console/key-management>.
 2. Choose **Rotate** from the **Actions** menu for your key.
 3. Copy the new key using the console **copy button** (selecting the displayed
    text by hand can truncate it).
