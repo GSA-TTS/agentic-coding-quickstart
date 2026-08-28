@@ -502,12 +502,25 @@ SSHSTUB
 _line="ssh-keygen"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
 # Emit throwaway key material at -f <path> so downstream authorize/forward runs.
+# ONLY inside $STUBDIR: a stub must never write to host paths. This bit for
+# real — a fixture `git commit` that forgot to disable signing made git invoke
+# this stub via the host's gpg.format=ssh config, and the unguarded write
+# clobbered the user's real ~/.ssh public key file. Refuse loudly instead so
+# the offending test fails and gets fixed.
 _f=""; _prev=""
 for a in "$@"; do [ "$_prev" = "-f" ] && { _f="$a"; break; }; _prev="$a"; done
 if [ -n "$_f" ]; then
-  mkdir -p "$(dirname "$_f")" 2>/dev/null || true
-  printf 'STUB-PRIVATE-KEY\n' >"$_f"
-  printf 'ssh-ed25519 AAAASTUBPUBKEY acq-msb\n' >"${_f}.pub"
+  case "$_f" in
+    "$STUBDIR"/*)
+      mkdir -p "$(dirname "$_f")" 2>/dev/null || true
+      printf 'STUB-PRIVATE-KEY\n' >"$_f"
+      printf 'ssh-ed25519 AAAASTUBPUBKEY acq-msb\n' >"${_f}.pub"
+      ;;
+    *)
+      printf 'ssh-keygen stub: refusing to write outside STUBDIR: %s\n' "$_f" >&2
+      exit 1
+      ;;
+  esac
 fi
 exit 0
 KEYGENSTUB
