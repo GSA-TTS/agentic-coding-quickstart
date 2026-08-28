@@ -571,6 +571,7 @@ ACQ_MSB_SSH_DIR="${ACQ_MSB_SSH_DIR:-${ACQ_STATE_DIR}/ssh}"
 ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR}/msb_id_ed25519}"
 ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR}/known_hosts}"
 ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR}/ports}"
+ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
 # Create-time startup-script staging state (ADR-0017). The staged host file list
 # is reset per provision; declare it at module scope so cleanup references are
 # always defined even if provision is not the entry point.
@@ -2293,6 +2294,115 @@ _acq_msb_upstream_ca_flags_into() {
 }
 
 # ---------------------------------------------------------------------------
+# Neutral --clone emulation (ADR-0027) — disposable primary on msb
+# ---------------------------------------------------------------------------
+# sbx's --clone runs the agent on an isolated in-container clone; msb workspaces
+# are direct host mounts. Emulate the semantics with a managed host-side scratch
+# clone: `git clone --no-hardlinks` the primary into
+# ACQ_MSB_CLONES_DIR/<sandbox>/<basename>, mount THAT rw at the ORIGINAL
+# workspace path in the guest (verified msb 0.6.15 mounts --volume src:dst with
+# src != dst), and register a `sandbox-<name>` remote in the host checkout so
+# recovery is sbx-parity: `git fetch sandbox-<name>`. --no-hardlinks is
+# load-bearing — a same-filesystem clone hardlinks object files by default, so a
+# guest with rw access to the scratch .git could modify inodes shared with the
+# real repo's object store. Deliberate divergences from sbx (both git-native and
+# documented in the ADR): gitignored/untracked files and uncommitted changes to
+# tracked files do NOT enter the clone — commit first, or `acq cp` them in.
+
+# _acq_msb_clone_setup NAME WSPATH — create the scratch clone + fetch-back
+# remote for NAME's primary workspace WSPATH. On success sets
+# _ACQ_MSB_CLONE_DIR to the canonicalized scratch path (the mount source).
+# Fails (return 1) without touching the backend when WSPATH is not a git
+# repository root or a previous scratch is still present.
+_acq_msb_clone_setup() {
+  local name="$1" ws="$2" top=""
+  if ! top=$(git -C "$ws" rev-parse --show-toplevel 2>/dev/null); then
+    echo "acq(msb): error: --clone: workspace is not a git repository: $ws" >&2
+    echo "acq(msb):   --clone runs the agent on a clone of the primary workspace's repo." >&2
+    return 1
+  fi
+  local ws_canon top_canon
+  ws_canon=$(canonicalize_path "$ws")
+  top_canon=$(canonicalize_path "$top")
+  if [ "$ws_canon" != "$top_canon" ]; then
+    echo "acq(msb): error: --clone: workspace must be the repository root: $top_canon" >&2
+    return 1
+  fi
+  local dir="${ACQ_MSB_CLONES_DIR}/${name}" scratch
+  scratch="${dir}/$(basename "$ws_canon")"
+  if [ -e "$dir" ]; then
+    echo "acq(msb): error: --clone: a scratch clone for '$name' already exists: $dir" >&2
+    echo "acq(msb):   it may hold unfetched work from an earlier sandbox. Recover it" >&2
+    echo "acq(msb):   ('git fetch sandbox-${name}') and remove the directory, then re-run." >&2
+    return 1
+  fi
+  if [ -n "$(git -C "$ws_canon" status --porcelain 2>/dev/null)" ]; then
+    echo "acq(msb): note: the workspace has uncommitted changes; a git clone carries" >&2
+    echo "acq(msb):   committed state only. Commit first, or copy files in with 'acq cp'." >&2
+  fi
+  mkdir -p "$dir"
+  printf '%s\n' "$ws_canon" > "${dir}/.origin"
+  if ! git clone --quiet --no-hardlinks -- "$ws_canon" "$scratch"; then
+    echo "acq(msb): error: --clone: git clone of $ws_canon failed" >&2
+    rm -rf "$dir"
+    return 1
+  fi
+  # Fetch-back remote in the host checkout (replace a stale same-name remote —
+  # its scratch dir was just verified absent, so it cannot hold unfetched work).
+  git -C "$ws_canon" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
+  if ! git -C "$ws_canon" remote add "sandbox-${name}" "$scratch" >/dev/null 2>&1; then
+    echo "acq(msb): warning: could not register the 'sandbox-${name}' remote in $ws_canon;" >&2
+    echo "acq(msb):   fetch agent work directly: git fetch $scratch" >&2
+  fi
+  echo "acq(msb): agent runs on a disposable clone; the real checkout is untouched." >&2
+  echo "acq(msb):   Recover agent branches with: git fetch sandbox-${name}" >&2
+  _ACQ_MSB_CLONE_DIR=$(canonicalize_path "$scratch")
+  return 0
+}
+
+# _acq_msb_clone_warn_unfetched NAME — warn (sbx-parity, never blocks) when
+# NAME's scratch clone holds commits absent from the origin checkout's object
+# store. Branch tips are checked with cat-file -e; a fetch transfers exactly
+# those objects, so tip-present == nothing to lose.
+_acq_msb_clone_warn_unfetched() {
+  # NOTE: `local a="$1" b="…${a}"` is a trap — the whole statement's words
+  # expand BEFORE `local` assigns, so ${a} is unbound under set -u. Split them.
+  local name="$1" origin="" scratch="" d t
+  local dir="${ACQ_MSB_CLONES_DIR}/${name}"
+  [ -d "$dir" ] || return 0
+  origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
+  [ -n "$origin" ] && [ -d "$origin" ] || return 0
+  for d in "$dir"/*/; do [ -d "${d}.git" ] && scratch="${d%/}"; done
+  [ -n "$scratch" ] || return 0
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    if ! git -C "$origin" cat-file -e "$t" 2>/dev/null; then
+      echo "acq(msb): warning: discarding unfetched commits in sandbox '$name''s scratch clone" >&2
+      echo "acq(msb):   (they were recoverable with: git fetch sandbox-${name})." >&2
+      return 0
+    fi
+  done <<EOF
+$(git -C "$scratch" for-each-ref --format='%(objectname)' refs/heads 2>/dev/null)
+EOF
+  return 0
+}
+
+# _acq_msb_clone_cleanup NAME — delete NAME's scratch clone and drop the
+# fetch-back remote from the origin checkout. Best-effort, always returns 0
+# (a sandbox created without --clone has no dir: quiet no-op).
+_acq_msb_clone_cleanup() {
+  local name="$1" origin=""
+  local dir="${ACQ_MSB_CLONES_DIR}/${name}"
+  [ -d "$dir" ] || return 0
+  origin=$(cat "${dir}/.origin" 2>/dev/null) || origin=""
+  if [ -n "$origin" ] && [ -d "$origin" ]; then
+    git -C "$origin" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$dir"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # acq_backend_provision — create a sandbox and apply the kits
 # ---------------------------------------------------------------------------
 # msb create takes an IMAGE + flags. acq derives the sandbox name at the acq
@@ -2636,6 +2746,28 @@ EOF
 $(workspace_paths "$@")
 EOF
 
+  # Neutral --clone (ADR-0027): the PRIMARY workspace mounts a managed scratch
+  # clone instead of the real checkout (see _acq_msb_clone_setup above).
+  # Secondaries are untouched. Fail before any backend call: a create that
+  # cannot honor --clone must not produce a sandbox with the real path rw.
+  local _clone_src=""
+  if [ "${ACQ_CLONE:-0}" = "1" ]; then
+    if [ "${#_ws_recs[@]}" -eq 0 ]; then
+      echo "acq(msb): error: --clone requires a workspace path (the repo to clone)." >&2
+      return 1
+    fi
+    local _primary="${_ws_recs[0]}"
+    case "$_primary" in *:ro) _primary="${_primary%:ro}" ;; esac
+    if [ ! -d "$_primary" ]; then
+      echo "acq(msb): error: workspace path does not exist on the host: $_primary" >&2
+      return 1
+    fi
+    if ! _acq_msb_clone_setup "$name" "$_primary"; then
+      return 1
+    fi
+    _clone_src="$_ACQ_MSB_CLONE_DIR"
+  fi
+
   ACQ_MSB_GUEST_WORKSPACE=""
   local _wi _wspec _wpath _wro _first_guest=""
   for _wi in ${_ws_recs[@]+"${!_ws_recs[@]}"}; do
@@ -2661,8 +2793,16 @@ EOF
       _wpath=$(canonicalize_path "$_wpath")
     fi
     # Mount at the same absolute path in the guest (sbx-parity), preserving :ro.
-    create_flags+=(--volume "${_wpath}:${_wpath}${_wro}")
-    acq_debug "msb volume: ${_wpath} -> ${_wpath}${_wro}"
+    # Under --clone, the PRIMARY's mount SOURCE is the scratch clone while the
+    # guest path stays the original — the agent's cwd, kits, and docs behave
+    # exactly as in a non-clone run (verified msb 0.6.15 mounts src != dst).
+    if [ -n "$_clone_src" ] && [ -z "$_first_guest" ]; then
+      create_flags+=(--volume "${_clone_src}:${_wpath}${_wro}")
+      acq_debug "msb volume (clone): ${_clone_src} -> ${_wpath}${_wro}"
+    else
+      create_flags+=(--volume "${_wpath}:${_wpath}${_wro}")
+      acq_debug "msb volume: ${_wpath} -> ${_wpath}${_wro}"
+    fi
     [ -z "$_first_guest" ] && _first_guest="$_wpath"
   done
 
@@ -2763,6 +2903,9 @@ EOF
       acq_registry_auth_hint msb "$_msb_image"
     fi
     echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the full command trace)" >&2
+    # A fresh --clone scratch can hold no agent work yet — remove it (and the
+    # fetch-back remote) so the next create doesn't refuse on a stale dir.
+    [ -n "$_clone_src" ] && _acq_msb_clone_cleanup "$name"
     return 1
   fi
 
@@ -3968,12 +4111,18 @@ acq_backend_terminate() {
   # failed remove of an already-gone sandbox (removed via `msb rm` directly, or
   # a half-failed create that never registered) must still reach the cleanup,
   # or the volumes orphan forever under ~/.microsandbox/volumes/.
+  # --clone (ADR-0027): surface unfetched agent commits BEFORE anything is deleted
+  # (sbx-parity warning; rm proceeds — the scratch is disposable by contract).
+  _acq_msb_clone_warn_unfetched "$1"
   local _rc=0
   msb remove --force "$1" || _rc=$?
   if [ "$_rc" -ne 0 ] && acq_backend_exists "$1"; then
     return "$_rc"
   fi
   _acq_msb_remove_derived_volumes "$1"
+  # Same GONE-after-remove-attempt rule as the volumes above: delete the scratch
+  # clone and drop the fetch-back remote only once the sandbox is really gone.
+  _acq_msb_clone_cleanup "$1"
   return "$_rc"
 }
 

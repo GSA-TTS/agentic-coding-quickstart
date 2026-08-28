@@ -407,15 +407,20 @@ acq_backend_provision() {
     fi
   fi
 
+  # Neutral --clone (ADR-0027): acq owns the flag, so re-inject sbx's native
+  # `--clone` here (the acq dispatch stripped it and exported ACQ_CLONE).
+  local _cf=()
+  [ "${ACQ_CLONE:-0}" = "1" ] && _cf=(--clone)
+
   local kf=()
   while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
 
-  acq_debug "sbx create --name $name ${_tf[*]:-} ${kf[*]} ${_stripped[*]:-}"
+  acq_debug "sbx create --name $name ${_cf[*]:-} ${_tf[*]:-} ${kf[*]} ${_stripped[*]:-}"
   acq_spin_start "Creating sandbox '$name'"
   if [ "${#_stripped[@]}" -gt 0 ]; then
-    sbx create --name "$name" ${_tf[@]+"${_tf[@]}"} "${kf[@]}" "${_stripped[@]}"
+    sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" "${_stripped[@]}"
   else
-    sbx create --name "$name" ${_tf[@]+"${_tf[@]}"} "${kf[@]}"
+    sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}"
   fi
   local _rc=$?
   acq_spin_stop "Creating sandbox '$name'"

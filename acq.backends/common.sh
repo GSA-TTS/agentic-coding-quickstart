@@ -911,6 +911,28 @@ extract_image_flag() {
   fi
 }
 
+# Extract the acq-owned boolean `--clone` (neutral disposable-primary option,
+# GSA-TTS/agentic-coding-quickstart#403) from an arg list, mirroring
+# extract_image_flag: ACQ_CLONE_FLAG=1 if seen before `--`, everything else in
+# ACQ_CLONE_REMAINING. Acq owns the flag on both backends — sbx re-injects it
+# for the native `sbx create --clone`; msb emulates with a host-side scratch
+# clone — so it must never survive raw on a backend argv.
+extract_clone_flag() {
+  ACQ_CLONE_FLAG=""
+  ACQ_CLONE_REMAINING=()
+  local arg
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    # shellcheck disable=SC2034  # ACQ_CLONE_FLAG is consumed by the sourcing acq dispatch (cross-file)
+    case "$arg" in
+      --)      ACQ_CLONE_REMAINING+=("$@"); break ;;
+      --clone) ACQ_CLONE_FLAG=1 ;;
+      *)       ACQ_CLONE_REMAINING+=("$arg") ;;
+    esac
+    shift
+  done
+}
+
 # Resolve the effective NEUTRAL base image per ADR-0022 precedence:
 #   --image flag  >  ACQ_IMAGE env  >  (empty)
 # The `--image` flag value is captured by extract_image_flag into ACQ_IMAGE_FLAG.
