@@ -302,6 +302,61 @@ SPEC
   refute_regex "$spec" '1BAD'
 }
 
+@test "env: a block-scalar environment value is dropped with a warning, not mangled" {
+  # environment[] values are single-line string scalars only. A YAML block
+  # scalar used to come out mangled (the value became a literal `|`/`>`), and
+  # its indented continuation lines containing a colon parsed as BOGUS extra
+  # env entries. The parser must drop the entry, warn, and skip the block body.
+  local bkit="$STUBDIR/blockenv-kit"
+  mkdir -p "$bkit"
+  cat >"$bkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: blockenv-kit
+displayName: BlockEnv Kit
+description: block scalar env values must be rejected
+environment:
+  GOOD_VAR: single-line-ok
+  MULTI_VAR: |
+    first line
+    looks_like: an-entry
+  FOLDED_VAR: >-
+    folded text
+  AFTER_VAR: still-parsed
+SPEC
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_spec_env "'"$bkit"'/spec.yaml" 2>/dev/null'
+  assert_output --partial 'GOOD_VAR'
+  assert_output --partial 'AFTER_VAR'
+  refute_output --partial 'MULTI_VAR'
+  refute_output --partial 'FOLDED_VAR'
+  refute_output --partial 'looks_like'
+
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_spec_env "'"$bkit"'/spec.yaml" 2>&1 >/dev/null'
+  assert_output --partial 'MULTI_VAR'
+  assert_output --partial 'FOLDED_VAR'
+  assert_output --partial 'block scalar'
+}
+
+@test "env: kit validate reports a block-scalar environment value as an error" {
+  local bkit="$STUBDIR/blockenv-vkit"
+  mkdir -p "$bkit"
+  cat >"$bkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: blockenv-vkit
+displayName: BlockEnv VKit
+description: validate flags block scalar env values
+environment:
+  OK_VAR: fine
+  MULTI_VAR: |
+    first line
+SPEC
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_validate "'"$bkit"'" 2>&1'
+  assert_failure
+  assert_output --partial 'MULTI_VAR'
+  assert_output --partial 'single-line'
+}
+
 # Regression guard: the files[].mode validators must NOT use a brace-interval
 # quantifier (/^[0-7]{3,4}$/ or /^0[0-7]{3}$/). mawk — the default awk on
 # Debian/Ubuntu — has no interval-expression support, so that form matches
