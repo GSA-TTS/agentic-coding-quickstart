@@ -63,7 +63,7 @@ You'll type (or paste) the commands below into this window.
 Paste this one line and press Return:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GSA-TTS/agentic-coding-quickstart/main/install.sh | sh
+curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v2.0.0/install.sh | sh # x-release-please-version
 ```
 
 That's it — you don't have to choose *how* to install. The installer:
@@ -99,13 +99,18 @@ You never have to pipe a script straight into your shell. Download it, read it,
 then run it:
 
 ```bash
-curl -fsSL -o install-acq.sh https://raw.githubusercontent.com/GSA-TTS/agentic-coding-quickstart/main/install.sh
-less install-acq.sh      # read it
-sh install-acq.sh --dry-run   # show what it WOULD do, changing nothing
-sh install-acq.sh             # actually install
+ACQ_VERSION=2.0.0 # x-release-please-version
+curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/install.sh"
+curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/SHA256SUMS"
+shasum -a 256 -c SHA256SUMS
+less install.sh              # read it
+sh install.sh --dry-run      # show what it WOULD do, changing nothing
+sh install.sh                # actually install
 ```
 
-You can also force a specific method with `--method brew|npm|clone`.
+The release asset pins the default clone install to the release tag and verifies
+that checkout against the release commit. You can also force a specific method
+with `--method brew|npm|clone`.
 
 </details>
 

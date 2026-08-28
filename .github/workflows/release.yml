@@ -23,6 +23,33 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          release-type: simple
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Check out release commit
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ steps.release.outputs.tag_name }}
+          persist-credentials: false
+
+      - name: Build release assets
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        run: |
+          set -eu
+          release_sha="$(git rev-parse HEAD)"
+          mkdir -p dist
+          cp install.sh dist/install.sh
+          sed -i "s/^DEFAULT_RELEASE_SHA=.*/DEFAULT_RELEASE_SHA=\"${release_sha}\"/" dist/install.sh
+          chmod 0755 dist/install.sh
+          (cd dist && sha256sum install.sh > SHA256SUMS)
+
+      - name: Upload release assets
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/install.sh dist/SHA256SUMS --clobber
