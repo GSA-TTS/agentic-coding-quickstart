@@ -25,6 +25,9 @@
 #                 [--sha <full-commit>] [--no-msb] [--dry-run] [--yes]
 #                 [--help]
 #
+# Running this script from a source checkout still installs from REPO_URL at the
+# default release tag; it does not install the local working tree.
+#
 # Inspect first (recommended): download and read this file, then run it.
 
 set -eu
@@ -104,6 +107,10 @@ install.sh — install acq (agentic-coding-quickstart)
 
 It auto-selects the best method already on your host: Homebrew, then npm, then
 a git clone. Override with --method.
+
+When run directly from a source checkout, the clone method still installs from
+the configured repository at the default release tag; it does not install your
+local working tree.
 
 Options:
   --method <m>         Force install method: brew | npm | clone (default: auto).
@@ -303,6 +310,20 @@ git_is_usable() {
   command -v git >/dev/null 2>&1 && git --version >/dev/null 2>&1
 }
 
+checkout_pinned_sha() {
+  repo="$1"
+  cleanup_on_fail="$2"
+  git -C "$repo" checkout "$SHA" 2>/dev/null && return 0
+  git -C "$repo" fetch --unshallow --tags origin \
+    '+refs/heads/*:refs/remotes/origin/*' 2>/dev/null \
+    || git -C "$repo" fetch --tags origin \
+      '+refs/heads/*:refs/remotes/origin/*' 2>/dev/null \
+    || true
+  git -C "$repo" checkout "$SHA" && return 0
+  [ "$cleanup_on_fail" = "cleanup" ] && rm -rf "$repo"
+  die "pinned commit '$SHA' not found in $REPO_URL"
+}
+
 # Ensure a usable git, proactively triggering the macOS Command Line Tools
 # install and waiting for it to finish. No sudo required. On non-macOS (or if
 # the tools never appear) this fails closed with guidance.
@@ -388,7 +409,11 @@ install_via_clone() {
   if [ -e "$CLONE_DIR/.git" ]; then
     step "Updating existing install at $CLONE_DIR"
     run git -C "$CLONE_DIR" fetch --tags --prune origin
-    run git -C "$CLONE_DIR" checkout "$target"
+    if [ -n "$SHA" ] && [ "$DRY_RUN" -eq 0 ]; then
+      checkout_pinned_sha "$CLONE_DIR" keep
+    else
+      run git -C "$CLONE_DIR" checkout "$target"
+    fi
     if [ "$DRY_RUN" -eq 0 ] && [ -z "$SHA" ] \
        && git -C "$CLONE_DIR" symbolic-ref -q HEAD >/dev/null 2>&1; then
       # Only fast-forward when on a branch (a pinned SHA is detached HEAD).
@@ -413,12 +438,7 @@ install_via_clone() {
           || { rm -rf "$CLONE_DIR"; die "failed to clone $REPO_URL"; }
       fi
       if [ -n "$SHA" ]; then
-        # A shallow clone may not contain the pinned commit; deepen if needed.
-        git -C "$CLONE_DIR" checkout "$SHA" 2>/dev/null \
-          || { git -C "$CLONE_DIR" fetch --unshallow origin 2>/dev/null \
-                 || git -C "$CLONE_DIR" fetch origin 2>/dev/null || true;
-               git -C "$CLONE_DIR" checkout "$SHA" \
-                 || { rm -rf "$CLONE_DIR"; die "pinned commit '$SHA' not found in $REPO_URL"; }; }
+        checkout_pinned_sha "$CLONE_DIR" cleanup
       else
         git -C "$CLONE_DIR" checkout "$REF" \
           || { rm -rf "$CLONE_DIR"; die "requested version '$REF' not found in $REPO_URL"; }

@@ -259,7 +259,9 @@ as issues):
   out `HEAD`, failing closed on mismatch — a content-addressed check). The source
   tree default ref is the current release tag, while release automation publishes
   an `install.sh` asset with the canonical release commit SHA embedded as the
-  default SHA.
+  default SHA. Running `sh install.sh` from a source checkout still clones from
+  the configured repository at that default release tag; it does not install
+  unreleased files from the invoking checkout.
 - **Verifiable.** Release automation publishes `SHA256SUMS` next to the installer
   asset. Inspect-first is supported: download `install.sh`, verify it with
   `SHA256SUMS`, read it, and use `--dry-run` before installing.
