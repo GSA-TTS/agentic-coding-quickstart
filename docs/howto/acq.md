@@ -202,8 +202,8 @@ The one-line installer detects Homebrew and npm automatically. To run the direct
 command yourself:
 
 ```bash
-npm install -g github:GSA-TTS/agentic-coding-quickstart   # if you use Node/npm — works today
-brew install GSA-TTS/tap/acq                              # if you use Homebrew — coming soon (tap not published yet)
+npm install -g github:GSA-TTS/agentic-coding-quickstart   # if you use Node/npm
+brew install GSA-TTS/tap/acq                              # if you use Homebrew
 ```
 
 Package-manager installs give you `upgrade`/`uninstall` for free.

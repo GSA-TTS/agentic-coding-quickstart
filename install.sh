@@ -14,11 +14,6 @@
 # needed). It never uses `sudo`, installs only under your home directory, and
 # never changes your PATH without asking first.
 #
-# NOTE: In this increment the npm and clone branches are fully functional. The
-# brew branch is a stub (the Homebrew tap repo does not exist yet) that falls
-# back to the clone install, so no path leaves the user without acq. See the
-# installation-and-distribution ADR under docs/adr/.
-#
 # Usage:
 #   curl -fsSL <release-asset-url>/install.sh | sh
 #   sh install.sh [--method brew|npm|clone] [--ref <tag-or-branch>]
@@ -44,6 +39,8 @@ DEFAULT_RELEASE_VERSION="2.0.0" # x-release-please-version
 DEFAULT_RELEASE_REF="v$DEFAULT_RELEASE_VERSION"
 DEFAULT_RELEASE_SHA=""
 REF="${ACQ_INSTALL_REF:-$DEFAULT_RELEASE_REF}"
+REF_WAS_SET=0
+[ "${ACQ_INSTALL_REF+x}" = x ] && REF_WAS_SET=1
 
 # Optional: pin to an exact 40-char commit SHA. Release assets set this to the
 # release commit by default; source checkouts leave it empty so local/dev installs
@@ -96,11 +93,6 @@ run() {
   fi
 }
 
-# Show a command that is STUBBED this increment (never executed).
-stub() {
-  printf '  [stub]    %s\n' "$*"
-}
-
 usage() {
   cat <<'EOF'
 install.sh — install acq (agentic-coding-quickstart)
@@ -141,8 +133,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --method) [ $# -ge 2 ] || die "--method needs a value"; METHOD="$2"; shift 2 ;;
     --method=*) METHOD="${1#--method=}"; shift ;;
-    --ref) [ $# -ge 2 ] || die "--ref needs a value"; REF="$2"; shift 2 ;;
-    --ref=*) REF="${1#--ref=}"; shift ;;
+    --ref) [ $# -ge 2 ] || die "--ref needs a value"; REF="$2"; REF_WAS_SET=1; shift 2 ;;
+    --ref=*) REF="${1#--ref=}"; REF_WAS_SET=1; shift ;;
     --sha) [ $# -ge 2 ] || die "--sha needs a value"; SHA="$2"; shift 2 ;;
     --sha=*) SHA="${1#--sha=}"; shift ;;
     --no-msb) INSTALL_MSB=0; shift ;;
@@ -229,7 +221,9 @@ command -v curl >/dev/null 2>&1 || die "curl is required but was not found."
 # ---------------------------------------------------------------------------
 
 if [ "$METHOD" = "auto" ]; then
-  if command -v brew >/dev/null 2>&1; then
+  if [ -n "$SHA" ]; then
+    METHOD="clone"
+  elif command -v brew >/dev/null 2>&1 && [ "$REF_WAS_SET" -eq 0 ]; then
     METHOD="brew"
   elif command -v npm >/dev/null 2>&1; then
     METHOD="npm"
@@ -240,24 +234,38 @@ if [ "$METHOD" = "auto" ]; then
 else
   info "  install method: $METHOD (forced)"
 fi
-info "  version:   $REF"
-[ -n "$SHA" ] && info "  pinned commit: $SHA"
+
+# Homebrew versioning is controlled by the formula in the tap. Avoid pretending a
+# caller-supplied git ref can affect `brew install GSA-TTS/tap/acq`.
+if [ "$METHOD" = "brew" ] && [ "$REF_WAS_SET" -eq 1 ]; then
+  die "--ref is not supported with --method brew; use brew update/upgrade or choose --method npm|clone"
+fi
+if [ "$METHOD" = "brew" ]; then
+  info "  version:   Homebrew formula"
+else
+  info "  version:   $REF"
+  [ -n "$SHA" ] && info "  pinned commit: $SHA"
+fi
 [ "$DRY_RUN" -eq 1 ] && warn "  (dry-run: no changes will be made)"
 
 # ---------------------------------------------------------------------------
-# Method: Homebrew  (STUBBED this increment — the tap repo does not exist yet)
+# Method: Homebrew
 # ---------------------------------------------------------------------------
 
 install_via_brew() {
   step "Installing acq via Homebrew"
   info "  Homebrew gives you 'brew upgrade acq' / 'brew uninstall acq' later."
-  warn "  NOTE: the acq Homebrew tap is not published yet — this branch is a stub."
-  warn "  Falling back to the git-clone install so you still get a working acq now."
-  stub "brew install $BREW_FORMULA"
-  # The tap lives in a separate GSA-TTS/homebrew-tap repository that has to be
-  # created outside this repo; until it exists, do the real install via clone so
-  # the user is never left without acq.
-  install_via_clone
+  if [ "$DRY_RUN" -eq 0 ] && ! command -v brew >/dev/null 2>&1; then
+    die "Homebrew is required for --method brew. Install Homebrew or choose --method npm|clone."
+  fi
+  run brew install "$BREW_FORMULA"
+  if [ "$DRY_RUN" -eq 0 ] && command -v acq >/dev/null 2>&1; then
+    ok "  acq is installed via Homebrew ($(command -v acq))."
+  elif [ "$DRY_RUN" -eq 0 ]; then
+    NEED_PATH_HELP=1
+    warn "  Homebrew finished, but 'acq' is not on your PATH yet. Ensure Homebrew's"
+    warn "  bin directory is on PATH (usually /opt/homebrew/bin or /usr/local/bin)."
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -549,8 +557,10 @@ if [ "$NEED_PATH_HELP" -eq 1 ]; then
   if [ "$METHOD" = "clone" ]; then
     info "Once $BIN_DIR is on your PATH, try:  ${B}acq version${R}"
     info "Or run it directly right now:        ${B}$BIN_DIR/acq version${R}"
-  else
+  elif [ "$METHOD" = "npm" ]; then
     info "Once npm's global bin dir is on your PATH, try:  ${B}acq version${R}"
+  else
+    info "Once Homebrew's bin dir is on your PATH, try:  ${B}acq version${R}"
   fi
 else
   info "Try it now:  ${B}acq version${R}"
