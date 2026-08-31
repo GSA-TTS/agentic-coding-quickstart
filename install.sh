@@ -14,16 +14,14 @@
 # needed). It never uses `sudo`, installs only under your home directory, and
 # never changes your PATH without asking first.
 #
-# NOTE: In this increment the npm and clone branches are fully functional. The
-# brew branch is a stub (the Homebrew tap repo does not exist yet) that falls
-# back to the clone install, so no path leaves the user without acq. See the
-# installation-and-distribution ADR under docs/adr/.
-#
 # Usage:
 #   curl -fsSL <release-asset-url>/install.sh | sh
 #   sh install.sh [--method brew|npm|clone] [--ref <tag-or-branch>]
 #                 [--sha <full-commit>] [--no-msb] [--dry-run] [--yes]
 #                 [--help]
+#
+# Running this script from a source checkout still installs from REPO_URL at the
+# default release tag; it does not install the local working tree.
 #
 # Inspect first (recommended): download and read this file, then run it.
 
@@ -37,10 +35,12 @@ REPO_URL="${ACQ_INSTALL_REPO_URL:-https://github.com/GSA-TTS/agentic-coding-quic
 # release-please updates this version in release PRs. Release automation also
 # publishes an install.sh asset with DEFAULT_RELEASE_SHA replaced by the exact
 # release commit so the default clone path is content-addressed.
-DEFAULT_RELEASE_VERSION="2.0.0" # x-release-please-version
+DEFAULT_RELEASE_VERSION="3.0.0" # x-release-please-version
 DEFAULT_RELEASE_REF="v$DEFAULT_RELEASE_VERSION"
 DEFAULT_RELEASE_SHA=""
 REF="${ACQ_INSTALL_REF:-$DEFAULT_RELEASE_REF}"
+REF_WAS_SET=0
+[ "${ACQ_INSTALL_REF+x}" = x ] && REF_WAS_SET=1
 
 # Optional: pin to an exact 40-char commit SHA. Release assets set this to the
 # release commit by default; source checkouts leave it empty so local/dev installs
@@ -93,17 +93,16 @@ run() {
   fi
 }
 
-# Show a command that is STUBBED this increment (never executed).
-stub() {
-  printf '  [stub]    %s\n' "$*"
-}
-
 usage() {
   cat <<'EOF'
 install.sh — install acq (agentic-coding-quickstart)
 
 It auto-selects the best method already on your host: Homebrew, then npm, then
 a git clone. Override with --method.
+
+When run directly from a source checkout, the clone method still installs from
+the configured repository at the default release tag; it does not install your
+local working tree.
 
 Options:
   --method <m>         Force install method: brew | npm | clone (default: auto).
@@ -134,8 +133,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --method) [ $# -ge 2 ] || die "--method needs a value"; METHOD="$2"; shift 2 ;;
     --method=*) METHOD="${1#--method=}"; shift ;;
-    --ref) [ $# -ge 2 ] || die "--ref needs a value"; REF="$2"; shift 2 ;;
-    --ref=*) REF="${1#--ref=}"; shift ;;
+    --ref) [ $# -ge 2 ] || die "--ref needs a value"; REF="$2"; REF_WAS_SET=1; shift 2 ;;
+    --ref=*) REF="${1#--ref=}"; REF_WAS_SET=1; shift ;;
     --sha) [ $# -ge 2 ] || die "--sha needs a value"; SHA="$2"; shift 2 ;;
     --sha=*) SHA="${1#--sha=}"; shift ;;
     --no-msb) INSTALL_MSB=0; shift ;;
@@ -222,7 +221,9 @@ command -v curl >/dev/null 2>&1 || die "curl is required but was not found."
 # ---------------------------------------------------------------------------
 
 if [ "$METHOD" = "auto" ]; then
-  if command -v brew >/dev/null 2>&1; then
+  if [ -n "$SHA" ]; then
+    METHOD="clone"
+  elif command -v brew >/dev/null 2>&1 && [ "$REF_WAS_SET" -eq 0 ]; then
     METHOD="brew"
   elif command -v npm >/dev/null 2>&1; then
     METHOD="npm"
@@ -233,24 +234,38 @@ if [ "$METHOD" = "auto" ]; then
 else
   info "  install method: $METHOD (forced)"
 fi
-info "  version:   $REF"
-[ -n "$SHA" ] && info "  pinned commit: $SHA"
+
+# Homebrew versioning is controlled by the formula in the tap. Avoid pretending a
+# caller-supplied git ref can affect `brew install GSA-TTS/tap/acq`.
+if [ "$METHOD" = "brew" ] && [ "$REF_WAS_SET" -eq 1 ]; then
+  die "--ref is not supported with --method brew; use brew update/upgrade or choose --method npm|clone"
+fi
+if [ "$METHOD" = "brew" ]; then
+  info "  version:   Homebrew formula"
+else
+  info "  version:   $REF"
+  [ -n "$SHA" ] && info "  pinned commit: $SHA"
+fi
 [ "$DRY_RUN" -eq 1 ] && warn "  (dry-run: no changes will be made)"
 
 # ---------------------------------------------------------------------------
-# Method: Homebrew  (STUBBED this increment — the tap repo does not exist yet)
+# Method: Homebrew
 # ---------------------------------------------------------------------------
 
 install_via_brew() {
   step "Installing acq via Homebrew"
   info "  Homebrew gives you 'brew upgrade acq' / 'brew uninstall acq' later."
-  warn "  NOTE: the acq Homebrew tap is not published yet — this branch is a stub."
-  warn "  Falling back to the git-clone install so you still get a working acq now."
-  stub "brew install $BREW_FORMULA"
-  # The tap lives in a separate GSA-TTS/homebrew-tap repository that has to be
-  # created outside this repo; until it exists, do the real install via clone so
-  # the user is never left without acq.
-  install_via_clone
+  if [ "$DRY_RUN" -eq 0 ] && ! command -v brew >/dev/null 2>&1; then
+    die "Homebrew is required for --method brew. Install Homebrew or choose --method npm|clone."
+  fi
+  run brew install "$BREW_FORMULA"
+  if [ "$DRY_RUN" -eq 0 ] && command -v acq >/dev/null 2>&1; then
+    ok "  acq is installed via Homebrew ($(command -v acq))."
+  elif [ "$DRY_RUN" -eq 0 ]; then
+    NEED_PATH_HELP=1
+    warn "  Homebrew finished, but 'acq' is not on your PATH yet. Ensure Homebrew's"
+    warn "  bin directory is on PATH (usually /opt/homebrew/bin or /usr/local/bin)."
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -301,6 +316,20 @@ rc_file_for_shell() {
 # So we probe by RUNNING git, not just `command -v`.
 git_is_usable() {
   command -v git >/dev/null 2>&1 && git --version >/dev/null 2>&1
+}
+
+checkout_pinned_sha() {
+  repo="$1"
+  cleanup_on_fail="$2"
+  git -C "$repo" checkout "$SHA" 2>/dev/null && return 0
+  git -C "$repo" fetch --unshallow --tags origin \
+    '+refs/heads/*:refs/remotes/origin/*' 2>/dev/null \
+    || git -C "$repo" fetch --tags origin \
+      '+refs/heads/*:refs/remotes/origin/*' 2>/dev/null \
+    || true
+  git -C "$repo" checkout "$SHA" && return 0
+  [ "$cleanup_on_fail" = "cleanup" ] && rm -rf "$repo"
+  die "pinned commit '$SHA' not found in $REPO_URL"
 }
 
 # Ensure a usable git, proactively triggering the macOS Command Line Tools
@@ -388,7 +417,11 @@ install_via_clone() {
   if [ -e "$CLONE_DIR/.git" ]; then
     step "Updating existing install at $CLONE_DIR"
     run git -C "$CLONE_DIR" fetch --tags --prune origin
-    run git -C "$CLONE_DIR" checkout "$target"
+    if [ -n "$SHA" ] && [ "$DRY_RUN" -eq 0 ]; then
+      checkout_pinned_sha "$CLONE_DIR" keep
+    else
+      run git -C "$CLONE_DIR" checkout "$target"
+    fi
     if [ "$DRY_RUN" -eq 0 ] && [ -z "$SHA" ] \
        && git -C "$CLONE_DIR" symbolic-ref -q HEAD >/dev/null 2>&1; then
       # Only fast-forward when on a branch (a pinned SHA is detached HEAD).
@@ -413,12 +446,7 @@ install_via_clone() {
           || { rm -rf "$CLONE_DIR"; die "failed to clone $REPO_URL"; }
       fi
       if [ -n "$SHA" ]; then
-        # A shallow clone may not contain the pinned commit; deepen if needed.
-        git -C "$CLONE_DIR" checkout "$SHA" 2>/dev/null \
-          || { git -C "$CLONE_DIR" fetch --unshallow origin 2>/dev/null \
-                 || git -C "$CLONE_DIR" fetch origin 2>/dev/null || true;
-               git -C "$CLONE_DIR" checkout "$SHA" \
-                 || { rm -rf "$CLONE_DIR"; die "pinned commit '$SHA' not found in $REPO_URL"; }; }
+        checkout_pinned_sha "$CLONE_DIR" cleanup
       else
         git -C "$CLONE_DIR" checkout "$REF" \
           || { rm -rf "$CLONE_DIR"; die "requested version '$REF' not found in $REPO_URL"; }
@@ -529,8 +557,10 @@ if [ "$NEED_PATH_HELP" -eq 1 ]; then
   if [ "$METHOD" = "clone" ]; then
     info "Once $BIN_DIR is on your PATH, try:  ${B}acq version${R}"
     info "Or run it directly right now:        ${B}$BIN_DIR/acq version${R}"
-  else
+  elif [ "$METHOD" = "npm" ]; then
     info "Once npm's global bin dir is on your PATH, try:  ${B}acq version${R}"
+  else
+    info "Once Homebrew's bin dir is on your PATH, try:  ${B}acq version${R}"
   fi
 else
   info "Try it now:  ${B}acq version${R}"

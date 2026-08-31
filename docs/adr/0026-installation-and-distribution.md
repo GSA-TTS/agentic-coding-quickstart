@@ -174,15 +174,11 @@ requires an Apple Developer ID certificate and notarization pipeline — an
 organizational hurdle out of scope for this increment. Revisit if the
 installer proves insufficient.
 
-> **Increment note:** in this PR the **npm branch is fully wired** (the
-> `package.json` `bin`/`files` fields ship an `acq` launcher, so
-> `npm install -g github:GSA-TTS/agentic-coding-quickstart` puts `acq` on
-> `PATH`). The **brew branch is stubbed** — the installer detects `brew` and
-> reports what it *would* run, but the formula lives in a separate
-> `GSA-TTS/homebrew-tap` repository that does not exist yet (deferred below). The
-> **clone fallback is fully functional**, so the front door works end-to-end
-> today regardless of which method is selected; the brew branch lights up once
-> the tap is created.
+> **Increment note:** the **brew** and **npm** branches are wired. Homebrew uses
+> `brew install GSA-TTS/tap/acq`; npm uses the `package.json` `bin`/`files`
+> fields so `npm install -g github:GSA-TTS/agentic-coding-quickstart` puts `acq`
+> on `PATH`. The **clone fallback is fully functional**, so the front door works
+> end-to-end today regardless of which method is selected.
 
 ### On-disk layout
 
@@ -222,8 +218,7 @@ In bounds now:
 
 - This ADR (`0026`, `status: accepted`).
 - `install.sh` — the hardened installer with brew → npm → clone auto-selection
-  (the **clone** and **npm** branches fully functional; the **brew branch
-  stubbed** pending the external tap repo).
+  (the **brew**, **npm**, and **clone** branches fully functional).
 - `package.json` `bin`/`files` wiring so the npm branch actually installs `acq`.
 - **Optional commit-SHA pinning** (`--sha` / `ACQ_INSTALL_SHA`). The clone method
   can pin to a full 40-char commit SHA and verifies `HEAD` equals it after
@@ -246,9 +241,8 @@ In bounds now:
 Deferred — only the work that **must** happen outside this repository (tracked
 as issues):
 
-- Creating the `GSA-TTS/homebrew-tap` repository and the `acq` formula, then
-  un-stubbing the installer's brew branch. (External repo — cannot be done from
-  this repo; tracked as an issue.)
+- Creating the `GSA-TTS/homebrew-tap` repository and the `acq` formula.
+  (External repo — cannot be done from this repo; tracked as an issue.)
 
 ### Security posture
 
@@ -259,7 +253,9 @@ as issues):
   out `HEAD`, failing closed on mismatch — a content-addressed check). The source
   tree default ref is the current release tag, while release automation publishes
   an `install.sh` asset with the canonical release commit SHA embedded as the
-  default SHA.
+  default SHA. Running `sh install.sh` from a source checkout still clones from
+  the configured repository at that default release tag; it does not install
+  unreleased files from the invoking checkout.
 - **Verifiable.** Release automation publishes `SHA256SUMS` next to the installer
   asset. Inspect-first is supported: download `install.sh`, verify it with
   `SHA256SUMS`, read it, and use `--dry-run` before installing.
@@ -345,5 +341,5 @@ as issues):
 
 ### Deferred-work tracking
 
-- Homebrew tap + formula (un-stub the brew branch):
+- Homebrew tap + formula:
   <https://github.com/GSA-TTS/agentic-coding-quickstart/issues/407>

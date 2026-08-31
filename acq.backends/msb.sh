@@ -3609,6 +3609,38 @@ _acq_msb_ssh_auth_sock_for() {
     </dev/null 2>/dev/null || true; } | tr -d '[:space:]'
 }
 
+_acq_msb_git_identity_env_flags_into() {
+  local _arrn="$1" _line _flag_e _flag_val
+  eval "$_arrn=()"
+  command -v acq_host_git_identity_env >/dev/null 2>&1 || return 0
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    _flag_e="-e"
+    _flag_val="$_line"
+    eval "$_arrn+=(\"\$_flag_e\" \"\$_flag_val\")"
+  done <<EOF
+$(acq_host_git_identity_env)
+EOF
+}
+
+_acq_msb_apply_host_git_global_config() {
+  local name="$1" _flags=() _line _flag_e _flag_val
+  command -v acq_host_git_global_config_env >/dev/null 2>&1 || return 0
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    _flag_e="-e"
+    _flag_val="$_line"
+    eval "_flags+=(\"\$_flag_e\" \"\$_flag_val\")"
+  done <<EOF
+$(acq_host_git_global_config_env)
+EOF
+  [ "${#_flags[@]}" -gt 0 ] || return 0
+  msb exec -u agent -e HOME=/home/agent ${_flags[@]+"${_flags[@]}"} "$name" -- sh -c '
+    [ -n "${ACQ_GIT_USER_NAME:-}" ] && git config --global user.name "$ACQ_GIT_USER_NAME" 2>/dev/null || true
+    [ -n "${ACQ_GIT_USER_EMAIL:-}" ] && git config --global user.email "$ACQ_GIT_USER_EMAIL" 2>/dev/null || true
+  ' </dev/null >/dev/null 2>&1 || true
+}
+
 # _acq_msb_kit_env_flags_into ARRVAR NAME — build the `-e NAME=value` flag array
 # for the kit environment[] entries persisted at /var/lib/acq/kit-env by
 # _acq_msb_apply_kit_dir, so every session path (run/attach/shell) sees the env
@@ -3999,14 +4031,17 @@ acq_backend_run() {
   # Kit-declared environment[] entries persisted at provision are replayed the
   # same way, mirroring the flag order the provisioning execs use (HOME, sock,
   # then kit env — see _acq_msb_exec_flags_into).
-  local _sock _kitenv=()
+  local _sock _gitident=() _kitenv=()
   _sock=$(_acq_msb_ssh_auth_sock_for "$name")
+  _acq_msb_apply_host_git_global_config "$name"
+  _acq_msb_git_identity_env_flags_into _gitident
   _acq_msb_kit_env_flags_into _kitenv "$name"
   if [ -n "$_sock" ]; then
     msb exec -u agent -e HOME=/home/agent -e "SSH_AUTH_SOCK=$_sock" \
-      ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
+      ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
   else
-    msb exec -u agent -e HOME=/home/agent ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
+    msb exec -u agent -e HOME=/home/agent ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
   fi
 }
 
@@ -4087,9 +4122,11 @@ _acq_msb_attach() {
   _sock=$(_acq_msb_ssh_auth_sock_for "$name")
   [ -n "$_sock" ] && _sockflag=(-e "SSH_AUTH_SOCK=$_sock")
 
-  # Replay the kit environment[] persisted at provision, so agent-runtime config
-  # (OPENCODE_CONFIG-style vars, see ADR-0011) reaches the agent session.
-  local _kitenv=()
+  # Replay the host git identity and kit environment[] so git commits and
+  # agent-runtime config (OPENCODE_CONFIG-style vars, see ADR-0011) reach the session.
+  local _gitident=() _kitenv=()
+  _acq_msb_apply_host_git_global_config "$name"
+  _acq_msb_git_identity_env_flags_into _gitident
   _acq_msb_kit_env_flags_into _kitenv "$name"
 
   if [ "$agent" = "shell" ]; then
@@ -4104,7 +4141,7 @@ _acq_msb_attach() {
   fi
 
   exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} \
-    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
+    ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
 }
 
 # _acq_msb_shell_exec NAME [WS] — exec into an interactive login shell as the
@@ -4121,12 +4158,14 @@ _acq_msb_shell_exec() {
     fi
     [ -n "$ws" ] || ws="/home/agent"
   fi
-  local _sock _sockflag=() _kitenv=()
+  local _sock _sockflag=() _gitident=() _kitenv=()
   _sock=$(_acq_msb_ssh_auth_sock_for "$name")
   [ -n "$_sock" ] && _sockflag=(-e "SSH_AUTH_SOCK=$_sock")
+  _acq_msb_apply_host_git_global_config "$name"
+  _acq_msb_git_identity_env_flags_into _gitident
   _acq_msb_kit_env_flags_into _kitenv "$name"
   exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} \
-    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- /bin/sh -l
+    ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- /bin/sh -l
 }
 
 # ---------------------------------------------------------------------------

@@ -171,6 +171,32 @@ STUB
   refute_regex "$log" 'sbx kit add probebox'
 }
 
+@test "provision(sbx): host global git identity is emitted as a create-time env kit" {
+  local home="$STUBDIR/git-home"
+  mkdir -p "$home"
+  git -c "safe.directory=*" config --file "$home/.gitconfig" user.name "Global User"
+  git -c "safe.directory=*" config --file "$home/.gitconfig" user.email global@example.gov
+
+  run bash -c '
+    export HOME="'"$home"'" GIT_CONFIG_NOSYSTEM=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
+    _acq_sbx_git_identity_kit
+  '
+  assert_success
+  local kitdir="$output"
+  [ -n "$kitdir" ]
+  local spec="$kitdir/spec.yaml"
+  [ -f "$spec" ]
+  assert_regex "$(cat "$spec")" 'kind: mixin'
+  assert_regex "$(cat "$spec")" "EMAIL: '?global@example\\.gov'?"
+  assert_regex "$(cat "$spec")" 'ACQ_GIT_USER_NAME: Global User'
+  assert_regex "$(cat "$spec")" "ACQ_GIT_USER_EMAIL: '?global@example\\.gov'?"
+  assert_regex "$(cat "$spec")" 'git config --global user.name'
+  refute_regex "$(cat "$spec")" 'GIT_AUTHOR_NAME: Global User'
+}
+
 @test "provision(sbx): ACQ_EXTRA_KITS is marked into ~/.acq-extra-kits at create" {
   : > "$CALLS"
   # Subshell, NOT `bash -c`: acq_backend_provision is a sourced function, which

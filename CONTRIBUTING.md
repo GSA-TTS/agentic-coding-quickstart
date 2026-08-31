@@ -70,7 +70,7 @@ This project operates under professional standards of conduct. All contributors:
 | ----------------------------------- | ---------------------------------------------------------- |
 | `acq`                               | Entry point — pluggable-backend wrapper (msb by default, or sbx) |
 | `acq.backends/`                     | Backend adapters (`common.sh`, `sbx.sh`, `msb.sh`, `kit-translate.sh`, `secret-store.sh`, `progress.sh`) |
-| `install.sh`                        | One-line `curl \| sh` installer (auto-selects brew/npm/clone) |
+| `install.sh`                        | One-line `curl \| sh` installer (auto-selects brew/npm/clone; direct `sh install.sh` still installs the default release tag from the repo, not the current checkout) |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`acq usai-rotate-api-key`) |
 | `scripts/test-acq-bats`             | Offline unit suite for acq (bats-core) |
 | `scripts/verify-backends`           | Live end-to-end backend verification (needs Docker or KVM) |
