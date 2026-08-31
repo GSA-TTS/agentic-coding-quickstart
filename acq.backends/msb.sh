@@ -2374,15 +2374,30 @@ _acq_msb_clone_warn_unfetched() {
   [ -n "$origin" ] && [ -d "$origin" ] || return 0
   for d in "$dir"/*/; do [ -d "${d}.git" ] && scratch="${d%/}"; done
   [ -n "$scratch" ] || return 0
+  # Branch tips are read straight from the ref files (loose + packed). The
+  # scratch is guest-writable, so the host must NEVER execute git inside it —
+  # repo-local config (core.fsmonitor, pagers, ...) would let the guest run
+  # commands on the host at rm time.
+  local tips=""
+  if [ -d "${scratch}/.git/refs/heads" ]; then
+    tips=$(find "${scratch}/.git/refs/heads" -type f -exec cat {} + 2>/dev/null) || tips=""
+  fi
+  if [ -f "${scratch}/.git/packed-refs" ]; then
+    tips="${tips}
+$(awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^refs\/heads\//{print $1}' "${scratch}/.git/packed-refs" 2>/dev/null || true)"
+  fi
   while IFS= read -r t; do
     [ -n "$t" ] || continue
+    # Skip non-SHA lines (e.g. a symbolic "ref: ..." loose ref) rather than
+    # letting cat-file fail on them and warn spuriously.
+    case "$t" in *[!0-9a-f]*) continue ;; esac
     if ! git -C "$origin" cat-file -e "$t" 2>/dev/null; then
       echo "acq(msb): warning: discarding unfetched commits in sandbox '$name''s scratch clone" >&2
       echo "acq(msb):   (they were recoverable with: git fetch sandbox-${name})." >&2
       return 0
     fi
   done <<EOF
-$(git -C "$scratch" for-each-ref --format='%(objectname)' refs/heads 2>/dev/null)
+$tips
 EOF
   return 0
 }
@@ -2757,11 +2772,23 @@ EOF
       return 1
     fi
     local _primary="${_ws_recs[0]}"
-    case "$_primary" in *:ro) _primary="${_primary%:ro}" ;; esac
-    if [ ! -d "$_primary" ]; then
-      echo "acq(msb): error: workspace path does not exist on the host: $_primary" >&2
-      return 1
-    fi
+    case "$_primary" in *:ro)
+      echo "acq(msb): error: --clone requires a writable primary workspace; '${_primary}' is read-only." >&2
+      echo "acq(msb):   Drop ':ro' — the agent works on a disposable clone; the real checkout is untouched." >&2
+      return 1 ;;
+    esac
+    # Validate EVERY workspace path before creating the scratch clone: a
+    # failure past this point would leak the scratch + remote, and the
+    # corrected re-run would then be refused as possibly holding unfetched work.
+    local _wchk
+    for _wchk in "${_ws_recs[@]}"; do
+      _wchk="${_wchk%:ro}"
+      if [ ! -d "$_wchk" ]; then
+        echo "acq(msb): error: workspace path does not exist on the host: $_wchk" >&2
+        echo "acq(msb):   msb cannot mount a nonexistent host path. Create it first." >&2
+        return 1
+      fi
+    done
     if ! _acq_msb_clone_setup "$name" "$_primary"; then
       return 1
     fi

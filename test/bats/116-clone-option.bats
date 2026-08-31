@@ -148,6 +148,50 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   [ ! -d "$STUBDIR/state/clones/shell-cloneproj" ]
 }
 
+@test "clone(msb): rm never executes git inside the guest-writable scratch" {
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  # Agent work the host never fetched, with the refs packed so both loose and
+  # packed lookups are exercised.
+  echo agent-work > "$scratch/agent.txt"
+  git -C "$scratch" add agent.txt
+  git -C "$scratch" -c user.email=a@example.com -c user.name=a -c commit.gpgsign=false commit -q -m agent-work
+  git -C "$scratch" pack-refs --all
+  # A hostile guest controls scratch/.git — corrupt its config so ANY host git
+  # invocation inside the scratch dies. The unfetched-commit warning must still
+  # fire: the host reads ref files directly, never runs git in the scratch.
+  printf '[broken\n' >> "$scratch/.git/config"
+  _msb_clone -- rm shell-cloneproj
+  assert_success
+  assert_output --partial 'unfetched commits'
+  [ ! -d "$STUBDIR/state/clones/shell-cloneproj" ]
+}
+
+@test "clone(msb): a read-only primary is rejected before any state is created" {
+  _msb_clone -- create shell --clone "$CLONEPROJ:ro"
+  assert_failure
+  assert_output --partial 'read-only'
+  refute_regex "$(cat "$CALLS")" 'msb create'
+  [ ! -d "$STUBDIR/state/clones/shell-cloneproj" ]
+  run git -C "$CLONEPROJ" remote get-url sandbox-shell-cloneproj
+  assert_failure
+}
+
+@test "clone(msb): a missing secondary fails the create without leaking the scratch" {
+  _msb_clone -- create shell --clone "$CLONEPROJ" "$STUBDIR/missinglib"
+  assert_failure
+  assert_output --partial 'does not exist'
+  refute_regex "$(cat "$CALLS")" 'msb create'
+  # No abandoned state: a corrected re-run must not be refused over a stale
+  # scratch clone or a dangling sandbox-<name> remote.
+  [ ! -d "$STUBDIR/state/clones/shell-cloneproj" ]
+  run git -C "$CLONEPROJ" remote get-url sandbox-shell-cloneproj
+  assert_failure
+  mkdir -p "$STUBDIR/missinglib"
+  _msb_clone -- create shell --clone "$CLONEPROJ" "$STUBDIR/missinglib"
+  assert_success
+}
+
 @test "clone(reattach): --clone on an existing sandbox notes it applies only at create" {
   printf 'clnreattach\n' > "$STUBDIR/.msb_sandbox_list"
   printf 'clnreattach\n' > "$STUBDIR/.msb_running_list"
