@@ -93,7 +93,7 @@ KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
 
 # USAi endpoint constants
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
-KEY_MGMT_URL="https://console.gsa.usai.gov/key-management"
+KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
 
 # Source the shared agent catalog (single source of truth for agent tokens and
 # the sandbox-template image naming convention; issue #377). Both adapters also
