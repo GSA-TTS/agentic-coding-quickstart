@@ -800,9 +800,13 @@ kit_spec_env() {
     in_env {
       # Inside a dropped block scalar: skip its body (anything indented deeper
       # than the offending key, plus blank lines). A line back at key depth is
-      # processed normally below.
+      # processed normally below. A tab-led line is treated as still inside the
+      # body: YAML forbids tabs as indentation, and indent_of() counts only
+      # spaces — so a tab-indented body line would otherwise report column 0,
+      # end the skip, and leak its colon-bearing lines as bogus entries.
       if (skip_blk) {
         if ($0 ~ /^[[:space:]]*$/) next
+        if ($0 ~ /^\t/) next
         if (indent_of($0) > blk_ind) next
         skip_blk=0
       }
