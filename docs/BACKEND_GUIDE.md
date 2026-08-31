@@ -571,11 +571,14 @@ adds a sudoers `env_keep` for the proxy variables. It addresses the user by name
 **How attach launches the agent.** sbx's `sbx run --name` re-launches the
 baked-in agent. On msb the adapter reproduces that with `msb exec -t` — the one
 primitive that allocates a PTY (so a full-screen agent TUI renders), runs as the
-unprivileged `agent` user (`-u agent`), starts in the workspace (`-w`), and gives
-the session a sane `$SHELL`. It execs the agent recorded at provision, falling
-back to an interactive `/bin/sh -l` as `agent` — never a root shell, never msb's
-default interactive shell (the base image's Node REPL) — for a `shell` sandbox or
-if the agent binary is somehow missing.
+unprivileged `agent` user (`-u agent`), starts in the workspace (`-w`), forwards
+the host terminal identity (`TERM`/`COLORTERM`, when set), and sets `$SHELL` to
+the agent user's passwd shell (which acq sets to bash when the image ships it,
+keeping `/bin/sh` otherwise). It execs the agent recorded at provision, falling
+back to an interactive login shell in that same passwd shell as `agent` — never
+a root shell, never msb's default interactive shell (the base image's Node
+REPL) — for a `shell` sandbox or if the agent binary is somehow missing.
+`acq exec` runs its command in the workspace (`-w`) too, matching sbx.
 
 To use your own image, set `ACQ_MSB_IMAGE` to one that also provides node, git,
 curl, and ca-certificates (or use the backend-neutral `--image`/`ACQ_IMAGE`, see

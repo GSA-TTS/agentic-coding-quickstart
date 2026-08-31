@@ -75,7 +75,7 @@ _with_adapter() { # ADAPTER BODY
   assert_regex "$(cat "$CALLS")" 'msb remove --force mybox'
   : > "$CALLS"
   run env ACQ_BACKEND=msb "$ACQ" exec mybox -- echo hi
-  assert_regex "$(cat "$CALLS")" 'msb exec -u agent -e HOME=/home/agent mybox -- echo hi'
+  assert_regex "$(cat "$CALLS")" 'msb exec -u agent -e HOME=/home/agent -w /home/agent mybox -- echo hi'
 }
 
 @test "msb: version and backend list report the real msb version" {

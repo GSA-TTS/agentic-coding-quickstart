@@ -33,8 +33,8 @@ _seed_usai() {
 }
 
 @test "shell: NAME (msb) -> agent-user login shell with PTY in the workspace" {
-  run env ACQ_BACKEND=msb "$ACQ" shell mybox
-  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e SHELL=/bin/sh mybox -- /bin/sh -l'
+  run env TERM=xterm-256color COLORTERM=truecolor ACQ_BACKEND=msb "$ACQ" shell mybox
+  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e TERM=xterm-256color -e COLORTERM=truecolor -e SHELL=/bin/sh mybox -- /bin/sh -l'
 }
 
 @test "shell: without a name is a usage error, no backend call" {
