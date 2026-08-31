@@ -59,10 +59,32 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Select markdown files
+        id: link-check-files
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin main --depth=1
+            git diff --name-only --diff-filter=AM origin/main -- \
+              '*.md' ':!CHANGELOG.md' > /tmp/markdown-link-check-files
+          else
+            git ls-files -- '*.md' ':!CHANGELOG.md' > /tmp/markdown-link-check-files
+          fi
+
+          {
+            echo 'files<<EOF'
+            sed 's#^#./#' /tmp/markdown-link-check-files | tr '\n' ',' | sed 's/,$//'
+            echo
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - uses: tcort/github-action-markdown-link-check@e047c5b37f24ab722bbef1a27b6fab7f96bc4068 # v1.1.3
+        if: steps.link-check-files.outputs.files != ''
         with:
           config-file: ".markdown-link-check.json"
           use-quiet-mode: "yes"
           folder-path: "."
-          check-modified-files-only: ${{ github.event_name == 'pull_request' && 'yes' || 'no' }}
+          check-modified-files-only: "no"
           base-branch: "main"
+          file-extension: ".markdown-link-check-disabled"
+          file-path: ${{ steps.link-check-files.outputs.files }}
