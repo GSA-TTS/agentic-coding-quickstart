@@ -139,7 +139,7 @@ restricted filesystem and network access. Repeat Step 3 for each project.
 On first run, `acq` sets you up interactively — nothing to configure beforehand:
 
 - **USAi key** — `acq` prompts you to paste a key and validates it. Create one at
-  the [USAi key console](https://console.gsa.usai.gov/key-management) (keys expire
+  the [USAi key console](https://gsa.usai.gov/console/key-management) (keys expire
   every 7 days).
 - **GitHub token** — when your project contains GitHub repos, `acq` offers to walk
   you through creating a repo-scoped token. You can decline and add one later.
