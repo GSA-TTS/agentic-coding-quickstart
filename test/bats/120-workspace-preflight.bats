@@ -73,6 +73,76 @@ _pf_out() { # PATH
   assert_output ''
 }
 
+@test "identity: complete host env or global email suppresses repo-local warning" {
+  run bash -c '
+    export HOME="'"$WT"'/fakehome" GIT_CONFIG_NOSYSTEM=1
+    export GIT_AUTHOR_EMAIL=dev@example.gov GIT_COMMITTER_EMAIL=dev@example.gov
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    warn_if_no_git_identity "'"$WT"'/repoA" 2>&1
+  '
+  assert_output ''
+
+  mkdir -p "$WT/globalhome"
+  run bash -c '
+    export HOME="'"$WT"'/globalhome" GIT_CONFIG_NOSYSTEM=1
+    git config --global user.email global@example.gov
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    warn_if_no_git_identity "'"$WT"'/repoA" 2>&1
+  '
+  assert_output ''
+}
+
+@test "identity: incomplete explicit host env still warns" {
+  run bash -c '
+    export HOME="'"$WT"'/fakehome" GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_EMAIL=dev@example.gov
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    warn_if_no_git_identity "'"$WT"'/repoA" 2>&1
+  '
+  assert_output --partial 'this repo has no git user.email'
+}
+
+@test "identity env: host git config yields author and committer env" {
+  mkdir -p "$WT/idenvhome"
+  run bash -c '
+    export HOME="'"$WT"'/idenvhome" GIT_CONFIG_NOSYSTEM=1
+    git config --global user.name "Global User"
+    git config --global user.email global@example.gov
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_host_git_identity_env
+  '
+  assert_output --partial 'EMAIL=global@example.gov'
+}
+
+@test "identity env: partial host git config forwards configured fields" {
+  mkdir -p "$WT/partialhome"
+  run bash -c '
+    export HOME="'"$WT"'/partialhome" GIT_CONFIG_NOSYSTEM=1
+    git config --global user.email global@example.gov
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_host_git_identity_env
+  '
+  assert_output --partial 'EMAIL=global@example.gov'
+  refute_output --partial 'GIT_AUTHOR_NAME='
+  refute_output --partial 'GIT_COMMITTER_NAME='
+}
+
+@test "identity env: explicit host GIT_* values override global git config" {
+  mkdir -p "$WT/overridehome"
+  run bash -c '
+    export HOME="'"$WT"'/overridehome" GIT_CONFIG_NOSYSTEM=1
+    git config --global user.name "Global User"
+    git config --global user.email global@example.gov
+    export GIT_AUTHOR_NAME="Env User" GIT_AUTHOR_EMAIL=env@example.gov
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_host_git_identity_env
+  '
+  assert_output --partial 'GIT_AUTHOR_NAME=Env User'
+  assert_output --partial 'GIT_AUTHOR_EMAIL=env@example.gov'
+  assert_output --partial 'EMAIL=global@example.gov'
+  refute_output --partial 'GIT_COMMITTER_NAME='
+  refute_output --partial 'GIT_COMMITTER_EMAIL='
+}
+
 @test "identity (b): non-repo root with sub-repos, symlinked child not followed" {
   _id "$WT/wsB"
   assert_output --partial 'workspace root is not a git repo'
