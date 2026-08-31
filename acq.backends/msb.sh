@@ -2332,8 +2332,16 @@ _acq_msb_clone_setup() {
   scratch="${dir}/$(basename "$ws_canon")"
   if [ -e "$dir" ]; then
     echo "acq(msb): error: --clone: a scratch clone for '$name' already exists: $dir" >&2
-    echo "acq(msb):   it may hold unfetched work from an earlier sandbox. Recover it" >&2
-    echo "acq(msb):   ('git fetch sandbox-${name}') and remove the directory, then re-run." >&2
+    if acq_backend_exists "$name"; then
+      # The scratch is the LIVE mount source of an existing sandbox — advising
+      # manual deletion here would destroy its workspace and skip the rm-time
+      # unfetched-commit warning.
+      echo "acq(msb):   sandbox '$name' still exists and mounts it. Remove the sandbox with" >&2
+      echo "acq(msb):   'acq rm $name' (it warns about unfetched work and cleans up), then re-run." >&2
+    else
+      echo "acq(msb):   it may hold unfetched work from an earlier sandbox. Recover it" >&2
+      echo "acq(msb):   ('git fetch sandbox-${name}') and remove the directory, then re-run." >&2
+    fi
     return 1
   fi
   if [ -n "$(git -C "$ws_canon" status --porcelain 2>/dev/null)" ]; then

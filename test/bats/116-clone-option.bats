@@ -192,12 +192,33 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   assert_success
 }
 
+@test "clone(msb): stale scratch advice matches sandbox liveness" {
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  # Sandbox still exists: the scratch is its live mount source, so the advice
+  # must be 'acq rm' (warns + cleans up), never manual directory deletion.
+  printf 'shell-cloneproj\n' > "$STUBDIR/.msb_sandbox_list"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial "acq rm shell-cloneproj"
+  refute_output --partial 'remove the directory'
+  # Sandbox gone, scratch orphaned: manual recovery advice applies.
+  rm -f "$STUBDIR/.msb_sandbox_list"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'remove the directory'
+}
+
 @test "clone(reattach): --clone on an existing sandbox notes it applies only at create" {
   printf 'clnreattach\n' > "$STUBDIR/.msb_sandbox_list"
   printf 'clnreattach\n' > "$STUBDIR/.msb_running_list"
   : > "$CALLS"
   _msb_clone -- run shell --clone --name clnreattach "$CLONEPROJ"
   assert_output --partial 'applies only at create'
+  # The suggested removal must be the acq-owned verb: 'acq msb rm' dispatches
+  # through the passthrough as 'msb msb rm' (doubled verb) and a raw backend rm
+  # would bypass the clone cleanup anyway.
+  assert_output --partial "'acq rm clnreattach'"
+  refute_output --partial 'acq msb rm'
   refute_regex "$(cat "$CALLS")" 'msb create'
 }
 

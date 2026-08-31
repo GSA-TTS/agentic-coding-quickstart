@@ -968,7 +968,7 @@ case "$subcommand" in
         if [ -n "${ACQ_IMAGE:-}" ]; then
           echo "acq: note: --image/ACQ_IMAGE is ignored when re-attaching an existing" \
                "sandbox ('$local_name'); it applies only at create (ADR-0022). Remove the" \
-               "sandbox first ('acq $ACQ_RESOLVED_BACKEND rm $local_name') to recreate on a new image." >&2
+               "sandbox first ('acq rm $local_name') to recreate on a new image." >&2
         fi
         # Same create-time-only contract for --clone/ACQ_CLONE (ADR-0027): a
         # re-attach does not re-mount, so say the flag is ignored rather than
@@ -976,7 +976,7 @@ case "$subcommand" in
         if [ "${ACQ_CLONE:-0}" = "1" ]; then
           echo "acq: note: --clone/ACQ_CLONE is ignored when re-attaching an existing sandbox" \
                "('$local_name'); it applies only at create. Remove the sandbox first" \
-               "('acq $ACQ_RESOLVED_BACKEND rm $local_name') to recreate on a disposable clone." >&2
+               "('acq rm $local_name') to recreate on a disposable clone." >&2
         fi
         # Capture staleness BEFORE the heal — ensure_kits_applied rewrites the
         # provenance record to "current", so reading status after it would never

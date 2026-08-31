@@ -205,6 +205,10 @@ _sbx_create() { # CREATE_ARGS... (with optional leading ENV via `env`)
     ACQ_IMAGE=localhost/ignored:test ACQ_BACKEND=msb "'"$ACQ"'" run shell --name imgreattach "'"$IMGPROJ"'" 2>&1 >/dev/null
   '
   assert_output --partial 'ignored when re-attaching'
+  # The suggested removal must be the acq-owned verb ('acq rm'): 'acq msb rm'
+  # dispatches through the passthrough as 'msb msb rm' (doubled verb).
+  assert_output --partial "'acq rm imgreattach'"
+  refute_output --partial 'acq msb rm'
   refute_regex "$(cat "$CALLS")" 'msb create'
 }
 
