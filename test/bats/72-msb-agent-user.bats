@@ -425,6 +425,27 @@ _attach() { # PRE_SNIPPET NAME
   assert_regex "$log" 'pshbox -- opencode'
 }
 
+@test "msb #422: the recursive home chown is reserved for an acq-created agent user" {
+  _provision chownbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/chown-secrets"'
+  local log; log=$(cat "$CALLS")
+  # The top-level dir chown stays unconditional (single inode, asserts the
+  # contract on every path).
+  assert_regex "$log" 'chown "agent:[^ ]* /home/agent'
+  # The full write-crawl only fires when acq itself created the user; a
+  # pre-existing agent user means the image baked ownership.
+  assert_regex "$log" 'useradd -M -d /home/agent -s /bin/sh agent'
+  assert_regex "$log" '_acq_created_agent=1'
+  assert_regex "$log" 'if \[ "\$_acq_created_agent" = 1 \]; then chown -R "agent:'
+  refute_regex "$log" $'\n[[:space:]]*chown -R "agent:'
+  # The writability backstop survives the skip.
+  assert_regex "$log" 'test -w /home/agent'
+}
+
+@test "msb #422: provision wraps the agent-user step in a progress status" {
+  _provision spinusrbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/spinusr-secrets"'
+  assert_output --partial 'Preparing the agent user'
+}
+
 @test "msb #426: a garbage passwd shell falls back to /bin/sh" {
   : > "$CALLS"
   run bash -c '
