@@ -113,6 +113,47 @@ RUBOCOP_PARALLELISM=4"
   assert_regex "$(cat "$CALLS")" '-e OPENCODE_CONFIG=/home/agent/oc\.jsonc'
 }
 
+@test "msb git identity: syncs global config and replays EMAIL fallback" {
+  local home="$STUBDIR/git-home"
+  mkdir -p "$home"
+  git -c "safe.directory=*" config --file "$home/.gitconfig" user.name "Global User"
+  git -c "safe.directory=*" config --file "$home/.gitconfig" user.email global@example.gov
+
+  : > "$CALLS"
+  run bash -c '
+    export HOME="'"$home"'" GIT_CONFIG_NOSYSTEM=1 STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run sbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '-e ACQ_GIT_USER_NAME=Global User'
+  assert_regex "$log" '-e ACQ_GIT_USER_EMAIL=global@example\.gov'
+  assert_regex "$log" 'git config --global user.name'
+  assert_regex "$log" 'git config --global user.email'
+  assert_regex "$log" '-e EMAIL=global@example\.gov'
+  refute_regex "$log" '-e GIT_AUTHOR_NAME=Global User'
+
+  : > "$CALLS"
+  run bash -c '
+    export HOME="'"$home"'" GIT_CONFIG_NOSYSTEM=1 STUB_MSB_VERSION=0.6.9
+    export STUB_RECORDED_AGENT=opencode STUB_AGENT_PRESENT=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ( _acq_msb_attach sbox </dev/null >/dev/null 2>&1 )
+  '
+  assert_regex "$(cat "$CALLS")" '-e EMAIL=global@example\.gov'
+
+  : > "$CALLS"
+  run bash -c '
+    export HOME="'"$home"'" GIT_CONFIG_NOSYSTEM=1 STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ( _acq_msb_shell_exec sbox </dev/null >/dev/null 2>&1 )
+  '
+  assert_regex "$(cat "$CALLS")" '-e EMAIL=global@example\.gov'
+}
+
 @test "msb markers: ABSENT /var/lib/acq markers must not kill session verbs under set -e" {
   # acq runs under `set -euo pipefail`. On a sandbox whose /var/lib/acq markers
   # are absent (created before a marker existed, e.g. pre-kit-env sandboxes, or

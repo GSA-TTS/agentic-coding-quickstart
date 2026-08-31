@@ -39,6 +39,11 @@ case "$1" in
     case "$1" in
       checkout)
         mkdir -p "$repo/.git"
+        if [ "${GIT_STUB_FAIL_FIRST_CHECKOUT_SHA:-}" = "$2" ] \
+           && [ ! -e "$repo/.git/checkout-failed-once" ]; then
+          : >"$repo/.git/checkout-failed-once"
+          exit 1
+        fi
         printf '%s\n' "$2" >"$repo/.git/head"
         ;;
       rev-parse)
@@ -87,4 +92,20 @@ STUB
   assert_output --partial "version:   v2.0.0"
   assert_output --partial "pinned commit: $release_sha"
   assert_output --partial "verified HEAD matches pinned commit $release_sha"
+}
+
+@test "install: existing shallow clone deepens before failing pinned sha" {
+  export GIT_STUB_LOG="$BATS_TEST_TMPDIR/git.log"
+  _write_git_stub
+  mkdir -p "$ACQ_INSTALL_CLONE_DIR/.git"
+  printf '#!/bin/sh\n' >"$ACQ_INSTALL_CLONE_DIR/acq"
+  chmod +x "$ACQ_INSTALL_CLONE_DIR/acq"
+  release_sha=abcdef0123456789abcdef0123456789abcdef01
+
+  run env GIT_STUB_FAIL_FIRST_CHECKOUT_SHA="$release_sha" \
+    sh "$REPO_ROOT/install.sh" --method clone --no-msb --yes --sha "$release_sha"
+
+  assert_success
+  assert_output --partial "verified HEAD matches pinned commit $release_sha"
+  assert_regex "$(cat "$GIT_STUB_LOG")" "fetch --unshallow --tags origin"
 }

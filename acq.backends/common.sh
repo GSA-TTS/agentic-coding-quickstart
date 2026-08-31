@@ -1802,10 +1802,62 @@ warn_if_no_ssh_signing_key() {
   echo "      Then commit as usual. (You can still work; only committing needs it.)" >&2
 }
 
+_acq_host_git_config_value() {
+  command -v git >/dev/null 2>&1 || return 0
+  HOME="${HOME:-}" git config --global --get "$1" 2>/dev/null || true
+}
+
+_acq_git_identity_value_is_safe() {
+  local val="$1" nl tab
+  nl=$(printf '\n_'); nl=${nl%_}
+  tab=$(printf '\t')
+  case "$val" in
+    *"$nl"*|*"$tab"*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+acq_host_git_identity_env() {
+  local email
+  if [ -n "${GIT_AUTHOR_NAME:-}" ] && _acq_git_identity_value_is_safe "$GIT_AUTHOR_NAME"; then
+    printf 'GIT_AUTHOR_NAME=%s\n' "$GIT_AUTHOR_NAME"
+  fi
+  if [ -n "${GIT_AUTHOR_EMAIL:-}" ] && _acq_git_identity_value_is_safe "$GIT_AUTHOR_EMAIL"; then
+    printf 'GIT_AUTHOR_EMAIL=%s\n' "$GIT_AUTHOR_EMAIL"
+  fi
+  if [ -n "${GIT_COMMITTER_NAME:-}" ] && _acq_git_identity_value_is_safe "$GIT_COMMITTER_NAME"; then
+    printf 'GIT_COMMITTER_NAME=%s\n' "$GIT_COMMITTER_NAME"
+  fi
+  if [ -n "${GIT_COMMITTER_EMAIL:-}" ] && _acq_git_identity_value_is_safe "$GIT_COMMITTER_EMAIL"; then
+    printf 'GIT_COMMITTER_EMAIL=%s\n' "$GIT_COMMITTER_EMAIL"
+  fi
+  if [ -n "${EMAIL:-}" ] && _acq_git_identity_value_is_safe "$EMAIL"; then
+    printf 'EMAIL=%s\n' "$EMAIL"
+  else
+    email=$(_acq_host_git_config_value user.email)
+    if [ -n "$email" ] && _acq_git_identity_value_is_safe "$email"; then
+      printf 'EMAIL=%s\n' "$email"
+    fi
+  fi
+}
+
+acq_host_git_global_config_env() {
+  local name email
+  name=$(_acq_host_git_config_value user.name)
+  email=$(_acq_host_git_config_value user.email)
+  if [ -n "$name" ] && _acq_git_identity_value_is_safe "$name"; then
+    printf 'ACQ_GIT_USER_NAME=%s\n' "$name"
+  fi
+  if [ -n "$email" ] && _acq_git_identity_value_is_safe "$email"; then
+    printf 'ACQ_GIT_USER_EMAIL=%s\n' "$email"
+  fi
+}
+
 # Warn (do not block) if the mounted workspace has no usable git identity.
-# Only a repo-local identity crosses into the sandbox (the sandbox home is empty
-# and the host's global ~/.gitconfig is NOT mounted), so guidance must point at
-# repo-local config. Classifies the workspace path P into four cases:
+# A repo-local identity crosses through the mounted workspace. When present, acq
+# also forwards the host's explicit GIT_* identity env or global git identity as
+# standard git author/committer env vars for guest commands. Classifies the
+# workspace path P into four cases:
 #   (a) P is itself a git repo    -> warn if effective user.email is unset
 #   (b) P is not a repo but has    -> tell the user to set identity per sub-repo
 #       depth-1 sub-repos              (names a capped, symlink-safe list)
@@ -1817,6 +1869,20 @@ warn_if_no_git_identity() {
   local path="${1:-}"
   command -v git >/dev/null 2>&1 || return 0
   [ -n "$path" ] && [ -d "$path" ] || return 0   # (d) handled by pre-flight
+
+  local host_email
+  if [ -n "${EMAIL:-}" ] && _acq_git_identity_value_is_safe "$EMAIL"; then
+    return 0
+  fi
+  if [ -n "${GIT_AUTHOR_EMAIL:-}" ] && [ -n "${GIT_COMMITTER_EMAIL:-}" ] \
+      && _acq_git_identity_value_is_safe "$GIT_AUTHOR_EMAIL" \
+      && _acq_git_identity_value_is_safe "$GIT_COMMITTER_EMAIL"; then
+    return 0
+  fi
+  host_email=$(_acq_host_git_config_value user.email)
+  if [ -n "$host_email" ] && _acq_git_identity_value_is_safe "$host_email"; then
+    return 0
+  fi
 
   # (a) P is itself a git work tree.
   if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
