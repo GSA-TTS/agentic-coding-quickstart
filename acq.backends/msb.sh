@@ -2316,6 +2316,19 @@ _acq_msb_upstream_ca_flags_into() {
 # repository root or a previous scratch is still present.
 _acq_msb_clone_setup() {
   local name="$1" ws="$2" top=""
+  # NAME lands verbatim in host paths (mkdir/git clone, and rm -rf at cleanup)
+  # under the clones root, and in the sandbox-<name> remote — and an EXPLICIT
+  # --name bypasses slugify, reaching here before msb's own name validation
+  # ever runs. Fail closed on anything that is not a single safe path
+  # component, so a traversal-shaped name can never build a path outside the
+  # clones root.
+  case "$name" in
+    ''|.|..|*[!A-Za-z0-9._-]*)
+      echo "acq(msb): error: --clone: invalid sandbox name '$name' for the scratch clone" >&2
+      echo "acq(msb):   (allowed: letters, digits, '.', '_', '-')." >&2
+      return 1
+      ;;
+  esac
   if ! top=$(git -C "$ws" rev-parse --show-toplevel 2>/dev/null); then
     echo "acq(msb): error: --clone: workspace is not a git repository: $ws" >&2
     echo "acq(msb):   --clone runs the agent on a clone of the primary workspace's repo." >&2
@@ -2346,7 +2359,8 @@ _acq_msb_clone_setup() {
   fi
   if [ -n "$(git -C "$ws_canon" status --porcelain 2>/dev/null)" ]; then
     echo "acq(msb): note: the workspace has uncommitted changes; a git clone carries" >&2
-    echo "acq(msb):   committed state only. Commit first, or copy files in with 'acq cp'." >&2
+    echo "acq(msb):   committed state only. Commit first ('git add' untracked files)," >&2
+    echo "acq(msb):   or copy files in with 'acq cp'." >&2
   fi
   mkdir -p "$dir"
   printf '%s\n' "$ws_canon" > "${dir}/.origin"

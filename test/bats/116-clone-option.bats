@@ -111,6 +111,35 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   assert_regex "$(cat "$CALLS")" 'msb create'
 }
 
+@test "clone(msb): the dirty-tree notice covers untracked-only changes ('git add' hint)" {
+  # An untracked file also makes `git status --porcelain` non-empty, and it too
+  # is invisible to the clone — but "commit first" alone is incomplete advice
+  # there (the file must be added first).
+  echo new > "$CLONEPROJ/untracked.txt"
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  assert_output --partial 'uncommitted changes'
+  assert_output --partial 'git add'
+  assert_regex "$(cat "$CALLS")" 'msb create'
+}
+
+@test "clone(msb): a path-unsafe explicit --name is rejected before any host path is built" {
+  # An explicit --name bypasses slugify and lands verbatim in the scratch path
+  # (mkdir/git clone/rm -rf under clones/<name>) and the sandbox-<name> remote,
+  # all BEFORE msb's own name validation runs. A traversal-shaped name must
+  # fail closed with nothing created.
+  _msb_clone -- create shell --name '../evil' --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'invalid sandbox name'
+  refute_regex "$(cat "$CALLS")" 'msb create'
+  [ ! -e "$STUBDIR/state/evil" ]
+  run git -C "$CLONEPROJ" remote
+  refute_output --partial 'sandbox-'
+
+  _msb_clone -- create shell --name '..' --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'invalid sandbox name'
+}
+
 @test "clone(msb): secondary workspaces keep their direct mounts" {
   local second="$STUBDIR/secondlib"; mkdir -p "$second"
   _msb_clone -- create shell --clone "$CLONEPROJ" "$second:ro"

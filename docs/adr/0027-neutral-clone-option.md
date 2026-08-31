@@ -131,5 +131,12 @@ fetch transfers objects, not hooks or config).
 - **Negative / trade-off:** two documented state-fidelity divergences from sbx
   (above), both git-native and both with the same `acq cp` escape hatch; host
   disk holds a second physical copy of the repo per cloned sandbox.
+- **Known limitation (accepted):** the scratch existence check and its `mkdir`
+  are not atomic, so two concurrent creates with the same name can race, and
+  the losing invocation's cleanup can delete the winner's fresh scratch. This
+  requires the operator to race themselves with identical names in a
+  single-operator interactive CLI, and msb's own name registration rejects the
+  duplicate create anyway — accepted (surfaced by adversarial review) rather
+  than complicating the claim into an atomic `mkdir` with EEXIST handling.
 - **Scope:** applies at sandbox **creation** only; `acq stop`/restart preserve
   the scratch and remote; only `acq rm` (or a failed create) cleans them up.
