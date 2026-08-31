@@ -20,9 +20,10 @@
 # installation-and-distribution ADR under docs/adr/.
 #
 # Usage:
-#   curl -fsSL <pinned-raw-url>/install.sh | sh
+#   curl -fsSL <release-asset-url>/install.sh | sh
 #   sh install.sh [--method brew|npm|clone] [--ref <tag-or-branch>]
-#                 [--no-msb] [--dry-run] [--yes] [--help]
+#                 [--sha <full-commit>] [--no-msb] [--dry-run] [--yes]
+#                 [--help]
 #
 # Inspect first (recommended): download and read this file, then run it.
 
@@ -33,18 +34,18 @@ set -eu
 # ---------------------------------------------------------------------------
 
 REPO_URL="${ACQ_INSTALL_REPO_URL:-https://github.com/GSA-TTS/agentic-coding-quickstart.git}"
-# Default to `main` for now. This is a rolling-release default: `main` is a
-# moving target, NOT a pinned, content-addressed reference. For a verifiable
-# install, pass --ref <tag> or --sha <commit> (the latter is integrity-checked
-# after checkout). Defaulting to a published release tag + shipped SHA is
-# tracked follow-up work; see ADR-0026 and its deferred-work tracking section.
-REF="${ACQ_INSTALL_REF:-main}"
+# release-please updates this version in release PRs. Release automation also
+# publishes an install.sh asset with DEFAULT_RELEASE_SHA replaced by the exact
+# release commit so the default clone path is content-addressed.
+DEFAULT_RELEASE_VERSION="2.0.0" # x-release-please-version
+DEFAULT_RELEASE_REF="v$DEFAULT_RELEASE_VERSION"
+DEFAULT_RELEASE_SHA=""
+REF="${ACQ_INSTALL_REF:-$DEFAULT_RELEASE_REF}"
 
-# Optional: pin to an exact 40-char commit SHA. When set, the clone method
-# verifies the checked-out HEAD equals this SHA and fails closed otherwise —
-# git objects are content-addressed, so a matching SHA *is* an integrity check
-# (no separate checksum file needed). See ADR-0026.
-SHA="${ACQ_INSTALL_SHA:-}"
+# Optional: pin to an exact 40-char commit SHA. Release assets set this to the
+# release commit by default; source checkouts leave it empty so local/dev installs
+# can still target REF unless ACQ_INSTALL_SHA or --sha is supplied.
+SHA="${ACQ_INSTALL_SHA:-$DEFAULT_RELEASE_SHA}"
 
 # Where the managed clone lives (preserves `acq version` git introspection).
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -106,8 +107,8 @@ a git clone. Override with --method.
 
 Options:
   --method <m>         Force install method: brew | npm | clone (default: auto).
-  --ref <tag|branch>   Version to install (default: main — a moving target;
-                       pass a release tag for a stable, repeatable install).
+  --ref <tag|branch>   Version to install (default: latest release tag baked
+                       into this installer).
   --sha <commit>       Pin to a full 40-char commit SHA and verify HEAD matches
                        it after checkout (content-addressed integrity check).
   --no-msb             Do not install the msb sandbox runtime.

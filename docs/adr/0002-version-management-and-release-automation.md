@@ -100,6 +100,9 @@ requirements while maintaining simplicity and being backed by Google's well-main
    - When Release PR is merged, creates git tag and GitHub release
    - Configuration in `release-please-config.json` and `.release-please-manifest.json`
    - GitHub Action: `googleapis/release-please-action`
+   - Release creation also uploads installer assets: `install.sh` with the release
+     commit SHA embedded as the default pin, plus `SHA256SUMS` for verifying the
+     downloaded installer asset
 
 4. **CHANGELOG.md Format**
    - Follow Keep a Changelog v1.1.0 format
@@ -185,8 +188,10 @@ Initially considered but rejected because:
 4. Update AGENTS.md with commit message requirements
 5. Update CODING_PRACTICES.md with version control standards
 6. Update `.github/workflows/release.yml` to use release-please
-7. Add CONTRIBUTING.md with commit message guidelines
-8. Backfill CHANGELOG for existing releases (v0.1.0, v0.2.0)
+7. Upload release installer assets (`install.sh` and `SHA256SUMS`) when a release
+   is created
+8. Add CONTRIBUTING.md with commit message guidelines
+9. Backfill CHANGELOG for existing releases (v0.1.0, v0.2.0)
 
 ## Commit Message Format Reference
 
