@@ -3382,16 +3382,20 @@ _acq_msb_ensure_agent_shell() {
   # guest script as a positional arg (never interpolated into the sh -c
   # string). Charset-guard the probe result before it reaches usermod/chsh.
   shell=$({ msb exec "$name" -u 0 -- sh -c 'command -v bash 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
-  case "$shell" in
-    /*) : ;;
-    *)  shell="/bin/sh" ;;
-  esac
-  case "$shell" in
-    *[!A-Za-z0-9._/-]*) shell="/bin/sh" ;;
-  esac
+  shell=$(_acq_msb_safe_shell_or_sh "$shell")
   acq_debug "msb: syncing agent login shell to $shell in $name"
   # NOTE: single-quoted `sh -c` string — no single quotes inside (they would
   # close the outer quote); `echo` writes the profile lines for the same reason.
+  #
+  # The bridge exports the shell passwd ACTUALLY holds after the sync attempt
+  # (re-read into `current`), not the requested target: an image with bash but
+  # neither usermod nor chsh keeps /bin/sh in passwd, and SHELL must not lie
+  # about the shell sessions really run.
+  #
+  # The rewrite is bounded to a file acq owns outright: missing/empty, or the
+  # marker present AND still just the bridge (3 lines). Lines other tools
+  # append below the bridge (rustup et al) must survive the heal, so a
+  # marker-plus-appended file is left untouched.
   msb exec "$name" -u 0 -- sh -c '
     set -e
     target="$1"
@@ -3402,15 +3406,17 @@ _acq_msb_ensure_agent_shell() {
       elif command -v chsh >/dev/null 2>&1; then
         chsh -s "$target" agent
       fi
+      current=$({ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; } | head -n1 | cut -d: -f7)
     fi
+    [ -n "$current" ] || current=/bin/sh
     profile=/home/agent/.profile
     if [ -f "$profile" ]; then
       sed -i "\|^export SHELL=/bin/sh\$|d" "$profile" 2>/dev/null || true
     fi
-    if [ ! -s "$profile" ] || grep -qs acq-login-profile "$profile"; then
+    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le 3 ]; }; then
       {
-        echo "# acq-login-profile: written by acq (rewritten on heal; do not edit)."
-        echo "export SHELL=$target"
+        echo "# acq-login-profile: written by acq (rewritten on heal; do not edit these 3 lines)."
+        echo "export SHELL=$current"
         echo "if [ -n \"\$BASH_VERSION\" ] && [ -f \"\$HOME/.bashrc\" ]; then . \"\$HOME/.bashrc\"; fi"
       } > "$profile"
       _agrp=$(id -gn agent 2>/dev/null || echo agent)
@@ -4071,6 +4077,11 @@ EOF
 # shell come free; msb exposes only raw `msb exec`, so every session path here
 # must synthesize each piece itself or the session silently drops it.
 
+# Per-process cache for acq_backend_run's workspace resolution (see the cache
+# note there). Module scope so the first run primes it for every later run.
+_ACQ_MSB_RUN_WS_NAME=""
+_ACQ_MSB_RUN_WS=""
+
 # _acq_msb_workspace_for NAME — the guest workspace a session starts in (-w).
 # Prefer an explicit ACQ_MSB_WORKSPACE override; otherwise the guest path
 # recorded at provision (it mirrors the host mount path, so it cannot be
@@ -4112,6 +4123,14 @@ _acq_msb_term_flags_into() {
 _acq_msb_agent_passwd_shell() {
   local name="$1" shell
   shell=$({ msb exec "$name" -u 0 -- sh -c '{ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; } | head -n1 | cut -d: -f7' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
+  _acq_msb_safe_shell_or_sh "$shell"
+}
+
+# _acq_msb_safe_shell_or_sh VALUE — echo VALUE when it is a word-safe absolute
+# path, /bin/sh otherwise. The shared guard for every shell path read from the
+# guest (passwd read, bash probe) before it reaches argv or usermod/chsh.
+_acq_msb_safe_shell_or_sh() {
+  local shell="$1"
   case "$shell" in
     /*) : ;;
     *)  shell="/bin/sh" ;;
@@ -4152,7 +4171,21 @@ acq_backend_run() {
   # Start in the primary workspace (-w), like attach/shell and like sbx's exec:
   # without it the command runs in msb's default cwd and every
   # workspace-relative invocation (direnv allow, git status) misfires.
-  ws=$(_acq_msb_workspace_for "$name")
+  # The marker read costs a guest exec, and callers drive this in probe loops
+  # (the verify/heal paths in common.sh), so cache the resolved path per NAME
+  # for the life of the process. Cached HERE, not inside the helper — the
+  # helper is always called through a command substitution, whose subshell
+  # would discard any cache write (the _ACQ_MSB_PORT_SEQ_FILE lesson). The
+  # ACQ_MSB_WORKSPACE override branch inside the helper still wins: an
+  # override never reaches the marker read, and it cannot change mid-process
+  # in a way the cache would mask (same env for every call).
+  if [ "${_ACQ_MSB_RUN_WS_NAME:-}" = "$name" ]; then
+    ws="$_ACQ_MSB_RUN_WS"
+  else
+    ws=$(_acq_msb_workspace_for "$name")
+    _ACQ_MSB_RUN_WS_NAME="$name"
+    _ACQ_MSB_RUN_WS="$ws"
+  fi
   msb exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
     ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
 }

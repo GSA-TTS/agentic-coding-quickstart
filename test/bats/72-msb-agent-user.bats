@@ -359,9 +359,37 @@ _attach() { # PRE_SNIPPET NAME
   _provision bridgebox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/bridge-secrets"'
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'usermod -s'
-  assert_regex "$log" 'export SHELL='
   assert_regex "$log" 'BASH_VERSION'
   assert_regex "$log" '\.bashrc'
+  # The bridge must export the shell passwd ACTUALLY holds after the sync
+  # attempt (re-read), not the requested target: on an image with bash but no
+  # usermod/chsh the passwd shell stays /bin/sh and SHELL must not lie.
+  assert_regex "$log" 'export SHELL=\$current'
+  refute_regex "$log" 'export SHELL=\$target'
+}
+
+@test "msb #426: the heal only rewrites a .profile acq owns outright (appended lines survive)" {
+  # Tools like rustup append to ~/.profile below acq's bridge. The rewrite
+  # condition must be marker-present AND still just the bridge (line-count
+  # bound), so a marker+appended file is left alone instead of clobbered on
+  # every heal.
+  _provision profguard shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/profguard-secrets"'
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'acq-login-profile "\$profile"'
+  assert_regex "$log" '\-le 3'
+}
+
+@test "msb: repeated acq exec reads the workspace marker once per process (cached)" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run cachebox -- git status >/dev/null 2>&1
+    acq_backend_run cachebox -- git log >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_equal "$(grep -c 'cat /var/lib/acq/workspace' "$CALLS")" "1"
+  assert_equal "$(grep -c -- '-w /tmp/myrepo cachebox' "$CALLS")" "2"
 }
 
 @test "msb #426: heal upgrades an existing /bin/sh agent user (marker hit still syncs the shell)" {
