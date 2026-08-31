@@ -265,6 +265,58 @@ _acq_sbx_kit_flags() {
   done
 }
 
+_acq_sbx_git_identity_kit() {
+  command -v acq_host_git_identity_env >/dev/null 2>&1 || return 0
+  command -v acq_host_git_global_config_env >/dev/null 2>&1 || return 0
+  command -v _kit_yaml_quote >/dev/null 2>&1 || return 0
+  local envrecs configrecs allrecs slug
+  envrecs=$(acq_host_git_identity_env)
+  configrecs=$(acq_host_git_global_config_env)
+  allrecs=$(printf '%s\n%s\n' "$envrecs" "$configrecs" | sed '/^$/d')
+  [ -n "$allrecs" ] || return 0
+  slug=$(printf '%s' "$allrecs" | cksum | cut -d' ' -f1)
+
+  local dir="${ACQ_SBX_KIT_CACHE}/generated/git-identity-${slug}"
+  mkdir -p "$dir"
+  {
+    printf 'schemaVersion: "2"\n'
+    printf 'kind: mixin\n'
+    printf 'name: acq-git-identity-%s\n' "$slug"
+    printf 'displayName: ACQ Git Identity\n'
+    printf 'description: Forward host git identity into the guest\n'
+    if [ -n "$envrecs" ]; then
+      printf 'environment:\n  variables:\n'
+      printf '%s\n' "$envrecs" | while IFS= read -r rec; do
+        [ -n "$rec" ] || continue
+        printf '    %s: %s\n' "${rec%%=*}" "$(_kit_yaml_quote "${rec#*=}")"
+      done
+    fi
+    if [ -n "$configrecs" ]; then
+      printf 'setup:\n  install:\n    command:\n      - sh\n      - -c\n'
+      printf '      - %s\n' "$(_kit_yaml_quote '[ -n "${ACQ_GIT_USER_NAME:-}" ] && git config --global user.name "$ACQ_GIT_USER_NAME" 2>/dev/null || true; [ -n "${ACQ_GIT_USER_EMAIL:-}" ] && git config --global user.email "$ACQ_GIT_USER_EMAIL" 2>/dev/null || true')"
+      printf '    env:\n'
+      printf '%s\n' "$configrecs" | while IFS= read -r rec; do
+        [ -n "$rec" ] || continue
+        printf '      %s: %s\n' "${rec%%=*}" "$(_kit_yaml_quote "${rec#*=}")"
+      done
+    fi
+  } >"$dir/spec.yaml"
+  printf '%s\n' "$dir"
+}
+
+_acq_sbx_apply_git_identity_kit() {
+  local name="$1" git_identity_kit _kadd_rc=0
+  git_identity_kit=$(_acq_sbx_git_identity_kit)
+  [ -n "$git_identity_kit" ] || return 0
+  _acq_sbx_kit_add "$name" "$git_identity_kit" || _kadd_rc=$?
+  case $_kadd_rc in
+    0) return 0 ;;
+    3) _acq_sbx_print_recreate_notice "$name" ;;
+    *) echo "acq: warning: 'sbx kit add' (git identity env) failed for '$name' (see error above)." >&2 ;;
+  esac
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Wait for sbx exec to become ready in a sandbox (after create or restart).
 # ---------------------------------------------------------------------------
@@ -409,6 +461,9 @@ acq_backend_provision() {
 
   local kf=()
   while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
+  local _git_identity_kit=""
+  _git_identity_kit=$(_acq_sbx_git_identity_kit)
+  [ -n "$_git_identity_kit" ] && kf+=(--kit "$_git_identity_kit")
 
   acq_debug "sbx create --name $name ${_tf[*]:-} ${kf[*]} ${_stripped[*]:-}"
   acq_spin_start "Creating sandbox '$name'"
@@ -490,6 +545,7 @@ _acq_sbx_seed_extra_kit_marker() {
 acq_backend_run() {
   local name="$1"
   shift
+  _acq_sbx_apply_git_identity_kit "$name"
   # Expect `-- CMD...` separator. No `-u agent` needed: sbx's agent templates
   # bake the unprivileged `agent` user (UID 1000, HOME=/home/agent) as the
   # default exec user, unlike a plain msb OCI base (which defaults to root).
@@ -503,6 +559,7 @@ acq_backend_run() {
 # relaunches the recorded agent and `acq exec` is non-interactive. sbx
 # allocates the PTY itself via `exec -it`; exec hands it the terminal directly.
 acq_backend_shell() {
+  _acq_sbx_apply_git_identity_kit "$1"
   exec sbx exec -it "$1" bash
 }
 
@@ -750,6 +807,8 @@ acq_backend_ensure_kits_applied() {
       *) echo "acq: warning: 'sbx kit add' (git-ssh-sign kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
   fi
+
+  _acq_sbx_apply_git_identity_kit "$name"
 
   # 4) Extra kits (tracked by marker file). Extra kits may be neutral or already
   #    sbx-v2; _acq_sbx_translate_kit handles both. The marker records one
