@@ -9,6 +9,14 @@
           "type": "json",
           "path": "package.json",
           "jsonpath": "$.version"
+        },
+        {
+          "type": "generic",
+          "path": "install.sh"
+        },
+        {
+          "type": "generic",
+          "path": "README.md"
         }
       ]
     }
