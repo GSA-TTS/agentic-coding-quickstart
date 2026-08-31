@@ -63,7 +63,7 @@ You'll type (or paste) the commands below into this window.
 Paste this one line and press Return:
 
 ```bash
-curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v2.0.0/install.sh | sh # x-release-please-version
+curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.0.0/install.sh | sh # x-release-please-version
 ```
 
 That's it — you don't have to choose *how* to install. The installer:
@@ -99,7 +99,7 @@ You never have to pipe a script straight into your shell. Download it, read it,
 then run it:
 
 ```bash
-ACQ_VERSION=2.0.0 # x-release-please-version
+ACQ_VERSION=3.0.0 # x-release-please-version
 curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/install.sh"
 curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
