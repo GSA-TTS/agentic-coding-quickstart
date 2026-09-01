@@ -34,7 +34,7 @@ set -eu
 REPO_URL="${ACQ_INSTALL_REPO_URL:-https://github.com/GSA-TTS/agentic-coding-quickstart.git}"
 # release-please updates this version in release PRs. Release automation also
 # publishes an install.sh asset with DEFAULT_RELEASE_SHA replaced by the exact
-# release commit so the default clone path is content-addressed.
+# release commit so clone installs can verify they landed on that commit.
 DEFAULT_RELEASE_VERSION="3.0.0" # x-release-please-version
 DEFAULT_RELEASE_REF="v$DEFAULT_RELEASE_VERSION"
 DEFAULT_RELEASE_SHA=""
@@ -110,8 +110,8 @@ Options:
   --method <m>         Force install method: brew | npm | clone (default: auto).
   --ref <tag|branch>   Version to install (default: latest release tag baked
                        into this installer).
-  --sha <commit>       Pin to a full 40-char commit SHA and verify HEAD matches
-                       it after checkout (content-addressed integrity check).
+  --sha <commit>       Force clone install, pin to a full 40-char commit SHA,
+                       and verify HEAD matches it after checkout.
   --no-msb             Do not install the msb sandbox runtime.
   --dry-run            Print what would happen; make no changes.
   --yes, -y            Assume "yes" to prompts (PATH edit, msb install).
@@ -159,7 +159,7 @@ if [ "$REF_WAS_SET" -eq 1 ] && [ "$SHA_WAS_SET" -eq 0 ]; then
 fi
 
 # A pinned SHA must be a full 40-hex commit id (short SHAs and tags cannot be
-# integrity-verified the same way). Reject anything else up front.
+# verified against HEAD the same way). Reject anything else up front.
 if [ "$SHA_WAS_SET" -eq 1 ] && [ -z "$SHA" ]; then
   die "invalid --sha '$SHA' (expected a 40-char hex commit id)"
 fi
@@ -171,8 +171,8 @@ if [ -n "$SHA" ]; then
 fi
 
 # Explicit SHA pinning only applies to the git-clone method (npm/brew resolve
-# their own packages). A release asset's baked SHA is used when clone is selected,
-# but does not by itself override package-manager auto-selection.
+# their own packages). A release asset's baked SHA is a clone-path consistency
+# check and does not by itself override package-manager auto-selection.
 if [ "$SHA_WAS_SET" -eq 1 ] && { [ "$METHOD" = "npm" ] || [ "$METHOD" = "brew" ]; }; then
   die "--sha is only supported with --method clone"
 fi
@@ -468,7 +468,7 @@ install_via_clone() {
     fi
   fi
 
-  # --- Integrity check: HEAD must equal the pinned SHA (content-addressed) ---
+  # --- Clone consistency check: HEAD must equal the pinned SHA. ---
   if [ -n "$SHA" ] && [ "$DRY_RUN" -eq 0 ]; then
     head_sha="$(git -C "$CLONE_DIR" rev-parse HEAD 2>/dev/null || echo '')"
     if [ "$head_sha" != "$SHA" ]; then
