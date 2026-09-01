@@ -9,6 +9,12 @@ setup() {
   export PATH="$STUBDIR/bin:$PATH"
   export ACQ_INSTALL_CLONE_DIR="$BATS_TEST_TMPDIR/acq-clone"
   export ACQ_INSTALL_BIN_DIR="$BATS_TEST_TMPDIR/bin"
+  # Derive the expected default version from install.sh itself rather than
+  # hardcoding it here: release-please bumps DEFAULT_RELEASE_VERSION on every
+  # release (the x-release-please-version annotation), and a hardcoded
+  # assertion in this file would silently go stale on the next release with
+  # no test catching it -- exactly what happened (v2.0.0 -> v3.0.0).
+  DEFAULT_VERSION_TAG="v$(sed -n 's/^DEFAULT_RELEASE_VERSION="\([^"]*\)".*/\1/p' "$REPO_ROOT/install.sh")"
 }
 
 teardown() {
@@ -74,7 +80,7 @@ STUB
     --method clone --no-msb --dry-run --yes
 
   assert_success
-  assert_output --partial 'version:   v2.0.0'
+  assert_output --partial "version:   $DEFAULT_VERSION_TAG"
   refute_output --partial 'pinned commit:'
 }
 
@@ -89,7 +95,7 @@ STUB
   run sh "$release_installer" --method clone --no-msb --yes
 
   assert_success
-  assert_output --partial "version:   v2.0.0"
+  assert_output --partial "version:   $DEFAULT_VERSION_TAG"
   assert_output --partial "pinned commit: $release_sha"
   assert_output --partial "verified HEAD matches pinned commit $release_sha"
 }
