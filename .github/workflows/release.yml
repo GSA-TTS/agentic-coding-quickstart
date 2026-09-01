@@ -22,6 +22,9 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
@@ -29,15 +32,23 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+  release-assets:
+    name: Release Assets
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
       - name: Check out release commit
-        if: ${{ steps.release.outputs.release_created == 'true' }}
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          ref: ${{ steps.release.outputs.tag_name }}
+          ref: ${{ needs.release-please.outputs.tag_name }}
           persist-credentials: false
 
       - name: Build release assets
-        if: ${{ steps.release.outputs.release_created == 'true' }}
         run: |
           set -eu
           release_sha="$(git rev-parse HEAD)"
@@ -47,9 +58,15 @@ jobs:
           chmod 0755 dist/install.sh
           (cd dist && sha256sum install.sh > SHA256SUMS)
 
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            dist/install.sh
+            dist/SHA256SUMS
+
       - name: Upload release assets
-        if: ${{ steps.release.outputs.release_created == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
         run: gh release upload "$RELEASE_TAG" dist/install.sh dist/SHA256SUMS --clobber

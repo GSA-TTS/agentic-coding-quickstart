@@ -95,22 +95,28 @@ finish, then continues on its own.
 <details>
 <summary>Prefer to look before you run it? (recommended) (click to expand)</summary>
 
-You never have to pipe a script straight into your shell. Download it, read it,
-then run it:
+You never have to pipe a script straight into your shell. If you have the GitHub
+CLI (`gh`), you can also verify the release asset attestations before running
+anything:
 
 ```bash
 ACQ_VERSION=3.0.0 # x-release-please-version
 curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/install.sh"
 curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/SHA256SUMS"
+gh attestation verify install.sh --repo GSA-TTS/agentic-coding-quickstart
+gh attestation verify SHA256SUMS --repo GSA-TTS/agentic-coding-quickstart
 shasum -a 256 -c SHA256SUMS
 less install.sh              # read it
 sh install.sh --dry-run      # show what it WOULD do, changing nothing
 sh install.sh                # actually install
 ```
 
-The release asset pins the default clone install to the release tag and verifies
-that checkout against the release commit. You can also force a specific method
-with `--method brew|npm|clone`.
+By default, the installer uses the best package manager already available on
+your host: Homebrew, then npm, then a managed git clone. Homebrew and npm rely on
+the published package/formula release path. The release asset's baked commit SHA
+is used only by the clone fallback (or `--method clone`) to verify that the clone
+landed on the release commit embedded in the installer. To pin to an independent,
+explicit commit, use `--method clone --sha <40-char-commit>`.
 
 </details>
 

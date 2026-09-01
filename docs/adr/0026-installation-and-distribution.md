@@ -103,12 +103,14 @@ dependency — it only defers it:
   A user who installed via tarball would hit the CLT prompt on their very first
   real `acq` command instead of during install — a *worse* experience, because
   it happens after they think setup is finished.
-- **The integrity win is available without the tarball.** Git objects are
-  content-addressed, so pinning the clone to a **full commit SHA** is itself a
-  cryptographic integrity check — the checkout cannot succeed with tampered
-  content. That gives us hash-confirmed provenance without a second archive
-  install path; release automation still publishes `SHA256SUMS` for installer
-  asset verification.
+- **The clone-path consistency check is available without the tarball.** Git
+  objects are content-addressed, so an explicit clone pin to a **full commit
+  SHA** verifies that `HEAD` equals the commit the caller requested. Release
+  assets also embed the release commit SHA so clone installs can fail closed if
+  the checkout does not land on the commit baked into the installer. This is not
+  a substitute for release-asset provenance, so release automation also
+  publishes `SHA256SUMS` and GitHub artifact attestations for installer asset
+  verification.
 
 So the CLT dependency is unavoidable for this tool; the right move is to make it
 **painless and early** rather than to engineer around it. The installer's clone
@@ -132,9 +134,10 @@ guided step.
   clone.
 - **Never touch the user's `PATH` without consent** — offer to add the line,
   and if declined, print the exact line for them to add themselves.
-- **Federal security posture** — release asset defaults pin to a release tag and
-  canonical release commit SHA, published checksums, inspect-first supported, no
-  `sudo`, install into a user-writable prefix.
+- **Federal security posture** — package-manager-first auto-selection, clone
+  installs bound to the release asset's embedded commit SHA, published checksums
+  and artifact attestations, inspect-first supported, no `sudo`, install into a
+  user-writable prefix.
 - **Preserve `acq version` introspection and easy updates** — the on-disk layout
   should keep `acq`'s git-based version reporting and support in-place updates.
 - **Minimal new surface** — reuse the existing `acq`/kit machinery and `msb`
@@ -224,18 +227,20 @@ In bounds now:
   can pin to a full 40-char commit SHA and verifies `HEAD` equals it after
   checkout, failing closed (and cleaning up) on mismatch — git objects are
   content-addressed, so a matching SHA *is* a cryptographic integrity check.
-- **Release asset commit-SHA pinning by default.** `release-please` updates the
+- **Release asset clone consistency by default.** `release-please` updates the
   installer release version marker. When a release is created, the release
   workflow checks out the release commit, writes that exact commit SHA into the
-  `install.sh` asset, generates `SHA256SUMS`, and uploads both files to the
-  GitHub release. Users who install from the release asset get a default clone
-  target of the release tag plus a default `--sha`-equivalent integrity check
-  against the release commit.
+  `install.sh` asset, generates `SHA256SUMS`, publishes GitHub artifact
+  attestations for both files, and uploads both files to the GitHub release.
+  Users who install from the release asset still get package-manager-first auto
+  selection; the embedded SHA is used only when the clone fallback is selected
+  (or when the user forces `--method clone`) to verify that checkout against the
+  release commit baked into the installer.
 - **release-please manages `package.json`'s `version`.** An `extra-files` entry in
   `release-please-config.json` bumps `$.version` on each release so the npm
-  package version tracks the release manifest (currently `2.0.0`) instead of a
-  hand-maintained placeholder. A second `extra-files` entry bumps the installer
-  release version marker so its default ref follows the package version.
+  package version tracks the release manifest instead of a hand-maintained
+  placeholder. A second `extra-files` entry bumps the installer release version
+  marker so its default ref follows the package version.
 - README streamlining + install instructions.
 
 Deferred — only the work that **must** happen outside this repository (tracked
@@ -248,17 +253,20 @@ as issues):
 
 - **No `sudo`.** Everything installs under the user's home; the `PATH` dir is
   user-writable.
-- **Pinning is the release-asset default.** The installer accepts `--ref <tag>`
-  and `--sha <full-commit>` (the latter is integrity-checked against the checked
-  out `HEAD`, failing closed on mismatch — a content-addressed check). The source
-  tree default ref is the current release tag, while release automation publishes
-  an `install.sh` asset with the canonical release commit SHA embedded as the
-  default SHA. Running `sh install.sh` from a source checkout still clones from
-  the configured repository at that default release tag; it does not install
-  unreleased files from the invoking checkout.
-- **Verifiable.** Release automation publishes `SHA256SUMS` next to the installer
-  asset. Inspect-first is supported: download `install.sh`, verify it with
-  `SHA256SUMS`, read it, and use `--dry-run` before installing.
+- **Explicit pinning is clone-only.** The installer accepts `--ref <tag>` and
+  `--sha <full-commit>`; an explicit SHA forces the clone method and verifies the
+  checked-out `HEAD` equals that full commit SHA, failing closed on mismatch. The
+  source tree default ref is the current release tag. Release automation
+  publishes an `install.sh` asset with the canonical release commit SHA embedded
+  for clone-path consistency, but that baked SHA does not override default
+  Homebrew/npm auto-selection. Running `sh install.sh` from a source checkout
+  still clones from the configured repository at that default release tag; it
+  does not install unreleased files from the invoking checkout.
+- **Verifiable release assets.** Release automation publishes `SHA256SUMS` next
+  to the installer asset and GitHub artifact attestations for both files.
+  Inspect-first is supported: download `install.sh` and `SHA256SUMS`, verify the
+  attestations, verify the checksum, read the installer, and use `--dry-run`
+  before installing.
 - **Consent-gated side effects.** `PATH` edits and `msb` installation each
   require explicit consent; declining is always a safe, documented fallback.
 - **Idempotent.** Re-running updates an existing install rather than duplicating
@@ -268,8 +276,9 @@ as issues):
   `curl -fsSL https://install.microsandbox.dev | sh`; that upstream installer is
   outside our control and is not pinned/checksummed by us. It is consent-gated
   (and, under `--yes`, authorized by the same blanket opt-in as the `PATH` edit).
-  The `acq` clone install is pinned by default when the release asset is used;
-  npm and explicit `--ref` overrides resolve the ref the user chooses.
+  The `acq` clone path verifies the baked release commit when the release asset
+  is used; Homebrew/npm installs and explicit `--ref` overrides resolve through
+  their own selected package or ref.
 
 > **Control Mapping:** CM-2 (Baseline Configuration), CM-3 (Configuration Change
 > Control), CM-6 (Configuration Settings), SA-8 (Security Engineering
@@ -283,12 +292,12 @@ as issues):
   brew and npm serve users who prefer them; `acq version` and updates keep
   working.
 - **Negative / trade-off:** `curl | bash` carries a cultural stigma in security
-  circles; we mitigate with pinning, checksums, inspect-first, no-`sudo`, and
-  consent gates, but cannot fully eliminate the pattern short of the deferred
-  signed `.pkg`.
-- **Maintenance:** release automation must keep publishing `SHA256SUMS`, and
-  (once the tap lands) the formula must track releases. The formula work remains
-  deferred because it lives outside this repository.
+  circles; we mitigate with package-manager-first auto-selection, clone-path
+  consistency checks, checksums, artifact attestations, inspect-first,
+  no-`sudo`, and consent gates, but cannot fully eliminate the pattern short of
+  the deferred signed `.pkg`.
+- **Maintenance:** release automation must keep publishing `SHA256SUMS` and
+  artifact attestations, and the formula must track releases.
 
 ## Validation
 
@@ -302,12 +311,13 @@ as issues):
   resolves its script dir through the npm symlink and runs (`acq version` reports
   the module path and backend). The npm install is not a git checkout, so
   `acq version` reports "not a git clone" for the commit line — expected.
-- **SHA pinning:** with `--sha <full-40-hex>` the clone method checks that commit
-  out and verifies `HEAD` equals it, failing closed (and removing the partial
-  clone) when the SHA is absent or mismatched; a malformed SHA, or `--sha` with a
-  non-clone method, is rejected at argument parse. Verified live against a local
-  checkout (matching SHA succeeds and prints "verified HEAD matches"; a
-  well-formed but absent SHA fails closed and cleans up).
+- **SHA pinning:** with `--sha <full-40-hex>` the installer forces the clone
+  method, checks that commit out, and verifies `HEAD` equals it, failing closed
+  (and removing the partial clone) when the SHA is absent or mismatched; a
+  malformed SHA, or explicit `--sha` with a forced non-clone method, is rejected
+  at argument parse. Verified live against a local checkout (matching SHA
+  succeeds and prints "verified HEAD matches"; a well-formed but absent SHA
+  fails closed and cleans up).
 - **release-please version sync:** `release-please-config.json` carries an
   `extra-files` entry (`type: json`, `jsonpath: $.version`) so the next release
   bumps `package.json`'s `version`; `npm pack --dry-run` reports the manifest
@@ -315,17 +325,19 @@ as issues):
   `install.sh`'s `DEFAULT_RELEASE_VERSION` aligned with the release version.
 - **Release assets:** on release creation, `.github/workflows/release.yml` checks
   out the release commit, copies `install.sh`, injects that exact commit into the
-  release asset's `DEFAULT_RELEASE_SHA`, generates `SHA256SUMS`, and uploads both
-  assets to the GitHub release.
-- **Manual (bare-Mac reviewer):** on a clean macOS account, run the pinned
-  one-liner; confirm `acq` resolves on `PATH` (after accepting the offered
-  `PATH` line or adding the printed line), `acq version` reports the pinned
-  `branch@commit`, and `--dry-run` performs no writes. Decline paths (`PATH`
-  edit declined, `--no-msb`) leave a working `acq` and print correct guidance.
+  release asset's `DEFAULT_RELEASE_SHA`, generates `SHA256SUMS`, publishes GitHub
+  artifact attestations for both release assets, and uploads both assets to the
+  GitHub release.
+- **Manual (bare-Mac reviewer):** on a clean macOS account, run the one-liner;
+  confirm `acq` resolves on `PATH` (after accepting the offered `PATH` line or
+  adding the printed line), `acq version` reports the selected install's version
+  data, and `--dry-run` performs no writes. Decline paths (`PATH` edit declined,
+  `--no-msb`) leave a working `acq` and print correct guidance.
 - **Live end-to-end:** verify after the first release containing this automation
   is published by downloading the `install.sh` and `SHA256SUMS` release assets,
-  checking the checksum, and confirming `sh install.sh --dry-run --method clone`
-  reports the release tag and canonical commit SHA.
+  verifying both files' artifact attestations, checking the checksum, and
+  confirming `sh install.sh --dry-run --method clone` reports the release tag and
+  canonical commit SHA.
 
 ## Links
 
