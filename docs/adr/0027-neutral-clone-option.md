@@ -116,6 +116,17 @@ A git clone carries **committed state only**:
   dirty working tree; the msb emulation does not. Create prints a notice when
   the host tree is dirty: commit first, or `acq cp` the files in.
 
+One piece of uncommitted state is carried on purpose: the source checkout's
+**effective git identity** (`user.name`/`user.email`, resolved on the host as
+the user's own commits resolve it) is written repo-locally into the scratch.
+A clone drops `.git/config`, and per-forge identities commonly live only there
+or in a gitdir-scoped include, so without it the first in-sandbox commit fails
+with "Author identity unknown"; the guest's global tier cannot express a
+per-repo value. sbx carries identity incidentally by copying `.git` wholesale;
+propagating only the two inert `user.*` values is the minimized form of that,
+without the credential helpers, hooks, and URL rewrites that ride along with a
+wholesale copy.
+
 ### Trade-off stated openly
 
 The scratch clone lives on **host disk** (unlike sbx's in-guest clone), so
