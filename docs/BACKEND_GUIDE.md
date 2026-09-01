@@ -606,11 +606,15 @@ store at provision:
 ./acq secret set my-sandbox usai    # sandbox-scoped; overrides the global key
 ```
 
-The store lives in the host OS keychain when available (macOS `security`, Linux
-`secret-tool`) with a `0600` file fallback under `$XDG_DATA_HOME/acq/secrets/`.
-Entries are keyed `acq.<service>` (global) or `acq.<sandbox>.<service>`
-(sandbox-scoped); a sandbox-scoped key takes precedence over the global one for
-the same service (supporting USAi per-sandbox billing-code keys).
+The store lives in the host OS keychain when available (macOS `security -i`,
+Linux `secret-tool`) with a `0600` file fallback under
+`$XDG_DATA_HOME/acq/secrets/` when no keychain backend is available. macOS writes
+use `security -i` so the value travels on stdin, not process argv. Existing
+legacy macOS file-backed entries are still read as a fallback until they are
+re-saved or removed. Entries are keyed `acq.<service>` (global) or
+`acq.<sandbox>.<service>` (sandbox-scoped); a sandbox-scoped key takes precedence
+over the global one for the same service (supporting USAi per-sandbox
+billing-code keys).
 
 At `acq run`/`create`, the **msb** backend reads the value from the store,
 exports it into a transient host env var, and binds it with

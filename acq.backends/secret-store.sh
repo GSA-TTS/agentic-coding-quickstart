@@ -13,7 +13,7 @@
 #     `acq.<sandbox>.<service>` (sandbox-scoped), with sandbox-scope taking
 #     precedence over global — mirroring §7.5 and the Phase-1 sbx global/sandbox
 #     scope that acq already lifted into its abstraction.
-#   - Storage in the OS keychain when available (macOS `security`, Linux
+#   - Storage in the OS keychain when available (macOS `security -i`, Linux
 #     `secret-tool`), with a 0600 file fallback under
 #     $XDG_DATA_HOME/acq/secrets/ when no keychain backend exists.
 #   - Read access for adapters at provision time: each backend pulls the real
@@ -58,12 +58,20 @@ fi
 # _acq_secret_backend — which store mechanism is active: keychain-macos |
 # keychain-linux | file. Respects ACQ_SECRET_FORCE_FILE.
 # ---------------------------------------------------------------------------
+_acq_secret_security_bin() {
+  if [ -n "${ACQ_SECRET_STORE_DIR:-}" ] && [ -n "${ACQ_SECRET_SECURITY_BIN:-}" ]; then
+    printf '%s\n' "$ACQ_SECRET_SECURITY_BIN"
+    return 0
+  fi
+  printf '/usr/bin/security\n'
+}
+
 _acq_secret_backend() {
   if [ -n "${ACQ_SECRET_FORCE_FILE:-}" ]; then
     printf 'file\n'; return 0
   fi
   case "$(uname -s 2>/dev/null)" in
-    Darwin) command -v security >/dev/null 2>&1 && { printf 'keychain-macos\n'; return 0; } ;;
+    Darwin) [ -x "$(_acq_secret_security_bin)" ] && { printf 'keychain-macos\n'; return 0; } ;;
     *)      command -v secret-tool >/dev/null 2>&1 && { printf 'keychain-linux\n'; return 0; } ;;
   esac
   printf 'file\n'
@@ -74,34 +82,29 @@ _acq_secret_backend() {
 #   acq.<service>              (global)
 #   acq.<sandbox>.<service>    (sandbox-scoped)
 #
-# The key format uses '.' as the scope separator, so it is only injective when
-# the SERVICE and SANDBOX segments contain no '.' themselves. If they could, a
-# GLOBAL service literally named "foo.bar" would produce `acq.foo.bar` — the
-# SAME key a SCOPED service "bar" in sandbox "foo" produces — colliding in BOTH
-# the value store and the meta sidecar (and mis-scoping meta_list). Sandbox
-# names are always slugified dot-free upstream (common.sh slugify -> [a-z0-9-])
-# and acq's own service names are dot-free, so this collision is latent today
-# We enforce that invariant here — the single choke
-# point both the value store and the meta sidecar share — so no caller can
-# smuggle a dotted (or otherwise separator-breaking) name past the store and
-# silently alias another scope. Fail closed rather than emit an ambiguous key.
+# The key format uses '.' as the scope separator, so SERVICE and SANDBOX must be
+# simple acq slugs. Sandbox names are always slugified upstream (common.sh
+# slugify -> [a-z0-9-]) and acq's own service names are slug-like. We enforce
+# that invariant here — the single choke point both the value store and the meta
+# sidecar share — so no caller can smuggle a separator/control-character-bearing
+# name past the store and silently alias another scope or affect a keychain
+# command stream. Fail closed rather than emit an ambiguous key.
 _acq_secret_key() {
   local service="$1" sandbox="${2:-}"
-  # A '.' in either segment breaks the acq.<sandbox>.<service> separator and
-  # makes the key non-injective; an empty service has no key. Reject both. This
-  # is a defensive assertion: legitimate service/sandbox names never contain a
-  # dot (see the invariant note above), so this only fires on a would-be
-  # collision. Emit no key and return non-zero so the caller fails visibly
-  # rather than reading/writing an aliased entry.
+  # Keep both segments to the existing acq/service slug alphabet. A '.' would
+  # break the acq.<sandbox>.<service> separator; control characters could split a
+  # macOS `security -i` command stream; other punctuation is unnecessary for the
+  # supported services and sandbox slugs. Emit no key and return non-zero so the
+  # caller fails visibly rather than reading/writing an aliased or injected entry.
   case "$service" in
-    ""|*.*)
-      acq_debug "secret key: refusing ambiguous service name '$service' (empty or contains '.')"
+    ""|*[!A-Za-z0-9_-]*)
+      acq_debug "secret key: refusing unsafe service name '$service'"
       return 1
       ;;
   esac
   case "$sandbox" in
-    *.*)
-      acq_debug "secret key: refusing ambiguous sandbox name '$sandbox' (contains '.')"
+    *[!A-Za-z0-9_-]*)
+      acq_debug "secret key: refusing unsafe sandbox name '$sandbox'"
       return 1
       ;;
   esac
@@ -116,6 +119,22 @@ _acq_secret_key() {
 _acq_secret_file_for() {
   local key="$1"
   printf '%s/%s\n' "$ACQ_SECRET_FILE_DIR" "$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')"
+}
+
+# Quote one token for macOS `security -i`'s command stream. We terminate the
+# stream with EOF, not a literal `quit`; the latter fails on some macOS releases.
+_acq_secret_security_i_quote() {
+  local s="$1"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '"%s"' "$s"
+}
+
+_acq_secret_store_keychain_macos() {
+  local key="$1" value="$2" cmd security_bin
+  security_bin=$(_acq_secret_security_bin)
+  cmd="add-generic-password -U -s $(_acq_secret_security_i_quote "$ACQ_KEYCHAIN_LABEL") -a $(_acq_secret_security_i_quote "$key") -w $(_acq_secret_security_i_quote "$value")"
+  printf '%s\n' "$cmd" | "$security_bin" -i >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -138,24 +157,20 @@ acq_secret_store() {
 
   case "$backend" in
     keychain-macos)
-      # -U updates if present; -w reads the password... but -w VALUE would put it
-      # in argv. Use -w with stdin is not supported; instead pipe via -w with a
-      # here-string is still argv. macOS `security add-generic-password` has no
-      # stdin password mode, so we fall back to the file backend when we must
-      # avoid argv. To keep the value off argv, use the file backend on macOS
-      # too UNLESS the caller accepts argv exposure. We choose safety: store to
-      # keychain via a temp file is not possible; so use `security` with the
-      # value only if ACQ_SECRET_ALLOW_ARGV=1, else file.
-      if [ -n "${ACQ_SECRET_ALLOW_ARGV:-}" ]; then
-        security add-generic-password -U \
-          -s "$ACQ_KEYCHAIN_LABEL" -a "$key" -w "$value" >/dev/null 2>&1 || {
-            echo "acq: secret store: keychain write failed for '$key'." >&2; return 1; }
+      # `security add-generic-password -w VALUE` puts VALUE on argv. Use
+      # `security -i` instead: the command stream is stdin, terminated by EOF, so
+      # the secret never appears in the process table. If that path fails, fail
+      # closed rather than silently downgrading a keychain-capable host to a
+      # plaintext file.
+      _acq_secret_store_keychain_macos "$key" "$value" || {
+        echo "acq: secret store: macOS keychain write failed for '$key'." >&2
         value=""
-        return 0
-      fi
-      # Default macOS path: 0600 file fallback (keeps the value off argv, which
-      # is the stronger guarantee; see trust hygiene rule 1).
-      _acq_secret_store_file "$key" "$value"; local rc=$?; value=""; return $rc
+        return 1
+      }
+      value=""
+      _acq_secret_delete_file "$key" || return 1
+      _acq_secret_index_add "$key"
+      return 0
       ;;
     keychain-linux)
       # secret-tool reads the secret from STDIN — never argv. Ideal.
@@ -189,18 +204,15 @@ _acq_secret_store_file() {
 # acq_secret_get KEY  ->  value on STDOUT (empty + non-zero if absent)
 # ---------------------------------------------------------------------------
 acq_secret_get() {
-  local key="$1" backend value
+  local key="$1" backend value security_bin
   backend=$(_acq_secret_backend)
   case "$backend" in
     keychain-macos)
-      if [ -z "${ACQ_SECRET_ALLOW_ARGV:-}" ]; then
-        # Value was stored in the file fallback (see acq_secret_store note).
-        _acq_secret_get_file "$key"; return $?
-      fi
-      # ALLOW_ARGV is set: prefer the keychain, but fall back to the file backend
-      # so a value stored earlier WITHOUT the flag (→ file) is still found — the
-      # flag governs where new writes go, not where reads may look.
-      value=$(security find-generic-password -s "$ACQ_KEYCHAIN_LABEL" -a "$key" -w 2>/dev/null || true)
+      # Prefer the Keychain. Fall back to the old 0600 file location so existing
+      # macOS installs that wrote before the `security -i` path keep working until
+      # the user re-saves or removes those entries.
+      security_bin=$(_acq_secret_security_bin)
+      value=$("$security_bin" find-generic-password -s "$ACQ_KEYCHAIN_LABEL" -a "$key" -w 2>/dev/null || true)
       if [ -n "$value" ]; then printf '%s' "$value"; return 0; fi
       _acq_secret_get_file "$key"; return $?
       ;;
@@ -247,24 +259,22 @@ if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
   ACQ_SECRET_META_DIR="${ACQ_SECRET_STORE_DIR%/}/meta"
 fi
 
-# Enumerable KEY INDEX (keychain-linux only) — a NON-SECRET plain file listing
-# one stored `acq.*` key per line. The Linux keychain (libsecret via
-# secret-tool) can look a value up BY attribute value but cannot list every item
-# by attribute NAME, so a keychain-linux store has no way to answer "what keys do
-# I hold?" without knowing the keys in advance. We record each stored key here so
-# `acq secret ls` can enumerate the keychain store the same way the file backend
-# enumerates its directory. Like the endpoint sidecar, this holds KEYS ONLY (no
-# secret values, no hosts) and is a plain 0600 file, not the keychain. The file
-# and macOS backends do NOT use this index — their file directory is already the
-# authoritative on-disk listing — so it is maintained only on keychain-linux to
-# avoid changing macOS/file behavior.
+# Enumerable KEY INDEX (keychain-backed stores) — a NON-SECRET plain file
+# listing one stored `acq.*` key per line. OS keychains can look values up by
+# account/attribute but cannot cheaply enumerate every acq item without already
+# knowing the keys. We record each stored key here so `acq secret ls` can
+# enumerate keychain-backed stores the same way the file backend enumerates its
+# directory. Like the endpoint sidecar, this holds KEYS ONLY (no secret values,
+# no hosts) and is a plain 0600 file, not the keychain. The file backend does NOT
+# use this index — its file directory is already the authoritative on-disk
+# listing.
 ACQ_SECRET_INDEX_FILE="${ACQ_SECRET_INDEX_FILE:-${ACQ_SECRET_FILE_DIR%/secrets}/secret-index}"
 if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
   # Offline-test escape hatch: keep the index beside the forced file store.
   ACQ_SECRET_INDEX_FILE="${ACQ_SECRET_STORE_DIR%/}/index"
 fi
 
-# _acq_secret_index_add KEY — record KEY in the keychain-linux enumeration index
+# _acq_secret_index_add KEY — record KEY in the keychain enumeration index
 # (deduplicated, 0600). Non-secret (a key name only). Best-effort: a failure to
 # update the index never fails the store — it only degrades later enumeration.
 _acq_secret_index_add() {
@@ -281,8 +291,8 @@ _acq_secret_index_add() {
   return 0
 }
 
-# _acq_secret_index_remove KEY — drop KEY from the keychain-linux enumeration
-# index (idempotent). Best-effort: never fails delete.
+# _acq_secret_index_remove KEY — drop KEY from the keychain enumeration index
+# (idempotent). Best-effort: never fails delete.
 _acq_secret_index_remove() {
   local key="$1" tmp
   [ -f "$ACQ_SECRET_INDEX_FILE" ] || return 0
@@ -452,36 +462,30 @@ acq_secret_meta_list() {
 # Enumeration is BACKEND-AWARE, because the two store shapes are enumerated
 # differently:
 #
-#   file / keychain-macos: the file directory IS the authoritative listing. On
-#     macOS the default write path is the 0600 file fallback (keeping values off
-#     argv — see acq_secret_store), so acq-managed values live in the file dir on
-#     both backends. We glob the directory for `acq.*` filenames exactly as
-#     before. On macOS with ACQ_SECRET_ALLOW_ARGV=1, a keychain-only write lands
-#     in the keychain instead of the file dir, so it is NOT enumerated by `ls`
-#     (the glob only sees the file dir). Such an entry still resolves normally at
-#     provision time — it just does not appear in the `ls` listing.
+#   file: the file directory IS the authoritative listing. We glob the directory
+#     for `acq.*` filenames exactly as before.
 #
-#   keychain-linux: the secret VALUES live in the Linux keychain, NOT in the file
-#     dir — so the file glob above would find nothing. libsecret (secret-tool)
-#     can look a value up by attribute value but cannot list every item by
-#     attribute name, so the keychain cannot answer "what keys do I hold?" on its
-#     own. We therefore enumerate from an acq-maintained NON-SECRET key index
-#     (ACQ_SECRET_INDEX_FILE, written by acq_secret_store / acq_secret_delete),
-#     UNIONED with keys reconstructed from the endpoint sidecar (belt and
-#     suspenders, in case the index lags), and VERIFY each candidate still
-#     resolves via acq_secret_get before emitting it — so a stale index entry for
-#     a deleted secret never shows. This is best-effort and never fails `ls`.
+#   keychain-macos / keychain-linux: the secret VALUES live in the OS keychain,
+#     NOT in the file dir, and neither keychain can enumerate every item by our
+#     account/attribute without already knowing the keys. We therefore enumerate
+#     from an acq-maintained NON-SECRET key index (ACQ_SECRET_INDEX_FILE, written
+#     by acq_secret_store / acq_secret_delete), UNIONED with keys reconstructed
+#     from the endpoint sidecar (belt and suspenders, in case the index lags), and
+#     VERIFY each candidate still resolves via acq_secret_get before emitting it —
+#     so a stale index entry for a deleted secret never shows. The keychain path
+#     also scans the file fallback directory so legacy macOS plaintext entries
+#     remain visible while they are still readable. This is best-effort and never
+#     fails `ls`.
 acq_secret_list_keys() {
   local backend
   backend=$(_acq_secret_backend)
   case "$backend" in
-    keychain-linux) _acq_secret_list_keys_keychain_linux ;;
-    *)              _acq_secret_list_keys_file ;;
+    keychain-macos|keychain-linux) _acq_secret_list_keys_keychain ;;
+    *)                            _acq_secret_list_keys_file ;;
   esac
 }
 
-# File-backend enumeration: glob the value directory for `acq.*` filenames. Used
-# by the file and macOS backends (see acq_secret_list_keys).
+# File-backend enumeration: glob the value directory for `acq.*` filenames.
 _acq_secret_list_keys_file() {
   local f base seen=" "
   [ -d "$ACQ_SECRET_FILE_DIR" ] || return 0
@@ -495,10 +499,10 @@ _acq_secret_list_keys_file() {
   done
 }
 
-# keychain-linux enumeration: union the acq-maintained key index with keys
+# Keychain-backed enumeration: union the acq-maintained key index with keys
 # reconstructed from the endpoint sidecar, verify each still resolves, emit
 # deduplicated `acq.*` keys. See acq_secret_list_keys for the rationale.
-_acq_secret_list_keys_keychain_linux() {
+_acq_secret_list_keys_keychain() {
   local key seen=" " svc
   # The resolve-check below is inlined at each emit site rather than factored into
   # a nested helper: a nested function plus `unset -f` would clobber a caller's
@@ -526,6 +530,21 @@ _acq_secret_list_keys_keychain_linux() {
   # so a sidecar without a matching value is silently skipped.
   if [ -d "$ACQ_SECRET_META_DIR" ]; then
     for svc in "$ACQ_SECRET_META_DIR"/*; do
+      [ -f "$svc" ] || continue
+      key=$(basename "$svc")
+      case "$key" in acq.*) ;; *) continue ;; esac
+      case "$seen" in *" $key "*) continue ;; esac
+      acq_secret_get "$key" >/dev/null 2>&1 || continue
+      seen="$seen$key "
+      printf '%s\n' "$key"
+    done
+  fi
+
+  # (c) Legacy macOS fallback files: before macOS wrote through `security -i`,
+  # the argv-safe default was a 0600 plaintext file. Keep those visible while the
+  # read path still honors them.
+  if [ -d "$ACQ_SECRET_FILE_DIR" ]; then
+    for svc in "$ACQ_SECRET_FILE_DIR"/*; do
       [ -f "$svc" ] || continue
       key=$(basename "$svc")
       case "$key" in acq.*) ;; *) continue ;; esac
@@ -577,15 +596,16 @@ _acq_secret_decode_key() {
 # the file fallback where relevant, since a value may have been written to the
 # file backend on macOS (see the acq_secret_store note about avoiding argv).
 acq_secret_delete() {
-  local key="$1" backend rc=0
+  local key="$1" backend rc=0 security_bin
   backend=$(_acq_secret_backend)
   acq_debug "secret delete: key=$key backend=$backend"
   case "$backend" in
     keychain-macos)
-      # New writes go to the file fallback (argv-safe); older ALLOW_ARGV writes
-      # may be in the keychain. Clear both so no copy lingers.
-      security delete-generic-password -s "$ACQ_KEYCHAIN_LABEL" -a "$key" \
+      # Clear both Keychain and legacy file fallback so no copy lingers.
+      security_bin=$(_acq_secret_security_bin)
+      "$security_bin" delete-generic-password -s "$ACQ_KEYCHAIN_LABEL" -a "$key" \
         >/dev/null 2>&1 || true
+      _acq_secret_index_remove "$key"
       _acq_secret_delete_file "$key" || rc=$?
       ;;
     keychain-linux)
@@ -706,11 +726,10 @@ _acq_read_secret_masked() {
 # provision. HOST/ENV are metadata only — never the value.
 acq_secret_set_interactive() {
   local service="$1" sandbox="${2:-}" host="${3:-}" env="${4:-}" key value
-  # _acq_secret_key fails closed on an ambiguous (dotted) service/sandbox that
-  # would alias another scope in the shared store. Refuse the
-  # set before reading a value so nothing is stored under an aliased key.
+  # _acq_secret_key fails closed on unsafe service/sandbox names before reading a
+  # value, so nothing is stored under an aliased or command-stream-breaking key.
   if ! key=$(_acq_secret_key "$service" "$sandbox"); then
-    echo "acq: secret set: refusing '$service'${sandbox:+ (sandbox '$sandbox')} — a service or sandbox name may not contain '.'" >&2
+    echo "acq: secret set: refusing '$service'${sandbox:+ (sandbox '$sandbox')} — service and sandbox names must match [A-Za-z0-9_-]+" >&2
     return 1
   fi
 

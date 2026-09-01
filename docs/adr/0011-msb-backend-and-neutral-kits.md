@@ -13,6 +13,14 @@ supersedes: []
 
 # ADR-0011: Add msb (microsandbox) Backend and Neutral hybrid/v1 Kit Translation
 
+> **Update (2026-09-01):** The macOS acq secret store now uses
+> `/usr/bin/security -i` for Keychain writes. The secret value is embedded in the
+> `security -i` stdin command stream and the stream is terminated by EOF, keeping
+> the value off argv while preserving the OS Keychain storage decision below.
+> The `0600` file path remains a fallback when no keychain backend is available,
+> and existing legacy macOS file-backed entries are still read until re-saved or
+> removed.
+>
 > **Update (2026-07-31):** The default `ACQ_MSB_IMAGE` is now
 > **`docker.io/docker/sandbox-templates:shell-docker`** — the same Ubuntu-based sbx
 > agent-template image — **not** `node:22-bookworm`. The default therefore already
@@ -93,11 +101,12 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
 - **`acq.backends/secret-store.sh`** — the acq-owned, backend-neutral secret
   store (the design's §7.5 model, as a thin bash subset). Credentials are no
   longer sbx-specific: one store keyed `acq.<service>` / `acq.<sandbox>.<service>`
-  (sandbox scope wins), stored in the OS keychain (macOS `security`, Linux
-  `secret-tool`) with a `0600` file fallback. `acq secret set` writes here; both
-  adapters read from here at provision. Trust hygiene per §7.5: the value is
-  read from TTY/stdin (never argv), never serialized into kit specs/config/logs,
-  and file entries are `0600`. Feeding each backend's runtime respects the real
+  (sandbox scope wins), stored in the OS keychain (macOS `security -i`, Linux
+  `secret-tool`) with a `0600` file fallback when no keychain backend is
+  available. `acq secret set` writes here; both adapters read from here at
+  provision. Trust hygiene per §7.5: the value is read from TTY/stdin (never
+  argv), never serialized into kit specs/config/logs, and file entries are
+  `0600`. Feeding each backend's runtime respects the real
   CLI contract: sbx built-in services take the value on **stdin**
   (`sbx secret set`), while sbx **custom endpoints** (`set-custom`) have no stdin
   and would require `--value` on argv — so acq runs `set-custom` interactively

@@ -42,6 +42,77 @@ STSTUB
   chmod +x "$STUBDIR/secret-tool"
 }
 
+# A narrow macOS /usr/bin/security stub for the keychain-macos secret store path.
+# It only needs the safe subset acq uses: `security -i` with one
+# add-generic-password command, `find-generic-password -w`, and delete.
+_plant_security_stub() {
+  cat >"$STUBDIR/security" <<'SECSTUB'
+#!/usr/bin/env bash
+_dir="${STUBDIR}/security-store"
+mkdir -p "$_dir" 2>/dev/null || true
+_keyfile() { printf '%s/%s' "$_dir" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"; }
+_split_security_i_line() {
+  _line="$1"; _tok=""; _inq=0; _esc=0; _i=0
+  while [ "$_i" -lt "${#_line}" ]; do
+    _c="${_line:$_i:1}"
+    if [ "$_esc" -eq 1 ]; then
+      _tok="$_tok$_c"; _esc=0
+    elif [ "$_inq" -eq 1 ] && [ "$_c" = "\\" ]; then
+      _esc=1
+    elif [ "$_c" = '"' ]; then
+      [ "$_inq" -eq 1 ] && _inq=0 || _inq=1
+    elif [ "$_inq" -eq 0 ]; then
+      case "$_c" in
+        " "|"	") [ -n "$_tok" ] && { printf '%s\n' "$_tok"; _tok=""; } ;;
+        *) _tok="$_tok$_c" ;;
+      esac
+    else
+      _tok="$_tok$_c"
+    fi
+    _i=$((_i + 1))
+  done
+  [ -n "$_tok" ] && printf '%s\n' "$_tok"
+}
+_arg_after() {
+  _flag="$1"; shift
+  _prev=""
+  for _a in "$@"; do
+    [ "$_prev" = "$_flag" ] && { printf '%s' "$_a"; return 0; }
+    _prev="$_a"
+  done
+  return 1
+}
+case "${1:-}" in
+  -i)
+    printf 'security -i\n' >>"$CALLS"
+    IFS= read -r _line || exit 1
+    _tokens=()
+    while IFS= read -r _tok; do _tokens+=("$_tok"); done <<EOF
+$(_split_security_i_line "$_line")
+EOF
+    set -- "${_tokens[@]}"
+    [ "${1:-}" = "add-generic-password" ] || exit 1
+    _account=""; _value=""; _prev=""
+    for _a in "$@"; do
+      if [ "$_prev" = "-a" ]; then _account="$_a"; _prev=""; continue; fi
+      if [ "$_prev" = "-w" ]; then _value="$_a"; _prev=""; continue; fi
+      case "$_a" in -a|-w) _prev="$_a" ;; esac
+    done
+    [ -n "$_account" ] || exit 1
+    printf '%s' "$_value" > "$(_keyfile "$_account")"
+    exit 0 ;;
+  find-generic-password)
+    _account=$(_arg_after -a "$@") || exit 1
+    _f="$(_keyfile "$_account")"; [ -f "$_f" ] || exit 1; cat "$_f"; exit 0 ;;
+  delete-generic-password)
+    _account=$(_arg_after -a "$@") || exit 0
+    rm -f "$(_keyfile "$_account")" 2>/dev/null || true; exit 0 ;;
+  *) exit 1 ;;
+esac
+SECSTUB
+  chmod +x "$STUBDIR/security"
+}
+
 # Provision helper (as in 71): source common (chains deps) + msb, seed store,
 # stub kit fetch, provision.
 _provision() { # NAME PRE_SNIPPET WS_ARGS...
@@ -79,6 +150,53 @@ _provision() { # NAME PRE_SNIPPET WS_ARGS...
   refute_output --partial 'KL-USAI-VALUE'
   refute_output --partial 'KL-GITHUB-VALUE'
   assert_output --partial 'after-del=[acq.usai ]'
+}
+
+@test "keychain-macos: stores via security -i, lists via index, falls back to legacy file" {
+  _plant_security_stub
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/km-secrets"
+    export STUBDIR="'"$STUBDIR"'"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    export ACQ_SECRET_SECURITY_BIN="'"$STUBDIR"'/security"
+    _acq_secret_backend() { printf "keychain-macos\n"; }
+    mkdir -p "$ACQ_SECRET_FILE_DIR"
+    printf "OLD-USAI" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    ACQ_SECRET_TEST_VALUE="MAC VALUE quote\" backslash\\ end" acq_secret_set_interactive usai "" >/dev/null 2>&1
+    printf "resolved=[%s]\n" "$(acq_secret_resolve usai)"
+    [ -f "$ACQ_SECRET_FILE_DIR/acq.usai" ] && printf "same-key-file=present\n" || printf "same-key-file=gone\n"
+    printf "listing=[%s]\n" "$(acq_secret_list_keys | sort | tr "\n" " ")"
+    printf "LEGACY" > "$ACQ_SECRET_FILE_DIR/acq.legacy"
+    printf "legacy=[%s]\n" "$(acq_secret_resolve legacy)"
+    printf "listing-legacy=[%s]\n" "$(acq_secret_list_keys | sort | tr "\n" " ")"
+    acq_secret_delete "$(_acq_secret_key usai)" >/dev/null 2>&1
+    acq_secret_resolve usai >/dev/null 2>&1 && printf "after=present\n" || printf "after=gone\n"
+  '
+  assert_output --partial 'resolved=[MAC VALUE quote" backslash\ end]'
+  assert_output --partial 'same-key-file=gone'
+  assert_output --partial 'listing=[acq.usai ]'
+  assert_output --partial 'legacy=[LEGACY]'
+  assert_output --partial 'listing-legacy=[acq.legacy acq.usai ]'
+  assert_output --partial 'after=gone'
+  assert_regex "$(cat "$CALLS")" '^security -i$'
+}
+
+@test "keychain-macos: unsafe service names are refused before security -i" {
+  _plant_security_stub
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/km-unsafe-secrets"
+    export STUBDIR="'"$STUBDIR"'"
+    export ACQ_SECRET_SECURITY_BIN="'"$STUBDIR"'/security"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    _acq_secret_backend() { printf "keychain-macos\n"; }
+    ACQ_SECRET_TEST_VALUE="SHOULD-NOT-STORE" acq_secret_set_interactive $'"'"'bad\nservice'"'"' "" >/dev/null 2>&1 && printf "newline=stored\n" || printf "newline=refused\n"
+    ACQ_SECRET_TEST_VALUE="SHOULD-NOT-STORE" acq_secret_set_interactive "bad;service" "" >/dev/null 2>&1 && printf "punct=stored\n" || printf "punct=refused\n"
+  '
+  assert_output --partial 'newline=refused'
+  assert_output --partial 'punct=refused'
+  refute_regex "$(cat "$CALLS")" '^security -i$'
 }
 
 @test "file ls: a stored secret lists (no value); an empty store lists nothing" {
