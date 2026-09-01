@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v3.0.0...v3.1.0) (2026-09-01)
+
+
+### Features
+
+* **acq:** make --clone a neutral option, emulated on msb via a managed host-side scratch clone ([#423](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/423)) ([7003608](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/70036087afbb00353cd6e2cbc6ee0dea423978db))
+
+
+### Bug Fixes
+
+* **install:** prefer package managers in auto mode ([#433](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/433)) ([831540d](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/831540d266a7a909d2043571c40b49f824ae22d8))
+* **kits:** reject block-scalar environment[] values instead of mangling them ([#420](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/420)) ([02f8531](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/02f8531febeaca4e9d0840b222c5834cc9b63e96))
+* **secret:** store macos secrets in keychain via stdin ([#436](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/436)) ([20ab8c7](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/20ab8c79389d5ce11e3894cd9529f30ef3a49dfa))
+
 ## [3.0.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v2.0.0...v3.0.0) (2026-08-31)
 
 
