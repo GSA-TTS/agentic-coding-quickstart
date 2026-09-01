@@ -152,6 +152,12 @@ case "$METHOD" in
   *) die "invalid --method '$METHOD' (expected: brew, npm, or clone)" ;;
 esac
 
+# A release asset's baked SHA only describes its baked default ref. If callers
+# choose another ref without also choosing a SHA, install that ref normally.
+if [ "$REF_WAS_SET" -eq 1 ] && [ "$SHA_WAS_SET" -eq 0 ]; then
+  SHA=""
+fi
+
 # A pinned SHA must be a full 40-hex commit id (short SHAs and tags cannot be
 # integrity-verified the same way). Reject anything else up front.
 if [ "$SHA_WAS_SET" -eq 1 ] && [ -z "$SHA" ]; then
@@ -162,12 +168,6 @@ if [ -n "$SHA" ]; then
     *[!0-9a-fA-F]* | "") die "invalid --sha '$SHA' (expected a 40-char hex commit id)" ;;
     *) [ "${#SHA}" -eq 40 ] || die "invalid --sha '$SHA' (expected a 40-char hex commit id)" ;;
   esac
-fi
-
-# A release asset's baked SHA only describes its baked default ref. If callers
-# choose another ref without also choosing a SHA, install that ref normally.
-if [ "$REF_WAS_SET" -eq 1 ] && [ "$SHA_WAS_SET" -eq 0 ]; then
-  SHA=""
 fi
 
 # Explicit SHA pinning only applies to the git-clone method (npm/brew resolve

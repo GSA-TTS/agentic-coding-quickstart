@@ -91,6 +91,16 @@ STUB
   chmod +x "$STUBDIR/bin/npm"
 }
 
+_no_package_manager_path() {
+  core_bin="$BATS_TEST_TMPDIR/core-bin"
+  mkdir -p "$core_bin"
+  for tool in bash cat chmod curl dirname env grep ln mkdir mv printf rm sed sh uname; do
+    tool_path=$(command -v "$tool") || continue
+    case "$tool_path" in /*) ln -sf "$tool_path" "$core_bin/$tool" ;; esac
+  done
+  printf '%s:%s' "$STUBDIR/bin" "$core_bin"
+}
+
 @test "install: source default targets release tag without a pinned sha" {
   export GIT_STUB_LOG="$BATS_TEST_TMPDIR/git.log"
   _write_git_stub
@@ -114,6 +124,24 @@ STUB
   run sh "$release_installer" --method clone --no-msb --yes
 
   assert_success
+  assert_output --partial "version:   $DEFAULT_VERSION_TAG"
+  assert_output --partial "pinned commit: $release_sha"
+  assert_output --partial "verified HEAD matches pinned commit $release_sha"
+}
+
+@test "install: release asset default sha verifies auto clone fallback" {
+  export GIT_STUB_LOG="$BATS_TEST_TMPDIR/git.log"
+  _write_git_stub
+  release_sha=0123456789abcdef0123456789abcdef01234567
+  release_installer="$BATS_TEST_TMPDIR/install-release.sh"
+  sed "s/^DEFAULT_RELEASE_SHA=.*/DEFAULT_RELEASE_SHA=\"$release_sha\"/" \
+    "$REPO_ROOT/install.sh" >"$release_installer"
+
+  run env PATH="$(_no_package_manager_path)" \
+    sh "$release_installer" --no-msb --yes
+
+  assert_success
+  assert_output --partial "install method: clone (auto-selected)"
   assert_output --partial "version:   $DEFAULT_VERSION_TAG"
   assert_output --partial "pinned commit: $release_sha"
   assert_output --partial "verified HEAD matches pinned commit $release_sha"
@@ -181,6 +209,42 @@ STUB
   assert_output --partial "version:   main"
   refute_output --partial "pinned commit:"
   refute_output --partial "git checkout $release_sha"
+}
+
+@test "install: explicit ref ignores malformed release asset default sha" {
+  export GIT_STUB_LOG="$BATS_TEST_TMPDIR/git.log"
+  _write_git_stub
+  release_installer="$BATS_TEST_TMPDIR/install-release.sh"
+  sed 's/^DEFAULT_RELEASE_SHA=.*/DEFAULT_RELEASE_SHA="not-a-valid-sha"/' \
+    "$REPO_ROOT/install.sh" >"$release_installer"
+
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$release_installer" --method clone --ref main --no-msb --dry-run --yes
+
+  assert_success
+  assert_output --partial "version:   main"
+  refute_output --partial "invalid --sha"
+  refute_output --partial "pinned commit:"
+}
+
+@test "install: explicit ref and explicit sha keep the explicit sha" {
+  export GIT_STUB_LOG="$BATS_TEST_TMPDIR/git.log"
+  _write_git_stub
+  release_sha=0123456789abcdef0123456789abcdef01234567
+  explicit_sha=abcdef0123456789abcdef0123456789abcdef01
+  release_installer="$BATS_TEST_TMPDIR/install-release.sh"
+  sed "s/^DEFAULT_RELEASE_SHA=.*/DEFAULT_RELEASE_SHA=\"$release_sha\"/" \
+    "$REPO_ROOT/install.sh" >"$release_installer"
+
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$release_installer" --method clone --ref main --no-msb --yes \
+      --sha "$explicit_sha"
+
+  assert_success
+  assert_output --partial "version:   main"
+  assert_output --partial "pinned commit: $explicit_sha"
+  refute_output --partial "pinned commit: $release_sha"
+  assert_output --partial "verified HEAD matches pinned commit $explicit_sha"
 }
 
 @test "install: explicit empty sha flag is rejected" {
