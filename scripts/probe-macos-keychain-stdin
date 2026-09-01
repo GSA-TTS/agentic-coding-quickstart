@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# probe-macos-keychain-stdin - validate argv-safe macOS Keychain write patterns
+# for acq's backend-neutral secret store.
+#
+# This is a HOST-SIDE probe for macOS only. It writes synthetic throwaway values
+# to the user's default login keychain under a unique service name, reads them
+# back, then removes them. It never uses real acq secrets and never prints the
+# synthetic secret values.
+#
+# Usage:
+#   ./scripts/probe-macos-keychain-stdin [--prompt-form]
+#
+# Exit 0 means the `security -i` pattern is viable for acq's macOS keychain
+# store path. The direct `security ... -w` prompt-style pattern is opt-in via
+# --prompt-form because it may attach to the terminal and prompt after timeout.
+set -u
+
+PASS=0
+FAIL=0
+INFO=0
+RUN_PROMPT_FORM=""
+SERVICE="acq-keychain-stdin-probe-$$-$(date +%s)"
+ACCOUNTS=""
+
+ok() { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+bad() { FAIL=$((FAIL + 1)); printf '  BAD  %s\n' "$1"; [ -n "${2:-}" ] && printf '       %s\n' "$2"; }
+note() { INFO=$((INFO + 1)); printf '  info %s\n' "$1"; }
+section() { printf '\n== %s ==\n' "$1"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+cleanup() {
+  local account
+  trap - EXIT INT TERM
+  for account in $ACCOUNTS; do
+    /usr/bin/security delete-generic-password -s "$SERVICE" -a "$account" \
+      >/dev/null 2>&1 || true
+  done
+}
+trap cleanup EXIT INT TERM
+
+record_account() {
+  ACCOUNTS="${ACCOUNTS:+$ACCOUNTS }$1"
+}
+
+usage() {
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --prompt-form) RUN_PROMPT_FORM=1 ;;
+      -h|--help) usage; exit 0 ;;
+      *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+}
+
+require_macos() {
+  if [ "$(uname -s 2>/dev/null)" != "Darwin" ]; then
+    bad "macOS is required" "This probe must run on the Mac host, not inside the Linux sandbox."
+    exit 2
+  fi
+  if [ ! -x /usr/bin/security ]; then
+    bad "/usr/bin/security not found" "Cannot probe the macOS Keychain CLI."
+    exit 2
+  fi
+}
+
+# Quote a single token for the `security -i` command stream. This is deliberately
+# a probe of the smallest useful grammar for acq values: one-line strings with
+# double quotes and backslashes escaped inside double quotes. If this fails for a
+# representative value, acq should not use this path without a stronger encoder.
+security_i_quote() {
+  local s="$1"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '"%s"' "$s"
+}
+
+security_i_store() {
+  local account="$1" value="$2" cmd_stream
+  cmd_stream="add-generic-password -U -s $(security_i_quote "$SERVICE") -a $(security_i_quote "$account") -w $(security_i_quote "$value")"
+  # `security -i` exits on EOF. A literal `quit` command is not portable across
+  # tested macOS versions and can make an otherwise-successful store return nonzero.
+  printf '%s\n' "$cmd_stream" | /usr/bin/security -i >/dev/null 2>&1
+}
+
+security_i_store_unquoted_basic() {
+  local account="$1" value="$2"
+  case "$SERVICE$account$value" in
+    *[!A-Za-z0-9._-]*) return 2 ;;
+  esac
+  printf 'add-generic-password -U -s %s -a %s -w %s\nquit\n' \
+    "$SERVICE" "$account" "$value" | /usr/bin/security -i >/dev/null 2>&1
+}
+
+security_i_store_stdin_no_quit_basic() {
+  local account="$1" value="$2"
+  case "$SERVICE$account$value" in
+    *[!A-Za-z0-9._-]*) return 2 ;;
+  esac
+  printf 'add-generic-password -U -s %s -a %s -w %s\n' \
+    "$SERVICE" "$account" "$value" | /usr/bin/security -i >/dev/null 2>&1
+}
+
+security_get() {
+  local account="$1"
+  /usr/bin/security find-generic-password -s "$SERVICE" -a "$account" -w 2>/dev/null
+}
+
+security_store_prompt_with_timeout() {
+  local account="$1" value="$2" timeout_s=5 pid elapsed=0
+  (
+    printf '%s\n' "$value" | /usr/bin/security add-generic-password -U \
+      -s "$SERVICE" -a "$account" -w >/dev/null 2>&1
+  ) &
+  pid=$!
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if [ "$elapsed" -ge "$timeout_s" ]; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  wait "$pid"
+}
+
+assert_store_roundtrip_i() {
+  local name="$1" account="$2" value="$3" got
+  record_account "$account"
+  if ! security_i_store "$account" "$value"; then
+    bad "$name: security -i store failed"
+    return 1
+  fi
+  got=$(security_get "$account" || true)
+  if [ "$got" = "$value" ]; then
+    ok "$name: security -i stored and retrieved the expected value"
+    return 0
+  fi
+  bad "$name: retrieved value did not match" "The command-stream quoting is not safe enough for this value shape."
+  return 1
+}
+
+test_security_i_basic() {
+  assert_store_roundtrip_i "basic" "basic" "probe-basic-value-123"
+}
+
+test_security_i_basic_variants() {
+  local value="probe-basic-value-123" got account
+
+  account="basic-unquoted"
+  record_account "$account"
+  if security_i_store_unquoted_basic "$account" "$value"; then
+    got=$(security_get "$account" || true)
+    if [ "$got" = "$value" ]; then
+      ok "basic variant: unquoted tokens with literal quit worked"
+    else
+      bad "basic variant: unquoted tokens with literal quit stored a non-matching value"
+    fi
+  else
+    note "basic variant: unquoted tokens with literal quit failed"
+  fi
+
+  account="basic-no-quit"
+  record_account "$account"
+  if security_i_store_stdin_no_quit_basic "$account" "$value"; then
+    got=$(security_get "$account" || true)
+    if [ "$got" = "$value" ]; then
+      ok "basic variant: unquoted tokens with EOF termination worked"
+    else
+      bad "basic variant: unquoted tokens with EOF termination stored a non-matching value"
+    fi
+  else
+    note "basic variant: unquoted tokens with EOF termination failed"
+  fi
+}
+
+test_security_i_special_chars() {
+  # Single-line by design: acq's current store rejects multi-line secrets. This
+  # value exercises characters likely to stress the `security -i` parser without
+  # printing them in the transcript.
+  assert_store_roundtrip_i \
+    "special chars" \
+    "special" \
+    "probe value with spaces -dash quote\" backslash\\ dollar\$ semi; single' end"
+}
+
+test_security_i_overwrite() {
+  local account="overwrite" first="probe-first-value" second="probe-second-value" got
+  record_account "$account"
+  if ! security_i_store "$account" "$first"; then
+    bad "overwrite: initial security -i store failed"
+    return 1
+  fi
+  if ! security_i_store "$account" "$second"; then
+    bad "overwrite: security -i -U update failed"
+    return 1
+  fi
+  got=$(security_get "$account" || true)
+  if [ "$got" = "$second" ]; then
+    ok "overwrite: security -i -U replaced the existing value"
+    return 0
+  fi
+  bad "overwrite: retrieved value was not the updated value"
+  return 1
+}
+
+test_prompt_form() {
+  local account="prompt-form" value="probe-prompt-value" got rc
+  record_account "$account"
+  security_store_prompt_with_timeout "$account" "$value"
+  rc=$?
+  case "$rc" in
+    0)
+      got=$(security_get "$account" || true)
+      if [ "$got" = "$value" ]; then
+        ok "prompt form: bare -w accepted a piped value"
+      else
+        note "prompt form: command exited 0, but no matching value was stored"
+      fi
+      ;;
+    124)
+      note "prompt form: timed out; likely waits on terminal input instead of stdin"
+      ;;
+    *)
+      note "prompt form: bare -w failed non-interactively (exit $rc)"
+      ;;
+  esac
+}
+
+main() {
+  parse_args "$@"
+
+  section "preflight"
+  require_macos
+  note "service: $SERVICE"
+  if ! have sw_vers; then
+    note "sw_vers not available"
+  else
+    sw_vers | sed 's/^/  info /'
+  fi
+
+  section "security -i command-stream writes"
+  test_security_i_basic
+  test_security_i_basic_variants
+  test_security_i_special_chars
+  test_security_i_overwrite
+
+  section "bare -w prompt form"
+  if [ -n "$RUN_PROMPT_FORM" ]; then
+    test_prompt_form
+  else
+    note "skipped by default; pass --prompt-form to test the terminal prompt behavior"
+  fi
+
+  section "cleanup"
+  cleanup
+  ok "removed throwaway keychain entries for $SERVICE"
+
+  section "summary"
+  printf '  passed: %s\n' "$PASS"
+  printf '  failed: %s\n' "$FAIL"
+  printf '  info:   %s\n' "$INFO"
+
+  if [ "$FAIL" -eq 0 ]; then
+    printf '\nResult: security -i is viable for an argv-safe macOS Keychain write path.\n'
+    exit 0
+  fi
+  printf '\nResult: security -i did not pass all required checks. Keep the file fallback or use a native helper.\n'
+  exit 1
+}
+
+main "$@"
