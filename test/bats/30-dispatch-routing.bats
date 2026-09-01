@@ -33,7 +33,11 @@ _seed_usai() {
 }
 
 @test "shell: NAME (msb) -> agent-user login shell with PTY in the workspace" {
-  run env TERM=xterm-256color COLORTERM=truecolor ACQ_BACKEND=msb "$ACQ" shell mybox
+  # Neutralize the host git identity (HOME/XDG config, EMAIL/GIT_* env) so the
+  # exec line is the same on a dev machine with a global identity and in CI.
+  run env -u EMAIL -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" GIT_CONFIG_NOSYSTEM=1 \
+    TERM=xterm-256color COLORTERM=truecolor ACQ_BACKEND=msb "$ACQ" shell mybox
   assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e TERM=xterm-256color -e COLORTERM=truecolor -e SHELL=/bin/sh mybox -- /bin/sh -l'
 }
 
