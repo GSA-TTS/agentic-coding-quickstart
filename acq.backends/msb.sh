@@ -2383,18 +2383,15 @@ _acq_msb_clone_setup() {
   return 0
 }
 
-# _acq_msb_clone_copy_identity SRC SCRATCH — write the source checkout's
-# EFFECTIVE git identity (user.name/user.email) repo-locally into the scratch.
-# A clone drops .git/config, and a per-forge identity commonly lives only
-# there or in a gitdir-scoped includeIf, so without this the first in-guest
-# commit fails with "Author identity unknown"; the guest's global tier (synced
-# from the host's global config) cannot express a per-repo value. Resolved on
-# the host exactly as the user's own commits resolve it. sbx's native --clone
-# copies .git wholesale and carries identity incidentally; this is the
-# minimized form of that. Running git inside the scratch is safe HERE only:
+# _acq_msb_clone_copy_identity SRC SCRATCH — write SRC's EFFECTIVE git
+# identity (user.name/user.email) repo-locally into the scratch. A clone drops
+# .git/config, and a per-forge identity often lives only there or behind a
+# gitdir-scoped includeIf; the guest's synced global tier cannot express a
+# per-repo value, so without this the first in-guest commit fails with "Author
+# identity unknown". `git -C SRC config --get` resolves the value exactly as
+# the user's own commits do. Running git inside the scratch is safe HERE only:
 # acq just created it and it is not yet guest-exposed (see the rm-time rule in
-# _acq_msb_clone_warn_unfetched). Values with control characters are skipped
-# like the global-tier sync does. Best-effort, always returns 0.
+# _acq_msb_clone_warn_unfetched). Best-effort, always returns 0.
 _acq_msb_clone_copy_identity() {
   local src="$1" scratch="$2" key val
   for key in user.name user.email; do

@@ -258,9 +258,8 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   assert_regex "$(_create_line sbx)" '--clone'
 }
 
-# Host git identity is neutralized for the identity tests (isolated HOME/XDG,
-# no system config) so only the source checkout's repo-local values, or their
-# absence, reach the scratch.
+# Neutralize the host git identity so only the source checkout's values (or
+# their absence) can reach the scratch.
 _msb_clone_isolated() { # ARGS...
   _msb_clone HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" GIT_CONFIG_NOSYSTEM=1 -- "$@"
 }
