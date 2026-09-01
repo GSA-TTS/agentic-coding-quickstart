@@ -165,7 +165,7 @@ if [ "$SHA_WAS_SET" -eq 1 ] && [ -z "$SHA" ]; then
 fi
 if [ -n "$SHA" ]; then
   case "$SHA" in
-    *[!0-9a-fA-F]* | "") die "invalid --sha '$SHA' (expected a 40-char hex commit id)" ;;
+    *[!0-9a-fA-F]*) die "invalid --sha '$SHA' (expected a 40-char hex commit id)" ;;
     *) [ "${#SHA}" -eq 40 ] || die "invalid --sha '$SHA' (expected a 40-char hex commit id)" ;;
   esac
 fi

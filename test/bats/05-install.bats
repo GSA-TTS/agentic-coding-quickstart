@@ -175,7 +175,7 @@ _no_package_manager_path() {
 
   assert_success
   assert_output --partial "install method: npm (auto-selected)"
-  assert_output --partial "version:   v2.0.0"
+  assert_output --partial "version:   $DEFAULT_VERSION_TAG"
   refute_output --partial "pinned commit: $release_sha"
 }
 
@@ -245,6 +245,19 @@ _no_package_manager_path() {
   assert_output --partial "pinned commit: $explicit_sha"
   refute_output --partial "pinned commit: $release_sha"
   assert_output --partial "verified HEAD matches pinned commit $explicit_sha"
+}
+
+@test "install: empty sha environment variable is treated as unset" {
+  export GIT_STUB_LOG="$BATS_TEST_TMPDIR/git.log"
+  _write_git_stub
+
+  run env ACQ_INSTALL_REF= ACQ_INSTALL_SHA= sh "$REPO_ROOT/install.sh" \
+    --method clone --no-msb --dry-run --yes
+
+  assert_success
+  assert_output --partial "version:   $DEFAULT_VERSION_TAG"
+  refute_output --partial "invalid --sha"
+  refute_output --partial "pinned commit:"
 }
 
 @test "install: explicit empty sha flag is rejected" {
