@@ -46,6 +46,8 @@ REF_WAS_SET=0
 # release commit by default; source checkouts leave it empty so local/dev installs
 # can still target REF unless ACQ_INSTALL_SHA or --sha is supplied.
 SHA="${ACQ_INSTALL_SHA:-$DEFAULT_RELEASE_SHA}"
+SHA_WAS_SET=0
+[ -n "${ACQ_INSTALL_SHA:-}" ] && SHA_WAS_SET=1
 
 # Where the managed clone lives (preserves `acq version` git introspection).
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -135,8 +137,8 @@ while [ $# -gt 0 ]; do
     --method=*) METHOD="${1#--method=}"; shift ;;
     --ref) [ $# -ge 2 ] || die "--ref needs a value"; REF="$2"; REF_WAS_SET=1; shift 2 ;;
     --ref=*) REF="${1#--ref=}"; REF_WAS_SET=1; shift ;;
-    --sha) [ $# -ge 2 ] || die "--sha needs a value"; SHA="$2"; shift 2 ;;
-    --sha=*) SHA="${1#--sha=}"; shift ;;
+    --sha) [ $# -ge 2 ] || die "--sha needs a value"; SHA="$2"; SHA_WAS_SET=1; shift 2 ;;
+    --sha=*) SHA="${1#--sha=}"; SHA_WAS_SET=1; shift ;;
     --no-msb) INSTALL_MSB=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
@@ -150,17 +152,29 @@ case "$METHOD" in
   *) die "invalid --method '$METHOD' (expected: brew, npm, or clone)" ;;
 esac
 
+# A release asset's baked SHA only describes its baked default ref. If callers
+# choose another ref without also choosing a SHA, install that ref normally.
+if [ "$REF_WAS_SET" -eq 1 ] && [ "$SHA_WAS_SET" -eq 0 ]; then
+  SHA=""
+fi
+
 # A pinned SHA must be a full 40-hex commit id (short SHAs and tags cannot be
 # integrity-verified the same way). Reject anything else up front.
+if [ "$SHA_WAS_SET" -eq 1 ] && [ -z "$SHA" ]; then
+  die "invalid --sha '$SHA' (expected a 40-char hex commit id)"
+fi
 if [ -n "$SHA" ]; then
   case "$SHA" in
-    *[!0-9a-fA-F]* | "") die "invalid --sha '$SHA' (expected a 40-char hex commit id)" ;;
+    *[!0-9a-fA-F]*) die "invalid --sha '$SHA' (expected a 40-char hex commit id)" ;;
     *) [ "${#SHA}" -eq 40 ] || die "invalid --sha '$SHA' (expected a 40-char hex commit id)" ;;
   esac
-  # SHA pinning only applies to the git-clone method (npm/brew resolve their own).
-  if [ "$METHOD" = "npm" ] || [ "$METHOD" = "brew" ]; then
-    die "--sha is only supported with --method clone"
-  fi
+fi
+
+# Explicit SHA pinning only applies to the git-clone method (npm/brew resolve
+# their own packages). A release asset's baked SHA is used when clone is selected,
+# but does not by itself override package-manager auto-selection.
+if [ "$SHA_WAS_SET" -eq 1 ] && { [ "$METHOD" = "npm" ] || [ "$METHOD" = "brew" ]; }; then
+  die "--sha is only supported with --method clone"
 fi
 
 # ---------------------------------------------------------------------------
@@ -221,7 +235,7 @@ command -v curl >/dev/null 2>&1 || die "curl is required but was not found."
 # ---------------------------------------------------------------------------
 
 if [ "$METHOD" = "auto" ]; then
-  if [ -n "$SHA" ]; then
+  if [ "$SHA_WAS_SET" -eq 1 ]; then
     METHOD="clone"
   elif command -v brew >/dev/null 2>&1 && [ "$REF_WAS_SET" -eq 0 ]; then
     METHOD="brew"
@@ -244,7 +258,7 @@ if [ "$METHOD" = "brew" ]; then
   info "  version:   Homebrew formula"
 else
   info "  version:   $REF"
-  [ -n "$SHA" ] && info "  pinned commit: $SHA"
+  [ "$METHOD" = "clone" ] && [ -n "$SHA" ] && info "  pinned commit: $SHA"
 fi
 [ "$DRY_RUN" -eq 1 ] && warn "  (dry-run: no changes will be made)"
 
