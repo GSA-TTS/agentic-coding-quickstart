@@ -80,7 +80,9 @@ Subcommands:
                                            (--no-update-check skips the stale-
                                            bundle check for this run;
                                            --image REF sets a custom base image,
-                                           see ACQ_IMAGE below.)
+                                           see ACQ_IMAGE below; --clone runs the
+                                           agent on a disposable clone of the
+                                           primary, see run/create flags below.)
   create AGENT PATH [...]                  Create a sandbox (detached).
   ls                                       List sandboxes.
   stop NAME                                Stop a sandbox (without removing).
@@ -140,6 +142,15 @@ run/create flags:
                        translates it to the backend — it is NOT forwarded raw.
   --image REF          Same as the global --image above; accepted here too so
                        `acq create AGENT --image REF PATH` works.
+  --clone              Run the agent on a disposable clone of the primary
+                       workspace (a git repo root) instead of the real checkout
+                       (ADR-0027). Recover agent branches on the host with
+                       `git fetch sandbox-NAME`; `acq rm` discards the clone
+                       (warning about unfetched commits). Backend-agnostic:
+                       native on sbx, emulated on msb via a managed host-side
+                       scratch clone. Env equivalent: ACQ_CLONE=1. Applies at
+                       create only. Note: a clone carries committed state only
+                       (no gitignored/untracked files, no uncommitted edits).
 
 See docs/howto/acq.md and docs/BACKEND_GUIDE.md for more.
 HELP
@@ -226,7 +237,7 @@ _acq_simple_verb_usage() {
 acq run — create+attach a sandbox, or re-attach an existing one
 
 Usage:
-  acq run AGENT PATH [--kit REF]... [--image REF] [--no-update-check] [-- AGENT_ARGS...]
+  acq run AGENT PATH [--kit REF]... [--image REF] [--clone] [--no-update-check] [-- AGENT_ARGS...]
   acq run NAME [-- AGENT_ARGS...]     # re-attach an existing sandbox by name
 
 Creates a sandbox for AGENT (e.g. opencode) mounted at PATH if one does not
@@ -241,7 +252,7 @@ U
 acq create — create a sandbox (detached; does not attach)
 
 Usage:
-  acq create AGENT PATH [--kit REF]... [--image REF]
+  acq create AGENT PATH [--kit REF]... [--image REF] [--clone]
 
 Provisions a sandbox for AGENT mounted at PATH and applies the pinned kits, then
 returns without attaching. Attach later with `acq run NAME`.
@@ -849,6 +860,15 @@ case "$subcommand" in
       export ACQ_IMAGE="$ACQ_IMAGE_FLAG"
     fi
     set -- ${ACQ_IMAGE_REMAINING[@]+"${ACQ_IMAGE_REMAINING[@]}"}
+    # Extract acq-owned `--clone` (ADR-0027) the same way: neither backend CLI may
+    # see the raw flag from acq (sbx re-injects its native --clone; msb emulates
+    # via a host-side scratch clone). Exporting ACQ_CLONE lets the flag take the
+    # same code path as the env var. Only honored BEFORE `--`.
+    extract_clone_flag "$@"
+    if [ -n "${ACQ_CLONE_FLAG:-}" ]; then
+      export ACQ_CLONE=1
+    fi
+    set -- ${ACQ_CLONE_REMAINING[@]+"${ACQ_CLONE_REMAINING[@]}"}
     extract_kit_flags "$@"
     [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _build_kit_list   # re-fold with CLI kits
     # Rebuild positional args as: <subcommand> <remaining args w/o --kit>.
@@ -948,7 +968,15 @@ case "$subcommand" in
         if [ -n "${ACQ_IMAGE:-}" ]; then
           echo "acq: note: --image/ACQ_IMAGE is ignored when re-attaching an existing" \
                "sandbox ('$local_name'); it applies only at create (ADR-0022). Remove the" \
-               "sandbox first ('acq $ACQ_RESOLVED_BACKEND rm $local_name') to recreate on a new image." >&2
+               "sandbox first ('acq rm $local_name') to recreate on a new image." >&2
+        fi
+        # Same create-time-only contract for --clone/ACQ_CLONE (ADR-0027): a
+        # re-attach does not re-mount, so say the flag is ignored rather than
+        # silently dropping it.
+        if [ "${ACQ_CLONE:-0}" = "1" ]; then
+          echo "acq: note: --clone/ACQ_CLONE is ignored when re-attaching an existing sandbox" \
+               "('$local_name'); it applies only at create. Remove the sandbox first" \
+               "('acq rm $local_name') to recreate on a disposable clone." >&2
         fi
         # Capture staleness BEFORE the heal — ensure_kits_applied rewrites the
         # provenance record to "current", so reading status after it would never
