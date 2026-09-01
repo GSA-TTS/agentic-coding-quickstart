@@ -794,15 +794,39 @@ kit_spec_env() {
   [ -f "$spec" ] || return 0
   awk '
     function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
+    function indent_of(s,   i){ i=match(s,/[^ ]/); return (i==0? 0 : i-1) }
     /^environment:/     { in_env=1; next }
     /^[A-Za-z]/         { if (in_env) in_env=0 }   # left the top-level block
     in_env {
+      # Inside a dropped block scalar: skip its body (anything indented deeper
+      # than the offending key, plus blank lines). A line back at key depth is
+      # processed normally below. A tab-led line is treated as still inside the
+      # body: YAML forbids tabs as indentation, and indent_of() counts only
+      # spaces — so a tab-indented body line would otherwise report column 0,
+      # end the skip, and leak its colon-bearing lines as bogus entries.
+      if (skip_blk) {
+        if ($0 ~ /^[[:space:]]*$/) next
+        if ($0 ~ /^\t/) next
+        if (indent_of($0) > blk_ind) next
+        skip_blk=0
+      }
       if ($0 ~ /^[[:space:]]*$/) next               # blank line
       if ($0 ~ /^[[:space:]]*#/) next               # comment line
       # A NAME: value entry, one indent level under environment:.
       if ($0 ~ /^[[:space:]]+[^:[:space:]#]+:/) {
         k=$0; sub(/:.*/,"",k); k=trim(k); gsub(/^"|"$/,"",k); gsub(/^'\''|'\''$/,"",k)
         v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); sub(/[[:space:]]*#.*/,"",v); v=trim(v)
+        # A block-scalar value (|, >, optional chomp/indent modifiers) is NOT
+        # supported: environment values are single-line strings (the msb
+        # replay marker and `-e NAME=value` threading are line-oriented).
+        # Drop the entry and its block body (skip_blk) with a warning; the
+        # check runs before quote stripping, so a QUOTED "|" stays a legal
+        # literal value.
+        if (v ~ /^[|>][0-9+-]*$/) {
+          print "kit-translate: skipping env var with unsupported block scalar value: " k > "/dev/stderr"
+          skip_blk=1; blk_ind=indent_of($0)
+          next
+        }
         gsub(/^"|"$/,"",v); gsub(/^'\''|'\''$/,"",v)
         if (k !~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
           print "kit-translate: skipping env var with unsafe name: " k > "/dev/stderr"
@@ -1340,6 +1364,33 @@ EOF
       [ -n "$en" ] && { echo "kit: validate: invalid env var name (must match [A-Za-z_][A-Za-z0-9_]*): '$en'" >&2; errs=$((errs + 1)); }
     done <<EOF
 $bad_env
+EOF
+  fi
+
+  # environment[] values must be single-line scalars (see kit_spec_env for the
+  # rationale). kit_spec_env DROPS a block-scalar entry (defense-in-depth), so
+  # scan the RAW spec here — otherwise it would be silently dropped rather
+  # than reported by `acq kit validate`. Matches a value that is exactly a
+  # block indicator (optional modifiers/trailing comment); a QUOTED "|" is a
+  # legal literal.
+  local blk_env
+  blk_env=$(awk '
+    /^environment:/ { in_e=1; next }
+    /^[A-Za-z]/     { in_e=0 }
+    in_e {
+      if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#/) next
+      if ($0 ~ /^[[:space:]]+[^:[:space:]#]+:[[:space:]]*[|>][0-9+-]*[[:space:]]*(#.*)?$/) {
+        k=$0; sub(/:.*/,"",k)
+        sub(/^[[:space:]]+/,"",k); sub(/[[:space:]]+$/,"",k)
+        gsub(/^["'\'']|["'\'']$/,"",k)
+        print k
+      }
+    }' "$spec")
+  if [ -n "$blk_env" ]; then
+    while IFS= read -r en; do
+      [ -n "$en" ] && { echo "kit: validate: environment value must be a single-line scalar (block scalars are not supported): '$en'" >&2; errs=$((errs + 1)); }
+    done <<EOF
+$blk_env
 EOF
   fi
 

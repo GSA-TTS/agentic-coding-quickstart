@@ -302,6 +302,121 @@ SPEC
   refute_regex "$spec" '1BAD'
 }
 
+@test "env: a block-scalar environment value is dropped with a warning, not mangled" {
+  # environment[] values are single-line string scalars only. A YAML block
+  # scalar used to come out mangled (the value became a literal `|`/`>`), and
+  # its indented continuation lines containing a colon parsed as BOGUS extra
+  # env entries. The parser must drop the entry, warn, and skip the block body.
+  local bkit="$STUBDIR/blockenv-kit"
+  mkdir -p "$bkit"
+  cat >"$bkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: blockenv-kit
+displayName: BlockEnv Kit
+description: block scalar env values must be rejected
+environment:
+  GOOD_VAR: single-line-ok
+  MULTI_VAR: |
+    first line
+    looks_like: an-entry
+  FOLDED_VAR: >-
+    folded text
+  AFTER_VAR: still-parsed
+SPEC
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_spec_env "'"$bkit"'/spec.yaml" 2>/dev/null'
+  assert_output --partial 'GOOD_VAR'
+  assert_output --partial 'AFTER_VAR'
+  refute_output --partial 'MULTI_VAR'
+  refute_output --partial 'FOLDED_VAR'
+  refute_output --partial 'looks_like'
+
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_spec_env "'"$bkit"'/spec.yaml" 2>&1 >/dev/null'
+  assert_output --partial 'MULTI_VAR'
+  assert_output --partial 'FOLDED_VAR'
+  assert_output --partial 'block scalar'
+}
+
+@test "env: kit validate reports a block-scalar environment value as an error" {
+  local bkit="$STUBDIR/blockenv-vkit"
+  mkdir -p "$bkit"
+  cat >"$bkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: blockenv-vkit
+displayName: BlockEnv VKit
+description: validate flags block scalar env values
+environment:
+  OK_VAR: fine
+  MULTI_VAR: |
+    first line
+SPEC
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_validate "'"$bkit"'" 2>&1'
+  assert_failure
+  assert_output --partial 'MULTI_VAR'
+  assert_output --partial 'single-line'
+}
+
+@test "env: a TAB-indented block body is still skipped (no bogus entry leaks)" {
+  # YAML forbids tabs as indentation, but an editor-autoindent slip is easy.
+  # A tab-led body line must count as still-inside-the-dropped-block: a
+  # space-only indent_of() saw it as column 0, reset the skip on the first
+  # body line, and its colon-bearing continuation leaked through as a real
+  # (bogus) environment entry. Fixture built with printf so the tabs are
+  # explicit, not invisible heredoc whitespace.
+  local tkit="$STUBDIR/tabenv-kit"
+  mkdir -p "$tkit"
+  printf '%s\n' \
+    'schemaVersion: "hybrid/v1"' \
+    'kind: mixin' \
+    'name: tabenv-kit' \
+    'displayName: TabEnv Kit' \
+    'description: tab-indented block body must not leak entries' \
+    'environment:' \
+    '  GOOD_VAR: single-line-ok' \
+    '  MULTI_VAR: |' \
+    $'\tfirst line with tab indent' \
+    $'\tlooks_like: an-entry' \
+    '  AFTER_VAR: still-parsed' \
+    > "$tkit/spec.yaml"
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_spec_env "'"$tkit"'/spec.yaml" 2>/dev/null'
+  assert_output --partial 'GOOD_VAR'
+  assert_output --partial 'AFTER_VAR'
+  refute_output --partial 'MULTI_VAR'
+  refute_output --partial 'looks_like'
+  # Agreement invariant: kit_validate must reject the identical spec too.
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_validate "'"$tkit"'" 2>&1'
+  assert_failure
+  assert_output --partial 'MULTI_VAR'
+}
+
+@test "env: a trailing comment on the block indicator line is still detected" {
+  # `KEY: | # comment` must strip the comment before block-scalar detection,
+  # and kit_spec_env / kit_validate must agree on the same spec.
+  local ckit="$STUBDIR/commentenv-kit"
+  mkdir -p "$ckit"
+  cat >"$ckit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: commentenv-kit
+displayName: CommentEnv Kit
+description: comment-suffixed block indicator is still a block scalar
+environment:
+  GOOD_VAR: ok
+  MULTI_VAR: | # why not
+    body line
+  AFTER_VAR: still-parsed
+SPEC
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_spec_env "'"$ckit"'/spec.yaml" 2>/dev/null'
+  assert_output --partial 'GOOD_VAR'
+  assert_output --partial 'AFTER_VAR'
+  refute_output --partial 'MULTI_VAR'
+  refute_output --partial 'body line'
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_validate "'"$ckit"'" 2>&1'
+  assert_failure
+  assert_output --partial 'MULTI_VAR'
+}
+
 # Regression guard: the files[].mode validators must NOT use a brace-interval
 # quantifier (/^[0-7]{3,4}$/ or /^0[0-7]{3}$/). mawk — the default awk on
 # Debian/Ubuntu — has no interval-expression support, so that form matches
