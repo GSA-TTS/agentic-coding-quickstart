@@ -69,6 +69,29 @@ The agent can edit `~/projects/my-app` and read from
 `~/projects/agentic-coding-playbook` without risk of modifying the reference
 content.
 
+### Disposable primary: `--clone`
+
+By default the primary workspace is the **real host checkout**, mounted
+read/write. Pass `--clone` (or set `ACQ_CLONE=1`) at create to run the agent on
+a **disposable clone** of the primary instead: the agent branches, commits, and
+experiments without touching your checkout, and you pull finished work back
+explicitly on the host:
+
+```bash
+acq run opencode --clone ~/projects/my-app
+# ... agent works on a private clone ...
+git fetch sandbox-<name>     # run in ~/projects/my-app: pulls agent branches
+```
+
+The primary must be the **root of a git repository**. Secondary workspaces are
+unaffected. Like the mounts themselves, `--clone` applies **at creation only**.
+A clone carries **committed state only** — no gitignored/untracked files and no
+uncommitted edits; commit first, or copy specific files in with `acq cp` (e.g.
+a needed `.env`). Removing the sandbox (`acq rm`) discards the clone, with a
+warning if it still holds commits you have not fetched. See
+[ADR-0027](adr/0027-neutral-clone-option.md) for the design and the per-backend
+mechanics.
+
 ### Security recommendation
 
 Prefer read-only (`:ro`) mounts for secondary workspaces unless the agent
@@ -90,9 +113,13 @@ has a few mechanics worth knowing. Rather than duplicate them here, see the
 - **msb** — each host workspace path must already exist (msb does not create the
   host mount path), and symlinked host paths (notably macOS `$TMPDIR`) are
   canonicalized to their real path before mounting.
-- **sbx** — the `--clone` remote-clone lifecycle interacts with multi-workspace
-  mounts; see the [sbx how-to guide](howto/sbx.md) for the sbx-specific
-  clone story.
+- **sbx** — `--clone` uses the backend's native in-container clone, whose
+  lifecycle interacts with multi-workspace mounts; see the
+  [sbx how-to guide](howto/sbx.md) for the sbx-specific clone story.
+- **msb** — `--clone` is emulated with a managed host-side scratch clone
+  mounted in place of the primary; see the
+  [Backend Guide](BACKEND_GUIDE.md#disposable-primary-clone) for mechanics and
+  the divergences from sbx (a git clone carries committed state only).
 
 ---
 

@@ -32,7 +32,17 @@ load "${REPO_ROOT}/test/vendor/bats-assert/load"
 
 # bats setup(): fresh stub sandbox per @test. make_stubs mktemps a private
 # $STUBDIR and $CALLS, so isolated tests never share state.
+#
+# The invoking shell's acq knobs must not leak into tests: a developer who
+# exports e.g. ACQ_IMAGE or ACQ_CLONE for daily use would silently change what
+# the suite exercises (observed: an exported ACQ_IMAGE broke every image-default
+# assertion locally while CI stayed green). Tests that need a knob set it
+# explicitly per invocation.
 acq_setup_stubs() {
+  unset ACQ_BACKEND ACQ_IMAGE ACQ_CLONE ACQ_EXTRA_KITS ACQ_UPDATE_CHECK \
+        ACQ_STATE_DIR ACQ_SECRET_STORE_DIR ACQ_NETWORK_TIER \
+        ACQ_NETWORK_TIER_CONFIRM_OPEN ACQ_MSB_BALANCED_EGRESS ACQ_MSB_IMAGE \
+        ACQ_MSB_PULL ACQ_MSB_WORKSPACE ACQ_MSB_CLONES_DIR
   make_stubs
   load_acq
 }

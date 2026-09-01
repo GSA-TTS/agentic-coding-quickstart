@@ -337,6 +337,37 @@ fine; prefer one over a temp dir if you hit this.
 > host's own (canonicalized) absolute path avoids that ordering problem entirely
 > and matches what sbx does.
 
+### Disposable primary (`--clone`)
+
+msb has no native clone mode, so the neutral `--clone`
+([ADR-0027](adr/0027-neutral-clone-option.md); see
+[CONCEPTS](CONCEPTS.md#disposable-primary---clone) for the user-facing story) is
+**emulated** by the adapter:
+
+- At create, the primary (which must be a git repository **root**) is cloned
+  with `git clone --no-hardlinks` into
+  `$XDG_STATE_HOME/acq/clones/<sandbox>/<repo>`, and that scratch clone is
+  mounted rw **at the original workspace's absolute path** in the guest — the
+  agent's starting directory and every kit behave exactly as in a non-clone
+  run. `--no-hardlinks` keeps the copy physical: a same-filesystem clone would
+  otherwise hardlink object files, letting the guest modify inodes shared with
+  the real repo's object store.
+- A `sandbox-<name>` remote is registered in the host checkout, pointing at the
+  scratch dir. `git fetch sandbox-<name>` pulls agent branches back as
+  hash-verified objects; hooks and config never transfer over a fetch.
+- `acq rm` warns when the scratch still holds unfetched commits, then deletes
+  it and removes the remote. `acq stop`/restart preserve both.
+
+**Divergence from sbx (deliberate, per ADR-0027):** a git clone carries
+committed state only. Gitignored/untracked files (sbx copies these — the known
+host-build-state contamination trap) and uncommitted edits to tracked files do
+**not** enter the sandbox; `acq` prints a notice when the host tree is dirty.
+Commit first, or copy specific files in with `acq cp`.
+
+The scratch clone lives on host disk (unlike sbx's in-guest clone), confined to
+the acq-managed state dir — disposable by construction and never executed by
+the host's git.
+
 Note the async-boot caveat:
 
 > **`msb create` starts asynchronously.** `msb create` returns success even if
