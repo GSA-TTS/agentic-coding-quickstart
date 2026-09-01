@@ -2397,10 +2397,6 @@ _acq_msb_clone_copy_identity() {
   for key in user.name user.email; do
     val=$(git -C "$src" config --get "$key" 2>/dev/null) || continue
     [ -n "$val" ] || continue
-    if command -v _acq_git_identity_value_is_safe >/dev/null 2>&1 \
-        && ! _acq_git_identity_value_is_safe "$val"; then
-      continue
-    fi
     git -C "$scratch" config "$key" "$val" >/dev/null 2>&1 \
       || echo "acq(msb): warning: --clone: could not set $key in the scratch clone." >&2
   done

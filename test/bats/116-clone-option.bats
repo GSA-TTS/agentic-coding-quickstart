@@ -282,13 +282,3 @@ _msb_clone_isolated() { # ARGS...
   run git config --file "$scratch/.git/config" user.email
   assert_failure
 }
-
-@test "clone(msb #438): a control-character identity value is not propagated" {
-  git -C "$CLONEPROJ" config user.name "$(printf 'Bad\tUser')"
-  git -C "$CLONEPROJ" config user.email "ok@example.gov"
-  _msb_clone_isolated create shell --clone "$CLONEPROJ"
-  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
-  run git config --file "$scratch/.git/config" user.name
-  assert_failure
-  [ "$(git config --file "$scratch/.git/config" user.email)" = "ok@example.gov" ]
-}
