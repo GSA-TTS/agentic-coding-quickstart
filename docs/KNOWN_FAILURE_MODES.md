@@ -1317,7 +1317,7 @@ which one you have before acting.
 | Signature (from inside the guest) | Cause | Fix |
 |---|---|---|
 | **Broad** `curl (56) unexpected eof` / HTTP `000` on **multiple** hosts at once (USAi *and* GitHub *and* npm) | Corrupted / stale **msb state** (not a clean-install behavior) | **Wipe msb data + reinstall, then `msb doctor`** (below) |
-| **USAi only** fails with `NXDOMAIN` / `curl rc=6` (or `rc=35` if a public address is pinned), while GitHub + npm work fine | **Split-horizon DNS** — the USAi host resolves to an internal, tunnel-only address the guest's public resolver can't see | Try pointing the guest at a resolver that can reach the internal USAi zone (`ACQ_MSB_DNS_NAMESERVER`) — but the internal resolver may itself not be routable from the guest; verify guest→resolver reachability and coordinate with your network team if it isn't |
+| **USAi only** fails with `NXDOMAIN` / `curl rc=6` (or a WAF-gated API such as GitLab's `/api/v4/*` returns `403` from `awselb/2.0`), while GitHub + npm work fine | **Split-horizon DNS** — the host resolves the name to a private tunnel address (`100.64.x` on ZPA); a public resolver returns the public endpoint, which the WAF rejects, and msb's rebind protection drops the private answer | Let the guest follow the host's resolvers with rebind protection off (acq's defaults): unset `ACQ_MSB_DNS_NAMESERVER` and `ACQ_MSB_DNS_REBIND_PROTECTION` (below) |
 | A **genuinely intercepted** endpoint fails its TLS handshake behind a corporate proxy that terminates it | The proxy's **root CA** isn't trusted on msb's upstream (proxy→server) leg | acq passes it via `--tls-upstream-ca-cert` (defense-in-depth; below) |
 
 Probe from inside the sandbox to read the signature — the curl exit code is the
@@ -1365,38 +1365,41 @@ If a broad `unexpected eof` **recurs on a clean install**, that would be new
 evidence of an msb bug — capture the `diagnose-*` output and reopen
 [superradcompany/microsandbox#1344](https://github.com/superradcompany/microsandbox/issues/1344).
 
-### Signature 2 — USAi-only NXDOMAIN (split-horizon DNS)
+### Signature 2 — split-horizon DNS (USAi NXDOMAIN, GitLab API 403)
 
-On a clean msb install on a GFE/Zscaler host, GitHub and npm resolve and return
-`200` from the guest, but `api.gsa.usai.gov` fails to **resolve** (`curl rc=6` /
-NXDOMAIN); pinning its public address instead fails to connect (`rc=35`). USAi is
-a **split-horizon** name — the host resolves it to an *internal* address reachable
-only over the corporate tunnel, and the guest's default public resolver
-(`ACQ_MSB_DNS_NAMESERVER=1.1.1.1`) cannot see that zone. A msb data wipe does not
-fix this; a key rotation does not fix this.
+On a GFE/Zscaler host, GitHub and npm resolve and return `200` from the guest,
+but `api.gsa.usai.gov` fails to **resolve** (`curl rc=6`), or a WAF-gated API
+behind the same tunnel (GitLab's `/api/v4/*`) answers `403` from `awselb/2.0`
+while its git endpoints work. Both are the same mechanism. The host's Zscaler
+resolvers answer these names with **private ZPA addresses** (`100.64.x`) that
+ride the tunnel's allow-listed path; a public resolver answers the public load
+balancer, which the WAF rejects. And even with the host resolver, msb's DNS
+rebind protection drops private-range answers, so the name resolves to nothing.
 
-`acq` now reports this distinctly ("did not RESOLVE … likely a split-horizon
-name") rather than as a generic network cut or a bad key.
-
-**Try this — but it is not a guaranteed fix:** point the guest at a resolver that
-can reach the internal USAi zone:
+acq's defaults handle this: the guest follows the host's resolvers (no
+`--dns-nameserver`) and msb is created with `--no-dns-rebind-protection`. If you
+see this signature, check that neither knob is overriding the defaults:
 
 ```bash
-export ACQ_MSB_DNS_NAMESERVER=<a-resolver-that-can-reach-the-internal-USAi-zone>
+unset ACQ_MSB_DNS_NAMESERVER          # a forced public resolver reintroduces the 403/NXDOMAIN
+unset ACQ_MSB_DNS_REBIND_PROTECTION   # =1 drops the private tunnel answers
 ```
 
-**Important:** the internal resolver may not itself be routable from the guest.
-Measured on GFE, the internal resolver was not reachable from the guest, and even
-pinning USAi's public address still failed to connect (`rc=35`) — the endpoint
-appeared reachable only via the corporate tunnel. So setting
-`ACQ_MSB_DNS_NAMESERVER` is worth trying, but it is not a "set this and it works"
-fix. **Verify guest→resolver reachability first** (e.g. with
-`./scripts/diagnose-host-egress-diff`), and if the resolver (or USAi itself) is
-not routable from the guest, **coordinate with your network team** — the guest
-may need tunnel access it does not currently have.
+Re-enabling rebind protection is a deliberate trade: it stops a kit-allowed
+domain from being resolved into private space by an attacker-influenced DNS
+answer, and it also stops every tunnel-only host from resolving at all. See the
+DNS section of `docs/BACKEND_GUIDE.md` for the mitigations that remain with it
+off.
 
-(See the `ACQ_MSB_DNS_NAMESERVER` notes in `docs/BACKEND_GUIDE.md` and the
-README's msb DNS section.)
+Verified on msb 0.6.16: from the guest, `gitlab.login.gov` resolves to its ZPA
+address, `/api/v4/user` with the bound token returns `200`, and the USAi models
+endpoint returns `401` (reachable) instead of failing to resolve. The guest's
+public egress IP is unchanged (still the Zscaler cloud). Earlier text here
+reported the internal resolver as unreachable from the guest; that predates
+msb's host-side network stack and no longer applies.
+
+`acq` reports this distinctly ("did not RESOLVE … likely a split-horizon name")
+rather than as a generic network cut or a bad key.
 
 ### Signature 3 — genuine TLS interception (upstream CA trust, defense-in-depth)
 

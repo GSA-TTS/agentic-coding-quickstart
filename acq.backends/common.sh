@@ -2279,11 +2279,12 @@ _report_usai_unreachable() {
 # resolver, while other public hosts (GitHub, npm) resolve and connect fine.
 #
 # The usual cause on GFE is split-horizon DNS — the USAi host resolves to an
-# INTERNAL address that only exists in the corporate/tunnel zone, which the
-# guest's default public resolver (ACQ_MSB_DNS_NAMESERVER, 1.1.1.1) cannot see.
-# A key rotation cannot fix this, and neither can a msb data wipe; the remedy is
-# a resolver that can reach the internal USAi zone. State the signal and point
-# at the docs rather than guessing the user's network fix.
+# INTERNAL address that only exists in the corporate/tunnel zone. The guest
+# follows the host's resolvers by default with msb's rebind protection off, so
+# this now points at a forced public resolver (ACQ_MSB_DNS_NAMESERVER) or
+# rebind protection re-enabled (ACQ_MSB_DNS_REBIND_PROTECTION=1), which drops
+# the private-range answer. A key rotation cannot fix this, and neither can a
+# msb data wipe. State the signal and point at the docs.
 _report_usai_unresolved() {
   echo >&2
   echo "acq: the USAi API host in $USAI_MODELS_URL did not RESOLVE from the sandbox" >&2
@@ -2291,9 +2292,9 @@ _report_usai_unresolved() {
   echo "      invalid or expired key, so rotating the key will not help." >&2
   echo "      If other public hosts (GitHub, npm) work from the sandbox but only" >&2
   echo "      USAi fails to resolve, USAi is likely a split-horizon name whose" >&2
-  echo "      address lives in an internal/tunnel-only zone the guest's default" >&2
-  echo "      resolver cannot see. Point the guest at a resolver that can reach the" >&2
-  echo "      internal USAi zone via ACQ_MSB_DNS_NAMESERVER." >&2
+  echo "      address lives in an internal/tunnel-only zone. Check that the guest" >&2
+  echo "      follows the host's resolvers (ACQ_MSB_DNS_NAMESERVER unset) and that" >&2
+  echo "      msb's rebind protection is off (ACQ_MSB_DNS_REBIND_PROTECTION unset)." >&2
   echo "      See docs/KNOWN_FAILURE_MODES.md §30 (USAi-only NXDOMAIN)." >&2
   echo >&2
 }

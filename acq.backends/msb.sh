@@ -278,17 +278,35 @@ _acq_msb_service_binding() {
 ACQ_MSB_MEMORY="${ACQ_MSB_MEMORY-4G}"
 ACQ_MSB_CPUS="${ACQ_MSB_CPUS-2}"
 
-# DNS nameserver for the guest. msb hands the guest the HOST's resolvers, but a
-# corporate/VPN resolver (e.g. 172.16.x, Zscaler) is typically unreachable from
-# the microVM's network namespace — so the guest cannot resolve even the
-# allow-listed kit hosts (api.gsa.usai.gov, github.com), and every outbound
-# request fails with "Could not resolve host". A public resolver reachable from
-# the microVM fixes it (verified: with --dns-nameserver 1.1.1.1 the models API
-# resolves + returns 401/200 and github returns 200). Override with a resolver
-# reachable from your environment, or set to empty to skip and use msb's default
-# (only if the host resolver IS reachable from the guest). Uses `-` (not `:-`)
-# so an explicitly-empty value disables the flag rather than re-defaulting.
-ACQ_MSB_DNS_NAMESERVER="${ACQ_MSB_DNS_NAMESERVER-1.1.1.1}"
+# Guest DNS. msb forwards guest queries from its HOST-SIDE network stack to the
+# host's resolvers, so a corporate/tunnel resolver (Zscaler's 100.64.0.x) is
+# reachable and answers exactly what the host sees. That matters for
+# split-horizon names: on a ZPA host, gitlab.login.gov and api.gsa.usai.gov
+# resolve to private 100.64.x addresses that ride the tunnel's allow-listed
+# path, while a public resolver returns the public load balancer, which rejects
+# the flow (403) or has no route. Earlier acq versions pinned 1.1.1.1 on the
+# assumption the host resolver was unreachable from the microVM; that predates
+# the host-side stack (verified on msb 0.6.16). Leave empty to use the host's
+# resolvers; set to force a specific resolver.
+ACQ_MSB_DNS_NAMESERVER="${ACQ_MSB_DNS_NAMESERVER:-}"
+
+# msb's DNS rebind protection drops answers that point at private ranges,
+# which is exactly what split-horizon/ZPA names resolve to (100.64.x), so the
+# name silently resolves to nothing. acq turns it off by default. What the
+# protection guards: msb maps a kit's allow@host rule onto the resolved IP, and
+# without it an allowed domain whose DNS an attacker influences could steer the
+# guest at private space (other tunnel app segments, the msb gateway) under
+# that rule. Mitigations that remain: only named kit hosts are allowed under
+# strict/balanced, answers come from the host's corporate resolver over the
+# tunnel, IP-group rules (allow@public) never admit private addresses, and
+# injected secrets are bound to the upstream TLS identity so a rebound endpoint
+# cannot receive them. Set to 1/true/on to keep the protection at the cost of
+# every tunnel-only host. Normalized like the other toggles.
+ACQ_MSB_DNS_REBIND_PROTECTION="${ACQ_MSB_DNS_REBIND_PROTECTION:-}"
+case "$(printf '%s' "$ACQ_MSB_DNS_REBIND_PROTECTION" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) ACQ_MSB_DNS_REBIND_PROTECTION="1" ;;
+  *)             ACQ_MSB_DNS_REBIND_PROTECTION="" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # TLS-interception UPSTREAM trust (corporate MITM proxy, e.g. Zscaler)
@@ -2715,13 +2733,12 @@ EOF
     [ "${#_upstream_ca[@]}" -gt 0 ] && create_flags+=("${_upstream_ca[@]}")
   fi
 
-  # Guest DNS: use a resolver reachable from the microVM. The host's resolvers
-  # (often a corporate/VPN/Zscaler IP) are typically unreachable from the guest,
-  # so without this the guest can't resolve even allow-listed hosts. See the
-  # ACQ_MSB_DNS_NAMESERVER note above.
+  # Guest DNS: host resolvers unless overridden, rebind protection off unless
+  # kept. See the ACQ_MSB_DNS_NAMESERVER / ACQ_MSB_DNS_REBIND_PROTECTION notes.
   if [ -n "$ACQ_MSB_DNS_NAMESERVER" ]; then
     create_flags+=(--dns-nameserver "$ACQ_MSB_DNS_NAMESERVER")
   fi
+  [ -n "$ACQ_MSB_DNS_REBIND_PROTECTION" ] || create_flags+=(--no-dns-rebind-protection)
 
   # Guest RAM / vCPU. msb defaults to 512 MiB / 1 vCPU — too small for a Node.js
   # agent TUI (opencode), which the guest OOM-kills on launch (prints "Killed";

@@ -2,9 +2,10 @@
 #
 # 76-msb-dns.bats — bats port of scripts/test-acq.d/76-msb-dns.sh (ADR-0019/0025)
 #
-# msb provision must pass --dns-nameserver (the guest can't reach the host's
-# corporate resolver), a generous default --memory/--cpus (msb's 512MiB/1vCPU
-# OOM-kills a Node TUI), and honor / validate the ACQ_MSB_* overrides. Each case
+# msb provision must leave guest DNS on the host's resolvers with msb's rebind
+# protection off (split-horizon/ZPA answers are private-range), pass a generous
+# default --memory/--cpus (msb's 512MiB/1vCPU OOM-kills a Node TUI), and honor /
+# validate the ACQ_MSB_* overrides. Each case
 # runs a real acq_backend_provision in an isolated subshell and inspects $CALLS.
 #
 # shellcheck shell=bats
@@ -33,10 +34,25 @@ _provision() { # NAME ENV_ASSIGNMENTS...
   ' _ "$name" "$@"
 }
 
-@test "msb: provision sets --dns-nameserver 1.1.1.1 by default" {
+@test "msb #439: provision leaves guest DNS on the host resolvers by default (no --dns-nameserver)" {
   _provision dnsbox
   run cat "$CALLS"
-  assert_output --partial '--dns-nameserver 1.1.1.1'
+  refute_output --partial '--dns-nameserver'
+}
+
+@test "msb #439: provision disables msb DNS rebind protection by default" {
+  _provision rebindbox
+  run cat "$CALLS"
+  assert_output --partial '--no-dns-rebind-protection'
+}
+
+@test "msb #439: ACQ_MSB_DNS_REBIND_PROTECTION=1 keeps msb's rebind protection" {
+  _provision rebind2box ACQ_MSB_DNS_REBIND_PROTECTION=1
+  run cat "$CALLS"
+  refute_output --partial '--no-dns-rebind-protection'
+  _provision rebind3box ACQ_MSB_DNS_REBIND_PROTECTION=off
+  run cat "$CALLS"
+  assert_output --partial '--no-dns-rebind-protection'
 }
 
 @test "msb: ACQ_MSB_DNS_NAMESERVER override is honored; empty omits the flag" {
