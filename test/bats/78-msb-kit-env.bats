@@ -179,7 +179,7 @@ RUBOCOP_PARALLELISM=4"
   assert_output --partial 'RUN-SURVIVED'
   assert_output --partial 'ATTACH-SURVIVED'
   assert_output --partial 'SHELL-SURVIVED'
-  assert_regex "$(cat "$CALLS")" 'exec -u agent -e HOME=/home/agent sbox -- git status'
+  assert_regex "$(cat "$CALLS")" 'exec -u agent -e HOME=/home/agent -w /home/agent sbox -- git status'
 }
 
 @test "msb kit env: heal rebuilds the marker — a var the kit no longer declares stops reaching sessions" {

@@ -181,7 +181,7 @@ _attach() { # PRE_SNIPPET NAME
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'msb exec -u agent'
   assert_regex "$log" '-u agent -e HOME=/home/agent'
-  assert_regex "$log" '-e HOME=/home/agent execbox'
+  assert_regex "$log" '-w /home/agent execbox'
   assert_regex "$log" 'execbox -- sh -c ls ~/.local/bin/opencode'
   refute_regex "$log" 'msb exec execbox --'
 }
@@ -275,4 +275,164 @@ _attach() { # PRE_SNIPPET NAME
   _provision ociinjbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ociinj-secrets" ACQ_MSB_PODMAN_PKGS="podman;rm -rf"'
   assert_output --partial 'unsafe characters'
   refute_regex "$(cat "$CALLS")" 'rm -rf'
+}
+
+# msb session parity: sbx is a full session transport, so
+# cwd/terminal identity/login shell come free; msb exposes only raw `msb exec`,
+# so the adapter must synthesize each piece on its session paths.
+
+@test "msb #421: acq exec passes -w with the recorded workspace" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  assert_regex "$(cat "$CALLS")" '\-u agent -e HOME=/home/agent -w /tmp/myrepo wsbox -- git status'
+}
+
+@test "msb #421: acq exec honors ACQ_MSB_WORKSPACE and falls back to /home/agent" {
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_MSB_WORKSPACE=/tmp/override STUB_RECORDED_WORKSPACE=/tmp/myrepo
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  assert_regex "$(cat "$CALLS")" '\-w /tmp/override wsbox'
+  : > "$CALLS"
+  run bash -c '
+    unset ACQ_MSB_WORKSPACE STUB_RECORDED_WORKSPACE
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  assert_regex "$(cat "$CALLS")" '\-w /home/agent wsbox'
+}
+
+@test "msb #425: attach and shell forward the host TERM/COLORTERM when set" {
+  _attach 'export TERM=xterm-256color COLORTERM=truecolor STUB_RECORDED_AGENT=opencode STUB_AGENT_PRESENT=1 STUB_RECORDED_WORKSPACE=/tmp/wsp' termbox
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb exec -t -u agent -w /tmp/wsp -e TERM=xterm-256color -e COLORTERM=truecolor'
+  : > "$CALLS"
+  run bash -c '
+    export TERM=xterm-256color COLORTERM=truecolor
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ( _acq_msb_shell_exec termbox </dev/null >/dev/null 2>&1 )
+  '
+  assert_regex "$(cat "$CALLS")" '\-e TERM=xterm-256color -e COLORTERM=truecolor'
+}
+
+@test "msb #425: unset TERM/COLORTERM are not invented on interactive paths" {
+  _attach 'unset TERM COLORTERM; export STUB_RECORDED_AGENT=opencode STUB_AGENT_PRESENT=1 STUB_RECORDED_WORKSPACE=/tmp/wsp' termbox
+  local log; log=$(cat "$CALLS")
+  refute_regex "$log" '\-e TERM='
+  refute_regex "$log" '\-e COLORTERM='
+}
+
+@test "msb #425: non-interactive acq exec does not forward TERM/COLORTERM" {
+  : > "$CALLS"
+  run bash -c '
+    export TERM=xterm-256color COLORTERM=truecolor
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run termbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  refute_regex "$log" '\-e TERM='
+  refute_regex "$log" '\-e COLORTERM='
+}
+
+@test "msb #426: provision sets the agent passwd shell to bash when the image has it" {
+  _provision bashshbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/bashsh-secrets"'
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'command -v bash'
+  assert_regex "$log" 'acq-login-profile.* sh /bin/bash'
+  refute_regex "$log" 'acq-login-profile.* sh /bin/sh$'
+}
+
+@test "msb #426: a bash-less image keeps the /bin/sh passwd shell" {
+  _provision noshbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/nosh-secrets" STUB_GUEST_BASH=0'
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'acq-login-profile.* sh /bin/sh'
+  refute_regex "$log" 'sh /bin/bash'
+}
+
+@test "msb #426: the login-profile bridge exports SHELL and sources .bashrc under bash" {
+  _provision bridgebox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/bridge-secrets"'
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'usermod -s'
+  assert_regex "$log" 'BASH_VERSION'
+  assert_regex "$log" '\.bashrc'
+  # The bridge must export the shell passwd ACTUALLY holds after the sync
+  # attempt (re-read), not the requested target: on an image with bash but no
+  # usermod/chsh the passwd shell stays /bin/sh and SHELL must not lie.
+  assert_regex "$log" 'export SHELL=\$current'
+  refute_regex "$log" 'export SHELL=\$target'
+}
+
+@test "msb #426: the heal only rewrites a .profile acq owns outright (appended lines survive)" {
+  # Tools like rustup append to ~/.profile below acq's bridge. The rewrite
+  # condition must be marker-present AND still just the bridge (line-count
+  # bound), so a marker+appended file is left alone instead of clobbered on
+  # every heal.
+  _provision profguard shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/profguard-secrets"'
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'acq-login-profile "\$profile"'
+  assert_regex "$log" '\-le 3'
+}
+
+@test "msb: repeated acq exec reads the workspace marker once per process (cached)" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run cachebox -- git status >/dev/null 2>&1
+    acq_backend_run cachebox -- git log >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_equal "$(grep -c 'cat /var/lib/acq/workspace' "$CALLS")" "1"
+  assert_equal "$(grep -c -- '-w /tmp/myrepo cachebox' "$CALLS")" "2"
+}
+
+@test "msb #426: heal upgrades an existing /bin/sh agent user (marker hit still syncs the shell)" {
+  : > "$CALLS"
+  printf 'healshbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'healshbox\n' > "$STUBDIR/.msb_running_list"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/healsh-secrets" STUB_AGENT_USER_READY=1
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    # shellcheck disable=SC2034  # consumed by the sourced acq_backend_ensure_kits_applied
+    ACQ_CLI_KITS=()
+    acq_backend_ensure_kits_applied healshbox >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" "test -f '/var/lib/acq/agent-user-ready'"
+  assert_regex "$log" 'acq-login-profile.* sh /bin/bash'
+  refute_regex "$log" 'useradd'
+}
+
+@test "msb #426: shell and attach exec the agent passwd shell and set SHELL to match" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_AGENT_PASSWD_SHELL=/bin/bash
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ( _acq_msb_shell_exec pshbox </dev/null >/dev/null 2>&1 )
+  '
+  assert_regex "$(cat "$CALLS")" '\-e SHELL=/bin/bash pshbox -- /bin/bash -l'
+  _attach 'export STUB_AGENT_PASSWD_SHELL=/bin/bash STUB_RECORDED_AGENT=opencode STUB_AGENT_PRESENT=1 STUB_RECORDED_WORKSPACE=/tmp/wsp' pshbox
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '\-e SHELL=/bin/bash'
+  assert_regex "$log" 'pshbox -- opencode'
+}
+
+@test "msb #426: a garbage passwd shell falls back to /bin/sh" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_AGENT_PASSWD_SHELL="bad shell; rm -rf /"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ( _acq_msb_shell_exec badshbox </dev/null >/dev/null 2>&1 )
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '\-e SHELL=/bin/sh badshbox -- /bin/sh -l'
+  refute_regex "$log" 'rm -rf'
 }

@@ -3308,6 +3308,10 @@ _acq_msb_ensure_agent_user() {
   local name="$1"
   local marker="/var/lib/acq/agent-user-ready"
   if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+    # The user exists from an earlier run, but its login shell may predate the
+    # passwd-shell setup: re-sync it so an existing /bin/sh agent user
+    # is healed to bash on its next run, not left behind.
+    _acq_msb_ensure_agent_shell "$name"
     return 0
   fi
 
@@ -3352,20 +3356,6 @@ _acq_msb_ensure_agent_user() {
     su agent -s /bin/sh -c "test -w /home/agent" 2>/dev/null \
       || { echo "acq(msb): /home/agent is not writable by the agent user" >&2; exit 1; }
 
-    # Set SHELL=/bin/sh in the agent profile. The passwd shell is /bin/sh, but
-    # SHELL is not populated by `msb exec`/`su -c`, and msb interactive-exec
-    # ignores the passwd shell entirely (it drops to the base image default, a
-    # Node REPL on node:22-bookworm as an override). acq always execs an explicit
-    # shell/agent, so
-    # this is cosmetic (tools that read SHELL) but correct and cheap. Idempotent.
-    # NOTE: this whole block is a single-quoted `sh -c` string — do NOT use single
-    # quotes here (they would close the outer quote). `echo` avoids both quotes
-    # and printf %-escaping.
-    if ! grep -qs "^export SHELL=" /home/agent/.profile 2>/dev/null; then
-      echo export SHELL=/bin/sh >> /home/agent/.profile
-      chown "agent:${_agrp}" /home/agent/.profile
-    fi
-
     # Passwordless sudo for agent (base-image requirement). Only if sudo exists;
     # a base without sudo still works for our purposes (kit/agent commands that
     # need root are run by acq as -u 0 directly), so a missing sudo is non-fatal.
@@ -3390,7 +3380,77 @@ _acq_msb_ensure_agent_user() {
     echo "acq(msb):   a base with useradd/adduser. Re-run with ACQ_DEBUG=1 for details." >&2
     return 1
   }
+  _acq_msb_ensure_agent_shell "$name"
   msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+}
+
+# _acq_msb_ensure_agent_shell NAME — align the agent's login shell with what
+# the image provides. Passwd-driven, the convention sshd / `machinectl
+# shell` / toolbox follow: the account database declares the shell, the
+# session paths honor it (_acq_msb_agent_passwd_shell). Kits wire the
+# interactive environment into ~/.bashrc (rc.d drop-in loops, prompt init),
+# which dash never reads, so prefer bash when the image ships it and keep
+# /bin/sh otherwise — a stock bash-less image keeps working exactly as today.
+# Also writes a Debian-skel-style ~/.profile bridge: a LOGIN bash reads only
+# ~/.profile, so without the bridge even `bash -l` skips ~/.bashrc on images
+# whose baked home ships no ~/.profile. The bare `export SHELL=/bin/sh` line
+# earlier acq versions appended is removed wherever it appears (it stopped a
+# login bash cold); a ~/.profile with any other content is left alone (image/
+# user-owned — Debian's own skel already bridges). Idempotent and re-run on
+# every provision AND heal (even on an agent-user-ready marker hit), which is
+# what upgrades sandboxes created before this setup. Fail-soft: a sync failure
+# leaves sessions on the /bin/sh fallback, never blocks the run.
+_acq_msb_ensure_agent_shell() {
+  local name="$1" shell
+  # Probe for bash host-side so the target is decided once and threaded to the
+  # guest script as a positional arg (never interpolated into the sh -c
+  # string). Charset-guard the probe result before it reaches usermod/chsh.
+  shell=$({ msb exec "$name" -u 0 -- sh -c 'command -v bash 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
+  shell=$(_acq_msb_safe_shell_or_sh "$shell")
+  acq_debug "msb: syncing agent login shell to $shell in $name"
+  # NOTE: single-quoted `sh -c` string — no single quotes inside (they would
+  # close the outer quote); `echo` writes the profile lines for the same reason.
+  #
+  # The bridge exports the shell passwd ACTUALLY holds after the sync attempt
+  # (re-read into `current`), not the requested target: an image with bash but
+  # neither usermod nor chsh keeps /bin/sh in passwd, and SHELL must not lie
+  # about the shell sessions really run.
+  #
+  # The rewrite is bounded to a file acq owns outright: missing/empty, or the
+  # marker present AND still just the bridge (3 lines). Lines other tools
+  # append below the bridge (rustup et al) must survive the heal, so a
+  # marker-plus-appended file is left untouched.
+  msb exec "$name" -u 0 -- sh -c '
+    set -e
+    target="$1"
+    current=$({ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; } | head -n1 | cut -d: -f7)
+    if [ "$current" != "$target" ]; then
+      if command -v usermod >/dev/null 2>&1; then
+        usermod -s "$target" agent
+      elif command -v chsh >/dev/null 2>&1; then
+        chsh -s "$target" agent
+      fi
+      current=$({ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; } | head -n1 | cut -d: -f7)
+    fi
+    [ -n "$current" ] || current=/bin/sh
+    profile=/home/agent/.profile
+    if [ -f "$profile" ]; then
+      sed -i "\|^export SHELL=/bin/sh\$|d" "$profile" 2>/dev/null || true
+    fi
+    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le 3 ]; }; then
+      {
+        echo "# acq-login-profile: written by acq (rewritten on heal; do not edit these 3 lines)."
+        echo "export SHELL=$current"
+        echo "if [ -n \"\$BASH_VERSION\" ] && [ -f \"\$HOME/.bashrc\" ]; then . \"\$HOME/.bashrc\"; fi"
+      } > "$profile"
+      _agrp=$(id -gn agent 2>/dev/null || echo agent)
+      chown "agent:${_agrp}" "$profile"
+    fi
+  ' sh "$shell" </dev/null >/dev/null 2>&1 || {
+    echo "acq(msb): warning: could not sync the agent login shell in '$name';" >&2
+    echo "acq(msb):   interactive sessions fall back to /bin/sh." >&2
+    return 0
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -4035,6 +4095,77 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Session context shared by exec/attach/shell
+# ---------------------------------------------------------------------------
+# sbx is a full session transport, so cwd, terminal identity, and the login
+# shell come free; msb exposes only raw `msb exec`, so every session path here
+# must synthesize each piece itself or the session silently drops it.
+
+# Per-process cache for acq_backend_run's workspace resolution (see the cache
+# note there). Module scope so the first run primes it for every later run.
+_ACQ_MSB_RUN_WS_NAME=""
+_ACQ_MSB_RUN_WS=""
+
+# _acq_msb_workspace_for NAME — the guest workspace a session starts in (-w).
+# Prefer an explicit ACQ_MSB_WORKSPACE override; otherwise the guest path
+# recorded at provision (it mirrors the host mount path, so it cannot be
+# recomputed from NAME alone); fall back to the agent home if nothing was
+# recorded (older sandbox). The marker read is failure-guarded so an absent
+# marker takes the documented fallback instead of killing the session verb
+# under `set -e` (see _acq_msb_ssh_auth_sock_for).
+_acq_msb_workspace_for() {
+  local name="$1" ws="${ACQ_MSB_WORKSPACE:-}"
+  if [ -z "$ws" ]; then
+    ws=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
+  fi
+  [ -n "$ws" ] || ws="/home/agent"
+  printf '%s\n' "$ws"
+}
+
+# _acq_msb_term_flags_into ARRVAR — `-e` flags forwarding the host's terminal
+# identity (TERM, COLORTERM) into an interactive (-t) session. msb does not
+# propagate the caller's terminal env into the guest PTY, so sessions see
+# TERM=linux and no COLORTERM, and TUI agents drop to a 16-color palette (sbx
+# forwards both itself). Only values the host actually has are forwarded —
+# unset stays unset, nothing is invented — and only the interactive paths use
+# this (non-interactive exec and kit commands have no terminal to describe).
+_acq_msb_term_flags_into() {
+  local _arrn="$1"
+  eval "$_arrn=()"
+  [ -n "${TERM:-}" ] && eval "$_arrn+=(-e \"TERM=\$TERM\")"
+  [ -n "${COLORTERM:-}" ] && eval "$_arrn+=(-e \"COLORTERM=\$COLORTERM\")"
+  return 0
+}
+
+# _acq_msb_agent_passwd_shell NAME — the agent user's passwd shell, the shell
+# an interactive session execs (and exports as SHELL). Passwd-driven like
+# sshd / `machinectl shell` / toolbox: the account database declares the
+# shell (set by _acq_msb_ensure_agent_shell), the transport honors it. The
+# value comes from a guest file, so charset-guard it to a word-safe absolute
+# path; anything unexpected — including an image with no getent and no agent
+# entry — falls back to /bin/sh.
+_acq_msb_agent_passwd_shell() {
+  local name="$1" shell
+  shell=$({ msb exec "$name" -u 0 -- sh -c '{ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; } | head -n1 | cut -d: -f7' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
+  _acq_msb_safe_shell_or_sh "$shell"
+}
+
+# _acq_msb_safe_shell_or_sh VALUE — echo VALUE when it is a word-safe absolute
+# path, /bin/sh otherwise. The shared guard for every shell path read from the
+# guest (passwd read, bash probe) before it reaches argv or usermod/chsh.
+_acq_msb_safe_shell_or_sh() {
+  local shell="$1"
+  case "$shell" in
+    /*) : ;;
+    *)  shell="/bin/sh" ;;
+  esac
+  case "$shell" in
+    *[!A-Za-z0-9._/-]*) shell="/bin/sh" ;;
+  esac
+  printf '%s\n' "$shell"
+}
+
+# ---------------------------------------------------------------------------
 # acq_backend_run — run a command inside a sandbox; return its exit status
 # ---------------------------------------------------------------------------
 # acq passes `-- CMD...`; msb exec uses the same `-- CMD...` separator.
@@ -4055,18 +4186,32 @@ acq_backend_run() {
   # Kit-declared environment[] entries persisted at provision are replayed the
   # same way, mirroring the flag order the provisioning execs use (HOME, sock,
   # then kit env — see _acq_msb_exec_flags_into).
-  local _sock _gitident=() _kitenv=()
+  local _sock _sockflag=() _gitident=() _kitenv=() ws
   _sock=$(_acq_msb_ssh_auth_sock_for "$name")
+  [ -n "$_sock" ] && _sockflag=(-e "SSH_AUTH_SOCK=$_sock")
   _acq_msb_apply_host_git_global_config "$name"
   _acq_msb_git_identity_env_flags_into _gitident
   _acq_msb_kit_env_flags_into _kitenv "$name"
-  if [ -n "$_sock" ]; then
-    msb exec -u agent -e HOME=/home/agent -e "SSH_AUTH_SOCK=$_sock" \
-      ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
+  # Start in the primary workspace (-w), like attach/shell and like sbx's exec:
+  # without it the command runs in msb's default cwd and every
+  # workspace-relative invocation (direnv allow, git status) misfires.
+  # The marker read costs a guest exec, and callers drive this in probe loops
+  # (the verify/heal paths in common.sh), so cache the resolved path per NAME
+  # for the life of the process. Cached HERE, not inside the helper — the
+  # helper is always called through a command substitution, whose subshell
+  # would discard any cache write (the _ACQ_MSB_PORT_SEQ_FILE lesson). The
+  # ACQ_MSB_WORKSPACE override branch inside the helper still wins: an
+  # override never reaches the marker read, and it cannot change mid-process
+  # in a way the cache would mask (same env for every call).
+  if [ "${_ACQ_MSB_RUN_WS_NAME:-}" = "$name" ]; then
+    ws="$_ACQ_MSB_RUN_WS"
   else
-    msb exec -u agent -e HOME=/home/agent ${_gitident[@]+"${_gitident[@]}"} \
-      ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
+    ws=$(_acq_msb_workspace_for "$name")
+    _ACQ_MSB_RUN_WS_NAME="$name"
+    _ACQ_MSB_RUN_WS="$ws"
   fi
+  msb exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
+    ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -4110,18 +4255,11 @@ _acq_msb_attach() {
   local name="$1"
   shift
 
-  # Determine the workspace to cd into (-w). Prefer an explicit ACQ_MSB_WORKSPACE
-  # override; otherwise read the guest path recorded at provision (it mirrors the
-  # host mount path, so it can't be recomputed from NAME alone). Fall back to the
-  # agent home if nothing was recorded (older sandbox).
-  # Both marker reads are failure-guarded so an absent marker takes the
-  # documented fallback instead of killing the attach (see
-  # _acq_msb_ssh_auth_sock_for).
-  local ws="${ACQ_MSB_WORKSPACE:-}"
-  if [ -z "$ws" ]; then
-    ws=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
-  fi
-  [ -n "$ws" ] || ws="/home/agent"
+  # Determine the workspace to cd into (-w); the marker reads below are
+  # failure-guarded so an absent marker takes the documented fallback instead
+  # of killing the attach (see _acq_msb_ssh_auth_sock_for).
+  local ws
+  ws=$(_acq_msb_workspace_for "$name")
 
   # Read the agent recorded at provision. Default to `shell` if unset. The value
   # comes from a guest file (/var/lib/acq/agent); charset-guard it before it
@@ -4134,8 +4272,10 @@ _acq_msb_attach() {
     agent="shell"
   fi
 
-  # Common flags for the interactive attach: PTY, agent user, workspace cwd, and
-  # a sane $SHELL (msb's default interactive shell is the base image's Node REPL).
+  # Common flags for the interactive attach: PTY, agent user, workspace cwd,
+  # the host terminal identity, and $SHELL set to the agent's passwd shell
+  # (msb's default interactive shell is the base image's Node REPL, and it
+  # exports neither the passwd shell nor the caller's TERM).
   # exec so acq hands the terminal straight to msb (no wrapper between TTY & PTY).
   #
   # When the host ssh-agent is forwarded, also point the session at the in-guest
@@ -4153,6 +4293,9 @@ _acq_msb_attach() {
   _acq_msb_git_identity_env_flags_into _gitident
   _acq_msb_kit_env_flags_into _kitenv "$name"
 
+  local _term=()
+  _acq_msb_term_flags_into _term
+
   if [ "$agent" = "shell" ]; then
     _acq_msb_shell_exec "$name" "$ws"
   fi
@@ -4164,32 +4307,35 @@ _acq_msb_attach() {
     _acq_msb_shell_exec "$name" "$ws"
   fi
 
-  exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} \
-    ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
+  local shell
+  shell=$(_acq_msb_agent_passwd_shell "$name")
+  exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+    ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
 }
 
 # _acq_msb_shell_exec NAME [WS] — exec into an interactive login shell as the
-# agent user: PTY, workspace cwd, sane $SHELL, and SSH_AUTH_SOCK when the host
-# ssh-agent is forwarded (a raw `msb exec` shell gets none of that). Shared by
-# _acq_msb_attach's shell paths and the neutral `acq shell` verb. WS skips the
-# workspace lookup when the caller already resolved it.
+# agent user: PTY, workspace cwd, the agent's passwd shell with SHELL set to
+# match and login semantics (so bash reads ~/.profile → ~/.bashrc via the
+# acq-login-profile bridge), the host terminal identity, and SSH_AUTH_SOCK
+# when the host ssh-agent is forwarded (a raw `msb exec` shell gets none of
+# that). Shared by _acq_msb_attach's shell paths and the neutral `acq shell`
+# verb. WS skips the workspace lookup when the caller already resolved it.
 _acq_msb_shell_exec() {
   local name="$1" ws="${2:-}"
-  if [ -z "$ws" ]; then
-    ws="${ACQ_MSB_WORKSPACE:-}"
-    if [ -z "$ws" ]; then
-      ws=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
-    fi
-    [ -n "$ws" ] || ws="/home/agent"
-  fi
-  local _sock _sockflag=() _gitident=() _kitenv=()
+  [ -n "$ws" ] || ws=$(_acq_msb_workspace_for "$name")
+  local shell
+  shell=$(_acq_msb_agent_passwd_shell "$name")
+  local _sock _sockflag=() _gitident=() _kitenv=() _term=()
   _sock=$(_acq_msb_ssh_auth_sock_for "$name")
   [ -n "$_sock" ] && _sockflag=(-e "SSH_AUTH_SOCK=$_sock")
   _acq_msb_apply_host_git_global_config "$name"
   _acq_msb_git_identity_env_flags_into _gitident
   _acq_msb_kit_env_flags_into _kitenv "$name"
-  exec msb exec -t -u agent -w "$ws" -e SHELL=/bin/sh ${_sockflag[@]+"${_sockflag[@]}"} \
-    ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- /bin/sh -l
+  _acq_msb_term_flags_into _term
+  exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+    ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$shell" -l
 }
 
 # ---------------------------------------------------------------------------
@@ -4714,6 +4860,12 @@ acq_backend_ensure_kits_applied() {
   # present — the reported "have to export SSH_AUTH_SOCK by hand" symptom. Cheap
   # no-op when no host forward is requested or the sandbox has no vsock route.
   _acq_msb_ensure_ssh_agent_forward "$name"
+  # Re-run the agent-user setup. It is idempotent and marker-gated, and its
+  # login-shell sync deliberately runs even on a marker hit — that is
+  # what heals a sandbox whose agent user was created with /bin/sh before the
+  # passwd-shell setup existed. Best-effort like the rest of the heal.
+  _acq_msb_ensure_agent_user "$name" || \
+    echo "acq(msb): warning: agent-user heal failed for '$name'." >&2
   local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
   local builtin_count="${#kits[@]}"
   if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
