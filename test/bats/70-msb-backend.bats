@@ -74,8 +74,12 @@ _with_adapter() { # ADAPTER BODY
   run env ACQ_BACKEND=msb "$ACQ" rm mybox
   assert_regex "$(cat "$CALLS")" 'msb remove --force mybox'
   : > "$CALLS"
-  run env ACQ_BACKEND=msb "$ACQ" exec mybox -- echo hi
-  assert_regex "$(cat "$CALLS")" 'msb exec -u agent -e HOME=/home/agent mybox -- echo hi'
+  # Neutralize the host git identity (HOME/XDG config, EMAIL/GIT_* env) so the
+  # exec line is the same on a dev machine with a global identity and in CI.
+  run env -u EMAIL -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" GIT_CONFIG_NOSYSTEM=1 \
+    ACQ_BACKEND=msb "$ACQ" exec mybox -- echo hi
+  assert_regex "$(cat "$CALLS")" 'msb exec -u agent -e HOME=/home/agent -w /home/agent mybox -- echo hi'
 }
 
 @test "msb: version and backend list report the real msb version" {

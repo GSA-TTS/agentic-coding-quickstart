@@ -289,6 +289,27 @@ case "$_msb_sub" in
       # unwritable home so the block exits 1 and provision must abort.
       *"test -w /home/agent"*)
         [ "${STUB_HOME_NOT_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
+      # The agent login-shell setup block: passwd-shell sync + the
+      # acq-login-profile bridge. Matched by its marker string BEFORE the
+      # generic command-v / getent arms (the block contains both).
+      *"acq-login-profile"*) exit 0 ;;
+      # The passwd-shell read the session paths (shell/attach) run. Unset
+      # STUB_AGENT_PASSWD_SHELL models an absent agent entry (exit 1, session
+      # falls back to /bin/sh), matching the marker-read convention below.
+      *"getent passwd agent"*)
+        [ -n "${STUB_AGENT_PASSWD_SHELL+x}" ] || exit 1
+        printf '%s\n' "$STUB_AGENT_PASSWD_SHELL" ;;
+      # The host-side bash probe deciding the agent's passwd shell.
+      # Default PRESENT (the default image ships bash); STUB_GUEST_BASH=0
+      # models a bash-less base. MUST precede the generic command-v arm.
+      *"command -v bash"*)
+        [ "${STUB_GUEST_BASH:-1}" = "0" ] && exit 1 || printf '/bin/bash\n' ;;
+      # The agent-user-ready marker gate. Default ABSENT (exit 1, like the
+      # generic test -f arm) so provision runs the full block;
+      # STUB_AGENT_USER_READY=1 models an already-provisioned sandbox so the
+      # heal's marker-hit shell-sync path can be exercised.
+      *"test -f '/var/lib/acq/agent-user-ready'"*)
+        [ "${STUB_AGENT_USER_READY:-0}" = "1" ] && exit 0 || exit 1 ;;
       # The OCI-engine setup is TWO msb-exec `sh -c` blocks: (1) a root (`-u 0`)
       # install/config block carrying `/usr/local/bin/docker`, and (2) a rootless
       # verify block (`-u agent`) that runs a `podman build` layer-mount self-test
