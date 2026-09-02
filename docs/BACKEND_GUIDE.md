@@ -643,7 +643,11 @@ store at provision:
 The store lives in the host OS keychain when available (macOS `security -i`,
 Linux `secret-tool`) with a `0600` file fallback under
 `$XDG_DATA_HOME/acq/secrets/` when no keychain backend is available. macOS writes
-use `security -i` so the value travels on stdin, not process argv. Existing
+use `security -i` so the value travels on stdin, not process argv. The macOS
+read path uses `security find-generic-password -w`, whose output formatting can
+be lossy for control characters and non-ASCII bytes even when the Keychain write
+stored the bytes correctly. `acq` secrets are expected to be single-line API
+tokens; do not use this store for arbitrary binary or multi-line values. Existing
 legacy macOS file-backed entries are still read as a fallback until they are
 re-saved or removed. Entries are keyed `acq.<service>` (global) or
 `acq.<sandbox>.<service>` (sandbox-scoped); a sandbox-scoped key takes precedence

@@ -130,6 +130,17 @@ _acq_secret_security_i_quote() {
   printf '"%s"' "$s"
 }
 
+_acq_secret_value_is_storable() {
+  local value="$1" nl tab
+  nl=$(printf '\n_'); nl=${nl%_}
+  tab=$(printf '\t')
+  case "$value" in
+    *"$nl"*) return 1 ;;
+    *"$tab"*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 _acq_secret_store_keychain_macos() {
   local key="$1" value="$2" cmd security_bin
   security_bin=$(_acq_secret_security_bin)
@@ -735,6 +746,11 @@ acq_secret_set_interactive() {
 
   if [ -n "${ACQ_SECRET_TEST_VALUE:-}" ]; then
     value="$ACQ_SECRET_TEST_VALUE"
+    if ! _acq_secret_value_is_storable "$value"; then
+      echo "acq: refusing '$service' — ACQ_SECRET_TEST_VALUE contains a newline or tab, which the acq secret store cannot store intact." >&2
+      value=""
+      return 1
+    fi
   elif [ ! -t 0 ]; then
     IFS= read -r value || true
   else
