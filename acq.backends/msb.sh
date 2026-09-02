@@ -2391,7 +2391,10 @@ _acq_msb_clone_setup() {
 # identity unknown". `git -C SRC config --get` resolves the value exactly as
 # the user's own commits do. Running git inside the scratch is safe HERE only:
 # acq just created it and it is not yet guest-exposed (see the rm-time rule in
-# _acq_msb_clone_warn_unfetched). Best-effort, always returns 0.
+# _acq_msb_clone_warn_unfetched). Unlike the global-identity forwarder in
+# common.sh there is no control-character filter: the values go through `git
+# config`, which escapes on write, never onto a command line. Best-effort,
+# always returns 0.
 _acq_msb_clone_copy_identity() {
   local src="$1" scratch="$2" key val
   for key in user.name user.email; do

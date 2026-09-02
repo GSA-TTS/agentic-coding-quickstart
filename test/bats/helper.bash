@@ -50,7 +50,10 @@ acq_setup_stubs() {
   # not, and reads it the same way. Point it under the stub dir so a faked HOME
   # is complete (observed: fixture identities written into ~/.config/git/config
   # after every suite run). Tests that need a config dir set their own.
+  # GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM override both HOME and XDG lookups, so a
+  # runner exporting them would leak through (and receive the fixture writes).
   export XDG_CONFIG_HOME="$STUBDIR/xdg"
+  unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
   load_acq
 }
 
