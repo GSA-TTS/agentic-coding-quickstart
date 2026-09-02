@@ -3358,8 +3358,8 @@ _acq_msb_ensure_agent_user() {
     # the home ownership, and a write-crawl over a dense baked home (single-user
     # Nix state is thousands of tiny files) grinds the guest disk journal for
     # minutes. The top-level chown and the writability check below still run on
-    # every path, so a wrong skip fails loudly; kits chown the subtrees they
-    # stage themselves.
+    # every path; they cover the home directory itself, not a root-owned subtree
+    # a custom image baked beneath it, which the base-image contract forbids.
     mkdir -p /home/agent
     _agrp=$(id -gn agent 2>/dev/null || echo agent)
     chown "agent:${_agrp}" /home/agent
