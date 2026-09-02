@@ -44,6 +44,13 @@ acq_setup_stubs() {
         ACQ_NETWORK_TIER_CONFIRM_OPEN ACQ_MSB_BALANCED_EGRESS ACQ_MSB_IMAGE \
         ACQ_MSB_PULL ACQ_MSB_WORKSPACE ACQ_MSB_CLONES_DIR
   make_stubs
+  # Tests that fake HOME still leak into the developer's real git config when
+  # the shell exports XDG_CONFIG_HOME: git writes --global to
+  # $XDG_CONFIG_HOME/git/config whenever that file exists and ~/.gitconfig does
+  # not, and reads it the same way. Point it under the stub dir so a faked HOME
+  # is complete (observed: fixture identities written into ~/.config/git/config
+  # after every suite run). Tests that need a config dir set their own.
+  export XDG_CONFIG_HOME="$STUBDIR/xdg"
   load_acq
 }
 
