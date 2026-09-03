@@ -60,10 +60,13 @@ something on msb instead of printing "re-create the sandbox."
 **Chosen: Option 1.** Wire `acq_backend_ports` on msb to the SSH-tunnel path and
 flip `ACQ_BACKEND_SUPPORTS_PORT_FORWARD=1`. Sketch:
 
-- **Key authorization (once per host).** `msb ssh authorize` seats a public key
+- **Key authorization (self-healing).** `msb ssh authorize` seats a public key
   in `<MSB_HOME>/ssh/authorized_keys`. acq uses a dedicated, non-interactive
   key it manages under its own state dir (not the user's personal key), created
-  on first use.
+  on first use. acq refreshes authorization on each publish because msb's
+  host-scoped `authorized_keys` can disappear independently of acq state (for
+  example, after an msb data reset/reinstall), and re-authorizing an existing key
+  is harmless.
 - **Serve + forward.** For `acq ports <sandbox> --publish H:G`, acq starts
   `msb ssh serve <sandbox> --host 127.0.0.1 --port <ephemeral>` and then
   `ssh -p <ephemeral> -L 127.0.0.1:H:127.0.0.1:G <sandbox-host>`, backgrounded.
