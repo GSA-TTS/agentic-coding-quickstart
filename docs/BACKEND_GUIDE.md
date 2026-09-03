@@ -362,7 +362,11 @@ msb has no native clone mode, so the neutral `--clone`
 committed state only. Gitignored/untracked files (sbx copies these — the known
 host-build-state contamination trap) and uncommitted edits to tracked files do
 **not** enter the sandbox; `acq` prints a notice when the host tree is dirty.
-Commit first, or copy specific files in with `acq cp`.
+Commit first, or copy specific files in with `acq cp`. One exception is
+deliberate: the source checkout's effective git identity
+(`user.name`/`user.email`) is written into the scratch as repo-local config, so
+a per-forge identity kept in `.git/config` or a gitdir-scoped include still
+authors the sandbox's commits. See ADR-0027 for the rationale.
 
 The scratch clone lives on host disk (unlike sbx's in-guest clone), confined to
 the acq-managed state dir — disposable by construction and never executed by

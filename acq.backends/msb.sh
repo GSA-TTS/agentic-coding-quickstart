@@ -2369,6 +2369,7 @@ _acq_msb_clone_setup() {
     rm -rf "$dir"
     return 1
   fi
+  _acq_msb_clone_copy_identity "$ws_canon" "$scratch"
   # Fetch-back remote in the host checkout (replace a stale same-name remote —
   # its scratch dir was just verified absent, so it cannot hold unfetched work).
   git -C "$ws_canon" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
@@ -2379,6 +2380,29 @@ _acq_msb_clone_setup() {
   echo "acq(msb): agent runs on a disposable clone; the real checkout is untouched." >&2
   echo "acq(msb):   Recover agent branches with: git fetch sandbox-${name}" >&2
   _ACQ_MSB_CLONE_DIR=$(canonicalize_path "$scratch")
+  return 0
+}
+
+# _acq_msb_clone_copy_identity SRC SCRATCH — write SRC's EFFECTIVE git
+# identity (user.name/user.email) repo-locally into the scratch. A clone drops
+# .git/config, and a per-forge identity often lives only there or behind a
+# gitdir-scoped includeIf; the guest's synced global tier cannot express a
+# per-repo value, so without this the first in-guest commit fails with "Author
+# identity unknown". `git -C SRC config --get` resolves the value exactly as
+# the user's own commits do. Running git inside the scratch is safe HERE only:
+# acq just created it and it is not yet guest-exposed (see the rm-time rule in
+# _acq_msb_clone_warn_unfetched). Unlike the global-identity forwarder in
+# common.sh there is no control-character filter: the values go through `git
+# config`, which escapes on write, never onto a command line. Best-effort,
+# always returns 0.
+_acq_msb_clone_copy_identity() {
+  local src="$1" scratch="$2" key val
+  for key in user.name user.email; do
+    val=$(git -C "$src" config --get "$key" 2>/dev/null) || continue
+    [ -n "$val" ] || continue
+    git -C "$scratch" config "$key" "$val" >/dev/null 2>&1 \
+      || echo "acq(msb): warning: --clone: could not set $key in the scratch clone." >&2
+  done
   return 0
 }
 
