@@ -188,3 +188,12 @@ sandbox 4096 -> host 127.0.0.1:4096 (create-time -p)'
   _wppd "$fixture" unknown;   assert_output ''
   _wppd "" closed;            assert_output ''
 }
+
+# The identity tests above fake HOME and run real `git config --global`; git
+# routes that to $XDG_CONFIG_HOME/git/config when it exists and ~/.gitconfig
+# does not, so the harness must isolate XDG_CONFIG_HOME or a developer shell
+# exporting it gets fixture identities written into its real config. CI cannot
+# see that regression (no XDG export there), hence this guard.
+@test "harness: XDG_CONFIG_HOME is isolated so a faked HOME never reaches the developer's git config" {
+  [[ "${XDG_CONFIG_HOME:-}" == "$STUBDIR"/* ]]
+}
