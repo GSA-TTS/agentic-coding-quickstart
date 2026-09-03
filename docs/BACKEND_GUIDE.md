@@ -193,7 +193,7 @@ Tunables:
 | `ACQ_MSB_MEMORY` | `4G` | Guest RAM at create (`-m`); `4G`/`4096`/`512M` (bare = MiB). Set empty to use msb's 512 MiB default |
 | `ACQ_MSB_CPUS` | `2` | Guest vCPU count at create (`-c`); set empty to use msb's 1-vCPU default |
 | `ACQ_MSB_DNS_NAMESERVER` | (host resolvers) | Force a guest DNS resolver (`--dns-nameserver`); empty uses the host's resolvers via msb's default |
-| `ACQ_MSB_DNS_REBIND_PROTECTION` | (off) | Set `1` to keep msb's DNS rebind protection; off by default so split-horizon/ZPA names that resolve to private `100.64.x` addresses still resolve |
+| `ACQ_MSB_DNS_REBIND_PROTECTION` | (auto) | msb's DNS rebind protection at create. Empty = auto: off when a host resolver is in `100.64.0.0/10` (ZPA), so split-horizon names that resolve to private `100.64.x` addresses still resolve; on everywhere else. `1` always keeps it; `0` always disables it (escape hatch when detection misses) |
 | `ACQ_MSB_KIT_CACHE` | `$XDG_CACHE_HOME/acq/kits` | where fetched neutral kits are materialized |
 | `ACQ_MSB_EXEC_READY_TIMEOUT` | `60` | Seconds to wait for a freshly-created sandbox to accept `msb exec` (create starts asynchronously) |
 | `ACQ_MSB_SSH_DIR` | `$XDG_STATE_HOME/acq/ssh` | Directory holding acq's managed SSH key for post-hoc port publishing (ADR-0015) |
@@ -213,21 +213,41 @@ split-horizon names on a corporate tunnel. On a Zscaler/ZPA host,
 `gitlab.login.gov` and `api.gsa.usai.gov` resolve to private `100.64.x`
 addresses that ride the tunnel's allow-listed path; a public resolver returns
 the public load balancer instead, which either rejects the flow (`403` from the
-ELB) or is unreachable. acq therefore leaves the resolver at msb's default and
-passes `--no-dns-rebind-protection`, because msb's rebind protection would drop
-those private-range answers.
+ELB) or is unreachable. acq therefore leaves the resolver at msb's default, and
+on such a host passes `--no-dns-rebind-protection`, because msb's rebind
+protection would drop those private-range answers.
+
+**Detection rule.** At `msb create`, acq reads the host's resolver list (the
+same one msb's stack forwards to: `scutil --dns` on macOS, `/etc/resolv.conf`
+elsewhere). If any resolver sits in `100.64.0.0/10`, the CGNAT range ZPA uses
+for both its resolvers and its synthetic app addresses, acq disables rebind
+protection and prints one line saying so. A host with no such resolver keeps
+msb's default (protection on) and sees no change. `ACQ_MSB_DNS_REBIND_PROTECTION`
+takes three values:
+
+| Value | Behavior |
+| --- | --- |
+| unset / empty | auto: off on a host with a `100.64/10` resolver, on otherwise |
+| `1` / `true` / `on` | always keep the protection (tunnel-only names then fail to resolve) |
+| `0` / `false` / `off` | always disable it |
+
+This is decided at create time; an existing sandbox keeps whatever it was
+created with until it is recreated. If the tunnel was down when the sandbox was
+created, detection misses and tunnel-only names fail later; recreate with
+`ACQ_MSB_DNS_REBIND_PROTECTION=0` to force it off.
 
 Security trade-off: msb maps a kit's `allow@host` rule onto the resolved IP, and
 rebind protection is what stops that mapping from admitting a private address.
 With it off, an allowed domain whose DNS an attacker can influence could steer
 the guest at private space (other tunnel app segments, the msb gateway) under
-that rule. The exposure is bounded: only named kit hosts are allowed under
-strict/balanced, their answers come from the host's corporate resolver over the
-tunnel, IP-group rules (`allow@public`) never admit private addresses, and
-injected secrets are bound to the upstream TLS identity, so a rebound endpoint
-cannot receive them. Set `ACQ_MSB_DNS_REBIND_PROTECTION=1` to keep the
-protection at the cost of every tunnel-only host. `ACQ_MSB_DNS_NAMESERVER`
-forces a specific resolver if the host's cannot be used.
+that rule. The guard is relaxed only on hosts whose resolvers already return
+private answers for the names the kits allow, and the exposure is bounded:
+only named kit hosts are allowed under strict/balanced, their answers come from
+the host's corporate resolver over the tunnel, IP-group rules (`allow@public`)
+never admit private addresses, and injected secrets are bound to the upstream
+TLS identity, so a rebound endpoint cannot receive them.
+`ACQ_MSB_DNS_NAMESERVER` forces a specific resolver if the host's cannot be
+used.
 
 ### Network egress tiers (`ACQ_NETWORK_TIER`)
 

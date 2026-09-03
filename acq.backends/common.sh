@@ -2280,11 +2280,13 @@ _report_usai_unreachable() {
 #
 # The usual cause on GFE is split-horizon DNS — the USAi host resolves to an
 # INTERNAL address that only exists in the corporate/tunnel zone. The guest
-# follows the host's resolvers by default with msb's rebind protection off, so
-# this now points at a forced public resolver (ACQ_MSB_DNS_NAMESERVER) or
-# rebind protection re-enabled (ACQ_MSB_DNS_REBIND_PROTECTION=1), which drops
-# the private-range answer. A key rotation cannot fix this, and neither can a
-# msb data wipe. State the signal and point at the docs.
+# follows the host's resolvers by default, with msb's rebind protection off on
+# a ZPA host, so this now points at a forced public resolver
+# (ACQ_MSB_DNS_NAMESERVER), rebind protection forced on
+# (ACQ_MSB_DNS_REBIND_PROTECTION=1), or a sandbox created while the tunnel was
+# down (detection missed; recreate with ACQ_MSB_DNS_REBIND_PROTECTION=0). A key
+# rotation cannot fix this, and neither can a msb data wipe. State the signal
+# and point at the docs.
 _report_usai_unresolved() {
   echo >&2
   echo "acq: the USAi API host in $USAI_MODELS_URL did not RESOLVE from the sandbox" >&2
@@ -2294,7 +2296,8 @@ _report_usai_unresolved() {
   echo "      USAi fails to resolve, USAi is likely a split-horizon name whose" >&2
   echo "      address lives in an internal/tunnel-only zone. Check that the guest" >&2
   echo "      follows the host's resolvers (ACQ_MSB_DNS_NAMESERVER unset) and that" >&2
-  echo "      msb's rebind protection is off (ACQ_MSB_DNS_REBIND_PROTECTION unset)." >&2
+  echo "      msb's rebind protection is not forced on (ACQ_MSB_DNS_REBIND_PROTECTION" >&2
+  echo "      unset, or 0 if the sandbox was created while the tunnel was down)." >&2
   echo "      See docs/KNOWN_FAILURE_MODES.md §30 (USAi-only NXDOMAIN)." >&2
   echo >&2
 }

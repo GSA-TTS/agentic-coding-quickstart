@@ -1317,7 +1317,7 @@ which one you have before acting.
 | Signature (from inside the guest) | Cause | Fix |
 |---|---|---|
 | **Broad** `curl (56) unexpected eof` / HTTP `000` on **multiple** hosts at once (USAi *and* GitHub *and* npm) | Corrupted / stale **msb state** (not a clean-install behavior) | **Wipe msb data + reinstall, then `msb doctor`** (below) |
-| **USAi only** fails with `NXDOMAIN` / `curl rc=6` (or a WAF-gated API such as GitLab's `/api/v4/*` returns `403` from `awselb/2.0`), while GitHub + npm work fine | **Split-horizon DNS** — the host resolves the name to a private tunnel address (`100.64.x` on ZPA); a public resolver returns the public endpoint, which the WAF rejects, and msb's rebind protection drops the private answer | Let the guest follow the host's resolvers with rebind protection off (acq's defaults): unset `ACQ_MSB_DNS_NAMESERVER` and `ACQ_MSB_DNS_REBIND_PROTECTION` (below) |
+| **USAi only** fails with `NXDOMAIN` / `curl rc=6` (or a WAF-gated API such as GitLab's `/api/v4/*` returns `403` from `awselb/2.0`), while GitHub + npm work fine | **Split-horizon DNS** — the host resolves the name to a private tunnel address (`100.64.x` on ZPA); a public resolver returns the public endpoint, which the WAF rejects, and msb's rebind protection drops the private answer | Let the guest follow the host's resolvers with rebind protection off, which acq does automatically on a host whose resolvers are in `100.64/10`: unset `ACQ_MSB_DNS_NAMESERVER` and `ACQ_MSB_DNS_REBIND_PROTECTION`, or set the latter to `0` if the sandbox was created while the tunnel was down (below) |
 | A **genuinely intercepted** endpoint fails its TLS handshake behind a corporate proxy that terminates it | The proxy's **root CA** isn't trusted on msb's upstream (proxy→server) leg | acq passes it via `--tls-upstream-ca-cert` (defense-in-depth; below) |
 
 Probe from inside the sandbox to read the signature — the curl exit code is the
@@ -1377,19 +1377,24 @@ balancer, which the WAF rejects. And even with the host resolver, msb's DNS
 rebind protection drops private-range answers, so the name resolves to nothing.
 
 acq's defaults handle this: the guest follows the host's resolvers (no
-`--dns-nameserver`) and msb is created with `--no-dns-rebind-protection`. If you
-see this signature, check that neither knob is overriding the defaults:
+`--dns-nameserver`), and when a host resolver is in `100.64/10` (the ZPA
+signature) msb is created with `--no-dns-rebind-protection`, with a one-line
+notice on stderr. If you see this signature, check that neither knob is
+overriding the defaults, and that the sandbox was not created while the tunnel
+was down (detection then sees no `100.64/10` resolver and keeps the protection):
 
 ```bash
-unset ACQ_MSB_DNS_NAMESERVER          # a forced public resolver reintroduces the 403/NXDOMAIN
-unset ACQ_MSB_DNS_REBIND_PROTECTION   # =1 drops the private tunnel answers
+unset ACQ_MSB_DNS_NAMESERVER            # a forced public resolver reintroduces the 403/NXDOMAIN
+unset ACQ_MSB_DNS_REBIND_PROTECTION     # =1 drops the private tunnel answers
+ACQ_MSB_DNS_REBIND_PROTECTION=0 acq …   # recreate: force it off if detection missed
 ```
 
-Re-enabling rebind protection is a deliberate trade: it stops a kit-allowed
+The setting is applied at create time; recreate the sandbox after changing it.
+Keeping rebind protection on is a deliberate trade: it stops a kit-allowed
 domain from being resolved into private space by an attacker-influenced DNS
 answer, and it also stops every tunnel-only host from resolving at all. See the
-DNS section of `docs/BACKEND_GUIDE.md` for the mitigations that remain with it
-off.
+DNS section of `docs/BACKEND_GUIDE.md` for the detection rule and the
+mitigations that remain with it off.
 
 Verified on msb 0.6.16: from the guest, `gitlab.login.gov` resolves to its ZPA
 address, `/api/v4/user` with the bound token returns `200`, and the USAi models

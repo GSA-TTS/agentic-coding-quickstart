@@ -246,6 +246,11 @@ msb doctor            # then msb doctor --fix
 # resolvers by default; force one only if those cannot be used):
 export ACQ_MSB_DNS_NAMESERVER=<reachable-resolver>
 
+# Tunnel-only names (ZPA) fail in a sandbox created while the tunnel was down:
+# acq relaxes msb's DNS rebind protection only when it sees 100.64/10 resolvers
+# at create time. Recreate with it forced off:
+ACQ_MSB_DNS_REBIND_PROTECTION=0 acq run opencode .
+
 # A locally-built image won't pull (registry-less reference)
 msb image load -i image.tar -t localhost/my-image:tag
 ACQ_MSB_PULL=never acq run --image localhost/my-image:tag opencode .

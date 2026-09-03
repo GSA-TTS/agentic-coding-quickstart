@@ -149,9 +149,10 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   absolute path in the guest** (sbx-parity; see the workspace-mount note below) —
   an earlier revision remapped to a fixed `/home/agent/workspace`, which failed
   because `msb create` mounts before the `agent` user/home exist.
-  It leaves guest DNS on the **host's resolvers** and passes
-  `--no-dns-rebind-protection`, so split-horizon names on a corporate tunnel
-  resolve to the same private addresses the host uses (an earlier revision
+  It leaves guest DNS on the **host's resolvers** and, when a host resolver is
+  in `100.64.0.0/10` (ZPA), passes `--no-dns-rebind-protection`, so
+  split-horizon names on a corporate tunnel resolve to the same private
+  addresses the host uses while other hosts keep msb's guard (an earlier revision
   pinned `1.1.1.1`, assuming the host resolver was unreachable from the
   microVM; msb's host-side network stack made that moot and the public answer
   is the wrong one for tunnel-gated hosts).

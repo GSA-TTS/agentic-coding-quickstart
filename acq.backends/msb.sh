@@ -292,21 +292,53 @@ ACQ_MSB_DNS_NAMESERVER="${ACQ_MSB_DNS_NAMESERVER:-}"
 
 # msb's DNS rebind protection drops answers that point at private ranges,
 # which is exactly what split-horizon/ZPA names resolve to (100.64.x), so the
-# name silently resolves to nothing. acq turns it off by default. What the
-# protection guards: msb maps a kit's allow@host rule onto the resolved IP, and
-# without it an allowed domain whose DNS an attacker influences could steer the
-# guest at private space (other tunnel app segments, the msb gateway) under
-# that rule. Mitigations that remain: only named kit hosts are allowed under
+# name silently resolves to nothing. acq turns it off only where that applies:
+# when the host's own resolvers sit in 100.64.0.0/10, the CGNAT range ZPA uses
+# for both its resolvers and its synthetic app addresses (see
+# _acq_msb_host_resolvers_in_cgnat). A host without such resolvers gains
+# nothing from the relaxation and keeps msb's default. What the protection
+# guards: msb maps a kit's allow@host rule onto the resolved IP, and without it
+# an allowed domain whose DNS an attacker influences could steer the guest at
+# private space (other tunnel app segments, the msb gateway) under that rule.
+# Mitigations that remain: only named kit hosts are allowed under
 # strict/balanced, answers come from the host's corporate resolver over the
 # tunnel, IP-group rules (allow@public) never admit private addresses, and
 # injected secrets are bound to the upstream TLS identity so a rebound endpoint
-# cannot receive them. Set to 1/true/on to keep the protection at the cost of
-# every tunnel-only host. Normalized like the other toggles.
+# cannot receive them. Three values: empty = auto (above); 1/true/on = always
+# keep the protection; 0/false/off = always disable it (the escape hatch when
+# detection misses, e.g. the tunnel was down at create time).
 ACQ_MSB_DNS_REBIND_PROTECTION="${ACQ_MSB_DNS_REBIND_PROTECTION:-}"
 case "$(printf '%s' "$ACQ_MSB_DNS_REBIND_PROTECTION" | tr '[:upper:]' '[:lower:]')" in
-  1|true|yes|on) ACQ_MSB_DNS_REBIND_PROTECTION="1" ;;
-  *)             ACQ_MSB_DNS_REBIND_PROTECTION="" ;;
+  1|true|yes|on)  ACQ_MSB_DNS_REBIND_PROTECTION="1" ;;
+  0|false|no|off) ACQ_MSB_DNS_REBIND_PROTECTION="0" ;;
+  *)              ACQ_MSB_DNS_REBIND_PROTECTION="" ;;
 esac
+
+# _acq_msb_host_resolver_lines — the raw resolver listing msb's host-side stack
+# will use: `scutil --dns` on Darwin, /etc/resolv.conf elsewhere. Tests
+# override this to feed a fixture.
+_acq_msb_host_resolver_lines() {
+  if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+    scutil --dns 2>/dev/null
+  else
+    cat /etc/resolv.conf 2>/dev/null
+  fi
+  return 0
+}
+
+# _acq_msb_host_resolvers_in_cgnat — true when any host resolver sits in
+# 100.64.0.0/10 (second octet 64-127), the ZPA signature. Both listing formats
+# put the address last on a line whose first field starts with "nameserver".
+_acq_msb_host_resolvers_in_cgnat() {
+  local ip o2
+  for ip in $(_acq_msb_host_resolver_lines | awk '$1 ~ /^nameserver/ { print $NF }'); do
+    case "$ip" in 100.*.*.*) ;; *) continue ;; esac
+    o2=${ip#100.}; o2=${o2%%.*}
+    case "$o2" in ""|*[!0-9]*) continue ;; esac
+    if [ "$o2" -ge 64 ] && [ "$o2" -le 127 ]; then return 0; fi
+  done
+  return 1
+}
 
 # ---------------------------------------------------------------------------
 # TLS-interception UPSTREAM trust (corporate MITM proxy, e.g. Zscaler)
@@ -2757,12 +2789,21 @@ EOF
     [ "${#_upstream_ca[@]}" -gt 0 ] && create_flags+=("${_upstream_ca[@]}")
   fi
 
-  # Guest DNS: host resolvers unless overridden, rebind protection off unless
-  # kept. See the ACQ_MSB_DNS_NAMESERVER / ACQ_MSB_DNS_REBIND_PROTECTION notes.
+  # Guest DNS: host resolvers unless overridden; rebind protection off on ZPA
+  # hosts (auto), or as forced. Create-time only: an existing sandbox keeps its
+  # DNS config until recreated. See the ACQ_MSB_DNS_* notes.
   if [ -n "$ACQ_MSB_DNS_NAMESERVER" ]; then
     create_flags+=(--dns-nameserver "$ACQ_MSB_DNS_NAMESERVER")
   fi
-  [ -n "$ACQ_MSB_DNS_REBIND_PROTECTION" ] || create_flags+=(--no-dns-rebind-protection)
+  case "$ACQ_MSB_DNS_REBIND_PROTECTION" in
+    1) ;;
+    0) create_flags+=(--no-dns-rebind-protection) ;;
+    *)
+      if _acq_msb_host_resolvers_in_cgnat; then
+        echo "acq(msb): host resolvers are in 100.64/10 (ZPA); disabling guest DNS rebind protection so split-horizon names resolve" >&2
+        create_flags+=(--no-dns-rebind-protection)
+      fi ;;
+  esac
 
   # Guest RAM / vCPU. msb defaults to 512 MiB / 1 vCPU — too small for a Node.js
   # agent TUI (opencode), which the guest OOM-kills on launch (prints "Killed";
