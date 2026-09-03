@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v3.1.0...v3.1.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* **msb:** carry the source checkout's git identity into the --clone scratch ([#443](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/443)) ([320d784](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/320d784a78b63864e6a647c797b06849e7d3b87d))
+* **msb:** session parity for exec/attach/shell (cwd, terminal identity, login shell) ([#427](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/427)) ([6261eda](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/6261eda7f8b5b0f0a4402bb27ea584467bb4abcb))
+* **msb:** skip the recursive home chown when the image baked the agent user ([#432](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/432)) ([d8f66a4](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/d8f66a43d10a01ce8318194bb0c82518a69e1346))
+
 ## [3.1.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v3.0.0...v3.1.0) (2026-09-01)
 
 

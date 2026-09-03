@@ -35,7 +35,7 @@ REPO_URL="${ACQ_INSTALL_REPO_URL:-https://github.com/GSA-TTS/agentic-coding-quic
 # release-please updates this version in release PRs. Release automation also
 # publishes an install.sh asset with DEFAULT_RELEASE_SHA replaced by the exact
 # release commit so clone installs can verify they landed on that commit.
-DEFAULT_RELEASE_VERSION="3.1.0" # x-release-please-version
+DEFAULT_RELEASE_VERSION="3.1.1" # x-release-please-version
 DEFAULT_RELEASE_REF="v$DEFAULT_RELEASE_VERSION"
 DEFAULT_RELEASE_SHA=""
 REF="${ACQ_INSTALL_REF:-$DEFAULT_RELEASE_REF}"
