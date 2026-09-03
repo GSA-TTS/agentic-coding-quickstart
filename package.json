@@ -1,7 +1,7 @@
 {
   "name": "@gsa-tts/agentic-coding-quickstart",
   "//version": "Managed by release-please via extra-files in release-please-config.json; do not edit by hand.",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "acq — run AI coding agents inside a federally-configured sandbox (SBX or MSB) with USAi endpoints",
   "type": "module",
   "bin": {

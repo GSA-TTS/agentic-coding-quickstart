@@ -63,7 +63,7 @@ You'll type (or paste) the commands below into this window.
 Paste this one line and press Return:
 
 ```bash
-curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.sh | sh # x-release-please-version
+curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.1/install.sh | sh # x-release-please-version
 ```
 
 That's it — you don't have to choose *how* to install. The installer:
@@ -100,7 +100,7 @@ CLI (`gh`), you can also verify the release asset attestations before running
 anything:
 
 ```bash
-ACQ_VERSION=3.1.0 # x-release-please-version
+ACQ_VERSION=3.1.1 # x-release-please-version
 curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/install.sh"
 curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/SHA256SUMS"
 gh attestation verify install.sh --repo GSA-TTS/agentic-coding-quickstart
