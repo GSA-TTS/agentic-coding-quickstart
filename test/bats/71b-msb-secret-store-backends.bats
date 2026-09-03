@@ -199,6 +199,26 @@ _provision() { # NAME PRE_SNIPPET WS_ARGS...
   refute_regex "$(cat "$CALLS")" '^security -i$'
 }
 
+@test "keychain-macos: ACQ_SECRET_TEST_VALUE rejects newline before security -i" {
+  _plant_security_stub
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/km-test-value-secrets"
+    export STUBDIR="'"$STUBDIR"'"
+    export ACQ_SECRET_SECURITY_BIN="'"$STUBDIR"'/security"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    _acq_secret_backend() { printf "keychain-macos\n"; }
+    ACQ_SECRET_TEST_VALUE=$'"'"'FIRST\nSECOND'"'"' acq_secret_set_interactive usai "" 2>&1 && printf "stored\n" || printf "refused\n"
+    acq_secret_has usai && printf "has-secret=yes\n" || printf "has-secret=no\n"
+  '
+  assert_output --partial 'ACQ_SECRET_TEST_VALUE contains a newline or tab'
+  assert_output --partial 'refused'
+  assert_output --partial 'has-secret=no'
+  refute_output --partial 'FIRST'
+  refute_output --partial 'SECOND'
+  refute_regex "$(cat "$CALLS")" '^security -i$'
+}
+
 @test "file ls: a stored secret lists (no value); an empty store lists nothing" {
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/file-ls-secrets"
