@@ -3024,10 +3024,13 @@ EOF
   # which is exactly how the playbook stopped fetching. Abort provision rather
   # than degrade silently.
   acq_debug "msb provision: ensuring agent user ($name)"
+  acq_spin_start "Preparing the agent user"
   if ! _acq_msb_ensure_agent_user "$name"; then
+    acq_spin_stop
     echo "acq(msb): error: agent-user setup failed for '$name'; aborting provision." >&2
     return 1
   fi
+  acq_spin_stop "Preparing the agent user"
   acq_debug "msb provision: agent user ready ($name)"
 
   # Ensure an OCI container engine (podman) so agents can run OCI images
@@ -3330,6 +3333,7 @@ _acq_msb_ensure_agent_user() {
   # silently degraded into a root-owned home and a playbook that never fetched).
   msb exec "$name" -u 0 -- sh -c '
     set -e
+    _acq_created_agent=0
     if id agent >/dev/null 2>&1; then
       :
     elif command -v useradd >/dev/null 2>&1; then
@@ -3337,20 +3341,29 @@ _acq_msb_ensure_agent_user() {
       # the tool pick a free uid. -M: do not auto-create home here; we create and
       # chown it explicitly below so ownership is unconditional.
       useradd -M -d /home/agent -s /bin/sh agent
+      _acq_created_agent=1
     elif command -v adduser >/dev/null 2>&1; then
       # Alpine/BusyBox.
       adduser -h /home/agent -s /bin/sh -D -H agent
+      _acq_created_agent=1
     else
       echo "acq(msb): no useradd/adduser in base image; cannot create agent user" >&2
       exit 1
     fi
     # Home MUST exist and be owned by agent. Not best-effort: a root-owned home
     # breaks every agent-user kit. `id -gn agent` resolves the primary group so
-    # chown works whether or not an `agent` group exists.
+    # chown works whether or not an `agent` group exists. The RECURSIVE chown is
+    # reserved for a user acq just created (a plain base can leave a half-created
+    # or root-owned home): when the image shipped the agent user it also baked
+    # the home ownership, and a write-crawl over a dense baked home (single-user
+    # Nix state is thousands of tiny files) grinds the guest disk journal for
+    # minutes. The top-level chown and the writability check below still run on
+    # every path; they cover the home directory itself, not a root-owned subtree
+    # a custom image baked beneath it, which the base-image contract forbids.
     mkdir -p /home/agent
     _agrp=$(id -gn agent 2>/dev/null || echo agent)
     chown "agent:${_agrp}" /home/agent
-    chown -R "agent:${_agrp}" /home/agent
+    if [ "$_acq_created_agent" = 1 ]; then chown -R "agent:${_agrp}" /home/agent; fi
     # Verify writability as the agent user (catches an exotic base where chown
     # "succeeds" but the mount is read-only, etc.). Fatal on failure.
     su agent -s /bin/sh -c "test -w /home/agent" 2>/dev/null \

@@ -572,6 +572,15 @@ no `agent`, no sudoers rule) that meets none of the first three, the msb adapter
 adds a sudoers `env_keep` for the proxy variables. It addresses the user by name
 (not the literal uid 1000), so it works even when 1000 is already taken.
 
+The recursive chown of `/home/agent` runs **only on that synthesized path**. When
+the image already ships an `agent` user, acq trusts the baked ownership (a dense
+baked home would otherwise cost minutes of chown on every first provision) and
+touches only the home directory itself. A custom image that ships `agent` but
+leaves root-owned content under `/home/agent` (a `COPY` without `--chown`)
+therefore violates the contract above and is not healed: the agent user gets
+`EACCES` on that subtree. Fix the image (`COPY --chown=agent:agent`, or a
+`chown -R agent:agent /home/agent` layer) rather than relying on acq.
+
 **How attach launches the agent.** sbx's `sbx run --name` re-launches the
 baked-in agent. On msb the adapter reproduces that with `msb exec -t` — the one
 primitive that allocates a PTY (so a full-screen agent TUI renders), runs as the
