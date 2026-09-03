@@ -3787,7 +3787,20 @@ _acq_msb_ensure_ssh_agent_forward() {
   # The --vsock route is create-time only. If this sandbox was created WITHOUT
   # it, a socat bridge would be inert and the marker would falsely advertise a
   # working agent, so require the route to actually be present before wiring.
-  _acq_msb_has_ssh_agent_vsock_route "$name" || return 0
+  # Do not fail silently, though: a valid host SSH_AUTH_SOCK means the user opted
+  # into signing support, and a missing route is the exact shape produced by a
+  # same-name sandbox recreated outside this create path (or after wiping msb
+  # state but keeping acq's expectations around the name). Recreate through acq
+  # with SSH_AUTH_SOCK set so the create-time route is recorded.
+  if ! _acq_msb_has_ssh_agent_vsock_route "$name"; then
+    echo "acq(msb): warning: host SSH_AUTH_SOCK is set, but existing sandbox '$name'" \
+         "has no ssh-agent --vsock route. The route is create-time only, so" \
+         "SSH_AUTH_SOCK will not be set in the guest and git signing will fail." >&2
+    echo "acq(msb):   If this sandbox was recreated with the same name after wiping" \
+         "msb state, remove it with 'acq rm $name' and re-run 'acq run …' with" \
+         "SSH_AUTH_SOCK set so acq can create the route. See ADR-0021." >&2
+    return 0
+  fi
 
   # From here, treat forwarding as active: point the bridge starter at the guest
   # sock constant (not the possibly-empty marker) and gate on socat as provision

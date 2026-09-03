@@ -356,6 +356,26 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   refute_regex "$(cat "$CALLS")" 'socat UNIX-LISTEN'
 }
 
+@test "vsock(10c17b): re-attach warns when host agent is set but no route exists" {
+  _mk_unix_socket "$STUBDIR/agent17b.sock" || skip "python3 AF_UNIX socket unavailable"
+  printf 'rbox\n' >"$STUBDIR/.msb_sandbox_list"
+  printf 'rbox\n' >"$STUBDIR/.msb_running_list"
+  printf '{"active_config":{"network":{}}}\n' >"$STUBDIR/.msb_inspect_json"
+  : > "$CALLS"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent17b.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_ensure_ssh_agent_forward rbox 2>&1
+    wait
+  '
+  assert_success
+  assert_output --partial 'has no ssh-agent --vsock route'
+  assert_output --partial 'SSH_AUTH_SOCK will not be set in the guest'
+  assert_output --partial 'same name after wiping msb state'
+  refute_regex "$(cat "$CALLS")" 'socat UNIX-LISTEN'
+}
+
 @test "vsock(10c18): the route probe matches the real msb 0.6.12 vsock shape" {
   # The real shape (confirmed on msb 0.6.12) is
   #   "vsock":{"routes":[{"host_socket":"…/Listeners","port":3552}]}
