@@ -2,14 +2,21 @@
 #
 # 76-msb-dns.bats — bats port of scripts/test-acq.d/76-msb-dns.sh (ADR-0019/0025)
 #
-# msb provision must pass --dns-nameserver (the guest can't reach the host's
-# corporate resolver), a generous default --memory/--cpus (msb's 512MiB/1vCPU
-# OOM-kills a Node TUI), and honor / validate the ACQ_MSB_* overrides. Each case
-# runs a real acq_backend_provision in an isolated subshell and inspects $CALLS.
+# msb provision must leave guest DNS on the host's resolvers, turn msb's rebind
+# protection off only when the host's own resolvers sit in 100.64/10 (ZPA, whose
+# split-horizon answers are private-range), pass a generous default
+# --memory/--cpus (msb's 512MiB/1vCPU OOM-kills a Node TUI), and honor /
+# validate the ACQ_MSB_* overrides. Each case runs a real acq_backend_provision
+# in an isolated subshell and inspects $CALLS. The host resolver listing is fed
+# from a fixture (ACQ_TEST_HOST_RESOLVERS) so no case depends on the machine
+# running the suite.
 #
 # shellcheck shell=bats
 
-setup() { acq_setup_stubs; }
+setup() {
+  acq_setup_stubs
+  printf 'nameserver 192.168.0.1\nnameserver 8.8.8.8\n' > "$STUBDIR/resolvers-public"
+}
 teardown() { acq_teardown_stubs; }
 
 load 'helper'
@@ -29,14 +36,75 @@ _provision() { # NAME ENV_ASSIGNMENTS...
     mkdir -p "'"$STUBDIR"'/nokit"
     printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "'"$STUBDIR"'/nokit/spec.yaml"
     _acq_msb_fetch_kit() { printf "%s\n" "'"$STUBDIR"'/nokit"; }
+    _acq_msb_host_resolver_lines() { cat "${ACQ_TEST_HOST_RESOLVERS:-'"$STUBDIR"'/resolvers-public}"; }
     acq_backend_provision "$name" shell /tmp 2>&1 >/dev/null
   ' _ "$name" "$@"
 }
 
-@test "msb: provision sets --dns-nameserver 1.1.1.1 by default" {
+@test "msb #439: provision leaves guest DNS on the host resolvers by default (no --dns-nameserver)" {
   _provision dnsbox
   run cat "$CALLS"
-  assert_output --partial '--dns-nameserver 1.1.1.1'
+  refute_output --partial '--dns-nameserver'
+}
+
+_rebind_note='host resolvers are in 100.64/10 (ZPA); disabling guest DNS rebind protection'
+
+@test "msb #439: auto disables rebind protection when a host resolver is in 100.64/10" {
+  printf 'search gsa.gov\nnameserver 100.64.0.1\nnameserver 100.64.0.2\n' > "$STUBDIR/resolvers-zpa"
+  _provision rebindbox ACQ_TEST_HOST_RESOLVERS="$STUBDIR/resolvers-zpa"
+  assert_output --partial "$_rebind_note"
+  run cat "$CALLS"
+  assert_output --partial '--no-dns-rebind-protection'
+}
+
+@test "msb #439: auto keeps rebind protection on a host without CGNAT resolvers" {
+  _provision rebind2box
+  refute_output --partial "$_rebind_note"
+  run cat "$CALLS"
+  refute_output --partial '--no-dns-rebind-protection'
+}
+
+@test "msb #439: auto matches any CGNAT resolver in a mixed list" {
+  printf 'nameserver 192.168.0.1\nnameserver 100.64.0.1\n' > "$STUBDIR/resolvers-mixed"
+  _provision rebind3box ACQ_TEST_HOST_RESOLVERS="$STUBDIR/resolvers-mixed"
+  run cat "$CALLS"
+  assert_output --partial '--no-dns-rebind-protection'
+}
+
+@test "msb #439: auto matches 100.64.0.0/10 exactly, not all of 100/8" {
+  printf 'nameserver 100.128.0.1\nnameserver 100.63.255.1\n' > "$STUBDIR/resolvers-near"
+  _provision rebind4box ACQ_TEST_HOST_RESOLVERS="$STUBDIR/resolvers-near"
+  run cat "$CALLS"
+  refute_output --partial '--no-dns-rebind-protection'
+  printf 'nameserver 100.127.255.254\n' > "$STUBDIR/resolvers-edge"
+  _provision rebind5box ACQ_TEST_HOST_RESOLVERS="$STUBDIR/resolvers-edge"
+  run cat "$CALLS"
+  assert_output --partial '--no-dns-rebind-protection'
+}
+
+@test "msb #439: ACQ_MSB_DNS_REBIND_PROTECTION=1 keeps the protection even with a CGNAT resolver" {
+  printf 'nameserver 100.64.0.1\n' > "$STUBDIR/resolvers-zpa"
+  _provision rebind6box ACQ_MSB_DNS_REBIND_PROTECTION=1 ACQ_TEST_HOST_RESOLVERS="$STUBDIR/resolvers-zpa"
+  refute_output --partial "$_rebind_note"
+  run cat "$CALLS"
+  refute_output --partial '--no-dns-rebind-protection'
+}
+
+@test "msb #439: an invalid ACQ_MSB_DNS_REBIND_PROTECTION warns and falls back to auto" {
+  _provision rebind9box ACQ_MSB_DNS_REBIND_PROTECTION=maybe
+  assert_output --partial 'invalid ACQ_MSB_DNS_REBIND_PROTECTION=maybe'
+  run cat "$CALLS"
+  refute_output --partial '--no-dns-rebind-protection'
+}
+
+@test "msb #439: ACQ_MSB_DNS_REBIND_PROTECTION=0 forces the protection off without a CGNAT resolver" {
+  _provision rebind7box ACQ_MSB_DNS_REBIND_PROTECTION=0
+  refute_output --partial "$_rebind_note"
+  run cat "$CALLS"
+  assert_output --partial '--no-dns-rebind-protection'
+  _provision rebind8box ACQ_MSB_DNS_REBIND_PROTECTION=off
+  run cat "$CALLS"
+  assert_output --partial '--no-dns-rebind-protection'
 }
 
 @test "msb: ACQ_MSB_DNS_NAMESERVER override is honored; empty omits the flag" {
