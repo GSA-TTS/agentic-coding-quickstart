@@ -217,9 +217,9 @@ ELB) or is unreachable. acq therefore leaves the resolver at msb's default, and
 on such a host passes `--no-dns-rebind-protection`, because msb's rebind
 protection would drop those private-range answers.
 
-**Detection rule.** At `msb create`, acq reads the host's resolver list (the
-same one msb's stack forwards to: `scutil --dns` on macOS, `/etc/resolv.conf`
-elsewhere). If any resolver sits in `100.64.0.0/10`, the CGNAT range ZPA uses
+**Detection rule.** At `msb create`, acq reads the host's resolver list from
+`/etc/resolv.conf`, which on macOS mirrors the global DNS state msb itself
+reads. If any resolver sits in `100.64.0.0/10`, the CGNAT range ZPA uses
 for both its resolvers and its synthetic app addresses, acq disables rebind
 protection and prints one line saying so. A host with no such resolver keeps
 msb's default (protection on) and sees no change. `ACQ_MSB_DNS_REBIND_PROTECTION`
@@ -230,6 +230,7 @@ takes three values:
 | unset / empty | auto: off on a host with a `100.64/10` resolver, on otherwise |
 | `1` / `true` / `on` | always keep the protection (tunnel-only names then fail to resolve) |
 | `0` / `false` / `off` | always disable it |
+| anything else | warns and falls back to auto |
 
 This is decided at create time; an existing sandbox keeps whatever it was
 created with until it is recreated. If the tunnel was down when the sandbox was

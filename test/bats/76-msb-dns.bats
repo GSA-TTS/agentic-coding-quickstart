@@ -49,8 +49,8 @@ _provision() { # NAME ENV_ASSIGNMENTS...
 
 _rebind_note='host resolvers are in 100.64/10 (ZPA); disabling guest DNS rebind protection'
 
-@test "msb #439: auto disables rebind protection when a host resolver is in 100.64/10 (scutil format)" {
-  printf '  nameserver[0] : 100.64.0.1\n  nameserver[1] : 100.64.0.2\n' > "$STUBDIR/resolvers-zpa"
+@test "msb #439: auto disables rebind protection when a host resolver is in 100.64/10" {
+  printf 'search gsa.gov\nnameserver 100.64.0.1\nnameserver 100.64.0.2\n' > "$STUBDIR/resolvers-zpa"
   _provision rebindbox ACQ_TEST_HOST_RESOLVERS="$STUBDIR/resolvers-zpa"
   assert_output --partial "$_rebind_note"
   run cat "$CALLS"
@@ -64,7 +64,7 @@ _rebind_note='host resolvers are in 100.64/10 (ZPA); disabling guest DNS rebind 
   refute_output --partial '--no-dns-rebind-protection'
 }
 
-@test "msb #439: auto matches any CGNAT resolver in a mixed list (resolv.conf format)" {
+@test "msb #439: auto matches any CGNAT resolver in a mixed list" {
   printf 'nameserver 192.168.0.1\nnameserver 100.64.0.1\n' > "$STUBDIR/resolvers-mixed"
   _provision rebind3box ACQ_TEST_HOST_RESOLVERS="$STUBDIR/resolvers-mixed"
   run cat "$CALLS"
@@ -86,6 +86,13 @@ _rebind_note='host resolvers are in 100.64/10 (ZPA); disabling guest DNS rebind 
   printf 'nameserver 100.64.0.1\n' > "$STUBDIR/resolvers-zpa"
   _provision rebind6box ACQ_MSB_DNS_REBIND_PROTECTION=1 ACQ_TEST_HOST_RESOLVERS="$STUBDIR/resolvers-zpa"
   refute_output --partial "$_rebind_note"
+  run cat "$CALLS"
+  refute_output --partial '--no-dns-rebind-protection'
+}
+
+@test "msb #439: an invalid ACQ_MSB_DNS_REBIND_PROTECTION warns and falls back to auto" {
+  _provision rebind9box ACQ_MSB_DNS_REBIND_PROTECTION=maybe
+  assert_output --partial 'invalid ACQ_MSB_DNS_REBIND_PROTECTION=maybe'
   run cat "$CALLS"
   refute_output --partial '--no-dns-rebind-protection'
 }

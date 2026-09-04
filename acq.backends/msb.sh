@@ -309,29 +309,30 @@ ACQ_MSB_DNS_NAMESERVER="${ACQ_MSB_DNS_NAMESERVER:-}"
 # detection misses, e.g. the tunnel was down at create time).
 ACQ_MSB_DNS_REBIND_PROTECTION="${ACQ_MSB_DNS_REBIND_PROTECTION:-}"
 case "$(printf '%s' "$ACQ_MSB_DNS_REBIND_PROTECTION" | tr '[:upper:]' '[:lower:]')" in
+  "")             ;;
   1|true|yes|on)  ACQ_MSB_DNS_REBIND_PROTECTION="1" ;;
   0|false|no|off) ACQ_MSB_DNS_REBIND_PROTECTION="0" ;;
-  *)              ACQ_MSB_DNS_REBIND_PROTECTION="" ;;
+  *)
+    printf 'acq(msb): WARNING: invalid ACQ_MSB_DNS_REBIND_PROTECTION=%s (expected 1|0|empty); using auto\n' "$ACQ_MSB_DNS_REBIND_PROTECTION" >&2
+    ACQ_MSB_DNS_REBIND_PROTECTION=""
+    ;;
 esac
 
-# _acq_msb_host_resolver_lines — the raw resolver listing msb's host-side stack
-# will use: `scutil --dns` on Darwin, /etc/resolv.conf elsewhere. Tests
-# override this to feed a fixture.
+# _acq_msb_host_resolver_lines — the resolver listing msb's host-side stack
+# will use. /etc/resolv.conf on every platform: on macOS configd writes it from
+# the global DNS state (State:/Network/Global/DNS), the one source msb reads,
+# whereas `scutil --dns` also lists domain-scoped supplemental resolvers msb
+# never consults. Tests override this to feed a fixture.
 _acq_msb_host_resolver_lines() {
-  if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
-    scutil --dns 2>/dev/null
-  else
-    cat /etc/resolv.conf 2>/dev/null
-  fi
+  cat /etc/resolv.conf 2>/dev/null
   return 0
 }
 
 # _acq_msb_host_resolvers_in_cgnat — true when any host resolver sits in
-# 100.64.0.0/10 (second octet 64-127), the ZPA signature. Both listing formats
-# put the address last on a line whose first field starts with "nameserver".
+# 100.64.0.0/10 (second octet 64-127), the ZPA signature.
 _acq_msb_host_resolvers_in_cgnat() {
   local ip o2
-  for ip in $(_acq_msb_host_resolver_lines | awk '$1 ~ /^nameserver/ { print $NF }'); do
+  for ip in $(_acq_msb_host_resolver_lines | awk '$1 == "nameserver" { print $2 }'); do
     case "$ip" in 100.*.*.*) ;; *) continue ;; esac
     o2=${ip#100.}; o2=${o2%%.*}
     case "$o2" in ""|*[!0-9]*) continue ;; esac
