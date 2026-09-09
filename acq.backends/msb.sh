@@ -4520,19 +4520,18 @@ _acq_msb_ssh_key_ensure() {
   return 0
 }
 
-# _acq_msb_ssh_authorize — seat the acq public key via `msb ssh authorize` once.
-# Authorizing twice is harmless; a marker guards against re-running each publish.
+# _acq_msb_ssh_authorize — seat the acq public key via `msb ssh authorize`.
+#
+# Do this on every post-hoc publish instead of trusting a private marker file:
+# msb's host-scoped authorized_keys can disappear independently of acq state
+# (e.g. msb data reset/reinstall), and `msb ssh serve` then fails immediately.
+# Authorizing an already-present key is harmless and keeps the path self-healing.
 _acq_msb_ssh_authorize() {
-  local marker="${ACQ_MSB_SSH_DIR}/.authorized"
-  if [ -f "$marker" ]; then
-    return 0
-  fi
   if ! msb ssh authorize --file "${ACQ_MSB_SSH_KEY}.pub" >/dev/null 2>&1; then
     echo "acq(msb): ports: 'msb ssh authorize' failed for the acq tunnel key." >&2
     return 1
   fi
-  : >"$marker" 2>/dev/null || true
-  acq_debug "msb ports: authorized acq tunnel public key (once)"
+  acq_debug "msb ports: authorized acq tunnel public key"
   return 0
 }
 
