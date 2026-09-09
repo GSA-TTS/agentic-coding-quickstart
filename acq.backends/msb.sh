@@ -2435,19 +2435,22 @@ _acq_msb_clone_setup() {
 }
 
 # _acq_msb_clone_copy_config SRC SCRATCH — write the few repo-local config
-# values a clone drops but the guest needs, from SRC into the scratch:
-#   - user.name/user.email (#438): SRC's EFFECTIVE identity. A per-forge
-#     identity often lives only in .git/config or behind a gitdir-scoped
-#     includeIf; the guest's synced global tier cannot express a per-repo value,
-#     so without this the first in-guest commit fails with "Author identity
-#     unknown". `git -C SRC config --get` resolves it exactly as the user's own
-#     commits do.
-#   - remote.origin.url/remote.origin.pushurl (#453): `git clone <host path>`
-#     points the scratch's origin at the host checkout path, and the scratch is
+# values a clone drops but the guest needs, from SRC into the scratch (see
+# ADR-0027 for what a clone carries and why):
+#   - user.name/user.email: SRC's EFFECTIVE identity. A per-forge identity
+#     often lives only in .git/config or behind a gitdir-scoped includeIf; the
+#     guest's synced global tier cannot express a per-repo value, so without
+#     this the first in-guest commit fails with "Author identity unknown".
+#     `git -C SRC config --get` resolves it exactly as the user's own commits do.
+#   - remote.origin.url/remote.origin.pushurl: `git clone <host path>` points
+#     the scratch's origin at the host checkout path, and the scratch is
 #     mounted AT that path in the guest — so origin resolves to the scratch
 #     itself (fetch is a no-op, push cannot reach the real remote). Copy the
-#     RAW values (`config --get`, not `remote get-url`) so host insteadOf
-#     rewrites are not baked in; the guest's global tier applies its own.
+#     RAW values (`config --get`, not `remote get-url`): that is what
+#     .git/config holds and what sbx carries, and a host insteadOf rewrite is
+#     host policy the guest never receives (an https->ssh rewrite would hand the
+#     guest a transport it has no key for). A credential embedded in the URL
+#     travels with it, exactly as it does in a direct mount of the checkout.
 # Running git inside the scratch is safe HERE only: acq just created it and it
 # is not yet guest-exposed (see the rm-time rule in _acq_msb_clone_warn_unfetched).
 # Unlike the global-identity forwarder in common.sh there is no

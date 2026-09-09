@@ -131,14 +131,18 @@ on purpose, written repo-locally into the scratch:
   that very path in the guest, so `origin` would resolve to the scratch itself:
   `git fetch origin` a no-op, `git push origin` unable to reach the real
   remote, and anything that identifies the repo by its origin URL misled. The
-  raw configured values are copied (not `git remote get-url`'s expansion), so
-  host `insteadOf` rewrites are not baked in; the guest's global tier applies
-  its own. Remote-tracking refs (`origin/*`) still reflect the host's local
-  branches at clone time until the first `git fetch --prune`.
+  raw configured values are copied, not `git remote get-url`'s expansion: a
+  host `insteadOf` rewrite is host policy that the guest never receives (only
+  `user.*` is synced into its global tier), and an https-to-ssh rewrite would
+  hand the guest a transport it has no key for. A credential embedded in the
+  URL travels with it, exactly as it does when the checkout's own `.git/config`
+  is mounted in a non-clone run. Remote-tracking refs (`origin/*`) still
+  reflect the host's local branches at clone time until the first
+  `git fetch --prune`.
 
 sbx carries both incidentally by copying `.git` wholesale. Propagating only
-these inert values is the minimized form of that, without the credential
-helpers, hooks, and URL rewrites that ride along with a wholesale copy.
+these values is the minimized form of that, without the credential helpers,
+hooks, and URL rewrites that ride along with a wholesale copy.
 
 ### Trade-off stated openly
 
