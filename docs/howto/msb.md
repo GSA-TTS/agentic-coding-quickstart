@@ -242,9 +242,14 @@ A few quick msb pointers:
 # Host not ready / boot fails
 msb doctor            # then msb doctor --fix
 
-# Guest can't resolve allow-listed hosts (corporate/VPN resolver unreachable)
-# acq defaults --dns-nameserver 1.1.1.1; override if 1.1.1.1 is blocked:
+# Guest can't resolve allow-listed hosts (the guest follows the host's
+# resolvers by default; force one only if those cannot be used):
 export ACQ_MSB_DNS_NAMESERVER=<reachable-resolver>
+
+# Tunnel-only names (ZPA) fail in a sandbox created while the tunnel was down:
+# acq relaxes msb's DNS rebind protection only when it sees 100.64/10 resolvers
+# at create time. Recreate with it forced off:
+ACQ_MSB_DNS_REBIND_PROTECTION=0 acq run opencode .
 
 # A locally-built image won't pull (registry-less reference)
 msb image load -i image.tar -t localhost/my-image:tag
