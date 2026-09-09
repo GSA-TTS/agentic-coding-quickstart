@@ -469,9 +469,11 @@ acq_backend_provision() {
   # sbx mounts the primary at its LOGICAL absolute host path (`.` resolves to
   # $PWD-form, not realpath; verified sbx 0.42.1), so resolve the same way or
   # `cd "$ACQ_WORKSPACE"` misses the mount on a symlinked path like /tmp.
+  # CDPATH is cleared so a relative workspace resolves against $PWD only (a
+  # CDPATH hit would both pick another directory and echo it into the value).
   local _ef=() _primary_ws
   _primary_ws=$(workspace_path "$@")
-  [ -n "$_primary_ws" ] && { _primary_ws=$(cd "$_primary_ws" 2>/dev/null && pwd) || _primary_ws=""; }
+  [ -n "$_primary_ws" ] && { _primary_ws=$(CDPATH='' cd -- "$_primary_ws" 2>/dev/null && pwd) || _primary_ws=""; }
   if [ -n "$_primary_ws" ]; then
     _ef=(--env "ACQ_WORKSPACE=${_primary_ws}")
     [ "${ACQ_CLONE:-0}" = "1" ] && _ef+=(--env ACQ_CLONE=1)
@@ -485,11 +487,7 @@ acq_backend_provision() {
 
   acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_stripped[*]:-}"
   acq_spin_start "Creating sandbox '$name'"
-  if [ "${#_stripped[@]}" -gt 0 ]; then
-    sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" "${_stripped[@]}"
-  else
-    sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}"
-  fi
+  sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" ${_stripped[@]+"${_stripped[@]}"}
   local _rc=$?
   acq_spin_stop "Creating sandbox '$name'"
   # Record host-side bundle provenance ONLY after a successful create — a failed

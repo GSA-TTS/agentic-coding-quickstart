@@ -329,11 +329,15 @@ _msb_clone_isolated() { # ARGS...
   assert_regex "$line" '--env ACQ_CLONE=1( |$)'
 }
 
-@test "clone(sbx #456): a relative workspace resolves to the logical absolute path, no ACQ_CLONE" {
+@test "clone(sbx #456): a relative workspace resolves against PWD (CDPATH ignored) to the logical path, no ACQ_CLONE" {
   printf 'sk-test\n' | env ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
   seed_sbx_usai_proxy_fixture
-  (cd "$CLONEPROJ" && env ACQ_BACKEND=sbx "$ACQ" create opencode . >/dev/null 2>&1)
+  # CDPATH points at a decoy holding a same-named dir: the marker must still
+  # resolve the relative workspace against $PWD, as sbx does, on one line.
+  mkdir -p "$STUBDIR/decoy/cloneproj"
+  (cd "$STUBDIR" && CDPATH="$STUBDIR/decoy" env ACQ_BACKEND=sbx "$ACQ" create opencode cloneproj >/dev/null 2>&1)
   local line logical; line=$(_create_line sbx); logical=$(cd "$CLONEPROJ" && pwd)
-  assert_regex "$line" "--env ACQ_WORKSPACE=${logical}( |\$)"
+  assert_regex "$line" "--env ACQ_WORKSPACE=${logical} "
+  refute_regex "$line" 'decoy'
   refute_regex "$line" 'ACQ_CLONE'
 }
