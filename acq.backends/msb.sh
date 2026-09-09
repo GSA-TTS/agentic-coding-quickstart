@@ -2369,6 +2369,7 @@ _acq_msb_clone_setup() {
     rm -rf "$dir"
     return 1
   fi
+  _acq_msb_clone_copy_identity "$ws_canon" "$scratch"
   # Fetch-back remote in the host checkout (replace a stale same-name remote —
   # its scratch dir was just verified absent, so it cannot hold unfetched work).
   git -C "$ws_canon" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
@@ -2379,6 +2380,29 @@ _acq_msb_clone_setup() {
   echo "acq(msb): agent runs on a disposable clone; the real checkout is untouched." >&2
   echo "acq(msb):   Recover agent branches with: git fetch sandbox-${name}" >&2
   _ACQ_MSB_CLONE_DIR=$(canonicalize_path "$scratch")
+  return 0
+}
+
+# _acq_msb_clone_copy_identity SRC SCRATCH — write SRC's EFFECTIVE git
+# identity (user.name/user.email) repo-locally into the scratch. A clone drops
+# .git/config, and a per-forge identity often lives only there or behind a
+# gitdir-scoped includeIf; the guest's synced global tier cannot express a
+# per-repo value, so without this the first in-guest commit fails with "Author
+# identity unknown". `git -C SRC config --get` resolves the value exactly as
+# the user's own commits do. Running git inside the scratch is safe HERE only:
+# acq just created it and it is not yet guest-exposed (see the rm-time rule in
+# _acq_msb_clone_warn_unfetched). Unlike the global-identity forwarder in
+# common.sh there is no control-character filter: the values go through `git
+# config`, which escapes on write, never onto a command line. Best-effort,
+# always returns 0.
+_acq_msb_clone_copy_identity() {
+  local src="$1" scratch="$2" key val
+  for key in user.name user.email; do
+    val=$(git -C "$src" config --get "$key" 2>/dev/null) || continue
+    [ -n "$val" ] || continue
+    git -C "$scratch" config "$key" "$val" >/dev/null 2>&1 \
+      || echo "acq(msb): warning: --clone: could not set $key in the scratch clone." >&2
+  done
   return 0
 }
 
@@ -3000,10 +3024,13 @@ EOF
   # which is exactly how the playbook stopped fetching. Abort provision rather
   # than degrade silently.
   acq_debug "msb provision: ensuring agent user ($name)"
+  acq_spin_start "Preparing the agent user"
   if ! _acq_msb_ensure_agent_user "$name"; then
+    acq_spin_stop
     echo "acq(msb): error: agent-user setup failed for '$name'; aborting provision." >&2
     return 1
   fi
+  acq_spin_stop "Preparing the agent user"
   acq_debug "msb provision: agent user ready ($name)"
 
   # Ensure an OCI container engine (podman) so agents can run OCI images
@@ -3306,6 +3333,7 @@ _acq_msb_ensure_agent_user() {
   # silently degraded into a root-owned home and a playbook that never fetched).
   msb exec "$name" -u 0 -- sh -c '
     set -e
+    _acq_created_agent=0
     if id agent >/dev/null 2>&1; then
       :
     elif command -v useradd >/dev/null 2>&1; then
@@ -3313,20 +3341,29 @@ _acq_msb_ensure_agent_user() {
       # the tool pick a free uid. -M: do not auto-create home here; we create and
       # chown it explicitly below so ownership is unconditional.
       useradd -M -d /home/agent -s /bin/sh agent
+      _acq_created_agent=1
     elif command -v adduser >/dev/null 2>&1; then
       # Alpine/BusyBox.
       adduser -h /home/agent -s /bin/sh -D -H agent
+      _acq_created_agent=1
     else
       echo "acq(msb): no useradd/adduser in base image; cannot create agent user" >&2
       exit 1
     fi
     # Home MUST exist and be owned by agent. Not best-effort: a root-owned home
     # breaks every agent-user kit. `id -gn agent` resolves the primary group so
-    # chown works whether or not an `agent` group exists.
+    # chown works whether or not an `agent` group exists. The RECURSIVE chown is
+    # reserved for a user acq just created (a plain base can leave a half-created
+    # or root-owned home): when the image shipped the agent user it also baked
+    # the home ownership, and a write-crawl over a dense baked home (single-user
+    # Nix state is thousands of tiny files) grinds the guest disk journal for
+    # minutes. The top-level chown and the writability check below still run on
+    # every path; they cover the home directory itself, not a root-owned subtree
+    # a custom image baked beneath it, which the base-image contract forbids.
     mkdir -p /home/agent
     _agrp=$(id -gn agent 2>/dev/null || echo agent)
     chown "agent:${_agrp}" /home/agent
-    chown -R "agent:${_agrp}" /home/agent
+    if [ "$_acq_created_agent" = 1 ]; then chown -R "agent:${_agrp}" /home/agent; fi
     # Verify writability as the agent user (catches an exotic base where chown
     # "succeeds" but the mount is read-only, etc.). Fatal on failure.
     su agent -s /bin/sh -c "test -w /home/agent" 2>/dev/null \
