@@ -149,9 +149,13 @@ the neutral `hybrid/v1` kits, JSON schema, and registry) lands separately in
   absolute path in the guest** (sbx-parity; see the workspace-mount note below) —
   an earlier revision remapped to a fixed `/home/agent/workspace`, which failed
   because `msb create` mounts before the `agent` user/home exist.
-  It passes **`--dns-nameserver`** (default `1.1.1.1`) because msb hands the
-  guest the host's resolvers, which for a corporate/VPN resolver are unreachable
-  from the microVM (otherwise the guest can't resolve even allow-listed hosts).
+  It leaves guest DNS on the **host's resolvers** and, when a host resolver is
+  in `100.64.0.0/10` (ZPA), passes `--no-dns-rebind-protection`, so
+  split-horizon names on a corporate tunnel resolve to the same private
+  addresses the host uses while other hosts keep msb's guard (an earlier revision
+  pinned `1.1.1.1`, assuming the host resolver was unreachable from the
+  microVM; msb's host-side network stack made that moot and the public answer
+  is the wrong one for tunnel-gated hosts).
   It treats a sandbox that is **not exec-ready** after create as a HARD failure:
   `msb create` returns 0 even when the guest fails to START (async boot), so the
   only reliable readiness signal is that `msb exec` works.
