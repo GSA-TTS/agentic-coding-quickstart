@@ -257,3 +257,28 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   env ACQ_BACKEND=sbx "$ACQ" create opencode --clone "$CLONEPROJ" >/dev/null 2>&1
   assert_regex "$(_create_line sbx)" '--clone'
 }
+
+# Neutralize the host git identity so only the source checkout's values (or
+# their absence) can reach the scratch.
+_msb_clone_isolated() { # ARGS...
+  _msb_clone HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" GIT_CONFIG_NOSYSTEM=1 -- "$@"
+}
+
+@test "clone(msb #438): the scratch carries the source checkout's effective git identity, repo-locally" {
+  git -C "$CLONEPROJ" config user.name "Repo User"
+  git -C "$CLONEPROJ" config user.email "repo@example.gov"
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  [ "$(git config --file "$scratch/.git/config" user.name)" = "Repo User" ]
+  [ "$(git config --file "$scratch/.git/config" user.email)" = "repo@example.gov" ]
+}
+
+@test "clone(msb #438): no effective source identity writes nothing into the scratch" {
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  [ -d "$scratch/.git" ]
+  run git config --file "$scratch/.git/config" user.name
+  assert_failure
+  run git config --file "$scratch/.git/config" user.email
+  assert_failure
+}

@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# probe-msb-posthoc-ports - host-side diagnostic for msb post-hoc port publish.
+#
+# This probes the raw msb SSH serving primitive underneath:
+#   acq --backend msb ports SANDBOX --publish HOST:GUEST
+#
+# It is designed for the failure where acq reports:
+#   'msb ssh serve' on 127.0.0.1:PORT exited immediately
+#
+# Safety:
+# - Does not print environment variables or secret values.
+# - Starts only transient loopback listeners and kills them before exit.
+# - Runs the final acq publish probe only when --acq-publish is supplied.
+#
+# Usage:
+#   ./scripts/probe-msb-posthoc-ports [SANDBOX] [HOST:GUEST] [--acq-publish]
+#
+# Defaults:
+#   SANDBOX    opencode-scanning-service
+#   HOST:GUEST 6769:6767
+#   --acq-publish is off by default so the diagnostic does not leave a tunnel.
+set -u
+
+SANDBOX="opencode-scanning-service"
+MAPPING="6769:6767"
+RUN_ACQ_PUBLISH=""
+TMPDIR_PROBE=""
+PIDS=""
+
+SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+ACQ="$SCRIPT_DIR/acq"
+
+PASS=0
+FAIL=0
+INFO=0
+
+ok() { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
+bad() { FAIL=$((FAIL + 1)); printf '  BAD  %s\n' "$1"; [ -n "${2:-}" ] && printf '       %s\n' "$2"; }
+note() { INFO=$((INFO + 1)); printf '  info %s\n' "$1"; }
+section() { printf '\n== %s ==\n' "$1"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+cleanup() {
+  local pid
+  trap - EXIT INT TERM
+  for pid in $PIDS; do
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+  done
+  [ -n "$TMPDIR_PROBE" ] && rm -rf "$TMPDIR_PROBE" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+parse_args() {
+  local positional=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --acq-publish)
+        RUN_ACQ_PUBLISH=1
+        ;;
+      --no-acq-publish)
+        RUN_ACQ_PUBLISH=""
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --*)
+        echo "unknown option: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+      *)
+        positional=$((positional + 1))
+        case "$positional" in
+          1) SANDBOX="$1" ;;
+          2) MAPPING="$1" ;;
+          *)
+            echo "unexpected extra argument: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+        esac
+        ;;
+    esac
+    shift
+  done
+}
+
+valid_mapping() {
+  local m="$1" h g p
+  case "$m" in *:*) ;; *) return 1 ;; esac
+  h="${m%%:*}"
+  g="${m#*:}"
+  for p in "$h" "$g"; do
+    case "$p" in ""|*[!0-9]*) return 1 ;; esac
+    [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || return 1
+  done
+  return 0
+}
+
+print_file_indented() {
+  local file="$1"
+  if [ -s "$file" ]; then
+    sed 's/^/       | /' "$file"
+  else
+    printf '       | (no output)\n'
+  fi
+}
+
+run_cmd() {
+  local label="$1" outfile rc
+  shift
+  outfile="$TMPDIR_PROBE/${label//[^A-Za-z0-9_.-]/_}.out"
+  printf '  $'
+  printf ' %q' "$@"
+  printf '\n'
+  "$@" >"$outfile" 2>&1
+  rc=$?
+  printf '  rc=%s\n' "$rc"
+  print_file_indented "$outfile"
+  return "$rc"
+}
+
+summarize_inspect_json() {
+  local json="$1"
+  if [ ! -s "$json" ]; then
+    bad "msb inspect produced no JSON"
+    return 1
+  fi
+  if ! have jq; then
+    note "jq not found; skipping structured inspect summary"
+    return 0
+  fi
+  jq -r '
+    def cfg: (.active_config // .config // .);
+    "  name: " + ((.name // cfg.name // "?")|tostring),
+    "  status: " + ((.status // .state // .runtime.status // "?")|tostring),
+    "  image: " + ((cfg.image.Oci.reference // cfg.image.oci.reference // cfg.image // "?")|tostring),
+    "  network.enabled: " + ((cfg.network.enabled // "?")|tostring),
+    "  default_egress: " + ((cfg.network.policy.default_egress // "?")|tostring),
+    "  default_ingress: " + ((cfg.network.policy.default_ingress // "?")|tostring),
+    "  env keys: " + ((cfg.env // [] | map(.key // empty) | join(", "))),
+    "  mounts: " + ((cfg.mounts // [] | length)|tostring),
+    "  create-time ports:",
+    ((cfg.network.ports // [])[]? | "    sandbox " + ((.guest_port // .guestPort // .guest // .container)|tostring) + " -> host " + ((.host_bind // "127.0.0.1")|tostring) + ":" + ((.host_port // .hostPort // .host)|tostring) + " (" + ((.protocol // "tcp")|tostring) + ")")
+  ' "$json" 2>/dev/null || note "jq could not summarize inspect JSON"
+}
+
+port_is_busy() {
+  local port="$1"
+  if have lsof; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+  fi
+  if have nc; then
+    nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+pick_probe_ports() {
+  local base p count=0
+  base=$(( 23000 + (($$ + $(date +%s 2>/dev/null || printf 0)) % 20000) ))
+  while [ "$count" -lt 3 ]; do
+    p=$(( base + count ))
+    if [ "$p" -gt 65500 ]; then p=$(( 23000 + count )); fi
+    printf '%s\n' "$p"
+    count=$((count + 1))
+  done
+}
+
+probe_serve_port() {
+  local port="$1" out pid rc=0
+  out="$TMPDIR_PROBE/msb-ssh-serve-${port}.out"
+  section "direct msb ssh serve on 127.0.0.1:${port}"
+  if port_is_busy "$port"; then
+    bad "host port $port is already in use" "This would make msb ssh serve fail before acq reaches ssh -L."
+    return 1
+  fi
+  printf '  $ msb ssh serve %q --host 127.0.0.1 --port %q\n' "$SANDBOX" "$port"
+  msb ssh serve "$SANDBOX" --host 127.0.0.1 --port "$port" >"$out" 2>&1 &
+  pid=$!
+  sleep 1
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    ok "msb ssh serve stayed alive for 1s"
+    PIDS="${PIDS:+$PIDS }$pid"
+  else
+    wait "$pid" >/dev/null 2>&1
+    rc=$?
+    bad "msb ssh serve exited immediately (rc=$rc)"
+    print_file_indented "$out"
+    return 1
+  fi
+  print_file_indented "$out"
+  return 0
+}
+
+probe_guest_port() {
+  local gport="$1" script
+  section "guest-side checks for port ${gport}"
+  script="gp=${gport}; echo \"user=\$(id -un 2>/dev/null || true)\"; echo \"ssh=\$(command -v ssh 2>/dev/null || true)\"; echo \"curl=\$(command -v curl 2>/dev/null || true)\"; hex=\$(printf \"%04X\" \"\$gp\" 2>/dev/null || true); if [ -r /proc/net/tcp ]; then grep -i \":\$hex\" /proc/net/tcp 2>/dev/null | sed \"s/^/proc-net-tcp: /\" || true; fi; if command -v curl >/dev/null 2>&1; then curl -sS -m 3 -o /dev/null -w \"curl-http=%{http_code} size=%{size_download}\\n\" \"http://127.0.0.1:\$gp/\"; rc=\$?; echo \"curl-exit=\$rc\"; else echo \"curl=missing\"; fi"
+  run_cmd "guest-port" "$ACQ" --backend msb exec "$SANDBOX" -- sh -lc "$script" || true
+}
+
+main() {
+  parse_args "$@"
+  if ! valid_mapping "$MAPPING"; then
+    echo "invalid HOST:GUEST mapping: $MAPPING" >&2
+    exit 2
+  fi
+  TMPDIR_PROBE=$(mktemp -d "${TMPDIR:-/tmp}/acq-msb-ports-probe.XXXXXX") || exit 1
+  local hport gport inspect_json port serve_ok=0
+  hport="${MAPPING%%:*}"
+  gport="${MAPPING#*:}"
+
+  section "probe configuration"
+  printf '  sandbox: %s\n' "$SANDBOX"
+  printf '  requested publish: host 127.0.0.1:%s -> sandbox 127.0.0.1:%s\n' "$hport" "$gport"
+  printf '  temp dir: %s\n' "$TMPDIR_PROBE"
+
+  section "host prerequisites"
+  if have msb; then ok "msb on PATH ($(command -v msb))"; else bad "msb not on PATH"; exit 1; fi
+  if [ -x "$ACQ" ]; then ok "repo acq found ($ACQ)"; else bad "repo acq not executable ($ACQ)"; exit 1; fi
+  have ssh && ok "ssh on PATH ($(command -v ssh))" || bad "ssh missing"
+  have jq && ok "jq on PATH ($(command -v jq))" || note "jq missing; JSON summaries will be limited"
+  run_cmd "msb-version" msb --version || true
+  run_cmd "acq-version" "$ACQ" version || true
+
+  section "msb ssh serve CLI shape"
+  run_cmd "msb-ssh-serve-help" msb ssh serve --help || true
+
+  section "sandbox inspect summary"
+  inspect_json="$TMPDIR_PROBE/inspect.json"
+  if msb inspect "$SANDBOX" --format json >"$inspect_json" 2>"$TMPDIR_PROBE/inspect.err"; then
+    ok "msb inspect --format json returned 0"
+    summarize_inspect_json "$inspect_json"
+  else
+    bad "msb inspect --format json failed"
+    print_file_indented "$TMPDIR_PROBE/inspect.err"
+  fi
+
+  section "acq ports list"
+  run_cmd "acq-ports-list" "$ACQ" --backend msb ports "$SANDBOX" || true
+
+  section "basic msb ssh connectivity"
+  run_cmd "msb-ssh-true" msb ssh "$SANDBOX" -- true || true
+
+  probe_guest_port "$gport"
+
+  section "requested host publish port occupancy"
+  if port_is_busy "$hport"; then
+    bad "host 127.0.0.1:${hport} appears busy" "The later ssh -L step would fail even if msb ssh serve works."
+  else
+    ok "host 127.0.0.1:${hport} does not appear busy"
+  fi
+
+  for port in $(pick_probe_ports); do
+    if probe_serve_port "$port"; then
+      serve_ok=1
+      break
+    fi
+  done
+
+  if [ -n "$RUN_ACQ_PUBLISH" ]; then
+    section "acq publish probe"
+    run_cmd "acq-publish" "$ACQ" --backend msb ports "$SANDBOX" --publish "$MAPPING" || true
+    note "If acq publish succeeded, tear it down later with: $ACQ --backend msb stop $SANDBOX"
+  else
+    note "skipped acq publish probe; pass --acq-publish to run the real publish path"
+  fi
+
+  section "interpretation"
+  if [ "$serve_ok" -eq 0 ]; then
+    bad "all raw msb ssh serve probes exited immediately" "The captured stderr is raw-msb evidence. The fixed acq path refreshes authorization before serve; pass --acq-publish to test that full path."
+  else
+    ok "raw msb ssh serve can start"
+    note "If acq publish still fails, compare the acq publish output with the raw serve port that worked."
+  fi
+  printf '\n  passed: %d   failed: %d   info: %d\n' "$PASS" "$FAIL" "$INFO"
+  [ "$FAIL" -eq 0 ]
+}
+
+main "$@"

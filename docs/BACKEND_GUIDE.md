@@ -362,7 +362,11 @@ msb has no native clone mode, so the neutral `--clone`
 committed state only. Gitignored/untracked files (sbx copies these — the known
 host-build-state contamination trap) and uncommitted edits to tracked files do
 **not** enter the sandbox; `acq` prints a notice when the host tree is dirty.
-Commit first, or copy specific files in with `acq cp`.
+Commit first, or copy specific files in with `acq cp`. One exception is
+deliberate: the source checkout's effective git identity
+(`user.name`/`user.email`) is written into the scratch as repo-local config, so
+a per-forge identity kept in `.git/config` or a gitdir-scoped include still
+authors the sandbox's commits. See ADR-0027 for the rationale.
 
 The scratch clone lives on host disk (unlike sbx's in-guest clone), confined to
 the acq-managed state dir — disposable by construction and never executed by
@@ -567,6 +571,15 @@ no `agent`, no sudoers rule) that meets none of the first three, the msb adapter
 `/home/agent` files to it, drops a passwordless-sudo rule in `/etc/sudoers.d`, and
 adds a sudoers `env_keep` for the proxy variables. It addresses the user by name
 (not the literal uid 1000), so it works even when 1000 is already taken.
+
+The recursive chown of `/home/agent` runs **only on that synthesized path**. When
+the image already ships an `agent` user, acq trusts the baked ownership (a dense
+baked home would otherwise cost minutes of chown on every first provision) and
+touches only the home directory itself. A custom image that ships `agent` but
+leaves root-owned content under `/home/agent` (a `COPY` without `--chown`)
+therefore violates the contract above and is not healed: the agent user gets
+`EACCES` on that subtree. Fix the image (`COPY --chown=agent:agent`, or a
+`chown -R agent:agent /home/agent` layer) rather than relying on acq.
 
 **How attach launches the agent.** sbx's `sbx run --name` re-launches the
 baked-in agent. On msb the adapter reproduces that with `msb exec -t` — the one
