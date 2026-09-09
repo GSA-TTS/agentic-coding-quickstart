@@ -1012,6 +1012,29 @@ reported by `acq kit validate`); values are plain strings. It maps to sbx-v2
 **Secrets do NOT go here** — use the credential/secret path (`acq secret …`);
 the kit spec never carries a secret value.
 
+**acq-set guest variables.** Independently of any kit, acq sets two guest
+environment variables at create on both backends, through the backend's native
+create-time env flag (`msb create --env`, `sbx create --env`), so they are
+present in every exec/attach session and survive a native restart:
+
+| Variable | When | Value |
+|----------|------|-------|
+| `ACQ_WORKSPACE` | any create with a workspace | guest path of the **primary** workspace (the agent's starting directory) |
+| `ACQ_CLONE` | `--clone` / `ACQ_CLONE=1` only | `1` — the primary is a disposable clone ([ADR-0027](adr/0027-neutral-clone-option.md)) |
+
+They are the kit-facing contract for "act on the clone, never on the real
+checkout": a startup step that writes agent instructions or a repo-local
+permission gate into the workspace should key on them rather than on a
+mount-type heuristic (the msb emulation mounts the scratch exactly like a
+passthrough, so `findmnt`-style probes cannot tell the two apart):
+
+```sh
+[ "${ACQ_CLONE:-0}" = 1 ] && ws="$ACQ_WORKSPACE"
+```
+
+The guard fails closed on both backends. `ACQ_WORKSPACE` is absent on a
+workspace-less create; `ACQ_CLONE` is never set to any value but `1`.
+
 > **Note (cross-repo, satisfied):** the authoritative `environment` schema
 > property and its field-level validator live in the patterns repo
 > (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`), shipped in patterns

@@ -282,3 +282,58 @@ _msb_clone_isolated() { # ARGS...
   run git config --file "$scratch/.git/config" user.email
   assert_failure
 }
+
+# --- Guest-visible workspace markers (GSA-TTS/agentic-coding-quickstart#456) ---
+# A kit that must act only on the disposable clone (write agent instructions,
+# install a repo-local permission gate) and never on the real checkout needs a
+# deliberate, backend-neutral signal: ACQ_WORKSPACE (guest path of the primary)
+# on every create with a workspace, ACQ_CLONE=1 only under --clone. Both ride
+# the backend's native create-time --env flag, which reaches every exec/attach
+# session and survives a native restart (verified msb 0.6.17, sbx 0.42.1).
+
+@test "clone(msb #456): the guest gets ACQ_WORKSPACE and ACQ_CLONE=1 via create --env" {
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  load_acq
+  local repo line; repo=$(canonicalize_path "$CLONEPROJ"); line=$(_create_line msb)
+  assert_regex "$line" "--env ACQ_WORKSPACE=${repo}( |\$)"
+  assert_regex "$line" '--env ACQ_CLONE=1( |$)'
+}
+
+@test "clone(msb #456): a non-clone create exports ACQ_WORKSPACE but never ACQ_CLONE" {
+  _msb_clone -- create shell "$CLONEPROJ"
+  load_acq
+  local repo line; repo=$(canonicalize_path "$CLONEPROJ"); line=$(_create_line msb)
+  assert_regex "$line" "--env ACQ_WORKSPACE=${repo}( |\$)"
+  refute_regex "$line" 'ACQ_CLONE'
+}
+
+@test "clone(msb #456): a workspace-less create exports neither marker" {
+  _msb_clone -- create shell
+  assert_regex "$(cat "$CALLS")" 'msb create'
+  refute_regex "$(_create_line msb)" 'ACQ_WORKSPACE|ACQ_CLONE'
+}
+
+@test "clone(sbx #456): the guest gets ACQ_WORKSPACE and ACQ_CLONE=1 via create --env" {
+  printf 'sk-test\n' | env ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+  seed_sbx_usai_proxy_fixture
+  env ACQ_BACKEND=sbx "$ACQ" create opencode --clone "$CLONEPROJ" >/dev/null 2>&1
+  local line logical; line=$(_create_line sbx); logical=$(cd "$CLONEPROJ" && pwd)
+  # sbx mounts the primary at its LOGICAL absolute host path (not realpath;
+  # on macOS the bats tmpdir is /var/..., a symlink to /private/var), so the
+  # marker must match that form for `cd "$ACQ_WORKSPACE"` to land.
+  assert_regex "$line" "--env ACQ_WORKSPACE=${logical}( |\$)"
+  local real; real=$(canonicalize_path "$CLONEPROJ")
+  if [ "$real" != "$logical" ]; then
+    refute_regex "$line" "ACQ_WORKSPACE=${real}( |\$)"
+  fi
+  assert_regex "$line" '--env ACQ_CLONE=1( |$)'
+}
+
+@test "clone(sbx #456): a relative workspace resolves to the logical absolute path, no ACQ_CLONE" {
+  printf 'sk-test\n' | env ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+  seed_sbx_usai_proxy_fixture
+  (cd "$CLONEPROJ" && env ACQ_BACKEND=sbx "$ACQ" create opencode . >/dev/null 2>&1)
+  local line logical; line=$(_create_line sbx); logical=$(cd "$CLONEPROJ" && pwd)
+  assert_regex "$line" "--env ACQ_WORKSPACE=${logical}( |\$)"
+  refute_regex "$line" 'ACQ_CLONE'
+}
