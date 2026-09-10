@@ -1157,7 +1157,7 @@ _acq_msb_fetch_kit() {
 # validated to look like a DNS name/wildcard BEFORE it reaches eval, so a
 # malformed or malicious spec value can't smuggle shell metacharacters in.
 _acq_msb_net_rules_into() {
-  local _arr="$1" _spec="$2" _host _target
+  local _arr="$1" _spec="$2" _host _target _warned_crl=0
   eval "$_arr=()"
   while IFS= read -r _host; do
     [ -n "$_host" ] || continue
@@ -1171,6 +1171,15 @@ _acq_msb_net_rules_into() {
     # handles ports/DNS for the allowed host), then reuse the balanced-egress target
     # normalizer so per-kit `**.host` wildcards get the same msb suffix form.
     _host="${_host%%:*}"
+    case "$_host" in
+      "crl*."*)
+        if [ "$_warned_crl" -eq 0 ]; then
+          echo "acq(msb): note: broadening 'crl*.' kit net-allow entries to parent domains" >&2
+          echo "acq(msb):   suffixes (msb has no intra-label glob; widens vs. sbx wildcard)." >&2
+          _warned_crl=1
+        fi
+        ;;
+    esac
     _target=$(_acq_msb_balanced_target "$_host" "kit net-allow entry") || continue
     eval "$_arr+=(--net-rule \"allow@\${_target}\")"
   done <<EOF
