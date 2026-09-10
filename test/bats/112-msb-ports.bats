@@ -62,7 +62,7 @@ load 'helper'
   assert [ ! -f "$STUBDIR/state/ports/pbox.pids" ]
 }
 
-@test "msb ports: a second publish reuses the key (no re-keygen/re-authorize) but opens its own tunnel" {
+@test "msb ports: a second publish reuses the key, refreshes auth, and opens its own tunnel" {
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
@@ -73,8 +73,20 @@ load 'helper'
   '
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'ssh-keygen'
-  refute_regex "$log" 'msb ssh authorize'
+  assert_regex "$log" 'msb ssh authorize'
   assert_regex "$log" -- '-L 127.0.0.1:9090:127.0.0.1:4000'
+}
+
+@test "msb ports: stale acq authorization marker does not skip msb authorize" {
+  mkdir -p "$STUBDIR/state/ssh"
+  : > "$STUBDIR/state/ssh/.authorized"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
+    wait
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb ssh authorize'
 }
 
 @test "msb ports: two publishes in one process get distinct serve ports" {
