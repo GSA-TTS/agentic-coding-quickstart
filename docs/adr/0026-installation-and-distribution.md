@@ -319,9 +319,9 @@ as issues):
   succeeds and prints "verified HEAD matches"; a well-formed but absent SHA
   fails closed and cleans up).
 - **release-please version sync:** `release-please-config.json` carries an
-  `extra-files` entry (`type: json`, `jsonpath: $.version`) so the next release
-  bumps `package.json`'s `version`; `npm pack --dry-run` reports the manifest
-  version (`2.0.0`) rather than a placeholder. A generic extra-file marker keeps
+  `extra-files` entry (`type: json`, `jsonpath: $.version`) so each release bumps
+  `package.json`'s `version`; `npm pack --dry-run` reports the current manifest
+  version rather than a placeholder. A generic extra-file marker keeps
   `install.sh`'s `DEFAULT_RELEASE_VERSION` aligned with the release version.
 - **Release assets:** on release creation, `.github/workflows/release.yml` checks
   out the release commit, copies `install.sh`, injects that exact commit into the
