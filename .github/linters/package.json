@@ -12,6 +12,7 @@
   "overrides": {
     "js-yaml": "4.3.2",
     "markdown-it": "14.2.0",
-    "linkify-it": "5.0.2"
+    "linkify-it": "5.0.2",
+    "smol-toml": "1.7.1"
   }
 }
