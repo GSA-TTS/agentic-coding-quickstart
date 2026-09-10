@@ -1157,7 +1157,7 @@ _acq_msb_fetch_kit() {
 # validated to look like a DNS name/wildcard BEFORE it reaches eval, so a
 # malformed or malicious spec value can't smuggle shell metacharacters in.
 _acq_msb_net_rules_into() {
-  local _arr="$1" _spec="$2" _host
+  local _arr="$1" _spec="$2" _host _target
   eval "$_arr=()"
   while IFS= read -r _host; do
     [ -n "$_host" ] || continue
@@ -1168,24 +1168,19 @@ _acq_msb_net_rules_into() {
     # a real multi-label FQDN like api.gsa.usai.gov is unambiguous as a bare domain,
     # so no `domain=` prefix is needed — and using one can break DNS resolution.)
     # Strip any :port the neutral spec carries (msb keys on the domain; the daemon
-    # handles ports/DNS for the allowed host).
+    # handles ports/DNS for the allowed host), then reuse the balanced-egress target
+    # normalizer so per-kit `**.host` wildcards get the same msb suffix form.
     _host="${_host%%:*}"
-    # Reject anything that isn't a plausible hostname/wildcard, so a malformed or
-    # malicious spec value can't smuggle characters through the eval below.
-    case "$_host" in
-      ""|*[!A-Za-z0-9.*_-]*)
-        echo "acq(msb): warning: skipping non-hostname net-allow entry: $_host" >&2
-        continue
-        ;;
-    esac
-    eval "$_arr+=(--net-rule \"allow@\${_host}\")"
+    _target=$(_acq_msb_balanced_target "$_host" "kit net-allow entry") || continue
+    eval "$_arr+=(--net-rule \"allow@\${_target}\")"
   done <<EOF
 $(kit_spec_net_allow "$_spec")
 EOF
 }
 
-# _acq_msb_balanced_target HOST — echo the msb `--net-rule` TARGET for one sbx
-# "balanced" host token, or nothing (rc 1) if it must be dropped. Translates the
+# _acq_msb_balanced_target HOST [CONTEXT] — echo the msb `--net-rule` TARGET for
+# one host token, or nothing (rc 1) if it must be dropped. CONTEXT labels warnings
+# and defaults to "balanced entry" for the baseline caller. Translates the
 # wildcard forms (ADR-0018):
 #   - `**.h`  (sbx multi-label glob) -> msb suffix `*.h` (apex + any depth)
 #   - `crl*.h` (intra-label glob msb can't express) -> broadened to `*.<parent>`;
@@ -1195,7 +1190,7 @@ EOF
 # (which msb rejects for blast radius) are dropped, so the value is safe to place
 # in an argv via the caller's eval-by-name append (SI-10).
 _acq_msb_balanced_target() {
-  local _host="$1" _target
+  local _host="$1" _context="${2:-balanced entry}" _target
   case "$_host" in
     "**."*)   _target="*.${_host#**.}" ;;
     "crl*."*) _target="*.${_host#crl*.}" ;;
@@ -1205,7 +1200,7 @@ _acq_msb_balanced_target() {
   # Charset-guard the FINAL target (defense-in-depth before any eval append).
   case "$_target" in
     ""|*[!A-Za-z0-9.*_-]*)
-      echo "acq(msb): warning: skipping non-hostname balanced entry: ${_host}" >&2
+      echo "acq(msb): warning: skipping non-hostname ${_context}: ${_host}" >&2
       return 1
       ;;
   esac
@@ -1217,7 +1212,7 @@ _acq_msb_balanced_target() {
       case "${_target#*.}" in
         *.*) : ;;  # two+ labels after `*.` -> OK
         *)
-          echo "acq(msb): warning: skipping single-label suffix (msb rejects it): ${_target}" >&2
+          echo "acq(msb): warning: skipping single-label suffix ${_context} (msb rejects it): ${_target}" >&2
           return 1
           ;;
       esac
@@ -3895,7 +3890,20 @@ _acq_msb_ensure_ssh_agent_forward() {
   # The --vsock route is create-time only. If this sandbox was created WITHOUT
   # it, a socat bridge would be inert and the marker would falsely advertise a
   # working agent, so require the route to actually be present before wiring.
-  _acq_msb_has_ssh_agent_vsock_route "$name" || return 0
+  # Do not fail silently, though: a valid host SSH_AUTH_SOCK means the user opted
+  # into signing support, and a missing route is the exact shape produced by a
+  # same-name sandbox recreated outside this create path (or after wiping msb
+  # state but keeping acq's expectations around the name). Recreate through acq
+  # with SSH_AUTH_SOCK set so the create-time route is recorded.
+  if ! _acq_msb_has_ssh_agent_vsock_route "$name"; then
+    echo "acq(msb): warning: host SSH_AUTH_SOCK is set, but existing sandbox '$name'" \
+         "has no ssh-agent --vsock route. The route is create-time only, so" \
+         "SSH_AUTH_SOCK will not be set in the guest and git signing will fail." >&2
+    echo "acq(msb):   If this sandbox was recreated with the same name after wiping" \
+         "msb state, remove it with 'acq rm $name' and re-run 'acq run …' with" \
+         "SSH_AUTH_SOCK set so acq can create the route. See ADR-0021." >&2
+    return 0
+  fi
 
   # From here, treat forwarding as active: point the bridge starter at the guest
   # sock constant (not the possibly-empty marker) and gate on socat as provision
