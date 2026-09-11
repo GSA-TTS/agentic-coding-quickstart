@@ -57,7 +57,7 @@ jobs:
           cp install.ps1 dist/install.ps1
           sed -i "s/^DEFAULT_RELEASE_SHA=.*/DEFAULT_RELEASE_SHA=\"${release_sha}\"/" dist/install.sh
           chmod 0755 dist/install.sh
-          cp acq acq.cmd acq.ps1 LICENSE README.md package.json dist/acq-windows-x64/
+          cp acq acq.cmd acq.ps1 install.ps1 LICENSE README.md package.json dist/acq-windows-x64/
           cp -R acq.backends dist/acq-windows-x64/
           (cd dist && zip -qr acq-windows-x64.zip acq-windows-x64)
           (cd dist && sha256sum install.sh install.ps1 acq-windows-x64.zip > SHA256SUMS)

@@ -66,6 +66,7 @@ teardown() {
 
   assert_regex "$workflow" 'acq-windows-x64\.zip'
   assert_regex "$workflow" 'cp install\.ps1 dist/install\.ps1'
+  assert_regex "$workflow" 'cp acq acq\.cmd acq\.ps1 install\.ps1 LICENSE README\.md package\.json'
   assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip > SHA256SUMS'
   assert_regex "$workflow" 'dist/acq-windows-x64\.zip'
 }
