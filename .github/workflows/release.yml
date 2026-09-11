@@ -52,21 +52,27 @@ jobs:
         run: |
           set -eu
           release_sha="$(git rev-parse HEAD)"
-          mkdir -p dist
+          mkdir -p dist/acq-windows-x64
           cp install.sh dist/install.sh
+          cp install.ps1 dist/install.ps1
           sed -i "s/^DEFAULT_RELEASE_SHA=.*/DEFAULT_RELEASE_SHA=\"${release_sha}\"/" dist/install.sh
           chmod 0755 dist/install.sh
-          (cd dist && sha256sum install.sh > SHA256SUMS)
+          cp acq acq.cmd acq.ps1 LICENSE README.md package.json dist/acq-windows-x64/
+          cp -R acq.backends dist/acq-windows-x64/
+          (cd dist && zip -qr acq-windows-x64.zip acq-windows-x64)
+          (cd dist && sha256sum install.sh install.ps1 acq-windows-x64.zip > SHA256SUMS)
 
       - name: Attest release assets
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-path: |
             dist/install.sh
+            dist/install.ps1
+            dist/acq-windows-x64.zip
             dist/SHA256SUMS
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: gh release upload "$RELEASE_TAG" dist/install.sh dist/SHA256SUMS --clobber
+        run: gh release upload "$RELEASE_TAG" dist/install.sh dist/install.ps1 dist/acq-windows-x64.zip dist/SHA256SUMS --clobber
