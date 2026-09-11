@@ -175,10 +175,10 @@ for the next request:
    ./acq usai-rotate-api-key
    ```
 
-   (or run the underlying `scripts/rotate-apikey` directly — a thin shim that
-   forwards to `acq usai-rotate-api-key`). It prompts for the new key, then
-   validates it in a temporary sandbox. Rotation runs through the active backend
-   (msb or sbx), so it works regardless of which backend you use.
+   It prompts for the new key, then validates it in a temporary sandbox.
+   Rotation runs through the active backend (msb or sbx), so it works regardless
+   of which backend you use. Source checkouts also carry `scripts/rotate-apikey`,
+   a thin compatibility shim that forwards to `acq usai-rotate-api-key`.
 
 `acq` also validates your key on attach and offers to rotate it then, but the
 subcommand above is the direct path — no session restart required.
@@ -211,9 +211,12 @@ Package-manager installs give you `upgrade`/`uninstall` for free.
 ### Windows preview install
 
 Windows support is a preview path for Windows 11 hosts using the `msb` backend.
-It runs the existing Bash `acq` implementation through Git Bash. The installer
-verifies that Windows Hypervisor Platform is already enabled, but it does not
-try to enable Windows features, elevate PowerShell, or reboot the machine.
+It is installed from the GitHub release zip with PowerShell; npm remains scoped
+to macOS/Linux until Windows path and secret-storage behavior are fully
+validated. The preview runs the existing Bash `acq` implementation through Git
+Bash. The installer verifies that Windows Hypervisor Platform is already enabled,
+but it does not try to enable Windows features, elevate PowerShell, or reboot the
+machine.
 
 ```powershell
 irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.ps1 | iex
@@ -236,8 +239,9 @@ to enable it before re-running the installer.
 ### Windows preview validation
 
 Run these checks from PowerShell on a Windows 11 host with WHP already enabled.
-They are intentionally manual until the project has a reliable Windows runner
-with local virtualization available.
+The PowerShell path is the supported Windows preview shell; `acq.cmd` is only a
+convenience shim. These checks are intentionally manual until the project has a
+reliable Windows runner with local virtualization available.
 
 ```powershell
 # Installer dry run; should print planned actions and make no changes.

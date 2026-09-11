@@ -52,12 +52,17 @@ teardown() {
   assert_regex "$installer" '"acq", "acq\.backends", "acq\.cmd", "acq\.ps1", "install\.ps1"'
 }
 
-@test "windows launcher: delegates to Git Bash with MSYS conversion disabled" {
+@test "windows launcher: converts Windows paths before Git Bash handoff" {
   launcher=$(cat "$REPO_ROOT/acq.ps1")
 
   assert_regex "$launcher" 'Find-GitBash'
-  assert_regex "$launcher" '\$env:MSYS2_ARG_CONV_EXCL = "\*"'
-  assert_regex "$launcher" '& \$bash --noprofile --norc \$bashAcq @args'
+  assert_regex "$launcher" 'Convert-ArgumentForGitBash'
+  assert_regex "$launcher" 'if \(\$Argument -match.*\[A-Za-z\]:'
+  assert_regex "$launcher" 'StartsWith'
+  assert_regex "$launcher" 'TrimStart'
+  assert_regex "$launcher" 'Convert-ToGitBashPath -Path \$Matches\[2\]'
+  refute_regex "$launcher" 'MSYS2_ARG_CONV_EXCL = "\*"'
+  assert_regex "$launcher" '& \$bash --noprofile --norc \$bashAcq @convertedArgs'
 }
 
 @test "windows cmd shim: delegates to PowerShell launcher without policy bypass" {
