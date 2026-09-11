@@ -233,6 +233,32 @@ Get-Content .\install.ps1
 If WHP is disabled, stop and work with your device or enterprise administrator
 to enable it before re-running the installer.
 
+### Windows preview validation
+
+Run these checks from PowerShell on a Windows 11 host with WHP already enabled.
+They are intentionally manual until the project has a reliable Windows runner
+with local virtualization available.
+
+```powershell
+# Installer dry run; should print planned actions and make no changes.
+.\install.ps1 -DryRun
+
+# After install, acq should resolve from PATH and delegate through Git Bash.
+Get-Command acq
+acq version
+
+# Confirm msb is installed and the host is ready.
+msb --version
+msb doctor
+
+# Smoke-test a shell sandbox against a path with spaces.
+New-Item -ItemType Directory -Force "$env:TEMP\acq windows smoke" | Out-Null
+acq --backend msb run shell "$env:TEMP\acq windows smoke"
+```
+
+If any command fails, capture the full command, output, Windows version, `msb
+--version`, and whether the machine is managed by enterprise policy.
+
 ### Manual install (from a clone)
 
 If you're comfortable in a terminal and prefer to run `acq` from a clone:
