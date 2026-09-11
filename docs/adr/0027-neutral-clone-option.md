@@ -116,17 +116,33 @@ A git clone carries **committed state only**:
   dirty working tree; the msb emulation does not. Create prints a notice when
   the host tree is dirty: commit first, or `acq cp` the files in.
 
-Unlike the two divergences above, one piece of uncommitted state is carried on
-purpose: the source checkout's **effective git identity**
-(`user.name`/`user.email`), resolved on the host as the user's own commits
-resolve it, is written repo-locally into the scratch. A clone drops
-`.git/config`, and per-forge identities commonly live only there or in a
-gitdir-scoped include. Without the copy, the first in-sandbox commit fails with
-"Author identity unknown"; the guest's global tier cannot express a per-repo
-value. sbx carries identity incidentally by copying `.git` wholesale.
-Propagating only the two inert `user.*` values is the minimized form of that,
-without the credential helpers, hooks, and URL rewrites that ride along with a
-wholesale copy.
+Unlike the two divergences above, two pieces of `.git/config` state are carried
+on purpose, written repo-locally into the scratch:
+
+- The source checkout's **effective git identity** (`user.name`/`user.email`),
+  resolved on the host as the user's own commits resolve it. A clone drops
+  `.git/config`, and per-forge identities commonly live only there or in a
+  gitdir-scoped include. Without the copy, the first in-sandbox commit fails
+  with "Author identity unknown"; the guest's global tier cannot express a
+  per-repo value.
+- The source checkout's **origin URL** (`remote.origin.url`, plus
+  `remote.origin.pushurl` when set). `git clone <host path>` points the
+  scratch's `origin` at the host checkout path, and the scratch is mounted at
+  that very path in the guest, so `origin` would resolve to the scratch itself:
+  `git fetch origin` a no-op, `git push origin` unable to reach the real
+  remote, and anything that identifies the repo by its origin URL misled. The
+  raw configured values are copied, not `git remote get-url`'s expansion: a
+  host `insteadOf` rewrite is host policy that the guest never receives (only
+  `user.*` is synced into its global tier), and an https-to-ssh rewrite would
+  hand the guest a transport it has no key for. A credential embedded in the
+  URL travels with it, exactly as it does when the checkout's own `.git/config`
+  is mounted in a non-clone run. Remote-tracking refs (`origin/*`) still
+  reflect the host's local branches at clone time until the first
+  `git fetch --prune`.
+
+sbx carries both incidentally by copying `.git` wholesale. Propagating only
+these values is the minimized form of that, without the credential helpers,
+hooks, and URL rewrites that ride along with a wholesale copy.
 
 ### Trade-off stated openly
 
