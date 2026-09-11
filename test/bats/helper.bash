@@ -42,16 +42,16 @@ acq_setup_stubs() {
   unset ACQ_BACKEND ACQ_IMAGE ACQ_CLONE ACQ_EXTRA_KITS ACQ_UPDATE_CHECK \
         ACQ_STATE_DIR ACQ_SECRET_STORE_DIR ACQ_NETWORK_TIER \
         ACQ_NETWORK_TIER_CONFIRM_OPEN ACQ_MSB_BALANCED_EGRESS ACQ_MSB_IMAGE \
-        ACQ_MSB_PULL ACQ_MSB_WORKSPACE ACQ_MSB_CLONES_DIR
+        ACQ_MSB_PULL ACQ_MSB_WORKSPACE ACQ_MSB_CLONES_DIR \
+        EMAIL GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME \
+        GIT_COMMITTER_EMAIL
   make_stubs
-  # Tests that fake HOME still leak into the developer's real git config when
-  # the shell exports XDG_CONFIG_HOME: git writes --global to
-  # $XDG_CONFIG_HOME/git/config whenever that file exists and ~/.gitconfig does
-  # not, and reads it the same way. Point it under the stub dir so a faked HOME
-  # is complete (observed: fixture identities written into ~/.config/git/config
-  # after every suite run). Tests that need a config dir set their own.
-  # GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM override both HOME and XDG lookups, so a
-  # runner exporting them would leak through (and receive the fixture writes).
+  # Tests should never see or write the developer's real git identity. Git reads
+  # --global values from HOME and, when exported, XDG_CONFIG_HOME. Point both at
+  # the stub dir so tests start from an empty host identity unless they set one
+  # explicitly.
+  mkdir -p "$STUBDIR/home"
+  export HOME="$STUBDIR/home"
   export XDG_CONFIG_HOME="$STUBDIR/xdg"
   unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
   load_acq
