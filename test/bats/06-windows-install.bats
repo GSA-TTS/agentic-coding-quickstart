@@ -17,6 +17,40 @@ teardown() {
   assert_equal "$ps_version" "$sh_version"
 }
 
+@test "windows PowerShell: installer help and dry-run execute when pwsh is available" {
+  command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
+
+  run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -Help
+  assert_success
+  assert_output --partial 'install.ps1 - install acq for Windows preview hosts'
+
+  run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -NoMsb -NoPath
+  assert_success
+  assert_output --partial '[dry-run] check host is Windows'
+  assert_output --partial '[dry-run] download'
+}
+
+@test "windows PowerShell: launcher and installer parse when pwsh is available" {
+  command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
+
+  run pwsh -NoLogo -NoProfile -Command '
+    foreach ($file in @("install.ps1", "acq.ps1")) {
+      $tokens = $null
+      $errors = $null
+      $null = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path "'"$REPO_ROOT"'" $file),
+        [ref]$tokens,
+        [ref]$errors
+      )
+      if ($errors.Count) {
+        $errors | ForEach-Object { $_.ToString() }
+        exit 1
+      }
+    }
+  '
+  assert_success
+}
+
 @test "windows installer: does not enable WHP or elevate" {
   run grep -E 'Enable-WindowsOptionalFeature|Start-Process.*-Verb RunAs|Restart-Computer' \
     "$REPO_ROOT/install.ps1"

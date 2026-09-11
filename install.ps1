@@ -7,7 +7,7 @@
 [CmdletBinding()]
 param(
     [string]$Version = "3.1.0", # x-release-please-version
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\acq"),
+    [string]$InstallDir = "",
     [string]$PackageUrl = "",
     [string]$Sha256 = "",
     [string]$MsbPackageId = $env:ACQ_MSB_WINGET_ID,
@@ -21,6 +21,18 @@ param(
 $ErrorActionPreference = "Stop"
 $ReleaseBaseUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version"
 $PackageName = "acq-windows-x64.zip"
+
+function Get-DefaultInstallDir {
+    if ($env:LOCALAPPDATA) {
+        return (Join-Path $env:LOCALAPPDATA "Programs\acq")
+    }
+
+    if ($Help -or $DryRun) {
+        return (Join-Path ([System.IO.Path]::GetTempPath()) "acq-preview-install")
+    }
+
+    throw "LOCALAPPDATA is not set. install.ps1 must run on Windows unless -DryRun is used."
+}
 
 function Show-Usage {
     @"
@@ -175,6 +187,11 @@ function Ensure-GitBash {
     }
 
     Write-Step "Git Bash is not installed"
+    if ($DryRun) {
+        Write-Host "  [dry-run] would prompt to install Git for Windows with WinGet"
+        return
+    }
+
     if (-not (Confirm-Action "Install Git for Windows with WinGet now?")) {
         throw "Git Bash is required. Install Git for Windows, then re-run this installer."
     }
@@ -198,6 +215,16 @@ function Ensure-Msb {
     }
 
     Write-Step "msb is not installed"
+    if ($DryRun) {
+        if ($MsbPackageId) {
+            Write-Host "  [dry-run] would prompt to install msb with WinGet package '$MsbPackageId'"
+        }
+        else {
+            Write-Host "  [dry-run] would prompt to install msb with the upstream Windows installer"
+        }
+        return
+    }
+
     if ($MsbPackageId) {
         if (-not (Confirm-Action "Install msb with WinGet package '$MsbPackageId' now?")) {
             throw "msb is required. Install msb, then re-run this installer."
@@ -323,6 +350,10 @@ function Ensure-Path {
         [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         $env:Path = "$env:Path;$InstallDir"
     }
+}
+
+if (-not $InstallDir) {
+    $InstallDir = Get-DefaultInstallDir
 }
 
 if ($Help) {
