@@ -66,7 +66,13 @@ to skip it.
 ```bash
 curl -fsSL https://install.microsandbox.dev | sh        # macOS / Linux
 brew install superradcompany/tap/microsandbox           # Homebrew
+```
 
+```powershell
+irm https://install.microsandbox.dev/windows | iex      # Windows preview
+```
+
+```bash
 # Verify
 msb --version
 ```
@@ -75,10 +81,12 @@ msb --version
 
 ### Host setup
 
-If `msb doctor` reports the host is not ready, follow its guidance (`msb doctor
---fix` attempts the setup). Common items: enabling KVM on Linux
-(`/dev/kvm` present and accessible) or Apple Virtualization on macOS. `acq`
-surfaces the doctor output before it provisions a sandbox.
+If `msb doctor` reports the host is not ready, follow its guidance. Common
+items: enabling KVM on Linux (`/dev/kvm` present and accessible), Apple
+Virtualization on macOS, or Windows Hypervisor Platform on Windows 11. The `acq`
+Windows preview installer does not elevate, enable WHP, or reboot; it stops when
+WHP is disabled so the user or enterprise administrator can handle that setup out
+of band. `acq` surfaces the doctor output before it provisions a sandbox.
 
 ## Step 2: Select the backend
 
