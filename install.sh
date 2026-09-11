@@ -86,12 +86,13 @@ warn()  { printf '%s%s%s\n' "$YEL" "$*" "$R" >&2; }
 ok()    { printf '%s%s%s\n' "$GRN" "$*" "$R"; }
 die()   { printf '%serror:%s %s\n' "$RED" "$R" "$*" >&2; exit 1; }
 
-# In dry-run, show what would run; otherwise run it.
+# In dry-run, show what would run; otherwise run it. Child stdin is detached so
+# a child never consumes the `curl | sh` script pipe (fd 0).
 run() {
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '  [dry-run] %s\n' "$*"
   else
-    "$@"
+    "$@" </dev/null
   fi
 }
 
@@ -544,6 +545,8 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
     if confirm "  Install msb now?"; then
       if command -v brew >/dev/null 2>&1; then
         info "  Installing via Homebrew..."
+        # Tap first: a fresh host has not tapped superradcompany/tap.
+        run brew tap superradcompany/tap
         run brew install superradcompany/tap/microsandbox
       else
         info "  Homebrew not found; using the microsandbox install script."
@@ -551,10 +554,18 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
           printf '  [dry-run] curl -fsSL https://install.microsandbox.dev | sh\n'
         else
-          curl -fsSL https://install.microsandbox.dev | sh
+          # Fetch then pipe, so the child does not read the curl | sh script pipe (fd 0).
+          if msb_installer="$(curl -fsSL https://install.microsandbox.dev)"; then
+            printf '%s' "$msb_installer" | sh
+          else
+            INSTALL_MSB=0
+          fi
         fi
       fi
     else
+      INSTALL_MSB=0
+    fi
+    if [ "$INSTALL_MSB" -eq 0 ]; then
       warn "  Skipping msb. Install it later with one of:"
       info  "    brew install superradcompany/tap/microsandbox"
       info  "    curl -fsSL https://install.microsandbox.dev | sh"

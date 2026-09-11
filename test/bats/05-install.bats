@@ -80,6 +80,28 @@ STUB
   chmod +x "$STUBDIR/bin/brew"
 }
 
+# Logs each brew invocation's argv (one per line) so tests can assert ordering.
+_write_brew_logging_stub() {
+  cat >"$STUBDIR/bin/brew" <<'STUB'
+#!/usr/bin/env sh
+printf '%s\n' "$*" >>"${BREW_STUB_LOG:?}"
+exit 0
+STUB
+  chmod +x "$STUBDIR/bin/brew"
+}
+
+# Records one stdin line; empty marker `ate:[]` proves run() detached child stdin.
+_write_stdin_eating_brew_stub() {
+  cat >"$STUBDIR/bin/brew" <<'STUB'
+#!/usr/bin/env bash
+line=""
+IFS= read -r line || true
+printf 'ate:[%s]\n' "$line" >>"${BREW_STUB_LOG:?}"
+exit 0
+STUB
+  chmod +x "$STUBDIR/bin/brew"
+}
+
 _write_npm_stub() {
   cat >"$STUBDIR/bin/npm" <<'STUB'
 #!/usr/bin/env sh
@@ -281,4 +303,38 @@ _no_package_manager_path() {
   assert_success
   assert_output --partial "verified HEAD matches pinned commit $release_sha"
   assert_regex "$(cat "$GIT_STUB_LOG")" "fetch --unshallow --tags origin"
+}
+
+@test "install: msb via brew taps superradcompany/tap before installing" {
+  export BREW_STUB_LOG="$BATS_TEST_TMPDIR/brew.log"
+  _write_brew_logging_stub
+  _write_npm_stub
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_regex "$(cat "$BREW_STUB_LOG")" "tap superradcompany/tap"
+  tap_line=$(grep -n 'tap superradcompany/tap' "$BREW_STUB_LOG" | head -1 | cut -d: -f1)
+  install_line=$(grep -n 'install superradcompany/tap/microsandbox' "$BREW_STUB_LOG" | head -1 | cut -d: -f1)
+  [ -n "$tap_line" ] && [ -n "$install_line" ]
+  [ "$tap_line" -lt "$install_line" ]
+}
+
+@test "install: run() detaches child stdin so piped script tail survives" {
+  export BREW_STUB_LOG="$BATS_TEST_TMPDIR/brew.log"
+  _write_stdin_eating_brew_stub
+  _write_npm_stub
+
+  # Pipe the installer plus a trailing marker (fd 0 = script bytes); a leaky
+  # child would steal the marker line.
+  installer="$(cat "$REPO_ROOT/install.sh"; printf 'echo STOLEN_TAIL_BYTES\n')"
+
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    BREW_STUB_LOG="$BREW_STUB_LOG" \
+    sh -c 'printf "%s" "$1" | sh -s -- --method npm --yes' _ "$installer"
+
+  assert_success
+  run cat "$BREW_STUB_LOG"
+  assert_output --partial "ate:[]"
+  refute_output --partial "STOLEN"
 }
