@@ -556,13 +556,19 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
           printf '  [dry-run] curl -fsSL https://install.microsandbox.dev | sh\n'
         else
           # Fetch to a variable then pipe to sh, so the nested installer does not
-          # fight this script for the `curl | sh` stdin pipe (fd 0).
-          msb_installer="$(curl -fsSL https://install.microsandbox.dev)" \
-            && printf '%s' "$msb_installer" | sh \
-            || warn "  microsandbox install script failed; install msb manually (see below)."
+          # fight this script for the `curl | sh` stdin pipe (fd 0). On download
+          # failure, fall through to the same skip guidance the decline path prints.
+          if msb_installer="$(curl -fsSL https://install.microsandbox.dev)"; then
+            printf '%s' "$msb_installer" | sh
+          else
+            INSTALL_MSB=0
+          fi
         fi
       fi
     else
+      INSTALL_MSB=0
+    fi
+    if [ "$INSTALL_MSB" -eq 0 ]; then
       warn "  Skipping msb. Install it later with one of:"
       info  "    brew install superradcompany/tap/microsandbox"
       info  "    curl -fsSL https://install.microsandbox.dev | sh"
