@@ -276,7 +276,7 @@ function Install-AcqZip {
             }
 
             New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-            foreach ($item in @("acq", "acq.backends", "acq.cmd", "acq.ps1", "README.md", "LICENSE", "package.json")) {
+            foreach ($item in @("acq", "acq.backends", "acq.cmd", "acq.ps1", "install.ps1", "README.md", "LICENSE", "package.json")) {
                 $src = Join-Path $sourceDir $item
                 if (Test-Path -LiteralPath $src) {
                     $dst = Join-Path $InstallDir $item
