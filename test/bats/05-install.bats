@@ -90,8 +90,7 @@ STUB
   chmod +x "$STUBDIR/bin/brew"
 }
 
-# Reads one stdin line and records it; empty marker `ate:[]` proves run()
-# detached child stdin from the `curl | sh` script pipe.
+# Records one stdin line; empty marker `ate:[]` proves run() detached child stdin.
 _write_stdin_eating_brew_stub() {
   cat >"$STUBDIR/bin/brew" <<'STUB'
 #!/usr/bin/env bash
@@ -306,8 +305,6 @@ _no_package_manager_path() {
   assert_regex "$(cat "$GIT_STUB_LOG")" "fetch --unshallow --tags origin"
 }
 
-# --- msb Homebrew path: tap before install, on a fresh host ----------------
-
 @test "install: msb via brew taps superradcompany/tap before installing" {
   export BREW_STUB_LOG="$BATS_TEST_TMPDIR/brew.log"
   _write_brew_logging_stub
@@ -328,8 +325,8 @@ _no_package_manager_path() {
   _write_stdin_eating_brew_stub
   _write_npm_stub
 
-  # Pipe the installer plus a trailing marker to `sh` (fd 0 = script bytes), the
-  # exact `curl | sh` shape; a leaky child would steal the marker line.
+  # Pipe the installer plus a trailing marker (fd 0 = script bytes); a leaky
+  # child would steal the marker line.
   installer="$(cat "$REPO_ROOT/install.sh"; printf 'echo STOLEN_TAIL_BYTES\n')"
 
   run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \

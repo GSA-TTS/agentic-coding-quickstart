@@ -86,8 +86,8 @@ warn()  { printf '%s%s%s\n' "$YEL" "$*" "$R" >&2; }
 ok()    { printf '%s%s%s\n' "$GRN" "$*" "$R"; }
 die()   { printf '%serror:%s %s\n' "$RED" "$R" "$*" >&2; exit 1; }
 
-# In dry-run, show what would run; otherwise run it. Child stdin is detached
-# (`</dev/null`) so a child never consumes the `curl | sh` script pipe (fd 0).
+# In dry-run, show what would run; otherwise run it. Child stdin is detached so
+# a child never consumes the `curl | sh` script pipe (fd 0).
 run() {
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '  [dry-run] %s\n' "$*"
@@ -545,8 +545,7 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
     if confirm "  Install msb now?"; then
       if command -v brew >/dev/null 2>&1; then
         info "  Installing via Homebrew..."
-        # Tap first: a fresh host has not tapped superradcompany/tap, so a bare
-        # `brew install superradcompany/tap/microsandbox` fails with "No available formula".
+        # Tap first: a fresh host has not tapped superradcompany/tap.
         run brew tap superradcompany/tap
         run brew install superradcompany/tap/microsandbox
       else
@@ -555,9 +554,7 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
           printf '  [dry-run] curl -fsSL https://install.microsandbox.dev | sh\n'
         else
-          # Fetch to a variable then pipe to sh, so the nested installer does not
-          # fight this script for the `curl | sh` stdin pipe (fd 0). On download
-          # failure, fall through to the same skip guidance the decline path prints.
+          # Fetch then pipe, so the child does not read the curl | sh script pipe (fd 0).
           if msb_installer="$(curl -fsSL https://install.microsandbox.dev)"; then
             printf '%s' "$msb_installer" | sh
           else
