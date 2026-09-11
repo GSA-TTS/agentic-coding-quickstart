@@ -33,9 +33,35 @@ function Convert-ToGitBashPath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     $fullPath = [System.IO.Path]::GetFullPath($Path)
-    $drive = [System.IO.Path]::GetPathRoot($fullPath).TrimEnd('\', ':').ToLowerInvariant()
-    $rest = $fullPath.Substring(3).Replace('\', '/')
-    return "/$drive/$rest"
+    if ($fullPath -match '^([A-Za-z]):[\\/](.*)$') {
+        $drive = $Matches[1].ToLowerInvariant()
+        $rest = $Matches[2].Replace('\', '/')
+        return "/$drive/$rest"
+    }
+
+    if ($fullPath.StartsWith('\\')) {
+        return '//' + $fullPath.TrimStart('\').Replace('\', '/')
+    }
+
+    return $fullPath.Replace('\', '/')
+}
+
+function Convert-ArgumentForGitBash {
+    param([Parameter(Mandatory = $true)][string]$Argument)
+
+    if ($Argument -match '^[A-Za-z]:[\\/]' -or $Argument -match '^\\\\[^\\]+\\[^\\]+') {
+        return Convert-ToGitBashPath -Path $Argument
+    }
+
+    if ($Argument -match '^([^:]+):([A-Za-z]:[\\/].*)$') {
+        return $Matches[1] + ':' + (Convert-ToGitBashPath -Path $Matches[2])
+    }
+
+    if ($Argument -match '^([^:]+):(\\\\[^\\]+\\[^\\]+.*)$') {
+        return $Matches[1] + ':' + (Convert-ToGitBashPath -Path $Matches[2])
+    }
+
+    return $Argument
 }
 
 $repoRoot = Split-Path -Parent $PSCommandPath
@@ -47,7 +73,7 @@ if (-not (Test-Path -LiteralPath $acqScript -PathType Leaf)) {
 
 $bash = Find-GitBash
 $bashAcq = Convert-ToGitBashPath -Path $acqScript
+$convertedArgs = @($args | ForEach-Object { Convert-ArgumentForGitBash -Argument $_ })
 
-$env:MSYS2_ARG_CONV_EXCL = "*"
-& $bash --noprofile --norc $bashAcq @args
+& $bash --noprofile --norc $bashAcq @convertedArgs
 exit $LASTEXITCODE

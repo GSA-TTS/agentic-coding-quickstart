@@ -77,7 +77,8 @@ irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.
 The Windows preview installer uses Git Bash to run `acq` and stops if Windows
 Hypervisor Platform is not already enabled. It does not elevate, enable Windows
 features, or reboot for you; work with your device or enterprise administrator to
-enable WHP before running it.
+enable WHP before running it. Windows preview installs use the GitHub release zip;
+npm remains scoped to macOS/Linux for now.
 
 That's it — you don't have to choose *how* to install. The macOS/Linux installer:
 
