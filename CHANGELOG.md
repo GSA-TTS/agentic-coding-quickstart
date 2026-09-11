@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v3.1.0...v3.2.0) (2026-09-11)
+
+
+### Features
+
+* **acq:** export ACQ_WORKSPACE and ACQ_CLONE into the guest on both backends ([#457](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/457)) ([e0b9a3b](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/e0b9a3b60d878080094264b407b03fb830c48c4e))
+
+
+### Bug Fixes
+
+* **ci:** bump js-yaml to 4.3.2 to clear a high-severity CPU-DoS advisory ([#454](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/454)) ([3217b49](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/3217b498e8cf54a6eab08afceeffeec3e646d19b))
+* **ci:** bump smol-toml to 1.7.1 to clear an infinite-loop DoS advisory ([#459](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/459)) ([c2291bf](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/c2291bf42da28145b0d67a2db3e9675b9e644e75))
+* **install:** keep curl | sh stdin intact and tap msb formula first ([#462](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/462)) ([c808d74](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/c808d740d5a3553b4e51d7d41069242d1ed914b8))
+* **msb:** carry the source checkout's git identity into the --clone scratch ([#443](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/443)) ([320d784](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/320d784a78b63864e6a647c797b06849e7d3b87d))
+* **msb:** follow the host resolvers and disable DNS rebind protection in the guest ([#444](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/444)) ([d2f4bdc](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/d2f4bdc7794d8b99319b37bd0a859e8aecfe6f4b))
+* **msb:** point the --clone scratch's origin at the source checkout's remote ([#455](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/455)) ([7f48b94](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/7f48b949fd12ca8da65cc5a26eab02723e398103))
+* **msb:** refresh ssh authorization for port publish ([#446](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/446)) ([72a6bd5](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/72a6bd5ca57877498b123bca24719ad99a8325d8))
+* **msb:** session parity for exec/attach/shell (cwd, terminal identity, login shell) ([#427](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/427)) ([6261eda](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/6261eda7f8b5b0f0a4402bb27ea584467bb4abcb))
+* **msb:** skip the recursive home chown when the image baked the agent user ([#432](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/432)) ([d8f66a4](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/d8f66a43d10a01ce8318194bb0c82518a69e1346))
+* **msb:** translate kit wildcard network rules ([#451](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/451)) ([e22bbc3](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/e22bbc37520dc4292a3290ab988e3ea2a34500b7))
+* **msb:** warn on broadened kit wildcard rules ([#460](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/460)) ([6ded3ce](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/6ded3ce250f57a86c1bb46e898e2901a2af76bbb))
+* **msb:** warn when ssh-agent route is missing ([#448](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/448)) ([3a767a4](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/3a767a4bf7a3957cd0179d9dcb3c3d8943119e0b))
+* **secret:** reject multiline test secret values ([#447](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/447)) ([f2da950](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/f2da950ef3da1e81f7a1aed548578b972550e06a))
+
 ## [3.1.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v3.0.0...v3.1.0) (2026-09-01)
 
 
