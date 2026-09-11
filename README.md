@@ -227,7 +227,7 @@ finishes, re-run your command. (No administrator rights are required.)
 
 - **How it works, customizing, extra kits, optional integrations (web UI, editors):**
   [docs/CONCEPTS.md](docs/CONCEPTS.md)
-- **Deeper `acq` how-to, backend selection, manual install:**
+- **Deeper `acq` how-to, backend selection, manual install, Windows preview validation:**
   [docs/howto/acq.md](docs/howto/acq.md)
 - **Choosing between the msb and sbx backends:**
   [docs/BACKEND_GUIDE.md](docs/BACKEND_GUIDE.md)
