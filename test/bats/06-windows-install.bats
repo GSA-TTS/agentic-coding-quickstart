@@ -46,6 +46,12 @@ teardown() {
   assert_regex "$installer" 'irm https://install\.microsandbox\.dev/windows \| iex'
 }
 
+@test "windows installer: installed layout includes Windows launcher files" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  assert_regex "$installer" '"acq", "acq\.backends", "acq\.cmd", "acq\.ps1", "install\.ps1"'
+}
+
 @test "windows launcher: delegates to Git Bash with MSYS conversion disabled" {
   launcher=$(cat "$REPO_ROOT/acq.ps1")
 
