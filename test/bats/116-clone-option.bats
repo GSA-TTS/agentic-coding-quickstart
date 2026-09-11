@@ -307,6 +307,18 @@ _msb_clone_isolated() { # ARGS...
   refute_regex "$line" 'ACQ_CLONE'
 }
 
+@test "clone(msb #456): ACQ_MSB_WORKSPACE moves the start dir but ACQ_WORKSPACE stays on the clone's mount root" {
+  # The override relocates only where the agent starts. The marker must keep
+  # naming the primary mount, or a --clone kit would read ACQ_CLONE=1 next to
+  # a path that is not the clone and write into the wrong tree.
+  _msb_clone ACQ_MSB_WORKSPACE=/tmp/elsewhere -- create shell --clone "$CLONEPROJ"
+  load_acq
+  local repo line; repo=$(canonicalize_path "$CLONEPROJ"); line=$(_create_line msb)
+  assert_regex "$line" "--env ACQ_WORKSPACE=${repo}( |\$)"
+  refute_regex "$line" 'ACQ_WORKSPACE=/tmp/elsewhere'
+  assert_regex "$line" '--env ACQ_CLONE=1( |$)'
+}
+
 @test "clone(msb #456): a workspace-less create exports neither marker" {
   _msb_clone -- create shell
   assert_regex "$(cat "$CALLS")" 'msb create'

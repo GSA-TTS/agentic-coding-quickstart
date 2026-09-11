@@ -152,7 +152,9 @@ verified to reach every exec/attach session and to survive a native restart):
 - `ACQ_WORKSPACE=<guest path of the primary>` on any create with a workspace.
   On msb this is the canonical host path the primary mounts at; on sbx it is
   the logical absolute path sbx itself mounts at (sbx resolves `.` to the
-  `$PWD` form, not `realpath`).
+  `$PWD` form, not `realpath`). It names the primary's mount root, not the
+  agent's cwd: `ACQ_MSB_WORKSPACE` relocates only the start dir, and following
+  it would let `ACQ_CLONE=1` sit next to a secondary passthrough's real path.
 - `ACQ_CLONE=1` only when the primary is the disposable clone.
 
 The two facts are kept separate so a non-clone kit gets a neutral workspace

@@ -1023,7 +1023,7 @@ present in every exec/attach session and survive a native restart:
 
 | Variable | When | Value |
 |----------|------|-------|
-| `ACQ_WORKSPACE` | any create with a workspace | guest path of the **primary** workspace (the agent's starting directory) |
+| `ACQ_WORKSPACE` | any create with a workspace | guest path of the **primary** (first) workspace's mount root. Not necessarily the agent's cwd: on msb, `ACQ_MSB_WORKSPACE` moves only the start dir, and the marker stays on the primary mount so a `--clone` kit always writes into the clone |
 | `ACQ_CLONE` | `--clone` / `ACQ_CLONE=1` only | `1` — the primary is a disposable clone ([ADR-0027](adr/0027-neutral-clone-option.md)) |
 
 They are the kit-facing contract for "act on the clone, never on the real
