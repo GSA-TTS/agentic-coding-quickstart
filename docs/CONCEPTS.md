@@ -88,7 +88,10 @@ unaffected. Like the mounts themselves, `--clone` applies **at creation only**.
 A clone carries **committed state only** — no gitignored/untracked files and no
 uncommitted edits; commit first, or copy specific files in with `acq cp` (e.g.
 a needed `.env`). Removing the sandbox (`acq rm`) discards the clone, with a
-warning if it still holds commits you have not fetched. See
+warning if it still holds commits you have not fetched. Inside the sandbox,
+`ACQ_CLONE=1` and `ACQ_WORKSPACE` tell kits and scripts that the primary is a
+disposable clone and where it is (see the `environment` section of
+[BACKEND_GUIDE](BACKEND_GUIDE.md)). See
 [ADR-0027](adr/0027-neutral-clone-option.md) for the design and the per-backend
 mechanics.
 

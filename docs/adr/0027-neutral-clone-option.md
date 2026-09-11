@@ -151,6 +151,37 @@ agent writes land on the host — but confined to the acq-managed directory,
 which is disposable by construction and never executed by the host's git (a
 fetch transfers objects, not hooks or config).
 
+### Guest-visible markers (amended 2026-09-09)
+
+Mounting the scratch at the original path makes the clone indistinguishable
+from a passthrough mount **by design**, which is right for the agent but left
+kits with no honest signal for "write into the clone, never into the real
+checkout". Kits fell back to backend accidents (`findmnt -t ext4`, sbx's
+`WORKSPACE_DIR`) that the msb emulation does not reproduce, so such a step was
+a silent no-op on the default backend
+([GSA-TTS/agentic-coding-quickstart#456](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/456)).
+
+Both backends therefore set two neutral guest variables at create, via their
+native create-time env flag (`msb create --env`, `sbx create --env`; both
+verified to reach every exec/attach session and to survive a native restart):
+
+- `ACQ_WORKSPACE=<guest path of the primary>` on any create with a workspace.
+  On msb this is the canonical host path the primary mounts at; on sbx it is
+  the logical absolute path sbx itself mounts at (sbx resolves `.` to the
+  `$PWD` form, not `realpath`). It names the primary's mount root, not the
+  agent's cwd: `ACQ_MSB_WORKSPACE` relocates only the start dir, and following
+  it would let `ACQ_CLONE=1` sit next to a secondary passthrough's real path.
+- `ACQ_CLONE=1` only when the primary is the disposable clone.
+
+The two facts are kept separate so a non-clone kit gets a neutral workspace
+path for free, and because the workspace path alone must never be read as a
+clone signal: msb already records the primary's path at
+`/var/lib/acq/workspace` (root-written, for name-only re-attach) on every
+create, clone or not, and a kit that keyed on it wrote its files into a real
+checkout through a passthrough mount. A marker file inside the scratch was
+also rejected: it needs a `.git/info/exclude` entry and a post-create write on
+sbx's native clone.
+
 ## Consequences
 
 - **Positive:** disposable-primary workflows work identically on both backends;
@@ -168,3 +199,6 @@ fetch transfers objects, not hooks or config).
   than complicating the claim into an atomic `mkdir` with EEXIST handling.
 - **Scope:** applies at sandbox **creation** only; `acq stop`/restart preserve
   the scratch and remote; only `acq rm` (or a failed create) cleans them up.
+- **Kit contract:** `ACQ_WORKSPACE` / `ACQ_CLONE` (above) are documented in
+  `docs/BACKEND_GUIDE.md` and are the only supported way for a kit to detect
+  the clone; mount-type or origin-URL heuristics are not.

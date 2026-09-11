@@ -2960,6 +2960,18 @@ EOF
     ACQ_MSB_GUEST_WORKSPACE="$_first_guest"
   fi
 
+  # Guest-visible workspace markers (GSA-TTS/agentic-coding-quickstart#456).
+  # ACQ_WORKSPACE names the primary's guest path; ACQ_CLONE=1 marks it as the
+  # disposable clone. A kit that must write into the clone and never the real
+  # checkout keys on these instead of a mount-type heuristic (which the
+  # emulation above defeats by design: the scratch mounts exactly like a
+  # passthrough). `msb create --env` reaches every exec/attach session and
+  # survives a native restart (verified msb 0.6.17), so no kit-env plumbing.
+  if [ -n "$_first_guest" ]; then
+    create_flags+=(--env "ACQ_WORKSPACE=${_first_guest}")
+    [ -n "$_clone_src" ] && create_flags+=(--env ACQ_CLONE=1)
+  fi
+
   # Host ssh-agent / socket forwarding (ADR-0021). Translate the neutral
   # host-socket forwards into msb `--vsock HOST:PORT/KIND` create flags. Gated on
   # msb >= 0.6.9; a lower version warns once and skips (forwarding is opt-in
