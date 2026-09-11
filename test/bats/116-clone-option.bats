@@ -283,6 +283,40 @@ _msb_clone_isolated() { # ARGS...
   assert_failure
 }
 
+@test "clone(msb #453): the scratch's origin is the source checkout's origin URL, not the host path" {
+  git -C "$CLONEPROJ" remote add origin https://github.com/example/cloneproj.git
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  [ "$(git config --file "$scratch/.git/config" remote.origin.url)" = "https://github.com/example/cloneproj.git" ]
+  # The fetch-back remote on the host still points at the scratch.
+  [ "$(canonicalize_path "$(git -C "$CLONEPROJ" remote get-url sandbox-shell-cloneproj)")" = "$(canonicalize_path "$scratch")" ]
+}
+
+@test "clone(msb #453): a separate push URL on the source origin is carried too" {
+  git -C "$CLONEPROJ" remote add origin https://github.com/example/cloneproj.git
+  git -C "$CLONEPROJ" remote set-url --push origin git@github.com:example/cloneproj.git
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  [ "$(git config --file "$scratch/.git/config" remote.origin.url)" = "https://github.com/example/cloneproj.git" ]
+  [ "$(git config --file "$scratch/.git/config" remote.origin.pushurl)" = "git@github.com:example/cloneproj.git" ]
+}
+
+@test "clone(msb #453): the origin URL is carried raw; host insteadOf rewrites are not baked in" {
+  git -C "$CLONEPROJ" remote add origin https://github.com/example/cloneproj.git
+  git -C "$CLONEPROJ" config url.git@github.com:.insteadOf https://github.com/
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  [ "$(git config --file "$scratch/.git/config" remote.origin.url)" = "https://github.com/example/cloneproj.git" ]
+}
+
+@test "clone(msb #453): a source with no origin leaves the clone's remote untouched" {
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  [ "$(git config --file "$scratch/.git/config" remote.origin.url)" = "$(canonicalize_path "$CLONEPROJ")" ]
+  run git config --file "$scratch/.git/config" remote.origin.pushurl
+  assert_failure
+}
+
 # --- Guest-visible workspace markers (GSA-TTS/agentic-coding-quickstart#456) ---
 # A kit that must act only on the disposable clone (write agent instructions,
 # install a repo-local permission gate) and never on the real checkout needs a
