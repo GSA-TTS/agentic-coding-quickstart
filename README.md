@@ -44,12 +44,14 @@ For the full comparison of the two backends and their tradeoffs, see [docs/BACKE
 
 You'll do three things: **open a terminal**, **install `acq`**, and **run it**.
 You do **not** need to be a developer, and you do **not** need administrator
-rights on your Mac.
+rights on your Mac. Windows support is currently a preview path for Windows 11
+machines that already have Windows Hypervisor Platform enabled.
 
 ### Step 1: Open a terminal
 
-- **macOS:** press ⌘-Space, type "Terminal", press Return. (Or find it in
-  Applications → Utilities.)
+- **macOS:** press Cmd-Space, type "Terminal", press Return. (Or find it in
+  Applications > Utilities.)
+- **Windows preview:** open PowerShell.
 
 You'll type (or paste) the commands below into this window.
 
@@ -60,13 +62,25 @@ You'll type (or paste) the commands below into this window.
 
 ### Step 2: Install acq
 
-Paste this one line and press Return:
+On macOS or Linux, paste this one line and press Return:
 
 ```bash
 curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.sh | sh
 ```
 
-That's it — you don't have to choose *how* to install. The installer:
+On Windows 11 preview hosts, paste this in PowerShell:
+
+```powershell
+irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.ps1 | iex
+```
+
+The Windows preview installer uses Git Bash to run `acq` and stops if Windows
+Hypervisor Platform is not already enabled. It does not elevate, enable Windows
+features, or reboot for you; work with your device or enterprise administrator to
+enable WHP before running it. Windows preview installs use the GitHub release zip;
+npm remains scoped to macOS/Linux for now.
+
+That's it — you don't have to choose *how* to install. The macOS/Linux installer:
 
 - **picks the best method already on your Mac** — Homebrew if you have it, then
   npm if you have it, otherwise a self-contained download — so you get automatic
@@ -111,12 +125,24 @@ sh install.sh --dry-run      # show what it WOULD do, changing nothing
 sh install.sh                # actually install
 ```
 
-By default, the installer uses the best package manager already available on
-your host: Homebrew, then npm, then a managed git clone. Homebrew and npm rely on
-the published package/formula release path. The release asset's baked commit SHA
-is used only by the clone fallback (or `--method clone`) to verify that the clone
-landed on the release commit embedded in the installer. To pin to an independent,
-explicit commit, use `--method clone --sha <40-char-commit>`.
+By default, the macOS/Linux installer uses the best package manager already
+available on your host: Homebrew, then npm, then a managed git clone. Homebrew
+and npm rely on the published package/formula release path. The release asset's
+baked commit SHA is used only by the clone fallback (or `--method clone`) to
+verify that the clone landed on the release commit embedded in the installer. To
+pin to an independent, explicit commit, use `--method clone --sha <40-char-commit>`.
+
+For Windows preview installs, download and inspect the PowerShell installer
+instead:
+
+```powershell
+$AcqVersion = "3.1.0" # x-release-please-version
+$BaseUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$AcqVersion"
+Invoke-WebRequest "$BaseUrl/install.ps1" -OutFile install.ps1
+Get-Content .\install.ps1
+.\install.ps1 -DryRun
+.\install.ps1
+```
 
 </details>
 
@@ -202,7 +228,7 @@ finishes, re-run your command. (No administrator rights are required.)
 
 - **How it works, customizing, extra kits, optional integrations (web UI, editors):**
   [docs/CONCEPTS.md](docs/CONCEPTS.md)
-- **Deeper `acq` how-to, backend selection, manual install:**
+- **Deeper `acq` how-to, backend selection, manual install, Windows preview validation:**
   [docs/howto/acq.md](docs/howto/acq.md)
 - **Choosing between the msb and sbx backends:**
   [docs/BACKEND_GUIDE.md](docs/BACKEND_GUIDE.md)
