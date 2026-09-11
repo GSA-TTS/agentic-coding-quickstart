@@ -63,7 +63,7 @@ You'll type (or paste) the commands below into this window.
 Paste this one line and press Return:
 
 ```bash
-curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.sh | sh # x-release-please-version
+curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.sh | sh
 ```
 
 That's it — you don't have to choose *how* to install. The installer:

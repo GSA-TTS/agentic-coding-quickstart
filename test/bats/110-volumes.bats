@@ -238,7 +238,7 @@ SPEC
   assert_output --partial 'CREATE time only'
 }
 
-@test "msb: net-rule uses a bare FQDN target, strips :port, avoids domain= / domain: forms" {
+@test "msb: net-rule normalizes kit hosts and wildcard targets" {
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
@@ -254,11 +254,17 @@ caps:
     allow:
       - api.gsa.usai.gov
       - github.com:443
+      - "**.cloud.gov:443"
+      - crl*.example.gov:80
 SPEC
     arr=(); _acq_msb_net_rules_into arr "$nkit/spec.yaml"; printf "%s\n" "${arr[@]}"
   '
+  assert_output --partial "broadening 'crl*.' kit net-allow entries"
   assert_output --partial 'allow@api.gsa.usai.gov'
   assert_output --partial 'allow@github.com'
+  assert_output --partial 'allow@*.cloud.gov'
+  assert_output --partial 'allow@*.example.gov'
+  refute_output --partial 'allow@**.cloud.gov'
   refute_output --partial 'allow@domain='
   refute_output --partial 'allow@domain:'
 }
