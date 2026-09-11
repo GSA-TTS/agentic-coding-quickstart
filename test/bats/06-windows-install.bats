@@ -58,9 +58,10 @@ teardown() {
   assert_regex "$launcher" 'Find-GitBash'
   assert_regex "$launcher" 'Convert-ArgumentForGitBash'
   assert_regex "$launcher" 'if \(\$Argument -match.*\[A-Za-z\]:'
-  assert_regex "$launcher" 'StartsWith'
-  assert_regex "$launcher" 'TrimStart'
-  assert_regex "$launcher" 'Convert-ToGitBashPath -Path \$Matches\[2\]'
+  assert_regex "$launcher" 'function Test-IsUncPath'
+  assert_regex "$launcher" 'return \$slash \+ \$slash'
+  assert_regex "$launcher" 'TrimStart\(\[char\]92\)'
+  assert_regex "$launcher" 'Test-IsUncPath -Path \$Matches\[2\]'
   refute_regex "$launcher" 'MSYS2_ARG_CONV_EXCL = "\*"'
   assert_regex "$launcher" '& \$bash --noprofile --norc \$bashAcq @convertedArgs'
 }

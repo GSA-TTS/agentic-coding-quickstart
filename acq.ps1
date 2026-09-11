@@ -29,6 +29,17 @@ function Find-GitBash {
     throw "Git Bash was not found. Install Git for Windows, then re-run acq."
 }
 
+function Get-UncPrefix {
+    $slash = [string][char]92
+    return $slash + $slash
+}
+
+function Test-IsUncPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    return $Path.StartsWith((Get-UncPrefix))
+}
+
 function Convert-ToGitBashPath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -39,8 +50,8 @@ function Convert-ToGitBashPath {
         return "/$drive/$rest"
     }
 
-    if ($fullPath.StartsWith('\\')) {
-        return '//' + $fullPath.TrimStart('\').Replace('\', '/')
+    if (Test-IsUncPath -Path $fullPath) {
+        return '//' + $fullPath.TrimStart([char]92).Replace('\', '/')
     }
 
     return $fullPath.Replace('\', '/')
@@ -49,7 +60,7 @@ function Convert-ToGitBashPath {
 function Convert-ArgumentForGitBash {
     param([Parameter(Mandatory = $true)][string]$Argument)
 
-    if ($Argument -match '^[A-Za-z]:[\\/]' -or $Argument -match '^\\\\[^\\]+\\[^\\]+') {
+    if ($Argument -match '^[A-Za-z]:[\\/]' -or (Test-IsUncPath -Path $Argument)) {
         return Convert-ToGitBashPath -Path $Argument
     }
 
@@ -57,7 +68,7 @@ function Convert-ArgumentForGitBash {
         return $Matches[1] + ':' + (Convert-ToGitBashPath -Path $Matches[2])
     }
 
-    if ($Argument -match '^([^:]+):(\\\\[^\\]+\\[^\\]+.*)$') {
+    if ($Argument -match '^([^:]+):(.*)$' -and (Test-IsUncPath -Path $Matches[2])) {
         return $Matches[1] + ':' + (Convert-ToGitBashPath -Path $Matches[2])
     }
 
