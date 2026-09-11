@@ -60,3 +60,12 @@ teardown() {
   assert_regex "$shim" 'powershell\.exe -NoLogo -NoProfile -File "%ACQ_PS1%" %\*'
   refute_regex "$shim" 'ExecutionPolicy Bypass'
 }
+
+@test "release workflow: publishes Windows preview assets" {
+  workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
+
+  assert_regex "$workflow" 'acq-windows-x64\.zip'
+  assert_regex "$workflow" 'cp install\.ps1 dist/install\.ps1'
+  assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip > SHA256SUMS'
+  assert_regex "$workflow" 'dist/acq-windows-x64\.zip'
+}
