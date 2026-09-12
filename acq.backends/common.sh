@@ -650,13 +650,21 @@ workspace_paths() {
 # e.g. on macOS $TMPDIR is a /var -> /private/var symlink, and msb cannot mount
 # the symlinked form (see docs/BACKEND_GUIDE.md, msb workspace mounting).
 canonicalize_path() {
-  local p="${1:-}"
+  local p="${1:-}" _out=""
   [ -n "$p" ] || return 0
   if command -v realpath >/dev/null 2>&1; then
-    realpath "$p" 2>/dev/null && return 0
+    _out=$(realpath "$p" 2>/dev/null) || _out=""
+  elif command -v readlink >/dev/null 2>&1; then
+    _out=$(readlink -f "$p" 2>/dev/null) || _out=""
   fi
-  if command -v readlink >/dev/null 2>&1; then
-    readlink -f "$p" 2>/dev/null && return 0
+  [ -n "$_out" ] && p="$_out"
+  # Under MSYS/Cygwin, native tools (git.exe, msb.exe) report Windows-form
+  # paths (C:/...) while bash-built paths stay MSYS-form (/c/... or /tmp/...).
+  # Normalize to mixed Windows form so comparisons and native-tool arguments
+  # agree; cygpath only exists on MSYS/Cygwin, so POSIX hosts are unaffected.
+  if command -v cygpath >/dev/null 2>&1; then
+    _out=$(cygpath -m "$p" 2>/dev/null) || _out=""
+    [ -n "$_out" ] && p="$_out"
   fi
   printf '%s\n' "$p"
 }
