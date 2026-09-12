@@ -3159,7 +3159,10 @@ EOF
   # root sh -c string.
   if [ -n "$ACQ_MSB_GUEST_WORKSPACE" ]; then
     case "$ACQ_MSB_GUEST_WORKSPACE" in
-      *[!A-Za-z0-9._/-]*)
+      # The path enters a root sh -c string single-quoted, so only a literal '
+      # is dangerous. Keep a conservative charset, but allow ':' so Windows
+      # drive-form paths (C:/...) from canonicalize_path can be recorded.
+      *[!A-Za-z0-9._/:-]*)
         acq_debug "msb: not recording unsafe guest workspace path: $ACQ_MSB_GUEST_WORKSPACE" ;;
       *)
         msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && printf '%s' '$ACQ_MSB_GUEST_WORKSPACE' > /var/lib/acq/workspace" >/dev/null 2>&1 || true ;;
