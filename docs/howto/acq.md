@@ -263,6 +263,23 @@ acq --backend msb run shell "$env:TEMP\acq windows smoke"
 If any command fails, capture the full command, output, Windows version, `msb
 --version`, and whether the machine is managed by enterprise policy.
 
+This checklist was validated on a Windows 11 host (build 26200) running inside a
+VM: the installer dry-run/help, a real release-zip install (with SHA-256
+verification), `acq version` through `acq.cmd`, `msb --version` / `msb doctor`,
+and sandbox provisioning all worked. Two notes from that validation:
+
+- The launcher and installer resolve Git Bash from Git for Windows' standard
+  install locations and deliberately ignore the WSL interop shim
+  (`C:\Windows\System32\bash.exe`) that a bare `bash.exe` PATH lookup often
+  returns. If `acq` still lands in WSL, run it from a Git Bash terminal or add
+  Git for Windows' `bin` directory to your PATH.
+- The installer checks WHP by probing the WHP API (`WHvCreatePartition`), the
+  same signal `msb` uses, rather than the DISM feature flag — the flag can report
+  `Disabled` on hosts where WHP genuinely works (WSL2/VirtualMachine Platform,
+  VBS, or a virtualized guest). Treat `msb doctor` as the authoritative readiness
+  check. The smoke test's last command additionally needs a stored USAi key
+  (`acq secret set -g usai`) before it can create a sandbox.
+
 ### Manual install (from a clone)
 
 If you're comfortable in a terminal and prefer to run `acq` from a clone:

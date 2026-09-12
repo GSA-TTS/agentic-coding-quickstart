@@ -2131,6 +2131,53 @@ amending the wrong branch.
 
 ---
 
+## 39. Windows preview: `bash.exe` resolves to the WSL shim, and the WHP feature flag is not a readiness signal
+
+### Symptoms
+
+- On a Windows 11 host, `acq.cmd` / `acq.ps1` delegates into a WSL distro instead of Git Bash:
+  `/bin/bash: /c/Users/.../acq: No such file or directory`.
+- `install.ps1` aborts for a non-elevated user with
+  `Get-WindowsOptionalFeature : The requested operation requires elevation.`
+  instead of WHP guidance.
+- `msb doctor` reports the host ready and sandboxes boot, yet
+  `Get-WindowsOptionalFeature -FeatureName HypervisorPlatform` reports `Disabled`.
+
+### Root Cause
+
+- Git for Windows installs `Git\bin` but does **not** put it on `PATH` by default,
+  so `Get-Command bash.exe` resolves to `C:\Windows\System32\bash.exe` — the WSL
+  interop shim, not Git Bash.
+- The WHP optional-feature *flag* is not the thing that makes WHP work. When the
+  Windows hypervisor is already running (WSL2 / VirtualMachine Platform, VBS, or a
+  virtualized guest), the user-mode WHP API (`WinHvPlatform.dll`, e.g.
+  `WHvCreatePartition`) is callable regardless of the flag, which is also not
+  readable without an elevated shell.
+
+### Fix
+
+- `acq.ps1` and `install.ps1` prefer known Git-for-Windows locations first and
+  reject the WSL shim (`System32\bash.exe`, `SysWOW64\bash.exe`) when falling back
+  to a PATH lookup.
+- `install.ps1` probes WHP with `WHvCreatePartition` (the same call `msb` relies
+  on) instead of gating on the feature flag; when the state stays undetermined it
+  warns and defers to `msb doctor`, which `acq` surfaces before provisioning.
+- Treat `msb doctor` as the authoritative readiness signal on Windows.
+
+### Related Windows/MSYS notes
+
+- Under Git Bash, `realpath` preserves MSYS paths (`/tmp/...`) while `git.exe` and
+  native tools report Windows-form paths (`C:/...`); `canonicalize_path` now
+  normalizes to mixed Windows form (`cygpath -m`) so comparisons and native-tool
+  arguments agree.
+- The offline Bats suite is POSIX-oriented: on a Windows/MSYS host, `install.sh`
+  tests (macOS/Linux installer), `chmod 0600` assertions (MSYS cannot represent
+  them on NTFS), and symlink-based tests cannot pass without native symlinks. None
+  are regressions from the Windows preview path; validate that path with the
+  checklist in `docs/howto/acq.md`.
+
+---
+
 When something fails, work through this list:
 
 1. [ ] Is the secret actually in the container? (`echo $VAR_NAME`)
