@@ -5,12 +5,29 @@
 
 $ErrorActionPreference = "Stop"
 
-function Find-GitBash {
-    $fromPath = Get-Command bash.exe -ErrorAction SilentlyContinue
-    if ($null -ne $fromPath) {
-        return $fromPath.Source
+function Test-IsWslShim {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not $env:SystemRoot) {
+        return $false
     }
 
+    $full = [System.IO.Path]::GetFullPath($Path)
+    foreach ($name in @("System32\bash.exe", "SysWOW64\bash.exe")) {
+        if ($full -eq [System.IO.Path]::GetFullPath((Join-Path $env:SystemRoot $name))) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Find-GitBash {
+    # Prefer Git for Windows' known install locations. A PATH lookup for bash.exe
+    # often resolves to C:\Windows\System32\bash.exe - the WSL interop shim, not
+    # Git Bash - so only fall back to PATH once those locations are exhausted, and
+    # never accept the shim (it would run acq inside a WSL distro, where the
+    # Windows msb.exe and this checkout's paths do not exist).
     $candidates = @(
         "$env:ProgramFiles\Git\bin\bash.exe",
         "$env:ProgramFiles\Git\usr\bin\bash.exe",
@@ -24,6 +41,11 @@ function Find-GitBash {
         if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
             return $candidate
         }
+    }
+
+    $fromPath = Get-Command bash.exe -ErrorAction SilentlyContinue
+    if ($null -ne $fromPath -and -not (Test-IsWslShim -Path $fromPath.Source)) {
+        return $fromPath.Source
     }
 
     throw "Git Bash was not found. Install Git for Windows, then re-run acq."

@@ -106,23 +106,56 @@ function Assert-WindowsHost {
 }
 
 function Test-WhpEnabled {
-    $dism = Get-Command dism.exe -ErrorAction SilentlyContinue
-    if ($null -ne $dism) {
-        $output = & $dism.Source /online /Get-FeatureInfo /FeatureName:HypervisorPlatform 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            $text = $output -join "`n"
-            if ($text -match 'State\s*:\s*Enabled') { return $true }
-            if ($text -match 'State\s*:\s*Disabled') { return $false }
+    # The WHP optional-feature flag is not a reliable readiness signal: it is not
+    # readable without elevation, and on hosts where the Windows hypervisor is
+    # already running (WSL2 / VirtualMachine Platform, VBS, or a virtualized guest)
+    # the WHP user-mode API works even when the feature still reports Disabled.
+    # Probe the API the way msb does - WHvCreatePartition needs no elevation and
+    # reflects whether WHP is actually usable. Returns $true / $false when a
+    # verdict is possible, and $null when the state stays undetermined.
+    try {
+        if (-not ("Whp.Capability" -as [type])) {
+            Add-Type -Namespace Whp -Name Capability -MemberDefinition @'
+[DllImport("WinHvPlatform.dll")]
+public static extern int WHvCreatePartition(out System.IntPtr Partition, uint Access);
+[DllImport("WinHvPlatform.dll")]
+public static extern int WHvDeletePartition(System.IntPtr Partition);
+'@
+        }
+        $partition = [System.IntPtr]::Zero
+        if ([Whp.Capability]::WHvCreatePartition([ref]$partition, 0) -eq 0) {
+            [void][Whp.Capability]::WHvDeletePartition($partition)
+            return $true
+        }
+        return $false
+    }
+    catch {
+        # The API probe could not load; fall back to the feature state where the
+        # optional-feature check is readable at all (an elevated shell).
+    }
+
+    try {
+        $dism = Get-Command dism.exe -ErrorAction SilentlyContinue
+        if ($null -ne $dism) {
+            $output = & $dism.Source /online /Get-FeatureInfo /FeatureName:HypervisorPlatform 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $text = $output -join "`n"
+                if ($text -match 'State\s*:\s*Enabled') { return $true }
+                if ($text -match 'State\s*:\s*Disabled') { return $false }
+            }
+        }
+
+        $featureCmd = Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue
+        if ($null -ne $featureCmd) {
+            $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction Stop
+            return $feature.State -eq "Enabled"
         }
     }
-
-    $featureCmd = Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue
-    if ($null -ne $featureCmd) {
-        $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction Stop
-        return $feature.State -eq "Enabled"
+    catch {
+        # Not elevated, so the feature state is unreadable; leave WHP undetermined.
     }
 
-    throw "Could not determine whether Windows Hypervisor Platform is enabled."
+    return $null
 }
 
 function Assert-WhpEnabled {
@@ -131,17 +164,40 @@ function Assert-WhpEnabled {
         return
     }
 
-    if (-not (Test-WhpEnabled)) {
+    $result = Test-WhpEnabled
+    if ($null -eq $result) {
+        Write-Warn "Could not verify Windows Hypervisor Platform directly. 'msb doctor' will confirm host readiness before the first sandbox starts."
+        return
+    }
+
+    if (-not $result) {
         throw "Windows Hypervisor Platform is not enabled. Enable it through your device or enterprise administrator, reboot if required, then re-run this installer."
     }
 }
 
-function Find-GitBash {
-    $fromPath = Get-Command bash.exe -ErrorAction SilentlyContinue
-    if ($null -ne $fromPath) {
-        return $fromPath.Source
+function Test-IsWslShim {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not $env:SystemRoot) {
+        return $false
     }
 
+    $full = [System.IO.Path]::GetFullPath($Path)
+    foreach ($name in @("System32\bash.exe", "SysWOW64\bash.exe")) {
+        if ($full -eq [System.IO.Path]::GetFullPath((Join-Path $env:SystemRoot $name))) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Find-GitBash {
+    # Prefer Git for Windows' known install locations. A PATH lookup for bash.exe
+    # often resolves to C:\Windows\System32\bash.exe - the WSL interop shim, not
+    # Git Bash - so only fall back to PATH once those locations are exhausted, and
+    # never accept the shim (it would run acq inside a WSL distro, where the
+    # Windows msb.exe and this checkout's paths do not exist).
     $candidates = @(
         "$env:ProgramFiles\Git\bin\bash.exe",
         "$env:ProgramFiles\Git\usr\bin\bash.exe",
@@ -155,6 +211,11 @@ function Find-GitBash {
         if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
             return $candidate
         }
+    }
+
+    $fromPath = Get-Command bash.exe -ErrorAction SilentlyContinue
+    if ($null -ne $fromPath -and -not (Test-IsWslShim -Path $fromPath.Source)) {
+        return $fromPath.Source
     }
 
     return $null
