@@ -33,12 +33,21 @@ teardown() {
 @test "windows PowerShell: launcher and installer parse when pwsh is available" {
   command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
 
+  # Under Git Bash, $REPO_ROOT is a POSIX path (/c/...); a native Windows pwsh
+  # cannot Join-Path that into a readable path. Convert to a Windows path where
+  # cygpath exists (Git Bash), else keep the POSIX path (macOS/Linux pwsh).
+  if command -v cygpath >/dev/null 2>&1; then
+    repo_root_win=$(cygpath -w "$REPO_ROOT")
+  else
+    repo_root_win="$REPO_ROOT"
+  fi
+
   run pwsh -NoLogo -NoProfile -Command '
     foreach ($file in @("install.ps1", "acq.ps1")) {
       $tokens = $null
       $errors = $null
       $null = [System.Management.Automation.Language.Parser]::ParseFile(
-        (Join-Path "'"$REPO_ROOT"'" $file),
+        (Join-Path "'"$repo_root_win"'" $file),
         [ref]$tokens,
         [ref]$errors
       )
@@ -98,6 +107,25 @@ teardown() {
   assert_regex "$launcher" 'Test-IsUncPath -Path \$Matches\[2\]'
   refute_regex "$launcher" 'MSYS2_ARG_CONV_EXCL = "\*"'
   assert_regex "$launcher" '& \$bash --noprofile --norc \$bashAcq @convertedArgs'
+}
+
+@test "windows launcher and installer: reject the WSL bash shim in favor of Git Bash" {
+  for f in "$REPO_ROOT/acq.ps1" "$REPO_ROOT/install.ps1"; do
+    script=$(cat "$f")
+    assert_regex "$script" 'Test-IsWslShim'
+    assert_regex "$script" 'System32\\bash\.exe'
+    assert_regex "$script" 'SysWOW64\\bash\.exe'
+    assert_regex "$script" 'Test-IsWslShim -Path \$fromPath\.Source'
+  done
+}
+
+@test "windows installer: probes WHP via the API, not just the feature flag" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  assert_regex "$installer" 'WHvCreatePartition'
+  assert_regex "$installer" 'WHvDeletePartition'
+  assert_regex "$installer" 'WinHvPlatform\.dll'
+  assert_regex "$installer" 'return \$null'
 }
 
 @test "windows cmd shim: delegates to PowerShell launcher without policy bypass" {
