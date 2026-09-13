@@ -85,8 +85,11 @@ If `msb doctor` reports the host is not ready, follow its guidance. Common
 items: enabling KVM on Linux (`/dev/kvm` present and accessible), Apple
 Virtualization on macOS, or Windows Hypervisor Platform on Windows 11. The `acq`
 Windows preview installer does not elevate, enable WHP, or reboot; it stops when
-WHP is disabled so the user or enterprise administrator can handle that setup out
-of band. `acq` surfaces the doctor output before it provisions a sandbox.
+WHP is not usable so the user or enterprise administrator can handle that setup
+out of band (enable it from an **elevated** PowerShell with
+`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`,
+then restart — see the [README box](../../README.md#step-1-open-a-terminal)).
+`acq` surfaces the doctor output before it provisions a sandbox.
 
 ## Step 2: Select the backend
 

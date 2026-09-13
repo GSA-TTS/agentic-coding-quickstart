@@ -214,13 +214,17 @@ Windows support is a preview path for Windows 11 hosts using the `msb` backend.
 It is installed from the GitHub release zip with PowerShell; npm remains scoped
 to macOS/Linux until Windows path and secret-storage behavior are fully
 validated. The preview runs the existing Bash `acq` implementation through Git
-Bash. The installer verifies that Windows Hypervisor Platform is already enabled,
-but it does not try to enable Windows features, elevate PowerShell, or reboot the
-machine.
+Bash. The installer probes Windows Hypervisor Platform and stops when it is not
+usable, but it does not try to enable Windows features, elevate PowerShell, or
+reboot the machine.
+
+<!-- x-release-please-start-version -->
 
 ```powershell
 irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.ps1 | iex
 ```
+
+<!-- x-release-please-end -->
 
 For an inspect-first install:
 
@@ -233,8 +237,10 @@ Get-Content .\install.ps1
 .\install.ps1
 ```
 
-If WHP is disabled, stop and work with your device or enterprise administrator
-to enable it before re-running the installer.
+If WHP is disabled, stop: enable it from an **elevated** PowerShell
+(`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),
+restart, and re-run the installer. On a managed device, ask your IT administrator
+to enable "Windows Hypervisor Platform" out of band.
 
 ### Windows preview validation
 
@@ -421,11 +427,14 @@ time: Apple Silicon Macs include the hypervisor support msb uses.
 **Windows 11** — Windows support is in **preview**. Local sandboxes need the
 **Windows Hypervisor Platform** feature (this is separate from the
 `VirtualMachinePlatform` feature that WSL2 and Docker Desktop enable). The
-Windows preview installer checks for WHP and stops if it is disabled; it does not
+Windows preview installer probes WHP and stops when it is not usable; it does not
 elevate PowerShell, enable the feature, or reboot the machine.
 
-If WHP is disabled, work with your device or enterprise administrator to enable
-it out of band, then re-run the installer or `msb doctor`.
+Enable WHP yourself from an **elevated** PowerShell
+(`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),
+then restart (see the [README box](../../README.md#step-1-open-a-terminal)). On a
+managed device, ask your IT administrator; then re-run the installer or
+`msb doctor`.
 
 **Inside a cloud VM, CI runner, or another hypervisor** — the outer environment
 must expose **nested virtualization** before `/dev/kvm` (or the equivalent) is
