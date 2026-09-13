@@ -43,53 +43,79 @@ For the full comparison of the two backends and their tradeoffs, see [docs/BACKE
 ## 5-Minute Quickstart
 
 You'll do three things: **open a terminal**, **install `acq`**, and **run it**.
-You do **not** need to be a developer, and you do **not** need administrator
-rights on your Mac. Windows support is currently a preview path for Windows 11
-machines that already have Windows Hypervisor Platform enabled.
+You do **not** need to be a developer. Windows support is currently a preview
+path for Windows 11 machines with virtualization enabled (see Step 1).
 
 ### Step 1: Open a terminal
 
-- **macOS:** press Cmd-Space, type "Terminal", press Return. (Or find it in
-  Applications > Utilities.)
-- **Windows preview:** open PowerShell.
+Open a terminal — **Terminal** (macOS) or **PowerShell** (Windows). You'll type
+(or paste) the commands below into this window.
 
-You'll type (or paste) the commands below into this window.
+> **Before you start:** the sandbox runs on your machine's hardware
+> virtualization. Apple Silicon Macs are ready to go. Windows 11 needs the
+> **Windows Hypervisor Platform** enabled — see the box below. Linux needs KVM
+> (`/dev/kvm`). For the full platform requirements, see
+> [supported hosts](docs/howto/acq.md#msb-host-setup).
 
-> **Not on an Apple Silicon Mac?** The sandbox needs hardware virtualization
-> (macOS on Apple Silicon, Windows 11 with the Windows Hypervisor Platform, or
-> Linux with `/dev/kvm`). See
-> [supported hosts and other platforms](docs/howto/acq.md#msb-host-setup).
+<details>
+<summary><strong>Windows: enable virtualization</strong> (click to expand)</summary>
+
+The sandbox runs a lightweight microVM using the **Windows Hypervisor Platform**
+(WHP). Your Windows 11 machine needs it enabled. Open an **elevated** PowerShell
+window — in the Start menu, right-click **PowerShell** and choose **Run as
+administrator** — then run:
+
+```powershell
+# Enable WHP, then restart your computer.
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
+```
+
+Restart when it finishes. After that, the installer (or `msb doctor`) will confirm
+the host is ready. On a work or managed device you may not be able to enable it
+yourself — ask your IT administrator to turn on "Windows Hypervisor Platform."
+If it can't be enabled, the installer stops with a clear message telling you so.
+
+</details>
 
 ### Step 2: Install acq
 
-On macOS or Linux, paste this one line and press Return:
+Run the one-line installer for your shell.
+
+**Terminal (macOS/Linux):**
+
+<!-- x-release-please-start-version -->
 
 ```bash
 curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.sh | sh
 ```
 
-On Windows 11 preview hosts, paste this in PowerShell:
+<!-- x-release-please-end -->
+
+**PowerShell (Windows):**
+
+<!-- x-release-please-start-version -->
 
 ```powershell
 irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.ps1 | iex
 ```
 
-The Windows preview installer uses Git Bash to run `acq` and stops if Windows
-Hypervisor Platform is not already enabled. It does not elevate, enable Windows
-features, or reboot for you; work with your device or enterprise administrator to
-enable WHP before running it. Windows preview installs use the GitHub release zip;
-npm remains scoped to macOS/Linux for now.
+<!-- x-release-please-end -->
 
-That's it — you don't have to choose *how* to install. The macOS/Linux installer:
+That's it — you don't have to choose *how* to install. The installer:
 
-- **picks the best method already on your Mac** — Homebrew if you have it, then
-  npm if you have it, otherwise a self-contained download — so you get automatic
+- **picks the best method already on your computer** — Homebrew or npm on
+  macOS/Linux, or the GitHub release zip on Windows — so you get automatic
   upgrades/uninstall if you already use a package manager, and a working setup
   either way,
 - puts the `acq` command on your computer so you can run it from **any folder**,
-- offers to install **msb** (the sandbox `acq` runs your agent inside), and
-- **asks before** changing anything about your setup — it never edits your
-  configuration without your OK, and it never needs administrator rights.
+- installs anything `acq` needs to run — the sandbox runtime, and on Windows a
+  small Linux-style shell — **asking before each change**, and never needing
+  administrator rights.
+
+**Answer "yes" to each prompt** — it may take a few minutes. When it finishes,
+**close and reopen your terminal** so the new `acq` command is available, then
+continue to Step 3. (On Windows, the installer stops with clear guidance if
+virtualization isn't enabled — see the box in Step 1.)
 
 <details>
 <summary>Prompted to install "Command Line Tools"? (click to expand)</summary>
@@ -153,12 +179,16 @@ Get-Content .\install.ps1
 
 ### Step 3: Run it
 
-Point `acq` at the folder you want the agent to work in (an existing project, or
-a new empty folder you just made):
+Point `acq` at the folder you want the agent to work in. The easiest is the
+folder you're already in:
 
 ```bash
-acq run opencode ~/my-project
+acq run opencode .
 ```
+
+To use a new folder, create it with `mkdir my-project`, move into it with
+`cd my-project`, then run `acq run opencode .` there. (These commands work in
+both PowerShell and the macOS/Linux terminal.)
 
 That's it — you're now running an AI coding agent with USAi access and
 restricted filesystem and network access. Repeat Step 3 for each project.
@@ -185,7 +215,7 @@ the guest**.
 
 ## First-Run Snags
 
-The two things a first-timer most often hits are below. For everything else
+The things a first-timer most often hits are below. For everything else
 (expired USAi keys, DNS resolution, unverified commits, stale branches, wrong
 providers, auth/TLS failures, and more), see
 **[docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md)**.
@@ -219,6 +249,25 @@ A pop-up window titled **"Install Command Line Developer Tools"** appears — cl
 **Install** and accept the license. **If you can't find the window, look in your
 Dock** — it sometimes opens minimized there rather than in front of you. When it
 finishes, re-run your command. (No administrator rights are required.)
+
+</details>
+
+<details>
+<summary><strong>"acq is not recognized as the name of a cmdlet"</strong> (Windows)</summary>
+
+This means the new `acq` command isn't on your PATH in this window. **Close and
+reopen PowerShell**, then try again. If it still isn't found, re-run the Step 2
+installer and answer **yes** when it asks to add `acq` to your PATH.
+
+</details>
+
+<details>
+<summary><strong>"Windows Hypervisor Platform is not enabled"</strong> (Windows)</summary>
+
+The sandbox can't start without virtualization. Enable it from an **elevated**
+PowerShell (`Enable-WindowsOptionalFeature -Online -FeatureName
+HypervisorPlatform -All`), restart your computer, and try again — see the box in
+Step 1. On a managed device, ask your IT administrator to enable it.
 
 </details>
 
