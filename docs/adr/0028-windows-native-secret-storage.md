@@ -1,6 +1,6 @@
 ---
 title: "Windows-Native Secret Storage for acq"
-status: proposed
+status: accepted
 date: 2026-09-13
 decision_makers: ["Bret Mogilefsky"]
 category: architecture
@@ -111,8 +111,8 @@ Windows hosts (MSYS/MINGW), with the plain `file` backend remaining as the
 fallback for exotic or headless cases where PowerShell is unavailable.
 
 The store API, key format, and metadata sidecar are unchanged; only the
-read/write mechanism behind the Windows backend differs. This ADR is `proposed`
-and subject to review in this PR before it moves to `accepted`.
+read/write mechanism behind the Windows backend differs. Status is `accepted`;
+the `keychain-windows` backend and its offline tests land in this stack.
 
 ## Consequences
 
@@ -132,7 +132,9 @@ and subject to review in this PR before it moves to `accepted`.
 - Cross-user negative test: a value written by user A must fail to read as user B.
 - Offline bats: a forceable/stubbable `keychain-windows` backend plus static
   contract tests, mirroring the `keychain-macos` stub approach.
-- Re-run the full suite; the §39 0600 note should narrow to macOS/Linux only.
+- The full suite passes with the new `keychain-windows` coverage; the
+  `KNOWN_FAILURE_MODES.md` §39 note now scopes the 0600 limitation to
+  macOS/Linux only.
 
 ## Links
 
