@@ -21,6 +21,10 @@
         {
           "type": "generic",
           "path": "README.md"
+        },
+        {
+          "type": "generic",
+          "path": "docs/howto/acq.md"
         }
       ]
     }
