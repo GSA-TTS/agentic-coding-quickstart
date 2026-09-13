@@ -269,10 +269,12 @@ acq --backend msb run shell "$env:TEMP\acq windows smoke"
 If any command fails, capture the full command, output, Windows version, `msb
 --version`, and whether the machine is managed by enterprise policy.
 
-This checklist was validated on a Windows 11 host (build 26200) running inside a
-VM: the installer dry-run/help, a real release-zip install (with SHA-256
-verification), `acq version` through `acq.cmd`, `msb --version` / `msb doctor`,
-and sandbox provisioning all worked. Two notes from that validation:
+This checklist was validated on a Windows 11 host (build 26200): the installer
+dry-run/help, a real release-zip install (with SHA-256 verification) on a host
+with no sandbox runtime preinstalled — the installer detected the missing `msb`,
+prompted, and installed it via the upstream Windows installer — `acq version`
+through `acq.cmd`, `msb --version` / `msb doctor`, and sandbox provisioning all
+worked. Notes from that validation:
 
 - The launcher and installer resolve Git Bash from Git for Windows' standard
   install locations and deliberately ignore the WSL interop shim
@@ -283,8 +285,12 @@ and sandbox provisioning all worked. Two notes from that validation:
   same signal `msb` uses, rather than the DISM feature flag — the flag can report
   `Disabled` on hosts where WHP genuinely works (WSL2/VirtualMachine Platform,
   VBS, or a virtualized guest). Treat `msb doctor` as the authoritative readiness
-  check. The smoke test's last command additionally needs a stored USAi key
-  (`acq secret set -g usai`) before it can create a sandbox.
+  check.
+- `acq run` gates on a stored USAi key and validates it against the USAi API
+  before creating a sandbox, so the smoke test's last command and the full first
+  run require **GSA network reachability** (e.g. the GSA VPN) plus a key
+  (`acq secret set -g usai`). Off the GSA network, `acq run` stops at the key
+  gate with a clear message.
 
 ### Manual install (from a clone)
 
