@@ -147,6 +147,7 @@ registry.k8s.io:443
 sourceforge.net:443
 vscode.dev:443
 vscode.download.prss.microsoft.com:443
+workshop.cloud.gov:443
 
 # --- Cloud infrastructure ---
 **.amazonaws.com:443
