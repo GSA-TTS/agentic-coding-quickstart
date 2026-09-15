@@ -145,6 +145,26 @@ guided step.
 
 ## Considered Options
 
+### Windows preview path
+
+Windows support is added as a separate **preview** front door, not by stretching
+the POSIX `install.sh` contract. The Windows path uses a PowerShell installer
+that installs a release zip and exposes `acq` through Git Bash while the main
+implementation remains Bash. The preview is scoped to Windows 11 with the `msb`
+backend.
+
+The Windows installer may install or verify user-space dependencies such as Git
+for Windows and `msb`, but it must not elevate PowerShell, enable Windows
+features, or reboot. It checks that Windows Hypervisor Platform is already
+enabled and stops with guidance when it is not; enterprise-managed machines need
+that prerequisite handled through their normal device administration path.
+
+Windows support remains preview until real Windows validation covers WinGet or
+release-zip installation, PowerShell launch, Git Bash argument forwarding, MSB
+sandbox creation, Windows path handling, host CA behavior, and secret storage.
+The full supported path also needs a Windows-native secret backend rather than
+relying on the Unix file fallback.
+
 ### Getting `acq` on PATH — one front door that picks the best available method
 
 There is a **single** entry point — the hardened `curl … | sh` installer — so a
@@ -290,7 +310,8 @@ as issues):
 - **Positive:** a bare-Mac, non-technical user gets `acq` (and optionally `msb`)
   on `PATH` from a single pasted command; developers keep the manual clone;
   brew and npm serve users who prefer them; `acq version` and updates keep
-  working.
+  working. Windows users get a preview PowerShell front door that does not depend
+  on cloning the repo manually.
 - **Negative / trade-off:** `curl | bash` carries a cultural stigma in security
   circles; we mitigate with package-manager-first auto-selection, clone-path
   consistency checks, checksums, artifact attestations, inspect-first,
@@ -327,7 +348,8 @@ as issues):
   out the release commit, copies `install.sh`, injects that exact commit into the
   release asset's `DEFAULT_RELEASE_SHA`, generates `SHA256SUMS`, publishes GitHub
   artifact attestations for both release assets, and uploads both assets to the
-  GitHub release.
+  GitHub release. The Windows preview path additionally needs a versioned zip and
+  PowerShell installer asset in that release bundle.
 - **Manual (bare-Mac reviewer):** on a clean macOS account, run the one-liner;
   confirm `acq` resolves on `PATH` (after accepting the offered `PATH` line or
   adding the printed line), `acq version` reports the selected install's version
