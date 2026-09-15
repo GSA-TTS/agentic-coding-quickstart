@@ -100,7 +100,7 @@ CLI (`gh`), you can also verify the release asset attestations before running
 anything:
 
 ```bash
-ACQ_VERSION=3.1.0 # x-release-please-version
+ACQ_VERSION=3.2.0 # x-release-please-version
 curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/install.sh"
 curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/SHA256SUMS"
 gh attestation verify install.sh --repo GSA-TTS/agentic-coding-quickstart
