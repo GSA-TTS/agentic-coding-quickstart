@@ -14,8 +14,9 @@
 #     precedence over global — mirroring §7.5 and the Phase-1 sbx global/sandbox
 #     scope that acq already lifted into its abstraction.
 #   - Storage in the OS keychain when available (macOS `security -i`, Linux
-#     `secret-tool`), with a 0600 file fallback under
-#     $XDG_DATA_HOME/acq/secrets/ when no keychain backend exists.
+#     `secret-tool`), Windows DPAPI (Keychain-equivalent, user-scoped) via
+#     in-box PowerShell, and a 0600 file fallback under
+#     $XDG_DATA_HOME/acq/secrets/ when no protected backend exists.
 #   - Read access for adapters at provision time: each backend pulls the real
 #     value from here and feeds it to its native injection path (sbx proxy /
 #     msb --secret), so the value never enters the guest and never appears in
@@ -56,7 +57,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # _acq_secret_backend — which store mechanism is active: keychain-macos |
-# keychain-linux | file. Respects ACQ_SECRET_FORCE_FILE.
+# keychain-linux | keychain-windows | file. Respects ACQ_SECRET_FORCE_FILE.
 # ---------------------------------------------------------------------------
 _acq_secret_security_bin() {
   if [ -n "${ACQ_SECRET_STORE_DIR:-}" ] && [ -n "${ACQ_SECRET_SECURITY_BIN:-}" ]; then
@@ -66,12 +67,30 @@ _acq_secret_security_bin() {
   printf '/usr/bin/security\n'
 }
 
+# PowerShell drives the Windows DPAPI backend (see _acq_secret_store_windows).
+# Like the macOS security override, ACQ_SECRET_POWERSHELL_BIN is a test-only
+# escape hatch honored only alongside ACQ_SECRET_STORE_DIR, so production never
+# honors it.
+_acq_secret_powershell_bin() {
+  if [ -n "${ACQ_SECRET_STORE_DIR:-}" ] && [ -n "${ACQ_SECRET_POWERSHELL_BIN:-}" ]; then
+    printf '%s\n' "$ACQ_SECRET_POWERSHELL_BIN"
+    return 0
+  fi
+  printf 'powershell.exe\n'
+}
+
 _acq_secret_backend() {
   if [ -n "${ACQ_SECRET_FORCE_FILE:-}" ]; then
     printf 'file\n'; return 0
   fi
   case "$(uname -s 2>/dev/null)" in
     Darwin) [ -x "$(_acq_secret_security_bin)" ] && { printf 'keychain-macos\n'; return 0; } ;;
+    MINGW*|MSYS*|CYGWIN*)
+      # Git Bash on Windows has neither a keychain nor secret-tool, so the plain
+      # file fallback would leave secrets in cleartext on NTFS (which cannot
+      # enforce 0600). Use Windows DPAPI via in-box PowerShell instead
+      # (ADR-0028); fall back to the file backend only if PowerShell is absent.
+      command -v "$(_acq_secret_powershell_bin)" >/dev/null 2>&1 && { printf 'keychain-windows\n'; return 0; } ;;
     *)      command -v secret-tool >/dev/null 2>&1 && { printf 'keychain-linux\n'; return 0; } ;;
   esac
   printf 'file\n'
@@ -149,6 +168,53 @@ _acq_secret_store_keychain_macos() {
 }
 
 # ---------------------------------------------------------------------------
+# Windows DPAPI (keychain-windows): encrypt/decrypt a value with the Windows
+# Data Protection API scoped to the CURRENT USER, via in-box Windows PowerShell
+# (`powershell.exe`, 5.1 — its System.Security assembly exposes ProtectedData
+# with no added dependency). Plaintext moves over stdin and ciphertext/base64
+# over stdout, so the value never reaches argv. This is the Windows analogue of
+# a keychain: the ciphertext lives in the same file layout as the plaintext
+# fallback but is readable only by the same Windows account, removing the
+# NTFS-cannot-enforce-0600 weakness (see ADR-0028).
+# ---------------------------------------------------------------------------
+_acq_secret_windows_encrypt() {
+  local ps; ps=$(_acq_secret_powershell_bin)
+  "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $b=[Text.Encoding]::UTF8.GetBytes($i); [Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
+}
+
+_acq_secret_windows_decrypt() {
+  local ps; ps=$(_acq_secret_powershell_bin)
+  "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $e=[Convert]::FromBase64String($i.Trim()); [Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($e,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
+}
+
+# Encrypt VALUE and write the ciphertext to the key's file path. The ciphertext
+# is written with umask 077 like the plaintext fallback (defense in depth), but
+# the DPAPI envelope is what actually protects it on NTFS.
+_acq_secret_store_windows() {
+  local key="$1" value="$2" f enc
+  f=$(_acq_secret_file_for "$key")
+  enc=$(printf '%s' "$value" | _acq_secret_windows_encrypt) || {
+    echo "acq: secret store: Windows DPAPI encryption failed for '$key'." >&2; return 1; }
+  [ -n "$enc" ] || {
+    echo "acq: secret store: Windows DPAPI produced no ciphertext for '$key'." >&2; return 1; }
+  ( umask 077; mkdir -p "$ACQ_SECRET_FILE_DIR" ) || return 1
+  ( umask 077; printf '%s' "$enc" > "$f" ) || {
+    echo "acq: secret store: file write failed for '$key'." >&2; return 1; }
+  return 0
+}
+
+# Read the key's ciphertext and decrypt it. A missing file, an undecryptable
+# envelope (wrong user/machine, or corruption), or a lost DPAPI key all surface
+# as a non-zero return so callers treat the secret as absent rather than using a
+# truncated value.
+_acq_secret_get_windows() {
+  local key="$1" f
+  f=$(_acq_secret_file_for "$key")
+  [ -f "$f" ] || return 1
+  cat "$f" | _acq_secret_windows_decrypt || return 1
+}
+
+# ---------------------------------------------------------------------------
 # acq_secret_store KEY  (value on STDIN)
 # ---------------------------------------------------------------------------
 # Store a secret VALUE (read from stdin, never argv) under KEY. Overwrites any
@@ -198,6 +264,14 @@ acq_secret_store() {
     file)
       _acq_secret_store_file "$key" "$value"; local rc=$?; value=""; return $rc
       ;;
+    keychain-windows)
+      # Encrypt with DPAPI and write the ciphertext to the key's file path (see
+      # _acq_secret_store_windows). No index is needed: the file lister
+      # enumerates the encrypted files directly.
+      _acq_secret_store_windows "$key" "$value" || { value=""; return 1; }
+      value=""
+      return 0
+      ;;
   esac
 }
 
@@ -234,6 +308,9 @@ acq_secret_get() {
       ;;
     file)
       _acq_secret_get_file "$key"; return $?
+      ;;
+    keychain-windows)
+      _acq_secret_get_windows "$key"; return $?
       ;;
   esac
 }
@@ -627,6 +704,9 @@ acq_secret_delete() {
       _acq_secret_delete_file "$key" || rc=$?
       ;;
     file)
+      _acq_secret_delete_file "$key" || rc=$?
+      ;;
+    keychain-windows)
       _acq_secret_delete_file "$key" || rc=$?
       ;;
   esac
