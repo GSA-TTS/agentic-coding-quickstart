@@ -317,6 +317,47 @@ _msb_clone_isolated() { # ARGS...
   assert_failure
 }
 
+# --- Origin-carry gaps (GSA-TTS/agentic-coding-quickstart#467) ---
+
+@test "clone(msb #467): a multi-valued origin URL is carried in full and in order" {
+  # `git remote set-url --add` (push-to-two-forges) is legal; `config --get`
+  # returns the LAST value while `git fetch` uses the FIRST.
+  git -C "$CLONEPROJ" remote add origin https://github.com/example/cloneproj.git
+  git -C "$CLONEPROJ" remote set-url --add origin https://gitlab.com/example/cloneproj.git
+  git -C "$CLONEPROJ" remote set-url --add --push origin git@github.com:example/cloneproj.git
+  git -C "$CLONEPROJ" remote set-url --add --push origin git@gitlab.com:example/cloneproj.git
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  [ "$(git config --file "$scratch/.git/config" --get-all remote.origin.url)" = \
+    "$(printf '%s\n%s' https://github.com/example/cloneproj.git https://gitlab.com/example/cloneproj.git)" ]
+  [ "$(git config --file "$scratch/.git/config" --get-all remote.origin.pushurl)" = \
+    "$(printf '%s\n%s' git@github.com:example/cloneproj.git git@gitlab.com:example/cloneproj.git)" ]
+}
+
+@test "clone(msb #467): the scratch's state dir is private (0700) regardless of umask" {
+  # The copied .git/config may hold a credential-bearing origin URL.
+  umask 022
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  local dir="$STUBDIR/state/clones/shell-cloneproj" perms
+  perms=$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir" 2>/dev/null || echo '?')
+  [ "$perms" = 700 ]
+}
+
+@test "clone(msb #467): a failed origin carry fails the create and removes the scratch" {
+  # A warn-only miss would leave origin pointing at the scratch itself, so an
+  # in-guest 'git push origin' APPEARS to succeed while reaching no forge.
+  git -C "$CLONEPROJ" remote add origin https://github.com/example/cloneproj.git
+  local real_git; real_git=$(command -v git)
+  printf '#!/usr/bin/env bash\ncase " $* " in *"/clones/"*" config "*) echo "fatal: could not lock config file" >&2; exit 255;; esac\nexec %s "$@"\n' "$real_git" > "$STUBDIR/git"
+  chmod +x "$STUBDIR/git"
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'remote.origin.url'
+  assert_output --partial 'push origin'
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+  refute_regex "$(cat "$CALLS")" 'msb create'
+}
+
 # --- Guest-visible workspace markers (GSA-TTS/agentic-coding-quickstart#456) ---
 # A kit that must act only on the disposable clone (write agent instructions,
 # install a repo-local permission gate) and never on the real checkout needs a
