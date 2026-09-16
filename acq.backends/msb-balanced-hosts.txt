@@ -179,7 +179,9 @@ mise-versions.jdx.dev:443
 mise.run:443
 packages.microsoft.com:443
 play.google.com:443
+cdn.playwright.dev:443
 playwright.azureedge.net:443
+playwright.download.prss.microsoft.com:443
 supabase.com:443
 unpkg.com:443
 vercel.com:443

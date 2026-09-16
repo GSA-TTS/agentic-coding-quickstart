@@ -85,6 +85,9 @@ _load_msb() { . "${REPO_ROOT}/acq.backends/msb.sh" 2>/dev/null; }
 github.com:443
 dhi.io:443
 dhi.io:80
+cdn.playwright.dev:443
+playwright.azureedge.net:443
+playwright.download.prss.microsoft.com:443
 crl*.digicert.com:80
 example.org
 HOSTS
@@ -101,6 +104,9 @@ HOSTS
   assert_output --partial 'allow@github.com:tcp:443'
   assert_output --partial 'allow@dhi.io:tcp:443'
   assert_output --partial 'allow@dhi.io:tcp:80'
+  assert_output --partial 'allow@cdn.playwright.dev:tcp:443'
+  assert_output --partial 'allow@playwright.azureedge.net:tcp:443'
+  assert_output --partial 'allow@playwright.download.prss.microsoft.com:tcp:443'
   assert_output --partial 'allow@*.digicert.com:tcp:80'
   assert_output --partial 'allow@example.org'
   refute_output --partial 'allow@:'
