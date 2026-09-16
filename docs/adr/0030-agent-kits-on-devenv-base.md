@@ -11,7 +11,7 @@ risk_treatment: mitigate
 supersedes: []
 ---
 
-# ADR-0028: Use Agent Kits on a Devenv-Enabled Agent-Less Base Image
+# ADR-0030: Use Agent Kits on a Devenv-Enabled Agent-Less Base Image
 
 ## Context and Problem Statement
 
