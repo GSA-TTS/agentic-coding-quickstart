@@ -2460,14 +2460,19 @@ _acq_msb_clone_setup() {
     echo "acq(msb):   committed state only. Commit first ('git add' untracked files)," >&2
     echo "acq(msb):   or copy files in with 'acq cp'." >&2
   fi
-  mkdir -p "$dir"
+  # Private (0700): the scratch .git/config carries the source origin URL,
+  # which may embed a credential, at a path the user never sees.
+  (umask 077 && mkdir -p "$dir") && chmod 700 "$dir"
   printf '%s\n' "$ws_canon" > "${dir}/.origin"
   if ! git clone --quiet --no-hardlinks -- "$ws_canon" "$scratch"; then
     echo "acq(msb): error: --clone: git clone of $ws_canon failed" >&2
     rm -rf "$dir"
     return 1
   fi
-  _acq_msb_clone_copy_config "$ws_canon" "$scratch"
+  if ! _acq_msb_clone_copy_config "$ws_canon" "$scratch"; then
+    rm -rf "$dir"
+    return 1
+  fi
   # Fetch-back remote in the host checkout (replace a stale same-name remote —
   # its scratch dir was just verified absent, so it cannot hold unfetched work).
   git -C "$ws_canon" remote remove "sandbox-${name}" >/dev/null 2>&1 || true
@@ -2493,23 +2498,42 @@ _acq_msb_clone_setup() {
 #     the scratch's origin at the host checkout path, and the scratch is
 #     mounted AT that path in the guest — so origin resolves to the scratch
 #     itself (fetch is a no-op, push cannot reach the real remote). Copy the
-#     RAW values (`config --get`, not `remote get-url`): that is what
+#     RAW values (`config --get-all`, not `remote get-url`): that is what
 #     .git/config holds and what sbx carries, and a host insteadOf rewrite is
 #     host policy the guest never receives (an https->ssh rewrite would hand the
 #     guest a transport it has no key for). A credential embedded in the URL
 #     travels with it, exactly as it does in a direct mount of the checkout.
+# Every value of a key is carried, in order: a remote URL is legitimately
+# multi-valued (`remote set-url --add`, push-to-two-forges) and git fetches the
+# FIRST value while `config --get` returns the LAST, so a single-value copy
+# would silently point the scratch at the wrong forge.
 # Running git inside the scratch is safe HERE only: acq just created it and it
 # is not yet guest-exposed (see the rm-time rule in _acq_msb_clone_warn_unfetched).
 # Unlike the global-identity forwarder in common.sh there is no
 # control-character filter: the values go through `git config`, which escapes
-# on write, never onto a command line. Best-effort, always returns 0.
+# on write, never onto a command line. Returns 1 on the first failed write: a
+# scratch whose origin still resolves to itself makes an in-guest
+# `git push origin` LOOK successful while reaching no forge (GSA-TTS/agentic-coding-quickstart#453),
+# and a warning cannot be trusted to prevent that.
 _acq_msb_clone_copy_config() {
-  local src="$1" scratch="$2" key val
+  local src="$1" scratch="$2" key vals val first
   for key in user.name user.email remote.origin.url remote.origin.pushurl; do
-    val=$(git -C "$src" config --get "$key" 2>/dev/null) || continue
-    [ -n "$val" ] || continue
-    git -C "$scratch" config "$key" "$val" >/dev/null 2>&1 \
-      || echo "acq(msb): warning: --clone: could not set $key in the scratch clone." >&2
+    vals=$(git -C "$src" config --get-all "$key" 2>/dev/null) || continue
+    [ -n "$vals" ] || continue
+    first=1
+    while IFS= read -r val; do
+      if [ -n "$first" ]; then
+        git -C "$scratch" config --replace-all "$key" "$val" >/dev/null 2>&1
+      else
+        git -C "$scratch" config --add "$key" "$val" >/dev/null 2>&1
+      fi || {
+        echo "acq(msb): error: --clone: could not set $key in the scratch clone." >&2
+        echo "acq(msb):   Refusing a scratch whose origin may still resolve to itself: an in-guest" >&2
+        echo "acq(msb):   'git push origin' would then look successful while reaching no forge." >&2
+        return 1
+      }
+      first=""
+    done <<<"$vals"
   done
   return 0
 }

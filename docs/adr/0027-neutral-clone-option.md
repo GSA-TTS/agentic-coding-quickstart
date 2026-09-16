@@ -136,9 +136,14 @@ on purpose, written repo-locally into the scratch:
   `user.*` is synced into its global tier), and an https-to-ssh rewrite would
   hand the guest a transport it has no key for. A credential embedded in the
   URL travels with it, exactly as it does when the checkout's own `.git/config`
-  is mounted in a non-clone run. Remote-tracking refs (`origin/*`) still
-  reflect the host's local branches at clone time until the first
-  `git fetch --prune`.
+  is mounted in a non-clone run; the scratch's state directory is private
+  (0700) because of it. Every configured value is carried, in order: a remote
+  URL is legitimately multi-valued (`git remote set-url --add`) and git fetches
+  the first value. A failed copy fails the create rather than warning: a
+  scratch whose `origin` still resolves to itself makes an in-guest
+  `git push origin` look successful while reaching no forge. Remote-tracking
+  refs (`origin/*`) still reflect the host's local branches at clone time
+  until the first `git fetch --prune`.
 
 sbx carries both incidentally by copying `.git` wholesale. Propagating only
 these values is the minimized form of that, without the credential helpers,
