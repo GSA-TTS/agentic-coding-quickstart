@@ -160,7 +160,8 @@ sbx secret set -g anthropic
 > injected into *every* sandbox, giving each one access to *all* your
 > repositories. For least privilege, let `acq` scope a **fine-grained** token to
 > just the repos in your workspace — on `acq run` it detects the mounted repos
-> and guides you, or run it explicitly:
+> and guides you, or run it explicitly. If you omit the path, `acq` uses the
+> workspace recorded when the sandbox was created:
 >
 > ```bash
 > acq github-scope <sandbox-name> /path/to/your/project
@@ -168,8 +169,8 @@ sbx secret set -g anthropic
 >
 > See [ADR-0013](../adr/0013-per-sandbox-github-token-downscoping.md) for the
 > rationale and the alternatives considered. Fine-grained tokens can't
-> contribute to public repos you're not a member of or call the Checks API —
-> use the global token below for those cases.
+> contribute to public repos you're not a member of, call the Checks API, or span
+> multiple owners in one token — use the global token below for those cases.
 
 **Deprecated (broad, global) path** — kept for back-compat:
 

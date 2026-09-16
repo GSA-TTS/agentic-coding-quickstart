@@ -15,9 +15,12 @@ setup() {
   # A throwaway workspace tree with assorted git remotes.
   GWT="$STUBDIR/gh"
   mkdir -p "$GWT/repoGH" "$GWT/wsMulti/a" "$GWT/wsMulti/b" "$GWT/wsGL" "$GWT/empty"
+  mkdir -p "$GWT/wsOneOwner/a" "$GWT/wsOneOwner/b"
   ( cd "$GWT/repoGH" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
   ( cd "$GWT/wsMulti/a" && git init -q && git remote add origin git@github.com:orgOne/repo1.git )
   ( cd "$GWT/wsMulti/b" && git init -q && git remote add origin https://github.com/orgTwo/repo2 )
+  ( cd "$GWT/wsOneOwner/a" && git init -q && git remote add origin git@github.com:orgOne/repo1.git )
+  ( cd "$GWT/wsOneOwner/b" && git init -q && git remote add origin https://github.com/orgOne/repo2 )
   ( cd "$GWT/wsGL" && git init -q && git remote add origin https://gitlab.com/x/y.git )
 }
 teardown() { acq_teardown_stubs; }
@@ -64,6 +67,33 @@ _common() { # FUNC ARGS...
   assert_output --partial 'orgTwo/repo2'
   _common detect_workspace_repos "$GWT/wsGL";  assert_output ''
   _common detect_workspace_repos "$GWT/empty"; assert_output ''
+}
+
+@test "gh-scope: refuses workspaces spanning multiple GitHub owners" {
+  run env ACQ_SECRET_TEST_VALUE=ghp_fake bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    github_scope_sandbox sb1 "'"$GWT"'/wsMulti" 2>&1
+  '
+  assert_failure
+  assert_output --partial 'multiple accounts'
+  assert_output --partial 'orgOne/repo1'
+  assert_output --partial 'orgTwo/repo2'
+  refute_output --partial 'Enter GitHub token'
+}
+
+@test "gh-scope: accepts multiple repos from one GitHub owner" {
+  run env ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
+    ACQ_SECRET_TEST_VALUE=ghp_fake bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    github_scope_sandbox sb1 "'"$GWT"'/wsOneOwner" 2>&1
+  '
+  assert_success
+  assert_output --partial "Owner 'orgOne'"
+  assert_output --partial 'orgOne/repo1'
+  assert_output --partial 'orgOne/repo2'
+  refute_output --partial 'For EACH owner'
 }
 
 # advise_github_scope gate: fires iff repos present AND no sandbox-scoped github
