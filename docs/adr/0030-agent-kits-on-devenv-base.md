@@ -161,16 +161,16 @@ acq
 └─ kits
    ├─ built-in bundle
    │  ├─ neutral: CA trust, playbook, git signing, shared security policy
-   │  ├─ OCI engine: podman or equivalent container-run capability
+   │  ├─ OCI engine: podman or equivalent (optional, not in the default set)
    │  ├─ agent: opencode | pi | goose | prime-agent | ...
-   │  └─ agent-aware: USAi/provider config in the selected agent's format
+   │  └─ provider facts: USAi endpoint, key env var, model catalog
    └─ extra kits
       ├─ team kit
       └─ personal kit
 ```
 
-This ADR is intentionally proposed, not accepted. It records the direction and
-questions for discussion before implementation.
+This ADR is intentionally proposed, not accepted. It records the direction, the
+review outcomes, and the questions that remain open before implementation.
 
 ## Lifecycle Sketch
 
@@ -190,37 +190,141 @@ At run or attach time:
 1. Start the sandbox if needed.
 2. Re-apply idempotent file, environment, and startup declarations as required.
 3. Attach using the selected agent kit's declared command.
-4. Activate the workspace's devenv/direnv environment according to the final
-   contract.
+4. Surface any pending workspace activation (devenv or direnv) for the human to
+   approve, per the activation contract.
+
+## Review Outcomes
+
+Review of the proposed direction converged on the following answers to the
+questions above. They are recorded as the intended shape for implementation.
+
+### Agent install contract
+
+Agent binaries are installed at create time by their agent kit and **pinned by
+content**: `nix profile install github:NixOS/nixpkgs/<rev>#<agent>` at the
+substrate's declared rev (content-hashed, cached, and identical across arches),
+or a sha256-pinned release binary for agents nixpkgs does not carry (the
+goose-server pattern). Create-time cost is once per sandbox and is acceptable
+next to the image pull, the Nix seed, and the first devenv build. Any published
+agent-populated image is an artifact produced by applying the kit, so the image
+and the kit cannot drift. The current create-time fallback
+(`npm install -g opencode-ai` resolving to latest) is not the contract.
+
+### Activation
+
+Activation is a human trust decision. The base image ships Nix, devenv, direnv,
+and the shell hook; the workspace owns its `.envrc`; `acq`'s job at run or attach
+time ends at giving `exec` and `run` a login shell in the primary repository.
+`acq` may detect an unactivated workspace, surface the command, and — only on
+explicit confirmation — invoke it. It never auto-approves and never runs
+activation non-interactively, **unless the user has explicitly opted in through
+an `ACQ_` environment variable** (for example `ACQ_AUTO_ACTIVATION=1`), which
+delegates the trust decision to the user's own environment. Because direnv and
+devenv trust is path-scoped, per-worktree approval is a property of the
+workspace, not something `acq` should globalize; preferring `devenv shell` or a
+shared `--from` source keeps the trust unit at the project level.
+
+### Create-time versus run-time, and `resources`
+
+Create-time is anything the backend must know before boot: egress, volumes,
+ports, and resources. Run-time is files, environment, and startup steps, which
+are re-applied on msb on every run. The vocabulary needs a neutral `resources:`
+field for CPU and memory, **max-merged** across kits, matching the two-halves
+shape of `volumes:`. Today `acq` sizes msb guests from an environment variable
+only, so a kit cannot express what its builds actually need.
+
+### Process supervision
+
+The general in-guest supervisor is devenv's native process manager.
+Agent-internal supervision (for example goose's `background:`) is a kit
+implementation detail and is not modeled by `acq`. Out-of-guest services are the
+host's concern and use podman-compose, chosen for cross-platform support
+including Windows (devenv does not run on Windows), rather than a second devenv
+supervision story.
+
+### Provider configuration
+
+`usai-provider` exports the provider **facts** (endpoint, key environment
+variable, model catalog); each agent kit **renders** those facts in its own
+configuration format. `acq` never merges agent configuration files — the agent
+owns its config-merge semantics, for example OpenCode's project-layer deep merge
+for its permission gate.
+
+### Bring-your-own image contract
+
+The contract must pin **where the Nix store lives** (`/nix`), not merely require
+that nix, devenv, and direnv exist. A kit volume that seeds and shadows a baked
+store (as the login.gov team kit does) breaks silently otherwise. The workspace
+must also carry a `devenv.nix` so auto-activation applies.
+
+### Egress and kit conflicts
+
+Egress is **union-only and visible**: a personal kit must not widen network reach
+without a trace. "Later wins" applies to environment and files, not to egress.
+
+### Personal dotfiles
+
+Personal preferences are a personal kit (via `ACQ_EXTRA_KITS`) that delivers
+files, pinned `nix profile install` tools, and shell snippets. The neutral
+`~/.rc.d` sourcing hook belongs in the base-image contract or a built-in neutral
+kit, not in a team kit. Adopt the hook broadly, with documented guardrails: it is
+kit-owned rather than user-editable, sourced for bash and zsh in deterministic
+lexical order, handled through their native conf.d mechanisms for fish and
+nushell, never used for secrets, and not used to duplicate what devenv already
+provides inside a devenv shell. Documented use-cases: the hook itself (neutral
+kit); agent shell integration that must exist outside a devenv shell; team tool
+environment and completions; personal aliases and functions; and the
+direnv/devenv hook.
+
+### Agent kit inference
+
+`acq run <agent> <workspace>` resolves the agent kit by name match against the
+**built-in bundle only**, never against extra kits, so a team or personal kit
+named after an agent cannot silently become that agent. The create output (or an
+equivalent such as `acq kit ls`) prints the selected kit; an explicit `--kit`
+wins; `shell` selects no agent kit.
+
+### OCI engine kit
+
+Rootless podman setup moves out of the msb adapter into an explicit OCI engine
+kit usable by both backends, but it is **optional and not part of the default
+bundle**: it is a create-time install plus egress for every sandbox, and many
+kits never need it.
+
+### Capabilities available through passwordless sudo
+
+`acq` grants the agent passwordless sudo, so devenv features that need privilege
+— binding privileged ports, the localhost proxy, `mkcert` CA trust, and
+`linux.capabilities` — are technically available in-guest. They must be
+explicitly declared by a kit and off by default, and treated like other in-guest
+CA trust rather than enabled implicitly by a workspace.
+
+### SecretSpec scope
+
+SecretSpec is confined to in-sandbox usage. Host- and boundary-level secrets
+remain in `acq`'s secret store; this ADR does not move the trust boundary into
+SecretSpec.
+
+### Stability contract during migration
+
+The refactor must preserve: `--clone` semantics with the `ACQ_CLONE` and
+`ACQ_WORKSPACE` guest markers
+([ADR-0027](0027-neutral-clone-option.md)); startup steps re-applied on every msb
+run; `ACQ_EXTRA_KITS` local paths applied after the built-in bundle; `acq exec`
+and `acq shell` landing in the primary repository with a login shell; `ACQ_IMAGE`
+as the image override; and `volumes:` mounted at boot before any exec. The
+login.gov team's `scripts/verify` asserts each of these against a real `--clone`
+sandbox on the active backend and can gate the refactor.
 
 ## Open Questions
 
-- **Activation contract:** Does `acq` run `devenv up`, `devenv shell`,
-  `direnv allow`, or a combination? Which step belongs to the base image, the
-  kit layer, and the project workspace?
-- **Process supervision:** Can devenv's process supervision replace ad hoc
-  supervisor loops used by related projects, and if so, what does `acq` need to
-  guarantee?
-- **Create-time versus run-time declarations:** Which kit declarations must be
-  resolved before VM creation, and which can be re-applied safely on every run?
-- **Kit ordering and conflicts:** What does "later wins" mean for security-
-  sensitive fields such as egress, environment variables, volumes, and startup
-  commands?
-- **Agent kit inference:** How should `acq run opencode .` infer an OpenCode
-  agent kit? How does the user inspect, override, or disable that inference?
-- **Agent-aware provider config:** Should `usai-provider` remain one kit that
-  emits configuration in the selected agent's format, or should each agent kit
-  own its provider-config translation?
-- **OCI engine kit:** Should rootless podman setup move out of the msb adapter
-  into a default OCI engine kit that can be applied consistently by both
-  backends?
-- **Bring-your-own images:** What is the minimum base-image contract `acq` can
-  require when users provide their own `BASE_IMAGE` or `ACQ_IMAGE`?
-- **Dotfiles and personal configuration:** Are host dotfiles best represented as
-  devenv configuration, a personal kit, a mounted volume, or explicit copy-in
-  behavior?
-- **Compatibility:** How much current `acq run opencode .` behavior must remain
-  unchanged during migration?
+- **Merge semantics beyond egress:** "later wins" is accepted for environment
+  and files and "union" for egress, but volume and startup-step conflicts across
+  built-in, team, and personal kits still need a rule.
+- **Minimum bring-your-own-image contract:** the exact required contents and how
+  `acq` verifies them (including `/nix`, `devenv.nix`, and the shell hook).
+- **Migration sequencing:** the order in which `acq run opencode .` behavior
+  changes, and which regression checks gate each step.
 
 ## Consequences
 
@@ -228,6 +332,8 @@ At run or attach time:
 
 - Core `acq` becomes less coupled to any one agent harness.
 - New agent support can be developed and reviewed as kit behavior.
+- Agent binaries are installed pinned by content and provider configuration is
+  rendered per agent kit, so images need not bake any agent.
 - The base-image story becomes simpler: generic devenv substrate first,
   agent-populated images only as optional cache optimizations.
 - The same environment/capability model can span msb and sbx.
@@ -237,6 +343,11 @@ At run or attach time:
 
 - devenv becomes load-bearing architecture and must be documented, versioned, and
   verified as part of the sandbox contract.
+- `.devenv` (evaluation cache and detached process-manager state) must be
+  persisted for supervision and caching to work across runs.
+- Privileged devenv capabilities (privileged binds, the localhost proxy, CA
+  trust) are reachable through passwordless sudo and must be declared per kit and
+  off by default.
 - Kit merge semantics become more important and need security review.
 - Debugging startup failures may require better introspection into generated
   devenv config and kit application order.
@@ -246,13 +357,14 @@ At run or attach time:
 
 - **AC-6 / CM-7:** Moving capabilities into explicit kits supports least
   privilege and least functionality, provided optional kits cannot silently widen
-  permissions.
+  permissions; capability-widening features (privileged binds, CA trust) are
+  declared and off by default.
 - **CM-2 / CM-3 / CM-6:** A declarative kit and base-image contract improves
   configuration baselines and change traceability.
 - **SA-8 / SA-15:** Separating harness, environment, and sandbox concerns makes
   architecture review and secure development responsibilities clearer.
-- **SC-7:** Egress declarations must fail closed and remain auditable when merged
-  across built-in, team, and personal kits.
+- **SC-7:** Egress declarations are union-only and visible across built-in,
+  team, and personal kits, and a personal kit cannot widen reach without a trace.
 
 ## Links
 
@@ -262,5 +374,6 @@ At run or attach time:
 - [ADR-0020: Ensure an OCI container engine in msb sandboxes via rootless podman](0020-msb-oci-engine-via-podman.md)
 - [ADR-0022: Neutral Image Override](0022-neutral-image-override.md)
 - [ADR-0023: Neutral Volumes Kit Vocabulary](0023-neutral-volumes-kit-vocabulary.md)
+- [ADR-0027: Neutral Clone Option](0027-neutral-clone-option.md)
 - [GSA-TTS/agentic-coding-quickstart#473: discussion issue](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/473)
 - [GSA-TTS/agentic-coding-patterns#395: devenv base image pattern](https://github.com/GSA-TTS/agentic-coding-patterns/pull/395)
