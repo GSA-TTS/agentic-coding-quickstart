@@ -224,14 +224,14 @@ devenv trust is path-scoped, per-worktree approval is a property of the
 workspace, not something `acq` should globalize; preferring `devenv shell` or a
 shared `--from` source keeps the trust unit at the project level.
 
-### Create-time versus run-time, and `resources`
+### Create-time versus run-time
 
-Create-time is anything the backend must know before boot: egress, volumes,
-ports, and resources. Run-time is files, environment, and startup steps, which
-are re-applied on msb on every run. The vocabulary needs a neutral `resources:`
-field for CPU and memory, **max-merged** across kits, matching the two-halves
-shape of `volumes:`. Today `acq` sizes msb guests from an environment variable
-only, so a kit cannot express what its builds actually need.
+Create-time is anything the backend must know before boot: egress, volumes, and
+ports. Run-time is files, environment, and startup steps, which are re-applied on
+msb on every run.
+
+Guest sizing (CPU and memory) is a separate kit-vocabulary gap tracked in its
+own issue (see Links).
 
 ### Process supervision
 
@@ -375,5 +375,6 @@ sandbox on the active backend and can gate the refactor.
 - [ADR-0022: Neutral Image Override](0022-neutral-image-override.md)
 - [ADR-0023: Neutral Volumes Kit Vocabulary](0023-neutral-volumes-kit-vocabulary.md)
 - [ADR-0027: Neutral Clone Option](0027-neutral-clone-option.md)
+- [GSA-TTS/agentic-coding-quickstart#475: neutral `resources:` kit field for guest CPU and memory](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/475)
 - [GSA-TTS/agentic-coding-quickstart#473: discussion issue](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/473)
 - [GSA-TTS/agentic-coding-patterns#395: devenv base image pattern](https://github.com/GSA-TTS/agentic-coding-patterns/pull/395)
