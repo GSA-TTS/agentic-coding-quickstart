@@ -34,6 +34,56 @@ The proposed direction is to make the sandbox image provide a generic devenv
 substrate, move agent installation and configuration into kits, and have `acq`
 compose those declarations consistently across backends.
 
+## Devenv Baseline and Upstream Impact
+
+The substrate this ADR depends on is currently behind the releases that ship the
+behaviors it leans on. `integrations/isolation/images/devenv/` in the patterns
+repository pins its toolchain to `nixos-25.05` and installs `devenv` from that
+channel, which resolves to **devenv 1.11.2**. devenv 2.x is present in neither
+`nixos-25.05` nor `nixos-25.11`; it first appears in `nixos-26.05` (2.1.2) and in
+`nixpkgs-unstable` (2.2/2.3). The devenv major is therefore part of the substrate
+contract, not an incidental of the pin.
+
+Changes since devenv 2.0 that bear directly on this ADR:
+
+- **Process supervision.** devenv 2.0 makes its native Rust process manager the
+  default (dependency ordering, readiness probes, watchdog, socket activation,
+  restart policies). 2.2 adds a shared manager that other terminals attach to,
+  cold-starts a named process, and stops with `devenv down`; 2.3 adds shutdown
+  signal and grace. Detached manager state lives in `.devenv`, so the workspace
+  needs a persistent path for it.
+- **Activation.** 2.0 makes `devenv shell` self-reloading and direnv optional;
+  2.2 keys auto-activation on `devenv.nix` rather than `devenv.yaml`, and
+  `devenv init` no longer writes `.envrc` by default. A workspace must therefore
+  carry a `devenv.nix` to auto-activate.
+- **Out-of-tree environments.** 2.0 adds `--from`; 2.2 makes a `--from` source
+  persistent per directory via `devenv allow`, carrying profiles and (for local
+  sources) the source's full `devenv.yaml`. A substrate can now be referenced at
+  run time instead of only baked into an image.
+- **Ports.** 2.0 adds automatic port allocation and a strict-port mode; 2.3 adds
+  a localhost reverse proxy with per-process hostnames, optional HTTPS via
+  `mkcert`, and Linux capabilities for privileged binds.
+- **Secrets.** 2.x bundles SecretSpec, a provider-based secret manager that
+  prompts before releasing values.
+- **Introspection.** `devenv eval`, `devenv build`, and `devenv tasks list`
+  expose configuration and task state as JSON, and traces identify the invoking
+  caller. These are documented, semver-versioned surfaces.
+- **Footprint.** The devenv closure shrank from 528 MB to 376 MB and bundles
+  Nix 2.35.2; the nixpkgs-wide ELF-note loader cache and a statically linked
+  devenv build lower startup cost further.
+- **Platforms.** 2.2 drops `x86_64-darwin`. The sandbox is Linux-only, so this
+  affects contributor hosts but not the image matrix.
+
+Consequences for the substrate and the kit contract:
+
+- The base image must move to a channel that carries the intended devenv major,
+  and the devenv major must be recorded as part of the substrate contract.
+- Kit-declared processes and any status `acq` inspects must account for
+  `.devenv` state persistence and for devenv's automatic quiet mode when it
+  detects a coding agent (`DEVENV_NO_AI_AGENT=1` opts out).
+- No existing kit uses devenv, so there is no 1.x-to-2.x migration cost for kit
+  authors; kits can target 2.x directly.
+
 ## Decision Drivers
 
 - **Reduce agent-specific behavior in core `acq`.** `acq` should orchestrate
