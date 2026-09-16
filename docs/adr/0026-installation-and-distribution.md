@@ -283,10 +283,12 @@ as issues):
   still clones from the configured repository at that default release tag; it
   does not install unreleased files from the invoking checkout.
 - **Verifiable release assets.** Release automation publishes `SHA256SUMS` next
-  to the installer asset and GitHub artifact attestations for both files.
-  Inspect-first is supported: download `install.sh` and `SHA256SUMS`, verify the
-  attestations, verify the checksum, read the installer, and use `--dry-run`
-  before installing.
+  to the installer assets and GitHub artifact attestations for them. The sums
+  file covers `install.sh`, `install.ps1`, and `acq-windows-x64.zip`, so a
+  macOS/Linux user who downloads only `install.sh` verifies with
+  `shasum -a 256 -c --ignore-missing SHA256SUMS`. Inspect-first is supported:
+  download the installer(s) and `SHA256SUMS`, verify the attestations, verify the
+  checksum(s), read the installer, and use `--dry-run` before installing.
 - **Consent-gated side effects.** `PATH` edits and `msb` installation each
   require explicit consent; declining is always a safe, documented fallback.
 - **Idempotent.** Re-running updates an existing install rather than duplicating
@@ -347,9 +349,10 @@ as issues):
 - **Release assets:** on release creation, `.github/workflows/release.yml` checks
   out the release commit, copies `install.sh`, injects that exact commit into the
   release asset's `DEFAULT_RELEASE_SHA`, generates `SHA256SUMS`, publishes GitHub
-  artifact attestations for both release assets, and uploads both assets to the
-  GitHub release. The Windows preview path additionally needs a versioned zip and
-  PowerShell installer asset in that release bundle.
+  artifact attestations for the release assets, and uploads them to the
+  GitHub release. The Windows preview path additionally ships a versioned zip and
+  PowerShell installer asset in that release bundle, both covered by
+  `SHA256SUMS`.
 - **Manual (bare-Mac reviewer):** on a clean macOS account, run the one-liner;
   confirm `acq` resolves on `PATH` (after accepting the offered `PATH` line or
   adding the printed line), `acq version` reports the selected install's version
@@ -357,7 +360,8 @@ as issues):
   `--no-msb`) leave a working `acq` and print correct guidance.
 - **Live end-to-end:** verify after the first release containing this automation
   is published by downloading the `install.sh` and `SHA256SUMS` release assets,
-  verifying both files' artifact attestations, checking the checksum, and
+  verifying both files' artifact attestations, checking the checksum (with
+  `--ignore-missing`, since `SHA256SUMS` also lists the Windows assets), and
   confirming `sh install.sh --dry-run --method clone` reports the release tag and
   canonical commit SHA.
 

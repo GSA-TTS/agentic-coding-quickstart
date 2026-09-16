@@ -237,6 +237,14 @@ Get-Content .\install.ps1
 .\install.ps1
 ```
 
+Running `.\install.ps1` (and the installed `acq`, via `acq.cmd`) requires a
+PowerShell **execution policy** that permits local scripts. Windows 11 client
+defaults to `Restricted`, so those steps fail with `PSSecurityException` on an
+otherwise default host; allow local scripts for your user with
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (or use the `irm ... | iex`
+one-liner, which is not affected because piped text is not a script file). On a
+managed device the policy may be set by Group Policy.
+
 If WHP is disabled, stop: enable it from an **elevated** PowerShell
 (`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),
 restart, and re-run the installer. On a managed device, ask your IT administrator
@@ -247,7 +255,10 @@ to enable "Windows Hypervisor Platform" out of band.
 Run these checks from PowerShell on a Windows 11 host with WHP already enabled.
 The PowerShell path is the supported Windows preview shell; `acq.cmd` is only a
 convenience shim. These checks are intentionally manual until the project has a
-reliable Windows runner with local virtualization available.
+reliable Windows runner with local virtualization available. The first step runs
+`install.ps1` directly, so the shell needs an execution policy that allows local
+scripts (see the note above) — a default `Restricted` client fails with
+`PSSecurityException`.
 
 ```powershell
 # Installer dry run; should print planned actions and make no changes.

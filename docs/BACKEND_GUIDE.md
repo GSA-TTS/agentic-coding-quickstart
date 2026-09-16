@@ -371,6 +371,16 @@ fine; prefer one over a temp dir if you hit this.
 > host's own (canonicalized) absolute path avoids that ordering problem entirely
 > and matches what sbx does.
 
+**Windows:** the host path and the guest path are different *forms* of the same
+location. `msb create --volume` takes the native host form for its source
+(`C:/Users/me/proj`) and the POSIX guest form for its target
+(`/c/Users/me/proj`), and the guest start directory/`ACQ_WORKSPACE` use the
+guest form. `acq` computes both explicitly (`host_path` / `canonicalize_path`)
+and invokes `msb` with MSYS argument rewriting disabled, because Git Bash would
+otherwise corrupt colon-delimited mounts and guest-only paths. See
+[ADR-0029](adr/0029-windows-host-guest-path-forms.md). On macOS/Linux the two
+forms are identical.
+
 ### Disposable primary (`--clone`)
 
 msb has no native clone mode, so the neutral `--clone`

@@ -145,7 +145,7 @@ curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/downl
 curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/SHA256SUMS"
 gh attestation verify install.sh --repo GSA-TTS/agentic-coding-quickstart
 gh attestation verify SHA256SUMS --repo GSA-TTS/agentic-coding-quickstart
-shasum -a 256 -c SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS
 less install.sh              # read it
 sh install.sh --dry-run      # show what it WOULD do, changing nothing
 sh install.sh                # actually install
@@ -169,6 +169,16 @@ Get-Content .\install.ps1
 .\install.ps1 -DryRun
 .\install.ps1
 ```
+
+`SHA256SUMS` also lists `install.ps1` and the Windows zip, so the macOS/Linux
+check above uses `--ignore-missing` to skip entries you didn't download.
+
+Running `.\install.ps1` (and the installed `acq` command, via `acq.cmd`) needs a
+PowerShell execution policy that permits local scripts; on a default Windows 11
+client that is `Restricted`, and the commands fail with `PSSecurityException`
+until you allow scripts — see the execution-policy note in
+[First-Run Snags](#first-run-snags). The `irm ... | iex` one-liner is unaffected
+(piped text is not a script file).
 
 </details>
 
@@ -258,6 +268,28 @@ finishes, re-run your command. (No administrator rights are required.)
 This means the new `acq` command isn't on your PATH in this window. **Close and
 reopen PowerShell**, then try again. If it still isn't found, re-run the Step 2
 installer and answer **yes** when it asks to add `acq` to your PATH.
+
+</details>
+
+<details>
+<summary><strong>"...cannot be loaded because running scripts is disabled on this system"</strong> (Windows)</summary>
+
+This is PowerShell's **execution policy** blocking a `.ps1` file. Windows 11
+client defaults to `Restricted`, which refuses to run script files — so the
+inspect-first steps (`.\install.ps1 -DryRun`, `.\install.ps1`) and the installed
+`acq` command (which runs through `acq.cmd`) all fail with `PSSecurityException`.
+The `irm ... | iex` one-liner still works, because piped text is not a script
+file.
+
+To allow local scripts for **your user only**, then re-run the command:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+`RemoteSigned` runs local scripts but still requires a signature on scripts
+downloaded from the internet. On a **managed device** the policy may be set by
+Group Policy — ask your IT administrator rather than changing it yourself.
 
 </details>
 

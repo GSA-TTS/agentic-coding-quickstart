@@ -2131,7 +2131,7 @@ amending the wrong branch.
 
 ---
 
-## 39. Windows preview: `bash.exe` resolves to the WSL shim, and the WHP feature flag is not a readiness signal
+## 39. Windows preview: `bash.exe` resolves to the WSL shim, WHP is not a feature flag, and the execution policy blocks scripts
 
 ### Symptoms
 
@@ -2142,6 +2142,10 @@ amending the wrong branch.
   instead of WHP guidance.
 - `msb doctor` reports the host ready and sandboxes boot, yet
   `Get-WindowsOptionalFeature -FeatureName HypervisorPlatform` reports `Disabled`.
+- On a default Windows 11 client, `.\install.ps1` and the installed `acq`
+  command fail with
+  `... cannot be loaded because running scripts is disabled on this system`
+  (`PSSecurityException`), while `irm ... | iex` works.
 
 ### Root Cause
 
@@ -2153,6 +2157,10 @@ amending the wrong branch.
   virtualized guest), the user-mode WHP API (`WinHvPlatform.dll`, e.g.
   `WHvCreatePartition`) is callable regardless of the flag, which is also not
   readable without an elevated shell.
+- Windows 11 **client** defaults its PowerShell execution policy to `Restricted`,
+  which refuses to run script *files*. `powershell -File` is not exempt, so
+  `acq.cmd` (which runs `acq.ps1`) and a direct `.\install.ps1` are blocked; the
+  `irm ... | iex` path is unaffected because piped text is not a script file.
 
 ### Fix
 
@@ -2163,13 +2171,22 @@ amending the wrong branch.
   on) instead of gating on the feature flag; when the state stays undetermined it
   warns and defers to `msb doctor`, which `acq` surfaces before provisioning.
 - Treat `msb doctor` as the authoritative readiness signal on Windows.
+- The execution-policy requirement is documented (README "First-Run Snags",
+  `docs/howto/acq.md`); allow local scripts with
+  `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` or use the `irm | iex`
+  one-liner. On a managed device the policy is set by Group Policy. `acq.cmd` and
+  `install.ps1` deliberately do **not** pass `-ExecutionPolicy Bypass`.
 
 ### Related Windows/MSYS notes
 
-- Under Git Bash, `realpath` preserves MSYS paths (`/tmp/...`) while `git.exe` and
-  native tools report Windows-form paths (`C:/...`); `canonicalize_path` now
-  normalizes to mixed Windows form (`cygpath -m`) so comparisons and native-tool
-  arguments agree.
+- Under Git Bash, the guest is a Linux microVM, so acq now computes two path
+  forms (ADR-0029): `canonicalize_path` is the POSIX **guest** form and `host_path`
+  the native **host** form (`cygpath -m` → `C:/...`). `msb` is invoked through a
+  wrapper that sets `MSYS2_ARG_CONV_EXCL='*'`, because MSYS otherwise rewrites
+  POSIX-looking argv when launching the native `msb.exe` and corrupts
+  colon-delimited mounts (`--volume /c/a:/c/a` → `C:\a;C:\a`) and guest-only
+  values (`-w /home/agent` → `C:/Program Files/Git/home/agent`). The exclusion is
+  scoped to `msb`; `git`/`ssh` keep the rewrite they rely on.
 - The offline Bats suite is POSIX-oriented: on a Windows/MSYS host, `install.sh`
   tests (macOS/Linux installer), `chmod 0600` assertions (MSYS cannot represent
   them on NTFS), and symlink-based tests cannot pass without native symlinks. None

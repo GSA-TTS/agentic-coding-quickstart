@@ -643,12 +643,19 @@ workspace_paths() {
   done
 }
 
-# Canonicalize a filesystem path to its real, symlink-free absolute form.
-# Echoes the resolved path, or the input unchanged if it cannot be resolved
-# (e.g. a nonexistent path, or no realpath/readlink available). Pure stdout;
-# never mutates the filesystem. Used so a backend mounts the REAL host path —
-# e.g. on macOS $TMPDIR is a /var -> /private/var symlink, and msb cannot mount
-# the symlinked form (see docs/BACKEND_GUIDE.md, msb workspace mounting).
+# Canonicalize a filesystem path to its real, symlink-free absolute form, in the
+# running shell's OWN (POSIX) vocabulary. Echoes the resolved path, or the input
+# unchanged if it cannot be resolved (e.g. a nonexistent path, or no
+# realpath/readlink available). Pure stdout; never mutates the filesystem. Used
+# so a backend mounts the REAL host path — e.g. on macOS $TMPDIR is a
+# /var -> /private/var symlink, and msb cannot mount the symlinked form (see
+# docs/BACKEND_GUIDE.md, msb workspace mounting).
+#
+# On MSYS/Cygwin this is also the GUEST form: a native tool (git.exe) may report
+# a drive-form path (C:/...), but the guest is a Linux microVM where a drive-form
+# path is not absolute. `cygpath -u` maps drive-form to the shell/guest form
+# (/c/...); cygpath only exists on MSYS/Cygwin, so POSIX hosts are unaffected.
+# For the HOST form a native tool needs, use host_path (below). See ADR-0029.
 canonicalize_path() {
   local p="${1:-}" _out=""
   [ -n "$p" ] || return 0
@@ -658,10 +665,23 @@ canonicalize_path() {
     _out=$(readlink -f "$p" 2>/dev/null) || _out=""
   fi
   [ -n "$_out" ] && p="$_out"
-  # Under MSYS/Cygwin, native tools (git.exe, msb.exe) report Windows-form
-  # paths (C:/...) while bash-built paths stay MSYS-form (/c/... or /tmp/...).
-  # Normalize to mixed Windows form so comparisons and native-tool arguments
-  # agree; cygpath only exists on MSYS/Cygwin, so POSIX hosts are unaffected.
+  if command -v cygpath >/dev/null 2>&1; then
+    _out=$(cygpath -u "$p" 2>/dev/null) || _out=""
+    [ -n "$_out" ] && p="$_out"
+  fi
+  printf '%s\n' "$p"
+}
+
+# host_path — echo PATH in the form a NATIVE host tool expects: a Windows
+# drive-form path (C:/...) under MSYS/Cygwin, unchanged on POSIX. Companion to
+# canonicalize_path: canonicalize a value that names something INSIDE the guest
+# (a mount target, a working directory, a guest env value); host_path a value a
+# native host tool must resolve on the host filesystem (a mount SOURCE, a file
+# to copy, a host socket, a host PEM). On POSIX the two are identical. See
+# ADR-0029.
+host_path() {
+  local p="${1:-}" _out=""
+  [ -n "$p" ] || return 0
   if command -v cygpath >/dev/null 2>&1; then
     _out=$(cygpath -m "$p" 2>/dev/null) || _out=""
     [ -n "$_out" ] && p="$_out"
