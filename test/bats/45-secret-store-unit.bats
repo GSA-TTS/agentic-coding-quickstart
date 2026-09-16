@@ -213,15 +213,54 @@ PSSTUB
     printf "resolved=[%s]\n" "$(acq_secret_resolve github)"
     raw=$(cat "$ACQ_SECRET_FILE_DIR/acq.github")
     [ "$raw" = "ghp_winSECRET" ] && printf "on-disk=plaintext\n" || printf "on-disk=ciphertext\n"
+    _acq_secret_file_is_dpapi_envelope "$ACQ_SECRET_FILE_DIR/acq.github" && printf "envelope=yes\n" || printf "envelope=no\n"
     printf "listing=[%s]\n" "$(acq_secret_list_keys | tr "\n" " ")"
     acq_secret_delete "$(_acq_secret_key github)"
     acq_secret_resolve github >/dev/null 2>&1 && printf "after=present\n" || printf "after=gone\n"
   '
   assert_output --partial 'resolved=[ghp_winSECRET]'
   assert_output --partial 'on-disk=ciphertext'
+  assert_output --partial 'envelope=yes'
   assert_output --partial 'listing=[acq.github ]'
   assert_output --partial 'after=gone'
   refute_regex "$(cat "$CALLS")" 'ghp_winSECRET'
+}
+
+@test "keychain-windows: a legacy plaintext value is read and migrated to an envelope" {
+  _plant_powershell_stub
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/win-migrate"
+    export ACQ_SECRET_POWERSHELL_BIN="'"$STUBDIR"'/powershell.exe"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    _acq_secret_backend() { printf "keychain-windows\n"; }
+    mkdir -p "$ACQ_SECRET_FILE_DIR"
+    printf "legacyPLAINTEXT" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    printf "resolved=[%s]\n" "$(acq_secret_resolve usai)"
+    _acq_secret_file_is_dpapi_envelope "$ACQ_SECRET_FILE_DIR/acq.usai" && printf "envelope=yes\n" || printf "envelope=no\n"
+    raw=$(cat "$ACQ_SECRET_FILE_DIR/acq.usai")
+    case "$raw" in *legacyPLAINTEXT*) printf "at-rest=plaintext\n" ;; *) printf "at-rest=ciphertext\n" ;; esac
+  '
+  assert_output --partial 'resolved=[legacyPLAINTEXT]'
+  assert_output --partial 'envelope=yes'
+  assert_output --partial 'at-rest=ciphertext'
+  refute_regex "$(cat "$CALLS")" 'legacyPLAINTEXT'
+}
+
+@test "file backend: an undecryptable DPAPI envelope fails closed, not read as the value" {
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/file-envelope"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    mkdir -p "$ACQ_SECRET_FILE_DIR"
+    printf "%s\n%s" "$ACQ_SECRET_DPAPI_HEADER" "Q0lQSEVSVEVYVA==" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    printf "backend=%s\n" "$(_acq_secret_backend)"
+    acq_secret_resolve usai >/dev/null 2>&1 && printf "resolved=yes\n" || printf "resolved=no\n"
+    acq_secret_has usai && printf "has=yes\n" || printf "has=no\n"
+  '
+  assert_output --partial 'backend=file'
+  assert_output --partial 'resolved=no'
+  assert_output --partial 'has=no'
 }
 
 @test "keychain-windows: an undecryptable envelope fails closed" {
@@ -233,7 +272,7 @@ PSSTUB
     unset ACQ_SECRET_FORCE_FILE
     _acq_secret_backend() { printf "keychain-windows\n"; }
     mkdir -p "$ACQ_SECRET_FILE_DIR"
-    printf "not-valid-base64!!!" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    printf "%s\n%s" "$ACQ_SECRET_DPAPI_HEADER" "not-valid-base64!!!" > "$ACQ_SECRET_FILE_DIR/acq.usai"
     acq_secret_resolve usai >/dev/null 2>&1 && printf "resolved=yes\n" || printf "resolved=no\n"
   '
   assert_output --partial 'resolved=no'

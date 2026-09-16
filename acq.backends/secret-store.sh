@@ -16,7 +16,10 @@
 #   - Storage in the OS keychain when available (macOS `security -i`, Linux
 #     `secret-tool`), Windows DPAPI (Keychain-equivalent, user-scoped) via
 #     in-box PowerShell, and a 0600 file fallback under
-#     $XDG_DATA_HOME/acq/secrets/ when no protected backend exists.
+#     $XDG_DATA_HOME/acq/secrets/ when no protected backend exists. The Windows
+#     backend wraps each value in a versioned envelope and migrates a legacy
+#     plaintext value on first read, so switching backends never mis-reads the
+#     shared file path in either direction (see the keychain-windows notes).
 #   - Read access for adapters at provision time: each backend pulls the real
 #     value from here and feeds it to its native injection path (sbx proxy /
 #     msb --secret), so the value never enters the guest and never appears in
@@ -44,6 +47,13 @@ fi
 # we put the full acq key in the account and a constant service label so entries
 # group under one keychain item type.
 ACQ_KEYCHAIN_LABEL="acq-secret-store"
+
+# Versioned envelope header for values written by the Windows DPAPI backend. That
+# backend shares the plaintext file fallback's path, so this header (the file's
+# first line — see the keychain-windows notes below) is what tells a DPAPI
+# ciphertext apart from a legacy plaintext value. Bump the version suffix if the
+# envelope format ever changes.
+ACQ_SECRET_DPAPI_HEADER="acq-dpapi-v1"
 
 # File-fallback location (used only when no OS keychain tool is present).
 ACQ_SECRET_FILE_DIR="${ACQ_SECRET_FILE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/acq/secrets}"
@@ -176,6 +186,20 @@ _acq_secret_store_keychain_macos() {
 # a keychain: the ciphertext lives in the same file layout as the plaintext
 # fallback but is readable only by the same Windows account, removing the
 # NTFS-cannot-enforce-0600 weakness (see ADR-0028).
+#
+# ENVELOPE: because the file path is shared with the plaintext `file` backend,
+# the raw bytes alone cannot distinguish a DPAPI ciphertext from a legacy
+# plaintext value. Every value this backend writes is therefore wrapped in a
+# versioned envelope — first line ACQ_SECRET_DPAPI_HEADER, second line the base64
+# ciphertext. Stored plaintext is always a single line (acq_secret_store reads
+# exactly one line), so a first line equal to the header can never be a plaintext
+# value and the two shapes are unambiguous. That makes a backend switch safe in
+# both directions:
+#   - Windows reading an UNMARKED file = a legacy plaintext value the file
+#     backend left behind. It is returned as-is and re-encrypted in place, so an
+#     upgrade neither loses the secret nor leaves the plaintext at rest.
+#   - `file` reading a MARKED file = ciphertext it cannot decrypt; it fails
+#     closed (_acq_secret_get_file) rather than exporting the blob as the secret.
 # ---------------------------------------------------------------------------
 _acq_secret_windows_encrypt() {
   local ps; ps=$(_acq_secret_powershell_bin)
@@ -187,9 +211,18 @@ _acq_secret_windows_decrypt() {
   "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $e=[Convert]::FromBase64String($i.Trim()); [Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($e,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
 }
 
-# Encrypt VALUE and write the ciphertext to the key's file path. The ciphertext
-# is written with umask 077 like the plaintext fallback (defense in depth), but
-# the DPAPI envelope is what actually protects it on NTFS.
+# _acq_secret_file_is_dpapi_envelope FILE -> 0 if FILE's first line is the DPAPI
+# envelope header. Stored plaintext is a single line, so an unmarked file cannot
+# be mistaken for an envelope (see the ENVELOPE note above).
+_acq_secret_file_is_dpapi_envelope() {
+  local header
+  IFS= read -r header < "$1" 2>/dev/null || true
+  [ "$header" = "$ACQ_SECRET_DPAPI_HEADER" ]
+}
+
+# Encrypt VALUE and write the header + base64 ciphertext to the key's file path.
+# The file is written with umask 077 like the plaintext fallback (defense in
+# depth), but the DPAPI envelope is what actually protects it on NTFS.
 _acq_secret_store_windows() {
   local key="$1" value="$2" f enc
   f=$(_acq_secret_file_for "$key")
@@ -198,20 +231,45 @@ _acq_secret_store_windows() {
   [ -n "$enc" ] || {
     echo "acq: secret store: Windows DPAPI produced no ciphertext for '$key'." >&2; return 1; }
   ( umask 077; mkdir -p "$ACQ_SECRET_FILE_DIR" ) || return 1
-  ( umask 077; printf '%s' "$enc" > "$f" ) || {
+  ( umask 077; printf '%s\n%s' "$ACQ_SECRET_DPAPI_HEADER" "$enc" > "$f" ) || {
     echo "acq: secret store: file write failed for '$key'." >&2; return 1; }
   return 0
 }
 
-# Read the key's ciphertext and decrypt it. A missing file, an undecryptable
-# envelope (wrong user/machine, or corruption), or a lost DPAPI key all surface
-# as a non-zero return so callers treat the secret as absent rather than using a
-# truncated value.
+# Best-effort migration of a legacy plaintext value to a DPAPI envelope. Writes
+# atomically (hidden temp + rename) with umask 077, so a failure never damages
+# the still-readable legacy value and never fails the read that triggered it (a
+# later read retries). The temp name's leading dot keeps it out of the `acq.*`
+# glob the file lister uses.
+_acq_secret_migrate_windows() {
+  local key="$1" value="$2" f tmp enc
+  f=$(_acq_secret_file_for "$key")
+  enc=$(printf '%s' "$value" | _acq_secret_windows_encrypt) || return 0
+  [ -n "$enc" ] || return 0
+  tmp="$(dirname "$f")/.${key}.tmp.$$"
+  ( umask 077; printf '%s\n%s' "$ACQ_SECRET_DPAPI_HEADER" "$enc" > "$tmp" ) || {
+    rm -f "$tmp" 2>/dev/null; return 0; }
+  mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  return 0
+}
+
+# Read the key's value. A marked file is decrypted; an unmarked file is a legacy
+# plaintext value that is returned as-is and migrated in place (see the ENVELOPE
+# note above). A missing file, an undecryptable envelope (wrong user/machine, or
+# corruption), or a lost DPAPI key all surface as a non-zero return so callers
+# treat the secret as absent rather than using a truncated value.
 _acq_secret_get_windows() {
-  local key="$1" f
+  local key="$1" f value
   f=$(_acq_secret_file_for "$key")
   [ -f "$f" ] || return 1
-  cat "$f" | _acq_secret_windows_decrypt || return 1
+  if _acq_secret_file_is_dpapi_envelope "$f"; then
+    value=$(tail -n +2 "$f" | _acq_secret_windows_decrypt) || return 1
+  else
+    value=$(cat "$f") || return 1
+    _acq_secret_migrate_windows "$key" "$value"
+  fi
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
 }
 
 # ---------------------------------------------------------------------------
@@ -319,6 +377,12 @@ _acq_secret_get_file() {
   local key="$1" f
   f=$(_acq_secret_file_for "$1")
   [ -f "$f" ] || return 1
+  # A DPAPI envelope here means the Windows backend wrote it but this (plaintext)
+  # backend is active — PowerShell became unavailable, or the store moved between
+  # hosts/users. We cannot decrypt it, and returning the base64 blob would make
+  # callers treat ciphertext as the secret (exporting or binding it), so fail
+  # closed. See the keychain-windows ENVELOPE note.
+  _acq_secret_file_is_dpapi_envelope "$f" && return 1
   cat "$f"
 }
 
