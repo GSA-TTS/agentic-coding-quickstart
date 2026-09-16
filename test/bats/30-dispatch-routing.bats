@@ -81,6 +81,24 @@ _seed_usai() {
   assert_output --partial 'no repo-scoped GitHub token'
 }
 
+@test "github-scope: uses recorded sandbox workspace when path is omitted" {
+  local parent="$STUBDIR/parent" pic="$STUBDIR/parent/pic" other="$STUBDIR/parent/other"
+  mkdir -p "$pic/repo" "$other"
+  ( cd "$pic/repo" && git init -q && git remote add origin https://github.com/GSA-TTS/pic-site.git )
+  ( cd "$other" && git init -q && git remote add origin https://github.com/mogul/artemis.git )
+  _seed_usai
+  run env ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
+    "$ACQ" create --name opencode-pic opencode "$pic"
+  assert_success
+
+  run env ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
+    ACQ_SECRET_TEST_VALUE=ghp_fake bash -c 'cd "$1" && "$2" github-scope opencode-pic' _ "$parent" "$ACQ"
+  assert_success
+  assert_output --partial "using recorded workspace for 'opencode-pic': $pic"
+  assert_output --partial 'GSA-TTS/pic-site'
+  refute_output --partial 'mogul/artemis'
+}
+
 @test "dispatch: create runs a non-blocking USAi key advisory (warns but never aborts)" {
   local proj="$STUBDIR/keyproj"; mkdir -p "$proj"
   _seed_usai

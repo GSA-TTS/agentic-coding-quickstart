@@ -3198,6 +3198,7 @@ EOF
   # Best-effort: a provenance write failure never affects the
   # sandbox. Reached only when provision did not abort earlier under set -e.
   acq_provenance_write msb "$name" || true
+  acq_workspace_record_write msb "$name" "$ACQ_MSB_GUEST_WORKSPACE" || true
 
   # Persist the CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs so a later
   # `acq start`/`acq restart` can reload them and re-run their startup services
@@ -4231,6 +4232,12 @@ _acq_msb_workspace_for() {
   fi
   [ -n "$ws" ] || ws="/home/agent"
   printf '%s\n' "$ws"
+}
+
+acq_backend_workspace_for() {
+  local ws
+  ws=$(_acq_msb_workspace_for "$1")
+  [ "$ws" = "/home/agent" ] || printf '%s\n' "$ws"
 }
 
 # _acq_msb_term_flags_into ARRVAR — `-e` flags forwarding the host's terminal

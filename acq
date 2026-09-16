@@ -102,8 +102,9 @@ Subcommands:
   secret ls  [-g|SANDBOX]                  List acq-managed secrets (no values).
   secret import [SERVICE] [-g|SANDBOX]     Import known service tokens from the
                                            host environment into the acq store.
-  github-scope SANDBOX [PATH]              Scope a GitHub token to the
-                                           workspace's repos (least-privilege PAT).
+  github-scope SANDBOX [PATH]              Scope a GitHub token to the workspace's
+                                           repos; PATH defaults to the recorded
+                                           sandbox workspace when available.
   usai-rotate-api-key                      Rotate the USAi API key.
   version                                  Show acq version + backend info.
   doctor                                   Backend health check + write config.
@@ -364,7 +365,8 @@ Usage:
   acq github-scope SANDBOX [WORKSPACE_PATH]
 
 Guides minting a fine-grained PAT scoped to the workspace's repos and stores it
-sandbox-scoped (ADR-0013). WORKSPACE_PATH defaults to the current directory.
+sandbox-scoped (ADR-0013). When omitted, WORKSPACE_PATH defaults to the recorded
+workspace for SANDBOX. Fine-grained PAT setup supports one GitHub owner per run.
 U
       ;;
     usai-rotate-api-key)
@@ -1404,7 +1406,22 @@ case "$subcommand" in
     acq_backend_prepare
     gs_sandbox="${1:-}"
     [ -n "$gs_sandbox" ] || { echo "acq: github-scope: missing sandbox name" >&2; echo "     usage: acq github-scope SANDBOX [WORKSPACE_PATH]" >&2; exit 1; }
-    gs_ws="${2:-$PWD}"
+    if [ -n "${2:-}" ]; then
+      gs_ws="$2"
+    else
+      gs_ws=$(acq_workspace_record_read "${ACQ_RESOLVED_BACKEND}" "$gs_sandbox")
+      if [ -z "$gs_ws" ] && command -v acq_backend_workspace_for >/dev/null 2>&1; then
+        gs_ws=$(acq_backend_workspace_for "$gs_sandbox")
+        [ -z "$gs_ws" ] || acq_workspace_record_write "${ACQ_RESOLVED_BACKEND}" "$gs_sandbox" "$gs_ws" || true
+      fi
+      if [ -z "$gs_ws" ]; then
+        echo "acq: github-scope: no workspace path was provided, and no workspace" >&2
+        echo "     is recorded for sandbox '$gs_sandbox'. Re-run with:" >&2
+        echo "       acq github-scope $gs_sandbox /path/to/workspace" >&2
+        exit 1
+      fi
+      echo "acq: github-scope: using recorded workspace for '$gs_sandbox': $gs_ws" >&2
+    fi
     github_scope_sandbox "$gs_sandbox" "$gs_ws"
     ;;
 
