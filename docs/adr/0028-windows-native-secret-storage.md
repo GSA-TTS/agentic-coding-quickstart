@@ -110,6 +110,20 @@ Adopt **Option A: DPAPI-encrypted file** as the Windows-native backend, named
 Windows hosts (MSYS/MINGW), with the plain `file` backend remaining as the
 fallback for exotic or headless cases where PowerShell is unavailable.
 
+Because the Windows backend reuses the plaintext fallback's file path, every
+value it writes is wrapped in a **versioned envelope**: a first line of
+`acq-dpapi-v1` followed by the base64 ciphertext. Stored plaintext is always a
+single line, so a first line equal to the header can never be a plaintext value
+and the two shapes are unambiguous. That makes a backend switch safe in both
+directions:
+
+- The Windows backend reads an **unmarked** file as a legacy plaintext value
+  (written by the `file` backend before this backend existed) and re-encrypts it
+  in place, so an upgrade neither loses the secret nor leaves the plaintext at
+  rest.
+- The plaintext `file` backend sees a **marked** envelope it cannot decrypt and
+  fails closed, rather than exporting the base64 blob as the secret.
+
 The store API, key format, and metadata sidecar are unchanged; only the
 read/write mechanism behind the Windows backend differs. Status is `accepted`;
 the `keychain-windows` backend and its offline tests land in this stack.
@@ -117,8 +131,10 @@ the `keychain-windows` backend and its offline tests land in this stack.
 ## Consequences
 
 - **Positive:** secrets on Windows are encrypted at rest; user-scoped; no admin;
-  no new dependency beyond in-box PowerShell; offline-testable; and it unblocks
-  the Windows preview secret-storage caveat from ADR-0026 and the install docs.
+  no new dependency beyond in-box PowerShell; a legacy plaintext entry is
+  migrated to the envelope the first time it is read; offline-testable; and it
+  unblocks the Windows preview secret-storage caveat from ADR-0026 and the
+  install docs.
 - **Trade-offs:** a PowerShell subprocess per secret operation; same-user-only
   decryption; reliance on the user's DPAPI master key (with machine/domain
   policy as the hardening lever); the 0600-based tests remain macOS/Linux-only
@@ -127,14 +143,21 @@ the `keychain-windows` backend and its offline tests land in this stack.
 
 ## Validation
 
-- Round-trip store/read on a Windows host (value written via the backend, read
-  back, never on argv or in a trace).
-- Cross-user negative test: a value written by user A must fail to read as user B.
+- Round-trip store/read on a real Windows 11 host (value written via the backend,
+  read back, never on argv or in a trace): `acq secret set -g usai` wrote DPAPI
+  ciphertext (not plaintext on disk), `acq secret ls` listed the row without
+  printing the value, and `acq secret rm -g usai` removed it.
+- Envelope handling verified on the same host: an unmarked legacy plaintext value
+  is read and re-encrypted in place, a marked envelope that DPAPI cannot decrypt
+  fails closed, and the plaintext `file` backend fails closed on a marked envelope.
 - Offline bats: a forceable/stubbable `keychain-windows` backend plus static
   contract tests, mirroring the `keychain-macos` stub approach.
 - The full suite passes with the new `keychain-windows` coverage; the
   `KNOWN_FAILURE_MODES.md` §39 note now scopes the 0600 limitation to
   macOS/Linux only.
+
+The cross-user negative test is **not** performed in this increment; see
+Deferred-work tracking.
 
 ## Links
 
@@ -146,6 +169,10 @@ the `keychain-windows` backend and its offline tests land in this stack.
 
 ### Deferred-work tracking
 
+- Cross-user negative test: confirm a value written under one Windows account
+  fails to read under another (DPAPI `CurrentUser` scope). The offline stub cannot
+  exercise real DPAPI user scoping, so this needs a second account on a real
+  Windows host.
 - Revisit Windows Credential Manager (Option B) if a lean in-box helper becomes
   available for the release bundle.
 - Optional DPAPI hardening for managed devices: document machine/domain policy
