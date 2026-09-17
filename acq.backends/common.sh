@@ -115,6 +115,8 @@ USAI_PROVIDER_BASE_URL="https://${USAI_PROVIDER_HOST}/api/v1"
 USAI_PROVIDER_KEY_ENV="USAI_API_KEY"
 USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_BASE_URL}/models"
 USAI_PROVIDER_KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
+USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_HOST}"
+USAI_PROVIDER_FACTS_SOURCE="fallback"
 
 # Source the shared agent catalog (single source of truth for agent tokens and
 # the sandbox-template image naming convention; issue #377). Both adapters also
@@ -195,6 +197,76 @@ _acq_import_env_vars_for() {
     gitlab) printf 'GITLAB_TOKEN\n' ;;
     *)      printf '\n' ;;
   esac
+}
+
+_acq_provider_fact_safe_host() {
+  case "$1" in
+    ""|*://*|*/*|*..*|*[^A-Za-z0-9.,:-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+_acq_provider_fact_safe_env() {
+  case "$1" in
+    ""|[!A-Za-z_]*|*[!A-Za-z0-9_]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+_acq_provider_fact_safe_url() {
+  case "$1" in
+    https://*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+acq_provider_facts_load() {
+  local file="${1:-}" line key value schema="" id=""
+  local host="" base_url="" models_url="" key_env="" key_mgmt_url="" bind_hosts=""
+  [ -n "$file" ] || return 1
+  [ -f "$file" ] || return 2
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ""|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) return 1 ;; esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in
+      ACQ_PROVIDER_FACTS_SCHEMA) schema="$value" ;;
+      ACQ_PROVIDER_ID) id="$value" ;;
+      ACQ_PROVIDER_HOST) host="$value" ;;
+      ACQ_PROVIDER_BASE_URL) base_url="$value" ;;
+      ACQ_PROVIDER_MODELS_URL) models_url="$value" ;;
+      ACQ_PROVIDER_KEY_ENV) key_env="$value" ;;
+      ACQ_PROVIDER_KEY_MGMT_URL) key_mgmt_url="$value" ;;
+      ACQ_PROVIDER_BIND_HOSTS) bind_hosts="$value" ;;
+      *) return 1 ;;
+    esac
+  done < "$file"
+
+  [ "$schema" = "1" ] || return 1
+  [ "$id" = "usai" ] || return 1
+  _acq_provider_fact_safe_host "$host" || return 1
+  _acq_provider_fact_safe_url "$base_url" || return 1
+  _acq_provider_fact_safe_url "$models_url" || return 1
+  _acq_provider_fact_safe_url "$key_mgmt_url" || return 1
+  _acq_provider_fact_safe_env "$key_env" || return 1
+  [ -n "$bind_hosts" ] || bind_hosts="$host"
+  _acq_provider_fact_safe_host "$bind_hosts" || return 1
+
+  USAI_PROVIDER_HOST="$host"
+  USAI_PROVIDER_BASE_URL="$base_url"
+  USAI_PROVIDER_MODELS_URL="$models_url"
+  USAI_PROVIDER_KEY_ENV="$key_env"
+  USAI_PROVIDER_KEY_MGMT_URL="$key_mgmt_url"
+  # shellcheck disable=SC2034  # consumed by adapters/tests after facts load
+  USAI_PROVIDER_BIND_HOSTS="$bind_hosts"
+  # shellcheck disable=SC2034  # consumed by diagnostics/tests after facts load
+  USAI_PROVIDER_FACTS_SOURCE="$file"
 }
 
 # _acq_import_detect_var SERVICE -> prints the NAME of the FIRST of SERVICE's

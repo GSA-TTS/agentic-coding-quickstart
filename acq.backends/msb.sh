@@ -215,8 +215,9 @@ ACQ_MSB_EXEC_READY_TIMEOUT="${ACQ_MSB_EXEC_READY_TIMEOUT:-${ACQ_EXEC_READY_TIMEO
 
 # USAi provider facts for --secret binding; common.sh owns the canonical values.
 USAI_PROVIDER_HOST="${USAI_PROVIDER_HOST:-api.gsa.usai.gov}"
+USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_BIND_HOSTS:-$USAI_PROVIDER_HOST}"
 USAI_PROVIDER_KEY_ENV="${USAI_PROVIDER_KEY_ENV:-USAI_API_KEY}"
-ACQ_MSB_USAI_HOST="$USAI_PROVIDER_HOST"
+ACQ_MSB_USAI_HOST="$USAI_PROVIDER_BIND_HOSTS"
 
 # GitHub credential hosts for the msb --secret binding. Bind the REST API and
 # git-transport hosts so both API calls and HTTPS git clone/push can substitute

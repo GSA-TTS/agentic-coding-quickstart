@@ -39,6 +39,7 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
 fi
 
 USAI_PROVIDER_HOST="${USAI_PROVIDER_HOST:-api.gsa.usai.gov}"
+USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_BIND_HOSTS:-$USAI_PROVIDER_HOST}"
 USAI_PROVIDER_KEY_ENV="${USAI_PROVIDER_KEY_ENV:-USAI_API_KEY}"
 USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_MODELS_URL:-https://${USAI_PROVIDER_HOST}/api/v1/models}"
 
@@ -952,7 +953,7 @@ acq_backend_ensure_kits_applied() {
 # Echoes "host1[,host2] <TAB> ENVVAR"; empty for unknown services.
 _acq_service_hosts_env() {
   case "$1" in
-    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_HOST" "$USAI_PROVIDER_KEY_ENV" ;;
+    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_BIND_HOSTS" "$USAI_PROVIDER_KEY_ENV" ;;
     github) printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
     *)      printf '\t\n' ;;
   esac
