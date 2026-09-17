@@ -251,7 +251,8 @@ In bounds now:
   installer release version marker. When a release is created, the release
   workflow checks out the release commit, writes that exact commit SHA into the
   `install.sh` asset, generates `SHA256SUMS`, publishes GitHub artifact
-  attestations for both files, and uploads both files to the GitHub release.
+  attestations for the release assets, and uploads them (the installer(s),
+  `SHA256SUMS`, and the Windows preview zip) to the GitHub release.
   Users who install from the release asset still get package-manager-first auto
   selection; the embedded SHA is used only when the clone fallback is selected
   (or when the user forces `--method clone`) to verify that checkout against the

@@ -3003,9 +3003,17 @@ EOF
   done
 
   # Decide the agent's starting directory (recorded for attach). Explicit
-  # override wins; otherwise the FIRST (primary) workspace, matching sbx.
+  # override wins; otherwise the FIRST (primary) workspace, matching sbx. The
+  # override arrives in whatever vocabulary the operator's shell uses, so it
+  # must be canonicalized to the POSIX guest form exactly like a mounted
+  # workspace (ADR-0029); recording a raw `C:/Users/me/proj` would put a
+  # drive-form path in the marker and later in `-w`.
   if [ -n "${ACQ_MSB_WORKSPACE:-}" ]; then
-    ACQ_MSB_GUEST_WORKSPACE="$ACQ_MSB_WORKSPACE"
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      ACQ_MSB_GUEST_WORKSPACE=$(canonicalize_path "$ACQ_MSB_WORKSPACE")
+    else
+      ACQ_MSB_GUEST_WORKSPACE="$ACQ_MSB_WORKSPACE"
+    fi
   elif [ -n "$_first_guest" ]; then
     ACQ_MSB_GUEST_WORKSPACE="$_first_guest"
   fi
@@ -4281,8 +4289,17 @@ _ACQ_MSB_RUN_WS=""
 # marker takes the documented fallback instead of killing the session verb
 # under `set -e` (see _acq_msb_ssh_auth_sock_for).
 _acq_msb_workspace_for() {
-  local name="$1" ws="${ACQ_MSB_WORKSPACE:-}"
-  if [ -z "$ws" ]; then
+  local name="$1" ws=""
+  if [ -n "${ACQ_MSB_WORKSPACE:-}" ]; then
+    # An operator override is host-vocabulary input; `-w` needs the POSIX guest
+    # form, so canonicalize it (a raw drive-form value here was the original
+    # single-form bug via the override path). See ADR-0029.
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      ws=$(canonicalize_path "$ACQ_MSB_WORKSPACE")
+    else
+      ws="$ACQ_MSB_WORKSPACE"
+    fi
+  else
     ws=$({ _acq_msb_cli exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
   fi
   [ -n "$ws" ] || ws="/home/agent"
@@ -4767,7 +4784,14 @@ _acq_msb_pick_ephemeral_port() {
 _acq_msb_serve_start() {
   local name="$1" sport="$2"
   acq_debug "msb ssh serve $name --host 127.0.0.1 --port $sport (backgrounded)"
-  _acq_msb_cli ssh serve "$name" --host 127.0.0.1 --port "$sport" >/dev/null 2>&1 &
+  # NOT through _acq_msb_cli: wrapping a command in a shell function makes bash
+  # fork a subshell for the background job, so $! is that subshell — not `msb`.
+  # Teardown/failure then kill the wrapper and orphan the still-listening
+  # `msb ssh serve` (its loopback port stays bound). A bare env-prefixed simple
+  # command is exec-optimized into the real process, so $! IS `msb` and the kill
+  # reaches it. The env prefix therefore stays inline here; ADR-0029 lists the
+  # three sites that must inline it (this one plus the two `exec msb exec`).
+  MSYS2_ARG_CONV_EXCL='*' msb ssh serve "$name" --host 127.0.0.1 --port "$sport" >/dev/null 2>&1 &
   local pid=$!
   # Give the listener a beat to fail fast (bind error, bad sandbox), then confirm
   # it is still alive. kill -0 probes liveness without signalling. `command sleep`

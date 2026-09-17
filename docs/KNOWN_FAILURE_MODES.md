@@ -2186,7 +2186,15 @@ amending the wrong branch.
   POSIX-looking argv when launching the native `msb.exe` and corrupts
   colon-delimited mounts (`--volume /c/a:/c/a` → `C:\a;C:\a`) and guest-only
   values (`-w /home/agent` → `C:/Program Files/Git/home/agent`). The exclusion is
-  scoped to `msb`; `git`/`ssh` keep the rewrite they rely on.
+  scoped to `msb`; `git`/`ssh` keep the rewrite they rely on. An explicit
+  `ACQ_MSB_WORKSPACE` override is canonicalized to the guest form too, so a
+  drive-form value cannot leak into `-w`.
+- Three `msb` call sites inline `MSYS2_ARG_CONV_EXCL='*'` instead of using the
+  wrapper: the two `exec msb exec …` lines (`exec` needs a binary, not a shell
+  function) and the backgrounded `msb ssh serve …` in `_acq_msb_serve_start`.
+  Wrapping the latter in the function would make `$!` a subshell rather than
+  `msb`, so teardown/`acq rm` would kill the wrapper and orphan the listener
+  with its loopback port still bound. See ADR-0029.
 - The offline Bats suite is POSIX-oriented: on a Windows/MSYS host, `install.sh`
   tests (macOS/Linux installer), `chmod 0600` assertions (MSYS cannot represent
   them on NTFS), and symlink-based tests cannot pass without native symlinks. None

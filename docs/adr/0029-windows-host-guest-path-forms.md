@@ -86,8 +86,24 @@ rewrite is *useful* for other native tools — `git.exe` relies on it to accept
 
 Guest-side arguments keep the `canonicalize_path` form: the `--volume` target,
 `--mount-named PATH`, `--env ACQ_WORKSPACE`, `-w`, `-e SSH_AUTH_SOCK`, and bare
-`chmod`/`chown` guest paths. The workspace-marker charset guard reverts to a
-conservative POSIX set (no `:`) now that the guest value is never drive-form.
+`chmod`/`chown` guest paths. An explicit `ACQ_MSB_WORKSPACE` override is
+host-vocabulary input too, so it is canonicalized to the guest form wherever it
+is read (the provision-time marker write and `_acq_msb_workspace_for`) — without
+that, a natural `C:/Users/me/proj` reaches `-w` verbatim. The workspace-marker
+charset guard reverts to a conservative POSIX set (no `:`) now that the guest
+value is never drive-form.
+
+Three call sites cannot use `_acq_msb_cli` and inline the env prefix instead:
+
+- the two `exec msb exec …` lines (`exec` needs a binary, not a function), and
+- the backgrounded `msb ssh serve …` in `_acq_msb_serve_start`.
+
+The backgrounded serve is the subtle one: wrapping a command in a shell function
+makes bash fork a subshell for the background job, so `$!` is the subshell, not
+`msb`. The recorded PID is then killed at teardown (or on the failed-forward
+path) while the real `msb ssh serve` is reparented and keeps the loopback port
+bound. A bare env-prefixed command is exec-optimized into the real process, so
+`$! IS msb`. A regression test asserts the recorded PID is the stub's own `$$`.
 
 `acq_backend_cp` is the one deliberate exception: `msb copy` takes one host path
 and one `NAME:/guest/path` ref, and MSYS rewriting already converts the bare
@@ -102,9 +118,14 @@ on a POSIX CI host. Two seams make the contract testable instead:
 
 - A fake `cygpath` (a stable POSIX↔drive bijection) planted on `PATH`
   exercises the two-form split on any host: the mount uses the host form for
-  the source and the guest form for the target, and `ACQ_WORKSPACE` stays POSIX
-  (`test/bats/117-msys-path-forms.bats`).
-- A stub `msb` asserts `MSYS2_ARG_CONV_EXCL=*` reaches the child.
+  the source and the guest form for the target, `ACQ_WORKSPACE` stays POSIX,
+  the `ACQ_MSB_WORKSPACE` override and `-w` are guest-form, and the
+  `--script-path`, `--tls-upstream-ca-cert`, `--vsock`, `msb copy` source, and
+  `ssh authorize --file` values are host-form (`test/bats/117-msys-path-forms.bats`).
+- A stub `msb` asserts `MSYS2_ARG_CONV_EXCL=*` reaches the child, and a
+  backgrounded `msb ssh serve` stub writes its own `$$` so
+  `test/bats/112-msb-ports.bats` proves the recorded PID is the real process
+  (not a function-wrapper subshell).
 
 Tests that exercised the adapter without sourcing `common.sh` were updated to
 source it (production sources `common.sh` before the backend), so `host_path`
@@ -118,7 +139,10 @@ is defined there too.
 - **Negative / trade-off:** `msb` calls are routed through a wrapper, so a
   future msb subcommand that needs MSYS conversion would have to say so
   explicitly; the wrapper is invoked without `command` so shell-function shims
-  (used by tests) still shadow `msb`.
+  (used by tests) still shadow `msb`. The `MSYS2_ARG_CONV_EXCL='*'` assignment
+  is therefore written literally at the three sites above in addition to the
+  wrapper — an unavoidable drift surface (`exec` cannot run a function, and the
+  backgrounded serve needs `$!` to be the real process).
 - **Scope:** applies whenever `cygpath` is present (MSYS/Cygwin). `host_path`
   and `canonicalize_path` are intentionally guarded so a caller without
   `common.sh` degrades to the identity form rather than erroring; production

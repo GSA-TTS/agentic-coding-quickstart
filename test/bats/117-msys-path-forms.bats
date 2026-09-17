@@ -103,6 +103,127 @@ _msys_provision() { # NAME WS
   refute_regex "$line" "ACQ_WORKSPACE=${host}( |\$)"
 }
 
+@test "msys: an ACQ_MSB_WORKSPACE override is canonicalized to the guest form" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    export ACQ_MSB_WORKSPACE="C:/Users/me/proj"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    printf "ws=%s\n" "$(_acq_msb_workspace_for somebox)"
+  '
+  assert_success
+  assert_output 'ws=/c/Users/me/proj'
+}
+
+@test "msys: the run path passes the guest form of ACQ_MSB_WORKSPACE to -w" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    export ACQ_MSB_WORKSPACE="C:/Users/me/proj"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run somebox true >/dev/null 2>&1 || true
+    grep -o -- "-w [^ ]*" "'"$CALLS"'" | tail -n1
+  '
+  assert_success
+  assert_output '-w /c/Users/me/proj'
+}
+
+@test "msys: msb copy gets the host form for its SRC and keeps the guest DST" {
+  _plant_cygpath_stub
+  mkdir -p "$STUBDIR/copy"
+  printf 'payload\n' >"$STUBDIR/copy/f.txt"
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_copy_file_verified somebox "'"$STUBDIR"'/copy/f.txt" /home/agent/f.txt 0600 >/dev/null 2>&1 || true
+    got=$(grep -o -- "copy [^ ]* [^ ]*" "'"$CALLS"'" | tail -n1)
+    src="${got#copy }"; src="${src% *}"
+    host=$(host_path "'"$STUBDIR"'/copy/f.txt")
+    [ "$src" = "$host" ] && echo "src-host-form-ok" || echo "bad-src: $got"
+    [ "$host" != "'"$STUBDIR"'/copy/f.txt" ] && echo "forms-differ" || echo "forms-same"
+    grep -q -- "somebox:/home/agent/f.txt" "'"$CALLS"'" && echo "dst-guest-form-ok"
+  '
+  assert_output --partial 'src-host-form-ok'
+  assert_output --partial 'forms-differ'
+  assert_output --partial 'dst-guest-form-ok'
+}
+
+@test "msys: ssh authorize --file gets the host form of the public key" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ACQ_MSB_SSH_KEY="'"$STUBDIR"'/state/ssh/msb_id_ed25519"
+    _acq_msb_ssh_authorize >/dev/null 2>&1
+    got=$(grep -o -- "--file [^ ]*" "'"$CALLS"'" | tail -n1)
+    host=$(host_path "$ACQ_MSB_SSH_KEY.pub")
+    [ "$got" = "--file $host" ] && echo "host-form-ok" || echo "bad: $got"
+    [ "$host" != "$ACQ_MSB_SSH_KEY.pub" ] && echo "forms-differ" || echo "forms-same"
+  '
+  assert_output --partial 'host-form-ok'
+  assert_output --partial 'forms-differ'
+}
+
+@test "msys: --tls-upstream-ca-cert gets the host form of the PEM" {
+  _plant_cygpath_stub
+  printf '%s\n' '-----BEGIN CERTIFICATE-----' >"$STUBDIR/ca.pem"
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    export ACQ_MSB_UPSTREAM_CA_CERT="'"$STUBDIR"'/ca.pem"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    arr=()
+    _acq_msb_upstream_ca_flags_into arr
+    got="${arr[*]}"
+    host=$(host_path "'"$STUBDIR"'/ca.pem")
+    [ "$got" = "--tls-upstream-ca-cert $host" ] && echo "host-form-ok" || echo "bad: $got"
+    [ "$host" != "'"$STUBDIR"'/ca.pem" ] && echo "forms-differ" || echo "forms-same"
+  '
+  assert_output --partial 'host-form-ok'
+  assert_output --partial 'forms-differ'
+}
+
+@test "msys: --vsock gets the host form of the socket" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_host_socket_forwards() { printf "%s\t%s\t%s\t%s\n" "'"$STUBDIR"'/agent.sock" 3552 stream ssh-agent; }
+    arr=()
+    _acq_msb_vsock_flags_into arr
+    got="${arr[*]}"
+    host=$(host_path "'"$STUBDIR"'/agent.sock")
+    [ "$got" = "--vsock $host:3552/stream" ] && echo "host-form-ok" || echo "bad: $got"
+    [ "$host" != "'"$STUBDIR"'/agent.sock" ] && echo "forms-differ" || echo "forms-same"
+  '
+  assert_output --partial 'host-form-ok'
+  assert_output --partial 'forms-differ'
+}
+
+@test "msys: --script-path gets the host form of the staged script" {
+  _plant_cygpath_stub
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    export ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/stage"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_generate_startup_script() { printf "#!/bin/sh\n" > "$2"; return 0; }
+    arr=()
+    _acq_msb_stage_startup_script spec arr
+    got="${arr[*]}"
+    hostd=$(host_path "'"$STUBDIR"'/stage")
+    case "$got" in "--script-path acq-startup:$hostd/"*) echo "host-dir-ok" ;; *) echo "bad: $got" ;; esac
+    [ "$hostd" != "'"$STUBDIR"'/stage" ] && echo "forms-differ" || echo "forms-same"
+  '
+  assert_output --partial 'host-dir-ok'
+  assert_output --partial 'forms-differ'
+}
+
 @test "msys: msb is invoked with MSYS argument rewriting disabled" {
   cat >"$STUBDIR/msb" <<'MSBENVSTUB'
 #!/usr/bin/env bash

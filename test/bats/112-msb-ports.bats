@@ -38,6 +38,37 @@ load 'helper'
   assert [ -f "$STUBDIR/state/ports/pbox.pids" ]
 }
 
+@test "msb ports: the recorded serve PID is the real msb process (teardown kill reaches it)" {
+  # Regression for the function-wrapper $! trap (ADR-0029): backgrounding
+  # `_acq_msb_cli ssh serve …` records the wrapper SUBSHELL pid, so a later kill
+  # orphans the still-listening msb. The stub writes its own $$ for comparison.
+  mkdir -p "$STUBDIR/state"
+  cat >"$STUBDIR/msb" <<MSBPIDSTUB
+#!/usr/bin/env bash
+if [ "\${1:-}" = "ssh" ] && [ "\${2:-}" = "serve" ]; then
+  printf '%s' "\$\$" > "$STUBDIR/state/serve.pid"
+  exec >/dev/null 2>&1
+  sleep 30
+fi
+MSBPIDSTUB
+  chmod +x "$STUBDIR/msb"
+  run bash -c '
+    export ACQ_MSB_FORCE_SERVE_PORT=54321
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_serve_start pbox 54321 || exit 2
+    pid="$_ACQ_MSB_LAST_BG_PID"
+    child=$(cat "'"$STUBDIR"'/state/serve.pid")
+    printf "pid=%s child=%s\n" "$pid" "$child"
+    [ "$pid" = "$child" ] && echo "pid-is-real-process" || echo "pid-is-wrapper"
+    kill "$pid" 2>/dev/null
+    sleep 0.5
+    if kill -0 "$child" 2>/dev/null; then echo "child-survived"; else echo "child-gone"; fi
+  '
+  assert_output --partial 'pid-is-real-process'
+  assert_output --partial 'child-gone'
+  refute_output --partial 'pid-is-wrapper'
+}
+
 @test "msb ports(S2): a serve that dies immediately fails the publish, no state recorded" {
   run bash -c '
     export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_MSB_SERVE_DIE=1

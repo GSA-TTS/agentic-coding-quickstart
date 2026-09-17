@@ -115,7 +115,10 @@ That's it — you don't have to choose *how* to install. The installer:
 **Answer "yes" to each prompt** — it may take a few minutes. When it finishes,
 **close and reopen your terminal** so the new `acq` command is available, then
 continue to Step 3. (On Windows, the installer stops with clear guidance if
-virtualization isn't enabled — see the box in Step 1.)
+virtualization isn't enabled — see the box in Step 1. And if a later `acq`
+command reports that *running scripts is disabled*, that's PowerShell's
+execution policy, not `acq` — see the `PSSecurityException` box in
+[First-Run Snags](#first-run-snags).)
 
 <details>
 <summary>Prompted to install "Command Line Tools"? (click to expand)</summary>
