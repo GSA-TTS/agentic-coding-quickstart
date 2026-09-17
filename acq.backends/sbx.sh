@@ -575,7 +575,14 @@ acq_backend_run() {
   # Expect `-- CMD...` separator. No `-u agent` needed: sbx's agent templates
   # bake the unprivileged `agent` user (UID 1000, HOME=/home/agent) as the
   # default exec user, unlike a plain msb OCI base (which defaults to root).
-  sbx exec "$name" "$@"
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_session_is_user >/dev/null 2>&1 && acq_session_is_user \
+      && command -v acq_guest_exec_script >/dev/null 2>&1 && [ "${1:-}" = "--" ]; then
+    shift
+    sbx exec "$name" -- sh -c "$(acq_guest_exec_script)" sh "$@"
+  else
+    sbx exec "$name" "$@"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -586,7 +593,12 @@ acq_backend_run() {
 # allocates the PTY itself via `exec -it`; exec hands it the terminal directly.
 acq_backend_shell() {
   _acq_sbx_apply_git_identity_kit "$1"
-  exec sbx exec -it "$1" bash
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_guest_shell_script >/dev/null 2>&1; then
+    exec sbx exec -it "$1" -- bash -lc "$(acq_guest_shell_script)" sh bash
+  else
+    exec sbx exec -it "$1" bash
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -598,7 +610,12 @@ acq_backend_attach() {
   shift
   if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
     shift
-    sbx run --name "$name" -- "$@"
+    if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+        && command -v acq_guest_exec_script >/dev/null 2>&1; then
+      sbx run --name "$name" -- sh -c "$(acq_guest_exec_script)" sh "$@"
+    else
+      sbx run --name "$name" -- "$@"
+    fi
   else
     sbx run --name "$name"
   fi

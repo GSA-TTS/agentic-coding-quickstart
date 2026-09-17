@@ -79,6 +79,11 @@ ACQ_EXTRA_KIT_SOURCES="${ACQ_EXTRA_KIT_SOURCES:-}"
 # this for a single invocation (parsed in the acq entry point).
 ACQ_UPDATE_CHECK="${ACQ_UPDATE_CHECK:-1}"
 
+# Human-owned activation contract: acq can detect direnv/devenv workspaces and
+# print guidance, but does not evaluate project-provided activation files unless
+# the user explicitly opts in for the current invocation/session.
+ACQ_ACTIVATE_PROJECT_ENV="${ACQ_ACTIVATE_PROJECT_ENV:-0}"
+
 # Kits supplied on the command line via `--kit <ref>` (repeatable) on
 # run/create. These are extracted from the arg list by extract_kit_flags (below)
 # BEFORE the args reach the backend, so a neutral kit ref is translated by acq
@@ -721,6 +726,55 @@ canonicalize_path() {
     readlink -f "$p" 2>/dev/null && return 0
   fi
   printf '%s\n' "$p"
+}
+
+acq_project_env_kind() {
+  local ws="${1:-}"
+  [ -n "$ws" ] && [ -d "$ws" ] || return 1
+  if [ -f "$ws/.envrc" ]; then
+    printf 'direnv\n'
+    return 0
+  fi
+  if [ -f "$ws/devenv.nix" ] || [ -f "$ws/devenv.yaml" ] || [ -f "$ws/devenv.lock" ]; then
+    printf 'devenv\n'
+    return 0
+  fi
+  return 1
+}
+
+advise_project_env_activation() {
+  local ws="${1:-}" kind
+  kind=$(acq_project_env_kind "$ws" 2>/dev/null || true)
+  [ -n "$kind" ] || return 0
+  [ "${ACQ_PROJECT_ENV_NOTICE:-1}" = "0" ] && return 0
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ]; then
+    echo "acq: project environment detected ($kind); ACQ_ACTIVATE_PROJECT_ENV=1 will" >&2
+    echo "     use already-approved direnv export when available." >&2
+    return 0
+  fi
+  echo "acq: project environment detected ($kind) in $ws." >&2
+  echo "     acq will not run project activation or 'direnv allow' automatically." >&2
+  echo "     If you trust this repo and have approved its .envrc yourself, re-run" >&2
+  echo "     this acq command with ACQ_ACTIVATE_PROJECT_ENV=1." >&2
+}
+
+acq_session_is_user() {
+  case "${ACQ_SESSION_KIND:-}" in
+    exec|shell|attach) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+acq_guest_exec_script() {
+  printf '%s\n' 'set -e; if [ -n "${ACQ_WORKSPACE:-}" ] && [ -d "$ACQ_WORKSPACE" ]; then cd "$ACQ_WORKSPACE"; fi; if [ -f .envrc ]; then if command -v direnv >/dev/null 2>&1; then eval "$(direnv export sh)"; else echo "acq: .envrc found, but direnv is not installed in this sandbox; continuing without activation." >&2; fi; elif [ -f devenv.nix ] || [ -f devenv.yaml ] || [ -f devenv.lock ]; then echo "acq: devenv files found, but no .envrc/direnv activation is available; continuing without activation." >&2; fi; exec "$@"'
+}
+
+acq_guest_shell_script() {
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ]; then
+    printf '%s\n' 'set -e; shell="${1:-${SHELL:-/bin/sh}}"; if [ -n "${ACQ_WORKSPACE:-}" ] && [ -d "$ACQ_WORKSPACE" ]; then cd "$ACQ_WORKSPACE"; fi; if [ -f .envrc ]; then if command -v direnv >/dev/null 2>&1; then eval "$(direnv export sh)"; else echo "acq: .envrc found, but direnv is not installed in this sandbox; continuing without activation." >&2; fi; elif [ -f devenv.nix ] || [ -f devenv.yaml ] || [ -f devenv.lock ]; then echo "acq: devenv files found, but no .envrc/direnv activation is available; continuing without activation." >&2; fi; exec "$shell" -l'
+  else
+    printf '%s\n' 'set -e; shell="${1:-${SHELL:-/bin/sh}}"; if [ -n "${ACQ_WORKSPACE:-}" ] && [ -d "$ACQ_WORKSPACE" ]; then cd "$ACQ_WORKSPACE"; fi; exec "$shell" -l'
+  fi
 }
 
 # _acq_valid_vsock_port PORT — succeed (return 0) iff PORT is an integer in

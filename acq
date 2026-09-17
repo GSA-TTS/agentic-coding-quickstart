@@ -135,6 +135,10 @@ Global flags (before the subcommand):
                        var/default (a set ACQ_MSB_IMAGE wins, with a notice). The
                        image must satisfy the base-image contract in
                        docs/BACKEND_GUIDE.md.
+  ACQ_ACTIVATE_PROJECT_ENV=1
+                       Opt in to human-approved project env activation for
+                       direnv/devenv workspaces. By default acq only detects and
+                       advises; it never runs `direnv allow` or activation.
 
 run/create flags:
   --kit REF            Apply an extra kit (repeatable). REF is a local dir or a
@@ -323,8 +327,10 @@ acq exec — run a command inside a sandbox
 Usage:
   acq exec NAME -- CMD...
 
-Runs CMD as the unprivileged agent user in the workspace. On msb, when the host
-ssh-agent is forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
+Runs CMD as the unprivileged agent user in the workspace. If the workspace uses
+direnv/devenv, acq prints activation guidance and only activates after the
+explicit ACQ_ACTIVATE_PROJECT_ENV=1 opt-in. On msb, when the host ssh-agent is
+forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
 U
       ;;
     shell)
@@ -334,10 +340,12 @@ acq shell — open an interactive shell in a sandbox
 Usage:
   acq shell NAME
 
-Opens an interactive shell in an existing sandbox as the unprivileged agent
-user (the human counterpart to 'acq run NAME', which relaunches the recorded
-agent; 'acq exec' is non-interactive). On msb, when the host ssh-agent is
-forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
+Opens an interactive shell in an existing sandbox as the unprivileged agent user
+(the human counterpart to 'acq run NAME', which relaunches the recorded agent;
+'acq exec' is non-interactive). If the workspace uses direnv/devenv, acq prints
+activation guidance and only activates after the explicit
+ACQ_ACTIVATE_PROJECT_ENV=1 opt-in. On msb, when the host ssh-agent is forwarded,
+SSH_AUTH_SOCK is injected so git/ssh reach the agent.
 U
       ;;
     cp)
@@ -923,6 +931,7 @@ case "$subcommand" in
     # just proceeds without a scoped token (the token is optional).
     [ -n "$ws" ] || ws="$PWD"
     advise_github_scope "$local_name" "$ws"
+    advise_project_env_activation "$ws"
     acq_print_selected_agent_kit "$create_agent"
 
     acq_backend_provision "$local_name" "$@"
@@ -1015,6 +1024,7 @@ case "$subcommand" in
         # at create; this re-attach case is the live-refeed path.
         [ -n "$ws" ] || ws="$PWD"
         advise_github_scope "$local_name" "$ws"
+        advise_project_env_activation "$ws"
       else
         # Fresh create: the USAi API key MUST be stored before we provision,
         # because a backend (msb) binds secrets only at create time. Creating the
@@ -1034,6 +1044,7 @@ case "$subcommand" in
         # proceeds without a scoped token (the token is optional).
         [ -n "$ws" ] || ws="$PWD"
         advise_github_scope "$local_name" "$ws"
+        advise_project_env_activation "$ws"
 
         acq_backend_provision "$local_name" "${create_args[@]}"
       fi
@@ -1069,8 +1080,10 @@ case "$subcommand" in
       warn_if_published_ports_dead "$local_name"
 
       if [ "${#agent_args[@]}" -gt 0 ]; then
+        ACQ_SESSION_KIND="attach"
         acq_backend_attach "$local_name" -- "${agent_args[@]}"
       else
+        ACQ_SESSION_KIND="attach"
         acq_backend_attach "$local_name"
       fi
 
@@ -1096,6 +1109,11 @@ case "$subcommand" in
       acq_backend_ensure_kits_applied "$first" || true
       maybe_offer_bundle_refresh "${ACQ_RESOLVED_BACKEND}" "$first" "$_pre_heal_status"
       warn_if_no_ssh_signing_key
+      _attach_ws=""
+      if command -v acq_backend_workspace_for >/dev/null 2>&1; then
+        _attach_ws=$(acq_backend_workspace_for "$first" 2>/dev/null || true)
+      fi
+      advise_project_env_activation "$_attach_ws"
 
       # Backend-neutral health note (same as the create-and-attach path): if the
       # sandbox publishes ports with nothing listening behind them, surface it
@@ -1120,10 +1138,13 @@ case "$subcommand" in
       done
 
       if [ "${#agent_args[@]}" -gt 0 ]; then
+        ACQ_SESSION_KIND="attach"
         acq_backend_attach "$first" -- "${agent_args[@]}"
       elif [ "${#rest[@]}" -gt 0 ]; then
+        ACQ_SESSION_KIND="attach"
         acq_backend_attach "$first" "${rest[@]}"
       else
+        ACQ_SESSION_KIND="attach"
         acq_backend_attach "$first"
       fi
     else
@@ -1236,6 +1257,12 @@ case "$subcommand" in
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: exec: missing sandbox name" >&2; exit 1; }
     shift
+    _exec_ws=""
+    if command -v acq_backend_workspace_for >/dev/null 2>&1; then
+      _exec_ws=$(acq_backend_workspace_for "$local_name" 2>/dev/null || true)
+    fi
+    advise_project_env_activation "$_exec_ws"
+    ACQ_SESSION_KIND="exec"
     acq_backend_run "$local_name" "$@"
     ;;
 
@@ -1243,6 +1270,12 @@ case "$subcommand" in
     shift
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: shell: missing sandbox name" >&2; exit 1; }
+    _shell_ws=""
+    if command -v acq_backend_workspace_for >/dev/null 2>&1; then
+      _shell_ws=$(acq_backend_workspace_for "$local_name" 2>/dev/null || true)
+    fi
+    advise_project_env_activation "$_shell_ws"
+    ACQ_SESSION_KIND="shell"
     acq_backend_shell "$local_name"
     ;;
 

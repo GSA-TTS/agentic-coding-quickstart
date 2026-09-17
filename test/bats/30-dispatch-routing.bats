@@ -260,7 +260,53 @@ _seed_usai() {
   assert_regex "$(cat "$CALLS")" 'sbx rm --force mybox'
   : > "$CALLS"
   run env ACQ_BACKEND=sbx "$ACQ" exec mybox -- echo hi
-  assert_regex "$(cat "$CALLS")" 'sbx exec mybox'
+  assert_regex "$(cat "$CALLS")" 'sbx exec mybox -- echo hi'
+  refute_regex "$(cat "$CALLS")" 'direnv export|direnv allow'
+}
+
+@test "project-env: sbx exec does not advise without a known workspace" {
+  run env ACQ_BACKEND=sbx "$ACQ" exec mybox -- echo hi
+  refute_output --partial 'project environment detected'
+  assert_regex "$(cat "$CALLS")" 'sbx exec mybox -- echo hi'
+}
+
+@test "project-env: run detects direnv workspace but does not activate by default" {
+  local proj="$STUBDIR/direnvproj"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj" -- echo hi
+  assert_success
+  assert_output --partial 'project environment detected (direnv)'
+  assert_output --partial 'will not run project activation'
+  assert_output --partial 'ACQ_ACTIVATE_PROJECT_ENV=1'
+  local log; log=$(cat "$CALLS")
+  local run_line; run_line=$(grep '^sbx run --name opencode-direnvproj' "$CALLS")
+  assert_regex "$run_line" 'sbx run --name opencode-direnvproj -- echo hi'
+  refute_regex "$log" 'direnv export|direnv allow'
+}
+
+@test "project-env: run opt-in wraps command with direnv export, never allow" {
+  local proj="$STUBDIR/direnvproj2"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  _seed_usai
+  run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj" -- echo hi
+  assert_success
+  assert_output --partial 'project environment detected (direnv)'
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx run --name opencode-direnvproj2 -- sh -c'
+  assert_regex "$log" 'direnv export sh'
+  refute_regex "$log" 'direnv allow'
+}
+
+@test "project-env: create detects devenv files without activating anything" {
+  local proj="$STUBDIR/devenvproj"; mkdir -p "$proj"
+  touch "$proj/devenv.nix"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
+  assert_success
+  assert_output --partial 'project environment detected (devenv)'
+  assert_output --partial 'will not run project activation'
+  refute_regex "$(cat "$CALLS")" 'direnv export|direnv allow'
 }
 
 @test "dispatch: an unknown subcommand passes through to the backend, announced, not doubled" {
