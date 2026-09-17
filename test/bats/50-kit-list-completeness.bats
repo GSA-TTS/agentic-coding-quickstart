@@ -69,6 +69,17 @@ load 'helper'
   refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/opencode'
 }
 
+@test "agent-kits: enabled built-in agent kit is appended after support bundle" {
+  load_acq
+  ACQ_EXTRA_KITS=""
+  ACQ_CLI_KITS=()
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _build_kit_list opencode
+
+  assert_regex "${KITS[4]}" 'acq-kits/opencode$'
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
+}
+
 @test "agent-kits: explicit CLI kit suppresses implicit agent-kit inference" {
   load_acq
   ACQ_EXTRA_KITS=""
