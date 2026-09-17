@@ -45,8 +45,63 @@ load 'helper'
   assert_equal "$USAI_PROVIDER_KEY_ENV" "USAI_API_KEY"
   assert_equal "$USAI_PROVIDER_MODELS_URL" "https://api.gsa.usai.gov/api/v1/models"
   assert_equal "$USAI_PROVIDER_KEY_MGMT_URL" "https://gsa.usai.gov/console/key-management"
+  assert_equal "$USAI_PROVIDER_BIND_HOSTS" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
   assert_regex "$USAI_KIT" "acq-kits/${USAI_PROVIDER_KIT_NAME}$"
   refute_regex "$USAI_PROVIDER_MODELS_URL" 'opencode'
+}
+
+@test "provider-facts: valid artifact overrides fallback defaults" {
+  load_acq
+  local facts="$STUBDIR/usai.env"
+  cat > "$facts" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.example.gov
+ACQ_PROVIDER_BASE_URL=https://api.example.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.example.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://example.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.example.gov,models.example.gov
+FACTS
+
+  acq_provider_facts_load "$facts"
+  assert_equal "$USAI_PROVIDER_HOST" "api.example.gov"
+  assert_equal "$USAI_PROVIDER_BASE_URL" "https://api.example.gov/api/v1"
+  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://api.example.gov/api/v1/models"
+  assert_equal "$USAI_PROVIDER_KEY_ENV" "EXAMPLE_API_KEY"
+  assert_equal "$USAI_PROVIDER_KEY_MGMT_URL" "https://example.gov/keys"
+  assert_equal "$USAI_PROVIDER_BIND_HOSTS" "api.example.gov,models.example.gov"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "$facts"
+}
+
+@test "provider-facts: missing artifact leaves fallback path available" {
+  load_acq
+  run acq_provider_facts_load "$STUBDIR/missing.env"
+  assert_failure 2
+  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
+}
+
+@test "provider-facts: invalid artifact fails closed without partial override" {
+  load_acq
+  local facts="$STUBDIR/bad-usai.env"
+  cat > "$facts" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.bad.gov
+ACQ_PROVIDER_BASE_URL=https://api.bad.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.bad.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=bad-key-name
+ACQ_PROVIDER_KEY_MGMT_URL=https://bad.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.bad.gov
+FACTS
+
+  run acq_provider_facts_load "$facts"
+  assert_failure
+  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_KEY_ENV" "USAI_API_KEY"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
 }
 
 @test "agent-kits: default kit list is support-only" {
