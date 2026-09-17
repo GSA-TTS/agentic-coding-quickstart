@@ -252,7 +252,7 @@ _sbx_create() { # CREATE_ARGS... (with optional leading ENV via `env`)
 #!/usr/bin/env bash
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
 case "${1:-}" in
-  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
   create) printf 'ERROR: failed to pull image: unauthorized\n' >&2; exit 1 ;;
   exec) printf 'ok\n' ;;
   *) exit 0 ;;

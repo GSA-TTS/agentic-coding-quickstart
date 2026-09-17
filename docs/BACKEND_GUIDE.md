@@ -58,7 +58,7 @@ from Docker Inc. It provides:
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `sbx` CLI | >= 0.38.0 | acq's neutral-kit translator emits the sbx v2 kit grammar, which only sbx >= 0.38.0 accepts (older builds fail with an opaque `field permissions not found` decode error). `sbx kit add` in-place healing needs >= 0.35.0. |
+| `sbx` CLI | >= 0.39.0 | acq exports the guest workspace markers with `sbx create --env`, which first exists in sbx 0.39.0; an older sbx rejects the unknown flag and fails the whole create. acq's neutral-kit translator also emits the sbx v2 kit grammar, which only sbx >= 0.38.0 accepts (older builds fail with an opaque `field permissions not found` decode error). `sbx kit add` in-place healing needs >= 0.35.0. |
 | Docker account | any | Required for `sbx login` |
 | Docker subscription seat | (org-dependent) | Some orgs require paid seats |
 

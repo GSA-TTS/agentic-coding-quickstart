@@ -806,23 +806,6 @@ first_positional() {
   done
 }
 
-# Strip --backend <name> / --backend=<name> from arg list into STRIPPED_ARGS.
-strip_backend_flag() {
-  STRIPPED_ARGS=()
-  local skip=0
-  for arg in "$@"; do
-    if [ "$skip" -eq 1 ]; then
-      skip=0
-      continue
-    fi
-    case "$arg" in
-      --backend) skip=1; continue ;;
-      --backend=*) continue ;;
-    esac
-    STRIPPED_ARGS+=("$arg")
-  done
-}
-
 # Extract user-supplied `--kit <ref>` / `--kit=<ref>` flags from a run/create
 # arg list. Populates two arrays IN THE CURRENT SHELL (so callers must not run
 # this in a subshell/pipeline):

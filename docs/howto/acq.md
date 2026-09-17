@@ -69,7 +69,7 @@ pre-seeding a machine or scripting setup (see [Secrets](#secrets) below).
 
 To use the **sbx** backend instead:
 
-- Install the `sbx` CLI (>= 0.38.0)
+- Install the `sbx` CLI (>= 0.39.0)
 - Run `sbx login`
 - Set your network policy
 
@@ -302,7 +302,7 @@ behavior is otherwise identical across backends.
 ## Running on the sbx backend
 
 ```bash
-# 1. Install the sbx CLI (>= 0.38.0) and authenticate
+# 1. Install the sbx CLI (>= 0.39.0) and authenticate
 #    (see https://docs.docker.com/ai/sandboxes/ — the standalone sbx CLI,
 #     NOT the deprecated `docker sandbox`)
 sbx login
