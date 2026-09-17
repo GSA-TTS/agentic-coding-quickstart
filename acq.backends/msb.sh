@@ -5424,7 +5424,9 @@ acq_backend_secret_rm() {
 # Prints one row per acq-managed secret: SCOPE, SERVICE, whether a VALUE is
 # present, and the binding ENV@HOST the msb adapter would use at provision.
 # NEVER prints a secret value. With no scope, lists everything acq holds; with a
-# scope (-g or SANDBOX) it filters to that scope. Read-only.
+# scope (-g or SANDBOX) it filters to that scope. It never writes secret values;
+# the sole write it can trigger is the one-time keychain-windows legacy->DPAPI
+# migration when it probes a legacy key (ADR-0028).
 #
 # Sources: the value store (acq_secret_list_keys → decode scope/service). The
 # ENV@HOST column comes from _acq_msb_service_binding, so it shows exactly what
@@ -5458,16 +5460,31 @@ _acq_msb_secret_ls_rows() {
     [ -n "$svc" ] || continue
     case "$want_scope" in "") ;; *) [ "$scope" = "$want_scope" ] || continue ;; esac
     if [ "$scope" = "-g" ]; then
-      acq_secret_has "$svc" && val="yes" || val="no"
+      val=$(_acq_msb_secret_ls_value "$svc" "")
       binding=$(_acq_msb_secret_ls_binding "$svc" "")
     else
-      acq_secret_has "$svc" "$scope" && val="yes" || val="no"
+      val=$(_acq_msb_secret_ls_value "$svc" "$scope")
       binding=$(_acq_msb_secret_ls_binding "$svc" "$scope")
     fi
     printf '%s\t%s\t%s\t%s\n' "$scope" "$svc" "$val" "$binding"
   done <<EOF
 $(acq_secret_list_keys)
 EOF
+}
+
+# _acq_msb_secret_ls_value SERVICE SANDBOX -> yes | no | unreadable.
+# "unreadable" means a value is stored but this user/host cannot read it (e.g. a
+# DPAPI envelope written under another profile); reporting "no" there would show
+# a stored secret as absent. Reuses the store's own predicates.
+_acq_msb_secret_ls_value() {
+  local svc="$1" sandbox="${2:-}"
+  if acq_secret_has "$svc" "$sandbox"; then
+    printf 'yes\n'; return 0
+  fi
+  if acq_secret_unreadable "$svc" "$sandbox"; then
+    printf 'unreadable\n'; return 0
+  fi
+  printf 'no\n'
 }
 
 # _acq_msb_secret_ls_binding SERVICE SANDBOX -> "ENV@HOST" or "(unmapped)".

@@ -2197,9 +2197,10 @@ amending the wrong branch.
   with its loopback port still bound. See ADR-0029.
 - The offline Bats suite is POSIX-oriented: on a Windows/MSYS host, `install.sh`
   tests (macOS/Linux installer), `chmod 0600` assertions (MSYS cannot represent
-  them on NTFS), and symlink-based tests cannot pass without native symlinks. None
-  are regressions from the Windows preview path; validate that path with the
-  checklist in `docs/howto/acq.md`.
+  them on NTFS — the Windows secret store no longer depends on them, since it
+  encrypts at rest with DPAPI; see ADR-0028), and symlink-based tests cannot pass
+  without native symlinks. None are regressions from the Windows preview path;
+  validate that path with the checklist in `docs/howto/acq.md`.
 
 ---
 
