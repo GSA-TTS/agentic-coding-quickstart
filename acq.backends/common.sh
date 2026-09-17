@@ -590,6 +590,7 @@ acq_print_selected_agent_kit() {
 # Assemble the full kit list: selected built-ins, then extras.
 # Zscaler CA trust FIRST (see ACQ_KIT_NAMES) so later network-fetching kits
 # succeed behind a TLS-intercepting proxy.
+# shellcheck disable=SC2120  # optional agent argument; many callers use default
 _build_kit_list() {
   local agent="${1:-}" kit
   KITS=()
