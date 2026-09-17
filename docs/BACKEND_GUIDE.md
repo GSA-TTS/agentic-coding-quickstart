@@ -713,9 +713,11 @@ stored the bytes correctly. `acq` secrets are expected to be single-line API
 tokens; do not use this store for arbitrary binary or multi-line values. Existing
 legacy macOS file-backed entries are still read as a fallback until they are
 re-saved or removed. Windows DPAPI values carry a small versioned envelope, and a
-legacy plaintext entry is migrated in place the first time it is read; a value
-the active backend cannot decrypt is treated as absent rather than exposed.
-Entries are keyed `acq.<service>` (global) or
+legacy plaintext entry is migrated in place the first time it is read; if that
+migration cannot encrypt (for example DPAPI is unavailable), the value is still
+returned and a one-time warning is emitted, leaving the plaintext in place so it
+is not lost. A value the active backend cannot decrypt is treated as absent
+rather than exposed. Entries are keyed `acq.<service>` (global) or
 `acq.<sandbox>.<service>` (sandbox-scoped); a sandbox-scoped key takes precedence
 over the global one for the same service (supporting USAi per-sandbox
 billing-code keys).

@@ -113,9 +113,9 @@ fallback for exotic or headless cases where PowerShell is unavailable.
 Because the Windows backend reuses the plaintext fallback's file path, every
 value it writes is wrapped in a **versioned envelope**: a first line of
 `acq-dpapi-v1` followed by the base64 ciphertext. Stored plaintext is always a
-single line, so a first line equal to the header can never be a plaintext value
-and the two shapes are unambiguous. That makes a backend switch safe in both
-directions:
+single line, and the store refuses a value equal to the header, so a first line
+equal to the header can never be a stored plaintext value and the two shapes are
+unambiguous. That makes a backend switch safe in both directions:
 
 - The Windows backend reads an **unmarked** file as a legacy plaintext value
   (written by the `file` backend before this backend existed) and re-encrypts it
@@ -123,6 +123,16 @@ directions:
   rest.
 - The plaintext `file` backend sees a **marked** envelope it cannot decrypt and
   fails closed, rather than exporting the base64 blob as the secret.
+
+Migrating on the read path carries two hazards, both handled explicitly. The
+migration re-checks, immediately before its rename, that the file is still the
+exact unmarked value it read, so a concurrent `acq secret set`/rotation landing
+during the encrypt subprocess is never reverted by the stale capture. And a
+migration failure is never silent: it emits an `acq_debug` trace and a
+once-per-key warning, then leaves the legacy value readable. Because the read
+paths wrap reads in `2>/dev/null`, the warning is written to the stderr the
+process started with (saved as fd 9) so it is not swallowed exactly where the
+failure occurs.
 
 The store API, key format, and metadata sidecar are unchanged; only the
 read/write mechanism behind the Windows backend differs. Status is `accepted`;
@@ -135,11 +145,12 @@ the `keychain-windows` backend and its offline tests land in this stack.
   migrated to the envelope the first time it is read; offline-testable; and it
   unblocks the Windows preview secret-storage caveat from ADR-0026 and the
   install docs.
-- **Trade-offs:** a PowerShell subprocess per secret operation; same-user-only
-  decryption; reliance on the user's DPAPI master key (with machine/domain
-  policy as the hardening lever); the 0600-based tests remain macOS/Linux-only
-  and the Windows path no longer depends on them (the `KNOWN_FAILURE_MODES.md`
-  §39 note narrows accordingly).
+- **Trade-offs:** a PowerShell subprocess per secret operation (plus one per read
+  of a legacy key while its migration keeps failing, reported once per key);
+  same-user-only decryption; reliance on the user's DPAPI master key (with
+  machine/domain policy as the hardening lever); the 0600-based tests remain
+  macOS/Linux-only and the Windows path no longer depends on them (the
+  `KNOWN_FAILURE_MODES.md` §39 note narrows accordingly).
 
 ## Validation
 
@@ -150,6 +161,10 @@ the `keychain-windows` backend and its offline tests land in this stack.
 - Envelope handling verified on the same host: an unmarked legacy plaintext value
   is read and re-encrypted in place, a marked envelope that DPAPI cannot decrypt
   fails closed, and the plaintext `file` backend fails closed on a marked envelope.
+- Migration safety and telemetry covered offline: a rewrite landing mid-encryption
+  is not clobbered, a failed migration warns once per key while still returning the
+  value, the reserved header value is refused at store time, and delete removes the
+  value's migration sidecars.
 - Offline bats: a forceable/stubbable `keychain-windows` backend plus static
   contract tests, mirroring the `keychain-macos` stub approach.
 - The full suite passes with the new `keychain-windows` coverage; the
