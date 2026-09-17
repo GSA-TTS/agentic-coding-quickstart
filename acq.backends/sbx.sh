@@ -38,6 +38,10 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
 
+USAI_PROVIDER_HOST="${USAI_PROVIDER_HOST:-api.gsa.usai.gov}"
+USAI_PROVIDER_KEY_ENV="${USAI_PROVIDER_KEY_ENV:-USAI_API_KEY}"
+USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_MODELS_URL:-https://${USAI_PROVIDER_HOST}/api/v1/models}"
+
 # Minimum sbx version required.
 #
 # Bumped 0.35.0 -> 0.38.0: the neutral-kit translator now emits the sbx **v2 kit
@@ -943,12 +947,12 @@ acq_backend_ensure_kits_applied() {
 # needs to know which HOST(s) the credential is injected for and (for the
 # placeholder/env path) which ENV var. Keep this table backend-neutral here so
 # sbx.sh and msb.sh agree on the mapping.
-#   usai   -> api.gsa.usai.gov            USAI_API_KEY
+#   usai   -> $USAI_PROVIDER_HOST          $USAI_PROVIDER_KEY_ENV
 #   github -> github.com,api.github.com   GITHUB_TOKEN (sbx built-in service)
 # Echoes "host1[,host2] <TAB> ENVVAR"; empty for unknown services.
 _acq_service_hosts_env() {
   case "$1" in
-    usai)   printf 'api.gsa.usai.gov\tUSAI_API_KEY\n' ;;
+    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_HOST" "$USAI_PROVIDER_KEY_ENV" ;;
     github) printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
     *)      printf '\t\n' ;;
   esac
@@ -1526,8 +1530,8 @@ _acq_sbx_custom_placeholder() {
 # calls `acq usai-rotate-api-key`). Never places the secret value on argv — sbx
 # prompts for the new key at its own prompt. Returns non-zero on failure.
 acq_backend_rotate_key() {
-  local usai_host="api.gsa.usai.gov"
-  local usai_models_url="https://${usai_host}/api/v1/models"
+  local usai_host="$USAI_PROVIDER_HOST"
+  local usai_models_url="$USAI_PROVIDER_MODELS_URL"
 
   # Read the current secret table once (avoids a TOCTOU window + a second call).
   local secret_ls

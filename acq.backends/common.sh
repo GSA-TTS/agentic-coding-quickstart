@@ -39,7 +39,8 @@ PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 PATTERNS_KIT_REF="6c6753c60a2b24322fb2e8c0d8e8af60c56ede8f"  # agentic-coding-patterns v1.9.0
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
-USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider"
+USAI_PROVIDER_KIT_NAME="usai-provider"
+USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/${USAI_PROVIDER_KIT_NAME}"
 PLAYBOOK_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/agentic-coding-playbook"
 ZSCALER_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/zscaler-ca-certificate"
 GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/git-ssh-sign"
@@ -55,7 +56,7 @@ GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_
 # intercepting CA is already trusted. Establishing trust first makes the rest
 # of the bundle succeed on corporate networks.
 # shellcheck disable=SC2034  # consumed by `acq kit list` in the acq entry point
-ACQ_KIT_NAMES=(zscaler-ca-certificate usai-provider agentic-coding-playbook git-ssh-sign)
+ACQ_KIT_NAMES=(zscaler-ca-certificate "$USAI_PROVIDER_KIT_NAME" agentic-coding-playbook git-ssh-sign)
 
 # Built-in bundle identity. This mirrors the `provenance` block the usai-provider
 # kit declares at the pinned PATTERNS_KIT_REF. acq records these in a sandbox's
@@ -100,9 +101,13 @@ ACQ_BUILTIN_KIT_COUNT=0
 KIT_SOURCE_PREFIX="github.com/GSA-TTS/"
 KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
 
-# USAi endpoint constants
-USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
-KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
+# Neutral USAi provider facts. The provider kit owns these facts; agent kits own
+# rendering them into agent-specific config formats.
+USAI_PROVIDER_HOST="api.gsa.usai.gov"
+USAI_PROVIDER_BASE_URL="https://${USAI_PROVIDER_HOST}/api/v1"
+USAI_PROVIDER_KEY_ENV="USAI_API_KEY"
+USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_BASE_URL}/models"
+USAI_PROVIDER_KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
 
 # Source the shared agent catalog (single source of truth for agent tokens and
 # the sandbox-template image naming convention; issue #377). Both adapters also
@@ -178,7 +183,7 @@ ACQ_MANAGED_SECRET_SERVICES=" usai github gitlab "
 # Only acq-managed services are importable; an unknown service echoes nothing.
 _acq_import_env_vars_for() {
   case "$1" in
-    usai)   printf 'USAI_API_KEY\n' ;;
+    usai)   printf '%s\n' "$USAI_PROVIDER_KEY_ENV" ;;
     github) printf 'GITHUB_TOKEN GH_TOKEN\n' ;;
     gitlab) printf 'GITLAB_TOKEN\n' ;;
     *)      printf '\n' ;;
@@ -530,7 +535,7 @@ _acq_builtin_kit_ref() {
 }
 
 _acq_builtin_support_kit_names() {
-  printf '%s\n' zscaler-ca-certificate usai-provider agentic-coding-playbook git-ssh-sign
+  printf '%s\n' zscaler-ca-certificate "$USAI_PROVIDER_KIT_NAME" agentic-coding-playbook git-ssh-sign
 }
 
 _acq_agent_builtin_kit_ref() {
@@ -1756,11 +1761,12 @@ ensure_opencode_postinstall() {
 # no free-form error text can splice into the caller's "(HTTP …)" message.
 check_key() {
   local name="$1"
-  local raw code exit_code
+  local raw code exit_code key_ref
+  key_ref="\$${USAI_PROVIDER_KEY_ENV}"
   raw=$(acq_backend_run "$name" -- sh -c \
     "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer \$USAI_API_KEY\" \
-     $USAI_MODELS_URL; printf '|%s' \"\$?\"" 2>/dev/null || true)
+     -H \"Authorization: Bearer $key_ref\" \
+     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" 2>/dev/null || true)
   _classify_key_status "$raw"
 }
 
@@ -1826,11 +1832,12 @@ check_fresh_sandbox_key() {
   fi
   # shellcheck disable=SC2064
   trap "acq_backend_terminate '$validation_name' </dev/null >/dev/null 2>&1 || true" EXIT
-  local raw
+  local raw key_ref
+  key_ref="\$${USAI_PROVIDER_KEY_ENV}"
   raw=$(acq_backend_run "$validation_name" -- sh -c \
     "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer \$USAI_API_KEY\" \
-     $USAI_MODELS_URL; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
+     -H \"Authorization: Bearer $key_ref\" \
+     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
   status=$(_classify_key_status "$raw")
   acq_backend_terminate "$validation_name" </dev/null >/dev/null 2>&1 || true
   trap - EXIT
@@ -2396,7 +2403,7 @@ advise_valid_key() {
 # the docs rather than guessing the user's network fix.
 _report_usai_unreachable() {
   echo >&2
-  echo "acq: could not reach the USAi API ($USAI_MODELS_URL) from the sandbox." >&2
+  echo "acq: could not reach the USAi API ($USAI_PROVIDER_MODELS_URL) from the sandbox." >&2
   echo "      The request did not complete (no HTTP response) — this is a network" >&2
   echo "      reachability problem, NOT an invalid or expired key, so rotating the" >&2
   echo "      key will not help." >&2
@@ -2423,7 +2430,7 @@ _report_usai_unreachable() {
 # and point at the docs.
 _report_usai_unresolved() {
   echo >&2
-  echo "acq: the USAi API host in $USAI_MODELS_URL did not RESOLVE from the sandbox" >&2
+  echo "acq: the USAi API host in $USAI_PROVIDER_MODELS_URL did not RESOLVE from the sandbox" >&2
   echo "      (DNS returned no address). This is a name-resolution problem, NOT an" >&2
   echo "      invalid or expired key, so rotating the key will not help." >&2
   echo "      If other public hosts (GitHub, npm) work from the sandbox but only" >&2
@@ -2494,16 +2501,16 @@ ensure_key_present() {
   # emit a single terse line and fail closed rather than the full interactive
   # help (mirrors the non-tty guard in the kit-update path above).
   if [ ! -t 0 ]; then
-    echo "acq: no USAi API key stored; set one with 'acq secret set -g usai' (see $KEY_MGMT_URL). Aborting." >&2
+    echo "acq: no USAi API key stored; set one with 'acq secret set -g usai' (see $USAI_PROVIDER_KEY_MGMT_URL). Aborting." >&2
     return 1
   fi
 
   echo >&2
   echo "No USAi API key is stored yet." >&2
-  echo "USAi keys are created at $KEY_MGMT_URL and expire every 7 days." >&2
+  echo "USAi keys are created at $USAI_PROVIDER_KEY_MGMT_URL and expire every 7 days." >&2
   echo >&2
   echo "To set one:" >&2
-  echo "  1. Open $KEY_MGMT_URL" >&2
+  echo "  1. Open $USAI_PROVIDER_KEY_MGMT_URL" >&2
   echo "  2. Create a key (or copy an existing one) with the console copy button" >&2
   echo >&2
 
@@ -2578,7 +2585,7 @@ ensure_valid_key() {
   echo "USAi keys expire every 7 days." >&2
   echo >&2
   echo "To rotate it:" >&2
-  echo "  1. Open $KEY_MGMT_URL" >&2
+  echo "  1. Open $USAI_PROVIDER_KEY_MGMT_URL" >&2
   echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
   echo "  3. Copy the new key using the console copy button" >&2
   echo >&2

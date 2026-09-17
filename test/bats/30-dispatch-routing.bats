@@ -178,6 +178,7 @@ _seed_usai() {
   run env STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
   assert_success
   refute_output --partial 'Aborting attach'
+  assert_regex "$(cat "$CALLS")" 'Authorization: Bearer \$USAI_API_KEY'
 }
 
 @test "run(opencode): runs postinstall under a timeout guard when binary not functional" {

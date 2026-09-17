@@ -36,6 +36,19 @@ load 'helper'
   done
 }
 
+@test "provider-facts: USAi facts are distinct from agent config rendering" {
+  load_acq
+
+  assert_equal "$USAI_PROVIDER_KIT_NAME" "usai-provider"
+  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_BASE_URL" "https://api.gsa.usai.gov/api/v1"
+  assert_equal "$USAI_PROVIDER_KEY_ENV" "USAI_API_KEY"
+  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://api.gsa.usai.gov/api/v1/models"
+  assert_equal "$USAI_PROVIDER_KEY_MGMT_URL" "https://gsa.usai.gov/console/key-management"
+  assert_regex "$USAI_KIT" "acq-kits/${USAI_PROVIDER_KIT_NAME}$"
+  refute_regex "$USAI_PROVIDER_MODELS_URL" 'opencode'
+}
+
 @test "agent-kits: default kit list is support-only" {
   load_acq
   ACQ_EXTRA_KITS=""
