@@ -242,6 +242,27 @@ host's concern and use podman-compose, chosen for cross-platform support
 including Windows (devenv does not run on Windows), rather than a second devenv
 supervision story.
 
+### Kit roles
+
+This ADR uses "provider kit", "agent kit", and "capability kit" as role labels
+within the same neutral kit model. They are not separate schema families unless a
+future ADR introduces role-specific validation.
+
+A provider-role kit publishes provider facts as static data that `acq` can
+consume before sandbox creation. A provider-role kit does not render
+agent-specific configuration.
+
+An agent-role kit installs or exposes an agent harness, declares its entrypoint,
+and renders that harness's configuration from provider facts. An agent-role kit
+does not define provider authority.
+
+A capability-role kit adds shared sandbox capabilities such as CA trust, playbook
+configuration, git signing, or OCI tooling.
+
+A single kit may eventually carry multiple roles, but the default expectation is
+one primary role per built-in kit so ownership and conflict behavior remain
+clear.
+
 ### Provider configuration
 
 `usai-provider` exports the provider **facts** (endpoint, key environment
@@ -249,6 +270,48 @@ variable, model catalog); each agent kit **renders** those facts in its own
 configuration format. `acq` never merges agent configuration files — the agent
 owns its config-merge semantics, for example OpenCode's project-layer deep merge
 for its permission gate.
+
+#### Provider facts artifact contract
+
+The `usai-provider` kit is the authoritative source for USAi provider facts. It
+publishes those facts as a static, non-executable metadata artifact in the kit
+tree so `acq` can consume them before sandbox creation.
+
+The initial artifact path is:
+
+```text
+provider-facts/usai.env
+```
+
+The file is parsed as data, never sourced or evaluated. `acq` accepts only known
+keys and validates each value before use. The initial schema is:
+
+```sh
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.gsa.usai.gov
+ACQ_PROVIDER_BASE_URL=https://api.gsa.usai.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.gsa.usai.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=USAI_API_KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://gsa.usai.gov/console/key-management
+ACQ_PROVIDER_BIND_HOSTS=api.gsa.usai.gov
+```
+
+`acq` may use provider facts only for sandbox lifecycle and credential plumbing:
+backend secret binding, key validation, key-management guidance, and network/DNS
+diagnostics. Agent-specific configuration rendering remains the responsibility
+of agent kits.
+
+Precedence is:
+
+```text
+explicit user --host/--env metadata > provider-facts artifact > acq fallback defaults
+```
+
+Until the pinned `usai-provider` kit includes this artifact, `acq` may carry
+transitional fallback defaults for current backend behavior. Those fallback
+defaults are not authoritative and must be removed or demoted once the artifact
+is available at the pinned kit ref.
 
 ### Bring-your-own image contract
 

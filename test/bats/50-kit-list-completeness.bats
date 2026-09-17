@@ -36,7 +36,7 @@ load 'helper'
   done
 }
 
-@test "provider-facts: USAi facts are distinct from agent config rendering" {
+@test "provider-facts: transitional USAi fallback defaults remain neutral" {
   load_acq
 
   assert_equal "$USAI_PROVIDER_KIT_NAME" "usai-provider"
