@@ -4485,7 +4485,7 @@ _acq_msb_shell_exec() {
       && command -v acq_guest_shell_script >/dev/null 2>&1; then
     exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
       ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
-      ${_kitenv[@]+"${_kitenv[@]}"} -e "ACQ_WORKSPACE=$ws" "$name" -- "$shell" -lc \
+      ${_kitenv[@]+"${_kitenv[@]}"} -e "ACQ_WORKSPACE=$ws" "$name" -- sh -c \
       "$(acq_guest_shell_script)" sh "$shell"
   else
     exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \

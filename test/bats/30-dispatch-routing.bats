@@ -264,9 +264,12 @@ _seed_usai() {
   refute_regex "$(cat "$CALLS")" 'direnv export|direnv allow'
 }
 
-@test "project-env: sbx exec does not advise without a known workspace" {
+@test "project-env: sbx exec advises when workspace provenance is known" {
+  local proj="$STUBDIR/known-env"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  acq_provenance_write sbx mybox opencode "$proj"
   run env ACQ_BACKEND=sbx "$ACQ" exec mybox -- echo hi
-  refute_output --partial 'project environment detected'
+  assert_output --partial 'project environment detected (direnv)'
   assert_regex "$(cat "$CALLS")" 'sbx exec mybox -- echo hi'
 }
 
@@ -285,17 +288,29 @@ _seed_usai() {
   refute_regex "$log" 'direnv export|direnv allow'
 }
 
-@test "project-env: run opt-in wraps command with direnv export, never allow" {
+@test "project-env: run opt-in wraps recorded agent with direnv export" {
   local proj="$STUBDIR/direnvproj2"; mkdir -p "$proj"
   touch "$proj/.envrc"
   _seed_usai
-  run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj" -- echo hi
+  run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj" -- --version
   assert_success
   assert_output --partial 'project environment detected (direnv)'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'sbx run --name opencode-direnvproj2 -- sh -c'
+  assert_regex "$log" 'sbx run --name opencode-direnvproj2 -- env ACQ_WORKSPACE=.* sh -c'
   assert_regex "$log" 'direnv export sh'
+  assert_regex "$log" 'sh opencode --version'
   refute_regex "$log" 'direnv allow'
+}
+
+@test "project-env: run opt-in wraps normal sbx attach too" {
+  local proj="$STUBDIR/direnvproj3"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  _seed_usai
+  run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj"
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx run --name opencode-direnvproj3 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'sh opencode'
 }
 
 @test "project-env: create detects devenv files without activating anything" {
@@ -307,6 +322,18 @@ _seed_usai() {
   assert_output --partial 'project environment detected (devenv)'
   assert_output --partial 'will not run project activation'
   refute_regex "$(cat "$CALLS")" 'direnv export|direnv allow'
+}
+
+@test "project-env: inherited session marker cannot wrap sbx helper exec" {
+  run bash -c '
+    export ACQ_ACTIVATE_PROJECT_ENV=1 ACQ_SESSION_KIND=exec
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
+    acq_backend_run helperbox -- sh -c "echo probe" >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx exec helperbox -- sh -c echo probe'
+  refute_regex "$log" 'direnv export|ACQ_WORKSPACE'
 }
 
 @test "dispatch: an unknown subcommand passes through to the backend, announced, not doubled" {

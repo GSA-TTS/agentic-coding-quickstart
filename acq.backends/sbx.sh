@@ -495,7 +495,7 @@ acq_backend_provision() {
   # Record host-side bundle provenance ONLY after a successful create — a failed
   # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
-    acq_provenance_write sbx "$name" "$agent" || true
+    acq_provenance_write sbx "$name" "$agent" "$_primary_ws" || true
     _acq_sbx_seed_extra_kit_marker "$name"
     # Persist the CLI (`--kit`) / extra kit refs alongside provenance so a later
     # resume heal can reload them (see acq_cli_kits_write). Best-effort.
@@ -564,6 +564,17 @@ acq_backend_recorded_agent() {
   fi
 }
 
+acq_backend_workspace_for() {
+  acq_provenance_field sbx "$1" workspace
+}
+
+_acq_sbx_attach_command() {
+  local name="$1" agent
+  agent=$(acq_backend_recorded_agent "$name")
+  [ -n "$agent" ] || agent="bash"
+  printf '%s\n' "$agent"
+}
+
 # ---------------------------------------------------------------------------
 # acq_backend_run — run a command inside a sandbox
 # ---------------------------------------------------------------------------
@@ -608,16 +619,32 @@ acq_backend_shell() {
 acq_backend_attach() {
   local name="$1"
   shift
+  local agent ws
+  agent=$(_acq_sbx_attach_command "$name")
+  ws=$(acq_backend_workspace_for "$name")
   if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
     shift
     if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
         && command -v acq_guest_exec_script >/dev/null 2>&1; then
-      sbx run --name "$name" -- sh -c "$(acq_guest_exec_script)" sh "$@"
+      if [ -n "$ws" ]; then
+        sbx run --name "$name" -- env "ACQ_WORKSPACE=$ws" sh -c "$(acq_guest_exec_script)" sh "$agent" "$@"
+      else
+        sbx run --name "$name" -- sh -c "$(acq_guest_exec_script)" sh "$agent" "$@"
+      fi
     else
       sbx run --name "$name" -- "$@"
     fi
   else
-    sbx run --name "$name"
+    if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+        && command -v acq_guest_exec_script >/dev/null 2>&1; then
+      if [ -n "$ws" ]; then
+        sbx run --name "$name" -- env "ACQ_WORKSPACE=$ws" sh -c "$(acq_guest_exec_script)" sh "$agent"
+      else
+        sbx run --name "$name" -- sh -c "$(acq_guest_exec_script)" sh "$agent"
+      fi
+    else
+      sbx run --name "$name"
+    fi
   fi
 }
 

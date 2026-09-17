@@ -83,6 +83,10 @@ ACQ_UPDATE_CHECK="${ACQ_UPDATE_CHECK:-1}"
 # print guidance, but does not evaluate project-provided activation files unless
 # the user explicitly opts in for the current invocation/session.
 ACQ_ACTIVATE_PROJECT_ENV="${ACQ_ACTIVATE_PROJECT_ENV:-0}"
+# In-process marker set only by acq dispatch before user-facing exec/shell/attach.
+# Ignore inherited environment values so internal helper probes cannot be wrapped
+# by setting ACQ_SESSION_KIND outside acq.
+ACQ_SESSION_KIND=""
 
 # Kits supplied on the command line via `--kit <ref>` (repeatable) on
 # run/create. These are extracted from the arg list by extract_kit_flags (below)
@@ -753,9 +757,9 @@ advise_project_env_activation() {
     return 0
   fi
   echo "acq: project environment detected ($kind) in $ws." >&2
-  echo "     acq will not run project activation or 'direnv allow' automatically." >&2
+  echo "     acq will not run project activation, 'direnv allow', or 'devenv shell' automatically." >&2
   echo "     If you trust this repo and have approved its .envrc yourself, re-run" >&2
-  echo "     this acq command with ACQ_ACTIVATE_PROJECT_ENV=1." >&2
+  echo "     this acq command with ACQ_ACTIVATE_PROJECT_ENV=1 to use direnv export." >&2
 }
 
 acq_session_is_user() {
@@ -1389,9 +1393,9 @@ _acq_provenance_file() {
 # agent selected at create time; when omitted, an existing agent field is
 # preserved across in-place refreshes. Best-effort: a write failure warns (debug)
 # and returns non-zero but never aborts the caller (fail-open).
-# Usage: acq_provenance_write BACKEND SANDBOX_NAME [AGENT]
+# Usage: acq_provenance_write BACKEND SANDBOX_NAME [AGENT] [WORKSPACE]
 acq_provenance_write() {
-  local backend="${1:-}" name="${2:-}" agent="${3:-}"
+  local backend="${1:-}" name="${2:-}" agent="${3:-}" workspace="${4:-}"
   [ -n "$backend" ] && [ -n "$name" ] || return 1
   local file dir ts
   file=$(_acq_provenance_file "$backend" "$name") || return 1
@@ -1402,9 +1406,14 @@ acq_provenance_write() {
   fi
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
   [ -n "$agent" ] || agent=$(acq_provenance_field "$backend" "$name" agent)
+  [ -n "$workspace" ] || workspace=$(acq_provenance_field "$backend" "$name" workspace)
   case "$agent" in
     "") : ;;
     *[!a-z-]*) agent="" ;;
+  esac
+  case "$workspace" in
+    "") : ;;
+    *[!A-Za-z0-9._/-]*) workspace="" ;;
   esac
   # Write atomically via a temp file + mv so a crash mid-write can't leave a
   # half-written record that later parses as a bogus "current" ref.
@@ -1416,6 +1425,7 @@ acq_provenance_write() {
     printf 'applied_ref=%s\n' "$PATTERNS_KIT_REF"
     printf 'backend=%s\n' "$backend"
     [ -n "$agent" ] && printf 'agent=%s\n' "$agent"
+    [ -n "$workspace" ] && printf 'workspace=%s\n' "$workspace"
     printf 'applied_at=%s\n' "$ts"
   } > "$tmp" 2>/dev/null || { acq_debug "provenance: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
   mv -f "$tmp" "$file" 2>/dev/null || { acq_debug "provenance: mv failed: $file"; rm -f "$tmp" 2>/dev/null; return 1; }

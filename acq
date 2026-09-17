@@ -136,9 +136,9 @@ Global flags (before the subcommand):
                        image must satisfy the base-image contract in
                        docs/BACKEND_GUIDE.md.
   ACQ_ACTIVATE_PROJECT_ENV=1
-                       Opt in to human-approved project env activation for
-                       direnv/devenv workspaces. By default acq only detects and
-                       advises; it never runs `direnv allow` or activation.
+                       Opt in to using already-approved `direnv export` for
+                       workspaces with .envrc. Devenv-only files are detected and
+                       advised, but acq never runs `direnv allow` or `devenv shell`.
 
 run/create flags:
   --kit REF            Apply an extra kit (repeatable). REF is a local dir or a
@@ -328,9 +328,9 @@ Usage:
   acq exec NAME -- CMD...
 
 Runs CMD as the unprivileged agent user in the workspace. If the workspace uses
-direnv/devenv, acq prints activation guidance and only activates after the
-explicit ACQ_ACTIVATE_PROJECT_ENV=1 opt-in. On msb, when the host ssh-agent is
-forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
+direnv/devenv, acq prints activation guidance; with ACQ_ACTIVATE_PROJECT_ENV=1 it
+uses already-approved `direnv export` when .envrc is present. On msb, when the
+host ssh-agent is forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
 U
       ;;
     shell)
@@ -343,9 +343,9 @@ Usage:
 Opens an interactive shell in an existing sandbox as the unprivileged agent user
 (the human counterpart to 'acq run NAME', which relaunches the recorded agent;
 'acq exec' is non-interactive). If the workspace uses direnv/devenv, acq prints
-activation guidance and only activates after the explicit
-ACQ_ACTIVATE_PROJECT_ENV=1 opt-in. On msb, when the host ssh-agent is forwarded,
-SSH_AUTH_SOCK is injected so git/ssh reach the agent.
+activation guidance; with ACQ_ACTIVATE_PROJECT_ENV=1 it uses already-approved
+`direnv export` when .envrc is present. On msb, when the host ssh-agent is
+forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
 U
       ;;
     cp)
