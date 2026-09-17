@@ -40,15 +40,23 @@ fi
 
 # Minimum sbx version required.
 #
-# Bumped 0.35.0 -> 0.38.0: the neutral-kit translator now emits the sbx **v2 kit
+# Bumped 0.38.0 -> 0.39.0: acq exports the guest-visible workspace markers
+# (ACQ_WORKSPACE, and ACQ_CLONE under --clone; ADR-0027) through
+# `sbx create --env`, and `-e`/`--env` first exists in sbx 0.39.0. The markers
+# ride EVERY create with a workspace, not just --clone, and sbx rejects an
+# unknown flag outright — so on 0.38.x this fails the whole create, not just
+# the marker. Gating the flag instead would leave a floor-compliant user with
+# kits that silently do nothing, which is what the markers were added to fix.
+#
+# Bumped 0.35.0 -> 0.38.0: the neutral-kit translator emits the sbx **v2 kit
 # grammar**, which only sbx >= 0.38.0 accepts. On 0.37.x the v2 fields are not
 # understood and sbx fails with a RAW decode error (e.g. `field permissions not
 # found`) instead of a version message — an opaque, self-inflicted mismatch. A
-# real floor here makes that self-diagnosing: acq refuses up front with a clear
-# "requires sbx >= 0.38.0" rather than letting a create fail deep inside sbx's
-# kit decoder. (0.35.0 was originally required so `sbx kit add` recreated the
-# sandbox preserving state; the v2-grammar requirement supersedes that.)
-MIN_SBX_VERSION="0.38.0"
+# real floor here makes that self-diagnosing: acq refuses up front rather than
+# letting a create fail deep inside sbx's kit decoder. (0.35.0 was originally
+# required so `sbx kit add` recreated the sandbox preserving state; the
+# v2-grammar requirement supersedes that.)
+MIN_SBX_VERSION="0.39.0"
 
 # Max seconds to wait for `sbx exec` to become usable.
 ACQ_EXEC_READY_TIMEOUT="${ACQ_EXEC_READY_TIMEOUT:-60}"
@@ -113,7 +121,10 @@ acq_backend_prepare() {
 
   if [ "$(version_ge "$current" "$MIN_SBX_VERSION")" -ne 0 ]; then
     echo "error: acq requires sbx >= $MIN_SBX_VERSION, but found $current." >&2
-    echo "       sbx >= $MIN_SBX_VERSION is required because acq's neutral-kit" >&2
+    echo "       acq sets the guest workspace markers with 'sbx create --env'," >&2
+    echo "       and --env first exists in sbx 0.39.0; an older sbx rejects the" >&2
+    echo "       unknown flag and fails the whole create." >&2
+    echo "       sbx >= 0.38.0 is also required because acq's neutral-kit" >&2
     echo "       translator emits the sbx v2 kit grammar, which older sbx builds" >&2
     echo "       reject with an opaque decode error (e.g. 'field permissions not" >&2
     echo "       found') rather than a version message." >&2
@@ -366,20 +377,6 @@ _acq_sbx_kit_feature_absent() {
     sleep 2
   done
   return 2
-}
-
-# Run a snippet inside a sandbox with retry.
-_acq_sbx_exec_retry() {
-  local name="$1" snippet="$2" out rc tries=0
-  while [ "$tries" -lt 5 ]; do
-    tries=$((tries + 1))
-    out=$(sbx exec "$name" -- sh -c "$snippet" </dev/null 2>/dev/null)
-    rc=$?
-    [ "$rc" -eq 0 ] && { printf '%s' "$out"; return 0; }
-    sleep 2
-  done
-  printf '%s' "$out"
-  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
