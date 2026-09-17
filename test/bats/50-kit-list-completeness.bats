@@ -35,3 +35,60 @@ load 'helper'
     assert_equal "$bad" "0"
   done
 }
+
+@test "agent-kits: default kit list is support-only" {
+  load_acq
+  ACQ_EXTRA_KITS=""
+  ACQ_CLI_KITS=()
+  _build_kit_list
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/opencode'
+}
+
+@test "agent-kits: shell kit list is support-only" {
+  load_acq
+  ACQ_EXTRA_KITS=""
+  ACQ_CLI_KITS=()
+  _build_kit_list shell
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/opencode'
+}
+
+@test "agent-kits: opencode inference is visible while apply is deferred" {
+  load_acq
+  ACQ_EXTRA_KITS=""
+  ACQ_CLI_KITS=()
+  _build_kit_list opencode
+
+  run acq_selected_agent_kit_summary opencode
+  assert_success
+  assert_output 'agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=deferred'
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/opencode'
+}
+
+@test "agent-kits: explicit CLI kit suppresses implicit agent-kit inference" {
+  load_acq
+  ACQ_EXTRA_KITS=""
+  ACQ_CLI_KITS=(/tmp/team-opencode)
+
+  run acq_selected_agent_kit_summary opencode
+  assert_failure
+  _build_kit_list opencode
+  local joined; joined=$(printf '%s\n' "${KITS[@]}")
+  assert_regex "$joined" '/tmp/team-opencode'
+  refute_regex "$joined" 'acq-kits/opencode'
+}
+
+@test "agent-kits: ACQ_EXTRA_KITS never drive implicit selection" {
+  load_acq
+  ACQ_EXTRA_KITS="/tmp/opencode"
+  ACQ_CLI_KITS=()
+  _build_kit_list shell
+
+  run acq_selected_agent_kit_summary shell
+  assert_failure
+  assert_regex "$(printf '%s\n' "${KITS[@]}")" '/tmp/opencode'
+}
