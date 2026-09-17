@@ -3499,13 +3499,15 @@ _acq_msb_ensure_agent_user() {
 # /bin/sh otherwise — a stock bash-less image keeps working exactly as today.
 # Also writes a Debian-skel-style ~/.profile bridge: a LOGIN bash reads only
 # ~/.profile, so without the bridge even `bash -l` skips ~/.bashrc on images
-# whose baked home ships no ~/.profile. The bare `export SHELL=/bin/sh` line
-# earlier acq versions appended is removed wherever it appears (it stopped a
-# login bash cold); a ~/.profile with any other content is left alone (image/
-# user-owned — Debian's own skel already bridges). Idempotent and re-run on
-# every provision AND heal (even on an agent-user-ready marker hit), which is
-# what upgrades sandboxes created before this setup. Fail-soft: a sync failure
-# leaves sessions on the /bin/sh fallback, never blocks the run.
+# whose baked home ships no ~/.profile. The bridge also sources kit-owned
+# ~/.rc.d/*.sh snippets for bash/zsh in deterministic lexical order. The bare
+# `export SHELL=/bin/sh` line earlier acq versions appended is removed wherever
+# it appears (it stopped a login bash cold); a ~/.profile with any other content
+# is left alone (image/user-owned — Debian's own skel already bridges).
+# Idempotent and re-run on every provision AND heal (even on an agent-user-ready
+# marker hit), which is what upgrades sandboxes created before this setup.
+# Fail-soft: a sync failure leaves sessions on the /bin/sh fallback, never blocks
+# the run.
 _acq_msb_ensure_agent_shell() {
   local name="$1" shell
   # Probe for bash host-side so the target is decided once and threaded to the
@@ -3543,11 +3545,20 @@ _acq_msb_ensure_agent_shell() {
     if [ -f "$profile" ]; then
       sed -i "\|^export SHELL=/bin/sh\$|d" "$profile" 2>/dev/null || true
     fi
-    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le 3 ]; }; then
+    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le 13 ]; }; then
       {
-        echo "# acq-login-profile: written by acq (rewritten on heal; do not edit these 3 lines)."
+        echo "# acq-login-profile: written by acq (rewritten on heal; do not edit this block)."
         echo "export SHELL=$current"
         echo "if [ -n \"\$BASH_VERSION\" ] && [ -f \"\$HOME/.bashrc\" ]; then . \"\$HOME/.bashrc\"; fi"
+        echo "if { [ -n \"\$BASH_VERSION\" ] || [ -n \"\$ZSH_VERSION\" ]; } && [ -d \"\$HOME/.rc.d\" ]; then"
+        echo "  for _acq_rc in \"\$HOME\"/.rc.d/*.sh; do"
+        echo "    [ -r \"\$_acq_rc\" ] || continue"
+        echo "    case \"\$_acq_rc\" in *[!A-Za-z0-9._/-]*) continue ;; esac"
+        echo "    # shellcheck disable=SC1090"
+        echo "    . \"\$_acq_rc\""
+        echo "  done"
+        echo "  unset _acq_rc"
+        echo "fi"
       } > "$profile"
       _agrp=$(id -gn agent 2>/dev/null || echo agent)
       chown "agent:${_agrp}" "$profile"

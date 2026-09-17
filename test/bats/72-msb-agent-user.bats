@@ -368,6 +368,16 @@ _attach() { # PRE_SNIPPET NAME
   refute_regex "$log" 'export SHELL=\$target'
 }
 
+@test "rc.d(msb): login-profile bridge sources kit-owned shell snippets lexically" {
+  _provision rcdbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/rcd-secrets"'
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '\.rc.d/\*.sh'
+  assert_regex "$log" 'for _acq_rc in'
+  assert_regex "$log" 'SC1090'
+  assert_regex "$log" 'unset _acq_rc'
+  refute_regex "$log" 'direnv allow'
+}
+
 @test "msb #426: the heal only rewrites a .profile acq owns outright (appended lines survive)" {
   # Tools like rustup append to ~/.profile below acq's bridge. The rewrite
   # condition must be marker-present AND still just the bridge (line-count
@@ -376,7 +386,7 @@ _attach() { # PRE_SNIPPET NAME
   _provision profguard shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/profguard-secrets"'
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'acq-login-profile "\$profile"'
-  assert_regex "$log" '\-le 3'
+  assert_regex "$log" '\-le 13'
 }
 
 @test "msb: repeated acq exec reads the workspace marker once per process (cached)" {
