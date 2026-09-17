@@ -101,8 +101,11 @@ ACQ_BUILTIN_KIT_COUNT=0
 KIT_SOURCE_PREFIX="github.com/GSA-TTS/"
 KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
 
-# Neutral USAi provider facts. The provider kit owns these facts; agent kits own
-# rendering them into agent-specific config formats.
+# Transitional fallback defaults for the pinned usai-provider kit. ADR-0030's
+# target state is for the kit to export these provider facts as static metadata
+# consumable before sandbox creation. acq keeps these defaults only for backend
+# credential binding, key validation, and offline tests until that artifact exists.
+# These values are not authoritative once the artifact is available.
 USAI_PROVIDER_HOST="api.gsa.usai.gov"
 USAI_PROVIDER_BASE_URL="https://${USAI_PROVIDER_HOST}/api/v1"
 USAI_PROVIDER_KEY_ENV="USAI_API_KEY"
