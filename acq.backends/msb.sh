@@ -5400,7 +5400,9 @@ acq_backend_secret_rm() {
 # Prints one row per acq-managed secret: SCOPE, SERVICE, whether a VALUE is
 # present, and the binding ENV@HOST the msb adapter would use at provision.
 # NEVER prints a secret value. With no scope, lists everything acq holds; with a
-# scope (-g or SANDBOX) it filters to that scope. Read-only.
+# scope (-g or SANDBOX) it filters to that scope. It never writes secret values;
+# the sole write it can trigger is the one-time keychain-windows legacy->DPAPI
+# migration when it probes a legacy key (ADR-0028).
 #
 # Sources: the value store (acq_secret_list_keys → decode scope/service). The
 # ENV@HOST column comes from _acq_msb_service_binding, so it shows exactly what

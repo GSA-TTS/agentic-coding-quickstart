@@ -33,6 +33,35 @@ PSSTUB
   chmod +x "$STUBDIR/powershell.exe"
 }
 
+# A stub whose encrypt/decrypt always fails, so no ciphertext is ever produced
+# (exercises the migration's failure telemetry).
+_plant_powershell_fail_stub() {
+  cat >"$STUBDIR/powershell-fail.exe" <<'PSSTUB'
+#!/usr/bin/env bash
+exit 1
+PSSTUB
+  chmod +x "$STUBDIR/powershell-fail.exe"
+}
+
+# A stub that emulates a concurrent writer landing mid-encryption: on an encrypt
+# call it rewrites $STUB_RACE_TARGET with a fresh envelope before returning the
+# ciphertext of its stdin, so the migration's re-check sees a changed file.
+_plant_powershell_race_stub() {
+  cat >"$STUBDIR/powershell-race.exe" <<'PSSTUB'
+#!/usr/bin/env bash
+_cmd="$*"
+if printf '%s' "$_cmd" | grep -q 'Unprotect'; then
+  base64 -d 2>/dev/null || exit 1
+else
+  if [ -n "${STUB_RACE_TARGET:-}" ]; then
+    printf '%s\n%s' "acq-dpapi-v1" "RACE-written-new" > "$STUB_RACE_TARGET"
+  fi
+  printf '%s' "$(cat)" | base64 | tr -d '\n'
+fi
+PSSTUB
+  chmod +x "$STUBDIR/powershell-race.exe"
+}
+
 @test "store: resolve global/scoped/fallback, has present/absent, 0600 perms" {
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/unit-secrets"
@@ -276,4 +305,78 @@ PSSTUB
     acq_secret_resolve usai >/dev/null 2>&1 && printf "resolved=yes\n" || printf "resolved=no\n"
   '
   assert_output --partial 'resolved=no'
+}
+
+@test "keychain-windows: migration does not clobber a rewrite that lands mid-encryption" {
+  _plant_powershell_race_stub
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/win-race"
+    export ACQ_SECRET_POWERSHELL_BIN="'"$STUBDIR"'/powershell-race.exe"
+    export STUB_RACE_TARGET="'"$STUBDIR"'/win-race/acq.usai"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    _acq_secret_backend() { printf "keychain-windows\n"; }
+    mkdir -p "$ACQ_SECRET_FILE_DIR"
+    printf "OLD-legacy-token" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    printf "resolved=[%s]\n" "$(acq_secret_resolve usai)"
+    raw=$(cat "$ACQ_SECRET_FILE_DIR/acq.usai")
+    case "$raw" in *RACE-written-new*) printf "final=rewrite-won\n" ;; *) printf "final=clobbered\n" ;; esac
+    ls -a "$ACQ_SECRET_FILE_DIR" | grep -q "\.tmp\." && printf "tmp=present\n" || printf "tmp=absent\n"
+  '
+  assert_output --partial 'resolved=[OLD-legacy-token]'
+  assert_output --partial 'final=rewrite-won'
+  assert_output --partial 'tmp=absent'
+}
+
+@test "keychain-windows: a failed migration warns once per key and still returns the value" {
+  _plant_powershell_fail_stub
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/win-warn"
+    export ACQ_SECRET_POWERSHELL_BIN="'"$STUBDIR"'/powershell-fail.exe"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    _acq_secret_backend() { printf "keychain-windows\n"; }
+    mkdir -p "$ACQ_SECRET_FILE_DIR"
+    printf "legacyPLAINTEXT" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    printf "r1=[%s]\n" "$(acq_secret_resolve usai 2>/dev/null)"
+    printf "r2=[%s]\n" "$(acq_secret_resolve usai 2>/dev/null)"
+    raw=$(cat "$ACQ_SECRET_FILE_DIR/acq.usai")
+    [ "$raw" = "legacyPLAINTEXT" ] && printf "at-rest=plaintext\n" || printf "at-rest=changed\n"
+    [ -e "$ACQ_SECRET_FILE_DIR/.acq.usai.warned" ] && printf "marker=present\n" || printf "marker=absent\n"
+  '
+  assert_output --partial 'r1=[legacyPLAINTEXT]'
+  assert_output --partial 'r2=[legacyPLAINTEXT]'
+  assert_output --partial 'at-rest=plaintext'
+  assert_output --partial 'marker=present'
+  local n
+  n=$(printf '%s\n' "$output" | grep -c 'could not encrypt')
+  assert_equal "$n" "1"
+}
+
+@test "delete: removes the value's migration sidecars (warning marker and stale temp)" {
+  _plant_powershell_fail_stub
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/win-clean"
+    export ACQ_SECRET_POWERSHELL_BIN="'"$STUBDIR"'/powershell-fail.exe"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    _acq_secret_backend() { printf "keychain-windows\n"; }
+    mkdir -p "$ACQ_SECRET_FILE_DIR"
+    printf "legacyDEL" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    printf "x" > "$ACQ_SECRET_FILE_DIR/.acq.usai.tmp.999"
+    acq_secret_resolve usai >/dev/null 2>&1
+    acq_secret_delete "$(_acq_secret_key usai)"
+    printf "left=[%s]\n" "$(ls -A "$ACQ_SECRET_FILE_DIR" | tr "\n" " ")"
+  '
+  assert_output --partial 'left=[]'
+}
+
+@test "store: refuses a value equal to the reserved DPAPI envelope header" {
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/hdr"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    printf "%s" "$ACQ_SECRET_DPAPI_HEADER" | acq_secret_store "$(_acq_secret_key usai)" && printf "stored=yes\n" || printf "stored=no\n"
+  '
+  assert_output --partial 'stored=no'
+  refute_output --partial 'stored=yes'
 }

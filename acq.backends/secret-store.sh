@@ -66,6 +66,29 @@ if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Warning channel for the Windows legacy migration (ADR-0028).
+#
+# The read paths wrap acq_secret_get in `2>/dev/null` (acq_secret_resolve and the
+# adapters' provision reads), so a plain `>&2` warning raised by the migration
+# would be dropped exactly where the failure happens. Preserve the stderr the
+# process started with as fd 9 and warn through that; fall back to fd 2 if the
+# dup did not take. The dup is guarded so re-sourcing is a no-op, and stderr is
+# always open for the CLI, so it cannot fail in practice.
+# ---------------------------------------------------------------------------
+if [ -z "${ACQ_SECRET_WARN_FD_READY:-}" ]; then
+  exec 9>&2
+  ACQ_SECRET_WARN_FD_READY=1
+fi
+
+_acq_secret_warn() {
+  local msg="acq: warning: $*"
+  if [ "${ACQ_SECRET_WARN_FD_READY:-0}" = 1 ] && printf '%s\n' "$msg" >&9 2>/dev/null; then
+    return 0
+  fi
+  printf '%s\n' "$msg" >&2 || true
+}
+
+# ---------------------------------------------------------------------------
 # _acq_secret_backend — which store mechanism is active: keychain-macos |
 # keychain-linux | keychain-windows | file. Respects ACQ_SECRET_FORCE_FILE.
 # ---------------------------------------------------------------------------
@@ -192,9 +215,9 @@ _acq_secret_store_keychain_macos() {
 # plaintext value. Every value this backend writes is therefore wrapped in a
 # versioned envelope — first line ACQ_SECRET_DPAPI_HEADER, second line the base64
 # ciphertext. Stored plaintext is always a single line (acq_secret_store reads
-# exactly one line), so a first line equal to the header can never be a plaintext
-# value and the two shapes are unambiguous. That makes a backend switch safe in
-# both directions:
+# exactly one line) and acq_secret_store refuses a value equal to the header, so a
+# first line equal to the header can never be a stored plaintext value and the two
+# shapes are unambiguous. That makes a backend switch safe in both directions:
 #   - Windows reading an UNMARKED file = a legacy plaintext value the file
 #     backend left behind. It is returned as-is and re-encrypted in place, so an
 #     upgrade neither loses the secret nor leaves the plaintext at rest.
@@ -233,23 +256,86 @@ _acq_secret_store_windows() {
   ( umask 077; mkdir -p "$ACQ_SECRET_FILE_DIR" ) || return 1
   ( umask 077; printf '%s\n%s' "$ACQ_SECRET_DPAPI_HEADER" "$enc" > "$f" ) || {
     echo "acq: secret store: file write failed for '$key'." >&2; return 1; }
+  # The value is encrypted now, so an earlier migration-failure warning marker
+  # for this key is stale.
+  _acq_secret_migrate_warn_clear "$f"
+  return 0
+}
+
+# 0 if FILE is still the exact unmarked legacy plaintext EXPECTED — i.e. nothing
+# rewrote it since we read it. Guards the migration against clobbering a
+# concurrent `acq secret set`/rotation (the encrypt subprocess can take seconds).
+_acq_secret_file_is_unchanged_legacy() {
+  local f="$1" expected="$2" current
+  _acq_secret_file_is_dpapi_envelope "$f" && return 1
+  current=$(cat "$f" 2>/dev/null) || return 1
+  [ "$current" = "$expected" ]
+}
+
+# Path of the once-per-key migration-warning marker for the key whose value FILE
+# holds. Dot-prefixed so the `acq.*` file lister ignores it.
+_acq_secret_warn_marker_for() {
+  printf '%s/.%s.warned\n' "$(dirname "$1")" "$(basename "$1")"
+}
+
+# Warn at most once per key that a legacy value could not be migrated to DPAPI.
+# Best-effort: a marker-write failure only means the warning may repeat. Never
+# fails the read; the value is still returned by the caller.
+_acq_secret_migrate_warn() {
+  local key="$1" f="$2" why="$3" marker
+  marker=$(_acq_secret_warn_marker_for "$f")
+  acq_debug "secret migrate: $why for '$key'; legacy plaintext left in place"
+  if [ -e "$marker" ]; then
+    return 0
+  fi
+  ( umask 077; : > "$marker" ) 2>/dev/null || true
+  _acq_secret_warn "could not encrypt the '$key' secret at rest with Windows DPAPI ($why); it remains in plaintext on disk. Re-run 'acq secret set' once DPAPI is available."
+}
+
+_acq_secret_migrate_warn_clear() {
+  rm -f "$(_acq_secret_warn_marker_for "$1")" 2>/dev/null || true
   return 0
 }
 
 # Best-effort migration of a legacy plaintext value to a DPAPI envelope. Writes
-# atomically (hidden temp + rename) with umask 077, so a failure never damages
-# the still-readable legacy value and never fails the read that triggered it (a
-# later read retries). The temp name's leading dot keeps it out of the `acq.*`
-# glob the file lister uses.
+# atomically (hidden temp + rename) with umask 077, so a failure never damages the
+# still-readable legacy value and never fails the read that triggered it (a later
+# read retries). Every failure is traced (acq_debug) and warned once per key (see
+# _acq_secret_migrate_warn). The temp name's leading dot keeps it out of the
+# `acq.*` glob the file lister uses.
 _acq_secret_migrate_windows() {
   local key="$1" value="$2" f tmp enc
   f=$(_acq_secret_file_for "$key")
-  enc=$(printf '%s' "$value" | _acq_secret_windows_encrypt) || return 0
-  [ -n "$enc" ] || return 0
-  tmp="$(dirname "$f")/.${key}.tmp.$$"
-  ( umask 077; printf '%s\n%s' "$ACQ_SECRET_DPAPI_HEADER" "$enc" > "$tmp" ) || {
-    rm -f "$tmp" 2>/dev/null; return 0; }
-  mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  if ! enc=$(printf '%s' "$value" | _acq_secret_windows_encrypt); then
+    _acq_secret_migrate_warn "$key" "$f" "DPAPI encryption failed"
+    return 1
+  fi
+  if [ -z "$enc" ]; then
+    _acq_secret_migrate_warn "$key" "$f" "DPAPI produced no ciphertext"
+    return 1
+  fi
+  tmp="$(dirname "$f")/.$(basename "$f").tmp.$$"
+  if ! ( umask 077; printf '%s\n%s' "$ACQ_SECRET_DPAPI_HEADER" "$enc" > "$tmp" ); then
+    rm -f "$tmp" 2>/dev/null || true
+    _acq_secret_migrate_warn "$key" "$f" "temporary file write failed"
+    return 1
+  fi
+  # Only replace the file if it is STILL the exact unmarked legacy value we read:
+  # a concurrent `acq secret set`/rotation (or another reader that migrated it)
+  # can rewrite it during the encrypt subprocess above, and clobbering that with
+  # our stale capture would silently revert the write. Shell has no atomic
+  # compare-and-swap, so this re-check narrows the race to the rename below.
+  if ! _acq_secret_file_is_unchanged_legacy "$f" "$value"; then
+    rm -f "$tmp" 2>/dev/null || true
+    acq_debug "secret migrate: '$key' changed during migration; left as-is"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$f" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    _acq_secret_migrate_warn "$key" "$f" "rename failed"
+    return 1
+  fi
+  _acq_secret_migrate_warn_clear "$f"
   return 0
 }
 
@@ -266,7 +352,8 @@ _acq_secret_get_windows() {
     value=$(tail -n +2 "$f" | _acq_secret_windows_decrypt) || return 1
   else
     value=$(cat "$f") || return 1
-    _acq_secret_migrate_windows "$key" "$value"
+    # Best-effort: never fail the read; the helper reports any problem itself.
+    _acq_secret_migrate_windows "$key" "$value" || true
   fi
   [ -n "$value" ] || return 1
   printf '%s' "$value"
@@ -283,6 +370,13 @@ acq_secret_store() {
   IFS= read -r value || true
   if [ -z "$value" ]; then
     echo "acq: secret store: empty value for '$key'; nothing stored." >&2
+    return 1
+  fi
+  # The DPAPI envelope header is reserved (see the ENVELOPE note): a plaintext
+  # value equal to it would be unreadable in the shared file layout, so refuse it
+  # here rather than storing a value that can never be read back.
+  if [ "$value" = "$ACQ_SECRET_DPAPI_HEADER" ]; then
+    echo "acq: secret store: refusing a value equal to the reserved DPAPI envelope header; nothing stored." >&2
     return 1
   fi
 
@@ -780,8 +874,14 @@ acq_secret_delete() {
 # 0600 file removal. Idempotent (absent file is success); non-zero only if the
 # file exists but cannot be removed.
 _acq_secret_delete_file() {
-  local key="$1" f
+  local key="$1" f dir base
   f=$(_acq_secret_file_for "$key")
+  dir=$(dirname "$f"); base=$(basename "$f")
+  # Drop the value's migration sidecars too — the once-per-key warning marker and
+  # any hidden temp left by a crash between write and rename — so deleting a
+  # secret cannot leave a decryptable copy (the temp) or litter behind. Both are
+  # dot-prefixed, so the bare `*` here cannot match the value file itself.
+  rm -f "$dir/.$base.tmp."* "$dir/.$base.warned" 2>/dev/null || true
   [ -e "$f" ] || return 0
   rm -f "$f" 2>/dev/null || {
     echo "acq: secret delete: file remove failed for '$key'." >&2; return 1; }
