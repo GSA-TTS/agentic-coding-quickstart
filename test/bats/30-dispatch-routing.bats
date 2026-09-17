@@ -320,3 +320,45 @@ _seed_usai() {
   refute_regex "$create_line" '--kit evil-agent-arg'
   assert_regex "$log" '--kit evil-agent-arg'
 }
+
+@test "agent-kits: run opencode reports inferred built-in kit" {
+  local proj="$STUBDIR/agentkit-opencode"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
+
+  assert_success
+  assert_output --partial 'built-in agent kit candidate (deferred; no agent kit applied): agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=deferred'
+  refute_regex "$(cat "$CALLS")" 'acq-kits/opencode'
+}
+
+@test "agent-kits: create opencode reports inferred built-in kit" {
+  local proj="$STUBDIR/agentkit-create"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
+
+  assert_success
+  assert_output --partial 'built-in agent kit candidate (deferred; no agent kit applied): agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=deferred'
+  refute_regex "$(cat "$CALLS")" 'acq-kits/opencode'
+}
+
+@test "agent-kits: explicit --kit suppresses implicit selection notice" {
+  local proj="$STUBDIR/agentkit-explicit"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/team-opencode "$proj"
+
+  assert_success
+  refute_output --partial 'built-in agent kit candidate'
+  local create_line; create_line=$(grep '^sbx create' "$CALLS")
+  assert_regex "$create_line" '--kit /tmp/team-opencode'
+  refute_regex "$create_line" 'acq-kits/opencode'
+}
+
+@test "agent-kits: shell reports no inferred agent kit" {
+  local proj="$STUBDIR/agentkit-shell"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run shell "$proj"
+
+  assert_success
+  refute_output --partial 'built-in agent kit candidate'
+  refute_regex "$(cat "$CALLS")" 'acq-kits/opencode'
+}

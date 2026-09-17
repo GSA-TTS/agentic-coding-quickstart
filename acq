@@ -870,7 +870,13 @@ case "$subcommand" in
     fi
     set -- ${ACQ_CLONE_REMAINING[@]+"${ACQ_CLONE_REMAINING[@]}"}
     extract_kit_flags "$@"
-    [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _build_kit_list   # re-fold with CLI kits
+    _acq_kit_agent=""
+    _acq_kit_first=$(first_positional "${ACQ_KIT_REMAINING[@]}" || true)
+    if [ -n "$_acq_kit_first" ] && is_known_agent "$_acq_kit_first"; then
+      _acq_kit_agent="$_acq_kit_first"
+    fi
+    _build_kit_list "$_acq_kit_agent"
+    unset _acq_kit_agent _acq_kit_first
     # Rebuild positional args as: <subcommand> <remaining args w/o --kit>.
     set -- "$_sub" ${ACQ_KIT_REMAINING[@]+"${ACQ_KIT_REMAINING[@]}"}
     ;;
@@ -899,6 +905,7 @@ case "$subcommand" in
     preflight_workspace_path "$ws" || exit 1
     local_name=$(derive_name "$@") || exit 1
     [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
+    create_agent=$(first_positional "$@")
 
     # The USAi API key must be stored before provisioning: msb binds secrets only
     # at create time, so a sandbox created before the key exists carries no USAi
@@ -916,6 +923,7 @@ case "$subcommand" in
     # just proceeds without a scoped token (the token is optional).
     [ -n "$ws" ] || ws="$PWD"
     advise_github_scope "$local_name" "$ws"
+    acq_print_selected_agent_kit "$create_agent"
 
     acq_backend_provision "$local_name" "$@"
 
@@ -951,6 +959,7 @@ case "$subcommand" in
       # AGENT form: create if missing, then attach.
       local_name=$(derive_name "${create_args[@]}") || exit 1
       [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
+      acq_print_selected_agent_kit "$first"
 
       # Pre-flight: validate the workspace path before provisioning (#issue).
       # Only enforce on a fresh create — a re-attach to an existing sandbox

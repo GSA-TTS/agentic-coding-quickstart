@@ -45,8 +45,7 @@ ZSCALER_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR
 GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/git-ssh-sign"
 
 # Neutral kit directory names (relative to PATTERNS_KIT_DIR), in apply order.
-# kit-translate.sh resolves a kit's spec.yaml + files/ from these names. The
-# built-in kit set maps 1:1 to the four *_KIT refs above.
+# kit-translate.sh resolves a kit's spec.yaml + files/ from these names.
 #
 # ORDER MATTERS: zscaler-ca-certificate is applied FIRST so its CA trust is in
 # place before any later kit makes an outbound HTTPS request. Behind a
@@ -87,6 +86,7 @@ ACQ_UPDATE_CHECK="${ACQ_UPDATE_CHECK:-1}"
 # neutral schema). Folded into the kit list by _build_kit_list, alongside
 # ACQ_EXTRA_KITS. One ref per element.
 ACQ_CLI_KITS=()
+ACQ_BUILTIN_KIT_COUNT=0
 
 KIT_SOURCE_PREFIX="github.com/GSA-TTS/"
 KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
@@ -509,11 +509,72 @@ split_noglob() {
   eval "$_name=(\"\$@\")"
 }
 
-# Assemble the full kit list: built-ins, then extras.
+_acq_builtin_kit_ref() {
+  case "$1" in
+    zscaler-ca-certificate) printf '%s\n' "$ZSCALER_KIT" ;;
+    usai-provider) printf '%s\n' "$USAI_KIT" ;;
+    agentic-coding-playbook) printf '%s\n' "$PLAYBOOK_KIT" ;;
+    git-ssh-sign) printf '%s\n' "$GITSSHSIGN_KIT" ;;
+    *) return 1 ;;
+  esac
+}
+
+_acq_builtin_support_kit_names() {
+  printf '%s\n' zscaler-ca-certificate usai-provider agentic-coding-playbook git-ssh-sign
+}
+
+_acq_agent_builtin_kit_ref() {
+  local kit_name
+  kit_name=$(acq_agent_builtin_kit_name "$1") || return 1
+  printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$kit_name"
+}
+
+_acq_selected_builtin_kit_refs() {
+  local agent="${1:-}" name kit
+  for name in $(_acq_builtin_support_kit_names); do
+    kit=$(_acq_builtin_kit_ref "$name") || return 1
+    printf '%s\n' "$kit"
+  done
+  if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
+      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_enabled "$agent"; then
+    kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
+    printf '%s\n' "$kit"
+  fi
+}
+
+acq_selected_agent_kit_summary() {
+  local agent="${1:-}" kit_name entrypoint install_owner start_owner apply_state="deferred"
+  [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || return 1
+  kit_name=$(acq_agent_builtin_kit_name "$agent") || return 1
+  entrypoint=$(acq_agent_kit_entrypoint "$agent") || entrypoint=""
+  install_owner=$(acq_agent_kit_install_owner "$agent") || install_owner=""
+  start_owner=$(acq_agent_kit_start_owner "$agent") || start_owner=""
+  acq_agent_builtin_kit_enabled "$agent" && apply_state="enabled"
+  printf 'agent=%s kit=%s entrypoint=%s install_owner=%s start_owner=%s apply=%s\n' \
+    "$agent" "$kit_name" "${entrypoint:-none}" "${install_owner:-none}" \
+    "${start_owner:-none}" "$apply_state"
+}
+
+acq_print_selected_agent_kit() {
+  local agent="${1:-}" summary
+  summary=$(acq_selected_agent_kit_summary "$agent") || return 0
+  if [ "${summary##*apply=}" = "enabled" ]; then
+    printf 'acq: selected built-in agent kit: %s\n' "$summary" >&2
+  else
+    printf 'acq: built-in agent kit candidate (deferred; no agent kit applied): %s\n' "$summary" >&2
+  fi
+}
+
+# Assemble the full kit list: selected built-ins, then extras.
 # Zscaler CA trust FIRST (see ACQ_KIT_NAMES) so later network-fetching kits
 # succeed behind a TLS-intercepting proxy.
 _build_kit_list() {
-  KITS=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
+  local agent="${1:-}" kit
+  KITS=()
+  while IFS= read -r kit; do
+    [ -n "$kit" ] && KITS+=("$kit")
+  done < <(_acq_selected_builtin_kit_refs "$agent")
+  ACQ_BUILTIN_KIT_COUNT="${#KITS[@]}"
   if [ -n "$ACQ_EXTRA_KITS" ]; then
     local _extra_kits=()
     split_noglob _extra_kits "$ACQ_EXTRA_KITS"

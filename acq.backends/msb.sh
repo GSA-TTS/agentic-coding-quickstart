@@ -2592,20 +2592,12 @@ acq_backend_provision() {
   # by _acq_msb_vsock_flags_into when an ssh-agent forward is emitted. See ADR-0021.
   _ACQ_MSB_SSH_AGENT_FORWARDING=0
 
-  # Fetch each built-in kit and gather its create-time contributions.
+  # Fetch each selected kit and gather its create-time contributions.
   # Zscaler CA trust FIRST so later network-fetching kits (playbook clone, USAi
   # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
   local kitref kitdir
-  local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
-  # Include any extra kits (env-supplied) and CLI-supplied --kit refs.
-  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
-    local _extras=()
-    split_noglob _extras "$ACQ_EXTRA_KITS"
-    kits+=("${_extras[@]}")
-  fi
-  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
-    kits+=("${ACQ_CLI_KITS[@]}")
-  fi
+  _build_kit_list "$agent"
+  local kits=("${KITS[@]}")
 
   for kitref in "${kits[@]}"; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
@@ -4976,25 +4968,12 @@ acq_backend_ensure_kits_applied() {
   # passwd-shell setup existed. Best-effort like the rest of the heal.
   _acq_msb_ensure_agent_user "$name" || \
     echo "acq(msb): warning: agent-user heal failed for '$name'." >&2
-  local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
-  local builtin_count="${#kits[@]}"
-  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
-    local _extras=()
-    split_noglob _extras "$ACQ_EXTRA_KITS"
-    kits+=("${_extras[@]}")
-  fi
-  # CLI-supplied `--kit <ref>` refs (ACQ_CLI_KITS) MUST be healed too, exactly as
-  # the provision path folds them in (see acq_backend_provision's kit assembly).
-  # These kits' STARTUP-phase commands (e.g. openchamber's supervisor loops for
-  # the shared `opencode serve` and the web UI) are re-run only by this heal —
-  # `msb start` alone does not replay them (ADR-0017). Omitting them here meant a
-  # resumed/rebooted sandbox came back with the create-time `-p` port mappings
-  # intact but NOTHING listening behind them, because the kit's startup was never
-  # re-run: `acq ports` showed the ports mapped while the services were dead. Fold
-  # ACQ_CLI_KITS in so `acq run --kit … <existing-sandbox>` heals its full kit set.
-  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
-    kits+=("${ACQ_CLI_KITS[@]}")
-  fi
+  # Rebuild after any persisted refs were loaded by the dispatcher. CLI-supplied
+  # `--kit <ref>` refs must be healed too, exactly as the provision path folds
+  # them in, so resumed kit services come back with their startup re-run.
+  _build_kit_list ""
+  local kits=("${KITS[@]}")
+  local builtin_count="${ACQ_BUILTIN_KIT_COUNT:-4}"
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"
   _acq_msb_reset_kit_env "$name"

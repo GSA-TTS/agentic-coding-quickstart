@@ -106,9 +106,14 @@ SPEC
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
     ACQ_CLI_KITS=()
+    _build_kit_list
     _acq_msb_fetch_kit() { printf '%s\n' "$clikit"; }
     acq_cli_kits_load msb clidurable
-    acq_backend_ensure_kits_applied clidurable >/dev/null 2>&1 )
+    acq_backend_ensure_kits_applied clidurable >/dev/null 2>&1
+    printf 'first-kit=%s\n' "${KITS[0]}" >> "$CALLS" )
   run cat "$CALLS"
   assert_output --partial 'clidurable:/home/agent/clidurable-marker'
+  assert_output --partial 'first-kit=git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref='
+  assert_output --partial 'acq-kits/zscaler-ca-certificate'
+  refute_output --partial 'acq-kits/opencode'
 }
