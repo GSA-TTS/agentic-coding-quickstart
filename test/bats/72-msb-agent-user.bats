@@ -457,3 +457,60 @@ _attach() { # PRE_SNIPPET NAME
   assert_regex "$log" '\-e SHELL=/bin/sh badshbox -- /bin/sh -l'
   refute_regex "$log" 'rm -rf'
 }
+
+@test "msb: default user exec stays direct backend argv in the primary repo" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo ACQ_SESSION_KIND=exec
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local line; line=$(grep -- 'wsbox -- git status' "$CALLS")
+  assert_regex "$line" '\-w /tmp/myrepo'
+  assert_regex "$line" 'wsbox -- git status'
+  refute_regex "$line" 'ACQ_WORKSPACE=/tmp/myrepo'
+  refute_regex "$line" 'direnv export| sh -c | -lc '
+}
+
+@test "msb: opt-in user exec evaluates already-approved direnv export" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo ACQ_SESSION_KIND=exec ACQ_ACTIVATE_PROJECT_ENV=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '-e ACQ_WORKSPACE=/tmp/myrepo wsbox -- sh -c'
+  assert_regex "$log" 'direnv export sh'
+  refute_regex "$log" 'direnv allow| -lc '
+}
+
+@test "msb: opt-in non-interactive exec does not use login flags" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo STUB_AGENT_PASSWD_SHELL=/bin/sh
+    export ACQ_SESSION_KIND=exec ACQ_ACTIVATE_PROJECT_ENV=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'wsbox -- sh -c'
+  refute_regex "$log" '/bin/sh -lc|/bin/bash -lc'
+}
+
+@test "msb: internal exec helpers are not wrapped as user project sessions" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo ACQ_ACTIVATE_PROJECT_ENV=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'wsbox -- git status'
+  refute_regex "$log" 'ACQ_WORKSPACE=/tmp/myrepo'
+  refute_regex "$log" 'direnv export'
+}
