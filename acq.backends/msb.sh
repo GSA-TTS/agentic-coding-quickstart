@@ -2437,6 +2437,12 @@ _acq_msb_clone_setup() {
     echo "acq(msb): warning: could not register the 'sandbox-${name}' remote in $ws_canon;" >&2
     echo "acq(msb):   fetch agent work directly: git fetch $scratch" >&2
   fi
+  # acq itself never runs git inside the guest-writable scratch (see the rm-time
+  # rule in _acq_msb_clone_warn_unfetched), but the recovery command advertised
+  # below does: `git fetch sandbox-<name>` spawns upload-pack in the scratch and
+  # reads its config. That is a documented residual risk, not a demonstrated
+  # vulnerability — see docs/KNOWN_FAILURE_MODES.md ("Recovering agent work
+  # reads the guest-writable scratch").
   echo "acq(msb): agent runs on a disposable clone; the real checkout is untouched." >&2
   echo "acq(msb):   Recover agent branches with: git fetch sandbox-${name}" >&2
   _ACQ_MSB_CLONE_DIR=$(canonicalize_path "$scratch")
@@ -2457,9 +2463,13 @@ _acq_msb_clone_setup() {
 #     itself (fetch is a no-op, push cannot reach the real remote). Copy the
 #     RAW values (`config --get-all`, not `remote get-url`): that is what
 #     .git/config holds and what sbx carries, and a host insteadOf rewrite is
-#     host policy the guest never receives (an https->ssh rewrite would hand the
-#     guest a transport it has no key for). A credential embedded in the URL
-#     travels with it, exactly as it does in a direct mount of the checkout.
+#     host policy the guest never receives, in EITHER direction: an https->ssh
+#     rewrite would hand the guest a transport it has no key for, and under an
+#     ssh->https rewrite (common for token auth) the raw value IS the ssh form,
+#     so the guest gets that same unusable transport. Only user.* reaches the
+#     guest's global tier, so nothing corrects it there; raw is still the right
+#     default because it is what the checkout itself holds. A credential embedded
+#     in the URL travels with it, as it does in a direct mount of the checkout.
 # Every value of a key is carried, in order: a remote URL is legitimately
 # multi-valued (`remote set-url --add`, push-to-two-forges) and git fetches the
 # FIRST value while `config --get` returns the LAST, so a single-value copy
@@ -2991,6 +3001,8 @@ EOF
   # emulation above defeats by design: the scratch mounts exactly like a
   # passthrough). `msb create --env` reaches every exec/attach session and
   # survives a native restart (verified msb 0.6.17), so no kit-env plumbing.
+  # --env is used unconditionally: it predates the 0.6.9 floor (`-e, --env` in
+  # the CLI's shared sandbox options at that tag), so no version gate is needed.
   if [ -n "$_first_guest" ]; then
     create_flags+=(--env "ACQ_WORKSPACE=${_first_guest}")
     [ -n "$_clone_src" ] && create_flags+=(--env ACQ_CLONE=1)
