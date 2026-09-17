@@ -5460,16 +5460,31 @@ _acq_msb_secret_ls_rows() {
     [ -n "$svc" ] || continue
     case "$want_scope" in "") ;; *) [ "$scope" = "$want_scope" ] || continue ;; esac
     if [ "$scope" = "-g" ]; then
-      acq_secret_has "$svc" && val="yes" || val="no"
+      val=$(_acq_msb_secret_ls_value "$svc" "")
       binding=$(_acq_msb_secret_ls_binding "$svc" "")
     else
-      acq_secret_has "$svc" "$scope" && val="yes" || val="no"
+      val=$(_acq_msb_secret_ls_value "$svc" "$scope")
       binding=$(_acq_msb_secret_ls_binding "$svc" "$scope")
     fi
     printf '%s\t%s\t%s\t%s\n' "$scope" "$svc" "$val" "$binding"
   done <<EOF
 $(acq_secret_list_keys)
 EOF
+}
+
+# _acq_msb_secret_ls_value SERVICE SANDBOX -> yes | no | unreadable.
+# "unreadable" means a value is stored but this user/host cannot read it (e.g. a
+# DPAPI envelope written under another profile); reporting "no" there would show
+# a stored secret as absent. Reuses the store's own predicates.
+_acq_msb_secret_ls_value() {
+  local svc="$1" sandbox="${2:-}"
+  if acq_secret_has "$svc" "$sandbox"; then
+    printf 'yes\n'; return 0
+  fi
+  if acq_secret_unreadable "$svc" "$sandbox"; then
+    printf 'unreadable\n'; return 0
+  fi
+  printf 'no\n'
 }
 
 # _acq_msb_secret_ls_binding SERVICE SANDBOX -> "ENV@HOST" or "(unmapped)".

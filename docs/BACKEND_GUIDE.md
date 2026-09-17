@@ -716,9 +716,11 @@ re-saved or removed. Windows DPAPI values carry a small versioned envelope, and 
 legacy plaintext entry is migrated in place the first time it is read; if that
 migration cannot encrypt (for example DPAPI is unavailable), the value is still
 returned and a one-time warning is emitted, leaving the plaintext in place so it
-is not lost. A value the active backend cannot decrypt is treated as absent
-rather than exposed. Entries are keyed `acq.<service>` (global) or
-`acq.<sandbox>.<service>` (sandbox-scoped); a sandbox-scoped key takes precedence
+is not lost. A value the active backend cannot decrypt resolves as absent rather
+than being exposed, but is reported as `unreadable` (not `no`) by the pre-create
+key gate and, on the msb backend, by `acq secret ls`, so a stored-but-unreadable
+secret is not misdiagnosed as not set. Entries are keyed `acq.<service>` (global)
+or `acq.<sandbox>.<service>` (sandbox-scoped); a sandbox-scoped key takes precedence
 over the global one for the same service (supporting USAi per-sandbox
 billing-code keys).
 

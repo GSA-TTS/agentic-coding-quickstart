@@ -72,8 +72,10 @@ fi
 # adapters' provision reads), so a plain `>&2` warning raised by the migration
 # would be dropped exactly where the failure happens. Preserve the stderr the
 # process started with as fd 9 and warn through that; fall back to fd 2 if the
-# dup did not take. The dup is guarded so re-sourcing is a no-op, and stderr is
-# always open for the CLI, so it cannot fail in practice.
+# dup did not take. fd 9 is inherited by child processes (bash cannot set
+# close-on-exec on a user fd); it is a handle on the CLI's own stderr, so that is
+# harmless. The dup is guarded so re-sourcing is a no-op, and stderr is always
+# open for the CLI, so it cannot fail in practice.
 # ---------------------------------------------------------------------------
 if [ -z "${ACQ_SECRET_WARN_FD_READY:-}" ]; then
   exec 9>&2
@@ -215,9 +217,9 @@ _acq_secret_store_keychain_macos() {
 # plaintext value. Every value this backend writes is therefore wrapped in a
 # versioned envelope — first line ACQ_SECRET_DPAPI_HEADER, second line the base64
 # ciphertext. Stored plaintext is always a single line (acq_secret_store reads
-# exactly one line) and acq_secret_store refuses a value equal to the header, so a
-# first line equal to the header can never be a stored plaintext value and the two
-# shapes are unambiguous. That makes a backend switch safe in both directions:
+# exactly one line) and acq_secret_store refuses a value whose first line is the
+# header (CR-trimmed), so the two shapes are unambiguous. That makes a backend
+# switch safe in both directions:
 #   - Windows reading an UNMARKED file = a legacy plaintext value the file
 #     backend left behind. It is returned as-is and re-encrypted in place, so an
 #     upgrade neither loses the secret nor leaves the plaintext at rest.
@@ -236,25 +238,47 @@ _acq_secret_windows_decrypt() {
 
 # _acq_secret_file_is_dpapi_envelope FILE -> 0 if FILE's first line is the DPAPI
 # envelope header. Stored plaintext is a single line, so an unmarked file cannot
-# be mistaken for an envelope (see the ENVELOPE note above).
+# be mistaken for an envelope (see the ENVELOPE note above). A trailing CR is
+# trimmed so a CRLF-mangled file is still recognized as an envelope rather than
+# read as legacy plaintext (which would leak the ciphertext as the value and make
+# the migration re-encrypt it).
 _acq_secret_file_is_dpapi_envelope() {
   local header
   IFS= read -r header < "$1" 2>/dev/null || true
+  header=${header%$'\r'}
   [ "$header" = "$ACQ_SECRET_DPAPI_HEADER" ]
+}
+
+# _acq_secret_stage_atomic FILE CONTENT -> write CONTENT (exactly, no added
+# newline) to a hidden temp beside FILE with umask 077, and print the temp path on
+# stdout. The caller renames it over FILE (or removes it on failure), so a
+# concurrent reader never observes a partial value. Dot-prefixed so the `acq.*`
+# lister ignores it; the value moves over a redirection, never argv.
+_acq_secret_stage_atomic() {
+  local f="$1" content="$2" dir tmp
+  dir=$(dirname "$f")
+  ( umask 077; mkdir -p "$dir" ) || return 1
+  tmp="$dir/.$(basename "$f").tmp.$$"
+  ( umask 077; printf '%s' "$content" > "$tmp" ) || {
+    rm -f "$tmp" 2>/dev/null || true; return 1; }
+  printf '%s\n' "$tmp"
 }
 
 # Encrypt VALUE and write the header + base64 ciphertext to the key's file path.
 # The file is written with umask 077 like the plaintext fallback (defense in
 # depth), but the DPAPI envelope is what actually protects it on NTFS.
 _acq_secret_store_windows() {
-  local key="$1" value="$2" f enc
+  local key="$1" value="$2" f enc tmp
   f=$(_acq_secret_file_for "$key")
   enc=$(printf '%s' "$value" | _acq_secret_windows_encrypt) || {
     echo "acq: secret store: Windows DPAPI encryption failed for '$key'." >&2; return 1; }
   [ -n "$enc" ] || {
     echo "acq: secret store: Windows DPAPI produced no ciphertext for '$key'." >&2; return 1; }
-  ( umask 077; mkdir -p "$ACQ_SECRET_FILE_DIR" ) || return 1
-  ( umask 077; printf '%s\n%s' "$ACQ_SECRET_DPAPI_HEADER" "$enc" > "$f" ) || {
+  if ! tmp=$(_acq_secret_stage_atomic "$f" "$ACQ_SECRET_DPAPI_HEADER"$'\n'"$enc"); then
+    echo "acq: secret store: file write failed for '$key'." >&2; return 1
+  fi
+  mv -f "$tmp" "$f" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null || true
     echo "acq: secret store: file write failed for '$key'." >&2; return 1; }
   # The value is encrypted now, so an earlier migration-failure warning marker
   # for this key is stale.
@@ -314,9 +338,7 @@ _acq_secret_migrate_windows() {
     _acq_secret_migrate_warn "$key" "$f" "DPAPI produced no ciphertext"
     return 1
   fi
-  tmp="$(dirname "$f")/.$(basename "$f").tmp.$$"
-  if ! ( umask 077; printf '%s\n%s' "$ACQ_SECRET_DPAPI_HEADER" "$enc" > "$tmp" ); then
-    rm -f "$tmp" 2>/dev/null || true
+  if ! tmp=$(_acq_secret_stage_atomic "$f" "$ACQ_SECRET_DPAPI_HEADER"$'\n'"$enc"); then
     _acq_secret_migrate_warn "$key" "$f" "temporary file write failed"
     return 1
   fi
@@ -373,9 +395,10 @@ acq_secret_store() {
     return 1
   fi
   # The DPAPI envelope header is reserved (see the ENVELOPE note): a plaintext
-  # value equal to it would be unreadable in the shared file layout, so refuse it
+  # value whose first line is the header — alone or with a trailing CR, which the
+  # read side trims — would be unreadable in the shared file layout, so refuse it
   # here rather than storing a value that can never be read back.
-  if [ "$value" = "$ACQ_SECRET_DPAPI_HEADER" ]; then
+  if [ "${value%$'\r'}" = "$ACQ_SECRET_DPAPI_HEADER" ]; then
     echo "acq: secret store: refusing a value equal to the reserved DPAPI envelope header; nothing stored." >&2
     return 1
   fi
@@ -427,12 +450,17 @@ acq_secret_store() {
   esac
 }
 
-# 0600 file write (value already in $2). Uses umask so the value is never in argv.
+# 0600 file write (value already in $2). Stages to a hidden temp then renames, so
+# a concurrent reader never sees a partial value, and uses umask so the value is
+# never in argv.
 _acq_secret_store_file() {
-  local key="$1" value="$2" f
+  local key="$1" value="$2" f tmp
   f=$(_acq_secret_file_for "$key")
-  ( umask 077; mkdir -p "$ACQ_SECRET_FILE_DIR" ) || return 1
-  ( umask 077; printf '%s' "$value" > "$f" ) || {
+  if ! tmp=$(_acq_secret_stage_atomic "$f" "$value"); then
+    echo "acq: secret store: file write failed for '$key'." >&2; return 1
+  fi
+  mv -f "$tmp" "$f" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null || true
     echo "acq: secret store: file write failed for '$key'." >&2; return 1; }
   return 0
 }
@@ -917,6 +945,42 @@ acq_secret_resolve() {
 # ---------------------------------------------------------------------------
 acq_secret_has() {
   acq_secret_resolve "$1" "${2:-}" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# acq_secret_unreadable SERVICE [SANDBOX]  ->  0 if a value is stored for SERVICE
+# but the store cannot present it (a DPAPI envelope the active backend cannot
+# decrypt), else 1. Lets a caller tell a genuine "not set" apart from a
+# present-but-unreadable value so it does not report the former when the latter
+# is true. Mirrors acq_secret_resolve's sandbox->global precedence: a resolving
+# candidate means the service is readable, so another scope's unreadable file
+# does not count. (May run the one-time legacy migration via acq_secret_has; it
+# never exposes a value.)
+# ---------------------------------------------------------------------------
+# 0 if KEY's value file is a DPAPI envelope. That is the only "present but
+# unreadable" shape this store produces: a non-envelope file that fails to read
+# is a corruption case the ordinary "not set"/prompt path handles, and a
+# decryptable envelope resolves (so acq_secret_unreadable's acq_secret_has check
+# wins first).
+_acq_secret_value_present_unreadable() {
+  local key="$1" f
+  f=$(_acq_secret_file_for "$key")
+  [ -f "$f" ] || return 1
+  _acq_secret_file_is_dpapi_envelope "$f"
+}
+
+acq_secret_unreadable() {
+  local service="$1" sandbox="${2:-}" key
+  acq_secret_has "$service" "$sandbox" && return 1
+  # _acq_secret_key fails closed on an ambiguous (dotted) name; such a name has
+  # no valid entry, so it cannot be present-but-unreadable.
+  if [ -n "$sandbox" ] && key=$(_acq_secret_key "$service" "$sandbox"); then
+    _acq_secret_value_present_unreadable "$key" && return 0
+  fi
+  if key=$(_acq_secret_key "$service"); then
+    _acq_secret_value_present_unreadable "$key" && return 0
+  fi
+  return 1
 }
 
 # ---------------------------------------------------------------------------

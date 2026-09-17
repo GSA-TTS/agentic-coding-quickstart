@@ -25,7 +25,9 @@ _plant_powershell_stub() {
 { printf 'powershell'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >> "${CALLS:-/dev/null}" 2>/dev/null || true
 _cmd="$*"
 if printf '%s' "$_cmd" | grep -q 'Unprotect'; then
-  base64 -d 2>/dev/null || exit 1
+  # Mirror the real one-liner's .Trim(): drop CR so a CRLF-mangled envelope's
+  # ciphertext line still decodes.
+  tr -d '\r' | base64 -d 2>/dev/null || exit 1
 else
   printf '%s' "$(cat)" | base64 | tr -d '\n'
 fi
@@ -379,4 +381,48 @@ PSSTUB
   '
   assert_output --partial 'stored=no'
   refute_output --partial 'stored=yes'
+}
+
+@test "keychain-windows: a CRLF-mangled envelope header is still recognized and decrypted" {
+  _plant_powershell_stub
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/win-crlf"
+    export ACQ_SECRET_POWERSHELL_BIN="'"$STUBDIR"'/powershell.exe"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    _acq_secret_backend() { printf "keychain-windows\n"; }
+    mkdir -p "$ACQ_SECRET_FILE_DIR"
+    printf "%s\r\n%s\r\n" "$ACQ_SECRET_DPAPI_HEADER" "$(printf "crlfVALUE" | base64 | tr -d "\n")" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    _acq_secret_file_is_dpapi_envelope "$ACQ_SECRET_FILE_DIR/acq.usai" && printf "envelope=yes\n" || printf "envelope=no\n"
+    printf "resolved=[%s]\n" "$(acq_secret_resolve usai)"
+  '
+  assert_output --partial 'envelope=yes'
+  assert_output --partial 'resolved=[crlfVALUE]'
+}
+
+@test "keychain-windows: a stored-but-unreadable envelope is distinguishable from absent" {
+  _plant_powershell_stub
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/win-unreadable"
+    export ACQ_SECRET_POWERSHELL_BIN="'"$STUBDIR"'/powershell.exe"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    unset ACQ_SECRET_FORCE_FILE
+    _acq_secret_backend() { printf "keychain-windows\n"; }
+    mkdir -p "$ACQ_SECRET_FILE_DIR"
+    printf "%s\n%s" "$ACQ_SECRET_DPAPI_HEADER" "not-valid-base64!!!" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    acq_secret_has usai && printf "has=yes\n" || printf "has=no\n"
+    acq_secret_unreadable usai && printf "unreadable=yes\n" || printf "unreadable=no\n"
+    acq_secret_unreadable missing >/dev/null 2>&1 && printf "absent-unreadable=yes\n" || printf "absent-unreadable=no\n"
+    # A readable legacy plaintext is not "unreadable" (it migrates on read).
+    printf "plainLEGACY" > "$ACQ_SECRET_FILE_DIR/acq.github"
+    acq_secret_unreadable github >/dev/null 2>&1 && printf "plaintext-unreadable=yes\n" || printf "plaintext-unreadable=no\n"
+    # A resolving scoped value wins over an unreadable global (resolve precedence).
+    printf "scopedVALUE" > "$ACQ_SECRET_FILE_DIR/acq.mybox.usai"
+    acq_secret_unreadable usai mybox >/dev/null 2>&1 && printf "mixed-unreadable=yes\n" || printf "mixed-unreadable=no\n"
+  '
+  assert_output --partial 'has=no'
+  assert_output --partial 'unreadable=yes'
+  assert_output --partial 'absent-unreadable=no'
+  assert_output --partial 'plaintext-unreadable=no'
+  assert_output --partial 'mixed-unreadable=no'
 }
