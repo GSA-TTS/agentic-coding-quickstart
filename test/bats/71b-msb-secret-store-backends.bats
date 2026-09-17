@@ -236,6 +236,20 @@ _provision() { # NAME PRE_SNIPPET WS_ARGS...
   assert_output --partial 'listing=[]'
 }
 
+@test "file ls: a stored-but-unreadable envelope lists as VALUE=unreadable, not no" {
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/file-unreadable-ls"
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    mkdir -p "$ACQ_SECRET_FILE_DIR"
+    printf "%s\n%s" "$ACQ_SECRET_DPAPI_HEADER" "QUJD" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    acq_backend_secret_ls
+  '
+  assert_success
+  assert_output --partial 'unreadable'
+}
+
 @test "keychain-linux self-heal: a lost index relists sidecar-backed keys only, never values" {
   _plant_secret_tool_stub
   run bash -c '

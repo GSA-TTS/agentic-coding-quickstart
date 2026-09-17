@@ -165,6 +165,9 @@ the `keychain-windows` backend and its offline tests land in this stack.
   is not clobbered, a failed migration warns once per key while still returning the
   value, the reserved header value is refused at store time, and delete removes the
   value's migration sidecars.
+- Robustness and diagnosis: a CRLF-mangled envelope is still recognized, and a
+  present-but-unreadable value is reported as such (pre-create gate message and,
+  on the msb backend, `acq secret ls` `VALUE=unreadable`) rather than as not set.
 - Offline bats: a forceable/stubbable `keychain-windows` backend plus static
   contract tests, mirroring the `keychain-macos` stub approach.
 - The full suite passes with the new `keychain-windows` coverage; the
