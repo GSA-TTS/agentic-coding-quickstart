@@ -40,9 +40,13 @@ PATTERNS_KIT_REF="6c6753c60a2b24322fb2e8c0d8e8af60c56ede8f"  # agentic-coding-pa
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_PROVIDER_KIT_NAME="usai-provider"
+# shellcheck disable=SC2034  # consumed by _acq_builtin_kit_ref after sourcing
 USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/${USAI_PROVIDER_KIT_NAME}"
+# shellcheck disable=SC2034  # consumed by _acq_builtin_kit_ref after sourcing
 PLAYBOOK_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/agentic-coding-playbook"
+# shellcheck disable=SC2034  # consumed by _acq_builtin_kit_ref after sourcing
 ZSCALER_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/zscaler-ca-certificate"
+# shellcheck disable=SC2034  # consumed by _acq_builtin_kit_ref after sourcing
 GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/git-ssh-sign"
 
 # Neutral kit directory names (relative to PATTERNS_KIT_DIR), in apply order.
@@ -592,6 +596,7 @@ _build_kit_list() {
   while IFS= read -r kit; do
     [ -n "$kit" ] && KITS+=("$kit")
   done < <(_acq_selected_builtin_kit_refs "$agent")
+  # shellcheck disable=SC2034  # read by adapters/tests after _build_kit_list
   ACQ_BUILTIN_KIT_COUNT="${#KITS[@]}"
   if [ -n "$ACQ_EXTRA_KITS" ]; then
     local _extra_kits=()

@@ -109,7 +109,9 @@ load 'helper'
 
 @test "agent-kits: ACQ_EXTRA_KITS never drive implicit selection" {
   load_acq
+  # shellcheck disable=SC2034  # read by sourced _build_kit_list
   ACQ_EXTRA_KITS="/tmp/opencode"
+  # shellcheck disable=SC2034  # read by sourced _build_kit_list
   ACQ_CLI_KITS=()
   _build_kit_list shell
 
