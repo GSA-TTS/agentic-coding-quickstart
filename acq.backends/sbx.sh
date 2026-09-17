@@ -395,6 +395,8 @@ acq_backend_provision() {
   _acq_sbx_ensure_kit_sources_allowed
   local name="$1"
   shift
+  local agent
+  agent=$(first_positional "$@")
   # Host ssh-agent trust-boundary notice (ADR-0021). sbx forwards the host
   # ssh-agent into the guest IMPLICITLY whenever SSH_AUTH_SOCK is set, so — as on
   # msb — a user who always exports it (tmux/screen/profile persistence) could
@@ -493,7 +495,7 @@ acq_backend_provision() {
   # Record host-side bundle provenance ONLY after a successful create — a failed
   # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
-    acq_provenance_write sbx "$name" || true
+    acq_provenance_write sbx "$name" "$agent" || true
     _acq_sbx_seed_extra_kit_marker "$name"
     # Persist the CLI (`--kit`) / extra kit refs alongside provenance so a later
     # resume heal can reload them (see acq_cli_kits_write). Best-effort.
@@ -552,6 +554,14 @@ _acq_sbx_seed_extra_kit_marker() {
            "for '$name'; re-attach may re-attempt it." >&2
     fi
   done
+}
+
+acq_backend_recorded_agent() {
+  local agent
+  agent=$(acq_provenance_field sbx "$1" agent)
+  if [ -n "$agent" ] && acq_agent_safe_token "$agent"; then
+    printf '%s\n' "$agent"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -822,6 +832,25 @@ acq_backend_ensure_kits_applied() {
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (git-ssh-sign kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
+  fi
+
+  if [ "$force" = "1" ] && command -v acq_backend_recorded_agent >/dev/null 2>&1; then
+    local agent agent_kit_ref agent_local
+    agent=$(acq_backend_recorded_agent "$name")
+    _build_kit_list "$agent"
+    local _idx=0
+    for agent_kit_ref in "${KITS[@]}"; do
+      _idx=$((_idx + 1))
+      [ "$_idx" -le 4 ] && continue
+      [ "$_idx" -le "${ACQ_BUILTIN_KIT_COUNT:-4}" ] || break
+      agent_local=$(_acq_sbx_translate_kit "$agent_kit_ref")
+      _kadd_rc=0; _acq_sbx_kit_add "$name" "$agent_local" || _kadd_rc=$?
+      case $_kadd_rc in
+        0) echo "acq: agent kit refreshed in '$name'." >&2 ;;
+        3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
+        *) echo "acq: warning: 'sbx kit add' (agent kit) failed for '$name' (see error above)." >&2; ok=0 ;;
+      esac
+    done
   fi
 
   _acq_sbx_apply_git_identity_kit "$name"

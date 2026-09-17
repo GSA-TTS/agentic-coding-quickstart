@@ -37,6 +37,23 @@ _seed_stale_provenance() { # BACKEND NAME
   assert_equal "$status" "stale"
 }
 
+@test "provenance: records and preserves the sandbox agent" {
+  acq_provenance_write sbx agentbox opencode
+  assert_equal "$(acq_provenance_field sbx agentbox agent)" "opencode"
+  acq_provenance_write sbx agentbox
+  assert_equal "$(acq_provenance_field sbx agentbox agent)" "opencode"
+}
+
+@test "provenance: recorded agent can rebuild an enabled agent kit list" {
+  acq_provenance_write msb agenthealbox opencode
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_builtin_kit_ref() { printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$1"; }
+
+  _build_kit_list "$(acq_provenance_field msb agenthealbox agent)"
+  assert_regex "${KITS[4]}" 'acq-kits/opencode$'
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
+}
+
 @test "provenance: backend keying — sbx and msb records do not collide" {
   acq_provenance_write sbx dup
   assert_equal "$(acq_provenance_status msb dup)" "unknown"

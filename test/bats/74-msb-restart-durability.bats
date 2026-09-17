@@ -133,6 +133,7 @@ SPEC
   assert_regex "$(cat "$CALLS")" 'clikitbox:/home/agent/clikit-marker'
 }
 
+
 @test "0017: startup is staged via --script-path but never designated --entrypoint (removed knob inert)" {
   : > "$CALLS"
   run bash -c '

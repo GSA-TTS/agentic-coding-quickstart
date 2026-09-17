@@ -74,6 +74,7 @@ load 'helper'
   ACQ_EXTRA_KITS=""
   ACQ_CLI_KITS=()
   acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_builtin_kit_ref() { printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$1"; }
   _build_kit_list opencode
 
   assert_regex "${KITS[4]}" 'acq-kits/opencode$'

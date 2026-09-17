@@ -510,13 +510,14 @@ split_noglob() {
 }
 
 _acq_builtin_kit_ref() {
-  case "$1" in
-    zscaler-ca-certificate) printf '%s\n' "$ZSCALER_KIT" ;;
-    usai-provider) printf '%s\n' "$USAI_KIT" ;;
-    agentic-coding-playbook) printf '%s\n' "$PLAYBOOK_KIT" ;;
-    git-ssh-sign) printf '%s\n' "$GITSSHSIGN_KIT" ;;
-    *) return 1 ;;
-  esac
+  local name="${1:-}" known
+  for known in "${ACQ_KIT_NAMES[@]}"; do
+    if [ "$known" = "$name" ]; then
+      printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$name"
+      return 0
+    fi
+  done
+  return 1
 }
 
 _acq_builtin_support_kit_names() {
@@ -1330,11 +1331,13 @@ _acq_provenance_file() {
 
 # Write (or overwrite) a sandbox's provenance record. Call ONLY after a
 # successful bundle apply. Records the bundle identity + the exact applied ref +
-# an ISO-8601 UTC timestamp + the backend. Best-effort: a write failure warns
-# (debug) and returns non-zero but never aborts the caller (fail-open).
-# Usage: acq_provenance_write BACKEND SANDBOX_NAME
+# an ISO-8601 UTC timestamp + the backend. A third AGENT argument records the
+# agent selected at create time; when omitted, an existing agent field is
+# preserved across in-place refreshes. Best-effort: a write failure warns (debug)
+# and returns non-zero but never aborts the caller (fail-open).
+# Usage: acq_provenance_write BACKEND SANDBOX_NAME [AGENT]
 acq_provenance_write() {
-  local backend="${1:-}" name="${2:-}"
+  local backend="${1:-}" name="${2:-}" agent="${3:-}"
   [ -n "$backend" ] && [ -n "$name" ] || return 1
   local file dir ts
   file=$(_acq_provenance_file "$backend" "$name") || return 1
@@ -1344,6 +1347,11 @@ acq_provenance_write() {
     return 1
   fi
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+  [ -n "$agent" ] || agent=$(acq_provenance_field "$backend" "$name" agent)
+  case "$agent" in
+    "") : ;;
+    *[!a-z-]*) agent="" ;;
+  esac
   # Write atomically via a temp file + mv so a crash mid-write can't leave a
   # half-written record that later parses as a bogus "current" ref.
   local tmp="${file}.tmp.$$"
@@ -1353,6 +1361,7 @@ acq_provenance_write() {
     printf 'repo=%s\n' "$ACQ_BUILTIN_BUNDLE_REPO"
     printf 'applied_ref=%s\n' "$PATTERNS_KIT_REF"
     printf 'backend=%s\n' "$backend"
+    [ -n "$agent" ] && printf 'agent=%s\n' "$agent"
     printf 'applied_at=%s\n' "$ts"
   } > "$tmp" 2>/dev/null || { acq_debug "provenance: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
   mv -f "$tmp" "$file" 2>/dev/null || { acq_debug "provenance: mv failed: $file"; rm -f "$tmp" 2>/dev/null; return 1; }

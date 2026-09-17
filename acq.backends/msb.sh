@@ -74,6 +74,19 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
 
+_acq_msb_select_kits() {
+  local agent="${1:-}"
+  if declare -p KITS >/dev/null 2>&1 && [ "${#KITS[@]}" -gt 0 ]; then
+    return 0
+  fi
+  if command -v _build_kit_list >/dev/null 2>&1; then
+    _build_kit_list "$agent"
+  else
+    KITS=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
+    ACQ_BUILTIN_KIT_COUNT="${#KITS[@]}"
+  fi
+}
+
 # Minimum msb version required. Two reasons pin this to 0.6.9:
 #   1. 0.6.8 is the first release with the `--net-default-egress` /
 #      `--net-default-ingress` split that the balanced-egress baseline (on by
@@ -2596,7 +2609,7 @@ acq_backend_provision() {
   # Zscaler CA trust FIRST so later network-fetching kits (playbook clone, USAi
   # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
   local kitref kitdir
-  _build_kit_list "$agent"
+  _acq_msb_select_kits "$agent"
   local kits=("${KITS[@]}")
 
   for kitref in "${kits[@]}"; do
@@ -3189,7 +3202,7 @@ EOF
   # Record host-side bundle provenance now the built-in bundle is applied.
   # Best-effort: a provenance write failure never affects the
   # sandbox. Reached only when provision did not abort earlier under set -e.
-  acq_provenance_write msb "$name" || true
+  acq_provenance_write msb "$name" "$agent" || true
 
   # Persist the CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs so a later
   # `acq start`/`acq restart` can reload them and re-run their startup services
@@ -4209,6 +4222,17 @@ EOF
 _ACQ_MSB_RUN_WS_NAME=""
 _ACQ_MSB_RUN_WS=""
 
+acq_backend_recorded_agent() {
+  local name="$1" agent
+  agent=$(acq_provenance_field msb "$name" agent)
+  if [ -z "$agent" ]; then
+    agent=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '[:space:]')
+  fi
+  if [ -n "$agent" ] && _acq_msb_safe_agent_token "$agent"; then
+    printf '%s\n' "$agent"
+  fi
+}
+
 # _acq_msb_workspace_for NAME — the guest workspace a session starts in (-w).
 # Prefer an explicit ACQ_MSB_WORKSPACE override; otherwise the guest path
 # recorded at provision (it mirrors the host mount path, so it cannot be
@@ -4971,7 +4995,9 @@ acq_backend_ensure_kits_applied() {
   # Rebuild after any persisted refs were loaded by the dispatcher. CLI-supplied
   # `--kit <ref>` refs must be healed too, exactly as the provision path folds
   # them in, so resumed kit services come back with their startup re-run.
-  _build_kit_list ""
+  local agent
+  agent=$(acq_backend_recorded_agent "$name")
+  _acq_msb_select_kits "$agent"
   local kits=("${KITS[@]}")
   local builtin_count="${ACQ_BUILTIN_KIT_COUNT:-4}"
   local kitref kitdir i=0 ok=1
@@ -4996,7 +5022,8 @@ acq_backend_ensure_kits_applied() {
   # msb re-applies all built-in kits idempotently, so on full
   # success the sandbox carries the currently pinned bundle. Best-effort write.
   if [ "$ok" -eq 1 ]; then
-    acq_provenance_write msb "$name" || true
+  acq_provenance_write msb "$name" "$agent" || true
+
     return 0
   fi
   return 1
