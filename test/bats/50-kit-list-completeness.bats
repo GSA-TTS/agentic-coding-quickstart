@@ -104,6 +104,59 @@ FACTS
   assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
 }
 
+@test "provider-facts: kit loader consumes artifact from a fetched kit" {
+  load_acq
+  local kit="$STUBDIR/provider-kit" cache="$STUBDIR/provider-cache"
+  mkdir -p "$kit/provider-facts"
+  cat > "$kit/provider-facts/usai.env" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.kit.gov
+ACQ_PROVIDER_BASE_URL=https://api.kit.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.kit.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=KIT_API_KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://kit.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.kit.gov
+FACTS
+
+  acq_provider_facts_load_from_kit "$kit" "$cache"
+  assert_equal "$USAI_PROVIDER_HOST" "api.kit.gov"
+  assert_equal "$USAI_PROVIDER_KEY_ENV" "KIT_API_KEY"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "$kit/provider-facts/usai.env"
+}
+
+@test "provider-facts: kit loader keeps fallback when artifact is absent" {
+  load_acq
+  local kit="$STUBDIR/provider-kit-empty" cache="$STUBDIR/provider-cache-empty"
+  mkdir -p "$kit"
+
+  run acq_provider_facts_load_from_kit "$kit" "$cache"
+  assert_failure 2
+  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
+}
+
+@test "provider-facts: kit loader fails closed for invalid artifact" {
+  load_acq
+  local kit="$STUBDIR/provider-kit-bad" cache="$STUBDIR/provider-cache-bad"
+  mkdir -p "$kit/provider-facts"
+  cat > "$kit/provider-facts/usai.env" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.bad.gov
+ACQ_PROVIDER_BASE_URL=https://api.bad.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.bad.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=BAD-KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://bad.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.bad.gov
+FACTS
+
+  run acq_provider_facts_load_from_kit "$kit" "$cache"
+  assert_failure
+  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
+}
+
 @test "agent-kits: default kit list is support-only" {
   load_acq
   ACQ_EXTRA_KITS=""
