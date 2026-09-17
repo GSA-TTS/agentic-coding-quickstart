@@ -820,6 +820,13 @@ esac
 # Resolve and load the backend adapter (required for all other subcommands).
 # ---------------------------------------------------------------------------
 acq_resolve_backend "${explicit_backend}"
+_acq_provider_facts_rc=0
+acq_provider_facts_load_from_kit "$USAI_KIT" || _acq_provider_facts_rc=$?
+case "$_acq_provider_facts_rc" in
+  0|2) : ;;
+  *) echo "acq: invalid provider facts in pinned usai-provider kit; refusing to continue" >&2; exit 1 ;;
+esac
+unset _acq_provider_facts_rc
 
 # ---------------------------------------------------------------------------
 # Intercept user-supplied `--kit <ref>` on run/create (repeatable).

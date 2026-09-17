@@ -269,6 +269,26 @@ acq_provider_facts_load() {
   USAI_PROVIDER_FACTS_SOURCE="$file"
 }
 
+acq_provider_facts_load_from_kit() {
+  local kitref="${1:-$USAI_KIT}" base_dir="${2:-}" kitdir facts rc
+  if [ -z "$base_dir" ]; then
+    base_dir="${ACQ_PROVIDER_FACTS_CACHE_DIR:-${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}/provider-facts}"
+  fi
+  mkdir -p "$base_dir" || return 1
+  if ! command -v kit_translate_fetch >/dev/null 2>&1; then
+    return 2
+  fi
+  kitdir=$(kit_translate_fetch "$kitref" "$base_dir/usai-provider") || return 1
+  facts="$kitdir/provider-facts/usai.env"
+  acq_provider_facts_load "$facts"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2) return 2 ;;
+    *) echo "acq: invalid provider facts artifact: $facts" >&2; return 1 ;;
+  esac
+}
+
 # _acq_import_detect_var SERVICE -> prints the NAME of the FIRST of SERVICE's
 # candidate env vars that is set and non-empty; empty output (rc 1) if none is
 # set. Returns the variable NAME ONLY — never the value — so the secret value is
