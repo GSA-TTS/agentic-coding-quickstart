@@ -368,6 +368,16 @@ _attach() { # PRE_SNIPPET NAME
   refute_regex "$log" 'export SHELL=\$target'
 }
 
+@test "rc.d(msb): login-profile bridge sources kit-owned shell snippets lexically" {
+  _provision rcdbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/rcd-secrets"'
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '\.rc.d/\*.sh'
+  assert_regex "$log" 'for _acq_rc in'
+  assert_regex "$log" 'SC1090'
+  assert_regex "$log" 'unset _acq_rc'
+  refute_regex "$log" 'direnv allow'
+}
+
 @test "msb #426: the heal only rewrites a .profile acq owns outright (appended lines survive)" {
   # Tools like rustup append to ~/.profile below acq's bridge. The rewrite
   # condition must be marker-present AND still just the bridge (line-count
@@ -376,7 +386,7 @@ _attach() { # PRE_SNIPPET NAME
   _provision profguard shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/profguard-secrets"'
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'acq-login-profile "\$profile"'
-  assert_regex "$log" '\-le 3'
+  assert_regex "$log" '\-le 13'
 }
 
 @test "msb: repeated acq exec reads the workspace marker once per process (cached)" {
@@ -456,4 +466,78 @@ _attach() { # PRE_SNIPPET NAME
   local log; log=$(cat "$CALLS")
   assert_regex "$log" '\-e SHELL=/bin/sh badshbox -- /bin/sh -l'
   refute_regex "$log" 'rm -rf'
+}
+
+@test "msb: default user exec stays direct backend argv in the primary repo" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ACQ_SESSION_KIND=exec
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local line; line=$(grep -- 'wsbox -- git status' "$CALLS")
+  assert_regex "$line" '\-w /tmp/myrepo'
+  assert_regex "$line" 'wsbox -- git status'
+  refute_regex "$line" 'ACQ_WORKSPACE=/tmp/myrepo'
+  refute_regex "$line" 'direnv export| sh -c | -lc '
+}
+
+@test "msb: opt-in user exec evaluates already-approved direnv export" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo ACQ_ACTIVATE_PROJECT_ENV=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ACQ_SESSION_KIND=exec
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '-e ACQ_WORKSPACE=/tmp/myrepo wsbox -- sh -c'
+  assert_regex "$log" 'direnv export sh'
+  refute_regex "$log" 'direnv allow| -lc '
+}
+
+@test "msb: opt-in non-interactive exec does not use login flags" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo STUB_AGENT_PASSWD_SHELL=/bin/sh
+    export ACQ_ACTIVATE_PROJECT_ENV=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ACQ_SESSION_KIND=exec
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'wsbox -- sh -c'
+  refute_regex "$log" '/bin/sh -lc|/bin/bash -lc'
+}
+
+@test "msb: internal exec helpers are not wrapped as user project sessions" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo ACQ_ACTIVATE_PROJECT_ENV=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'wsbox -- git status'
+  refute_regex "$log" 'ACQ_WORKSPACE=/tmp/myrepo'
+  refute_regex "$log" 'direnv export'
+}
+
+@test "msb: inherited session marker cannot wrap internal helper exec" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo ACQ_ACTIVATE_PROJECT_ENV=1 ACQ_SESSION_KIND=exec
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'wsbox -- git status'
+  refute_regex "$log" 'ACQ_WORKSPACE=/tmp/myrepo'
+  refute_regex "$log" 'direnv export'
 }

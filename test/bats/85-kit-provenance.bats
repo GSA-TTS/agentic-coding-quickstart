@@ -37,6 +37,35 @@ _seed_stale_provenance() { # BACKEND NAME
   assert_equal "$status" "stale"
 }
 
+@test "provenance: records and preserves the sandbox agent" {
+  acq_provenance_write sbx agentbox opencode
+  assert_equal "$(acq_provenance_field sbx agentbox agent)" "opencode"
+  acq_provenance_write sbx agentbox
+  assert_equal "$(acq_provenance_field sbx agentbox agent)" "opencode"
+}
+
+@test "provenance: recorded agent can rebuild an enabled agent kit list" {
+  ACQ_TEST_AGENT_KIT="$STUBDIR/provenance-opencode-kit"
+  mkdir -p "$ACQ_TEST_AGENT_KIT"
+  cat >"$ACQ_TEST_AGENT_KIT/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: opencode
+displayName: OpenCode Agent Kit
+description: test fixture only
+agent:
+  name: opencode
+  entrypoint: opencode
+SPEC
+  acq_provenance_write msb agenthealbox opencode
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$ACQ_TEST_AGENT_KIT"; }
+
+  _build_kit_list "$(acq_provenance_field msb agenthealbox agent)"
+  assert_equal "${KITS[4]}" "$ACQ_TEST_AGENT_KIT"
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
+}
+
 @test "provenance: backend keying — sbx and msb records do not collide" {
   acq_provenance_write sbx dup
   assert_equal "$(acq_provenance_status msb dup)" "unknown"

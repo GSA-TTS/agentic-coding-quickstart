@@ -82,3 +82,26 @@ load 'helper'
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/agents.sh"; acq_is_known_agent prime-agent'
   assert_failure
 }
+
+@test "agents: opencode has built-in agent-kit metadata" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/agents.sh"
+    acq_agent_builtin_kit_name opencode
+    acq_agent_kit_entrypoint opencode
+    acq_agent_kit_install_owner opencode
+    acq_agent_kit_start_owner opencode
+    acq_agent_builtin_kit_enabled opencode || printf "apply-deferred\n"
+  '
+  assert_success
+  assert_output $'opencode\nopencode\nkit\nkit\napply-deferred'
+}
+
+@test "agents: shell selects no built-in agent kit" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/agents.sh"
+    acq_agent_builtin_kit_name shell || true
+    acq_agent_kit_entrypoint shell || true
+  '
+  assert_success
+  assert_output ""
+}

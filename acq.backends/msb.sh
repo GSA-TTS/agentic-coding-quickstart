@@ -74,6 +74,19 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
 
+_acq_msb_select_kits() {
+  local agent="${1:-}"
+  if declare -p KITS >/dev/null 2>&1 && [ "${#KITS[@]}" -gt 0 ]; then
+    return 0
+  fi
+  if command -v _build_kit_list >/dev/null 2>&1; then
+    _build_kit_list "$agent"
+  else
+    KITS=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
+    ACQ_BUILTIN_KIT_COUNT="${#KITS[@]}"
+  fi
+}
+
 # Minimum msb version required. Two reasons pin this to 0.6.9:
 #   1. 0.6.8 is the first release with the `--net-default-egress` /
 #      `--net-default-ingress` split that the balanced-egress baseline (on by
@@ -200,8 +213,11 @@ ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/kits
 # ACQ_EXEC_READY_TIMEOUT.
 ACQ_MSB_EXEC_READY_TIMEOUT="${ACQ_MSB_EXEC_READY_TIMEOUT:-${ACQ_EXEC_READY_TIMEOUT:-60}}"
 
-# USAi models path (matches common.sh USAI_MODELS_URL host) for --secret host.
-ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
+# USAi provider facts for --secret binding; common.sh owns the canonical values.
+USAI_PROVIDER_HOST="${USAI_PROVIDER_HOST:-api.gsa.usai.gov}"
+USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_BIND_HOSTS:-$USAI_PROVIDER_HOST}"
+USAI_PROVIDER_KEY_ENV="${USAI_PROVIDER_KEY_ENV:-USAI_API_KEY}"
+ACQ_MSB_USAI_HOST="$USAI_PROVIDER_BIND_HOSTS"
 
 # GitHub credential hosts for the msb --secret binding. Bind the REST API and
 # git-transport hosts so both API calls and HTTPS git clone/push can substitute
@@ -244,7 +260,7 @@ _acq_msb_service_binding() {
     fi
   fi
   case "$_service" in
-    usai)   printf '%s\t%s\n' "USAI_API_KEY" "$ACQ_MSB_USAI_HOST"; return 0 ;;
+    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_KEY_ENV" "$ACQ_MSB_USAI_HOST"; return 0 ;;
     github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
   esac
   printf '\t\n'
@@ -927,7 +943,7 @@ $(acq_secret_meta_list "$_name")
 EOF
     fi
   elif [ -n "${USAI_API_KEY:-}" ]; then
-    eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
+    eval "$_arrn+=(--secret \"${USAI_PROVIDER_KEY_ENV}@\${ACQ_MSB_USAI_HOST}\")"
   fi
 }
 
@@ -2592,20 +2608,12 @@ acq_backend_provision() {
   # by _acq_msb_vsock_flags_into when an ssh-agent forward is emitted. See ADR-0021.
   _ACQ_MSB_SSH_AGENT_FORWARDING=0
 
-  # Fetch each built-in kit and gather its create-time contributions.
+  # Fetch each selected kit and gather its create-time contributions.
   # Zscaler CA trust FIRST so later network-fetching kits (playbook clone, USAi
   # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
   local kitref kitdir
-  local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
-  # Include any extra kits (env-supplied) and CLI-supplied --kit refs.
-  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
-    local _extras=()
-    split_noglob _extras "$ACQ_EXTRA_KITS"
-    kits+=("${_extras[@]}")
-  fi
-  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
-    kits+=("${ACQ_CLI_KITS[@]}")
-  fi
+  _acq_msb_select_kits "$agent"
+  local kits=("${KITS[@]}")
 
   for kitref in "${kits[@]}"; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
@@ -3197,7 +3205,7 @@ EOF
   # Record host-side bundle provenance now the built-in bundle is applied.
   # Best-effort: a provenance write failure never affects the
   # sandbox. Reached only when provision did not abort earlier under set -e.
-  acq_provenance_write msb "$name" || true
+  acq_provenance_write msb "$name" "$agent" || true
 
   # Persist the CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs so a later
   # `acq start`/`acq restart` can reload them and re-run their startup services
@@ -3491,13 +3499,15 @@ _acq_msb_ensure_agent_user() {
 # /bin/sh otherwise — a stock bash-less image keeps working exactly as today.
 # Also writes a Debian-skel-style ~/.profile bridge: a LOGIN bash reads only
 # ~/.profile, so without the bridge even `bash -l` skips ~/.bashrc on images
-# whose baked home ships no ~/.profile. The bare `export SHELL=/bin/sh` line
-# earlier acq versions appended is removed wherever it appears (it stopped a
-# login bash cold); a ~/.profile with any other content is left alone (image/
-# user-owned — Debian's own skel already bridges). Idempotent and re-run on
-# every provision AND heal (even on an agent-user-ready marker hit), which is
-# what upgrades sandboxes created before this setup. Fail-soft: a sync failure
-# leaves sessions on the /bin/sh fallback, never blocks the run.
+# whose baked home ships no ~/.profile. The bridge also sources kit-owned
+# ~/.rc.d/*.sh snippets for bash/zsh in deterministic lexical order. The bare
+# `export SHELL=/bin/sh` line earlier acq versions appended is removed wherever
+# it appears (it stopped a login bash cold); a ~/.profile with any other content
+# is left alone (image/user-owned — Debian's own skel already bridges).
+# Idempotent and re-run on every provision AND heal (even on an agent-user-ready
+# marker hit), which is what upgrades sandboxes created before this setup.
+# Fail-soft: a sync failure leaves sessions on the /bin/sh fallback, never blocks
+# the run.
 _acq_msb_ensure_agent_shell() {
   local name="$1" shell
   # Probe for bash host-side so the target is decided once and threaded to the
@@ -3535,11 +3545,20 @@ _acq_msb_ensure_agent_shell() {
     if [ -f "$profile" ]; then
       sed -i "\|^export SHELL=/bin/sh\$|d" "$profile" 2>/dev/null || true
     fi
-    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le 3 ]; }; then
+    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le 13 ]; }; then
       {
-        echo "# acq-login-profile: written by acq (rewritten on heal; do not edit these 3 lines)."
+        echo "# acq-login-profile: written by acq (rewritten on heal; do not edit this block)."
         echo "export SHELL=$current"
         echo "if [ -n \"\$BASH_VERSION\" ] && [ -f \"\$HOME/.bashrc\" ]; then . \"\$HOME/.bashrc\"; fi"
+        echo "if { [ -n \"\$BASH_VERSION\" ] || [ -n \"\$ZSH_VERSION\" ]; } && [ -d \"\$HOME/.rc.d\" ]; then"
+        echo "  for _acq_rc in \"\$HOME\"/.rc.d/*.sh; do"
+        echo "    [ -r \"\$_acq_rc\" ] || continue"
+        echo "    case \"\$_acq_rc\" in *[!A-Za-z0-9._/-]*) continue ;; esac"
+        echo "    # shellcheck disable=SC1090"
+        echo "    . \"\$_acq_rc\""
+        echo "  done"
+        echo "  unset _acq_rc"
+        echo "fi"
       } > "$profile"
       _agrp=$(id -gn agent 2>/dev/null || echo agent)
       chown "agent:${_agrp}" "$profile"
@@ -4217,6 +4236,17 @@ EOF
 _ACQ_MSB_RUN_WS_NAME=""
 _ACQ_MSB_RUN_WS=""
 
+acq_backend_recorded_agent() {
+  local name="$1" agent
+  agent=$(acq_provenance_field msb "$name" agent)
+  if [ -z "$agent" ]; then
+    agent=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '[:space:]')
+  fi
+  if [ -n "$agent" ] && _acq_msb_safe_agent_token "$agent"; then
+    printf '%s\n' "$agent"
+  fi
+}
+
 # _acq_msb_workspace_for NAME — the guest workspace a session starts in (-w).
 # Prefer an explicit ACQ_MSB_WORKSPACE override; otherwise the guest path
 # recorded at provision (it mirrors the host mount path, so it cannot be
@@ -4231,6 +4261,10 @@ _acq_msb_workspace_for() {
   fi
   [ -n "$ws" ] || ws="/home/agent"
   printf '%s\n' "$ws"
+}
+
+acq_backend_workspace_for() {
+  _acq_msb_workspace_for "$1"
 }
 
 # _acq_msb_term_flags_into ARRVAR — `-e` flags forwarding the host's terminal
@@ -4321,8 +4355,17 @@ acq_backend_run() {
     _ACQ_MSB_RUN_WS_NAME="$name"
     _ACQ_MSB_RUN_WS="$ws"
   fi
-  msb exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
-    ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_session_is_user >/dev/null 2>&1 && acq_session_is_user \
+      && command -v acq_guest_exec_script >/dev/null 2>&1 && [ "${1:-}" = "--" ]; then
+    shift
+    msb exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
+      ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} \
+      -e "ACQ_WORKSPACE=$ws" "$name" -- sh -c "$(acq_guest_exec_script)" sh "$@"
+  else
+    msb exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
+      ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -4420,9 +4463,17 @@ _acq_msb_attach() {
 
   local shell
   shell=$(_acq_msb_agent_passwd_shell "$name")
-  exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
-    ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
-    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_guest_exec_script >/dev/null 2>&1; then
+    exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} -e "ACQ_WORKSPACE=$ws" "$name" -- sh -c \
+      "$(acq_guest_exec_script)" sh "$agent" "$@"
+  else
+    exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
+  fi
 }
 
 # _acq_msb_shell_exec NAME [WS] — exec into an interactive login shell as the
@@ -4444,9 +4495,17 @@ _acq_msb_shell_exec() {
   _acq_msb_git_identity_env_flags_into _gitident
   _acq_msb_kit_env_flags_into _kitenv "$name"
   _acq_msb_term_flags_into _term
-  exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
-    ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
-    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$shell" -l
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_guest_shell_script >/dev/null 2>&1; then
+    exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} -e "ACQ_WORKSPACE=$ws" "$name" -- sh -c \
+      "$(acq_guest_shell_script)" sh "$shell"
+  else
+    exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$shell" -l
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -4976,25 +5035,14 @@ acq_backend_ensure_kits_applied() {
   # passwd-shell setup existed. Best-effort like the rest of the heal.
   _acq_msb_ensure_agent_user "$name" || \
     echo "acq(msb): warning: agent-user heal failed for '$name'." >&2
-  local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
-  local builtin_count="${#kits[@]}"
-  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
-    local _extras=()
-    split_noglob _extras "$ACQ_EXTRA_KITS"
-    kits+=("${_extras[@]}")
-  fi
-  # CLI-supplied `--kit <ref>` refs (ACQ_CLI_KITS) MUST be healed too, exactly as
-  # the provision path folds them in (see acq_backend_provision's kit assembly).
-  # These kits' STARTUP-phase commands (e.g. openchamber's supervisor loops for
-  # the shared `opencode serve` and the web UI) are re-run only by this heal —
-  # `msb start` alone does not replay them (ADR-0017). Omitting them here meant a
-  # resumed/rebooted sandbox came back with the create-time `-p` port mappings
-  # intact but NOTHING listening behind them, because the kit's startup was never
-  # re-run: `acq ports` showed the ports mapped while the services were dead. Fold
-  # ACQ_CLI_KITS in so `acq run --kit … <existing-sandbox>` heals its full kit set.
-  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
-    kits+=("${ACQ_CLI_KITS[@]}")
-  fi
+  # Rebuild after any persisted refs were loaded by the dispatcher. CLI-supplied
+  # `--kit <ref>` refs must be healed too, exactly as the provision path folds
+  # them in, so resumed kit services come back with their startup re-run.
+  local agent
+  agent=$(acq_backend_recorded_agent "$name")
+  _acq_msb_select_kits "$agent"
+  local kits=("${KITS[@]}")
+  local builtin_count="${ACQ_BUILTIN_KIT_COUNT:-4}"
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"
   _acq_msb_reset_kit_env "$name"
@@ -5017,7 +5065,8 @@ acq_backend_ensure_kits_applied() {
   # msb re-applies all built-in kits idempotently, so on full
   # success the sandbox carries the currently pinned bundle. Best-effort write.
   if [ "$ok" -eq 1 ]; then
-    acq_provenance_write msb "$name" || true
+  acq_provenance_write msb "$name" "$agent" || true
+
     return 0
   fi
   return 1
@@ -5470,6 +5519,11 @@ acq_backend_doctor() {
   ver=$(_acq_msb_version)
   [ -n "$ver" ] || ver="?"
   printf '[msb: installed %s]\n' "$ver"
+}
+
+acq_backend_doctor_sandbox() {
+  local name="$1"
+  msb exec -u agent -e HOME=/home/agent "$name" -- sh -c "$(acq_image_contract_doctor_script)"
 }
 
 # ---------------------------------------------------------------------------

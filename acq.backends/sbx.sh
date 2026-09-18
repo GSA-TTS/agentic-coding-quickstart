@@ -38,6 +38,11 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
 
+USAI_PROVIDER_HOST="${USAI_PROVIDER_HOST:-api.gsa.usai.gov}"
+USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_BIND_HOSTS:-$USAI_PROVIDER_HOST}"
+USAI_PROVIDER_KEY_ENV="${USAI_PROVIDER_KEY_ENV:-USAI_API_KEY}"
+USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_MODELS_URL:-https://${USAI_PROVIDER_HOST}/api/v1/models}"
+
 # Minimum sbx version required.
 #
 # Bumped 0.35.0 -> 0.38.0: the neutral-kit translator now emits the sbx **v2 kit
@@ -395,6 +400,8 @@ acq_backend_provision() {
   _acq_sbx_ensure_kit_sources_allowed
   local name="$1"
   shift
+  local agent
+  agent=$(first_positional "$@")
   # Host ssh-agent trust-boundary notice (ADR-0021). sbx forwards the host
   # ssh-agent into the guest IMPLICITLY whenever SSH_AUTH_SOCK is set, so — as on
   # msb — a user who always exports it (tmux/screen/profile persistence) could
@@ -493,7 +500,7 @@ acq_backend_provision() {
   # Record host-side bundle provenance ONLY after a successful create — a failed
   # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
-    acq_provenance_write sbx "$name" || true
+    acq_provenance_write sbx "$name" "$agent" "$_primary_ws" || true
     _acq_sbx_seed_extra_kit_marker "$name"
     # Persist the CLI (`--kit`) / extra kit refs alongside provenance so a later
     # resume heal can reload them (see acq_cli_kits_write). Best-effort.
@@ -554,6 +561,25 @@ _acq_sbx_seed_extra_kit_marker() {
   done
 }
 
+acq_backend_recorded_agent() {
+  local agent
+  agent=$(acq_provenance_field sbx "$1" agent)
+  if [ -n "$agent" ] && acq_agent_safe_token "$agent"; then
+    printf '%s\n' "$agent"
+  fi
+}
+
+acq_backend_workspace_for() {
+  acq_provenance_field sbx "$1" workspace
+}
+
+_acq_sbx_attach_command() {
+  local name="$1" agent
+  agent=$(acq_backend_recorded_agent "$name")
+  [ -n "$agent" ] || agent="bash"
+  printf '%s\n' "$agent"
+}
+
 # ---------------------------------------------------------------------------
 # acq_backend_run — run a command inside a sandbox
 # ---------------------------------------------------------------------------
@@ -565,7 +591,14 @@ acq_backend_run() {
   # Expect `-- CMD...` separator. No `-u agent` needed: sbx's agent templates
   # bake the unprivileged `agent` user (UID 1000, HOME=/home/agent) as the
   # default exec user, unlike a plain msb OCI base (which defaults to root).
-  sbx exec "$name" "$@"
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_session_is_user >/dev/null 2>&1 && acq_session_is_user \
+      && command -v acq_guest_exec_script >/dev/null 2>&1 && [ "${1:-}" = "--" ]; then
+    shift
+    sbx exec "$name" -- sh -c "$(acq_guest_exec_script)" sh "$@"
+  else
+    sbx exec "$name" "$@"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -576,7 +609,12 @@ acq_backend_run() {
 # allocates the PTY itself via `exec -it`; exec hands it the terminal directly.
 acq_backend_shell() {
   _acq_sbx_apply_git_identity_kit "$1"
-  exec sbx exec -it "$1" bash
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_guest_shell_script >/dev/null 2>&1; then
+    exec sbx exec -it "$1" -- bash -lc "$(acq_guest_shell_script)" sh bash
+  else
+    exec sbx exec -it "$1" bash
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -586,11 +624,32 @@ acq_backend_shell() {
 acq_backend_attach() {
   local name="$1"
   shift
+  local agent ws
+  agent=$(_acq_sbx_attach_command "$name")
+  ws=$(acq_backend_workspace_for "$name")
   if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
     shift
-    sbx run --name "$name" -- "$@"
+    if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+        && command -v acq_guest_exec_script >/dev/null 2>&1; then
+      if [ -n "$ws" ]; then
+        sbx run --name "$name" -- env "ACQ_WORKSPACE=$ws" sh -c "$(acq_guest_exec_script)" sh "$agent" "$@"
+      else
+        sbx run --name "$name" -- sh -c "$(acq_guest_exec_script)" sh "$agent" "$@"
+      fi
+    else
+      sbx run --name "$name" -- "$@"
+    fi
   else
-    sbx run --name "$name"
+    if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+        && command -v acq_guest_exec_script >/dev/null 2>&1; then
+      if [ -n "$ws" ]; then
+        sbx run --name "$name" -- env "ACQ_WORKSPACE=$ws" sh -c "$(acq_guest_exec_script)" sh "$agent"
+      else
+        sbx run --name "$name" -- sh -c "$(acq_guest_exec_script)" sh "$agent"
+      fi
+    else
+      sbx run --name "$name"
+    fi
   fi
 }
 
@@ -824,6 +883,25 @@ acq_backend_ensure_kits_applied() {
     esac
   fi
 
+  if [ "$force" = "1" ] && command -v acq_backend_recorded_agent >/dev/null 2>&1; then
+    local agent agent_kit_ref agent_local
+    agent=$(acq_backend_recorded_agent "$name")
+    _build_kit_list "$agent"
+    local _idx=0
+    for agent_kit_ref in "${KITS[@]}"; do
+      _idx=$((_idx + 1))
+      [ "$_idx" -le 4 ] && continue
+      [ "$_idx" -le "${ACQ_BUILTIN_KIT_COUNT:-4}" ] || break
+      agent_local=$(_acq_sbx_translate_kit "$agent_kit_ref")
+      _kadd_rc=0; _acq_sbx_kit_add "$name" "$agent_local" || _kadd_rc=$?
+      case $_kadd_rc in
+        0) echo "acq: agent kit refreshed in '$name'." >&2 ;;
+        3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
+        *) echo "acq: warning: 'sbx kit add' (agent kit) failed for '$name' (see error above)." >&2; ok=0 ;;
+      esac
+    done
+  fi
+
   _acq_sbx_apply_git_identity_kit "$name"
 
   # 4) Extra kits (tracked by marker file). Extra kits may be neutral or already
@@ -870,12 +948,12 @@ acq_backend_ensure_kits_applied() {
 # needs to know which HOST(s) the credential is injected for and (for the
 # placeholder/env path) which ENV var. Keep this table backend-neutral here so
 # sbx.sh and msb.sh agree on the mapping.
-#   usai   -> api.gsa.usai.gov            USAI_API_KEY
+#   usai   -> $USAI_PROVIDER_HOST          $USAI_PROVIDER_KEY_ENV
 #   github -> github.com,api.github.com   GITHUB_TOKEN (sbx built-in service)
 # Echoes "host1[,host2] <TAB> ENVVAR"; empty for unknown services.
 _acq_service_hosts_env() {
   case "$1" in
-    usai)   printf 'api.gsa.usai.gov\tUSAI_API_KEY\n' ;;
+    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_BIND_HOSTS" "$USAI_PROVIDER_KEY_ENV" ;;
     github) printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
     *)      printf '\t\n' ;;
   esac
@@ -1453,8 +1531,8 @@ _acq_sbx_custom_placeholder() {
 # calls `acq usai-rotate-api-key`). Never places the secret value on argv — sbx
 # prompts for the new key at its own prompt. Returns non-zero on failure.
 acq_backend_rotate_key() {
-  local usai_host="api.gsa.usai.gov"
-  local usai_models_url="https://${usai_host}/api/v1/models"
+  local usai_host="$USAI_PROVIDER_HOST"
+  local usai_models_url="$USAI_PROVIDER_MODELS_URL"
 
   # Read the current secret table once (avoids a TOCTOU window + a second call).
   local secret_ls
@@ -1611,6 +1689,11 @@ acq_backend_doctor() {
   local ver
   ver=$(sbx version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || echo "?")
   printf '[sbx: installed %s]\n' "$ver"
+}
+
+acq_backend_doctor_sandbox() {
+  local name="$1"
+  sbx exec "$name" -- env HOME=/home/agent sh -c "$(acq_image_contract_doctor_script)"
 }
 
 # ---------------------------------------------------------------------------

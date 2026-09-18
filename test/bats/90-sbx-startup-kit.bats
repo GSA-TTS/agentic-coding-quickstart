@@ -197,6 +197,31 @@ STUB
   refute_regex "$(cat "$spec")" 'GIT_AUTHOR_NAME: Global User'
 }
 
+@test "rc.d(sbx): neutral kit files materialize as home rc snippets" {
+  local kit="$STUBDIR/rcd-kit" out="$STUBDIR/rcd-sbx-v2"
+  mkdir -p "$kit/files/home/agent/.rc.d"
+  cat > "$kit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: rc-hook
+displayName: RC Hook
+description: shell rc hook fixture
+files:
+  - path: /home/agent/.rc.d/10-team.sh
+    mode: "0644"
+    source: files/home/agent/.rc.d/10-team.sh
+SPEC
+  printf 'export TEAM_TOOL=1\n' > "$kit/files/home/agent/.rc.d/10-team.sh"
+
+  run kit_translate_to_sbx "$kit" "$out"
+  assert_success
+  [ -f "$out/files/home/agent/.rc.d/10-team.sh" ]
+  assert_equal "$(cat "$out/files/home/agent/.rc.d/10-team.sh")" "export TEAM_TOOL=1"
+  assert_regex "$(cat "$out/spec.yaml")" '/home/agent/.rc.d/10-team.sh'
+  assert_regex "$(cat "$out/spec.yaml")" 'chmod 0644'
+  refute_regex "$(cat "$out/spec.yaml")" 'direnv allow|USAI_API_KEY|GITHUB_TOKEN'
+}
+
 @test "provision(sbx): ACQ_EXTRA_KITS is marked into ~/.acq-extra-kits at create" {
   : > "$CALLS"
   # Subshell, NOT `bash -c`: acq_backend_provision is a sourced function, which
@@ -270,4 +295,29 @@ STUB
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'sbx kit add skipbox'
   refute_output --partial 'cannot extend a live sandbox'
+}
+
+@test "agent-kit-heal(sbx): forced refresh includes recorded agent kit" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in *present*) printf 'present\n' ;; *) exit 0 ;; esac ;;
+  kit) exit 0 ;;
+  settings) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  printf 'agentrefreshbox\n' > "$STUBDIR/.sandbox_list"
+  acq_provenance_write sbx agentrefreshbox opencode
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_builtin_kit_ref() { printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$1"; }
+  ( ACQ_FORCE_KIT_REAPPLY=1 acq_backend_ensure_kits_applied agentrefreshbox >/dev/null 2>&1 ) || true
+  assert_regex "$(cat "$CALLS")" 'acq-kits/opencode'
 }

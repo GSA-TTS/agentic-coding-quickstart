@@ -178,6 +178,7 @@ _seed_usai() {
   run env STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
   assert_success
   refute_output --partial 'Aborting attach'
+  assert_regex "$(cat "$CALLS")" 'Authorization: Bearer \$USAI_API_KEY'
 }
 
 @test "run(opencode): runs postinstall under a timeout guard when binary not functional" {
@@ -260,7 +261,80 @@ _seed_usai() {
   assert_regex "$(cat "$CALLS")" 'sbx rm --force mybox'
   : > "$CALLS"
   run env ACQ_BACKEND=sbx "$ACQ" exec mybox -- echo hi
-  assert_regex "$(cat "$CALLS")" 'sbx exec mybox'
+  assert_regex "$(cat "$CALLS")" 'sbx exec mybox -- echo hi'
+  refute_regex "$(cat "$CALLS")" 'direnv export|direnv allow'
+}
+
+@test "project-env: sbx exec advises when workspace provenance is known" {
+  local proj="$STUBDIR/known-env"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  acq_provenance_write sbx mybox opencode "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" exec mybox -- echo hi
+  assert_output --partial 'project environment detected (direnv)'
+  assert_regex "$(cat "$CALLS")" 'sbx exec mybox -- echo hi'
+}
+
+@test "project-env: run detects direnv workspace but does not activate by default" {
+  local proj="$STUBDIR/direnvproj"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj" -- echo hi
+  assert_success
+  assert_output --partial 'project environment detected (direnv)'
+  assert_output --partial 'will not run project activation'
+  assert_output --partial 'ACQ_ACTIVATE_PROJECT_ENV=1'
+  local log; log=$(cat "$CALLS")
+  local run_line; run_line=$(grep '^sbx run --name opencode-direnvproj' "$CALLS")
+  assert_regex "$run_line" 'sbx run --name opencode-direnvproj -- echo hi'
+  refute_regex "$log" 'direnv export|direnv allow'
+}
+
+@test "project-env: run opt-in wraps recorded agent with direnv export" {
+  local proj="$STUBDIR/direnvproj2"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  _seed_usai
+  run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj" -- --version
+  assert_success
+  assert_output --partial 'project environment detected (direnv)'
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx run --name opencode-direnvproj2 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'direnv export sh'
+  assert_regex "$log" 'sh opencode --version'
+  refute_regex "$log" 'direnv allow'
+}
+
+@test "project-env: run opt-in wraps normal sbx attach too" {
+  local proj="$STUBDIR/direnvproj3"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  _seed_usai
+  run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj"
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx run --name opencode-direnvproj3 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'sh opencode'
+}
+
+@test "project-env: create detects devenv files without activating anything" {
+  local proj="$STUBDIR/devenvproj"; mkdir -p "$proj"
+  touch "$proj/devenv.nix"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
+  assert_success
+  assert_output --partial 'project environment detected (devenv)'
+  assert_output --partial 'will not run project activation'
+  refute_regex "$(cat "$CALLS")" 'direnv export|direnv allow'
+}
+
+@test "project-env: inherited session marker cannot wrap sbx helper exec" {
+  run bash -c '
+    export ACQ_ACTIVATE_PROJECT_ENV=1 ACQ_SESSION_KIND=exec
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
+    acq_backend_run helperbox -- sh -c "echo probe" >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx exec helperbox -- sh -c echo probe'
+  refute_regex "$log" 'direnv export|ACQ_WORKSPACE'
 }
 
 @test "dispatch: an unknown subcommand passes through to the backend, announced, not doubled" {
@@ -319,4 +393,46 @@ _seed_usai() {
   local create_line; create_line=$(printf '%s\n' "$log" | grep '^sbx create')
   refute_regex "$create_line" '--kit evil-agent-arg'
   assert_regex "$log" '--kit evil-agent-arg'
+}
+
+@test "agent-kits: run opencode reports inferred built-in kit" {
+  local proj="$STUBDIR/agentkit-opencode"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
+
+  assert_success
+  assert_output --partial 'built-in agent kit candidate (deferred; no agent kit applied): agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=deferred'
+  refute_regex "$(cat "$CALLS")" 'acq-kits/opencode'
+}
+
+@test "agent-kits: create opencode reports inferred built-in kit" {
+  local proj="$STUBDIR/agentkit-create"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
+
+  assert_success
+  assert_output --partial 'built-in agent kit candidate (deferred; no agent kit applied): agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=deferred'
+  refute_regex "$(cat "$CALLS")" 'acq-kits/opencode'
+}
+
+@test "agent-kits: explicit --kit suppresses implicit selection notice" {
+  local proj="$STUBDIR/agentkit-explicit"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/team-opencode "$proj"
+
+  assert_success
+  refute_output --partial 'built-in agent kit candidate'
+  local create_line; create_line=$(grep '^sbx create' "$CALLS")
+  assert_regex "$create_line" '--kit /tmp/team-opencode'
+  refute_regex "$create_line" 'acq-kits/opencode'
+}
+
+@test "agent-kits: shell reports no inferred agent kit" {
+  local proj="$STUBDIR/agentkit-shell"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run shell "$proj"
+
+  assert_success
+  refute_output --partial 'built-in agent kit candidate'
+  refute_regex "$(cat "$CALLS")" 'acq-kits/opencode'
 }
