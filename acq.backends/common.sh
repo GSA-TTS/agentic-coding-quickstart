@@ -101,6 +101,7 @@ ACQ_SESSION_KIND=""
 # ACQ_EXTRA_KITS. One ref per element.
 ACQ_CLI_KITS=()
 ACQ_BUILTIN_KIT_COUNT=0
+ACQ_AGENT_KIT_READY_CACHE=""
 
 KIT_SOURCE_PREFIX="github.com/GSA-TTS/"
 KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
@@ -643,6 +644,78 @@ _acq_agent_builtin_kit_ref() {
   printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$kit_name"
 }
 
+kit_spec_agent_field() {
+  local spec="$1" key="$2"
+  [ -f "$spec" ] || return 1
+  awk -v key="$key" '
+    function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
+    /^agent:[[:space:]]*($|#)/ { in_agent=1; next }
+    /^[^[:space:]#][^:]*:/ { in_agent=0 }
+    in_agent {
+      line=$0
+      sub(/[[:space:]]*#.*/,"",line)
+      if (line ~ "^  " key ":[[:space:]]*") {
+        sub("^  " key ":[[:space:]]*","",line)
+        line=trim(line)
+        gsub(/^\"|\"$/, "", line)
+        gsub(/^'\''|'\''$/, "", line)
+        if (line != "") print line
+        exit
+      }
+    }
+  ' "$spec"
+}
+
+acq_validate_agent_builtin_kit_dir() {
+  local agent="$1" kitdir="$2" spec schema kind kit_name agent_name entrypoint
+  local expected_kit expected_entrypoint
+  expected_kit=$(acq_agent_builtin_kit_name "$agent") || return 1
+  expected_entrypoint=$(acq_agent_kit_entrypoint "$agent") || return 1
+  spec="$kitdir/spec.yaml"
+  [ -f "$spec" ] || return 1
+
+  schema=$(kit_spec_field "$spec" schemaVersion) || schema=""
+  kind=$(kit_spec_field "$spec" kind) || kind=""
+  kit_name=$(kit_spec_field "$spec" name) || kit_name=""
+  agent_name=$(kit_spec_agent_field "$spec" name) || agent_name=""
+  entrypoint=$(kit_spec_agent_field "$spec" entrypoint) || entrypoint=""
+
+  [ "$schema" = "hybrid/v1" ] || return 1
+  [ "$kind" = "mixin" ] || return 1
+  [ "$kit_name" = "$expected_kit" ] || return 1
+  [ "$agent_name" = "$agent" ] || return 1
+  [ "$entrypoint" = "$expected_entrypoint" ] || return 1
+}
+
+acq_validate_agent_builtin_kit_ref() {
+  local agent="$1" kitref="$2" base_dir="${3:-}" kitdir
+  if [ -z "$base_dir" ]; then
+    base_dir="${ACQ_STATE_DIR:-${TMPDIR:-/tmp}/acq}/agent-kit-validation/$agent"
+  fi
+  kitdir=$(kit_translate_fetch "$kitref" "$base_dir") || return 1
+  acq_validate_agent_builtin_kit_dir "$agent" "$kitdir"
+}
+
+acq_agent_builtin_kit_ready() {
+  local agent="$1" kit cache_key cache_value
+  acq_agent_builtin_kit_enabled "$agent" || return 1
+  kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
+  cache_key="${agent}:$(printf '%s' "$kit" | cksum | cut -d' ' -f1)"
+  cache_value=$(printf '%s\n' "$ACQ_AGENT_KIT_READY_CACHE" | awk -F'\t' -v key="$cache_key" '$1 == key { print $2; exit }')
+  case "$cache_value" in
+    yes) return 0 ;;
+    no) return 1 ;;
+  esac
+  if acq_validate_agent_builtin_kit_ref "$agent" "$kit"; then
+    ACQ_AGENT_KIT_READY_CACHE="${ACQ_AGENT_KIT_READY_CACHE}${cache_key}	yes
+"
+    return 0
+  fi
+  ACQ_AGENT_KIT_READY_CACHE="${ACQ_AGENT_KIT_READY_CACHE}${cache_key}	no
+"
+  return 1
+}
+
 _acq_selected_builtin_kit_refs() {
   local agent="${1:-}" name kit
   for name in $(_acq_builtin_support_kit_names); do
@@ -650,7 +723,7 @@ _acq_selected_builtin_kit_refs() {
     printf '%s\n' "$kit"
   done
   if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
-      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_enabled "$agent"; then
+      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_ready "$agent"; then
     kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
     printf '%s\n' "$kit"
   fi
@@ -663,7 +736,7 @@ acq_selected_agent_kit_summary() {
   entrypoint=$(acq_agent_kit_entrypoint "$agent") || entrypoint=""
   install_owner=$(acq_agent_kit_install_owner "$agent") || install_owner=""
   start_owner=$(acq_agent_kit_start_owner "$agent") || start_owner=""
-  acq_agent_builtin_kit_enabled "$agent" && apply_state="enabled"
+  acq_agent_builtin_kit_ready "$agent" && apply_state="enabled"
   printf 'agent=%s kit=%s entrypoint=%s install_owner=%s start_owner=%s apply=%s\n' \
     "$agent" "$kit_name" "${entrypoint:-none}" "${install_owner:-none}" \
     "${start_owner:-none}" "$apply_state"

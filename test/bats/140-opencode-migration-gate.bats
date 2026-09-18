@@ -64,6 +64,137 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   assert_equal "${KITS[7]}" "/extra/cli-two"
 }
 
+_mk_opencode_agent_kit() { # PATH [schema] [kit-name] [agent-name] [entrypoint]
+  mkdir -p "$1"
+  cat >"$1/spec.yaml" <<SPEC
+schemaVersion: "${2:-hybrid/v1}"
+kind: mixin
+name: ${3:-opencode}
+displayName: OpenCode Agent Kit
+description: test fixture only
+agent:
+  name: ${4:-opencode}
+  entrypoint: ${5:-opencode}
+SPEC
+}
+
+@test "agent kit gate: valid opencode artifact enables inferred built-in kit" {
+  ACQ_TEST_AGENT_KIT="$STUBDIR/opencode-kit"
+  _mk_opencode_agent_kit "$ACQ_TEST_AGENT_KIT"
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$ACQ_TEST_AGENT_KIT"; }
+
+  _build_kit_list opencode
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
+  assert_equal "${KITS[4]}" "$ACQ_TEST_AGENT_KIT"
+  assert_regex "$(acq_selected_agent_kit_summary opencode)" 'apply=enabled'
+}
+
+@test "agent kit gate: missing opencode artifact fails closed" {
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$STUBDIR/missing-opencode-kit"; }
+
+  _build_kit_list opencode
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  assert_equal "${#KITS[@]}" "4"
+  assert_regex "$(acq_selected_agent_kit_summary opencode 2>/dev/null)" 'apply=deferred'
+}
+
+@test "agent kit gate: wrong opencode kit name fails closed" {
+  local kit="$STUBDIR/wrong-name-kit"
+  _mk_opencode_agent_kit "$kit" "hybrid/v1" "not-opencode"
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$kit"; }
+
+  _build_kit_list opencode
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  assert_equal "${#KITS[@]}" "4"
+}
+
+@test "agent kit gate: wrong opencode kit schema fails closed" {
+  local kit="$STUBDIR/wrong-schema-kit"
+  _mk_opencode_agent_kit "$kit" "sbx/v1" "opencode"
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$kit"; }
+
+  _build_kit_list opencode
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  assert_equal "${#KITS[@]}" "4"
+}
+
+@test "agent kit gate: wrong agent metadata name fails closed" {
+  local kit="$STUBDIR/wrong-agent-name-kit"
+  _mk_opencode_agent_kit "$kit" "hybrid/v1" "opencode" "not-opencode" "opencode"
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$kit"; }
+
+  _build_kit_list opencode
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  assert_equal "${#KITS[@]}" "4"
+}
+
+@test "agent kit gate: wrong agent metadata entrypoint fails closed" {
+  local kit="$STUBDIR/wrong-agent-entrypoint-kit"
+  _mk_opencode_agent_kit "$kit" "hybrid/v1" "opencode" "opencode" "not-opencode"
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$kit"; }
+
+  _build_kit_list opencode
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  assert_equal "${#KITS[@]}" "4"
+}
+
+@test "agent kit gate: nested agent metadata does not satisfy direct fields" {
+  local kit="$STUBDIR/nested-agent-kit"
+  mkdir -p "$kit"
+  cat >"$kit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: opencode
+agent:
+  metadata:
+    name: opencode
+    entrypoint: opencode
+SPEC
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$kit"; }
+
+  _build_kit_list opencode
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  assert_equal "${#KITS[@]}" "4"
+}
+
+@test "agent kit gate: explicit --kit suppresses inferred opencode kit" {
+  local cli="$STUBDIR/cli-kit"
+  mkdir -p "$cli"
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$STUBDIR/missing-opencode-kit"; }
+  # shellcheck disable=SC2034  # read by sourced _build_kit_list
+  ACQ_CLI_KITS=("$cli")
+
+  _build_kit_list opencode
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  assert_equal "${#KITS[@]}" "5"
+  assert_equal "${KITS[4]}" "$cli"
+}
+
+@test "agent kit gate: shell remains no-agent-kit" {
+  acq_agent_builtin_kit_enabled() { return 0; }
+
+  _build_kit_list shell
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  assert_equal "${#KITS[@]}" "4"
+}
+
 @test "migration gate(msb): run opencode --clone preserves clone markers, image, kit order, and boot volumes" {
   local proj="$STUBDIR/migproj" extra="$STUBDIR/extra-kit" cli="$STUBDIR/cli-kit"
   _mk_repo "$proj"
