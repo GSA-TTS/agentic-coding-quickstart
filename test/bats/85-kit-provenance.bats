@@ -45,12 +45,24 @@ _seed_stale_provenance() { # BACKEND NAME
 }
 
 @test "provenance: recorded agent can rebuild an enabled agent kit list" {
+  ACQ_TEST_AGENT_KIT="$STUBDIR/provenance-opencode-kit"
+  mkdir -p "$ACQ_TEST_AGENT_KIT"
+  cat >"$ACQ_TEST_AGENT_KIT/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: opencode
+displayName: OpenCode Agent Kit
+description: test fixture only
+agent:
+  name: opencode
+  entrypoint: opencode
+SPEC
   acq_provenance_write msb agenthealbox opencode
   acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
-  _acq_builtin_kit_ref() { printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$1"; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$ACQ_TEST_AGENT_KIT"; }
 
   _build_kit_list "$(acq_provenance_field msb agenthealbox agent)"
-  assert_regex "${KITS[4]}" 'acq-kits/opencode$'
+  assert_equal "${KITS[4]}" "$ACQ_TEST_AGENT_KIT"
   assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
 }
 
