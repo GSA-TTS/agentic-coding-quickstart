@@ -106,7 +106,8 @@ Subcommands:
                                            workspace's repos (least-privilege PAT).
   usai-rotate-api-key                      Rotate the USAi API key.
   version                                  Show acq version + backend info.
-  doctor                                   Backend health check + write config.
+  doctor [NAME]                            Backend health check, or non-enforcing
+                                           image diagnostics for an existing sandbox.
   backend list                             List detected backends (sbx, msb).
   backend set NAME                         Persist the default backend.
   backend unset                            Clear the persisted default (auto-detect).
@@ -393,10 +394,14 @@ U
       ;;
     doctor)
       cat >&2 <<'U'
-acq doctor — backend health check + write config
+acq doctor — backend health check, or sandbox image diagnostics
 
 Usage:
   acq doctor
+  acq doctor NAME
+
+With NAME, runs non-enforcing ADR-0030 base-image contract diagnostics inside an
+existing sandbox. Warnings are actionable but do not block create/run flows.
 U
       ;;
     *)
@@ -810,9 +815,18 @@ case "$subcommand" in
     ;;
 
   doctor)
+    shift
     acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
-    acq_print_doctor
-    exit 0
+    if [ -n "${1:-}" ]; then
+      if [ -n "${2:-}" ]; then
+        echo "acq: doctor: expected at most one sandbox name" >&2
+        exit 1
+      fi
+      acq_print_image_contract_doctor "$1"
+    else
+      acq_print_doctor
+    fi
+    exit $?
     ;;
 esac
 

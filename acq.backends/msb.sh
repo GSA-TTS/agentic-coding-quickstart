@@ -5521,6 +5521,11 @@ acq_backend_doctor() {
   printf '[msb: installed %s]\n' "$ver"
 }
 
+acq_backend_doctor_sandbox() {
+  local name="$1"
+  msb exec -u agent -e HOME=/home/agent "$name" -- sh -c "$(acq_image_contract_doctor_script)"
+}
+
 # ---------------------------------------------------------------------------
 # is_known_agent — used by the acq run dispatch
 # ---------------------------------------------------------------------------

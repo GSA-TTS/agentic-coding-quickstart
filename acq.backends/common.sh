@@ -2725,6 +2725,102 @@ ensure_valid_key() {
 # acq doctor output helpers
 # ============================================================================
 
+acq_image_contract_doctor_script() {
+  cat <<'SH'
+ACQ_ADR0030_IMAGE_DIAGNOSTIC=1
+warns=0
+ok() { printf '  ok: %s\n' "$1"; }
+warn() {
+  warns=$((warns + 1))
+  printf '  warning: %s\n' "$1"
+  printf '           fix: %s\n' "$2"
+}
+
+if [ "${HOME:-}" = "/home/agent" ]; then
+  ok "HOME is /home/agent"
+else
+  warn "HOME is ${HOME:-unset}, not /home/agent" "run diagnostics as the agent user with HOME=/home/agent"
+fi
+
+if [ "$(id -un 2>/dev/null || true)" = "agent" ]; then
+  ok "running as agent user"
+else
+  warn "diagnostic is not running as the agent user" "run sandbox diagnostics as the unprivileged agent user"
+fi
+
+if [ -d /nix ]; then
+  ok "/nix exists"
+else
+  warn "/nix is missing" "use a devenv-capable image with its Nix store at /nix"
+fi
+
+for tool in nix devenv direnv; do
+  if command -v "$tool" >/dev/null 2>&1; then
+    ok "$tool is on PATH"
+  else
+    warn "$tool is not on PATH" "install $tool in the base image or a create-time kit"
+  fi
+done
+
+if [ -w /home/agent ]; then
+  ok "/home/agent is writable"
+else
+  warn "/home/agent is not writable" "make /home/agent owned/writable by the agent user"
+fi
+
+if command -v sudo >/dev/null 2>&1; then
+  # Best-effort privilege probe: sudo -n may update guest-local sudo/audit state.
+  if sudo -n true >/dev/null 2>&1; then
+    ok "passwordless sudo probe works"
+  else
+    warn "sudo exists but passwordless sudo probe failed" "grant NOPASSWD sudo for declared privileged kit steps"
+  fi
+else
+  warn "sudo is not on PATH" "install sudo and allow passwordless sudo where privileged kit features are needed"
+fi
+
+home=${HOME:-/home/agent}
+if [ -d "$home/.rc.d" ]; then
+  ok "~/.rc.d exists"
+else
+  warn "~/.rc.d is missing" "install the neutral shell hook directory at /home/agent/.rc.d"
+fi
+
+hook=0
+for profile in "$home/.profile" "$home/.bashrc" "$home/.zshrc" /etc/profile /etc/bash.bashrc /etc/profile.d/acq*.sh; do
+  if [ -f "$profile" ] && grep -Eq '(^|[[:space:]])(source|\.)[[:space:]].*\.rc\.d' "$profile" 2>/dev/null; then
+    hook=1
+    break
+  fi
+done
+if [ "$hook" -eq 1 ]; then
+  ok "shell startup references ~/.rc.d"
+else
+  warn "no shell startup hook for ~/.rc.d found" "source ~/.rc.d snippets from shell startup in deterministic order"
+fi
+
+printf '  summary: %s warning(s); diagnostics only, create/run are not blocked\n' "$warns"
+exit 0
+SH
+}
+
+acq_print_image_contract_doctor() {
+  local name="$1"
+  if ! command -v acq_backend_doctor_sandbox >/dev/null 2>&1; then
+    echo "acq: doctor: backend '${ACQ_RESOLVED_BACKEND:-unknown}' cannot inspect sandboxes." >&2
+    return 1
+  fi
+  if ! acq_backend_exists "$name"; then
+    echo "acq: doctor: no such sandbox '$name'." >&2
+    return 1
+  fi
+
+  printf 'acq: ADR-0030 image contract diagnostics for %s (backend: %s)\n' \
+    "$name" "${ACQ_RESOLVED_BACKEND:-unknown}"
+  echo "  This check is non-enforcing: warnings do not change create/run behavior."
+  acq_backend_doctor_sandbox "$name"
+}
+
 acq_print_doctor() {
   local sbx_status msb_status
 

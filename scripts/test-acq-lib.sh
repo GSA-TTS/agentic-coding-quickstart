@@ -118,6 +118,31 @@ case "${1:-}" in
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *"ACQ_ADR0030_IMAGE_DIAGNOSTIC=1"*)
+        if [ "${STUB_IMAGE_CONTRACT:-present}" = "missing" ]; then
+          printf '  ok: HOME is /home/agent\n'
+          printf '  ok: running as agent user\n'
+          printf '  ok: /nix exists\n'
+          printf '  warning: devenv is not on PATH\n'
+          printf '           fix: install devenv in the base image or a create-time kit\n'
+          printf '  warning: no shell startup hook for ~/.rc.d found\n'
+          printf '           fix: source ~/.rc.d snippets from shell startup in deterministic order\n'
+          printf '  summary: 2 warning(s); diagnostics only, create/run are not blocked\n'
+        else
+          printf '  ok: HOME is /home/agent\n'
+          printf '  ok: running as agent user\n'
+          printf '  ok: /nix exists\n'
+          printf '  ok: nix is on PATH\n'
+          printf '  ok: devenv is on PATH\n'
+          printf '  ok: direnv is on PATH\n'
+          printf '  ok: /home/agent is writable\n'
+          printf '  ok: passwordless sudo probe works\n'          printf '  ok: ~/.rc.d exists\n'
+          printf '  ok: shell startup references ~/.rc.d\n'
+          printf '  summary: 0 warning(s); diagnostics only, create/run are not blocked\n'
+        fi
+        exit 0 ;;
+    esac
     # `opencode --version` is the postinstall functionality probe (bare argv,
     # not an `sh -c`). By default model the BROKEN state (exit 1) so the
     # postinstall path runs; STUB_OPENCODE_OK=1 makes it "already runnable".
@@ -256,6 +281,29 @@ case "$_msb_sub" in
         exit 1 ;;
     esac
     case "$snippet" in
+      *"ACQ_ADR0030_IMAGE_DIAGNOSTIC=1"*)
+        if [ "${STUB_IMAGE_CONTRACT:-present}" = "missing" ]; then
+          printf '  ok: HOME is /home/agent\n'
+          printf '  ok: running as agent user\n'
+          printf '  ok: /nix exists\n'
+          printf '  warning: devenv is not on PATH\n'
+          printf '           fix: install devenv in the base image or a create-time kit\n'
+          printf '  warning: no shell startup hook for ~/.rc.d found\n'
+          printf '           fix: source ~/.rc.d snippets from shell startup in deterministic order\n'
+          printf '  summary: 2 warning(s); diagnostics only, create/run are not blocked\n'
+        else
+          printf '  ok: HOME is /home/agent\n'
+          printf '  ok: running as agent user\n'
+          printf '  ok: /nix exists\n'
+          printf '  ok: nix is on PATH\n'
+          printf '  ok: devenv is on PATH\n'
+          printf '  ok: direnv is on PATH\n'
+          printf '  ok: /home/agent is writable\n'
+          printf '  ok: passwordless sudo probe works\n'          printf '  ok: ~/.rc.d exists\n'
+          printf '  ok: shell startup references ~/.rc.d\n'
+          printf '  summary: 0 warning(s); diagnostics only, create/run are not blocked\n'
+        fi
+        exit 0 ;;
       *"echo ok"*) printf 'ok\n' ;;
       # #321: the registry reachability probe curls `https://<host>/` and prints
       # the `<http_code>|<curl_exit>` shape _classify_key_status reads. Default

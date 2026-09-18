@@ -1691,6 +1691,11 @@ acq_backend_doctor() {
   printf '[sbx: installed %s]\n' "$ver"
 }
 
+acq_backend_doctor_sandbox() {
+  local name="$1"
+  sbx exec "$name" -- env HOME=/home/agent sh -c "$(acq_image_contract_doctor_script)"
+}
+
 # ---------------------------------------------------------------------------
 # is_known_agent — used by the acq run dispatch
 # ---------------------------------------------------------------------------
