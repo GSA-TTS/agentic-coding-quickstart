@@ -110,6 +110,9 @@ Subcommands:
   backend list                             List detected backends (sbx, msb).
   backend set NAME                         Persist the default backend.
   backend unset                            Clear the persisted default (auto-detect).
+  configure                                Interactive setup: pick extra kits and
+                                           the per-sandbox token-scoping default
+                                           (persists to config.yaml).
   kit list                                 Show the pinned kits (+ extras).
   kit validate PATH                        Validate a neutral hybrid/v1 kit.
   kit apply NAME KITREF                    Apply a kit to an existing sandbox.
@@ -221,6 +224,26 @@ Usage:
   acq backend set NAME    Persist the default backend (sbx | msb)
   acq backend unset       Clear the persisted default (fall back to auto-detect)
 BACKENDUSAGE
+}
+
+_acq_configure_usage() {
+  cat >&2 <<'CONFIGUSAGE'
+acq configure — interactive setup for extra kits and token scoping (ADR-0028)
+
+Usage:
+  acq configure
+
+Opens an interactive picker to choose which OPT-IN kits to enable (the four
+built-in kits are always applied) and to set the DEFAULT answer for the
+per-sandbox GitHub-token-scoping prompt. Choices persist to
+~/.config/acq/config.yaml and pre-populate the picker shown at `acq create`,
+where a single sandbox may deviate without changing the global default.
+
+Non-interactive (CI / piped) invocations make no changes and just print the
+current configuration. Set ACQ_NO_PROMPT=1 to force this behavior. The
+GitHub-token preference only pre-answers the existing scoping prompt; the
+fine-grained PAT is still minted per-sandbox (see `acq github-scope`).
+CONFIGUSAGE
 }
 
 # _acq_simple_verb_usage VERB — acq's OWN one-verb usage for the remaining
@@ -426,10 +449,11 @@ _acq_print_topic_help() {
   local topic="$1" head
   head="${topic%% *}"
   case "$head" in
-    secret)  _acq_secret_usage; return 0 ;;
-    kit)     _acq_kit_usage; return 0 ;;
-    backend) _acq_backend_subcmd_usage; return 0 ;;
-    *)       _acq_simple_verb_usage "$head"; return $? ;;
+    secret)    _acq_secret_usage; return 0 ;;
+    kit)       _acq_kit_usage; return 0 ;;
+    backend)   _acq_backend_subcmd_usage; return 0 ;;
+    configure) _acq_configure_usage; return 0 ;;
+    *)         _acq_simple_verb_usage "$head"; return $? ;;
   esac
 }
 
@@ -620,17 +644,24 @@ case "$subcommand" in
         local_backend="${1:-}"
         [ -z "$local_backend" ] && { echo "acq: backend set: missing backend name" >&2; exit 1; }
         local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
-        mkdir -p "$(dirname "$local_config_file")"
-        printf 'backend: %s\n' "$local_backend" > "$local_config_file"
+        # Write only the `backend:` key, preserving any other config (extra_kits,
+        # scope_github_token) written by `acq configure` (ADR-0028).
+        _acq_config_write_field backend "$local_backend" \
+          || { echo "acq: backend set: could not write ${local_config_file}" >&2; exit 1; }
         echo "acq: default backend set to '${local_backend}' in ${local_config_file}" >&2
         ;;
       unset)
-        # Clear the persisted default so acq falls back to auto-detection (see
-        # the resolution order in `acq help`). Idempotent: succeeds whether or
-        # not a default was set.
+        # Clear ONLY the persisted default backend so acq falls back to
+        # auto-detection (see the resolution order in `acq help`). Preserves any
+        # other config keys (extra_kits, scope_github_token). Idempotent.
         local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
-        if [ -f "$local_config_file" ]; then
-          rm -f "$local_config_file"
+        if [ -f "$local_config_file" ] && [ -n "$(_acq_config_read_field backend)" ]; then
+          _acq_config_write_field backend ""   # empty value removes the key
+          # If the config is now empty (backend was the only key), remove the
+          # file so a fresh checkout looks pristine — matching the historical
+          # behavior and the first-run detection (a stale empty file would
+          # suppress the first-run `acq configure` offer).
+          [ -s "$local_config_file" ] || rm -f "$local_config_file" 2>/dev/null || true
           echo "acq: cleared the persisted default backend (${local_config_file}); acq will auto-detect." >&2
         else
           echo "acq: no persisted default backend was set; acq already auto-detects." >&2
@@ -794,6 +825,16 @@ esac
 # version/doctor: resolve backend best-effort (they work even if none detected).
 # ---------------------------------------------------------------------------
 case "$subcommand" in
+  configure)
+    # Interactive configuration (ADR-0028). Needs no backend — it only reads and
+    # writes config.yaml. Resolve the backend best-effort so a first-run decline
+    # can persist the detected default, but never fail on no backend.
+    shift
+    acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+    acq_configure
+    exit 0
+    ;;
+
   version|--version|-v)
     # Resolve backend best-effort so version can report it; don't fail.
     acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
@@ -894,6 +935,14 @@ case "$subcommand" in
   create)
     shift
     acq_backend_prepare
+    # First-run onboarding (ADR-0028): offer `acq configure` once before we
+    # provision, so a brand-new user picks kits up front. No-op after first run
+    # and in non-interactive sessions.
+    maybe_first_run_configure
+    # Apply configured-default extra kits (config.yaml), then offer a create-time
+    # picker pre-populated with those defaults so THIS sandbox can deviate.
+    _acq_apply_configured_extra_kits
+    create_time_kit_picker
     # Pre-flight: validate the workspace path before provisioning (#issue).
     ws=$(workspace_path "$@")
     preflight_workspace_path "$ws" || exit 1
@@ -1013,6 +1062,16 @@ case "$subcommand" in
         # with no USAi binding — the exact split that made validation report 200
         # (in a throwaway sandbox) yet 401 (in the real one). Gate on key
         # presence first; fail closed if the user declines.
+
+        # First-run onboarding + extra-kit selection (ADR-0028), BEFORE the key
+        # gate so a first-time user configures kits up front. maybe_first_run_*
+        # is a no-op after first run / non-interactive; the picker pre-populates
+        # from the configured defaults and folds the result into ACQ_EXTRA_KITS
+        # for this create (persisted per-sandbox by the existing kit-record path).
+        maybe_first_run_configure
+        _acq_apply_configured_extra_kits
+        create_time_kit_picker
+
         if ! ensure_key_present "$local_name"; then
           exit 1
         fi

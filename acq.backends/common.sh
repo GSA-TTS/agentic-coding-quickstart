@@ -73,6 +73,83 @@ ACQ_BUILTIN_BUNDLE_REPO="GSA-TTS/agentic-coding-patterns"
 ACQ_EXTRA_KITS="${ACQ_EXTRA_KITS:-}"
 ACQ_EXTRA_KIT_SOURCES="${ACQ_EXTRA_KIT_SOURCES:-}"
 
+# Record whether ACQ_EXTRA_KITS came from the ENVIRONMENT (vs. being empty or set
+# later by acq itself). The configured-default and create-time picker paths honor
+# env > config > interactive: a user who exported ACQ_EXTRA_KITS gets it verbatim
+# and is never re-prompted or overridden (ADR-0028). Captured once at load time.
+if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
+  ACQ_EXTRA_KITS_FROM_ENV=1
+else
+  ACQ_EXTRA_KITS_FROM_ENV=""
+fi
+
+# ---------------------------------------------------------------------------
+# Opt-in kit catalog (for `acq configure`; ADR-0028)
+# ---------------------------------------------------------------------------
+# The OPT-IN community kits acq can offer in the interactive picker, sourced from
+# the SAME pinned patterns bundle as the built-ins (PATTERNS_KIT_REF /
+# PATTERNS_KIT_DIR) so their refs stay pinned in lockstep. The four built-in kits
+# above are always applied and are NOT listed here (the picker shows them as
+# locked/pre-checked, informational only).
+#
+# Parallel arrays (bash 3.2 safe — no associative arrays): NAME[i] is the kit
+# directory under PATTERNS_KIT_DIR; DESC[i] is the one-line picker description.
+# `prime-agent` is intentionally omitted: it is a skeleton at the current pin
+# (see the patterns kits.yaml parity note) and would be non-functional if
+# offered. Add it here once it is functional.
+# shellcheck disable=SC2034  # consumed by `acq configure` (cross-function reader)
+ACQ_OPTIN_KIT_NAMES=(openchamber paseo)
+# shellcheck disable=SC2034
+ACQ_OPTIN_KIT_DESCS=(
+  "Browser UI for OpenCode alongside the terminal TUI (publishes ports 3000/4096)"
+  "Self-hosted Paseo browser web UI for coding agents (one port, loopback only)"
+)
+
+# _acq_optin_kit_ref NAME — echo the fully-pinned git+https kit ref for an opt-in
+# kit NAME, built exactly like the built-in *_KIT refs (same repo/ref/dir), so a
+# picked kit is pinned to the same patterns bundle as everything else.
+_acq_optin_kit_ref() {
+  printf '%s#ref=%s&dir=%s/%s\n' \
+    "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "${1:?kit name required}"
+}
+
+# _acq_apply_configured_extra_kits — fold the configured-default extra kits
+# (config.yaml `extra_kits:`, written by `acq configure`) into ACQ_EXTRA_KITS for
+# this invocation, so a durable default behaves like an env-supplied extra. An
+# env-supplied ACQ_EXTRA_KITS is authoritative and is NOT overridden (env > config,
+# matching the backend-resolution precedence and the `--kit`/env layering). No-op
+# when nothing is configured. Idempotent (guarded so a second call is cheap).
+_ACQ_CONFIGURED_KITS_APPLIED=""
+_acq_apply_configured_extra_kits() {
+  [ -z "$_ACQ_CONFIGURED_KITS_APPLIED" ] || return 0
+  _ACQ_CONFIGURED_KITS_APPLIED=1
+  # Env wins: if the user exported ACQ_EXTRA_KITS, respect it verbatim.
+  [ -z "${ACQ_EXTRA_KITS_FROM_ENV:-}" ] || return 0
+  local configured names ref
+  configured=$(_acq_config_read_field extra_kits)
+  [ -n "$configured" ] || return 0
+  # The stored value is a list of opt-in kit NAMES; expand each to its pinned ref
+  # (a name not in the catalog is passed through as-is, tolerating a hand-edited
+  # config that used a raw ref).
+  names="$configured"
+  local out="" tok known k
+  for tok in $names; do
+    known=""
+    for k in ${ACQ_OPTIN_KIT_NAMES[@]+"${ACQ_OPTIN_KIT_NAMES[@]}"}; do
+      [ "$k" = "$tok" ] && { known=1; break; }
+    done
+    if [ -n "$known" ]; then
+      ref=$(_acq_optin_kit_ref "$tok")
+    else
+      ref="$tok"
+    fi
+    out="${out:+$out }$ref"
+  done
+  ACQ_EXTRA_KITS="$out"
+  acq_debug "config: applied configured extra_kits: $out"
+  return 0
+}
+
 # Update-check opt-out. When ACQ_UPDATE_CHECK=0, `acq run` never
 # runs the stale-sandbox check (no provenance comparison, no prompt). The
 # explicit `acq kit check` / `acq kit update` commands still work — the opt-out
@@ -137,6 +214,22 @@ if ! command -v acq_status >/dev/null 2>&1; then
   acq_status()     { printf 'acq: %s\n' "$*" >&2; }
   acq_spin_start() { acq_status "$*"; }
   acq_spin_stop()  { :; }
+fi
+
+# Source the TTY-aware interactive prompt widgets (acq_prompt_multiselect /
+# acq_prompt_confirm) used by `acq configure` and the create-time picker (see
+# ADR-0028). Like progress.sh, all chrome is stderr-only and gated on an
+# interactive TTY; non-interactive callers take documented defaults and never
+# block. If the file is missing (older partial checkout), define no-op fallbacks
+# so `acq configure` degrades to "take defaults" rather than breaking.
+if [ -n "${ACQ_SCRIPT_DIR:-}" ] && [ -f "${ACQ_SCRIPT_DIR}/acq.backends/prompt.sh" ]; then
+  # shellcheck disable=SC1091
+  . "${ACQ_SCRIPT_DIR}/acq.backends/prompt.sh"
+fi
+if ! command -v acq_prompt_confirm >/dev/null 2>&1; then
+  # Fallback: echo nothing selected / honor the passed default (arg 2 = yes|no).
+  acq_prompt_multiselect() { printf '\n'; }
+  acq_prompt_confirm()     { [ "${2:-no}" = "yes" ] && return 0 || return 1; }
 fi
 
 # ============================================================================
@@ -1020,11 +1113,75 @@ _acq_config_file() {
 }
 
 _read_config_backend() {
-  local cfg
+  _acq_config_read_field backend
+}
+
+# _acq_config_read_field KEY — echo the value of a flat `KEY: value` line from
+# config.yaml (empty if the file or key is absent). Defensive awk parse, no YAML
+# dependency — the same convention as the original single-key backend reader,
+# generalized to any flat scalar key (backend, extra_kits, scope_github_token).
+# KEY is matched literally at the start of a line (after optional indentation);
+# a non-identifier KEY is rejected so a caller can't inject an awk regex.
+_acq_config_read_field() {
+  local key="${1:-}" cfg
+  case "$key" in
+    ''|*[!A-Za-z0-9_]*) return 0 ;;   # fail closed on an unexpected key name
+  esac
   cfg=$(_acq_config_file)
   [ -f "$cfg" ] || return 0
-  # Parse the single `backend: <name>` key defensively with awk (no YAML dep).
-  awk '/^[[:space:]]*backend[[:space:]]*:/ { gsub(/^[[:space:]]*backend[[:space:]]*:[[:space:]]*/,""); gsub(/[[:space:]]*$/,""); print; exit }' "$cfg"
+  awk -v k="$key" '
+    {
+      # Match: optional leading space, the key, optional space, colon.
+      pat = "^[[:space:]]*" k "[[:space:]]*:"
+      if ($0 ~ pat) {
+        sub(pat "[[:space:]]*", "")     # strip through the colon + spaces
+        sub(/[[:space:]]*$/, "")        # strip trailing space
+        print
+        exit
+      }
+    }
+  ' "$cfg"
+}
+
+# _acq_config_write_field KEY VALUE — set (or replace) a flat `KEY: VALUE` line in
+# config.yaml, preserving every OTHER line (so writing extra_kits leaves backend
+# untouched, and vice-versa). Creates the file + parent dir on first write. An
+# empty VALUE removes the key entirely (so "no extras" is represented by absence,
+# not an empty-valued line). Atomic (temp file + mv). Best-effort: a write failure
+# warns via acq_debug and returns non-zero but never aborts the caller.
+_acq_config_write_field() {
+  local key="${1:-}" value="${2:-}" cfg dir tmp
+  case "$key" in
+    ''|*[!A-Za-z0-9_]*) acq_debug "config: refusing to write unsafe key '$key'"; return 1 ;;
+  esac
+  cfg=$(_acq_config_file)
+  dir=$(dirname "$cfg")
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    acq_debug "config: could not create config dir: $dir"
+    return 1
+  fi
+  tmp="${cfg}.tmp.$$"
+  {
+    # Re-emit every existing line except the one for KEY (which we replace/drop).
+    if [ -f "$cfg" ]; then
+      awk -v k="$key" '
+        {
+          pat = "^[[:space:]]*" k "[[:space:]]*:"
+          if ($0 ~ pat) next     # drop the old KEY line; we re-add below
+          print
+        }
+      ' "$cfg"
+    fi
+    # Append the new value only when non-empty (empty VALUE => remove the key).
+    # Use an explicit if (not `[ ] &&`) so the group's exit status reflects the
+    # write, not a false test when VALUE is empty.
+    if [ -n "$value" ]; then
+      printf '%s: %s\n' "$key" "$value"
+    fi
+  } > "$tmp" 2>/dev/null || { acq_debug "config: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$cfg" 2>/dev/null || { acq_debug "config: mv failed: $cfg"; rm -f "$tmp" 2>/dev/null; return 1; }
+  acq_debug "config: wrote ${key}"
+  return 0
 }
 
 # _ensure_local_bin_on_path — if a backend CLI is not on PATH but IS present in
@@ -2187,13 +2344,20 @@ advise_github_scope() {
     return 0
   fi
 
-  local ans=""
-  printf 'acq: scope a GitHub token for this sandbox now? [y/N] ' >&2
-  read -r ans 2>/dev/null || ans=""
-  case "$ans" in
-    y|Y|yes|YES) github_scope_sandbox "$sandbox" "$ws" ;;
-    *) echo "acq: continuing without scoping (run 'acq github-scope $sandbox $ws' anytime)." >&2 ;;
-  esac
+  # The configured default (ADR-0028) pre-answers this prompt: `acq configure`
+  # can set scope_github_token: yes|no in config.yaml. Default is "no" (a bare
+  # ENTER declines), preserving the historical behavior when unset. This only
+  # changes the DEFAULT answer — the actual per-sandbox fine-grained-PAT minting
+  # still runs through github_scope_sandbox (ADR-0013 unchanged).
+  local scope_default
+  scope_default=$(_acq_config_read_field scope_github_token)
+  case "$scope_default" in yes|y|Y) scope_default="yes" ;; *) scope_default="no" ;; esac
+
+  if acq_prompt_confirm "Scope a GitHub token for this sandbox now?" "$scope_default"; then
+    github_scope_sandbox "$sandbox" "$ws"
+  else
+    echo "acq: continuing without scoping (run 'acq github-scope $sandbox $ws' anytime)." >&2
+  fi
   return 0
 }
 
@@ -2547,14 +2711,210 @@ acq_print_doctor() {
   read -r answer || true
   case "$answer" in
     [yY]|[yY][eE][sS])
-      local cfg_dir
-      cfg_dir=$(dirname "$config_file")
-      mkdir -p "$cfg_dir"
-      printf 'backend: %s\n' "${ACQ_RESOLVED_BACKEND:-msb}" > "$config_file"
+      # Write only the backend key, preserving any other config (extra_kits,
+      # scope_github_token) written by `acq configure` (ADR-0028).
+      _acq_config_write_field backend "${ACQ_RESOLVED_BACKEND:-msb}"
       echo "  Wrote default backend to ${config_file}." >&2
       ;;
     *)
       echo "  Not written." >&2
       ;;
   esac
+}
+
+# ============================================================================
+# Interactive configuration (`acq configure`; ADR-0028)
+# ============================================================================
+
+# _acq_configure_show_current — print the current durable configuration
+# (config.yaml) to stderr, so `acq configure` opens by showing what is in effect.
+_acq_configure_show_current() {
+  local cfg backend extras scope
+  cfg=$(_acq_config_file)
+  backend=$(_acq_config_read_field backend)
+  extras=$(_acq_config_read_field extra_kits)
+  scope=$(_acq_config_read_field scope_github_token)
+  echo "acq: current configuration (${cfg}):" >&2
+  echo "      default backend:    ${backend:-<auto-detect>}" >&2
+  echo "      extra kits:         ${extras:-<none>}" >&2
+  echo "      scope GitHub token: ${scope:-no}" >&2
+  echo "" >&2
+  echo "      Built-in kits (always applied): ${ACQ_KIT_NAMES[*]}" >&2
+  echo "" >&2
+}
+
+# acq_configure — the interactive configuration flow. Presents the opt-in kit
+# catalog as a multiselect (pre-checked from the current config), then a confirm
+# for the GitHub-token-scoping default, and persists both to config.yaml
+# (preserving the `backend:` key). Non-interactive callers keep the current
+# config unchanged (the widgets fail-open to defaults) and only re-print it.
+#
+# The kit selection is stored as a whitespace-separated list of the CHOSEN opt-in
+# kit NAMES (e.g. "openchamber paseo") under extra_kits:, not the fully-expanded
+# git refs — the ref is rebuilt from PATTERNS_KIT_REF at apply time so a later pin
+# bump moves configured kits forward automatically. A user's own custom refs (set
+# via ACQ_EXTRA_KITS) are layered separately and are not managed here.
+acq_configure() {
+  _acq_configure_show_current
+
+  # Non-interactive (CI / piped / ACQ_NO_PROMPT): make NO changes — just show the
+  # current config above and return. Writing here would clobber a hand-edited or
+  # previously-configured file with the widget defaults.
+  if ! _acq_prompt_interactive; then
+    echo "acq: non-interactive; configuration unchanged." >&2
+    echo "      Run 'acq configure' from a terminal to change kits/token scoping." >&2
+    return 0
+  fi
+
+  local n="${#ACQ_OPTIN_KIT_NAMES[@]}"
+  if [ "$n" -eq 0 ]; then
+    echo "acq: no opt-in kits are available to configure." >&2
+    return 0
+  fi
+
+  # Which opt-in kits are already selected (from config), as a set of names.
+  local current_extras selected_names=""
+  current_extras=$(_acq_config_read_field extra_kits)
+
+  # Build the multiselect argument list and the defaults CSV (1-based indices of
+  # currently-selected kits).
+  local args=() defaults="" i name desc
+  i=1
+  while [ "$i" -le "$n" ]; do
+    name="${ACQ_OPTIN_KIT_NAMES[$((i-1))]}"
+    desc="${ACQ_OPTIN_KIT_DESCS[$((i-1))]}"
+    args+=("$name" "$desc")
+    # Pre-check if this kit name appears in the configured extras (word match).
+    case " $current_extras " in *" $name "*) defaults="${defaults:+$defaults,}$i" ;; esac
+    i=$((i + 1))
+  done
+
+  # Run the picker in-process (NOT via $(...)) so the shared scripted-input
+  # cursor advances into the token-scoping confirm below; read the result from
+  # the _ACQ_PROMPT_SELECTION global.
+  local chosen
+  acq_prompt_multiselect "$defaults" "${args[@]}" >/dev/null
+  chosen="$_ACQ_PROMPT_SELECTION"
+
+  # CANCELLED → leave config untouched.
+  if [ "$chosen" = "CANCELLED" ]; then
+    return 0
+  fi
+
+  # Map chosen indices back to kit names.
+  local idx
+  for idx in $chosen; do
+    case "$idx" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "$idx" -ge 1 ] && [ "$idx" -le "$n" ]; then
+      name="${ACQ_OPTIN_KIT_NAMES[$((idx-1))]}"
+      selected_names="${selected_names:+$selected_names }$name"
+    fi
+  done
+
+  # Persist the kit selection (empty removes the key).
+  _acq_config_write_field extra_kits "$selected_names"
+
+  # GitHub-token-scoping default.
+  local scope_current scope_default
+  scope_current=$(_acq_config_read_field scope_github_token)
+  case "$scope_current" in yes|y|Y) scope_default="yes" ;; *) scope_default="no" ;; esac
+  if acq_prompt_confirm "Scope a per-sandbox GitHub token by default (on create)?" "$scope_default"; then
+    _acq_config_write_field scope_github_token yes
+  else
+    _acq_config_write_field scope_github_token no
+  fi
+
+  echo "" >&2
+  echo "acq: configuration saved to $(_acq_config_file)." >&2
+  echo "      extra kits:         ${selected_names:-<none>}" >&2
+  return 0
+}
+
+# maybe_first_run_configure — on first run (no config.yaml yet) and interactive,
+# offer to run `acq configure` once. Declining still writes a minimal config
+# (an empty scope_github_token line is avoided; we write the resolved backend if
+# known, else touch the file) so the offer never repeats. Fully skipped when
+# non-interactive (CI / piped) — fail-open, preserving today's behavior.
+maybe_first_run_configure() {
+  local cfg
+  cfg=$(_acq_config_file)
+  [ -f "$cfg" ] && return 0        # already configured (or previously offered)
+  _acq_prompt_interactive || return 0   # non-interactive: skip silently
+
+  echo "acq: looks like this is your first run — let's set up your kits." >&2
+  echo "      (You can re-run this anytime with 'acq configure'.)" >&2
+  echo "" >&2
+  if acq_prompt_confirm "Configure extra kits and token scoping now?" "yes"; then
+    acq_configure
+  else
+    # Write a minimal config so the first-run offer does not repeat. Prefer the
+    # resolved backend if one is known; otherwise create an empty file.
+    if [ -n "${ACQ_RESOLVED_BACKEND:-}" ]; then
+      _acq_config_write_field backend "$ACQ_RESOLVED_BACKEND"
+    else
+      mkdir -p "$(dirname "$cfg")" 2>/dev/null && : > "$cfg" 2>/dev/null || true
+    fi
+    echo "acq: skipped. Run 'acq configure' anytime to change kits/token scoping." >&2
+  fi
+  return 0
+}
+
+# create_time_kit_picker — at `acq create`/`run` (fresh create only), offer the
+# opt-in kit picker PRE-POPULATED from the configured global defaults, so a user
+# can enable/disable a kit for THIS sandbox without changing the global default.
+# The selection is folded into ACQ_EXTRA_KITS for this invocation (as fully-
+# expanded refs), which flows through _build_kit_list and is persisted PER-SANDBOX
+# by the existing acq_cli_kits_write path (ADR-0017) — reloaded on resume by
+# acq_cli_kits_load. No global config is written here (that is `acq configure`).
+#
+# Fail-open: non-interactive (CI / piped) makes no prompt and simply lets the
+# configured defaults apply via _acq_apply_configured_extra_kits (already called
+# before provisioning). Idempotent per process.
+_ACQ_CREATE_PICKER_DONE=""
+create_time_kit_picker() {
+  [ -z "$_ACQ_CREATE_PICKER_DONE" ] || return 0
+  _ACQ_CREATE_PICKER_DONE=1
+
+  # Only prompt interactively; otherwise the configured defaults already applied.
+  _acq_prompt_interactive || return 0
+
+  local n="${#ACQ_OPTIN_KIT_NAMES[@]}"
+  [ "$n" -gt 0 ] || return 0
+
+  # Defaults = the configured global extra_kits (kit NAMES). An env-supplied
+  # ACQ_EXTRA_KITS is authoritative and NOT re-prompted (env > interactive).
+  [ -z "${ACQ_EXTRA_KITS_FROM_ENV:-}" ] || return 0
+
+  local configured args=() defaults="" i name desc
+  configured=$(_acq_config_read_field extra_kits)
+  i=1
+  while [ "$i" -le "$n" ]; do
+    name="${ACQ_OPTIN_KIT_NAMES[$((i-1))]}"
+    desc="${ACQ_OPTIN_KIT_DESCS[$((i-1))]}"
+    args+=("$name" "$desc")
+    case " $configured " in *" $name "*) defaults="${defaults:+$defaults,}$i" ;; esac
+    i=$((i + 1))
+  done
+
+  echo "acq: extra kits for this sandbox (defaults from 'acq configure'):" >&2
+  local chosen
+  chosen=$(acq_prompt_multiselect "$defaults" "${args[@]}")
+  [ "$chosen" = "CANCELLED" ] && return 0
+
+  # Map chosen indices → fully-expanded kit refs, and set ACQ_EXTRA_KITS for this
+  # invocation (replacing the configured-default application, which we override
+  # deliberately: the picker's result is authoritative for this create).
+  local refs="" idx
+  for idx in $chosen; do
+    case "$idx" in ''|*[!0-9]*) continue ;; esac
+    if [ "$idx" -ge 1 ] && [ "$idx" -le "$n" ]; then
+      name="${ACQ_OPTIN_KIT_NAMES[$((idx-1))]}"
+      refs="${refs:+$refs }$(_acq_optin_kit_ref "$name")"
+    fi
+  done
+  ACQ_EXTRA_KITS="$refs"
+  acq_debug "create-picker: ACQ_EXTRA_KITS set to: $refs"
+  return 0
 }
