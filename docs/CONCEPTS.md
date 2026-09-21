@@ -3,7 +3,7 @@ title: "acq Concepts"
 description: "Backend-neutral concepts for working with acq sandboxes (workspaces, mounts)"
 status: canonical
 tier: 2
-last_updated: "2026-08-21"
+last_updated: "2026-09-21"
 audience: "developers"
 keywords: ["acq", "concepts", "workspace", "mount", "backend-neutral", "sbx", "msb"]
 related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -220,6 +220,31 @@ scheme-less prefix so `acq` allowlists it:
 ```bash
 export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 ```
+
+### Advanced: optional OCI-engine capability kit
+
+`acq` can select an **OCI-engine capability kit** (rootless podman) as part of
+its built-in bundle so agents get an OCI-run capability (`docker run`,
+`docker compose`) from a shared, reviewable kit rather than from backend-specific
+adapter code. This is **off by default** and opt-in per invocation/session:
+
+```bash
+export ACQ_ENABLE_OCI_KIT=1
+```
+
+Values `0`/`false`/`no`/`off`/empty (case-insensitive) keep it off; anything else
+turns it on. When on, the kit is appended **after** the built-in support kits and
+**before** any extras.
+
+Why it is gated, and why it is off by default (ADR-0020/ADR-0030): moving OCI
+provisioning into an explicit, backend-neutral capability kit lets both backends
+reuse one audited path and keeps OCI out of every sandbox's default create cost.
+The patterns-side kit body is **not published yet**, so even when you opt in,
+`acq` verifies the kit is actually present and valid at the pinned patterns ref
+before adding it; if it is not, `acq` prints a single notice and continues
+without it. Until the kit path is published and live-verified, the **msb
+adapter's built-in podman provisioning remains the active OCI mechanism** — this
+opt-in is additive and changes nothing about that path today.
 
 ---
 
