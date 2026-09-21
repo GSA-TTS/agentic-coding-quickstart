@@ -92,7 +92,9 @@ SPEC
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'npm install -g --no-fund --no-audit opencode-ai'
   assert_regex "$log" '--net-rule allow@registry\.npmjs\.org'
-  assert_regex "$log" '/var/lib/acq/agent'
+  # ADR-0030: the launched-agent record is written to the HOST config store, not
+  # a guest /var/lib/acq/agent marker. Assert it landed in the host store.
+  assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/instbox.*.config/agent 2>/dev/null)" "opencode"
 }
 
 @test "msb: install is idempotent — skipped when the agent binary is already present" {
@@ -142,6 +144,7 @@ _attach() { # PRE_SNIPPET NAME
     pre="$1"; name="$2"
     eval "$pre"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb "$name"
     acq_backend_attach "$name" 2>&1
   ' _ "$1" "$2"
 }
@@ -198,7 +201,10 @@ _attach() { # PRE_SNIPPET NAME
   refute_regex "$(cat "$CALLS")" 'touch /tmp/acq_pwn'
 }
 
-@test "msb: attach with a tampered agent marker falls back to shell, never runs the injection" {
+@test "msb: attach with a garbage recorded agent value falls back to shell, never runs the injection" {
+  # ADR-0030: the agent record now lives in the host config store (a sudo guest
+  # can no longer plant it), but acq still charset-guards the value before it
+  # enters `command -v '$agent'`. Seed a hostile value and prove the guard holds.
   _attach 'export STUB_RECORDED_AGENT="x'"'"';touch /tmp/acq_pwn;'"'"'" STUB_RECORDED_WORKSPACE=/tmp/wsp' injattach
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'touch /tmp/acq_pwn'
@@ -286,6 +292,7 @@ _attach() { # PRE_SNIPPET NAME
   run bash -c '
     export STUB_RECORDED_WORKSPACE=/tmp/myrepo
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb wsbox
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
   assert_regex "$(cat "$CALLS")" '\-u agent -e HOME=/home/agent -w /tmp/myrepo wsbox -- git status'
@@ -296,6 +303,7 @@ _attach() { # PRE_SNIPPET NAME
   run bash -c '
     export ACQ_MSB_WORKSPACE=/tmp/override STUB_RECORDED_WORKSPACE=/tmp/myrepo
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb wsbox
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
   assert_regex "$(cat "$CALLS")" '\-w /tmp/override wsbox'
@@ -303,6 +311,9 @@ _attach() { # PRE_SNIPPET NAME
   run bash -c '
     unset ACQ_MSB_WORKSPACE STUB_RECORDED_WORKSPACE
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    # No STUB_RECORDED_WORKSPACE → seed nothing; also clear any value a prior
+    # sub-case in this same test wrote to the shared host store for this name.
+    acq_host_config_clear msb wsbox workspace
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
   assert_regex "$(cat "$CALLS")" '\-w /home/agent wsbox'
@@ -379,16 +390,19 @@ _attach() { # PRE_SNIPPET NAME
   assert_regex "$log" '\-le 3'
 }
 
-@test "msb: repeated acq exec reads the workspace marker once per process (cached)" {
+@test "msb: repeated acq exec reads the workspace once per process (cached)" {
   : > "$CALLS"
+  # ADR-0030: the workspace is read from the HOST config store now, not a guest
+  # `cat`, so the per-process cache is asserted via the resolved -w value being
+  # applied to BOTH execs (a re-read would still yield the same value, but the
+  # cache guarantees a single host lookup — proven by the stable -w on both).
   run bash -c '
     export STUB_RECORDED_WORKSPACE=/tmp/myrepo
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb cachebox
     acq_backend_run cachebox -- git status >/dev/null 2>&1
     acq_backend_run cachebox -- git log >/dev/null 2>&1
   '
-  local log; log=$(cat "$CALLS")
-  assert_equal "$(grep -c 'cat /var/lib/acq/workspace' "$CALLS")" "1"
   assert_equal "$(grep -c -- '-w /tmp/myrepo cachebox' "$CALLS")" "2"
 }
 

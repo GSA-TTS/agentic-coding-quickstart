@@ -390,51 +390,11 @@ case "$_msb_sub" in
         [ "${STUB_NPM_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
       *"test -f "*) exit 1 ;;       # markers absent
       *"test -s "*) exit 0 ;;       # copied files present
-      # The /var/lib/acq marker reads (agent, workspace, ssh-auth-sock,
-      # kit-env). An UNSET STUB_RECORDED_* models an ABSENT marker faithfully:
-      # a real `sh -c 'cat …'` exits 1 there, and acq runs under
-      # `set -euo pipefail`, so every reader must survive that nonzero (a
-      # sandbox from before a marker existed, or one whose feature was never
-      # configured, still has to serve every session verb). A SET-but-empty
-      # value models a present-but-empty marker (cat exits 0).
-      *"cat /var/lib/acq/agent"*)
-        [ -n "${STUB_RECORDED_AGENT+x}" ] || exit 1
-        printf '%s' "$STUB_RECORDED_AGENT" ;;
-      *"cat /var/lib/acq/workspace"*)
-        [ -n "${STUB_RECORDED_WORKSPACE+x}" ] || exit 1
-        printf '%s' "$STUB_RECORDED_WORKSPACE" ;;
-      # ADR-0021: the persisted ssh-agent guest sock marker read by
-      # _acq_msb_ssh_auth_sock_for (and, via it, run/attach/start).
-      *"cat /var/lib/acq/ssh-auth-sock"*)
-        [ -n "${STUB_RECORDED_SSH_AUTH_SOCK+x}" ] || exit 1
-        printf '%s' "$STUB_RECORDED_SSH_AUTH_SOCK" ;;
-      # The persisted kit environment[] marker (see ADR-0011). The write/reset
-      # arms keep a STATEFUL model in $STUBDIR/.kit_env so the full
-      # provision→heal→replay cycle is testable (stale-entry regression);
-      # STUB_RECORDED_KIT_ENV, when set, overrides it with fixed content
-      # (multi-line values model multiple entries). Absent/empty semantics per
-      # the marker-reads comment above.
-      *">> /var/lib/acq/kit-env"*)
-        # Append the env tokens: argv shape is `… -- sh -c '<script>' sh
-        # NAME=value…` — collect everything after the argv0 `sh` that follows
-        # the script.
-        _kes_c=0 _kes_script=0 _kes_argv0=0
-        for a in "$@"; do
-          if [ "$_kes_argv0" = 1 ]; then printf '%s\n' "$a" >>"$STUBDIR/.kit_env"
-          elif [ "$_kes_script" = 1 ] && [ "$a" = "sh" ]; then _kes_argv0=1
-          elif [ "$_kes_c" = 1 ]; then _kes_script=1; _kes_c=0
-          elif [ "$a" = "-c" ]; then _kes_c=1
-          fi
-        done ;;
-      *"rm -f /var/lib/acq/kit-env"*) rm -f "$STUBDIR/.kit_env" ;;
-      *"cat /var/lib/acq/kit-env"*)
-        if [ -n "${STUB_RECORDED_KIT_ENV+x}" ]; then
-          printf '%s' "$STUB_RECORDED_KIT_ENV"
-        elif [ -f "$STUBDIR/.kit_env" ]; then
-          cat "$STUBDIR/.kit_env"
-        else
-          exit 1
-        fi ;;
+      # ADR-0030 migrated agent/workspace/ssh-auth-sock/kit-env OFF the guest
+      # /var/lib/acq markers onto the HOST config store (acq_host_config_*), which
+      # acq now reads directly on the host — no `msb exec cat` happens for them.
+      # The STUB_RECORDED_* knobs are seeded into the host store instead (see
+      # seed_host_config below), so no guest-cat arm remains for them here.
       *) : ;;
     esac ;;
   ssh)
@@ -586,3 +546,26 @@ load_acq() {
   # failing command via errexit inherited into the @test body, so disabling it
   # in setup() makes every assertion in the suite pass vacuously (#381 review).
 }
+
+# seed_host_config BACKEND NAME — populate the ADR-0030 host config store for a
+# sandbox from the STUB_RECORDED_* env knobs, so tests that exercise the session
+# paths (attach/run/shell) find the agent/workspace/ssh-auth-sock/kit-env acq now
+# reads from the HOST (no guest `msb exec cat` happens for them anymore). Only a
+# SET knob is written (an unset knob models an absent value → acq's documented
+# fallback). Requires acq_host_config_* to be defined (source common.sh first).
+# Usage (inside a test subshell, after sourcing common.sh/msb.sh):
+#   seed_host_config msb "$name"
+seed_host_config() {
+  local backend="${1:-msb}" name="${2:-}"
+  [ -n "$name" ] || return 0
+  command -v acq_host_config_write >/dev/null 2>&1 || return 0
+  [ -n "${STUB_RECORDED_AGENT+x}" ] && acq_host_config_write "$backend" "$name" agent "$STUB_RECORDED_AGENT"
+  [ -n "${STUB_RECORDED_WORKSPACE+x}" ] && acq_host_config_write "$backend" "$name" workspace "$STUB_RECORDED_WORKSPACE"
+  [ -n "${STUB_RECORDED_SSH_AUTH_SOCK+x}" ] && acq_host_config_write "$backend" "$name" ssh-auth-sock "$STUB_RECORDED_SSH_AUTH_SOCK"
+  [ -n "${STUB_RECORDED_KIT_ENV+x}" ] && acq_host_config_write "$backend" "$name" kit-env "$STUB_RECORDED_KIT_ENV"
+  return 0
+}
+# Export so a test's `run bash -c '…'` subshell (which does NOT re-source this
+# stub library) still sees the helper. The ACQ_PROVENANCE_DIR/ACQ_STATE_DIR env
+# exports carry the store location into that subshell too.
+export -f seed_host_config 2>/dev/null || true

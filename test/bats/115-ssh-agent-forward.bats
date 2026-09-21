@@ -144,13 +144,16 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   local log; log=$(cat "$CALLS")
   assert_regex "$log" "socat UNIX-LISTEN:'/home/agent/\.acq/ssh-agent\.sock'"
   assert_regex "$log" "VSOCK-CONNECT:2:'3552'"
-  assert_regex "$log" '/var/lib/acq/ssh-auth-sock'
+  # ADR-0030: the sock path is recorded in the HOST config store, not a guest
+  # /var/lib/acq/ssh-auth-sock marker.
+  assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/sbox.*.config/ssh-auth-sock 2>/dev/null)" "/home/agent/.acq/ssh-agent.sock"
 }
 
 @test "vsock(10c9): the start path reads the marker and starts the bridge; empty marker starts none" {
   run bash -c '
     export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb sbox
     _ACQ_MSB_SSH_AGENT_FORWARDING=0
     _acq_msb_start_ssh_agent_bridge sbox >/dev/null 2>&1
     wait
@@ -160,8 +163,9 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   run bash -c '
     export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb sbox2
     _ACQ_MSB_SSH_AGENT_FORWARDING=0
-    _acq_msb_start_ssh_agent_bridge sbox >/dev/null 2>&1
+    _acq_msb_start_ssh_agent_bridge sbox2 >/dev/null 2>&1
     wait
   '
   refute_regex "$(cat "$CALLS")" 'socat UNIX-LISTEN'
@@ -192,13 +196,15 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   run bash -c '
     export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb sbox
     acq_backend_run sbox -- git status >/dev/null 2>&1
   '
   assert_regex "$(cat "$CALLS")" 'SSH_AUTH_SOCK=/home/agent/\.acq/ssh-agent\.sock'
   : > "$CALLS"
   run bash -c '
-    export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
+    export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock STUB_RECORDED_AGENT=opencode STUB_AGENT_PRESENT=1
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb sbox
     ( _acq_msb_attach sbox </dev/null >/dev/null 2>&1 )
   '
   assert_regex "$(cat "$CALLS")" 'SSH_AUTH_SOCK='
@@ -206,7 +212,8 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   run bash -c '
     export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_run sbox -- git status >/dev/null 2>&1
+    seed_host_config msb sboxempty
+    acq_backend_run sboxempty -- git status >/dev/null 2>&1
   '
   refute_regex "$(cat "$CALLS")" 'SSH_AUTH_SOCK='
 }
@@ -309,7 +316,8 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   '
   local log; log=$(cat "$CALLS")
   assert_regex "$log" "socat UNIX-LISTEN:'/home/agent/\.acq/ssh-agent\.sock'"
-  assert_regex "$log" '/var/lib/acq/ssh-auth-sock'
+  # ADR-0030: the sock path is recorded in the HOST config store, not a guest marker.
+  assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/reattachbox.*.config/ssh-auth-sock 2>/dev/null)" "/home/agent/.acq/ssh-agent.sock"
   # A running sandbox must NOT be routed through acq_backend_start.
   refute_regex "$log" 'msb start'
 }
