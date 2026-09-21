@@ -678,7 +678,7 @@ _acq_sbx_kit_add() {
   case "$err" in
     # Heuristic: the classification is pinned to sbx 0.38's wording (see ADR-0009
     # and the doc link above). This only ever runs when sbx is already confirmed
-    # >= MIN_SBX_VERSION (0.38.0) — acq_backend_prepare enforces that version floor
+    # >= MIN_SBX_VERSION (0.39.0) — acq_backend_prepare enforces that version floor
     # at every dispatch entry point before any heal — so the match is bounded to
     # the versions whose wording it targets, not applied blindly to arbitrary
     # future/older sbx. `setup.startup` is the primary discriminator; the prose
