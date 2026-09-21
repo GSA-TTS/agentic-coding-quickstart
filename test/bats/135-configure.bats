@@ -184,6 +184,33 @@ _cfg_src() {
   assert_line 'off='
 }
 
+@test "prompt: rows are fit to the terminal width (no soft-wrap desync)" {
+  # A row longer than the terminal width used to soft-wrap onto a second physical
+  # line, which desynced the up-by-N-rows repaint (rows visibly duplicated and
+  # pushed others down). Assert each rendered row's VISIBLE width is <= COLUMNS.
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    set +e
+    export COLUMNS=60
+    long="this is a deliberately very long description that exceeds sixty display columns easily"
+    ACQ_PROMPT_TEST_INPUT="SPACE ENTER" \
+      acq_prompt_multiselect 1 "" "locked-kit" "$long" "toggle-kit" "$long" 2>/tmp/acq-rows.txt >/dev/null
+    # Widest visible row, measured in CHARACTERS (wc -m, locale-aware) so the
+    # multibyte cursor/ellipsis glyphs count as one display column each — matching
+    # the widget'"'"'s own char-based fit. Strip escapes and blank lines first.
+    max=0
+    while IFS= read -r ln; do
+      w=$(printf "%s" "$ln" | LC_ALL=C.UTF-8 wc -m)
+      [ "$w" -gt "$max" ] && max="$w"
+    done < <(sed "s/\x1b\[[0-9;?]*[A-Za-z]//g" /tmp/acq-rows.txt | grep -v "^$")
+    rm -f /tmp/acq-rows.txt
+    if [ "$max" -le "$COLUMNS" ]; then echo "FIT ok ($max <= $COLUMNS)"; else echo "FIT BAD ($max > $COLUMNS)"; fi
+    true
+  '
+  assert_success
+  assert_output --partial 'FIT ok'
+}
+
 @test "prompt: confirm honors scripted y/n and the default" {
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
@@ -251,9 +278,10 @@ _cfg_src() {
   # confirm then reads the next token (n).
   run env ACQ_BACKEND=sbx ACQ_PROMPT_TEST_INPUT="SPACE ENTER n" "$ACQ" configure
   assert_success
-  # Built-in kits appear inline in the picker, tagged, instead of a separate banner.
-  assert_output --partial '(always applied)'
-  assert_output --partial 'zscaler-ca-certificate'
+  # Built-in kits appear inline in the picker (frozen rows), not in a separate
+  # banner. The trailing "(always applied)" tag may be truncated at narrow widths,
+  # so assert on the always-present frozen row prefix + the removed banner.
+  assert_output --partial '[x] zscaler-ca-certificate'
   refute_output --partial 'Built-in kits (always applied):'
   run cat "$XDG_CONFIG_HOME/acq/config.yaml"
   assert_line 'extra_kits: openchamber'

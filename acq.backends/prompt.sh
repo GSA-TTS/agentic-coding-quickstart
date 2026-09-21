@@ -78,6 +78,44 @@ _acq_prompt_color() {
   return 0
 }
 
+# _acq_prompt_term_cols — best-effort terminal width (columns). Falls back to 80
+# when it can't be determined (non-TTY, no COLUMNS, no tput). Used to keep each
+# rendered row on exactly ONE physical line: the redraw math moves the cursor up
+# by the row count, so a row that soft-wraps to a second line would desync the
+# repaint (the classic "row duplicates and pushes others down" artifact).
+_acq_prompt_term_cols() {
+  local c=""
+  if [ -n "${COLUMNS:-}" ]; then
+    c="$COLUMNS"
+  elif command -v tput >/dev/null 2>&1; then
+    c=$(tput cols 2>/dev/null)
+  fi
+  case "$c" in
+    ''|*[!0-9]*) c=80 ;;
+  esac
+  [ "$c" -ge 20 ] || c=80
+  printf '%s' "$c"
+}
+
+# _acq_prompt_fit PLAIN MAXCOLS — echo PLAIN truncated to at most MAXCOLS display
+# columns, appending a single-column ellipsis '…' when truncated. PLAIN MUST be
+# free of escape sequences (callers colorize AFTER fitting). This uses byte/char
+# length as a proxy for width — adequate here because all labels/descriptions are
+# ASCII plus the odd box char, and it guarantees the printed cell never exceeds
+# the terminal width, which is what keeps the no-wrap invariant.
+_acq_prompt_fit() {
+  local s="$1" max="$2"
+  # Character count (locale-aware via ${#s} in bash). If it fits, return as-is.
+  if [ "${#s}" -le "$max" ]; then
+    printf '%s' "$s"
+    return 0
+  fi
+  # Reserve one column for the ellipsis.
+  local keep=$((max - 1))
+  [ "$keep" -lt 0 ] && keep=0
+  printf '%s…' "${s:0:keep}"
+}
+
 # Populate B/R/YEL/GRN/RED/DIM/CYAN for the duration of a widget. Mirrors the
 # install.sh palette (B/R/YEL/GRN/RED) plus a dim + cyan accent for the cursor
 # row. Empty strings when color is disabled, so every printf is color-safe.
@@ -213,7 +251,10 @@ acq_prompt_multiselect() {
   # Cursor starts on the first toggleable row (locked rows are display-only). If
   # there are no toggleable rows, cursor stays at first_toggle (== n+1) and the
   # only actions are ENTER/QUIT.
-  local cursor="$first_toggle" key i mark row line
+  local cursor="$first_toggle" key i mark line plain cols
+  # Column budget: every row must fit on ONE physical line or the up-by-N-rows
+  # repaint desyncs (a wrapped row visually duplicates and shoves others down).
+  cols=$(_acq_prompt_term_cols)
 
   # Hide the cursor for the duration and ensure it is restored on any exit path.
   local _prior_int _prior_term
@@ -229,25 +270,37 @@ acq_prompt_multiselect() {
     if [ "$rendered" -gt 0 ]; then
       printf '\033[%dA' "$rendered" >&2
     else
-      printf '%s%s?%s %sSelect kits%s %s(dimmed rows are always applied · ↑/↓ move · SPACE toggle · ENTER confirm · q cancel)%s\n' \
-        "$_P_B" "$_P_GRN" "$_P_R" "$_P_B" "$_P_R" "$_P_DIM" "$_P_R" >&2
+      # Header is printed ONCE, above the repainted block, so the up-by-N repaint
+      # never touches it. Fit it to one physical line too (a wrapped header would
+      # otherwise shift everything below it by the wrap count).
+      local _hdr
+      _hdr=$(_acq_prompt_fit "? Select kits (dimmed rows are always applied · ↑/↓ move · SPACE toggle · ENTER confirm · q cancel)" "$cols")
+      printf '%s%s%s\n' "$_P_B" "$_hdr" "$_P_R" >&2
     fi
     i=1
     while [ "$i" -le "$n" ]; do
+      # Assemble each row as ONE plain string (checkbox + label + description
+      # [+ tag]), fit it to the terminal width so it never soft-wraps, THEN wrap
+      # the whole thing in a single color span. Fitting the plain text (color
+      # codes are zero-width) is what keeps every row to exactly one physical
+      # line — the invariant the up-by-N repaint depends on. A single span per
+      # row (rather than per-field tinting) keeps that guarantee simple and
+      # avoids stray attributes bleeding across a truncation boundary.
       if [ "$i" -le "$locked_n" ]; then
-        # Frozen row: always checked, fully dimmed, tagged, no cursor, no toggle.
-        line="  ${_P_DIM}[x] ${labels[$((i-1))]}  ${descs[$((i-1))]} (always applied)${_P_R}"
+        plain="  [x] ${labels[$((i-1))]}  ${descs[$((i-1))]} (always applied)"
+        line="${_P_DIM}$(_acq_prompt_fit "$plain" "$cols")${_P_R}"
       else
-        if _acq_prompt_in_list "$i" $checked; then
-          mark="${_P_GRN}[x]${_P_R}"
-        else
-          mark="[ ]"
-        fi
+        if _acq_prompt_in_list "$i" $checked; then mark="[x]"; else mark="[ ]"; fi
         if [ "$i" -eq "$cursor" ]; then
-          row="${_P_CYAN}${_P_B}❯ ${mark} ${labels[$((i-1))]}${_P_R}"
-          line="${row}  ${_P_DIM}${descs[$((i-1))]}${_P_R}"
+          plain="❯ ${mark} ${labels[$((i-1))]}  ${descs[$((i-1))]}"
+          line="${_P_CYAN}${_P_B}$(_acq_prompt_fit "$plain" "$cols")${_P_R}"
         else
-          line="  ${mark} ${labels[$((i-1))]}  ${_P_DIM}${descs[$((i-1))]}${_P_R}"
+          plain="  ${mark} ${labels[$((i-1))]}  ${descs[$((i-1))]}"
+          if [ "$mark" = "[x]" ]; then
+            line="${_P_GRN}$(_acq_prompt_fit "$plain" "$cols")${_P_R}"
+          else
+            line="$(_acq_prompt_fit "$plain" "$cols")"
+          fi
         fi
       fi
       # Clear the line first (\033[K) so a shorter repaint can't leave residue.
