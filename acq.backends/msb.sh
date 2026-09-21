@@ -1896,8 +1896,11 @@ _acq_msb_exec_install() {
   eval "_ef=(\${${_eflagn}[@]+\"\${${_eflagn}[@]}\"})"
 
   local marker
-  marker="/var/lib/acq/install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
-  if _acq_msb_cli exec "$_name" -u 0 -- sh -c "test -f '$marker'" </dev/null >/dev/null 2>&1; then
+  # Host-authoritative run-once gate (ADR-0030): a presence key in the host config
+  # store, keyed by the command's cksum, instead of a guest `touch`/`test -f` a
+  # passwordless-sudo agent could forge to SUPPRESS this install step.
+  marker="install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
+  if acq_host_config_has msb "$_name" "$marker"; then
     acq_debug "msb cmd[install] already done (marker hit): $*"
     return 0
   fi
@@ -1908,7 +1911,7 @@ _acq_msb_exec_install() {
     return 0
   }
   acq_debug "msb cmd[install] DONE: $*"
-  _acq_msb_cli exec "$_name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" </dev/null >/dev/null 2>&1 || true
+  acq_host_config_write msb "$_name" "$marker" 1 || true
 }
 
 # _acq_msb_exec_run NAME PHASE USER BACKGROUND UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV...
@@ -3435,8 +3438,8 @@ _acq_msb_install_agent() {
     return 0
   fi
 
-  local marker="/var/lib/acq/agent-installed-${agent}"
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+  local marker="agent-installed-${agent}"
+  if acq_host_config_has msb "$name" "$marker"; then
     return 0
   fi
 
@@ -3457,7 +3460,7 @@ _acq_msb_install_agent() {
 
   # Verify the binary is now on PATH before recording the marker.
   if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
-    _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+    acq_host_config_write msb "$name" "$marker" 1 || true
     acq_debug "msb: agent '$agent' installed and on PATH in $name"
   else
     echo "acq(msb): warning: installed '$agent' but it is not on PATH in '$name'." >&2
@@ -3487,8 +3490,11 @@ _acq_msb_install_agent() {
 # _acq_msb_exec_command) with HOME exported.
 _acq_msb_ensure_agent_user() {
   local name="$1"
-  local marker="/var/lib/acq/agent-user-ready"
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+  # Host-authoritative run-once gate (ADR-0030): the user/sudoers setup is gated
+  # on a host config key, not a guest marker a passwordless-sudo agent could
+  # pre-create to SKIP the setup.
+  local marker="agent-user-ready"
+  if acq_host_config_has msb "$name" "$marker"; then
     # The user exists from an earlier run, but its login shell may predate the
     # passwd-shell setup: re-sync it so an existing /bin/sh agent user
     # is healed to bash on its next run, not left behind.
@@ -3572,7 +3578,7 @@ _acq_msb_ensure_agent_user() {
     return 1
   }
   _acq_msb_ensure_agent_shell "$name"
-  _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+  acq_host_config_write msb "$name" "$marker" 1 || true
 }
 
 # _acq_msb_ensure_agent_shell NAME — align the agent's login shell with what
@@ -4109,8 +4115,8 @@ _acq_msb_ensure_oci() {
   # and it is also re-applied on restart from acq_backend_start.
   _acq_msb_grant_oci_devs "$name"
 
-  local marker="/var/lib/acq/oci-ready"
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+  local marker="oci-ready"
+  if acq_host_config_has msb "$name" "$marker"; then
     return 0
   fi
 
@@ -4279,7 +4285,8 @@ EOF
       # Best-effort: mark ready so we do not re-run the (network-bound) install on
       # every provision/restart. (The /dev/net/tun grant and config writes above
       # are cheap + idempotent and re-run each pass regardless of this marker.)
-      _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+      # Host-authoritative (ADR-0030).
+      acq_host_config_write msb "$name" "$marker" 1 || true
       acq_debug "msb: OCI engine (rootless podman) ready in $name"
       return 0
     fi

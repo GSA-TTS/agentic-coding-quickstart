@@ -304,12 +304,6 @@ case "$_msb_sub" in
       # models a bash-less base. MUST precede the generic command-v arm.
       *"command -v bash"*)
         [ "${STUB_GUEST_BASH:-1}" = "0" ] && exit 1 || printf '/bin/bash\n' ;;
-      # The agent-user-ready marker gate. Default ABSENT (exit 1, like the
-      # generic test -f arm) so provision runs the full block;
-      # STUB_AGENT_USER_READY=1 models an already-provisioned sandbox so the
-      # heal's marker-hit shell-sync path can be exercised.
-      *"test -f '/var/lib/acq/agent-user-ready'"*)
-        [ "${STUB_AGENT_USER_READY:-0}" = "1" ] && exit 0 || exit 1 ;;
       # The OCI-engine setup is TWO msb-exec `sh -c` blocks: (1) a root (`-u 0`)
       # install/config block carrying `/usr/local/bin/docker`, and (2) a rootless
       # verify block (`-u agent`) that runs a `podman build` layer-mount self-test
@@ -323,12 +317,10 @@ case "$_msb_sub" in
         [ "${STUB_OCI_SETUP_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
       *"acq-oci-selftest"*)
         [ "${STUB_OCI_VERIFY_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
-      # The OCI-ready marker probe (`test -f '/var/lib/acq/oci-ready'`) gates the
-      # setup block. Match it BEFORE the generic `test -f` (markers absent) case
-      # below. Default ABSENT (exit 1) so the OCI step runs; STUB_OCI_READY=1
-      # makes the marker present (exit 0) to exercise the marker-gated skip.
-      *"test -f '/var/lib/acq/oci-ready'"*)
-        [ "${STUB_OCI_READY:-0}" = "1" ] && exit 0 || exit 1 ;;
+      # ADR-0030: the agent-user-ready and oci-ready run-once gates moved OFF the
+      # guest /var/lib/acq markers onto the HOST config store (acq_host_config_*).
+      # Tests seed those via seed_host_config_gates (from STUB_AGENT_USER_READY /
+      # STUB_OCI_READY), so no guest `test -f` arm remains for them here.
       # `command -v <agent>` (agent-presence probe): controllable so the install
       # path can be exercised. By default the agent is ABSENT (exit 1) so install
       # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq
@@ -569,3 +561,18 @@ seed_host_config() {
 # stub library) still sees the helper. The ACQ_PROVENANCE_DIR/ACQ_STATE_DIR env
 # exports carry the store location into that subshell too.
 export -f seed_host_config 2>/dev/null || true
+
+# seed_host_config_gates BACKEND NAME — seed the ADR-0030 presence-gate keys
+# (agent-user-ready, oci-ready) from STUB_AGENT_USER_READY / STUB_OCI_READY, so a
+# test can model an already-provisioned sandbox (the run-once gates now live in
+# the host config store, not guest `touch`/`test -f` markers). Only a truthy knob
+# writes the key. Requires acq_host_config_* (source common.sh first).
+seed_host_config_gates() {
+  local backend="${1:-msb}" name="${2:-}"
+  [ -n "$name" ] || return 0
+  command -v acq_host_config_write >/dev/null 2>&1 || return 0
+  [ "${STUB_AGENT_USER_READY:-0}" = "1" ] && acq_host_config_write "$backend" "$name" agent-user-ready 1
+  [ "${STUB_OCI_READY:-0}" = "1" ] && acq_host_config_write "$backend" "$name" oci-ready 1
+  return 0
+}
+export -f seed_host_config_gates 2>/dev/null || true

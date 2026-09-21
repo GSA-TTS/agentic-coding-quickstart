@@ -35,6 +35,7 @@ _provision() { # NAME AGENT PRE_SNIPPET [KITDIR]
     # NOTE: the stub must NOT read a variable named "kitdir" — provision declares
     # a `local kitdir`, which dynamically shadows it at stub-call time.
     _acq_msb_fetch_kit() { printf "%s\n" "$stub_kitdir"; }
+    seed_host_config_gates msb "$name"
     acq_backend_provision "$name" "$agent" /tmp 2>&1
     printf "PROVISION_RC=%s\n" "$?"
   ' _ "$name" "$agent" "$pre" "$kitdir"
@@ -145,6 +146,7 @@ _attach() { # PRE_SNIPPET NAME
     eval "$pre"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     seed_host_config msb "$name"
+    seed_host_config_gates msb "$name"
     acq_backend_attach "$name" 2>&1
   ' _ "$1" "$2"
 }
@@ -216,7 +218,8 @@ _attach() { # PRE_SNIPPET NAME
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'PODMAN_PKGS='
   assert_regex "$log" '/usr/local/bin/docker'
-  assert_regex "$log" "touch '/var/lib/acq/oci-ready'"
+  # ADR-0030: the oci-ready gate is recorded in the host config store.
+  assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/ocibox.*.config/oci-ready 2>/dev/null)" "1"
   assert_regex "$log" '/etc/containers/storage\.conf'
   assert_regex "$log" 'driver = ..vfs..'
   assert_regex "$log" 'mount_program'
@@ -258,7 +261,9 @@ _attach() { # PRE_SNIPPET NAME
 @test "msb: the OCI setup is skipped when the ready marker already exists" {
   _provision ocirdybox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ociready-secrets" STUB_OCI_READY=1'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "test -f '/var/lib/acq/oci-ready'"
+  # ADR-0030: the oci-ready gate is a host config key now, seeded by
+  # seed_host_config_gates from STUB_OCI_READY; a hit skips the setup block.
+  assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/ocirdybox.*.config/oci-ready 2>/dev/null)" "1"
   refute_regex "$log" 'PODMAN_PKGS='
   refute_regex "$log" '/usr/local/bin/docker'
 }
@@ -274,7 +279,8 @@ _attach() { # PRE_SNIPPET NAME
   _provision ocifailbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ocifail-secrets" STUB_OCI_SETUP_FAIL=1'
   assert_success
   assert_output --partial 'could not provision an OCI engine'
-  refute_regex "$(cat "$CALLS")" "touch '/var/lib/acq/oci-ready'"
+  # The host-store oci-ready key must NOT be written on a failed setup.
+  [ ! -f "$ACQ_PROVENANCE_DIR"/msb/ocifailbox.*.config/oci-ready ]
 }
 
 @test "msb: an unsafe ACQ_MSB_PODMAN_PKGS is refused and never reaches an exec" {
@@ -417,10 +423,12 @@ _attach() { # PRE_SNIPPET NAME
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     # shellcheck disable=SC2034  # consumed by the sourced acq_backend_ensure_kits_applied
     ACQ_CLI_KITS=()
+    seed_host_config_gates msb healshbox
     acq_backend_ensure_kits_applied healshbox >/dev/null 2>&1
   '
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "test -f '/var/lib/acq/agent-user-ready'"
+  # ADR-0030: agent-user-ready is a host config key; a hit skips useradd but
+  # still re-syncs the login shell (the heal path this test asserts).
   assert_regex "$log" 'acq-login-profile.* sh /bin/bash'
   refute_regex "$log" 'useradd'
 }
