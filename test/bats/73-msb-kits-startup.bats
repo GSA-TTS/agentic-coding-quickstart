@@ -20,7 +20,9 @@ load 'helper'
 @test "msb: applies ALL kit files and ALL kit commands (no stdin-drain drop)" {
   : > "$CALLS"
   run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/multi-secrets"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
@@ -57,8 +59,8 @@ SPEC
     _acq_msb_apply_kit_dir multibox "$mk"
   '
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb copy ${STUBDIR}/multikit/files/home/file_one multibox:/home/agent/file_one"
-  assert_regex "$log" "msb copy ${STUBDIR}/multikit/files/home/file_two multibox:/home/agent/file_two"
+  assert_regex "$log" "msb copy $(host_path "${STUBDIR}/multikit/files/home/file_one") multibox:/home/agent/file_one"
+  assert_regex "$log" "msb copy $(host_path "${STUBDIR}/multikit/files/home/file_two") multibox:/home/agent/file_two"
   assert_regex "$log" 'echo CMD_ALPHA'
   assert_regex "$log" 'echo CMD_BETA'
 }
@@ -176,8 +178,10 @@ _staged_body() { cat "$(find "$STUBDIR/$1" -type f 2>/dev/null | head -n1)" 2>/d
 @test "0017: a startup command stages a create-time --script-path with a faithful body" {
   : > "$CALLS"
   run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/su-secrets"
     export ACQ_MSB_KEEP_STARTUP_STAGE=1 ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/startup-stage"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
@@ -208,7 +212,7 @@ SPEC
   assert_regex "$body" 'echo STARTUP_MARKER_ALPHA'
   assert_regex "$body" 'runuser -u agent'
   assert_regex "$body" 'HOME=/home/agent'
-  assert_regex "$log" "--script-path acq-startup:${su_file}"
+  assert_regex "$log" "--script-path acq-startup:$(host_path "$su_file")"
 }
 
 @test "0017: a background startup command is staged with nohup detach" {
