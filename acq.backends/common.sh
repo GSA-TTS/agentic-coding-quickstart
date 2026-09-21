@@ -643,20 +643,48 @@ workspace_paths() {
   done
 }
 
-# Canonicalize a filesystem path to its real, symlink-free absolute form.
-# Echoes the resolved path, or the input unchanged if it cannot be resolved
-# (e.g. a nonexistent path, or no realpath/readlink available). Pure stdout;
-# never mutates the filesystem. Used so a backend mounts the REAL host path —
-# e.g. on macOS $TMPDIR is a /var -> /private/var symlink, and msb cannot mount
-# the symlinked form (see docs/BACKEND_GUIDE.md, msb workspace mounting).
+# Canonicalize a filesystem path to its real, symlink-free absolute form, in the
+# running shell's OWN (POSIX) vocabulary. Echoes the resolved path, or the input
+# unchanged if it cannot be resolved (e.g. a nonexistent path, or no
+# realpath/readlink available). Pure stdout; never mutates the filesystem. Used
+# so a backend mounts the REAL host path — e.g. on macOS $TMPDIR is a
+# /var -> /private/var symlink, and msb cannot mount the symlinked form (see
+# docs/BACKEND_GUIDE.md, msb workspace mounting).
+#
+# On MSYS/Cygwin this is also the GUEST form: a native tool (git.exe) may report
+# a drive-form path (C:/...), but the guest is a Linux microVM where a drive-form
+# path is not absolute. `cygpath -u` maps drive-form to the shell/guest form
+# (/c/...); cygpath only exists on MSYS/Cygwin, so POSIX hosts are unaffected.
+# For the HOST form a native tool needs, use host_path (below). See ADR-0029.
 canonicalize_path() {
-  local p="${1:-}"
+  local p="${1:-}" _out=""
   [ -n "$p" ] || return 0
   if command -v realpath >/dev/null 2>&1; then
-    realpath "$p" 2>/dev/null && return 0
+    _out=$(realpath "$p" 2>/dev/null) || _out=""
+  elif command -v readlink >/dev/null 2>&1; then
+    _out=$(readlink -f "$p" 2>/dev/null) || _out=""
   fi
-  if command -v readlink >/dev/null 2>&1; then
-    readlink -f "$p" 2>/dev/null && return 0
+  [ -n "$_out" ] && p="$_out"
+  if command -v cygpath >/dev/null 2>&1; then
+    _out=$(cygpath -u "$p" 2>/dev/null) || _out=""
+    [ -n "$_out" ] && p="$_out"
+  fi
+  printf '%s\n' "$p"
+}
+
+# host_path — echo PATH in the form a NATIVE host tool expects: a Windows
+# drive-form path (C:/...) under MSYS/Cygwin, unchanged on POSIX. Companion to
+# canonicalize_path: canonicalize a value that names something INSIDE the guest
+# (a mount target, a working directory, a guest env value); host_path a value a
+# native host tool must resolve on the host filesystem (a mount SOURCE, a file
+# to copy, a host socket, a host PEM). On POSIX the two are identical. See
+# ADR-0029.
+host_path() {
+  local p="${1:-}" _out=""
+  [ -n "$p" ] || return 0
+  if command -v cygpath >/dev/null 2>&1; then
+    _out=$(cygpath -m "$p" 2>/dev/null) || _out=""
+    [ -n "$_out" ] && p="$_out"
   fi
   printf '%s\n' "$p"
 }
@@ -2302,6 +2330,16 @@ _report_usai_unresolved() {
   echo >&2
 }
 
+# Diagnose a USAi value that is stored but cannot be presented by the active
+# backend (an undecryptable DPAPI envelope written under a different Windows
+# profile, or a damaged store). Reporting "not set" here would send the user to
+# create a fresh key when the real problem is the stored one.
+_report_usai_unreadable() {
+  echo "acq: a USAi API key is stored for this user, but it cannot be read or decrypted here." >&2
+  echo "     It may have been stored under a different user or host, or the stored value is damaged." >&2
+  echo "     Re-set it with 'acq secret set -g usai' (or remove it with 'acq secret rm -g usai')." >&2
+}
+
 # acq_key_injectable SERVICE [SANDBOX] -> 0 if the ACTIVE BACKEND can inject
 # SERVICE for that scope, else 1. Single source of truth for the "is this
 # credential actually usable at provision?" predicate, composed of two checks:
@@ -2354,6 +2392,16 @@ ensure_key_present() {
   # sbx does NOT read host env at provision, so this short-circuit is msb-only.
   if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ] && [ -n "${USAI_API_KEY:-}" ]; then
     return 0
+  fi
+
+  # Present-but-unreadable: a value is stored for this user but cannot be read or
+  # decrypted (e.g. a DPAPI envelope written under a different Windows profile,
+  # or a damaged store). Reporting "not set" here would send the user to create a
+  # fresh key when the real problem is the stored one — fail closed with the real
+  # diagnosis instead.
+  if acq_secret_unreadable usai "$scope_sandbox"; then
+    _report_usai_unreadable
+    return 1
   fi
 
   # Non-interactive (CI / piped stdin): no one can answer the prompt below, so

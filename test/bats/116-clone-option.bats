@@ -57,8 +57,9 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   line=$(_create_line msb)
 
   # The primary mount is scratch -> original path, rw; the raw path never
-  # mounts, and the acq-owned flag never reaches the backend argv.
-  assert_regex "$line" "--volume $(canonicalize_path "$scratch"):${repo}( |\$)"
+  # mounts, and the acq-owned flag never reaches the backend argv. The mount
+  # SOURCE is the host form and the TARGET the guest form (ADR-0029).
+  assert_regex "$line" "--volume $(host_path "$scratch"):${repo}( |\$)"
   refute_regex "$line" "--volume ${repo}:${repo}"
   refute_regex "$line" '--clone'
 
@@ -144,9 +145,9 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   local second="$STUBDIR/secondlib"; mkdir -p "$second"
   _msb_clone -- create shell --clone "$CLONEPROJ" "$second:ro"
   load_acq
-  local line sec repo
-  line=$(_create_line msb); sec=$(canonicalize_path "$second"); repo=$(canonicalize_path "$CLONEPROJ")
-  assert_regex "$line" "--volume ${sec}:${sec}:ro"
+  local line sec sechost repo
+  line=$(_create_line msb); sec=$(canonicalize_path "$second"); sechost=$(host_path "$second"); repo=$(canonicalize_path "$CLONEPROJ")
+  assert_regex "$line" "--volume ${sechost}:${sec}:ro"
   refute_regex "$line" "--volume ${sec}:${sec}( |\$)"
   refute_regex "$line" "--volume ${repo}:${repo}"
 }
@@ -312,7 +313,7 @@ _msb_clone_isolated() { # ARGS...
 @test "clone(msb #453): a source with no origin leaves the clone's remote untouched" {
   _msb_clone_isolated create shell --clone "$CLONEPROJ"
   local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
-  [ "$(git config --file "$scratch/.git/config" remote.origin.url)" = "$(canonicalize_path "$CLONEPROJ")" ]
+  [ "$(git config --file "$scratch/.git/config" remote.origin.url)" = "$(host_path "$CLONEPROJ")" ]
   run git config --file "$scratch/.git/config" remote.origin.pushurl
   assert_failure
 }
