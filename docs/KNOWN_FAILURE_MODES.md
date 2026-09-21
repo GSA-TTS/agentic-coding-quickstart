@@ -2131,6 +2131,79 @@ amending the wrong branch.
 
 ---
 
+## 39. Windows preview: `bash.exe` resolves to the WSL shim, WHP is not a feature flag, and the execution policy blocks scripts
+
+### Symptoms
+
+- On a Windows 11 host, `acq.cmd` / `acq.ps1` delegates into a WSL distro instead of Git Bash:
+  `/bin/bash: /c/Users/.../acq: No such file or directory`.
+- `install.ps1` aborts for a non-elevated user with
+  `Get-WindowsOptionalFeature : The requested operation requires elevation.`
+  instead of WHP guidance.
+- `msb doctor` reports the host ready and sandboxes boot, yet
+  `Get-WindowsOptionalFeature -FeatureName HypervisorPlatform` reports `Disabled`.
+- On a default Windows 11 client, `.\install.ps1` and the installed `acq`
+  command fail with
+  `... cannot be loaded because running scripts is disabled on this system`
+  (`PSSecurityException`), while `irm ... | iex` works.
+
+### Root Cause
+
+- Git for Windows installs `Git\bin` but does **not** put it on `PATH` by default,
+  so `Get-Command bash.exe` resolves to `C:\Windows\System32\bash.exe` — the WSL
+  interop shim, not Git Bash.
+- The WHP optional-feature *flag* is not the thing that makes WHP work. When the
+  Windows hypervisor is already running (WSL2 / VirtualMachine Platform, VBS, or a
+  virtualized guest), the user-mode WHP API (`WinHvPlatform.dll`, e.g.
+  `WHvCreatePartition`) is callable regardless of the flag, which is also not
+  readable without an elevated shell.
+- Windows 11 **client** defaults its PowerShell execution policy to `Restricted`,
+  which refuses to run script *files*. `powershell -File` is not exempt, so
+  `acq.cmd` (which runs `acq.ps1`) and a direct `.\install.ps1` are blocked; the
+  `irm ... | iex` path is unaffected because piped text is not a script file.
+
+### Fix
+
+- `acq.ps1` and `install.ps1` prefer known Git-for-Windows locations first and
+  reject the WSL shim (`System32\bash.exe`, `SysWOW64\bash.exe`) when falling back
+  to a PATH lookup.
+- `install.ps1` probes WHP with `WHvCreatePartition` (the same call `msb` relies
+  on) instead of gating on the feature flag; when the state stays undetermined it
+  warns and defers to `msb doctor`, which `acq` surfaces before provisioning.
+- Treat `msb doctor` as the authoritative readiness signal on Windows.
+- The execution-policy requirement is documented (README "First-Run Snags",
+  `docs/howto/acq.md`); allow local scripts with
+  `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` or use the `irm | iex`
+  one-liner. On a managed device the policy is set by Group Policy. `acq.cmd` and
+  `install.ps1` deliberately do **not** pass `-ExecutionPolicy Bypass`.
+
+### Related Windows/MSYS notes
+
+- Under Git Bash, the guest is a Linux microVM, so acq now computes two path
+  forms (ADR-0029): `canonicalize_path` is the POSIX **guest** form and `host_path`
+  the native **host** form (`cygpath -m` → `C:/...`). `msb` is invoked through a
+  wrapper that sets `MSYS2_ARG_CONV_EXCL='*'`, because MSYS otherwise rewrites
+  POSIX-looking argv when launching the native `msb.exe` and corrupts
+  colon-delimited mounts (`--volume /c/a:/c/a` → `C:\a;C:\a`) and guest-only
+  values (`-w /home/agent` → `C:/Program Files/Git/home/agent`). The exclusion is
+  scoped to `msb`; `git`/`ssh` keep the rewrite they rely on. An explicit
+  `ACQ_MSB_WORKSPACE` override is canonicalized to the guest form too, so a
+  drive-form value cannot leak into `-w`.
+- Three `msb` call sites inline `MSYS2_ARG_CONV_EXCL='*'` instead of using the
+  wrapper: the two `exec msb exec …` lines (`exec` needs a binary, not a shell
+  function) and the backgrounded `msb ssh serve …` in `_acq_msb_serve_start`.
+  Wrapping the latter in the function would make `$!` a subshell rather than
+  `msb`, so teardown/`acq rm` would kill the wrapper and orphan the listener
+  with its loopback port still bound. See ADR-0029.
+- The offline Bats suite is POSIX-oriented: on a Windows/MSYS host, `install.sh`
+  tests (macOS/Linux installer), `chmod 0600` assertions (MSYS cannot represent
+  them on NTFS — the Windows secret store no longer depends on them, since it
+  encrypts at rest with DPAPI; see ADR-0028), and symlink-based tests cannot pass
+  without native symlinks. None are regressions from the Windows preview path;
+  validate that path with the checklist in `docs/howto/acq.md`.
+
+---
+
 When something fails, work through this list:
 
 1. [ ] Is the secret actually in the container? (`echo $VAR_NAME`)

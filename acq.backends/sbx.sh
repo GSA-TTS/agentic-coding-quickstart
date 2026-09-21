@@ -289,21 +289,27 @@ _acq_sbx_git_identity_kit() {
     printf 'name: acq-git-identity-%s\n' "$slug"
     printf 'displayName: ACQ Git Identity\n'
     printf 'description: Forward host git identity into the guest\n'
-    if [ -n "$envrecs" ]; then
+    # sbx-v2's real InstallCommand struct (confirmed live against sbx v0.43.0)
+    # has NO env field — only command/user/description. Both envrecs (raw
+    # GIT_* vars) and configrecs (ACQ_GIT_USER_*) go through the ONE
+    # mechanism sbx-v2 actually supports for guest env: the top-level
+    # `environment.variables` map, which sbx injects natively into every
+    # phase, install included. The install command below then just reads
+    # ACQ_GIT_USER_NAME/ACQ_GIT_USER_EMAIL from that same block — no
+    # separate install-scoped env is needed or exists.
+    if [ -n "$allrecs" ]; then
       printf 'environment:\n  variables:\n'
-      printf '%s\n' "$envrecs" | while IFS= read -r rec; do
+      printf '%s\n' "$allrecs" | while IFS= read -r rec; do
         [ -n "$rec" ] || continue
         printf '    %s: %s\n' "${rec%%=*}" "$(_kit_yaml_quote "${rec#*=}")"
       done
     fi
     if [ -n "$configrecs" ]; then
-      printf 'setup:\n  install:\n    command:\n      - sh\n      - -c\n'
-      printf '      - %s\n' "$(_kit_yaml_quote '[ -n "${ACQ_GIT_USER_NAME:-}" ] && git config --global user.name "$ACQ_GIT_USER_NAME" 2>/dev/null || true; [ -n "${ACQ_GIT_USER_EMAIL:-}" ] && git config --global user.email "$ACQ_GIT_USER_EMAIL" 2>/dev/null || true')"
-      printf '    env:\n'
-      printf '%s\n' "$configrecs" | while IFS= read -r rec; do
-        [ -n "$rec" ] || continue
-        printf '      %s: %s\n' "${rec%%=*}" "$(_kit_yaml_quote "${rec#*=}")"
-      done
+      printf 'setup:\n  install:\n    - command: |\n'
+      printf '        [ -n "${ACQ_GIT_USER_NAME:-}" ] && git config --global user.name "$ACQ_GIT_USER_NAME" 2>/dev/null || true\n'
+      printf '        [ -n "${ACQ_GIT_USER_EMAIL:-}" ] && git config --global user.email "$ACQ_GIT_USER_EMAIL" 2>/dev/null || true\n'
+      printf '      description: %s\n' \
+        "$(_kit_yaml_quote 'Apply the forwarded host git identity (from the environment.variables block above) to the guest global git config')"
     fi
   } >"$dir/spec.yaml"
   printf '%s\n' "$dir"
