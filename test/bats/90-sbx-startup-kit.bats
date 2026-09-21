@@ -164,7 +164,12 @@ esac
 STUB
   chmod +x "$STUBDIR/sbx"
   printf 'probebox\n' > "$STUBDIR/.sandbox_list"
-  acq_backend_ensure_kits_applied probebox >/dev/null 2>&1 || true
+  (
+    unset EMAIL GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
+    unset GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+    HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" \
+      acq_backend_ensure_kits_applied probebox >/dev/null 2>&1 || true
+  )
   local log; log=$(cat "$CALLS")
   assert_regex "$log" '\.agentic-coding-playbook/AGENTS\.md'
   refute_regex "$log" '\.agentic-coding-playbook/\.git'
@@ -316,7 +321,14 @@ STUB
   chmod +x "$STUBDIR/sbx"
   printf 'agentrefreshbox\n' > "$STUBDIR/.sandbox_list"
   acq_provenance_write sbx agentrefreshbox opencode
+  # Simulate a READY built-in agent kit offline. The real selection gate
+  # (_acq_selected_builtin_kit_refs -> acq_agent_builtin_kit_ready) requires the
+  # pinned patterns bundle to actually ship a valid `opencode` agent kit, which
+  # it does not yet (enablement is deferred, quickstart #485). Stubbing
+  # readiness here keeps this refresh-path regression test meaningful without
+  # falsely enabling opencode in shipped behavior.
   acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  acq_agent_builtin_kit_ready() { [ "$1" = "opencode" ]; }
   _acq_builtin_kit_ref() { printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$1"; }
   ( ACQ_FORCE_KIT_REAPPLY=1 acq_backend_ensure_kits_applied agentrefreshbox >/dev/null 2>&1 ) || true
   assert_regex "$(cat "$CALLS")" 'acq-kits/opencode'
