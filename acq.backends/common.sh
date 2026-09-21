@@ -2330,6 +2330,16 @@ _report_usai_unresolved() {
   echo >&2
 }
 
+# Diagnose a USAi value that is stored but cannot be presented by the active
+# backend (an undecryptable DPAPI envelope written under a different Windows
+# profile, or a damaged store). Reporting "not set" here would send the user to
+# create a fresh key when the real problem is the stored one.
+_report_usai_unreadable() {
+  echo "acq: a USAi API key is stored for this user, but it cannot be read or decrypted here." >&2
+  echo "     It may have been stored under a different user or host, or the stored value is damaged." >&2
+  echo "     Re-set it with 'acq secret set -g usai' (or remove it with 'acq secret rm -g usai')." >&2
+}
+
 # acq_key_injectable SERVICE [SANDBOX] -> 0 if the ACTIVE BACKEND can inject
 # SERVICE for that scope, else 1. Single source of truth for the "is this
 # credential actually usable at provision?" predicate, composed of two checks:
@@ -2382,6 +2392,16 @@ ensure_key_present() {
   # sbx does NOT read host env at provision, so this short-circuit is msb-only.
   if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ] && [ -n "${USAI_API_KEY:-}" ]; then
     return 0
+  fi
+
+  # Present-but-unreadable: a value is stored for this user but cannot be read or
+  # decrypted (e.g. a DPAPI envelope written under a different Windows profile,
+  # or a damaged store). Reporting "not set" here would send the user to create a
+  # fresh key when the real problem is the stored one — fail closed with the real
+  # diagnosis instead.
+  if acq_secret_unreadable usai "$scope_sandbox"; then
+    _report_usai_unreadable
+    return 1
   fi
 
   # Non-interactive (CI / piped stdin): no one can answer the prompt below, so

@@ -700,17 +700,27 @@ store at provision:
 ./acq secret set my-sandbox usai    # sandbox-scoped; overrides the global key
 ```
 
-The store lives in the host OS keychain when available (macOS `security -i`,
-Linux `secret-tool`) with a `0600` file fallback under
-`$XDG_DATA_HOME/acq/secrets/` when no keychain backend is available. macOS writes
+The store lives in a host-protected backend when available: the macOS keychain
+(`security -i`), the Linux keyring (`secret-tool`), or, on Windows, Windows DPAPI
+scoped to the current user (encrypted at rest; see
+[ADR-0028](adr/0028-windows-native-secret-storage.md)). A `0600` file fallback
+under `$XDG_DATA_HOME/acq/secrets/` is used only when no protected backend is
+available. macOS writes
 use `security -i` so the value travels on stdin, not process argv. The macOS
 read path uses `security find-generic-password -w`, whose output formatting can
 be lossy for control characters and non-ASCII bytes even when the Keychain write
 stored the bytes correctly. `acq` secrets are expected to be single-line API
 tokens; do not use this store for arbitrary binary or multi-line values. Existing
 legacy macOS file-backed entries are still read as a fallback until they are
-re-saved or removed. Entries are keyed `acq.<service>` (global) or
-`acq.<sandbox>.<service>` (sandbox-scoped); a sandbox-scoped key takes precedence
+re-saved or removed. Windows DPAPI values carry a small versioned envelope, and a
+legacy plaintext entry is migrated in place the first time it is read; if that
+migration cannot encrypt (for example DPAPI is unavailable), the value is still
+returned and a one-time warning is emitted, leaving the plaintext in place so it
+is not lost. A value the active backend cannot decrypt resolves as absent rather
+than being exposed, but is reported as `unreadable` (not `no`) by the pre-create
+key gate and, on the msb backend, by `acq secret ls`, so a stored-but-unreadable
+secret is not misdiagnosed as not set. Entries are keyed `acq.<service>` (global)
+or `acq.<sandbox>.<service>` (sandbox-scoped); a sandbox-scoped key takes precedence
 over the global one for the same service (supporting USAi per-sandbox
 billing-code keys).
 
