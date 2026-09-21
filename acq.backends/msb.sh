@@ -3038,6 +3038,29 @@ EOF
   _acq_msb_vsock_flags_into _vsock_flags
   [ "${#_vsock_flags[@]}" -gt 0 ] && create_flags+=("${_vsock_flags[@]}")
 
+  # Host-authoritative config mount (ADR-0030). Mount this sandbox's host config
+  # dir into the guest READ-ONLY at ACQ_HOST_CONFIG_GUEST_DIR. acq writes the
+  # sandbox's trusted config there on the HOST (agent, workspace, ssh-auth-sock,
+  # kit-env, gate markers); the guest can read but — because the mount is
+  # read-only, enforced by the VMM/mount layer — a passwordless-sudo agent cannot
+  # forge or tamper it. The host dir is created empty now so the create-time
+  # mount has a source; acq populates it during provisioning (post-create).
+  local _hcfg_dir _hcfg_host
+  if _hcfg_dir=$(acq_host_config_dir msb "$name"); then
+    mkdir -p "$_hcfg_dir" 2>/dev/null || true
+    chmod 700 "$_hcfg_dir" 2>/dev/null || true
+    # --volume takes HOST:GUEST[:ro]; the host side is what native msb resolves on
+    # this machine (host_path → drive form under MSYS), the guest side is POSIX
+    # (ACQ_HOST_CONFIG_GUEST_DIR). See ADR-0029.
+    if command -v host_path >/dev/null 2>&1; then
+      _hcfg_host=$(host_path "$_hcfg_dir")
+    else
+      _hcfg_host="$_hcfg_dir"
+    fi
+    create_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
+    acq_debug "msb host-config mount: ${_hcfg_host} (host) -> ${ACQ_HOST_CONFIG_GUEST_DIR} (guest, ro)"
+  fi
+
   # Credentials: read from the acq-owned secret store (keychain/file), scoped to
   # this sandbox first, then global. The real value is read into a TRANSIENT env
   # var (never argv, never the kit spec) and bound with `msb --secret ENV@HOST`,
@@ -4565,6 +4588,8 @@ acq_backend_terminate() {
   # Same GONE-after-remove-attempt rule as the volumes above: delete the scratch
   # clone and drop the fetch-back remote only once the sandbox is really gone.
   _acq_msb_clone_cleanup "$1"
+  # Remove the host-authoritative config dir (ADR-0030) once the sandbox is gone.
+  acq_host_config_remove msb "$1" || true
   return "$_rc"
 }
 
