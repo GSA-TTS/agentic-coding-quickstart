@@ -74,6 +74,26 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
 
+# ---------------------------------------------------------------------------
+# _acq_msb_cli — invoke the msb CLI with MSYS argument rewriting disabled
+# ---------------------------------------------------------------------------
+# Under MSYS/Cygwin (Git Bash) the runtime rewrites POSIX-looking argv values to
+# Windows form when it launches a native program. That corrupts the paths acq
+# hands msb: a colon-delimited mount (`--volume C:/host:/c/guest`) becomes a
+# broken `HOST;GUEST` list, and guest-only values (`-w /c/guest`,
+# `--env K=/c/guest`, `--mount-named n:/guest:…`) are turned into `C:/…`.
+#
+# acq therefore computes BOTH forms explicitly — host_path() for values a native
+# tool resolves on the host, canonicalize_path() for values that name something
+# inside the guest — and msb must receive them verbatim.
+# MSYS2_ARG_CONV_EXCL='*' disables the rewrite for this one child; it is inert
+# off MSYS, so POSIX hosts are unaffected. `msb` is invoked WITHOUT `command` so
+# a shell-function shim (tests) or the PATH executable is honored as before; the
+# env assignment still reaches the real process either way. See ADR-0029.
+_acq_msb_cli() {
+  MSYS2_ARG_CONV_EXCL='*' msb "$@"
+}
+
 # Minimum msb version required. Two reasons pin this to 0.6.9:
 #   1. 0.6.8 is the first release with the `--net-default-egress` /
 #      `--net-default-ingress` split that the balanced-egress baseline (on by
@@ -728,7 +748,7 @@ EOF
 
 # Parse `msb --version` → bare X.Y.Z.
 _acq_msb_version() {
-  msb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1
+  _acq_msb_cli --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1
 }
 
 # ---------------------------------------------------------------------------
@@ -770,7 +790,7 @@ acq_backend_prepare() {
   # All `msb doctor` invocations redirect stdin from /dev/null (file convention):
   # `msb doctor --fix` may prompt, and acq holds stdin open, so an un-redirected
   # call would hang indefinitely on the exact unfit-host path this targets.
-  if msb doctor </dev/null >/dev/null 2>&1; then
+  if _acq_msb_cli doctor </dev/null >/dev/null 2>&1; then
     return 0
   fi
   # Not ready — attempt the fix automatically, then re-check. `msb doctor --fix`
@@ -779,8 +799,8 @@ acq_backend_prepare() {
   # changes as approval-worthy; ACQ_SKIP_MSB_DOCTOR=1 opts out entirely).
   echo "acq: host not ready for microVMs — running 'msb doctor --fix' to set it up" >&2
   echo "      (set ACQ_SKIP_MSB_DOCTOR=1 to skip this and fix it yourself)." >&2
-  msb doctor --fix </dev/null >/dev/null 2>&1 || true
-  if msb doctor </dev/null >/dev/null 2>&1; then
+  _acq_msb_cli doctor --fix </dev/null >/dev/null 2>&1 || true
+  if _acq_msb_cli doctor </dev/null >/dev/null 2>&1; then
     acq_debug "msb doctor: host ready after --fix"
     return 0
   fi
@@ -801,7 +821,7 @@ acq_backend_prepare() {
 # CLI help. If the column layout differs on a real host, adjust the parse.
 
 acq_backend_exists() {
-  msb list -q 2>/dev/null | grep -Fxq -- "$1"
+  _acq_msb_cli list -q 2>/dev/null | grep -Fxq -- "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -818,7 +838,7 @@ acq_backend_exists() {
 # help and is not live-verified against a running daemon; if the layout differs on
 # a real host, adjust here and in acq_backend_exists together.
 _acq_msb_is_running() {
-  msb list --running -q 2>/dev/null | grep -Fxq -- "$1"
+  _acq_msb_cli list --running -q 2>/dev/null | grep -Fxq -- "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -983,7 +1003,7 @@ acq_backend_start() {
   local _start_secret_flags=() _start_secret_names=()
   _acq_msb_bind_secrets_into _start_secret_flags _start_secret_names "$_name"
   local _start_rc=0
-  msb start "$_name" || _start_rc=$?
+  _acq_msb_cli start "$_name" || _start_rc=$?
   # Clear the transient secret env vars immediately after `msb start` read them
   # (runs on both success and failure so no exported value lingers).
   local _sev
@@ -1021,7 +1041,7 @@ _acq_msb_wait_for_exec_ready() {
   while :; do
     _attempt=$(( _attempt + 1 ))
     acq_debug "msb exec-ready probe #${_attempt} for $name"
-    out=$(msb exec "$name" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r')
+    out=$(_acq_msb_cli exec "$name" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r')
     _rc=$?
     acq_debug "msb exec-ready probe #${_attempt}: rc=${_rc} out='${out}'"
     case "$out" in
@@ -1482,11 +1502,11 @@ _acq_msb_remove_derived_volumes() {
       "acq-${_name}-"*) _vols+=("$_vol") ;;
     esac
   done <<EOF
-$(msb volume ls -q 2>/dev/null)
+$(_acq_msb_cli volume ls -q 2>/dev/null)
 EOF
   local _i
   for _i in ${_vols[@]+"${!_vols[@]}"}; do
-    if msb volume rm "${_vols[$_i]}" >/dev/null 2>&1 </dev/null; then
+    if _acq_msb_cli volume rm "${_vols[$_i]}" >/dev/null 2>&1 </dev/null; then
       acq_debug "removed derived volume ${_vols[$_i]}"
     else
       echo "acq(msb): warning: could not remove derived volume: ${_vols[$_i]}" >&2
@@ -1568,7 +1588,7 @@ EOF
   local _kit_env=()
   _acq_msb_collect_kit_env_into _kit_env "$spec"
   if [ "${#_kit_env[@]}" -gt 0 ]; then
-    msb exec -u 0 "$name" -- sh -c \
+    _acq_msb_cli exec -u 0 "$name" -- sh -c \
       'mkdir -p /var/lib/acq && printf "%s\n" "$@" >> /var/lib/acq/kit-env' \
       sh "${_kit_env[@]}" </dev/null >/dev/null 2>&1 || \
       echo "acq(msb): warning: could not persist kit env for '$name'; its environment[] will not reach agent sessions" >&2
@@ -1594,7 +1614,7 @@ EOF
 # a failed reset degrades to the previous stale-retention behavior, never
 # aborts the apply.
 _acq_msb_reset_kit_env() {
-  msb exec -u 0 "$1" -- sh -c 'rm -f /var/lib/acq/kit-env' \
+  _acq_msb_cli exec -u 0 "$1" -- sh -c 'rm -f /var/lib/acq/kit-env' \
     </dev/null >/dev/null 2>&1 || true
 }
 
@@ -1624,8 +1644,15 @@ _acq_msb_copy_file_verified() {
 
   local dir; dir=$(dirname "$path")
 
-  msb exec "$name" -u 0 -- sh -c "mkdir -p '$dir'" >/dev/null 2>&1 || true
-  if ! msb copy "$src" "${name}:${path}" >/dev/null 2>&1; then
+  # `msb copy SRC DST` SRC is a HOST file native msb reads (DST keeps its
+  # `name:/guest/path` form), so hand msb the host form. See ADR-0029.
+  local _srchost="$src"
+  if command -v host_path >/dev/null 2>&1; then
+    _srchost=$(host_path "$src")
+  fi
+
+  _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p '$dir'" >/dev/null 2>&1 || true
+  if ! _acq_msb_cli copy "$_srchost" "${name}:${path}" >/dev/null 2>&1; then
     echo "acq(msb): warning: 'msb copy' failed for ${name}:${path}" >&2
   fi
 
@@ -1634,15 +1661,15 @@ _acq_msb_copy_file_verified() {
   local deadline attempt=0 ok=0
   deadline=$(( $(date +%s) + ${ACQ_MSB_COPY_SETTLE_TIMEOUT:-20} ))
   while :; do
-    if msb exec "$name" -u 0 -- sh -c "test -s '$path'" >/dev/null 2>&1; then
+    if _acq_msb_cli exec "$name" -u 0 -- sh -c "test -s '$path'" >/dev/null 2>&1; then
       ok=1; break
     fi
     attempt=$((attempt + 1))
     if [ "$(date +%s)" -ge "$deadline" ]; then
       echo "acq(msb): warning: ${name}:${path} not observable after copy" \
            "(${attempt} checks); retrying copy once." >&2
-      msb copy "$src" "${name}:${path}" >/dev/null 2>&1 || true
-      msb exec "$name" -u 0 -- sh -c "test -s '$path'" >/dev/null 2>&1 && ok=1
+      _acq_msb_cli copy "$_srchost" "${name}:${path}" >/dev/null 2>&1 || true
+      _acq_msb_cli exec "$name" -u 0 -- sh -c "test -s '$path'" >/dev/null 2>&1 && ok=1
       break
     fi
     sleep 1
@@ -1660,7 +1687,7 @@ _acq_msb_copy_file_verified() {
     esac
   fi
   if [ -n "$mode" ]; then
-    msb exec "$name" -u 0 -- chmod "$mode" "$path" >/dev/null 2>&1 || true
+    _acq_msb_cli exec "$name" -u 0 -- chmod "$mode" "$path" >/dev/null 2>&1 || true
   fi
   case "$path" in
     /home/agent/*)
@@ -1688,7 +1715,7 @@ _acq_msb_copy_file_verified() {
           # cannot be redirected to chown files OUTSIDE /home/agent. Defense in
           # depth — the tree is inside the ephemeral guest and the top component
           # is already ../. guarded above.
-          msb exec "$name" -u 0 -- chown -R -P agent "/home/agent/$top" >/dev/null 2>&1 || true
+          _acq_msb_cli exec "$name" -u 0 -- chown -R -P agent "/home/agent/$top" >/dev/null 2>&1 || true
           ;;
       esac
       ;;
@@ -1861,18 +1888,18 @@ _acq_msb_exec_install() {
 
   local marker
   marker="/var/lib/acq/install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
-  if msb exec "$_name" -u 0 -- sh -c "test -f '$marker'" </dev/null >/dev/null 2>&1; then
+  if _acq_msb_cli exec "$_name" -u 0 -- sh -c "test -f '$marker'" </dev/null >/dev/null 2>&1; then
     acq_debug "msb cmd[install] already done (marker hit): $*"
     return 0
   fi
   acq_debug "msb cmd[install] START (user=${_user:-0}): $*"
-  msb exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
+  _acq_msb_cli exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
     acq_debug "msb cmd[install] FAILED: $*"
     echo "acq(msb): warning: install command failed for '$_name'" >&2
     return 0
   }
   acq_debug "msb cmd[install] DONE: $*"
-  msb exec "$_name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" </dev/null >/dev/null 2>&1 || true
+  _acq_msb_cli exec "$_name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" </dev/null >/dev/null 2>&1 || true
 }
 
 # _acq_msb_exec_run NAME PHASE USER BACKGROUND UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV...
@@ -1892,7 +1919,7 @@ _acq_msb_exec_run() {
 
   if [ "$_phase" = "startup" ] && [ "$_background" = "true" ]; then
     acq_debug "msb cmd[startup:background] DETACH (user=${_user:-0}): $*"
-    msb exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} \
+    _acq_msb_cli exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} \
       -- sh -c 'nohup "$@" >/dev/null 2>&1 & exit 0' sh "$@" </dev/null || {
       acq_debug "msb cmd[startup:background] FAILED to launch: $*"
       echo "acq(msb): warning: background startup command failed to launch for '$_name'" >&2
@@ -1900,7 +1927,7 @@ _acq_msb_exec_run() {
     acq_debug "msb cmd[startup:background] LAUNCHED: $*"
   else
     acq_debug "msb cmd[${_phase}] START (user=${_user:-0}): $*"
-    msb exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
+    _acq_msb_cli exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
       acq_debug "msb cmd[${_phase}] FAILED: $*"
       echo "acq(msb): warning: ${_phase} command failed for '$_name'" >&2
     }
@@ -2235,10 +2262,16 @@ _acq_msb_stage_startup_script() {
   chmod 600 "$_file" 2>/dev/null || true
 
   if _acq_msb_generate_startup_script "$_spec" "$_file"; then
-    eval "$_arrn+=(--script-path \"${ACQ_MSB_STARTUP_SCRIPT_NAME}:\$_file\")"
+    # --script-path names a HOST file native msb reads, so pass the host form
+    # (the shell keeps the POSIX _file for cleanup). See ADR-0029.
+    local _hostfile="$_file"
+    if command -v host_path >/dev/null 2>&1; then
+      _hostfile=$(host_path "$_file")
+    fi
+    eval "$_arrn+=(--script-path \"${ACQ_MSB_STARTUP_SCRIPT_NAME}:\$_hostfile\")"
     _ACQ_MSB_STARTUP_STAGE_FILES+=("$_file")
     _ACQ_MSB_STARTUP_STAGED=1
-    acq_debug "msb startup-script staged: --script-path ${ACQ_MSB_STARTUP_SCRIPT_NAME}:${_file}"
+    acq_debug "msb startup-script staged: --script-path ${ACQ_MSB_STARTUP_SCRIPT_NAME}:${_hostfile}"
   else
     # No startup commands in this kit — remove the empty temp file.
      rm -f "$_file" 2>/dev/null || true
@@ -2295,7 +2328,12 @@ _acq_msb_upstream_ca_flags_into() {
     for _p in "$@"; do
       [ -n "$_p" ] || continue
       if [ -r "$_p" ] && [ -s "$_p" ]; then
-        eval "$_arr+=(--tls-upstream-ca-cert \"\$_p\")"
+        # --tls-upstream-ca-cert names a HOST PEM native msb reads: host form.
+        local _phost="$_p"
+        if command -v host_path >/dev/null 2>&1; then
+          _phost=$(host_path "$_p")
+        fi
+        eval "$_arr+=(--tls-upstream-ca-cert \"\$_phost\")"
         _added=$((_added + 1))
         acq_debug "msb upstream-CA: trusting explicit PEM ${_p}"
       else
@@ -2335,7 +2373,12 @@ _acq_msb_upstream_ca_flags_into() {
   if security find-certificate -a -p >"$_tmp" 2>/dev/null && grep -q 'BEGIN CERTIFICATE' "$_tmp"; then
     chmod 0644 "$_tmp" 2>/dev/null || true
     mv -f "$_tmp" "$_out" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
-    eval "$_arr+=(--tls-upstream-ca-cert \"\$_out\")"
+    # --tls-upstream-ca-cert names a HOST PEM native msb reads: host form.
+    local _outhost="$_out"
+    if command -v host_path >/dev/null 2>&1; then
+      _outhost=$(host_path "$_out")
+    fi
+    eval "$_arr+=(--tls-upstream-ca-cert \"\$_outhost\")"
     acq_debug "msb upstream-CA: exported host search-list roots to ${_out} and trusting them upstream"
   else
     rm -f "$_tmp" 2>/dev/null
@@ -2915,7 +2958,7 @@ EOF
   fi
 
   ACQ_MSB_GUEST_WORKSPACE=""
-  local _wi _wspec _wpath _wro _first_guest=""
+  local _wi _wspec _wpath _wro _wsrc _whost _first_guest=""
   for _wi in ${_ws_recs[@]+"${!_ws_recs[@]}"}; do
     _wspec="${_ws_recs[$_wi]}"
     # Split an optional trailing ":ro" (read-only) marker from the path.
@@ -2942,20 +2985,35 @@ EOF
     # Under --clone, the PRIMARY's mount SOURCE is the scratch clone while the
     # guest path stays the original — the agent's cwd, kits, and docs behave
     # exactly as in a non-clone run (verified msb 0.6.15 mounts src != dst).
-    if [ -n "$_clone_src" ] && [ -z "$_first_guest" ]; then
-      create_flags+=(--volume "${_clone_src}:${_wpath}${_wro}")
-      acq_debug "msb volume (clone): ${_clone_src} -> ${_wpath}${_wro}"
+    #
+    # The spec is HOST:GUEST with the two sides in DIFFERENT forms (ADR-0029):
+    # the host side is what native msb resolves on this machine (host_path →
+    # drive form under MSYS), the guest side is the POSIX path the Linux microVM
+    # uses (canonicalize_path). A single value for both is the bug this fixes.
+    _wsrc="$_wpath"
+    [ -n "$_clone_src" ] && [ -z "$_first_guest" ] && _wsrc="$_clone_src"
+    if command -v host_path >/dev/null 2>&1; then
+      _whost=$(host_path "$_wsrc")
     else
-      create_flags+=(--volume "${_wpath}:${_wpath}${_wro}")
-      acq_debug "msb volume: ${_wpath} -> ${_wpath}${_wro}"
+      _whost="$_wsrc"
     fi
+    create_flags+=(--volume "${_whost}:${_wpath}${_wro}")
+    acq_debug "msb volume: ${_whost} (host) -> ${_wpath}${_wro} (guest)"
     [ -z "$_first_guest" ] && _first_guest="$_wpath"
   done
 
   # Decide the agent's starting directory (recorded for attach). Explicit
-  # override wins; otherwise the FIRST (primary) workspace, matching sbx.
+  # override wins; otherwise the FIRST (primary) workspace, matching sbx. The
+  # override arrives in whatever vocabulary the operator's shell uses, so it
+  # must be canonicalized to the POSIX guest form exactly like a mounted
+  # workspace (ADR-0029); recording a raw `C:/Users/me/proj` would put a
+  # drive-form path in the marker and later in `-w`.
   if [ -n "${ACQ_MSB_WORKSPACE:-}" ]; then
-    ACQ_MSB_GUEST_WORKSPACE="$ACQ_MSB_WORKSPACE"
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      ACQ_MSB_GUEST_WORKSPACE=$(canonicalize_path "$ACQ_MSB_WORKSPACE")
+    else
+      ACQ_MSB_GUEST_WORKSPACE="$ACQ_MSB_WORKSPACE"
+    fi
   elif [ -n "$_first_guest" ]; then
     ACQ_MSB_GUEST_WORKSPACE="$_first_guest"
   fi
@@ -3014,7 +3072,7 @@ EOF
   local _create_output=""
   acq_debug "msb create: invoking (this returns fast; guest boots in background)"
   acq_spin_start "Creating sandbox '$name'"
-  _create_output=$(msb create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
+  _create_output=$(_acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
   acq_spin_stop "Creating sandbox '$name'"
   [ -z "$_create_output" ] || printf '%s\n' "$_create_output" >&2
   if [ "$_create_rc" -ne 0 ] && [ "$_msb_image_source" = "agent-default" ] \
@@ -3028,7 +3086,7 @@ EOF
     _create_output=""
     acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
     acq_spin_start "Creating sandbox '$name'"
-    _create_output=$(msb create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
+    _create_output=$(_acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
     acq_spin_stop "Creating sandbox '$name'"
     [ -z "$_create_output" ] || printf '%s\n' "$_create_output" >&2
   fi
@@ -3149,7 +3207,7 @@ EOF
   # a fixed guest path; validated charset (KNOWN_AGENTS tokens are word-safe).
   case "$agent" in
     *[!a-z-]*) : ;;  # defensive: never write an odd token
-    *) msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && printf '%s' '$agent' > /var/lib/acq/agent" >/dev/null 2>&1 || true ;;
+    *) _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && printf '%s' '$agent' > /var/lib/acq/agent" >/dev/null 2>&1 || true ;;
   esac
 
   # Record the guest workspace path too. attach only gets the sandbox NAME, so it
@@ -3159,10 +3217,12 @@ EOF
   # root sh -c string.
   if [ -n "$ACQ_MSB_GUEST_WORKSPACE" ]; then
     case "$ACQ_MSB_GUEST_WORKSPACE" in
+      # Guest-side paths are POSIX (canonicalize_path, ADR-0029), so the
+      # conservative charset holds; only a literal ' would break the quoting.
       *[!A-Za-z0-9._/-]*)
         acq_debug "msb: not recording unsafe guest workspace path: $ACQ_MSB_GUEST_WORKSPACE" ;;
       *)
-        msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && printf '%s' '$ACQ_MSB_GUEST_WORKSPACE' > /var/lib/acq/workspace" >/dev/null 2>&1 || true ;;
+        _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && printf '%s' '$ACQ_MSB_GUEST_WORKSPACE' > /var/lib/acq/workspace" >/dev/null 2>&1 || true ;;
     esac
   fi
 
@@ -3253,7 +3313,7 @@ _acq_msb_report_npm_install_failure() {
   echo "acq(msb):   opencode will not be available on attach." >&2
 
   # Is npm actually present in the guest? If not, that is the cause outright.
-  if ! msb exec "$name" -u 0 -- sh -c 'command -v npm' >/dev/null 2>&1; then
+  if ! _acq_msb_cli exec "$name" -u 0 -- sh -c 'command -v npm' >/dev/null 2>&1; then
     echo "acq(msb):   Cause: npm is not present in the guest. Use a base image that" >&2
     echo "acq(msb):   ships node/npm, or bake opencode into ACQ_MSB_IMAGE." >&2
     return 0
@@ -3267,7 +3327,7 @@ _acq_msb_report_npm_install_failure() {
   _first_host=""
   for _reg in $ACQ_MSB_NPM_HOSTS; do _first_host="$_reg"; break; done
   if [ -n "$_first_host" ] && command -v _classify_key_status >/dev/null 2>&1; then
-    _raw=$(msb exec "$name" -u 0 -- sh -c \
+    _raw=$(_acq_msb_cli exec "$name" -u 0 -- sh -c \
       "curl -sS -o /dev/null -w '%{http_code}' https://${_first_host}/; printf '|%s' \"\$?\"" \
       2>/dev/null || true)
     _status=$(_classify_key_status "$_raw")
@@ -3327,7 +3387,7 @@ _acq_msb_install_agent() {
 
   if ! _acq_msb_agent_has_install_recipe "$agent"; then
     # Maybe the base image already provides it — don't warn if so.
-    if msb exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
+    if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
       acq_debug "msb: agent '$agent' already present in base image"
       return 0
     fi
@@ -3338,13 +3398,13 @@ _acq_msb_install_agent() {
   fi
 
   # Already installed (pre-baked image or a prior apply)? Then done.
-  if msb exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
+  if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
     acq_debug "msb: agent '$agent' already installed in $name"
     return 0
   fi
 
   local marker="/var/lib/acq/agent-installed-${agent}"
-  if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+  if _acq_msb_cli exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -3356,7 +3416,7 @@ _acq_msb_install_agent() {
       # argv element (never re-split by a shell); ACQ_MSB_OPENCODE_PKG is a
       # controlled tunable. `npm` is present (node prerequisite). npm needs the
       # registry host, allow-listed at create.
-      if ! msb exec "$name" -u 0 -- npm install -g --no-fund --no-audit "$ACQ_MSB_OPENCODE_PKG" >/dev/null 2>&1; then
+      if ! _acq_msb_cli exec "$name" -u 0 -- npm install -g --no-fund --no-audit "$ACQ_MSB_OPENCODE_PKG" >/dev/null 2>&1; then
         _acq_msb_report_npm_install_failure "$name"
         return 0
       fi
@@ -3364,8 +3424,8 @@ _acq_msb_install_agent() {
   esac
 
   # Verify the binary is now on PATH before recording the marker.
-  if msb exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
-    msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+  if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
+    _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
     acq_debug "msb: agent '$agent' installed and on PATH in $name"
   else
     echo "acq(msb): warning: installed '$agent' but it is not on PATH in '$name'." >&2
@@ -3396,7 +3456,7 @@ _acq_msb_install_agent() {
 _acq_msb_ensure_agent_user() {
   local name="$1"
   local marker="/var/lib/acq/agent-user-ready"
-  if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+  if _acq_msb_cli exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
     # The user exists from an earlier run, but its login shell may predate the
     # passwd-shell setup: re-sync it so an existing /bin/sh agent user
     # is healed to bash on its next run, not left behind.
@@ -3417,7 +3477,7 @@ _acq_msb_ensure_agent_user() {
   # fails with Permission denied. So home creation + ownership is deterministic
   # and its failure is FATAL (previously it was best-effort `|| true`, which
   # silently degraded into a root-owned home and a playbook that never fetched).
-  msb exec "$name" -u 0 -- sh -c '
+  _acq_msb_cli exec "$name" -u 0 -- sh -c '
     set -e
     _acq_created_agent=0
     if id agent >/dev/null 2>&1; then
@@ -3480,7 +3540,7 @@ _acq_msb_ensure_agent_user() {
     return 1
   }
   _acq_msb_ensure_agent_shell "$name"
-  msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+  _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
 }
 
 # _acq_msb_ensure_agent_shell NAME — align the agent's login shell with what
@@ -3504,7 +3564,7 @@ _acq_msb_ensure_agent_shell() {
   # Probe for bash host-side so the target is decided once and threaded to the
   # guest script as a positional arg (never interpolated into the sh -c
   # string). Charset-guard the probe result before it reaches usermod/chsh.
-  shell=$({ msb exec "$name" -u 0 -- sh -c 'command -v bash 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
+  shell=$({ _acq_msb_cli exec "$name" -u 0 -- sh -c 'command -v bash 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
   shell=$(_acq_msb_safe_shell_or_sh "$shell")
   acq_debug "msb: syncing agent login shell to $shell in $name"
   # NOTE: single-quoted `sh -c` string — no single quotes inside (they would
@@ -3519,7 +3579,7 @@ _acq_msb_ensure_agent_shell() {
   # marker present AND still just the bridge (3 lines). Lines other tools
   # append below the bridge (rustup et al) must survive the heal, so a
   # marker-plus-appended file is left untouched.
-  msb exec "$name" -u 0 -- sh -c '
+  _acq_msb_cli exec "$name" -u 0 -- sh -c '
     set -e
     target="$1"
     current=$({ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; } | head -n1 | cut -d: -f7)
@@ -3565,7 +3625,7 @@ _acq_msb_check_prereqs() {
   [ -z "$ACQ_MSB_SKIP_PREREQ_CHECK" ] || return 0
 
   local missing
-  missing=$(msb exec "$name" -- sh -c '
+  missing=$(_acq_msb_cli exec "$name" -- sh -c '
     m=""
     for t in node git curl update-ca-certificates; do
       command -v "$t" >/dev/null 2>&1 || m="$m $t"
@@ -3625,6 +3685,10 @@ EOF
     _port=$(printf '%s' "$_f" | cut -f2)
     _kind=$(printf '%s' "$_f" | cut -f3)
     _label=$(printf '%s' "$_f" | cut -f4)
+    # --vsock names a HOST unix socket, so hand msb the host form (ADR-0029).
+    if command -v host_path >/dev/null 2>&1; then
+      _path=$(host_path "$_path")
+    fi
     eval "$_arr+=(--vsock \"\${_path}:\${_port}/\${_kind}\")"
     if [ "$_label" = "ssh-agent" ]; then
       _ACQ_MSB_SSH_AGENT_FORWARDING=1
@@ -3653,7 +3717,7 @@ EOF
 _acq_msb_check_socat() {
   local name="$1"
   [ "${_ACQ_MSB_SSH_AGENT_FORWARDING:-0}" = "1" ] || return 1
-  if msb exec "$name" -- sh -c 'command -v socat >/dev/null 2>&1' </dev/null >/dev/null 2>&1; then
+  if _acq_msb_cli exec "$name" -- sh -c 'command -v socat >/dev/null 2>&1' </dev/null >/dev/null 2>&1; then
     return 0
   fi
   echo "acq(msb): warning: socat not found in the guest; host ssh-agent forwarding" \
@@ -3686,7 +3750,7 @@ _acq_msb_start_ssh_agent_bridge() {
   # A SINGLE socat under nohup (detached): the --vsock route reconnects lazily,
   # and the bridge is re-launched fresh on each provision/start, so no supervisor
   # loop is needed. `rm -f` clears any stale socket before re-listening.
-  msb exec "$name" -u agent -- sh -c "
+  _acq_msb_cli exec "$name" -u agent -- sh -c "
     mkdir -p \"\$(dirname '$_sock')\" 2>/dev/null || true
     rm -f '$_sock' 2>/dev/null || true
     nohup socat UNIX-LISTEN:'$_sock',fork,reuseaddr VSOCK-CONNECT:2:'$_port' >/dev/null 2>&1 &
@@ -3697,7 +3761,7 @@ _acq_msb_start_ssh_agent_bridge() {
 
   # Record the guest sock path so attach/exec/start can resolve SSH_AUTH_SOCK
   # even when no provision flag is set. Only written when forwarding is active.
-  msb exec "$name" -u 0 -- sh -c \
+  _acq_msb_cli exec "$name" -u 0 -- sh -c \
     "mkdir -p /var/lib/acq && printf '%s' '$_sock' > /var/lib/acq/ssh-auth-sock" \
     </dev/null >/dev/null 2>&1 || true
   acq_debug "msb: ssh-agent bridge started at $_sock (vsock port $_port) in $name"
@@ -3748,14 +3812,14 @@ _acq_msb_warn_if_agent_unreachable() {
   local name="$1" _sock="$2"
   # Need ssh-add in the guest to probe; if it is absent, skip silently (the
   # forward may still be fine — we simply cannot assert it here).
-  msb exec "$name" -u agent -- sh -c 'command -v ssh-add >/dev/null 2>&1' \
+  _acq_msb_cli exec "$name" -u agent -- sh -c 'command -v ssh-add >/dev/null 2>&1' \
     </dev/null >/dev/null 2>&1 || return 0
   # Capture combined output AND exit status. Give the freshly-started socat a
   # brief moment to establish its listener before probing (a fresh create can
   # race the probe); a short bounded wait, not a fixed 1s tax on the common
   # already-running reattach where the listener is already up.
   local _out="" _rc=0
-  _out=$(msb exec "$name" -u agent -- sh -c \
+  _out=$(_acq_msb_cli exec "$name" -u agent -- sh -c \
     "for _i in 1 2 3; do SSH_AUTH_SOCK='$_sock' ssh-add -l 2>&1 && exit 0; sleep 0.3; done; SSH_AUTH_SOCK='$_sock' ssh-add -l 2>&1" \
     </dev/null 2>/dev/null) || _rc=$?
   # Reachable with keys => quiet.
@@ -3788,7 +3852,7 @@ _acq_msb_ssh_auth_sock_for() {
   # would otherwise propagate that into the caller's command substitution and
   # kill the whole session verb (the trailing `tr` does NOT mask it: pipefail
   # takes the failing stage's status).
-  { msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/ssh-auth-sock 2>/dev/null' \
+  { _acq_msb_cli exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/ssh-auth-sock 2>/dev/null' \
     </dev/null 2>/dev/null || true; } | tr -d '[:space:]'
 }
 
@@ -3818,7 +3882,7 @@ _acq_msb_apply_host_git_global_config() {
 $(acq_host_git_global_config_env)
 EOF
   [ "${#_flags[@]}" -gt 0 ] || return 0
-  msb exec -u agent -e HOME=/home/agent ${_flags[@]+"${_flags[@]}"} "$name" -- sh -c '
+  _acq_msb_cli exec -u agent -e HOME=/home/agent ${_flags[@]+"${_flags[@]}"} "$name" -- sh -c '
     [ -n "${ACQ_GIT_USER_NAME:-}" ] && git config --global user.name "$ACQ_GIT_USER_NAME" 2>/dev/null || true
     [ -n "${ACQ_GIT_USER_EMAIL:-}" ] && git config --global user.email "$ACQ_GIT_USER_EMAIL" 2>/dev/null || true
   ' </dev/null >/dev/null 2>&1 || true
@@ -3842,7 +3906,7 @@ _acq_msb_kit_env_flags_into() {
   # environment[]) must yield an empty result, not kill the session verb — see
   # _acq_msb_ssh_auth_sock_for.
   local _kvs
-  _kvs=$(msb exec "$_name" -u 0 -- sh -c 'cat /var/lib/acq/kit-env 2>/dev/null' \
+  _kvs=$(_acq_msb_cli exec "$_name" -u 0 -- sh -c 'cat /var/lib/acq/kit-env 2>/dev/null' \
     </dev/null 2>/dev/null) || _kvs=""
   [ -n "$_kvs" ] || return 0
   local _line
@@ -3941,7 +4005,7 @@ _acq_msb_ensure_ssh_agent_forward() {
 # non-zero, never hard-fails). See ADR-0021.
 _acq_msb_has_ssh_agent_vsock_route() {
   local name="$1" json _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT"
-  json=$(msb inspect "$name" --format json 2>/dev/null) || return 1
+  json=$(_acq_msb_cli inspect "$name" --format json 2>/dev/null) || return 1
   [ -n "$json" ] || return 1
   # Require BOTH a `vsock` key AND the ssh-agent guest-port token, so a published
   # `ports:[{port:<vsock-port>}]` that merely happens to equal the (user-
@@ -3983,7 +4047,7 @@ _acq_msb_has_ssh_agent_vsock_route() {
 _acq_msb_grant_oci_devs() {
   local name="$1"
   [ -n "$ACQ_MSB_ENSURE_OCI" ] || return 0
-  msb exec "$name" -u 0 -- sh -c '
+  _acq_msb_cli exec "$name" -u 0 -- sh -c '
     for _dev in /dev/net/tun /dev/fuse; do
       if [ -e "$_dev" ]; then
         chown root:agent "$_dev" 2>/dev/null || true
@@ -4017,7 +4081,7 @@ _acq_msb_ensure_oci() {
   _acq_msb_grant_oci_devs "$name"
 
   local marker="/var/lib/acq/oci-ready"
-  if msb exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+  if _acq_msb_cli exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -4090,7 +4154,7 @@ _acq_msb_ensure_oci() {
   # the install set so the preferred path is available on the default (apt) image;
   # if the mirror lacks fuse-overlayfs the vfs fallback still yields a working
   # engine.
-  if msb exec "$name" -u 0 -e "PODMAN_PKGS=$ACQ_MSB_PODMAN_PKGS" -e "SHORT_NAME_MODE=$ACQ_MSB_SHORT_NAME_MODE" -- sh -c '
+  if _acq_msb_cli exec "$name" -u 0 -e "PODMAN_PKGS=$ACQ_MSB_PODMAN_PKGS" -e "SHORT_NAME_MODE=$ACQ_MSB_SHORT_NAME_MODE" -- sh -c '
     set -e
     # 1) Ensure the podman binary is present (idempotent).
     if ! command -v podman >/dev/null 2>&1; then
@@ -4166,7 +4230,7 @@ EOF
     # the configured driver, the agent forces a USER-level vfs storage.conf and
     # retries once (covers a base whose overlay+fuse combo is still rejected under
     # rootless). Only a successful build writes the ready marker.
-    if msb exec "$name" -u agent -e HOME=/home/agent -- sh -c '
+    if _acq_msb_cli exec "$name" -u agent -e HOME=/home/agent -- sh -c '
       _oci_selftest() {
         d=$(mktemp -d) || return 1
         printf "FROM scratch\nCOPY hi /hi\n" > "$d/Containerfile"
@@ -4186,7 +4250,7 @@ EOF
       # Best-effort: mark ready so we do not re-run the (network-bound) install on
       # every provision/restart. (The /dev/net/tun grant and config writes above
       # are cheap + idempotent and re-run each pass regardless of this marker.)
-      msb exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+      _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
       acq_debug "msb: OCI engine (rootless podman) ready in $name"
       return 0
     fi
@@ -4226,9 +4290,18 @@ _ACQ_MSB_RUN_WS=""
 # marker takes the documented fallback instead of killing the session verb
 # under `set -e` (see _acq_msb_ssh_auth_sock_for).
 _acq_msb_workspace_for() {
-  local name="$1" ws="${ACQ_MSB_WORKSPACE:-}"
-  if [ -z "$ws" ]; then
-    ws=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
+  local name="$1" ws=""
+  if [ -n "${ACQ_MSB_WORKSPACE:-}" ]; then
+    # An operator override is host-vocabulary input; `-w` needs the POSIX guest
+    # form, so canonicalize it (a raw drive-form value here was the original
+    # single-form bug via the override path). See ADR-0029.
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      ws=$(canonicalize_path "$ACQ_MSB_WORKSPACE")
+    else
+      ws="$ACQ_MSB_WORKSPACE"
+    fi
+  else
+    ws=$({ _acq_msb_cli exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
   fi
   [ -n "$ws" ] || ws="/home/agent"
   printf '%s\n' "$ws"
@@ -4264,7 +4337,7 @@ _acq_msb_term_flags_into() {
 # entry — falls back to /bin/sh.
 _acq_msb_agent_passwd_shell() {
   local name="$1" shell
-  shell=$({ msb exec "$name" -u 0 -- sh -c '{ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; } | head -n1 | cut -d: -f7' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
+  shell=$({ _acq_msb_cli exec "$name" -u 0 -- sh -c '{ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; } | head -n1 | cut -d: -f7' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
   _acq_msb_safe_shell_or_sh "$shell"
 }
 
@@ -4328,7 +4401,7 @@ acq_backend_run() {
     _ACQ_MSB_RUN_WS_NAME="$name"
     _ACQ_MSB_RUN_WS="$ws"
   fi
-  msb exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
+  _acq_msb_cli exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
     ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
 }
 
@@ -4385,7 +4458,7 @@ _acq_msb_attach() {
   # otherwise break the single-quoting and run as the agent user. Fall back to a
   # plain shell on anything unexpected.
   local agent
-  agent=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '[:space:]')
+  agent=$({ _acq_msb_cli exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '[:space:]')
   if [ -z "$agent" ] || ! _acq_msb_safe_agent_token "$agent"; then
     agent="shell"
   fi
@@ -4420,14 +4493,14 @@ _acq_msb_attach() {
 
   # Pre-check the agent binary AS the agent user; fall back to a shell (with a
   # notice) rather than launching into a broken/blank session if it's missing.
-  if ! msb exec -u agent "$name" -- sh -c "command -v '$agent'" </dev/null >/dev/null 2>&1; then
+  if ! _acq_msb_cli exec -u agent "$name" -- sh -c "command -v '$agent'" </dev/null >/dev/null 2>&1; then
     echo "acq(msb): '$agent' not found in sandbox '$name'; opening a shell instead." >&2
     _acq_msb_shell_exec "$name" "$ws"
   fi
 
   local shell
   shell=$(_acq_msb_agent_passwd_shell "$name")
-  exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+  MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
     ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
     ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
 }
@@ -4451,7 +4524,7 @@ _acq_msb_shell_exec() {
   _acq_msb_git_identity_env_flags_into _gitident
   _acq_msb_kit_env_flags_into _kitenv "$name"
   _acq_msb_term_flags_into _term
-  exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+  MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
     ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
     ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$shell" -l
 }
@@ -4473,7 +4546,7 @@ acq_backend_stop() {
   # sandbox can no longer serve them, and the serve/ssh process pair would
   # otherwise linger. Defensive — no recorded ports is a no-op.
   _acq_msb_ports_teardown "$1"
-  msb stop "$1"
+  _acq_msb_cli stop "$1"
 }
 
 acq_backend_terminate() {
@@ -4491,7 +4564,7 @@ acq_backend_terminate() {
   # (sbx-parity warning; rm proceeds — the scratch is disposable by contract).
   _acq_msb_clone_warn_unfetched "$1"
   local _rc=0
-  msb remove --force "$1" || _rc=$?
+  _acq_msb_cli remove --force "$1" || _rc=$?
   if [ "$_rc" -ne 0 ] && acq_backend_exists "$1"; then
     return "$_rc"
   fi
@@ -4503,10 +4576,16 @@ acq_backend_terminate() {
 }
 
 acq_backend_list() {
-  msb list "$@"
+  _acq_msb_cli list "$@"
 }
 
 acq_backend_cp() {
+  # Deliberately NOT routed through _acq_msb_cli (ADR-0029): `msb copy` takes
+  # one host path and one `NAME:/guest/path` ref, and MSYS rewriting is already
+  # useful here — it converts the bare host path to drive form while leaving the
+  # `NAME:`-prefixed guest ref verbatim. Disabling it would require acq to parse
+  # which side is the sandbox ref (a `NAME:` prefix is ambiguous with a drive
+  # letter), so let msb's own `NAME:` heuristic do the split.
   msb copy "$1" "$2"
 }
 
@@ -4632,7 +4711,12 @@ _acq_msb_ssh_key_ensure() {
 # (e.g. msb data reset/reinstall), and `msb ssh serve` then fails immediately.
 # Authorizing an already-present key is harmless and keeps the path self-healing.
 _acq_msb_ssh_authorize() {
-  if ! msb ssh authorize --file "${ACQ_MSB_SSH_KEY}.pub" >/dev/null 2>&1; then
+  # `--file` is a HOST key native msb reads: pass the host form (ADR-0029).
+  local _pubhost="${ACQ_MSB_SSH_KEY}.pub"
+  if command -v host_path >/dev/null 2>&1; then
+    _pubhost=$(host_path "$_pubhost")
+  fi
+  if ! _acq_msb_cli ssh authorize --file "$_pubhost" >/dev/null 2>&1; then
     echo "acq(msb): ports: 'msb ssh authorize' failed for the acq tunnel key." >&2
     return 1
   fi
@@ -4707,7 +4791,14 @@ _acq_msb_pick_ephemeral_port() {
 _acq_msb_serve_start() {
   local name="$1" sport="$2"
   acq_debug "msb ssh serve $name --host 127.0.0.1 --port $sport (backgrounded)"
-  msb ssh serve "$name" --host 127.0.0.1 --port "$sport" >/dev/null 2>&1 &
+  # NOT through _acq_msb_cli: wrapping a command in a shell function makes bash
+  # fork a subshell for the background job, so $! is that subshell — not `msb`.
+  # Teardown/failure then kill the wrapper and orphan the still-listening
+  # `msb ssh serve` (its loopback port stays bound). A bare env-prefixed simple
+  # command is exec-optimized into the real process, so $! IS `msb` and the kill
+  # reaches it. The env prefix therefore stays inline here; ADR-0029 lists the
+  # three sites that must inline it (this one plus the two `exec msb exec`).
+  MSYS2_ARG_CONV_EXCL='*' msb ssh serve "$name" --host 127.0.0.1 --port "$sport" >/dev/null 2>&1 &
   local pid=$!
   # Give the listener a beat to fail fast (bind error, bad sandbox), then confirm
   # it is still alive. kill -0 probes liveness without signalling. `command sleep`
@@ -4849,7 +4940,7 @@ _acq_msb_ports_list() {
 # — a query must never hard-fail.
 _acq_msb_ports_from_inspect() {
   local name="$1" json line h g
-  json=$(msb inspect "$name" --format json 2>/dev/null) || return 0
+  json=$(_acq_msb_cli inspect "$name" --format json 2>/dev/null) || return 0
   [ -n "$json" ] || return 0
   local lines=""
   if command -v jq >/dev/null 2>&1; then
@@ -5134,7 +5225,7 @@ _acq_msb_secret_refeed() {
   export "$_env=$val"
   if [ -n "$scope_name" ]; then
     if acq_backend_exists "$scope_name"; then
-      msb modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+      _acq_msb_cli modify "$scope_name" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
         && applied=$((applied + 1))
     fi
   else
@@ -5143,10 +5234,10 @@ _acq_msb_secret_refeed() {
     # stdin). Same trap guarded in acq_backend_secret_rm's sweep.
     while IFS= read -r sb; do
       [ -n "$sb" ] || continue
-      msb modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
+      _acq_msb_cli modify "$sb" --secret "${_env}@${_host}" </dev/null >/dev/null 2>&1 \
         && applied=$((applied + 1))
     done <<EOF
-$(msb list -q 2>/dev/null)
+$(_acq_msb_cli list -q 2>/dev/null)
 EOF
   fi
   unset "$_env"
@@ -5260,7 +5351,7 @@ _acq_msb_secret_unbind() {
   fi
   if [ -n "$scope_name" ]; then
     if acq_backend_exists "$scope_name"; then
-      msb modify "$scope_name" --secret-rm "$env_name" >/dev/null 2>&1 \
+      _acq_msb_cli modify "$scope_name" --secret-rm "$env_name" >/dev/null 2>&1 \
         && unbound=$((unbound + 1))
     fi
   else
@@ -5270,10 +5361,10 @@ _acq_msb_secret_unbind() {
     # the same stdin-consumption trap the test stub deliberately reproduces.
     while IFS= read -r sb; do
       [ -n "$sb" ] || continue
-      msb modify "$sb" --secret-rm "$env_name" </dev/null >/dev/null 2>&1 \
+      _acq_msb_cli modify "$sb" --secret-rm "$env_name" </dev/null >/dev/null 2>&1 \
         && unbound=$((unbound + 1))
     done <<EOF
-$(msb list -q 2>/dev/null)
+$(_acq_msb_cli list -q 2>/dev/null)
 EOF
   fi
   [ "$unbound" -gt 0 ] && acq_debug "msb modify --secret-rm $env_name: unbound from $unbound sandbox(es)"
@@ -5340,7 +5431,9 @@ acq_backend_secret_rm() {
 # Prints one row per acq-managed secret: SCOPE, SERVICE, whether a VALUE is
 # present, and the binding ENV@HOST the msb adapter would use at provision.
 # NEVER prints a secret value. With no scope, lists everything acq holds; with a
-# scope (-g or SANDBOX) it filters to that scope. Read-only.
+# scope (-g or SANDBOX) it filters to that scope. It never writes secret values;
+# the sole write it can trigger is the one-time keychain-windows legacy->DPAPI
+# migration when it probes a legacy key (ADR-0028).
 #
 # Sources: the value store (acq_secret_list_keys → decode scope/service). The
 # ENV@HOST column comes from _acq_msb_service_binding, so it shows exactly what
@@ -5374,16 +5467,31 @@ _acq_msb_secret_ls_rows() {
     [ -n "$svc" ] || continue
     case "$want_scope" in "") ;; *) [ "$scope" = "$want_scope" ] || continue ;; esac
     if [ "$scope" = "-g" ]; then
-      acq_secret_has "$svc" && val="yes" || val="no"
+      val=$(_acq_msb_secret_ls_value "$svc" "")
       binding=$(_acq_msb_secret_ls_binding "$svc" "")
     else
-      acq_secret_has "$svc" "$scope" && val="yes" || val="no"
+      val=$(_acq_msb_secret_ls_value "$svc" "$scope")
       binding=$(_acq_msb_secret_ls_binding "$svc" "$scope")
     fi
     printf '%s\t%s\t%s\t%s\n' "$scope" "$svc" "$val" "$binding"
   done <<EOF
 $(acq_secret_list_keys)
 EOF
+}
+
+# _acq_msb_secret_ls_value SERVICE SANDBOX -> yes | no | unreadable.
+# "unreadable" means a value is stored but this user/host cannot read it (e.g. a
+# DPAPI envelope written under another profile); reporting "no" there would show
+# a stored secret as absent. Reuses the store's own predicates.
+_acq_msb_secret_ls_value() {
+  local svc="$1" sandbox="${2:-}"
+  if acq_secret_has "$svc" "$sandbox"; then
+    printf 'yes\n'; return 0
+  fi
+  if acq_secret_unreadable "$svc" "$sandbox"; then
+    printf 'unreadable\n'; return 0
+  fi
+  printf 'no\n'
 }
 
 # _acq_msb_secret_ls_binding SERVICE SANDBOX -> "ENV@HOST" or "(unmapped)".
@@ -5469,7 +5577,7 @@ acq_backend_rotate_key() {
 # ---------------------------------------------------------------------------
 
 acq_backend_version() {
-  msb --version 2>/dev/null || echo "(msb version unknown)"
+  _acq_msb_cli --version 2>/dev/null || echo "(msb version unknown)"
 }
 
 acq_backend_doctor() {

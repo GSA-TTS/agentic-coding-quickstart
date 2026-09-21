@@ -142,6 +142,18 @@ _seed_usai() {
   assert [ ! -f "$STUBDIR/.created" ]
 }
 
+@test "create(sbx): a stored-but-unreadable key is reported as unreadable, not absent" {
+  local proj="$STUBDIR/kc-broken"; mkdir -p "$proj"
+  mkdir -p "$STUBDIR/secrets"; printf 'acq-dpapi-v1\nQUJD\n' > "$STUBDIR/secrets/acq.usai"
+  rm -f "$STUBDIR/.created"
+  run bash -c 'printf "" | ACQ_BACKEND=sbx "$1" create opencode "$2"' _ "$ACQ" "$proj"
+  assert_failure
+  assert_output --partial 'cannot be read or decrypted'
+  refute_output --partial 'no USAi API key stored'
+  refute_regex "$(cat "$CALLS")" 'sbx create'
+  assert [ ! -f "$STUBDIR/.created" ]
+}
+
 @test "create(sbx): acq-store key WITH proxy binding proceeds to sbx create" {
   local proj="$STUBDIR/kc-bound"; mkdir -p "$proj"
   mkdir -p "$STUBDIR/secrets"; printf 'sk-stored-and-bound\n' > "$STUBDIR/secrets/acq.usai"

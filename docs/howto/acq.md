@@ -177,10 +177,10 @@ for the next request:
    ./acq usai-rotate-api-key
    ```
 
-   (or run the underlying `scripts/rotate-apikey` directly — a thin shim that
-   forwards to `acq usai-rotate-api-key`). It prompts for the new key, then
-   validates it in a temporary sandbox. Rotation runs through the active backend
-   (msb or sbx), so it works regardless of which backend you use.
+   It prompts for the new key, then validates it in a temporary sandbox.
+   Rotation runs through the active backend (msb or sbx), so it works regardless
+   of which backend you use. Source checkouts also carry `scripts/rotate-apikey`,
+   a thin compatibility shim that forwards to `acq usai-rotate-api-key`.
 
 `acq` also validates your key on attach and offers to rotate it then, but the
 subcommand above is the direct path — no session restart required.
@@ -194,9 +194,9 @@ If a rotated key is still rejected, it was likely truncated on copy — see
 
 Most users should use the one-line installer in the
 [README quickstart](../../README.md#step-2-install-acq) — it auto-selects the
-best method already on your Mac (Homebrew → npm → self-contained download), puts
-`acq` on your `PATH`, and never needs administrator rights. This section covers
-the manual and developer paths.
+best method already on your Mac or Linux host (Homebrew → npm → self-contained
+download), puts `acq` on your `PATH`, and never needs administrator rights. This
+section covers the manual, developer, and Windows preview paths.
 
 ### Direct package-manager install
 
@@ -209,6 +209,101 @@ brew install GSA-TTS/tap/acq                              # if you use Homebrew
 ```
 
 Package-manager installs give you `upgrade`/`uninstall` for free.
+
+### Windows preview install
+
+Windows support is a preview path for Windows 11 hosts using the `msb` backend.
+It is installed from the GitHub release zip with PowerShell; npm remains scoped
+to macOS/Linux until Windows path and secret-storage behavior are fully
+validated. The preview runs the existing Bash `acq` implementation through Git
+Bash. The installer probes Windows Hypervisor Platform and stops when it is not
+usable, but it does not try to enable Windows features, elevate PowerShell, or
+reboot the machine.
+
+<!-- x-release-please-start-version -->
+
+```powershell
+irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.ps1 | iex
+```
+
+<!-- x-release-please-end -->
+
+For an inspect-first install:
+
+```powershell
+$AcqVersion = "3.1.0" # x-release-please-version
+$BaseUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$AcqVersion"
+Invoke-WebRequest "$BaseUrl/install.ps1" -OutFile install.ps1
+Get-Content .\install.ps1
+.\install.ps1 -DryRun
+.\install.ps1
+```
+
+Running `.\install.ps1` (and the installed `acq`, via `acq.cmd`) requires a
+PowerShell **execution policy** that permits local scripts. Windows 11 client
+defaults to `Restricted`, so those steps fail with `PSSecurityException` on an
+otherwise default host; allow local scripts for your user with
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (or use the `irm ... | iex`
+one-liner, which is not affected because piped text is not a script file). On a
+managed device the policy may be set by Group Policy.
+
+If WHP is disabled, stop: enable it from an **elevated** PowerShell
+(`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),
+restart, and re-run the installer. On a managed device, ask your IT administrator
+to enable "Windows Hypervisor Platform" out of band.
+
+### Windows preview validation
+
+Run these checks from PowerShell on a Windows 11 host with WHP already enabled.
+The PowerShell path is the supported Windows preview shell; `acq.cmd` is only a
+convenience shim. These checks are intentionally manual until the project has a
+reliable Windows runner with local virtualization available. The first step runs
+`install.ps1` directly, so the shell needs an execution policy that allows local
+scripts (see the note above) — a default `Restricted` client fails with
+`PSSecurityException`.
+
+```powershell
+# Installer dry run; should print planned actions and make no changes.
+.\install.ps1 -DryRun
+
+# After install, acq should resolve from PATH and delegate through Git Bash.
+Get-Command acq
+acq version
+
+# Confirm msb is installed and the host is ready.
+msb --version
+msb doctor
+
+# Smoke-test a shell sandbox against a path with spaces.
+New-Item -ItemType Directory -Force "$env:TEMP\acq windows smoke" | Out-Null
+acq --backend msb run shell "$env:TEMP\acq windows smoke"
+```
+
+If any command fails, capture the full command, output, Windows version, `msb
+--version`, and whether the machine is managed by enterprise policy.
+
+This checklist was validated on a Windows 11 host (build 26200): the installer
+dry-run/help, a real release-zip install (with SHA-256 verification) on a host
+with no sandbox runtime preinstalled — the installer detected the missing `msb`,
+prompted, and installed it via the upstream Windows installer — `acq version`
+through `acq.cmd`, `msb --version` / `msb doctor`, and sandbox provisioning all
+worked. Notes from that validation:
+
+- The launcher and installer resolve Git Bash from Git for Windows' standard
+  install locations and deliberately ignore the WSL interop shim
+  (`C:\Windows\System32\bash.exe`) that a bare `bash.exe` PATH lookup often
+  returns. If `acq` still lands in WSL, run it from a Git Bash terminal or add
+  Git for Windows' `bin` directory to your PATH.
+- The installer checks WHP by probing the WHP API (`WHvCreatePartition`), the
+  same signal `msb` uses, rather than the DISM feature flag — the flag can report
+  `Disabled` on hosts where WHP genuinely works (WSL2/VirtualMachine Platform,
+  VBS, or a virtualized guest). Treat `msb doctor` as the authoritative readiness
+  check.
+- `acq run` gates on a stored USAi key and validates it against the USAi API
+  before creating a sandbox, so the smoke test's last command and the full first
+  run require **GSA network reachability** (e.g. the GSA VPN) plus a key
+  (`acq secret set -g usai`). Off the GSA network, `acq run` stops at the key
+  gate with a clear message.
 
 ### Manual install (from a clone)
 
@@ -350,13 +445,15 @@ time: Apple Silicon Macs include the hypervisor support msb uses.
 
 **Windows 11** — Windows support is in **preview**. Local sandboxes need the
 **Windows Hypervisor Platform** feature (this is separate from the
-`VirtualMachinePlatform` feature that WSL2 and Docker Desktop enable):
+`VirtualMachinePlatform` feature that WSL2 and Docker Desktop enable). The
+Windows preview installer probes WHP and stops when it is not usable; it does not
+elevate PowerShell, enable the feature, or reboot the machine.
 
-```powershell
-Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart
-```
-
-`msb doctor --fix` can apply this for you from an elevated PowerShell window.
+Enable WHP yourself from an **elevated** PowerShell
+(`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All`),
+then restart (see the [README box](../../README.md#step-1-open-a-terminal)). On a
+managed device, ask your IT administrator; then re-run the installer or
+`msb doctor`.
 
 **Inside a cloud VM, CI runner, or another hypervisor** — the outer environment
 must expose **nested virtualization** before `/dev/kvm` (or the equivalent) is
