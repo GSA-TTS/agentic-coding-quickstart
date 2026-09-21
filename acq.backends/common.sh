@@ -58,6 +58,16 @@ GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_
 # shellcheck disable=SC2034  # consumed by `acq kit list` in the acq entry point
 ACQ_KIT_NAMES=(zscaler-ca-certificate usai-provider agentic-coding-playbook git-ssh-sign)
 
+# One-line descriptions for the built-in kits, parallel to ACQ_KIT_NAMES, shown
+# as the frozen ("always applied") rows in the `acq configure` picker (ADR-0028).
+# shellcheck disable=SC2034  # consumed by acq_configure / create_time_kit_picker
+ACQ_KIT_DESCS=(
+  "Zscaler/corporate CA trust so TLS-intercepting proxies don't break fetches"
+  "USAi provider + model config for OpenCode (endpoints, key wiring)"
+  "Federal agent rules and skills from the agentic-coding playbook"
+  "SSH-based git commit signing for the agent's commits"
+)
+
 # Built-in bundle identity. This mirrors the `provenance` block the usai-provider
 # kit declares at the pinned PATTERNS_KIT_REF. acq records these in a sandbox's
 # record so a later `acq run` / `acq kit check` can tell whether an existing
@@ -2739,8 +2749,6 @@ _acq_configure_show_current() {
   echo "      extra kits:         ${extras:-<none>}" >&2
   echo "      scope GitHub token: ${scope:-no}" >&2
   echo "" >&2
-  echo "      Built-in kits (always applied): ${ACQ_KIT_NAMES[*]}" >&2
-  echo "" >&2
 }
 
 # acq_configure — the interactive configuration flow. Presents the opt-in kit
@@ -2776,9 +2784,17 @@ acq_configure() {
   local current_extras selected_names=""
   current_extras=$(_acq_config_read_field extra_kits)
 
-  # Build the multiselect argument list and the defaults CSV (1-based indices of
-  # currently-selected kits).
+  # Build the picker's argument list: the built-in kits FIRST as frozen
+  # ("always applied") rows, then the toggleable opt-in kits. The defaults CSV
+  # is RELATIVE to the toggleable block (index 1 = first opt-in kit), matching
+  # the multiselect contract, so it is unaffected by the number of locked rows.
   local args=() defaults="" i name desc
+  local locked_n="${#ACQ_KIT_NAMES[@]}"
+  i=1
+  while [ "$i" -le "$locked_n" ]; do
+    args+=("${ACQ_KIT_NAMES[$((i-1))]}" "${ACQ_KIT_DESCS[$((i-1))]}")
+    i=$((i + 1))
+  done
   i=1
   while [ "$i" -le "$n" ]; do
     name="${ACQ_OPTIN_KIT_NAMES[$((i-1))]}"
@@ -2791,9 +2807,10 @@ acq_configure() {
 
   # Run the picker in-process (NOT via $(...)) so the shared scripted-input
   # cursor advances into the token-scoping confirm below; read the result from
-  # the _ACQ_PROMPT_SELECTION global.
+  # the _ACQ_PROMPT_SELECTION global. Chosen indices are relative to the opt-in
+  # block, so the index→name mapping below is unchanged by the frozen rows.
   local chosen
-  acq_prompt_multiselect "$defaults" "${args[@]}" >/dev/null
+  acq_prompt_multiselect "$locked_n" "$defaults" "${args[@]}" >/dev/null
   chosen="$_ACQ_PROMPT_SELECTION"
 
   # CANCELLED → leave config untouched.
@@ -2888,7 +2905,14 @@ create_time_kit_picker() {
   [ -z "${ACQ_EXTRA_KITS_FROM_ENV:-}" ] || return 0
 
   local configured args=() defaults="" i name desc
+  local locked_n="${#ACQ_KIT_NAMES[@]}"
   configured=$(_acq_config_read_field extra_kits)
+  # Built-in kits first as frozen rows (consistent with `acq configure`).
+  i=1
+  while [ "$i" -le "$locked_n" ]; do
+    args+=("${ACQ_KIT_NAMES[$((i-1))]}" "${ACQ_KIT_DESCS[$((i-1))]}")
+    i=$((i + 1))
+  done
   i=1
   while [ "$i" -le "$n" ]; do
     name="${ACQ_OPTIN_KIT_NAMES[$((i-1))]}"
@@ -2899,8 +2923,10 @@ create_time_kit_picker() {
   done
 
   echo "acq: extra kits for this sandbox (defaults from 'acq configure'):" >&2
+  # In-process (not $(...)) so the selection lands in _ACQ_PROMPT_SELECTION.
   local chosen
-  chosen=$(acq_prompt_multiselect "$defaults" "${args[@]}")
+  acq_prompt_multiselect "$locked_n" "$defaults" "${args[@]}" >/dev/null
+  chosen="$_ACQ_PROMPT_SELECTION"
   [ "$chosen" = "CANCELLED" ] && return 0
 
   # Map chosen indices → fully-expanded kit refs, and set ACQ_EXTRA_KITS for this

@@ -211,14 +211,19 @@ answer for the per-sandbox GitHub-token-scoping prompt. Choices persist to
 flags on every run.
 
 ```text
-? Select kits (↑/↓ move · SPACE toggle · ENTER confirm · q cancel)
-❯ [x] openchamber  Browser UI for OpenCode alongside the terminal TUI
-  [ ] paseo        Self-hosted Paseo browser web UI for coding agents
+? Select kits (dimmed rows are always applied · ↑/↓ move · SPACE toggle · ENTER confirm · q cancel)
+  [x] zscaler-ca-certificate   Zscaler/corporate CA trust … (always applied)
+  [x] usai-provider            USAi provider + model config … (always applied)
+  [x] agentic-coding-playbook  Federal agent rules and skills … (always applied)
+  [x] git-ssh-sign             SSH-based git commit signing … (always applied)
+❯ [x] openchamber              Browser UI for OpenCode alongside the terminal TUI
+  [ ] paseo                    Self-hosted Paseo browser web UI for coding agents
 ```
 
 - The **four built-in kits** (`zscaler-ca-certificate`, `usai-provider`,
-  `agentic-coding-playbook`, `git-ssh-sign`) are always applied and are not
-  shown as toggleable — the picker manages only the opt-in extras.
+  `agentic-coding-playbook`, `git-ssh-sign`) appear as **frozen rows** at the top
+  — always checked, dimmed, and tagged `(always applied)`. The cursor skips them
+  and they can't be toggled; the picker manages only the opt-in extras below.
 - On your **first run**, `acq` offers to run this for you. Run it again anytime
   with `acq configure`.
 - At `acq create`, the picker is shown again **pre-populated with your saved

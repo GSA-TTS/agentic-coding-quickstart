@@ -122,7 +122,7 @@ _cfg_src() {
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
     ACQ_PROMPT_TEST_INPUT="SPACE ENTER" \
-      acq_prompt_multiselect "" "openchamber" "descA" "paseo" "descB" 2>/dev/null
+      acq_prompt_multiselect 0 "" "openchamber" "descA" "paseo" "descB" 2>/dev/null
   '
   assert_success
   assert_output '1'
@@ -132,7 +132,7 @@ _cfg_src() {
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
     ACQ_PROMPT_TEST_INPUT="DOWN SPACE ENTER" \
-      acq_prompt_multiselect "" "a" "d" "b" "d" 2>/dev/null
+      acq_prompt_multiselect 0 "" "a" "d" "b" "d" 2>/dev/null
   '
   assert_success
   assert_output '2'
@@ -143,7 +143,7 @@ _cfg_src() {
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
     # default-checked index 2; move to it and toggle it off -> empty result
     ACQ_PROMPT_TEST_INPUT="DOWN SPACE ENTER" \
-      acq_prompt_multiselect "2" "a" "d" "b" "d" 2>/dev/null
+      acq_prompt_multiselect 0 "2" "a" "d" "b" "d" 2>/dev/null
   '
   assert_success
   assert_output ''
@@ -153,10 +153,35 @@ _cfg_src() {
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
     ACQ_PROMPT_TEST_INPUT="QUIT" \
-      acq_prompt_multiselect "1" "a" "d" "b" "d" 2>/dev/null
+      acq_prompt_multiselect 0 "1" "a" "d" "b" "d" 2>/dev/null
   '
   assert_success
   assert_output 'CANCELLED'
+}
+
+@test "prompt: locked rows are frozen — cursor skips them, result excludes them" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    set +e
+    # 2 locked rows (L1,L2) then 2 toggleable (T1,T2). Cursor starts on T1.
+    # SPACE toggles T1 -> result is the toggleable-relative index 1.
+    ACQ_PROMPT_TEST_INPUT="SPACE ENTER" \
+      acq_prompt_multiselect 2 "" "L1" "d" "L2" "d" "T1" "d" "T2" "d" >/dev/null 2>&1
+    echo "one=$_ACQ_PROMPT_SELECTION"
+    # UP from T1 wraps to T2 (never onto a locked row); SPACE toggles T2 -> index 2.
+    ACQ_PROMPT_TEST_INPUT="UP SPACE ENTER" \
+      acq_prompt_multiselect 2 "" "L1" "d" "L2" "d" "T1" "d" "T2" "d" >/dev/null 2>&1
+    echo "up=$_ACQ_PROMPT_SELECTION"
+    # A default pre-check is relative to the toggleable block (2 = T2); toggle it off.
+    ACQ_PROMPT_TEST_INPUT="DOWN SPACE ENTER" \
+      acq_prompt_multiselect 2 "2" "L1" "d" "L2" "d" "T1" "d" "T2" "d" >/dev/null 2>&1
+    echo "off=$_ACQ_PROMPT_SELECTION"
+    true
+  '
+  assert_success
+  assert_line 'one=1'
+  assert_line 'up=2'
+  assert_line 'off='
 }
 
 @test "prompt: confirm honors scripted y/n and the default" {
@@ -184,7 +209,7 @@ _cfg_src() {
     export ACQ_PROMPT_TEST_INPUT="SPACE ENTER y"
     # Do NOT command-substitute the multiselect (that would fork a subshell and
     # lose the cursor advance); redirect its stdout to a file instead.
-    acq_prompt_multiselect "" "a" "d" "b" "d" >/dev/null 2>&1
+    acq_prompt_multiselect 0 "" "a" "d" "b" "d" >/dev/null 2>&1
     acq_prompt_confirm "scope?" "no"; echo "confirm=$?"
     true
   '
@@ -221,10 +246,15 @@ _cfg_src() {
 
 @test "configure: interactive selection persists to config.yaml" {
   export XDG_CONFIG_HOME="$STUBDIR/xdg3"
-  # multiselect: SPACE toggles item 1 (openchamber), ENTER confirms; then the
-  # token-scoping confirm reads the next token (n).
+  # The built-in kits render as frozen rows; the cursor starts on the first
+  # opt-in (openchamber). SPACE toggles it, ENTER confirms; the token-scoping
+  # confirm then reads the next token (n).
   run env ACQ_BACKEND=sbx ACQ_PROMPT_TEST_INPUT="SPACE ENTER n" "$ACQ" configure
   assert_success
+  # Built-in kits appear inline in the picker, tagged, instead of a separate banner.
+  assert_output --partial '(always applied)'
+  assert_output --partial 'zscaler-ca-certificate'
+  refute_output --partial 'Built-in kits (always applied):'
   run cat "$XDG_CONFIG_HOME/acq/config.yaml"
   assert_line 'extra_kits: openchamber'
   assert_line 'scope_github_token: no'

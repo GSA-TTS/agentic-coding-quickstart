@@ -73,8 +73,10 @@ Chosen: **option 3**.
   (`PATTERNS_KIT_REF` / `PATTERNS_KIT_DIR`, `integrations/isolation/acq-kits/`):
   `openchamber`, `paseo`. `prime-agent` is a skeleton at the current pin and is
   intentionally omitted until functional. The catalog also offers a free-form
-  "add your own ref / local path" entry. The four built-ins are shown as
-  locked/pre-checked (informational) — the picker cannot disable them.
+  "add your own ref / local path" entry. The four built-ins are shown **inline as
+  frozen rows** at the top of the same picker — always checked, dimmed, tagged
+  "(always applied)", cursor-skipped, and never toggleable — rather than in a
+  separate banner, so the full applied set reads as one list.
 - **`acq configure` command** — shows current config, runs the multiselect over
   the opt-in catalog, then a confirm for the token-scoping default, and writes
   the result to `config.yaml`. Auto-offered once on first run (no `config.yaml`
