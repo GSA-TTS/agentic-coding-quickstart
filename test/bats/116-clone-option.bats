@@ -344,6 +344,20 @@ _msb_clone_isolated() { # ARGS...
   [ "$perms" = 700 ]
 }
 
+@test "clone(msb #467): a scratch dir that cannot be made private fails the create" {
+  # chmod runs as a non-final `&&` link inside a function called as an `if !`
+  # condition, where errexit does not apply: without an explicit status check a
+  # failure here clones the credential-bearing config in at the ambient umask.
+  local real_chmod; real_chmod=$(command -v chmod)
+  printf '#!/usr/bin/env bash\ncase " $* " in *"/clones/"*) echo "chmod: operation not permitted" >&2; exit 1;; esac\nexec %s "$@"\n' "$real_chmod" > "$STUBDIR/chmod"
+  "$real_chmod" +x "$STUBDIR/chmod"
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'private scratch dir'
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+  refute_regex "$(cat "$CALLS")" 'msb create'
+}
+
 @test "clone(msb #467): a failed origin carry fails the create and removes the scratch" {
   # A warn-only miss would leave origin pointing at the scratch itself, so an
   # in-guest 'git push origin' APPEARS to succeed while reaching no forge.

@@ -2461,8 +2461,17 @@ _acq_msb_clone_setup() {
     echo "acq(msb):   or copy files in with 'acq cp'." >&2
   fi
   # Private (0700): the scratch .git/config carries the source origin URL,
-  # which may embed a credential, at a path the user never sees.
-  (umask 077 && mkdir -p "$dir") && chmod 700 "$dir"
+  # which may embed a credential, at a path the user never sees. Check the
+  # status explicitly: this function runs as an `if !` condition, which
+  # suppresses errexit for its whole body, so a bare `&&` chain would let a
+  # failed chmod fall through and clone that config in at the ambient umask.
+  if ! (umask 077 && mkdir -p "$dir") || ! chmod 700 "$dir"; then
+    echo "acq(msb): error: --clone: could not create a private scratch dir: $dir" >&2
+    echo "acq(msb):   Refusing to clone a config that may embed a credential into a" >&2
+    echo "acq(msb):   directory other users can read." >&2
+    rm -rf "$dir"
+    return 1
+  fi
   printf '%s\n' "$ws_canon" > "${dir}/.origin"
   if ! git clone --quiet --no-hardlinks -- "$ws_canon" "$scratch"; then
     echo "acq(msb): error: --clone: git clone of $ws_canon failed" >&2
