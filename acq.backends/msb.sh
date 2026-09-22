@@ -1115,10 +1115,11 @@ _acq_msb_wait_for_exec_ready() {
 # THE BOUNDARY — what stays on `msb exec`, and WHY it MUST:
 #
 #   1) INSTALL PHASE stays exec-based. install commands are run-once, gated by a
-#      root-owned marker keyed on a hash of the argv
-#      (_acq_msb_exec_install: /var/lib/acq/install-<cksum>), tested+written as
-#      uid 0 so the gate is independent of the command's own user. A create-time
-#      script re-runs on every restart by design — the OPPOSITE of run-once — so
+#      host-authoritative marker keyed on a hash of the argv
+#      (_acq_msb_exec_install: acq_host_config_has/_write "install-<cksum>", held
+#      on the host per ADR-0030 so a passwordless-sudo guest cannot forge it to
+#      suppress the step). A create-time script re-runs on every restart by
+#      design — the OPPOSITE of run-once — so
 #      folding install into the startup script would break its idempotency
 #      contract. install therefore stays out of the staged script entirely.
 #
@@ -1966,9 +1967,9 @@ _acq_msb_exec_flags_into() {
 
 # _acq_msb_exec_install NAME USER UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV... — run an
 # install-phase command, gated by a per-command marker (hash of argv) so it runs
-# once per sandbox even across re-applies. The marker lives under /var/lib/acq
-# (root-owned) and is both TESTED and WRITTEN as uid 0, so the gate is
-# independent of the install command's own user.
+# once per sandbox even across re-applies. The marker is a key in the
+# host-authoritative config store (ADR-0030), so a passwordless-sudo guest cannot
+# forge it to suppress the install step.
 _acq_msb_exec_install() {
   local _name="$1" _user="$2" _uflagn="$3" _eflagn="$4"
   shift 4
@@ -4091,8 +4092,8 @@ EOF
 # forward on a RUNNING sandbox that acq is re-attaching to. See ADR-0021.
 #
 # WHY THIS EXISTS: the provision path wires the forward (emit --vsock, start the
-# socat bridge, write the /var/lib/acq/ssh-auth-sock marker), and the
-# stopped→resume path (acq_backend_start) restarts the bridge from that marker.
+# socat bridge, write the host-config ssh-auth-sock key), and the
+# stopped→resume path (acq_backend_start) restarts the bridge from that value.
 # But re-attaching to an ALREADY-RUNNING sandbox goes through neither: the heal
 # loop skips acq_backend_start (the sandbox is already running), so nothing
 # re-drives forwarding. That left two live gaps where the guest process env got
