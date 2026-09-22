@@ -658,6 +658,14 @@ ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
 # always defined even if provision is not the entry point.
 _ACQ_MSB_STARTUP_STAGE_FILES=()
 _ACQ_MSB_STARTUP_STAGED=""
+# Per-kit read-only-file rewrite table (ADR-0030 Mechanism 2): parallel arrays
+# mapping a kit-declared guest path (FROM) to the path the same bytes appear at
+# on the read-only host-config mount (TO). _acq_msb_apply_kit_dir populates these
+# from `readonly: true` files[] entries; _acq_msb_run_commands / the staged
+# startup body rewrite any startup-argv token equal to a FROM into its TO, so
+# trusted code runs from the :ro mount, never a guest-writable copy.
+_ACQ_MSB_RO_REWRITE_FROM=()
+_ACQ_MSB_RO_REWRITE_TO=()
 # SSH user for the serve listener. `msb ssh serve` authorizes a key host-wide;
 # the login user on the loopback listener defaults to root (override if a
 # deployment's msb serve expects a different account).
@@ -1566,19 +1574,40 @@ _acq_msb_apply_kit_dir() {
 $(kit_spec_files "$spec")
 EOF
 
-  local path mode phase source src _i
+  local path mode phase source readonly src _i
+  # Reset the per-kit readonly-file rewrite table (guest path -> :ro guest path)
+  # before this kit's files are processed; _acq_msb_run_commands consults it to
+  # rewrite startup argv so trusted code runs from the read-only mount (ADR-0030).
+  _ACQ_MSB_RO_REWRITE_FROM=()
+  _ACQ_MSB_RO_REWRITE_TO=()
   for _i in ${_frecs[@]+"${!_frecs[@]}"}; do
     fline="${_frecs[$_i]}"
     path=$(printf '%s' "$fline" | cut -f1)
     mode=$(printf '%s' "$fline" | cut -f2)
     phase=$(printf '%s' "$fline" | cut -f3)
     source=$(printf '%s' "$fline" | cut -f4)
+    readonly=$(printf '%s' "$fline" | cut -f5)
     [ -n "$path" ] || continue
     src=""
     if [ -n "$source" ]; then
       src="${kitdir}/${source}"
     fi
-    if [ -n "$src" ] && [ -f "$src" ]; then
+    if [ "$readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ]; then
+      # Trusted CODE (ADR-0030 Mechanism 2): stage it on the per-sandbox
+      # host-config dir so the guest sees it through the READ-ONLY mount and a
+      # passwordless-sudo agent cannot rewrite it. Do NOT copy it into the
+      # guest's writable filesystem; record a rewrite so the invoking startup
+      # command runs the :ro copy instead of the (absent) guest path.
+      local _ro_guest
+      if _ro_guest=$(_acq_msb_stage_readonly_file "$name" "$kitdir" "$path" "$src"); then
+        _ACQ_MSB_RO_REWRITE_FROM+=("$path")
+        _ACQ_MSB_RO_REWRITE_TO+=("$_ro_guest")
+        acq_debug "msb readonly kit file: $path -> $_ro_guest (:ro)"
+      else
+        echo "acq(msb): warning: could not stage read-only kit file '$path' for '$name';" \
+             "its startup command may fail." >&2
+      fi
+    elif [ -n "$src" ] && [ -f "$src" ]; then
       _acq_msb_copy_file_verified "$name" "$src" "$path" "$mode" || {
         echo "acq(msb): error: could not place kit file at ${name}:${path}" >&2
         echo "acq(msb):   subsequent kit commands that read it will fail." >&2
@@ -1625,6 +1654,52 @@ EOF
 # aborts the apply. Host-authoritative (ADR-0030).
 _acq_msb_reset_kit_env() {
   acq_host_config_clear msb "$1" kit-env
+}
+
+# _acq_msb_stage_readonly_file NAME KITDIR GUESTPATH SRC — stage one trusted kit
+# code file onto the per-sandbox host-config dir so the guest sees it through the
+# READ-ONLY mount (ADR-0030 Mechanism 2), and echo the guest path it appears at.
+# Returns non-zero (and echoes nothing) on failure. The file is placed under a
+# `kit-files/<pathslug>.<crc>` subtree of the host-config dir (a direct
+# filesystem write, NOT acq_host_config_write, whose flat KEY charset forbids the
+# nested path). Staged 0555 on the host — defense in depth; the :ro mount is the
+# real guarantee. No chown: a :ro bind is readable/executable by the agent user
+# regardless of host owner.
+_acq_msb_stage_readonly_file() {
+  local name="$1" kitdir="$2" guestpath="$3" src="$4"
+  local cfgdir slug crc dest reldir="kit-files"
+  cfgdir=$(acq_host_config_dir msb "$name") || return 1
+  # Lossy slug + CRC of the guest path, matching the volume-name scheme
+  # (_acq_msb_volume_flags_from_records): map non-alnum to '-', squeeze runs, and
+  # append a CRC so two distinct paths that slug the same do not collide.
+  slug=$(printf '%s' "${guestpath#/}" | tr -c 'A-Za-z0-9' '-' | tr -s '-')
+  slug="${slug%-}"
+  crc=$(printf '%s' "$guestpath" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+  if ! mkdir -p "${cfgdir}/${reldir}" 2>/dev/null; then
+    acq_debug "msb readonly-stage: could not create ${cfgdir}/${reldir}"
+    return 1
+  fi
+  chmod 700 "$cfgdir" 2>/dev/null || true
+  dest="${cfgdir}/${reldir}/${slug}.${crc}"
+  cp -f "$src" "$dest" 2>/dev/null || { acq_debug "msb readonly-stage: cp failed: $src -> $dest"; return 1; }
+  chmod 0555 "$dest" 2>/dev/null || true
+  # The guest sees the host-config dir at ACQ_HOST_CONFIG_GUEST_DIR (:ro).
+  printf '%s/%s/%s.%s\n' "$ACQ_HOST_CONFIG_GUEST_DIR" "$reldir" "$slug" "$crc"
+}
+
+# _acq_msb_ro_rewrite_token TOKEN — echo TOKEN, or its read-only-mount equivalent
+# when TOKEN exactly equals a staged readonly file's declared guest path (ADR-0030
+# Mechanism 2). Whole-token match only (never substring), so a --flag value that
+# merely mentions the path is untouched. Bash 3.2 safe (parallel-array scan).
+_acq_msb_ro_rewrite_token() {
+  local _tok="$1" _i
+  for _i in ${_ACQ_MSB_RO_REWRITE_FROM[@]+"${!_ACQ_MSB_RO_REWRITE_FROM[@]}"}; do
+    if [ "$_tok" = "${_ACQ_MSB_RO_REWRITE_FROM[$_i]}" ]; then
+      printf '%s\n' "${_ACQ_MSB_RO_REWRITE_TO[$_i]}"
+      return 0
+    fi
+  done
+  printf '%s\n' "$_tok"
 }
 
 # Copy a host file into the guest and VERIFY it is readable there before
@@ -1771,6 +1846,16 @@ EOF
         ;;
       "__END__")
         reading=0
+        # ADR-0030 Mechanism 2: rewrite any argv token that names a readonly
+        # (trusted-code) kit file to its read-only-mount path, so startup runs the
+        # :ro copy, not a guest-writable one. No-op when the rewrite table is
+        # empty (the common case: no kit declared readonly files).
+        if [ "${#_ACQ_MSB_RO_REWRITE_FROM[@]}" -gt 0 ] && [ "${#argv[@]}" -gt 0 ]; then
+          local _ai
+          for _ai in "${!argv[@]}"; do
+            argv[$_ai]=$(_acq_msb_ro_rewrite_token "${argv[$_ai]}")
+          done
+        fi
         _acq_msb_exec_command "$name" "$phase" "$user" "$background" \
           ${_kit_env[@]+"${_kit_env[@]}"} -- ${argv[@]+"${argv[@]}"}
         ;;
@@ -2143,6 +2228,31 @@ _acq_msb_startup_body_into() {
   local _kit_env=()
   _acq_msb_collect_kit_env_into _kit_env "$_spec"
 
+  # ADR-0030 Mechanism 2: build this spec's readonly-file rewrite table so the
+  # staged --script-path body (like the exec path) invokes trusted code from the
+  # :ro mount. Staging runs at create-flag assembly, before _acq_msb_apply_kit_dir
+  # populates the module-level table, so derive a LOCAL table from the same
+  # readonly files[] entries. The guest :ro path is derived by the same
+  # slug+crc scheme _acq_msb_stage_readonly_file uses (the file itself is staged
+  # later, during apply; here we only need the resulting guest path to rewrite
+  # the argv token).
+  local _ro_from=() _ro_to=() _frec _fpath _fsource _freadonly _fslug _fcrc
+  while IFS= read -r _frec; do
+    [ -n "$_frec" ] || continue
+    _freadonly=$(printf '%s' "$_frec" | cut -f5)
+    [ "$_freadonly" = "true" ] || continue
+    _fpath=$(printf '%s' "$_frec" | cut -f1)
+    _fsource=$(printf '%s' "$_frec" | cut -f4)
+    [ -n "$_fpath" ] && [ -n "$_fsource" ] || continue
+    _fslug=$(printf '%s' "${_fpath#/}" | tr -c 'A-Za-z0-9' '-' | tr -s '-')
+    _fslug="${_fslug%-}"
+    _fcrc=$(printf '%s' "$_fpath" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+    _ro_from+=("$_fpath")
+    _ro_to+=("${ACQ_HOST_CONFIG_GUEST_DIR}/kit-files/${_fslug}.${_fcrc}")
+  done <<EOF
+$(kit_spec_files "$_spec")
+EOF
+
   # Buffer the command stream first (kit_spec_commands runs its own subshell).
   local _lines=() line
   while IFS= read -r line; do
@@ -2167,6 +2277,20 @@ EOF
       "__END__")
         reading=0
         if [ "$phase" = "startup" ] && [ "${#argv[@]}" -gt 0 ]; then
+          # Rewrite readonly-file argv tokens to their :ro-mount path (whole-token
+          # match), so the staged body runs trusted code from the read-only mount.
+          if [ "${#_ro_from[@]}" -gt 0 ]; then
+            local _ai _aj _atok
+            for _ai in "${!argv[@]}"; do
+              _atok="${argv[$_ai]}"
+              for _aj in "${!_ro_from[@]}"; do
+                if [ "$_atok" = "${_ro_from[$_aj]}" ]; then
+                  argv[$_ai]="${_ro_to[$_aj]}"
+                  break
+                fi
+              done
+            done
+          fi
           local _prefix=() _cmdline
           _acq_msb_startup_env_prefix_into _prefix "$user" _kit_env
           _cmdline=$(_acq_msb_startup_emit_command "$user" "$background" _prefix argv)

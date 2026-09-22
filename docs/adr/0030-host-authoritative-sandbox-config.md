@@ -175,12 +175,32 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
 - Kit `startup` code that acq re-runs across restarts is staged into the same
   per-sandbox `:ro` config dir and invoked from there by the heal, so a restart
   always executes the host-authoritative (pinned) copy, not a guest-tampered one.
+- **Identification is declared, not inferred.** A kit `files[]` entry marks
+  trusted code with `readonly: true`. acq stages such a file onto the host config
+  dir (under `kit-files/<path-slug>.<crc>`), does **not** `msb copy` it into the
+  guest's writable filesystem, and rewrites any startup-command argv token that
+  *exactly equals* the file's declared guest path to its `:ro`-mount path (whole
+  token only, so a `--flag <data-path>` value is left untouched). Inference from
+  "is this path referenced by a startup command" is deliberately rejected: trust
+  is a per-file property the kit author asserts, and a data file the command also
+  reads (e.g. `opencode.jsonc`) must stay a normal guest-writable drop.
+- A file **without** `readonly: true` is unchanged: copied into the guest and
+  invoked by its guest path (full backward compatibility; no shipped kit changes
+  behavior until it opts in).
 - Kits that genuinely must *compute* runtime state in-guest still may — they
   write their output to a guest-owned **rw** path (e.g. a per-sandbox catalog
   cache), which acq never treats as authoritative configuration. (This is
   exactly the boundary patterns ADR 0003 now draws: read-only provider *facts*
   from the `:ro` mount; rw *catalog* generated per-sandbox at startup, never
   shared across sandboxes.)
+
+> **Cross-repo dependency.** The `readonly: true` files[] field is additive to
+> the neutral `hybrid/v1` kit spec and must be adopted by the provider/harness
+> kits in `GSA-TTS/agentic-coding-patterns` for their trusted code (e.g.
+> `usai-provider`'s `merge-global-config.mjs`, and ADR 0003's provider
+> normalizers). The two sides are independently deployable: acq shipping first
+> is inert until a kit opts in; a kit shipping the field first is ignored by an
+> older acq (the file still copies into the guest). Tracked as sequenced work.
 
 ### Migration (one tracking issue, one PR, a commit per change)
 
