@@ -1840,25 +1840,29 @@ socket path, so the persisted route now points at a dead host endpoint. This is
 distinct from the previous variant: there the guest env var was missing; here the
 env var and bridge are present but the route's host end is dead.
 
-`acq` now **detects and reports** this instead of leaving a silent dead bridge:
-after (re)starting the bridge, `_acq_msb_start_ssh_agent_bridge` runs a liveness
-probe (`ssh-add -l` over the guest sock) and, on failure, prints an actionable
-warning naming the host-reboot cause and the remedy. Because the bridge's
-listener socket is present (only its vsock backend is dead), `ssh-add` exits **1**
-with `communication with agent failed` here — the same exit code as a healthy but
-empty agent, so the probe classifies on the message (a "no identities" reply is
-treated as healthy and stays quiet). The `--vsock` route is create-time only, so
-the fix is to **recreate the sandbox** to refresh the route:
+`acq` now has two responses. The resume/re-attach path still **detects and
+reports** this instead of leaving a silent dead bridge: after (re)starting the
+bridge, `_acq_msb_start_ssh_agent_bridge` runs a liveness probe (`ssh-add -l`
+over the guest sock) and, on failure, prints an actionable warning naming the
+host-reboot cause. Because the bridge's listener socket is present (only its
+vsock backend is dead), `ssh-add` exits **1** with `communication with agent
+failed` here — the same exit code as a healthy but empty agent, so the probe
+classifies on the message (a "no identities" reply is treated as healthy and
+stays quiet).
+
+For planned recovery, use native stateful snapshot/restore. `acq restore` asks
+msb to restore captured VM state and re-derives the `--vsock` route from the
+current host `SSH_AUTH_SOCK`, so the restored sandbox gets a live host-agent
+endpoint:
 
 ```bash
-acq rm <sandbox>
-# then re-run your original create/run WITH the host agent available:
 eval "$(ssh-agent -s)"; ssh-add ~/.ssh/id_ed25519   # if needed
-acq run <agent> <workspace…>
+acq recreate <sandbox>
 ```
 
-See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
-("Re-attach to a running sandbox") for the full mechanism.
+Use the old `acq rm <sandbox>; acq run …` path only when you do not need to
+preserve live agent context. See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
+and [ADR-0030](adr/0030-native-snapshot-restore.md) for the mechanisms.
 
 ---
 

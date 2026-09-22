@@ -59,7 +59,7 @@ ACQ_BACKEND_NAME="msb"
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_PORT_FORWARD=1        # post-hoc publish via `msb ssh serve` + OpenSSH -L forwarding (ADR-0015)
 # shellcheck disable=SC2034
-ACQ_BACKEND_SUPPORTS_SNAPSHOTS=0           # msb HAS `msb snapshot`, but acq exposes NO `snapshot` verb; wiring one is beyond sbx parity (sbx has none), so this flag reflects what acq surfaces (0), not what msb can do
+ACQ_BACKEND_SUPPORTS_SNAPSHOTS=1           # acq surfaces native msb snapshot/restore (full state + restore-time resource rebinding)
 # shellcheck disable=SC2034
 ACQ_BACKEND_CAN_RESUME=1                   # msb stop / msb start preserve state
 # shellcheck disable=SC2034
@@ -1022,6 +1022,90 @@ acq_backend_start() {
   # must be (re)started here too. Gated on the persisted marker (no provision ran
   # this path, so _ACQ_MSB_SSH_AGENT_FORWARDING is not set). See ADR-0021.
   _acq_msb_start_ssh_agent_bridge "$_name"
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_snapshot NAME [OUT] — create a native full-state msb snapshot
+# ---------------------------------------------------------------------------
+acq_backend_snapshot() {
+  local _name="${1:-}" _out="${2:-}"
+  [ -n "$_name" ] || { echo "acq(msb): snapshot: missing sandbox name" >&2; return 1; }
+  if [ -n "${3:-}" ]; then
+    echo "acq(msb): snapshot: too many arguments" >&2
+    echo "     usage: acq snapshot NAME [OUT]" >&2
+    return 2
+  fi
+  if [ -n "$_out" ]; then
+    local _host_out="$_out"
+    if command -v host_path >/dev/null 2>&1; then
+      _host_out=$(host_path "$_out")
+    fi
+    _acq_msb_cli snapshot create --from-sandbox "$_name" --full --guest-flush auto -o "$_host_out"
+  else
+    _acq_msb_cli snapshot create --from-sandbox "$_name" --full --guest-flush auto
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_restore SNAPSHOT --name NAME — restore and re-plumb resources
+# ---------------------------------------------------------------------------
+acq_backend_restore() {
+  local _snapshot="${1:-}" _name="" _arg
+  [ -n "$_snapshot" ] || { echo "acq(msb): restore: missing snapshot reference" >&2; return 1; }
+  shift || true
+  while [ "$#" -gt 0 ]; do
+    _arg="$1"; shift
+    case "$_arg" in
+      --name)
+        _name="${1:-}"; [ "$#" -gt 0 ] && shift || true ;;
+      --name=*)
+        _name="${_arg#--name=}" ;;
+      --*)
+        echo "acq(msb): restore: unknown flag '$_arg'" >&2
+        echo "     usage: acq restore SNAPSHOT --name NAME" >&2
+        return 2 ;;
+      *)
+        echo "acq(msb): restore: unexpected argument '$_arg'" >&2
+        echo "     usage: acq restore SNAPSHOT --name NAME" >&2
+        return 2 ;;
+    esac
+  done
+  case "$_name" in
+    ""|-*)
+      echo "acq(msb): restore: missing --name NAME" >&2
+      echo "     usage: acq restore SNAPSHOT --name NAME" >&2
+      return 2 ;;
+  esac
+
+  local _restore_flags=(--name "$_name" --dangerously-inherit-resources)
+  local _vsock_flags=()
+  _acq_msb_vsock_flags_into _vsock_flags
+  [ "${#_vsock_flags[@]}" -gt 0 ] && _restore_flags+=("${_vsock_flags[@]}")
+
+  local _host_snapshot="$_snapshot"
+  if command -v host_path >/dev/null 2>&1; then
+    _host_snapshot=$(host_path "$_snapshot")
+  fi
+
+  local _restore_secret_flags=() _restore_secret_names=()
+  _acq_msb_bind_secrets_into _restore_secret_flags _restore_secret_names "$_name"
+  local _restore_rc=0
+  _acq_msb_cli restore "$_host_snapshot" "${_restore_flags[@]}" || _restore_rc=$?
+  local _rev
+  for _rev in ${_restore_secret_names[@]+"${_restore_secret_names[@]}"}; do
+    unset "$_rev"
+  done
+  [ "$_restore_rc" -eq 0 ] || return "$_restore_rc"
+
+  _acq_msb_wait_for_exec_ready "$_name" || \
+    echo "acq(msb): warning: $_name did not become exec-ready after restore." >&2
+  _acq_msb_grant_oci_devs "$_name"
+  if [ "${_ACQ_MSB_SSH_AGENT_FORWARDING:-0}" = "1" ]; then
+    _acq_msb_check_socat "$_name" && _acq_msb_start_ssh_agent_bridge "$_name"
+  else
+    echo "acq(msb): warning: no current host SSH_AUTH_SOCK was available;" \
+         "SSH signing will not be re-plumbed in restored sandbox '$_name'." >&2
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -4543,28 +4627,45 @@ acq_backend_stop() {
 }
 
 acq_backend_terminate() {
+  _acq_msb_terminate_impl "$1" cleanup
+}
+
+acq_backend_terminate_for_restore() {
+  _acq_msb_terminate_impl "$1" keep-resources
+}
+
+_acq_msb_terminate_impl() {
+  local _name="$1" _mode="${2:-cleanup}"
   # Tear down any post-hoc published-port tunnels (serve + ssh PIDs, state file)
   # before removing the sandbox (ADR-0015). Killing a dead PID / missing state
   # file is a no-op.
-  _acq_msb_ports_teardown "$1"
+  _acq_msb_ports_teardown "$_name"
   # Clean up derived volumes (ADR-0023) whenever the sandbox is GONE after the
   # remove attempt — not merely when remove succeeded. A failed remove of a
   # still-existing sandbox must not touch volumes that may be in use, but a
   # failed remove of an already-gone sandbox (removed via `msb rm` directly, or
   # a half-failed create that never registered) must still reach the cleanup,
   # or the volumes orphan forever under ~/.microsandbox/volumes/.
+  #
+  # Restore-aware removal keeps derived host resources: `acq recreate` snapshots,
+  # removes the VM, then restores from the snapshot, and msb restore inherits
+  # validated source-local resource records. Deleting the derived volumes in the
+  # gap would destroy the resources restore needs.
+  #
   # --clone (ADR-0027): surface unfetched agent commits BEFORE anything is deleted
   # (sbx-parity warning; rm proceeds — the scratch is disposable by contract).
-  _acq_msb_clone_warn_unfetched "$1"
+  _acq_msb_clone_warn_unfetched "$_name"
   local _rc=0
-  _acq_msb_cli remove --force "$1" || _rc=$?
-  if [ "$_rc" -ne 0 ] && acq_backend_exists "$1"; then
+  _acq_msb_cli remove --force "$_name" || _rc=$?
+  if [ "$_rc" -ne 0 ] && acq_backend_exists "$_name"; then
     return "$_rc"
   fi
-  _acq_msb_remove_derived_volumes "$1"
-  # Same GONE-after-remove-attempt rule as the volumes above: delete the scratch
-  # clone and drop the fetch-back remote only once the sandbox is really gone.
-  _acq_msb_clone_cleanup "$1"
+  if [ "$_mode" != "keep-resources" ]; then
+    _acq_msb_remove_derived_volumes "$_name"
+    # Same GONE-after-remove-attempt rule as the volumes above: delete the scratch
+    # clone and drop the fetch-back remote only once the sandbox is really gone.
+    _acq_msb_clone_cleanup "$_name"
+  fi
   return "$_rc"
 }
 

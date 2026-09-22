@@ -54,6 +54,21 @@ _seed_usai() {
   refute_output --partial 'passed through'
 }
 
+@test "snapshot/restore: --help documents acq-owned native state verbs" {
+  run env ACQ_BACKEND=sbx "$ACQ" snapshot --help
+  assert_output --partial 'save a sandbox'
+  assert_output --partial 'backends fail closed'
+  refute_output --partial 'passed through'
+  run env ACQ_BACKEND=sbx "$ACQ" restore --help
+  assert_output --partial 're-plumb acq-owned resources'
+  assert_output --partial 'host-resource re-plumbing'
+  refute_output --partial 'passed through'
+  run env ACQ_BACKEND=sbx "$ACQ" recreate --help
+  assert_output --partial 'snapshot, remove, then restore'
+  assert_output --partial 'acq-owned host-resource re-plumbing'
+  refute_output --partial 'passed through'
+}
+
 @test "dispatch: version reports backend and script path" {
   run env ACQ_BACKEND=sbx "$ACQ" version
   assert_output --partial 'backend:'

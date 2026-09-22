@@ -224,6 +224,25 @@ _msys_provision() { # NAME WS
   assert_output --partial 'forms-differ'
 }
 
+@test "msys: snapshot output and restore archive paths get the host form" {
+  _plant_cygpath_stub
+  : > "$STUBDIR/saved.msb"
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_snapshot somebox "'"$STUBDIR"'/saved.msb" >/dev/null 2>&1
+    acq_backend_restore "'"$STUBDIR"'/saved.msb" --name restored >/dev/null 2>&1 || true
+    host=$(host_path "'"$STUBDIR"'/saved.msb")
+    grep -q -- "-o $host" "'"$CALLS"'" && echo "snapshot-host-form-ok"
+    grep -q -- "restore $host --name restored" "'"$CALLS"'" && echo "restore-host-form-ok"
+    [ "$host" != "'"$STUBDIR"'/saved.msb" ] && echo "forms-differ" || echo "forms-same"
+  '
+  assert_output --partial 'snapshot-host-form-ok'
+  assert_output --partial 'restore-host-form-ok'
+  assert_output --partial 'forms-differ'
+}
+
 @test "msys: msb is invoked with MSYS argument rewriting disabled" {
   cat >"$STUBDIR/msb" <<'MSBENVSTUB'
 #!/usr/bin/env bash

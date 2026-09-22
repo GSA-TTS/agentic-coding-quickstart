@@ -86,12 +86,17 @@ Subcommands:
   create AGENT PATH [...]                  Create a sandbox (detached).
   ls                                       List sandboxes.
   stop NAME                                Stop a sandbox (without removing).
+  snapshot NAME [OUT]                      Snapshot a sandbox's live state (msb only).
+  restore NAME [SNAPSHOT]                  Restore a sandbox from SNAPSHOT, or
+                                           the newest date-stamped snapshot (msb only).
+  recreate NAME [OUT]                      Snapshot, remove, then restore NAME
+                                           from the snapshot (msb only).
   start NAME                               Start a stopped sandbox and re-run its
                                            kit startup services (msb only; on sbx
                                            a sandbox resumes automatically on 'acq run').
   restart NAME                             Stop then start a sandbox, re-running
                                            kit startup services (msb only; see 'start').
-  rm NAME                                  Remove a sandbox.
+  rm [--snapshot] NAME [OUT]              Remove a sandbox; optionally snapshot first.
   shell NAME                               Open an interactive shell in a sandbox.
   exec NAME -- CMD...                      Run a command inside a sandbox.
   cp SRC DST                               Copy files in/out (NAME:path syntax).
@@ -276,6 +281,46 @@ Usage:
 State is preserved; resume with `acq run NAME` (or `acq start NAME` on msb).
 U
       ;;
+    snapshot)
+      cat >&2 <<'U'
+acq snapshot — save a sandbox's live state (msb only)
+
+Usage:
+  acq snapshot NAME [OUT]
+
+Creates a full native snapshot archive of NAME. On msb this captures disk,
+memory, execution, and device state. OUT is optional; when omitted, acq writes a
+date-stamped .msb archive under its snapshot state directory. Unsupported
+backends fail closed with a clear message.
+U
+      ;;
+    restore)
+      cat >&2 <<'U'
+acq restore — restore a native snapshot and re-plumb acq-owned resources (msb only)
+
+Usage:
+  acq restore NAME [SNAPSHOT]
+
+Restores NAME from SNAPSHOT. When SNAPSHOT is omitted, acq selects the newest
+date-stamped snapshot for NAME from its snapshot state directory. acq owns
+host-resource re-plumbing: it derives the current host SSH-agent vsock route and
+asks the backend to inherit validated source-local resources, rather than
+requiring the user to pass vsock/volume/port flags by hand. Unsupported backends
+fail closed with a clear message.
+U
+      ;;
+    recreate)
+      cat >&2 <<'U'
+acq recreate — snapshot, remove, then restore a sandbox (msb only)
+
+Usage:
+  acq recreate NAME [OUT]
+
+Creates a full native snapshot archive, removes NAME, then restores the archive
+back to NAME with acq-owned host-resource re-plumbing. OUT defaults to an acq
+state directory and is left in place if restore fails.
+U
+      ;;
     start)
       cat >&2 <<'U'
 acq start — resume a stopped sandbox and re-run its kit startup (msb only)
@@ -312,8 +357,11 @@ acq rm — remove a sandbox
 
 Usage:
   acq rm NAME
+  acq rm --snapshot NAME [OUT]
 
 Destroys the sandbox and all of its state (including uncommitted work in it).
+With --snapshot, acq first writes a full native snapshot archive and removes the
+sandbox only if that snapshot succeeds. Unsupported backends fail closed.
 U
       ;;
     exec)
@@ -412,7 +460,7 @@ U
 _acq_verb_backend_help_kind() {
   case "${1%% *}" in
     run|ls|stop|rm|exec|cp|ports|secret|kit) printf 'shared' ;;
-    start|restart|create|shell|version|doctor|github-scope|usai-rotate-api-key|backend) printf 'acqonly' ;;
+    start|restart|snapshot|restore|recreate|create|shell|version|doctor|github-scope|usai-rotate-api-key|backend) printf 'acqonly' ;;
     *) printf '' ;;
   esac
 }
@@ -467,6 +515,30 @@ _acq_backend_passthrough() {
   echo "acq: '$1' is not an acq subcommand — forwarding to '${be}'." >&2
   echo "     (output and any errors below are from '${be}', not acq)" >&2
   command "${ACQ_RESOLVED_BACKEND}" "$@"
+}
+
+_acq_snapshot_dir() {
+  printf '%s\n' "${ACQ_SNAPSHOT_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq/snapshots}"
+}
+
+_acq_default_snapshot_path() {
+  local name="$1" snapshot_dir
+  snapshot_dir=$(_acq_snapshot_dir)
+  mkdir -p "$snapshot_dir"
+  printf '%s/%s-%s.msb\n' "$snapshot_dir" "$(slugify "$name")" "$(date -u +%Y%m%dT%H%M%SZ)"
+}
+
+_acq_latest_snapshot_path() {
+  local name="$1" snapshot_dir slug latest
+  snapshot_dir=$(_acq_snapshot_dir)
+  slug=$(slugify "$name")
+  latest=$(find "$snapshot_dir" -maxdepth 1 -type f -name "${slug}-*.msb" 2>/dev/null | while IFS= read -r _snap; do
+    case "${_snap##*/}" in
+      ${slug}-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.msb) printf '%s\n' "$_snap" ;;
+    esac
+  done | LC_ALL=C sort | tail -n 1)
+  [ -n "$latest" ] || return 1
+  printf '%s\n' "$latest"
 }
 
 # ---------------------------------------------------------------------------
@@ -1150,6 +1222,85 @@ case "$subcommand" in
     acq_backend_stop "$local_name"
     ;;
 
+  snapshot)
+    shift
+    if ! command -v acq_backend_snapshot >/dev/null 2>&1; then
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support stateful snapshots." >&2
+      echo "     This verb requires a native full-state snapshot/restore primitive." >&2
+      exit 1
+    fi
+    acq_backend_prepare
+    local_name="${1:-}"
+    [ -n "$local_name" ] || { echo "acq: snapshot: missing sandbox name" >&2; exit 1; }
+    shift
+    if [ "$#" -gt 1 ]; then
+      echo "acq: snapshot: too many arguments" >&2
+      echo "     usage: acq snapshot NAME [OUT]" >&2
+      exit 2
+    fi
+    snapshot_out="${1:-}"
+    [ -n "$snapshot_out" ] || snapshot_out=$(_acq_default_snapshot_path "$local_name")
+    acq_backend_snapshot "$local_name" "$snapshot_out"
+    echo "acq: snapshot saved: $snapshot_out" >&2
+    ;;
+
+  restore)
+    shift
+    if ! command -v acq_backend_restore >/dev/null 2>&1; then
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support stateful restore." >&2
+      echo "     This verb requires native restore with host-resource rebinding." >&2
+      exit 1
+    fi
+    acq_backend_prepare
+    local_name="${1:-}"
+    [ -n "$local_name" ] || { echo "acq: restore: missing sandbox name" >&2; exit 1; }
+    shift
+    if [ "$#" -gt 1 ]; then
+      echo "acq: restore: too many arguments" >&2
+      echo "     usage: acq restore NAME [SNAPSHOT]" >&2
+      exit 2
+    fi
+    snapshot_ref="${1:-}"
+    if [ -z "$snapshot_ref" ]; then
+      snapshot_ref=$(_acq_latest_snapshot_path "$local_name") || {
+        echo "acq: restore: no snapshots found for '$local_name' in $(_acq_snapshot_dir)" >&2
+        exit 1
+      }
+    fi
+    acq_backend_restore "$snapshot_ref" --name "$local_name"
+    ;;
+
+  recreate)
+    shift
+    if ! command -v acq_backend_snapshot >/dev/null 2>&1 \
+        || ! command -v acq_backend_restore >/dev/null 2>&1; then
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support stateful recreate." >&2
+      echo "     This verb requires native full-state snapshot/restore." >&2
+      exit 1
+    fi
+    acq_backend_prepare
+    local_name="${1:-}"
+    [ -n "$local_name" ] || { echo "acq: recreate: missing sandbox name" >&2; exit 1; }
+    shift
+    if [ "$#" -gt 1 ]; then
+      echo "acq: recreate: too many arguments" >&2
+      echo "     usage: acq recreate NAME [OUT]" >&2
+      exit 2
+    fi
+    snapshot_out="${1:-}"
+    if [ -z "$snapshot_out" ]; then
+      snapshot_out=$(_acq_default_snapshot_path "$local_name")
+    fi
+    acq_backend_snapshot "$local_name" "$snapshot_out"
+    if command -v acq_backend_terminate_for_restore >/dev/null 2>&1; then
+      acq_backend_terminate_for_restore "$local_name"
+    else
+      acq_backend_terminate "$local_name"
+    fi
+    acq_backend_restore "$snapshot_out" --name "$local_name"
+    echo "acq: recreated '$local_name' from snapshot: $snapshot_out" >&2
+    ;;
+
   start)
     # Resume a stopped sandbox and re-run its kit startup services deterministically
     # (ADR-0017). On msb, `msb start` alone does NOT reliably replay kit
@@ -1217,8 +1368,34 @@ case "$subcommand" in
 
   rm)
     shift
+    snapshot_first=0
+    snapshot_out=""
+    case "${1:-}" in
+      --snapshot)
+        snapshot_first=1
+        shift
+        ;;
+    esac
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: rm: missing sandbox name" >&2; exit 1; }
+    shift
+    if [ "$snapshot_first" -eq 1 ]; then
+      if ! command -v acq_backend_snapshot >/dev/null 2>&1; then
+        echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support stateful snapshots." >&2
+        echo "     Cannot run 'acq rm --snapshot' on this backend." >&2
+        exit 1
+      fi
+      acq_backend_prepare
+      if [ "$#" -gt 1 ]; then
+        echo "acq: rm --snapshot: too many arguments" >&2
+        echo "     usage: acq rm --snapshot NAME [OUT]" >&2
+        exit 2
+      fi
+      snapshot_out="${1:-}"
+      [ -n "$snapshot_out" ] || snapshot_out=$(_acq_default_snapshot_path "$local_name")
+      acq_backend_snapshot "$local_name" "$snapshot_out"
+      echo "acq: snapshot saved before removal: $snapshot_out" >&2
+    fi
     acq_backend_terminate "$local_name"
     ;;
 
