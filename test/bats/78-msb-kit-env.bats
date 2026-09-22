@@ -73,7 +73,8 @@ SPEC
   '
   assert_success
   refute_regex "$(cat "$CALLS")" '/var/lib/acq/kit-env'
-  [ ! -f "$ACQ_PROVENANCE_DIR"/msb/envbox2.*.config/kit-env ]
+  run bash -c 'ls "$1"/msb/envbox2.*.config/kit-env 2>/dev/null' _ "$ACQ_PROVENANCE_DIR"
+  assert_output ''
 }
 
 @test "msb kit env: acq exec replays persisted entries as -e flags; none when empty" {

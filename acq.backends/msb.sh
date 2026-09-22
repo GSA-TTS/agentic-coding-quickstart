@@ -1575,7 +1575,7 @@ _acq_msb_apply_kit_dir() {
 $(kit_spec_files "$spec")
 EOF
 
-  local path mode phase source readonly src _i
+  local path mode phase source _readonly src _i
   # Reset the per-kit readonly-file rewrite table (guest path -> :ro guest path)
   # before this kit's files are processed; _acq_msb_run_commands consults it to
   # rewrite startup argv so trusted code runs from the read-only mount (ADR-0030).
@@ -1587,13 +1587,13 @@ EOF
     mode=$(printf '%s' "$fline" | cut -f2)
     phase=$(printf '%s' "$fline" | cut -f3)
     source=$(printf '%s' "$fline" | cut -f4)
-    readonly=$(printf '%s' "$fline" | cut -f5)
+    _readonly=$(printf '%s' "$fline" | cut -f5)
     [ -n "$path" ] || continue
     src=""
     if [ -n "$source" ]; then
       src="${kitdir}/${source}"
     fi
-    if [ "$readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ]; then
+    if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ]; then
       # Trusted CODE (ADR-0030 Mechanism 2): stage it on the per-sandbox
       # host-config dir so the guest sees it through the READ-ONLY mount and a
       # passwordless-sudo agent cannot rewrite it. Do NOT copy it into the

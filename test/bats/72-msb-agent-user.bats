@@ -280,7 +280,8 @@ _attach() { # PRE_SNIPPET NAME
   assert_success
   assert_output --partial 'could not provision an OCI engine'
   # The host-store oci-ready key must NOT be written on a failed setup.
-  [ ! -f "$ACQ_PROVENANCE_DIR"/msb/ocifailbox.*.config/oci-ready ]
+  run bash -c 'ls "$1"/msb/ocifailbox.*.config/oci-ready 2>/dev/null' _ "$ACQ_PROVENANCE_DIR"
+  assert_output ''
 }
 
 @test "msb: an unsafe ACQ_MSB_PODMAN_PKGS is refused and never reaches an exec" {
