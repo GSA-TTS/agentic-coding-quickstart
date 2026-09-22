@@ -122,6 +122,7 @@ case "${1:-}" in
   create)
     [ "${STUB_SBX_CREATE_FAIL:-0}" = "1" ] && exit 1
     : >"$STUBDIR/.created"; exit 0 ;;
+  snapshot|restore) exit 64 ;;
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
@@ -443,6 +444,10 @@ case "$_msb_sub" in
     # `--secret ENV@HOST` bindings and REQUIRES the value to be present in the
     # host env. Record which of the bound secret env vars were present at start
     # time so a test can assert acq_backend_start exported them before starting.
+    { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
+    { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
+    : ;;
+  snapshot|restore)
     { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
     { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
     : ;;
