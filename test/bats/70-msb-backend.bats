@@ -24,6 +24,12 @@ _with_adapter() { # ADAPTER BODY
   ' _ "$1" "$2"
 }
 
+_mk_unix_socket() {
+  python3 -c 'import socket,sys
+s=socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
+}
+
 @test "msb: auto-detect prefers msb when both present and no sbx sandboxes" {
   rm -f "$STUBDIR/.sandbox_list"
   run bash -c '
@@ -59,9 +65,84 @@ _with_adapter() { # ADAPTER BODY
   assert_output --partial 'msb'
 }
 
-@test "msb: advertises SUPPORTS_SNAPSHOTS=0 (matches acq's surfaced verbs, #225)" {
+@test "msb: advertises SUPPORTS_SNAPSHOTS=1 because acq surfaces native snapshot/restore" {
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh"; printf "%s" "$ACQ_BACKEND_SUPPORTS_SNAPSHOTS"'
-  assert_output '0'
+  assert_output '1'
+}
+
+@test "msb: snapshot maps to msb snapshot create --full with date-stamped default output" {
+  run env ACQ_BACKEND=msb ACQ_SNAPSHOT_DIR="$STUBDIR/snapshots" "$ACQ" snapshot mybox
+  assert_success
+  assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/snapshots/mybox-[0-9]{8}T[0-9]{6}Z\.msb"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" snapshot mybox "$STUBDIR/mybox.msb"
+  assert_success
+  assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/mybox\.msb"
+}
+
+@test "msb: restore maps to msb restore with inherited resources and re-derived vsock" {
+  _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
+  mkdir -p "$STUBDIR/secrets"
+  printf 'sk-restored\n' > "$STUBDIR/secrets/acq.usai"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/saved.msb"
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" "msb restore $STUBDIR/saved\.msb --name restored --dangerously-inherit-resources --vsock $STUBDIR/agent\.sock:3552/stream"
+  assert_regex "$log" 'USAI_API_KEY=present'
+  assert_regex "$log" 'socat UNIX-LISTEN:'
+}
+
+@test "msb: restore without a snapshot picks the newest date-stamped snapshot for the sandbox" {
+  _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
+  mkdir -p "$STUBDIR/snapshots"
+  : > "$STUBDIR/snapshots/mybox-20260920T010203Z.msb"
+  : > "$STUBDIR/snapshots/mybox-20260921T010203Z.msb"
+  : > "$STUBDIR/snapshots/mybox-z-not-a-date.msb"
+  : > "$STUBDIR/snapshots/other-20260922T010203Z.msb"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_SNAPSHOT_DIR="$STUBDIR/snapshots" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore mybox
+  assert_success
+  assert_regex "$(cat "$CALLS")" "msb restore $STUBDIR/snapshots/mybox-20260921T010203Z\.msb --name mybox"
+}
+
+@test "sbx: snapshot/restore/recreate are acq-owned unsupported verbs, not backend passthrough" {
+  run env ACQ_BACKEND=sbx "$ACQ" snapshot mybox
+  assert_failure
+  assert_output --partial 'does not support stateful snapshots'
+  refute_regex "$(cat "$CALLS")" 'sbx snapshot'
+  : > "$CALLS"
+  run env ACQ_BACKEND=sbx "$ACQ" restore restored "$STUBDIR/saved.sbx"
+  assert_failure
+  assert_output --partial 'does not support stateful restore'
+  refute_regex "$(cat "$CALLS")" 'sbx restore'
+  : > "$CALLS"
+  run env ACQ_BACKEND=sbx "$ACQ" recreate mybox
+  assert_failure
+  assert_output --partial 'does not support stateful recreate'
+  refute_regex "$(cat "$CALLS")" 'sbx snapshot|sbx restore'
+}
+
+@test "msb: recreate snapshots, removes, then restores to the same name" {
+  _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" recreate mybox "$STUBDIR/recreate.msb"
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/recreate\.msb"
+  assert_regex "$log" 'msb remove --force mybox'
+  refute_regex "$log" 'msb volume rm'
+  assert_regex "$log" "msb restore $STUBDIR/recreate\.msb --name mybox --dangerously-inherit-resources --vsock $STUBDIR/agent\.sock:3552/stream"
+}
+
+@test "msb: rm --snapshot snapshots before removing and does not restore" {
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" rm --snapshot mybox "$STUBDIR/rm.msb"
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/rm\.msb"
+  assert_regex "$log" 'msb remove --force mybox'
+  refute_regex "$log" 'msb restore'
 }
 
 @test "msb: ls/stop/rm/exec dispatch to the msb verbs (exec as agent user)" {
