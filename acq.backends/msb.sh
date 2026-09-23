@@ -1128,7 +1128,10 @@ acq_backend_restore() {
   local _restore_flags=(--name "$_name" --dangerously-inherit-resources)
   local _resource_flags=() _vsock_flags=()
   _acq_msb_restore_resource_flags_into _resource_flags "$_snapshot" "$_name"
-  [ "${#_resource_flags[@]}" -gt 0 ] && _restore_flags+=("${_resource_flags[@]}")
+  if [ "${#_resource_flags[@]}" -gt 0 ]; then
+    _restore_flags+=(--external-mount-policy relaxed)
+    _restore_flags+=("${_resource_flags[@]}")
+  fi
   _acq_msb_vsock_flags_into _vsock_flags
   [ "${#_vsock_flags[@]}" -gt 0 ] && _restore_flags+=("${_vsock_flags[@]}")
 
