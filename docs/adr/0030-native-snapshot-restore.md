@@ -46,9 +46,10 @@ host-resource re-plumbing.
 - sbx is unsupported for these verbs. It fails closed with a clear unsupported
   message rather than offering a disk-only degraded mode.
 - Restore does not expose user-facing `--vsock`, `--volume`, or `--port` flags.
-  acq owns the re-plumbing: it re-derives the current SSH-agent vsock route and
-  asks the backend to inherit validated source-local resource records for the
-  rest.
+  acq owns the re-plumbing: it records acq-created workspace volume bindings as
+  host-side sidecar metadata next to exported snapshots, re-derives the current
+  SSH-agent vsock route, and asks the backend to inherit validated source-local
+  resource records for the rest.
 
 ## Consequences
 
