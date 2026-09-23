@@ -265,6 +265,15 @@ _msb_clone_isolated() { # ARGS...
   _msb_clone HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" GIT_CONFIG_NOSYSTEM=1 -- "$@"
 }
 
+# Put a `git` on PATH that fails every call whose argv matches the case PATTERN
+# with exit code RC and passes everything else through to the real git.
+_stub_git() { # PATTERN RC
+  local real; real=$(command -v git)
+  printf '#!/usr/bin/env bash\ncase " $* " in %s) echo "fatal: stubbed git failure" >&2; exit %s;; esac\nexec %s "$@"\n' \
+    "$1" "$2" "$real" > "$STUBDIR/git"
+  chmod +x "$STUBDIR/git"
+}
+
 @test "clone(msb #438): the scratch carries the source checkout's effective git identity, repo-locally" {
   git -C "$CLONEPROJ" config user.name "Repo User"
   git -C "$CLONEPROJ" config user.email "repo@example.gov"
@@ -310,11 +319,17 @@ _msb_clone_isolated() { # ARGS...
   [ "$(git config --file "$scratch/.git/config" remote.origin.url)" = "https://github.com/example/cloneproj.git" ]
 }
 
-@test "clone(msb #453): a source with no origin leaves the clone's remote untouched" {
+@test "clone(msb #467): a source with no origin leaves the scratch with no origin URL" {
+  # `git clone` points origin at the host path, where the guest mounts the
+  # scratch itself: a push there would land in the scratch and look successful.
   _msb_clone_isolated create shell --clone "$CLONEPROJ"
   local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
-  [ "$(git config --file "$scratch/.git/config" remote.origin.url)" = "$(host_path "$CLONEPROJ")" ]
+  assert_success
+  run git config --file "$scratch/.git/config" remote.origin.url
+  assert_failure
   run git config --file "$scratch/.git/config" remote.origin.pushurl
+  assert_failure
+  run git -C "$scratch" push origin HEAD
   assert_failure
 }
 
@@ -371,6 +386,44 @@ _msb_clone_isolated() { # ARGS...
   assert_output --partial 'push origin'
   [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
   refute_regex "$(cat "$CALLS")" 'msb create'
+}
+
+@test "clone(msb #467): an origin URL with an embedded newline stays one value" {
+  # `--get-all` is line-oriented and git allows a newline inside a value: read
+  # line by line, one value would become two push targets.
+  local url; url=$(printf 'https://github.com/example/cloneproj.git\nhttps://evil.example/cloneproj.git')
+  git -C "$CLONEPROJ" remote add origin https://placeholder.invalid/x.git
+  git -C "$CLONEPROJ" config remote.origin.url "$url"
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  assert_success
+  local cfg="$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git/config"
+  [ "$(git config --file "$cfg" -z --get-all remote.origin.url | tr -dc '\0' | wc -c | tr -d ' ')" = 1 ]
+  [ "$(git config --file "$cfg" --get-all remote.origin.url)" = "$url" ]
+}
+
+@test "clone(msb #467): an unreadable source origin fails the create" {
+  # Exit 1 means "no such key"; anything else means the config could not be
+  # read, which must not be mistaken for "nothing to carry".
+  git -C "$CLONEPROJ" remote add origin https://github.com/example/cloneproj.git
+  _stub_git '*" --get-all remote.origin.url "*' 128
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'could not read remote.origin.url'
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+  refute_regex "$(cat "$CALLS")" 'msb create'
+}
+
+@test "clone(msb #467): an unreadable or unwritable identity warns but does not fail the create" {
+  # The identity is a convenience, not a safety property: a missing one fails
+  # loudly at the first in-guest commit. Only the origin keys abort.
+  git -C "$CLONEPROJ" config user.name "Repo User"
+  _stub_git '*" --get-all user.email "*|*"/clones/"*" user.name "*' 128
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  assert_success
+  assert_output --partial 'user.name'
+  assert_output --partial 'user.email'
+  refute_output --partial 'push origin'
+  assert_regex "$(cat "$CALLS")" 'msb create'
 }
 
 # --- Guest-visible workspace markers (GSA-TTS/agentic-coding-quickstart#456) ---
