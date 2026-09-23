@@ -21,6 +21,7 @@ Environment:
   AGENT=opencode                         agent to create for the test sandbox
   ACQ_SNAPSHOT_DIR=<dir>                 override snapshot archive directory
   VERIFY_SNAPSHOT_CLEANUP=1              remove the test sandboxes at the end
+  VERIFY_SNAPSHOT_FORCE=1                allow pre-cleaning a non-snaptest name
   VERIFY_SNAPSHOT_SKIP_CREATE=1          skip initial create/attach step
   VERIFY_SNAPSHOT_SKIP_COPY=1            skip explicit archive restore copy test
   VERIFY_SNAPSHOT_SKIP_RECREATE=1        skip acq recreate test
@@ -49,6 +50,23 @@ COPY_SANDBOX="${SANDBOX}-copy"
 say() { printf '\n==> %s\n' "$*" >&2; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+sandbox_exists() {
+  "$ACQ" --backend msb ls 2>/dev/null | grep -F "$1" >/dev/null 2>&1
+}
+
+preclean_sandbox() {
+  local name="$1"
+  sandbox_exists "$name" || return 0
+  case "$name" in
+    snaptest-*) ;;
+    *)
+      [ "${VERIFY_SNAPSHOT_FORCE:-0}" = "1" ] || fail "sandbox '$name' already exists; set VERIFY_SNAPSHOT_FORCE=1 to pre-clean non-snaptest names"
+      ;;
+  esac
+  say "Removing existing test sandbox before verification: $name"
+  "$ACQ" --backend msb rm "$name" || true
+}
+
 [ -x "$ACQ" ] || fail "acq is not executable at $ACQ"
 [ -d "$WORKSPACE" ] || fail "workspace is not a directory: $WORKSPACE"
 command -v msb >/dev/null 2>&1 || fail "msb is not on PATH"
@@ -60,7 +78,9 @@ say "Sandbox: $SANDBOX"
 say "Workspace: $WORKSPACE"
 say "Snapshot directory: $SNAPDIR"
 
+preclean_sandbox "$COPY_SANDBOX"
 if [ "${VERIFY_SNAPSHOT_SKIP_CREATE:-0}" != "1" ]; then
+  preclean_sandbox "$SANDBOX"
   say "Creating and attaching to sandbox. Exit the agent session to continue."
   "$ACQ" --backend msb run "$AGENT" "$WORKSPACE" --name "$SANDBOX"
 else
