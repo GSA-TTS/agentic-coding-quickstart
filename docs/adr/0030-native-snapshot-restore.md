@@ -41,8 +41,11 @@ host-resource re-plumbing.
 - msb is supported: `acq snapshot NAME [OUT]` maps to `msb snapshot create
   --full -o OUT` and writes a date-stamped archive when OUT is omitted. `acq
   restore NAME [SNAPSHOT]` maps to `msb restore`; when SNAPSHOT is omitted, acq
-  restores the newest date-stamped archive for NAME. acq supplies current
-  host-resource bindings internally.
+  restores the newest date-stamped archive for NAME. For snapshots that include
+  acq-managed external workspace mounts, acq uses `--disk-only` on restore and
+  re-binds those resources explicitly because msb full device-state restore of
+  exported virtio-fs mounts currently fails. acq supplies current host-resource
+  bindings internally.
 - sbx is unsupported for these verbs. It fails closed with a clear unsupported
   message rather than offering a disk-only degraded mode.
 - Restore does not expose user-facing `--vsock`, `--volume`, or `--port` flags.
