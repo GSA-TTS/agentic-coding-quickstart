@@ -1531,6 +1531,11 @@ acq_cli_kits_load() {
 # was written. Atomic temp+rename write; fail-soft (mirrors the marker writes
 # it replaces, which were best-effort `|| true`).
 #
+# The sandbox config dir is chmod 0711: the guest must be able to traverse the
+# read-only mount root to execute `kit-files/...` staged code, but should not be
+# able to list acq-internal key names. Content-bearing flat keys remain 0600 on
+# the host; readonly kit code is staged under kit-files/ with executable perms.
+#
 # KEY charset is restricted ([A-Za-z0-9._-], no slash) so a key can never escape
 # the config dir; callers pass fixed literals (agent, workspace, ssh-auth-sock,
 # kit-env, and the gate markers).
@@ -1563,8 +1568,9 @@ _acq_host_config_key_ok() {
   esac
 }
 
-# Write one KEY's VALUE for a sandbox's host config. Creates the dir 0700 and the
-# file 0600 (world-unreadable on the host; the guest sees it via the :ro mount).
+# Write one KEY's VALUE for a sandbox's host config. Creates/traversabilizes the
+# dir 0711 and writes the file 0600 (world-unreadable on the host; the guest sees
+# only what it can traverse/read via the :ro mount).
 # Atomic temp+rename. Best-effort: warns (debug) and returns non-zero on failure
 # but never aborts the caller — preserving the fail-soft posture of the guest
 # markers this replaces.
@@ -1579,7 +1585,7 @@ acq_host_config_write() {
     acq_debug "host-config: could not create config dir: $dir"
     return 1
   fi
-  chmod 700 "$dir" 2>/dev/null || true
+  chmod 711 "$dir" 2>/dev/null || true
   file="$dir/$key"
   local tmp="${file}.tmp.$$"
   printf '%s' "$value" > "$tmp" 2>/dev/null || {
@@ -1631,7 +1637,7 @@ acq_host_config_append() {
   if ! mkdir -p "$dir" 2>/dev/null; then
     acq_debug "host-config: could not create config dir: $dir"; return 1
   fi
-  chmod 700 "$dir" 2>/dev/null || true
+  chmod 711 "$dir" 2>/dev/null || true
   file="$dir/$key"
   printf '%s\n' "$value" >> "$file" 2>/dev/null || {
     acq_debug "host-config: append failed: $file"; return 1; }

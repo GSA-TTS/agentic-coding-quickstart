@@ -166,6 +166,9 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   on sbx via the `:ro` positional the CLI already honors (confirmed: sbx enforces
   read-only on extra mounts; msb builds the `:ro` `--volume` flag itself). Host
   and guest path forms follow ADR-0029.
+- The mount root is traversable but not listable (`0711`) so the guest `agent`
+  user can open/execute read-only kit payloads below `kit-files/`, while flat
+  acq-internal keys stay host-private (`0600`).
 - In-guest consumers (kit orchestrators, the agent) **read** from
   `/var/lib/acq/host/…` but cannot write it. Guest-owned read-write state stays
   on separate rw paths.
@@ -186,7 +189,11 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   reads (e.g. `opencode.jsonc`) must stay a normal guest-writable drop.
 - A file **without** `readonly: true` is unchanged: copied into the guest and
   invoked by its guest path (full backward compatibility; no shipped kit changes
-  behavior until it opts in).
+  behavior until it opts in). If an existing sandbox predates the
+  `/var/lib/acq/host` mount, acq warns and falls back to this legacy guest-copy
+  behavior for `readonly: true` files too, rather than rewriting startup argv to a
+  path that does not exist; recreating the sandbox restores the tamper-resistant
+  read-only path.
 - Kits that genuinely must *compute* runtime state in-guest still may — they
   write their output to a guest-owned **rw** path (e.g. a per-sandbox catalog
   cache), which acq never treats as authoritative configuration. (This is

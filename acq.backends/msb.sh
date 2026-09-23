@@ -1581,6 +1581,10 @@ EOF
   # rewrite startup argv so trusted code runs from the read-only mount (ADR-0030).
   _ACQ_MSB_RO_REWRITE_FROM=()
   _ACQ_MSB_RO_REWRITE_TO=()
+  local _hcfg_mount_ok=0
+  if _acq_msb_host_config_mount_available "$name"; then
+    _hcfg_mount_ok=1
+  fi
   for _i in ${_frecs[@]+"${!_frecs[@]}"}; do
     fline="${_frecs[$_i]}"
     path=$(printf '%s' "$fline" | cut -f1)
@@ -1593,7 +1597,7 @@ EOF
     if [ -n "$source" ]; then
       src="${kitdir}/${source}"
     fi
-    if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ]; then
+    if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_mount_ok" -eq 1 ]; then
       # Trusted CODE (ADR-0030 Mechanism 2): stage it on the per-sandbox
       # host-config dir so the guest sees it through the READ-ONLY mount and a
       # passwordless-sudo agent cannot rewrite it. Do NOT copy it into the
@@ -1606,9 +1610,15 @@ EOF
         acq_debug "msb readonly kit file: $path -> $_ro_guest (:ro)"
       else
         echo "acq(msb): warning: could not stage read-only kit file '$path' for '$name';" \
-             "its startup command may fail." >&2
+             "falling back to the legacy guest copy." >&2
+        _readonly=""
       fi
-    elif [ -n "$src" ] && [ -f "$src" ]; then
+    fi
+    if { [ "$_readonly" != "true" ] || [ "$_hcfg_mount_ok" -ne 1 ]; } && [ -n "$src" ] && [ -f "$src" ]; then
+      if [ "$_readonly" = "true" ]; then
+        echo "acq(msb): warning: sandbox '$name' has no readable ADR-0030 host-config mount;" \
+             "copying readonly kit file '$path' into the guest for compatibility. Recreate the sandbox to get tamper-resistant readonly startup code." >&2
+      fi
       _acq_msb_copy_file_verified "$name" "$src" "$path" "$mode" || {
         echo "acq(msb): error: could not place kit file at ${name}:${path}" >&2
         echo "acq(msb):   subsequent kit commands that read it will fail." >&2
@@ -1657,6 +1667,18 @@ _acq_msb_reset_kit_env() {
   acq_host_config_clear msb "$1" kit-env
 }
 
+# _acq_msb_host_config_mount_available NAME — true iff this sandbox has the
+# ADR-0030 host-config dir mounted at ACQ_HOST_CONFIG_GUEST_DIR and traversable
+# by the agent user. Existing sandboxes created before ADR-0030 lack this
+# create-time mount; for those, readonly:true files must fall back to the legacy
+# guest-copy path rather than rewriting startup argv to a non-existent path.
+_acq_msb_host_config_mount_available() {
+  local name="$1"
+  _acq_msb_cli exec "$name" -u agent -- sh -c \
+    "test -d '$ACQ_HOST_CONFIG_GUEST_DIR' && test -r '$ACQ_HOST_CONFIG_GUEST_DIR' && test -x '$ACQ_HOST_CONFIG_GUEST_DIR'" \
+    </dev/null >/dev/null 2>&1
+}
+
 # _acq_msb_stage_readonly_file NAME KITDIR GUESTPATH SRC — stage one trusted kit
 # code file onto the per-sandbox host-config dir so the guest sees it through the
 # READ-ONLY mount (ADR-0030 Mechanism 2), and echo the guest path it appears at.
@@ -1680,7 +1702,8 @@ _acq_msb_stage_readonly_file() {
     acq_debug "msb readonly-stage: could not create ${cfgdir}/${reldir}"
     return 1
   fi
-  chmod 700 "$cfgdir" 2>/dev/null || true
+  chmod 711 "$cfgdir" 2>/dev/null || true
+  chmod 755 "${cfgdir}/${reldir}" 2>/dev/null || true
   dest="${cfgdir}/${reldir}/${slug}.${crc}"
   cp -f "$src" "$dest" 2>/dev/null || { acq_debug "msb readonly-stage: cp failed: $src -> $dest"; return 1; }
   chmod 0555 "$dest" 2>/dev/null || true
@@ -3185,7 +3208,7 @@ EOF
   local _hcfg_dir _hcfg_host
   if _hcfg_dir=$(acq_host_config_dir msb "$name"); then
     mkdir -p "$_hcfg_dir" 2>/dev/null || true
-    chmod 700 "$_hcfg_dir" 2>/dev/null || true
+    chmod 711 "$_hcfg_dir" 2>/dev/null || true
     # --volume takes HOST:GUEST[:ro]; the host side is what native msb resolves on
     # this machine (host_path → drive form under MSYS), the guest side is POSIX
     # (ACQ_HOST_CONFIG_GUEST_DIR). See ADR-0029.

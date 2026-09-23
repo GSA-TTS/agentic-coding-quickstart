@@ -96,8 +96,17 @@ SPEC
   '
   local log; log=$(cat "$CALLS")
   # The readonly file is staged into the per-sandbox host config dir kit-files/.
-  local staged; staged=$(find "$ACQ_PROVENANCE_DIR"/msb/rocodebox.*.config/kit-files -type f 2>/dev/null | head -n1)
+  local cfg staged
+  cfg=$(ls -d "$ACQ_PROVENANCE_DIR"/msb/rocodebox.*.config 2>/dev/null | head -n1)
+  [ -n "$cfg" ]
+  staged=$(find "$cfg/kit-files" -type f 2>/dev/null | head -n1)
   [ -n "$staged" ]
+  # The mount root must be traversable by the guest agent (0711) while flat
+  # acq-internal keys stay private; kit-files must be traversable and files
+  # executable/readable from the :ro mount.
+  assert_equal "$(stat -c '%a' "$cfg")" "711"
+  assert_equal "$(stat -c '%a' "$cfg/kit-files")" "755"
+  assert_equal "$(stat -c '%a' "$staged")" "555"
   # It is NOT msb-copied into the guest at its declared guest path.
   refute_regex "$log" 'msb copy .*:/home/agent/cfg/merge\.mjs'
   # The plain data file IS copied into the guest (unchanged behavior).
@@ -126,6 +135,27 @@ SPEC
   local body; body=$(cat "$(find "$STUBDIR/rocode2-stage" -type f 2>/dev/null | head -n1)" 2>/dev/null)
   assert_regex "$body" '/var/lib/acq/host/kit-files/home-agent-cfg-merge-mjs\.[0-9]+'
   refute_regex "$body" '/home/agent/cfg/merge\.mjs'
+}
+
+@test "msb ro: legacy sandbox without the host-config mount falls back to the guest copy" {
+  local k="$STUBDIR/legacyro"; _ro_kit "$k"
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/legacyro-secrets" STUB_HOST_CONFIG_MOUNT=0
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_apply_kit_dir legacyrobox "'"$k"'" 2>&1
+  '
+  assert_success
+  # No mount -> no :ro rewrite; preserve compatibility by copying the trusted
+  # file into the guest and invoking the original path. Users can recreate the
+  # sandbox to get tamper-resistant readonly startup code.
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb copy .*legacyrobox:/home/agent/cfg/merge\.mjs'
+  assert_regex "$log" 'node /home/agent/cfg/merge\.mjs'
+  refute_regex "$log" '/var/lib/acq/host/kit-files'
+  assert_output --partial 'has no readable ADR-0030 host-config mount'
 }
 
 @test "msb ro: the create-time host-config mount is read-only" {
