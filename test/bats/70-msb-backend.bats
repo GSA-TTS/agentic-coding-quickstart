@@ -95,6 +95,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   assert_regex "$log" "msb restore $STUBDIR/saved\.msb --name restored --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock $STUBDIR/agent\.sock:3552/stream"
   assert_regex "$log" 'USAI_API_KEY=present'
   assert_regex "$log" 'socat UNIX-LISTEN:'
+  [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
 }
 
 @test "msb: restore without a snapshot picks the newest date-stamped snapshot for the sandbox" {
