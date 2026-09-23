@@ -532,11 +532,9 @@ _acq_latest_snapshot_path() {
   local name="$1" snapshot_dir slug latest
   snapshot_dir=$(_acq_snapshot_dir)
   slug=$(slugify "$name")
-  latest=$(find "$snapshot_dir" -maxdepth 1 -type f -name "${slug}-*.msb" 2>/dev/null | while IFS= read -r _snap; do
-    case "${_snap##*/}" in
-      ${slug}-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.msb) printf '%s\n' "$_snap" ;;
-    esac
-  done | LC_ALL=C sort | tail -n 1)
+  latest=$(find "$snapshot_dir" -maxdepth 1 -type f -name "${slug}-*.msb" 2>/dev/null \
+    | grep -E "/${slug}-[0-9]{8}T[0-9]{6}Z[.]msb$" \
+    | LC_ALL=C sort | tail -n 1)
   [ -n "$latest" ] || return 1
   printf '%s\n' "$latest"
 }
