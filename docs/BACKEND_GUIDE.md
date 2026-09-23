@@ -136,10 +136,11 @@ automation story.
   `--secret GITHUB_TOKEN@github.com,api.github.com,codeload.github.com`); the real values never enter the VM.
   **Any** custom-endpoint secret stored with `acq secret set SVC --host H --env E`
   is bound generically the same way — no fixed usai/github table
-- **Snapshots**: `acq snapshot` / `acq restore` surface msb's native full-state
-  snapshot/restore path (`msb snapshot create --full` + `msb restore`), including
-  restore-time host-resource re-plumbing for the SSH-agent vsock route; see
-  [ADR-0030](adr/0030-native-snapshot-restore.md)
+- **Snapshots**: `acq snapshot` / `acq restore` surface msb's native snapshot
+  path (`msb snapshot create --full` + `msb restore`). When a snapshot includes
+  acq-managed external workspace mounts, restore cold-boots the captured disk
+  (`--disk-only`) and re-binds those host resources to avoid stale virtio-fs
+  device-state restore failures; see [ADR-0030](adr/0030-native-snapshot-restore.md)
 
 ### Requirements
 

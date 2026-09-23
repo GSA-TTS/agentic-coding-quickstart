@@ -1129,7 +1129,12 @@ acq_backend_restore() {
   local _resource_flags=() _vsock_flags=()
   _acq_msb_restore_resource_flags_into _resource_flags "$_snapshot" "$_name"
   if [ "${#_resource_flags[@]}" -gt 0 ]; then
-    _restore_flags+=(--external-mount-policy relaxed)
+    # Full memory/device restore currently fails for exported snapshots that
+    # contain an external virtio-fs workspace mount (virtio_fs device-state
+    # restore reports ENOENT). Cold-boot the captured disk and re-bind acq-owned
+    # resources instead; this preserves agent context on disk (OpenCode/Paseo
+    # state) without restoring stale external filesystem device state.
+    _restore_flags+=(--disk-only --external-mount-policy relaxed)
     _restore_flags+=("${_resource_flags[@]}")
   fi
   _acq_msb_vsock_flags_into _vsock_flags
