@@ -75,29 +75,34 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   assert_success
   assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/snapshots/mybox-[0-9]{8}T[0-9]{6}Z\.msb"
   : > "$CALLS"
+  mkdir -p "$STUBDIR/state/msb-restore"
+  printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/state/msb-restore/mybox.resources"
   run env ACQ_BACKEND=msb "$ACQ" snapshot mybox "$STUBDIR/mybox.msb"
   assert_success
   assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/mybox\.msb"
+  [ -f "$STUBDIR/mybox.msb.resources" ]
 }
 
 @test "msb: restore maps to msb restore with inherited resources and re-derived vsock" {
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
-  mkdir -p "$STUBDIR/secrets"
+  mkdir -p "$STUBDIR/secrets" "$STUBDIR/ws"
   printf 'sk-restored\n' > "$STUBDIR/secrets/acq.usai"
+  printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/saved.msb.resources"
   : > "$CALLS"
   run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/saved.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb restore $STUBDIR/saved\.msb --name restored --dangerously-inherit-resources --vsock $STUBDIR/agent\.sock:3552/stream"
+  assert_regex "$log" "msb restore $STUBDIR/saved\.msb --name restored --dangerously-inherit-resources --volume $STUBDIR/ws:$STUBDIR/ws --vsock $STUBDIR/agent\.sock:3552/stream"
   assert_regex "$log" 'USAI_API_KEY=present'
   assert_regex "$log" 'socat UNIX-LISTEN:'
 }
 
 @test "msb: restore without a snapshot picks the newest date-stamped snapshot for the sandbox" {
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
-  mkdir -p "$STUBDIR/snapshots"
+  mkdir -p "$STUBDIR/snapshots" "$STUBDIR/ws2"
   : > "$STUBDIR/snapshots/mybox-20260920T010203Z.msb"
   : > "$STUBDIR/snapshots/mybox-20260921T010203Z.msb"
+  printf 'volume\t%s:%s\n' "$STUBDIR/ws2" "$STUBDIR/ws2" > "$STUBDIR/snapshots/mybox-20260921T010203Z.msb.resources"
   : > "$STUBDIR/snapshots/mybox-z-not-a-date.msb"
   : > "$STUBDIR/snapshots/other-20260922T010203Z.msb"
   : > "$CALLS"

@@ -643,6 +643,7 @@ ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR}/msb_id_ed25519}"
 ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR}/known_hosts}"
 ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR}/ports}"
 ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
+ACQ_MSB_RESTORE_DIR="${ACQ_MSB_RESTORE_DIR:-${ACQ_STATE_DIR}/msb-restore}"
 # Create-time startup-script staging state (ADR-0017). The staged host file list
 # is reset per provision; declare it at module scope so cleanup references are
 # always defined even if provision is not the entry point.
@@ -1025,6 +1026,52 @@ acq_backend_start() {
 }
 
 # ---------------------------------------------------------------------------
+# Restore resource metadata — acq-owned host bindings for exported snapshots
+# ---------------------------------------------------------------------------
+_acq_msb_restore_resource_file() {
+  local name="$1"
+  case "$name" in
+    ""|*[!A-Za-z0-9_-]*|-*)
+      echo "acq(msb): restore: refusing unsafe sandbox name '$name' for state path." >&2
+      return 1 ;;
+  esac
+  printf '%s/%s.resources' "$ACQ_MSB_RESTORE_DIR" "$name"
+}
+
+_acq_msb_restore_resources_write() {
+  local name="$1" _file _spec
+  _file=$(_acq_msb_restore_resource_file "$name") || return 0
+  mkdir -p "$ACQ_MSB_RESTORE_DIR" 2>/dev/null || return 0
+  : >"$_file" 2>/dev/null || return 0
+  shift
+  for _spec in ${@+"$@"}; do
+    printf 'volume\t%s\n' "$_spec" >>"$_file" 2>/dev/null || true
+  done
+}
+
+_acq_msb_restore_resources_copy_sidecar() {
+  local name="$1" snapshot="$2" _file
+  _file=$(_acq_msb_restore_resource_file "$name") || return 0
+  [ -f "$_file" ] || return 0
+  cp "$_file" "${snapshot}.resources" 2>/dev/null || true
+}
+
+_acq_msb_restore_resource_flags_into() { # ARRVAR SNAPSHOT NAME
+  local _arr="$1" _snapshot="$2" _name="$3" _file _kind _spec
+  eval "$_arr=()"
+  _file="${_snapshot}.resources"
+  if [ ! -f "$_file" ]; then
+    _file=$(_acq_msb_restore_resource_file "$_name") || return 0
+  fi
+  [ -f "$_file" ] || return 0
+  while IFS=$'\t' read -r _kind _spec; do
+    case "$_kind" in
+      volume) [ -n "$_spec" ] && eval "$_arr+=(--volume \"\$_spec\")" ;;
+    esac
+  done <"$_file"
+}
+
+# ---------------------------------------------------------------------------
 # acq_backend_snapshot NAME [OUT] — create a native full-state msb snapshot
 # ---------------------------------------------------------------------------
 acq_backend_snapshot() {
@@ -1041,6 +1088,7 @@ acq_backend_snapshot() {
       _host_out=$(host_path "$_out")
     fi
     _acq_msb_cli snapshot create --from-sandbox "$_name" --full --guest-flush auto -o "$_host_out"
+    _acq_msb_restore_resources_copy_sidecar "$_name" "$_out"
   else
     _acq_msb_cli snapshot create --from-sandbox "$_name" --full --guest-flush auto
   fi
@@ -1078,7 +1126,9 @@ acq_backend_restore() {
   esac
 
   local _restore_flags=(--name "$_name" --dangerously-inherit-resources)
-  local _vsock_flags=()
+  local _resource_flags=() _vsock_flags=()
+  _acq_msb_restore_resource_flags_into _resource_flags "$_snapshot" "$_name"
+  [ "${#_resource_flags[@]}" -gt 0 ] && _restore_flags+=("${_resource_flags[@]}")
   _acq_msb_vsock_flags_into _vsock_flags
   [ "${#_vsock_flags[@]}" -gt 0 ] && _restore_flags+=("${_vsock_flags[@]}")
 
@@ -3043,6 +3093,7 @@ EOF
 
   ACQ_MSB_GUEST_WORKSPACE=""
   local _wi _wspec _wpath _wro _wsrc _whost _first_guest=""
+  local _restore_volume_specs=()
   for _wi in ${_ws_recs[@]+"${!_ws_recs[@]}"}; do
     _wspec="${_ws_recs[$_wi]}"
     # Split an optional trailing ":ro" (read-only) marker from the path.
@@ -3082,6 +3133,7 @@ EOF
       _whost="$_wsrc"
     fi
     create_flags+=(--volume "${_whost}:${_wpath}${_wro}")
+    _restore_volume_specs+=("${_whost}:${_wpath}${_wro}")
     acq_debug "msb volume: ${_whost} (host) -> ${_wpath}${_wro} (guest)"
     [ -z "$_first_guest" ] && _first_guest="$_wpath"
   done
@@ -3231,6 +3283,7 @@ EOF
   fi
   acq_spin_stop "Waiting for the sandbox to finish booting"
   acq_debug "msb provision: exec-ready OK ($name)"
+  _acq_msb_restore_resources_write "$name" "${_restore_volume_specs[@]}"
 
   # Verify the kits' runtime prerequisites are present in the base image
   # (node/git/curl/update-ca-certificates). We do NOT install them: the kit
@@ -4662,6 +4715,8 @@ _acq_msb_terminate_impl() {
   fi
   if [ "$_mode" != "keep-resources" ]; then
     _acq_msb_remove_derived_volumes "$_name"
+    local _restore_file
+    _restore_file=$(_acq_msb_restore_resource_file "$_name") && rm -f "$_restore_file" 2>/dev/null || true
     # Same GONE-after-remove-attempt rule as the volumes above: delete the scratch
     # clone and drop the fetch-back remote only once the sandbox is really gone.
     _acq_msb_clone_cleanup "$_name"
