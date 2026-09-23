@@ -1056,6 +1056,14 @@ _acq_msb_restore_resources_copy_sidecar() {
   cp "$_file" "${snapshot}.resources" 2>/dev/null || true
 }
 
+_acq_msb_restore_resources_adopt_sidecar() {
+  local name="$1" snapshot="$2" _file
+  [ -f "${snapshot}.resources" ] || return 0
+  _file=$(_acq_msb_restore_resource_file "$name") || return 0
+  mkdir -p "$ACQ_MSB_RESTORE_DIR" 2>/dev/null || return 0
+  cp "${snapshot}.resources" "$_file" 2>/dev/null || true
+}
+
 _acq_msb_restore_resource_flags_into() { # ARRVAR SNAPSHOT NAME
   local _arr="$1" _snapshot="$2" _name="$3" _file _kind _spec
   eval "$_arr=()"
@@ -1154,6 +1162,7 @@ acq_backend_restore() {
     unset "$_rev"
   done
   [ "$_restore_rc" -eq 0 ] || return "$_restore_rc"
+  _acq_msb_restore_resources_adopt_sidecar "$_name" "$_snapshot"
 
   _acq_msb_wait_for_exec_ready "$_name" || \
     echo "acq(msb): warning: $_name did not become exec-ready after restore." >&2
