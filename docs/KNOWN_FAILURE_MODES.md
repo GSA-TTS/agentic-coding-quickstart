@@ -2129,49 +2129,6 @@ across a possibly-dirty tree. Run one branch per command, and guard switches
 (`git switch "$b" || break`) so a failed checkout cannot silently leave you
 amending the wrong branch.
 
-## 39. Recovering agent work reads the guest-writable scratch clone (residual risk)
-
-### Symptoms
-
-None. This is a documented residual risk of `--clone` on the msb backend, not a
-reported failure or a demonstrated vulnerability.
-
-### Root Cause
-
-Under `--clone` the agent works in a host-side scratch clone that the guest
-mounts read-write, so guest code can write anything into the scratch's
-`.git/config`. acq itself never runs git inside that scratch once the sandbox
-exists: the clone and its config copy both finish before `msb create`, and the
-rm-time warning reads ref **files** and runs `cat-file` against the real
-checkout, never the scratch.
-
-The recovery command acq advertises does read it. `git fetch sandbox-<name>`
-spawns `git upload-pack` inside the scratch and reads that config. Verified with
-plain git: a scratch-local `uploadpack.hideRefs` changes what the host's
-`ls-remote` advertises. Two config-driven command hooks were probed on git
-2.50.1 and did **not** execute from a local-path remote:
-`core.alternateRefsCommand` (with `objects/info/alternates`) and
-`uploadpack.packObjectsHook`, which git restricts to protected scope.
-`safe.directory` offers no protection here, because the scratch is owned by the
-invoking user.
-
-Git's own documentation notes that "the surface area for attack against
-upload-pack is large, so this does carry some risk," which is why this is
-written down rather than left implicit.
-
-### Fix
-
-No code change. Treat the fetch-back remote as what it is: a read of a directory
-an untrusted agent could write to.
-
-- Fetch back only from sandboxes whose work you intend to keep.
-- `acq rm <name>` deletes the scratch and the remote after warning about
-  unfetched commits, so a scratch you do not plan to recover should not linger.
-- Keep git current on the host; the hooks above are inert on 2.50.1, and that is
-  a property of the git version, not of acq.
-
----
-
 ---
 
 ## 39. Windows preview: `bash.exe` resolves to the WSL shim, WHP is not a feature flag, and the execution policy blocks scripts
@@ -2244,6 +2201,49 @@ an untrusted agent could write to.
   encrypts at rest with DPAPI; see ADR-0028), and symlink-based tests cannot pass
   without native symlinks. None are regressions from the Windows preview path;
   validate that path with the checklist in `docs/howto/acq.md`.
+
+---
+
+## 40. Recovering agent work reads the guest-writable scratch clone (residual risk)
+
+### Symptoms
+
+None. This is a documented residual risk of `--clone` on the msb backend, not a
+reported failure or a demonstrated vulnerability.
+
+### Root Cause
+
+Under `--clone` the agent works in a host-side scratch clone that the guest
+mounts read-write, so guest code can write anything into the scratch's
+`.git/config`. acq itself never runs git inside that scratch once the sandbox
+exists: the clone and its config copy both finish before `msb create`, and the
+rm-time warning reads ref **files** and runs `cat-file` against the real
+checkout, never the scratch.
+
+The recovery command acq advertises does read it. `git fetch sandbox-<name>`
+spawns `git upload-pack` inside the scratch and reads that config. Verified with
+plain git: a scratch-local `uploadpack.hideRefs` changes what the host's
+`ls-remote` advertises. Two config-driven command hooks were probed on git
+2.50.1 and did **not** execute from a local-path remote:
+`core.alternateRefsCommand` (with `objects/info/alternates`) and
+`uploadpack.packObjectsHook`, which git restricts to protected scope.
+`safe.directory` offers no protection here, because the scratch is owned by the
+invoking user.
+
+Git's own documentation notes that "the surface area for attack against
+upload-pack is large, so this does carry some risk," which is why this is
+written down rather than left implicit.
+
+### Fix
+
+No code change. Treat the fetch-back remote as what it is: a read of a directory
+an untrusted agent could write to.
+
+- Fetch back only from sandboxes whose work you intend to keep.
+- `acq rm <name>` deletes the scratch and the remote after warning about
+  unfetched commits, so a scratch you do not plan to recover should not linger.
+- Keep git current on the host; the hooks above are inert on 2.50.1, and that is
+  a property of the git version, not of acq.
 
 ---
 
