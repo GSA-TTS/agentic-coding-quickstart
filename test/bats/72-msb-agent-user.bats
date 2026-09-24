@@ -371,11 +371,31 @@ _attach() { # PRE_SNIPPET NAME
 @test "rc.d(msb): login-profile bridge sources kit-owned shell snippets lexically" {
   _provision rcdbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/rcd-secrets"'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" '\.rc.d/\*.sh'
+  # The bridge sources ~/.rc.d in deterministic C-collation order (ADR-0030):
+  # it must iterate an `LC_ALL=C ls "$HOME"/.rc.d` list, NOT a bare locale-
+  # dependent `*.sh` glob whose order can vary by guest locale.
+  assert_regex "$log" 'LC_ALL=C ls'
+  assert_regex "$log" '\$HOME./.rc.d'
   assert_regex "$log" 'for _acq_rc in'
   assert_regex "$log" 'SC1090'
   assert_regex "$log" 'unset _acq_rc'
+  # Non-.sh files are skipped by the in-loop suffix case guard.
+  assert_regex "$log" '\*.sh) ;; \*) continue'
   refute_regex "$log" 'direnv allow'
+}
+
+@test "rc.d: generated login-profile block executes snippets in byte order" {
+  local home="$STUBDIR/rc-home"
+  mkdir -p "$home/.rc.d"
+  printf '%s\n' 'printf "%s\n" 2-b >> "$HOME/order"' > "$home/.rc.d/2-b.sh"
+  printf '%s\n' 'printf "%s\n" 10-a >> "$HOME/order"' > "$home/.rc.d/10-a.sh"
+  printf '%s\n' 'printf "%s\n" skipped >> "$HOME/order"' > "$home/.rc.d/30-skip.txt"
+  acq_login_profile_rc_block > "$home/profile"
+
+  run env HOME="$home" bash -c '. "$HOME/profile"; cat "$HOME/order"'
+
+  assert_success
+  assert_output $'10-a\n2-b'
 }
 
 @test "msb #426: the heal only rewrites a .profile acq owns outright (appended lines survive)" {
@@ -386,7 +406,9 @@ _attach() { # PRE_SNIPPET NAME
   _provision profguard shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/profguard-secrets"'
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'acq-login-profile "\$profile"'
-  assert_regex "$log" '\-le 13'
+  # Bound = 3 header lines + the shared rc-block's line count (common.sh
+  # acq_login_profile_rc_block), computed host-side and passed as $3/max_lines.
+  assert_regex "$log" '\-le .\$max_lines'
 }
 
 @test "msb: repeated acq exec reads the workspace marker once per process (cached)" {

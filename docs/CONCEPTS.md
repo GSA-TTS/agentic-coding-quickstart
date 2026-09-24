@@ -221,40 +221,65 @@ scheme-less prefix so `acq` allowlists it:
 export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 ```
 
-### Shell snippets from kits
+### Advanced: the `~/.rc.d` shell hook
 
-Kits can deliver shell startup snippets under the agent user's neutral rc
-directory:
+`acq` gives kits a neutral shell hook: any file a kit drops at
+`~/.rc.d/*.sh` is sourced at login. Both backends apply it identically
+(ADR-0030) — the delivery is a normal kit `files[]` drop, and `acq` writes the
+matching login-profile bridge that sources the snippets (`sbx` writes it at
+create time; `msb` writes it as part of its login-shell setup).
 
-```text
-/home/agent/.rc.d/*.sh
-```
+What it is and how it behaves:
 
-This hook is for **kit-owned state**, not a user-edited dotfile. Put team and
-personal shell customizations in kits, then let `acq` apply those kits. Common
-uses include agent shell integration that must exist outside a devenv shell,
-team tool completions and environment variables, personal aliases/functions, and
-a direnv/devenv hook.
+- **Kit-owned, not user-editable.** The snippets come from a kit's `files[]`
+  tree, and the sourcing bridge is written by `acq`. Treat `~/.rc.d/*.sh` as
+  build output, not a place to hand-edit inside a sandbox.
+- **POSIX-sh, bash bridge.** The built-in `~/.profile` bridge sources the
+  snippets for bash login shells. Zsh-capable base images must wire the same
+  directory from native zsh startup files. The files are POSIX-sh.
+- **Deterministic lexical order.** Snippets are sourced in byte (C-collation)
+  order regardless of the guest's locale, so a `10-`, `20-`, `90-` numeric
+  prefix convention gives a stable, predictable order. A bare shell glob would
+  sort in the guest's locale collation; the bridge forces `LC_ALL=C` for the
+  listing to avoid that.
 
 Guardrails:
 
-- Bash login shells source readable `*.sh` snippets in deterministic lexical
-  order through `acq`'s shell bridge.
-- Zsh support is part of the base-image contract; a zsh-capable image must source
-  the same directory from its native zsh startup files.
-- Use numeric prefixes, such as `10-team.sh` and `90-personal.sh`, when order
-  matters.
-- Do not put secrets or commands that print secrets in snippets.
-- Do not duplicate environment that `devenv` already provides inside a
-  `devenv shell`; snippets should cover shell integration outside that context.
-- Fish and nushell do not source POSIX `.sh` files. Kits that target those shells
-  must use their native configuration locations and keep behavior equivalent:
-  kit-owned files, deterministic naming, no secrets, and no duplicate devenv
-  setup.
+- **Never put secrets in a snippet.** `~/.rc.d/*.sh` is kit content that lands
+  on disk and is sourced into every login shell; secrets belong in the backend
+  secret store (injected at runtime), never in a shipped file.
+- **Do not duplicate what devenv provides** inside a devenv shell. If a tool's
+  environment is already established by the project's `devenv`/`.envrc`, do not
+  re-export it here — the hook is for shell integration that must exist
+  *outside* a devenv shell.
+- **Kit-owned.** Ship shell behavior as a kit, not as ad-hoc edits.
 
-Existing team kits that owned their own shell hook should migrate by keeping
-their snippet files, moving them under `/home/agent/.rc.d/`, and relying on the
-neutral hook instead of installing a second shell-startup loop.
+Use-cases (ADR-0030):
+
+- the hook itself, delivered by a neutral kit;
+- agent shell integration that must exist outside a devenv shell;
+- team tool environment variables and shell completions;
+- personal aliases and functions (via a personal kit through `ACQ_EXTRA_KITS`);
+- a direnv/devenv activation hook.
+
+**fish and nushell.** The `~/.rc.d/*.sh` snippets are POSIX-sh and are **not**
+sourced by fish or nushell, because their shell languages are incompatible with
+POSIX-sh syntax — sourcing a `.sh` file into fish/nushell would error, not work.
+`acq` therefore does not wire fish/nushell to `~/.rc.d`. This is a documented
+constraint, chosen over speculative wiring: fish has its own native autoload
+directory (`~/.config/fish/conf.d/*.fish`), and nushell loads from its
+configured config/autoload path (`$nu.config-path`). The intended future path is
+for a kit to deliver shell-native snippets there when fish/nushell support is
+actually needed. Until a concrete need exists, `acq` neither wires those
+directories nor installs fish or nushell.
+
+**Migration path.** If a team kit currently establishes shell behavior by other
+means (for example, appending to `~/.bashrc` from a kit `startup` command), move
+that behavior into a POSIX-sh snippet under `files/home/agent/.rc.d/NN-name.sh`
+in a personal or team kit, applied via `ACQ_EXTRA_KITS`. Pick a numeric prefix
+to order it against other snippets (lower runs first). Drop the old
+`~/.bashrc`-append step once the snippet is in place; the built-in bridge
+sources the snippet for bash login shells.
 
 ### Advanced: optional OCI-engine capability kit
 

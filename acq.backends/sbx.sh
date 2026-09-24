@@ -508,6 +508,15 @@ acq_backend_provision() {
   if [ "$_rc" -eq 0 ]; then
     acq_provenance_write sbx "$name" "$agent" "$_primary_ws" || true
     _acq_sbx_seed_extra_kit_marker "$name"
+    # Backend parity (ADR-0030): sbx DELIVERS ~/.rc.d/*.sh via kit files[] but,
+    # unlike msb's .profile bridge, nothing SOURCES them at login. Write the same
+    # bridge here at create time so a kit-dropped snippet actually runs. This is a
+    # post-create `sbx exec`, NOT a startup-bearing kit, so it does not interact
+    # with the sbx >= 0.38 live-extend refusal (that gate only rejects `sbx kit
+    # add` of setup.startup kits — see _acq_sbx_kit_add). The helper waits for
+    # exec readiness itself, so this also works when no extra-kit marker write
+    # happened before it.
+    _acq_sbx_ensure_rc_bridge "$name"
     # Persist the CLI (`--kit`) / extra kit refs alongside provenance so a later
     # resume heal can reload them (see acq_cli_kits_write). Best-effort.
     acq_cli_kits_write sbx "$name" || true
@@ -565,6 +574,63 @@ _acq_sbx_seed_extra_kit_marker() {
            "for '$name'; re-attach may re-attempt it." >&2
     fi
   done
+}
+
+# ---------------------------------------------------------------------------
+# _acq_sbx_ensure_rc_bridge — write the login-profile rc.d sourcing bridge
+# ---------------------------------------------------------------------------
+# sbx delivers kit-owned ~/.rc.d/*.sh files (via kit files[]), but sbx's agent
+# templates ship no ~/.profile that sources them, so on sbx a dropped snippet
+# never runs — the exact parity gap this closes (ADR-0030). msb writes an
+# equivalent bridge in _acq_msb_ensure_agent_shell; the rc-sourcing block is the
+# ONE shared text from common.sh (acq_login_profile_rc_block) so the two
+# backends cannot silently drift. The block gates itself to bash and sources
+# ~/.rc.d in C-collation (deterministic lexical) order.
+#
+# Unlike msb, sbx's agent user already has a working login shell, so this ONLY
+# adds the rc.d bridge (no shell/passwd sync). It writes ~/.profile only when acq
+# owns it outright (missing/empty, or the acq-rc marker present AND still just
+# this bridge), so a user/image ~/.profile or lines other tools appended survive
+# untouched — the same discipline msb applies.
+#
+# Runs as a post-create `sbx exec` (NOT a startup-bearing kit), so it is
+# unaffected by the sbx >= 0.38 refusal to live-extend a sandbox with
+# setup.startup kits (_acq_sbx_kit_add) — no regression to that handling.
+# Fail-soft: any error leaves rc.d unsourced (delivery still happened), never
+# blocks the run. In offline/no-network mode (ACQ_SBX_KIT_PASSTHROUGH) the real
+# `sbx exec` is stubbed by the unit harness, so no live sandbox is required.
+_acq_sbx_ensure_rc_bridge() {
+  local name="$1" rc_block bridge_lines
+  command -v acq_login_profile_rc_block >/dev/null 2>&1 || return 0
+  if ! _acq_sbx_wait_for_exec_ready "$name"; then
+    echo "acq(sbx): warning: sandbox '$name' not exec-ready; could not install the ~/.rc.d login bridge." >&2
+    echo "acq(sbx):   kit-dropped ~/.rc.d/*.sh snippets will not be sourced at login." >&2
+    return 0
+  fi
+  rc_block=$(acq_login_profile_rc_block)
+  # Header lines written before the block (the marker comment). Bound computed
+  # host-side so the "acq owns it outright" guard tracks the shared block's real
+  # size instead of a literal that could silently go stale if the block grows.
+  bridge_lines=$(( 1 + $(printf '%s\n' "$rc_block" | wc -l) ))
+  # The block is threaded to the guest as a positional arg ($1), never
+  # interpolated into the single-quoted sh -c string (the block contains single
+  # quotes, which would otherwise close the outer quote).
+  sbx exec "$name" -- sh -c '
+    set -e
+    rc_block="$1"
+    max_lines="$2"
+    profile="$HOME/.profile"
+    if [ ! -s "$profile" ] || { grep -qs acq-login-profile-rc "$profile" && [ "$(wc -l < "$profile")" -le "$max_lines" ]; }; then
+      {
+        echo "# acq-login-profile-rc: written by acq (do not edit this block)."
+        printf "%s\n" "$rc_block"
+      } > "$profile"
+    fi
+  ' sh "$rc_block" "$bridge_lines" </dev/null >/dev/null 2>&1 || {
+    echo "acq(sbx): warning: could not install the ~/.rc.d login bridge in '$name';" >&2
+    echo "acq(sbx):   kit-dropped ~/.rc.d/*.sh snippets will not be sourced at login." >&2
+    return 0
+  }
 }
 
 acq_backend_recorded_agent() {

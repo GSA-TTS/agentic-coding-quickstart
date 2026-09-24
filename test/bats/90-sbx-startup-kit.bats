@@ -227,6 +227,47 @@ SPEC
   refute_regex "$(cat "$out/spec.yaml")" 'direnv allow|USAI_API_KEY|GITHUB_TOKEN'
 }
 
+@test "rc.d(sbx): provision installs the ~/.rc.d login bridge (backend parity)" {
+  # Parity with msb (ADR-0030): sbx DELIVERS ~/.rc.d files but nothing sources
+  # them at login without this create-time bridge. The bridge text is the ONE
+  # shared block from common.sh (acq_login_profile_rc_block), so the assertions
+  # below (C-collation ordering, bash gate, guards) hold for BOTH backends.
+  : > "$CALLS"
+  (
+    acq_backend_provision rcdbridgebox shell /tmp
+  ) >/dev/null 2>&1 || true
+  local log; log=$(cat "$CALLS")
+  # The bridge is written via a post-create `sbx exec` (not a startup kit).
+  assert_regex "$log" 'acq-login-profile-rc'
+  # Deterministic lexical order: an LC_ALL=C ls list, NOT a locale-dependent glob.
+  assert_regex "$log" 'LC_ALL=C ls'
+  assert_regex "$log" 'for _acq_rc in'
+  assert_regex "$log" 'SC1090'
+  assert_regex "$log" 'unset _acq_rc'
+  # bash-only ~/.profile gate preserved; zsh uses native startup files in images
+  # that support it.
+  assert_regex "$log" 'BASH_VERSION'
+  refute_regex "$log" 'ZSH_VERSION'
+  # The readiness probe must happen before the bridge install, so a freshly
+  # created sandbox does not silently miss the hook while exec is still starting.
+  assert_regex "$log" 'echo ok.*acq-login-profile-rc'
+}
+
+@test "rc.d(sbx): the login bridge does not use a startup-bearing kit (no live-extend refusal)" {
+  # The bridge must NOT be delivered via `sbx kit add` of a setup.startup kit —
+  # that path is refused on sbx >= 0.38 (see _acq_sbx_kit_add). It runs as a
+  # plain `sbx exec`, so provision must never emit a `kit add` for the bridge.
+  : > "$CALLS"
+  (
+    acq_backend_provision rcdnostartupbox shell /tmp
+  ) >/dev/null 2>&1 || true
+  local log; log=$(cat "$CALLS")
+  # The rc-bridge exec line carries the marker; no `sbx kit add` line should.
+  local bridgelines; bridgelines=$(printf '%s\n' "$log" | grep 'acq-login-profile-rc' || true)
+  [ -n "$bridgelines" ]
+  refute_regex "$bridgelines" 'kit add'
+}
+
 @test "provision(sbx): ACQ_EXTRA_KITS is marked into ~/.acq-extra-kits at create" {
   : > "$CALLS"
   # Subshell, NOT `bash -c`: acq_backend_provision is a sourced function, which

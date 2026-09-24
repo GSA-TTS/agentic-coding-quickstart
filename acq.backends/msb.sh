@@ -3560,7 +3560,7 @@ _acq_msb_ensure_agent_user() {
 # Also writes a Debian-skel-style ~/.profile bridge: a LOGIN bash reads only
 # ~/.profile, so without the bridge even `bash -l` skips ~/.bashrc on images
 # whose baked home ships no ~/.profile. The bridge also sources kit-owned
-# ~/.rc.d/*.sh snippets for bash/zsh in deterministic lexical order. The bare
+# ~/.rc.d/*.sh snippets for bash in deterministic lexical order. The bare
 # `export SHELL=/bin/sh` line earlier acq versions appended is removed wherever
 # it appears (it stopped a login bash cold); a ~/.profile with any other content
 # is left alone (image/user-owned — Debian's own skel already bridges).
@@ -3577,7 +3577,9 @@ _acq_msb_ensure_agent_shell() {
   shell=$(_acq_msb_safe_shell_or_sh "$shell")
   acq_debug "msb: syncing agent login shell to $shell in $name"
   # NOTE: single-quoted `sh -c` string — no single quotes inside (they would
-  # close the outer quote); `echo` writes the profile lines for the same reason.
+  # close the outer quote). The rc.d-sourcing block IS single-quote-bearing, but
+  # it is passed as a positional arg ($2), never interpolated into this string,
+  # so its quoting is inert here. `echo`/`printf` write the profile lines.
   #
   # The bridge exports the shell passwd ACTUALLY holds after the sync attempt
   # (re-read into `current`), not the requested target: an image with bash but
@@ -3585,12 +3587,30 @@ _acq_msb_ensure_agent_shell() {
   # about the shell sessions really run.
   #
   # The rewrite is bounded to a file acq owns outright: missing/empty, or the
-  # marker present AND still just the bridge (3 lines). Lines other tools
-  # append below the bridge (rustup et al) must survive the heal, so a
-  # marker-plus-appended file is left untouched.
+  # marker present AND still just the bridge (the header lines + shared rc-block
+  # line count, computed host-side). Lines other tools append below the bridge
+  # (rustup et al) must survive the heal, so a marker-plus-appended file is left
+  # untouched.
+  # The rc.d-sourcing block is the ONE shared bridge text from common.sh
+  # (acq_login_profile_rc_block); it is threaded to the guest as $2 so the sbx
+  # and msb bridges cannot silently drift (ADR-0030). The guest writes the 3
+  # fixed header lines + the shared block via a single here-doc-free `printf`,
+  # then re-owns the file to the agent. `_acq_rc_block` is captured host-side so
+  # the guest receives it as inert data (never re-expanded on the host).
+  local _acq_rc_block
+  _acq_rc_block=$(acq_login_profile_rc_block)
+  # Rewrite bound: 3 fixed header lines + the shared block's line count. Counted
+  # host-side so the "still just the bridge acq owns" heal guard stays exact if
+  # the shared block grows (rather than a hard-coded literal that would silently
+  # go stale). Appended lines below the bridge (rustup et al) push the total
+  # past this bound and are left untouched.
+  local _acq_bridge_lines
+  _acq_bridge_lines=$(( 3 + $(printf '%s\n' "$_acq_rc_block" | wc -l) ))
   _acq_msb_cli exec "$name" -u 0 -- sh -c '
     set -e
     target="$1"
+    rc_block="$2"
+    max_lines="$3"
     current=$({ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; } | head -n1 | cut -d: -f7)
     if [ "$current" != "$target" ]; then
       if command -v usermod >/dev/null 2>&1; then
@@ -3605,25 +3625,17 @@ _acq_msb_ensure_agent_shell() {
     if [ -f "$profile" ]; then
       sed -i "\|^export SHELL=/bin/sh\$|d" "$profile" 2>/dev/null || true
     fi
-    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le 13 ]; }; then
+    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le "$max_lines" ]; }; then
       {
         echo "# acq-login-profile: written by acq (rewritten on heal; do not edit this block)."
         echo "export SHELL=$current"
         echo "if [ -n \"\$BASH_VERSION\" ] && [ -f \"\$HOME/.bashrc\" ]; then . \"\$HOME/.bashrc\"; fi"
-        echo "if { [ -n \"\$BASH_VERSION\" ] || [ -n \"\$ZSH_VERSION\" ]; } && [ -d \"\$HOME/.rc.d\" ]; then"
-        echo "  for _acq_rc in \"\$HOME\"/.rc.d/*.sh; do"
-        echo "    [ -r \"\$_acq_rc\" ] || continue"
-        echo "    case \"\$_acq_rc\" in *[!A-Za-z0-9._/-]*) continue ;; esac"
-        echo "    # shellcheck disable=SC1090"
-        echo "    . \"\$_acq_rc\""
-        echo "  done"
-        echo "  unset _acq_rc"
-        echo "fi"
+        printf "%s\n" "$rc_block"
       } > "$profile"
       _agrp=$(id -gn agent 2>/dev/null || echo agent)
       chown "agent:${_agrp}" "$profile"
     fi
-  ' sh "$shell" </dev/null >/dev/null 2>&1 || {
+  ' sh "$shell" "$_acq_rc_block" "$_acq_bridge_lines" </dev/null >/dev/null 2>&1 || {
     echo "acq(msb): warning: could not sync the agent login shell in '$name';" >&2
     echo "acq(msb):   interactive sessions fall back to /bin/sh." >&2
     return 0

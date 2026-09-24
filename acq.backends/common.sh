@@ -1107,6 +1107,29 @@ acq_guest_shell_script() {
   fi
 }
 
+# acq_login_profile_rc_block — emit the guest-side POSIX-sh snippet that a login
+# ~/.profile uses to source the kit-owned ~/.rc.d/*.sh drop-ins. Keep this as the
+# single backend-neutral source of the bridge text: msb writes it from
+# _acq_msb_ensure_agent_shell, and sbx writes the same bytes from
+# _acq_sbx_ensure_rc_bridge.
+#
+# Emitted lines are evaluated by the guest login shell. They gate to bash,
+# list snippets with C collation for deterministic order, preserve the readable
+# and charset guards, and clean up the loop variable after sourcing.
+acq_login_profile_rc_block() {
+  printf '%s\n' 'if [ -n "$BASH_VERSION" ] && [ -d "$HOME/.rc.d" ]; then'
+  printf '%s\n' '  for _acq_rc in $(LC_ALL=C ls "$HOME"/.rc.d 2>/dev/null); do'
+  printf '%s\n' '    _acq_rc="$HOME/.rc.d/$_acq_rc"'
+  printf '%s\n' '    case "$_acq_rc" in *.sh) ;; *) continue ;; esac'
+  printf '%s\n' '    [ -r "$_acq_rc" ] || continue'
+  printf '%s\n' '    case "$_acq_rc" in *[!A-Za-z0-9._/-]*) continue ;; esac'
+  printf '%s\n' '    # shellcheck disable=SC1090'
+  printf '%s\n' '    . "$_acq_rc"'
+  printf '%s\n' '  done'
+  printf '%s\n' '  unset _acq_rc'
+  printf '%s\n' 'fi'
+}
+
 # _acq_valid_vsock_port PORT — succeed (return 0) iff PORT is an integer in
 # 1..4294967294 and not the reserved value 123. msb rejects port 0 and reserves
 # 123 (see ADR-0021); we mirror that validation host-side so a bad port is
@@ -3028,7 +3051,11 @@ fi
 
 hook=0
 for profile in "$home/.profile" "$home/.bashrc" "$home/.zshrc" /etc/profile /etc/bash.bashrc /etc/profile.d/acq*.sh; do
-  if [ -f "$profile" ] && grep -Eq '(^|[[:space:]])(source|\.)[[:space:]].*\.rc\.d' "$profile" 2>/dev/null; then
+  # Match either an explicit `source/.  …rc.d…` line OR acq's own login bridge
+  # marker (acq-login-profile), whose loop sources ~/.rc.d indirectly through a
+  # variable — so a plain `source .rc.d` grep alone would miss it. See ADR-0030.
+  if [ -f "$profile" ] \
+      && grep -Eq '(^|[[:space:]])(source|\.)[[:space:]].*\.rc\.d|acq-login-profile' "$profile" 2>/dev/null; then
     hook=1
     break
   fi

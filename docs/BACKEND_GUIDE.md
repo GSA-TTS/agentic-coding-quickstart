@@ -1034,9 +1034,9 @@ The neutral vocabulary is: `caps.network.allow`, `files[]`, `commands[]`,
 readable POSIX snippets as files under `/home/agent/.rc.d/*.sh`, for example
 `/home/agent/.rc.d/10-team.sh` or `/home/agent/.rc.d/90-personal.sh`.
 `acq`'s built-in shell bridge sources these snippets for bash login shells in
-lexical order; zsh-capable base images must wire the same directory from native
-zsh startup files. The snippets are kit-owned state, not a user-editable dotfile
-layer.
+deterministic lexical order; zsh-capable base images must wire the same directory
+from native zsh startup files. The snippets are kit-owned state, not a
+user-editable dotfile layer.
 
 Use this path for agent shell integration outside a devenv shell, team tool
 environment/completions, personal aliases/functions, and an optional
