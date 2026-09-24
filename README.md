@@ -86,7 +86,7 @@ Run the one-line installer for your shell.
 <!-- x-release-please-start-version -->
 
 ```bash
-curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.sh | sh
+curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.2.0/install.sh | sh
 ```
 
 <!-- x-release-please-end -->
@@ -96,7 +96,7 @@ curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/downloa
 <!-- x-release-please-start-version -->
 
 ```powershell
-irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.ps1 | iex
+irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.2.0/install.ps1 | iex
 ```
 
 <!-- x-release-please-end -->
@@ -143,7 +143,7 @@ CLI (`gh`), you can also verify the release asset attestations before running
 anything:
 
 ```bash
-ACQ_VERSION=3.1.0 # x-release-please-version
+ACQ_VERSION=3.2.0 # x-release-please-version
 curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/install.sh"
 curl -fsSLO "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v${ACQ_VERSION}/SHA256SUMS"
 gh attestation verify install.sh --repo GSA-TTS/agentic-coding-quickstart
@@ -165,7 +165,7 @@ For Windows preview installs, download and inspect the PowerShell installer
 instead:
 
 ```powershell
-$AcqVersion = "3.1.0" # x-release-please-version
+$AcqVersion = "3.2.0" # x-release-please-version
 $BaseUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$AcqVersion"
 Invoke-WebRequest "$BaseUrl/install.ps1" -OutFile install.ps1
 Get-Content .\install.ps1
