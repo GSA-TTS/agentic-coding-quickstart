@@ -1226,6 +1226,38 @@ acq_backend_secret_set() {
   return "$exit_code"
 }
 
+acq_backend_secret_propagate() {
+  local scope="${1:-}" service="${2:-}" scope_flag="" scope_name=""
+  case "$scope" in
+    -g|--global) scope_flag="-g" ;;
+    ""|-*) echo "acq(sbx): secret propagate: missing scope" >&2; return 1 ;;
+    *) scope_name="$scope" ;;
+  esac
+  if [ -z "$service" ]; then
+    echo "acq(sbx): secret propagate: missing service name" >&2
+    return 1
+  fi
+  if [ -n "$scope_name" ]; then
+    acq_backend_exists "$scope_name" || return 0
+  elif [ -z "$(sbx ls -q 2>/dev/null)" ]; then
+    return 0
+  fi
+  if [ "$service" != "usai" ]; then
+    echo "acq(sbx): stored '$service' in the acq secret store." >&2
+    echo "          sbx cannot safely overwrite this secret non-interactively; run:" >&2
+    echo "          acq --backend sbx secret set -g ${service}" >&2
+    return 0
+  fi
+  if [ ! -t 0 ] && [ -z "${ACQ_SECRET_TEST_VALUE:-}" ]; then
+    echo "acq(sbx): stored 'usai' in the acq secret store, but existing sbx" >&2
+    echo "          sandboxes still need the proxy placeholder updated." >&2
+    echo "          Run from a terminal: acq --backend sbx usai-rotate-api-key" >&2
+    return 1
+  fi
+  echo "acq(sbx): enter the same USAi key at sbx's prompt to update its proxy." >&2
+  acq_backend_rotate_key
+}
+
 # ---------------------------------------------------------------------------
 # acq_backend_secret_rm [-g | SANDBOX] SERVICE  (sbx backend)
 # ---------------------------------------------------------------------------
@@ -1552,6 +1584,11 @@ acq_backend_rotate_key() {
       echo "acq(sbx): 'sbx secret set-custom' failed." >&2
       return 1
     }
+  fi
+
+  if [ -n "${ACQ_PROPAGATING_SECRET:-}" ]; then
+    echo "acq(sbx): updated the USAi proxy placeholder for existing sbx sandbox(es)." >&2
+    return 0
   fi
 
   # Validate the new key in a throwaway sandbox so we don't depend on any

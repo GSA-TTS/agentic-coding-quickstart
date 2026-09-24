@@ -5316,6 +5316,31 @@ acq_backend_secret_set() {
   return 0
 }
 
+acq_backend_secret_propagate() {
+  local service scope_name
+  _acq_msb_parse_secret_scope service scope_name "$@"
+  shift "$_ACQ_MSB_SCOPE_CONSUMED"
+
+  if [ -z "$service" ]; then
+    echo "acq(msb): secret propagate: missing service name" >&2
+    return 1
+  fi
+  if [ -n "$scope_name" ]; then
+    acq_backend_exists "$scope_name" || return 0
+  elif [ -z "$(_acq_msb_cli list -q 2>/dev/null)" ]; then
+    return 0
+  fi
+
+  local _env _host _binding applied
+  _binding=$(_acq_msb_service_binding "$service" "$scope_name")
+  _env=$(printf '%s' "$_binding" | cut -f1)
+  _host=$(printf '%s' "$_binding" | cut -f2)
+  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
+  if [ "$applied" -gt 0 ]; then
+    echo "acq(msb): applied '$service' to $applied running sandbox(es)." >&2
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # acq_backend_secret_rm [-g | SANDBOX] SERVICE  (msb backend)
 # ---------------------------------------------------------------------------
