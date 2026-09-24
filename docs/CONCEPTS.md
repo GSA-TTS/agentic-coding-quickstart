@@ -191,6 +191,8 @@ repository for details.
 `acq` applies a fixed set of built-in kits, pinned to a commit of the patterns
 repo. To customize:
 
+- **Pick opt-in kits interactively:** run `acq configure` (see
+  [Interactive setup: `acq configure`](#interactive-setup-acq-configure)).
 - **Add your own kits on every run:** see [Advanced: extra kits](#advanced-extra-kits).
 - **Change USAi models / provider config, rules, or skills:** contribute to the
   kits in the
@@ -199,6 +201,39 @@ repo. To customize:
   live.
 - **Adopt newer kit versions:** bump `PATTERNS_KIT_REF` near the top of
   `acq.backends/common.sh`.
+
+### Interactive setup: `acq configure`
+
+`acq configure` opens a small, colorful interactive picker (no extra tools to
+install) that lets you choose which **opt-in** kits to enable and set the default
+answer for the per-sandbox GitHub-token-scoping prompt. Choices persist to
+`~/.config/acq/config.yaml`, so you set them once instead of repeating `--kit`
+flags on every run.
+
+```text
+? Select kits (dimmed rows are always applied · ↑/↓ move · SPACE toggle · ENTER confirm · q cancel)
+  [x] zscaler-ca-certificate   Zscaler/corporate CA trust … (always applied)
+  [x] usai-provider            USAi provider + model config … (always applied)
+  [x] agentic-coding-playbook  Federal agent rules and skills … (always applied)
+  [x] git-ssh-sign             SSH-based git commit signing … (always applied)
+❯ [x] openchamber              Browser UI for OpenCode alongside the terminal TUI
+  [ ] paseo                    Self-hosted Paseo browser web UI for coding agents
+```
+
+- The **four built-in kits** (`zscaler-ca-certificate`, `usai-provider`,
+  `agentic-coding-playbook`, `git-ssh-sign`) appear as **frozen rows** at the top
+  — always checked, dimmed, and tagged `(always applied)`. The cursor skips them
+  and they can't be toggled; the picker manages only the opt-in extras below.
+- On your **first run**, `acq` offers to run this for you. Run it again anytime
+  with `acq configure`.
+- At `acq create`, the picker is shown again **pre-populated with your saved
+  defaults**, so a single sandbox can enable or disable a kit without changing
+  the global default (the deviation is remembered for that sandbox).
+- The **GitHub-token** preference only pre-answers the scoping prompt; the
+  fine-grained token is still minted per-sandbox (see
+  [`acq github-scope`](howto/acq.md)).
+- Non-interactive/CI runs make no changes and simply print the current
+  configuration. Set `ACQ_NO_PROMPT=1` to force that behavior.
 
 ### Advanced: extra kits
 
@@ -209,6 +244,10 @@ whitespace-separated list of kit references (local paths or remote refs):
 ```bash
 export ACQ_EXTRA_KITS="./my-local-kit git+https://github.com/acme/kits.git#ref=<sha>&dir=some-kit"
 ```
+
+An explicitly-exported `ACQ_EXTRA_KITS` takes precedence over the kits saved by
+`acq configure` (env wins): the interactive picker is skipped and your env value
+is used verbatim.
 
 Extras are applied **after** the built-in kits (so they win on any overlapping
 config). They also work when re-running against an existing sandbox: adding a new

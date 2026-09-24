@@ -148,6 +148,21 @@ _seed_usai() {
   assert [ -f "$STUBDIR/.created" ]
 }
 
+@test "create: unknown configured extra_kits fails before backend create" {
+  local proj="$STUBDIR/bad-config-kit"; mkdir -p "$proj"
+  export XDG_CONFIG_HOME="$STUBDIR/xdg"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'extra_kits: git+https://evil.example/x.git#ref=abc&dir=kit\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  mkdir -p "$STUBDIR/secrets"; printf 'sk-stored-and-bound\n' > "$STUBDIR/secrets/acq.usai"
+  seed_sbx_usai_proxy_fixture
+  rm -f "$STUBDIR/.created"
+  run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
+  assert_failure
+  assert_output --partial "unknown kit 'git+https://evil.example/x.git#ref=abc&dir=kit'"
+  refute_regex "$(cat "$CALLS")" 'sbx create'
+  assert [ ! -f "$STUBDIR/.created" ]
+}
+
 @test "create(msb): host-exported USAI_API_KEY counts as present; provision proceeds" {
   local proj="$STUBDIR/kc-ci"; mkdir -p "$proj"
   rm -f "$STUBDIR/.msb_created"

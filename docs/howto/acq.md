@@ -492,6 +492,30 @@ design and trust model.
 
 ---
 
+## Interactive setup: `acq configure`
+
+`acq configure` is a colorful, dependency-free interactive picker for choosing
+which **opt-in** kits to enable and the default answer for per-sandbox GitHub
+token scoping. Choices persist to `~/.config/acq/config.yaml`.
+
+```bash
+acq configure
+```
+
+- The four built-in kits are always applied; the picker only manages opt-in
+  extras (e.g. `openchamber`, `paseo`).
+- `acq` offers to run this on your first run; run it again anytime.
+- `acq create` re-shows the picker pre-filled with your saved defaults, so one
+  sandbox can deviate without changing the global default (the deviation is
+  remembered per-sandbox and re-applied on resume).
+- The token preference only pre-answers the scoping prompt — the fine-grained
+  PAT is still minted per-sandbox (`acq github-scope`).
+- Non-interactive/CI runs make no changes and just print the current config; set
+  `ACQ_NO_PROMPT=1` to force that. See
+  [ADR-0031](../adr/0031-interactive-acq-configure.md).
+
+---
+
 ## Advanced: extra kits
 
 ```bash
@@ -501,6 +525,10 @@ export ACQ_EXTRA_KITS="./my-local-kit git+https://github.com/acme/kits.git#ref=<
 # Allow a new kit source prefix
 export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 ```
+
+An exported `ACQ_EXTRA_KITS` takes precedence over the kits saved by
+`acq configure` (env wins): the create-time picker is skipped and your env value
+is used verbatim.
 
 You can also apply an extra kit for a single `run`/`create` with `--kit`
 (repeatable), instead of the env var:
