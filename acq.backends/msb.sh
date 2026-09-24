@@ -110,6 +110,12 @@ _acq_msb_cli() {
 # clear version message, not a raw clap error or DNS parse failure mid-create.
 MIN_MSB_VERSION="0.6.9"
 
+# msb 0.7.0 through 0.7.2 can migrate 0.6.x sandbox state into a form that is
+# incompatible across versions. Refuse those releases until the upstream fix
+# expected in 0.7.3 is available.
+MSB_BLOCKED_VERSION_MIN="0.7.0"
+MSB_BLOCKED_VERSION_MAX="0.7.2"
+
 # Default OCI image for provisioned sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
 # agent template. It ALREADY ships the non-root `agent` user (with passwordless
@@ -691,7 +697,7 @@ case "$ACQ_MSB_SSH_AGENT_GUEST_SOCK" in
     ;;
 esac
 # The ssh-agent forward feature needs msb >= 0.6.9 (first release with --vsock).
-# The global MIN_MSB_VERSION floor stays 0.6.8; this gates ONLY the forward.
+# Keep a feature-specific constant so the forward path stays self-documenting.
 MIN_MSB_VSOCK_VERSION="0.6.9"
 # Share the ssh-agent guest port with common.sh's neutral helper so both sides
 # agree on the port (the helper emits it, this adapter translates it). This is
@@ -746,6 +752,13 @@ EOF
   echo 0
 }
 
+_acq_msb_version_blocked() {
+  local v="$1"
+  [ "$(_acq_msb_version_ge "$v" "$MSB_BLOCKED_VERSION_MIN")" -eq 0 ] || return 1
+  [ "$(_acq_msb_version_ge "$MSB_BLOCKED_VERSION_MAX" "$v")" -eq 0 ] || return 1
+  return 0
+}
+
 # Parse `msb --version` → bare X.Y.Z.
 _acq_msb_version() {
   _acq_msb_cli --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1
@@ -772,7 +785,14 @@ acq_backend_prepare() {
   fi
   if [ "$(_acq_msb_version_ge "$current" "$MIN_MSB_VERSION")" -ne 0 ]; then
     echo "error: acq requires msb >= $MIN_MSB_VERSION, but found $current." >&2
-    echo "       Upgrade with 'msb self update' (see docs/BACKEND_GUIDE.md)." >&2
+    echo "       Install msb 0.6.18, or upgrade to msb >= 0.7.3 once available." >&2
+    exit 1
+  fi
+  if _acq_msb_version_blocked "$current"; then
+    echo "error: acq refuses msb $current because msb $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX" >&2
+    echo "       can corrupt or migrate existing 0.6.x sandbox state incompatibly." >&2
+    echo "       Use msb 0.6.18, or upgrade to msb >= 0.7.3 after that upstream fix" >&2
+    echo "       is released. See docs/KNOWN_FAILURE_MODES.md for details." >&2
     exit 1
   fi
 

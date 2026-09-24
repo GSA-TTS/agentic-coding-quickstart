@@ -3,7 +3,7 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-08-18"
+last_updated: "2026-09-24"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
 related_files: ["docs/howto/acq.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
@@ -146,7 +146,7 @@ automation story.
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `msb` CLI | >= 0.6.8 | `--net-rule`, `--trust-host-cas`, `--secret`, and the `--net-default-egress` split (0.6.8) used by acq's balanced-egress default. Host ssh-agent forwarding for git signing additionally needs msb >= 0.6.9 (`--vsock`; [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)) — it warns and skips on older msb without changing this 0.6.8 floor. |
+| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases can migrate 0.6.x sandbox state incompatibly. Use 0.6.18 or >=0.7.3. |
 | Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
 
 Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
@@ -311,10 +311,10 @@ kits' own `caps.network.allow` rules.
   client falls back to TLS-over-TCP automatically — the same behavior as sbx
   `balanced`. A one-time slow first connection while a client tries QUIC and falls
   back is expected, not a bug.
-- **Requires msb >= 0.6.8.** The egress-only deny-default uses the
-  `--net-default-egress` flag, which first appears in msb 0.6.8. `acq` enforces
-  this floor (`MIN_MSB_VERSION`) and fails closed with a clear version message on
-  an older binary, rather than passing an unknown flag to `msb create`.
+- **Requires msb >= 0.6.9.** The egress-only deny-default uses the
+  `--net-default-egress` flag, which first appears in msb 0.6.8, and acq's DNS
+  rule emitter relies on the 0.6.9 release-build parser fix. `acq` enforces this
+  floor (`MIN_MSB_VERSION`) and also blocks msb 0.7.0-0.7.2 before create.
 
 See [ADR-0018](adr/0018-msb-balanced-egress-baseline.md) for the full rationale,
 and [ADR-0019](adr/0019-msb-balanced-egress-is-egress-only.md) for why the
@@ -794,8 +794,8 @@ and exports it as `SSH_AUTH_SOCK` on attach, `acq exec`, and kit commands.
 
 - **Needs msb >= 0.6.9** (the release that adds `--vsock`) **and `socat` in the
   base image** (the default `docker/sandbox-templates:shell-docker` ships it). On
-  an older msb, or a guest without `socat`, acq **warns and skips** the forward
-  (fail-soft) — the 0.6.8 floor is unchanged.
+  a guest without `socat`, acq **warns and skips** the forward (fail-soft); the
+  runtime floor already excludes older msb versions.
 - **It widens the host↔microVM trust boundary:** guest code can exercise every
   key the host agent holds while the socket is reachable. It is **opt-in** via
   `SSH_AUTH_SOCK` — **unset it to disable** — and only agent *operations* (not key

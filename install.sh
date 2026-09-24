@@ -64,6 +64,13 @@ NPM_SPEC_BASE="github:GSA-TTS/agentic-coding-quickstart"
 # Homebrew formula used by the brew method.
 BREW_FORMULA="GSA-TTS/tap/acq"
 
+# msb 0.7.0-0.7.2 have an upstream migration bug. Install the last known-good
+# release when acq needs to install or repair msb, and accept >=0.7.3 when present.
+MSB_MIN_VERSION="0.6.9"
+MSB_SAFE_VERSION="0.6.18"
+MSB_BLOCKED_VERSION_MIN="0.7.0"
+MSB_BLOCKED_VERSION_MAX="0.7.2"
+
 INSTALL_MSB=1   # offer to install msb; --no-msb disables
 DRY_RUN=0
 ASSUME_YES=0
@@ -205,6 +212,35 @@ confirm() {
     [yY]|[yY][eE][sS]) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+version_ge() {
+  a=$1 b=$2 i=1
+  while [ "$i" -le 3 ]; do
+    a_part=$(printf '%s\n' "$a" | cut -d. -f"$i")
+    b_part=$(printf '%s\n' "$b" | cut -d. -f"$i")
+    a_part=${a_part%%[!0-9]*}; b_part=${b_part%%[!0-9]*}
+    a_part=${a_part:-0}; b_part=${b_part:-0}
+    if [ "$a_part" -gt "$b_part" ]; then return 0; fi
+    if [ "$a_part" -lt "$b_part" ]; then return 1; fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
+msb_version_blocked() {
+  v="$1"
+  version_ge "$v" "$MSB_BLOCKED_VERSION_MIN" || return 1
+  version_ge "$MSB_BLOCKED_VERSION_MAX" "$v" || return 1
+  return 0
+}
+
+msb_version_of() {
+  "$1" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true
+}
+
+msb_install_script_url() {
+  printf 'https://github.com/superradcompany/microsandbox/releases/download/v%s/install.sh\n' "$MSB_SAFE_VERSION"
 }
 
 # ---------------------------------------------------------------------------
@@ -522,6 +558,120 @@ install_via_clone() {
   fi
 }
 
+msb_candidate_paths() {
+  if command -v msb >/dev/null 2>&1; then
+    command -v msb
+  fi
+
+  old_ifs=$IFS
+  IFS=:
+  for dir in $PATH; do
+    [ -n "$dir" ] || dir=.
+    [ -x "$dir/msb" ] && printf '%s\n' "$dir/msb"
+  done
+  IFS=$old_ifs
+
+  [ -n "${HOME:-}" ] && [ -x "$HOME/.local/bin/msb" ] && printf '%s\n' "$HOME/.local/bin/msb"
+
+  if command -v brew >/dev/null 2>&1; then
+    brew_prefix=$(brew --prefix superradcompany/tap/microsandbox 2>/dev/null || brew --prefix microsandbox 2>/dev/null || true)
+    [ -n "$brew_prefix" ] && [ -x "$brew_prefix/bin/msb" ] && printf '%s\n' "$brew_prefix/bin/msb"
+  fi
+}
+
+msb_unique_candidates() {
+  seen=""
+  msb_candidate_paths | while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    case "
+$seen
+" in
+      *"
+$candidate
+"*) ;;
+      *)
+        seen="${seen}
+${candidate}"
+        printf '%s\n' "$candidate"
+        ;;
+    esac
+  done
+}
+
+msb_report_candidates() {
+  count=0
+  versions=""
+  active="$(command -v msb 2>/dev/null || true)"
+  candidates=$(msb_unique_candidates)
+  [ -n "$candidates" ] || return 0
+
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    count=$((count + 1))
+    ver=$(msb_version_of "$candidate")
+    [ -n "$ver" ] || ver="unknown"
+    versions="${versions} ${ver}"
+  done <<EOF
+$candidates
+EOF
+
+  if [ "$count" -le 1 ]; then
+    return 0
+  fi
+
+  warn "  Multiple msb binaries were found; PATH order determines which one acq uses."
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    ver=$(msb_version_of "$candidate")
+    [ -n "$ver" ] || ver="unknown"
+    marker=""
+    [ -n "$active" ] && [ "$candidate" = "$active" ] && marker=" (active)"
+    warn "    $candidate: $ver$marker"
+  done <<EOF
+$candidates
+EOF
+  warn "  Remove stale copies or adjust PATH so the intended msb appears first."
+}
+
+install_msb_safe_version() {
+  url=$(msb_install_script_url)
+  info "  Installing msb $MSB_SAFE_VERSION via upstream release installer..."
+  info "  (This downloads and runs the upstream shell installer from $url.)"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '  [dry-run] curl -fsSL %s | sh\n' "$url"
+  else
+    tmp="${TMPDIR:-/tmp}/acq-msb-install.$$"
+    trap 'rm -f "$tmp"' EXIT HUP INT TERM
+    curl -fsSL "$url" -o "$tmp" || return 1
+    sh "$tmp" </dev/null || return 1
+    rm -f "$tmp"
+    trap - EXIT HUP INT TERM
+  fi
+}
+
+verify_active_msb_safe() {
+  active="$(command -v msb 2>/dev/null || true)"
+  if [ -z "$active" ]; then
+    die "msb $MSB_SAFE_VERSION was installed, but no msb is active on PATH.
+Add ~/.local/bin to PATH, open a new terminal, and re-run this installer."
+  fi
+  ver=$(msb_version_of "$active")
+  if [ -z "$ver" ]; then
+    die "active msb at $active did not report a parseable version. Check that PATH
+points at the intended msb binary, then re-run this installer."
+  fi
+  if ! version_ge "$ver" "$MSB_MIN_VERSION"; then
+    die "active msb is still too old: $ver at $active.
+Use msb $MSB_SAFE_VERSION, or upgrade to msb >= 0.7.3 once available."
+  fi
+  if msb_version_blocked "$ver"; then
+    die "active msb is still blocked version $ver at $active.
+The installer put msb $MSB_SAFE_VERSION in ~/.microsandbox/bin and usually links
+it from ~/.local/bin, but another msb is shadowing it on PATH. Remove the stale
+copy or move ~/.local/bin earlier in PATH, then re-run this installer."
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Run the selected method
 # ---------------------------------------------------------------------------
@@ -537,39 +687,59 @@ esac
 # ---------------------------------------------------------------------------
 
 if [ "$INSTALL_MSB" -eq 1 ]; then
-  if command -v msb >/dev/null 2>&1; then
-    ok "  msb is already installed ($(command -v msb))."
-  else
-    step "The msb sandbox runtime is not installed"
-    info "  acq runs your agent inside an msb microVM. It is a separate, open-source tool."
-    if confirm "  Install msb now?"; then
-      if command -v brew >/dev/null 2>&1; then
-        info "  Installing via Homebrew..."
-        # Tap first: a fresh host has not tapped superradcompany/tap.
-        run brew tap superradcompany/tap
-        run brew install superradcompany/tap/microsandbox
-      else
-        info "  Homebrew not found; using the microsandbox install script."
-        info "  (This downloads and runs https://install.microsandbox.dev.)"
-        if [ "$DRY_RUN" -eq 1 ]; then
-          printf '  [dry-run] curl -fsSL https://install.microsandbox.dev | sh\n'
-        else
-          # Fetch then pipe, so the child does not read the curl | sh script pipe (fd 0).
-          if msb_installer="$(curl -fsSL https://install.microsandbox.dev)"; then
-            printf '%s' "$msb_installer" | sh
-          else
-            INSTALL_MSB=0
-          fi
-        fi
-      fi
+  msb_report_candidates
+  active_msb="$(command -v msb 2>/dev/null || true)"
+  active_msb_version=""
+  [ -n "$active_msb" ] && active_msb_version=$(msb_version_of "$active_msb")
+
+  if [ -n "$active_msb" ] && [ -z "$active_msb_version" ]; then
+    step "The active msb version could not be determined"
+    warn "  Found msb at $active_msb, but its version output was not parseable."
+    warn "  Install msb $MSB_SAFE_VERSION so acq can verify a supported version."
+    if confirm "  Install/downgrade msb to $MSB_SAFE_VERSION now?"; then
+      install_msb_safe_version || INSTALL_MSB=0
+      verify_active_msb_safe
     else
       INSTALL_MSB=0
     fi
-    if [ "$INSTALL_MSB" -eq 0 ]; then
-      warn "  Skipping msb. Install it later with one of:"
-      info  "    brew install superradcompany/tap/microsandbox"
-      info  "    curl -fsSL https://install.microsandbox.dev | sh"
+  elif [ -n "$active_msb" ] && ! version_ge "$active_msb_version" "$MSB_MIN_VERSION"; then
+    step "The active msb version is too old"
+    warn "  Found msb $active_msb_version at $active_msb. acq requires msb >= $MSB_MIN_VERSION."
+    warn "  Install msb $MSB_SAFE_VERSION instead."
+    if confirm "  Install/downgrade msb to $MSB_SAFE_VERSION now?"; then
+      install_msb_safe_version || INSTALL_MSB=0
+      verify_active_msb_safe
+    else
+      INSTALL_MSB=0
     fi
+  elif [ -n "$active_msb" ] && msb_version_blocked "$active_msb_version"; then
+    step "The active msb version is blocked"
+    warn "  Found msb $active_msb_version at $active_msb."
+    warn "  acq refuses msb $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX because those releases can"
+    warn "  migrate 0.6.x sandbox state incompatibly. Install msb $MSB_SAFE_VERSION instead."
+    if confirm "  Install/downgrade msb to $MSB_SAFE_VERSION now?"; then
+      install_msb_safe_version || INSTALL_MSB=0
+      verify_active_msb_safe
+    else
+      INSTALL_MSB=0
+    fi
+  elif [ -n "$active_msb" ]; then
+    ok "  msb is already installed ($active_msb${active_msb_version:+, v$active_msb_version})."
+  else
+    step "The msb sandbox runtime is not installed"
+    info "  acq runs your agent inside an msb microVM. It is a separate, open-source tool."
+    if confirm "  Install msb $MSB_SAFE_VERSION now?"; then
+      install_msb_safe_version || INSTALL_MSB=0
+      verify_active_msb_safe
+    else
+      INSTALL_MSB=0
+    fi
+  fi
+
+  if [ "$INSTALL_MSB" -eq 0 ]; then
+    warn "  Skipping msb. Install a supported version later with:"
+    info  "    curl -fsSL $(msb_install_script_url) | sh"
+    info  "  Avoid msb $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX; use msb $MSB_SAFE_VERSION or >= 0.7.3."
   fi
 fi
 

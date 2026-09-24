@@ -82,7 +82,7 @@ acq_teardown_stubs() {
 # a stray file in the CWD would then become callable and defeat the "backend
 # provably absent" premise. Skipping non-/-prefixed results keeps PATH clean.
 _acq_coreutils_path() {
-  local _tools="env rm cat mkdir mv chmod dirname sh grep sed awk printf"
+  local _tools="env rm cat mkdir mv chmod dirname sh grep sed awk printf cut head"
   local _t _d _seen="" _out=""
   for _t in $_tools; do
     _d=$(command -v "$_t" 2>/dev/null) || continue
