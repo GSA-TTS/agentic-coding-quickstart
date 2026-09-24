@@ -81,6 +81,24 @@ _seed_usai() {
   assert_output --partial 'no repo-scoped GitHub token'
 }
 
+@test "github-scope: uses recorded sandbox workspace when path is omitted" {
+  local parent="$STUBDIR/parent" pic="$STUBDIR/parent/pic" other="$STUBDIR/parent/other"
+  mkdir -p "$pic/repo" "$other"
+  ( cd "$pic/repo" && git init -q && git remote add origin https://github.com/GSA-TTS/pic-site.git )
+  ( cd "$other" && git init -q && git remote add origin https://github.com/mogul/artemis.git )
+  _seed_usai
+  run env ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
+    "$ACQ" create --name opencode-pic opencode "$pic"
+  assert_success
+
+  run env ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
+    ACQ_SECRET_TEST_VALUE=ghp_fake bash -c 'cd "$1" && "$2" github-scope opencode-pic' _ "$parent" "$ACQ"
+  assert_success
+  assert_output --partial "using recorded workspace for 'opencode-pic': $pic"
+  assert_output --partial 'GSA-TTS/pic-site'
+  refute_output --partial 'mogul/artemis'
+}
+
 @test "dispatch: create runs a non-blocking USAi key advisory (warns but never aborts)" {
   local proj="$STUBDIR/keyproj"; mkdir -p "$proj"
   _seed_usai
@@ -172,6 +190,32 @@ _seed_usai() {
   assert_output --partial 'no repo-scoped GitHub token'
   assert_regex "$(cat "$CALLS")" 'msb create'
   assert [ -f "$STUBDIR/.msb_created" ]
+}
+
+@test "create(msb): records the host workspace path for later github-scope" {
+  local proj="$STUBDIR/msb-gh-record" expected
+  mkdir -p "$proj"
+  expected=$(canonicalize_path "$proj")
+  rm -f "$STUBDIR/.msb_created"
+  run env USAI_API_KEY=sk-ci-host ACQ_BACKEND=msb "$ACQ" create opencode "$proj"
+  assert_success
+  assert [ -f "$STUBDIR/.msb_created" ]
+  run acq_workspace_record_read msb opencode-msb-gh-record
+  assert_success
+  assert_output "$expected"
+  refute_output --partial '/home/agent'
+}
+
+@test "github-scope: no path does not read or persist guest-reported workspace" {
+  local proj="$STUBDIR/guest-controlled"
+  mkdir -p "$proj/repo"
+  ( cd "$proj/repo" && git init -q && git remote add origin https://github.com/GSA-TTS/guest.git )
+  run env ACQ_BACKEND=sbx STUB_RECORDED_WORKSPACE="$proj" "$ACQ" github-scope oldbox
+  assert_failure
+  assert_output --partial 'no workspace path was provided'
+  refute_regex "$(cat "$CALLS")" 'sbx exec oldbox'
+  run acq_workspace_record_read sbx oldbox
+  assert_output ''
 }
 
 @test "run: present key + bad status -> post-create gate offers rotate; decline aborts" {

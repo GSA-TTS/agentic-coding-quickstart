@@ -497,6 +497,7 @@ acq_backend_provision() {
   # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
     acq_provenance_write sbx "$name" || true
+    acq_workspace_record_write sbx "$name" "$_primary_ws" || true
     _acq_sbx_seed_extra_kit_marker "$name"
     # Persist the CLI (`--kit`) / extra kit refs alongside provenance so a later
     # resume heal can reload them (see acq_cli_kits_write). Best-effort.
