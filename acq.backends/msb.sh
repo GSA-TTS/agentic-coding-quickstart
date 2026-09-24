@@ -1616,7 +1616,7 @@ EOF
     fi
     if { [ "$_readonly" != "true" ] || [ "$_hcfg_mount_ok" -ne 1 ]; } && [ -n "$src" ] && [ -f "$src" ]; then
       if [ "$_readonly" = "true" ]; then
-        echo "acq(msb): warning: sandbox '$name' has no readable ADR-0030 host-config mount;" \
+        echo "acq(msb): warning: sandbox '$name' has no readable or read-only ADR-0030 host-config mount;" \
              "copying readonly kit file '$path' into the guest for compatibility. Recreate the sandbox to get tamper-resistant readonly startup code." >&2
       fi
       _acq_msb_copy_file_verified "$name" "$src" "$path" "$mode" || {
@@ -1668,15 +1668,19 @@ _acq_msb_reset_kit_env() {
 }
 
 # _acq_msb_host_config_mount_available NAME — true iff this sandbox has the
-# ADR-0030 host-config dir mounted at ACQ_HOST_CONFIG_GUEST_DIR and traversable
-# by the agent user. Existing sandboxes created before ADR-0030 lack this
-# create-time mount; for those, readonly:true files must fall back to the legacy
-# guest-copy path rather than rewriting startup argv to a non-existent path.
+# ADR-0030 host-config dir mounted at ACQ_HOST_CONFIG_GUEST_DIR, traversable by
+# the agent user, and still write-refusing under guest root. Existing sandboxes
+# created before ADR-0030 lack this create-time mount; for those, readonly:true
+# files must fall back to the legacy guest-copy path rather than rewriting startup
+# argv to a non-existent or writable path.
 _acq_msb_host_config_mount_available() {
   local name="$1"
   _acq_msb_cli exec "$name" -u agent -- sh -c \
     "test -d '$ACQ_HOST_CONFIG_GUEST_DIR' && test -r '$ACQ_HOST_CONFIG_GUEST_DIR' && test -x '$ACQ_HOST_CONFIG_GUEST_DIR'" \
-    </dev/null >/dev/null 2>&1
+    </dev/null >/dev/null 2>&1 || return 1
+  _acq_msb_cli exec "$name" -u 0 -- sh -c \
+    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; if : > "$_tmp" 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 1; fi; exit 0' \
+    sh "$ACQ_HOST_CONFIG_GUEST_DIR" </dev/null >/dev/null 2>&1
 }
 
 # _acq_msb_stage_readonly_file NAME KITDIR GUESTPATH SRC — stage one trusted kit
@@ -1703,7 +1707,7 @@ _acq_msb_stage_readonly_file() {
     return 1
   fi
   chmod 711 "$cfgdir" 2>/dev/null || true
-  chmod 755 "${cfgdir}/${reldir}" 2>/dev/null || true
+  chmod 711 "${cfgdir}/${reldir}" 2>/dev/null || true
   dest="${cfgdir}/${reldir}/${slug}.${crc}"
   cp -f "$src" "$dest" 2>/dev/null || { acq_debug "msb readonly-stage: cp failed: $src -> $dest"; return 1; }
   chmod 0555 "$dest" 2>/dev/null || true
@@ -3330,6 +3334,10 @@ EOF
   fi
   acq_spin_stop "Waiting for the sandbox to finish booting"
   acq_debug "msb provision: exec-ready OK ($name)"
+
+  # Fresh create: stale host-side state from a same-named sandbox removed outside
+  # acq must not carry over into this new instance.
+  acq_host_config_clear_instance_state msb "$name"
 
   # Verify the kits' runtime prerequisites are present in the base image
   # (node/git/curl/update-ca-certificates). We do NOT install them: the kit

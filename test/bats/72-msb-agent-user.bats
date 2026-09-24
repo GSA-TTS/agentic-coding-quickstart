@@ -258,11 +258,20 @@ _attach() { # PRE_SNIPPET NAME
   refute_regex "$log" 'rm -rf /'
 }
 
-@test "msb: the OCI setup is skipped when the ready marker already exists" {
-  _provision ocirdybox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ociready-secrets" STUB_OCI_READY=1'
+@test "msb: OCI setup is skipped on heal when the ready marker already exists" {
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ociready-secrets" STUB_OCI_READY=1
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config_gates msb ocirdybox
+    _acq_msb_ensure_oci ocirdybox
+  '
+  assert_success
   local log; log=$(cat "$CALLS")
-  # ADR-0030: the oci-ready gate is a host config key now, seeded by
-  # seed_host_config_gates from STUB_OCI_READY; a hit skips the setup block.
+  # ADR-0030: the oci-ready gate still skips idempotent OCI setup during a heal;
+  # fresh provision clears stale gates before this point.
   assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/ocirdybox.*.config/oci-ready 2>/dev/null)" "1"
   refute_regex "$log" 'PODMAN_PKGS='
   refute_regex "$log" '/usr/local/bin/docker'
@@ -273,6 +282,51 @@ _attach() { # PRE_SNIPPET NAME
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'PODMAN_PKGS='
   refute_regex "$log" 'oci-ready'
+}
+
+@test "msb: fresh provision clears stale host-side instance state" {
+  local k="$STUBDIR/freshgate-kit"; mkdir -p "$k"
+  cat >"$k/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: freshgate-kit
+displayName: Fresh Gate Kit
+description: install marker regression kit
+commands:
+  - phase: install
+    user: "0"
+    command:
+      - sh
+      - -c
+      - printf freshgate-kit-install
+SPEC
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    marker="install-$(printf "%s\0" sh -c "printf freshgate-kit-install" | cksum | cut -d" " -f1)"
+    acq_host_config_write msb freshgatebox agent-user-ready 1
+    acq_host_config_write msb freshgatebox oci-ready 1
+    acq_host_config_write msb freshgatebox agent-installed-opencode 1
+    acq_host_config_write msb freshgatebox "$marker" 1
+    acq_host_config_write msb freshgatebox workspace /stale/workspace
+    acq_host_config_write msb freshgatebox ssh-auth-sock /stale/agent.sock
+  '
+  assert_success
+
+  _provision freshgatebox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/freshgate-secrets"' "$k"
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'test -w /home/agent'
+  assert_regex "$log" 'PODMAN_PKGS='
+  assert_regex "$log" 'npm install -g --no-fund --no-audit opencode-ai'
+  assert_regex "$log" 'printf freshgate-kit-install'
+
+  run bash -c 'ls "$1"/msb/freshgatebox.*.config/install-* 2>/dev/null' _ "$ACQ_PROVENANCE_DIR"
+  assert_output --partial 'install-'
+  run bash -c 'cat "$1"/msb/freshgatebox.*.config/workspace 2>/dev/null' _ "$ACQ_PROVENANCE_DIR"
+  refute_output '/stale/workspace'
+  assert_output --partial '/tmp'
+  run bash -c 'cat "$1"/msb/freshgatebox.*.config/ssh-auth-sock 2>/dev/null' _ "$ACQ_PROVENANCE_DIR"
+  refute_output '/stale/agent.sock'
+  assert_output --partial '/home/agent/.acq/ssh-agent.sock'
 }
 
 @test "msb: an OCI setup failure is fail-soft (rc 0, warns, marker not touched)" {

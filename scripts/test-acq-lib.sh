@@ -299,11 +299,15 @@ case "$_msb_sub" in
       *"getent passwd agent"*)
         [ -n "${STUB_AGENT_PASSWD_SHELL+x}" ] || exit 1
         printf '%s\n' "$STUB_AGENT_PASSWD_SHELL" ;;
-      # ADR-0030 host-config mount probe. Default PRESENT, matching a freshly
-      # created sandbox on this branch; STUB_HOST_CONFIG_MOUNT=0 models a legacy
-      # sandbox created before the /var/lib/acq/host:ro mount existed.
+      # ADR-0030 host-config mount probes. Default PRESENT+READONLY, matching a
+      # freshly created sandbox on this branch; STUB_HOST_CONFIG_MOUNT=0 models a
+      # legacy sandbox created before the /var/lib/acq/host:ro mount existed, and
+      # STUB_HOST_CONFIG_WRITABLE=1 models a backend that accepts but does not
+      # enforce :ro.
       *"test -d"*"/var/lib/acq/host"*)
         [ "${STUB_HOST_CONFIG_MOUNT:-1}" = "0" ] && exit 1 || exit 0 ;;
+      *".acq-ro-probe"*)
+        [ "${STUB_HOST_CONFIG_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
       # The host-side bash probe deciding the agent's passwd shell.
       # Default PRESENT (the default image ships bash); STUB_GUEST_BASH=0
       # models a bash-less base. MUST precede the generic command-v arm.

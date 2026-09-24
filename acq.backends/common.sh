@@ -1535,6 +1535,8 @@ acq_cli_kits_load() {
 # read-only mount root to execute `kit-files/...` staged code, but should not be
 # able to list acq-internal key names. Content-bearing flat keys remain 0600 on
 # the host; readonly kit code is staged under kit-files/ with executable perms.
+# The traversable dirs intentionally make known kit-file paths host-readable too;
+# only non-sensitive trusted code may be staged there.
 #
 # KEY charset is restricted ([A-Za-z0-9._-], no slash) so a key can never escape
 # the config dir; callers pass fixed literals (agent, workspace, ssh-auth-sock,
@@ -1588,7 +1590,7 @@ acq_host_config_write() {
   chmod 711 "$dir" 2>/dev/null || true
   file="$dir/$key"
   local tmp="${file}.tmp.$$"
-  printf '%s' "$value" > "$tmp" 2>/dev/null || {
+  ( umask 077; printf '%s' "$value" > "$tmp" ) 2>/dev/null || {
     acq_debug "host-config: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$file" 2>/dev/null || {
@@ -1639,6 +1641,10 @@ acq_host_config_append() {
   fi
   chmod 711 "$dir" 2>/dev/null || true
   file="$dir/$key"
+  if [ ! -f "$file" ]; then
+    ( umask 077; : > "$file" ) 2>/dev/null || {
+      acq_debug "host-config: create failed: $file"; return 1; }
+  fi
   printf '%s\n' "$value" >> "$file" 2>/dev/null || {
     acq_debug "host-config: append failed: $file"; return 1; }
   chmod 600 "$file" 2>/dev/null || true
@@ -1654,6 +1660,24 @@ acq_host_config_clear() {
   local dir
   dir=$(acq_host_config_dir "$backend" "$name") || return 0
   rm -f "$dir/$key" 2>/dev/null || true
+  return 0
+}
+
+# Remove per-sandbox instance keys before provisioning a freshly-created sandbox.
+# The host config dir is keyed by sandbox name, so a sandbox removed outside acq
+# can leave stale state behind for a later same-named sandbox. Clear run-once
+# gates and conditionally-written content keys before provision rewrites the
+# current instance's authoritative values.
+# Usage: acq_host_config_clear_instance_state BACKEND NAME
+acq_host_config_clear_instance_state() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  local dir
+  dir=$(acq_host_config_dir "$backend" "$name") || return 0
+  case "$dir" in ""|/|/*/) return 0 ;; esac
+  rm -f "$dir"/install-* "$dir"/agent-installed-* \
+        "$dir"/agent-user-ready "$dir"/oci-ready \
+        "$dir"/workspace "$dir"/ssh-auth-sock 2>/dev/null || true
   return 0
 }
 

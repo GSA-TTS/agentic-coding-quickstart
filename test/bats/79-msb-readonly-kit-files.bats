@@ -105,7 +105,7 @@ SPEC
   # acq-internal keys stay private; kit-files must be traversable and files
   # executable/readable from the :ro mount.
   assert_equal "$(stat -c '%a' "$cfg")" "711"
-  assert_equal "$(stat -c '%a' "$cfg/kit-files")" "755"
+  assert_equal "$(stat -c '%a' "$cfg/kit-files")" "711"
   assert_equal "$(stat -c '%a' "$staged")" "555"
   # It is NOT msb-copied into the guest at its declared guest path.
   refute_regex "$log" 'msb copy .*:/home/agent/cfg/merge\.mjs'
@@ -155,7 +155,25 @@ SPEC
   assert_regex "$log" 'msb copy .*legacyrobox:/home/agent/cfg/merge\.mjs'
   assert_regex "$log" 'node /home/agent/cfg/merge\.mjs'
   refute_regex "$log" '/var/lib/acq/host/kit-files'
-  assert_output --partial 'has no readable ADR-0030 host-config mount'
+  assert_output --partial 'has no readable or read-only ADR-0030 host-config mount'
+}
+
+@test "msb ro: writable host-config mount falls back to the guest copy" {
+  local k="$STUBDIR/writablero"; _ro_kit "$k"
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/writablero-secrets" STUB_HOST_CONFIG_WRITABLE=1
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_apply_kit_dir writablerobox "'"$k"'" 2>&1
+  '
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb copy .*writablerobox:/home/agent/cfg/merge\.mjs'
+  assert_regex "$log" 'node /home/agent/cfg/merge\.mjs'
+  refute_regex "$log" '/var/lib/acq/host/kit-files'
+  assert_output --partial 'has no readable or read-only ADR-0030 host-config mount'
 }
 
 @test "msb ro: the create-time host-config mount is read-only" {

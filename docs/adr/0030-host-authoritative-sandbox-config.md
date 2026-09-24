@@ -56,9 +56,9 @@ acq currently violates the safe form of this in two ways:
    those **guest-resident** files. A sudo-capable agent can overwrite a startup
    script or normalizer *between* provision and the next restart; the heal then
    executes the tampered code. This is the general form of the
-   "provider-facts file is root-owned, therefore safe" error flagged in the
-   `agentic-coding-patterns` PR #423 review — root-ownership is not the barrier
-   it appears to be.
+   "provider-facts file is root-owned, therefore safe" error flagged during
+   review of the `agentic-coding-patterns` neutral model-provider discovery work
+   — root-ownership is not the barrier it appears to be.
 
 A concrete instance motivating this ADR: the neutral model-provider discovery
 design (patterns ADR 0003) originally had each provider kit **write** a facts
@@ -163,12 +163,22 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   kit code on the host.
 - acq mounts that directory into the guest **read-only** at a well-known path:
   `/var/lib/acq/host/` (`:ro`). On msb via `--volume <hostdir>:/var/lib/acq/host:ro`;
-  on sbx via the `:ro` positional the CLI already honors (confirmed: sbx enforces
-  read-only on extra mounts; msb builds the `:ro` `--volume` flag itself). Host
-  and guest path forms follow ADR-0029.
-- The mount root is traversable but not listable (`0711`) so the guest `agent`
-  user can open/execute read-only kit payloads below `kit-files/`, while flat
-  acq-internal keys stay host-private (`0600`).
+  on sbx via the `:ro` positional the CLI already honors. This relies on backend
+  mount/export semantics, not Unix ownership inside the guest: sbx already
+  enforces read-only extra mounts, and msb 0.7.2 was live-verified to export the
+  virtiofs mount read-only even when guest root can make the guest-visible mount
+  flag appear `rw`. acq also probes that guest root cannot create a file in the
+  mount before it rewrites `readonly: true` startup code to that path; if the
+  probe fails, acq falls back to the legacy guest-copy path and warns. If a future
+  msb changes `--volume ...:ro` parsing or enforcement, acq must raise or gate
+  its minimum msb version before relying on ADR-0030. Host and guest path forms
+  follow ADR-0029.
+- The mount root and `kit-files/` subtree are traversable but not listable (`0711`)
+  so the guest `agent` user can open/execute known read-only kit payload paths,
+  while flat acq-internal keys stay host-private (`0600`). This is also a
+  host-side visibility relaxation: any local host user who can guess a staged
+  `kit-files/<slug>.<crc>` path can read the `0555` payload, so only non-sensitive
+  trusted code from public/pinned kits belongs there.
 - In-guest consumers (kit orchestrators, the agent) **read** from
   `/var/lib/acq/host/…` but cannot write it. Guest-owned read-write state stays
   on separate rw paths.
@@ -225,7 +235,11 @@ behavior:
    from there; stop reading the guest marker.
 5. **Presence gates** (`install-*`, `agent-installed-*`, `agent-user-ready`,
    `oci-ready`): move to the host config dir so a guest cannot forge them to
-   suppress provisioning. (Lower severity; last.)
+   suppress provisioning. Because the host config dir is keyed by sandbox name,
+   clear these gate keys, plus conditionally-written instance keys such as
+   `workspace` and `ssh-auth-sock`, at the start of a fresh provision so a
+   same-named sandbox recreated after an out-of-band `msb rm` cannot inherit stale
+   "already done" markers or session paths. (Lower severity; last.)
 
 ## Threat model and flows
 
@@ -307,6 +321,12 @@ sequenceDiagram
   script paths.
 - The current marker writes are best-effort; the migration must keep that
   fail-soft posture rather than converting a state-dir error into a hard abort.
+- Host-side state can outlive a sandbox if it is removed outside acq or cleanup
+  fails. Fresh provision must clear run-once gate keys before gated setup starts
+  so the marker means "this sandbox instance completed this step," not "some
+  same-named sandbox once completed this step," and must clear conditionally
+  written instance keys before rewriting only the values that apply to the new
+  sandbox.
 
 ### Neutral
 
