@@ -1223,6 +1223,58 @@ acq_backend_secret_set() {
   return "$exit_code"
 }
 
+acq_backend_secret_propagate() {
+  local scope="${1:-}" service="${2:-}" scope_flag="" scope_name=""
+  case "$scope" in
+    -g|--global) scope_flag="-g" ;;
+    ""|-*) echo "acq(sbx): secret propagate: missing scope" >&2; return 1 ;;
+    *) scope_name="$scope" ;;
+  esac
+  if [ -z "$service" ]; then
+    echo "acq(sbx): secret propagate: missing service name" >&2
+    return 1
+  fi
+  if [ -n "$scope_name" ]; then
+    acq_backend_exists "$scope_name" || return 0
+  elif [ -z "$(sbx ls -q 2>/dev/null)" ]; then
+    return 0
+  fi
+  local rerun_cmd
+  if [ -n "$scope_flag" ]; then
+    rerun_cmd="acq --backend sbx secret set -g ${service}"
+  else
+    rerun_cmd="acq --backend sbx secret set ${scope_name} ${service}"
+  fi
+  if [ "$service" != "usai" ]; then
+    echo "acq(sbx): stored '$service' in the acq secret store, but existing sbx" >&2
+    echo "          sandbox(es) still need this secret updated." >&2
+    echo "          sbx cannot safely overwrite this secret non-interactively; run:" >&2
+    echo "          ${rerun_cmd}" >&2
+    return 1
+  fi
+
+  local placeholder cmd_args=("secret" "set-custom")
+  placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" USAI_API_KEY)
+  if [ -z "$placeholder" ]; then
+    echo "acq(sbx): stored 'usai' in the acq secret store, but no existing sbx" >&2
+    echo "          USAi placeholder was found for this scope. Run:" >&2
+    echo "          ${rerun_cmd}" >&2
+    return 1
+  fi
+  if [ -z "$scope_flag" ]; then cmd_args+=(--sandbox "$scope_name"); fi
+  cmd_args+=(--host api.gsa.usai.gov --env USAI_API_KEY --placeholder "$placeholder")
+  if [ ! -t 0 ] && [ -z "${ACQ_SECRET_TEST_VALUE:-}" ]; then
+    echo "acq(sbx): stored 'usai' in the acq secret store, but existing sbx" >&2
+    echo "          sandbox(es) still need the proxy placeholder updated." >&2
+    echo "          Run from a terminal: ${rerun_cmd}" >&2
+    return 1
+  fi
+  if [ -t 0 ] && [ -z "${ACQ_SECRET_TEST_VALUE:-}" ]; then
+    echo "acq(sbx): enter the same USAi key at sbx's prompt to update its proxy." >&2
+  fi
+  sbx "${cmd_args[@]}"
+}
+
 # ---------------------------------------------------------------------------
 # acq_backend_secret_rm [-g | SANDBOX] SERVICE  (sbx backend)
 # ---------------------------------------------------------------------------
@@ -1549,6 +1601,11 @@ acq_backend_rotate_key() {
       echo "acq(sbx): 'sbx secret set-custom' failed." >&2
       return 1
     }
+  fi
+
+  if [ -n "${ACQ_PROPAGATING_SECRET:-}" ]; then
+    echo "acq(sbx): updated the USAi proxy placeholder for existing sbx sandbox(es)." >&2
+    return 0
   fi
 
   # Validate the new key in a throwaway sandbox so we don't depend on any

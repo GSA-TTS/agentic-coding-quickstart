@@ -469,6 +469,54 @@ _acq_backend_passthrough() {
   command "${ACQ_RESOLVED_BACKEND}" "$@"
 }
 
+_acq_parse_secret_scope_for_propagation() {
+  ACQ_PROPAGATE_SCOPE=""
+  ACQ_PROPAGATE_SERVICE=""
+  case "${1:-}" in
+    -g|--global)
+      ACQ_PROPAGATE_SERVICE="${2:-}"
+      ;;
+    "")
+      return 1
+      ;;
+    -*)
+      return 1
+      ;;
+    *)
+      if [ -n "${2:-}" ]; then
+        case "${2:-}" in
+          -*) ACQ_PROPAGATE_SERVICE="${1:-}" ;;
+          *) ACQ_PROPAGATE_SCOPE="${1:-}"; ACQ_PROPAGATE_SERVICE="${2:-}" ;;
+        esac
+      else
+        return 1
+      fi
+      ;;
+  esac
+  [ -n "$ACQ_PROPAGATE_SERVICE" ]
+}
+
+_acq_propagate_secret_to_present_backends() {
+  local service="$1" scope_name="${2:-}" current="${ACQ_RESOLVED_BACKEND:-}" be rc=0
+  [ -n "$service" ] || return 0
+  for be in msb sbx; do
+    [ "$be" != "$current" ] || continue
+    _backend_installed "$be" || continue
+    if [ -n "$scope_name" ]; then
+      echo "acq: propagating '$service' to ${be} sandbox '${scope_name}' if present." >&2
+      if ! ACQ_PROPAGATING_SECRET=1 ACQ_SECRET_TEST_VALUE="${ACQ_SECRET_TEST_VALUE:-}" "$ACQ_RESOLVED_PATH" --backend "$be" secret _propagate "$scope_name" "$service"; then
+        rc=1
+      fi
+    else
+      echo "acq: propagating '$service' to existing ${be} sandbox(es), if any." >&2
+      if ! ACQ_PROPAGATING_SECRET=1 ACQ_SECRET_TEST_VALUE="${ACQ_SECRET_TEST_VALUE:-}" "$ACQ_RESOLVED_PATH" --backend "$be" secret _propagate -g "$service"; then
+        rc=1
+      fi
+    fi
+  done
+  return "$rc"
+}
+
 # ---------------------------------------------------------------------------
 # Allow tests to source this script without running the dispatch.
 # ---------------------------------------------------------------------------
@@ -889,6 +937,7 @@ case "$subcommand" in
       exit 1
     fi
     acq_backend_rotate_key "$@"
+    _acq_propagate_secret_to_present_backends usai ""
     ;;
 
   create)
@@ -1257,6 +1306,21 @@ case "$subcommand" in
       set)
         shift
         acq_backend_secret_set "$@"
+        if _acq_parse_secret_scope_for_propagation "$@"; then
+          _acq_propagate_secret_to_present_backends "$ACQ_PROPAGATE_SERVICE" "$ACQ_PROPAGATE_SCOPE"
+        fi
+        ;;
+      _propagate)
+        shift
+        if [ -z "${ACQ_PROPAGATING_SECRET:-}" ]; then
+          echo "acq: secret _propagate is internal; use 'acq secret set' instead." >&2
+          exit 1
+        fi
+        if ! command -v acq_backend_secret_propagate >/dev/null 2>&1; then
+          echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend cannot propagate secrets" >&2
+          exit 1
+        fi
+        acq_backend_secret_propagate "$@"
         ;;
       rm)
         shift

@@ -82,14 +82,17 @@ name-swapped:
 
 **Chosen: Option 1.**
 
-- Extend the ADR-0010 adapter contract with one function:
+- Extend the ADR-0010 adapter contract with two functions:
 
   | Function | Purpose |
   |----------|---------|
   | `acq_backend_rotate_key` | Rotate the USAi API key using the backend's native secret mechanism; validate the new key; return non-zero on failure. |
+  | `acq_backend_secret_propagate` | Re-apply an already-stored acq secret to affected sandboxes for that backend, no-oping when none are present. |
 
-- `acq usai-rotate-api-key` resolves the backend (already does) and calls
-  `acq_backend_rotate_key` instead of `exec`ing the sbx-only script.
+- `acq usai-rotate-api-key` resolves the backend (already does), calls
+  `acq_backend_rotate_key` instead of `exec`ing the sbx-only script, then asks
+  other installed backends to propagate the stored USAi secret to any affected
+  sandboxes they own.
 - `ensure_valid_key` (`common.sh`) calls `acq_backend_rotate_key` instead of the
   script, gated on the function being defined (fail closed with a clear message
   if a backend does not implement it).
@@ -100,6 +103,9 @@ name-swapped:
   new key into the acq store and re-feeding running sandboxes with
   `msb modify --secret` (the `acq secret set -g usai` path), then validating in a
   fresh sandbox via the shared `check_fresh_sandbox_key` helper.
+- `acq secret set [-g | SANDBOX] SERVICE` also invokes the same propagation hook
+  after storing a global or sandbox-scoped secret, so a secret changed through one
+  backend is re-applied by every installed backend that has affected sandboxes.
 - `scripts/rotate-apikey` is reduced to a thin back-compat wrapper that execs
   `acq usai-rotate-api-key` so existing muscle-memory / docs keep working, but it
   no longer contains any `sbx` calls.
@@ -114,21 +120,33 @@ operation). It MUST:
 - validate the new key against the USAi models API from inside a sandbox and
   return non-zero if validation fails or cannot run.
 
+`acq_backend_secret_propagate [-g | SANDBOX] SERVICE` MUST:
+- re-apply the backend's runtime injection only to affected sandboxes (all
+  sandboxes for global scope, or the named sandbox for sandbox scope);
+- no-op successfully when the backend has no affected sandbox;
+- avoid placing the secret value on argv. If a backend can safely replay the
+  stored secret (for example, msb bindings), it should do so without another
+  prompt. If a backend cannot safely re-apply a secret non-interactively, it MUST
+  fail closed with actionable, scope-preserving guidance rather than leaking the
+  value, accepting a divergent value, or silently claiming success.
+
 ## Consequences
 
 ### Positive Consequences
 
 - msb (and any future backend) users can rotate the USAi key without `sbx`
   installed — the reported block is removed.
-- The neutral core (`acq`, `common.sh`) again holds zero backend CLI knowledge;
-  the ADR-0010 seam is complete.
+- Mixed msb/sbx fleets no longer require users to remember a second
+  `--backend sbx` run after rotating or globally setting USAi from the msb path.
+- The neutral core (`acq`, `common.sh`) still routes through adapter hooks rather
+  than invoking backend CLIs directly for propagation.
 - Each backend keeps its correct rotation semantics (sbx placeholder, msb store
   re-feed).
 
 ### Negative Consequences
 
-- The adapter contract grows by one function; existing/future adapters must
-  implement it (enforced by fail-closed dispatch + a `scripts/test-acq` check).
+- The adapter contract grows by two functions; existing/future adapters must
+  implement them (enforced by fail-closed dispatch + test coverage).
 
 ### Compliance Consequences
 
@@ -145,7 +163,8 @@ operation). It MUST:
 - `bash -n acq acq.backends/*.sh scripts/rotate-apikey scripts/test-acq` clean.
 - `./scripts/test-acq` passes, including new checks that
   `acq usai-rotate-api-key` dispatches to `acq_backend_rotate_key` on both
-  backends and that the rotate path issues no `sbx` command on the msb backend.
+  backends and that the msb rotation path also propagates to existing sbx
+  sandboxes through the sbx placeholder-preserving path.
 - **Deferred, requires a sandbox-capable host:** the live rotate→validate loop
   (creates a throwaway validation sandbox) cannot run inside a sandbox — mirrors
   the ADR-0010/0011 deferral. Tracked for `scripts/verify-*` coverage.
