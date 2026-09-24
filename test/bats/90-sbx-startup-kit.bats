@@ -271,3 +271,79 @@ STUB
   refute_regex "$log" 'sbx kit add skipbox'
   refute_output --partial 'cannot extend a live sandbox'
 }
+
+@test "provision(sbx): startup barrier timeout removes the unsafe sandbox" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  create) : >"$STUBDIR/.created"; exit 0 ;;
+  exec) exit 1 ;;
+  rm) : >"$STUBDIR/.removed"; exit 0 ;;
+  settings) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  : >"$CALLS"
+
+  export ACQ_SBX_STARTUP_BARRIER_TIMEOUT=0
+  run acq_backend_provision timeoutbox shell /tmp
+  assert_failure
+  assert_output --partial "startup commands did not finish"
+  assert_output --partial "removing 'timeoutbox'"
+
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx create --name timeoutbox'
+  assert_regex "$log" 'sbx rm --force timeoutbox'
+  assert [ -f "$STUBDIR/.removed" ]
+}
+
+@test "run(sbx): waits for the startup barrier before opencode postinstall probe" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
+  create) : >"$STUBDIR/.created"; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case " $* " in
+      *" opencode --version "*) printf 'opencode 1.18.12\n'; exit 0 ;;
+    esac
+    case "$snippet" in
+      *"startup-complete"*) printf 'ready\n' ;;
+      *'%{http_code}'*) printf '200|0' ;;
+      *) exit 0 ;;
+    esac ;;
+  run) exit 0 ;;
+  settings) exit 0 ;;
+  secret)
+    [ "${2:-}" = "ls" ] && { [ -n "${SBX_LS_FIXTURE:-}" ] && [ -f "$SBX_LS_FIXTURE" ] && cat "$SBX_LS_FIXTURE"; exit 0; }
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  local proj="$STUBDIR/startup-race-proj"; mkdir -p "$proj"
+  printf 'sk-test\n' | env ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+  seed_sbx_usai_proxy_fixture
+
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
+  assert_success
+
+  local log create_line barrier_line opencode_line attach_line
+  log=$(cat "$CALLS")
+  create_line=$(printf '%s\n' "$log" | grep -n '^sbx create' | cut -d: -f1)
+  barrier_line=$(printf '%s\n' "$log" | grep -n 'startup-complete' | cut -d: -f1)
+  opencode_line=$(printf '%s\n' "$log" | grep -n 'opencode --version' | cut -d: -f1)
+  attach_line=$(printf '%s\n' "$log" | grep -n '^sbx run --name' | cut -d: -f1)
+
+  assert_regex "$log" 'startup-barrier'
+  assert [ "$create_line" -lt "$barrier_line" ]
+  assert [ "$barrier_line" -lt "$opencode_line" ]
+  assert [ "$opencode_line" -lt "$attach_line" ]
+}

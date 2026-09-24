@@ -162,6 +162,7 @@ Focused live checks for specific fixes (also require a sandbox-capable host):
 
 ```bash
 ./scripts/verify-issue-320          # sbx 0.38 re-attach heal loop (#320)
+./scripts/verify-sbx-startup-barrier # sbx startup barrier before attach
 ./scripts/verify-ports-live         # msb post-hoc port publish (ADR-0015)
 ./scripts/verify-net-default-egress # msb create-time published port (ADR-0019)
 ./scripts/verify-image-override     # backend-neutral --image/ACQ_IMAGE (ADR-0022)
