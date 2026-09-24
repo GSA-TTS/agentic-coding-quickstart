@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v3.1.0...v3.2.0) (2026-09-24)
+
+
+### Features
+
+* **acq:** export ACQ_WORKSPACE and ACQ_CLONE into the guest on both backends ([#457](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/457)) ([e0b9a3b](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/e0b9a3b60d878080094264b407b03fb830c48c4e))
+* **secrets:** add Windows-native DPAPI secret backend ([#464](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/464)) ([907f404](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/907f4043d14d65e1b70fb62eef6b1d4d8dac4606))
+* **windows:** add acq preview install path ([#463](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/463)) ([d6d76f4](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/d6d76f4407b83bcba38c764f364b6c1b64f174aa))
+
+
+### Bug Fixes
+
+* **ci:** bump js-yaml to 4.3.2 to clear a high-severity CPU-DoS advisory ([#454](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/454)) ([3217b49](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/3217b498e8cf54a6eab08afceeffeec3e646d19b))
+* **ci:** bump smol-toml to 1.7.1 to clear an infinite-loop DoS advisory ([#459](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/459)) ([c2291bf](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/c2291bf42da28145b0d67a2db3e9675b9e644e75))
+* **ci:** unblock unrelated PRs from the bash32 required-check deadlock ([#513](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/513)) ([187aa57](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/187aa57bd7294a3d04527805f3ee5a95017c0ed8))
+* **install:** keep curl | sh stdin intact and tap msb formula first ([#462](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/462)) ([c808d74](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/c808d740d5a3553b4e51d7d41069242d1ed914b8))
+* **msb:** allow Playwright browser downloads ([#477](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/477)) ([0c399c5](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/0c399c565b7217f8242de62ff1304d436c091d53))
+* **msb:** carry every origin URL, keep the scratch private, fail closed on a copy miss ([#488](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/488)) ([babcd49](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/babcd49c14dd3080d0d2c04c3baa6c411262d1cc))
+* **msb:** carry the source checkout's git identity into the --clone scratch ([#443](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/443)) ([320d784](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/320d784a78b63864e6a647c797b06849e7d3b87d))
+* **msb:** follow the host resolvers and disable DNS rebind protection in the guest ([#444](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/444)) ([d2f4bdc](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/d2f4bdc7794d8b99319b37bd0a859e8aecfe6f4b))
+* **msb:** point the --clone scratch's origin at the source checkout's remote ([#455](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/455)) ([7f48b94](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/7f48b949fd12ca8da65cc5a26eab02723e398103))
+* **msb:** refresh ssh authorization for port publish ([#446](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/446)) ([72a6bd5](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/72a6bd5ca57877498b123bca24719ad99a8325d8))
+* **msb:** session parity for exec/attach/shell (cwd, terminal identity, login shell) ([#427](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/427)) ([6261eda](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/6261eda7f8b5b0f0a4402bb27ea584467bb4abcb))
+* **msb:** skip the recursive home chown when the image baked the agent user ([#432](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/432)) ([d8f66a4](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/d8f66a43d10a01ce8318194bb0c82518a69e1346))
+* **msb:** translate kit wildcard network rules ([#451](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/451)) ([e22bbc3](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/e22bbc37520dc4292a3290ab988e3ea2a34500b7))
+* **msb:** warn on broadened kit wildcard rules ([#460](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/460)) ([6ded3ce](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/6ded3ce250f57a86c1bb46e898e2901a2af76bbb))
+* **msb:** warn when ssh-agent route is missing ([#448](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/448)) ([3a767a4](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/3a767a4bf7a3957cd0179d9dcb3c3d8943119e0b))
+* **sbx:** emit valid setup.install shape for the git-identity mixin ([#492](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/492)) ([8e6160c](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/8e6160c63acc35bd48d0a3844e133ea3ad52a464))
+* **sbx:** raise the version floor to 0.39.0, where sbx create --env first exists ([#491](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/491)) ([30f9ecf](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/30f9ecfde587f3394d853b0c4616c9562baef5b3))
+* **secret:** reject multiline test secret values ([#447](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/447)) ([f2da950](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/f2da950ef3da1e81f7a1aed548578b972550e06a))
+
 ## [3.1.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v3.0.0...v3.1.0) (2026-09-01)
 
 
