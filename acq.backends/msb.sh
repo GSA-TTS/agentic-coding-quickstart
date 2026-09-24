@@ -836,15 +836,14 @@ acq_backend_prepare() {
 # ---------------------------------------------------------------------------
 # acq_backend_exists — 0 if a named sandbox exists, else 1
 # ---------------------------------------------------------------------------
-# `msb list -q` prints one sandbox name per line (verified via --tree: "-q
-# Show only sandbox names"). Match the whole line exactly.
-# NOTE: not live-verified against a running daemon; the -q contract is from the
-# CLI help. If the column layout differs on a real host, adjust the parse.
-
+# Prefer `msb list -q` when it reports names directly, but fall back to
+# `msb inspect NAME`: some restore paths can produce sandboxes visible in the
+# table output before they appear in the quiet-name listing.
 acq_backend_exists() {
   local listed
   listed=$(_acq_msb_cli list -q 2>/dev/null) || return 1
-  grep -Fxq -- "$1" <<<"$listed"
+  grep -Fxq -- "$1" <<<"$listed" && return 0
+  _acq_msb_cli inspect "$1" >/dev/null 2>&1
 }
 
 # Return success only when msb successfully lists sandboxes and NAME is absent.

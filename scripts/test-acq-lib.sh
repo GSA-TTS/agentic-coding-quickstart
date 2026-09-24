@@ -262,7 +262,8 @@ case "$_msb_sub" in
   inspect)
     # `msb inspect <name> --format json` — emit a create-time published-ports
     # JSON fixture if the test planted one, else nothing (models an absent field
-    # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
+    # / no ports so _acq_msb_ports_from_inspect must degrade gracefully). When no
+    # fixture exists, require the sandbox to exist like real `msb inspect`.
     # STUB_MSB_INSPECT_FAIL_TIMES=N fails the first N inspects (with a stderr
     # line) and then succeeds, modelling a transient inspect failure.
     _inspect_fails=$(cat "$STUBDIR/.msb_inspect_fails" 2>/dev/null || echo 0)
@@ -271,7 +272,14 @@ case "$_msb_sub" in
       echo "error: stub inspect failure" >&2
       exit 1
     fi
-    [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
+    if [ -f "$STUBDIR/.msb_inspect_json" ]; then
+      cat "$STUBDIR/.msb_inspect_json"
+      exit 0
+    fi
+    if [ -f "$STUBDIR/.msb_sandbox_list" ] && grep -Fxq -- "${2:-}" "$STUBDIR/.msb_sandbox_list"; then
+      exit 0
+    fi
+    exit 1 ;;
   list|ls)
     [ "${STUB_MSB_LIST_FAIL:-0}" = "1" ] && exit 1
     # `msb list --running -q` (running-state probe, ADR-0017 stopped detection):
