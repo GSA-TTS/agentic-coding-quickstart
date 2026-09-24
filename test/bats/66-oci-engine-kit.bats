@@ -28,6 +28,7 @@ load 'helper'
   refute_regex "$joined" 'acq-kits/oci-engine'
   # Default identity is unchanged: four support kits, zscaler first.
   assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  assert_equal "$ACQ_BUILTIN_SUPPORT_KIT_COUNT" "4"
   assert_equal "${#ACQ_KIT_NAMES[@]}" "4"
   assert_regex "${KITS[0]}" 'acq-kits/zscaler-ca-certificate'
 }
@@ -71,6 +72,7 @@ load 'helper'
   # And the kit list itself is unchanged (support-only, zscaler first).
   _build_kit_list
   assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  assert_equal "$ACQ_BUILTIN_SUPPORT_KIT_COUNT" "4"
   assert_regex "${KITS[0]}" 'acq-kits/zscaler-ca-certificate'
   refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/oci-engine'
 }
@@ -106,8 +108,9 @@ load 'helper'
   acq_oci_engine_kit_ready() { return 0; }
   _build_kit_list
 
-  # Appended after the four support kits, before extras/CLI kits.
+  # Appended after the four default support kits, before any agent/extras/CLI kits.
   assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
+  assert_equal "$ACQ_BUILTIN_SUPPORT_KIT_COUNT" "5"
   assert_regex "${KITS[0]}" 'acq-kits/zscaler-ca-certificate'
   assert_regex "${KITS[4]}" 'acq-kits/oci-engine'
 }
@@ -124,8 +127,35 @@ load 'helper'
   _build_kit_list
 
   assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
+  assert_equal "$ACQ_BUILTIN_SUPPORT_KIT_COUNT" "5"
   assert_regex "${KITS[4]}" 'acq-kits/oci-engine'
   assert_regex "$(printf '%s\n' "${KITS[@]}")" 'some-extra-kit'
+}
+
+@test "oci-kit: ready support kit stays outside the agent-kit boundary" {
+  load_acq
+  local agent_kit="$STUBDIR/opencode-kit"
+  mkdir -p "$agent_kit"
+  cat >"$agent_kit/spec.yaml" <<'SPEC'
+hi
+SPEC
+  # shellcheck disable=SC2034  # read by sourced _build_kit_list
+  ACQ_EXTRA_KITS=""
+  # shellcheck disable=SC2034  # read by sourced _build_kit_list
+  ACQ_CLI_KITS=()
+  # shellcheck disable=SC2034  # read by sourced _acq_selected_builtin_kit_refs
+  ACQ_ENABLE_OCI_KIT=1
+  acq_oci_engine_kit_ready() { return 0; }
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  acq_agent_builtin_kit_ready() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$agent_kit"; }
+
+  _build_kit_list opencode
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "6"
+  assert_equal "$ACQ_BUILTIN_SUPPORT_KIT_COUNT" "5"
+  assert_regex "${KITS[4]}" 'acq-kits/oci-engine'
+  assert_equal "${KITS[5]}" "$agent_kit"
 }
 
 @test "oci-kit: the emitted ref is acq-kits/oci-engine under the GSA-TTS allowlist" {
