@@ -29,9 +29,40 @@
 # just the bytes, and fails closed if the key can't be imported by fingerprint.
 #
 # Why a separate, non-default workflow (not part of pre-commit):
-#   3.2-specific regressions are relatively rare and the build adds time, so this
-#   is NOT run on every default pre-commit pass. It runs as a REQUIRED PR check so
-#   the feedback lands before merge without slowing the common path.
+#   3.2-specific regressions are relatively rare and the build adds time, so the
+#   expensive job is NOT run on every PR — only when it's relevant (see the
+#   `changes` job below). It runs as a REQUIRED PR check so the feedback lands
+#   before merge without slowing the common path.
+#
+# Why this workflow has NO top-level `paths:` filter (fixed 2026-09-24):
+#   A workflow-level `paths:` filter suppresses the check-run ENTIRELY for a
+#   non-matching PR — GitHub creates no status at all for that context, not a
+#   "skipped, passing" one. Branch protection's required-status-checks list has
+#   no path awareness of its own, so a required context that's structurally
+#   never created sits "Expected"/pending forever and blocks merge — even when
+#   every check that DID run is green. This hit a real dependabot PR
+#   (agentic-coding-quickstart#449, an actions-version bump touching only
+#   .github/workflows/release.yml) and needed an admin-bypass merge to unblock.
+#   This is GitHub's own documented failure mode for "required check backed by a
+#   path-filtered workflow" (see "Handling skipped but required checks" in
+#   GitHub's required-status-checks troubleshooting docs) and the fix below is
+#   its documented mitigation: the workflow now always triggers; a cheap
+#   `changes` job computes relevance via `git diff` (same technique
+#   markdown-quality.yml already uses, so no new tooling); the expensive
+#   interpreter-build job runs only when relevant; and an always-on `gate` job
+#   turns that conditional result into an unconditional status so the SAME
+#   required-check name ("acq offline suite under bash 3.2") keeps getting
+#   posted on every PR — skipped-and-green when irrelevant, real-result when
+#   relevant. Keeping the required-check name unchanged (rather than renaming it
+#   to something like "bash 3.2 compat gate") means this fix needs zero
+#   out-of-band branch-protection/ruleset changes: the same context that was
+#   already required just starts actually posting on every PR instead of only
+#   some.
+#   The gate is deliberately fail-closed on its OWN dependency chain, not just
+#   the expensive job's result: it treats a FAILURE of the cheap `changes` job
+#   itself (e.g. the diff computation errors) as a gate failure, not a silent
+#   skip-to-green — an error in path detection must not be indistinguishable
+#   from "nothing relevant changed".
 
 name: bash 3.2 compat
 
@@ -39,13 +70,6 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - 'acq'
-      - 'acq.backends/**'
-      - 'scripts/test-acq-lib.sh'
-      - 'scripts/test-acq-bats'
-      - 'test/bats/**'
-      - '.github/workflows/bash32-compat.yml'
 
 concurrency:
   group: bash32-compat-${{ github.head_ref || github.ref }}
@@ -68,8 +92,67 @@ env:
   BASH_SIGNING_KEY_FPR: "7C0135FB088AAF6C66C650B9BB5869F064EA74AB"
 
 jobs:
+  # Cheap relevance check: does this PR's diff touch anything the bash 3.2
+  # interpreter-build + acq-offline-suite job actually needs to re-verify?
+  # Mirrors the path list the old workflow-level `paths:` filter encoded.
+  # Uses a plain `git diff --name-only`, matching the existing in-repo
+  # precedent in markdown-quality.yml's link-check job, rather than adding a
+  # marketplace paths-filter action — consistent with this repo's minimal-
+  # third-party-action / exact-SHA-pin culture.
+  changes:
+    name: Determine bash 3.2 relevance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compute relevance from the PR diff
+        id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # Fail CLOSED on any error in this step: if the diff can't be
+          # computed for any reason, treat the PR as relevant rather than
+          # silently skipping the real check. An error here must surface as a
+          # job FAILURE (caught by the gate below), never as a quiet
+          # relevant=false. Shallow-fetch just the base commit (mirrors
+          # markdown-quality.yml's link-check job) rather than the whole
+          # history — cheaper, and `git diff <sha> -- <paths>` only needs that
+          # one commit to be present locally, not a merge-base walk.
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          changed="$(git diff --name-only "$BASE_SHA" -- \
+            'acq' \
+            'acq.backends' \
+            'scripts/test-acq-lib.sh' \
+            'scripts/test-acq-bats' \
+            'test/bats' \
+            '.github/workflows/bash32-compat.yml')"
+          if [ -n "$changed" ]; then
+            echo "relevant=true" >>"$GITHUB_OUTPUT"
+            echo "Relevant paths changed:"
+            printf '  %s\n' "$changed"
+          else
+            echo "relevant=false" >>"$GITHUB_OUTPUT"
+            echo "No bash-3.2-relevant paths changed; the interpreter build + offline suite will be skipped."
+          fi
+
+  # The real check: build bash 3.2.57 from source and run the acq offline
+  # suite under it. Only runs when `changes` found a relevant diff — the
+  # multi-minute interpreter build (cached across runs, but not across a
+  # cold cache) is the cost this conditional exists to avoid paying on every
+  # docs/CI-only PR. Renamed from the required-check name (which now lives on
+  # the `gate` job below) to avoid two jobs in one run racing to post the same
+  # context — GitHub's branch-protection docs warn that duplicate job names
+  # across a run produce ambiguous status-check results.
   test-acq-bash32:
-    name: acq offline suite under bash 3.2
+    name: acq offline suite under bash 3.2 (build)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -161,3 +244,51 @@ jobs:
         run: |
           set -euo pipefail
           PATH="/opt/bash32/bin:$PATH" /opt/bash32/bin/bash scripts/test-acq-bats
+
+  # Always-posting gate: this is what branch protection actually requires,
+  # under the ORIGINAL required-check name ("acq offline suite under bash
+  # 3.2") — unchanged from before this fix, so no branch-protection/ruleset
+  # update is needed. `if: always()` (per GitHub's own required-status-checks
+  # troubleshooting doc, "Use always() with needs for required checks that
+  # depend on other jobs") makes this job run regardless of whether its
+  # dependencies succeeded, failed, or were skipped, so a check-run for this
+  # exact context is created on every single PR — closing the original gap
+  # where a path-filtered trigger meant no check-run was created at all.
+  #
+  # Fail-closed logic, deliberately checking BOTH upstream jobs, not just the
+  # expensive one: `needs.changes.result` must be `success` (a `changes`
+  # failure — e.g. the diff computation errored — must not be laundered into
+  # a passing gate just because the downstream job was consequently skipped),
+  # AND `needs.test-acq-bash32.result` must be `success` or `skipped` (skipped
+  # is the expected, correct outcome for an irrelevant diff; anything else —
+  # failure or cancelled — fails the gate).
+  gate:
+    name: acq offline suite under bash 3.2
+    needs: [changes, test-acq-bash32]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Evaluate upstream results
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.test-acq-bash32.result }}
+        run: |
+          set -euo pipefail
+          echo "changes job result:        $CHANGES_RESULT"
+          echo "test-acq-bash32 job result: $TEST_RESULT"
+
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::relevance-detection job did not succeed ($CHANGES_RESULT) — failing closed, not treating this as 'irrelevant'."
+            exit 1
+          fi
+
+          case "$TEST_RESULT" in
+            success|skipped)
+              echo "Gate passes: offline suite $TEST_RESULT."
+              ;;
+            *)
+              echo "::error::acq offline suite under bash 3.2 did not pass (result: $TEST_RESULT)."
+              exit 1
+              ;;
+          esac

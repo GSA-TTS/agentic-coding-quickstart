@@ -2247,6 +2247,74 @@ an untrusted agent could write to.
 
 ---
 
+## 41. A Required Check Backed by a `paths:`-Filtered Workflow Deadlocks Unrelated PRs
+
+### Symptoms
+
+- A PR's merge box shows `mergeStateStatus: BLOCKED` even though every check
+  that actually ran is green.
+- The blocking context (e.g. `acq offline suite under bash 3.2`) sits as
+  `Expected`/pending forever — never `success`, never `failure`, just absent.
+- Reproduces on PRs that don't touch the paths the workflow's trigger filters
+  on (e.g. a dependabot GitHub-Actions-version bump touching only
+  `.github/workflows/release.yml`).
+
+### Root Cause
+
+`.github/workflows/bash32-compat.yml` had a top-level `paths:` filter on its
+`pull_request` trigger, so the workflow — and therefore its job — simply never
+ran for a non-matching diff. That is not the same as the job running and
+reporting `skipped`: GitHub creates **no check-run at all** in that case.
+Branch protection's required-status-checks list has no path awareness of its
+own; it just waits for a named context to report. A context that is
+structurally never created satisfies nothing, so the PR sits blocked
+indefinitely — even for changes entirely unrelated to what the workflow tests.
+This is a documented GitHub failure mode ("Handling skipped but required
+checks" in GitHub's required-status-checks troubleshooting docs), not specific
+to this repo, but it hit real CI here: agentic-coding-quickstart#449 (a routine
+dependabot bump) needed an admin-bypass merge to get past it.
+
+### Fix
+
+Removed the workflow-level `paths:` filter so the workflow always triggers,
+and split the single job into three:
+
+1. `changes` — a cheap job that computes relevance via `git diff --name-only`
+   against the PR base (same technique `markdown-quality.yml`'s link-check job
+   already uses; no new marketplace action). Fails closed: any error in
+   computing the diff is a job **failure**, never a silent "not relevant."
+2. `test-acq-bash32` — the real, expensive job (builds bash 3.2.57 from
+   source, runs the offline suite) — now conditional on `needs.changes`
+   reporting relevant, unchanged otherwise.
+3. `gate` — an always-running job (`if: always()`) that is what branch
+   protection actually requires, posted under the **same** required-check name
+   the old single job used (`acq offline suite under bash 3.2`) — so this fix
+   needed **no** out-of-band branch-protection/ruleset update. It fails unless
+   `needs.changes.result == 'success'` **and**
+   `needs.test-acq-bash32.result` is `success` or `skipped` — checking both
+   upstream jobs, not just the expensive one, so a failure in the cheap
+   relevance-detection step can't be laundered into a passing gate via the
+   downstream job's consequent skip.
+
+Verified locally (not just read from docs) before merging: reproduced both
+branches of the `changes` job's `git diff` logic against real commits (one
+touching only a workflow file → empty diff → `relevant=false`; one touching
+`acq.backends/msb.sh` → non-empty diff → `relevant=true`), and exercised the
+gate's shell logic directly against all five `(changes result, test result)`
+combinations, confirming it passes only on `(success, success)` and
+`(success, skipped)` and fails on every other combination including the
+failure-laundering case `(failure, skipped)`.
+
+### Prevention
+
+Any workflow whose job backs a required status check must either have no
+`paths:`/`branches:`/similar trigger-level filter, or must follow this
+gate-job pattern. A conditional trigger and "required" are structurally
+incompatible in GitHub Actions; check new required workflows for this before
+adding them to branch protection.
+
+---
+
 When something fails, work through this list:
 
 1. [ ] Is the secret actually in the container? (`echo $VAR_NAME`)
