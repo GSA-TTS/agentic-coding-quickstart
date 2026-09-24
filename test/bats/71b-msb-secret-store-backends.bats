@@ -283,12 +283,14 @@ _provision() { # NAME PRE_SNIPPET WS_ARGS...
   log=$(cat "$CALLS")
   assert_regex "$log" "--volume ${ws_app_h}:${ws_app}"
   assert_regex "$log" "--volume ${ws_lib_h}:${ws_lib}:ro"
-  assert_regex "$log" "'${ws_app}' > /var/lib/acq/workspace"
-  refute_regex "$log" "'/home/agent/workspace' > /var/lib/acq/workspace"
+  # ADR-0030: the workspace record is written to the HOST config store now, not a
+  # guest /var/lib/acq/workspace marker. Assert the primary landed there.
+  assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/mwbox.*.config/workspace 2>/dev/null)" "${ws_app}"
+  [ "$(cat "$ACQ_PROVENANCE_DIR"/msb/mwbox.*.config/workspace 2>/dev/null)" != "/home/agent/workspace" ]
 
   # Single workspace records that mount as the start dir.
   _provision swbox 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sw-secrets"' "$STUBDIR/ws-app"
-  assert_regex "$(cat "$CALLS")" "'${ws_app}' > /var/lib/acq/workspace"
+  assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/swbox.*.config/workspace 2>/dev/null)" "${ws_app}"
 }
 
 @test "msb: a symlinked workspace is canonicalized to its real path before mounting" {

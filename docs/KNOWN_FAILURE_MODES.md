@@ -1799,11 +1799,12 @@ sandbox, and it starts working again as soon as you
 `export SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock` by hand. Here the vsock
 route and the `socat` bridge are fine — what is missing is the
 **`SSH_AUTH_SOCK` env var in the agent's process**. acq injects that var
-(`-e SSH_AUTH_SOCK=…`) only when the persisted `/var/lib/acq/ssh-auth-sock`
-marker is present, and before the fix nothing re-established the bridge or wrote
-that marker when re-attaching to an already-running sandbox (the heal's
-start-if-stopped block is a no-op on a running sandbox, and only that path — or
-provision — wrote the marker).
+(`-e SSH_AUTH_SOCK=…`) only when the persisted ssh-agent sock value is present
+(recorded host-side in acq's per-sandbox config store, ADR-0030; originally a
+guest `/var/lib/acq/ssh-auth-sock` marker), and before the fix nothing
+re-established the bridge or wrote that value when re-attaching to an
+already-running sandbox (the heal's start-if-stopped block is a no-op on a
+running sandbox, and only that path — or provision — wrote it).
 
 Fixed in `acq.backends/msb.sh`: `acq_backend_ensure_kits_applied` now calls
 `_acq_msb_ensure_ssh_agent_forward` at the top of the heal, which re-drives the

@@ -35,7 +35,7 @@
 #   kit_spec_net_allow   SPEC                -> one host[:port] per line
 #   kit_spec_published_ports SPEC            -> one "guest<TAB>proto<TAB>name<TAB>host" per line
 #   kit_spec_volumes     SPEC                -> one "path<TAB>type<TAB>size" per line
-#   kit_spec_files       SPEC                -> one "path|mode|phase|source" per line
+#   kit_spec_files       SPEC                -> one "path|mode|phase|source|readonly" per line
 #   kit_spec_commands    SPEC                -> command records (see format below)
 #   kit_spec_env         SPEC                -> one "NAME<TAB>value" per line
 #   kit_spec_has_shortcut SPEC BACKEND       -> 0 if backend_shortcuts.<backend>
@@ -486,9 +486,14 @@ _kit_vol_validate() {
 # kit_spec_files SPEC
 # ---------------------------------------------------------------------------
 # Echo one record per files[] entry, tab-separated:
-#   path <TAB> mode <TAB> phase <TAB> source
+#   path <TAB> mode <TAB> phase <TAB> source <TAB> readonly
 # phase is empty if unspecified (default: written before commands run).
 # source is empty for inline-content files (not used by the four acq kits).
+# readonly is "true" iff the entry declares `readonly: true` — a file whose
+# BYTES are trusted CODE acq must execute from a host-authoritative read-only
+# mount rather than a guest-writable copy a passwordless-sudo agent could tamper
+# (ADR-0030). Empty (treated as false) otherwise, so existing 4-field consumers
+# and unflagged files are unaffected.
 kit_spec_files() {
   local spec="$1"
   [ -f "$spec" ] || return 0
@@ -517,9 +522,10 @@ kit_spec_files() {
       if (k=="mode")   cur_mode=v
       if (k=="phase")  cur_phase=v
       if (k=="source") cur_source=v
+      if (k=="readonly") cur_readonly=v
       if (k=="description") cur_desc=v
     }
-    function flush() {
+    function flush(   ro) {
       if (cur_path != "") {
         # Reject fields that could break out of the shell contexts these values
         # are later interpolated into. A hostile or mistyped kit spec must not
@@ -536,6 +542,7 @@ kit_spec_files() {
         # kit stages no files at all — a silent, host-dependent failure, because
         # the warning goes to stderr and the create path treats kit failures as
         # best-effort. Do NOT "simplify" this back to an interval expression.
+        ro = (cur_readonly == "true") ? "true" : ""
         if (cur_mode != "" && cur_mode !~ /^[0-7][0-7][0-7][0-7]?$/) {
           print "kit-translate: skipping file with invalid mode: " cur_mode > "/dev/stderr"
         } else if (cur_path !~ /^[A-Za-z0-9._\/-]+$/) {
@@ -543,10 +550,10 @@ kit_spec_files() {
         } else if (cur_source != "" && cur_source !~ /^[A-Za-z0-9._\/-]+$/) {
           print "kit-translate: skipping file with unsafe source: " cur_source > "/dev/stderr"
         } else {
-          printf "%s\t%s\t%s\t%s\n", cur_path, cur_mode, cur_phase, cur_source
+          printf "%s\t%s\t%s\t%s\t%s\n", cur_path, cur_mode, cur_phase, cur_source, ro
         }
       }
-      cur_path=""; cur_mode=""; cur_phase=""; cur_source=""; cur_desc=""
+      cur_path=""; cur_mode=""; cur_phase=""; cur_source=""; cur_readonly=""; cur_desc=""
     }
   ' "$spec"
 }

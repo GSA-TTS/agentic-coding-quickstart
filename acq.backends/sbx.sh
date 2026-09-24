@@ -624,6 +624,11 @@ acq_backend_stop() {
 
 acq_backend_terminate() {
   sbx rm --force "$1"
+  # Remove any host-authoritative config dir for this sandbox (ADR-0030).
+  # sbx does not use the guest /var/lib/acq markers today (its parity mechanism
+  # is `sbx run --name` + ~/.acq-extra-kits), so this is a defensive no-op unless
+  # a future sbx path writes host config. Best-effort, never blocks removal.
+  acq_host_config_remove sbx "$1" || true
 }
 
 acq_backend_list() {

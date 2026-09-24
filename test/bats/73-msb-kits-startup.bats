@@ -154,9 +154,11 @@ SPEC
     _acq_msb_apply_kit_dir instmarkerbox "$imk"
   '
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "test -f '/var/lib/acq/install-"
-  assert_regex "$log" "touch '/var/lib/acq/install-"
+  # ADR-0030: the run-once install gate is a host config key now, not a guest
+  # test -f/touch. The install command still runs, and the gate key is written.
   assert_regex "$log" 'msb exec instmarkerbox -u 0'
+  local instkey; instkey=$(ls "$ACQ_PROVENANCE_DIR"/msb/instmarkerbox.*.config/install-* 2>/dev/null | head -n1)
+  [ -n "$instkey" ]
 }
 
 # Provision helper that stages startup scripts to a per-test dir and keeps them.
@@ -306,8 +308,12 @@ SPEC
   local log body
   log=$(cat "$CALLS")
   body=$(_staged_body mix-stage)
-  assert_regex "$log" "test -f '/var/lib/acq/install-"
+  # ADR-0030: install is still exec-based and run-once, but the gate lives in the
+  # host config store now (not a guest test -f). Assert the install ran and a
+  # gate key was recorded; startup is staged into the script body, not the gate.
   assert_regex "$log" 'echo INSTALL_ONLY_0017'
+  local instkey; instkey=$(ls "$ACQ_PROVENANCE_DIR"/msb/mixbox.*.config/install-* 2>/dev/null | head -n1)
+  [ -n "$instkey" ]
   assert_regex "$body" 'echo STARTUP_ONLY_0017'
   refute_regex "$body" 'INSTALL_ONLY_0017'
 }

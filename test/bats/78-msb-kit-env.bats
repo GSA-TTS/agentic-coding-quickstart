@@ -6,10 +6,10 @@
 # OPENCODE_CONFIG-style vars). On msb the entries were only threaded onto the
 # kit's own provisioning commands and never reached the agent session or
 # `acq exec`/`acq shell` — the kit env silently no-op'd at runtime. The fix
-# persists the validated entries to a root-owned guest marker
-# (/var/lib/acq/kit-env, same pattern as /var/lib/acq/agent and
-# /var/lib/acq/ssh-auth-sock) at apply time, and every session path reads the
-# marker back and threads each entry as `msb exec -e NAME=value`.
+# persists the validated entries and every session path replays each as
+# `msb exec -e NAME=value`. Per ADR-0030 the entries are persisted to the
+# HOST-authoritative config store (acq_host_config_* kit-env key), not a guest
+# /var/lib/acq/kit-env marker a passwordless-sudo agent could tamper.
 #
 # shellcheck shell=bats
 
@@ -18,7 +18,7 @@ teardown() { acq_teardown_stubs; }
 
 load 'helper'
 
-@test "msb kit env: apply persists environment[] to /var/lib/acq/kit-env; unsafe name is dropped" {
+@test "msb kit env: apply persists environment[] to the host config store; unsafe name is dropped" {
   : > "$CALLS"
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/kitenv-secrets"
@@ -39,13 +39,15 @@ SPEC
     _acq_msb_apply_kit_dir envbox "$ek"
   '
   assert_success
-  local log; log=$(cat "$CALLS")
-  assert_regex "$log" '/var/lib/acq/kit-env'
-  assert_regex "$log" 'OPENCODE_CONFIG=/home/agent/\.config/opencode/kit\.jsonc'
-  refute_regex "$log" '1BAD'
+  # The record now lands in the HOST config store, not a guest exec.
+  local kitenv; kitenv=$(cat "$ACQ_PROVENANCE_DIR"/msb/envbox.*.config/kit-env 2>/dev/null)
+  assert_regex "$kitenv" 'OPENCODE_CONFIG=/home/agent/\.config/opencode/kit\.jsonc'
+  refute_regex "$kitenv" '1BAD'
+  # And no guest /var/lib/acq/kit-env write happened.
+  refute_regex "$(cat "$CALLS")" '/var/lib/acq/kit-env'
 }
 
-@test "msb kit env: a kit with no environment[] writes no kit-env marker" {
+@test "msb kit env: a kit with no environment[] writes no kit-env record" {
   : > "$CALLS"
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/noenv-secrets"
@@ -67,19 +69,22 @@ commands:
       - -c
       - echo CMD_NOENV
 SPEC
-    _acq_msb_apply_kit_dir envbox "$nk"
+    _acq_msb_apply_kit_dir envbox2 "$nk"
   '
   assert_success
   refute_regex "$(cat "$CALLS")" '/var/lib/acq/kit-env'
+  run bash -c 'ls "$1"/msb/envbox2.*.config/kit-env 2>/dev/null' _ "$ACQ_PROVENANCE_DIR"
+  assert_output ''
 }
 
-@test "msb kit env: acq exec replays persisted entries as -e flags; none when marker empty" {
+@test "msb kit env: acq exec replays persisted entries as -e flags; none when empty" {
   : > "$CALLS"
   run bash -c '
     export STUB_MSB_VERSION=0.6.9
     export STUB_RECORDED_KIT_ENV="OPENCODE_CONFIG=/home/agent/oc.jsonc
 RUBOCOP_PARALLELISM=4"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb sbox
     acq_backend_run sbox -- printenv OPENCODE_CONFIG >/dev/null 2>&1
   '
   local log; log=$(cat "$CALLS")
@@ -89,7 +94,8 @@ RUBOCOP_PARALLELISM=4"
   run bash -c '
     export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_KIT_ENV=
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_run sbox -- git status >/dev/null 2>&1
+    seed_host_config msb sbox2
+    acq_backend_run sbox2 -- git status >/dev/null 2>&1
   '
   refute_regex "$(cat "$CALLS")" 'OPENCODE_CONFIG'
 }
@@ -100,6 +106,7 @@ RUBOCOP_PARALLELISM=4"
     export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_AGENT=opencode STUB_AGENT_PRESENT=1
     export STUB_RECORDED_KIT_ENV="OPENCODE_CONFIG=/home/agent/oc.jsonc"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb sbox
     ( _acq_msb_attach sbox </dev/null >/dev/null 2>&1 )
   '
   assert_regex "$(cat "$CALLS")" '-e OPENCODE_CONFIG=/home/agent/oc\.jsonc'
@@ -108,6 +115,7 @@ RUBOCOP_PARALLELISM=4"
     export STUB_MSB_VERSION=0.6.9
     export STUB_RECORDED_KIT_ENV="OPENCODE_CONFIG=/home/agent/oc.jsonc"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb sbox
     ( _acq_msb_shell_exec sbox </dev/null >/dev/null 2>&1 )
   '
   assert_regex "$(cat "$CALLS")" '-e OPENCODE_CONFIG=/home/agent/oc\.jsonc'
@@ -154,14 +162,11 @@ RUBOCOP_PARALLELISM=4"
   assert_regex "$(cat "$CALLS")" '-e EMAIL=global@example\.gov'
 }
 
-@test "msb markers: ABSENT /var/lib/acq markers must not kill session verbs under set -e" {
-  # acq runs under `set -euo pipefail`. On a sandbox whose /var/lib/acq markers
-  # are absent (created before a marker existed, e.g. pre-kit-env sandboxes, or
-  # no ssh-agent forwarding configured), the in-guest `cat` exits 1 inside the
-  # command substitution and an unguarded assignment terminates acq before any
-  # output — every exec/shell/attach against such a sandbox dies with rc 1 and
-  # nothing on stdout/stderr (observed live for kit-env and ssh-auth-sock).
-  # All STUB_RECORDED_* stay UNSET here so the stub exits 1 like real cat.
+@test "msb markers: an ABSENT host config must not kill session verbs under set -e" {
+  # acq runs under `set -euo pipefail`. On a sandbox with no recorded host config
+  # (created before ADR-0030, or with no ssh-agent forwarding / kit env), the
+  # host reads return empty and must not terminate the session verb. All
+  # STUB_RECORDED_* stay UNSET and nothing is seeded into the host store.
   : > "$CALLS"
   run bash -c '
     set -euo pipefail
@@ -249,6 +254,7 @@ SPEC
 GITLAB_HOST=gitlab.example.gov
 GITLAB_HOST=gitlab.override.gov"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb sbox
     acq_backend_run sbox -- git status >/dev/null 2>&1
   '
   local log; log=$(cat "$CALLS")

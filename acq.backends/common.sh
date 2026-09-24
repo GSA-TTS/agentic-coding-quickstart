@@ -1492,6 +1492,193 @@ acq_cli_kits_load() {
   return 0
 }
 
+# ============================================================================
+# Host-authoritative per-sandbox config store (ADR-0030)
+# ============================================================================
+# acq must NOT rely on guest-generated or guest-tamperable state to configure a
+# sandbox: the in-sandbox agent has passwordless sudo, so a root-owned GUEST path
+# (e.g. /var/lib/acq/agent) is NOT a trust boundary against a prompt-injected
+# agent — it can sudo-rewrite any such file, and acq would then read the tampered
+# value back and act on it (which agent to launch, cwd, SSH_AUTH_SOCK, kit env).
+#
+# The only enforceable boundary is host<->guest. This store holds acq's trusted
+# per-sandbox config on the HOST (under the same state tree as provenance and the
+# cli-kits record) and, where the guest legitimately needs to read a value, acq
+# mounts the directory into the guest READ-ONLY (see the backend :ro mount).
+# The guest can read it but cannot write it; a sudo agent cannot forge it.
+#
+# Layout (host):   <provenance-dir>/<backend>/<safe-name>.<sum>.config/<KEY>
+# Guest mount:     ACQ_HOST_CONFIG_GUEST_DIR (read-only)  [default /var/lib/acq/host]
+# One flat file per KEY (value = raw bytes, no trailing newline added), so a
+# value may contain any byte a single line could not; readers get exactly what
+# was written. Atomic temp+rename write; fail-soft (mirrors the marker writes
+# it replaces, which were best-effort `|| true`).
+#
+# The sandbox config dir is chmod 0711: the guest must be able to traverse the
+# read-only mount root to execute `kit-files/...` staged code, but should not be
+# able to list acq-internal key names. Content-bearing flat keys remain 0600 on
+# the host; readonly kit code is staged under kit-files/ with executable perms.
+# The traversable dirs intentionally make known kit-file paths host-readable too;
+# only non-sensitive trusted code may be staged there.
+#
+# KEY charset is restricted ([A-Za-z0-9._-], no slash) so a key can never escape
+# the config dir; callers pass fixed literals (agent, workspace, ssh-auth-sock,
+# kit-env, and the gate markers).
+
+# The well-known guest mount point for the read-only host config dir. Overridable
+# for tests / unusual images. Kept under /var/lib/acq so it sits beside the
+# (being-migrated) legacy guest markers without colliding with them.
+ACQ_HOST_CONFIG_GUEST_DIR="${ACQ_HOST_CONFIG_GUEST_DIR:-/var/lib/acq/host}"
+
+# Host directory holding one sandbox's config files. Same keying as the
+# provenance/cli-kits records (sanitized name + raw-name checksum) so the three
+# sit side by side and never collide across backends or sanitizer-aliased names.
+acq_host_config_dir() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  local safe_backend safe_name name_sum
+  safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
+  safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+  name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+  printf '%s/%s/%s.%s.config\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+}
+
+# Validate a config KEY: fixed-literal callers only, restricted charset, never a
+# path separator or traversal. Fail closed (return non-zero, emit nothing).
+_acq_host_config_key_ok() {
+  case "${1:-}" in
+    ""|.|..) return 1 ;;
+    *[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Write one KEY's VALUE for a sandbox's host config. Creates/traversabilizes the
+# dir 0711 and writes the file 0600 (world-unreadable on the host; the guest sees
+# only what it can traverse/read via the :ro mount).
+# Atomic temp+rename. Best-effort: warns (debug) and returns non-zero on failure
+# but never aborts the caller — preserving the fail-soft posture of the guest
+# markers this replaces.
+# Usage: acq_host_config_write BACKEND NAME KEY VALUE
+acq_host_config_write() {
+  local backend="${1:-}" name="${2:-}" key="${3:-}" value="${4:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  _acq_host_config_key_ok "$key" || { acq_debug "host-config: refusing unsafe key '$key'"; return 1; }
+  local dir file
+  dir=$(acq_host_config_dir "$backend" "$name") || return 1
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    acq_debug "host-config: could not create config dir: $dir"
+    return 1
+  fi
+  chmod 711 "$dir" 2>/dev/null || true
+  file="$dir/$key"
+  local tmp="${file}.tmp.$$"
+  ( umask 077; printf '%s' "$value" > "$tmp" ) 2>/dev/null || {
+    acq_debug "host-config: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file" 2>/dev/null || {
+    acq_debug "host-config: mv failed: $file"; rm -f "$tmp" 2>/dev/null; return 1; }
+  acq_debug "host-config: wrote $backend/$name/$key"
+  return 0
+}
+
+# Read one KEY's VALUE. Echoes the raw stored bytes (empty if absent/unreadable).
+# Never fails the caller (returns 0 even when the key is absent) so a reader under
+# `set -euo pipefail` behaves like the old failure-guarded guest `cat`.
+# Usage: acq_host_config_read BACKEND NAME KEY
+acq_host_config_read() {
+  local backend="${1:-}" name="${2:-}" key="${3:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  _acq_host_config_key_ok "$key" || return 0
+  local dir file
+  dir=$(acq_host_config_dir "$backend" "$name") || return 0
+  file="$dir/$key"
+  [ -f "$file" ] || return 0
+  cat "$file" 2>/dev/null || true
+}
+
+# True (0) if a KEY exists for a sandbox. Replaces the guest `test -f` marker
+# gates (install-*, agent-*-ready, oci-ready) that a sudo guest could forge.
+# Usage: acq_host_config_has BACKEND NAME KEY
+acq_host_config_has() {
+  local backend="${1:-}" name="${2:-}" key="${3:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  _acq_host_config_key_ok "$key" || return 1
+  local dir
+  dir=$(acq_host_config_dir "$backend" "$name") || return 1
+  [ -f "$dir/$key" ]
+}
+
+# Append VALUE (one line) to a KEY's file, creating it if needed. Used by the
+# kit-env accumulator (multiple kits each contribute lines). Same fail-soft
+# contract as acq_host_config_write.
+# Usage: acq_host_config_append BACKEND NAME KEY VALUE
+acq_host_config_append() {
+  local backend="${1:-}" name="${2:-}" key="${3:-}" value="${4:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  _acq_host_config_key_ok "$key" || { acq_debug "host-config: refusing unsafe key '$key'"; return 1; }
+  local dir file
+  dir=$(acq_host_config_dir "$backend" "$name") || return 1
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    acq_debug "host-config: could not create config dir: $dir"; return 1
+  fi
+  chmod 711 "$dir" 2>/dev/null || true
+  file="$dir/$key"
+  if [ ! -f "$file" ]; then
+    ( umask 077; : > "$file" ) 2>/dev/null || {
+      acq_debug "host-config: create failed: $file"; return 1; }
+  fi
+  printf '%s\n' "$value" >> "$file" 2>/dev/null || {
+    acq_debug "host-config: append failed: $file"; return 1; }
+  chmod 600 "$file" 2>/dev/null || true
+  return 0
+}
+
+# Remove one KEY (e.g. reset kit-env before a full re-apply). Best-effort.
+# Usage: acq_host_config_clear BACKEND NAME KEY
+acq_host_config_clear() {
+  local backend="${1:-}" name="${2:-}" key="${3:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  _acq_host_config_key_ok "$key" || return 0
+  local dir
+  dir=$(acq_host_config_dir "$backend" "$name") || return 0
+  rm -f "$dir/$key" 2>/dev/null || true
+  return 0
+}
+
+# Remove per-sandbox instance keys before provisioning a freshly-created sandbox.
+# The host config dir is keyed by sandbox name, so a sandbox removed outside acq
+# can leave stale state behind for a later same-named sandbox. Clear run-once
+# gates and conditionally-written content keys before provision rewrites the
+# current instance's authoritative values.
+# Usage: acq_host_config_clear_instance_state BACKEND NAME
+acq_host_config_clear_instance_state() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  local dir
+  dir=$(acq_host_config_dir "$backend" "$name") || return 0
+  case "$dir" in ""|/|/*/) return 0 ;; esac
+  rm -f "$dir"/install-* "$dir"/agent-installed-* \
+        "$dir"/agent-user-ready "$dir"/oci-ready \
+        "$dir"/workspace "$dir"/ssh-auth-sock 2>/dev/null || true
+  return 0
+}
+
+# Remove a sandbox's entire host config dir (called from terminate). Best-effort.
+# Usage: acq_host_config_remove BACKEND NAME
+acq_host_config_remove() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  local dir
+  dir=$(acq_host_config_dir "$backend" "$name") || return 0
+  # Guard against a pathological empty resolution before rm -rf.
+  case "$dir" in
+    ""|/|/*/) return 0 ;;
+    *.config) rm -rf "$dir" 2>/dev/null || true ;;
+  esac
+  return 0
+}
+
 # Automatic stale-sandbox advisory for `acq run` on an EXISTING sandbox. Compares
 # the sandbox's recorded bundle ref against the local pinned PATTERNS_KIT_REF and,
 # when they differ (or no record exists), OFFERS an in-place refresh. Contract:

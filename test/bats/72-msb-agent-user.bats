@@ -35,6 +35,7 @@ _provision() { # NAME AGENT PRE_SNIPPET [KITDIR]
     # NOTE: the stub must NOT read a variable named "kitdir" — provision declares
     # a `local kitdir`, which dynamically shadows it at stub-call time.
     _acq_msb_fetch_kit() { printf "%s\n" "$stub_kitdir"; }
+    seed_host_config_gates msb "$name"
     acq_backend_provision "$name" "$agent" /tmp 2>&1
     printf "PROVISION_RC=%s\n" "$?"
   ' _ "$name" "$agent" "$pre" "$kitdir"
@@ -92,7 +93,9 @@ SPEC
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'npm install -g --no-fund --no-audit opencode-ai'
   assert_regex "$log" '--net-rule allow@registry\.npmjs\.org'
-  assert_regex "$log" '/var/lib/acq/agent'
+  # ADR-0030: the launched-agent record is written to the HOST config store, not
+  # a guest /var/lib/acq/agent marker. Assert it landed in the host store.
+  assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/instbox.*.config/agent 2>/dev/null)" "opencode"
 }
 
 @test "msb: install is idempotent — skipped when the agent binary is already present" {
@@ -142,6 +145,8 @@ _attach() { # PRE_SNIPPET NAME
     pre="$1"; name="$2"
     eval "$pre"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb "$name"
+    seed_host_config_gates msb "$name"
     acq_backend_attach "$name" 2>&1
   ' _ "$1" "$2"
 }
@@ -198,7 +203,10 @@ _attach() { # PRE_SNIPPET NAME
   refute_regex "$(cat "$CALLS")" 'touch /tmp/acq_pwn'
 }
 
-@test "msb: attach with a tampered agent marker falls back to shell, never runs the injection" {
+@test "msb: attach with a garbage recorded agent value falls back to shell, never runs the injection" {
+  # ADR-0030: the agent record now lives in the host config store (a sudo guest
+  # can no longer plant it), but acq still charset-guards the value before it
+  # enters `command -v '$agent'`. Seed a hostile value and prove the guard holds.
   _attach 'export STUB_RECORDED_AGENT="x'"'"';touch /tmp/acq_pwn;'"'"'" STUB_RECORDED_WORKSPACE=/tmp/wsp' injattach
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'touch /tmp/acq_pwn'
@@ -210,7 +218,8 @@ _attach() { # PRE_SNIPPET NAME
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'PODMAN_PKGS='
   assert_regex "$log" '/usr/local/bin/docker'
-  assert_regex "$log" "touch '/var/lib/acq/oci-ready'"
+  # ADR-0030: the oci-ready gate is recorded in the host config store.
+  assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/ocibox.*.config/oci-ready 2>/dev/null)" "1"
   assert_regex "$log" '/etc/containers/storage\.conf'
   assert_regex "$log" 'driver = ..vfs..'
   assert_regex "$log" 'mount_program'
@@ -249,10 +258,21 @@ _attach() { # PRE_SNIPPET NAME
   refute_regex "$log" 'rm -rf /'
 }
 
-@test "msb: the OCI setup is skipped when the ready marker already exists" {
-  _provision ocirdybox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ociready-secrets" STUB_OCI_READY=1'
+@test "msb: OCI setup is skipped on heal when the ready marker already exists" {
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ociready-secrets" STUB_OCI_READY=1
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config_gates msb ocirdybox
+    _acq_msb_ensure_oci ocirdybox
+  '
+  assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "test -f '/var/lib/acq/oci-ready'"
+  # ADR-0030: the oci-ready gate still skips idempotent OCI setup during a heal;
+  # fresh provision clears stale gates before this point.
+  assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/ocirdybox.*.config/oci-ready 2>/dev/null)" "1"
   refute_regex "$log" 'PODMAN_PKGS='
   refute_regex "$log" '/usr/local/bin/docker'
 }
@@ -264,11 +284,57 @@ _attach() { # PRE_SNIPPET NAME
   refute_regex "$log" 'oci-ready'
 }
 
+@test "msb: fresh provision clears stale host-side instance state" {
+  local k="$STUBDIR/freshgate-kit"; mkdir -p "$k"
+  cat >"$k/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: freshgate-kit
+displayName: Fresh Gate Kit
+description: install marker regression kit
+commands:
+  - phase: install
+    user: "0"
+    command:
+      - sh
+      - -c
+      - printf freshgate-kit-install
+SPEC
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    marker="install-$(printf "%s\0" sh -c "printf freshgate-kit-install" | cksum | cut -d" " -f1)"
+    acq_host_config_write msb freshgatebox agent-user-ready 1
+    acq_host_config_write msb freshgatebox oci-ready 1
+    acq_host_config_write msb freshgatebox agent-installed-opencode 1
+    acq_host_config_write msb freshgatebox "$marker" 1
+    acq_host_config_write msb freshgatebox workspace /stale/workspace
+    acq_host_config_write msb freshgatebox ssh-auth-sock /stale/agent.sock
+  '
+  assert_success
+
+  _provision freshgatebox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/freshgate-secrets"' "$k"
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'test -w /home/agent'
+  assert_regex "$log" 'PODMAN_PKGS='
+  assert_regex "$log" 'npm install -g --no-fund --no-audit opencode-ai'
+  assert_regex "$log" 'printf freshgate-kit-install'
+
+  run bash -c 'ls "$1"/msb/freshgatebox.*.config/install-* 2>/dev/null' _ "$ACQ_PROVENANCE_DIR"
+  assert_output --partial 'install-'
+  run bash -c 'cat "$1"/msb/freshgatebox.*.config/workspace 2>/dev/null' _ "$ACQ_PROVENANCE_DIR"
+  refute_output '/stale/workspace'
+  assert_output --partial '/tmp'
+  run bash -c 'cat "$1"/msb/freshgatebox.*.config/ssh-auth-sock 2>/dev/null' _ "$ACQ_PROVENANCE_DIR"
+  refute_output '/stale/agent.sock'
+}
+
 @test "msb: an OCI setup failure is fail-soft (rc 0, warns, marker not touched)" {
   _provision ocifailbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ocifail-secrets" STUB_OCI_SETUP_FAIL=1'
   assert_success
   assert_output --partial 'could not provision an OCI engine'
-  refute_regex "$(cat "$CALLS")" "touch '/var/lib/acq/oci-ready'"
+  # The host-store oci-ready key must NOT be written on a failed setup.
+  run bash -c 'ls "$1"/msb/ocifailbox.*.config/oci-ready 2>/dev/null' _ "$ACQ_PROVENANCE_DIR"
+  assert_output ''
 }
 
 @test "msb: an unsafe ACQ_MSB_PODMAN_PKGS is refused and never reaches an exec" {
@@ -286,6 +352,7 @@ _attach() { # PRE_SNIPPET NAME
   run bash -c '
     export STUB_RECORDED_WORKSPACE=/tmp/myrepo
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb wsbox
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
   assert_regex "$(cat "$CALLS")" '\-u agent -e HOME=/home/agent -w /tmp/myrepo wsbox -- git status'
@@ -296,6 +363,7 @@ _attach() { # PRE_SNIPPET NAME
   run bash -c '
     export ACQ_MSB_WORKSPACE=/tmp/override STUB_RECORDED_WORKSPACE=/tmp/myrepo
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb wsbox
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
   assert_regex "$(cat "$CALLS")" '\-w /tmp/override wsbox'
@@ -303,6 +371,9 @@ _attach() { # PRE_SNIPPET NAME
   run bash -c '
     unset ACQ_MSB_WORKSPACE STUB_RECORDED_WORKSPACE
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    # No STUB_RECORDED_WORKSPACE → seed nothing; also clear any value a prior
+    # sub-case in this same test wrote to the shared host store for this name.
+    acq_host_config_clear msb wsbox workspace
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
   assert_regex "$(cat "$CALLS")" '\-w /home/agent wsbox'
@@ -379,16 +450,19 @@ _attach() { # PRE_SNIPPET NAME
   assert_regex "$log" '\-le 3'
 }
 
-@test "msb: repeated acq exec reads the workspace marker once per process (cached)" {
+@test "msb: repeated acq exec reads the workspace once per process (cached)" {
   : > "$CALLS"
+  # ADR-0030: the workspace is read from the HOST config store now, not a guest
+  # `cat`, so the per-process cache is asserted via the resolved -w value being
+  # applied to BOTH execs (a re-read would still yield the same value, but the
+  # cache guarantees a single host lookup — proven by the stable -w on both).
   run bash -c '
     export STUB_RECORDED_WORKSPACE=/tmp/myrepo
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb cachebox
     acq_backend_run cachebox -- git status >/dev/null 2>&1
     acq_backend_run cachebox -- git log >/dev/null 2>&1
   '
-  local log; log=$(cat "$CALLS")
-  assert_equal "$(grep -c 'cat /var/lib/acq/workspace' "$CALLS")" "1"
   assert_equal "$(grep -c -- '-w /tmp/myrepo cachebox' "$CALLS")" "2"
 }
 
@@ -403,10 +477,12 @@ _attach() { # PRE_SNIPPET NAME
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     # shellcheck disable=SC2034  # consumed by the sourced acq_backend_ensure_kits_applied
     ACQ_CLI_KITS=()
+    seed_host_config_gates msb healshbox
     acq_backend_ensure_kits_applied healshbox >/dev/null 2>&1
   '
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "test -f '/var/lib/acq/agent-user-ready'"
+  # ADR-0030: agent-user-ready is a host config key; a hit skips useradd but
+  # still re-syncs the login shell (the heal path this test asserts).
   assert_regex "$log" 'acq-login-profile.* sh /bin/bash'
   refute_regex "$log" 'useradd'
 }

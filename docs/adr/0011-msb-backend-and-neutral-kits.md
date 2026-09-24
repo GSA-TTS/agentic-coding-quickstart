@@ -405,13 +405,20 @@ strings). The translate layer:
 
 > **Update (2026-08-26):** The command-only scoping above dropped exactly the
 > agent-runtime config (`OPENCODE_CONFIG`-style vars) this vocabulary was
-> motivated by. The msb adapter now also persists the validated entries to a
-> root-owned guest marker (`/var/lib/acq/kit-env`, the same pattern as
-> `/var/lib/acq/agent` and `/var/lib/acq/ssh-auth-sock`) and replays them as
-> `-e` flags on every session path (attach, `acq exec`, `acq shell`), matching
-> sbx's sandbox-level env semantics. Names are re-validated on replay (tampered
-> marker defense) and the last value wins for a duplicate name (kits append in
-> application order, so a later kit overrides an earlier one).
+> motivated by. The msb adapter now also persists the validated entries and
+> replays them as `-e` flags on every session path (attach, `acq exec`,
+> `acq shell`), matching sbx's sandbox-level env semantics. Names are
+> re-validated on replay and the last value wins for a duplicate name (kits
+> append in application order, so a later kit overrides an earlier one).
+>
+> **Superseded storage (ADR-0030):** the persisted values described in this ADR
+> (`agent`, `workspace`, `ssh-auth-sock`, `kit-env`, and the run-once gate
+> markers) were originally written to root-owned **guest** files under
+> `/var/lib/acq/`. Because the in-sandbox agent has passwordless sudo, a guest
+> path is not tamper-proof against a prompt-injected agent. ADR-0030 moves all of
+> these to acq's **host-authoritative** per-sandbox config store (mounted into
+> the guest read-only where the guest must read them). The behavior described
+> here is unchanged; only the storage location and its trust boundary moved.
 
 Deliberately minimal (YAGNI): **static string values only** — no interpolation,
 no references to `files[]`-staged paths (a kit needing a computed value uses a
