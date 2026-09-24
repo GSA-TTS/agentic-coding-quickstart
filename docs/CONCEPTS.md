@@ -221,6 +221,41 @@ scheme-less prefix so `acq` allowlists it:
 export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 ```
 
+### Shell snippets from kits
+
+Kits can deliver shell startup snippets under the agent user's neutral rc
+directory:
+
+```text
+/home/agent/.rc.d/*.sh
+```
+
+This hook is for **kit-owned state**, not a user-edited dotfile. Put team and
+personal shell customizations in kits, then let `acq` apply those kits. Common
+uses include agent shell integration that must exist outside a devenv shell,
+team tool completions and environment variables, personal aliases/functions, and
+a direnv/devenv hook.
+
+Guardrails:
+
+- Bash login shells source readable `*.sh` snippets in deterministic lexical
+  order through `acq`'s shell bridge.
+- Zsh support is part of the base-image contract; a zsh-capable image must source
+  the same directory from its native zsh startup files.
+- Use numeric prefixes, such as `10-team.sh` and `90-personal.sh`, when order
+  matters.
+- Do not put secrets or commands that print secrets in snippets.
+- Do not duplicate environment that `devenv` already provides inside a
+  `devenv shell`; snippets should cover shell integration outside that context.
+- Fish and nushell do not source POSIX `.sh` files. Kits that target those shells
+  must use their native configuration locations and keep behavior equivalent:
+  kit-owned files, deterministic naming, no secrets, and no duplicate devenv
+  setup.
+
+Existing team kits that owned their own shell hook should migrate by keeping
+their snippet files, moving them under `/home/agent/.rc.d/`, and relying on the
+neutral hook instead of installing a second shell-startup loop.
+
 ### Advanced: optional OCI-engine capability kit
 
 `acq` can select an **OCI-engine capability kit** (rootless podman) as part of
