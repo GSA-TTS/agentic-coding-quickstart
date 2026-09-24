@@ -218,6 +218,27 @@ LS
   assert_success
 }
 
+@test "secret set(msb): scoped usai propagates to matching sbx sandbox" {
+  printf 'my-sandbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'my-sandbox\n' > "$STUBDIR/.sandbox_list"
+  printf 'CUSTOM SECRETS\nmy-sandbox api.gsa.usai.gov USAI_API_KEY ph-scoped ****\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$2" ACQ_SECRET_TEST_VALUE="k" ACQ_BACKEND=msb "$1" secret set my-sandbox usai' _ "$ACQ" "$STUBDIR/sbx_ls"
+  local log
+  log=$(cat "$CALLS")
+  assert_success
+  assert_regex "$log" 'msb modify my-sandbox --secret USAI_API_KEY@api\.gsa\.usai\.gov'
+  assert_regex "$log" 'sbx secret set-custom --sandbox my-sandbox --host api\.gsa\.usai\.gov --env USAI_API_KEY --placeholder ph-scoped'
+}
+
+@test "secret set(msb): unsupported sbx propagation fails closed" {
+  printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'legacy-sbx\n' > "$STUBDIR/.sandbox_list"
+  run bash -c 'printf "k\n" | ACQ_BACKEND=msb "$1" secret set -g github' _ "$ACQ"
+  assert_failure
+  assert_output --partial "sbx cannot safely overwrite this secret non-interactively"
+  assert_output --partial "acq --backend sbx secret set -g github"
+}
+
 @test "secret has(msb): store-present -> rc 0; absent -> rc 1; silent both ways" {
   load_acq
   mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"

@@ -121,13 +121,14 @@ operation). It MUST:
   return non-zero if validation fails or cannot run.
 
 `acq_backend_secret_propagate [-g | SANDBOX] SERVICE` MUST:
-- read an already-stored acq secret without prompting for a second value;
 - re-apply the backend's runtime injection only to affected sandboxes (all
   sandboxes for global scope, or the named sandbox for sandbox scope);
 - no-op successfully when the backend has no affected sandbox;
-- avoid placing the secret value on argv. If a backend cannot safely re-apply a
-  secret non-interactively, it MUST fail closed with actionable guidance rather
-  than leaking the value or silently claiming success.
+- avoid placing the secret value on argv. If a backend can safely replay the
+  stored secret (for example, msb bindings), it should do so without another
+  prompt. If a backend cannot safely re-apply a secret non-interactively, it MUST
+  fail closed with actionable, scope-preserving guidance rather than leaking the
+  value, accepting a divergent value, or silently claiming success.
 
 ## Consequences
 
