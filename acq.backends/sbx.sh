@@ -100,10 +100,14 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_prepare — sbx version floor check
+# acq_backend_check_version — sbx presence + version floor ONLY; fail closed
 # ---------------------------------------------------------------------------
-
-acq_backend_prepare() {
+# Kept separate from acq_backend_prepare so verbs that only touch existing
+# sandbox state can be guarded with the cheap check. On sbx the two are currently
+# the same work (there is no host-readiness probe here), but the split keeps the
+# adapter contract identical across backends — acq calls check_version on
+# state-touching verbs and prepare on provisioning verbs. See ADR-0031.
+acq_backend_check_version() {
   if ! command -v sbx >/dev/null 2>&1; then
     echo "error: sbx CLI not found on PATH. Install sbx >= $MIN_SBX_VERSION." >&2
     echo "       See README.md (Step 2: Install sbx CLI)." >&2
@@ -131,6 +135,14 @@ acq_backend_prepare() {
     echo "       Upgrade sbx (see README.md, Step 2) and retry." >&2
     exit 1
   fi
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_prepare — sbx version floor check
+# ---------------------------------------------------------------------------
+
+acq_backend_prepare() {
+  acq_backend_check_version
 }
 
 # ---------------------------------------------------------------------------

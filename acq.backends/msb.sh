@@ -110,11 +110,17 @@ _acq_msb_cli() {
 # clear version message, not a raw clap error or DNS parse failure mid-create.
 MIN_MSB_VERSION="0.6.9"
 
-# msb 0.7.0 through 0.7.2 can migrate 0.6.x sandbox state into a form that is
-# incompatible across versions. Refuse those releases until the upstream fix
-# expected in 0.7.3 is available.
+# msb 0.7.0 through 0.7.2 migrate 0.6.x sandbox state one-way, into a form the
+# 0.6.x line cannot read (`database schema is newer than this msb binary`).
+# Refuse those releases until the upstream fix expected in 0.7.3 is available.
+# Recovering an already-migrated host needs `msb self downgrade`, run BY the
+# 0.7.x binary (it owns the rollback metadata) — see ADR-0031.
 MSB_BLOCKED_VERSION_MIN="0.7.0"
 MSB_BLOCKED_VERSION_MAX="0.7.2"
+
+# Version acq's own tooling installs and recommends during the blocked window:
+# the newest release whose migration set the 0.6.x line understands.
+MSB_PINNED_VERSION="0.6.18"
 
 # Default OCI image for provisioned sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
@@ -765,14 +771,23 @@ _acq_msb_version() {
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_prepare — CLI presence + version floor; fail closed
+# acq_backend_check_version — CLI presence + version floor ONLY; fail closed
 # ---------------------------------------------------------------------------
-
-acq_backend_prepare() {
+# Split out of acq_backend_prepare so verbs that merely TOUCH existing sandbox
+# state (ls/stop/start/rm/exec/...) can be guarded too, without paying for the
+# `msb doctor` host-readiness probe that only provisioning needs. Without this,
+# those verbs reached msb unguarded and surfaced raw upstream errors — most
+# visibly `database schema is newer than this msb binary` from a blocked 0.7.x
+# that had already migrated the catalog. Cheap: one `msb --version`, no network,
+# no host mutation. See ADR-0031.
+acq_backend_check_version() {
   if ! command -v msb >/dev/null 2>&1; then
     echo "error: msb (microsandbox) CLI not found on PATH. Install msb >= $MIN_MSB_VERSION:" >&2
-    echo "         curl -fsSL https://install.microsandbox.dev | sh   # macOS / Linux" >&2
-    echo "         brew install superradcompany/tap/microsandbox" >&2
+    echo "         brew install GSA-TTS/tap/microsandbox-acq        # version-pinned" >&2
+    echo "         ./scripts/verify-msb-pin --install               # verified release bundle" >&2
+    echo "       Do NOT use 'curl -fsSL https://install.microsandbox.dev | sh' or" >&2
+    echo "       'msb self update' right now: both resolve to the newest release," >&2
+    echo "       which is inside the blocked $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX range." >&2
     echo "       See docs/BACKEND_GUIDE.md (msb backend) for details." >&2
     exit 1
   fi
@@ -785,16 +800,30 @@ acq_backend_prepare() {
   fi
   if [ "$(_acq_msb_version_ge "$current" "$MIN_MSB_VERSION")" -ne 0 ]; then
     echo "error: acq requires msb >= $MIN_MSB_VERSION, but found $current." >&2
-    echo "       Install msb 0.6.18, or upgrade to msb >= 0.7.3 once available." >&2
+    echo "       Install msb $MSB_PINNED_VERSION, or upgrade to msb >= 0.7.3 once available:" >&2
+    echo "         brew install GSA-TTS/tap/microsandbox-acq" >&2
+    echo "         ./scripts/verify-msb-pin --install" >&2
     exit 1
   fi
   if _acq_msb_version_blocked "$current"; then
     echo "error: acq refuses msb $current because msb $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX" >&2
-    echo "       can corrupt or migrate existing 0.6.x sandbox state incompatibly." >&2
-    echo "       Use msb 0.6.18, or upgrade to msb >= 0.7.3 after that upstream fix" >&2
-    echo "       is released. See docs/KNOWN_FAILURE_MODES.md for details." >&2
+    echo "       migrate existing 0.6.x sandbox state one-way, into a form the 0.6.x" >&2
+    echo "       line cannot read." >&2
+    echo "       Use msb $MSB_PINNED_VERSION, or msb >= 0.7.3 once that upstream fix is released." >&2
+    echo "       If this msb ALREADY migrated your sandbox state, swapping the binary" >&2
+    echo "       is not enough — roll the catalog back first, using THIS msb:" >&2
+    echo "         msb self downgrade $MSB_PINNED_VERSION" >&2
+    echo "       See docs/KNOWN_FAILURE_MODES.md for details." >&2
     exit 1
   fi
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_prepare — version floor + host readiness; fail closed
+# ---------------------------------------------------------------------------
+
+acq_backend_prepare() {
+  acq_backend_check_version
 
   # msb needs host virtualization (KVM on Linux, HVF on macOS, WHP on Windows).
   # Run the readiness check FOR the user (so the happy path needs no manual `msb
