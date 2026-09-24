@@ -91,3 +91,34 @@ load 'helper'
   assert_success
   assert_output --partial 'ok: shell startup references ~/.rc.d'
 }
+
+@test "doctor script: reports tool versions when available" {
+  local home="$STUBDIR/agent-home-versions" script="$STUBDIR/image-doctor.sh" bin="$STUBDIR/bin"
+  mkdir -p "$home/.rc.d" "$bin"
+  printf '. "$HOME/.rc.d/10-team.sh"\n' > "$home/.profile"
+  printf '#!/usr/bin/env sh\nprintf "nix 2.35.2\\n"\n' > "$bin/nix"
+  printf '#!/usr/bin/env sh\nprintf "devenv 2.3.0\\n"\n' > "$bin/devenv"
+  printf '#!/usr/bin/env sh\nprintf "direnv 2.36.0\\n"\n' > "$bin/direnv"
+  chmod +x "$bin/nix" "$bin/devenv" "$bin/direnv"
+  bash -c '. "'"$REPO_ROOT"'/acq.backends/common.sh"; acq_image_contract_doctor_script' > "$script"
+
+  run env HOME="$home" PATH="$bin:$PATH" sh "$script"
+
+  assert_success
+  assert_output --partial 'ok: nix is on PATH (nix 2.35.2)'
+  assert_output --partial 'ok: devenv is on PATH (devenv 2.3.0)'
+  assert_output --partial 'ok: direnv is on PATH (direnv 2.36.0)'
+}
+
+@test "doctor script: separately warns for missing rc.d directory and startup hook" {
+  local home="$STUBDIR/agent-home-no-rc" script="$STUBDIR/image-doctor.sh"
+  mkdir -p "$home"
+  bash -c '. "'"$REPO_ROOT"'/acq.backends/common.sh"; acq_image_contract_doctor_script' > "$script"
+
+  run env HOME="$home" sh "$script"
+
+  assert_success
+  assert_output --partial 'warning: ~/.rc.d is missing'
+  assert_output --partial 'fix: install the neutral shell hook directory at /home/agent/.rc.d'
+  assert_output --partial 'warning: no shell startup hook for ~/.rc.d found'
+}

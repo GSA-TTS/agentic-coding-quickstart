@@ -91,6 +91,18 @@ SPEC
   assert_regex "$(acq_selected_agent_kit_summary opencode)" 'apply=enabled'
 }
 
+@test "agent kit gate: valid opencode artifact stays deferred while disabled" {
+  ACQ_TEST_AGENT_KIT="$STUBDIR/opencode-kit-disabled"
+  _mk_opencode_agent_kit "$ACQ_TEST_AGENT_KIT"
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$ACQ_TEST_AGENT_KIT"; }
+
+  _build_kit_list opencode
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  assert_equal "${#KITS[@]}" "4"
+  assert_regex "$(acq_selected_agent_kit_summary opencode 2>/dev/null)" 'apply=deferred'
+}
+
 @test "agent kit gate: missing opencode artifact fails closed" {
   acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
   _acq_agent_builtin_kit_ref() { printf '%s\n' "$STUBDIR/missing-opencode-kit"; }

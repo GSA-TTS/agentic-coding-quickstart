@@ -76,14 +76,12 @@ fi
 
 _acq_msb_select_kits() {
   local agent="${1:-}"
-  if declare -p KITS >/dev/null 2>&1 && [ "${#KITS[@]}" -gt 0 ]; then
-    return 0
-  fi
   if command -v _build_kit_list >/dev/null 2>&1; then
     _build_kit_list "$agent"
-  else
+  elif ! declare -p KITS >/dev/null 2>&1 || [ "${#KITS[@]}" -eq 0 ]; then
     KITS=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
     ACQ_BUILTIN_KIT_COUNT="${#KITS[@]}"
+    ACQ_BUILTIN_SUPPORT_KIT_COUNT="${#KITS[@]}"
   fi
 }
 
@@ -2732,12 +2730,19 @@ acq_backend_provision() {
   local kitref kitdir
   _acq_msb_select_kits "$agent"
   local kits=("${KITS[@]}")
+  local _oci_kit_selected=0 _oci_kit_ref=""
+  if command -v _acq_oci_engine_kit_ref >/dev/null 2>&1; then
+    _oci_kit_ref=$(_acq_oci_engine_kit_ref) || _oci_kit_ref=""
+  fi
 
   for kitref in "${kits[@]}"; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
       echo "acq(msb): error: could not fetch kit: $kitref" >&2
       exit 1
     }
+    if [ -n "$_oci_kit_ref" ] && [ "$kitref" = "$_oci_kit_ref" ]; then
+      _oci_kit_selected=1
+    fi
     kitdirs+=("$kitdir")
     local spec="${kitdir}/spec.yaml"
     [ -f "$spec" ] || continue
@@ -3266,7 +3271,9 @@ EOF
   # warning, never aborting provision) if the engine cannot be installed — e.g.
   # the OS package mirror is unreachable under a narrowed egress. See ADR-0020.
   acq_debug "msb provision: ensuring OCI engine ($name)"
-  if [ -n "$ACQ_MSB_ENSURE_OCI" ]; then
+  if [ "$_oci_kit_selected" -eq 1 ]; then
+    acq_debug "msb provision: OCI engine provided by selected kit; skipping adapter setup ($name)"
+  elif [ -n "$ACQ_MSB_ENSURE_OCI" ]; then
     acq_spin_start "Ensuring an OCI engine (podman)"
     _acq_msb_ensure_oci "$name"
     acq_spin_stop "Ensuring an OCI engine (podman)"

@@ -129,6 +129,7 @@ ACQ_SESSION_KIND=""
 # ACQ_EXTRA_KITS. One ref per element.
 ACQ_CLI_KITS=()
 ACQ_BUILTIN_KIT_COUNT=0
+ACQ_BUILTIN_SUPPORT_KIT_COUNT=0
 ACQ_AGENT_KIT_READY_CACHE=""
 # Per-process readiness memo for the optional OCI-engine kit (ADR-0030),
 # mirroring ACQ_AGENT_KIT_READY_CACHE: acq_oci_engine_kit_ready runs multiple
@@ -799,35 +800,28 @@ acq_agent_builtin_kit_ready() {
   return 1
 }
 
-_acq_selected_builtin_kit_refs() {
-  local agent="${1:-}" name kit
+_acq_selected_support_kit_refs() {
+  local name kit
   for name in $(_acq_builtin_support_kit_names); do
     kit=$(_acq_builtin_kit_ref "$name") || return 1
     printf '%s\n' "$kit"
   done
-  # Optional OCI-engine capability kit (ADR-0030): appended AFTER the network/CA
-  # and provider/playbook support kits and BEFORE any agent kit / extras, only
-  # when the user opted in (ACQ_ENABLE_OCI_KIT) AND the kit is actually present
-  # at the pinned patterns ref. If opted in but not yet published/valid (the
-  # current reality — see ADR-0020/ADR-0030), emit one clear notice and skip the
-  # ref so default behavior and the msb adapter's own podman provisioning are
-  # unaffected. zscaler-ca-certificate stays first regardless.
-  #
-  # NOTE: The sbx forced-heal refresh path (sbx.sh) rebuilds this list on a
-  # fixed loop and does not yet re-run OCI selection; wiring the sbx forced-heal
-  # to this selection is deferred until the patterns kit publishes (ADR-0020 /
-  # ADR-0030). This block affects create-time kit selection only for now.
+  # Optional OCI-engine capability kit (ADR-0030): appended after the default
+  # support kits and before any agent/extras/CLI kits, only when the user opted in
+  # and the kit is present/valid at the pinned patterns ref.
   if [ -n "$ACQ_ENABLE_OCI_KIT" ]; then
     if acq_oci_engine_kit_ready; then
       kit=$(_acq_oci_engine_kit_ref) || return 1
       printf '%s\n' "$kit"
     fi
-    # NOTE: the "not available" fallback notice is emitted by _build_kit_list
-    # (the parent shell), NOT here. This function runs inside a process
-    # substitution (`< <(...)`), so a once-guard set here would live in a
-    # subshell and reset on every call — defeating the guard. Emitting from the
-    # parent keeps _ACQ_OCI_KIT_NOTICE_SHOWN process-global.
+    # The "not available" fallback notice is emitted by _build_kit_list in the
+    # parent shell so the process-global once guard is effective.
   fi
+}
+
+_acq_selected_builtin_kit_refs() {
+  local agent="${1:-}" kit
+  _acq_selected_support_kit_refs || return 1
   if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
       && acq_is_known_agent "$agent" && acq_agent_builtin_kit_ready "$agent"; then
     kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
@@ -846,6 +840,15 @@ acq_selected_agent_kit_summary() {
   printf 'agent=%s kit=%s entrypoint=%s install_owner=%s start_owner=%s apply=%s\n' \
     "$agent" "$kit_name" "${entrypoint:-none}" "${install_owner:-none}" \
     "${start_owner:-none}" "$apply_state"
+}
+
+acq_oci_engine_kit_selected() {
+  local kit expected
+  expected=$(_acq_oci_engine_kit_ref) || return 1
+  for kit in ${KITS[@]+"${KITS[@]}"}; do
+    [ "$kit" = "$expected" ] && return 0
+  done
+  return 1
 }
 
 acq_print_selected_agent_kit() {
@@ -880,7 +883,14 @@ _build_kit_list() {
   fi
   while IFS= read -r kit; do
     [ -n "$kit" ] && KITS+=("$kit")
-  done < <(_acq_selected_builtin_kit_refs "$agent")
+  done < <(_acq_selected_support_kit_refs)
+  # shellcheck disable=SC2034  # read by adapters/tests after _build_kit_list
+  ACQ_BUILTIN_SUPPORT_KIT_COUNT="${#KITS[@]}"
+  if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
+      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_ready "$agent"; then
+    kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
+    KITS+=("$kit")
+  fi
   # shellcheck disable=SC2034  # read by adapters/tests after _build_kit_list
   ACQ_BUILTIN_KIT_COUNT="${#KITS[@]}"
   if [ -n "$ACQ_EXTRA_KITS" ]; then
@@ -2996,13 +3006,23 @@ fi
 
 if [ -d /nix ]; then
   ok "/nix exists"
+  if [ -w /nix 2>/dev/null ]; then
+    ok "/nix is writable"
+  else
+    warn "/nix is not writable" "mount or bake a writable Nix store at /nix for devenv/cache reuse"
+  fi
 else
   warn "/nix is missing" "use a devenv-capable image with its Nix store at /nix"
 fi
 
 for tool in nix devenv direnv; do
   if command -v "$tool" >/dev/null 2>&1; then
-    ok "$tool is on PATH"
+    ver=$($tool --version 2>/dev/null | head -n1 || true)
+    if [ -n "$ver" ]; then
+      ok "$tool is on PATH ($ver)"
+    else
+      ok "$tool is on PATH"
+    fi
   else
     warn "$tool is not on PATH" "install $tool in the base image or a create-time kit"
   fi

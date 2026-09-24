@@ -953,20 +953,24 @@ acq_backend_ensure_kits_applied() {
   fi
 
   if [ "$force" = "1" ] && command -v acq_backend_recorded_agent >/dev/null 2>&1; then
-    local agent agent_kit_ref agent_local
+    local agent refresh_kit_ref refresh_local refresh_idx support_count handled_support_count label
     agent=$(acq_backend_recorded_agent "$name")
     _build_kit_list "$agent"
-    local _idx=0
-    for agent_kit_ref in "${KITS[@]}"; do
-      _idx=$((_idx + 1))
-      [ "$_idx" -le 4 ] && continue
-      [ "$_idx" -le "${ACQ_BUILTIN_KIT_COUNT:-4}" ] || break
-      agent_local=$(_acq_sbx_translate_kit "$agent_kit_ref")
-      _kadd_rc=0; _acq_sbx_kit_add "$name" "$agent_local" || _kadd_rc=$?
+    support_count="${ACQ_BUILTIN_SUPPORT_KIT_COUNT:-4}"
+    handled_support_count=$(_acq_builtin_support_kit_names | wc -l | tr -d ' ')
+    refresh_idx=0
+    for refresh_kit_ref in "${KITS[@]}"; do
+      refresh_idx=$((refresh_idx + 1))
+      [ "$refresh_idx" -le "$handled_support_count" ] && continue
+      [ "$refresh_idx" -le "${ACQ_BUILTIN_KIT_COUNT:-4}" ] || break
+      label="agent kit"
+      [ "$refresh_idx" -le "$support_count" ] && label="support kit"
+      refresh_local=$(_acq_sbx_translate_kit "$refresh_kit_ref")
+      _kadd_rc=0; _acq_sbx_kit_add "$name" "$refresh_local" || _kadd_rc=$?
       case $_kadd_rc in
-        0) echo "acq: agent kit refreshed in '$name'." >&2 ;;
+        0) echo "acq: $label refreshed in '$name'." >&2 ;;
         3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
-        *) echo "acq: warning: 'sbx kit add' (agent kit) failed for '$name' (see error above)." >&2; ok=0 ;;
+        *) echo "acq: warning: 'sbx kit add' ($label) failed for '$name' (see error above)." >&2; ok=0 ;;
       esac
     done
   fi
