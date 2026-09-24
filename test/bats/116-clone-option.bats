@@ -47,6 +47,16 @@ _msb_clone() { # [ENV KEY=VAL...] -- ARGS...
   ' _ "$BATS_TEST_NUMBER" ${env_kv[@]+"${env_kv[@]}"} -- "$@"
 }
 _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
+# A create that must abort before the backend runs. The preflight's
+# `msb --version` proves the stub recorder wrote $CALLS at all (an empty file
+# would make the refute pass vacuously), so the refute means what it says.
+# Use --version, not `msb doctor`: the doctor probe is skipped whenever
+# ACQ_SKIP_MSB_DOCTOR is set, which the harness inherits from the caller, so a
+# developer who exports it would see every converted test fail spuriously.
+_refute_backend_create() {
+  assert_regex "$(cat "$CALLS")" 'msb --version'
+  refute_regex "$(cat "$CALLS")" 'msb create'
+}
 
 @test "clone(msb): --clone mounts a scratch clone at the original path and registers the sandbox remote" {
   _msb_clone -- create shell --clone "$CLONEPROJ"
@@ -86,7 +96,7 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   _msb_clone -- create shell --clone "$plain"
   assert_failure
   assert_output --partial 'not a git repository'
-  refute_regex "$(cat "$CALLS")" 'msb create'
+  _refute_backend_create
 }
 
 @test "clone(msb): a subdirectory of a repo is rejected, naming the toplevel" {
@@ -95,14 +105,14 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   assert_failure
   assert_output --partial 'repository root'
   assert_output --partial 'cloneproj'
-  refute_regex "$(cat "$CALLS")" 'msb create'
+  _refute_backend_create
 }
 
 @test "clone(msb): --clone with no workspace positional fails with guidance" {
   _msb_clone -- create shell --clone
   assert_failure
   assert_output --partial '--clone requires a workspace path'
-  refute_regex "$(cat "$CALLS")" 'msb create'
+  _refute_backend_create
 }
 
 @test "clone(msb): a dirty working tree gets a notice but the create proceeds" {
@@ -131,10 +141,11 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   _msb_clone -- create shell --name '../evil' --clone "$CLONEPROJ"
   assert_failure
   assert_output --partial 'invalid sandbox name'
-  refute_regex "$(cat "$CALLS")" 'msb create'
+  _refute_backend_create
   [ ! -e "$STUBDIR/state/evil" ]
   run git -C "$CLONEPROJ" remote
-  refute_output --partial 'sandbox-'
+  assert_success
+  assert_output ''
 
   _msb_clone -- create shell --name '..' --clone "$CLONEPROJ"
   assert_failure
@@ -158,10 +169,10 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   [ -d "$scratch" ]
   _msb_clone -- rm shell-cloneproj
   assert_success
+  refute_output --partial 'unfetched'
   [ ! -d "$scratch" ]
   run git -C "$CLONEPROJ" remote get-url sandbox-shell-cloneproj
   assert_failure
-  refute_output --partial 'unfetched'
 }
 
 @test "clone(msb): rm warns about unfetched commits before deleting the scratch" {
@@ -201,7 +212,7 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   _msb_clone -- create shell --clone "$CLONEPROJ:ro"
   assert_failure
   assert_output --partial 'read-only'
-  refute_regex "$(cat "$CALLS")" 'msb create'
+  _refute_backend_create
   [ ! -d "$STUBDIR/state/clones/shell-cloneproj" ]
   run git -C "$CLONEPROJ" remote get-url sandbox-shell-cloneproj
   assert_failure
@@ -211,7 +222,7 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   _msb_clone -- create shell --clone "$CLONEPROJ" "$STUBDIR/missinglib"
   assert_failure
   assert_output --partial 'does not exist'
-  refute_regex "$(cat "$CALLS")" 'msb create'
+  _refute_backend_create
   # No abandoned state: a corrected re-run must not be refused over a stale
   # scratch clone or a dangling sandbox-<name> remote.
   [ ! -d "$STUBDIR/state/clones/shell-cloneproj" ]
@@ -249,7 +260,7 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   # would bypass the clone cleanup anyway.
   assert_output --partial "'acq rm clnreattach'"
   refute_output --partial 'acq msb rm'
-  refute_regex "$(cat "$CALLS")" 'msb create'
+  _refute_backend_create
 }
 
 @test "clone(sbx): --clone forwards to the native sbx create --clone" {
@@ -263,6 +274,15 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
 # their absence) can reach the scratch.
 _msb_clone_isolated() { # ARGS...
   _msb_clone HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" GIT_CONFIG_NOSYSTEM=1 -- "$@"
+}
+
+# Put a `git` on PATH that fails every call whose argv matches the case PATTERN
+# with exit code RC and passes everything else through to the real git.
+_stub_git() { # PATTERN RC
+  local real; real=$(command -v git)
+  printf '#!/usr/bin/env bash\ncase " $* " in %s) echo "fatal: stubbed git failure" >&2; exit %s;; esac\nexec %s "$@"\n' \
+    "$1" "$2" "$real" > "$STUBDIR/git"
+  chmod +x "$STUBDIR/git"
 }
 
 @test "clone(msb #438): the scratch carries the source checkout's effective git identity, repo-locally" {
@@ -289,6 +309,9 @@ _msb_clone_isolated() { # ARGS...
   _msb_clone_isolated create shell --clone "$CLONEPROJ"
   local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
   [ "$(git config --file "$scratch/.git/config" remote.origin.url)" = "https://github.com/example/cloneproj.git" ]
+  # An absent source value is not invented alongside the carried one.
+  run git config --file "$scratch/.git/config" remote.origin.pushurl
+  assert_failure
   # The fetch-back remote on the host still points at the scratch.
   [ "$(canonicalize_path "$(git -C "$CLONEPROJ" remote get-url sandbox-shell-cloneproj)")" = "$(canonicalize_path "$scratch")" ]
 }
@@ -310,12 +333,111 @@ _msb_clone_isolated() { # ARGS...
   [ "$(git config --file "$scratch/.git/config" remote.origin.url)" = "https://github.com/example/cloneproj.git" ]
 }
 
-@test "clone(msb #453): a source with no origin leaves the clone's remote untouched" {
+@test "clone(msb #467): a source with no origin leaves the scratch with no origin URL" {
+  # `git clone` points origin at the host path, where the guest mounts the
+  # scratch itself: a push there would land in the scratch and look successful.
   _msb_clone_isolated create shell --clone "$CLONEPROJ"
   local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
-  [ "$(git config --file "$scratch/.git/config" remote.origin.url)" = "$(host_path "$CLONEPROJ")" ]
+  assert_success
+  run git config --file "$scratch/.git/config" remote.origin.url
+  assert_failure
   run git config --file "$scratch/.git/config" remote.origin.pushurl
   assert_failure
+  run git -C "$scratch" push origin HEAD
+  assert_failure
+}
+
+# --- Origin-carry gaps (GSA-TTS/agentic-coding-quickstart#467) ---
+
+@test "clone(msb #467): a multi-valued origin URL is carried in full and in order" {
+  # `git remote set-url --add` (push-to-two-forges) is legal; `config --get`
+  # returns the LAST value while `git fetch` uses the FIRST.
+  git -C "$CLONEPROJ" remote add origin https://github.com/example/cloneproj.git
+  git -C "$CLONEPROJ" remote set-url --add origin https://gitlab.com/example/cloneproj.git
+  git -C "$CLONEPROJ" remote set-url --add --push origin git@github.com:example/cloneproj.git
+  git -C "$CLONEPROJ" remote set-url --add --push origin git@gitlab.com:example/cloneproj.git
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  local scratch="$STUBDIR/state/clones/shell-cloneproj/cloneproj"
+  [ "$(git config --file "$scratch/.git/config" --get-all remote.origin.url)" = \
+    "$(printf '%s\n%s' https://github.com/example/cloneproj.git https://gitlab.com/example/cloneproj.git)" ]
+  [ "$(git config --file "$scratch/.git/config" --get-all remote.origin.pushurl)" = \
+    "$(printf '%s\n%s' git@github.com:example/cloneproj.git git@gitlab.com:example/cloneproj.git)" ]
+}
+
+@test "clone(msb #467): the scratch's state dir is private (0700) regardless of umask" {
+  # The copied .git/config may hold a credential-bearing origin URL.
+  umask 022
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  local dir="$STUBDIR/state/clones/shell-cloneproj" perms
+  perms=$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir" 2>/dev/null || echo '?')
+  [ "$perms" = 700 ]
+}
+
+@test "clone(msb #467): a scratch dir that cannot be made private fails the create" {
+  # chmod runs as a non-final `&&` link inside a function called as an `if !`
+  # condition, where errexit does not apply: without an explicit status check a
+  # failure here clones the credential-bearing config in at the ambient umask.
+  local real_chmod; real_chmod=$(command -v chmod)
+  printf '#!/usr/bin/env bash\ncase " $* " in *"/clones/"*) echo "chmod: operation not permitted" >&2; exit 1;; esac\nexec %s "$@"\n' "$real_chmod" > "$STUBDIR/chmod"
+  "$real_chmod" +x "$STUBDIR/chmod"
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'private scratch dir'
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+  _refute_backend_create
+}
+
+@test "clone(msb #467): a failed origin carry fails the create and removes the scratch" {
+  # A warn-only miss would leave origin pointing at the scratch itself, so an
+  # in-guest 'git push origin' APPEARS to succeed while reaching no forge.
+  git -C "$CLONEPROJ" remote add origin https://github.com/example/cloneproj.git
+  local real_git; real_git=$(command -v git)
+  printf '#!/usr/bin/env bash\ncase " $* " in *"/clones/"*" config "*) echo "fatal: could not lock config file" >&2; exit 255;; esac\nexec %s "$@"\n' "$real_git" > "$STUBDIR/git"
+  chmod +x "$STUBDIR/git"
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'remote.origin.url'
+  assert_output --partial 'push origin'
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+  _refute_backend_create
+}
+
+@test "clone(msb #467): an origin URL with an embedded newline stays one value" {
+  # `--get-all` is line-oriented and git allows a newline inside a value: read
+  # line by line, one value would become two push targets.
+  local url; url=$(printf 'https://github.com/example/cloneproj.git\nhttps://evil.example/cloneproj.git')
+  git -C "$CLONEPROJ" remote add origin https://placeholder.invalid/x.git
+  git -C "$CLONEPROJ" config remote.origin.url "$url"
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  assert_success
+  local cfg="$STUBDIR/state/clones/shell-cloneproj/cloneproj/.git/config"
+  [ "$(git config --file "$cfg" -z --get-all remote.origin.url | tr -dc '\0' | wc -c | tr -d ' ')" = 1 ]
+  [ "$(git config --file "$cfg" --get-all remote.origin.url)" = "$url" ]
+}
+
+@test "clone(msb #467): an unreadable source origin fails the create" {
+  # Exit 1 means "no such key"; anything else means the config could not be
+  # read, which must not be mistaken for "nothing to carry".
+  git -C "$CLONEPROJ" remote add origin https://github.com/example/cloneproj.git
+  _stub_git '*" --get-all remote.origin.url "*' 128
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  assert_failure
+  assert_output --partial 'could not read remote.origin.url'
+  [ ! -e "$STUBDIR/state/clones/shell-cloneproj" ]
+  _refute_backend_create
+}
+
+@test "clone(msb #467): an unreadable or unwritable identity warns but does not fail the create" {
+  # The identity is a convenience, not a safety property: a missing one fails
+  # loudly at the first in-guest commit. Only the origin keys abort.
+  git -C "$CLONEPROJ" config user.name "Repo User"
+  _stub_git '*" --get-all user.email "*|*"/clones/"*" user.name "*' 128
+  _msb_clone_isolated create shell --clone "$CLONEPROJ"
+  assert_success
+  assert_output --partial 'user.name'
+  assert_output --partial 'user.email'
+  refute_output --partial 'push origin'
+  assert_regex "$(cat "$CALLS")" 'msb create'
 }
 
 # --- Guest-visible workspace markers (GSA-TTS/agentic-coding-quickstart#456) ---
@@ -355,6 +477,11 @@ _msb_clone_isolated() { # ARGS...
 }
 
 @test "clone(msb #456): a workspace-less create exports neither marker" {
+  # Same session, same stub: first prove the emitter fires with a workspace,
+  # so the refute below cannot pass with the emitter deleted.
+  _msb_clone -- create shell --name withws "$CLONEPROJ"
+  assert_regex "$(_create_line msb)" '--env ACQ_WORKSPACE='
+  : > "$CALLS"
   _msb_clone -- create shell
   assert_regex "$(cat "$CALLS")" 'msb create'
   refute_regex "$(_create_line msb)" 'ACQ_WORKSPACE|ACQ_CLONE'

@@ -160,13 +160,19 @@ _with_adapter() { # ADAPTER BODY
   assert_output --partial 'RC=0'
 }
 
-@test "sbx: version floor rejects sub-0.38.0 with the v2-grammar cause, accepts 0.38.0" {
+@test "sbx: version floor rejects sub-0.39.0 naming both causes, accepts 0.39.0" {
+  # 0.38.x is BELOW the floor: acq emits the ACQ_WORKSPACE marker through
+  # `sbx create --env` on every workspace create, and --env only exists from
+  # sbx 0.39.0 — an unknown flag fails the whole create, not just the marker.
   # Same subshell isolation as the msb floor test: prepare `exit`s on violation.
+  _with_adapter sbx 'out=$(STUB_SBX_VERSION=0.38.0 acq_backend_prepare 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
+  assert_output --partial '0.39.0'
+  assert_output --partial '--env'
+  assert_output --partial 'RC=1'
   _with_adapter sbx 'out=$(STUB_SBX_VERSION=0.37.9 acq_backend_prepare 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
-  assert_output --partial '0.38.0'
   assert_output --partial 'v2 kit grammar'
   assert_output --partial 'RC=1'
-  _with_adapter sbx 'out=$(STUB_SBX_VERSION=0.38.0 acq_backend_prepare 2>&1); printf "%s\nRC=%s\n" "$out" "$?"'
+  _with_adapter sbx 'out=$(STUB_SBX_VERSION=0.39.0 acq_backend_prepare 2>&1); printf "%s\nRC=%s\n" "$out" "$?"'
   assert_output --partial 'RC=0'
   refute_output --partial 'requires sbx'
 }
