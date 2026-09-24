@@ -1303,9 +1303,12 @@ _acq_provenance_file() {
 acq_provenance_write() {
   local backend="${1:-}" name="${2:-}"
   [ -n "$backend" ] && [ -n "$name" ] || return 1
-  local file dir ts workspace
+  local file dir ts workspace workspace_source
   file=$(_acq_provenance_file "$backend" "$name") || return 1
-  workspace=$(acq_provenance_field "$backend" "$name" workspace)
+  workspace_source=$(acq_provenance_field "$backend" "$name" workspace_source)
+  if [ "$workspace_source" = "host" ]; then
+    workspace=$(acq_provenance_field "$backend" "$name" workspace)
+  fi
   dir=$(dirname "$file")
   if ! mkdir -p "$dir" 2>/dev/null; then
     acq_debug "provenance: could not create state dir: $dir"
@@ -1322,7 +1325,10 @@ acq_provenance_write() {
     printf 'applied_ref=%s\n' "$PATTERNS_KIT_REF"
     printf 'backend=%s\n' "$backend"
     printf 'applied_at=%s\n' "$ts"
-    [ -z "$workspace" ] || printf 'workspace=%s\n' "$workspace"
+    if [ -n "${workspace:-}" ]; then
+      printf 'workspace_source=host\n'
+      printf 'workspace=%s\n' "$workspace"
+    fi
   } > "$tmp" 2>/dev/null || { acq_debug "provenance: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
   mv -f "$tmp" "$file" 2>/dev/null || { acq_debug "provenance: mv failed: $file"; rm -f "$tmp" 2>/dev/null; return 1; }
   acq_debug "provenance: recorded $backend/$name applied_ref=$PATTERNS_KIT_REF"
@@ -1351,18 +1357,38 @@ acq_provenance_field() {
 acq_workspace_record_write() {
   local backend="${1:-}" name="${2:-}" workspace="${3:-}"
   [ -n "$backend" ] && [ -n "$name" ] && [ -n "$workspace" ] || return 0
+  case "$workspace" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  local workspace_check
+  workspace_check="$workspace"
+  if [ ! -d "$workspace_check" ] && command -v cygpath >/dev/null 2>&1; then
+    workspace_check=$(cygpath -u "$workspace" 2>/dev/null || printf '%s' "$workspace")
+  fi
+  [ -d "$workspace_check" ] || return 1
   local file dir tmp
   file=$(_acq_provenance_file "$backend" "$name") || return 1
   dir=$(dirname "$file")
   mkdir -p "$dir" 2>/dev/null || return 1
   tmp="${file}.workspace.$$"
-  awk -F= '$1 != "workspace" { print }' "$file" 2>/dev/null > "$tmp" || : > "$tmp"
-  printf 'workspace=%s\n' "$workspace" >> "$tmp" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  {
+    if [ -f "$file" ]; then
+      awk -F= '$1 != "workspace" && $1 != "workspace_source" { print }' "$file" 2>/dev/null || true
+    else
+      printf 'schema=1\n'
+      printf 'backend=%s\n' "$backend"
+    fi
+    printf 'workspace_source=host\n'
+    printf 'workspace=%s\n' "$workspace"
+  } > "$tmp" || { rm -f "$tmp" 2>/dev/null; return 1; }
   mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
 }
 
 acq_workspace_record_read() {
-  acq_provenance_field "${1:-}" "${2:-}" workspace
+  local backend="${1:-}" name="${2:-}" source
+  source=$(acq_provenance_field "$backend" "$name" workspace_source)
+  [ "$source" = "host" ] || return 0
+  acq_provenance_field "$backend" "$name" workspace
 }
 
 # Classify a sandbox's currency against the LOCAL pinned PATTERNS_KIT_REF.
@@ -2132,7 +2158,7 @@ _acq_github_pat_url() {
 # path).
 github_scope_sandbox() {
   local sandbox="$1" ws="${2:-}"
-  local repos owners="" nwo owner owner_count=0
+  local repos owners="" nwo owner owner_key owner_count=0
 
   repos=$(detect_workspace_repos "$ws")
   if [ -z "$repos" ]; then
@@ -2144,7 +2170,8 @@ github_scope_sandbox() {
   while IFS= read -r nwo; do
     [ -n "$nwo" ] || continue
     owner="${nwo%%/*}"
-    case "$owners" in *"|$owner|"*) ;; *) owners="$owners|$owner|"; owner_count=$((owner_count + 1)) ;; esac
+    owner_key=$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')
+    case "$owners" in *"|$owner_key="*) ;; *) owners="$owners|$owner_key=$owner|"; owner_count=$((owner_count + 1)) ;; esac
   done <<EOF
 $repos
 EOF
@@ -2184,6 +2211,7 @@ EOF
   IFS="$_oldifs"
   for o in "$@"; do
     [ -n "$o" ] || continue
+    o="${o#*=}"
     echo "" >&2
     echo "      Owner '$o' — open:" >&2
     printf '        %s\n' "$(_acq_github_pat_url "$o" "$sandbox")" >&2

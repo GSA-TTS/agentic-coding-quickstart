@@ -569,10 +569,6 @@ acq_backend_run() {
   sbx exec "$name" "$@"
 }
 
-acq_backend_workspace_for() {
-  sbx exec "$1" -- sh -c 'printf "%s" "${ACQ_WORKSPACE:-}"' </dev/null 2>/dev/null || true
-}
-
 # ---------------------------------------------------------------------------
 # acq_backend_shell — interactive human shell
 # ---------------------------------------------------------------------------

@@ -15,12 +15,14 @@ setup() {
   # A throwaway workspace tree with assorted git remotes.
   GWT="$STUBDIR/gh"
   mkdir -p "$GWT/repoGH" "$GWT/wsMulti/a" "$GWT/wsMulti/b" "$GWT/wsGL" "$GWT/empty"
-  mkdir -p "$GWT/wsOneOwner/a" "$GWT/wsOneOwner/b"
+  mkdir -p "$GWT/wsOneOwner/a" "$GWT/wsOneOwner/b" "$GWT/wsCaseOwner/a" "$GWT/wsCaseOwner/b"
   ( cd "$GWT/repoGH" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
   ( cd "$GWT/wsMulti/a" && git init -q && git remote add origin git@github.com:orgOne/repo1.git )
   ( cd "$GWT/wsMulti/b" && git init -q && git remote add origin https://github.com/orgTwo/repo2 )
   ( cd "$GWT/wsOneOwner/a" && git init -q && git remote add origin git@github.com:orgOne/repo1.git )
   ( cd "$GWT/wsOneOwner/b" && git init -q && git remote add origin https://github.com/orgOne/repo2 )
+  ( cd "$GWT/wsCaseOwner/a" && git init -q && git remote add origin git@github.com:OrgOne/repo1.git )
+  ( cd "$GWT/wsCaseOwner/b" && git init -q && git remote add origin https://github.com/orgone/repo2 )
   ( cd "$GWT/wsGL" && git init -q && git remote add origin https://gitlab.com/x/y.git )
 }
 teardown() { acq_teardown_stubs; }
@@ -94,6 +96,75 @@ _common() { # FUNC ARGS...
   assert_output --partial 'orgOne/repo1'
   assert_output --partial 'orgOne/repo2'
   refute_output --partial 'For EACH owner'
+}
+
+@test "gh-scope: treats owner case variants as the same GitHub owner" {
+  run env ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
+    ACQ_SECRET_TEST_VALUE=ghp_fake bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    github_scope_sandbox sb1 "'"$GWT"'/wsCaseOwner" 2>&1
+  '
+  assert_success
+  assert_output --partial "Owner '"
+  assert_output --partial 'OrgOne/repo1'
+  assert_output --partial 'orgone/repo2'
+  refute_output --partial 'multiple accounts'
+}
+
+@test "gh-record: workspace records reject newline values and keep metadata" {
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    export ACQ_PROVENANCE_DIR="'"$STUBDIR"'/provenance"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_record_write sbx sb1 "'"$GWT"'/repoGH"
+    acq_workspace_record_write sbx sb1 "'"$GWT"'/repoGH
+owner=evil" || true
+    acq_provenance_field sbx sb1 schema
+    acq_provenance_field sbx sb1 backend
+    acq_provenance_field sbx sb1 workspace_source
+    acq_workspace_record_read sbx sb1
+    acq_provenance_field sbx sb1 owner
+  '
+  assert_success
+  assert_line --index 0 '1'
+  assert_line --index 1 'sbx'
+  assert_line --index 2 'host'
+  assert_line --index 3 "$GWT/repoGH"
+  refute_output --partial 'evil'
+}
+
+@test "gh-record: unmarked legacy workspace records are ignored" {
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    export ACQ_PROVENANCE_DIR="'"$STUBDIR"'/provenance"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    file=$(_acq_provenance_file sbx oldbox)
+    mkdir -p "$(dirname "$file")"
+    printf "schema=1\nbackend=sbx\nworkspace='"$GWT"'/repoGH\n" > "$file"
+    acq_workspace_record_read sbx oldbox
+  '
+  assert_success
+  assert_output ''
+}
+
+@test "gh-record: provenance refresh preserves only host-marked workspace" {
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    export ACQ_PROVENANCE_DIR="'"$STUBDIR"'/provenance"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    acq_workspace_record_write sbx goodbox "'"$GWT"'/repoGH"
+    acq_provenance_write sbx goodbox
+    printf "good=%s\n" "$(acq_workspace_record_read sbx goodbox)"
+    file=$(_acq_provenance_file sbx oldbox)
+    mkdir -p "$(dirname "$file")"
+    printf "schema=1\nbackend=sbx\nworkspace='"$GWT"'/repoGH\n" > "$file"
+    acq_provenance_write sbx oldbox
+    printf "legacy=%s\n" "$(acq_workspace_record_read sbx oldbox)"
+  '
+  assert_success
+  assert_line --index 0 "good=$GWT/repoGH"
+  assert_line --index 1 'legacy='
 }
 
 # advise_github_scope gate: fires iff repos present AND no sandbox-scoped github

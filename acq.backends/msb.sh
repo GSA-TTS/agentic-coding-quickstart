@@ -2958,7 +2958,7 @@ EOF
   fi
 
   ACQ_MSB_GUEST_WORKSPACE=""
-  local _wi _wspec _wpath _wro _wsrc _whost _first_guest=""
+  local _wi _wspec _wpath _wro _wsrc _whost _first_record _first_guest="" _first_host=""
   for _wi in ${_ws_recs[@]+"${!_ws_recs[@]}"}; do
     _wspec="${_ws_recs[$_wi]}"
     # Split an optional trailing ":ro" (read-only) marker from the path.
@@ -2991,7 +2991,16 @@ EOF
     # drive form under MSYS), the guest side is the POSIX path the Linux microVM
     # uses (canonicalize_path). A single value for both is the bug this fixes.
     _wsrc="$_wpath"
-    [ -n "$_clone_src" ] && [ -z "$_first_guest" ] && _wsrc="$_clone_src"
+    if command -v host_path >/dev/null 2>&1; then
+      _first_record=$(host_path "$_wpath")
+    else
+      _first_record="$_wpath"
+    fi
+    if [ -z "$_first_guest" ]; then
+      _first_guest="$_wpath"
+      _first_host="$_first_record"
+    fi
+    [ -n "$_clone_src" ] && [ "$_wi" -eq 0 ] && _wsrc="$_clone_src"
     if command -v host_path >/dev/null 2>&1; then
       _whost=$(host_path "$_wsrc")
     else
@@ -2999,7 +3008,6 @@ EOF
     fi
     create_flags+=(--volume "${_whost}:${_wpath}${_wro}")
     acq_debug "msb volume: ${_whost} (host) -> ${_wpath}${_wro} (guest)"
-    [ -z "$_first_guest" ] && _first_guest="$_wpath"
   done
 
   # Decide the agent's starting directory (recorded for attach). Explicit
@@ -3258,7 +3266,7 @@ EOF
   # Best-effort: a provenance write failure never affects the
   # sandbox. Reached only when provision did not abort earlier under set -e.
   acq_provenance_write msb "$name" || true
-  acq_workspace_record_write msb "$name" "$ACQ_MSB_GUEST_WORKSPACE" || true
+  acq_workspace_record_write msb "$name" "$_first_host" || true
 
   # Persist the CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs so a later
   # `acq start`/`acq restart` can reload them and re-run their startup services
@@ -4305,12 +4313,6 @@ _acq_msb_workspace_for() {
   fi
   [ -n "$ws" ] || ws="/home/agent"
   printf '%s\n' "$ws"
-}
-
-acq_backend_workspace_for() {
-  local ws
-  ws=$(_acq_msb_workspace_for "$1")
-  [ "$ws" = "/home/agent" ] || printf '%s\n' "$ws"
 }
 
 # _acq_msb_term_flags_into ARRVAR — `-e` flags forwarding the host's terminal

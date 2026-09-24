@@ -1410,10 +1410,6 @@ case "$subcommand" in
       gs_ws="$2"
     else
       gs_ws=$(acq_workspace_record_read "${ACQ_RESOLVED_BACKEND}" "$gs_sandbox")
-      if [ -z "$gs_ws" ] && command -v acq_backend_workspace_for >/dev/null 2>&1; then
-        gs_ws=$(acq_backend_workspace_for "$gs_sandbox")
-        [ -z "$gs_ws" ] || acq_workspace_record_write "${ACQ_RESOLVED_BACKEND}" "$gs_sandbox" "$gs_ws" || true
-      fi
       if [ -z "$gs_ws" ]; then
         echo "acq: github-scope: no workspace path was provided, and no workspace" >&2
         echo "     is recorded for sandbox '$gs_sandbox'. Re-run with:" >&2

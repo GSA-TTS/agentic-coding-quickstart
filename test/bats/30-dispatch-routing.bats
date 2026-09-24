@@ -192,6 +192,32 @@ _seed_usai() {
   assert [ -f "$STUBDIR/.msb_created" ]
 }
 
+@test "create(msb): records the host workspace path for later github-scope" {
+  local proj="$STUBDIR/msb-gh-record" expected
+  mkdir -p "$proj"
+  expected=$(canonicalize_path "$proj")
+  rm -f "$STUBDIR/.msb_created"
+  run env USAI_API_KEY=sk-ci-host ACQ_BACKEND=msb "$ACQ" create opencode "$proj"
+  assert_success
+  assert [ -f "$STUBDIR/.msb_created" ]
+  run acq_workspace_record_read msb opencode-msb-gh-record
+  assert_success
+  assert_output "$expected"
+  refute_output --partial '/home/agent'
+}
+
+@test "github-scope: no path does not read or persist guest-reported workspace" {
+  local proj="$STUBDIR/guest-controlled"
+  mkdir -p "$proj/repo"
+  ( cd "$proj/repo" && git init -q && git remote add origin https://github.com/GSA-TTS/guest.git )
+  run env ACQ_BACKEND=sbx STUB_RECORDED_WORKSPACE="$proj" "$ACQ" github-scope oldbox
+  assert_failure
+  assert_output --partial 'no workspace path was provided'
+  refute_regex "$(cat "$CALLS")" 'sbx exec oldbox'
+  run acq_workspace_record_read sbx oldbox
+  assert_output ''
+}
+
 @test "run: present key + bad status -> post-create gate offers rotate; decline aborts" {
   local proj="$STUBDIR/keyrun2"; mkdir -p "$proj"
   _seed_usai
