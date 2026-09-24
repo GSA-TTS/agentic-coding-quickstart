@@ -18,7 +18,7 @@ Defaults:
   WORKSPACE current directory
 
 Environment:
-  AGENT=opencode                         agent to create for the test sandbox
+  AGENT=shell                            agent to create for the test sandbox
   ACQ_SNAPSHOT_DIR=<dir>                 override snapshot archive directory
   VERIFY_SNAPSHOT_CLEANUP=1              remove the test sandboxes at the end
   VERIFY_SNAPSHOT_FORCE=1                allow pre-cleaning a non-snaptest name
@@ -30,7 +30,7 @@ Prerequisites:
   - Run from a quickstart checkout with this branch checked out.
   - msb must be installed and usable.
   - SSH_AUTH_SOCK must point at a live host ssh-agent socket.
-  - The initial acq run is interactive; exit the agent session to continue.
+  - A USAi key must already be stored or exported; the verifier is non-interactive.
 USAGE
 }
 
@@ -43,9 +43,11 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ACQ="$ROOT/acq"
 SANDBOX="${1:-snaptest-opencode}"
 WORKSPACE="${2:-$PWD}"
-AGENT="${AGENT:-opencode}"
+AGENT="${AGENT:-shell}"
 SNAPDIR="${ACQ_SNAPSHOT_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq/snapshots}"
 COPY_SANDBOX="${SANDBOX}-copy"
+SENTINEL_PATH="/home/agent/.acq-native-snapshot-restore-sentinel"
+SENTINEL_VALUE="acq-native-snapshot-restore:$SANDBOX:$(date -u +%Y%m%dT%H%M%SZ):$$"
 
 say() { printf '\n==> %s\n' "$*" >&2; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -67,6 +69,35 @@ preclean_sandbox() {
   "$ACQ" --backend msb rm "$name" || true
 }
 
+write_sentinel() {
+  say "Writing guest-state sentinel before snapshot"
+  "$ACQ" --backend msb exec "$SANDBOX" \
+    -e "ACQ_VERIFY_SENTINEL_PATH=$SENTINEL_PATH" \
+    -e "ACQ_VERIFY_SENTINEL_VALUE=$SENTINEL_VALUE" \
+    -- sh -lc '
+      printf "%s\n" "$ACQ_VERIFY_SENTINEL_VALUE" >"$ACQ_VERIFY_SENTINEL_PATH"
+      test -s "$ACQ_VERIFY_SENTINEL_PATH"
+      sync "$ACQ_VERIFY_SENTINEL_PATH" 2>/dev/null || sync
+      printf "sentinel written: %s\n" "$ACQ_VERIFY_SENTINEL_PATH"
+    '
+}
+
+verify_sentinel() {
+  local name="$1" label="$2"
+  say "Verifying restored sentinel in $label"
+  "$ACQ" --backend msb exec "$name" \
+    -e "ACQ_VERIFY_SENTINEL_PATH=$SENTINEL_PATH" \
+    -e "ACQ_VERIFY_SENTINEL_VALUE=$SENTINEL_VALUE" \
+    -- sh -lc '
+      actual=$(cat "$ACQ_VERIFY_SENTINEL_PATH") || exit 1
+      [ "$actual" = "$ACQ_VERIFY_SENTINEL_VALUE" ] || {
+        printf "sentinel mismatch: expected %s, got %s\n" "$ACQ_VERIFY_SENTINEL_VALUE" "$actual" >&2
+        exit 1
+      }
+      printf "sentinel restored: %s\n" "$ACQ_VERIFY_SENTINEL_PATH"
+    '
+}
+
 [ -x "$ACQ" ] || fail "acq is not executable at $ACQ"
 [ -d "$WORKSPACE" ] || fail "workspace is not a directory: $WORKSPACE"
 command -v msb >/dev/null 2>&1 || fail "msb is not on PATH"
@@ -81,11 +112,13 @@ say "Snapshot directory: $SNAPDIR"
 preclean_sandbox "$COPY_SANDBOX"
 if [ "${VERIFY_SNAPSHOT_SKIP_CREATE:-0}" != "1" ]; then
   preclean_sandbox "$SANDBOX"
-  say "Creating and attaching to sandbox. Exit the agent session to continue."
-  "$ACQ" --backend msb run "$AGENT" "$WORKSPACE" --name "$SANDBOX"
+  say "Creating sandbox non-interactively"
+  "$ACQ" --backend msb create --no-update-check "$AGENT" "$WORKSPACE" --name "$SANDBOX" </dev/null
 else
   say "Skipping initial create/attach step because VERIFY_SNAPSHOT_SKIP_CREATE=1"
 fi
+
+write_sentinel
 
 say "Creating date-stamped snapshot archive"
 "$ACQ" --backend msb snapshot "$SANDBOX"
@@ -103,12 +136,15 @@ say "Restoring by sandbox name only (should pick newest date-stamped snapshot)"
 say "Verifying sandbox is listed"
 "$ACQ" --backend msb ls | grep -F "$SANDBOX" >/dev/null || fail "restored sandbox not listed: $SANDBOX"
 
+verify_sentinel "$SANDBOX" "primary restore"
+
 say "Verifying SSH-agent is reachable through restored vsock route"
 "$ACQ" --backend msb exec "$SANDBOX" -- sh -lc 'echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"; ssh-add -l >/dev/null && echo "ssh-agent reachable"'
 
 if [ "${VERIFY_SNAPSHOT_SKIP_COPY:-0}" != "1" ]; then
   say "Restoring explicit archive into copy sandbox: $COPY_SANDBOX"
   "$ACQ" --backend msb restore "$COPY_SANDBOX" "$LATEST"
+  verify_sentinel "$COPY_SANDBOX" "copy restore"
   "$ACQ" --backend msb exec "$COPY_SANDBOX" -- sh -lc 'ssh-add -l >/dev/null && echo "copy ssh-agent reachable"'
 else
   say "Skipping explicit archive copy restore because VERIFY_SNAPSHOT_SKIP_COPY=1"
@@ -117,13 +153,11 @@ fi
 if [ "${VERIFY_SNAPSHOT_SKIP_RECREATE:-0}" != "1" ]; then
   say "Testing one-shot acq recreate on primary sandbox"
   "$ACQ" --backend msb recreate "$SANDBOX"
+  verify_sentinel "$SANDBOX" "recreate"
   "$ACQ" --backend msb exec "$SANDBOX" -- sh -lc 'ssh-add -l >/dev/null && echo "recreated ssh-agent reachable"'
 else
   say "Skipping acq recreate because VERIFY_SNAPSHOT_SKIP_RECREATE=1"
 fi
-
-say "Re-attaching to primary sandbox so you can inspect restored agent context. Exit to finish."
-"$ACQ" --backend msb run "$SANDBOX"
 
 if [ "${VERIFY_SNAPSHOT_CLEANUP:-0}" = "1" ]; then
   say "Cleaning up test sandboxes"
