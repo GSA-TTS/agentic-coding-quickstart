@@ -115,6 +115,7 @@ case "${1:-}" in
     [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"
     exit 0 ;;
   create) : >"$STUBDIR/.created"; exit 0 ;;
+  snapshot|restore) exit 64 ;;
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
@@ -218,9 +219,16 @@ case "$_msb_sub" in
     : >"$STUBDIR/.msb_created" ;;
   inspect)
     # `msb inspect <name> --format json` — emit a create-time published-ports
-    # JSON fixture if the test planted one, else nothing (models an absent field
-    # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
-    [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
+    # JSON fixture if the test planted one, else require the sandbox to exist.
+    # This matches real inspect semantics and keeps acq_backend_exists honest.
+    if [ -f "$STUBDIR/.msb_inspect_json" ]; then
+      cat "$STUBDIR/.msb_inspect_json"
+      exit 0
+    fi
+    if [ -f "$STUBDIR/.msb_sandbox_list" ] && grep -Fxq -- "${2:-}" "$STUBDIR/.msb_sandbox_list"; then
+      exit 0
+    fi
+    exit 1 ;;
   list|ls)
     # `msb list --running -q` (running-state probe, ADR-0017 stopped detection):
     # emit the RUNNING fixture if the caller asked for --running, else the full
@@ -464,6 +472,10 @@ case "$_msb_sub" in
     # `--secret ENV@HOST` bindings and REQUIRES the value to be present in the
     # host env. Record which of the bound secret env vars were present at start
     # time so a test can assert acq_backend_start exported them before starting.
+    { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
+    { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
+    : ;;
+  snapshot|restore)
     { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
     { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
     : ;;

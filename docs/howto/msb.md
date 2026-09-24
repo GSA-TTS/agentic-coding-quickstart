@@ -198,10 +198,12 @@ acq shell my-sandbox        # interactive human shell (acq exec runs a command, 
 acq exec my-sandbox -- <cmd>   # run a one-off command in the sandbox
 ```
 
-Unlike sbx, msb **can** stop and resume detached long-running sandboxes and
-supports snapshot/restore natively (`msb snapshot …`); `acq` does not yet
-surface a neutral `acq snapshot` verb (see the Backend Guide's
-known-limitations note).
+Unlike sbx, msb **can** stop and resume detached long-running sandboxes. It also
+supports `acq snapshot` / `acq restore` via msb's native snapshot/restore path;
+acq restores snapshots with external workspace mounts using disk-only boot plus
+explicit resource re-binding to avoid stale virtio-fs device state. sbx remains
+unsupported for those acq verbs because its local template flow is
+disk-only/fresh-boot.
 
 ## Common commands reference
 
@@ -212,6 +214,10 @@ known-limitations note).
 | Stop sandbox | `acq stop <name>` | `msb stop <name>` |
 | Resume sandbox | `acq run <name>` | `msb run <name>` |
 | Remove sandbox | `acq rm <name>` | `msb remove <name>` |
+| Snapshot then remove | `acq rm --snapshot <name> [out.msb]` | `msb snapshot create ... && msb remove ...` |
+| Snapshot sandbox | `acq snapshot <name> [out.msb]` | `msb snapshot create --from-sandbox <name> --full [-o out.msb]` |
+| Restore snapshot | `acq restore <name> [snapshot.msb]` | `msb restore <snapshot> --name <name> ...` |
+| Recreate from snapshot | `acq recreate <name> [out.msb]` | `msb snapshot create ... && msb remove ... && msb restore ...` |
 | Run a command | `acq exec <name> -- <cmd>` | `msb exec <name> -- <cmd>` |
 | Interactive shell | `acq shell <name>` | `msb exec -it <name> -- bash` |
 
@@ -224,7 +230,6 @@ abstract — use the raw `msb` command:
 | Check version | `msb --version` |
 | Self-update | `msb self update` |
 | Import a local image | `msb image load -i <tar> -t <ref>` |
-| Snapshots | `msb snapshot …` |
 
 ## msb-specific configuration
 

@@ -85,7 +85,7 @@ export ACQ_BACKEND=sbx
 | Flag | Value | Meaning |
 |------|-------|---------|
 | `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 1 | `acq ports` is supported |
-| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 0 | No snapshot support |
+| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 0 | No stateful snapshot/restore support; sbx local templates are disk-only/fresh-boot and are not exposed as `acq snapshot` |
 | `ACQ_BACKEND_CAN_RESUME` | 1 | Sandboxes persist between sessions |
 | `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | Secret proxy injection |
 
@@ -136,11 +136,11 @@ automation story.
   `--secret GITHUB_TOKEN@github.com,api.github.com,codeload.github.com`); the real values never enter the VM.
   **Any** custom-endpoint secret stored with `acq secret set SVC --host H --env E`
   is bound generically the same way — no fixed usai/github table
-- **Snapshots**: microsandbox has a full `msb snapshot` CLI verb
-  (create/list/inspect/verify/remove/save/load, `run --from-snapshot`), but
-  `acq` does not surface it — wiring `acq snapshot` is beyond sbx parity, so
-  `SUPPORTS_SNAPSHOTS=0` reflects what `acq` surfaces (not what msb can do); see
-  Known limitations
+- **Snapshots**: `acq snapshot` / `acq restore` surface msb's native snapshot
+  path (`msb snapshot create --full` + `msb restore`). When a snapshot includes
+  acq-managed external workspace mounts, restore cold-boots the captured disk
+  (`--disk-only`) and re-binds those host resources to avoid stale virtio-fs
+  device-state restore failures; see [ADR-0030](adr/0030-native-snapshot-restore.md)
 
 ### Requirements
 
@@ -834,7 +834,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 | Flag | Value | Meaning |
 |------|-------|---------|
 | `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 1 | Post-hoc `acq ports <sandbox> --publish HOST:GUEST` is **implemented**: `acq_backend_ports` opens `msb ssh serve` on an ephemeral loopback port against a running sandbox and tunnels the guest port to the host with OpenSSH `-L` (no re-create), using an acq-managed ed25519 key and tearing the serve/ssh pair down on `acq stop`/`rm` ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md)). Create/run publish via neutral `publishedPorts` → `-p HOST:GUEST` also ships. **Live-verified** on a KVM-capable host via `scripts/verify-ports-live` (happy-path publish + host-reaches-guest, LIST, fail-closed on a busy host port, teardown) |
-| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 0 | msb has a full `msb snapshot` CLI verb, but `acq` exposes **no `snapshot` verb** to invoke it. Wiring one is beyond sbx parity (sbx has none), so the flag reflects what `acq` surfaces (`0`), not what msb can do |
+| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 1 | `acq snapshot` / `acq restore` surface msb's native full-state snapshot/restore path. `acq restore` re-derives the current host SSH-agent vsock route and asks msb to inherit validated source-local resources rather than requiring user-supplied resource flags ([ADR-0030](adr/0030-native-snapshot-restore.md)) |
 | `ACQ_BACKEND_CAN_RESUME` | 1 | `msb stop` / `msb start` preserve state |
 | `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (host-scoped substitution for REST/API hosts and HTTPS git transport hosts) |
 
@@ -848,7 +848,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 | Secret model | proxy `secret set-custom` | host-env `--secret ENV@HOST` |
 | Git commit signing / ssh-agent | host SSH agent forwarded implicitly by the sbx CLI (when SSH_AUTH_SOCK set) | host SSH agent forwarded via `--vsock` + an in-guest socat bridge when SSH_AUTH_SOCK set, msb >= 0.6.9 (ADR-0021) |
 | Secret binding breadth | 7 built-in services + any custom `--host/--env` endpoint | usai + github + **any** custom `--host/--env` endpoint bound generically via `--secret ENV@HOST` (shipped) |
-| Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; `SUPPORTS_SNAPSHOTS=0`) |
+| Snapshots | unsupported (`SUPPORTS_SNAPSHOTS=0`; local `sbx template save/load` is disk-only/fresh-boot and is not exposed as a degraded `acq snapshot`) | supported (`SUPPORTS_SNAPSHOTS=1`; native full-state snapshot/restore via `acq snapshot` / `acq restore`) |
 | Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` now implemented (ADR-0015) — live end-to-end verification pending a KVM host |
 | Kit volumes | neutral `volumes:` passed through 1:1 to kit-spec v2 §5.7 (sized block device / tmpfs, mounted at create; dies with the sandbox) | neutral `volumes:` unioned across kits (last wins by path) and mapped to a derived named disk volume (`--mount-named acq-<sandbox>-<pathslug>-<crc>:<path>:kind=disk,size=<size>`) or `--tmpfs <path>:<size>`; derived volumes removed on `acq rm` (ADR-0023) |
 | Agent binary | supplied by the sbx agent template | installed at provision on a plain base (`npm install -g opencode-ai`), then launched on attach |
@@ -899,10 +899,11 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   own `ACQ_MSB_IMAGE`; `acq` warns at attach if the requested agent has no recipe.
   (On sbx the agent is supplied by the sbx template, so this constraint is
   msb-specific.)
-- **Snapshots not surfaced.** `msb snapshot` is a full CLI verb, but `acq`
-  exposes no `snapshot` verb, so `SUPPORTS_SNAPSHOTS=0`. Wiring it is beyond sbx
-  parity (sbx has no snapshots), so the flag reflects what `acq` surfaces rather
-  than the verb being built.
+- **Snapshots are msb-only in acq.** `acq snapshot` / `acq restore` use msb's
+  native full-state primitive. sbx is deliberately unsupported rather than
+  degraded to a disk-only template flow, because local `sbx template save/load`
+  does not preserve execution state or provide restore-time host-resource
+  rebinding.
 - **Browser-based OpenCode is via the `openchamber` kit.** The former
   `opencode-web.sh` helper has been removed; use the `openchamber` acq kit, which
   publishes the OpenCode server port (4096) plus the OpenChamber UI (3000) with a
@@ -1142,8 +1143,8 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
   ([ADR-0014](adr/0014-neutral-port-publish-and-background-vocab.md)) — the
   neutral fields light up end-to-end with the released patterns schema +
   openchamber kit (merged)
-- msb `SUPPORTS_SNAPSHOTS=0` — `acq` surfaces no snapshot verb (msb's own verb
-  exists; wiring is beyond parity)
+- msb `SUPPORTS_SNAPSHOTS=1` — `acq snapshot` / `acq restore` surface native
+  full-state msb snapshot/restore (ADR-0030); sbx remains unsupported
 - Generic custom-endpoint secret binding on msb — usai + github + **any** custom
   `--host/--env` endpoint bound via `--secret ENV@HOST` from a non-secret endpoint
   sidecar
@@ -1177,8 +1178,6 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
   the kit/agent/USAi rows, not `--publish`), so run it per the
   [ADR-0011](adr/0011-msb-backend-and-neutral-kits.md) periodic-validation
   cadence before treating the tunnel as verified working
-- `acq snapshot` verb (beyond sbx parity; msb's own `msb snapshot` verb is not
-  surfaced)
 - Full Go/keychain swap-on-access secret component of design §7.5 (age fallback,
   `CredentialRewriteRule`); acq ships the bash keychain subset (see Secrets)
 - `acq policy …` — network policy subcommands
