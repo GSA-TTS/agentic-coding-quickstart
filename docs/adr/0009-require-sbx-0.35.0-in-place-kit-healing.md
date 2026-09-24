@@ -13,15 +13,20 @@ supersedes: []
 
 # ADR-0009: Require sbx >= 0.35.0 and Heal Pre-Kit Sandboxes In Place with `sbx kit add`
 
-> **Update (2026-08-11): the sbx version floor has since been raised to 0.38.0.**
+> **Update (2026-08-11, revised 2026-09-21): the sbx version floor has since been
+> raised, first to 0.38.0 and now to 0.39.0.**
 > This ADR records why 0.35.0 was originally required (in-place `sbx kit add`
-> healing). The floor was later bumped to **0.38.0** because acq's neutral-kit
+> healing). The floor was first bumped to **0.38.0** because acq's neutral-kit
 > translator emits the sbx **v2 kit grammar**, which only sbx >= 0.38.0 accepts —
 > older builds fail with an opaque `field permissions not found` decode error
-> mid-create rather than a version message. The 0.35.0 rationale below still holds
-> (it is a lower bound satisfied by 0.38.0); the effective floor in
-> `acq.backends/sbx.sh` (`MIN_SBX_VERSION`) is now 0.38.0. The Linux/ARM64 "no
-> 0.35.x build, wait for 0.36.x" caveat is moot at the 0.38.0 floor.
+> mid-create rather than a version message. It was then bumped again to
+> **0.39.0**, where `sbx create --env` first exists: acq emits `--env` on every
+> create that has a workspace (the `ACQ_WORKSPACE`/`ACQ_CLONE` guest markers of
+> ADR-0027), and sbx rejects unknown flags outright, so on 0.38.x every such
+> create fails. The 0.35.0 rationale below still holds (it is a lower bound
+> satisfied by 0.39.0); the effective floor in `acq.backends/sbx.sh`
+> (`MIN_SBX_VERSION`) is now **0.39.0**. The Linux/ARM64 "no 0.35.x build, wait
+> for 0.36.x" caveat is moot at that floor.
 >
 > **Update (2026-08-18): sbx 0.38 no longer supports in-place healing of the
 > built-in bundle.** sbx 0.38's `sbx kit add` only applies mixin kits that

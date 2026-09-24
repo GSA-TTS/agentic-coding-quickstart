@@ -134,9 +134,12 @@ on purpose, written repo-locally into the scratch:
   remote, and anything that identifies the repo by its origin URL misled. The
   raw configured values are copied, not `git remote get-url`'s expansion: a
   host `insteadOf` rewrite is host policy that the guest never receives (only
-  `user.*` is synced into its global tier), and an https-to-ssh rewrite would
-  hand the guest a transport it has no key for. A credential embedded in the
-  URL travels with it, exactly as it does when the checkout's own `.git/config`
+  `user.*` is synced into its global tier), and such a rewrite leaves the guest
+  with an unusable transport in EITHER direction: an https-to-ssh rewrite hands
+  it a transport it has no key for, and under an ssh-to-https rewrite (common
+  for token auth) the raw value is already the ssh form. Raw remains the right
+  default because it is what the checkout itself holds. A credential embedded
+  in the URL travels with it, exactly as when the checkout's own `.git/config`
   is mounted in a non-clone run; the scratch's state directory is private
   (0700) because of it. Every configured value is carried, in order and with
   its boundaries intact: a remote URL is legitimately multi-valued
@@ -182,6 +185,14 @@ verified to reach every exec/attach session and to survive a native restart):
   agent's cwd: `ACQ_MSB_WORKSPACE` relocates only the start dir, and following
   it would let `ACQ_CLONE=1` sit next to a secondary passthrough's real path.
 - `ACQ_CLONE=1` only when the primary is the disposable clone.
+
+The flag is used unconditionally, so it must exist at each backend's declared
+version floor. `msb` has carried `-e`/`--env` on `create` since before its
+0.6.9 floor (verified in the CLI's shared sandbox options at that tag). `sbx`
+gained it in **0.39.0**, which is why the sbx floor moved from 0.38.0 to 0.39.0
+rather than gating the flag: sbx rejects an unknown flag outright, so on 0.38.x
+the whole create fails, and a gate would instead leave a floor-compliant user
+with kits that silently do nothing.
 
 The two facts are kept separate so a non-clone kit gets a neutral workspace
 path for free, and because the workspace path alone must never be read as a
