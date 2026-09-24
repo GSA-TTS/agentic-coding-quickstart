@@ -124,7 +124,8 @@ on purpose, written repo-locally into the scratch:
   `.git/config`, and per-forge identities commonly live only there or in a
   gitdir-scoped include. Without the copy, the first in-sandbox commit fails
   with "Author identity unknown"; the guest's global tier cannot express a
-  per-repo value.
+  per-repo value. A failure to read or write it only warns: a missing identity
+  already fails loudly at the first commit.
 - The source checkout's **origin URL** (`remote.origin.url`, plus
   `remote.origin.pushurl` when set). `git clone <host path>` points the
   scratch's `origin` at the host checkout path, and the scratch is mounted at
@@ -136,9 +137,18 @@ on purpose, written repo-locally into the scratch:
   `user.*` is synced into its global tier), and an https-to-ssh rewrite would
   hand the guest a transport it has no key for. A credential embedded in the
   URL travels with it, exactly as it does when the checkout's own `.git/config`
-  is mounted in a non-clone run. Remote-tracking refs (`origin/*`) still
-  reflect the host's local branches at clone time until the first
-  `git fetch --prune`.
+  is mounted in a non-clone run; the scratch's state directory is private
+  (0700) because of it. Every configured value is carried, in order and with
+  its boundaries intact: a remote URL is legitimately multi-valued
+  (`git remote set-url --add`) and git fetches the first value, and a value may
+  itself contain a newline, so values are read NUL-delimited rather than by
+  line. A source with no origin leaves the scratch with no origin URL either,
+  so an in-guest push fails instead of landing in the scratch. Failing to read
+  the source's config or to write the scratch's fails the create rather than
+  warning: a scratch whose `origin` still resolves to itself makes an in-guest
+  `git push origin` look successful while reaching no forge. Remote-tracking
+  refs (`origin/*`) still reflect the host's local branches at clone time
+  until the first `git fetch --prune`.
 
 sbx carries both incidentally by copying `.git` wholesale. Propagating only
 these values is the minimized form of that, without the credential helpers,
