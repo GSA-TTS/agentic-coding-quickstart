@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# verify-sbx-startup-barrier — live check for the sbx startup barrier used by
+# acq create/run before any attach-time probes can read kit-managed config.
+#
+# Requires a host that can create sbx sandboxes and has acq's normal create-time
+# secrets configured. This cannot run inside a sandbox.
+#
+# Usage:
+#   ./scripts/verify-sbx-startup-barrier [SANDBOX_NAME]
+set -u
+
+SANDBOX="${1:-acq-sbx-startup-barrier-$$}"
+SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+ACQ="$SCRIPT_DIR/acq"
+PASS=0
+FAIL=0
+TMPDIR=""
+
+ok() { PASS=$((PASS + 1)); printf '  ok  %s\n' "$1"; }
+bad() { FAIL=$((FAIL + 1)); printf '  BAD %s\n' "$1"; [ -n "${2:-}" ] && printf '      %s\n' "$2"; }
+info() { printf '\n== %s ==\n' "$1"; }
+
+cleanup() {
+  info "cleanup"
+  "$ACQ" --backend sbx rm "$SANDBOX" >/dev/null 2>&1 && printf '  removed sandbox %s\n' "$SANDBOX" || true
+  [ -n "$TMPDIR" ] && rm -rf "$TMPDIR"
+}
+trap cleanup EXIT INT TERM
+
+info "preconditions"
+command -v sbx >/dev/null 2>&1 && ok "sbx on PATH ($(sbx version 2>/dev/null | sed -n '1p'))" || { bad "sbx not on PATH"; exit 1; }
+[ -x "$ACQ" ] && ok "acq is executable" || { bad "acq not executable at $ACQ"; exit 1; }
+
+TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-sbx-startup.XXXXXX")
+WORKSPACE="$TMPDIR/workspace"
+KITDIR="$TMPDIR/slow-config-writer"
+mkdir -p "$WORKSPACE" "$KITDIR"
+
+cat >"$KITDIR/spec.yaml" <<'KIT'
+schemaVersion: "2"
+kind: mixin
+name: slow-config-writer
+displayName: Slow Config Writer
+description: Writes a delayed marker so acq can verify startup ordering
+setup:
+  startup:
+    - command:
+        - sh
+        - -c
+        - |
+          echo "$(date +%s.%N) STARTUP_BEGIN" >> /tmp/acq-startup-barrier.log
+          sleep 4
+          mkdir -p /home/agent/.config/opencode
+          printf '%s\n' '{"acqStartupBarrier":"ready"}' > /home/agent/.config/opencode/acq-startup-barrier.json
+          echo "$(date +%s.%N) STARTUP_CONFIG_WRITTEN" >> /tmp/acq-startup-barrier.log
+KIT
+
+info "fresh sandbox"
+"$ACQ" --backend sbx rm "$SANDBOX" >/dev/null 2>&1 || true
+
+info "create with slow startup kit"
+create_log="$TMPDIR/acq-create.log"
+if "$ACQ" --backend sbx create opencode --name "$SANDBOX" --kit "$KITDIR" "$WORKSPACE" >"$create_log" 2>&1; then
+  ok "acq create returned 0"
+else
+  bad "acq create failed" "$(sed -n '1,120p' "$create_log")"
+  exit 1
+fi
+
+info "verify marker is present immediately after create"
+probe=$(sbx exec "$SANDBOX" -- sh -c '
+  set -u
+  printf "HOST_RETURN_OBSERVED %s\n" "$(date +%s.%N)"
+  cat /tmp/acq-startup-barrier.log 2>/dev/null || true
+  test -f /home/agent/.config/opencode/acq-startup-barrier.json && echo CONFIG_PRESENT=yes || echo CONFIG_PRESENT=no
+' 2>&1)
+printf '%s\n' "$probe" | sed 's/^/    | /'
+
+printf '%s\n' "$probe" | grep -q 'STARTUP_CONFIG_WRITTEN' \
+  && ok "slow startup command completed before acq returned" \
+  || bad "slow startup completion marker missing after acq returned"
+printf '%s\n' "$probe" | grep -q 'CONFIG_PRESENT=yes' \
+  && ok "config file is present immediately after acq returned" \
+  || bad "config file is absent immediately after acq returned"
+
+printf '\n  passed: %d   failed: %d\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

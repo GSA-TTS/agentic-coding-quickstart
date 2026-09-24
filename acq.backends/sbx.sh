@@ -61,6 +61,14 @@ MIN_SBX_VERSION="0.39.0"
 # Max seconds to wait for `sbx exec` to become usable.
 ACQ_EXEC_READY_TIMEOUT="${ACQ_EXEC_READY_TIMEOUT:-60}"
 
+# Max seconds to wait for acq's final startup marker after `sbx create` returns.
+ACQ_SBX_STARTUP_BARRIER_TIMEOUT="${ACQ_SBX_STARTUP_BARRIER_TIMEOUT:-60}"
+
+# Guest-visible marker written by the final acq-generated startup kit. Because
+# sbx dispatches background startup commands without waiting, this only gates
+# non-background startup commands that appear before acq's barrier kit.
+ACQ_SBX_STARTUP_BARRIER_PATH="/tmp/acq/startup-complete"
+
 # Absolute path where the usai-provider kit stages its OpenCode config.
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 
@@ -321,6 +329,28 @@ _acq_sbx_git_identity_kit() {
   printf '%s\n' "$dir"
 }
 
+_acq_sbx_startup_barrier_kit() {
+  local token="$1" dir
+  dir="${ACQ_SBX_KIT_CACHE}/generated/startup-barrier-${token}"
+  mkdir -p "$dir"
+  cat >"$dir/spec.yaml" <<EOF
+schemaVersion: "2"
+kind: mixin
+name: acq-startup-barrier
+displayName: ACQ Startup Barrier
+description: Marks completion of prior non-background startup commands for acq
+setup:
+  startup:
+    - command:
+        - sh
+        - -c
+        - |
+          mkdir -p /tmp/acq
+          printf '%s\\n' '$token' > /tmp/acq/startup-complete
+EOF
+  printf '%s\n' "$dir"
+}
+
 _acq_sbx_apply_git_identity_kit() {
   local name="$1" git_identity_kit _kadd_rc=0
   git_identity_kit=$(_acq_sbx_git_identity_kit)
@@ -342,9 +372,24 @@ _acq_sbx_wait_for_exec_ready() {
   local name="$1" deadline out
   deadline=$(( $(date +%s) + ACQ_EXEC_READY_TIMEOUT ))
   while :; do
-    out=$(sbx exec "$name" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r')
+    out=$(sbx exec "$name" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r') || out=""
     case "$out" in
       *ok*) return 0 ;;
+    esac
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 2
+  done
+}
+
+_acq_sbx_wait_for_startup_barrier() {
+  local name="$1" token="$2" deadline out
+  deadline=$(( $(date +%s) + ACQ_SBX_STARTUP_BARRIER_TIMEOUT ))
+  while :; do
+    out=$(sbx exec "$name" -- sh -c \
+      "test \"\$(cat '$ACQ_SBX_STARTUP_BARRIER_PATH' 2>/dev/null)\" = '$token' && echo ready" \
+      </dev/null 2>/dev/null | tr -d '\r') || out=""
+    case "$out" in
+      *ready*) return 0 ;;
     esac
     [ "$(date +%s)" -ge "$deadline" ] && return 1
     sleep 2
@@ -487,6 +532,9 @@ acq_backend_provision() {
   local _git_identity_kit=""
   _git_identity_kit=$(_acq_sbx_git_identity_kit)
   [ -n "$_git_identity_kit" ] && kf+=(--kit "$_git_identity_kit")
+  local _startup_barrier_token
+  _startup_barrier_token="acq-$$-$(date +%s)"
+  kf+=(--kit "$(_acq_sbx_startup_barrier_kit "$_startup_barrier_token")")
 
   acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_stripped[*]:-}"
   acq_spin_start "Creating sandbox '$name'"
@@ -496,6 +544,17 @@ acq_backend_provision() {
   # Record host-side bundle provenance ONLY after a successful create — a failed
   # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
+    acq_spin_start "Waiting for kit startup in '$name'"
+    if ! _acq_sbx_wait_for_startup_barrier "$name" "$_startup_barrier_token"; then
+      acq_spin_stop "Waiting for kit startup in '$name'"
+      echo "acq(sbx): startup commands did not finish within ${ACQ_SBX_STARTUP_BARRIER_TIMEOUT}s." >&2
+      echo "          Refusing to keep a sandbox whose kit-managed config was not" >&2
+      echo "          confirmed complete before attach; removing '$name'." >&2
+      acq_backend_terminate "$name" >/dev/null 2>&1 || \
+        echo "acq(sbx): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
+      return 1
+    fi
+    acq_spin_stop "Waiting for kit startup in '$name'"
     acq_provenance_write sbx "$name" || true
     _acq_sbx_seed_extra_kit_marker "$name"
     # Persist the CLI (`--kit`) / extra kit refs alongside provenance so a later
