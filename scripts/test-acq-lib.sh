@@ -219,9 +219,16 @@ case "$_msb_sub" in
     : >"$STUBDIR/.msb_created" ;;
   inspect)
     # `msb inspect <name> --format json` — emit a create-time published-ports
-    # JSON fixture if the test planted one, else nothing (models an absent field
-    # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
-    [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
+    # JSON fixture if the test planted one, else require the sandbox to exist.
+    # This matches real inspect semantics and keeps acq_backend_exists honest.
+    if [ -f "$STUBDIR/.msb_inspect_json" ]; then
+      cat "$STUBDIR/.msb_inspect_json"
+      exit 0
+    fi
+    if [ -f "$STUBDIR/.msb_sandbox_list" ] && grep -Fxq -- "${2:-}" "$STUBDIR/.msb_sandbox_list"; then
+      exit 0
+    fi
+    exit 1 ;;
   list|ls)
     # `msb list --running -q` (running-state probe, ADR-0017 stopped detection):
     # emit the RUNNING fixture if the caller asked for --running, else the full
