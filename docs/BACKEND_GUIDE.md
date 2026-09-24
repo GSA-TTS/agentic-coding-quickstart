@@ -1030,6 +1030,24 @@ The neutral vocabulary is: `caps.network.allow`, `files[]`, `commands[]`,
 `environment`, `publishedPorts`, `volumes`, `agentContext`,
 `backend_shortcuts`, and `backend_extras`.
 
+**Shell rc snippets.** A kit that needs shell startup behavior should deliver
+readable POSIX snippets as files under `/home/agent/.rc.d/*.sh`, for example
+`/home/agent/.rc.d/10-team.sh` or `/home/agent/.rc.d/90-personal.sh`.
+`acq`'s built-in shell bridge sources these snippets for bash login shells in
+lexical order; zsh-capable base images must wire the same directory from native
+zsh startup files. The snippets are kit-owned state, not a user-editable dotfile
+layer.
+
+Use this path for agent shell integration outside a devenv shell, team tool
+environment/completions, personal aliases/functions, and an optional
+direnv/devenv hook. Do not put secrets in snippets, do not print secret-bearing
+environment, and do not duplicate environment already supplied by `devenv shell`.
+Fish and nushell do not consume `.sh` files; kits targeting those shells must use
+the shells' native configuration directories with the same constraints: kit-owned
+files, deterministic names, no secrets, and no duplicate devenv setup. Team kits
+that previously installed their own shell-startup loop should migrate their
+payloads to `/home/agent/.rc.d/` and stop owning the hook itself.
+
 **`environment` (guest env vars).** A flat map of `NAME → value` for
 **non-secret** guest environment variables (e.g. `OPENCODE_CONFIG`,
 `OPENCODE_TUI_CONFIG`, `GITLAB_HOST`). Names must be POSIX identifiers
