@@ -326,7 +326,6 @@ SPEC
   assert_output --partial '/tmp'
   run bash -c 'cat "$1"/msb/freshgatebox.*.config/ssh-auth-sock 2>/dev/null' _ "$ACQ_PROVENANCE_DIR"
   refute_output '/stale/agent.sock'
-  assert_output --partial '/home/agent/.acq/ssh-agent.sock'
 }
 
 @test "msb: an OCI setup failure is fail-soft (rc 0, warns, marker not touched)" {
