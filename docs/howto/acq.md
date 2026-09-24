@@ -415,7 +415,7 @@ acq configure
   PAT is still minted per-sandbox (`acq github-scope`).
 - Non-interactive/CI runs make no changes and just print the current config; set
   `ACQ_NO_PROMPT=1` to force that. See
-  [ADR-0028](../adr/0028-interactive-acq-configure.md).
+  [ADR-0031](../adr/0031-interactive-acq-configure.md).
 
 ---
 

@@ -228,7 +228,7 @@ BACKENDUSAGE
 
 _acq_configure_usage() {
   cat >&2 <<'CONFIGUSAGE'
-acq configure — interactive setup for extra kits and token scoping (ADR-0028)
+acq configure — interactive setup for extra kits and token scoping (ADR-0031)
 
 Usage:
   acq configure
@@ -645,7 +645,7 @@ case "$subcommand" in
         [ -z "$local_backend" ] && { echo "acq: backend set: missing backend name" >&2; exit 1; }
         local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
         # Write only the `backend:` key, preserving any other config (extra_kits,
-        # scope_github_token) written by `acq configure` (ADR-0028).
+        # scope_github_token) written by `acq configure` (ADR-0031).
         _acq_config_write_field backend "$local_backend" \
           || { echo "acq: backend set: could not write ${local_config_file}" >&2; exit 1; }
         echo "acq: default backend set to '${local_backend}' in ${local_config_file}" >&2
@@ -826,7 +826,7 @@ esac
 # ---------------------------------------------------------------------------
 case "$subcommand" in
   configure)
-    # Interactive configuration (ADR-0028). Needs no backend — it only reads and
+    # Interactive configuration (ADR-0031). Needs no backend — it only reads and
     # writes config.yaml. Resolve the backend best-effort so a first-run decline
     # can persist the detected default, but never fail on no backend.
     shift
@@ -935,13 +935,13 @@ case "$subcommand" in
   create)
     shift
     acq_backend_prepare
-    # First-run onboarding (ADR-0028): offer `acq configure` once before we
+    # First-run onboarding (ADR-0031): offer `acq configure` once before we
     # provision, so a brand-new user picks kits up front. No-op after first run
     # and in non-interactive sessions.
     maybe_first_run_configure
     # Apply configured-default extra kits (config.yaml), then offer a create-time
     # picker pre-populated with those defaults so THIS sandbox can deviate.
-    _acq_apply_configured_extra_kits
+    _acq_apply_configured_extra_kits || exit 1
     create_time_kit_picker
     # Pre-flight: validate the workspace path before provisioning (#issue).
     ws=$(workspace_path "$@")
@@ -1063,13 +1063,13 @@ case "$subcommand" in
         # (in a throwaway sandbox) yet 401 (in the real one). Gate on key
         # presence first; fail closed if the user declines.
 
-        # First-run onboarding + extra-kit selection (ADR-0028), BEFORE the key
+        # First-run onboarding + extra-kit selection (ADR-0031), BEFORE the key
         # gate so a first-time user configures kits up front. maybe_first_run_*
         # is a no-op after first run / non-interactive; the picker pre-populates
         # from the configured defaults and folds the result into ACQ_EXTRA_KITS
         # for this create (persisted per-sandbox by the existing kit-record path).
         maybe_first_run_configure
-        _acq_apply_configured_extra_kits
+        _acq_apply_configured_extra_kits || exit 1
         create_time_kit_picker
 
         if ! ensure_key_present "$local_name"; then

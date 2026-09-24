@@ -6,7 +6,7 @@
 # set of interactive widgets so `acq configure` (and the create-time picker) can
 # offer a friendly, colorful selection UI — modeled on the multiselect installers
 # users already like — WITHOUT pinning a TUI dependency (gum/fzf/whiptail). See
-# ADR-0028 and issue GSA-TTS/agentic-coding-quickstart#499.
+# ADR-0031 and issue GSA-TTS/agentic-coding-quickstart#499.
 #
 # Two public functions:
 #
@@ -48,11 +48,12 @@
 #   - Caller-supplied labels are sanitized of control bytes before display, so an
 #     untrusted kit description can't inject terminal escapes.
 
-# _acq_prompt_sanitize TEXT — strip C0 control bytes + DEL from caller data, so a
-# label/description can never inject raw escapes. Same technique as progress.sh's
-# _acq_sanitize_msg (kept independent so prompt.sh is usable if sourced alone).
+# _acq_prompt_sanitize TEXT — strip C0/C1 control bytes + DEL from caller data,
+# so a label/description can never inject raw escapes. Same technique as
+# progress.sh's _acq_sanitize_msg (kept independent so prompt.sh is usable if
+# sourced alone).
 _acq_prompt_sanitize() {
-  printf '%s' "$*" | LC_ALL=C tr -d '\000-\037\177'
+  printf '%s' "$*" | LC_ALL=C tr -d '\000-\037\177\200-\237'
 }
 
 # _acq_prompt_interactive — 0 (true) when we may run an interactive widget:

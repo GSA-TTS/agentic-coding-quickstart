@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
 # 135-configure.bats — interactive `acq configure` + config.yaml + prompt widgets
-# (ADR-0028; issue GSA-TTS/agentic-coding-quickstart#499).
+# (ADR-0031; issue GSA-TTS/agentic-coding-quickstart#499).
 #
 # Covers, offline (no TTY, no backend CLI, no network):
 #   - the generalized config.yaml reader/writer (multi-key, preserve-others)
@@ -87,6 +87,35 @@ _cfg_src() {
   assert_success
   assert_line 'write-rc=1'
   assert_line 'read-rc=0'
+}
+
+@test "config: reader ignores nested YAML and uses last top-level duplicate" {
+  export XDG_CONFIG_HOME="$STUBDIR/xdg"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'extra_kits: openchamber\nsome_block:\n  extra_kits: nested-evil\nextra_kits: paseo\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _acq_config_read_field extra_kits
+  '
+  assert_success
+  assert_output 'paseo'
+}
+
+@test "config: writer creates private config directory and file" {
+  export XDG_CONFIG_HOME="$STUBDIR/xdg"
+  run bash -c '
+    umask 022
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _acq_config_write_field backend msb
+    cfg="$XDG_CONFIG_HOME/acq/config.yaml"
+    dir_mode=$(stat -c %a "$(dirname "$cfg")" 2>/dev/null || stat -f %Lp "$(dirname "$cfg")" 2>/dev/null || echo "?")
+    file_mode=$(stat -c %a "$cfg" 2>/dev/null || stat -f %Lp "$cfg" 2>/dev/null || echo "?")
+    printf "dir=%s\n" "$dir_mode"
+    printf "file=%s\n" "$file_mode"
+  '
+  assert_success
+  assert_line 'dir=700'
+  assert_line 'file=600'
 }
 
 # ---------------------------------------------------------------------------
@@ -228,6 +257,15 @@ _cfg_src() {
   assert_line 'dn=1'
 }
 
+@test "prompt: sanitizer strips C0, C1, and DEL control bytes" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    _acq_prompt_sanitize "$(printf "a\033[31m\2331m\177b")" | od -An -tx1 | tr -d " \n"
+  '
+  assert_success
+  assert_output '615b33316d316d62'
+}
+
 @test "prompt: a multi-token script drives multiselect THEN confirm in one flow" {
   # This mirrors how acq_configure calls the widgets in-process (no subshell
   # between them), so the shared scripted-input cursor advances across both.
@@ -252,7 +290,7 @@ _cfg_src() {
   run env ACQ_BACKEND=sbx "$ACQ" configure --help
   assert_success
   assert_output --partial 'acq configure'
-  assert_output --partial 'ADR-0028'
+  assert_output --partial 'ADR-0031'
 }
 
 @test "configure: help banner lists the configure verb" {
@@ -319,8 +357,21 @@ _cfg_src() {
   assert_output --partial 'dir=integrations/isolation/acq-kits/paseo'
 }
 
-@test "apply: an env-supplied ACQ_EXTRA_KITS wins over the configured default" {
+@test "apply: unknown configured extra_kits names fail closed" {
   export XDG_CONFIG_HOME="$STUBDIR/xdg6"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'extra_kits: openchamber git+https://evil.example/x.git#ref=abc&dir=kit\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    ACQ_EXTRA_KITS=""; ACQ_EXTRA_KITS_FROM_ENV=""
+    _acq_apply_configured_extra_kits
+  '
+  assert_failure
+  assert_output --partial "unknown kit 'git+https://evil.example/x.git#ref=abc&dir=kit'"
+}
+
+@test "apply: an env-supplied ACQ_EXTRA_KITS wins over the configured default" {
+  export XDG_CONFIG_HOME="$STUBDIR/xdg7"
   mkdir -p "$XDG_CONFIG_HOME/acq"
   printf 'extra_kits: openchamber\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
   run bash -c '

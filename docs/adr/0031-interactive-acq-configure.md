@@ -11,7 +11,7 @@ risk_treatment: n/a
 supersedes: []
 ---
 
-# ADR-0028: Interactive `acq configure` for extra kits and token-scoping defaults
+# ADR-0031: Interactive `acq configure` for extra kits and token-scoping defaults
 
 ## Context and Problem Statement
 
@@ -64,7 +64,7 @@ Chosen: **option 3**.
 
 - **New `acq.backends/prompt.sh`** — `acq_prompt_multiselect` and
   `acq_prompt_confirm`. Stderr-only chrome, gated on an interactive TTY
-  (`[ -t 0 ]` for input, `[ -t 1 ]` for color), colored with the same
+  (`[ -t 0 ]` for input, `[ -t 2 ]` for stderr color), colored with the same
   `install.sh` SGR scheme, bash-3.2 safe, caller labels escape-sanitized (as in
   `progress.sh`). Honors an `ACQ_NO_PROMPT` opt-out and an `ACQ_PROMPT_TEST_INPUT`
   test hook (mirroring `ACQ_SECRET_TEST_VALUE`). Non-TTY / opted-out degrades to
@@ -72,9 +72,10 @@ Chosen: **option 3**.
 - **Opt-in kit catalog** — sourced from the already-pinned patterns bundle
   (`PATTERNS_KIT_REF` / `PATTERNS_KIT_DIR`, `integrations/isolation/acq-kits/`):
   `openchamber`, `paseo`. `prime-agent` is a skeleton at the current pin and is
-  intentionally omitted until functional. The catalog also offers a free-form
-  "add your own ref / local path" entry. The four built-ins are shown **inline as
-  frozen rows** at the top of the same picker — always checked, dimmed, tagged
+  intentionally omitted until functional. Custom refs remain available through
+  `ACQ_EXTRA_KITS` and `--kit`, but are not stored in durable config. The four
+  built-ins are shown **inline as frozen rows** at the top of the same picker —
+  always checked, dimmed, tagged
   "(always applied)", cursor-skipped, and never toggleable — rather than in a
   separate banner, so the full applied set reads as one list.
 - **`acq configure` command** — shows current config, runs the multiselect over
@@ -84,7 +85,10 @@ Chosen: **option 3**.
 - **Config schema** — `config.yaml` gains flat keys `extra_kits:` and
   `scope_github_token:` alongside the existing `backend:`. The single-key awk
   parser is generalized to read/write named flat keys, preserving the existing
-  `backend:` line and the "no YAML dependency" convention.
+  `backend:` line and the "no YAML dependency" convention. The config directory
+  and file are written private to the user, and the flat-key reader ignores
+  indented/nested YAML so hand-edited structure is not mistaken for a top-level
+  setting.
 - **`acq create`/`run`** — pre-populate the picker from the global defaults, fold
   the selection into the existing `ACQ_EXTRA_KITS`/`ACQ_CLI_KITS` path (so it
   flows through `_build_kit_list` → `acq_cli_kits_write`), and thereby persist
@@ -109,7 +113,7 @@ Chosen: **option 3**.
 - A hand-rolled multiselect is less capable than a real TUI library (no mouse,
   simple key handling). Accepted per the minimalism driver.
 - `config.yaml` now carries more than one key; the awk parser is generalized but
-  remains a deliberately small, non-YAML reader.
+  remains a deliberately small, flat-only reader.
 
 **Compliance implications**
 
