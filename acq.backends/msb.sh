@@ -112,15 +112,22 @@ MIN_MSB_VERSION="0.6.9"
 
 # msb 0.7.0 through 0.7.2 migrate 0.6.x sandbox state one-way, into a form the
 # 0.6.x line cannot read (`database schema is newer than this msb binary`).
-# Refuse those releases until the upstream fix expected in 0.7.3 is available.
-# Recovering an already-migrated host needs `msb self downgrade`, run BY the
-# 0.7.x binary (it owns the rollback metadata) — see ADR-0031.
+# Refuse exactly that range: 0.7.3 carries the upstream cross-version
+# compatibility fix and is accepted.
 MSB_BLOCKED_VERSION_MIN="0.7.0"
 MSB_BLOCKED_VERSION_MAX="0.7.2"
 
-# Version acq's own tooling installs and recommends during the blocked window:
-# the newest release whose migration set the 0.6.x line understands.
+# Version acq's own tooling installs during the blocked window: the newest
+# release whose migration set the 0.6.x line understands.
 MSB_PINNED_VERSION="0.6.18"
+
+# First release with the upstream fix. Moving FORWARD to this is the preferred
+# recovery for a host that already ran a blocked version: the migration sets are
+# additive, so this line reads an already-migrated catalog with no rollback and no
+# state rewrite. Rolling back needs `msb self downgrade` run BY the blocked binary
+# (it owns the rollback metadata), and can be refused outright when grouped or
+# duplicate snapshots exist. See ADR-0031.
+MSB_FIXED_VERSION="0.7.3"
 
 # Default OCI image for provisioned sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
@@ -785,9 +792,10 @@ acq_backend_check_version() {
     echo "error: msb (microsandbox) CLI not found on PATH. Install msb >= $MIN_MSB_VERSION:" >&2
     echo "         brew install GSA-TTS/tap/microsandbox-acq        # version-pinned" >&2
     echo "         ./scripts/verify-msb-pin --install               # verified release bundle" >&2
-    echo "       Do NOT use 'curl -fsSL https://install.microsandbox.dev | sh' or" >&2
-    echo "       'msb self update' right now: both resolve to the newest release," >&2
-    echo "       which is inside the blocked $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX range." >&2
+    echo "       Note: 'curl -fsSL https://install.microsandbox.dev | sh' cannot install a" >&2
+    echo "       specific version — it always resolves to the newest release, and every" >&2
+    echo "       release ships a byte-identical copy, so a versioned URL is not a pin." >&2
+    echo "       acq accepts msb $MIN_MSB_VERSION-$MSB_BLOCKED_VERSION_MIN (exclusive) and $MSB_FIXED_VERSION or newer." >&2
     echo "       See docs/BACKEND_GUIDE.md (msb backend) for details." >&2
     exit 1
   fi
@@ -800,7 +808,7 @@ acq_backend_check_version() {
   fi
   if [ "$(_acq_msb_version_ge "$current" "$MIN_MSB_VERSION")" -ne 0 ]; then
     echo "error: acq requires msb >= $MIN_MSB_VERSION, but found $current." >&2
-    echo "       Install msb $MSB_PINNED_VERSION, or upgrade to msb >= 0.7.3 once available:" >&2
+    echo "       Install msb $MSB_PINNED_VERSION, or msb $MSB_FIXED_VERSION or newer:" >&2
     echo "         brew install GSA-TTS/tap/microsandbox-acq" >&2
     echo "         ./scripts/verify-msb-pin --install" >&2
     exit 1
@@ -809,10 +817,16 @@ acq_backend_check_version() {
     echo "error: acq refuses msb $current because msb $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX" >&2
     echo "       migrate existing 0.6.x sandbox state one-way, into a form the 0.6.x" >&2
     echo "       line cannot read." >&2
-    echo "       Use msb $MSB_PINNED_VERSION, or msb >= 0.7.3 once that upstream fix is released." >&2
-    echo "       If this msb ALREADY migrated your sandbox state, swapping the binary" >&2
-    echo "       is not enough — roll the catalog back first, using THIS msb:" >&2
+    echo "       Preferred fix — move FORWARD to msb $MSB_FIXED_VERSION, which reads the state this" >&2
+    echo "       msb already migrated, with no rollback and no state rewrite:" >&2
+    echo "         msb self update" >&2
+    echo "       Alternative — roll back to msb $MSB_PINNED_VERSION. If this msb ALREADY migrated" >&2
+    echo "       your sandbox state, swapping the binary is NOT enough; the catalog" >&2
+    echo "       must be rolled back first, and only THIS msb can do it:" >&2
     echo "         msb self downgrade $MSB_PINNED_VERSION" >&2
+    echo "       Do NOT run 'msb self downgrade' from an older msb: it cannot roll" >&2
+    echo "       these migrations back, and the failed attempt leaves an" >&2
+    echo "       interrupted-downgrade record that blocks every msb command." >&2
     echo "       See docs/KNOWN_FAILURE_MODES.md for details." >&2
     exit 1
   fi

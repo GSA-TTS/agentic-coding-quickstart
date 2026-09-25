@@ -66,11 +66,19 @@ BREW_FORMULA="GSA-TTS/tap/acq"
 
 # msb 0.7.0-0.7.2 migrate 0.6.x sandbox state one-way into a format the 0.6.x
 # line cannot read. Install a pinned last-known-good release when acq needs to
-# install or repair msb, and accept >=0.7.3 when present. See ADR-0031.
+# install or repair msb, and accept the fixed line when present. See ADR-0031.
 MSB_MIN_VERSION="0.6.9"
 MSB_PINNED_VERSION="0.6.18"
 MSB_BLOCKED_VERSION_MIN="0.7.0"
 MSB_BLOCKED_VERSION_MAX="0.7.2"
+
+# First release carrying the upstream cross-version compatibility fix. Moving
+# FORWARD to this is strictly safer than rolling back to the pin: the migration
+# sets are additive, so this line reads a catalog an earlier 0.7.x already
+# migrated with no rollback, no data-affecting step, and no snapshot refusal.
+# Prefer it whenever the host can reach it; the pin remains the fallback for a
+# host that cannot move forward.
+MSB_FIXED_VERSION="0.7.3"
 
 # Where pinned msb release artifacts come from. The upstream one-line installer
 # is deliberately NOT used to place a pinned version: it resolves the version at
@@ -85,6 +93,13 @@ MSB_RELEASE_BASE="https://github.com/superradcompany/microsandbox/releases/downl
 # version. Both own `bin/msb`, so only one may be linked at a time.
 MSB_BREW_FORMULA="GSA-TTS/tap/microsandbox-acq"
 MSB_BREW_UPSTREAM_FORMULA="superradcompany/tap/microsandbox"
+
+# Keg-only, version-specific formulae in our tap, for reaching one exact msb
+# without disturbing the linked one (e.g. to run `msb self downgrade` with the
+# binary that performed a migration — only that binary can roll it back). Keg-only
+# means they are never symlinked into the Homebrew prefix, so any number of them
+# coexist with each other and with the linked formula above.
+MSB_BREW_VERSIONED_PREFIX="GSA-TTS/tap/microsandbox-acq@"
 
 # Where the upstream layout keeps msb (honoring MSB_HOME, as msb itself does).
 MSB_HOME_DIR="${MSB_HOME:-$HOME/.microsandbox}"
@@ -607,6 +622,11 @@ msb_candidate_paths() {
   [ -n "${HOME:-}" ] && [ -x "$HOME/.local/bin/msb" ] && printf '%s\n' "$HOME/.local/bin/msb"
 
   if command -v brew >/dev/null 2>&1; then
+    # Only formulae that LINK bin/msb can affect which msb runs. The
+    # microsandbox-acq@<version> formulae are keg-only by design — installed but
+    # never symlinked into the prefix — so they cannot shadow anything and are
+    # deliberately not probed here. Reporting them would turn a correct
+    # side-by-side install into a spurious "multiple msb binaries" warning.
     for formula in "$MSB_BREW_UPSTREAM_FORMULA" "$MSB_BREW_FORMULA" microsandbox; do
       brew_prefix=$(brew --prefix "$formula" 2>/dev/null || true)
       [ -n "$brew_prefix" ] && [ -x "$brew_prefix/bin/msb" ] && printf '%s\n' "$brew_prefix/bin/msb"
@@ -847,17 +867,95 @@ msb_catalog_ahead() {
   esac
 }
 
+# Path of an interrupted `msb self downgrade` journal, or empty.
+#
+# A failed downgrade leaves $MSB_HOME/db/self-downgrade/<id>/journal.json behind,
+# and msb then refuses EVERY command from EVERY version until that operation is
+# resumed:
+#
+#   error: self_downgrade_recovery_required: resume the active downgrade
+#   recorded at .../db/self-downgrade/<id>/journal.json
+#
+# When the journal records a transition that cannot complete — which is exactly
+# what a too-old binary leaves behind, because it stages a target it then cannot
+# roll the database back to — the demand is unsatisfiable and the install is
+# wedged. Verified against msb 0.6.18/0.7.2/0.7.3: resuming with the journal's
+# own target, with a different target, and from each of the three binaries all
+# fail identically, and `self downgrade` exposes no abort or clear flag. The only
+# exit is removing the journal directory, after which a correctly-ordered
+# downgrade succeeds normally.
+msb_stale_downgrade_journal() {
+  for journal in "$MSB_HOME_DIR"/db/self-downgrade/*/journal.json; do
+    [ -f "$journal" ] || continue
+    printf '%s\n' "$journal"
+    return 0
+  done
+}
+
+# Clear a wedged downgrade journal, with consent. Deliberately narrow: it removes
+# only the self-downgrade operation directory, never the database, the backups, or
+# any sandbox state.
+clear_stale_downgrade_journal() {
+  journal="$1"
+  opdir=$(dirname "$journal")
+
+  step "An interrupted msb downgrade is blocking every msb command"
+  warn "  msb records an in-progress 'self downgrade' here:"
+  info "    $journal"
+  warn "  Until that operation finishes, msb refuses all commands — including"
+  warn "  read-only ones, and including from a different msb version. If the"
+  warn "  recorded transition cannot complete (a too-old msb leaves exactly that"
+  warn "  behind), there is no way to resume it and no flag to abandon it."
+  info "  Removing that operation directory clears the block. It does NOT touch"
+  info "  your database, your retained downgrade backups, or any sandbox."
+
+  if ! confirm "  Remove $opdir now?"; then
+    warn "  Leaving it in place. msb will keep refusing every command. To do it"
+    warn "  yourself:"
+    info  "    rm -rf \"$opdir\""
+    return 1
+  fi
+
+  run rm -rf "$opdir" || { warn "  Could not remove $opdir."; return 1; }
+  ok "  Cleared the interrupted downgrade; msb commands should work again."
+}
+
 # Roll a 0.7.x-migrated catalog back so a supported msb can read it again.
 #
 # This MUST be driven by the currently-installed 0.7.x binary: `msb self
 # downgrade` builds its rollback plan from the running binary's own migration
 # metadata, takes a database backup, and reverts the migrations the older line
-# does not know. Installing the older binary first strands the catalog instead.
-# It mutates sandbox state, so it is consent-gated and never implied by --yes
-# alone being absent.
+# does not know. Installing the older binary first strands the catalog instead —
+# an older msb answers `local database was updated by a newer msb or does not
+# contain a valid migration prefix`, AND leaves a wedging journal behind (see
+# msb_stale_downgrade_journal). It mutates sandbox state, so it is consent-gated
+# and never implied by --yes alone being absent.
+#
+# Prefer moving FORWARD (see update_msb_to_fixed): it needs no rollback at all.
+# This path is for a host that cannot, or chose not to, move forward.
 recover_migrated_catalog() {
   blocked_msb="$1"
   blocked_version="$2"
+
+  # Refuse to drive the rollback with a binary that cannot perform it. Only the
+  # binary whose own migration metadata covers the applied set can build the
+  # plan, and an attempt by an older one wedges the install rather than failing
+  # cleanly. This guard is the reason that wedge is unreachable through acq.
+  if msb_version_blocked "$blocked_version" \
+     || version_ge "$blocked_version" "$MSB_BLOCKED_VERSION_MIN"; then
+    : # this binary is from the line that applied the migrations; it can roll back
+  else
+    warn "  Refusing to run 'msb self downgrade' with msb $blocked_version: only the newer"
+    warn "  msb that applied these migrations can roll them back, and an attempt by"
+    warn "  an older one leaves an interrupted-downgrade record that blocks every"
+    warn "  msb command afterwards."
+    info "  Get the msb that migrated this catalog, run the downgrade with IT, then"
+    info "  re-run this installer. A keg-only formula gets you that exact version"
+    info "  without disturbing your current msb:"
+    info "    brew install ${MSB_BREW_VERSIONED_PREFIX}<version>"
+    info "    \"\$(brew --prefix microsandbox-acq@<version>)/bin/msb\" self downgrade $MSB_PINNED_VERSION"
+    return 1
+  fi
 
   step "Existing sandbox state was migrated by msb $blocked_version"
   warn "  msb $blocked_version already upgraded the local sandbox catalog in"
@@ -897,12 +995,65 @@ recover_migrated_catalog() {
     warn "  'msb self downgrade $MSB_PINNED_VERSION' did not complete. msb's message above is"
     warn "  authoritative — it refuses rather than discarding data it cannot roll"
     warn "  back (grouped or duplicate snapshots are the usual cause). Resolve"
-    warn "  what it reports, or keep using msb $blocked_version until msb >= 0.7.3 is"
-    warn "  available, then re-run this installer."
+    warn "  what it reports, or move forward to msb $MSB_FIXED_VERSION instead, then re-run"
+    warn "  this installer."
     return 1
   }
 
   ok "  Sandbox catalog rolled back for msb $MSB_PINNED_VERSION."
+}
+
+# Move a blocked msb FORWARD to the fixed line instead of rolling it back.
+#
+# This is the preferred recovery. The migration sets are additive — every
+# migration an earlier 0.7.x applied is also known to the fixed line — so the
+# fixed binary opens an already-migrated catalog directly. No rollback plan, no
+# database backup dance, no `affects_user_data` step, and none of the refusals a
+# downgrade can hit (grouped or duplicate snapshots).
+#
+# `msb self update` is the right tool here precisely because it targets the newest
+# release: during this window the newest release IS the fixed one. That coupling
+# is why this is checked, not assumed — if upstream ships something newer that we
+# have not cleared, the version check afterwards catches it.
+update_msb_to_fixed() {
+  blocked_msb="$1"
+  blocked_version="$2"
+
+  step "msb $blocked_version can be fixed by moving forward, not back"
+  info "  msb $MSB_FIXED_VERSION carries the upstream cross-version compatibility fix, and it"
+  info "  reads the catalog msb $blocked_version already migrated — the migration sets are"
+  info "  additive, so nothing has to be rolled back and no sandbox state is"
+  info "  rewritten. This is safer than downgrading to msb $MSB_PINNED_VERSION, which has to"
+  info "  revert migrations and can refuse outright if you have grouped snapshots."
+
+  if ! confirm "  Run 'msb self update' to move to msb $MSB_FIXED_VERSION now?"; then
+    return 1
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '  [dry-run] %s self update\n' "$blocked_msb"
+    return 0
+  fi
+
+  "$blocked_msb" self update </dev/null || {
+    warn "  'msb self update' did not complete; msb's message above is authoritative."
+    return 1
+  }
+
+  # Trust nothing: `self update` targets whatever is newest, so confirm we landed
+  # on a version this installer actually accepts before calling it a success.
+  hash -r 2>/dev/null || true
+  updated="$(command -v msb 2>/dev/null || true)"
+  updated_version=""
+  [ -n "$updated" ] && updated_version=$(msb_version_of "$updated")
+  if [ -z "$updated_version" ] || msb_version_blocked "$updated_version" \
+     || ! version_ge "$updated_version" "$MSB_MIN_VERSION"; then
+    warn "  After 'msb self update' the active msb is ${updated_version:-unreadable}, which acq"
+    warn "  does not accept. Falling back to the pinned msb $MSB_PINNED_VERSION path."
+    return 1
+  fi
+
+  ok "  msb is now $updated_version ($updated)."
 }
 
 # Remove upstream's always-latest brew formula when it is what is being replaced.
@@ -926,15 +1077,35 @@ remove_upstream_brew_msb() {
     || { warn "  'brew uninstall' failed; remove it manually and re-run."; return 1; }
 }
 
-# Replace whatever msb is active with the pinned version, rolling the sandbox
-# catalog back first when a blocked msb already migrated it. Order matters: the
-# catalog rollback needs the blocked binary still installed.
+# Bring the active msb to a version acq accepts.
+#
+# Returns 0 when the active msb is already acceptable (the forward-update path
+# succeeded and nothing further is needed) via MSB_ALREADY_SUPPORTED=1, or when
+# the pinned version was installed. Order matters throughout: a catalog rollback
+# needs the binary that performed the migration to still be installed, so nothing
+# may be uninstalled before that step.
 replace_active_msb() {
   active="$1"
   active_version="$2"
+  MSB_ALREADY_SUPPORTED=0
+
+  # A wedged downgrade journal blocks every msb command, so clear it before any
+  # probe that shells out to msb — otherwise msb_catalog_ahead misreads the
+  # recovery-required error as an unrelated failure.
+  journal=$(msb_stale_downgrade_journal)
+  if [ -n "$journal" ]; then
+    clear_stale_downgrade_journal "$journal" || return 1
+  fi
 
   if [ -n "$active_version" ] && msb_version_blocked "$active_version" \
      && msb_catalog_ahead "$active"; then
+    # Forward first: it rewrites no state and cannot be refused by the snapshot
+    # checks a rollback can hit. Only fall back to the rollback if the user
+    # declines or the update does not land on an accepted version.
+    if update_msb_to_fixed "$active" "$active_version"; then
+      MSB_ALREADY_SUPPORTED=1
+      return 0
+    fi
     recover_migrated_catalog "$active" "$active_version" || return 1
   fi
   remove_upstream_brew_msb || return 1
@@ -958,7 +1129,7 @@ points at the intended msb binary, then re-run this installer."
   fi
   if ! version_ge "$ver" "$MSB_MIN_VERSION"; then
     die "active msb is still too old: $ver at $active.
-Use msb $MSB_PINNED_VERSION, or upgrade to msb >= 0.7.3 once available."
+Use msb $MSB_PINNED_VERSION, or upgrade to msb $MSB_FIXED_VERSION or newer."
   fi
   if msb_version_blocked "$ver"; then
     die "active msb is still blocked version $ver at $active.
@@ -1019,8 +1190,11 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
     step "The active msb version is blocked"
     warn "  Found msb $active_msb_version at $active_msb."
     warn "  acq refuses msb $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX because those releases"
-    warn "  migrate 0.6.x sandbox state one-way. Install msb $MSB_PINNED_VERSION instead."
-    if confirm "  Install/downgrade msb to $MSB_PINNED_VERSION now?"; then
+    warn "  migrate 0.6.x sandbox state one-way."
+    info "  Two ways out: move FORWARD to msb $MSB_FIXED_VERSION (preferred — it reads the"
+    info "  already-migrated catalog as-is), or roll back to msb $MSB_PINNED_VERSION. You will be"
+    info "  offered the forward path first, and asked before anything changes."
+    if confirm "  Fix the active msb now?"; then
       if replace_active_msb "$active_msb" "$active_msb_version"; then
         verify_active_msb_pinned
       else
@@ -1051,11 +1225,12 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
       info  "    brew install $MSB_BREW_FORMULA"
     fi
     info  "    ./scripts/verify-msb-pin --install   # verified pinned release bundle"
-    info  "  Do NOT use 'curl -fsSL https://install.microsandbox.dev | sh' or"
-    info  "  'msb self update' during the blocked window: both resolve to the newest"
-    info  "  release, which is currently msb $MSB_BLOCKED_VERSION_MAX."
-    info  "  Use msb $MSB_PINNED_VERSION, or msb >= 0.7.3 once it is released."
-
+    info  "  Do NOT use 'curl -fsSL https://install.microsandbox.dev | sh' to install a"
+    info  "  specific version: it always resolves to the newest release, and every"
+    info  "  release publishes a byte-identical copy, so a versioned asset URL is not"
+    info  "  a pin. Use msb $MSB_PINNED_VERSION, or msb $MSB_FIXED_VERSION or newer."
+    info  "  ('msb self update' targets the newest release, which right now IS msb"
+    info  "  $MSB_FIXED_VERSION — that is the one supported use of it during this window.)"
   fi
 fi
 
