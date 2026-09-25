@@ -164,7 +164,12 @@ esac
 STUB
   chmod +x "$STUBDIR/sbx"
   printf 'probebox\n' > "$STUBDIR/.sandbox_list"
-  acq_backend_ensure_kits_applied probebox >/dev/null 2>&1 || true
+  (
+    unset EMAIL GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
+    unset GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+    HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" \
+      acq_backend_ensure_kits_applied probebox >/dev/null 2>&1 || true
+  )
   local log; log=$(cat "$CALLS")
   assert_regex "$log" '\.agentic-coding-playbook/AGENTS\.md'
   refute_regex "$log" '\.agentic-coding-playbook/\.git'
@@ -195,6 +200,72 @@ STUB
   assert_regex "$(cat "$spec")" "ACQ_GIT_USER_EMAIL: '?global@example\\.gov'?"
   assert_regex "$(cat "$spec")" 'git config --global user.name'
   refute_regex "$(cat "$spec")" 'GIT_AUTHOR_NAME: Global User'
+}
+
+@test "rc.d(sbx): neutral kit files materialize as home rc snippets" {
+  local kit="$STUBDIR/rcd-kit" out="$STUBDIR/rcd-sbx-v2"
+  mkdir -p "$kit/files/home/agent/.rc.d"
+  cat > "$kit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: rc-hook
+displayName: RC Hook
+description: shell rc hook fixture
+files:
+  - path: /home/agent/.rc.d/10-team.sh
+    mode: "0644"
+    source: files/home/agent/.rc.d/10-team.sh
+SPEC
+  printf 'export TEAM_TOOL=1\n' > "$kit/files/home/agent/.rc.d/10-team.sh"
+
+  run kit_translate_to_sbx "$kit" "$out"
+  assert_success
+  [ -f "$out/files/home/agent/.rc.d/10-team.sh" ]
+  assert_equal "$(cat "$out/files/home/agent/.rc.d/10-team.sh")" "export TEAM_TOOL=1"
+  assert_regex "$(cat "$out/spec.yaml")" '/home/agent/.rc.d/10-team.sh'
+  assert_regex "$(cat "$out/spec.yaml")" 'chmod 0644'
+  refute_regex "$(cat "$out/spec.yaml")" 'direnv allow|USAI_API_KEY|GITHUB_TOKEN'
+}
+
+@test "rc.d(sbx): provision installs the ~/.rc.d login bridge (backend parity)" {
+  # Parity with msb (ADR-0030): sbx DELIVERS ~/.rc.d files but nothing sources
+  # them at login without this create-time bridge. The bridge text is the ONE
+  # shared block from common.sh (acq_login_profile_rc_block), so the assertions
+  # below (C-collation ordering, bash gate, guards) hold for BOTH backends.
+  : > "$CALLS"
+  (
+    acq_backend_provision rcdbridgebox shell /tmp
+  ) >/dev/null 2>&1 || true
+  local log; log=$(cat "$CALLS")
+  # The bridge is written via a post-create `sbx exec` (not a startup kit).
+  assert_regex "$log" 'acq-login-profile-rc'
+  # Deterministic lexical order: an LC_ALL=C ls list, NOT a locale-dependent glob.
+  assert_regex "$log" 'LC_ALL=C ls'
+  assert_regex "$log" 'for _acq_rc in'
+  assert_regex "$log" 'SC1090'
+  assert_regex "$log" 'unset _acq_rc'
+  # bash-only ~/.profile gate preserved; zsh uses native startup files in images
+  # that support it.
+  assert_regex "$log" 'BASH_VERSION'
+  refute_regex "$log" 'ZSH_VERSION'
+  # The readiness probe must happen before the bridge install, so a freshly
+  # created sandbox does not silently miss the hook while exec is still starting.
+  assert_regex "$log" 'echo ok.*acq-login-profile-rc'
+}
+
+@test "rc.d(sbx): the login bridge does not use a startup-bearing kit (no live-extend refusal)" {
+  # The bridge must NOT be delivered via `sbx kit add` of a setup.startup kit —
+  # that path is refused on sbx >= 0.38 (see _acq_sbx_kit_add). It runs as a
+  # plain `sbx exec`, so provision must never emit a `kit add` for the bridge.
+  : > "$CALLS"
+  (
+    acq_backend_provision rcdnostartupbox shell /tmp
+  ) >/dev/null 2>&1 || true
+  local log; log=$(cat "$CALLS")
+  # The rc-bridge exec line carries the marker; no `sbx kit add` line should.
+  local bridgelines; bridgelines=$(printf '%s\n' "$log" | grep 'acq-login-profile-rc' || true)
+  [ -n "$bridgelines" ]
+  refute_regex "$bridgelines" 'kit add'
 }
 
 @test "provision(sbx): ACQ_EXTRA_KITS is marked into ~/.acq-extra-kits at create" {
@@ -270,4 +341,36 @@ STUB
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'sbx kit add skipbox'
   refute_output --partial 'cannot extend a live sandbox'
+}
+
+@test "agent-kit-heal(sbx): forced refresh includes recorded agent kit" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in *present*) printf 'present\n' ;; *) exit 0 ;; esac ;;
+  kit) exit 0 ;;
+  settings) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  printf 'agentrefreshbox\n' > "$STUBDIR/.sandbox_list"
+  acq_provenance_write sbx agentrefreshbox opencode
+  # Simulate a READY built-in agent kit offline. The real selection gate
+  # (_acq_selected_builtin_kit_refs -> acq_agent_builtin_kit_ready) requires the
+  # pinned patterns bundle to actually ship a valid `opencode` agent kit, which
+  # it does not yet (enablement is deferred, quickstart #485). Stubbing
+  # readiness here keeps this refresh-path regression test meaningful without
+  # falsely enabling opencode in shipped behavior.
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  acq_agent_builtin_kit_ready() { [ "$1" = "opencode" ]; }
+  _acq_builtin_kit_ref() { printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$1"; }
+  ( ACQ_FORCE_KIT_REAPPLY=1 acq_backend_ensure_kits_applied agentrefreshbox >/dev/null 2>&1 ) || true
+  assert_regex "$(cat "$CALLS")" 'acq-kits/opencode'
 }

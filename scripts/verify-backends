@@ -2,9 +2,12 @@
 #
 # verify-backends — HOST-SIDE end-to-end check that the four neutral acq kits
 # apply cleanly on each INSTALLED backend, and that the core kit behaviors work.
-# Unlike scripts/test-acq (which stubs sbx/msb and runs anywhere), this exercises
-# the REAL toolchain and therefore must run on a machine that can create
-# sandboxes:
+# It is also the live sequencing gate for the ADR-0030 migration of
+# `acq run opencode .` to the agent-kit/devenv model: keep this verifier green
+# before, during, and after the internal migration so the observable acq contract
+# remains stable. Unlike scripts/test-acq-bats (which stubs sbx/msb and runs
+# anywhere), this exercises the REAL toolchain and therefore must run on a
+# machine that can create sandboxes:
 #   - sbx: Docker + KVM, `sbx login` done, sbx >= 0.39.0
 #   - msb: host virtualization (KVM on Linux, HVF on macOS, WHP on Windows),
 #          msb >= 0.6.0
@@ -24,6 +27,12 @@
 #      ssh-agent the verifier spins up itself (no dependence on the caller's
 #      agent).
 #   4. The playbook clone symlink appears at the agent's AGENTS.md path.
+#   5. The migration-sensitive boot contract stays intact: the verifier's
+#      ACQ_EXTRA_KITS volume mounts at boot, acq exec starts in the workspace as
+#      the agent user, and an opencode sandbox re-attaches through `acq run NAME --
+#      --version`. Offline bats additionally freeze the fresh `acq run opencode .`
+#      dispatch surface: --clone / ACQ_CLONE, ACQ_WORKSPACE, --kit ordering,
+#      ACQ_IMAGE, boot volumes, and login-shell shape.
 # A backend that is NOT installed is SKIPPED (its row prints "skipped").
 #
 # This CANNOT run inside an sbx/msb sandbox (no nested sandboxes) — see ADR-0011
@@ -1123,6 +1132,17 @@ verify_agent_install() {
   else
     fail "${backend}: opencode binary NOT found in sandbox (agent install failed)"
     dump "exec output" "$LAST_OUT"
+  fi
+
+  # Exercise the live attach/launch path without requiring a real USAi key. A
+  # fresh `acq run opencode "$WORKDIR" -- --version` also performs post-create
+  # USAi key validation and intentionally fails with the verifier's synthetic key;
+  # this name-reattach form drives the same backend attach path and cleanup target.
+  if run_acq "run-opencode-version" --backend "$backend" run "$aname" -- --version; then
+    pass "${backend}: acq run re-attaches opencode sandbox and launches --version"
+  else
+    fail "${backend}: acq run did not re-attach opencode sandbox and launch --version"
+    dump "acq run output" "$LAST_OUT"
   fi
 
   # The guest must have enough RAM to actually RUN a Node.js agent TUI. msb's

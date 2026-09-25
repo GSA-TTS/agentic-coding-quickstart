@@ -3,7 +3,7 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-08-18"
+last_updated: "2026-09-17"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
 related_files: ["docs/howto/acq.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
@@ -1030,6 +1030,24 @@ The neutral vocabulary is: `caps.network.allow`, `files[]`, `commands[]`,
 `environment`, `publishedPorts`, `volumes`, `agentContext`,
 `backend_shortcuts`, and `backend_extras`.
 
+**Shell rc snippets.** A kit that needs shell startup behavior should deliver
+readable POSIX snippets as files under `/home/agent/.rc.d/*.sh`, for example
+`/home/agent/.rc.d/10-team.sh` or `/home/agent/.rc.d/90-personal.sh`.
+`acq`'s built-in shell bridge sources these snippets for bash login shells in
+deterministic lexical order; zsh-capable base images must wire the same directory
+from native zsh startup files. The snippets are kit-owned state, not a
+user-editable dotfile layer.
+
+Use this path for agent shell integration outside a devenv shell, team tool
+environment/completions, personal aliases/functions, and an optional
+direnv/devenv hook. Do not put secrets in snippets, do not print secret-bearing
+environment, and do not duplicate environment already supplied by `devenv shell`.
+Fish and nushell do not consume `.sh` files; kits targeting those shells must use
+the shells' native configuration directories with the same constraints: kit-owned
+files, deterministic names, no secrets, and no duplicate devenv setup. Team kits
+that previously installed their own shell-startup loop should migrate their
+payloads to `/home/agent/.rc.d/` and stop owning the hook itself.
+
 **`environment` (guest env vars).** A flat map of `NAME → value` for
 **non-secret** guest environment variables (e.g. `OPENCODE_CONFIG`,
 `OPENCODE_TUI_CONFIG`, `GITLAB_HOST`). Names must be POSIX identifiers
@@ -1103,6 +1121,56 @@ practical floor (`acq kit validate` warns below it).
 > the property and `PATTERNS_KIT_REF` advances past it.
 
 Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
+
+### ADR-0030 migration sequencing: agent-kit/devenv model
+
+ADR-0030 moves the `acq run opencode .` implementation toward an agent-kit and
+devenv model. The migration is deliberately sequenced so user-visible behavior
+stays stable while internals move behind the existing `acq` surface.
+
+**Increment 0: freeze the current contract before moving code.** Keep the
+observable backend-neutral contract green: `--clone` and `ACQ_CLONE=1`,
+`ACQ_WORKSPACE`, `ACQ_EXTRA_KITS` before CLI `--kit`, `ACQ_IMAGE`, boot-time
+`volumes`, `acq exec` workspace/user behavior, and `acq shell` login-shell
+behavior. Verification:
+
+- `./scripts/test-acq-bats test/bats/140-opencode-migration-gate.bats`
+- `./scripts/test-acq-bats test/bats/35-image-override.bats test/bats/116-clone-option.bats test/bats/110-volumes.bats test/bats/30-dispatch-routing.bats test/bats/70-msb-backend.bats`
+- `./scripts/verify-backends --only sbx` on an sbx-capable host
+- `./scripts/verify-backends --only msb` on an msb-capable host
+
+**Increment 1: introduce the opencode agent-kit inputs without changing dispatch.**
+Add the new kit/devenv artifacts and validation in the patterns/team-kit layer,
+but keep `acq run opencode .` wired through the existing wrapper behavior until
+Increment 0 remains green. When the team kit ships its own verifier, run it from
+that repository or checked-out kit path with `scripts/verify` in addition to the
+Quickstart gates above. Unresolved schema or team-kit vocabulary questions stay
+inside this increment; do not change `acq` dispatch to depend on them first.
+
+**Increment 2: switch `opencode` provisioning to consume the agent kit.** Replace
+only the internal source of the opencode configuration/devenv setup. Preserve the
+same create-time inputs and guest markers. Verification:
+
+- Increment 0 offline bats commands
+- team-kit `scripts/verify` when available
+- `./scripts/verify-backends --only sbx`
+- `./scripts/verify-backends --only msb`
+
+**Increment 3: move devenv-specific setup behind the kit boundary.** Remove any
+now-duplicated wrapper-side setup only after the kit verifier and Quickstart gates
+prove the kit supplies it. Defer unresolved image-layout, login-shell, and
+workspace-start-directory questions to this increment so earlier increments do
+not overfit speculative behavior. Verification:
+
+- Increment 0 offline bats commands
+- focused live `./scripts/verify-backends --only <backend>` for every backend
+  whose setup changed
+- team-kit `scripts/verify` when available
+
+**Increment 4: cleanup and documentation.** Only after all gates above pass,
+remove obsolete wrapper code and update user docs. Re-run the full offline suite
+(`./scripts/test-acq-bats`) and live backend verifier on installed backends before
+claiming the ADR-0030 migration complete.
 
 ### Kit-bundle provenance and stale-sandbox refresh
 

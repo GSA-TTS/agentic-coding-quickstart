@@ -3,7 +3,7 @@ title: "acq Concepts"
 description: "Backend-neutral concepts for working with acq sandboxes (workspaces, mounts)"
 status: canonical
 tier: 2
-last_updated: "2026-08-21"
+last_updated: "2026-09-21"
 audience: "developers"
 keywords: ["acq", "concepts", "workspace", "mount", "backend-neutral", "sbx", "msb"]
 related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -220,6 +220,91 @@ scheme-less prefix so `acq` allowlists it:
 ```bash
 export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 ```
+
+### Advanced: the `~/.rc.d` shell hook
+
+`acq` gives kits a neutral shell hook: any file a kit drops at
+`~/.rc.d/*.sh` is sourced at login. Both backends apply it identically
+(ADR-0030) — the delivery is a normal kit `files[]` drop, and `acq` writes the
+matching login-profile bridge that sources the snippets (`sbx` writes it at
+create time; `msb` writes it as part of its login-shell setup).
+
+What it is and how it behaves:
+
+- **Kit-owned, not user-editable.** The snippets come from a kit's `files[]`
+  tree, and the sourcing bridge is written by `acq`. Treat `~/.rc.d/*.sh` as
+  build output, not a place to hand-edit inside a sandbox.
+- **POSIX-sh, bash bridge.** The built-in `~/.profile` bridge sources the
+  snippets for bash login shells. Zsh-capable base images must wire the same
+  directory from native zsh startup files. The files are POSIX-sh.
+- **Deterministic lexical order.** Snippets are sourced in byte (C-collation)
+  order regardless of the guest's locale, so a `10-`, `20-`, `90-` numeric
+  prefix convention gives a stable, predictable order. A bare shell glob would
+  sort in the guest's locale collation; the bridge forces `LC_ALL=C` for the
+  listing to avoid that.
+
+Guardrails:
+
+- **Never put secrets in a snippet.** `~/.rc.d/*.sh` is kit content that lands
+  on disk and is sourced into every login shell; secrets belong in the backend
+  secret store (injected at runtime), never in a shipped file.
+- **Do not duplicate what devenv provides** inside a devenv shell. If a tool's
+  environment is already established by the project's `devenv`/`.envrc`, do not
+  re-export it here — the hook is for shell integration that must exist
+  *outside* a devenv shell.
+- **Kit-owned.** Ship shell behavior as a kit, not as ad-hoc edits.
+
+Use-cases (ADR-0030):
+
+- the hook itself, delivered by a neutral kit;
+- agent shell integration that must exist outside a devenv shell;
+- team tool environment variables and shell completions;
+- personal aliases and functions (via a personal kit through `ACQ_EXTRA_KITS`);
+- a direnv/devenv activation hook.
+
+**fish and nushell.** The `~/.rc.d/*.sh` snippets are POSIX-sh and are **not**
+sourced by fish or nushell, because their shell languages are incompatible with
+POSIX-sh syntax — sourcing a `.sh` file into fish/nushell would error, not work.
+`acq` therefore does not wire fish/nushell to `~/.rc.d`. This is a documented
+constraint, chosen over speculative wiring: fish has its own native autoload
+directory (`~/.config/fish/conf.d/*.fish`), and nushell loads from its
+configured config/autoload path (`$nu.config-path`). The intended future path is
+for a kit to deliver shell-native snippets there when fish/nushell support is
+actually needed. Until a concrete need exists, `acq` neither wires those
+directories nor installs fish or nushell.
+
+**Migration path.** If a team kit currently establishes shell behavior by other
+means (for example, appending to `~/.bashrc` from a kit `startup` command), move
+that behavior into a POSIX-sh snippet under `files/home/agent/.rc.d/NN-name.sh`
+in a personal or team kit, applied via `ACQ_EXTRA_KITS`. Pick a numeric prefix
+to order it against other snippets (lower runs first). Drop the old
+`~/.bashrc`-append step once the snippet is in place; the built-in bridge
+sources the snippet for bash login shells.
+
+### Advanced: optional OCI-engine capability kit
+
+`acq` can select an **OCI-engine capability kit** (rootless podman) as part of
+its built-in bundle so agents get an OCI-run capability (`docker run`,
+`docker compose`) from a shared, reviewable kit rather than from backend-specific
+adapter code. This is **off by default** and opt-in per invocation/session:
+
+```bash
+export ACQ_ENABLE_OCI_KIT=1
+```
+
+Values `0`/`false`/`no`/`off`/empty (case-insensitive) keep it off; anything else
+turns it on. When on, the kit is appended **after** the built-in support kits and
+**before** any extras.
+
+Why it is gated, and why it is off by default (ADR-0020/ADR-0030): moving OCI
+provisioning into an explicit, backend-neutral capability kit lets both backends
+reuse one audited path and keeps OCI out of every sandbox's default create cost.
+The patterns-side kit body is **not published yet**, so even when you opt in,
+`acq` verifies the kit is actually present and valid at the pinned patterns ref
+before adding it; if it is not, `acq` prints a single notice and continues
+without it. Until the kit path is published and live-verified, the **msb
+adapter's built-in podman provisioning remains the active OCI mechanism** — this
+opt-in is additive and changes nothing about that path today.
 
 ---
 

@@ -103,6 +103,27 @@ _provision() { # NAME PRE_SNIPPET
   refute_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
 }
 
+@test "msb: selected OCI kit suppresses adapter-owned podman provisioning" {
+  _provision ocikitbox '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ocikit-secrets"
+    export ACQ_ENABLE_OCI_KIT=1
+    acq_oci_engine_kit_ready() { return 0; }
+  '
+  local log; log=$(cat "$CALLS")
+  refute_regex "$log" '/var/lib/acq/oci-ready'
+  refute_regex "$log" 'podman build'
+}
+
+@test "msb: stale OCI ref in KITS cannot suppress adapter podman provisioning" {
+  _provision staleocibox '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/staleoci-secrets"
+    KITS=("$(_acq_oci_engine_kit_ref)")
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '/var/lib/acq/oci-ready'
+  assert_regex "$log" 'podman build'
+}
+
 @test "msb#226: a custom endpoint binds generically; usai/github still bind; no bogus flag; no leak" {
   _provision genbox '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/gen-secrets"
