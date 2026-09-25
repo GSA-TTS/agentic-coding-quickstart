@@ -1,0 +1,541 @@
+#!/usr/bin/env bash
+# verify-msb-pin — live verification of acq's pinned-msb distribution and the
+# blocked-version recovery paths (ADR-0031).
+#
+# WHY THIS EXISTS
+#
+# acq refuses msb 0.7.0-0.7.2 because those releases migrate 0.6.x sandbox state
+# one-way. Everything about that claim — the stranding, both recovery routes, and
+# the pinned install itself — is a claim about how three real msb binaries behave
+# against real sandbox state. A mocked test proves none of it. So this script runs
+# the real binaries.
+#
+# ISOLATION
+#
+# Every check runs against a throwaway MSB_HOME **and** a throwaway HOME. Both are
+# required: `msb self downgrade` writes command symlinks into $HOME/.local/bin, so
+# a script that isolated only MSB_HOME would silently replace the caller's real
+# `msb` link (observed during development). Your real ~/.microsandbox and
+# ~/.local/bin are never touched. No sandbox is created and no VM is booted, so
+# this needs NO virtualization and CAN run inside a sandbox — unlike the other
+# verify-* scripts here.
+#
+# WHAT IT CHECKS
+#
+#   1. pin          the upstream one-line installer cannot pin a version, and its
+#                   per-release copies are byte-identical (the trap acq avoids)
+#   2. install      the pinned bundle verifies against the release checksum and
+#                   yields a working binary of the expected version
+#   3. strand       0.6.18 -> run blocked 0.7.x -> 0.6.18 reproduces
+#                   `database schema is newer than this msb binary`
+#   4. forward      the fixed release reads that already-migrated catalog as-is
+#                   (the PREFERRED recovery; no rollback, no state rewrite)
+#   5. rollback     `msb self downgrade` driven BY the blocked binary restores a
+#                   catalog the pinned version can read, and retains a backup
+#   6. wrong-order  the same downgrade attempted BY the older binary fails AND
+#                   wedges every later msb command, which is why acq refuses to
+#                   attempt it (install.sh recover_migrated_catalog) and offers to
+#                   clear the journal (clear_stale_downgrade_journal)
+#   6b. keg layout  a keg-only versioned formula's layout runs by path and can
+#                   drive that recovery without being linked — the escape hatch
+#                   when the migrating msb has already been uninstalled
+#
+# Checks 3-6 need the blocked 0.7.2 bundle. It is deliberately NOT in our Homebrew
+# tap — publishing a formula for a release we tell people to avoid would be a
+# mixed message — so it is fetched here by pinned URL and verified against the
+# release's own published checksums.sha256, exactly like every other bundle.
+#
+# Usage:
+#   ./scripts/verify-msb-pin              # all checks, isolated; changes nothing
+#   ./scripts/verify-msb-pin --install    # ALSO install the pinned msb for real
+#   ./scripts/verify-msb-pin --keep       # keep the scratch dir for inspection
+set -u
+
+SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+
+# Versions under test. Keep in lockstep with install.sh / acq.backends/msb.sh:
+# a drift here is a silently weaker test, not a failure.
+PINNED_VERSION="0.6.18"
+BLOCKED_VERSION="0.7.2"
+FIXED_VERSION="0.7.3"
+
+RELEASE_BASE="https://github.com/superradcompany/microsandbox/releases/download"
+
+DO_INSTALL=0
+KEEP=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --install) DO_INSTALL=1; shift ;;
+    --keep)    KEEP=1; shift ;;
+    -h|--help) sed -n '2,51p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1 (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+PASS=0; FAIL=0; BLOCKED=0
+ok()    { PASS=$((PASS+1));       printf '  \033[32mok  \033[0m %s\n' "$1"; }
+bad()   { FAIL=$((FAIL+1));       printf '  \033[31mBAD \033[0m %s\n' "$1"
+          [ -n "${2:-}" ] && printf '        %s\n' "$2"; return 0; }
+block() { BLOCKED=$((BLOCKED+1)); printf '  \033[33mskip\033[0m %s\n' "$1"; }
+info()  { printf '\n== %s ==\n' "$1"; }
+note()  { printf '        %s\n' "$1"; }
+
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/msb-pin-verify.XXXXXX")
+cleanup() {
+  if [ "$KEEP" -eq 1 ]; then
+    printf '\nscratch kept at %s\n' "$SCRATCH"
+    return
+  fi
+  rm -rf "$SCRATCH" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# --- helpers ---------------------------------------------------------------
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+  fi
+}
+
+bundle_name() {
+  local os arch
+  os=$(uname -s 2>/dev/null || echo unknown)
+  arch=$(uname -m 2>/dev/null || echo unknown)
+  case "$arch" in
+    arm64|aarch64) arch=aarch64 ;;
+    x86_64|amd64)  arch=x86_64 ;;
+    *) return 1 ;;
+  esac
+  case "$os" in
+    Darwin) [ "$arch" = aarch64 ] || return 1
+            printf 'microsandbox-darwin-aarch64.tar.gz\n' ;;
+    Linux)  printf 'microsandbox-linux-%s.tar.gz\n' "$arch" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fetch_msb VERSION -> extracts to $SCRATCH/v<VERSION>/, echoes the binary path.
+# Verifies against the release's published checksum; a mismatch is fatal, because
+# an unverified binary would invalidate every later result.
+fetch_msb() {
+  local version="$1" dir="$SCRATCH/v$1" bundle expected actual
+  if [ -x "$dir/msb" ]; then printf '%s\n' "$dir/msb"; return 0; fi
+
+  bundle=$(bundle_name) || return 1
+  mkdir -p "$dir" || return 1
+
+  curl -fsSL "$RELEASE_BASE/v$version/$bundle" -o "$dir/$bundle" || return 1
+  curl -fsSL "$RELEASE_BASE/v$version/checksums.sha256" -o "$dir/checksums.sha256" || return 1
+
+  expected=$(grep -F " $bundle" "$dir/checksums.sha256" | cut -d' ' -f1)
+  actual=$(sha256_of "$dir/$bundle")
+  [ -n "$expected" ] && [ -n "$actual" ] || return 1
+  [ "$expected" = "$actual" ] || {
+    echo "checksum mismatch for $bundle at v$version" >&2
+    return 1
+  }
+
+  tar -xzf "$dir/$bundle" -C "$dir" || return 1
+  rm -f "$dir/$bundle"          # reclaim space; several bundles are ~30MB each
+  chmod +x "$dir/msb" || return 1
+  printf '%s\n' "$dir/msb"
+}
+
+# run_msb BINARY MSB_HOME ARGS... — run a fetched msb fully isolated.
+#
+# HOME is redirected alongside MSB_HOME because `msb self downgrade` links
+# commands into $HOME/.local/bin. LD_LIBRARY_PATH covers hosts where the binary
+# cannot find its sibling libkrunfw through its own rpath.
+run_msb() {
+  local bin="$1" home="$2"; shift 2
+  local dir; dir=$(dirname "$bin")
+  local fake="$SCRATCH/fakehome"
+  mkdir -p "$fake/.local/bin"
+  env HOME="$fake" MSB_HOME="$home" LD_LIBRARY_PATH="$dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    "$bin" "$@" 2>&1 </dev/null
+}
+
+# Count applied migrations in a catalog; empty if unreadable. Reading the schema
+# directly is what makes "the catalog moved" an observation instead of an
+# inference from an error message.
+applied_migrations() {
+  local db="$1/db/msb.db"
+  [ -f "$db" ] || return 0
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$db" 'SELECT COUNT(*) FROM seaql_migrations' 2>/dev/null
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$db" <<'PY' 2>/dev/null
+import sqlite3, sys
+try:
+    con = sqlite3.connect(sys.argv[1])
+    print(con.execute("SELECT COUNT(*) FROM seaql_migrations").fetchone()[0])
+except Exception:
+    pass
+PY
+  fi
+}
+
+# --- 0. preconditions ------------------------------------------------------
+
+info "preconditions"
+command -v curl >/dev/null 2>&1 || { bad "curl is required"; exit 1; }
+command -v tar  >/dev/null 2>&1 || { bad "tar is required"; exit 1; }
+[ -n "$(sha256_of "$0")" ] || { bad "neither sha256sum nor shasum is available"; exit 1; }
+ok "curl, tar, and a sha256 tool are present"
+
+if ! BUNDLE=$(bundle_name); then
+  block "no msb release bundle is published for $(uname -s)/$(uname -m); cannot verify live"
+  printf '\n  passed: %d   failed: %d   skipped: %d\n' "$PASS" "$FAIL" "$BLOCKED"
+  exit 0
+fi
+ok "platform bundle: $BUNDLE"
+
+if [ -z "$(applied_migrations "$SCRATCH/nonexistent")" ] \
+   && ! command -v sqlite3 >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+  note "no sqlite3 or python3: migration counts will be reported as unknown"
+fi
+
+# Assert the script's pinned versions still match what the code ships, so this
+# script cannot drift into verifying versions acq no longer uses.
+for pair in "PINNED_VERSION:MSB_PINNED_VERSION" "FIXED_VERSION:MSB_FIXED_VERSION"; do
+  local_name=${pair%%:*}; code_name=${pair##*:}
+  eval "want=\$$local_name"
+  got=$(grep -hoE "^$code_name=\"[0-9.]+\"" "$SCRIPT_DIR/install.sh" | head -1 | cut -d'"' -f2)
+  if [ "$got" = "$want" ]; then
+    ok "install.sh $code_name matches this script ($want)"
+  else
+    bad "version drift: install.sh $code_name=$got but this script tests $want" \
+        "update both, or the verification is checking the wrong release"
+  fi
+done
+
+# --- 1. the upstream installer cannot pin ----------------------------------
+
+info "1. upstream install.sh cannot pin a version"
+a="$SCRATCH/inst-pinned.sh"; b="$SCRATCH/inst-fixed.sh"
+if curl -fsSL "$RELEASE_BASE/v$PINNED_VERSION/install.sh" -o "$a" \
+   && curl -fsSL "$RELEASE_BASE/v$FIXED_VERSION/install.sh" -o "$b"; then
+  if [ "$(sha256_of "$a")" = "$(sha256_of "$b")" ]; then
+    ok "the v$PINNED_VERSION and v$FIXED_VERSION install.sh assets are byte-identical"
+    note "so a versioned asset URL is NOT a pin — it installs whatever is latest"
+  else
+    bad "install.sh assets now DIFFER between releases" \
+        "upstream may have fixed this; re-check whether acq still needs its own pinned install path"
+  fi
+  if grep -q 'releases/latest' "$a"; then
+    ok "the installer resolves its version from releases/latest at run time"
+  else
+    bad "the installer no longer reads releases/latest" \
+        "it may now support a version argument; if so acq could stop reimplementing this"
+  fi
+else
+  block "could not fetch the upstream install.sh assets (offline?)"
+fi
+
+# --- 2. the pinned bundle installs and runs --------------------------------
+
+info "2. pinned msb $PINNED_VERSION installs from a verified bundle"
+if ! PINNED_BIN=$(fetch_msb "$PINNED_VERSION"); then
+  bad "could not fetch and verify the msb $PINNED_VERSION bundle"
+  printf '\n  passed: %d   failed: %d   skipped: %d\n' "$PASS" "$FAIL" "$BLOCKED"
+  exit 1
+fi
+ok "bundle for v$PINNED_VERSION verified against its published checksums.sha256"
+
+HOME_A="$SCRATCH/home-strand"
+mkdir -p "$HOME_A"
+reported=$(run_msb "$PINNED_BIN" "$HOME_A" --version | head -1)
+case "$reported" in
+  *"$PINNED_VERSION"*) ok "the installed binary reports: $reported" ;;
+  *) bad "expected msb $PINNED_VERSION, got: ${reported:-<no output>}" ;;
+esac
+
+# --- 3. reproduce the stranding -------------------------------------------
+
+info "3. a blocked msb strands the catalog for the pinned line"
+out=$(run_msb "$PINNED_BIN" "$HOME_A" list)
+case "$out" in
+  *"No sandboxes found"*|*NAME*) ok "msb $PINNED_VERSION initialized its catalog cleanly" ;;
+  *) bad "msb $PINNED_VERSION could not initialize a fresh catalog" "$out" ;;
+esac
+before=$(applied_migrations "$HOME_A")
+note "applied migrations after $PINNED_VERSION: ${before:-unknown}"
+
+if ! BLOCKED_BIN=$(fetch_msb "$BLOCKED_VERSION"); then
+  block "could not fetch the blocked msb $BLOCKED_VERSION bundle; skipping checks 3-6"
+  printf '\n  passed: %d   failed: %d   skipped: %d\n' "$PASS" "$FAIL" "$BLOCKED"
+  [ "$FAIL" -eq 0 ] && exit 0 || exit 1
+fi
+ok "bundle for the blocked v$BLOCKED_VERSION verified against its published checksum"
+note "fetched by pinned URL on purpose: a known-bad release does not belong in our tap"
+
+run_msb "$BLOCKED_BIN" "$HOME_A" list >/dev/null
+after=$(applied_migrations "$HOME_A")
+if [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ]; then
+  ok "msb $BLOCKED_VERSION migrated the catalog forward ($before -> $after migrations)"
+else
+  note "applied migrations after $BLOCKED_VERSION: ${after:-unknown}"
+fi
+
+out=$(run_msb "$PINNED_BIN" "$HOME_A" list)
+case "$out" in
+  *"schema is newer"*|*"not in this binary's migration prefix"*)
+    ok "msb $PINNED_VERSION now refuses the migrated catalog (the reported failure)"
+    note "${out%%$'\n'*}" ;;
+  *)
+    bad "msb $PINNED_VERSION did NOT refuse the migrated catalog" \
+        "the one-way migration may be fixed upstream; re-evaluate the blocked range" ;;
+esac
+
+# --- 4. forward recovery (preferred) ---------------------------------------
+
+info "4. moving FORWARD to msb $FIXED_VERSION recovers without a rollback"
+HOME_FWD="$SCRATCH/home-forward"
+cp -a "$HOME_A" "$HOME_FWD"
+if FIXED_BIN=$(fetch_msb "$FIXED_VERSION"); then
+  ok "bundle for the fixed v$FIXED_VERSION verified against its published checksum"
+  out=$(run_msb "$FIXED_BIN" "$HOME_FWD" list)
+  case "$out" in
+    *"No sandboxes found"*|*NAME*)
+      fwd=$(applied_migrations "$HOME_FWD")
+      ok "msb $FIXED_VERSION read the already-migrated catalog directly (now ${fwd:-unknown} migrations)"
+      note "no rollback, no backup dance, no data-affecting step — this is why acq offers it first" ;;
+    *)
+      bad "msb $FIXED_VERSION could not read a catalog migrated by $BLOCKED_VERSION" "$out"
+      note "if this fails, the forward path in install.sh must not be recommended" ;;
+  esac
+else
+  block "could not fetch msb $FIXED_VERSION; forward-recovery path unverified"
+fi
+
+# --- 5. rollback recovery, correctly ordered ------------------------------
+
+info "5. rollback recovery, driven BY the blocked binary"
+HOME_DG="$SCRATCH/home-downgrade"
+cp -a "$HOME_A" "$HOME_DG"
+out=$(run_msb "$BLOCKED_BIN" "$HOME_DG" self downgrade "$PINNED_VERSION" --yes)
+if printf '%s' "$out" | grep -qi "Downgraded to v$PINNED_VERSION"; then
+  ok "msb $BLOCKED_VERSION rolled its own migrations back to $PINNED_VERSION"
+  dg=$(applied_migrations "$HOME_DG")
+  if [ -n "$before" ] && [ -n "$dg" ] && [ "$dg" = "$before" ]; then
+    ok "the catalog is back to its pre-$BLOCKED_VERSION migration count ($dg)"
+  else
+    note "applied migrations after rollback: ${dg:-unknown} (expected ${before:-unknown})"
+  fi
+  if ls "$HOME_DG"/db/msb.db.bak-* >/dev/null 2>&1; then
+    ok "a database backup was retained: $(basename "$(ls "$HOME_DG"/db/msb.db.bak-* | head -1)")"
+  else
+    bad "no retained database backup after a rollback that reverts migrations"
+  fi
+  out=$(run_msb "$PINNED_BIN" "$HOME_DG" list)
+  case "$out" in
+    *"No sandboxes found"*|*NAME*) ok "msb $PINNED_VERSION can read the rolled-back catalog again" ;;
+    *) bad "msb $PINNED_VERSION still cannot read the catalog after rollback" "$out" ;;
+  esac
+else
+  # A refusal here is legitimate (e.g. grouped snapshots) but this scratch
+  # catalog has none, so treat it as a real failure of the documented path.
+  bad "'msb self downgrade $PINNED_VERSION' did not complete from the $BLOCKED_VERSION binary" \
+      "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+fi
+
+# --- 6. the wrong order wedges the install --------------------------------
+
+info "6. the WRONG order fails, and wedges every later msb command"
+HOME_WEDGE="$SCRATCH/home-wedge"
+cp -a "$HOME_A" "$HOME_WEDGE"
+
+# An older binary cannot build a rollback plan for migrations it does not know.
+out=$(run_msb "$PINNED_BIN" "$HOME_WEDGE" self downgrade 0.6.17 --yes)
+case "$out" in
+  *"updated by a newer msb"*|*"does not contain a valid migration prefix"*)
+    ok "msb $PINNED_VERSION refuses to roll back migrations it does not know" ;;
+  *"Downgraded to"*)
+    bad "msb $PINNED_VERSION performed a rollback it should not be able to" \
+        "acq's ordering guard may be unnecessary; re-check ADR-0031" ;;
+  *) note "unexpected output: ${out##*$'\n'}" ;;
+esac
+
+# The damage: a staged-but-unfinishable operation journal.
+journal=""
+for candidate in "$HOME_WEDGE"/db/self-downgrade/*/journal.json; do
+  [ -f "$candidate" ] && journal="$candidate" && break
+done
+if [ -n "$journal" ]; then
+  ok "the failed attempt left an interrupted-downgrade journal behind"
+  note "${journal#"$SCRATCH"/}"
+
+  # Every later command, from every version, now refuses.
+  wedged=0
+  for pair in "$PINNED_VERSION:$PINNED_BIN" "$BLOCKED_VERSION:$BLOCKED_BIN"; do
+    v=${pair%%:*}; b=${pair##*:}
+    out=$(run_msb "$b" "$HOME_WEDGE" list)
+    case "$out" in
+      *self_downgrade_recovery_required*) wedged=$((wedged + 1)) ;;
+      *) bad "msb $v still ran 'list' despite the interrupted-downgrade journal" ;;
+    esac
+  done
+  [ "$wedged" -eq 2 ] && ok "both msb versions refuse ALL commands while the journal exists"
+  note "this is why install.sh refuses to attempt a rollback from too-old an msb"
+
+  # And the documented escape works.
+  rm -rf "$(dirname "$journal")"
+  out=$(run_msb "$PINNED_BIN" "$HOME_WEDGE" list)
+  case "$out" in
+    *self_downgrade_recovery_required*)
+      bad "removing the journal directory did not clear the block" "$out" ;;
+    *)
+      ok "removing the journal directory unblocks msb (what clear_stale_downgrade_journal does)" ;;
+  esac
+else
+  bad "expected an interrupted-downgrade journal after the failed attempt" \
+      "if upstream now cleans up after itself, install.sh's journal handling can be simplified"
+fi
+
+# --- 6b. the keg-only escape hatch ----------------------------------------
+
+info "6b. a keg-only versioned formula can drive the recovery"
+# Check 6 establishes that recovery requires the binary that performed the
+# migration. On a Homebrew host that binary may be gone — `brew uninstall` is the
+# reflexive first step — and upstream's tap cannot hand it back, because it carries
+# only an always-latest formula. Our keg-only microsandbox-acq@<version> formulae
+# exist to close exactly that gap, so verify the property they depend on: a keg
+# binary, invoked by path, runs and can perform a real rollback WITHOUT being
+# linked or shadowing anything on PATH.
+if command -v brew >/dev/null 2>&1; then
+  keg_prefix=$(brew --prefix "microsandbox-acq@$BLOCKED_VERSION" 2>/dev/null || true)
+  if [ -n "$keg_prefix" ] && [ -x "$keg_prefix/bin/msb" ]; then
+    ok "keg-only formula present: microsandbox-acq@$BLOCKED_VERSION"
+    note "(by design the tap ships no formula for a blocked release; this is unexpected)"
+  else
+    note "no keg-only formula for $BLOCKED_VERSION is installed, and none is published"
+    note "for a blocked release on purpose — this check uses the fetched bundle instead"
+  fi
+else
+  note "no brew on this host; verifying the layout property with the fetched bundle"
+fi
+
+# Simulate the keg layout the formula produces: binary + libkrunfw together under
+# libexec, reached through a wrapper script in bin, nothing linked anywhere.
+KEG="$SCRATCH/keg"
+mkdir -p "$KEG/libexec" "$KEG/bin"
+keg_src=$(dirname "$BLOCKED_BIN")
+cp "$BLOCKED_BIN" "$KEG/libexec/msb"
+keg_lib=""
+for candidate in "$keg_src"/libkrunfw.so.*.*.* "$keg_src"/libkrunfw.*.dylib; do
+  [ -f "$candidate" ] && keg_lib="$candidate" && break
+done
+if [ -z "$keg_lib" ]; then
+  bad "the verified bundle has no libkrunfw to place in the simulated keg"
+else
+  keg_libname=$(basename "$keg_lib")
+  cp "$keg_lib" "$KEG/libexec/$keg_libname"
+  case "$keg_libname" in
+    *.dylib) ln -sf "$keg_libname" "$KEG/libexec/libkrunfw.dylib" ;;
+    *) keg_abi=${keg_libname#libkrunfw.so.}; keg_abi=${keg_abi%%.*}
+       ln -sf "$keg_libname" "$KEG/libexec/libkrunfw.so.$keg_abi"
+       ln -sf "libkrunfw.so.$keg_abi" "$KEG/libexec/libkrunfw.so" ;;
+  esac
+  printf '#!/bin/bash\nexec "%s/libexec/msb" "$@"\n' "$KEG" > "$KEG/bin/msb"
+  chmod +x "$KEG/bin/msb"
+
+  # The formula relies on the binary finding its sibling library through its own
+  # rpath, with no LD_LIBRARY_PATH and no install_name_tool edit (which on macOS
+  # would break the code signature and the hypervisor entitlements).
+  fake="$SCRATCH/fakehome"; mkdir -p "$fake/.local/bin"
+  reported=$(env HOME="$fake" MSB_HOME="$SCRATCH/keg-home" "$KEG/bin/msb" --version 2>&1 </dev/null | head -1)
+  case "$reported" in
+    *"$BLOCKED_VERSION"*)
+      ok "a keg-layout msb runs by path with no LD_LIBRARY_PATH: $reported"
+      note "so the wrapper + libexec layout in the formula is sound, unsigned-edit-free" ;;
+    *)
+      bad "keg-layout msb did not report $BLOCKED_VERSION: ${reported:-<no output>}" \
+          "the formula's libexec layout may not resolve libkrunfw on this platform" ;;
+  esac
+
+  # And it can perform the real recovery — the reason the formula exists.
+  HOME_KEG="$SCRATCH/home-keg"
+  cp -a "$HOME_A" "$HOME_KEG"
+  out=$(env HOME="$fake" MSB_HOME="$HOME_KEG" "$KEG/bin/msb" self downgrade "$PINNED_VERSION" --yes 2>&1 </dev/null)
+  if printf '%s' "$out" | grep -qi "Downgraded to v$PINNED_VERSION"; then
+    ok "the keg binary rolled the catalog back without ever being on PATH"
+    note "this is the documented escape when the migrating msb is already uninstalled"
+  else
+    bad "the keg binary could not perform the rollback" \
+        "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+  fi
+fi
+
+# --- 7. optionally install for real ---------------------------------------
+
+if [ "$DO_INSTALL" -eq 1 ]; then
+  info "7. installing the pinned msb on THIS host"
+  # Everything above ran isolated. This step deliberately does not: it places the
+  # already-verified pinned bundle into the real MSB_HOME, which is the documented
+  # way to get a supported msb without the unpinnable upstream installer.
+  real_home="${MSB_HOME:-$HOME/.microsandbox}"
+  real_bin="${ACQ_INSTALL_BIN_DIR:-$HOME/.local/bin}"
+
+  existing=""
+  command -v msb >/dev/null 2>&1 && existing=$(msb --version 2>/dev/null | head -1)
+  if [ -n "$existing" ]; then
+    note "an msb is already active: $existing"
+    note "this replaces the binary only; it does NOT migrate or roll back sandbox state"
+    note "if that msb already migrated your catalog, run 'msb self update' or"
+    note "'msb self downgrade $PINNED_VERSION' with IT first (see install.sh)"
+  fi
+
+  printf '  install verified msb %s into %s? [y/N] ' "$PINNED_VERSION" "$real_home"
+  if [ -t 0 ]; then read -r answer || answer=""; else answer=""; note "(no terminal; declining)"; fi
+  case "$answer" in
+    [yY]|[yY][eE][sS])
+      src=$(dirname "$PINNED_BIN")
+      lib=""
+      for candidate in "$src"/libkrunfw.so.*.*.* "$src"/libkrunfw.*.dylib; do
+        [ -f "$candidate" ] && lib="$candidate" && break
+      done
+      if [ -z "$lib" ]; then
+        bad "the verified bundle carries no libkrunfw library; refusing to install"
+      else
+        libname=$(basename "$lib")
+        case "$libname" in
+          *.dylib) abi=${libname#libkrunfw.}; abi=${abi%.dylib} ;;
+          *)       abi=${libname#libkrunfw.so.}; abi=${abi%%.*} ;;
+        esac
+        mkdir -p "$real_home/bin" "$real_home/lib" "$real_bin"
+        install -m 755 "$PINNED_BIN" "$real_home/bin/msb" \
+          && ln -sf msb "$real_home/bin/microsandbox" \
+          && install -m 644 "$lib" "$real_home/lib/$libname" || bad "install into $real_home failed"
+        case "$libname" in
+          *.dylib) ln -sf "$libname" "$real_home/lib/libkrunfw.dylib" ;;
+          *)       ln -sf "$libname" "$real_home/lib/libkrunfw.so.$abi"
+                   ln -sf "libkrunfw.so.$abi" "$real_home/lib/libkrunfw.so" ;;
+        esac
+        for name in msb microsandbox; do
+          if [ -e "$real_bin/$name" ] && [ ! -L "$real_bin/$name" ]; then
+            note "left $real_bin/$name alone: it exists and is not a symlink"
+            continue
+          fi
+          ln -sf "$real_home/bin/$name" "$real_bin/$name"
+        done
+        hash -r 2>/dev/null || true
+        got=$(msb --version 2>/dev/null | head -1)
+        case "$got" in
+          *"$PINNED_VERSION"*) ok "installed and active: $got" ;;
+          *) bad "after install the active msb reports: ${got:-<nothing>}" \
+                 "another msb may be earlier on PATH than $real_bin" ;;
+        esac
+      fi
+      ;;
+    *)
+      note "declined; nothing was installed"
+      note "alternatives: brew install GSA-TTS/tap/microsandbox-acq, or ./install.sh"
+      ;;
+  esac
+fi
+
+printf '\n  passed: %d   failed: %d   skipped: %d\n' "$PASS" "$FAIL" "$BLOCKED"
+[ "$FAIL" -eq 0 ]

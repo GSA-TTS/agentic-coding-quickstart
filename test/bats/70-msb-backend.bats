@@ -149,6 +149,17 @@ _with_adapter() { # ADAPTER BODY
   assert_output --partial 'RC=0'
 }
 
+@test "msb: rejects blocked 0.7.0 through 0.7.2 but accepts 0.7.3" {
+  for version in 0.7.0 0.7.1 0.7.2; do
+    _with_adapter msb "out=\$(STUB_MSB_VERSION=$version ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); rc=\$?; printf \"%s\\nRC=%s\\n\" \"\$out\" \"\$rc\""
+    assert_output --partial "refuses msb $version"
+    assert_output --partial '0.7.0-0.7.2'
+    assert_output --partial 'RC=1'
+  done
+  _with_adapter msb 'out=$(STUB_MSB_VERSION=0.7.3 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); printf "%s\nRC=%s\n" "$out" "$?"'
+  assert_output --partial 'RC=0'
+}
+
 @test "sbx: version floor rejects sub-0.39.0 naming both causes, accepts 0.39.0" {
   # 0.38.x is BELOW the floor: acq emits the ACQ_WORKSPACE marker through
   # `sbx create --env` on every workspace create, and --env only exists from

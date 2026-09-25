@@ -113,6 +113,62 @@ STUB
   chmod +x "$STUBDIR/bin/npm"
 }
 
+_write_msb_stub() { # PATH VERSION
+  mkdir -p "$(dirname "$1")"
+  printf '%s\n' \
+    '#!/usr/bin/env sh' \
+    'case "$1" in' \
+    "  --version|-V) printf 'msb %s\\n' '$2' ;;" \
+    '  *) exit 0 ;;' \
+    'esac' >"$1"
+  chmod +x "$1"
+}
+
+_write_curl_msb_installer_stub() {
+  cat >"$STUBDIR/bin/curl" <<'STUB'
+#!/usr/bin/env sh
+emit_installer() {
+  cat <<'INSTALLER'
+#!/usr/bin/env sh
+set -eu
+if [ "${MSB_INSTALLER_READS_STDIN:-0}" = "1" ]; then cat >/dev/null; fi
+mkdir -p "$HOME/.microsandbox/bin" "$HOME/.local/bin"
+cat >"$HOME/.microsandbox/bin/msb" <<'MSB'
+#!/usr/bin/env sh
+case "$1" in
+  --version|-V) printf 'msb 0.6.18\n' ;;
+  *) exit 0 ;;
+esac
+MSB
+chmod +x "$HOME/.microsandbox/bin/msb"
+ln -sf "$HOME/.microsandbox/bin/msb" "$HOME/.local/bin/msb"
+INSTALLER
+}
+case "$*" in
+  *github.com/superradcompany/microsandbox/releases/download/v0.6.18/install.sh*) ;;
+  *) printf 'unexpected curl: %s\n' "$*" >&2; exit 1 ;;
+esac
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then out=$arg; break; fi
+  prev=$arg
+done
+if [ -n "$out" ]; then
+  emit_installer >"$out"
+else
+  emit_installer
+fi
+STUB
+  chmod +x "$STUBDIR/bin/curl"
+}
+
+_write_unparseable_msb_stub() { # PATH
+  mkdir -p "$(dirname "$1")"
+  printf '%s\n' '#!/usr/bin/env sh' 'printf "msb dev-build\\n"' >"$1"
+  chmod +x "$1"
+}
+
 _no_package_manager_path() {
   core_bin="$BATS_TEST_TMPDIR/core-bin"
   mkdir -p "$core_bin"
@@ -305,31 +361,128 @@ _no_package_manager_path() {
   assert_regex "$(cat "$GIT_STUB_LOG")" "fetch --unshallow --tags origin"
 }
 
-@test "install: msb via brew taps superradcompany/tap before installing" {
-  export BREW_STUB_LOG="$BATS_TEST_TMPDIR/brew.log"
-  _write_brew_logging_stub
+@test "install: missing msb installs pinned safe 0.6.18" {
   _write_npm_stub
+  _write_curl_msb_installer_stub
+
+  run env PATH="$STUBDIR/bin:$HOME/.local/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'Installing msb 0.6.18 via upstream release installer'
+  assert_output --partial 'releases/download/v0.6.18/install.sh'
+  run "$HOME/.local/bin/msb" --version
+  assert_output 'msb 0.6.18'
+}
+
+@test "install: active msb 0.6.8 upgrades to pinned safe 0.6.18" {
+  _write_npm_stub
+  _write_curl_msb_installer_stub
+  _write_msb_stub "$HOME/.local/bin/msb" 0.6.8
+
+  run env PATH="$HOME/.local/bin:$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version is too old'
+  assert_output --partial 'Installing msb 0.6.18 via upstream release installer'
+  run "$HOME/.local/bin/msb" --version
+  assert_output 'msb 0.6.18'
+}
+
+@test "install: unparseable active msb is replaced with pinned safe version" {
+  _write_npm_stub
+  _write_curl_msb_installer_stub
+  _write_unparseable_msb_stub "$HOME/.local/bin/msb"
+
+  run env PATH="$HOME/.local/bin:$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version could not be determined'
+  run "$HOME/.local/bin/msb" --version
+  assert_output 'msb 0.6.18'
+}
+
+@test "install: fetched msb installer runs from temp file with stdin detached" {
+  _write_npm_stub
+  _write_curl_msb_installer_stub
+
+  run env MSB_INSTALLER_READS_STDIN=1 PATH="$STUBDIR/bin:$HOME/.local/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  run "$HOME/.local/bin/msb" --version
+  assert_output 'msb 0.6.18'
+}
+
+@test "install: active local msb 0.7.2 downgrades to 0.6.18" {
+  _write_npm_stub
+  _write_curl_msb_installer_stub
+  _write_msb_stub "$HOME/.local/bin/msb" 0.7.2
+
+  run env PATH="$HOME/.local/bin:$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version is blocked'
+  assert_output --partial 'Installing msb 0.6.18 via upstream release installer'
+  run "$HOME/.local/bin/msb" --version
+  assert_output 'msb 0.6.18'
+}
+
+@test "install: blocked msb shadowing safe install fails closed" {
+  _write_npm_stub
+  _write_curl_msb_installer_stub
+  _write_msb_stub "$STUBDIR/bin/msb" 0.7.2
+
+  run env PATH="$STUBDIR/bin:$HOME/.local/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_failure
+  assert_output --partial 'active msb is still blocked version 0.7.2'
+  assert_output --partial 'another msb is shadowing it on PATH'
+}
+
+@test "install: blocked msb downgrade can be declined" {
+  _write_npm_stub
+  _write_msb_stub "$STUBDIR/bin/msb" 0.7.1
+
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh -c 'printf "n\n" | sh "$1" --method npm' _ "$REPO_ROOT/install.sh"
+
+  assert_success
+  assert_output --partial 'Found msb 0.7.1'
+  assert_output --partial 'Skipping msb'
+  refute_output --partial 'msb is already installed'
+}
+
+@test "install: duplicate msb paths are reported with active marker" {
+  _write_npm_stub
+  _write_msb_stub "$STUBDIR/bin/msb" 0.6.18
+  mkdir -p "$HOME/.local/bin"
+  _write_msb_stub "$HOME/.local/bin/msb" 0.7.2
+
   run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
     sh "$REPO_ROOT/install.sh" --method npm --yes
 
   assert_success
-  assert_regex "$(cat "$BREW_STUB_LOG")" "tap superradcompany/tap"
-  tap_line=$(grep -n 'tap superradcompany/tap' "$BREW_STUB_LOG" | head -1 | cut -d: -f1)
-  install_line=$(grep -n 'install superradcompany/tap/microsandbox' "$BREW_STUB_LOG" | head -1 | cut -d: -f1)
-  [ -n "$tap_line" ] && [ -n "$install_line" ]
-  [ "$tap_line" -lt "$install_line" ]
+  assert_output --partial 'Multiple msb binaries were found'
+  assert_output --partial "$STUBDIR/bin/msb: 0.6.18 (active)"
+  assert_output --partial "$HOME/.local/bin/msb: 0.7.2"
 }
 
 @test "install: run() detaches child stdin so piped script tail survives" {
   export BREW_STUB_LOG="$BATS_TEST_TMPDIR/brew.log"
   _write_stdin_eating_brew_stub
   _write_npm_stub
+  _write_curl_msb_installer_stub
 
   # Pipe the installer plus a trailing marker (fd 0 = script bytes); a leaky
   # child would steal the marker line.
   installer="$(cat "$REPO_ROOT/install.sh"; printf 'echo STOLEN_TAIL_BYTES\n')"
 
-  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+  run env PATH="$STUBDIR/bin:$HOME/.local/bin:$(_acq_coreutils_path)" \
     BREW_STUB_LOG="$BREW_STUB_LOG" \
     sh -c 'printf "%s" "$1" | sh -s -- --method npm --yes' _ "$installer"
 

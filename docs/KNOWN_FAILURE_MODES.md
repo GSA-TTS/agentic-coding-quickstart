@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-08-25"
+last_updated: "2026-09-24"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -1776,7 +1776,8 @@ running on the host (or no key is loaded), there is nothing to forward.
 
 ### Fix
 
-- **Upgrade msb** to >= 0.6.9 (`msb self update`).
+- **Use a supported msb**: 0.6.18 during the blocked 0.7.0-0.7.2 window, or
+  >=0.7.3 once the upstream migration fix is released.
 - **Ensure `socat` is in `ACQ_MSB_IMAGE`** — the default
   `docker/sandbox-templates:shell-docker` ships it; a custom override must too.
 - **Ensure the host has an agent with a key loaded** before running `acq`:
@@ -2201,6 +2202,60 @@ amending the wrong branch.
   encrypts at rest with DPAPI; see ADR-0028), and symlink-based tests cannot pass
   without native symlinks. None are regressions from the Windows preview path;
   validate that path with the checklist in `docs/howto/acq.md`.
+
+---
+
+## 35. acq Refuses msb 0.7.0-0.7.2 or Reports Multiple msb Binaries
+
+### Symptoms
+
+`acq run`, `acq create`, or another msb-backed command exits before touching a
+sandbox with a message like:
+
+```text
+error: acq refuses msb 0.7.2 because msb 0.7.0-0.7.2
+       can corrupt or migrate existing 0.6.x sandbox state incompatibly.
+```
+
+During install, `install.sh` may also warn:
+
+```text
+Multiple msb binaries were found; PATH order determines which one acq uses.
+```
+
+### Root Cause
+
+microsandbox 0.7.0 through 0.7.2 can migrate sandbox state created by 0.6.x in a
+way that is incompatible across the affected versions. Users can make this worse
+when two `msb` binaries exist on the same host, such as one installed by Homebrew
+and another installed by the upstream installer in `~/.local/bin`: whichever
+binary appears first on `PATH` creates or migrates the state for that run.
+
+### Fix
+
+Use one supported `msb` version consistently:
+
+```bash
+# Last known-good pre-0.7 release
+curl -fsSL https://github.com/superradcompany/microsandbox/releases/download/v0.6.18/install.sh | sh
+
+# Confirm which binary acq will use
+command -v msb
+msb --version
+```
+
+Remove stale copies or adjust `PATH` so the intended `msb` appears first. `acq`
+accepts `msb 0.6.9` through `0.6.18`, rejects `0.7.0` through `0.7.2`, and is
+expected to accept `0.7.3` or newer once the upstream migration fix is released.
+
+### Prevention / Status
+
+- `acq_backend_prepare` fails closed on the blocked version range before running
+  `msb doctor` or touching sandbox state.
+- `install.sh` installs the pinned safe `0.6.18` release when it needs to install
+  `msb`, prompts before replacing a too-old, unparseable, or blocked active
+  version, and fails closed when another blocked `msb` earlier on `PATH` would
+  still shadow the safe install.
 
 ---
 

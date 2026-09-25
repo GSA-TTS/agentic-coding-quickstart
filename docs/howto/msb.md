@@ -3,7 +3,7 @@ title: "msb How-To Guide"
 description: "Detailed how-to for the msb (microsandbox) backend behind acq"
 status: canonical
 tier: 2
-last_updated: "2026-08-24"
+last_updated: "2026-09-24"
 audience: "developers"
 keywords: ["msb", "microsandbox", "backend", "acq", "howto", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/acq.md", "docs/howto/sbx.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0024-neutral-user-facing-docs-vs-backend-specific.md"]
@@ -54,7 +54,7 @@ strengths/tradeoffs comparison.
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `msb` CLI | >= 0.6.8 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`. Host ssh-agent forwarding (git signing) additionally needs msb >= 0.6.9 (`--vsock`; [ADR-0021](../adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)) — it warns and skips on older msb. |
+| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](../adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases can migrate 0.6.x sandbox state incompatibly. Use 0.6.18 or >=0.7.3. |
 | Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
 
 Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
@@ -64,6 +64,10 @@ to skip it.
 ## Step 1: Install msb
 
 ```bash
+# Temporary safe pin while msb 0.7.0-0.7.2 are blocked:
+curl -fsSL https://github.com/superradcompany/microsandbox/releases/download/v0.6.18/install.sh | sh
+
+# Use the generic installers only once they resolve to msb >=0.7.3:
 curl -fsSL https://install.microsandbox.dev | sh        # macOS / Linux
 brew install superradcompany/tap/microsandbox           # Homebrew
 ```
@@ -76,6 +80,11 @@ irm https://install.microsandbox.dev/windows | iex      # Windows preview
 # Verify
 msb --version
 ```
+
+If you have both Homebrew and a prior manual/curl install, verify which binary is
+active with `command -v msb`. Multiple `msb` copies on PATH can create or migrate
+sandbox state with different versions depending on shell PATH order; keep only
+one intended version active.
 
 <a id="msb-host-setup"></a>
 

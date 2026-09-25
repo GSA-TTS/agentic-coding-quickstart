@@ -64,6 +64,46 @@ NPM_SPEC_BASE="github:GSA-TTS/agentic-coding-quickstart"
 # Homebrew formula used by the brew method.
 BREW_FORMULA="GSA-TTS/tap/acq"
 
+# msb 0.7.0-0.7.2 migrate 0.6.x sandbox state one-way into a format the 0.6.x
+# line cannot read. Install a pinned last-known-good release when acq needs to
+# install or repair msb, and accept the fixed line when present. See ADR-0031.
+MSB_MIN_VERSION="0.6.9"
+MSB_PINNED_VERSION="0.6.18"
+MSB_BLOCKED_VERSION_MIN="0.7.0"
+MSB_BLOCKED_VERSION_MAX="0.7.2"
+
+# First release carrying the upstream cross-version compatibility fix. Moving
+# FORWARD to this is strictly safer than rolling back to the pin: the migration
+# sets are additive, so this line reads a catalog an earlier 0.7.x already
+# migrated with no rollback, no data-affecting step, and no snapshot refusal.
+# Prefer it whenever the host can reach it; the pin remains the fallback for a
+# host that cannot move forward.
+MSB_FIXED_VERSION="0.7.3"
+
+# Where pinned msb release artifacts come from. The upstream one-line installer
+# is deliberately NOT used to place a pinned version: it resolves the version at
+# run time from `releases/latest` and takes no version argument, and every
+# release publishes a byte-identical copy of that script as a release asset — so
+# a versioned asset URL looks like a pin but installs whatever is newest. We
+# therefore fetch the release bundle and its published checksum directly.
+MSB_RELEASE_BASE="https://github.com/superradcompany/microsandbox/releases/download"
+
+# Homebrew formulae. Our tap carries a version-pinned formula; upstream's tap
+# formula always tracks the newest release and so cannot hold a supported
+# version. Both own `bin/msb`, so only one may be linked at a time.
+MSB_BREW_FORMULA="GSA-TTS/tap/microsandbox-acq"
+MSB_BREW_UPSTREAM_FORMULA="superradcompany/tap/microsandbox"
+
+# Keg-only, version-specific formulae in our tap, for reaching one exact msb
+# without disturbing the linked one (e.g. to run `msb self downgrade` with the
+# binary that performed a migration — only that binary can roll it back). Keg-only
+# means they are never symlinked into the Homebrew prefix, so any number of them
+# coexist with each other and with the linked formula above.
+MSB_BREW_VERSIONED_PREFIX="GSA-TTS/tap/microsandbox-acq@"
+
+# Where the upstream layout keeps msb (honoring MSB_HOME, as msb itself does).
+MSB_HOME_DIR="${MSB_HOME:-$HOME/.microsandbox}"
+
 INSTALL_MSB=1   # offer to install msb; --no-msb disables
 DRY_RUN=0
 ASSUME_YES=0
@@ -204,6 +244,50 @@ confirm() {
   case "$ans" in
     [yY]|[yY][eE][sS]) return 0 ;;
     *) return 1 ;;
+  esac
+}
+
+version_ge() {
+  a=$1 b=$2 i=1
+  while [ "$i" -le 3 ]; do
+    a_part=$(printf '%s\n' "$a" | cut -d. -f"$i")
+    b_part=$(printf '%s\n' "$b" | cut -d. -f"$i")
+    a_part=${a_part%%[!0-9]*}; b_part=${b_part%%[!0-9]*}
+    a_part=${a_part:-0}; b_part=${b_part:-0}
+    if [ "$a_part" -gt "$b_part" ]; then return 0; fi
+    if [ "$a_part" -lt "$b_part" ]; then return 1; fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
+msb_version_blocked() {
+  v="$1"
+  version_ge "$v" "$MSB_BLOCKED_VERSION_MIN" || return 1
+  version_ge "$MSB_BLOCKED_VERSION_MAX" "$v" || return 1
+  return 0
+}
+
+msb_version_of() {
+  "$1" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true
+}
+
+# Release bundle basename for this host, e.g. microsandbox-darwin-aarch64.tar.gz.
+# Empty means "this platform has no published bundle we know how to place", and
+# callers fall back to guidance rather than guessing an artifact name.
+msb_bundle_name() {
+  _os=$(uname -s 2>/dev/null || echo unknown)
+  _arch=$(uname -m 2>/dev/null || echo unknown)
+  case "$_arch" in
+    arm64|aarch64) _arch=aarch64 ;;
+    x86_64|amd64)  _arch=x86_64 ;;
+    *) return 0 ;;
+  esac
+  case "$_os" in
+    Darwin) [ "$_arch" = "aarch64" ] || return 0
+            printf 'microsandbox-darwin-aarch64.tar.gz\n' ;;
+    Linux)  printf 'microsandbox-linux-%s.tar.gz\n' "$_arch" ;;
+    *) return 0 ;;
   esac
 }
 
@@ -522,6 +606,540 @@ install_via_clone() {
   fi
 }
 
+msb_candidate_paths() {
+  if command -v msb >/dev/null 2>&1; then
+    command -v msb
+  fi
+
+  old_ifs=$IFS
+  IFS=:
+  for dir in $PATH; do
+    [ -n "$dir" ] || dir=.
+    [ -x "$dir/msb" ] && printf '%s\n' "$dir/msb"
+  done
+  IFS=$old_ifs
+
+  [ -n "${HOME:-}" ] && [ -x "$HOME/.local/bin/msb" ] && printf '%s\n' "$HOME/.local/bin/msb"
+
+  if command -v brew >/dev/null 2>&1; then
+    # Only formulae that LINK bin/msb can affect which msb runs. The
+    # microsandbox-acq@<version> formulae are keg-only by design — installed but
+    # never symlinked into the prefix — so they cannot shadow anything and are
+    # deliberately not probed here. Reporting them would turn a correct
+    # side-by-side install into a spurious "multiple msb binaries" warning.
+    for formula in "$MSB_BREW_UPSTREAM_FORMULA" "$MSB_BREW_FORMULA" microsandbox; do
+      brew_prefix=$(brew --prefix "$formula" 2>/dev/null || true)
+      [ -n "$brew_prefix" ] && [ -x "$brew_prefix/bin/msb" ] && printf '%s\n' "$brew_prefix/bin/msb"
+    done
+  fi
+}
+
+msb_unique_candidates() {
+  seen=""
+  msb_candidate_paths | while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    case "
+$seen
+" in
+      *"
+$candidate
+"*) ;;
+      *)
+        seen="${seen}
+${candidate}"
+        printf '%s\n' "$candidate"
+        ;;
+    esac
+  done
+}
+
+msb_report_candidates() {
+  count=0
+  versions=""
+  active="$(command -v msb 2>/dev/null || true)"
+  candidates=$(msb_unique_candidates)
+  [ -n "$candidates" ] || return 0
+
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    count=$((count + 1))
+    ver=$(msb_version_of "$candidate")
+    [ -n "$ver" ] || ver="unknown"
+    versions="${versions} ${ver}"
+  done <<EOF
+$candidates
+EOF
+
+  if [ "$count" -le 1 ]; then
+    return 0
+  fi
+
+  warn "  Multiple msb binaries were found; PATH order determines which one acq uses."
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    ver=$(msb_version_of "$candidate")
+    [ -n "$ver" ] || ver="unknown"
+    marker=""
+    [ -n "$active" ] && [ "$candidate" = "$active" ] && marker=" (active)"
+    warn "    $candidate: $ver$marker"
+  done <<EOF
+$candidates
+EOF
+  warn "  Remove stale copies or adjust PATH so the intended msb appears first."
+  if [ -n "$(msb_upstream_brew_prefix)" ]; then
+    warn "  One of these is Homebrew's $MSB_BREW_UPSTREAM_FORMULA, which always tracks the"
+    warn "  newest release and cannot hold a supported version. Remove it with:"
+    warn "    brew uninstall $MSB_BREW_UPSTREAM_FORMULA"
+  fi
+}
+
+# Installed prefix of upstream's always-latest brew formula, or empty. Used both
+# to explain PATH shadowing and to decide whether a downgrade needs a `brew
+# uninstall` first: our pinned formula also owns `bin/msb`, so the two conflict.
+msb_upstream_brew_prefix() {
+  command -v brew >/dev/null 2>&1 || return 0
+  for formula in "$MSB_BREW_UPSTREAM_FORMULA" microsandbox; do
+    prefix=$(brew --prefix "$formula" 2>/dev/null || true)
+    if [ -n "$prefix" ] && [ -d "$prefix" ]; then
+      printf '%s\n' "$prefix"
+      return 0
+    fi
+  done
+}
+
+# sha256 of a file, via whichever tool this host has. Empty means neither exists,
+# and callers MUST fail closed rather than install an unverified artifact.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+  fi
+}
+
+# Abandon a pinned-install attempt: report why, drop the scratch dir, and clear
+# the cleanup trap so an unrelated later failure cannot re-run it. Always fails,
+# so callers can `msb_pin_abort "..." && return 1` — see install_msb_pinned_tarball.
+msb_pin_abort() {
+  warn "  $1"
+  [ -n "${2:-}" ] && rm -rf "$2"
+  trap - EXIT HUP INT TERM
+  return 1
+}
+
+# Install the pinned msb release by fetching the release bundle and verifying it
+# against that release's published checksums.sha256. This deliberately does not
+# reuse upstream's install.sh (see MSB_RELEASE_BASE above for why it cannot pin).
+# Layout matches upstream's: $MSB_HOME_DIR/{bin,lib} plus ~/.local/bin links.
+install_msb_pinned_tarball() {
+  bundle=$(msb_bundle_name)
+  if [ -z "$bundle" ]; then
+    warn "  No pinned msb bundle is published for $(uname -s)/$(uname -m)."
+    warn "  Install msb $MSB_PINNED_VERSION manually, then re-run this installer."
+    return 1
+  fi
+
+  base="$MSB_RELEASE_BASE/v$MSB_PINNED_VERSION"
+  info "  Installing msb $MSB_PINNED_VERSION from the pinned release bundle..."
+  info "  ($base/$bundle, verified against that release's checksums.sha256.)"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '  [dry-run] curl -fsSL %s/%s -o <tmp>/%s\n' "$base" "$bundle" "$bundle"
+    printf '  [dry-run] curl -fsSL %s/checksums.sha256 -o <tmp>/checksums.sha256\n' "$base"
+    printf '  [dry-run] verify sha256, extract, install into %s/{bin,lib}\n' "$MSB_HOME_DIR"
+    printf '  [dry-run] link %s/msb -> %s/bin/msb\n' "$BIN_DIR" "$MSB_HOME_DIR"
+    return 0
+  fi
+
+  command -v tar >/dev/null 2>&1 || { warn "  tar is required to install msb."; return 1; }
+
+  tmpdir="${TMPDIR:-/tmp}/acq-msb-pin.$$"
+  rm -rf "$tmpdir"
+  mkdir -p "$tmpdir" || { warn "  Could not create $tmpdir."; return 1; }
+  trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
+
+  curl -fsSL "$base/$bundle" -o "$tmpdir/$bundle" \
+    || msb_pin_abort "Could not download $base/$bundle." "$tmpdir" || return 1
+  curl -fsSL "$base/checksums.sha256" -o "$tmpdir/checksums.sha256" \
+    || msb_pin_abort "Could not download $base/checksums.sha256." "$tmpdir" || return 1
+
+  expected=$(grep -F " $bundle" "$tmpdir/checksums.sha256" 2>/dev/null | cut -d' ' -f1)
+  [ -n "$expected" ] \
+    || msb_pin_abort "No checksum for $bundle in the release's checksums.sha256." "$tmpdir" || return 1
+  actual=$(sha256_of "$tmpdir/$bundle")
+  [ -n "$actual" ] \
+    || msb_pin_abort "Neither sha256sum nor shasum is available to verify the download." "$tmpdir" || return 1
+  [ "$expected" = "$actual" ] \
+    || msb_pin_abort "Checksum mismatch for $bundle (expected $expected, got $actual)." "$tmpdir" || return 1
+  ok "  Verified $bundle (sha256 $actual)."
+
+  ( cd "$tmpdir" && tar -xzf "$bundle" ) \
+    || msb_pin_abort "Could not extract $bundle." "$tmpdir" || return 1
+  [ -f "$tmpdir/msb" ] \
+    || msb_pin_abort "The release bundle did not contain an msb binary." "$tmpdir" || return 1
+
+  # Derive the libkrunfw filename and ABI from the artifact rather than pinning
+  # another version here; the bundle carries exactly one versioned library.
+  libname=""
+  for candidate in "$tmpdir"/libkrunfw.so.*.*.* "$tmpdir"/libkrunfw.*.dylib; do
+    [ -f "$candidate" ] || continue
+    [ -z "$libname" ] \
+      || msb_pin_abort "The release bundle carried more than one libkrunfw library." "$tmpdir" || return 1
+    libname=$(basename "$candidate")
+  done
+  [ -n "$libname" ] \
+    || msb_pin_abort "The release bundle did not contain a libkrunfw library." "$tmpdir" || return 1
+
+  # Validate the ABI BEFORE writing anything, so a malformed bundle cannot leave
+  # a half-installed runtime behind.
+  case "$libname" in
+    *.dylib) abi=${libname#libkrunfw.}; abi=${abi%.dylib} ;;
+    *)       abi=${libname#libkrunfw.so.}; abi=${abi%%.*} ;;
+  esac
+  case "$abi" in
+    ''|*[!0-9]*) msb_pin_abort "The bundle's libkrunfw ABI version ('$abi') is not numeric." "$tmpdir" || return 1 ;;
+  esac
+
+  mkdir -p "$MSB_HOME_DIR/bin" "$MSB_HOME_DIR/lib" \
+    || msb_pin_abort "Could not create $MSB_HOME_DIR." "$tmpdir" || return 1
+
+  # install(1) unlinks first, so a running msb keeps its own inode. On macOS the
+  # code signature is cached on the vnode, so the library is replaced by
+  # write-then-rename rather than overwritten in place.
+  install -m 755 "$tmpdir/msb" "$MSB_HOME_DIR/bin/msb" \
+    || msb_pin_abort "Could not install msb into $MSB_HOME_DIR/bin." "$tmpdir" || return 1
+  ln -sf msb "$MSB_HOME_DIR/bin/microsandbox"
+
+  case "$libname" in
+    *.dylib)
+      cp "$tmpdir/$libname" "$MSB_HOME_DIR/lib/$libname.tmp" \
+        && mv "$MSB_HOME_DIR/lib/$libname.tmp" "$MSB_HOME_DIR/lib/$libname" \
+        || msb_pin_abort "Could not install $libname." "$tmpdir" || return 1
+      ln -sf "$libname" "$MSB_HOME_DIR/lib/libkrunfw.dylib"
+      ;;
+    *)
+      install -m 644 "$tmpdir/$libname" "$MSB_HOME_DIR/lib/$libname" \
+        || msb_pin_abort "Could not install $libname." "$tmpdir" || return 1
+      ln -sf "$libname" "$MSB_HOME_DIR/lib/libkrunfw.so.$abi"
+      ln -sf "libkrunfw.so.$abi" "$MSB_HOME_DIR/lib/libkrunfw.so"
+      ;;
+  esac
+
+  # Link into the same user-writable bin dir acq uses. Never clobber a real file
+  # a user put there by hand; only manage our own symlink.
+  mkdir -p "$BIN_DIR"
+  for name in msb microsandbox; do
+    if [ -e "$BIN_DIR/$name" ] && [ ! -L "$BIN_DIR/$name" ]; then
+      warn "  Left $BIN_DIR/$name alone: it exists and is not a symlink."
+      continue
+    fi
+    ln -sf "$MSB_HOME_DIR/bin/$name" "$BIN_DIR/$name"
+  done
+
+  rm -rf "$tmpdir"
+  trap - EXIT HUP INT TERM
+  ok "  Installed msb $MSB_PINNED_VERSION to $MSB_HOME_DIR/bin/msb."
+}
+
+# Install the pinned msb. Homebrew hosts get our version-pinned formula so that
+# `brew upgrade` stays meaningful and brew keeps owning what it installed;
+# everyone else gets the verified release bundle.
+install_msb_pinned() {
+  if command -v brew >/dev/null 2>&1; then
+    info "  Installing msb $MSB_PINNED_VERSION via Homebrew ($MSB_BREW_FORMULA)..."
+    if run brew install "$MSB_BREW_FORMULA"; then
+      return 0
+    fi
+    warn "  Homebrew could not install $MSB_BREW_FORMULA; falling back to the"
+    warn "  pinned release bundle."
+  fi
+  install_msb_pinned_tarball
+}
+
+# Does this msb refuse to open the local catalog because a newer msb migrated it?
+# That is the one-way 0.6.x -> 0.7.x catalog migration, and no amount of swapping
+# binaries fixes it; the state itself has to be rolled back first.
+msb_catalog_ahead() {
+  out=$("$1" list 2>&1 </dev/null || true)
+  case "$out" in
+    *"schema is newer"*|*"not in this binary's migration prefix"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Path of an interrupted `msb self downgrade` journal, or empty.
+#
+# A failed downgrade leaves $MSB_HOME/db/self-downgrade/<id>/journal.json behind,
+# and msb then refuses EVERY command from EVERY version until that operation is
+# resumed:
+#
+#   error: self_downgrade_recovery_required: resume the active downgrade
+#   recorded at .../db/self-downgrade/<id>/journal.json
+#
+# When the journal records a transition that cannot complete — which is exactly
+# what a too-old binary leaves behind, because it stages a target it then cannot
+# roll the database back to — the demand is unsatisfiable and the install is
+# wedged. Verified against msb 0.6.18/0.7.2/0.7.3: resuming with the journal's
+# own target, with a different target, and from each of the three binaries all
+# fail identically, and `self downgrade` exposes no abort or clear flag. The only
+# exit is removing the journal directory, after which a correctly-ordered
+# downgrade succeeds normally.
+msb_stale_downgrade_journal() {
+  for journal in "$MSB_HOME_DIR"/db/self-downgrade/*/journal.json; do
+    [ -f "$journal" ] || continue
+    printf '%s\n' "$journal"
+    return 0
+  done
+}
+
+# Clear a wedged downgrade journal, with consent. Deliberately narrow: it removes
+# only the self-downgrade operation directory, never the database, the backups, or
+# any sandbox state.
+clear_stale_downgrade_journal() {
+  journal="$1"
+  opdir=$(dirname "$journal")
+
+  step "An interrupted msb downgrade is blocking every msb command"
+  warn "  msb records an in-progress 'self downgrade' here:"
+  info "    $journal"
+  warn "  Until that operation finishes, msb refuses all commands — including"
+  warn "  read-only ones, and including from a different msb version. If the"
+  warn "  recorded transition cannot complete (a too-old msb leaves exactly that"
+  warn "  behind), there is no way to resume it and no flag to abandon it."
+  info "  Removing that operation directory clears the block. It does NOT touch"
+  info "  your database, your retained downgrade backups, or any sandbox."
+
+  if ! confirm "  Remove $opdir now?"; then
+    warn "  Leaving it in place. msb will keep refusing every command. To do it"
+    warn "  yourself:"
+    info  "    rm -rf \"$opdir\""
+    return 1
+  fi
+
+  run rm -rf "$opdir" || { warn "  Could not remove $opdir."; return 1; }
+  ok "  Cleared the interrupted downgrade; msb commands should work again."
+}
+
+# Roll a 0.7.x-migrated catalog back so a supported msb can read it again.
+#
+# This MUST be driven by the currently-installed 0.7.x binary: `msb self
+# downgrade` builds its rollback plan from the running binary's own migration
+# metadata, takes a database backup, and reverts the migrations the older line
+# does not know. Installing the older binary first strands the catalog instead —
+# an older msb answers `local database was updated by a newer msb or does not
+# contain a valid migration prefix`, AND leaves a wedging journal behind (see
+# msb_stale_downgrade_journal). It mutates sandbox state, so it is consent-gated
+# and never implied by --yes alone being absent.
+#
+# Prefer moving FORWARD (see update_msb_to_fixed): it needs no rollback at all.
+# This path is for a host that cannot, or chose not to, move forward.
+recover_migrated_catalog() {
+  blocked_msb="$1"
+  blocked_version="$2"
+
+  # Refuse to drive the rollback with a binary that cannot perform it. Only the
+  # binary whose own migration metadata covers the applied set can build the
+  # plan, and an attempt by an older one wedges the install rather than failing
+  # cleanly. This guard is the reason that wedge is unreachable through acq.
+  if msb_version_blocked "$blocked_version" \
+     || version_ge "$blocked_version" "$MSB_BLOCKED_VERSION_MIN"; then
+    : # this binary is from the line that applied the migrations; it can roll back
+  else
+    warn "  Refusing to run 'msb self downgrade' with msb $blocked_version: only the newer"
+    warn "  msb that applied these migrations can roll them back, and an attempt by"
+    warn "  an older one leaves an interrupted-downgrade record that blocks every"
+    warn "  msb command afterwards."
+    info "  Get the msb that migrated this catalog, run the downgrade with IT, then"
+    info "  re-run this installer. A keg-only formula gets you that exact version"
+    info "  without disturbing your current msb:"
+    info "    brew install ${MSB_BREW_VERSIONED_PREFIX}<version>"
+    info "    \"\$(brew --prefix microsandbox-acq@<version>)/bin/msb\" self downgrade $MSB_PINNED_VERSION"
+    return 1
+  fi
+
+  step "Existing sandbox state was migrated by msb $blocked_version"
+  warn "  msb $blocked_version already upgraded the local sandbox catalog in"
+  warn "  $MSB_HOME_DIR. A supported msb cannot read it, so installing one now"
+  warn "  would leave you with 'database schema is newer than this msb binary'."
+  info "  'msb self downgrade $MSB_PINNED_VERSION' rolls that catalog back. It is run by the"
+  info "  currently-installed msb $blocked_version (which owns the rollback steps), takes a"
+  info "  database backup first, and reports exactly what it will change before"
+  info "  doing it. It alters sandbox state, so it needs your approval."
+
+  if ! confirm "  Run 'msb self downgrade $MSB_PINNED_VERSION' now?"; then
+    warn "  Skipping catalog rollback. acq will keep refusing msb $blocked_version, and a"
+    warn "  supported msb will not be able to read this catalog. To do it yourself:"
+    info  "    msb self downgrade $MSB_PINNED_VERSION"
+    return 1
+  fi
+
+  # Interactive on purpose: msb prints the plan (including any user-data
+  # warnings) and prompts. Do not pass --yes; the user is approving msb's plan,
+  # not just our question. stdin is wired to the terminal because a piped
+  # `curl | sh` leaves fd 0 pointing at the script.
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '  [dry-run] %s self downgrade %s\n' "$blocked_msb" "$MSB_PINNED_VERSION"
+    return 0
+  fi
+
+  if [ -t 0 ]; then
+    "$blocked_msb" self downgrade "$MSB_PINNED_VERSION"
+  elif [ -e /dev/tty ]; then
+    "$blocked_msb" self downgrade "$MSB_PINNED_VERSION" </dev/tty
+  else
+    warn "  No terminal is available to confirm msb's own downgrade prompt."
+    info  "  Run this yourself, then re-run this installer:"
+    info  "    msb self downgrade $MSB_PINNED_VERSION"
+    return 1
+  fi || {
+    warn "  'msb self downgrade $MSB_PINNED_VERSION' did not complete. msb's message above is"
+    warn "  authoritative — it refuses rather than discarding data it cannot roll"
+    warn "  back (grouped or duplicate snapshots are the usual cause). Resolve"
+    warn "  what it reports, or move forward to msb $MSB_FIXED_VERSION instead, then re-run"
+    warn "  this installer."
+    return 1
+  }
+
+  ok "  Sandbox catalog rolled back for msb $MSB_PINNED_VERSION."
+}
+
+# Move a blocked msb FORWARD to the fixed line instead of rolling it back.
+#
+# This is the preferred recovery. The migration sets are additive — every
+# migration an earlier 0.7.x applied is also known to the fixed line — so the
+# fixed binary opens an already-migrated catalog directly. No rollback plan, no
+# database backup dance, no `affects_user_data` step, and none of the refusals a
+# downgrade can hit (grouped or duplicate snapshots).
+#
+# `msb self update` is the right tool here precisely because it targets the newest
+# release: during this window the newest release IS the fixed one. That coupling
+# is why this is checked, not assumed — if upstream ships something newer that we
+# have not cleared, the version check afterwards catches it.
+update_msb_to_fixed() {
+  blocked_msb="$1"
+  blocked_version="$2"
+
+  step "msb $blocked_version can be fixed by moving forward, not back"
+  info "  msb $MSB_FIXED_VERSION carries the upstream cross-version compatibility fix, and it"
+  info "  reads the catalog msb $blocked_version already migrated — the migration sets are"
+  info "  additive, so nothing has to be rolled back and no sandbox state is"
+  info "  rewritten. This is safer than downgrading to msb $MSB_PINNED_VERSION, which has to"
+  info "  revert migrations and can refuse outright if you have grouped snapshots."
+
+  if ! confirm "  Run 'msb self update' to move to msb $MSB_FIXED_VERSION now?"; then
+    return 1
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '  [dry-run] %s self update\n' "$blocked_msb"
+    return 0
+  fi
+
+  "$blocked_msb" self update </dev/null || {
+    warn "  'msb self update' did not complete; msb's message above is authoritative."
+    return 1
+  }
+
+  # Trust nothing: `self update` targets whatever is newest, so confirm we landed
+  # on a version this installer actually accepts before calling it a success.
+  hash -r 2>/dev/null || true
+  updated="$(command -v msb 2>/dev/null || true)"
+  updated_version=""
+  [ -n "$updated" ] && updated_version=$(msb_version_of "$updated")
+  if [ -z "$updated_version" ] || msb_version_blocked "$updated_version" \
+     || ! version_ge "$updated_version" "$MSB_MIN_VERSION"; then
+    warn "  After 'msb self update' the active msb is ${updated_version:-unreadable}, which acq"
+    warn "  does not accept. Falling back to the pinned msb $MSB_PINNED_VERSION path."
+    return 1
+  fi
+
+  ok "  msb is now $updated_version ($updated)."
+}
+
+# Remove upstream's always-latest brew formula when it is what is being replaced.
+# Our pinned formula owns the same `bin/msb`, so Homebrew refuses to link both.
+remove_upstream_brew_msb() {
+  prefix=$(msb_upstream_brew_prefix)
+  [ -n "$prefix" ] || return 0
+
+  step "Homebrew's $MSB_BREW_UPSTREAM_FORMULA is installed"
+  warn "  That formula always tracks the newest msb release, so it cannot hold a"
+  warn "  supported version, and it owns the same 'msb' command as the pinned"
+  warn "  formula — Homebrew will not link both."
+  if ! confirm "  Run 'brew uninstall $MSB_BREW_UPSTREAM_FORMULA' now?"; then
+    warn "  Leaving it installed. Remove it yourself before installing the pinned"
+    warn "  formula, or the two will collide:"
+    info  "    brew uninstall $MSB_BREW_UPSTREAM_FORMULA"
+    return 1
+  fi
+  run brew uninstall "$MSB_BREW_UPSTREAM_FORMULA" \
+    || run brew uninstall microsandbox \
+    || { warn "  'brew uninstall' failed; remove it manually and re-run."; return 1; }
+}
+
+# Bring the active msb to a version acq accepts.
+#
+# Returns 0 when the active msb is already acceptable (the forward-update path
+# succeeded and nothing further is needed) via MSB_ALREADY_SUPPORTED=1, or when
+# the pinned version was installed. Order matters throughout: a catalog rollback
+# needs the binary that performed the migration to still be installed, so nothing
+# may be uninstalled before that step.
+replace_active_msb() {
+  active="$1"
+  active_version="$2"
+  MSB_ALREADY_SUPPORTED=0
+
+  # A wedged downgrade journal blocks every msb command, so clear it before any
+  # probe that shells out to msb — otherwise msb_catalog_ahead misreads the
+  # recovery-required error as an unrelated failure.
+  journal=$(msb_stale_downgrade_journal)
+  if [ -n "$journal" ]; then
+    clear_stale_downgrade_journal "$journal" || return 1
+  fi
+
+  if [ -n "$active_version" ] && msb_version_blocked "$active_version" \
+     && msb_catalog_ahead "$active"; then
+    # Forward first: it rewrites no state and cannot be refused by the snapshot
+    # checks a rollback can hit. Only fall back to the rollback if the user
+    # declines or the update does not land on an accepted version.
+    if update_msb_to_fixed "$active" "$active_version"; then
+      MSB_ALREADY_SUPPORTED=1
+      return 0
+    fi
+    recover_migrated_catalog "$active" "$active_version" || return 1
+  fi
+  remove_upstream_brew_msb || return 1
+  install_msb_pinned
+}
+
+verify_active_msb_pinned() {
+  # A brew install or a fresh symlink may not be visible to a shell that cached
+  # PATH lookups. Clear the cache so the check sees what was just installed.
+  hash -r 2>/dev/null || true
+
+  active="$(command -v msb 2>/dev/null || true)"
+  if [ -z "$active" ]; then
+    die "msb $MSB_PINNED_VERSION was installed, but no msb is active on PATH.
+Add $BIN_DIR to PATH, open a new terminal, and re-run this installer."
+  fi
+  ver=$(msb_version_of "$active")
+  if [ -z "$ver" ]; then
+    die "active msb at $active did not report a parseable version. Check that PATH
+points at the intended msb binary, then re-run this installer."
+  fi
+  if ! version_ge "$ver" "$MSB_MIN_VERSION"; then
+    die "active msb is still too old: $ver at $active.
+Use msb $MSB_PINNED_VERSION, or upgrade to msb $MSB_FIXED_VERSION or newer."
+  fi
+  if msb_version_blocked "$ver"; then
+    die "active msb is still blocked version $ver at $active.
+msb $MSB_PINNED_VERSION was installed, but another msb is shadowing it on PATH. Remove
+the stale copy (if it is Homebrew's: brew uninstall $MSB_BREW_UPSTREAM_FORMULA) or put
+$BIN_DIR earlier in PATH, then re-run this installer."
+  fi
+  ok "  Active msb is $ver ($active)."
+}
+
 # ---------------------------------------------------------------------------
 # Run the selected method
 # ---------------------------------------------------------------------------
@@ -537,39 +1155,82 @@ esac
 # ---------------------------------------------------------------------------
 
 if [ "$INSTALL_MSB" -eq 1 ]; then
-  if command -v msb >/dev/null 2>&1; then
-    ok "  msb is already installed ($(command -v msb))."
-  else
-    step "The msb sandbox runtime is not installed"
-    info "  acq runs your agent inside an msb microVM. It is a separate, open-source tool."
-    if confirm "  Install msb now?"; then
-      if command -v brew >/dev/null 2>&1; then
-        info "  Installing via Homebrew..."
-        # Tap first: a fresh host has not tapped superradcompany/tap.
-        run brew tap superradcompany/tap
-        run brew install superradcompany/tap/microsandbox
+  msb_report_candidates
+  active_msb="$(command -v msb 2>/dev/null || true)"
+  active_msb_version=""
+  [ -n "$active_msb" ] && active_msb_version=$(msb_version_of "$active_msb")
+
+  if [ -n "$active_msb" ] && [ -z "$active_msb_version" ]; then
+    step "The active msb version could not be determined"
+    warn "  Found msb at $active_msb, but its version output was not parseable."
+    warn "  Install msb $MSB_PINNED_VERSION so acq can verify a supported version."
+    if confirm "  Install/downgrade msb to $MSB_PINNED_VERSION now?"; then
+      if replace_active_msb "$active_msb" "$active_msb_version"; then
+        verify_active_msb_pinned
       else
-        info "  Homebrew not found; using the microsandbox install script."
-        info "  (This downloads and runs https://install.microsandbox.dev.)"
-        if [ "$DRY_RUN" -eq 1 ]; then
-          printf '  [dry-run] curl -fsSL https://install.microsandbox.dev | sh\n'
-        else
-          # Fetch then pipe, so the child does not read the curl | sh script pipe (fd 0).
-          if msb_installer="$(curl -fsSL https://install.microsandbox.dev)"; then
-            printf '%s' "$msb_installer" | sh
-          else
-            INSTALL_MSB=0
-          fi
-        fi
+        INSTALL_MSB=0
       fi
     else
       INSTALL_MSB=0
     fi
-    if [ "$INSTALL_MSB" -eq 0 ]; then
-      warn "  Skipping msb. Install it later with one of:"
-      info  "    brew install superradcompany/tap/microsandbox"
-      info  "    curl -fsSL https://install.microsandbox.dev | sh"
+  elif [ -n "$active_msb" ] && ! version_ge "$active_msb_version" "$MSB_MIN_VERSION"; then
+    step "The active msb version is too old"
+    warn "  Found msb $active_msb_version at $active_msb. acq requires msb >= $MSB_MIN_VERSION."
+    warn "  Install msb $MSB_PINNED_VERSION instead."
+    if confirm "  Install/downgrade msb to $MSB_PINNED_VERSION now?"; then
+      if replace_active_msb "$active_msb" "$active_msb_version"; then
+        verify_active_msb_pinned
+      else
+        INSTALL_MSB=0
+      fi
+    else
+      INSTALL_MSB=0
     fi
+  elif [ -n "$active_msb" ] && msb_version_blocked "$active_msb_version"; then
+    step "The active msb version is blocked"
+    warn "  Found msb $active_msb_version at $active_msb."
+    warn "  acq refuses msb $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX because those releases"
+    warn "  migrate 0.6.x sandbox state one-way."
+    info "  Two ways out: move FORWARD to msb $MSB_FIXED_VERSION (preferred — it reads the"
+    info "  already-migrated catalog as-is), or roll back to msb $MSB_PINNED_VERSION. You will be"
+    info "  offered the forward path first, and asked before anything changes."
+    if confirm "  Fix the active msb now?"; then
+      if replace_active_msb "$active_msb" "$active_msb_version"; then
+        verify_active_msb_pinned
+      else
+        INSTALL_MSB=0
+      fi
+    else
+      INSTALL_MSB=0
+    fi
+  elif [ -n "$active_msb" ]; then
+    ok "  msb is already installed ($active_msb${active_msb_version:+, v$active_msb_version})."
+  else
+    step "The msb sandbox runtime is not installed"
+    info "  acq runs your agent inside an msb microVM. It is a separate, open-source tool."
+    if confirm "  Install msb $MSB_PINNED_VERSION now?"; then
+      if install_msb_pinned; then
+        verify_active_msb_pinned
+      else
+        INSTALL_MSB=0
+      fi
+    else
+      INSTALL_MSB=0
+    fi
+  fi
+
+  if [ "$INSTALL_MSB" -eq 0 ]; then
+    warn "  Skipping msb. Install a supported version later with:"
+    if command -v brew >/dev/null 2>&1; then
+      info  "    brew install $MSB_BREW_FORMULA"
+    fi
+    info  "    ./scripts/verify-msb-pin --install   # verified pinned release bundle"
+    info  "  Do NOT use 'curl -fsSL https://install.microsandbox.dev | sh' to install a"
+    info  "  specific version: it always resolves to the newest release, and every"
+    info  "  release publishes a byte-identical copy, so a versioned asset URL is not"
+    info  "  a pin. Use msb $MSB_PINNED_VERSION, or msb $MSB_FIXED_VERSION or newer."
+    info  "  ('msb self update' targets the newest release, which right now IS msb"
+    info  "  $MSB_FIXED_VERSION — that is the one supported use of it during this window.)"
   fi
 fi
 
