@@ -126,7 +126,7 @@ MSB_PINNED_VERSION="0.6.18"
 # additive, so this line reads an already-migrated catalog with no rollback and no
 # state rewrite. Rolling back needs `msb self downgrade` run BY the blocked binary
 # (it owns the rollback metadata), and can be refused outright when grouped or
-# duplicate snapshots exist. See ADR-0031.
+# duplicate snapshots exist. See ADR-0032.
 MSB_FIXED_VERSION="0.7.3"
 
 # Default OCI image for provisioned sandboxes. We default to the SAME image
@@ -786,7 +786,7 @@ _acq_msb_version() {
 # those verbs reached msb unguarded and surfaced raw upstream errors — most
 # visibly `database schema is newer than this msb binary` from a blocked 0.7.x
 # that had already migrated the catalog. Cheap: one `msb --version`, no network,
-# no host mutation. See ADR-0031.
+# no host mutation. See ADR-0032.
 acq_backend_check_version() {
   if ! command -v msb >/dev/null 2>&1; then
     echo "error: msb (microsandbox) CLI not found on PATH. Install msb >= $MIN_MSB_VERSION:" >&2
@@ -2972,6 +2972,16 @@ EOF
   # auto-trusted in the guest, so no extra CA install is needed (verified: plain
   # HTTPS to an intercepted host returns 200). Toggle off only if a deployment
   # cannot use interception (secrets then won't substitute).
+  #
+  # On msb 0.7.3+ that toggle costs more than secret substitution. Upstream turned
+  # `--net-strict` on by default there: a HOSTNAME allow rule is only honored when
+  # msb can inspect the request authority, so non-intercepted HTTPS fails closed
+  # when only a hostname rule permits it. Every rule acq emits for the balanced and
+  # strict tiers is hostname-based, so disabling interception on 0.7.3+ makes those
+  # hosts unreachable outright rather than merely unsubstituted. Left as the user's
+  # call (the knob exists for deployments that cannot intercept), but the escape is
+  # msb's own `--net-strict=false`, not anything acq can decide for them. See
+  # docs/BACKEND_GUIDE.md (balanced egress).
   if [ -z "${ACQ_MSB_NO_TLS_INTERCEPT:-}" ]; then
     create_flags+=(--tls-intercept)
 

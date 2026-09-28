@@ -54,7 +54,7 @@ strengths/tradeoffs comparison.
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](../adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases can migrate 0.6.x sandbox state incompatibly. Use 0.6.18 or >=0.7.3. |
+| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](../adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases migrate 0.6.x sandbox state one-way, into a form the 0.6.x line cannot read. Use 0.6.18, or 0.7.3 or newer ([ADR-0032](../adr/0032-msb-version-policy-and-migration-recovery.md)). |
 | Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
 
 Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
@@ -63,18 +63,23 @@ to skip it.
 
 ## Step 1: Install msb
 
+Install through a channel that can express a **version**:
+
 ```bash
-# Temporary safe pin while msb 0.7.0-0.7.2 are blocked:
-curl -fsSL https://github.com/superradcompany/microsandbox/releases/download/v0.6.18/install.sh | sh
-
-# Use the generic installers only once they resolve to msb >=0.7.3:
-curl -fsSL https://install.microsandbox.dev | sh        # macOS / Linux
-brew install superradcompany/tap/microsandbox           # Homebrew
+brew install GSA-TTS/tap/microsandbox-acq    # version-pinned formula
+./scripts/verify-msb-pin --install           # verified pinned release bundle
 ```
 
-```powershell
-irm https://install.microsandbox.dev/windows | iex      # Windows preview
-```
+`./install.sh` does this for you and also repairs a blocked, too-old,
+unparseable, or PATH-shadowed `msb`.
+
+> **Do not use the upstream one-liners to get a specific version.**
+> `curl -fsSL https://install.microsandbox.dev | sh` (and its Windows
+> `irm … | iex` equivalent) take no version argument and read
+> `releases/latest`. Every release also publishes a **byte-identical** copy of
+> that script as a release asset, so a URL like
+> `.../releases/download/v0.6.18/install.sh` looks like a pin and still installs
+> whatever is newest — which may be a version `acq` refuses.
 
 ```bash
 # Verify
@@ -85,6 +90,13 @@ If you have both Homebrew and a prior manual/curl install, verify which binary i
 active with `command -v msb`. Multiple `msb` copies on PATH can create or migrate
 sandbox state with different versions depending on shell PATH order; keep only
 one intended version active.
+
+If a 0.7.0-0.7.2 `msb` has already touched your sandbox state, do **not** just
+swap the binary — the catalog was migrated. Move forward with
+`msb self update` (upstream's own recommendation: the fixed line reads the
+already-migrated catalog with no rollback). See §42 of
+[`KNOWN_FAILURE_MODES.md`](../KNOWN_FAILURE_MODES.md) for every symptom and
+recovery, including the wedge a mis-ordered `msb self downgrade` leaves behind.
 
 <a id="msb-host-setup"></a>
 

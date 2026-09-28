@@ -26,7 +26,7 @@ $PackageName = "acq-windows-x64.zip"
 # a drift here means Windows accepts an msb the rest of acq refuses.
 #
 # 0.7.0 through 0.7.2 migrate 0.6.x sandbox state one-way, into a form the 0.6.x
-# line cannot read. 0.7.3 carries the upstream compatibility fix. See ADR-0031.
+# line cannot read. 0.7.3 carries the upstream compatibility fix. See ADR-0032.
 $MsbMinVersion = "0.6.9"
 $MsbPinnedVersion = "0.6.18"
 $MsbBlockedVersionMin = "0.7.0"

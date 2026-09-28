@@ -29,7 +29,7 @@ once (install one, and it auto-detects). Pick the one that fits your environment
 
 | Backend | Install | Fits when |
 |---------|---------|-----------|
-| **msb** | `curl -fsSL https://install.microsandbox.dev \| sh` | You want a FOSS microVM runtime, no Docker seat, snapshots |
+| **msb** | `brew install GSA-TTS/tap/microsandbox-acq` | You want a FOSS microVM runtime, no Docker seat, snapshots |
 | **sbx** | `brew install docker/tap/sbx && sbx login` | You have Docker and want the commercial product |
 
 See [docs/BACKEND_GUIDE.md](../BACKEND_GUIDE.md) for a full comparison. `acq`
@@ -50,7 +50,10 @@ a choice with `acq backend set <sbx|msb>` or `acq doctor`.
 
 Complete the standard setup in [README.md](../../README.md#5-minute-quickstart):
 
-- Install the `msb` CLI: `curl -fsSL https://install.microsandbox.dev | sh`
+- Install the `msb` CLI: `brew install GSA-TTS/tap/microsandbox-acq`, or
+  `./scripts/verify-msb-pin --install`. Not the upstream one-liner: it always
+  installs the newest release, and `acq` refuses msb 0.7.0-0.7.2
+  ([ADR-0032](../adr/0032-msb-version-policy-and-migration-recovery.md))
 - Run `msb doctor` (add `--fix` to set up KVM/HVF/WHP virtualization)
 - Set your network policy
 
@@ -314,8 +317,11 @@ cd agentic-coding-quickstart
 ```
 
 You'll also need the `msb` sandbox runtime — install it without admin via
-`curl -fsSL https://install.microsandbox.dev | sh` (or, if you have Homebrew,
-`brew install superradcompany/tap/microsandbox`).
+`brew install GSA-TTS/tap/microsandbox-acq`, or `./scripts/verify-msb-pin
+--install` if you have no Homebrew. Avoid
+`curl -fsSL https://install.microsandbox.dev | sh`: it always installs the newest
+release, and `acq` refuses msb 0.7.0-0.7.2 (see §42 of
+[`KNOWN_FAILURE_MODES.md`](../KNOWN_FAILURE_MODES.md)).
 
 > **Running `./acq` from the clone?** It only works from **inside** the
 > `agentic-coding-quickstart` folder (that's where the `acq` file lives). If you
@@ -372,8 +378,10 @@ backend (`ppp` — Podman-Plus-Proxy) is deferred.
 ## Running on the msb backend (default)
 
 ```bash
-# 1. Install msb (microsandbox) and confirm the host is ready
-curl -fsSL https://install.microsandbox.dev | sh
+# 1. Install msb (microsandbox) and confirm the host is ready.
+#    A version-pinned channel, because acq refuses msb 0.7.0-0.7.2 and the
+#    upstream one-liner always resolves to the newest release.
+brew install GSA-TTS/tap/microsandbox-acq   # or: ./scripts/verify-msb-pin --install
 msb doctor          # checks KVM/HVF/WHP; msb doctor --fix to set up
 
 # 2. Provide the USAi key.

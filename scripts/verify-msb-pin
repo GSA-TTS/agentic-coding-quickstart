@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # verify-msb-pin — live verification of acq's pinned-msb distribution and the
-# blocked-version recovery paths (ADR-0031).
+# blocked-version recovery paths (ADR-0032).
 #
 # WHY THIS EXISTS
 #
@@ -32,6 +32,10 @@
 #                   (the PREFERRED recovery; no rollback, no state rewrite)
 #   5. rollback     `msb self downgrade` driven BY the blocked binary restores a
 #                   catalog the pinned version can read, and retains a backup
+#   5b. groups      a snapshot group refuses the rollback outright (every 0.7
+#                   capture makes one by default), and refuses fail-closed: no
+#                   backup, no journal, msb still usable. This is the load-bearing
+#                   reason acq offers the FORWARD path first
 #   6. wrong-order  the same downgrade attempted BY the older binary fails AND
 #                   wedges every later msb command, which is why acq refuses to
 #                   attempt it (install.sh recover_migrated_catalog) and offers to
@@ -49,6 +53,12 @@
 #   ./scripts/verify-msb-pin              # all checks, isolated; changes nothing
 #   ./scripts/verify-msb-pin --install    # ALSO install the pinned msb for real
 #   ./scripts/verify-msb-pin --keep       # keep the scratch dir for inspection
+#
+# Needs ~1.2GB of scratch (three msb bundles plus a staged downgrade target per
+# check). It uses $TMPDIR, and checks up front that there is room — a small /tmp
+# tmpfs otherwise surfaces as a bogus `msb self downgrade` failure rather than as
+# an out-of-space error. Point it elsewhere if needed:
+#   TMPDIR=~/scratch ./scripts/verify-msb-pin
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -67,7 +77,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --install) DO_INSTALL=1; shift ;;
     --keep)    KEEP=1; shift ;;
-    -h|--help) sed -n '2,51p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,61p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1 (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -193,16 +203,41 @@ if ! BUNDLE=$(bundle_name); then
 fi
 ok "platform bundle: $BUNDLE"
 
+# Fail early and legibly on a small TMPDIR. Three ~57MB bundles are fetched and
+# extracted, and checks 4-6b each `cp -a` a catalog and stage a downgrade target,
+# so the scratch peaks around 1GB. Exhausting the filesystem mid-run does not
+# report "out of space": it surfaces as a bogus `msb self downgrade` failure
+# ("failed to unpack libkrunfw...") that reads exactly like a real defect in the
+# path under test. Observed on a host with a 512MB /tmp tmpfs.
+SCRATCH_KB_REQUIRED=1200000
+scratch_kb_free=$(df -Pk "$SCRATCH" 2>/dev/null | awk 'NR==2 {print $4}')
+case "$scratch_kb_free" in
+  ''|*[!0-9]*) note "could not determine free space on $(dirname "$SCRATCH")" ;;
+  *)
+    if [ "$scratch_kb_free" -lt "$SCRATCH_KB_REQUIRED" ]; then
+      bad "only $((scratch_kb_free / 1024))MB free on $(dirname "$SCRATCH"); need ~$((SCRATCH_KB_REQUIRED / 1024))MB" \
+          "re-run with a roomier scratch: TMPDIR=/path/with/space $0"
+      printf '\n  passed: %d   failed: %d   skipped: %d\n' "$PASS" "$FAIL" "$BLOCKED"
+      exit 1
+    fi
+    ok "scratch space: $((scratch_kb_free / 1024))MB free on $(dirname "$SCRATCH")"
+    ;;
+esac
+
 if [ -z "$(applied_migrations "$SCRATCH/nonexistent")" ] \
    && ! command -v sqlite3 >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
   note "no sqlite3 or python3: migration counts will be reported as unknown"
 fi
 
 # Assert the script's pinned versions still match what the code ships, so this
-# script cannot drift into verifying versions acq no longer uses.
-for pair in "PINNED_VERSION:MSB_PINNED_VERSION" "FIXED_VERSION:MSB_FIXED_VERSION"; do
-  local_name=${pair%%:*}; code_name=${pair##*:}
-  eval "want=\$$local_name"
+# script cannot drift into verifying versions acq no longer uses. Pairs are
+# "<value this script tests>:<constant name in install.sh>" — the value is passed
+# directly rather than looked up by variable name, so there is no eval and no
+# indirection for a reader (or shellcheck) to follow.
+for pair in "$PINNED_VERSION:MSB_PINNED_VERSION" \
+            "$BLOCKED_VERSION:MSB_BLOCKED_VERSION_MAX" \
+            "$FIXED_VERSION:MSB_FIXED_VERSION"; do
+  want=${pair%%:*}; code_name=${pair##*:}
   got=$(grep -hoE "^$code_name=\"[0-9.]+\"" "$SCRIPT_DIR/install.sh" | head -1 | cut -d'"' -f2)
   if [ "$got" = "$want" ]; then
     ok "install.sh $code_name matches this script ($want)"
@@ -342,6 +377,62 @@ else
       "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
 fi
 
+# --- 5b. snapshot groups refuse the rollback outright ----------------------
+
+info "5b. a snapshot group blocks the rollback (and leaves no wedge)"
+# Upstream documents this, and it is the load-bearing reason acq offers the
+# FORWARD recovery first rather than treating the rollback as always-available:
+# every 0.7 capture creates a group by default, so a host that used snapshots at
+# all cannot roll back until it exports and removes them. Verified rather than
+# taken on faith, and the fail-closed behavior matters too -- a refusal must not
+# leave the wedging journal that check 6 demonstrates.
+#
+# The on-disk group marker (snapshots/<group>/group.json) is sufficient: msb
+# deliberately refuses on an empty or unindexed group rather than letting it
+# vanish from the older CLI's view.
+HOME_GRP="$SCRATCH/home-group"
+cp -a "$HOME_A" "$HOME_GRP"
+mkdir -p "$HOME_GRP/snapshots/verify-group"
+printf '{}\n' >"$HOME_GRP/snapshots/verify-group/group.json"
+
+out=$(run_msb "$BLOCKED_BIN" "$HOME_GRP" self downgrade "$PINNED_VERSION" --yes)
+case "$out" in
+  *"snapshot groups prevent downgrade"*)
+    ok "msb $BLOCKED_VERSION refuses the rollback while a snapshot group exists" ;;
+  *"Downgraded to v$PINNED_VERSION"*)
+    bad "the rollback succeeded despite a snapshot group" \
+        "upstream may have added group projection; the forward-first rationale needs re-checking" ;;
+  *)
+    bad "unexpected result downgrading with a snapshot group present" \
+        "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')" ;;
+esac
+
+# Fail closed: refused before touching the database, and no journal left behind.
+if ls "$HOME_GRP"/db/msb.db.bak-* >/dev/null 2>&1; then
+  bad "a database backup exists after a refusal that should precede any mutation"
+else
+  ok "no database backup was written: the refusal precedes any mutation"
+fi
+grp_journal=""
+for candidate in "$HOME_GRP"/db/self-downgrade/*/journal.json; do
+  [ -f "$candidate" ] && grp_journal="$candidate" && break
+done
+if [ -n "$grp_journal" ]; then
+  bad "the group refusal left an active downgrade journal behind" \
+      "that would wedge every later msb command; install.sh's journal guard would be load-bearing here"
+else
+  ok "no active journal after the refusal (the operation dir is retired as .cancelled-*)"
+  note "acq's journal glob skips dot-prefixed dirs, so a cancelled op is correctly ignored"
+fi
+out=$(run_msb "$BLOCKED_BIN" "$HOME_GRP" list)
+case "$out" in
+  *self_downgrade_recovery_required*)
+    bad "msb is wedged after a clean group refusal" "$out" ;;
+  *"No sandboxes found"*|*NAME*)
+    ok "msb $BLOCKED_VERSION still works normally after the refusal" ;;
+  *) note "unexpected list output after the refusal: ${out%%$'\n'*}" ;;
+esac
+
 # --- 6. the wrong order wedges the install --------------------------------
 
 info "6. the WRONG order fails, and wedges every later msb command"
@@ -355,7 +446,7 @@ case "$out" in
     ok "msb $PINNED_VERSION refuses to roll back migrations it does not know" ;;
   *"Downgraded to"*)
     bad "msb $PINNED_VERSION performed a rollback it should not be able to" \
-        "acq's ordering guard may be unnecessary; re-check ADR-0031" ;;
+        "acq's ordering guard may be unnecessary; re-check ADR-0032" ;;
   *) note "unexpected output: ${out##*$'\n'}" ;;
 esac
 

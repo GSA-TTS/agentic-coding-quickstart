@@ -822,7 +822,7 @@ acq_resolve_backend "${explicit_backend}"
 # errors instead of acq's (most visibly msb's `database schema is newer than this
 # msb binary` after a blocked 0.7.x migrated the catalog). This wrapper calls the
 # adapter's cheap check when it has one, so a backend that predates the split (or
-# a test stub) keeps working instead of dying on an unbound function. See ADR-0031.
+# a test stub) keeps working instead of dying on an unbound function. See ADR-0032.
 acq_backend_guard_version() {
   if command -v acq_backend_check_version >/dev/null 2>&1; then
     acq_backend_check_version

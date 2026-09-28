@@ -106,7 +106,7 @@ EOF
 # sandbox state can be guarded with the cheap check. On sbx the two are currently
 # the same work (there is no host-readiness probe here), but the split keeps the
 # adapter contract identical across backends — acq calls check_version on
-# state-touching verbs and prepare on provisioning verbs. See ADR-0031.
+# state-touching verbs and prepare on provisioning verbs. See ADR-0032.
 acq_backend_check_version() {
   if ! command -v sbx >/dev/null 2>&1; then
     echo "error: sbx CLI not found on PATH. Install sbx >= $MIN_SBX_VERSION." >&2

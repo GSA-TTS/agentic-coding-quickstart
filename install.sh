@@ -66,7 +66,7 @@ BREW_FORMULA="GSA-TTS/tap/acq"
 
 # msb 0.7.0-0.7.2 migrate 0.6.x sandbox state one-way into a format the 0.6.x
 # line cannot read. Install a pinned last-known-good release when acq needs to
-# install or repair msb, and accept the fixed line when present. See ADR-0031.
+# install or repair msb, and accept the fixed line when present. See ADR-0032.
 MSB_MIN_VERSION="0.6.9"
 MSB_PINNED_VERSION="0.6.18"
 MSB_BLOCKED_VERSION_MIN="0.7.0"
@@ -655,17 +655,15 @@ ${candidate}"
 
 msb_report_candidates() {
   count=0
-  versions=""
   active="$(command -v msb 2>/dev/null || true)"
   candidates=$(msb_unique_candidates)
   [ -n "$candidates" ] || return 0
 
+  # Count first: with one candidate there is no PATH-order ambiguity to report,
+  # and probing `--version` on it would be wasted work.
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
     count=$((count + 1))
-    ver=$(msb_version_of "$candidate")
-    [ -n "$ver" ] || ver="unknown"
-    versions="${versions} ${ver}"
   done <<EOF
 $candidates
 EOF
@@ -870,20 +868,21 @@ msb_catalog_ahead() {
 # Path of an interrupted `msb self downgrade` journal, or empty.
 #
 # A failed downgrade leaves $MSB_HOME/db/self-downgrade/<id>/journal.json behind,
-# and msb then refuses EVERY command from EVERY version until that operation is
-# resumed:
+# and msb then refuses EVERY command from EVERY version until that operation
+# reaches `phase: complete`:
 #
 #   error: self_downgrade_recovery_required: resume the active downgrade
 #   recorded at .../db/self-downgrade/<id>/journal.json
 #
-# When the journal records a transition that cannot complete — which is exactly
-# what a too-old binary leaves behind, because it stages a target it then cannot
-# roll the database back to — the demand is unsatisfiable and the install is
-# wedged. Verified against msb 0.6.18/0.7.2/0.7.3: resuming with the journal's
-# own target, with a different target, and from each of the three binaries all
-# fail identically, and `self downgrade` exposes no abort or clear flag. The only
-# exit is removing the journal directory, after which a correctly-ordered
-# downgrade succeeds normally.
+# The refusal is unconditional by design: msb checks for it before it opens the
+# database at all. When the journal records a transition that cannot complete —
+# which is exactly what a too-old binary leaves behind, because it stages a target
+# it then cannot roll the database back to — the demand is unsatisfiable and the
+# install is wedged. Verified against msb 0.6.18/0.7.2/0.7.3: resuming with the
+# journal's own target, with a different target, and from each of the three
+# binaries all fail identically, and `self downgrade` exposes no abort or clear
+# flag. The only exit is removing the journal directory, after which a
+# correctly-ordered downgrade succeeds normally.
 msb_stale_downgrade_journal() {
   for journal in "$MSB_HOME_DIR"/db/self-downgrade/*/journal.json; do
     [ -f "$journal" ] || continue
@@ -892,9 +891,26 @@ msb_stale_downgrade_journal() {
   done
 }
 
-# Clear a wedged downgrade journal, with consent. Deliberately narrow: it removes
-# only the self-downgrade operation directory, never the database, the backups, or
-# any sandbox state.
+# Clear a wedged downgrade journal, with consent.
+#
+# Upstream's migration guide says: "Do not delete the catalog or edit migration
+# history to bypass the refusal." That instruction is correct, and this does not
+# violate it. The paths look similar, so the distinction is worth being explicit
+# about:
+#
+#   NOT touched: the catalog database ($MSB_HOME/db/*.db), the applied-migrations
+#                history inside it, the retained downgrade backups, and every
+#                sandbox, snapshot, and image.
+#   Removed:     $MSB_HOME/db/self-downgrade/<id>/ — the journal of ONE operation
+#                that never finished.
+#
+# The journal is a lock, not a record of schema state: `phase != complete` means
+# "an operation is in flight", and msb's own downgrade path RETIRES the journal on
+# success rather than keeping it. Removing it abandons an operation that never
+# began mutating the database, so the catalog left behind is bit-identical and no
+# schema check is bypassed. What upstream is warning against is the other thing —
+# deleting the database, or editing the applied-migrations table, to force an
+# older binary to accept a newer catalog. acq never does that.
 clear_stale_downgrade_journal() {
   journal="$1"
   opdir=$(dirname "$journal")
@@ -906,8 +922,10 @@ clear_stale_downgrade_journal() {
   warn "  read-only ones, and including from a different msb version. If the"
   warn "  recorded transition cannot complete (a too-old msb leaves exactly that"
   warn "  behind), there is no way to resume it and no flag to abandon it."
-  info "  Removing that operation directory clears the block. It does NOT touch"
-  info "  your database, your retained downgrade backups, or any sandbox."
+  info "  Removing that operation directory clears the block. It removes only the"
+  info "  record of that unfinished operation — NOT your catalog database, NOT its"
+  info "  migration history, NOT your retained downgrade backups, and NOT any"
+  info "  sandbox, snapshot, or image. See ADR-0032 for why that is the safe cut."
 
   if ! confirm "  Remove $opdir now?"; then
     warn "  Leaving it in place. msb will keep refusing every command. To do it"
@@ -925,13 +943,18 @@ clear_stale_downgrade_journal() {
 # This MUST be driven by the currently-installed 0.7.x binary: `msb self
 # downgrade` builds its rollback plan from the running binary's own migration
 # metadata, takes a database backup, and reverts the migrations the older line
-# does not know. Installing the older binary first strands the catalog instead —
-# an older msb answers `local database was updated by a newer msb or does not
-# contain a valid migration prefix`, AND leaves a wedging journal behind (see
+# does not know. Upstream states the same requirement — run the downgrade from the
+# newer CLI BEFORE replacing it, because only that CLI carries the rollback steps.
+# Installing the older binary first strands the catalog instead — an older msb
+# answers `local database was updated by a newer msb or does not contain a valid
+# migration prefix`, AND leaves a wedging journal behind (see
 # msb_stale_downgrade_journal). It mutates sandbox state, so it is consent-gated
 # and never implied by --yes alone being absent.
 #
-# Prefer moving FORWARD (see update_msb_to_fixed): it needs no rollback at all.
+# The rollback can also be refused outright for reasons this installer cannot fix:
+# snapshot groups (which every 0.7 capture creates by default) block a downgrade
+# to a release without group support, even when empty. That is a second reason to
+# prefer moving FORWARD (see update_msb_to_fixed): it needs no rollback at all.
 # This path is for a host that cannot, or chose not to, move forward.
 recover_migrated_catalog() {
   blocked_msb="$1"
@@ -1005,11 +1028,15 @@ recover_migrated_catalog() {
 
 # Move a blocked msb FORWARD to the fixed line instead of rolling it back.
 #
-# This is the preferred recovery. The migration sets are additive — every
-# migration an earlier 0.7.x applied is also known to the fixed line — so the
-# fixed binary opens an already-migrated catalog directly. No rollback plan, no
-# database backup dance, no `affects_user_data` step, and none of the refusals a
-# downgrade can hit (grouped or duplicate snapshots).
+# This is the preferred recovery, and upstream agrees: its migration guide says to
+# upgrade to the fixed release and retry FIRST, because a blocked-version database
+# can upgrade directly with no downgrade to 0.6 needed.
+#
+# The migration sets are additive — every migration an earlier 0.7.x applied is
+# also known to the fixed line — so the fixed binary opens an already-migrated
+# catalog directly. No rollback plan, no database backup dance, no
+# `affects_user_data` step, and none of the refusals a downgrade can hit (grouped
+# or duplicate snapshots).
 #
 # `msb self update` is the right tool here precisely because it targets the newest
 # release: during this window the newest release IS the fixed one. That coupling
@@ -1079,15 +1106,13 @@ remove_upstream_brew_msb() {
 
 # Bring the active msb to a version acq accepts.
 #
-# Returns 0 when the active msb is already acceptable (the forward-update path
-# succeeded and nothing further is needed) via MSB_ALREADY_SUPPORTED=1, or when
-# the pinned version was installed. Order matters throughout: a catalog rollback
-# needs the binary that performed the migration to still be installed, so nothing
-# may be uninstalled before that step.
+# Returns 0 when the active msb is acceptable — either the forward update landed
+# on the fixed line, or the pinned version was installed. Order matters
+# throughout: a catalog rollback needs the binary that performed the migration to
+# still be installed, so nothing may be uninstalled before that step.
 replace_active_msb() {
   active="$1"
   active_version="$2"
-  MSB_ALREADY_SUPPORTED=0
 
   # A wedged downgrade journal blocks every msb command, so clear it before any
   # probe that shells out to msb — otherwise msb_catalog_ahead misreads the
@@ -1102,24 +1127,32 @@ replace_active_msb() {
     # Forward first: it rewrites no state and cannot be refused by the snapshot
     # checks a rollback can hit. Only fall back to the rollback if the user
     # declines or the update does not land on an accepted version.
-    if update_msb_to_fixed "$active" "$active_version"; then
-      MSB_ALREADY_SUPPORTED=1
-      return 0
-    fi
+    #
+    # update_msb_to_fixed has already re-checked the resulting version, so a
+    # success here needs nothing further installed.
+    update_msb_to_fixed "$active" "$active_version" && return 0
     recover_migrated_catalog "$active" "$active_version" || return 1
   fi
   remove_upstream_brew_msb || return 1
   install_msb_pinned
 }
 
-verify_active_msb_pinned() {
+# Confirm the active msb is one acq accepts, after any install or repair. Fails
+# closed via die(): an msb this installer cannot vouch for is worse than none,
+# because acq would refuse it later with a less obvious message.
+#
+# Deliberately does not name a single expected version: this runs after the
+# forward-update path (which lands on the fixed line) as well as after a pinned
+# install, and claiming "$MSB_PINNED_VERSION was installed" would be wrong in the
+# first case.
+verify_active_msb_supported() {
   # A brew install or a fresh symlink may not be visible to a shell that cached
   # PATH lookups. Clear the cache so the check sees what was just installed.
   hash -r 2>/dev/null || true
 
   active="$(command -v msb 2>/dev/null || true)"
   if [ -z "$active" ]; then
-    die "msb $MSB_PINNED_VERSION was installed, but no msb is active on PATH.
+    die "msb was installed, but no msb is active on PATH.
 Add $BIN_DIR to PATH, open a new terminal, and re-run this installer."
   fi
   ver=$(msb_version_of "$active")
@@ -1133,7 +1166,7 @@ Use msb $MSB_PINNED_VERSION, or upgrade to msb $MSB_FIXED_VERSION or newer."
   fi
   if msb_version_blocked "$ver"; then
     die "active msb is still blocked version $ver at $active.
-msb $MSB_PINNED_VERSION was installed, but another msb is shadowing it on PATH. Remove
+A supported msb was installed, but another msb is shadowing it on PATH. Remove
 the stale copy (if it is Homebrew's: brew uninstall $MSB_BREW_UPSTREAM_FORMULA) or put
 $BIN_DIR earlier in PATH, then re-run this installer."
   fi
@@ -1166,7 +1199,7 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
     warn "  Install msb $MSB_PINNED_VERSION so acq can verify a supported version."
     if confirm "  Install/downgrade msb to $MSB_PINNED_VERSION now?"; then
       if replace_active_msb "$active_msb" "$active_msb_version"; then
-        verify_active_msb_pinned
+        verify_active_msb_supported
       else
         INSTALL_MSB=0
       fi
@@ -1179,7 +1212,7 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
     warn "  Install msb $MSB_PINNED_VERSION instead."
     if confirm "  Install/downgrade msb to $MSB_PINNED_VERSION now?"; then
       if replace_active_msb "$active_msb" "$active_msb_version"; then
-        verify_active_msb_pinned
+        verify_active_msb_supported
       else
         INSTALL_MSB=0
       fi
@@ -1196,7 +1229,7 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
     info "  offered the forward path first, and asked before anything changes."
     if confirm "  Fix the active msb now?"; then
       if replace_active_msb "$active_msb" "$active_msb_version"; then
-        verify_active_msb_pinned
+        verify_active_msb_supported
       else
         INSTALL_MSB=0
       fi
@@ -1210,7 +1243,7 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
     info "  acq runs your agent inside an msb microVM. It is a separate, open-source tool."
     if confirm "  Install msb $MSB_PINNED_VERSION now?"; then
       if install_msb_pinned; then
-        verify_active_msb_pinned
+        verify_active_msb_supported
       else
         INSTALL_MSB=0
       fi

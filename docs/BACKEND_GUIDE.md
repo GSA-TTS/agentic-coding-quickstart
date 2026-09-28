@@ -146,17 +146,30 @@ automation story.
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases can migrate 0.6.x sandbox state incompatibly. Use 0.6.18 or >=0.7.3. |
+| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases migrate 0.6.x sandbox state one-way, into a form the 0.6.x line cannot read. Use 0.6.18, or 0.7.3 or newer ([ADR-0032](adr/0032-msb-version-policy-and-migration-recovery.md)). |
 | Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
 
 Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
 
 ### Installation
 
+Install through a channel that can express a **version**. Neither upstream
+channel can: `install.microsandbox.dev` takes no version argument and reads
+`releases/latest`, and upstream's tap formula tracks the newest release by
+construction. Since `acq` refuses msb 0.7.0-0.7.2, "whatever is newest" is not a
+safe default during this window.
+
 ```bash
-curl -fsSL https://install.microsandbox.dev | sh        # macOS / Linux
-brew install superradcompany/tap/microsandbox           # Homebrew
+brew install GSA-TTS/tap/microsandbox-acq    # version-pinned formula
+./scripts/verify-msb-pin --install           # verified pinned release bundle
 ```
+
+`./install.sh` does this for you, and also detects and repairs a blocked,
+too-old, unparseable, or PATH-shadowed `msb`. If an already-installed
+0.7.0-0.7.2 has migrated your sandbox state, the recovery is `msb self update`
+(forward to 0.7.3) — see §42 of
+[`KNOWN_FAILURE_MODES.md`](KNOWN_FAILURE_MODES.md) and
+[ADR-0032](adr/0032-msb-version-policy-and-migration-recovery.md).
 
 ### Configuration
 
@@ -315,6 +328,17 @@ kits' own `caps.network.allow` rules.
   `--net-default-egress` flag, which first appears in msb 0.6.8, and acq's DNS
   rule emitter relies on the 0.6.9 release-build parser fix. `acq` enforces this
   floor (`MIN_MSB_VERSION`) and also blocks msb 0.7.0-0.7.2 before create.
+- **On msb 0.7.3+, hostname rules require TLS interception.** Upstream turned
+  `--net-strict` on by default in 0.7.3: a *hostname*-based allow rule is only
+  honored when msb can inspect the request authority, so non-intercepted HTTPS
+  fails closed when only a hostname rule permits it. IP, CIDR, group, and
+  default-allow rules are unaffected. acq's balanced and strict tiers are
+  hostname-based **and** acq enables `--tls-intercept` by default, so the default
+  configuration is correct on 0.7.3. The combination that breaks is
+  **`ACQ_MSB_NO_TLS_INTERCEPT=1` on msb 0.7.3+**: every allowed host then becomes
+  unreachable rather than merely losing secret substitution. If you must disable
+  interception there, pass `--net-strict=false` via msb config, or use
+  `ACQ_NETWORK_TIER=open` (testing only, never GFE).
 
 See [ADR-0018](adr/0018-msb-balanced-egress-baseline.md) for the full rationale,
 and [ADR-0019](adr/0019-msb-balanced-egress-is-egress-only.md) for why the
@@ -983,7 +1007,11 @@ corrupted local msb state, not a network or certificate change. Wipe msb's data
 and reinstall, then confirm host readiness:
 
 ```bash
-curl -fsSL https://install.microsandbox.dev | sh   # reinstall (re-lays runtime state)
+# Reinstall msb (re-lays runtime state). Use a version-pinned channel: the
+# upstream one-liner always resolves to the newest release, which may be one acq
+# refuses (see Requirements above).
+brew install GSA-TTS/tap/microsandbox-acq           # Homebrew hosts
+./scripts/verify-msb-pin --install                  # verified pinned release bundle
 msb doctor                                          # verify virtualization + prerequisites
 msb doctor --fix                                    # apply supported setup fixes
 ```
