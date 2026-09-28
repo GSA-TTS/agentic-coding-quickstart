@@ -1146,6 +1146,17 @@ replace_active_msb() {
 # install, and claiming "$MSB_PINNED_VERSION was installed" would be wrong in the
 # first case.
 verify_active_msb_supported() {
+  # Nothing was installed in a dry run, so there is nothing to verify and the
+  # absence of an msb is expected rather than a failure. Without this, a plain
+  # `--dry-run --yes` on a host with no msb reports success for every step and
+  # then dies at the last one — the loudest possible false alarm, on the exact
+  # command a cautious user runs first. (install.ps1's Assert-MsbSupported has
+  # always guarded this; the shell side did not.)
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '  [dry-run] verify the active msb is a version acq accepts\n'
+    return 0
+  fi
+
   # A brew install or a fresh symlink may not be visible to a shell that cached
   # PATH lookups. Clear the cache so the check sees what was just installed.
   hash -r 2>/dev/null || true

@@ -245,6 +245,29 @@ _no_package_manager_path() {
   printf '%s:%s' "$STUBDIR/bin" "$core_bin"
 }
 
+@test "install: --dry-run succeeds on a host with no msb" {
+  # Regression: verify_active_msb_supported did not exempt dry runs, so
+  # `--dry-run --yes` on a host with no msb printed every step as OK and then
+  # died on the final check -- a false alarm on the exact command a cautious user
+  # runs first. Every other dry-run test here passes --no-msb, which is why none
+  # of them caught it.
+  #
+  # Deliberately does NOT stub curl or npm: a dry run must reach the end without
+  # fetching anything.
+  _write_npm_stub
+
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --dry-run --yes
+
+  assert_success
+  assert_output --partial 'Installing msb 0.6.18 from the pinned release bundle'
+  assert_output --partial '[dry-run] verify the active msb is a version acq accepts'
+  refute_output --partial 'no msb is active on PATH'
+  # Nothing may be written in a dry run.
+  [ ! -e "$HOME/.microsandbox" ]
+  [ ! -e "$ACQ_INSTALL_BIN_DIR/msb" ]
+}
+
 @test "install: source default targets release tag without a pinned sha" {
   export GIT_STUB_LOG="$BATS_TEST_TMPDIR/git.log"
   _write_git_stub
