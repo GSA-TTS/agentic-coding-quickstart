@@ -213,6 +213,20 @@ STUB
   chmod +x "$STUBDIR/bin/curl"
 }
 
+# curl stub that fails the msb bundle download (simulates a network/HTTP error),
+# to exercise the "download failed -> Skipping msb, acq still installs" degrade.
+_write_curl_msb_download_failure_stub() {
+  cat >"$STUBDIR/bin/curl" <<'STUB'
+#!/usr/bin/env sh
+case "$*" in
+  *releases/download/*) exit 22 ;;   # curl's HTTP-error exit code
+esac
+# Anything else this run needs (there is nothing) would pass through as success.
+exit 0
+STUB
+  chmod +x "$STUBDIR/bin/curl"
+}
+
 _write_unparseable_msb_stub() { # PATH
   mkdir -p "$(dirname "$1")"
   printf '%s\n' '#!/usr/bin/env sh' 'printf "msb dev-build\\n"' >"$1"
@@ -243,6 +257,26 @@ _no_package_manager_path() {
     case "$tool_path" in /*) ln -sf "$tool_path" "$core_bin/$tool" ;; esac
   done
   printf '%s:%s' "$STUBDIR/bin" "$core_bin"
+}
+
+@test "install: a failed msb download degrades to Skipping msb, acq still succeeds" {
+  # Regression (reviewer finding): verify_active_msb_supported used to run
+  # unconditionally after install_msb_pinned, so a FAILED download died in the
+  # gate before reaching the "Skipping msb" degrade -- turning a successful acq
+  # install into a total-failure exit. The degrade path was unreachable, and no
+  # test stubbed a failing curl. This is that test.
+  _write_npm_stub
+  _write_curl_msb_download_failure_stub
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'Skipping msb'
+  refute_output --partial 'Active msb is'
+  refute_output --partial 'no msb is active on PATH'
+  [ ! -e "$ACQ_INSTALL_BIN_DIR/msb" ]
+  [ ! -e "$HOME/.microsandbox/bin/msb" ]
 }
 
 @test "install: --dry-run succeeds on a host with no msb" {
