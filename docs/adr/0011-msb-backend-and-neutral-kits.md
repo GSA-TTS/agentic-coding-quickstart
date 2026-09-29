@@ -424,8 +424,11 @@ strings). The translate layer:
 > merged set is computed in a **pre-pass over the whole kit set** (so it does not
 > depend on kit application order), with the persisted marker as the fallback for
 > the mid-life single-kit `acq kit apply` path. The adapter's non-interactive git
-> guards stay scoped **per kit**: one kit setting `GIT_TERMINAL_PROMPT` must not
-> disable them for another kit's commands. See
+> guards stay **owned by the kit whose command is running**: a command receives
+> only its own kit's value for a guard name, so another kit can neither disable
+> them (by declaring a guard name this kit does not) nor change them (by declaring
+> the same name with a different value, which the merge would otherwise resolve in
+> the later kit's favor). See
 > [ADR-0033](0033-msb-kit-env-is-guest-wide-for-lifecycle-commands.md).
 
 Deliberately minimal (YAGNI): **static string values only** — no interpolation,

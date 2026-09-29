@@ -1766,12 +1766,14 @@ _acq_msb_run_commands() {
     _acq_msb_collect_kit_env_into _kit_env "$spec"
   fi
 
-  # The git-guard decision stays PER KIT: only the guard vars THIS spec declares
-  # suppress the adapter's guards, so another kit's GIT_TERMINAL_PROMPT in the
-  # merged set cannot disable them here (see _acq_msb_env_tokens_with_guards_into).
-  local _own_env=() _ownguards
+  # The git guards stay PER KIT: a command may only ever receive THIS spec's own
+  # guard tokens, so neither another kit declaring a guard name this kit does not,
+  # nor another kit declaring the same name with a different value (which the merge
+  # resolves in the later kit's favor), can change or disable the guards here. See
+  # _acq_msb_env_tokens_with_guards_into.
+  local _own_env=() _own_guard_tok=()
   _acq_msb_collect_kit_env_into _own_env "$spec"
-  _ownguards=$(_acq_msb_own_guard_names _own_env)
+  _acq_msb_own_guard_tokens_into _own_guard_tok _own_env
 
   # Buffer the parsed command stream FIRST, then execute. The exec step calls
   # `msb exec`, which would consume this loop's stdin if we iterated the heredoc
@@ -1799,7 +1801,7 @@ EOF
         ;;
       "__END__")
         reading=0
-        _acq_msb_exec_command "$name" "$phase" "$user" "$background" "$_ownguards" \
+        _acq_msb_exec_command "$name" "$phase" "$user" "$background" _own_guard_tok \
           ${_kit_env[@]+"${_kit_env[@]}"} -- ${argv[@]+"${argv[@]}"}
         ;;
       *)
@@ -1849,66 +1851,90 @@ _acq_msb_split_env_argv() {
 # The three non-interactive git guard vars the adapter injects onto kit lifecycle
 # commands (see _acq_msb_env_tokens_with_guards_into).
 ACQ_MSB_GIT_GUARD_NAMES="GIT_TERMINAL_PROMPT GIT_ASKPASS SSH_ASKPASS"
+# A permanently-empty array used as the default "this kit declared no guard vars"
+# argument, so the by-name guard-token parameter is always a real array even when a
+# caller omits it (set -u safe).
+_acq_msb_no_guards=()
 
-# _acq_msb_own_guard_names ENVARR — echo the space-joined subset of
-# ACQ_MSB_GIT_GUARD_NAMES that the array named ENVARR (ONE kit spec's own
-# environment[]) declares. The result is a word list drawn from a FIXED
-# adapter-owned name set, never kit bytes, so it is safe to pass as a single
-# positional argument through the exec/staging call chain.
-_acq_msb_own_guard_names() {
-  local _envarrn="$1" _names="" _g _ev
+# _acq_msb_own_guard_tokens_into ARRVAR ENVARR — store, in the array named ARRVAR,
+# the subset of the array named ENVARR (ONE kit spec's own environment[]) whose
+# NAME is in ACQ_MSB_GIT_GUARD_NAMES, as whole `NAME=value` tokens.
+#
+# TOKENS, NOT NAMES — this is load-bearing. The guard decision must be answerable
+# as "is this token still MY kit's value?", not merely "did my kit declare this
+# name?". The merged env has already collapsed a duplicate name to the LAST kit's
+# value, so a name-only record cannot tell a kit's own guard value from another
+# kit's: kit A declaring GIT_TERMINAL_PROMPT=0 and kit B declaring =1 would leave
+# kit A's own commands running with kit B's opt-out. Keeping the value here lets
+# _acq_msb_env_tokens_with_guards_into restore the owning kit's own token.
+_acq_msb_own_guard_tokens_into() {
+  local _arrn="$1" _envarrn="$2" _g _ev
+  eval "$_arrn=()"
   eval "set -- \${${_envarrn}[@]+\"\${${_envarrn}[@]}\"}"
   for _ev in "$@"; do
     for _g in $ACQ_MSB_GIT_GUARD_NAMES; do
       case "$_ev" in
-        "$_g"=*) case " $_names " in *" $_g "*) : ;; *) _names="${_names:+$_names }$_g" ;; esac ;;
+        "$_g"=*) eval "$_arrn+=(\"\$_ev\")" ;;
       esac
     done
   done
-  printf '%s' "$_names"
 }
 
-# _acq_msb_env_tokens_with_guards_into ARRVAR ENVARR OWNGUARDS — store the
+# _acq_msb_env_tokens_with_guards_into ARRVAR ENVARR OWNGUARDARR — store the
 # NAME=value tokens one kit command should run with into the array named ARRVAR:
 # the MERGED kit env (ENVARR, every effective kit's environment[]) plus the
 # non-interactive git guards.
 #
-# GUARD SCOPING (do not widen): the guard decision stays PER KIT. OWNGUARDS is
-# the guard-var subset THIS kit declared (_acq_msb_own_guard_names). A guard var
-# coming from ANOTHER kit is filtered out of the merged set and the adapter's own
-# guard value is used instead, so one kit setting GIT_TERMINAL_PROMPT can never
-# disable the guards for a different kit's commands (nor produce two conflicting
-# values for one name). A kit that declares a guard var itself still overrides it
-# for its OWN commands, exactly as before.
+# GUARD SCOPING (do not widen): a command may only ever receive ITS OWN kit's
+# value for a guard name. OWNGUARDARR names an array of THIS kit's own guard
+# tokens (_acq_msb_own_guard_tokens_into). Every guard-name token is stripped from
+# the merged set regardless of which kit contributed it, then this kit's own guard
+# tokens are re-added, then the adapter's guard values are appended unless this
+# kit set GIT_TERMINAL_PROMPT itself. So no other kit can change — or disable —
+# the guards for this kit's commands, whether by declaring a guard name this kit
+# does not (name collision) or by declaring the same name with a different value
+# (value collision, which the merge would otherwise resolve in the other kit's
+# favor). A kit that declares a guard var still overrides it for its OWN commands.
 _acq_msb_env_tokens_with_guards_into() {
-  local _arrn="$1" _envarrn="$2" _ownguards="$3"
+  local _arrn="$1" _envarrn="$2" _ownarrn="$3"
   eval "$_arrn=()"
-  local _ev _g _keep
+  local _own=() _ev _g _keep
+  eval "_own=(\${${_ownarrn}[@]+\"\${${_ownarrn}[@]}\"})"
+
+  # 1) The merged env with EVERY guard-name token removed (any kit's value).
   eval "set -- \${${_envarrn}[@]+\"\${${_envarrn}[@]}\"}"
   for _ev in "$@"; do
     _keep=1
     for _g in $ACQ_MSB_GIT_GUARD_NAMES; do
-      case "$_ev" in
-        "$_g"=*) case " $_ownguards " in *" $_g "*) : ;; *) _keep=0 ;; esac ;;
-      esac
+      case "$_ev" in "$_g"=*) _keep=0 ;; esac
     done
     [ "$_keep" -eq 1 ] && eval "$_arrn+=(\"\$_ev\")"
   done
-  case " $_ownguards " in
-    *" GIT_TERMINAL_PROMPT "*) return 0 ;;
-  esac
+
+  # 2) Re-add only THIS kit's own guard tokens (its intentional override).
+  for _ev in ${_own[@]+"${_own[@]}"}; do
+    eval "$_arrn+=(\"\$_ev\")"
+  done
+
+  # 3) acq's guards, unless this kit set GIT_TERMINAL_PROMPT itself. Appended
+  #    last, so where this kit declared one of the other two the adapter's value
+  #    still wins — the flag order the single-kit path has always emitted.
+  for _ev in ${_own[@]+"${_own[@]}"}; do
+    case "$_ev" in GIT_TERMINAL_PROMPT=*) return 0 ;; esac
+  done
   eval "$_arrn+=(\"GIT_TERMINAL_PROMPT=0\" \"GIT_ASKPASS=/bin/false\" \"SSH_ASKPASS=/bin/false\")"
 }
 
-# _acq_msb_exec_flags_into UFLAG_ARRVAR EFLAG_ARRVAR USER KITENV_ARRVAR OWNGUARDS
-# — build the `msb exec` -u/-e flag arrays for one kit command. Maps the sbx uid
-# contract (1000/agent) onto our by-name agent user, threads the MERGED kit env
-# (KITENV_ARRVAR) as `-e NAME=value`, and injects git non-interactive guards
-# unless THIS kit declared them (OWNGUARDS, from _acq_msb_own_guard_names — the
-# guard decision must stay per kit; see _acq_msb_env_tokens_with_guards_into).
+# _acq_msb_exec_flags_into UFLAG_ARRVAR EFLAG_ARRVAR USER KITENV_ARRVAR
+# OWNGUARD_ARRVAR — build the `msb exec` -u/-e flag arrays for one kit command.
+# Maps the sbx uid contract (1000/agent) onto our by-name agent user, threads the
+# MERGED kit env (KITENV_ARRVAR) as `-e NAME=value`, and injects git
+# non-interactive guards unless THIS kit declared them (OWNGUARD_ARRVAR holds this
+# kit's own guard TOKENS, from _acq_msb_own_guard_tokens_into — the guard value
+# must stay this kit's; see _acq_msb_env_tokens_with_guards_into).
 # Arrays passed/returned by name (bash 3.2 compat).
 _acq_msb_exec_flags_into() {
-  local _uflag="$1" _eflag="$2" _user="$3" _envarr="$4" _ownguards="${5:-}"
+  local _uflag="$1" _eflag="$2" _user="$3" _envarr="$4" _ownguards="${5:-_acq_msb_no_guards}"
   eval "$_uflag=()"
   eval "$_eflag=()"
 
@@ -1950,8 +1976,8 @@ _acq_msb_exec_flags_into() {
   #   - stdin from /dev/null for every kit exec, so nothing can read the TTY.
   #   - GIT_TERMINAL_PROMPT=0 (+ GIT_ASKPASS/SSH_ASKPASS=false) so git fails fast
   #     instead of prompting. Injected unless THIS kit set GIT_TERMINAL_PROMPT
-  #     (kits may override intentionally) — the guard decision is per kit even
-  #     though the env is merged, so another kit cannot disable these guards. See
+  #     (kits may override intentionally). The env is merged but a guard value is
+  #     never taken from another kit — not by name and not by value. See
   #     _acq_msb_env_tokens_with_guards_into.
   local _envtok=()
   _acq_msb_env_tokens_with_guards_into _envtok "$_envarr" "$_ownguards"
@@ -2026,6 +2052,10 @@ _acq_msb_exec_run() {
   fi
 }
 
+# Args: NAME PHASE USER BACKGROUND OWNGUARD_ARRVAR [NAME=value ...] -- ARGV...
+# OWNGUARD_ARRVAR is the NAME of an array holding this kit's own git-guard tokens
+# (see _acq_msb_own_guard_tokens_into); it is passed by name, not by value, because
+# a guard VALUE can contain spaces and must never be re-split.
 _acq_msb_exec_command() {
   local name="$1" phase="$2" user="$3" background="$4" ownguards="$5"
   shift 5
@@ -2037,7 +2067,7 @@ _acq_msb_exec_command() {
   [ "${#_argv[@]}" -gt 0 ] || return 0
 
   # Build the `msb exec` -u/-e flag arrays (uid mapping, merged kit env, and the
-  # git guards — decided from THIS kit's own guard vars, not the merged set).
+  # git guards — taken from THIS kit's own guard tokens, not the merged set).
   local uflag=() eflag=()
   _acq_msb_exec_flags_into uflag eflag "$user" _kit_env "$ownguards"
 
@@ -2092,16 +2122,16 @@ _acq_msb_sq() {
   printf "'%s'" "${_s//\'/$_q}"
 }
 
-# _acq_msb_startup_env_prefix_into PREFIX_ARRVAR USER KITENV_ARRVAR OWNGUARDS —
-# build the in-guest `env NAME=value …` prefix tokens for one startup command:
-# HOME for the agent user, the MERGED kit env vars (KITENV_ARRVAR), and the git
-# non-interactive guards (unless THIS kit declared them — OWNGUARDS keeps that
-# decision per kit, exactly as the exec path does). Mirrors
+# _acq_msb_startup_env_prefix_into PREFIX_ARRVAR USER KITENV_ARRVAR
+# OWNGUARD_ARRVAR — build the in-guest `env NAME=value …` prefix tokens for one
+# startup command: HOME for the agent user, the MERGED kit env vars
+# (KITENV_ARRVAR), and the git non-interactive guards taken from THIS kit's own
+# guard tokens (OWNGUARD_ARRVAR), exactly as the exec path does. Mirrors
 # _acq_msb_exec_flags_into's -e set, but as `env` argv rather than `msb exec -e`.
 # Tokens are RAW here (NAME=value); the caller single-quote-escapes each before
 # writing it to the script.
 _acq_msb_startup_env_prefix_into() {
-  local _prefixn="$1" _user="$2" _envarrn="$3" _ownguards="${4:-}"
+  local _prefixn="$1" _user="$2" _envarrn="$3" _ownguards="${4:-_acq_msb_no_guards}"
   eval "$_prefixn=()"
 
   case "$_user" in
@@ -2109,8 +2139,8 @@ _acq_msb_startup_env_prefix_into() {
   esac
 
   # Kit-declared env vars (already NAME-validated by kit_spec_env) plus the
-  # non-interactive git guards, with the same per-kit guard scoping the exec path
-  # uses (see _acq_msb_env_tokens_with_guards_into).
+  # non-interactive git guards, with the same per-kit guard ownership the exec path
+  # applies (see _acq_msb_env_tokens_with_guards_into).
   local _envtok=() _ev
   _acq_msb_env_tokens_with_guards_into _envtok "$_envarrn" "$_ownguards"
   for _ev in ${_envtok[@]+"${_envtok[@]}"}; do
@@ -2270,16 +2300,17 @@ _acq_msb_startup_body_into() {
   local _bodyn="$1" _spec="$2" _mergedn="${3:-}"
 
   # The env the emitted commands run with: the MERGED kit env when the caller has
-  # the full kit set (ADR-0033), else this spec's own environment[]. The guard
-  # decision stays per kit either way (_ownguards below).
-  local _kit_env=() _own_env=() _ownguards
+  # the full kit set (ADR-0033), else this spec's own environment[]. Either way the
+  # git guards come from THIS spec's own guard tokens (_own_guard_tok), never from
+  # another kit's value in the merged set.
+  local _kit_env=() _own_env=() _own_guard_tok=()
   _acq_msb_collect_kit_env_into _own_env "$_spec"
   if [ -n "$_mergedn" ]; then
     eval "_kit_env=(\${${_mergedn}[@]+\"\${${_mergedn}[@]}\"})"
   else
     _kit_env=(${_own_env[@]+"${_own_env[@]}"})
   fi
-  _ownguards=$(_acq_msb_own_guard_names _own_env)
+  _acq_msb_own_guard_tokens_into _own_guard_tok _own_env
 
   # Buffer the command stream first (kit_spec_commands runs its own subshell).
   local _lines=() line
@@ -2306,7 +2337,7 @@ EOF
         reading=0
         if [ "$phase" = "startup" ] && [ "${#argv[@]}" -gt 0 ]; then
           local _prefix=() _cmdline
-          _acq_msb_startup_env_prefix_into _prefix "$user" _kit_env "$_ownguards"
+          _acq_msb_startup_env_prefix_into _prefix "$user" _kit_env _own_guard_tok
           _cmdline=$(_acq_msb_startup_emit_command "$user" "$background" _prefix argv)
           if [ -n "$_cmdline" ]; then
             # Append "<cmdline>\n" by name; $'\n' is a literal newline (ANSI-C).
