@@ -1035,7 +1035,13 @@ The neutral vocabulary is: `caps.network.allow`, `files[]`, `commands[]`,
 `OPENCODE_TUI_CONFIG`, `GITLAB_HOST`). Names must be POSIX identifiers
 (`^[A-Za-z_][A-Za-z0-9_]*$`; an invalid name is dropped with a warning and
 reported by `acq kit validate`); values are plain strings. It maps to sbx-v2
-`environment.variables` (synthesized) and to `msb exec -e NAME=value` (per-exec).
+`environment.variables` (synthesized) and, on msb, to `msb exec -e NAME=value`.
+On both backends these variables are **guest-wide**, not per kit: msb threads the
+**merged** set from every applied kit onto every kit's lifecycle commands and
+replays the same set on `acq exec`/`acq shell`/attach, so a daemon started by one
+kit's `background: true` startup command still sees another kit's config
+(last-value-wins for a duplicate name — see
+[ADR-0033](adr/0033-msb-kit-env-is-guest-wide-for-lifecycle-commands.md)).
 **Secrets do NOT go here** — use the credential/secret path (`acq secret …`);
 the kit spec never carries a secret value.
 

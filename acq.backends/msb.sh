@@ -1526,7 +1526,7 @@ EOF
 # also substitutes the GitHub token on the wire for the API and HTTPS
 # git-transport hosts bound above, so direct HTTPS clone/push is eligible too.
 _acq_msb_apply_kit_dir() {
-  local name="$1" kitdir="$2"
+  local name="$1" kitdir="$2" mergedn="${3:-}"
   local spec="${kitdir}/spec.yaml"
   if [ ! -f "$spec" ]; then
     echo "acq(msb): kit spec not found: $spec" >&2
@@ -1597,11 +1597,29 @@ EOF
   # 3) Run commands[]. Reassemble each argv record and exec it as the given uid.
   #    install → run once (idempotent, marker-gated); initFiles/startup → every
   #    apply. msb has no create-time-only hook, so install collapses to a
-  #    marker-gated exec (design §3 lifecycle table). The kit's environment[]
-  #    entries are threaded onto every command as `msb exec -e NAME=value` (msb's
-  #    native per-exec env flag), so the kit's declared guest env is present when
-  #    its lifecycle commands run.
-  _acq_msb_run_commands "$name" "$spec"
+  #    marker-gated exec (design §3 lifecycle table). The MERGED kit env (every
+  #    effective kit's environment[]) is threaded onto every command as
+  #    `msb exec -e NAME=value` (msb's native per-exec env flag): kit env is
+  #    guest-wide config, so a command — especially a `background: true` daemon
+  #    that launches agents — must see the other kits' vars too (ADR-0033).
+  #
+  #    Where the merged set comes from:
+  #      - FULL-SET callers (provision, heal) computed it in a pre-pass over every
+  #        kit BEFORE this per-kit loop and pass its array name in, so the result
+  #        does not depend on the order the kits are applied in.
+  #      - The MID-LIFE single-kit path (`acq kit apply NAME KITREF`) has no full
+  #        set, so it recovers the sandbox's already-persisted merged value from
+  #        the marker (step 2 just appended THIS kit's entries, and the read
+  #        applies last-value-wins, so the new kit still overrides — matching the
+  #        additive semantics of a mid-life add).
+  #      - Neither available (marker absent/unwritable) → this kit's own env, the
+  #        pre-ADR-0033 behavior. Fail-soft, never empty.
+  local _merged_env=() _merged_envn="$mergedn"
+  if [ -z "$_merged_envn" ]; then
+    _acq_msb_persisted_kit_env_into _merged_env "$name"
+    [ "${#_merged_env[@]}" -gt 0 ] && _merged_envn=_merged_env
+  fi
+  _acq_msb_run_commands "$name" "$spec" "$_merged_envn"
 }
 
 # _acq_msb_reset_kit_env NAME — remove the persisted kit-env marker so a
@@ -1725,16 +1743,35 @@ _acq_msb_copy_file_verified() {
 }
 
 # Parse and execute a kit spec's commands[] against sandbox NAME.
+#
+# Args: NAME SPEC [MERGEDENV_ARRVAR]
+# MERGEDENV_ARRVAR names an array of already-merged NAME=value tokens covering
+# the FULL effective kit set (see _acq_msb_merge_kit_env_into). Omitted, the env
+# falls back to this spec's own environment[] — used only where no full set
+# exists and no merged value could be recovered (see _acq_msb_apply_kit_dir).
 _acq_msb_run_commands() {
-  local name="$1" spec="$2"
+  local name="$1" spec="$2" mergedn="${3:-}"
 
-  # Collect the kit's environment[] entries as `NAME=value` argv-ready tokens,
-  # threaded onto every command's `msb exec` as `-e NAME=value`. kit_spec_env
-  # already validates each NAME (^[A-Za-z_][A-Za-z0-9_]*$) and drops unsafe ones,
-  # so these are safe to pass as exec env. Values are passed as a single argv
-  # element (never re-split by a shell).
+  # The guest env threaded onto every command's `msb exec` as `-e NAME=value`.
+  # kit_spec_env already validates each NAME (^[A-Za-z_][A-Za-z0-9_]*$) and drops
+  # unsafe ones, and the marker replay re-validates, so these are safe to pass as
+  # exec env. Values are passed as a single argv element (never re-split by a
+  # shell). Kit env is guest-wide config, so a command sees the MERGED set — a
+  # `background: true` daemon that launches agents must not be limited to its own
+  # kit's vars (ADR-0033).
   local _kit_env=()
-  _acq_msb_collect_kit_env_into _kit_env "$spec"
+  if [ -n "$mergedn" ]; then
+    eval "_kit_env=(\${${mergedn}[@]+\"\${${mergedn}[@]}\"})"
+  else
+    _acq_msb_collect_kit_env_into _kit_env "$spec"
+  fi
+
+  # The git-guard decision stays PER KIT: only the guard vars THIS spec declares
+  # suppress the adapter's guards, so another kit's GIT_TERMINAL_PROMPT in the
+  # merged set cannot disable them here (see _acq_msb_env_tokens_with_guards_into).
+  local _own_env=() _ownguards
+  _acq_msb_collect_kit_env_into _own_env "$spec"
+  _ownguards=$(_acq_msb_own_guard_names _own_env)
 
   # Buffer the parsed command stream FIRST, then execute. The exec step calls
   # `msb exec`, which would consume this loop's stdin if we iterated the heredoc
@@ -1762,7 +1799,7 @@ EOF
         ;;
       "__END__")
         reading=0
-        _acq_msb_exec_command "$name" "$phase" "$user" "$background" \
+        _acq_msb_exec_command "$name" "$phase" "$user" "$background" "$_ownguards" \
           ${_kit_env[@]+"${_kit_env[@]}"} -- ${argv[@]+"${argv[@]}"}
         ;;
       *)
@@ -1809,13 +1846,69 @@ _acq_msb_split_env_argv() {
   eval "$_argvarr=(\"\$@\")"
 }
 
-# _acq_msb_exec_flags_into UFLAG_ARRVAR EFLAG_ARRVAR USER KITENV_ARRVAR — build
-# the `msb exec` -u/-e flag arrays for one kit command. Maps the sbx uid contract
-# (1000/agent) onto our by-name agent user, threads the kit's declared env as
-# `-e NAME=value`, and injects git non-interactive guards unless the kit set
-# GIT_TERMINAL_PROMPT itself. Arrays passed/returned by name (bash 3.2 compat).
+# The three non-interactive git guard vars the adapter injects onto kit lifecycle
+# commands (see _acq_msb_env_tokens_with_guards_into).
+ACQ_MSB_GIT_GUARD_NAMES="GIT_TERMINAL_PROMPT GIT_ASKPASS SSH_ASKPASS"
+
+# _acq_msb_own_guard_names ENVARR — echo the space-joined subset of
+# ACQ_MSB_GIT_GUARD_NAMES that the array named ENVARR (ONE kit spec's own
+# environment[]) declares. The result is a word list drawn from a FIXED
+# adapter-owned name set, never kit bytes, so it is safe to pass as a single
+# positional argument through the exec/staging call chain.
+_acq_msb_own_guard_names() {
+  local _envarrn="$1" _names="" _g _ev
+  eval "set -- \${${_envarrn}[@]+\"\${${_envarrn}[@]}\"}"
+  for _ev in "$@"; do
+    for _g in $ACQ_MSB_GIT_GUARD_NAMES; do
+      case "$_ev" in
+        "$_g"=*) case " $_names " in *" $_g "*) : ;; *) _names="${_names:+$_names }$_g" ;; esac ;;
+      esac
+    done
+  done
+  printf '%s' "$_names"
+}
+
+# _acq_msb_env_tokens_with_guards_into ARRVAR ENVARR OWNGUARDS — store the
+# NAME=value tokens one kit command should run with into the array named ARRVAR:
+# the MERGED kit env (ENVARR, every effective kit's environment[]) plus the
+# non-interactive git guards.
+#
+# GUARD SCOPING (do not widen): the guard decision stays PER KIT. OWNGUARDS is
+# the guard-var subset THIS kit declared (_acq_msb_own_guard_names). A guard var
+# coming from ANOTHER kit is filtered out of the merged set and the adapter's own
+# guard value is used instead, so one kit setting GIT_TERMINAL_PROMPT can never
+# disable the guards for a different kit's commands (nor produce two conflicting
+# values for one name). A kit that declares a guard var itself still overrides it
+# for its OWN commands, exactly as before.
+_acq_msb_env_tokens_with_guards_into() {
+  local _arrn="$1" _envarrn="$2" _ownguards="$3"
+  eval "$_arrn=()"
+  local _ev _g _keep
+  eval "set -- \${${_envarrn}[@]+\"\${${_envarrn}[@]}\"}"
+  for _ev in "$@"; do
+    _keep=1
+    for _g in $ACQ_MSB_GIT_GUARD_NAMES; do
+      case "$_ev" in
+        "$_g"=*) case " $_ownguards " in *" $_g "*) : ;; *) _keep=0 ;; esac ;;
+      esac
+    done
+    [ "$_keep" -eq 1 ] && eval "$_arrn+=(\"\$_ev\")"
+  done
+  case " $_ownguards " in
+    *" GIT_TERMINAL_PROMPT "*) return 0 ;;
+  esac
+  eval "$_arrn+=(\"GIT_TERMINAL_PROMPT=0\" \"GIT_ASKPASS=/bin/false\" \"SSH_ASKPASS=/bin/false\")"
+}
+
+# _acq_msb_exec_flags_into UFLAG_ARRVAR EFLAG_ARRVAR USER KITENV_ARRVAR OWNGUARDS
+# — build the `msb exec` -u/-e flag arrays for one kit command. Maps the sbx uid
+# contract (1000/agent) onto our by-name agent user, threads the MERGED kit env
+# (KITENV_ARRVAR) as `-e NAME=value`, and injects git non-interactive guards
+# unless THIS kit declared them (OWNGUARDS, from _acq_msb_own_guard_names — the
+# guard decision must stay per kit; see _acq_msb_env_tokens_with_guards_into).
+# Arrays passed/returned by name (bash 3.2 compat).
 _acq_msb_exec_flags_into() {
-  local _uflag="$1" _eflag="$2" _user="$3" _envarr="$4"
+  local _uflag="$1" _eflag="$2" _user="$3" _envarr="$4" _ownguards="${5:-}"
   eval "$_uflag=()"
   eval "$_eflag=()"
 
@@ -1845,13 +1938,9 @@ _acq_msb_exec_flags_into() {
       ;;
   esac
 
-  # Append the kit's declared guest env as additional `-e NAME=value` flags.
-  local _ev
-  eval "set -- \${${_envarr}[@]+\"\${${_envarr}[@]}\"}"
-  for _ev in "$@"; do
-    eval "$_eflag+=(-e \"\$_ev\")"
-  done
-
+  # Append the guest env as additional `-e NAME=value` flags: the MERGED kit env
+  # (every effective kit's environment[]) plus the non-interactive git guards.
+  #
   # NON-INTERACTIVE ENFORCEMENT. Kit lifecycle commands run before the agent
   # attaches, with no terminal, so they MUST NOT try to read from a TTY. Docker's
   # kit-reference states startup commands are non-interactive; a kit that prompts
@@ -1860,14 +1949,16 @@ _acq_msb_exec_flags_into() {
   # kit hung here). Defense-in-depth alongside the kit's own prompt-suppression:
   #   - stdin from /dev/null for every kit exec, so nothing can read the TTY.
   #   - GIT_TERMINAL_PROMPT=0 (+ GIT_ASKPASS/SSH_ASKPASS=false) so git fails fast
-  #     instead of prompting. These are injected only if the kit did not already
-  #     set GIT_TERMINAL_PROMPT (kits may override intentionally).
-  local _kit_env_str
-  eval "_kit_env_str=\" \${${_envarr}[*]-} \""
-  case "$_kit_env_str" in
-    *" GIT_TERMINAL_PROMPT="*) : ;;
-    *) eval "$_eflag+=(-e \"GIT_TERMINAL_PROMPT=0\" -e \"GIT_ASKPASS=/bin/false\" -e \"SSH_ASKPASS=/bin/false\")" ;;
-  esac
+  #     instead of prompting. Injected unless THIS kit set GIT_TERMINAL_PROMPT
+  #     (kits may override intentionally) — the guard decision is per kit even
+  #     though the env is merged, so another kit cannot disable these guards. See
+  #     _acq_msb_env_tokens_with_guards_into.
+  local _envtok=()
+  _acq_msb_env_tokens_with_guards_into _envtok "$_envarr" "$_ownguards"
+  local _ev
+  for _ev in ${_envtok[@]+"${_envtok[@]}"}; do
+    eval "$_eflag+=(-e \"\$_ev\")"
+  done
 }
 
 # _acq_msb_exec_install NAME USER UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV... — run an
@@ -1936,8 +2027,8 @@ _acq_msb_exec_run() {
 }
 
 _acq_msb_exec_command() {
-  local name="$1" phase="$2" user="$3" background="$4"
-  shift 4
+  local name="$1" phase="$2" user="$3" background="$4" ownguards="$5"
+  shift 5
 
   # Split leading NAME=value env tokens (up to the `--` sentinel) from argv.
   local _kit_env=() _argv=()
@@ -1945,9 +2036,10 @@ _acq_msb_exec_command() {
 
   [ "${#_argv[@]}" -gt 0 ] || return 0
 
-  # Build the `msb exec` -u/-e flag arrays (uid mapping, kit env, git guards).
+  # Build the `msb exec` -u/-e flag arrays (uid mapping, merged kit env, and the
+  # git guards — decided from THIS kit's own guard vars, not the merged set).
   local uflag=() eflag=()
-  _acq_msb_exec_flags_into uflag eflag "$user" _kit_env
+  _acq_msb_exec_flags_into uflag eflag "$user" _kit_env "$ownguards"
 
   if [ "$phase" = "install" ]; then
     _acq_msb_exec_install "$name" "$user" uflag eflag -- "${_argv[@]}"
@@ -2000,34 +2092,30 @@ _acq_msb_sq() {
   printf "'%s'" "${_s//\'/$_q}"
 }
 
-# _acq_msb_startup_env_prefix_into PREFIX_ARRVAR USER KITENV_ARRVAR — build the
-# in-guest `env NAME=value …` prefix tokens for one startup command: HOME for the
-# agent user, the kit env vars, and the git non-interactive guards (unless the
-# kit set GIT_TERMINAL_PROMPT). Mirrors _acq_msb_exec_flags_into's -e set, but as
-# `env` argv rather than `msb exec -e`. Tokens are RAW here (NAME=value); the
-# caller single-quote-escapes each before writing it to the script.
+# _acq_msb_startup_env_prefix_into PREFIX_ARRVAR USER KITENV_ARRVAR OWNGUARDS —
+# build the in-guest `env NAME=value …` prefix tokens for one startup command:
+# HOME for the agent user, the MERGED kit env vars (KITENV_ARRVAR), and the git
+# non-interactive guards (unless THIS kit declared them — OWNGUARDS keeps that
+# decision per kit, exactly as the exec path does). Mirrors
+# _acq_msb_exec_flags_into's -e set, but as `env` argv rather than `msb exec -e`.
+# Tokens are RAW here (NAME=value); the caller single-quote-escapes each before
+# writing it to the script.
 _acq_msb_startup_env_prefix_into() {
-  local _prefixn="$1" _user="$2" _envarrn="$3"
+  local _prefixn="$1" _user="$2" _envarrn="$3" _ownguards="${4:-}"
   eval "$_prefixn=()"
 
   case "$_user" in
     1000|agent) eval "$_prefixn+=(\"HOME=/home/agent\")" ;;
   esac
 
-  # Kit-declared env vars (already NAME-validated by kit_spec_env).
-  local _ev
-  eval "set -- \${${_envarrn}[@]+\"\${${_envarrn}[@]}\"}"
-  for _ev in "$@"; do
+  # Kit-declared env vars (already NAME-validated by kit_spec_env) plus the
+  # non-interactive git guards, with the same per-kit guard scoping the exec path
+  # uses (see _acq_msb_env_tokens_with_guards_into).
+  local _envtok=() _ev
+  _acq_msb_env_tokens_with_guards_into _envtok "$_envarrn" "$_ownguards"
+  for _ev in ${_envtok[@]+"${_envtok[@]}"}; do
     eval "$_prefixn+=(\"\$_ev\")"
   done
-
-  # Non-interactive git guards, unless the kit set GIT_TERMINAL_PROMPT itself.
-  local _kit_env_str
-  eval "_kit_env_str=\" \${${_envarrn}[*]-} \""
-  case "$_kit_env_str" in
-    *" GIT_TERMINAL_PROMPT="*) : ;;
-    *) eval "$_prefixn+=(\"GIT_TERMINAL_PROMPT=0\" \"GIT_ASKPASS=/bin/false\" \"SSH_ASKPASS=/bin/false\")" ;;
-  esac
 }
 
 # _acq_msb_startup_emit_command USER BACKGROUND PREFIX_ARRVAR ARGV_ARRVAR — echo
@@ -2120,16 +2208,78 @@ $(kit_spec_env "$_spec")
 EOF
 }
 
+# _acq_msb_dedupe_env_into ARRVAR TOKEN... — store the NAME=value TOKENs in the
+# array named ARRVAR with duplicates collapsed: the LAST value for a name wins,
+# the FIRST appearance fixes the order. Same resolution rule the session replay
+# applies to the persisted marker, so a command's env and a session's env agree
+# on which kit's value survives. Malformed tokens (no `=`, empty name) are
+# dropped. Tokens are read from argv and written back as whole array elements,
+# so a value containing spaces or metacharacters is never re-split (SI-10).
+_acq_msb_dedupe_env_into() {
+  local _arrn="$1"
+  shift
+  eval "$_arrn=()"
+  local _line
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    eval "$_arrn+=(\"\$_line\")"
+  done <<EOF
+$([ "$#" -eq 0 ] || printf '%s\n' "$@" | awk '
+  {
+    i = index($0, "=")
+    if (i < 2) next
+    k = substr($0, 1, i - 1)
+    # Same NAME charset kit_spec_env enforces, re-checked here so this helper is
+    # safe regardless of where its input came from (defense in depth).
+    if (k !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next
+    v[k] = substr($0, i + 1)
+    if (!(k in seen)) { seen[k] = 1; order[++n] = k }
+  }
+  END { for (j = 1; j <= n; j++) printf "%s=%s\n", order[j], v[order[j]] }
+')
+EOF
+}
+
+# _acq_msb_merge_kit_env_into ARRVAR SPEC... — collect the environment[] entries
+# of EVERY given kit spec into the array named ARRVAR as merged NAME=value
+# tokens (last kit wins for a duplicate name, in spec order). This is the
+# whole-kit-set view a kit's lifecycle commands need: kit env is guest-wide
+# configuration, so a daemon a kit starts must see the other kits' vars too, not
+# only its own (see ADR-0033). Callers that HAVE the full set (provision, heal)
+# build it here in a pre-pass, so the result is independent of the order the kits
+# are then applied in.
+_acq_msb_merge_kit_env_into() {
+  local _arrn="$1"
+  shift
+  # Distinct internal names (_mkall/_mkspec) so they cannot collide with a caller
+  # array passed BY NAME (the eval-by-name hazard _acq_msb_exec_install documents).
+  local _mkall=() _mkspec
+  for _mkspec in "$@"; do
+    [ -f "$_mkspec" ] || continue
+    _acq_msb_collect_kit_env_into _mkall "$_mkspec"
+  done
+  _acq_msb_dedupe_env_into "$_arrn" ${_mkall[@]+"${_mkall[@]}"}
+}
+
 # _acq_msb_startup_body_into BODYVAR SPEC — parse SPEC's __CMD__/base64-argv
 # command stream (the same stream _acq_msb_run_commands consumes) and append one
 # guest command line per STARTUP-phase record to the variable named BODYVAR.
 # Returns 0 iff at least one startup command line was emitted. Non-startup phases
 # are ignored here (install/initFiles stay on the exec path — ADR-0017).
 _acq_msb_startup_body_into() {
-  local _bodyn="$1" _spec="$2"
+  local _bodyn="$1" _spec="$2" _mergedn="${3:-}"
 
-  local _kit_env=()
-  _acq_msb_collect_kit_env_into _kit_env "$_spec"
+  # The env the emitted commands run with: the MERGED kit env when the caller has
+  # the full kit set (ADR-0033), else this spec's own environment[]. The guard
+  # decision stays per kit either way (_ownguards below).
+  local _kit_env=() _own_env=() _ownguards
+  _acq_msb_collect_kit_env_into _own_env "$_spec"
+  if [ -n "$_mergedn" ]; then
+    eval "_kit_env=(\${${_mergedn}[@]+\"\${${_mergedn}[@]}\"})"
+  else
+    _kit_env=(${_own_env[@]+"${_own_env[@]}"})
+  fi
+  _ownguards=$(_acq_msb_own_guard_names _own_env)
 
   # Buffer the command stream first (kit_spec_commands runs its own subshell).
   local _lines=() line
@@ -2156,7 +2306,7 @@ EOF
         reading=0
         if [ "$phase" = "startup" ] && [ "${#argv[@]}" -gt 0 ]; then
           local _prefix=() _cmdline
-          _acq_msb_startup_env_prefix_into _prefix "$user" _kit_env
+          _acq_msb_startup_env_prefix_into _prefix "$user" _kit_env "$_ownguards"
           _cmdline=$(_acq_msb_startup_emit_command "$user" "$background" _prefix argv)
           if [ -n "$_cmdline" ]; then
             # Append "<cmdline>\n" by name; $'\n' is a literal newline (ANSI-C).
@@ -2176,14 +2326,16 @@ EOF
   [ "$_emitted" -eq 1 ]
 }
 
-# _acq_msb_generate_startup_script SPEC OUTFILE — write the guest startup script
-# for one kit spec's STARTUP-phase commands into OUTFILE. Returns 0 and writes a
-# non-empty script iff the kit HAS at least one startup command; returns 1 (and
-# writes nothing) when there are none, so the caller registers no empty script.
+# _acq_msb_generate_startup_script SPEC OUTFILE [MERGEDENV_ARRVAR] — write the
+# guest startup script for one kit spec's STARTUP-phase commands into OUTFILE.
+# MERGEDENV_ARRVAR, when given, is the merged whole-kit-set env the body should
+# carry (ADR-0033). Returns 0 and writes a non-empty script iff the kit HAS at
+# least one startup command; returns 1 (and writes nothing) when there are none,
+# so the caller registers no empty script.
 _acq_msb_generate_startup_script() {
-  local _spec="$1" _out="$2" _body=""
+  local _spec="$1" _out="$2" _mergedn="${3:-}" _body=""
 
-  _acq_msb_startup_body_into _body "$_spec" || return 1
+  _acq_msb_startup_body_into _body "$_spec" "$_mergedn" || return 1
 
   # Emit the file: a self-contained /bin/sh with its own shebang (so --script-path
   # reads a complete verbatim body; no --shell shebang derivation dependency).
@@ -2198,7 +2350,8 @@ _acq_msb_generate_startup_script() {
   return 0
 }
 
-# _acq_msb_stage_startup_script SPEC ARRVAR — generate the startup script for one
+# _acq_msb_stage_startup_script SPEC ARRVAR [MERGEDENV_ARRVAR] — generate the
+# startup script for one
 # kit SPEC and, if non-empty, append a `--script-path acq-startup:<hostfile>`
 # entry into the create-flags array named ARRVAR. The host file is created under
 # ACQ_MSB_STARTUP_STAGE_DIR (a private 0700 dir under the acq state tree, so kit
@@ -2237,7 +2390,7 @@ _acq_msb_generate_startup_script() {
 # Script at Boot") for the re-verification procedure and remediation.
 ACQ_MSB_STARTUP_SCRIPT_NAME="acq-startup"
 _acq_msb_stage_startup_script() {
-  local _spec="$1" _arrn="$2"
+  local _spec="$1" _arrn="$2" _mergedn="${3:-}"
 
   # One staged script per sandbox provision. If we already staged one, skip
   # (increment-1 scope; see NOTE above).
@@ -2261,7 +2414,7 @@ _acq_msb_stage_startup_script() {
   }
   chmod 600 "$_file" 2>/dev/null || true
 
-  if _acq_msb_generate_startup_script "$_spec" "$_file"; then
+  if _acq_msb_generate_startup_script "$_spec" "$_file" "$_mergedn"; then
     # --script-path names a HOST file native msb reads, so pass the host form
     # (the shell keeps the POSIX _file for cleanup). See ADR-0029.
     local _hostfile="$_file"
@@ -2764,15 +2917,35 @@ acq_backend_provision() {
     # declare the same path.
     _volrecs="${_volrecs}
 $(kit_spec_volumes "$spec")"
+  done
 
-    # Startup-phase commands → a create-time `--script-path acq-startup:<file>`
-    # (ADR-0017). The script is REGISTERED at create; a bare registration is
-    # runtime-neutral (staged on the guest PATH, not auto-run at start). Restart
-    # durability is delivered by the acq `start`/`restart` verb re-running startup
-    # via the exec heal. install + mid-life apply stay exec-based (see the DESIGN
-    # NOTE and _acq_msb_apply_kit_dir). Only the first kit with startup commands
-    # stakes the fixed script name (see _acq_msb_stage_startup_script).
-    _acq_msb_stage_startup_script "$spec" create_flags
+  # MERGED KIT ENV (ADR-0033), computed ONCE per provision now that every kit is
+  # fetched: the union of all kits' environment[] with last-kit-wins. Threaded
+  # onto each kit's lifecycle commands (the apply loop below) and into the staged
+  # startup-script body, so a kit's `background: true` daemon sees the whole
+  # guest env, not only its own kit's vars. Computed here, BEFORE any kit is
+  # applied, so the result is independent of kit application order (the per-kit
+  # marker append happens inside the apply loop).
+  local _merged_kit_env=() _pspecs=() _kd
+  for _kd in ${kitdirs[@]+"${kitdirs[@]}"}; do
+    _pspecs+=("${_kd}/spec.yaml")
+  done
+  _acq_msb_merge_kit_env_into _merged_kit_env ${_pspecs[@]+"${_pspecs[@]}"}
+
+  # Startup-phase commands → a create-time `--script-path acq-startup:<file>`
+  # (ADR-0017). The script is REGISTERED at create; a bare registration is
+  # runtime-neutral (staged on the guest PATH, not auto-run at start). Restart
+  # durability is delivered by the acq `start`/`restart` verb re-running startup
+  # via the exec heal. install + mid-life apply stay exec-based (see the DESIGN
+  # NOTE and _acq_msb_apply_kit_dir). Only the first kit with startup commands
+  # stakes the fixed script name (see _acq_msb_stage_startup_script).
+  #
+  # Staged AFTER the fetch loop (not inside it) so the body can carry the merged
+  # kit env, which is only knowable once every kit has been fetched. Iterating
+  # kitdirs in the same order preserves the first-kit-stakes rule.
+  for _kd in ${kitdirs[@]+"${kitdirs[@]}"}; do
+    [ -f "${_kd}/spec.yaml" ] || continue
+    _acq_msb_stage_startup_script "${_kd}/spec.yaml" create_flags _merged_kit_env
   done
 
   # Volumes (ADR-0023) → create-time storage flags, from the union of every
@@ -3309,12 +3482,18 @@ EOF
   # sandbox half-configured with no diagnostic. Warn and continue — the kits are
   # individually non-fatal (the playbook kit already self-heals on next start),
   # matching acq_backend_ensure_kits_applied's best-effort heal loop.
+  #
+  # Each kit's lifecycle commands run with the MERGED kit env computed in the
+  # pre-pass above (ADR-0033), so a kit's `background: true` daemon sees the whole
+  # guest env rather than only its own kit's vars. It has to be a PRE-pass: the
+  # marker is appended inside this loop, so reading it per kit would make the
+  # result depend on kit order (a daemon kit applied first would see nothing).
   local kd
   acq_spin_start "Applying configuration kits"
   _acq_msb_reset_kit_env "$name"
   for kd in "${kitdirs[@]}"; do
     acq_debug "msb provision: applying kit dir $kd ($name)"
-    if _acq_msb_apply_kit_dir "$name" "$kd"; then
+    if _acq_msb_apply_kit_dir "$name" "$kd" _merged_kit_env; then
       acq_debug "msb provision: applied kit dir $kd ($name)"
     else
       echo "acq(msb): warning: kit did not fully apply: $kd" >&2
@@ -3964,18 +4143,17 @@ EOF
   ' </dev/null >/dev/null 2>&1 || true
 }
 
-# _acq_msb_kit_env_flags_into ARRVAR NAME — build the `-e NAME=value` flag array
-# for the kit environment[] entries persisted at /var/lib/acq/kit-env by
-# _acq_msb_apply_kit_dir, so every session path (run/attach/shell) sees the env
-# the kits declared for agent runtime (see ADR-0011). Empty array when no kit
-# declared environment[]. Array passed by name (bash 3.2 compat).
+# _acq_msb_persisted_kit_env_into ARRVAR NAME — read the kit environment[] entries
+# persisted at /var/lib/acq/kit-env by _acq_msb_apply_kit_dir into the array named
+# ARRVAR as NAME=value tokens (see ADR-0011). Empty array when the marker is
+# absent or no kit declared environment[]. Array passed by name (bash 3.2 compat).
 #
 # The marker is root-owned but its content is kit-derived guest data: re-validate
 # each NAME (same ^[A-Za-z_][A-Za-z0-9_]*$ charset kit_spec_env enforces) so a
 # tampered line cannot smuggle an option-shaped or quote-bearing token, and keep
 # the LAST value for a duplicate name (kits append in application order, so a
 # later kit overrides an earlier one).
-_acq_msb_kit_env_flags_into() {
+_acq_msb_persisted_kit_env_into() {
   local _arrn="$1" _name="$2"
   eval "$_arrn=()"
   # Failure-guarded: an absent marker (pre-kit-env sandbox, or no kit declared
@@ -3988,7 +4166,7 @@ _acq_msb_kit_env_flags_into() {
   local _line
   while IFS= read -r _line; do
     [ -n "$_line" ] || continue
-    eval "$_arrn+=(-e \"\$_line\")"
+    eval "$_arrn+=(\"\$_line\")"
   done <<EOF
 $(printf '%s\n' "$_kvs" | awk '
   {
@@ -4002,6 +4180,21 @@ $(printf '%s\n' "$_kvs" | awk '
   END { for (j = 1; j <= n; j++) printf "%s=%s\n", order[j], v[order[j]] }
 ')
 EOF
+}
+
+# _acq_msb_kit_env_flags_into ARRVAR NAME — build the `-e NAME=value` flag array
+# for the persisted kit environment[] entries, so every session path
+# (run/attach/shell) sees the env the kits declared for agent runtime (see
+# ADR-0011). Thin `-e` wrapper over _acq_msb_persisted_kit_env_into (which owns
+# the marker read, the tampered-name re-validation, and last-value-wins).
+_acq_msb_kit_env_flags_into() {
+  local _arrn="$1" _name="$2"
+  eval "$_arrn=()"
+  local _tok=() _ev
+  _acq_msb_persisted_kit_env_into _tok "$_name"
+  for _ev in ${_tok[@]+"${_tok[@]}"}; do
+    eval "$_arrn+=(-e \"\$_ev\")"
+  done
 }
 
 # _acq_msb_ensure_ssh_agent_forward NAME — (re)establish the host ssh-agent
@@ -5092,7 +5285,53 @@ acq_backend_apply_kit() {
     echo "acq(msb): note: this kit declares volumes:, which apply at CREATE time only —" >&2
     echo "acq(msb):   this apply skips them. Recreate the sandbox (acq rm && acq run) to mount them." >&2
   fi
+  # No merged-env array is passed here on purpose: a mid-life apply knows only
+  # THIS kit, so there is no full set to pre-merge. _acq_msb_apply_kit_dir falls
+  # back to the sandbox's already-persisted merged value (ADR-0033), which is the
+  # correct whole-guest view for an additive add.
   _acq_msb_apply_kit_dir "$name" "$kitdir"
+}
+
+# _acq_msb_heal_kit_set NAME BUILTIN_COUNT KITREF... — the heal's kit loop: fetch
+# every ref, merge their environment[] in a PRE-PASS, reset the marker, then apply
+# each kit with that merged env. Returns 1 if any of the first BUILTIN_COUNT refs
+# failed to fetch or apply (the caller's provenance verdict), 0 otherwise.
+#
+# Two loops, not one: the merged env must be known BEFORE the first kit is applied
+# (ADR-0033). The per-kit marker append happens inside the apply loop, so reading
+# the marker per kit would make a daemon kit's env depend on whether the
+# env-declaring kit happened to be applied before it. _builtin mirrors _dirs so a
+# built-in's apply failure is still attributable once the loops are separated.
+_acq_msb_heal_kit_set() {
+  local name="$1" builtin_count="$2"
+  shift 2
+  local kitref kitdir i=0 ok=1
+  local _dirs=() _builtin=()
+  for kitref in "$@"; do
+    if kitdir=$(_acq_msb_fetch_kit "$kitref"); then
+      _dirs+=("$kitdir")
+      if [ "$i" -lt "$builtin_count" ]; then _builtin+=(1); else _builtin+=(0); fi
+    else
+      echo "acq(msb): warning: could not fetch kit for healing: $kitref" >&2
+      # A built-in kit that can't even be fetched means we cannot claim the
+      # bundle is current. Extra-kit fetch failures don't affect the verdict.
+      [ "$i" -lt "$builtin_count" ] && ok=0
+    fi
+    i=$((i + 1))
+  done
+  local _merged=() _specs=()
+  for kitdir in ${_dirs[@]+"${_dirs[@]}"}; do
+    _specs+=("${kitdir}/spec.yaml")
+  done
+  _acq_msb_merge_kit_env_into _merged ${_specs[@]+"${_specs[@]}"}
+  _acq_msb_reset_kit_env "$name"
+  local _ki
+  for _ki in ${_dirs[@]+"${!_dirs[@]}"}; do
+    if ! _acq_msb_apply_kit_dir "$name" "${_dirs[$_ki]}" _merged; then
+      [ "${_builtin[$_ki]}" -eq 1 ] && ok=0
+    fi
+  done
+  [ "$ok" -eq 1 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -5163,23 +5402,9 @@ acq_backend_ensure_kits_applied() {
   if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
     kits+=("${ACQ_CLI_KITS[@]}")
   fi
-  local kitref kitdir i=0 ok=1
+  local ok=1
   acq_spin_start "Refreshing configuration kits"
-  _acq_msb_reset_kit_env "$name"
-  for kitref in "${kits[@]}"; do
-    kitdir=$(_acq_msb_fetch_kit "$kitref") || {
-      echo "acq(msb): warning: could not fetch kit for healing: $kitref" >&2
-      # A built-in kit that can't even be fetched means we cannot claim the
-      # bundle is current. Extra-kit fetch failures don't affect the verdict.
-      [ "$i" -lt "$builtin_count" ] && ok=0
-      i=$((i + 1))
-      continue
-    }
-    if ! _acq_msb_apply_kit_dir "$name" "$kitdir"; then
-      [ "$i" -lt "$builtin_count" ] && ok=0
-    fi
-    i=$((i + 1))
-  done
+  _acq_msb_heal_kit_set "$name" "$builtin_count" "${kits[@]}" || ok=0
   acq_spin_stop "Refreshing configuration kits"
   # Record host-side bundle provenance ONLY when every built-in kit applied.
   # msb re-applies all built-in kits idempotently, so on full
