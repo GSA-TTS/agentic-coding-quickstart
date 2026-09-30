@@ -83,7 +83,7 @@ msb 0.6.7** (released 2026-07-27), which corrects three assumptions:
 3. **`msb snapshot` exists as a full CLI verb** (create/list/inspect/verify/
    remove/save/load, plus restore). This is unrelated to ports; acq's native
    snapshot/restore decision is tracked separately in
-   [ADR-0030](0030-native-snapshot-restore.md).
+   [ADR-0033](0033-native-snapshot-restore.md).
 
 The neutral schema is owned by the **patterns** repo
 (`schemas/kit-hybrid-v1.schema.json`, `validate-kits.py`); the translator and

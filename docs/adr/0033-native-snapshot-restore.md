@@ -11,7 +11,7 @@ risk_treatment: accept
 supersedes: []
 ---
 
-# ADR-0030: Expose native stateful snapshot/restore through acq
+# ADR-0033: Expose native stateful snapshot/restore through acq
 
 ## Context
 
@@ -50,9 +50,10 @@ host-resource re-plumbing.
   message rather than offering a disk-only degraded mode.
 - Restore does not expose user-facing `--vsock`, `--volume`, or `--port` flags.
   acq owns the re-plumbing: it records acq-created workspace volume bindings as
-  host-side sidecar metadata next to exported snapshots, re-derives the current
-  SSH-agent vsock route, and asks the backend to inherit validated source-local
-  resource records for the rest.
+  host-side sidecar metadata next to exported snapshots, carries the persisted
+  CLI/extra kit reference record as a snapshot sidecar for restore-to-copy flows,
+  re-derives the current SSH-agent vsock route, and asks the backend to inherit
+  validated source-local resource records for the rest.
 
 ## Consequences
 
