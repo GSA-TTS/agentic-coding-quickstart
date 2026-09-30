@@ -164,7 +164,12 @@ esac
 STUB
   chmod +x "$STUBDIR/sbx"
   printf 'probebox\n' > "$STUBDIR/.sandbox_list"
-  acq_backend_ensure_kits_applied probebox >/dev/null 2>&1 || true
+  (
+    unset EMAIL GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
+    unset GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+    HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" \
+      acq_backend_ensure_kits_applied probebox >/dev/null 2>&1 || true
+  )
   local log; log=$(cat "$CALLS")
   assert_regex "$log" '\.agentic-coding-playbook/AGENTS\.md'
   refute_regex "$log" '\.agentic-coding-playbook/\.git'

@@ -91,8 +91,10 @@ Concretely:
   working for back-compat), and the per-sandbox scoped flow becomes the
   documented default.
 
-Multiple distinct owners in one workspace are handled by guiding one token per
-owner (fine-grained PATs are single-owner by design).
+Multiple distinct owners in one workspace fail closed with a clear explanation.
+Fine-grained PATs are single-owner by design, and `acq` stores one sandbox-scoped
+GitHub token today; asking for several owner tokens would imply support the
+secret store and backend binding do not provide.
 
 ## Considered Alternatives (rejected)
 
