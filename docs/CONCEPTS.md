@@ -164,6 +164,8 @@ Two limits worth knowing:
 - It is **msb only**. sbx assigns the host port itself and offers no way to
   request one, so acq refuses the flag there rather than appear to honor it; read
   what sbx chose with `acq ports`.
+- Like the other run/create flags, it goes **after** the subcommand
+  (`acq run … --publish …`). Only `--backend` and `--image` may precede it.
 
 See [ADR-0034](adr/0034-host-port-selection-and-publish-override.md) for the
 design, and [ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md) for the

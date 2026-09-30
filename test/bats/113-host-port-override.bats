@@ -144,6 +144,45 @@ REC
   assert_equal "$n" "1"
 }
 
+@test "hostport(A): an EXPLICIT host port also reports an unprobeable host, once" {
+  # Regression: the explicit-host branch used to treat only `busy` as
+  # exceptional, so an unprobeable host published a REQUESTED port in total
+  # silence — the one case where a wrong answer is most visible to the caller.
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
+    export ACQ_MSB_HOST_PROBE_UNKNOWN=1
+    arr=(); _acq_msb_port_flags_from_records arr <<REC
+$(printf "3000\t\t\t8080")
+REC
+    echo "rc=$?"
+    printf "%s\n" "${arr[@]}"
+  '
+  # Honored, not failed — acq cannot tell, which is not evidence of contention.
+  assert_output --partial 'rc=0'
+  assert_output --partial '8080:3000'
+  assert_output --partial 'cannot probe host port availability'
+
+  # Explicit and chosen ports share ONE notice per provision: "acq did not
+  # check" is the same fact however the port was arrived at.
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
+    export ACQ_MSB_HOST_PROBE_UNKNOWN=1
+    arr=(); _acq_msb_port_flags_from_records arr <<REC
+$(printf "3000\t\t\t8080")
+$(printf "4000\t\t\t")
+$(printf "5000\t\t\t9090")
+REC
+    printf "%s\n" "${arr[@]}"
+  '
+  assert_output --partial '8080:3000'
+  assert_output --partial '9090:5000'
+  assert_regex "$output" '[0-9]+:4000'
+  local n; n=$(printf '%s\n' "$output" | grep -c 'cannot probe host port availability')
+  assert_equal "$n" "1"
+}
+
 @test "hostport(A): two kits publishing one guest port collapse to a single -p" {
   local a b
   a=$(_pp_kit dupa 5000 7001)
@@ -322,4 +361,44 @@ _msb_create_line() { grep '^msb create' "$CALLS" | head -n1; }
   _acq_child ACQ_BACKEND=msb -- create shell --publish 6868:6767 --publish 6869:6767 "$proj"
   assert_failure
   assert_output --partial 'already mapped to host port 6868'
+}
+
+@test "hostport(A): an unprobeable host is reported for a KIT-PINNED host port" {
+  local k; k=$(_pp_kit unprobekit 3000 8080)
+  : > "$CALLS"
+  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-unprobe"
+    export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/stage-unprobe"
+    export ACQ_MSB_HOST_PROBE_UNKNOWN=1
+    # shellcheck source=acq.backends/secret-store.sh
+    . "${REPO_ROOT}/acq.backends/secret-store.sh"
+    # shellcheck source=acq.backends/msb.sh
+    . "${REPO_ROOT}/acq.backends/msb.sh"
+    # shellcheck disable=SC2034  # consumed by the sourced acq_backend_provision
+    ACQ_CLI_KITS=("$k")
+    _acq_msb_fetch_kit() { printf '%s\n' "$k"; }
+    acq_backend_provision unprobebox shell /tmp ) >/dev/null 2>"$STUBDIR/unprobe.err" || true
+  run cat "$STUBDIR/unprobe.err"
+  assert_output --partial 'cannot probe host port availability'
+  assert_regex "$(grep '^msb create' "$CALLS" | head -n1)" '\-p 8080:3000'
+}
+
+@test "publish(B): an unprobeable host is reported for a --publish port" {
+  local proj="$STUBDIR/pubprojunknown"; mkdir -p "$proj"
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb ACQ_MSB_HOST_PROBE_UNKNOWN=1 -- \
+    create shell --publish 6868:6767 "$proj"
+  assert_output --partial 'cannot probe host port availability'
+  assert_regex "$(_msb_create_line)" '\-p 6868:6767'
+}
+
+@test "publish(B): usage documents that run/create flags go AFTER the subcommand" {
+  # The pre-subcommand position is NOT supported (only --backend/--image are
+  # globals). A flag placed there falls into acq's generic unknown-subcommand
+  # passthrough — pre-existing behavior shared by --clone and --no-update-check,
+  # tracked separately — so the usage text has to say where the flag belongs.
+  run bash -c '"'"$ACQ"'" --help 2>&1'
+  assert_output --partial 'recognized only AFTER the subcommand'
+  run bash -c '"'"$ACQ"'" run --help 2>&1'
+  assert_output --partial 'recognized only AFTER the subcommand'
+  assert_output --partial '--publish'
 }

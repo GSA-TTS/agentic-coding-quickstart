@@ -136,10 +136,10 @@ rather than silently accepted as decimal.
 
 Availability is measured by connecting to the **real host listener** — a bash
 `/dev/tcp/127.0.0.1/PORT` redirect in a subshell — not by reading msb's declared
-mapping. `msb inspect` reports what msb was *asked* for, and that record survives
-unchanged when another process owns the port; that reporting gap is
-[GSA-TTS/agentic-coding-quickstart#520](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/520)
-and is deliberately not addressed here.
+mapping. msb's inspect output reports what msb was *asked* for, and that record
+survives unchanged when another process owns the port, so it cannot answer "is
+this port actually available"; closing that reporting gap is separate work,
+tracked in its own issue (see Links).
 
 The literal IPv4 loopback is used, never `localhost`: a `::1`-first resolution
 against an IPv4-only listener does not fail fast, it hangs.
@@ -149,6 +149,26 @@ network redirection answers "No such file or directory". An unprobeable shell
 gets **one** notice and the publish proceeds — the behavior before this check
 existed. Fabricating `free` would reintroduce a silent collision; refusing to
 create would break hosts that worked yesterday over a check acq cannot run.
+
+`unknown` is reported for an **explicitly requested** host port (a kit's pinned
+`host:` or a `--publish`) exactly as for a chosen one. A named address is where a
+wrong answer is most visible to the caller, so it must not be the quiet case; the
+notice is once per provision either way, since "acq did not check" is one fact
+however the port was arrived at. Only a *measured* conflict fails the create —
+the fail-loud rule is about contention, not about an unprobeable host.
+
+### Flag position
+
+The acq-owned run/create flags — `--publish`, `--clone`, `--no-update-check`,
+`--kit` — are recognized only **after** the subcommand. Only `--backend` and
+`--image` are pre-subcommand globals ([ADR-0022](0022-neutral-image-override.md)
+documents `--image`'s dual position deliberately). A flag placed before the
+subcommand falls into acq's generic unknown-subcommand passthrough and is
+forwarded to the backend CLI, which is a pre-existing usability trap shared by
+the whole family rather than anything specific to `--publish`; it is tracked
+separately (see Links) so a fix lands for all of them at once instead of making
+one flag inconsistent with its siblings. The usage text now states the
+restriction.
 
 ### Two explicit refusals instead of silence
 
@@ -177,10 +197,16 @@ otherwise map a port with nothing behind it and look like a working publish.
   by default** for a kit that omits `host:` — scripts must read it back from
   `acq ports` (they already should have; the old value only looked stable) or pin
   it with `--publish`.
-- **Negative:** the probe is a point-in-time check. A port free at probe time can
-  be taken microseconds later, in which case msb's own create fails — loudly.
-  Closing that window would require holding the port open across create, which
-  is exactly what would prevent msb from binding it.
+- **Negative:** the probe is a point-in-time check, so it reduces ordinary
+  contention but cannot eliminate a **post-probe race**: a port free when probed
+  can be taken before `msb create` runs. What msb does then is **not** something
+  this change can promise — the evidence in hand says msb accepts a duplicate host
+  mapping without complaint (that is the very silence Part A exists to remove, and
+  it is recorded in `docs/KNOWN_FAILURE_MODES.md`). So the residual window may
+  still end in an inert mapping rather than a visible failure. Live validation on
+  a sandbox-capable host must establish msb's actual behavior here. Closing the
+  window in acq would require holding the port open across create, which is
+  exactly what would stop msb from binding it.
 - **Scope:** `--publish` applies at **create only**, and on **msb only**. No env
   var. The post-hoc `acq ports --publish` tunnel
   ([ADR-0015](0015-msb-post-hoc-port-publish-via-ssh.md)) is untouched and is
@@ -191,13 +217,20 @@ otherwise map a port with nothing behind it and look like a working publish.
 
 ## Links
 
-- Driver: [#334](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/334)
+- Driver:
+  [GSA-TTS/agentic-coding-quickstart#334](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/334)
   (run-time HOST port override; its second comment corrects the premise and
   reports the msb collision)
 - Probing the host rather than the backend's declared mapping:
-  [#520](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/520)
+  [GSA-TTS/agentic-coding-quickstart#520](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/520)
   (`acq ports` reports declared configuration, not liveness) — motivation only,
   not fixed here
+- Flag-position trap shared by every acq-owned run/create flag (`--publish`,
+  `--clone`, `--no-update-check`, `--kit`): placed BEFORE the subcommand they fall
+  into the unknown-subcommand passthrough and reach the backend CLI. Pre-existing;
+  tracked separately so one fix covers the family. **Issue number to be filled in
+  when filed** (drafted alongside this ADR; not posted by the implementer, which
+  has no write access to the tracker).
 - Corroborating evidence (no dependency; acq-side change only):
   [agentic-coding-patterns#453](https://github.com/GSA-TTS/agentic-coding-patterns/pull/453)
 - Builds on: [ADR-0014](0014-neutral-port-publish-and-background-vocab.md)
@@ -208,4 +241,4 @@ otherwise map a port with nothing behind it and look like a working publish.
   pattern), [ADR-0015](0015-msb-post-hoc-port-publish-via-ssh.md) (the post-hoc
   tunnel this deliberately does not fall back to)
 - Guest-bind prerequisite for create-time publish to be reachable at all:
-  [#333](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/333)
+  [GSA-TTS/agentic-coding-quickstart#333](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/333)

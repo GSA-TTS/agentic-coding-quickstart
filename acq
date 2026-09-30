@@ -138,6 +138,10 @@ Global flags (before the subcommand):
                        docs/BACKEND_GUIDE.md.
 
 run/create flags:
+  (These are recognized only AFTER the subcommand — `acq create --publish …`, not
+  `acq --publish … create`. Only --backend and --image above are pre-subcommand
+  globals; a flag placed before the subcommand is treated as an unknown
+  subcommand and forwarded to the backend CLI.)
   --kit REF            Apply an extra kit (repeatable). REF is a local dir or a
                        git+https ref (like an ACQ_EXTRA_KITS entry); acq
                        translates it to the backend — it is NOT forwarded raw.
@@ -257,6 +261,10 @@ already exist, applies the pinned kits, then attaches. Re-attaching an existing
 sandbox heals its kits and (on msb) resumes it if stopped. This is the verb that
 both resumes AND attaches — so an interactive session started via `acq run` gets
 the forwarded host ssh-agent (SSH_AUTH_SOCK) injected, unlike `acq start`.
+
+Every flag above is recognized only AFTER the subcommand. Placed before it, a
+flag is read as an unknown subcommand and forwarded to the backend CLI (only
+--backend and --image are pre-subcommand globals).
 U
       ;;
     create)
@@ -268,6 +276,8 @@ Usage:
 
 Provisions a sandbox for AGENT mounted at PATH and applies the pinned kits, then
 returns without attaching. Attach later with `acq run NAME`.
+
+Every flag above is recognized only AFTER the subcommand (see `acq run --help`).
 U
       ;;
     ls)

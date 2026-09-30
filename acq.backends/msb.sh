@@ -1392,10 +1392,10 @@ _acq_msb_port_records_dedupe() {
 #   unknown — the probe itself could not run (see below)
 #
 # The probe is a bash /dev/tcp connect, i.e. it tests the REAL host listener
-# rather than any backend's declared configuration: `msb inspect` reports the
-# mapping msb was asked for, which stays in the record even when another process
-# owns the port (that reporting gap is
-# GSA-TTS/agentic-coding-quickstart#520, deliberately not addressed here).
+# rather than any backend's declared configuration: msb's inspect output reports
+# the mapping msb was ASKED for, and that record stays unchanged even when another
+# process owns the port, so it cannot answer whether the port is available. See
+# ADR-0034; closing that reporting gap is separate, deliberately-deferred work.
 # Always the literal IPv4 loopback, never `localhost`: a `::1`-first resolution
 # against an IPv4-only listener does not fail fast, it HANGS.
 # `unknown` is real and must not be mistaken for `free`: a bash built without
@@ -1452,6 +1452,20 @@ _acq_msb_pick_free_host_port() {
   return 1
 }
 
+# Print the "could not probe host port availability" notice AT MOST ONCE per
+# provision, whichever branch discovers it — a requested host port and a chosen
+# one are the same fact from the caller's side ("acq did not check"), and it must
+# never be mistaken for "acq checked and it was free". A provision publishing
+# several ports on a bash without network redirection says it once, not per port.
+# Always returns 0 so it can sit in a `case`/`&&` arm without affecting flow.
+_acq_msb_probe_unknown_notice() {
+  [ "$_ACQ_MSB_HOST_PROBE_NOTICE_SHOWN" -eq 0 ] || return 0
+  _ACQ_MSB_HOST_PROBE_NOTICE_SHOWN=1
+  echo "acq(msb): note: cannot probe host port availability on this shell;" \
+       "publishing ports without a contention check." >&2
+  return 0
+}
+
 # Turn validated `guest<TAB>proto<TAB>name<TAB>host` records on STDIN into
 # create-time `-p HOST:GUEST` flags in the named array. Usage:
 #   _acq_msb_port_flags_from_records ARRVAR <<EOF ... records ... EOF
@@ -1467,6 +1481,9 @@ _acq_msb_pick_free_host_port() {
 #                 loopback port per sandbox. Defaulting it to the guest port
 #                 (the old behavior) made every sandbox from one kit request the
 #                 same host port, so the second one lost the race in silence.
+#
+# Either way, when the availability probe cannot run at all, the port is published
+# and a notice says the check did not happen — never silently.
 #
 # msb -p also accepts BIND_ADDR:HOST:GUEST and /udp, but the neutral schema stays
 # TCP + default loopback bind for sbx parity, so neither is emitted. Uses the
@@ -1495,13 +1512,19 @@ _acq_msb_port_flags_from_records() {
         ;;
     esac
     if [ -n "$_host" ]; then
-      if [ "$(_acq_msb_host_port_status "$_host")" = "busy" ]; then
-        echo "acq(msb): error: host port ${_host} (for guest port ${_guest}) is already" >&2
-        echo "          in use on 127.0.0.1. acq will not substitute a different port for" >&2
-        echo "          an explicitly requested one. Free it, or request another host port." >&2
-        _rc=1
-        continue
-      fi
+      case "$(_acq_msb_host_port_status "$_host")" in
+        busy)
+          echo "acq(msb): error: host port ${_host} (for guest port ${_guest}) is already" >&2
+          echo "          in use on 127.0.0.1. acq will not substitute a different port for" >&2
+          echo "          an explicitly requested one. Free it, or request another host port." >&2
+          _rc=1
+          continue
+          ;;
+        # Unprobeable: publish the requested port (the behavior before this check
+        # existed) but say so. An EXPLICIT request is the case where a wrong
+        # answer is most visible to the caller, so it must not be the quiet one.
+        unknown) _acq_msb_probe_unknown_notice ;;
+      esac
     else
       _prc=0
       _host=$(_acq_msb_pick_free_host_port) || _prc=$?
@@ -1510,14 +1533,8 @@ _acq_msb_port_flags_from_records() {
         _rc=1
         continue
       fi
-      # _prc 2 == the probe itself could not run. Publish anyway (the behavior
-      # before this contention check existed) but say so once per provision, so
-      # "acq did not check" is never mistaken for "acq checked and it was free".
-      if [ "$_prc" -eq 2 ] && [ "$_ACQ_MSB_HOST_PROBE_NOTICE_SHOWN" -eq 0 ]; then
-        _ACQ_MSB_HOST_PROBE_NOTICE_SHOWN=1
-        echo "acq(msb): note: cannot probe host port availability on this shell;" \
-             "publishing ports without a contention check." >&2
-      fi
+      # _prc 2 == the probe could not run; same "publish, but say so" contract.
+      [ "$_prc" -eq 2 ] && _acq_msb_probe_unknown_notice
     fi
     eval "$_arr+=(-p \"\${_host}:\${_guest}\")"
   done
