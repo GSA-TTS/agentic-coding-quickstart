@@ -48,12 +48,17 @@
 #   - Caller-supplied labels are sanitized of control bytes before display, so an
 #     untrusted kit description can't inject terminal escapes.
 
-# _acq_prompt_sanitize TEXT — strip C0/C1 control bytes + DEL from caller data,
-# so a label/description can never inject raw escapes. Same technique as
-# progress.sh's _acq_sanitize_msg (kept independent so prompt.sh is usable if
-# sourced alone).
+# _acq_prompt_sanitize TEXT — strip raw terminal control bytes from caller data,
+# so a label/description can never inject raw escapes. Keep valid UTF-8 intact;
+# raw C1 bytes are invalid UTF-8 and are dropped by iconv when available.
 _acq_prompt_sanitize() {
-  printf '%s' "$*" | LC_ALL=C tr -d '\000-\037\177\200-\237'
+  if command -v iconv >/dev/null 2>&1; then
+    { printf '%s' "$*" | iconv -f UTF-8 -t UTF-8 -c || true; } \
+      | LC_ALL=C awk '{ gsub(/\302[\200-\237]/, ""); printf "%s", $0 }' \
+      | LC_ALL=C tr -d '\000-\037\177'
+  else
+    printf '%s' "$*" | LC_ALL=C tr -d '\000-\037\177'
+  fi
 }
 
 # _acq_prompt_interactive — 0 (true) when we may run an interactive widget:

@@ -14,8 +14,12 @@
 #     precedence over global — mirroring §7.5 and the Phase-1 sbx global/sandbox
 #     scope that acq already lifted into its abstraction.
 #   - Storage in the OS keychain when available (macOS `security -i`, Linux
-#     `secret-tool`), with a 0600 file fallback under
-#     $XDG_DATA_HOME/acq/secrets/ when no keychain backend exists.
+#     `secret-tool`), Windows DPAPI (Keychain-equivalent, user-scoped) via
+#     in-box PowerShell, and a 0600 file fallback under
+#     $XDG_DATA_HOME/acq/secrets/ when no protected backend exists. The Windows
+#     backend wraps each value in a versioned envelope and migrates a legacy
+#     plaintext value on first read, so switching backends never mis-reads the
+#     shared file path in either direction (see the keychain-windows notes).
 #   - Read access for adapters at provision time: each backend pulls the real
 #     value from here and feeds it to its native injection path (sbx proxy /
 #     msb --secret), so the value never enters the guest and never appears in
@@ -44,6 +48,13 @@ fi
 # group under one keychain item type.
 ACQ_KEYCHAIN_LABEL="acq-secret-store"
 
+# Versioned envelope header for values written by the Windows DPAPI backend. That
+# backend shares the plaintext file fallback's path, so this header (the file's
+# first line — see the keychain-windows notes below) is what tells a DPAPI
+# ciphertext apart from a legacy plaintext value. Bump the version suffix if the
+# envelope format ever changes.
+ACQ_SECRET_DPAPI_HEADER="acq-dpapi-v1"
+
 # File-fallback location (used only when no OS keychain tool is present).
 ACQ_SECRET_FILE_DIR="${ACQ_SECRET_FILE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/acq/secrets}"
 
@@ -55,8 +66,33 @@ if [ -n "${ACQ_SECRET_STORE_DIR:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Warning channel for the Windows legacy migration (ADR-0028).
+#
+# The read paths wrap acq_secret_get in `2>/dev/null` (acq_secret_resolve and the
+# adapters' provision reads), so a plain `>&2` warning raised by the migration
+# would be dropped exactly where the failure happens. Preserve the stderr the
+# process started with as fd 9 and warn through that; fall back to fd 2 if the
+# dup did not take. fd 9 is inherited by child processes (bash cannot set
+# close-on-exec on a user fd); it is a handle on the CLI's own stderr, so that is
+# harmless. The dup is guarded so re-sourcing is a no-op, and stderr is always
+# open for the CLI, so it cannot fail in practice.
+# ---------------------------------------------------------------------------
+if [ -z "${ACQ_SECRET_WARN_FD_READY:-}" ]; then
+  exec 9>&2
+  ACQ_SECRET_WARN_FD_READY=1
+fi
+
+_acq_secret_warn() {
+  local msg="acq: warning: $*"
+  if [ "${ACQ_SECRET_WARN_FD_READY:-0}" = 1 ] && printf '%s\n' "$msg" >&9 2>/dev/null; then
+    return 0
+  fi
+  printf '%s\n' "$msg" >&2 || true
+}
+
+# ---------------------------------------------------------------------------
 # _acq_secret_backend — which store mechanism is active: keychain-macos |
-# keychain-linux | file. Respects ACQ_SECRET_FORCE_FILE.
+# keychain-linux | keychain-windows | file. Respects ACQ_SECRET_FORCE_FILE.
 # ---------------------------------------------------------------------------
 _acq_secret_security_bin() {
   if [ -n "${ACQ_SECRET_STORE_DIR:-}" ] && [ -n "${ACQ_SECRET_SECURITY_BIN:-}" ]; then
@@ -66,12 +102,30 @@ _acq_secret_security_bin() {
   printf '/usr/bin/security\n'
 }
 
+# PowerShell drives the Windows DPAPI backend (see _acq_secret_store_windows).
+# Like the macOS security override, ACQ_SECRET_POWERSHELL_BIN is a test-only
+# escape hatch honored only alongside ACQ_SECRET_STORE_DIR, so production never
+# honors it.
+_acq_secret_powershell_bin() {
+  if [ -n "${ACQ_SECRET_STORE_DIR:-}" ] && [ -n "${ACQ_SECRET_POWERSHELL_BIN:-}" ]; then
+    printf '%s\n' "$ACQ_SECRET_POWERSHELL_BIN"
+    return 0
+  fi
+  printf 'powershell.exe\n'
+}
+
 _acq_secret_backend() {
   if [ -n "${ACQ_SECRET_FORCE_FILE:-}" ]; then
     printf 'file\n'; return 0
   fi
   case "$(uname -s 2>/dev/null)" in
     Darwin) [ -x "$(_acq_secret_security_bin)" ] && { printf 'keychain-macos\n'; return 0; } ;;
+    MINGW*|MSYS*|CYGWIN*)
+      # Git Bash on Windows has neither a keychain nor secret-tool, so the plain
+      # file fallback would leave secrets in cleartext on NTFS (which cannot
+      # enforce 0600). Use Windows DPAPI via in-box PowerShell instead
+      # (ADR-0028); fall back to the file backend only if PowerShell is absent.
+      command -v "$(_acq_secret_powershell_bin)" >/dev/null 2>&1 && { printf 'keychain-windows\n'; return 0; } ;;
     *)      command -v secret-tool >/dev/null 2>&1 && { printf 'keychain-linux\n'; return 0; } ;;
   esac
   printf 'file\n'
@@ -149,6 +203,185 @@ _acq_secret_store_keychain_macos() {
 }
 
 # ---------------------------------------------------------------------------
+# Windows DPAPI (keychain-windows): encrypt/decrypt a value with the Windows
+# Data Protection API scoped to the CURRENT USER, via in-box Windows PowerShell
+# (`powershell.exe`, 5.1 — its System.Security assembly exposes ProtectedData
+# with no added dependency). Plaintext moves over stdin and ciphertext/base64
+# over stdout, so the value never reaches argv. This is the Windows analogue of
+# a keychain: the ciphertext lives in the same file layout as the plaintext
+# fallback but is readable only by the same Windows account, removing the
+# NTFS-cannot-enforce-0600 weakness (see ADR-0028).
+#
+# ENVELOPE: because the file path is shared with the plaintext `file` backend,
+# the raw bytes alone cannot distinguish a DPAPI ciphertext from a legacy
+# plaintext value. Every value this backend writes is therefore wrapped in a
+# versioned envelope — first line ACQ_SECRET_DPAPI_HEADER, second line the base64
+# ciphertext. Stored plaintext is always a single line (acq_secret_store reads
+# exactly one line) and acq_secret_store refuses a value whose first line is the
+# header (CR-trimmed), so the two shapes are unambiguous. That makes a backend
+# switch safe in both directions:
+#   - Windows reading an UNMARKED file = a legacy plaintext value the file
+#     backend left behind. It is returned as-is and re-encrypted in place, so an
+#     upgrade neither loses the secret nor leaves the plaintext at rest.
+#   - `file` reading a MARKED file = ciphertext it cannot decrypt; it fails
+#     closed (_acq_secret_get_file) rather than exporting the blob as the secret.
+# ---------------------------------------------------------------------------
+_acq_secret_windows_encrypt() {
+  local ps; ps=$(_acq_secret_powershell_bin)
+  "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $b=[Text.Encoding]::UTF8.GetBytes($i); [Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
+}
+
+_acq_secret_windows_decrypt() {
+  local ps; ps=$(_acq_secret_powershell_bin)
+  "$ps" -NoLogo -NoProfile -Command '$ErrorActionPreference="Stop"; Add-Type -AssemblyName System.Security; $i=[Console]::In.ReadToEnd(); $e=[Convert]::FromBase64String($i.Trim()); [Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($e,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)))' 2>/dev/null
+}
+
+# _acq_secret_file_is_dpapi_envelope FILE -> 0 if FILE's first line is the DPAPI
+# envelope header. Stored plaintext is a single line, so an unmarked file cannot
+# be mistaken for an envelope (see the ENVELOPE note above). A trailing CR is
+# trimmed so a CRLF-mangled file is still recognized as an envelope rather than
+# read as legacy plaintext (which would leak the ciphertext as the value and make
+# the migration re-encrypt it).
+_acq_secret_file_is_dpapi_envelope() {
+  local header
+  IFS= read -r header < "$1" 2>/dev/null || true
+  header=${header%$'\r'}
+  [ "$header" = "$ACQ_SECRET_DPAPI_HEADER" ]
+}
+
+# _acq_secret_stage_atomic FILE CONTENT -> write CONTENT (exactly, no added
+# newline) to a hidden temp beside FILE with umask 077, and print the temp path on
+# stdout. The caller renames it over FILE (or removes it on failure), so a
+# concurrent reader never observes a partial value. Dot-prefixed so the `acq.*`
+# lister ignores it; the value moves over a redirection, never argv.
+_acq_secret_stage_atomic() {
+  local f="$1" content="$2" dir tmp
+  dir=$(dirname "$f")
+  ( umask 077; mkdir -p "$dir" ) || return 1
+  tmp="$dir/.$(basename "$f").tmp.$$"
+  ( umask 077; printf '%s' "$content" > "$tmp" ) || {
+    rm -f "$tmp" 2>/dev/null || true; return 1; }
+  printf '%s\n' "$tmp"
+}
+
+# Encrypt VALUE and write the header + base64 ciphertext to the key's file path.
+# The file is written with umask 077 like the plaintext fallback (defense in
+# depth), but the DPAPI envelope is what actually protects it on NTFS.
+_acq_secret_store_windows() {
+  local key="$1" value="$2" f enc tmp
+  f=$(_acq_secret_file_for "$key")
+  enc=$(printf '%s' "$value" | _acq_secret_windows_encrypt) || {
+    echo "acq: secret store: Windows DPAPI encryption failed for '$key'." >&2; return 1; }
+  [ -n "$enc" ] || {
+    echo "acq: secret store: Windows DPAPI produced no ciphertext for '$key'." >&2; return 1; }
+  if ! tmp=$(_acq_secret_stage_atomic "$f" "$ACQ_SECRET_DPAPI_HEADER"$'\n'"$enc"); then
+    echo "acq: secret store: file write failed for '$key'." >&2; return 1
+  fi
+  mv -f "$tmp" "$f" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null || true
+    echo "acq: secret store: file write failed for '$key'." >&2; return 1; }
+  # The value is encrypted now, so an earlier migration-failure warning marker
+  # for this key is stale.
+  _acq_secret_migrate_warn_clear "$f"
+  return 0
+}
+
+# 0 if FILE is still the exact unmarked legacy plaintext EXPECTED — i.e. nothing
+# rewrote it since we read it. Guards the migration against clobbering a
+# concurrent `acq secret set`/rotation (the encrypt subprocess can take seconds).
+_acq_secret_file_is_unchanged_legacy() {
+  local f="$1" expected="$2" current
+  _acq_secret_file_is_dpapi_envelope "$f" && return 1
+  current=$(cat "$f" 2>/dev/null) || return 1
+  [ "$current" = "$expected" ]
+}
+
+# Path of the once-per-key migration-warning marker for the key whose value FILE
+# holds. Dot-prefixed so the `acq.*` file lister ignores it.
+_acq_secret_warn_marker_for() {
+  printf '%s/.%s.warned\n' "$(dirname "$1")" "$(basename "$1")"
+}
+
+# Warn at most once per key that a legacy value could not be migrated to DPAPI.
+# Best-effort: a marker-write failure only means the warning may repeat. Never
+# fails the read; the value is still returned by the caller.
+_acq_secret_migrate_warn() {
+  local key="$1" f="$2" why="$3" marker
+  marker=$(_acq_secret_warn_marker_for "$f")
+  acq_debug "secret migrate: $why for '$key'; legacy plaintext left in place"
+  if [ -e "$marker" ]; then
+    return 0
+  fi
+  ( umask 077; : > "$marker" ) 2>/dev/null || true
+  _acq_secret_warn "could not encrypt the '$key' secret at rest with Windows DPAPI ($why); it remains in plaintext on disk. Re-run 'acq secret set' once DPAPI is available."
+}
+
+_acq_secret_migrate_warn_clear() {
+  rm -f "$(_acq_secret_warn_marker_for "$1")" 2>/dev/null || true
+  return 0
+}
+
+# Best-effort migration of a legacy plaintext value to a DPAPI envelope. Writes
+# atomically (hidden temp + rename) with umask 077, so a failure never damages the
+# still-readable legacy value and never fails the read that triggered it (a later
+# read retries). Every failure is traced (acq_debug) and warned once per key (see
+# _acq_secret_migrate_warn). The temp name's leading dot keeps it out of the
+# `acq.*` glob the file lister uses.
+_acq_secret_migrate_windows() {
+  local key="$1" value="$2" f tmp enc
+  f=$(_acq_secret_file_for "$key")
+  if ! enc=$(printf '%s' "$value" | _acq_secret_windows_encrypt); then
+    _acq_secret_migrate_warn "$key" "$f" "DPAPI encryption failed"
+    return 1
+  fi
+  if [ -z "$enc" ]; then
+    _acq_secret_migrate_warn "$key" "$f" "DPAPI produced no ciphertext"
+    return 1
+  fi
+  if ! tmp=$(_acq_secret_stage_atomic "$f" "$ACQ_SECRET_DPAPI_HEADER"$'\n'"$enc"); then
+    _acq_secret_migrate_warn "$key" "$f" "temporary file write failed"
+    return 1
+  fi
+  # Only replace the file if it is STILL the exact unmarked legacy value we read:
+  # a concurrent `acq secret set`/rotation (or another reader that migrated it)
+  # can rewrite it during the encrypt subprocess above, and clobbering that with
+  # our stale capture would silently revert the write. Shell has no atomic
+  # compare-and-swap, so this re-check narrows the race to the rename below.
+  if ! _acq_secret_file_is_unchanged_legacy "$f" "$value"; then
+    rm -f "$tmp" 2>/dev/null || true
+    acq_debug "secret migrate: '$key' changed during migration; left as-is"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$f" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    _acq_secret_migrate_warn "$key" "$f" "rename failed"
+    return 1
+  fi
+  _acq_secret_migrate_warn_clear "$f"
+  return 0
+}
+
+# Read the key's value. A marked file is decrypted; an unmarked file is a legacy
+# plaintext value that is returned as-is and migrated in place (see the ENVELOPE
+# note above). A missing file, an undecryptable envelope (wrong user/machine, or
+# corruption), or a lost DPAPI key all surface as a non-zero return so callers
+# treat the secret as absent rather than using a truncated value.
+_acq_secret_get_windows() {
+  local key="$1" f value
+  f=$(_acq_secret_file_for "$key")
+  [ -f "$f" ] || return 1
+  if _acq_secret_file_is_dpapi_envelope "$f"; then
+    value=$(tail -n +2 "$f" | _acq_secret_windows_decrypt) || return 1
+  else
+    value=$(cat "$f") || return 1
+    # Best-effort: never fail the read; the helper reports any problem itself.
+    _acq_secret_migrate_windows "$key" "$value" || true
+  fi
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# ---------------------------------------------------------------------------
 # acq_secret_store KEY  (value on STDIN)
 # ---------------------------------------------------------------------------
 # Store a secret VALUE (read from stdin, never argv) under KEY. Overwrites any
@@ -159,6 +392,14 @@ acq_secret_store() {
   IFS= read -r value || true
   if [ -z "$value" ]; then
     echo "acq: secret store: empty value for '$key'; nothing stored." >&2
+    return 1
+  fi
+  # The DPAPI envelope header is reserved (see the ENVELOPE note): a plaintext
+  # value whose first line is the header — alone or with a trailing CR, which the
+  # read side trims — would be unreadable in the shared file layout, so refuse it
+  # here rather than storing a value that can never be read back.
+  if [ "${value%$'\r'}" = "$ACQ_SECRET_DPAPI_HEADER" ]; then
+    echo "acq: secret store: refusing a value equal to the reserved DPAPI envelope header; nothing stored." >&2
     return 1
   fi
 
@@ -198,15 +439,28 @@ acq_secret_store() {
     file)
       _acq_secret_store_file "$key" "$value"; local rc=$?; value=""; return $rc
       ;;
+    keychain-windows)
+      # Encrypt with DPAPI and write the ciphertext to the key's file path (see
+      # _acq_secret_store_windows). No index is needed: the file lister
+      # enumerates the encrypted files directly.
+      _acq_secret_store_windows "$key" "$value" || { value=""; return 1; }
+      value=""
+      return 0
+      ;;
   esac
 }
 
-# 0600 file write (value already in $2). Uses umask so the value is never in argv.
+# 0600 file write (value already in $2). Stages to a hidden temp then renames, so
+# a concurrent reader never sees a partial value, and uses umask so the value is
+# never in argv.
 _acq_secret_store_file() {
-  local key="$1" value="$2" f
+  local key="$1" value="$2" f tmp
   f=$(_acq_secret_file_for "$key")
-  ( umask 077; mkdir -p "$ACQ_SECRET_FILE_DIR" ) || return 1
-  ( umask 077; printf '%s' "$value" > "$f" ) || {
+  if ! tmp=$(_acq_secret_stage_atomic "$f" "$value"); then
+    echo "acq: secret store: file write failed for '$key'." >&2; return 1
+  fi
+  mv -f "$tmp" "$f" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null || true
     echo "acq: secret store: file write failed for '$key'." >&2; return 1; }
   return 0
 }
@@ -235,6 +489,9 @@ acq_secret_get() {
     file)
       _acq_secret_get_file "$key"; return $?
       ;;
+    keychain-windows)
+      _acq_secret_get_windows "$key"; return $?
+      ;;
   esac
 }
 
@@ -242,6 +499,12 @@ _acq_secret_get_file() {
   local key="$1" f
   f=$(_acq_secret_file_for "$1")
   [ -f "$f" ] || return 1
+  # A DPAPI envelope here means the Windows backend wrote it but this (plaintext)
+  # backend is active — PowerShell became unavailable, or the store moved between
+  # hosts/users. We cannot decrypt it, and returning the base64 blob would make
+  # callers treat ciphertext as the secret (exporting or binding it), so fail
+  # closed. See the keychain-windows ENVELOPE note.
+  _acq_secret_file_is_dpapi_envelope "$f" && return 1
   cat "$f"
 }
 
@@ -629,6 +892,9 @@ acq_secret_delete() {
     file)
       _acq_secret_delete_file "$key" || rc=$?
       ;;
+    keychain-windows)
+      _acq_secret_delete_file "$key" || rc=$?
+      ;;
   esac
   return "$rc"
 }
@@ -636,8 +902,14 @@ acq_secret_delete() {
 # 0600 file removal. Idempotent (absent file is success); non-zero only if the
 # file exists but cannot be removed.
 _acq_secret_delete_file() {
-  local key="$1" f
+  local key="$1" f dir base
   f=$(_acq_secret_file_for "$key")
+  dir=$(dirname "$f"); base=$(basename "$f")
+  # Drop the value's migration sidecars too — the once-per-key warning marker and
+  # any hidden temp left by a crash between write and rename — so deleting a
+  # secret cannot leave a decryptable copy (the temp) or litter behind. Both are
+  # dot-prefixed, so the bare `*` here cannot match the value file itself.
+  rm -f "$dir/.$base.tmp."* "$dir/.$base.warned" 2>/dev/null || true
   [ -e "$f" ] || return 0
   rm -f "$f" 2>/dev/null || {
     echo "acq: secret delete: file remove failed for '$key'." >&2; return 1; }
@@ -673,6 +945,42 @@ acq_secret_resolve() {
 # ---------------------------------------------------------------------------
 acq_secret_has() {
   acq_secret_resolve "$1" "${2:-}" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# acq_secret_unreadable SERVICE [SANDBOX]  ->  0 if a value is stored for SERVICE
+# but the store cannot present it (a DPAPI envelope the active backend cannot
+# decrypt), else 1. Lets a caller tell a genuine "not set" apart from a
+# present-but-unreadable value so it does not report the former when the latter
+# is true. Mirrors acq_secret_resolve's sandbox->global precedence: a resolving
+# candidate means the service is readable, so another scope's unreadable file
+# does not count. (May run the one-time legacy migration via acq_secret_has; it
+# never exposes a value.)
+# ---------------------------------------------------------------------------
+# 0 if KEY's value file is a DPAPI envelope. That is the only "present but
+# unreadable" shape this store produces: a non-envelope file that fails to read
+# is a corruption case the ordinary "not set"/prompt path handles, and a
+# decryptable envelope resolves (so acq_secret_unreadable's acq_secret_has check
+# wins first).
+_acq_secret_value_present_unreadable() {
+  local key="$1" f
+  f=$(_acq_secret_file_for "$key")
+  [ -f "$f" ] || return 1
+  _acq_secret_file_is_dpapi_envelope "$f"
+}
+
+acq_secret_unreadable() {
+  local service="$1" sandbox="${2:-}" key
+  acq_secret_has "$service" "$sandbox" && return 1
+  # _acq_secret_key fails closed on an ambiguous (dotted) name; such a name has
+  # no valid entry, so it cannot be present-but-unreadable.
+  if [ -n "$sandbox" ] && key=$(_acq_secret_key "$service" "$sandbox"); then
+    _acq_secret_value_present_unreadable "$key" && return 0
+  fi
+  if key=$(_acq_secret_key "$service"); then
+    _acq_secret_value_present_unreadable "$key" && return 0
+  fi
+  return 1
 }
 
 # ---------------------------------------------------------------------------

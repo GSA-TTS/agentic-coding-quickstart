@@ -40,15 +40,23 @@ fi
 
 # Minimum sbx version required.
 #
-# Bumped 0.35.0 -> 0.38.0: the neutral-kit translator now emits the sbx **v2 kit
+# Bumped 0.38.0 -> 0.39.0: acq exports the guest-visible workspace markers
+# (ACQ_WORKSPACE, and ACQ_CLONE under --clone; ADR-0027) through
+# `sbx create --env`, and `-e`/`--env` first exists in sbx 0.39.0. The markers
+# ride EVERY create with a workspace, not just --clone, and sbx rejects an
+# unknown flag outright — so on 0.38.x this fails the whole create, not just
+# the marker. Gating the flag instead would leave a floor-compliant user with
+# kits that silently do nothing, which is what the markers were added to fix.
+#
+# Bumped 0.35.0 -> 0.38.0: the neutral-kit translator emits the sbx **v2 kit
 # grammar**, which only sbx >= 0.38.0 accepts. On 0.37.x the v2 fields are not
 # understood and sbx fails with a RAW decode error (e.g. `field permissions not
 # found`) instead of a version message — an opaque, self-inflicted mismatch. A
-# real floor here makes that self-diagnosing: acq refuses up front with a clear
-# "requires sbx >= 0.38.0" rather than letting a create fail deep inside sbx's
-# kit decoder. (0.35.0 was originally required so `sbx kit add` recreated the
-# sandbox preserving state; the v2-grammar requirement supersedes that.)
-MIN_SBX_VERSION="0.38.0"
+# real floor here makes that self-diagnosing: acq refuses up front rather than
+# letting a create fail deep inside sbx's kit decoder. (0.35.0 was originally
+# required so `sbx kit add` recreated the sandbox preserving state; the
+# v2-grammar requirement supersedes that.)
+MIN_SBX_VERSION="0.39.0"
 
 # Max seconds to wait for `sbx exec` to become usable.
 ACQ_EXEC_READY_TIMEOUT="${ACQ_EXEC_READY_TIMEOUT:-60}"
@@ -113,7 +121,10 @@ acq_backend_prepare() {
 
   if [ "$(version_ge "$current" "$MIN_SBX_VERSION")" -ne 0 ]; then
     echo "error: acq requires sbx >= $MIN_SBX_VERSION, but found $current." >&2
-    echo "       sbx >= $MIN_SBX_VERSION is required because acq's neutral-kit" >&2
+    echo "       acq sets the guest workspace markers with 'sbx create --env'," >&2
+    echo "       and --env first exists in sbx 0.39.0; an older sbx rejects the" >&2
+    echo "       unknown flag and fails the whole create." >&2
+    echo "       sbx >= 0.38.0 is also required because acq's neutral-kit" >&2
     echo "       translator emits the sbx v2 kit grammar, which older sbx builds" >&2
     echo "       reject with an opaque decode error (e.g. 'field permissions not" >&2
     echo "       found') rather than a version message." >&2
@@ -284,21 +295,27 @@ _acq_sbx_git_identity_kit() {
     printf 'name: acq-git-identity-%s\n' "$slug"
     printf 'displayName: ACQ Git Identity\n'
     printf 'description: Forward host git identity into the guest\n'
-    if [ -n "$envrecs" ]; then
+    # sbx-v2's real InstallCommand struct (confirmed live against sbx v0.43.0)
+    # has NO env field — only command/user/description. Both envrecs (raw
+    # GIT_* vars) and configrecs (ACQ_GIT_USER_*) go through the ONE
+    # mechanism sbx-v2 actually supports for guest env: the top-level
+    # `environment.variables` map, which sbx injects natively into every
+    # phase, install included. The install command below then just reads
+    # ACQ_GIT_USER_NAME/ACQ_GIT_USER_EMAIL from that same block — no
+    # separate install-scoped env is needed or exists.
+    if [ -n "$allrecs" ]; then
       printf 'environment:\n  variables:\n'
-      printf '%s\n' "$envrecs" | while IFS= read -r rec; do
+      printf '%s\n' "$allrecs" | while IFS= read -r rec; do
         [ -n "$rec" ] || continue
         printf '    %s: %s\n' "${rec%%=*}" "$(_kit_yaml_quote "${rec#*=}")"
       done
     fi
     if [ -n "$configrecs" ]; then
-      printf 'setup:\n  install:\n    command:\n      - sh\n      - -c\n'
-      printf '      - %s\n' "$(_kit_yaml_quote '[ -n "${ACQ_GIT_USER_NAME:-}" ] && git config --global user.name "$ACQ_GIT_USER_NAME" 2>/dev/null || true; [ -n "${ACQ_GIT_USER_EMAIL:-}" ] && git config --global user.email "$ACQ_GIT_USER_EMAIL" 2>/dev/null || true')"
-      printf '    env:\n'
-      printf '%s\n' "$configrecs" | while IFS= read -r rec; do
-        [ -n "$rec" ] || continue
-        printf '      %s: %s\n' "${rec%%=*}" "$(_kit_yaml_quote "${rec#*=}")"
-      done
+      printf 'setup:\n  install:\n    - command: |\n'
+      printf '        [ -n "${ACQ_GIT_USER_NAME:-}" ] && git config --global user.name "$ACQ_GIT_USER_NAME" 2>/dev/null || true\n'
+      printf '        [ -n "${ACQ_GIT_USER_EMAIL:-}" ] && git config --global user.email "$ACQ_GIT_USER_EMAIL" 2>/dev/null || true\n'
+      printf '      description: %s\n' \
+        "$(_kit_yaml_quote 'Apply the forwarded host git identity (from the environment.variables block above) to the guest global git config')"
     fi
   } >"$dir/spec.yaml"
   printf '%s\n' "$dir"
@@ -360,20 +377,6 @@ _acq_sbx_kit_feature_absent() {
     sleep 2
   done
   return 2
-}
-
-# Run a snippet inside a sandbox with retry.
-_acq_sbx_exec_retry() {
-  local name="$1" snippet="$2" out rc tries=0
-  while [ "$tries" -lt 5 ]; do
-    tries=$((tries + 1))
-    out=$(sbx exec "$name" -- sh -c "$snippet" </dev/null 2>/dev/null)
-    rc=$?
-    [ "$rc" -eq 0 ] && { printf '%s' "$out"; return 0; }
-    sleep 2
-  done
-  printf '%s' "$out"
-  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -494,6 +497,7 @@ acq_backend_provision() {
   # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
     acq_provenance_write sbx "$name" || true
+    acq_workspace_record_write sbx "$name" "$_primary_ws" || true
     _acq_sbx_seed_extra_kit_marker "$name"
     # Persist the CLI (`--kit`) / extra kit refs alongside provenance so a later
     # resume heal can reload them (see acq_cli_kits_write). Best-effort.
@@ -675,7 +679,7 @@ _acq_sbx_kit_add() {
   case "$err" in
     # Heuristic: the classification is pinned to sbx 0.38's wording (see ADR-0009
     # and the doc link above). This only ever runs when sbx is already confirmed
-    # >= MIN_SBX_VERSION (0.38.0) — acq_backend_prepare enforces that version floor
+    # >= MIN_SBX_VERSION (0.39.0) — acq_backend_prepare enforces that version floor
     # at every dispatch entry point before any heal — so the match is bounded to
     # the versions whose wording it targets, not applied blindly to arbitrary
     # future/older sbx. `setup.startup` is the primary discriminator; the prose

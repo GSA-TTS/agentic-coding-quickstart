@@ -298,6 +298,14 @@ adapter therefore canonicalizes each workspace to its real, symlink-free path
 (`canonicalize_path` in `common.sh`) before mounting, and `scripts/verify-backends`
 no longer places its test workspace under `$TMPDIR`.
 
+On a **Windows** host the "same path in the guest" contract is expressed as two
+forms of one location: the mount SOURCE is the native host form (`C:/...`) that
+`msb.exe` resolves, while the guest TARGET, the recorded start directory, and
+`ACQ_WORKSPACE` are the POSIX guest form (`/c/...`) the Linux microVM uses
+(`host_path` / `canonicalize_path`; MSYS argument rewriting is disabled for
+`msb`). POSIX hosts are unaffected. See
+[ADR-0029](0029-windows-host-guest-path-forms.md).
+
 ### msb CLI flag verification
 
 The msb flag/subcommand shapes used by the adapter were **verified against

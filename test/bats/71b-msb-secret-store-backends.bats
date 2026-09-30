@@ -236,6 +236,20 @@ _provision() { # NAME PRE_SNIPPET WS_ARGS...
   assert_output --partial 'listing=[]'
 }
 
+@test "file ls: a stored-but-unreadable envelope lists as VALUE=unreadable, not no" {
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/file-unreadable-ls"
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    mkdir -p "$ACQ_SECRET_FILE_DIR"
+    printf "%s\n%s" "$ACQ_SECRET_DPAPI_HEADER" "QUJD" > "$ACQ_SECRET_FILE_DIR/acq.usai"
+    acq_backend_secret_ls
+  '
+  assert_success
+  assert_output --partial 'unreadable'
+}
+
 @test "keychain-linux self-heal: a lost index relists sidecar-backed keys only, never values" {
   _plant_secret_tool_stub
   run bash -c '
@@ -261,12 +275,14 @@ _provision() { # NAME PRE_SNIPPET WS_ARGS...
   _provision mwbox 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/mw-secrets"' \
     "$STUBDIR/ws-app" "$STUBDIR/ws-lib:ro"
   load_acq
-  local ws_app ws_lib log
+  local ws_app ws_lib ws_app_h ws_lib_h log
   ws_app=$(canonicalize_path "$STUBDIR/ws-app")
   ws_lib=$(canonicalize_path "$STUBDIR/ws-lib")
+  ws_app_h=$(host_path "$STUBDIR/ws-app")
+  ws_lib_h=$(host_path "$STUBDIR/ws-lib")
   log=$(cat "$CALLS")
-  assert_regex "$log" "--volume ${ws_app}:${ws_app}"
-  assert_regex "$log" "--volume ${ws_lib}:${ws_lib}:ro"
+  assert_regex "$log" "--volume ${ws_app_h}:${ws_app}"
+  assert_regex "$log" "--volume ${ws_lib_h}:${ws_lib}:ro"
   assert_regex "$log" "'${ws_app}' > /var/lib/acq/workspace"
   refute_regex "$log" "'/home/agent/workspace' > /var/lib/acq/workspace"
 
@@ -279,10 +295,11 @@ _provision() { # NAME PRE_SNIPPET WS_ARGS...
   mkdir -p "$STUBDIR/real-ws"
   ln -sf "$STUBDIR/real-ws" "$STUBDIR/link-ws"
   _provision symbox 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sym-secrets"' "$STUBDIR/link-ws"
-  local real_ws log
+  local real_ws real_ws_h log
   real_ws=$(realpath "$STUBDIR/real-ws" 2>/dev/null || printf '%s' "$STUBDIR/real-ws")
+  real_ws_h=$(host_path "$real_ws")
   log=$(cat "$CALLS")
-  assert_regex "$log" "--volume ${real_ws}:${real_ws}"
+  assert_regex "$log" "--volume ${real_ws_h}:${real_ws}"
   refute_regex "$log" "--volume ${STUBDIR}/link-ws:"
 }
 

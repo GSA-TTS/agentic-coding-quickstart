@@ -47,10 +47,12 @@ _provision() { # NAME PRE_SNIPPET
   assert_regex "$log" "--secret $MSB_GITHUB_SECRET_BINDING"
   refute_regex "$log" 'USAI-REAL-VALUE'
   refute_regex "$log" 'GH-REAL-VALUE'
-  # Workspace mounted at the same canonical guest path (sbx-parity), default image.
+  # Workspace mounted at the same canonical guest path (sbx-parity), default
+  # image. The mount SOURCE is the native host form, the TARGET the guest form
+  # (ADR-0029); identical on POSIX.
   load_acq
-  local ws; ws=$(canonicalize_path /tmp)
-  assert_regex "$log" "--volume ${ws}:${ws}"
+  local ws wshost; ws=$(canonicalize_path /tmp); wshost=$(host_path /tmp)
+  assert_regex "$log" "--volume ${wshost}:${ws}"
   refute_regex "$log" "--volume ${ws}:/home/agent/workspace"
   assert_regex "$log" 'msb create --name provbox'
   assert_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
@@ -63,7 +65,8 @@ _provision() { # NAME PRE_SNIPPET
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/upca-secrets"
     export ACQ_MSB_UPSTREAM_CA_CERT="'"$STUBDIR"'/corp-root.pem"
   '
-  assert_regex "$(cat "$CALLS")" "--tls-upstream-ca-cert $STUBDIR/corp-root.pem"
+  # --tls-upstream-ca-cert names a HOST PEM: the native host form (ADR-0029).
+  assert_regex "$(cat "$CALLS")" "--tls-upstream-ca-cert $(host_path "$STUBDIR/corp-root.pem")"
 }
 
 @test "msb: no --tls-intercept / upstream-CA when interception is disabled" {

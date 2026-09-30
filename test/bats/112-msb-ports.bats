@@ -19,14 +19,16 @@ load 'helper'
 
 @test "msb ports: publish generates+authorizes the acq key once, serves, and opens the -L tunnel" {
   run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
     export ACQ_MSB_FORCE_SERVE_PORT=54321
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
     wait
   '
   local log; log=$(cat "$CALLS")
   assert_regex "$log" "ssh-keygen -t ed25519 -N  -f $STUBDIR/state/ssh/msb_id_ed25519"
-  assert_regex "$log" "msb ssh authorize --file $STUBDIR/state/ssh/msb_id_ed25519.pub"
+  assert_regex "$log" "msb ssh authorize --file $(host_path "$STUBDIR/state/ssh/msb_id_ed25519.pub")"
   assert_regex "$log" 'msb ssh serve pbox --host 127.0.0.1 --port 54321'
   assert_regex "$log" -- '-L 127.0.0.1:8080:127.0.0.1:3000'
   assert_regex "$log" -- "-i $STUBDIR/state/ssh/msb_id_ed25519"
@@ -34,6 +36,37 @@ load 'helper'
   assert_regex "$log" 'IdentitiesOnly=yes'
   assert_regex "$log" -- '-F none'
   assert [ -f "$STUBDIR/state/ports/pbox.pids" ]
+}
+
+@test "msb ports: the recorded serve PID is the real msb process (teardown kill reaches it)" {
+  # Regression for the function-wrapper $! trap (ADR-0029): backgrounding
+  # `_acq_msb_cli ssh serve …` records the wrapper SUBSHELL pid, so a later kill
+  # orphans the still-listening msb. The stub writes its own $$ for comparison.
+  mkdir -p "$STUBDIR/state"
+  cat >"$STUBDIR/msb" <<MSBPIDSTUB
+#!/usr/bin/env bash
+if [ "\${1:-}" = "ssh" ] && [ "\${2:-}" = "serve" ]; then
+  printf '%s' "\$\$" > "$STUBDIR/state/serve.pid"
+  exec >/dev/null 2>&1
+  sleep 30
+fi
+MSBPIDSTUB
+  chmod +x "$STUBDIR/msb"
+  run bash -c '
+    export ACQ_MSB_FORCE_SERVE_PORT=54321
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_serve_start pbox 54321 || exit 2
+    pid="$_ACQ_MSB_LAST_BG_PID"
+    child=$(cat "'"$STUBDIR"'/state/serve.pid")
+    printf "pid=%s child=%s\n" "$pid" "$child"
+    [ "$pid" = "$child" ] && echo "pid-is-real-process" || echo "pid-is-wrapper"
+    kill "$pid" 2>/dev/null
+    sleep 0.5
+    if kill -0 "$child" 2>/dev/null; then echo "child-survived"; else echo "child-gone"; fi
+  '
+  assert_output --partial 'pid-is-real-process'
+  assert_output --partial 'child-gone'
+  refute_output --partial 'pid-is-wrapper'
 }
 
 @test "msb ports(S2): a serve that dies immediately fails the publish, no state recorded" {

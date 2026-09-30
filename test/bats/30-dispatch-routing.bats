@@ -81,6 +81,24 @@ _seed_usai() {
   assert_output --partial 'no repo-scoped GitHub token'
 }
 
+@test "github-scope: uses recorded sandbox workspace when path is omitted" {
+  local parent="$STUBDIR/parent" pic="$STUBDIR/parent/pic" other="$STUBDIR/parent/other"
+  mkdir -p "$pic/repo" "$other"
+  ( cd "$pic/repo" && git init -q && git remote add origin https://github.com/GSA-TTS/pic-site.git )
+  ( cd "$other" && git init -q && git remote add origin https://github.com/mogul/artemis.git )
+  _seed_usai
+  run env ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
+    "$ACQ" create --name opencode-pic opencode "$pic"
+  assert_success
+
+  run env ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
+    ACQ_SECRET_TEST_VALUE=ghp_fake bash -c 'cd "$1" && "$2" github-scope opencode-pic' _ "$parent" "$ACQ"
+  assert_success
+  assert_output --partial "using recorded workspace for 'opencode-pic': $pic"
+  assert_output --partial 'GSA-TTS/pic-site'
+  refute_output --partial 'mogul/artemis'
+}
+
 @test "dispatch: create runs a non-blocking USAi key advisory (warns but never aborts)" {
   local proj="$STUBDIR/keyproj"; mkdir -p "$proj"
   _seed_usai
@@ -124,6 +142,18 @@ _seed_usai() {
   assert [ ! -f "$STUBDIR/.created" ]
 }
 
+@test "create(sbx): a stored-but-unreadable key is reported as unreadable, not absent" {
+  local proj="$STUBDIR/kc-broken"; mkdir -p "$proj"
+  mkdir -p "$STUBDIR/secrets"; printf 'acq-dpapi-v1\nQUJD\n' > "$STUBDIR/secrets/acq.usai"
+  rm -f "$STUBDIR/.created"
+  run bash -c 'printf "" | ACQ_BACKEND=sbx "$1" create opencode "$2"' _ "$ACQ" "$proj"
+  assert_failure
+  assert_output --partial 'cannot be read or decrypted'
+  refute_output --partial 'no USAi API key stored'
+  refute_regex "$(cat "$CALLS")" 'sbx create'
+  assert [ ! -f "$STUBDIR/.created" ]
+}
+
 @test "create(sbx): acq-store key WITH proxy binding proceeds to sbx create" {
   local proj="$STUBDIR/kc-bound"; mkdir -p "$proj"
   mkdir -p "$STUBDIR/secrets"; printf 'sk-stored-and-bound\n' > "$STUBDIR/secrets/acq.usai"
@@ -151,6 +181,32 @@ _seed_usai() {
   assert [ ! -f "$STUBDIR/.created" ]
 }
 
+@test "create(sbx): configured extra_kits reach sbx create kit flags" {
+  local proj="$STUBDIR/config-kit"; mkdir -p "$proj"
+  export XDG_CONFIG_HOME="$STUBDIR/xdg-config-kit"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'extra_kits: openchamber\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  mkdir -p "$STUBDIR/secrets"; printf 'sk-stored-and-bound\n' > "$STUBDIR/secrets/acq.usai"
+  seed_sbx_usai_proxy_fixture
+  run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
+  assert_success
+  local create_line; create_line=$(grep '^sbx create' "$CALLS")
+  assert_regex "$create_line" '--kit git\+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=.*&dir=integrations/isolation/acq-kits/openchamber'
+}
+
+@test "run(sbx): configured extra_kits reach fresh sbx create kit flags" {
+  local proj="$STUBDIR/run-config-kit"; mkdir -p "$proj"
+  export XDG_CONFIG_HOME="$STUBDIR/xdg-run-config-kit"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'extra_kits: openchamber\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  mkdir -p "$STUBDIR/secrets"; printf 'sk-stored-and-bound\n' > "$STUBDIR/secrets/acq.usai"
+  seed_sbx_usai_proxy_fixture
+  run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx STUB_OPENCODE_OK=1 "$ACQ" run opencode "$proj"
+  assert_success
+  local create_line; create_line=$(grep '^sbx create' "$CALLS")
+  assert_regex "$create_line" '--kit git\+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=.*&dir=integrations/isolation/acq-kits/openchamber'
+}
+
 @test "create(msb): host-exported USAI_API_KEY counts as present; provision proceeds" {
   local proj="$STUBDIR/kc-ci"; mkdir -p "$proj"
   rm -f "$STUBDIR/.msb_created"
@@ -175,6 +231,32 @@ _seed_usai() {
   assert_output --partial 'no repo-scoped GitHub token'
   assert_regex "$(cat "$CALLS")" 'msb create'
   assert [ -f "$STUBDIR/.msb_created" ]
+}
+
+@test "create(msb): records the host workspace path for later github-scope" {
+  local proj="$STUBDIR/msb-gh-record" expected
+  mkdir -p "$proj"
+  expected=$(canonicalize_path "$proj")
+  rm -f "$STUBDIR/.msb_created"
+  run env USAI_API_KEY=sk-ci-host ACQ_BACKEND=msb "$ACQ" create opencode "$proj"
+  assert_success
+  assert [ -f "$STUBDIR/.msb_created" ]
+  run acq_workspace_record_read msb opencode-msb-gh-record
+  assert_success
+  assert_output "$expected"
+  refute_output --partial '/home/agent'
+}
+
+@test "github-scope: no path does not read or persist guest-reported workspace" {
+  local proj="$STUBDIR/guest-controlled"
+  mkdir -p "$proj/repo"
+  ( cd "$proj/repo" && git init -q && git remote add origin https://github.com/GSA-TTS/guest.git )
+  run env ACQ_BACKEND=sbx STUB_RECORDED_WORKSPACE="$proj" "$ACQ" github-scope oldbox
+  assert_failure
+  assert_output --partial 'no workspace path was provided'
+  refute_regex "$(cat "$CALLS")" 'sbx exec oldbox'
+  run acq_workspace_record_read sbx oldbox
+  assert_output ''
 }
 
 @test "run: present key + bad status -> post-create gate offers rotate; decline aborts" {

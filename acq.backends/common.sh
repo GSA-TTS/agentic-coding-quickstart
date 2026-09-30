@@ -756,20 +756,48 @@ workspace_paths() {
   done
 }
 
-# Canonicalize a filesystem path to its real, symlink-free absolute form.
-# Echoes the resolved path, or the input unchanged if it cannot be resolved
-# (e.g. a nonexistent path, or no realpath/readlink available). Pure stdout;
-# never mutates the filesystem. Used so a backend mounts the REAL host path —
-# e.g. on macOS $TMPDIR is a /var -> /private/var symlink, and msb cannot mount
-# the symlinked form (see docs/BACKEND_GUIDE.md, msb workspace mounting).
+# Canonicalize a filesystem path to its real, symlink-free absolute form, in the
+# running shell's OWN (POSIX) vocabulary. Echoes the resolved path, or the input
+# unchanged if it cannot be resolved (e.g. a nonexistent path, or no
+# realpath/readlink available). Pure stdout; never mutates the filesystem. Used
+# so a backend mounts the REAL host path — e.g. on macOS $TMPDIR is a
+# /var -> /private/var symlink, and msb cannot mount the symlinked form (see
+# docs/BACKEND_GUIDE.md, msb workspace mounting).
+#
+# On MSYS/Cygwin this is also the GUEST form: a native tool (git.exe) may report
+# a drive-form path (C:/...), but the guest is a Linux microVM where a drive-form
+# path is not absolute. `cygpath -u` maps drive-form to the shell/guest form
+# (/c/...); cygpath only exists on MSYS/Cygwin, so POSIX hosts are unaffected.
+# For the HOST form a native tool needs, use host_path (below). See ADR-0029.
 canonicalize_path() {
-  local p="${1:-}"
+  local p="${1:-}" _out=""
   [ -n "$p" ] || return 0
   if command -v realpath >/dev/null 2>&1; then
-    realpath "$p" 2>/dev/null && return 0
+    _out=$(realpath "$p" 2>/dev/null) || _out=""
+  elif command -v readlink >/dev/null 2>&1; then
+    _out=$(readlink -f "$p" 2>/dev/null) || _out=""
   fi
-  if command -v readlink >/dev/null 2>&1; then
-    readlink -f "$p" 2>/dev/null && return 0
+  [ -n "$_out" ] && p="$_out"
+  if command -v cygpath >/dev/null 2>&1; then
+    _out=$(cygpath -u "$p" 2>/dev/null) || _out=""
+    [ -n "$_out" ] && p="$_out"
+  fi
+  printf '%s\n' "$p"
+}
+
+# host_path — echo PATH in the form a NATIVE host tool expects: a Windows
+# drive-form path (C:/...) under MSYS/Cygwin, unchanged on POSIX. Companion to
+# canonicalize_path: canonicalize a value that names something INSIDE the guest
+# (a mount target, a working directory, a guest env value); host_path a value a
+# native host tool must resolve on the host filesystem (a mount SOURCE, a file
+# to copy, a host socket, a host PEM). On POSIX the two are identical. See
+# ADR-0029.
+host_path() {
+  local p="${1:-}" _out=""
+  [ -n "$p" ] || return 0
+  if command -v cygpath >/dev/null 2>&1; then
+    _out=$(cygpath -m "$p" 2>/dev/null) || _out=""
+    [ -n "$_out" ] && p="$_out"
   fi
   printf '%s\n' "$p"
 }
@@ -916,23 +944,6 @@ first_positional() {
     esac
     printf '%s\n' "$arg"
     return 0
-  done
-}
-
-# Strip --backend <name> / --backend=<name> from arg list into STRIPPED_ARGS.
-strip_backend_flag() {
-  STRIPPED_ARGS=()
-  local skip=0
-  for arg in "$@"; do
-    if [ "$skip" -eq 1 ]; then
-      skip=0
-      continue
-    fi
-    case "$arg" in
-      --backend) skip=1; continue ;;
-      --backend=*) continue ;;
-    esac
-    STRIPPED_ARGS+=("$arg")
   done
 }
 
@@ -1141,9 +1152,11 @@ _read_config_backend() {
 # dependency — the same convention as the original single-key backend reader,
 # generalized to any flat scalar key (backend, extra_kits, scope_github_token).
 # KEY is matched literally at column 1. Indented keys are deliberately ignored:
-# this is a flat config file, not a general YAML parser. If duplicate top-level
-# keys exist, the last one wins, matching the writer's replace-all behavior.
-# A non-identifier KEY is rejected so a caller can't inject an awk regex.
+# this is a flat config file, not a general YAML parser. Inline comments and
+# simple single/double-quoted scalars are accepted for hand-edited YAML. If
+# duplicate top-level keys exist, the last one wins, matching the writer's
+# replace-all behavior. A non-identifier KEY is rejected so a caller can't inject
+# an awk regex.
 _acq_config_read_field() {
   local key="${1:-}" cfg
   case "$key" in
@@ -1157,7 +1170,15 @@ _acq_config_read_field() {
       pat = "^" k "[[:space:]]*:"
       if ($0 ~ pat) {
         sub(pat "[[:space:]]*", "")     # strip through the colon + spaces
+        sub(/[[:space:]]+#.*$/, "")     # tolerate common inline comments
         sub(/[[:space:]]*$/, "")        # strip trailing space
+        q = sprintf("%c", 39)
+        if ($0 ~ /^"[^"]*"$/) {
+          sub(/^"/, "")
+          sub(/"$/, "")
+        } else if (substr($0, 1, 1) == q && substr($0, length($0), 1) == q) {
+          $0 = substr($0, 2, length($0) - 2)
+        }
         val = $0                         # last duplicate key wins
       }
     }
@@ -1458,8 +1479,12 @@ _acq_provenance_file() {
 acq_provenance_write() {
   local backend="${1:-}" name="${2:-}"
   [ -n "$backend" ] && [ -n "$name" ] || return 1
-  local file dir ts
+  local file dir ts workspace workspace_source
   file=$(_acq_provenance_file "$backend" "$name") || return 1
+  workspace_source=$(acq_provenance_field "$backend" "$name" workspace_source)
+  if [ "$workspace_source" = "host" ]; then
+    workspace=$(acq_provenance_field "$backend" "$name" workspace)
+  fi
   dir=$(dirname "$file")
   if ! mkdir -p "$dir" 2>/dev/null; then
     acq_debug "provenance: could not create state dir: $dir"
@@ -1476,6 +1501,10 @@ acq_provenance_write() {
     printf 'applied_ref=%s\n' "$PATTERNS_KIT_REF"
     printf 'backend=%s\n' "$backend"
     printf 'applied_at=%s\n' "$ts"
+    if [ -n "${workspace:-}" ]; then
+      printf 'workspace_source=host\n'
+      printf 'workspace=%s\n' "$workspace"
+    fi
   } > "$tmp" 2>/dev/null || { acq_debug "provenance: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
   mv -f "$tmp" "$file" 2>/dev/null || { acq_debug "provenance: mv failed: $file"; rm -f "$tmp" 2>/dev/null; return 1; }
   acq_debug "provenance: recorded $backend/$name applied_ref=$PATTERNS_KIT_REF"
@@ -1495,6 +1524,47 @@ acq_provenance_field() {
   awk -F= -v k="$field" '
     $1 == k { sub(/^[^=]*=/, ""); print; exit }
   ' "$file" 2>/dev/null || true
+}
+
+# Remember the primary host workspace mounted into a sandbox. This is non-secret
+# host-side state used by commands that take only SANDBOX later (for example,
+# `acq github-scope SANDBOX`) so they do not accidentally inspect the caller's
+# current directory instead of the sandbox's workspace.
+acq_workspace_record_write() {
+  local backend="${1:-}" name="${2:-}" workspace="${3:-}"
+  [ -n "$backend" ] && [ -n "$name" ] && [ -n "$workspace" ] || return 0
+  case "$workspace" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  local workspace_check
+  workspace_check="$workspace"
+  if [ ! -d "$workspace_check" ] && command -v cygpath >/dev/null 2>&1; then
+    workspace_check=$(cygpath -u "$workspace" 2>/dev/null || printf '%s' "$workspace")
+  fi
+  [ -d "$workspace_check" ] || return 1
+  local file dir tmp
+  file=$(_acq_provenance_file "$backend" "$name") || return 1
+  dir=$(dirname "$file")
+  mkdir -p "$dir" 2>/dev/null || return 1
+  tmp="${file}.workspace.$$"
+  {
+    if [ -f "$file" ]; then
+      awk -F= '$1 != "workspace" && $1 != "workspace_source" { print }' "$file" 2>/dev/null || true
+    else
+      printf 'schema=1\n'
+      printf 'backend=%s\n' "$backend"
+    fi
+    printf 'workspace_source=host\n'
+    printf 'workspace=%s\n' "$workspace"
+  } > "$tmp" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+}
+
+acq_workspace_record_read() {
+  local backend="${1:-}" name="${2:-}" source
+  source=$(acq_provenance_field "$backend" "$name" workspace_source)
+  [ "$source" = "host" ] || return 0
+  acq_provenance_field "$backend" "$name" workspace
 }
 
 # Classify a sandbox's currency against the LOCAL pinned PATTERNS_KIT_REF.
@@ -2258,11 +2328,13 @@ _acq_github_pat_url() {
 
 # github_scope_sandbox SANDBOX WORKSPACE — guide the user through minting a
 # fine-grained PAT scoped to the workspace's repos and store it sandbox-scoped.
-# Warn-not-block: returns 0 even if the user declines. Never places the token in
-# argv (delegates to acq_secret_set_interactive via the backend secret path).
+# Refuses multi-owner workspaces because acq stores one sandbox-scoped GitHub
+# token today, while GitHub fine-grained PATs are single-owner. Never places the
+# token in argv (delegates to acq_secret_set_interactive via the backend secret
+# path).
 github_scope_sandbox() {
   local sandbox="$1" ws="${2:-}"
-  local repos owners="" nwo owner
+  local repos owners="" nwo owner owner_key owner_count=0
 
   repos=$(detect_workspace_repos "$ws")
   if [ -z "$repos" ]; then
@@ -2274,16 +2346,33 @@ github_scope_sandbox() {
   while IFS= read -r nwo; do
     [ -n "$nwo" ] || continue
     owner="${nwo%%/*}"
-    case "$owners" in *"|$owner|"*) ;; *) owners="$owners|$owner|" ;; esac
+    owner_key=$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')
+    case "$owners" in *"|$owner_key="*) ;; *) owners="$owners|$owner_key=$owner|"; owner_count=$((owner_count + 1)) ;; esac
   done <<EOF
 $repos
 EOF
 
+  if [ "$owner_count" -gt 1 ]; then
+    echo "acq: cannot create a repo-scoped GitHub token for sandbox '$sandbox'." >&2
+    echo "      This workspace contains GitHub repositories owned by multiple accounts," >&2
+    echo "      but acq stores one sandbox-scoped GitHub token today and GitHub" >&2
+    echo "      fine-grained PATs are scoped to a single owner." >&2
+    echo "" >&2
+    echo "      Detected repositories:" >&2
+    while IFS= read -r nwo; do [ -n "$nwo" ] && printf '        %s\n' "$nwo" >&2; done <<EOF
+$repos
+EOF
+    echo "" >&2
+    echo "      Re-run with a workspace path containing repos from only one owner:" >&2
+    echo "        acq github-scope $sandbox /path/to/one-owner-workspace" >&2
+    return 1
+  fi
+
   echo "acq: scoping a GitHub token for sandbox '$sandbox'." >&2
   echo "" >&2
   echo "      GitHub has no API to mint a fine-grained PAT, so create it in the" >&2
-  echo "      browser. For EACH owner below, open the pre-filled link, select" >&2
-  echo "      'Only select repositories' and choose the repo(s) listed below," >&2
+  echo "      browser. Open the pre-filled link, select 'Only select" >&2
+  echo "      repositories' and choose the repo(s) listed below," >&2
   echo "      then generate the token and paste it back here." >&2
   echo "      Default permissions: Contents=Read/Write, Pull requests=Read/Write," >&2
   echo "      Issues=Read/Write, Actions=Read (lets the agent read the PR-check" >&2
@@ -2298,6 +2387,7 @@ EOF
   IFS="$_oldifs"
   for o in "$@"; do
     [ -n "$o" ] || continue
+    o="${o#*=}"
     echo "" >&2
     echo "      Owner '$o' — open:" >&2
     printf '        %s\n' "$(_acq_github_pat_url "$o" "$sandbox")" >&2
@@ -2492,6 +2582,16 @@ _report_usai_unresolved() {
   echo >&2
 }
 
+# Diagnose a USAi value that is stored but cannot be presented by the active
+# backend (an undecryptable DPAPI envelope written under a different Windows
+# profile, or a damaged store). Reporting "not set" here would send the user to
+# create a fresh key when the real problem is the stored one.
+_report_usai_unreadable() {
+  echo "acq: a USAi API key is stored for this user, but it cannot be read or decrypted here." >&2
+  echo "     It may have been stored under a different user or host, or the stored value is damaged." >&2
+  echo "     Re-set it with 'acq secret set -g usai' (or remove it with 'acq secret rm -g usai')." >&2
+}
+
 # acq_key_injectable SERVICE [SANDBOX] -> 0 if the ACTIVE BACKEND can inject
 # SERVICE for that scope, else 1. Single source of truth for the "is this
 # credential actually usable at provision?" predicate, composed of two checks:
@@ -2544,6 +2644,16 @@ ensure_key_present() {
   # sbx does NOT read host env at provision, so this short-circuit is msb-only.
   if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ] && [ -n "${USAI_API_KEY:-}" ]; then
     return 0
+  fi
+
+  # Present-but-unreadable: a value is stored for this user but cannot be read or
+  # decrypted (e.g. a DPAPI envelope written under a different Windows profile,
+  # or a damaged store). Reporting "not set" here would send the user to create a
+  # fresh key when the real problem is the stored one — fail closed with the real
+  # diagnosis instead.
+  if acq_secret_unreadable usai "$scope_sandbox"; then
+    _report_usai_unreadable
+    return 1
   fi
 
   # Non-interactive (CI / piped stdin): no one can answer the prompt below, so

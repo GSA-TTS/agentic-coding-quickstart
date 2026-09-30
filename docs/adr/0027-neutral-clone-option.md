@@ -124,7 +124,8 @@ on purpose, written repo-locally into the scratch:
   `.git/config`, and per-forge identities commonly live only there or in a
   gitdir-scoped include. Without the copy, the first in-sandbox commit fails
   with "Author identity unknown"; the guest's global tier cannot express a
-  per-repo value.
+  per-repo value. A failure to read or write it only warns: a missing identity
+  already fails loudly at the first commit.
 - The source checkout's **origin URL** (`remote.origin.url`, plus
   `remote.origin.pushurl` when set). `git clone <host path>` points the
   scratch's `origin` at the host checkout path, and the scratch is mounted at
@@ -133,12 +134,24 @@ on purpose, written repo-locally into the scratch:
   remote, and anything that identifies the repo by its origin URL misled. The
   raw configured values are copied, not `git remote get-url`'s expansion: a
   host `insteadOf` rewrite is host policy that the guest never receives (only
-  `user.*` is synced into its global tier), and an https-to-ssh rewrite would
-  hand the guest a transport it has no key for. A credential embedded in the
-  URL travels with it, exactly as it does when the checkout's own `.git/config`
-  is mounted in a non-clone run. Remote-tracking refs (`origin/*`) still
-  reflect the host's local branches at clone time until the first
-  `git fetch --prune`.
+  `user.*` is synced into its global tier), and such a rewrite leaves the guest
+  with an unusable transport in EITHER direction: an https-to-ssh rewrite hands
+  it a transport it has no key for, and under an ssh-to-https rewrite (common
+  for token auth) the raw value is already the ssh form. Raw remains the right
+  default because it is what the checkout itself holds. A credential embedded
+  in the URL travels with it, exactly as when the checkout's own `.git/config`
+  is mounted in a non-clone run; the scratch's state directory is private
+  (0700) because of it. Every configured value is carried, in order and with
+  its boundaries intact: a remote URL is legitimately multi-valued
+  (`git remote set-url --add`) and git fetches the first value, and a value may
+  itself contain a newline, so values are read NUL-delimited rather than by
+  line. A source with no origin leaves the scratch with no origin URL either,
+  so an in-guest push fails instead of landing in the scratch. Failing to read
+  the source's config or to write the scratch's fails the create rather than
+  warning: a scratch whose `origin` still resolves to itself makes an in-guest
+  `git push origin` look successful while reaching no forge. Remote-tracking
+  refs (`origin/*`) still reflect the host's local branches at clone time
+  until the first `git fetch --prune`.
 
 sbx carries both incidentally by copying `.git` wholesale. Propagating only
 these values is the minimized form of that, without the credential helpers,
@@ -172,6 +185,14 @@ verified to reach every exec/attach session and to survive a native restart):
   agent's cwd: `ACQ_MSB_WORKSPACE` relocates only the start dir, and following
   it would let `ACQ_CLONE=1` sit next to a secondary passthrough's real path.
 - `ACQ_CLONE=1` only when the primary is the disposable clone.
+
+The flag is used unconditionally, so it must exist at each backend's declared
+version floor. `msb` has carried `-e`/`--env` on `create` since before its
+0.6.9 floor (verified in the CLI's shared sandbox options at that tag). `sbx`
+gained it in **0.39.0**, which is why the sbx floor moved from 0.38.0 to 0.39.0
+rather than gating the flag: sbx rejects an unknown flag outright, so on 0.38.x
+the whole create fails, and a gate would instead leave a floor-compliant user
+with kits that silently do nothing.
 
 The two facts are kept separate so a non-clone kit gets a neutral workspace
 path for free, and because the workspace path alone must never be read as a

@@ -101,6 +101,22 @@ _cfg_src() {
   assert_output 'paseo'
 }
 
+@test "config: reader tolerates inline comments and quoted scalars" {
+  export XDG_CONFIG_HOME="$STUBDIR/xdg-comments"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'extra_kits: openchamber # browser UI\nscope_github_token: "yes"\nbackend: '\''msb'\''\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    printf "k=%s\n" "$(_acq_config_read_field extra_kits)"
+    printf "s=%s\n" "$(_acq_config_read_field scope_github_token)"
+    printf "b=%s\n" "$(_acq_config_read_field backend)"
+  '
+  assert_success
+  assert_line 'k=openchamber'
+  assert_line 's=yes'
+  assert_line 'b=msb'
+}
+
 @test "config: writer creates private config directory and file" {
   export XDG_CONFIG_HOME="$STUBDIR/xdg"
   run bash -c '
@@ -257,13 +273,13 @@ _cfg_src() {
   assert_line 'dn=1'
 }
 
-@test "prompt: sanitizer strips C0, C1, and DEL control bytes" {
+@test "prompt: sanitizer strips terminal controls without mangling UTF-8" {
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
-    _acq_prompt_sanitize "$(printf "a\033[31m\2331m\177b")" | od -An -tx1 | tr -d " \n"
+    _acq_prompt_sanitize "$(printf "don\342\200\231t \342\200\246 a\033[31m\2331m\302\23332m\177b")" | od -An -tx1 | tr -d " \n"
   '
   assert_success
-  assert_output '615b33316d316d62'
+  assert_output '646f6ee280997420e280a620615b33316d316d33326d62'
 }
 
 @test "prompt: a multi-token script drives multiselect THEN confirm in one flow" {
