@@ -222,6 +222,7 @@ Agent assumes host filesystem layout, not container layout.
 - Requests never return
 - Agent appears stuck
 - Eventually fails with timeout
+- OpenCode shows `Provider retry (attempt N): SSE read timed out`
 
 ### Root Cause
 
@@ -229,16 +230,35 @@ Agent assumes host filesystem layout, not container layout.
 - Network routing issues inside container
 - DNS resolution failures
 - Proxy misconfiguration
+- `SSE read timed out`: the streamed response sent no data for longer than the
+  provider's `chunkTimeout`. Common during long reasoning or while the model
+  generates a large tool call (such as writing a long file), or when a hop on the
+  path (sandbox proxy, Zscaler, USAi, the upstream model) stalls. OpenCode retries
+  automatically, so an occasional one is harmless.
 
 ### Fix
 
-Set explicit timeouts in config:
+The `usai-provider` kit already sets timeouts under the provider's `options`:
+`timeout` (whole request, 10 minutes) and `chunkTimeout` (gap between streamed
+chunks, 2 minutes). If `SSE read timed out` recurs, raise `chunkTimeout` in the
+project's `opencode.json`. A higher value makes a truly hung stream take longer to
+fail over to the retry. Do not set it to a few seconds: normal model pauses would
+then abort nearly every long response.
+
 ```json
 {
-  "requestTimeout": 30000,
-  "chunkTimeout": 5000
+  "provider": {
+    "usai": {
+      "options": {
+        "chunkTimeout": 300000
+      }
+    }
+  }
 }
 ```
+
+If retries also fail, note the model, the time, and what the agent was doing, so a
+slow model can be told apart from a network stall.
 
 Check network connectivity from inside container:
 ```bash
