@@ -74,28 +74,64 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   run env ACQ_BACKEND=msb ACQ_SNAPSHOT_DIR="$STUBDIR/snapshots" "$ACQ" snapshot mybox
   assert_success
   assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/snapshots/mybox-[0-9]{8}T[0-9]{6}Z\.msb"
+  [ "$(stat -c '%a' "$STUBDIR/snapshots" 2>/dev/null || stat -f '%Lp' "$STUBDIR/snapshots")" = "700" ]
   : > "$CALLS"
-  mkdir -p "$STUBDIR/state/msb-restore"
+  mkdir -p "$STUBDIR/state/msb-restore" "$STUBDIR/provenance/msb"
   printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/state/msb-restore/mybox.resources"
-  run env ACQ_BACKEND=msb "$ACQ" snapshot mybox "$STUBDIR/mybox.msb"
+  local kit_record
+  kit_record=$(printf '%s' mybox | cksum | cut -d' ' -f1)
+  printf 'schema=1\nkit=%s\n' "$STUBDIR/custom-kit" > "$STUBDIR/provenance/msb/mybox.${kit_record}.kits"
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" snapshot mybox "$STUBDIR/mybox.msb"
   assert_success
   assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/mybox\.msb"
   [ -f "$STUBDIR/mybox.msb.resources" ]
+  [ -f "$STUBDIR/mybox.msb.kits" ]
+}
+
+@test "msb: create with no workspace positional provisions without empty-array abort" {
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb USAI_API_KEY="sk-ci-host" "$ACQ" create opencode
+  assert_success
+  refute_output --partial 'unbound variable'
+  assert_regex "$(cat "$CALLS")" 'msb create --name opencode'
 }
 
 @test "msb: restore maps to msb restore with inherited resources and re-derived vsock" {
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
-  mkdir -p "$STUBDIR/secrets" "$STUBDIR/ws"
+  local sock_path="$STUBDIR/agent.sock"
+  command -v realpath >/dev/null 2>&1 && sock_path=$(realpath "$sock_path")
+  mkdir -p "$STUBDIR/secrets" "$STUBDIR/ws" "$STUBDIR/provenance/msb"
   printf 'sk-restored\n' > "$STUBDIR/secrets/acq.usai"
   printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/saved.msb.resources"
+  printf 'schema=1\nkit=%s\n' "$STUBDIR/custom-kit" > "$STUBDIR/saved.msb.kits"
+  mkdir -p "$STUBDIR/custom-kit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: custom\ndisplayName: Custom\ndescription: custom\n' > "$STUBDIR/custom-kit/spec.yaml"
   : > "$CALLS"
-  run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/saved.msb"
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/saved.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb restore $STUBDIR/saved\.msb --name restored --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock $STUBDIR/agent\.sock:3552/stream"
+  assert_regex "$log" "msb restore $STUBDIR/saved\.msb --name restored --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
   assert_regex "$log" 'USAI_API_KEY=present'
   assert_regex "$log" 'socat UNIX-LISTEN:'
+  assert_regex "$log" 'msb inspect restored --format json'
+  assert_output --partial "re-applied kit startup"
   [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
+  local kit_record
+  kit_record=$(printf '%s' restored | cksum | cut -d' ' -f1)
+  assert [ -f "$STUBDIR/provenance/msb/restored.${kit_record}.kits" ]
+  assert_regex "$(cat "$STUBDIR/provenance/msb/restored.${kit_record}.kits")" "$STUBDIR/custom-kit"
+}
+
+@test "msb: full-state restore does not re-run kit startup" {
+  _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/full-state.msb"
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" "msb restore $STUBDIR/full-state\.msb --name restored --dangerously-inherit-resources --vsock"
+  refute_regex "$log" 'msb inspect restored --format json'
+  refute_output --partial "re-applied kit startup"
+  assert_output --partial "acq: restored 'restored'."
 }
 
 @test "msb: restore without a snapshot picks the newest date-stamped snapshot for the sandbox" {
@@ -131,6 +167,10 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
 
 @test "msb: recreate snapshots, removes, then restores to the same name" {
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
+  local sock_path="$STUBDIR/agent.sock"
+  command -v realpath >/dev/null 2>&1 && sock_path=$(realpath "$sock_path")
+  mkdir -p "$STUBDIR/state/msb-restore" "$STUBDIR/ws"
+  printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/state/msb-restore/mybox.resources"
   : > "$CALLS"
   run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" recreate mybox "$STUBDIR/recreate.msb"
   assert_success
@@ -138,7 +178,9 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   assert_regex "$log" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/recreate\.msb"
   assert_regex "$log" 'msb remove --force mybox'
   refute_regex "$log" 'msb volume rm'
-  assert_regex "$log" "msb restore $STUBDIR/recreate\.msb --name mybox --dangerously-inherit-resources --vsock $STUBDIR/agent\.sock:3552/stream"
+  assert_regex "$log" "msb restore $STUBDIR/recreate\.msb --name mybox --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
+  assert_regex "$log" 'msb inspect mybox --format json'
+  assert_output --partial "kit startup re-applied"
 }
 
 @test "msb: rm --snapshot snapshots before removing and does not restore" {
@@ -149,6 +191,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   assert_regex "$log" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/rm\.msb"
   assert_regex "$log" 'msb remove --force mybox'
   refute_regex "$log" 'msb restore'
+  refute_regex "$log" 'msb volume rm'
 }
 
 @test "msb: ls/stop/rm/exec dispatch to the msb verbs (exec as agent user)" {

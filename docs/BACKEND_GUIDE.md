@@ -140,7 +140,7 @@ automation story.
   path (`msb snapshot create --full` + `msb restore`), including restore-time
   SSH-agent re-plumbing. Snapshots with acq-managed external workspace mounts
   cold-boot the captured disk (`--disk-only`) and re-bind validated host resources;
-  see [ADR-0030](adr/0030-native-snapshot-restore.md)
+  see [ADR-0033](adr/0033-native-snapshot-restore.md)
 
 ### Requirements
 
@@ -843,7 +843,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 | Flag | Value | Meaning |
 |------|-------|---------|
 | `ACQ_BACKEND_SUPPORTS_PORT_FORWARD` | 1 | Post-hoc `acq ports <sandbox> --publish HOST:GUEST` is **implemented**: `acq_backend_ports` opens `msb ssh serve` on an ephemeral loopback port against a running sandbox and tunnels the guest port to the host with OpenSSH `-L` (no re-create), using an acq-managed ed25519 key and tearing the serve/ssh pair down on `acq stop`/`rm` ([ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md)). Create/run publish via neutral `publishedPorts` → `-p HOST:GUEST` also ships. **Live-verified** on a KVM-capable host via `scripts/verify-ports-live` (happy-path publish + host-reaches-guest, LIST, fail-closed on a busy host port, teardown) |
-| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 1 | `acq snapshot` / `acq restore` surface msb's native full-state snapshot/restore path. `acq restore` re-derives the current host SSH-agent vsock route and asks msb to inherit validated source-local resources rather than requiring user-supplied resource flags ([ADR-0030](adr/0030-native-snapshot-restore.md)) |
+| `ACQ_BACKEND_SUPPORTS_SNAPSHOTS` | 1 | `acq snapshot` / `acq restore` surface msb's native full-state snapshot/restore path. `acq restore` re-derives the current host SSH-agent vsock route and asks msb to inherit validated source-local resources rather than requiring user-supplied resource flags ([ADR-0033](adr/0033-native-snapshot-restore.md)) |
 | `ACQ_BACKEND_CAN_RESUME` | 1 | `msb stop` / `msb start` preserve state |
 | `ACQ_BACKEND_SUPPORTS_CREDENTIAL_REWRITE` | 1 | `--secret ENV@HOST` + `--tls-intercept` (host-scoped substitution for REST/API hosts and HTTPS git transport hosts) |
 
@@ -1237,7 +1237,7 @@ See [ADR-0016](adr/0016-kit-bundle-provenance-and-stale-refresh.md).
   neutral fields light up end-to-end with the released patterns schema +
   openchamber kit (merged)
 - msb `SUPPORTS_SNAPSHOTS=1` — `acq snapshot` / `acq restore` surface native
-  full-state msb snapshot/restore (ADR-0030); sbx remains unsupported
+  full-state msb snapshot/restore (ADR-0033); sbx remains unsupported
 - Generic custom-endpoint secret binding on msb — usai + github + **any** custom
   `--host/--env` endpoint bound via `--secret ENV@HOST` from a non-secret endpoint
   sidecar
