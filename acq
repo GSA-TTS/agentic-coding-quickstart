@@ -524,7 +524,11 @@ _acq_snapshot_dir() {
 _acq_default_snapshot_path() {
   local name="$1" snapshot_dir
   snapshot_dir=$(_acq_snapshot_dir)
-  mkdir -p "$snapshot_dir"
+  ( umask 077; mkdir -p "$snapshot_dir" )
+  chmod 700 "$snapshot_dir" 2>/dev/null || {
+    echo "acq: snapshot: could not make snapshot directory private: $snapshot_dir" >&2
+    return 1
+  }
   printf '%s/%s-%s.msb\n' "$snapshot_dir" "$(slugify "$name")" "$(date -u +%Y%m%dT%H%M%SZ)"
 }
 
@@ -537,6 +541,14 @@ _acq_latest_snapshot_path() {
     | LC_ALL=C sort | tail -n 1)
   [ -n "$latest" ] || return 1
   printf '%s\n' "$latest"
+}
+
+_acq_restore_heal_kits_if_needed() {
+  local local_name="$1"
+  [ "${ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL:-0}" = "1" ] || return 1
+  acq_cli_kits_load "${ACQ_RESOLVED_BACKEND}" "$local_name" || return 2
+  acq_backend_ensure_kits_applied "$local_name" || return 2
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1266,6 +1278,13 @@ case "$subcommand" in
       }
     fi
     acq_backend_restore "$snapshot_ref" --name "$local_name"
+    if _acq_restore_heal_kits_if_needed "$local_name"; then
+      echo "acq: restored '$local_name' and re-applied kit startup." >&2
+    else
+      heal_rc=$?
+      [ "$heal_rc" -eq 1 ] || exit "$heal_rc"
+      echo "acq: restored '$local_name'." >&2
+    fi
     ;;
 
   recreate)
@@ -1296,7 +1315,13 @@ case "$subcommand" in
       acq_backend_terminate "$local_name"
     fi
     acq_backend_restore "$snapshot_out" --name "$local_name"
-    echo "acq: recreated '$local_name' from snapshot: $snapshot_out" >&2
+    if _acq_restore_heal_kits_if_needed "$local_name"; then
+      echo "acq: recreated '$local_name' from snapshot: $snapshot_out (kit startup re-applied)" >&2
+    else
+      heal_rc=$?
+      [ "$heal_rc" -eq 1 ] || exit "$heal_rc"
+      echo "acq: recreated '$local_name' from snapshot: $snapshot_out" >&2
+    fi
     ;;
 
   start)
@@ -1394,7 +1419,11 @@ case "$subcommand" in
       acq_backend_snapshot "$local_name" "$snapshot_out"
       echo "acq: snapshot saved before removal: $snapshot_out" >&2
     fi
-    acq_backend_terminate "$local_name"
+    if [ "$snapshot_first" -eq 1 ] && command -v acq_backend_terminate_for_restore >/dev/null 2>&1; then
+      acq_backend_terminate_for_restore "$local_name"
+    else
+      acq_backend_terminate "$local_name"
+    fi
     ;;
 
   exec)

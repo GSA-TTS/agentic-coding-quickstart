@@ -1862,7 +1862,7 @@ acq recreate <sandbox>
 
 Use the old `acq rm <sandbox>; acq run …` path only when you do not need to
 preserve live agent context. See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
-and [ADR-0030](adr/0030-native-snapshot-restore.md) for the mechanisms.
+and [ADR-0033](adr/0033-native-snapshot-restore.md) for the mechanisms.
 
 ---
 

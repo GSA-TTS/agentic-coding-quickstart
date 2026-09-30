@@ -1039,12 +1039,13 @@ _acq_msb_restore_resource_file() {
 
 _acq_msb_restore_resources_write() {
   local name="$1" _file _spec
-  _file=$(_acq_msb_restore_resource_file "$name") || return 0
-  mkdir -p "$ACQ_MSB_RESTORE_DIR" 2>/dev/null || return 0
-  : >"$_file" 2>/dev/null || return 0
+  _file=$(_acq_msb_restore_resource_file "$name") || return 1
+  ( umask 077; mkdir -p "$ACQ_MSB_RESTORE_DIR" ) 2>/dev/null || return 1
+  chmod 700 "$ACQ_MSB_RESTORE_DIR" 2>/dev/null || return 1
+  : >"$_file" 2>/dev/null || return 1
   shift
   for _spec in ${@+"$@"}; do
-    printf 'volume\t%s\n' "$_spec" >>"$_file" 2>/dev/null || true
+    printf 'volume\t%s\n' "$_spec" >>"$_file" 2>/dev/null || return 1
   done
 }
 
@@ -1052,15 +1053,16 @@ _acq_msb_restore_resources_copy_sidecar() {
   local name="$1" snapshot="$2" _file
   _file=$(_acq_msb_restore_resource_file "$name") || return 0
   [ -f "$_file" ] || return 0
-  cp "$_file" "${snapshot}.resources" 2>/dev/null || true
+  cp "$_file" "${snapshot}.resources" 2>/dev/null || return 1
 }
 
 _acq_msb_restore_resources_adopt_sidecar() {
   local name="$1" snapshot="$2" _file
   [ -f "${snapshot}.resources" ] || return 0
-  _file=$(_acq_msb_restore_resource_file "$name") || return 0
-  mkdir -p "$ACQ_MSB_RESTORE_DIR" 2>/dev/null || return 0
-  cp "${snapshot}.resources" "$_file" 2>/dev/null || true
+  _file=$(_acq_msb_restore_resource_file "$name") || return 1
+  ( umask 077; mkdir -p "$ACQ_MSB_RESTORE_DIR" ) 2>/dev/null || return 1
+  chmod 700 "$ACQ_MSB_RESTORE_DIR" 2>/dev/null || return 1
+  cp "${snapshot}.resources" "$_file" 2>/dev/null || return 1
 }
 
 _acq_msb_restore_resource_flags_into() { # ARRVAR SNAPSHOT NAME
@@ -1095,7 +1097,8 @@ acq_backend_snapshot() {
       _host_out=$(host_path "$_out")
     fi
     _acq_msb_cli snapshot create --from-sandbox "$_name" --full --guest-flush auto -o "$_host_out"
-    _acq_msb_restore_resources_copy_sidecar "$_name" "$_out"
+    _acq_msb_restore_resources_copy_sidecar "$_name" "$_out" || return 1
+    acq_cli_kits_copy_sidecar msb "$_name" "$_out" || return 1
   else
     _acq_msb_cli snapshot create --from-sandbox "$_name" --full --guest-flush auto
   fi
@@ -1134,6 +1137,7 @@ acq_backend_restore() {
 
   local _restore_flags=(--name "$_name" --dangerously-inherit-resources)
   local _resource_flags=() _vsock_flags=()
+  ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=0
   _acq_msb_restore_resource_flags_into _resource_flags "$_snapshot" "$_name"
   if [ "${#_resource_flags[@]}" -gt 0 ]; then
     # Full memory/device restore currently fails for exported snapshots that
@@ -1143,6 +1147,7 @@ acq_backend_restore() {
     # state) without restoring stale external filesystem device state.
     _restore_flags+=(--disk-only --external-mount-policy relaxed)
     _restore_flags+=("${_resource_flags[@]}")
+    ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=1
   fi
   _acq_msb_vsock_flags_into _vsock_flags
   [ "${#_vsock_flags[@]}" -gt 0 ] && _restore_flags+=("${_vsock_flags[@]}")
@@ -1161,7 +1166,8 @@ acq_backend_restore() {
     unset "$_rev"
   done
   [ "$_restore_rc" -eq 0 ] || return "$_restore_rc"
-  _acq_msb_restore_resources_adopt_sidecar "$_name" "$_snapshot"
+  _acq_msb_restore_resources_adopt_sidecar "$_name" "$_snapshot" || return 1
+  acq_cli_kits_adopt_sidecar msb "$_name" "$_snapshot" || return 1
 
   _acq_msb_wait_for_exec_ready "$_name" || \
     echo "acq(msb): warning: $_name did not become exec-ready after restore." >&2
@@ -3376,7 +3382,8 @@ EOF
   fi
   acq_spin_stop "Waiting for the sandbox to finish booting"
   acq_debug "msb provision: exec-ready OK ($name)"
-  _acq_msb_restore_resources_write "$name" "${_restore_volume_specs[@]}"
+  _acq_msb_restore_resources_write "$name" \
+    ${_restore_volume_specs[@]+"${_restore_volume_specs[@]}"} || return 1
 
   # Verify the kits' runtime prerequisites are present in the base image
   # (node/git/curl/update-ca-certificates). We do NOT install them: the kit
