@@ -497,24 +497,38 @@ _acq_parse_secret_scope_for_propagation() {
 }
 
 _acq_propagate_secret_to_present_backends() {
-  local service="$1" scope_name="${2:-}" current="${ACQ_RESOLVED_BACKEND:-}" be rc=0
+  local service="$1" scope_name="${2:-}" origin="${3:-set}" current="${ACQ_RESOLVED_BACKEND:-}" be rc=0
   [ -n "$service" ] || return 0
   for be in msb sbx; do
     [ "$be" != "$current" ] || continue
     _backend_installed "$be" || continue
+    if [ "$origin" = "rotate" ] && [ "$current" = "sbx" ] && [ "$be" = "msb" ]; then
+      echo "acq: not propagating sbx USAi rotation to msb; sbx does not expose the" >&2
+      echo "     rotated value to the acq store. Run 'acq --backend msb usai-rotate-api-key'" >&2
+      echo "     to update existing msb sandbox(es)." >&2
+      continue
+    fi
     if [ -n "$scope_name" ]; then
       echo "acq: propagating '$service' to ${be} sandbox '${scope_name}' if present." >&2
+      # ACQ_SECRET_TEST_VALUE is a test-only secret-store hook. Keep it off argv;
+      # production propagation reuses stored/backend values or fails closed.
       if ! ACQ_PROPAGATING_SECRET=1 ACQ_SECRET_TEST_VALUE="${ACQ_SECRET_TEST_VALUE:-}" "$ACQ_RESOLVED_PATH" --backend "$be" secret _propagate "$scope_name" "$service"; then
         rc=1
       fi
     else
       echo "acq: propagating '$service' to existing ${be} sandbox(es), if any." >&2
+      # ACQ_PROPAGATING_SECRET is an ergonomics guard for the internal verb, not a
+      # privilege boundary; callers that can run acq can set environment variables.
       if ! ACQ_PROPAGATING_SECRET=1 ACQ_SECRET_TEST_VALUE="${ACQ_SECRET_TEST_VALUE:-}" "$ACQ_RESOLVED_PATH" --backend "$be" secret _propagate -g "$service"; then
         rc=1
       fi
     fi
   done
   return "$rc"
+}
+
+acq_propagate_usai_rotation() {
+  _acq_propagate_secret_to_present_backends usai "" rotate
 }
 
 # ---------------------------------------------------------------------------
@@ -937,7 +951,7 @@ case "$subcommand" in
       exit 1
     fi
     acq_backend_rotate_key "$@"
-    _acq_propagate_secret_to_present_backends usai ""
+    acq_propagate_usai_rotation
     ;;
 
   create)

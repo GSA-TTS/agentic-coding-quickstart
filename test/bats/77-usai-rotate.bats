@@ -46,6 +46,21 @@ load 'helper'
   assert_output --partial "propagating 'usai' to existing sbx sandbox"
 }
 
+@test "rotate(sbx): propagation guard does not replay stale store value to msb" {
+  load_acq
+  mkdir -p "$STUBDIR/secrets"
+  printf 'OLD-STALE-KEY\n' > "$STUBDIR/secrets/acq.usai"
+  printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  # shellcheck disable=SC2034  # read by acq_propagate_usai_rotation
+  ACQ_RESOLVED_BACKEND=sbx
+  run acq_propagate_usai_rotation
+  local log
+  log=$(cat "$CALLS")
+  assert_success
+  assert_output --partial "not propagating sbx USAi rotation to msb"
+  refute_regex "$log" 'msb modify runningbox --secret USAI_API_KEY@api\.gsa\.usai\.gov'
+}
+
 @test "rotate: both adapters define the acq_backend_rotate_key contract" {
   load_acq
   run command -v acq_backend_rotate_key

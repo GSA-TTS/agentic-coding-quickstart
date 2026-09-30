@@ -106,6 +106,11 @@ name-swapped:
 - `acq secret set [-g | SANDBOX] SERVICE` also invokes the same propagation hook
   after storing a global or sandbox-scoped secret, so a secret changed through one
   backend is re-applied by every installed backend that has affected sandboxes.
+- Expiry-driven rotations from `acq run` call the same propagation hook after a
+  successful active-backend rotation. The sbx rotation path is intentionally
+  asymmetric: sbx prompts inside its own proxy flow and does not expose the new
+  value to the acq store, so `sbx -> msb` rotation propagation is skipped with
+  guidance instead of replaying a stale stored value.
 - `scripts/rotate-apikey` is reduced to a thin back-compat wrapper that execs
   `acq usai-rotate-api-key` so existing muscle-memory / docs keep working, but it
   no longer contains any `sbx` calls.
@@ -138,6 +143,9 @@ operation). It MUST:
   installed — the reported block is removed.
 - Mixed msb/sbx fleets no longer require users to remember a second
   `--backend sbx` run after rotating or globally setting USAi from the msb path.
+- The reverse `sbx -> msb` rotation path fails safe by not propagating, because
+  sbx does not make the newly-entered value available to msb without prompting
+  again or risking a stale acq-store replay.
 - The neutral core (`acq`, `common.sh`) still routes through adapter hooks rather
   than invoking backend CLIs directly for propagation.
 - Each backend keeps its correct rotation semantics (sbx placeholder, msb store

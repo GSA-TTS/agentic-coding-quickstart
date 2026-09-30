@@ -1248,16 +1248,35 @@ acq_backend_secret_propagate() {
   else
     rerun_cmd="acq --backend sbx secret set ${scope_name} ${service}"
   fi
+  local sidecar host env_var meta
+  if command -v acq_secret_meta_resolve >/dev/null 2>&1; then
+    meta=$(acq_secret_meta_resolve "$service" "$scope_name" 2>/dev/null) || meta=""
+  fi
+  if [ -n "$meta" ]; then
+    host=$(printf '%s' "$meta" | cut -f1)
+    env_var=$(printf '%s' "$meta" | cut -f2)
+    sidecar=1
+  else
+    host=$(_acq_service_hosts_env "$service" | cut -f1)
+    env_var=$(_acq_service_hosts_env "$service" | cut -f2)
+    sidecar=0
+  fi
+
+  local existing_env=""
+  [ "$sidecar" -eq 1 ] && existing_env="$env_var"
   if [ "$service" != "usai" ]; then
-    echo "acq(sbx): stored '$service' in the acq secret store, but existing sbx" >&2
-    echo "          sandbox(es) still need this secret updated." >&2
-    echo "          sbx cannot safely overwrite this secret non-interactively; run:" >&2
-    echo "          ${rerun_cmd}" >&2
-    return 1
+    if _acq_sbx_secret_exists "$scope_flag" "$scope_name" "$service" "$existing_env"; then
+      echo "acq(sbx): stored '$service' in the acq secret store, but existing sbx" >&2
+      echo "          sandbox(es) still need this secret updated." >&2
+      echo "          sbx cannot safely overwrite this secret non-interactively; run:" >&2
+      echo "          ${rerun_cmd}" >&2
+      return 1
+    fi
+    return 0
   fi
 
   local placeholder cmd_args=("secret" "set-custom")
-  placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" USAI_API_KEY)
+  placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" "$env_var" "$host")
   if [ -z "$placeholder" ]; then
     echo "acq(sbx): stored 'usai' in the acq secret store, but no existing sbx" >&2
     echo "          USAi placeholder was found for this scope. Run:" >&2
@@ -1265,7 +1284,7 @@ acq_backend_secret_propagate() {
     return 1
   fi
   if [ -z "$scope_flag" ]; then cmd_args+=(--sandbox "$scope_name"); fi
-  cmd_args+=(--host api.gsa.usai.gov --env USAI_API_KEY --placeholder "$placeholder")
+  cmd_args+=(--host "$host" --env "$env_var" --placeholder "$placeholder")
   if [ ! -t 0 ] && [ -z "${ACQ_SECRET_TEST_VALUE:-}" ]; then
     echo "acq(sbx): stored 'usai' in the acq secret store, but existing sbx" >&2
     echo "          sandbox(es) still need the proxy placeholder updated." >&2
@@ -1474,30 +1493,34 @@ acq_backend_key_present() {
 }
 
 # ---------------------------------------------------------------------------
-# _acq_sbx_custom_placeholder SCOPE_FLAG SCOPE_NAME ENV_VAR -> placeholder|empty
+# _acq_sbx_custom_placeholder SCOPE_FLAG SCOPE_NAME ENV_VAR [HOST] -> placeholder|empty
 # ---------------------------------------------------------------------------
 # Look up the PLACEHOLDER of a CUSTOM secret (from the CUSTOM SECRETS table of
-# `sbx secret ls`) for a given scope + env var, so `sbx secret rm --placeholder`
-# can target it. Echoes the placeholder (e.g. sbx-cs-…) or nothing if absent.
+# `sbx secret ls`) for a given scope + env var, optionally constrained to the
+# target host(s), so `sbx secret rm --placeholder` can target it. Echoes the
+# placeholder (e.g. sbx-cs-...) or nothing if absent.
 _acq_sbx_custom_placeholder() {
-  local scope_flag="$1" scope_name="$2" env_var="$3"
+  local scope_flag="$1" scope_name="$2" env_var="$3" host="${4:-}"
   [ -n "$env_var" ] || return 0
   local listing want_scope
   listing=$(sbx secret ls 2>/dev/null) || return 0
   if [ -n "$scope_flag" ]; then want_scope="(global)"; else want_scope="$scope_name"; fi
 
   # CUSTOM table columns: SCOPE TARGETS ENV PLACEHOLDER SECRET. Find the row in
-  # the custom section whose SCOPE == want_scope and ENV == env_var, print its
-  # PLACEHOLDER. We locate ENV by value (not fixed index) and take the NEXT field
-  # as the placeholder, robust to a multi-token TARGETS cell.
+  # the custom section whose SCOPE == want_scope and ENV == env_var, and when a
+  # host is supplied require TARGETS to match too. We locate ENV by value (not
+  # fixed index) and take the NEXT field as the placeholder, robust to a
+  # multi-token TARGETS cell.
   printf '%s\n' "$listing" | awk \
-    -v scope="$want_scope" -v env="$env_var" '
+    -v scope="$want_scope" -v env="$env_var" -v host="$host" '
     /^CUSTOM SECRETS/ { in_custom = 1; next }
     !in_custom { next }
     NF == 0 { next }
     $1 == "SCOPE" { next }
     $1 == scope {
-      for (i = 2; i < NF; i++) if ($i == env) { print $(i+1); exit }
+      for (i = 2; i < NF; i++) {
+        if ($i == env && (host == "" || $(i-1) == host)) { print $(i+1); exit }
+      }
     }
   '
 }
