@@ -3,7 +3,7 @@ title: "acq How-To Guide"
 description: "Detailed how-to for acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-08-21"
+last_updated: "2026-09-30"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "howto", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -108,6 +108,7 @@ kits, validates your USAi key, and attaches the agent.
 | `./acq shell NAME` | Open an interactive shell in a sandbox |
 | `./acq exec NAME -- CMD` | Run a command inside a sandbox |
 | `./acq cp SRC DST` | Copy files in/out (NAME:path syntax) |
+| `./acq ports NAME` | Show the sandbox's published port mappings |
 | `./acq version` | Show acq version + active backend |
 | `./acq doctor` | Backend health check + write default config |
 
