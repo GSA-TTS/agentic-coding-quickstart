@@ -2204,6 +2204,117 @@ amending the wrong branch.
 
 ---
 
+## 40. Recovering agent work reads the guest-writable scratch clone (residual risk)
+
+### Symptoms
+
+None. This is a documented residual risk of `--clone` on the msb backend, not a
+reported failure or a demonstrated vulnerability.
+
+### Root Cause
+
+Under `--clone` the agent works in a host-side scratch clone that the guest
+mounts read-write, so guest code can write anything into the scratch's
+`.git/config`. acq itself never runs git inside that scratch once the sandbox
+exists: the clone and its config copy both finish before `msb create`, and the
+rm-time warning reads ref **files** and runs `cat-file` against the real
+checkout, never the scratch.
+
+The recovery command acq advertises does read it. `git fetch sandbox-<name>`
+spawns `git upload-pack` inside the scratch and reads that config. Verified with
+plain git: a scratch-local `uploadpack.hideRefs` changes what the host's
+`ls-remote` advertises. Two config-driven command hooks were probed on git
+2.50.1 and did **not** execute from a local-path remote:
+`core.alternateRefsCommand` (with `objects/info/alternates`) and
+`uploadpack.packObjectsHook`, which git restricts to protected scope.
+`safe.directory` offers no protection here, because the scratch is owned by the
+invoking user.
+
+Git's own documentation notes that "the surface area for attack against
+upload-pack is large, so this does carry some risk," which is why this is
+written down rather than left implicit.
+
+### Fix
+
+No code change. Treat the fetch-back remote as what it is: a read of a directory
+an untrusted agent could write to.
+
+- Fetch back only from sandboxes whose work you intend to keep.
+- `acq rm <name>` deletes the scratch and the remote after warning about
+  unfetched commits, so a scratch you do not plan to recover should not linger.
+- Keep git current on the host; the hooks above are inert on 2.50.1, and that is
+  a property of the git version, not of acq.
+
+---
+
+## 41. A Required Check Backed by a `paths:`-Filtered Workflow Deadlocks Unrelated PRs
+
+### Symptoms
+
+- A PR's merge box shows `mergeStateStatus: BLOCKED` even though every check
+  that actually ran is green.
+- The blocking context (e.g. `acq offline suite under bash 3.2`) sits as
+  `Expected`/pending forever — never `success`, never `failure`, just absent.
+- Reproduces on PRs that don't touch the paths the workflow's trigger filters
+  on (e.g. a dependabot GitHub-Actions-version bump touching only
+  `.github/workflows/release.yml`).
+
+### Root Cause
+
+`.github/workflows/bash32-compat.yml` had a top-level `paths:` filter on its
+`pull_request` trigger, so the workflow — and therefore its job — simply never
+ran for a non-matching diff. That is not the same as the job running and
+reporting `skipped`: GitHub creates **no check-run at all** in that case.
+Branch protection's required-status-checks list has no path awareness of its
+own; it just waits for a named context to report. A context that is
+structurally never created satisfies nothing, so the PR sits blocked
+indefinitely — even for changes entirely unrelated to what the workflow tests.
+This is a documented GitHub failure mode ("Handling skipped but required
+checks" in GitHub's required-status-checks troubleshooting docs), not specific
+to this repo, but it hit real CI here: agentic-coding-quickstart#449 (a routine
+dependabot bump) needed an admin-bypass merge to get past it.
+
+### Fix
+
+Removed the workflow-level `paths:` filter so the workflow always triggers,
+and split the single job into three:
+
+1. `changes` — a cheap job that computes relevance via `git diff --name-only`
+   against the PR base (same technique `markdown-quality.yml`'s link-check job
+   already uses; no new marketplace action). Fails closed: any error in
+   computing the diff is a job **failure**, never a silent "not relevant."
+2. `test-acq-bash32` — the real, expensive job (builds bash 3.2.57 from
+   source, runs the offline suite) — now conditional on `needs.changes`
+   reporting relevant, unchanged otherwise.
+3. `gate` — an always-running job (`if: always()`) that is what branch
+   protection actually requires, posted under the **same** required-check name
+   the old single job used (`acq offline suite under bash 3.2`) — so this fix
+   needed **no** out-of-band branch-protection/ruleset update. It fails unless
+   `needs.changes.result == 'success'` **and**
+   `needs.test-acq-bash32.result` is `success` or `skipped` — checking both
+   upstream jobs, not just the expensive one, so a failure in the cheap
+   relevance-detection step can't be laundered into a passing gate via the
+   downstream job's consequent skip.
+
+Verified locally (not just read from docs) before merging: reproduced both
+branches of the `changes` job's `git diff` logic against real commits (one
+touching only a workflow file → empty diff → `relevant=false`; one touching
+`acq.backends/msb.sh` → non-empty diff → `relevant=true`), and exercised the
+gate's shell logic directly against all five `(changes result, test result)`
+combinations, confirming it passes only on `(success, success)` and
+`(success, skipped)` and fails on every other combination including the
+failure-laundering case `(failure, skipped)`.
+
+### Prevention
+
+Any workflow whose job backs a required status check must either have no
+`paths:`/`branches:`/similar trigger-level filter, or must follow this
+gate-job pattern. A conditional trigger and "required" are structurally
+incompatible in GitHub Actions; check new required workflows for this before
+adding them to branch protection.
+
+---
+
 When something fails, work through this list:
 
 1. [ ] Is the secret actually in the container? (`echo $VAR_NAME`)
