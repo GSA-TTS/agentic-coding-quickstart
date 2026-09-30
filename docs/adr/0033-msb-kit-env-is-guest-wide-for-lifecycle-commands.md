@@ -15,158 +15,99 @@ supersedes: []
 
 ## Context and Problem Statement
 
-On the msb backend, a kit's lifecycle commands (`install`, `initFiles`,
-`startup`) ran with only **that kit's own** `environment[]`, threaded as
-`msb exec -e NAME=value`. Interactive sessions were already whole-guest: acq
-replays the merged marker on `run`/`attach`/`shell` (ADR-0011's 2026-08-26
-update). Commands started by a kit's lifecycle phase were not.
+On msb, a kit's lifecycle commands (`install`, `initFiles`, `startup`) ran with only
+**that kit's own** `environment[]`. Sessions were already whole-guest — acq replays
+the merged `/var/lib/acq/kit-env` marker on `run`/`attach`/`shell` (ADR-0011's
+2026-08-26 update) — but commands were not.
 
-That split is invisible until a kit's command **outlives the command** and
-launches other processes. A daemon kit starts its supervisor from a
-`background: true` startup command, so every agent that daemon later spawns
-inherits only the daemon kit's env. A separate kit that sets `OPENCODE_CONFIG`
-(agent instructions plus a default-deny permission layer) is silently missing
-from those agents, while the injected credentials are still present — a quiet
-loss of a policy/permission control, not a visible failure. Terminal sessions
-look correct, so a smoke test passes.
+That split is invisible until a kit's command outlives itself. A daemon kit starts its
+supervisor from a `background: true` startup command, so every agent that daemon spawns
+inherits only the daemon kit's env: another kit's `OPENCODE_CONFIG` (agent instructions
+plus a default-deny permission layer) was silently absent from those agents while the
+injected credentials were still present — a quiet loss of a policy control, and
+sessions still looked correct, so smoke tests passed.
 
-The hard part is **order independence**. The persisted marker
-(`/var/lib/acq/kit-env`) is appended per kit *inside the same loop that runs that
-kit's commands*, so "read the merged marker when running commands" is correct
-only when the env-declaring kit happens to be applied before the daemon kit, and
-silently wrong in the reverse order.
+**The order-independence trap.** The marker is appended per kit *inside the same loop
+that runs that kit's commands*, so "read the merged marker when running commands" is
+correct only when the env-declaring kit happens to be applied first, and silently
+wrong in the reverse order. Any fix must establish the merged set before the first
+kit is applied.
 
 ## Decision Drivers
 
-- **A kit must not be able to silently drop another kit's policy config** from
-  the environment of agents it launches (AC-3, AC-6, CM-6).
-- **Order independence** — the effective env must not depend on the order kits
-  are applied in, which is an implementation detail of the kit list.
-- **One kit must not weaken another kit's hardening** — the adapter's
-  non-interactive git guards are per-kit safety, not shared config (CM-7).
-- **Same resolution rule as sessions** — last-value-wins, so a command and a
-  session agree on which kit's value survives.
-- **No new guest dependency** — kits must not each have to source a marker file
-  themselves; the adapter owns the threading.
-- **Fail soft, never empty** — an unreadable marker degrades to the previous
-  per-kit behavior rather than stripping a kit's own env.
+- A kit must not silently drop another kit's policy config from the env of agents it
+  launches, and the result must not depend on kit application order (AC-3, AC-6, CM-6).
+- One kit must not weaken another kit's hardening: the non-interactive git guards are
+  per-kit safety, not shared config (CM-7).
+- Kits must not each have to source a marker file; the adapter owns the threading.
 
 ## Considered Options
 
-1. **Pre-pass over the full kit set in the full-set paths; marker fallback for
-   the mid-life single-kit path.** Chosen.
-2. **Read the persisted marker inside `_acq_msb_run_commands` for every path.**
-   Rejected: order-dependent by construction — the marker is written in the same
-   per-kit loop, so a daemon kit applied before the env-declaring kit still sees
-   nothing. It would fix the reported case only for one kit ordering.
-3. **Have each kit source `/var/lib/acq/kit-env` in its own commands.** Rejected:
-   pushes an adapter concern into every kit, is opt-in (so a kit that forgets is
-   silently broken), and couples kit content to a guest path acq owns.
-4. **Do nothing; document that kit env is session-only.** Rejected: the
-   vocabulary exists for agent-runtime config (ADR-0011), and the failure mode is
-   a silent loss of permission/policy configuration.
+**Pre-pass over the full kit set — chosen.** A **per-kit marker read** is
+order-dependent by construction (see the trap above), fixing the reported case in one
+kit order only. Having each kit source the marker itself is opt-in — a kit that
+forgets is silently broken — and pushes an adapter concern into every kit.
 
 ## Decision Outcome
 
-**Chosen: Option 1.** Kit `environment[]` is treated as **guest-wide
-configuration**, so every kit lifecycle command runs with the merged env of the
-full effective kit set, using the same last-value-wins order sessions replay.
-
-Where the merged set comes from, per path:
+Kit `environment[]` is **guest-wide configuration**: every kit lifecycle command runs
+with the merged env of the full effective kit set, last-value-wins — the same
+resolution sessions replay.
 
 | Path | Source of the merged env |
 |------|--------------------------|
-| `acq_backend_provision` (create) | pre-pass over every fetched kit spec, computed **before** the first kit is applied |
-| `acq_backend_ensure_kits_applied` (heal / `acq start`, `restart`, re-attach) | same pre-pass; kit refs are resolved in one loop, merged, then applied in a second loop |
-| `acq_backend_apply_kit` (`acq kit apply NAME KITREF`) | no full set exists — falls back to the sandbox's already-persisted merged marker value |
-| neither available (marker absent or unwritable) | this kit's own `environment[]` — the pre-existing behavior |
+| `acq_backend_provision` (create) | pre-pass over every fetched kit spec, before the first apply |
+| `acq_backend_ensure_kits_applied` (heal / `start`, `restart`, re-attach) | same pre-pass; refs resolved in one loop, merged, applied in a second |
+| `acq_backend_apply_kit` (`acq kit apply`) | no full set exists — the sandbox's already-persisted merged marker value |
+| neither available (marker absent/unwritable) | this kit's own `environment[]` — the pre-existing behavior |
 
-The mid-life fallback is correct for an additive add: the new kit's own entries
-are appended to the marker *before* its commands run, and the read applies
-last-value-wins, so the new kit still overrides an older value.
+The mid-life fallback suits an additive add: the new kit's entries reach the marker
+*before* its commands run, and the read is last-value-wins, so it still overrides.
 
-**Guard ownership stays per kit, tracked by value (load-bearing).** The adapter
-injects `GIT_TERMINAL_PROMPT=0` + `GIT_ASKPASS`/`SSH_ASKPASS=/bin/false` onto kit
-commands unless *that* kit declared `GIT_TERMINAL_PROMPT` itself. Deciding this
-from the *merged* set would let one kit's opt-out disable the guards for every
-other kit's commands — and a prompting kit command with no credential blocks
-provision forever (observed with the playbook kit). So the merged set is widened
-for **threading** only: a command receives **only its own kit's value** for a
-guard name.
+**Guard ownership is per kit, tracked by value.** acq injects `GIT_TERMINAL_PROMPT=0` +
+`GIT_ASKPASS`/`SSH_ASKPASS=/bin/false` onto kit commands unless *that* kit declared
+`GIT_TERMINAL_PROMPT` itself; a prompting kit command with no credential blocks
+provision forever (observed with the playbook kit). So a command may only ever receive
+**its own kit's value** for a guard name — and the ownership record must be that kit's
+guard **tokens** (`NAME=value`), not the names it declared, because the merge has
+already collapsed a duplicate name to the *last* kit's value:
 
-The ownership record is the owning kit's guard **tokens** (`NAME=value`), not just
-the names it declared. A name-only record is insufficient, because the merge has
-already collapsed a duplicate name to the *last* kit's value before the filter
-runs — so it cannot tell a kit's own guard value from another kit's. That gap was
-a real regression against the pre-change behavior: with kit A declaring
-`GIT_TERMINAL_PROMPT=0` and a later kit B declaring `=1`, kit A's own command ran
-with kit B's opt-out *and* with no `GIT_ASKPASS`/`SSH_ASKPASS` at all, where
-before it had correctly got its own `0`. The implementation therefore strips
-**every** guard-name token from the merged set regardless of contributor, re-adds
-this kit's own guard tokens, then appends acq's guard values unless this kit set
-`GIT_TERMINAL_PROMPT` itself. Both collision shapes — another kit declaring a
-guard name this kit does not (name collision) and another kit declaring the same
-name with a different value (value collision) — are closed, while a kit that
-declares a guard var still overrides it for its own commands.
+> Kit A declares `GIT_TERMINAL_PROMPT=0` and owns a command; a later kit B declares
+> `=1`. Under name-only ownership A's own command ran with B's opt-out *and* no
+> `GIT_ASKPASS`/`SSH_ASKPASS` at all — worse than before the change, where A correctly
+> got its own `0`.
 
-The staged create-time `--script-path` body (ADR-0017) gets the same treatment,
-for consistency. **That path is inert today** — a bare `--script-path`
-registration is staged on the guest PATH and is not auto-run at boot — so this
-part fixes no live symptom; it keeps the two paths from drifting so the ADR-0017
-version-bump re-verification trap (a future msb that *does* auto-run the script)
-cannot resurface this bug.
+So: strip every guard-name token from the merged set whoever contributed it, re-add this
+kit's own, then append acq's values unless this kit set `GIT_TERMINAL_PROMPT`. Both
+collision shapes (name and value) are closed; a kit's own override still stands for its
+own commands. The staged `--script-path` body shares the same helper so the paths cannot
+drift — **that path is inert today** (ADR-0017), so it fixes no live symptom; it exists
+so ADR-0017's re-verification trap cannot resurface this bug unnoticed.
 
-### Positive Consequences
+## Consequences
 
-- A daemon kit's launched agents see every kit's declared config, so a policy/
-  permission layer contributed by another kit is no longer silently absent.
-- The effective env is identical in both kit application orders.
-- Commands and sessions now agree on the env and on duplicate resolution.
-- Kits need no knowledge of `/var/lib/acq/kit-env`.
-
-### Negative Consequences
-
-- **Broader blast radius per var.** A var declared by one kit now reaches every
-  kit's commands. This is the intended semantics (it matches sbx, where
-  `environment.variables` is sandbox-level), but a kit author can no longer
-  assume their command's env is theirs alone.
-- **Staging-order coupling at create.** The `--script-path` staging moved out of
-  the kit fetch loop into a second loop so the merged env is known first. The
-  first-kit-stakes-the-script-name rule is preserved by iterating the same list
-  in the same order.
-- **Not addressed: a merged var can name a not-yet-staged path.** Kit *N*'s
-  commands can now receive e.g. `OPENCODE_CONFIG` pointing at a file kit *N+k*
-  has not copied in yet. Before this change the daemon saw **no** var; now it can
-  see a var pointing at a **missing** file, which converts "no team config" into
-  "possibly broken team config" for the window between the daemon starting and
-  the declaring kit's files landing. This is the same class as the sbx
-  startup/attach race (a startup command racing the state it depends on, tracked
-  separately — see Links) and is deliberately out of scope here: fixing it needs
-  an ordering/barrier decision (stage every kit's `files[]` before any kit's
-  commands, or a readiness barrier before background startup), not an env-scoping
-  one. Kits whose commands read a path from a var should already tolerate its
-  absence.
-- The guard-scoping rule is a real subtlety in the adapter: merged for threading,
-  per-kit for the guard decision. It is asserted by a regression test so a future
-  simplification cannot quietly collapse the two.
+- **Broader blast radius per var.** A var one kit declares now reaches every kit's
+  commands — intended (it matches sbx, where `environment.variables` is sandbox-level),
+  but a kit author can no longer assume a command's env is theirs alone.
+- **Staging-order coupling at create.** `--script-path` staging moved into a second
+  loop over the same kit dirs, since the merged env is only knowable once every kit is
+  fetched; same list, same order, so the first-kit-stakes-the-name rule holds.
+- **Knowingly left undone: a merged var can name a not-yet-staged path.** Kit *N*'s
+  commands can now receive e.g. `OPENCODE_CONFIG` pointing at a file kit *N+k* has not
+  copied in yet, turning "no team config" into "possibly broken team config" until the
+  declaring kit's files land. That is the startup-races-its-own-prerequisites class, not
+  an env-scoping one: fixing it needs an ordering/barrier decision (stage all `files[]`
+  before any commands, or a readiness barrier before background startup).
 
 ## Links
 
-- ADR-0011 (msb backend and neutral hybrid/v1 kits) — defines the `environment`
-  vocabulary and the session-replay marker this widens to lifecycle commands.
-- ADR-0014 (neutral port-publish and background-command vocabulary) — defines the
-  `background: true` startup commands whose daemons made the scoping gap visible.
-- ADR-0017 (msb create-time startup-script staging) — the staged body updated for
-  consistency here, including its inertness caveat and re-verification trap.
-- `acq.backends/msb.sh` — `_acq_msb_merge_kit_env_into` (the pre-pass),
-  `_acq_msb_own_guard_tokens_into` + `_acq_msb_env_tokens_with_guards_into`
-  (merged threading, per-kit guard ownership by value),
-  `_acq_msb_persisted_kit_env_into` (the mid-life fallback and session replay).
-- `test/bats/79-msb-merged-kit-env.bats` — the lifecycle-command regression
-  coverage (both kit orders, all three phases, the mid-life and heal paths,
-  duplicate resolution, and both guard-collision shapes).
-  `test/bats/78-msb-kit-env.bats` keeps the marker/session-replay coverage;
-  `test/bats/73-msb-kits-startup.bats` covers the staged-body side.
-- Reported as GSA-TTS/agentic-coding-quickstart#515. The related
-  startup-races-its-own-prerequisites class noted under Negative Consequences is
-  tracked as GSA-TTS/agentic-coding-quickstart#506.
+- ADR-0011 (the `environment` vocabulary and session-replay marker this widens),
+  ADR-0014 (`background: true`, whose daemons made the gap visible), ADR-0017 (the
+  staged-script path and its inertness caveat).
+- `acq.backends/msb.sh`: `_acq_msb_merge_kit_env_into` (pre-pass),
+  `_acq_msb_own_guard_tokens_into` + `_acq_msb_env_tokens_with_guards_into` (guard
+  ownership), `_acq_msb_persisted_kit_env_into` (mid-life fallback, session replay).
+- Tests: `test/bats/79-msb-merged-kit-env.bats` (lifecycle commands),
+  `78-msb-kit-env.bats` (marker/session replay), `73-msb-kits-startup.bats` (staged body).
+- Reported as GSA-TTS/agentic-coding-quickstart#515; the deferred
+  startup-races-its-prerequisites class is GSA-TTS/agentic-coding-quickstart#506.

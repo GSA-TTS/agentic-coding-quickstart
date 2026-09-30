@@ -148,9 +148,10 @@ schemaVersion: "hybrid/v1"
 kind: mixin
 name: dup-two
 displayName: Dup Two
-description: overrides GITLAB_HOST from a later kit
+description: overrides GITLAB_HOST from a later kit, and carries an awkward value
 environment:
   GITLAB_HOST: gitlab.second.gov
+  OPENCODE_CONFIG: /home/agent/a b.jsonc; touch /tmp/MERGE_PWNED
 SPEC
   _env_merge_provision "$k1" "$k2"
   local cmd; cmd=$(printf '%s\n' "$(cat "$CALLS")" | grep 'echo DUP_CMD' | head -n1)
@@ -158,6 +159,11 @@ SPEC
   # the same resolution the session replay applies, and exactly once (never both).
   assert_regex "$cmd" '\-e GITLAB_HOST=gitlab\.second\.gov'
   refute_regex "$cmd" 'gitlab\.first\.gov'
+  # A value with spaces and metacharacters crosses the merge as ONE token: it is
+  # threaded as a single `-e` argv element, never re-split into a second variable
+  # and never interpreted as shell syntax (SI-10).
+  assert_regex "$cmd" '\-e OPENCODE_CONFIG=/home/agent/a b\.jsonc; touch /tmp/MERGE_PWNED'
+  refute_regex "$cmd" '\-e touch'
 }
 
 # --- the git guards belong to the kit whose command is running ------------
@@ -291,35 +297,19 @@ SPEC
   assert_regex "$bg" '\-e PASEO_OWN_VAR=own'
 }
 
-@test "ADR-0033: the merge re-validates names and never re-splits a value" {
-  # The merge helper is a second place kit-derived NAME=value tokens flow through,
-  # so it re-applies the kit_spec_env charset itself (defense in depth), and each
-  # token stays ONE array element so a value with spaces or metacharacters is
-  # never re-split into a second variable (SI-10).
-  run bash -c '
-    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
-    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    m=()
-    _acq_msb_dedupe_env_into m "BAD-NAME=x" "=noname" "noequals" \
-      "OPENCODE_CONFIG=/home/agent/a b.jsonc; touch /tmp/PWNED" "OK=1"
-    printf "TOKEN[%s]\n" ${m[@]+"${m[@]}"}
-  '
-  assert_success
-  refute_output --partial 'BAD-NAME'
-  refute_output --partial 'noequals'
-  assert_output --partial 'TOKEN[OPENCODE_CONFIG=/home/agent/a b.jsonc; touch /tmp/PWNED]'
-  assert_output --partial 'TOKEN[OK=1]'
-}
-
 
 # VALUE collision — the case a name-only ownership record cannot catch. The merge
 # collapses a duplicate name to the LAST kit's value, so an earlier kit that
 # declared GIT_TERMINAL_PROMPT=0 saw kit B's =1 on its own commands, with no
 # GIT_ASKPASS/SSH_ASKPASS added either (the "owner declared it, leave it alone"
 # branch). Reproduces a real regression: at base that command got its own 0.
+#
+# The two kits also cover the mirror requirement in one pass: kit B is a kit that
+# deliberately opts ITSELF out, so its own override must survive intact (its value,
+# exactly once, no acq-injected 0 alongside it) and both kits must still receive
+# the other's NON-guard merged vars — proving the hole was closed by scoping the
+# guards, not by disabling the merge.
 @test "ADR-0033: two kits declaring the SAME guard name with different values" {
-  # Kit A owns the command and declares the safe value; kit B, merged later,
-  # declares the opt-out. Kit A's command must keep kit A's value.
   local ka="$STUBDIR/guardvalkitA" kb="$STUBDIR/guardvalkitB"
   mkdir -p "$ka" "$kb"
   cat > "$ka/spec.yaml" <<'SPEC'
@@ -327,9 +317,10 @@ schemaVersion: "hybrid/v1"
 kind: mixin
 name: guardval-a
 displayName: GuardVal A
-description: owns the command and declares the safe guard value
+description: owns a command and declares the safe guard value
 environment:
   GIT_TERMINAL_PROMPT: "0"
+  A_VAR: from-a
 commands:
   - phase: startup
     user: "0"
@@ -346,7 +337,7 @@ displayName: GuardVal B
 description: a later kit opting ITSELF out of the guards
 environment:
   GIT_TERMINAL_PROMPT: "1"
-  TEAM_VAR: shared
+  B_VAR: from-b
 commands:
   - phase: startup
     user: "0"
@@ -356,58 +347,24 @@ commands:
       - echo GUARDVAL_B_CMD
 SPEC
   _env_merge_provision "$ka" "$kb"
-  local log; log=$(cat "$CALLS")
-  # Kit A's command: its own value, never kit B's.
-  local a; a=$(printf '%s\n' "$log" | grep 'echo GUARDVAL_A_CMD' | head -n1)
+  local log a b na nb
+  log=$(cat "$CALLS")
+  # Kit A's command: its own value, never kit B's, and the ASKPASS guards absent
+  # because A declared GIT_TERMINAL_PROMPT itself.
+  a=$(printf '%s\n' "$log" | grep 'echo GUARDVAL_A_CMD' | head -n1)
   assert_regex "$a" '\-e GIT_TERMINAL_PROMPT=0'
   refute_regex "$a" 'GIT_TERMINAL_PROMPT=1'
-  # Kit B's command: its own opt-out value, never kit A's.
-  local b; b=$(printf '%s\n' "$log" | grep 'echo GUARDVAL_B_CMD' | head -n1)
+  na=$(printf '%s\n' "$a" | tr ' ' '\n' | grep -c '^GIT_TERMINAL_PROMPT=')
+  assert_equal "$na" "1"
+  # Kit B's command: its own opt-out value stands, exactly once, with no
+  # acq-injected 0 — a kit's intentional override is not clobbered.
+  b=$(printf '%s\n' "$log" | grep 'echo GUARDVAL_B_CMD' | head -n1)
   assert_regex "$b" '\-e GIT_TERMINAL_PROMPT=1'
   refute_regex "$b" 'GIT_TERMINAL_PROMPT=0'
-  # Both still receive the other kit's NON-guard merged vars.
-  assert_regex "$a" '\-e TEAM_VAR=shared'
-  assert_regex "$b" '\-e TEAM_VAR=shared'
-}
-
-@test "ADR-0033: a kit's own guard override is not clobbered by the merged set" {
-  # The mirror of the finding: fixing value-collision must not stop a kit from
-  # overriding the guards for ITS OWN commands. Its own value appears once, with
-  # no conflicting duplicate, and acq's GIT_TERMINAL_PROMPT=0 is not added.
-  local ok="$STUBDIR/ownoverridekit" ck="$STUBDIR/ownotherkit"
-  mkdir -p "$ok" "$ck"
-  cat > "$ok/spec.yaml" <<'SPEC'
-schemaVersion: "hybrid/v1"
-kind: mixin
-name: own-override
-displayName: Own Override
-description: deliberately opts itself out of the git guards
-environment:
-  GIT_TERMINAL_PROMPT: "1"
-commands:
-  - phase: startup
-    user: "0"
-    command:
-      - sh
-      - -c
-      - echo OWN_OVERRIDE_CMD
-SPEC
-  cat > "$ck/spec.yaml" <<'SPEC'
-schemaVersion: "hybrid/v1"
-kind: mixin
-name: own-other
-displayName: Own Other
-description: contributes only a non-guard var
-environment:
-  OPENCODE_CONFIG: /home/agent/.config/opencode/team.jsonc
-SPEC
-  _env_merge_provision "$ok" "$ck"
-  local cmd n
-  cmd=$(printf '%s\n' "$(cat "$CALLS")" | grep 'echo OWN_OVERRIDE_CMD' | head -n1)
-  assert_regex "$cmd" '\-e GIT_TERMINAL_PROMPT=1'
-  refute_regex "$cmd" 'GIT_TERMINAL_PROMPT=0'
-  n=$(printf '%s\n' "$cmd" | tr ' ' '\n' | grep -c '^GIT_TERMINAL_PROMPT=')
-  assert_equal "$n" "1"
-  # And it still receives the other kit's merged non-guard var.
-  assert_regex "$cmd" '\-e OPENCODE_CONFIG=/home/agent/\.config/opencode/team\.jsonc'
+  nb=$(printf '%s\n' "$b" | tr ' ' '\n' | grep -c '^GIT_TERMINAL_PROMPT=')
+  assert_equal "$nb" "1"
+  # Both still receive the OTHER kit's non-guard merged vars: the guards were
+  # scoped, the merge was not disabled.
+  assert_regex "$a" '\-e B_VAR=from-b'
+  assert_regex "$b" '\-e A_VAR=from-a'
 }
