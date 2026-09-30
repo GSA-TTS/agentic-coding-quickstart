@@ -1602,13 +1602,16 @@ EOF
   #    Commands run with the MERGED env of the whole kit set, not just this kit's
   #    (ADR-0033). Full-set callers pass its array name; the mid-life single-kit
   #    path (`acq kit apply`) has none, so it recovers the sandbox's persisted
-  #    merged value — step 2 appended THIS kit's entries first and the read is
-  #    last-value-wins, so a mid-life add still overrides. An unreadable marker
-  #    degrades to this kit's own env: fail-soft, never empty.
+  #    merged value with THIS kit's entries layered last (last-value-wins). The
+  #    re-layering matters: step 2's append only warns on failure, so the marker
+  #    can be stale — without it the kit's own env would be silently dropped.
   local _merged_env=() _merged_envn="$mergedn"
   if [ -z "$_merged_envn" ]; then
-    _acq_msb_persisted_kit_env_into _merged_env "$name"
-    [ "${#_merged_env[@]}" -gt 0 ] && _merged_envn=_merged_env
+    local _persisted_env=()
+    _acq_msb_persisted_kit_env_into _persisted_env "$name"
+    _acq_msb_dedupe_env_into _merged_env \
+      ${_persisted_env[@]+"${_persisted_env[@]}"} ${_kit_env[@]+"${_kit_env[@]}"}
+    _merged_envn=_merged_env
   fi
   _acq_msb_run_commands "$name" "$spec" "$_merged_envn"
 }
@@ -2249,6 +2252,10 @@ _acq_msb_merge_kit_env_into() {
   local _mkall=() _mkspec
   for _mkspec in "$@"; do
     [ -f "$_mkspec" ] || continue
+    # A backend-shortcut kit skips the generic apply, so its env is never
+    # persisted for sessions; merging it here would make commands and sessions
+    # disagree on the guest env.
+    kit_spec_has_shortcut "$_mkspec" msb && continue
     _acq_msb_collect_kit_env_into _mkall "$_mkspec"
   done
   _acq_msb_dedupe_env_into "$_arrn" ${_mkall[@]+"${_mkall[@]}"}

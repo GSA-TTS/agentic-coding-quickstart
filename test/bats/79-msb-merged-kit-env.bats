@@ -368,3 +368,64 @@ SPEC
   assert_regex "$a" '\-e B_VAR=from-b'
   assert_regex "$b" '\-e A_VAR=from-a'
 }
+
+@test "ADR-0033: mid-life 'kit apply' keeps its own env when the marker append is lost" {
+  # The persisted read can return a STALE non-empty marker that lacks this kit's
+  # entries (step 2's append failed: it only warns). The kit's commands must still
+  # carry its own environment[], winning over a stale value for the same name,
+  # while keeping the other persisted entries.
+  export STUB_RECORDED_KIT_ENV='OPENCODE_CONFIG=/stale.jsonc
+OTHER_KIT_VAR=kept'
+  local mk="$STUBDIR/lostappendkit"; mkdir -p "$mk"
+  cat > "$mk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: lostappend-kit
+displayName: Lost Append Kit
+description: added to a live sandbox whose marker append does not land
+environment:
+  OPENCODE_CONFIG: /fresh.jsonc
+  LOST_OWN: yes
+commands:
+  - phase: startup
+    user: "0"
+    background: true
+    command:
+      - lostappend-daemon
+SPEC
+  : > "$CALLS"
+  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/lostappend-secrets"
+    . "${REPO_ROOT}/acq.backends/secret-store.sh"
+    . "${REPO_ROOT}/acq.backends/kit-translate.sh"
+    . "${REPO_ROOT}/acq.backends/msb.sh"
+    acq_backend_apply_kit lostappendbox "$mk" >/dev/null 2>&1 )
+  local bg; bg=$(printf '%s\n' "$(cat "$CALLS")" | grep 'nohup' | head -n1)
+  assert_regex "$bg" '\-e LOST_OWN=yes'
+  assert_regex "$bg" '\-e OPENCODE_CONFIG=/fresh\.jsonc'
+  refute_regex "$bg" 'stale\.jsonc'
+  assert_regex "$bg" '\-e OTHER_KIT_VAR=kept'
+}
+
+@test "ADR-0033: a backend-shortcut kit's environment[] is not merged into other kits" {
+  # A kit with a backend_shortcuts.msb entry skips the generic apply path, so its
+  # environment[] is never persisted for sessions. Merging it into other kits'
+  # commands would make commands and sessions disagree on the guest env.
+  local sk="$STUBDIR/shortcutkit"; mkdir -p "$sk"
+  cat > "$sk/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: shortcut-kit
+displayName: Shortcut Kit
+description: handled natively by msb; declares env that must stay unmerged
+environment:
+  SHORTCUT_VAR: leaked
+backend_shortcuts:
+  msb:
+    trust_host_cas: true
+SPEC
+  _env_kit_daemon "$STUBDIR/daemonkit"
+  _env_merge_provision "$sk" "$STUBDIR/daemonkit"
+  local bg; bg=$(printf '%s\n' "$(cat "$CALLS")" | grep 'nohup' | head -n1)
+  assert_regex "$bg" '\-e PASEO_OWN_VAR=own'
+  refute_regex "$bg" 'SHORTCUT_VAR'
+}

@@ -58,11 +58,15 @@ resolution sessions replay.
 |------|--------------------------|
 | `acq_backend_provision` (create) | pre-pass over every fetched kit spec, before the first apply |
 | `acq_backend_ensure_kits_applied` (heal / `start`, `restart`, re-attach) | same pre-pass; refs resolved in one loop, merged, applied in a second |
-| `acq_backend_apply_kit` (`acq kit apply`) | no full set exists — the sandbox's already-persisted merged marker value |
-| neither available (marker absent/unwritable) | this kit's own `environment[]` — the pre-existing behavior |
+| `acq_backend_apply_kit` (`acq kit apply`) | no full set exists: the sandbox's persisted marker value, with this kit's own `environment[]` layered last |
 
-The mid-life fallback suits an additive add: the new kit's entries reach the marker
-*before* its commands run, and the read is last-value-wins, so it still overrides.
+The mid-life path suits an additive add: layering the kit's own entries last means it
+still overrides, and a stale or absent marker (the append in the same apply is only
+best-effort) can never drop the kit's own env.
+
+A kit with a `backend_shortcuts.msb` entry is left out of the merge: msb applies it
+natively and skips the generic apply, so its `environment[]` never reaches the marker,
+and merging it into commands would make them disagree with sessions.
 
 **Guard ownership is per kit, tracked by value.** acq injects `GIT_TERMINAL_PROMPT=0` +
 `GIT_ASKPASS`/`SSH_ASKPASS=/bin/false` onto kit commands unless *that* kit declared
