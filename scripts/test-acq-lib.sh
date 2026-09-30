@@ -556,6 +556,12 @@ KEYGENSTUB
   # the stubbed serve/ssh children stay alive ~3s (STUB_*_ALIVE), comfortably
   # past this settle window, so a healthy publish is observed without slow tests.
   export ACQ_MSB_SERVE_SETTLE="0.3" ACQ_MSB_FORWARD_SETTLE="0.3"
+  # Make the create-time host-port contention probe (ADR-0034) deterministic and
+  # socket-free: every port reports FREE unless a test names it in
+  # ACQ_MSB_HOST_PORTS_BUSY. Without this the verdict would depend on what the
+  # developer's machine happens to be listening on, so a chosen ephemeral port
+  # could be reported busy and turn a green suite red on one host only.
+  export ACQ_MSB_HOST_PROBE_STUB=1
   # Export ACQ_SCRIPT_DIR so acq can locate its backends.
   export ACQ_SCRIPT_DIR="$REPO_ROOT"
   # Force the acq secret store to a throwaway file backend (never touch the real
