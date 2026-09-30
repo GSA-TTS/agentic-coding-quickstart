@@ -154,6 +154,9 @@ case "${1:-}" in
         else
           printf '%s|0' "${STUB_KEY_STATUS:-200}"
         fi ;;
+      *'${ACQ_WORKSPACE:-}'*)
+        [ -n "${STUB_RECORDED_WORKSPACE+x}" ] || exit 1
+        printf '%s' "$STUB_RECORDED_WORKSPACE" ;;
       *"postinstall.mjs"*)
         # Model a successful postinstall: mark opencode fixed so the follow-up
         # `opencode --version` probe passes.

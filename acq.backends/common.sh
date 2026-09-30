@@ -1286,8 +1286,12 @@ _acq_provenance_file() {
 acq_provenance_write() {
   local backend="${1:-}" name="${2:-}"
   [ -n "$backend" ] && [ -n "$name" ] || return 1
-  local file dir ts
+  local file dir ts workspace workspace_source
   file=$(_acq_provenance_file "$backend" "$name") || return 1
+  workspace_source=$(acq_provenance_field "$backend" "$name" workspace_source)
+  if [ "$workspace_source" = "host" ]; then
+    workspace=$(acq_provenance_field "$backend" "$name" workspace)
+  fi
   dir=$(dirname "$file")
   if ! mkdir -p "$dir" 2>/dev/null; then
     acq_debug "provenance: could not create state dir: $dir"
@@ -1304,6 +1308,10 @@ acq_provenance_write() {
     printf 'applied_ref=%s\n' "$PATTERNS_KIT_REF"
     printf 'backend=%s\n' "$backend"
     printf 'applied_at=%s\n' "$ts"
+    if [ -n "${workspace:-}" ]; then
+      printf 'workspace_source=host\n'
+      printf 'workspace=%s\n' "$workspace"
+    fi
   } > "$tmp" 2>/dev/null || { acq_debug "provenance: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
   mv -f "$tmp" "$file" 2>/dev/null || { acq_debug "provenance: mv failed: $file"; rm -f "$tmp" 2>/dev/null; return 1; }
   acq_debug "provenance: recorded $backend/$name applied_ref=$PATTERNS_KIT_REF"
@@ -1323,6 +1331,47 @@ acq_provenance_field() {
   awk -F= -v k="$field" '
     $1 == k { sub(/^[^=]*=/, ""); print; exit }
   ' "$file" 2>/dev/null || true
+}
+
+# Remember the primary host workspace mounted into a sandbox. This is non-secret
+# host-side state used by commands that take only SANDBOX later (for example,
+# `acq github-scope SANDBOX`) so they do not accidentally inspect the caller's
+# current directory instead of the sandbox's workspace.
+acq_workspace_record_write() {
+  local backend="${1:-}" name="${2:-}" workspace="${3:-}"
+  [ -n "$backend" ] && [ -n "$name" ] && [ -n "$workspace" ] || return 0
+  case "$workspace" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  local workspace_check
+  workspace_check="$workspace"
+  if [ ! -d "$workspace_check" ] && command -v cygpath >/dev/null 2>&1; then
+    workspace_check=$(cygpath -u "$workspace" 2>/dev/null || printf '%s' "$workspace")
+  fi
+  [ -d "$workspace_check" ] || return 1
+  local file dir tmp
+  file=$(_acq_provenance_file "$backend" "$name") || return 1
+  dir=$(dirname "$file")
+  mkdir -p "$dir" 2>/dev/null || return 1
+  tmp="${file}.workspace.$$"
+  {
+    if [ -f "$file" ]; then
+      awk -F= '$1 != "workspace" && $1 != "workspace_source" { print }' "$file" 2>/dev/null || true
+    else
+      printf 'schema=1\n'
+      printf 'backend=%s\n' "$backend"
+    fi
+    printf 'workspace_source=host\n'
+    printf 'workspace=%s\n' "$workspace"
+  } > "$tmp" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+}
+
+acq_workspace_record_read() {
+  local backend="${1:-}" name="${2:-}" source
+  source=$(acq_provenance_field "$backend" "$name" workspace_source)
+  [ "$source" = "host" ] || return 0
+  acq_provenance_field "$backend" "$name" workspace
 }
 
 # Classify a sandbox's currency against the LOCAL pinned PATTERNS_KIT_REF.
@@ -2086,11 +2135,13 @@ _acq_github_pat_url() {
 
 # github_scope_sandbox SANDBOX WORKSPACE — guide the user through minting a
 # fine-grained PAT scoped to the workspace's repos and store it sandbox-scoped.
-# Warn-not-block: returns 0 even if the user declines. Never places the token in
-# argv (delegates to acq_secret_set_interactive via the backend secret path).
+# Refuses multi-owner workspaces because acq stores one sandbox-scoped GitHub
+# token today, while GitHub fine-grained PATs are single-owner. Never places the
+# token in argv (delegates to acq_secret_set_interactive via the backend secret
+# path).
 github_scope_sandbox() {
   local sandbox="$1" ws="${2:-}"
-  local repos owners="" nwo owner
+  local repos owners="" nwo owner owner_key owner_count=0
 
   repos=$(detect_workspace_repos "$ws")
   if [ -z "$repos" ]; then
@@ -2102,16 +2153,33 @@ github_scope_sandbox() {
   while IFS= read -r nwo; do
     [ -n "$nwo" ] || continue
     owner="${nwo%%/*}"
-    case "$owners" in *"|$owner|"*) ;; *) owners="$owners|$owner|" ;; esac
+    owner_key=$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')
+    case "$owners" in *"|$owner_key="*) ;; *) owners="$owners|$owner_key=$owner|"; owner_count=$((owner_count + 1)) ;; esac
   done <<EOF
 $repos
 EOF
 
+  if [ "$owner_count" -gt 1 ]; then
+    echo "acq: cannot create a repo-scoped GitHub token for sandbox '$sandbox'." >&2
+    echo "      This workspace contains GitHub repositories owned by multiple accounts," >&2
+    echo "      but acq stores one sandbox-scoped GitHub token today and GitHub" >&2
+    echo "      fine-grained PATs are scoped to a single owner." >&2
+    echo "" >&2
+    echo "      Detected repositories:" >&2
+    while IFS= read -r nwo; do [ -n "$nwo" ] && printf '        %s\n' "$nwo" >&2; done <<EOF
+$repos
+EOF
+    echo "" >&2
+    echo "      Re-run with a workspace path containing repos from only one owner:" >&2
+    echo "        acq github-scope $sandbox /path/to/one-owner-workspace" >&2
+    return 1
+  fi
+
   echo "acq: scoping a GitHub token for sandbox '$sandbox'." >&2
   echo "" >&2
   echo "      GitHub has no API to mint a fine-grained PAT, so create it in the" >&2
-  echo "      browser. For EACH owner below, open the pre-filled link, select" >&2
-  echo "      'Only select repositories' and choose the repo(s) listed below," >&2
+  echo "      browser. Open the pre-filled link, select 'Only select" >&2
+  echo "      repositories' and choose the repo(s) listed below," >&2
   echo "      then generate the token and paste it back here." >&2
   echo "      Default permissions: Contents=Read/Write, Pull requests=Read/Write," >&2
   echo "      Issues=Read/Write, Actions=Read (lets the agent read the PR-check" >&2
@@ -2126,6 +2194,7 @@ EOF
   IFS="$_oldifs"
   for o in "$@"; do
     [ -n "$o" ] || continue
+    o="${o#*=}"
     echo "" >&2
     echo "      Owner '$o' — open:" >&2
     printf '        %s\n' "$(_acq_github_pat_url "$o" "$sandbox")" >&2
@@ -2202,7 +2271,7 @@ advise_github_scope() {
   printf 'acq: scope a GitHub token for this sandbox now? [y/N] ' >&2
   read -r ans 2>/dev/null || ans=""
   case "$ans" in
-    y|Y|yes|YES) github_scope_sandbox "$sandbox" "$ws" ;;
+    y|Y|yes|YES) github_scope_sandbox "$sandbox" "$ws" || true ;;
     *) echo "acq: continuing without scoping (run 'acq github-scope $sandbox $ws' anytime)." >&2 ;;
   esac
   return 0

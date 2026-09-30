@@ -33,6 +33,7 @@ case "$mode" in
   -u)
     for p in "$@"; do
       case "$p" in
+        C:/tmp/*) printf '/tmp/%s\n' "${p#C:/tmp/}" ;;
         [A-Za-z]:/*) d=$(printf '%s' "${p%%:*}" | tr 'A-Z' 'a-z'); printf '/%s%s\n' "$d" "${p#*:}" ;;
         *) printf '%s\n' "$p" ;;
       esac
@@ -101,6 +102,17 @@ _msys_provision() { # NAME WS
   # ACQ_WORKSPACE is a guest-side value: it must stay POSIX.
   assert_regex "$line" "--env ACQ_WORKSPACE=${guest}( |\$)"
   refute_regex "$line" "ACQ_WORKSPACE=${host}( |\$)"
+}
+
+@test "msys: recorded github-scope workspace uses the host form" {
+  _plant_cygpath_stub
+  mkdir -p "$STUBDIR/msysws"
+  _msys_provision shell-msysws "$STUBDIR/msysws"
+  load_acq
+  run acq_workspace_record_read msb shell-msysws
+  assert_success
+  assert_output "$(host_path "$STUBDIR/msysws")"
+  refute_output "$(canonicalize_path "$STUBDIR/msysws")"
 }
 
 @test "msys: an ACQ_MSB_WORKSPACE override is canonicalized to the guest form" {
