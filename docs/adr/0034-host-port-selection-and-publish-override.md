@@ -228,9 +228,12 @@ otherwise map a port with nothing behind it and look like a working publish.
 - Flag-position trap shared by every acq-owned run/create flag (`--publish`,
   `--clone`, `--no-update-check`, `--kit`): placed BEFORE the subcommand they fall
   into the unknown-subcommand passthrough and reach the backend CLI. Pre-existing;
-  tracked separately so one fix covers the family. **Issue number to be filled in
-  when filed** (drafted alongside this ADR; not posted by the implementer, which
-  has no write access to the tracker).
+  tracked separately so one fix covers the family —
+  [GSA-TTS/agentic-coding-quickstart#524](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/524)
+- Lint coverage gap noticed while writing this ADR: the markdownlint glob is
+  `docs/*.md`, so `docs/adr/` — including this file — is never checked by the gate
+  or CI, and both ADRs touched here were linted by hand instead. Tracked in
+  [GSA-TTS/agentic-coding-quickstart#525](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/525)
 - Corroborating evidence (no dependency; acq-side change only):
   [agentic-coding-patterns#453](https://github.com/GSA-TTS/agentic-coding-patterns/pull/453)
 - Builds on: [ADR-0014](0014-neutral-port-publish-and-background-vocab.md)
