@@ -2392,12 +2392,14 @@ Symptom 3 has its own cause worth stating, because the action that produces it i
 the reflexive one. `msb self downgrade` builds its rollback plan from the
 **running** binary's migration metadata, so only a binary whose metadata covers
 the applied set can revert it. Attempting it from the older binary does not merely
-fail: it records an operation journal, and `msb` then refuses **every** command
-from **every** version until that operation completes. When the recorded
+fail: it records an operation journal, and `msb` then refuses catalog-opening
+commands from every version until that operation completes. When the recorded
 transition cannot complete, the demand is unsatisfiable. Verified against real
-0.6.18 / 0.7.2 / 0.7.3 binaries: resuming with the journal's own target, with a
-different target, and from each of the three all fail identically, and
-`self downgrade` exposes no abort flag.
+0.6.18 / 0.7.2 / 0.7.3 binaries: catalog-opening retries with the journal's own
+target, with a different target, and from each of the three all fail identically,
+and `self downgrade` exposes no abort flag. Non-catalog probes such as
+`msb --version` can still work, but they cannot clear the journal or read sandbox
+state.
 
 ### Fix
 
@@ -2429,9 +2431,9 @@ brew install GSA-TTS/tap/microsandbox-acq@0.7.3
 "$(brew --prefix microsandbox-acq@0.7.3)/bin/msb" self downgrade 0.6.18
 ```
 
-**If every msb command reports `self_downgrade_recovery_required`,** the only
-exit is removing that one operation directory. `install.sh` detects this and
-offers to do it; by hand:
+**If every catalog-opening msb command reports `self_downgrade_recovery_required`,**
+the only exit is removing that one operation directory. `install.sh` detects this
+and offers to do it; by hand:
 
 ```bash
 rm -rf ~/.microsandbox/db/self-downgrade/<id>
@@ -2476,7 +2478,8 @@ accepts `0.7.3` or newer. Remove stale copies or adjust `PATH` so the intended
   fails closed when another blocked `msb` earlier on `PATH` would still shadow
   the install.
 - `install.ps1` applies the same policy on Windows, which previously had none.
-  That path is **untested on a real Windows host**.
+  The Windows-specific logic has been smoke-tested on a real Windows host, but
+  remains lower-confidence than the POSIX path.
 - `scripts/verify-msb-pin` verifies all of the above against real 0.6.18 / 0.7.2
   / 0.7.3 binaries in a throwaway `MSB_HOME`. It boots no VM, so it needs no
   virtualization and runs inside a sandbox.

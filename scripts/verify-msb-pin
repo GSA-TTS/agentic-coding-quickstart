@@ -459,7 +459,7 @@ if [ -n "$journal" ]; then
   ok "the failed attempt left an interrupted-downgrade journal behind"
   note "${journal#"$SCRATCH"/}"
 
-  # Every later command, from every version, now refuses.
+  # Every later catalog-opening command tested here, from every version, now refuses.
   wedged=0
   for pair in "$PINNED_VERSION:$PINNED_BIN" "$BLOCKED_VERSION:$BLOCKED_BIN"; do
     v=${pair%%:*}; b=${pair##*:}
@@ -469,7 +469,7 @@ if [ -n "$journal" ]; then
       *) bad "msb $v still ran 'list' despite the interrupted-downgrade journal" ;;
     esac
   done
-  [ "$wedged" -eq 2 ] && ok "both msb versions refuse ALL commands while the journal exists"
+  [ "$wedged" -eq 2 ] && ok "both msb versions refuse catalog-opening commands while the journal exists"
   note "this is why install.sh refuses to attempt a rollback from too-old an msb"
 
   # And the documented escape works.

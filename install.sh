@@ -868,20 +868,22 @@ msb_catalog_ahead() {
 # Path of an interrupted `msb self downgrade` journal, or empty.
 #
 # A failed downgrade leaves $MSB_HOME/db/self-downgrade/<id>/journal.json behind,
-# and msb then refuses EVERY command from EVERY version until that operation
-# reaches `phase: complete`:
+# and msb then refuses catalog-opening commands from every version until that
+# operation reaches `phase: complete`:
 #
 #   error: self_downgrade_recovery_required: resume the active downgrade
 #   recorded at .../db/self-downgrade/<id>/journal.json
 #
-# The refusal is unconditional by design: msb checks for it before it opens the
-# database at all. When the journal records a transition that cannot complete —
-# which is exactly what a too-old binary leaves behind, because it stages a target
-# it then cannot roll the database back to — the demand is unsatisfiable and the
-# install is wedged. Verified against msb 0.6.18/0.7.2/0.7.3: resuming with the
-# journal's own target, with a different target, and from each of the three
-# binaries all fail identically, and `self downgrade` exposes no abort or clear
-# flag. The only exit is removing the journal directory, after which a
+# The refusal is unconditional for commands that open local backend state: msb
+# checks for it before it opens the database. When the journal records a
+# transition that cannot complete — which is exactly what a too-old binary leaves
+# behind, because it stages a target it then cannot roll the database back to —
+# the demand is unsatisfiable and the install is wedged. Verified against msb
+# 0.6.18/0.7.2/0.7.3: catalog-opening retries with the journal's own target, with
+# a different target, and from each of the three binaries all fail identically,
+# and `self downgrade` exposes no abort or clear flag. Non-catalog probes such as
+# `msb --version` can still work, but they cannot clear the journal or read
+# sandbox state. The only exit is removing the journal directory, after which a
 # correctly-ordered downgrade succeeds normally.
 msb_stale_downgrade_journal() {
   for journal in "$MSB_HOME_DIR"/db/self-downgrade/*/journal.json; do
@@ -915,20 +917,21 @@ clear_stale_downgrade_journal() {
   journal="$1"
   opdir=$(dirname "$journal")
 
-  step "An interrupted msb downgrade is blocking every msb command"
+  step "An interrupted msb downgrade is blocking msb catalog access"
   warn "  msb records an in-progress 'self downgrade' here:"
   info "    $journal"
-  warn "  Until that operation finishes, msb refuses all commands — including"
-  warn "  read-only ones, and including from a different msb version. If the"
-  warn "  recorded transition cannot complete (a too-old msb leaves exactly that"
-  warn "  behind), there is no way to resume it and no flag to abandon it."
+  warn "  Until that operation finishes, msb refuses catalog-opening commands —"
+  warn "  including read-only state commands, and including from a different msb"
+  warn "  version. If the recorded transition cannot complete (a too-old msb"
+  warn "  leaves exactly that behind), there is no way to resume it and no flag"
+  warn "  to abandon it."
   info "  Removing that operation directory clears the block. It removes only the"
   info "  record of that unfinished operation — NOT your catalog database, NOT its"
   info "  migration history, NOT your retained downgrade backups, and NOT any"
   info "  sandbox, snapshot, or image. See ADR-0032 for why that is the safe cut."
 
   if ! confirm "  Remove $opdir now?"; then
-    warn "  Leaving it in place. msb will keep refusing every command. To do it"
+    warn "  Leaving it in place. msb will keep refusing catalog access. To do it"
     warn "  yourself:"
     info  "    rm -rf \"$opdir\""
     return 1
@@ -1114,8 +1117,8 @@ replace_active_msb() {
   active="$1"
   active_version="$2"
 
-  # A wedged downgrade journal blocks every msb command, so clear it before any
-  # probe that shells out to msb — otherwise msb_catalog_ahead misreads the
+  # A wedged downgrade journal blocks catalog-opening msb commands, so clear it
+  # before any state probe — otherwise msb_catalog_ahead misreads the
   # recovery-required error as an unrelated failure.
   journal=$(msb_stale_downgrade_journal)
   if [ -n "$journal" ]; then

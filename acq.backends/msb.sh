@@ -772,9 +772,20 @@ _acq_msb_version_blocked() {
   return 0
 }
 
-# Parse `msb --version` → bare X.Y.Z.
+# Parse `msb --version` → bare X.Y.Z. Only final releases are accepted:
+# prerelease/build-suffixed output such as 0.7.3-rc1 must fail closed rather
+# than being treated as the fixed final 0.7.3.
 _acq_msb_version() {
-  _acq_msb_cli --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1
+  local raw
+  raw=$(_acq_msb_cli --version 2>/dev/null || true)
+  printf '%s\n' "$raw" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1 || true
+}
+
+_acq_msb_version_is_final() {
+  case "$1" in
+    *[-+]* ) return 1 ;;
+    * ) return 0 ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -802,9 +813,13 @@ acq_backend_check_version() {
 
   local current
   current=$(_acq_msb_version)
-  if [ -z "$current" ]; then
-    echo "acq: warning: could not determine msb version (need >= $MIN_MSB_VERSION); continuing." >&2
-    return 0
+  if [ -z "$current" ] || ! _acq_msb_version_is_final "$current"; then
+    echo "error: acq could not determine a supported final msb version." >&2
+    echo "       msb --version must report a final release like 'msb $MSB_PINNED_VERSION'" >&2
+    echo "       or 'msb $MSB_FIXED_VERSION'. Local, dev, prerelease, or unparseable" >&2
+    echo "       builds are refused so acq does not open sandbox state with an" >&2
+    echo "       unverified migration policy." >&2
+    exit 1
   fi
   if [ "$(_acq_msb_version_ge "$current" "$MIN_MSB_VERSION")" -ne 0 ]; then
     echo "error: acq requires msb >= $MIN_MSB_VERSION, but found $current." >&2
@@ -826,7 +841,7 @@ acq_backend_check_version() {
     echo "         msb self downgrade $MSB_PINNED_VERSION" >&2
     echo "       Do NOT run 'msb self downgrade' from an older msb: it cannot roll" >&2
     echo "       these migrations back, and the failed attempt leaves an" >&2
-    echo "       interrupted-downgrade record that blocks every msb command." >&2
+    echo "       interrupted-downgrade record that blocks msb catalog access." >&2
     echo "       See docs/KNOWN_FAILURE_MODES.md for details." >&2
     exit 1
   fi

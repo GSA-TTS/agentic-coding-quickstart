@@ -81,7 +81,7 @@ migrations."
 Attempting the downgrade from the older binary does not merely fail. It records
 an operation journal at
 `$MSB_HOME/db/self-downgrade/<operation-id>/journal.json`, and `msb` then
-refuses **every** command from **every** version until that operation reaches
+refuses catalog-opening commands from every version until that operation reaches
 `phase: complete`:
 
 ```text
@@ -89,13 +89,15 @@ error: self_downgrade_recovery_required: resume the active downgrade recorded at
        …/db/self-downgrade/<id>/journal.json
 ```
 
-The refusal is deliberate and unconditional — upstream checks for it before
-opening the database at all (`refuse_incomplete_self_downgrade`, called from
-local-backend startup in 0.7.3). When the journal records a transition the
-running binary cannot complete, the demand is unsatisfiable. Verified against
-real 0.6.18 / 0.7.2 / 0.7.3 binaries: resuming with the journal's own recorded
-target, with a different target, and from each of the three binaries all fail
-identically, and `self downgrade` exposes no abort or clear flag.
+The refusal is deliberate for commands that open local backend state — upstream
+checks for it before opening the database (`refuse_incomplete_self_downgrade`,
+called from local-backend startup in 0.7.3). When the journal records a
+transition the running binary cannot complete, the demand is unsatisfiable.
+Verified against real 0.6.18 / 0.7.2 / 0.7.3 binaries: catalog-opening retries
+with the journal's own recorded target, with a different target, and from each of
+the three binaries all fail identically, and `self downgrade` exposes no abort or
+clear flag. Non-catalog probes such as `msb --version` can still work, but they
+cannot clear the journal or read sandbox state.
 
 "Try the downgrade with the `msb` I have" is the reflexive user action. It turns
 a recoverable version mismatch into an apparent brick.
@@ -211,8 +213,10 @@ comparator (not `[version]`, so a build suffix cannot throw mid-install), the
 same blocked/too-old/unparseable handling, and a pinned install from the
 checksum-verified release bundle. It also checks for an in-use `msb.exe` before
 copying, because Windows cannot overwrite a running image, and fails with an
-actionable message rather than a sharing violation mid-copy. **The Windows path
-remains untested on a real Windows host.**
+actionable message rather than a sharing violation mid-copy. The Windows-specific
+logic has since been smoke-tested on a real Windows host for pinned install,
+blocked-to-forward recovery, the in-use guard, comparator behavior, and
+fail-closed parsing.
 
 ### 3. Recovery, forward first
 
@@ -318,8 +322,8 @@ the snapshot-group downgrade refusal; and the keg-only formula layout.
   its floor to `0.7.3` or newer, the range, the pin, the keg-only formulae, and
   `verify-msb-pin`'s blocked-version checks all become dead weight and should be
   removed together.
-- **Windows remains a preview path** and this ADR's Windows claims are
-  code-review-level only.
+- **Windows remains lower-confidence than POSIX**, but it has been smoke-tested
+  on a real Windows host for the version-policy paths this ADR covers.
 
 ## Links
 
@@ -332,6 +336,6 @@ the snapshot-group downgrade refusal; and the keg-only formula layout.
   — the `allow@dns` macro behind the independent 0.6.9 floor.
 - [ADR-0026: installation and distribution](0026-installation-and-distribution.md)
   — the installer this version policy was added to.
-- `docs/KNOWN_FAILURE_MODES.md` §35 — the user-facing symptoms and recovery.
+- `docs/KNOWN_FAILURE_MODES.md` §42 — the user-facing symptoms and recovery.
 - `docs/BACKEND_GUIDE.md` (msb backend) — the supported version table.
 - `scripts/verify-msb-pin` — the live verification of every behavioral claim here.

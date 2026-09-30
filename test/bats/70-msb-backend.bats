@@ -160,6 +160,20 @@ _with_adapter() { # ADAPTER BODY
   assert_output --partial 'RC=0'
 }
 
+@test "msb: unparseable version output fails closed with diagnostics" {
+  _with_adapter msb 'out=$(STUB_MSB_VERSION=dev-build ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
+  assert_output --partial 'could not determine a supported final msb version'
+  assert_output --partial 'unparseable'
+  assert_output --partial 'RC=1'
+}
+
+@test "msb: prerelease versions do not satisfy the fixed final release" {
+  _with_adapter msb 'out=$(STUB_MSB_VERSION=0.7.3-rc1 ACQ_SKIP_MSB_DOCTOR=1 acq_backend_prepare 2>&1); rc=$?; printf "%s\nRC=%s\n" "$out" "$rc"'
+  assert_output --partial 'could not determine a supported final msb version'
+  assert_output --partial 'prerelease'
+  assert_output --partial 'RC=1'
+}
+
 @test "sbx: version floor rejects sub-0.39.0 naming both causes, accepts 0.39.0" {
   # 0.38.x is BELOW the floor: acq emits the ACQ_WORKSPACE marker through
   # `sbx create --env` on every workspace create, and --env only exists from
