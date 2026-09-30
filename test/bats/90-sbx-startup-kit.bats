@@ -21,7 +21,7 @@ _plant_refusal_stub() {
 #!/usr/bin/env bash
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
 case "${1:-}" in
-  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
   ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
   kit)
     if [ "${2:-}" = "add" ]; then
@@ -100,7 +100,7 @@ _seed_stale_provenance() {
 #!/usr/bin/env bash
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
 case "${1:-}" in
-  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
   ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
   kit) [ "${2:-}" = "add" ] && { printf 'ERROR: some other transient failure\n' >&2; exit 1; }; exit 0 ;;
   exec)
@@ -123,7 +123,7 @@ STUB
 #!/usr/bin/env bash
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
 case "${1:-}" in
-  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
   ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
   kit)
     if [ "${2:-}" = "add" ]; then
@@ -151,7 +151,7 @@ STUB
 #!/usr/bin/env bash
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
 case "${1:-}" in
-  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
   ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
   exec)
     snippet=""; prev=""
@@ -164,7 +164,12 @@ esac
 STUB
   chmod +x "$STUBDIR/sbx"
   printf 'probebox\n' > "$STUBDIR/.sandbox_list"
-  acq_backend_ensure_kits_applied probebox >/dev/null 2>&1 || true
+  (
+    unset EMAIL GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
+    unset GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+    HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" \
+      acq_backend_ensure_kits_applied probebox >/dev/null 2>&1 || true
+  )
   local log; log=$(cat "$CALLS")
   assert_regex "$log" '\.agentic-coding-playbook/AGENTS\.md'
   refute_regex "$log" '\.agentic-coding-playbook/\.git'
@@ -226,7 +231,7 @@ STUB
 #!/usr/bin/env bash
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
 case "${1:-}" in
-  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
   create) printf 'ERROR: create failed\n' >&2; exit 1 ;;
   exec) printf 'ok\n' ;;
   *) exit 0 ;;
@@ -246,7 +251,7 @@ STUB
 #!/usr/bin/env bash
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
 case "${1:-}" in
-  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
   ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
   exec)
     snippet=""; prev=""
