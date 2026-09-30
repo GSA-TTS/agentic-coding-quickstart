@@ -152,6 +152,16 @@ run/create flags:
                        scratch clone. Env equivalent: ACQ_CLONE=1. Applies at
                        create only. Note: a clone carries committed state only
                        (no gitignored/untracked files, no uncommitted edits).
+  --publish HOST:GUEST Reach the sandbox's GUEST port on a host port YOU choose,
+                       instead of the free one acq picks (repeatable; ADR-0034).
+                       Use it to give parallel sandboxes from one kit predictable,
+                       distinct addresses. Both sides are required. msb only —
+                       sbx assigns the host port itself. Create-time only: it
+                       becomes part of the create argv, so a re-attach cannot move
+                       it (`acq ports NAME --publish HOST:GUEST` adds a mapping to
+                       a running sandbox, over a tunnel rather than the guest IP).
+                       A host port already in use FAILS the create — acq never
+                       substitutes a different one for an explicit request.
 
 See docs/howto/acq.md and docs/BACKEND_GUIDE.md for more.
 HELP
@@ -238,7 +248,8 @@ _acq_simple_verb_usage() {
 acq run — create+attach a sandbox, or re-attach an existing one
 
 Usage:
-  acq run AGENT PATH [--kit REF]... [--image REF] [--clone] [--no-update-check] [-- AGENT_ARGS...]
+  acq run AGENT PATH [--kit REF]... [--image REF] [--clone] [--publish H:G]...
+          [--no-update-check] [-- AGENT_ARGS...]
   acq run NAME [-- AGENT_ARGS...]     # re-attach an existing sandbox by name
 
 Creates a sandbox for AGENT (e.g. opencode) mounted at PATH if one does not
@@ -253,7 +264,7 @@ U
 acq create — create a sandbox (detached; does not attach)
 
 Usage:
-  acq create AGENT PATH [--kit REF]... [--image REF] [--clone]
+  acq create AGENT PATH [--kit REF]... [--image REF] [--clone] [--publish H:G]...
 
 Provisions a sandbox for AGENT mounted at PATH and applies the pinned kits, then
 returns without attaching. Attach later with `acq run NAME`.
@@ -871,6 +882,33 @@ case "$subcommand" in
       export ACQ_CLONE=1
     fi
     set -- ${ACQ_CLONE_REMAINING[@]+"${ACQ_CLONE_REMAINING[@]}"}
+    # Extract acq-owned `--publish HOST:GUEST` (ADR-0034), repeatable, the same
+    # way: `msb create` has its own `-p` (which the msb adapter synthesizes from
+    # kit records, folding these overrides in), and `sbx create` has no host-port
+    # knob at all, so the raw flag must never reach a backend CLI. A malformed
+    # value aborts here rather than creating a sandbox missing a mapping the user
+    # asked for. Only honored BEFORE `--`.
+    extract_publish_flags "$@" || exit 1
+    set -- ${ACQ_PUBLISH_REMAINING[@]+"${ACQ_PUBLISH_REMAINING[@]}"}
+    if [ "${#ACQ_PUBLISH_FLAGS[@]}" -gt 0 ]; then
+      # A create-time host-port override only means something on a backend that
+      # CHOOSES the host port. sbx assigns it itself and exposes no knob (its
+      # kit-spec ports block keys on the guest port only), so honoring the flag
+      # there would be a lie. Refuse explicitly — and name the post-hoc verb,
+      # which does work on both backends — rather than silently ignore it.
+      if [ "${ACQ_RESOLVED_BACKEND}" = "sbx" ]; then
+        echo "acq: --publish is not supported on the sbx backend: sbx chooses the host" >&2
+        echo "     port for a published guest port itself and offers no way to request" >&2
+        echo "     one at create time. Read the assigned mapping with 'acq ports NAME'," >&2
+        echo "     or open a tunnel on a port you choose with" >&2
+        echo "     'acq ports NAME --publish HOST:GUEST' after the sandbox is up." >&2
+        exit 1
+      fi
+      # No export: the backend adapter is SOURCED into this shell, so it reads
+      # ACQ_PUBLISH_FLAGS directly (like ACQ_CLI_KITS). Deliberately NOT an env
+      # var — the override is per-launch by design, and a sticky exported value
+      # would silently re-pin the host port of every later sandbox in the shell.
+    fi
     extract_kit_flags "$@"
     [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _build_kit_list   # re-fold with CLI kits
     # Rebuild positional args as: <subcommand> <remaining args w/o --kit>.
@@ -979,6 +1017,16 @@ case "$subcommand" in
           echo "acq: note: --clone/ACQ_CLONE is ignored when re-attaching an existing sandbox" \
                "('$local_name'); it applies only at create. Remove the sandbox first" \
                "('acq rm $local_name') to recreate on a disposable clone." >&2
+        fi
+        # Same create-time-only contract for --publish (ADR-0034): the host↔guest
+        # mapping is fixed in the backend's create argv, so a re-attach cannot
+        # move it. Point at the post-hoc verb, which CAN add a mapping to a
+        # running sandbox (over a different transport — see ADR-0015).
+        if [ "${#ACQ_PUBLISH_FLAGS[@]}" -gt 0 ]; then
+          echo "acq: note: --publish is ignored when re-attaching an existing sandbox" \
+               "('$local_name'); the host port mapping is fixed at create. Use" \
+               "'acq ports $local_name --publish HOST:GUEST' to add one now, or remove" \
+               "the sandbox first ('acq rm $local_name') to recreate with it." >&2
         fi
         # Capture staleness BEFORE the heal — ensure_kits_applied rewrites the
         # provenance record to "current", so reading status after it would never

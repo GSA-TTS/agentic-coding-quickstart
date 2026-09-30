@@ -2898,6 +2898,29 @@ $(kit_spec_volumes "$spec")"
     _acq_msb_stage_startup_script "$spec" create_flags
   done
 
+  # CLI host-port overrides (`acq run/create --publish HOST:GUEST`, ADR-0034) are
+  # appended AFTER every kit's records, so the guest-keyed last-wins dedupe below
+  # makes them win: the user's launch-time choice outranks the kit's declaration
+  # (and outranks the free port acq would otherwise pick). Values are validated at
+  # the acq layer (_acq_validate_publish_pair) before reaching this argv.
+  local _pub
+  for _pub in ${ACQ_PUBLISH_FLAGS[@]+"${ACQ_PUBLISH_FLAGS[@]}"}; do
+    case "
+$_portrecs" in
+      *"
+${_pub#*:}	"*) : ;;   # some kit publishes this guest port — plain override
+      *)
+        # No kit declared it. Publish anyway (an explicit request is honored) but
+        # say so: a mistyped guest port would otherwise map a port with nothing
+        # behind it, and look like a working publish.
+        echo "acq(msb): note: --publish ${_pub}: no applied kit declares guest port" \
+             "${_pub#*:}; publishing it anyway." >&2
+        ;;
+    esac
+    _portrecs="${_portrecs}
+$(printf '%s\t\t\t%s' "${_pub#*:}" "${_pub%%:*}")"
+  done
+
   # Published ports (ADR-0014, ADR-0034) → create-time `-p HOST:GUEST` flags,
   # from the union of every kit's records (last wins by guest port). A record
   # whose host column is EMPTY gets a FREE loopback host port chosen per sandbox

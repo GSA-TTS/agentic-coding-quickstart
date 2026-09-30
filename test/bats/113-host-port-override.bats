@@ -166,3 +166,160 @@ REC
   local n; n=$(printf '%s\n' "$line" | grep -o -- '-p [0-9]*:5000' | wc -l | tr -d ' ')
   assert_equal "$n" "1"
 }
+
+# ---------------------------------------------------------------------------
+# Part B — `acq run/create --publish HOST:GUEST`
+# ---------------------------------------------------------------------------
+# These drive the REAL acq entry point as a child process, so they also prove the
+# acq-owned flag never survives onto the backend argv.
+
+# Run acq as a child with a stored USAi key. Extra `KEY=VAL` env assignments
+# precede the acq argv after a literal `--`. Usage:
+#   _acq_child [KEY=VAL...] -- ARGS...
+_acq_child() {
+  local _env=() ; while [ "$1" != "--" ]; do _env+=("$1"); shift; done; shift
+  run bash -c '
+    tag="$1"; shift
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-$tag"
+    export ACQ_MSB_KIT_PASSTHROUGH=1
+    while [ "$1" != "--" ]; do export "$1"; shift; done; shift
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    printf "USAI-REAL\n" | acq_secret_store "$(_acq_secret_key usai)"
+    "'"$ACQ"'" "$@" 2>&1
+  ' _ "$BATS_TEST_NUMBER" ${_env[@]+"${_env[@]}"} -- "$@"
+}
+_msb_create_line() { grep '^msb create' "$CALLS" | head -n1; }
+
+@test "publish(B): --publish H:G emits a create-time -p H:G and never reaches msb argv" {
+  local proj="$STUBDIR/pubproj"; mkdir -p "$proj"
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb -- create shell --publish 6868:6767 "$proj"
+  local line; line=$(_msb_create_line)
+  assert_regex "$line" '\-p 6868:6767'
+  # The acq-owned flag itself must never survive onto the backend argv.
+  refute_regex "$line" '\-\-publish'
+  refute_regex "$(cat "$CALLS")" '\-\-publish'
+}
+
+@test "publish(B): repeatable, and the =VALUE form is intercepted too" {
+  local proj="$STUBDIR/pubproj2"; mkdir -p "$proj"
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb -- create shell --publish 6868:6767 --publish=7070:3000 "$proj"
+  local line; line=$(_msb_create_line)
+  assert_regex "$line" '\-p 6868:6767'
+  assert_regex "$line" '\-p 7070:3000'
+  refute_regex "$line" '\-\-publish'
+}
+
+@test "publish(B): a --publish overrides a kit entry that left host: unset" {
+  local proj="$STUBDIR/pubproj3"; mkdir -p "$proj"
+  local k; k=$(_pp_kit ovkit 6767)
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb -- create shell --kit "$k" --publish 6868:6767 "$proj"
+  local line; line=$(_msb_create_line)
+  assert_regex "$line" '\-p 6868:6767'
+  # Exactly ONE mapping for guest 6767: the override replaces the chosen port
+  # rather than adding a second, conflicting -p.
+  local n; n=$(printf '%s\n' "$line" | grep -o -- '-p [0-9]*:6767' | wc -l | tr -d ' ')
+  assert_equal "$n" "1"
+}
+
+@test "publish(B): a --publish also overrides a kit's PINNED host: port" {
+  local proj="$STUBDIR/pubproj4"; mkdir -p "$proj"
+  local k; k=$(_pp_kit pinovkit 3000 8080)
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb -- create shell --kit "$k" --publish 9090:3000 "$proj"
+  local line; line=$(_msb_create_line)
+  assert_regex "$line" '\-p 9090:3000'
+  refute_regex "$line" '\-p 8080:3000'
+}
+
+@test "publish(B): a guest port no kit declares is published, with a note" {
+  local proj="$STUBDIR/pubproj5"; mkdir -p "$proj"
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb -- create shell --publish 6868:6767 "$proj"
+  assert_output --partial 'no applied kit declares guest port 6767'
+  assert_regex "$(_msb_create_line)" '\-p 6868:6767'
+}
+
+@test "publish(B): a contended --publish host port fails the create, no fallback" {
+  local proj="$STUBDIR/pubproj6"; mkdir -p "$proj"
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb ACQ_MSB_HOST_PORTS_BUSY=6868 -- \
+    create shell --publish 6868:6767 "$proj"
+  assert_failure
+  assert_output --partial 'host port 6868'
+  assert_output --partial 'already'
+  # Nothing was created, and certainly not on some other host port.
+  refute_regex "$(cat "$CALLS")" '\-p [0-9]+:6767'
+}
+
+@test "publish(B): --publish AFTER the -- separator passes through to the agent" {
+  local proj="$STUBDIR/pubproj7"; mkdir -p "$proj"
+  : > "$CALLS"
+  # STUB_AGENT_PRESENT + STUB_RECORDED_AGENT: without them the stub reports the
+  # agent binary missing / unrecorded and the attach falls back to a plain login
+  # shell, dropping the agent args we are here to observe.
+  _acq_child ACQ_BACKEND=msb STUB_AGENT_PRESENT=1 STUB_RECORDED_AGENT=opencode -- \
+    run opencode "$proj" -- --publish 6868:6767
+  local log; log=$(cat "$CALLS")
+  # Forwarded verbatim to the inner agent invocation ...
+  assert_regex "$log" '\-\-publish 6868:6767'
+  # ... and NOT interpreted as an acq host-port override.
+  refute_regex "$(_msb_create_line)" '\-p 6868:6767'
+
+  # Guard against a vacuous pass: the SAME flag placed BEFORE the separator must
+  # be consumed by acq and become a mapping, so this test would notice if the
+  # extraction simply never ran.
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb STUB_AGENT_PRESENT=1 STUB_RECORDED_AGENT=opencode -- \
+    run opencode --publish 6868:6767 "$proj"
+  assert_regex "$(_msb_create_line)" '\-p 6868:6767'
+  refute_regex "$(cat "$CALLS")" '\-\-publish'
+}
+
+@test "publish(B): --publish is refused on sbx, naming the post-hoc verb" {
+  local proj="$STUBDIR/pubproj8"; mkdir -p "$proj"
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=sbx -- create shell --publish 6868:6767 "$proj"
+  assert_failure
+  assert_output --partial 'not supported on the sbx backend'
+  assert_output --partial 'acq ports'
+  # Refused BEFORE anything was created.
+  refute_regex "$(cat "$CALLS")" '^sbx create'
+}
+
+@test "publish(B): --publish on a re-attach says it is ignored (create-time only)" {
+  local proj="$STUBDIR/pubproj9"; mkdir -p "$proj"
+  printf 'reattachbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'reattachbox\n' > "$STUBDIR/.msb_running_list"
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb -- run shell --name reattachbox --publish 6868:6767 "$proj"
+  assert_output --partial '--publish is ignored when re-attaching'
+  assert_output --partial 'acq ports reattachbox --publish'
+  refute_regex "$(cat "$CALLS")" '^msb create'
+}
+
+@test "publish(B): malformed values fail with a usable message and create nothing" {
+  local proj="$STUBDIR/pubprojbad"; mkdir -p "$proj"
+  local bad
+  for bad in 6868 abc:6767 6767:abc 99999:6767 6767:99999 0:6767 06868:6767; do
+    : > "$CALLS"
+    _acq_child ACQ_BACKEND=msb -- create shell --publish "$bad" "$proj"
+    assert_failure
+    assert_output --partial "--publish"
+    refute_regex "$(cat "$CALLS")" '^msb create'
+  done
+
+  # A trailing --publish with no value at all.
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb -- create shell "$proj" --publish
+  assert_failure
+  assert_output --partial 'no value'
+
+  # Two --publish flags fighting over one guest port.
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb -- create shell --publish 6868:6767 --publish 6869:6767 "$proj"
+  assert_failure
+  assert_output --partial 'already mapped to host port 6868'
+}
