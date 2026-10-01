@@ -70,6 +70,17 @@ repos:
   # (test/bats/*.bats) reuse the stub library scripts/test-acq-lib.sh via
   # test/bats/helper.bash, so a change to acq, the adapters, the stub library, or
   # any test re-runs it.
+  #
+  # ONE DELIBERATE EXCEPTION: test/bats/101-sbx-grammar-acceptance.bats does NOT
+  # call acq_setup_stubs, because the single thing it asserts is that the REAL
+  # sbx accepts the kit grammar acq's translator emits (#529). The stub cannot
+  # answer that — its fallthrough is `*) exit 0`, so `sbx kit validate` against
+  # it reports success for any input, including a malformed spec. That file still
+  # honors the offline contract: `sbx kit validate` is a local, read-only
+  # validator (no sandbox, no container, no network, no registry), and when sbx
+  # is absent — as on every GitHub-hosted runner — each of its tests SKIPS with a
+  # reason rather than passing. So the suite stays safe in CI and this hook needs
+  # no gating.
   - repo: local
     hooks:
       - id: test-acq
