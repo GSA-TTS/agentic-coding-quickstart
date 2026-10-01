@@ -12,25 +12,40 @@
 #
 # shellcheck shell=bats
 
-setup() { acq_setup_stubs; load_acq; }
+setup() {
+  acq_setup_stubs
+  load_acq
+  command -v python3 >/dev/null 2>&1 || skip "python3 unavailable for ssh listener stub"
+}
 teardown() { acq_teardown_stubs; }
 
 load 'helper'
 
+free_tcp_port() {
+  python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+}
+
 @test "msb ports: publish generates+authorizes the acq key once, serves, and opens the -L tunnel" {
+  local hport; hport=$(free_tcp_port)
   run bash -c '
     export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
     export ACQ_MSB_FORCE_SERVE_PORT=54321
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
+    acq_backend_ports pbox --publish "$1:3000" >/dev/null 2>&1
     wait
-  '
+  ' _ "$hport"
   local log; log=$(cat "$CALLS")
   assert_regex "$log" "ssh-keygen -t ed25519 -N  -f $STUBDIR/state/ssh/msb_id_ed25519"
   assert_regex "$log" "msb ssh authorize --file $(host_path "$STUBDIR/state/ssh/msb_id_ed25519.pub")"
   assert_regex "$log" 'msb ssh serve pbox --host 127.0.0.1 --port 54321'
-  assert_regex "$log" -- '-L 127.0.0.1:8080:127.0.0.1:3000'
+  assert_regex "$log" -- "-L 127.0.0.1:${hport}:127.0.0.1:3000"
   assert_regex "$log" -- "-i $STUBDIR/state/ssh/msb_id_ed25519"
   assert_regex "$log" "UserKnownHostsFile=$STUBDIR/state/ssh/known_hosts"
   assert_regex "$log" 'IdentitiesOnly=yes'
@@ -73,79 +88,89 @@ MSBPIDSTUB
 }
 
 @test "msb ports(S2): a serve that dies immediately fails the publish, no state recorded" {
+  local hport; hport=$(free_tcp_port)
   run bash -c '
     export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_MSB_SERVE_DIE=1
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_ports pbox --publish 8080:3000 2>&1
+    acq_backend_ports pbox --publish "$1:3000" 2>&1
     echo "RC=$?"
     wait
-  '
+  ' _ "$hport"
   assert_output --partial 'RC=1'
   refute_output --partial 'published host'
   assert [ ! -f "$STUBDIR/state/ports/pbox.pids" ]
 }
 
 @test "msb ports(S2): a forward that dies immediately fails the publish, no state recorded" {
+  local hport; hport=$(free_tcp_port)
   run bash -c '
     export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_SSH_DIE=1
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_ports pbox --publish 8080:3000 2>&1
+    acq_backend_ports pbox --publish "$1:3000" 2>&1
     echo "RC=$?"
     wait
-  '
+  ' _ "$hport"
   assert_output --partial 'RC=1'
   refute_output --partial 'published host'
   assert [ ! -f "$STUBDIR/state/ports/pbox.pids" ]
 }
 
 @test "msb ports(S2): a forward with no host listener fails the publish, no state recorded" {
+  local hport; hport=$(free_tcp_port)
   run bash -c '
     export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_SSH_NO_LISTENER=1
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_ports pbox --publish 8080:3000 2>&1
+    acq_backend_ports pbox --publish "$1:3000" 2>&1
     echo "RC=$?"
     wait
-  '
+  ' _ "$hport"
   assert_output --partial 'RC=1'
-  assert_output --partial 'did not open host listener 127.0.0.1:8080'
+  assert_output --partial "did not open host listener 127.0.0.1:${hport}"
   refute_output --partial 'published host'
   assert [ ! -f "$STUBDIR/state/ports/pbox.pids" ]
 }
 
 @test "msb ports: a second publish reuses the key, refreshes auth, and opens its own tunnel" {
+  local hport1 hport2
+  hport1=$(free_tcp_port)
+  hport2=$(free_tcp_port)
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
+    acq_backend_ports pbox --publish "$1:3000" >/dev/null 2>&1
     wait
     : > "'"$CALLS"'"
-    acq_backend_ports pbox --publish 9090:4000 >/dev/null 2>&1
+    acq_backend_ports pbox --publish "$2:4000" >/dev/null 2>&1
     wait
-  '
+  ' _ "$hport1" "$hport2"
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'ssh-keygen'
   assert_regex "$log" 'msb ssh authorize'
-  assert_regex "$log" -- '-L 127.0.0.1:9090:127.0.0.1:4000'
+  assert_regex "$log" -- "-L 127.0.0.1:${hport2}:127.0.0.1:4000"
 }
 
 @test "msb ports: stale acq authorization marker does not skip msb authorize" {
+  local hport; hport=$(free_tcp_port)
   mkdir -p "$STUBDIR/state/ssh"
   : > "$STUBDIR/state/ssh/.authorized"
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_ports pbox --publish 8080:3000 >/dev/null 2>&1
+    acq_backend_ports pbox --publish "$1:3000" >/dev/null 2>&1
     wait
-  '
+  ' _ "$hport"
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'msb ssh authorize'
 }
 
 @test "msb ports: two publishes in one process get distinct serve ports" {
+  local hport1 hport2
+  hport1=$(free_tcp_port)
+  hport2=$(free_tcp_port)
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_ports mpbox --publish 8080:3000 >/dev/null 2>&1
-    acq_backend_ports mpbox --publish 9090:4000 >/dev/null 2>&1
+    acq_backend_ports mpbox --publish "$1:3000" >/dev/null 2>&1
+    acq_backend_ports mpbox --publish "$2:4000" >/dev/null 2>&1
     wait
-  '
+  ' _ "$hport1" "$hport2"
   local lines ports
   lines=$(wc -l < "$STUBDIR/state/ports/mpbox.pids" | tr -d ' ')
   ports=$(awk '{print $3}' "$STUBDIR/state/ports/mpbox.pids" | sort -u | wc -l | tr -d ' ')
@@ -171,19 +196,22 @@ MSBPIDSTUB
 }
 
 @test "msb ports: rm and stop tear down recorded port state; un-published teardown is a no-op" {
+  local hport1 hport2
+  hport1=$(free_tcp_port)
+  hport2=$(free_tcp_port)
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_ports rmbox --publish 8080:3000 >/dev/null 2>&1
+    acq_backend_ports rmbox --publish "$1:3000" >/dev/null 2>&1
     [ -f "'"$STUBDIR"'/state/ports/rmbox.pids" ] || exit 3
     acq_backend_terminate rmbox >/dev/null 2>&1
-  '
+  ' _ "$hport1"
   assert [ ! -f "$STUBDIR/state/ports/rmbox.pids" ]
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_backend_ports stopbox --publish 7000:7000 >/dev/null 2>&1
+    acq_backend_ports stopbox --publish "$1:7000" >/dev/null 2>&1
     acq_backend_stop stopbox >/dev/null 2>&1
     acq_backend_terminate neverbox >/dev/null 2>&1
-  '
+  ' _ "$hport2"
   assert_success
   assert [ ! -f "$STUBDIR/state/ports/stopbox.pids" ]
 }
