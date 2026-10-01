@@ -1471,6 +1471,38 @@ _acq_msb_probe_unknown_notice() {
   return 0
 }
 
+# Return 0 if the explicitly requested host port HOST may be mapped to GUEST,
+# 1 (with the reason on stderr) if not. TAKEN is the space-separated list of host
+# ports this create already maps. Usage:
+#   _acq_msb_explicit_host_ok HOST GUEST TAKEN
+_acq_msb_explicit_host_ok() {
+  local _host="$1" _guest="$2" _taken="$3"
+  # Nothing is bound until msb create runs, so the probe below cannot see a
+  # host port this same create already maps (two `--publish` pins, or a pin
+  # and a kit's `host:`). Refuse it here instead of handing msb two `-p`
+  # flags for one host port.
+  case " $_taken " in
+    *" $_host "*)
+      echo "acq(msb): error: host port ${_host} is requested for more than one guest" >&2
+      echo "          port (again for guest port ${_guest}). Give each its own host port." >&2
+      return 1
+      ;;
+  esac
+  case "$(_acq_msb_host_port_status "$_host")" in
+    busy)
+      echo "acq(msb): error: host port ${_host} (for guest port ${_guest}) is already" >&2
+      echo "          in use on 127.0.0.1. acq will not substitute a different port for" >&2
+      echo "          an explicitly requested one. Free it, or request another host port." >&2
+      return 1
+      ;;
+    # Unprobeable: publish the requested port (the behavior before this check
+    # existed) but say so. An EXPLICIT request is the case where a wrong
+    # answer is most visible to the caller, so it must not be the quiet one.
+    unknown) _acq_msb_probe_unknown_notice ;;
+  esac
+  return 0
+}
+
 # Turn validated `guest<TAB>proto<TAB>name<TAB>host` records on STDIN into
 # create-time `-p HOST:GUEST` flags in the named array. Usage:
 #   _acq_msb_port_flags_from_records ARRVAR <<EOF ... records ... EOF
@@ -1517,31 +1549,7 @@ _acq_msb_port_flags_from_records() {
         ;;
     esac
     if [ -n "$_host" ]; then
-      # Nothing is bound until msb create runs, so the probe below cannot see a
-      # host port this same create already maps (two `--publish` pins, or a pin
-      # and a kit's `host:`). Refuse it here instead of handing msb two `-p`
-      # flags for one host port.
-      case " $_taken " in
-        *" $_host "*)
-          echo "acq(msb): error: host port ${_host} is requested for more than one guest" >&2
-          echo "          port (again for guest port ${_guest}). Give each its own host port." >&2
-          _rc=1
-          continue
-          ;;
-      esac
-      case "$(_acq_msb_host_port_status "$_host")" in
-        busy)
-          echo "acq(msb): error: host port ${_host} (for guest port ${_guest}) is already" >&2
-          echo "          in use on 127.0.0.1. acq will not substitute a different port for" >&2
-          echo "          an explicitly requested one. Free it, or request another host port." >&2
-          _rc=1
-          continue
-          ;;
-        # Unprobeable: publish the requested port (the behavior before this check
-        # existed) but say so. An EXPLICIT request is the case where a wrong
-        # answer is most visible to the caller, so it must not be the quiet one.
-        unknown) _acq_msb_probe_unknown_notice ;;
-      esac
+      _acq_msb_explicit_host_ok "$_host" "$_guest" "$_taken" || { _rc=1; continue; }
     else
       _prc=0
       _host=$(_acq_msb_pick_free_host_port "$_taken") || _prc=$?

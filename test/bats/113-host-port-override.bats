@@ -456,7 +456,9 @@ _msb_create_line() { grep '^msb create' "$CALLS" | head -n1; }
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     # shellcheck source=acq.backends/msb.sh
     . "${REPO_ROOT}/acq.backends/msb.sh"
+    # shellcheck disable=SC2034  # consumed by the sourced acq_backend_provision
     ACQ_CLI_KITS=("$k")
+    # shellcheck disable=SC2034  # consumed by the sourced acq_backend_provision
     ACQ_PUBLISH_FLAGS=(6868:6767)
     _acq_msb_fetch_kit() { printf '%s\n' "$k"; }
     # Both host ports are held by the real sandbox; the key check must not
