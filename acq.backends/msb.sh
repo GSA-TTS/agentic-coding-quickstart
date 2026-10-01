@@ -1430,7 +1430,11 @@ _acq_msb_host_port_status() {
 
 # Echo a host port that is free right now, for a published guest port whose kit
 # left `host:` unspecified. Reuses the existing loopback-range picker and probes
-# each candidate, retrying a busy one a bounded number of times. Returns:
+# each candidate, retrying a busy one a bounded number of times. Candidates in
+# the space-separated TAKEN list (ports this create already maps, not yet bound,
+# so the probe would call them free) are skipped. Usage:
+#   _acq_msb_pick_free_host_port [TAKEN]
+# Returns:
 #   0 — the echoed port probed FREE
 #   2 — the echoed port could not be probed (acq cannot tell; the caller decides
 #       whether to say so — it must, because the caller is not a subshell and
@@ -1439,10 +1443,11 @@ _acq_msb_host_port_status() {
 #       _ACQ_MSB_PORT_SEQ_FILE exists to avoid)
 #   1 — every candidate was busy; the caller must fail the create
 _acq_msb_pick_free_host_port() {
-  local _try=0 _p
+  local _taken=" ${1:-} " _try=0 _p
   while [ "$_try" -lt 12 ]; do
     _try=$(( _try + 1 ))
     _p=$(_acq_msb_pick_ephemeral_port)
+    case "$_taken" in *" $_p "*) continue ;; esac
     case "$(_acq_msb_host_port_status "$_p")" in
       busy)    continue ;;
       unknown) printf '%s\n' "$_p"; return 2 ;;
@@ -1491,7 +1496,7 @@ _acq_msb_probe_unknown_notice() {
 # Returns non-zero if any record could not be mapped; the caller must abort the
 # create rather than bring up a sandbox with a missing port.
 _acq_msb_port_flags_from_records() {
-  local _arr="$1" _rec _guest _host _rc=0 _prc
+  local _arr="$1" _rec _guest _host _rc=0 _prc _taken=""
   eval "$_arr=()"
   # Parse fields with cut, NOT `IFS=<tab> read`: tab is IFS whitespace, so a
   # bare read COLLAPSES adjacent empty fields — an entry with guest + host but
@@ -1512,6 +1517,18 @@ _acq_msb_port_flags_from_records() {
         ;;
     esac
     if [ -n "$_host" ]; then
+      # Nothing is bound until msb create runs, so the probe below cannot see a
+      # host port this same create already maps (two `--publish` pins, or a pin
+      # and a kit's `host:`). Refuse it here instead of handing msb two `-p`
+      # flags for one host port.
+      case " $_taken " in
+        *" $_host "*)
+          echo "acq(msb): error: host port ${_host} is requested for more than one guest" >&2
+          echo "          port (again for guest port ${_guest}). Give each its own host port." >&2
+          _rc=1
+          continue
+          ;;
+      esac
       case "$(_acq_msb_host_port_status "$_host")" in
         busy)
           echo "acq(msb): error: host port ${_host} (for guest port ${_guest}) is already" >&2
@@ -1527,7 +1544,7 @@ _acq_msb_port_flags_from_records() {
       esac
     else
       _prc=0
-      _host=$(_acq_msb_pick_free_host_port) || _prc=$?
+      _host=$(_acq_msb_pick_free_host_port "$_taken") || _prc=$?
       if [ "$_prc" -eq 1 ]; then
         echo "acq(msb): error: could not find a free host port for guest port ${_guest}." >&2
         _rc=1
@@ -1536,6 +1553,7 @@ _acq_msb_port_flags_from_records() {
       # _prc 2 == the probe could not run; same "publish, but say so" contract.
       [ "$_prc" -eq 2 ] && _acq_msb_probe_unknown_notice
     fi
+    _taken="${_taken} ${_host}"
     eval "$_arr+=(-p \"\${_host}:\${_guest}\")"
   done
   return "$_rc"
@@ -2920,8 +2938,12 @@ $(kit_spec_volumes "$spec")"
   # makes them win: the user's launch-time choice outranks the kit's declaration
   # (and outranks the free port acq would otherwise pick). Values are validated at
   # the acq layer (_acq_validate_publish_pair) before reaching this argv.
+  # A caller that needs no ports (the throwaway key-check sandbox, see
+  # check_fresh_sandbox_key) drops them all, CLI overrides included.
+  [ "${_ACQ_PROVISION_WITHOUT_PORTS:-0}" = "1" ] && _portrecs=""
   local _pub
   for _pub in ${ACQ_PUBLISH_FLAGS[@]+"${ACQ_PUBLISH_FLAGS[@]}"}; do
+    [ "${_ACQ_PROVISION_WITHOUT_PORTS:-0}" = "1" ] && break
     case "
 $_portrecs" in
       *"

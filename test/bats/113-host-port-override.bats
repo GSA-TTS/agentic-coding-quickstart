@@ -402,3 +402,68 @@ _msb_create_line() { grep '^msb create' "$CALLS" | head -n1; }
   assert_output --partial 'recognized only AFTER the subcommand'
   assert_output --partial '--publish'
 }
+
+@test "publish(B): --publish on a re-attach BY NAME says it is ignored too" {
+  printf 'namebox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'namebox\n' > "$STUBDIR/.msb_running_list"
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb -- run namebox --publish 6868:6767
+  assert_output --partial '--publish is ignored when re-attaching'
+  assert_output --partial 'acq ports namebox --publish'
+  refute_regex "$(cat "$CALLS")" '^msb create'
+}
+
+@test "publish(B): one host port requested for two guest ports fails the create" {
+  local proj="$STUBDIR/pubprojdup"; mkdir -p "$proj"
+  : > "$CALLS"
+  # The probe sees nothing bound yet, so only an in-create check can catch this.
+  _acq_child ACQ_BACKEND=msb -- create shell --publish 7000:80 --publish 7000:443 "$proj"
+  assert_failure
+  assert_output --partial 'host port 7000 is requested for more than one guest'
+  refute_regex "$(cat "$CALLS")" '^msb create'
+
+  # A --publish pin that reuses a kit's pinned host: port for another guest port.
+  local k; k=$(_pp_kit duphostkit 3000 7000)
+  : > "$CALLS"
+  _acq_child ACQ_BACKEND=msb -- create shell --kit "$k" --publish 7000:6767 "$proj"
+  assert_failure
+  assert_output --partial 'host port 7000 is requested for more than one guest'
+  refute_regex "$(cat "$CALLS")" '^msb create'
+}
+
+@test "hostport(A): a chosen host port never reuses one this create already maps" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
+    export ACQ_MSB_HOST_PROBE_STUB=1
+    # The picker runs in a command substitution, so count calls in a file.
+    seq_file="'"$STUBDIR"'/pick-seq"; : > "$seq_file"
+    _acq_msb_pick_ephemeral_port() {
+      echo x >> "$seq_file"
+      [ "$(wc -l < "$seq_file")" -eq 1 ] && echo 41000 || echo 41001
+    }
+    _acq_msb_pick_free_host_port "40999 41000"
+  '
+  assert_success
+  assert_output "41001"
+}
+
+@test "publish(B): the throwaway key-check sandbox publishes no ports" {
+  local k; k=$(_pp_kit keycheckkit 3000 7000)
+  : > "$CALLS"
+  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-keycheck"
+    export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/stage-keycheck"
+    # shellcheck source=acq.backends/secret-store.sh
+    . "${REPO_ROOT}/acq.backends/secret-store.sh"
+    # shellcheck source=acq.backends/msb.sh
+    . "${REPO_ROOT}/acq.backends/msb.sh"
+    ACQ_CLI_KITS=("$k")
+    ACQ_PUBLISH_FLAGS=(6868:6767)
+    _acq_msb_fetch_kit() { printf '%s\n' "$k"; }
+    # Both host ports are held by the real sandbox; the key check must not
+    # contend for them.
+    export ACQ_MSB_HOST_PORTS_BUSY=6868,7000
+    check_fresh_sandbox_key ) >/dev/null 2>&1 || true
+  local line; line=$(grep '^msb create' "$CALLS" | head -n1)
+  assert_regex "$line" 'acq-keycheck-'
+  refute_regex "$line" '\-p '
+}

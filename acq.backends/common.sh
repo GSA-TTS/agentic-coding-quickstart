@@ -1049,6 +1049,19 @@ _acq_validate_publish_pair() {
   return 0
 }
 
+# --publish is create-time only (ADR-0034): the host↔guest mapping is fixed in
+# the backend's create argv, so a re-attach cannot move it. Say so on every
+# re-attach path rather than drop the flag silently, and point at the post-hoc
+# verb, which CAN add a mapping to a running sandbox (ADR-0015).
+note_publish_ignored_on_reattach() {
+  local name="$1"
+  [ "${#ACQ_PUBLISH_FLAGS[@]}" -gt 0 ] || return 0
+  echo "acq: note: --publish is ignored when re-attaching an existing sandbox" \
+       "('$name'); the host port mapping is fixed at create. Use" \
+       "'acq ports $name --publish HOST:GUEST' to add one now, or remove" \
+       "the sandbox first ('acq rm $name') to recreate with it." >&2
+}
+
 # Resolve the effective NEUTRAL base image per ADR-0022 precedence:
 #   --image flag  >  ACQ_IMAGE env  >  (empty)
 # The `--image` flag value is captured by extract_image_flag into ACQ_IMAGE_FLAG.
@@ -1850,6 +1863,11 @@ _classify_key_status() {
 check_fresh_sandbox_key() {
   local validation_name="acq-keycheck-$$"
   local status=""
+  # The throwaway sandbox only needs the USAi binding. Publishing ports would
+  # make it contend with the real sandbox for every explicit host port (a
+  # `--publish` pin or a kit's `host:`), fail its create, and silently skip this
+  # check. Dynamic scoping hands the flag to acq_backend_provision.
+  local _ACQ_PROVISION_WITHOUT_PORTS=1
 
   # Use the backend to create a minimal sandbox for validation.
   if ! acq_backend_provision "$validation_name" shell . </dev/null >/dev/null 2>&1; then

@@ -1028,16 +1028,8 @@ case "$subcommand" in
                "('$local_name'); it applies only at create. Remove the sandbox first" \
                "('acq rm $local_name') to recreate on a disposable clone." >&2
         fi
-        # Same create-time-only contract for --publish (ADR-0034): the host↔guest
-        # mapping is fixed in the backend's create argv, so a re-attach cannot
-        # move it. Point at the post-hoc verb, which CAN add a mapping to a
-        # running sandbox (over a different transport — see ADR-0015).
-        if [ "${#ACQ_PUBLISH_FLAGS[@]}" -gt 0 ]; then
-          echo "acq: note: --publish is ignored when re-attaching an existing sandbox" \
-               "('$local_name'); the host port mapping is fixed at create. Use" \
-               "'acq ports $local_name --publish HOST:GUEST' to add one now, or remove" \
-               "the sandbox first ('acq rm $local_name') to recreate with it." >&2
-        fi
+        # Same create-time-only contract for --publish (ADR-0034).
+        note_publish_ignored_on_reattach "$local_name"
         # Capture staleness BEFORE the heal — ensure_kits_applied rewrites the
         # provenance record to "current", so reading status after it would never
         # see stale/unknown and the offer below would be dead.
@@ -1134,6 +1126,7 @@ case "$subcommand" in
       # Capture staleness BEFORE the heal (the heal rewrites provenance to
       # "current"), then heal, then offer a refresh. Never
       # blocks; skipped under --no-update-check / ACQ_UPDATE_CHECK=0.
+      note_publish_ignored_on_reattach "$first"
       _pre_heal_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$first")
       # Reload persisted CLI (`--kit`) / extra kit refs so the heal re-runs their
       # startup on a name-only re-attach too (the user did not re-pass `--kit`
