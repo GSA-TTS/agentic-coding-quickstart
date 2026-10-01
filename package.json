@@ -2,7 +2,7 @@
   "name": "@gsa-tts/agentic-coding-quickstart",
   "//version": "Managed by release-please via extra-files in release-please-config.json; do not edit by hand.",
   "version": "3.1.0",
-  "description": "acq — run AI coding agents inside a federally-configured sandbox (SBX or MSB) with USAi endpoints",
+  "description": "acq \u2014 run AI coding agents inside a federally-configured sandbox (SBX or MSB) with USAi endpoints",
   "type": "module",
   "bin": {
     "acq": "acq"
@@ -12,7 +12,7 @@
     "acq.backends/"
   ],
   "scripts": {
-    "lint:md": "npx --prefix .github/linters markdownlint-cli2 '**/*.md' '#node_modules' '#.github/linters/node_modules' '#CHANGELOG.md' '#tmp' '#test/vendor'",
+    "lint:md": "npx --prefix .github/linters markdownlint-cli2",
     "lint:secrets": "gitleaks detect --source .",
     "lint": "npm run lint:md",
     "check": "pre-commit run --all-files"
