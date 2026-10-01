@@ -34,6 +34,9 @@ load 'helper'
   assert_regex "$log" -- "-i $STUBDIR/state/ssh/msb_id_ed25519"
   assert_regex "$log" "UserKnownHostsFile=$STUBDIR/state/ssh/known_hosts"
   assert_regex "$log" 'IdentitiesOnly=yes'
+  assert_regex "$log" 'BatchMode=yes'
+  assert_regex "$log" 'NumberOfPasswordPrompts=0'
+  assert_regex "$log" -- '-n'
   assert_regex "$log" -- '-F none'
   assert [ -f "$STUBDIR/state/ports/pbox.pids" ]
 }
@@ -91,6 +94,20 @@ MSBPIDSTUB
     wait
   '
   assert_output --partial 'RC=1'
+  refute_output --partial 'published host'
+  assert [ ! -f "$STUBDIR/state/ports/pbox.pids" ]
+}
+
+@test "msb ports(S2): a forward with no host listener fails the publish, no state recorded" {
+  run bash -c '
+    export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_SSH_NO_LISTENER=1
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_ports pbox --publish 8080:3000 2>&1
+    echo "RC=$?"
+    wait
+  '
+  assert_output --partial 'RC=1'
+  assert_output --partial 'did not open host listener 127.0.0.1:8080'
   refute_output --partial 'published host'
   assert [ ! -f "$STUBDIR/state/ports/pbox.pids" ]
 }
