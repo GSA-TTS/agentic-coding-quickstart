@@ -148,6 +148,26 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   `ACQ_BATS_JOBS=<n>`, or force serial with `ACQ_BATS_JOBS=1` (handy when
   debugging a failure, so TAP output isn't interleaved).
 
+  **One file is deliberately not stubbed.**
+  `test/bats/101-sbx-grammar-acceptance.bats` asserts that the **real** `sbx`
+  still accepts the kit grammar acq's translator emits. The stub cannot answer
+  that question — its fallthrough case is `*) exit 0`, so `sbx kit validate`
+  against the stub reports success for any input, including a malformed spec.
+  When `sbx` is absent its tests **skip with a reason** rather than passing, so a
+  run without `sbx` reports *"could not check"*, never *"accepted"*. The live
+  verifier `scripts/verify-backends` runs this file as a required sbx preflight
+  when `sbx` is installed, so a sandbox-capable sbx validation fails if grammar
+  acceptance could not be measured. It stays within the offline contract: `sbx
+  kit validate` is a local read-only validator and creates no sandbox, container,
+  network request, or registry push.
+
+  > **Watch for a shadowed `env`.** The bats launcher ends with
+  > `exec env … bats`. If a directory earlier on your `PATH` contains an `env`
+  > that is not the system one (some dotfile setups install a no-op stub at
+  > `~/.local/bin/env`), the whole suite exits **0 having run nothing** — a
+  > silent false green. If `./scripts/test-acq-bats` prints no TAP output, run
+  > it as `PATH="/usr/bin:$PATH" ./scripts/test-acq-bats` and compare.
+
 To verify the backends end-to-end against the **real** toolchain (requires a
 host that can create sandboxes — Docker for sbx, or KVM for msb):
 
