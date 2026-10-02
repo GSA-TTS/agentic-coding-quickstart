@@ -30,12 +30,34 @@ repos:
     hooks:
       - id: gitleaks
 
-  # Markdown linting
-  - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: 996abf60411a8d954288ac9856aae7602b80cbda  # v0.22.1
+  # Markdown linting. The version is pinned ONCE, in
+  # .github/linters/package.json (+ package-lock.json, which also carries the
+  # transitive overrides and is what `npm audit` gates in markdown-quality.yml).
+  # This hook delegates to that install instead of pinning a second time via a
+  # remote rev, so the two can never drift. Configuration AND file selection both
+  # come from .markdownlint-cli2.yaml. Mirrors agentic-coding-patterns#451.
+  #
+  # Unlike patterns/playbook, this repo runs `pre-commit run --all-files` in CI
+  # (.github/workflows/pre-commit.yml), so the DEFAULT hook must not rewrite
+  # files: `--fix` would mutate the checkout and CI would fail on "files were
+  # modified by this hook" instead of reporting the lint error. The default id is
+  # therefore check-only, and the fixing form is opt-in via
+  # `pre-commit run markdownlint-cli2-fix --hook-stage manual`.
+  - repo: local
     hooks:
       - id: markdownlint-cli2
-        args: ["--fix"]
+        name: markdownlint-cli2 (npm-pinned, check only)
+        entry: npx --prefix .github/linters markdownlint-cli2
+        language: system
+        types: [markdown]
+        pass_filenames: false
+      - id: markdownlint-cli2-fix
+        name: markdownlint-cli2 (npm-pinned, --fix)
+        entry: npx --prefix .github/linters markdownlint-cli2 --fix
+        language: system
+        types: [markdown]
+        pass_filenames: false
+        stages: [manual]
 
   # Shell script linting via the system shellcheck binary
   # (`brew install shellcheck` / `apt install shellcheck`; preinstalled on CI).
@@ -70,6 +92,17 @@ repos:
   # (test/bats/*.bats) reuse the stub library scripts/test-acq-lib.sh via
   # test/bats/helper.bash, so a change to acq, the adapters, the stub library, or
   # any test re-runs it.
+  #
+  # ONE DELIBERATE EXCEPTION: test/bats/101-sbx-grammar-acceptance.bats does NOT
+  # call acq_setup_stubs, because the single thing it asserts is that the REAL
+  # sbx accepts the kit grammar acq's translator emits. The stub cannot answer
+  # that — its fallthrough is `*) exit 0`, so `sbx kit validate` against
+  # it reports success for any input, including a malformed spec. That file still
+  # honors the offline contract: `sbx kit validate` is a local, read-only
+  # validator (no sandbox, no container, no network, no registry), and when sbx
+  # is absent — as on every GitHub-hosted runner — each of its tests SKIPS with a
+  # reason rather than passing. So the suite stays safe in CI and this hook needs
+  # no gating.
   - repo: local
     hooks:
       - id: test-acq
