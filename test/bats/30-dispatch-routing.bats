@@ -27,6 +27,58 @@ _seed_usai() {
   assert_regex "$(cat "$CALLS")" 'sbx ls'
 }
 
+@test "dispatch: ls does not fetch provider facts" {
+  run env ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none "$ACQ" ls
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb list'
+  refute_output --partial 'provider facts'
+}
+
+@test "dispatch: create falls back when provider facts cannot be fetched" {
+  local proj="$STUBDIR/provider-facts-offline"; mkdir -p "$proj"
+  rm -f "$STUBDIR/.msb_created"
+  run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
+    STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
+  assert_success
+  refute_output --partial 'invalid provider facts'
+  assert_regex "$(cat "$CALLS")" 'msb create'
+  assert [ -f "$STUBDIR/.msb_created" ]
+}
+
+@test "dispatch: run existing sandbox does not fetch provider facts" {
+  printf 'mybox\n' > "$STUBDIR/.msb_sandbox_list"
+  run env ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none "$ACQ" run mybox
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e SHELL=/bin/sh mybox -- /bin/sh -l'
+  refute_output --partial 'provider facts'
+}
+
+@test "dispatch: start falls back when provider facts cannot be fetched" {
+  run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
+    STUB_AGENT_USER_READY=1 "$ACQ" start mybox
+  assert_success
+  refute_output --partial 'invalid provider facts'
+  assert_regex "$(cat "$CALLS")" 'msb start mybox'
+}
+
+@test "secret: option-only import falls back when provider facts cannot be fetched" {
+  run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
+    ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
+    "$ACQ" secret import --all
+  assert_success
+  refute_output --partial 'provider facts'
+  assert_output --partial "imported 'usai'"
+}
+
+@test "secret: scoped non-USAi command does not fetch provider facts" {
+  run env ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none \
+    ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
+    GITHUB_TOKEN="github-token-stub" "$ACQ" secret set usai github
+  assert_success
+  refute_output --partial 'provider facts'
+  assert_output --partial "stored 'github'"
+}
+
 @test "shell: NAME -> interactive backend shell (sbx exec -it ... bash)" {
   run env ACQ_BACKEND=sbx "$ACQ" shell mybox
   assert_regex "$(cat "$CALLS")" 'sbx exec -it mybox bash'
@@ -151,7 +203,7 @@ _seed_usai() {
 @test "create(msb): host-exported USAI_API_KEY counts as present; provision proceeds" {
   local proj="$STUBDIR/kc-ci"; mkdir -p "$proj"
   rm -f "$STUBDIR/.msb_created"
-  run bash -c 'printf "" | USAI_API_KEY="sk-ci-host" ACQ_BACKEND=msb "$1" create opencode "$2"' _ "$ACQ" "$proj"
+  run bash -c 'printf "" | USAI_API_KEY="usai-key-stub" ACQ_BACKEND=msb "$1" create opencode "$2"' _ "$ACQ" "$proj"
   refute_output --partial 'no USAi API key stored'
   assert_regex "$(cat "$CALLS")" 'msb create'
   assert [ -f "$STUBDIR/.msb_created" ]
@@ -168,7 +220,7 @@ _seed_usai() {
   local ghproj="$STUBDIR/gh-mcreate"; mkdir -p "$ghproj"
   ( cd "$ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
   rm -f "$STUBDIR/.msb_created"
-  run bash -c 'printf "" | USAI_API_KEY="sk-ci-host" ACQ_BACKEND=msb ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$3/.secrets" "$1" create opencode "$2"' _ "$ACQ" "$ghproj" "$ghproj"
+  run bash -c 'printf "" | USAI_API_KEY="usai-key-stub" ACQ_BACKEND=msb ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$3/.secrets" "$1" create opencode "$2"' _ "$ACQ" "$ghproj" "$ghproj"
   assert_output --partial 'no repo-scoped GitHub token'
   assert_regex "$(cat "$CALLS")" 'msb create'
   assert [ -f "$STUBDIR/.msb_created" ]

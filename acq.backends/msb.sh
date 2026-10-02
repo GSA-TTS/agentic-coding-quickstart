@@ -1014,6 +1014,9 @@ EOF
 # matter for start.
 acq_backend_start() {
   local _name="$1"
+  if command -v acq_provider_facts_load_from_kit_or_fallback >/dev/null 2>&1; then
+    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+  fi
   local _start_secret_flags=() _start_secret_names=()
   _acq_msb_bind_secrets_into _start_secret_flags _start_secret_names "$_name"
   local _start_rc=0

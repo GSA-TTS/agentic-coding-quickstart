@@ -324,6 +324,33 @@ acq_provider_facts_load_from_kit() {
   esac
 }
 
+acq_provider_facts_use_fallback() {
+  USAI_PROVIDER_HOST="api.gsa.usai.gov"
+  USAI_PROVIDER_BASE_URL="https://${USAI_PROVIDER_HOST}/api/v1"
+  USAI_PROVIDER_KEY_ENV="USAI_API_KEY"
+  USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_BASE_URL}/models"
+  USAI_PROVIDER_KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
+  # shellcheck disable=SC2034  # consumed by adapters/tests after facts load
+  USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_HOST}"
+  # shellcheck disable=SC2034  # consumed by diagnostics/tests after facts load
+  USAI_PROVIDER_FACTS_SOURCE="fallback"
+}
+
+acq_provider_facts_load_from_kit_or_fallback() {
+  if acq_provider_facts_load_from_kit "$@" 2>/dev/null; then
+    :
+  else
+    acq_provider_facts_use_fallback
+    acq_debug "provider facts unavailable from kit; using transitional fallback defaults"
+  fi
+  # msb derives this adapter-local binding host when sourced, before lazy facts load.
+  if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ]; then
+    # shellcheck disable=SC2034  # consumed by msb adapter functions at dispatch
+    ACQ_MSB_USAI_HOST="$USAI_PROVIDER_BIND_HOSTS"
+  fi
+  return 0
+}
+
 # _acq_import_detect_var SERVICE -> prints the NAME of the FIRST of SERVICE's
 # candidate env vars that is set and non-empty; empty output (rc 1) if none is
 # set. Returns the variable NAME ONLY — never the value — so the secret value is
