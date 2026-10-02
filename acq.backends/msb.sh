@@ -5424,6 +5424,50 @@ acq_backend_secret_set() {
   return 0
 }
 
+acq_backend_secret_propagate() {
+  local service scope_name
+  _acq_msb_parse_secret_scope service scope_name "$@"
+  shift "$_ACQ_MSB_SCOPE_CONSUMED"
+
+  if [ -z "$service" ]; then
+    echo "acq(msb): secret propagate: missing service name" >&2
+    return 1
+  fi
+  if [ -n "$scope_name" ]; then
+    acq_backend_exists "$scope_name" || return 0
+  elif [ -z "$(_acq_msb_cli list -q 2>/dev/null)" ]; then
+    return 0
+  fi
+
+  local _env _host _binding applied eligible=0 _probe_val sb
+  _binding=$(_acq_msb_service_binding "$service" "$scope_name")
+  _env=$(printf '%s' "$_binding" | cut -f1)
+  _host=$(printf '%s' "$_binding" | cut -f2)
+  [ -n "$_env" ] && [ -n "$_host" ] || return 0
+  [ -z "${ACQ_SECRET_NO_LIVE_REFEED:-}" ] || return 0
+  if ! _probe_val=$(acq_secret_resolve "$service" "$scope_name" 2>/dev/null) || [ -z "$_probe_val" ]; then
+    echo "acq(msb): cannot propagate '$service'; no value is present in the acq secret store." >&2
+    return 1
+  fi
+  _probe_val=""
+  if [ -n "$scope_name" ]; then
+    eligible=1
+  else
+    while IFS= read -r sb; do
+      [ -n "$sb" ] && eligible=$((eligible + 1))
+    done <<EOF
+$(_acq_msb_cli list -q 2>/dev/null)
+EOF
+  fi
+  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
+  if [ "$applied" -gt 0 ]; then
+    echo "acq(msb): applied '$service' to $applied running sandbox(es)." >&2
+  elif [ "$eligible" -gt 0 ]; then
+    echo "acq(msb): failed to apply '$service' to existing sandbox(es)." >&2
+    return 1
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # acq_backend_secret_rm [-g | SANDBOX] SERVICE  (msb backend)
 # ---------------------------------------------------------------------------
