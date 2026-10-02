@@ -142,7 +142,11 @@ teardown() {
 @test "windows PowerShell: msb version parser preserves suffix policy" {
   command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
 
-  run pwsh -NoLogo -NoProfile -Command '
+  stub="$BATS_TEST_TMPDIR/msb"
+  printf '%s\n' '#!/usr/bin/env sh' 'printf "%s\n" "$MSB_VERSION_OUTPUT"' >"$stub"
+  chmod +x "$stub"
+
+  run env MSB_STUB_PATH="$stub" pwsh -NoLogo -NoProfile -Command '
     $script = Get-Content -Raw -LiteralPath "'"$REPO_ROOT"'/install.ps1"
     $tokens = $null
     $errors = $null
@@ -153,15 +157,14 @@ teardown() {
       if ($null -eq $fn) { "missing $name"; exit 1 }
       . ([scriptblock]::Create($fn.Extent.Text))
     }
-    $stub = Join-Path $env:BATS_TEST_TMPDIR "msb.ps1"
     $cases = @(
       @{ Output = "msb 0.7.3-rc1"; Parsed = "0.7.3-rc1"; Final = $false },
       @{ Output = "msb 0.7.3+build.1"; Parsed = "0.7.3+build.1"; Final = $false },
       @{ Output = "msb 0.7.3 linux-arm64"; Parsed = "0.7.3"; Final = $true }
     )
     foreach ($case in $cases) {
-      Set-Content -LiteralPath $stub -Value "param(`$Arg0) if (`$Arg0 -eq `"--version`") { `"$($case.Output)`" }"
-      $parsed = Get-MsbVersion -MsbPath $stub
+      $env:MSB_VERSION_OUTPUT = $case.Output
+      $parsed = Get-MsbVersion -MsbPath $env:MSB_STUB_PATH
       "parsed=$parsed final=$(Test-MsbVersionFinal -MsbVersion $parsed)"
       if ($parsed -ne $case.Parsed) { "expected parsed=$($case.Parsed)"; exit 1 }
       if ((Test-MsbVersionFinal -MsbVersion $parsed) -ne $case.Final) { "expected final=$($case.Final)"; exit 1 }
