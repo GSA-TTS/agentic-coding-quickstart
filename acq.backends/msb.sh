@@ -777,7 +777,9 @@ _acq_msb_version_blocked() {
 # than being treated as the fixed final 0.7.3.
 _acq_msb_version() {
   local raw
-  raw=$(_acq_msb_cli --version 2>/dev/null || true)
+  if ! raw=$(_acq_msb_cli --version 2>/dev/null); then
+    return 0
+  fi
   printf '%s\n' "$raw" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1 || true
 }
 

@@ -113,12 +113,12 @@ STUB
   chmod +x "$STUBDIR/bin/npm"
 }
 
-_write_msb_stub() { # PATH VERSION
+_write_msb_stub() { # PATH VERSION [VERSION_RC]
   mkdir -p "$(dirname "$1")"
   printf '%s\n' \
     '#!/usr/bin/env sh' \
     'case "$1" in' \
-    "  --version|-V) printf 'msb %s\\n' '$2' ;;" \
+    "  --version|-V) printf 'msb %s\\n' '$2'; exit '${3:-0}' ;;" \
     '  *) exit 0 ;;' \
     'esac' >"$1"
   chmod +x "$1"
@@ -566,6 +566,22 @@ _no_package_manager_path() {
   fixture=$(_make_msb_bundle_fixture 0.6.18) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
   _write_curl_msb_bundle_stub "$fixture"
   _write_unparseable_msb_stub "$HOME/.local/bin/msb"
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$HOME/.local/bin:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version is not a supported final release'
+  assert_output --partial 'Active msb is 0.6.18'
+  run "$ACQ_INSTALL_BIN_DIR/msb" --version
+  assert_output 'msb 0.6.18'
+}
+
+@test "install: failed active msb version probe is replaced with the pinned version" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.6.18) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  _write_curl_msb_bundle_stub "$fixture"
+  _write_msb_stub "$HOME/.local/bin/msb" 0.7.3 42
 
   run env PATH="$ACQ_INSTALL_BIN_DIR:$HOME/.local/bin:$STUBDIR/bin:$(_msb_pin_tools_path)" \
     sh "$REPO_ROOT/install.sh" --method npm --yes

@@ -276,7 +276,8 @@ msb_version_final() {
 }
 
 msb_version_of() {
-  "$1" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1 || true
+  _raw=$("$1" --version 2>/dev/null) || return 0
+  printf '%s\n' "$_raw" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1 || true
 }
 
 # Release bundle basename for this host, e.g. microsandbox-darwin-aarch64.tar.gz.
