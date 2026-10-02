@@ -156,6 +156,7 @@ case "${1:-}" in
         exit 1 ;;
     esac
     case "$snippet" in
+      *"startup-complete"*) printf 'ready\n' ;;
       *"echo ok"*) printf 'ok\n' ;;
       *'%{http_code}'*)
         # check_key runs `curl … -w '%{http_code}'; printf '|%s' "$?"`, so the
@@ -179,6 +180,9 @@ case "${1:-}" in
         else
           printf '%s|0' "${STUB_KEY_STATUS:-200}"
         fi ;;
+      *'${ACQ_WORKSPACE:-}'*)
+        [ -n "${STUB_RECORDED_WORKSPACE+x}" ] || exit 1
+        printf '%s' "$STUB_RECORDED_WORKSPACE" ;;
       *"postinstall.mjs"*)
         # Model a successful postinstall: mark opencode fixed so the follow-up
         # `opencode --version` probe passes.

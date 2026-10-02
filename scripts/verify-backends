@@ -15,6 +15,9 @@
 # For each backend that is INSTALLED, it creates a tiny throwaway sandbox and
 # asserts (design §9):
 #   1. The four pinned kits apply cleanly (no hard failure).
+#      On sbx, before provisioning, it also runs the real-sbx grammar acceptance
+#      guard (`test/bats/101-sbx-grammar-acceptance.bats`) so kit grammar drift is
+#      caught by this live validation path, not only by ad hoc local unit runs.
 #   2. The USAi key is bound and the models host is reachable from the guest.
 #      NOTE: this does NOT require a valid USAi key. On both backends the guest
 #      holds only a PLACEHOLDER (sbx bakes a custom-secret placeholder + proxy
@@ -458,6 +461,38 @@ unseed_usai_secret() {
 # ---------------------------------------------------------------------------
 # Per-backend verification. $1 = backend name. Assumes it is installed.
 # ---------------------------------------------------------------------------
+verify_sbx_grammar_acceptance() {
+  local bats="${REPO_ROOT}/test/vendor/bats-core/bin/bats"
+  local test_file="${REPO_ROOT}/test/bats/101-sbx-grammar-acceptance.bats"
+  local out rc skips
+
+  [ -x "$bats" ] || { fail "sbx: grammar acceptance guard cannot run (vendored bats not initialized)"; return 0; }
+  [ -f "$test_file" ] || { fail "sbx: grammar acceptance guard missing at $test_file"; return 0; }
+
+  if [ -n "$VERBOSE" ]; then
+    printf '        $ %s %s   # sbx grammar acceptance\n' "$bats" "$test_file" >&2
+    out=$("$bats" "$test_file" 2>&1 | tee /dev/stderr); rc="${PIPESTATUS[0]}"
+  else
+    out=$("$bats" "$test_file" 2>&1); rc=$?
+  fi
+  out=${out//$'\r'/}
+
+  if [ "$rc" -ne 0 ]; then
+    fail "sbx: real sbx rejected acq's translated kit grammar"
+    dump "bats output" "$out"
+    return 0
+  fi
+
+  skips=$(printf '%s\n' "$out" | grep -c '# skip' 2>/dev/null | head -n1)
+  case "$skips" in ""|*[!0-9]*) skips=0 ;; esac
+  if [ "$skips" -gt 0 ]; then
+    fail "sbx: grammar acceptance guard did not run all checks (${skips} skip(s))"
+    dump "bats output" "$out"
+  else
+    pass "sbx: real sbx accepts acq's translated kit grammar"
+  fi
+}
+
 verify_backend() {
   local backend="$1"
   echo ""
@@ -472,6 +507,7 @@ verify_backend() {
         fail "${backend}: 'sbx version' failed — is sbx installed and on PATH?"
         return
       fi
+      verify_sbx_grammar_acceptance
       # A logged-out sbx will fail kit resolution / create with an auth error.
       # We can't cheaply assert login state, so just note it if create fails.
       ;;
