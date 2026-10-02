@@ -353,11 +353,12 @@ EOF
 
 _acq_sbx_apply_git_identity_kit() {
   local name="$1" git_identity_kit _kadd_rc=0
+  _ACQ_SBX_LAST_KIT_ADD_SUCCEEDED=0
   git_identity_kit=$(_acq_sbx_git_identity_kit)
   [ -n "$git_identity_kit" ] || return 0
   _acq_sbx_kit_add "$name" "$git_identity_kit" || _kadd_rc=$?
   case $_kadd_rc in
-    0) return 0 ;;
+    0) _ACQ_SBX_LAST_KIT_ADD_SUCCEEDED=1; return 0 ;;
     3) _acq_sbx_print_recreate_notice "$name" ;;
     *) echo "acq: warning: 'sbx kit add' (git identity env) failed for '$name' (see error above)." >&2 ;;
   esac
@@ -533,7 +534,7 @@ acq_backend_provision() {
   _git_identity_kit=$(_acq_sbx_git_identity_kit)
   [ -n "$_git_identity_kit" ] && kf+=(--kit "$_git_identity_kit")
   local _startup_barrier_token
-  _startup_barrier_token="acq-$$-$(date +%s)"
+  _startup_barrier_token="acq-$$-$(date +%s)-$RANDOM-$RANDOM"
   kf+=(--kit "$(_acq_sbx_startup_barrier_kit "$_startup_barrier_token")")
 
   acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_stripped[*]:-}"
@@ -648,6 +649,10 @@ acq_backend_shell() {
 acq_backend_attach() {
   local name="$1"
   shift
+  if [ "${_ACQ_SBX_HEAL_WAIT_FAILED_NAME:-}" = "$name" ]; then
+    echo "acq: refusing to attach to '$name' because kit heal did not finish." >&2
+    return 1
+  fi
   if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
     shift
     sbx run --name "$name" -- "$@"
@@ -709,9 +714,9 @@ acq_backend_ports() {
 #   ERROR: kit "…" declares setup.startup, which the kit-add recreate flow does
 #   not yet apply; recreate the sandbox from scratch via `sbx rm` + `sbx create
 #   --kit` …
-# (See https://docs.docker.com/ai/sandboxes/customize/kits/#using-kits — "sbx
-# kit add … supports mixin kits limited to environment.variables, setup.install,
-# and permissions.network.allow. To use other fields, recreate …".)
+# (See https://docs.docker.com/ai/sandboxes/customize/kits-v2/#execution-order —
+# "sbx kit add" supports mixin kits limited to environment.variables,
+# setup.install, and permissions.network.allow. To use other fields, recreate.)
 #
 # Older acq swallowed sbx's stderr (`sbx kit add … >/dev/null 2>&1`) and printed
 # a generic per-kit warning plus a "Recover with: sbx kit add …" hint that could
@@ -809,7 +814,9 @@ acq_backend_ensure_kits_applied() {
   local name="$1"
   local force="${ACQ_FORCE_KIT_REAPPLY:-0}"
   local ok=1
+  local healed=0
   local _kadd_rc=0
+  _ACQ_SBX_HEAL_WAIT_FAILED_NAME=""
   # Reset the once-per-heal sbx-0.38 recreate advisory guard (see
   # _acq_sbx_print_recreate_notice). Without this reset, a second heal in the
   # same process would suppress the notice.
@@ -833,7 +840,7 @@ acq_backend_ensure_kits_applied() {
     # normal signalling — capture the status inline so the loop is not aborted.
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$zscaler_local" || _kadd_rc=$?
     case $_kadd_rc in
-      0) echo "acq: Zscaler CA kit injected into '$name'." >&2 ;;
+      0) healed=1; echo "acq: Zscaler CA kit injected into '$name'." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
@@ -845,6 +852,7 @@ acq_backend_ensure_kits_applied() {
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$usai_local" || _kadd_rc=$?
     case $_kadd_rc in
       0)
+        healed=1
         sbx exec "$name" -- sh -c \
           'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
           </dev/null >/dev/null 2>&1 || true
@@ -865,7 +873,7 @@ acq_backend_ensure_kits_applied() {
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$playbook_local" || _kadd_rc=$?
     case $_kadd_rc in
-      0) echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2 ;;
+      0) healed=1; echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (playbook kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
@@ -880,13 +888,14 @@ acq_backend_ensure_kits_applied() {
     gitsshsign_local=$(_acq_sbx_translate_kit "$GITSSHSIGN_KIT")
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$gitsshsign_local" || _kadd_rc=$?
     case $_kadd_rc in
-      0) echo "acq: git-ssh-sign kit refreshed in '$name'." >&2 ;;
+      0) healed=1; echo "acq: git-ssh-sign kit refreshed in '$name'." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (git-ssh-sign kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
   fi
 
   _acq_sbx_apply_git_identity_kit "$name"
+  [ "${_ACQ_SBX_LAST_KIT_ADD_SUCCEEDED:-0}" = "1" ] && healed=1
 
   # 4) Extra kits (tracked by marker file). Extra kits may be neutral or already
   #    sbx-v2; _acq_sbx_translate_kit handles both. The marker records one
@@ -908,6 +917,7 @@ acq_backend_ensure_kits_applied() {
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$local_extra" || _kadd_rc=$?
     case $_kadd_rc in
       0)
+        healed=1
         sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$k" </dev/null >/dev/null 2>&1 || true
         ;;
       3) _acq_sbx_print_recreate_notice "$name" ;;
@@ -919,6 +929,16 @@ acq_backend_ensure_kits_applied() {
   # A failed apply must not write a record claiming the sandbox
   # is current. Best-effort write: a provenance write failure never fails the run.
   if [ "$ok" -eq 1 ]; then
+    if [ "$healed" -eq 1 ]; then
+      # sbx kit add recreates the sandbox. Current sbx v2 docs say kit-add only
+      # supports synchronous install-time changes, but still wait for exec to be
+      # usable again before a re-attach path can continue to agent attach.
+      if ! _acq_sbx_wait_for_exec_ready "$name"; then
+        _ACQ_SBX_HEAL_WAIT_FAILED_NAME="$name"
+        echo "acq: warning: '$name' did not become exec-ready after kit heal." >&2
+        return 1
+      fi
+    fi
     acq_provenance_write sbx "$name" || true
     return 0
   fi

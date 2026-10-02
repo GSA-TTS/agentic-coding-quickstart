@@ -347,3 +347,111 @@ STUB
   assert [ "$barrier_line" -lt "$opencode_line" ]
   assert [ "$opencode_line" -lt "$attach_line" ]
 }
+
+@test "wait(sbx): startup barrier requires this create's token" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *startup-complete*)
+        case "$snippet" in
+          *" = '$STUB_BARRIER_FILE_TOKEN'"*) printf 'ready\n' ;;
+          *=*) exit 0 ;;
+          *) printf 'ready\n' ;;
+        esac ;;
+      *) exit 0 ;;
+    esac ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+
+  export STUB_BARRIER_FILE_TOKEN=fresh-token
+  run _acq_sbx_wait_for_startup_barrier tokenbox fresh-token
+  assert_success
+
+  export ACQ_SBX_STARTUP_BARRIER_TIMEOUT=0
+  export STUB_BARRIER_FILE_TOKEN=stale-token
+  run _acq_sbx_wait_for_startup_barrier tokenbox fresh-token
+  assert_failure
+}
+
+@test "run(sbx): waits for successful reattach heal before attach" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  ls) printf 'healattach\n'; exit 0 ;;
+  kit) [ "${2:-}" = "add" ] && exit 0; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *"echo ok"*) printf 'ok\n' ;;
+      *present*) printf 'absent\n' ;;
+      *) exit 0 ;;
+    esac ;;
+  run) exit 0 ;;
+  settings) exit 0 ;;
+  secret) [ "${2:-}" = "ls" ] && exit 0; exit 0 ;;
+  ports) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  : >"$CALLS"
+
+  run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 "$ACQ" run healattach
+  assert_success
+
+  local log kit_line wait_line attach_line
+  log=$(cat "$CALLS")
+  kit_line=$(printf '%s\n' "$log" | grep -n '^sbx kit add healattach' | tail -n1 | cut -d: -f1)
+  wait_line=$(printf '%s\n' "$log" | grep -n 'echo ok' | tail -n1 | cut -d: -f1)
+  attach_line=$(printf '%s\n' "$log" | grep -n '^sbx run --name healattach' | cut -d: -f1)
+
+  assert [ "$kit_line" -lt "$wait_line" ]
+  assert [ "$wait_line" -lt "$attach_line" ]
+}
+
+@test "run(sbx): refuses attach when reattach heal never becomes exec-ready" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  ls) printf 'healblocked\n'; exit 0 ;;
+  kit) [ "${2:-}" = "add" ] && exit 0; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *"echo ok"*) exit 1 ;;
+      *present*) printf 'absent\n' ;;
+      *) exit 0 ;;
+    esac ;;
+  run) exit 0 ;;
+  settings) exit 0 ;;
+  secret) [ "${2:-}" = "ls" ] && exit 0; exit 0 ;;
+  ports) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  : >"$CALLS"
+
+  run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 ACQ_EXEC_READY_TIMEOUT=0 "$ACQ" run healblocked
+  assert_failure
+  assert_output --partial "refusing to attach to 'healblocked'"
+
+  local log
+  log=$(cat "$CALLS")
+  assert grep -Fq 'sbx kit add healblocked ' "$CALLS"
+  refute grep -Fxq 'sbx run --name healblocked' "$CALLS"
+}
