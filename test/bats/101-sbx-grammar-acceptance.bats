@@ -1,11 +1,11 @@
 #!/usr/bin/env bats
 #
-# 101-sbx-grammar-acceptance.bats — does the REAL sbx still accept the kit
-# grammar acq's translator emits? (#529)
+# 101-sbx-grammar-acceptance.bats - does the REAL sbx still accept the kit
+# grammar acq's translator emits?
 #
 # This is the one assertion 100-kit-translate.bats cannot make. That file runs
 # under acq_setup_stubs, which puts a FAKE sbx on PATH whose fallthrough case is
-# `*) exit 0` (scripts/test-acq-lib.sh) — so `sbx kit validate` against it exits
+# `*) exit 0` (scripts/test-acq-lib.sh) - so `sbx kit validate` against it exits
 # 0 for any input, malformed or not. Its line
 #
 #     assert_regex "$spec" 'schemaVersion: "2"'
@@ -13,11 +13,11 @@
 # therefore proves acq emits the text WE expect, and nothing about whether any
 # sbx accepts it. It would keep passing after the real CLI stopped accepting "2".
 #
-# That is not hypothetical: #298 is this exact failure already having happened.
-# sbx 0.38.0 shipped Kit spec v2, acq's translator was still emitting v1, and
-# every `acq create` on the sbx backend failed at kit resolve.
+# That is not hypothetical: this exact failure has already happened. sbx 0.38.0
+# shipped Kit spec v2, acq's translator was still emitting v1, and every
+# `acq create` on the sbx backend failed at kit resolve.
 #
-# So this file deliberately does NOT call acq_setup_stubs — it needs the real
+# So this file deliberately does NOT call acq_setup_stubs - it needs the real
 # binary on PATH. It is opt-in by nature: when sbx is absent (every
 # GitHub-hosted runner) each test SKIPS with a reason. A skip here is an
 # explicit "could not measure", not a pass: these tests must never be the only
@@ -37,7 +37,7 @@ load 'helper'
 ACQ_EMITS_SCHEMA_VERSION='2'
 
 _require_sbx() {
-  command -v sbx >/dev/null 2>&1 || skip "sbx not on PATH — grammar acceptance UNVERIFIED"
+  command -v sbx >/dev/null 2>&1 || skip "sbx not on PATH - grammar acceptance UNVERIFIED"
 }
 
 # Write a minimal neutral hybrid/v1 kit and translate it with acq's own
@@ -87,18 +87,18 @@ SPEC
 
   # Guard the guard: if translation produced nothing, the validate below would
   # be measuring an empty directory. Fail loudly rather than pass vacuously.
-  [ -f "$out/spec.yaml" ] || fail "translator produced no spec.yaml — nothing to validate"
+  [ -f "$out/spec.yaml" ] || fail "translator produced no spec.yaml - nothing to validate"
 
   # Confirm the fixture is actually the version this file claims to test, so a
   # future translator change cannot silently move the goalposts.
   run grep -c "schemaVersion: \"$ACQ_EMITS_SCHEMA_VERSION\"" "$out/spec.yaml"
-  [ "$output" -ge 1 ] || fail "translator did not emit schemaVersion \"$ACQ_EMITS_SCHEMA_VERSION\" — update this guard deliberately"
+  [ "$output" -ge 1 ] || fail "translator did not emit schemaVersion \"$ACQ_EMITS_SCHEMA_VERSION\" - update this guard deliberately"
 
   run sbx kit validate "$out"
   if [ "$status" -ne 0 ]; then
     printf 'sbx version: %s\n' "$(sbx version 2>&1 | head -n1)" >&2
     printf 'sbx kit validate output:\n%s\n' "$output" >&2
-    fail "the installed sbx REJECTED acq's translator output — the emitted grammar is no longer accepted (see #529, and #298 for the last time this happened)"
+    fail "the installed sbx REJECTED acq's translator output - the emitted grammar is no longer accepted"
   fi
 }
 
@@ -121,12 +121,12 @@ description: Deliberately unsupported version, to make sbx list what it supports
 SPEC
 
   run sbx kit validate "$probe"
-  [ "$status" -ne 0 ] || fail "sbx accepted schemaVersion \"999\" — this probe no longer enumerates the supported set"
+  [ "$status" -ne 0 ] || fail "sbx accepted schemaVersion \"999\" - this probe no longer enumerates the supported set"
 
   # If the message shape changed, say so instead of silently concluding nothing.
   case "$output" in
     *"supported: ["*) : ;;
-    *) skip "sbx no longer prints a 'supported: [...]' list — supported set UNVERIFIED (output: $output)" ;;
+    *) skip "sbx no longer prints a 'supported: [...]' list - supported set UNVERIFIED (output: $output)" ;;
   esac
 
   local supported
@@ -136,13 +136,13 @@ SPEC
   case " $supported " in
     *" $ACQ_EMITS_SCHEMA_VERSION "*) : ;;
     *)
-      fail "acq emits schemaVersion \"$ACQ_EMITS_SCHEMA_VERSION\" but the installed sbx supports [$supported] — translator and CLI have diverged (#529)"
+      fail "acq emits schemaVersion \"$ACQ_EMITS_SCHEMA_VERSION\" but the installed sbx supports [$supported] - translator and CLI have diverged"
       ;;
   esac
 }
 
 # The minimal fixture above covers the common path. The built-in kits exercise
-# considerably more of the vocabulary, and they are NOT vendored here — acq
+# considerably more of the vocabulary, and they are NOT vendored here - acq
 # fetches them from agentic-coding-patterns at a pinned ref (common.sh
 # PATTERNS_KIT_REF), over git+https. Fetching inside this suite would make it
 # network-dependent, which the offline contract forbids, so this fixture instead
@@ -210,18 +210,18 @@ SPEC
   bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_translate_to_sbx "'"$src"'" "'"$out"'"' \
     >/dev/null 2>&1
 
-  [ -f "$out/spec.yaml" ] || fail "translator produced no spec.yaml — nothing to validate"
+  [ -f "$out/spec.yaml" ] || fail "translator produced no spec.yaml - nothing to validate"
 
   # Assert the translation actually populated the blocks this test exists to
   # cover. Without this, a translator that silently dropped them would still
   # reach a VALID verdict below and the test would claim coverage it does not
-  # have — the same defect as validating against the stub.
+  # have - the same defect as validating against the stub.
   local spec; spec=$(cat "$out/spec.yaml")
   local block
   for block in 'permissions:' 'environment:' 'ports:' 'setup:' '  install:' '  startup:' 'agentInstructions:'; do
     case "$spec" in
       *"$block"*) : ;;
-      *) fail "translated spec is missing '$block' — this guard is no longer covering it" ;;
+      *) fail "translated spec is missing '$block' - this guard is no longer covering it" ;;
     esac
   done
 
@@ -230,6 +230,6 @@ SPEC
     printf 'sbx version: %s\n' "$(sbx version 2>&1 | head -n1)" >&2
     printf 'translated spec:\n%s\n' "$spec" >&2
     printf 'sbx kit validate output:\n%s\n' "$output" >&2
-    fail "the installed sbx REJECTED a translated kit using the full optional vocabulary (see #529, and #298 for the last time this happened)"
+    fail "the installed sbx REJECTED a translated kit using the full optional vocabulary"
   fi
 }

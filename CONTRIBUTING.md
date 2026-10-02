@@ -150,14 +150,16 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
 
   **One file is deliberately not stubbed.**
   `test/bats/101-sbx-grammar-acceptance.bats` asserts that the **real** `sbx`
-  still accepts the kit grammar acq's translator emits (#529). The stub cannot
-  answer that question — its fallthrough case is `*) exit 0`, so
-  `sbx kit validate` against the stub reports success for any input, including a
-  malformed spec. When `sbx` is absent its tests **skip with a reason** rather
-  than passing, so a run without `sbx` reports *"could not check"*, never
-  *"accepted"*. It stays within the offline contract: `sbx kit validate` is a
-  local read-only validator and creates no sandbox, container, network request,
-  or registry push.
+  still accepts the kit grammar acq's translator emits. The stub cannot answer
+  that question — its fallthrough case is `*) exit 0`, so `sbx kit validate`
+  against the stub reports success for any input, including a malformed spec.
+  When `sbx` is absent its tests **skip with a reason** rather than passing, so a
+  run without `sbx` reports *"could not check"*, never *"accepted"*. The live
+  verifier `scripts/verify-backends` runs this file as a required sbx preflight
+  when `sbx` is installed, so a sandbox-capable sbx validation fails if grammar
+  acceptance could not be measured. It stays within the offline contract: `sbx
+  kit validate` is a local read-only validator and creates no sandbox, container,
+  network request, or registry push.
 
   > **Watch for a shadowed `env`.** The bats launcher ends with
   > `exec env … bats`. If a directory earlier on your `PATH` contains an `env`
