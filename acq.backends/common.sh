@@ -82,33 +82,6 @@ ACQ_BUILTIN_BUNDLE="acq-builtin"
 # shellcheck disable=SC2034
 ACQ_BUILTIN_BUNDLE_REPO="GSA-TTS/agentic-coding-patterns"
 
-# Optional OCI-engine capability kit (ADR-0030). OFF by default. When opted in
-# AND the kit is actually published/valid at the pinned patterns ref, acq appends
-# an `oci-engine` capability kit to the built-in support bundle so agents get an
-# OCI-run capability (podman) from a shared kit rather than from the msb adapter's
-# built-in provisioning. Normalized exactly like ACQ_MSB_ENSURE_OCI below:
-# unset/empty/0/false/no/off => off (case-insensitive); anything else => on.
-#
-# Intentionally additive and gated (ADR-0020/ADR-0030): even when opted in, acq
-# only selects the kit after a readiness check confirms it is present and valid at
-# the pinned ref. This keeps default behavior — including the msb adapter's
-# podman provisioning (`_acq_msb_ensure_oci`) — unchanged unless the user opts in
-# and the kit is live at the pin. NOT added to ACQ_KIT_NAMES (that is the default
-# `acq kit list` registry and the provenance-bundle count); selection is gated
-# purely in _acq_selected_builtin_kit_refs.
-OCI_ENGINE_KIT_NAME="oci-engine"
-ACQ_ENABLE_OCI_KIT="${ACQ_ENABLE_OCI_KIT-}"
-case "$(printf '%s' "$ACQ_ENABLE_OCI_KIT" | tr '[:upper:]' '[:lower:]')" in
-  ""|0|false|no|off) ACQ_ENABLE_OCI_KIT="" ;;
-  *)                 ACQ_ENABLE_OCI_KIT="1" ;;
-esac
-# One-shot guard so the "requested but not available" fallback notice prints at
-# most once per process, not once per _acq_selected_builtin_kit_refs call
-# (that runs 2-3x/invocation via _build_kit_list). Mirrors sbx.sh's
-# _ACQ_SBX_RECREATE_NOTICE_SHOWN. Guarded by this flag (not the readiness
-# cache) so the notice still prints exactly once even when readiness is memoized.
-_ACQ_OCI_KIT_NOTICE_SHOWN=0
-
 # Additional user-supplied kits. Set ACQ_EXTRA_KITS to a whitespace-separated
 # list of kit references. Set ACQ_EXTRA_KIT_SOURCES for their allowlist prefixes.
 ACQ_EXTRA_KITS="${ACQ_EXTRA_KITS:-}"
@@ -227,11 +200,6 @@ ACQ_CLI_KITS=()
 ACQ_BUILTIN_KIT_COUNT=0
 ACQ_BUILTIN_SUPPORT_KIT_COUNT=0
 ACQ_AGENT_KIT_READY_CACHE=""
-# Per-process readiness memo for the optional OCI-engine kit (ADR-0030),
-# mirroring ACQ_AGENT_KIT_READY_CACHE: acq_oci_engine_kit_ready runs multiple
-# times per invocation (via _build_kit_list), so its network fetch is done once
-# and the yes/no result cached here.
-ACQ_OCI_KIT_READY_CACHE=""
 
 # Host-port overrides supplied on the command line via `--publish HOST:GUEST`
 # (repeatable) on run/create, one `HOST:GUEST` pair per element (ADR-0034).
@@ -826,55 +794,6 @@ _acq_agent_builtin_kit_ref() {
   printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$kit_name"
 }
 
-# Dedicated ref helper for the optional OCI-engine capability kit. Deliberately
-# NOT routed through _acq_builtin_kit_ref (which requires membership in
-# ACQ_KIT_NAMES): keeping oci-engine out of ACQ_KIT_NAMES preserves the default
-# `acq kit list` set and the provenance-bundle count. Produces the same pinned
-# patterns ref shape, under github.com/GSA-TTS/ so it already satisfies
-# KIT_SOURCE_PREFIX without widening the allowlist.
-_acq_oci_engine_kit_ref() {
-  printf '%s#ref=%s&dir=%s/%s\n' \
-    "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$OCI_ENGINE_KIT_NAME"
-}
-
-# Readiness check for the optional OCI-engine kit, mirroring the agent-kit
-# readiness pattern (acq_agent_builtin_kit_ready): fetch the kit at the pinned
-# ref and validate it is a well-formed mixin named oci-engine. Returns 0 only
-# when the kit is actually present/valid. Fetch failure or a spec mismatch returns
-# non-zero, so selection falls back without changing default behavior. The yes/no
-# result is memoized in ACQ_OCI_KIT_READY_CACHE so at most one network fetch runs
-# per process even though _build_kit_list calls this repeatedly. Offline tests
-# stub this to force ready/not-ready.
-acq_oci_engine_kit_ready() {
-  local kitref base_dir kitdir schema kind kit_name cache_key cache_value
-  kitref=$(_acq_oci_engine_kit_ref) || return 1
-  cache_key=$(printf '%s' "$kitref" | cksum | cut -d' ' -f1)
-  cache_value=$(printf '%s\n' "$ACQ_OCI_KIT_READY_CACHE" | awk -F'\t' -v key="$cache_key" '$1 == key { print $2; exit }')
-  case "$cache_value" in
-    yes) return 0 ;;
-    no) return 1 ;;
-  esac
-  base_dir="${ACQ_STATE_DIR:-${TMPDIR:-/tmp}/acq}/oci-engine-kit-validation"
-  # Best-effort presence probe: suppress kit-translate's multi-line fetch-failure
-  # block on stderr (the single acq-level notice from _acq_selected_builtin_kit_refs
-  # is the only user-facing message). stderr is NOT suppressed anywhere else.
-  if kitdir=$(kit_translate_fetch "$kitref" "$base_dir" 2>/dev/null) \
-      && [ -f "$kitdir/spec.yaml" ]; then
-    schema=$(kit_spec_field "$kitdir/spec.yaml" schemaVersion) || schema=""
-    kind=$(kit_spec_field "$kitdir/spec.yaml" kind) || kind=""
-    kit_name=$(kit_spec_field "$kitdir/spec.yaml" name) || kit_name=""
-    if [ "$schema" = "hybrid/v1" ] && [ "$kind" = "mixin" ] \
-        && [ "$kit_name" = "$OCI_ENGINE_KIT_NAME" ]; then
-      ACQ_OCI_KIT_READY_CACHE="${ACQ_OCI_KIT_READY_CACHE}${cache_key}	yes
-"
-      return 0
-    fi
-  fi
-  ACQ_OCI_KIT_READY_CACHE="${ACQ_OCI_KIT_READY_CACHE}${cache_key}	no
-"
-  return 1
-}
-
 kit_spec_agent_field() {
   local spec="$1" key="$2"
   [ -f "$spec" ] || return 1
@@ -953,17 +872,6 @@ _acq_selected_support_kit_refs() {
     kit=$(_acq_builtin_kit_ref "$name") || return 1
     printf '%s\n' "$kit"
   done
-  # Optional OCI-engine capability kit (ADR-0030): appended after the default
-  # support kits and before any agent/extras/CLI kits, only when the user opted in
-  # and the kit is present/valid at the pinned patterns ref.
-  if [ -n "$ACQ_ENABLE_OCI_KIT" ]; then
-    if acq_oci_engine_kit_ready; then
-      kit=$(_acq_oci_engine_kit_ref) || return 1
-      printf '%s\n' "$kit"
-    fi
-    # The "not available" fallback notice is emitted by _build_kit_list in the
-    # parent shell so the process-global once guard is effective.
-  fi
 }
 
 _acq_selected_builtin_kit_refs() {
@@ -989,15 +897,6 @@ acq_selected_agent_kit_summary() {
     "${start_owner:-none}" "$apply_state"
 }
 
-acq_oci_engine_kit_selected() {
-  local kit expected
-  expected=$(_acq_oci_engine_kit_ref) || return 1
-  for kit in ${KITS[@]+"${KITS[@]}"}; do
-    [ "$kit" = "$expected" ] && return 0
-  done
-  return 1
-}
-
 acq_print_selected_agent_kit() {
   local agent="${1:-}" summary
   summary=$(acq_selected_agent_kit_summary "$agent") || return 0
@@ -1015,19 +914,6 @@ acq_print_selected_agent_kit() {
 _build_kit_list() {
   local agent="${1:-}" kit
   KITS=()
-  # Prime the OCI readiness cache in the PARENT shell first (at most one network
-  # fetch per process, memoized in ACQ_OCI_KIT_READY_CACHE). The subsequent
-  # process substitution forks a subshell that inherits this populated cache, so
-  # _acq_selected_builtin_kit_refs short-circuits without re-fetching. Also emit
-  # the "not available" fallback notice here — guarded by the process-global
-  # _ACQ_OCI_KIT_NOTICE_SHOWN (independent of the cache) so it prints exactly
-  # once across the 2-3 _build_kit_list calls per invocation. Doing this in the
-  # subshell would reset both the guard and the cache each call.
-  if [ -n "$ACQ_ENABLE_OCI_KIT" ] && ! acq_oci_engine_kit_ready \
-      && [ "${_ACQ_OCI_KIT_NOTICE_SHOWN:-0}" != "1" ]; then
-    _ACQ_OCI_KIT_NOTICE_SHOWN=1
-    printf 'acq: OCI engine kit requested but not available at the pinned patterns ref; falling back to adapter-provided OCI (if any).\n' >&2
-  fi
   while IFS= read -r kit; do
     [ -n "$kit" ] && KITS+=("$kit")
   done < <(_acq_selected_support_kit_refs)
