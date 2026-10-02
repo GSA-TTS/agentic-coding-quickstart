@@ -357,6 +357,24 @@ install_via_brew() {
   if [ "$DRY_RUN" -eq 0 ] && ! command -v brew >/dev/null 2>&1; then
     die "Homebrew is required for --method brew. Install Homebrew or choose --method npm|clone."
   fi
+  # Homebrew (since 6.0.0) requires explicit trust for non-official taps before
+  # it will load a formula. Installing a FULLY-QUALIFIED name (what $BREW_FORMULA
+  # is) auto-trusts ONLY that one formula — not the whole tap, and not any other
+  # formula in the same tap, even one it depends on. acq.rb's `depends_on
+  # "GSA-TTS/tap/microsandbox-acq"` is exactly that: a second formula from the
+  # SAME tap that Homebrew does not auto-trust just because `acq` itself was.
+  # Without this, `brew install "$BREW_FORMULA"` fails here with:
+  #   Error: Refusing to load formula gsa-tts/tap/microsandbox-acq from
+  #   untrusted tap gsa-tts/tap.
+  # Trust the known dependency explicitly, by name, rather than the whole tap
+  # (narrower: future formulae added to the tap stay untrusted until a user
+  # opts in to them directly). `brew trust --formula` is safe to call before
+  # the tap is cloned — verified live: it records the trust decision without
+  # tapping or installing anything, and the subsequent `brew install` tap-clones
+  # as normal and then finds the dependency already trusted. Routed through
+  # `run` (not a bare call) so --dry-run shows it rather than silently skipping
+  # it, consistent with the `brew install` call below.
+  run brew trust --formula "GSA-TTS/tap/microsandbox-acq"
   run brew install "$BREW_FORMULA"
   if [ "$DRY_RUN" -eq 0 ] && command -v acq >/dev/null 2>&1; then
     ok "  acq is installed via Homebrew ($(command -v acq))."
