@@ -5108,9 +5108,8 @@ _acq_msb_serve_start() {
 # known_hosts under acq state (accept-new against the ephemeral loopback listener).
 # Publishes the live ssh PID in _ACQ_MSB_LAST_BG_PID. Returns non-zero if the
 # forward dies within the settle window (ExitOnForwardFailure makes ssh exit fast
-# when the local bind/forward fails), so a failed tunnel is never reported as a
-# successful publish. Best-effort liveness probe (see _acq_msb_serve_start): a
-# forward that dies just after the settle window will still be recorded.
+# when the local bind/forward fails), or if the requested host listener is not
+# reachable after startup. This avoids recording a dead/non-listening tunnel.
 _acq_msb_forward_start() {
   local sport="$1" hport="$2" gport="$3"
   if ! command -v ssh >/dev/null 2>&1; then
@@ -5121,10 +5120,14 @@ _acq_msb_forward_start() {
   # -o IdentitiesOnly=yes: use ONLY the acq -i key, so a loaded agent/other keys
   #   can't burn MaxAuthTries before it. -F none: ignore the user's ~/.ssh/config
   #   so the loopback tunnel is hermetic and cannot be altered out from under acq.
-  ssh -p "$sport" -N \
+  # -n / BatchMode / NumberOfPasswordPrompts=0: fail closed instead of hanging or
+  #   staying alive while waiting for interactive auth on a backgrounded tunnel.
+  ssh -p "$sport" -N -n \
     -F none \
     -i "$ACQ_MSB_SSH_KEY" \
     -o IdentitiesOnly=yes \
+    -o BatchMode=yes \
+    -o NumberOfPasswordPrompts=0 \
     -o StrictHostKeyChecking=accept-new \
     -o "UserKnownHostsFile=${ACQ_MSB_SSH_KNOWN_HOSTS}" \
     -o ExitOnForwardFailure=yes \
@@ -5134,11 +5137,30 @@ _acq_msb_forward_start() {
   command sleep "${ACQ_MSB_FORWARD_SETTLE:-1}" 2>/dev/null || sleep "${ACQ_MSB_FORWARD_SETTLE:-1}"
   if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid" 2>/dev/null || true
-    echo "acq(msb): ports: ssh -L 127.0.0.1:${hport} -> 127.0.0.1:${gport} failed to establish (forward rejected or bind in use)." >&2
+    echo "acq(msb): ports: ssh -L 127.0.0.1:${hport} -> 127.0.0.1:${gport} failed to establish (forward rejected, auth failed, or bind in use)." >&2
+    return 1
+  fi
+  if ! _acq_msb_forward_listener_ready "$hport"; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    echo "acq(msb): ports: ssh -L did not open host listener 127.0.0.1:${hport}." >&2
     return 1
   fi
   _ACQ_MSB_LAST_BG_PID="$pid"
   return 0
+}
+
+_acq_msb_forward_listener_ready() {
+  local port="$1" attempts="${ACQ_MSB_FORWARD_PROBE_ATTEMPTS:-20}" delay="${ACQ_MSB_FORWARD_PROBE_DELAY:-0.1}" i=0
+  while [ "$i" -lt "$attempts" ]; do
+    # shellcheck disable=SC3025
+    if ( : >"/dev/tcp/127.0.0.1/${port}" ) >/dev/null 2>&1; then
+      return 0
+    fi
+    i=$(( i + 1 ))
+    command sleep "$delay" 2>/dev/null || sleep "$delay"
+  done
+  return 1
 }
 
 # _acq_msb_ports_pidfile NAME — echo the per-sandbox PID state file path, but ONLY
@@ -5608,6 +5630,50 @@ acq_backend_secret_set() {
 
   _acq_msb_secret_set_guidance "$service" "$_env" "$_host" "$applied"
   return 0
+}
+
+acq_backend_secret_propagate() {
+  local service scope_name
+  _acq_msb_parse_secret_scope service scope_name "$@"
+  shift "$_ACQ_MSB_SCOPE_CONSUMED"
+
+  if [ -z "$service" ]; then
+    echo "acq(msb): secret propagate: missing service name" >&2
+    return 1
+  fi
+  if [ -n "$scope_name" ]; then
+    acq_backend_exists "$scope_name" || return 0
+  elif [ -z "$(_acq_msb_cli list -q 2>/dev/null)" ]; then
+    return 0
+  fi
+
+  local _env _host _binding applied eligible=0 _probe_val sb
+  _binding=$(_acq_msb_service_binding "$service" "$scope_name")
+  _env=$(printf '%s' "$_binding" | cut -f1)
+  _host=$(printf '%s' "$_binding" | cut -f2)
+  [ -n "$_env" ] && [ -n "$_host" ] || return 0
+  [ -z "${ACQ_SECRET_NO_LIVE_REFEED:-}" ] || return 0
+  if ! _probe_val=$(acq_secret_resolve "$service" "$scope_name" 2>/dev/null) || [ -z "$_probe_val" ]; then
+    echo "acq(msb): cannot propagate '$service'; no value is present in the acq secret store." >&2
+    return 1
+  fi
+  _probe_val=""
+  if [ -n "$scope_name" ]; then
+    eligible=1
+  else
+    while IFS= read -r sb; do
+      [ -n "$sb" ] && eligible=$((eligible + 1))
+    done <<EOF
+$(_acq_msb_cli list -q 2>/dev/null)
+EOF
+  fi
+  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
+  if [ "$applied" -gt 0 ]; then
+    echo "acq(msb): applied '$service' to $applied running sandbox(es)." >&2
+  elif [ "$eligible" -gt 0 ]; then
+    echo "acq(msb): failed to apply '$service' to existing sandbox(es)." >&2
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------
