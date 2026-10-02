@@ -104,17 +104,21 @@ _cfg_src() {
 @test "config: reader tolerates inline comments and quoted scalars" {
   export XDG_CONFIG_HOME="$STUBDIR/xdg-comments"
   mkdir -p "$XDG_CONFIG_HOME/acq"
-  printf 'extra_kits: openchamber # browser UI\nscope_github_token: "yes"\nbackend: '\''msb'\''\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  printf 'extra_kits: "openchamber # browser UI"\nscope_github_token: "yes"\nbackend: '\''msb'\''\nlabel: don'\''t # plain scalar comment\nplain_kits: openchamber # browser UI\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
     printf "k=%s\n" "$(_acq_config_read_field extra_kits)"
     printf "s=%s\n" "$(_acq_config_read_field scope_github_token)"
     printf "b=%s\n" "$(_acq_config_read_field backend)"
+    printf "l=%s\n" "$(_acq_config_read_field label)"
+    printf "p=%s\n" "$(_acq_config_read_field plain_kits)"
   '
   assert_success
-  assert_line 'k=openchamber'
+  assert_line 'k=openchamber # browser UI'
   assert_line 's=yes'
   assert_line 'b=msb'
+  assert_line "l=don't"
+  assert_line 'p=openchamber'
 }
 
 @test "config: writer creates private config directory and file" {

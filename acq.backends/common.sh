@@ -1170,8 +1170,29 @@ _acq_config_read_field() {
       pat = "^" k "[[:space:]]*:"
       if ($0 ~ pat) {
         sub(pat "[[:space:]]*", "")     # strip through the colon + spaces
-        sub(/[[:space:]]+#.*$/, "")     # tolerate common inline comments
-        sub(/[[:space:]]*$/, "")        # strip trailing space
+        line = $0
+        q = sprintf("%c", 39)
+        if (substr(line, 1, 1) == "\"" || substr(line, 1, 1) == q) {
+          in_single = 0
+          in_double = 0
+          for (i = 1; i <= length(line); i++) {
+            c = substr(line, i, 1)
+            if (c == q && !in_double) {
+              in_single = !in_single
+            } else if (c == "\"" && !in_single) {
+              in_double = !in_double
+            } else if (c == "#" && !in_single && !in_double && (i == 1 || substr(line, i - 1, 1) ~ /[[:space:]]/)) {
+              line = substr(line, 1, i - 1)
+              break
+            }
+          }
+        } else if (line ~ /^#/) {
+          line = ""
+        } else {
+          sub(/[[:space:]]+#.*$/, "", line)
+        }
+        $0 = line                         # tolerate inline comments outside quotes
+        sub(/[[:space:]]*$/, "")         # strip trailing space
         q = sprintf("%c", 39)
         if ($0 ~ /^"[^"]*"$/) {
           sub(/^"/, "")
