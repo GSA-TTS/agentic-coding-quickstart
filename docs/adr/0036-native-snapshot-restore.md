@@ -11,7 +11,7 @@ risk_treatment: accept
 supersedes: []
 ---
 
-# ADR-0033: Expose native stateful snapshot/restore through acq
+# ADR-0036: Expose native stateful snapshot/restore through acq
 
 ## Context
 
