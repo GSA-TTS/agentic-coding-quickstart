@@ -131,6 +131,7 @@ case "${1:-}" in
         exit 1 ;;
     esac
     case "$snippet" in
+      *"startup-complete"*) printf 'ready\n' ;;
       *"echo ok"*) printf 'ok\n' ;;
       *'%{http_code}'*)
         # check_key runs `curl … -w '%{http_code}'; printf '|%s' "$?"`, so the
