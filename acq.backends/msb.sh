@@ -4972,9 +4972,8 @@ _acq_msb_serve_start() {
 # known_hosts under acq state (accept-new against the ephemeral loopback listener).
 # Publishes the live ssh PID in _ACQ_MSB_LAST_BG_PID. Returns non-zero if the
 # forward dies within the settle window (ExitOnForwardFailure makes ssh exit fast
-# when the local bind/forward fails), so a failed tunnel is never reported as a
-# successful publish. Best-effort liveness probe (see _acq_msb_serve_start): a
-# forward that dies just after the settle window will still be recorded.
+# when the local bind/forward fails), or if the requested host listener is not
+# reachable after startup. This avoids recording a dead/non-listening tunnel.
 _acq_msb_forward_start() {
   local sport="$1" hport="$2" gport="$3"
   if ! command -v ssh >/dev/null 2>&1; then
@@ -4985,10 +4984,14 @@ _acq_msb_forward_start() {
   # -o IdentitiesOnly=yes: use ONLY the acq -i key, so a loaded agent/other keys
   #   can't burn MaxAuthTries before it. -F none: ignore the user's ~/.ssh/config
   #   so the loopback tunnel is hermetic and cannot be altered out from under acq.
-  ssh -p "$sport" -N \
+  # -n / BatchMode / NumberOfPasswordPrompts=0: fail closed instead of hanging or
+  #   staying alive while waiting for interactive auth on a backgrounded tunnel.
+  ssh -p "$sport" -N -n \
     -F none \
     -i "$ACQ_MSB_SSH_KEY" \
     -o IdentitiesOnly=yes \
+    -o BatchMode=yes \
+    -o NumberOfPasswordPrompts=0 \
     -o StrictHostKeyChecking=accept-new \
     -o "UserKnownHostsFile=${ACQ_MSB_SSH_KNOWN_HOSTS}" \
     -o ExitOnForwardFailure=yes \
@@ -4998,11 +5001,30 @@ _acq_msb_forward_start() {
   command sleep "${ACQ_MSB_FORWARD_SETTLE:-1}" 2>/dev/null || sleep "${ACQ_MSB_FORWARD_SETTLE:-1}"
   if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid" 2>/dev/null || true
-    echo "acq(msb): ports: ssh -L 127.0.0.1:${hport} -> 127.0.0.1:${gport} failed to establish (forward rejected or bind in use)." >&2
+    echo "acq(msb): ports: ssh -L 127.0.0.1:${hport} -> 127.0.0.1:${gport} failed to establish (forward rejected, auth failed, or bind in use)." >&2
+    return 1
+  fi
+  if ! _acq_msb_forward_listener_ready "$hport"; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    echo "acq(msb): ports: ssh -L did not open host listener 127.0.0.1:${hport}." >&2
     return 1
   fi
   _ACQ_MSB_LAST_BG_PID="$pid"
   return 0
+}
+
+_acq_msb_forward_listener_ready() {
+  local port="$1" attempts="${ACQ_MSB_FORWARD_PROBE_ATTEMPTS:-20}" delay="${ACQ_MSB_FORWARD_PROBE_DELAY:-0.1}" i=0
+  while [ "$i" -lt "$attempts" ]; do
+    # shellcheck disable=SC3025
+    if ( : >"/dev/tcp/127.0.0.1/${port}" ) >/dev/null 2>&1; then
+      return 0
+    fi
+    i=$(( i + 1 ))
+    command sleep "$delay" 2>/dev/null || sleep "$delay"
+  done
+  return 1
 }
 
 # _acq_msb_ports_pidfile NAME — echo the per-sandbox PID state file path, but ONLY
