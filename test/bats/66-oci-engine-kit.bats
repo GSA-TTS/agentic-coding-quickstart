@@ -2,13 +2,13 @@
 #
 # 66-oci-engine-kit.bats — optional OCI-engine capability kit selection (ADR-0030)
 #
-# The OCI-engine kit is off by default and opt-in via ACQ_ENABLE_OCI_KIT. Because
-# the patterns-side kit body is unpublished (see ADR-0020/ADR-0030), selection is
-# additionally gated on a readiness check (acq_oci_engine_kit_ready): opted in but
-# not-ready must NOT add the ref and must emit one clear notice. These tests are
-# fully offline — the readiness check is stubbed per case, so no network fetch or
-# real kit is required. In-process (no `run` for the array assertions) mirrors
-# 50-kit-list-completeness.bats; the notice-emitting case captures stderr.
+# The OCI-engine kit is off by default and opt-in via ACQ_ENABLE_OCI_KIT.
+# Selection is additionally gated on a readiness check
+# (acq_oci_engine_kit_ready): opted in but not-ready must NOT add the ref and must
+# emit one clear notice. Most tests are fully offline — the readiness check is
+# stubbed per case, so no network fetch or real kit is required. In-process (no
+# `run` for the array assertions) mirrors 50-kit-list-completeness.bats; the
+# notice-emitting case captures stderr.
 #
 # shellcheck shell=bats
 
@@ -43,7 +43,8 @@ load 'helper'
   ACQ_EXTRA_KITS=""
   ACQ_CLI_KITS=()
   ACQ_ENABLE_OCI_KIT=1
-  # Force NOT-ready: the real current state (kit unpublished at the pinned ref).
+  # Force NOT-ready to keep the fail-soft fallback covered even when the pinned
+  # release carries the kit.
   acq_oci_engine_kit_ready() { return 1; }
 
   # The ref-selection helper never emits the ref when not-ready...
@@ -168,6 +169,12 @@ SPEC
   # git+https URL, so match the host/org path segment.
   assert_regex "$ref" "github.com/GSA-TTS/"
   assert_equal "$KIT_SOURCE_PREFIX" "github.com/GSA-TTS/"
+}
+
+@test "oci-kit: readiness TRUE at the pinned patterns ref" {
+  load_acq
+  run acq_oci_engine_kit_ready
+  assert_success
 }
 
 @test "oci-kit: readiness TRUE for a well-formed oci-engine mixin spec (offline)" {
