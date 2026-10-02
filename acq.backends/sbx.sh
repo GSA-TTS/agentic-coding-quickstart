@@ -1706,10 +1706,10 @@ acq_backend_key_present() {
   local service="${1:-}" scope_sandbox="${2:-}"
   case "$service" in
     usai)
-      if [ -n "$scope_sandbox" ] && _acq_sbx_secret_exists "" "$scope_sandbox" usai USAI_API_KEY; then
+      if [ -n "$scope_sandbox" ] && _acq_sbx_secret_exists "" "$scope_sandbox" usai "$USAI_PROVIDER_KEY_ENV"; then
         return 0
       fi
-      _acq_sbx_secret_exists -g "" usai USAI_API_KEY
+      _acq_sbx_secret_exists -g "" usai "$USAI_PROVIDER_KEY_ENV"
       ;;
     *)
       return 0
@@ -1753,7 +1753,7 @@ _acq_sbx_custom_placeholder() {
 # ---------------------------------------------------------------------------
 # acq_backend_rotate_key — rotate the global USAi key (per ADR-0012)
 # ---------------------------------------------------------------------------
-# Rotate the global USAI_API_KEY custom secret in sbx, PRESERVING its proxy
+# Rotate the global USAi custom secret in sbx, PRESERVING its proxy
 # placeholder so existing sandboxes keep resolving to the new value. Carried
 # verbatim from the former scripts/rotate-apikey (which is now a thin shim that
 # calls `acq usai-rotate-api-key`). Never places the secret value on argv — sbx
@@ -1761,6 +1761,7 @@ _acq_sbx_custom_placeholder() {
 acq_backend_rotate_key() {
   local usai_host="$USAI_PROVIDER_HOST"
   local usai_models_url="$USAI_PROVIDER_MODELS_URL"
+  local usai_env="$USAI_PROVIDER_KEY_ENV"
 
   # Read the current secret table once (avoids a TOCTOU window + a second call).
   local secret_ls
@@ -1769,25 +1770,25 @@ acq_backend_rotate_key() {
     return 1
   }
 
-  # Grab the existing placeholder, anchoring on the USAI_API_KEY token rather
+  # Grab the existing placeholder, anchoring on the provider key env token rather
   # than a fixed column, taking only the FIRST match so a duplicated state can't
   # produce a multi-line value. Preserved across rotation so running sandboxes
   # that already injected it keep resolving to the new secret.
   local placeholder
   placeholder=$(printf '%s\n' "$secret_ls" \
-    | awk '{ for (i = 1; i <= NF; i++) if ($i == "USAI_API_KEY") { print $(i+1); exit } }')
+    | awk -v env="$usai_env" '{ for (i = 1; i <= NF; i++) if ($i == env) { print $(i+1); exit } }')
 
   if [ -z "$placeholder" ]; then
-    echo "acq(sbx): USAI_API_KEY not found. Run 'acq secret ls' to check." >&2
+    echo "acq(sbx): $usai_env not found. Run 'acq secret ls' to check." >&2
     return 1
   fi
 
-  # Count USAI_API_KEY rows. More than one means a previous rotation (before the
-  # fix in ADR-0008) left duplicate/ghost entries; the proxy can then resolve the
-  # placeholder to an empty entry and validation fails with 401.
+  # Count provider key env rows. More than one means a previous rotation (before
+  # the fix in ADR-0008) left duplicate/ghost entries; the proxy can then resolve
+  # the placeholder to an empty entry and validation fails with 401.
   local row_count
   row_count=$(printf '%s\n' "$secret_ls" \
-    | grep -cE '[[:space:]]USAI_API_KEY[[:space:]]' || true)
+    | grep -cE "[[:space:]]${usai_env}[[:space:]]" || true)
 
   if [ "${row_count:-0}" -gt 1 ]; then
     # --- Cleanup path for data corrupted by the pre-fix rotation bug ----------
@@ -1804,25 +1805,25 @@ acq_backend_rotate_key() {
     # We hold the placeholder already, so remove EACH duplicate row by placeholder
     # (rm by placeholder targets the one row; loop while any remain), then recreate
     # a single canonical entry.
-    echo "Found $row_count USAI_API_KEY entries; consolidating to a single secret." >&2
+    echo "Found $row_count $usai_env entries; consolidating to a single secret." >&2
 
-    local _ph="$placeholder" _host="$usai_host"
+    local _ph="$placeholder" _host="$usai_host" _env="$usai_env"
     # shellcheck disable=SC2064
     trap "{
       echo '' >&2
-      echo 'ERROR: rotation was interrupted while the USAI_API_KEY secret was removed' >&2
+      echo 'ERROR: rotation was interrupted while the USAi secret was removed' >&2
       echo 'but before the new value was set. Your sandboxes currently have NO USAi key.' >&2
       echo 'Recover by re-running this rotation, or manually:' >&2
-      echo '  sbx secret set-custom --host ${_host} --env USAI_API_KEY --placeholder ${_ph}' >&2
+      echo '  sbx secret set-custom --host ${_host} --env ${_env} --placeholder ${_ph}' >&2
     }" EXIT
 
-    # Remove every USAI_API_KEY custom row. Each row's placeholder is re-read from
+    # Remove every USAi custom row. Each row's placeholder is re-read from
     # a fresh listing so we clear duplicates that may share OR differ in
     # placeholder; -f avoids the confirm prompt, </dev/null guards our stdin.
     local _guard=0 _dup_ph rm_err
     while :; do
       _dup_ph=$(sbx secret ls -g 2>/dev/null \
-        | awk '{ for (i = 1; i <= NF; i++) if ($i == "USAI_API_KEY") { print $(i+1); exit } }')
+        | awk -v env="$usai_env" '{ for (i = 1; i <= NF; i++) if ($i == env) { print $(i+1); exit } }')
       [ -n "$_dup_ph" ] || break
       if ! rm_err=$(sbx secret rm --placeholder "$_dup_ph" -f </dev/null 2>&1); then
         trap - EXIT
@@ -1836,7 +1837,7 @@ acq_backend_rotate_key() {
     # Recreate the single secret with the preserved placeholder. Omitting
     # --value makes sbx prompt for the new key (keeps it out of shell history).
     sbx secret set-custom --host "$usai_host" \
-          --env USAI_API_KEY --placeholder "$placeholder" || {
+          --env "$usai_env" --placeholder "$placeholder" || {
       echo "acq(sbx): 'sbx secret set-custom' failed. See recovery steps above." >&2
       return 1
     }
@@ -1848,7 +1849,7 @@ acq_backend_rotate_key() {
     # Omitting --value makes sbx prompt for the new key (no shell-history leak).
     # Global is the default (no `-g`); see the CLI-change note above.
     sbx secret set-custom --host "$usai_host" \
-          --env USAI_API_KEY --placeholder "$placeholder" || {
+          --env "$usai_env" --placeholder "$placeholder" || {
       echo "acq(sbx): 'sbx secret set-custom' failed." >&2
       return 1
     }
@@ -1896,7 +1897,7 @@ acq_backend_rotate_key() {
   local status
   status=$(sbx exec "$validation_sbx" -- sh -c \
      "curl -sS -o /dev/null -w '%{http_code}' \
-      -H \"Authorization: Bearer \$USAI_API_KEY\" \
+      -H \"Authorization: Bearer \$${usai_env}\" \
       $usai_models_url" 2>/dev/null || true)
 
   acq_backend_terminate "$validation_sbx" >/dev/null 2>&1 || true
