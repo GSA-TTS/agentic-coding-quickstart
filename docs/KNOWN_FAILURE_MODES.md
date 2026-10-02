@@ -1800,7 +1800,7 @@ sandbox, and it starts working again as soon as you
 route and the `socat` bridge are fine — what is missing is the
 **`SSH_AUTH_SOCK` env var in the agent's process**. acq injects that var
 (`-e SSH_AUTH_SOCK=…`) only when the persisted ssh-agent sock value is present
-(recorded host-side in acq's per-sandbox config store, ADR-0030; originally a
+(recorded host-side in acq's per-sandbox config store, ADR-0035; originally a
 guest `/var/lib/acq/ssh-auth-sock` marker), and before the fix nothing
 re-established the bridge or wrote that value when re-attaching to an
 already-running sandbox (the heal's start-if-stopped block is a no-op on a

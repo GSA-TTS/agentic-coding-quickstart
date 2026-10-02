@@ -303,7 +303,7 @@ case "$_msb_sub" in
       *"getent passwd agent"*)
         [ -n "${STUB_AGENT_PASSWD_SHELL+x}" ] || exit 1
         printf '%s\n' "$STUB_AGENT_PASSWD_SHELL" ;;
-      # ADR-0030 host-config mount probes. Default PRESENT+READONLY, matching a
+      # ADR-0035 host-config mount probes. Default PRESENT+READONLY, matching a
       # freshly created sandbox on this branch; STUB_HOST_CONFIG_MOUNT=0 models a
       # legacy sandbox created before the /var/lib/acq/host:ro mount existed, and
       # STUB_HOST_CONFIG_WRITABLE=1 models a backend that accepts but does not
@@ -330,7 +330,7 @@ case "$_msb_sub" in
         [ "${STUB_OCI_SETUP_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
       *"acq-oci-selftest"*)
         [ "${STUB_OCI_VERIFY_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
-      # ADR-0030: the agent-user-ready and oci-ready run-once gates moved OFF the
+      # ADR-0035: the agent-user-ready and oci-ready run-once gates moved OFF the
       # guest /var/lib/acq markers onto the HOST config store (acq_host_config_*).
       # Tests seed those via seed_host_config_gates (from STUB_AGENT_USER_READY /
       # STUB_OCI_READY), so no guest `test -f` arm remains for them here.
@@ -395,7 +395,7 @@ case "$_msb_sub" in
         [ "${STUB_NPM_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
       *"test -f "*) exit 1 ;;       # markers absent
       *"test -s "*) exit 0 ;;       # copied files present
-      # ADR-0030 migrated agent/workspace/ssh-auth-sock/kit-env OFF the guest
+      # ADR-0035 migrated agent/workspace/ssh-auth-sock/kit-env OFF the guest
       # /var/lib/acq markers onto the HOST config store (acq_host_config_*), which
       # acq now reads directly on the host — no `msb exec cat` happens for them.
       # The STUB_RECORDED_* knobs are seeded into the host store instead (see
@@ -552,7 +552,7 @@ load_acq() {
   # in setup() makes every assertion in the suite pass vacuously (#381 review).
 }
 
-# seed_host_config BACKEND NAME — populate the ADR-0030 host config store for a
+# seed_host_config BACKEND NAME — populate the ADR-0035 host config store for a
 # sandbox from the STUB_RECORDED_* env knobs, so tests that exercise the session
 # paths (attach/run/shell) find the agent/workspace/ssh-auth-sock/kit-env acq now
 # reads from the HOST (no guest `msb exec cat` happens for them anymore). Only a
@@ -575,7 +575,7 @@ seed_host_config() {
 # exports carry the store location into that subshell too.
 export -f seed_host_config 2>/dev/null || true
 
-# seed_host_config_gates BACKEND NAME — seed the ADR-0030 presence-gate keys
+# seed_host_config_gates BACKEND NAME — seed the ADR-0035 presence-gate keys
 # (agent-user-ready, oci-ready) from STUB_AGENT_USER_READY / STUB_OCI_READY, so a
 # test can model an already-provisioned sandbox (the run-once gates now live in
 # the host config store, not guest `touch`/`test -f` markers). Only a truthy knob

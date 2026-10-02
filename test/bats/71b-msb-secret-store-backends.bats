@@ -283,7 +283,7 @@ _provision() { # NAME PRE_SNIPPET WS_ARGS...
   log=$(cat "$CALLS")
   assert_regex "$log" "--volume ${ws_app_h}:${ws_app}"
   assert_regex "$log" "--volume ${ws_lib_h}:${ws_lib}:ro"
-  # ADR-0030: the workspace record is written to the HOST config store now, not a
+  # ADR-0035: the workspace record is written to the HOST config store now, not a
   # guest /var/lib/acq/workspace marker. Assert the primary landed there.
   assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/mwbox.*.config/workspace 2>/dev/null)" "${ws_app}"
   [ "$(cat "$ACQ_PROVENANCE_DIR"/msb/mwbox.*.config/workspace 2>/dev/null)" != "/home/agent/workspace" ]

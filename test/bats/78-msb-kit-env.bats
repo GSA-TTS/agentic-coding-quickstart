@@ -7,7 +7,7 @@
 # kit's own provisioning commands and never reached the agent session or
 # `acq exec`/`acq shell` — the kit env silently no-op'd at runtime. The fix
 # persists the validated entries and every session path replays each as
-# `msb exec -e NAME=value`. Per ADR-0030 the entries are persisted to the
+# `msb exec -e NAME=value`. Per ADR-0035 the entries are persisted to the
 # HOST-authoritative config store (acq_host_config_* kit-env key), not a guest
 # /var/lib/acq/kit-env marker a passwordless-sudo agent could tamper.
 #
@@ -164,7 +164,7 @@ RUBOCOP_PARALLELISM=4"
 
 @test "msb markers: an ABSENT host config must not kill session verbs under set -e" {
   # acq runs under `set -euo pipefail`. On a sandbox with no recorded host config
-  # (created before ADR-0030, or with no ssh-agent forwarding / kit env), the
+  # (created before ADR-0035, or with no ssh-agent forwarding / kit env), the
   # host reads return empty and must not terminate the session verb. All
   # STUB_RECORDED_* stay UNSET and nothing is seeded into the host store.
   : > "$CALLS"

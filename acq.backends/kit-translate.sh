@@ -492,7 +492,7 @@ _kit_vol_validate() {
 # readonly is "true" iff the entry declares `readonly: true` — a file whose
 # BYTES are trusted CODE acq must execute from a host-authoritative read-only
 # mount rather than a guest-writable copy a passwordless-sudo agent could tamper
-# (ADR-0030). Empty (treated as false) otherwise, so existing 4-field consumers
+# (ADR-0035). Empty (treated as false) otherwise, so existing 4-field consumers
 # and unflagged files are unaffected.
 kit_spec_files() {
   local spec="$1"

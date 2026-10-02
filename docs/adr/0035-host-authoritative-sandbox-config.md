@@ -11,7 +11,7 @@ risk_treatment: mitigate
 supersedes: []
 ---
 
-# ADR-0030: Host-Authoritative Sandbox Configuration (no trust in guest-generated state)
+# ADR-0035: Host-Authoritative Sandbox Configuration (no trust in guest-generated state)
 
 ## Context and Problem Statement
 
@@ -171,7 +171,7 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   mount before it rewrites `readonly: true` startup code to that path; if the
   probe fails, acq falls back to the legacy guest-copy path and warns. If a future
   msb changes `--volume ...:ro` parsing or enforcement, acq must raise or gate
-  its minimum msb version before relying on ADR-0030. Host and guest path forms
+  its minimum msb version before relying on ADR-0035. Host and guest path forms
   follow ADR-0029.
 - The mount root and `kit-files/` subtree are traversable but not listable (`0711`)
   so the guest `agent` user can open/execute known read-only kit payload paths,

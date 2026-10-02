@@ -74,7 +74,7 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
 
-# Host-authoritative config store (ADR-0030). Normally defined in common.sh
+# Host-authoritative config store (ADR-0035). Normally defined in common.sh
 # (sourced before this adapter by acq_resolve_backend), but the offline session
 # paths (attach/run/shell) are exercised in tests that source THIS file directly
 # without common.sh. Guard-source it so acq_host_config_* are always defined when
@@ -658,7 +658,7 @@ ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
 # always defined even if provision is not the entry point.
 _ACQ_MSB_STARTUP_STAGE_FILES=()
 _ACQ_MSB_STARTUP_STAGED=""
-# Per-kit read-only-file rewrite table (ADR-0030 Mechanism 2): parallel arrays
+# Per-kit read-only-file rewrite table (ADR-0035 Mechanism 2): parallel arrays
 # mapping a kit-declared guest path (FROM) to the path the same bytes appear at
 # on the read-only host-config mount (TO). _acq_msb_apply_kit_dir populates these
 # from `readonly: true` files[] entries; _acq_msb_run_commands / the staged
@@ -1117,7 +1117,7 @@ _acq_msb_wait_for_exec_ready() {
 #   1) INSTALL PHASE stays exec-based. install commands are run-once, gated by a
 #      host-authoritative marker keyed on a hash of the argv
 #      (_acq_msb_exec_install: acq_host_config_has/_write "install-<cksum>", held
-#      on the host per ADR-0030 so a passwordless-sudo guest cannot forge it to
+#      on the host per ADR-0035 so a passwordless-sudo guest cannot forge it to
 #      suppress the step). A create-time script re-runs on every restart by
 #      design — the OPPOSITE of run-once — so
 #      folding install into the startup script would break its idempotency
@@ -1578,7 +1578,7 @@ EOF
   local path mode phase source _readonly src _i
   # Reset the per-kit readonly-file rewrite table (guest path -> :ro guest path)
   # before this kit's files are processed; _acq_msb_run_commands consults it to
-  # rewrite startup argv so trusted code runs from the read-only mount (ADR-0030).
+  # rewrite startup argv so trusted code runs from the read-only mount (ADR-0035).
   _ACQ_MSB_RO_REWRITE_FROM=()
   _ACQ_MSB_RO_REWRITE_TO=()
   local _hcfg_mount_ok=0
@@ -1598,7 +1598,7 @@ EOF
       src="${kitdir}/${source}"
     fi
     if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_mount_ok" -eq 1 ]; then
-      # Trusted CODE (ADR-0030 Mechanism 2): stage it on the per-sandbox
+      # Trusted CODE (ADR-0035 Mechanism 2): stage it on the per-sandbox
       # host-config dir so the guest sees it through the READ-ONLY mount and a
       # passwordless-sudo agent cannot rewrite it. Do NOT copy it into the
       # guest's writable filesystem; record a rewrite so the invoking startup
@@ -1616,7 +1616,7 @@ EOF
     fi
     if { [ "$_readonly" != "true" ] || [ "$_hcfg_mount_ok" -ne 1 ]; } && [ -n "$src" ] && [ -f "$src" ]; then
       if [ "$_readonly" = "true" ]; then
-        echo "acq(msb): warning: sandbox '$name' has no readable or read-only ADR-0030 host-config mount;" \
+        echo "acq(msb): warning: sandbox '$name' has no readable or read-only ADR-0035 host-config mount;" \
              "copying readonly kit file '$path' into the guest for compatibility. Recreate the sandbox to get tamper-resistant readonly startup code." >&2
       fi
       _acq_msb_copy_file_verified "$name" "$src" "$path" "$mode" || {
@@ -1631,7 +1631,7 @@ EOF
   #    the kit's own commands (step 3) covers provisioning only; the block exists
   #    for agent-runtime config (see ADR-0011: OPENCODE_CONFIG-style vars), so
   #    the validated entries are also persisted to the HOST config store
-  #    (ADR-0030) that run/attach/shell read back and replay as `-e` flags — the
+  #    (ADR-0035) that run/attach/shell read back and replay as `-e` flags — the
   #    same role the guest /var/lib/acq/kit-env marker had, but host-authoritative
   #    so a passwordless-sudo agent cannot inject env into the agent process.
   local _kit_env=()
@@ -1662,15 +1662,15 @@ EOF
 # single-kit `acq kit apply` verb deliberately does NOT reset: a mid-life add
 # is additive, and replay's last-value-wins handles its overrides. Best-effort:
 # a failed reset degrades to the previous stale-retention behavior, never
-# aborts the apply. Host-authoritative (ADR-0030).
+# aborts the apply. Host-authoritative (ADR-0035).
 _acq_msb_reset_kit_env() {
   acq_host_config_clear msb "$1" kit-env
 }
 
 # _acq_msb_host_config_mount_available NAME — true iff this sandbox has the
-# ADR-0030 host-config dir mounted at ACQ_HOST_CONFIG_GUEST_DIR, traversable by
+# ADR-0035 host-config dir mounted at ACQ_HOST_CONFIG_GUEST_DIR, traversable by
 # the agent user, and still write-refusing under guest root. Existing sandboxes
-# created before ADR-0030 lack this create-time mount; for those, readonly:true
+# created before ADR-0035 lack this create-time mount; for those, readonly:true
 # files must fall back to the legacy guest-copy path rather than rewriting startup
 # argv to a non-existent or writable path.
 _acq_msb_host_config_mount_available() {
@@ -1685,7 +1685,7 @@ _acq_msb_host_config_mount_available() {
 
 # _acq_msb_stage_readonly_file NAME KITDIR GUESTPATH SRC — stage one trusted kit
 # code file onto the per-sandbox host-config dir so the guest sees it through the
-# READ-ONLY mount (ADR-0030 Mechanism 2), and echo the guest path it appears at.
+# READ-ONLY mount (ADR-0035 Mechanism 2), and echo the guest path it appears at.
 # Returns non-zero (and echoes nothing) on failure. The file is placed under a
 # `kit-files/<pathslug>.<crc>` subtree of the host-config dir (a direct
 # filesystem write, NOT acq_host_config_write, whose flat KEY charset forbids the
@@ -1716,7 +1716,7 @@ _acq_msb_stage_readonly_file() {
 }
 
 # _acq_msb_ro_rewrite_token TOKEN — echo TOKEN, or its read-only-mount equivalent
-# when TOKEN exactly equals a staged readonly file's declared guest path (ADR-0030
+# when TOKEN exactly equals a staged readonly file's declared guest path (ADR-0035
 # Mechanism 2). Whole-token match only (never substring), so a --flag value that
 # merely mentions the path is untouched. Bash 3.2 safe (parallel-array scan).
 _acq_msb_ro_rewrite_token() {
@@ -1874,7 +1874,7 @@ EOF
         ;;
       "__END__")
         reading=0
-        # ADR-0030 Mechanism 2: rewrite any argv token that names a readonly
+        # ADR-0035 Mechanism 2: rewrite any argv token that names a readonly
         # (trusted-code) kit file to its read-only-mount path, so startup runs the
         # :ro copy, not a guest-writable one. No-op when the rewrite table is
         # empty (the common case: no kit declared readonly files).
@@ -1995,7 +1995,7 @@ _acq_msb_exec_flags_into() {
 # _acq_msb_exec_install NAME USER UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV... — run an
 # install-phase command, gated by a per-command marker (hash of argv) so it runs
 # once per sandbox even across re-applies. The marker is a key in the
-# host-authoritative config store (ADR-0030), so a passwordless-sudo guest cannot
+# host-authoritative config store (ADR-0035), so a passwordless-sudo guest cannot
 # forge it to suppress the install step.
 _acq_msb_exec_install() {
   local _name="$1" _user="$2" _uflagn="$3" _eflagn="$4"
@@ -2009,7 +2009,7 @@ _acq_msb_exec_install() {
   eval "_ef=(\${${_eflagn}[@]+\"\${${_eflagn}[@]}\"})"
 
   local marker
-  # Host-authoritative run-once gate (ADR-0030): a presence key in the host config
+  # Host-authoritative run-once gate (ADR-0035): a presence key in the host config
   # store, keyed by the command's cksum, instead of a guest `touch`/`test -f` a
   # passwordless-sudo agent could forge to SUPPRESS this install step.
   marker="install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
@@ -2256,7 +2256,7 @@ _acq_msb_startup_body_into() {
   local _kit_env=()
   _acq_msb_collect_kit_env_into _kit_env "$_spec"
 
-  # ADR-0030 Mechanism 2: build this spec's readonly-file rewrite table so the
+  # ADR-0035 Mechanism 2: build this spec's readonly-file rewrite table so the
   # staged --script-path body (like the exec path) invokes trusted code from the
   # :ro mount. Staging runs at create-flag assembly, before _acq_msb_apply_kit_dir
   # populates the module-level table, so derive a LOCAL table from the same
@@ -3287,7 +3287,7 @@ EOF
   _acq_msb_vsock_flags_into _vsock_flags
   [ "${#_vsock_flags[@]}" -gt 0 ] && create_flags+=("${_vsock_flags[@]}")
 
-  # Host-authoritative config mount (ADR-0030). Mount this sandbox's host config
+  # Host-authoritative config mount (ADR-0035). Mount this sandbox's host config
   # dir into the guest READ-ONLY at ACQ_HOST_CONFIG_GUEST_DIR. acq writes the
   # sandbox's trusted config there on the HOST (agent, workspace, ssh-auth-sock,
   # kit-env, gate markers); the guest can read but — because the mount is
@@ -3480,7 +3480,7 @@ EOF
   # Record which agent this sandbox runs, so acq_backend_attach (which only gets
   # the sandbox name) knows what to launch — the sbx equivalent is that
   # `sbx run --name` re-launches the agent baked in at create. Written to the
-  # HOST-authoritative config store (ADR-0030), not a guest file: a
+  # HOST-authoritative config store (ADR-0035), not a guest file: a
   # passwordless-sudo agent could otherwise rewrite a guest marker and change
   # which binary acq relaunches. The value is still charset-checked defensively.
   case "$agent" in
@@ -3490,7 +3490,7 @@ EOF
 
   # Record the guest workspace path too. attach only gets the sandbox NAME, so it
   # cannot recompute the host→guest mapping (which now mirrors the host path);
-  # persist it (host-side, ADR-0030) so a name-only re-attach cds into the right
+  # persist it (host-side, ADR-0035) so a name-only re-attach cds into the right
   # place. The path was validated as an existing host dir above; the charset
   # guard is kept for defense-in-depth even though the value no longer enters a
   # guest sh -c string.
@@ -3732,7 +3732,7 @@ _acq_msb_install_agent() {
 # _acq_msb_exec_command) with HOME exported.
 _acq_msb_ensure_agent_user() {
   local name="$1"
-  # Host-authoritative run-once gate (ADR-0030): the user/sudoers setup is gated
+  # Host-authoritative run-once gate (ADR-0035): the user/sudoers setup is gated
   # on a host config key, not a guest marker a passwordless-sudo agent could
   # pre-create to SKIP the setup.
   local marker="agent-user-ready"
@@ -4041,7 +4041,7 @@ _acq_msb_start_ssh_agent_bridge() {
 
   # Record the guest sock path so attach/exec/start can resolve SSH_AUTH_SOCK
   # even when no provision flag is set. Only written when forwarding is active.
-  # Host-authoritative (ADR-0030): held on the host, not a guest marker a
+  # Host-authoritative (ADR-0035): held on the host, not a guest marker a
   # sudo agent could repoint. $_sock is acq's own constant.
   acq_host_config_write msb "$name" ssh-auth-sock "$_sock" || true
   acq_debug "msb: ssh-agent bridge started at $_sock (vsock port $_port) in $name"
@@ -4124,7 +4124,7 @@ _acq_msb_warn_if_agent_unreachable() {
 # _acq_msb_ssh_auth_sock_for NAME — echo the recorded guest ssh-agent sock path
 # (the SSH_AUTH_SOCK value git/ssh should use in the guest), or empty when
 # forwarding was never configured for this sandbox. Read from the HOST config
-# store (ADR-0030) so run/attach on a name-only re-entry still find it, and a
+# store (ADR-0035) so run/attach on a name-only re-entry still find it, and a
 # sudo guest cannot repoint SSH_AUTH_SOCK. See ADR-0021.
 _acq_msb_ssh_auth_sock_for() {
   local name="$1"
@@ -4167,7 +4167,7 @@ EOF
 }
 
 # _acq_msb_kit_env_flags_into ARRVAR NAME — build the `-e NAME=value` flag array
-# for the kit environment[] entries persisted in the HOST config store (ADR-0030)
+# for the kit environment[] entries persisted in the HOST config store (ADR-0035)
 # by _acq_msb_apply_kit_dir, so every session path (run/attach/shell) sees the env
 # the kits declared for agent runtime (see ADR-0011). Empty array when no kit
 # declared environment[]. Array passed by name (bash 3.2 compat).
@@ -4527,7 +4527,7 @@ EOF
       # Best-effort: mark ready so we do not re-run the (network-bound) install on
       # every provision/restart. (The /dev/net/tun grant and config writes above
       # are cheap + idempotent and re-run each pass regardless of this marker.)
-      # Host-authoritative (ADR-0030).
+      # Host-authoritative (ADR-0035).
       acq_host_config_write msb "$name" "$marker" 1 || true
       acq_debug "msb: OCI engine (rootless podman) ready in $name"
       return 0
@@ -4693,7 +4693,7 @@ acq_backend_run() {
 #                base image's Node REPL, and the passwd shell isn't exported).
 #
 # A bare `acq run <sandbox>` re-attach (no agent token) reads the agent recorded
-# at provision from the host config store (ADR-0030); `shell` (or a missing/failed
+# at provision from the host config store (ADR-0035); `shell` (or a missing/failed
 # agent binary) falls back to an interactive `/bin/sh -l` as `agent` — never a
 # root shell, never msb's Node-REPL default. Post-`--` args are forwarded to the agent.
 acq_backend_attach() {
@@ -4724,7 +4724,7 @@ _acq_msb_attach() {
   ws=$(_acq_msb_workspace_for "$name")
 
   # Read the agent recorded at provision. Default to `shell` if unset. The value
-  # comes from the HOST-authoritative config store (ADR-0030), not a guest file,
+  # comes from the HOST-authoritative config store (ADR-0035), not a guest file,
   # so a passwordless-sudo agent can no longer alter which binary is launched.
   # The charset guard is kept for defense-in-depth before the value enters the
   # `sh -c "command -v '$agent'"` below; fall back to a plain shell on anything
@@ -4844,7 +4844,7 @@ acq_backend_terminate() {
   # Same GONE-after-remove-attempt rule as the volumes above: delete the scratch
   # clone and drop the fetch-back remote only once the sandbox is really gone.
   _acq_msb_clone_cleanup "$1"
-  # Remove the host-authoritative config dir (ADR-0030) once the sandbox is gone.
+  # Remove the host-authoritative config dir (ADR-0035) once the sandbox is gone.
   acq_host_config_remove msb "$1" || true
   return "$_rc"
 }

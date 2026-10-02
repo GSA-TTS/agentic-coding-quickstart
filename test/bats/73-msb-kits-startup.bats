@@ -154,7 +154,7 @@ SPEC
     _acq_msb_apply_kit_dir instmarkerbox "$imk"
   '
   local log; log=$(cat "$CALLS")
-  # ADR-0030: the run-once install gate is a host config key now, not a guest
+  # ADR-0035: the run-once install gate is a host config key now, not a guest
   # test -f/touch. The install command still runs, and the gate key is written.
   assert_regex "$log" 'msb exec instmarkerbox -u 0'
   local instkey; instkey=$(ls "$ACQ_PROVENANCE_DIR"/msb/instmarkerbox.*.config/install-* 2>/dev/null | head -n1)
@@ -308,7 +308,7 @@ SPEC
   local log body
   log=$(cat "$CALLS")
   body=$(_staged_body mix-stage)
-  # ADR-0030: install is still exec-based and run-once, but the gate lives in the
+  # ADR-0035: install is still exec-based and run-once, but the gate lives in the
   # host config store now (not a guest test -f). Assert the install ran and a
   # gate key was recorded; startup is staged into the script body, not the gate.
   assert_regex "$log" 'echo INSTALL_ONLY_0017'

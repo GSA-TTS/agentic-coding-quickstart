@@ -1542,7 +1542,7 @@ acq_cli_kits_load() {
 }
 
 # ============================================================================
-# Host-authoritative per-sandbox config store (ADR-0030)
+# Host-authoritative per-sandbox config store (ADR-0035)
 # ============================================================================
 # acq must NOT rely on guest-generated or guest-tamperable state to configure a
 # sandbox: the in-sandbox agent has passwordless sudo, so a root-owned GUEST path

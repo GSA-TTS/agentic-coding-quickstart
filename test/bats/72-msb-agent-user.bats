@@ -93,7 +93,7 @@ SPEC
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'npm install -g --no-fund --no-audit opencode-ai'
   assert_regex "$log" '--net-rule allow@registry\.npmjs\.org'
-  # ADR-0030: the launched-agent record is written to the HOST config store, not
+  # ADR-0035: the launched-agent record is written to the HOST config store, not
   # a guest /var/lib/acq/agent marker. Assert it landed in the host store.
   assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/instbox.*.config/agent 2>/dev/null)" "opencode"
 }
@@ -204,7 +204,7 @@ _attach() { # PRE_SNIPPET NAME
 }
 
 @test "msb: attach with a garbage recorded agent value falls back to shell, never runs the injection" {
-  # ADR-0030: the agent record now lives in the host config store (a sudo guest
+  # ADR-0035: the agent record now lives in the host config store (a sudo guest
   # can no longer plant it), but acq still charset-guards the value before it
   # enters `command -v '$agent'`. Seed a hostile value and prove the guard holds.
   _attach 'export STUB_RECORDED_AGENT="x'"'"';touch /tmp/acq_pwn;'"'"'" STUB_RECORDED_WORKSPACE=/tmp/wsp' injattach
@@ -218,7 +218,7 @@ _attach() { # PRE_SNIPPET NAME
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'PODMAN_PKGS='
   assert_regex "$log" '/usr/local/bin/docker'
-  # ADR-0030: the oci-ready gate is recorded in the host config store.
+  # ADR-0035: the oci-ready gate is recorded in the host config store.
   assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/ocibox.*.config/oci-ready 2>/dev/null)" "1"
   assert_regex "$log" '/etc/containers/storage\.conf'
   assert_regex "$log" 'driver = ..vfs..'
@@ -270,7 +270,7 @@ _attach() { # PRE_SNIPPET NAME
   '
   assert_success
   local log; log=$(cat "$CALLS")
-  # ADR-0030: the oci-ready gate still skips idempotent OCI setup during a heal;
+  # ADR-0035: the oci-ready gate still skips idempotent OCI setup during a heal;
   # fresh provision clears stale gates before this point.
   assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/ocirdybox.*.config/oci-ready 2>/dev/null)" "1"
   refute_regex "$log" 'PODMAN_PKGS='
@@ -452,7 +452,7 @@ SPEC
 
 @test "msb: repeated acq exec reads the workspace once per process (cached)" {
   : > "$CALLS"
-  # ADR-0030: the workspace is read from the HOST config store now, not a guest
+  # ADR-0035: the workspace is read from the HOST config store now, not a guest
   # `cat`, so the per-process cache is asserted via the resolved -w value being
   # applied to BOTH execs (a re-read would still yield the same value, but the
   # cache guarantees a single host lookup — proven by the stable -w on both).
@@ -481,7 +481,7 @@ SPEC
     acq_backend_ensure_kits_applied healshbox >/dev/null 2>&1
   '
   local log; log=$(cat "$CALLS")
-  # ADR-0030: agent-user-ready is a host config key; a hit skips useradd but
+  # ADR-0035: agent-user-ready is a host config key; a hit skips useradd but
   # still re-syncs the login shell (the heal path this test asserts).
   assert_regex "$log" 'acq-login-profile.* sh /bin/bash'
   refute_regex "$log" 'useradd'

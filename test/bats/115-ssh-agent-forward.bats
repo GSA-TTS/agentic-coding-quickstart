@@ -144,7 +144,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   local log; log=$(cat "$CALLS")
   assert_regex "$log" "socat UNIX-LISTEN:'/home/agent/\.acq/ssh-agent\.sock'"
   assert_regex "$log" "VSOCK-CONNECT:2:'3552'"
-  # ADR-0030: the sock path is recorded in the HOST config store, not a guest
+  # ADR-0035: the sock path is recorded in the HOST config store, not a guest
   # /var/lib/acq/ssh-auth-sock marker.
   assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/sbox.*.config/ssh-auth-sock 2>/dev/null)" "/home/agent/.acq/ssh-agent.sock"
 }
@@ -316,7 +316,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   '
   local log; log=$(cat "$CALLS")
   assert_regex "$log" "socat UNIX-LISTEN:'/home/agent/\.acq/ssh-agent\.sock'"
-  # ADR-0030: the sock path is recorded in the HOST config store, not a guest marker.
+  # ADR-0035: the sock path is recorded in the HOST config store, not a guest marker.
   assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/reattachbox.*.config/ssh-auth-sock 2>/dev/null)" "/home/agent/.acq/ssh-agent.sock"
   # A running sandbox must NOT be routed through acq_backend_start.
   refute_regex "$log" 'msb start'

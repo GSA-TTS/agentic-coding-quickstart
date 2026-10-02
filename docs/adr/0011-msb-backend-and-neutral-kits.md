@@ -411,11 +411,11 @@ strings). The translate layer:
 > re-validated on replay and the last value wins for a duplicate name (kits
 > append in application order, so a later kit overrides an earlier one).
 >
-> **Superseded storage (ADR-0030):** the persisted values described in this ADR
+> **Superseded storage (ADR-0035):** the persisted values described in this ADR
 > (`agent`, `workspace`, `ssh-auth-sock`, `kit-env`, and the run-once gate
 > markers) were originally written to root-owned **guest** files under
 > `/var/lib/acq/`. Because the in-sandbox agent has passwordless sudo, a guest
-> path is not tamper-proof against a prompt-injected agent. ADR-0030 moves all of
+> path is not tamper-proof against a prompt-injected agent. ADR-0035 moves all of
 > these to acq's **host-authoritative** per-sandbox config store (mounted into
 > the guest read-only where the guest must read them). The behavior described
 > here is unchanged; only the storage location and its trust boundary moved.
