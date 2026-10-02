@@ -288,6 +288,17 @@ LS
   assert_success
 }
 
+@test "secret has(sbx): provider facts key env drives proxy lookup" {
+  load_acq
+  mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov KIT_API_KEY ph-kit ****\n' > "$STUBDIR/sbx_ls"
+  export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+  export USAI_PROVIDER_KEY_ENV=KIT_API_KEY
+  run acq_backend_key_present usai
+
+  assert_success
+}
+
 @test "secret has: a missing service name is a usage error (rc 2)" {
   load_acq
   run env ACQ_BACKEND=msb "$ACQ" secret has -g
