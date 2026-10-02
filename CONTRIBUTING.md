@@ -105,7 +105,7 @@ npm ci --prefix .github/linters
 |---------|-------------|
 | `npm run lint:md` | Lint markdown files (same rules as CI) |
 | `npm run lint` | Run all linters |
-| `npm run lint:secrets` | Run gitleaks (requires gitleaks to be installed: `brew install gitleaks`) |
+| `npm run lint:secrets` | Run gitleaks at the version pinned in `.pre-commit-config.yaml` (pre-commit fetches it; no separate install) |
 | `npm run check` | Run the full pre-commit suite (gitleaks, shellcheck, YAML/JSON validation, whitespace, markdown lint) |
 
 > [!NOTE]
