@@ -320,6 +320,21 @@ _no_package_manager_path() {
   [ "$tap_line" -lt "$install_line" ]
 }
 
+@test "install: brew method trusts the microsandbox-acq dependency before installing acq" {
+  export BREW_STUB_LOG="$BATS_TEST_TMPDIR/brew.log"
+  _write_brew_logging_stub
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method brew --no-msb --yes
+
+  assert_success
+  assert_regex "$(cat "$BREW_STUB_LOG")" "trust --formula GSA-TTS/tap/microsandbox-acq"
+  assert_regex "$(cat "$BREW_STUB_LOG")" "install GSA-TTS/tap/acq"
+  trust_line=$(grep -n 'trust --formula GSA-TTS/tap/microsandbox-acq' "$BREW_STUB_LOG" | head -1 | cut -d: -f1)
+  install_line=$(grep -n 'install GSA-TTS/tap/acq' "$BREW_STUB_LOG" | head -1 | cut -d: -f1)
+  [ -n "$trust_line" ] && [ -n "$install_line" ]
+  [ "$trust_line" -lt "$install_line" ]
+}
+
 @test "install: run() detaches child stdin so piped script tail survives" {
   export BREW_STUB_LOG="$BATS_TEST_TMPDIR/brew.log"
   _write_stdin_eating_brew_stub
