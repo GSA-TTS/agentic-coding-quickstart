@@ -31,6 +31,11 @@ ACQ_RESOLVED_PATH="${ACQ_SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 # shellcheck disable=SC1091
 . "${ACQ_SCRIPT_DIR}/acq.backends/common.sh"
 
+# Test-only seam for executable dispatch tests that need a local provider kit.
+if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_USAI_KIT:-}" ]; then
+  USAI_KIT="$ACQ_TEST_USAI_KIT"
+fi
+
 # ---------------------------------------------------------------------------
 # Print version/identity
 # ---------------------------------------------------------------------------
@@ -529,6 +534,32 @@ _acq_backend_passthrough() {
   command "${ACQ_RESOLVED_BACKEND}" "$@"
 }
 
+_acq_secret_service_arg() {
+  local a1="${1:-}" a2="${2:-}"
+  case "$a1" in
+    -g|--global) printf '%s\n' "$a2" ;;
+    "")          printf '\n' ;;
+    -*)          printf '%s\n' "$a1" ;;
+    *)
+      case "$a2" in
+        ""|-*) printf '%s\n' "$a1" ;;
+        *)     printf '%s\n' "$a2" ;;
+      esac
+      ;;
+  esac
+}
+
+_acq_secret_needs_usai_facts() {
+  [ "$(_acq_secret_service_arg "$@")" = "usai" ]
+}
+
+_acq_secret_import_includes_usai() {
+  local parsed only_service
+  parsed=$(_acq_import_parse_args "$@" 2>/dev/null) || return 1
+  only_service=$(printf '%s' "$parsed" | cut -f3)
+  [ -z "$only_service" ] || [ "$only_service" = "usai" ]
+}
+
 _acq_parse_secret_scope_for_propagation() {
   ACQ_PROPAGATE_SCOPE=""
   ACQ_PROPAGATE_SERVICE=""
@@ -960,13 +991,6 @@ esac
 # Resolve and load the backend adapter (required for all other subcommands).
 # ---------------------------------------------------------------------------
 acq_resolve_backend "${explicit_backend}"
-_acq_provider_facts_rc=0
-acq_provider_facts_load_from_kit "$USAI_KIT" || _acq_provider_facts_rc=$?
-case "$_acq_provider_facts_rc" in
-  0|2) : ;;
-  *) echo "acq: invalid provider facts in pinned usai-provider kit; refusing to continue" >&2; exit 1 ;;
-esac
-unset _acq_provider_facts_rc
 
 # ---------------------------------------------------------------------------
 # acq_backend_guard_version — cheap version floor for state-touching verbs
@@ -1087,6 +1111,7 @@ esac
 case "$subcommand" in
   usai-rotate-api-key)
     shift
+    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
     if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
       echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not implement key rotation" >&2
       echo "     (acq_backend_rotate_key). Rotate manually, then re-run." >&2
@@ -1098,6 +1123,7 @@ case "$subcommand" in
 
   create)
     shift
+    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
     acq_backend_prepare
     # First-run onboarding (ADR-0031): offer `acq configure` once before we
     # provision, so a brand-new user picks kits up front. No-op after first run
@@ -1105,15 +1131,15 @@ case "$subcommand" in
     maybe_first_run_configure
     # Apply configured-default extra kits (config.yaml), then offer a create-time
     # picker pre-populated with those defaults so THIS sandbox can deviate.
+    create_agent=$(first_positional "$@")
     _acq_apply_configured_extra_kits || exit 1
     create_time_kit_picker
-    _build_kit_list
+    _build_kit_list "$create_agent"
     # Pre-flight: validate the workspace path before provisioning (#issue).
     ws=$(workspace_path "$@")
     preflight_workspace_path "$ws" || exit 1
     local_name=$(derive_name "$@") || exit 1
     [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
-    create_agent=$(first_positional "$@")
 
     # The USAi API key must be stored before provisioning: msb binds secrets only
     # at create time, so a sandbox created before the key exists carries no USAi
@@ -1165,6 +1191,7 @@ case "$subcommand" in
     [ "${#create_args[@]}" -gt 0 ] && first=$(first_positional "${create_args[@]}")
 
     if [ -n "$first" ] && is_known_agent "$first"; then
+      acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
       # AGENT form: create if missing, then attach.
       local_name=$(derive_name "${create_args[@]}") || exit 1
       [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
@@ -1243,7 +1270,7 @@ case "$subcommand" in
         maybe_first_run_configure
         _acq_apply_configured_extra_kits || exit 1
         create_time_kit_picker
-        _build_kit_list
+        _build_kit_list "$first"
 
         if ! ensure_key_present "$local_name"; then
           exit 1
@@ -1521,6 +1548,9 @@ case "$subcommand" in
     case "$sub2" in
       set)
         shift
+        if _acq_secret_needs_usai_facts "$@"; then
+          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+        fi
         acq_backend_secret_set "$@"
         if _acq_parse_secret_scope_for_propagation "$@"; then
           _acq_propagate_secret_to_present_backends "$ACQ_PROPAGATE_SERVICE" "$ACQ_PROPAGATE_SCOPE"
@@ -1540,6 +1570,9 @@ case "$subcommand" in
         ;;
       rm)
         shift
+        if _acq_secret_needs_usai_facts "$@"; then
+          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+        fi
         # `acq secret rm [-g | SANDBOX] SERVICE` removes an acq-owned secret from
         # the acq store (and clears the backend's injector). If the args name a
         # scope + known acq service (-g or a sandbox name), route to the backend
@@ -1576,6 +1609,9 @@ case "$subcommand" in
         # acq_key_injectable so the two can never drift. Fail closed; never forward
         # to the backend CLI.
         shift
+        if _acq_secret_needs_usai_facts "$@"; then
+          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+        fi
         # Parse scope the same way secret set/rm do: `-g`/`--global` -> global; a
         # leading bare token before the service -> sandbox; a lone token -> service.
         secret_has_scope=""
@@ -1651,6 +1687,9 @@ case "$subcommand" in
         # it never invokes the backend's own `secret` CLI. See acq_secret_import
         # in acq.backends/common.sh and docs/BACKEND_GUIDE.md "Migration".
         shift
+        if _acq_secret_import_includes_usai "$@"; then
+          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+        fi
         acq_secret_import "$@"
         ;;
       --help|-h|"")
