@@ -268,8 +268,15 @@ msb_version_blocked() {
   return 0
 }
 
+msb_version_final() {
+  case "$1" in
+    *[-+]* ) return 1 ;;
+    * ) return 0 ;;
+  esac
+}
+
 msb_version_of() {
-  "$1" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true
+  "$1" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1 || true
 }
 
 # Release bundle basename for this host, e.g. microsandbox-darwin-aarch64.tar.gz.
@@ -956,7 +963,7 @@ clear_stale_downgrade_journal() {
   fi
 
   run rm -rf "$opdir" || { warn "  Could not remove $opdir."; return 1; }
-  ok "  Cleared the interrupted downgrade; msb commands should work again."
+  ok "  Cleared the interrupted downgrade; msb catalog access should work again."
 }
 
 # Roll a 0.7.x-migrated catalog back so a supported msb can read it again.
@@ -991,8 +998,8 @@ recover_migrated_catalog() {
   else
     warn "  Refusing to run 'msb self downgrade' with msb $blocked_version: only the newer"
     warn "  msb that applied these migrations can roll them back, and an attempt by"
-    warn "  an older one leaves an interrupted-downgrade record that blocks every"
-    warn "  msb command afterwards."
+    warn "  an older one leaves an interrupted-downgrade record that blocks later"
+    warn "  catalog-opening msb commands afterwards."
     info "  Get the msb that migrated this catalog, run the downgrade with IT, then"
     info "  re-run this installer. A keg-only formula gets you that exact version"
     info "  without disturbing your current msb:"
@@ -1094,7 +1101,8 @@ update_msb_to_fixed() {
   updated="$(command -v msb 2>/dev/null || true)"
   updated_version=""
   [ -n "$updated" ] && updated_version=$(msb_version_of "$updated")
-  if [ -z "$updated_version" ] || msb_version_blocked "$updated_version" \
+  if [ -z "$updated_version" ] || ! msb_version_final "$updated_version" \
+     || msb_version_blocked "$updated_version" \
      || ! version_ge "$updated_version" "$MSB_MIN_VERSION"; then
     warn "  After 'msb self update' the active msb is ${updated_version:-unreadable}, which acq"
     warn "  does not accept. Falling back to the pinned msb $MSB_PINNED_VERSION path."
@@ -1188,9 +1196,9 @@ verify_active_msb_supported() {
 Add $BIN_DIR to PATH, open a new terminal, and re-run this installer."
   fi
   ver=$(msb_version_of "$active")
-  if [ -z "$ver" ]; then
-    die "active msb at $active did not report a parseable version. Check that PATH
-points at the intended msb binary, then re-run this installer."
+  if [ -z "$ver" ] || ! msb_version_final "$ver"; then
+    die "active msb at $active did not report a supported final version. Check that PATH
+points at an msb final release, then re-run this installer."
   fi
   if ! version_ge "$ver" "$MSB_MIN_VERSION"; then
     die "active msb is still too old: $ver at $active.
@@ -1225,9 +1233,9 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
   active_msb_version=""
   [ -n "$active_msb" ] && active_msb_version=$(msb_version_of "$active_msb")
 
-  if [ -n "$active_msb" ] && [ -z "$active_msb_version" ]; then
-    step "The active msb version could not be determined"
-    warn "  Found msb at $active_msb, but its version output was not parseable."
+  if [ -n "$active_msb" ] && { [ -z "$active_msb_version" ] || ! msb_version_final "$active_msb_version"; }; then
+    step "The active msb version is not a supported final release"
+    warn "  Found msb at $active_msb, but its version output was not a supported final release."
     warn "  Install msb $MSB_PINNED_VERSION so acq can verify a supported version."
     if confirm "  Install/downgrade msb to $MSB_PINNED_VERSION now?"; then
       if replace_active_msb "$active_msb" "$active_msb_version"; then

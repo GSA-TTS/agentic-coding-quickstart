@@ -571,10 +571,65 @@ _no_package_manager_path() {
     sh "$REPO_ROOT/install.sh" --method npm --yes
 
   assert_success
-  assert_output --partial 'active msb version could not be determined'
+  assert_output --partial 'active msb version is not a supported final release'
   assert_output --partial 'Active msb is 0.6.18'
   run "$ACQ_INSTALL_BIN_DIR/msb" --version
   assert_output 'msb 0.6.18'
+}
+
+@test "install: prerelease active msb is replaced with the pinned version" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.6.18) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  _write_curl_msb_bundle_stub "$fixture"
+  _write_msb_stub "$HOME/.local/bin/msb" '0.7.3-rc1'
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$HOME/.local/bin:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version is not a supported final release'
+  assert_output --partial 'Active msb is 0.6.18'
+  run "$ACQ_INSTALL_BIN_DIR/msb" --version
+  assert_output 'msb 0.6.18'
+}
+
+@test "install: build-suffixed active msb is replaced with the pinned version" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.6.18) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  _write_curl_msb_bundle_stub "$fixture"
+  _write_msb_stub "$HOME/.local/bin/msb" '0.7.3+build.1'
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$HOME/.local/bin:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version is not a supported final release'
+  assert_output --partial 'Active msb is 0.6.18'
+  run "$ACQ_INSTALL_BIN_DIR/msb" --version
+  assert_output 'msb 0.6.18'
+}
+
+@test "install: platform-suffixed final msb is accepted" {
+  _write_npm_stub
+  _write_msb_stub "$STUBDIR/bin/msb" '0.7.3 linux-arm64'
+
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'msb is already installed'
+  assert_output --partial 'v0.7.3'
+  refute_output --partial 'not a supported final release'
+}
+
+@test "install: self-update verification rejects non-final msb versions" {
+  update_check=$(awk '
+    /updated_version=/ { seen = 1 }
+    seen { print }
+    /Falling back to the pinned msb/ { exit }
+  ' "$REPO_ROOT/install.sh")
+
+  assert_regex "$update_check" '! msb_version_final "\$updated_version"'
 }
 
 @test "install: never fetches and executes an msb installer script" {

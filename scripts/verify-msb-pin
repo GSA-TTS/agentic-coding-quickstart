@@ -37,9 +37,9 @@
 #                   backup, no journal, msb still usable. This is the load-bearing
 #                   reason acq offers the FORWARD path first
 #   6. wrong-order  the same downgrade attempted BY the older binary fails AND
-#                   wedges every later msb command, which is why acq refuses to
-#                   attempt it (install.sh recover_migrated_catalog) and offers to
-#                   clear the journal (clear_stale_downgrade_journal)
+#                   wedges later catalog-opening msb commands, which is why acq
+#                   refuses to attempt it (install.sh recover_migrated_catalog)
+#                   and offers to clear the journal (clear_stale_downgrade_journal)
 #   6b. keg layout  a keg-only versioned formula's layout runs by path and can
 #                   drive that recovery without being linked — the escape hatch
 #                   when the migrating msb has already been uninstalled
@@ -419,7 +419,7 @@ for candidate in "$HOME_GRP"/db/self-downgrade/*/journal.json; do
 done
 if [ -n "$grp_journal" ]; then
   bad "the group refusal left an active downgrade journal behind" \
-      "that would wedge every later msb command; install.sh's journal guard would be load-bearing here"
+      "that would wedge later catalog-opening msb commands; install.sh's journal guard would be load-bearing here"
 else
   ok "no active journal after the refusal (the operation dir is retired as .cancelled-*)"
   note "acq's journal glob skips dot-prefixed dirs, so a cancelled op is correctly ignored"
@@ -435,7 +435,7 @@ esac
 
 # --- 6. the wrong order wedges the install --------------------------------
 
-info "6. the WRONG order fails, and wedges every later msb command"
+info "6. the WRONG order fails, and wedges later catalog-opening msb commands"
 HOME_WEDGE="$SCRATCH/home-wedge"
 cp -a "$HOME_A" "$HOME_WEDGE"
 

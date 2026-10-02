@@ -2354,8 +2354,8 @@ database schema is newer than this msb binary; applied migration
 "m20260910_000001_snapshot_groups" is not in this binary's migration prefix
 ```
 
-**3. Every msb command refuses** — after a `msb self downgrade` attempted with
-too old a binary:
+**3. Catalog-opening msb commands refuse** — after a `msb self downgrade`
+attempted with too old a binary:
 
 ```text
 error: self_downgrade_recovery_required: resume the active downgrade recorded at

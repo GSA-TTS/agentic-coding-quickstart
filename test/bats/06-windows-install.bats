@@ -139,6 +139,41 @@ teardown() {
   done
 }
 
+@test "windows PowerShell: msb version parser preserves suffix policy" {
+  command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
+
+  run pwsh -NoLogo -NoProfile -Command '
+    $script = Get-Content -Raw -LiteralPath "'"$REPO_ROOT"'/install.ps1"
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($script, [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { $errors | ForEach-Object { $_.ToString() }; exit 1 }
+    foreach ($name in @("Get-MsbVersion", "Test-MsbVersionFinal")) {
+      $fn = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+      if ($null -eq $fn) { "missing $name"; exit 1 }
+      . ([scriptblock]::Create($fn.Extent.Text))
+    }
+    $stub = Join-Path $env:BATS_TEST_TMPDIR "msb.ps1"
+    $cases = @(
+      @{ Output = "msb 0.7.3-rc1"; Parsed = "0.7.3-rc1"; Final = $false },
+      @{ Output = "msb 0.7.3+build.1"; Parsed = "0.7.3+build.1"; Final = $false },
+      @{ Output = "msb 0.7.3 linux-arm64"; Parsed = "0.7.3"; Final = $true }
+    )
+    foreach ($case in $cases) {
+      Set-Content -LiteralPath $stub -Value "param(`$Arg0) if (`$Arg0 -eq `"--version`") { `"$($case.Output)`" }"
+      $parsed = Get-MsbVersion -MsbPath $stub
+      "parsed=$parsed final=$(Test-MsbVersionFinal -MsbVersion $parsed)"
+      if ($parsed -ne $case.Parsed) { "expected parsed=$($case.Parsed)"; exit 1 }
+      if ((Test-MsbVersionFinal -MsbVersion $parsed) -ne $case.Final) { "expected final=$($case.Final)"; exit 1 }
+    }
+  '
+
+  assert_success
+  assert_output --partial 'parsed=0.7.3-rc1 final=False'
+  assert_output --partial 'parsed=0.7.3+build.1 final=False'
+  assert_output --partial 'parsed=0.7.3 final=True'
+}
+
 @test "windows installer: installed layout includes Windows launcher files" {
   installer=$(cat "$REPO_ROOT/install.ps1")
 

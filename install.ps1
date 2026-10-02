@@ -287,6 +287,12 @@ function Test-MsbVersionBlocked {
            ((Compare-MsbVersion -Left $MsbVersion -Right $MsbBlockedVersionMax) -le 0)
 }
 
+function Test-MsbVersionFinal {
+    param([Parameter(Mandatory = $true)][string]$MsbVersion)
+
+    return -not ($MsbVersion -match '[-+]')
+}
+
 function Get-MsbVersion {
     param([Parameter(Mandatory = $true)][string]$MsbPath)
 
@@ -300,7 +306,7 @@ function Get-MsbVersion {
         return ""
     }
 
-    $match = [regex]::Match(($output -join " "), '\d+\.\d+(\.\d+)?')
+    $match = [regex]::Match(($output -join " "), '\d+\.\d+(\.\d+)?([+-]\S*)?')
     if ($match.Success) {
         return $match.Value
     }
@@ -441,8 +447,8 @@ function Assert-MsbSupported {
     }
 
     $found = Get-MsbVersion -MsbPath $msb.Source
-    if (-not $found) {
-        throw "$Context, but msb.exe at $($msb.Source) did not report a parseable version."
+    if ((-not $found) -or (-not (Test-MsbVersionFinal -MsbVersion $found))) {
+        throw "$Context, but msb.exe at $($msb.Source) did not report a supported final version."
     }
     if ((Compare-MsbVersion -Left $found -Right $MsbMinVersion) -lt 0) {
         throw "$Context, but the active msb is $found at $($msb.Source), older than the required $MsbMinVersion."
@@ -490,11 +496,11 @@ function Ensure-Msb {
     if ($null -ne $msb) {
         $found = Get-MsbVersion -MsbPath $msb.Source
 
-        if (-not $found) {
-            Write-Step "The active msb version could not be determined"
-            Write-Warn "Found msb at $($msb.Source), but its version output was not parseable."
+        if ((-not $found) -or (-not (Test-MsbVersionFinal -MsbVersion $found))) {
+            Write-Step "The active msb version is not a supported final release"
+            Write-Warn "Found msb at $($msb.Source), but its version output was not a supported final release."
             if (-not (Confirm-Action "Install msb $MsbPinnedVersion now?")) {
-                throw "acq needs an msb version it can verify. Install msb $MsbPinnedVersion, then re-run this installer."
+                throw "acq needs an msb final release it can verify. Install msb $MsbPinnedVersion, then re-run this installer."
             }
             Install-MsbPinned -MsbVersion $MsbPinnedVersion
             Assert-MsbSupported -Context "msb $MsbPinnedVersion was installed"
@@ -526,7 +532,7 @@ function Ensure-Msb {
             Write-Host "  'msb self update' targets the newest release, which currently IS $MsbFixedVersion."
 
             if (-not (Confirm-Action "Run 'msb self update' to move to msb $MsbFixedVersion now?")) {
-                throw "acq refuses msb $found. Run 'msb self update' (or install msb $MsbPinnedVersion), then re-run this installer. If you roll back instead, run 'msb self downgrade $MsbPinnedVersion' with THIS msb first - an older msb cannot roll back these migrations, and a failed attempt blocks every later msb command."
+                throw "acq refuses msb $found. Run 'msb self update' (or install msb $MsbPinnedVersion), then re-run this installer. If you roll back instead, run 'msb self downgrade $MsbPinnedVersion' with THIS msb first - an older msb cannot roll back these migrations, and a failed attempt blocks later catalog-opening msb commands."
             }
 
             Invoke-InstallCommand "msb self update" {
