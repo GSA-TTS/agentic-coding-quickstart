@@ -2764,6 +2764,9 @@ ensure_valid_key() {
         echo "Key setup did not complete. Aborting attach." >&2
         return 1
       }
+      if command -v acq_propagate_usai_rotation >/dev/null 2>&1; then
+        acq_propagate_usai_rotation || return 1
+      fi
       status=$(check_key "$name")
       if [ "$status" = "200" ]; then
         echo "Key validated. Continuing." >&2
