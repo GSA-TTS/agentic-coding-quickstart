@@ -3033,7 +3033,7 @@ EOF
   fi
 
   ACQ_MSB_GUEST_WORKSPACE=""
-  local _wi _wspec _wpath _wro _wsrc _whost _first_guest=""
+  local _wi _wspec _wpath _wro _wsrc _whost _first_record _first_guest="" _first_host=""
   for _wi in ${_ws_recs[@]+"${!_ws_recs[@]}"}; do
     _wspec="${_ws_recs[$_wi]}"
     # Split an optional trailing ":ro" (read-only) marker from the path.
@@ -3066,7 +3066,16 @@ EOF
     # drive form under MSYS), the guest side is the POSIX path the Linux microVM
     # uses (canonicalize_path). A single value for both is the bug this fixes.
     _wsrc="$_wpath"
-    [ -n "$_clone_src" ] && [ -z "$_first_guest" ] && _wsrc="$_clone_src"
+    if command -v host_path >/dev/null 2>&1; then
+      _first_record=$(host_path "$_wpath")
+    else
+      _first_record="$_wpath"
+    fi
+    if [ -z "$_first_guest" ]; then
+      _first_guest="$_wpath"
+      _first_host="$_first_record"
+    fi
+    [ -n "$_clone_src" ] && [ "$_wi" -eq 0 ] && _wsrc="$_clone_src"
     if command -v host_path >/dev/null 2>&1; then
       _whost=$(host_path "$_wsrc")
     else
@@ -3074,7 +3083,6 @@ EOF
     fi
     create_flags+=(--volume "${_whost}:${_wpath}${_wro}")
     acq_debug "msb volume: ${_whost} (host) -> ${_wpath}${_wro} (guest)"
-    [ -z "$_first_guest" ] && _first_guest="$_wpath"
   done
 
   # Decide the agent's starting directory (recorded for attach). Explicit
@@ -3335,6 +3343,7 @@ EOF
   # Best-effort: a provenance write failure never affects the
   # sandbox. Reached only when provision did not abort earlier under set -e.
   acq_provenance_write msb "$name" || true
+  acq_workspace_record_write msb "$name" "$_first_host" || true
 
   # Persist the CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs so a later
   # `acq start`/`acq restart` can reload them and re-run their startup services
@@ -5391,6 +5400,50 @@ acq_backend_secret_set() {
 
   _acq_msb_secret_set_guidance "$service" "$_env" "$_host" "$applied"
   return 0
+}
+
+acq_backend_secret_propagate() {
+  local service scope_name
+  _acq_msb_parse_secret_scope service scope_name "$@"
+  shift "$_ACQ_MSB_SCOPE_CONSUMED"
+
+  if [ -z "$service" ]; then
+    echo "acq(msb): secret propagate: missing service name" >&2
+    return 1
+  fi
+  if [ -n "$scope_name" ]; then
+    acq_backend_exists "$scope_name" || return 0
+  elif [ -z "$(_acq_msb_cli list -q 2>/dev/null)" ]; then
+    return 0
+  fi
+
+  local _env _host _binding applied eligible=0 _probe_val sb
+  _binding=$(_acq_msb_service_binding "$service" "$scope_name")
+  _env=$(printf '%s' "$_binding" | cut -f1)
+  _host=$(printf '%s' "$_binding" | cut -f2)
+  [ -n "$_env" ] && [ -n "$_host" ] || return 0
+  [ -z "${ACQ_SECRET_NO_LIVE_REFEED:-}" ] || return 0
+  if ! _probe_val=$(acq_secret_resolve "$service" "$scope_name" 2>/dev/null) || [ -z "$_probe_val" ]; then
+    echo "acq(msb): cannot propagate '$service'; no value is present in the acq secret store." >&2
+    return 1
+  fi
+  _probe_val=""
+  if [ -n "$scope_name" ]; then
+    eligible=1
+  else
+    while IFS= read -r sb; do
+      [ -n "$sb" ] && eligible=$((eligible + 1))
+    done <<EOF
+$(_acq_msb_cli list -q 2>/dev/null)
+EOF
+  fi
+  applied=$(_acq_msb_secret_refeed "$service" "$scope_name" "$_env" "$_host")
+  if [ "$applied" -gt 0 ]; then
+    echo "acq(msb): applied '$service' to $applied running sandbox(es)." >&2
+  elif [ "$eligible" -gt 0 ]; then
+    echo "acq(msb): failed to apply '$service' to existing sandbox(es)." >&2
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------

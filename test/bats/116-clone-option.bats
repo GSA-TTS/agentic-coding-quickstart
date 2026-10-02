@@ -91,6 +91,15 @@ _refute_backend_create() {
   assert_regex "$(_create_line msb)" "--volume [^ ]*/clones/shell-cloneproj/cloneproj:${repo}( |\$)"
 }
 
+@test "clone(msb): records original host checkout, not scratch, for github-scope" {
+  _msb_clone -- create shell --clone "$CLONEPROJ"
+  local repo; load_acq; repo=$(canonicalize_path "$CLONEPROJ")
+  run acq_workspace_record_read msb shell-cloneproj
+  assert_success
+  assert_output "$repo"
+  refute_output --partial '/clones/'
+}
+
 @test "clone(msb): a non-git workspace fails the create before the backend runs" {
   local plain="$STUBDIR/plainproj"; mkdir -p "$plain"
   _msb_clone -- create shell --clone "$plain"

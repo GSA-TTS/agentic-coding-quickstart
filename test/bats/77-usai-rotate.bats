@@ -23,14 +23,42 @@ load 'helper'
   assert_regex "$log" 'sbx create --name acq-keycheck-'
 }
 
-@test "rotate(msb): issues NO sbx command, stores the key, re-feeds via msb modify" {
+@test "rotate(msb): stores the key and re-feeds via msb modify" {
   printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
   run env ACQ_SECRET_TEST_VALUE="new-usai-key" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
   local log
   log=$(cat "$CALLS")
-  refute_regex "$log" 'sbx '
+  refute_regex "$log" 'sbx secret set-custom'
   assert_regex "$log" 'msb modify'
   assert [ -f "$STUBDIR/secrets/acq.usai" ]
+}
+
+@test "rotate(msb): also propagates to existing sbx sandboxes" {
+  printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'legacy-sbx\n' > "$STUBDIR/.sandbox_list"
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY ph-existing ****\n' > "$STUBDIR/sbx_ls"
+  run env SBX_LS_FIXTURE="$STUBDIR/sbx_ls" ACQ_SECRET_TEST_VALUE="new-usai-key" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key
+  local log
+  log=$(cat "$CALLS")
+  assert_success
+  assert_regex "$log" 'msb modify runningbox --secret USAI_API_KEY@api\.gsa\.usai\.gov'
+  assert_regex "$log" 'sbx secret set-custom --host api\.gsa\.usai\.gov --env USAI_API_KEY --placeholder ph-existing'
+  assert_output --partial "propagating 'usai' to existing sbx sandbox"
+}
+
+@test "rotate(sbx): propagation guard does not replay stale store value to msb" {
+  load_acq
+  mkdir -p "$STUBDIR/secrets"
+  printf 'OLD-STALE-KEY\n' > "$STUBDIR/secrets/acq.usai"
+  printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  # shellcheck disable=SC2034  # read by acq_propagate_usai_rotation
+  ACQ_RESOLVED_BACKEND=sbx
+  run acq_propagate_usai_rotation
+  local log
+  log=$(cat "$CALLS")
+  assert_success
+  assert_output --partial "not propagating sbx USAi rotation to msb"
+  refute_regex "$log" 'msb modify runningbox --secret USAI_API_KEY@api\.gsa\.usai\.gov'
 }
 
 @test "rotate: both adapters define the acq_backend_rotate_key contract" {
