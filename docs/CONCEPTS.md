@@ -281,31 +281,6 @@ to order it against other snippets (lower runs first). Drop the old
 `~/.bashrc`-append step once the snippet is in place; the built-in bridge
 sources the snippet for bash login shells.
 
-### Advanced: optional OCI-engine capability kit
-
-`acq` can select an **OCI-engine capability kit** (rootless podman) as part of
-its built-in bundle so agents get an OCI-run capability (`docker run`,
-`docker compose`) from a shared, reviewable kit rather than from backend-specific
-adapter code. This is **off by default** and opt-in per invocation/session:
-
-```bash
-export ACQ_ENABLE_OCI_KIT=1
-```
-
-Values `0`/`false`/`no`/`off`/empty (case-insensitive) keep it off; anything else
-turns it on. When on, the kit is appended **after** the built-in support kits and
-**before** any extras.
-
-Why it is gated, and why it is off by default (ADR-0020/ADR-0030): moving OCI
-provisioning into an explicit, backend-neutral capability kit lets both backends
-reuse one audited path and keeps OCI out of every sandbox's default create cost.
-When you opt in, `acq` verifies the kit is actually present and valid at the
-pinned patterns ref before adding it; if it is not, `acq` prints a single notice
-and continues without it. With the pinned patterns v1.10.0 release the kit is
-available, so `ACQ_ENABLE_OCI_KIT=1` selects the kit and suppresses the msb
-adapter's built-in podman provisioning for that sandbox. With the variable unset
-or off, the msb adapter path remains the default active OCI mechanism.
-
 ---
 
 ## Optional Integrations

@@ -352,7 +352,9 @@ wins; `shell` selects no agent kit.
 Rootless podman setup moves out of the msb adapter into an explicit OCI engine
 kit usable by both backends, but it is **optional and not part of the default
 bundle**: it is a create-time install plus egress for every sandbox, and many
-kits never need it.
+kits never need it. ADR-0031's generic opt-in catalog is the intended selection
+mechanism; adding the catalog entry and retiring the adapter-owned default path
+are tracked by GSA-TTS/agentic-coding-quickstart#505.
 
 ### Capabilities available through passwordless sudo
 

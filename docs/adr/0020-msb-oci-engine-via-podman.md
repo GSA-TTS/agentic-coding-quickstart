@@ -75,11 +75,9 @@ already wrestles with), and (c) provision a per-sandbox disk-backed
 ## Decision
 
 > **Revision note (2026-10-02, ADR-0030 transition):** this adapter-owned path
-> remains the default when `ACQ_ENABLE_OCI_KIT` is unset/off, but the shared
-> `oci-engine` capability kit is now published in agentic-coding-patterns v1.10.0.
-> When a user opts in with `ACQ_ENABLE_OCI_KIT=1`, `acq` selects that kit and
-> suppresses this adapter provisioning for the sandbox. See
-> [ADR-0030](0030-agent-kits-on-devenv-base.md).
+> remains the default while the shared `oci-engine` capability kit is introduced
+> through the generic opt-in catalog described by ADR-0031. The catalog entry and
+> adapter retirement are tracked by GSA-TTS/agentic-coding-quickstart#505.
 
 Provision **podman** at provision time as the OCI engine, run it **rootless as
 the agent user**, and alias `docker` → `podman` so both `docker run …` and
