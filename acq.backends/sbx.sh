@@ -61,6 +61,14 @@ MIN_SBX_VERSION="0.39.0"
 # Max seconds to wait for `sbx exec` to become usable.
 ACQ_EXEC_READY_TIMEOUT="${ACQ_EXEC_READY_TIMEOUT:-60}"
 
+# Max seconds to wait for acq's final startup marker after `sbx create` returns.
+ACQ_SBX_STARTUP_BARRIER_TIMEOUT="${ACQ_SBX_STARTUP_BARRIER_TIMEOUT:-60}"
+
+# Guest-visible marker written by the final acq-generated startup kit. Because
+# sbx dispatches background startup commands without waiting, this only gates
+# non-background startup commands that appear before acq's barrier kit.
+ACQ_SBX_STARTUP_BARRIER_PATH="/tmp/acq/startup-complete"
+
 # Absolute path where the usai-provider kit stages its OpenCode config.
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 
@@ -321,13 +329,36 @@ _acq_sbx_git_identity_kit() {
   printf '%s\n' "$dir"
 }
 
+_acq_sbx_startup_barrier_kit() {
+  local token="$1" dir
+  dir="${ACQ_SBX_KIT_CACHE}/generated/startup-barrier-${token}"
+  mkdir -p "$dir"
+  cat >"$dir/spec.yaml" <<EOF
+schemaVersion: "2"
+kind: mixin
+name: acq-startup-barrier
+displayName: ACQ Startup Barrier
+description: Marks completion of prior non-background startup commands for acq
+setup:
+  startup:
+    - command:
+        - sh
+        - -c
+        - |
+          mkdir -p /tmp/acq
+          printf '%s\\n' '$token' > /tmp/acq/startup-complete
+EOF
+  printf '%s\n' "$dir"
+}
+
 _acq_sbx_apply_git_identity_kit() {
   local name="$1" git_identity_kit _kadd_rc=0
+  _ACQ_SBX_LAST_KIT_ADD_SUCCEEDED=0
   git_identity_kit=$(_acq_sbx_git_identity_kit)
   [ -n "$git_identity_kit" ] || return 0
   _acq_sbx_kit_add "$name" "$git_identity_kit" || _kadd_rc=$?
   case $_kadd_rc in
-    0) return 0 ;;
+    0) _ACQ_SBX_LAST_KIT_ADD_SUCCEEDED=1; return 0 ;;
     3) _acq_sbx_print_recreate_notice "$name" ;;
     *) echo "acq: warning: 'sbx kit add' (git identity env) failed for '$name' (see error above)." >&2 ;;
   esac
@@ -342,9 +373,24 @@ _acq_sbx_wait_for_exec_ready() {
   local name="$1" deadline out
   deadline=$(( $(date +%s) + ACQ_EXEC_READY_TIMEOUT ))
   while :; do
-    out=$(sbx exec "$name" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r')
+    out=$(sbx exec "$name" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r') || out=""
     case "$out" in
       *ok*) return 0 ;;
+    esac
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 2
+  done
+}
+
+_acq_sbx_wait_for_startup_barrier() {
+  local name="$1" token="$2" deadline out
+  deadline=$(( $(date +%s) + ACQ_SBX_STARTUP_BARRIER_TIMEOUT ))
+  while :; do
+    out=$(sbx exec "$name" -- sh -c \
+      "test \"\$(cat '$ACQ_SBX_STARTUP_BARRIER_PATH' 2>/dev/null)\" = '$token' && echo ready" \
+      </dev/null 2>/dev/null | tr -d '\r') || out=""
+    case "$out" in
+      *ready*) return 0 ;;
     esac
     [ "$(date +%s)" -ge "$deadline" ] && return 1
     sleep 2
@@ -487,6 +533,9 @@ acq_backend_provision() {
   local _git_identity_kit=""
   _git_identity_kit=$(_acq_sbx_git_identity_kit)
   [ -n "$_git_identity_kit" ] && kf+=(--kit "$_git_identity_kit")
+  local _startup_barrier_token
+  _startup_barrier_token="acq-$$-$(date +%s)-$RANDOM-$RANDOM"
+  kf+=(--kit "$(_acq_sbx_startup_barrier_kit "$_startup_barrier_token")")
 
   acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_stripped[*]:-}"
   acq_spin_start "Creating sandbox '$name'"
@@ -496,6 +545,17 @@ acq_backend_provision() {
   # Record host-side bundle provenance ONLY after a successful create — a failed
   # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
+    acq_spin_start "Waiting for kit startup in '$name'"
+    if ! _acq_sbx_wait_for_startup_barrier "$name" "$_startup_barrier_token"; then
+      acq_spin_stop "Waiting for kit startup in '$name'"
+      echo "acq(sbx): startup commands did not finish within ${ACQ_SBX_STARTUP_BARRIER_TIMEOUT}s." >&2
+      echo "          Refusing to keep a sandbox whose kit-managed config was not" >&2
+      echo "          confirmed complete before attach; removing '$name'." >&2
+      acq_backend_terminate "$name" >/dev/null 2>&1 || \
+        echo "acq(sbx): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
+      return 1
+    fi
+    acq_spin_stop "Waiting for kit startup in '$name'"
     acq_provenance_write sbx "$name" || true
     acq_workspace_record_write sbx "$name" "$_primary_ws" || true
     _acq_sbx_seed_extra_kit_marker "$name"
@@ -590,6 +650,10 @@ acq_backend_shell() {
 acq_backend_attach() {
   local name="$1"
   shift
+  if [ "${_ACQ_SBX_HEAL_WAIT_FAILED_NAME:-}" = "$name" ]; then
+    echo "acq: refusing to attach to '$name' because kit heal did not finish." >&2
+    return 1
+  fi
   if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
     shift
     sbx run --name "$name" -- "$@"
@@ -651,9 +715,9 @@ acq_backend_ports() {
 #   ERROR: kit "…" declares setup.startup, which the kit-add recreate flow does
 #   not yet apply; recreate the sandbox from scratch via `sbx rm` + `sbx create
 #   --kit` …
-# (See https://docs.docker.com/ai/sandboxes/customize/kits/#using-kits — "sbx
-# kit add … supports mixin kits limited to environment.variables, setup.install,
-# and permissions.network.allow. To use other fields, recreate …".)
+# (See https://docs.docker.com/ai/sandboxes/customize/kits-v2/#execution-order —
+# "sbx kit add" supports mixin kits limited to environment.variables,
+# setup.install, and permissions.network.allow. To use other fields, recreate.)
 #
 # Older acq swallowed sbx's stderr (`sbx kit add … >/dev/null 2>&1`) and printed
 # a generic per-kit warning plus a "Recover with: sbx kit add …" hint that could
@@ -751,7 +815,9 @@ acq_backend_ensure_kits_applied() {
   local name="$1"
   local force="${ACQ_FORCE_KIT_REAPPLY:-0}"
   local ok=1
+  local healed=0
   local _kadd_rc=0
+  _ACQ_SBX_HEAL_WAIT_FAILED_NAME=""
   # Reset the once-per-heal sbx-0.38 recreate advisory guard (see
   # _acq_sbx_print_recreate_notice). Without this reset, a second heal in the
   # same process would suppress the notice.
@@ -775,7 +841,7 @@ acq_backend_ensure_kits_applied() {
     # normal signalling — capture the status inline so the loop is not aborted.
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$zscaler_local" || _kadd_rc=$?
     case $_kadd_rc in
-      0) echo "acq: Zscaler CA kit injected into '$name'." >&2 ;;
+      0) healed=1; echo "acq: Zscaler CA kit injected into '$name'." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
@@ -787,6 +853,7 @@ acq_backend_ensure_kits_applied() {
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$usai_local" || _kadd_rc=$?
     case $_kadd_rc in
       0)
+        healed=1
         sbx exec "$name" -- sh -c \
           'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
           </dev/null >/dev/null 2>&1 || true
@@ -807,7 +874,7 @@ acq_backend_ensure_kits_applied() {
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$playbook_local" || _kadd_rc=$?
     case $_kadd_rc in
-      0) echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2 ;;
+      0) healed=1; echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (playbook kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
@@ -822,13 +889,14 @@ acq_backend_ensure_kits_applied() {
     gitsshsign_local=$(_acq_sbx_translate_kit "$GITSSHSIGN_KIT")
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$gitsshsign_local" || _kadd_rc=$?
     case $_kadd_rc in
-      0) echo "acq: git-ssh-sign kit refreshed in '$name'." >&2 ;;
+      0) healed=1; echo "acq: git-ssh-sign kit refreshed in '$name'." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (git-ssh-sign kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
   fi
 
   _acq_sbx_apply_git_identity_kit "$name"
+  [ "${_ACQ_SBX_LAST_KIT_ADD_SUCCEEDED:-0}" = "1" ] && healed=1
 
   # 4) Extra kits (tracked by marker file). Extra kits may be neutral or already
   #    sbx-v2; _acq_sbx_translate_kit handles both. The marker records one
@@ -850,6 +918,7 @@ acq_backend_ensure_kits_applied() {
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$local_extra" || _kadd_rc=$?
     case $_kadd_rc in
       0)
+        healed=1
         sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$k" </dev/null >/dev/null 2>&1 || true
         ;;
       3) _acq_sbx_print_recreate_notice "$name" ;;
@@ -861,6 +930,16 @@ acq_backend_ensure_kits_applied() {
   # A failed apply must not write a record claiming the sandbox
   # is current. Best-effort write: a provenance write failure never fails the run.
   if [ "$ok" -eq 1 ]; then
+    if [ "$healed" -eq 1 ]; then
+      # sbx kit add recreates the sandbox. Current sbx v2 docs say kit-add only
+      # supports synchronous install-time changes, but still wait for exec to be
+      # usable again before a re-attach path can continue to agent attach.
+      if ! _acq_sbx_wait_for_exec_ready "$name"; then
+        _ACQ_SBX_HEAL_WAIT_FAILED_NAME="$name"
+        echo "acq: warning: '$name' did not become exec-ready after kit heal." >&2
+        return 1
+      fi
+    fi
     acq_provenance_write sbx "$name" || true
     return 0
   fi
