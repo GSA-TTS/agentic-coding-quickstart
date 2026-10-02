@@ -12,8 +12,8 @@
     "acq.backends/"
   ],
   "scripts": {
-    "lint:md": "npx --prefix .github/linters markdownlint-cli2 '**/*.md' '#node_modules' '#.github/linters/node_modules' '#CHANGELOG.md' '#tmp' '#test/vendor'",
-    "lint:secrets": "gitleaks detect --source .",
+    "lint:md": "npx --prefix .github/linters markdownlint-cli2",
+    "lint:secrets": "pre-commit run gitleaks --all-files",
     "lint": "npm run lint:md",
     "check": "pre-commit run --all-files"
   },

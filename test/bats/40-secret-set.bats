@@ -218,6 +218,55 @@ LS
   assert_success
 }
 
+@test "secret set(msb): scoped usai propagates to matching sbx sandbox" {
+  printf 'my-sandbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'my-sandbox\n' > "$STUBDIR/.sandbox_list"
+  printf 'CUSTOM SECRETS\nmy-sandbox api.gsa.usai.gov USAI_API_KEY ph-scoped ****\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$2" ACQ_SECRET_TEST_VALUE="k" ACQ_BACKEND=msb "$1" secret set my-sandbox usai' _ "$ACQ" "$STUBDIR/sbx_ls"
+  local log
+  log=$(cat "$CALLS")
+  assert_success
+  assert_regex "$log" 'msb modify my-sandbox --secret USAI_API_KEY@api\.gsa\.usai\.gov'
+  assert_regex "$log" 'sbx secret set-custom --sandbox my-sandbox --host api\.gsa\.usai\.gov --env USAI_API_KEY --placeholder ph-scoped'
+}
+
+@test "secret set(msb): non-usai sbx propagation is no-op when sbx has no secret" {
+  printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'legacy-sbx\n' > "$STUBDIR/.sandbox_list"
+  run bash -c 'printf "k\n" | ACQ_BACKEND=msb "$1" secret set -g github' _ "$ACQ"
+  assert_success
+  refute_output --partial "sbx cannot safely overwrite this secret non-interactively"
+}
+
+@test "secret set(msb): unsupported sbx propagation fails closed for existing secret" {
+  printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'legacy-sbx\n' > "$STUBDIR/.sandbox_list"
+  printf 'SCOPE      TYPE      NAME     SECRET\n(global)   service   github   (stored)\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$2" ACQ_BACKEND=msb "$1" secret set -g github' _ "$ACQ" "$STUBDIR/sbx_ls"
+  assert_failure
+  assert_output --partial "sbx cannot safely overwrite this secret non-interactively"
+  assert_output --partial "acq --backend sbx secret set -g github"
+}
+
+@test "secret set(msb): usai propagation preserves sidecar host" {
+  printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'legacy-sbx\n' > "$STUBDIR/.sandbox_list"
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov USAI_API_KEY ph-default ****\n(global) usai.alt.example.gov USAI_API_KEY ph-alt ****\n' > "$STUBDIR/sbx_ls"
+  run bash -c 'printf "k\n" | SBX_LS_FIXTURE="$2" ACQ_SECRET_TEST_VALUE="k" ACQ_BACKEND=msb "$1" secret set -g usai --host usai.alt.example.gov --env USAI_API_KEY' _ "$ACQ" "$STUBDIR/sbx_ls"
+  local log
+  log=$(cat "$CALLS")
+  assert_success
+  assert_regex "$log" 'sbx secret set-custom --host usai\.alt\.example\.gov --env USAI_API_KEY --placeholder ph-alt'
+  refute_regex "$log" 'sbx secret set-custom --host api\.gsa\.usai\.gov --env USAI_API_KEY --placeholder ph-default'
+}
+
+@test "secret propagate(msb): missing store value fails closed" {
+  printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
+  run env ACQ_PROPAGATING_SECRET=1 ACQ_BACKEND=msb "$ACQ" secret _propagate -g usai
+  assert_failure
+  assert_output --partial "no value is present in the acq secret store"
+}
+
 @test "secret has(msb): store-present -> rc 0; absent -> rc 1; silent both ways" {
   load_acq
   mkdir -p "$STUBDIR/secrets"; printf 'k\n' > "$STUBDIR/secrets/acq.usai"
