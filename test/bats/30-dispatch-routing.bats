@@ -47,7 +47,9 @@ _seed_usai() {
 
 @test "dispatch: run existing sandbox does not fetch provider facts" {
   printf 'mybox\n' > "$STUBDIR/.msb_sandbox_list"
-  run env ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none "$ACQ" run mybox
+  printf 'mybox\n' > "$STUBDIR/.msb_running_list"
+  run env TERM= ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none \
+    STUB_AGENT_USER_READY=1 "$ACQ" run mybox
   assert_success
   assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e SHELL=/bin/sh mybox -- /bin/sh -l'
   refute_output --partial 'provider facts'
@@ -71,9 +73,12 @@ _seed_usai() {
 }
 
 @test "secret: scoped non-USAi command does not fetch provider facts" {
-  run env ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none \
-    ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
-    GITHUB_TOKEN="github-token-stub" "$ACQ" secret set usai github
+  run bash -c '
+    printf "%s\n" "github-token-stub" \
+      | ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none \
+        ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$2/secrets" \
+        "$1" secret set usai github
+  ' _ "$ACQ" "$STUBDIR"
   assert_success
   refute_output --partial 'provider facts'
   assert_output --partial "stored 'github'"
