@@ -36,7 +36,7 @@ PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # the bundle-version anchor recorded in a sandbox's host-side provenance record
 # (see ACQ_BUILTIN_BUNDLE below + the provenance helpers) so acq can tell a
 # stale sandbox from a current one.
-PATTERNS_KIT_REF="6c6753c60a2b24322fb2e8c0d8e8af60c56ede8f"  # agentic-coding-patterns v1.9.0
+PATTERNS_KIT_REF="2dd2ad6ad5f63b842d732424bed5ba9aebeed676"  # agentic-coding-patterns v1.10.0
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_PROVIDER_KIT_NAME="usai-provider"
@@ -79,14 +79,13 @@ ACQ_BUILTIN_BUNDLE_REPO="GSA-TTS/agentic-coding-patterns"
 # built-in provisioning. Normalized exactly like ACQ_MSB_ENSURE_OCI below:
 # unset/empty/0/false/no/off => off (case-insensitive); anything else => on.
 #
-# Intentionally additive and gated (ADR-0020/ADR-0030): the patterns-side kit
-# body is not published yet, so even when opted in acq falls back silently (with
-# a single stderr notice) unless a readiness check confirms the kit is present at
-# the pinned ref. This keeps default behavior — and the msb adapter's active
-# podman provisioning (`_acq_msb_ensure_oci`) — unchanged until the kit path is
-# live-verified. NOT added to ACQ_KIT_NAMES (that is the default `acq kit list`
-# registry and the provenance-bundle count); selection is gated purely in
-# _acq_selected_builtin_kit_refs.
+# Intentionally additive and gated (ADR-0020/ADR-0030): even when opted in, acq
+# only selects the kit after a readiness check confirms it is present and valid at
+# the pinned ref. This keeps default behavior — including the msb adapter's
+# podman provisioning (`_acq_msb_ensure_oci`) — unchanged unless the user opts in
+# and the kit is live at the pin. NOT added to ACQ_KIT_NAMES (that is the default
+# `acq kit list` registry and the provenance-bundle count); selection is gated
+# purely in _acq_selected_builtin_kit_refs.
 OCI_ENGINE_KIT_NAME="oci-engine"
 ACQ_ENABLE_OCI_KIT="${ACQ_ENABLE_OCI_KIT-}"
 case "$(printf '%s' "$ACQ_ENABLE_OCI_KIT" | tr '[:upper:]' '[:lower:]')" in
@@ -719,12 +718,11 @@ _acq_oci_engine_kit_ref() {
 # Readiness check for the optional OCI-engine kit, mirroring the agent-kit
 # readiness pattern (acq_agent_builtin_kit_ready): fetch the kit at the pinned
 # ref and validate it is a well-formed mixin named oci-engine. Returns 0 only
-# when the kit is actually present/valid. Fetch failure (the current reality —
-# the patterns-side kit is unpublished) or a spec mismatch returns non-zero, so
-# selection falls back silently. The yes/no result is memoized in
-# ACQ_OCI_KIT_READY_CACHE so at most one network fetch runs per process even
-# though _build_kit_list calls this repeatedly. Offline tests stub this to
-# force ready/not-ready.
+# when the kit is actually present/valid. Fetch failure or a spec mismatch returns
+# non-zero, so selection falls back without changing default behavior. The yes/no
+# result is memoized in ACQ_OCI_KIT_READY_CACHE so at most one network fetch runs
+# per process even though _build_kit_list calls this repeatedly. Offline tests
+# stub this to force ready/not-ready.
 acq_oci_engine_kit_ready() {
   local kitref base_dir kitdir schema kind kit_name cache_key cache_value
   kitref=$(_acq_oci_engine_kit_ref) || return 1

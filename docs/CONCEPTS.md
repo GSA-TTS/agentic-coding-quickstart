@@ -299,12 +299,12 @@ turns it on. When on, the kit is appended **after** the built-in support kits an
 Why it is gated, and why it is off by default (ADR-0020/ADR-0030): moving OCI
 provisioning into an explicit, backend-neutral capability kit lets both backends
 reuse one audited path and keeps OCI out of every sandbox's default create cost.
-The patterns-side kit body is **not published yet**, so even when you opt in,
-`acq` verifies the kit is actually present and valid at the pinned patterns ref
-before adding it; if it is not, `acq` prints a single notice and continues
-without it. Until the kit path is published and live-verified, the **msb
-adapter's built-in podman provisioning remains the active OCI mechanism** — this
-opt-in is additive and changes nothing about that path today.
+When you opt in, `acq` verifies the kit is actually present and valid at the
+pinned patterns ref before adding it; if it is not, `acq` prints a single notice
+and continues without it. With the pinned patterns v1.10.0 release the kit is
+available, so `ACQ_ENABLE_OCI_KIT=1` selects the kit and suppresses the msb
+adapter's built-in podman provisioning for that sandbox. With the variable unset
+or off, the msb adapter path remains the default active OCI mechanism.
 
 ---
 
