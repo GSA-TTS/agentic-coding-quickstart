@@ -3,15 +3,12 @@
   "version": "1.0.0",
   "description": "Pinned linter dependencies for CI supply chain security",
   "private": true,
-  "scripts": {
-    "lint:md": "markdownlint-cli2 '**/*.md' '#node_modules'"
-  },
   "dependencies": {
-    "markdownlint-cli2": "0.22.1"
+    "markdownlint-cli2": "0.23.3"
   },
   "overrides": {
     "js-yaml": "4.3.2",
-    "markdown-it": "14.2.0",
+    "markdown-it": "14.3.1",
     "linkify-it": "5.0.2",
     "smol-toml": "1.7.1"
   }
