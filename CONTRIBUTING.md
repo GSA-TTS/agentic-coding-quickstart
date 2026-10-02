@@ -36,7 +36,7 @@ This repo is one of three in the agentic coding ecosystem:
 This project operates under professional standards of conduct. All contributors:
 
 - Be respectful and constructive in all interactions
-- Follow security requirements outlined in `AGENTS.md` and [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (in the GSA agentic-coding-playbook)
+- Follow security requirements outlined in `AGENTS.md` and `CODING_PRACTICES.md` (in the GSA agentic-coding-playbook)
 - For security issues, see [SECURITY.md](SECURITY.md)
 
 ---
@@ -59,7 +59,7 @@ This project operates under professional standards of conduct. All contributors:
 
 2. Read the core documentation:
    - `AGENTS.md` — Behavioral rules for AI agents
-   - [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (GSA agentic-coding-playbook) — Secure coding standards
+   - `CODING_PRACTICES.md` (GSA agentic-coding-playbook) — Secure coding standards
    - `docs/howto/sbx.md` — sbx CLI setup guide
 
 3. Follow the quickstart to set up your environment
@@ -105,7 +105,7 @@ npm ci --prefix .github/linters
 |---------|-------------|
 | `npm run lint:md` | Lint markdown files (same rules as CI) |
 | `npm run lint` | Run all linters |
-| `npm run lint:secrets` | Run gitleaks (requires gitleaks to be installed: `brew install gitleaks`) |
+| `npm run lint:secrets` | Run gitleaks at the version pinned in `.pre-commit-config.yaml` (pre-commit fetches it; no separate install) |
 | `npm run check` | Run the full pre-commit suite (gitleaks, shellcheck, YAML/JSON validation, whitespace, markdown lint) |
 
 > [!NOTE]
@@ -148,6 +148,26 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   `ACQ_BATS_JOBS=<n>`, or force serial with `ACQ_BATS_JOBS=1` (handy when
   debugging a failure, so TAP output isn't interleaved).
 
+  **One file is deliberately not stubbed.**
+  `test/bats/101-sbx-grammar-acceptance.bats` asserts that the **real** `sbx`
+  still accepts the kit grammar acq's translator emits. The stub cannot answer
+  that question — its fallthrough case is `*) exit 0`, so `sbx kit validate`
+  against the stub reports success for any input, including a malformed spec.
+  When `sbx` is absent its tests **skip with a reason** rather than passing, so a
+  run without `sbx` reports *"could not check"*, never *"accepted"*. The live
+  verifier `scripts/verify-backends` runs this file as a required sbx preflight
+  when `sbx` is installed, so a sandbox-capable sbx validation fails if grammar
+  acceptance could not be measured. It stays within the offline contract: `sbx
+  kit validate` is a local read-only validator and creates no sandbox, container,
+  network request, or registry push.
+
+  > **Watch for a shadowed `env`.** The bats launcher ends with
+  > `exec env … bats`. If a directory earlier on your `PATH` contains an `env`
+  > that is not the system one (some dotfile setups install a no-op stub at
+  > `~/.local/bin/env`), the whole suite exits **0 having run nothing** — a
+  > silent false green. If `./scripts/test-acq-bats` prints no TAP output, run
+  > it as `PATH="/usr/bin:$PATH" ./scripts/test-acq-bats` and compare.
+
 To verify the backends end-to-end against the **real** toolchain (requires a
 host that can create sandboxes — Docker for sbx, or KVM for msb):
 
@@ -162,6 +182,7 @@ Focused live checks for specific fixes (also require a sandbox-capable host):
 
 ```bash
 ./scripts/verify-issue-320          # sbx 0.38 re-attach heal loop (#320)
+./scripts/verify-sbx-startup-barrier # sbx startup barrier before attach
 ./scripts/verify-ports-live         # msb post-hoc port publish (ADR-0015)
 ./scripts/verify-net-default-egress # msb create-time published port (ADR-0019)
 ./scripts/verify-image-override     # backend-neutral --image/ACQ_IMAGE (ADR-0022)
@@ -319,7 +340,7 @@ squashed away), so focus on getting the PR title right.
    git checkout -b feat/your-feature-name
    ```
 
-2. **Make your changes** following the coding standards in [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (GSA agentic-coding-playbook)
+2. **Make your changes** following the coding standards in `CODING_PRACTICES.md` (GSA agentic-coding-playbook)
 
 3. **Write tests** if applicable — all new features should include tests
 
@@ -340,7 +361,7 @@ squashed away), so focus on getting the PR title right.
    - Test results (if applicable)
 
 7. **Address review feedback** — reviewers will check for:
-   - Compliance with `AGENTS.md` and [`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md) (GSA agentic-coding-playbook)
+   - Compliance with `AGENTS.md` and `CODING_PRACTICES.md` (GSA agentic-coding-playbook)
    - Conventional commit format
    - Test coverage
    - Security implications
@@ -354,7 +375,7 @@ squashed away), so focus on getting the PR title right.
 All code must comply with:
 
 - **AGENTS.md** — Behavioral rules for AI agents
-- **[`CODING_PRACTICES.md`](https://github.com/GSA-TTS/agentic-coding-playbook/blob/main/docs/CODING_PRACTICES.md)** (GSA agentic-coding-playbook) — Secure coding standards including:
+- **`CODING_PRACTICES.md`** (GSA agentic-coding-playbook) — Secure coding standards including:
   - Input validation and output encoding
   - Secrets management (no secrets in code!)
   - Dependency security (exact version pinning)
@@ -431,9 +452,8 @@ Releases are **fully automated** via GitHub Actions and release-please:
 ## Public domain
 
 This project is in the public domain within the United States, and copyright and
-related rights in the work worldwide are waived through the
-[CC0 1.0 Universal public domain dedication](https://creativecommons.org/publicdomain/zero/1.0/).
-See [`LICENSE`](LICENSE) for details.
+related rights in the work worldwide are waived through the CC0 1.0 Universal
+public domain dedication. See [`LICENSE`](LICENSE) for details.
 
 All contributions to this project will be released under the CC0 dedication. By
 submitting a pull request or issue, you are agreeing to comply with this waiver

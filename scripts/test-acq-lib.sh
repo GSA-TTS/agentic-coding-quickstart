@@ -109,7 +109,7 @@ make_stubs() {
 _line="sbx"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
 case "${1:-}" in
-  version) printf 'sbx version: v%s abc123\n' "${STUB_SBX_VERSION:-0.38.0}" ;;
+  version) printf 'sbx version: v%s abc123\n' "${STUB_SBX_VERSION:-0.39.0}" ;;
   --help|-h) printf 'SBX-TOPLEVEL-HELP\n' ;;
   ls)
     [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"
@@ -131,6 +131,7 @@ case "${1:-}" in
         exit 1 ;;
     esac
     case "$snippet" in
+      *"startup-complete"*) printf 'ready\n' ;;
       *"echo ok"*) printf 'ok\n' ;;
       *'%{http_code}'*)
         # check_key runs `curl … -w '%{http_code}'; printf '|%s' "$?"`, so the
@@ -154,6 +155,9 @@ case "${1:-}" in
         else
           printf '%s|0' "${STUB_KEY_STATUS:-200}"
         fi ;;
+      *'${ACQ_WORKSPACE:-}'*)
+        [ -n "${STUB_RECORDED_WORKSPACE+x}" ] || exit 1
+        printf '%s' "$STUB_RECORDED_WORKSPACE" ;;
       *"postinstall.mjs"*)
         # Model a successful postinstall: mark opencode fixed so the follow-up
         # `opencode --version` probe passes.

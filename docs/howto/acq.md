@@ -69,7 +69,7 @@ pre-seeding a machine or scripting setup (see [Secrets](#secrets) below).
 
 To use the **sbx** backend instead:
 
-- Install the `sbx` CLI (>= 0.38.0)
+- Install the `sbx` CLI (>= 0.39.0)
 - Run `sbx login`
 - Set your network policy
 
@@ -146,9 +146,11 @@ the guest.
 > ./acq github-scope <sandbox-name> /path/to/your/project
 > ```
 >
-> This is also what `acq run` offers interactively. Fine-grained tokens can't
-> contribute to public repos you're not a member of or call the Checks API — fall
-> back to a global token for those cases. See
+> This is also what `acq run` offers interactively. If you omit the path later,
+> `acq github-scope <sandbox-name>` uses the workspace recorded when the sandbox
+> was created. Fine-grained tokens can't contribute to public repos you're not a
+> member of, call the Checks API, or span multiple owners in one token — fall back
+> to a global token for those cases. See
 > [ADR-0013](../adr/0013-per-sandbox-github-token-downscoping.md).
 
 ### Rotate your USAi key
@@ -397,7 +399,7 @@ behavior is otherwise identical across backends.
 ## Running on the sbx backend
 
 ```bash
-# 1. Install the sbx CLI (>= 0.38.0) and authenticate
+# 1. Install the sbx CLI (>= 0.39.0) and authenticate
 #    (see https://docs.docker.com/ai/sandboxes/ — the standalone sbx CLI,
 #     NOT the deprecated `docker sandbox`)
 sbx login

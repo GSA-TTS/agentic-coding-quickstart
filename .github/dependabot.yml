@@ -7,6 +7,10 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "09:00"
+    # Let freshly-published (possibly compromised) releases age out before we
+    # adopt them (zizmor dependabot-cooldown).
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
@@ -26,6 +30,10 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "09:00"
+    # Let freshly-published (possibly compromised) releases age out before we
+    # adopt them (zizmor dependabot-cooldown).
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
@@ -44,6 +52,10 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "09:00"
+    # Let freshly-published (possibly compromised) releases age out before we
+    # adopt them (zizmor dependabot-cooldown).
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
@@ -54,3 +66,20 @@ updates:
       linters:
         patterns:
           - "*"
+
+  # Keeps the hook revs in .pre-commit-config.yaml current. No other ecosystem
+  # updates them, so without this entry those pins never move.
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "pre-commit"
+    commit-message:
+      prefix: "chore(deps)"
