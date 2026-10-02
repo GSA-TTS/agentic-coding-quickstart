@@ -379,15 +379,29 @@ as the image override; and `volumes:` mounted at boot before any exec. The
 login.gov team's `scripts/verify` asserts each of these against a real `--clone`
 sandbox on the active backend and can gate the refactor.
 
+### Migration sequencing
+
+The `acq run opencode .` behavior changes in the staged sequence documented in
+[`docs/BACKEND_GUIDE.md`](../BACKEND_GUIDE.md#adr-0030-migration-sequencing-agent-kitdevenv-model):
+freeze the current contract first, introduce agent-kit inputs without changing
+dispatch, switch OpenCode provisioning to consume the agent kit, move
+remaining devenv-specific setup behind the kit boundary, then remove obsolete
+wrapper code. Each increment has explicit offline and live verification commands.
+The Increment 0 freeze is implemented in
+[`test/bats/140-opencode-migration-gate.bats`](../../test/bats/140-opencode-migration-gate.bats),
+which keeps the current backend-neutral contract green while the migration
+continues.
+
 ## Open Questions
 
 - **Merge semantics beyond egress:** "later wins" is accepted for environment
   and files and "union" for egress, but volume and startup-step conflicts across
-  built-in, team, and personal kits still need a rule.
+  built-in, team, and personal kits still need a rule. Tracked by
+  [GSA-TTS/agentic-coding-quickstart#533](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/533).
 - **Minimum bring-your-own-image contract:** the exact required contents and how
   `acq` verifies them (including `/nix`, `devenv.nix`, and the shell hook).
-- **Migration sequencing:** the order in which `acq run opencode .` behavior
-  changes, and which regression checks gate each step.
+  Tracked by
+  [GSA-TTS/agentic-coding-quickstart#484](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/484).
 
 ## Consequences
 
