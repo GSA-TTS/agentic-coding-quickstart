@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-09-24"
+last_updated: "2026-09-30"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -1355,7 +1355,7 @@ not a defect in a clean msb.
 ```bash
 # Reinstall msb (removes and re-lays its runtime state).
 # Do NOT use `curl -fsSL https://install.microsandbox.dev | sh` here: it always
-# resolves to the newest release, which may be a version acq refuses (§42).
+# resolves to the newest release, which may be a version acq refuses (§43).
 brew install GSA-TTS/tap/microsandbox-acq   # Homebrew hosts
 ./scripts/verify-msb-pin --install          # verified pinned release bundle
 
@@ -1780,7 +1780,7 @@ running on the host (or no key is loaded), there is nothing to forward.
 ### Fix
 
 - **Use a supported msb**: 0.6.18, or 0.7.3 or newer. msb 0.7.0-0.7.2 are
-  refused — see §42.
+  refused — see §43.
 - **Ensure `socat` is in `ACQ_MSB_IMAGE`** — the default
   `docker/sandbox-templates:shell-docker` ships it; a custom override must too.
 - **Ensure the host has an agent with a key loaded** before running `acq`:
@@ -2319,6 +2319,52 @@ adding them to branch protection.
 
 ---
 
+## 42. A Second Parallel Sandbox From the Same Kit Is Unreachable on Its Published Port (msb)
+
+### Symptoms
+
+- Two sandboxes created from the same kit both start cleanly, with no error.
+- `acq ports` reports the **same** host port for both, e.g.
+  `sandbox 6767 -> host 127.0.0.1:6767` in each.
+- `http://127.0.0.1:6767` serves the **first** sandbox's service. The second
+  sandbox's UI/API is simply unreachable, and nothing said so.
+- Also: a developer already running their own service on that port owns it, and
+  the sandbox's mapping silently loses.
+
+### Root Cause
+
+acq's neutral `publishedPorts` parser defaulted an omitted `host:` to the
+**guest** port, so every sandbox built from one kit requested the same host port.
+msb accepts the duplicate mapping without complaint — first writer wins, the rest
+are inert.
+
+### Fix
+
+Fixed in acq: an entry that omits `host:` now gets a **free** loopback host port
+chosen per sandbox, and an explicitly requested host port that is already in use
+**fails the create** instead of producing a dead mapping. Upgrade acq and
+recreate the sandboxes (`acq rm NAME` then `acq run …`) — the mapping is baked
+into the create arguments, so an existing sandbox keeps its old one.
+
+To pin a predictable host port per sandbox instead of taking the free one:
+
+```bash
+acq run opencode --publish 6868:6767 ~/projects/app-one
+acq run opencode --publish 6869:6767 ~/projects/app-two
+```
+
+`--publish` is msb-only and create-time only. See
+[ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
+
+### Prevention
+
+Never hardcode a published host port in a script — read it back from
+`acq ports NAME`, or request it explicitly with `--publish` and let a contended
+port fail loudly. Note that `acq ports` prints the mapping msb was **asked**
+for, which is not proof that the sandbox owns that host port.
+
+---
+
 When something fails, work through this list:
 
 1. [ ] Is the secret actually in the container? (`echo $VAR_NAME`)
@@ -2331,7 +2377,7 @@ When something fails, work through this list:
 
 ---
 
-## 42. acq Refuses msb 0.7.0-0.7.2, or msb Refuses Your Sandbox State
+## 43. acq Refuses msb 0.7.0-0.7.2, or msb Refuses Your Sandbox State
 
 ### Symptoms
 

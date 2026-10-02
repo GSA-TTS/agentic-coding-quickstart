@@ -336,6 +336,6 @@ the snapshot-group downgrade refusal; and the keg-only formula layout.
   — the `allow@dns` macro behind the independent 0.6.9 floor.
 - [ADR-0026: installation and distribution](0026-installation-and-distribution.md)
   — the installer this version policy was added to.
-- `docs/KNOWN_FAILURE_MODES.md` §42 — the user-facing symptoms and recovery.
+- `docs/KNOWN_FAILURE_MODES.md` §43 — the user-facing symptoms and recovery.
 - `docs/BACKEND_GUIDE.md` (msb backend) — the supported version table.
 - `scripts/verify-msb-pin` — the live verification of every behavioral claim here.

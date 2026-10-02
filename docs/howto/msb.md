@@ -94,7 +94,7 @@ one intended version active.
 If a 0.7.0-0.7.2 `msb` has already touched your sandbox state, do **not** just
 swap the binary — the catalog was migrated. Move forward with
 `msb self update` (upstream's own recommendation: the fixed line reads the
-already-migrated catalog with no rollback). See §42 of
+already-migrated catalog with no rollback). See §43 of
 [`KNOWN_FAILURE_MODES.md`](../KNOWN_FAILURE_MODES.md) for every symptom and
 recovery, including the wedge a mis-ordered `msb self downgrade` leaves behind.
 

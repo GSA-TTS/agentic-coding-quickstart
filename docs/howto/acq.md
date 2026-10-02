@@ -3,7 +3,7 @@ title: "acq How-To Guide"
 description: "Detailed how-to for acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-08-21"
+last_updated: "2026-09-30"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "howto", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -111,6 +111,7 @@ kits, validates your USAi key, and attaches the agent.
 | `./acq shell NAME` | Open an interactive shell in a sandbox |
 | `./acq exec NAME -- CMD` | Run a command inside a sandbox |
 | `./acq cp SRC DST` | Copy files in/out (NAME:path syntax) |
+| `./acq ports NAME` | Show the sandbox's published port mappings |
 | `./acq version` | Show acq version + active backend |
 | `./acq doctor` | Backend health check + write default config |
 
@@ -322,7 +323,7 @@ You'll also need the `msb` sandbox runtime — install it without admin via
 `brew install GSA-TTS/tap/microsandbox-acq`, or `./scripts/verify-msb-pin
 --install` if you have no Homebrew. Avoid
 `curl -fsSL https://install.microsandbox.dev | sh`: it always installs the newest
-release, and `acq` refuses msb 0.7.0-0.7.2 (see §42 of
+release, and `acq` refuses msb 0.7.0-0.7.2 (see §43 of
 [`KNOWN_FAILURE_MODES.md`](../KNOWN_FAILURE_MODES.md)).
 
 > **Running `./acq` from the clone?** It only works from **inside** the
@@ -502,6 +503,30 @@ design and trust model.
 
 ---
 
+## Interactive setup: `acq configure`
+
+`acq configure` is a colorful, dependency-free interactive picker for choosing
+which **opt-in** kits to enable and the default answer for per-sandbox GitHub
+token scoping. Choices persist to `~/.config/acq/config.yaml`.
+
+```bash
+acq configure
+```
+
+- The four built-in kits are always applied; the picker only manages opt-in
+  extras (e.g. `openchamber`, `paseo`).
+- `acq` offers to run this on your first run; run it again anytime.
+- `acq create` re-shows the picker pre-filled with your saved defaults, so one
+  sandbox can deviate without changing the global default (the deviation is
+  remembered per-sandbox and re-applied on resume).
+- The token preference only pre-answers the scoping prompt — the fine-grained
+  PAT is still minted per-sandbox (`acq github-scope`).
+- Non-interactive/CI runs make no changes and just print the current config; set
+  `ACQ_NO_PROMPT=1` to force that. See
+  [ADR-0031](../adr/0031-interactive-acq-configure.md).
+
+---
+
 ## Advanced: extra kits
 
 ```bash
@@ -511,6 +536,10 @@ export ACQ_EXTRA_KITS="./my-local-kit git+https://github.com/acme/kits.git#ref=<
 # Allow a new kit source prefix
 export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 ```
+
+An exported `ACQ_EXTRA_KITS` takes precedence over the kits saved by
+`acq configure` (env wins): the create-time picker is skipped and your env value
+is used verbatim.
 
 You can also apply an extra kit for a single `run`/`create` with `--kit`
 (repeatable), instead of the env var:

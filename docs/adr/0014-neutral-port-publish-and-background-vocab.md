@@ -13,6 +13,18 @@ supersedes: []
 
 # ADR-0014: Neutral Port-Publish and Background-Command Kit Vocabulary
 
+> **Update (2026-09-30) — the omitted-`host` rule below is superseded by
+> [ADR-0034](0034-host-port-selection-and-publish-override.md).** The Decision
+> Outcome states that when `host` is omitted it **defaults to `guest`**. That
+> proved wrong in practice on msb: every sandbox created from one kit then
+> requested the same host port, msb accepted the duplicate mapping silently, and
+> only the first sandbox was actually reachable. An omitted `host` now means
+> "unspecified" and travels to the consumer as an **empty** host column, which the
+> msb adapter resolves to a **free loopback port chosen per sandbox** (sbx, which
+> never read the column, is unaffected). The rest of this ADR — the neutral field
+> itself, its source precedence, the deprecated `backend_extras.sbx` fallback, the
+> validation rules, and the `background` vocabulary — stands as recorded.
+
 ## Context and Problem Statement
 
 [ADR-0011](0011-msb-backend-and-neutral-kits.md) established the neutral
@@ -111,7 +123,9 @@ same fail-closed gating ADR-0011 used: quickstart pins a released
 
 - **`publishedPorts`** — a top-level list of port mappings. Each entry:
   `{ host: <int>, guest: <int>, protocol?: tcp|udp, name?: <string> }`. When
-  `host` is omitted it defaults to `guest`.
+  `host` is omitted it defaults to `guest`. *(Superseded — see the Update note at
+  the top of this ADR and [ADR-0034](0034-host-port-selection-and-publish-override.md):
+  an omitted `host` now stays unspecified and the backend chooses a free port.)*
 - **`background`** — a boolean on a `commands[]` entry (default `false`),
   marking a startup command that must be detached rather than awaited.
 
