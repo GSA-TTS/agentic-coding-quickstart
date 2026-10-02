@@ -3,10 +3,10 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-08-18"
+last_updated: "2026-09-30"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
-related_files: ["docs/howto/acq.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
+related_files: ["docs/howto/acq.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md", "docs/adr/0034-host-port-selection-and-publish-override.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -891,6 +891,14 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   the guest interface address) for create-time `publishedPorts`, or use
   `acq --backend msb ports <sandbox> --publish HOST:GUEST`; the post-hoc path
   tunnels with `ssh -L` from inside the guest and can reach guest loopback.
+  **The host side of a create-time publish is chosen per sandbox, and can be
+  pinned at launch.** An entry that omits `host:` gets a **free** loopback host
+  port per sandbox, so several sandboxes from one kit are each reachable (they
+  previously all requested the guest port and only the first one worked). Pass
+  `acq run/create --publish HOST:GUEST` (repeatable, msb only, create-time only)
+  to choose the host side yourself; a host port already in use **fails the
+  create** rather than being substituted. See
+  [ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
 - **`acq` can auto-install only `opencode` on msb.** On the msb base image `acq`

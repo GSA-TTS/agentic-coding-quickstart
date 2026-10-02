@@ -706,6 +706,10 @@ _ACQ_MSB_SSH_AGENT_FORWARDING=0
 # printed, so the "forwarding host ssh-agent" notice appears at most once per
 # process even if the vsock-flag helper runs more than once. See ADR-0021.
 _ACQ_MSB_SSH_AGENT_NOTICE_SHOWN=0
+# Module-scope flag: set to 1 once the "cannot probe host port availability"
+# notice has been printed, so a provision publishing several ports on a shell
+# without /dev/tcp says it once instead of per port. See ADR-0034.
+_ACQ_MSB_HOST_PROBE_NOTICE_SHOWN=0
 
 # Module-level monotonic counter for ephemeral serve-port selection. The call
 # site is `sport=$(_acq_msb_pick_ephemeral_port)` — a COMMAND SUBSTITUTION, which
@@ -1359,21 +1363,172 @@ _acq_msb_balanced_rules_into() {
 # Emit the create-time `-p HOST:GUEST` flags for a kit's published ports into the
 # named array. Usage: _acq_msb_port_flags_into ARRVAR SPEC
 #
-# ADR-0014: kit_spec_published_ports reads the NEUTRAL top-level
-# `publishedPorts` first (deprecated backend_extras.sbx fallback) and emits
-# validated `guest<TAB>proto<TAB>name<TAB>host` records (ports are ints 1..65535,
-# so they cannot smuggle shell metacharacters). host defaults to guest. We map
-# each to a plain `-p HOST:GUEST` — msb's create/run-time NAT publish. msb -p also
-# accepts BIND_ADDR:HOST:GUEST and /udp, but the neutral schema stays TCP +
-# default loopback bind for sbx parity, so bind-addr and /udp are deliberately
-# NOT emitted. Uses the eval-by-name array pattern (macOS bash 3.2 compat), like
-# _acq_msb_net_rules_into. Absence of publishedPorts is a silent no-op: the
-# neutral field is read DEFENSIVELY so a kit that omits it — or an older pinned
-# kit predating the neutral schema — is a clean no-op rather than an error. The
-# schema and a consuming kit are released at the current PATTERNS_KIT_REF, so the
-# field lights up end-to-end (see ADR-0014).
+# Thin wrapper over _acq_msb_port_flags_from_records for a SINGLE spec. The
+# provision path does NOT use it: it accumulates every kit's records and emits
+# once after the kit loop, so cross-kit duplicates collapse and a CLI override
+# can compose (see acq_backend_provision and ADR-0034).
 _acq_msb_port_flags_into() {
-  local _arr="$1" _spec="$2" _rec _guest _host
+  _acq_msb_port_flags_from_records "$1" <<EOF
+$(kit_spec_published_ports "$2")
+EOF
+}
+
+# Union published-port records by GUEST port, LAST WINS — the same composition
+# rule _acq_msb_volume_records_dedupe applies to volumes. Two kits that publish
+# the same guest port must yield ONE `-p` flag (msb rejects a duplicate guest
+# mapping), and last-wins is what lets a later record (a CLI `--publish`, see
+# ADR-0034) override an earlier kit's entry. stdin -> stdout; blank lines
+# dropped; survivors keep the position of their LAST occurrence.
+_acq_msb_port_records_dedupe() {
+  awk -F'\t' '
+    $1 != "" { recs[NR]=$0; last[$1]=NR }
+    END { for (i=1;i<=NR;i++) if (i in recs) { split(recs[i],f,"\t"); if (last[f[1]]==i) print recs[i] } }
+  '
+}
+
+# Report whether the HOST port PORT is already spoken for, as one word:
+#   busy    — something is listening on 127.0.0.1:PORT right now
+#   free    — the connect was refused, so nothing is listening
+#   unknown — the probe itself could not run (see below)
+#
+# The probe is a bash /dev/tcp connect, i.e. it tests the REAL host listener
+# rather than any backend's declared configuration: msb's inspect output reports
+# the mapping msb was ASKED for, and that record stays unchanged even when another
+# process owns the port, so it cannot answer whether the port is available. See
+# ADR-0034; closing that reporting gap is separate, deliberately-deferred work.
+# Always the literal IPv4 loopback, never `localhost`: a `::1`-first resolution
+# against an IPv4-only listener does not fail fast, it HANGS.
+# `unknown` is real and must not be mistaken for `free`: a bash built without
+# net redirection answers "No such file or directory". Callers warn on it and
+# proceed (the pre-ADR-0034 behavior) rather than silently claiming the port.
+#
+# Test seams, mirroring _acq_msb_pick_ephemeral_port's ACQ_MSB_FORCE_SERVE_PORT:
+# ACQ_MSB_HOST_PORTS_BUSY is a space/comma list of ports reported busy,
+# ACQ_MSB_HOST_PROBE_STUB=1 reports every other port free WITHOUT touching a
+# socket (so the offline suite never depends on what the developer's machine
+# happens to be listening on), and ACQ_MSB_HOST_PROBE_UNKNOWN=1 forces the
+# indeterminate verdict. Real use leaves all three unset and probes for real.
+_acq_msb_host_port_status() {
+  local _p="$1" _out _rc=0 _b
+  [ "${ACQ_MSB_HOST_PROBE_UNKNOWN:-0}" = "1" ] && { echo unknown; return 0; }
+  for _b in $(printf '%s' "${ACQ_MSB_HOST_PORTS_BUSY:-}" | tr ',' ' '); do
+    [ "$_b" = "$_p" ] && { echo busy; return 0; }
+  done
+  [ "${ACQ_MSB_HOST_PROBE_STUB:-0}" = "1" ] && { echo free; return 0; }
+  # The redirection runs in a command substitution, so fd 3 dies with the
+  # subshell — no explicit close, and no fd leak into the caller.
+  _out=$( { exec 3<>"/dev/tcp/127.0.0.1/${_p}"; } 2>&1 ) || _rc=$?
+  if [ "$_rc" -eq 0 ]; then echo busy; return 0; fi
+  # Only a refused connection PROVES nothing is listening. Anything else — an
+  # unexpected message, or a failure with no message at all — is "cannot tell",
+  # never optimistically "free".
+  case "$_out" in
+    *[Cc]"onnection refused"*) echo free ;;
+    *)                         echo unknown ;;
+  esac
+}
+
+# Echo a host port that is free right now, for a published guest port whose kit
+# left `host:` unspecified. Reuses the existing loopback-range picker and probes
+# each candidate, retrying a busy one a bounded number of times. Candidates in
+# the space-separated TAKEN list (ports this create already maps, not yet bound,
+# so the probe would call them free) are skipped. Usage:
+#   _acq_msb_pick_free_host_port [TAKEN]
+# Returns:
+#   0 — the echoed port probed FREE
+#   2 — the echoed port could not be probed (acq cannot tell; the caller decides
+#       whether to say so — it must, because the caller is not a subshell and
+#       this helper always is, being called via command substitution, so a
+#       "printed once" flag set here would never survive back, the same trap
+#       _ACQ_MSB_PORT_SEQ_FILE exists to avoid)
+#   1 — every candidate was busy; the caller must fail the create
+_acq_msb_pick_free_host_port() {
+  local _taken=" ${1:-} " _try=0 _p
+  while [ "$_try" -lt 12 ]; do
+    _try=$(( _try + 1 ))
+    _p=$(_acq_msb_pick_ephemeral_port)
+    case "$_taken" in *" $_p "*) continue ;; esac
+    case "$(_acq_msb_host_port_status "$_p")" in
+      busy)    continue ;;
+      unknown) printf '%s\n' "$_p"; return 2 ;;
+      *)       printf '%s\n' "$_p"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Print the "could not probe host port availability" notice AT MOST ONCE per
+# provision, whichever branch discovers it — a requested host port and a chosen
+# one are the same fact from the caller's side ("acq did not check"), and it must
+# never be mistaken for "acq checked and it was free". A provision publishing
+# several ports on a bash without network redirection says it once, not per port.
+# Always returns 0 so it can sit in a `case`/`&&` arm without affecting flow.
+_acq_msb_probe_unknown_notice() {
+  [ "$_ACQ_MSB_HOST_PROBE_NOTICE_SHOWN" -eq 0 ] || return 0
+  _ACQ_MSB_HOST_PROBE_NOTICE_SHOWN=1
+  echo "acq(msb): note: cannot probe host port availability on this shell;" \
+       "publishing ports without a contention check." >&2
+  return 0
+}
+
+# Return 0 if the explicitly requested host port HOST may be mapped to GUEST,
+# 1 (with the reason on stderr) if not. TAKEN is the space-separated list of host
+# ports this create already maps. Usage:
+#   _acq_msb_explicit_host_ok HOST GUEST TAKEN
+_acq_msb_explicit_host_ok() {
+  local _host="$1" _guest="$2" _taken="$3"
+  # Nothing is bound until msb create runs, so the probe below cannot see a
+  # host port this same create already maps (two `--publish` pins, or a pin
+  # and a kit's `host:`). Refuse it here instead of handing msb two `-p`
+  # flags for one host port.
+  case " $_taken " in
+    *" $_host "*)
+      echo "acq(msb): error: host port ${_host} is requested for more than one guest" >&2
+      echo "          port (again for guest port ${_guest}). Give each its own host port." >&2
+      return 1
+      ;;
+  esac
+  case "$(_acq_msb_host_port_status "$_host")" in
+    busy)
+      echo "acq(msb): error: host port ${_host} (for guest port ${_guest}) is already" >&2
+      echo "          in use on 127.0.0.1. acq will not substitute a different port for" >&2
+      echo "          an explicitly requested one. Free it, or request another host port." >&2
+      return 1
+      ;;
+    # Unprobeable: publish the requested port (the behavior before this check
+    # existed) but say so. An EXPLICIT request is the case where a wrong
+    # answer is most visible to the caller, so it must not be the quiet one.
+    unknown) _acq_msb_probe_unknown_notice ;;
+  esac
+  return 0
+}
+
+# Turn validated `guest<TAB>proto<TAB>name<TAB>host` records on STDIN into
+# create-time `-p HOST:GUEST` flags in the named array. Usage:
+#   _acq_msb_port_flags_from_records ARRVAR <<EOF ... records ... EOF
+#
+# ADR-0014 supplies the records (ports are ints 1..65535, so they cannot smuggle
+# shell metacharacters); ADR-0034 defines what an EMPTY host column means:
+#
+#   host set    — an explicit request. If something is already listening there we
+#                 FAIL, loudly and without substituting another port: the caller
+#                 asked for a predictable address and a silent substitution is
+#                 exactly the "started fine, unreachable" failure this replaces.
+#   host empty  — the kit left the host side to the backend, so acq picks a FREE
+#                 loopback port per sandbox. Defaulting it to the guest port
+#                 (the old behavior) made every sandbox from one kit request the
+#                 same host port, so the second one lost the race in silence.
+#
+# Either way, when the availability probe cannot run at all, the port is published
+# and a notice says the check did not happen — never silently.
+#
+# msb -p also accepts BIND_ADDR:HOST:GUEST and /udp, but the neutral schema stays
+# TCP + default loopback bind for sbx parity, so neither is emitted. Uses the
+# eval-by-name array pattern (macOS bash 3.2 compat), like _acq_msb_net_rules_into.
+# Returns non-zero if any record could not be mapped; the caller must abort the
+# create rather than bring up a sandbox with a missing port.
+_acq_msb_port_flags_from_records() {
+  local _arr="$1" _rec _guest _host _rc=0 _prc _taken=""
   eval "$_arr=()"
   # Parse fields with cut, NOT `IFS=<tab> read`: tab is IFS whitespace, so a
   # bare read COLLAPSES adjacent empty fields — an entry with guest + host but
@@ -1385,7 +1540,6 @@ _acq_msb_port_flags_into() {
     _guest=$(printf '%s' "$_rec" | cut -f1)
     _host=$(printf '%s' "$_rec" | cut -f4)
     [ -n "$_guest" ] || continue
-    [ -n "$_host" ] || _host="$_guest"
     # Defense-in-depth: the validator already guarantees integer ports, but
     # re-check before the value reaches an argv via eval.
     case "$_guest$_host" in
@@ -1394,10 +1548,23 @@ _acq_msb_port_flags_into() {
         continue
         ;;
     esac
+    if [ -n "$_host" ]; then
+      _acq_msb_explicit_host_ok "$_host" "$_guest" "$_taken" || { _rc=1; continue; }
+    else
+      _prc=0
+      _host=$(_acq_msb_pick_free_host_port "$_taken") || _prc=$?
+      if [ "$_prc" -eq 1 ]; then
+        echo "acq(msb): error: could not find a free host port for guest port ${_guest}." >&2
+        _rc=1
+        continue
+      fi
+      # _prc 2 == the probe could not run; same "publish, but say so" contract.
+      [ "$_prc" -eq 2 ] && _acq_msb_probe_unknown_notice
+    fi
+    _taken="${_taken} ${_host}"
     eval "$_arr+=(-p \"\${_host}:\${_guest}\")"
-  done <<EOF
-$(kit_spec_published_ports "$_spec")
-EOF
+  done
+  return "$_rc"
 }
 
 # Emit create-time storage flags from `path<TAB>type<TAB>size` volume records
@@ -2673,6 +2840,7 @@ acq_backend_provision() {
   local trust_host_cas=0
   local kitdirs=()
   local _volrecs=""
+  local _portrecs=""
 
   # Resolve the OCI image ONCE per provision (ADR-0022): explicit ACQ_MSB_IMAGE
   # wins over the neutral --image/ACQ_IMAGE, which wins over an agent-derived
@@ -2746,16 +2914,14 @@ acq_backend_provision() {
     _acq_msb_net_rules_into nr "$spec"
     [ "${#nr[@]}" -gt 0 ] && create_flags+=("${nr[@]}")
 
-    # Published ports (ADR-0014) → create-time `-p HOST:GUEST` flags. The
-    # neutral top-level `publishedPorts` is read first by kit_spec_published_ports
-    # (with a deprecated backend_extras.sbx fallback). Each surviving record is
-    # `guest<TAB>proto<TAB>name<TAB>host` (validated to ints 1..65535). msb -p also
-    # accepts BIND_ADDR:HOST:GUEST and /udp, but the neutral schema stays TCP +
-    # default loopback bind for sbx parity, so we emit a plain `-p HOST:GUEST`
-    # (no bind-addr, no /udp — out of parity scope). Absence is a silent no-op.
-    local pp=()
-    _acq_msb_port_flags_into pp "$spec"
-    [ "${#pp[@]}" -gt 0 ] && create_flags+=("${pp[@]}")
+    # Published ports (ADR-0014): ACCUMULATE this kit's validated records. They
+    # are unioned across all kits (last wins by guest port) and mapped to
+    # create-time `-p HOST:GUEST` flags AFTER the loop — emitting per kit here
+    # would produce a duplicate `-p` for a guest port two kits both publish, and
+    # would leave no single place for a CLI host-port override to compose
+    # (ADR-0034). Records are `guest<TAB>proto<TAB>name<TAB>host`.
+    _portrecs="${_portrecs}
+$(kit_spec_published_ports "$spec")"
 
     # Volumes (ADR-0023): ACCUMULATE this kit's validated records; they are
     # unioned across all kits (last wins by path, matching sbx's own
@@ -2774,6 +2940,48 @@ $(kit_spec_volumes "$spec")"
     # stakes the fixed script name (see _acq_msb_stage_startup_script).
     _acq_msb_stage_startup_script "$spec" create_flags
   done
+
+  # CLI host-port overrides (`acq run/create --publish HOST:GUEST`, ADR-0034) are
+  # appended AFTER every kit's records, so the guest-keyed last-wins dedupe below
+  # makes them win: the user's launch-time choice outranks the kit's declaration
+  # (and outranks the free port acq would otherwise pick). Values are validated at
+  # the acq layer (_acq_validate_publish_pair) before reaching this argv.
+  # A caller that needs no ports (the throwaway key-check sandbox, see
+  # check_fresh_sandbox_key) drops them all, CLI overrides included.
+  [ "${_ACQ_PROVISION_WITHOUT_PORTS:-0}" = "1" ] && _portrecs=""
+  local _pub
+  for _pub in ${ACQ_PUBLISH_FLAGS[@]+"${ACQ_PUBLISH_FLAGS[@]}"}; do
+    [ "${_ACQ_PROVISION_WITHOUT_PORTS:-0}" = "1" ] && break
+    case "
+$_portrecs" in
+      *"
+${_pub#*:}	"*) : ;;   # some kit publishes this guest port — plain override
+      *)
+        # No kit declared it. Publish anyway (an explicit request is honored) but
+        # say so: a mistyped guest port would otherwise map a port with nothing
+        # behind it, and look like a working publish.
+        echo "acq(msb): note: --publish ${_pub}: no applied kit declares guest port" \
+             "${_pub#*:}; publishing it anyway." >&2
+        ;;
+    esac
+    _portrecs="${_portrecs}
+$(printf '%s\t\t\t%s' "${_pub#*:}" "${_pub%%:*}")"
+  done
+
+  # Published ports (ADR-0014, ADR-0034) → create-time `-p HOST:GUEST` flags,
+  # from the union of every kit's records (last wins by guest port). A record
+  # whose host column is EMPTY gets a FREE loopback host port chosen per sandbox
+  # (so parallel sandboxes from one kit do not collide); an explicit host port
+  # that is already taken FAILS the create rather than being silently moved.
+  local pf=()
+  if ! _acq_msb_port_flags_from_records pf <<EOF
+$(printf '%s\n' "$_portrecs" | _acq_msb_port_records_dedupe)
+EOF
+  then
+    echo "acq(msb): aborting create for '${name}': a published port could not be mapped." >&2
+    exit 1
+  fi
+  [ "${#pf[@]}" -gt 0 ] && create_flags+=("${pf[@]}")
 
   # Volumes (ADR-0023) → create-time storage flags, from the union of every
   # kit's records (last wins by path): a block entry becomes a derived named
