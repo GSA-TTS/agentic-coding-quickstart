@@ -6,8 +6,8 @@
 # msb provision: agent-user creation + uid-1000 kit commands as `agent`, the
 # Docker base-image contract (sudo + proxy env_keep), agent install + npm-failure
 # disambiguation (#321), attach launching the recorded agent with a PTY, exec as
-# the agent user, injection guards, and the OCI-engine (podman) setup. Provisions
-# run in isolated subshells; assertions read $CALLS.
+# the agent user, injection guards, and absence of adapter-owned OCI setup.
+# Provisions run in isolated subshells; assertions read $CALLS.
 #
 # shellcheck shell=bats
 
@@ -205,76 +205,17 @@ _attach() { # PRE_SNIPPET NAME
   assert_regex "$log" 'injattach -- /bin/sh -l'
 }
 
-@test "msb: OCI (podman) engine setup runs as root, configures storage, verifies rootless" {
+@test "msb: provision without oci-engine does not install podman or grant OCI devices" {
   _provision ocibox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/oci-secrets"'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'PODMAN_PKGS='
-  assert_regex "$log" '/usr/local/bin/docker'
-  assert_regex "$log" "touch '/var/lib/acq/oci-ready'"
-  assert_regex "$log" '/etc/containers/storage\.conf'
-  assert_regex "$log" 'driver = ..vfs..'
-  assert_regex "$log" 'mount_program'
-  assert_regex "$log" 'fuse-overlayfs'
-  assert_regex "$log" 'uidmap'
-  assert_regex "$log" 'passt'
-  assert_regex "$log" 'slirp4netns'
-  assert_regex "$log" 'exec podman'
-  refute_regex "$log" 'exec sudo -n podman'
-  assert_regex "$log" '/dev/net/tun'
-  assert_regex "$log" '/dev/fuse'
-  assert_regex "$log" 'chown root:agent'
-  assert_regex "$log" 'unqualified-search-registries = ...docker.io...'
-  assert_regex "$log" 'docker\.io/library/hello-world'
-  assert_regex "$log" 'short-name-mode = ...SHORT_NAME_MODE.'
-  assert_regex "$log" 'SHORT_NAME_MODE=enforcing'
-  refute_regex "$log" 'SHORT_NAME_MODE=permissive'
-  assert_regex "$log" 'msb exec ocibox -u 0 -e PODMAN_PKGS='
-  assert_regex "$log" 'msb exec ocibox -u agent -e HOME=/home/agent'
-  assert_regex "$log" 'acq-oci-selftest'
-}
-
-@test "msb: ACQ_MSB_SHORT_NAME_MODE=permissive threads the permissive value" {
-  _provision ocipermbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/oci-perm-secrets" ACQ_MSB_SHORT_NAME_MODE=permissive'
-  local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'SHORT_NAME_MODE=permissive'
-  refute_regex "$log" 'SHORT_NAME_MODE=enforcing'
-}
-
-@test "msb: an invalid ACQ_MSB_SHORT_NAME_MODE warns and falls back to enforcing" {
-  _provision ocibadbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/oci-bad-secrets" ACQ_MSB_SHORT_NAME_MODE="bogus; rm -rf /"'
-  assert_output --partial 'invalid ACQ_MSB_SHORT_NAME_MODE'
-  local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'SHORT_NAME_MODE=enforcing'
-  refute_regex "$log" 'SHORT_NAME_MODE=bogus'
-  refute_regex "$log" 'rm -rf /'
-}
-
-@test "msb: the OCI setup is skipped when the ready marker already exists" {
-  _provision ocirdybox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ociready-secrets" STUB_OCI_READY=1'
-  local log; log=$(cat "$CALLS")
-  assert_regex "$log" "test -f '/var/lib/acq/oci-ready'"
   refute_regex "$log" 'PODMAN_PKGS='
   refute_regex "$log" '/usr/local/bin/docker'
-}
-
-@test "msb: ACQ_MSB_ENSURE_OCI=0 skips the OCI step entirely" {
-  _provision ocioffbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ocioff-secrets" ACQ_MSB_ENSURE_OCI=0'
-  local log; log=$(cat "$CALLS")
-  refute_regex "$log" 'PODMAN_PKGS='
-  refute_regex "$log" 'oci-ready'
-}
-
-@test "msb: an OCI setup failure is fail-soft (rc 0, warns, marker not touched)" {
-  _provision ocifailbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ocifail-secrets" STUB_OCI_SETUP_FAIL=1'
-  assert_success
-  assert_output --partial 'could not provision an OCI engine'
-  refute_regex "$(cat "$CALLS")" "touch '/var/lib/acq/oci-ready'"
-}
-
-@test "msb: an unsafe ACQ_MSB_PODMAN_PKGS is refused and never reaches an exec" {
-  _provision ociinjbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ociinj-secrets" ACQ_MSB_PODMAN_PKGS="podman;rm -rf"'
-  assert_output --partial 'unsafe characters'
-  refute_regex "$(cat "$CALLS")" 'rm -rf'
+  refute_regex "$log" "touch '/var/lib/acq/oci-ready'"
+  refute_regex "$log" '/etc/containers/storage\.conf'
+  refute_regex "$log" 'acq-oci-selftest'
+  refute_regex "$log" '/dev/net/tun'
+  refute_regex "$log" '/dev/fuse'
+  refute_regex "$log" 'chown root:agent'
 }
 
 # msb session parity: sbx is a full session transport, so

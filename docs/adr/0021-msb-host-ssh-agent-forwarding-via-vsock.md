@@ -124,8 +124,7 @@ any interactive `git`/`ssh` see the agent.
 
 The `--vsock` route persists across `msb stop`/`start` (it is part of the sandbox
 config), but the `socat` bridge **process** dies on stop. So the bridge is
-re-started in `acq_backend_start`, the same way the OCI device-node re-grant is
-re-applied on resume.
+re-started in `acq_backend_start` before kit startup services are healed.
 
 ### Re-attach to a running sandbox (bridge + `SSH_AUTH_SOCK` must be re-driven)
 
@@ -202,7 +201,7 @@ not used — the host agent socket path is platform-dependent (launchd may keep 
 stable; a plain `ssh-agent` rotates it), so only a live connect is
 authoritative. Refreshing the route automatically on resume is left as future
 work pending an msb capability to update a `--vsock` route in place. See
-`docs/KNOWN_FAILURE_MODES.md` §34 ("forwarded agent unreachable after a host
+`docs/KNOWN_FAILURE_MODES.md` §35 ("forwarded agent unreachable after a host
 reboot").
 
 ### Version gate (MIN_MSB_VERSION stays 0.6.8)

@@ -362,25 +362,6 @@ case "$_msb_sub" in
       # heal's marker-hit shell-sync path can be exercised.
       *"test -f '/var/lib/acq/agent-user-ready'"*)
         [ "${STUB_AGENT_USER_READY:-0}" = "1" ] && exit 0 || exit 1 ;;
-      # The OCI-engine setup is TWO msb-exec `sh -c` blocks: (1) a root (`-u 0`)
-      # install/config block carrying `/usr/local/bin/docker`, and (2) a rootless
-      # verify block (`-u agent`) that runs a `podman build` layer-mount self-test
-      # (tagged acq-oci-selftest). Match the root block by its docker-alias marker
-      # and the verify block by the self-test image tag. STUB_OCI_SETUP_FAIL=1
-      # models the ROOT block failing; STUB_OCI_VERIFY_FAIL=1 models the rootless
-      # build self-test failing (engine/storage unusable). Either failure must make
-      # provision FAIL SOFT (warn, rc 0, no marker). Match these FIRST (before the
-      # generic command-v / test-f cases below would swallow them).
-      *"/usr/local/bin/docker"*)
-        [ "${STUB_OCI_SETUP_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
-      *"acq-oci-selftest"*)
-        [ "${STUB_OCI_VERIFY_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
-      # The OCI-ready marker probe (`test -f '/var/lib/acq/oci-ready'`) gates the
-      # setup block. Match it BEFORE the generic `test -f` (markers absent) case
-      # below. Default ABSENT (exit 1) so the OCI step runs; STUB_OCI_READY=1
-      # makes the marker present (exit 0) to exercise the marker-gated skip.
-      *"test -f '/var/lib/acq/oci-ready'"*)
-        [ "${STUB_OCI_READY:-0}" = "1" ] && exit 0 || exit 1 ;;
       # `command -v <agent>` (agent-presence probe): controllable so the install
       # path can be exercised. By default the agent is ABSENT (exit 1) so install
       # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq
