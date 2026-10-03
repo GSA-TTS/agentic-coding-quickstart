@@ -13,6 +13,14 @@ supersedes: []
 
 # ADR-0026: Installation and Distribution of `acq` for Non-Technical Users
 
+> **Partly superseded (2026-09-25):** the `msb` install leg described below —
+> reusing upstream's `curl … | sh` / upstream tap formula — was replaced by a
+> version-pinned, checksum-verified install. Neither upstream channel can express
+> a version, and `acq` must refuse msb 0.7.0-0.7.2. The "one remaining unpinned
+> leg" called out under *Security posture* is therefore no longer unpinned. See
+> [ADR-0032](0032-msb-version-policy-and-migration-recovery.md). Everything here
+> about installing **`acq` itself** still stands.
+
 ## Context and Problem Statement
 
 Today the only documented way to get `acq` onto a machine is a manual
@@ -373,8 +381,13 @@ as issues):
   with.
 - [ADR-0011: msb backend and neutral kits](0011-msb-backend-and-neutral-kits.md)
   — the `msb` runtime this installer optionally installs.
+- [ADR-0032: msb version policy and migration recovery](0032-msb-version-policy-and-migration-recovery.md)
+  — supersedes the `msb` install leg here with a pinned, checksum-verified
+  install, and explains why neither upstream channel can pin a version.
 - microsandbox install methods: <https://install.microsandbox.dev> and the
-  `superradcompany/tap/microsandbox` Homebrew tap.
+  `superradcompany/tap/microsandbox` Homebrew tap. **Both always resolve to the
+  newest release**; `acq` uses `GSA-TTS/tap/microsandbox-acq` or a verified
+  release bundle instead (ADR-0032).
 - Related code/docs (this increment): `install.sh`, `README.md`,
   `release-please-config.json`.
 

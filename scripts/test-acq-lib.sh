@@ -196,7 +196,7 @@ _line="msb"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
 _msb_sub="${1:-}"
 case "$_msb_sub" in
-  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.6.9}" ;;
+  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.6.9}"; exit "${STUB_MSB_VERSION_RC:-0}" ;;
   --help|-h) printf 'MSB-TOPLEVEL-HELP for msb\n' ;;
   doctor)
     # Model host-readiness. Default: ready (exit 0), so the happy path is silent.

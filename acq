@@ -940,6 +940,22 @@ esac
 acq_resolve_backend "${explicit_backend}"
 
 # ---------------------------------------------------------------------------
+# acq_backend_guard_version — cheap version floor for state-touching verbs
+# ---------------------------------------------------------------------------
+# Provisioning verbs (run/create) call acq_backend_prepare, which also probes host
+# readiness. Verbs that merely touch EXISTING sandbox state need the version floor
+# too — without it they reached the backend CLI unguarded and surfaced raw upstream
+# errors instead of acq's (most visibly msb's `database schema is newer than this
+# msb binary` after a blocked 0.7.x migrated the catalog). This wrapper calls the
+# adapter's cheap check when it has one, so a backend that predates the split (or
+# a test stub) keeps working instead of dying on an unbound function. See ADR-0032.
+acq_backend_guard_version() {
+  if command -v acq_backend_check_version >/dev/null 2>&1; then
+    acq_backend_check_version
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Intercept user-supplied `--kit <ref>` on run/create (repeatable).
 # ---------------------------------------------------------------------------
 # A `--kit` flag must be handled BY ACQ, not forwarded to the backend: the
@@ -1317,11 +1333,13 @@ case "$subcommand" in
 
   ls)
     shift
+    acq_backend_guard_version
     acq_backend_list "$@"
     ;;
 
   stop)
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: stop: missing sandbox name" >&2; exit 1; }
     acq_backend_stop "$local_name"
@@ -1338,6 +1356,7 @@ case "$subcommand" in
     # 'start' verb (acq_backend_start is undefined there); this arm is
     # capability-gated below to point sbx users at `acq run`, which auto-resumes.
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: start: missing sandbox name" >&2; exit 1; }
     if ! command -v acq_backend_start >/dev/null 2>&1; then
@@ -1372,6 +1391,7 @@ case "$subcommand" in
     # so the stop is guarded with `|| ...` and never aborts. start+heal always
     # follows.
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: restart: missing sandbox name" >&2; exit 1; }
     if ! command -v acq_backend_start >/dev/null 2>&1; then
@@ -1394,6 +1414,7 @@ case "$subcommand" in
 
   rm)
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: rm: missing sandbox name" >&2; exit 1; }
     acq_backend_terminate "$local_name"
@@ -1401,6 +1422,7 @@ case "$subcommand" in
 
   exec)
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: exec: missing sandbox name" >&2; exit 1; }
     shift
@@ -1409,6 +1431,7 @@ case "$subcommand" in
 
   shell)
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: shell: missing sandbox name" >&2; exit 1; }
     acq_backend_shell "$local_name"
@@ -1416,11 +1439,13 @@ case "$subcommand" in
 
   cp)
     shift
+    acq_backend_guard_version
     acq_backend_cp "${1:-}" "${2:-}"
     ;;
 
   ports)
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: ports: missing sandbox name" >&2; exit 1; }
     shift

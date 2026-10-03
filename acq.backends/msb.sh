@@ -110,6 +110,25 @@ _acq_msb_cli() {
 # clear version message, not a raw clap error or DNS parse failure mid-create.
 MIN_MSB_VERSION="0.6.9"
 
+# msb 0.7.0 through 0.7.2 migrate 0.6.x sandbox state one-way, into a form the
+# 0.6.x line cannot read (`database schema is newer than this msb binary`).
+# Refuse exactly that range: 0.7.3 carries the upstream cross-version
+# compatibility fix and is accepted.
+MSB_BLOCKED_VERSION_MIN="0.7.0"
+MSB_BLOCKED_VERSION_MAX="0.7.2"
+
+# Version acq's own tooling installs during the blocked window: the newest
+# release whose migration set the 0.6.x line understands.
+MSB_PINNED_VERSION="0.6.18"
+
+# First release with the upstream fix. Moving FORWARD to this is the preferred
+# recovery for a host that already ran a blocked version: the migration sets are
+# additive, so this line reads an already-migrated catalog with no rollback and no
+# state rewrite. Rolling back needs `msb self downgrade` run BY the blocked binary
+# (it owns the rollback metadata), and can be refused outright when grouped or
+# duplicate snapshots exist. See ADR-0032.
+MSB_FIXED_VERSION="0.7.3"
+
 # Default OCI image for provisioned sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
 # agent template. It ALREADY ships the non-root `agent` user (with passwordless
@@ -691,7 +710,7 @@ case "$ACQ_MSB_SSH_AGENT_GUEST_SOCK" in
     ;;
 esac
 # The ssh-agent forward feature needs msb >= 0.6.9 (first release with --vsock).
-# The global MIN_MSB_VERSION floor stays 0.6.8; this gates ONLY the forward.
+# Keep a feature-specific constant so the forward path stays self-documenting.
 MIN_MSB_VSOCK_VERSION="0.6.9"
 # Share the ssh-agent guest port with common.sh's neutral helper so both sides
 # agree on the port (the helper emits it, this adapter translates it). This is
@@ -750,35 +769,96 @@ EOF
   echo 0
 }
 
-# Parse `msb --version` → bare X.Y.Z.
+_acq_msb_version_blocked() {
+  local v="$1"
+  [ "$(_acq_msb_version_ge "$v" "$MSB_BLOCKED_VERSION_MIN")" -eq 0 ] || return 1
+  [ "$(_acq_msb_version_ge "$MSB_BLOCKED_VERSION_MAX" "$v")" -eq 0 ] || return 1
+  return 0
+}
+
+# Parse `msb --version` → bare X.Y.Z. Only final releases are accepted:
+# prerelease/build-suffixed output such as 0.7.3-rc1 must fail closed rather
+# than being treated as the fixed final 0.7.3.
 _acq_msb_version() {
-  _acq_msb_cli --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1
+  local raw
+  if ! raw=$(_acq_msb_cli --version 2>/dev/null); then
+    return 0
+  fi
+  printf '%s\n' "$raw" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1 || true
+}
+
+_acq_msb_version_is_final() {
+  case "$1" in
+    *[-+]* ) return 1 ;;
+    * ) return 0 ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_prepare — CLI presence + version floor; fail closed
+# acq_backend_check_version — CLI presence + version floor ONLY; fail closed
 # ---------------------------------------------------------------------------
-
-acq_backend_prepare() {
+# Split out of acq_backend_prepare so verbs that merely TOUCH existing sandbox
+# state (ls/stop/start/rm/exec/...) can be guarded too, without paying for the
+# `msb doctor` host-readiness probe that only provisioning needs. Without this,
+# those verbs reached msb unguarded and surfaced raw upstream errors — most
+# visibly `database schema is newer than this msb binary` from a blocked 0.7.x
+# that had already migrated the catalog. Cheap: one `msb --version`, no network,
+# no host mutation. See ADR-0032.
+acq_backend_check_version() {
   if ! command -v msb >/dev/null 2>&1; then
     echo "error: msb (microsandbox) CLI not found on PATH. Install msb >= $MIN_MSB_VERSION:" >&2
-    echo "         curl -fsSL https://install.microsandbox.dev | sh   # macOS / Linux" >&2
-    echo "         brew install superradcompany/tap/microsandbox" >&2
+    echo "         brew install GSA-TTS/tap/microsandbox-acq        # version-pinned" >&2
+    echo "         ./scripts/verify-msb-pin --install               # verified release bundle" >&2
+    echo "       Note: 'curl -fsSL https://install.microsandbox.dev | sh' cannot install a" >&2
+    echo "       specific version — it always resolves to the newest release, and every" >&2
+    echo "       release ships a byte-identical copy, so a versioned URL is not a pin." >&2
+    echo "       acq accepts msb $MIN_MSB_VERSION-$MSB_BLOCKED_VERSION_MIN (exclusive) and $MSB_FIXED_VERSION or newer." >&2
     echo "       See docs/BACKEND_GUIDE.md (msb backend) for details." >&2
     exit 1
   fi
 
   local current
   current=$(_acq_msb_version)
-  if [ -z "$current" ]; then
-    echo "acq: warning: could not determine msb version (need >= $MIN_MSB_VERSION); continuing." >&2
-    return 0
+  if [ -z "$current" ] || ! _acq_msb_version_is_final "$current"; then
+    echo "error: acq could not determine a supported final msb version." >&2
+    echo "       msb --version must report a final release like 'msb $MSB_PINNED_VERSION'" >&2
+    echo "       or 'msb $MSB_FIXED_VERSION'. Local, dev, prerelease, or unparseable" >&2
+    echo "       builds are refused so acq does not open sandbox state with an" >&2
+    echo "       unverified migration policy." >&2
+    exit 1
   fi
   if [ "$(_acq_msb_version_ge "$current" "$MIN_MSB_VERSION")" -ne 0 ]; then
     echo "error: acq requires msb >= $MIN_MSB_VERSION, but found $current." >&2
-    echo "       Upgrade with 'msb self update' (see docs/BACKEND_GUIDE.md)." >&2
+    echo "       Install msb $MSB_PINNED_VERSION, or msb $MSB_FIXED_VERSION or newer:" >&2
+    echo "         brew install GSA-TTS/tap/microsandbox-acq" >&2
+    echo "         ./scripts/verify-msb-pin --install" >&2
     exit 1
   fi
+  if _acq_msb_version_blocked "$current"; then
+    echo "error: acq refuses msb $current because msb $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX" >&2
+    echo "       migrate existing 0.6.x sandbox state one-way, into a form the 0.6.x" >&2
+    echo "       line cannot read." >&2
+    echo "       Preferred fix — move FORWARD to msb $MSB_FIXED_VERSION, which reads the state this" >&2
+    echo "       msb already migrated, with no rollback and no state rewrite:" >&2
+    echo "         msb self update" >&2
+    echo "       Alternative — roll back to msb $MSB_PINNED_VERSION. If this msb ALREADY migrated" >&2
+    echo "       your sandbox state, swapping the binary is NOT enough; the catalog" >&2
+    echo "       must be rolled back first, and only THIS msb can do it:" >&2
+    echo "         msb self downgrade $MSB_PINNED_VERSION" >&2
+    echo "       Do NOT run 'msb self downgrade' from an older msb: it cannot roll" >&2
+    echo "       these migrations back, and the failed attempt leaves an" >&2
+    echo "       interrupted-downgrade record that blocks msb catalog access." >&2
+    echo "       See docs/KNOWN_FAILURE_MODES.md for details." >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_prepare — version floor + host readiness; fail closed
+# ---------------------------------------------------------------------------
+
+acq_backend_prepare() {
+  acq_backend_check_version
 
   # msb needs host virtualization (KVM on Linux, HVF on macOS, WHP on Windows).
   # Run the readiness check FOR the user (so the happy path needs no manual `msb
@@ -3117,6 +3197,16 @@ EOF
   # auto-trusted in the guest, so no extra CA install is needed (verified: plain
   # HTTPS to an intercepted host returns 200). Toggle off only if a deployment
   # cannot use interception (secrets then won't substitute).
+  #
+  # On msb 0.7.3+ that toggle costs more than secret substitution. Upstream turned
+  # `--net-strict` on by default there: a HOSTNAME allow rule is only honored when
+  # msb can inspect the request authority, so non-intercepted HTTPS fails closed
+  # when only a hostname rule permits it. Every rule acq emits for the balanced and
+  # strict tiers is hostname-based, so disabling interception on 0.7.3+ makes those
+  # hosts unreachable outright rather than merely unsubstituted. Left as the user's
+  # call (the knob exists for deployments that cannot intercept), but the escape is
+  # msb's own `--net-strict=false`, not anything acq can decide for them. See
+  # docs/BACKEND_GUIDE.md (balanced egress).
   if [ -z "${ACQ_MSB_NO_TLS_INTERCEPT:-}" ]; then
     create_flags+=(--tls-intercept)
 
