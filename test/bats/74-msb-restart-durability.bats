@@ -107,6 +107,37 @@ _first_line() { printf '%s\n' "$2" | grep -n -- "$1" | head -n1 | cut -d: -f1; }
   refute_regex "$(cat "$CALLS")" 'msb start livebox'
 }
 
+@test "rc.d(msb): neutral kit files are copied under the agent rc directory" {
+  printf 'rcdkitbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'rcdkitbox\n' > "$STUBDIR/.msb_running_list"
+  : > "$CALLS"
+  local rcdkit="$STUBDIR/rcdkit"; mkdir -p "$rcdkit/files/home/agent/.rc.d"
+  cat > "$rcdkit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: rcdkit
+displayName: RC Kit
+description: rc.d file fixture
+files:
+  - path: /home/agent/.rc.d/10-team.sh
+    mode: "0644"
+    source: files/home/agent/.rc.d/10-team.sh
+  - path: /home/agent/.rc.d/90-personal.sh
+    mode: "0644"
+    source: files/home/agent/.rc.d/90-personal.sh
+SPEC
+  printf 'export TEAM_TOOL=1\n' > "$rcdkit/files/home/agent/.rc.d/10-team.sh"
+  printf 'alias ll="ls -la"\n' > "$rcdkit/files/home/agent/.rc.d/90-personal.sh"
+  ( . "${REPO_ROOT}/acq.backends/msb.sh"
+    ACQ_CLI_KITS=("$rcdkit")
+    _acq_msb_fetch_kit() { printf '%s\n' "$rcdkit"; }
+    acq_backend_ensure_kits_applied rcdkitbox >/dev/null 2>&1 )
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'rcdkitbox:/home/agent/.rc.d/10-team.sh'
+  assert_regex "$log" 'rcdkitbox:/home/agent/.rc.d/90-personal.sh'
+  assert_regex "$log" 'chown -R -P agent /home/agent/.rc.d'
+}
+
 @test "clikit-heal: a CLI --kit ref (ACQ_CLI_KITS) is applied during heal" {
   printf 'clikitbox\n' > "$STUBDIR/.msb_sandbox_list"
   printf 'clikitbox\n' > "$STUBDIR/.msb_running_list"
@@ -132,6 +163,7 @@ SPEC
     acq_backend_ensure_kits_applied clikitbox >/dev/null 2>&1 )
   assert_regex "$(cat "$CALLS")" 'clikitbox:/home/agent/clikit-marker'
 }
+
 
 @test "0017: startup is staged via --script-path but never designated --entrypoint (removed knob inert)" {
   : > "$CALLS"

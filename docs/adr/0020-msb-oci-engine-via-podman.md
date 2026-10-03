@@ -74,6 +74,11 @@ already wrestles with), and (c) provision a per-sandbox disk-backed
 
 ## Decision
 
+> **Revision note (2026-10-02, ADR-0030 transition):** this adapter-owned path
+> remains the default while the shared `oci-engine` capability kit is introduced
+> through the generic opt-in catalog described by ADR-0031. The catalog entry and
+> adapter retirement are tracked by GSA-TTS/agentic-coding-quickstart#505.
+
 Provision **podman** at provision time as the OCI engine, run it **rootless as
 the agent user**, and alias `docker` → `podman` so both `docker run …` and
 `docker compose …` work inside the sandbox. Implemented as a new idempotent,
