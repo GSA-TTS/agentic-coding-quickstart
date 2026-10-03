@@ -128,6 +128,27 @@ re-passed on the same invocation stays authoritative. This is consistent with th
 above: the verb now restores the *full* kit set, not just the built-ins. See
 `docs/KNOWN_FAILURE_MODES.md` §33.
 
+## Update (2026-09-29): the staged body carries the merged, guest-wide kit env
+
+Kit `environment[]` became guest-wide for **all** kit lifecycle commands
+([ADR-0033](0033-msb-kit-env-is-guest-wide-for-lifecycle-commands.md)): each
+command runs with the merged env of the full effective kit set rather than only
+its own kit's vars. The generated `--script-path` body now emits the same merged
+`env NAME=value …` prefix, so the staged path and the exec path cannot drift.
+
+Two notes specific to this ADR:
+
+- The staged body is still **inert at boot** (a bare `--script-path` registration
+  stages the script on the guest PATH; microsandbox does not auto-run it), so this
+  change fixes no live symptom here. It exists so the re-verification trap above —
+  a future msb that *does* auto-run a registered script — cannot resurface the
+  wrong-env bug in a path nobody re-checked.
+- The staging call moved **out of** the kit fetch loop in
+  `acq_backend_provision` into a second loop over the same kit dirs, because the
+  merged env is only knowable once every kit has been fetched. The
+  first-kit-with-startup-commands-stakes-the-script-name rule is unchanged
+  (same list, same order).
+
 ---
 
 # ADR-0017: Stage msb kit startup commands as a create-time script for restart durability (original)
