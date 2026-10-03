@@ -201,6 +201,15 @@ ACQ_BUILTIN_KIT_COUNT=0
 ACQ_BUILTIN_SUPPORT_KIT_COUNT=0
 ACQ_AGENT_KIT_READY_CACHE=""
 
+# Host-port overrides supplied on the command line via `--publish HOST:GUEST`
+# (repeatable) on run/create, one `HOST:GUEST` pair per element (ADR-0034).
+# Extracted by extract_publish_flags BEFORE the args reach the backend: `msb
+# create` has its own `-p` that the adapter synthesizes from kit records, and sbx
+# has no host-port knob at all, so the raw flag must never reach either CLI. The
+# msb adapter folds these into its published-port records at provision time,
+# where they override a kit's mapping for the same guest port.
+ACQ_PUBLISH_FLAGS=()
+
 KIT_SOURCE_PREFIX="github.com/GSA-TTS/"
 KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
 
@@ -1438,6 +1447,115 @@ extract_clone_flag() {
   done
 }
 
+# Extract the acq-owned `--publish HOST:GUEST` / `--publish=HOST:GUEST` flag
+# (repeatable) from a run/create arg list (ADR-0034). Populates, IN THE CURRENT
+# SHELL (so callers must not run this in a subshell/pipeline):
+#   ACQ_PUBLISH_FLAGS      — one `HOST:GUEST` pair per element, in order
+#   ACQ_PUBLISH_REMAINING  — the arg list with the --publish flags removed
+#
+# Returns non-zero on a malformed value, having explained what was wrong; the
+# caller must abort rather than create a sandbox missing a mapping the user
+# explicitly asked for. `HOST:GUEST` is REQUIRED in full: a bare `--publish 6868`
+# is ambiguous (host or guest?) and the guest port belongs to the kit, not to the
+# launcher, so acq refuses it instead of guessing.
+#
+# Like extract_kit_flags, scanning STOPS at the first `--` separator: everything
+# after it is agent args and is forwarded verbatim (an inner agent may have its
+# own `--publish`). The flag must never reach a backend CLI — `msb create` has a
+# native `-p` that acq synthesizes itself, and sbx has no equivalent at all.
+extract_publish_flags() {
+  ACQ_PUBLISH_FLAGS=()
+  ACQ_PUBLISH_REMAINING=()
+  local expect=0 arg rc=0
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    if [ "$expect" -eq 1 ]; then
+      _acq_validate_publish_pair "$arg" || rc=1
+      ACQ_PUBLISH_FLAGS+=("$arg")
+      expect=0
+      shift
+      continue
+    fi
+    case "$arg" in
+      --)          ACQ_PUBLISH_REMAINING+=("$@"); break ;;
+      --publish)   expect=1 ;;
+      --publish=*) _acq_validate_publish_pair "${arg#--publish=}" || rc=1
+                   ACQ_PUBLISH_FLAGS+=("${arg#--publish=}") ;;
+      *)           ACQ_PUBLISH_REMAINING+=("$arg") ;;
+    esac
+    shift
+  done
+  if [ "$expect" -eq 1 ]; then
+    echo "acq: --publish given with no value (expected HOST:GUEST)" >&2
+    rc=1
+  fi
+  return "$rc"
+}
+
+# Validate one `HOST:GUEST` pair (SI-10) — these values become an `-p` argv on a
+# backend CLI. Both sides must be integers 1..65535, spelled canonically.
+#
+# The digits-only `case` guard and the length cap come FIRST, deliberately:
+# `[ "$p" -ge 1 ]` compares arithmetically without octal-interpreting a leading
+# zero (so `0080` would silently mean 80, which is why a leading zero is refused
+# outright rather than accepted), but it ABORTS the shell with status 2 on a
+# wildly long digit string. Never use `$((...))` on these: `$((0080))` is a fatal
+# invalid-octal error, not a comparison.
+_acq_validate_publish_pair() {
+  local pair="${1:-}" h g p
+  case "$pair" in
+    *:*) h="${pair%%:*}"; g="${pair#*:}" ;;
+    *)
+      echo "acq: --publish '${pair}' is not HOST:GUEST — both sides are required" >&2
+      echo "     (e.g. --publish 6868:6767: reach the sandbox's guest port 6767 on" >&2
+      echo "     host port 6868). The guest port is the one the kit publishes." >&2
+      return 1
+      ;;
+  esac
+  for p in "$h" "$g"; do
+    case "$p" in
+      ""|*[!0-9]*)
+        echo "acq: --publish '${pair}': '${p}' is not a port number (1..65535)" >&2
+        return 1 ;;
+      0*)
+        echo "acq: --publish '${pair}': '${p}' has a leading zero; write it plainly" >&2
+        return 1 ;;
+    esac
+    if [ "${#p}" -gt 5 ]; then
+      echo "acq: --publish '${pair}': '${p}' is out of range (1..65535)" >&2
+      return 1
+    fi
+    if [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
+      echo "acq: --publish '${pair}': '${p}' is out of range (1..65535)" >&2
+      return 1
+    fi
+  done
+  # A guest port is publishable exactly once, so a repeated guest side is a
+  # user mistake (which of the two host ports did they mean?), not a union.
+  local prev
+  for prev in ${ACQ_PUBLISH_FLAGS[@]+"${ACQ_PUBLISH_FLAGS[@]}"}; do
+    if [ "${prev#*:}" = "$g" ]; then
+      echo "acq: --publish: guest port ${g} is already mapped to host port" \
+           "${prev%%:*}; drop one of the two --publish flags" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+# --publish is create-time only (ADR-0034): the host↔guest mapping is fixed in
+# the backend's create argv, so a re-attach cannot move it. Say so on every
+# re-attach path rather than drop the flag silently, and point at the post-hoc
+# verb, which CAN add a mapping to a running sandbox (ADR-0015).
+note_publish_ignored_on_reattach() {
+  local name="$1"
+  [ "${#ACQ_PUBLISH_FLAGS[@]}" -gt 0 ] || return 0
+  echo "acq: note: --publish is ignored when re-attaching an existing sandbox" \
+       "('$name'); the host port mapping is fixed at create. Use" \
+       "'acq ports $name --publish HOST:GUEST' to add one now, or remove" \
+       "the sandbox first ('acq rm $name') to recreate with it." >&2
+}
+
 # Resolve the effective NEUTRAL base image per ADR-0022 precedence:
 #   --image flag  >  ACQ_IMAGE env  >  (empty)
 # The `--image` flag value is captured by extract_image_flag into ACQ_IMAGE_FLAG.
@@ -2353,6 +2471,11 @@ _classify_key_status() {
 check_fresh_sandbox_key() {
   local validation_name="acq-keycheck-$$"
   local status=""
+  # The throwaway sandbox only needs the USAi binding. Publishing ports would
+  # make it contend with the real sandbox for every explicit host port (a
+  # `--publish` pin or a kit's `host:`), fail its create, and silently skip this
+  # check. Dynamic scoping hands the flag to acq_backend_provision.
+  local _ACQ_PROVISION_WITHOUT_PORTS=1
 
   # Use the backend to create a minimal sandbox for validation.
   if ! acq_backend_provision "$validation_name" shell . </dev/null >/dev/null 2>&1; then

@@ -45,7 +45,8 @@ displayName: USAi Provider
 description: test fixture
 SPEC
   rm -f "$STUBDIR/.msb_created"
-  run env ACQ_BACKEND=msb USAI_API_KEY="usai-key-stub" ACQ_TEST_USAI_KIT="$kit" \
+  run env ACQ_BACKEND=msb USAI_API_KEY="usai-key-stub" \
+    BATS_TEST_NAME="$BATS_TEST_NAME" ACQ_TEST_USAI_KIT="$kit" \
     STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
   assert_success
   refute_output --partial 'provider facts'
@@ -87,7 +88,8 @@ ACQ_PROVIDER_BIND_HOSTS=api.bad.gov
 FACTS
   rm -f "$STUBDIR/.msb_created"
 
-  run env ACQ_BACKEND=msb USAI_API_KEY="usai-key-stub" ACQ_TEST_USAI_KIT="$kit" \
+  run env ACQ_BACKEND=msb USAI_API_KEY="usai-key-stub" \
+    BATS_TEST_NAME="$BATS_TEST_NAME" ACQ_TEST_USAI_KIT="$kit" \
     STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
   assert_failure
   assert_output --partial "acq: invalid provider facts artifact: $kit/provider-facts/usai.env"

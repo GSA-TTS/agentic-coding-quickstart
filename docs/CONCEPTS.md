@@ -1,12 +1,12 @@
 ---
 title: "acq Concepts"
-description: "Backend-neutral concepts for working with acq sandboxes (workspaces, mounts)"
+description: "Backend-neutral concepts for working with acq sandboxes (workspaces, mounts, published ports)"
 status: canonical
 tier: 2
-last_updated: "2026-09-21"
+last_updated: "2026-09-30"
 audience: "developers"
-keywords: ["acq", "concepts", "workspace", "mount", "backend-neutral", "sbx", "msb"]
-related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
+keywords: ["acq", "concepts", "workspace", "mount", "ports", "publish", "backend-neutral", "sbx", "msb"]
+related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0034-host-port-selection-and-publish-override.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -123,6 +123,53 @@ has a few mechanics worth knowing. Rather than duplicate them here, see the
   mounted in place of the primary; see the
   [Backend Guide](BACKEND_GUIDE.md#disposable-primary-clone) for mechanics and
   the divergences from sbx (a git clone carries committed state only).
+
+---
+
+## Published Ports
+
+A kit that runs a server declares the **guest** port it listens on (its
+`publishedPorts` entry); acq maps that to a port on **your host** at create time,
+so `http://127.0.0.1:<host port>` reaches it. Read the mapping acq chose with:
+
+```bash
+acq ports <name>
+```
+
+acq picks a **free host port per sandbox**, so several sandboxes from the same
+kit can run at once and each gets its own host address.
+
+### Choosing the host port: `--publish`
+
+When you want a **predictable** address rather than whatever was free — "this
+sandbox's UI is on 6868, that one's on 6869" — choose it at launch:
+
+```bash
+acq run opencode --publish 6868:6767 ~/projects/my-app
+```
+
+`--publish HOST:GUEST` is repeatable, and both sides are required (the guest port
+is the kit's, not yours to invent). It overrides whatever the kit declared for
+that guest port. If the host port is already in use, the create **fails** — acq
+never quietly moves your mapping somewhere else.
+
+Two limits worth knowing:
+
+- It applies **at create only**, like the mounts and `--clone`: the mapping lives
+  in the sandbox's create arguments, so a re-attach cannot move it (acq says so
+  rather than ignoring the flag). To add a mapping to a sandbox that is already
+  running, use `acq ports <name> --publish HOST:GUEST` — that opens a tunnel to
+  the guest's *loopback* interface, a different path than the create-time
+  publish.
+- It is **msb only**. sbx assigns the host port itself and offers no way to
+  request one, so acq refuses the flag there rather than appear to honor it; read
+  what sbx chose with `acq ports`.
+- Like the other run/create flags, it goes **after** the subcommand
+  (`acq run … --publish …`). Only `--backend` and `--image` may precede it.
+
+See [ADR-0034](adr/0034-host-port-selection-and-publish-override.md) for the
+design, and [ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md) for the
+post-hoc tunnel this deliberately does not fall back to.
 
 ---
 
