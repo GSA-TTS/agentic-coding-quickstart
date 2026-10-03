@@ -110,13 +110,16 @@ fi
 # directory under PATTERNS_KIT_DIR; DESC[i] is the one-line picker description.
 # `prime-agent` is intentionally omitted: it is a skeleton at the current pin
 # (see the patterns kits.yaml parity note) and would be non-functional if
-# offered. Add it here once it is functional.
+# offered. Add it here once it is functional. Heavier kits such as `oci-engine`
+# still belong here when they are functional; the picker description must make
+# their create-time cost clear.
 # shellcheck disable=SC2034  # consumed by `acq configure` (cross-function reader)
-ACQ_OPTIN_KIT_NAMES=(openchamber paseo)
+ACQ_OPTIN_KIT_NAMES=(openchamber paseo oci-engine)
 # shellcheck disable=SC2034
 ACQ_OPTIN_KIT_DESCS=(
   "Browser UI for OpenCode alongside the terminal TUI (publishes ports 3000/4096)"
   "Self-hosted Paseo browser web UI for coding agents (one port, loopback only)"
+  "Rootless podman for docker run / docker compose inside the sandbox (installs packages)"
 )
 
 # _acq_optin_kit_ref NAME — echo the fully-pinned git+https kit ref for an opt-in

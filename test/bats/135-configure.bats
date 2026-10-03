@@ -152,6 +152,18 @@ _cfg_src() {
   assert_output --partial 'dir=integrations/isolation/acq-kits/openchamber'
 }
 
+@test "catalog: oci-engine is offered and expands to the pinned ref" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    printf "%s\n" "${ACQ_OPTIN_KIT_NAMES[@]}"
+    _acq_optin_kit_ref oci-engine
+  '
+  assert_success
+  assert_line 'oci-engine'
+  assert_output --partial 'ref=2dd2ad6ad5f63b842d732424bed5ba9aebeed676'
+  assert_output --partial 'dir=integrations/isolation/acq-kits/oci-engine'
+}
+
 @test "catalog: prime-agent is intentionally NOT offered (skeleton at pin)" {
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
@@ -160,6 +172,7 @@ _cfg_src() {
   assert_success
   assert_line 'openchamber'
   assert_line 'paseo'
+  assert_line 'oci-engine'
   refute_line 'prime-agent'
 }
 
@@ -358,6 +371,17 @@ _cfg_src() {
   assert_line 'scope_github_token: yes'
 }
 
+@test "configure: selecting oci-engine persists the catalog name" {
+  export XDG_CONFIG_HOME="$STUBDIR/xdg-oci"
+  run env ACQ_BACKEND=sbx ACQ_PROMPT_TEST_INPUT="DOWN DOWN SPACE ENTER n" "$ACQ" configure
+  assert_success
+  assert_output --partial 'oci-engine'
+  assert_output --partial 'Rootless podman for docker run / docker compose'
+  run cat "$XDG_CONFIG_HOME/acq/config.yaml"
+  assert_line 'extra_kits: oci-engine'
+  assert_line 'scope_github_token: no'
+}
+
 # ---------------------------------------------------------------------------
 # configured-default extra-kit application + env precedence
 # ---------------------------------------------------------------------------
@@ -365,7 +389,7 @@ _cfg_src() {
 @test "apply: configured extra_kits expand to pinned refs" {
   export XDG_CONFIG_HOME="$STUBDIR/xdg5"
   mkdir -p "$XDG_CONFIG_HOME/acq"
-  printf 'extra_kits: openchamber paseo\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  printf 'extra_kits: openchamber paseo oci-engine\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
   run bash -c '
     ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
     ACQ_EXTRA_KITS=""; ACQ_EXTRA_KITS_FROM_ENV=""
@@ -375,6 +399,7 @@ _cfg_src() {
   assert_success
   assert_output --partial 'dir=integrations/isolation/acq-kits/openchamber'
   assert_output --partial 'dir=integrations/isolation/acq-kits/paseo'
+  assert_output --partial 'dir=integrations/isolation/acq-kits/oci-engine'
 }
 
 @test "apply: unknown configured extra_kits names fail closed" {
