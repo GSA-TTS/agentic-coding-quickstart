@@ -34,15 +34,65 @@ _seed_usai() {
   refute_output --partial 'provider facts'
 }
 
-@test "dispatch: create falls back when provider facts cannot be fetched" {
+@test "dispatch: create falls back silently when provider facts artifact is absent" {
+  local kit="$STUBDIR/provider-kit-empty" proj="$STUBDIR/provider-facts-absent"
+  mkdir -p "$kit" "$proj"
+  cat > "$kit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: usai-provider
+displayName: USAi Provider
+description: test fixture
+SPEC
+  rm -f "$STUBDIR/.msb_created"
+  run env ACQ_BACKEND=msb USAI_API_KEY="usai-key-stub" ACQ_TEST_USAI_KIT="$kit" \
+    STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
+  assert_success
+  refute_output --partial 'provider facts'
+  assert_regex "$(cat "$CALLS")" 'msb create'
+  assert [ -f "$STUBDIR/.msb_created" ]
+}
+
+@test "dispatch: create warns and falls back when provider facts cannot be fetched" {
   local proj="$STUBDIR/provider-facts-offline"; mkdir -p "$proj"
   rm -f "$STUBDIR/.msb_created"
   run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
     STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
   assert_success
+  assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
   refute_output --partial 'invalid provider facts'
   assert_regex "$(cat "$CALLS")" 'msb create'
   assert [ -f "$STUBDIR/.msb_created" ]
+}
+
+@test "dispatch: create fails closed when provider facts artifact is malformed" {
+  local kit="$STUBDIR/provider-kit-bad" proj="$STUBDIR/provider-facts-bad"
+  mkdir -p "$kit/provider-facts" "$proj"
+  cat > "$kit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: usai-provider
+displayName: USAi Provider
+description: test fixture
+SPEC
+  cat > "$kit/provider-facts/usai.env" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.bad.gov
+ACQ_PROVIDER_BASE_URL=https://api.bad.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.bad.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=BAD-KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://bad.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.bad.gov
+FACTS
+  rm -f "$STUBDIR/.msb_created"
+
+  run env ACQ_BACKEND=msb USAI_API_KEY="usai-key-stub" ACQ_TEST_USAI_KIT="$kit" \
+    STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
+  assert_failure
+  assert_output --partial "acq: invalid provider facts artifact: $kit/provider-facts/usai.env"
+  refute_regex "$(cat "$CALLS")" 'msb create'
+  refute [ -f "$STUBDIR/.msb_created" ]
 }
 
 @test "dispatch: run existing sandbox does not fetch provider facts" {
@@ -59,6 +109,7 @@ _seed_usai() {
   run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
     STUB_AGENT_USER_READY=1 "$ACQ" start mybox
   assert_success
+  assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
   refute_output --partial 'invalid provider facts'
   assert_regex "$(cat "$CALLS")" 'msb start mybox'
 }
@@ -68,7 +119,7 @@ _seed_usai() {
     ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
     "$ACQ" secret import --all
   assert_success
-  refute_output --partial 'provider facts'
+  assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
   assert_output --partial "imported 'usai'"
 }
 

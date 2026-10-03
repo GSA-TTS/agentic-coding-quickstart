@@ -31,6 +31,11 @@ ACQ_RESOLVED_PATH="${ACQ_SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 # shellcheck disable=SC1091
 . "${ACQ_SCRIPT_DIR}/acq.backends/common.sh"
 
+# Test-only seam for executable dispatch tests that need a local provider kit.
+if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_USAI_KIT:-}" ]; then
+  USAI_KIT="$ACQ_TEST_USAI_KIT"
+fi
+
 # ---------------------------------------------------------------------------
 # Print version/identity
 # ---------------------------------------------------------------------------

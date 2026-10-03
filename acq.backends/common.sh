@@ -389,11 +389,11 @@ acq_provider_facts_load_from_kit() {
   if [ -z "$base_dir" ]; then
     base_dir="${ACQ_PROVIDER_FACTS_CACHE_DIR:-${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}/provider-facts}"
   fi
-  mkdir -p "$base_dir" || return 1
+  mkdir -p "$base_dir" || return 3
   if ! command -v kit_translate_fetch >/dev/null 2>&1; then
-    return 2
+    return 3
   fi
-  kitdir=$(kit_translate_fetch "$kitref" "$base_dir/usai-provider") || return 1
+  kitdir=$(kit_translate_fetch "$kitref" "$base_dir/usai-provider") || return 3
   facts="$kitdir/provider-facts/usai.env"
   acq_provider_facts_load "$facts"
   rc=$?
@@ -417,12 +417,32 @@ acq_provider_facts_use_fallback() {
 }
 
 acq_provider_facts_load_from_kit_or_fallback() {
-  if acq_provider_facts_load_from_kit "$@" 2>/dev/null; then
-    :
+  local provider_facts_err provider_facts_rc
+  if provider_facts_err=$(acq_provider_facts_load_from_kit "$@" 2>&1); then
+    provider_facts_rc=0
   else
-    acq_provider_facts_use_fallback
-    acq_debug "provider facts unavailable from kit; using transitional fallback defaults"
+    provider_facts_rc=$?
   fi
+  case "$provider_facts_rc" in
+    0) : ;;
+    1)
+      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
+      return 1
+      ;;
+    2)
+      acq_provider_facts_use_fallback
+      acq_debug "provider facts unavailable from kit; using transitional fallback defaults"
+      ;;
+    3)
+      acq_provider_facts_use_fallback
+      echo "acq: warning: provider facts could not be fetched; using transitional fallback defaults" >&2
+      acq_debug "provider facts fetch failed; using transitional fallback defaults"
+      ;;
+    *)
+      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
+      return "$provider_facts_rc"
+      ;;
+  esac
   # msb derives this adapter-local binding host when sourced, before lazy facts load.
   if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ]; then
     # shellcheck disable=SC2034  # consumed by msb adapter functions at dispatch
@@ -765,14 +785,13 @@ split_noglob() {
 }
 
 _acq_builtin_kit_ref() {
-  local name="${1:-}" known
-  for known in "${ACQ_KIT_NAMES[@]}"; do
-    if [ "$known" = "$name" ]; then
-      printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$name"
-      return 0
-    fi
-  done
-  return 1
+  case "${1:-}" in
+    zscaler-ca-certificate) printf '%s\n' "$ZSCALER_KIT" ;;
+    "$USAI_PROVIDER_KIT_NAME") printf '%s\n' "$USAI_KIT" ;;
+    agentic-coding-playbook) printf '%s\n' "$PLAYBOOK_KIT" ;;
+    git-ssh-sign) printf '%s\n' "$GITSSHSIGN_KIT" ;;
+    *) return 1 ;;
+  esac
 }
 
 _acq_builtin_support_kit_names() {
