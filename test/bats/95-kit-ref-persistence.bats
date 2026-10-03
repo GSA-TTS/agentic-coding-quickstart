@@ -55,6 +55,43 @@ load 'helper'
   assert_regex "$ACQ_EXTRA_KITS" '/kits/b'
 }
 
+@test "cli-kits: configured oci-engine catalog kit survives fresh-shell start" {
+  export XDG_CONFIG_HOME="$STUBDIR/xdg-oci-start"
+  mkdir -p "$XDG_CONFIG_HOME/acq"
+  printf 'extra_kits: oci-engine\n' > "$XDG_CONFIG_HOME/acq/config.yaml"
+  local okit="$STUBDIR/okit"
+  mkdir -p "$okit/files"
+  cat > "$okit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: oci-engine
+files:
+  - path: /home/agent/oci-engine-marker
+    mode: "0644"
+    source: files/marker
+SPEC
+  printf 'OCI_ENGINE_MARKER\n' > "$okit/files/marker"
+  printf 'ocistartbox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'ocistartbox\n' > "$STUBDIR/.msb_running_list"
+  load_acq
+  ACQ_EXTRA_KITS=""
+  # shellcheck disable=SC2034  # read by sourced _acq_apply_configured_extra_kits
+  ACQ_EXTRA_KITS_FROM_ENV=""
+  _acq_apply_configured_extra_kits
+  _build_kit_list shell
+  acq_cli_kits_write msb ocistartbox
+  ACQ_EXTRA_KITS=""; ACQ_CLI_KITS=()
+  : > "$CALLS"
+  run env ACQ_MSB_KIT_LOCAL_DIR="$okit" ACQ_BACKEND=msb XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$ACQ" start ocistartbox
+  assert_success
+  assert_output --partial "started 'ocistartbox'"
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'ocistartbox:/home/agent/oci-engine-marker'
+  run cat "$(_acq_cli_kits_file msb ocistartbox)"
+  assert_output --partial 'dir=integrations/isolation/acq-kits/oci-engine'
+  assert_output --partial 'ref=2dd2ad6ad5f63b842d732424bed5ba9aebeed676'
+}
+
 @test "cli-kits: backend keying — an sbx read does not see an msb record" {
   load_acq
   ACQ_CLI_KITS=("/kits/msbonly"); ACQ_EXTRA_KITS=""
