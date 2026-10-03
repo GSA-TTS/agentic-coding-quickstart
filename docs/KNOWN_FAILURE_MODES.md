@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-09-30"
+last_updated: "2026-10-03"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -647,7 +647,7 @@ worked on sbx 0.35.0–0.37.x, where `sbx kit add` recreated the container with 
 augmented kit set while preserving state.
 
 > **sbx 0.38 caveat.** On sbx >= 0.38, `sbx kit add` no longer applies
-> startup-bearing kits mid-life (see [Section 35](#35-re-attach-heal-loop-warns-every-time-on-sbx-038--sbx-kit-add-refuses-startup-bearing-kits)),
+> startup-bearing kits mid-life (see [Section 36](#36-re-attach-heal-loop-warns-every-time-on-sbx-038--sbx-kit-add-refuses-startup-bearing-kits)),
 > and every built-in acq kit declares startup commands. In-place healing of the
 > built-in bundle therefore does **not** work on 0.38+: to add or refresh the
 > bundle you must recreate the sandbox (`acq rm && acq run`). acq detects the
@@ -1743,7 +1743,51 @@ acq exec <sandbox> -- sh /home/agent/openchamber-start.sh &
 
 ---
 
-## 34. Git signing fails on msb: socat missing or msb < 0.6.9
+## 34. `docker run` or `docker compose` Missing Inside a Sandbox
+
+### Symptoms
+
+- `docker run`, `docker compose`, or `podman` is not found inside a sandbox.
+- On msb, a new sandbox no longer gets podman automatically.
+
+### Root Cause
+
+`oci-engine` is an opt-in catalog kit. acq no longer installs podman from the msb
+adapter by default, and sbx/msb now use the same mechanism for in-sandbox OCI
+support.
+
+### Fix
+
+Enable the kit for future sandboxes:
+
+```bash
+acq configure
+# select: oci-engine
+```
+
+For a single sandbox, pass the pinned kit ref with `--kit` or include it in
+`ACQ_EXTRA_KITS`:
+
+```bash
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=2dd2ad6ad5f63b842d732424bed5ba9aebeed676&dir=integrations/isolation/acq-kits/oci-engine'
+```
+
+Existing sandboxes that were created before this change keep whatever podman
+state they already have, but new sandboxes require the opt-in kit unless the base
+image already includes a working engine.
+
+### Prevention / Status
+
+- Breaking change in the `oci-engine` catalog migration. Covered by the
+  `acq configure` catalog tests, the configured-kit fresh-shell start
+  round-trip, the msb no-default-OCI regression test, and the dedicated live
+  `scripts/verify-backends --only msb --oci-only` path.
+- ADR-0020 is superseded for the adapter-owned mechanism; ADR-0030 and ADR-0031
+  describe the kit/catalog path.
+
+---
+
+## 35. Git signing fails on msb: socat missing or msb < 0.6.9
 
 ### Symptoms
 
@@ -1862,7 +1906,7 @@ See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
 
 ---
 
-## 35. Re-attach Heal Loop Warns Every Time on sbx 0.38 — `sbx kit add` Refuses Startup-Bearing Kits
+## 36. Re-attach Heal Loop Warns Every Time on sbx 0.38 — `sbx kit add` Refuses Startup-Bearing Kits
 
 ### Symptoms
 
@@ -1952,7 +1996,7 @@ heal-loop cases).
 
 ---
 
-## 36. msb Create-Time Published Port Returns Empty Response for a Loopback-Only Guest Service
+## 37. msb Create-Time Published Port Returns Empty Response for a Loopback-Only Guest Service
 
 ### Symptoms
 
@@ -2024,7 +2068,7 @@ from inside the sandbox and can reach guest `127.0.0.1:6767`.
 
 ---
 
-## 37. Commit signing fails in the sandbox: `user.signingKey needs to be set` / `No signature`
+## 38. Commit signing fails in the sandbox: `user.signingKey needs to be set` / `No signature`
 
 ### Symptoms
 
@@ -2081,7 +2125,7 @@ Notes:
   reachable, so a rebase with `SSH_AUTH_SOCK` set does not need a separate
   `--amend -S` pass.
 
-## 38. Spurious `M` (modified) diffs on scripts across the host/sandbox mount
+## 39. Spurious `M` (modified) diffs on scripts across the host/sandbox mount
 
 ### Symptoms
 
@@ -2131,7 +2175,7 @@ amending the wrong branch.
 
 ---
 
-## 39. Windows preview: `bash.exe` resolves to the WSL shim, WHP is not a feature flag, and the execution policy blocks scripts
+## 40. Windows preview: `bash.exe` resolves to the WSL shim, WHP is not a feature flag, and the execution policy blocks scripts
 
 ### Symptoms
 
@@ -2204,7 +2248,7 @@ amending the wrong branch.
 
 ---
 
-## 40. Recovering agent work reads the guest-writable scratch clone (residual risk)
+## 41. Recovering agent work reads the guest-writable scratch clone (residual risk)
 
 ### Symptoms
 
@@ -2247,7 +2291,7 @@ an untrusted agent could write to.
 
 ---
 
-## 41. A Required Check Backed by a `paths:`-Filtered Workflow Deadlocks Unrelated PRs
+## 42. A Required Check Backed by a `paths:`-Filtered Workflow Deadlocks Unrelated PRs
 
 ### Symptoms
 
@@ -2315,7 +2359,7 @@ adding them to branch protection.
 
 ---
 
-## 42. A Second Parallel Sandbox From the Same Kit Is Unreachable on Its Published Port (msb)
+## 43. A Second Parallel Sandbox From the Same Kit Is Unreachable on Its Published Port (msb)
 
 ### Symptoms
 

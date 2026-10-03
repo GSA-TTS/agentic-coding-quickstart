@@ -3,7 +3,7 @@ title: "msb How-To Guide"
 description: "Detailed how-to for the msb (microsandbox) backend behind acq"
 status: canonical
 tier: 2
-last_updated: "2026-08-24"
+last_updated: "2026-10-03"
 audience: "developers"
 keywords: ["msb", "microsandbox", "backend", "acq", "howto", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/acq.md", "docs/howto/sbx.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0024-neutral-user-facing-docs-vs-backend-specific.md"]
@@ -230,7 +230,7 @@ abstract — use the raw `msb` command:
 
 msb exposes a large set of `ACQ_MSB_*` (and neutral `ACQ_*`) tunables — base
 image and pull policy, network egress tier, memory/CPU, DNS, host ssh-agent
-forwarding, post-hoc port publishing, and OCI-engine provisioning. Rather than
+forwarding, post-hoc port publishing, and opt-in OCI-engine support. Rather than
 duplicate them here, the authoritative reference is the
 [Backend Guide → msb Backend](../BACKEND_GUIDE.md#msb-backend-microsandbox-default),
 including:

@@ -3,7 +3,7 @@ title: "acq Concepts"
 description: "Backend-neutral concepts for working with acq sandboxes (workspaces, mounts, published ports)"
 status: canonical
 tier: 2
-last_updated: "2026-09-30"
+last_updated: "2026-10-03"
 audience: "developers"
 keywords: ["acq", "concepts", "workspace", "mount", "ports", "publish", "backend-neutral", "sbx", "msb"]
 related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0034-host-port-selection-and-publish-override.md"]
@@ -265,6 +265,7 @@ flags on every run.
   [x] git-ssh-sign             SSH-based git commit signing … (always applied)
 ❯ [x] openchamber              Browser UI for OpenCode alongside the terminal TUI
   [ ] paseo                    Self-hosted Paseo browser web UI for coding agents
+  [ ] oci-engine               Rootless podman for docker run / docker compose
 ```
 
 - The **four built-in kits** (`zscaler-ca-certificate`, `usai-provider`,
@@ -276,6 +277,9 @@ flags on every run.
 - At `acq create`, the picker is shown again **pre-populated with your saved
   defaults**, so a single sandbox can enable or disable a kit without changing
   the global default (the deviation is remembered for that sandbox).
+- Select **`oci-engine`** when the sandbox needs `docker run` or
+  `docker compose`. It installs rootless podman inside the sandbox and is not
+  enabled by default.
 - The **GitHub-token** preference only pre-answers the scoping prompt; the
   fine-grained token is still minted per-sandbox (see
   [`acq github-scope`](howto/acq.md)).
