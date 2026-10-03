@@ -131,6 +131,7 @@ case "${1:-}" in
         exit 1 ;;
     esac
     case "$snippet" in
+      *"startup-complete"*) printf 'ready\n' ;;
       *"echo ok"*) printf 'ok\n' ;;
       *'%{http_code}'*)
         # check_key runs `curl … -w '%{http_code}'; printf '|%s' "$?"`, so the
@@ -195,7 +196,7 @@ _line="msb"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
 _msb_sub="${1:-}"
 case "$_msb_sub" in
-  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.6.9}" ;;
+  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.6.9}"; exit "${STUB_MSB_VERSION_RC:-0}" ;;
   --help|-h) printf 'MSB-TOPLEVEL-HELP for msb\n' ;;
   doctor)
     # Model host-readiness. Default: ready (exit 0), so the happy path is silent.
@@ -501,22 +502,45 @@ MSBSTUB
 
   # Stub `ssh` and `ssh-keygen` for the ADR-0015 post-hoc port path. Both log
   # every call to $CALLS. `ssh -N -L …` would normally block foregrounded; the
-  # stub logs, then stays alive briefly so acq's post-background liveness probe
-  # (kill -0 after ACQ_MSB_*_SETTLE) sees a HEALTHY forward — modelling a
-  # successful publish. A test that wants to model an immediately-dying forward
-  # sets STUB_SSH_DIE=1 (exit at once, before the settle window). `ssh-keygen -f`
-  # writes throwaway key + .pub files so the key-ensure/authorize path proceeds.
+  # stub logs, opens a local listener for the requested -L host port, then stays
+  # alive briefly so acq's liveness + listener probes see a HEALTHY forward. A
+  # test that wants to model an immediately-dying forward sets STUB_SSH_DIE=1.
+  # `ssh-keygen -f` writes throwaway key + .pub files so key setup proceeds.
   cat >"$STUBDIR/ssh" <<'SSHSTUB'
 #!/usr/bin/env bash
 _line="ssh"; for a in "$@"; do _line="$_line $a"; done
 printf '%s\n' "$_line" >>"$CALLS"
 [ "${STUB_SSH_DIE:-0}" = "1" ] && exit 1
-# Stay alive just past acq's liveness settle window so kill -0 sees the forward
-# established, then exit. Detach stdout/stderr FIRST so this backgrounded child
-# never holds the harness's capture pipe open (a lingering fd blocks the parent's
-# output read → CI hangs).
+_lspec=""; _prev=""
+for a in "$@"; do [ "$_prev" = "-L" ] && { _lspec="$a"; break; }; _prev="$a"; done
+_pid=""
+if [ -n "$_lspec" ] && [ "${STUB_SSH_NO_LISTENER:-0}" != "1" ]; then
+  _hport="${_lspec#127.0.0.1:}"
+  _hport="${_hport%%:*}"
+  python3 - "$_hport" <<'PY' >/dev/null 2>&1 &
+import socket
+import sys
+import time
+port = int(sys.argv[1])
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", port))
+s.listen(5)
+end = time.time() + 5
+while time.time() < end:
+    s.settimeout(0.2)
+    try:
+        conn, _ = s.accept()
+        conn.close()
+    except socket.timeout:
+        pass
+s.close()
+PY
+  _pid="$!"
+fi
 exec >/dev/null 2>&1
 sleep "${STUB_SSH_ALIVE:-0.6}"
+[ -n "$_pid" ] && kill "$_pid" 2>/dev/null || true
 exit 0
 SSHSTUB
   chmod +x "$STUBDIR/ssh"
@@ -556,6 +580,12 @@ KEYGENSTUB
   # the stubbed serve/ssh children stay alive ~3s (STUB_*_ALIVE), comfortably
   # past this settle window, so a healthy publish is observed without slow tests.
   export ACQ_MSB_SERVE_SETTLE="0.3" ACQ_MSB_FORWARD_SETTLE="0.3"
+  # Make the create-time host-port contention probe (ADR-0034) deterministic and
+  # socket-free: every port reports FREE unless a test names it in
+  # ACQ_MSB_HOST_PORTS_BUSY. Without this the verdict would depend on what the
+  # developer's machine happens to be listening on, so a chosen ephemeral port
+  # could be reported busy and turn a green suite red on one host only.
+  export ACQ_MSB_HOST_PROBE_STUB=1
   # Export ACQ_SCRIPT_DIR so acq can locate its backends.
   export ACQ_SCRIPT_DIR="$REPO_ROOT"
   # Force the acq secret store to a throwaway file backend (never touch the real
