@@ -15,6 +15,7 @@
     "lint:md": ".github/linters/node_modules/.bin/markdownlint --config .markdownlint.jsonc --ignore-path .markdownlintignore --dot \"**/*.md\"",
     "lint:secrets": "pre-commit run gitleaks --all-files",
     "lint": "npm run lint:md",
+    "fix:exec-bits": "bash scripts/fix-exec-bits",
     "check": "pre-commit run --all-files"
   },
   "repository": {
