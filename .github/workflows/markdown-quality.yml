@@ -51,16 +51,24 @@ jobs:
       # three can select a different set. The version comes from
       # .github/linters/package-lock.json (installed above), so there is no second
       # version pin to drift.
-      - name: Run markdownlint
-        run: npx --prefix .github/linters markdownlint-cli2
-
       # A markdownlint-cli2 run that matched no files still exits 0, so assert the
-      # file count is non-zero rather than trusting the exit status alone.
-      - name: Assert markdownlint actually linted files
+      # file count is non-zero from the same output instead of running the linter
+      # a second time.
+      - name: Run markdownlint
+        shell: bash
         run: |
-          count=$(npx --prefix .github/linters markdownlint-cli2 2>&1 \
-            | sed -n 's/^Linting: \([0-9]\{1,\}\) file.*/\1/p')
+          set -euo pipefail
+          output="$(mktemp)"
+          set +e
+          npx --prefix .github/linters markdownlint-cli2 2>&1 | tee "$output"
+          lint_rc=${PIPESTATUS[0]}
+          set -e
+
+          count=$(sed -n 's/^Linting: \([0-9]\{1,\}\) file.*/\1/p' "$output")
           echo "markdownlint linted ${count:-0} file(s)"
+          if [ "$lint_rc" -ne 0 ]; then
+            exit "$lint_rc"
+          fi
           if [ "${count:-0}" -lt 1 ]; then
             echo "::error::markdownlint matched no files - check globs in .markdownlint-cli2.yaml" >&2
             exit 1

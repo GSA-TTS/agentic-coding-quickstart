@@ -21,8 +21,9 @@
 # across-files already saturates the cores, so per-@test worker orchestration is
 # pure overhead. See ADR-0025 ("Within-file parallelism") for the measurements.
 # When no parallelizer is present (e.g. the bash 3.2 gate, a bare dev box) we
-# fall back to serial — identical behavior, just slower. Override the job count
-# with ACQ_BATS_JOBS; set ACQ_BATS_JOBS=1 to force serial.
+# fall back to xargs -P file-level parallelism — identical behavior, with less
+# polished TAP than bats' native --jobs but far faster than serial. Override the
+# job count with ACQ_BATS_JOBS; set ACQ_BATS_JOBS=1 to force serial.
 #
 # Usage:
 #   ./scripts/test-acq-bats                   # all .bats (parallel if available)
@@ -55,4 +56,32 @@ _jobs="${ACQ_BATS_JOBS:-$( (command -v nproc >/dev/null 2>&1 && nproc) || echo 1
 if [ "$_jobs" -gt 1 ] 2>/dev/null && { command -v parallel >/dev/null 2>&1 || command -v rush >/dev/null 2>&1; }; then
   exec "$BATS" --jobs "$_jobs" --no-parallelize-within-files "${REPO_ROOT}/test/bats"
 fi
+
+if [ "$_jobs" -gt 1 ] 2>/dev/null && command -v xargs >/dev/null 2>&1 && printf 'x\0' | xargs -0 -n1 -P 1 true 2>/dev/null; then
+  _tmp="$(mktemp -d "${TMPDIR:-/tmp}/acq-bats.XXXXXX")"
+  trap 'rm -rf "$_tmp"' EXIT HUP INT TERM
+  printf '%s\0' "${REPO_ROOT}"/test/bats/*.bats |
+    xargs -0 -n1 -P "$_jobs" sh -c '
+      _bats=$1 _outdir=$2 _file=$3
+      _name=$(basename "$_file")
+      _out="${_outdir}/${_name}.out"
+      if "$_bats" "$_file" >"$_out" 2>&1; then
+        printf "0\n" >"${_out}.status"
+      else
+        printf "%s\n" "$?" >"${_out}.status"
+      fi
+    ' sh "$BATS" "$_tmp"
+
+  _rc=0
+  for _file in "${REPO_ROOT}"/test/bats/*.bats; do
+    _out="${_tmp}/$(basename "$_file").out"
+    [ -f "$_out" ] && cat "$_out"
+    _status="${_out}.status"
+    if [ ! -f "$_status" ] || [ "$(cat "$_status")" != "0" ]; then
+      _rc=1
+    fi
+  done
+  exit "$_rc"
+fi
+
 exec "$BATS" "${REPO_ROOT}/test/bats"
