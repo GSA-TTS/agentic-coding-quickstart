@@ -691,7 +691,7 @@ You can also apply it for one sandbox by passing the pinned kit ref through
 `--kit`, or by exporting that same ref in `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=2dd2ad6ad5f63b842d732424bed5ba9aebeed676&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=f2227413df78dc5ef6580b5e29c59542dfe1f66a&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 The kit provisions **rootless podman** and aliases `docker` to `podman`, so
