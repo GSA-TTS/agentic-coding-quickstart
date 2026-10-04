@@ -475,3 +475,130 @@ SPEC
   assert_regex "$body" 'echo NAMED_USER_MARKER'
   refute_regex "$body" 'runuser -u agent'
 }
+
+@test "0017 + ADR-0033: the staged startup body carries the MERGED kit env, guards per kit" {
+  # The staged --script-path body must scope env the same way the exec path does:
+  # merged across the whole kit set, but the git-guard decision kept per kit. This
+  # path is INERT today (a bare --script-path registration is staged on the guest
+  # PATH, not auto-run at boot — see ADR-0017), so fixing it does not fix the
+  # reported daemon symptom; it keeps the two paths from drifting, so the ADR-0017
+  # re-verification trap (a future msb that DOES auto-run the script) cannot turn
+  # into a live instance of the same bug.
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/mergestage-secrets"
+    export ACQ_MSB_KEEP_STARTUP_STAGE=1 ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/mergestage-stage"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    # The kit with the startup command is fetched FIRST (it stakes the single
+    # script name), and the kit declaring the env comes LATER — the order that
+    # fails without a pre-pass over the full kit set.
+    sk="'"$STUBDIR"'/stagestartupkit"; mkdir -p "$sk"
+    cat >"$sk/spec.yaml" <<'"'"'SPEC'"'"'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: stage-startup-kit
+displayName: Stage Startup Kit
+description: owns the staged startup command and opts out of the git guards
+environment:
+  GIT_TERMINAL_PROMPT: "1"
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - echo STAGED_MERGED_MARKER
+SPEC
+    ck="'"$STUBDIR"'/stageconfigkit"; mkdir -p "$ck"
+    cat >"$ck/spec.yaml" <<'"'"'SPEC'"'"'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: stage-config-kit
+displayName: Stage Config Kit
+description: declares agent-runtime config a later-merged body must carry
+environment:
+  OPENCODE_CONFIG: /home/agent/.config/opencode/team.jsonc
+SPEC
+    nk="'"$STUBDIR"'/stagenokit"; mkdir -p "$nk"
+    printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "$nk/spec.yaml"
+    ZSCALER_KIT=k1; USAI_KIT=k2; PLAYBOOK_KIT=k3; GITSSHSIGN_KIT=k4
+    _acq_msb_fetch_kit() {
+      case "$1" in k1) printf "%s\n" "$sk" ;; k2) printf "%s\n" "$ck" ;; *) printf "%s\n" "$nk" ;; esac
+    }
+    acq_backend_provision stagemergebox shell /tmp >/dev/null 2>&1
+  '
+  local body; body=$(_staged_body mergestage-stage)
+  assert_regex "$body" 'echo STAGED_MERGED_MARKER'
+  # The other kit's var reaches this kit's staged command.
+  assert_regex "$body" "'OPENCODE_CONFIG=/home/agent/.config/opencode/team.jsonc'"
+  # This kit opted out of the guards, so its own value stands and acq's does not
+  # appear alongside it.
+  assert_regex "$body" "'GIT_TERMINAL_PROMPT=1'"
+  refute_regex "$body" 'GIT_TERMINAL_PROMPT=0'
+  # Still a valid, busybox-safe /bin/sh body.
+  refute_regex "$body" 'env --'
+  local f; f=$(find "$STUBDIR/mergestage-stage" -type f 2>/dev/null | head -n1)
+  run sh -n "$f"
+  assert_success
+}
+
+@test "0017 + ADR-0033: a staged body keeps its OWN kit's guard value, not a later kit's" {
+  # Value-collision on the staged path: the kit that stakes the script declares
+  # GIT_TERMINAL_PROMPT=0 (the safe value); a later-merged kit declares =1. The
+  # body must carry the staking kit's own value. Same defect class as the exec
+  # path — the merge collapses a duplicate name to the LAST kit's value, so guard
+  # ownership has to be tracked by value, not by name.
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/gvstage-secrets"
+    export ACQ_MSB_KEEP_STARTUP_STAGE=1 ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/gvstage-stage"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    sk="'"$STUBDIR"'/gvstagekit"; mkdir -p "$sk"
+    cat >"$sk/spec.yaml" <<'"'"'SPEC'"'"'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: gv-stage-kit
+displayName: GV Stage Kit
+description: stakes the staged script and declares the safe guard value
+environment:
+  GIT_TERMINAL_PROMPT: "0"
+commands:
+  - phase: startup
+    user: "0"
+    command:
+      - sh
+      - -c
+      - echo GV_STAGED_MARKER
+SPEC
+    bk="'"$STUBDIR"'/gvoptoutkit"; mkdir -p "$bk"
+    cat >"$bk/spec.yaml" <<'"'"'SPEC'"'"'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: gv-optout-kit
+displayName: GV OptOut Kit
+description: a later kit opting ITSELF out, plus a shared non-guard var
+environment:
+  GIT_TERMINAL_PROMPT: "1"
+  TEAM_VAR: shared
+SPEC
+    nk="'"$STUBDIR"'/gvnokit"; mkdir -p "$nk"
+    printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "$nk/spec.yaml"
+    ZSCALER_KIT=k1; USAI_KIT=k2; PLAYBOOK_KIT=k3; GITSSHSIGN_KIT=k4
+    _acq_msb_fetch_kit() {
+      case "$1" in k1) printf "%s\n" "$sk" ;; k2) printf "%s\n" "$bk" ;; *) printf "%s\n" "$nk" ;; esac
+    }
+    acq_backend_provision gvstagebox shell /tmp >/dev/null 2>&1
+  '
+  local body; body=$(_staged_body gvstage-stage)
+  assert_regex "$body" 'echo GV_STAGED_MARKER'
+  assert_regex "$body" "'GIT_TERMINAL_PROMPT=0'"
+  refute_regex "$body" 'GIT_TERMINAL_PROMPT=1'
+  # The other kit's NON-guard var still reaches the body (merge still applies).
+  assert_regex "$body" "'TEAM_VAR=shared'"
+  local f; f=$(find "$STUBDIR/gvstage-stage" -type f 2>/dev/null | head -n1)
+  run sh -n "$f"
+  assert_success
+}
