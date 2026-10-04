@@ -47,13 +47,13 @@ repos:
     hooks:
       - id: markdownlint
         name: markdownlint (npm-pinned, check only)
-        entry: .github/linters/node_modules/.bin/markdownlint --config .markdownlint.jsonc --ignore-path .markdownlintignore --dot "**/*.md"
+        entry: bash -c 'npm ci --prefix .github/linters --prefer-offline --no-audit --no-fund >/dev/null && npm --prefix .github/linters exec -- markdownlint --config .markdownlint.jsonc --ignore-path .markdownlintignore --dot "**/*.md"' --
         language: system
         types: [markdown]
         pass_filenames: false
       - id: markdownlint-fix
         name: markdownlint (npm-pinned, --fix)
-        entry: .github/linters/node_modules/.bin/markdownlint --config .markdownlint.jsonc --ignore-path .markdownlintignore --dot --fix "**/*.md"
+        entry: bash -c 'npm ci --prefix .github/linters --prefer-offline --no-audit --no-fund >/dev/null && npm --prefix .github/linters exec -- markdownlint --config .markdownlint.jsonc --ignore-path .markdownlintignore --dot --fix "**/*.md"' --
         language: system
         types: [markdown]
         pass_filenames: false

@@ -2532,6 +2532,182 @@ accepts `0.7.3` or newer. Remove stale copies or adjust `PATH` so the intended
 
 ---
 
+## 44. `verify-backends` Stalls Right After "provision complete" (No `DONE` Trace Line)
+
+**Status:** Fixed — `scripts/verify-backends` captures to a file instead of a pipe.
+
+### Symptoms
+
+A live `./scripts/verify-backends --only msb -x` run streams normal progress,
+reaches the end of provisioning, and then never returns:
+
+```text
+acq[debug]: msb provision: all kits applied; provision complete (shell-ws-xxxxxx)
+acq[debug]: msb: ssh-agent bridge started at /home/agent/.acq/ssh-agent.sock ...
+acq[debug]: provenance: recorded msb/shell-ws-xxxxxx applied_ref=...
+acq[debug]: cli-kits: recorded msb/shell-ws-xxxxxx (kit= )
+```
+
+There is no `[trace ...] DONE create: rc=0` line, no further check output, and no
+error. The sandbox itself is healthy — `msb list` shows it running, and
+`acq exec <name> -- true` succeeds from another terminal.
+
+### Root Cause
+
+The verifier captured each step with command substitution:
+
+```sh
+LAST_OUT=$("$ACQ" "$@" 2>&1 | tee /dev/stderr)
+```
+
+Command substitution reads the capture pipe until **EOF**, which arrives only
+when *every* writer closes it — not when `acq` exits. Two things in `acq` hold a
+descriptor on that pipe past exit:
+
+- `acq.backends/secret-store.sh` dups the process's stderr to fd 9 (the warning
+  channel used so migration warnings survive `2>/dev/null` read paths). fd 9 is
+  inherited by children.
+- the msb adapter launches **daemonized** guest-side helpers, notably the
+  ssh-agent `socat` bridge started at the end of provisioning.
+
+So `acq` finished successfully, while the verifier blocked on a pipe that a
+long-lived descendant kept open. The stall therefore appeared at the *last*
+thing provisioning logs, making a completed create look like a hung one.
+
+Because the hang is in the harness, not the backend, it masqueraded as a backend
+failure and cost several live runs. Writing to a **file** removes the EOF
+dependency entirely: the wait ends when `acq` exits.
+
+### Fix
+
+`run_acq` redirects `acq` to a temp file in the hermetic `VERIFY_STATE` dir and
+reads the file after `acq` returns. Verbose mode gets its live view from a
+`tail -f` on that file rather than from `tee` in the capture pipeline. `acq` stays
+in the **foreground**, so pipelines that feed it a secret on stdin
+(`printf key | run_acq ... secret set -g usai`) are unchanged.
+
+### Prevention
+
+`test/bats/145-verify-capture.bats` extracts the real `run_acq` out of
+`scripts/verify-backends` and drives it against a stand-in that daemonizes a
+child and exits 0 — the exact shape that deadlocks a pipe capture. Each case runs
+under `timeout`, so reintroducing a pipe-EOF dependency fails as a test timeout
+instead of hanging a human's live verification. The guard was confirmed to fail
+against the old `$( ... | tee /dev/stderr )` implementation before being kept
+against the new one.
+
+### Also Fixed in the Same Pass
+
+- **`markdownlint` never linted `.github/**/*.md`.** markdownlint's globber skips
+  dot-directories unless `--dot` is passed, so `.github/pull_request_template.md`
+  was silently excluded from CI, `npm run lint:md`, and the pre-commit hook. All
+  three now pass `--dot`.
+- **The "did it lint anything?" assertion counted a different set than the
+  linter.** It hand-translated `.markdownlintignore` into `git ls-files :!`
+  pathspecs, but those matchers differ: a bare `test/vendor` pathspec excludes
+  only that exact path, not the tree under it, so the count ran high. The
+  assertion now evaluates the ignore file with git's own gitignore engine
+  (`git ls-files -c -i --exclude-from=.markdownlintignore`), which agrees with
+  markdownlint's semantics.
+
+### Second Instance of the Same Bug Class
+
+The grammar-acceptance preflight (`verify_sbx_grammar_acceptance`) had its own
+`out=$(bats ... | tee /dev/stderr)` capture — the identical idiom, in a second
+place a `run_acq`-only fix would not have reached. Both now go through one shared
+`_run_captured` helper, and a test asserts the idiom appears nowhere in the
+script, so a third instance cannot be added quietly.
+
+### The Lost-Executable-Bit Class (and the systemic fix)
+
+**Status:** Fixed systemically — `scripts/fix-exec-bits`, a pre-commit hook, and
+self-healing in `scripts/verify-backends`.
+
+Three separate symptoms in this one investigation were the same root cause:
+
+```text
+zsh: permission denied: ./scripts/verify-backends
+```
+
+```text
+./scripts/verify-backends: line 259: .../acq: Permission denied     # rc=126
+```
+
+```text
+  FAIL  sbx: real sbx rejected acq's translated kit grammar
+        | env: .../libexec/bats-core/bats: Permission denied
+```
+
+That last one is the dangerous presentation: a **file-permission artifact
+reported as kit-grammar incompatibility**.
+
+#### Why it keeps happening
+
+A clone on a container/host shared mount (virtiofs, Docker Desktop file sharing,
+WSL drvfs) cannot round-trip POSIX permissions, so the clone sets
+`core.fileMode = false` to suppress a storm of spurious mode churn. That is
+correct, and it opens a blind spot:
+
+1. git applies the index mode on **checkout**, so a fresh clone is right;
+2. nearly every editor, formatter, and coding agent saves by writing a temp file
+   and renaming it — a **new inode** with the ambient umask (0644), so the exec
+   bit is dropped;
+3. with `core.fileMode = false` git is **blind** to it. Measured: a 100755 →
+   0644 drift with byte-identical content yields an empty `git status` *and* an
+   empty `git diff --summary`. With `core.fileMode = true` the same drift reports
+   `mode change 100755 => 100644`.
+
+So the regression is invisible to every normal check and only surfaces as a
+confusing runtime failure, often far from the real cause.
+
+#### Why `bash <script>` is not the fix
+
+An earlier attempt invoked the vendored bats as `bash bin/bats` on the theory
+that a bash script does not need its exec bit. It does not survive: `bin/bats`
+ends in `exec env ... "$BATS_ROOT/libexec/bats-core/bats"`, which in turn execs
+`bats-exec-suite` and a formatter. Repairing bits one at a time showed the chain
+needs **at least** `bin/bats`, `libexec/bats-core/bats`, `bats-exec-suite`, and
+the formatters — the submodule records 32 executables. Working around the exec
+bit only moves the error deeper.
+
+#### The fix
+
+`scripts/fix-exec-bits` treats the **git index as the single source of truth**: a
+file recorded `100755` must be executable on disk. A shebang is explicitly *not*
+the criterion — `acq.backends/*.sh` are *sourced* and `test/bats/*.bats` are read
+*by bats*, so both are correctly `100644` and must stay non-executable. It walks
+initialized submodules too, and reports (never silently clears) an unexpected
+exec bit on a file the index says is `100644`.
+
+Three places use it:
+
+- `scripts/fix-exec-bits` / `npm run fix:exec-bits` — manual repair;
+- a **pre-commit hook** runs `--check`, which turns an invisible drift into a
+  visible failure at commit time;
+- `scripts/verify-backends` **self-heals at startup**, so a live verification run
+  is never spent diagnosing a permission artifact.
+
+The sbx grammar preflight now also distinguishes "bats absent" (remedy:
+`git submodule update --init`) from "bats present but not executable" (remedy:
+`scripts/fix-exec-bits`), and `scripts/test-acq-bats` does the same — instead of
+the old misleading "vendored bats not found". Both still fail closed, because
+this guard must never report "accepted" when it did not measure (ADR-0025).
+
+### Related Symptom (same run, different cause)
+
+Two other things in the same code path can also look like a hang:
+
+- **`gh auth token` blocking on a host credential helper.** The optional GitHub
+  seed ran before the first traced step, so a keychain prompt froze the run with
+  no trace output at all. `_gh_token` now reads only an exported `GH_TOKEN` /
+  `GITHUB_TOKEN` unless `ACQ_VERIFY_USE_GH_AUTH=1` opts back into the keyring
+  fallback.
+- **Missing executable bit.** A fresh worktree checkout whose mode bits were lost
+  yields `Permission denied` and `rc=126` on every `acq` step; `chmod +x acq
+  scripts/verify-backends` restores it.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:
