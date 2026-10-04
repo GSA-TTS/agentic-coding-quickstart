@@ -209,6 +209,17 @@ export ACQ_PROVENANCE_DIR="$VERIFY_STATE/provenance"
 # (no `msb modify` against running VMs); the throwaway sandboxes this script
 # creates still bind the key at create time, which is all the checks need.
 export ACQ_SECRET_NO_LIVE_REFEED=1
+# The hermetic XDG_CONFIG_HOME above means acq never finds a config file here, so
+# EVERY verify run looks like a first run to `maybe_first_run_configure` — which
+# then blocks on an interactive confirm and hangs the verifier forever (the
+# observed symptom: a create step that never returns, with no output because
+# run_acq captures it). `create_time_kit_picker` is a second such gate. Neither
+# prompt has anything to ask a verifier: the configured defaults are exactly what
+# we want. ACQ_NO_PROMPT=1 forces the non-interactive path for both (and for
+# `acq configure`, which then reports "configuration unchanged" and makes no
+# writes). This only affects the three config widgets — secret VALUE reads are
+# gated on `[ -t 0 ]`, not on this, so seeding still works.
+export ACQ_NO_PROMPT=1
 mkdir -p "$XDG_CONFIG_HOME" "$ACQ_SECRET_STORE_DIR" "$ACQ_STATE_DIR" "$ACQ_PROVENANCE_DIR"
 
 # Fixture kit for the neutral `volumes:` vocabulary (ADR-0023): a tiny local kit
