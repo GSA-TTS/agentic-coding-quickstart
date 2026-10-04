@@ -70,7 +70,11 @@ SPEC
     _acq_msb_apply_kit_dir envbox "$nk"
   '
   assert_success
-  refute_regex "$(cat "$CALLS")" '/var/lib/acq/kit-env'
+  # Asserts the WRITE specifically (`>> /var/lib/acq/kit-env`), not any mention of
+  # the path: a kit with no environment[] of its own still READS the merged marker
+  # so its commands inherit the other kits' env (see ADR-0033) — that read is
+  # expected here, an append is not.
+  refute_regex "$(cat "$CALLS")" '>> /var/lib/acq/kit-env'
 }
 
 @test "msb kit env: acq exec replays persisted entries as -e flags; none when marker empty" {
