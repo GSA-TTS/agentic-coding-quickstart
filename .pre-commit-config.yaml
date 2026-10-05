@@ -34,26 +34,26 @@ repos:
   # .github/linters/package.json (+ package-lock.json, which also carries the
   # transitive overrides and is what `npm audit` gates in markdown-quality.yml).
   # This hook delegates to that install instead of pinning a second time via a
-  # remote rev, so the two can never drift. Configuration AND file selection both
-  # come from .markdownlint-cli2.yaml. Mirrors agentic-coding-patterns#451.
+  # remote rev, so the two can never drift. Configuration and file exclusions
+  # come from .markdownlint.jsonc and .markdownlintignore.
   #
   # Unlike patterns/playbook, this repo runs `pre-commit run --all-files` in CI
   # (.github/workflows/pre-commit.yml), so the DEFAULT hook must not rewrite
   # files: `--fix` would mutate the checkout and CI would fail on "files were
   # modified by this hook" instead of reporting the lint error. The default id is
   # therefore check-only, and the fixing form is opt-in via
-  # `pre-commit run markdownlint-cli2-fix --hook-stage manual`.
+  # `pre-commit run markdownlint-fix --hook-stage manual`.
   - repo: local
     hooks:
-      - id: markdownlint-cli2
-        name: markdownlint-cli2 (npm-pinned, check only)
-        entry: npx --prefix .github/linters markdownlint-cli2
+      - id: markdownlint
+        name: markdownlint (npm-pinned, check only)
+        entry: bash -c 'npm ci --prefix .github/linters --prefer-offline --no-audit --no-fund >/dev/null && npm --prefix .github/linters exec -- markdownlint --config .markdownlint.jsonc --ignore-path .markdownlintignore --dot "**/*.md"' --
         language: system
         types: [markdown]
         pass_filenames: false
-      - id: markdownlint-cli2-fix
-        name: markdownlint-cli2 (npm-pinned, --fix)
-        entry: npx --prefix .github/linters markdownlint-cli2 --fix
+      - id: markdownlint-fix
+        name: markdownlint (npm-pinned, --fix)
+        entry: bash -c 'npm ci --prefix .github/linters --prefer-offline --no-audit --no-fund >/dev/null && npm --prefix .github/linters exec -- markdownlint --config .markdownlint.jsonc --ignore-path .markdownlintignore --dot --fix "**/*.md"' --
         language: system
         types: [markdown]
         pass_filenames: false
