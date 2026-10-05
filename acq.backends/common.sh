@@ -36,8 +36,8 @@ PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # the bundle-version anchor recorded in a sandbox's host-side provenance record
 # (see ACQ_BUILTIN_BUNDLE below + the provenance helpers) so acq can tell a
 # stale sandbox from a current one.
-# Placeholder until the next agentic-coding-patterns release SHA exists.
-PATTERNS_KIT_REF="patterns-release-shaplaceholder"
+# agentic-coding-patterns v1.12.0 release SHA.
+PATTERNS_KIT_REF="56d1f5f49ef928f50e61aa64a93d618b3d21c415"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_PROVIDER_KIT_NAME="usai-provider"
