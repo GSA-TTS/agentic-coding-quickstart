@@ -600,24 +600,24 @@ FACTS
   assert_regex "$log" '--kit evil-agent-arg'
 }
 
-@test "agent-kits: run opencode reports inferred built-in kit" {
+@test "agent-kits: run opencode applies inferred built-in kit" {
   local proj="$STUBDIR/agentkit-opencode"; mkdir -p "$proj"
   _seed_usai
   run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
 
   assert_success
-  assert_output --partial 'built-in agent kit candidate (deferred; no agent kit applied): agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=deferred'
-  refute_regex "$(cat "$CALLS")" 'acq-kits/opencode'
+  assert_output --partial 'selected built-in agent kit: agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=enabled'
+  assert_regex "$(cat "$CALLS")" 'acq-opencode-kit'
 }
 
-@test "agent-kits: create opencode reports inferred built-in kit" {
+@test "agent-kits: create opencode applies inferred built-in kit" {
   local proj="$STUBDIR/agentkit-create"; mkdir -p "$proj"
   _seed_usai
   run env ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
 
   assert_success
-  assert_output --partial 'built-in agent kit candidate (deferred; no agent kit applied): agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=deferred'
-  refute_regex "$(cat "$CALLS")" 'acq-kits/opencode'
+  assert_output --partial 'selected built-in agent kit: agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=enabled'
+  assert_regex "$(cat "$CALLS")" 'acq-opencode-kit'
 }
 
 @test "agent-kits: explicit --kit suppresses implicit selection notice" {

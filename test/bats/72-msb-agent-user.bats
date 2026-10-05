@@ -4,9 +4,9 @@
 # (ADR-0025)
 #
 # msb provision: agent-user creation + uid-1000 kit commands as `agent`, the
-# Docker base-image contract (sudo + proxy env_keep), agent install + npm-failure
-# disambiguation (#321), attach launching the recorded agent with a PTY, exec as
-# the agent user, injection guards, and absence of adapter-owned OCI setup.
+# Docker base-image contract (sudo + proxy env_keep), agent-kit selection, attach
+# launching the recorded agent with a PTY, exec as the agent user, injection
+# guards, and absence of adapter-owned OCI setup.
 # Provisions run in isolated subshells; assertions read $CALLS.
 #
 # shellcheck shell=bats
@@ -87,52 +87,19 @@ SPEC
   assert_regex "$log" 'HTTPS_PROXY'
 }
 
-@test "msb: provision installs the requested agent via npm and allow-lists the registry" {
-  _provision instbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/inst-secrets"'
+@test "msb: provision applies the opencode agent kit without native npm fallback" {
+  _provision instbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/inst-secrets" ACQ_NETWORK_TIER=strict'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'npm install -g --no-fund --no-audit opencode-ai'
-  assert_regex "$log" '--net-rule allow@registry\.npmjs\.org'
+  refute_regex "$log" 'npm install'
+  refute_regex "$log" 'allow@registry\.npmjs\.org'
   assert_regex "$log" '/var/lib/acq/agent'
 }
 
-@test "msb: install is idempotent — skipped when the agent binary is already present" {
-  _provision inst2box opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/inst2-secrets" STUB_AGENT_PRESENT=1'
-  refute_regex "$(cat "$CALLS")" 'npm install'
-}
-
-@test "msb: a shell sandbox installs no agent and (strict tier) adds no npm net-rule" {
+@test "msb: a shell sandbox has no agent kit and adds no npm net-rule" {
   _provision shellbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/shell-secrets" ACQ_NETWORK_TIER=strict'
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'npm install'
   refute_regex "$log" 'allow@registry\.npmjs\.org'
-}
-
-@test "msb #321: an unreachable npm registry is reported as network, not missing npm" {
-  _provision npmunreachbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/npmunreach-secrets" STUB_NPM_FAIL=1 STUB_NPM_REGISTRY=unreachable'
-  assert_output --partial 'NOT REACHABLE'
-  assert_output --partial 'KNOWN_FAILURE_MODES.md §30'
-  refute_output --partial 'npm is not present'
-}
-
-@test "msb #321: an NXDOMAIN npm registry is reported as DNS, not missing npm" {
-  _provision npmunresbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/npmunres-secrets" STUB_NPM_FAIL=1 STUB_NPM_REGISTRY=unresolved'
-  assert_output --partial 'did not RESOLVE'
-  assert_output --partial 'ACQ_MSB_DNS_NAMESERVER'
-}
-
-@test "msb #321: a genuinely-missing npm is reported as such" {
-  _provision npmmissingbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/npmmissing-secrets" STUB_NPM_FAIL=1 STUB_NPM_MISSING=1'
-  assert_output --partial 'npm is not present'
-  refute_output --partial 'NOT REACHABLE'
-}
-
-@test "msb #321: a responded-but-errored registry gets neutral guidance, no DNS/TLS bleed" {
-  _provision npmrespbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/npmresp-secrets" STUB_NPM_FAIL=1 STUB_NPM_REGISTRY=responded'
-  assert_output --partial 'registry appears reachable'
-  refute_output --partial 'ACQ_MSB_DNS_NAMESERVER'
-  refute_output --partial 'did not RESOLVE'
-  refute_output --partial 'NOT REACHABLE'
-  refute_output --partial 'npm is not present'
 }
 
 # Attach helper: source msb + run acq_backend_attach in a subshell.
@@ -184,18 +151,6 @@ _attach() { # PRE_SNIPPET NAME
   assert_regex "$log" '-w /home/agent execbox'
   assert_regex "$log" 'execbox -- sh -c ls ~/.local/bin/opencode'
   refute_regex "$log" 'msb exec execbox --'
-}
-
-@test "msb: a hostile agent token is refused on install and never emitted as sh -c" {
-  : > "$CALLS"
-  run bash -c '
-    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/inj-secrets"
-    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
-    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    _acq_msb_install_agent injbox "x'"'"';touch /tmp/acq_pwn;'"'"'" 2>&1
-  '
-  assert_output --partial 'refusing agent name'
-  refute_regex "$(cat "$CALLS")" 'touch /tmp/acq_pwn'
 }
 
 @test "msb: attach with a tampered agent marker falls back to shell, never runs the injection" {

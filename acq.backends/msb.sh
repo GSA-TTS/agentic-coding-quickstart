@@ -456,28 +456,6 @@ ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-${ACQ_STATE_DIR:-${XDG_STA
 # Use it to confirm the failure and that the fix resolves it. Off by default.
 ACQ_MSB_NO_UPSTREAM_CA="${ACQ_MSB_NO_UPSTREAM_CA:-}"
 
-# Agent binary install.
-# ---------------------------------------------------------------------------
-# Unlike sbx (whose agent templates BAKE the agent binary into the image), msb
-# runs a plain OCI base, so the adapter must install the requested agent itself.
-# For `opencode`, install the npm package globally (node is a base-image
-# prerequisite the adapter already verifies). The registry host must be reachable
-# from the guest, so the adapter allow-lists it at create (kit net-rules are
-# default-deny). The install is idempotent (marker-gated + `command -v` guarded).
-#
-# Only agents with a known install recipe are auto-installed; `shell` is a no-op
-# (there is nothing to install), and an unknown agent is a clear, non-fatal warning
-# (the user can bake it into ACQ_MSB_IMAGE). Override the opencode package spec
-# (e.g. to pin a version like opencode-ai@1.2.3) with ACQ_MSB_OPENCODE_PKG.
-ACQ_MSB_OPENCODE_PKG="${ACQ_MSB_OPENCODE_PKG:-opencode-ai}"
-
-# Hosts the agent installer needs to reach, allow-listed at create so egress
-# (default-deny under kit net-rules) permits the npm download. registry.npmjs.org
-# serves metadata; the tarballs are on the same host for the public registry.
-# Override for an internal mirror via ACQ_MSB_NPM_HOSTS (space-separated).
-ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
-
-# ---------------------------------------------------------------------------
 # Balanced egress baseline (ADR-0018)
 # ---------------------------------------------------------------------------
 # msb defaults guest egress to NONE, so without a baseline an msb sandbox is far
@@ -3234,37 +3212,6 @@ EOF
     fi
   fi
 
-  # Allow-list the agent installer's registry host(s) so the (default-deny) guest
-  # egress permits the npm download. Only when we will actually install an agent
-  # (a known recipe exists); `shell` and unknown agents add no rule.
-  #
-  # De-dupe against the balanced set: when the baseline is ON, registry.npmjs.org
-  # is already allow-listed, so a second bare `allow@registry.npmjs.org` would be
-  # dead weight (both allow; no deny to shadow). We therefore skip any npm host
-  # that the balanced block ALREADY emitted a rule for, rather than skipping the
-  # whole block — an operator who overrides ACQ_MSB_NPM_HOSTS to an internal
-  # mirror NOT in the balanced set still gets its rule. Under the `strict` tier
-  # (or `open`) the balanced set is empty, so nothing is elided.
-  if _acq_msb_agent_has_install_recipe "$agent"; then
-    local _npm_host
-    for _npm_host in $ACQ_MSB_NPM_HOSTS; do
-      case "$_npm_host" in
-        ""|*[!A-Za-z0-9.*_-]*)
-          echo "acq(msb): warning: skipping non-hostname npm host: $_npm_host" >&2
-          continue
-          ;;
-      esac
-      # Already covered by a balanced rule? Skip the redundant bare allow.
-      case "$_balanced_hosts" in
-        *" ${_npm_host} "*)
-          acq_debug "msb: npm host ${_npm_host} already in balanced set; skipping redundant rule"
-          continue
-          ;;
-      esac
-      create_flags+=(--net-rule "allow@${_npm_host}")
-    done
-  fi
-
   # TLS interception is REQUIRED for secret substitution: msb only swaps a
   # placeholder for the real value on a connection it can see into (the security
   # docs: "a secret requires intercepted TLS"). Without --tls-intercept the USAi
@@ -3634,19 +3581,6 @@ EOF
   acq_spin_stop "Preparing the agent user"
   acq_debug "msb provision: agent user ready ($name)"
 
-  # Install the requested agent binary (sbx bakes it into the template image; on
-  # a plain msb base acq must install it). Idempotent + marker-gated; a no-op for
-  # `shell`, a clear warning for an agent with no known recipe.
-  acq_debug "msb provision: installing agent '$agent' ($name)"
-  if _acq_msb_agent_has_install_recipe "$agent"; then
-    acq_spin_start "Installing the '$agent' agent"
-    _acq_msb_install_agent "$name" "$agent"
-    acq_spin_stop "Installing the '$agent' agent"
-  else
-    _acq_msb_install_agent "$name" "$agent"
-  fi
-  acq_debug "msb provision: agent install step done ($name)"
-
   # Record which agent this sandbox runs, so acq_backend_attach (which only gets
   # the sandbox name) knows what to launch — the sbx equivalent is that
   # `sbx run --name` re-launches the agent baked in at create. Written as root to
@@ -3717,168 +3651,6 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# _acq_msb_agent_has_install_recipe AGENT — 0 if acq knows how to install AGENT
-# ---------------------------------------------------------------------------
-# `shell` needs no binary; today only `opencode` has a recipe. Others are baked
-# into ACQ_MSB_IMAGE by the user (warned at install time). Keep this in sync with
-# _acq_msb_install_agent's case.
-_acq_msb_agent_has_install_recipe() {
-  acq_agent_has_msb_install_recipe "$1"
-}
-
-# _acq_msb_safe_agent_token AGENT -> 0 if AGENT is a safe agent token to
-# interpolate into a shell command. Agent tokens are short lowercase names
-# (opencode, claude, shell, …); restrict to [a-z-] so a value can never break
-# out of the `sh -c "command -v '$agent'"` single-quoting (defense against a
-# `acq create "x';…'"` arg or a tampered /var/lib/acq/agent marker). Callers
-# that build an `sh -c` string with $agent MUST gate on this first.
-_acq_msb_safe_agent_token() {
-  acq_agent_safe_token "$1"
-}
-
-# ---------------------------------------------------------------------------
-# _acq_msb_report_npm_install_failure NAME — diagnose a failed in-guest npm
-# install, distinguishing a genuinely-missing npm from an UNREACHABLE registry.
-# ---------------------------------------------------------------------------
-# A network-cut install (corporate TLS interception → curl (56) unexpected eof /
-# HTTP 000, or a resolver that can't see the registry → NXDOMAIN) otherwise reads
-# identically to "node/npm isn't installed", which sends users down the wrong
-# path (reinstalling node on the HOST, which never touches the guest). Probe the
-# actual cause in-guest and print the message that matches it.
-#
-# Branches:
-#   - npm binary absent in-guest      → genuinely-missing message.
-#   - npm present + registry probe:
-#       unresolved (curl exit 6)       → registry name did not resolve; DNS.
-#       unreachable (curl exit / 000)  → TLS/network cut; point at KFM §30.
-#       responded / inconclusive       → registry rejected it or a real npm error.
-# Reuses the shared _classify_key_status fingerprint so the npm path and the
-# USAi path classify curl results identically.
-_acq_msb_report_npm_install_failure() {
-  local name="$1"
-  echo "acq(msb): warning: 'npm install -g $ACQ_MSB_OPENCODE_PKG' failed in '$name'." >&2
-  echo "acq(msb):   opencode will not be available on attach." >&2
-
-  # Is npm actually present in the guest? If not, that is the cause outright.
-  if ! _acq_msb_cli exec "$name" -u 0 -- sh -c 'command -v npm' >/dev/null 2>&1; then
-    echo "acq(msb):   Cause: npm is not present in the guest. Use a base image that" >&2
-    echo "acq(msb):   ships node/npm, or bake opencode into ACQ_MSB_IMAGE." >&2
-    return 0
-  fi
-
-  # npm exists — classify reachability of the registry from INSIDE the guest,
-  # using the same curl `<http_code>|<exit>` fingerprint as the USAi key probe.
-  # Probe the first configured registry host over HTTPS; any HTTP response (even
-  # a 404) proves the connection completed, i.e. NOT a network cut.
-  local _reg _first_host _raw _status
-  _first_host=""
-  for _reg in $ACQ_MSB_NPM_HOSTS; do _first_host="$_reg"; break; done
-  if [ -n "$_first_host" ] && command -v _classify_key_status >/dev/null 2>&1; then
-    _raw=$(_acq_msb_cli exec "$name" -u 0 -- sh -c \
-      "curl -sS -o /dev/null -w '%{http_code}' https://${_first_host}/; printf '|%s' \"\$?\"" \
-      2>/dev/null || true)
-    _status=$(_classify_key_status "$_raw")
-    case "$_status" in
-      unresolved)
-        echo "acq(msb):   Cause: the npm registry host (${_first_host}) did not RESOLVE from" >&2
-        echo "acq(msb):   the guest. This is DNS, not a missing npm. Point the guest at a" >&2
-        echo "acq(msb):   usable resolver via ACQ_MSB_DNS_NAMESERVER, or set ACQ_MSB_NPM_HOSTS" >&2
-        echo "acq(msb):   to a mirror the guest can resolve. See docs/KNOWN_FAILURE_MODES.md §30." >&2
-        return 0
-        ;;
-      unreachable)
-        echo "acq(msb):   Cause: the npm registry host (${_first_host}) is NOT REACHABLE from" >&2
-        echo "acq(msb):   the guest — the connection was cut (TLS 'unexpected eof' / HTTP 000)," >&2
-        echo "acq(msb):   NOT a missing npm. This is a network / TLS-interception problem." >&2
-        echo "acq(msb):   See docs/KNOWN_FAILURE_MODES.md §30 for diagnosis." >&2
-        return 0
-        ;;
-    esac
-  fi
-
-  # npm present and the registry either responded (an HTTP error) or the probe
-  # was inconclusive: give neutral guidance without implying node is missing.
-  echo "acq(msb):   npm is present and the registry appears reachable, so the install" >&2
-  echo "acq(msb):   itself failed (registry rejected the request, disk, or a package" >&2
-  echo "acq(msb):   error). Re-run with ACQ_DEBUG=1 to see npm's output, set" >&2
-  echo "acq(msb):   ACQ_MSB_NPM_HOSTS for an internal mirror, or bake opencode into" >&2
-  echo "acq(msb):   ACQ_MSB_IMAGE." >&2
-  return 0
-}
-
-# ---------------------------------------------------------------------------
-# _acq_msb_install_agent NAME AGENT — install the agent binary into the guest
-# ---------------------------------------------------------------------------
-# sbx's agent templates ship the binary; msb runs a plain base, so acq installs
-# it. For `opencode`, install the npm package globally as root (node is a
-# verified base prerequisite; the registry host was allow-listed at create).
-# Idempotent: skip if the binary is already present (a pre-baked ACQ_MSB_IMAGE),
-# and marker-gate so a re-apply doesn't reinstall. `shell` is a no-op; an unknown
-# agent is a non-fatal warning (the sandbox still comes up; the user can bake the
-# binary into ACQ_MSB_IMAGE).
-_acq_msb_install_agent() {
-  local name="$1" agent="$2"
-
-  case "$agent" in
-    shell|"") acq_debug "msb: agent '$agent' needs no binary install"; return 0 ;;
-  esac
-
-  # Charset-guard the agent token before it enters any `sh -c "… '$agent' …"`.
-  # `acq create <agent> <path>` does not go through is_known_agent, so a hostile
-  # token (e.g. "x';touch /tmp/pwn;'") could otherwise break the single-quoting
-  # and run as root. Refuse anything outside [a-z-].
-  if ! _acq_msb_safe_agent_token "$agent"; then
-    echo "acq(msb): refusing agent name with unexpected characters: '$agent'" >&2
-    return 0
-  fi
-
-  if ! _acq_msb_agent_has_install_recipe "$agent"; then
-    # Maybe the base image already provides it — don't warn if so.
-    if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
-      acq_debug "msb: agent '$agent' already present in base image"
-      return 0
-    fi
-    echo "acq(msb): warning: no install recipe for agent '$agent' and it is not in the" >&2
-    echo "acq(msb):   base image. Attach will fail to launch it. Bake '$agent' into" >&2
-    echo "acq(msb):   ACQ_MSB_IMAGE, or use an agent acq can install (e.g. opencode)." >&2
-    return 0
-  fi
-
-  # Already installed (pre-baked image or a prior apply)? Then done.
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
-    acq_debug "msb: agent '$agent' already installed in $name"
-    return 0
-  fi
-
-  local marker="/var/lib/acq/agent-installed-${agent}"
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  case "$agent" in
-    opencode)
-      acq_debug "msb: installing opencode ($ACQ_MSB_OPENCODE_PKG) via npm in $name"
-      # Install globally as root so the binary lands on the system PATH for every
-      # user (the agent runs as `agent`). The package spec is passed as a single
-      # argv element (never re-split by a shell); ACQ_MSB_OPENCODE_PKG is a
-      # controlled tunable. `npm` is present (node prerequisite). npm needs the
-      # registry host, allow-listed at create.
-      if ! _acq_msb_cli exec "$name" -u 0 -- npm install -g --no-fund --no-audit "$ACQ_MSB_OPENCODE_PKG" >/dev/null 2>&1; then
-        _acq_msb_report_npm_install_failure "$name"
-        return 0
-      fi
-      ;;
-  esac
-
-  # Verify the binary is now on PATH before recording the marker.
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
-    _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
-    acq_debug "msb: agent '$agent' installed and on PATH in $name"
-  else
-    echo "acq(msb): warning: installed '$agent' but it is not on PATH in '$name'." >&2
-  fi
-}
-
 # ---------------------------------------------------------------------------
 # _acq_msb_ensure_agent_user NAME — satisfy the sbx/Docker base-image contract
 # ---------------------------------------------------------------------------
@@ -4525,7 +4297,7 @@ acq_backend_recorded_agent() {
   if [ -z "$agent" ]; then
     agent=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '[:space:]')
   fi
-  if [ -n "$agent" ] && _acq_msb_safe_agent_token "$agent"; then
+  if [ -n "$agent" ] && acq_agent_safe_token "$agent"; then
     printf '%s\n' "$agent"
   fi
 }
@@ -4714,7 +4486,7 @@ _acq_msb_attach() {
   # plain shell on anything unexpected.
   local agent
   agent=$({ _acq_msb_cli exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '[:space:]')
-  if [ -z "$agent" ] || ! _acq_msb_safe_agent_token "$agent"; then
+  if [ -z "$agent" ] || ! acq_agent_safe_token "$agent"; then
     agent="shell"
   fi
 

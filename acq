@@ -1610,7 +1610,7 @@ case "$subcommand" in
         # to the backend CLI.
         shift
         if _acq_secret_needs_usai_facts "$@"; then
-          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT" >/dev/null 2>&1 || true
         fi
         # Parse scope the same way secret set/rm do: `-g`/`--global` -> global; a
         # leading bare token before the service -> sandbox; a lone token -> service.
