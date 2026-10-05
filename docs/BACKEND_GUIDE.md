@@ -3,10 +3,10 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-08-18"
+last_updated: "2026-09-30"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
-related_files: ["docs/howto/acq.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md"]
+related_files: ["docs/howto/acq.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md", "docs/adr/0034-host-port-selection-and-publish-override.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -146,17 +146,30 @@ automation story.
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `msb` CLI | >= 0.6.8 | `--net-rule`, `--trust-host-cas`, `--secret`, and the `--net-default-egress` split (0.6.8) used by acq's balanced-egress default. Host ssh-agent forwarding for git signing additionally needs msb >= 0.6.9 (`--vsock`; [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)) — it warns and skips on older msb without changing this 0.6.8 floor. |
+| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases migrate 0.6.x sandbox state one-way, into a form the 0.6.x line cannot read. Use 0.6.18, or 0.7.3 or newer ([ADR-0032](adr/0032-msb-version-policy-and-migration-recovery.md)). |
 | Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
 
 Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
 
 ### Installation
 
+Install through a channel that can express a **version**. Neither upstream
+channel can: `install.microsandbox.dev` takes no version argument and reads
+`releases/latest`, and upstream's tap formula tracks the newest release by
+construction. Since `acq` refuses msb 0.7.0-0.7.2, "whatever is newest" is not a
+safe default during this window.
+
 ```bash
-curl -fsSL https://install.microsandbox.dev | sh        # macOS / Linux
-brew install superradcompany/tap/microsandbox           # Homebrew
+brew install GSA-TTS/tap/microsandbox-acq    # version-pinned formula
+./scripts/verify-msb-pin --install           # verified pinned release bundle
 ```
+
+`./install.sh` does this for you, and also detects and repairs a blocked,
+too-old, unparseable, or PATH-shadowed `msb`. If an already-installed
+0.7.0-0.7.2 has migrated your sandbox state, the recovery is `msb self update`
+(forward to 0.7.3) — see §43 of
+[`KNOWN_FAILURE_MODES.md`](KNOWN_FAILURE_MODES.md) and
+[ADR-0032](adr/0032-msb-version-policy-and-migration-recovery.md).
 
 ### Configuration
 
@@ -311,10 +324,21 @@ kits' own `caps.network.allow` rules.
   client falls back to TLS-over-TCP automatically — the same behavior as sbx
   `balanced`. A one-time slow first connection while a client tries QUIC and falls
   back is expected, not a bug.
-- **Requires msb >= 0.6.8.** The egress-only deny-default uses the
-  `--net-default-egress` flag, which first appears in msb 0.6.8. `acq` enforces
-  this floor (`MIN_MSB_VERSION`) and fails closed with a clear version message on
-  an older binary, rather than passing an unknown flag to `msb create`.
+- **Requires msb >= 0.6.9.** The egress-only deny-default uses the
+  `--net-default-egress` flag, which first appears in msb 0.6.8, and acq's DNS
+  rule emitter relies on the 0.6.9 release-build parser fix. `acq` enforces this
+  floor (`MIN_MSB_VERSION`) and also blocks msb 0.7.0-0.7.2 before create.
+- **On msb 0.7.3+, hostname rules require TLS interception.** Upstream turned
+  `--net-strict` on by default in 0.7.3: a *hostname*-based allow rule is only
+  honored when msb can inspect the request authority, so non-intercepted HTTPS
+  fails closed when only a hostname rule permits it. IP, CIDR, group, and
+  default-allow rules are unaffected. acq's balanced and strict tiers are
+  hostname-based **and** acq enables `--tls-intercept` by default, so the default
+  configuration is correct on 0.7.3. The combination that breaks is
+  **`ACQ_MSB_NO_TLS_INTERCEPT=1` on msb 0.7.3+**: every allowed host then becomes
+  unreachable rather than merely losing secret substitution. If you must disable
+  interception there, pass `--net-strict=false` via msb config, or use
+  `ACQ_NETWORK_TIER=open` (testing only, never GFE).
 
 See [ADR-0018](adr/0018-msb-balanced-egress-baseline.md) for the full rationale,
 and [ADR-0019](adr/0019-msb-balanced-egress-is-egress-only.md) for why the
@@ -794,8 +818,8 @@ and exports it as `SSH_AUTH_SOCK` on attach, `acq exec`, and kit commands.
 
 - **Needs msb >= 0.6.9** (the release that adds `--vsock`) **and `socat` in the
   base image** (the default `docker/sandbox-templates:shell-docker` ships it). On
-  an older msb, or a guest without `socat`, acq **warns and skips** the forward
-  (fail-soft) — the 0.6.8 floor is unchanged.
+  a guest without `socat`, acq **warns and skips** the forward (fail-soft); the
+  runtime floor already excludes older msb versions.
 - **It widens the host↔microVM trust boundary:** guest code can exercise every
   key the host agent holds while the socket is reachable. It is **opt-in** via
   `SSH_AUTH_SOCK` — **unset it to disable** — and only agent *operations* (not key
@@ -891,6 +915,14 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   the guest interface address) for create-time `publishedPorts`, or use
   `acq --backend msb ports <sandbox> --publish HOST:GUEST`; the post-hoc path
   tunnels with `ssh -L` from inside the guest and can reach guest loopback.
+  **The host side of a create-time publish is chosen per sandbox, and can be
+  pinned at launch.** An entry that omits `host:` gets a **free** loopback host
+  port per sandbox, so several sandboxes from one kit are each reachable (they
+  previously all requested the guest port and only the first one worked). Pass
+  `acq run/create --publish HOST:GUEST` (repeatable, msb only, create-time only)
+  to choose the host side yourself; a host port already in use **fails the
+  create** rather than being substituted. See
+  [ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
 - **`acq` can auto-install only `opencode` on msb.** On the msb base image `acq`
@@ -983,7 +1015,11 @@ corrupted local msb state, not a network or certificate change. Wipe msb's data
 and reinstall, then confirm host readiness:
 
 ```bash
-curl -fsSL https://install.microsandbox.dev | sh   # reinstall (re-lays runtime state)
+# Reinstall msb (re-lays runtime state). Use a version-pinned channel: the
+# upstream one-liner always resolves to the newest release, which may be one acq
+# refuses (see Requirements above).
+brew install GSA-TTS/tap/microsandbox-acq           # Homebrew hosts
+./scripts/verify-msb-pin --install                  # verified pinned release bundle
 msb doctor                                          # verify virtualization + prerequisites
 msb doctor --fix                                    # apply supported setup fixes
 ```
@@ -1035,7 +1071,13 @@ The neutral vocabulary is: `caps.network.allow`, `files[]`, `commands[]`,
 `OPENCODE_TUI_CONFIG`, `GITLAB_HOST`). Names must be POSIX identifiers
 (`^[A-Za-z_][A-Za-z0-9_]*$`; an invalid name is dropped with a warning and
 reported by `acq kit validate`); values are plain strings. It maps to sbx-v2
-`environment.variables` (synthesized) and to `msb exec -e NAME=value` (per-exec).
+`environment.variables` (synthesized) and, on msb, to `msb exec -e NAME=value`.
+On both backends these variables are **guest-wide**, not per kit: msb threads the
+**merged** set from every applied kit onto every kit's lifecycle commands and
+replays the same set on `acq exec`/`acq shell`/attach, so a daemon started by one
+kit's `background: true` startup command still sees another kit's config
+(last-value-wins for a duplicate name — see
+[ADR-0033](adr/0033-msb-kit-env-is-guest-wide-for-lifecycle-commands.md)).
 **Secrets do NOT go here** — use the credential/secret path (`acq secret …`);
 the kit spec never carries a secret value.
 

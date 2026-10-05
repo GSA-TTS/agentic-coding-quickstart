@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-08-25"
+last_updated: "2026-09-30"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -1353,8 +1353,11 @@ not a defect in a clean msb.
 **Fix:** wipe msb's data/state and reinstall, then confirm host readiness:
 
 ```bash
-# Reinstall msb (removes and re-lays its runtime state)
-curl -fsSL https://install.microsandbox.dev | sh
+# Reinstall msb (removes and re-lays its runtime state).
+# Do NOT use `curl -fsSL https://install.microsandbox.dev | sh` here: it always
+# resolves to the newest release, which may be a version acq refuses (§43).
+brew install GSA-TTS/tap/microsandbox-acq   # Homebrew hosts
+./scripts/verify-msb-pin --install          # verified pinned release bundle
 
 # Verify host virtualization + runtime prerequisites; --fix applies supported setup
 msb doctor
@@ -1776,7 +1779,8 @@ running on the host (or no key is loaded), there is nothing to forward.
 
 ### Fix
 
-- **Upgrade msb** to >= 0.6.9 (`msb self update`).
+- **Use a supported msb**: 0.6.18, or 0.7.3 or newer. msb 0.7.0-0.7.2 are
+  refused — see §43.
 - **Ensure `socat` is in `ACQ_MSB_IMAGE`** — the default
   `docker/sandbox-templates:shell-docker` ships it; a custom override must too.
 - **Ensure the host has an agent with a key loaded** before running `acq`:
@@ -2316,6 +2320,52 @@ adding them to branch protection.
 
 ---
 
+## 42. A Second Parallel Sandbox From the Same Kit Is Unreachable on Its Published Port (msb)
+
+### Symptoms
+
+- Two sandboxes created from the same kit both start cleanly, with no error.
+- `acq ports` reports the **same** host port for both, e.g.
+  `sandbox 6767 -> host 127.0.0.1:6767` in each.
+- `http://127.0.0.1:6767` serves the **first** sandbox's service. The second
+  sandbox's UI/API is simply unreachable, and nothing said so.
+- Also: a developer already running their own service on that port owns it, and
+  the sandbox's mapping silently loses.
+
+### Root Cause
+
+acq's neutral `publishedPorts` parser defaulted an omitted `host:` to the
+**guest** port, so every sandbox built from one kit requested the same host port.
+msb accepts the duplicate mapping without complaint — first writer wins, the rest
+are inert.
+
+### Fix
+
+Fixed in acq: an entry that omits `host:` now gets a **free** loopback host port
+chosen per sandbox, and an explicitly requested host port that is already in use
+**fails the create** instead of producing a dead mapping. Upgrade acq and
+recreate the sandboxes (`acq rm NAME` then `acq run …`) — the mapping is baked
+into the create arguments, so an existing sandbox keeps its old one.
+
+To pin a predictable host port per sandbox instead of taking the free one:
+
+```bash
+acq run opencode --publish 6868:6767 ~/projects/app-one
+acq run opencode --publish 6869:6767 ~/projects/app-two
+```
+
+`--publish` is msb-only and create-time only. See
+[ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
+
+### Prevention
+
+Never hardcode a published host port in a script — read it back from
+`acq ports NAME`, or request it explicitly with `--publish` and let a contended
+port fail loudly. Note that `acq ports` prints the mapping msb was **asked**
+for, which is not proof that the sandbox owns that host port.
+
+---
+
 When something fails, work through this list:
 
 1. [ ] Is the secret actually in the container? (`echo $VAR_NAME`)
@@ -2325,6 +2375,161 @@ When something fails, work through this list:
 5. [ ] Is the config file actually being read? (add debug logging)
 6. [ ] Did SBX CLI syntax change? (`sbx --help`)
 7. [ ] Is this a known model/entitlement issue? (test with different model)
+
+---
+
+## 43. acq Refuses msb 0.7.0-0.7.2, or msb Refuses Your Sandbox State
+
+### Symptoms
+
+Any of four, depending on how far the host got.
+
+**1. `acq` refuses the msb version** — `acq run`, `acq create`, `acq ls`, or any
+other msb-backed command exits before touching a sandbox:
+
+```text
+error: acq refuses msb 0.7.2 because msb 0.7.0-0.7.2
+       migrate existing 0.6.x sandbox state one-way, into a form the 0.6.x
+       line cannot read.
+```
+
+**2. msb refuses the catalog** — a 0.6.x `msb` after a 0.7.x has run, including
+on read-only commands like `msb list`:
+
+```text
+database schema is newer than this msb binary; applied migration
+"m20260910_000001_snapshot_groups" is not in this binary's migration prefix
+```
+
+**3. Catalog-opening msb commands refuse** — after a `msb self downgrade`
+attempted with too old a binary:
+
+```text
+error: self_downgrade_recovery_required: resume the active downgrade recorded at
+       ~/.microsandbox/db/self-downgrade/<id>/journal.json
+```
+
+**4. Duplicate binaries** — during install:
+
+```text
+Multiple msb binaries were found; PATH order determines which one acq uses.
+```
+
+### Root Cause
+
+`msb` keeps its sandbox catalog in a versioned database under `$MSB_HOME`.
+Opening it with a newer `msb` **migrates it in place**, and the 0.6 → 0.7
+transition crossed a boundary the older line cannot read back. Nothing unusual is
+needed to land here — installing `msb` the documented way is enough, because
+`msb self update`, `brew upgrade`, and
+`curl -fsSL https://install.microsandbox.dev | sh` all resolve to the **newest**
+release.
+
+msb 0.7.0 through 0.7.2 had a further defect: they could reject persisted sandbox
+configurations they had themselves written. Upstream fixed that in **0.7.3** and
+now documents 0.7.0-0.7.2 as having "compatibility gaps addressed in v0.7.3"
+([Migrating from v0.6 to v0.7](https://docs.microsandbox.dev/migrations/v0.7)).
+
+Two `msb` binaries on one host make this worse — say a Homebrew one and another
+in `~/.local/bin`. Whichever appears first on `PATH` creates or migrates the
+state for that run, so the same host can migrate state in one terminal and refuse
+it in another.
+
+Symptom 3 has its own cause worth stating, because the action that produces it is
+the reflexive one. `msb self downgrade` builds its rollback plan from the
+**running** binary's migration metadata, so only a binary whose metadata covers
+the applied set can revert it. Attempting it from the older binary does not merely
+fail: it records an operation journal, and `msb` then refuses catalog-opening
+commands from every version until that operation completes. When the recorded
+transition cannot complete, the demand is unsatisfiable. Verified against real
+0.6.18 / 0.7.2 / 0.7.3 binaries: catalog-opening retries with the journal's own
+target, with a different target, and from each of the three all fail identically,
+and `self downgrade` exposes no abort flag. Non-catalog probes such as
+`msb --version` can still work, but they cannot clear the journal or read sandbox
+state.
+
+### Fix
+
+**If a 0.7.0-0.7.2 msb has already touched your sandbox state, move FORWARD.**
+This is upstream's recommendation and `acq`'s default offer, and it rewrites
+nothing — the migration sets are additive, so 0.7.3 reads the already-migrated
+catalog as-is, with no rollback, no data-affecting step, and none of the refusals
+a downgrade can hit:
+
+```bash
+msb self update          # targets the newest release, which currently IS 0.7.3
+msb --version            # confirm; acq accepts 0.7.3 or newer
+```
+
+**To roll back to the pin instead,** run the downgrade **with the msb that did
+the migration, before replacing it** — only that binary carries the rollback
+steps:
+
+```bash
+msb self downgrade 0.6.18   # run this with the 0.7.x binary, NOT an older one
+```
+
+If you already replaced or uninstalled that binary, get it back side-by-side
+without disturbing your current `msb` (these formulae are keg-only, so nothing is
+symlinked and nothing shadows your `PATH`):
+
+```bash
+brew install GSA-TTS/tap/microsandbox-acq@0.7.3
+"$(brew --prefix microsandbox-acq@0.7.3)/bin/msb" self downgrade 0.6.18
+```
+
+**If every catalog-opening msb command reports `self_downgrade_recovery_required`,**
+the only exit is removing that one operation directory. `install.sh` detects this
+and offers to do it; by hand:
+
+```bash
+rm -rf ~/.microsandbox/db/self-downgrade/<id>
+```
+
+That removes the record of an **unfinished operation** — not your catalog
+database, not its migration history, not your retained downgrade backups, and not
+any sandbox, snapshot, or image. (Upstream separately warns against deleting the
+catalog or editing migration history to bypass a refusal. That is a different
+action, and neither `acq` nor this step does it; see
+[ADR-0032](adr/0032-msb-version-policy-and-migration-recovery.md).)
+
+**To install a supported msb,** use a channel that can express a version.
+Neither upstream channel can:
+
+```bash
+brew install GSA-TTS/tap/microsandbox-acq   # version-pinned formula
+./scripts/verify-msb-pin --install          # verified pinned release bundle
+
+command -v msb && msb --version             # confirm which binary acq will use
+```
+
+Do **not** use `curl -fsSL https://install.microsandbox.dev | sh` to get a
+specific version. It takes no version argument and reads `releases/latest`, and
+every release publishes a **byte-identical** copy of that script as a release
+asset — so `.../releases/download/v0.6.18/install.sh` looks like a pin and
+installs whatever is newest.
+
+`acq` accepts `msb 0.6.9` through `0.6.18`, refuses `0.7.0` through `0.7.2`, and
+accepts `0.7.3` or newer. Remove stale copies or adjust `PATH` so the intended
+`msb` appears first.
+
+### Prevention / Status
+
+- `acq_backend_check_version` fails closed on the blocked range before any
+  command that opens the catalog — including state-touching verbs like `acq ls`,
+  which previously reached `msb` unguarded and surfaced the raw upstream error.
+- `install.sh` installs the pinned `0.6.18` from a checksum-verified release
+  bundle, prompts before replacing a too-old, unparseable, or blocked active
+  version, offers the forward path first when the catalog was already migrated,
+  refuses to drive a rollback with a binary that would wedge the install, and
+  fails closed when another blocked `msb` earlier on `PATH` would still shadow
+  the install.
+- `install.ps1` applies the same policy on Windows, which previously had none.
+  The Windows-specific logic has been smoke-tested on a real Windows host, but
+  remains lower-confidence than the POSIX path.
+- `scripts/verify-msb-pin` verifies all of the above against real 0.6.18 / 0.7.2
+  / 0.7.3 binaries in a throwaway `MSB_HOME`. It boots no VM, so it needs no
+  virtualization and runs inside a sandbox.
 
 ---
 

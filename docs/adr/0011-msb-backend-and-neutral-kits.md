@@ -411,6 +411,24 @@ strings). The translate layer:
 > re-validated on replay and the last value wins for a duplicate name (kits
 > append in application order, so a later kit overrides an earlier one).
 >
+> **Update (2026-09-29):** The per-kit scoping of the *command* env above is also
+> gone. Widening only the session paths left a gap wherever a kit command
+> outlives itself: a `background: true` startup daemon launches agents, and those
+> agents inherited only the daemon kit's vars, so another kit's agent
+> configuration (including a permission layer) was silently absent. Kit
+> `environment[]` is now **guest-wide for kit lifecycle commands too** — every
+> `install`/`initFiles`/`startup` command runs with the merged env of the full
+> effective kit set, last-value-wins, the same resolution sessions replay. The
+> merged set is computed in a **pre-pass over the whole kit set** (so it does not
+> depend on kit application order), with the persisted marker as the fallback for
+> the mid-life single-kit `acq kit apply` path. The adapter's non-interactive git
+> guards stay **owned by the kit whose command is running**: a command receives
+> only its own kit's value for a guard name, so another kit can neither disable
+> them (by declaring a guard name this kit does not) nor change them (by declaring
+> the same name with a different value, which the merge would otherwise resolve in
+> the later kit's favor). See
+> [ADR-0033](0033-msb-kit-env-is-guest-wide-for-lifecycle-commands.md).
+>
 > **Superseded storage (ADR-0035):** the persisted values described in this ADR
 > (`agent`, `workspace`, `ssh-auth-sock`, `kit-env`, and the run-once gate
 > markers) were originally written to root-owned **guest** files under
