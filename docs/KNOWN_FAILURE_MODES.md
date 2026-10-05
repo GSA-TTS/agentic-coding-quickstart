@@ -1284,9 +1284,8 @@ If `sbx exec` reports the sandbox is not running, start it first
   (opencode requires postinstall to fetch its binary since v1.15.1).
 - If acq's automatic remediation ever fails, the manual `node postinstall.mjs`
   above is the reliable per-sandbox workaround.
-- The **msb** backend installs opencode itself (`npm install -g`, scripts
-  enabled) rather than using this image, so it is a possible alternative if the
-  sbx image stays broken — though it may hit the same opencode packaging issue.
+- The **msb** backend now gets opencode from the selected agent kit or base image,
+  not from an adapter-owned `npm install -g` fallback.
 
 ---
 

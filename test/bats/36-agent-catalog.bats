@@ -83,17 +83,17 @@ load 'helper'
   assert_failure
 }
 
-@test "agents: opencode has built-in agent-kit metadata" {
+@test "agents: opencode has enabled built-in agent-kit metadata" {
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/agents.sh"
     acq_agent_builtin_kit_name opencode
     acq_agent_kit_entrypoint opencode
     acq_agent_kit_install_owner opencode
     acq_agent_kit_start_owner opencode
-    acq_agent_builtin_kit_enabled opencode || printf "apply-deferred\n"
+    acq_agent_builtin_kit_enabled opencode && printf "apply-enabled\n"
   '
   assert_success
-  assert_output $'opencode\nopencode\nkit\nkit\napply-deferred'
+  assert_output $'opencode\nopencode\nkit\nkit\napply-enabled'
 }
 
 @test "agents: shell selects no built-in agent kit" {

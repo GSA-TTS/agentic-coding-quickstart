@@ -814,6 +814,10 @@ _acq_builtin_support_kit_names() {
 _acq_agent_builtin_kit_ref() {
   local kit_name
   kit_name=$(acq_agent_builtin_kit_name "$1") || return 1
+  if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_AGENT_KIT:-}" ]; then
+    printf '%s\n' "$ACQ_TEST_AGENT_KIT"
+    return 0
+  fi
   printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$kit_name"
 }
 
@@ -2343,8 +2347,8 @@ maybe_offer_bundle_refresh() {
 # opencode-docker template) install the package with lifecycle scripts skipped,
 # so the first launch fails with:
 #   Error: opencode-ai's postinstall script was not run.
-# This is backend-agnostic (the msb npm install can hit the same gap), so run
-# the fix on any backend before attaching an opencode agent.
+# Run the fix before attaching an opencode agent so a broken packaged binary can
+# recover without changing the agent launch path.
 #
 # Idempotent and cheap: if opencode already runs (`opencode --version`), do
 # nothing. Otherwise locate the installed package via `npm root -g` and run its

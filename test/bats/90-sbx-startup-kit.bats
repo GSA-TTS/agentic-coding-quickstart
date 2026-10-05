@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
 # 90-sbx-startup-kit.bats — bats port of scripts/test-acq.d/90-sbx-startup-kit.sh
-# (quickstart #320, ADR-0025)
+# (ADR-0025)
 #
 # sbx 0.38 startup-kit refusal handling, stale-probe footprint, and the
 # create-time extra-kit marker. All offline via the stubbed sbx. Each @test
@@ -362,15 +362,11 @@ STUB
   chmod +x "$STUBDIR/sbx"
   printf 'agentrefreshbox\n' > "$STUBDIR/.sandbox_list"
   acq_provenance_write sbx agentrefreshbox opencode
-  # Simulate a READY built-in agent kit offline. The real selection gate
-  # (_acq_selected_builtin_kit_refs -> acq_agent_builtin_kit_ready) requires the
-  # pinned patterns bundle to actually ship a valid `opencode` agent kit, which
-  # it does not yet (enablement is deferred, quickstart #485). Stubbing
-  # readiness here keeps this refresh-path regression test meaningful without
-  # falsely enabling opencode in shipped behavior.
-  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  # Simulate a READY built-in agent kit offline. The real selection gate fetches
+  # the pinned patterns bundle; this refresh-path regression test should stay
+  # network-free while still proving agent-kit refresh wiring.
   acq_agent_builtin_kit_ready() { [ "$1" = "opencode" ]; }
-  _acq_builtin_kit_ref() { printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$1"; }
+  _acq_agent_builtin_kit_ref() { printf '%s#ref=%s&dir=%s/opencode\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR"; }
   ( ACQ_FORCE_KIT_REAPPLY=1 acq_backend_ensure_kits_applied agentrefreshbox >/dev/null 2>&1 ) || true
   assert_regex "$(cat "$CALLS")" 'acq-kits/opencode'
 }

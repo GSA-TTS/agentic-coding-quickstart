@@ -177,7 +177,7 @@ FACTS
   refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/opencode'
 }
 
-@test "agent-kits: opencode inference is visible while apply is deferred" {
+@test "agent-kits: opencode inference applies the built-in agent kit" {
   load_acq
   ACQ_EXTRA_KITS=""
   ACQ_CLI_KITS=()
@@ -185,9 +185,9 @@ FACTS
 
   run acq_selected_agent_kit_summary opencode
   assert_success
-  assert_output 'agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=deferred'
-  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
-  refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/opencode'
+  assert_output 'agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=enabled'
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
+  assert_regex "$(printf '%s\n' "${KITS[@]}")" '/acq-opencode-kit'
 }
 
 @test "agent-kits: enabled built-in agent kit is appended after support bundle" {
