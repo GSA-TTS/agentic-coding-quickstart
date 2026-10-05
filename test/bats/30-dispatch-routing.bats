@@ -196,13 +196,13 @@ FACTS
   ( cd "$other" && git init -q && git remote add origin https://github.com/mogul/artemis.git )
   _seed_usai
   run env ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
-    "$ACQ" create --name opencode-pic opencode "$pic"
+    "$ACQ" create --name opencode-pic opencode "$pic/repo"
   assert_success
 
   run env ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
     ACQ_SECRET_TEST_VALUE=ghp_fake bash -c 'cd "$1" && "$2" github-scope opencode-pic' _ "$parent" "$ACQ"
   assert_success
-  assert_output --partial "using recorded workspace for 'opencode-pic': $pic"
+  assert_output --partial "using recorded workspace for 'opencode-pic': $pic/repo"
   assert_output --partial 'GSA-TTS/pic-site'
   refute_output --partial 'mogul/artemis'
 }
