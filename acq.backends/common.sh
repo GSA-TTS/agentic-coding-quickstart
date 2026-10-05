@@ -2001,10 +2001,10 @@ _acq_provenance_file() {
 acq_provenance_write() {
   local backend="${1:-}" name="${2:-}" agent="${3:-}" workspace="${4:-}"
   [ -n "$backend" ] && [ -n "$name" ] || return 1
-  local file dir ts workspace workspace_source
+  local file dir ts workspace_source
   file=$(_acq_provenance_file "$backend" "$name") || return 1
   workspace_source=$(acq_provenance_field "$backend" "$name" workspace_source)
-  if [ "$workspace_source" = "host" ]; then
+  if [ -z "$workspace" ] && [ "$workspace_source" = "host" ]; then
     workspace=$(acq_provenance_field "$backend" "$name" workspace)
   fi
   dir=$(dirname "$file")
@@ -2014,7 +2014,6 @@ acq_provenance_write() {
   fi
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
   [ -n "$agent" ] || agent=$(acq_provenance_field "$backend" "$name" agent)
-  [ -n "$workspace" ] || workspace=$(acq_provenance_field "$backend" "$name" workspace)
   case "$agent" in
     "") : ;;
     *[!a-z-]*) agent="" ;;
@@ -2033,7 +2032,6 @@ acq_provenance_write() {
     printf 'applied_ref=%s\n' "$PATTERNS_KIT_REF"
     printf 'backend=%s\n' "$backend"
     [ -n "$agent" ] && printf 'agent=%s\n' "$agent"
-    [ -n "$workspace" ] && printf 'workspace=%s\n' "$workspace"
     printf 'applied_at=%s\n' "$ts"
     if [ -n "${workspace:-}" ]; then
       printf 'workspace_source=host\n'
