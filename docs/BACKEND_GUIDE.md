@@ -3,7 +3,7 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-09-30"
+last_updated: "2026-10-03"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
 related_files: ["docs/howto/acq.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md", "docs/adr/0034-host-port-selection-and-publish-override.md"]
@@ -194,10 +194,6 @@ Tunables:
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
 | `ACQ_SKIP_MSB_DOCTOR` | (unset) | Skip the automatic host-readiness check (`msb doctor`, and the `msb doctor --fix` it runs when the host is not ready). Set when the check is unreliable in your environment or you prefer to run it yourself. |
 | `ACQ_OPENCODE_POSTINSTALL_TIMEOUT` | `120` | Seconds to bound opencode's in-guest `postinstall.mjs` (which fetches a platform binary) so a wedged registry can't hang `acq run`; used only when the guest provides `timeout` |
-| `ACQ_MSB_OPENCODE_PKG` | `opencode-ai` | npm package spec for the opencode install (pin e.g. `opencode-ai@1.2.3`) |
-| `ACQ_MSB_NPM_HOSTS` | `registry.npmjs.org` | npm registry host(s) to allow-list for the agent install (space-separated; set for an internal mirror) |
-| `ACQ_MSB_ENSURE_OCI` | `1` (on) | Provision an OCI container engine (podman) at create so agents can run OCI images (`docker run`, `docker compose`). Installs `ACQ_MSB_PODMAN_PKGS` and aliases `docker` → `podman`. Set `0`/`false`/`no`/`off`/empty to skip (e.g. a base that bakes its own working engine). Fails soft if the OS package mirror is unreachable. See ADR-0020. |
-| `ACQ_MSB_PODMAN_PKGS` | `podman podman-compose` | Packages installed to provide the OCI engine (space-separated). `podman-compose` is the `docker compose` / `podman compose` provider. Override for a different set or an internal mirror's names. |
 | `ACQ_NETWORK_TIER` | `balanced` | Neutral egress posture (`strict`\|`balanced`\|`open`), the backend-agnostic selector defined by the agentic-coding-patterns network-tiers contract (ADR-0002). **All tiers are deny-by-default except `open`**; the tier only sizes the baseline allowlist. `strict` = `--net-default-egress deny` + gateway DNS + the kits' own `caps.network.allow` hosts ONLY (recommended for GFE / high-assurance). `balanced` = the same deny-default + the curated sbx-`balanced` baseline (ADR-0018) unioned with the kit hosts. `open` = **unrestricted egress** (no deny-default); testing only, never for GFE, and refused unless `ACQ_NETWORK_TIER_CONFIRM_OPEN=1`. Invalid values fail closed to `balanced`. |
 | `ACQ_NETWORK_TIER_CONFIRM_OPEN` | (unset) | Required confirmation for `ACQ_NETWORK_TIER=open`. Set to `1` to acknowledge that the sandbox runs with unrestricted egress; otherwise `open` is refused at provision time (fail-closed). Treated like `--privileged` — never a default. |
 | `ACQ_MSB_BALANCED_EGRESS` | (deprecated) | **Deprecated alias** for `ACQ_NETWORK_TIER`; retained for one deprecation window and removed in a future major. A `1`/on value maps to `ACQ_NETWORK_TIER=balanced`; a `0`/`false`/`no`/`off`/empty value maps to `ACQ_NETWORK_TIER=strict` (deny-by-default, kit hosts only — a former "off" no longer means permissive; an upgrade never silently loosens egress). `ACQ_NETWORK_TIER` wins when both are set, and a one-time notice is printed. Migrate to `ACQ_NETWORK_TIER`; use `open` if you truly need unrestricted egress. |
@@ -591,17 +587,11 @@ tools are present and warns if any are missing (it does not try to install
 them). A custom override must ship them too.
 
 **The agent binary.** sbx's agent templates bake the requested agent (e.g.
-`opencode`) into the image; a plain msb base has no agent. So at provision the
-msb adapter **installs the agent it was asked to run**. For `opencode` this is
-`npm install -g opencode-ai` (node is a verified prerequisite), and the adapter
-allow-lists the npm registry host (`registry.npmjs.org`) at create so the
-default-deny guest egress permits the download. The install is idempotent: it is
-skipped when the binary is already present (e.g. a pre-baked `ACQ_MSB_IMAGE`) and
-marker-gated against re-apply. `shell` installs nothing; an agent with no known
-recipe that is also absent from the base image produces a clear warning (bake it
-into `ACQ_MSB_IMAGE`). Tunables: `ACQ_MSB_OPENCODE_PKG` (npm spec, e.g.
-`opencode-ai@1.2.3`), `ACQ_MSB_NPM_HOSTS` (registry host(s) to allow-list, for an
-internal mirror).
+`opencode`) into the image. On msb, `opencode` is supplied by the selected
+agent-kit path from the pinned patterns bundle; the msb adapter no longer
+installs `opencode-ai` directly. Custom `ACQ_MSB_IMAGE` overrides must either
+ship the requested agent binary or work with the selected agent kit's install
+contract.
 
 **The base-image contract (Docker sandbox templates).** sbx's templates are built
 on `docker/sandbox-templates:<agent>-docker`, and acq now derives the same image
@@ -620,16 +610,16 @@ mirroring the sbx
   1000 is already taken, e.g. by `node` on `node:22-bookworm`.)
 - A **`/home/agent`** home directory owned by `agent`.
 - **HTTP proxy env** (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) **preserved across sudo**.
-- The **agent binary** (baked into the image, or installed via a kit's install
-  command — for `opencode`, acq runs `npm install -g opencode-ai`).
+- The **agent binary** (baked into the image, or installed/exposed by the
+  selected agent kit).
 - The four kit prerequisites present: `node`, `git`, `curl`,
   `update-ca-certificates`.
 
-For OCI-run support (`docker run` / `docker compose`), the adapter installs
-podman at provision (see [Running OCI images inside the sandbox](#running-oci-images-inside-the-sandbox-podman)),
-so a base image does **not** need a container engine baked in — only a supported
-package manager (apt-get/dnf/apk) and mirror reachability. Bake podman in (and
-set `ACQ_MSB_ENSURE_OCI=0`) only if you want to skip the runtime install.
+For OCI-run support (`docker run` / `docker compose`), opt into the
+`oci-engine` catalog kit (see [Running OCI images inside the sandbox](#running-oci-images-inside-the-sandbox-podman)).
+The base image does **not** need a container engine baked in if the kit can reach
+its package mirrors; alternatively, use a base that already includes a working
+engine and skip the kit.
 
 **Build on Docker's `sandbox-templates:*` images to get all of these for free**
 — msb derives the same agent-specific image naming convention as sbx when no
@@ -679,38 +669,33 @@ If the image requires registry auth, log in with your container tooling (e.g.
 ### Running OCI images inside the sandbox (podman)
 
 Agents often need to run OCI images from inside the sandbox — `docker run` an
-image, or bring up a `docker-compose.yaml`. The msb adapter guarantees this
-capability the same way it guarantees the base-image contract: idempotently, no
-matter what the base image brings.
+image, or bring up a `docker-compose.yaml`. This capability is now an **opt-in
+catalog kit**, not an msb adapter default.
 
-The default image ships the Docker CLI, but msb's microVM init (`/init.krun`)
-never starts `dockerd`, so the Docker socket is dead — and Docker's `overlay2`
-storage driver cannot sit on the sandbox's already-overlay root without a
-disk-backed data volume. Rather than retrofit the msb docker-in-docker recipe (a
-daemon to start and keep alive across restarts, plus a per-sandbox disk-backed
-volume), the adapter provisions **podman** at create time and aliases `docker` →
-`podman`:
+Enable it through the catalog:
 
-- **podman is daemonless** — no socket to start/poll, no restart lifecycle — uses
-  `fuse-overlayfs` on the overlay root (no disk-backed volume), and needs no
-  nested virtualization (containers are `runc`/`crun` processes, not VMs).
-- It runs **rootful** via the agent's passwordless sudo, which avoids the
-  rootless prerequisites (`uidmap`, `passt`/pasta) a lean base lacks.
-- A tiny `docker` → `podman` wrapper is placed in `/usr/local/bin` (ahead of
-  `/usr/bin`), so `docker run …` **and** `docker compose …` route to podman. The
-  base image's `/usr/bin/docker` is never modified. `docker compose` resolves to
-  `podman compose`, driven by the installed `podman-compose` provider — so
-  `docker-compose.yaml` files work. (The standalone `docker-compose` CLI is
-  deprecated in favour of the `docker compose` subcommand, so no separate
-  `docker-compose` binary is provided.)
+```bash
+acq configure
+# select: oci-engine
+```
 
-The install uses the OS package mirror, which under the default balanced egress
-baseline (ADR-0018) is already reachable — no extra net-rule needed. With
-`ACQ_NETWORK_TIER=strict`, or a custom base whose egress is narrowed, the
-mirror is unreachable and the step **fails soft** (a warning; provision
-continues; OCI is simply unavailable). Turn the step off entirely with
-`ACQ_MSB_ENSURE_OCI=0` (e.g. a base that bakes its own working engine), or point
-`ACQ_MSB_PODMAN_PKGS` at a different package set / internal mirror. See ADR-0020.
+You can also apply it for one sandbox by passing the pinned kit ref through
+`--kit`, or by exporting that same ref in `ACQ_EXTRA_KITS`:
+
+```bash
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=56d1f5f49ef928f50e61aa64a93d618b3d21c415&dir=integrations/isolation/acq-kits/oci-engine'
+```
+
+The kit provisions **rootless podman** and aliases `docker` to `podman`, so
+`docker run` and `docker compose` work inside the sandbox without a Docker daemon.
+It is backend-neutral: the same catalog choice applies on sbx and msb.
+
+This is a breaking change for msb users: sandboxes no longer get podman by
+default. Existing sandboxes keep whatever was already installed, but new
+sandboxes must opt into `oci-engine` if they need an in-sandbox container engine.
+The old msb-only environment toggles for adapter provisioning are removed; use
+`acq configure`, `ACQ_EXTRA_KITS`, or `--kit` instead. See ADR-0020 for the
+superseded adapter-era decision and ADR-0031 for the catalog mechanism.
 
 ### Secrets
 
@@ -875,7 +860,7 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 | Snapshots | not supported (`SUPPORTS_SNAPSHOTS=0`) | `msb snapshot` verb exists but **not surfaced by `acq`** (beyond-parity; `SUPPORTS_SNAPSHOTS=0`) |
 | Port forwarding | `acq ports` (post-hoc) | create/run (`-p`) via neutral `publishedPorts` now (shipped); **plus** post-hoc `acq ports --publish` via `msb ssh serve` + `ssh -L` now implemented (ADR-0015) — live end-to-end verification pending a KVM host |
 | Kit volumes | neutral `volumes:` passed through 1:1 to kit-spec v2 §5.7 (sized block device / tmpfs, mounted at create; dies with the sandbox) | neutral `volumes:` unioned across kits (last wins by path) and mapped to a derived named disk volume (`--mount-named acq-<sandbox>-<pathslug>-<crc>:<path>:kind=disk,size=<size>`) or `--tmpfs <path>:<size>`; derived volumes removed on `acq rm` (ADR-0023) |
-| Agent binary | supplied by the sbx agent template | installed at provision on a plain base (`npm install -g opencode-ai`), then launched on attach |
+| Agent binary | supplied by the sbx agent template | supplied by the selected agent kit or the base image, then launched on attach |
 | OpenCode web UI | `openchamber` acq kit (publishes port 4096) | same kit once it declares `backends: [sbx, msb]` against the released patterns schema (neutral port/background vocab consumed by both backends; the patterns repo's openchamber kit) |
 | In-place kit heal | `sbx kit add` (state-preserving, 0.35.0+; **no startup-bearing kits on 0.38+ — recreate to extend/refresh**) | re-apply kits idempotently (no state-preserving add) |
 
@@ -925,12 +910,10 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   [ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
 - **No state-preserving in-place kit add.** `acq_backend_ensure_kits_applied`
   re-applies kits idempotently; for a clean rebuild use `acq rm && acq run`.
-- **`acq` can auto-install only `opencode` on msb.** On the msb base image `acq`
-  installs the agent at provision time, and today only `opencode` has an install
-  recipe (`shell` needs no binary). Any other agent must be pre-baked into your
-  own `ACQ_MSB_IMAGE`; `acq` warns at attach if the requested agent has no recipe.
-  (On sbx the agent is supplied by the sbx template, so this constraint is
-  msb-specific.)
+- **Agent binaries come from templates, images, or agent kits.** `acq` no longer
+  has an msb-native `opencode` installer fallback. If the selected agent is not
+  present in the base image, the corresponding agent kit must provide it before
+  attach.
 - **Snapshots not surfaced.** `msb snapshot` is a full CLI verb, but `acq`
   exposes no `snapshot` verb, so `SUPPORTS_SNAPSHOTS=0`. Wiring it is beyond sbx
   parity (sbx has no snapshots), so the flag reflects what `acq` surfaces rather

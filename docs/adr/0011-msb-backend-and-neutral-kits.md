@@ -229,14 +229,12 @@ same contract sbx's templates provide, keyed off the
 [Docker base-image requirements](https://docs.docker.com/ai/sandboxes/customize/kit-reference/#base-image-requirements)
 for `docker/sandbox-templates:shell-docker`:
 
-- **Install the agent** (`_acq_msb_install_agent`). The AGENT token is read from
-  the first positional at provision. `opencode` → `npm install -g opencode-ai`
-  (node is already a verified prerequisite), with the npm registry host
-  (`registry.npmjs.org`) allow-listed at create so the default-deny egress
-  permits the download. Idempotent: skipped if the binary is already present
-  (a pre-baked `ACQ_MSB_IMAGE`) and marker-gated. `shell` is a no-op; an unknown,
-  absent agent warns (bake it into `ACQ_MSB_IMAGE`). Tunables:
-  `ACQ_MSB_OPENCODE_PKG`, `ACQ_MSB_NPM_HOSTS`.
+- **Select the agent kit or base-image agent.** The AGENT token is read from the
+  first positional at provision. For `opencode`, acq applies the built-in agent
+  kit from the pinned patterns bundle unless the user supplies an explicit
+  `--kit`; the msb adapter no longer owns an npm fallback installer. Agent install
+  egress belongs in the selected agent kit's network declarations, or the agent
+  binary must already be present in the base image.
 - **Satisfy the base-image contract** (`_acq_msb_ensure_agent_user`, extended).
   In addition to the `agent`/`/home/agent` user it already created, it now adds
   **passwordless sudo** (`/etc/sudoers.d/90-acq-agent`) and preserves the

@@ -36,7 +36,8 @@ PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # the bundle-version anchor recorded in a sandbox's host-side provenance record
 # (see ACQ_BUILTIN_BUNDLE below + the provenance helpers) so acq can tell a
 # stale sandbox from a current one.
-PATTERNS_KIT_REF="2dd2ad6ad5f63b842d732424bed5ba9aebeed676"  # agentic-coding-patterns v1.10.0
+# agentic-coding-patterns v1.12.0 release SHA.
+PATTERNS_KIT_REF="56d1f5f49ef928f50e61aa64a93d618b3d21c415"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_PROVIDER_KIT_NAME="usai-provider"
@@ -110,13 +111,16 @@ fi
 # directory under PATTERNS_KIT_DIR; DESC[i] is the one-line picker description.
 # `prime-agent` is intentionally omitted: it is a skeleton at the current pin
 # (see the patterns kits.yaml parity note) and would be non-functional if
-# offered. Add it here once it is functional.
+# offered. Add it here once it is functional. Heavier kits such as `oci-engine`
+# still belong here when they are functional; the picker description must make
+# their create-time cost clear.
 # shellcheck disable=SC2034  # consumed by `acq configure` (cross-function reader)
-ACQ_OPTIN_KIT_NAMES=(openchamber paseo)
+ACQ_OPTIN_KIT_NAMES=(openchamber paseo oci-engine)
 # shellcheck disable=SC2034
 ACQ_OPTIN_KIT_DESCS=(
   "Browser UI for OpenCode alongside the terminal TUI (publishes ports 3000/4096)"
   "Self-hosted Paseo browser web UI for coding agents (one port, loopback only)"
+  "Rootless podman for docker run / docker compose inside the sandbox (installs packages)"
 )
 
 # _acq_optin_kit_ref NAME — echo the fully-pinned git+https kit ref for an opt-in
@@ -810,6 +814,10 @@ _acq_builtin_support_kit_names() {
 _acq_agent_builtin_kit_ref() {
   local kit_name
   kit_name=$(acq_agent_builtin_kit_name "$1") || return 1
+  if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_AGENT_KIT:-}" ]; then
+    printf '%s\n' "$ACQ_TEST_AGENT_KIT"
+    return 0
+  fi
   printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$kit_name"
 }
 
@@ -2339,8 +2347,8 @@ maybe_offer_bundle_refresh() {
 # opencode-docker template) install the package with lifecycle scripts skipped,
 # so the first launch fails with:
 #   Error: opencode-ai's postinstall script was not run.
-# This is backend-agnostic (the msb npm install can hit the same gap), so run
-# the fix on any backend before attaching an opencode agent.
+# Run the fix before attaching an opencode agent so a broken packaged binary can
+# recover without changing the agent launch path.
 #
 # Idempotent and cheap: if opencode already runs (`opencode --version`), do
 # nothing. Otherwise locate the installed package via `npm root -g` and run its

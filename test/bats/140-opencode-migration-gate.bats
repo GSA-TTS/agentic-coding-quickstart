@@ -94,6 +94,7 @@ SPEC
 @test "agent kit gate: valid opencode artifact stays deferred while disabled" {
   ACQ_TEST_AGENT_KIT="$STUBDIR/opencode-kit-disabled"
   _mk_opencode_agent_kit "$ACQ_TEST_AGENT_KIT"
+  acq_agent_builtin_kit_enabled() { return 1; }
   _acq_agent_builtin_kit_ref() { printf '%s\n' "$ACQ_TEST_AGENT_KIT"; }
 
   _build_kit_list opencode

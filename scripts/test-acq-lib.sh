@@ -81,7 +81,11 @@ else
   _ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-nokit.XXXXXX")
 fi
 printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml"
+_ACQ_AGENT_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR:-$_ACQ_MSB_OFFLINE_KIT_DIR}/acq-opencode-kit"
+mkdir -p "$_ACQ_AGENT_OFFLINE_KIT_DIR"
+printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml"
 export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
+export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
 
 
 # ---------------------------------------------------------------------------
@@ -265,14 +269,6 @@ case "$_msb_sub" in
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
-    # `npm install -g …` is run as DIRECT argv (no `sh -c`), so it is matched on
-    # the full arg list, not on $snippet. STUB_NPM_FAIL=1 models the install
-    # failing so the #321 disambiguation path runs. Match it up front (before the
-    # bare-argv opencode-version probe and the $snippet cases below).
-    case " $* " in
-      *" npm install "*)
-        [ "${STUB_NPM_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
-    esac
     # `opencode --version` postinstall functionality probe (bare argv). Default
     # broken (exit 1) so the postinstall path runs; STUB_OPENCODE_OK=1 or a
     # planted .opencode_fixed marker (written by a successful postinstall.mjs
@@ -309,23 +305,6 @@ case "$_msb_sub" in
         fi
         exit 0 ;;
       *"echo ok"*) printf 'ok\n' ;;
-      # #321: the registry reachability probe curls `https://<host>/` and prints
-      # the `<http_code>|<curl_exit>` shape _classify_key_status reads. Default
-      # models a reachable registry (200). STUB_NPM_REGISTRY=unreachable models a
-      # TLS/connection cut (000|56); =unresolved models NXDOMAIN (000|6);
-      # =responded models the registry answering with an HTTP ERROR (500|0) —
-      # the connection completed, so it is NOT a DNS/TLS problem and MUST fall
-      # through to the neutral "registry rejected it / real npm error" branch.
-      # Match BEFORE the generic `%{http_code}` arm below (that one is the USAi
-      # key probe with an Authorization header; this one has neither header nor
-      # USAi host). Must precede the generic arm because both contain `%{http_code}`.
-      *"registry.npmjs.org"*'%{http_code}'*|*'%{http_code}'*"registry.npmjs.org"*)
-        case "${STUB_NPM_REGISTRY:-reachable}" in
-          unreachable) printf '000|56' ;;
-          unresolved)  printf '000|6'  ;;
-          responded)   printf '500|0'  ;;
-          *)           printf '200|0'  ;;
-        esac ;;
       *'%{http_code}'*)
         # Match check_key's `<http_code>|<curl_exit>` shape (see the sbx stub).
         if [ "${STUB_KEY_UNREACHABLE:-0}" = "1" ]; then
@@ -362,25 +341,6 @@ case "$_msb_sub" in
       # heal's marker-hit shell-sync path can be exercised.
       *"test -f '/var/lib/acq/agent-user-ready'"*)
         [ "${STUB_AGENT_USER_READY:-0}" = "1" ] && exit 0 || exit 1 ;;
-      # The OCI-engine setup is TWO msb-exec `sh -c` blocks: (1) a root (`-u 0`)
-      # install/config block carrying `/usr/local/bin/docker`, and (2) a rootless
-      # verify block (`-u agent`) that runs a `podman build` layer-mount self-test
-      # (tagged acq-oci-selftest). Match the root block by its docker-alias marker
-      # and the verify block by the self-test image tag. STUB_OCI_SETUP_FAIL=1
-      # models the ROOT block failing; STUB_OCI_VERIFY_FAIL=1 models the rootless
-      # build self-test failing (engine/storage unusable). Either failure must make
-      # provision FAIL SOFT (warn, rc 0, no marker). Match these FIRST (before the
-      # generic command-v / test-f cases below would swallow them).
-      *"/usr/local/bin/docker"*)
-        [ "${STUB_OCI_SETUP_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
-      *"acq-oci-selftest"*)
-        [ "${STUB_OCI_VERIFY_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
-      # The OCI-ready marker probe (`test -f '/var/lib/acq/oci-ready'`) gates the
-      # setup block. Match it BEFORE the generic `test -f` (markers absent) case
-      # below. Default ABSENT (exit 1) so the OCI step runs; STUB_OCI_READY=1
-      # makes the marker present (exit 0) to exercise the marker-gated skip.
-      *"test -f '/var/lib/acq/oci-ready'"*)
-        [ "${STUB_OCI_READY:-0}" = "1" ] && exit 0 || exit 1 ;;
       # `command -v <agent>` (agent-presence probe): controllable so the install
       # path can be exercised. By default the agent is ABSENT (exit 1) so install
       # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq
@@ -395,13 +355,6 @@ case "$_msb_sub" in
       # tool (socat included) as present and make STUB_SOCAT_PRESENT inert.
       *"command -v socat"*)
         [ "${STUB_SOCAT_PRESENT:-1}" = "0" ] && exit 1 || exit 0 ;;
-      # #321 npm-install-failure disambiguation: on a failed `npm install`, acq
-      # probes whether npm is present in-guest (`command -v npm`) and, if so,
-      # curls the registry host. Model npm as present by default; STUB_NPM_MISSING=1
-      # makes `command -v npm` miss (exit 1) so the genuinely-missing-npm branch is
-      # exercised. This arm MUST precede the generic `command -v` catch-all.
-      *"command -v npm"*)
-        [ "${STUB_NPM_MISSING:-0}" = "1" ] && exit 1 || exit 0 ;;
       # ADR-0021: the in-guest socat bridge (`nohup socat UNIX-LISTEN:…
       # VSOCK-CONNECT:2:<port>`) started by _acq_msb_start_ssh_agent_bridge.
       # Model a successful bridge start (exit 0). Match BEFORE the generic cases.
@@ -438,8 +391,6 @@ case "$_msb_sub" in
           printf '256 SHA256:stubkey stub@host (ED25519)\n'; exit 0
         fi ;;
       *"command -v"*) : ;;          # prereqs "present" (empty missing set)
-      *"npm install"*)
-        [ "${STUB_NPM_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
       *"test -f "*) exit 1 ;;       # markers absent
       *"test -s "*) exit 0 ;;       # copied files present
       # The /var/lib/acq marker reads (agent, workspace, ssh-auth-sock,

@@ -93,7 +93,7 @@ That's it. `acq run` creates the sandbox if it doesn't exist, heals any missing
 kits, validates your USAi key, and attaches the agent.
 
 > [!NOTE]
-> The **first** run boots a microVM, installs the agent, and fetches kits — a
+> The **first** run boots a microVM, applies kits, and prepares the agent — a
 > minute or two, with a progress spinner and status lines so you can follow
 > along. Later runs are much faster. Set `ACQ_NO_PROGRESS=1` to silence the
 > animation (plain status lines still print); `ACQ_DEBUG=1` also disables it in

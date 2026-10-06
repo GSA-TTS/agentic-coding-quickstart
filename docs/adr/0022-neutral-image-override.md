@@ -128,8 +128,7 @@ published in the Docker Sandboxes kit reference
 - The four kit prerequisites present in the image: **`node`, `git`, `curl`,
   `update-ca-certificates`** (plus **`socat`** if git commit signing / ssh-agent
   forwarding is used).
-- The **agent binary** baked in, or installable at provision (for `opencode`,
-  `acq` runs `npm install -g opencode-ai` on msb; sbx's agent templates bake it).
+- The **agent binary** baked in, or installable/exposed by a selected agent kit.
 
 The image does **not** have to be built `FROM docker/sandbox-templates:shell`
 — it only has to *meet* the contract. Building `FROM
