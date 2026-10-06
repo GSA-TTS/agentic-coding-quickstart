@@ -1822,7 +1822,8 @@ running on the host (or no key is loaded), there is nothing to forward.
 
 ### Fix
 
-- **Use a supported msb**: 0.6.18, or 0.7.3 or newer. msb 0.7.0-0.7.2 are
+- **Use a supported msb**: acq's default install pin is 0.7.7; existing
+  0.6.9-0.6.18 and 0.7.3+ installs remain accepted. msb 0.7.0-0.7.2 are
   refused — see §43.
 - **Ensure `socat` is in `ACQ_MSB_IMAGE`** — the default
   `docker/sandbox-templates:shell-docker` ships it; a custom override must too.
@@ -2494,16 +2495,16 @@ state.
 
 **If a 0.7.0-0.7.2 msb has already touched your sandbox state, move FORWARD.**
 This is upstream's recommendation and `acq`'s default offer, and it rewrites
-nothing — the migration sets are additive, so 0.7.3 reads the already-migrated
+nothing — the migration sets are additive, so 0.7.3 or newer reads the already-migrated
 catalog as-is, with no rollback, no data-affecting step, and none of the refusals
 a downgrade can hit:
 
 ```bash
-msb self update          # targets the newest release, which currently IS 0.7.3
+msb self update          # targets the newest release; acq re-checks the result
 msb --version            # confirm; acq accepts 0.7.3 or newer
 ```
 
-**To roll back to the pin instead,** run the downgrade **with the msb that did
+**To roll back to 0.6.18 instead,** run the downgrade **with the msb that did
 the migration, before replacing it** — only that binary carries the rollback
 steps:
 
@@ -2548,19 +2549,19 @@ command -v msb && msb --version             # confirm which binary acq will use
 Do **not** use `curl -fsSL https://install.microsandbox.dev | sh` to get a
 specific version. It takes no version argument and reads `releases/latest`, and
 every release publishes a **byte-identical** copy of that script as a release
-asset — so `.../releases/download/v0.6.18/install.sh` looks like a pin and
+asset — so `.../releases/download/v0.7.7/install.sh` looks like a pin and
 installs whatever is newest.
 
 `acq` accepts `msb 0.6.9` through `0.6.18`, refuses `0.7.0` through `0.7.2`, and
-accepts `0.7.3` or newer. Remove stale copies or adjust `PATH` so the intended
-`msb` appears first.
+accepts `0.7.3` or newer. Fresh installs use pinned `0.7.7`. Remove stale copies
+or adjust `PATH` so the intended `msb` appears first.
 
 ### Prevention / Status
 
 - `acq_backend_check_version` fails closed on the blocked range before any
   command that opens the catalog — including state-touching verbs like `acq ls`,
   which previously reached `msb` unguarded and surfaced the raw upstream error.
-- `install.sh` installs the pinned `0.6.18` from a checksum-verified release
+- `install.sh` installs the pinned `0.7.7` from a checksum-verified release
   bundle, prompts before replacing a too-old, unparseable, or blocked active
   version, offers the forward path first when the catalog was already migrated,
   refuses to drive a rollback with a binary that would wedge the install, and
@@ -2569,9 +2570,9 @@ accepts `0.7.3` or newer. Remove stale copies or adjust `PATH` so the intended
 - `install.ps1` applies the same policy on Windows, which previously had none.
   The Windows-specific logic has been smoke-tested on a real Windows host, but
   remains lower-confidence than the POSIX path.
-- `scripts/verify-msb-pin` verifies all of the above against real 0.6.18 / 0.7.2
-  / 0.7.3 binaries in a throwaway `MSB_HOME`. It boots no VM, so it needs no
-  virtualization and runs inside a sandbox.
+- `scripts/verify-msb-pin` verifies the 0.7.7 install pin plus recovery behavior
+  against real 0.6.18 / 0.7.2 / 0.7.3 binaries in a throwaway `MSB_HOME`. It
+  boots no VM, so it needs no virtualization and runs inside a sandbox.
 
 ---
 

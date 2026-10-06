@@ -59,7 +59,7 @@ Both upstream install vectors resolve the version at run time:
   and reads `releases/latest`.
 - Every release additionally publishes `install.sh` as a release asset, and
   those copies are **byte-identical** — so
-  `.../releases/download/v0.6.18/install.sh` *looks* like a pin and installs
+  `.../releases/download/v0.7.7/install.sh` *looks* like a pin and installs
   whatever is newest. An earlier revision of this work used exactly that URL and
   was wrong to.
 - `superradcompany/tap/microsandbox` (Homebrew) tracks the newest release by
@@ -140,7 +140,7 @@ a recoverable version mismatch into an apparent brick.
 
 ### How to recover a stranded host
 
-1. **Roll back to the pinned version.** The only option before 0.7.3 existed.
+1. **Roll back to the 0.6.18 rollback target.** The only option before 0.7.3 existed.
    Mutates state, is ordering-sensitive, and can be refused outright when
    snapshot groups exist.
 2. **Move forward to the fixed line (chosen as the default offer).** Rewrites
@@ -182,7 +182,7 @@ parity, even though on `sbx` the two currently do the same work.
 
 ### 2. Installing a specific version
 
-`install.sh` installs the pinned **0.6.18** when it must install or repair
+`install.sh` installs the pinned **0.7.7** when it must install or repair
 `msb`, by fetching the release bundle and verifying it against that release's
 published `checksums.sha256`. The `libkrunfw` filename and ABI are derived
 **from the artifact**, never hardcoded — a hardcoded name is precisely the bug
@@ -197,10 +197,11 @@ owning what it installed. Because that formula and upstream's own
 `brew uninstall` upstream's before installing ours rather than letting Homebrew
 fail on the link conflict.
 
-The tap also carries keg-only `microsandbox-acq@0.6.18` and
-`microsandbox-acq@0.7.3`. Keg-only matters: nothing is symlinked, so versions
-coexist and cannot shadow the `msb` on `PATH`. That is what makes them usable
-for "run the downgrade with the binary that performed the migration" when that
+The tap also carries keg-only `microsandbox-acq@0.6.18`,
+`microsandbox-acq@0.7.3`, and `microsandbox-acq@0.7.7`. Keg-only matters:
+nothing is symlinked, so versions coexist and cannot shadow the `msb` on `PATH`.
+That is what makes them usable for "run the downgrade with the binary that
+performed the migration" when that
 binary has already been uninstalled. A **blocked** release is deliberately not
 published as a formula — shipping a convenient way to install a version we tell
 people to avoid would be a mixed message. `scripts/verify-msb-pin` fetches
@@ -240,14 +241,15 @@ v0.7.0–v0.7.2 reports unsupported persisted sandbox configuration, upgrade to
 v0.7.3 and retry first. A v0.7.2 database can upgrade directly; no downgrade to
 v0.6 is needed."
 
-`msb self update` is the right tool here *precisely because* it targets the
-newest release: during this window the newest release is the fixed one. That
-coupling is why the result is **re-checked** rather than assumed — if upstream
-ships something newer that `acq` has not cleared, the post-update version check
-catches it and falls back to the pin.
+`msb self update` is still the right tool here because it targets a release at or
+after the fixed threshold. The result is **re-checked** rather than assumed — if
+upstream ships something newer that `acq` does not accept, the post-update
+version check catches it and falls back to the pin.
 
-The pin remains the default for a **fresh** install, where there is no migrated
-catalog and nothing to recover.
+The install pin is now **0.7.7** for a fresh install. That is separate from the
+rollback target: if a blocked 0.7.0-0.7.2 binary already migrated a catalog and
+the user chooses rollback instead of forward recovery, `msb self downgrade` still
+targets **0.6.18**, the newest 0.6.x catalog format.
 
 ### 4. Guarding the wedge
 
@@ -312,16 +314,15 @@ the snapshot-group downgrade refusal; and the keg-only formula layout.
   Windows is no longer a hole in the policy; the distribution claims are
   verified live rather than asserted.
 - **Negative / trade-off:** the version policy is duplicated in four files, and
-  only the Windows copy is drift-tested. Fresh installs land on 0.6.18 rather
-  than the newest release, so a new user starts one line behind upstream — a
-  deliberate trade of currency for a state format that can be rolled back.
+  only the Windows copy is drift-tested. Fresh installs now land on 0.7.7, while
+  rollback guidance still needs 0.6.18 as a distinct state-recovery target.
 - **Negative:** `install.sh` executes no upstream code, but it does download
   release artifacts from GitHub; the checksum is fetched from the same release,
   so this verifies integrity against the published manifest, not provenance.
 - **Scope:** the blocked range is a fixed historical window. When `acq` moves
-  its floor to `0.7.3` or newer, the range, the pin, the keg-only formulae, and
-  `verify-msb-pin`'s blocked-version checks all become dead weight and should be
-  removed together.
+  its floor to `0.7.3` or newer, the range, the rollback target, the older
+  keg-only formulae, and `verify-msb-pin`'s blocked-version checks all become
+  dead weight and should be removed together.
 - **Windows remains lower-confidence than POSIX**, but it has been smoke-tested
   on a real Windows host for the version-policy paths this ADR covers.
 

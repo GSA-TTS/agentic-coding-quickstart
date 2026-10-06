@@ -54,7 +54,7 @@ strengths/tradeoffs comparison.
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](../adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases migrate 0.6.x sandbox state one-way, into a form the 0.6.x line cannot read. Use 0.6.18, or 0.7.3 or newer ([ADR-0032](../adr/0032-msb-version-policy-and-migration-recovery.md)). |
+| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](../adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases migrate 0.6.x sandbox state one-way, into a form the 0.6.x line cannot read. The default install pin is 0.7.7; existing 0.6.9-0.6.18 and 0.7.3+ installs remain accepted ([ADR-0032](../adr/0032-msb-version-policy-and-migration-recovery.md)). |
 | Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
 
 Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
@@ -78,7 +78,7 @@ unparseable, or PATH-shadowed `msb`.
 > `irm … | iex` equivalent) take no version argument and read
 > `releases/latest`. Every release also publishes a **byte-identical** copy of
 > that script as a release asset, so a URL like
-> `.../releases/download/v0.6.18/install.sh` looks like a pin and still installs
+> `.../releases/download/v0.7.7/install.sh` looks like a pin and still installs
 > whatever is newest — which may be a version `acq` refuses.
 
 ```bash
@@ -94,7 +94,7 @@ one intended version active.
 If a 0.7.0-0.7.2 `msb` has already touched your sandbox state, do **not** just
 swap the binary — the catalog was migrated. Move forward with
 `msb self update` (upstream's own recommendation: the fixed line reads the
-already-migrated catalog with no rollback). See §43 of
+already-migrated catalog with no rollback; acq accepts 0.7.3 or newer). See §43 of
 [`KNOWN_FAILURE_MODES.md`](../KNOWN_FAILURE_MODES.md) for every symptom and
 recovery, including the wedge a mis-ordered `msb self downgrade` leaves behind.
 

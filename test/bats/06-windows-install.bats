@@ -126,6 +126,7 @@ teardown() {
   # accepts an msb the rest of acq refuses, so pin the Windows copy to install.sh's.
   for var in MSB_MIN_VERSION:MsbMinVersion \
              MSB_PINNED_VERSION:MsbPinnedVersion \
+             MSB_ROLLBACK_VERSION:MsbRollbackVersion \
              MSB_BLOCKED_VERSION_MIN:MsbBlockedVersionMin \
              MSB_BLOCKED_VERSION_MAX:MsbBlockedVersionMax \
              MSB_FIXED_VERSION:MsbFixedVersion; do
