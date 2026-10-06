@@ -107,6 +107,7 @@ npm ci --prefix .github/linters
 | `npm run lint` | Run all linters |
 | `npm run lint:secrets` | Run gitleaks at the version pinned in `.pre-commit-config.yaml` (pre-commit fetches it; no separate install) |
 | `npm run check` | Run the full pre-commit suite (gitleaks, shellcheck, YAML/JSON validation, whitespace, markdown lint) |
+| `npm run fix:exec-bits` | Restore executable bits the git index records (see below) |
 
 > [!NOTE]
 > `npm run check` auto-fixes some issues (markdown, whitespace, EOF) — review and stage the changes it makes.
@@ -117,6 +118,40 @@ kits it applies — and their tests (permission-matrix, model-sync, per-kit
 [agentic-coding-patterns](https://github.com/GSA-TTS/agentic-coding-patterns)
 repo under `integrations/isolation/acq-kits/`. Changes to provider config,
 rules, skills, or CA trust belong there.
+
+### If a script suddenly says "Permission denied"
+
+Run:
+
+```bash
+npm run fix:exec-bits      # or: scripts/fix-exec-bits
+```
+
+Clones on a **container/host shared mount** (virtiofs, Docker Desktop file
+sharing, WSL drvfs) do not round-trip POSIX permissions reliably, so such clones
+typically set `core.fileMode = false` to stop git reporting a storm of spurious
+mode changes. That is the right call, and it creates a blind spot:
+
+- git applies the index mode on **checkout**, so a fresh clone is correct;
+- but almost every editor, formatter, and coding agent saves by writing a temp
+  file and renaming it. That is a **new inode** with the ambient umask (0644),
+  so the executable bit is gone;
+- with `core.fileMode = false`, git is **blind** to that. A 100755 → 0644
+  regression with identical content yields an empty `git status` *and* an empty
+  `git diff --summary`.
+
+The symptom is an entry point that stops working with no visible cause —
+`./scripts/verify-backends` exiting 126, or the vendored bats failing several
+execs deep (`bin/bats` re-execs `libexec/bats-core/bats`, which execs
+`bats-exec-suite` and a formatter, so a stripped bit surfaces as a confusing
+downstream error rather than an obvious permission one).
+
+`scripts/fix-exec-bits` compares every tracked file against its **index** mode
+and restores the bit. The index is the criterion, not the presence of a shebang:
+`acq.backends/*.sh` are *sourced* and `test/bats/*.bats` are read *by bats*, so
+both are correctly non-executable. It covers initialized submodules too, and
+`--check` makes it report-only (that form runs as a pre-commit hook, and
+`scripts/verify-backends` self-heals at startup).
 
 There is one offline unit suite (stubbed `sbx`/`msb`/`opencode`, no Docker or
 network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025):

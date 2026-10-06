@@ -35,3 +35,205 @@ load 'helper'
     assert_equal "$bad" "0"
   done
 }
+
+@test "provider-facts: transitional USAi fallback defaults remain neutral" {
+  load_acq
+
+  assert_equal "$USAI_PROVIDER_KIT_NAME" "usai-provider"
+  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_BASE_URL" "https://api.gsa.usai.gov/api/v1"
+  assert_equal "$USAI_PROVIDER_KEY_ENV" "USAI_API_KEY"
+  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://api.gsa.usai.gov/api/v1/models"
+  assert_equal "$USAI_PROVIDER_KEY_MGMT_URL" "https://gsa.usai.gov/console/key-management"
+  assert_equal "$USAI_PROVIDER_BIND_HOSTS" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
+  assert_regex "$USAI_KIT" "acq-kits/${USAI_PROVIDER_KIT_NAME}$"
+  refute_regex "$USAI_PROVIDER_MODELS_URL" 'opencode'
+}
+
+@test "provider-facts: valid artifact overrides fallback defaults" {
+  load_acq
+  local facts="$STUBDIR/usai.env"
+  cat > "$facts" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.example.gov
+ACQ_PROVIDER_BASE_URL=https://api.example.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.example.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://example.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.example.gov,models.example.gov
+FACTS
+
+  acq_provider_facts_load "$facts"
+  assert_equal "$USAI_PROVIDER_HOST" "api.example.gov"
+  assert_equal "$USAI_PROVIDER_BASE_URL" "https://api.example.gov/api/v1"
+  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://api.example.gov/api/v1/models"
+  assert_equal "$USAI_PROVIDER_KEY_ENV" "EXAMPLE_API_KEY"
+  assert_equal "$USAI_PROVIDER_KEY_MGMT_URL" "https://example.gov/keys"
+  assert_equal "$USAI_PROVIDER_BIND_HOSTS" "api.example.gov,models.example.gov"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "$facts"
+}
+
+@test "provider-facts: missing artifact leaves fallback path available" {
+  load_acq
+  run acq_provider_facts_load "$STUBDIR/missing.env"
+  assert_failure 2
+  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
+}
+
+@test "provider-facts: invalid artifact fails closed without partial override" {
+  load_acq
+  local facts="$STUBDIR/bad-usai.env"
+  cat > "$facts" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.bad.gov
+ACQ_PROVIDER_BASE_URL=https://api.bad.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.bad.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=bad-key-name
+ACQ_PROVIDER_KEY_MGMT_URL=https://bad.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.bad.gov
+FACTS
+
+  run acq_provider_facts_load "$facts"
+  assert_failure
+  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_KEY_ENV" "USAI_API_KEY"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
+}
+
+@test "provider-facts: kit loader consumes artifact from a fetched kit" {
+  load_acq
+  local kit="$STUBDIR/provider-kit" cache="$STUBDIR/provider-cache"
+  mkdir -p "$kit/provider-facts"
+  cat > "$kit/provider-facts/usai.env" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.kit.gov
+ACQ_PROVIDER_BASE_URL=https://api.kit.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.kit.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=KIT_API_KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://kit.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.kit.gov
+FACTS
+
+  acq_provider_facts_load_from_kit "$kit" "$cache"
+  assert_equal "$USAI_PROVIDER_HOST" "api.kit.gov"
+  assert_equal "$USAI_PROVIDER_KEY_ENV" "KIT_API_KEY"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "$kit/provider-facts/usai.env"
+}
+
+@test "provider-facts: kit loader keeps fallback when artifact is absent" {
+  load_acq
+  local kit="$STUBDIR/provider-kit-empty" cache="$STUBDIR/provider-cache-empty"
+  mkdir -p "$kit"
+
+  run acq_provider_facts_load_from_kit "$kit" "$cache"
+  assert_failure 2
+  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
+}
+
+@test "provider-facts: kit loader fails closed for invalid artifact" {
+  load_acq
+  local kit="$STUBDIR/provider-kit-bad" cache="$STUBDIR/provider-cache-bad"
+  mkdir -p "$kit/provider-facts"
+  cat > "$kit/provider-facts/usai.env" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.bad.gov
+ACQ_PROVIDER_BASE_URL=https://api.bad.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.bad.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=BAD-KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://bad.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.bad.gov
+FACTS
+
+  run acq_provider_facts_load_from_kit "$kit" "$cache"
+  assert_failure
+  assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
+}
+
+@test "agent-kits: default kit list is support-only" {
+  load_acq
+  ACQ_EXTRA_KITS=""
+  ACQ_CLI_KITS=()
+  _build_kit_list
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/opencode'
+}
+
+@test "agent-kits: shell kit list is support-only" {
+  load_acq
+  ACQ_EXTRA_KITS=""
+  ACQ_CLI_KITS=()
+  _build_kit_list shell
+
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/opencode'
+}
+
+@test "agent-kits: opencode inference is visible while apply is deferred" {
+  load_acq
+  ACQ_EXTRA_KITS=""
+  ACQ_CLI_KITS=()
+  _build_kit_list opencode
+
+  run acq_selected_agent_kit_summary opencode
+  assert_success
+  assert_output 'agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=deferred'
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
+  refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/opencode'
+}
+
+@test "agent-kits: enabled built-in agent kit is appended after support bundle" {
+  load_acq
+  ACQ_TEST_AGENT_KIT="$STUBDIR/enabled-opencode-kit"
+  mkdir -p "$ACQ_TEST_AGENT_KIT"
+  cat >"$ACQ_TEST_AGENT_KIT/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: opencode
+agent:
+  name: opencode
+  entrypoint: opencode
+SPEC
+  ACQ_EXTRA_KITS=""
+  ACQ_CLI_KITS=()
+  acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$ACQ_TEST_AGENT_KIT"; }
+  _build_kit_list opencode
+
+  assert_equal "${KITS[4]}" "$ACQ_TEST_AGENT_KIT"
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
+}
+
+@test "agent-kits: explicit CLI kit suppresses implicit agent-kit inference" {
+  load_acq
+  ACQ_EXTRA_KITS=""
+  ACQ_CLI_KITS=(/tmp/team-opencode)
+
+  run acq_selected_agent_kit_summary opencode
+  assert_failure
+  _build_kit_list opencode
+  local joined; joined=$(printf '%s\n' "${KITS[@]}")
+  assert_regex "$joined" '/tmp/team-opencode'
+  refute_regex "$joined" 'acq-kits/opencode'
+}
+
+@test "agent-kits: ACQ_EXTRA_KITS never drive implicit selection" {
+  load_acq
+  # shellcheck disable=SC2034  # read by sourced _build_kit_list
+  ACQ_EXTRA_KITS="/tmp/opencode"
+  # shellcheck disable=SC2034  # read by sourced _build_kit_list
+  ACQ_CLI_KITS=()
+  _build_kit_list shell
+
+  run acq_selected_agent_kit_summary shell
+  assert_failure
+  assert_regex "$(printf '%s\n' "${KITS[@]}")" '/tmp/opencode'
+}

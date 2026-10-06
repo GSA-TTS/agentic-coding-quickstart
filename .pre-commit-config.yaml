@@ -110,7 +110,7 @@ repos:
         entry: bash scripts/test-acq-bats
         language: system
         pass_filenames: false
-        files: '^(acq|acq\.backends/.*|scripts/test-acq-lib\.sh|scripts/test-acq-bats|test/bats/.*)$'
+        files: '^(acq|acq\.backends/.*|scripts/test-acq-lib\.sh|scripts/test-acq-bats|scripts/fix-exec-bits|scripts/verify-backends|test/bats/.*)$'
 
       # Lint the .bats files with ShellCheck (it treats .bats as a shell dialect).
       # The main shellcheck hook's `types: [shell]` does not reliably tag .bats,
@@ -121,3 +121,26 @@ repos:
         entry: bash -c 'printf "%s\n" "$@" | xargs -r -n8 shellcheck --severity=warning' --
         language: system
         files: '^test/bats/.*\.(bats|bash)$'
+
+  # Guard the executable bit the git index records for entry points.
+  #
+  # The repo is routinely checked out onto a container/host shared mount
+  # (virtiofs, Docker Desktop sharing, WSL drvfs) where the host clone sets
+  # core.fileMode=false to suppress spurious mode churn. That makes git BLIND to
+  # a LOST exec bit: a 100755 -> 0644 regression with identical content produces
+  # an empty `git status` and an empty `git diff --summary`. Since nearly every
+  # editor/formatter/agent writes a temp file and renames it (new inode, ambient
+  # umask), entry points silently stop being executable and the next live run
+  # fails with rc=126 — or, worse, with a misleading downstream error.
+  #
+  # --check reports and fails; `scripts/fix-exec-bits` repairs. It compares
+  # against the INDEX, so sourced libraries (acq.backends/*.sh) and bats files
+  # stay correctly non-executable; a shebang is not the criterion.
+  - repo: local
+    hooks:
+      - id: fix-exec-bits
+        name: executable bits match the git index
+        entry: bash scripts/fix-exec-bits --check
+        language: system
+        pass_filenames: false
+        always_run: true

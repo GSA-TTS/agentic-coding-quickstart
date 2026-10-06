@@ -35,10 +35,23 @@ _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${_dir}/.." && pwd)"
 BATS="${REPO_ROOT}/test/vendor/bats-core/bin/bats"
 
-if [ ! -x "$BATS" ]; then
+if [ ! -f "$BATS" ]; then
   echo "test-acq-bats: vendored bats not found at $BATS" >&2
   echo "  run: git submodule update --init test/vendor/bats-core \\" >&2
   echo "       test/vendor/bats-support test/vendor/bats-assert" >&2
+  exit 2
+fi
+
+# A PRESENT-but-not-executable bats means the checkout lost its mode bits, which
+# happens routinely on a container/host shared mount (see scripts/fix-exec-bits).
+# bats re-execs its own libexec helpers, so `bash bin/bats` is NOT a sufficient
+# workaround: the chain fails several execs later with a confusing error. Point at
+# the one-command repair instead of failing with a misleading "not found".
+if [ ! -x "$BATS" ]; then
+  echo "test-acq-bats: vendored bats is present but not executable:" >&2
+  echo "  $BATS" >&2
+  echo "  The checkout lost its executable bits (common on a shared mount)." >&2
+  echo "  run: scripts/fix-exec-bits" >&2
   exit 2
 fi
 
