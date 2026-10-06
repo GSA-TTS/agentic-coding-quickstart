@@ -10,13 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ⚠ BREAKING CHANGES
 
-* **kits:** acq no longer installs podman/OCI tooling by default. Users who need docker, docker compose, or rootless podman when the base image doesn't  provide it must opt into the oci-engine kit with `acq configure`, `--kit`, or `ACQ_EXTRA_KITS`.
+* **kits:** acq no longer installs podman/OCI tooling by default. Users who need docker, docker compose, or rootless podman when the base image doesn't provide it must opt into the oci-engine kit with `acq configure`, `--kit`, or `ACQ_EXTRA_KITS`.
+* **kits:** acq no longer performs native OpenCode npm fallback installation. OpenCode is supplied by the pinned opencode agent kit from agentic-coding-patterns v1.12.0, currently delivering OpenCode v2.0.22. If the kit is unavailable or invalid, acq fails closed instead of installing opencode-ai from npm.
+* **kits:** existing acq sandboxes with adapter-installed podman are not migrated in place. Recreate affected sandboxes or add the oci-engine kit before relying on OCI behavior after stop/start.
 
 ### Features
 
 * **acq:** choose the host port per sandbox, and let --publish pin it ([#526](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/526)) ([410f332](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/410f332074c5df830e2a6bff215679314aa7739f))
 * **acq:** export ACQ_WORKSPACE and ACQ_CLONE into the guest on both backends ([#457](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/457)) ([e0b9a3b](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/e0b9a3b60d878080094264b407b03fb830c48c4e))
 * **acq:** interactive `acq configure` UI for extra kits + token-scoping defaults ([#500](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/500)) ([13d9d3a](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/13d9d3a6f556345b332aa4f6d8d6f9d6c516f919))
+* **network:** add workshop.cloud.gov to the balanced hosts ([#471](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/471)) ([a503287](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/a503287))
 * **kits:** adopt pinned agent and capability kits ([#474](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/474)) ([6a67063](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/6a6706321bae66d6e3f8993afbb64eaf01cf8561))
 * **secrets:** add Windows-native DPAPI secret backend ([#464](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/464)) ([907f404](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/907f4043d14d65e1b70fb62eef6b1d4d8dac4606))
 * **windows:** add acq preview install path ([#463](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/463)) ([d6d76f4](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/d6d76f4407b83bcba38c764f364b6c1b64f174aa))
@@ -32,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **ci:** unblock unrelated PRs from the bash32 required-check deadlock ([#513](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/513)) ([187aa57](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/187aa57bd7294a3d04527805f3ee5a95017c0ed8))
 * **install:** keep curl | sh stdin intact and tap msb formula first ([#462](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/462)) ([c808d74](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/c808d740d5a3553b4e51d7d41069242d1ed914b8))
 * **install:** trust the microsandbox-acq dependency before brew install ([#534](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/534)) ([ffac0fa](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/ffac0fa21e5dacef6df3cb0543938da078840d81))
+* **msb:** correct copy-paste command in README ([#452](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/452)) ([83734f9](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/83734f9))
 * **kits:** land collapsed kit stack implementation ([#549](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/549)) ([bcd5b9c](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/bcd5b9cccc89ac56b327a1461c078f777e39e0f0))
 * **msb:** allow Playwright browser downloads ([#477](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/477)) ([0c399c5](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/0c399c565b7217f8242de62ff1304d436c091d53))
 * **msb:** block unsafe 0.7 migration versions ([#510](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/510)) ([3634046](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/3634046a415f8fe5961767070c16fbadadf169f0))
