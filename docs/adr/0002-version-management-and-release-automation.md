@@ -100,6 +100,9 @@ requirements while maintaining simplicity and being backed by Google's well-main
    - When Release PR is merged, creates git tag and GitHub release
    - Configuration in `release-please-config.json` and `.release-please-manifest.json`
    - GitHub Action: `googleapis/release-please-action`
+   - Version override is available by adding a `Release-As: X.Y.Z` trailer to a
+     commit or release PR when maintainers intentionally correct the next release
+     boundary without moving an existing immutable tag.
    - Release creation also uploads installer assets: `install.sh` with the release
      commit SHA embedded for clone-path consistency checks, the Windows preview
      `install.ps1`, the Windows preview zip, plus `SHA256SUMS` for verifying
