@@ -128,9 +128,15 @@ MIN_MSB_VERSION="0.6.9"
 MSB_BLOCKED_VERSION_MIN="0.7.0"
 MSB_BLOCKED_VERSION_MAX="0.7.2"
 
-# Version acq's own tooling installs during the blocked window: the newest
-# release whose migration set the 0.6.x line understands.
-MSB_PINNED_VERSION="0.6.18"
+# Version acq's own tooling installs by default: latest release known to carry
+# the upstream 0.7.3+ cross-version compatibility fix. See ADR-0032.
+MSB_PINNED_VERSION="0.7.7"
+
+# Rollback target for catalogs already migrated by blocked 0.7.0-0.7.2 releases.
+# This stays on the newest 0.6.x release because `msb self downgrade` is a state
+# rollback to the last catalog format the 0.6.x line understands, not an install
+# default.
+MSB_ROLLBACK_VERSION="0.6.18"
 
 # First release with the upstream fix. Moving FORWARD to this is the preferred
 # recovery for a host that already ran a blocked version: the migration sets are
@@ -736,10 +742,10 @@ acq_backend_check_version() {
     echo "       Preferred fix — move FORWARD to msb $MSB_FIXED_VERSION, which reads the state this" >&2
     echo "       msb already migrated, with no rollback and no state rewrite:" >&2
     echo "         msb self update" >&2
-    echo "       Alternative — roll back to msb $MSB_PINNED_VERSION. If this msb ALREADY migrated" >&2
+    echo "       Alternative — roll back to msb $MSB_ROLLBACK_VERSION. If this msb ALREADY migrated" >&2
     echo "       your sandbox state, swapping the binary is NOT enough; the catalog" >&2
     echo "       must be rolled back first, and only THIS msb can do it:" >&2
-    echo "         msb self downgrade $MSB_PINNED_VERSION" >&2
+    echo "         msb self downgrade $MSB_ROLLBACK_VERSION" >&2
     echo "       Do NOT run 'msb self downgrade' from an older msb: it cannot roll" >&2
     echo "       these migrations back, and the failed attempt leaves an" >&2
     echo "       interrupted-downgrade record that blocks msb catalog access." >&2

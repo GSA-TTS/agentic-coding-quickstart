@@ -102,7 +102,7 @@ _refute_backend_create() {
 
 @test "clone(msb): a non-git workspace fails the create before the backend runs" {
   local plain="$STUBDIR/plainproj"; mkdir -p "$plain"
-  _msb_clone -- create shell --clone "$plain"
+  GIT_CEILING_DIRECTORIES="$STUBDIR" _msb_clone -- create shell --clone "$plain"
   assert_failure
   assert_output --partial 'not a git repository'
   _refute_backend_create

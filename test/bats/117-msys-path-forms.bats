@@ -106,13 +106,17 @@ _msys_provision() { # NAME WS
 
 @test "msys: recorded github-scope workspace uses the host form" {
   _plant_cygpath_stub
-  mkdir -p "$STUBDIR/msysws"
-  _msys_provision shell-msysws "$STUBDIR/msysws"
+  local ws="/tmp/opencode/acq-msys-${BATS_TEST_NUMBER:-0}-$$"
+  rm -rf "$ws"
+  mkdir -p "$ws"
+  ( cd "$ws" && git init -q )
+  _msys_provision shell-msysws "$ws"
   load_acq
   run acq_workspace_record_read msb shell-msysws
   assert_success
-  assert_output "$(host_path "$STUBDIR/msysws")"
-  refute_output "$(canonicalize_path "$STUBDIR/msysws")"
+  assert_output "$(host_path "$ws")"
+  refute_output "$(canonicalize_path "$ws")"
+  rm -rf "$ws"
 }
 
 @test "msys: an ACQ_MSB_WORKSPACE override is canonicalized to the guest form" {

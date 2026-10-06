@@ -176,17 +176,20 @@ jobs:
           tarball="bash-${BASH32_VERSION}.tar.gz"
           # Fetch the tarball + its detached signature. `ftp.gnu.org` is a single
           # host that intermittently refuses connections and red-flags healthy
-          # PRs (curl 28 "Failed to connect"); `ftpmirror.gnu.org` redirects to a
-          # live GNU mirror, so try it FIRST and fall back to the canonical host.
-          # Integrity does not depend on the source — the OpenPGP signature below
-          # authenticates the bytes regardless of which mirror served them.
+          # PRs (curl 28 "Failed to connect"). Try multiple HTTPS GNU mirrors
+          # before failing; integrity does not depend on the source — the OpenPGP
+          # signature below authenticates the bytes regardless of which mirror
+          # served them.
           fetch() {
             # $1 = output path, $2 = path under /gnu/bash
             local _out="$1" _path="$2" _m
             for _m in \
               https://ftpmirror.gnu.org/gnu/bash \
+              https://mirrors.kernel.org/gnu/bash \
+              https://mirrors.ocf.berkeley.edu/gnu/bash \
+              https://mirrors.mit.edu/gnu/bash \
               https://ftp.gnu.org/gnu/bash ; do
-              if curl -fsSL --connect-timeout 30 --retry 3 --retry-connrefused \
+              if curl -fsSL --connect-timeout 20 --retry 2 --retry-connrefused \
                    -o "$_out" "${_m}/${_path}"; then
                 return 0
               fi
@@ -200,23 +203,15 @@ jobs:
 
           # Authenticate the tarball via GNU's detached OpenPGP signature.
           # Trust is anchored to Chet Ramey's release-signing key by its full
-          # 40-hex fingerprint: import BY fingerprint, then verify the fetched
-          # key's fingerprint matches exactly before trusting any signature.
+          # 40-hex fingerprint: import the vendored key, then verify its
+          # fingerprint matches exactly before trusting any signature.
           export GNUPGHOME
           GNUPGHOME="$(mktemp -d)"
-          got_fpr=""
-          for ks in \
-            hkps://keys.openpgp.org \
-            hkps://keyserver.ubuntu.com \
-            hkps://pgp.mit.edu ; do
-            if gpg --batch --keyserver "$ks" --recv-keys "$BASH_SIGNING_KEY_FPR" 2>/dev/null; then
-              got_fpr="$(gpg --batch --with-colons --fingerprint "$BASH_SIGNING_KEY_FPR" \
-                          | awk -F: '$1=="fpr"{print $10; exit}')"
-              [ "$got_fpr" = "$BASH_SIGNING_KEY_FPR" ] && break
-            fi
-          done
+          gpg --batch --import .github/keys/chet-ramey-bash-release-signing-key.asc
+          got_fpr="$(gpg --batch --with-colons --fingerprint "$BASH_SIGNING_KEY_FPR" \
+                      | awk -F: '$1=="fpr"{print $10; exit}')"
           if [ "$got_fpr" != "$BASH_SIGNING_KEY_FPR" ]; then
-            echo "::error::could not import bash signing key $BASH_SIGNING_KEY_FPR from any keyserver" >&2
+            echo "::error::vendored bash signing key fingerprint mismatch: ${got_fpr:-<none>}" >&2
             exit 1
           fi
           # Fail closed unless the signature verifies against that exact key.

@@ -14,6 +14,7 @@ setup() {
   acq_setup_stubs
   # A throwaway workspace tree with assorted git remotes.
   GWT="$STUBDIR/gh"
+  export GIT_CEILING_DIRECTORIES="$GWT"
   mkdir -p "$GWT/repoGH" "$GWT/wsMulti/a" "$GWT/wsMulti/b" "$GWT/wsGL" "$GWT/empty"
   mkdir -p "$GWT/wsOneOwner/a" "$GWT/wsOneOwner/b" "$GWT/wsCaseOwner/a" "$GWT/wsCaseOwner/b"
   ( cd "$GWT/repoGH" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
@@ -68,7 +69,7 @@ _common() { # FUNC ARGS...
   assert_output --partial 'orgOne/repo1'
   assert_output --partial 'orgTwo/repo2'
   _common detect_workspace_repos "$GWT/wsGL";  assert_output ''
-  _common detect_workspace_repos "$GWT/empty"; assert_output ''
+  GIT_CEILING_DIRECTORIES="$STUBDIR" _common detect_workspace_repos "$GWT/empty"; assert_output ''
 }
 
 @test "gh-scope: refuses workspaces spanning multiple GitHub owners" {

@@ -146,7 +146,7 @@ automation story.
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases migrate 0.6.x sandbox state one-way, into a form the 0.6.x line cannot read. Use 0.6.18, or 0.7.3 or newer ([ADR-0032](adr/0032-msb-version-policy-and-migration-recovery.md)). |
+| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases migrate 0.6.x sandbox state one-way, into a form the 0.6.x line cannot read. The default install pin is 0.7.7; existing 0.6.9-0.6.18 and 0.7.3+ installs remain accepted ([ADR-0032](adr/0032-msb-version-policy-and-migration-recovery.md)). |
 | Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
 
 Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
@@ -156,8 +156,8 @@ Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
 Install through a channel that can express a **version**. Neither upstream
 channel can: `install.microsandbox.dev` takes no version argument and reads
 `releases/latest`, and upstream's tap formula tracks the newest release by
-construction. Since `acq` refuses msb 0.7.0-0.7.2, "whatever is newest" is not a
-safe default during this window.
+construction. Since `acq` refuses msb 0.7.0-0.7.2, use the `acq` pin when a
+reproducible install is required.
 
 ```bash
 brew install GSA-TTS/tap/microsandbox-acq    # version-pinned formula
@@ -167,7 +167,7 @@ brew install GSA-TTS/tap/microsandbox-acq    # version-pinned formula
 `./install.sh` does this for you, and also detects and repairs a blocked,
 too-old, unparseable, or PATH-shadowed `msb`. If an already-installed
 0.7.0-0.7.2 has migrated your sandbox state, the recovery is `msb self update`
-(forward to 0.7.3) — see §43 of
+(forward to 0.7.3 or newer) — see §43 of
 [`KNOWN_FAILURE_MODES.md`](KNOWN_FAILURE_MODES.md) and
 [ADR-0032](adr/0032-msb-version-policy-and-migration-recovery.md).
 
