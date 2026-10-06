@@ -7,19 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [4.0.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.0.0...v4.0.1) (2026-10-06)
 
-
-### ⚠ BREAKING CHANGES
-
-* **msb:** fresh acq-managed msb installs now default to msb 0.7.7 instead of 0.6.18.
-
 ### Features
 
 * **msb:** default to microsandbox 0.7.7 ([#553](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/553)) ([ccd1bcb](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/ccd1bcbd7b4c7a47e2d3de297c93140d380c8a8e))
 
-
-### Miscellaneous Chores
-
-* **release:** force next release to 4.0.1 ([#556](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/556)) ([cc13d7c](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/cc13d7c9333229701ddef4b37e3f1fc079c2ee3b))
 
 ## [4.0.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v3.1.0...v4.0.0) (2026-10-06)
 
