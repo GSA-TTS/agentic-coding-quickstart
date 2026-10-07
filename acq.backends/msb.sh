@@ -3926,9 +3926,8 @@ _acq_msb_check_prereqs() {
 # NAME, or when the link cannot be staged, the raw path is used as before.
 # See ADR-0021.
 _acq_msb_vsock_flags_into() {
-  local _arr="$1" _name="${2:-}" _line _path _port _kind _label _current _link
-  # Collect the requested forwards first so the version gate can decide whether
-  # anything is even being asked for (only warn when a forward was requested).
+  local _arr="$1" _name="${2:-}" _line _path _port _kind _label _current
+  # Collect the forwards first so the version gate only warns when one is asked.
   local _forwards=()
   while IFS= read -r _line; do
     [ -n "$_line" ] && _forwards+=("$_line")
@@ -3952,18 +3951,8 @@ EOF
     _port=$(printf '%s' "$_f" | cut -f2)
     _kind=$(printf '%s' "$_f" | cut -f3)
     _label=$(printf '%s' "$_f" | cut -f4)
-    # Route the automatic ssh-agent forward through the managed link (NOT
-    # canonicalized — the link path itself is what must reach msb). Fall back
-    # to the raw agent path when the link cannot be staged (unsafe name, no
-    # symlink support, path too long for sun_path): that is today's route, and
-    # the unreachable-agent warning explains the one-time recreate.
     if [ "$_label" = "ssh-agent" ] && [ -n "$_name" ]; then
-      if _link=$(_acq_msb_ssh_agent_link_path "$_name") && \
-         _acq_msb_ssh_agent_link_point "$_link" "$_path"; then
-        _path="$_link"
-      else
-        acq_debug "msb: could not stage the managed ssh-agent link for $_name; routing the raw agent path"
-      fi
+      _path=$(_acq_msb_ssh_agent_route_path "$_name" "$_path")
     fi
     # --vsock names a HOST unix socket, so hand msb the host form (ADR-0029).
     if command -v host_path >/dev/null 2>&1; then
@@ -3972,13 +3961,11 @@ EOF
     eval "$_arr+=(--vsock \"\${_path}:\${_port}/\${_kind}\")"
     if [ "$_label" = "ssh-agent" ]; then
       _ACQ_MSB_SSH_AGENT_FORWARDING=1
-      # Make the implicit opt-in a CONSCIOUS choice (ADR-0021 trust-boundary):
-      # SSH_AUTH_SOCK being set is the only trigger, so a user who always exports
-      # it (tmux/screen/profile persistence) could forward their agent into a
-      # guest running untrusted code without a deliberate per-run decision. Print
-      # a one-time notice naming the opt-out and the ssh-add -c mitigation so the
-      # forward is never silent. Guarded by a module flag so it prints once even
-      # if the helper runs more than once in a process (create + a later probe).
+      # Make the implicit opt-in a CONSCIOUS choice (ADR-0021 trust-boundary): a
+      # user who always exports SSH_AUTH_SOCK (tmux/profile) would otherwise
+      # forward their agent into untrusted guest code silently. Print a one-time
+      # notice naming the opt-out and the ssh-add -c mitigation (module flag, so
+      # it prints once per process even if this helper runs more than once).
       if [ "${_ACQ_MSB_SSH_AGENT_NOTICE_SHOWN:-0}" != "1" ]; then
         _ACQ_MSB_SSH_AGENT_NOTICE_SHOWN=1
         echo "acq(msb): forwarding your host ssh-agent into the guest because SSH_AUTH_SOCK" \
@@ -3987,6 +3974,27 @@ EOF
       fi
     fi
   done
+}
+
+# _acq_msb_ssh_agent_route_path NAME AGENT_PATH — echo the host path to emit as
+# the automatic ssh-agent --vsock route for sandbox NAME: the managed link (NOT
+# canonicalized — the link path itself is what must reach msb), staged here to
+# point at AGENT_PATH. When no link can be staged (name outside acq's charset,
+# no symlink support, path too long for sun_path) fall back to AGENT_PATH —
+# today's route — and say so on stderr, because that route goes stale when the
+# host agent moves and the user should know a recreate will not self-heal.
+_acq_msb_ssh_agent_route_path() {
+  local _name="$1" _agent="$2" _link
+  if _link=$(_acq_msb_ssh_agent_link_path "$_name") && \
+     _acq_msb_ssh_agent_link_point "$_link" "$_agent"; then
+    printf '%s\n' "$_link"
+    return 0
+  fi
+  echo "acq(msb): warning: cannot manage the ssh-agent route for sandbox '$_name'" \
+       "(the name must use only letters, digits, '_' and '-', and the link path" \
+       "must fit a unix socket address); routing the raw agent socket path, which" \
+       "goes stale when the host agent moves (e.g. after a reboot). See ADR-0021." >&2
+  printf '%s\n' "$_agent"
 }
 
 # _acq_msb_ssh_agent_link_path NAME — echo the managed ssh-agent route link for
@@ -4026,7 +4034,9 @@ _acq_msb_ssh_agent_link_point() {
   [ -L "$link" ] && [ -d "$link" ] && rm -f "$link"
   tmp="${link}.tmp.$$"
   rm -f "$tmp" 2>/dev/null
-  if ln -s "$target" "$tmp" 2>/dev/null && mv -f "$tmp" "$link" 2>/dev/null; then
+  # `[ -L "$tmp" ]` guards hosts whose `ln -s` copies instead of linking (MSYS
+  # without native symlinks): a copied socket would be a dead route.
+  if ln -s "$target" "$tmp" 2>/dev/null && [ -L "$tmp" ] && mv -f "$tmp" "$link" 2>/dev/null; then
     return 0
   fi
   rm -f "$tmp" 2>/dev/null
@@ -4041,19 +4051,27 @@ _acq_msb_ssh_agent_link_point() {
 #     is the raw path and only a recreate can change it), or
 #   - SSH_AUTH_SOCK is unset or not a socket (the link is left as is; the
 #     liveness probe will still warn if the agent is unreachable).
-# Never fails the caller.
+# Records why the link was left alone in _ACQ_MSB_SSH_AGENT_LINK_SKIPPED (empty
+# when it now points at the live agent) so the unreachable warning can tell the
+# user the truth about what was and was not re-pointed. Never fails the caller.
+_ACQ_MSB_SSH_AGENT_LINK_SKIPPED=""
 _acq_msb_ssh_agent_link_refresh() {
   local name="$1" link target
+  _ACQ_MSB_SSH_AGENT_LINK_SKIPPED=""
   link=$(_acq_msb_ssh_agent_link_path "$name") || return 0
   [ -L "$link" ] || return 0
   target="${SSH_AUTH_SOCK:-}"
-  [ -n "$target" ] && [ -S "$target" ] || return 0
+  if [ -z "$target" ] || [ ! -S "$target" ]; then
+    _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="SSH_AUTH_SOCK is unset or not a socket in this shell"
+    return 0
+  fi
   if command -v canonicalize_path >/dev/null 2>&1; then
     target=$(canonicalize_path "$target")
   fi
   if _acq_msb_ssh_agent_link_point "$link" "$target"; then
     acq_debug "msb: ssh-agent route link for $name -> $target"
   else
+    _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="the link could not be replaced"
     echo "acq(msb): warning: could not re-point the ssh-agent route link '$link' at" \
          "'$target'; the forwarded agent may be unreachable in '$name'." >&2
   fi
@@ -4113,10 +4131,8 @@ _acq_msb_start_ssh_agent_bridge() {
     [ -n "$_sock" ] || return 0
   fi
 
-  # Heal the HOST end of the route first: point the managed link at the current
-  # host agent socket, so a sandbox resumed after a host reboot (new agent
-  # socket path) reaches the live agent without a recreate. No-op for a sandbox
-  # whose route is the raw path (created before the managed link existed).
+  # Heal the HOST end of the route first (re-point the managed link at the
+  # current agent socket); no-op for a raw-path route. See ADR-0021 amendment.
   _acq_msb_ssh_agent_link_refresh "$name"
 
   # The guest sock path and port are acq's own constants (word-safe charset), so
@@ -4140,21 +4156,13 @@ _acq_msb_start_ssh_agent_bridge() {
     </dev/null >/dev/null 2>&1 || true
   acq_debug "msb: ssh-agent bridge started at $_sock (vsock port $_port) in $name"
 
-  # Liveness probe (ADR-0021): the bridge + marker are now in place, but the
-  # route's HOST endpoint can still be dead. For a sandbox created before the
-  # managed link existed, the persisted --vsock route pins the raw agent path
-  # captured at create and a host reboot (new agent socket path) leaves it
-  # stale; the route is create-time only, so only a recreate fixes that one. For
-  # a managed route the link was just re-pointed, so an unreachable agent means
-  # the host agent itself is down or the bridge failed. Either way the guest has
-  # SSH_AUTH_SOCK set and socat running yet `ssh-add -l` fails and signing
-  # breaks — a silent dead bridge behind a present marker. Probe once and, on
-  # failure, surface the matching remedy instead of failing silently (repo
-  # no-silent-failure rule). Best-effort: `|| true` so a warning can NEVER abort
-  # the caller (this is the last statement of the bridge starter, which is itself
-  # the last statement of acq_backend_start, called bare under `set -euo
-  # pipefail` by the start/restart verbs — an unguarded non-zero would abort the
-  # whole verb). See ADR-0021 / docs/KNOWN_FAILURE_MODES.md §35.
+  # Liveness probe (ADR-0021): the bridge + marker are in place, but the route's
+  # HOST endpoint can still be dead (a raw-path route stale after a host reboot;
+  # a managed link whose agent is down or was not re-pointed), leaving a silent
+  # dead bridge behind a present marker. Probe once and surface the matching
+  # remedy (repo no-silent-failure rule). `|| true`: this is the last statement
+  # of acq_backend_start, called bare under `set -euo pipefail`, so the warn-
+  # return must never abort the verb. See docs/KNOWN_FAILURE_MODES.md §35.
   _acq_msb_warn_if_agent_unreachable "$name" "$_sock" || true
 }
 
@@ -4207,27 +4215,57 @@ _acq_msb_warn_if_agent_unreachable() {
   # agent failed", exit 1; or a bare "cannot open a connection" exit 2). Warn
   # with the remedy that matches how this sandbox's route was created.
   if _acq_msb_ssh_agent_link_managed "$name"; then
-    local _link
-    _link=$(_acq_msb_ssh_agent_link_path "$name")
-    echo "acq(msb): warning: the forwarded host ssh-agent is UNREACHABLE from the guest" \
-         "in '$name'. Its --vsock route follows acq's managed link '$_link' ->" \
-         "'$(readlink "$_link" 2>/dev/null)', which was just re-pointed at the current" \
-         "SSH_AUTH_SOCK, so the host agent itself is probably not answering (check" \
-         "'ssh-add -l' on the host) or the in-guest socat bridge failed. Fix the host" \
-         "agent, then re-run 'acq start $name' or 'acq run $name'. See ADR-0021 /" \
-         "docs/KNOWN_FAILURE_MODES.md §35." >&2
+    _acq_msb_warn_managed_route_unreachable "$name"
   else
-    echo "acq(msb): warning: the forwarded host ssh-agent is UNREACHABLE from the guest" \
-         "in '$name' (the create-time --vsock route's host endpoint is stale — most" \
-         "commonly after a HOST REBOOT, which gives the host ssh-agent a new socket" \
-         "path while the sandbox keeps the old one). SSH_AUTH_SOCK is set but git" \
-         "signing will fail. This sandbox routes the raw agent path, which is" \
-         "create-time only, so recreate it once: 'acq rm $name' then re-run your" \
-         "'acq run …' (with SSH_AUTH_SOCK set). The recreated sandbox routes through" \
-         "a link acq re-points on every start, so this is a one-time recreate." \
-         "See ADR-0021 / docs/KNOWN_FAILURE_MODES.md §35." >&2
+    _acq_msb_warn_raw_route_unreachable "$name"
   fi
   return 1
+}
+
+# _acq_msb_warn_managed_route_unreachable NAME — the unreachable warning for a
+# sandbox whose route is the managed link. Tells the truth about the link: if
+# the refresh re-pointed it, the host agent or the in-guest bridge is at fault;
+# if the refresh skipped it (recorded in _ACQ_MSB_SSH_AGENT_LINK_SKIPPED), the
+# remedy is to run the verb from a shell where SSH_AUTH_SOCK names the live
+# agent, not to chase the agent.
+_acq_msb_warn_managed_route_unreachable() {
+  local name="$1" _link _state
+  _link=$(_acq_msb_ssh_agent_link_path "$name")
+  if [ -n "$_ACQ_MSB_SSH_AGENT_LINK_SKIPPED" ]; then
+    _state="was NOT re-pointed because $_ACQ_MSB_SSH_AGENT_LINK_SKIPPED. Re-run"
+    _state="$_state 'acq start $name' or 'acq run $name' from a shell where SSH_AUTH_SOCK"
+    _state="$_state names your live agent (e.g. after 'eval \"\$(ssh-agent -s)\"; ssh-add')."
+  else
+    _state="was just re-pointed at the current SSH_AUTH_SOCK, so the host agent itself"
+    _state="$_state is probably not answering (check 'ssh-add -l' on the host) or the in-guest"
+    _state="$_state socat bridge failed. Fix the host agent, then re-run 'acq start $name' or 'acq run $name'."
+  fi
+  echo "acq(msb): warning: the forwarded host ssh-agent is UNREACHABLE from the guest" \
+       "in '$name'. Its --vsock route follows acq's managed link '$_link' ->" \
+       "'$(readlink "$_link" 2>/dev/null)', which $_state" \
+       "See ADR-0021 / docs/KNOWN_FAILURE_MODES.md §35." >&2
+}
+
+# _acq_msb_warn_raw_route_unreachable NAME — the unreachable warning for a
+# sandbox whose route pins the raw agent path (created before the managed link,
+# or with a name acq cannot turn into a link). The route is create-time only, so
+# only a recreate can change it; promise self-healing only when the name allows
+# a managed link.
+_acq_msb_warn_raw_route_unreachable() {
+  local name="$1" _after
+  if _acq_msb_ssh_agent_link_path "$name" >/dev/null 2>&1; then
+    _after="The recreated sandbox routes through a link acq re-points on every start, so this is a one-time recreate: you only do it once."
+  else
+    _after="This name cannot carry acq's managed route link; recreate with a name using only letters, digits, '_' and '-' to get a route that survives reboots."
+  fi
+  echo "acq(msb): warning: the forwarded host ssh-agent is UNREACHABLE from the guest" \
+       "in '$name' (the create-time --vsock route's host endpoint is stale — most" \
+       "commonly after a HOST REBOOT, which gives the host ssh-agent a new socket" \
+       "path while the sandbox keeps the old one). SSH_AUTH_SOCK is set but git" \
+       "signing will fail. This sandbox routes the raw agent path, which is" \
+       "create-time only, so recreate it: 'acq rm $name' then re-run your" \
+       "'acq run …' (with SSH_AUTH_SOCK set). $_after" \
+       "See ADR-0021 / docs/KNOWN_FAILURE_MODES.md §35." >&2
 }
 
 # _acq_msb_ssh_auth_sock_for NAME — echo the recorded guest ssh-agent sock path

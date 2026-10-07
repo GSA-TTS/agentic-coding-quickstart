@@ -643,6 +643,9 @@ PQ
   '
   assert_output --partial 'RC=0'
   assert_output --partial 'UNREACHABLE'
+  # The warning must not claim the link was re-pointed: nothing to point it at.
+  assert_output --partial 'NOT re-pointed'
+  refute_output --partial 'just re-pointed'
   assert_equal "$(readlink "$STUBDIR/state/msb/ssh-agent/holdbox.sock")" "$STUBDIR/gone.sock"
   run bash -c '
     set -euo pipefail
@@ -702,6 +705,7 @@ PQ
   assert_output --partial 'UNREACHABLE'
   refute_output --partial 'acq rm newbox'
   assert_output --partial 'ssh-agent/newbox.sock'
+  assert_output --partial 'just re-pointed'
 }
 
 @test "vsock(10c28): a link path that would overflow sun_path falls back to a short hashed name under the same dir" {
@@ -738,8 +742,24 @@ PQ
     export SSH_AUTH_SOCK="'"$STUBDIR"'/agent29.sock" STUB_MSB_VERSION=0.6.9
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    f=(); _acq_msb_vsock_flags_into f "../escape" 2>/dev/null; printf "%s\n" "${f[@]+"${f[@]}"}"
+    f=(); _acq_msb_vsock_flags_into f "../escape" 2>"'"$STUBDIR"'/c29.err"; printf "%s\n" "${f[@]+"${f[@]}"}"
+    cat "'"$STUBDIR"'/c29.err"
   '
   assert_line "$want:3552/stream"
+  # The fallback is announced, not silent: the route will go stale on a reboot.
+  assert_output --partial 'cannot manage the ssh-agent route'
   [ ! -e "$STUBDIR/state/msb/ssh-agent" ] || [ -z "$(ls -A "$STUBDIR/state/msb/ssh-agent")" ]
+  # For such a name the legacy warning must not promise that a recreate self-heals.
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9 STUB_AGENT_UNREACHABLE=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _ACQ_MSB_SSH_AGENT_FORWARDING=1
+    _acq_msb_start_ssh_agent_bridge my.app 2>&1
+    wait
+  '
+  assert_output --partial 'UNREACHABLE'
+  assert_output --partial 'acq rm my.app'
+  refute_output --partial 'one-time recreate'
+  assert_output --partial "letters, digits, '_' and '-'"
 }

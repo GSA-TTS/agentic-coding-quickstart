@@ -373,7 +373,8 @@ instead of the raw agent path:
   must fit a `sockaddr_un` (104 bytes on macOS including the terminator). When
   `<dir>/<name>.sock` would overflow, the basename falls back to `h<cksum>.sock`;
   when even that does not fit, or the sandbox name is outside acq's own
-  `[A-Za-z0-9_-]` charset, acq falls back to the raw path (today's route).
+  `[A-Za-z0-9_-]` charset, acq falls back to the raw path (today's route) and
+  warns at create that the route will go stale when the host agent moves.
 - **At create** (`_acq_msb_vsock_flags_into ARR NAME`): the link is staged
   pointing at the canonicalized current `SSH_AUTH_SOCK` and the **link path, not
   the target**, is emitted as the `--vsock` host path. All existing validation of
@@ -393,9 +394,12 @@ instead of the raw agent path:
 - **Existing sandboxes** keep their raw-path route until recreated once; acq
   cannot change a persisted route. The unreachable-agent warning now says so
   (`_acq_msb_ssh_agent_link_managed` picks the remedy text): recreate once, and
-  the recreated sandbox self-heals on every start. For a managed route that is
-  still unreachable, the warning instead points at the host agent and the
-  in-guest bridge.
+  the recreated sandbox self-heals on every start (or, for a name that cannot
+  carry a link, to recreate under a name that can). For a managed route that is
+  still unreachable, the warning says whether the link was re-pointed: if it was,
+  the host agent or the in-guest bridge is at fault; if `SSH_AUTH_SOCK` was unset
+  or not a socket in the invoking shell, it says so and asks for a re-run from a
+  shell where the agent is exported.
 - **sbx:** unchanged. The sbx CLI owns its implicit forward; the neutral
   emitter's output is a no-op there (see `acq.backends/sbx.sh`).
 
