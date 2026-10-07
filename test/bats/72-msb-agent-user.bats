@@ -4,10 +4,10 @@
 # (ADR-0025)
 #
 # msb provision: agent-user creation + uid-1000 kit commands as `agent`, the
-# Docker base-image contract (sudo + proxy env_keep), agent install + npm-failure
-# disambiguation (#321), attach launching the recorded agent with a PTY, exec as
-# the agent user, injection guards, and the OCI-engine (podman) setup. Provisions
-# run in isolated subshells; assertions read $CALLS.
+# Docker base-image contract (sudo + proxy env_keep), agent-kit selection, attach
+# launching the recorded agent with a PTY, exec as the agent user, injection
+# guards, and absence of adapter-owned OCI setup.
+# Provisions run in isolated subshells; assertions read $CALLS.
 #
 # shellcheck shell=bats
 
@@ -87,52 +87,19 @@ SPEC
   assert_regex "$log" 'HTTPS_PROXY'
 }
 
-@test "msb: provision installs the requested agent via npm and allow-lists the registry" {
-  _provision instbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/inst-secrets"'
+@test "msb: provision applies the opencode agent kit without native npm fallback" {
+  _provision instbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/inst-secrets" ACQ_NETWORK_TIER=strict'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'npm install -g --no-fund --no-audit opencode-ai'
-  assert_regex "$log" '--net-rule allow@registry\.npmjs\.org'
+  refute_regex "$log" 'npm install'
+  refute_regex "$log" 'allow@registry\.npmjs\.org'
   assert_regex "$log" '/var/lib/acq/agent'
 }
 
-@test "msb: install is idempotent — skipped when the agent binary is already present" {
-  _provision inst2box opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/inst2-secrets" STUB_AGENT_PRESENT=1'
-  refute_regex "$(cat "$CALLS")" 'npm install'
-}
-
-@test "msb: a shell sandbox installs no agent and (strict tier) adds no npm net-rule" {
+@test "msb: a shell sandbox has no agent kit and adds no npm net-rule" {
   _provision shellbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/shell-secrets" ACQ_NETWORK_TIER=strict'
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'npm install'
   refute_regex "$log" 'allow@registry\.npmjs\.org'
-}
-
-@test "msb #321: an unreachable npm registry is reported as network, not missing npm" {
-  _provision npmunreachbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/npmunreach-secrets" STUB_NPM_FAIL=1 STUB_NPM_REGISTRY=unreachable'
-  assert_output --partial 'NOT REACHABLE'
-  assert_output --partial 'KNOWN_FAILURE_MODES.md §30'
-  refute_output --partial 'npm is not present'
-}
-
-@test "msb #321: an NXDOMAIN npm registry is reported as DNS, not missing npm" {
-  _provision npmunresbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/npmunres-secrets" STUB_NPM_FAIL=1 STUB_NPM_REGISTRY=unresolved'
-  assert_output --partial 'did not RESOLVE'
-  assert_output --partial 'ACQ_MSB_DNS_NAMESERVER'
-}
-
-@test "msb #321: a genuinely-missing npm is reported as such" {
-  _provision npmmissingbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/npmmissing-secrets" STUB_NPM_FAIL=1 STUB_NPM_MISSING=1'
-  assert_output --partial 'npm is not present'
-  refute_output --partial 'NOT REACHABLE'
-}
-
-@test "msb #321: a responded-but-errored registry gets neutral guidance, no DNS/TLS bleed" {
-  _provision npmrespbox opencode 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/npmresp-secrets" STUB_NPM_FAIL=1 STUB_NPM_REGISTRY=responded'
-  assert_output --partial 'registry appears reachable'
-  refute_output --partial 'ACQ_MSB_DNS_NAMESERVER'
-  refute_output --partial 'did not RESOLVE'
-  refute_output --partial 'NOT REACHABLE'
-  refute_output --partial 'npm is not present'
 }
 
 # Attach helper: source msb + run acq_backend_attach in a subshell.
@@ -186,18 +153,6 @@ _attach() { # PRE_SNIPPET NAME
   refute_regex "$log" 'msb exec execbox --'
 }
 
-@test "msb: a hostile agent token is refused on install and never emitted as sh -c" {
-  : > "$CALLS"
-  run bash -c '
-    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/inj-secrets"
-    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
-    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    _acq_msb_install_agent injbox "x'"'"';touch /tmp/acq_pwn;'"'"'" 2>&1
-  '
-  assert_output --partial 'refusing agent name'
-  refute_regex "$(cat "$CALLS")" 'touch /tmp/acq_pwn'
-}
-
 @test "msb: attach with a tampered agent marker falls back to shell, never runs the injection" {
   _attach 'export STUB_RECORDED_AGENT="x'"'"';touch /tmp/acq_pwn;'"'"'" STUB_RECORDED_WORKSPACE=/tmp/wsp' injattach
   local log; log=$(cat "$CALLS")
@@ -205,76 +160,17 @@ _attach() { # PRE_SNIPPET NAME
   assert_regex "$log" 'injattach -- /bin/sh -l'
 }
 
-@test "msb: OCI (podman) engine setup runs as root, configures storage, verifies rootless" {
+@test "msb: provision without oci-engine does not install podman or grant OCI devices" {
   _provision ocibox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/oci-secrets"'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'PODMAN_PKGS='
-  assert_regex "$log" '/usr/local/bin/docker'
-  assert_regex "$log" "touch '/var/lib/acq/oci-ready'"
-  assert_regex "$log" '/etc/containers/storage\.conf'
-  assert_regex "$log" 'driver = ..vfs..'
-  assert_regex "$log" 'mount_program'
-  assert_regex "$log" 'fuse-overlayfs'
-  assert_regex "$log" 'uidmap'
-  assert_regex "$log" 'passt'
-  assert_regex "$log" 'slirp4netns'
-  assert_regex "$log" 'exec podman'
-  refute_regex "$log" 'exec sudo -n podman'
-  assert_regex "$log" '/dev/net/tun'
-  assert_regex "$log" '/dev/fuse'
-  assert_regex "$log" 'chown root:agent'
-  assert_regex "$log" 'unqualified-search-registries = ...docker.io...'
-  assert_regex "$log" 'docker\.io/library/hello-world'
-  assert_regex "$log" 'short-name-mode = ...SHORT_NAME_MODE.'
-  assert_regex "$log" 'SHORT_NAME_MODE=enforcing'
-  refute_regex "$log" 'SHORT_NAME_MODE=permissive'
-  assert_regex "$log" 'msb exec ocibox -u 0 -e PODMAN_PKGS='
-  assert_regex "$log" 'msb exec ocibox -u agent -e HOME=/home/agent'
-  assert_regex "$log" 'acq-oci-selftest'
-}
-
-@test "msb: ACQ_MSB_SHORT_NAME_MODE=permissive threads the permissive value" {
-  _provision ocipermbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/oci-perm-secrets" ACQ_MSB_SHORT_NAME_MODE=permissive'
-  local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'SHORT_NAME_MODE=permissive'
-  refute_regex "$log" 'SHORT_NAME_MODE=enforcing'
-}
-
-@test "msb: an invalid ACQ_MSB_SHORT_NAME_MODE warns and falls back to enforcing" {
-  _provision ocibadbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/oci-bad-secrets" ACQ_MSB_SHORT_NAME_MODE="bogus; rm -rf /"'
-  assert_output --partial 'invalid ACQ_MSB_SHORT_NAME_MODE'
-  local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'SHORT_NAME_MODE=enforcing'
-  refute_regex "$log" 'SHORT_NAME_MODE=bogus'
-  refute_regex "$log" 'rm -rf /'
-}
-
-@test "msb: the OCI setup is skipped when the ready marker already exists" {
-  _provision ocirdybox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ociready-secrets" STUB_OCI_READY=1'
-  local log; log=$(cat "$CALLS")
-  assert_regex "$log" "test -f '/var/lib/acq/oci-ready'"
   refute_regex "$log" 'PODMAN_PKGS='
   refute_regex "$log" '/usr/local/bin/docker'
-}
-
-@test "msb: ACQ_MSB_ENSURE_OCI=0 skips the OCI step entirely" {
-  _provision ocioffbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ocioff-secrets" ACQ_MSB_ENSURE_OCI=0'
-  local log; log=$(cat "$CALLS")
-  refute_regex "$log" 'PODMAN_PKGS='
-  refute_regex "$log" 'oci-ready'
-}
-
-@test "msb: an OCI setup failure is fail-soft (rc 0, warns, marker not touched)" {
-  _provision ocifailbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ocifail-secrets" STUB_OCI_SETUP_FAIL=1'
-  assert_success
-  assert_output --partial 'could not provision an OCI engine'
-  refute_regex "$(cat "$CALLS")" "touch '/var/lib/acq/oci-ready'"
-}
-
-@test "msb: an unsafe ACQ_MSB_PODMAN_PKGS is refused and never reaches an exec" {
-  _provision ociinjbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/ociinj-secrets" ACQ_MSB_PODMAN_PKGS="podman;rm -rf"'
-  assert_output --partial 'unsafe characters'
-  refute_regex "$(cat "$CALLS")" 'rm -rf'
+  refute_regex "$log" "touch '/var/lib/acq/oci-ready'"
+  refute_regex "$log" '/etc/containers/storage\.conf'
+  refute_regex "$log" 'acq-oci-selftest'
+  refute_regex "$log" '/dev/net/tun'
+  refute_regex "$log" '/dev/fuse'
+  refute_regex "$log" 'chown root:agent'
 }
 
 # msb session parity: sbx is a full session transport, so
@@ -368,6 +264,36 @@ _attach() { # PRE_SNIPPET NAME
   refute_regex "$log" 'export SHELL=\$target'
 }
 
+@test "rc.d(msb): login-profile bridge sources kit-owned shell snippets lexically" {
+  _provision rcdbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/rcd-secrets"'
+  local log; log=$(cat "$CALLS")
+  # The bridge sources ~/.rc.d in deterministic C-collation order (ADR-0030):
+  # it must iterate an `LC_ALL=C ls "$HOME"/.rc.d` list, NOT a bare locale-
+  # dependent `*.sh` glob whose order can vary by guest locale.
+  assert_regex "$log" 'LC_ALL=C ls'
+  assert_regex "$log" '\$HOME./.rc.d'
+  assert_regex "$log" 'for _acq_rc in'
+  assert_regex "$log" 'SC1090'
+  assert_regex "$log" 'unset _acq_rc'
+  # Non-.sh files are skipped by the in-loop suffix case guard.
+  assert_regex "$log" '\*.sh) ;; \*) continue'
+  refute_regex "$log" 'direnv allow'
+}
+
+@test "rc.d: generated login-profile block executes snippets in byte order" {
+  local home="$STUBDIR/rc-home"
+  mkdir -p "$home/.rc.d"
+  printf '%s\n' 'printf "%s\n" 2-b >> "$HOME/order"' > "$home/.rc.d/2-b.sh"
+  printf '%s\n' 'printf "%s\n" 10-a >> "$HOME/order"' > "$home/.rc.d/10-a.sh"
+  printf '%s\n' 'printf "%s\n" skipped >> "$HOME/order"' > "$home/.rc.d/30-skip.txt"
+  acq_login_profile_rc_block > "$home/profile"
+
+  run env HOME="$home" bash -c '. "$HOME/profile"; cat "$HOME/order"'
+
+  assert_success
+  assert_output $'10-a\n2-b'
+}
+
 @test "msb #426: the heal only rewrites a .profile acq owns outright (appended lines survive)" {
   # Tools like rustup append to ~/.profile below acq's bridge. The rewrite
   # condition must be marker-present AND still just the bridge (line-count
@@ -376,7 +302,9 @@ _attach() { # PRE_SNIPPET NAME
   _provision profguard shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/profguard-secrets"'
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'acq-login-profile "\$profile"'
-  assert_regex "$log" '\-le 3'
+  # Bound = 3 header lines + the shared rc-block's line count (common.sh
+  # acq_login_profile_rc_block), computed host-side and passed as $3/max_lines.
+  assert_regex "$log" '\-le .\$max_lines'
 }
 
 @test "msb: repeated acq exec reads the workspace marker once per process (cached)" {
@@ -456,4 +384,78 @@ _attach() { # PRE_SNIPPET NAME
   local log; log=$(cat "$CALLS")
   assert_regex "$log" '\-e SHELL=/bin/sh badshbox -- /bin/sh -l'
   refute_regex "$log" 'rm -rf'
+}
+
+@test "msb: default user exec stays direct backend argv in the primary repo" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ACQ_SESSION_KIND=exec
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local line; line=$(grep -- 'wsbox -- git status' "$CALLS")
+  assert_regex "$line" '\-w /tmp/myrepo'
+  assert_regex "$line" 'wsbox -- git status'
+  refute_regex "$line" 'ACQ_WORKSPACE=/tmp/myrepo'
+  refute_regex "$line" 'direnv export| sh -c | -lc '
+}
+
+@test "msb: opt-in user exec evaluates already-approved direnv export" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo ACQ_ACTIVATE_PROJECT_ENV=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ACQ_SESSION_KIND=exec
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" '-e ACQ_WORKSPACE=/tmp/myrepo wsbox -- sh -c'
+  assert_regex "$log" 'direnv export sh'
+  refute_regex "$log" 'direnv allow| -lc '
+}
+
+@test "msb: opt-in non-interactive exec does not use login flags" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo STUB_AGENT_PASSWD_SHELL=/bin/sh
+    export ACQ_ACTIVATE_PROJECT_ENV=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    ACQ_SESSION_KIND=exec
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'wsbox -- sh -c'
+  refute_regex "$log" '/bin/sh -lc|/bin/bash -lc'
+}
+
+@test "msb: internal exec helpers are not wrapped as user project sessions" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo ACQ_ACTIVATE_PROJECT_ENV=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'wsbox -- git status'
+  refute_regex "$log" 'ACQ_WORKSPACE=/tmp/myrepo'
+  refute_regex "$log" 'direnv export'
+}
+
+@test "msb: inherited session marker cannot wrap internal helper exec" {
+  : > "$CALLS"
+  run bash -c '
+    export STUB_RECORDED_WORKSPACE=/tmp/myrepo ACQ_ACTIVATE_PROJECT_ENV=1 ACQ_SESSION_KIND=exec
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_run wsbox -- git status >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'wsbox -- git status'
+  refute_regex "$log" 'ACQ_WORKSPACE=/tmp/myrepo'
+  refute_regex "$log" 'direnv export'
 }

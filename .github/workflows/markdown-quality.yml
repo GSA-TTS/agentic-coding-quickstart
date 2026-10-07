@@ -4,7 +4,8 @@ on:
   pull_request:
     paths:
       - '**/*.md'
-      - '.markdownlint-cli2.yaml'
+      - '.markdownlint.jsonc'
+      - '.markdownlintignore'
       - '.markdown-link-check.json'
       - '.github/linters/package*.json'
   push:
@@ -12,7 +13,8 @@ on:
       - main
     paths:
       - '**/*.md'
-      - '.markdownlint-cli2.yaml'
+      - '.markdownlint.jsonc'
+      - '.markdownlintignore'
       - '.markdown-link-check.json'
       - '.github/linters/package*.json'
 
@@ -46,23 +48,39 @@ jobs:
           npm ci
           npm audit --audit-level=high
 
-      # No glob arguments: file selection comes from .markdownlint-cli2.yaml, the
-      # same source the pre-commit hook and `npm run lint:md` read, so none of the
-      # three can select a different set. The version comes from
-      # .github/linters/package-lock.json (installed above), so there is no second
-      # version pin to drift.
+      # File selection comes from the same command used by `npm run lint:md` and
+      # pre-commit, so none of the three can select a different set. The version
+      # comes from .github/linters/package-lock.json (installed above), so there
+      # is no second version pin to drift.
+      #
+      # --dot is required: markdownlint's globber skips dot-directories by
+      # default, which silently excluded .github/**/*.md (e.g.
+      # .github/pull_request_template.md) from every invocation.
       - name: Run markdownlint
-        run: npx --prefix .github/linters markdownlint-cli2
-
-      # A markdownlint-cli2 run that matched no files still exits 0, so assert the
-      # file count is non-zero rather than trusting the exit status alone.
-      - name: Assert markdownlint actually linted files
+        shell: bash
         run: |
-          count=$(npx --prefix .github/linters markdownlint-cli2 2>&1 \
-            | sed -n 's/^Linting: \([0-9]\{1,\}\) file.*/\1/p')
-          echo "markdownlint linted ${count:-0} file(s)"
-          if [ "${count:-0}" -lt 1 ]; then
-            echo "::error::markdownlint matched no files - check globs in .markdownlint-cli2.yaml" >&2
+          set -euo pipefail
+          .github/linters/node_modules/.bin/markdownlint --config .markdownlint.jsonc --ignore-path .markdownlintignore --dot "**/*.md"
+
+      # A markdownlint run that matched no files can still exit 0, so assert the
+      # repository has tracked markdown files after applying .markdownlintignore.
+      #
+      # The ignore set is evaluated by GIT's gitignore engine via --exclude-from,
+      # not by hand-translating .markdownlintignore into `:!` pathspecs. Those are
+      # different matchers: a bare `test/vendor` pathspec matches only that exact
+      # path, so a naive translation left vendored files in the count and the
+      # assertion drifted above the set markdownlint actually linted. Reusing the
+      # same gitignore semantics markdownlint applies keeps them in agreement.
+      - name: Assert markdownlint actually linted files
+        shell: bash
+        run: |
+          set -euo pipefail
+          total=$(git ls-files -- '*.md' | wc -l | tr -d ' ')
+          ignored=$(git ls-files -c -i --exclude-from=.markdownlintignore -- '*.md' | wc -l | tr -d ' ')
+          count=$((total - ignored))
+          echo "markdownlint linted ${count} file(s) (${total} tracked, ${ignored} ignored)"
+          if [ "${count}" -lt 1 ]; then
+            echo "::error::markdownlint matched no files - check .markdownlintignore" >&2
             exit 1
           fi
 

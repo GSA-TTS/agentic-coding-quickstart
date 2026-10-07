@@ -36,17 +36,22 @@ PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # the bundle-version anchor recorded in a sandbox's host-side provenance record
 # (see ACQ_BUILTIN_BUNDLE below + the provenance helpers) so acq can tell a
 # stale sandbox from a current one.
-PATTERNS_KIT_REF="6c6753c60a2b24322fb2e8c0d8e8af60c56ede8f"  # agentic-coding-patterns v1.9.0
+# agentic-coding-patterns v1.12.0 release SHA.
+PATTERNS_KIT_REF="56d1f5f49ef928f50e61aa64a93d618b3d21c415"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
-USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/usai-provider"
+USAI_PROVIDER_KIT_NAME="usai-provider"
+# shellcheck disable=SC2034  # consumed by _acq_builtin_kit_ref after sourcing
+USAI_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/${USAI_PROVIDER_KIT_NAME}"
+# shellcheck disable=SC2034  # consumed by _acq_builtin_kit_ref after sourcing
 PLAYBOOK_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/agentic-coding-playbook"
+# shellcheck disable=SC2034  # consumed by _acq_builtin_kit_ref after sourcing
 ZSCALER_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/zscaler-ca-certificate"
+# shellcheck disable=SC2034  # consumed by _acq_builtin_kit_ref after sourcing
 GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_DIR}/git-ssh-sign"
 
 # Neutral kit directory names (relative to PATTERNS_KIT_DIR), in apply order.
-# kit-translate.sh resolves a kit's spec.yaml + files/ from these names. The
-# built-in kit set maps 1:1 to the four *_KIT refs above.
+# kit-translate.sh resolves a kit's spec.yaml + files/ from these names.
 #
 # ORDER MATTERS: zscaler-ca-certificate is applied FIRST so its CA trust is in
 # place before any later kit makes an outbound HTTPS request. Behind a
@@ -56,7 +61,17 @@ GITSSHSIGN_KIT="${PATTERNS_KIT_REPO}#ref=${PATTERNS_KIT_REF}&dir=${PATTERNS_KIT_
 # intercepting CA is already trusted. Establishing trust first makes the rest
 # of the bundle succeed on corporate networks.
 # shellcheck disable=SC2034  # consumed by `acq kit list` in the acq entry point
-ACQ_KIT_NAMES=(zscaler-ca-certificate usai-provider agentic-coding-playbook git-ssh-sign)
+ACQ_KIT_NAMES=(zscaler-ca-certificate "$USAI_PROVIDER_KIT_NAME" agentic-coding-playbook git-ssh-sign)
+
+# One-line descriptions for the built-in kits, parallel to ACQ_KIT_NAMES, shown
+# as the frozen ("always applied") rows in the `acq configure` picker (ADR-0031).
+# shellcheck disable=SC2034  # consumed by acq_configure / create_time_kit_picker
+ACQ_KIT_DESCS=(
+  "Zscaler/corporate CA trust so TLS-intercepting proxies don't break fetches"
+  "USAi provider + model config for OpenCode (endpoints, key wiring)"
+  "Federal agent rules and skills from the agentic-coding playbook"
+  "SSH-based git commit signing for the agent's commits"
+)
 
 # Built-in bundle identity. This mirrors the `provenance` block the usai-provider
 # kit declares at the pinned PATTERNS_KIT_REF. acq records these in a sandbox's
@@ -73,12 +88,111 @@ ACQ_BUILTIN_BUNDLE_REPO="GSA-TTS/agentic-coding-patterns"
 ACQ_EXTRA_KITS="${ACQ_EXTRA_KITS:-}"
 ACQ_EXTRA_KIT_SOURCES="${ACQ_EXTRA_KIT_SOURCES:-}"
 
+# Record whether ACQ_EXTRA_KITS came from the ENVIRONMENT (vs. being empty or set
+# later by acq itself). The configured-default and create-time picker paths honor
+# env > config > interactive: a user who exported ACQ_EXTRA_KITS gets it verbatim
+# and is never re-prompted or overridden (ADR-0031). Captured once at load time.
+if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
+  ACQ_EXTRA_KITS_FROM_ENV=1
+else
+  ACQ_EXTRA_KITS_FROM_ENV=""
+fi
+
+# ---------------------------------------------------------------------------
+# Opt-in kit catalog (for `acq configure`; ADR-0031)
+# ---------------------------------------------------------------------------
+# The OPT-IN community kits acq can offer in the interactive picker, sourced from
+# the SAME pinned patterns bundle as the built-ins (PATTERNS_KIT_REF /
+# PATTERNS_KIT_DIR) so their refs stay pinned in lockstep. The four built-in kits
+# above are always applied and are NOT listed here (the picker shows them as
+# locked/pre-checked, informational only).
+#
+# Parallel arrays (bash 3.2 safe — no associative arrays): NAME[i] is the kit
+# directory under PATTERNS_KIT_DIR; DESC[i] is the one-line picker description.
+# `prime-agent` is intentionally omitted: it is a skeleton at the current pin
+# (see the patterns kits.yaml parity note) and would be non-functional if
+# offered. Add it here once it is functional. Heavier kits such as `oci-engine`
+# still belong here when they are functional; the picker description must make
+# their create-time cost clear.
+# shellcheck disable=SC2034  # consumed by `acq configure` (cross-function reader)
+ACQ_OPTIN_KIT_NAMES=(openchamber paseo oci-engine)
+# shellcheck disable=SC2034
+ACQ_OPTIN_KIT_DESCS=(
+  "Browser UI for OpenCode alongside the terminal TUI (publishes ports 3000/4096)"
+  "Self-hosted Paseo browser web UI for coding agents (one port, loopback only)"
+  "Rootless podman for docker run / docker compose inside the sandbox (installs packages)"
+)
+
+# _acq_optin_kit_ref NAME — echo the fully-pinned git+https kit ref for an opt-in
+# kit NAME, built exactly like the built-in *_KIT refs (same repo/ref/dir), so a
+# picked kit is pinned to the same patterns bundle as everything else.
+_acq_optin_kit_ref() {
+  printf '%s#ref=%s&dir=%s/%s\n' \
+    "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "${1:?kit name required}"
+}
+
+# _acq_apply_configured_extra_kits — fold the configured-default extra kits
+# (config.yaml `extra_kits:`, written by `acq configure`) into ACQ_EXTRA_KITS for
+# this invocation, so a durable default behaves like an env-supplied extra. An
+# env-supplied ACQ_EXTRA_KITS is authoritative and is NOT overridden (env > config,
+# matching the backend-resolution precedence and the `--kit`/env layering). No-op
+# when nothing is configured. Idempotent (guarded so a second call is cheap).
+_ACQ_CONFIGURED_KITS_APPLIED=""
+_acq_apply_configured_extra_kits() {
+  [ -z "$_ACQ_CONFIGURED_KITS_APPLIED" ] || return 0
+  # Env wins: if the user exported ACQ_EXTRA_KITS, respect it verbatim.
+  if [ -n "${ACQ_EXTRA_KITS_FROM_ENV:-}" ]; then
+    _ACQ_CONFIGURED_KITS_APPLIED=1
+    return 0
+  fi
+  local configured names ref
+  configured=$(_acq_config_read_field extra_kits)
+  if [ -z "$configured" ]; then
+    _ACQ_CONFIGURED_KITS_APPLIED=1
+    return 0
+  fi
+  # The stored value is a list of opt-in kit NAMES. Raw refs are intentionally
+  # not accepted from durable config; use ACQ_EXTRA_KITS or --kit for those.
+  names="$configured"
+  local out="" tok known k
+  for tok in $names; do
+    known=""
+    for k in ${ACQ_OPTIN_KIT_NAMES[@]+"${ACQ_OPTIN_KIT_NAMES[@]}"}; do
+      [ "$k" = "$tok" ] && { known=1; break; }
+    done
+    if [ -z "$known" ]; then
+      echo "acq: config extra_kits contains unknown kit '${tok}'" >&2
+      echo "     Run 'acq configure' to choose catalog kits, or use ACQ_EXTRA_KITS/--kit for custom refs." >&2
+      return 1
+    fi
+    ref=$(_acq_optin_kit_ref "$tok")
+    out="${out:+$out }$ref"
+  done
+  if [ -z "$out" ]; then
+    _ACQ_CONFIGURED_KITS_APPLIED=1
+    return 0
+  fi
+  ACQ_EXTRA_KITS="$out"
+  _ACQ_CONFIGURED_KITS_APPLIED=1
+  acq_debug "config: applied configured extra_kits: $out"
+  return 0
+}
+
 # Update-check opt-out. When ACQ_UPDATE_CHECK=0, `acq run` never
 # runs the stale-sandbox check (no provenance comparison, no prompt). The
 # explicit `acq kit check` / `acq kit update` commands still work — the opt-out
 # only silences the automatic per-run check. `acq run --no-update-check` sets
 # this for a single invocation (parsed in the acq entry point).
 ACQ_UPDATE_CHECK="${ACQ_UPDATE_CHECK:-1}"
+
+# Human-owned activation contract: acq can detect direnv/devenv workspaces and
+# print guidance, but does not evaluate project-provided activation files unless
+# the user explicitly opts in for the current invocation/session.
+ACQ_ACTIVATE_PROJECT_ENV="${ACQ_ACTIVATE_PROJECT_ENV:-0}"
+# In-process marker set only by acq dispatch before user-facing exec/shell/attach.
+# Ignore inherited environment values so internal helper probes cannot be wrapped
+# by setting ACQ_SESSION_KIND outside acq.
+ACQ_SESSION_KIND=""
 
 # Kits supplied on the command line via `--kit <ref>` (repeatable) on
 # run/create. These are extracted from the arg list by extract_kit_flags (below)
@@ -87,13 +201,34 @@ ACQ_UPDATE_CHECK="${ACQ_UPDATE_CHECK:-1}"
 # neutral schema). Folded into the kit list by _build_kit_list, alongside
 # ACQ_EXTRA_KITS. One ref per element.
 ACQ_CLI_KITS=()
+ACQ_BUILTIN_KIT_COUNT=0
+ACQ_BUILTIN_SUPPORT_KIT_COUNT=0
+ACQ_AGENT_KIT_READY_CACHE=""
+
+# Host-port overrides supplied on the command line via `--publish HOST:GUEST`
+# (repeatable) on run/create, one `HOST:GUEST` pair per element (ADR-0034).
+# Extracted by extract_publish_flags BEFORE the args reach the backend: `msb
+# create` has its own `-p` that the adapter synthesizes from kit records, and sbx
+# has no host-port knob at all, so the raw flag must never reach either CLI. The
+# msb adapter folds these into its published-port records at provision time,
+# where they override a kit's mapping for the same guest port.
+ACQ_PUBLISH_FLAGS=()
 
 KIT_SOURCE_PREFIX="github.com/GSA-TTS/"
 KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
 
-# USAi endpoint constants
-USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
-KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
+# Transitional fallback defaults for the pinned usai-provider kit. ADR-0030's
+# target state is for the kit to export these provider facts as static metadata
+# consumable before sandbox creation. acq keeps these defaults only for backend
+# credential binding, key validation, and offline tests until that artifact exists.
+# These values are not authoritative once the artifact is available.
+USAI_PROVIDER_HOST="api.gsa.usai.gov"
+USAI_PROVIDER_BASE_URL="https://${USAI_PROVIDER_HOST}/api/v1"
+USAI_PROVIDER_KEY_ENV="USAI_API_KEY"
+USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_BASE_URL}/models"
+USAI_PROVIDER_KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
+USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_HOST}"
+USAI_PROVIDER_FACTS_SOURCE="fallback"
 
 # Source the shared agent catalog (single source of truth for agent tokens and
 # the sandbox-template image naming convention; issue #377). Both adapters also
@@ -139,6 +274,22 @@ if ! command -v acq_status >/dev/null 2>&1; then
   acq_spin_stop()  { :; }
 fi
 
+# Source the TTY-aware interactive prompt widgets (acq_prompt_multiselect /
+# acq_prompt_confirm) used by `acq configure` and the create-time picker (see
+# ADR-0031). Like progress.sh, all chrome is stderr-only and gated on an
+# interactive TTY; non-interactive callers take documented defaults and never
+# block. If the file is missing (older partial checkout), define no-op fallbacks
+# so `acq configure` degrades to "take defaults" rather than breaking.
+if [ -n "${ACQ_SCRIPT_DIR:-}" ] && [ -f "${ACQ_SCRIPT_DIR}/acq.backends/prompt.sh" ]; then
+  # shellcheck disable=SC1091
+  . "${ACQ_SCRIPT_DIR}/acq.backends/prompt.sh"
+fi
+if ! command -v acq_prompt_confirm >/dev/null 2>&1; then
+  # Fallback: echo nothing selected / honor the passed default (arg 2 = yes|no).
+  acq_prompt_multiselect() { printf '\n'; }
+  acq_prompt_confirm()     { [ "${2:-no}" = "yes" ] && return 0 || return 1; }
+fi
+
 # ============================================================================
 # Utility functions
 # ============================================================================
@@ -169,11 +320,148 @@ ACQ_MANAGED_SECRET_SERVICES=" usai github gitlab "
 # Only acq-managed services are importable; an unknown service echoes nothing.
 _acq_import_env_vars_for() {
   case "$1" in
-    usai)   printf 'USAI_API_KEY\n' ;;
+    usai)   printf '%s\n' "$USAI_PROVIDER_KEY_ENV" ;;
     github) printf 'GITHUB_TOKEN GH_TOKEN\n' ;;
     gitlab) printf 'GITLAB_TOKEN\n' ;;
     *)      printf '\n' ;;
   esac
+}
+
+_acq_provider_fact_safe_host() {
+  case "$1" in
+    ""|*://*|*/*|*..*|*[^A-Za-z0-9.,:-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+_acq_provider_fact_safe_env() {
+  case "$1" in
+    ""|[!A-Za-z_]*|*[!A-Za-z0-9_]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+_acq_provider_fact_safe_url() {
+  case "$1" in
+    https://*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+acq_provider_facts_load() {
+  local file="${1:-}" line key value schema="" id=""
+  local host="" base_url="" models_url="" key_env="" key_mgmt_url="" bind_hosts=""
+  [ -n "$file" ] || return 1
+  [ -f "$file" ] || return 2
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ""|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) return 1 ;; esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in
+      ACQ_PROVIDER_FACTS_SCHEMA) schema="$value" ;;
+      ACQ_PROVIDER_ID) id="$value" ;;
+      ACQ_PROVIDER_HOST) host="$value" ;;
+      ACQ_PROVIDER_BASE_URL) base_url="$value" ;;
+      ACQ_PROVIDER_MODELS_URL) models_url="$value" ;;
+      ACQ_PROVIDER_KEY_ENV) key_env="$value" ;;
+      ACQ_PROVIDER_KEY_MGMT_URL) key_mgmt_url="$value" ;;
+      ACQ_PROVIDER_BIND_HOSTS) bind_hosts="$value" ;;
+      *) return 1 ;;
+    esac
+  done < "$file"
+
+  [ "$schema" = "1" ] || return 1
+  [ "$id" = "usai" ] || return 1
+  _acq_provider_fact_safe_host "$host" || return 1
+  _acq_provider_fact_safe_url "$base_url" || return 1
+  _acq_provider_fact_safe_url "$models_url" || return 1
+  _acq_provider_fact_safe_url "$key_mgmt_url" || return 1
+  _acq_provider_fact_safe_env "$key_env" || return 1
+  [ -n "$bind_hosts" ] || bind_hosts="$host"
+  _acq_provider_fact_safe_host "$bind_hosts" || return 1
+
+  USAI_PROVIDER_HOST="$host"
+  USAI_PROVIDER_BASE_URL="$base_url"
+  USAI_PROVIDER_MODELS_URL="$models_url"
+  USAI_PROVIDER_KEY_ENV="$key_env"
+  USAI_PROVIDER_KEY_MGMT_URL="$key_mgmt_url"
+  # shellcheck disable=SC2034  # consumed by adapters/tests after facts load
+  USAI_PROVIDER_BIND_HOSTS="$bind_hosts"
+  # shellcheck disable=SC2034  # consumed by diagnostics/tests after facts load
+  USAI_PROVIDER_FACTS_SOURCE="$file"
+}
+
+acq_provider_facts_load_from_kit() {
+  local kitref="${1:-$USAI_KIT}" base_dir="${2:-}" kitdir facts rc
+  if [ -z "$base_dir" ]; then
+    base_dir="${ACQ_PROVIDER_FACTS_CACHE_DIR:-${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}/provider-facts}"
+  fi
+  mkdir -p "$base_dir" || return 3
+  if ! command -v kit_translate_fetch >/dev/null 2>&1; then
+    return 3
+  fi
+  kitdir=$(kit_translate_fetch "$kitref" "$base_dir/usai-provider") || return 3
+  facts="$kitdir/provider-facts/usai.env"
+  acq_provider_facts_load "$facts"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2) return 2 ;;
+    *) echo "acq: invalid provider facts artifact: $facts" >&2; return 1 ;;
+  esac
+}
+
+acq_provider_facts_use_fallback() {
+  USAI_PROVIDER_HOST="api.gsa.usai.gov"
+  USAI_PROVIDER_BASE_URL="https://${USAI_PROVIDER_HOST}/api/v1"
+  USAI_PROVIDER_KEY_ENV="USAI_API_KEY"
+  USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_BASE_URL}/models"
+  USAI_PROVIDER_KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
+  # shellcheck disable=SC2034  # consumed by adapters/tests after facts load
+  USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_HOST}"
+  # shellcheck disable=SC2034  # consumed by diagnostics/tests after facts load
+  USAI_PROVIDER_FACTS_SOURCE="fallback"
+}
+
+acq_provider_facts_load_from_kit_or_fallback() {
+  local provider_facts_err provider_facts_rc
+  if provider_facts_err=$(acq_provider_facts_load_from_kit "$@" 2>&1); then
+    provider_facts_rc=0
+  else
+    provider_facts_rc=$?
+  fi
+  case "$provider_facts_rc" in
+    0) : ;;
+    1)
+      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
+      return 1
+      ;;
+    2)
+      acq_provider_facts_use_fallback
+      acq_debug "provider facts unavailable from kit; using transitional fallback defaults"
+      ;;
+    3)
+      acq_provider_facts_use_fallback
+      echo "acq: warning: provider facts could not be fetched; using transitional fallback defaults" >&2
+      acq_debug "provider facts fetch failed; using transitional fallback defaults"
+      ;;
+    *)
+      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
+      return "$provider_facts_rc"
+      ;;
+  esac
+  # msb derives this adapter-local binding host when sourced, before lazy facts load.
+  if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ]; then
+    # shellcheck disable=SC2034  # consumed by msb adapter functions at dispatch
+    ACQ_MSB_USAI_HOST="$USAI_PROVIDER_BIND_HOSTS"
+  fi
+  return 0
 }
 
 # _acq_import_detect_var SERVICE -> prints the NAME of the FIRST of SERVICE's
@@ -509,11 +797,162 @@ split_noglob() {
   eval "$_name=(\"\$@\")"
 }
 
-# Assemble the full kit list: built-ins, then extras.
+_acq_builtin_kit_ref() {
+  case "${1:-}" in
+    zscaler-ca-certificate) printf '%s\n' "$ZSCALER_KIT" ;;
+    "$USAI_PROVIDER_KIT_NAME") printf '%s\n' "$USAI_KIT" ;;
+    agentic-coding-playbook) printf '%s\n' "$PLAYBOOK_KIT" ;;
+    git-ssh-sign) printf '%s\n' "$GITSSHSIGN_KIT" ;;
+    *) return 1 ;;
+  esac
+}
+
+_acq_builtin_support_kit_names() {
+  printf '%s\n' zscaler-ca-certificate "$USAI_PROVIDER_KIT_NAME" agentic-coding-playbook git-ssh-sign
+}
+
+_acq_agent_builtin_kit_ref() {
+  local kit_name
+  kit_name=$(acq_agent_builtin_kit_name "$1") || return 1
+  if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_AGENT_KIT:-}" ]; then
+    printf '%s\n' "$ACQ_TEST_AGENT_KIT"
+    return 0
+  fi
+  printf '%s#ref=%s&dir=%s/%s\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$kit_name"
+}
+
+kit_spec_agent_field() {
+  local spec="$1" key="$2"
+  [ -f "$spec" ] || return 1
+  awk -v key="$key" '
+    function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); return s }
+    /^agent:[[:space:]]*($|#)/ { in_agent=1; next }
+    /^[^[:space:]#][^:]*:/ { in_agent=0 }
+    in_agent {
+      line=$0
+      sub(/[[:space:]]*#.*/,"",line)
+      if (line ~ "^  " key ":[[:space:]]*") {
+        sub("^  " key ":[[:space:]]*","",line)
+        line=trim(line)
+        gsub(/^\"|\"$/, "", line)
+        gsub(/^'\''|'\''$/, "", line)
+        if (line != "") print line
+        exit
+      }
+    }
+  ' "$spec"
+}
+
+acq_validate_agent_builtin_kit_dir() {
+  local agent="$1" kitdir="$2" spec schema kind kit_name agent_name entrypoint
+  local expected_kit expected_entrypoint
+  expected_kit=$(acq_agent_builtin_kit_name "$agent") || return 1
+  expected_entrypoint=$(acq_agent_kit_entrypoint "$agent") || return 1
+  spec="$kitdir/spec.yaml"
+  [ -f "$spec" ] || return 1
+
+  schema=$(kit_spec_field "$spec" schemaVersion) || schema=""
+  kind=$(kit_spec_field "$spec" kind) || kind=""
+  kit_name=$(kit_spec_field "$spec" name) || kit_name=""
+  agent_name=$(kit_spec_agent_field "$spec" name) || agent_name=""
+  entrypoint=$(kit_spec_agent_field "$spec" entrypoint) || entrypoint=""
+
+  [ "$schema" = "hybrid/v1" ] || return 1
+  [ "$kind" = "mixin" ] || return 1
+  [ "$kit_name" = "$expected_kit" ] || return 1
+  [ "$agent_name" = "$agent" ] || return 1
+  [ "$entrypoint" = "$expected_entrypoint" ] || return 1
+}
+
+acq_validate_agent_builtin_kit_ref() {
+  local agent="$1" kitref="$2" base_dir="${3:-}" kitdir
+  if [ -z "$base_dir" ]; then
+    base_dir="${ACQ_STATE_DIR:-${TMPDIR:-/tmp}/acq}/agent-kit-validation/$agent"
+  fi
+  kitdir=$(kit_translate_fetch "$kitref" "$base_dir") || return 1
+  acq_validate_agent_builtin_kit_dir "$agent" "$kitdir"
+}
+
+acq_agent_builtin_kit_ready() {
+  local agent="$1" kit cache_key cache_value
+  acq_agent_builtin_kit_enabled "$agent" || return 1
+  kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
+  cache_key="${agent}:$(printf '%s' "$kit" | cksum | cut -d' ' -f1)"
+  cache_value=$(printf '%s\n' "$ACQ_AGENT_KIT_READY_CACHE" | awk -F'\t' -v key="$cache_key" '$1 == key { print $2; exit }')
+  case "$cache_value" in
+    yes) return 0 ;;
+    no) return 1 ;;
+  esac
+  if acq_validate_agent_builtin_kit_ref "$agent" "$kit"; then
+    ACQ_AGENT_KIT_READY_CACHE="${ACQ_AGENT_KIT_READY_CACHE}${cache_key}	yes
+"
+    return 0
+  fi
+  ACQ_AGENT_KIT_READY_CACHE="${ACQ_AGENT_KIT_READY_CACHE}${cache_key}	no
+"
+  return 1
+}
+
+_acq_selected_support_kit_refs() {
+  local name kit
+  for name in $(_acq_builtin_support_kit_names); do
+    kit=$(_acq_builtin_kit_ref "$name") || return 1
+    printf '%s\n' "$kit"
+  done
+}
+
+_acq_selected_builtin_kit_refs() {
+  local agent="${1:-}" kit
+  _acq_selected_support_kit_refs || return 1
+  if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
+      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_ready "$agent"; then
+    kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
+    printf '%s\n' "$kit"
+  fi
+}
+
+acq_selected_agent_kit_summary() {
+  local agent="${1:-}" kit_name entrypoint install_owner start_owner apply_state="deferred"
+  [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || return 1
+  kit_name=$(acq_agent_builtin_kit_name "$agent") || return 1
+  entrypoint=$(acq_agent_kit_entrypoint "$agent") || entrypoint=""
+  install_owner=$(acq_agent_kit_install_owner "$agent") || install_owner=""
+  start_owner=$(acq_agent_kit_start_owner "$agent") || start_owner=""
+  acq_agent_builtin_kit_ready "$agent" && apply_state="enabled"
+  printf 'agent=%s kit=%s entrypoint=%s install_owner=%s start_owner=%s apply=%s\n' \
+    "$agent" "$kit_name" "${entrypoint:-none}" "${install_owner:-none}" \
+    "${start_owner:-none}" "$apply_state"
+}
+
+acq_print_selected_agent_kit() {
+  local agent="${1:-}" summary
+  summary=$(acq_selected_agent_kit_summary "$agent") || return 0
+  if [ "${summary##*apply=}" = "enabled" ]; then
+    printf 'acq: selected built-in agent kit: %s\n' "$summary" >&2
+  else
+    printf 'acq: built-in agent kit candidate (deferred; no agent kit applied): %s\n' "$summary" >&2
+  fi
+}
+
+# Assemble the full kit list: selected built-ins, then extras.
 # Zscaler CA trust FIRST (see ACQ_KIT_NAMES) so later network-fetching kits
 # succeed behind a TLS-intercepting proxy.
+# shellcheck disable=SC2120  # optional agent argument; many callers use default
 _build_kit_list() {
-  KITS=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
+  local agent="${1:-}" kit
+  KITS=()
+  while IFS= read -r kit; do
+    [ -n "$kit" ] && KITS+=("$kit")
+  done < <(_acq_selected_support_kit_refs)
+  # shellcheck disable=SC2034  # read by adapters/tests after _build_kit_list
+  ACQ_BUILTIN_SUPPORT_KIT_COUNT="${#KITS[@]}"
+  if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
+      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_ready "$agent"; then
+    kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
+    KITS+=("$kit")
+  fi
+  # shellcheck disable=SC2034  # read by adapters/tests after _build_kit_list
+  ACQ_BUILTIN_KIT_COUNT="${#KITS[@]}"
   if [ -n "$ACQ_EXTRA_KITS" ]; then
     local _extra_kits=()
     split_noglob _extra_kits "$ACQ_EXTRA_KITS"
@@ -687,6 +1126,78 @@ host_path() {
     [ -n "$_out" ] && p="$_out"
   fi
   printf '%s\n' "$p"
+}
+
+acq_project_env_kind() {
+  local ws="${1:-}"
+  [ -n "$ws" ] && [ -d "$ws" ] || return 1
+  if [ -f "$ws/.envrc" ]; then
+    printf 'direnv\n'
+    return 0
+  fi
+  if [ -f "$ws/devenv.nix" ] || [ -f "$ws/devenv.yaml" ] || [ -f "$ws/devenv.lock" ]; then
+    printf 'devenv\n'
+    return 0
+  fi
+  return 1
+}
+
+advise_project_env_activation() {
+  local ws="${1:-}" kind
+  kind=$(acq_project_env_kind "$ws" 2>/dev/null || true)
+  [ -n "$kind" ] || return 0
+  [ "${ACQ_PROJECT_ENV_NOTICE:-1}" = "0" ] && return 0
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ]; then
+    echo "acq: project environment detected ($kind); ACQ_ACTIVATE_PROJECT_ENV=1 will" >&2
+    echo "     use already-approved direnv export when available." >&2
+    return 0
+  fi
+  echo "acq: project environment detected ($kind) in $ws." >&2
+  echo "     acq will not run project activation, 'direnv allow', or 'devenv shell' automatically." >&2
+  echo "     If you trust this repo and have approved its .envrc yourself, re-run" >&2
+  echo "     this acq command with ACQ_ACTIVATE_PROJECT_ENV=1 to use direnv export." >&2
+}
+
+acq_session_is_user() {
+  case "${ACQ_SESSION_KIND:-}" in
+    exec|shell|attach) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+acq_guest_exec_script() {
+  printf '%s\n' 'set -e; if [ -n "${ACQ_WORKSPACE:-}" ] && [ -d "$ACQ_WORKSPACE" ]; then cd "$ACQ_WORKSPACE"; fi; if [ -f .envrc ]; then if command -v direnv >/dev/null 2>&1; then eval "$(direnv export sh)"; else echo "acq: .envrc found, but direnv is not installed in this sandbox; continuing without activation." >&2; fi; elif [ -f devenv.nix ] || [ -f devenv.yaml ] || [ -f devenv.lock ]; then echo "acq: devenv files found, but no .envrc/direnv activation is available; continuing without activation." >&2; fi; exec "$@"'
+}
+
+acq_guest_shell_script() {
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ]; then
+    printf '%s\n' 'set -e; shell="${1:-${SHELL:-/bin/sh}}"; if [ -n "${ACQ_WORKSPACE:-}" ] && [ -d "$ACQ_WORKSPACE" ]; then cd "$ACQ_WORKSPACE"; fi; if [ -f .envrc ]; then if command -v direnv >/dev/null 2>&1; then eval "$(direnv export sh)"; else echo "acq: .envrc found, but direnv is not installed in this sandbox; continuing without activation." >&2; fi; elif [ -f devenv.nix ] || [ -f devenv.yaml ] || [ -f devenv.lock ]; then echo "acq: devenv files found, but no .envrc/direnv activation is available; continuing without activation." >&2; fi; exec "$shell" -l'
+  else
+    printf '%s\n' 'set -e; shell="${1:-${SHELL:-/bin/sh}}"; if [ -n "${ACQ_WORKSPACE:-}" ] && [ -d "$ACQ_WORKSPACE" ]; then cd "$ACQ_WORKSPACE"; fi; exec "$shell" -l'
+  fi
+}
+
+# acq_login_profile_rc_block — emit the guest-side POSIX-sh snippet that a login
+# ~/.profile uses to source the kit-owned ~/.rc.d/*.sh drop-ins. Keep this as the
+# single backend-neutral source of the bridge text: msb writes it from
+# _acq_msb_ensure_agent_shell, and sbx writes the same bytes from
+# _acq_sbx_ensure_rc_bridge.
+#
+# Emitted lines are evaluated by the guest login shell. They gate to bash,
+# list snippets with C collation for deterministic order, preserve the readable
+# and charset guards, and clean up the loop variable after sourcing.
+acq_login_profile_rc_block() {
+  printf '%s\n' 'if [ -n "$BASH_VERSION" ] && [ -d "$HOME/.rc.d" ]; then'
+  printf '%s\n' '  for _acq_rc in $(LC_ALL=C ls "$HOME"/.rc.d 2>/dev/null); do'
+  printf '%s\n' '    _acq_rc="$HOME/.rc.d/$_acq_rc"'
+  printf '%s\n' '    case "$_acq_rc" in *.sh) ;; *) continue ;; esac'
+  printf '%s\n' '    [ -r "$_acq_rc" ] || continue'
+  printf '%s\n' '    case "$_acq_rc" in *[!A-Za-z0-9._/-]*) continue ;; esac'
+  printf '%s\n' '    # shellcheck disable=SC1090'
+  printf '%s\n' '    . "$_acq_rc"'
+  printf '%s\n' '  done'
+  printf '%s\n' '  unset _acq_rc'
+  printf '%s\n' 'fi'
 }
 
 # _acq_valid_vsock_port PORT — succeed (return 0) iff PORT is an integer in
@@ -944,6 +1455,115 @@ extract_clone_flag() {
   done
 }
 
+# Extract the acq-owned `--publish HOST:GUEST` / `--publish=HOST:GUEST` flag
+# (repeatable) from a run/create arg list (ADR-0034). Populates, IN THE CURRENT
+# SHELL (so callers must not run this in a subshell/pipeline):
+#   ACQ_PUBLISH_FLAGS      — one `HOST:GUEST` pair per element, in order
+#   ACQ_PUBLISH_REMAINING  — the arg list with the --publish flags removed
+#
+# Returns non-zero on a malformed value, having explained what was wrong; the
+# caller must abort rather than create a sandbox missing a mapping the user
+# explicitly asked for. `HOST:GUEST` is REQUIRED in full: a bare `--publish 6868`
+# is ambiguous (host or guest?) and the guest port belongs to the kit, not to the
+# launcher, so acq refuses it instead of guessing.
+#
+# Like extract_kit_flags, scanning STOPS at the first `--` separator: everything
+# after it is agent args and is forwarded verbatim (an inner agent may have its
+# own `--publish`). The flag must never reach a backend CLI — `msb create` has a
+# native `-p` that acq synthesizes itself, and sbx has no equivalent at all.
+extract_publish_flags() {
+  ACQ_PUBLISH_FLAGS=()
+  ACQ_PUBLISH_REMAINING=()
+  local expect=0 arg rc=0
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    if [ "$expect" -eq 1 ]; then
+      _acq_validate_publish_pair "$arg" || rc=1
+      ACQ_PUBLISH_FLAGS+=("$arg")
+      expect=0
+      shift
+      continue
+    fi
+    case "$arg" in
+      --)          ACQ_PUBLISH_REMAINING+=("$@"); break ;;
+      --publish)   expect=1 ;;
+      --publish=*) _acq_validate_publish_pair "${arg#--publish=}" || rc=1
+                   ACQ_PUBLISH_FLAGS+=("${arg#--publish=}") ;;
+      *)           ACQ_PUBLISH_REMAINING+=("$arg") ;;
+    esac
+    shift
+  done
+  if [ "$expect" -eq 1 ]; then
+    echo "acq: --publish given with no value (expected HOST:GUEST)" >&2
+    rc=1
+  fi
+  return "$rc"
+}
+
+# Validate one `HOST:GUEST` pair (SI-10) — these values become an `-p` argv on a
+# backend CLI. Both sides must be integers 1..65535, spelled canonically.
+#
+# The digits-only `case` guard and the length cap come FIRST, deliberately:
+# `[ "$p" -ge 1 ]` compares arithmetically without octal-interpreting a leading
+# zero (so `0080` would silently mean 80, which is why a leading zero is refused
+# outright rather than accepted), but it ABORTS the shell with status 2 on a
+# wildly long digit string. Never use `$((...))` on these: `$((0080))` is a fatal
+# invalid-octal error, not a comparison.
+_acq_validate_publish_pair() {
+  local pair="${1:-}" h g p
+  case "$pair" in
+    *:*) h="${pair%%:*}"; g="${pair#*:}" ;;
+    *)
+      echo "acq: --publish '${pair}' is not HOST:GUEST — both sides are required" >&2
+      echo "     (e.g. --publish 6868:6767: reach the sandbox's guest port 6767 on" >&2
+      echo "     host port 6868). The guest port is the one the kit publishes." >&2
+      return 1
+      ;;
+  esac
+  for p in "$h" "$g"; do
+    case "$p" in
+      ""|*[!0-9]*)
+        echo "acq: --publish '${pair}': '${p}' is not a port number (1..65535)" >&2
+        return 1 ;;
+      0*)
+        echo "acq: --publish '${pair}': '${p}' has a leading zero; write it plainly" >&2
+        return 1 ;;
+    esac
+    if [ "${#p}" -gt 5 ]; then
+      echo "acq: --publish '${pair}': '${p}' is out of range (1..65535)" >&2
+      return 1
+    fi
+    if [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
+      echo "acq: --publish '${pair}': '${p}' is out of range (1..65535)" >&2
+      return 1
+    fi
+  done
+  # A guest port is publishable exactly once, so a repeated guest side is a
+  # user mistake (which of the two host ports did they mean?), not a union.
+  local prev
+  for prev in ${ACQ_PUBLISH_FLAGS[@]+"${ACQ_PUBLISH_FLAGS[@]}"}; do
+    if [ "${prev#*:}" = "$g" ]; then
+      echo "acq: --publish: guest port ${g} is already mapped to host port" \
+           "${prev%%:*}; drop one of the two --publish flags" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+# --publish is create-time only (ADR-0034): the host↔guest mapping is fixed in
+# the backend's create argv, so a re-attach cannot move it. Say so on every
+# re-attach path rather than drop the flag silently, and point at the post-hoc
+# verb, which CAN add a mapping to a running sandbox (ADR-0015).
+note_publish_ignored_on_reattach() {
+  local name="$1"
+  [ "${#ACQ_PUBLISH_FLAGS[@]}" -gt 0 ] || return 0
+  echo "acq: note: --publish is ignored when re-attaching an existing sandbox" \
+       "('$name'); the host port mapping is fixed at create. Use" \
+       "'acq ports $name --publish HOST:GUEST' to add one now, or remove" \
+       "the sandbox first ('acq rm $name') to recreate with it." >&2
+}
+
 # Resolve the effective NEUTRAL base image per ADR-0022 precedence:
 #   --image flag  >  ACQ_IMAGE env  >  (empty)
 # The `--image` flag value is captured by extract_image_flag into ACQ_IMAGE_FLAG.
@@ -1031,11 +1651,112 @@ _acq_config_file() {
 }
 
 _read_config_backend() {
-  local cfg
+  _acq_config_read_field backend
+}
+
+# _acq_config_read_field KEY — echo the value of a flat `KEY: value` line from
+# config.yaml (empty if the file or key is absent). Defensive awk parse, no YAML
+# dependency — the same convention as the original single-key backend reader,
+# generalized to any flat scalar key (backend, extra_kits, scope_github_token).
+# KEY is matched literally at column 1. Indented keys are deliberately ignored:
+# this is a flat config file, not a general YAML parser. Inline comments and
+# simple single/double-quoted scalars are accepted for hand-edited YAML. If
+# duplicate top-level keys exist, the last one wins, matching the writer's
+# replace-all behavior. A non-identifier KEY is rejected so a caller can't inject
+# an awk regex.
+_acq_config_read_field() {
+  local key="${1:-}" cfg
+  case "$key" in
+    ''|*[!A-Za-z0-9_]*) return 0 ;;   # fail closed on an unexpected key name
+  esac
   cfg=$(_acq_config_file)
   [ -f "$cfg" ] || return 0
-  # Parse the single `backend: <name>` key defensively with awk (no YAML dep).
-  awk '/^[[:space:]]*backend[[:space:]]*:/ { gsub(/^[[:space:]]*backend[[:space:]]*:[[:space:]]*/,""); gsub(/[[:space:]]*$/,""); print; exit }' "$cfg"
+  awk -v k="$key" '
+    {
+      # Match only a top-level flat key: key, optional space, colon.
+      pat = "^" k "[[:space:]]*:"
+      if ($0 ~ pat) {
+        sub(pat "[[:space:]]*", "")     # strip through the colon + spaces
+        line = $0
+        q = sprintf("%c", 39)
+        if (substr(line, 1, 1) == "\"" || substr(line, 1, 1) == q) {
+          in_single = 0
+          in_double = 0
+          for (i = 1; i <= length(line); i++) {
+            c = substr(line, i, 1)
+            if (c == q && !in_double) {
+              in_single = !in_single
+            } else if (c == "\"" && !in_single) {
+              in_double = !in_double
+            } else if (c == "#" && !in_single && !in_double && (i == 1 || substr(line, i - 1, 1) ~ /[[:space:]]/)) {
+              line = substr(line, 1, i - 1)
+              break
+            }
+          }
+        } else if (line ~ /^#/) {
+          line = ""
+        } else {
+          sub(/[[:space:]]+#.*$/, "", line)
+        }
+        $0 = line                         # tolerate inline comments outside quotes
+        sub(/[[:space:]]*$/, "")         # strip trailing space
+        q = sprintf("%c", 39)
+        if ($0 ~ /^"[^"]*"$/) {
+          sub(/^"/, "")
+          sub(/"$/, "")
+        } else if (substr($0, 1, 1) == q && substr($0, length($0), 1) == q) {
+          $0 = substr($0, 2, length($0) - 2)
+        }
+        val = $0                         # last duplicate key wins
+      }
+    }
+    END {
+      if (val != "") print val
+    }
+  ' "$cfg"
+}
+
+# _acq_config_write_field KEY VALUE — set (or replace) a flat `KEY: VALUE` line in
+# config.yaml, preserving every OTHER line (so writing extra_kits leaves backend
+# untouched, and vice-versa). Creates the file + parent dir on first write. An
+# empty VALUE removes the key entirely (so "no extras" is represented by absence,
+# not an empty-valued line). Atomic (temp file + mv). Best-effort: a write failure
+# warns via acq_debug and returns non-zero but never aborts the caller.
+_acq_config_write_field() {
+  local key="${1:-}" value="${2:-}" cfg dir tmp
+  case "$key" in
+    ''|*[!A-Za-z0-9_]*) acq_debug "config: refusing to write unsafe key '$key'"; return 1 ;;
+  esac
+  cfg=$(_acq_config_file)
+  dir=$(dirname "$cfg")
+  if ! ( umask 077; mkdir -p "$dir" ) 2>/dev/null; then
+    acq_debug "config: could not create config dir: $dir"
+    return 1
+  fi
+  chmod 700 "$dir" 2>/dev/null || { acq_debug "config: chmod failed: $dir"; return 1; }
+  tmp="${cfg}.tmp.$$"
+  {
+    # Re-emit every existing line except the one for KEY (which we replace/drop).
+    if [ -f "$cfg" ]; then
+      awk -v k="$key" '
+        {
+          pat = "^" k "[[:space:]]*:"
+          if ($0 ~ pat) next     # drop the old top-level KEY line; we re-add below
+          print
+        }
+      ' "$cfg"
+    fi
+    # Append the new value only when non-empty (empty VALUE => remove the key).
+    # Use an explicit if (not `[ ] &&`) so the group's exit status reflects the
+    # write, not a false test when VALUE is empty.
+    if [ -n "$value" ]; then
+      printf '%s: %s\n' "$key" "$value"
+    fi
+  } > "$tmp" 2>/dev/null || { acq_debug "config: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || { acq_debug "config: chmod failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$cfg" 2>/dev/null || { acq_debug "config: mv failed: $cfg"; rm -f "$tmp" 2>/dev/null; return 1; }
+  acq_debug "config: wrote ${key}"
+  return 0
 }
 
 # _ensure_local_bin_on_path — if a backend CLI is not on PATH but IS present in
@@ -1280,16 +2001,18 @@ _acq_provenance_file() {
 
 # Write (or overwrite) a sandbox's provenance record. Call ONLY after a
 # successful bundle apply. Records the bundle identity + the exact applied ref +
-# an ISO-8601 UTC timestamp + the backend. Best-effort: a write failure warns
-# (debug) and returns non-zero but never aborts the caller (fail-open).
-# Usage: acq_provenance_write BACKEND SANDBOX_NAME
+# an ISO-8601 UTC timestamp + the backend. A third AGENT argument records the
+# agent selected at create time; when omitted, an existing agent field is
+# preserved across in-place refreshes. Best-effort: a write failure warns (debug)
+# and returns non-zero but never aborts the caller (fail-open).
+# Usage: acq_provenance_write BACKEND SANDBOX_NAME [AGENT] [WORKSPACE]
 acq_provenance_write() {
-  local backend="${1:-}" name="${2:-}"
+  local backend="${1:-}" name="${2:-}" agent="${3:-}" workspace="${4:-}"
   [ -n "$backend" ] && [ -n "$name" ] || return 1
-  local file dir ts workspace workspace_source
+  local file dir ts workspace_source
   file=$(_acq_provenance_file "$backend" "$name") || return 1
   workspace_source=$(acq_provenance_field "$backend" "$name" workspace_source)
-  if [ "$workspace_source" = "host" ]; then
+  if [ -z "$workspace" ] && [ "$workspace_source" = "host" ]; then
     workspace=$(acq_provenance_field "$backend" "$name" workspace)
   fi
   dir=$(dirname "$file")
@@ -1298,6 +2021,15 @@ acq_provenance_write() {
     return 1
   fi
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+  [ -n "$agent" ] || agent=$(acq_provenance_field "$backend" "$name" agent)
+  case "$agent" in
+    "") : ;;
+    *[!a-z-]*) agent="" ;;
+  esac
+  case "$workspace" in
+    "") : ;;
+    *[!A-Za-z0-9._/-]*) workspace="" ;;
+  esac
   # Write atomically via a temp file + mv so a crash mid-write can't leave a
   # half-written record that later parses as a bogus "current" ref.
   local tmp="${file}.tmp.$$"
@@ -1307,6 +2039,7 @@ acq_provenance_write() {
     printf 'repo=%s\n' "$ACQ_BUILTIN_BUNDLE_REPO"
     printf 'applied_ref=%s\n' "$PATTERNS_KIT_REF"
     printf 'backend=%s\n' "$backend"
+    [ -n "$agent" ] && printf 'agent=%s\n' "$agent"
     printf 'applied_at=%s\n' "$ts"
     if [ -n "${workspace:-}" ]; then
       printf 'workspace_source=host\n'
@@ -1614,8 +2347,8 @@ maybe_offer_bundle_refresh() {
 # opencode-docker template) install the package with lifecycle scripts skipped,
 # so the first launch fails with:
 #   Error: opencode-ai's postinstall script was not run.
-# This is backend-agnostic (the msb npm install can hit the same gap), so run
-# the fix on any backend before attaching an opencode agent.
+# Run the fix before attaching an opencode agent so a broken packaged binary can
+# recover without changing the agent launch path.
 #
 # Idempotent and cheap: if opencode already runs (`opencode --version`), do
 # nothing. Otherwise locate the installed package via `npm root -g` and run its
@@ -1682,11 +2415,12 @@ ensure_opencode_postinstall() {
 # no free-form error text can splice into the caller's "(HTTP …)" message.
 check_key() {
   local name="$1"
-  local raw code exit_code
+  local raw code exit_code key_ref
+  key_ref="\$${USAI_PROVIDER_KEY_ENV}"
   raw=$(acq_backend_run "$name" -- sh -c \
     "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer \$USAI_API_KEY\" \
-     $USAI_MODELS_URL; printf '|%s' \"\$?\"" 2>/dev/null || true)
+     -H \"Authorization: Bearer $key_ref\" \
+     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" 2>/dev/null || true)
   _classify_key_status "$raw"
 }
 
@@ -1745,6 +2479,11 @@ _classify_key_status() {
 check_fresh_sandbox_key() {
   local validation_name="acq-keycheck-$$"
   local status=""
+  # The throwaway sandbox only needs the USAi binding. Publishing ports would
+  # make it contend with the real sandbox for every explicit host port (a
+  # `--publish` pin or a kit's `host:`), fail its create, and silently skip this
+  # check. Dynamic scoping hands the flag to acq_backend_provision.
+  local _ACQ_PROVISION_WITHOUT_PORTS=1
 
   # Use the backend to create a minimal sandbox for validation.
   if ! acq_backend_provision "$validation_name" shell . </dev/null >/dev/null 2>&1; then
@@ -1752,11 +2491,12 @@ check_fresh_sandbox_key() {
   fi
   # shellcheck disable=SC2064
   trap "acq_backend_terminate '$validation_name' </dev/null >/dev/null 2>&1 || true" EXIT
-  local raw
+  local raw key_ref
+  key_ref="\$${USAI_PROVIDER_KEY_ENV}"
   raw=$(acq_backend_run "$validation_name" -- sh -c \
     "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer \$USAI_API_KEY\" \
-     $USAI_MODELS_URL; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
+     -H \"Authorization: Bearer $key_ref\" \
+     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
   status=$(_classify_key_status "$raw")
   acq_backend_terminate "$validation_name" </dev/null >/dev/null 2>&1 || true
   trap - EXIT
@@ -2267,13 +3007,20 @@ advise_github_scope() {
     return 0
   fi
 
-  local ans=""
-  printf 'acq: scope a GitHub token for this sandbox now? [y/N] ' >&2
-  read -r ans 2>/dev/null || ans=""
-  case "$ans" in
-    y|Y|yes|YES) github_scope_sandbox "$sandbox" "$ws" || true ;;
-    *) echo "acq: continuing without scoping (run 'acq github-scope $sandbox $ws' anytime)." >&2 ;;
-  esac
+  # The configured default (ADR-0031) pre-answers this prompt: `acq configure`
+  # can set scope_github_token: yes|no in config.yaml. Default is "no" (a bare
+  # ENTER declines), preserving the historical behavior when unset. This only
+  # changes the DEFAULT answer — the actual per-sandbox fine-grained-PAT minting
+  # still runs through github_scope_sandbox (ADR-0013 unchanged).
+  local scope_default
+  scope_default=$(_acq_config_read_field scope_github_token)
+  case "$scope_default" in yes|y|Y) scope_default="yes" ;; *) scope_default="no" ;; esac
+
+  if acq_prompt_confirm "Scope a GitHub token for this sandbox now?" "$scope_default"; then
+    github_scope_sandbox "$sandbox" "$ws"
+  else
+    echo "acq: continuing without scoping (run 'acq github-scope $sandbox $ws' anytime)." >&2
+  fi
   return 0
 }
 
@@ -2342,7 +3089,7 @@ advise_valid_key() {
 # the docs rather than guessing the user's network fix.
 _report_usai_unreachable() {
   echo >&2
-  echo "acq: could not reach the USAi API ($USAI_MODELS_URL) from the sandbox." >&2
+  echo "acq: could not reach the USAi API ($USAI_PROVIDER_MODELS_URL) from the sandbox." >&2
   echo "      The request did not complete (no HTTP response) — this is a network" >&2
   echo "      reachability problem, NOT an invalid or expired key, so rotating the" >&2
   echo "      key will not help." >&2
@@ -2369,7 +3116,7 @@ _report_usai_unreachable() {
 # and point at the docs.
 _report_usai_unresolved() {
   echo >&2
-  echo "acq: the USAi API host in $USAI_MODELS_URL did not RESOLVE from the sandbox" >&2
+  echo "acq: the USAi API host in $USAI_PROVIDER_MODELS_URL did not RESOLVE from the sandbox" >&2
   echo "      (DNS returned no address). This is a name-resolution problem, NOT an" >&2
   echo "      invalid or expired key, so rotating the key will not help." >&2
   echo "      If other public hosts (GitHub, npm) work from the sandbox but only" >&2
@@ -2460,16 +3207,16 @@ ensure_key_present() {
   # emit a single terse line and fail closed rather than the full interactive
   # help (mirrors the non-tty guard in the kit-update path above).
   if [ ! -t 0 ]; then
-    echo "acq: no USAi API key stored; set one with 'acq secret set -g usai' (see $KEY_MGMT_URL). Aborting." >&2
+    echo "acq: no USAi API key stored; set one with 'acq secret set -g usai' (see $USAI_PROVIDER_KEY_MGMT_URL). Aborting." >&2
     return 1
   fi
 
   echo >&2
   echo "No USAi API key is stored yet." >&2
-  echo "USAi keys are created at $KEY_MGMT_URL and expire every 7 days." >&2
+  echo "USAi keys are created at $USAI_PROVIDER_KEY_MGMT_URL and expire every 7 days." >&2
   echo >&2
   echo "To set one:" >&2
-  echo "  1. Open $KEY_MGMT_URL" >&2
+  echo "  1. Open $USAI_PROVIDER_KEY_MGMT_URL" >&2
   echo "  2. Create a key (or copy an existing one) with the console copy button" >&2
   echo >&2
 
@@ -2544,7 +3291,7 @@ ensure_valid_key() {
   echo "USAi keys expire every 7 days." >&2
   echo >&2
   echo "To rotate it:" >&2
-  echo "  1. Open $KEY_MGMT_URL" >&2
+  echo "  1. Open $USAI_PROVIDER_KEY_MGMT_URL" >&2
   echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
   echo "  3. Copy the new key using the console copy button" >&2
   echo >&2
@@ -2585,6 +3332,116 @@ ensure_valid_key() {
 # ============================================================================
 # acq doctor output helpers
 # ============================================================================
+
+acq_image_contract_doctor_script() {
+  cat <<'SH'
+ACQ_ADR0030_IMAGE_DIAGNOSTIC=1
+warns=0
+ok() { printf '  ok: %s\n' "$1"; }
+warn() {
+  warns=$((warns + 1))
+  printf '  warning: %s\n' "$1"
+  printf '           fix: %s\n' "$2"
+}
+
+if [ "${HOME:-}" = "/home/agent" ]; then
+  ok "HOME is /home/agent"
+else
+  warn "HOME is ${HOME:-unset}, not /home/agent" "run diagnostics as the agent user with HOME=/home/agent"
+fi
+
+if [ "$(id -un 2>/dev/null || true)" = "agent" ]; then
+  ok "running as agent user"
+else
+  warn "diagnostic is not running as the agent user" "run sandbox diagnostics as the unprivileged agent user"
+fi
+
+if [ -d /nix ]; then
+  ok "/nix exists"
+  if [ -w /nix 2>/dev/null ]; then
+    ok "/nix is writable"
+  else
+    warn "/nix is not writable" "mount or bake a writable Nix store at /nix for devenv/cache reuse"
+  fi
+else
+  warn "/nix is missing" "use a devenv-capable image with its Nix store at /nix"
+fi
+
+for tool in nix devenv direnv; do
+  if command -v "$tool" >/dev/null 2>&1; then
+    ver=$($tool --version 2>/dev/null | head -n1 || true)
+    if [ -n "$ver" ]; then
+      ok "$tool is on PATH ($ver)"
+    else
+      ok "$tool is on PATH"
+    fi
+  else
+    warn "$tool is not on PATH" "install $tool in the base image or a create-time kit"
+  fi
+done
+
+if [ -w /home/agent ]; then
+  ok "/home/agent is writable"
+else
+  warn "/home/agent is not writable" "make /home/agent owned/writable by the agent user"
+fi
+
+if command -v sudo >/dev/null 2>&1; then
+  # Best-effort privilege probe: sudo -n may update guest-local sudo/audit state.
+  if sudo -n true >/dev/null 2>&1; then
+    ok "passwordless sudo probe works"
+  else
+    warn "sudo exists but passwordless sudo probe failed" "grant NOPASSWD sudo for declared privileged kit steps"
+  fi
+else
+  warn "sudo is not on PATH" "install sudo and allow passwordless sudo where privileged kit features are needed"
+fi
+
+home=${HOME:-/home/agent}
+if [ -d "$home/.rc.d" ]; then
+  ok "~/.rc.d exists"
+else
+  warn "~/.rc.d is missing" "install the neutral shell hook directory at /home/agent/.rc.d"
+fi
+
+hook=0
+for profile in "$home/.profile" "$home/.bashrc" "$home/.zshrc" /etc/profile /etc/bash.bashrc /etc/profile.d/acq*.sh; do
+  # Match either an explicit `source/.  …rc.d…` line OR acq's own login bridge
+  # marker (acq-login-profile), whose loop sources ~/.rc.d indirectly through a
+  # variable — so a plain `source .rc.d` grep alone would miss it. See ADR-0030.
+  if [ -f "$profile" ] \
+      && grep -Eq '(^|[[:space:]])(source|\.)[[:space:]].*\.rc\.d|acq-login-profile' "$profile" 2>/dev/null; then
+    hook=1
+    break
+  fi
+done
+if [ "$hook" -eq 1 ]; then
+  ok "shell startup references ~/.rc.d"
+else
+  warn "no shell startup hook for ~/.rc.d found" "source ~/.rc.d snippets from shell startup in deterministic order"
+fi
+
+printf '  summary: %s warning(s); diagnostics only, create/run are not blocked\n' "$warns"
+exit 0
+SH
+}
+
+acq_print_image_contract_doctor() {
+  local name="$1"
+  if ! command -v acq_backend_doctor_sandbox >/dev/null 2>&1; then
+    echo "acq: doctor: backend '${ACQ_RESOLVED_BACKEND:-unknown}' cannot inspect sandboxes." >&2
+    return 1
+  fi
+  if ! acq_backend_exists "$name"; then
+    echo "acq: doctor: no such sandbox '$name'." >&2
+    return 1
+  fi
+
+  printf 'acq: ADR-0030 image contract diagnostics for %s (backend: %s)\n' \
+    "$name" "${ACQ_RESOLVED_BACKEND:-unknown}"
+  echo "  This check is non-enforcing: warnings do not change create/run behavior."
+  acq_backend_doctor_sandbox "$name"
+}
 
 acq_print_doctor() {
   local sbx_status msb_status
@@ -2650,14 +3507,229 @@ acq_print_doctor() {
   read -r answer || true
   case "$answer" in
     [yY]|[yY][eE][sS])
-      local cfg_dir
-      cfg_dir=$(dirname "$config_file")
-      mkdir -p "$cfg_dir"
-      printf 'backend: %s\n' "${ACQ_RESOLVED_BACKEND:-msb}" > "$config_file"
+      # Write only the backend key, preserving any other config (extra_kits,
+      # scope_github_token) written by `acq configure` (ADR-0031).
+      _acq_config_write_field backend "${ACQ_RESOLVED_BACKEND:-msb}"
       echo "  Wrote default backend to ${config_file}." >&2
       ;;
     *)
       echo "  Not written." >&2
       ;;
   esac
+}
+
+# ============================================================================
+# Interactive configuration (`acq configure`; ADR-0031)
+# ============================================================================
+
+# _acq_configure_show_current — print the current durable configuration
+# (config.yaml) to stderr, so `acq configure` opens by showing what is in effect.
+_acq_configure_show_current() {
+  local cfg backend extras scope
+  cfg=$(_acq_config_file)
+  backend=$(_acq_config_read_field backend)
+  extras=$(_acq_config_read_field extra_kits)
+  scope=$(_acq_config_read_field scope_github_token)
+  echo "acq: current configuration (${cfg}):" >&2
+  echo "      default backend:    ${backend:-<auto-detect>}" >&2
+  echo "      extra kits:         ${extras:-<none>}" >&2
+  echo "      scope GitHub token: ${scope:-no}" >&2
+  echo "" >&2
+}
+
+# acq_configure — the interactive configuration flow. Presents the opt-in kit
+# catalog as a multiselect (pre-checked from the current config), then a confirm
+# for the GitHub-token-scoping default, and persists both to config.yaml
+# (preserving the `backend:` key). Non-interactive callers keep the current
+# config unchanged (the widgets fail-open to defaults) and only re-print it.
+#
+# The kit selection is stored as a whitespace-separated list of the CHOSEN opt-in
+# kit NAMES (e.g. "openchamber paseo") under extra_kits:, not the fully-expanded
+# git refs — the ref is rebuilt from PATTERNS_KIT_REF at apply time so a later pin
+# bump moves configured kits forward automatically. A user's own custom refs (set
+# via ACQ_EXTRA_KITS) are layered separately and are not managed here.
+acq_configure() {
+  _acq_configure_show_current
+
+  # Non-interactive (CI / piped / ACQ_NO_PROMPT): make NO changes — just show the
+  # current config above and return. Writing here would clobber a hand-edited or
+  # previously-configured file with the widget defaults.
+  if ! _acq_prompt_interactive; then
+    echo "acq: non-interactive; configuration unchanged." >&2
+    echo "      Run 'acq configure' from a terminal to change kits/token scoping." >&2
+    return 0
+  fi
+
+  local n="${#ACQ_OPTIN_KIT_NAMES[@]}"
+  if [ "$n" -eq 0 ]; then
+    echo "acq: no opt-in kits are available to configure." >&2
+    return 0
+  fi
+
+  # Which opt-in kits are already selected (from config), as a set of names.
+  local current_extras selected_names=""
+  current_extras=$(_acq_config_read_field extra_kits)
+
+  # Build the picker's argument list: the built-in kits FIRST as frozen
+  # ("always applied") rows, then the toggleable opt-in kits. The defaults CSV
+  # is RELATIVE to the toggleable block (index 1 = first opt-in kit), matching
+  # the multiselect contract, so it is unaffected by the number of locked rows.
+  local args=() defaults="" i name desc
+  local locked_n="${#ACQ_KIT_NAMES[@]}"
+  i=1
+  while [ "$i" -le "$locked_n" ]; do
+    args+=("${ACQ_KIT_NAMES[$((i-1))]}" "${ACQ_KIT_DESCS[$((i-1))]}")
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le "$n" ]; do
+    name="${ACQ_OPTIN_KIT_NAMES[$((i-1))]}"
+    desc="${ACQ_OPTIN_KIT_DESCS[$((i-1))]}"
+    args+=("$name" "$desc")
+    # Pre-check if this kit name appears in the configured extras (word match).
+    case " $current_extras " in *" $name "*) defaults="${defaults:+$defaults,}$i" ;; esac
+    i=$((i + 1))
+  done
+
+  # Run the picker in-process (NOT via $(...)) so the shared scripted-input
+  # cursor advances into the token-scoping confirm below; read the result from
+  # the _ACQ_PROMPT_SELECTION global. Chosen indices are relative to the opt-in
+  # block, so the index→name mapping below is unchanged by the frozen rows.
+  local chosen
+  acq_prompt_multiselect "$locked_n" "$defaults" "${args[@]}" >/dev/null
+  chosen="$_ACQ_PROMPT_SELECTION"
+
+  # CANCELLED → leave config untouched.
+  if [ "$chosen" = "CANCELLED" ]; then
+    return 0
+  fi
+
+  # Map chosen indices back to kit names.
+  local idx
+  for idx in $chosen; do
+    case "$idx" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "$idx" -ge 1 ] && [ "$idx" -le "$n" ]; then
+      name="${ACQ_OPTIN_KIT_NAMES[$((idx-1))]}"
+      selected_names="${selected_names:+$selected_names }$name"
+    fi
+  done
+
+  # Persist the kit selection (empty removes the key).
+  _acq_config_write_field extra_kits "$selected_names"
+
+  # GitHub-token-scoping default.
+  local scope_current scope_default
+  scope_current=$(_acq_config_read_field scope_github_token)
+  case "$scope_current" in yes|y|Y) scope_default="yes" ;; *) scope_default="no" ;; esac
+  if acq_prompt_confirm "Scope a per-sandbox GitHub token by default (on create)?" "$scope_default"; then
+    _acq_config_write_field scope_github_token yes
+  else
+    _acq_config_write_field scope_github_token no
+  fi
+
+  echo "" >&2
+  echo "acq: configuration saved to $(_acq_config_file)." >&2
+  echo "      extra kits:         ${selected_names:-<none>}" >&2
+  return 0
+}
+
+# maybe_first_run_configure — on first run (no config.yaml yet) and interactive,
+# offer to run `acq configure` once. Declining still writes a minimal config
+# (an empty scope_github_token line is avoided; we write the resolved backend if
+# known, else touch the file) so the offer never repeats. Fully skipped when
+# non-interactive (CI / piped) — fail-open, preserving today's behavior.
+maybe_first_run_configure() {
+  local cfg dir
+  cfg=$(_acq_config_file)
+  [ -f "$cfg" ] && return 0        # already configured (or previously offered)
+  _acq_prompt_interactive || return 0   # non-interactive: skip silently
+
+  echo "acq: looks like this is your first run — let's set up your kits." >&2
+  echo "      (You can re-run this anytime with 'acq configure'.)" >&2
+  echo "" >&2
+  if acq_prompt_confirm "Configure extra kits and token scoping now?" "yes"; then
+    acq_configure
+  else
+    # Write a minimal config so the first-run offer does not repeat. Prefer the
+    # resolved backend if one is known; otherwise create an empty file.
+    if [ -n "${ACQ_RESOLVED_BACKEND:-}" ]; then
+      _acq_config_write_field backend "$ACQ_RESOLVED_BACKEND"
+    else
+      dir=$(dirname "$cfg")
+      ( umask 077; mkdir -p "$dir" && : > "$cfg" ) 2>/dev/null || true
+      chmod 700 "$dir" 2>/dev/null || true
+      chmod 600 "$cfg" 2>/dev/null || true
+    fi
+    echo "acq: skipped. Run 'acq configure' anytime to change kits/token scoping." >&2
+  fi
+  return 0
+}
+
+# create_time_kit_picker — at `acq create`/`run` (fresh create only), offer the
+# opt-in kit picker PRE-POPULATED from the configured global defaults, so a user
+# can enable/disable a kit for THIS sandbox without changing the global default.
+# The selection is folded into ACQ_EXTRA_KITS for this invocation (as fully-
+# expanded refs), which flows through _build_kit_list and is persisted PER-SANDBOX
+# by the existing acq_cli_kits_write path (ADR-0017) — reloaded on resume by
+# acq_cli_kits_load. No global config is written here (that is `acq configure`).
+#
+# Fail-open: non-interactive (CI / piped) makes no prompt and simply lets the
+# configured defaults apply via _acq_apply_configured_extra_kits (already called
+# before provisioning). Idempotent per process.
+_ACQ_CREATE_PICKER_DONE=""
+create_time_kit_picker() {
+  [ -z "$_ACQ_CREATE_PICKER_DONE" ] || return 0
+  _ACQ_CREATE_PICKER_DONE=1
+
+  # Only prompt interactively; otherwise the configured defaults already applied.
+  _acq_prompt_interactive || return 0
+
+  local n="${#ACQ_OPTIN_KIT_NAMES[@]}"
+  [ "$n" -gt 0 ] || return 0
+
+  # Defaults = the configured global extra_kits (kit NAMES). An env-supplied
+  # ACQ_EXTRA_KITS is authoritative and NOT re-prompted (env > interactive).
+  [ -z "${ACQ_EXTRA_KITS_FROM_ENV:-}" ] || return 0
+
+  local configured args=() defaults="" i name desc
+  local locked_n="${#ACQ_KIT_NAMES[@]}"
+  configured=$(_acq_config_read_field extra_kits)
+  # Built-in kits first as frozen rows (consistent with `acq configure`).
+  i=1
+  while [ "$i" -le "$locked_n" ]; do
+    args+=("${ACQ_KIT_NAMES[$((i-1))]}" "${ACQ_KIT_DESCS[$((i-1))]}")
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le "$n" ]; do
+    name="${ACQ_OPTIN_KIT_NAMES[$((i-1))]}"
+    desc="${ACQ_OPTIN_KIT_DESCS[$((i-1))]}"
+    args+=("$name" "$desc")
+    case " $configured " in *" $name "*) defaults="${defaults:+$defaults,}$i" ;; esac
+    i=$((i + 1))
+  done
+
+  echo "acq: extra kits for this sandbox (defaults from 'acq configure'):" >&2
+  # In-process (not $(...)) so the selection lands in _ACQ_PROMPT_SELECTION.
+  local chosen
+  acq_prompt_multiselect "$locked_n" "$defaults" "${args[@]}" >/dev/null
+  chosen="$_ACQ_PROMPT_SELECTION"
+  [ "$chosen" = "CANCELLED" ] && return 0
+
+  # Map chosen indices → fully-expanded kit refs, and set ACQ_EXTRA_KITS for this
+  # invocation (replacing the configured-default application, which we override
+  # deliberately: the picker's result is authoritative for this create).
+  local refs="" idx
+  for idx in $chosen; do
+    case "$idx" in ''|*[!0-9]*) continue ;; esac
+    if [ "$idx" -ge 1 ] && [ "$idx" -le "$n" ]; then
+      name="${ACQ_OPTIN_KIT_NAMES[$((idx-1))]}"
+      refs="${refs:+$refs }$(_acq_optin_kit_ref "$name")"
+    fi
+  done
+  ACQ_EXTRA_KITS="$refs"
+  acq_debug "create-picker: ACQ_EXTRA_KITS set to: $refs"
+  return 0
 }

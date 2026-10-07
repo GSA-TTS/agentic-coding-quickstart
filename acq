@@ -31,6 +31,11 @@ ACQ_RESOLVED_PATH="${ACQ_SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 # shellcheck disable=SC1091
 . "${ACQ_SCRIPT_DIR}/acq.backends/common.sh"
 
+# Test-only seam for executable dispatch tests that need a local provider kit.
+if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_USAI_KIT:-}" ]; then
+  USAI_KIT="$ACQ_TEST_USAI_KIT"
+fi
+
 # ---------------------------------------------------------------------------
 # Print version/identity
 # ---------------------------------------------------------------------------
@@ -107,10 +112,14 @@ Subcommands:
                                            sandbox workspace when available.
   usai-rotate-api-key                      Rotate the USAi API key.
   version                                  Show acq version + backend info.
-  doctor                                   Backend health check + write config.
+  doctor [NAME]                            Backend health check, or non-enforcing
+                                           image diagnostics for an existing sandbox.
   backend list                             List detected backends (sbx, msb).
   backend set NAME                         Persist the default backend.
   backend unset                            Clear the persisted default (auto-detect).
+  configure                                Interactive setup: pick extra kits and
+                                           the per-sandbox token-scoping default
+                                           (persists to config.yaml).
   kit list                                 Show the pinned kits (+ extras).
   kit validate PATH                        Validate a neutral hybrid/v1 kit.
   kit apply NAME KITREF                    Apply a kit to an existing sandbox.
@@ -136,8 +145,16 @@ Global flags (before the subcommand):
                        var/default (a set ACQ_MSB_IMAGE wins, with a notice). The
                        image must satisfy the base-image contract in
                        docs/BACKEND_GUIDE.md.
+  ACQ_ACTIVATE_PROJECT_ENV=1
+                       Opt in to using already-approved `direnv export` for
+                       workspaces with .envrc. Devenv-only files are detected and
+                       advised, but acq never runs `direnv allow` or `devenv shell`.
 
 run/create flags:
+  (These are recognized only AFTER the subcommand — `acq create --publish …`, not
+  `acq --publish … create`. Only --backend and --image above are pre-subcommand
+  globals; a flag placed before the subcommand is treated as an unknown
+  subcommand and forwarded to the backend CLI.)
   --kit REF            Apply an extra kit (repeatable). REF is a local dir or a
                        git+https ref (like an ACQ_EXTRA_KITS entry); acq
                        translates it to the backend — it is NOT forwarded raw.
@@ -152,6 +169,16 @@ run/create flags:
                        scratch clone. Env equivalent: ACQ_CLONE=1. Applies at
                        create only. Note: a clone carries committed state only
                        (no gitignored/untracked files, no uncommitted edits).
+  --publish HOST:GUEST Reach the sandbox's GUEST port on a host port YOU choose,
+                       instead of the free one acq picks (repeatable; ADR-0034).
+                       Use it to give parallel sandboxes from one kit predictable,
+                       distinct addresses. Both sides are required. msb only —
+                       sbx assigns the host port itself. Create-time only: it
+                       becomes part of the create argv, so a re-attach cannot move
+                       it (`acq ports NAME --publish HOST:GUEST` adds a mapping to
+                       a running sandbox, over a tunnel rather than the guest IP).
+                       A host port already in use FAILS the create — acq never
+                       substitutes a different one for an explicit request.
 
 See docs/howto/acq.md and docs/BACKEND_GUIDE.md for more.
 HELP
@@ -224,6 +251,26 @@ Usage:
 BACKENDUSAGE
 }
 
+_acq_configure_usage() {
+  cat >&2 <<'CONFIGUSAGE'
+acq configure — interactive setup for extra kits and token scoping (ADR-0031)
+
+Usage:
+  acq configure
+
+Opens an interactive picker to choose which OPT-IN kits to enable (the four
+built-in kits are always applied) and to set the DEFAULT answer for the
+per-sandbox GitHub-token-scoping prompt. Choices persist to
+~/.config/acq/config.yaml and pre-populate the picker shown at `acq create`,
+where a single sandbox may deviate without changing the global default.
+
+Non-interactive (CI / piped) invocations make no changes and just print the
+current configuration. Set ACQ_NO_PROMPT=1 to force this behavior. The
+GitHub-token preference only pre-answers the existing scoping prompt; the
+fine-grained PAT is still minted per-sandbox (see `acq github-scope`).
+CONFIGUSAGE
+}
+
 # _acq_simple_verb_usage VERB — acq's OWN one-verb usage for the remaining
 # acq-owned top-level verbs that are NOT the multi-word topics (secret/kit/
 # backend) handled above. Kept as a single source (one case) so `acq VERB --help`
@@ -238,7 +285,8 @@ _acq_simple_verb_usage() {
 acq run — create+attach a sandbox, or re-attach an existing one
 
 Usage:
-  acq run AGENT PATH [--kit REF]... [--image REF] [--clone] [--no-update-check] [-- AGENT_ARGS...]
+  acq run AGENT PATH [--kit REF]... [--image REF] [--clone] [--publish H:G]...
+          [--no-update-check] [-- AGENT_ARGS...]
   acq run NAME [-- AGENT_ARGS...]     # re-attach an existing sandbox by name
 
 Creates a sandbox for AGENT (e.g. opencode) mounted at PATH if one does not
@@ -246,6 +294,10 @@ already exist, applies the pinned kits, then attaches. Re-attaching an existing
 sandbox heals its kits and (on msb) resumes it if stopped. This is the verb that
 both resumes AND attaches — so an interactive session started via `acq run` gets
 the forwarded host ssh-agent (SSH_AUTH_SOCK) injected, unlike `acq start`.
+
+Every flag above is recognized only AFTER the subcommand. Placed before it, a
+flag is read as an unknown subcommand and forwarded to the backend CLI (only
+--backend and --image are pre-subcommand globals).
 U
       ;;
     create)
@@ -253,10 +305,12 @@ U
 acq create — create a sandbox (detached; does not attach)
 
 Usage:
-  acq create AGENT PATH [--kit REF]... [--image REF] [--clone]
+  acq create AGENT PATH [--kit REF]... [--image REF] [--clone] [--publish H:G]...
 
 Provisions a sandbox for AGENT mounted at PATH and applies the pinned kits, then
 returns without attaching. Attach later with `acq run NAME`.
+
+Every flag above is recognized only AFTER the subcommand (see `acq run --help`).
 U
       ;;
     ls)
@@ -324,8 +378,10 @@ acq exec — run a command inside a sandbox
 Usage:
   acq exec NAME -- CMD...
 
-Runs CMD as the unprivileged agent user in the workspace. On msb, when the host
-ssh-agent is forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
+Runs CMD as the unprivileged agent user in the workspace. If the workspace uses
+direnv/devenv, acq prints activation guidance; with ACQ_ACTIVATE_PROJECT_ENV=1 it
+uses already-approved `direnv export` when .envrc is present. On msb, when the
+host ssh-agent is forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
 U
       ;;
     shell)
@@ -335,9 +391,11 @@ acq shell — open an interactive shell in a sandbox
 Usage:
   acq shell NAME
 
-Opens an interactive shell in an existing sandbox as the unprivileged agent
-user (the human counterpart to 'acq run NAME', which relaunches the recorded
-agent; 'acq exec' is non-interactive). On msb, when the host ssh-agent is
+Opens an interactive shell in an existing sandbox as the unprivileged agent user
+(the human counterpart to 'acq run NAME', which relaunches the recorded agent;
+'acq exec' is non-interactive). If the workspace uses direnv/devenv, acq prints
+activation guidance; with ACQ_ACTIVATE_PROJECT_ENV=1 it uses already-approved
+`direnv export` when .envrc is present. On msb, when the host ssh-agent is
 forwarded, SSH_AUTH_SOCK is injected so git/ssh reach the agent.
 U
       ;;
@@ -387,10 +445,14 @@ U
       ;;
     doctor)
       cat >&2 <<'U'
-acq doctor — backend health check + write config
+acq doctor — backend health check, or sandbox image diagnostics
 
 Usage:
   acq doctor
+  acq doctor NAME
+
+With NAME, runs non-enforcing ADR-0030 base-image contract diagnostics inside an
+existing sandbox. Warnings are actionable but do not block create/run flows.
 U
       ;;
     *)
@@ -428,10 +490,11 @@ _acq_print_topic_help() {
   local topic="$1" head
   head="${topic%% *}"
   case "$head" in
-    secret)  _acq_secret_usage; return 0 ;;
-    kit)     _acq_kit_usage; return 0 ;;
-    backend) _acq_backend_subcmd_usage; return 0 ;;
-    *)       _acq_simple_verb_usage "$head"; return $? ;;
+    secret)    _acq_secret_usage; return 0 ;;
+    kit)       _acq_kit_usage; return 0 ;;
+    backend)   _acq_backend_subcmd_usage; return 0 ;;
+    configure) _acq_configure_usage; return 0 ;;
+    *)         _acq_simple_verb_usage "$head"; return $? ;;
   esac
 }
 
@@ -469,6 +532,32 @@ _acq_backend_passthrough() {
   echo "acq: '$1' is not an acq subcommand — forwarding to '${be}'." >&2
   echo "     (output and any errors below are from '${be}', not acq)" >&2
   command "${ACQ_RESOLVED_BACKEND}" "$@"
+}
+
+_acq_secret_service_arg() {
+  local a1="${1:-}" a2="${2:-}"
+  case "$a1" in
+    -g|--global) printf '%s\n' "$a2" ;;
+    "")          printf '\n' ;;
+    -*)          printf '%s\n' "$a1" ;;
+    *)
+      case "$a2" in
+        ""|-*) printf '%s\n' "$a1" ;;
+        *)     printf '%s\n' "$a2" ;;
+      esac
+      ;;
+  esac
+}
+
+_acq_secret_needs_usai_facts() {
+  [ "$(_acq_secret_service_arg "$@")" = "usai" ]
+}
+
+_acq_secret_import_includes_usai() {
+  local parsed only_service
+  parsed=$(_acq_import_parse_args "$@" 2>/dev/null) || return 1
+  only_service=$(printf '%s' "$parsed" | cut -f3)
+  [ -z "$only_service" ] || [ "$only_service" = "usai" ]
 }
 
 _acq_parse_secret_scope_for_propagation() {
@@ -684,17 +773,24 @@ case "$subcommand" in
         local_backend="${1:-}"
         [ -z "$local_backend" ] && { echo "acq: backend set: missing backend name" >&2; exit 1; }
         local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
-        mkdir -p "$(dirname "$local_config_file")"
-        printf 'backend: %s\n' "$local_backend" > "$local_config_file"
+        # Write only the `backend:` key, preserving any other config (extra_kits,
+        # scope_github_token) written by `acq configure` (ADR-0031).
+        _acq_config_write_field backend "$local_backend" \
+          || { echo "acq: backend set: could not write ${local_config_file}" >&2; exit 1; }
         echo "acq: default backend set to '${local_backend}' in ${local_config_file}" >&2
         ;;
       unset)
-        # Clear the persisted default so acq falls back to auto-detection (see
-        # the resolution order in `acq help`). Idempotent: succeeds whether or
-        # not a default was set.
+        # Clear ONLY the persisted default backend so acq falls back to
+        # auto-detection (see the resolution order in `acq help`). Preserves any
+        # other config keys (extra_kits, scope_github_token). Idempotent.
         local_config_file="${XDG_CONFIG_HOME:-$HOME/.config}/acq/config.yaml"
-        if [ -f "$local_config_file" ]; then
-          rm -f "$local_config_file"
+        if [ -f "$local_config_file" ] && [ -n "$(_acq_config_read_field backend)" ]; then
+          _acq_config_write_field backend ""   # empty value removes the key
+          # If the config is now empty (backend was the only key), remove the
+          # file so a fresh checkout looks pristine — matching the historical
+          # behavior and the first-run detection (a stale empty file would
+          # suppress the first-run `acq configure` offer).
+          [ -s "$local_config_file" ] || rm -f "$local_config_file" 2>/dev/null || true
           echo "acq: cleared the persisted default backend (${local_config_file}); acq will auto-detect." >&2
         else
           echo "acq: no persisted default backend was set; acq already auto-detects." >&2
@@ -858,6 +954,16 @@ esac
 # version/doctor: resolve backend best-effort (they work even if none detected).
 # ---------------------------------------------------------------------------
 case "$subcommand" in
+  configure)
+    # Interactive configuration (ADR-0031). Needs no backend — it only reads and
+    # writes config.yaml. Resolve the backend best-effort so a first-run decline
+    # can persist the detected default, but never fail on no backend.
+    shift
+    acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+    acq_configure
+    exit 0
+    ;;
+
   version|--version|-v)
     # Resolve backend best-effort so version can report it; don't fail.
     acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
@@ -866,9 +972,18 @@ case "$subcommand" in
     ;;
 
   doctor)
+    shift
     acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
-    acq_print_doctor
-    exit 0
+    if [ -n "${1:-}" ]; then
+      if [ -n "${2:-}" ]; then
+        echo "acq: doctor: expected at most one sandbox name" >&2
+        exit 1
+      fi
+      acq_print_image_contract_doctor "$1"
+    else
+      acq_print_doctor
+    fi
+    exit $?
     ;;
 esac
 
@@ -876,6 +991,22 @@ esac
 # Resolve and load the backend adapter (required for all other subcommands).
 # ---------------------------------------------------------------------------
 acq_resolve_backend "${explicit_backend}"
+
+# ---------------------------------------------------------------------------
+# acq_backend_guard_version — cheap version floor for state-touching verbs
+# ---------------------------------------------------------------------------
+# Provisioning verbs (run/create) call acq_backend_prepare, which also probes host
+# readiness. Verbs that merely touch EXISTING sandbox state need the version floor
+# too — without it they reached the backend CLI unguarded and surfaced raw upstream
+# errors instead of acq's (most visibly msb's `database schema is newer than this
+# msb binary` after a blocked 0.7.x migrated the catalog). This wrapper calls the
+# adapter's cheap check when it has one, so a backend that predates the split (or
+# a test stub) keeps working instead of dying on an unbound function. See ADR-0032.
+acq_backend_guard_version() {
+  if command -v acq_backend_check_version >/dev/null 2>&1; then
+    acq_backend_check_version
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Intercept user-supplied `--kit <ref>` on run/create (repeatable).
@@ -933,8 +1064,41 @@ case "$subcommand" in
       export ACQ_CLONE=1
     fi
     set -- ${ACQ_CLONE_REMAINING[@]+"${ACQ_CLONE_REMAINING[@]}"}
+    # Extract acq-owned `--publish HOST:GUEST` (ADR-0034), repeatable, the same
+    # way: `msb create` has its own `-p` (which the msb adapter synthesizes from
+    # kit records, folding these overrides in), and `sbx create` has no host-port
+    # knob at all, so the raw flag must never reach a backend CLI. A malformed
+    # value aborts here rather than creating a sandbox missing a mapping the user
+    # asked for. Only honored BEFORE `--`.
+    extract_publish_flags "$@" || exit 1
+    set -- ${ACQ_PUBLISH_REMAINING[@]+"${ACQ_PUBLISH_REMAINING[@]}"}
+    if [ "${#ACQ_PUBLISH_FLAGS[@]}" -gt 0 ]; then
+      # A create-time host-port override only means something on a backend that
+      # CHOOSES the host port. sbx assigns it itself and exposes no knob (its
+      # kit-spec ports block keys on the guest port only), so honoring the flag
+      # there would be a lie. Refuse explicitly — and name the post-hoc verb,
+      # which does work on both backends — rather than silently ignore it.
+      if [ "${ACQ_RESOLVED_BACKEND}" = "sbx" ]; then
+        echo "acq: --publish is not supported on the sbx backend: sbx chooses the host" >&2
+        echo "     port for a published guest port itself and offers no way to request" >&2
+        echo "     one at create time. Read the assigned mapping with 'acq ports NAME'," >&2
+        echo "     or open a tunnel on a port you choose with" >&2
+        echo "     'acq ports NAME --publish HOST:GUEST' after the sandbox is up." >&2
+        exit 1
+      fi
+      # No export: the backend adapter is SOURCED into this shell, so it reads
+      # ACQ_PUBLISH_FLAGS directly (like ACQ_CLI_KITS). Deliberately NOT an env
+      # var — the override is per-launch by design, and a sticky exported value
+      # would silently re-pin the host port of every later sandbox in the shell.
+    fi
     extract_kit_flags "$@"
-    [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _build_kit_list   # re-fold with CLI kits
+    _acq_kit_agent=""
+    _acq_kit_first=$(first_positional "${ACQ_KIT_REMAINING[@]}" || true)
+    if [ -n "$_acq_kit_first" ] && is_known_agent "$_acq_kit_first"; then
+      _acq_kit_agent="$_acq_kit_first"
+    fi
+    _build_kit_list "$_acq_kit_agent"
+    unset _acq_kit_agent _acq_kit_first
     # Rebuild positional args as: <subcommand> <remaining args w/o --kit>.
     set -- "$_sub" ${ACQ_KIT_REMAINING[@]+"${ACQ_KIT_REMAINING[@]}"}
     ;;
@@ -947,6 +1111,7 @@ esac
 case "$subcommand" in
   usai-rotate-api-key)
     shift
+    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
     if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
       echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not implement key rotation" >&2
       echo "     (acq_backend_rotate_key). Rotate manually, then re-run." >&2
@@ -958,7 +1123,18 @@ case "$subcommand" in
 
   create)
     shift
+    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
     acq_backend_prepare
+    # First-run onboarding (ADR-0031): offer `acq configure` once before we
+    # provision, so a brand-new user picks kits up front. No-op after first run
+    # and in non-interactive sessions.
+    maybe_first_run_configure
+    # Apply configured-default extra kits (config.yaml), then offer a create-time
+    # picker pre-populated with those defaults so THIS sandbox can deviate.
+    create_agent=$(first_positional "$@")
+    _acq_apply_configured_extra_kits || exit 1
+    create_time_kit_picker
+    _build_kit_list "$create_agent"
     # Pre-flight: validate the workspace path before provisioning (#issue).
     ws=$(workspace_path "$@")
     preflight_workspace_path "$ws" || exit 1
@@ -981,6 +1157,8 @@ case "$subcommand" in
     # just proceeds without a scoped token (the token is optional).
     [ -n "$ws" ] || ws="$PWD"
     advise_github_scope "$local_name" "$ws"
+    advise_project_env_activation "$ws"
+    acq_print_selected_agent_kit "$create_agent"
 
     acq_backend_provision "$local_name" "$@"
 
@@ -1013,9 +1191,11 @@ case "$subcommand" in
     [ "${#create_args[@]}" -gt 0 ] && first=$(first_positional "${create_args[@]}")
 
     if [ -n "$first" ] && is_known_agent "$first"; then
+      acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
       # AGENT form: create if missing, then attach.
       local_name=$(derive_name "${create_args[@]}") || exit 1
       [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
+      acq_print_selected_agent_kit "$first"
 
       # Pre-flight: validate the workspace path before provisioning (#issue).
       # Only enforce on a fresh create — a re-attach to an existing sandbox
@@ -1043,6 +1223,8 @@ case "$subcommand" in
                "('$local_name'); it applies only at create. Remove the sandbox first" \
                "('acq rm $local_name') to recreate on a disposable clone." >&2
         fi
+        # Same create-time-only contract for --publish (ADR-0034).
+        note_publish_ignored_on_reattach "$local_name"
         # Capture staleness BEFORE the heal — ensure_kits_applied rewrites the
         # provenance record to "current", so reading status after it would never
         # see stale/unknown and the offer below would be dead.
@@ -1071,6 +1253,7 @@ case "$subcommand" in
         # at create; this re-attach case is the live-refeed path.
         [ -n "$ws" ] || ws="$PWD"
         advise_github_scope "$local_name" "$ws"
+        advise_project_env_activation "$ws"
       else
         # Fresh create: the USAi API key MUST be stored before we provision,
         # because a backend (msb) binds secrets only at create time. Creating the
@@ -1078,6 +1261,17 @@ case "$subcommand" in
         # with no USAi binding — the exact split that made validation report 200
         # (in a throwaway sandbox) yet 401 (in the real one). Gate on key
         # presence first; fail closed if the user declines.
+
+        # First-run onboarding + extra-kit selection (ADR-0031), BEFORE the key
+        # gate so a first-time user configures kits up front. maybe_first_run_*
+        # is a no-op after first run / non-interactive; the picker pre-populates
+        # from the configured defaults and folds the result into ACQ_EXTRA_KITS
+        # for this create (persisted per-sandbox by the existing kit-record path).
+        maybe_first_run_configure
+        _acq_apply_configured_extra_kits || exit 1
+        create_time_kit_picker
+        _build_kit_list "$first"
+
         if ! ensure_key_present "$local_name"; then
           exit 1
         fi
@@ -1090,6 +1284,7 @@ case "$subcommand" in
         # proceeds without a scoped token (the token is optional).
         [ -n "$ws" ] || ws="$PWD"
         advise_github_scope "$local_name" "$ws"
+        advise_project_env_activation "$ws"
 
         acq_backend_provision "$local_name" "${create_args[@]}"
       fi
@@ -1125,8 +1320,10 @@ case "$subcommand" in
       warn_if_published_ports_dead "$local_name"
 
       if [ "${#agent_args[@]}" -gt 0 ]; then
+        ACQ_SESSION_KIND="attach"
         acq_backend_attach "$local_name" -- "${agent_args[@]}"
       else
+        ACQ_SESSION_KIND="attach"
         acq_backend_attach "$local_name"
       fi
 
@@ -1139,6 +1336,7 @@ case "$subcommand" in
       # Capture staleness BEFORE the heal (the heal rewrites provenance to
       # "current"), then heal, then offer a refresh. Never
       # blocks; skipped under --no-update-check / ACQ_UPDATE_CHECK=0.
+      note_publish_ignored_on_reattach "$first"
       _pre_heal_status=$(acq_provenance_status "${ACQ_RESOLVED_BACKEND}" "$first")
       # Reload persisted CLI (`--kit`) / extra kit refs so the heal re-runs their
       # startup on a name-only re-attach too (the user did not re-pass `--kit`
@@ -1152,6 +1350,11 @@ case "$subcommand" in
       acq_backend_ensure_kits_applied "$first" || true
       maybe_offer_bundle_refresh "${ACQ_RESOLVED_BACKEND}" "$first" "$_pre_heal_status"
       warn_if_no_ssh_signing_key
+      _attach_ws=""
+      if command -v acq_backend_workspace_for >/dev/null 2>&1; then
+        _attach_ws=$(acq_backend_workspace_for "$first" 2>/dev/null || true)
+      fi
+      advise_project_env_activation "$_attach_ws"
 
       # Backend-neutral health note (same as the create-and-attach path): if the
       # sandbox publishes ports with nothing listening behind them, surface it
@@ -1176,10 +1379,13 @@ case "$subcommand" in
       done
 
       if [ "${#agent_args[@]}" -gt 0 ]; then
+        ACQ_SESSION_KIND="attach"
         acq_backend_attach "$first" -- "${agent_args[@]}"
       elif [ "${#rest[@]}" -gt 0 ]; then
+        ACQ_SESSION_KIND="attach"
         acq_backend_attach "$first" "${rest[@]}"
       else
+        ACQ_SESSION_KIND="attach"
         acq_backend_attach "$first"
       fi
     else
@@ -1205,11 +1411,13 @@ case "$subcommand" in
 
   ls)
     shift
+    acq_backend_guard_version
     acq_backend_list "$@"
     ;;
 
   stop)
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: stop: missing sandbox name" >&2; exit 1; }
     acq_backend_stop "$local_name"
@@ -1226,6 +1434,7 @@ case "$subcommand" in
     # 'start' verb (acq_backend_start is undefined there); this arm is
     # capability-gated below to point sbx users at `acq run`, which auto-resumes.
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: start: missing sandbox name" >&2; exit 1; }
     if ! command -v acq_backend_start >/dev/null 2>&1; then
@@ -1260,6 +1469,7 @@ case "$subcommand" in
     # so the stop is guarded with `|| ...` and never aborts. start+heal always
     # follows.
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: restart: missing sandbox name" >&2; exit 1; }
     if ! command -v acq_backend_start >/dev/null 2>&1; then
@@ -1282,6 +1492,7 @@ case "$subcommand" in
 
   rm)
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: rm: missing sandbox name" >&2; exit 1; }
     acq_backend_terminate "$local_name"
@@ -1289,26 +1500,42 @@ case "$subcommand" in
 
   exec)
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: exec: missing sandbox name" >&2; exit 1; }
     shift
+    _exec_ws=""
+    if command -v acq_backend_workspace_for >/dev/null 2>&1; then
+      _exec_ws=$(acq_backend_workspace_for "$local_name" 2>/dev/null || true)
+    fi
+    advise_project_env_activation "$_exec_ws"
+    ACQ_SESSION_KIND="exec"
     acq_backend_run "$local_name" "$@"
     ;;
 
   shell)
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: shell: missing sandbox name" >&2; exit 1; }
+    _shell_ws=""
+    if command -v acq_backend_workspace_for >/dev/null 2>&1; then
+      _shell_ws=$(acq_backend_workspace_for "$local_name" 2>/dev/null || true)
+    fi
+    advise_project_env_activation "$_shell_ws"
+    ACQ_SESSION_KIND="shell"
     acq_backend_shell "$local_name"
     ;;
 
   cp)
     shift
+    acq_backend_guard_version
     acq_backend_cp "${1:-}" "${2:-}"
     ;;
 
   ports)
     shift
+    acq_backend_guard_version
     local_name="${1:-}"
     [ -n "$local_name" ] || { echo "acq: ports: missing sandbox name" >&2; exit 1; }
     shift
@@ -1321,6 +1548,9 @@ case "$subcommand" in
     case "$sub2" in
       set)
         shift
+        if _acq_secret_needs_usai_facts "$@"; then
+          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+        fi
         acq_backend_secret_set "$@"
         if _acq_parse_secret_scope_for_propagation "$@"; then
           _acq_propagate_secret_to_present_backends "$ACQ_PROPAGATE_SERVICE" "$ACQ_PROPAGATE_SCOPE"
@@ -1340,6 +1570,9 @@ case "$subcommand" in
         ;;
       rm)
         shift
+        if _acq_secret_needs_usai_facts "$@"; then
+          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+        fi
         # `acq secret rm [-g | SANDBOX] SERVICE` removes an acq-owned secret from
         # the acq store (and clears the backend's injector). If the args name a
         # scope + known acq service (-g or a sandbox name), route to the backend
@@ -1376,6 +1609,9 @@ case "$subcommand" in
         # acq_key_injectable so the two can never drift. Fail closed; never forward
         # to the backend CLI.
         shift
+        if _acq_secret_needs_usai_facts "$@"; then
+          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT" >/dev/null 2>&1 || true
+        fi
         # Parse scope the same way secret set/rm do: `-g`/`--global` -> global; a
         # leading bare token before the service -> sandbox; a lone token -> service.
         secret_has_scope=""
@@ -1451,6 +1687,9 @@ case "$subcommand" in
         # it never invokes the backend's own `secret` CLI. See acq_secret_import
         # in acq.backends/common.sh and docs/BACKEND_GUIDE.md "Migration".
         shift
+        if _acq_secret_import_includes_usai "$@"; then
+          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+        fi
         acq_secret_import "$@"
         ;;
       --help|-h|"")

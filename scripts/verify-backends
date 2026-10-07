@@ -2,9 +2,12 @@
 #
 # verify-backends — HOST-SIDE end-to-end check that the four neutral acq kits
 # apply cleanly on each INSTALLED backend, and that the core kit behaviors work.
-# Unlike scripts/test-acq (which stubs sbx/msb and runs anywhere), this exercises
-# the REAL toolchain and therefore must run on a machine that can create
-# sandboxes:
+# It is also the live sequencing gate for the ADR-0030 migration of
+# `acq run opencode .` to the agent-kit/devenv model: keep this verifier green
+# before, during, and after the internal migration so the observable acq contract
+# remains stable. Unlike scripts/test-acq-bats (which stubs sbx/msb and runs
+# anywhere), this exercises the REAL toolchain and therefore must run on a
+# machine that can create sandboxes:
 #   - sbx: Docker + KVM, `sbx login` done, sbx >= 0.39.0
 #   - msb: host virtualization (KVM on Linux, HVF on macOS, WHP on Windows),
 #          msb >= 0.6.0
@@ -12,6 +15,9 @@
 # For each backend that is INSTALLED, it creates a tiny throwaway sandbox and
 # asserts (design §9):
 #   1. The four pinned kits apply cleanly (no hard failure).
+#      On sbx, before provisioning, it also runs the real-sbx grammar acceptance
+#      guard (`test/bats/101-sbx-grammar-acceptance.bats`) so kit grammar drift is
+#      caught by this live validation path, not only by ad hoc local unit runs.
 #   2. The USAi key is bound and the models host is reachable from the guest.
 #      NOTE: this does NOT require a valid USAi key. On both backends the guest
 #      holds only a PLACEHOLDER (sbx bakes a custom-secret placeholder + proxy
@@ -24,6 +30,13 @@
 #      ssh-agent the verifier spins up itself (no dependence on the caller's
 #      agent).
 #   4. The playbook clone symlink appears at the agent's AGENTS.md path.
+#   5. The migration-sensitive boot contract stays intact: the verifier's
+#      ACQ_EXTRA_KITS volume mounts at boot, acq exec starts in the workspace as
+#      the agent user, and an opencode sandbox re-attaches through `acq run NAME --
+#      --version`. On msb, the optional `oci-engine` catalog kit is verified in a
+#      separate sandbox. Offline bats additionally freeze the fresh `acq run
+#      opencode .` dispatch surface: --clone / ACQ_CLONE, ACQ_WORKSPACE, --kit
+#      ordering, ACQ_IMAGE, boot volumes, and login-shell shape.
 # A backend that is NOT installed is SKIPPED (its row prints "skipped").
 #
 # This CANNOT run inside an sbx/msb sandbox (no nested sandboxes) — see ADR-0011
@@ -41,11 +54,17 @@
 #                                         (default: always remove) for manual poking.
 #     --only BACKEND                      Run just one backend (sbx|msb), skipping
 #                                         the other — handy when iterating.
-#     --oci-only                          Skip the slow create + kit-apply and run
-#                                         ONLY the OCI (podman) checks against an
-#                                         already-existing exec-ready sandbox.
-#                                         Pair with a prior `--only msb -k` run so
-#                                         the sandbox is left in place to reuse.
+#     --oci-only                          Skip the broad backend checks and run
+#                                         ONLY the OCI (podman) checks. Creates a
+#                                         dedicated sandbox with the oci-engine kit
+#                                         unless an exec-ready one already exists.
+#     ACQ_VERIFY_USE_GH_AUTH=1            Allow the GitHub seed to fall back to
+#                                         `gh auth token`. OFF by default because a
+#                                         keychain-backed gh can block on a
+#                                         credential prompt before the first traced
+#                                         step (see KNOWN_FAILURE_MODES.md §44); an
+#                                         exported GH_TOKEN/GITHUB_TOKEN is always
+#                                         used without the opt-in.
 #
 # No USAi key is required or prompted for: the verifier seeds a synthetic dummy
 # USAi value at global scope, in a hermetic secret store, and suppresses acq's
@@ -197,6 +216,17 @@ export ACQ_PROVENANCE_DIR="$VERIFY_STATE/provenance"
 # (no `msb modify` against running VMs); the throwaway sandboxes this script
 # creates still bind the key at create time, which is all the checks need.
 export ACQ_SECRET_NO_LIVE_REFEED=1
+# The hermetic XDG_CONFIG_HOME above means acq never finds a config file here, so
+# EVERY verify run looks like a first run to `maybe_first_run_configure` — which
+# then blocks on an interactive confirm and hangs the verifier forever (the
+# observed symptom: a create step that never returns, with no output because
+# run_acq captures it). `create_time_kit_picker` is a second such gate. Neither
+# prompt has anything to ask a verifier: the configured defaults are exactly what
+# we want. ACQ_NO_PROMPT=1 forces the non-interactive path for both (and for
+# `acq configure`, which then reports "configuration unchanged" and makes no
+# writes). This only affects the three config widgets — secret VALUE reads are
+# gated on `[ -t 0 ]`, not on this, so seeding still works.
+export ACQ_NO_PROMPT=1
 mkdir -p "$XDG_CONFIG_HOME" "$ACQ_SECRET_STORE_DIR" "$ACQ_STATE_DIR" "$ACQ_PROVENANCE_DIR"
 
 # Fixture kit for the neutral `volumes:` vocabulary (ADR-0023): a tiny local kit
@@ -218,25 +248,48 @@ volumes:
 SPEC
 export ACQ_EXTRA_KITS="${ACQ_EXTRA_KITS:+${ACQ_EXTRA_KITS} }${VOLKIT_DIR}"
 
-# Run an acq command, capturing combined stdout+stderr into LAST_OUT and
-# returning its exit status. The first arg is a short label for the step; in
-# verbose mode it and the exact command line are streamed live.
+# _run_captured CMD... — run CMD, put its combined stdout+stderr in LAST_OUT, and
+# return its exit status. In verbose mode the output also streams live.
 #
-# When TRACE is on, a timestamped heartbeat brackets the step (START ... DONE
-# rc=N) so a step that hangs shows its START line with no matching DONE — that
-# names the exact acq step that stalled. Live streaming (VERBOSE) is forced in
-# trace mode so acq's own ACQ_DEBUG output appears in real time rather than
-# being buffered inside the command substitution until the step returns.
-run_acq() {
-  local desc="$1"; shift
-  trace "START ${desc}: acq $*"
-  local _rc
+# WHY A TEMP FILE AND NOT `$( ... )`: command substitution reads the capture pipe
+# until EOF, i.e. until EVERY writer closes it — not until the command exits. acq
+# both dups its stderr to fd 9 (the secret-store warning channel) and launches
+# daemonized guest-side helpers (the ssh-agent socat bridge), so a descriptor on
+# that pipe outlives the acq process. `$(acq ...)` and
+# `$(acq ... | tee /dev/stderr)` therefore BLOCK after acq has already finished —
+# the observed "stalls right after provision complete" with no DONE line, which
+# is indistinguishable from a real hang. Redirecting to a FILE has no such
+# dependency: the wait ends when the command exits. Reproduced and confirmed with
+# a daemonizing stand-in; see docs/KNOWN_FAILURE_MODES.md §44.
+#
+# The command runs in the FOREGROUND so piped stdin (`printf key | run_acq ...
+# secret set`) reaches it unchanged, and `tail -f` provides the live view.
+#
+# Every capture in this script MUST go through here. A second hand-rolled
+# `$( ... | tee )` would reintroduce exactly the hang this replaced.
+_run_captured() {
+  local _rc _out _tail_pid=""
+  # Clear the previous step's capture FIRST. Otherwise an early return below
+  # leaves LAST_OUT holding the PRIOR step's output, and a caller that dumps
+  # LAST_OUT on failure would print a stale, unrelated transcript.
+  LAST_OUT=""
+  _out=$(mktemp "${VERIFY_STATE}/run-captured.XXXXXX") || return 1
+  : >"$_out"
   if [ -n "$VERBOSE" ]; then
-    printf '        $ acq %s   # %s\n' "$*" "$desc" >&2
-    LAST_OUT=$("$ACQ" "$@" 2>&1 | tee /dev/stderr); _rc="${PIPESTATUS[0]}"
-  else
-    LAST_OUT=$("$ACQ" "$@" 2>&1); _rc=$?
+    tail -f "$_out" >&2 &
+    _tail_pid=$!
   fi
+  "$@" >"$_out" 2>&1
+  _rc=$?
+  if [ -n "$_tail_pid" ]; then
+    # Let tail flush the last write before it is stopped, so the live view is
+    # not truncated relative to the captured LAST_OUT.
+    sleep 0.2
+    kill "$_tail_pid" >/dev/null 2>&1 || true
+    wait "$_tail_pid" 2>/dev/null || true
+  fi
+  LAST_OUT=$(cat "$_out")
+  rm -f "$_out" 2>/dev/null || true
   # Normalize CRLF -> LF in the captured output. Guest command output reaches us
   # over msb's PTY/ssh transport, which terminates lines with CRLF; the trailing
   # CR survives into LAST_OUT and silently breaks downstream parses that compare
@@ -247,6 +300,25 @@ run_acq() {
   # every consumer sees clean LF-delimited text; callers that already tolerated
   # it (tr -dc, anchored sed) are unaffected. bash 3.2 safe.
   LAST_OUT=${LAST_OUT//$'\r'/}
+  return "$_rc"
+}
+
+# Run an acq command, capturing combined stdout+stderr into LAST_OUT and
+# returning its exit status. The first arg is a short label for the step; in
+# verbose mode it and the exact command line are streamed live.
+#
+# When TRACE is on, a timestamped heartbeat brackets the step (START ... DONE
+# rc=N) so a step that hangs shows its START line with no matching DONE — that
+# names the exact acq step that stalled. Live streaming (VERBOSE) is forced in
+# trace mode so acq's own ACQ_DEBUG output appears in real time rather than
+# being buffered until the step returns.
+run_acq() {
+  local desc="$1"; shift
+  trace "START ${desc}: acq $*"
+  [ -n "$VERBOSE" ] && printf '        $ acq %s   # %s\n' "$*" "$desc" >&2
+  local _rc
+  _run_captured "$ACQ" "$@"
+  _rc=$?
   trace "DONE  ${desc}: rc=${_rc}"
   return "$_rc"
 }
@@ -301,11 +373,19 @@ USAI_SEEDED_FOR=""
 # Prefer an already-exported GH_TOKEN / GITHUB_TOKEN (how many users, incl. CI,
 # authenticate) — note that when GH_TOKEN is set in the env, `gh auth token`
 # prints NOTHING (gh treats the env var as authoritative and won't echo it), so
-# we must read the env var directly. Fall back to `gh auth token` (keyring) when
-# no env token is set and gh is installed + logged in.
+# we must read the env var directly.
+#
+# The `gh auth token` keyring fallback is OPT-IN (ACQ_VERIFY_USE_GH_AUTH=1): on a
+# host whose gh credentials live in an OS keychain, that call can block on a
+# credential-helper prompt. It runs BEFORE the first traced step, so a block there
+# freezes the whole verifier with no trace output at all — indistinguishable from
+# a backend hang (see docs/KNOWN_FAILURE_MODES.md §44). Without the opt-in and
+# without an exported token, the playbook check simply SKIPs, which is the
+# documented token-less behavior anyway.
 _gh_token() {
   if [ -n "${GH_TOKEN:-}" ]; then printf '%s' "$GH_TOKEN"; return 0; fi
   if [ -n "${GITHUB_TOKEN:-}" ]; then printf '%s' "$GITHUB_TOKEN"; return 0; fi
+  [ "${ACQ_VERIFY_USE_GH_AUTH:-0}" = "1" ] || return 0
   command -v gh >/dev/null 2>&1 || return 0
   gh auth token 2>/dev/null || true
 }
@@ -415,8 +495,18 @@ seed_usai_secret() {
   # secrets are GLOBAL BY DEFAULT now, and a specific sandbox is scoped with
   # `--sandbox NAME` (see docs/VERIFY_BACKENDS_HANDOFF.md "sbx CLI secret
   # scope-flag change"). We omit the flag (global is what we want).
+  # The guard must be SCOPE-AWARE. A bare `grep -q USAI_API_KEY` over the whole
+  # listing also matches a SANDBOX-SCOPED row (e.g. one left behind for a since-
+  # deleted sandbox), so the global row never gets created, step 3's
+  # `secret has -g usai` keeps returning 1, and every sbx check skips forever.
+  # Match only a row in the "(global)" scope column.
   if [ "$backend" = "sbx" ]; then
-    if ! sbx secret ls 2>/dev/null | grep -q 'USAI_API_KEY'; then
+    if ! sbx secret ls 2>/dev/null | awk '
+         $1 == "(global)" {
+           for (i = 2; i <= NF; i++) if ($i == "USAI_API_KEY") { found = 1; exit }
+         }
+         END { exit(found ? 0 : 1) }
+       '; then
       sbx secret set-custom --host "$USAI_HOST" --env USAI_API_KEY \
         --value "$VERIFY_USAI_DUMMY" >/dev/null 2>&1 || true
     fi
@@ -449,6 +539,62 @@ unseed_usai_secret() {
 # ---------------------------------------------------------------------------
 # Per-backend verification. $1 = backend name. Assumes it is installed.
 # ---------------------------------------------------------------------------
+verify_sbx_grammar_acceptance() {
+  local bats="${REPO_ROOT}/test/vendor/bats-core/bin/bats"
+  local test_file="${REPO_ROOT}/test/bats/101-sbx-grammar-acceptance.bats"
+  local out rc skips
+
+  # Fail-closed on BOTH "absent" and "present but not executable", with the
+  # distinction surfaced because the remedies differ.
+  #
+  # Do NOT try to work around a missing exec bit by invoking `bash "$bats"`. That
+  # looks like it should work (bats is a bash script) but does not: bin/bats ends
+  # in `exec env ... "$BATS_ROOT/libexec/bats-core/bats"`, which then execs
+  # bats-exec-suite and a formatter. A stripped bit therefore surfaces several
+  # execs deeper as `env: .../libexec/bats-core/bats: Permission denied` — which
+  # this function previously classified as "real sbx rejected acq's translated kit
+  # grammar", an alarming claim about kit compatibility for what is actually a
+  # file-permission artifact. Measured on a live run; see KNOWN_FAILURE_MODES §44.
+  #
+  # Either way this must never report "accepted" without having run (ADR-0025).
+  if [ ! -f "$bats" ]; then
+    fail "sbx: grammar acceptance guard cannot run (vendored bats not initialized)" \
+         "run: git submodule update --init test/vendor/bats-core test/vendor/bats-support test/vendor/bats-assert"
+    return 0
+  fi
+  if [ ! -x "$bats" ]; then
+    fail "sbx: grammar acceptance guard cannot run (vendored bats is not executable)" \
+         "the checkout lost its exec bits (common on a shared mount) — run: scripts/fix-exec-bits"
+    return 0
+  fi
+  if [ ! -f "$test_file" ]; then
+    fail "sbx: grammar acceptance guard missing at $test_file"
+    return 0
+  fi
+
+  # Capture via _run_captured for the same reason run_acq does (see its comment):
+  # a `$( ... | tee )` capture can block on a descriptor held past child exit.
+  [ -n "$VERBOSE" ] && printf '        $ %s %s   # sbx grammar acceptance\n' "$bats" "$test_file" >&2
+  _run_captured "$bats" "$test_file"
+  rc=$?
+  out="$LAST_OUT"
+
+  if [ "$rc" -ne 0 ]; then
+    fail "sbx: real sbx rejected acq's translated kit grammar"
+    dump "bats output" "$out"
+    return 0
+  fi
+
+  skips=$(printf '%s\n' "$out" | grep -c '# skip' 2>/dev/null | head -n1)
+  case "$skips" in ""|*[!0-9]*) skips=0 ;; esac
+  if [ "$skips" -gt 0 ]; then
+    fail "sbx: grammar acceptance guard did not run all checks (${skips} skip(s))"
+    dump "bats output" "$out"
+  else
+    pass "sbx: real sbx accepts acq's translated kit grammar"
+  fi
+}
+
 verify_backend() {
   local backend="$1"
   echo ""
@@ -463,6 +609,7 @@ verify_backend() {
         fail "${backend}: 'sbx version' failed — is sbx installed and on PATH?"
         return
       fi
+      verify_sbx_grammar_acceptance
       # A logged-out sbx will fail kit resolution / create with an auth error.
       # We can't cheaply assert login state, so just note it if create fails.
       ;;
@@ -707,8 +854,17 @@ verify_backend() {
     _stop_ephemeral_agent
   fi
 
-  # 5) OCI engine (podman) usable — msb only (ADR-0020).
-  _verify_oci_checks "$backend" "$name"
+  # 5) Default sandbox has no adapter-owned OCI install; OCI is opt-in via the
+  #    oci-engine catalog kit, verified separately below.
+  if [ "$backend" = "msb" ]; then
+    if run_acq "exec no-default-oci" --backend "$backend" exec "$name" -- sh -c \
+        'test ! -e /var/lib/acq/oci-ready && ! command -v podman >/dev/null 2>&1'; then
+      pass "${backend}: OCI engine is not installed by default"
+    else
+      fail "${backend}: OCI engine appeared without selecting the oci-engine kit"
+      dump "no-default-oci output" "$LAST_OUT"
+    fi
+  fi
 
   # 6) Neutral kit volumes (ADR-0023): the verifier's fixture kit (appended to
   #    ACQ_EXTRA_KITS at setup) declares a 256m block volume at /acq-verify-vol.
@@ -1002,86 +1158,101 @@ _verify_ver_ge() {
   return 0
 }
 
-# _verify_oci_checks BACKEND NAME — the OCI engine + run checks (msb only,
-# ADR-0020). Factored out of verify_backend so the --oci-only fast path can
-# re-run JUST these against an existing sandbox without the slow create/kit-apply.
-# acq provisions rootless podman and aliases docker->podman so agents can run OCI
-# images; skipped when ACQ_MSB_ENSURE_OCI=0 (operator opted out).
-_verify_oci_checks() {
-  local backend="$1" name="$2"
-  [ "$backend" = "msb" ] || return 0
-  case "$(printf '%s' "${ACQ_MSB_ENSURE_OCI-1}" | tr '[:upper:]' '[:lower:]')" in
-    ""|0|false|no|off)
-      skip "${backend}: OCI engine check (ACQ_MSB_ENSURE_OCI disabled)" ;;
-    *)
-      # docker (our wrapper) resolves to podman, and the engine reports info.
-      # The engine runs ROOTLESS as the agent user (ADR-0020), and `acq exec`
-      # already runs as the agent, so `docker info` (= plain `podman info`)
-      # exercises the real usable path: the rootless prereqs, the storage driver
-      # on the overlay root, and the docker->podman alias.
-      if run_acq "exec oci-engine" --backend "$backend" exec "$name" -- sh -c \
-          'command -v podman >/dev/null 2>&1 && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1'; then
-        pass "${backend}: OCI engine (rootless podman) present and docker->podman aliased"
-      else
-        fail "${backend}: OCI engine (podman) not usable (see ADR-0020)"
-        dump "oci-engine output" "$LAST_OUT"
-      fi
-      # LOCAL BUILD (no registry): build a trivial `FROM scratch` image. This
-      # exercises the storage-driver LAYER MOUNT — the exact operation that
-      # `docker info` does NOT perform but every real build/run does. It is what
-      # caught the rootless /dev/fuse regression: with the fuse-overlayfs driver
-      # but /dev/fuse ungranted, `docker info` PASSES yet the layer mount fails
-      # ("fuse: failed to open /dev/fuse: Permission denied"). Because it needs
-      # neither egress nor a registry, a failure here is UNAMBIGUOUSLY an
-      # engine/storage fault (unlike the hello-world run below, which depends on
-      # Docker Hub egress) — and `docker build` is itself a capability agents use.
-      # We assert the BUILD succeeds; the build mounts layers, which is the mount
-      # path we need to prove. `FROM scratch` needs no base image (no pull).
-      if run_acq "exec oci-build" --backend "$backend" exec "$name" -- sh -c '
-          set -e
-          d=$(mktemp -d)
-          printf "FROM scratch\nCOPY hi /hi\n" > "$d/Containerfile"
-          echo hi > "$d/hi"
-          docker build -q -t acq-oci-selftest:local "$d" >/dev/null 2>&1
-          rc=$?
-          docker rmi -f acq-oci-selftest:local >/dev/null 2>&1 || true
-          rm -rf "$d"
-          exit $rc'; then
-        pass "${backend}: local 'docker build' (rootless, fuse-overlayfs mount) works"
-      else
-        fail "${backend}: local 'docker build' failed — storage-driver mount fault (see ADR-0020)"
-        dump "oci-build output" "$LAST_OUT"
-      fi
-      # End-to-end: run a trivial container through the docker alias. We use the
-      # FULLY-QUALIFIED docker.io/library/hello-world (NOT the bare `hello-world`
-      # short name, which podman's stock shortnames map to quay.io/podman/hello —
-      # whose blob CDN cdn01.quay.io is NOT in the balanced baseline). Docker
-      # Hub's blob CDNs (**.production.cloudflare.docker.com /
-      # **.production.cloudfront.docker.com) ARE in the balanced baseline, so this
-      # pull+run succeeds under the default policy.
-      #
-      # Escalation: distinguish "engine can't run a container" (a real FAIL) from
-      # "registry egress is blocked" (environmental WARN). If the run fails, probe
-      # registry reachability (a 401 from registry-1.docker.io/v2/ means egress is
-      # fine and the failure is the engine → FAIL; anything else means egress is
-      # the culprit → WARN).
-      if run_acq "exec oci-run" --backend "$backend" exec "$name" -- sh -c \
-          'docker run --rm docker.io/library/hello-world >/dev/null 2>&1'; then
-        pass "${backend}: 'docker run' (via podman) executes an OCI image"
-      else
-        local _oci_run_out="$LAST_OUT"
-        if run_acq "exec oci-egress-probe" --backend "$backend" exec "$name" -- sh -c \
-            '[ "$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://registry-1.docker.io/v2/)" = "401" ]'; then
-          # Registry egress works, but the container did not run -> genuine engine fault.
-          fail "${backend}: 'docker run' failed though Docker Hub egress is reachable (engine fault)"
-          dump "oci-run output" "$_oci_run_out"
-        else
-          warn "${backend}: 'docker run hello-world' did not complete (registry egress?); engine wiring OK"
-          dump "oci-run output" "$_oci_run_out"
-        fi
-      fi
-      ;;
-  esac
+# verify_oci_kit — provision a dedicated msb sandbox with the opt-in oci-engine
+# catalog kit, then prove the docker->podman path. This is a live check: without
+# msb or a sandbox-capable host it SKIPs/BLOCKS loudly rather than passing.
+verify_oci_kit() {
+  local backend="msb" name created=""
+  echo ""
+  echo "== backend: msb (oci-engine kit) =="
+
+  command -v msb >/dev/null 2>&1 || { skip "msb: oci-engine kit skipped (msb not installed)"; return 0; }
+  _verify_backend_enabled msb || return 0
+  if ! msb doctor >/dev/null 2>&1; then
+    skip "msb: oci-engine kit skipped (msb doctor reports host virtualization is not ready)"
+    return 0
+  fi
+
+  name=$(
+    # shellcheck disable=SC1090
+    ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
+    derive_name shell "$WORKDIR-oci" 2>/dev/null
+  )
+  [ -n "$name" ] || name="shell-$(basename "$WORKDIR" | tr '[:upper:]' '[:lower:]')-oci"
+  printf '        sandbox name: %s\n' "$name"
+
+  if [ -n "${OCI_ONLY:-}" ] && run_acq "exists-oci-kit" --backend "$backend" exec "$name" -- true >/dev/null 2>&1; then
+    printf '        (--oci-only: reusing existing exec-ready sandbox %s)\n' "$name"
+  else
+    seed_usai_secret "$backend" "$name"
+    if [ "$USAI_SEEDED_FOR" != "$name" ]; then
+      skip "${backend}: oci-engine kit skipped (verifier did not seed sandbox-scoped USAi key)"
+      return 0
+    fi
+    local oci_kit_ref
+    oci_kit_ref=$(
+      # shellcheck disable=SC1090
+      ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
+      _acq_optin_kit_ref oci-engine
+    )
+    printf '        creating sandbox %s with oci-engine kit (booting + package install can take a few minutes)...\n' "$name"
+    if ! run_acq "create-oci-kit" --backend "$backend" create shell "$WORKDIR" --name "$name" --kit "$oci_kit_ref"; then
+      fail "${backend}: provision with oci-engine kit failed"
+      dump "acq create output" "$LAST_OUT"
+      unseed_usai_secret "$backend" "$name"
+      [ -n "$KEEP" ] || run_acq "rm-oci-kit" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
+      return
+    fi
+    created=1
+    unseed_usai_secret "$backend" "$name"
+  fi
+
+  if run_acq "exec oci-engine" --backend "$backend" exec "$name" -- sh -c \
+      'command -v podman >/dev/null 2>&1 && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1'; then
+    pass "${backend}: oci-engine kit installed rootless podman and docker alias"
+  else
+    fail "${backend}: oci-engine kit did not provide a usable podman engine"
+    dump "oci-engine output" "$LAST_OUT"
+  fi
+
+  if run_acq "exec oci-build" --backend "$backend" exec "$name" -- sh -c '
+      set -e
+      d=$(mktemp -d)
+      printf "FROM scratch\nCOPY hi /hi\n" > "$d/Containerfile"
+      echo hi > "$d/hi"
+      docker build -q -t acq-oci-selftest:local "$d" >/dev/null 2>&1
+      rc=$?
+      docker rmi -f acq-oci-selftest:local >/dev/null 2>&1 || true
+      rm -rf "$d"
+      exit $rc'; then
+    pass "${backend}: oci-engine kit supports local docker build"
+  else
+    fail "${backend}: oci-engine kit local docker build failed"
+    dump "oci-build output" "$LAST_OUT"
+  fi
+
+  if run_acq "exec oci-run" --backend "$backend" exec "$name" -- sh -c \
+      'docker run --rm docker.io/library/hello-world >/dev/null 2>&1'; then
+    pass "${backend}: oci-engine kit runs an OCI image via docker alias"
+  else
+    local _oci_run_out="$LAST_OUT"
+    if run_acq "exec oci-egress-probe" --backend "$backend" exec "$name" -- sh -c \
+        '[ "$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://registry-1.docker.io/v2/)" = "401" ]'; then
+      fail "${backend}: docker run failed though Docker Hub egress is reachable"
+      dump "oci-run output" "$_oci_run_out"
+    else
+      warn "${backend}: docker run hello-world did not complete (registry egress?); engine wiring OK"
+      dump "oci-run output" "$_oci_run_out"
+    fi
+  fi
+
+  if [ -n "$created" ]; then
+    if [ -n "$KEEP" ] && [ "$FAIL" -gt 0 ]; then
+      printf '        (keeping sandbox %s; --keep set)\n' "$name"
+    else
+      run_acq "rm-oci-kit" --backend "$backend" rm "$name" >/dev/null 2>&1 || true
+    fi
+  fi
 }
 
 # verify_agent_install BACKEND — provision an `opencode` sandbox (not `shell`)
@@ -1125,6 +1296,17 @@ verify_agent_install() {
     dump "exec output" "$LAST_OUT"
   fi
 
+  # Exercise the live attach/launch path without requiring a real USAi key. A
+  # fresh `acq run opencode "$WORKDIR" -- --version` also performs post-create
+  # USAi key validation and intentionally fails with the verifier's synthetic key;
+  # this name-reattach form drives the same backend attach path and cleanup target.
+  if run_acq "run-opencode-version" --backend "$backend" run "$aname" -- --version; then
+    pass "${backend}: acq run re-attaches opencode sandbox and launches --version"
+  else
+    fail "${backend}: acq run did not re-attach opencode sandbox and launch --version"
+    dump "acq run output" "$LAST_OUT"
+  fi
+
   # The guest must have enough RAM to actually RUN a Node.js agent TUI. msb's
   # 512 MiB default OOM-kills opencode on launch (quickstart#228 follow-up: it
   # started, then the terminal died with "Killed"). Assert a generous ceiling
@@ -1150,27 +1332,56 @@ verify_agent_install() {
 echo "verify-backends"
 echo "  workspace: $WORKDIR"
 
-# sbx
-if command -v sbx >/dev/null 2>&1; then
-  if _verify_backend_enabled sbx; then
-    verify_backend sbx
-    verify_agent_install sbx
-  fi
-else
-  if _verify_backend_enabled sbx; then
-    echo ""; echo "== backend: sbx =="; skip "sbx: not installed"
-  fi
+# Self-heal the checkout's executable bits before any check runs.
+#
+# This script and the tools it drives are entry points the git index records as
+# 100755, but a checkout on a container/host shared mount routinely presents them
+# as 0644 — and the host clone sets core.fileMode=false, so git never reports it.
+# The failures that follow are misleading: rc=126 on an acq step, or bats dying
+# several execs deep with "Permission denied" (which this script used to report as
+# kit-grammar rejection). Repairing first means a live run is never spent
+# diagnosing a permission artifact. See scripts/fix-exec-bits and
+# docs/KNOWN_FAILURE_MODES.md §44.
+#
+# Best-effort and quiet when there is nothing to do: a read-only checkout should
+# not block verification, and the per-check gates still fail closed.
+if [ -x "${REPO_ROOT}/scripts/fix-exec-bits" ] || [ -f "${REPO_ROOT}/scripts/fix-exec-bits" ]; then
+  _fix_out=$(bash "${REPO_ROOT}/scripts/fix-exec-bits" 2>&1) || true
+  case "$_fix_out" in
+    *"fixed +x"*)
+      printf '  note: repaired executable bits lost by the checkout:\n'
+      printf '%s\n' "$_fix_out" | sed -n 's/^  fixed +x   /        /p'
+      ;;
+  esac
+  unset _fix_out
 fi
 
-# msb
-if command -v msb >/dev/null 2>&1; then
-  if _verify_backend_enabled msb; then
-    verify_backend msb
-    verify_agent_install msb
-  fi
+if [ -n "${OCI_ONLY:-}" ]; then
+  verify_oci_kit
 else
-  if _verify_backend_enabled msb; then
-    echo ""; echo "== backend: msb =="; skip "msb: not installed"
+  # sbx
+  if command -v sbx >/dev/null 2>&1; then
+    if _verify_backend_enabled sbx; then
+      verify_backend sbx
+      verify_agent_install sbx
+    fi
+  else
+    if _verify_backend_enabled sbx; then
+      echo ""; echo "== backend: sbx =="; skip "sbx: not installed"
+    fi
+  fi
+
+  # msb
+  if command -v msb >/dev/null 2>&1; then
+    if _verify_backend_enabled msb; then
+      verify_backend msb
+      verify_agent_install msb
+      verify_oci_kit
+    fi
+  else
+    if _verify_backend_enabled msb; then
+      echo ""; echo "== backend: msb =="; skip "msb: not installed"
+    fi
   fi
 fi
 

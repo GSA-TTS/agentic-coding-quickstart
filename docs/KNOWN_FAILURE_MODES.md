@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-08-25"
+last_updated: "2026-10-03"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -674,7 +674,7 @@ worked on sbx 0.35.0–0.37.x, where `sbx kit add` recreated the container with 
 augmented kit set while preserving state.
 
 > **sbx 0.38 caveat.** On sbx >= 0.38, `sbx kit add` no longer applies
-> startup-bearing kits mid-life (see [Section 35](#35-re-attach-heal-loop-warns-every-time-on-sbx-038--sbx-kit-add-refuses-startup-bearing-kits)),
+> startup-bearing kits mid-life (see [Section 36](#36-re-attach-heal-loop-warns-every-time-on-sbx-038--sbx-kit-add-refuses-startup-bearing-kits)),
 > and every built-in acq kit declares startup commands. In-place healing of the
 > built-in bundle therefore does **not** work on 0.38+: to add or refresh the
 > bundle you must recreate the sandbox (`acq rm && acq run`). acq detects the
@@ -1311,9 +1311,8 @@ If `sbx exec` reports the sandbox is not running, start it first
   (opencode requires postinstall to fetch its binary since v1.15.1).
 - If acq's automatic remediation ever fails, the manual `node postinstall.mjs`
   above is the reliable per-sandbox workaround.
-- The **msb** backend installs opencode itself (`npm install -g`, scripts
-  enabled) rather than using this image, so it is a possible alternative if the
-  sbx image stays broken — though it may hit the same opencode packaging issue.
+- The **msb** backend now gets opencode from the selected agent kit or base image,
+  not from an adapter-owned `npm install -g` fallback.
 
 ---
 
@@ -1380,8 +1379,11 @@ not a defect in a clean msb.
 **Fix:** wipe msb's data/state and reinstall, then confirm host readiness:
 
 ```bash
-# Reinstall msb (removes and re-lays its runtime state)
-curl -fsSL https://install.microsandbox.dev | sh
+# Reinstall msb (removes and re-lays its runtime state).
+# Do NOT use `curl -fsSL https://install.microsandbox.dev | sh` here: it always
+# resolves to the newest release, which may be a version acq refuses (§43).
+brew install GSA-TTS/tap/microsandbox-acq   # Homebrew hosts
+./scripts/verify-msb-pin --install          # verified pinned release bundle
 
 # Verify host virtualization + runtime prerequisites; --fix applies supported setup
 msb doctor
@@ -1770,7 +1772,51 @@ acq exec <sandbox> -- sh /home/agent/openchamber-start.sh &
 
 ---
 
-## 34. Git signing fails on msb: socat missing or msb < 0.6.9
+## 34. `docker run` or `docker compose` Missing Inside a Sandbox
+
+### Symptoms
+
+- `docker run`, `docker compose`, or `podman` is not found inside a sandbox.
+- On msb, a new sandbox no longer gets podman automatically.
+
+### Root Cause
+
+`oci-engine` is an opt-in catalog kit. acq no longer installs podman from the msb
+adapter by default, and sbx/msb now use the same mechanism for in-sandbox OCI
+support.
+
+### Fix
+
+Enable the kit for future sandboxes:
+
+```bash
+acq configure
+# select: oci-engine
+```
+
+For a single sandbox, pass the pinned kit ref with `--kit` or include it in
+`ACQ_EXTRA_KITS`:
+
+```bash
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=56d1f5f49ef928f50e61aa64a93d618b3d21c415&dir=integrations/isolation/acq-kits/oci-engine'
+```
+
+Existing sandboxes that were created before this change keep whatever podman
+state they already have, but new sandboxes require the opt-in kit unless the base
+image already includes a working engine.
+
+### Prevention / Status
+
+- Breaking change in the `oci-engine` catalog migration. Covered by the
+  `acq configure` catalog tests, the configured-kit fresh-shell start
+  round-trip, the msb no-default-OCI regression test, and the dedicated live
+  `scripts/verify-backends --only msb --oci-only` path.
+- ADR-0020 is superseded for the adapter-owned mechanism; ADR-0030 and ADR-0031
+  describe the kit/catalog path.
+
+---
+
+## 35. Git signing fails on msb: socat missing or msb < 0.6.9
 
 ### Symptoms
 
@@ -1803,7 +1849,9 @@ running on the host (or no key is loaded), there is nothing to forward.
 
 ### Fix
 
-- **Upgrade msb** to >= 0.6.9 (`msb self update`).
+- **Use a supported msb**: acq's default install pin is 0.7.7; existing
+  0.6.9-0.6.18 and 0.7.3+ installs remain accepted. msb 0.7.0-0.7.2 are
+  refused — see §43.
 - **Ensure `socat` is in `ACQ_MSB_IMAGE`** — the default
   `docker/sandbox-templates:shell-docker` ships it; a custom override must too.
 - **Ensure the host has an agent with a key loaded** before running `acq`:
@@ -1889,7 +1937,7 @@ See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
 
 ---
 
-## 35. Re-attach Heal Loop Warns Every Time on sbx 0.38 — `sbx kit add` Refuses Startup-Bearing Kits
+## 36. Re-attach Heal Loop Warns Every Time on sbx 0.38 — `sbx kit add` Refuses Startup-Bearing Kits
 
 ### Symptoms
 
@@ -1979,7 +2027,7 @@ heal-loop cases).
 
 ---
 
-## 36. msb Create-Time Published Port Returns Empty Response for a Loopback-Only Guest Service
+## 37. msb Create-Time Published Port Returns Empty Response for a Loopback-Only Guest Service
 
 ### Symptoms
 
@@ -2051,7 +2099,7 @@ from inside the sandbox and can reach guest `127.0.0.1:6767`.
 
 ---
 
-## 37. Commit signing fails in the sandbox: `user.signingKey needs to be set` / `No signature`
+## 38. Commit signing fails in the sandbox: `user.signingKey needs to be set` / `No signature`
 
 ### Symptoms
 
@@ -2108,7 +2156,7 @@ Notes:
   reachable, so a rebase with `SSH_AUTH_SOCK` set does not need a separate
   `--amend -S` pass.
 
-## 38. Spurious `M` (modified) diffs on scripts across the host/sandbox mount
+## 39. Spurious `M` (modified) diffs on scripts across the host/sandbox mount
 
 ### Symptoms
 
@@ -2158,7 +2206,7 @@ amending the wrong branch.
 
 ---
 
-## 39. Windows preview: `bash.exe` resolves to the WSL shim, WHP is not a feature flag, and the execution policy blocks scripts
+## 40. Windows preview: `bash.exe` resolves to the WSL shim, WHP is not a feature flag, and the execution policy blocks scripts
 
 ### Symptoms
 
@@ -2231,7 +2279,7 @@ amending the wrong branch.
 
 ---
 
-## 40. Recovering agent work reads the guest-writable scratch clone (residual risk)
+## 41. Recovering agent work reads the guest-writable scratch clone (residual risk)
 
 ### Symptoms
 
@@ -2274,7 +2322,7 @@ an untrusted agent could write to.
 
 ---
 
-## 41. A Required Check Backed by a `paths:`-Filtered Workflow Deadlocks Unrelated PRs
+## 42. A Required Check Backed by a `paths:`-Filtered Workflow Deadlocks Unrelated PRs
 
 ### Symptoms
 
@@ -2342,6 +2390,52 @@ adding them to branch protection.
 
 ---
 
+## 43. A Second Parallel Sandbox From the Same Kit Is Unreachable on Its Published Port (msb)
+
+### Symptoms
+
+- Two sandboxes created from the same kit both start cleanly, with no error.
+- `acq ports` reports the **same** host port for both, e.g.
+  `sandbox 6767 -> host 127.0.0.1:6767` in each.
+- `http://127.0.0.1:6767` serves the **first** sandbox's service. The second
+  sandbox's UI/API is simply unreachable, and nothing said so.
+- Also: a developer already running their own service on that port owns it, and
+  the sandbox's mapping silently loses.
+
+### Root Cause
+
+acq's neutral `publishedPorts` parser defaulted an omitted `host:` to the
+**guest** port, so every sandbox built from one kit requested the same host port.
+msb accepts the duplicate mapping without complaint — first writer wins, the rest
+are inert.
+
+### Fix
+
+Fixed in acq: an entry that omits `host:` now gets a **free** loopback host port
+chosen per sandbox, and an explicitly requested host port that is already in use
+**fails the create** instead of producing a dead mapping. Upgrade acq and
+recreate the sandboxes (`acq rm NAME` then `acq run …`) — the mapping is baked
+into the create arguments, so an existing sandbox keeps its old one.
+
+To pin a predictable host port per sandbox instead of taking the free one:
+
+```bash
+acq run opencode --publish 6868:6767 ~/projects/app-one
+acq run opencode --publish 6869:6767 ~/projects/app-two
+```
+
+`--publish` is msb-only and create-time only. See
+[ADR-0034](adr/0034-host-port-selection-and-publish-override.md).
+
+### Prevention
+
+Never hardcode a published host port in a script — read it back from
+`acq ports NAME`, or request it explicitly with `--publish` and let a contended
+port fail loudly. Note that `acq ports` prints the mapping msb was **asked**
+for, which is not proof that the sandbox owns that host port.
+
+---
+
 When something fails, work through this list:
 
 1. [ ] Is the secret actually in the container? (`echo $VAR_NAME`)
@@ -2351,6 +2445,337 @@ When something fails, work through this list:
 5. [ ] Is the config file actually being read? (add debug logging)
 6. [ ] Did SBX CLI syntax change? (`sbx --help`)
 7. [ ] Is this a known model/entitlement issue? (test with different model)
+
+---
+
+## 43. acq Refuses msb 0.7.0-0.7.2, or msb Refuses Your Sandbox State
+
+### Symptoms
+
+Any of four, depending on how far the host got.
+
+**1. `acq` refuses the msb version** — `acq run`, `acq create`, `acq ls`, or any
+other msb-backed command exits before touching a sandbox:
+
+```text
+error: acq refuses msb 0.7.2 because msb 0.7.0-0.7.2
+       migrate existing 0.6.x sandbox state one-way, into a form the 0.6.x
+       line cannot read.
+```
+
+**2. msb refuses the catalog** — a 0.6.x `msb` after a 0.7.x has run, including
+on read-only commands like `msb list`:
+
+```text
+database schema is newer than this msb binary; applied migration
+"m20260910_000001_snapshot_groups" is not in this binary's migration prefix
+```
+
+**3. Catalog-opening msb commands refuse** — after a `msb self downgrade`
+attempted with too old a binary:
+
+```text
+error: self_downgrade_recovery_required: resume the active downgrade recorded at
+       ~/.microsandbox/db/self-downgrade/<id>/journal.json
+```
+
+**4. Duplicate binaries** — during install:
+
+```text
+Multiple msb binaries were found; PATH order determines which one acq uses.
+```
+
+### Root Cause
+
+`msb` keeps its sandbox catalog in a versioned database under `$MSB_HOME`.
+Opening it with a newer `msb` **migrates it in place**, and the 0.6 → 0.7
+transition crossed a boundary the older line cannot read back. Nothing unusual is
+needed to land here — installing `msb` the documented way is enough, because
+`msb self update`, `brew upgrade`, and
+`curl -fsSL https://install.microsandbox.dev | sh` all resolve to the **newest**
+release.
+
+msb 0.7.0 through 0.7.2 had a further defect: they could reject persisted sandbox
+configurations they had themselves written. Upstream fixed that in **0.7.3** and
+now documents 0.7.0-0.7.2 as having "compatibility gaps addressed in v0.7.3"
+([Migrating from v0.6 to v0.7](https://docs.microsandbox.dev/migrations/v0.7)).
+
+Two `msb` binaries on one host make this worse — say a Homebrew one and another
+in `~/.local/bin`. Whichever appears first on `PATH` creates or migrates the
+state for that run, so the same host can migrate state in one terminal and refuse
+it in another.
+
+Symptom 3 has its own cause worth stating, because the action that produces it is
+the reflexive one. `msb self downgrade` builds its rollback plan from the
+**running** binary's migration metadata, so only a binary whose metadata covers
+the applied set can revert it. Attempting it from the older binary does not merely
+fail: it records an operation journal, and `msb` then refuses catalog-opening
+commands from every version until that operation completes. When the recorded
+transition cannot complete, the demand is unsatisfiable. Verified against real
+0.6.18 / 0.7.2 / 0.7.3 binaries: catalog-opening retries with the journal's own
+target, with a different target, and from each of the three all fail identically,
+and `self downgrade` exposes no abort flag. Non-catalog probes such as
+`msb --version` can still work, but they cannot clear the journal or read sandbox
+state.
+
+### Fix
+
+**If a 0.7.0-0.7.2 msb has already touched your sandbox state, move FORWARD.**
+This is upstream's recommendation and `acq`'s default offer, and it rewrites
+nothing — the migration sets are additive, so 0.7.3 or newer reads the already-migrated
+catalog as-is, with no rollback, no data-affecting step, and none of the refusals
+a downgrade can hit:
+
+```bash
+msb self update          # targets the newest release; acq re-checks the result
+msb --version            # confirm; acq accepts 0.7.3 or newer
+```
+
+**To roll back to 0.6.18 instead,** run the downgrade **with the msb that did
+the migration, before replacing it** — only that binary carries the rollback
+steps:
+
+```bash
+msb self downgrade 0.6.18   # run this with the 0.7.x binary, NOT an older one
+```
+
+If you already replaced or uninstalled that binary, get it back side-by-side
+without disturbing your current `msb` (these formulae are keg-only, so nothing is
+symlinked and nothing shadows your `PATH`):
+
+```bash
+brew install GSA-TTS/tap/microsandbox-acq@0.7.3
+"$(brew --prefix microsandbox-acq@0.7.3)/bin/msb" self downgrade 0.6.18
+```
+
+**If every catalog-opening msb command reports `self_downgrade_recovery_required`,**
+the only exit is removing that one operation directory. `install.sh` detects this
+and offers to do it; by hand:
+
+```bash
+rm -rf ~/.microsandbox/db/self-downgrade/<id>
+```
+
+That removes the record of an **unfinished operation** — not your catalog
+database, not its migration history, not your retained downgrade backups, and not
+any sandbox, snapshot, or image. (Upstream separately warns against deleting the
+catalog or editing migration history to bypass a refusal. That is a different
+action, and neither `acq` nor this step does it; see
+[ADR-0032](adr/0032-msb-version-policy-and-migration-recovery.md).)
+
+**To install a supported msb,** use a channel that can express a version.
+Neither upstream channel can:
+
+```bash
+brew install GSA-TTS/tap/microsandbox-acq   # version-pinned formula
+./scripts/verify-msb-pin --install          # verified pinned release bundle
+
+command -v msb && msb --version             # confirm which binary acq will use
+```
+
+Do **not** use `curl -fsSL https://install.microsandbox.dev | sh` to get a
+specific version. It takes no version argument and reads `releases/latest`, and
+every release publishes a **byte-identical** copy of that script as a release
+asset — so `.../releases/download/v0.7.7/install.sh` looks like a pin and
+installs whatever is newest.
+
+`acq` accepts `msb 0.6.9` through `0.6.18`, refuses `0.7.0` through `0.7.2`, and
+accepts `0.7.3` or newer. Fresh installs use pinned `0.7.7`. Remove stale copies
+or adjust `PATH` so the intended `msb` appears first.
+
+### Prevention / Status
+
+- `acq_backend_check_version` fails closed on the blocked range before any
+  command that opens the catalog — including state-touching verbs like `acq ls`,
+  which previously reached `msb` unguarded and surfaced the raw upstream error.
+- `install.sh` installs the pinned `0.7.7` from a checksum-verified release
+  bundle, prompts before replacing a too-old, unparseable, or blocked active
+  version, offers the forward path first when the catalog was already migrated,
+  refuses to drive a rollback with a binary that would wedge the install, and
+  fails closed when another blocked `msb` earlier on `PATH` would still shadow
+  the install.
+- `install.ps1` applies the same policy on Windows, which previously had none.
+  The Windows-specific logic has been smoke-tested on a real Windows host, but
+  remains lower-confidence than the POSIX path.
+- `scripts/verify-msb-pin` verifies the 0.7.7 install pin plus recovery behavior
+  against real 0.6.18 / 0.7.2 / 0.7.3 binaries in a throwaway `MSB_HOME`. It
+  boots no VM, so it needs no virtualization and runs inside a sandbox.
+
+---
+
+## 44. `verify-backends` Stalls Right After "provision complete" (No `DONE` Trace Line)
+
+**Status:** Fixed — `scripts/verify-backends` captures to a file instead of a pipe.
+
+### Symptoms
+
+A live `./scripts/verify-backends --only msb -x` run streams normal progress,
+reaches the end of provisioning, and then never returns:
+
+```text
+acq[debug]: msb provision: all kits applied; provision complete (shell-ws-xxxxxx)
+acq[debug]: msb: ssh-agent bridge started at /home/agent/.acq/ssh-agent.sock ...
+acq[debug]: provenance: recorded msb/shell-ws-xxxxxx applied_ref=...
+acq[debug]: cli-kits: recorded msb/shell-ws-xxxxxx (kit= )
+```
+
+There is no `[trace ...] DONE create: rc=0` line, no further check output, and no
+error. The sandbox itself is healthy — `msb list` shows it running, and
+`acq exec <name> -- true` succeeds from another terminal.
+
+### Root Cause
+
+The verifier captured each step with command substitution:
+
+```sh
+LAST_OUT=$("$ACQ" "$@" 2>&1 | tee /dev/stderr)
+```
+
+Command substitution reads the capture pipe until **EOF**, which arrives only
+when *every* writer closes it — not when `acq` exits. Two things in `acq` hold a
+descriptor on that pipe past exit:
+
+- `acq.backends/secret-store.sh` dups the process's stderr to fd 9 (the warning
+  channel used so migration warnings survive `2>/dev/null` read paths). fd 9 is
+  inherited by children.
+- the msb adapter launches **daemonized** guest-side helpers, notably the
+  ssh-agent `socat` bridge started at the end of provisioning.
+
+So `acq` finished successfully, while the verifier blocked on a pipe that a
+long-lived descendant kept open. The stall therefore appeared at the *last*
+thing provisioning logs, making a completed create look like a hung one.
+
+Because the hang is in the harness, not the backend, it masqueraded as a backend
+failure and cost several live runs. Writing to a **file** removes the EOF
+dependency entirely: the wait ends when `acq` exits.
+
+### Fix
+
+`run_acq` redirects `acq` to a temp file in the hermetic `VERIFY_STATE` dir and
+reads the file after `acq` returns. Verbose mode gets its live view from a
+`tail -f` on that file rather than from `tee` in the capture pipeline. `acq` stays
+in the **foreground**, so pipelines that feed it a secret on stdin
+(`printf key | run_acq ... secret set -g usai`) are unchanged.
+
+### Prevention
+
+`test/bats/145-verify-capture.bats` extracts the real `run_acq` out of
+`scripts/verify-backends` and drives it against a stand-in that daemonizes a
+child and exits 0 — the exact shape that deadlocks a pipe capture. Each case runs
+under `timeout`, so reintroducing a pipe-EOF dependency fails as a test timeout
+instead of hanging a human's live verification. The guard was confirmed to fail
+against the old `$( ... | tee /dev/stderr )` implementation before being kept
+against the new one.
+
+### Also Fixed in the Same Pass
+
+- **`markdownlint` never linted `.github/**/*.md`.** markdownlint's globber skips
+  dot-directories unless `--dot` is passed, so `.github/pull_request_template.md`
+  was silently excluded from CI, `npm run lint:md`, and the pre-commit hook. All
+  three now pass `--dot`.
+- **The "did it lint anything?" assertion counted a different set than the
+  linter.** It hand-translated `.markdownlintignore` into `git ls-files :!`
+  pathspecs, but those matchers differ: a bare `test/vendor` pathspec excludes
+  only that exact path, not the tree under it, so the count ran high. The
+  assertion now evaluates the ignore file with git's own gitignore engine
+  (`git ls-files -c -i --exclude-from=.markdownlintignore`), which agrees with
+  markdownlint's semantics.
+
+### Second Instance of the Same Bug Class
+
+The grammar-acceptance preflight (`verify_sbx_grammar_acceptance`) had its own
+`out=$(bats ... | tee /dev/stderr)` capture — the identical idiom, in a second
+place a `run_acq`-only fix would not have reached. Both now go through one shared
+`_run_captured` helper, and a test asserts the idiom appears nowhere in the
+script, so a third instance cannot be added quietly.
+
+### The Lost-Executable-Bit Class (and the systemic fix)
+
+**Status:** Fixed systemically — `scripts/fix-exec-bits`, a pre-commit hook, and
+self-healing in `scripts/verify-backends`.
+
+Three separate symptoms in this one investigation were the same root cause:
+
+```text
+zsh: permission denied: ./scripts/verify-backends
+```
+
+```text
+./scripts/verify-backends: line 259: .../acq: Permission denied     # rc=126
+```
+
+```text
+  FAIL  sbx: real sbx rejected acq's translated kit grammar
+        | env: .../libexec/bats-core/bats: Permission denied
+```
+
+That last one is the dangerous presentation: a **file-permission artifact
+reported as kit-grammar incompatibility**.
+
+#### Why it keeps happening
+
+A clone on a container/host shared mount (virtiofs, Docker Desktop file sharing,
+WSL drvfs) cannot round-trip POSIX permissions, so the clone sets
+`core.fileMode = false` to suppress a storm of spurious mode churn. That is
+correct, and it opens a blind spot:
+
+1. git applies the index mode on **checkout**, so a fresh clone is right;
+2. nearly every editor, formatter, and coding agent saves by writing a temp file
+   and renaming it — a **new inode** with the ambient umask (0644), so the exec
+   bit is dropped;
+3. with `core.fileMode = false` git is **blind** to it. Measured: a 100755 →
+   0644 drift with byte-identical content yields an empty `git status` *and* an
+   empty `git diff --summary`. With `core.fileMode = true` the same drift reports
+   `mode change 100755 => 100644`.
+
+So the regression is invisible to every normal check and only surfaces as a
+confusing runtime failure, often far from the real cause.
+
+#### Why `bash <script>` is not the fix
+
+An earlier attempt invoked the vendored bats as `bash bin/bats` on the theory
+that a bash script does not need its exec bit. It does not survive: `bin/bats`
+ends in `exec env ... "$BATS_ROOT/libexec/bats-core/bats"`, which in turn execs
+`bats-exec-suite` and a formatter. Repairing bits one at a time showed the chain
+needs **at least** `bin/bats`, `libexec/bats-core/bats`, `bats-exec-suite`, and
+the formatters — the submodule records 32 executables. Working around the exec
+bit only moves the error deeper.
+
+#### The fix
+
+`scripts/fix-exec-bits` treats the **git index as the single source of truth**: a
+file recorded `100755` must be executable on disk. A shebang is explicitly *not*
+the criterion — `acq.backends/*.sh` are *sourced* and `test/bats/*.bats` are read
+*by bats*, so both are correctly `100644` and must stay non-executable. It walks
+initialized submodules too, and reports (never silently clears) an unexpected
+exec bit on a file the index says is `100644`.
+
+Three places use it:
+
+- `scripts/fix-exec-bits` / `npm run fix:exec-bits` — manual repair;
+- a **pre-commit hook** runs `--check`, which turns an invisible drift into a
+  visible failure at commit time;
+- `scripts/verify-backends` **self-heals at startup**, so a live verification run
+  is never spent diagnosing a permission artifact.
+
+The sbx grammar preflight now also distinguishes "bats absent" (remedy:
+`git submodule update --init`) from "bats present but not executable" (remedy:
+`scripts/fix-exec-bits`), and `scripts/test-acq-bats` does the same — instead of
+the old misleading "vendored bats not found". Both still fail closed, because
+this guard must never report "accepted" when it did not measure (ADR-0025).
+
+### Related Symptom (same run, different cause)
+
+Two other things in the same code path can also look like a hang:
+
+- **`gh auth token` blocking on a host credential helper.** The optional GitHub
+  seed ran before the first traced step, so a keychain prompt froze the run with
+  no trace output at all. `_gh_token` now reads only an exported `GH_TOKEN` /
+  `GITHUB_TOKEN` unless `ACQ_VERIFY_USE_GH_AUTH=1` opts back into the keyring
+  fallback.
+- **Missing executable bit.** A fresh worktree checkout whose mode bits were lost
+  yields `Permission denied` and `rc=126` on every `acq` step; `chmod +x acq
+  scripts/verify-backends` restores it.
 
 ---
 

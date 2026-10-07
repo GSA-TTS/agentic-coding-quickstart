@@ -232,7 +232,14 @@ kit_spec_net_allow() {
 # ---------------------------------------------------------------------------
 # Echo one record per published-port entry, tab-separated:
 #   guest <TAB> protocol <TAB> name <TAB> host
-# protocol/name are empty if unspecified; host defaults to guest when omitted.
+# protocol/name are empty if unspecified. The host column is emitted VERBATIM —
+# EMPTY when the kit did not declare `host:` — because "the kit asked for a
+# specific host port" and "the kit left the host port to the backend" are
+# different intents and only the consumer can act on the difference. Defaulting
+# host to guest here erased that distinction and made every sandbox from one kit
+# request the SAME host port, so parallel sandboxes silently collided on msb
+# (see ADR-0034). sbx already ignored this column and let sbx choose; an empty
+# column is the neutral spelling of that behavior.
 #
 # SOURCE PRECEDENCE (ADR-0014): the NEUTRAL top-level `publishedPorts` is read
 # FIRST. Each neutral entry is `{guest, host?, protocol?(tcp|udp), name?}`:
@@ -290,12 +297,14 @@ kit_spec_published_ports() {
 }
 
 # Parse the NEUTRAL top-level `publishedPorts:` list into raw (unvalidated)
-# tab-separated `guest<TAB>proto<TAB>name<TAB>host` records. host defaults to
-# guest when omitted. Reads only the top-level block (dedent ends it).
+# tab-separated `guest<TAB>proto<TAB>name<TAB>host` records. The host column stays
+# EMPTY when the entry omits `host:` (see kit_spec_published_ports — the absence
+# is meaningful and must survive to the consumer). Reads only the top-level block
+# (dedent ends it).
 _kit_pp_parse_neutral() {
   awk '
     function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); gsub(/^"|"$/,"",s); return s }
-    function flush(){ if (cur_g != "") printf "%s\t%s\t%s\t%s\n", cur_g, cur_p, cur_n, (cur_h==""?cur_g:cur_h); cur_g=""; cur_p=""; cur_n=""; cur_h="" }
+    function flush(){ if (cur_g != "") printf "%s\t%s\t%s\t%s\n", cur_g, cur_p, cur_n, cur_h; cur_g=""; cur_p=""; cur_n=""; cur_h="" }
     /^publishedPorts:[[:space:]]*$/ { in_pp=1; flush(); next }
     /^[A-Za-z]/ { if (in_pp) { flush(); in_pp=0 } }
     in_pp {
@@ -320,12 +329,16 @@ _kit_pp_parse_neutral() {
 }
 
 # Parse the DEPRECATED backend_extras.sbx.publishedPorts list into raw
-# tab-separated `guest<TAB>proto<TAB>name<TAB>host` records (legacy uses the old
-# `container:` key and has no `host:`, so host==guest).
+# tab-separated `guest<TAB>proto<TAB>name<TAB>host` records. The legacy shape uses
+# the old `container:` key and has NO `host:` key at all, so the host column is
+# always EMPTY here — "unspecified" is the only host intent this shape can
+# express, and encoding it as host==guest is what pinned every sandbox from one
+# kit to the same host port (see kit_spec_published_ports and ADR-0034). The
+# consumer, not the parser, decides what an unspecified host becomes.
 _kit_pp_parse_legacy() {
   awk '
     function trim(s){ sub(/^[[:space:]]+/,"",s); sub(/[[:space:]]+$/,"",s); gsub(/^"|"$/,"",s); return s }
-    function flush(){ if (cur_c != "") printf "%s\t%s\t%s\t%s\n", cur_c, cur_p, cur_n, cur_c; cur_c=""; cur_p=""; cur_n="" }
+    function flush(){ if (cur_c != "") printf "%s\t%s\t%s\t\n", cur_c, cur_p, cur_n; cur_c=""; cur_p=""; cur_n="" }
     function indent_of(s,   i){ i=match(s,/[^ ]/); return (i==0? 0 : i-1) }
     /^backend_extras:/  { in_be=1; next }
     /^[A-Za-z]/         { if (in_be) { flush(); in_be=0; in_sbx=0; in_pp=0 } }

@@ -35,15 +35,22 @@ publishedPorts:
 SPEC
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_spec_published_ports "'"$ppkit"'/spec.yaml" 2>/dev/null'
   assert_output --partial "$(printf '3000\ttcp\tui\t8080')"
-  assert_output --partial "$(printf '4096\ttcp\tapi\t4096')"
+  # An entry WITHOUT `host:` keeps the host column EMPTY: the parser must not
+  # invent host==guest, or every sandbox from this kit requests the same host
+  # port (ADR-0034). The trailing tab is significant, so match the whole line.
+  assert_line "$(printf '4096\ttcp\tapi\t')"
 
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
+    ACQ_MSB_FORCE_SERVE_PORT=25001
     arr=(); _acq_msb_port_flags_into arr "'"$ppkit"'/spec.yaml"; printf "%s\n" "${arr[@]}"
   '
   assert_output --partial '8080:3000'
-  assert_output --partial '4096:4096'
+  # The host side of the host-less entry is CHOSEN (loopback 20000..59999), so it
+  # must not be the guest port.
+  assert_output --partial '25001:4096'
+  refute_output --partial '4096:4096'
   assert_output --partial '-p'
 
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_translate_to_sbx "'"$ppkit"'" "'"$ppout"'" >/dev/null 2>&1'
@@ -70,16 +77,21 @@ backend_extras:
         name: web
 SPEC
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_spec_published_ports "'"$lpkit"'/spec.yaml" 2>/dev/null'
-  assert_output --partial "$(printf '3000\ttcp\tweb\t3000')"
+  # The legacy shape has no `host:` key at all, so its host column is EMPTY too —
+  # "unspecified" is the only intent it can express, and host==guest would pin
+  # every sandbox from the kit to one host port (ADR-0034).
+  assert_line "$(printf '3000\ttcp\tweb\t')"
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"; kit_spec_published_ports "'"$lpkit"'/spec.yaml" 2>&1 >/dev/null'
   assert_output --partial 'DEPRECATION'
   assert_output --partial 'backend_extras.sbx.publishedPorts'
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
+    ACQ_MSB_FORCE_SERVE_PORT=25002
     arr=(); _acq_msb_port_flags_into arr "'"$lpkit"'/spec.yaml" 2>/dev/null; printf "%s\n" "${arr[@]}"
   '
-  assert_output --partial '3000:3000'
+  assert_output --partial '25002:3000'
+  refute_output --partial '3000:3000'
 }
 
 @test "pp: a neutral list suppresses the deprecated fallback (no warning)" {

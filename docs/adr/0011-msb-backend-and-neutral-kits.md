@@ -229,14 +229,12 @@ same contract sbx's templates provide, keyed off the
 [Docker base-image requirements](https://docs.docker.com/ai/sandboxes/customize/kit-reference/#base-image-requirements)
 for `docker/sandbox-templates:shell-docker`:
 
-- **Install the agent** (`_acq_msb_install_agent`). The AGENT token is read from
-  the first positional at provision. `opencode` → `npm install -g opencode-ai`
-  (node is already a verified prerequisite), with the npm registry host
-  (`registry.npmjs.org`) allow-listed at create so the default-deny egress
-  permits the download. Idempotent: skipped if the binary is already present
-  (a pre-baked `ACQ_MSB_IMAGE`) and marker-gated. `shell` is a no-op; an unknown,
-  absent agent warns (bake it into `ACQ_MSB_IMAGE`). Tunables:
-  `ACQ_MSB_OPENCODE_PKG`, `ACQ_MSB_NPM_HOSTS`.
+- **Select the agent kit or base-image agent.** The AGENT token is read from the
+  first positional at provision. For `opencode`, acq applies the built-in agent
+  kit from the pinned patterns bundle unless the user supplies an explicit
+  `--kit`; the msb adapter no longer owns an npm fallback installer. Agent install
+  egress belongs in the selected agent kit's network declarations, or the agent
+  binary must already be present in the base image.
 - **Satisfy the base-image contract** (`_acq_msb_ensure_agent_user`, extended).
   In addition to the `agent`/`/home/agent` user it already created, it now adds
   **passwordless sudo** (`/etc/sudoers.d/90-acq-agent`) and preserves the
@@ -412,6 +410,24 @@ strings). The translate layer:
 > sbx's sandbox-level env semantics. Names are re-validated on replay (tampered
 > marker defense) and the last value wins for a duplicate name (kits append in
 > application order, so a later kit overrides an earlier one).
+>
+> **Update (2026-09-29):** The per-kit scoping of the *command* env above is also
+> gone. Widening only the session paths left a gap wherever a kit command
+> outlives itself: a `background: true` startup daemon launches agents, and those
+> agents inherited only the daemon kit's vars, so another kit's agent
+> configuration (including a permission layer) was silently absent. Kit
+> `environment[]` is now **guest-wide for kit lifecycle commands too** — every
+> `install`/`initFiles`/`startup` command runs with the merged env of the full
+> effective kit set, last-value-wins, the same resolution sessions replay. The
+> merged set is computed in a **pre-pass over the whole kit set** (so it does not
+> depend on kit application order), with the persisted marker as the fallback for
+> the mid-life single-kit `acq kit apply` path. The adapter's non-interactive git
+> guards stay **owned by the kit whose command is running**: a command receives
+> only its own kit's value for a guard name, so another kit can neither disable
+> them (by declaring a guard name this kit does not) nor change them (by declaring
+> the same name with a different value, which the merge would otherwise resolve in
+> the later kit's favor). See
+> [ADR-0033](0033-msb-kit-env-is-guest-wide-for-lifecycle-commands.md).
 
 Deliberately minimal (YAGNI): **static string values only** — no interpolation,
 no references to `files[]`-staged paths (a kit needing a computed value uses a

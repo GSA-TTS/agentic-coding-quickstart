@@ -113,6 +113,142 @@ STUB
   chmod +x "$STUBDIR/bin/npm"
 }
 
+_write_msb_stub() { # PATH VERSION [VERSION_RC]
+  mkdir -p "$(dirname "$1")"
+  printf '%s\n' \
+    '#!/usr/bin/env sh' \
+    'case "$1" in' \
+    "  --version|-V) printf 'msb %s\\n' '$2'; exit '${3:-0}' ;;" \
+    '  *) exit 0 ;;' \
+    'esac' >"$1"
+  chmod +x "$1"
+}
+
+# Release bundle basename for this host — mirrors msb_bundle_name() in install.sh.
+# Deriving it (rather than hardcoding one platform's name) keeps these tests
+# meaningful on both linux-* and darwin-aarch64 runners.
+_msb_bundle_name() {
+  case "$(uname -m)" in
+    arm64|aarch64) arch=aarch64 ;;
+    x86_64|amd64)  arch=x86_64 ;;
+    *) return 1 ;;
+  esac
+  case "$(uname -s)" in
+    Darwin) [ "$arch" = aarch64 ] || return 1; printf 'microsandbox-darwin-aarch64.tar.gz' ;;
+    Linux)  printf 'microsandbox-linux-%s.tar.gz' "$arch" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Build a stand-in release bundle plus a matching checksums.sha256, with the same
+# shape install_msb_pinned_tarball parses: an `msb` binary and exactly one
+# versioned libkrunfw whose name carries the ABI. The library filename differs by
+# platform on purpose -- install.sh derives the ABI from the artifact rather than
+# hardcoding a version (upstream's own formula had that bug), so the fixture has
+# to exercise the real name shape.
+#
+# Echoes the directory holding <bundle> and checksums.sha256.
+_make_msb_bundle_fixture() { # VERSION
+  local version="$1" bundle dir libname
+  bundle=$(_msb_bundle_name) || return 1
+  dir="$BATS_TEST_TMPDIR/msb-release"
+  mkdir -p "$dir/stage"
+
+  printf '%s\n' \
+    '#!/usr/bin/env sh' \
+    'case "$1" in' \
+    "  --version|-V) printf 'msb %s\\n' '$version' ;;" \
+    '  *) exit 0 ;;' \
+    'esac' >"$dir/stage/msb"
+  chmod +x "$dir/stage/msb"
+
+  case "$(uname -s)" in
+    Darwin) libname="libkrunfw.5.dylib" ;;
+    *)      libname="libkrunfw.so.5.6.1" ;;
+  esac
+  printf 'not-a-real-library\n' >"$dir/stage/$libname"
+
+  ( cd "$dir/stage" && tar -czf "../$bundle" msb "$libname" ) || return 1
+
+  # Same two-space format as the real published checksums.sha256.
+  ( cd "$dir" && printf '%s  %s\n' "$(_sha256_of "$bundle")" "$bundle" >checksums.sha256 )
+  printf '%s' "$dir"
+}
+
+_sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# curl stub serving the pinned release bundle and its checksums from a local
+# fixture. Anything else is a hard error, so a test cannot pass by accident if
+# install.sh starts fetching a different URL -- which is exactly how the removed
+# upstream-installer path would have slipped through.
+_write_curl_msb_bundle_stub() { # FIXTURE_DIR
+  cat >"$STUBDIR/bin/curl" <<STUB
+#!/usr/bin/env sh
+fixture='$1'
+STUB
+  cat >>"$STUBDIR/bin/curl" <<'STUB'
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then out=$arg; fi
+  prev=$arg
+done
+[ -n "$out" ] || { printf 'curl stub: no -o in: %s\n' "$*" >&2; exit 1; }
+
+case "$*" in
+  *releases/download/v0.7.7/checksums.sha256*)
+    cp "$fixture/checksums.sha256" "$out" ;;
+  *releases/download/v0.7.7/microsandbox-*.tar.gz*)
+    cp "$fixture"/microsandbox-*.tar.gz "$out" ;;
+  *)
+    printf 'curl stub: unexpected URL: %s\n' "$*" >&2; exit 1 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/bin/curl"
+}
+
+# curl stub that fails the msb bundle download (simulates a network/HTTP error),
+# to exercise the "download failed -> Skipping msb, acq still installs" degrade.
+_write_curl_msb_download_failure_stub() {
+  cat >"$STUBDIR/bin/curl" <<'STUB'
+#!/usr/bin/env sh
+case "$*" in
+  *releases/download/*) exit 22 ;;   # curl's HTTP-error exit code
+esac
+# Anything else this run needs (there is nothing) would pass through as success.
+exit 0
+STUB
+  chmod +x "$STUBDIR/bin/curl"
+}
+
+_write_unparseable_msb_stub() { # PATH
+  mkdir -p "$(dirname "$1")"
+  printf '%s\n' '#!/usr/bin/env sh' 'printf "msb dev-build\\n"' >"$1"
+  chmod +x "$1"
+}
+
+# PATH for the pinned-bundle install path: coreutils plus the tools
+# install_msb_pinned_tarball actually shells out to. _acq_coreutils_path covers
+# only the tools the shared helper needs, and a missing `tar` here would make the
+# install bail with "tar is required" -- a pass that proved nothing.
+_msb_pin_tools_path() {
+  local extra="" d t
+  for t in tar install ln cp basename uname sha256sum shasum; do
+    d=$(command -v "$t" 2>/dev/null) || continue
+    case "$d" in /*) ;; *) continue ;; esac
+    d=$(dirname "$d")
+    case ":$extra:" in *":$d:"*) continue ;; esac
+    extra="${extra:+$extra:}$d"
+  done
+  printf '%s' "$(_acq_coreutils_path)${extra:+:$extra}"
+}
+
 _no_package_manager_path() {
   core_bin="$BATS_TEST_TMPDIR/core-bin"
   mkdir -p "$core_bin"
@@ -121,6 +257,49 @@ _no_package_manager_path() {
     case "$tool_path" in /*) ln -sf "$tool_path" "$core_bin/$tool" ;; esac
   done
   printf '%s:%s' "$STUBDIR/bin" "$core_bin"
+}
+
+@test "install: a failed msb download degrades to Skipping msb, acq still succeeds" {
+  # Regression (reviewer finding): verify_active_msb_supported used to run
+  # unconditionally after install_msb_pinned, so a FAILED download died in the
+  # gate before reaching the "Skipping msb" degrade -- turning a successful acq
+  # install into a total-failure exit. The degrade path was unreachable, and no
+  # test stubbed a failing curl. This is that test.
+  _write_npm_stub
+  _write_curl_msb_download_failure_stub
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'Skipping msb'
+  refute_output --partial 'Active msb is'
+  refute_output --partial 'no msb is active on PATH'
+  [ ! -e "$ACQ_INSTALL_BIN_DIR/msb" ]
+  [ ! -e "$HOME/.microsandbox/bin/msb" ]
+}
+
+@test "install: --dry-run succeeds on a host with no msb" {
+  # Regression: verify_active_msb_supported did not exempt dry runs, so
+  # `--dry-run --yes` on a host with no msb printed every step as OK and then
+  # died on the final check -- a false alarm on the exact command a cautious user
+  # runs first. Every other dry-run test here passes --no-msb, which is why none
+  # of them caught it.
+  #
+  # Deliberately does NOT stub curl or npm: a dry run must reach the end without
+  # fetching anything.
+  _write_npm_stub
+
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --dry-run --yes
+
+  assert_success
+  assert_output --partial 'Installing msb 0.7.7 from the pinned release bundle'
+  assert_output --partial '[dry-run] verify the active msb is a version acq accepts'
+  refute_output --partial 'no msb is active on PATH'
+  # Nothing may be written in a dry run.
+  [ ! -e "$HOME/.microsandbox" ]
+  [ ! -e "$ACQ_INSTALL_BIN_DIR/msb" ]
 }
 
 @test "install: source default targets release tag without a pinned sha" {
@@ -305,33 +484,290 @@ _no_package_manager_path() {
   assert_regex "$(cat "$GIT_STUB_LOG")" "fetch --unshallow --tags origin"
 }
 
-@test "install: msb via brew taps superradcompany/tap before installing" {
-  export BREW_STUB_LOG="$BATS_TEST_TMPDIR/brew.log"
-  _write_brew_logging_stub
+@test "install: missing msb installs the pinned 0.7.7 release bundle" {
   _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  _write_curl_msb_bundle_stub "$fixture"
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'Installing msb 0.7.7 from the pinned release bundle'
+  assert_output --partial 'releases/download/v0.7.7'
+  assert_output --partial 'Active msb is 0.7.7'
+  # The upstream one-line installer cannot pin a version, so it must not be the
+  # thing that placed msb -- not even via a versioned install.sh asset URL, whose
+  # per-release copies are byte-identical and still resolve releases/latest.
+  refute_output --partial 'install.sh | sh'
+  refute_output --partial 'v0.7.7/install.sh'
+  run "$ACQ_INSTALL_BIN_DIR/msb" --version
+  assert_output 'msb 0.7.7'
+}
+
+@test "install: pinned bundle install fails closed on a checksum mismatch" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  # Corrupt the artifact AFTER the checksum was recorded: the published checksum
+  # stays valid, the bytes do not. This is the tamper/truncation case, and it must
+  # not install anything.
+  printf 'corrupted\n' >>"$fixture"/microsandbox-*.tar.gz
+  _write_curl_msb_bundle_stub "$fixture"
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  # acq still installs; only msb is skipped, with the reason stated.
+  assert_success
+  assert_output --partial 'Checksum mismatch'
+  assert_output --partial 'Skipping msb'
+  refute_output --partial 'Active msb is'
+  [ ! -e "$ACQ_INSTALL_BIN_DIR/msb" ]
+  [ ! -e "$HOME/.microsandbox/bin/msb" ]
+}
+
+@test "install: pinned bundle install fails closed when the release has no checksum for it" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  # A checksums.sha256 that covers other assets but not ours. Verification has
+  # nothing to compare against, so it must refuse rather than install unverified.
+  printf '%s  some-other-asset.tar.gz\n' "$(printf 0 | _sha256_of /dev/stdin)" \
+    >"$fixture/checksums.sha256"
+  _write_curl_msb_bundle_stub "$fixture"
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'No checksum for'
+  assert_output --partial 'Skipping msb'
+  [ ! -e "$ACQ_INSTALL_BIN_DIR/msb" ]
+}
+
+@test "install: active msb 0.6.8 upgrades to the pinned 0.7.7" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  _write_curl_msb_bundle_stub "$fixture"
+  _write_msb_stub "$HOME/.local/bin/msb" 0.6.8
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$HOME/.local/bin:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version is too old'
+  assert_output --partial 'Installing msb 0.7.7 from the pinned release bundle'
+  assert_output --partial 'Active msb is 0.7.7'
+  run "$ACQ_INSTALL_BIN_DIR/msb" --version
+  assert_output 'msb 0.7.7'
+}
+
+@test "install: unparseable active msb is replaced with the pinned version" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  _write_curl_msb_bundle_stub "$fixture"
+  _write_unparseable_msb_stub "$HOME/.local/bin/msb"
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$HOME/.local/bin:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version is not a supported final release'
+  assert_output --partial 'Active msb is 0.7.7'
+  run "$ACQ_INSTALL_BIN_DIR/msb" --version
+  assert_output 'msb 0.7.7'
+}
+
+@test "install: failed active msb version probe is replaced with the pinned version" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  _write_curl_msb_bundle_stub "$fixture"
+  _write_msb_stub "$HOME/.local/bin/msb" 0.7.3 42
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$HOME/.local/bin:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version is not a supported final release'
+  assert_output --partial 'Active msb is 0.7.7'
+  run "$ACQ_INSTALL_BIN_DIR/msb" --version
+  assert_output 'msb 0.7.7'
+}
+
+@test "install: prerelease active msb is replaced with the pinned version" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  _write_curl_msb_bundle_stub "$fixture"
+  _write_msb_stub "$HOME/.local/bin/msb" '0.7.3-rc1'
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$HOME/.local/bin:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version is not a supported final release'
+  assert_output --partial 'Active msb is 0.7.7'
+  run "$ACQ_INSTALL_BIN_DIR/msb" --version
+  assert_output 'msb 0.7.7'
+}
+
+@test "install: build-suffixed active msb is replaced with the pinned version" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  _write_curl_msb_bundle_stub "$fixture"
+  _write_msb_stub "$HOME/.local/bin/msb" '0.7.3+build.1'
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$HOME/.local/bin:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version is not a supported final release'
+  assert_output --partial 'Active msb is 0.7.7'
+  run "$ACQ_INSTALL_BIN_DIR/msb" --version
+  assert_output 'msb 0.7.7'
+}
+
+@test "install: platform-suffixed final msb is accepted" {
+  _write_npm_stub
+  _write_msb_stub "$STUBDIR/bin/msb" '0.7.3 linux-arm64'
+
   run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
     sh "$REPO_ROOT/install.sh" --method npm --yes
 
   assert_success
-  assert_regex "$(cat "$BREW_STUB_LOG")" "tap superradcompany/tap"
-  tap_line=$(grep -n 'tap superradcompany/tap' "$BREW_STUB_LOG" | head -1 | cut -d: -f1)
-  install_line=$(grep -n 'install superradcompany/tap/microsandbox' "$BREW_STUB_LOG" | head -1 | cut -d: -f1)
-  [ -n "$tap_line" ] && [ -n "$install_line" ]
-  [ "$tap_line" -lt "$install_line" ]
+  assert_output --partial 'msb is already installed'
+  assert_output --partial 'v0.7.3'
+  refute_output --partial 'not a supported final release'
+}
+
+@test "install: self-update verification rejects non-final msb versions" {
+  update_check=$(awk '
+    /updated_version=/ { seen = 1 }
+    seen { print }
+    /Falling back to the pinned msb/ { exit }
+  ' "$REPO_ROOT/install.sh")
+
+  assert_regex "$update_check" '! msb_version_final "\$updated_version"'
+}
+
+@test "install: never fetches and executes an msb installer script" {
+  # The removed upstream-installer path fetched msb's install.sh and ran it.
+  # Nothing may reintroduce that: a remote script cannot be pinned (upstream's
+  # per-release install.sh assets are byte-identical and resolve releases/latest at
+  # run time), so running one places an unverifiable version.
+  #
+  # Asserted over CODE only. install.sh deliberately *names* the unpinnable
+  # one-liner in its guidance text ("Do NOT use ... | sh"), and acq's own
+  # `curl | sh` bootstrap is documented in the header -- a whole-file regex would
+  # match that prose and prove nothing. Strip comments and the output helpers that
+  # print guidance, then assert on what is left.
+  code=$(grep -vE '^[[:space:]]*#' "$REPO_ROOT/install.sh" \
+         | grep -vE '^[[:space:]]*(info|warn|step|ok|printf)[[:space:]]')
+
+  # No fetched artifact is handed to a shell.
+  refute_regex "$code" '\|[[:space:]]*(sh|bash)([[:space:]]|$)'
+  refute_regex "$code" '(sh|bash)[[:space:]]+"?\$\{?tmp'
+  # The only msb release assets fetched are the bundle and its checksum file.
+  refute_regex "$code" 'curl[^\n]*install\.sh'
+  refute_regex "$code" 'curl[^\n]*install\.microsandbox\.dev'
+  assert_regex "$code" 'curl -fsSL "\$base/\$bundle"'
+  assert_regex "$code" 'curl -fsSL "\$base/checksums\.sha256"'
+  # And verification gates the write.
+  assert_regex "$code" 'Checksum mismatch'
+}
+
+@test "install: active local msb 0.7.2 is replaced by the pinned 0.7.7" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  _write_curl_msb_bundle_stub "$fixture"
+  # A blocked msb whose catalog is NOT ahead (the stub answers `list` cleanly), so
+  # there is nothing to recover and the rollback/forward prompts do not apply.
+  _write_msb_stub "$HOME/.local/bin/msb" 0.7.2
+
+  run env PATH="$ACQ_INSTALL_BIN_DIR:$HOME/.local/bin:$STUBDIR/bin:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'active msb version is blocked'
+  assert_output --partial 'Installing msb 0.7.7 from the pinned release bundle'
+  assert_output --partial 'Active msb is 0.7.7'
+  run "$ACQ_INSTALL_BIN_DIR/msb" --version
+  assert_output 'msb 0.7.7'
+}
+
+@test "install: blocked msb shadowing the pinned install fails closed" {
+  _write_npm_stub
+  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  _write_curl_msb_bundle_stub "$fixture"
+  # The blocked binary sits EARLIER on PATH than where the pinned install lands,
+  # so the install succeeds and is then shadowed. That must be fatal, not a
+  # reassuring "installed" message over a host that still runs the blocked msb.
+  _write_msb_stub "$STUBDIR/bin/msb" 0.7.2
+
+  run env PATH="$STUBDIR/bin:$ACQ_INSTALL_BIN_DIR:$(_msb_pin_tools_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_failure
+  assert_output --partial 'active msb is still blocked version 0.7.2'
+  assert_output --partial 'another msb is shadowing it on PATH'
+}
+
+@test "install: blocked msb downgrade can be declined" {
+  _write_npm_stub
+  _write_msb_stub "$STUBDIR/bin/msb" 0.7.1
+
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh -c 'printf "n\n" | sh "$1" --method npm' _ "$REPO_ROOT/install.sh"
+
+  assert_success
+  assert_output --partial 'Found msb 0.7.1'
+  assert_output --partial 'Skipping msb'
+  refute_output --partial 'msb is already installed'
+}
+
+@test "install: duplicate msb paths are reported with active marker" {
+  _write_npm_stub
+  _write_msb_stub "$STUBDIR/bin/msb" 0.7.7
+  mkdir -p "$HOME/.local/bin"
+  _write_msb_stub "$HOME/.local/bin/msb" 0.7.2
+
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method npm --yes
+
+  assert_success
+  assert_output --partial 'Multiple msb binaries were found'
+  assert_output --partial "$STUBDIR/bin/msb: 0.7.7 (active)"
+  assert_output --partial "$HOME/.local/bin/msb: 0.7.2"
+}
+
+@test "install: brew method trusts the microsandbox-acq dependency before installing acq" {
+  export BREW_STUB_LOG="$BATS_TEST_TMPDIR/brew.log"
+  _write_brew_logging_stub
+  run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
+    sh "$REPO_ROOT/install.sh" --method brew --no-msb --yes
+
+  assert_success
+  assert_regex "$(cat "$BREW_STUB_LOG")" "trust --formula GSA-TTS/tap/microsandbox-acq"
+  assert_regex "$(cat "$BREW_STUB_LOG")" "install GSA-TTS/tap/acq"
+  trust_line=$(grep -n 'trust --formula GSA-TTS/tap/microsandbox-acq' "$BREW_STUB_LOG" | head -1 | cut -d: -f1)
+  install_line=$(grep -n 'install GSA-TTS/tap/acq' "$BREW_STUB_LOG" | head -1 | cut -d: -f1)
+  [ -n "$trust_line" ] && [ -n "$install_line" ]
+  [ "$trust_line" -lt "$install_line" ]
 }
 
 @test "install: run() detaches child stdin so piped script tail survives" {
   export BREW_STUB_LOG="$BATS_TEST_TMPDIR/brew.log"
   _write_stdin_eating_brew_stub
-  _write_npm_stub
 
+  # Drive the brew path for acq itself, with --no-msb. Any run() child proves the
+  # contract, and this one needs no msb fixture: what is under test is that run()
+  # gives the child /dev/null, not which command it happens to be.
+  #
   # Pipe the installer plus a trailing marker (fd 0 = script bytes); a leaky
   # child would steal the marker line.
   installer="$(cat "$REPO_ROOT/install.sh"; printf 'echo STOLEN_TAIL_BYTES\n')"
 
   run env PATH="$STUBDIR/bin:$(_acq_coreutils_path)" \
     BREW_STUB_LOG="$BREW_STUB_LOG" \
-    sh -c 'printf "%s" "$1" | sh -s -- --method npm --yes' _ "$installer"
+    sh -c 'printf "%s" "$1" | sh -s -- --method brew --no-msb --yes' _ "$installer"
 
   assert_success
   run cat "$BREW_STUB_LOG"

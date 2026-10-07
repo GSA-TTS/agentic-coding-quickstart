@@ -124,8 +124,7 @@ any interactive `git`/`ssh` see the agent.
 
 The `--vsock` route persists across `msb stop`/`start` (it is part of the sandbox
 config), but the `socat` bridge **process** dies on stop. So the bridge is
-re-started in `acq_backend_start`, the same way the OCI device-node re-grant is
-re-applied on resume.
+re-started in `acq_backend_start` before kit startup services are healed.
 
 ### Re-attach to a running sandbox (bridge + `SSH_AUTH_SOCK` must be re-driven)
 
@@ -202,16 +201,18 @@ not used — the host agent socket path is platform-dependent (launchd may keep 
 stable; a plain `ssh-agent` rotates it), so only a live connect is
 authoritative. Refreshing the route automatically on resume is left as future
 work pending an msb capability to update a `--vsock` route in place. See
-`docs/KNOWN_FAILURE_MODES.md` §34 ("forwarded agent unreachable after a host
+`docs/KNOWN_FAILURE_MODES.md` §35 ("forwarded agent unreachable after a host
 reboot").
 
-### Version gate (MIN_MSB_VERSION stays 0.6.8)
+### Version gate
 
-`--vsock` first appears in **msb 0.6.9**. The global `MIN_MSB_VERSION` floor stays
-**0.6.8** (unchanged — the balanced-egress `--net-default-egress` floor). The
-forwarding feature is gated separately on `MIN_MSB_VSOCK_VERSION` (0.6.9): on an
-older msb, acq **warns and skips** the forward (fail-soft) rather than passing an
-unknown flag to `msb create`, because forwarding is opt-in convenience, not core.
+`--vsock` first appears in **msb 0.6.9**. The global `MIN_MSB_VERSION` floor is
+now **0.6.9** because acq also relies on the release-build DNS parser fix from
+that version. The forwarding feature remains gated separately on
+`MIN_MSB_VSOCK_VERSION` (0.6.9): if a future compatibility window ever allowed an
+older msb, acq would still warn and skip the forward (fail-soft) rather than
+passing an unknown flag to `msb create`, because forwarding is opt-in convenience,
+not core.
 
 `socat` must be present **in the guest image** for the bridge to run. It is
 prereq-checked and warned-on-missing, but **not auto-installed** — guest egress is
@@ -291,8 +292,8 @@ point of use, not only in this ADR.
   case reuse the same forwarding path.
 - **Tradeoff:** an in-guest `socat` bridge process per sandbox that must be
   re-started on resume (handled in `acq_backend_start`); a hard dependency on
-  `socat` being present in the guest image; and a feature gated on msb >= 0.6.9
-  while `MIN_MSB_VERSION` stays 0.6.8 (older msb warns and skips).
+  `socat` being present in the guest image; and a feature-specific gate kept at
+  msb >= 0.6.9 even though the global msb floor now enforces the same minimum.
 - **Security (AC-6/AC-17/SC-7/SC-8/IA-5):** the forward widens the trust boundary
   but is opt-in, reversible (unset `SSH_AUTH_SOCK`), and never carries key material
   into the guest; `ssh-add -c`/`-h` are recommended to narrow it further.

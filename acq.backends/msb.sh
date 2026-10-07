@@ -74,6 +74,17 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
 
+_acq_msb_select_kits() {
+  local agent="${1:-}"
+  if command -v _build_kit_list >/dev/null 2>&1; then
+    _build_kit_list "$agent"
+  elif ! declare -p KITS >/dev/null 2>&1 || [ "${#KITS[@]}" -eq 0 ]; then
+    KITS=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
+    ACQ_BUILTIN_KIT_COUNT="${#KITS[@]}"
+    ACQ_BUILTIN_SUPPORT_KIT_COUNT="${#KITS[@]}"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # _acq_msb_cli — invoke the msb CLI with MSYS argument rewriting disabled
 # ---------------------------------------------------------------------------
@@ -109,6 +120,31 @@ _acq_msb_cli() {
 # Fail closed on the floor instead (acq_backend_prepare) so the failure mode is a
 # clear version message, not a raw clap error or DNS parse failure mid-create.
 MIN_MSB_VERSION="0.6.9"
+
+# msb 0.7.0 through 0.7.2 migrate 0.6.x sandbox state one-way, into a form the
+# 0.6.x line cannot read (`database schema is newer than this msb binary`).
+# Refuse exactly that range: 0.7.3 carries the upstream cross-version
+# compatibility fix and is accepted.
+MSB_BLOCKED_VERSION_MIN="0.7.0"
+MSB_BLOCKED_VERSION_MAX="0.7.2"
+
+# Version acq's own tooling installs by default: latest release known to carry
+# the upstream 0.7.3+ cross-version compatibility fix. See ADR-0032.
+MSB_PINNED_VERSION="0.7.7"
+
+# Rollback target for catalogs already migrated by blocked 0.7.0-0.7.2 releases.
+# This stays on the newest 0.6.x release because `msb self downgrade` is a state
+# rollback to the last catalog format the 0.6.x line understands, not an install
+# default.
+MSB_ROLLBACK_VERSION="0.6.18"
+
+# First release with the upstream fix. Moving FORWARD to this is the preferred
+# recovery for a host that already ran a blocked version: the migration sets are
+# additive, so this line reads an already-migrated catalog with no rollback and no
+# state rewrite. Rolling back needs `msb self downgrade` run BY the blocked binary
+# (it owns the rollback metadata), and can be refused outright when grouped or
+# duplicate snapshots exist. See ADR-0032.
+MSB_FIXED_VERSION="0.7.3"
 
 # Default OCI image for provisioned sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
@@ -220,8 +256,11 @@ ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/kits
 # ACQ_EXEC_READY_TIMEOUT.
 ACQ_MSB_EXEC_READY_TIMEOUT="${ACQ_MSB_EXEC_READY_TIMEOUT:-${ACQ_EXEC_READY_TIMEOUT:-60}}"
 
-# USAi models path (matches common.sh USAI_MODELS_URL host) for --secret host.
-ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
+# USAi provider facts for --secret binding; common.sh owns the canonical values.
+USAI_PROVIDER_HOST="${USAI_PROVIDER_HOST:-api.gsa.usai.gov}"
+USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_BIND_HOSTS:-$USAI_PROVIDER_HOST}"
+USAI_PROVIDER_KEY_ENV="${USAI_PROVIDER_KEY_ENV:-USAI_API_KEY}"
+ACQ_MSB_USAI_HOST="$USAI_PROVIDER_BIND_HOSTS"
 
 # GitHub credential hosts for the msb --secret binding. Bind the REST API and
 # git-transport hosts so both API calls and HTTPS git clone/push can substitute
@@ -264,7 +303,7 @@ _acq_msb_service_binding() {
     fi
   fi
   case "$_service" in
-    usai)   printf '%s\t%s\n' "USAI_API_KEY" "$ACQ_MSB_USAI_HOST"; return 0 ;;
+    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_KEY_ENV" "$ACQ_MSB_USAI_HOST"; return 0 ;;
     github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
   esac
   printf '\t\n'
@@ -423,28 +462,6 @@ ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-${ACQ_STATE_DIR:-${XDG_STA
 # Use it to confirm the failure and that the fix resolves it. Off by default.
 ACQ_MSB_NO_UPSTREAM_CA="${ACQ_MSB_NO_UPSTREAM_CA:-}"
 
-# Agent binary install.
-# ---------------------------------------------------------------------------
-# Unlike sbx (whose agent templates BAKE the agent binary into the image), msb
-# runs a plain OCI base, so the adapter must install the requested agent itself.
-# For `opencode`, install the npm package globally (node is a base-image
-# prerequisite the adapter already verifies). The registry host must be reachable
-# from the guest, so the adapter allow-lists it at create (kit net-rules are
-# default-deny). The install is idempotent (marker-gated + `command -v` guarded).
-#
-# Only agents with a known install recipe are auto-installed; `shell` is a no-op
-# (there is nothing to install), and an unknown agent is a clear, non-fatal warning
-# (the user can bake it into ACQ_MSB_IMAGE). Override the opencode package spec
-# (e.g. to pin a version like opencode-ai@1.2.3) with ACQ_MSB_OPENCODE_PKG.
-ACQ_MSB_OPENCODE_PKG="${ACQ_MSB_OPENCODE_PKG:-opencode-ai}"
-
-# Hosts the agent installer needs to reach, allow-listed at create so egress
-# (default-deny under kit net-rules) permits the npm download. registry.npmjs.org
-# serves metadata; the tarballs are on the same host for the public registry.
-# Override for an internal mirror via ACQ_MSB_NPM_HOSTS (space-separated).
-ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
-
-# ---------------------------------------------------------------------------
 # Balanced egress baseline (ADR-0018)
 # ---------------------------------------------------------------------------
 # msb defaults guest egress to NONE, so without a baseline an msb sandbox is far
@@ -475,7 +492,7 @@ ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
 #
 # ALL tiers keep deny-by-default EXCEPT open; the tier only sizes the baseline
 # allowlist. This normalizes to a lowercase enum, fail-closed to `balanced` on an
-# invalid value (matching ACQ_MSB_SHORT_NAME_MODE's validator).
+# invalid value.
 #
 # DEPRECATED ALIAS — `ACQ_MSB_BALANCED_EGRESS` predates the neutral tier and is
 # retained for one deprecation window. It maps into the tier fail-safe (tighter,
@@ -526,103 +543,6 @@ unset _acq_net_tier_source _acq_msb_balanced_egress_alias
 # is validated in acq_backend_provision (not here) so a stale env var that is
 # never used to provision cannot abort an unrelated acq invocation.
 ACQ_NETWORK_TIER_CONFIRM_OPEN="${ACQ_NETWORK_TIER_CONFIRM_OPEN:-}"
-
-# ---------------------------------------------------------------------------
-# OCI container engine (podman) — ensure agents can run OCI images (ADR-0020)
-# ---------------------------------------------------------------------------
-# Agents frequently need to run OCI images inside the sandbox (e.g. `docker run`,
-# bringing up a docker-compose.yaml). The default image ships the Docker CLI +
-# compose plugin, but msb's microVM init (/init.krun) never starts dockerd, so
-# the Docker socket is dead; and dockerd's overlay2 storage driver cannot sit on
-# the sandbox's already-overlay root without a disk-backed data volume. Rather
-# than retrofit the msb docker:dind entrypoint recipe (a daemon we would have to
-# start and keep alive across restarts, plus a per-sandbox disk-backed volume),
-# the adapter provisions **podman** — a daemonless engine that forks runc/crun
-# per invocation (no socket, no restart lifecycle), uses fuse-overlayfs on the
-# overlay root (no disk-backed volume), and needs no nested virtualization. We
-# run podman ROOTLESS as the agent user: the install step installs the rootless
-# prerequisites (uidmap for newuidmap/newgidmap, passt + slirp4netns for rootless
-# networking) from the same mirror in the same step as podman itself, and grants
-# the agent access to /dev/net/tun (group-scoped) so rootless networking can set
-# up. Rootless keeps containers unprivileged (defense-in-depth), aligns container/
-# host UIDs, and lets the agent invoke podman directly (no sudo wrapper). See
-# ADR-0020 and _acq_msb_ensure_oci.
-#
-# podman is CLI-compatible with docker for the run/build/compose workflows this
-# targets, and the bundled Docker CLI is non-functional here anyway (dead
-# socket), so we alias `docker` -> podman (in /usr/local/bin, ahead of /usr/bin)
-# so both `docker run …` and `docker compose …` route to podman. `docker compose`
-# resolves to `podman compose`, which drives the installed podman-compose
-# provider — this is what makes docker-compose.yaml files usable (the standalone
-# `docker-compose` CLI is deprecated in favour of the `docker compose`
-# subcommand, so we do not provide a separate `docker-compose` binary).
-#
-# We also make unadorned image names resolve to Docker Hub by default (stock
-# podman sends many short names to quay.io and has no default search registry),
-# to reduce migration burden for users whose code assumes `docker run <name>`
-# means Docker Hub. See _acq_msb_ensure_oci step 4 and ADR-0020.
-#
-# Toggle: on by default. Set ACQ_MSB_ENSURE_OCI=0 (or empty) to skip the step
-# entirely (e.g. a base image that bakes its own working engine, or a lean
-# sandbox that needs no OCI support). Normalized to exactly "1" (on) or "" (off):
-# an unset value defaults on; "0"/"false"/"no"/"off"/empty are off
-# (case-insensitive); anything else is on.
-ACQ_MSB_ENSURE_OCI="${ACQ_MSB_ENSURE_OCI-1}"
-case "$(printf '%s' "$ACQ_MSB_ENSURE_OCI" | tr '[:upper:]' '[:lower:]')" in
-  ""|0|false|no|off) ACQ_MSB_ENSURE_OCI="" ;;
-  *)                 ACQ_MSB_ENSURE_OCI="1" ;;
-esac
-
-# The packages installed to provide the OCI engine (space-separated). Override
-# for a different set or an internal mirror's package names. podman-compose is
-# the `docker compose` / `podman compose` provider. fuse-overlayfs lets podman
-# use the `overlay` graph driver on msb's overlay ROOT filesystem (the kernel
-# `overlay` driver refuses to stack on overlayfs); without it the adapter falls
-# back to the `vfs` driver, which works everywhere but is disk-heavy. uidmap
-# (newuidmap/newgidmap), passt, and slirp4netns are the ROOTLESS prerequisites:
-# uidmap provides the setuid helpers rootless podman needs to map the subuid/
-# subgid ranges (already present for `agent`), and passt/slirp4netns provide
-# rootless container networking. See ADR-0020 and _acq_msb_ensure_oci. The install
-# uses the OS package mirror (apt/dnf/apk), which under the default balanced egress
-# baseline (ADR-0018) is already reachable (archive.ubuntu.com / ports.ubuntu.com
-# / security.ubuntu.com / *.debian.org are in the vendored host list). With
-# ACQ_NETWORK_TIER=strict (kit hosts only), or a base whose egress is otherwise
-# narrowed, the mirror is unreachable and the install fails soft (a clear warning;
-# provision continues; OCI is simply unavailable).
-ACQ_MSB_PODMAN_PKGS="${ACQ_MSB_PODMAN_PKGS:-podman podman-compose fuse-overlayfs uidmap passt slirp4netns}"
-
-# podman short-name resolution mode written into the docker-first registries
-# drop-in (/etc/containers/registries.conf.d/00-acq-docker-first.conf). This
-# governs what happens when the agent runs an UNQUALIFIED image name (e.g.
-# `docker run nginx`) that is not already fully qualified to a registry.
-#
-# DEFAULT: "enforcing" (least-privilege / prompt-injection defense). Per the
-# PR #302 review (3-model consensus + reviewer), "permissive" is the WRONG
-# default for a federal sandbox running a prompt-injectable agent: it silently
-# resolves ambiguous short names, which removes the defense against image
-# substitution / typosquatting (an injected `docker run nginx` could resolve to
-# docker.io/<attacker>/nginx without any prompt). We KEEP
-# unqualified-search-registries = ["docker.io"] below, so unqualified names
-# still resolve deterministically to Docker Hub and migration ergonomics are
-# preserved; "enforcing" only fails closed on interactively-ambiguous short
-# names instead of silently resolving them. Because there is a single search
-# registry, "enforcing" costs essentially no day-to-day ergonomics.
-#
-# Setting ACQ_MSB_SHORT_NAME_MODE=permissive is an EXPLICIT operator override
-# that REMOVES the typosquatting / image-substitution guardrail. Only podman's
-# accepted values are allowed: enforcing | permissive | disabled. Any other
-# value (including empty) is rejected and falls back to "enforcing"
-# (fail-closed), with a warning.
-ACQ_MSB_SHORT_NAME_MODE="${ACQ_MSB_SHORT_NAME_MODE:-enforcing}"
-_acq_msb_short_name_mode_lc="$(printf '%s' "$ACQ_MSB_SHORT_NAME_MODE" | tr '[:upper:]' '[:lower:]')"
-case "$_acq_msb_short_name_mode_lc" in
-  enforcing|permissive|disabled) ACQ_MSB_SHORT_NAME_MODE="$_acq_msb_short_name_mode_lc" ;;
-  *)
-    printf 'msb: WARNING: invalid ACQ_MSB_SHORT_NAME_MODE=%s (expected enforcing|permissive|disabled); falling back to enforcing\n' "$ACQ_MSB_SHORT_NAME_MODE" >&2
-    ACQ_MSB_SHORT_NAME_MODE="enforcing"
-    ;;
-esac
-unset _acq_msb_short_name_mode_lc
 
 # Path to the vendored host list (a verbatim mirror of `sbx policy inspect
 # local-policy`; see acq.backends/msb-balanced-hosts.txt). Override to point at a
@@ -691,7 +611,7 @@ case "$ACQ_MSB_SSH_AGENT_GUEST_SOCK" in
     ;;
 esac
 # The ssh-agent forward feature needs msb >= 0.6.9 (first release with --vsock).
-# The global MIN_MSB_VERSION floor stays 0.6.8; this gates ONLY the forward.
+# Keep a feature-specific constant so the forward path stays self-documenting.
 MIN_MSB_VSOCK_VERSION="0.6.9"
 # Share the ssh-agent guest port with common.sh's neutral helper so both sides
 # agree on the port (the helper emits it, this adapter translates it). This is
@@ -706,6 +626,10 @@ _ACQ_MSB_SSH_AGENT_FORWARDING=0
 # printed, so the "forwarding host ssh-agent" notice appears at most once per
 # process even if the vsock-flag helper runs more than once. See ADR-0021.
 _ACQ_MSB_SSH_AGENT_NOTICE_SHOWN=0
+# Module-scope flag: set to 1 once the "cannot probe host port availability"
+# notice has been printed, so a provision publishing several ports on a shell
+# without /dev/tcp says it once instead of per port. See ADR-0034.
+_ACQ_MSB_HOST_PROBE_NOTICE_SHOWN=0
 
 # Module-level monotonic counter for ephemeral serve-port selection. The call
 # site is `sport=$(_acq_msb_pick_ephemeral_port)` — a COMMAND SUBSTITUTION, which
@@ -746,35 +670,96 @@ EOF
   echo 0
 }
 
-# Parse `msb --version` → bare X.Y.Z.
+_acq_msb_version_blocked() {
+  local v="$1"
+  [ "$(_acq_msb_version_ge "$v" "$MSB_BLOCKED_VERSION_MIN")" -eq 0 ] || return 1
+  [ "$(_acq_msb_version_ge "$MSB_BLOCKED_VERSION_MAX" "$v")" -eq 0 ] || return 1
+  return 0
+}
+
+# Parse `msb --version` → bare X.Y.Z. Only final releases are accepted:
+# prerelease/build-suffixed output such as 0.7.3-rc1 must fail closed rather
+# than being treated as the fixed final 0.7.3.
 _acq_msb_version() {
-  _acq_msb_cli --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1
+  local raw
+  if ! raw=$(_acq_msb_cli --version 2>/dev/null); then
+    return 0
+  fi
+  printf '%s\n' "$raw" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1 || true
+}
+
+_acq_msb_version_is_final() {
+  case "$1" in
+    *[-+]* ) return 1 ;;
+    * ) return 0 ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_prepare — CLI presence + version floor; fail closed
+# acq_backend_check_version — CLI presence + version floor ONLY; fail closed
 # ---------------------------------------------------------------------------
-
-acq_backend_prepare() {
+# Split out of acq_backend_prepare so verbs that merely TOUCH existing sandbox
+# state (ls/stop/start/rm/exec/...) can be guarded too, without paying for the
+# `msb doctor` host-readiness probe that only provisioning needs. Without this,
+# those verbs reached msb unguarded and surfaced raw upstream errors — most
+# visibly `database schema is newer than this msb binary` from a blocked 0.7.x
+# that had already migrated the catalog. Cheap: one `msb --version`, no network,
+# no host mutation. See ADR-0032.
+acq_backend_check_version() {
   if ! command -v msb >/dev/null 2>&1; then
     echo "error: msb (microsandbox) CLI not found on PATH. Install msb >= $MIN_MSB_VERSION:" >&2
-    echo "         curl -fsSL https://install.microsandbox.dev | sh   # macOS / Linux" >&2
-    echo "         brew install superradcompany/tap/microsandbox" >&2
+    echo "         brew install GSA-TTS/tap/microsandbox-acq        # version-pinned" >&2
+    echo "         ./scripts/verify-msb-pin --install               # verified release bundle" >&2
+    echo "       Note: 'curl -fsSL https://install.microsandbox.dev | sh' cannot install a" >&2
+    echo "       specific version — it always resolves to the newest release, and every" >&2
+    echo "       release ships a byte-identical copy, so a versioned URL is not a pin." >&2
+    echo "       acq accepts msb $MIN_MSB_VERSION-$MSB_BLOCKED_VERSION_MIN (exclusive) and $MSB_FIXED_VERSION or newer." >&2
     echo "       See docs/BACKEND_GUIDE.md (msb backend) for details." >&2
     exit 1
   fi
 
   local current
   current=$(_acq_msb_version)
-  if [ -z "$current" ]; then
-    echo "acq: warning: could not determine msb version (need >= $MIN_MSB_VERSION); continuing." >&2
-    return 0
+  if [ -z "$current" ] || ! _acq_msb_version_is_final "$current"; then
+    echo "error: acq could not determine a supported final msb version." >&2
+    echo "       msb --version must report a final release like 'msb $MSB_PINNED_VERSION'" >&2
+    echo "       or 'msb $MSB_FIXED_VERSION'. Local, dev, prerelease, or unparseable" >&2
+    echo "       builds are refused so acq does not open sandbox state with an" >&2
+    echo "       unverified migration policy." >&2
+    exit 1
   fi
   if [ "$(_acq_msb_version_ge "$current" "$MIN_MSB_VERSION")" -ne 0 ]; then
     echo "error: acq requires msb >= $MIN_MSB_VERSION, but found $current." >&2
-    echo "       Upgrade with 'msb self update' (see docs/BACKEND_GUIDE.md)." >&2
+    echo "       Install msb $MSB_PINNED_VERSION, or msb $MSB_FIXED_VERSION or newer:" >&2
+    echo "         brew install GSA-TTS/tap/microsandbox-acq" >&2
+    echo "         ./scripts/verify-msb-pin --install" >&2
     exit 1
   fi
+  if _acq_msb_version_blocked "$current"; then
+    echo "error: acq refuses msb $current because msb $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX" >&2
+    echo "       migrate existing 0.6.x sandbox state one-way, into a form the 0.6.x" >&2
+    echo "       line cannot read." >&2
+    echo "       Preferred fix — move FORWARD to msb $MSB_FIXED_VERSION, which reads the state this" >&2
+    echo "       msb already migrated, with no rollback and no state rewrite:" >&2
+    echo "         msb self update" >&2
+    echo "       Alternative — roll back to msb $MSB_ROLLBACK_VERSION. If this msb ALREADY migrated" >&2
+    echo "       your sandbox state, swapping the binary is NOT enough; the catalog" >&2
+    echo "       must be rolled back first, and only THIS msb can do it:" >&2
+    echo "         msb self downgrade $MSB_ROLLBACK_VERSION" >&2
+    echo "       Do NOT run 'msb self downgrade' from an older msb: it cannot roll" >&2
+    echo "       these migrations back, and the failed attempt leaves an" >&2
+    echo "       interrupted-downgrade record that blocks msb catalog access." >&2
+    echo "       See docs/KNOWN_FAILURE_MODES.md for details." >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_prepare — version floor + host readiness; fail closed
+# ---------------------------------------------------------------------------
+
+acq_backend_prepare() {
+  acq_backend_check_version
 
   # msb needs host virtualization (KVM on Linux, HVF on macOS, WHP on Windows).
   # Run the readiness check FOR the user (so the happy path needs no manual `msb
@@ -947,7 +932,7 @@ $(acq_secret_meta_list "$_name")
 EOF
     fi
   elif [ -n "${USAI_API_KEY:-}" ]; then
-    eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
+    eval "$_arrn+=(--secret \"${USAI_PROVIDER_KEY_ENV}@\${ACQ_MSB_USAI_HOST}\")"
   fi
 }
 
@@ -1000,6 +985,9 @@ EOF
 # matter for start.
 acq_backend_start() {
   local _name="$1"
+  if command -v acq_provider_facts_load_from_kit_or_fallback >/dev/null 2>&1; then
+    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+  fi
   local _start_secret_flags=() _start_secret_names=()
   _acq_msb_bind_secrets_into _start_secret_flags _start_secret_names "$_name"
   local _start_rc=0
@@ -1013,10 +1001,6 @@ acq_backend_start() {
   [ "$_start_rc" -eq 0 ] || return "$_start_rc"
   _acq_msb_wait_for_exec_ready "$_name" || \
     echo "acq(msb): warning: $_name did not become exec-ready after start." >&2
-  # Re-grant the rootless-podman device nodes (/dev/net/tun, /dev/fuse): /dev is a
-  # devtmpfs re-created each boot, so the provision-time grant is lost across
-  # restart. Cheap + idempotent; no-op when ENSURE_OCI is disabled or absent.
-  _acq_msb_grant_oci_devs "$_name"
   # The host ssh-agent forward's --vsock route persists in the sandbox config
   # across stop/start, but the in-guest socat bridge process dies on stop, so it
   # must be (re)started here too. Gated on the persisted marker (no provision ran
@@ -1359,21 +1343,172 @@ _acq_msb_balanced_rules_into() {
 # Emit the create-time `-p HOST:GUEST` flags for a kit's published ports into the
 # named array. Usage: _acq_msb_port_flags_into ARRVAR SPEC
 #
-# ADR-0014: kit_spec_published_ports reads the NEUTRAL top-level
-# `publishedPorts` first (deprecated backend_extras.sbx fallback) and emits
-# validated `guest<TAB>proto<TAB>name<TAB>host` records (ports are ints 1..65535,
-# so they cannot smuggle shell metacharacters). host defaults to guest. We map
-# each to a plain `-p HOST:GUEST` — msb's create/run-time NAT publish. msb -p also
-# accepts BIND_ADDR:HOST:GUEST and /udp, but the neutral schema stays TCP +
-# default loopback bind for sbx parity, so bind-addr and /udp are deliberately
-# NOT emitted. Uses the eval-by-name array pattern (macOS bash 3.2 compat), like
-# _acq_msb_net_rules_into. Absence of publishedPorts is a silent no-op: the
-# neutral field is read DEFENSIVELY so a kit that omits it — or an older pinned
-# kit predating the neutral schema — is a clean no-op rather than an error. The
-# schema and a consuming kit are released at the current PATTERNS_KIT_REF, so the
-# field lights up end-to-end (see ADR-0014).
+# Thin wrapper over _acq_msb_port_flags_from_records for a SINGLE spec. The
+# provision path does NOT use it: it accumulates every kit's records and emits
+# once after the kit loop, so cross-kit duplicates collapse and a CLI override
+# can compose (see acq_backend_provision and ADR-0034).
 _acq_msb_port_flags_into() {
-  local _arr="$1" _spec="$2" _rec _guest _host
+  _acq_msb_port_flags_from_records "$1" <<EOF
+$(kit_spec_published_ports "$2")
+EOF
+}
+
+# Union published-port records by GUEST port, LAST WINS — the same composition
+# rule _acq_msb_volume_records_dedupe applies to volumes. Two kits that publish
+# the same guest port must yield ONE `-p` flag (msb rejects a duplicate guest
+# mapping), and last-wins is what lets a later record (a CLI `--publish`, see
+# ADR-0034) override an earlier kit's entry. stdin -> stdout; blank lines
+# dropped; survivors keep the position of their LAST occurrence.
+_acq_msb_port_records_dedupe() {
+  awk -F'\t' '
+    $1 != "" { recs[NR]=$0; last[$1]=NR }
+    END { for (i=1;i<=NR;i++) if (i in recs) { split(recs[i],f,"\t"); if (last[f[1]]==i) print recs[i] } }
+  '
+}
+
+# Report whether the HOST port PORT is already spoken for, as one word:
+#   busy    — something is listening on 127.0.0.1:PORT right now
+#   free    — the connect was refused, so nothing is listening
+#   unknown — the probe itself could not run (see below)
+#
+# The probe is a bash /dev/tcp connect, i.e. it tests the REAL host listener
+# rather than any backend's declared configuration: msb's inspect output reports
+# the mapping msb was ASKED for, and that record stays unchanged even when another
+# process owns the port, so it cannot answer whether the port is available. See
+# ADR-0034; closing that reporting gap is separate, deliberately-deferred work.
+# Always the literal IPv4 loopback, never `localhost`: a `::1`-first resolution
+# against an IPv4-only listener does not fail fast, it HANGS.
+# `unknown` is real and must not be mistaken for `free`: a bash built without
+# net redirection answers "No such file or directory". Callers warn on it and
+# proceed (the pre-ADR-0034 behavior) rather than silently claiming the port.
+#
+# Test seams, mirroring _acq_msb_pick_ephemeral_port's ACQ_MSB_FORCE_SERVE_PORT:
+# ACQ_MSB_HOST_PORTS_BUSY is a space/comma list of ports reported busy,
+# ACQ_MSB_HOST_PROBE_STUB=1 reports every other port free WITHOUT touching a
+# socket (so the offline suite never depends on what the developer's machine
+# happens to be listening on), and ACQ_MSB_HOST_PROBE_UNKNOWN=1 forces the
+# indeterminate verdict. Real use leaves all three unset and probes for real.
+_acq_msb_host_port_status() {
+  local _p="$1" _out _rc=0 _b
+  [ "${ACQ_MSB_HOST_PROBE_UNKNOWN:-0}" = "1" ] && { echo unknown; return 0; }
+  for _b in $(printf '%s' "${ACQ_MSB_HOST_PORTS_BUSY:-}" | tr ',' ' '); do
+    [ "$_b" = "$_p" ] && { echo busy; return 0; }
+  done
+  [ "${ACQ_MSB_HOST_PROBE_STUB:-0}" = "1" ] && { echo free; return 0; }
+  # The redirection runs in a command substitution, so fd 3 dies with the
+  # subshell — no explicit close, and no fd leak into the caller.
+  _out=$( { exec 3<>"/dev/tcp/127.0.0.1/${_p}"; } 2>&1 ) || _rc=$?
+  if [ "$_rc" -eq 0 ]; then echo busy; return 0; fi
+  # Only a refused connection PROVES nothing is listening. Anything else — an
+  # unexpected message, or a failure with no message at all — is "cannot tell",
+  # never optimistically "free".
+  case "$_out" in
+    *[Cc]"onnection refused"*) echo free ;;
+    *)                         echo unknown ;;
+  esac
+}
+
+# Echo a host port that is free right now, for a published guest port whose kit
+# left `host:` unspecified. Reuses the existing loopback-range picker and probes
+# each candidate, retrying a busy one a bounded number of times. Candidates in
+# the space-separated TAKEN list (ports this create already maps, not yet bound,
+# so the probe would call them free) are skipped. Usage:
+#   _acq_msb_pick_free_host_port [TAKEN]
+# Returns:
+#   0 — the echoed port probed FREE
+#   2 — the echoed port could not be probed (acq cannot tell; the caller decides
+#       whether to say so — it must, because the caller is not a subshell and
+#       this helper always is, being called via command substitution, so a
+#       "printed once" flag set here would never survive back, the same trap
+#       _ACQ_MSB_PORT_SEQ_FILE exists to avoid)
+#   1 — every candidate was busy; the caller must fail the create
+_acq_msb_pick_free_host_port() {
+  local _taken=" ${1:-} " _try=0 _p
+  while [ "$_try" -lt 12 ]; do
+    _try=$(( _try + 1 ))
+    _p=$(_acq_msb_pick_ephemeral_port)
+    case "$_taken" in *" $_p "*) continue ;; esac
+    case "$(_acq_msb_host_port_status "$_p")" in
+      busy)    continue ;;
+      unknown) printf '%s\n' "$_p"; return 2 ;;
+      *)       printf '%s\n' "$_p"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Print the "could not probe host port availability" notice AT MOST ONCE per
+# provision, whichever branch discovers it — a requested host port and a chosen
+# one are the same fact from the caller's side ("acq did not check"), and it must
+# never be mistaken for "acq checked and it was free". A provision publishing
+# several ports on a bash without network redirection says it once, not per port.
+# Always returns 0 so it can sit in a `case`/`&&` arm without affecting flow.
+_acq_msb_probe_unknown_notice() {
+  [ "$_ACQ_MSB_HOST_PROBE_NOTICE_SHOWN" -eq 0 ] || return 0
+  _ACQ_MSB_HOST_PROBE_NOTICE_SHOWN=1
+  echo "acq(msb): note: cannot probe host port availability on this shell;" \
+       "publishing ports without a contention check." >&2
+  return 0
+}
+
+# Return 0 if the explicitly requested host port HOST may be mapped to GUEST,
+# 1 (with the reason on stderr) if not. TAKEN is the space-separated list of host
+# ports this create already maps. Usage:
+#   _acq_msb_explicit_host_ok HOST GUEST TAKEN
+_acq_msb_explicit_host_ok() {
+  local _host="$1" _guest="$2" _taken="$3"
+  # Nothing is bound until msb create runs, so the probe below cannot see a
+  # host port this same create already maps (two `--publish` pins, or a pin
+  # and a kit's `host:`). Refuse it here instead of handing msb two `-p`
+  # flags for one host port.
+  case " $_taken " in
+    *" $_host "*)
+      echo "acq(msb): error: host port ${_host} is requested for more than one guest" >&2
+      echo "          port (again for guest port ${_guest}). Give each its own host port." >&2
+      return 1
+      ;;
+  esac
+  case "$(_acq_msb_host_port_status "$_host")" in
+    busy)
+      echo "acq(msb): error: host port ${_host} (for guest port ${_guest}) is already" >&2
+      echo "          in use on 127.0.0.1. acq will not substitute a different port for" >&2
+      echo "          an explicitly requested one. Free it, or request another host port." >&2
+      return 1
+      ;;
+    # Unprobeable: publish the requested port (the behavior before this check
+    # existed) but say so. An EXPLICIT request is the case where a wrong
+    # answer is most visible to the caller, so it must not be the quiet one.
+    unknown) _acq_msb_probe_unknown_notice ;;
+  esac
+  return 0
+}
+
+# Turn validated `guest<TAB>proto<TAB>name<TAB>host` records on STDIN into
+# create-time `-p HOST:GUEST` flags in the named array. Usage:
+#   _acq_msb_port_flags_from_records ARRVAR <<EOF ... records ... EOF
+#
+# ADR-0014 supplies the records (ports are ints 1..65535, so they cannot smuggle
+# shell metacharacters); ADR-0034 defines what an EMPTY host column means:
+#
+#   host set    — an explicit request. If something is already listening there we
+#                 FAIL, loudly and without substituting another port: the caller
+#                 asked for a predictable address and a silent substitution is
+#                 exactly the "started fine, unreachable" failure this replaces.
+#   host empty  — the kit left the host side to the backend, so acq picks a FREE
+#                 loopback port per sandbox. Defaulting it to the guest port
+#                 (the old behavior) made every sandbox from one kit request the
+#                 same host port, so the second one lost the race in silence.
+#
+# Either way, when the availability probe cannot run at all, the port is published
+# and a notice says the check did not happen — never silently.
+#
+# msb -p also accepts BIND_ADDR:HOST:GUEST and /udp, but the neutral schema stays
+# TCP + default loopback bind for sbx parity, so neither is emitted. Uses the
+# eval-by-name array pattern (macOS bash 3.2 compat), like _acq_msb_net_rules_into.
+# Returns non-zero if any record could not be mapped; the caller must abort the
+# create rather than bring up a sandbox with a missing port.
+_acq_msb_port_flags_from_records() {
+  local _arr="$1" _rec _guest _host _rc=0 _prc _taken=""
   eval "$_arr=()"
   # Parse fields with cut, NOT `IFS=<tab> read`: tab is IFS whitespace, so a
   # bare read COLLAPSES adjacent empty fields — an entry with guest + host but
@@ -1385,7 +1520,6 @@ _acq_msb_port_flags_into() {
     _guest=$(printf '%s' "$_rec" | cut -f1)
     _host=$(printf '%s' "$_rec" | cut -f4)
     [ -n "$_guest" ] || continue
-    [ -n "$_host" ] || _host="$_guest"
     # Defense-in-depth: the validator already guarantees integer ports, but
     # re-check before the value reaches an argv via eval.
     case "$_guest$_host" in
@@ -1394,10 +1528,23 @@ _acq_msb_port_flags_into() {
         continue
         ;;
     esac
+    if [ -n "$_host" ]; then
+      _acq_msb_explicit_host_ok "$_host" "$_guest" "$_taken" || { _rc=1; continue; }
+    else
+      _prc=0
+      _host=$(_acq_msb_pick_free_host_port "$_taken") || _prc=$?
+      if [ "$_prc" -eq 1 ]; then
+        echo "acq(msb): error: could not find a free host port for guest port ${_guest}." >&2
+        _rc=1
+        continue
+      fi
+      # _prc 2 == the probe could not run; same "publish, but say so" contract.
+      [ "$_prc" -eq 2 ] && _acq_msb_probe_unknown_notice
+    fi
+    _taken="${_taken} ${_host}"
     eval "$_arr+=(-p \"\${_host}:\${_guest}\")"
-  done <<EOF
-$(kit_spec_published_ports "$_spec")
-EOF
+  done
+  return "$_rc"
 }
 
 # Emit create-time storage flags from `path<TAB>type<TAB>size` volume records
@@ -1526,7 +1673,7 @@ EOF
 # also substitutes the GitHub token on the wire for the API and HTTPS
 # git-transport hosts bound above, so direct HTTPS clone/push is eligible too.
 _acq_msb_apply_kit_dir() {
-  local name="$1" kitdir="$2"
+  local name="$1" kitdir="$2" mergedn="${3:-}"
   local spec="${kitdir}/spec.yaml"
   if [ ! -f "$spec" ]; then
     echo "acq(msb): kit spec not found: $spec" >&2
@@ -1597,11 +1744,23 @@ EOF
   # 3) Run commands[]. Reassemble each argv record and exec it as the given uid.
   #    install → run once (idempotent, marker-gated); initFiles/startup → every
   #    apply. msb has no create-time-only hook, so install collapses to a
-  #    marker-gated exec (design §3 lifecycle table). The kit's environment[]
-  #    entries are threaded onto every command as `msb exec -e NAME=value` (msb's
-  #    native per-exec env flag), so the kit's declared guest env is present when
-  #    its lifecycle commands run.
-  _acq_msb_run_commands "$name" "$spec"
+  #    marker-gated exec (design §3 lifecycle table).
+  #
+  #    Commands run with the MERGED env of the whole kit set, not just this kit's
+  #    (ADR-0033). Full-set callers pass its array name; the mid-life single-kit
+  #    path (`acq kit apply`) has none, so it recovers the sandbox's persisted
+  #    merged value with THIS kit's entries layered last (last-value-wins). The
+  #    re-layering matters: step 2's append only warns on failure, so the marker
+  #    can be stale — without it the kit's own env would be silently dropped.
+  local _merged_env=() _merged_envn="$mergedn"
+  if [ -z "$_merged_envn" ]; then
+    local _persisted_env=()
+    _acq_msb_persisted_kit_env_into _persisted_env "$name"
+    _acq_msb_dedupe_env_into _merged_env \
+      ${_persisted_env[@]+"${_persisted_env[@]}"} ${_kit_env[@]+"${_kit_env[@]}"}
+    _merged_envn=_merged_env
+  fi
+  _acq_msb_run_commands "$name" "$spec" "$_merged_envn"
 }
 
 # _acq_msb_reset_kit_env NAME — remove the persisted kit-env marker so a
@@ -1725,16 +1884,29 @@ _acq_msb_copy_file_verified() {
 }
 
 # Parse and execute a kit spec's commands[] against sandbox NAME.
+#
+# Args: NAME SPEC [MERGEDENV_ARRVAR]
+# MERGEDENV_ARRVAR names an array of already-merged NAME=value tokens covering the
+# FULL effective kit set (_acq_msb_merge_kit_env_into). Omitted, the env falls back
+# to this spec's own environment[] — see _acq_msb_apply_kit_dir step 3.
 _acq_msb_run_commands() {
-  local name="$1" spec="$2"
+  local name="$1" spec="$2" mergedn="${3:-}"
 
-  # Collect the kit's environment[] entries as `NAME=value` argv-ready tokens,
-  # threaded onto every command's `msb exec` as `-e NAME=value`. kit_spec_env
-  # already validates each NAME (^[A-Za-z_][A-Za-z0-9_]*$) and drops unsafe ones,
-  # so these are safe to pass as exec env. Values are passed as a single argv
-  # element (never re-split by a shell).
+  # The guest env threaded onto every command's `msb exec` as `-e NAME=value`.
+  # Names are already validated by kit_spec_env and re-validated on marker replay;
+  # each value is one argv element, never re-split by a shell.
   local _kit_env=()
-  _acq_msb_collect_kit_env_into _kit_env "$spec"
+  if [ -n "$mergedn" ]; then
+    eval "_kit_env=(\${${mergedn}[@]+\"\${${mergedn}[@]}\"})"
+  else
+    _acq_msb_collect_kit_env_into _kit_env "$spec"
+  fi
+
+  # The git guards are owned per kit even though the env is merged — see
+  # _acq_msb_env_tokens_with_guards_into.
+  local _own_env=() _own_guard_tok=()
+  _acq_msb_collect_kit_env_into _own_env "$spec"
+  _acq_msb_own_guard_tokens_into _own_guard_tok _own_env
 
   # Buffer the parsed command stream FIRST, then execute. The exec step calls
   # `msb exec`, which would consume this loop's stdin if we iterated the heredoc
@@ -1762,7 +1934,7 @@ EOF
         ;;
       "__END__")
         reading=0
-        _acq_msb_exec_command "$name" "$phase" "$user" "$background" \
+        _acq_msb_exec_command "$name" "$phase" "$user" "$background" _own_guard_tok \
           ${_kit_env[@]+"${_kit_env[@]}"} -- ${argv[@]+"${argv[@]}"}
         ;;
       *)
@@ -1809,13 +1981,85 @@ _acq_msb_split_env_argv() {
   eval "$_argvarr=(\"\$@\")"
 }
 
-# _acq_msb_exec_flags_into UFLAG_ARRVAR EFLAG_ARRVAR USER KITENV_ARRVAR — build
-# the `msb exec` -u/-e flag arrays for one kit command. Maps the sbx uid contract
-# (1000/agent) onto our by-name agent user, threads the kit's declared env as
-# `-e NAME=value`, and injects git non-interactive guards unless the kit set
-# GIT_TERMINAL_PROMPT itself. Arrays passed/returned by name (bash 3.2 compat).
+# The three non-interactive git guard vars the adapter injects onto kit lifecycle
+# commands (see _acq_msb_env_tokens_with_guards_into).
+ACQ_MSB_GIT_GUARD_NAMES="GIT_TERMINAL_PROMPT GIT_ASKPASS SSH_ASKPASS"
+# A permanently-empty array used as the default "this kit declared no guard vars"
+# argument, so the by-name guard-token parameter is always a real array even when a
+# caller omits it (set -u safe).
+_acq_msb_no_guards=()
+
+# _acq_msb_own_guard_tokens_into ARRVAR ENVARR — store, in the array named ARRVAR,
+# the guard-named entries of ENVARR (ONE kit spec's own environment[]) as whole
+# `NAME=value` tokens. Tokens, not names: see the ownership rule at
+# _acq_msb_env_tokens_with_guards_into.
+_acq_msb_own_guard_tokens_into() {
+  local _arrn="$1" _envarrn="$2" _g _ev
+  eval "$_arrn=()"
+  eval "set -- \${${_envarrn}[@]+\"\${${_envarrn}[@]}\"}"
+  for _ev in "$@"; do
+    for _g in $ACQ_MSB_GIT_GUARD_NAMES; do
+      case "$_ev" in
+        "$_g"=*) eval "$_arrn+=(\"\$_ev\")" ;;
+      esac
+    done
+  done
+}
+
+# _acq_msb_env_tokens_with_guards_into ARRVAR ENVARR OWNGUARDARR — store into the
+# array named ARRVAR the NAME=value tokens one kit command runs with: the MERGED
+# kit env (ENVARR) plus the non-interactive git guards.
+#
+# GUARD OWNERSHIP (do not widen). A command may only ever receive ITS OWN kit's
+# value for a guard name. OWNGUARDARR names THIS kit's own guard tokens. Tracking
+# ownership by NAME is not enough: the merge has already collapsed a duplicate
+# name to the LAST kit's value, so kit A declaring GIT_TERMINAL_PROMPT=0 and a
+# later kit B declaring =1 would leave A's own commands running with B's opt-out,
+# and with no ASKPASS guards either. Hence: strip every guard-name token from the
+# merged set whoever contributed it, re-add this kit's own, then append acq's
+# values unless this kit set GIT_TERMINAL_PROMPT. Closes both collision shapes
+# (another kit declaring a guard name this kit does not; another kit declaring the
+# same name with a different value) while a kit's own override still stands for
+# its own commands. Shared by the exec and staged-script paths, so they cannot
+# drift. See ADR-0033.
+_acq_msb_env_tokens_with_guards_into() {
+  local _arrn="$1" _envarrn="$2" _ownarrn="$3"
+  eval "$_arrn=()"
+  local _own=() _ev _g _keep
+  eval "_own=(\${${_ownarrn}[@]+\"\${${_ownarrn}[@]}\"})"
+
+  # 1) The merged env with EVERY guard-name token removed (any kit's value).
+  eval "set -- \${${_envarrn}[@]+\"\${${_envarrn}[@]}\"}"
+  for _ev in "$@"; do
+    _keep=1
+    for _g in $ACQ_MSB_GIT_GUARD_NAMES; do
+      case "$_ev" in "$_g"=*) _keep=0 ;; esac
+    done
+    [ "$_keep" -eq 1 ] && eval "$_arrn+=(\"\$_ev\")"
+  done
+
+  # 2) Re-add only THIS kit's own guard tokens (its intentional override).
+  for _ev in ${_own[@]+"${_own[@]}"}; do
+    eval "$_arrn+=(\"\$_ev\")"
+  done
+
+  # 3) acq's guards, unless this kit set GIT_TERMINAL_PROMPT itself. Appended
+  #    last, so where this kit declared one of the other two the adapter's value
+  #    still wins — the flag order the single-kit path has always emitted.
+  for _ev in ${_own[@]+"${_own[@]}"}; do
+    case "$_ev" in GIT_TERMINAL_PROMPT=*) return 0 ;; esac
+  done
+  eval "$_arrn+=(\"GIT_TERMINAL_PROMPT=0\" \"GIT_ASKPASS=/bin/false\" \"SSH_ASKPASS=/bin/false\")"
+}
+
+# _acq_msb_exec_flags_into UFLAG_ARRVAR EFLAG_ARRVAR USER KITENV_ARRVAR
+# OWNGUARD_ARRVAR — build the `msb exec` -u/-e flag arrays for one kit command.
+# Maps the sbx uid contract (1000/agent) onto our by-name agent user and threads
+# the env as `-e NAME=value` (merged kit env + git guards, per
+# _acq_msb_env_tokens_with_guards_into, which owns the guard rule). OWNGUARD_ARRVAR
+# names this kit's own guard tokens. Arrays by name (bash 3.2 compat).
 _acq_msb_exec_flags_into() {
-  local _uflag="$1" _eflag="$2" _user="$3" _envarr="$4"
+  local _uflag="$1" _eflag="$2" _user="$3" _envarr="$4" _ownguards="${5:-_acq_msb_no_guards}"
   eval "$_uflag=()"
   eval "$_eflag=()"
 
@@ -1845,29 +2089,18 @@ _acq_msb_exec_flags_into() {
       ;;
   esac
 
-  # Append the kit's declared guest env as additional `-e NAME=value` flags.
+  # NON-INTERACTIVE ENFORCEMENT. Kit lifecycle commands run before the agent
+  # attaches, with no terminal, so they MUST NOT read from a TTY: a kit that
+  # prompts (e.g. `git clone` of a private repo with no credential -> "Username
+  # for 'https://github.com':") would BLOCK provision forever — observed, the
+  # playbook kit hung here. Two defenses: stdin from /dev/null on every kit exec
+  # (at the call sites), and the GIT_TERMINAL_PROMPT/ASKPASS guards appended below.
+  local _envtok=()
+  _acq_msb_env_tokens_with_guards_into _envtok "$_envarr" "$_ownguards"
   local _ev
-  eval "set -- \${${_envarr}[@]+\"\${${_envarr}[@]}\"}"
-  for _ev in "$@"; do
+  for _ev in ${_envtok[@]+"${_envtok[@]}"}; do
     eval "$_eflag+=(-e \"\$_ev\")"
   done
-
-  # NON-INTERACTIVE ENFORCEMENT. Kit lifecycle commands run before the agent
-  # attaches, with no terminal, so they MUST NOT try to read from a TTY. Docker's
-  # kit-reference states startup commands are non-interactive; a kit that prompts
-  # (e.g. `git clone` of a private repo with no credential -> "Username for
-  # 'https://github.com':") would BLOCK provision forever (observed: the playbook
-  # kit hung here). Defense-in-depth alongside the kit's own prompt-suppression:
-  #   - stdin from /dev/null for every kit exec, so nothing can read the TTY.
-  #   - GIT_TERMINAL_PROMPT=0 (+ GIT_ASKPASS/SSH_ASKPASS=false) so git fails fast
-  #     instead of prompting. These are injected only if the kit did not already
-  #     set GIT_TERMINAL_PROMPT (kits may override intentionally).
-  local _kit_env_str
-  eval "_kit_env_str=\" \${${_envarr}[*]-} \""
-  case "$_kit_env_str" in
-    *" GIT_TERMINAL_PROMPT="*) : ;;
-    *) eval "$_eflag+=(-e \"GIT_TERMINAL_PROMPT=0\" -e \"GIT_ASKPASS=/bin/false\" -e \"SSH_ASKPASS=/bin/false\")" ;;
-  esac
 }
 
 # _acq_msb_exec_install NAME USER UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV... — run an
@@ -1935,9 +2168,13 @@ _acq_msb_exec_run() {
   fi
 }
 
+# Args: NAME PHASE USER BACKGROUND OWNGUARD_ARRVAR [NAME=value ...] -- ARGV...
+# OWNGUARD_ARRVAR is the NAME of an array holding this kit's own git-guard tokens
+# (see _acq_msb_own_guard_tokens_into); it is passed by name, not by value, because
+# a guard VALUE can contain spaces and must never be re-split.
 _acq_msb_exec_command() {
-  local name="$1" phase="$2" user="$3" background="$4"
-  shift 4
+  local name="$1" phase="$2" user="$3" background="$4" ownguards="$5"
+  shift 5
 
   # Split leading NAME=value env tokens (up to the `--` sentinel) from argv.
   local _kit_env=() _argv=()
@@ -1945,9 +2182,8 @@ _acq_msb_exec_command() {
 
   [ "${#_argv[@]}" -gt 0 ] || return 0
 
-  # Build the `msb exec` -u/-e flag arrays (uid mapping, kit env, git guards).
   local uflag=() eflag=()
-  _acq_msb_exec_flags_into uflag eflag "$user" _kit_env
+  _acq_msb_exec_flags_into uflag eflag "$user" _kit_env "$ownguards"
 
   if [ "$phase" = "install" ]; then
     _acq_msb_exec_install "$name" "$user" uflag eflag -- "${_argv[@]}"
@@ -2000,34 +2236,25 @@ _acq_msb_sq() {
   printf "'%s'" "${_s//\'/$_q}"
 }
 
-# _acq_msb_startup_env_prefix_into PREFIX_ARRVAR USER KITENV_ARRVAR — build the
-# in-guest `env NAME=value …` prefix tokens for one startup command: HOME for the
-# agent user, the kit env vars, and the git non-interactive guards (unless the
-# kit set GIT_TERMINAL_PROMPT). Mirrors _acq_msb_exec_flags_into's -e set, but as
-# `env` argv rather than `msb exec -e`. Tokens are RAW here (NAME=value); the
-# caller single-quote-escapes each before writing it to the script.
+# _acq_msb_startup_env_prefix_into PREFIX_ARRVAR USER KITENV_ARRVAR
+# OWNGUARD_ARRVAR — build the in-guest `env NAME=value …` prefix tokens for one
+# startup command: HOME for the agent user plus the same env set
+# _acq_msb_exec_flags_into threads, as `env` argv rather than `msb exec -e`.
+# Tokens are RAW here (NAME=value); the caller single-quote-escapes each before
+# writing it to the script.
 _acq_msb_startup_env_prefix_into() {
-  local _prefixn="$1" _user="$2" _envarrn="$3"
+  local _prefixn="$1" _user="$2" _envarrn="$3" _ownguards="${4:-_acq_msb_no_guards}"
   eval "$_prefixn=()"
 
   case "$_user" in
     1000|agent) eval "$_prefixn+=(\"HOME=/home/agent\")" ;;
   esac
 
-  # Kit-declared env vars (already NAME-validated by kit_spec_env).
-  local _ev
-  eval "set -- \${${_envarrn}[@]+\"\${${_envarrn}[@]}\"}"
-  for _ev in "$@"; do
+  local _envtok=() _ev
+  _acq_msb_env_tokens_with_guards_into _envtok "$_envarrn" "$_ownguards"
+  for _ev in ${_envtok[@]+"${_envtok[@]}"}; do
     eval "$_prefixn+=(\"\$_ev\")"
   done
-
-  # Non-interactive git guards, unless the kit set GIT_TERMINAL_PROMPT itself.
-  local _kit_env_str
-  eval "_kit_env_str=\" \${${_envarrn}[*]-} \""
-  case "$_kit_env_str" in
-    *" GIT_TERMINAL_PROMPT="*) : ;;
-    *) eval "$_prefixn+=(\"GIT_TERMINAL_PROMPT=0\" \"GIT_ASKPASS=/bin/false\" \"SSH_ASKPASS=/bin/false\")" ;;
-  esac
 }
 
 # _acq_msb_startup_emit_command USER BACKGROUND PREFIX_ARRVAR ARGV_ARRVAR — echo
@@ -2120,16 +2347,85 @@ $(kit_spec_env "$_spec")
 EOF
 }
 
+# _acq_msb_dedupe_env_into ARRVAR TOKEN... — store the NAME=value TOKENs in the
+# array named ARRVAR with duplicates collapsed: LAST value for a name wins, FIRST
+# appearance fixes the order — the same rule the session replay applies to the
+# marker, so a command's env and a session's env agree on which kit's value
+# survives. Malformed tokens are dropped; each token stays one array element, so a
+# value with spaces or metacharacters is never re-split (SI-10).
+_acq_msb_dedupe_env_into() {
+  local _arrn="$1"
+  shift
+  eval "$_arrn=()"
+  local _line
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    eval "$_arrn+=(\"\$_line\")"
+  done <<EOF
+$([ "$#" -eq 0 ] || printf '%s\n' "$@" | awk '
+  {
+    i = index($0, "=")
+    if (i < 2) next
+    k = substr($0, 1, i - 1)
+    # Same NAME charset kit_spec_env enforces, re-checked here so this helper is
+    # safe regardless of where its input came from (defense in depth).
+    if (k !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next
+    v[k] = substr($0, i + 1)
+    if (!(k in seen)) { seen[k] = 1; order[++n] = k }
+  }
+  END { for (j = 1; j <= n; j++) printf "%s=%s\n", order[j], v[order[j]] }
+')
+EOF
+}
+
+# _acq_msb_merge_kit_env_into ARRVAR SPEC... — collect the environment[] entries of
+# EVERY given kit spec into the array named ARRVAR as merged NAME=value tokens
+# (last kit wins for a duplicate name, in spec order). Kit env is guest-wide
+# configuration, so a kit's lifecycle commands — especially a `background: true`
+# daemon that launches agents — must see the other kits' vars too, not only their
+# own (ADR-0033).
+#
+# WHY A PRE-PASS, not a per-kit marker read: full-set callers (provision, heal)
+# MUST call this over the whole kit set BEFORE applying the first kit. Each kit's
+# entries are appended to the marker inside the apply loop, so reading the marker
+# per kit would make a daemon kit's env depend on whether the env-declaring kit
+# happened to be applied first — correct in one kit order, silently wrong in the
+# other. Computing the merge up front removes the ordering dependence entirely.
+_acq_msb_merge_kit_env_into() {
+  local _arrn="$1"
+  shift
+  # Distinct internal names (_mkall/_mkspec) so they cannot collide with a caller
+  # array passed BY NAME (the eval-by-name hazard _acq_msb_exec_install documents).
+  local _mkall=() _mkspec
+  for _mkspec in "$@"; do
+    [ -f "$_mkspec" ] || continue
+    # A backend-shortcut kit skips the generic apply, so its env is never
+    # persisted for sessions; merging it here would make commands and sessions
+    # disagree on the guest env.
+    kit_spec_has_shortcut "$_mkspec" msb && continue
+    _acq_msb_collect_kit_env_into _mkall "$_mkspec"
+  done
+  _acq_msb_dedupe_env_into "$_arrn" ${_mkall[@]+"${_mkall[@]}"}
+}
+
 # _acq_msb_startup_body_into BODYVAR SPEC — parse SPEC's __CMD__/base64-argv
 # command stream (the same stream _acq_msb_run_commands consumes) and append one
 # guest command line per STARTUP-phase record to the variable named BODYVAR.
 # Returns 0 iff at least one startup command line was emitted. Non-startup phases
 # are ignored here (install/initFiles stay on the exec path — ADR-0017).
 _acq_msb_startup_body_into() {
-  local _bodyn="$1" _spec="$2"
+  local _bodyn="$1" _spec="$2" _mergedn="${3:-}"
 
-  local _kit_env=()
-  _acq_msb_collect_kit_env_into _kit_env "$_spec"
+  # Same env contract as the exec path: the merged kit env when the caller has the
+  # full kit set, else this spec's own; guards always from this spec's own tokens.
+  local _kit_env=() _own_env=() _own_guard_tok=()
+  _acq_msb_collect_kit_env_into _own_env "$_spec"
+  if [ -n "$_mergedn" ]; then
+    eval "_kit_env=(\${${_mergedn}[@]+\"\${${_mergedn}[@]}\"})"
+  else
+    _kit_env=(${_own_env[@]+"${_own_env[@]}"})
+  fi
+  _acq_msb_own_guard_tokens_into _own_guard_tok _own_env
 
   # Buffer the command stream first (kit_spec_commands runs its own subshell).
   local _lines=() line
@@ -2156,7 +2452,7 @@ EOF
         reading=0
         if [ "$phase" = "startup" ] && [ "${#argv[@]}" -gt 0 ]; then
           local _prefix=() _cmdline
-          _acq_msb_startup_env_prefix_into _prefix "$user" _kit_env
+          _acq_msb_startup_env_prefix_into _prefix "$user" _kit_env _own_guard_tok
           _cmdline=$(_acq_msb_startup_emit_command "$user" "$background" _prefix argv)
           if [ -n "$_cmdline" ]; then
             # Append "<cmdline>\n" by name; $'\n' is a literal newline (ANSI-C).
@@ -2176,14 +2472,16 @@ EOF
   [ "$_emitted" -eq 1 ]
 }
 
-# _acq_msb_generate_startup_script SPEC OUTFILE — write the guest startup script
-# for one kit spec's STARTUP-phase commands into OUTFILE. Returns 0 and writes a
-# non-empty script iff the kit HAS at least one startup command; returns 1 (and
-# writes nothing) when there are none, so the caller registers no empty script.
+# _acq_msb_generate_startup_script SPEC OUTFILE [MERGEDENV_ARRVAR] — write the
+# guest startup script for one kit spec's STARTUP-phase commands into OUTFILE.
+# MERGEDENV_ARRVAR, when given, is the merged whole-kit-set env the body should
+# carry (ADR-0033). Returns 0 and writes a non-empty script iff the kit HAS at
+# least one startup command; returns 1 (and writes nothing) when there are none,
+# so the caller registers no empty script.
 _acq_msb_generate_startup_script() {
-  local _spec="$1" _out="$2" _body=""
+  local _spec="$1" _out="$2" _mergedn="${3:-}" _body=""
 
-  _acq_msb_startup_body_into _body "$_spec" || return 1
+  _acq_msb_startup_body_into _body "$_spec" "$_mergedn" || return 1
 
   # Emit the file: a self-contained /bin/sh with its own shebang (so --script-path
   # reads a complete verbatim body; no --shell shebang derivation dependency).
@@ -2198,7 +2496,8 @@ _acq_msb_generate_startup_script() {
   return 0
 }
 
-# _acq_msb_stage_startup_script SPEC ARRVAR — generate the startup script for one
+# _acq_msb_stage_startup_script SPEC ARRVAR [MERGEDENV_ARRVAR] — generate the
+# startup script for one
 # kit SPEC and, if non-empty, append a `--script-path acq-startup:<hostfile>`
 # entry into the create-flags array named ARRVAR. The host file is created under
 # ACQ_MSB_STARTUP_STAGE_DIR (a private 0700 dir under the acq state tree, so kit
@@ -2237,7 +2536,7 @@ _acq_msb_generate_startup_script() {
 # Script at Boot") for the re-verification procedure and remediation.
 ACQ_MSB_STARTUP_SCRIPT_NAME="acq-startup"
 _acq_msb_stage_startup_script() {
-  local _spec="$1" _arrn="$2"
+  local _spec="$1" _arrn="$2" _mergedn="${3:-}"
 
   # One staged script per sandbox provision. If we already staged one, skip
   # (increment-1 scope; see NOTE above).
@@ -2261,7 +2560,7 @@ _acq_msb_stage_startup_script() {
   }
   chmod 600 "$_file" 2>/dev/null || true
 
-  if _acq_msb_generate_startup_script "$_spec" "$_file"; then
+  if _acq_msb_generate_startup_script "$_spec" "$_file" "$_mergedn"; then
     # --script-path names a HOST file native msb reads, so pass the host form
     # (the shell keeps the POSIX _file for cleanup). See ADR-0029.
     local _hostfile="$_file"
@@ -2673,6 +2972,7 @@ acq_backend_provision() {
   local trust_host_cas=0
   local kitdirs=()
   local _volrecs=""
+  local _portrecs=""
 
   # Resolve the OCI image ONCE per provision (ADR-0022): explicit ACQ_MSB_IMAGE
   # wins over the neutral --image/ACQ_IMAGE, which wins over an agent-derived
@@ -2710,20 +3010,12 @@ acq_backend_provision() {
   # by _acq_msb_vsock_flags_into when an ssh-agent forward is emitted. See ADR-0021.
   _ACQ_MSB_SSH_AGENT_FORWARDING=0
 
-  # Fetch each built-in kit and gather its create-time contributions.
+  # Fetch each selected kit and gather its create-time contributions.
   # Zscaler CA trust FIRST so later network-fetching kits (playbook clone, USAi
   # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
   local kitref kitdir
-  local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
-  # Include any extra kits (env-supplied) and CLI-supplied --kit refs.
-  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
-    local _extras=()
-    split_noglob _extras "$ACQ_EXTRA_KITS"
-    kits+=("${_extras[@]}")
-  fi
-  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
-    kits+=("${ACQ_CLI_KITS[@]}")
-  fi
+  _acq_msb_select_kits "$agent"
+  local kits=("${KITS[@]}")
 
   for kitref in "${kits[@]}"; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
@@ -2746,16 +3038,14 @@ acq_backend_provision() {
     _acq_msb_net_rules_into nr "$spec"
     [ "${#nr[@]}" -gt 0 ] && create_flags+=("${nr[@]}")
 
-    # Published ports (ADR-0014) → create-time `-p HOST:GUEST` flags. The
-    # neutral top-level `publishedPorts` is read first by kit_spec_published_ports
-    # (with a deprecated backend_extras.sbx fallback). Each surviving record is
-    # `guest<TAB>proto<TAB>name<TAB>host` (validated to ints 1..65535). msb -p also
-    # accepts BIND_ADDR:HOST:GUEST and /udp, but the neutral schema stays TCP +
-    # default loopback bind for sbx parity, so we emit a plain `-p HOST:GUEST`
-    # (no bind-addr, no /udp — out of parity scope). Absence is a silent no-op.
-    local pp=()
-    _acq_msb_port_flags_into pp "$spec"
-    [ "${#pp[@]}" -gt 0 ] && create_flags+=("${pp[@]}")
+    # Published ports (ADR-0014): ACCUMULATE this kit's validated records. They
+    # are unioned across all kits (last wins by guest port) and mapped to
+    # create-time `-p HOST:GUEST` flags AFTER the loop — emitting per kit here
+    # would produce a duplicate `-p` for a guest port two kits both publish, and
+    # would leave no single place for a CLI host-port override to compose
+    # (ADR-0034). Records are `guest<TAB>proto<TAB>name<TAB>host`.
+    _portrecs="${_portrecs}
+$(kit_spec_published_ports "$spec")"
 
     # Volumes (ADR-0023): ACCUMULATE this kit's validated records; they are
     # unioned across all kits (last wins by path, matching sbx's own
@@ -2764,16 +3054,73 @@ acq_backend_provision() {
     # declare the same path.
     _volrecs="${_volrecs}
 $(kit_spec_volumes "$spec")"
-
-    # Startup-phase commands → a create-time `--script-path acq-startup:<file>`
-    # (ADR-0017). The script is REGISTERED at create; a bare registration is
-    # runtime-neutral (staged on the guest PATH, not auto-run at start). Restart
-    # durability is delivered by the acq `start`/`restart` verb re-running startup
-    # via the exec heal. install + mid-life apply stay exec-based (see the DESIGN
-    # NOTE and _acq_msb_apply_kit_dir). Only the first kit with startup commands
-    # stakes the fixed script name (see _acq_msb_stage_startup_script).
-    _acq_msb_stage_startup_script "$spec" create_flags
   done
+
+  # Merged kit env, computed ONCE now that every kit is fetched and BEFORE any kit
+  # is applied — see _acq_msb_merge_kit_env_into for why it must be a pre-pass.
+  # Consumed by the apply loop below and by the staged startup-script body.
+  local _merged_kit_env=() _pspecs=() _kd
+  for _kd in ${kitdirs[@]+"${kitdirs[@]}"}; do
+    _pspecs+=("${_kd}/spec.yaml")
+  done
+  _acq_msb_merge_kit_env_into _merged_kit_env ${_pspecs[@]+"${_pspecs[@]}"}
+
+  # Startup-phase commands → a create-time `--script-path acq-startup:<file>`
+  # (ADR-0017). The script is REGISTERED at create; a bare registration is
+  # runtime-neutral (staged on the guest PATH, not auto-run at start). Restart
+  # durability is delivered by the acq `start`/`restart` verb re-running startup
+  # via the exec heal. install + mid-life apply stay exec-based (see the DESIGN
+  # NOTE and _acq_msb_apply_kit_dir). Only the first kit with startup commands
+  # stakes the fixed script name (see _acq_msb_stage_startup_script).
+  #
+  # Runs AFTER the fetch loop, not inside it, so the body can carry the merged kit
+  # env; the same list in the same order keeps the first-kit-stakes rule.
+  for _kd in ${kitdirs[@]+"${kitdirs[@]}"}; do
+    [ -f "${_kd}/spec.yaml" ] || continue
+    _acq_msb_stage_startup_script "${_kd}/spec.yaml" create_flags _merged_kit_env
+  done
+
+  # CLI host-port overrides (`acq run/create --publish HOST:GUEST`, ADR-0034) are
+  # appended AFTER every kit's records, so the guest-keyed last-wins dedupe below
+  # makes them win: the user's launch-time choice outranks the kit's declaration
+  # (and outranks the free port acq would otherwise pick). Values are validated at
+  # the acq layer (_acq_validate_publish_pair) before reaching this argv.
+  # A caller that needs no ports (the throwaway key-check sandbox, see
+  # check_fresh_sandbox_key) drops them all, CLI overrides included.
+  [ "${_ACQ_PROVISION_WITHOUT_PORTS:-0}" = "1" ] && _portrecs=""
+  local _pub
+  for _pub in ${ACQ_PUBLISH_FLAGS[@]+"${ACQ_PUBLISH_FLAGS[@]}"}; do
+    [ "${_ACQ_PROVISION_WITHOUT_PORTS:-0}" = "1" ] && break
+    case "
+$_portrecs" in
+      *"
+${_pub#*:}	"*) : ;;   # some kit publishes this guest port — plain override
+      *)
+        # No kit declared it. Publish anyway (an explicit request is honored) but
+        # say so: a mistyped guest port would otherwise map a port with nothing
+        # behind it, and look like a working publish.
+        echo "acq(msb): note: --publish ${_pub}: no applied kit declares guest port" \
+             "${_pub#*:}; publishing it anyway." >&2
+        ;;
+    esac
+    _portrecs="${_portrecs}
+$(printf '%s\t\t\t%s' "${_pub#*:}" "${_pub%%:*}")"
+  done
+
+  # Published ports (ADR-0014, ADR-0034) → create-time `-p HOST:GUEST` flags,
+  # from the union of every kit's records (last wins by guest port). A record
+  # whose host column is EMPTY gets a FREE loopback host port chosen per sandbox
+  # (so parallel sandboxes from one kit do not collide); an explicit host port
+  # that is already taken FAILS the create rather than being silently moved.
+  local pf=()
+  if ! _acq_msb_port_flags_from_records pf <<EOF
+$(printf '%s\n' "$_portrecs" | _acq_msb_port_records_dedupe)
+EOF
+  then
+    echo "acq(msb): aborting create for '${name}': a published port could not be mapped." >&2
+    exit 1
+  fi
+  [ "${#pf[@]}" -gt 0 ] && create_flags+=("${pf[@]}")
 
   # Volumes (ADR-0023) → create-time storage flags, from the union of every
   # kit's records (last wins by path): a block entry becomes a derived named
@@ -2871,37 +3218,6 @@ EOF
     fi
   fi
 
-  # Allow-list the agent installer's registry host(s) so the (default-deny) guest
-  # egress permits the npm download. Only when we will actually install an agent
-  # (a known recipe exists); `shell` and unknown agents add no rule.
-  #
-  # De-dupe against the balanced set: when the baseline is ON, registry.npmjs.org
-  # is already allow-listed, so a second bare `allow@registry.npmjs.org` would be
-  # dead weight (both allow; no deny to shadow). We therefore skip any npm host
-  # that the balanced block ALREADY emitted a rule for, rather than skipping the
-  # whole block — an operator who overrides ACQ_MSB_NPM_HOSTS to an internal
-  # mirror NOT in the balanced set still gets its rule. Under the `strict` tier
-  # (or `open`) the balanced set is empty, so nothing is elided.
-  if _acq_msb_agent_has_install_recipe "$agent"; then
-    local _npm_host
-    for _npm_host in $ACQ_MSB_NPM_HOSTS; do
-      case "$_npm_host" in
-        ""|*[!A-Za-z0-9.*_-]*)
-          echo "acq(msb): warning: skipping non-hostname npm host: $_npm_host" >&2
-          continue
-          ;;
-      esac
-      # Already covered by a balanced rule? Skip the redundant bare allow.
-      case "$_balanced_hosts" in
-        *" ${_npm_host} "*)
-          acq_debug "msb: npm host ${_npm_host} already in balanced set; skipping redundant rule"
-          continue
-          ;;
-      esac
-      create_flags+=(--net-rule "allow@${_npm_host}")
-    done
-  fi
-
   # TLS interception is REQUIRED for secret substitution: msb only swaps a
   # placeholder for the real value on a connection it can see into (the security
   # docs: "a secret requires intercepted TLS"). Without --tls-intercept the USAi
@@ -2909,6 +3225,16 @@ EOF
   # auto-trusted in the guest, so no extra CA install is needed (verified: plain
   # HTTPS to an intercepted host returns 200). Toggle off only if a deployment
   # cannot use interception (secrets then won't substitute).
+  #
+  # On msb 0.7.3+ that toggle costs more than secret substitution. Upstream turned
+  # `--net-strict` on by default there: a HOSTNAME allow rule is only honored when
+  # msb can inspect the request authority, so non-intercepted HTTPS fails closed
+  # when only a hostname rule permits it. Every rule acq emits for the balanced and
+  # strict tiers is hostname-based, so disabling interception on 0.7.3+ makes those
+  # hosts unreachable outright rather than merely unsubstituted. Left as the user's
+  # call (the knob exists for deployments that cannot intercept), but the escape is
+  # msb's own `--net-strict=false`, not anything acq can decide for them. See
+  # docs/BACKEND_GUIDE.md (balanced egress).
   if [ -z "${ACQ_MSB_NO_TLS_INTERCEPT:-}" ]; then
     create_flags+=(--tls-intercept)
 
@@ -3261,31 +3587,6 @@ EOF
   acq_spin_stop "Preparing the agent user"
   acq_debug "msb provision: agent user ready ($name)"
 
-  # Ensure an OCI container engine (podman) so agents can run OCI images
-  # (docker run / docker compose). Idempotent + marker-gated; FAILS SOFT (a
-  # warning, never aborting provision) if the engine cannot be installed — e.g.
-  # the OS package mirror is unreachable under a narrowed egress. See ADR-0020.
-  acq_debug "msb provision: ensuring OCI engine ($name)"
-  if [ -n "$ACQ_MSB_ENSURE_OCI" ]; then
-    acq_spin_start "Ensuring an OCI engine (podman)"
-    _acq_msb_ensure_oci "$name"
-    acq_spin_stop "Ensuring an OCI engine (podman)"
-  fi
-  acq_debug "msb provision: OCI engine step done ($name)"
-
-  # Install the requested agent binary (sbx bakes it into the template image; on
-  # a plain msb base acq must install it). Idempotent + marker-gated; a no-op for
-  # `shell`, a clear warning for an agent with no known recipe.
-  acq_debug "msb provision: installing agent '$agent' ($name)"
-  if _acq_msb_agent_has_install_recipe "$agent"; then
-    acq_spin_start "Installing the '$agent' agent"
-    _acq_msb_install_agent "$name" "$agent"
-    acq_spin_stop "Installing the '$agent' agent"
-  else
-    _acq_msb_install_agent "$name" "$agent"
-  fi
-  acq_debug "msb provision: agent install step done ($name)"
-
   # Record which agent this sandbox runs, so acq_backend_attach (which only gets
   # the sandbox name) knows what to launch — the sbx equivalent is that
   # `sbx run --name` re-launches the agent baked in at create. Written as root to
@@ -3316,13 +3617,14 @@ EOF
   # abort provision under `set -e` and leave an already-created, agent-installed
   # sandbox half-configured with no diagnostic. Warn and continue — the kits are
   # individually non-fatal (the playbook kit already self-heals on next start),
-  # matching acq_backend_ensure_kits_applied's best-effort heal loop.
+  # matching acq_backend_ensure_kits_applied's best-effort heal loop. Each kit's
+  # commands get the merged env from the pre-pass above.
   local kd
   acq_spin_start "Applying configuration kits"
   _acq_msb_reset_kit_env "$name"
   for kd in "${kitdirs[@]}"; do
     acq_debug "msb provision: applying kit dir $kd ($name)"
-    if _acq_msb_apply_kit_dir "$name" "$kd"; then
+    if _acq_msb_apply_kit_dir "$name" "$kd" _merged_kit_env; then
       acq_debug "msb provision: applied kit dir $kd ($name)"
     else
       echo "acq(msb): warning: kit did not fully apply: $kd" >&2
@@ -3342,7 +3644,7 @@ EOF
   # Record host-side bundle provenance now the built-in bundle is applied.
   # Best-effort: a provenance write failure never affects the
   # sandbox. Reached only when provision did not abort earlier under set -e.
-  acq_provenance_write msb "$name" || true
+  acq_provenance_write msb "$name" "$agent" || true
   acq_workspace_record_write msb "$name" "$_first_host" || true
 
   # Persist the CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs so a later
@@ -3355,168 +3657,6 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# _acq_msb_agent_has_install_recipe AGENT — 0 if acq knows how to install AGENT
-# ---------------------------------------------------------------------------
-# `shell` needs no binary; today only `opencode` has a recipe. Others are baked
-# into ACQ_MSB_IMAGE by the user (warned at install time). Keep this in sync with
-# _acq_msb_install_agent's case.
-_acq_msb_agent_has_install_recipe() {
-  acq_agent_has_msb_install_recipe "$1"
-}
-
-# _acq_msb_safe_agent_token AGENT -> 0 if AGENT is a safe agent token to
-# interpolate into a shell command. Agent tokens are short lowercase names
-# (opencode, claude, shell, …); restrict to [a-z-] so a value can never break
-# out of the `sh -c "command -v '$agent'"` single-quoting (defense against a
-# `acq create "x';…'"` arg or a tampered /var/lib/acq/agent marker). Callers
-# that build an `sh -c` string with $agent MUST gate on this first.
-_acq_msb_safe_agent_token() {
-  acq_agent_safe_token "$1"
-}
-
-# ---------------------------------------------------------------------------
-# _acq_msb_report_npm_install_failure NAME — diagnose a failed in-guest npm
-# install, distinguishing a genuinely-missing npm from an UNREACHABLE registry.
-# ---------------------------------------------------------------------------
-# A network-cut install (corporate TLS interception → curl (56) unexpected eof /
-# HTTP 000, or a resolver that can't see the registry → NXDOMAIN) otherwise reads
-# identically to "node/npm isn't installed", which sends users down the wrong
-# path (reinstalling node on the HOST, which never touches the guest). Probe the
-# actual cause in-guest and print the message that matches it.
-#
-# Branches:
-#   - npm binary absent in-guest      → genuinely-missing message.
-#   - npm present + registry probe:
-#       unresolved (curl exit 6)       → registry name did not resolve; DNS.
-#       unreachable (curl exit / 000)  → TLS/network cut; point at KFM §30.
-#       responded / inconclusive       → registry rejected it or a real npm error.
-# Reuses the shared _classify_key_status fingerprint so the npm path and the
-# USAi path classify curl results identically.
-_acq_msb_report_npm_install_failure() {
-  local name="$1"
-  echo "acq(msb): warning: 'npm install -g $ACQ_MSB_OPENCODE_PKG' failed in '$name'." >&2
-  echo "acq(msb):   opencode will not be available on attach." >&2
-
-  # Is npm actually present in the guest? If not, that is the cause outright.
-  if ! _acq_msb_cli exec "$name" -u 0 -- sh -c 'command -v npm' >/dev/null 2>&1; then
-    echo "acq(msb):   Cause: npm is not present in the guest. Use a base image that" >&2
-    echo "acq(msb):   ships node/npm, or bake opencode into ACQ_MSB_IMAGE." >&2
-    return 0
-  fi
-
-  # npm exists — classify reachability of the registry from INSIDE the guest,
-  # using the same curl `<http_code>|<exit>` fingerprint as the USAi key probe.
-  # Probe the first configured registry host over HTTPS; any HTTP response (even
-  # a 404) proves the connection completed, i.e. NOT a network cut.
-  local _reg _first_host _raw _status
-  _first_host=""
-  for _reg in $ACQ_MSB_NPM_HOSTS; do _first_host="$_reg"; break; done
-  if [ -n "$_first_host" ] && command -v _classify_key_status >/dev/null 2>&1; then
-    _raw=$(_acq_msb_cli exec "$name" -u 0 -- sh -c \
-      "curl -sS -o /dev/null -w '%{http_code}' https://${_first_host}/; printf '|%s' \"\$?\"" \
-      2>/dev/null || true)
-    _status=$(_classify_key_status "$_raw")
-    case "$_status" in
-      unresolved)
-        echo "acq(msb):   Cause: the npm registry host (${_first_host}) did not RESOLVE from" >&2
-        echo "acq(msb):   the guest. This is DNS, not a missing npm. Point the guest at a" >&2
-        echo "acq(msb):   usable resolver via ACQ_MSB_DNS_NAMESERVER, or set ACQ_MSB_NPM_HOSTS" >&2
-        echo "acq(msb):   to a mirror the guest can resolve. See docs/KNOWN_FAILURE_MODES.md §30." >&2
-        return 0
-        ;;
-      unreachable)
-        echo "acq(msb):   Cause: the npm registry host (${_first_host}) is NOT REACHABLE from" >&2
-        echo "acq(msb):   the guest — the connection was cut (TLS 'unexpected eof' / HTTP 000)," >&2
-        echo "acq(msb):   NOT a missing npm. This is a network / TLS-interception problem." >&2
-        echo "acq(msb):   See docs/KNOWN_FAILURE_MODES.md §30 for diagnosis." >&2
-        return 0
-        ;;
-    esac
-  fi
-
-  # npm present and the registry either responded (an HTTP error) or the probe
-  # was inconclusive: give neutral guidance without implying node is missing.
-  echo "acq(msb):   npm is present and the registry appears reachable, so the install" >&2
-  echo "acq(msb):   itself failed (registry rejected the request, disk, or a package" >&2
-  echo "acq(msb):   error). Re-run with ACQ_DEBUG=1 to see npm's output, set" >&2
-  echo "acq(msb):   ACQ_MSB_NPM_HOSTS for an internal mirror, or bake opencode into" >&2
-  echo "acq(msb):   ACQ_MSB_IMAGE." >&2
-  return 0
-}
-
-# ---------------------------------------------------------------------------
-# _acq_msb_install_agent NAME AGENT — install the agent binary into the guest
-# ---------------------------------------------------------------------------
-# sbx's agent templates ship the binary; msb runs a plain base, so acq installs
-# it. For `opencode`, install the npm package globally as root (node is a
-# verified base prerequisite; the registry host was allow-listed at create).
-# Idempotent: skip if the binary is already present (a pre-baked ACQ_MSB_IMAGE),
-# and marker-gate so a re-apply doesn't reinstall. `shell` is a no-op; an unknown
-# agent is a non-fatal warning (the sandbox still comes up; the user can bake the
-# binary into ACQ_MSB_IMAGE).
-_acq_msb_install_agent() {
-  local name="$1" agent="$2"
-
-  case "$agent" in
-    shell|"") acq_debug "msb: agent '$agent' needs no binary install"; return 0 ;;
-  esac
-
-  # Charset-guard the agent token before it enters any `sh -c "… '$agent' …"`.
-  # `acq create <agent> <path>` does not go through is_known_agent, so a hostile
-  # token (e.g. "x';touch /tmp/pwn;'") could otherwise break the single-quoting
-  # and run as root. Refuse anything outside [a-z-].
-  if ! _acq_msb_safe_agent_token "$agent"; then
-    echo "acq(msb): refusing agent name with unexpected characters: '$agent'" >&2
-    return 0
-  fi
-
-  if ! _acq_msb_agent_has_install_recipe "$agent"; then
-    # Maybe the base image already provides it — don't warn if so.
-    if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
-      acq_debug "msb: agent '$agent' already present in base image"
-      return 0
-    fi
-    echo "acq(msb): warning: no install recipe for agent '$agent' and it is not in the" >&2
-    echo "acq(msb):   base image. Attach will fail to launch it. Bake '$agent' into" >&2
-    echo "acq(msb):   ACQ_MSB_IMAGE, or use an agent acq can install (e.g. opencode)." >&2
-    return 0
-  fi
-
-  # Already installed (pre-baked image or a prior apply)? Then done.
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
-    acq_debug "msb: agent '$agent' already installed in $name"
-    return 0
-  fi
-
-  local marker="/var/lib/acq/agent-installed-${agent}"
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  case "$agent" in
-    opencode)
-      acq_debug "msb: installing opencode ($ACQ_MSB_OPENCODE_PKG) via npm in $name"
-      # Install globally as root so the binary lands on the system PATH for every
-      # user (the agent runs as `agent`). The package spec is passed as a single
-      # argv element (never re-split by a shell); ACQ_MSB_OPENCODE_PKG is a
-      # controlled tunable. `npm` is present (node prerequisite). npm needs the
-      # registry host, allow-listed at create.
-      if ! _acq_msb_cli exec "$name" -u 0 -- npm install -g --no-fund --no-audit "$ACQ_MSB_OPENCODE_PKG" >/dev/null 2>&1; then
-        _acq_msb_report_npm_install_failure "$name"
-        return 0
-      fi
-      ;;
-  esac
-
-  # Verify the binary is now on PATH before recording the marker.
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
-    _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
-    acq_debug "msb: agent '$agent' installed and on PATH in $name"
-  else
-    echo "acq(msb): warning: installed '$agent' but it is not on PATH in '$name'." >&2
-  fi
-}
-
 # ---------------------------------------------------------------------------
 # _acq_msb_ensure_agent_user NAME — satisfy the sbx/Docker base-image contract
 # ---------------------------------------------------------------------------
@@ -3637,13 +3777,15 @@ _acq_msb_ensure_agent_user() {
 # /bin/sh otherwise — a stock bash-less image keeps working exactly as today.
 # Also writes a Debian-skel-style ~/.profile bridge: a LOGIN bash reads only
 # ~/.profile, so without the bridge even `bash -l` skips ~/.bashrc on images
-# whose baked home ships no ~/.profile. The bare `export SHELL=/bin/sh` line
-# earlier acq versions appended is removed wherever it appears (it stopped a
-# login bash cold); a ~/.profile with any other content is left alone (image/
-# user-owned — Debian's own skel already bridges). Idempotent and re-run on
-# every provision AND heal (even on an agent-user-ready marker hit), which is
-# what upgrades sandboxes created before this setup. Fail-soft: a sync failure
-# leaves sessions on the /bin/sh fallback, never blocks the run.
+# whose baked home ships no ~/.profile. The bridge also sources kit-owned
+# ~/.rc.d/*.sh snippets for bash in deterministic lexical order. The bare
+# `export SHELL=/bin/sh` line earlier acq versions appended is removed wherever
+# it appears (it stopped a login bash cold); a ~/.profile with any other content
+# is left alone (image/user-owned — Debian's own skel already bridges).
+# Idempotent and re-run on every provision AND heal (even on an agent-user-ready
+# marker hit), which is what upgrades sandboxes created before this setup.
+# Fail-soft: a sync failure leaves sessions on the /bin/sh fallback, never blocks
+# the run.
 _acq_msb_ensure_agent_shell() {
   local name="$1" shell
   # Probe for bash host-side so the target is decided once and threaded to the
@@ -3653,7 +3795,9 @@ _acq_msb_ensure_agent_shell() {
   shell=$(_acq_msb_safe_shell_or_sh "$shell")
   acq_debug "msb: syncing agent login shell to $shell in $name"
   # NOTE: single-quoted `sh -c` string — no single quotes inside (they would
-  # close the outer quote); `echo` writes the profile lines for the same reason.
+  # close the outer quote). The rc.d-sourcing block IS single-quote-bearing, but
+  # it is passed as a positional arg ($2), never interpolated into this string,
+  # so its quoting is inert here. `echo`/`printf` write the profile lines.
   #
   # The bridge exports the shell passwd ACTUALLY holds after the sync attempt
   # (re-read into `current`), not the requested target: an image with bash but
@@ -3661,12 +3805,30 @@ _acq_msb_ensure_agent_shell() {
   # about the shell sessions really run.
   #
   # The rewrite is bounded to a file acq owns outright: missing/empty, or the
-  # marker present AND still just the bridge (3 lines). Lines other tools
-  # append below the bridge (rustup et al) must survive the heal, so a
-  # marker-plus-appended file is left untouched.
+  # marker present AND still just the bridge (the header lines + shared rc-block
+  # line count, computed host-side). Lines other tools append below the bridge
+  # (rustup et al) must survive the heal, so a marker-plus-appended file is left
+  # untouched.
+  # The rc.d-sourcing block is the ONE shared bridge text from common.sh
+  # (acq_login_profile_rc_block); it is threaded to the guest as $2 so the sbx
+  # and msb bridges cannot silently drift (ADR-0030). The guest writes the 3
+  # fixed header lines + the shared block via a single here-doc-free `printf`,
+  # then re-owns the file to the agent. `_acq_rc_block` is captured host-side so
+  # the guest receives it as inert data (never re-expanded on the host).
+  local _acq_rc_block
+  _acq_rc_block=$(acq_login_profile_rc_block)
+  # Rewrite bound: 3 fixed header lines + the shared block's line count. Counted
+  # host-side so the "still just the bridge acq owns" heal guard stays exact if
+  # the shared block grows (rather than a hard-coded literal that would silently
+  # go stale). Appended lines below the bridge (rustup et al) push the total
+  # past this bound and are left untouched.
+  local _acq_bridge_lines
+  _acq_bridge_lines=$(( 3 + $(printf '%s\n' "$_acq_rc_block" | wc -l) ))
   _acq_msb_cli exec "$name" -u 0 -- sh -c '
     set -e
     target="$1"
+    rc_block="$2"
+    max_lines="$3"
     current=$({ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; } | head -n1 | cut -d: -f7)
     if [ "$current" != "$target" ]; then
       if command -v usermod >/dev/null 2>&1; then
@@ -3681,16 +3843,17 @@ _acq_msb_ensure_agent_shell() {
     if [ -f "$profile" ]; then
       sed -i "\|^export SHELL=/bin/sh\$|d" "$profile" 2>/dev/null || true
     fi
-    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le 3 ]; }; then
+    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le "$max_lines" ]; }; then
       {
-        echo "# acq-login-profile: written by acq (rewritten on heal; do not edit these 3 lines)."
+        echo "# acq-login-profile: written by acq (rewritten on heal; do not edit this block)."
         echo "export SHELL=$current"
         echo "if [ -n \"\$BASH_VERSION\" ] && [ -f \"\$HOME/.bashrc\" ]; then . \"\$HOME/.bashrc\"; fi"
+        printf "%s\n" "$rc_block"
       } > "$profile"
       _agrp=$(id -gn agent 2>/dev/null || echo agent)
       chown "agent:${_agrp}" "$profile"
     fi
-  ' sh "$shell" </dev/null >/dev/null 2>&1 || {
+  ' sh "$shell" "$_acq_rc_block" "$_acq_bridge_lines" </dev/null >/dev/null 2>&1 || {
     echo "acq(msb): warning: could not sync the agent login shell in '$name';" >&2
     echo "acq(msb):   interactive sessions fall back to /bin/sh." >&2
     return 0
@@ -3815,8 +3978,8 @@ _acq_msb_check_socat() {
 # exposes the forwarded host ssh-agent as a unix socket at
 # ACQ_MSB_SSH_AGENT_GUEST_SOCK. The --vsock route persists across msb stop/start,
 # but the socat process dies on stop, so this runs on provision AND on
-# acq_backend_start (mirrors _acq_msb_grant_oci_devs). Fail-soft: warns, never
-# aborts. Works from EITHER the in-provision flag OR the persisted marker (start
+# acq_backend_start. Fail-soft: warns, never aborts. Works from EITHER the
+# in-provision flag OR the persisted marker (start
 # has no provision flag set), so the guest sock path is resolved from whichever
 # source is authoritative for the call. See ADR-0021.
 _acq_msb_start_ssh_agent_bridge() {
@@ -3973,18 +4136,17 @@ EOF
   ' </dev/null >/dev/null 2>&1 || true
 }
 
-# _acq_msb_kit_env_flags_into ARRVAR NAME — build the `-e NAME=value` flag array
-# for the kit environment[] entries persisted at /var/lib/acq/kit-env by
-# _acq_msb_apply_kit_dir, so every session path (run/attach/shell) sees the env
-# the kits declared for agent runtime (see ADR-0011). Empty array when no kit
-# declared environment[]. Array passed by name (bash 3.2 compat).
+# _acq_msb_persisted_kit_env_into ARRVAR NAME — read the kit environment[] entries
+# persisted at /var/lib/acq/kit-env by _acq_msb_apply_kit_dir into the array named
+# ARRVAR as NAME=value tokens (see ADR-0011). Empty array when the marker is
+# absent or no kit declared environment[]. Array passed by name (bash 3.2 compat).
 #
 # The marker is root-owned but its content is kit-derived guest data: re-validate
 # each NAME (same ^[A-Za-z_][A-Za-z0-9_]*$ charset kit_spec_env enforces) so a
 # tampered line cannot smuggle an option-shaped or quote-bearing token, and keep
 # the LAST value for a duplicate name (kits append in application order, so a
 # later kit overrides an earlier one).
-_acq_msb_kit_env_flags_into() {
+_acq_msb_persisted_kit_env_into() {
   local _arrn="$1" _name="$2"
   eval "$_arrn=()"
   # Failure-guarded: an absent marker (pre-kit-env sandbox, or no kit declared
@@ -3997,7 +4159,7 @@ _acq_msb_kit_env_flags_into() {
   local _line
   while IFS= read -r _line; do
     [ -n "$_line" ] || continue
-    eval "$_arrn+=(-e \"\$_line\")"
+    eval "$_arrn+=(\"\$_line\")"
   done <<EOF
 $(printf '%s\n' "$_kvs" | awk '
   {
@@ -4011,6 +4173,21 @@ $(printf '%s\n' "$_kvs" | awk '
   END { for (j = 1; j <= n; j++) printf "%s=%s\n", order[j], v[order[j]] }
 ')
 EOF
+}
+
+# _acq_msb_kit_env_flags_into ARRVAR NAME — build the `-e NAME=value` flag array
+# for the persisted kit environment[] entries, so every session path
+# (run/attach/shell) sees the env the kits declared for agent runtime (see
+# ADR-0011). Thin `-e` wrapper over _acq_msb_persisted_kit_env_into (which owns
+# the marker read, the tampered-name re-validation, and last-value-wins).
+_acq_msb_kit_env_flags_into() {
+  local _arrn="$1" _name="$2"
+  eval "$_arrn=()"
+  local _tok=() _ev
+  _acq_msb_persisted_kit_env_into _tok "$_name"
+  for _ev in ${_tok[@]+"${_tok[@]}"}; do
+    eval "$_arrn+=(-e \"\$_ev\")"
+  done
 }
 
 # _acq_msb_ensure_ssh_agent_forward NAME — (re)establish the host ssh-agent
@@ -4109,253 +4286,6 @@ _acq_msb_has_ssh_agent_vsock_route() {
 }
 
 # ---------------------------------------------------------------------------
-# _acq_msb_grant_oci_devs NAME — grant the agent access to the device nodes
-#                                rootless podman needs (/dev/net/tun, /dev/fuse)
-# ---------------------------------------------------------------------------
-# Rootless podman needs unprivileged access to two root-only device nodes on the
-# default image:
-#   - /dev/net/tun (crw------- root root): the network backend (netavark→pasta,
-#     or slirp4netns) must open it to set up container networking.
-#   - /dev/fuse (crw------- root root): the fuse-overlayfs storage driver (our
-#     PREFERRED driver on the overlay root) must open it to mount image layers.
-#     Without it `podman info` still passes but `podman run` fails at mount time
-#     with "fuse: failed to open /dev/fuse: Permission denied" — the exact
-#     info-OK-but-run-FAILS split seen on the host.
-# Group-scope each to the agent (chown root:agent, chmod 0660) — inside the
-# microVM only (the security boundary), narrower than world-writable, no new host
-# attack surface.
-#
-# Called on EVERY provision pass (before the OCI install marker gate) AND on
-# restart (acq_backend_start), because /dev is a devtmpfs re-created at each boot
-# — a one-time grant would be lost after `msb start`. Idempotent, cheap, and a
-# best-effort no-op for any device that is absent or when ENSURE_OCI is disabled.
-_acq_msb_grant_oci_devs() {
-  local name="$1"
-  [ -n "$ACQ_MSB_ENSURE_OCI" ] || return 0
-  _acq_msb_cli exec "$name" -u 0 -- sh -c '
-    for _dev in /dev/net/tun /dev/fuse; do
-      if [ -e "$_dev" ]; then
-        chown root:agent "$_dev" 2>/dev/null || true
-        chmod 0660 "$_dev" 2>/dev/null || true
-      fi
-    done' \
-    >/dev/null 2>&1 || true
-}
-
-# ---------------------------------------------------------------------------
-# _acq_msb_ensure_oci NAME — ensure an OCI container engine (podman) is usable
-# ---------------------------------------------------------------------------
-# Guarantee agents can run OCI images inside the sandbox (`docker run`,
-# `docker compose up`, etc.). See the ACQ_MSB_ENSURE_OCI block above for the
-# rationale (podman over dind; ROOTLESS podman run as the agent user; alias
-# docker->podman). This step is idempotent + marker-gated and FAILS SOFT: if the
-# engine cannot be provisioned (mirror unreachable under a narrowed egress,
-# unknown package manager, rootless prereqs absent, etc.) it warns and returns 0
-# — provision continues, OCI is simply unavailable, exactly like the
-# agent-install and prereq-check steps. The package INSTALL runs as root
-# (`-u 0`, needed to install), but the engine RUNS rootless as the agent user.
-_acq_msb_ensure_oci() {
-  local name="$1"
-  [ -n "$ACQ_MSB_ENSURE_OCI" ] || return 0
-
-  # Grant the rootless-podman device nodes (/dev/net/tun for networking,
-  # /dev/fuse for the fuse-overlayfs storage driver) on EVERY provision pass,
-  # BEFORE the install-marker short-circuit below. /dev is a devtmpfs re-created
-  # each boot, so this must not be gated behind the (persistent) install marker,
-  # and it is also re-applied on restart from acq_backend_start.
-  _acq_msb_grant_oci_devs "$name"
-
-  local marker="/var/lib/acq/oci-ready"
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  # ACQ_MSB_PODMAN_PKGS is operator-controlled config, but it is interpolated
-  # into a root `sh -c` string below, so charset-guard it (package names are
-  # word-safe: letters, digits, . _ + - and spaces). Refuse anything else rather
-  # than risk shell injection into the elevated install.
-  case "$ACQ_MSB_PODMAN_PKGS" in
-    *[!A-Za-z0-9._+\ -]*)
-      echo "acq(msb): warning: ACQ_MSB_PODMAN_PKGS contains unsafe characters; skipping OCI setup." >&2
-      return 0
-      ;;
-  esac
-
-  acq_debug "msb: ensuring an OCI engine (podman) in $name"
-
-  # Root setup phase: install podman if absent (distro-detected, non-interactive),
-  # configure a storage driver that works on msb's overlay root, grant the agent
-  # access to /dev/net/tun (rootless networking needs it), write a Docker-Hub-first
-  # registries config, and wire the docker->podman alias. The engine itself RUNS
-  # ROOTLESS as the agent (verified separately, below) — only this install/config
-  # phase needs root. The whole block is best-effort; a non-zero exit is caught
-  # below and treated as non-fatal.
-  #
-  # The default image ships a (non-functional) docker CLI, so rather than gate on
-  # its absence we place our wrapper in /usr/local/bin (ahead of /usr/bin on the
-  # default PATH) to SHADOW it — the bundled docker talks to a dead socket,
-  # whereas our wrapper routes to the working podman engine. We overwrite our own
-  # wrapper idempotently but never touch the base image's /usr/bin/docker.
-  #
-  # STORAGE DRIVER: msb's sandbox root filesystem is itself an overlay mount
-  # (/.msb/rootfs/...). podman's default KERNEL `overlay` graph driver CANNOT stack
-  # on an overlay root — `podman info` fails with "'overlay' is not supported over
-  # overlayfs, a mount_program is required". This applies to BOTH rootful and
-  # rootless. So we write /etc/containers/storage.conf (honored by rootless as its
-  # lowest-precedence source) selecting a driver that works on an overlay root:
-  #   - PREFER `overlay` + `mount_program=fuse-overlayfs` when fuse-overlayfs is
-  #     present (msb provides /dev/fuse; this is the fast, thin-on-disk path), else
-  #   - FALL BACK to `vfs`, which works everywhere with no extra package or
-  #     /dev/fuse (correct but disk-heavy — full copy per layer).
-  #
-  # ROOTLESS NETWORKING: rootless podman's network backend (netavark→pasta, or
-  # slirp4netns) must open /dev/net/tun, which is root-only (crw------- root root)
-  # on the default image. We group-scope it to the agent (chown root:agent, 0660)
-  # so the unprivileged agent can set up container networking. This is inside the
-  # microVM only (the security boundary) — no new host attack surface. Applied on
-  # EVERY provision pass (outside the install marker gate) because the device node
-  # can be re-created with default perms across restarts.
-  #
-  # REGISTRY RESOLUTION (Docker-Hub-first, ADR-0020): stock podman resolves many
-  # unadorned short names to quay.io (e.g. `hello-world` -> quay.io/podman/hello)
-  # and has no default unqualified search registry. Users migrating from Docker
-  # assume `docker run nginx` means Docker Hub. So we write a system
-  # registries.conf setting unqualified-search-registries=["docker.io"] +
-  # short-name-mode="$SHORT_NAME_MODE", and a shortnames drop-in remapping the
-  # podman `hello`/`hello-world` aliases back to docker.io/library/hello-world.
-  # This diverges from stock podman deliberately to reduce migration burden.
-  #
-  # SHORT-NAME MODE (PR #302 review): the default is "enforcing", NOT permissive.
-  # Because there is a single search registry (docker.io), unqualified names STILL
-  # resolve deterministically to Docker Hub — migration ergonomics are preserved.
-  # "enforcing" only fails closed on interactively-ambiguous short names instead
-  # of silently resolving them, which is the least-privilege / prompt-injection
-  # defense a federal sandbox wants: an injected `docker run nginx` cannot be
-  # silently substituted (typosquatting / image substitution) without a qualified
-  # name or an explicit alias. Operators MAY opt into "permissive" (removing that
-  # guardrail) via ACQ_MSB_SHORT_NAME_MODE; see the env-var comment above.
-  #
-  # We add fuse-overlayfs + the rootless prereqs (uidmap, passt, slirp4netns) to
-  # the install set so the preferred path is available on the default (apt) image;
-  # if the mirror lacks fuse-overlayfs the vfs fallback still yields a working
-  # engine.
-  if _acq_msb_cli exec "$name" -u 0 -e "PODMAN_PKGS=$ACQ_MSB_PODMAN_PKGS" -e "SHORT_NAME_MODE=$ACQ_MSB_SHORT_NAME_MODE" -- sh -c '
-    set -e
-    # 1) Ensure the podman binary is present (idempotent).
-    if ! command -v podman >/dev/null 2>&1; then
-      if command -v apt-get >/dev/null 2>&1; then
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update
-        # shellcheck disable=SC2086
-        apt-get install -y --no-install-recommends $PODMAN_PKGS
-      elif command -v dnf >/dev/null 2>&1; then
-        # shellcheck disable=SC2086
-        dnf install -y $PODMAN_PKGS
-      elif command -v apk >/dev/null 2>&1; then
-        # shellcheck disable=SC2086
-        apk add --no-cache $PODMAN_PKGS
-      else
-        echo "acq(msb): no supported package manager (apt-get/dnf/apk) to install podman" >&2
-        exit 1
-      fi
-    fi
-    # 2) Select a storage driver that works on msb'"'"'s overlay root. Only write
-    #    the config if we have not already (idempotent); do not clobber an operator
-    #    file that already names a driver. Prefer fuse-overlayfs, else vfs.
-    if ! grep -q '"'"'^[[:space:]]*driver'"'"' /etc/containers/storage.conf 2>/dev/null; then
-      mkdir -p /etc/containers
-      _fuse=""
-      for _c in /usr/bin/fuse-overlayfs /usr/local/bin/fuse-overlayfs /bin/fuse-overlayfs; do
-        [ -x "$_c" ] && _fuse="$_c" && break
-      done
-      if [ -z "$_fuse" ] && command -v fuse-overlayfs >/dev/null 2>&1; then
-        _fuse=$(command -v fuse-overlayfs)
-      fi
-      if [ -n "$_fuse" ] && [ -e /dev/fuse ]; then
-        printf "[storage]\ndriver = \"overlay\"\n[storage.options.overlay]\nmount_program = \"%s\"\n" "$_fuse" \
-          > /etc/containers/storage.conf
-      else
-        printf "[storage]\ndriver = \"vfs\"\n" > /etc/containers/storage.conf
-      fi
-    fi
-    # 3) Grant the agent access to /dev/net/tun + /dev/fuse for rootless podman —
-    #    handled by _acq_msb_grant_oci_devs (called un-gated above AND on restart),
-    #    NOT here, because /dev is a devtmpfs re-created each boot: a grant baked
-    #    behind the install marker would be lost after `msb start`. (No-op here.)
-    # 4) Docker-Hub-first registry resolution (ADR-0020). System-level so it
-    #    applies to the rootless agent (read as the lowest-precedence source).
-    #    Idempotent: overwrite our own files each pass.
-    mkdir -p /etc/containers/registries.conf.d
-    printf "unqualified-search-registries = [\"docker.io\"]\nshort-name-mode = \"$SHORT_NAME_MODE\"\n" \
-      > /etc/containers/registries.conf.d/00-acq-docker-first.conf
-    printf "[aliases]\n\"hello-world\" = \"docker.io/library/hello-world\"\n\"hello\" = \"docker.io/library/hello-world\"\n" \
-      > /etc/containers/registries.conf.d/01-acq-shortnames.conf
-    # 5) Alias docker -> podman in /usr/local/bin (ahead of /usr/bin on PATH), so
-    #    `docker run …` and `docker compose …` route to the podman engine. A tiny
-    #    exec wrapper (not a symlink) so `docker compose` -> `podman compose`
-    #    dispatches through podman'"'"'s compose provider (podman-compose).
-    #    Plain `podman` (NOT sudo): the engine runs ROOTLESS as the agent user, so
-    #    the agent invokes podman directly. The heredoc is FLUSH-LEFT so the
-    #    shebang is not indented; `\$@` is escaped so the guest writes the LITERAL
-    #    `"$@"` into the wrapper.
-    mkdir -p /usr/local/bin
-    cat > /usr/local/bin/docker <<EOF
-#!/bin/sh
-exec podman "\$@"
-EOF
-    chmod 0755 /usr/local/bin/docker
-  ' >/dev/null 2>&1; then
-    # Root setup succeeded. Now VERIFY the engine works ROOTLESS as the agent user
-    # — the way agents actually use it. A bare `podman info` as root would prove
-    # the wrong thing (rootful), so we probe as the agent. CRUCIALLY we do more
-    # than `podman info`: info does NOT open /dev/fuse or mount a layer, so it
-    # passes even when the fuse-overlayfs storage mount would fail (the exact
-    # /dev/fuse-permission trap). We therefore verify with a real LAYER MOUNT: a
-    # `podman build` FROM scratch (no registry pull, no egress). If it fails with
-    # the configured driver, the agent forces a USER-level vfs storage.conf and
-    # retries once (covers a base whose overlay+fuse combo is still rejected under
-    # rootless). Only a successful build writes the ready marker.
-    if _acq_msb_cli exec "$name" -u agent -e HOME=/home/agent -- sh -c '
-      _oci_selftest() {
-        d=$(mktemp -d) || return 1
-        printf "FROM scratch\nCOPY hi /hi\n" > "$d/Containerfile"
-        echo hi > "$d/hi"
-        podman build -q -t acq-oci-selftest:local "$d" >/dev/null 2>&1
-        rc=$?
-        podman rmi -f acq-oci-selftest:local >/dev/null 2>&1 || true
-        rm -rf "$d"
-        return $rc
-      }
-      _oci_selftest && exit 0
-      # Retry once with a user-level vfs storage.conf (overlay+fuse rejected).
-      mkdir -p "$HOME/.config/containers"
-      printf "[storage]\ndriver = \"vfs\"\n" > "$HOME/.config/containers/storage.conf"
-      _oci_selftest
-    ' >/dev/null 2>&1; then
-      # Best-effort: mark ready so we do not re-run the (network-bound) install on
-      # every provision/restart. (The /dev/net/tun grant and config writes above
-      # are cheap + idempotent and re-run each pass regardless of this marker.)
-      _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
-      acq_debug "msb: OCI engine (rootless podman) ready in $name"
-      return 0
-    fi
-  fi
-
-  # Fail soft (ADR-0020 / the balanced-egress-off case). Name the mirror hosts and
-  # the rootless prereqs so the operator can allow-list / bake them into ACQ_MSB_IMAGE.
-  echo "acq(msb): warning: could not provision an OCI engine (rootless podman) in '$name'." >&2
-  echo "acq(msb):   Agents will not be able to run OCI images (docker run / docker compose)." >&2
-  echo "acq(msb):   Most likely the OS package mirror is unreachable: the default balanced" >&2
-  echo "acq(msb):   egress (ADR-0018) allows it, but ACQ_NETWORK_TIER=strict or a narrowed" >&2
-  echo "acq(msb):   custom base blocks archive.ubuntu.com / ports.ubuntu.com / *.debian.org," >&2
-  echo "acq(msb):   or the rootless prereqs (podman, fuse-overlayfs, uidmap, passt," >&2
-  echo "acq(msb):   slirp4netns) could not be installed / rootless podman could not start." >&2
-  echo "acq(msb):   Bake those into ACQ_MSB_IMAGE, widen egress, or set ACQ_MSB_ENSURE_OCI=0" >&2
-  echo "acq(msb):   to silence this warning." >&2
-  return 0
-}
-
-# ---------------------------------------------------------------------------
 # Session context shared by exec/attach/shell
 # ---------------------------------------------------------------------------
 # sbx is a full session transport, so cwd, terminal identity, and the login
@@ -4366,6 +4296,17 @@ EOF
 # note there). Module scope so the first run primes it for every later run.
 _ACQ_MSB_RUN_WS_NAME=""
 _ACQ_MSB_RUN_WS=""
+
+acq_backend_recorded_agent() {
+  local name="$1" agent
+  agent=$(acq_provenance_field msb "$name" agent)
+  if [ -z "$agent" ]; then
+    agent=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '[:space:]')
+  fi
+  if [ -n "$agent" ] && acq_agent_safe_token "$agent"; then
+    printf '%s\n' "$agent"
+  fi
+}
 
 # _acq_msb_workspace_for NAME — the guest workspace a session starts in (-w).
 # Prefer an explicit ACQ_MSB_WORKSPACE override; otherwise the guest path
@@ -4390,6 +4331,10 @@ _acq_msb_workspace_for() {
   fi
   [ -n "$ws" ] || ws="/home/agent"
   printf '%s\n' "$ws"
+}
+
+acq_backend_workspace_for() {
+  _acq_msb_workspace_for "$1"
 }
 
 # _acq_msb_term_flags_into ARRVAR — `-e` flags forwarding the host's terminal
@@ -4480,8 +4425,17 @@ acq_backend_run() {
     _ACQ_MSB_RUN_WS_NAME="$name"
     _ACQ_MSB_RUN_WS="$ws"
   fi
-  _acq_msb_cli exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
-    ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_session_is_user >/dev/null 2>&1 && acq_session_is_user \
+      && command -v acq_guest_exec_script >/dev/null 2>&1 && [ "${1:-}" = "--" ]; then
+    shift
+    _acq_msb_cli exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
+      ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} \
+      -e "ACQ_WORKSPACE=$ws" "$name" -- sh -c "$(acq_guest_exec_script)" sh "$@"
+  else
+    _acq_msb_cli exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
+      ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -4538,7 +4492,7 @@ _acq_msb_attach() {
   # plain shell on anything unexpected.
   local agent
   agent=$({ _acq_msb_cli exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '[:space:]')
-  if [ -z "$agent" ] || ! _acq_msb_safe_agent_token "$agent"; then
+  if [ -z "$agent" ] || ! acq_agent_safe_token "$agent"; then
     agent="shell"
   fi
 
@@ -4579,9 +4533,17 @@ _acq_msb_attach() {
 
   local shell
   shell=$(_acq_msb_agent_passwd_shell "$name")
-  MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
-    ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
-    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_guest_exec_script >/dev/null 2>&1; then
+    MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} -e "ACQ_WORKSPACE=$ws" "$name" -- sh -c \
+      "$(acq_guest_exec_script)" sh "$agent" "$@"
+  else
+    MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
+  fi
 }
 
 # _acq_msb_shell_exec NAME [WS] — exec into an interactive login shell as the
@@ -4603,9 +4565,17 @@ _acq_msb_shell_exec() {
   _acq_msb_git_identity_env_flags_into _gitident
   _acq_msb_kit_env_flags_into _kitenv "$name"
   _acq_msb_term_flags_into _term
-  MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
-    ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
-    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$shell" -l
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_guest_shell_script >/dev/null 2>&1; then
+    MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} -e "ACQ_WORKSPACE=$ws" "$name" -- sh -c \
+      "$(acq_guest_shell_script)" sh "$shell"
+  else
+    MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$shell" -l
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -4900,9 +4870,8 @@ _acq_msb_serve_start() {
 # known_hosts under acq state (accept-new against the ephemeral loopback listener).
 # Publishes the live ssh PID in _ACQ_MSB_LAST_BG_PID. Returns non-zero if the
 # forward dies within the settle window (ExitOnForwardFailure makes ssh exit fast
-# when the local bind/forward fails), so a failed tunnel is never reported as a
-# successful publish. Best-effort liveness probe (see _acq_msb_serve_start): a
-# forward that dies just after the settle window will still be recorded.
+# when the local bind/forward fails), or if the requested host listener is not
+# reachable after startup. This avoids recording a dead/non-listening tunnel.
 _acq_msb_forward_start() {
   local sport="$1" hport="$2" gport="$3"
   if ! command -v ssh >/dev/null 2>&1; then
@@ -4913,10 +4882,14 @@ _acq_msb_forward_start() {
   # -o IdentitiesOnly=yes: use ONLY the acq -i key, so a loaded agent/other keys
   #   can't burn MaxAuthTries before it. -F none: ignore the user's ~/.ssh/config
   #   so the loopback tunnel is hermetic and cannot be altered out from under acq.
-  ssh -p "$sport" -N \
+  # -n / BatchMode / NumberOfPasswordPrompts=0: fail closed instead of hanging or
+  #   staying alive while waiting for interactive auth on a backgrounded tunnel.
+  ssh -p "$sport" -N -n \
     -F none \
     -i "$ACQ_MSB_SSH_KEY" \
     -o IdentitiesOnly=yes \
+    -o BatchMode=yes \
+    -o NumberOfPasswordPrompts=0 \
     -o StrictHostKeyChecking=accept-new \
     -o "UserKnownHostsFile=${ACQ_MSB_SSH_KNOWN_HOSTS}" \
     -o ExitOnForwardFailure=yes \
@@ -4926,11 +4899,30 @@ _acq_msb_forward_start() {
   command sleep "${ACQ_MSB_FORWARD_SETTLE:-1}" 2>/dev/null || sleep "${ACQ_MSB_FORWARD_SETTLE:-1}"
   if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid" 2>/dev/null || true
-    echo "acq(msb): ports: ssh -L 127.0.0.1:${hport} -> 127.0.0.1:${gport} failed to establish (forward rejected or bind in use)." >&2
+    echo "acq(msb): ports: ssh -L 127.0.0.1:${hport} -> 127.0.0.1:${gport} failed to establish (forward rejected, auth failed, or bind in use)." >&2
+    return 1
+  fi
+  if ! _acq_msb_forward_listener_ready "$hport"; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    echo "acq(msb): ports: ssh -L did not open host listener 127.0.0.1:${hport}." >&2
     return 1
   fi
   _ACQ_MSB_LAST_BG_PID="$pid"
   return 0
+}
+
+_acq_msb_forward_listener_ready() {
+  local port="$1" attempts="${ACQ_MSB_FORWARD_PROBE_ATTEMPTS:-20}" delay="${ACQ_MSB_FORWARD_PROBE_DELAY:-0.1}" i=0
+  while [ "$i" -lt "$attempts" ]; do
+    # shellcheck disable=SC3025
+    if ( : >"/dev/tcp/127.0.0.1/${port}" ) >/dev/null 2>&1; then
+      return 0
+    fi
+    i=$(( i + 1 ))
+    command sleep "$delay" 2>/dev/null || sleep "$delay"
+  done
+  return 1
 }
 
 # _acq_msb_ports_pidfile NAME — echo the per-sandbox PID state file path, but ONLY
@@ -5101,7 +5093,48 @@ acq_backend_apply_kit() {
     echo "acq(msb): note: this kit declares volumes:, which apply at CREATE time only —" >&2
     echo "acq(msb):   this apply skips them. Recreate the sandbox (acq rm && acq run) to mount them." >&2
   fi
+  # No merged-env array on purpose: a mid-life apply knows only THIS kit, so
+  # _acq_msb_apply_kit_dir uses its persisted-marker fallback (see its step 3).
   _acq_msb_apply_kit_dir "$name" "$kitdir"
+}
+
+# _acq_msb_heal_kit_set NAME BUILTIN_COUNT KITREF... — the heal's kit loop: fetch
+# every ref, merge their environment[] in a pre-pass (see
+# _acq_msb_merge_kit_env_into for why fetch and apply must be separate loops),
+# reset the marker, then apply each kit with that merged env. Returns 1 if any of
+# the first BUILTIN_COUNT refs failed to fetch or apply (the caller's provenance
+# verdict), 0 otherwise. _builtin mirrors _dirs so a built-in's apply failure stays
+# attributable across the two loops.
+_acq_msb_heal_kit_set() {
+  local name="$1" builtin_count="$2"
+  shift 2
+  local kitref kitdir i=0 ok=1
+  local _dirs=() _builtin=()
+  for kitref in "$@"; do
+    if kitdir=$(_acq_msb_fetch_kit "$kitref"); then
+      _dirs+=("$kitdir")
+      if [ "$i" -lt "$builtin_count" ]; then _builtin+=(1); else _builtin+=(0); fi
+    else
+      echo "acq(msb): warning: could not fetch kit for healing: $kitref" >&2
+      # A built-in kit that can't even be fetched means we cannot claim the
+      # bundle is current. Extra-kit fetch failures don't affect the verdict.
+      [ "$i" -lt "$builtin_count" ] && ok=0
+    fi
+    i=$((i + 1))
+  done
+  local _merged=() _specs=()
+  for kitdir in ${_dirs[@]+"${_dirs[@]}"}; do
+    _specs+=("${kitdir}/spec.yaml")
+  done
+  _acq_msb_merge_kit_env_into _merged ${_specs[@]+"${_specs[@]}"}
+  _acq_msb_reset_kit_env "$name"
+  local _ki
+  for _ki in ${_dirs[@]+"${!_dirs[@]}"}; do
+    if ! _acq_msb_apply_kit_dir "$name" "${_dirs[$_ki]}" _merged; then
+      [ "${_builtin[$_ki]}" -eq 1 ] && ok=0
+    fi
+  done
+  [ "$ok" -eq 1 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -5153,48 +5186,23 @@ acq_backend_ensure_kits_applied() {
   # passwd-shell setup existed. Best-effort like the rest of the heal.
   _acq_msb_ensure_agent_user "$name" || \
     echo "acq(msb): warning: agent-user heal failed for '$name'." >&2
-  local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
-  local builtin_count="${#kits[@]}"
-  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
-    local _extras=()
-    split_noglob _extras "$ACQ_EXTRA_KITS"
-    kits+=("${_extras[@]}")
-  fi
-  # CLI-supplied `--kit <ref>` refs (ACQ_CLI_KITS) MUST be healed too, exactly as
-  # the provision path folds them in (see acq_backend_provision's kit assembly).
-  # These kits' STARTUP-phase commands (e.g. openchamber's supervisor loops for
-  # the shared `opencode serve` and the web UI) are re-run only by this heal —
-  # `msb start` alone does not replay them (ADR-0017). Omitting them here meant a
-  # resumed/rebooted sandbox came back with the create-time `-p` port mappings
-  # intact but NOTHING listening behind them, because the kit's startup was never
-  # re-run: `acq ports` showed the ports mapped while the services were dead. Fold
-  # ACQ_CLI_KITS in so `acq run --kit … <existing-sandbox>` heals its full kit set.
-  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
-    kits+=("${ACQ_CLI_KITS[@]}")
-  fi
+  # Rebuild after any persisted refs were loaded by the dispatcher. CLI-supplied
+  # `--kit <ref>` refs must be healed too, exactly as the provision path folds
+  # them in, so resumed kit services come back with their startup re-run.
+  local agent
+  agent=$(acq_backend_recorded_agent "$name")
+  _acq_msb_select_kits "$agent"
+  local kits=("${KITS[@]}")
+  local builtin_count="${ACQ_BUILTIN_KIT_COUNT:-4}"
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"
-  _acq_msb_reset_kit_env "$name"
-  for kitref in "${kits[@]}"; do
-    kitdir=$(_acq_msb_fetch_kit "$kitref") || {
-      echo "acq(msb): warning: could not fetch kit for healing: $kitref" >&2
-      # A built-in kit that can't even be fetched means we cannot claim the
-      # bundle is current. Extra-kit fetch failures don't affect the verdict.
-      [ "$i" -lt "$builtin_count" ] && ok=0
-      i=$((i + 1))
-      continue
-    }
-    if ! _acq_msb_apply_kit_dir "$name" "$kitdir"; then
-      [ "$i" -lt "$builtin_count" ] && ok=0
-    fi
-    i=$((i + 1))
-  done
+  _acq_msb_heal_kit_set "$name" "$builtin_count" "${kits[@]}" || ok=0
   acq_spin_stop "Refreshing configuration kits"
   # Record host-side bundle provenance ONLY when every built-in kit applied.
   # msb re-applies all built-in kits idempotently, so on full
   # success the sandbox carries the currently pinned bundle. Best-effort write.
   if [ "$ok" -eq 1 ]; then
-    acq_provenance_write msb "$name" || true
+    acq_provenance_write msb "$name" "$agent" || true
     return 0
   fi
   return 1
@@ -5708,6 +5716,11 @@ acq_backend_doctor() {
   ver=$(_acq_msb_version)
   [ -n "$ver" ] || ver="?"
   printf '[msb: installed %s]\n' "$ver"
+}
+
+acq_backend_doctor_sandbox() {
+  local name="$1"
+  msb exec -u agent -e HOME=/home/agent "$name" -- sh -c "$(acq_image_contract_doctor_script)"
 }
 
 # ---------------------------------------------------------------------------

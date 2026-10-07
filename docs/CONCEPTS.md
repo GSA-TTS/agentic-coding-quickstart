@@ -1,12 +1,12 @@
 ---
 title: "acq Concepts"
-description: "Backend-neutral concepts for working with acq sandboxes (workspaces, mounts)"
+description: "Backend-neutral concepts for working with acq sandboxes (workspaces, mounts, published ports)"
 status: canonical
 tier: 2
-last_updated: "2026-08-21"
+last_updated: "2026-10-03"
 audience: "developers"
-keywords: ["acq", "concepts", "workspace", "mount", "backend-neutral", "sbx", "msb"]
-related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
+keywords: ["acq", "concepts", "workspace", "mount", "ports", "publish", "backend-neutral", "sbx", "msb"]
+related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0034-host-port-selection-and-publish-override.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
@@ -126,6 +126,53 @@ has a few mechanics worth knowing. Rather than duplicate them here, see the
 
 ---
 
+## Published Ports
+
+A kit that runs a server declares the **guest** port it listens on (its
+`publishedPorts` entry); acq maps that to a port on **your host** at create time,
+so `http://127.0.0.1:<host port>` reaches it. Read the mapping acq chose with:
+
+```bash
+acq ports <name>
+```
+
+acq picks a **free host port per sandbox**, so several sandboxes from the same
+kit can run at once and each gets its own host address.
+
+### Choosing the host port: `--publish`
+
+When you want a **predictable** address rather than whatever was free — "this
+sandbox's UI is on 6868, that one's on 6869" — choose it at launch:
+
+```bash
+acq run opencode --publish 6868:6767 ~/projects/my-app
+```
+
+`--publish HOST:GUEST` is repeatable, and both sides are required (the guest port
+is the kit's, not yours to invent). It overrides whatever the kit declared for
+that guest port. If the host port is already in use, the create **fails** — acq
+never quietly moves your mapping somewhere else.
+
+Two limits worth knowing:
+
+- It applies **at create only**, like the mounts and `--clone`: the mapping lives
+  in the sandbox's create arguments, so a re-attach cannot move it (acq says so
+  rather than ignoring the flag). To add a mapping to a sandbox that is already
+  running, use `acq ports <name> --publish HOST:GUEST` — that opens a tunnel to
+  the guest's *loopback* interface, a different path than the create-time
+  publish.
+- It is **msb only**. sbx assigns the host port itself and offers no way to
+  request one, so acq refuses the flag there rather than appear to honor it; read
+  what sbx chose with `acq ports`.
+- Like the other run/create flags, it goes **after** the subcommand
+  (`acq run … --publish …`). Only `--backend` and `--image` may precede it.
+
+See [ADR-0034](adr/0034-host-port-selection-and-publish-override.md) for the
+design, and [ADR-0015](adr/0015-msb-post-hoc-port-publish-via-ssh.md) for the
+post-hoc tunnel this deliberately does not fall back to.
+
+---
+
 ## How It Works
 
 This explains the mechanics behind the [README](../README.md) quickstart — read
@@ -191,6 +238,8 @@ repository for details.
 `acq` applies a fixed set of built-in kits, pinned to a commit of the patterns
 repo. To customize:
 
+- **Pick opt-in kits interactively:** run `acq configure` (see
+  [Interactive setup: `acq configure`](#interactive-setup-acq-configure)).
 - **Add your own kits on every run:** see [Advanced: extra kits](#advanced-extra-kits).
 - **Change USAi models / provider config, rules, or skills:** contribute to the
   kits in the
@@ -199,6 +248,43 @@ repo. To customize:
   live.
 - **Adopt newer kit versions:** bump `PATTERNS_KIT_REF` near the top of
   `acq.backends/common.sh`.
+
+### Interactive setup: `acq configure`
+
+`acq configure` opens a small, colorful interactive picker (no extra tools to
+install) that lets you choose which **opt-in** kits to enable and set the default
+answer for the per-sandbox GitHub-token-scoping prompt. Choices persist to
+`~/.config/acq/config.yaml`, so you set them once instead of repeating `--kit`
+flags on every run.
+
+```text
+? Select kits (dimmed rows are always applied · ↑/↓ move · SPACE toggle · ENTER confirm · q cancel)
+  [x] zscaler-ca-certificate   Zscaler/corporate CA trust … (always applied)
+  [x] usai-provider            USAi provider + model config … (always applied)
+  [x] agentic-coding-playbook  Federal agent rules and skills … (always applied)
+  [x] git-ssh-sign             SSH-based git commit signing … (always applied)
+❯ [x] openchamber              Browser UI for OpenCode alongside the terminal TUI
+  [ ] paseo                    Self-hosted Paseo browser web UI for coding agents
+  [ ] oci-engine               Rootless podman for docker run / docker compose
+```
+
+- The **four built-in kits** (`zscaler-ca-certificate`, `usai-provider`,
+  `agentic-coding-playbook`, `git-ssh-sign`) appear as **frozen rows** at the top
+  — always checked, dimmed, and tagged `(always applied)`. The cursor skips them
+  and they can't be toggled; the picker manages only the opt-in extras below.
+- On your **first run**, `acq` offers to run this for you. Run it again anytime
+  with `acq configure`.
+- At `acq create`, the picker is shown again **pre-populated with your saved
+  defaults**, so a single sandbox can enable or disable a kit without changing
+  the global default (the deviation is remembered for that sandbox).
+- Select **`oci-engine`** when the sandbox needs `docker run` or
+  `docker compose`. It installs rootless podman inside the sandbox and is not
+  enabled by default.
+- The **GitHub-token** preference only pre-answers the scoping prompt; the
+  fine-grained token is still minted per-sandbox (see
+  [`acq github-scope`](howto/acq.md)).
+- Non-interactive/CI runs make no changes and simply print the current
+  configuration. Set `ACQ_NO_PROMPT=1` to force that behavior.
 
 ### Advanced: extra kits
 
@@ -210,6 +296,10 @@ whitespace-separated list of kit references (local paths or remote refs):
 export ACQ_EXTRA_KITS="./my-local-kit git+https://github.com/acme/kits.git#ref=<sha>&dir=some-kit"
 ```
 
+An explicitly-exported `ACQ_EXTRA_KITS` takes precedence over the kits saved by
+`acq configure` (env wins): the interactive picker is skipped and your env value
+is used verbatim.
+
 Extras are applied **after** the built-in kits (so they win on any overlapping
 config). They also work when re-running against an existing sandbox: adding a new
 entry and re-running `acq run <existing-sandbox>` injects just the new kit.
@@ -220,6 +310,66 @@ scheme-less prefix so `acq` allowlists it:
 ```bash
 export ACQ_EXTRA_KIT_SOURCES="github.com/acme/"
 ```
+
+### Advanced: the `~/.rc.d` shell hook
+
+`acq` gives kits a neutral shell hook: any file a kit drops at
+`~/.rc.d/*.sh` is sourced at login. Both backends apply it identically
+(ADR-0030) — the delivery is a normal kit `files[]` drop, and `acq` writes the
+matching login-profile bridge that sources the snippets (`sbx` writes it at
+create time; `msb` writes it as part of its login-shell setup).
+
+What it is and how it behaves:
+
+- **Kit-owned, not user-editable.** The snippets come from a kit's `files[]`
+  tree, and the sourcing bridge is written by `acq`. Treat `~/.rc.d/*.sh` as
+  build output, not a place to hand-edit inside a sandbox.
+- **POSIX-sh, bash bridge.** The built-in `~/.profile` bridge sources the
+  snippets for bash login shells. Zsh-capable base images must wire the same
+  directory from native zsh startup files. The files are POSIX-sh.
+- **Deterministic lexical order.** Snippets are sourced in byte (C-collation)
+  order regardless of the guest's locale, so a `10-`, `20-`, `90-` numeric
+  prefix convention gives a stable, predictable order. A bare shell glob would
+  sort in the guest's locale collation; the bridge forces `LC_ALL=C` for the
+  listing to avoid that.
+
+Guardrails:
+
+- **Never put secrets in a snippet.** `~/.rc.d/*.sh` is kit content that lands
+  on disk and is sourced into every login shell; secrets belong in the backend
+  secret store (injected at runtime), never in a shipped file.
+- **Do not duplicate what devenv provides** inside a devenv shell. If a tool's
+  environment is already established by the project's `devenv`/`.envrc`, do not
+  re-export it here — the hook is for shell integration that must exist
+  *outside* a devenv shell.
+- **Kit-owned.** Ship shell behavior as a kit, not as ad-hoc edits.
+
+Use-cases (ADR-0030):
+
+- the hook itself, delivered by a neutral kit;
+- agent shell integration that must exist outside a devenv shell;
+- team tool environment variables and shell completions;
+- personal aliases and functions (via a personal kit through `ACQ_EXTRA_KITS`);
+- a direnv/devenv activation hook.
+
+**fish and nushell.** The `~/.rc.d/*.sh` snippets are POSIX-sh and are **not**
+sourced by fish or nushell, because their shell languages are incompatible with
+POSIX-sh syntax — sourcing a `.sh` file into fish/nushell would error, not work.
+`acq` therefore does not wire fish/nushell to `~/.rc.d`. This is a documented
+constraint, chosen over speculative wiring: fish has its own native autoload
+directory (`~/.config/fish/conf.d/*.fish`), and nushell loads from its
+configured config/autoload path (`$nu.config-path`). The intended future path is
+for a kit to deliver shell-native snippets there when fish/nushell support is
+actually needed. Until a concrete need exists, `acq` neither wires those
+directories nor installs fish or nushell.
+
+**Migration path.** If a team kit currently establishes shell behavior by other
+means (for example, appending to `~/.bashrc` from a kit `startup` command), move
+that behavior into a POSIX-sh snippet under `files/home/agent/.rc.d/NN-name.sh`
+in a personal or team kit, applied via `ACQ_EXTRA_KITS`. Pick a numeric prefix
+to order it against other snippets (lower runs first). Drop the old
+`~/.bashrc`-append step once the snippet is in place; the built-in bridge
+sources the snippet for bash login shells.
 
 ---
 

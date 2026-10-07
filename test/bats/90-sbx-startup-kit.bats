@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
 # 90-sbx-startup-kit.bats — bats port of scripts/test-acq.d/90-sbx-startup-kit.sh
-# (quickstart #320, ADR-0025)
+# (ADR-0025)
 #
 # sbx 0.38 startup-kit refusal handling, stale-probe footprint, and the
 # create-time extra-kit marker. All offline via the stubbed sbx. Each @test
@@ -202,6 +202,72 @@ STUB
   refute_regex "$(cat "$spec")" 'GIT_AUTHOR_NAME: Global User'
 }
 
+@test "rc.d(sbx): neutral kit files materialize as home rc snippets" {
+  local kit="$STUBDIR/rcd-kit" out="$STUBDIR/rcd-sbx-v2"
+  mkdir -p "$kit/files/home/agent/.rc.d"
+  cat > "$kit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: rc-hook
+displayName: RC Hook
+description: shell rc hook fixture
+files:
+  - path: /home/agent/.rc.d/10-team.sh
+    mode: "0644"
+    source: files/home/agent/.rc.d/10-team.sh
+SPEC
+  printf 'export TEAM_TOOL=1\n' > "$kit/files/home/agent/.rc.d/10-team.sh"
+
+  run kit_translate_to_sbx "$kit" "$out"
+  assert_success
+  [ -f "$out/files/home/agent/.rc.d/10-team.sh" ]
+  assert_equal "$(cat "$out/files/home/agent/.rc.d/10-team.sh")" "export TEAM_TOOL=1"
+  assert_regex "$(cat "$out/spec.yaml")" '/home/agent/.rc.d/10-team.sh'
+  assert_regex "$(cat "$out/spec.yaml")" 'chmod 0644'
+  refute_regex "$(cat "$out/spec.yaml")" 'direnv allow|USAI_API_KEY|GITHUB_TOKEN'
+}
+
+@test "rc.d(sbx): provision installs the ~/.rc.d login bridge (backend parity)" {
+  # Parity with msb (ADR-0030): sbx DELIVERS ~/.rc.d files but nothing sources
+  # them at login without this create-time bridge. The bridge text is the ONE
+  # shared block from common.sh (acq_login_profile_rc_block), so the assertions
+  # below (C-collation ordering, bash gate, guards) hold for BOTH backends.
+  : > "$CALLS"
+  (
+    acq_backend_provision rcdbridgebox shell /tmp
+  ) >/dev/null 2>&1 || true
+  local log; log=$(cat "$CALLS")
+  # The bridge is written via a post-create `sbx exec` (not a startup kit).
+  assert_regex "$log" 'acq-login-profile-rc'
+  # Deterministic lexical order: an LC_ALL=C ls list, NOT a locale-dependent glob.
+  assert_regex "$log" 'LC_ALL=C ls'
+  assert_regex "$log" 'for _acq_rc in'
+  assert_regex "$log" 'SC1090'
+  assert_regex "$log" 'unset _acq_rc'
+  # bash-only ~/.profile gate preserved; zsh uses native startup files in images
+  # that support it.
+  assert_regex "$log" 'BASH_VERSION'
+  refute_regex "$log" 'ZSH_VERSION'
+  # The readiness probe must happen before the bridge install, so a freshly
+  # created sandbox does not silently miss the hook while exec is still starting.
+  assert_regex "$log" 'echo ok.*acq-login-profile-rc'
+}
+
+@test "rc.d(sbx): the login bridge does not use a startup-bearing kit (no live-extend refusal)" {
+  # The bridge must NOT be delivered via `sbx kit add` of a setup.startup kit —
+  # that path is refused on sbx >= 0.38 (see _acq_sbx_kit_add). It runs as a
+  # plain `sbx exec`, so provision must never emit a `kit add` for the bridge.
+  : > "$CALLS"
+  (
+    acq_backend_provision rcdnostartupbox shell /tmp
+  ) >/dev/null 2>&1 || true
+  local log; log=$(cat "$CALLS")
+  # The rc-bridge exec line carries the marker; no `sbx kit add` line should.
+  local bridgelines; bridgelines=$(printf '%s\n' "$log" | grep 'acq-login-profile-rc' || true)
+  [ -n "$bridgelines" ]
+  refute_regex "$bridgelines" 'kit add'
+}
+
 @test "provision(sbx): ACQ_EXTRA_KITS is marked into ~/.acq-extra-kits at create" {
   : > "$CALLS"
   # Subshell, NOT `bash -c`: acq_backend_provision is a sourced function, which
@@ -275,4 +341,216 @@ STUB
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'sbx kit add skipbox'
   refute_output --partial 'cannot extend a live sandbox'
+}
+
+@test "agent-kit-heal(sbx): forced refresh includes recorded agent kit" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.38.0 abc123\n' ;;
+  ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in *present*) printf 'present\n' ;; *) exit 0 ;; esac ;;
+  kit) exit 0 ;;
+  settings) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  printf 'agentrefreshbox\n' > "$STUBDIR/.sandbox_list"
+  acq_provenance_write sbx agentrefreshbox opencode
+  # Simulate a READY built-in agent kit offline. The real selection gate fetches
+  # the pinned patterns bundle; this refresh-path regression test should stay
+  # network-free while still proving agent-kit refresh wiring.
+  acq_agent_builtin_kit_ready() { [ "$1" = "opencode" ]; }
+  _acq_agent_builtin_kit_ref() { printf '%s#ref=%s&dir=%s/opencode\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR"; }
+  ( ACQ_FORCE_KIT_REAPPLY=1 acq_backend_ensure_kits_applied agentrefreshbox >/dev/null 2>&1 ) || true
+  assert_regex "$(cat "$CALLS")" 'acq-kits/opencode'
+}
+
+@test "provision(sbx): startup barrier timeout removes the unsafe sandbox" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  create) : >"$STUBDIR/.created"; exit 0 ;;
+  exec) exit 1 ;;
+  rm) : >"$STUBDIR/.removed"; exit 0 ;;
+  settings) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  : >"$CALLS"
+
+  export ACQ_SBX_STARTUP_BARRIER_TIMEOUT=0
+  run acq_backend_provision timeoutbox shell /tmp
+  assert_failure
+  assert_output --partial "startup commands did not finish"
+  assert_output --partial "removing 'timeoutbox'"
+
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx create --name timeoutbox'
+  assert_regex "$log" 'sbx rm --force timeoutbox'
+  assert [ -f "$STUBDIR/.removed" ]
+}
+
+@test "run(sbx): waits for the startup barrier before opencode postinstall probe" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
+  create) : >"$STUBDIR/.created"; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case " $* " in
+      *" opencode --version "*) printf 'opencode 1.18.12\n'; exit 0 ;;
+    esac
+    case "$snippet" in
+      *"startup-complete"*) printf 'ready\n' ;;
+      *'%{http_code}'*) printf '200|0' ;;
+      *) exit 0 ;;
+    esac ;;
+  run) exit 0 ;;
+  settings) exit 0 ;;
+  secret)
+    [ "${2:-}" = "ls" ] && { [ -n "${SBX_LS_FIXTURE:-}" ] && [ -f "$SBX_LS_FIXTURE" ] && cat "$SBX_LS_FIXTURE"; exit 0; }
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  local proj="$STUBDIR/startup-race-proj"; mkdir -p "$proj"
+  printf 'sk-test\n' | env ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
+  seed_sbx_usai_proxy_fixture
+
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
+  assert_success
+
+  local log create_line barrier_line opencode_line attach_line
+  log=$(cat "$CALLS")
+  create_line=$(printf '%s\n' "$log" | grep -n '^sbx create' | cut -d: -f1)
+  barrier_line=$(printf '%s\n' "$log" | grep -n 'startup-complete' | cut -d: -f1)
+  opencode_line=$(printf '%s\n' "$log" | grep -n 'opencode --version' | cut -d: -f1)
+  attach_line=$(printf '%s\n' "$log" | grep -n '^sbx run --name' | cut -d: -f1)
+
+  assert_regex "$log" 'startup-barrier'
+  assert [ "$create_line" -lt "$barrier_line" ]
+  assert [ "$barrier_line" -lt "$opencode_line" ]
+  assert [ "$opencode_line" -lt "$attach_line" ]
+}
+
+@test "wait(sbx): startup barrier requires this create's token" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *startup-complete*)
+        case "$snippet" in
+          *" = '$STUB_BARRIER_FILE_TOKEN'"*) printf 'ready\n' ;;
+          *=*) exit 0 ;;
+          *) printf 'ready\n' ;;
+        esac ;;
+      *) exit 0 ;;
+    esac ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+
+  export STUB_BARRIER_FILE_TOKEN=fresh-token
+  run _acq_sbx_wait_for_startup_barrier tokenbox fresh-token
+  assert_success
+
+  export ACQ_SBX_STARTUP_BARRIER_TIMEOUT=0
+  export STUB_BARRIER_FILE_TOKEN=stale-token
+  run _acq_sbx_wait_for_startup_barrier tokenbox fresh-token
+  assert_failure
+}
+
+@test "run(sbx): waits for successful reattach heal before attach" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  ls) printf 'healattach\n'; exit 0 ;;
+  kit) [ "${2:-}" = "add" ] && exit 0; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *"echo ok"*) printf 'ok\n' ;;
+      *present*) printf 'absent\n' ;;
+      *) exit 0 ;;
+    esac ;;
+  run) exit 0 ;;
+  settings) exit 0 ;;
+  secret) [ "${2:-}" = "ls" ] && exit 0; exit 0 ;;
+  ports) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  : >"$CALLS"
+
+  run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 "$ACQ" run healattach
+  assert_success
+
+  local log kit_line wait_line attach_line
+  log=$(cat "$CALLS")
+  kit_line=$(printf '%s\n' "$log" | grep -n '^sbx kit add healattach' | tail -n1 | cut -d: -f1)
+  wait_line=$(printf '%s\n' "$log" | grep -n 'echo ok' | tail -n1 | cut -d: -f1)
+  attach_line=$(printf '%s\n' "$log" | grep -n '^sbx run --name healattach' | cut -d: -f1)
+
+  assert [ "$kit_line" -lt "$wait_line" ]
+  assert [ "$wait_line" -lt "$attach_line" ]
+}
+
+@test "run(sbx): refuses attach when reattach heal never becomes exec-ready" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  ls) printf 'healblocked\n'; exit 0 ;;
+  kit) [ "${2:-}" = "add" ] && exit 0; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *"echo ok"*) exit 1 ;;
+      *present*) printf 'absent\n' ;;
+      *) exit 0 ;;
+    esac ;;
+  run) exit 0 ;;
+  settings) exit 0 ;;
+  secret) [ "${2:-}" = "ls" ] && exit 0; exit 0 ;;
+  ports) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  : >"$CALLS"
+
+  run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 ACQ_EXEC_READY_TIMEOUT=0 "$ACQ" run healblocked
+  assert_failure
+  assert_output --partial "refusing to attach to 'healblocked'"
+
+  local log
+  log=$(cat "$CALLS")
+  assert grep -Fq 'sbx kit add healblocked ' "$CALLS"
+  refute grep -Fxq 'sbx run --name healblocked' "$CALLS"
 }
