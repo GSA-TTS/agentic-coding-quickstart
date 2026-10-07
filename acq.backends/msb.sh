@@ -3979,21 +3979,24 @@ EOF
 # _acq_msb_ssh_agent_route_path NAME AGENT_PATH — echo the host path to emit as
 # the automatic ssh-agent --vsock route for sandbox NAME: the managed link (NOT
 # canonicalized — the link path itself is what must reach msb), staged here to
-# point at AGENT_PATH. When no link can be staged (name outside acq's charset,
-# no symlink support, path too long for sun_path) fall back to AGENT_PATH —
-# today's route — and say so on stderr, because that route goes stale when the
-# host agent moves and the user should know a recreate will not self-heal.
+# point at AGENT_PATH. When no link can be staged, fall back to AGENT_PATH —
+# today's route — and say why on stderr (the name cannot carry a link, or the
+# link itself could not be created), because that route goes stale when the host
+# agent moves and the user should know a recreate will not self-heal.
 _acq_msb_ssh_agent_route_path() {
-  local _name="$1" _agent="$2" _link
-  if _link=$(_acq_msb_ssh_agent_link_path "$_name") && \
-     _acq_msb_ssh_agent_link_point "$_link" "$_agent"; then
-    printf '%s\n' "$_link"
-    return 0
+  local _name="$1" _agent="$2" _link _why
+  if _link=$(_acq_msb_ssh_agent_link_path "$_name"); then
+    if _acq_msb_ssh_agent_link_point "$_link" "$_agent"; then
+      printf '%s\n' "$_link"
+      return 0
+    fi
+    _why="the link '$_link' could not be created (is its directory writable, and is nothing else at that path?)"
+  else
+    _why="the name must use only letters, digits, '_' and '-', not start with '-', and the link path must fit a unix socket address"
   fi
-  echo "acq(msb): warning: cannot manage the ssh-agent route for sandbox '$_name'" \
-       "(the name must use only letters, digits, '_' and '-', and the link path" \
-       "must fit a unix socket address); routing the raw agent socket path, which" \
-       "goes stale when the host agent moves (e.g. after a reboot). See ADR-0021." >&2
+  echo "acq(msb): warning: cannot manage the ssh-agent route for sandbox '$_name':" \
+       "$_why. Routing the raw agent socket path, which goes stale when the host" \
+       "agent moves (e.g. after a reboot). See ADR-0021." >&2
   printf '%s\n' "$_agent"
 }
 
@@ -4051,9 +4054,10 @@ _acq_msb_ssh_agent_link_point() {
 #     is the raw path and only a recreate can change it), or
 #   - SSH_AUTH_SOCK is unset or not a socket (the link is left as is; the
 #     liveness probe will still warn if the agent is unreachable).
-# Records why the link was left alone in _ACQ_MSB_SSH_AGENT_LINK_SKIPPED (empty
-# when it now points at the live agent) so the unreachable warning can tell the
-# user the truth about what was and was not re-pointed. Never fails the caller.
+# Records why the link was left alone, remedy included, in
+# _ACQ_MSB_SSH_AGENT_LINK_SKIPPED (empty when it now points at the live agent) so
+# the unreachable warning tells the truth about what was and was not re-pointed.
+# Never fails the caller.
 _ACQ_MSB_SSH_AGENT_LINK_SKIPPED=""
 _acq_msb_ssh_agent_link_refresh() {
   local name="$1" link target
@@ -4062,7 +4066,7 @@ _acq_msb_ssh_agent_link_refresh() {
   [ -L "$link" ] || return 0
   target="${SSH_AUTH_SOCK:-}"
   if [ -z "$target" ] || [ ! -S "$target" ]; then
-    _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="SSH_AUTH_SOCK is unset or not a socket in this shell"
+    _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="SSH_AUTH_SOCK is unset or not a socket in this shell. Re-run 'acq start $name' or 'acq run $name' from a shell where SSH_AUTH_SOCK names your live agent (e.g. after 'eval \"\$(ssh-agent -s)\"; ssh-add')."
     return 0
   fi
   if command -v canonicalize_path >/dev/null 2>&1; then
@@ -4071,7 +4075,7 @@ _acq_msb_ssh_agent_link_refresh() {
   if _acq_msb_ssh_agent_link_point "$link" "$target"; then
     acq_debug "msb: ssh-agent route link for $name -> $target"
   else
-    _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="the link could not be replaced"
+    _ACQ_MSB_SSH_AGENT_LINK_SKIPPED="the link could not be replaced. Fix or remove '$link' (is its directory writable, and is it still a symlink?), then re-run 'acq start $name' or 'acq run $name'."
     echo "acq(msb): warning: could not re-point the ssh-agent route link '$link' at" \
          "'$target'; the forwarded agent may be unreachable in '$name'." >&2
   fi
@@ -4225,16 +4229,14 @@ _acq_msb_warn_if_agent_unreachable() {
 # _acq_msb_warn_managed_route_unreachable NAME — the unreachable warning for a
 # sandbox whose route is the managed link. Tells the truth about the link: if
 # the refresh re-pointed it, the host agent or the in-guest bridge is at fault;
-# if the refresh skipped it (recorded in _ACQ_MSB_SSH_AGENT_LINK_SKIPPED), the
-# remedy is to run the verb from a shell where SSH_AUTH_SOCK names the live
-# agent, not to chase the agent.
+# if the refresh left it alone, _ACQ_MSB_SSH_AGENT_LINK_SKIPPED carries the
+# reason and its remedy (no SSH_AUTH_SOCK in this shell, or a link that could not
+# be replaced), so the user is never sent to chase a healthy agent.
 _acq_msb_warn_managed_route_unreachable() {
   local name="$1" _link _state
   _link=$(_acq_msb_ssh_agent_link_path "$name")
   if [ -n "$_ACQ_MSB_SSH_AGENT_LINK_SKIPPED" ]; then
-    _state="was NOT re-pointed because $_ACQ_MSB_SSH_AGENT_LINK_SKIPPED. Re-run"
-    _state="$_state 'acq start $name' or 'acq run $name' from a shell where SSH_AUTH_SOCK"
-    _state="$_state names your live agent (e.g. after 'eval \"\$(ssh-agent -s)\"; ssh-add')."
+    _state="was NOT re-pointed because $_ACQ_MSB_SSH_AGENT_LINK_SKIPPED"
   else
     _state="was just re-pointed at the current SSH_AUTH_SOCK, so the host agent itself"
     _state="$_state is probably not answering (check 'ssh-add -l' on the host) or the in-guest"
@@ -4256,7 +4258,7 @@ _acq_msb_warn_raw_route_unreachable() {
   if _acq_msb_ssh_agent_link_path "$name" >/dev/null 2>&1; then
     _after="The recreated sandbox routes through a link acq re-points on every start, so this is a one-time recreate: you only do it once."
   else
-    _after="This name cannot carry acq's managed route link; recreate with a name using only letters, digits, '_' and '-' to get a route that survives reboots."
+    _after="This sandbox cannot carry acq's managed route link (the name must use only letters, digits, '_' and '-', not start with '-', and the link path under ACQ_STATE_DIR must fit a unix socket address); recreate under a name and state dir that allow it to get a route that survives reboots."
   fi
   echo "acq(msb): warning: the forwarded host ssh-agent is UNREACHABLE from the guest" \
        "in '$name' (the create-time --vsock route's host endpoint is stale — most" \

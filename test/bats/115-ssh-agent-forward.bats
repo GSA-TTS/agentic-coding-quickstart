@@ -763,3 +763,42 @@ PQ
   refute_output --partial 'one-time recreate'
   assert_output --partial "letters, digits, '_' and '-'"
 }
+
+@test "vsock(10c30): a link that cannot be replaced is reported as such, never blamed on SSH_AUTH_SOCK or the name" {
+  _mk_unix_socket "$STUBDIR/agent30.sock" || skip "python3 AF_UNIX socket unavailable"
+  # (a) at start: the managed link exists but a regular file now sits at the
+  #     temp-link name's parent... simplest reproducible failure is a read-only
+  #     link dir, so the atomic replace cannot mint its temp link.
+  mkdir -p "$STUBDIR/state/msb/ssh-agent"
+  ln -s "$STUBDIR/gone30.sock" "$STUBDIR/state/msb/ssh-agent/rofs.sock"
+  chmod 555 "$STUBDIR/state/msb/ssh-agent"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent30.sock" STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock STUB_AGENT_UNREACHABLE=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _ACQ_MSB_SSH_AGENT_FORWARDING=0
+    _acq_msb_start_ssh_agent_bridge rofs 2>&1
+    wait
+  '
+  chmod 755 "$STUBDIR/state/msb/ssh-agent"
+  assert_output --partial 'could not re-point'
+  assert_output --partial 'UNREACHABLE'
+  assert_output --partial 'NOT re-pointed'
+  assert_output --partial 'ssh-agent/rofs.sock'
+  assert_output --partial 'Fix or remove'
+  refute_output --partial 'just re-pointed'
+  refute_output --partial 'names your live agent'
+  # (b) at create: a valid name whose link cannot be created is not told its
+  #     name is wrong; the warning names the link path instead.
+  chmod 555 "$STUBDIR/state/msb/ssh-agent"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent30.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    f=(); _acq_msb_vsock_flags_into f okname 2>&1 1>/dev/null
+  '
+  chmod 755 "$STUBDIR/state/msb/ssh-agent"
+  assert_output --partial 'cannot manage the ssh-agent route'
+  assert_output --partial 'ssh-agent/okname.sock'
+  refute_output --partial "letters, digits"
+}

@@ -399,7 +399,8 @@ instead of the raw agent path:
   still unreachable, the warning says whether the link was re-pointed: if it was,
   the host agent or the in-guest bridge is at fault; if `SSH_AUTH_SOCK` was unset
   or not a socket in the invoking shell, it says so and asks for a re-run from a
-  shell where the agent is exported.
+  shell where the agent is exported; if the link itself could not be replaced
+  (unwritable state dir, a non-symlink at its path), it names the link to fix.
 - **sbx:** unchanged. The sbx CLI owns its implicit forward; the neutral
   emitter's output is a no-op there (see `acq.backends/sbx.sh`).
 
