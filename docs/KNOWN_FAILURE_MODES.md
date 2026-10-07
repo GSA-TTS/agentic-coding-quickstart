@@ -222,7 +222,7 @@ Agent assumes host filesystem layout, not container layout.
 - Requests never return
 - Agent appears stuck
 - Eventually fails with timeout
-- OpenCode shows `Provider retry (attempt N): SSE read timed out`
+- OpenCode shows a retry notice carrying `SSE read timed out`
 
 ### Root Cause
 
@@ -231,19 +231,25 @@ Agent assumes host filesystem layout, not container layout.
 - DNS resolution failures
 - Proxy misconfiguration
 - `SSE read timed out`: the streamed response sent no data for longer than the
-  provider's `chunkTimeout`. Common during long reasoning or while the model
-  generates a large tool call (such as writing a long file), or when a hop on the
-  path (sandbox proxy, Zscaler, USAi, the upstream model) stalls. OpenCode retries
-  automatically, so an occasional one is harmless.
+  provider's `chunkTimeout`. OpenCode before 1.18.27 has no default for this option
+  (unset means no idle timeout; 1.18.27 and later default to 5 minutes), so on those
+  versions the 2-minute value the `usai-provider` kit sets is what makes it fire.
+  Common during long reasoning or while the model generates a large tool call (such
+  as writing a long file), or when a hop on the path (sandbox proxy, Zscaler, USAi,
+  the upstream model) stalls. OpenCode retries automatically, so an occasional one
+  is harmless.
 
 ### Fix
 
-The `usai-provider` kit already sets timeouts under the provider's `options`:
+The `usai-provider` kit sets both timeouts under the provider's `options` in its
+[`opencode.jsonc`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/acq-kits/usai-provider/files/home/usai-config/opencode.jsonc):
 `timeout` (whole request, 10 minutes) and `chunkTimeout` (gap between streamed
-chunks, 2 minutes). If `SSE read timed out` recurs, raise `chunkTimeout` in the
-project's `opencode.json`. A higher value makes a truly hung stream take longer to
-fail over to the retry. Do not set it to a few seconds: normal model pauses would
-then abort nearly every long response.
+chunks, 2 minutes); check that file for the current values. If `SSE read timed out`
+recurs, raise `chunkTimeout` in the project's `opencode.json`. The example below
+uses 5 minutes, the default OpenCode 1.18.27 and later ship; `false` disables the
+idle timeout entirely. A higher value makes a truly hung stream take longer to fail
+over to the retry. Do not set it to a few seconds: normal model pauses would then
+abort nearly every long response.
 
 ```json
 {
@@ -257,8 +263,9 @@ then abort nearly every long response.
 }
 ```
 
-If retries also fail, note the model, the time, and what the agent was doing, so a
-slow model can be told apart from a network stall.
+If the retries run out (OpenCode 1.18.17 and later give up after five; earlier
+releases keep retrying until you abort), note the model, the time, and what the
+agent was doing, so a slow model can be told apart from a network stall.
 
 Check network connectivity from inside container:
 ```bash
