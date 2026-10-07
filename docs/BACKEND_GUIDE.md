@@ -797,9 +797,18 @@ The `git-ssh-sign` kit signs guest commits with the **host's** SSH agent, so no
 private key material ever enters the sandbox. On msb this is **automatic whenever
 the host `SSH_AUTH_SOCK` env var is set** (the same opt-in signal sbx uses): at
 create, acq forwards the host agent socket into the guest with
-`--vsock $SSH_AUTH_SOCK:3552/stream`, then starts an in-guest `socat` bridge that
-re-exposes the vsock route as a unix socket at `/home/agent/.acq/ssh-agent.sock`
-and exports it as `SSH_AUTH_SOCK` on attach, `acq exec`, and kit commands.
+`--vsock <link>:3552/stream`, where `<link>` is a per-sandbox symlink under
+`~/.local/state/acq/msb/ssh-agent/` that acq points at the current
+`SSH_AUTH_SOCK`, then starts an in-guest `socat` bridge that re-exposes the vsock
+route as a unix socket at `/home/agent/.acq/ssh-agent.sock` and exports it as
+`SSH_AUTH_SOCK` on attach, `acq exec`, and kit commands.
+
+- **Survives host reboots.** The persisted route cannot change, but the link
+  can: every `acq start` / `acq restart` / `acq run` re-points it at the current
+  host agent socket before starting the bridge, so a sandbox keeps signing after
+  the host agent moves (macOS launchd mints a new socket path per login).
+  Sandboxes created before this mechanism route the raw path and need a one-time
+  recreate; acq's warning says which case applies.
 
 - **Needs msb >= 0.6.9** (the release that adds `--vsock`) **and `socat` in the
   base image** (the default `docker/sandbox-templates:shell-docker` ships it). On

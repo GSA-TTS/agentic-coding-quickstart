@@ -199,10 +199,12 @@ The probe skips silently when `ssh-add` is absent in the guest (it cannot assert
 either way). A path-compare against the create-time `host_socket` is deliberately
 not used — the host agent socket path is platform-dependent (launchd may keep it
 stable; a plain `ssh-agent` rotates it), so only a live connect is
-authoritative. Refreshing the route automatically on resume is left as future
-work pending an msb capability to update a `--vsock` route in place. See
-`docs/KNOWN_FAILURE_MODES.md` §35 ("forwarded agent unreachable after a host
-reboot").
+authoritative. This detect-and-report posture was superseded for new sandboxes
+by the managed-link route (see "Amendment (2026-10-06)" below): the probe is
+kept, and its warning now names the matching remedy — a one-time recreate for a
+sandbox that still routes the raw path, or the host agent for a managed route.
+See `docs/KNOWN_FAILURE_MODES.md` §35 ("forwarded agent unreachable after a
+host reboot").
 
 ### Version gate
 
@@ -335,6 +337,103 @@ point of use, not only in this ADR.
   a live end-to-end check on a KVM/HVF host — tracked in
   [`GSA-TTS/agentic-coding-quickstart#388`](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/388).
 
+## Amendment (2026-10-06): reboot-proof route via a managed host symlink
+
+### Problem
+
+The `--vsock HOST_PATH:3552/stream` route is persisted at create and cannot be
+changed afterwards. With `HOST_PATH` being the canonicalized `SSH_AUTH_SOCK`, a
+host reboot (or any agent restart that moves the socket) leaves the route
+pointing at a dead path. On macOS this is the common case: the launchd agent
+socket lives at `/private/var/run/com.apple.launchd.<random>/Listeners` and the
+random component changes on every login, so every sandbox created before a
+reboot loses signing afterwards (msb's `runtime.log` shows `vsock::muxer: custom
+vsock service rejected port 3552: No such file or directory`; in the guest
+`ssh-add -l` reports `communication with agent failed`). Until this amendment the
+only remedy was `acq rm` plus a recreate.
+
+### Observed msb behavior that makes a fix possible
+
+Tested on macOS with msb 0.7.7 (2026-10-06): `msb create --vsock
+<symlink>:3552/stream` stores the symlink path **verbatim** as the route's
+`host_socket`, and msb **dials that path per guest connection, following the
+symlink**. Re-pointing the host symlink at a different agent socket changed what
+the next in-guest `ssh-add -l` saw, with no sandbox restart. So the host end of
+the route can be moved at will as long as the path msb holds is a stable
+symlink that acq owns.
+
+### Decision
+
+The **automatic ssh-agent forward routes through a per-sandbox managed symlink**
+instead of the raw agent path:
+
+- **Path:** `${ACQ_STATE_DIR}/msb/ssh-agent/<sandbox>.sock` (constant
+  `ACQ_MSB_SSH_AGENT_LINK_DIR`; `ACQ_STATE_DIR` defaults to
+  `${XDG_STATE_HOME:-~/.local/state}/acq`). msb `connect()`s to this path, so it
+  must fit a `sockaddr_un` (104 bytes on macOS including the terminator). When
+  `<dir>/<name>.sock` would overflow, the basename falls back to `h<cksum>.sock`;
+  when even that does not fit, or the sandbox name is outside acq's own
+  `[A-Za-z0-9_-]` charset, acq falls back to the raw path (today's route).
+- **At create** (`_acq_msb_vsock_flags_into ARR NAME`): the link is staged
+  pointing at the canonicalized current `SSH_AUTH_SOCK` and the **link path, not
+  the target**, is emitted as the `--vsock` host path. All existing validation of
+  the target stays (absolute, is a socket, no TAB/newline, port check).
+  `ACQ_FORWARD_HOST_SOCKETS` entries keep today's canonicalized behavior.
+- **On every bridge (re)start** — provision, `acq_backend_start` (stopped →
+  resume), and the running re-attach re-drive
+  (`_acq_msb_ensure_ssh_agent_forward`) — `_acq_msb_start_ssh_agent_bridge`
+  first calls `_acq_msb_ssh_agent_link_refresh`, which re-points an **existing**
+  managed link at the current `SSH_AUTH_SOCK` before the liveness probe runs. The
+  swap is atomic (`ln -s` to a temp name, then `mv -f` over the link), so a
+  concurrent acq invocation or msb dialing the route mid-swap never sees a
+  missing link. If `SSH_AUTH_SOCK` is unset or not a socket, the link is left as
+  is and the verb never fails; the existing probe still warns.
+- **On `acq rm`** (`acq_backend_terminate`) the link is removed (the link only,
+  never the agent socket behind it).
+- **Existing sandboxes** keep their raw-path route until recreated once; acq
+  cannot change a persisted route. The unreachable-agent warning now says so
+  (`_acq_msb_ssh_agent_link_managed` picks the remedy text): recreate once, and
+  the recreated sandbox self-heals on every start. For a managed route that is
+  still unreachable, the warning instead points at the host agent and the
+  in-guest bridge.
+- **sbx:** unchanged. The sbx CLI owns its implicit forward; the neutral
+  emitter's output is a no-op there (see `acq.backends/sbx.sh`).
+
+Rejected alternative: a single shared link per host user. Shorter and needing no
+cleanup, but starting one sandbox from a shell with a different agent (as
+`scripts/verify-backends` does with its hermetic throwaway agent) would silently
+re-point every other sandbox's route. Per-sandbox links keep each route bound to
+the shell that last started it.
+
+### Consequences
+
+- A sandbox created with this acq survives host reboots and agent restarts with
+  no recreate; `acq start`/`acq restart`/`acq run` heal the route.
+- One extra symlink per sandbox under acq's host state dir; no new env knob.
+- The route is only as fresh as the last `acq` verb that started the bridge: an
+  agent that moves while a sandbox keeps running needs an `acq run NAME` (or
+  `acq restart NAME`) to re-point the link. This is the same shape as before,
+  minus the recreate.
+
+### Validation
+
+- Offline unit coverage in `test/bats/115-ssh-agent-forward.bats`, cases
+  **10c22–10c29**: create emits the link path (not the target) and the link
+  resolves to the agent; no-name and custom-forward paths stay canonicalized; the
+  bridge (re)start re-points an existing link and invents none for a legacy
+  sandbox; an unset/non-socket `SSH_AUTH_SOCK` leaves the link alone and never
+  fails; `acq rm` removes the link only; the warning text per route kind; the
+  sun_path hashed fallback; an unsafe name never becomes a link path.
+- **Live check VERIFIED** on a macOS/HVF host with msb 0.7.7 (2026-10-07), using
+  a throwaway agent and key: `acq create` persisted
+  `host_socket = ~/.local/state/acq/msb/ssh-agent/<sandbox>.sock`; in-guest
+  `ssh-add -l` listed the throwaway key; re-pointing the link at an empty agent
+  made the next `ssh-add -l` report "The agent has no identities" and pointing it
+  back restored the key, with no restart; then `acq stop`, killing the agent,
+  starting a new agent at a different socket path and `acq start` re-pointed the
+  link, `ssh-add -l` listed the key again, and `git commit` in the guest produced
+  a good signature (`%G?` = `G`) with no recreate. `acq rm` removed the link.
+
 ## Links
 
 - Commit signing decisions: [ADR-0006](0006-git-ssh-sign-kit.md) (the
@@ -348,6 +447,10 @@ point of use, not only in this ADR.
   (`GSA-TTS/agentic-coding-quickstart#234`)
 - This change is tracked in
   [`GSA-TTS/agentic-coding-quickstart#303`](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/303)
+- The 2026-10-06 managed-link amendment is tracked in
+  [`GSA-TTS/agentic-coding-quickstart#501`](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/501)
+  (stale route after a host reboot; the earlier detect-and-report step was
+  [`GSA-TTS/agentic-coding-quickstart#413`](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/413))
 - Upstream primitive: microsandbox `--vsock`, introduced by merge commit
   `e0c0f9ba` in
   [superradcompany/microsandbox#1297](https://github.com/superradcompany/microsandbox/pull/1297)

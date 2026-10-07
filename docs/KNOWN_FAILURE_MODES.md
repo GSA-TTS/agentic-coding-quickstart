@@ -1888,15 +1888,26 @@ socket path, so the persisted route now points at a dead host endpoint. This is
 distinct from the previous variant: there the guest env var was missing; here the
 env var and bridge are present but the route's host end is dead.
 
-`acq` now **detects and reports** this instead of leaving a silent dead bridge:
-after (re)starting the bridge, `_acq_msb_start_ssh_agent_bridge` runs a liveness
-probe (`ssh-add -l` over the guest sock) and, on failure, prints an actionable
-warning naming the host-reboot cause and the remedy. Because the bridge's
-listener socket is present (only its vsock backend is dead), `ssh-add` exits **1**
-with `communication with agent failed` here — the same exit code as a healthy but
-empty agent, so the probe classifies on the message (a "no identities" reply is
-treated as healthy and stays quiet). The `--vsock` route is create-time only, so
-the fix is to **recreate the sandbox** to refresh the route:
+`acq` **heals this on start** for sandboxes created since the managed-link
+amendment of ADR-0021: the `--vsock` route names a per-sandbox symlink under
+`~/.local/state/acq/msb/ssh-agent/` rather than the raw agent path, and every
+`acq start` / `acq restart` / `acq run` re-points that link at the current host
+`SSH_AUTH_SOCK` before starting the bridge (msb dials the path per connection and
+follows the symlink, so no recreate is needed). If the agent moved while the
+sandbox kept running, re-run `acq run <sandbox>` (or `acq restart <sandbox>`) to
+re-point it.
+
+A sandbox created **before** that amendment still carries the raw path in its
+persisted route, which acq cannot change. For it, acq **detects and reports**
+rather than leaving a silent dead bridge: after (re)starting the bridge,
+`_acq_msb_start_ssh_agent_bridge` runs a liveness probe (`ssh-add -l` over the
+guest sock) and, on failure, prints a warning naming the host-reboot cause and the
+remedy. Because the bridge's listener socket is present (only its vsock backend
+is dead), `ssh-add` exits **1** with `communication with agent failed` here — the
+same exit code as a healthy but empty agent, so the probe classifies on the
+message (a "no identities" reply is treated as healthy and stays quiet). The fix
+is a **one-time recreate**; the recreated sandbox routes through the managed link
+and self-heals from then on:
 
 ```bash
 acq rm <sandbox>
@@ -1905,8 +1916,14 @@ eval "$(ssh-agent -s)"; ssh-add ~/.ssh/id_ed25519   # if needed
 acq run <agent> <workspace…>
 ```
 
+If the warning fires for a sandbox that already routes through the managed link
+(the message names the link path), the link was just re-pointed, so look at the
+host agent itself (`ssh-add -l` on the host) or the in-guest `socat` bridge
+rather than recreating.
+
 See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
-("Re-attach to a running sandbox") for the full mechanism.
+("Amendment (2026-10-06): reboot-proof route via a managed host symlink") for the
+full mechanism.
 
 ---
 
