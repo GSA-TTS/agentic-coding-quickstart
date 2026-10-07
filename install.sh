@@ -35,7 +35,7 @@ REPO_URL="${ACQ_INSTALL_REPO_URL:-https://github.com/GSA-TTS/agentic-coding-quic
 # release-please updates this version in release PRs. Release automation also
 # publishes an install.sh asset with DEFAULT_RELEASE_SHA replaced by the exact
 # release commit so clone installs can verify they landed on that commit.
-DEFAULT_RELEASE_VERSION="3.1.0" # x-release-please-version
+DEFAULT_RELEASE_VERSION="4.0.1" # x-release-please-version
 DEFAULT_RELEASE_REF="v$DEFAULT_RELEASE_VERSION"
 DEFAULT_RELEASE_SHA=""
 REF="${ACQ_INSTALL_REF:-$DEFAULT_RELEASE_REF}"
@@ -65,10 +65,12 @@ NPM_SPEC_BASE="github:GSA-TTS/agentic-coding-quickstart"
 BREW_FORMULA="GSA-TTS/tap/acq"
 
 # msb 0.7.0-0.7.2 migrate 0.6.x sandbox state one-way into a format the 0.6.x
-# line cannot read. Install a pinned last-known-good release when acq needs to
-# install or repair msb, and accept the fixed line when present. See ADR-0032.
+# line cannot read. Install a pinned latest-known-good release when acq needs to
+# install or repair msb, and keep refusing that historical blocked range. See
+# ADR-0032.
 MSB_MIN_VERSION="0.6.9"
-MSB_PINNED_VERSION="0.6.18"
+MSB_PINNED_VERSION="0.7.7"
+MSB_ROLLBACK_VERSION="0.6.18"
 MSB_BLOCKED_VERSION_MIN="0.7.0"
 MSB_BLOCKED_VERSION_MAX="0.7.2"
 
@@ -76,8 +78,8 @@ MSB_BLOCKED_VERSION_MAX="0.7.2"
 # FORWARD to this is strictly safer than rolling back to the pin: the migration
 # sets are additive, so this line reads a catalog an earlier 0.7.x already
 # migrated with no rollback, no data-affecting step, and no snapshot refusal.
-# Prefer it whenever the host can reach it; the pin remains the fallback for a
-# host that cannot move forward.
+# Prefer it whenever the host can reach it; the install pin is newer, but this
+# remains the first fixed threshold for policy checks and recovery guidance.
 MSB_FIXED_VERSION="0.7.3"
 
 # Where pinned msb release artifacts come from. The upstream one-line installer
@@ -1005,7 +1007,7 @@ recover_migrated_catalog() {
     info "  re-run this installer. A keg-only formula gets you that exact version"
     info "  without disturbing your current msb:"
     info "    brew install ${MSB_BREW_VERSIONED_PREFIX}<version>"
-    info "    \"\$(brew --prefix microsandbox-acq@<version>)/bin/msb\" self downgrade $MSB_PINNED_VERSION"
+    info "    \"\$(brew --prefix microsandbox-acq@<version>)/bin/msb\" self downgrade $MSB_ROLLBACK_VERSION"
     return 1
   fi
 
@@ -1013,15 +1015,15 @@ recover_migrated_catalog() {
   warn "  msb $blocked_version already upgraded the local sandbox catalog in"
   warn "  $MSB_HOME_DIR. A supported msb cannot read it, so installing one now"
   warn "  would leave you with 'database schema is newer than this msb binary'."
-  info "  'msb self downgrade $MSB_PINNED_VERSION' rolls that catalog back. It is run by the"
+  info "  'msb self downgrade $MSB_ROLLBACK_VERSION' rolls that catalog back. It is run by the"
   info "  currently-installed msb $blocked_version (which owns the rollback steps), takes a"
   info "  database backup first, and reports exactly what it will change before"
   info "  doing it. It alters sandbox state, so it needs your approval."
 
-  if ! confirm "  Run 'msb self downgrade $MSB_PINNED_VERSION' now?"; then
+  if ! confirm "  Run 'msb self downgrade $MSB_ROLLBACK_VERSION' now?"; then
     warn "  Skipping catalog rollback. acq will keep refusing msb $blocked_version, and a"
     warn "  supported msb will not be able to read this catalog. To do it yourself:"
-    info  "    msb self downgrade $MSB_PINNED_VERSION"
+    info  "    msb self downgrade $MSB_ROLLBACK_VERSION"
     return 1
   fi
 
@@ -1030,21 +1032,21 @@ recover_migrated_catalog() {
   # not just our question. stdin is wired to the terminal because a piped
   # `curl | sh` leaves fd 0 pointing at the script.
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '  [dry-run] %s self downgrade %s\n' "$blocked_msb" "$MSB_PINNED_VERSION"
+    printf '  [dry-run] %s self downgrade %s\n' "$blocked_msb" "$MSB_ROLLBACK_VERSION"
     return 0
   fi
 
   if [ -t 0 ]; then
-    "$blocked_msb" self downgrade "$MSB_PINNED_VERSION"
+    "$blocked_msb" self downgrade "$MSB_ROLLBACK_VERSION"
   elif [ -e /dev/tty ]; then
-    "$blocked_msb" self downgrade "$MSB_PINNED_VERSION" </dev/tty
+    "$blocked_msb" self downgrade "$MSB_ROLLBACK_VERSION" </dev/tty
   else
     warn "  No terminal is available to confirm msb's own downgrade prompt."
     info  "  Run this yourself, then re-run this installer:"
-    info  "    msb self downgrade $MSB_PINNED_VERSION"
+    info  "    msb self downgrade $MSB_ROLLBACK_VERSION"
     return 1
   fi || {
-    warn "  'msb self downgrade $MSB_PINNED_VERSION' did not complete. msb's message above is"
+    warn "  'msb self downgrade $MSB_ROLLBACK_VERSION' did not complete. msb's message above is"
     warn "  authoritative — it refuses rather than discarding data it cannot roll"
     warn "  back (grouped or duplicate snapshots are the usual cause). Resolve"
     warn "  what it reports, or move forward to msb $MSB_FIXED_VERSION instead, then re-run"
@@ -1052,7 +1054,7 @@ recover_migrated_catalog() {
     return 1
   }
 
-  ok "  Sandbox catalog rolled back for msb $MSB_PINNED_VERSION."
+  ok "  Sandbox catalog rolled back for msb $MSB_ROLLBACK_VERSION."
 }
 
 # Move a blocked msb FORWARD to the fixed line instead of rolling it back.
@@ -1067,10 +1069,9 @@ recover_migrated_catalog() {
 # `affects_user_data` step, and none of the refusals a downgrade can hit (grouped
 # or duplicate snapshots).
 #
-# `msb self update` is the right tool here precisely because it targets the newest
-# release: during this window the newest release IS the fixed one. That coupling
-# is why this is checked, not assumed — if upstream ships something newer that we
-# have not cleared, the version check afterwards catches it.
+# `msb self update` is still the right tool here when recovering from the blocked
+# range because it targets a release on or after the fixed threshold. The result is
+# checked, not assumed, so any future unsupported release still fails closed.
 update_msb_to_fixed() {
   blocked_msb="$1"
   blocked_version="$2"
@@ -1079,7 +1080,7 @@ update_msb_to_fixed() {
   info "  msb $MSB_FIXED_VERSION carries the upstream cross-version compatibility fix, and it"
   info "  reads the catalog msb $blocked_version already migrated — the migration sets are"
   info "  additive, so nothing has to be rolled back and no sandbox state is"
-  info "  rewritten. This is safer than downgrading to msb $MSB_PINNED_VERSION, which has to"
+  info "  rewritten. This is safer than downgrading to msb $MSB_ROLLBACK_VERSION, which has to"
   info "  revert migrations and can refuse outright if you have grouped snapshots."
 
   if ! confirm "  Run 'msb self update' to move to msb $MSB_FIXED_VERSION now?"; then
@@ -1266,7 +1267,7 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
     warn "  acq refuses msb $MSB_BLOCKED_VERSION_MIN-$MSB_BLOCKED_VERSION_MAX because those releases"
     warn "  migrate 0.6.x sandbox state one-way."
     info "  Two ways out: move FORWARD to msb $MSB_FIXED_VERSION (preferred — it reads the"
-    info "  already-migrated catalog as-is), or roll back to msb $MSB_PINNED_VERSION. You will be"
+    info "  already-migrated catalog as-is), or roll back to msb $MSB_ROLLBACK_VERSION. You will be"
     info "  offered the forward path first, and asked before anything changes."
     if confirm "  Fix the active msb now?"; then
       if replace_active_msb "$active_msb" "$active_msb_version"; then
@@ -1303,8 +1304,8 @@ if [ "$INSTALL_MSB" -eq 1 ]; then
     info  "  specific version: it always resolves to the newest release, and every"
     info  "  release publishes a byte-identical copy, so a versioned asset URL is not"
     info  "  a pin. Use msb $MSB_PINNED_VERSION, or msb $MSB_FIXED_VERSION or newer."
-    info  "  ('msb self update' targets the newest release, which right now IS msb"
-    info  "  $MSB_FIXED_VERSION — that is the one supported use of it during this window.)"
+    info  "  ('msb self update' targets the newest release; acq re-checks that it lands"
+    info  "  on msb $MSB_FIXED_VERSION or newer before accepting it.)"
   fi
 fi
 

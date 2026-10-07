@@ -6,7 +6,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "3.1.0", # x-release-please-version
+    [string]$Version = "4.0.1", # x-release-please-version
     [string]$InstallDir = "",
     [string]$PackageUrl = "",
     [string]$Sha256 = "",
@@ -26,9 +26,11 @@ $PackageName = "acq-windows-x64.zip"
 # a drift here means Windows accepts an msb the rest of acq refuses.
 #
 # 0.7.0 through 0.7.2 migrate 0.6.x sandbox state one-way, into a form the 0.6.x
-# line cannot read. 0.7.3 carries the upstream compatibility fix. See ADR-0032.
+# line cannot read. 0.7.3 carries the upstream compatibility fix; acq installs a
+# newer fixed release by default. See ADR-0032.
 $MsbMinVersion = "0.6.9"
-$MsbPinnedVersion = "0.6.18"
+$MsbPinnedVersion = "0.7.7"
+$MsbRollbackVersion = "0.6.18"
 $MsbBlockedVersionMin = "0.7.0"
 $MsbBlockedVersionMax = "0.7.2"
 $MsbFixedVersion = "0.7.3"
@@ -529,10 +531,10 @@ function Ensure-Msb {
             Write-Warn "acq refuses msb $MsbBlockedVersionMin-$MsbBlockedVersionMax because those releases migrate 0.6.x sandbox state one-way, into a form the 0.6.x line cannot read."
             Write-Host "  Moving forward to msb $MsbFixedVersion fixes this without rolling anything back: it"
             Write-Host "  reads sandbox state this msb already migrated, so no state is rewritten."
-            Write-Host "  'msb self update' targets the newest release, which currently IS $MsbFixedVersion."
+            Write-Host "  'msb self update' targets the newest release; acq re-checks that it lands on $MsbFixedVersion or newer."
 
             if (-not (Confirm-Action "Run 'msb self update' to move to msb $MsbFixedVersion now?")) {
-                throw "acq refuses msb $found. Run 'msb self update' (or install msb $MsbPinnedVersion), then re-run this installer. If you roll back instead, run 'msb self downgrade $MsbPinnedVersion' with THIS msb first - an older msb cannot roll back these migrations, and a failed attempt blocks later catalog-opening msb commands."
+                throw "acq refuses msb $found. Run 'msb self update' (or install msb $MsbPinnedVersion), then re-run this installer. If you roll back instead, run 'msb self downgrade $MsbRollbackVersion' with THIS msb first - an older msb cannot roll back these migrations, and a failed attempt blocks later catalog-opening msb commands."
             }
 
             Invoke-InstallCommand "msb self update" {
@@ -542,7 +544,7 @@ function Ensure-Msb {
                 }
             }
             # Verify rather than assume: 'self update' targets whatever is newest,
-            # which is only the fixed release for as long as that stays true.
+            # and acq must still reject unsupported results.
             Assert-MsbSupported -Context "'msb self update' completed"
             return
         }

@@ -93,7 +93,7 @@ That's it. `acq run` creates the sandbox if it doesn't exist, heals any missing
 kits, validates your USAi key, and attaches the agent.
 
 > [!NOTE]
-> The **first** run boots a microVM, installs the agent, and fetches kits — a
+> The **first** run boots a microVM, applies kits, and prepares the agent — a
 > minute or two, with a progress spinner and status lines so you can follow
 > along. Later runs are much faster. Set `ACQ_NO_PROGRESS=1` to silence the
 > animation (plain status lines still print); `ACQ_DEBUG=1` also disables it in
@@ -227,7 +227,7 @@ reboot the machine.
 <!-- x-release-please-start-version -->
 
 ```powershell
-irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.0/install.ps1 | iex
+irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v4.0.1/install.ps1 | iex
 ```
 
 <!-- x-release-please-end -->
@@ -235,7 +235,7 @@ irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v3.1.
 For an inspect-first install:
 
 ```powershell
-$AcqVersion = "3.1.0" # x-release-please-version
+$AcqVersion = "4.0.1" # x-release-please-version
 $BaseUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$AcqVersion"
 Invoke-WebRequest "$BaseUrl/install.ps1" -OutFile install.ps1
 Get-Content .\install.ps1

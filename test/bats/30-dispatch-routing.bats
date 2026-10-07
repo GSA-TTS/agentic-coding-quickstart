@@ -27,6 +27,114 @@ _seed_usai() {
   assert_regex "$(cat "$CALLS")" 'sbx ls'
 }
 
+@test "dispatch: ls does not fetch provider facts" {
+  run env ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none "$ACQ" ls
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb list'
+  refute_output --partial 'provider facts'
+}
+
+@test "dispatch: create falls back silently when provider facts artifact is absent" {
+  local kit="$STUBDIR/provider-kit-empty" proj="$STUBDIR/provider-facts-absent"
+  mkdir -p "$kit" "$proj"
+  cat > "$kit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: usai-provider
+displayName: USAi Provider
+description: test fixture
+SPEC
+  rm -f "$STUBDIR/.msb_created"
+  run env ACQ_BACKEND=msb USAI_API_KEY="usai-key-stub" ACQ_TEST_USAI_KIT="$kit" \
+    STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
+  assert_success
+  refute_output --partial 'provider facts'
+  assert_regex "$(cat "$CALLS")" 'msb create'
+  assert [ -f "$STUBDIR/.msb_created" ]
+}
+
+@test "dispatch: create warns and falls back when provider facts cannot be fetched" {
+  local proj="$STUBDIR/provider-facts-offline"; mkdir -p "$proj"
+  rm -f "$STUBDIR/.msb_created"
+  run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
+    STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
+  assert_success
+  assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
+  refute_output --partial 'invalid provider facts'
+  assert_regex "$(cat "$CALLS")" 'msb create'
+  assert [ -f "$STUBDIR/.msb_created" ]
+}
+
+@test "dispatch: create fails closed when provider facts artifact is malformed" {
+  local kit="$STUBDIR/provider-kit-bad" proj="$STUBDIR/provider-facts-bad"
+  mkdir -p "$kit/provider-facts" "$proj"
+  cat > "$kit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: usai-provider
+displayName: USAi Provider
+description: test fixture
+SPEC
+  cat > "$kit/provider-facts/usai.env" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.bad.gov
+ACQ_PROVIDER_BASE_URL=https://api.bad.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.bad.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=BAD-KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://bad.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.bad.gov
+FACTS
+  rm -f "$STUBDIR/.msb_created"
+
+  run env ACQ_BACKEND=msb USAI_API_KEY="usai-key-stub" ACQ_TEST_USAI_KIT="$kit" \
+    STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
+  assert_failure
+  assert_output --partial "acq: invalid provider facts artifact: $kit/provider-facts/usai.env"
+  refute_regex "$(cat "$CALLS")" 'msb create'
+  refute [ -f "$STUBDIR/.msb_created" ]
+}
+
+@test "dispatch: run existing sandbox does not fetch provider facts" {
+  printf 'mybox\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'mybox\n' > "$STUBDIR/.msb_running_list"
+  run env TERM= ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none \
+    STUB_AGENT_USER_READY=1 "$ACQ" run mybox
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e SHELL=/bin/sh mybox -- /bin/sh -l'
+  refute_output --partial 'provider facts'
+}
+
+@test "dispatch: start falls back when provider facts cannot be fetched" {
+  run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
+    STUB_AGENT_USER_READY=1 "$ACQ" start mybox
+  assert_success
+  assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
+  refute_output --partial 'invalid provider facts'
+  assert_regex "$(cat "$CALLS")" 'msb start mybox'
+}
+
+@test "secret: option-only import falls back when provider facts cannot be fetched" {
+  run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
+    ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
+    "$ACQ" secret import --all
+  assert_success
+  assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
+  assert_output --partial "imported 'usai'"
+}
+
+@test "secret: scoped non-USAi command does not fetch provider facts" {
+  run bash -c '
+    printf "%s\n" "github-token-stub" \
+      | ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none \
+        ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$2/secrets" \
+        "$1" secret set usai github
+  ' _ "$ACQ" "$STUBDIR"
+  assert_success
+  refute_output --partial 'provider facts'
+  assert_output --partial "stored 'github'"
+}
+
 @test "shell: NAME -> interactive backend shell (sbx exec -it ... bash)" {
   run env ACQ_BACKEND=sbx "$ACQ" shell mybox
   assert_regex "$(cat "$CALLS")" 'sbx exec -it mybox bash'
@@ -88,13 +196,13 @@ _seed_usai() {
   ( cd "$other" && git init -q && git remote add origin https://github.com/mogul/artemis.git )
   _seed_usai
   run env ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
-    "$ACQ" create --name opencode-pic opencode "$pic"
+    "$ACQ" create --name opencode-pic opencode "$pic/repo"
   assert_success
 
   run env ACQ_BACKEND=sbx ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$STUBDIR/secrets" \
     ACQ_SECRET_TEST_VALUE=ghp_fake bash -c 'cd "$1" && "$2" github-scope opencode-pic' _ "$parent" "$ACQ"
   assert_success
-  assert_output --partial "using recorded workspace for 'opencode-pic': $pic"
+  assert_output --partial "using recorded workspace for 'opencode-pic': $pic/repo"
   assert_output --partial 'GSA-TTS/pic-site'
   refute_output --partial 'mogul/artemis'
 }
@@ -210,7 +318,7 @@ _seed_usai() {
 @test "create(msb): host-exported USAI_API_KEY counts as present; provision proceeds" {
   local proj="$STUBDIR/kc-ci"; mkdir -p "$proj"
   rm -f "$STUBDIR/.msb_created"
-  run bash -c 'printf "" | USAI_API_KEY="sk-ci-host" ACQ_BACKEND=msb "$1" create opencode "$2"' _ "$ACQ" "$proj"
+  run bash -c 'printf "" | USAI_API_KEY="usai-key-stub" ACQ_BACKEND=msb "$1" create opencode "$2"' _ "$ACQ" "$proj"
   refute_output --partial 'no USAi API key stored'
   assert_regex "$(cat "$CALLS")" 'msb create'
   assert [ -f "$STUBDIR/.msb_created" ]
@@ -227,7 +335,7 @@ _seed_usai() {
   local ghproj="$STUBDIR/gh-mcreate"; mkdir -p "$ghproj"
   ( cd "$ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
   rm -f "$STUBDIR/.msb_created"
-  run bash -c 'printf "" | USAI_API_KEY="sk-ci-host" ACQ_BACKEND=msb ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$3/.secrets" "$1" create opencode "$2"' _ "$ACQ" "$ghproj" "$ghproj"
+  run bash -c 'printf "" | USAI_API_KEY="usai-key-stub" ACQ_BACKEND=msb ACQ_SECRET_FORCE_FILE=1 ACQ_SECRET_FILE_DIR="$3/.secrets" "$1" create opencode "$2"' _ "$ACQ" "$ghproj" "$ghproj"
   assert_output --partial 'no repo-scoped GitHub token'
   assert_regex "$(cat "$CALLS")" 'msb create'
   assert [ -f "$STUBDIR/.msb_created" ]
@@ -275,6 +383,7 @@ _seed_usai() {
   run env STUB_OPENCODE_OK=1 STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
   assert_success
   refute_output --partial 'Aborting attach'
+  assert_regex "$(cat "$CALLS")" 'Authorization: Bearer \$USAI_API_KEY'
 }
 
 @test "run(opencode): runs postinstall under a timeout guard when binary not functional" {
@@ -357,7 +466,80 @@ _seed_usai() {
   assert_regex "$(cat "$CALLS")" 'sbx rm --force mybox'
   : > "$CALLS"
   run env ACQ_BACKEND=sbx "$ACQ" exec mybox -- echo hi
-  assert_regex "$(cat "$CALLS")" 'sbx exec mybox'
+  assert_regex "$(cat "$CALLS")" 'sbx exec mybox -- echo hi'
+  refute_regex "$(cat "$CALLS")" 'direnv export|direnv allow'
+}
+
+@test "project-env: sbx exec advises when workspace provenance is known" {
+  local proj="$STUBDIR/known-env"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  acq_provenance_write sbx mybox opencode "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" exec mybox -- echo hi
+  assert_output --partial 'project environment detected (direnv)'
+  assert_regex "$(cat "$CALLS")" 'sbx exec mybox -- echo hi'
+}
+
+@test "project-env: run detects direnv workspace but does not activate by default" {
+  local proj="$STUBDIR/direnvproj"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj" -- echo hi
+  assert_success
+  assert_output --partial 'project environment detected (direnv)'
+  assert_output --partial 'will not run project activation'
+  assert_output --partial 'ACQ_ACTIVATE_PROJECT_ENV=1'
+  local log; log=$(cat "$CALLS")
+  local run_line; run_line=$(grep '^sbx run --name opencode-direnvproj' "$CALLS")
+  assert_regex "$run_line" 'sbx run --name opencode-direnvproj -- echo hi'
+  refute_regex "$log" 'direnv export|direnv allow'
+}
+
+@test "project-env: run opt-in wraps recorded agent with direnv export" {
+  local proj="$STUBDIR/direnvproj2"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  _seed_usai
+  run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj" -- --version
+  assert_success
+  assert_output --partial 'project environment detected (direnv)'
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx run --name opencode-direnvproj2 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'direnv export sh'
+  assert_regex "$log" 'sh opencode --version'
+  refute_regex "$log" 'direnv allow'
+}
+
+@test "project-env: run opt-in wraps normal sbx attach too" {
+  local proj="$STUBDIR/direnvproj3"; mkdir -p "$proj"
+  touch "$proj/.envrc"
+  _seed_usai
+  run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj"
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx run --name opencode-direnvproj3 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'sh opencode'
+}
+
+@test "project-env: create detects devenv files without activating anything" {
+  local proj="$STUBDIR/devenvproj"; mkdir -p "$proj"
+  touch "$proj/devenv.nix"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
+  assert_success
+  assert_output --partial 'project environment detected (devenv)'
+  assert_output --partial 'will not run project activation'
+  refute_regex "$(cat "$CALLS")" 'direnv export|direnv allow'
+}
+
+@test "project-env: inherited session marker cannot wrap sbx helper exec" {
+  run bash -c '
+    export ACQ_ACTIVATE_PROJECT_ENV=1 ACQ_SESSION_KIND=exec
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
+    acq_backend_run helperbox -- sh -c "echo probe" >/dev/null 2>&1
+  '
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'sbx exec helperbox -- sh -c echo probe'
+  refute_regex "$log" 'direnv export|ACQ_WORKSPACE'
 }
 
 @test "dispatch: an unknown subcommand passes through to the backend, announced, not doubled" {
@@ -416,4 +598,46 @@ _seed_usai() {
   local create_line; create_line=$(printf '%s\n' "$log" | grep '^sbx create')
   refute_regex "$create_line" '--kit evil-agent-arg'
   assert_regex "$log" '--kit evil-agent-arg'
+}
+
+@test "agent-kits: run opencode applies inferred built-in kit" {
+  local proj="$STUBDIR/agentkit-opencode"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
+
+  assert_success
+  assert_output --partial 'selected built-in agent kit: agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=enabled'
+  assert_regex "$(cat "$CALLS")" 'acq-opencode-kit'
+}
+
+@test "agent-kits: create opencode applies inferred built-in kit" {
+  local proj="$STUBDIR/agentkit-create"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode "$proj"
+
+  assert_success
+  assert_output --partial 'selected built-in agent kit: agent=opencode kit=opencode entrypoint=opencode install_owner=kit start_owner=kit apply=enabled'
+  assert_regex "$(cat "$CALLS")" 'acq-opencode-kit'
+}
+
+@test "agent-kits: explicit --kit suppresses implicit selection notice" {
+  local proj="$STUBDIR/agentkit-explicit"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/team-opencode "$proj"
+
+  assert_success
+  refute_output --partial 'built-in agent kit candidate'
+  local create_line; create_line=$(grep '^sbx create' "$CALLS")
+  assert_regex "$create_line" '--kit /tmp/team-opencode'
+  refute_regex "$create_line" 'acq-kits/opencode'
+}
+
+@test "agent-kits: shell reports no inferred agent kit" {
+  local proj="$STUBDIR/agentkit-shell"; mkdir -p "$proj"
+  _seed_usai
+  run env ACQ_BACKEND=sbx "$ACQ" run shell "$proj"
+
+  assert_success
+  refute_output --partial 'built-in agent kit candidate'
+  refute_regex "$(cat "$CALLS")" 'acq-kits/opencode'
 }

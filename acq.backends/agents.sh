@@ -55,9 +55,45 @@ acq_agent_template_image() {
   esac
 }
 
-acq_agent_has_msb_install_recipe() {
+# Agent-specific built-in kit metadata. Only the built-in bundle participates in
+# implicit selection; team/personal kits supplied through ACQ_EXTRA_KITS or --kit
+# are never matched by agent name.
+acq_agent_builtin_kit_name() {
+  case "$1" in
+    opencode) printf '%s\n' opencode ;;
+    shell|"") return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+acq_agent_kit_entrypoint() {
+  case "$1" in
+    opencode) printf '%s\n' opencode ;;
+    shell|"") return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+acq_agent_kit_install_owner() {
+  case "$1" in
+    opencode) printf '%s\n' kit ;;
+    shell|"") return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+acq_agent_kit_start_owner() {
+  case "$1" in
+    opencode) printf '%s\n' kit ;;
+    shell|"") return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+acq_agent_builtin_kit_enabled() {
   case "$1" in
     opencode) return 0 ;;
+    shell|"") return 1 ;;
     *) return 1 ;;
   esac
 }

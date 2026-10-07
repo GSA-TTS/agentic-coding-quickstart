@@ -74,15 +74,31 @@ if ! command -v acq_is_known_agent >/dev/null 2>&1; then
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agents.sh"
 fi
 
+_acq_msb_select_kits() {
+  local agent="${1:-}"
+  if command -v _build_kit_list >/dev/null 2>&1; then
+    _build_kit_list "$agent"
+  elif ! declare -p KITS >/dev/null 2>&1 || [ "${#KITS[@]}" -eq 0 ]; then
+    KITS=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
+    ACQ_BUILTIN_KIT_COUNT="${#KITS[@]}"
+    ACQ_BUILTIN_SUPPORT_KIT_COUNT="${#KITS[@]}"
+  fi
+}
+
 # Host-authoritative config store (ADR-0035). Normally defined in common.sh
-# (sourced before this adapter by acq_resolve_backend), but the offline session
-# paths (attach/run/shell) are exercised in tests that source THIS file directly
-# without common.sh. Guard-source it so acq_host_config_* are always defined when
-# this file's functions run (cheap re-source; common.sh is idempotent).
+# (sourced before this adapter by acq_resolve_backend), but offline session paths
+# source this adapter directly in tests. Guard-source it so acq_host_config_* is
+# available in either path.
 if ! command -v acq_host_config_read >/dev/null 2>&1; then
   # shellcheck source=acq.backends/common.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 fi
+
+# Keep the adapter-local validator used by attach while delegating the canonical
+# token policy to the shared agent catalog.
+_acq_msb_safe_agent_token() {
+  acq_agent_safe_token "$1"
+}
 
 # ---------------------------------------------------------------------------
 # _acq_msb_cli — invoke the msb CLI with MSYS argument rewriting disabled
@@ -127,9 +143,15 @@ MIN_MSB_VERSION="0.6.9"
 MSB_BLOCKED_VERSION_MIN="0.7.0"
 MSB_BLOCKED_VERSION_MAX="0.7.2"
 
-# Version acq's own tooling installs during the blocked window: the newest
-# release whose migration set the 0.6.x line understands.
-MSB_PINNED_VERSION="0.6.18"
+# Version acq's own tooling installs by default: latest release known to carry
+# the upstream 0.7.3+ cross-version compatibility fix. See ADR-0032.
+MSB_PINNED_VERSION="0.7.7"
+
+# Rollback target for catalogs already migrated by blocked 0.7.0-0.7.2 releases.
+# This stays on the newest 0.6.x release because `msb self downgrade` is a state
+# rollback to the last catalog format the 0.6.x line understands, not an install
+# default.
+MSB_ROLLBACK_VERSION="0.6.18"
 
 # First release with the upstream fix. Moving FORWARD to this is the preferred
 # recovery for a host that already ran a blocked version: the migration sets are
@@ -249,8 +271,11 @@ ACQ_MSB_KIT_CACHE="${ACQ_MSB_KIT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/kits
 # ACQ_EXEC_READY_TIMEOUT.
 ACQ_MSB_EXEC_READY_TIMEOUT="${ACQ_MSB_EXEC_READY_TIMEOUT:-${ACQ_EXEC_READY_TIMEOUT:-60}}"
 
-# USAi models path (matches common.sh USAI_MODELS_URL host) for --secret host.
-ACQ_MSB_USAI_HOST="api.gsa.usai.gov"
+# USAi provider facts for --secret binding; common.sh owns the canonical values.
+USAI_PROVIDER_HOST="${USAI_PROVIDER_HOST:-api.gsa.usai.gov}"
+USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_BIND_HOSTS:-$USAI_PROVIDER_HOST}"
+USAI_PROVIDER_KEY_ENV="${USAI_PROVIDER_KEY_ENV:-USAI_API_KEY}"
+ACQ_MSB_USAI_HOST="$USAI_PROVIDER_BIND_HOSTS"
 
 # GitHub credential hosts for the msb --secret binding. Bind the REST API and
 # git-transport hosts so both API calls and HTTPS git clone/push can substitute
@@ -293,7 +318,7 @@ _acq_msb_service_binding() {
     fi
   fi
   case "$_service" in
-    usai)   printf '%s\t%s\n' "USAI_API_KEY" "$ACQ_MSB_USAI_HOST"; return 0 ;;
+    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_KEY_ENV" "$ACQ_MSB_USAI_HOST"; return 0 ;;
     github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
   esac
   printf '\t\n'
@@ -452,28 +477,6 @@ ACQ_MSB_UPSTREAM_CA_FILE="${ACQ_MSB_UPSTREAM_CA_FILE:-${ACQ_STATE_DIR:-${XDG_STA
 # Use it to confirm the failure and that the fix resolves it. Off by default.
 ACQ_MSB_NO_UPSTREAM_CA="${ACQ_MSB_NO_UPSTREAM_CA:-}"
 
-# Agent binary install.
-# ---------------------------------------------------------------------------
-# Unlike sbx (whose agent templates BAKE the agent binary into the image), msb
-# runs a plain OCI base, so the adapter must install the requested agent itself.
-# For `opencode`, install the npm package globally (node is a base-image
-# prerequisite the adapter already verifies). The registry host must be reachable
-# from the guest, so the adapter allow-lists it at create (kit net-rules are
-# default-deny). The install is idempotent (marker-gated + `command -v` guarded).
-#
-# Only agents with a known install recipe are auto-installed; `shell` is a no-op
-# (there is nothing to install), and an unknown agent is a clear, non-fatal warning
-# (the user can bake it into ACQ_MSB_IMAGE). Override the opencode package spec
-# (e.g. to pin a version like opencode-ai@1.2.3) with ACQ_MSB_OPENCODE_PKG.
-ACQ_MSB_OPENCODE_PKG="${ACQ_MSB_OPENCODE_PKG:-opencode-ai}"
-
-# Hosts the agent installer needs to reach, allow-listed at create so egress
-# (default-deny under kit net-rules) permits the npm download. registry.npmjs.org
-# serves metadata; the tarballs are on the same host for the public registry.
-# Override for an internal mirror via ACQ_MSB_NPM_HOSTS (space-separated).
-ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
-
-# ---------------------------------------------------------------------------
 # Balanced egress baseline (ADR-0018)
 # ---------------------------------------------------------------------------
 # msb defaults guest egress to NONE, so without a baseline an msb sandbox is far
@@ -504,7 +507,7 @@ ACQ_MSB_NPM_HOSTS="${ACQ_MSB_NPM_HOSTS:-registry.npmjs.org}"
 #
 # ALL tiers keep deny-by-default EXCEPT open; the tier only sizes the baseline
 # allowlist. This normalizes to a lowercase enum, fail-closed to `balanced` on an
-# invalid value (matching ACQ_MSB_SHORT_NAME_MODE's validator).
+# invalid value.
 #
 # DEPRECATED ALIAS — `ACQ_MSB_BALANCED_EGRESS` predates the neutral tier and is
 # retained for one deprecation window. It maps into the tier fail-safe (tighter,
@@ -556,103 +559,6 @@ unset _acq_net_tier_source _acq_msb_balanced_egress_alias
 # never used to provision cannot abort an unrelated acq invocation.
 ACQ_NETWORK_TIER_CONFIRM_OPEN="${ACQ_NETWORK_TIER_CONFIRM_OPEN:-}"
 
-# ---------------------------------------------------------------------------
-# OCI container engine (podman) — ensure agents can run OCI images (ADR-0020)
-# ---------------------------------------------------------------------------
-# Agents frequently need to run OCI images inside the sandbox (e.g. `docker run`,
-# bringing up a docker-compose.yaml). The default image ships the Docker CLI +
-# compose plugin, but msb's microVM init (/init.krun) never starts dockerd, so
-# the Docker socket is dead; and dockerd's overlay2 storage driver cannot sit on
-# the sandbox's already-overlay root without a disk-backed data volume. Rather
-# than retrofit the msb docker:dind entrypoint recipe (a daemon we would have to
-# start and keep alive across restarts, plus a per-sandbox disk-backed volume),
-# the adapter provisions **podman** — a daemonless engine that forks runc/crun
-# per invocation (no socket, no restart lifecycle), uses fuse-overlayfs on the
-# overlay root (no disk-backed volume), and needs no nested virtualization. We
-# run podman ROOTLESS as the agent user: the install step installs the rootless
-# prerequisites (uidmap for newuidmap/newgidmap, passt + slirp4netns for rootless
-# networking) from the same mirror in the same step as podman itself, and grants
-# the agent access to /dev/net/tun (group-scoped) so rootless networking can set
-# up. Rootless keeps containers unprivileged (defense-in-depth), aligns container/
-# host UIDs, and lets the agent invoke podman directly (no sudo wrapper). See
-# ADR-0020 and _acq_msb_ensure_oci.
-#
-# podman is CLI-compatible with docker for the run/build/compose workflows this
-# targets, and the bundled Docker CLI is non-functional here anyway (dead
-# socket), so we alias `docker` -> podman (in /usr/local/bin, ahead of /usr/bin)
-# so both `docker run …` and `docker compose …` route to podman. `docker compose`
-# resolves to `podman compose`, which drives the installed podman-compose
-# provider — this is what makes docker-compose.yaml files usable (the standalone
-# `docker-compose` CLI is deprecated in favour of the `docker compose`
-# subcommand, so we do not provide a separate `docker-compose` binary).
-#
-# We also make unadorned image names resolve to Docker Hub by default (stock
-# podman sends many short names to quay.io and has no default search registry),
-# to reduce migration burden for users whose code assumes `docker run <name>`
-# means Docker Hub. See _acq_msb_ensure_oci step 4 and ADR-0020.
-#
-# Toggle: on by default. Set ACQ_MSB_ENSURE_OCI=0 (or empty) to skip the step
-# entirely (e.g. a base image that bakes its own working engine, or a lean
-# sandbox that needs no OCI support). Normalized to exactly "1" (on) or "" (off):
-# an unset value defaults on; "0"/"false"/"no"/"off"/empty are off
-# (case-insensitive); anything else is on.
-ACQ_MSB_ENSURE_OCI="${ACQ_MSB_ENSURE_OCI-1}"
-case "$(printf '%s' "$ACQ_MSB_ENSURE_OCI" | tr '[:upper:]' '[:lower:]')" in
-  ""|0|false|no|off) ACQ_MSB_ENSURE_OCI="" ;;
-  *)                 ACQ_MSB_ENSURE_OCI="1" ;;
-esac
-
-# The packages installed to provide the OCI engine (space-separated). Override
-# for a different set or an internal mirror's package names. podman-compose is
-# the `docker compose` / `podman compose` provider. fuse-overlayfs lets podman
-# use the `overlay` graph driver on msb's overlay ROOT filesystem (the kernel
-# `overlay` driver refuses to stack on overlayfs); without it the adapter falls
-# back to the `vfs` driver, which works everywhere but is disk-heavy. uidmap
-# (newuidmap/newgidmap), passt, and slirp4netns are the ROOTLESS prerequisites:
-# uidmap provides the setuid helpers rootless podman needs to map the subuid/
-# subgid ranges (already present for `agent`), and passt/slirp4netns provide
-# rootless container networking. See ADR-0020 and _acq_msb_ensure_oci. The install
-# uses the OS package mirror (apt/dnf/apk), which under the default balanced egress
-# baseline (ADR-0018) is already reachable (archive.ubuntu.com / ports.ubuntu.com
-# / security.ubuntu.com / *.debian.org are in the vendored host list). With
-# ACQ_NETWORK_TIER=strict (kit hosts only), or a base whose egress is otherwise
-# narrowed, the mirror is unreachable and the install fails soft (a clear warning;
-# provision continues; OCI is simply unavailable).
-ACQ_MSB_PODMAN_PKGS="${ACQ_MSB_PODMAN_PKGS:-podman podman-compose fuse-overlayfs uidmap passt slirp4netns}"
-
-# podman short-name resolution mode written into the docker-first registries
-# drop-in (/etc/containers/registries.conf.d/00-acq-docker-first.conf). This
-# governs what happens when the agent runs an UNQUALIFIED image name (e.g.
-# `docker run nginx`) that is not already fully qualified to a registry.
-#
-# DEFAULT: "enforcing" (least-privilege / prompt-injection defense). Per the
-# PR #302 review (3-model consensus + reviewer), "permissive" is the WRONG
-# default for a federal sandbox running a prompt-injectable agent: it silently
-# resolves ambiguous short names, which removes the defense against image
-# substitution / typosquatting (an injected `docker run nginx` could resolve to
-# docker.io/<attacker>/nginx without any prompt). We KEEP
-# unqualified-search-registries = ["docker.io"] below, so unqualified names
-# still resolve deterministically to Docker Hub and migration ergonomics are
-# preserved; "enforcing" only fails closed on interactively-ambiguous short
-# names instead of silently resolving them. Because there is a single search
-# registry, "enforcing" costs essentially no day-to-day ergonomics.
-#
-# Setting ACQ_MSB_SHORT_NAME_MODE=permissive is an EXPLICIT operator override
-# that REMOVES the typosquatting / image-substitution guardrail. Only podman's
-# accepted values are allowed: enforcing | permissive | disabled. Any other
-# value (including empty) is rejected and falls back to "enforcing"
-# (fail-closed), with a warning.
-ACQ_MSB_SHORT_NAME_MODE="${ACQ_MSB_SHORT_NAME_MODE:-enforcing}"
-_acq_msb_short_name_mode_lc="$(printf '%s' "$ACQ_MSB_SHORT_NAME_MODE" | tr '[:upper:]' '[:lower:]')"
-case "$_acq_msb_short_name_mode_lc" in
-  enforcing|permissive|disabled) ACQ_MSB_SHORT_NAME_MODE="$_acq_msb_short_name_mode_lc" ;;
-  *)
-    printf 'msb: WARNING: invalid ACQ_MSB_SHORT_NAME_MODE=%s (expected enforcing|permissive|disabled); falling back to enforcing\n' "$ACQ_MSB_SHORT_NAME_MODE" >&2
-    ACQ_MSB_SHORT_NAME_MODE="enforcing"
-    ;;
-esac
-unset _acq_msb_short_name_mode_lc
-
 # Path to the vendored host list (a verbatim mirror of `sbx policy inspect
 # local-policy`; see acq.backends/msb-balanced-hosts.txt). Override to point at a
 # site-specific list. ACQ_SCRIPT_DIR is exported by the acq entry point (and set
@@ -677,12 +583,8 @@ ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
 # always defined even if provision is not the entry point.
 _ACQ_MSB_STARTUP_STAGE_FILES=()
 _ACQ_MSB_STARTUP_STAGED=""
-# Per-kit read-only-file rewrite table (ADR-0035 Mechanism 2): parallel arrays
-# mapping a kit-declared guest path (FROM) to the path the same bytes appear at
-# on the read-only host-config mount (TO). _acq_msb_apply_kit_dir populates these
-# from `readonly: true` files[] entries; _acq_msb_run_commands / the staged
-# startup body rewrite any startup-argv token equal to a FROM into its TO, so
-# trusted code runs from the :ro mount, never a guest-writable copy.
+# Per-kit readonly-file rewrite table: declared guest path -> read-only mount
+# path. Trusted startup code is never executed from a guest-writable copy.
 _ACQ_MSB_RO_REWRITE_FROM=()
 _ACQ_MSB_RO_REWRITE_TO=()
 # SSH user for the serve listener. `msb ssh serve` authorizes a key host-wide;
@@ -859,10 +761,10 @@ acq_backend_check_version() {
     echo "       Preferred fix — move FORWARD to msb $MSB_FIXED_VERSION, which reads the state this" >&2
     echo "       msb already migrated, with no rollback and no state rewrite:" >&2
     echo "         msb self update" >&2
-    echo "       Alternative — roll back to msb $MSB_PINNED_VERSION. If this msb ALREADY migrated" >&2
+    echo "       Alternative — roll back to msb $MSB_ROLLBACK_VERSION. If this msb ALREADY migrated" >&2
     echo "       your sandbox state, swapping the binary is NOT enough; the catalog" >&2
     echo "       must be rolled back first, and only THIS msb can do it:" >&2
-    echo "         msb self downgrade $MSB_PINNED_VERSION" >&2
+    echo "         msb self downgrade $MSB_ROLLBACK_VERSION" >&2
     echo "       Do NOT run 'msb self downgrade' from an older msb: it cannot roll" >&2
     echo "       these migrations back, and the failed attempt leaves an" >&2
     echo "       interrupted-downgrade record that blocks msb catalog access." >&2
@@ -924,6 +826,14 @@ acq_backend_prepare() {
 
 acq_backend_exists() {
   _acq_msb_cli list -q 2>/dev/null | grep -Fxq -- "$1"
+}
+
+# Return success only when msb successfully lists sandboxes and NAME is absent.
+# A failed list probe is indeterminate, not evidence that a live sandbox is gone.
+_acq_msb_confirm_absent() {
+  local name="$1" listed
+  listed=$(_acq_msb_cli list -q 2>/dev/null) || return 1
+  ! printf '%s\n' "$listed" | grep -Fxq -- "$name"
 }
 
 # ---------------------------------------------------------------------------
@@ -1049,7 +959,7 @@ $(acq_secret_meta_list "$_name")
 EOF
     fi
   elif [ -n "${USAI_API_KEY:-}" ]; then
-    eval "$_arrn+=(--secret \"USAI_API_KEY@\${ACQ_MSB_USAI_HOST}\")"
+    eval "$_arrn+=(--secret \"${USAI_PROVIDER_KEY_ENV}@\${ACQ_MSB_USAI_HOST}\")"
   fi
 }
 
@@ -1102,6 +1012,9 @@ EOF
 # matter for start.
 acq_backend_start() {
   local _name="$1"
+  if command -v acq_provider_facts_load_from_kit_or_fallback >/dev/null 2>&1; then
+    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+  fi
   local _start_secret_flags=() _start_secret_names=()
   _acq_msb_bind_secrets_into _start_secret_flags _start_secret_names "$_name"
   local _start_rc=0
@@ -1115,10 +1028,6 @@ acq_backend_start() {
   [ "$_start_rc" -eq 0 ] || return "$_start_rc"
   _acq_msb_wait_for_exec_ready "$_name" || \
     echo "acq(msb): warning: $_name did not become exec-ready after start." >&2
-  # Re-grant the rootless-podman device nodes (/dev/net/tun, /dev/fuse): /dev is a
-  # devtmpfs re-created each boot, so the provision-time grant is lost across
-  # restart. Cheap + idempotent; no-op when ENSURE_OCI is disabled or absent.
-  _acq_msb_grant_oci_devs "$_name"
   # The host ssh-agent forward's --vsock route persists in the sandbox config
   # across stop/start, but the in-guest socat bridge process dies on stop, so it
   # must be (re)started here too. Gated on the persisted marker (no provision ran
@@ -1200,10 +1109,9 @@ _acq_msb_wait_for_exec_ready() {
 #
 #   1) INSTALL PHASE stays exec-based. install commands are run-once, gated by a
 #      host-authoritative marker keyed on a hash of the argv
-#      (_acq_msb_exec_install: acq_host_config_has/_write "install-<cksum>", held
-#      on the host per ADR-0035 so a passwordless-sudo guest cannot forge it to
-#      suppress the step). A create-time script re-runs on every restart by
-#      design — the OPPOSITE of run-once — so
+#      (_acq_msb_exec_install: `install-<cksum>` in host config), so a
+#      passwordless-sudo guest cannot suppress the step. A create-time
+#      script re-runs on every restart by design — the OPPOSITE of run-once — so
 #      folding install into the startup script would break its idempotency
 #      contract. install therefore stays out of the staged script entirely.
 #
@@ -1808,7 +1716,7 @@ _acq_msb_apply_kit_dir() {
 
   # 1) Drop files[] (msb cp host→guest). Files are staged from the kit's files/
   #    tree via the spec's source: field.
-  #    kit_spec_files emits tab-separated "path<TAB>mode<TAB>phase<TAB>source"
+  #    kit_spec_files emits tab-separated "path<TAB>mode<TAB>phase<TAB>source<TAB>readonly"
   #    with possibly-empty middle fields; parse each field explicitly with cut
   #    (a bare `IFS=<tab> read` collapses adjacent empty tab fields).
   #    IMPORTANT: read ALL records into an array FIRST. If we iterated the
@@ -1823,15 +1731,10 @@ $(kit_spec_files "$spec")
 EOF
 
   local path mode phase source _readonly src _i
-  # Reset the per-kit readonly-file rewrite table (guest path -> :ro guest path)
-  # before this kit's files are processed; _acq_msb_run_commands consults it to
-  # rewrite startup argv so trusted code runs from the read-only mount (ADR-0035).
   _ACQ_MSB_RO_REWRITE_FROM=()
   _ACQ_MSB_RO_REWRITE_TO=()
   local _hcfg_mount_ok=0
-  if _acq_msb_host_config_mount_available "$name"; then
-    _hcfg_mount_ok=1
-  fi
+  _acq_msb_host_config_mount_available "$name" && _hcfg_mount_ok=1
   for _i in ${_frecs[@]+"${!_frecs[@]}"}; do
     fline="${_frecs[$_i]}"
     path=$(printf '%s' "$fline" | cut -f1)
@@ -1845,26 +1748,18 @@ EOF
       src="${kitdir}/${source}"
     fi
     if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_mount_ok" -eq 1 ]; then
-      # Trusted CODE (ADR-0035 Mechanism 2): stage it on the per-sandbox
-      # host-config dir so the guest sees it through the READ-ONLY mount and a
-      # passwordless-sudo agent cannot rewrite it. Do NOT copy it into the
-      # guest's writable filesystem; record a rewrite so the invoking startup
-      # command runs the :ro copy instead of the (absent) guest path.
       local _ro_guest
-      if _ro_guest=$(_acq_msb_stage_readonly_file "$name" "$kitdir" "$path" "$src"); then
+      if _ro_guest=$(_acq_msb_stage_readonly_file "$name" "$path" "$src"); then
         _ACQ_MSB_RO_REWRITE_FROM+=("$path")
         _ACQ_MSB_RO_REWRITE_TO+=("$_ro_guest")
-        acq_debug "msb readonly kit file: $path -> $_ro_guest (:ro)"
       else
-        echo "acq(msb): warning: could not stage read-only kit file '$path' for '$name';" \
-             "falling back to the legacy guest copy." >&2
+        echo "acq(msb): warning: could not stage read-only kit file '$path' for '$name'; falling back to the legacy guest copy." >&2
         _readonly=""
       fi
     fi
     if { [ "$_readonly" != "true" ] || [ "$_hcfg_mount_ok" -ne 1 ]; } && [ -n "$src" ] && [ -f "$src" ]; then
       if [ "$_readonly" = "true" ]; then
-        echo "acq(msb): warning: sandbox '$name' has no readable or read-only ADR-0035 host-config mount;" \
-             "copying readonly kit file '$path' into the guest for compatibility. Recreate the sandbox to get tamper-resistant readonly startup code." >&2
+        echo "acq(msb): warning: sandbox '$name' has no readable or read-only ADR-0035 host-config mount; copying readonly kit file '$path' into the guest for compatibility. Recreate the sandbox to get tamper-resistant readonly startup code." >&2
       fi
       _acq_msb_copy_file_verified "$name" "$src" "$path" "$mode" || {
         echo "acq(msb): error: could not place kit file at ${name}:${path}" >&2
@@ -1877,10 +1772,9 @@ EOF
   # 2) Persist environment[] for session replay. Threading `-e NAME=value` onto
   #    the kit's own commands (step 3) covers provisioning only; the block exists
   #    for agent-runtime config (see ADR-0011: OPENCODE_CONFIG-style vars), so
-  #    the validated entries are also persisted to the HOST config store
-  #    (ADR-0035) that run/attach/shell read back and replay as `-e` flags — the
-  #    same role the guest /var/lib/acq/kit-env marker had, but host-authoritative
-  #    so a passwordless-sudo agent cannot inject env into the agent process.
+  #    the validated entries are persisted to the host config store and replayed
+  #    as `-e` flags. A passwordless-sudo guest cannot inject environment into a
+  #    later agent session. Entries are never interpolated into shell syntax.
   local _kit_env=()
   _acq_msb_collect_kit_env_into _kit_env "$spec"
   if [ "${#_kit_env[@]}" -gt 0 ]; then
@@ -1913,7 +1807,7 @@ EOF
   _acq_msb_run_commands "$name" "$spec" "$_merged_envn"
 }
 
-# _acq_msb_reset_kit_env NAME — remove the persisted kit-env so a
+# _acq_msb_reset_kit_env NAME — remove the persisted host kit-env key so a
 # FULL-set kit application (provision, heal) rebuilds it from the current kits'
 # environment[] only. Without this, the per-kit append in _acq_msb_apply_kit_dir
 # would retain entries a kit no longer declares — removed runtime config
@@ -1921,72 +1815,45 @@ EOF
 # single-kit `acq kit apply` verb deliberately does NOT reset: a mid-life add
 # is additive, and replay's last-value-wins handles its overrides. Best-effort:
 # a failed reset degrades to the previous stale-retention behavior, never
-# aborts the apply. Host-authoritative (ADR-0035).
+# aborts the apply.
 _acq_msb_reset_kit_env() {
   acq_host_config_clear msb "$1" kit-env
 }
 
-# _acq_msb_host_config_mount_available NAME — true iff this sandbox has the
-# ADR-0035 host-config dir mounted at ACQ_HOST_CONFIG_GUEST_DIR, traversable by
-# the agent user, and still write-refusing under guest root. Existing sandboxes
-# created before ADR-0035 lack this create-time mount; for those, readonly:true
-# files must fall back to the legacy guest-copy path rather than rewriting startup
-# argv to a non-existent or writable path.
 _acq_msb_host_config_mount_available() {
   local name="$1"
   _acq_msb_cli exec "$name" -u agent -- sh -c \
-    "test -d '$ACQ_HOST_CONFIG_GUEST_DIR' && test -r '$ACQ_HOST_CONFIG_GUEST_DIR' && test -x '$ACQ_HOST_CONFIG_GUEST_DIR'" \
+    "test -d '$ACQ_HOST_CONFIG_GUEST_DIR' && test -x '$ACQ_HOST_CONFIG_GUEST_DIR'" \
     </dev/null >/dev/null 2>&1 || return 1
   _acq_msb_cli exec "$name" -u 0 -- sh -c \
     '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; if : > "$_tmp" 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 1; fi; exit 0' \
     sh "$ACQ_HOST_CONFIG_GUEST_DIR" </dev/null >/dev/null 2>&1
 }
 
-# _acq_msb_stage_readonly_file NAME KITDIR GUESTPATH SRC — stage one trusted kit
-# code file onto the per-sandbox host-config dir so the guest sees it through the
-# READ-ONLY mount (ADR-0035 Mechanism 2), and echo the guest path it appears at.
-# Returns non-zero (and echoes nothing) on failure. The file is placed under a
-# `kit-files/<pathslug>.<crc>` subtree of the host-config dir (a direct
-# filesystem write, NOT acq_host_config_write, whose flat KEY charset forbids the
-# nested path). Staged 0555 on the host — defense in depth; the :ro mount is the
-# real guarantee. No chown: a :ro bind is readable/executable by the agent user
-# regardless of host owner.
 _acq_msb_stage_readonly_file() {
-  local name="$1" kitdir="$2" guestpath="$3" src="$4"
-  local cfgdir slug crc dest reldir="kit-files"
+  local name="$1" guestpath="$2" src="$3"
+  local cfgdir slug crc dest
   cfgdir=$(acq_host_config_dir msb "$name") || return 1
-  # Lossy slug + CRC of the guest path, matching the volume-name scheme
-  # (_acq_msb_volume_flags_from_records): map non-alnum to '-', squeeze runs, and
-  # append a CRC so two distinct paths that slug the same do not collide.
   slug=$(printf '%s' "${guestpath#/}" | tr -c 'A-Za-z0-9' '-' | tr -s '-')
   slug="${slug%-}"
   crc=$(printf '%s' "$guestpath" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
-  if ! mkdir -p "${cfgdir}/${reldir}" 2>/dev/null; then
-    acq_debug "msb readonly-stage: could not create ${cfgdir}/${reldir}"
-    return 1
-  fi
-  chmod 711 "$cfgdir" 2>/dev/null || true
-  chmod 711 "${cfgdir}/${reldir}" 2>/dev/null || true
-  dest="${cfgdir}/${reldir}/${slug}.${crc}"
-  cp -f "$src" "$dest" 2>/dev/null || { acq_debug "msb readonly-stage: cp failed: $src -> $dest"; return 1; }
+  mkdir -p "${cfgdir}/kit-files" 2>/dev/null || return 1
+  chmod 711 "$cfgdir" "${cfgdir}/kit-files" 2>/dev/null || true
+  dest="${cfgdir}/kit-files/${slug}.${crc}"
+  cp -f "$src" "$dest" 2>/dev/null || return 1
   chmod 0555 "$dest" 2>/dev/null || true
-  # The guest sees the host-config dir at ACQ_HOST_CONFIG_GUEST_DIR (:ro).
-  printf '%s/%s/%s.%s\n' "$ACQ_HOST_CONFIG_GUEST_DIR" "$reldir" "$slug" "$crc"
+  printf '%s/kit-files/%s.%s\n' "$ACQ_HOST_CONFIG_GUEST_DIR" "$slug" "$crc"
 }
 
-# _acq_msb_ro_rewrite_token TOKEN — echo TOKEN, or its read-only-mount equivalent
-# when TOKEN exactly equals a staged readonly file's declared guest path (ADR-0035
-# Mechanism 2). Whole-token match only (never substring), so a --flag value that
-# merely mentions the path is untouched. Bash 3.2 safe (parallel-array scan).
 _acq_msb_ro_rewrite_token() {
-  local _tok="$1" _i
-  for _i in ${_ACQ_MSB_RO_REWRITE_FROM[@]+"${!_ACQ_MSB_RO_REWRITE_FROM[@]}"}; do
-    if [ "$_tok" = "${_ACQ_MSB_RO_REWRITE_FROM[$_i]}" ]; then
-      printf '%s\n' "${_ACQ_MSB_RO_REWRITE_TO[$_i]}"
+  local token="$1" i
+  for i in ${_ACQ_MSB_RO_REWRITE_FROM[@]+"${!_ACQ_MSB_RO_REWRITE_FROM[@]}"}; do
+    if [ "$token" = "${_ACQ_MSB_RO_REWRITE_FROM[$i]}" ]; then
+      printf '%s\n' "${_ACQ_MSB_RO_REWRITE_TO[$i]}"
       return 0
     fi
   done
-  printf '%s\n' "$_tok"
+  printf '%s\n' "$token"
 }
 
 # Copy a host file into the guest and VERIFY it is readable there before
@@ -2146,10 +2013,6 @@ EOF
         ;;
       "__END__")
         reading=0
-        # ADR-0035 Mechanism 2: rewrite any argv token that names a readonly
-        # (trusted-code) kit file to its read-only-mount path, so startup runs the
-        # :ro copy, not a guest-writable one. No-op when the rewrite table is
-        # empty (the common case: no kit declared readonly files).
         if [ "${#_ACQ_MSB_RO_REWRITE_FROM[@]}" -gt 0 ] && [ "${#argv[@]}" -gt 0 ]; then
           local _ai
           for _ai in "${!argv[@]}"; do
@@ -2327,9 +2190,8 @@ _acq_msb_exec_flags_into() {
 
 # _acq_msb_exec_install NAME USER UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV... — run an
 # install-phase command, gated by a per-command marker (hash of argv) so it runs
-# once per sandbox even across re-applies. The marker is a key in the
-# host-authoritative config store (ADR-0035), so a passwordless-sudo guest cannot
-# forge it to suppress the install step.
+# once per sandbox even across re-applies. The marker is held in host config so
+# a passwordless-sudo guest cannot forge it to suppress the command.
 _acq_msb_exec_install() {
   local _name="$1" _user="$2" _uflagn="$3" _eflagn="$4"
   shift 4
@@ -2342,9 +2204,6 @@ _acq_msb_exec_install() {
   eval "_ef=(\${${_eflagn}[@]+\"\${${_eflagn}[@]}\"})"
 
   local marker
-  # Host-authoritative run-once gate (ADR-0035): a presence key in the host config
-  # store, keyed by the command's cksum, instead of a guest `touch`/`test -f` a
-  # passwordless-sudo agent could forge to SUPPRESS this install step.
   marker="install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
   if acq_host_config_has msb "$_name" "$marker"; then
     acq_debug "msb cmd[install] already done (marker hit): $*"
@@ -2652,14 +2511,8 @@ _acq_msb_startup_body_into() {
   fi
   _acq_msb_own_guard_tokens_into _own_guard_tok _own_env
 
-  # ADR-0035 Mechanism 2: build this spec's readonly-file rewrite table so the
-  # staged --script-path body (like the exec path) invokes trusted code from the
-  # :ro mount. Staging runs at create-flag assembly, before _acq_msb_apply_kit_dir
-  # populates the module-level table, so derive a LOCAL table from the same
-  # readonly files[] entries. The guest :ro path is derived by the same
-  # slug+crc scheme _acq_msb_stage_readonly_file uses (the file itself is staged
-  # later, during apply; here we only need the resulting guest path to rewrite
-  # the argv token).
+  # The create-time script is assembled before the normal apply path stages the
+  # files, so derive the same readonly path rewrite locally.
   local _ro_from=() _ro_to=() _frec _fpath _fsource _freadonly _fslug _fcrc
   while IFS= read -r _frec; do
     [ -n "$_frec" ] || continue
@@ -2701,8 +2554,6 @@ EOF
       "__END__")
         reading=0
         if [ "$phase" = "startup" ] && [ "${#argv[@]}" -gt 0 ]; then
-          # Rewrite readonly-file argv tokens to their :ro-mount path (whole-token
-          # match), so the staged body runs trusted code from the read-only mount.
           if [ "${#_ro_from[@]}" -gt 0 ]; then
             local _ai _aj _atok
             for _ai in "${!argv[@]}"; do
@@ -3274,20 +3125,12 @@ acq_backend_provision() {
   # by _acq_msb_vsock_flags_into when an ssh-agent forward is emitted. See ADR-0021.
   _ACQ_MSB_SSH_AGENT_FORWARDING=0
 
-  # Fetch each built-in kit and gather its create-time contributions.
+  # Fetch each selected kit and gather its create-time contributions.
   # Zscaler CA trust FIRST so later network-fetching kits (playbook clone, USAi
   # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
   local kitref kitdir
-  local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
-  # Include any extra kits (env-supplied) and CLI-supplied --kit refs.
-  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
-    local _extras=()
-    split_noglob _extras "$ACQ_EXTRA_KITS"
-    kits+=("${_extras[@]}")
-  fi
-  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
-    kits+=("${ACQ_CLI_KITS[@]}")
-  fi
+  _acq_msb_select_kits "$agent"
+  local kits=("${KITS[@]}")
 
   for kitref in "${kits[@]}"; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
@@ -3488,37 +3331,6 @@ EOF
         esac
       done
     fi
-  fi
-
-  # Allow-list the agent installer's registry host(s) so the (default-deny) guest
-  # egress permits the npm download. Only when we will actually install an agent
-  # (a known recipe exists); `shell` and unknown agents add no rule.
-  #
-  # De-dupe against the balanced set: when the baseline is ON, registry.npmjs.org
-  # is already allow-listed, so a second bare `allow@registry.npmjs.org` would be
-  # dead weight (both allow; no deny to shadow). We therefore skip any npm host
-  # that the balanced block ALREADY emitted a rule for, rather than skipping the
-  # whole block — an operator who overrides ACQ_MSB_NPM_HOSTS to an internal
-  # mirror NOT in the balanced set still gets its rule. Under the `strict` tier
-  # (or `open`) the balanced set is empty, so nothing is elided.
-  if _acq_msb_agent_has_install_recipe "$agent"; then
-    local _npm_host
-    for _npm_host in $ACQ_MSB_NPM_HOSTS; do
-      case "$_npm_host" in
-        ""|*[!A-Za-z0-9.*_-]*)
-          echo "acq(msb): warning: skipping non-hostname npm host: $_npm_host" >&2
-          continue
-          ;;
-      esac
-      # Already covered by a balanced rule? Skip the redundant bare allow.
-      case "$_balanced_hosts" in
-        *" ${_npm_host} "*)
-          acq_debug "msb: npm host ${_npm_host} already in balanced set; skipping redundant rule"
-          continue
-          ;;
-      esac
-      create_flags+=(--net-rule "allow@${_npm_host}")
-    done
   fi
 
   # TLS interception is REQUIRED for secret substitution: msb only swaps a
@@ -3752,27 +3564,18 @@ EOF
   _acq_msb_vsock_flags_into _vsock_flags
   [ "${#_vsock_flags[@]}" -gt 0 ] && create_flags+=("${_vsock_flags[@]}")
 
-  # Host-authoritative config mount (ADR-0035). Mount this sandbox's host config
-  # dir into the guest READ-ONLY at ACQ_HOST_CONFIG_GUEST_DIR. acq writes the
-  # sandbox's trusted config there on the HOST (agent, workspace, ssh-auth-sock,
-  # kit-env, gate markers); the guest can read but — because the mount is
-  # read-only, enforced by the VMM/mount layer — a passwordless-sudo agent cannot
-  # forge or tamper it. The host dir is created empty now so the create-time
-  # mount has a source; acq populates it during provisioning (post-create).
+  # Mount per-sandbox trusted configuration read-only. The guest can consume
+  # declared code and data here but cannot make acq trust a modified replacement.
   local _hcfg_dir _hcfg_host
   if _hcfg_dir=$(acq_host_config_dir msb "$name"); then
     mkdir -p "$_hcfg_dir" 2>/dev/null || true
     chmod 711 "$_hcfg_dir" 2>/dev/null || true
-    # --volume takes HOST:GUEST[:ro]; the host side is what native msb resolves on
-    # this machine (host_path → drive form under MSYS), the guest side is POSIX
-    # (ACQ_HOST_CONFIG_GUEST_DIR). See ADR-0029.
     if command -v host_path >/dev/null 2>&1; then
       _hcfg_host=$(host_path "$_hcfg_dir")
     else
       _hcfg_host="$_hcfg_dir"
     fi
     create_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
-    acq_debug "msb host-config mount: ${_hcfg_host} (host) -> ${ACQ_HOST_CONFIG_GUEST_DIR} (guest, ro)"
   fi
 
   # Credentials: read from the acq-owned secret store (keychain/file), scoped to
@@ -3885,8 +3688,8 @@ EOF
   acq_spin_stop "Waiting for the sandbox to finish booting"
   acq_debug "msb provision: exec-ready OK ($name)"
 
-  # Fresh create: stale host-side state from a same-named sandbox removed outside
-  # acq must not carry over into this new instance.
+  # A same-named sandbox removed outside acq can leave host state behind. Clear
+  # instance-scoped values before this fresh provision records replacement values.
   acq_host_config_clear_instance_state msb "$name"
 
   # Verify the kits' runtime prerequisites are present in the base image
@@ -3917,37 +3720,10 @@ EOF
   acq_spin_stop "Preparing the agent user"
   acq_debug "msb provision: agent user ready ($name)"
 
-  # Ensure an OCI container engine (podman) so agents can run OCI images
-  # (docker run / docker compose). Idempotent + marker-gated; FAILS SOFT (a
-  # warning, never aborting provision) if the engine cannot be installed — e.g.
-  # the OS package mirror is unreachable under a narrowed egress. See ADR-0020.
-  acq_debug "msb provision: ensuring OCI engine ($name)"
-  if [ -n "$ACQ_MSB_ENSURE_OCI" ]; then
-    acq_spin_start "Ensuring an OCI engine (podman)"
-    _acq_msb_ensure_oci "$name"
-    acq_spin_stop "Ensuring an OCI engine (podman)"
-  fi
-  acq_debug "msb provision: OCI engine step done ($name)"
-
-  # Install the requested agent binary (sbx bakes it into the template image; on
-  # a plain msb base acq must install it). Idempotent + marker-gated; a no-op for
-  # `shell`, a clear warning for an agent with no known recipe.
-  acq_debug "msb provision: installing agent '$agent' ($name)"
-  if _acq_msb_agent_has_install_recipe "$agent"; then
-    acq_spin_start "Installing the '$agent' agent"
-    _acq_msb_install_agent "$name" "$agent"
-    acq_spin_stop "Installing the '$agent' agent"
-  else
-    _acq_msb_install_agent "$name" "$agent"
-  fi
-  acq_debug "msb provision: agent install step done ($name)"
-
   # Record which agent this sandbox runs, so acq_backend_attach (which only gets
   # the sandbox name) knows what to launch — the sbx equivalent is that
-  # `sbx run --name` re-launches the agent baked in at create. Written to the
-  # HOST-authoritative config store (ADR-0035), not a guest file: a
-  # passwordless-sudo agent could otherwise rewrite a guest marker and change
-  # which binary acq relaunches. The value is still charset-checked defensively.
+  # `sbx run --name` re-launches the agent baked in at create. Store the value on
+  # the host so a passwordless-sudo guest cannot change which binary acq launches.
   case "$agent" in
     *[!a-z-]*) : ;;  # defensive: never record an odd token
     *) acq_host_config_write msb "$name" agent "$agent" || true ;;
@@ -3955,12 +3731,13 @@ EOF
 
   # Record the guest workspace path too. attach only gets the sandbox NAME, so it
   # cannot recompute the host→guest mapping (which now mirrors the host path);
-  # persist it (host-side, ADR-0035) so a name-only re-attach cds into the right
-  # place. The path was validated as an existing host dir above; the charset
-  # guard is kept for defense-in-depth even though the value no longer enters a
-  # guest sh -c string.
+  # persist it so a name-only re-attach cds into the right place. The path was
+  # validated as an existing host dir above; guard the charset before it enters a
+  # host config key.
   if [ -n "$ACQ_MSB_GUEST_WORKSPACE" ]; then
     case "$ACQ_MSB_GUEST_WORKSPACE" in
+      # Guest-side paths are POSIX (canonicalize_path, ADR-0029), so the
+      # conservative charset holds; only a literal ' would break the quoting.
       *[!A-Za-z0-9._/-]*)
         acq_debug "msb: not recording unsafe guest workspace path: $ACQ_MSB_GUEST_WORKSPACE" ;;
       *)
@@ -4000,7 +3777,7 @@ EOF
   # Record host-side bundle provenance now the built-in bundle is applied.
   # Best-effort: a provenance write failure never affects the
   # sandbox. Reached only when provision did not abort earlier under set -e.
-  acq_provenance_write msb "$name" || true
+  acq_provenance_write msb "$name" "$agent" || true
   acq_workspace_record_write msb "$name" "$_first_host" || true
 
   # Persist the CLI (`--kit`) and extra (ACQ_EXTRA_KITS) kit refs so a later
@@ -4013,168 +3790,6 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# _acq_msb_agent_has_install_recipe AGENT — 0 if acq knows how to install AGENT
-# ---------------------------------------------------------------------------
-# `shell` needs no binary; today only `opencode` has a recipe. Others are baked
-# into ACQ_MSB_IMAGE by the user (warned at install time). Keep this in sync with
-# _acq_msb_install_agent's case.
-_acq_msb_agent_has_install_recipe() {
-  acq_agent_has_msb_install_recipe "$1"
-}
-
-# _acq_msb_safe_agent_token AGENT -> 0 if AGENT is a safe agent token to
-# interpolate into a shell command. Agent tokens are short lowercase names
-# (opencode, claude, shell, …); restrict to [a-z-] so a value can never break
-# out of the `sh -c "command -v '$agent'"` single-quoting (defense against a
-# `acq create "x';…'"` arg or a stale host-config value). Callers
-# that build an `sh -c` string with $agent MUST gate on this first.
-_acq_msb_safe_agent_token() {
-  acq_agent_safe_token "$1"
-}
-
-# ---------------------------------------------------------------------------
-# _acq_msb_report_npm_install_failure NAME — diagnose a failed in-guest npm
-# install, distinguishing a genuinely-missing npm from an UNREACHABLE registry.
-# ---------------------------------------------------------------------------
-# A network-cut install (corporate TLS interception → curl (56) unexpected eof /
-# HTTP 000, or a resolver that can't see the registry → NXDOMAIN) otherwise reads
-# identically to "node/npm isn't installed", which sends users down the wrong
-# path (reinstalling node on the HOST, which never touches the guest). Probe the
-# actual cause in-guest and print the message that matches it.
-#
-# Branches:
-#   - npm binary absent in-guest      → genuinely-missing message.
-#   - npm present + registry probe:
-#       unresolved (curl exit 6)       → registry name did not resolve; DNS.
-#       unreachable (curl exit / 000)  → TLS/network cut; point at KFM §30.
-#       responded / inconclusive       → registry rejected it or a real npm error.
-# Reuses the shared _classify_key_status fingerprint so the npm path and the
-# USAi path classify curl results identically.
-_acq_msb_report_npm_install_failure() {
-  local name="$1"
-  echo "acq(msb): warning: 'npm install -g $ACQ_MSB_OPENCODE_PKG' failed in '$name'." >&2
-  echo "acq(msb):   opencode will not be available on attach." >&2
-
-  # Is npm actually present in the guest? If not, that is the cause outright.
-  if ! _acq_msb_cli exec "$name" -u 0 -- sh -c 'command -v npm' >/dev/null 2>&1; then
-    echo "acq(msb):   Cause: npm is not present in the guest. Use a base image that" >&2
-    echo "acq(msb):   ships node/npm, or bake opencode into ACQ_MSB_IMAGE." >&2
-    return 0
-  fi
-
-  # npm exists — classify reachability of the registry from INSIDE the guest,
-  # using the same curl `<http_code>|<exit>` fingerprint as the USAi key probe.
-  # Probe the first configured registry host over HTTPS; any HTTP response (even
-  # a 404) proves the connection completed, i.e. NOT a network cut.
-  local _reg _first_host _raw _status
-  _first_host=""
-  for _reg in $ACQ_MSB_NPM_HOSTS; do _first_host="$_reg"; break; done
-  if [ -n "$_first_host" ] && command -v _classify_key_status >/dev/null 2>&1; then
-    _raw=$(_acq_msb_cli exec "$name" -u 0 -- sh -c \
-      "curl -sS -o /dev/null -w '%{http_code}' https://${_first_host}/; printf '|%s' \"\$?\"" \
-      2>/dev/null || true)
-    _status=$(_classify_key_status "$_raw")
-    case "$_status" in
-      unresolved)
-        echo "acq(msb):   Cause: the npm registry host (${_first_host}) did not RESOLVE from" >&2
-        echo "acq(msb):   the guest. This is DNS, not a missing npm. Point the guest at a" >&2
-        echo "acq(msb):   usable resolver via ACQ_MSB_DNS_NAMESERVER, or set ACQ_MSB_NPM_HOSTS" >&2
-        echo "acq(msb):   to a mirror the guest can resolve. See docs/KNOWN_FAILURE_MODES.md §30." >&2
-        return 0
-        ;;
-      unreachable)
-        echo "acq(msb):   Cause: the npm registry host (${_first_host}) is NOT REACHABLE from" >&2
-        echo "acq(msb):   the guest — the connection was cut (TLS 'unexpected eof' / HTTP 000)," >&2
-        echo "acq(msb):   NOT a missing npm. This is a network / TLS-interception problem." >&2
-        echo "acq(msb):   See docs/KNOWN_FAILURE_MODES.md §30 for diagnosis." >&2
-        return 0
-        ;;
-    esac
-  fi
-
-  # npm present and the registry either responded (an HTTP error) or the probe
-  # was inconclusive: give neutral guidance without implying node is missing.
-  echo "acq(msb):   npm is present and the registry appears reachable, so the install" >&2
-  echo "acq(msb):   itself failed (registry rejected the request, disk, or a package" >&2
-  echo "acq(msb):   error). Re-run with ACQ_DEBUG=1 to see npm's output, set" >&2
-  echo "acq(msb):   ACQ_MSB_NPM_HOSTS for an internal mirror, or bake opencode into" >&2
-  echo "acq(msb):   ACQ_MSB_IMAGE." >&2
-  return 0
-}
-
-# ---------------------------------------------------------------------------
-# _acq_msb_install_agent NAME AGENT — install the agent binary into the guest
-# ---------------------------------------------------------------------------
-# sbx's agent templates ship the binary; msb runs a plain base, so acq installs
-# it. For `opencode`, install the npm package globally as root (node is a
-# verified base prerequisite; the registry host was allow-listed at create).
-# Idempotent: skip if the binary is already present (a pre-baked ACQ_MSB_IMAGE),
-# and marker-gate so a re-apply doesn't reinstall. `shell` is a no-op; an unknown
-# agent is a non-fatal warning (the sandbox still comes up; the user can bake the
-# binary into ACQ_MSB_IMAGE).
-_acq_msb_install_agent() {
-  local name="$1" agent="$2"
-
-  case "$agent" in
-    shell|"") acq_debug "msb: agent '$agent' needs no binary install"; return 0 ;;
-  esac
-
-  # Charset-guard the agent token before it enters any `sh -c "… '$agent' …"`.
-  # `acq create <agent> <path>` does not go through is_known_agent, so a hostile
-  # token (e.g. "x';touch /tmp/pwn;'") could otherwise break the single-quoting
-  # and run as root. Refuse anything outside [a-z-].
-  if ! _acq_msb_safe_agent_token "$agent"; then
-    echo "acq(msb): refusing agent name with unexpected characters: '$agent'" >&2
-    return 0
-  fi
-
-  if ! _acq_msb_agent_has_install_recipe "$agent"; then
-    # Maybe the base image already provides it — don't warn if so.
-    if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
-      acq_debug "msb: agent '$agent' already present in base image"
-      return 0
-    fi
-    echo "acq(msb): warning: no install recipe for agent '$agent' and it is not in the" >&2
-    echo "acq(msb):   base image. Attach will fail to launch it. Bake '$agent' into" >&2
-    echo "acq(msb):   ACQ_MSB_IMAGE, or use an agent acq can install (e.g. opencode)." >&2
-    return 0
-  fi
-
-  # Already installed (pre-baked image or a prior apply)? Then done.
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
-    acq_debug "msb: agent '$agent' already installed in $name"
-    return 0
-  fi
-
-  local marker="agent-installed-${agent}"
-  if acq_host_config_has msb "$name" "$marker"; then
-    return 0
-  fi
-
-  case "$agent" in
-    opencode)
-      acq_debug "msb: installing opencode ($ACQ_MSB_OPENCODE_PKG) via npm in $name"
-      # Install globally as root so the binary lands on the system PATH for every
-      # user (the agent runs as `agent`). The package spec is passed as a single
-      # argv element (never re-split by a shell); ACQ_MSB_OPENCODE_PKG is a
-      # controlled tunable. `npm` is present (node prerequisite). npm needs the
-      # registry host, allow-listed at create.
-      if ! _acq_msb_cli exec "$name" -u 0 -- npm install -g --no-fund --no-audit "$ACQ_MSB_OPENCODE_PKG" >/dev/null 2>&1; then
-        _acq_msb_report_npm_install_failure "$name"
-        return 0
-      fi
-      ;;
-  esac
-
-  # Verify the binary is now on PATH before recording the marker.
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "command -v '$agent'" >/dev/null 2>&1; then
-    acq_host_config_write msb "$name" "$marker" 1 || true
-    acq_debug "msb: agent '$agent' installed and on PATH in $name"
-  else
-    echo "acq(msb): warning: installed '$agent' but it is not on PATH in '$name'." >&2
-  fi
-}
-
 # ---------------------------------------------------------------------------
 # _acq_msb_ensure_agent_user NAME — satisfy the sbx/Docker base-image contract
 # ---------------------------------------------------------------------------
@@ -4198,9 +3813,6 @@ _acq_msb_install_agent() {
 # _acq_msb_exec_command) with HOME exported.
 _acq_msb_ensure_agent_user() {
   local name="$1"
-  # Host-authoritative run-once gate (ADR-0035): the user/sudoers setup is gated
-  # on a host config key, not a guest marker a passwordless-sudo agent could
-  # pre-create to SKIP the setup.
   local marker="agent-user-ready"
   if acq_host_config_has msb "$name" "$marker"; then
     # The user exists from an earlier run, but its login shell may predate the
@@ -4298,13 +3910,15 @@ _acq_msb_ensure_agent_user() {
 # /bin/sh otherwise — a stock bash-less image keeps working exactly as today.
 # Also writes a Debian-skel-style ~/.profile bridge: a LOGIN bash reads only
 # ~/.profile, so without the bridge even `bash -l` skips ~/.bashrc on images
-# whose baked home ships no ~/.profile. The bare `export SHELL=/bin/sh` line
-# earlier acq versions appended is removed wherever it appears (it stopped a
-# login bash cold); a ~/.profile with any other content is left alone (image/
-# user-owned — Debian's own skel already bridges). Idempotent and re-run on
-# every provision AND heal (even on an agent-user-ready marker hit), which is
-# what upgrades sandboxes created before this setup. Fail-soft: a sync failure
-# leaves sessions on the /bin/sh fallback, never blocks the run.
+# whose baked home ships no ~/.profile. The bridge also sources kit-owned
+# ~/.rc.d/*.sh snippets for bash in deterministic lexical order. The bare
+# `export SHELL=/bin/sh` line earlier acq versions appended is removed wherever
+# it appears (it stopped a login bash cold); a ~/.profile with any other content
+# is left alone (image/user-owned — Debian's own skel already bridges).
+# Idempotent and re-run on every provision AND heal (even on an agent-user-ready
+# marker hit), which is what upgrades sandboxes created before this setup.
+# Fail-soft: a sync failure leaves sessions on the /bin/sh fallback, never blocks
+# the run.
 _acq_msb_ensure_agent_shell() {
   local name="$1" shell
   # Probe for bash host-side so the target is decided once and threaded to the
@@ -4314,7 +3928,9 @@ _acq_msb_ensure_agent_shell() {
   shell=$(_acq_msb_safe_shell_or_sh "$shell")
   acq_debug "msb: syncing agent login shell to $shell in $name"
   # NOTE: single-quoted `sh -c` string — no single quotes inside (they would
-  # close the outer quote); `echo` writes the profile lines for the same reason.
+  # close the outer quote). The rc.d-sourcing block IS single-quote-bearing, but
+  # it is passed as a positional arg ($2), never interpolated into this string,
+  # so its quoting is inert here. `echo`/`printf` write the profile lines.
   #
   # The bridge exports the shell passwd ACTUALLY holds after the sync attempt
   # (re-read into `current`), not the requested target: an image with bash but
@@ -4322,12 +3938,30 @@ _acq_msb_ensure_agent_shell() {
   # about the shell sessions really run.
   #
   # The rewrite is bounded to a file acq owns outright: missing/empty, or the
-  # marker present AND still just the bridge (3 lines). Lines other tools
-  # append below the bridge (rustup et al) must survive the heal, so a
-  # marker-plus-appended file is left untouched.
+  # marker present AND still just the bridge (the header lines + shared rc-block
+  # line count, computed host-side). Lines other tools append below the bridge
+  # (rustup et al) must survive the heal, so a marker-plus-appended file is left
+  # untouched.
+  # The rc.d-sourcing block is the ONE shared bridge text from common.sh
+  # (acq_login_profile_rc_block); it is threaded to the guest as $2 so the sbx
+  # and msb bridges cannot silently drift (ADR-0030). The guest writes the 3
+  # fixed header lines + the shared block via a single here-doc-free `printf`,
+  # then re-owns the file to the agent. `_acq_rc_block` is captured host-side so
+  # the guest receives it as inert data (never re-expanded on the host).
+  local _acq_rc_block
+  _acq_rc_block=$(acq_login_profile_rc_block)
+  # Rewrite bound: 3 fixed header lines + the shared block's line count. Counted
+  # host-side so the "still just the bridge acq owns" heal guard stays exact if
+  # the shared block grows (rather than a hard-coded literal that would silently
+  # go stale). Appended lines below the bridge (rustup et al) push the total
+  # past this bound and are left untouched.
+  local _acq_bridge_lines
+  _acq_bridge_lines=$(( 3 + $(printf '%s\n' "$_acq_rc_block" | wc -l) ))
   _acq_msb_cli exec "$name" -u 0 -- sh -c '
     set -e
     target="$1"
+    rc_block="$2"
+    max_lines="$3"
     current=$({ getent passwd agent 2>/dev/null || grep "^agent:" /etc/passwd 2>/dev/null; } | head -n1 | cut -d: -f7)
     if [ "$current" != "$target" ]; then
       if command -v usermod >/dev/null 2>&1; then
@@ -4342,16 +3976,17 @@ _acq_msb_ensure_agent_shell() {
     if [ -f "$profile" ]; then
       sed -i "\|^export SHELL=/bin/sh\$|d" "$profile" 2>/dev/null || true
     fi
-    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le 3 ]; }; then
+    if [ ! -s "$profile" ] || { grep -qs acq-login-profile "$profile" && [ "$(wc -l < "$profile")" -le "$max_lines" ]; }; then
       {
-        echo "# acq-login-profile: written by acq (rewritten on heal; do not edit these 3 lines)."
+        echo "# acq-login-profile: written by acq (rewritten on heal; do not edit this block)."
         echo "export SHELL=$current"
         echo "if [ -n \"\$BASH_VERSION\" ] && [ -f \"\$HOME/.bashrc\" ]; then . \"\$HOME/.bashrc\"; fi"
+        printf "%s\n" "$rc_block"
       } > "$profile"
       _agrp=$(id -gn agent 2>/dev/null || echo agent)
       chown "agent:${_agrp}" "$profile"
     fi
-  ' sh "$shell" </dev/null >/dev/null 2>&1 || {
+  ' sh "$shell" "$_acq_rc_block" "$_acq_bridge_lines" </dev/null >/dev/null 2>&1 || {
     echo "acq(msb): warning: could not sync the agent login shell in '$name';" >&2
     echo "acq(msb):   interactive sessions fall back to /bin/sh." >&2
     return 0
@@ -4476,8 +4111,8 @@ _acq_msb_check_socat() {
 # exposes the forwarded host ssh-agent as a unix socket at
 # ACQ_MSB_SSH_AGENT_GUEST_SOCK. The --vsock route persists across msb stop/start,
 # but the socat process dies on stop, so this runs on provision AND on
-# acq_backend_start (mirrors _acq_msb_grant_oci_devs). Fail-soft: warns, never
-# aborts. Works from EITHER the in-provision flag OR the persisted marker (start
+# acq_backend_start. Fail-soft: warns, never aborts. Works from EITHER the
+# in-provision flag OR the persisted host key (start
 # has no provision flag set), so the guest sock path is resolved from whichever
 # source is authoritative for the call. See ADR-0021.
 _acq_msb_start_ssh_agent_bridge() {
@@ -4486,7 +4121,7 @@ _acq_msb_start_ssh_agent_bridge() {
     _sock="$ACQ_MSB_SSH_AGENT_GUEST_SOCK"
   else
     # No provision ran this path (e.g. acq_backend_start): read the persisted
-    # marker recorded at provision. Empty marker => forwarding not configured.
+    # key recorded at provision. Empty key => forwarding not configured.
     _sock=$(_acq_msb_ssh_auth_sock_for "$name")
     [ -n "$_sock" ] || return 0
   fi
@@ -4505,10 +4140,8 @@ _acq_msb_start_ssh_agent_bridge() {
     return 0
   }
 
-  # Record the guest sock path so attach/exec/start can resolve SSH_AUTH_SOCK
-  # even when no provision flag is set. Only written when forwarding is active.
-  # Host-authoritative (ADR-0035): held on the host, not a guest marker a
-  # sudo agent could repoint. $_sock is acq's own constant.
+  # Keep the guest sock path host-side so attach/exec/start cannot be redirected
+  # by a passwordless-sudo guest. Only written when forwarding is active.
   acq_host_config_write msb "$name" ssh-auth-sock "$_sock" || true
   acq_debug "msb: ssh-agent bridge started at $_sock (vsock port $_port) in $name"
 
@@ -4589,14 +4222,10 @@ _acq_msb_warn_if_agent_unreachable() {
 
 # _acq_msb_ssh_auth_sock_for NAME — echo the recorded guest ssh-agent sock path
 # (the SSH_AUTH_SOCK value git/ssh should use in the guest), or empty when
-# forwarding was never configured for this sandbox. Read from the HOST config
-# store (ADR-0035) so run/attach on a name-only re-entry still find it, and a
-# sudo guest cannot repoint SSH_AUTH_SOCK. See ADR-0021.
+# forwarding was never configured for this sandbox. Read from host config so
+# run/attach on a name-only re-entry still find it. See ADR-0021.
 _acq_msb_ssh_auth_sock_for() {
   local name="$1"
-  # The host read never fails the caller (empty when unset), so a session verb
-  # under `set -euo pipefail` survives an absent value (forwarding never
-  # configured) and takes the documented no-flag fallback.
   acq_host_config_read msb "$name" ssh-auth-sock | tr -d '[:space:]'
 }
 
@@ -4633,22 +4262,18 @@ EOF
 }
 
 # _acq_msb_persisted_kit_env_into ARRVAR NAME — read the kit environment[] entries
-# persisted in the HOST config store (ADR-0035) by _acq_msb_apply_kit_dir into the
-# array named ARRVAR as NAME=value tokens (see ADR-0011). Empty array when the key
-# is absent or no kit declared environment[]. Array passed by name (bash 3.2
-# compat).
+# persisted in the host config store by _acq_msb_apply_kit_dir into the array named
+# ARRVAR as NAME=value tokens (see ADR-0011). Empty array when the marker is
+# absent or no kit declared environment[]. Array passed by name (bash 3.2 compat).
 #
-# The stored content is kit-derived data: re-validate each NAME (same
-# ^[A-Za-z_][A-Za-z0-9_]*$ charset kit_spec_env enforces) so a malformed line
-# cannot smuggle an option-shaped or quote-bearing token, and keep the LAST value
-# for a duplicate name (kits append in application order, so a later kit overrides
-# an earlier one).
+# Values remain kit-derived, so re-validate each NAME (same
+# ^[A-Za-z_][A-Za-z0-9_]*$ charset kit_spec_env enforces) and keep the LAST value
+# for duplicates (kits append in application order, so a later kit overrides).
 _acq_msb_persisted_kit_env_into() {
   local _arrn="$1" _name="$2"
   eval "$_arrn=()"
-  # The host read never fails the caller: an absent value (pre-kit-env sandbox,
-  # or no kit declared environment[]) yields an empty result, not a killed
-  # session verb under `set -euo pipefail`.
+  # An absent key (pre-kit-env sandbox, or no kit declared environment[]) yields
+  # an empty result, not a failed session verb.
   local _kvs
   _kvs=$(acq_host_config_read msb "$_name" kit-env)
   [ -n "$_kvs" ] || return 0
@@ -4690,8 +4315,8 @@ _acq_msb_kit_env_flags_into() {
 # forward on a RUNNING sandbox that acq is re-attaching to. See ADR-0021.
 #
 # WHY THIS EXISTS: the provision path wires the forward (emit --vsock, start the
-# socat bridge, write the host-config ssh-auth-sock key), and the
-# stopped→resume path (acq_backend_start) restarts the bridge from that value.
+# socat bridge, write the host-authoritative ssh-auth-sock key), and the
+# stopped→resume path (acq_backend_start) restarts the bridge from that marker.
 # But re-attaching to an ALREADY-RUNNING sandbox goes through neither: the heal
 # loop skips acq_backend_start (the sandbox is already running), so nothing
 # re-drives forwarding. That left two live gaps where the guest process env got
@@ -4782,254 +4407,6 @@ _acq_msb_has_ssh_agent_vsock_route() {
 }
 
 # ---------------------------------------------------------------------------
-# _acq_msb_grant_oci_devs NAME — grant the agent access to the device nodes
-#                                rootless podman needs (/dev/net/tun, /dev/fuse)
-# ---------------------------------------------------------------------------
-# Rootless podman needs unprivileged access to two root-only device nodes on the
-# default image:
-#   - /dev/net/tun (crw------- root root): the network backend (netavark→pasta,
-#     or slirp4netns) must open it to set up container networking.
-#   - /dev/fuse (crw------- root root): the fuse-overlayfs storage driver (our
-#     PREFERRED driver on the overlay root) must open it to mount image layers.
-#     Without it `podman info` still passes but `podman run` fails at mount time
-#     with "fuse: failed to open /dev/fuse: Permission denied" — the exact
-#     info-OK-but-run-FAILS split seen on the host.
-# Group-scope each to the agent (chown root:agent, chmod 0660) — inside the
-# microVM only (the security boundary), narrower than world-writable, no new host
-# attack surface.
-#
-# Called on EVERY provision pass (before the OCI install marker gate) AND on
-# restart (acq_backend_start), because /dev is a devtmpfs re-created at each boot
-# — a one-time grant would be lost after `msb start`. Idempotent, cheap, and a
-# best-effort no-op for any device that is absent or when ENSURE_OCI is disabled.
-_acq_msb_grant_oci_devs() {
-  local name="$1"
-  [ -n "$ACQ_MSB_ENSURE_OCI" ] || return 0
-  _acq_msb_cli exec "$name" -u 0 -- sh -c '
-    for _dev in /dev/net/tun /dev/fuse; do
-      if [ -e "$_dev" ]; then
-        chown root:agent "$_dev" 2>/dev/null || true
-        chmod 0660 "$_dev" 2>/dev/null || true
-      fi
-    done' \
-    >/dev/null 2>&1 || true
-}
-
-# ---------------------------------------------------------------------------
-# _acq_msb_ensure_oci NAME — ensure an OCI container engine (podman) is usable
-# ---------------------------------------------------------------------------
-# Guarantee agents can run OCI images inside the sandbox (`docker run`,
-# `docker compose up`, etc.). See the ACQ_MSB_ENSURE_OCI block above for the
-# rationale (podman over dind; ROOTLESS podman run as the agent user; alias
-# docker->podman). This step is idempotent + marker-gated and FAILS SOFT: if the
-# engine cannot be provisioned (mirror unreachable under a narrowed egress,
-# unknown package manager, rootless prereqs absent, etc.) it warns and returns 0
-# — provision continues, OCI is simply unavailable, exactly like the
-# agent-install and prereq-check steps. The package INSTALL runs as root
-# (`-u 0`, needed to install), but the engine RUNS rootless as the agent user.
-_acq_msb_ensure_oci() {
-  local name="$1"
-  [ -n "$ACQ_MSB_ENSURE_OCI" ] || return 0
-
-  # Grant the rootless-podman device nodes (/dev/net/tun for networking,
-  # /dev/fuse for the fuse-overlayfs storage driver) on EVERY provision pass,
-  # BEFORE the install-marker short-circuit below. /dev is a devtmpfs re-created
-  # each boot, so this must not be gated behind the (persistent) install marker,
-  # and it is also re-applied on restart from acq_backend_start.
-  _acq_msb_grant_oci_devs "$name"
-
-  local marker="oci-ready"
-  if acq_host_config_has msb "$name" "$marker"; then
-    return 0
-  fi
-
-  # ACQ_MSB_PODMAN_PKGS is operator-controlled config, but it is interpolated
-  # into a root `sh -c` string below, so charset-guard it (package names are
-  # word-safe: letters, digits, . _ + - and spaces). Refuse anything else rather
-  # than risk shell injection into the elevated install.
-  case "$ACQ_MSB_PODMAN_PKGS" in
-    *[!A-Za-z0-9._+\ -]*)
-      echo "acq(msb): warning: ACQ_MSB_PODMAN_PKGS contains unsafe characters; skipping OCI setup." >&2
-      return 0
-      ;;
-  esac
-
-  acq_debug "msb: ensuring an OCI engine (podman) in $name"
-
-  # Root setup phase: install podman if absent (distro-detected, non-interactive),
-  # configure a storage driver that works on msb's overlay root, grant the agent
-  # access to /dev/net/tun (rootless networking needs it), write a Docker-Hub-first
-  # registries config, and wire the docker->podman alias. The engine itself RUNS
-  # ROOTLESS as the agent (verified separately, below) — only this install/config
-  # phase needs root. The whole block is best-effort; a non-zero exit is caught
-  # below and treated as non-fatal.
-  #
-  # The default image ships a (non-functional) docker CLI, so rather than gate on
-  # its absence we place our wrapper in /usr/local/bin (ahead of /usr/bin on the
-  # default PATH) to SHADOW it — the bundled docker talks to a dead socket,
-  # whereas our wrapper routes to the working podman engine. We overwrite our own
-  # wrapper idempotently but never touch the base image's /usr/bin/docker.
-  #
-  # STORAGE DRIVER: msb's sandbox root filesystem is itself an overlay mount
-  # (/.msb/rootfs/...). podman's default KERNEL `overlay` graph driver CANNOT stack
-  # on an overlay root — `podman info` fails with "'overlay' is not supported over
-  # overlayfs, a mount_program is required". This applies to BOTH rootful and
-  # rootless. So we write /etc/containers/storage.conf (honored by rootless as its
-  # lowest-precedence source) selecting a driver that works on an overlay root:
-  #   - PREFER `overlay` + `mount_program=fuse-overlayfs` when fuse-overlayfs is
-  #     present (msb provides /dev/fuse; this is the fast, thin-on-disk path), else
-  #   - FALL BACK to `vfs`, which works everywhere with no extra package or
-  #     /dev/fuse (correct but disk-heavy — full copy per layer).
-  #
-  # ROOTLESS NETWORKING: rootless podman's network backend (netavark→pasta, or
-  # slirp4netns) must open /dev/net/tun, which is root-only (crw------- root root)
-  # on the default image. We group-scope it to the agent (chown root:agent, 0660)
-  # so the unprivileged agent can set up container networking. This is inside the
-  # microVM only (the security boundary) — no new host attack surface. Applied on
-  # EVERY provision pass (outside the install marker gate) because the device node
-  # can be re-created with default perms across restarts.
-  #
-  # REGISTRY RESOLUTION (Docker-Hub-first, ADR-0020): stock podman resolves many
-  # unadorned short names to quay.io (e.g. `hello-world` -> quay.io/podman/hello)
-  # and has no default unqualified search registry. Users migrating from Docker
-  # assume `docker run nginx` means Docker Hub. So we write a system
-  # registries.conf setting unqualified-search-registries=["docker.io"] +
-  # short-name-mode="$SHORT_NAME_MODE", and a shortnames drop-in remapping the
-  # podman `hello`/`hello-world` aliases back to docker.io/library/hello-world.
-  # This diverges from stock podman deliberately to reduce migration burden.
-  #
-  # SHORT-NAME MODE (PR #302 review): the default is "enforcing", NOT permissive.
-  # Because there is a single search registry (docker.io), unqualified names STILL
-  # resolve deterministically to Docker Hub — migration ergonomics are preserved.
-  # "enforcing" only fails closed on interactively-ambiguous short names instead
-  # of silently resolving them, which is the least-privilege / prompt-injection
-  # defense a federal sandbox wants: an injected `docker run nginx` cannot be
-  # silently substituted (typosquatting / image substitution) without a qualified
-  # name or an explicit alias. Operators MAY opt into "permissive" (removing that
-  # guardrail) via ACQ_MSB_SHORT_NAME_MODE; see the env-var comment above.
-  #
-  # We add fuse-overlayfs + the rootless prereqs (uidmap, passt, slirp4netns) to
-  # the install set so the preferred path is available on the default (apt) image;
-  # if the mirror lacks fuse-overlayfs the vfs fallback still yields a working
-  # engine.
-  if _acq_msb_cli exec "$name" -u 0 -e "PODMAN_PKGS=$ACQ_MSB_PODMAN_PKGS" -e "SHORT_NAME_MODE=$ACQ_MSB_SHORT_NAME_MODE" -- sh -c '
-    set -e
-    # 1) Ensure the podman binary is present (idempotent).
-    if ! command -v podman >/dev/null 2>&1; then
-      if command -v apt-get >/dev/null 2>&1; then
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update
-        # shellcheck disable=SC2086
-        apt-get install -y --no-install-recommends $PODMAN_PKGS
-      elif command -v dnf >/dev/null 2>&1; then
-        # shellcheck disable=SC2086
-        dnf install -y $PODMAN_PKGS
-      elif command -v apk >/dev/null 2>&1; then
-        # shellcheck disable=SC2086
-        apk add --no-cache $PODMAN_PKGS
-      else
-        echo "acq(msb): no supported package manager (apt-get/dnf/apk) to install podman" >&2
-        exit 1
-      fi
-    fi
-    # 2) Select a storage driver that works on msb'"'"'s overlay root. Only write
-    #    the config if we have not already (idempotent); do not clobber an operator
-    #    file that already names a driver. Prefer fuse-overlayfs, else vfs.
-    if ! grep -q '"'"'^[[:space:]]*driver'"'"' /etc/containers/storage.conf 2>/dev/null; then
-      mkdir -p /etc/containers
-      _fuse=""
-      for _c in /usr/bin/fuse-overlayfs /usr/local/bin/fuse-overlayfs /bin/fuse-overlayfs; do
-        [ -x "$_c" ] && _fuse="$_c" && break
-      done
-      if [ -z "$_fuse" ] && command -v fuse-overlayfs >/dev/null 2>&1; then
-        _fuse=$(command -v fuse-overlayfs)
-      fi
-      if [ -n "$_fuse" ] && [ -e /dev/fuse ]; then
-        printf "[storage]\ndriver = \"overlay\"\n[storage.options.overlay]\nmount_program = \"%s\"\n" "$_fuse" \
-          > /etc/containers/storage.conf
-      else
-        printf "[storage]\ndriver = \"vfs\"\n" > /etc/containers/storage.conf
-      fi
-    fi
-    # 3) Grant the agent access to /dev/net/tun + /dev/fuse for rootless podman —
-    #    handled by _acq_msb_grant_oci_devs (called un-gated above AND on restart),
-    #    NOT here, because /dev is a devtmpfs re-created each boot: a grant baked
-    #    behind the install marker would be lost after `msb start`. (No-op here.)
-    # 4) Docker-Hub-first registry resolution (ADR-0020). System-level so it
-    #    applies to the rootless agent (read as the lowest-precedence source).
-    #    Idempotent: overwrite our own files each pass.
-    mkdir -p /etc/containers/registries.conf.d
-    printf "unqualified-search-registries = [\"docker.io\"]\nshort-name-mode = \"$SHORT_NAME_MODE\"\n" \
-      > /etc/containers/registries.conf.d/00-acq-docker-first.conf
-    printf "[aliases]\n\"hello-world\" = \"docker.io/library/hello-world\"\n\"hello\" = \"docker.io/library/hello-world\"\n" \
-      > /etc/containers/registries.conf.d/01-acq-shortnames.conf
-    # 5) Alias docker -> podman in /usr/local/bin (ahead of /usr/bin on PATH), so
-    #    `docker run …` and `docker compose …` route to the podman engine. A tiny
-    #    exec wrapper (not a symlink) so `docker compose` -> `podman compose`
-    #    dispatches through podman'"'"'s compose provider (podman-compose).
-    #    Plain `podman` (NOT sudo): the engine runs ROOTLESS as the agent user, so
-    #    the agent invokes podman directly. The heredoc is FLUSH-LEFT so the
-    #    shebang is not indented; `\$@` is escaped so the guest writes the LITERAL
-    #    `"$@"` into the wrapper.
-    mkdir -p /usr/local/bin
-    cat > /usr/local/bin/docker <<EOF
-#!/bin/sh
-exec podman "\$@"
-EOF
-    chmod 0755 /usr/local/bin/docker
-  ' >/dev/null 2>&1; then
-    # Root setup succeeded. Now VERIFY the engine works ROOTLESS as the agent user
-    # — the way agents actually use it. A bare `podman info` as root would prove
-    # the wrong thing (rootful), so we probe as the agent. CRUCIALLY we do more
-    # than `podman info`: info does NOT open /dev/fuse or mount a layer, so it
-    # passes even when the fuse-overlayfs storage mount would fail (the exact
-    # /dev/fuse-permission trap). We therefore verify with a real LAYER MOUNT: a
-    # `podman build` FROM scratch (no registry pull, no egress). If it fails with
-    # the configured driver, the agent forces a USER-level vfs storage.conf and
-    # retries once (covers a base whose overlay+fuse combo is still rejected under
-    # rootless). Only a successful build writes the ready marker.
-    if _acq_msb_cli exec "$name" -u agent -e HOME=/home/agent -- sh -c '
-      _oci_selftest() {
-        d=$(mktemp -d) || return 1
-        printf "FROM scratch\nCOPY hi /hi\n" > "$d/Containerfile"
-        echo hi > "$d/hi"
-        podman build -q -t acq-oci-selftest:local "$d" >/dev/null 2>&1
-        rc=$?
-        podman rmi -f acq-oci-selftest:local >/dev/null 2>&1 || true
-        rm -rf "$d"
-        return $rc
-      }
-      _oci_selftest && exit 0
-      # Retry once with a user-level vfs storage.conf (overlay+fuse rejected).
-      mkdir -p "$HOME/.config/containers"
-      printf "[storage]\ndriver = \"vfs\"\n" > "$HOME/.config/containers/storage.conf"
-      _oci_selftest
-    ' >/dev/null 2>&1; then
-      # Best-effort: mark ready so we do not re-run the (network-bound) install on
-      # every provision/restart. (The /dev/net/tun grant and config writes above
-      # are cheap + idempotent and re-run each pass regardless of this marker.)
-      # Host-authoritative (ADR-0035).
-      acq_host_config_write msb "$name" "$marker" 1 || true
-      acq_debug "msb: OCI engine (rootless podman) ready in $name"
-      return 0
-    fi
-  fi
-
-  # Fail soft (ADR-0020 / the balanced-egress-off case). Name the mirror hosts and
-  # the rootless prereqs so the operator can allow-list / bake them into ACQ_MSB_IMAGE.
-  echo "acq(msb): warning: could not provision an OCI engine (rootless podman) in '$name'." >&2
-  echo "acq(msb):   Agents will not be able to run OCI images (docker run / docker compose)." >&2
-  echo "acq(msb):   Most likely the OS package mirror is unreachable: the default balanced" >&2
-  echo "acq(msb):   egress (ADR-0018) allows it, but ACQ_NETWORK_TIER=strict or a narrowed" >&2
-  echo "acq(msb):   custom base blocks archive.ubuntu.com / ports.ubuntu.com / *.debian.org," >&2
-  echo "acq(msb):   or the rootless prereqs (podman, fuse-overlayfs, uidmap, passt," >&2
-  echo "acq(msb):   slirp4netns) could not be installed / rootless podman could not start." >&2
-  echo "acq(msb):   Bake those into ACQ_MSB_IMAGE, widen egress, or set ACQ_MSB_ENSURE_OCI=0" >&2
-  echo "acq(msb):   to silence this warning." >&2
-  return 0
-}
-
-# ---------------------------------------------------------------------------
 # Session context shared by exec/attach/shell
 # ---------------------------------------------------------------------------
 # sbx is a full session transport, so cwd, terminal identity, and the login
@@ -5041,12 +4418,22 @@ EOF
 _ACQ_MSB_RUN_WS_NAME=""
 _ACQ_MSB_RUN_WS=""
 
+acq_backend_recorded_agent() {
+  local name="$1" agent
+  agent=$(acq_provenance_field msb "$name" agent)
+  if [ -z "$agent" ]; then
+    agent=$(acq_host_config_read msb "$name" agent | tr -d '[:space:]')
+  fi
+  if [ -n "$agent" ] && acq_agent_safe_token "$agent"; then
+    printf '%s\n' "$agent"
+  fi
+}
+
 # _acq_msb_workspace_for NAME — the guest workspace a session starts in (-w).
 # Prefer an explicit ACQ_MSB_WORKSPACE override; otherwise the guest path
 # recorded at provision in the host config store (it mirrors the host mount path,
 # so it cannot be recomputed from NAME alone); fall back to the agent home if
-# nothing was recorded (older sandbox). The host-config read never fails the
-# caller, so an absent value takes the documented fallback under `set -e`.
+# nothing was recorded (older sandbox).
 _acq_msb_workspace_for() {
   local name="$1" ws=""
   if [ -n "${ACQ_MSB_WORKSPACE:-}" ]; then
@@ -5063,6 +4450,10 @@ _acq_msb_workspace_for() {
   fi
   [ -n "$ws" ] || ws="/home/agent"
   printf '%s\n' "$ws"
+}
+
+acq_backend_workspace_for() {
+  _acq_msb_workspace_for "$1"
 }
 
 # _acq_msb_term_flags_into ARRVAR — `-e` flags forwarding the host's terminal
@@ -5153,8 +4544,17 @@ acq_backend_run() {
     _ACQ_MSB_RUN_WS_NAME="$name"
     _ACQ_MSB_RUN_WS="$ws"
   fi
-  _acq_msb_cli exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
-    ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_session_is_user >/dev/null 2>&1 && acq_session_is_user \
+      && command -v acq_guest_exec_script >/dev/null 2>&1 && [ "${1:-}" = "--" ]; then
+    shift
+    _acq_msb_cli exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
+      ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} \
+      -e "ACQ_WORKSPACE=$ws" "$name" -- sh -c "$(acq_guest_exec_script)" sh "$@"
+  else
+    _acq_msb_cli exec -u agent -e HOME=/home/agent -w "$ws" ${_sockflag[@]+"${_sockflag[@]}"} \
+      ${_gitident[@]+"${_gitident[@]}"} ${_kitenv[@]+"${_kitenv[@]}"} "$name" "$@"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -5174,9 +4574,9 @@ acq_backend_run() {
 #                base image's Node REPL, and the passwd shell isn't exported).
 #
 # A bare `acq run <sandbox>` re-attach (no agent token) reads the agent recorded
-# at provision from the host config store (ADR-0035); `shell` (or a missing/failed
-# agent binary) falls back to an interactive `/bin/sh -l` as `agent` — never a
-# root shell, never msb's Node-REPL default. Post-`--` args are forwarded to the agent.
+# at provision from the host-authoritative agent key; `shell` (or a missing/failed agent binary)
+# falls back to an interactive `/bin/sh -l` as `agent` — never a root shell, never
+# msb's Node-REPL default. Post-`--` args are forwarded to the agent.
 acq_backend_attach() {
   local name="$1"
   shift
@@ -5205,11 +4605,9 @@ _acq_msb_attach() {
   ws=$(_acq_msb_workspace_for "$name")
 
   # Read the agent recorded at provision. Default to `shell` if unset. The value
-  # comes from the HOST-authoritative config store (ADR-0035), not a guest file,
-  # so a passwordless-sudo agent can no longer alter which binary is launched.
-  # The charset guard is kept for defense-in-depth before the value enters the
-  # `sh -c "command -v '$agent'"` below; fall back to a plain shell on anything
-  # unexpected.
+  # comes from the host-authoritative config store (ADR-0035), not a guest file.
+  # Keep the charset guard before it enters the `sh -c "command -v '$agent'"`
+  # below; fall back to a plain shell on anything unexpected.
   local agent
   agent=$(acq_host_config_read msb "$name" agent | tr -d '[:space:]')
   if [ -z "$agent" ] || ! _acq_msb_safe_agent_token "$agent"; then
@@ -5253,9 +4651,17 @@ _acq_msb_attach() {
 
   local shell
   shell=$(_acq_msb_agent_passwd_shell "$name")
-  MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
-    ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
-    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_guest_exec_script >/dev/null 2>&1; then
+    MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} -e "ACQ_WORKSPACE=$ws" "$name" -- sh -c \
+      "$(acq_guest_exec_script)" sh "$agent" "$@"
+  else
+    MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$agent" "$@"
+  fi
 }
 
 # _acq_msb_shell_exec NAME [WS] — exec into an interactive login shell as the
@@ -5277,9 +4683,17 @@ _acq_msb_shell_exec() {
   _acq_msb_git_identity_env_flags_into _gitident
   _acq_msb_kit_env_flags_into _kitenv "$name"
   _acq_msb_term_flags_into _term
-  MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
-    ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
-    ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$shell" -l
+  if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
+      && command -v acq_guest_shell_script >/dev/null 2>&1; then
+    MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} -e "ACQ_WORKSPACE=$ws" "$name" -- sh -c \
+      "$(acq_guest_shell_script)" sh "$shell"
+  else
+    MSYS2_ARG_CONV_EXCL='*' exec msb exec -t -u agent -w "$ws" ${_term[@]+"${_term[@]}"} -e "SHELL=$shell" \
+      ${_sockflag[@]+"${_sockflag[@]}"} ${_gitident[@]+"${_gitident[@]}"} \
+      ${_kitenv[@]+"${_kitenv[@]}"} "$name" -- "$shell" -l
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -5318,14 +4732,17 @@ acq_backend_terminate() {
   _acq_msb_clone_warn_unfetched "$1"
   local _rc=0
   _acq_msb_cli remove --force "$1" || _rc=$?
-  if [ "$_rc" -ne 0 ] && acq_backend_exists "$1"; then
-    return "$_rc"
+  if [ "$_rc" -ne 0 ]; then
+    if acq_backend_exists "$1" || ! _acq_msb_confirm_absent "$1"; then
+      return "$_rc"
+    fi
   fi
   _acq_msb_remove_derived_volumes "$1"
   # Same GONE-after-remove-attempt rule as the volumes above: delete the scratch
   # clone and drop the fetch-back remote only once the sandbox is really gone.
   _acq_msb_clone_cleanup "$1"
-  # Remove the host-authoritative config dir (ADR-0035) once the sandbox is gone.
+  # Remove host-authoritative config only after the sandbox is confirmed gone;
+  # otherwise a failed removal could discard state still mounted by a live guest.
   acq_host_config_remove msb "$1" || true
   return "$_rc"
 }
@@ -5892,26 +5309,15 @@ acq_backend_ensure_kits_applied() {
   # passwd-shell setup existed. Best-effort like the rest of the heal.
   _acq_msb_ensure_agent_user "$name" || \
     echo "acq(msb): warning: agent-user heal failed for '$name'." >&2
-  local kits=("$ZSCALER_KIT" "$USAI_KIT" "$PLAYBOOK_KIT" "$GITSSHSIGN_KIT")
-  local builtin_count="${#kits[@]}"
-  if [ -n "${ACQ_EXTRA_KITS:-}" ]; then
-    local _extras=()
-    split_noglob _extras "$ACQ_EXTRA_KITS"
-    kits+=("${_extras[@]}")
-  fi
-  # CLI-supplied `--kit <ref>` refs (ACQ_CLI_KITS) MUST be healed too, exactly as
-  # the provision path folds them in (see acq_backend_provision's kit assembly).
-  # These kits' STARTUP-phase commands (e.g. openchamber's supervisor loops for
-  # the shared `opencode serve` and the web UI) are re-run only by this heal —
-  # `msb start` alone does not replay them (ADR-0017). Omitting them here meant a
-  # resumed/rebooted sandbox came back with the create-time `-p` port mappings
-  # intact but NOTHING listening behind them, because the kit's startup was never
-  # re-run: `acq ports` showed the ports mapped while the services were dead. Fold
-  # ACQ_CLI_KITS in so `acq run --kit … <existing-sandbox>` heals its full kit set.
-  if [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
-    kits+=("${ACQ_CLI_KITS[@]}")
-  fi
-  local ok=1
+  # Rebuild after any persisted refs were loaded by the dispatcher. CLI-supplied
+  # `--kit <ref>` refs must be healed too, exactly as the provision path folds
+  # them in, so resumed kit services come back with their startup re-run.
+  local agent
+  agent=$(acq_backend_recorded_agent "$name")
+  _acq_msb_select_kits "$agent"
+  local kits=("${KITS[@]}")
+  local builtin_count="${ACQ_BUILTIN_KIT_COUNT:-4}"
+  local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"
   _acq_msb_heal_kit_set "$name" "$builtin_count" "${kits[@]}" || ok=0
   acq_spin_stop "Refreshing configuration kits"
@@ -5919,7 +5325,7 @@ acq_backend_ensure_kits_applied() {
   # msb re-applies all built-in kits idempotently, so on full
   # success the sandbox carries the currently pinned bundle. Best-effort write.
   if [ "$ok" -eq 1 ]; then
-    acq_provenance_write msb "$name" || true
+    acq_provenance_write msb "$name" "$agent" || true
     return 0
   fi
   return 1
@@ -6433,6 +5839,11 @@ acq_backend_doctor() {
   ver=$(_acq_msb_version)
   [ -n "$ver" ] || ver="?"
   printf '[msb: installed %s]\n' "$ver"
+}
+
+acq_backend_doctor_sandbox() {
+  local name="$1"
+  msb exec -u agent -e HOME=/home/agent "$name" -- sh -c "$(acq_image_contract_doctor_script)"
 }
 
 # ---------------------------------------------------------------------------

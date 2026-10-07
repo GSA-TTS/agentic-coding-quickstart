@@ -1,5 +1,5 @@
-# markdownlint-cli2 configuration
-# Aligned with playbook standards for consistency
+# Legacy markdownlint-cli2 configuration kept temporarily for branch compatibility.
+# Active linting uses .markdownlint.jsonc plus .markdownlintignore.
 # See: https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
 
 config:
@@ -42,28 +42,21 @@ config:
   # MD060 - Table column style spacing
   MD060: false
 
-# Scan these files
-# Scan these files. This is the SINGLE source of truth for file selection: both
-# the pre-commit hook and markdown-quality.yml invoke markdownlint-cli2 with no
-# glob arguments, so neither can select a different set. Previously CI passed
-# "**/*.md" plus exclusions on the command line (49 files) while these globs
-# alone selected 9, so the commit-time hook checked 18% of what CI checked.
+# Legacy file selection retained only for consumers still invoking
+# markdownlint-cli2 directly. Active file selection is the explicit
+# markdownlint command in package.json, pre-commit, and markdown-quality.yml plus
+# .markdownlintignore.
 globs:
   - "**/*.md"
 
-# Ignore files
+# Legacy ignore files. Keep this aligned with .markdownlintignore until this file
+# is deleted.
 ignores:
   - "node_modules"
   - ".github/linters/node_modules"
   - "deleteme"
   - "tmp"
   - "CHANGELOG.md"
-  # Vendored, SHA-pinned bats submodules (ADR-0025) -- third-party markdown we do
-  # not own and must not lint to our rules. markdown-quality.yml checks out
-  # WITHOUT submodules so it never saw these, but pre-commit.yml uses
-  # `submodules: true` for the bats hook, so the pre-commit run WOULD: measured
-  # 21 vendored .md files producing 235 issues in 13 files. Excluding them here
-  # preserves the existing effective coverage rather than widening it.
   - "test/vendor"
 
 # Support YAML frontmatter

@@ -65,7 +65,8 @@ SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 
 # Versions under test. Keep in lockstep with install.sh / acq.backends/msb.sh:
 # a drift here is a silently weaker test, not a failure.
-PINNED_VERSION="0.6.18"
+PINNED_VERSION="0.7.7"
+ROLLBACK_VERSION="0.6.18"
 BLOCKED_VERSION="0.7.2"
 FIXED_VERSION="0.7.3"
 
@@ -235,6 +236,7 @@ fi
 # directly rather than looked up by variable name, so there is no eval and no
 # indirection for a reader (or shellcheck) to follow.
 for pair in "$PINNED_VERSION:MSB_PINNED_VERSION" \
+            "$ROLLBACK_VERSION:MSB_ROLLBACK_VERSION" \
             "$BLOCKED_VERSION:MSB_BLOCKED_VERSION_MAX" \
             "$FIXED_VERSION:MSB_FIXED_VERSION"; do
   want=${pair%%:*}; code_name=${pair##*:}
@@ -280,9 +282,9 @@ if ! PINNED_BIN=$(fetch_msb "$PINNED_VERSION"); then
 fi
 ok "bundle for v$PINNED_VERSION verified against its published checksums.sha256"
 
-HOME_A="$SCRATCH/home-strand"
-mkdir -p "$HOME_A"
-reported=$(run_msb "$PINNED_BIN" "$HOME_A" --version | head -1)
+HOME_PIN="$SCRATCH/home-pin"
+mkdir -p "$HOME_PIN"
+reported=$(run_msb "$PINNED_BIN" "$HOME_PIN" --version | head -1)
 case "$reported" in
   *"$PINNED_VERSION"*) ok "the installed binary reports: $reported" ;;
   *) bad "expected msb $PINNED_VERSION, got: ${reported:-<no output>}" ;;
@@ -290,14 +292,22 @@ esac
 
 # --- 3. reproduce the stranding -------------------------------------------
 
-info "3. a blocked msb strands the catalog for the pinned line"
-out=$(run_msb "$PINNED_BIN" "$HOME_A" list)
+info "3. a blocked msb strands the catalog for the rollback line"
+HOME_A="$SCRATCH/home-strand"
+mkdir -p "$HOME_A"
+if ! ROLLBACK_BIN=$(fetch_msb "$ROLLBACK_VERSION"); then
+  block "could not fetch the rollback msb $ROLLBACK_VERSION bundle; skipping checks 3-6"
+  printf '\n  passed: %d   failed: %d   skipped: %d\n' "$PASS" "$FAIL" "$BLOCKED"
+  [ "$FAIL" -eq 0 ] && exit 0 || exit 1
+fi
+ok "bundle for the rollback v$ROLLBACK_VERSION verified against its published checksum"
+out=$(run_msb "$ROLLBACK_BIN" "$HOME_A" list)
 case "$out" in
-  *"No sandboxes found"*|*NAME*) ok "msb $PINNED_VERSION initialized its catalog cleanly" ;;
-  *) bad "msb $PINNED_VERSION could not initialize a fresh catalog" "$out" ;;
+  *"No sandboxes found"*|*NAME*) ok "msb $ROLLBACK_VERSION initialized its catalog cleanly" ;;
+  *) bad "msb $ROLLBACK_VERSION could not initialize a fresh catalog" "$out" ;;
 esac
 before=$(applied_migrations "$HOME_A")
-note "applied migrations after $PINNED_VERSION: ${before:-unknown}"
+note "applied migrations after $ROLLBACK_VERSION: ${before:-unknown}"
 
 if ! BLOCKED_BIN=$(fetch_msb "$BLOCKED_VERSION"); then
   block "could not fetch the blocked msb $BLOCKED_VERSION bundle; skipping checks 3-6"
@@ -315,14 +325,24 @@ else
   note "applied migrations after $BLOCKED_VERSION: ${after:-unknown}"
 fi
 
-out=$(run_msb "$PINNED_BIN" "$HOME_A" list)
+out=$(run_msb "$ROLLBACK_BIN" "$HOME_A" list)
 case "$out" in
   *"schema is newer"*|*"not in this binary's migration prefix"*)
-    ok "msb $PINNED_VERSION now refuses the migrated catalog (the reported failure)"
+    ok "msb $ROLLBACK_VERSION now refuses the migrated catalog (the reported failure)"
     note "${out%%$'\n'*}" ;;
   *)
-    bad "msb $PINNED_VERSION did NOT refuse the migrated catalog" \
+    bad "msb $ROLLBACK_VERSION did NOT refuse the migrated catalog" \
         "the one-way migration may be fixed upstream; re-evaluate the blocked range" ;;
+esac
+
+HOME_PIN_FWD="$SCRATCH/home-pinned-forward"
+cp -a "$HOME_A" "$HOME_PIN_FWD"
+out=$(run_msb "$PINNED_BIN" "$HOME_PIN_FWD" list)
+case "$out" in
+  *"No sandboxes found"*|*NAME*)
+    ok "default pin msb $PINNED_VERSION also reads the already-migrated catalog" ;;
+  *)
+    bad "default pin msb $PINNED_VERSION could not read a catalog migrated by $BLOCKED_VERSION" "$out" ;;
 esac
 
 # --- 4. forward recovery (preferred) ---------------------------------------
@@ -351,9 +371,9 @@ fi
 info "5. rollback recovery, driven BY the blocked binary"
 HOME_DG="$SCRATCH/home-downgrade"
 cp -a "$HOME_A" "$HOME_DG"
-out=$(run_msb "$BLOCKED_BIN" "$HOME_DG" self downgrade "$PINNED_VERSION" --yes)
-if printf '%s' "$out" | grep -qi "Downgraded to v$PINNED_VERSION"; then
-  ok "msb $BLOCKED_VERSION rolled its own migrations back to $PINNED_VERSION"
+out=$(run_msb "$BLOCKED_BIN" "$HOME_DG" self downgrade "$ROLLBACK_VERSION" --yes)
+if printf '%s' "$out" | grep -qi "Downgraded to v$ROLLBACK_VERSION"; then
+  ok "msb $BLOCKED_VERSION rolled its own migrations back to $ROLLBACK_VERSION"
   dg=$(applied_migrations "$HOME_DG")
   if [ -n "$before" ] && [ -n "$dg" ] && [ "$dg" = "$before" ]; then
     ok "the catalog is back to its pre-$BLOCKED_VERSION migration count ($dg)"
@@ -365,15 +385,15 @@ if printf '%s' "$out" | grep -qi "Downgraded to v$PINNED_VERSION"; then
   else
     bad "no retained database backup after a rollback that reverts migrations"
   fi
-  out=$(run_msb "$PINNED_BIN" "$HOME_DG" list)
+  out=$(run_msb "$ROLLBACK_BIN" "$HOME_DG" list)
   case "$out" in
-    *"No sandboxes found"*|*NAME*) ok "msb $PINNED_VERSION can read the rolled-back catalog again" ;;
-    *) bad "msb $PINNED_VERSION still cannot read the catalog after rollback" "$out" ;;
+    *"No sandboxes found"*|*NAME*) ok "msb $ROLLBACK_VERSION can read the rolled-back catalog again" ;;
+    *) bad "msb $ROLLBACK_VERSION still cannot read the catalog after rollback" "$out" ;;
   esac
 else
   # A refusal here is legitimate (e.g. grouped snapshots) but this scratch
   # catalog has none, so treat it as a real failure of the documented path.
-  bad "'msb self downgrade $PINNED_VERSION' did not complete from the $BLOCKED_VERSION binary" \
+  bad "'msb self downgrade $ROLLBACK_VERSION' did not complete from the $BLOCKED_VERSION binary" \
       "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
 fi
 
@@ -395,11 +415,11 @@ cp -a "$HOME_A" "$HOME_GRP"
 mkdir -p "$HOME_GRP/snapshots/verify-group"
 printf '{}\n' >"$HOME_GRP/snapshots/verify-group/group.json"
 
-out=$(run_msb "$BLOCKED_BIN" "$HOME_GRP" self downgrade "$PINNED_VERSION" --yes)
+out=$(run_msb "$BLOCKED_BIN" "$HOME_GRP" self downgrade "$ROLLBACK_VERSION" --yes)
 case "$out" in
   *"snapshot groups prevent downgrade"*)
     ok "msb $BLOCKED_VERSION refuses the rollback while a snapshot group exists" ;;
-  *"Downgraded to v$PINNED_VERSION"*)
+  *"Downgraded to v$ROLLBACK_VERSION"*)
     bad "the rollback succeeded despite a snapshot group" \
         "upstream may have added group projection; the forward-first rationale needs re-checking" ;;
   *)
@@ -440,12 +460,12 @@ HOME_WEDGE="$SCRATCH/home-wedge"
 cp -a "$HOME_A" "$HOME_WEDGE"
 
 # An older binary cannot build a rollback plan for migrations it does not know.
-out=$(run_msb "$PINNED_BIN" "$HOME_WEDGE" self downgrade 0.6.17 --yes)
+out=$(run_msb "$ROLLBACK_BIN" "$HOME_WEDGE" self downgrade 0.6.17 --yes)
 case "$out" in
   *"updated by a newer msb"*|*"does not contain a valid migration prefix"*)
-    ok "msb $PINNED_VERSION refuses to roll back migrations it does not know" ;;
+    ok "msb $ROLLBACK_VERSION refuses to roll back migrations it does not know" ;;
   *"Downgraded to"*)
-    bad "msb $PINNED_VERSION performed a rollback it should not be able to" \
+    bad "msb $ROLLBACK_VERSION performed a rollback it should not be able to" \
         "acq's ordering guard may be unnecessary; re-check ADR-0032" ;;
   *) note "unexpected output: ${out##*$'\n'}" ;;
 esac
@@ -461,7 +481,7 @@ if [ -n "$journal" ]; then
 
   # Every later catalog-opening command tested here, from every version, now refuses.
   wedged=0
-  for pair in "$PINNED_VERSION:$PINNED_BIN" "$BLOCKED_VERSION:$BLOCKED_BIN"; do
+  for pair in "$ROLLBACK_VERSION:$ROLLBACK_BIN" "$BLOCKED_VERSION:$BLOCKED_BIN"; do
     v=${pair%%:*}; b=${pair##*:}
     out=$(run_msb "$b" "$HOME_WEDGE" list)
     case "$out" in
@@ -474,7 +494,7 @@ if [ -n "$journal" ]; then
 
   # And the documented escape works.
   rm -rf "$(dirname "$journal")"
-  out=$(run_msb "$PINNED_BIN" "$HOME_WEDGE" list)
+  out=$(run_msb "$ROLLBACK_BIN" "$HOME_WEDGE" list)
   case "$out" in
     *self_downgrade_recovery_required*)
       bad "removing the journal directory did not clear the block" "$out" ;;
@@ -550,8 +570,8 @@ else
   # And it can perform the real recovery — the reason the formula exists.
   HOME_KEG="$SCRATCH/home-keg"
   cp -a "$HOME_A" "$HOME_KEG"
-  out=$(env HOME="$fake" MSB_HOME="$HOME_KEG" "$KEG/bin/msb" self downgrade "$PINNED_VERSION" --yes 2>&1 </dev/null)
-  if printf '%s' "$out" | grep -qi "Downgraded to v$PINNED_VERSION"; then
+  out=$(env HOME="$fake" MSB_HOME="$HOME_KEG" "$KEG/bin/msb" self downgrade "$ROLLBACK_VERSION" --yes 2>&1 </dev/null)
+  if printf '%s' "$out" | grep -qi "Downgraded to v$ROLLBACK_VERSION"; then
     ok "the keg binary rolled the catalog back without ever being on PATH"
     note "this is the documented escape when the migrating msb is already uninstalled"
   else
@@ -576,7 +596,7 @@ if [ "$DO_INSTALL" -eq 1 ]; then
     note "an msb is already active: $existing"
     note "this replaces the binary only; it does NOT migrate or roll back sandbox state"
     note "if that msb already migrated your catalog, run 'msb self update' or"
-    note "'msb self downgrade $PINNED_VERSION' with IT first (see install.sh)"
+    note "'msb self downgrade $ROLLBACK_VERSION' with IT first (see install.sh)"
   fi
 
   printf '  install verified msb %s into %s? [y/N] ' "$PINNED_VERSION" "$real_home"

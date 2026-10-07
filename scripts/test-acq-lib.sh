@@ -81,7 +81,11 @@ else
   _ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-nokit.XXXXXX")
 fi
 printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml"
+_ACQ_AGENT_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR:-$_ACQ_MSB_OFFLINE_KIT_DIR}/acq-opencode-kit"
+mkdir -p "$_ACQ_AGENT_OFFLINE_KIT_DIR"
+printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml"
 export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
+export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +122,31 @@ case "${1:-}" in
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *"ACQ_ADR0030_IMAGE_DIAGNOSTIC=1"*)
+        if [ "${STUB_IMAGE_CONTRACT:-present}" = "missing" ]; then
+          printf '  ok: HOME is /home/agent\n'
+          printf '  ok: running as agent user\n'
+          printf '  ok: /nix exists\n'
+          printf '  warning: devenv is not on PATH\n'
+          printf '           fix: install devenv in the base image or a create-time kit\n'
+          printf '  warning: no shell startup hook for ~/.rc.d found\n'
+          printf '           fix: source ~/.rc.d snippets from shell startup in deterministic order\n'
+          printf '  summary: 2 warning(s); diagnostics only, create/run are not blocked\n'
+        else
+          printf '  ok: HOME is /home/agent\n'
+          printf '  ok: running as agent user\n'
+          printf '  ok: /nix exists\n'
+          printf '  ok: nix is on PATH\n'
+          printf '  ok: devenv is on PATH\n'
+          printf '  ok: direnv is on PATH\n'
+          printf '  ok: /home/agent is writable\n'
+          printf '  ok: passwordless sudo probe works\n'          printf '  ok: ~/.rc.d exists\n'
+          printf '  ok: shell startup references ~/.rc.d\n'
+          printf '  summary: 0 warning(s); diagnostics only, create/run are not blocked\n'
+        fi
+        exit 0 ;;
+    esac
     # `opencode --version` is the postinstall functionality probe (bare argv,
     # not an `sh -c`). By default model the BROKEN state (exit 1) so the
     # postinstall path runs; STUB_OPENCODE_OK=1 makes it "already runnable".
@@ -226,6 +255,7 @@ case "$_msb_sub" in
     # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
     [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
   list|ls)
+    [ "${STUB_MSB_LIST_FAIL:-0}" = "1" ] && exit 1
     # `msb list --running -q` (running-state probe, ADR-0017 stopped detection):
     # emit the RUNNING fixture if the caller asked for --running, else the full
     # existence fixture. A test that wants a sandbox to appear STOPPED plants it
@@ -240,14 +270,6 @@ case "$_msb_sub" in
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
-    # `npm install -g …` is run as DIRECT argv (no `sh -c`), so it is matched on
-    # the full arg list, not on $snippet. STUB_NPM_FAIL=1 models the install
-    # failing so the #321 disambiguation path runs. Match it up front (before the
-    # bare-argv opencode-version probe and the $snippet cases below).
-    case " $* " in
-      *" npm install "*)
-        [ "${STUB_NPM_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
-    esac
     # `opencode --version` postinstall functionality probe (bare argv). Default
     # broken (exit 1) so the postinstall path runs; STUB_OPENCODE_OK=1 or a
     # planted .opencode_fixed marker (written by a successful postinstall.mjs
@@ -260,24 +282,30 @@ case "$_msb_sub" in
         exit 1 ;;
     esac
     case "$snippet" in
+      *"ACQ_ADR0030_IMAGE_DIAGNOSTIC=1"*)
+        if [ "${STUB_IMAGE_CONTRACT:-present}" = "missing" ]; then
+          printf '  ok: HOME is /home/agent\n'
+          printf '  ok: running as agent user\n'
+          printf '  ok: /nix exists\n'
+          printf '  warning: devenv is not on PATH\n'
+          printf '           fix: install devenv in the base image or a create-time kit\n'
+          printf '  warning: no shell startup hook for ~/.rc.d found\n'
+          printf '           fix: source ~/.rc.d snippets from shell startup in deterministic order\n'
+          printf '  summary: 2 warning(s); diagnostics only, create/run are not blocked\n'
+        else
+          printf '  ok: HOME is /home/agent\n'
+          printf '  ok: running as agent user\n'
+          printf '  ok: /nix exists\n'
+          printf '  ok: nix is on PATH\n'
+          printf '  ok: devenv is on PATH\n'
+          printf '  ok: direnv is on PATH\n'
+          printf '  ok: /home/agent is writable\n'
+          printf '  ok: passwordless sudo probe works\n'          printf '  ok: ~/.rc.d exists\n'
+          printf '  ok: shell startup references ~/.rc.d\n'
+          printf '  summary: 0 warning(s); diagnostics only, create/run are not blocked\n'
+        fi
+        exit 0 ;;
       *"echo ok"*) printf 'ok\n' ;;
-      # #321: the registry reachability probe curls `https://<host>/` and prints
-      # the `<http_code>|<curl_exit>` shape _classify_key_status reads. Default
-      # models a reachable registry (200). STUB_NPM_REGISTRY=unreachable models a
-      # TLS/connection cut (000|56); =unresolved models NXDOMAIN (000|6);
-      # =responded models the registry answering with an HTTP ERROR (500|0) —
-      # the connection completed, so it is NOT a DNS/TLS problem and MUST fall
-      # through to the neutral "registry rejected it / real npm error" branch.
-      # Match BEFORE the generic `%{http_code}` arm below (that one is the USAi
-      # key probe with an Authorization header; this one has neither header nor
-      # USAi host). Must precede the generic arm because both contain `%{http_code}`.
-      *"registry.npmjs.org"*'%{http_code}'*|*'%{http_code}'*"registry.npmjs.org"*)
-        case "${STUB_NPM_REGISTRY:-reachable}" in
-          unreachable) printf '000|56' ;;
-          unresolved)  printf '000|6'  ;;
-          responded)   printf '500|0'  ;;
-          *)           printf '200|0'  ;;
-        esac ;;
       *'%{http_code}'*)
         # Match check_key's `<http_code>|<curl_exit>` shape (see the sbx stub).
         if [ "${STUB_KEY_UNREACHABLE:-0}" = "1" ]; then
@@ -303,37 +331,18 @@ case "$_msb_sub" in
       *"getent passwd agent"*)
         [ -n "${STUB_AGENT_PASSWD_SHELL+x}" ] || exit 1
         printf '%s\n' "$STUB_AGENT_PASSWD_SHELL" ;;
-      # ADR-0035 host-config mount probes. Default PRESENT+READONLY, matching a
-      # freshly created sandbox on this branch; STUB_HOST_CONFIG_MOUNT=0 models a
-      # legacy sandbox created before the /var/lib/acq/host:ro mount existed, and
-      # STUB_HOST_CONFIG_WRITABLE=1 models a backend that accepts but does not
-      # enforce :ro.
-      *"test -d"*"/var/lib/acq/host"*)
-        [ "${STUB_HOST_CONFIG_MOUNT:-1}" = "0" ] && exit 1 || exit 0 ;;
-      *".acq-ro-probe"*)
-        [ "${STUB_HOST_CONFIG_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
       # The host-side bash probe deciding the agent's passwd shell.
       # Default PRESENT (the default image ships bash); STUB_GUEST_BASH=0
       # models a bash-less base. MUST precede the generic command-v arm.
       *"command -v bash"*)
         [ "${STUB_GUEST_BASH:-1}" = "0" ] && exit 1 || printf '/bin/bash\n' ;;
-      # The OCI-engine setup is TWO msb-exec `sh -c` blocks: (1) a root (`-u 0`)
-      # install/config block carrying `/usr/local/bin/docker`, and (2) a rootless
-      # verify block (`-u agent`) that runs a `podman build` layer-mount self-test
-      # (tagged acq-oci-selftest). Match the root block by its docker-alias marker
-      # and the verify block by the self-test image tag. STUB_OCI_SETUP_FAIL=1
-      # models the ROOT block failing; STUB_OCI_VERIFY_FAIL=1 models the rootless
-      # build self-test failing (engine/storage unusable). Either failure must make
-      # provision FAIL SOFT (warn, rc 0, no marker). Match these FIRST (before the
-      # generic command-v / test-f cases below would swallow them).
-      *"/usr/local/bin/docker"*)
-        [ "${STUB_OCI_SETUP_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
-      *"acq-oci-selftest"*)
-        [ "${STUB_OCI_VERIFY_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
-      # ADR-0035: the agent-user-ready and oci-ready run-once gates moved OFF the
-      # guest /var/lib/acq markers onto the HOST config store (acq_host_config_*).
-      # Tests seed those via seed_host_config_gates (from STUB_AGENT_USER_READY /
-      # STUB_OCI_READY), so no guest `test -f` arm remains for them here.
+      # ADR-0035 readonly mount probe. The 0711 mount root is traversable, not
+      # listable: known 0555 payload paths remain executable without directory
+      # read permission. A writable mount must still be rejected.
+      *"test -d '/var/lib/acq/host'"*)
+        [ "${STUB_HOST_CONFIG_MOUNT:-1}" = "0" ] && exit 1 || exit 0 ;;
+      *".acq-ro-probe"*)
+        [ "${STUB_HOST_CONFIG_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
       # `command -v <agent>` (agent-presence probe): controllable so the install
       # path can be exercised. By default the agent is ABSENT (exit 1) so install
       # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq
@@ -348,13 +357,6 @@ case "$_msb_sub" in
       # tool (socat included) as present and make STUB_SOCAT_PRESENT inert.
       *"command -v socat"*)
         [ "${STUB_SOCAT_PRESENT:-1}" = "0" ] && exit 1 || exit 0 ;;
-      # #321 npm-install-failure disambiguation: on a failed `npm install`, acq
-      # probes whether npm is present in-guest (`command -v npm`) and, if so,
-      # curls the registry host. Model npm as present by default; STUB_NPM_MISSING=1
-      # makes `command -v npm` miss (exit 1) so the genuinely-missing-npm branch is
-      # exercised. This arm MUST precede the generic `command -v` catch-all.
-      *"command -v npm"*)
-        [ "${STUB_NPM_MISSING:-0}" = "1" ] && exit 1 || exit 0 ;;
       # ADR-0021: the in-guest socat bridge (`nohup socat UNIX-LISTEN:…
       # VSOCK-CONNECT:2:<port>`) started by _acq_msb_start_ssh_agent_bridge.
       # Model a successful bridge start (exit 0). Match BEFORE the generic cases.
@@ -391,15 +393,10 @@ case "$_msb_sub" in
           printf '256 SHA256:stubkey stub@host (ED25519)\n'; exit 0
         fi ;;
       *"command -v"*) : ;;          # prereqs "present" (empty missing set)
-      *"npm install"*)
-        [ "${STUB_NPM_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
       *"test -f "*) exit 1 ;;       # markers absent
       *"test -s "*) exit 0 ;;       # copied files present
-      # ADR-0035 migrated agent/workspace/ssh-auth-sock/kit-env OFF the guest
-      # /var/lib/acq markers onto the HOST config store (acq_host_config_*), which
-      # acq now reads directly on the host — no `msb exec cat` happens for them.
-      # The STUB_RECORDED_* knobs are seeded into the host store instead (see
-      # seed_host_config below), so no guest-cat arm remains for them here.
+      # ADR-0035 stores agent/workspace/ssh-auth-sock/kit-env on the host. Test
+      # knobs are seeded there by seed_host_config, so no guest marker arm remains.
       *) : ;;
     esac ;;
   ssh)
@@ -581,14 +578,8 @@ load_acq() {
   # in setup() makes every assertion in the suite pass vacuously (#381 review).
 }
 
-# seed_host_config BACKEND NAME — populate the ADR-0035 host config store for a
-# sandbox from the STUB_RECORDED_* env knobs, so tests that exercise the session
-# paths (attach/run/shell) find the agent/workspace/ssh-auth-sock/kit-env acq now
-# reads from the HOST (no guest `msb exec cat` happens for them anymore). Only a
-# SET knob is written (an unset knob models an absent value → acq's documented
-# fallback). Requires acq_host_config_* to be defined (source common.sh first).
-# Usage (inside a test subshell, after sourcing common.sh/msb.sh):
-#   seed_host_config msb "$name"
+# Seed host-authoritative config values for session-path tests. Unset knobs model
+# absent keys and exercise the adapter's documented fallbacks.
 seed_host_config() {
   local backend="${1:-msb}" name="${2:-}"
   [ -n "$name" ] || return 0
@@ -597,24 +588,14 @@ seed_host_config() {
   [ -n "${STUB_RECORDED_WORKSPACE+x}" ] && acq_host_config_write "$backend" "$name" workspace "$STUB_RECORDED_WORKSPACE"
   [ -n "${STUB_RECORDED_SSH_AUTH_SOCK+x}" ] && acq_host_config_write "$backend" "$name" ssh-auth-sock "$STUB_RECORDED_SSH_AUTH_SOCK"
   [ -n "${STUB_RECORDED_KIT_ENV+x}" ] && acq_host_config_write "$backend" "$name" kit-env "$STUB_RECORDED_KIT_ENV"
-  return 0
 }
-# Export so a test's `run bash -c '…'` subshell (which does NOT re-source this
-# stub library) still sees the helper. The ACQ_PROVENANCE_DIR/ACQ_STATE_DIR env
-# exports carry the store location into that subshell too.
 export -f seed_host_config 2>/dev/null || true
 
-# seed_host_config_gates BACKEND NAME — seed the ADR-0035 presence-gate keys
-# (agent-user-ready, oci-ready) from STUB_AGENT_USER_READY / STUB_OCI_READY, so a
-# test can model an already-provisioned sandbox (the run-once gates now live in
-# the host config store, not guest `touch`/`test -f` markers). Only a truthy knob
-# writes the key. Requires acq_host_config_* (source common.sh first).
+# Seed the host-side agent-user gate for a pre-provisioned sandbox test fixture.
 seed_host_config_gates() {
   local backend="${1:-msb}" name="${2:-}"
   [ -n "$name" ] || return 0
   command -v acq_host_config_write >/dev/null 2>&1 || return 0
   [ "${STUB_AGENT_USER_READY:-0}" = "1" ] && acq_host_config_write "$backend" "$name" agent-user-ready 1
-  [ "${STUB_OCI_READY:-0}" = "1" ] && acq_host_config_write "$backend" "$name" oci-ready 1
-  return 0
 }
 export -f seed_host_config_gates 2>/dev/null || true

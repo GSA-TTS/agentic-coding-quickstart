@@ -229,14 +229,12 @@ same contract sbx's templates provide, keyed off the
 [Docker base-image requirements](https://docs.docker.com/ai/sandboxes/customize/kit-reference/#base-image-requirements)
 for `docker/sandbox-templates:shell-docker`:
 
-- **Install the agent** (`_acq_msb_install_agent`). The AGENT token is read from
-  the first positional at provision. `opencode` → `npm install -g opencode-ai`
-  (node is already a verified prerequisite), with the npm registry host
-  (`registry.npmjs.org`) allow-listed at create so the default-deny egress
-  permits the download. Idempotent: skipped if the binary is already present
-  (a pre-baked `ACQ_MSB_IMAGE`) and marker-gated. `shell` is a no-op; an unknown,
-  absent agent warns (bake it into `ACQ_MSB_IMAGE`). Tunables:
-  `ACQ_MSB_OPENCODE_PKG`, `ACQ_MSB_NPM_HOSTS`.
+- **Select the agent kit or base-image agent.** The AGENT token is read from the
+  first positional at provision. For `opencode`, acq applies the built-in agent
+  kit from the pinned patterns bundle unless the user supplies an explicit
+  `--kit`; the msb adapter no longer owns an npm fallback installer. Agent install
+  egress belongs in the selected agent kit's network declarations, or the agent
+  binary must already be present in the base image.
 - **Satisfy the base-image contract** (`_acq_msb_ensure_agent_user`, extended).
   In addition to the `agent`/`/home/agent` user it already created, it now adds
   **passwordless sudo** (`/etc/sudoers.d/90-acq-agent`) and preserves the
@@ -249,7 +247,8 @@ for `docker/sandbox-templates:shell-docker`:
   `msb exec -t -u agent -w <workspace> -e SHELL=/bin/sh NAME -- <agent>` — the one
   msb primitive that allocates a PTY (so a full-screen agent TUI renders; `msb
   ssh` has no tty flag), runs as the unprivileged `agent` user, and starts in the
-  workspace. The agent to run is recorded at provision (`/var/lib/acq/agent`) so
+   workspace. The agent to run is recorded at provision in host-authoritative
+   config (ADR-0035) so
   the name-only re-attach path (`acq run <sandbox>`) still launches it. Falls back
   to an interactive `/bin/sh -l` **as the agent user** (never root, never msb's
   Node-REPL default) for `shell` sandboxes or a missing binary.
@@ -286,7 +285,8 @@ semantics (`docs/QUICKSTART_SBX.md`: "All workspaces appear inside the sandbox a
 their absolute host paths"). This sidesteps the create-time ordering problem and
 restores sbx parity. Multiple workspaces and a trailing `:ro` marker are
 supported (`workspace_paths` in `common.sh` enumerates them). The agent's
-starting directory is recorded at provision (`/var/lib/acq/workspace`) for the
+   starting directory is recorded at provision in host-authoritative config
+   (ADR-0035) for the
 name-only re-attach path: it is the **primary (first) workspace**, matching sbx.
 `ACQ_MSB_WORKSPACE` overrides the start dir.
 

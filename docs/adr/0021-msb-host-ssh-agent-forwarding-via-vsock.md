@@ -124,22 +124,21 @@ any interactive `git`/`ssh` see the agent.
 
 The `--vsock` route persists across `msb stop`/`start` (it is part of the sandbox
 config), but the `socat` bridge **process** dies on stop. So the bridge is
-re-started in `acq_backend_start`, the same way the OCI device-node re-grant is
-re-applied on resume.
+re-started in `acq_backend_start` before kit startup services are healed.
 
 ### Re-attach to a running sandbox (bridge + `SSH_AUTH_SOCK` must be re-driven)
 
 The guest-side `SSH_AUTH_SOCK` value is injected into the guest process env only
 when acq passes `-e SSH_AUTH_SOCK=<sock>` to `msb exec` on attach/`acq exec`/kit
-commands, and acq only does that when the persisted
-`/var/lib/acq/ssh-auth-sock` marker is non-empty. That marker is written solely
-by `_acq_msb_start_ssh_agent_bridge`. Provision runs the bridge starter directly,
+commands, and acq only does that when the host-authoritative `ssh-auth-sock`
+config key is non-empty. That key is written solely by
+`_acq_msb_start_ssh_agent_bridge`. Provision runs the bridge starter directly,
 and the **stopped→resume** path runs it via `acq_backend_start`.
 
 A re-attach to an **already-running** sandbox (`acq run <name>` /
 `acq run <agent> .` against an existing, running sandbox) previously reached
 **neither**: the heal's start-if-stopped block is a no-op on a running sandbox, so
-nothing re-started the bridge or wrote the marker. The result was that the guest
+nothing re-started the bridge or refreshed the key. The result was that the guest
 process env had **no `SSH_AUTH_SOCK`** on re-attach even though the create-time
 `--vsock` route was present and the host agent was available — the operator had to
 `export SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock` by hand before signing.
@@ -202,7 +201,7 @@ not used — the host agent socket path is platform-dependent (launchd may keep 
 stable; a plain `ssh-agent` rotates it), so only a live connect is
 authoritative. Refreshing the route automatically on resume is left as future
 work pending an msb capability to update a `--vsock` route in place. See
-`docs/KNOWN_FAILURE_MODES.md` §34 ("forwarded agent unreachable after a host
+`docs/KNOWN_FAILURE_MODES.md` §35 ("forwarded agent unreachable after a host
 reboot").
 
 ### Version gate

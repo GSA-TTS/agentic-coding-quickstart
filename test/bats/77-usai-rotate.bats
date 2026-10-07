@@ -23,6 +23,20 @@ load 'helper'
   assert_regex "$log" 'sbx create --name acq-keycheck-'
 }
 
+@test "rotate(sbx): provider facts key env drives placeholder update" {
+  load_acq
+  printf 'CUSTOM SECRETS\n(global) api.gsa.usai.gov KIT_API_KEY ph-kit ****\n' > "$STUBDIR/sbx_ls"
+  export SBX_LS_FIXTURE="$STUBDIR/sbx_ls"
+  export USAI_PROVIDER_KEY_ENV=KIT_API_KEY
+  export ACQ_PROPAGATING_SECRET=1
+  run acq_backend_rotate_key
+
+  local log
+  log=$(cat "$CALLS")
+  assert_success
+  assert_regex "$log" 'sbx secret set-custom --host api\.gsa\.usai\.gov --env KIT_API_KEY --placeholder ph-kit'
+}
+
 @test "rotate(msb): stores the key and re-feeds via msb modify" {
   printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
   run env ACQ_SECRET_TEST_VALUE="new-usai-key" ACQ_BACKEND=msb "$ACQ" usai-rotate-api-key

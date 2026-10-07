@@ -69,8 +69,8 @@ host-side validation this ADR requires, an SSRF/credential-misuse surface).
 
 ### Presence-only gates (a lower-severity variant of the same problem)
 
-Four other `/var/lib/acq/` files are `touch`/`test -f` idempotency gates
-(`install-<cksum>`, `agent-installed-<agent>`, `agent-user-ready`, `oci-ready`).
+Three other `/var/lib/acq/` files are `touch`/`test -f` idempotency gates
+(`install-<cksum>`, `agent-installed-<agent>`, `agent-user-ready`).
 Their *content* is never consumed, but a guest can pre-`touch` them to
 **suppress** a provisioning step (skip an install, skip the agent-user/sudoers
 setup, skip OCI setup). That is a downgrade/DoS on setup rather than injection,
@@ -233,8 +233,8 @@ behavior:
 4. **`kit-env`**: acq already parses each kit's `environment[]` on the host
    during apply — persist the validated env to the host config dir and replay
    from there; stop reading the guest marker.
-5. **Presence gates** (`install-*`, `agent-installed-*`, `agent-user-ready`,
-   `oci-ready`): move to the host config dir so a guest cannot forge them to
+5. **Presence gates** (`install-*`, `agent-installed-*`, `agent-user-ready`):
+   move to the host config dir so a guest cannot forge them to
    suppress provisioning. Because the host config dir is keyed by sandbox name,
    clear these gate keys, plus conditionally-written instance keys such as
    `workspace` and `ssh-auth-sock`, at the start of a fresh provision so a

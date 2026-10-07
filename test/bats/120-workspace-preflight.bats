@@ -144,6 +144,7 @@ _pf_out() { # PATH
 }
 
 @test "identity (b): non-repo root with sub-repos, symlinked child not followed" {
+  export GIT_CEILING_DIRECTORIES="$STUBDIR"
   _id "$WT/wsB"
   assert_output --partial 'workspace root is not a git repo'
   assert_output --partial 'wsB/sub1'
@@ -151,6 +152,7 @@ _pf_out() { # PATH
 }
 
 @test "identity (c): empty dir gets the new-workspace onboarding note" {
+  export GIT_CEILING_DIRECTORIES="$STUBDIR"
   _id "$WT/wsC"
   assert_output --partial 'no git repos yet'
 }

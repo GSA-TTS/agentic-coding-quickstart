@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# fix-exec-bits — restore the executable bit the git index records, and report
+# any file whose on-disk mode disagrees with it.
+#
+# WHY THIS EXISTS
+#
+# The repository is routinely checked out onto a path shared with a container
+# (virtiofs, Docker Desktop file sharing, UTM/Multipass, WSL drvfs). Those mounts
+# do not round-trip POSIX permissions reliably, so the host clone sets
+# `core.fileMode = false` to stop git reporting a storm of spurious mode changes.
+#
+# That setting is the right call AND it creates a blind spot:
+#
+#   - git still applies the index mode on *checkout*, so a fresh clone is fine.
+#   - but any edit performed as write-temp-then-rename — which is what virtually
+#     every editor, formatter, and agent file-write does — REPLACES the inode.
+#     The new file gets the ambient umask (0644), and the exec bit is gone.
+#   - with `core.fileMode = false`, `git status` and `git diff` are BLIND to that:
+#     a pure mode regression reports absolutely nothing. (Verified: a 755 -> 644
+#     drift with identical content shows empty `git status` and empty
+#     `git diff --summary` under fileMode=false, and `mode change 100755 =>
+#     100644` under fileMode=true.)
+#
+# The result is a recurring, silent class of breakage: `./scripts/verify-backends`
+# suddenly exits 126 "Permission denied", or a vendored tool fails mid-exec-chain
+# (bats re-execs `libexec/bats-core/bats` and then a formatter, so a stripped bit
+# surfaces as a confusing downstream error, not an obvious permission one).
+#
+# THE FIX IS NOT `chmod +x` ON A SHEBANG
+#
+# A shebang does NOT mean a file should be executable here. `acq.backends/*.sh`
+# are *sourced* by `acq`; `test/bats/*.bats` are read *by bats*. Both are
+# correctly 100644 in the index. Marking them 755 would be wrong.
+#
+# The git index is the single source of truth: if git records 100755, the file is
+# an entry point and must be executable on disk. This script enforces exactly
+# that invariant, in both directions, and nothing more.
+#
+# USAGE
+#
+#   scripts/fix-exec-bits          # repair drift, report what changed
+#   scripts/fix-exec-bits --check  # report only, exit 1 on drift (for CI/hooks)
+#
+# Covers the superproject and every initialized submodule (the vendored bats
+# submodule is the common casualty: it records 32 executables, and its exec chain
+# needs at least bin/bats, libexec/bats-core/bats, bats-exec-suite, and the
+# formatters).
+#
+# This is idempotent, touches only the executable bit, and never changes content.
+
+set -uo pipefail
+
+CHECK_ONLY=0
+case "${1:-}" in
+  --check) CHECK_ONLY=1 ;;
+  -h|--help)
+    sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  "") ;;
+  *)
+    printf 'fix-exec-bits: unknown argument: %s (try --help)\n' "$1" >&2
+    exit 2
+    ;;
+esac
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "fix-exec-bits: git not found on PATH" >&2
+  exit 2
+fi
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "fix-exec-bits: not inside a git repository" >&2
+  exit 2
+}
+cd "$REPO_ROOT" || exit 2
+
+FIXED=0
+DRIFT=0
+
+# _scan DIR LABEL — compare every tracked file's index mode against its on-disk
+# executable bit, in the git repository rooted at DIR.
+#
+# Modes are read with `git ls-files -s`, which reports the INDEX mode and is
+# therefore unaffected by core.fileMode (that setting governs whether git
+# *notices* worktree mode changes, not what the index says). -z plus a NUL read
+# loop keeps paths with spaces or newlines intact.
+_scan() {
+  local dir="$1" label="$2"
+  local entry mode path want_x have_x
+
+  while IFS= read -r -d '' entry; do
+    mode=${entry%% *}
+    path=${entry#*$'\t'}
+
+    case "$mode" in
+      100755) want_x=1 ;;
+      100644) want_x=0 ;;
+      # Symlinks (120000) and gitlinks (160000) have no meaningful exec bit.
+      *) continue ;;
+    esac
+
+    # Skip anything not present as a regular file (sparse checkout, broken link).
+    [ -f "$dir/$path" ] || continue
+
+    if [ -x "$dir/$path" ]; then have_x=1; else have_x=0; fi
+    [ "$want_x" = "$have_x" ] && continue
+
+    DRIFT=$((DRIFT + 1))
+    if [ "$want_x" = 1 ]; then
+      if [ "$CHECK_ONLY" = 1 ]; then
+        printf '  needs +x   %s%s\n' "$label" "$path"
+      elif chmod +x "$dir/$path" 2>/dev/null; then
+        printf '  fixed +x   %s%s\n' "$label" "$path"
+        FIXED=$((FIXED + 1))
+      else
+        printf '  FAILED +x  %s%s\n' "$label" "$path" >&2
+      fi
+    else
+      # The index says this file is NOT an entry point. An unexpected exec bit is
+      # reported but never silently cleared: it may be a deliberate local change
+      # the author still intends to commit as a mode change.
+      printf '  unexpected +x (index says 100644)  %s%s\n' "$label" "$path"
+    fi
+  done < <(git -C "$dir" ls-files -s -z)
+}
+
+printf 'fix-exec-bits: checking tracked file modes against the git index\n'
+_scan "$REPO_ROOT" ""
+
+# Initialized submodules only. An uninitialized submodule has no worktree to fix,
+# and `--recursive` would fail noisily on it.
+while IFS= read -r sub; do
+  [ -n "$sub" ] || continue
+  [ -d "$REPO_ROOT/$sub/.git" ] || [ -f "$REPO_ROOT/$sub/.git" ] || continue
+  _scan "$REPO_ROOT/$sub" "$sub/"
+done < <(git submodule --quiet foreach --recursive 'printf "%s\n" "$displaypath"' 2>/dev/null || true)
+
+if [ "$DRIFT" -eq 0 ]; then
+  printf 'fix-exec-bits: OK - every tracked file matches its index mode\n'
+  exit 0
+fi
+
+if [ "$CHECK_ONLY" = 1 ]; then
+  printf '\nfix-exec-bits: %d file(s) disagree with the git index.\n' "$DRIFT" >&2
+  printf '               Run: scripts/fix-exec-bits\n' >&2
+  exit 1
+fi
+
+printf 'fix-exec-bits: repaired %d of %d file(s)\n' "$FIXED" "$DRIFT"
+[ "$FIXED" -eq "$DRIFT" ] || exit 1
+exit 0
