@@ -249,10 +249,11 @@ _msys_provision() { # NAME WS
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_snapshot somebox "'"$STUBDIR"'/saved.msb" >/dev/null 2>&1
     acq_backend_restore "'"$STUBDIR"'/saved.msb" --name restored >/dev/null 2>&1 || true
-    host=$(host_path "'"$STUBDIR"'/saved.msb")
-    grep -q -- "-o $host" "'"$CALLS"'" && echo "snapshot-host-form-ok"
-    grep -q -- "restore $host --name restored" "'"$CALLS"'" && echo "restore-host-form-ok"
-    [ "$host" != "'"$STUBDIR"'/saved.msb" ] && echo "forms-differ" || echo "forms-same"
+    snapshot_host=$(host_path "'"$STUBDIR"'/saved.msb")
+    staged_host=$(host_path "'"$STUBDIR"'/state/msb-snapshots/$(sha256sum "'"$STUBDIR"'/saved.msb" | cut -d" " -f1).msb")
+    grep -q -- "-o $snapshot_host" "'"$CALLS"'" && echo "snapshot-host-form-ok"
+    grep -q -- "restore $staged_host --name restored" "'"$CALLS"'" && echo "restore-host-form-ok"
+    [ "$snapshot_host" != "'"$STUBDIR"'/saved.msb" ] && echo "forms-differ" || echo "forms-same"
   '
   assert_output --partial 'snapshot-host-form-ok'
   assert_output --partial 'restore-host-form-ok'
