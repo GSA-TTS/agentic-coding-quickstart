@@ -275,6 +275,7 @@ case "$_msb_sub" in
       [ -f "$STUBDIR/.msb_sandbox_list" ] && cat "$STUBDIR/.msb_sandbox_list"
     fi ;;
   exec)
+    [ "${STUB_MSB_EXEC_FAIL:-0}" = "1" ] && exit 1
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
     # `opencode --version` postinstall functionality probe (bare argv). Default
@@ -478,7 +479,17 @@ case "$_msb_sub" in
     { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
     { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
     : ;;
-  snapshot|restore)
+  snapshot)
+    _out=""
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = "-o" ] && { shift; _out="${1:-}"; }
+      shift || true
+    done
+    [ -n "$_out" ] && : >"$_out"
+    { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
+    { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
+    : ;;
+  restore)
     { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
     { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
     : ;;

@@ -919,6 +919,11 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
   degraded to a disk-only template flow, because local `sbx template save/load`
   does not preserve execution state or provide restore-time host-resource
   rebinding.
+  For acq-owned workspace bindings, restore intentionally uses `--disk-only` and
+  re-runs kit startup: msb can otherwise report a successful restore while
+  cold-booting after a virtio-fs rebind. `acq` never accepts archive-adjacent
+  resource metadata as authority; it uses private host metadata recorded when
+  the snapshot was created.
 - **Browser-based OpenCode is via the `openchamber` kit.** The former
   `opencode-web.sh` helper has been removed; use the `openchamber` acq kit, which
   publishes the OpenCode server port (4096) plus the OpenChamber UI (3000) with a
