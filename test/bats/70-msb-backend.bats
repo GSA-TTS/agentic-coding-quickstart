@@ -30,6 +30,14 @@ s=socket.socket(socket.AF_UNIX)
 s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
 }
 
+_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
 @test "msb: auto-detect prefers msb when both present and no sbx sandboxes" {
   rm -f "$STUBDIR/.sandbox_list"
   run bash -c '
@@ -84,8 +92,8 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" snapshot mybox "$STUBDIR/mybox.msb"
   assert_success
   assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/mybox\.msb"
-  [ -f "$STUBDIR/mybox.msb.resources" ]
-  [ -f "$STUBDIR/mybox.msb.kits" ]
+  [ "$(stat -c '%a' "$STUBDIR/mybox.msb" 2>/dev/null || stat -f '%Lp' "$STUBDIR/mybox.msb")" = "600" ]
+  [ -f "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/mybox.msb").resources" ]
 }
 
 @test "msb: create with no workspace positional provisions without empty-array abort" {
@@ -102,15 +110,17 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   command -v realpath >/dev/null 2>&1 && sock_path=$(realpath "$sock_path")
   mkdir -p "$STUBDIR/secrets" "$STUBDIR/ws" "$STUBDIR/provenance/msb"
   printf 'sk-restored\n' > "$STUBDIR/secrets/acq.usai"
-  printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/saved.msb.resources"
-  printf 'schema=1\nkit=%s\n' "$STUBDIR/custom-kit" > "$STUBDIR/saved.msb.kits"
+  : > "$STUBDIR/saved.msb"
+  mkdir -p "$STUBDIR/state/msb-snapshots"
+  printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/saved.msb").resources"
+  printf 'schema=1\nkit=%s\n' "$STUBDIR/custom-kit" > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/saved.msb").kits"
   mkdir -p "$STUBDIR/custom-kit"
   printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: custom\ndisplayName: Custom\ndescription: custom\n' > "$STUBDIR/custom-kit/spec.yaml"
   : > "$CALLS"
   run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/saved.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb restore $STUBDIR/saved\.msb --name restored --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/[0-9a-f]{64}\.msb --name restored --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
   assert_regex "$log" 'USAI_API_KEY=present'
   assert_regex "$log" 'socat UNIX-LISTEN:'
   assert_regex "$log" 'msb inspect restored --format json'
@@ -120,18 +130,40 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   kit_record=$(printf '%s' restored | cksum | cut -d' ' -f1)
   assert [ -f "$STUBDIR/provenance/msb/restored.${kit_record}.kits" ]
   assert_regex "$(cat "$STUBDIR/provenance/msb/restored.${kit_record}.kits")" "$STUBDIR/custom-kit"
+  [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
 }
 
 @test "msb: full-state restore does not re-run kit startup" {
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
+  : > "$STUBDIR/full-state.msb"
   : > "$CALLS"
   run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/full-state.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb restore $STUBDIR/full-state\.msb --name restored --dangerously-inherit-resources --vsock"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/[0-9a-f]{64}\.msb --name restored --dangerously-inherit-resources --vsock"
   refute_regex "$log" 'msb inspect restored --format json'
   refute_output --partial "re-applied kit startup"
   assert_output --partial "acq: restored 'restored'."
+}
+
+@test "msb: restore ignores archive-adjacent resource sidecars" {
+  mkdir -p "$STUBDIR/ws" "$STUBDIR/attacker"
+  : > "$STUBDIR/untrusted.msb"
+  printf 'volume\t%s:%s\n' "$STUBDIR/attacker" "$STUBDIR/attacker" > "$STUBDIR/untrusted.msb.resources"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" restore restored "$STUBDIR/untrusted.msb"
+  assert_success
+  refute_regex "$(cat "$CALLS")" "--volume $STUBDIR/attacker:$STUBDIR/attacker"
+}
+
+@test "msb: restore fails when the guest never becomes exec-ready" {
+  : > "$STUBDIR/unready.msb"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb STUB_MSB_EXEC_FAIL=1 ACQ_MSB_EXEC_READY_TIMEOUT=0 \
+    "$ACQ" restore restored "$STUBDIR/unready.msb"
+  assert_failure
+  assert_output --partial "did not become exec-ready"
+  refute_output --partial "acq: restored 'restored'."
 }
 
 @test "msb: restore without a snapshot picks the newest date-stamped snapshot for the sandbox" {
@@ -139,13 +171,14 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   mkdir -p "$STUBDIR/snapshots" "$STUBDIR/ws2"
   : > "$STUBDIR/snapshots/mybox-20260920T010203Z.msb"
   : > "$STUBDIR/snapshots/mybox-20260921T010203Z.msb"
-  printf 'volume\t%s:%s\n' "$STUBDIR/ws2" "$STUBDIR/ws2" > "$STUBDIR/snapshots/mybox-20260921T010203Z.msb.resources"
+  mkdir -p "$STUBDIR/state/msb-snapshots"
+  printf 'volume\t%s:%s\n' "$STUBDIR/ws2" "$STUBDIR/ws2" > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/snapshots/mybox-20260921T010203Z.msb").resources"
   : > "$STUBDIR/snapshots/mybox-z-not-a-date.msb"
   : > "$STUBDIR/snapshots/other-20260922T010203Z.msb"
   : > "$CALLS"
   run env ACQ_BACKEND=msb ACQ_SNAPSHOT_DIR="$STUBDIR/snapshots" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore mybox
   assert_success
-  assert_regex "$(cat "$CALLS")" "msb restore $STUBDIR/snapshots/mybox-20260921T010203Z\.msb --name mybox"
+  assert_regex "$(cat "$CALLS")" "msb restore $STUBDIR/state/msb-snapshots/[0-9a-f]{64}\.msb --name mybox"
 }
 
 @test "sbx: snapshot/restore/recreate are acq-owned unsupported verbs, not backend passthrough" {
@@ -178,7 +211,7 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   assert_regex "$log" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/recreate\.msb"
   assert_regex "$log" 'msb remove --force mybox'
   refute_regex "$log" 'msb volume rm'
-  assert_regex "$log" "msb restore $STUBDIR/recreate\.msb --name mybox --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/[0-9a-f]{64}\.msb --name mybox --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
   assert_regex "$log" 'msb inspect mybox --format json'
   assert_output --partial "kit startup re-applied"
 }
