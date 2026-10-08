@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-10-03"
+last_updated: "2026-10-08"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -1641,6 +1641,48 @@ calls against a 0.6.9+ binary, `allow@dns` is safe to use directly.
   a supported install. If a future regression is suspected, re-run the minimal
   `msb run … --net-rule "allow@dns"` case above on the quarterly review cadence to
   confirm the macro still parses.
+
+---
+
+## 32.1. An Existing msb Sandbox Opens a Shell or `/home/agent` After Upgrading acq
+
+### Symptoms
+
+After upgrading acq, a name-only `acq run <sandbox>` against an existing msb
+sandbox opens a plain shell instead of its configured agent, or starts in
+`/home/agent` rather than the mounted workspace. The first resume may also
+re-run idempotent kit install and agent-user setup steps.
+
+### Root Cause
+
+ADR-0035 moves session configuration and run-once gates from guest-writable
+`/var/lib/acq` markers to the host-authoritative config store. Sandboxes created
+before that migration have no host-config keys. acq must not import their old
+guest markers because a passwordless-sudo agent can forge those values.
+
+### Fix
+
+Current acq releases recover the agent and workspace from their existing trusted
+host provenance record when the new host-config keys are absent. The regular
+`acq run`, `acq start`, and `acq restart` heal also reapplies the effective kit
+set, rebuilding kit environment entries and safely re-running missing
+idempotency gates once. SSH-agent forwarding is re-established during the same
+heal when configured.
+
+If the provenance record is missing or the replay fails, recreate the sandbox
+from its workspace:
+
+```bash
+acq rm <sandbox>
+acq run <agent> <workspace>
+```
+
+### Prevention / Status
+
+- Fixed without trusting legacy guest state. A one-time idempotent replay after
+  upgrade is expected for a sandbox that predates the host-config migration.
+- Keep work in the mounted workspace committed or backed up before recreating a
+  sandbox; recreation discards guest-local state.
 
 ---
 

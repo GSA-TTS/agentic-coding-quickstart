@@ -127,6 +127,34 @@ _attach() { # PRE_SNIPPET NAME
   refute_regex "$log" 'su - agent'
 }
 
+@test "msb: legacy sandbox uses trusted provenance for its agent and workspace" {
+  : > "$CALLS"
+  run bash -c '
+    set -euo pipefail
+    export STUB_AGENT_PRESENT=1
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_provenance_write msb legacybox opencode /tmp/legacy-repo
+    _acq_msb_attach legacybox </dev/null >/dev/null 2>&1
+  '
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb exec -t -u agent -w /tmp/legacy-repo'
+  assert_regex "$log" 'legacybox -- opencode'
+  refute_regex "$log" 'legacybox -- /bin/sh -l'
+}
+
+@test "msb: host-config agent overrides stale provenance" {
+  run bash -c '
+    set -euo pipefail
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_provenance_write msb precedencebox opencode
+    acq_host_config_write msb precedencebox agent shell
+    acq_backend_recorded_agent precedencebox
+  '
+  assert_success
+  assert_output 'shell'
+}
+
 @test "msb: attach falls back to a shell (with notice) when the agent binary is missing" {
   _attach 'export STUB_RECORDED_AGENT=opencode STUB_RECORDED_WORKSPACE=/tmp/myrepo STUB_AGENT_PRESENT=0' attachbox
   assert_regex "$(cat "$CALLS")" 'attachbox -- /bin/sh -l'
@@ -208,6 +236,18 @@ _attach() { # PRE_SNIPPET NAME
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
   assert_regex "$(cat "$CALLS")" '\-w /home/agent wsbox'
+}
+
+@test "msb #421: acq exec uses trusted provenance for a legacy workspace" {
+  : > "$CALLS"
+  run bash -c '
+    set -euo pipefail
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_provenance_write msb legacywsbox shell /tmp/legacy-repo
+    acq_backend_run legacywsbox -- git status >/dev/null 2>&1
+  '
+  assert_success
+  assert_regex "$(cat "$CALLS")" '\-w /tmp/legacy-repo legacywsbox -- git status'
 }
 
 @test "msb #425: attach and shell forward the host TERM/COLORTERM when set" {

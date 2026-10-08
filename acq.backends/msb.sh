@@ -4420,9 +4420,9 @@ _ACQ_MSB_RUN_WS=""
 
 acq_backend_recorded_agent() {
   local name="$1" agent
-  agent=$(acq_provenance_field msb "$name" agent)
+  agent=$(acq_host_config_read msb "$name" agent | tr -d '[:space:]')
   if [ -z "$agent" ]; then
-    agent=$(acq_host_config_read msb "$name" agent | tr -d '[:space:]')
+    agent=$(acq_provenance_field msb "$name" agent)
   fi
   if [ -n "$agent" ] && acq_agent_safe_token "$agent"; then
     printf '%s\n' "$agent"
@@ -4432,8 +4432,9 @@ acq_backend_recorded_agent() {
 # _acq_msb_workspace_for NAME — the guest workspace a session starts in (-w).
 # Prefer an explicit ACQ_MSB_WORKSPACE override; otherwise the guest path
 # recorded at provision in the host config store (it mirrors the host mount path,
-# so it cannot be recomputed from NAME alone); fall back to the agent home if
-# nothing was recorded (older sandbox).
+# so it cannot be recomputed from NAME alone). A pre-ADR-0035 sandbox lacks that
+# key; use its trusted host provenance record before falling back to the agent
+# home. Never import the guest marker because a sudo-capable guest can forge it.
 _acq_msb_workspace_for() {
   local name="$1" ws=""
   if [ -n "${ACQ_MSB_WORKSPACE:-}" ]; then
@@ -4447,6 +4448,12 @@ _acq_msb_workspace_for() {
     fi
   else
     ws=$(acq_host_config_read msb "$name" workspace | tr -d '\r\n')
+    if [ -z "$ws" ]; then
+      ws=$(acq_workspace_record_read msb "$name" | tr -d '\r\n')
+      if [ -n "$ws" ] && command -v canonicalize_path >/dev/null 2>&1; then
+        ws=$(canonicalize_path "$ws")
+      fi
+    fi
   fi
   [ -n "$ws" ] || ws="/home/agent"
   printf '%s\n' "$ws"
@@ -4604,12 +4611,13 @@ _acq_msb_attach() {
   local ws
   ws=$(_acq_msb_workspace_for "$name")
 
-  # Read the agent recorded at provision. Default to `shell` if unset. The value
-  # comes from the host-authoritative config store (ADR-0035), not a guest file.
+  # Read the agent recorded at provision. Default to `shell` if unset. Prefer
+  # host provenance for pre-ADR-0035 sandboxes, then the host-authoritative config
+  # store; never import the guest marker.
   # Keep the charset guard before it enters the `sh -c "command -v '$agent'"`
   # below; fall back to a plain shell on anything unexpected.
   local agent
-  agent=$(acq_host_config_read msb "$name" agent | tr -d '[:space:]')
+  agent=$(acq_backend_recorded_agent "$name" | tr -d '[:space:]')
   if [ -z "$agent" ] || ! _acq_msb_safe_agent_token "$agent"; then
     agent="shell"
   fi

@@ -187,6 +187,18 @@ RUBOCOP_PARALLELISM=4"
   assert_regex "$(cat "$CALLS")" 'exec -u agent -e HOME=/home/agent -w /home/agent sbox -- git status'
 }
 
+@test "msb test helper: unset fixture values are safe under set -e" {
+  run bash -c '
+    set -euo pipefail
+    unset STUB_RECORDED_AGENT STUB_RECORDED_WORKSPACE STUB_RECORDED_SSH_AUTH_SOCK STUB_RECORDED_KIT_ENV
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb unsetfixture
+    echo SURVIVED
+  '
+  assert_success
+  assert_output 'SURVIVED'
+}
+
 @test "msb kit env: heal rebuilds the marker — a var the kit no longer declares stops reaching sessions" {
   # The heal loop (and provision) applies the FULL effective kit set, so the
   # marker must be rebuilt from the current kits' environment[] each time. An

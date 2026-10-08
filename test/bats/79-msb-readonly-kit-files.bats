@@ -104,9 +104,9 @@ SPEC
   # The mount root must be traversable by the guest agent (0711) while flat
   # acq-internal keys stay private; kit-files must be traversable and files
   # executable/readable from the :ro mount.
-  assert_equal "$(stat -c '%a' "$cfg")" "711"
-  assert_equal "$(stat -c '%a' "$cfg/kit-files")" "711"
-  assert_equal "$(stat -c '%a' "$staged")" "555"
+  assert_equal "$(stat -c '%a' "$cfg" 2>/dev/null || stat -f '%Lp' "$cfg" 2>/dev/null || echo '?')" "711"
+  assert_equal "$(stat -c '%a' "$cfg/kit-files" 2>/dev/null || stat -f '%Lp' "$cfg/kit-files" 2>/dev/null || echo '?')" "711"
+  assert_equal "$(stat -c '%a' "$staged" 2>/dev/null || stat -f '%Lp' "$staged" 2>/dev/null || echo '?')" "555"
   # It is NOT msb-copied into the guest at its declared guest path.
   refute_regex "$log" 'msb copy .*:/home/agent/cfg/merge\.mjs'
   # The plain data file IS copied into the guest (unchanged behavior).

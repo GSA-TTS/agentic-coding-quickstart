@@ -588,6 +588,7 @@ seed_host_config() {
   [ -n "${STUB_RECORDED_WORKSPACE+x}" ] && acq_host_config_write "$backend" "$name" workspace "$STUB_RECORDED_WORKSPACE"
   [ -n "${STUB_RECORDED_SSH_AUTH_SOCK+x}" ] && acq_host_config_write "$backend" "$name" ssh-auth-sock "$STUB_RECORDED_SSH_AUTH_SOCK"
   [ -n "${STUB_RECORDED_KIT_ENV+x}" ] && acq_host_config_write "$backend" "$name" kit-env "$STUB_RECORDED_KIT_ENV"
+  return 0
 }
 export -f seed_host_config 2>/dev/null || true
 
