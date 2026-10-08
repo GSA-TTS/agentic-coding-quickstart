@@ -78,6 +78,8 @@ capability flag variables:
 | `acq_backend_attach NAME [-- AGENT_ARGS...]` | Interactive attach (TTY) |
 | `acq_backend_exists NAME` | 0 if sandbox exists, else 1 |
 | `acq_backend_stop NAME` | Stop without removing |
+| `acq_backend_snapshot NAME [OUT]` | Create a native full-state snapshot when supported |
+| `acq_backend_restore SNAPSHOT --name NAME` | Restore a native full-state snapshot and re-plumb acq-owned host resources when supported |
 | `acq_backend_terminate NAME` | Permanently remove |
 | `acq_backend_cp SRC DST` | Copy in/out (NAME:path syntax) |
 | `acq_backend_ports NAME [args...]` | List/publish ports |

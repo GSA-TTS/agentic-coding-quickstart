@@ -2245,6 +2245,24 @@ acq_cli_kits_write() {
   return 0
 }
 
+acq_cli_kits_copy_sidecar() {
+  local backend="${1:-}" name="${2:-}" snapshot="${3:-}" file
+  [ -n "$backend" ] && [ -n "$name" ] && [ -n "$snapshot" ] || return 0
+  file=$(_acq_cli_kits_file "$backend" "$name") || return 0
+  [ -f "$file" ] || return 0
+  cp "$file" "${snapshot}.kits" 2>/dev/null || return 1
+}
+
+acq_cli_kits_adopt_sidecar() {
+  local backend="${1:-}" name="${2:-}" snapshot="${3:-}" file dir
+  [ -n "$backend" ] && [ -n "$name" ] && [ -n "$snapshot" ] || return 0
+  [ -f "${snapshot}.kits" ] || return 0
+  file=$(_acq_cli_kits_file "$backend" "$name") || return 1
+  dir=$(dirname "$file")
+  mkdir -p "$dir" 2>/dev/null || return 1
+  cp "${snapshot}.kits" "$file" 2>/dev/null || return 1
+}
+
 # Reload a sandbox's persisted CLI (`--kit`) and extra kit refs into ACQ_CLI_KITS
 # / ACQ_EXTRA_KITS for the CURRENT shell, so a subsequent heal re-runs their
 # startup. Called by the start/restart verbs before ensure_kits_applied. No-op
