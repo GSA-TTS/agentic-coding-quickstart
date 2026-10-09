@@ -85,6 +85,21 @@ _acq_msb_select_kits() {
   fi
 }
 
+# Host-authoritative config store (ADR-0035). Normally defined in common.sh
+# (sourced before this adapter by acq_resolve_backend), but offline session paths
+# source this adapter directly in tests. Guard-source it so acq_host_config_* is
+# available in either path.
+if ! command -v acq_host_config_read >/dev/null 2>&1; then
+  # shellcheck source=acq.backends/common.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+fi
+
+# Keep the adapter-local validator used by attach while delegating the canonical
+# token policy to the shared agent catalog.
+_acq_msb_safe_agent_token() {
+  acq_agent_safe_token "$1"
+}
+
 # ---------------------------------------------------------------------------
 # _acq_msb_cli — invoke the msb CLI with MSYS argument rewriting disabled
 # ---------------------------------------------------------------------------
@@ -568,6 +583,10 @@ ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
 # always defined even if provision is not the entry point.
 _ACQ_MSB_STARTUP_STAGE_FILES=()
 _ACQ_MSB_STARTUP_STAGED=""
+# Per-kit readonly-file rewrite table: declared guest path -> read-only mount
+# path. Trusted startup code is never executed from a guest-writable copy.
+_ACQ_MSB_RO_REWRITE_FROM=()
+_ACQ_MSB_RO_REWRITE_TO=()
 # SSH user for the serve listener. `msb ssh serve` authorizes a key host-wide;
 # the login user on the loopback listener defaults to root (override if a
 # deployment's msb serve expects a different account).
@@ -818,6 +837,14 @@ acq_backend_prepare() {
 
 acq_backend_exists() {
   _acq_msb_cli list -q 2>/dev/null | grep -Fxq -- "$1"
+}
+
+# Return success only when msb successfully lists sandboxes and NAME is absent.
+# A failed list probe is indeterminate, not evidence that a live sandbox is gone.
+_acq_msb_confirm_absent() {
+  local name="$1" listed
+  listed=$(_acq_msb_cli list -q 2>/dev/null) || return 1
+  ! printf '%s\n' "$listed" | grep -Fxq -- "$name"
 }
 
 # ---------------------------------------------------------------------------
@@ -1092,9 +1119,9 @@ _acq_msb_wait_for_exec_ready() {
 # THE BOUNDARY — what stays on `msb exec`, and WHY it MUST:
 #
 #   1) INSTALL PHASE stays exec-based. install commands are run-once, gated by a
-#      root-owned marker keyed on a hash of the argv
-#      (_acq_msb_exec_install: /var/lib/acq/install-<cksum>), tested+written as
-#      uid 0 so the gate is independent of the command's own user. A create-time
+#      host-authoritative marker keyed on a hash of the argv
+#      (_acq_msb_exec_install: `install-<cksum>` in host config), so a
+#      passwordless-sudo guest cannot suppress the step. A create-time
 #      script re-runs on every restart by design — the OPPOSITE of run-once — so
 #      folding install into the startup script would break its idempotency
 #      contract. install therefore stays out of the staged script entirely.
@@ -1700,7 +1727,7 @@ _acq_msb_apply_kit_dir() {
 
   # 1) Drop files[] (msb cp host→guest). Files are staged from the kit's files/
   #    tree via the spec's source: field.
-  #    kit_spec_files emits tab-separated "path<TAB>mode<TAB>phase<TAB>source"
+  #    kit_spec_files emits tab-separated "path<TAB>mode<TAB>phase<TAB>source<TAB>readonly"
   #    with possibly-empty middle fields; parse each field explicitly with cut
   #    (a bare `IFS=<tab> read` collapses adjacent empty tab fields).
   #    IMPORTANT: read ALL records into an array FIRST. If we iterated the
@@ -1714,19 +1741,37 @@ _acq_msb_apply_kit_dir() {
 $(kit_spec_files "$spec")
 EOF
 
-  local path mode phase source src _i
+  local path mode phase source _readonly src _i
+  _ACQ_MSB_RO_REWRITE_FROM=()
+  _ACQ_MSB_RO_REWRITE_TO=()
+  local _hcfg_mount_ok=0
+  _acq_msb_host_config_mount_available "$name" && _hcfg_mount_ok=1
   for _i in ${_frecs[@]+"${!_frecs[@]}"}; do
     fline="${_frecs[$_i]}"
     path=$(printf '%s' "$fline" | cut -f1)
     mode=$(printf '%s' "$fline" | cut -f2)
     phase=$(printf '%s' "$fline" | cut -f3)
     source=$(printf '%s' "$fline" | cut -f4)
+    _readonly=$(printf '%s' "$fline" | cut -f5)
     [ -n "$path" ] || continue
     src=""
     if [ -n "$source" ]; then
       src="${kitdir}/${source}"
     fi
-    if [ -n "$src" ] && [ -f "$src" ]; then
+    if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_mount_ok" -eq 1 ]; then
+      local _ro_guest
+      if _ro_guest=$(_acq_msb_stage_readonly_file "$name" "$path" "$src"); then
+        _ACQ_MSB_RO_REWRITE_FROM+=("$path")
+        _ACQ_MSB_RO_REWRITE_TO+=("$_ro_guest")
+      else
+        echo "acq(msb): warning: could not stage read-only kit file '$path' for '$name'; falling back to the legacy guest copy." >&2
+        _readonly=""
+      fi
+    fi
+    if { [ "$_readonly" != "true" ] || [ "$_hcfg_mount_ok" -ne 1 ]; } && [ -n "$src" ] && [ -f "$src" ]; then
+      if [ "$_readonly" = "true" ]; then
+        echo "acq(msb): warning: sandbox '$name' has no readable or read-only ADR-0035 host-config mount; copying readonly kit file '$path' into the guest for compatibility. Recreate the sandbox to get tamper-resistant readonly startup code." >&2
+      fi
       _acq_msb_copy_file_verified "$name" "$src" "$path" "$mode" || {
         echo "acq(msb): error: could not place kit file at ${name}:${path}" >&2
         echo "acq(msb):   subsequent kit commands that read it will fail." >&2
@@ -1738,18 +1783,17 @@ EOF
   # 2) Persist environment[] for session replay. Threading `-e NAME=value` onto
   #    the kit's own commands (step 3) covers provisioning only; the block exists
   #    for agent-runtime config (see ADR-0011: OPENCODE_CONFIG-style vars), so
-  #    the validated entries are also appended to a root-owned guest marker that
-  #    run/attach/shell read back and replay as `-e` flags (same marker pattern
-  #    as /var/lib/acq/agent and /var/lib/acq/ssh-auth-sock). Entries are passed
-  #    as argv to a fixed `sh -c` body — kit bytes are never interpolated into
-  #    shell syntax (SI-10).
+  #    the validated entries are persisted to the host config store and replayed
+  #    as `-e` flags. A passwordless-sudo guest cannot inject environment into a
+  #    later agent session. Entries are never interpolated into shell syntax.
   local _kit_env=()
   _acq_msb_collect_kit_env_into _kit_env "$spec"
   if [ "${#_kit_env[@]}" -gt 0 ]; then
-    _acq_msb_cli exec -u 0 "$name" -- sh -c \
-      'mkdir -p /var/lib/acq && printf "%s\n" "$@" >> /var/lib/acq/kit-env' \
-      sh "${_kit_env[@]}" </dev/null >/dev/null 2>&1 || \
-      echo "acq(msb): warning: could not persist kit env for '$name'; its environment[] will not reach agent sessions" >&2
+    local _kev
+    for _kev in "${_kit_env[@]}"; do
+      acq_host_config_append msb "$name" kit-env "$_kev" || \
+        echo "acq(msb): warning: could not persist kit env for '$name'; its environment[] will not reach agent sessions" >&2
+    done
   fi
 
   # 3) Run commands[]. Reassemble each argv record and exec it as the given uid.
@@ -1774,7 +1818,7 @@ EOF
   _acq_msb_run_commands "$name" "$spec" "$_merged_envn"
 }
 
-# _acq_msb_reset_kit_env NAME — remove the persisted kit-env marker so a
+# _acq_msb_reset_kit_env NAME — remove the persisted host kit-env key so a
 # FULL-set kit application (provision, heal) rebuilds it from the current kits'
 # environment[] only. Without this, the per-kit append in _acq_msb_apply_kit_dir
 # would retain entries a kit no longer declares — removed runtime config
@@ -1784,8 +1828,43 @@ EOF
 # a failed reset degrades to the previous stale-retention behavior, never
 # aborts the apply.
 _acq_msb_reset_kit_env() {
-  _acq_msb_cli exec -u 0 "$1" -- sh -c 'rm -f /var/lib/acq/kit-env' \
-    </dev/null >/dev/null 2>&1 || true
+  acq_host_config_clear msb "$1" kit-env
+}
+
+_acq_msb_host_config_mount_available() {
+  local name="$1"
+  _acq_msb_cli exec "$name" -u agent -- sh -c \
+    "test -d '$ACQ_HOST_CONFIG_GUEST_DIR' && test -x '$ACQ_HOST_CONFIG_GUEST_DIR'" \
+    </dev/null >/dev/null 2>&1 || return 1
+  _acq_msb_cli exec "$name" -u 0 -- sh -c \
+    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; if : > "$_tmp" 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 1; fi; exit 0' \
+    sh "$ACQ_HOST_CONFIG_GUEST_DIR" </dev/null >/dev/null 2>&1
+}
+
+_acq_msb_stage_readonly_file() {
+  local name="$1" guestpath="$2" src="$3"
+  local cfgdir slug crc dest
+  cfgdir=$(acq_host_config_dir msb "$name") || return 1
+  slug=$(printf '%s' "${guestpath#/}" | tr -c 'A-Za-z0-9' '-' | tr -s '-')
+  slug="${slug%-}"
+  crc=$(printf '%s' "$guestpath" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+  mkdir -p "${cfgdir}/kit-files" 2>/dev/null || return 1
+  chmod 711 "$cfgdir" "${cfgdir}/kit-files" 2>/dev/null || true
+  dest="${cfgdir}/kit-files/${slug}.${crc}"
+  cp -f "$src" "$dest" 2>/dev/null || return 1
+  chmod 0555 "$dest" 2>/dev/null || true
+  printf '%s/kit-files/%s.%s\n' "$ACQ_HOST_CONFIG_GUEST_DIR" "$slug" "$crc"
+}
+
+_acq_msb_ro_rewrite_token() {
+  local token="$1" i
+  for i in ${_ACQ_MSB_RO_REWRITE_FROM[@]+"${!_ACQ_MSB_RO_REWRITE_FROM[@]}"}; do
+    if [ "$token" = "${_ACQ_MSB_RO_REWRITE_FROM[$i]}" ]; then
+      printf '%s\n' "${_ACQ_MSB_RO_REWRITE_TO[$i]}"
+      return 0
+    fi
+  done
+  printf '%s\n' "$token"
 }
 
 # Copy a host file into the guest and VERIFY it is readable there before
@@ -1945,6 +2024,12 @@ EOF
         ;;
       "__END__")
         reading=0
+        if [ "${#_ACQ_MSB_RO_REWRITE_FROM[@]}" -gt 0 ] && [ "${#argv[@]}" -gt 0 ]; then
+          local _ai
+          for _ai in "${!argv[@]}"; do
+            argv[$_ai]=$(_acq_msb_ro_rewrite_token "${argv[$_ai]}")
+          done
+        fi
         _acq_msb_exec_command "$name" "$phase" "$user" "$background" _own_guard_tok \
           ${_kit_env[@]+"${_kit_env[@]}"} -- ${argv[@]+"${argv[@]}"}
         ;;
@@ -2116,9 +2201,8 @@ _acq_msb_exec_flags_into() {
 
 # _acq_msb_exec_install NAME USER UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV... — run an
 # install-phase command, gated by a per-command marker (hash of argv) so it runs
-# once per sandbox even across re-applies. The marker lives under /var/lib/acq
-# (root-owned) and is both TESTED and WRITTEN as uid 0, so the gate is
-# independent of the install command's own user.
+# once per sandbox even across re-applies. The marker is held in host config so
+# a passwordless-sudo guest cannot forge it to suppress the command.
 _acq_msb_exec_install() {
   local _name="$1" _user="$2" _uflagn="$3" _eflagn="$4"
   shift 4
@@ -2131,8 +2215,8 @@ _acq_msb_exec_install() {
   eval "_ef=(\${${_eflagn}[@]+\"\${${_eflagn}[@]}\"})"
 
   local marker
-  marker="/var/lib/acq/install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
-  if _acq_msb_cli exec "$_name" -u 0 -- sh -c "test -f '$marker'" </dev/null >/dev/null 2>&1; then
+  marker="install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
+  if acq_host_config_has msb "$_name" "$marker"; then
     acq_debug "msb cmd[install] already done (marker hit): $*"
     return 0
   fi
@@ -2143,7 +2227,7 @@ _acq_msb_exec_install() {
     return 0
   }
   acq_debug "msb cmd[install] DONE: $*"
-  _acq_msb_cli exec "$_name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" </dev/null >/dev/null 2>&1 || true
+  acq_host_config_write msb "$_name" "$marker" 1 || true
 }
 
 # _acq_msb_exec_run NAME PHASE USER BACKGROUND UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV...
@@ -2438,6 +2522,25 @@ _acq_msb_startup_body_into() {
   fi
   _acq_msb_own_guard_tokens_into _own_guard_tok _own_env
 
+  # The create-time script is assembled before the normal apply path stages the
+  # files, so derive the same readonly path rewrite locally.
+  local _ro_from=() _ro_to=() _frec _fpath _fsource _freadonly _fslug _fcrc
+  while IFS= read -r _frec; do
+    [ -n "$_frec" ] || continue
+    _freadonly=$(printf '%s' "$_frec" | cut -f5)
+    [ "$_freadonly" = "true" ] || continue
+    _fpath=$(printf '%s' "$_frec" | cut -f1)
+    _fsource=$(printf '%s' "$_frec" | cut -f4)
+    [ -n "$_fpath" ] && [ -n "$_fsource" ] || continue
+    _fslug=$(printf '%s' "${_fpath#/}" | tr -c 'A-Za-z0-9' '-' | tr -s '-')
+    _fslug="${_fslug%-}"
+    _fcrc=$(printf '%s' "$_fpath" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+    _ro_from+=("$_fpath")
+    _ro_to+=("${ACQ_HOST_CONFIG_GUEST_DIR}/kit-files/${_fslug}.${_fcrc}")
+  done <<EOF
+$(kit_spec_files "$_spec")
+EOF
+
   # Buffer the command stream first (kit_spec_commands runs its own subshell).
   local _lines=() line
   while IFS= read -r line; do
@@ -2462,6 +2565,18 @@ EOF
       "__END__")
         reading=0
         if [ "$phase" = "startup" ] && [ "${#argv[@]}" -gt 0 ]; then
+          if [ "${#_ro_from[@]}" -gt 0 ]; then
+            local _ai _aj _atok
+            for _ai in "${!argv[@]}"; do
+              _atok="${argv[$_ai]}"
+              for _aj in "${!_ro_from[@]}"; do
+                if [ "$_atok" = "${_ro_from[$_aj]}" ]; then
+                  argv[$_ai]="${_ro_to[$_aj]}"
+                  break
+                fi
+              done
+            done
+          fi
           local _prefix=() _cmdline
           _acq_msb_startup_env_prefix_into _prefix "$user" _kit_env _own_guard_tok
           _cmdline=$(_acq_msb_startup_emit_command "$user" "$background" _prefix argv)
@@ -3460,6 +3575,20 @@ EOF
   _acq_msb_vsock_flags_into _vsock_flags "$name"
   [ "${#_vsock_flags[@]}" -gt 0 ] && create_flags+=("${_vsock_flags[@]}")
 
+  # Mount per-sandbox trusted configuration read-only. The guest can consume
+  # declared code and data here but cannot make acq trust a modified replacement.
+  local _hcfg_dir _hcfg_host
+  if _hcfg_dir=$(acq_host_config_dir msb "$name"); then
+    mkdir -p "$_hcfg_dir" 2>/dev/null || true
+    chmod 711 "$_hcfg_dir" 2>/dev/null || true
+    if command -v host_path >/dev/null 2>&1; then
+      _hcfg_host=$(host_path "$_hcfg_dir")
+    else
+      _hcfg_host="$_hcfg_dir"
+    fi
+    create_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
+  fi
+
   # Credentials: read from the acq-owned secret store (keychain/file), scoped to
   # this sandbox first, then global. The real value is read into a TRANSIENT env
   # var (never argv, never the kit spec) and bound with `msb --secret ENV@HOST`,
@@ -3570,6 +3699,10 @@ EOF
   acq_spin_stop "Waiting for the sandbox to finish booting"
   acq_debug "msb provision: exec-ready OK ($name)"
 
+  # A same-named sandbox removed outside acq can leave host state behind. Clear
+  # instance-scoped values before this fresh provision records replacement values.
+  acq_host_config_clear_instance_state msb "$name"
+
   # Verify the kits' runtime prerequisites are present in the base image
   # (node/git/curl/update-ca-certificates). We do NOT install them: the kit
   # net-rules lock egress to the kits' own hosts, so a package mirror is
@@ -3600,18 +3733,18 @@ EOF
 
   # Record which agent this sandbox runs, so acq_backend_attach (which only gets
   # the sandbox name) knows what to launch — the sbx equivalent is that
-  # `sbx run --name` re-launches the agent baked in at create. Written as root to
-  # a fixed guest path; validated charset (KNOWN_AGENTS tokens are word-safe).
+  # `sbx run --name` re-launches the agent baked in at create. Store the value on
+  # the host so a passwordless-sudo guest cannot change which binary acq launches.
   case "$agent" in
-    *[!a-z-]*) : ;;  # defensive: never write an odd token
-    *) _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && printf '%s' '$agent' > /var/lib/acq/agent" >/dev/null 2>&1 || true ;;
+    *[!a-z-]*) : ;;  # defensive: never record an odd token
+    *) acq_host_config_write msb "$name" agent "$agent" || true ;;
   esac
 
   # Record the guest workspace path too. attach only gets the sandbox NAME, so it
   # cannot recompute the host→guest mapping (which now mirrors the host path);
   # persist it so a name-only re-attach cds into the right place. The path was
   # validated as an existing host dir above; guard the charset before it enters a
-  # root sh -c string.
+  # host config key.
   if [ -n "$ACQ_MSB_GUEST_WORKSPACE" ]; then
     case "$ACQ_MSB_GUEST_WORKSPACE" in
       # Guest-side paths are POSIX (canonicalize_path, ADR-0029), so the
@@ -3619,7 +3752,7 @@ EOF
       *[!A-Za-z0-9._/-]*)
         acq_debug "msb: not recording unsafe guest workspace path: $ACQ_MSB_GUEST_WORKSPACE" ;;
       *)
-        _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && printf '%s' '$ACQ_MSB_GUEST_WORKSPACE' > /var/lib/acq/workspace" >/dev/null 2>&1 || true ;;
+        acq_host_config_write msb "$name" workspace "$ACQ_MSB_GUEST_WORKSPACE" || true ;;
     esac
   fi
 
@@ -3691,8 +3824,8 @@ EOF
 # _acq_msb_exec_command) with HOME exported.
 _acq_msb_ensure_agent_user() {
   local name="$1"
-  local marker="/var/lib/acq/agent-user-ready"
-  if _acq_msb_cli exec "$name" -u 0 -- sh -c "test -f '$marker'" >/dev/null 2>&1; then
+  local marker="agent-user-ready"
+  if acq_host_config_has msb "$name" "$marker"; then
     # The user exists from an earlier run, but its login shell may predate the
     # passwd-shell setup: re-sync it so an existing /bin/sh agent user
     # is healed to bash on its next run, not left behind.
@@ -3776,7 +3909,7 @@ _acq_msb_ensure_agent_user() {
     return 1
   }
   _acq_msb_ensure_agent_shell "$name"
-  _acq_msb_cli exec "$name" -u 0 -- sh -c "mkdir -p /var/lib/acq && touch '$marker'" >/dev/null 2>&1 || true
+  acq_host_config_write msb "$name" "$marker" 1 || true
 }
 
 # _acq_msb_ensure_agent_shell NAME — align the agent's login shell with what
@@ -4121,7 +4254,7 @@ _acq_msb_check_socat() {
 # ACQ_MSB_SSH_AGENT_GUEST_SOCK. The --vsock route persists across msb stop/start,
 # but the socat process dies on stop, so this runs on provision AND on
 # acq_backend_start. Fail-soft: warns, never aborts. Works from EITHER the
-# in-provision flag OR the persisted marker (start
+# in-provision flag OR the persisted host key (start
 # has no provision flag set), so the guest sock path is resolved from whichever
 # source is authoritative for the call. See ADR-0021.
 _acq_msb_start_ssh_agent_bridge() {
@@ -4130,7 +4263,7 @@ _acq_msb_start_ssh_agent_bridge() {
     _sock="$ACQ_MSB_SSH_AGENT_GUEST_SOCK"
   else
     # No provision ran this path (e.g. acq_backend_start): read the persisted
-    # marker recorded at provision. Empty marker => forwarding not configured.
+    # key recorded at provision. Empty key => forwarding not configured.
     _sock=$(_acq_msb_ssh_auth_sock_for "$name")
     [ -n "$_sock" ] || return 0
   fi
@@ -4153,11 +4286,9 @@ _acq_msb_start_ssh_agent_bridge() {
     return 0
   }
 
-  # Record the guest sock path so attach/exec/start can resolve SSH_AUTH_SOCK
-  # even when no provision flag is set. Only written when forwarding is active.
-  _acq_msb_cli exec "$name" -u 0 -- sh -c \
-    "mkdir -p /var/lib/acq && printf '%s' '$_sock' > /var/lib/acq/ssh-auth-sock" \
-    </dev/null >/dev/null 2>&1 || true
+  # Keep the guest sock path host-side so attach/exec/start cannot be redirected
+  # by a passwordless-sudo guest. Only written when forwarding is active.
+  acq_host_config_write msb "$name" ssh-auth-sock "$_sock" || true
   acq_debug "msb: ssh-agent bridge started at $_sock (vsock port $_port) in $name"
 
   # Liveness probe (ADR-0021): the bridge + marker are in place, but the route's
@@ -4272,17 +4403,11 @@ _acq_msb_warn_raw_route_unreachable() {
 
 # _acq_msb_ssh_auth_sock_for NAME — echo the recorded guest ssh-agent sock path
 # (the SSH_AUTH_SOCK value git/ssh should use in the guest), or empty when
-# forwarding was never configured for this sandbox. Read from the persisted
-# marker so run/attach on a name-only re-entry still find it. See ADR-0021.
+# forwarding was never configured for this sandbox. Read from host config so
+# run/attach on a name-only re-entry still find it. See ADR-0021.
 _acq_msb_ssh_auth_sock_for() {
   local name="$1"
-  # Failure-guarded: with the marker absent (forwarding never configured), the
-  # in-guest `cat` exits 1 and — under acq's `set -euo pipefail` — the pipeline
-  # would otherwise propagate that into the caller's command substitution and
-  # kill the whole session verb (the trailing `tr` does NOT mask it: pipefail
-  # takes the failing stage's status).
-  { _acq_msb_cli exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/ssh-auth-sock 2>/dev/null' \
-    </dev/null 2>/dev/null || true; } | tr -d '[:space:]'
+  acq_host_config_read msb "$name" ssh-auth-sock | tr -d '[:space:]'
 }
 
 _acq_msb_git_identity_env_flags_into() {
@@ -4318,24 +4443,20 @@ EOF
 }
 
 # _acq_msb_persisted_kit_env_into ARRVAR NAME — read the kit environment[] entries
-# persisted at /var/lib/acq/kit-env by _acq_msb_apply_kit_dir into the array named
+# persisted in the host config store by _acq_msb_apply_kit_dir into the array named
 # ARRVAR as NAME=value tokens (see ADR-0011). Empty array when the marker is
 # absent or no kit declared environment[]. Array passed by name (bash 3.2 compat).
 #
-# The marker is root-owned but its content is kit-derived guest data: re-validate
-# each NAME (same ^[A-Za-z_][A-Za-z0-9_]*$ charset kit_spec_env enforces) so a
-# tampered line cannot smuggle an option-shaped or quote-bearing token, and keep
-# the LAST value for a duplicate name (kits append in application order, so a
-# later kit overrides an earlier one).
+# Values remain kit-derived, so re-validate each NAME (same
+# ^[A-Za-z_][A-Za-z0-9_]*$ charset kit_spec_env enforces) and keep the LAST value
+# for duplicates (kits append in application order, so a later kit overrides).
 _acq_msb_persisted_kit_env_into() {
   local _arrn="$1" _name="$2"
   eval "$_arrn=()"
-  # Failure-guarded: an absent marker (pre-kit-env sandbox, or no kit declared
-  # environment[]) must yield an empty result, not kill the session verb — see
-  # _acq_msb_ssh_auth_sock_for.
+  # An absent key (pre-kit-env sandbox, or no kit declared environment[]) yields
+  # an empty result, not a failed session verb.
   local _kvs
-  _kvs=$(_acq_msb_cli exec "$_name" -u 0 -- sh -c 'cat /var/lib/acq/kit-env 2>/dev/null' \
-    </dev/null 2>/dev/null) || _kvs=""
+  _kvs=$(acq_host_config_read msb "$_name" kit-env)
   [ -n "$_kvs" ] || return 0
   local _line
   while IFS= read -r _line; do
@@ -4375,7 +4496,7 @@ _acq_msb_kit_env_flags_into() {
 # forward on a RUNNING sandbox that acq is re-attaching to. See ADR-0021.
 #
 # WHY THIS EXISTS: the provision path wires the forward (emit --vsock, start the
-# socat bridge, write the /var/lib/acq/ssh-auth-sock marker), and the
+# socat bridge, write the host-authoritative ssh-auth-sock key), and the
 # stopped→resume path (acq_backend_start) restarts the bridge from that marker.
 # But re-attaching to an ALREADY-RUNNING sandbox goes through neither: the heal
 # loop skips acq_backend_start (the sandbox is already running), so nothing
@@ -4480,9 +4601,9 @@ _ACQ_MSB_RUN_WS=""
 
 acq_backend_recorded_agent() {
   local name="$1" agent
-  agent=$(acq_provenance_field msb "$name" agent)
+  agent=$(acq_host_config_read msb "$name" agent | tr -d '[:space:]')
   if [ -z "$agent" ]; then
-    agent=$({ msb exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '[:space:]')
+    agent=$(acq_provenance_field msb "$name" agent)
   fi
   if [ -n "$agent" ] && acq_agent_safe_token "$agent"; then
     printf '%s\n' "$agent"
@@ -4491,11 +4612,10 @@ acq_backend_recorded_agent() {
 
 # _acq_msb_workspace_for NAME — the guest workspace a session starts in (-w).
 # Prefer an explicit ACQ_MSB_WORKSPACE override; otherwise the guest path
-# recorded at provision (it mirrors the host mount path, so it cannot be
-# recomputed from NAME alone); fall back to the agent home if nothing was
-# recorded (older sandbox). The marker read is failure-guarded so an absent
-# marker takes the documented fallback instead of killing the session verb
-# under `set -e` (see _acq_msb_ssh_auth_sock_for).
+# recorded at provision in the host config store (it mirrors the host mount path,
+# so it cannot be recomputed from NAME alone). A pre-ADR-0035 sandbox lacks that
+# key; use its trusted host provenance record before falling back to the agent
+# home. Never import the guest marker because a sudo-capable guest can forge it.
 _acq_msb_workspace_for() {
   local name="$1" ws=""
   if [ -n "${ACQ_MSB_WORKSPACE:-}" ]; then
@@ -4508,7 +4628,13 @@ _acq_msb_workspace_for() {
       ws="$ACQ_MSB_WORKSPACE"
     fi
   else
-    ws=$({ _acq_msb_cli exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/workspace 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '\r\n')
+    ws=$(acq_host_config_read msb "$name" workspace | tr -d '\r\n')
+    if [ -z "$ws" ]; then
+      ws=$(acq_workspace_record_read msb "$name" | tr -d '\r\n')
+      if [ -n "$ws" ] && command -v canonicalize_path >/dev/null 2>&1; then
+        ws=$(canonicalize_path "$ws")
+      fi
+    fi
   fi
   [ -n "$ws" ] || ws="/home/agent"
   printf '%s\n' "$ws"
@@ -4636,7 +4762,7 @@ acq_backend_run() {
 #                base image's Node REPL, and the passwd shell isn't exported).
 #
 # A bare `acq run <sandbox>` re-attach (no agent token) reads the agent recorded
-# at provision from /var/lib/acq/agent; `shell` (or a missing/failed agent binary)
+# at provision from the host-authoritative agent key; `shell` (or a missing/failed agent binary)
 # falls back to an interactive `/bin/sh -l` as `agent` — never a root shell, never
 # msb's Node-REPL default. Post-`--` args are forwarded to the agent.
 acq_backend_attach() {
@@ -4666,14 +4792,14 @@ _acq_msb_attach() {
   local ws
   ws=$(_acq_msb_workspace_for "$name")
 
-  # Read the agent recorded at provision. Default to `shell` if unset. The value
-  # comes from a guest file (/var/lib/acq/agent); charset-guard it before it
-  # enters the `sh -c "command -v '$agent'"` below, since a tampered marker could
-  # otherwise break the single-quoting and run as the agent user. Fall back to a
-  # plain shell on anything unexpected.
+  # Read the agent recorded at provision. Default to `shell` if unset. Prefer
+  # host provenance for pre-ADR-0035 sandboxes, then the host-authoritative config
+  # store; never import the guest marker.
+  # Keep the charset guard before it enters the `sh -c "command -v '$agent'"`
+  # below; fall back to a plain shell on anything unexpected.
   local agent
-  agent=$({ _acq_msb_cli exec "$name" -u 0 -- sh -c 'cat /var/lib/acq/agent 2>/dev/null' </dev/null 2>/dev/null || true; } | tr -d '[:space:]')
-  if [ -z "$agent" ] || ! acq_agent_safe_token "$agent"; then
+  agent=$(acq_backend_recorded_agent "$name" | tr -d '[:space:]')
+  if [ -z "$agent" ] || ! _acq_msb_safe_agent_token "$agent"; then
     agent="shell"
   fi
 
@@ -4795,8 +4921,10 @@ acq_backend_terminate() {
   _acq_msb_clone_warn_unfetched "$1"
   local _rc=0
   _acq_msb_cli remove --force "$1" || _rc=$?
-  if [ "$_rc" -ne 0 ] && acq_backend_exists "$1"; then
-    return "$_rc"
+  if [ "$_rc" -ne 0 ]; then
+    if acq_backend_exists "$1" || ! _acq_msb_confirm_absent "$1"; then
+      return "$_rc"
+    fi
   fi
   _acq_msb_remove_derived_volumes "$1"
   # Same GONE-after-remove-attempt rule as the volumes above: delete the scratch
@@ -4804,6 +4932,9 @@ acq_backend_terminate() {
   _acq_msb_clone_cleanup "$1"
   # The managed ssh-agent route link (ADR-0021) is per sandbox; drop it too.
   _acq_msb_ssh_agent_link_remove "$1"
+  # Remove host-authoritative config only after the sandbox is confirmed gone;
+  # otherwise a failed removal could discard state still mounted by a live guest.
+  acq_host_config_remove msb "$1" || true
   return "$_rc"
 }
 

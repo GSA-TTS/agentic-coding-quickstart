@@ -25,8 +25,8 @@ takes `HOST:GUEST[:ro]`: the host side is resolved by native `msb.exe` on the
 Windows filesystem (`C:/Users/me/proj`), and the guest side is the path inside
 the Linux microVM, which must be POSIX (`/c/Users/me/proj`, or any absolute
 `/...`). `C:/...` is **not** an absolute path in the guest. The same split
-applies to the start directory (`msb exec -w`), the recorded
-`/var/lib/acq/workspace` marker, and the `ACQ_WORKSPACE` create env
+applies to the start directory (`msb exec -w`), the host-authoritative recorded
+workspace value (ADR-0035), and the `ACQ_WORKSPACE` create env
 ([ADR-0027](0027-neutral-clone-option.md)). An earlier revision passed one
 `cygpath -m` value for both sides, which fixed the host side and broke the
 guest (GSA-TTS/agentic-coding-quickstart#463).

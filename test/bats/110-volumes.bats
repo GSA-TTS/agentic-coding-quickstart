@@ -177,6 +177,30 @@ SPEC
   refute_regex "$log" 'volume rm user-data'
 }
 
+@test "vol: terminate removes host-authoritative config after the sandbox is gone" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_host_config_write msb configbox agent shell
+    acq_backend_terminate configbox >/dev/null 2>&1
+    config=$(acq_host_config_dir msb configbox)
+    [ ! -e "$config" ]
+  '
+  assert_success
+}
+
+@test "vol: terminate retains host config when sandbox absence is indeterminate" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_host_config_write msb uncertainbox agent shell
+    config=$(acq_host_config_dir msb uncertainbox)
+    STUB_MSB_RM_FAIL=1 STUB_MSB_LIST_FAIL=1 acq_backend_terminate uncertainbox >/dev/null 2>&1 || true
+    [ -f "$config/agent" ]
+  '
+  assert_success
+}
+
 @test "vol: colliding path slugs get distinct CRC-suffixed derived names" {
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null
