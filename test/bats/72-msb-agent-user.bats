@@ -35,6 +35,7 @@ _provision() { # NAME AGENT PRE_SNIPPET [KITDIR]
     # NOTE: the stub must NOT read a variable named "kitdir" — provision declares
     # a `local kitdir`, which dynamically shadows it at stub-call time.
     _acq_msb_fetch_kit() { printf "%s\n" "$stub_kitdir"; }
+    seed_host_config_gates msb "$name"
     acq_backend_provision "$name" "$agent" /tmp 2>&1
     printf "PROVISION_RC=%s\n" "$?"
   ' _ "$name" "$agent" "$pre" "$kitdir"
@@ -92,7 +93,7 @@ SPEC
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'npm install'
   refute_regex "$log" 'allow@registry\.npmjs\.org'
-  assert_regex "$log" '/var/lib/acq/agent'
+  assert_equal "$(cat "$ACQ_PROVENANCE_DIR"/msb/instbox.*.config/agent 2>/dev/null)" "opencode"
 }
 
 @test "msb: a shell sandbox has no agent kit and adds no npm net-rule" {
@@ -109,6 +110,8 @@ _attach() { # PRE_SNIPPET NAME
     pre="$1"; name="$2"
     eval "$pre"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb "$name"
+    seed_host_config_gates msb "$name"
     acq_backend_attach "$name" 2>&1
   ' _ "$1" "$2"
 }
@@ -122,6 +125,34 @@ _attach() { # PRE_SNIPPET NAME
   assert_regex "$log" 'attachbox -- opencode'
   refute_regex "$log" 'msb ssh'
   refute_regex "$log" 'su - agent'
+}
+
+@test "msb: legacy sandbox uses trusted provenance for its agent and workspace" {
+  : > "$CALLS"
+  run bash -c '
+    set -euo pipefail
+    export STUB_AGENT_PRESENT=1
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_provenance_write msb legacybox opencode /tmp/legacy-repo
+    _acq_msb_attach legacybox </dev/null >/dev/null 2>&1
+  '
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb exec -t -u agent -w /tmp/legacy-repo'
+  assert_regex "$log" 'legacybox -- opencode'
+  refute_regex "$log" 'legacybox -- /bin/sh -l'
+}
+
+@test "msb: host-config agent overrides stale provenance" {
+  run bash -c '
+    set -euo pipefail
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_provenance_write msb precedencebox opencode
+    acq_host_config_write msb precedencebox agent shell
+    acq_backend_recorded_agent precedencebox
+  '
+  assert_success
+  assert_output 'shell'
 }
 
 @test "msb: attach falls back to a shell (with notice) when the agent binary is missing" {
@@ -153,7 +184,7 @@ _attach() { # PRE_SNIPPET NAME
   refute_regex "$log" 'msb exec execbox --'
 }
 
-@test "msb: attach with a tampered agent marker falls back to shell, never runs the injection" {
+@test "msb: attach with a garbage recorded agent falls back to shell, never runs the injection" {
   _attach 'export STUB_RECORDED_AGENT="x'"'"';touch /tmp/acq_pwn;'"'"'" STUB_RECORDED_WORKSPACE=/tmp/wsp' injattach
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'touch /tmp/acq_pwn'
@@ -165,7 +196,7 @@ _attach() { # PRE_SNIPPET NAME
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'PODMAN_PKGS='
   refute_regex "$log" '/usr/local/bin/docker'
-  refute_regex "$log" "touch '/var/lib/acq/oci-ready'"
+  refute_regex "$log" 'oci-ready'
   refute_regex "$log" '/etc/containers/storage\.conf'
   refute_regex "$log" 'acq-oci-selftest'
   refute_regex "$log" '/dev/net/tun'
@@ -182,6 +213,7 @@ _attach() { # PRE_SNIPPET NAME
   run bash -c '
     export STUB_RECORDED_WORKSPACE=/tmp/myrepo
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb wsbox
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
   assert_regex "$(cat "$CALLS")" '\-u agent -e HOME=/home/agent -w /tmp/myrepo wsbox -- git status'
@@ -192,6 +224,7 @@ _attach() { # PRE_SNIPPET NAME
   run bash -c '
     export ACQ_MSB_WORKSPACE=/tmp/override STUB_RECORDED_WORKSPACE=/tmp/myrepo
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb wsbox
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
   assert_regex "$(cat "$CALLS")" '\-w /tmp/override wsbox'
@@ -199,9 +232,22 @@ _attach() { # PRE_SNIPPET NAME
   run bash -c '
     unset ACQ_MSB_WORKSPACE STUB_RECORDED_WORKSPACE
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_host_config_clear msb wsbox workspace
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
   assert_regex "$(cat "$CALLS")" '\-w /home/agent wsbox'
+}
+
+@test "msb #421: acq exec uses trusted provenance for a legacy workspace" {
+  : > "$CALLS"
+  run bash -c '
+    set -euo pipefail
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_provenance_write msb legacywsbox shell /tmp/legacy-repo
+    acq_backend_run legacywsbox -- git status >/dev/null 2>&1
+  '
+  assert_success
+  assert_regex "$(cat "$CALLS")" '\-w /tmp/legacy-repo legacywsbox -- git status'
 }
 
 @test "msb #425: attach and shell forward the host TERM/COLORTERM when set" {
@@ -307,16 +353,16 @@ _attach() { # PRE_SNIPPET NAME
   assert_regex "$log" '\-le .\$max_lines'
 }
 
-@test "msb: repeated acq exec reads the workspace marker once per process (cached)" {
+@test "msb: repeated acq exec applies the cached host workspace" {
   : > "$CALLS"
   run bash -c '
     export STUB_RECORDED_WORKSPACE=/tmp/myrepo
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb cachebox
     acq_backend_run cachebox -- git status >/dev/null 2>&1
     acq_backend_run cachebox -- git log >/dev/null 2>&1
   '
   local log; log=$(cat "$CALLS")
-  assert_equal "$(grep -c 'cat /var/lib/acq/workspace' "$CALLS")" "1"
   assert_equal "$(grep -c -- '-w /tmp/myrepo cachebox' "$CALLS")" "2"
 }
 
@@ -329,12 +375,12 @@ _attach() { # PRE_SNIPPET NAME
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config_gates msb healshbox
     # shellcheck disable=SC2034  # consumed by the sourced acq_backend_ensure_kits_applied
     ACQ_CLI_KITS=()
     acq_backend_ensure_kits_applied healshbox >/dev/null 2>&1
   '
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "test -f '/var/lib/acq/agent-user-ready'"
   assert_regex "$log" 'acq-login-profile.* sh /bin/bash'
   refute_regex "$log" 'useradd'
 }
@@ -392,6 +438,7 @@ _attach() { # PRE_SNIPPET NAME
     export STUB_RECORDED_WORKSPACE=/tmp/myrepo
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb wsbox
     ACQ_SESSION_KIND=exec
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
@@ -408,6 +455,7 @@ _attach() { # PRE_SNIPPET NAME
     export STUB_RECORDED_WORKSPACE=/tmp/myrepo ACQ_ACTIVATE_PROJECT_ENV=1
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb wsbox
     ACQ_SESSION_KIND=exec
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
@@ -424,6 +472,7 @@ _attach() { # PRE_SNIPPET NAME
     export ACQ_ACTIVATE_PROJECT_ENV=1
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb wsbox
     ACQ_SESSION_KIND=exec
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
@@ -438,6 +487,7 @@ _attach() { # PRE_SNIPPET NAME
     export STUB_RECORDED_WORKSPACE=/tmp/myrepo ACQ_ACTIVATE_PROJECT_ENV=1
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb wsbox
     acq_backend_run wsbox -- git status >/dev/null 2>&1
   '
   local log; log=$(cat "$CALLS")

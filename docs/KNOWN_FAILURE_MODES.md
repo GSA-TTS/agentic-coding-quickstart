@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-10-03"
+last_updated: "2026-10-08"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -1671,6 +1671,48 @@ calls against a 0.6.9+ binary, `allow@dns` is safe to use directly.
 
 ---
 
+## 32.1. An Existing msb Sandbox Opens a Shell or `/home/agent` After Upgrading acq
+
+### Symptoms
+
+After upgrading acq, a name-only `acq run <sandbox>` against an existing msb
+sandbox opens a plain shell instead of its configured agent, or starts in
+`/home/agent` rather than the mounted workspace. The first resume may also
+re-run idempotent kit install and agent-user setup steps.
+
+### Root Cause
+
+ADR-0035 moves session configuration and run-once gates from guest-writable
+`/var/lib/acq` markers to the host-authoritative config store. Sandboxes created
+before that migration have no host-config keys. acq must not import their old
+guest markers because a passwordless-sudo agent can forge those values.
+
+### Fix
+
+Current acq releases recover the agent and workspace from their existing trusted
+host provenance record when the new host-config keys are absent. The regular
+`acq run`, `acq start`, and `acq restart` heal also reapplies the effective kit
+set, rebuilding kit environment entries and safely re-running missing
+idempotency gates once. SSH-agent forwarding is re-established during the same
+heal when configured.
+
+If the provenance record is missing or the replay fails, recreate the sandbox
+from its workspace:
+
+```bash
+acq rm <sandbox>
+acq run <agent> <workspace>
+```
+
+### Prevention / Status
+
+- Fixed without trusting legacy guest state. A one-time idempotent replay after
+  upgrade is expected for a sandbox that predates the host-config migration.
+- Keep work in the mounted workspace committed or backed up before recreating a
+  sandbox; recreation discards guest-local state.
+
+---
+
 ## 33. `--kit` Services Dead After a Resume/Reboot on msb — Ports Mapped, Nothing Listening
 
 ### Symptoms
@@ -1874,11 +1916,12 @@ sandbox, and it starts working again as soon as you
 `export SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock` by hand. Here the vsock
 route and the `socat` bridge are fine — what is missing is the
 **`SSH_AUTH_SOCK` env var in the agent's process**. acq injects that var
-(`-e SSH_AUTH_SOCK=…`) only when the persisted `/var/lib/acq/ssh-auth-sock`
-marker is present, and before the fix nothing re-established the bridge or wrote
-that marker when re-attaching to an already-running sandbox (the heal's
-start-if-stopped block is a no-op on a running sandbox, and only that path — or
-provision — wrote the marker).
+(`-e SSH_AUTH_SOCK=…`) only when the persisted ssh-agent sock value is present
+(recorded host-side in acq's per-sandbox config store, ADR-0035; originally a
+guest `/var/lib/acq/ssh-auth-sock` marker), and before the fix nothing
+re-established the bridge or wrote that value when re-attaching to an
+already-running sandbox (the heal's start-if-stopped block is a no-op on a
+running sandbox, and only that path — or provision — wrote it).
 
 Fixed in `acq.backends/msb.sh`: `acq_backend_ensure_kits_applied` now calls
 `_acq_msb_ensure_ssh_agent_forward` at the top of the heal, which re-drives the

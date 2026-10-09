@@ -227,11 +227,11 @@ SPEC
   refute_regex "$prompt" 'GIT_TERMINAL_PROMPT=0'
 }
 
-@test "ADR-0033: mid-life 'kit apply' recovers the merged env from the marker" {
+@test "ADR-0033: mid-life 'kit apply' recovers the merged env from host config" {
   # A mid-life single-kit apply has NO full kit set to pre-merge, so it must fall
-  # back to the env the sandbox already persisted — otherwise adding a daemon kit
-  # to a live sandbox reintroduces exactly the reported bug for that kit.
-  printf 'OPENCODE_CONFIG=/home/agent/.config/opencode/team.jsonc\n' > "$STUBDIR/.kit_env"
+  # back to the env the sandbox already persisted in host config — otherwise
+  # adding a daemon kit to a live sandbox reintroduces exactly the reported bug
+  # for that kit.
   local mk="$STUBDIR/midlifekit"; mkdir -p "$mk"
   cat > "$mk/spec.yaml" <<'SPEC'
 schemaVersion: "hybrid/v1"
@@ -250,9 +250,11 @@ commands:
 SPEC
   : > "$CALLS"
   ( export ACQ_SECRET_STORE_DIR="$STUBDIR/midlife-secrets"
+    export STUB_RECORDED_KIT_ENV='OPENCODE_CONFIG=/home/agent/.config/opencode/team.jsonc'
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/kit-translate.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
+    seed_host_config msb midlifebox
     acq_backend_apply_kit midlifebox "$mk" >/dev/null 2>&1 )
   local bg; bg=$(printf '%s\n' "$(cat "$CALLS")" | grep 'nohup' | head -n1)
   assert_regex "$bg" '\-e OPENCODE_CONFIG=/home/agent/\.config/opencode/team\.jsonc'
@@ -369,13 +371,11 @@ SPEC
   assert_regex "$b" '\-e A_VAR=from-a'
 }
 
-@test "ADR-0033: mid-life 'kit apply' keeps its own env when the marker append is lost" {
-  # The persisted read can return a STALE non-empty marker that lacks this kit's
-  # entries (step 2's append failed: it only warns). The kit's commands must still
-  # carry its own environment[], winning over a stale value for the same name,
-  # while keeping the other persisted entries.
-  export STUB_RECORDED_KIT_ENV='OPENCODE_CONFIG=/stale.jsonc
-OTHER_KIT_VAR=kept'
+@test "ADR-0033: mid-life 'kit apply' keeps its own env when the host append is lost" {
+  # The persisted read can return a STALE non-empty host-config value that lacks
+  # this kit's entries (step 2's append failed: it only warns). The kit's commands
+  # must still carry its own environment[], winning over a stale value for the
+  # same name, while keeping the other persisted entries.
   local mk="$STUBDIR/lostappendkit"; mkdir -p "$mk"
   cat > "$mk/spec.yaml" <<'SPEC'
 schemaVersion: "hybrid/v1"
@@ -395,9 +395,12 @@ commands:
 SPEC
   : > "$CALLS"
   ( export ACQ_SECRET_STORE_DIR="$STUBDIR/lostappend-secrets"
+    export STUB_RECORDED_KIT_ENV='OPENCODE_CONFIG=/stale.jsonc
+OTHER_KIT_VAR=kept'
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/kit-translate.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
+    seed_host_config msb lostappendbox
     acq_backend_apply_kit lostappendbox "$mk" >/dev/null 2>&1 )
   local bg; bg=$(printf '%s\n' "$(cat "$CALLS")" | grep 'nohup' | head -n1)
   assert_regex "$bg" '\-e LOST_OWN=yes'
