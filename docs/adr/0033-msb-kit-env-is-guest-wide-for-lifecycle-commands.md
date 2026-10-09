@@ -17,8 +17,8 @@ supersedes: []
 
 On msb, a kit's lifecycle commands (`install`, `initFiles`, `startup`) ran with only
 **that kit's own** `environment[]`. Sessions were already whole-guest — acq replays
-the merged `/var/lib/acq/kit-env` marker on `run`/`attach`/`shell` (ADR-0011's
-2026-08-26 update) — but commands were not.
+the merged host-authoritative `kit-env` value on `run`/`attach`/`shell`
+(ADR-0035) — but commands were not.
 
 That split is invisible until a kit's command outlives itself. A daemon kit starts its
 supervisor from a `background: true` startup command, so every agent that daemon spawns
@@ -27,7 +27,7 @@ plus a default-deny permission layer) was silently absent from those agents whil
 injected credentials were still present — a quiet loss of a policy control, and
 sessions still looked correct, so smoke tests passed.
 
-**The order-independence trap.** The marker is appended per kit *inside the same loop
+**The order-independence trap.** The value is appended per kit *inside the same loop
 that runs that kit's commands*, so "read the merged marker when running commands" is
 correct only when the env-declaring kit happens to be applied first, and silently
 wrong in the reverse order. Any fix must establish the merged set before the first

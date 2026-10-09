@@ -285,8 +285,9 @@ SPEC
 
   run env -u EMAIL -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
     HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" GIT_CONFIG_NOSYSTEM=1 \
-    STUB_RECORDED_WORKSPACE=/workspace STUB_AGENT_PASSWD_SHELL=/bin/bash \
-    ACQ_BACKEND=msb "$ACQ" exec migbox -- pwd
+    STUB_AGENT_PASSWD_SHELL=/bin/bash ACQ_BACKEND=msb \
+    bash -c '. "$1/acq.backends/common.sh"; acq_host_config_write msb migbox workspace /workspace; exec "$2" exec migbox -- pwd' \
+    _ "$REPO_ROOT" "$ACQ"
   assert_success
   local exec_line
   exec_line=$(grep '^msb exec -u agent .* migbox -- pwd' "$CALLS")
@@ -298,8 +299,9 @@ SPEC
   : >"$CALLS"
   run env -u EMAIL -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
     HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" GIT_CONFIG_NOSYSTEM=1 \
-    TERM=xterm-256color STUB_RECORDED_WORKSPACE=/workspace STUB_AGENT_PASSWD_SHELL=/bin/bash \
-    ACQ_BACKEND=msb "$ACQ" shell migbox
+    TERM=xterm-256color STUB_AGENT_PASSWD_SHELL=/bin/bash ACQ_BACKEND=msb \
+    bash -c '. "$1/acq.backends/common.sh"; acq_host_config_write msb migbox workspace /workspace; exec "$2" shell migbox' \
+    _ "$REPO_ROOT" "$ACQ"
   assert_success
   assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /workspace -e TERM=xterm-256color -e SHELL=/bin/bash migbox -- /bin/bash -l'
 }

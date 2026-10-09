@@ -247,7 +247,8 @@ for `docker/sandbox-templates:shell-docker`:
   `msb exec -t -u agent -w <workspace> -e SHELL=/bin/sh NAME -- <agent>` — the one
   msb primitive that allocates a PTY (so a full-screen agent TUI renders; `msb
   ssh` has no tty flag), runs as the unprivileged `agent` user, and starts in the
-  workspace. The agent to run is recorded at provision (`/var/lib/acq/agent`) so
+   workspace. The agent to run is recorded at provision in host-authoritative
+   config (ADR-0035) so
   the name-only re-attach path (`acq run <sandbox>`) still launches it. Falls back
   to an interactive `/bin/sh -l` **as the agent user** (never root, never msb's
   Node-REPL default) for `shell` sandboxes or a missing binary.
@@ -284,7 +285,8 @@ semantics (`docs/QUICKSTART_SBX.md`: "All workspaces appear inside the sandbox a
 their absolute host paths"). This sidesteps the create-time ordering problem and
 restores sbx parity. Multiple workspaces and a trailing `:ro` marker are
 supported (`workspace_paths` in `common.sh` enumerates them). The agent's
-starting directory is recorded at provision (`/var/lib/acq/workspace`) for the
+   starting directory is recorded at provision in host-authoritative config
+   (ADR-0035) for the
 name-only re-attach path: it is the **primary (first) workspace**, matching sbx.
 `ACQ_MSB_WORKSPACE` overrides the start dir.
 
@@ -403,13 +405,11 @@ strings). The translate layer:
 
 > **Update (2026-08-26):** The command-only scoping above dropped exactly the
 > agent-runtime config (`OPENCODE_CONFIG`-style vars) this vocabulary was
-> motivated by. The msb adapter now also persists the validated entries to a
-> root-owned guest marker (`/var/lib/acq/kit-env`, the same pattern as
-> `/var/lib/acq/agent` and `/var/lib/acq/ssh-auth-sock`) and replays them as
-> `-e` flags on every session path (attach, `acq exec`, `acq shell`), matching
-> sbx's sandbox-level env semantics. Names are re-validated on replay (tampered
-> marker defense) and the last value wins for a duplicate name (kits append in
-> application order, so a later kit overrides an earlier one).
+> motivated by. The msb adapter now also persists the validated entries and
+> replays them as `-e` flags on every session path (attach, `acq exec`,
+> `acq shell`), matching sbx's sandbox-level env semantics. Names are
+> re-validated on replay and the last value wins for a duplicate name (kits
+> append in application order, so a later kit overrides an earlier one).
 >
 > **Update (2026-09-29):** The per-kit scoping of the *command* env above is also
 > gone. Widening only the session paths left a gap wherever a kit command
@@ -428,6 +428,15 @@ strings). The translate layer:
 > the same name with a different value, which the merge would otherwise resolve in
 > the later kit's favor). See
 > [ADR-0033](0033-msb-kit-env-is-guest-wide-for-lifecycle-commands.md).
+>
+> **Superseded storage (ADR-0035):** the persisted values described in this ADR
+> (`agent`, `workspace`, `ssh-auth-sock`, `kit-env`, and the run-once gate
+> markers) were originally written to root-owned **guest** files under
+> `/var/lib/acq/`. Because the in-sandbox agent has passwordless sudo, a guest
+> path is not tamper-proof against a prompt-injected agent. ADR-0035 moves all of
+> these to acq's **host-authoritative** per-sandbox config store (mounted into
+> the guest read-only where the guest must read them). The behavior described
+> here is unchanged; only the storage location and its trust boundary moved.
 
 Deliberately minimal (YAGNI): **static string values only** — no interpolation,
 no references to `files[]`-staged paths (a kit needing a computed value uses a

@@ -197,7 +197,7 @@ with kits that silently do nothing.
 The two facts are kept separate so a non-clone kit gets a neutral workspace
 path for free, and because the workspace path alone must never be read as a
 clone signal: msb already records the primary's path at
-`/var/lib/acq/workspace` (root-written, for name-only re-attach) on every
+the host-authoritative workspace config key (for name-only re-attach) on every
 create, clone or not, and a kit that keyed on it wrote its files into a real
 checkout through a passthrough mount. A marker file inside the scratch was
 also rejected: it needs a `.git/info/exclude` entry and a post-create write on
