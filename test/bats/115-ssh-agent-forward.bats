@@ -613,6 +613,7 @@ PQ
     export SSH_AUTH_SOCK="'"$STUBDIR"'/new24.sock" STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb rebootbox
     _ACQ_MSB_SSH_AGENT_FORWARDING=0
     _acq_msb_start_ssh_agent_bridge rebootbox >/dev/null 2>&1
     wait
@@ -627,6 +628,7 @@ PQ
     export SSH_AUTH_SOCK="'"$STUBDIR"'/new24.sock" STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb legacybox
     _ACQ_MSB_SSH_AGENT_FORWARDING=0
     _acq_msb_start_ssh_agent_bridge legacybox >/dev/null 2>&1
     wait
@@ -644,6 +646,7 @@ PQ
     export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock STUB_AGENT_UNREACHABLE=1
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb holdbox
     _ACQ_MSB_SSH_AGENT_FORWARDING=0
     _acq_msb_start_ssh_agent_bridge holdbox 2>&1
     printf "RC=%s\n" "$?"
@@ -660,6 +663,7 @@ PQ
     export SSH_AUTH_SOCK="'"$STUBDIR"'/not-a-socket25" STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb holdbox
     _ACQ_MSB_SSH_AGENT_FORWARDING=0
     _acq_msb_start_ssh_agent_bridge holdbox >/dev/null 2>&1
     printf "RC=%s\n" "$?"
@@ -784,6 +788,7 @@ PQ
     export SSH_AUTH_SOCK="'"$STUBDIR"'/agent30.sock" STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock STUB_AGENT_UNREACHABLE=1
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb rofs
     _ACQ_MSB_SSH_AGENT_FORWARDING=0
     _acq_msb_start_ssh_agent_bridge rofs 2>&1
     wait
