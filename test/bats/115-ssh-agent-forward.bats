@@ -547,3 +547,271 @@ PQ
   '
   refute_output --partial 'missing kit prerequisite'
 }
+
+# --- Managed ssh-agent route link (ADR-0021 amendment: reboot-proof route) ----
+# msb dials the --vsock host_socket path per guest connection and follows
+# symlinks, so acq routes the automatic ssh-agent forward through a per-sandbox
+# symlink it owns and re-points on every bridge (re)start. The route therefore
+# survives a host reboot that gives the host agent a new socket path.
+
+@test "vsock(10c22): create with a sandbox name routes the ssh-agent forward via the managed link, not the raw path" {
+  _mk_unix_socket "$STUBDIR/agent22.sock" || skip "python3 AF_UNIX socket unavailable"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent22.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    f=(); _acq_msb_vsock_flags_into f linkbox 2>/dev/null; printf "%s\n" "${f[@]+"${f[@]}"}"
+    printf "LINK=%s\n" "$(readlink "$ACQ_STATE_DIR/msb/ssh-agent/linkbox.sock")"
+  '
+  assert_line "--vsock"
+  assert_line "$STUBDIR/state/msb/ssh-agent/linkbox.sock:3552/stream"
+  refute_output --partial "agent22.sock:3552"
+  # The link resolves to the canonical agent socket.
+  local want; want=$(realpath "$STUBDIR/agent22.sock" 2>/dev/null || readlink -f "$STUBDIR/agent22.sock")
+  assert_line "LINK=$want"
+}
+
+@test "vsock(10c23): without a sandbox name the raw canonical path is kept; custom forwards stay canonicalized" {
+  _mk_unix_socket "$STUBDIR/agent23.sock" || skip "python3 AF_UNIX socket unavailable"
+  _mk_unix_socket "$STUBDIR/custom23.sock" || skip "python3 AF_UNIX socket unavailable"
+  ln -s "$STUBDIR/custom23.sock" "$STUBDIR/custom23.link"
+  local want_a want_c
+  want_a=$(realpath "$STUBDIR/agent23.sock" 2>/dev/null || readlink -f "$STUBDIR/agent23.sock")
+  want_c=$(realpath "$STUBDIR/custom23.sock" 2>/dev/null || readlink -f "$STUBDIR/custom23.sock")
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent23.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    f=(); _acq_msb_vsock_flags_into f 2>/dev/null; printf "%s\n" "${f[@]+"${f[@]}"}"
+  '
+  assert_line "$want_a:3552/stream"
+  refute_output --partial 'ssh-agent/'
+  # A custom ACQ_FORWARD_HOST_SOCKETS entry given as a symlink is still resolved
+  # to its target even when a name is supplied (only the automatic ssh-agent
+  # forward is routed through the managed link).
+  run bash -c '
+    unset SSH_AUTH_SOCK
+    export ACQ_FORWARD_HOST_SOCKETS="'"$STUBDIR"'/custom23.link:6000/stream" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    f=(); _acq_msb_vsock_flags_into f custombox 2>/dev/null; printf "%s\n" "${f[@]+"${f[@]}"}"
+  '
+  assert_line "$want_c:6000/stream"
+  refute_output --partial 'custom23.link'
+  [ ! -e "$STUBDIR/state/msb/ssh-agent/custombox.sock" ]
+}
+
+@test "vsock(10c24): the bridge (re)start re-points an existing managed link at the current SSH_AUTH_SOCK" {
+  _mk_unix_socket "$STUBDIR/old24.sock" || skip "python3 AF_UNIX socket unavailable"
+  _mk_unix_socket "$STUBDIR/new24.sock" || skip "python3 AF_UNIX socket unavailable"
+  local want; want=$(realpath "$STUBDIR/new24.sock" 2>/dev/null || readlink -f "$STUBDIR/new24.sock")
+  # Create-time link pointing at the pre-reboot agent path.
+  mkdir -p "$STUBDIR/state/msb/ssh-agent"
+  ln -s "$STUBDIR/old24.sock" "$STUBDIR/state/msb/ssh-agent/rebootbox.sock"
+  # Resume path (acq_backend_start shape): no provision flag, marker present.
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/new24.sock" STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb rebootbox
+    _ACQ_MSB_SSH_AGENT_FORWARDING=0
+    _acq_msb_start_ssh_agent_bridge rebootbox >/dev/null 2>&1
+    wait
+    printf "LINK=%s\n" "$(readlink "$ACQ_STATE_DIR/msb/ssh-agent/rebootbox.sock")"
+  '
+  assert_line "LINK=$want"
+  # The replace left no temp link behind.
+  run bash -c 'ls "'"$STUBDIR"'/state/msb/ssh-agent"'
+  assert_output 'rebootbox.sock'
+  # A sandbox without a managed link (pre-amendment route) gets none invented.
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/new24.sock" STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb legacybox
+    _ACQ_MSB_SSH_AGENT_FORWARDING=0
+    _acq_msb_start_ssh_agent_bridge legacybox >/dev/null 2>&1
+    wait
+  '
+  [ ! -L "$STUBDIR/state/msb/ssh-agent/legacybox.sock" ]
+}
+
+@test "vsock(10c25): an unset or non-socket SSH_AUTH_SOCK at start leaves the link alone and never fails the verb" {
+  mkdir -p "$STUBDIR/state/msb/ssh-agent"
+  ln -s "$STUBDIR/gone.sock" "$STUBDIR/state/msb/ssh-agent/holdbox.sock"
+  touch "$STUBDIR/not-a-socket25"
+  run bash -c '
+    set -euo pipefail
+    unset SSH_AUTH_SOCK
+    export STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock STUB_AGENT_UNREACHABLE=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb holdbox
+    _ACQ_MSB_SSH_AGENT_FORWARDING=0
+    _acq_msb_start_ssh_agent_bridge holdbox 2>&1
+    printf "RC=%s\n" "$?"
+    wait
+  '
+  assert_output --partial 'RC=0'
+  assert_output --partial 'UNREACHABLE'
+  # The warning must not claim the link was re-pointed: nothing to point it at.
+  assert_output --partial 'NOT re-pointed'
+  refute_output --partial 'just re-pointed'
+  assert_equal "$(readlink "$STUBDIR/state/msb/ssh-agent/holdbox.sock")" "$STUBDIR/gone.sock"
+  run bash -c '
+    set -euo pipefail
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/not-a-socket25" STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb holdbox
+    _ACQ_MSB_SSH_AGENT_FORWARDING=0
+    _acq_msb_start_ssh_agent_bridge holdbox >/dev/null 2>&1
+    printf "RC=%s\n" "$?"
+    wait
+  '
+  assert_output --partial 'RC=0'
+  assert_equal "$(readlink "$STUBDIR/state/msb/ssh-agent/holdbox.sock")" "$STUBDIR/gone.sock"
+}
+
+@test "vsock(10c26): acq rm removes the managed link but never the agent socket it points at" {
+  _mk_unix_socket "$STUBDIR/agent26.sock" || skip "python3 AF_UNIX socket unavailable"
+  mkdir -p "$STUBDIR/state/msb/ssh-agent"
+  ln -s "$STUBDIR/agent26.sock" "$STUBDIR/state/msb/ssh-agent/rmbox.sock"
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_terminate rmbox >/dev/null 2>&1; printf "RC=%s\n" "$?"
+  '
+  assert_output --partial 'RC=0'
+  [ ! -L "$STUBDIR/state/msb/ssh-agent/rmbox.sock" ]
+  [ -S "$STUBDIR/agent26.sock" ]
+}
+
+@test "vsock(10c27): the unreachable warning names the one-time recreate for a legacy route, and the host agent for a managed one" {
+  # (a) legacy route (no managed link): recreate once; afterwards start heals it.
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9 STUB_AGENT_UNREACHABLE=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _ACQ_MSB_SSH_AGENT_FORWARDING=1
+    _acq_msb_start_ssh_agent_bridge oldbox 2>&1
+    wait
+  '
+  assert_output --partial 'UNREACHABLE'
+  assert_output --partial 'acq rm oldbox'
+  assert_output --partial 'once'
+  # (b) managed route: the link is already re-pointed, so the remedy is the host
+  #     agent, not a recreate.
+  _mk_unix_socket "$STUBDIR/agent27.sock" || skip "python3 AF_UNIX socket unavailable"
+  mkdir -p "$STUBDIR/state/msb/ssh-agent"
+  ln -s "$STUBDIR/agent27.sock" "$STUBDIR/state/msb/ssh-agent/newbox.sock"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent27.sock" STUB_MSB_VERSION=0.6.9 STUB_AGENT_UNREACHABLE=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _ACQ_MSB_SSH_AGENT_FORWARDING=1
+    _acq_msb_start_ssh_agent_bridge newbox 2>&1
+    wait
+  '
+  assert_output --partial 'UNREACHABLE'
+  refute_output --partial 'acq rm newbox'
+  assert_output --partial 'ssh-agent/newbox.sock'
+  assert_output --partial 'just re-pointed'
+}
+
+@test "vsock(10c28): a link path that would overflow sun_path falls back to a short hashed name under the same dir" {
+  _mk_unix_socket "$STUBDIR/agent28.sock" || skip "python3 AF_UNIX socket unavailable"
+  # Pad the state dir to ~70 bytes so "<dir>/msb/ssh-agent/<60-char name>.sock"
+  # exceeds the 103-byte macOS sun_path budget while the hashed basename
+  # ("h<cksum>.sock", <= 16 bytes) still fits. The temp dir differs per host, so
+  # pad relative to it rather than assuming its length.
+  local deep pad
+  deep="$STUBDIR/state"
+  pad=$(( 70 - ${#deep} ))
+  [ "$pad" -le 0 ] && [ "${#deep}" -gt 72 ] && skip "temp dir too long for the sun_path window"
+  [ "$pad" -gt 0 ] && deep="$deep/$(printf 'd%.0s' $(seq 1 "$pad"))"
+  local longname="a-rather-long-sandbox-name-for-the-sun-path-overflow-case-x"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent28.sock" STUB_MSB_VERSION=0.6.9 ACQ_STATE_DIR="'"$deep"'"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    f=(); _acq_msb_vsock_flags_into f "'"$longname"'" 2>/dev/null
+    p="${f[1]%%:3552/stream}"; printf "PATH=%s\nLEN=%s\n" "$p" "$(printf "%s" "$p" | wc -c | tr -d " ")"
+    [ -L "$p" ] && printf "ISLINK=1\n"
+  '
+  assert_output --partial "PATH=$deep/msb/ssh-agent/h"
+  refute_output --partial "$longname"
+  assert_output --partial 'ISLINK=1'
+  local len; len=$(printf '%s\n' "$output" | sed -n 's/^LEN=//p')
+  [ "$len" -le 103 ]
+}
+
+@test "vsock(10c29): an unsafe sandbox name never becomes a link path; the raw route is used instead" {
+  _mk_unix_socket "$STUBDIR/agent29.sock" || skip "python3 AF_UNIX socket unavailable"
+  local want; want=$(realpath "$STUBDIR/agent29.sock" 2>/dev/null || readlink -f "$STUBDIR/agent29.sock")
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent29.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    f=(); _acq_msb_vsock_flags_into f "../escape" 2>"'"$STUBDIR"'/c29.err"; printf "%s\n" "${f[@]+"${f[@]}"}"
+    cat "'"$STUBDIR"'/c29.err"
+  '
+  assert_line "$want:3552/stream"
+  # The fallback is announced, not silent: the route will go stale on a reboot.
+  assert_output --partial 'cannot manage the ssh-agent route'
+  [ ! -e "$STUBDIR/state/msb/ssh-agent" ] || [ -z "$(ls -A "$STUBDIR/state/msb/ssh-agent")" ]
+  # For such a name the legacy warning must not promise that a recreate self-heals.
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9 STUB_AGENT_UNREACHABLE=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _ACQ_MSB_SSH_AGENT_FORWARDING=1
+    _acq_msb_start_ssh_agent_bridge my.app 2>&1
+    wait
+  '
+  assert_output --partial 'UNREACHABLE'
+  assert_output --partial 'acq rm my.app'
+  refute_output --partial 'one-time recreate'
+  assert_output --partial "letters, digits, '_' and '-'"
+}
+
+@test "vsock(10c30): a link that cannot be replaced is reported as such, never blamed on SSH_AUTH_SOCK or the name" {
+  _mk_unix_socket "$STUBDIR/agent30.sock" || skip "python3 AF_UNIX socket unavailable"
+  # (a) at start: the managed link exists but a regular file now sits at the
+  #     temp-link name's parent... simplest reproducible failure is a read-only
+  #     link dir, so the atomic replace cannot mint its temp link.
+  mkdir -p "$STUBDIR/state/msb/ssh-agent"
+  ln -s "$STUBDIR/gone30.sock" "$STUBDIR/state/msb/ssh-agent/rofs.sock"
+  chmod 555 "$STUBDIR/state/msb/ssh-agent"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent30.sock" STUB_MSB_VERSION=0.6.9 STUB_RECORDED_SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock STUB_AGENT_UNREACHABLE=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    seed_host_config msb rofs
+    _ACQ_MSB_SSH_AGENT_FORWARDING=0
+    _acq_msb_start_ssh_agent_bridge rofs 2>&1
+    wait
+  '
+  chmod 755 "$STUBDIR/state/msb/ssh-agent"
+  assert_output --partial 'could not re-point'
+  assert_output --partial 'UNREACHABLE'
+  assert_output --partial 'NOT re-pointed'
+  assert_output --partial 'ssh-agent/rofs.sock'
+  assert_output --partial 'Fix or remove'
+  refute_output --partial 'just re-pointed'
+  refute_output --partial 'names your live agent'
+  # (b) at create: a valid name whose link cannot be created is not told its
+  #     name is wrong; the warning names the link path instead.
+  chmod 555 "$STUBDIR/state/msb/ssh-agent"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent30.sock" STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    f=(); _acq_msb_vsock_flags_into f okname 2>&1 1>/dev/null
+  '
+  chmod 755 "$STUBDIR/state/msb/ssh-agent"
+  assert_output --partial 'cannot manage the ssh-agent route'
+  assert_output --partial 'ssh-agent/okname.sock'
+  refute_output --partial "letters, digits"
+}
