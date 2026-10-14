@@ -1084,7 +1084,7 @@ _acq_msb_snapshot_resource_file() {
 }
 
 _acq_msb_snapshot_stage() {
-  local snapshot="$1" tmp sum staged
+  local snapshot="$1" tmp sum
   [ -f "$snapshot" ] || return 1
   ( umask 077; mkdir -p "$ACQ_MSB_SNAPSHOT_DIR" ) 2>/dev/null || return 1
   chmod 700 "$ACQ_MSB_SNAPSHOT_DIR" 2>/dev/null || return 1
@@ -1100,9 +1100,10 @@ _acq_msb_snapshot_stage() {
     echo "acq(msb): snapshot metadata requires sha256sum or shasum." >&2
     return 1
   fi
-  staged="$ACQ_MSB_SNAPSHOT_DIR/${sum}.msb"
-  mv -f "$tmp" "$staged" 2>/dev/null || { rm -f "$tmp"; return 1; }
-  printf '%s\n' "$staged"
+  # Keep the per-invocation mktemp name. The digest authenticates metadata, not
+  # the staged archive: a shared digest filename would let concurrent restores
+  # of identical snapshots remove or replace each other's restore input.
+  printf '%s\n' "$tmp"
 }
 
 _acq_msb_snapshot_kits_file() {
