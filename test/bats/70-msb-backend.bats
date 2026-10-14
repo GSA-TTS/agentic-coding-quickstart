@@ -120,7 +120,7 @@ _sha256() {
   run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/saved.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/[0-9a-f]{64}\.msb --name restored --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
   assert_regex "$log" 'USAI_API_KEY=present'
   assert_regex "$log" 'socat UNIX-LISTEN:'
   assert_regex "$log" 'msb inspect restored --format json'
@@ -140,7 +140,7 @@ _sha256() {
   run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/full-state.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/[0-9a-f]{64}\.msb --name restored --dangerously-inherit-resources --vsock"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --vsock"
   refute_regex "$log" 'msb inspect restored --format json'
   refute_output --partial "re-applied kit startup"
   assert_output --partial "acq: restored 'restored'."
@@ -154,6 +154,25 @@ _sha256() {
   run env ACQ_BACKEND=msb "$ACQ" restore restored "$STUBDIR/untrusted.msb"
   assert_success
   refute_regex "$(cat "$CALLS")" "--volume $STUBDIR/attacker:$STUBDIR/attacker"
+}
+
+@test "msb: private staging keeps identical snapshot restores independent" {
+  : > "$STUBDIR/shared.msb"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    first=$(_acq_msb_snapshot_stage "'"$STUBDIR"'/shared.msb") || exit 1
+    second=$(_acq_msb_snapshot_stage "'"$STUBDIR"'/shared.msb") || exit 1
+    [ "$first" != "$second" ] || exit 1
+    [ -f "$first" ] && [ -f "$second" ] || exit 1
+    rm -f "$first"
+    [ ! -e "$first" ] && [ -f "$second" ] || exit 1
+    rm -f "$second"
+    printf "%s\n%s\n" "$first" "$second"
+  '
+  assert_success
+  assert_line --index 0 --regexp "/msb-snapshots/\\.restore\\.[[:alnum:]]{6}$"
+  assert_line --index 1 --regexp "/msb-snapshots/\\.restore\\.[[:alnum:]]{6}$"
 }
 
 @test "msb: restore fails when the guest never becomes exec-ready" {
@@ -178,7 +197,7 @@ _sha256() {
   : > "$CALLS"
   run env ACQ_BACKEND=msb ACQ_SNAPSHOT_DIR="$STUBDIR/snapshots" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore mybox
   assert_success
-  assert_regex "$(cat "$CALLS")" "msb restore $STUBDIR/state/msb-snapshots/[0-9a-f]{64}\.msb --name mybox"
+  assert_regex "$(cat "$CALLS")" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name mybox"
 }
 
 @test "sbx: snapshot/restore/recreate are acq-owned unsupported verbs, not backend passthrough" {
@@ -211,7 +230,7 @@ _sha256() {
   assert_regex "$log" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/recreate\.msb"
   assert_regex "$log" 'msb remove --force mybox'
   refute_regex "$log" 'msb volume rm'
-  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/[0-9a-f]{64}\.msb --name mybox --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name mybox --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
   assert_regex "$log" 'msb inspect mybox --format json'
   assert_output --partial "kit startup re-applied"
 }
