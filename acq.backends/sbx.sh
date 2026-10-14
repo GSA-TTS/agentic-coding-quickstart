@@ -535,6 +535,26 @@ acq_backend_provision() {
     fi
   fi
 
+  # SBX derives and injects its native agent kit from the positional agent token
+  # even when --template selects a generic image. The generic OpenCode path adds
+  # the pinned OpenCode kit itself, so pass `shell` to SBX to avoid a duplicate
+  # native `opencode` kit. Keep $agent for acq provenance and attach behavior.
+  local _sbx_args=("${_stripped[@]}") _arg _prev="" _idx
+  if [ "${ACQ_DEFAULT_OPENCODE_GENERIC:-}" = "1" ]; then
+    for _idx in "${!_sbx_args[@]}"; do
+      _arg="${_sbx_args[$_idx]}"
+      if _takes_value "$_prev"; then
+        _prev="$_arg"
+        continue
+      fi
+      case "$_arg" in
+        -*) _prev="$_arg"; continue ;;
+      esac
+      _sbx_args[$_idx]=shell
+      break
+    done
+  fi
+
   # Neutral --clone (ADR-0027): acq owns the flag, so re-inject sbx's native
   # `--clone` here (the acq dispatch stripped it and exported ACQ_CLONE).
   local _cf=()
@@ -565,9 +585,9 @@ acq_backend_provision() {
   _startup_barrier_token="acq-$$-$(date +%s)-$RANDOM-$RANDOM"
   kf+=(--kit "$(_acq_sbx_startup_barrier_kit "$_startup_barrier_token")")
 
-  acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_stripped[*]:-}"
+  acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_sbx_args[*]:-}"
   acq_spin_start "Creating sandbox '$name'"
-  sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" ${_stripped[@]+"${_stripped[@]}"}
+  sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" ${_sbx_args[@]+"${_sbx_args[@]}"}
   local _rc=$?
   acq_spin_stop "Creating sandbox '$name'"
   # Record host-side bundle provenance ONLY after a successful create — a failed
