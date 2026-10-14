@@ -188,7 +188,7 @@ HELP
     printf '%s%s' "$_backend_sep" "$_backend_name"
     _backend_sep=', '
   done
-  printf '. OpenShell is explicit-only until its adapter is available.\n'
+  printf '. OpenShell is explicit-only and experimental.\n'
 }
 
 # _acq_secret_usage / _acq_kit_usage — acq's OWN per-verb usage blocks. Printed
@@ -761,7 +761,13 @@ case "$subcommand" in
         printf 'Registered backends:\n'
         for local_backend in "${ACQ_BACKEND_NAMES[@]}"; do
           if acq_backend_is_explicit_only "$local_backend"; then
-            printf '  %s  (explicit-only; adapter not yet available)\n' "$local_backend"
+            _ensure_local_bin_on_path "$local_backend" >/dev/null 2>&1 || true
+            if command -v "$local_backend" >/dev/null 2>&1; then
+              local_ver=$(acq_backend_cli_version "$local_backend")
+              printf '  %s  v%s (explicit-only; experimental)\n' "$local_backend" "$local_ver"
+            else
+              printf '  %s  (explicit-only; not found)\n' "$local_backend"
+            fi
           else
             _ensure_local_bin_on_path "$local_backend" >/dev/null 2>&1 || true
             if command -v "$local_backend" >/dev/null 2>&1; then
@@ -1097,9 +1103,13 @@ case "$subcommand" in
       # would silently re-pin the host port of every later sandbox in the shell.
     fi
     extract_kit_flags "$@"
+    if [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] && [ "${#ACQ_CLI_KITS[@]}" -gt 0 ]; then
+      echo "acq(openshell): --kit is unsupported; OpenShell kit translation is not implemented." >&2
+      exit 1
+    fi
     _acq_kit_agent=""
     _acq_kit_first=$(first_positional "${ACQ_KIT_REMAINING[@]}" || true)
-    if [ -n "$_acq_kit_first" ] && is_known_agent "$_acq_kit_first"; then
+    if [ -n "$_acq_kit_first" ] && acq_is_known_agent "$_acq_kit_first"; then
       _acq_kit_agent="$_acq_kit_first"
     fi
     _build_kit_list "$_acq_kit_agent"
@@ -1128,18 +1138,24 @@ case "$subcommand" in
 
   create)
     shift
-    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+    [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] || acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
     acq_backend_prepare
     # First-run onboarding (ADR-0031): offer `acq configure` once before we
     # provision, so a brand-new user picks kits up front. No-op after first run
     # and in non-interactive sessions.
-    maybe_first_run_configure
+    [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] || maybe_first_run_configure
     # Apply configured-default extra kits (config.yaml), then offer a create-time
     # picker pre-populated with those defaults so THIS sandbox can deviate.
     create_agent=$(first_positional "$@")
-    _acq_apply_configured_extra_kits || exit 1
-    create_time_kit_picker
-    _build_kit_list "$create_agent"
+    if [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] \
+        && ! acq_backend_validate_agent "$create_agent"; then
+      exit 1
+    fi
+    if [ "${ACQ_RESOLVED_BACKEND}" != "openshell" ]; then
+      _acq_apply_configured_extra_kits || exit 1
+      create_time_kit_picker
+      _build_kit_list "$create_agent"
+    fi
     # Pre-flight: validate the workspace path before provisioning (#issue).
     ws=$(workspace_path "$@")
     preflight_workspace_path "$ws" || exit 1
@@ -1150,7 +1166,7 @@ case "$subcommand" in
     # at create time, so a sandbox created before the key exists carries no USAi
     # binding. Gate on key presence first (fail closed if declined) so create
     # picks it up. `create` is otherwise detached and never attaches.
-    if ! ensure_key_present "$local_name"; then
+    if [ "${ACQ_RESOLVED_BACKEND}" != "openshell" ] && ! ensure_key_present "$local_name"; then
       exit 1
     fi
 
@@ -1161,9 +1177,9 @@ case "$subcommand" in
     # create. Warn-not-block (ADR-0013): declining never aborts the create, it
     # just proceeds without a scoped token (the token is optional).
     [ -n "$ws" ] || ws="$PWD"
-    advise_github_scope "$local_name" "$ws"
+    [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] || advise_github_scope "$local_name" "$ws"
     advise_project_env_activation "$ws"
-    acq_print_selected_agent_kit "$create_agent"
+    [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] || acq_print_selected_agent_kit "$create_agent"
 
     acq_backend_provision "$local_name" "$@"
 
@@ -1171,7 +1187,7 @@ case "$subcommand" in
     # so unlike `run` we don't gate on the key or offer interactive rotation —
     # just warn if it's already invalid so a create-only user knows before they
     # later `acq run`.
-    advise_valid_key "$local_name"
+    [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] || advise_valid_key "$local_name"
     ;;
 
   run)
@@ -1195,12 +1211,16 @@ case "$subcommand" in
     first=""
     [ "${#create_args[@]}" -gt 0 ] && first=$(first_positional "${create_args[@]}")
 
-    if [ -n "$first" ] && is_known_agent "$first"; then
-      acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+    if [ -n "$first" ] && acq_is_known_agent "$first"; then
+      if [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] \
+          && ! acq_backend_validate_agent "$first"; then
+        exit 1
+      fi
+      [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] || acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
       # AGENT form: create if missing, then attach.
       local_name=$(derive_name "${create_args[@]}") || exit 1
       [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
-      acq_print_selected_agent_kit "$first"
+      [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] || acq_print_selected_agent_kit "$first"
 
       # Pre-flight: validate the workspace path before provisioning (#issue).
       # Only enforce on a fresh create — a re-attach to an existing sandbox
@@ -1241,7 +1261,7 @@ case "$subcommand" in
         # this invocation, so we must not clobber it — hence the empty-guard.
         # See acq_cli_kits_load and the "--kit Services Dead After a
         # Resume/Reboot" section in docs/KNOWN_FAILURE_MODES.md.
-        if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ]; then
+        if [ "${ACQ_RESOLVED_BACKEND}" != "openshell" ] && [ "${#ACQ_CLI_KITS[@]}" -eq 0 ]; then
           acq_cli_kits_load "${ACQ_RESOLVED_BACKEND}" "$local_name"
         fi
         acq_backend_ensure_kits_applied "$local_name" || true
@@ -1257,7 +1277,7 @@ case "$subcommand" in
         # Fresh creates run the advisory BEFORE provision (below) so msb binds it
         # at create; this re-attach case is the live-refeed path.
         [ -n "$ws" ] || ws="$PWD"
-        advise_github_scope "$local_name" "$ws"
+        [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] || advise_github_scope "$local_name" "$ws"
         advise_project_env_activation "$ws"
       else
         # Fresh create: the USAi API key MUST be stored before we provision,
@@ -1272,12 +1292,14 @@ case "$subcommand" in
         # is a no-op after first run / non-interactive; the picker pre-populates
         # from the configured defaults and folds the result into ACQ_EXTRA_KITS
         # for this create (persisted per-sandbox by the existing kit-record path).
-        maybe_first_run_configure
-        _acq_apply_configured_extra_kits || exit 1
-        create_time_kit_picker
-        _build_kit_list "$first"
+        if [ "${ACQ_RESOLVED_BACKEND}" != "openshell" ]; then
+          maybe_first_run_configure
+          _acq_apply_configured_extra_kits || exit 1
+          create_time_kit_picker
+          _build_kit_list "$first"
+        fi
 
-        if ! ensure_key_present "$local_name"; then
+        if [ "${ACQ_RESOLVED_BACKEND}" != "openshell" ] && ! ensure_key_present "$local_name"; then
           exit 1
         fi
 
@@ -1288,7 +1310,7 @@ case "$subcommand" in
         # create. Warn-not-block (ADR-0013): declining never aborts, it just
         # proceeds without a scoped token (the token is optional).
         [ -n "$ws" ] || ws="$PWD"
-        advise_github_scope "$local_name" "$ws"
+        [ "${ACQ_RESOLVED_BACKEND}" = "openshell" ] || advise_github_scope "$local_name" "$ws"
         advise_project_env_activation "$ws"
 
         acq_backend_provision "$local_name" "${create_args[@]}"
@@ -1298,7 +1320,7 @@ case "$subcommand" in
       # abort explicitly on a non-zero return rather than relying on `set -e`
       # to propagate from a bare function call (its behavior for a function
       # used as the tested command is not portable across bash versions).
-      if ! ensure_valid_key "$local_name" "${create_args[@]}"; then
+      if [ "${ACQ_RESOLVED_BACKEND}" != "openshell" ] && ! ensure_valid_key "$local_name" "${create_args[@]}"; then
         exit 1
       fi
 

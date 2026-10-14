@@ -3687,8 +3687,10 @@ acq_print_doctor() {
 
   echo "acq: backend health check"
   for backend in "${ACQ_BACKEND_NAMES[@]}"; do
-    if acq_backend_is_explicit_only "$backend"; then
-      status="explicit-only; adapter not yet available"
+    if acq_backend_is_explicit_only "$backend" && command -v "$backend" >/dev/null 2>&1; then
+      status="installed v$(acq_backend_cli_version "$backend") (explicit-only; experimental)"
+    elif acq_backend_is_explicit_only "$backend"; then
+      status="explicit-only; not found"
     elif command -v "$backend" >/dev/null 2>&1; then
       status="installed v$(acq_backend_cli_version "$backend")"
     else

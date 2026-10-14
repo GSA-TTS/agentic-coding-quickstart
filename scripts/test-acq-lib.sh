@@ -214,6 +214,38 @@ esac
 STUB
   chmod +x "$STUBDIR/sbx"
 
+  # Stub OpenShell's structured lifecycle surface. JSON is deliberately emitted
+  # for list/get/status so adapter tests cannot accidentally rely on table output.
+  cat >"$STUBDIR/openshell" <<'OPENSHELLSTUB'
+#!/usr/bin/env bash
+_line="openshell"; for a in "$@"; do _line="$_line $a"; done
+printf '%s\n' "$_line" >>"$CALLS"
+case "${1:-}" in
+  --version|-V) printf 'openshell %s\n' "${STUB_OPENSHELL_VERSION:-0.1.4}" ;;
+  status)
+    [ "${STUB_OPENSHELL_NO_GATEWAY:-0}" = "1" ] && { printf 'no active gateway\n' >&2; exit 1; }
+    printf '{"gateway":"local","driver":"docker"}\n' ;;
+  doctor) exit "${STUB_OPENSHELL_DOCTOR_RC:-0}" ;;
+  sandbox)
+    case "${2:-}" in
+      get)
+        [ "${STUB_OPENSHELL_MISSING:-0}" = "1" ] && exit 1
+        printf '{"name":"%s","status":"running"}\n' "${3:-box}" ;;
+      list) printf '[{"name":"box","status":"running"}]\n' ;;
+      create)
+        [ "${STUB_OPENSHELL_CREATE_FAIL:-0}" = "1" ] && { printf 'driver does not support bind mounts\n' >&2; exit 1; }
+        : >"$STUBDIR/.openshell_created"; printf '{"name":"box","status":"creating"}\n' ;;
+      exec)
+        [ "${STUB_OPENSHELL_NOT_READY:-0}" = "1" ] && exit 1
+        case " $* " in *' opencode --version '*) printf 'opencode 1.18.12\n' ;; esac ;;
+      connect|stop|start|delete|upload|download) : ;;
+      *) exit 1 ;;
+    esac ;;
+  *) exit 1 ;;
+esac
+OPENSHELLSTUB
+  chmod +x "$STUBDIR/openshell"
+
   # Stub `msb` (microsandbox) the same way, logging every call to $CALLS.
   # IMPORTANT: this stub DRAINS STDIN (`cat >/dev/null`) like a real `msb exec`
   # / `msb ssh` does. That is what surfaced the loop-stdin-consumption bug (a
