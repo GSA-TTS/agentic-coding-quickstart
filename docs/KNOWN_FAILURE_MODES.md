@@ -2852,3 +2852,26 @@ When you discover a new failure mode:
 3. Provide a minimal fix
 4. Add it to this document
 5. Consider if it indicates a gap in AGENTS.md rules
+
+---
+
+## Default OpenCode Generic Base Requires Recreation
+
+**Symptom:** An existing OpenCode sandbox still starts through an older
+OpenCode-specific template or does not receive the pinned kit behavior.
+
+**Cause:** The ADR-0030 generic base and kit composition are selected only when
+the sandbox is created. Existing sandboxes intentionally keep the image and kit
+set they were created with.
+
+**Resolution:** Recreate the sandbox from the project path:
+
+```bash
+./acq rm opencode-your-project
+./acq run opencode /path/to/your/project
+```
+
+The new default uses the pinned generic `devenv-shell` image and validates the
+pinned OpenCode kit before provisioning. If that validation fails, correct the
+pinned kit availability or metadata rather than falling back to an unpinned npm
+installation.

@@ -510,6 +510,14 @@ acq_backend_provision() {
   if command -v acq_resolve_neutral_image >/dev/null 2>&1; then
     _neutral_image=$(acq_resolve_neutral_image)
   fi
+  if [ "$agent" = "opencode" ] && [ "$_user_template" -eq 0 ] && [ -z "$_neutral_image" ]; then
+    _tf=(--template "$ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE")
+    ACQ_REQUIRED_AGENT_KIT="opencode"
+    ACQ_DEFAULT_OPENCODE_GENERIC=1
+  else
+    ACQ_REQUIRED_AGENT_KIT=""
+    ACQ_DEFAULT_OPENCODE_GENERIC=""
+  fi
   if [ -n "$_neutral_image" ]; then
     if [ "$_user_template" -eq 1 ]; then
       echo "acq(sbx): both --image ('$_neutral_image') and an explicit --template were given;" >&2
@@ -547,6 +555,7 @@ acq_backend_provision() {
     [ "${ACQ_CLONE:-0}" = "1" ] && _ef+=(--env ACQ_CLONE=1)
   fi
 
+  _build_kit_list "$agent" || return 1
   local kf=()
   while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
   local _git_identity_kit=""
@@ -576,6 +585,9 @@ acq_backend_provision() {
     fi
     acq_spin_stop "Waiting for kit startup in '$name'"
     acq_provenance_write sbx "$name" "$agent" || true
+    if [ "${ACQ_DEFAULT_OPENCODE_GENERIC:-}" = "1" ]; then
+      acq_host_config_write sbx "$name" generic-opencode 1 || true
+    fi
     acq_workspace_record_write sbx "$name" "$_primary_ws" || true
     _acq_sbx_seed_extra_kit_marker "$name"
     # Backend parity (ADR-0030): sbx DELIVERS ~/.rc.d/*.sh via kit files[] but,
@@ -718,6 +730,11 @@ acq_backend_workspace_for() {
 _acq_sbx_attach_command() {
   local name="$1" agent
   agent=$(acq_backend_recorded_agent "$name")
+  if [ "$agent" = "opencode" ] \
+      && [ "$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)" = "1" ]; then
+    acq_agent_kit_entrypoint opencode
+    return 0
+  fi
   [ -n "$agent" ] || agent="bash"
   printf '%s\n' "$agent"
 }
@@ -794,7 +811,12 @@ acq_backend_attach() {
         sbx run --name "$name" -- sh -c "$(acq_guest_exec_script)" sh "$agent"
       fi
     else
-      sbx run --name "$name"
+      if [ "$agent" = "opencode" ] \
+          && [ "$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)" = "1" ]; then
+        sbx run --name "$name" -- "$agent"
+      else
+        sbx run --name "$name"
+      fi
     fi
   fi
 }

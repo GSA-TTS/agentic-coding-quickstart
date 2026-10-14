@@ -386,14 +386,13 @@ FACTS
   assert_regex "$(cat "$CALLS")" 'Authorization: Bearer \$USAI_API_KEY'
 }
 
-@test "run(opencode): runs postinstall under a timeout guard when binary not functional" {
+@test "run(opencode): generic default does not run an unpinned npm postinstall fallback" {
   local proj="$STUBDIR/ocrun"; mkdir -p "$proj"
   _seed_usai
   run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'postinstall\.mjs'
-  assert_regex "$log" 'timeout'
+  refute_regex "$log" 'postinstall\.mjs|opencode-ai|npm root -g'
   refute_output --partial 'does not appear runnable'
 }
 

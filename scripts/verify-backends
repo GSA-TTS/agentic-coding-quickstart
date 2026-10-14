@@ -3,9 +3,9 @@
 # verify-backends — HOST-SIDE end-to-end check that the four neutral acq kits
 # apply cleanly on each INSTALLED backend, and that the core kit behaviors work.
 # It is also the live sequencing gate for the ADR-0030 migration of
-# `acq run opencode .` to the agent-kit/devenv model: keep this verifier green
-# before, during, and after the internal migration so the observable acq contract
-# remains stable. Unlike scripts/test-acq-bats (which stubs sbx/msb and runs
+# `acq run opencode .` generic-base migration: each backend creates OpenCode from
+# the pinned generic devenv base plus the inferred agent kit and then validates
+# the kit-provided binary and attach path. Unlike scripts/test-acq-bats (which stubs sbx/msb and runs
 # anywhere), this exercises the REAL toolchain and therefore must run on a
 # machine that can create sandboxes:
 #   - sbx: Docker + KVM, `sbx login` done, sbx >= 0.39.0
@@ -1258,7 +1258,7 @@ verify_oci_kit() {
 # verify_agent_install BACKEND — provision an `opencode` sandbox (not `shell`)
 # and assert the agent binary is actually installed and launchable. This catches
 # the class of bug where a sandbox comes up but the agent was never installed
-# (quickstart#228): on sbx the template bakes it in; on msb acq installs it.
+# (the default path is now kit-owned on both backends).
 verify_agent_install() {
   local backend="$1"
   echo ""

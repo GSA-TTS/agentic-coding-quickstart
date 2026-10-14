@@ -9,7 +9,10 @@
 #
 # shellcheck shell=bats
 
-setup() { acq_setup_stubs; }
+setup() {
+  acq_setup_stubs
+  unset ACQ_REQUIRED_AGENT_KIT ACQ_DEFAULT_OPENCODE_GENERIC
+}
 teardown() { acq_teardown_stubs; }
 
 load 'helper'
@@ -104,15 +107,16 @@ SPEC
   assert_regex "$(acq_selected_agent_kit_summary opencode 2>/dev/null)" 'apply=deferred'
 }
 
-@test "agent kit gate: missing opencode artifact fails closed" {
+@test "agent kit gate: missing opencode artifact fails before generic-default provisioning" {
   acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
   _acq_agent_builtin_kit_ref() { printf '%s\n' "$STUBDIR/missing-opencode-kit"; }
 
-  _build_kit_list opencode
+  # shellcheck disable=SC2034  # read by sourced _build_kit_list
+  ACQ_REQUIRED_AGENT_KIT=opencode
+  run _build_kit_list opencode
 
-  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
-  assert_equal "${#KITS[@]}" "4"
-  assert_regex "$(acq_selected_agent_kit_summary opencode 2>/dev/null)" 'apply=deferred'
+  assert_failure
+  assert_output --partial 'required built-in opencode kit is unavailable'
 }
 
 @test "agent kit gate: wrong opencode kit name fails closed" {
@@ -184,19 +188,24 @@ SPEC
   assert_equal "${#KITS[@]}" "4"
 }
 
-@test "agent kit gate: explicit --kit suppresses inferred opencode kit" {
+@test "agent kit gate: explicit --kit cannot suppress required inferred opencode kit" {
   local cli="$STUBDIR/cli-kit"
   mkdir -p "$cli"
   acq_agent_builtin_kit_enabled() { [ "$1" = "opencode" ]; }
-  _acq_agent_builtin_kit_ref() { printf '%s\n' "$STUBDIR/missing-opencode-kit"; }
+  local built_in="$STUBDIR/opencode-kit"
+  _mk_opencode_agent_kit "$built_in"
+  _acq_agent_builtin_kit_ref() { printf '%s\n' "$built_in"; }
   # shellcheck disable=SC2034  # read by sourced _build_kit_list
   ACQ_CLI_KITS=("$cli")
 
+  # shellcheck disable=SC2034  # read by sourced _build_kit_list
+  ACQ_REQUIRED_AGENT_KIT=opencode
   _build_kit_list opencode
 
-  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "4"
-  assert_equal "${#KITS[@]}" "5"
-  assert_equal "${KITS[4]}" "$cli"
+  assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
+  assert_equal "${#KITS[@]}" "6"
+  assert_equal "${KITS[4]}" "$built_in"
+  assert_equal "${KITS[5]}" "$cli"
 }
 
 @test "agent kit gate: shell remains no-agent-kit" {
@@ -340,4 +349,25 @@ SPEC
   assert_regex "$line" "--env ACQ_WORKSPACE=${logical}( |$)"
   assert_regex "$line" '--env ACQ_CLONE=1( |$)'
   assert_regex "$(cat "$CALLS")" 'sbx run --name opencode-envclone-sbx -- --version'
+}
+
+@test "migration gate(sbx): generic default attach launches kit entrypoint and preserves -- escape" {
+  local proj="$STUBDIR/sbx-generic-attach"
+  _mk_repo "$proj"
+  _seed_sbx_usai
+  run env ACQ_BACKEND=sbx STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 \
+    "$ACQ" create opencode --name genericattach "$proj"
+  assert_success
+  printf 'genericattach\n' >"$STUBDIR/.sandbox_list"
+
+  : >"$CALLS"
+  run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 "$ACQ" run genericattach
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'sbx run --name genericattach -- opencode'
+
+  : >"$CALLS"
+  run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 "$ACQ" run genericattach -- sh -c 'echo escape'
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'sbx run --name genericattach -- sh -c echo escape'
+  refute_regex "$(cat "$CALLS")" 'opencode sh -c'
 }
