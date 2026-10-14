@@ -359,6 +359,10 @@ SPEC
     "$ACQ" create opencode --name genericattach "$proj"
   assert_success
   printf 'genericattach\n' >"$STUBDIR/.sandbox_list"
+  local create_line
+  create_line=$(_create_line sbx)
+  assert_regex "$create_line" " shell ${proj}$"
+  assert_equal "$(printf '%s\n' "$create_line" | grep -o 'acq-opencode-kit' | wc -l | tr -d ' ')" "1"
 
   : >"$CALLS"
   run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 "$ACQ" run genericattach
