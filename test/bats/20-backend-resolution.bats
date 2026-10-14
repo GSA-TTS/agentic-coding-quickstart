@@ -82,7 +82,7 @@ _resolve() { # ADAPTER EXPLICIT  -> prints "<resolved>|<stderr-note>"
   refute_output --partial 'acq: using'
 }
 
-@test "backend: OpenShell registration is explicit-only and never auto-detected" {
+@test "backend: OpenShell is explicit-only and never auto-detected" {
   unset ACQ_BACKEND
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
   export ACQ_TEST_INSTALLED_BACKENDS="openshell"
@@ -95,8 +95,8 @@ _resolve() { # ADAPTER EXPLICIT  -> prints "<resolved>|<stderr-note>"
   assert_output --partial 'no backend detected'
 
   run env ACQ_BACKEND=openshell "$ACQ" ls
-  assert_failure
-  assert_output --partial "no backend adapter found for 'openshell'"
+  assert_success
+  assert_output --partial '"name":"box"'
 }
 
 @test "backend: both installed, no sbx sandboxes -> msb + notice" {

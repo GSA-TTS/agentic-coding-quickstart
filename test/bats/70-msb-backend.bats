@@ -88,7 +88,7 @@ _with_adapter() { # ADAPTER BODY
   assert_output --partial '0.6.9'
   run env "$ACQ" backend list
   assert_output --partial 'msb  v0.6.9'
-  assert_output --partial 'openshell  (explicit-only; adapter not yet available)'
+  assert_output --partial 'openshell  v0.1.4 (explicit-only; experimental)'
 }
 
 @test "backend set/unset: persists a default then clears it (idempotent)" {
@@ -109,7 +109,7 @@ _with_adapter() { # ADAPTER BODY
 @test "msb: doctor shows the installed msb version, not the old placeholder" {
   run bash -c 'printf "n\n" | "$1" doctor' _ "$ACQ"
   assert_output --partial 'msb: installed v0.6.9'
-  assert_output --partial 'openshell: explicit-only; adapter not yet available'
+  assert_output --partial 'openshell: installed v0.1.4 (explicit-only; experimental)'
 }
 
 @test "msb: acq_backend_prepare is silent on a ready host" {
