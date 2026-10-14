@@ -1,6 +1,6 @@
 ---
 title: "Use Agent Kits on a Devenv-Enabled Agent-Less Base Image"
-status: proposed
+status: accepted
 date: 2026-09-15
 decision_makers: ["Bret Mogilefsky", "William Zujkowski", "Basilio Bogado"]
 category: architecture
@@ -169,8 +169,9 @@ acq
       └─ personal kit
 ```
 
-This ADR is intentionally proposed, not accepted. It records the direction, the
-review outcomes, and the questions that remain open before implementation.
+The default OpenCode path is implemented with a pinned generic base image and
+the pinned OpenCode kit. It remains subject to the live verification cadence
+defined below.
 
 ## Lifecycle Sketch
 
@@ -417,6 +418,9 @@ continues.
   agent-populated images only as optional cache optimizations.
 - The same environment/capability model can span msb and sbx.
 - Kit-authoring agents and humans can rely on the broader devenv ecosystem.
+- Default OpenCode no longer selects an OpenCode-specific sandbox template; both
+  backends use the same immutable generic devenv base and the kit-declared
+  `opencode` entrypoint.
 
 ### Negative Consequences
 
@@ -431,6 +435,8 @@ continues.
 - Debugging startup failures may require better introspection into generated
   devenv config and kit application order.
 - Agent install steps must be idempotent and safe to re-run.
+- Existing default OpenCode sandboxes retain their original image and launch
+  behavior. Recreate them to adopt the generic base and pinned kit path.
 
 ### Compliance Consequences
 

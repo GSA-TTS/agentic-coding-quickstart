@@ -161,7 +161,7 @@ MSB_ROLLBACK_VERSION="0.6.18"
 # duplicate snapshots exist. See ADR-0032.
 MSB_FIXED_VERSION="0.7.3"
 
-# Default OCI image for provisioned sandboxes. We default to the SAME image
+# Default OCI image for provisioned non-OpenCode sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
 # agent template. It ALREADY ships the non-root `agent` user (with passwordless
 # sudo), node, git, curl, and ca-certificates (the four kits' runtime
@@ -192,7 +192,7 @@ _ACQ_MSB_IMAGE_NOTICE_SHOWN=0
 
 # _acq_msb_resolve_image AGENT — set the OCI image `msb create` should use,
 # applying the ADR-0022 precedence: explicit ACQ_MSB_IMAGE > neutral
-# --image/ACQ_IMAGE > agent-derived sandbox-template image > built-in default.
+# --image/ACQ_IMAGE > generic OpenCode base > agent-derived sandbox-template image > built-in default.
 # Prints a one-time notice if BOTH the backend var and the neutral image are set
 # (backend var wins). Idempotent notice (once per process).
 _ACQ_MSB_RESOLVED_IMAGE=""
@@ -219,6 +219,11 @@ _acq_msb_resolve_image() {
   if [ -n "$neutral" ]; then
     _ACQ_MSB_RESOLVED_IMAGE="$neutral"
     _ACQ_MSB_RESOLVED_IMAGE_SOURCE="neutral"
+    return 0
+  fi
+  if [ "$agent" = "opencode" ]; then
+    _ACQ_MSB_RESOLVED_IMAGE="$ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE"
+    _ACQ_MSB_RESOLVED_IMAGE_SOURCE="generic-opencode-default"
     return 0
   fi
   if _ACQ_MSB_RESOLVED_IMAGE=$(acq_agent_template_image "$agent" 2>/dev/null) \
@@ -3112,6 +3117,13 @@ acq_backend_provision() {
   _acq_msb_resolve_image "$agent"
   local _msb_image="$_ACQ_MSB_RESOLVED_IMAGE"
   local _msb_image_source="$_ACQ_MSB_RESOLVED_IMAGE_SOURCE"
+  if [ "$_msb_image_source" = "generic-opencode-default" ]; then
+    ACQ_REQUIRED_AGENT_KIT="opencode"
+    ACQ_DEFAULT_OPENCODE_GENERIC=1
+  else
+    ACQ_REQUIRED_AGENT_KIT=""
+    ACQ_DEFAULT_OPENCODE_GENERIC=""
+  fi
 
   # Optional pull policy (ACQ_MSB_PULL): forwarded to `msb create --pull`.
   # `msb create` reads an image REF and by default pulls if-missing from a
@@ -3144,7 +3156,7 @@ acq_backend_provision() {
   # Zscaler CA trust FIRST so later network-fetching kits (playbook clone, USAi
   # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
   local kitref kitdir
-  _acq_msb_select_kits "$agent"
+  _acq_msb_select_kits "$agent" || return 1
   local kits=("${KITS[@]}")
 
   for kitref in "${kits[@]}"; do
