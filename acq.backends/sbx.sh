@@ -812,15 +812,25 @@ acq_backend_attach() {
   ws=$(acq_backend_workspace_for "$name")
   if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
     shift
+    local _attach_cmd=()
+    if [ "$agent" = "opencode" ] \
+        && [ "$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)" = "1" ]; then
+      case "${1:-}" in
+        -*) _attach_cmd=("$agent" "$@") ;;  # agent flags, including short options
+        *)  _attach_cmd=("$@") ;;             # explicit command escape
+      esac
+    else
+      _attach_cmd=("$@")
+    fi
     if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
         && command -v acq_guest_exec_script >/dev/null 2>&1; then
       if [ -n "$ws" ]; then
-        sbx run --name "$name" -- env "ACQ_WORKSPACE=$ws" sh -c "$(acq_guest_exec_script)" sh "$agent" "$@"
+        sbx run --name "$name" -- env "ACQ_WORKSPACE=$ws" sh -c "$(acq_guest_exec_script)" sh "${_attach_cmd[@]}"
       else
-        sbx run --name "$name" -- sh -c "$(acq_guest_exec_script)" sh "$agent" "$@"
+        sbx run --name "$name" -- sh -c "$(acq_guest_exec_script)" sh "${_attach_cmd[@]}"
       fi
     else
-      sbx run --name "$name" -- "$@"
+      sbx run --name "$name" -- "${_attach_cmd[@]}"
     fi
   else
     if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
