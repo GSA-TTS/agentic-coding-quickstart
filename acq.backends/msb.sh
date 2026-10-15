@@ -3831,14 +3831,21 @@ EOF
 
   # Mount per-sandbox trusted configuration read-only. The guest can consume
   # declared code and data here but cannot make acq trust a modified replacement.
-  local _hcfg_dir _hcfg_host
+  local _hcfg_dir _hcfg_mount _hcfg_host
   if _hcfg_dir=$(acq_host_config_dir msb "$name"); then
     mkdir -p "$_hcfg_dir" 2>/dev/null || true
     chmod 711 "$_hcfg_dir" 2>/dev/null || true
+    # msb rejects bind-mount sources reached through a host symlink. Host config
+    # commonly lives below macOS $TMPDIR (/var -> /private/var), so canonicalize
+    # this source just as we do workspace mounts above.
+    _hcfg_mount="$_hcfg_dir"
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      _hcfg_mount=$(canonicalize_path "$_hcfg_mount")
+    fi
     if command -v host_path >/dev/null 2>&1; then
-      _hcfg_host=$(host_path "$_hcfg_dir")
+      _hcfg_host=$(host_path "$_hcfg_mount")
     else
-      _hcfg_host="$_hcfg_dir"
+      _hcfg_host="$_hcfg_mount"
     fi
     create_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
   fi
