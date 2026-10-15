@@ -1185,10 +1185,11 @@ acq_guest_shell_script() {
 #
 # Emitted lines are evaluated by the guest login shell. They gate to bash,
 # list snippets with C collation for deterministic order, preserve the readable
-# and charset guards, and clean up the loop variable after sourcing.
+# and charset guards, and clean up the loop variable after sourcing. `command ls`
+# because ~/.profile sources ~/.bashrc first, which may alias or wrap ls.
 acq_login_profile_rc_block() {
   printf '%s\n' 'if [ -n "$BASH_VERSION" ] && [ -d "$HOME/.rc.d" ]; then'
-  printf '%s\n' '  for _acq_rc in $(LC_ALL=C ls "$HOME"/.rc.d 2>/dev/null); do'
+  printf '%s\n' '  for _acq_rc in $(LC_ALL=C command ls "$HOME"/.rc.d 2>/dev/null); do'
   printf '%s\n' '    _acq_rc="$HOME/.rc.d/$_acq_rc"'
   printf '%s\n' '    case "$_acq_rc" in *.sh) ;; *) continue ;; esac'
   printf '%s\n' '    [ -r "$_acq_rc" ] || continue'
