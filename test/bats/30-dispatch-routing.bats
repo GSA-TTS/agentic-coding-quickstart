@@ -386,14 +386,13 @@ FACTS
   assert_regex "$(cat "$CALLS")" 'Authorization: Bearer \$USAI_API_KEY'
 }
 
-@test "run(opencode): runs postinstall under a timeout guard when binary not functional" {
+@test "run(opencode): generic default does not run an unpinned npm postinstall fallback" {
   local proj="$STUBDIR/ocrun"; mkdir -p "$proj"
   _seed_usai
   run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'postinstall\.mjs'
-  assert_regex "$log" 'timeout'
+  refute_regex "$log" 'postinstall\.mjs|opencode-ai|npm root -g'
   refute_output --partial 'does not appear runnable'
 }
 
@@ -490,7 +489,7 @@ FACTS
   assert_output --partial 'ACQ_ACTIVATE_PROJECT_ENV=1'
   local log; log=$(cat "$CALLS")
   local run_line; run_line=$(grep '^sbx run --name opencode-direnvproj' "$CALLS")
-  assert_regex "$run_line" 'sbx run --name opencode-direnvproj -- echo hi'
+  assert_regex "$run_line" 'sbx run --name opencode-direnvproj shell -- -lc exec.*sh echo hi'
   refute_regex "$log" 'direnv export|direnv allow'
 }
 
@@ -502,7 +501,7 @@ FACTS
   assert_success
   assert_output --partial 'project environment detected (direnv)'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'sbx run --name opencode-direnvproj2 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'sbx run --name opencode-direnvproj2 shell -- -lc exec.*sh env ACQ_WORKSPACE=.* sh -c'
   assert_regex "$log" 'direnv export sh'
   assert_regex "$log" 'sh opencode --version'
   refute_regex "$log" 'direnv allow'
@@ -515,7 +514,7 @@ FACTS
   run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'sbx run --name opencode-direnvproj3 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'sbx run --name opencode-direnvproj3 shell -- -lc exec.*sh env ACQ_WORKSPACE=.* sh -c'
   assert_regex "$log" 'sh opencode'
 }
 

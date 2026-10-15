@@ -1,6 +1,6 @@
 ---
 title: "Use Agent Kits on a Devenv-Enabled Agent-Less Base Image"
-status: proposed
+status: accepted
 date: 2026-09-15
 decision_makers: ["Bret Mogilefsky", "William Zujkowski", "Basilio Bogado"]
 category: architecture
@@ -116,9 +116,9 @@ Consequences for the substrate and the kit contract:
    plus agent kits.** This keeps the base image generic, preserves familiar OS
    choices, and moves agent-specific knowledge to kits.
 
-## Proposed Decision Outcome
+## Decision Outcome
 
-Proposed option: **Option 3**.
+Accepted option: **Option 3**.
 
 `acq` should target an agent-less, devenv-enabled base-image contract: Nix
 (single-user), devenv, and direnv layered onto a parametrized `BASE_IMAGE`.
@@ -169,8 +169,9 @@ acq
       └─ personal kit
 ```
 
-This ADR is intentionally proposed, not accepted. It records the direction, the
-review outcomes, and the questions that remain open before implementation.
+The default OpenCode path is implemented with a pinned generic base image and
+the pinned OpenCode kit. It remains subject to the live verification cadence
+defined below.
 
 ## Lifecycle Sketch
 
@@ -384,7 +385,7 @@ sandbox on the active backend and can gate the refactor.
 ### Migration sequencing
 
 The `acq run opencode .` behavior changes in the staged sequence documented in
-[`docs/BACKEND_GUIDE.md`](../BACKEND_GUIDE.md#adr-0030-migration-sequencing-agent-kitdevenv-model):
+[`docs/BACKEND_GUIDE.md`](../BACKEND_GUIDE.md#adr-0030-generic-base-implementation):
 freeze the current contract first, introduce agent-kit inputs without changing
 dispatch, switch OpenCode provisioning to consume the agent kit, move
 remaining devenv-specific setup behind the kit boundary, then remove obsolete
@@ -417,6 +418,9 @@ continues.
   agent-populated images only as optional cache optimizations.
 - The same environment/capability model can span msb and sbx.
 - Kit-authoring agents and humans can rely on the broader devenv ecosystem.
+- Default OpenCode no longer selects an OpenCode-specific sandbox template; both
+  backends use the same immutable generic devenv base and the kit-declared
+  `opencode` entrypoint.
 
 ### Negative Consequences
 
@@ -431,6 +435,8 @@ continues.
 - Debugging startup failures may require better introspection into generated
   devenv config and kit application order.
 - Agent install steps must be idempotent and safe to re-run.
+- Existing default OpenCode sandboxes retain their original image and launch
+  behavior. Recreate them to adopt the generic base and pinned kit path.
 
 ### Compliance Consequences
 

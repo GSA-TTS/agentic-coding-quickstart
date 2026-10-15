@@ -1303,11 +1303,11 @@ case "$subcommand" in
       [ -n "$ws" ] || ws="$PWD"
       warn_if_no_git_identity "$ws"
 
-      # opencode (since v1.15.1) fetches its binary in a postinstall step that
+      # Legacy/custom opencode images can fetch their binary in a postinstall step that
       # some sandbox images skip, so a fresh launch fails with "postinstall
       # script was not run". Run it here — on any backend — before attaching an
       # opencode agent. Best-effort; never blocks the run.
-      if [ "$first" = "opencode" ]; then
+      if [ "$first" = "opencode" ] && [ "${ACQ_DEFAULT_OPENCODE_GENERIC:-}" != "1" ]; then
         ensure_opencode_postinstall "$local_name"
       fi
 
