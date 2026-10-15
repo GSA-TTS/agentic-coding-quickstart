@@ -314,9 +314,9 @@ _attach() { # PRE_SNIPPET NAME
   _provision rcdbox shell 'export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/rcd-secrets"'
   local log; log=$(cat "$CALLS")
   # The bridge sources ~/.rc.d in deterministic C-collation order (ADR-0030):
-  # it must iterate an `LC_ALL=C ls "$HOME"/.rc.d` list, NOT a bare locale-
+  # it must iterate an `LC_ALL=C command ls "$HOME"/.rc.d` list, NOT a bare locale-
   # dependent `*.sh` glob whose order can vary by guest locale.
-  assert_regex "$log" 'LC_ALL=C ls'
+  assert_regex "$log" 'LC_ALL=C command ls'
   assert_regex "$log" '\$HOME./.rc.d'
   assert_regex "$log" 'for _acq_rc in'
   assert_regex "$log" 'SC1090'
@@ -338,6 +338,29 @@ _attach() { # PRE_SNIPPET NAME
 
   assert_success
   assert_output $'10-a\n2-b'
+}
+
+@test "rc.d: login-profile block ignores an ls alias or function from .bashrc (#587)" {
+  # The bridge runs after ~/.profile sources ~/.bashrc, so an interactive
+  # login shell already has the user's `ls` alias or function when the block
+  # lists ~/.rc.d. The listing must come from the real ls.
+  local home="$STUBDIR/rc-alias-home"
+  mkdir -p "$home/.rc.d"
+  printf '%s\n' 'printf "%s\n" 10-a >> "$HOME/order"' > "$home/.rc.d/10-a.sh"
+  printf '%s\n' 'printf "%s\n" 20-b >> "$HOME/order"' > "$home/.rc.d/20-b.sh"
+  acq_login_profile_rc_block > "$home/profile"
+
+  # An alias that reverses the order.
+  run env HOME="$home" bash -c 'shopt -s expand_aliases; alias ls="ls -r"
+. "$HOME/profile"; cat "$HOME/order"'
+  assert_success
+  assert_output $'10-a\n20-b'
+
+  # A function whose output names one snippet twice and omits the other.
+  rm -f "$home/order"
+  run env HOME="$home" bash -c 'ls() { echo 20-b.sh 20-b.sh; }; . "$HOME/profile"; cat "$HOME/order"'
+  assert_success
+  assert_output $'10-a\n20-b'
 }
 
 @test "msb #426: the heal only rewrites a .profile acq owns outright (appended lines survive)" {
