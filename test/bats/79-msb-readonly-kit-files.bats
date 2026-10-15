@@ -190,3 +190,20 @@ SPEC
   # The host-config dir is mounted :ro at the well-known guest path.
   assert_regex "$(cat "$CALLS")" -- '--volume [^ ]*romountbox[^ ]*\.config:/var/lib/acq/host:ro'
 }
+
+@test "msb ro: a symlinked host-config directory is canonicalized before mounting" {
+  local state="$STUBDIR/real-state" link="$STUBDIR/link-state"
+  mkdir -p "$state"
+  ln -s "$state" "$link"
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_PROVENANCE_DIR="'"$link"'" ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/symlinked-secrets"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_provision configlinkbox shell /tmp >/dev/null 2>&1
+  '
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" -- "--volume ${state}/msb/configlinkbox[^ ]*\.config:/var/lib/acq/host:ro"
+}

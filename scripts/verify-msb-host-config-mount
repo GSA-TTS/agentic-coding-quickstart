@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# verify-msb-host-config-mount — live macOS/MSB check for canonicalizing the
+# host-authoritative config bind mount before `msb create` receives it.
+#
+# The normal verifier stages this config under its temporary state directory.
+# On macOS that is usually below /var/folders, where /var is a symlink to
+# /private/var. msb rejects the uncanonicalized source path. This wrapper retains
+# any sandbox the verifier creates; do not remove it without explicit approval.
+#
+# Usage: ./scripts/verify-msb-host-config-mount
+set -eu
+
+SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+exec env VERIFY_KEEP=1 "$SCRIPT_DIR/scripts/verify-backends" --only msb

@@ -1981,13 +1981,13 @@ is dead), `ssh-add` exits **1** with `communication with agent failed` here — 
 same exit code as a healthy but empty agent, so the probe classifies on the
 message (a "no identities" reply is treated as healthy and stays quiet). The fix
 is a **one-time recreate**; the recreated sandbox routes through the managed link
-and self-heals from then on:
+and self-heals from then on. To preserve live agent context during planned
+recovery, `acq recreate <sandbox>` snapshots, removes, and restores the sandbox
+while re-deriving the `--vsock` route from the current host `SSH_AUTH_SOCK`.
 
 ```bash
-acq rm <sandbox>
-# then re-run your original create/run WITH the host agent available:
 eval "$(ssh-agent -s)"; ssh-add ~/.ssh/id_ed25519   # if needed
-acq run <agent> <workspace…>
+acq recreate <sandbox>
 ```
 
 If the warning fires for a sandbox that already routes through the managed link
@@ -1997,7 +1997,9 @@ rather than recreating.
 
 See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
 ("Amendment (2026-10-06): reboot-proof route via a managed host symlink") for the
-full mechanism.
+full mechanism. Use the old `acq rm <sandbox>; acq run ...` path only when you do
+not need to preserve live agent context. See
+[ADR-0036](adr/0036-native-snapshot-restore.md) for native snapshot restore.
 
 ---
 
