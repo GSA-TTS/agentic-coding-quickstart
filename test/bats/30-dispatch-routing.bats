@@ -489,7 +489,7 @@ FACTS
   assert_output --partial 'ACQ_ACTIVATE_PROJECT_ENV=1'
   local log; log=$(cat "$CALLS")
   local run_line; run_line=$(grep '^sbx run --name opencode-direnvproj' "$CALLS")
-  assert_regex "$run_line" 'sbx run --name opencode-direnvproj -- echo hi'
+  assert_regex "$run_line" 'sbx run --name opencode-direnvproj shell -- -lc exec.*sh echo hi'
   refute_regex "$log" 'direnv export|direnv allow'
 }
 
@@ -501,7 +501,7 @@ FACTS
   assert_success
   assert_output --partial 'project environment detected (direnv)'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'sbx run --name opencode-direnvproj2 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'sbx run --name opencode-direnvproj2 shell -- -lc exec.*sh env ACQ_WORKSPACE=.* sh -c'
   assert_regex "$log" 'direnv export sh'
   assert_regex "$log" 'sh opencode --version'
   refute_regex "$log" 'direnv allow'
@@ -514,7 +514,7 @@ FACTS
   run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'sbx run --name opencode-direnvproj3 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'sbx run --name opencode-direnvproj3 shell -- -lc exec.*sh env ACQ_WORKSPACE=.* sh -c'
   assert_regex "$log" 'sh opencode'
 }
 
