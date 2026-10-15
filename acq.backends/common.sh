@@ -2471,7 +2471,7 @@ acq_host_config_clear_instance_state() {
   case "$dir" in ""|/|/*/) return 0 ;; esac
   rm -f "$dir"/install-* "$dir"/agent-installed-* \
         "$dir"/agent-user-ready \
-        "$dir"/workspace "$dir"/ssh-auth-sock 2>/dev/null || true
+        "$dir"/workspace "$dir"/ssh-auth-sock "$dir"/generic-opencode 2>/dev/null || true
   return 0
 }
 

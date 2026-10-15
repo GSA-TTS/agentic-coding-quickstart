@@ -116,9 +116,9 @@ Consequences for the substrate and the kit contract:
    plus agent kits.** This keeps the base image generic, preserves familiar OS
    choices, and moves agent-specific knowledge to kits.
 
-## Proposed Decision Outcome
+## Decision Outcome
 
-Proposed option: **Option 3**.
+Accepted option: **Option 3**.
 
 `acq` should target an agent-less, devenv-enabled base-image contract: Nix
 (single-user), devenv, and direnv layered onto a parametrized `BASE_IMAGE`.
@@ -385,7 +385,7 @@ sandbox on the active backend and can gate the refactor.
 ### Migration sequencing
 
 The `acq run opencode .` behavior changes in the staged sequence documented in
-[`docs/BACKEND_GUIDE.md`](../BACKEND_GUIDE.md#adr-0030-migration-sequencing-agent-kitdevenv-model):
+[`docs/BACKEND_GUIDE.md`](../BACKEND_GUIDE.md#adr-0030-generic-base-implementation):
 freeze the current contract first, introduce agent-kit inputs without changing
 dispatch, switch OpenCode provisioning to consume the agent kit, move
 remaining devenv-specific setup behind the kit boundary, then remove obsolete
