@@ -193,7 +193,13 @@ case "${1:-}" in
         touch "$STUBDIR/.opencode_fixed"; exit 0 ;;
       *) exit 0 ;;
     esac ;;
-  run)  [ "${2:-}" = "--help" ] && printf 'SBX-RUN-HELP\n'; exit 0 ;;
+  run)
+    [ "${2:-}" = "--help" ] && printf 'SBX-RUN-HELP\n'
+    # Agent arguments require an agent positional before `--`. SBX otherwise
+    # forwards the separator to its shell launcher, where Bash rejects it.
+    [ "${2:-}" = "--name" ] && [ "${4:-}" = "--" ] && exit 2
+    exit 0
+    ;;
   stop) exit 0 ;;
   start) exit 0 ;;
   rm)   exit 0 ;;

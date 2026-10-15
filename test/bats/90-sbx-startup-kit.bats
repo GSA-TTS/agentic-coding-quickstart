@@ -437,7 +437,7 @@ STUB
   log=$(cat "$CALLS")
   create_line=$(printf '%s\n' "$log" | grep -n '^sbx create' | cut -d: -f1)
   barrier_line=$(printf '%s\n' "$log" | grep -n 'startup-complete' | cut -d: -f1)
-  attach_line=$(printf '%s\n' "$log" | grep -n '^sbx run --name.* -- opencode' | cut -d: -f1)
+  attach_line=$(printf '%s\n' "$log" | grep -n '^sbx run --name.* shell -- -lc exec.*sh opencode' | cut -d: -f1)
 
   assert_regex "$log" 'startup-barrier'
   assert [ "$create_line" -lt "$barrier_line" ]

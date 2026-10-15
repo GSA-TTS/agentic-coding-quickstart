@@ -331,7 +331,7 @@ SPEC
   assert_regex "$line" '--env ACQ_CLONE=1( |$)'
   assert_regex "$line" '--template ghcr\.io/acq/migration:v1'
   assert_regex "$line" '--kit /extra/env-one .*--kit /extra/env-two .*--kit /extra/cli-one'
-  assert_regex "$(cat "$CALLS")" 'sbx run --name opencode-sbxproj -- --version'
+  assert_regex "$(cat "$CALLS")" 'sbx run --name opencode-sbxproj opencode -- --version'
 }
 
 @test "migration gate(sbx): ACQ_CLONE=1 run opencode matches --clone markers" {
@@ -348,7 +348,7 @@ SPEC
   assert_regex "$line" '--clone'
   assert_regex "$line" "--env ACQ_WORKSPACE=${logical}( |$)"
   assert_regex "$line" '--env ACQ_CLONE=1( |$)'
-  assert_regex "$(cat "$CALLS")" 'sbx run --name opencode-envclone-sbx -- opencode --version'
+  assert_regex "$(cat "$CALLS")" 'sbx run --name opencode-envclone-sbx shell -- -lc exec.*sh opencode --version'
 }
 
 @test "migration gate(sbx): generic default attach launches kit entrypoint and preserves -- escape" {
@@ -367,16 +367,16 @@ SPEC
   : >"$CALLS"
   run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 "$ACQ" run genericattach
   assert_success
-  assert_regex "$(cat "$CALLS")" 'sbx run --name genericattach -- opencode'
+  assert_regex "$(cat "$CALLS")" 'sbx run --name genericattach shell -- -lc exec.*sh opencode'
 
   : >"$CALLS"
   run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 "$ACQ" run genericattach -- --version
   assert_success
-  assert_regex "$(cat "$CALLS")" 'sbx run --name genericattach -- opencode --version'
+  assert_regex "$(cat "$CALLS")" 'sbx run --name genericattach shell -- -lc exec.*sh opencode --version'
 
   : >"$CALLS"
   run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 "$ACQ" run genericattach -- sh -c 'echo escape'
   assert_success
-  assert_regex "$(cat "$CALLS")" 'sbx run --name genericattach -- sh -c echo escape'
+  assert_regex "$(cat "$CALLS")" 'sbx run --name genericattach shell -- -lc exec.*sh sh -c echo escape'
   refute_regex "$(cat "$CALLS")" 'opencode sh -c'
 }

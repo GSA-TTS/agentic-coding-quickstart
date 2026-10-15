@@ -761,6 +761,19 @@ _acq_sbx_attach_command() {
   printf '%s\n' "$agent"
 }
 
+# SBX requires an agent positional before `-- AGENT_ARGS`. Generic OpenCode
+# sandboxes were created with SBX's `shell` token to avoid its native OpenCode
+# kit, while the pinned kit supplies `opencode` as the command to run.
+_acq_sbx_attach_agent() {
+  local name="$1" agent
+  if [ "$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)" = "1" ]; then
+    printf '%s\n' shell
+  else
+    agent=$(acq_backend_recorded_agent "$name")
+    printf '%s\n' "${agent:-shell}"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # acq_backend_run — run a command inside a sandbox
 # ---------------------------------------------------------------------------
@@ -809,12 +822,14 @@ acq_backend_attach() {
     echo "acq: refusing to attach to '$name' because kit heal did not finish." >&2
     return 1
   fi
-  local agent ws
+  local agent sbx_agent ws generic_opencode
   agent=$(_acq_sbx_attach_command "$name")
+  sbx_agent=$(_acq_sbx_attach_agent "$name")
+  generic_opencode=$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)
   ws=$(acq_backend_workspace_for "$name")
   if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
     shift
-    local _attach_cmd=()
+    local _attach_cmd=() _sbx_args=()
     if [ "$agent" = "opencode" ] \
         && [ "$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)" = "1" ]; then
       case "${1:-}" in
@@ -827,29 +842,39 @@ acq_backend_attach() {
     if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
         && command -v acq_guest_exec_script >/dev/null 2>&1; then
       if [ -n "$ws" ]; then
-        sbx run --name "$name" -- env "ACQ_WORKSPACE=$ws" sh -c "$(acq_guest_exec_script)" sh "${_attach_cmd[@]}"
+        _sbx_args=(env "ACQ_WORKSPACE=$ws" sh -c "$(acq_guest_exec_script)" sh "${_attach_cmd[@]}")
       else
-        sbx run --name "$name" -- sh -c "$(acq_guest_exec_script)" sh "${_attach_cmd[@]}"
+        _sbx_args=(sh -c "$(acq_guest_exec_script)" sh "${_attach_cmd[@]}")
       fi
     else
-      sbx run --name "$name" -- "${_attach_cmd[@]}"
+      _sbx_args=("${_attach_cmd[@]}")
     fi
+    if [ "$generic_opencode" = "1" ]; then
+      _sbx_args=(-lc 'exec "$@"' sh "${_sbx_args[@]}")
+    fi
+    sbx run --name "$name" "$sbx_agent" -- "${_sbx_args[@]}"
   else
+    local _sbx_args=()
     if [ "${ACQ_ACTIVATE_PROJECT_ENV:-0}" = "1" ] \
         && command -v acq_guest_exec_script >/dev/null 2>&1; then
       if [ -n "$ws" ]; then
-        sbx run --name "$name" -- env "ACQ_WORKSPACE=$ws" sh -c "$(acq_guest_exec_script)" sh "$agent"
+        _sbx_args=(env "ACQ_WORKSPACE=$ws" sh -c "$(acq_guest_exec_script)" sh "$agent")
       else
-        sbx run --name "$name" -- sh -c "$(acq_guest_exec_script)" sh "$agent"
+        _sbx_args=(sh -c "$(acq_guest_exec_script)" sh "$agent")
       fi
     else
       if [ "$agent" = "opencode" ] \
-          && [ "$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)" = "1" ]; then
-        sbx run --name "$name" -- "$agent"
+          && [ "$generic_opencode" = "1" ]; then
+        _sbx_args=("$agent")
       else
         sbx run --name "$name"
+        return
       fi
     fi
+    if [ "$generic_opencode" = "1" ]; then
+      _sbx_args=(-lc 'exec "$@"' sh "${_sbx_args[@]}")
+    fi
+    sbx run --name "$name" "$sbx_agent" -- "${_sbx_args[@]}"
   fi
 }
 
