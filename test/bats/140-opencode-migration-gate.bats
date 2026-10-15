@@ -380,3 +380,87 @@ SPEC
   assert_regex "$(cat "$CALLS")" 'sbx run --name genericattach shell -- -lc exec.*sh sh -c echo escape'
   refute_regex "$(cat "$CALLS")" 'opencode sh -c'
 }
+
+@test "migration gate(sbx): generic default fails closed when launch-mode persistence fails" {
+  local proj="$STUBDIR/sbx-generic-mode-write-fail"
+  _mk_repo "$proj"
+  _seed_sbx_usai
+  # shellcheck disable=SC2034 # read by acq_backend_provision
+  ACQ_DEFAULT_OPENCODE_GENERIC=1
+  acq_host_config_write sbx genericwritefail generic-opencode legacy-opencode
+  acq_host_config_write() { return 1; }
+
+  run acq_backend_provision genericwritefail opencode "$proj"
+
+  assert_failure
+  assert_output --partial 'could not record OpenCode launch mode'
+  assert_regex "$(_create_line sbx)" ' shell '
+  run acq_host_config_has sbx genericwritefail generic-opencode
+  assert_failure
+  refute_regex "$(cat "$CALLS")" '^sbx run '
+}
+
+@test "migration gate(sbx): lost generic launch mode refuses legacy attach grammar" {
+  local proj="$STUBDIR/sbx-generic-mode-lost"
+  _mk_repo "$proj"
+  _seed_sbx_usai
+  run env ACQ_BACKEND=sbx STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 \
+    "$ACQ" create opencode --name genericmodelost "$proj"
+  assert_success
+  printf 'genericmodelost\n' >"$STUBDIR/.sandbox_list"
+  acq_host_config_clear sbx genericmodelost generic-opencode
+
+  : >"$CALLS"
+  run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 "$ACQ" run genericmodelost
+
+  assert_failure
+  assert_output --partial 'cannot determine OpenCode launch mode'
+  refute_regex "$(cat "$CALLS")" '^sbx run --name genericmodelost opencode'
+  refute_regex "$(cat "$CALLS")" '^sbx run --name genericmodelost shell'
+}
+
+@test "migration gate(sbx): prior generic launch-mode record keeps the shell launcher" {
+  local proj="$STUBDIR/sbx-generic-mode-prior"
+  _mk_repo "$proj"
+  _seed_sbx_usai
+  run env ACQ_BACKEND=sbx STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 \
+    "$ACQ" create opencode --name genericmodeprior "$proj"
+  assert_success
+  printf 'genericmodeprior\n' >"$STUBDIR/.sandbox_list"
+  acq_host_config_write sbx genericmodeprior generic-opencode 1
+
+  : >"$CALLS"
+  run env ACQ_BACKEND=sbx ACQ_UPDATE_CHECK=0 "$ACQ" run genericmodeprior -- --version
+
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'sbx run --name genericmodeprior shell -- -lc exec.*sh opencode --version'
+}
+
+@test "migration gate(sbx): failed same-name create retains the existing launch mode" {
+  local proj="$STUBDIR/sbx-generic-mode-existing"
+  _mk_repo "$proj"
+  printf 'genericmodeexisting\n' >"$STUBDIR/.sandbox_list"
+  acq_host_config_write sbx genericmodeexisting generic-opencode generic-opencode
+
+  run acq_backend_provision genericmodeexisting opencode "$proj"
+
+  assert_failure
+  assert_output --partial "sandbox 'genericmodeexisting' already exists"
+  assert_equal "$(acq_host_config_read sbx genericmodeexisting generic-opencode)" generic-opencode
+  refute_regex "$(cat "$CALLS")" '^sbx create '
+}
+
+@test "migration gate(sbx): replacement create overwrites a stale launch mode" {
+  local proj="$STUBDIR/sbx-generic-mode-replacement"
+  _mk_repo "$proj"
+  _seed_sbx_usai
+  # shellcheck disable=SC2034 # read by acq_backend_provision
+  ACQ_DEFAULT_OPENCODE_GENERIC=1
+  acq_host_config_write sbx genericmodereplacement generic-opencode legacy-opencode
+
+  run acq_backend_provision genericmodereplacement opencode "$proj"
+
+  assert_success
+  assert_equal "$(acq_host_config_read sbx genericmodereplacement generic-opencode)" generic-opencode
+  assert_regex "$(_create_line sbx)" ' shell '
+}

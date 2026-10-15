@@ -414,6 +414,16 @@ _acq_sbx_wait_for_startup_barrier() {
   done
 }
 
+_acq_sbx_clear_opencode_launch_mode() {
+  local name="$1"
+  acq_host_config_clear sbx "$name" generic-opencode
+  if acq_host_config_has sbx "$name" generic-opencode; then
+    echo "acq(sbx): error: could not clear stale OpenCode launch mode for '$name'." >&2
+    echo "          Refusing to create because reattach could select stale SBX grammar." >&2
+    return 1
+  fi
+}
+
 # Probe a feature inside a sandbox. Returns 0=absent, 1=present, 2=probe failed.
 # IMPORTANT: `snippet` MUST end with " && echo present" — e.g.:
 #   "test -f '/path/to/file' && echo present"
@@ -586,6 +596,16 @@ acq_backend_provision() {
   kf+=(--kit "$(_acq_sbx_startup_barrier_kit "$_startup_barrier_token")")
 
   acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_sbx_args[*]:-}"
+  # The name-keyed host record may outlive a sandbox removed outside acq. Clear
+  # OpenCode's routing mode before create, and refuse to create if it persists.
+  # A later write failure then leaves no stale mode that could enable reattach.
+  if [ "$agent" = "opencode" ]; then
+    if acq_backend_exists "$name"; then
+      echo "acq(sbx): error: sandbox '$name' already exists; refusing to replace its launch mode." >&2
+      return 1
+    fi
+    _acq_sbx_clear_opencode_launch_mode "$name" || return 1
+  fi
   acq_spin_start "Creating sandbox '$name'"
   sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" ${_sbx_args[@]+"${_sbx_args[@]}"}
   local _rc=$?
@@ -604,9 +624,19 @@ acq_backend_provision() {
       return 1
     fi
     acq_spin_stop "Waiting for kit startup in '$name'"
+    acq_host_config_clear_instance_state sbx "$name"
     acq_provenance_write sbx "$name" "$agent" || true
-    if [ "${ACQ_DEFAULT_OPENCODE_GENERIC:-}" = "1" ]; then
-      acq_host_config_write sbx "$name" generic-opencode 1 || true
+    if [ "$agent" = "opencode" ]; then
+      # Reattach grammar is determined by the create-time SBX agent token. Persist
+      # it host-side so a missing record never guesses between shell and OpenCode.
+      local _opencode_mode=legacy-opencode
+      [ "${ACQ_DEFAULT_OPENCODE_GENERIC:-}" = "1" ] && _opencode_mode=generic-opencode
+      if ! acq_host_config_write sbx "$name" generic-opencode "$_opencode_mode"; then
+        echo "acq(sbx): error: could not record OpenCode launch mode for '$name'." >&2
+        echo "          Refusing to attach because acq cannot safely choose SBX grammar." >&2
+        echo "          Remove and recreate this sandbox." >&2
+        return 1
+      fi
     fi
     acq_workspace_record_write sbx "$name" "$_primary_ws" || true
     _acq_sbx_seed_extra_kit_marker "$name"
@@ -750,11 +780,7 @@ acq_backend_workspace_for() {
 _acq_sbx_attach_command() {
   local name="$1" agent
   agent=$(acq_backend_recorded_agent "$name")
-  if [ "$agent" = "opencode" ] \
-      && [ "$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)" = "1" ]; then
-    acq_agent_kit_entrypoint opencode
-    return 0
-  fi
+  [ "$agent" = "opencode" ] && acq_agent_kit_entrypoint opencode && return 0
   [ -n "$agent" ] || agent="bash"
   printf '%s\n' "$agent"
 }
@@ -764,12 +790,37 @@ _acq_sbx_attach_command() {
 # kit, while the pinned kit supplies `opencode` as the command to run.
 _acq_sbx_attach_agent() {
   local name="$1" agent
-  if [ "$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)" = "1" ]; then
+  case "$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)" in
+    generic-opencode|1)
     printf '%s\n' shell
-  else
+    ;;
+    *)
     agent=$(acq_backend_recorded_agent "$name")
     printf '%s\n' "${agent:-shell}"
-  fi
+    ;;
+  esac
+}
+
+_acq_sbx_opencode_launch_mode() {
+  local name="$1" agent mode
+  agent=$(acq_backend_recorded_agent "$name")
+  [ "$agent" = "opencode" ] || return 0
+  mode=$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)
+  case "$mode" in
+    generic-opencode|1) printf '%s\n' generic-opencode; return 0 ;;
+    legacy-opencode) printf '%s\n' "$mode"; return 0 ;;
+    "")
+      echo "acq(sbx): error: cannot determine OpenCode launch mode for '$name'." >&2
+      echo "          Its host launch-mode record is missing, so acq will not fall back" >&2
+      echo "          to legacy SBX grammar. Remove and recreate this sandbox." >&2
+      return 1
+      ;;
+    *)
+      echo "acq(sbx): error: invalid OpenCode launch mode record for '$name'." >&2
+      echo "          Remove and recreate this sandbox." >&2
+      return 1
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -820,16 +871,18 @@ acq_backend_attach() {
     echo "acq: refusing to attach to '$name' because kit heal did not finish." >&2
     return 1
   fi
-  local agent sbx_agent ws generic_opencode
+  local agent sbx_agent ws opencode_mode generic_opencode
+  opencode_mode=$(_acq_sbx_opencode_launch_mode "$name") || return 1
+  generic_opencode=""
+  [ "$opencode_mode" = "generic-opencode" ] && generic_opencode=1
   agent=$(_acq_sbx_attach_command "$name")
   sbx_agent=$(_acq_sbx_attach_agent "$name")
-  generic_opencode=$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)
   ws=$(acq_backend_workspace_for "$name")
   if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
     shift
     local _attach_cmd=() _sbx_args=()
     if [ "$agent" = "opencode" ] \
-        && [ "$(acq_host_config_read sbx "$name" generic-opencode 2>/dev/null || true)" = "1" ]; then
+        && [ "$generic_opencode" = "1" ]; then
       case "${1:-}" in
         -*) _attach_cmd=("$agent" "$@") ;;  # agent flags, including short options
         *)  _attach_cmd=("$@") ;;             # explicit command escape

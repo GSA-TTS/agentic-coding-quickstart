@@ -1185,6 +1185,10 @@ the inferred pinned OpenCode kit on both backends. The kit is mandatory for this
 default and must declare `agent.name: opencode` and `agent.entrypoint: opencode`.
 The generic default is create-time behavior, so existing sandboxes must be
 recreated to migrate; their existing sessions are not changed in place.
+SBX OpenCode sandboxes without a recorded launch mode are also refused at
+reattach: acq cannot safely distinguish a legacy template sandbox from a generic
+one whose host state was lost. Recreate the sandbox rather than selecting a
+launch grammar by guesswork.
 
 The retained migration verification keeps the observable backend-neutral contract
 green: `--clone` and `ACQ_CLONE=1`,
