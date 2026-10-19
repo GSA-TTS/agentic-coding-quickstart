@@ -239,8 +239,8 @@ SPEC
   local log; log=$(cat "$CALLS")
   # The bridge is written via a post-create `sbx exec` (not a startup kit).
   assert_regex "$log" 'acq-login-profile-rc'
-  # Deterministic lexical order: an LC_ALL=C ls list, NOT a locale-dependent glob.
-  assert_regex "$log" 'LC_ALL=C ls'
+  # Deterministic lexical order: an LC_ALL=C command ls list, NOT a locale-dependent glob.
+  assert_regex "$log" 'LC_ALL=C command ls'
   assert_regex "$log" 'for _acq_rc in'
   assert_regex "$log" 'SC1090'
   assert_regex "$log" 'unset _acq_rc'
