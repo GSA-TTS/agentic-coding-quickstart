@@ -223,7 +223,7 @@ Agent assumes host filesystem layout, not container layout.
 - Agent appears stuck
 - Eventually fails with timeout
 - OpenCode shows a retry notice for a streamed-response read timeout: `Timed out
-  waiting for response data` on OpenCode 2.0.22 (the version the kit installs),
+  waiting for response data` on OpenCode 2.0.30 (the version the kit installs),
   `SSE read timed out` on 1.18.x
 
 ### Root Cause
@@ -234,8 +234,9 @@ Agent assumes host filesystem layout, not container layout.
 - Proxy misconfiguration
 - Streamed-response read timeout: the response sent no data for longer than the
   provider's `chunkTimeout`. OpenCode before 1.18.27 has no default for this option
-  (unset means no idle timeout; 1.18.27 and later default to 5 minutes), so on those
-  versions the 2-minute value the `usai-provider` kit sets is what makes it fire.
+  (unset means no idle timeout; 1.18.27 through 2.0.29 default to 5 minutes, 2.0.30
+  to 15), so on those versions the 2-minute value the `usai-provider` kit sets is
+  what makes it fire.
   Common during long reasoning or while the model generates a large tool call (such
   as writing a long file), or when a hop on the path (sandbox proxy, Zscaler, USAi,
   the upstream model) stalls. OpenCode retries automatically, so an occasional one
@@ -248,7 +249,7 @@ The `usai-provider` kit sets both timeouts under the provider's `options` in its
 `timeout` (whole request, 10 minutes) and `chunkTimeout` (gap between streamed
 chunks, 2 minutes); check that file for the current values. If the read timeout
 recurs, raise `chunkTimeout` in the project's `opencode.json`. The example below
-uses 5 minutes, the default OpenCode 1.18.27 and later ship; `false` disables the
+uses 5 minutes, the default from OpenCode 1.18.27 through 2.0.29; `false` disables the
 idle timeout entirely. A higher value makes a truly hung stream take longer to fail
 over to the retry. Do not set it to a few seconds: normal model pauses would then
 abort nearly every long response.
@@ -265,7 +266,7 @@ abort nearly every long response.
 }
 ```
 
-If the retries run out (OpenCode 2.0.22 gives up after three retries of a timed-out
+If the retries run out (OpenCode 2.0.30 gives up after three retries of a timed-out
 request, while other retryable errors follow a separate policy; 1.18.17 through the
 1.18.x line stop after five; earlier releases keep retrying until you abort), note
 the model, the time, and what the agent was doing, so a slow model can be told
@@ -1844,7 +1845,7 @@ For a single sandbox, pass the pinned kit ref with `--kit` or include it in
 `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=56d1f5f49ef928f50e61aa64a93d618b3d21c415&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=89e87f9b831d66c9590fefe7b5b997c5719e64df&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 Existing sandboxes that were created before this change keep whatever podman
