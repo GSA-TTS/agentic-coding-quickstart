@@ -208,6 +208,67 @@ FACTS
   assert_equal "$USAI_PROVIDER_HOST" "api.example.gov"
 }
 
+@test "provider-facts: wrapper classifies loader results under errexit with custom IFS" {
+  load_acq
+  local diagnostics="$STUBDIR/provider-facts-diagnostics" rc actual_rc
+  local _before_ifs
+
+  for rc in 0 1 2 3 7; do
+    USAI_PROVIDER_HOST="before.example.gov"
+    USAI_PROVIDER_FACTS_SOURCE="before"
+    IFS='|'
+    _before_ifs="$IFS"
+    acq_provider_facts_load_from_kit() {
+      printf 'loader diagnostic for rc %s\n' "$rc" >&2
+      if [ "$rc" -eq 0 ]; then
+        USAI_PROVIDER_HOST="loaded.example.gov"
+        USAI_PROVIDER_FACTS_SOURCE="loaded"
+      fi
+      return "$rc"
+    }
+
+    set -e
+    if acq_provider_facts_load_from_kit_or_fallback kit cache 2>"$diagnostics"; then
+      actual_rc=0
+    else
+      actual_rc=$?
+    fi
+
+    assert_equal "$IFS" "$_before_ifs"
+    case "$rc" in
+      0)
+        assert_equal "$actual_rc" "0"
+        assert_equal "$USAI_PROVIDER_HOST" "loaded.example.gov"
+        assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "loaded"
+        grep -Fqx "loader diagnostic for rc 0" "$diagnostics"
+        ;;
+      1)
+        assert_equal "$actual_rc" "1"
+        assert_equal "$USAI_PROVIDER_HOST" "before.example.gov"
+        grep -Fqx "loader diagnostic for rc 1" "$diagnostics"
+        ;;
+      2)
+        assert_equal "$actual_rc" "0"
+        assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+        assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
+        grep -Fqx "loader diagnostic for rc 2" "$diagnostics"
+        ;;
+      3)
+        assert_equal "$actual_rc" "0"
+        assert_equal "$USAI_PROVIDER_HOST" "api.gsa.usai.gov"
+        assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
+        grep -Fq "provider facts could not be fetched" "$diagnostics"
+        grep -Fq "loader diagnostic for rc 3" "$diagnostics"
+        ;;
+      7)
+        assert_equal "$actual_rc" "7"
+        assert_equal "$USAI_PROVIDER_HOST" "before.example.gov"
+        grep -Fqx "loader diagnostic for rc 7" "$diagnostics"
+        ;;
+    esac
+  done
+}
+
 @test "agent-kits: default kit list is support-only" {
   load_acq
   ACQ_EXTRA_KITS=""
