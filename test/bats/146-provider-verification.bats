@@ -12,11 +12,11 @@ teardown() { acq_teardown_stubs; }
 _check_reachability_harness() {
   cat <<'PRELUDE'
     set -u
-    PASS=0 FAIL=0 LAST_OUT=""
+    PASS=0 FAIL=0 LAST_OUT="" LAST_ARGS=""
     pass() { PASS=$((PASS + 1)); }
     fail() { FAIL=$((FAIL + 1)); printf 'FAIL=%s\n' "$1"; }
     dump() { :; }
-    run_acq() { LAST_OUT="$FAKE_OUTPUT"; return "${FAKE_RC:-0}"; }
+    run_acq() { LAST_ARGS="$*"; LAST_OUT="$FAKE_OUTPUT"; return "${FAKE_RC:-0}"; }
 PRELUDE
   awk '/^check_usai_reachability\(\) \{$/,/^\}$/ { print }' \
     "$REPO_ROOT/scripts/verify-backends"
@@ -55,6 +55,17 @@ PRELUDE
   assert_output --partial 'PASS=0 FAIL=1'
 }
 
+@test "provider verification: shared-contract URL punctuation reaches curl unchanged" {
+  run bash -c "$(_check_reachability_harness)"'
+    FAKE_OUTPUT="200" FAKE_RC=0
+    url="https://api.example.gov/v1/models%2Fbeta+preview~v1?tag=a%2Bb"
+    check_usai_reachability sbx box "$url"
+    printf "ARGS=[%s]\n" "$LAST_ARGS"
+  '
+  assert_success
+  assert_output --partial 'ARGS=[exec usai-reach --backend sbx exec box -- sh -c curl -sS -o /dev/null -w "%{http_code}" --max-time 15 "$1" verify https://api.example.gov/v1/models%2Fbeta+preview~v1?tag=a%2Bb]'
+}
+
 @test "provider verification: non-default provider key seeds and passes presence check" {
   local calls="$STUBDIR/provider-verification-calls"
   run bash -c '
@@ -72,30 +83,8 @@ PRELUDE
         "secret set-custom") printf "set-custom %s\n" "$*" >> "$CALLS" ;;
       esac
     }
-    _sbx_secret_has_global_row() {
-      local env_var="$1"
-      [ -n "$env_var" ] || { echo "_sbx_secret_has_global_row: env_var required"; return 1; }
-      sbx secret ls 2>/dev/null | awk -v env="$env_var" '"'"'
-        $1 == "(global)" {
-          for (i = 2; i <= NF; i++) if ($i == env) { found = 1; exit }
-        }
-        END { exit(found ? 0 : 1) }
-      '"'"'
-    }
-    seed_usai_secret() {
-      local backend="$1" sandbox="$2"
-      USAI_SEEDED_FOR=""
-      printf '"'"'%s\n'"'"' "$VERIFY_USAI_DUMMY" | run_acq "seed-usai" --backend "$backend" secret set -g usai >/dev/null 2>&1 || true
-      if [ "$backend" = "sbx" ]; then
-        if ! _sbx_secret_has_global_row "$USAI_PROVIDER_KEY_ENV"; then
-          sbx secret set-custom --host "$USAI_HOST" --env "$USAI_PROVIDER_KEY_ENV" \
-            --value "$VERIFY_USAI_DUMMY" >/dev/null 2>&1 || true
-        fi
-      fi
-      if run_acq "usai-present" --backend "$backend" secret has -g usai; then
-        USAI_SEEDED_FOR="$sandbox"
-      fi
-    }
+    source="$(awk "/^seed_usai_secret\(\) \{$/,/^}$/" "'"$REPO_ROOT"'/scripts/verify-backends")"
+    eval "$source"
     seed_usai_secret sbx box
   '
   assert_success
@@ -122,30 +111,9 @@ PRELUDE
         "secret set-custom") printf "unexpected seed\n" >> "$CALLS" ;;
       esac
     }
-    _sbx_secret_has_global_row() {
-      local env_var="$1"
-      [ -n "$env_var" ] || { echo "_sbx_secret_has_global_row: env_var required"; return 1; }
-      sbx secret ls 2>/dev/null | awk -v env="$env_var" '"'"'
-        $1 == "(global)" {
-          for (i = 2; i <= NF; i++) if ($i == env) { found = 1; exit }
-        }
-        END { exit(found ? 0 : 1) }
-      '"'"'
-    }
-    seed_usai_secret() {
-      local backend="$1" sandbox="$2"
-      USAI_SEEDED_FOR=""
-      printf '"'"'%s\n'"'"' "$VERIFY_USAI_DUMMY" | run_acq "seed-usai" --backend "$backend" secret set -g usai >/dev/null 2>&1 || true
-      if [ "$backend" = "sbx" ]; then
-        if ! _sbx_secret_has_global_row "$USAI_PROVIDER_KEY_ENV"; then
-          sbx secret set-custom --host "$USAI_HOST" --env "$USAI_PROVIDER_KEY_ENV" \
-            --value "$VERIFY_USAI_DUMMY" >/dev/null 2>&1 || true
-        fi
-      fi
-      if run_acq "usai-present" --backend "$backend" secret has -g usai; then
-        USAI_SEEDED_FOR="$sandbox"
-      fi
-    }
+    _sbx_secret_has_global_row() { return 0; }
+    source="$(awk "/^seed_usai_secret\(\) \{$/,/^}$/" "'"$REPO_ROOT"'/scripts/verify-backends")"
+    eval "$source"
     seed_usai_secret sbx box
   '
   assert_success
@@ -161,43 +129,79 @@ PRELUDE
   assert_success
 }
 
-@test "provider verification: shell metacharacters in URL are rejected" {
-  run bash -c "$(_check_reachability_harness)"'
-    FAKE_OUTPUT="200" FAKE_RC=0
-    check_usai_reachability sbx box "https://api.gsa.usai.gov/api/v1/models\"; whoami; echo \""
-    printf "PASS=%s FAIL=%s\n" "$PASS" "$FAIL"
+@test "provider verification: seeded credential is required for an installed backend" {
+  run bash -c '
+    set -u
+    REPO_ROOT="'"$REPO_ROOT"'"
+    source="$(awk "/^seed_usai_secret\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
+    require_source="$(awk "/^require_usai_seed\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
+    status_source="$(awk "/^verification_succeeded\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
+    eval "$source"
+    eval "$require_source"
+    eval "$status_source"
+    VERIFY_USAI_DUMMY=synthetic
+    USAI_HOST=api.example.gov
+    USAI_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
+    USAI_SEEDED_FOR=""
+    PASS=0 FAIL=0
+    fail() { FAIL=$((FAIL + 1)); printf "FAIL=%s\n" "$1"; }
+    unseed_usai_secret() { USAI_SEEDED_FOR=""; }
+    _sbx_secret_has_global_row() { return 0; }
+    sbx() { :; }
+    run_acq() {
+      case "$1" in
+        seed-usai) printf "SEED_RC=%s\n" "${SEED_RC:-0}"; return "${SEED_RC:-0}" ;;
+        usai-present) return "${PRESENT_RC:-0}" ;;
+      esac
+    }
+    SEED_RC=7 PRESENT_RC=1
+    require_usai_seed sbx box || true
+    if verification_succeeded; then final_rc=0; else final_rc=$?; fi
+    printf "FAILED_SEED_FAIL=%s FINAL_RC=%s\n" "$FAIL" "$final_rc"
+    FAIL=0 USAI_SEEDED_FOR="" SEED_RC=0 PRESENT_RC=0
+    if require_usai_seed sbx box; then success=yes; else success=no; fi
+    printf "SUCCESS=%s FAIL=%s\n" "$success" "$FAIL"
   '
   assert_success
-  assert_output --partial 'FAIL=sbx: USAi URL validation failed'
-  assert_output --partial 'PASS=0 FAIL=1'
-  refute_output --partial 'root'
+  assert_output --partial 'FAIL=sbx: required provider credential could not be seeded/bound'
+  assert_line 'FAILED_SEED_FAIL=1 FINAL_RC=1'
+  assert_line 'SUCCESS=yes FAIL=0'
 }
 
-@test "provider verification: URL with command substitution is rejected" {
-  run bash -c "$(_check_reachability_harness)"'
-    FAKE_OUTPUT="200" FAKE_RC=0
-    check_usai_reachability sbx box "https://api.gsa.usai.gov/api/v1/models/\$(whoami)"
-    printf "PASS=%s FAIL=%s\n" "$PASS" "$FAIL"
-  '
+@test "provider verification: every installed-backend seed path requires a credential" {
+  run grep -n 'require_usai_seed "\$backend" "\$name"' "$REPO_ROOT/scripts/verify-backends"
   assert_success
-  assert_output --partial 'FAIL=sbx: USAi URL validation failed'
-  assert_output --partial 'PASS=0 FAIL=1'
+  assert [ "${#lines[@]}" -eq 2 ]
+
+  run grep -n 'require_usai_seed "\$backend" "\$aname"' "$REPO_ROOT/scripts/verify-backends"
+  assert_success
+  assert [ "${#lines[@]}" -eq 1 ]
+
+  run grep -n 'skipped (verifier did not seed' "$REPO_ROOT/scripts/verify-backends"
+  assert_failure
 }
 
-@test "provider verification: production-equivalent URL validation works correctly" {
+@test "provider verification: lost post-provision binding fails and cleans up" {
   run bash -c '
     REPO_ROOT="'"$REPO_ROOT"'"
-    source="$(sed -n "/^_check_reachability_production_equivalent/,/^}/p" "$REPO_ROOT/scripts/verify-backends")"
-    eval "$source"
-    # Valid HTTPS URLs pass
-    _check_reachability_production_equivalent sbx "https://api.example.com/v1/models" && echo "pass1=yes" || echo "pass1=no"
-    # URLs with shell metacharacters fail
-    _check_reachability_production_equivalent sbx "https://api.example.com/v1/models\"; whoami; echo" && echo "fail1=yes" || echo "fail1=no"
-    # Command substitution fails
-    _check_reachability_production_equivalent sbx "https://api.example.com/v1/models/\$(whoami)" && echo "fail2=yes" || echo "fail2=no"
+    cleanup_source="$(awk "/^cleanup_failed_backend_verification\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
+    status_source="$(awk "/^verification_succeeded\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
+    eval "$cleanup_source"
+    eval "$status_source"
+    FAIL=1 KEEP="" CALLS=""
+    unseed_usai_secret() { CALLS="${CALLS} usai:$1:$2"; }
+    unseed_github_secret() { CALLS="${CALLS} github:$1:$2"; }
+    _stop_ephemeral_agent() { CALLS="${CALLS} stop-agent"; }
+    run_acq() { CALLS="${CALLS} $1:$2:$3:$4:$5"; }
+
+    cleanup_failed_backend_verification msb box
+    if verification_succeeded; then final_rc=0; else final_rc=$?; fi
+    printf "CALLS=%s\nFINAL_RC=%s\n" "$CALLS" "$final_rc"
   '
   assert_success
-  assert_line 'pass1=yes'
-  assert_line 'fail1=no'
-  assert_line 'fail2=no'
+  assert_output --partial 'usai:msb:box'
+  assert_output --partial 'github:msb:box'
+  assert_output --partial 'stop-agent'
+  assert_output --partial 'rm:--backend:msb:rm:box'
+  assert_line 'FINAL_RC=1'
 }

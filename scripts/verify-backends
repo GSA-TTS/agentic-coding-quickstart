@@ -182,6 +182,9 @@ skip() { SKIP=$((SKIP + 1)); printf '  skip  %s\n' "$1"; }
 # warn(): a known, tracked limitation — surfaced loudly every run but NOT counted
 # as a failure (the run still exits 0). Use for deferred gaps.
 warn() { WARN=$((WARN + 1)); printf '  WARN  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
+verification_succeeded() {
+  [ "$FAIL" -eq 0 ]
+}
 
 # Print a captured block indented under a heading (only when non-empty).
 dump() {
@@ -354,19 +357,6 @@ USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 # Load the provider contract used by acq's backend adapters before the verifier
 # performs any provider-specific checks. The fallback remains available through
 # the shared loader for older provider kits.
-# TEST_SEAM: _check_reachability_production_equivalent — verifies check_usai_reachability
-# constructs a safe curl command when given provider facts. Used by tests to ensure no
-# shell injection despite URL provenance. Not exported (internal to verify-backends).
-_check_reachability_production_equivalent() {
-  local backend="$1" url="$2"
-  [ -n "$backend" ] || { echo "backend required"; return 1; }
-  [ -n "$url" ] || { echo "url required"; return 1; }
-  if ! printf '%s' "$url" | grep -qE '^https://[a-zA-Z0-9._/:?=&#-]+$'; then
-    return 1  # URL validation failed (expected for injection tests)
-  fi
-  return 0    # URL passes production-equivalent validation
-}
-
 # TEST_SEAM: _sbx_secret_has_global_row — checks if sbx secret ls output contains
 # a GLOBAL-scoped row for a given environment variable. Returns 0 if found, 1 otherwise.
 # This helper factorizes the scope-aware awk logic used by seed_usai_secret step 2.
@@ -481,7 +471,7 @@ unseed_github_secret() {
 # `msb modify` sweep from touching the user's own running sandboxes.
 #
 # USAI_SEEDED_FOR carries the SANDBOX name for per-sandbox reporting/unseed; the
-# underlying secret is global. On any seed failure it stays empty -> clean SKIP.
+# underlying secret is global. On any seed failure it stays empty.
 
 # A synthetic, non-secret USAi value. NOT a real credential: the wiring checks
 # (bind + host reachability) never authenticate it against USAi, so its only job
@@ -632,13 +622,8 @@ verify_sbx_grammar_acceptance() {
 
 check_usai_reachability() {
   local backend="$1" name="$2" url="$3" rc ustatus
-  # Validate URL: must be https:// followed by safe hostname/path chars.
-  # Rejects shell metacharacters, variable refs, command substitution, etc.
-  if ! printf '%s' "$url" | grep -qE '^https://[a-zA-Z0-9._/:?=&#-]+$'; then
-    fail "${backend}: USAi URL validation failed (unsafe characters or invalid scheme)"
-    dump "URL" "$url"
-    return 0
-  fi
+  # load_provider_facts validates this URL before assigning it. Passing it as $1
+  # keeps that already-validated value out of the guest shell program.
   if run_acq "exec usai-reach" --backend "$backend" exec "$name" -- sh -c \
       'curl -sS -o /dev/null -w "%{http_code}" --max-time 15 "$1"' verify "$url"; then
     ustatus="$LAST_OUT"
@@ -659,6 +644,31 @@ check_usai_reachability() {
     rc=$?
     fail "${backend}: USAi reachability command failed (exit ${rc})"
     dump "curl output" "$LAST_OUT"
+  fi
+}
+
+# require_usai_seed BACKEND SANDBOX — a provider credential is a prerequisite for
+# an installed backend's verification. A missing binding is a failure, not a skip.
+require_usai_seed() {
+  local backend="$1" sandbox="$2"
+  seed_usai_secret "$backend" "$sandbox"
+  if [ "$USAI_SEEDED_FOR" = "$sandbox" ]; then
+    return 0
+  fi
+  fail "${backend}: required provider credential could not be seeded/bound"
+  unseed_usai_secret "$backend" "$sandbox"
+  return 1
+}
+
+cleanup_failed_backend_verification() {
+  local backend="$1" sandbox="$2"
+  unseed_usai_secret "$backend" "$sandbox"
+  unseed_github_secret "$backend" "$sandbox"
+  [ "$backend" != "msb" ] || _stop_ephemeral_agent
+  if [ -n "$KEEP" ]; then
+    printf '        (keeping sandbox %s for inspection; --keep set)\n' "$sandbox"
+  else
+    run_acq "rm" --backend "$backend" rm "$sandbox" >/dev/null 2>&1 || true
   fi
 }
 
@@ -712,9 +722,7 @@ verify_backend() {
   # Seed a sandbox-scoped github token (from `gh`) BEFORE create so the private
   # playbook tarball fetch can authenticate. No-op if gh is unavailable.
   seed_github_secret "$backend" "$name"
-  seed_usai_secret "$backend" "$name"
-  if [ "$USAI_SEEDED_FOR" != "$name" ]; then
-    skip "${backend}: skipped (verifier did not seed sandbox-scoped USAi key)"
+  if ! require_usai_seed "$backend" "$name"; then
     unseed_github_secret "$backend" "$name"
     return
   fi
@@ -785,11 +793,12 @@ verify_backend() {
   #    Validating the KEY itself against USAi's auth is USAi's concern, not acq's,
   #    and would need a real key on the host purely to test a third party — so we
   #    deliberately do not do it here (that also removes the manual key paste).
-  if [ "$USAI_SEEDED_FOR" = "$name" ]; then
-    pass "${backend}: USAi key seeded + bound by verifier"
-  else
-    skip "${backend}: USAi key not seeded by verifier"
+  if [ "$USAI_SEEDED_FOR" != "$name" ]; then
+    fail "${backend}: required provider credential binding was lost after provisioning"
+    cleanup_failed_backend_verification "$backend" "$name"
+    return
   fi
+  pass "${backend}: USAi key seeded + bound by verifier"
   check_usai_reachability "$backend" "$name" "$USAI_MODELS_URL"
 
   # 3) git-ssh-sign config present (system gitconfig has gpg.format ssh).
@@ -1243,10 +1252,8 @@ verify_oci_kit() {
   if [ -n "${OCI_ONLY:-}" ] && run_acq "exists-oci-kit" --backend "$backend" exec "$name" -- true >/dev/null 2>&1; then
     printf '        (--oci-only: reusing existing exec-ready sandbox %s)\n' "$name"
   else
-    seed_usai_secret "$backend" "$name"
-    if [ "$USAI_SEEDED_FOR" != "$name" ]; then
-      skip "${backend}: oci-engine kit skipped (verifier did not seed sandbox-scoped USAi key)"
-      return 0
+    if ! require_usai_seed "$backend" "$name"; then
+      return
     fi
     local oci_kit_ref
     oci_kit_ref=$(
@@ -1332,9 +1339,7 @@ verify_agent_install() {
   [ -n "$aname" ] || aname="opencode-$(basename "$WORKDIR" | tr '[:upper:]' '[:lower:]')"
   printf '        sandbox name: %s\n' "$aname"
 
-  seed_usai_secret "$backend" "$aname"
-  if [ "$USAI_SEEDED_FOR" != "$aname" ]; then
-    skip "${backend}: agent install skipped (verifier did not seed sandbox-scoped USAi key)"
+  if ! require_usai_seed "$backend" "$aname"; then
     return
   fi
 
@@ -1449,4 +1454,4 @@ echo "  passed: $PASS   failed: $FAIL   skipped: $SKIP   warnings: $WARN"
 if [ "$WARN" -gt 0 ]; then
   echo "  ($WARN warning(s): known, tracked limitations -- not failures. See notes above.)"
 fi
-[ "$FAIL" -eq 0 ]
+verification_succeeded

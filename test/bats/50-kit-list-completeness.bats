@@ -75,6 +75,44 @@ FACTS
   assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "$facts"
 }
 
+@test "provider-facts: URL syntax accepted by the shared contract reaches the verifier" {
+  load_acq
+  local facts="$STUBDIR/usai-url.env"
+  cat > "$facts" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.example.gov
+ACQ_PROVIDER_BASE_URL=https://api.example.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.example.gov/api/v1/models%2Fbeta+preview~v1?view=full&tag=a%2Bb
+ACQ_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://example.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.example.gov
+FACTS
+
+  acq_provider_facts_load "$facts"
+  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://api.example.gov/api/v1/models%2Fbeta+preview~v1?view=full&tag=a%2Bb"
+}
+
+@test "provider-facts: malformed or injection-shaped URL fails before verifier use" {
+  load_acq
+  local facts="$STUBDIR/usai-bad-url.env"
+  cat > "$facts" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.example.gov
+ACQ_PROVIDER_BASE_URL=https://api.example.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.example.gov/api/v1/models$(touch injected)
+ACQ_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://example.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.example.gov
+FACTS
+
+  run acq_provider_facts_load "$facts"
+  assert_failure
+  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://api.gsa.usai.gov/api/v1/models"
+  refute [ -e "$STUBDIR/injected" ]
+}
+
 @test "provider-facts: missing artifact leaves fallback path available" {
   load_acq
   run acq_provider_facts_load "$STUBDIR/missing.env"
