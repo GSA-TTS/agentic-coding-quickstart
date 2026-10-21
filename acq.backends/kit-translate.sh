@@ -91,7 +91,28 @@ kit_translate_fetch() {
         return 1
       fi
       command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: $url ref=$ref dir=$dir -> $destdir"
-      mkdir -p "$destdir"
+      # Fail closed on a destination that is not a disposable scratch directory.
+      # The fetch below runs `rm -rf .git` then `git init` + `git checkout
+      # FETCH_HEAD` inside $destdir, so a destination resolving to a real
+      # repository would have its Git metadata replaced and its tracked files
+      # overwritten with the kit bundle's tree. Refuse before any of that runs.
+      # Reject: empty, root, and any destination inside an existing Git
+      # repository (which also covers $destdir being a repository root itself).
+      if [ -z "$destdir" ]; then
+        echo "kit-translate: refusing to fetch into an empty destination" >&2
+        return 1
+      fi
+      case "$destdir" in
+        /) echo "kit-translate: refusing to fetch into /" >&2; return 1 ;;
+      esac
+      mkdir -p "$destdir" || return 1
+      local _dest_repo
+      _dest_repo=$(cd "$destdir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || _dest_repo=""
+      if [ -n "$_dest_repo" ]; then
+        echo "kit-translate: refusing to fetch into a git repository: $destdir" >&2
+        echo "kit-translate:   resolved repository root: $_dest_repo" >&2
+        return 1
+      fi
       # Fetch NON-INTERACTIVELY. We MUST NOT drop into an interactive git
       # credential prompt (which hangs, or fails on GitHub's disabled password
       # auth) just because the user has a global git credential helper or a
