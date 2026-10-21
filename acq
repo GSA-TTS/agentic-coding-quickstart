@@ -1696,11 +1696,9 @@ case "$subcommand" in
       acq_backend_snapshot "$local_name" "$snapshot_out"
       echo "acq: snapshot saved before removal: $snapshot_out" >&2
     fi
-    if [ "$snapshot_first" -eq 1 ] && command -v acq_backend_terminate_for_restore >/dev/null 2>&1; then
-      acq_backend_terminate_for_restore "$local_name"
-    else
-      acq_backend_terminate "$local_name"
-    fi
+    # A snapshot is an export, not a recreate: permanently removing the source
+    # must clean its derived resources and host metadata after the export exists.
+    acq_backend_terminate "$local_name"
     ;;
 
   exec)

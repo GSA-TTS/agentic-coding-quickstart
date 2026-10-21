@@ -2094,6 +2094,22 @@ acq_provenance_field() {
   ' "$file" 2>/dev/null || true
 }
 
+# Remove a sandbox's provenance once its resources are permanently gone. Snapshot
+# sidecars and the separate CLI/extra-kit record remain available for restore.
+acq_provenance_remove() {
+  local backend="${1:-}" name="${2:-}" provenance
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  provenance=$(_acq_provenance_file "$backend" "$name") || return 0
+  rm -f "$provenance" 2>/dev/null || true
+}
+
+acq_cli_kits_remove() {
+  local backend="${1:-}" name="${2:-}" file
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  file=$(_acq_cli_kits_file "$backend" "$name") || return 0
+  rm -f "$file" 2>/dev/null || true
+}
+
 # Remember the primary host workspace mounted into a sandbox. This is non-secret
 # host-side state used by commands that take only SANDBOX later (for example,
 # `acq github-scope SANDBOX`) so they do not accidentally inspect the caller's

@@ -84,16 +84,21 @@ _sha256() {
   assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/snapshots/mybox-[0-9]{8}T[0-9]{6}Z\.msb"
   [ "$(stat -c '%a' "$STUBDIR/snapshots" 2>/dev/null || stat -f '%Lp' "$STUBDIR/snapshots")" = "700" ]
   : > "$CALLS"
-  mkdir -p "$STUBDIR/state/msb-restore" "$STUBDIR/provenance/msb"
+  mkdir -p "$STUBDIR/state/msb-restore" "$STUBDIR/provenance/msb" "$STUBDIR/ws"
   printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/state/msb-restore/mybox.resources"
   local kit_record
   kit_record=$(printf '%s' mybox | cksum | cut -d' ' -f1)
   printf 'schema=1\nkit=%s\n' "$STUBDIR/custom-kit" > "$STUBDIR/provenance/msb/mybox.${kit_record}.kits"
+  acq_host_config_write msb mybox agent opencode
+  acq_host_config_write msb mybox workspace "$STUBDIR/ws"
+  acq_host_config_write msb mybox generic-opencode generic-opencode
+  acq_workspace_record_write msb mybox "$STUBDIR/ws"
   run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" snapshot mybox "$STUBDIR/mybox.msb"
   assert_success
   assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/mybox\.msb"
   [ "$(stat -c '%a' "$STUBDIR/mybox.msb" 2>/dev/null || stat -f '%Lp' "$STUBDIR/mybox.msb")" = "600" ]
   [ -f "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/mybox.msb").resources" ]
+  [ -f "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/mybox.msb").state" ]
 }
 
 @test "msb: create with no workspace positional provisions without empty-array abort" {
@@ -102,6 +107,18 @@ _sha256() {
   assert_success
   refute_output --partial 'unbound variable'
   assert_regex "$(cat "$CALLS")" 'msb create --name opencode'
+}
+
+@test "msb: snapshot preserves legacy provenance agent state" {
+  mkdir -p "$STUBDIR/provenance/msb" "$STUBDIR/ws"
+  local record
+  record=$(printf '%s' legacybox | cksum | cut -d' ' -f1)
+  printf 'schema=1\nbackend=msb\nagent=opencode\nworkspace_source=host\nworkspace=%s\n' "$STUBDIR/ws" > "$STUBDIR/provenance/msb/legacybox.${record}.env"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" snapshot legacybox "$STUBDIR/legacy.msb"
+  assert_success
+  assert_regex "$(cat "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/legacy.msb").state")" $'agent\topencode'
+  assert_regex "$(cat "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/legacy.msb").state")" $'workspace\t'"$STUBDIR/ws"
 }
 
 @test "msb: restore maps to msb restore with inherited resources and re-derived vsock" {
@@ -114,6 +131,7 @@ _sha256() {
   mkdir -p "$STUBDIR/state/msb-snapshots"
   printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/saved.msb").resources"
   printf 'schema=1\nkit=%s\n' "$STUBDIR/custom-kit" > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/saved.msb").kits"
+  printf 'agent\topencode\nworkspace\t%s\ngeneric-opencode\tgeneric-opencode\nhost-workspace\t%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/saved.msb").state"
   mkdir -p "$STUBDIR/custom-kit"
   printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: custom\ndisplayName: Custom\ndescription: custom\n' > "$STUBDIR/custom-kit/spec.yaml"
   : > "$CALLS"
@@ -126,6 +144,10 @@ _sha256() {
   assert_regex "$log" 'msb inspect restored --format json'
   assert_output --partial "re-applied kit startup"
   [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
+  assert_equal "$(acq_host_config_read msb restored agent)" opencode
+  assert_equal "$(acq_host_config_read msb restored workspace)" "$STUBDIR/ws"
+  assert_equal "$(acq_host_config_read msb restored generic-opencode)" generic-opencode
+  assert_equal "$(acq_workspace_record_read msb restored)" "$STUBDIR/ws"
   local kit_record
   kit_record=$(printf '%s' restored | cksum | cut -d' ' -f1)
   assert [ -f "$STUBDIR/provenance/msb/restored.${kit_record}.kits" ]
@@ -236,6 +258,10 @@ _sha256() {
 }
 
 @test "msb: rm --snapshot snapshots before removing and does not restore" {
+  acq_host_config_write msb mybox agent opencode
+  acq_workspace_record_write msb mybox "$STUBDIR"
+  acq_cli_kits_write msb mybox
+  printf 'acq-mybox-volume\n' > "$STUBDIR/.msb_volume_list"
   : > "$CALLS"
   run env ACQ_BACKEND=msb "$ACQ" rm --snapshot mybox "$STUBDIR/rm.msb"
   assert_success
@@ -243,7 +269,13 @@ _sha256() {
   assert_regex "$log" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/rm\.msb"
   assert_regex "$log" 'msb remove --force mybox'
   refute_regex "$log" 'msb restore'
-  refute_regex "$log" 'msb volume rm'
+  assert_regex "$log" 'msb volume rm'
+  assert_equal "$(acq_host_config_read msb mybox agent)" ""
+  assert_equal "$(acq_workspace_record_read msb mybox)" ""
+  assert_equal "$(acq_provenance_field msb mybox schema)" ""
+  local kit_record
+  kit_record=$(printf '%s' mybox | cksum | cut -d' ' -f1)
+  [ ! -f "$STUBDIR/provenance/msb/mybox.${kit_record}.kits" ]
 }
 
 @test "msb: ls/stop/rm/exec dispatch to the msb verbs (exec as agent user)" {

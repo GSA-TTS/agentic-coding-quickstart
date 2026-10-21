@@ -1112,6 +1112,61 @@ _acq_msb_snapshot_kits_file() {
   printf '%s.kits' "${resource_file%.resources}"
 }
 
+_acq_msb_snapshot_state_file() {
+  local snapshot="$1" resource_file
+  resource_file=$(_acq_msb_snapshot_resource_file "$snapshot") || return 1
+  printf '%s.state' "${resource_file%.resources}"
+}
+
+_acq_msb_snapshot_state_copy() {
+  local name="$1" snapshot="$2" target agent workspace generic host_workspace
+  target=$(_acq_msb_snapshot_state_file "$snapshot") || return 1
+  agent=$(acq_host_config_read msb "$name" agent 2>/dev/null || true)
+  [ -n "$agent" ] || agent=$(acq_provenance_field msb "$name" agent)
+  workspace=$(acq_host_config_read msb "$name" workspace 2>/dev/null || true)
+  [ -n "$workspace" ] || workspace=$(acq_workspace_record_read msb "$name" 2>/dev/null || true)
+  generic=$(acq_host_config_read msb "$name" generic-opencode 2>/dev/null || true)
+  host_workspace=$(acq_workspace_record_read msb "$name" 2>/dev/null || true)
+  [ -n "$agent$workspace$generic$host_workspace" ] || return 0
+  ( umask 077; mkdir -p "$ACQ_MSB_SNAPSHOT_DIR" ) 2>/dev/null || return 1
+  {
+    printf 'agent\t%s\n' "$agent"
+    printf 'workspace\t%s\n' "$workspace"
+    printf 'generic-opencode\t%s\n' "$generic"
+    printf 'host-workspace\t%s\n' "$host_workspace"
+  } >"$target" 2>/dev/null || return 1
+  chmod 600 "$target" 2>/dev/null || return 1
+}
+
+_acq_msb_snapshot_state_adopt() {
+  local name="$1" snapshot="$2" source kind value agent="" workspace="" generic="" host_workspace=""
+  source=$(_acq_msb_snapshot_state_file "$snapshot") || return 0
+  [ -f "$source" ] || return 0
+  while IFS=$'\t' read -r kind value; do
+    case "$kind" in
+      agent) agent="$value" ;;
+      workspace) workspace="$value" ;;
+      generic-opencode) generic="$value" ;;
+      host-workspace) host_workspace="$value" ;;
+    esac
+  done <"$source"
+  case "$agent" in ""|*[!a-z-]*) return 1 ;; esac
+  # A restore's sidecar is authoritative. Never retain a removed sandbox's
+  # name-keyed state when this snapshot omits a field.
+  acq_host_config_clear msb "$name" agent
+  acq_host_config_clear msb "$name" workspace
+  acq_host_config_clear msb "$name" generic-opencode
+  acq_provenance_remove msb "$name"
+  acq_host_config_write msb "$name" agent "$agent" || return 1
+  [ -z "$workspace" ] || acq_host_config_write msb "$name" workspace "$workspace" || return 1
+  case "$generic" in
+    "") ;;
+    generic-opencode|1) acq_host_config_write msb "$name" generic-opencode generic-opencode || return 1 ;;
+    *) return 1 ;;
+  esac
+  [ -z "$host_workspace" ] || acq_workspace_record_write msb "$name" "$host_workspace" || return 1
+}
+
 _acq_msb_restore_resources_write() {
   local name="$1" _file _spec
   _file=$(_acq_msb_restore_resource_file "$name") || return 1
@@ -1201,6 +1256,7 @@ acq_backend_snapshot() {
     chmod 600 "$_out" 2>/dev/null || return 1
     _acq_msb_restore_resources_copy_sidecar "$_name" "$_out" || return 1
     _acq_msb_snapshot_kits_copy "$_name" "$_out" || return 1
+    _acq_msb_snapshot_state_copy "$_name" "$_out" || return 1
   else
     _acq_msb_cli snapshot create --from-sandbox "$_name" --full --guest-flush auto
   fi
@@ -1277,7 +1333,8 @@ acq_backend_restore() {
     return "$_restore_rc"
   fi
   if ! _acq_msb_restore_resources_adopt_trusted "$_name" "$_staged_snapshot" \
-      || ! _acq_msb_snapshot_kits_adopt_trusted "$_name" "$_staged_snapshot"; then
+      || ! _acq_msb_snapshot_kits_adopt_trusted "$_name" "$_staged_snapshot" \
+      || ! _acq_msb_snapshot_state_adopt "$_name" "$_staged_snapshot"; then
     rm -f "$_staged_snapshot"
     return 1
   fi
@@ -5271,6 +5328,8 @@ _acq_msb_terminate_impl() {
     # Remove host-authoritative config only after the sandbox is confirmed gone;
     # otherwise a failed removal could discard state still mounted by a live guest.
     acq_host_config_remove msb "$_name" || true
+    acq_provenance_remove msb "$_name" || true
+    acq_cli_kits_remove msb "$_name" || true
   fi
   return "$_rc"
 }
