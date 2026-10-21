@@ -116,9 +116,12 @@ case "${1:-}" in
   version) printf 'sbx version: v%s abc123\n' "${STUB_SBX_VERSION:-0.39.0}" ;;
   --help|-h) printf 'SBX-TOPLEVEL-HELP\n' ;;
   ls)
+    [ "${STUB_SBX_LS_FAIL:-0}" = "1" ] && exit 1
     [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"
     exit 0 ;;
-  create) : >"$STUBDIR/.created"; exit 0 ;;
+  create)
+    [ "${STUB_SBX_CREATE_FAIL:-0}" = "1" ] && exit 1
+    : >"$STUBDIR/.created"; exit 0 ;;
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
@@ -193,7 +196,13 @@ case "${1:-}" in
         touch "$STUBDIR/.opencode_fixed"; exit 0 ;;
       *) exit 0 ;;
     esac ;;
-  run)  [ "${2:-}" = "--help" ] && printf 'SBX-RUN-HELP\n'; exit 0 ;;
+  run)
+    [ "${2:-}" = "--help" ] && printf 'SBX-RUN-HELP\n'
+    # Agent arguments require an agent positional before `--`. SBX otherwise
+    # forwards the separator to its shell launcher, where Bash rejects it.
+    [ "${2:-}" = "--name" ] && [ "${4:-}" = "--" ] && exit 2
+    exit 0
+    ;;
   stop) exit 0 ;;
   start) exit 0 ;;
   rm)   exit 0 ;;
@@ -253,6 +262,14 @@ case "$_msb_sub" in
     # `msb inspect <name> --format json` — emit a create-time published-ports
     # JSON fixture if the test planted one, else nothing (models an absent field
     # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
+    # STUB_MSB_INSPECT_FAIL_TIMES=N fails the first N inspects (with a stderr
+    # line) and then succeeds, modelling a transient inspect failure.
+    _inspect_fails=$(cat "$STUBDIR/.msb_inspect_fails" 2>/dev/null || echo 0)
+    if [ "$_inspect_fails" -lt "${STUB_MSB_INSPECT_FAIL_TIMES:-0}" ]; then
+      echo $((_inspect_fails + 1)) >"$STUBDIR/.msb_inspect_fails"
+      echo "error: stub inspect failure" >&2
+      exit 1
+    fi
     [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
   list|ls)
     [ "${STUB_MSB_LIST_FAIL:-0}" = "1" ] && exit 1

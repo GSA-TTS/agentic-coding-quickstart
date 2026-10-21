@@ -399,7 +399,7 @@ STUB
   assert [ -f "$STUBDIR/.removed" ]
 }
 
-@test "run(sbx): waits for the startup barrier before opencode postinstall probe" {
+@test "run(sbx): waits for the startup barrier before generic-default opencode attach" {
   cat >"$STUBDIR/sbx" <<'STUB'
 #!/usr/bin/env bash
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
@@ -411,7 +411,6 @@ case "${1:-}" in
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
     case " $* " in
-      *" opencode --version "*) printf 'opencode 1.18.12\n'; exit 0 ;;
     esac
     case "$snippet" in
       *"startup-complete"*) printf 'ready\n' ;;
@@ -434,17 +433,15 @@ STUB
   run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
   assert_success
 
-  local log create_line barrier_line opencode_line attach_line
+  local log create_line barrier_line attach_line
   log=$(cat "$CALLS")
   create_line=$(printf '%s\n' "$log" | grep -n '^sbx create' | cut -d: -f1)
   barrier_line=$(printf '%s\n' "$log" | grep -n 'startup-complete' | cut -d: -f1)
-  opencode_line=$(printf '%s\n' "$log" | grep -n 'opencode --version' | cut -d: -f1)
-  attach_line=$(printf '%s\n' "$log" | grep -n '^sbx run --name' | cut -d: -f1)
+  attach_line=$(printf '%s\n' "$log" | grep -n '^sbx run --name.* shell -- -lc exec.*sh opencode' | cut -d: -f1)
 
   assert_regex "$log" 'startup-barrier'
   assert [ "$create_line" -lt "$barrier_line" ]
-  assert [ "$barrier_line" -lt "$opencode_line" ]
-  assert [ "$opencode_line" -lt "$attach_line" ]
+  assert [ "$barrier_line" -lt "$attach_line" ]
 }
 
 @test "wait(sbx): startup barrier requires this create's token" {

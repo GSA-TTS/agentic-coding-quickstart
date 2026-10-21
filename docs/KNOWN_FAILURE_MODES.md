@@ -223,7 +223,7 @@ Agent assumes host filesystem layout, not container layout.
 - Agent appears stuck
 - Eventually fails with timeout
 - OpenCode shows a retry notice for a streamed-response read timeout: `Timed out
-  waiting for response data` on OpenCode 2.0.22 (the version the kit installs),
+  waiting for response data` on OpenCode 2.0.30 (the version the kit installs),
   `SSE read timed out` on 1.18.x
 
 ### Root Cause
@@ -234,8 +234,9 @@ Agent assumes host filesystem layout, not container layout.
 - Proxy misconfiguration
 - Streamed-response read timeout: the response sent no data for longer than the
   provider's `chunkTimeout`. OpenCode before 1.18.27 has no default for this option
-  (unset means no idle timeout; 1.18.27 and later default to 5 minutes), so on those
-  versions the 2-minute value the `usai-provider` kit sets is what makes it fire.
+  (unset means no idle timeout; 1.18.27 through 2.0.29 default to 5 minutes, 2.0.30
+  to 15), so on those versions the 2-minute value the `usai-provider` kit sets is
+  what makes it fire.
   Common during long reasoning or while the model generates a large tool call (such
   as writing a long file), or when a hop on the path (sandbox proxy, Zscaler, USAi,
   the upstream model) stalls. OpenCode retries automatically, so an occasional one
@@ -248,7 +249,7 @@ The `usai-provider` kit sets both timeouts under the provider's `options` in its
 `timeout` (whole request, 10 minutes) and `chunkTimeout` (gap between streamed
 chunks, 2 minutes); check that file for the current values. If the read timeout
 recurs, raise `chunkTimeout` in the project's `opencode.json`. The example below
-uses 5 minutes, the default OpenCode 1.18.27 and later ship; `false` disables the
+uses 5 minutes, the default from OpenCode 1.18.27 through 2.0.29; `false` disables the
 idle timeout entirely. A higher value makes a truly hung stream take longer to fail
 over to the retry. Do not set it to a few seconds: normal model pauses would then
 abort nearly every long response.
@@ -265,7 +266,7 @@ abort nearly every long response.
 }
 ```
 
-If the retries run out (OpenCode 2.0.22 gives up after three retries of a timed-out
+If the retries run out (OpenCode 2.0.30 gives up after three retries of a timed-out
 request, while other retryable errors follow a separate policy; 1.18.17 through the
 1.18.x line stop after five; earlier releases keep retrying until you abort), note
 the model, the time, and what the agent was doing, so a slow model can be told
@@ -1844,7 +1845,7 @@ For a single sandbox, pass the pinned kit ref with `--kit` or include it in
 `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=56d1f5f49ef928f50e61aa64a93d618b3d21c415&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=f3c6acb4d34a89b3b6539c44d47f56bacaeb94d7&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 Existing sandboxes that were created before this change keep whatever podman
@@ -2843,6 +2844,57 @@ Two other things in the same code path can also look like a hang:
 
 ---
 
+## 45. "has no ssh-agent --vsock route" Warning on a Sandbox That Has the Route
+
+**Status:** Fixed — the route probe no longer pipes into `grep -q`, and a failed
+`msb inspect` is reported as "could not verify", not as a missing route.
+
+### Symptoms
+
+`acq run`, `acq start`, or `acq restart` on an existing msb sandbox sometimes
+prints:
+
+```text
+acq(msb): warning: host SSH_AUTH_SOCK is set, but existing sandbox '<name>' has no ssh-agent --vsock route. ...
+```
+
+even though `msb inspect <name> --format json` shows the `vsock` route and
+`acq exec <name> -- ssh-add -l` lists the host's keys. On msb 0.7.8 it fired on
+roughly 1 in 3 `acq run`s and on nearly every `start`/`restart`. After a start or
+restart, kit daemons launched in that run (such as the paseo daemon) come up
+without `SSH_AUTH_SOCK`, so commits signed from their sessions fail with
+`no SSH agent - cannot sign commits`.
+
+### Root Cause
+
+`acq` runs under `set -euo pipefail`. `_acq_msb_has_ssh_agent_vsock_route` checked
+the flattened inspect JSON with `printf '%s\n' "$_flat" | grep -Eq …`. `grep -q`
+exits on its first match; when the document is larger than the pipe buffer
+(a 0.7.8 inspect is about 175 KB), `printf` is still writing, dies of SIGPIPE
+(exit 141), and `pipefail` turns the successful match into a failure. The result
+depends on timing, hence the intermittent rate. Separately, a failed or empty
+`msb inspect` returned the same "no" as a missing route.
+
+### Fix
+
+- Every `grep -q` over captured output in `acq.backends/msb.sh` and
+  `acq.backends/sbx.sh` reads a here-string (`grep -q … <<<"$var"`) instead of a
+  pipe, and CLI listings (`msb list -q`, `sbx ls -q`) are captured before
+  matching rather than piped into `grep -q`.
+- The route probe returns 2 when `msb inspect` fails or prints nothing. The
+  caller retries once, and if inspect still fails it warns that it could not
+  verify the route (with inspect's stderr) instead of advising a recreate.
+
+### Prevention
+
+`test/bats/115-ssh-agent-forward.bats` runs the probe under `pipefail` against a
+large inspect document with the route near the start (this test failed before
+the fix), and covers a transient and a persistent inspect failure via the stub's
+`STUB_MSB_INSPECT_FAIL_TIMES` knob. In new code, do not pipe into `grep -q`
+(or `head`) under `pipefail` when the writer may still be producing output.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:
@@ -2852,3 +2904,26 @@ When you discover a new failure mode:
 3. Provide a minimal fix
 4. Add it to this document
 5. Consider if it indicates a gap in AGENTS.md rules
+
+---
+
+## Default OpenCode Generic Base Requires Recreation
+
+**Symptom:** An existing OpenCode sandbox still starts through an older
+OpenCode-specific template or does not receive the pinned kit behavior.
+
+**Cause:** The ADR-0030 generic base and kit composition are selected only when
+the sandbox is created. Existing sandboxes intentionally keep the image and kit
+set they were created with.
+
+**Resolution:** Recreate the sandbox from the project path:
+
+```bash
+./acq rm opencode-your-project
+./acq run opencode /path/to/your/project
+```
+
+The new default uses the pinned generic `devenv-shell` image and validates the
+pinned OpenCode kit before provisioning. If that validation fails, correct the
+pinned kit availability or metadata rather than falling back to an unpinned npm
+installation.

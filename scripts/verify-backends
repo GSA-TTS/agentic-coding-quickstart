@@ -3,9 +3,9 @@
 # verify-backends — HOST-SIDE end-to-end check that the four neutral acq kits
 # apply cleanly on each INSTALLED backend, and that the core kit behaviors work.
 # It is also the live sequencing gate for the ADR-0030 migration of
-# `acq run opencode .` to the agent-kit/devenv model: keep this verifier green
-# before, during, and after the internal migration so the observable acq contract
-# remains stable. Unlike scripts/test-acq-bats (which stubs sbx/msb and runs
+# `acq run opencode .` generic-base migration: each backend creates OpenCode from
+# the pinned generic devenv base plus the inferred agent kit and then validates
+# the kit-provided binary and attach path. Unlike scripts/test-acq-bats (which stubs sbx/msb and runs
 # anywhere), this exercises the REAL toolchain and therefore must run on a
 # machine that can create sandboxes:
 #   - sbx: Docker + KVM, `sbx login` done, sbx >= 0.39.0
@@ -182,6 +182,9 @@ skip() { SKIP=$((SKIP + 1)); printf '  skip  %s\n' "$1"; }
 # warn(): a known, tracked limitation — surfaced loudly every run but NOT counted
 # as a failure (the run still exits 0). Use for deferred gaps.
 warn() { WARN=$((WARN + 1)); printf '  WARN  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
+verification_succeeded() {
+  [ "$FAIL" -eq 0 ]
+}
 
 # Print a captured block indented under a heading (only when non-empty).
 dump() {
@@ -351,6 +354,32 @@ fi
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 
+# Load the provider contract used by acq's backend adapters before the verifier
+# performs any provider-specific checks. The fallback remains available through
+# the shared loader for older provider kits.
+# TEST_SEAM: _sbx_secret_has_global_row — checks if sbx secret ls output contains
+# a GLOBAL-scoped row for a given environment variable. Returns 0 if found, 1 otherwise.
+# This helper factorizes the scope-aware awk logic used by seed_usai_secret step 2.
+# Used by tests to avoid brittle awk extraction.
+_sbx_secret_has_global_row() {
+  local env_var="$1"
+  [ -n "$env_var" ] || { echo "_sbx_secret_has_global_row: env_var required"; return 1; }
+  sbx secret ls 2>/dev/null | awk -v env="$env_var" '
+    $1 == "(global)" {
+      for (i = 2; i <= NF; i++) if ($i == env) { found = 1; exit }
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+load_provider_facts() {
+  # shellcheck disable=SC1090
+  ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
+  acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+  USAI_HOST="$USAI_PROVIDER_HOST"
+  USAI_MODELS_URL="$USAI_PROVIDER_MODELS_URL"
+}
+
 # ---------------------------------------------------------------------------
 # GitHub token seeding for the private-repo playbook kit.
 # ---------------------------------------------------------------------------
@@ -442,7 +471,7 @@ unseed_github_secret() {
 # `msb modify` sweep from touching the user's own running sandboxes.
 #
 # USAI_SEEDED_FOR carries the SANDBOX name for per-sandbox reporting/unseed; the
-# underlying secret is global. On any seed failure it stays empty -> clean SKIP.
+# underlying secret is global. On any seed failure it stays empty.
 
 # A synthetic, non-secret USAi value. NOT a real credential: the wiring checks
 # (bind + host reachability) never authenticate it against USAi, so its only job
@@ -499,15 +528,11 @@ seed_usai_secret() {
   # listing also matches a SANDBOX-SCOPED row (e.g. one left behind for a since-
   # deleted sandbox), so the global row never gets created, step 3's
   # `secret has -g usai` keeps returning 1, and every sbx check skips forever.
-  # Match only a row in the "(global)" scope column.
+  # Match only a row in the "(global)" scope column. Use the TEST_SEAM helper
+  # _sbx_secret_has_global_row() for testability.
   if [ "$backend" = "sbx" ]; then
-    if ! sbx secret ls 2>/dev/null | awk '
-         $1 == "(global)" {
-           for (i = 2; i <= NF; i++) if ($i == "USAI_API_KEY") { found = 1; exit }
-         }
-         END { exit(found ? 0 : 1) }
-       '; then
-      sbx secret set-custom --host "$USAI_HOST" --env USAI_API_KEY \
+    if ! _sbx_secret_has_global_row "$USAI_PROVIDER_KEY_ENV"; then
+      sbx secret set-custom --host "$USAI_HOST" --env "$USAI_PROVIDER_KEY_ENV" \
         --value "$VERIFY_USAI_DUMMY" >/dev/null 2>&1 || true
     fi
   fi
@@ -595,6 +620,58 @@ verify_sbx_grammar_acceptance() {
   fi
 }
 
+check_usai_reachability() {
+  local backend="$1" name="$2" url="$3" rc ustatus
+  # load_provider_facts validates this URL before assigning it. Passing it as $1
+  # keeps that already-validated value out of the guest shell program.
+  if run_acq "exec usai-reach" --backend "$backend" exec "$name" -- sh -c \
+      'curl -sS -o /dev/null -w "%{http_code}" --max-time 15 "$1"' verify "$url"; then
+    ustatus="$LAST_OUT"
+    case "$ustatus" in
+      000)
+        fail "${backend}: USAi host not reachable from guest (egress/net-rule?)"
+        dump "curl output" "$LAST_OUT"
+        ;;
+      [1-5][0-9][0-9])
+        pass "${backend}: USAi host reachable from guest (HTTP $ustatus; auth rewritten on wire)"
+        ;;
+      *)
+        fail "${backend}: USAi host did not return a valid HTTP status"
+        dump "curl output" "$LAST_OUT"
+        ;;
+    esac
+  else
+    rc=$?
+    fail "${backend}: USAi reachability command failed (exit ${rc})"
+    dump "curl output" "$LAST_OUT"
+  fi
+}
+
+# require_usai_seed BACKEND SANDBOX — a provider credential is a prerequisite for
+# an installed backend's verification. A missing binding is a failure, not a skip.
+require_usai_seed() {
+  local backend="$1" sandbox="$2"
+  seed_usai_secret "$backend" "$sandbox"
+  if [ "$USAI_SEEDED_FOR" = "$sandbox" ]; then
+    return 0
+  fi
+  fail "${backend}: required provider credential could not be seeded/bound"
+  unseed_usai_secret "$backend" "$sandbox"
+  return 1
+}
+
+cleanup_failed_backend_verification() {
+  local backend="$1" sandbox="$2"
+  unseed_usai_secret "$backend" "$sandbox"
+  unseed_github_secret "$backend" "$sandbox"
+  [ "$backend" != "msb" ] || _stop_ephemeral_agent
+  if [ -n "$KEEP" ]; then
+    printf '        (keeping sandbox %s for inspection; --keep set)\n' "$sandbox"
+  else
+    run_acq "rm" --backend "$backend" rm "$sandbox" >/dev/null 2>&1 || true
+  fi
+}
+
 verify_backend() {
   local backend="$1"
   echo ""
@@ -625,6 +702,11 @@ verify_backend() {
       ;;
   esac
 
+  if ! load_provider_facts; then
+    fail "${backend}: provider facts could not be loaded"
+    return
+  fi
+
   # Derive the sandbox name the same way acq does (agent "shell" + workspace
   # basename), by sourcing common.sh's derive_name. This mirrors the acq run/
   # create dispatch so we address the exact sandbox acq creates.
@@ -640,9 +722,7 @@ verify_backend() {
   # Seed a sandbox-scoped github token (from `gh`) BEFORE create so the private
   # playbook tarball fetch can authenticate. No-op if gh is unavailable.
   seed_github_secret "$backend" "$name"
-  seed_usai_secret "$backend" "$name"
-  if [ "$USAI_SEEDED_FOR" != "$name" ]; then
-    skip "${backend}: skipped (verifier did not seed sandbox-scoped USAi key)"
+  if ! require_usai_seed "$backend" "$name"; then
     unseed_github_secret "$backend" "$name"
     return
   fi
@@ -713,25 +793,13 @@ verify_backend() {
   #    Validating the KEY itself against USAi's auth is USAi's concern, not acq's,
   #    and would need a real key on the host purely to test a third party — so we
   #    deliberately do not do it here (that also removes the manual key paste).
-  if [ "$USAI_SEEDED_FOR" = "$name" ]; then
-    pass "${backend}: USAi key seeded + bound by verifier"
-  else
-    skip "${backend}: USAi key not seeded by verifier"
+  if [ "$USAI_SEEDED_FOR" != "$name" ]; then
+    fail "${backend}: required provider credential binding was lost after provisioning"
+    cleanup_failed_backend_verification "$backend" "$name"
+    return
   fi
-  run_acq "exec usai-reach" --backend "$backend" exec "$name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' --max-time 15 $USAI_MODELS_URL"
-  local ustatus="$LAST_OUT"
-  case "$ustatus" in
-    000|*"resolve"*|*"curl:"*|"")
-      fail "${backend}: USAi host not reachable from guest (egress/net-rule?)"
-      dump "curl output" "$LAST_OUT"
-      printf '        note: with kit net-rules, egress is default-deny; the models\n' >&2
-      printf '              host must be allow-listed AND DNS must resolve. See ADR-0011.\n' >&2
-      ;;
-    *)
-      pass "${backend}: USAi host reachable from guest (HTTP $ustatus; auth rewritten on wire)"
-      ;;
-  esac
+  pass "${backend}: USAi key seeded + bound by verifier"
+  check_usai_reachability "$backend" "$name" "$USAI_MODELS_URL"
 
   # 3) git-ssh-sign config present (system gitconfig has gpg.format ssh).
   if run_acq "exec gpg-format" --backend "$backend" exec "$name" -- sh -c \
@@ -1184,10 +1252,8 @@ verify_oci_kit() {
   if [ -n "${OCI_ONLY:-}" ] && run_acq "exists-oci-kit" --backend "$backend" exec "$name" -- true >/dev/null 2>&1; then
     printf '        (--oci-only: reusing existing exec-ready sandbox %s)\n' "$name"
   else
-    seed_usai_secret "$backend" "$name"
-    if [ "$USAI_SEEDED_FOR" != "$name" ]; then
-      skip "${backend}: oci-engine kit skipped (verifier did not seed sandbox-scoped USAi key)"
-      return 0
+    if ! require_usai_seed "$backend" "$name"; then
+      return
     fi
     local oci_kit_ref
     oci_kit_ref=$(
@@ -1258,7 +1324,7 @@ verify_oci_kit() {
 # verify_agent_install BACKEND — provision an `opencode` sandbox (not `shell`)
 # and assert the agent binary is actually installed and launchable. This catches
 # the class of bug where a sandbox comes up but the agent was never installed
-# (quickstart#228): on sbx the template bakes it in; on msb acq installs it.
+# (the default path is now kit-owned on both backends).
 verify_agent_install() {
   local backend="$1"
   echo ""
@@ -1273,19 +1339,31 @@ verify_agent_install() {
   [ -n "$aname" ] || aname="opencode-$(basename "$WORKDIR" | tr '[:upper:]' '[:lower:]')"
   printf '        sandbox name: %s\n' "$aname"
 
-  seed_usai_secret "$backend" "$aname"
-  if [ "$USAI_SEEDED_FOR" != "$aname" ]; then
-    skip "${backend}: agent install skipped (verifier did not seed sandbox-scoped USAi key)"
+  if ! require_usai_seed "$backend" "$aname"; then
     return
   fi
 
   printf '        creating sandbox %s (booting + installing the agent; this can take a minute)...\n' "$aname"
-  if ! run_acq "create-opencode" --backend "$backend" create opencode "$WORKDIR"; then
+  if ! ACQ_DEBUG=1 run_acq "create-opencode" --backend "$backend" create opencode "$WORKDIR"; then
     fail "${backend}: provision (acq create opencode) failed"
     dump "acq create output" "$LAST_OUT"
     unseed_usai_secret "$backend" "$aname"
     run_acq "rm" --backend "$backend" rm "$aname" >/dev/null 2>&1 || true
     return
+  fi
+
+  # SBX derives a native kit from its positional agent token. The generic default
+  # must use the neutral `shell` token so SBX does not add a second opencode kit.
+  if [ "$backend" = sbx ]; then
+    case "$LAST_OUT" in
+      *"sbx create"*"--template"*"shell $WORKDIR"*)
+      pass "sbx: generic OpenCode create uses shell token (no native duplicate kit)"
+        ;;
+      *)
+      fail "sbx: generic OpenCode create retained the native opencode token"
+      dump "acq create output" "$LAST_OUT"
+        ;;
+    esac
   fi
 
   # The agent binary must be on PATH inside the sandbox (the bug: it wasn't).
@@ -1390,4 +1468,4 @@ echo "  passed: $PASS   failed: $FAIL   skipped: $SKIP   warnings: $WARN"
 if [ "$WARN" -gt 0 ]; then
   echo "  ($WARN warning(s): known, tracked limitations -- not failures. See notes above.)"
 fi
-[ "$FAIL" -eq 0 ]
+verification_succeeded

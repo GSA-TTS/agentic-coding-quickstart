@@ -36,8 +36,8 @@ PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # the bundle-version anchor recorded in a sandbox's host-side provenance record
 # (see ACQ_BUILTIN_BUNDLE below + the provenance helpers) so acq can tell a
 # stale sandbox from a current one.
-# agentic-coding-patterns v1.12.0 release SHA.
-PATTERNS_KIT_REF="56d1f5f49ef928f50e61aa64a93d618b3d21c415"
+# agentic-coding-patterns v1.15.0 release SHA.
+PATTERNS_KIT_REF="f3c6acb4d34a89b3b6539c44d47f56bacaeb94d7"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_PROVIDER_KIT_NAME="usai-provider"
@@ -348,8 +348,22 @@ _acq_provider_fact_safe_url() {
   esac
   case "$1" in
     *[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
-    *) return 0 ;;
   esac
+  # Keep provider facts data-only: allow RFC 3986 URL punctuation needed by
+  # configured endpoints, but reject shell syntax before facts reach a backend.
+  if ! printf '%s' "$1" | LC_ALL=C grep -qE '^https://[A-Za-z0-9._~:/?%&=+,@#-]+$'; then
+    return 1
+  fi
+  local suffix hex
+  suffix="$1"
+  while [ "${suffix#*%}" != "$suffix" ]; do
+    suffix="${suffix#*%}"
+    [ "${#suffix}" -ge 2 ] || return 1
+    hex="${suffix:0:2}"
+    case "$hex" in *[!0-9A-Fa-f]*) return 1 ;; esac
+    suffix="${suffix:2}"
+  done
+  return 0
 }
 
 acq_provider_facts_load() {
@@ -430,16 +444,25 @@ acq_provider_facts_use_fallback() {
 }
 
 acq_provider_facts_load_from_kit_or_fallback() {
-  local provider_facts_err provider_facts_rc
-  if provider_facts_err=$(acq_provider_facts_load_from_kit "$@" 2>&1); then
+  local provider_facts_rc
+  local IFS
+
+  # Keep the loader in this shell so validated provider assignments persist, but
+  # invoke it as a condition so caller errexit cannot skip status handling.
+  # Diagnostics flow directly to stderr; no temporary file or trap is needed.
+  # Use 'local IFS' (Bash 3.2-safe dynamic scoping) to preserve the caller's
+  # IFS state (including when intentionally unset under 'set -u'). The local
+  # declaration auto-restores the caller's IFS on function exit, avoiding
+  # explicit snapshot/restore that fails when IFS is unset.
+  if acq_provider_facts_load_from_kit "$@"; then
     provider_facts_rc=0
   else
     provider_facts_rc=$?
   fi
+
   case "$provider_facts_rc" in
     0) : ;;
     1)
-      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
       return 1
       ;;
     2)
@@ -452,7 +475,6 @@ acq_provider_facts_load_from_kit_or_fallback() {
       acq_debug "provider facts fetch failed; using transitional fallback defaults"
       ;;
     *)
-      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
       return "$provider_facts_rc"
       ;;
   esac
@@ -904,8 +926,9 @@ _acq_selected_support_kit_refs() {
 _acq_selected_builtin_kit_refs() {
   local agent="${1:-}" kit
   _acq_selected_support_kit_refs || return 1
-  if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
-      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_ready "$agent"; then
+  if [ -n "$agent" ] && acq_is_known_agent "$agent" \
+      && { [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || [ "${ACQ_REQUIRED_AGENT_KIT:-}" = "$agent" ]; } \
+      && acq_agent_builtin_kit_ready "$agent"; then
     kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
     printf '%s\n' "$kit"
   fi
@@ -913,7 +936,6 @@ _acq_selected_builtin_kit_refs() {
 
 acq_selected_agent_kit_summary() {
   local agent="${1:-}" kit_name entrypoint install_owner start_owner apply_state="deferred"
-  [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || return 1
   kit_name=$(acq_agent_builtin_kit_name "$agent") || return 1
   entrypoint=$(acq_agent_kit_entrypoint "$agent") || entrypoint=""
   install_owner=$(acq_agent_kit_install_owner "$agent") || install_owner=""
@@ -946,8 +968,16 @@ _build_kit_list() {
   done < <(_acq_selected_support_kit_refs)
   # shellcheck disable=SC2034  # read by adapters/tests after _build_kit_list
   ACQ_BUILTIN_SUPPORT_KIT_COUNT="${#KITS[@]}"
-  if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
-      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_ready "$agent"; then
+  if [ -n "${ACQ_REQUIRED_AGENT_KIT:-}" ] \
+      && [ "${ACQ_REQUIRED_AGENT_KIT:-}" = "$agent" ] \
+      && ! acq_agent_builtin_kit_ready "$agent"; then
+    echo "acq: required built-in ${agent} kit is unavailable or has invalid agent metadata." >&2
+    echo "     Refusing the generic default image because it has no bundled ${agent} binary." >&2
+    return 1
+  fi
+  if [ -n "$agent" ] && acq_is_known_agent "$agent" \
+      && { [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || [ "${ACQ_REQUIRED_AGENT_KIT:-}" = "$agent" ]; } \
+      && acq_agent_builtin_kit_ready "$agent"; then
     kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
     KITS+=("$kit")
   fi
@@ -2443,8 +2473,18 @@ acq_host_config_clear_instance_state() {
   case "$dir" in ""|/|/*/) return 0 ;; esac
   rm -f "$dir"/install-* "$dir"/agent-installed-* \
         "$dir"/agent-user-ready \
-        "$dir"/workspace "$dir"/ssh-auth-sock 2>/dev/null || true
+        "$dir"/workspace "$dir"/ssh-auth-sock "$dir"/generic-opencode 2>/dev/null || true
   return 0
+}
+
+# True when a sandbox was created with the generic OpenCode base and its pinned
+# kit. This is host-authoritative create-time state, not a per-invocation flag.
+# Usage: acq_instance_uses_generic_opencode BACKEND NAME
+acq_instance_uses_generic_opencode() {
+  case "$(acq_host_config_read "$1" "$2" generic-opencode 2>/dev/null || true)" in
+    generic-opencode|1) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Remove a sandbox's entire host config dir (called from terminate). Best-effort.
