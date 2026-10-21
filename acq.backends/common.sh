@@ -923,8 +923,9 @@ _acq_selected_support_kit_refs() {
 _acq_selected_builtin_kit_refs() {
   local agent="${1:-}" kit
   _acq_selected_support_kit_refs || return 1
-  if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
-      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_ready "$agent"; then
+  if [ -n "$agent" ] && acq_is_known_agent "$agent" \
+      && { [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || [ "${ACQ_REQUIRED_AGENT_KIT:-}" = "$agent" ]; } \
+      && acq_agent_builtin_kit_ready "$agent"; then
     kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
     printf '%s\n' "$kit"
   fi
@@ -932,7 +933,6 @@ _acq_selected_builtin_kit_refs() {
 
 acq_selected_agent_kit_summary() {
   local agent="${1:-}" kit_name entrypoint install_owner start_owner apply_state="deferred"
-  [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || return 1
   kit_name=$(acq_agent_builtin_kit_name "$agent") || return 1
   entrypoint=$(acq_agent_kit_entrypoint "$agent") || entrypoint=""
   install_owner=$(acq_agent_kit_install_owner "$agent") || install_owner=""
@@ -965,8 +965,16 @@ _build_kit_list() {
   done < <(_acq_selected_support_kit_refs)
   # shellcheck disable=SC2034  # read by adapters/tests after _build_kit_list
   ACQ_BUILTIN_SUPPORT_KIT_COUNT="${#KITS[@]}"
-  if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
-      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_ready "$agent"; then
+  if [ -n "${ACQ_REQUIRED_AGENT_KIT:-}" ] \
+      && [ "${ACQ_REQUIRED_AGENT_KIT:-}" = "$agent" ] \
+      && ! acq_agent_builtin_kit_ready "$agent"; then
+    echo "acq: required built-in ${agent} kit is unavailable or has invalid agent metadata." >&2
+    echo "     Refusing the generic default image because it has no bundled ${agent} binary." >&2
+    return 1
+  fi
+  if [ -n "$agent" ] && acq_is_known_agent "$agent" \
+      && { [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || [ "${ACQ_REQUIRED_AGENT_KIT:-}" = "$agent" ]; } \
+      && acq_agent_builtin_kit_ready "$agent"; then
     kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
     KITS+=("$kit")
   fi
@@ -2462,8 +2470,18 @@ acq_host_config_clear_instance_state() {
   case "$dir" in ""|/|/*/) return 0 ;; esac
   rm -f "$dir"/install-* "$dir"/agent-installed-* \
         "$dir"/agent-user-ready \
-        "$dir"/workspace "$dir"/ssh-auth-sock 2>/dev/null || true
+        "$dir"/workspace "$dir"/ssh-auth-sock "$dir"/generic-opencode 2>/dev/null || true
   return 0
+}
+
+# True when a sandbox was created with the generic OpenCode base and its pinned
+# kit. This is host-authoritative create-time state, not a per-invocation flag.
+# Usage: acq_instance_uses_generic_opencode BACKEND NAME
+acq_instance_uses_generic_opencode() {
+  case "$(acq_host_config_read "$1" "$2" generic-opencode 2>/dev/null || true)" in
+    generic-opencode|1) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Remove a sandbox's entire host config dir (called from terminate). Best-effort.

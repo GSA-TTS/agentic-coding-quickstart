@@ -161,7 +161,7 @@ MSB_ROLLBACK_VERSION="0.6.18"
 # duplicate snapshots exist. See ADR-0032.
 MSB_FIXED_VERSION="0.7.3"
 
-# Default OCI image for provisioned sandboxes. We default to the SAME image
+# Default OCI image for provisioned non-OpenCode sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
 # agent template. It ALREADY ships the non-root `agent` user (with passwordless
 # sudo), node, git, curl, and ca-certificates (the four kits' runtime
@@ -192,7 +192,7 @@ _ACQ_MSB_IMAGE_NOTICE_SHOWN=0
 
 # _acq_msb_resolve_image AGENT — set the OCI image `msb create` should use,
 # applying the ADR-0022 precedence: explicit ACQ_MSB_IMAGE > neutral
-# --image/ACQ_IMAGE > agent-derived sandbox-template image > built-in default.
+# --image/ACQ_IMAGE > generic OpenCode base > agent-derived sandbox-template image > built-in default.
 # Prints a one-time notice if BOTH the backend var and the neutral image are set
 # (backend var wins). Idempotent notice (once per process).
 _ACQ_MSB_RESOLVED_IMAGE=""
@@ -219,6 +219,11 @@ _acq_msb_resolve_image() {
   if [ -n "$neutral" ]; then
     _ACQ_MSB_RESOLVED_IMAGE="$neutral"
     _ACQ_MSB_RESOLVED_IMAGE_SOURCE="neutral"
+    return 0
+  fi
+  if [ "$agent" = "opencode" ]; then
+    _ACQ_MSB_RESOLVED_IMAGE="$ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE"
+    _ACQ_MSB_RESOLVED_IMAGE_SOURCE="generic-opencode-default"
     return 0
   fi
   if _ACQ_MSB_RESOLVED_IMAGE=$(acq_agent_template_image "$agent" 2>/dev/null) \
@@ -3112,6 +3117,13 @@ acq_backend_provision() {
   _acq_msb_resolve_image "$agent"
   local _msb_image="$_ACQ_MSB_RESOLVED_IMAGE"
   local _msb_image_source="$_ACQ_MSB_RESOLVED_IMAGE_SOURCE"
+  if [ "$_msb_image_source" = "generic-opencode-default" ]; then
+    ACQ_REQUIRED_AGENT_KIT="opencode"
+    ACQ_DEFAULT_OPENCODE_GENERIC=1
+  else
+    ACQ_REQUIRED_AGENT_KIT=""
+    ACQ_DEFAULT_OPENCODE_GENERIC=""
+  fi
 
   # Optional pull policy (ACQ_MSB_PULL): forwarded to `msb create --pull`.
   # `msb create` reads an image REF and by default pulls if-missing from a
@@ -3144,8 +3156,12 @@ acq_backend_provision() {
   # Zscaler CA trust FIRST so later network-fetching kits (playbook clone, USAi
   # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
   local kitref kitdir
-  _acq_msb_select_kits "$agent"
+  _acq_msb_select_kits "$agent" || return 1
   local kits=("${KITS[@]}")
+  local _generic_opencode_kit=""
+  if [ "$_msb_image_source" = "generic-opencode-default" ]; then
+    _generic_opencode_kit=$(_acq_agent_builtin_kit_ref opencode) || return 1
+  fi
 
   for kitref in "${kits[@]}"; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
@@ -3767,19 +3783,41 @@ EOF
   # individually non-fatal (the playbook kit already self-heals on next start),
   # matching acq_backend_ensure_kits_applied's best-effort heal loop. Each kit's
   # commands get the merged env from the pre-pass above.
-  local kd
+  local kd _kit_index _generic_opencode_kit_applied=0
   acq_spin_start "Applying configuration kits"
   _acq_msb_reset_kit_env "$name"
-  for kd in "${kitdirs[@]}"; do
+  for _kit_index in "${!kitdirs[@]}"; do
+    kd="${kitdirs[$_kit_index]}"
+    kitref="${kits[$_kit_index]}"
     acq_debug "msb provision: applying kit dir $kd ($name)"
     if _acq_msb_apply_kit_dir "$name" "$kd" _merged_kit_env; then
       acq_debug "msb provision: applied kit dir $kd ($name)"
+      if [ "$kitref" = "$_generic_opencode_kit" ]; then
+        _generic_opencode_kit_applied=1
+      fi
     else
+      if [ "$kitref" = "$_generic_opencode_kit" ]; then
+        acq_spin_stop "Applying configuration kits"
+        echo "acq(msb): error: required OpenCode kit did not fully apply for '$name'." >&2
+        echo "          Removing the new sandbox because its generic image has no OpenCode binary." >&2
+        acq_backend_terminate "$name" >/dev/null 2>&1 || \
+          echo "acq(msb): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
+        return 1
+      fi
       echo "acq(msb): warning: kit did not fully apply: $kd" >&2
       echo "acq(msb):   the sandbox is up; re-run 'acq run' to re-apply, or inspect with ACQ_DEBUG=1." >&2
     fi
   done
   acq_spin_stop "Applying configuration kits"
+  if [ "$_msb_image_source" = "generic-opencode-default" ] \
+      && { [ "$_generic_opencode_kit_applied" != 1 ] \
+        || ! acq_host_config_write msb "$name" generic-opencode generic-opencode; }; then
+    echo "acq(msb): error: could not record completed generic OpenCode state for '$name'." >&2
+    echo "          Removing the new sandbox to avoid an unpinned postinstall fallback." >&2
+    acq_backend_terminate "$name" >/dev/null 2>&1 || \
+      echo "acq(msb): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
+    return 1
+  fi
   acq_debug "msb provision: all kits applied; provision complete ($name)"
 
   # Start the in-guest socat bridge for the host ssh-agent forward (ADR-0021).
