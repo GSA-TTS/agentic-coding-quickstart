@@ -836,7 +836,9 @@ acq_backend_prepare() {
 # CLI help. If the column layout differs on a real host, adjust the parse.
 
 acq_backend_exists() {
-  _acq_msb_cli list -q 2>/dev/null | grep -Fxq -- "$1"
+  local listed
+  listed=$(_acq_msb_cli list -q 2>/dev/null) || return 1
+  grep -Fxq -- "$1" <<<"$listed"
 }
 
 # Return success only when msb successfully lists sandboxes and NAME is absent.
@@ -844,7 +846,7 @@ acq_backend_exists() {
 _acq_msb_confirm_absent() {
   local name="$1" listed
   listed=$(_acq_msb_cli list -q 2>/dev/null) || return 1
-  ! printf '%s\n' "$listed" | grep -Fxq -- "$name"
+  ! grep -Fxq -- "$name" <<<"$listed"
 }
 
 # ---------------------------------------------------------------------------
@@ -861,7 +863,9 @@ _acq_msb_confirm_absent() {
 # help and is not live-verified against a running daemon; if the layout differs on
 # a real host, adjust here and in acq_backend_exists together.
 _acq_msb_is_running() {
-  _acq_msb_cli list --running -q 2>/dev/null | grep -Fxq -- "$1"
+  local listed
+  listed=$(_acq_msb_cli list --running -q 2>/dev/null) || return 1
+  grep -Fxq -- "$1" <<<"$listed"
 }
 
 # ---------------------------------------------------------------------------
@@ -4543,7 +4547,16 @@ _acq_msb_ensure_ssh_agent_forward() {
   # same-name sandbox recreated outside this create path (or after wiping msb
   # state but keeping acq's expectations around the name). Recreate through acq
   # with SSH_AUTH_SOCK set so the create-time route is recorded.
-  if ! _acq_msb_has_ssh_agent_vsock_route "$name"; then
+  # rc 2 means inspect failed, which says nothing about whether the route exists.
+  local _route_rc=0
+  _acq_msb_has_ssh_agent_vsock_route "$name" || _route_rc=$?
+  if [ "$_route_rc" -eq 2 ]; then
+    echo "acq(msb): warning: could not verify the ssh-agent --vsock route for '$name'" \
+         "(msb inspect failed: ${_ACQ_MSB_ROUTE_PROBE_ERR:-no output});" \
+         "continuing without ssh-agent forwarding for this run." >&2
+    return 0
+  fi
+  if [ "$_route_rc" -ne 0 ]; then
     echo "acq(msb): warning: host SSH_AUTH_SOCK is set, but existing sandbox '$name'" \
          "has no ssh-agent --vsock route. The route is create-time only, so" \
          "SSH_AUTH_SOCK will not be set in the guest and git signing will fail." >&2
@@ -4565,12 +4578,25 @@ _acq_msb_ensure_ssh_agent_forward() {
 # config carries the ssh-agent --vsock route (guest AF_VSOCK CID 2:PORT for the
 # ssh-agent port). The route is create-time only, so its presence is the
 # authoritative signal that this sandbox CAN carry a forward. Read from
-# `msb inspect NAME --format json`; best-effort (a missing tool/field returns
-# non-zero, never hard-fails). See ADR-0021.
+# `msb inspect NAME --format json`; never hard-fails. Returns 1 when the route is
+# missing and 2 when inspect fails or prints nothing twice in a row (could not
+# check), leaving inspect's stderr in _ACQ_MSB_ROUTE_PROBE_ERR. See ADR-0021.
 _acq_msb_has_ssh_agent_vsock_route() {
-  local name="$1" json _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT"
-  json=$(_acq_msb_cli inspect "$name" --format json 2>/dev/null) || return 1
-  [ -n "$json" ] || return 1
+  local name="$1" json _port="$ACQ_MSB_SSH_AGENT_VSOCK_PORT" _errf _rc _try
+  _ACQ_MSB_ROUTE_PROBE_ERR=""
+  # stderr goes to a file, not into $json: a warning mentioning vsock would
+  # otherwise flatten into a false route match.
+  _errf=$(mktemp "${TMPDIR:-/tmp}/acq-msb-inspect.XXXXXX" 2>/dev/null) || _errf=/dev/null
+  for _try in 1 2; do
+    _rc=0
+    json=$(_acq_msb_cli inspect "$name" --format json 2>"$_errf") || _rc=$?
+    [ "$_rc" -eq 0 ] && [ -n "$json" ] && break
+  done
+  if [ "$_errf" != /dev/null ]; then
+    _ACQ_MSB_ROUTE_PROBE_ERR=$(tr '\n' ' ' <"$_errf" 2>/dev/null)
+    rm -f "$_errf" 2>/dev/null
+  fi
+  [ "$_rc" -eq 0 ] && [ -n "$json" ] || return 2
   # Require BOTH a `vsock` key AND the ssh-agent guest-port token, so a published
   # `ports:[{port:<vsock-port>}]` that merely happens to equal the (user-
   # overridable) vsock port cannot masquerade as a route on a sandbox that has no
@@ -4581,10 +4607,13 @@ _acq_msb_has_ssh_agent_vsock_route() {
   # and `port:3552` land on separate lines, so both greps must be run over the
   # full text (not a single line). The port is anchored as a whole token so 3552
   # can't match e.g. 35521. See ADR-0021; shape confirmed against msb 0.6.12.
+  # grep reads a here-string, not a pipe: under pipefail, `grep -q` exiting on an
+  # early match SIGPIPEs a writer still emitting a large document, which reads as
+  # a false "no route".
   local _flat
   _flat=$(printf '%s' "$json" | tr -d '" ' | tr ',{}[]' '\n\n\n\n\n')
-  printf '%s\n' "$_flat" | grep -Eq '(^|:)vsock:?$' 2>/dev/null || return 1
-  printf '%s\n' "$_flat" | grep -Eq "port[:=]${_port}\$" 2>/dev/null
+  grep -Eq '(^|:)vsock:?$' <<<"$_flat" 2>/dev/null || return 1
+  grep -Eq "port[:=]${_port}\$" <<<"$_flat" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
