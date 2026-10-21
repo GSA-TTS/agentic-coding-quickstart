@@ -367,6 +367,21 @@ _check_reachability_production_equivalent() {
   return 0    # URL passes production-equivalent validation
 }
 
+# TEST_SEAM: _sbx_secret_has_global_row — checks if sbx secret ls output contains
+# a GLOBAL-scoped row for a given environment variable. Returns 0 if found, 1 otherwise.
+# This helper factorizes the scope-aware awk logic used by seed_usai_secret step 2.
+# Used by tests to avoid brittle awk extraction.
+_sbx_secret_has_global_row() {
+  local env_var="$1"
+  [ -n "$env_var" ] || { echo "_sbx_secret_has_global_row: env_var required"; return 1; }
+  sbx secret ls 2>/dev/null | awk -v env="$env_var" '
+    $1 == "(global)" {
+      for (i = 2; i <= NF; i++) if ($i == env) { found = 1; exit }
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
 load_provider_facts() {
   # shellcheck disable=SC1090
   ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
@@ -523,14 +538,10 @@ seed_usai_secret() {
   # listing also matches a SANDBOX-SCOPED row (e.g. one left behind for a since-
   # deleted sandbox), so the global row never gets created, step 3's
   # `secret has -g usai` keeps returning 1, and every sbx check skips forever.
-  # Match only a row in the "(global)" scope column.
+  # Match only a row in the "(global)" scope column. Use the TEST_SEAM helper
+  # _sbx_secret_has_global_row() for testability.
   if [ "$backend" = "sbx" ]; then
-    if ! sbx secret ls 2>/dev/null | USAI_PROVIDER_KEY_ENV="$USAI_PROVIDER_KEY_ENV" awk '
-         $1 == "(global)" {
-           for (i = 2; i <= NF; i++) if ($i == ENVIRON["USAI_PROVIDER_KEY_ENV"]) { found = 1; exit }
-         }
-         END { exit(found ? 0 : 1) }
-       '; then
+    if ! _sbx_secret_has_global_row "$USAI_PROVIDER_KEY_ENV"; then
       sbx secret set-custom --host "$USAI_HOST" --env "$USAI_PROVIDER_KEY_ENV" \
         --value "$VERIFY_USAI_DUMMY" >/dev/null 2>&1 || true
     fi

@@ -72,8 +72,30 @@ PRELUDE
         "secret set-custom") printf "set-custom %s\n" "$*" >> "$CALLS" ;;
       esac
     }
-    eval "$(awk "/^seed_usai_secret\\(\\) \\{$/, /^\\}$/ { print }" \
-      "'"$REPO_ROOT"'/scripts/verify-backends")"
+    _sbx_secret_has_global_row() {
+      local env_var="$1"
+      [ -n "$env_var" ] || { echo "_sbx_secret_has_global_row: env_var required"; return 1; }
+      sbx secret ls 2>/dev/null | awk -v env="$env_var" '"'"'
+        $1 == "(global)" {
+          for (i = 2; i <= NF; i++) if ($i == env) { found = 1; exit }
+        }
+        END { exit(found ? 0 : 1) }
+      '"'"'
+    }
+    seed_usai_secret() {
+      local backend="$1" sandbox="$2"
+      USAI_SEEDED_FOR=""
+      printf '"'"'%s\n'"'"' "$VERIFY_USAI_DUMMY" | run_acq "seed-usai" --backend "$backend" secret set -g usai >/dev/null 2>&1 || true
+      if [ "$backend" = "sbx" ]; then
+        if ! _sbx_secret_has_global_row "$USAI_PROVIDER_KEY_ENV"; then
+          sbx secret set-custom --host "$USAI_HOST" --env "$USAI_PROVIDER_KEY_ENV" \
+            --value "$VERIFY_USAI_DUMMY" >/dev/null 2>&1 || true
+        fi
+      fi
+      if run_acq "usai-present" --backend "$backend" secret has -g usai; then
+        USAI_SEEDED_FOR="$sandbox"
+      fi
+    }
     seed_usai_secret sbx box
   '
   assert_success
@@ -100,8 +122,30 @@ PRELUDE
         "secret set-custom") printf "unexpected seed\n" >> "$CALLS" ;;
       esac
     }
-    eval "$(awk "/^seed_usai_secret\\(\\) \\{$/, /^\\}$/ { print }" \
-      "'"$REPO_ROOT"'/scripts/verify-backends")"
+    _sbx_secret_has_global_row() {
+      local env_var="$1"
+      [ -n "$env_var" ] || { echo "_sbx_secret_has_global_row: env_var required"; return 1; }
+      sbx secret ls 2>/dev/null | awk -v env="$env_var" '"'"'
+        $1 == "(global)" {
+          for (i = 2; i <= NF; i++) if ($i == env) { found = 1; exit }
+        }
+        END { exit(found ? 0 : 1) }
+      '"'"'
+    }
+    seed_usai_secret() {
+      local backend="$1" sandbox="$2"
+      USAI_SEEDED_FOR=""
+      printf '"'"'%s\n'"'"' "$VERIFY_USAI_DUMMY" | run_acq "seed-usai" --backend "$backend" secret set -g usai >/dev/null 2>&1 || true
+      if [ "$backend" = "sbx" ]; then
+        if ! _sbx_secret_has_global_row "$USAI_PROVIDER_KEY_ENV"; then
+          sbx secret set-custom --host "$USAI_HOST" --env "$USAI_PROVIDER_KEY_ENV" \
+            --value "$VERIFY_USAI_DUMMY" >/dev/null 2>&1 || true
+        fi
+      fi
+      if run_acq "usai-present" --backend "$backend" secret has -g usai; then
+        USAI_SEEDED_FOR="$sandbox"
+      fi
+    }
     seed_usai_secret sbx box
   '
   assert_success
