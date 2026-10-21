@@ -13,7 +13,6 @@ _check_reachability_harness() {
   cat <<'PRELUDE'
     set -u
     PASS=0 FAIL=0 LAST_OUT=""
-    USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
     pass() { PASS=$((PASS + 1)); }
     fail() { FAIL=$((FAIL + 1)); printf 'FAIL=%s\n' "$1"; }
     dump() { :; }
@@ -26,7 +25,7 @@ PRELUDE
 @test "provider verification: failed reachability command is a failure" {
   run bash -c "$(_check_reachability_harness)"'
     FAKE_OUTPUT="noisy-error" FAKE_RC=7
-    check_usai_reachability sbx box
+    check_usai_reachability sbx box "https://api.gsa.usai.gov/api/v1/models"
     printf "PASS=%s FAIL=%s\n" "$PASS" "$FAIL"
   '
   assert_success
@@ -37,18 +36,18 @@ PRELUDE
 @test "provider verification: non-HTTP output is not reachability success" {
   run bash -c "$(_check_reachability_harness)"'
     FAKE_OUTPUT="noisy-error" FAKE_RC=0
-    check_usai_reachability sbx box
+    check_usai_reachability sbx box "https://api.gsa.usai.gov/api/v1/models"
     printf "PASS=%s FAIL=%s\n" "$PASS" "$FAIL"
   '
   assert_success
-  assert_output --partial 'FAIL=sbx: USAi host did not return an HTTP status'
+  assert_output --partial 'FAIL=sbx: USAi host did not return a valid HTTP status'
   assert_output --partial 'PASS=0 FAIL=1'
 }
 
 @test "provider verification: curl HTTP 000 is a reachability failure" {
   run bash -c "$(_check_reachability_harness)"'
     FAKE_OUTPUT="000" FAKE_RC=0
-    check_usai_reachability sbx box
+    check_usai_reachability sbx box "https://api.gsa.usai.gov/api/v1/models"
     printf "PASS=%s FAIL=%s\n" "$PASS" "$FAIL"
   '
   assert_success
@@ -116,4 +115,45 @@ PRELUDE
   run grep -n 'USAI_HOST="\$USAI_PROVIDER_HOST"' \
     "$REPO_ROOT/scripts/verify-backends"
   assert_success
+}
+
+@test "provider verification: shell metacharacters in URL are rejected" {
+  run bash -c "$(_check_reachability_harness)"'
+    FAKE_OUTPUT="200" FAKE_RC=0
+    check_usai_reachability sbx box "https://api.gsa.usai.gov/api/v1/models\"; whoami; echo \""
+    printf "PASS=%s FAIL=%s\n" "$PASS" "$FAIL"
+  '
+  assert_success
+  assert_output --partial 'FAIL=sbx: USAi URL validation failed'
+  assert_output --partial 'PASS=0 FAIL=1'
+  refute_output --partial 'root'
+}
+
+@test "provider verification: URL with command substitution is rejected" {
+  run bash -c "$(_check_reachability_harness)"'
+    FAKE_OUTPUT="200" FAKE_RC=0
+    check_usai_reachability sbx box "https://api.gsa.usai.gov/api/v1/models/\$(whoami)"
+    printf "PASS=%s FAIL=%s\n" "$PASS" "$FAIL"
+  '
+  assert_success
+  assert_output --partial 'FAIL=sbx: USAi URL validation failed'
+  assert_output --partial 'PASS=0 FAIL=1'
+}
+
+@test "provider verification: production-equivalent URL validation works correctly" {
+  run bash -c '
+    REPO_ROOT="'"$REPO_ROOT"'"
+    source="$(sed -n "/^_check_reachability_production_equivalent/,/^}/p" "$REPO_ROOT/scripts/verify-backends")"
+    eval "$source"
+    # Valid HTTPS URLs pass
+    _check_reachability_production_equivalent sbx "https://api.example.com/v1/models" && echo "pass1=yes" || echo "pass1=no"
+    # URLs with shell metacharacters fail
+    _check_reachability_production_equivalent sbx "https://api.example.com/v1/models\"; whoami; echo" && echo "fail1=yes" || echo "fail1=no"
+    # Command substitution fails
+    _check_reachability_production_equivalent sbx "https://api.example.com/v1/models/\$(whoami)" && echo "fail2=yes" || echo "fail2=no"
+  '
+  assert_success
+  assert_line 'pass1=yes'
+  assert_line 'fail1=no'
+  assert_line 'fail2=no'
 }

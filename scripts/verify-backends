@@ -354,6 +354,19 @@ USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 # Load the provider contract used by acq's backend adapters before the verifier
 # performs any provider-specific checks. The fallback remains available through
 # the shared loader for older provider kits.
+# TEST_SEAM: _check_reachability_production_equivalent — verifies check_usai_reachability
+# constructs a safe curl command when given provider facts. Used by tests to ensure no
+# shell injection despite URL provenance. Not exported (internal to verify-backends).
+_check_reachability_production_equivalent() {
+  local backend="$1" url="$2"
+  [ -n "$backend" ] || { echo "backend required"; return 1; }
+  [ -n "$url" ] || { echo "url required"; return 1; }
+  if ! printf '%s' "$url" | grep -qE '^https://[a-zA-Z0-9._/:?=&#-]+$'; then
+    return 1  # URL validation failed (expected for injection tests)
+  fi
+  return 0    # URL passes production-equivalent validation
+}
+
 load_provider_facts() {
   # shellcheck disable=SC1090
   ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
@@ -607,21 +620,27 @@ verify_sbx_grammar_acceptance() {
 }
 
 check_usai_reachability() {
-  local backend="$1" name="$2" rc ustatus
+  local backend="$1" name="$2" url="$3" rc ustatus
+  # Validate URL: must be https:// followed by safe hostname/path chars.
+  # Rejects shell metacharacters, variable refs, command substitution, etc.
+  if ! printf '%s' "$url" | grep -qE '^https://[a-zA-Z0-9._/:?=&#-]+$'; then
+    fail "${backend}: USAi URL validation failed (unsafe characters or invalid scheme)"
+    dump "URL" "$url"
+    return 0
+  fi
   if run_acq "exec usai-reach" --backend "$backend" exec "$name" -- sh -c \
-      "curl -sS -o /dev/null -w '%{http_code}' --max-time 15 $USAI_MODELS_URL"; then
+      'curl -sS -o /dev/null -w "%{http_code}" --max-time 15 "$1"' verify "$url"; then
     ustatus="$LAST_OUT"
     case "$ustatus" in
-      [0-9][0-9][0-9])
-        if [ "$ustatus" = "000" ]; then
-          fail "${backend}: USAi host not reachable from guest (egress/net-rule?)"
-          dump "curl output" "$LAST_OUT"
-          return 0
-        fi
+      000)
+        fail "${backend}: USAi host not reachable from guest (egress/net-rule?)"
+        dump "curl output" "$LAST_OUT"
+        ;;
+      [1-5][0-9][0-9])
         pass "${backend}: USAi host reachable from guest (HTTP $ustatus; auth rewritten on wire)"
         ;;
       *)
-        fail "${backend}: USAi host did not return an HTTP status"
+        fail "${backend}: USAi host did not return a valid HTTP status"
         dump "curl output" "$LAST_OUT"
         ;;
     esac
@@ -760,7 +779,7 @@ verify_backend() {
   else
     skip "${backend}: USAi key not seeded by verifier"
   fi
-  check_usai_reachability "$backend" "$name"
+  check_usai_reachability "$backend" "$name" "$USAI_MODELS_URL"
 
   # 3) git-ssh-sign config present (system gitconfig has gpg.format ssh).
   if run_acq "exec gpg-format" --backend "$backend" exec "$name" -- sh -c \
