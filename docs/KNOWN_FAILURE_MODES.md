@@ -2843,6 +2843,57 @@ Two other things in the same code path can also look like a hang:
 
 ---
 
+## 45. "has no ssh-agent --vsock route" Warning on a Sandbox That Has the Route
+
+**Status:** Fixed — the route probe no longer pipes into `grep -q`, and a failed
+`msb inspect` is reported as "could not verify", not as a missing route.
+
+### Symptoms
+
+`acq run`, `acq start`, or `acq restart` on an existing msb sandbox sometimes
+prints:
+
+```text
+acq(msb): warning: host SSH_AUTH_SOCK is set, but existing sandbox '<name>' has no ssh-agent --vsock route. ...
+```
+
+even though `msb inspect <name> --format json` shows the `vsock` route and
+`acq exec <name> -- ssh-add -l` lists the host's keys. On msb 0.7.8 it fired on
+roughly 1 in 3 `acq run`s and on nearly every `start`/`restart`. After a start or
+restart, kit daemons launched in that run (such as the paseo daemon) come up
+without `SSH_AUTH_SOCK`, so commits signed from their sessions fail with
+`no SSH agent - cannot sign commits`.
+
+### Root Cause
+
+`acq` runs under `set -euo pipefail`. `_acq_msb_has_ssh_agent_vsock_route` checked
+the flattened inspect JSON with `printf '%s\n' "$_flat" | grep -Eq …`. `grep -q`
+exits on its first match; when the document is larger than the pipe buffer
+(a 0.7.8 inspect is about 175 KB), `printf` is still writing, dies of SIGPIPE
+(exit 141), and `pipefail` turns the successful match into a failure. The result
+depends on timing, hence the intermittent rate. Separately, a failed or empty
+`msb inspect` returned the same "no" as a missing route.
+
+### Fix
+
+- Every `grep -q` over captured output in `acq.backends/msb.sh` and
+  `acq.backends/sbx.sh` reads a here-string (`grep -q … <<<"$var"`) instead of a
+  pipe, and CLI listings (`msb list -q`, `sbx ls -q`) are captured before
+  matching rather than piped into `grep -q`.
+- The route probe returns 2 when `msb inspect` fails or prints nothing. The
+  caller retries once, and if inspect still fails it warns that it could not
+  verify the route (with inspect's stderr) instead of advising a recreate.
+
+### Prevention
+
+`test/bats/115-ssh-agent-forward.bats` runs the probe under `pipefail` against a
+large inspect document with the route near the start (this test failed before
+the fix), and covers a transient and a persistent inspect failure via the stub's
+`STUB_MSB_INSPECT_FAIL_TIMES` knob. In new code, do not pipe into `grep -q`
+(or `head`) under `pipefail` when the writer may still be producing output.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

@@ -163,7 +163,9 @@ acq_backend_prepare() {
 # ---------------------------------------------------------------------------
 
 acq_backend_exists() {
-  sbx ls -q 2>/dev/null | grep -Fxq -- "$1"
+  local listed
+  listed=$(sbx ls -q 2>/dev/null) || return 1
+  grep -Fxq -- "$1" <<<"$listed"
 }
 
 # ---------------------------------------------------------------------------
@@ -1075,7 +1077,7 @@ acq_backend_ensure_kits_applied() {
     # Whole-line match (the marker is written one ref per line via printf
     # '%s\n'). A substring test would wrongly treat a ref that is a prefix of an
     # already-applied ref (e.g. `…&dir=kit` vs `…&dir=kit-extended`) as applied.
-    if printf '%s\n' "$applied" | grep -Fxq -- "$k"; then
+    if grep -Fxq -- "$k" <<<"$applied"; then
       continue
     fi
     echo "acq: applying extra kit to '$name': $k" >&2

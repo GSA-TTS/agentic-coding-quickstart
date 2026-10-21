@@ -410,6 +410,77 @@ s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
   assert_output --partial 'RC=1'
 }
 
+@test "vsock(10c18b): the route probe matches a large inspect document under pipefail" {
+  # acq runs under `set -o pipefail`. Piping a document larger than the pipe
+  # buffer into `grep -q` lets grep exit on its first match while the writer is
+  # still going; the writer dies of SIGPIPE and pipefail turns the match into a
+  # false "no route". The route sits at the front so grep matches early.
+  printf 'pbox\n' >"$STUBDIR/.msb_sandbox_list"
+  {
+    printf '{"vsock":{"routes":[{"host_socket":"/private/var/run/x/Listeners","port":3552}]},"pad":['
+    printf '"x%06d",' $(seq 1 40000)
+    printf '"end"]}\n'
+  } >"$STUBDIR/.msb_inspect_json"
+  run bash -c '
+    set -o pipefail
+    export STUB_MSB_VERSION=0.6.9
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_has_ssh_agent_vsock_route pbox; printf "RC=%s\n" "$?"
+  '
+  assert_output --partial 'RC=0'
+}
+
+@test "vsock(10c18c): the route probe returns 2 when msb inspect keeps failing" {
+  printf 'pbox\n' >"$STUBDIR/.msb_sandbox_list"
+  printf '%s\n' '{"vsock":{"routes":[{"port":3552}]}}' >"$STUBDIR/.msb_inspect_json"
+  run bash -c '
+    export STUB_MSB_VERSION=0.6.9 STUB_MSB_INSPECT_FAIL_TIMES=2
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_has_ssh_agent_vsock_route pbox; printf "RC=%s\n" "$?"
+  '
+  assert_output --partial 'RC=2'
+}
+
+@test "vsock(10c18d): a transient inspect failure is retried and the forward is wired" {
+  _mk_unix_socket "$STUBDIR/agent18d.sock" || skip "python3 AF_UNIX socket unavailable"
+  printf 'rbox\n' >"$STUBDIR/.msb_sandbox_list"
+  printf 'rbox\n' >"$STUBDIR/.msb_running_list"
+  printf '{"active_config":{"vsock":{"routes":[{"host_socket":"/private/var/run/x/Listeners","port":3552}]}}}\n' >"$STUBDIR/.msb_inspect_json"
+  : > "$CALLS"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent18d.sock" STUB_MSB_VERSION=0.6.9 STUB_MSB_INSPECT_FAIL_TIMES=1
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_ensure_ssh_agent_forward rbox 2>&1
+    wait
+  '
+  assert_success
+  refute_output --partial 'ssh-agent --vsock route'
+  assert_regex "$(cat "$CALLS")" "socat UNIX-LISTEN:'/home/agent/\.acq/ssh-agent\.sock'"
+}
+
+@test "vsock(10c18e): a persistent inspect failure warns it could not verify, not that the route is missing" {
+  _mk_unix_socket "$STUBDIR/agent18e.sock" || skip "python3 AF_UNIX socket unavailable"
+  printf 'rbox\n' >"$STUBDIR/.msb_sandbox_list"
+  printf 'rbox\n' >"$STUBDIR/.msb_running_list"
+  : > "$CALLS"
+  run bash -c '
+    export SSH_AUTH_SOCK="'"$STUBDIR"'/agent18e.sock" STUB_MSB_VERSION=0.6.9 STUB_MSB_INSPECT_FAIL_TIMES=99
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_ensure_ssh_agent_forward rbox 2>&1
+    wait
+  '
+  assert_success
+  assert_output --partial "could not verify the ssh-agent --vsock route for 'rbox'"
+  assert_output --partial 'error: stub inspect failure'
+  refute_output --partial 'has no ssh-agent --vsock route'
+  refute_output --partial 'same name after wiping msb state'
+  refute_regex "$(cat "$CALLS")" 'socat UNIX-LISTEN'
+}
+
 @test "vsock(10c19): a stale --vsock route (host reboot) warns with the recreate remedy, not silently" {
   # After the bridge + marker are (re)placed, the forwarded-agent liveness probe
   # runs `ssh-add -l` over the guest sock. The reboot dead-bridge signature is
