@@ -157,6 +157,32 @@ FACTS
   assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "fallback"
 }
 
+
+@test "provider-facts: wrapper preserves assignments from successful kit load (regression for #551)" {
+  load_acq
+  local kit="$STUBDIR/provider-kit-ok" cache="$STUBDIR/provider-cache-ok"
+  mkdir -p "$kit/provider-facts"
+  cat > "$kit/provider-facts/usai.env" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=custom.example.gov
+ACQ_PROVIDER_BASE_URL=https://custom.example.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://custom.example.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=CUSTOM_API_KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://custom.example.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=custom.example.gov,models.custom.example.gov
+FACTS
+
+  acq_provider_facts_load_from_kit_or_fallback "$kit" "$cache"
+  assert_equal "$USAI_PROVIDER_HOST" "custom.example.gov"
+  assert_equal "$USAI_PROVIDER_BASE_URL" "https://custom.example.gov/api/v1"
+  assert_equal "$USAI_PROVIDER_MODELS_URL" "https://custom.example.gov/api/v1/models"
+  assert_equal "$USAI_PROVIDER_KEY_ENV" "CUSTOM_API_KEY"
+  assert_equal "$USAI_PROVIDER_KEY_MGMT_URL" "https://custom.example.gov/keys"
+  assert_equal "$USAI_PROVIDER_BIND_HOSTS" "custom.example.gov,models.custom.example.gov"
+  assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "$kit/provider-facts/usai.env"
+}
+
 @test "agent-kits: default kit list is support-only" {
   load_acq
   ACQ_EXTRA_KITS=""

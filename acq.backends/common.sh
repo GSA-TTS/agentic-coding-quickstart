@@ -430,16 +430,12 @@ acq_provider_facts_use_fallback() {
 }
 
 acq_provider_facts_load_from_kit_or_fallback() {
-  local provider_facts_err provider_facts_rc
-  if provider_facts_err=$(acq_provider_facts_load_from_kit "$@" 2>&1); then
-    provider_facts_rc=0
-  else
-    provider_facts_rc=$?
-  fi
+  local provider_facts_rc
+  acq_provider_facts_load_from_kit "$@"
+  provider_facts_rc=$?
   case "$provider_facts_rc" in
     0) : ;;
     1)
-      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
       return 1
       ;;
     2)
@@ -452,7 +448,6 @@ acq_provider_facts_load_from_kit_or_fallback() {
       acq_debug "provider facts fetch failed; using transitional fallback defaults"
       ;;
     *)
-      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
       return "$provider_facts_rc"
       ;;
   esac
