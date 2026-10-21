@@ -1845,7 +1845,7 @@ For a single sandbox, pass the pinned kit ref with `--kit` or include it in
 `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=89e87f9b831d66c9590fefe7b5b997c5719e64df&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=f3c6acb4d34a89b3b6539c44d47f56bacaeb94d7&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 Existing sandboxes that were created before this change keep whatever podman
