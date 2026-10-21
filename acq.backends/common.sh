@@ -348,8 +348,22 @@ _acq_provider_fact_safe_url() {
   esac
   case "$1" in
     *[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
-    *) return 0 ;;
   esac
+  # Keep provider facts data-only: allow RFC 3986 URL punctuation needed by
+  # configured endpoints, but reject shell syntax before facts reach a backend.
+  if ! printf '%s' "$1" | LC_ALL=C grep -qE '^https://[A-Za-z0-9._~:/?%&=+,@#-]+$'; then
+    return 1
+  fi
+  local suffix hex
+  suffix="$1"
+  while [ "${suffix#*%}" != "$suffix" ]; do
+    suffix="${suffix#*%}"
+    [ "${#suffix}" -ge 2 ] || return 1
+    hex="${suffix:0:2}"
+    case "$hex" in *[!0-9A-Fa-f]*) return 1 ;; esac
+    suffix="${suffix:2}"
+  done
+  return 0
 }
 
 acq_provider_facts_load() {
