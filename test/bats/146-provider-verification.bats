@@ -13,6 +13,7 @@ _check_reachability_harness() {
   cat <<'PRELUDE'
     set -u
     PASS=0 FAIL=0 LAST_OUT=""
+    USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
     pass() { PASS=$((PASS + 1)); }
     fail() { FAIL=$((FAIL + 1)); printf 'FAIL=%s\n' "$1"; }
     dump() { :; }
