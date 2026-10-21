@@ -431,8 +431,10 @@ acq_provider_facts_use_fallback() {
 
 acq_provider_facts_load_from_kit_or_fallback() {
   local provider_facts_rc
+  local _acq_saved_ifs="$IFS"
   acq_provider_facts_load_from_kit "$@"
   provider_facts_rc=$?
+  IFS="$_acq_saved_ifs"
   case "$provider_facts_rc" in
     0) : ;;
     1)

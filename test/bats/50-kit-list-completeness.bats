@@ -183,6 +183,31 @@ FACTS
   assert_equal "$USAI_PROVIDER_FACTS_SOURCE" "$kit/provider-facts/usai.env"
 }
 
+@test "provider-facts: wrapper preserves IFS and caller shell state (regression for #551 indirect)" {
+  load_acq
+  local kit="$STUBDIR/provider-kit-ok" cache="$STUBDIR/provider-cache-ok"
+  mkdir -p "$kit/provider-facts"
+  cat > "$kit/provider-facts/usai.env" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.example.gov
+ACQ_PROVIDER_BASE_URL=https://api.example.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.example.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://api.example.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.example.gov
+FACTS
+
+  # Snapshot IFS before call
+  local _before_ifs="$IFS"
+  # Call the wrapper
+  acq_provider_facts_load_from_kit_or_fallback "$kit" "$cache"
+  # Verify IFS is restored
+  assert_equal "$IFS" "$_before_ifs"
+  # Verify provider vars are assigned
+  assert_equal "$USAI_PROVIDER_HOST" "api.example.gov"
+}
+
 @test "agent-kits: default kit list is support-only" {
   load_acq
   ACQ_EXTRA_KITS=""
