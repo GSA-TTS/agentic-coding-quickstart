@@ -56,10 +56,18 @@ kit_translate_fetch() {
 
   case "$kitref" in
     git+http*)
-      local url ref dir frag
+      local url ref dir frag authority
       url="${kitref#git+}"
       frag="${url#*#}"
       url="${url%%#*}"
+      authority="${url#*://}"
+      authority="${authority%%/*}"
+      case "$authority" in
+        *@*)
+          echo "kit-translate: credential-bearing kit URLs are not allowed" >&2
+          return 1
+          ;;
+      esac
       # Parse &-separated fragment params ref= and dir=.
       ref=""; dir=""
       local IFS='&'
@@ -74,7 +82,7 @@ kit_translate_fetch() {
         esac
       done
       if [ -z "$ref" ] || [ -z "$dir" ]; then
-        echo "kit-translate: malformed kit ref (need #ref=&dir=): $kitref" >&2
+        echo "kit-translate: malformed kit ref (need #ref=&dir=)" >&2
         return 1
       fi
       # Defense-in-depth: reject a hostile dir= (path traversal / metachars).
@@ -90,7 +98,7 @@ kit_translate_fetch() {
         echo "kit-translate: unsafe kit dir (illegal characters): $dir" >&2
         return 1
       fi
-      command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: $url ref=$ref dir=$dir -> $destdir"
+      command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: ref=$ref dir=$dir -> $destdir"
       # Fail closed on a destination that is not a disposable scratch directory.
       # The fetch below runs `rm -rf .git` then `git init` + `git checkout
       # FETCH_HEAD` inside $destdir, so a destination resolving to a real
@@ -155,8 +163,11 @@ kit_translate_fetch() {
         # authed retry (system config) succeeded
         :
       else
-        echo "kit-translate: failed to fetch $kitref" >&2
-        [ -n "$_ferr" ] && printf '%s\n' "$_ferr" | sed 's/^/kit-translate:   /' >&2
+        echo "kit-translate: failed to fetch remote kit" >&2
+        # The authenticated retry inherits credential helpers and URL rewrites.
+        # Their diagnostics can contain credential-bearing URLs, so never replay
+        # raw git stderr into terminal or CI logs.
+        [ -z "$_ferr" ] || echo "kit-translate:   git fetch failed (details suppressed)" >&2
         cat >&2 <<'EOM'
 kit-translate: If you saw a "Username for 'https://github.com'" prompt, plain git
 kit-translate:   (not gh) is trying to authenticate. gh auth authenticates the gh

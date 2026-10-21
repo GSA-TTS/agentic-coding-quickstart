@@ -348,8 +348,22 @@ _acq_provider_fact_safe_url() {
   esac
   case "$1" in
     *[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
-    *) return 0 ;;
   esac
+  # Keep provider facts data-only: allow RFC 3986 URL punctuation needed by
+  # configured endpoints, but reject shell syntax before facts reach a backend.
+  if ! printf '%s' "$1" | LC_ALL=C grep -qE '^https://[A-Za-z0-9._~:/?%&=+,@#-]+$'; then
+    return 1
+  fi
+  local suffix hex
+  suffix="$1"
+  while [ "${suffix#*%}" != "$suffix" ]; do
+    suffix="${suffix#*%}"
+    [ "${#suffix}" -ge 2 ] || return 1
+    hex="${suffix:0:2}"
+    case "$hex" in *[!0-9A-Fa-f]*) return 1 ;; esac
+    suffix="${suffix:2}"
+  done
+  return 0
 }
 
 acq_provider_facts_load() {
@@ -430,16 +444,22 @@ acq_provider_facts_use_fallback() {
 }
 
 acq_provider_facts_load_from_kit_or_fallback() {
-  local provider_facts_err provider_facts_rc
-  if provider_facts_err=$(acq_provider_facts_load_from_kit "$@" 2>&1); then
+  local provider_facts_rc
+  local _acq_saved_ifs="$IFS"
+
+  # Keep the loader in this shell so validated provider assignments persist, but
+  # invoke it as a condition so caller errexit cannot skip status handling.
+  # Diagnostics flow directly to stderr; no temporary file or trap is needed.
+  if acq_provider_facts_load_from_kit "$@"; then
     provider_facts_rc=0
   else
     provider_facts_rc=$?
   fi
+  IFS="$_acq_saved_ifs"
+
   case "$provider_facts_rc" in
     0) : ;;
     1)
-      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
       return 1
       ;;
     2)
@@ -452,7 +472,6 @@ acq_provider_facts_load_from_kit_or_fallback() {
       acq_debug "provider facts fetch failed; using transitional fallback defaults"
       ;;
     *)
-      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
       return "$provider_facts_rc"
       ;;
   esac

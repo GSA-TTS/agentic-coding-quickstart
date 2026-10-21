@@ -253,6 +253,14 @@ case "$_msb_sub" in
     # `msb inspect <name> --format json` — emit a create-time published-ports
     # JSON fixture if the test planted one, else nothing (models an absent field
     # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
+    # STUB_MSB_INSPECT_FAIL_TIMES=N fails the first N inspects (with a stderr
+    # line) and then succeeds, modelling a transient inspect failure.
+    _inspect_fails=$(cat "$STUBDIR/.msb_inspect_fails" 2>/dev/null || echo 0)
+    if [ "$_inspect_fails" -lt "${STUB_MSB_INSPECT_FAIL_TIMES:-0}" ]; then
+      echo $((_inspect_fails + 1)) >"$STUBDIR/.msb_inspect_fails"
+      echo "error: stub inspect failure" >&2
+      exit 1
+    fi
     [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
   list|ls)
     [ "${STUB_MSB_LIST_FAIL:-0}" = "1" ] && exit 1

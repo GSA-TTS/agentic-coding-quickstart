@@ -250,6 +250,40 @@ GITSTUB
   assert_regex "$anonline" 'insteadOf='
 }
 
+@test "#207: authenticated retry diagnostics never expose credential-bearing URLs" {
+  cat >"$STUBDIR/git" <<'GITSTUB'
+#!/usr/bin/env bash
+case "$*" in
+  *fetch*) printf '%s\n' 'fatal: https://user:secret-value@example.test/private.git' >&2; exit 1 ;;
+  *) exit 0 ;;
+esac
+GITSTUB
+  chmod +x "$STUBDIR/git"
+
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    kit_translate_fetch "git+https://github.com/x/y.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/kitdest"
+  '
+
+  assert_failure
+  assert_output --partial 'git fetch failed (details suppressed)'
+  refute_output --partial 'secret-value'
+  refute_output --partial 'user:'
+}
+
+@test "#207: credential-bearing kit references are rejected before logging" {
+  run bash -c '
+    acq_debug() { printf "DEBUG: %s\n" "$*" >&2; }
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    kit_translate_fetch "git+https://user:secret-value@example.test/x.git#ref=deadbeef&dir=kit" "'"$STUBDIR"'/kitdest"
+  '
+
+  assert_failure
+  assert_output --partial 'credential-bearing kit URLs are not allowed'
+  refute_output --partial 'secret-value'
+  refute_output --partial 'user:'
+}
+
 @test "#207: a hostile dir= (path traversal) is rejected before any git call" {
   : >"$STUBDIR/git-invocations.log"
   cat >"$STUBDIR/git" <<'GITSTUB'
