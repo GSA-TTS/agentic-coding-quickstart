@@ -3158,6 +3158,10 @@ acq_backend_provision() {
   local kitref kitdir
   _acq_msb_select_kits "$agent" || return 1
   local kits=("${KITS[@]}")
+  local _generic_opencode_kit=""
+  if [ "$_msb_image_source" = "generic-opencode-default" ]; then
+    _generic_opencode_kit=$(_acq_agent_builtin_kit_ref opencode) || return 1
+  fi
 
   for kitref in "${kits[@]}"; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
@@ -3779,19 +3783,41 @@ EOF
   # individually non-fatal (the playbook kit already self-heals on next start),
   # matching acq_backend_ensure_kits_applied's best-effort heal loop. Each kit's
   # commands get the merged env from the pre-pass above.
-  local kd
+  local kd _kit_index _generic_opencode_kit_applied=0
   acq_spin_start "Applying configuration kits"
   _acq_msb_reset_kit_env "$name"
-  for kd in "${kitdirs[@]}"; do
+  for _kit_index in "${!kitdirs[@]}"; do
+    kd="${kitdirs[$_kit_index]}"
+    kitref="${kits[$_kit_index]}"
     acq_debug "msb provision: applying kit dir $kd ($name)"
     if _acq_msb_apply_kit_dir "$name" "$kd" _merged_kit_env; then
       acq_debug "msb provision: applied kit dir $kd ($name)"
+      if [ "$kitref" = "$_generic_opencode_kit" ]; then
+        _generic_opencode_kit_applied=1
+      fi
     else
+      if [ "$kitref" = "$_generic_opencode_kit" ]; then
+        acq_spin_stop "Applying configuration kits"
+        echo "acq(msb): error: required OpenCode kit did not fully apply for '$name'." >&2
+        echo "          Removing the new sandbox because its generic image has no OpenCode binary." >&2
+        acq_backend_terminate "$name" >/dev/null 2>&1 || \
+          echo "acq(msb): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
+        return 1
+      fi
       echo "acq(msb): warning: kit did not fully apply: $kd" >&2
       echo "acq(msb):   the sandbox is up; re-run 'acq run' to re-apply, or inspect with ACQ_DEBUG=1." >&2
     fi
   done
   acq_spin_stop "Applying configuration kits"
+  if [ "$_msb_image_source" = "generic-opencode-default" ] \
+      && { [ "$_generic_opencode_kit_applied" != 1 ] \
+        || ! acq_host_config_write msb "$name" generic-opencode generic-opencode; }; then
+    echo "acq(msb): error: could not record completed generic OpenCode state for '$name'." >&2
+    echo "          Removing the new sandbox to avoid an unpinned postinstall fallback." >&2
+    acq_backend_terminate "$name" >/dev/null 2>&1 || \
+      echo "acq(msb): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
+    return 1
+  fi
   acq_debug "msb provision: all kits applied; provision complete ($name)"
 
   # Start the in-guest socat bridge for the host ssh-agent forward (ADR-0021).

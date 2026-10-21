@@ -1307,7 +1307,8 @@ case "$subcommand" in
       # some sandbox images skip, so a fresh launch fails with "postinstall
       # script was not run". Run it here — on any backend — before attaching an
       # opencode agent. Best-effort; never blocks the run.
-      if [ "$first" = "opencode" ] && [ "${ACQ_DEFAULT_OPENCODE_GENERIC:-}" != "1" ]; then
+      if [ "$first" = "opencode" ] \
+          && ! acq_instance_uses_generic_opencode "$ACQ_RESOLVED_BACKEND" "$local_name"; then
         ensure_opencode_postinstall "$local_name"
       fi
 

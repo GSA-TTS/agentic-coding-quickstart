@@ -116,9 +116,12 @@ case "${1:-}" in
   version) printf 'sbx version: v%s abc123\n' "${STUB_SBX_VERSION:-0.39.0}" ;;
   --help|-h) printf 'SBX-TOPLEVEL-HELP\n' ;;
   ls)
+    [ "${STUB_SBX_LS_FAIL:-0}" = "1" ] && exit 1
     [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"
     exit 0 ;;
-  create) : >"$STUBDIR/.created"; exit 0 ;;
+  create)
+    [ "${STUB_SBX_CREATE_FAIL:-0}" = "1" ] && exit 1
+    : >"$STUBDIR/.created"; exit 0 ;;
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done

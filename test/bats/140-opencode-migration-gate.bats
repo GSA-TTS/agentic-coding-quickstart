@@ -288,6 +288,35 @@ SPEC
   assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w .* opencode-envclone-msb -- opencode --version'
 }
 
+@test "migration gate(msb): generic-state persistence failure removes the new sandbox" {
+  local proj="$STUBDIR/msb-generic-state-write-fail"
+  _mk_repo "$proj"
+  acq_host_config_write() { return 1; }
+
+  run env ACQ_MSB_KIT_PASSTHROUGH=1 \
+    bash -c '. "$1/acq.backends/common.sh"; . "$1/acq.backends/msb.sh"; acq_host_config_write() { return 1; }; acq_backend_provision msbgenericstatefail opencode "$2"' \
+    _ "$REPO_ROOT" "$proj"
+
+  assert_failure
+  assert_output --partial 'could not record completed generic OpenCode state'
+  assert_regex "$(cat "$CALLS")" 'msb remove --force msbgenericstatefail'
+}
+
+@test "migration gate(msb): failed required OpenCode kit removes the new sandbox" {
+  local proj="$STUBDIR/msb-generic-kit-fail"
+  _mk_repo "$proj"
+
+  run env ACQ_MSB_KIT_PASSTHROUGH=1 \
+    bash -c '. "$1/acq.backends/common.sh"; . "$1/acq.backends/msb.sh"; _acq_msb_apply_kit_dir() { return 1; }; acq_backend_provision msbgenerickitfail opencode "$2"' \
+    _ "$REPO_ROOT" "$proj"
+
+  assert_failure
+  assert_output --partial 'required OpenCode kit did not fully apply'
+  assert_regex "$(cat "$CALLS")" 'msb remove --force msbgenerickitfail'
+  run acq_host_config_has msb msbgenerickitfail generic-opencode
+  assert_failure
+}
+
 @test "migration gate(msb): acq exec remains non-login; acq shell uses the agent login shell" {
   printf 'migbox\n' >"$STUBDIR/.msb_sandbox_list"
   printf 'migbox\n' >"$STUBDIR/.msb_running_list"
@@ -397,6 +426,20 @@ SPEC
   assert_regex "$(_create_line sbx)" ' shell '
   run acq_host_config_has sbx genericwritefail generic-opencode
   assert_failure
+  assert_regex "$(cat "$CALLS")" 'sbx rm --force genericwritefail'
+}
+
+@test "migration gate(sbx): provenance persistence failure removes the new sandbox" {
+  local proj="$STUBDIR/sbx-generic-provenance-write-fail"
+  _mk_repo "$proj"
+  _seed_sbx_usai
+  acq_provenance_write() { return 1; }
+
+  run acq_backend_provision genericprovenancefail opencode "$proj"
+
+  assert_failure
+  assert_output --partial 'could not record provenance'
+  assert_regex "$(cat "$CALLS")" 'sbx rm --force genericprovenancefail'
   refute_regex "$(cat "$CALLS")" '^sbx run '
 }
 
@@ -448,6 +491,21 @@ SPEC
   assert_output --partial "sandbox 'genericmodeexisting' already exists"
   assert_equal "$(acq_host_config_read sbx genericmodeexisting generic-opencode)" generic-opencode
   refute_regex "$(cat "$CALLS")" '^sbx create '
+}
+
+@test "migration gate(sbx): unavailable name lookup and failed create retain launch mode" {
+  local proj="$STUBDIR/sbx-generic-mode-ls-fail"
+  _mk_repo "$proj"
+  acq_host_config_write sbx genericmodelsfail generic-opencode generic-opencode
+
+  run env STUB_SBX_LS_FAIL=1 STUB_SBX_CREATE_FAIL=1 \
+    bash -c '. "$1/acq.backends/common.sh"; . "$1/acq.backends/sbx.sh"; acq_backend_provision genericmodelsfail opencode "$2"' \
+    _ "$REPO_ROOT" "$proj"
+
+  assert_failure
+  assert_equal "$(acq_host_config_read sbx genericmodelsfail generic-opencode)" generic-opencode
+  assert_regex "$(cat "$CALLS")" 'sbx create --name genericmodelsfail'
+  refute_regex "$(cat "$CALLS")" 'sbx rm --force genericmodelsfail'
 }
 
 @test "migration gate(sbx): replacement create overwrites a stale launch mode" {

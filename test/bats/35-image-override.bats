@@ -118,6 +118,26 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   refute_regex "$(_create_line msb)" 'sandbox-templates:cursor-docker'
 }
 
+@test "image(msb): missing non-OpenCode agent image falls back to shell" {
+  _msb_create STUB_MSB_CREATE_FAIL_IMAGE=docker.io/docker/sandbox-templates:claude-code-docker -- \
+    create claude --name imgclaudefallback "$IMGPROJ"
+
+  assert_success
+  assert_output --partial 'agent-specific image'
+  assert_output --partial 'falling back'
+  assert_regex "$(cat "$CALLS")" 'msb create .*claude-code-docker'
+  assert_regex "$(cat "$CALLS")" 'msb create .*shell-docker'
+}
+
+@test "image(msb): auth failure for a non-OpenCode agent image does not fall back" {
+  _msb_create STUB_MSB_CREATE_FAIL_IMAGE=docker.io/docker/sandbox-templates:claude-code-docker \
+    STUB_MSB_CREATE_FAIL_MESSAGE=unauthorized -- create claude --name imgclaudeauth "$IMGPROJ"
+
+  assert_failure
+  refute_output --partial 'falling back'
+  refute_regex "$(cat "$CALLS")" 'msb create .*shell-docker'
+}
+
 @test "image(msb): explicit ACQ_MSB_IMAGE beats the agent-derived default" {
   # 3-way precedence: ACQ_MSB_IMAGE must win over a known agent's derived image
   # (not just over the neutral --image/ACQ_IMAGE tier).

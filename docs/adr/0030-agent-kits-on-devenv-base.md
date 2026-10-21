@@ -382,18 +382,18 @@ as the image override; and `volumes:` mounted at boot before any exec. The
 login.gov team's `scripts/verify` asserts each of these against a real `--clone`
 sandbox on the active backend and can gate the refactor.
 
-### Migration sequencing
+### Implemented rollout and verification
 
-The `acq run opencode .` behavior changes in the staged sequence documented in
-[`docs/BACKEND_GUIDE.md`](../BACKEND_GUIDE.md#adr-0030-generic-base-implementation):
-freeze the current contract first, introduce agent-kit inputs without changing
-dispatch, switch OpenCode provisioning to consume the agent kit, move
-remaining devenv-specific setup behind the kit boundary, then remove obsolete
-wrapper code. Each increment has explicit offline and live verification commands.
-The Increment 0 freeze is implemented in
-[`test/bats/140-opencode-migration-gate.bats`](../../test/bats/140-opencode-migration-gate.bats),
-which keeps the current backend-neutral contract green while the migration
-continues.
+The default `acq run opencode .` path now selects the pinned generic devenv base
+and pinned OpenCode kit on both backends. Explicit image overrides retain their
+documented precedence, and SBX uses its neutral `shell` launcher token while
+retaining OpenCode provenance and the kit entrypoint for attachment. The current
+backend behavior and verification commands are documented in
+[`docs/BACKEND_GUIDE.md`](../BACKEND_GUIDE.md#adr-0030-generic-base-implementation).
+
+[`test/bats/140-opencode-migration-gate.bats`](../../test/bats/140-opencode-migration-gate.bats)
+exercises the offline create and reattach contract. The backend verifier performs
+the corresponding live checks when a sandbox-capable host is available.
 
 ## Open Questions
 

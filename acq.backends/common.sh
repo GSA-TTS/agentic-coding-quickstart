@@ -933,7 +933,6 @@ _acq_selected_builtin_kit_refs() {
 
 acq_selected_agent_kit_summary() {
   local agent="${1:-}" kit_name entrypoint install_owner start_owner apply_state="deferred"
-  [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || return 1
   kit_name=$(acq_agent_builtin_kit_name "$agent") || return 1
   entrypoint=$(acq_agent_kit_entrypoint "$agent") || entrypoint=""
   install_owner=$(acq_agent_kit_install_owner "$agent") || install_owner=""
@@ -2473,6 +2472,16 @@ acq_host_config_clear_instance_state() {
         "$dir"/agent-user-ready \
         "$dir"/workspace "$dir"/ssh-auth-sock "$dir"/generic-opencode 2>/dev/null || true
   return 0
+}
+
+# True when a sandbox was created with the generic OpenCode base and its pinned
+# kit. This is host-authoritative create-time state, not a per-invocation flag.
+# Usage: acq_instance_uses_generic_opencode BACKEND NAME
+acq_instance_uses_generic_opencode() {
+  case "$(acq_host_config_read "$1" "$2" generic-opencode 2>/dev/null || true)" in
+    generic-opencode|1) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Remove a sandbox's entire host config dir (called from terminate). Best-effort.

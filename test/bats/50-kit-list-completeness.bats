@@ -362,13 +362,14 @@ SPEC
   assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
 }
 
-@test "agent-kits: explicit CLI kit suppresses implicit agent-kit inference" {
+@test "agent-kits: explicit CLI kit preserves the selected-kit notice" {
   load_acq
   ACQ_EXTRA_KITS=""
   ACQ_CLI_KITS=(/tmp/team-opencode)
 
   run acq_selected_agent_kit_summary opencode
-  assert_failure
+  assert_success
+  assert_output --partial 'agent=opencode kit=opencode'
   _build_kit_list opencode
   local joined; joined=$(printf '%s\n' "${KITS[@]}")
   assert_regex "$joined" '/tmp/team-opencode'

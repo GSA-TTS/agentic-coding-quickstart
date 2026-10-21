@@ -416,16 +416,6 @@ _acq_sbx_wait_for_startup_barrier() {
   done
 }
 
-_acq_sbx_clear_opencode_launch_mode() {
-  local name="$1"
-  acq_host_config_clear sbx "$name" generic-opencode
-  if acq_host_config_has sbx "$name" generic-opencode; then
-    echo "acq(sbx): error: could not clear stale OpenCode launch mode for '$name'." >&2
-    echo "          Refusing to create because reattach could select stale SBX grammar." >&2
-    return 1
-  fi
-}
-
 # Probe a feature inside a sandbox. Returns 0=absent, 1=present, 2=probe failed.
 # IMPORTANT: `snippet` MUST end with " && echo present" — e.g.:
 #   "test -f '/path/to/file' && echo present"
@@ -598,15 +588,14 @@ acq_backend_provision() {
   kf+=(--kit "$(_acq_sbx_startup_barrier_kit "$_startup_barrier_token")")
 
   acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_sbx_args[*]:-}"
-  # The name-keyed host record may outlive a sandbox removed outside acq. Clear
-  # OpenCode's routing mode before create, and refuse to create if it persists.
-  # A later write failure then leaves no stale mode that could enable reattach.
+  # Do not replace the launch mode of an existing OpenCode sandbox. Stale host
+  # state is cleared only after this create succeeds, avoiding races with a
+  # concurrent create and avoiding destructive guesses when `sbx ls` fails.
   if [ "$agent" = "opencode" ]; then
     if acq_backend_exists "$name"; then
       echo "acq(sbx): error: sandbox '$name' already exists; refusing to replace its launch mode." >&2
       return 1
     fi
-    _acq_sbx_clear_opencode_launch_mode "$name" || return 1
   fi
   acq_spin_start "Creating sandbox '$name'"
   sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" ${_sbx_args[@]+"${_sbx_args[@]}"}
@@ -627,7 +616,13 @@ acq_backend_provision() {
     fi
     acq_spin_stop "Waiting for kit startup in '$name'"
     acq_host_config_clear_instance_state sbx "$name"
-    acq_provenance_write sbx "$name" "$agent" || true
+    if ! acq_provenance_write sbx "$name" "$agent"; then
+      echo "acq(sbx): error: could not record provenance for '$name'." >&2
+      echo "          Removing the new sandbox because safe reattach requires complete state." >&2
+      acq_backend_terminate "$name" >/dev/null 2>&1 || \
+        echo "acq(sbx): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
+      return 1
+    fi
     if [ "$agent" = "opencode" ]; then
       # Reattach grammar is determined by the create-time SBX agent token. Persist
       # it host-side so a missing record never guesses between shell and OpenCode.
@@ -635,8 +630,9 @@ acq_backend_provision() {
       [ "${ACQ_DEFAULT_OPENCODE_GENERIC:-}" = "1" ] && _opencode_mode=generic-opencode
       if ! acq_host_config_write sbx "$name" generic-opencode "$_opencode_mode"; then
         echo "acq(sbx): error: could not record OpenCode launch mode for '$name'." >&2
-        echo "          Refusing to attach because acq cannot safely choose SBX grammar." >&2
-        echo "          Remove and recreate this sandbox." >&2
+        echo "          Removing the new sandbox because acq cannot safely choose SBX grammar." >&2
+        acq_backend_terminate "$name" >/dev/null 2>&1 || \
+          echo "acq(sbx): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
         return 1
       fi
     fi

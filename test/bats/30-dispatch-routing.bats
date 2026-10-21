@@ -396,6 +396,20 @@ FACTS
   refute_output --partial 'does not appear runnable'
 }
 
+@test "run(opencode): generic default reattach does not run an unpinned npm postinstall fallback" {
+  local proj="$STUBDIR/ocreattach"; mkdir -p "$proj"
+  _seed_usai
+  run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" create opencode --name ocreattach "$proj"
+  assert_success
+  printf 'ocreattach\n' >"$STUBDIR/.sandbox_list"
+  : >"$CALLS"
+
+  run env ACQ_UPDATE_CHECK=0 ACQ_BACKEND=sbx "$ACQ" run ocreattach
+
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'postinstall\.mjs|opencode-ai|npm root -g'
+}
+
 @test "run(opencode): skips postinstall when already runnable" {
   local proj="$STUBDIR/ocok"; mkdir -p "$proj"
   _seed_usai
@@ -619,13 +633,13 @@ FACTS
   assert_regex "$(cat "$CALLS")" 'acq-opencode-kit'
 }
 
-@test "agent-kits: explicit --kit suppresses implicit selection notice" {
+@test "agent-kits: explicit --kit still reports the selected agent kit" {
   local proj="$STUBDIR/agentkit-explicit"; mkdir -p "$proj"
   _seed_usai
   run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/team-opencode "$proj"
 
   assert_success
-  refute_output --partial 'built-in agent kit candidate'
+  assert_output --partial 'selected built-in agent kit: agent=opencode kit=opencode'
   local create_line; create_line=$(grep '^sbx create' "$CALLS")
   assert_regex "$create_line" '--kit /tmp/team-opencode'
   refute_regex "$create_line" 'acq-kits/opencode'
