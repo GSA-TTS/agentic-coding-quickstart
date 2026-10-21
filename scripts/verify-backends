@@ -351,6 +351,17 @@ fi
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
 USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 
+# Load the provider contract used by acq's backend adapters before the verifier
+# performs any provider-specific checks. The fallback remains available through
+# the shared loader for older provider kits.
+load_provider_facts() {
+  # shellcheck disable=SC1090
+  ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
+  acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+  USAI_HOST="$USAI_PROVIDER_HOST"
+  USAI_MODELS_URL="$USAI_PROVIDER_MODELS_URL"
+}
+
 # ---------------------------------------------------------------------------
 # GitHub token seeding for the private-repo playbook kit.
 # ---------------------------------------------------------------------------
@@ -501,13 +512,13 @@ seed_usai_secret() {
   # `secret has -g usai` keeps returning 1, and every sbx check skips forever.
   # Match only a row in the "(global)" scope column.
   if [ "$backend" = "sbx" ]; then
-    if ! sbx secret ls 2>/dev/null | awk '
+    if ! sbx secret ls 2>/dev/null | USAI_PROVIDER_KEY_ENV="$USAI_PROVIDER_KEY_ENV" awk '
          $1 == "(global)" {
-           for (i = 2; i <= NF; i++) if ($i == "USAI_API_KEY") { found = 1; exit }
+           for (i = 2; i <= NF; i++) if ($i == ENVIRON["USAI_PROVIDER_KEY_ENV"]) { found = 1; exit }
          }
          END { exit(found ? 0 : 1) }
        '; then
-      sbx secret set-custom --host "$USAI_HOST" --env USAI_API_KEY \
+      sbx secret set-custom --host "$USAI_HOST" --env "$USAI_PROVIDER_KEY_ENV" \
         --value "$VERIFY_USAI_DUMMY" >/dev/null 2>&1 || true
     fi
   fi
@@ -602,6 +613,11 @@ check_usai_reachability() {
     ustatus="$LAST_OUT"
     case "$ustatus" in
       [0-9][0-9][0-9])
+        if [ "$ustatus" = "000" ]; then
+          fail "${backend}: USAi host not reachable from guest (egress/net-rule?)"
+          dump "curl output" "$LAST_OUT"
+          return 0
+        fi
         pass "${backend}: USAi host reachable from guest (HTTP $ustatus; auth rewritten on wire)"
         ;;
       *)
@@ -645,6 +661,11 @@ verify_backend() {
       fi
       ;;
   esac
+
+  if ! load_provider_facts; then
+    fail "${backend}: provider facts could not be loaded"
+    return
+  fi
 
   # Derive the sandbox name the same way acq does (agent "shell" + workspace
   # basename), by sourcing common.sh's derive_name. This mirrors the acq run/
