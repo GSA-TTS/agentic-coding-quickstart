@@ -595,6 +595,27 @@ verify_sbx_grammar_acceptance() {
   fi
 }
 
+check_usai_reachability() {
+  local backend="$1" name="$2" rc ustatus
+  if run_acq "exec usai-reach" --backend "$backend" exec "$name" -- sh -c \
+      "curl -sS -o /dev/null -w '%{http_code}' --max-time 15 $USAI_MODELS_URL"; then
+    ustatus="$LAST_OUT"
+    case "$ustatus" in
+      [0-9][0-9][0-9])
+        pass "${backend}: USAi host reachable from guest (HTTP $ustatus; auth rewritten on wire)"
+        ;;
+      *)
+        fail "${backend}: USAi host did not return an HTTP status"
+        dump "curl output" "$LAST_OUT"
+        ;;
+    esac
+  else
+    rc=$?
+    fail "${backend}: USAi reachability command failed (exit ${rc})"
+    dump "curl output" "$LAST_OUT"
+  fi
+}
+
 verify_backend() {
   local backend="$1"
   echo ""
@@ -718,20 +739,7 @@ verify_backend() {
   else
     skip "${backend}: USAi key not seeded by verifier"
   fi
-  run_acq "exec usai-reach" --backend "$backend" exec "$name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' --max-time 15 $USAI_MODELS_URL"
-  local ustatus="$LAST_OUT"
-  case "$ustatus" in
-    000|*"resolve"*|*"curl:"*|"")
-      fail "${backend}: USAi host not reachable from guest (egress/net-rule?)"
-      dump "curl output" "$LAST_OUT"
-      printf '        note: with kit net-rules, egress is default-deny; the models\n' >&2
-      printf '              host must be allow-listed AND DNS must resolve. See ADR-0011.\n' >&2
-      ;;
-    *)
-      pass "${backend}: USAi host reachable from guest (HTTP $ustatus; auth rewritten on wire)"
-      ;;
-  esac
+  check_usai_reachability "$backend" "$name"
 
   # 3) git-ssh-sign config present (system gitconfig has gpg.format ssh).
   if run_acq "exec gpg-format" --backend "$backend" exec "$name" -- sh -c \
