@@ -59,7 +59,7 @@ ACQ_BACKEND_NAME="msb"
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_PORT_FORWARD=1        # post-hoc publish via `msb ssh serve` + OpenSSH -L forwarding (ADR-0015)
 # shellcheck disable=SC2034
-ACQ_BACKEND_SUPPORTS_SNAPSHOTS=1           # acq surfaces native msb snapshot/restore (full state + restore-time resource rebinding)
+ACQ_BACKEND_SUPPORTS_SNAPSHOTS=1           # acq surfaces msb disk-state snapshot/restore (cold-boot restore + restore-time resource rebinding)
 # shellcheck disable=SC2034
 ACQ_BACKEND_CAN_RESUME=1                   # msb stop / msb start preserve state
 # shellcheck disable=SC2034
@@ -1237,7 +1237,7 @@ _acq_msb_restore_resource_flags_into() { # ARRVAR SNAPSHOT
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_snapshot NAME [OUT] — create a native full-state msb snapshot
+# acq_backend_snapshot NAME [OUT] — create a disk-state msb snapshot (cold-boot recoverable)
 # ---------------------------------------------------------------------------
 acq_backend_snapshot() {
   local _name="${1:-}" _out="${2:-}"

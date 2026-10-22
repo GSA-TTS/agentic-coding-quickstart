@@ -220,9 +220,10 @@ acq exec my-sandbox -- <cmd>   # run a one-off command in the sandbox
 ```
 
 Unlike sbx, msb **can** stop and resume detached long-running sandboxes. It also
-supports `acq snapshot` / `acq restore` via msb's native snapshot/restore path;
-acq restores snapshots with external workspace mounts using disk-only boot plus
-explicit resource re-binding to avoid stale virtio-fs device state. sbx remains
+supports `acq snapshot` / `acq restore` via msb's disk-state snapshot/restore
+path; every restore is a cold boot from saved disk state. Snapshots with
+acq-managed external workspace mounts use explicit disk-only mode and re-apply
+kits after restore to avoid stale virtio-fs device state. sbx remains
 unsupported for those acq verbs because its local template flow is
 disk-only/fresh-boot.
 

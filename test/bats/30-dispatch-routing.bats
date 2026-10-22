@@ -162,18 +162,25 @@ FACTS
   refute_output --partial 'passed through'
 }
 
-@test "snapshot/restore: --help documents acq-owned native state verbs" {
+@test "snapshot/restore: --help documents acq-owned disk-state verbs (no memory/live-state claims)" {
   run env ACQ_BACKEND=sbx "$ACQ" snapshot --help
-  assert_output --partial 'save a sandbox'
+  assert_output --partial 'durable disk state'
+  assert_output --partial 'cold-boots'
   assert_output --partial 'backends fail closed'
+  refute_output --partial 'live state'
+  refute_output --partial 'execution, and device'
   refute_output --partial 'passed through'
   run env ACQ_BACKEND=sbx "$ACQ" restore --help
-  assert_output --partial 're-plumb acq-owned resources'
+  assert_output --partial 'cold boot'
+  assert_output --partial 'disk image'
   assert_output --partial 'host-resource re-plumbing'
+  refute_output --partial 'live state'
   refute_output --partial 'passed through'
   run env ACQ_BACKEND=sbx "$ACQ" recreate --help
-  assert_output --partial 'snapshot, remove, then restore'
-  assert_output --partial 'acq-owned host-resource re-plumbing'
+  assert_output --partial 'disk state'
+  assert_output --partial 'cold-boot'
+  assert_output --partial 'host-resource re-plumbing'
+  refute_output --partial 'live state'
   refute_output --partial 'passed through'
 }
 

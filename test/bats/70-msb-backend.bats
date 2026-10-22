@@ -73,7 +73,7 @@ _sha256() {
   assert_output --partial 'msb'
 }
 
-@test "msb: advertises SUPPORTS_SNAPSHOTS=1 because acq surfaces native snapshot/restore" {
+@test "msb: advertises SUPPORTS_SNAPSHOTS=1 because acq surfaces disk-state snapshot/restore" {
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh"; printf "%s" "$ACQ_BACKEND_SUPPORTS_SNAPSHOTS"'
   assert_output '1'
 }
@@ -155,11 +155,11 @@ _sha256() {
   [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
 }
 
-@test "msb: full-state restore does not re-run kit startup" {
+@test "msb: restore without external workspace mounts cold-boots without kit startup" {
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
-  : > "$STUBDIR/full-state.msb"
+  : > "$STUBDIR/disk-state.msb"
   : > "$CALLS"
-  run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/full-state.msb"
+  run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/disk-state.msb"
   assert_success
   local log; log=$(cat "$CALLS")
   assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --vsock"
@@ -225,17 +225,17 @@ _sha256() {
 @test "sbx: snapshot/restore/recreate are acq-owned unsupported verbs, not backend passthrough" {
   run env ACQ_BACKEND=sbx "$ACQ" snapshot mybox
   assert_failure
-  assert_output --partial 'does not support stateful snapshots'
+  assert_output --partial 'does not support sandbox snapshots'
   refute_regex "$(cat "$CALLS")" 'sbx snapshot'
   : > "$CALLS"
   run env ACQ_BACKEND=sbx "$ACQ" restore restored "$STUBDIR/saved.sbx"
   assert_failure
-  assert_output --partial 'does not support stateful restore'
+  assert_output --partial 'does not support sandbox restore'
   refute_regex "$(cat "$CALLS")" 'sbx restore'
   : > "$CALLS"
   run env ACQ_BACKEND=sbx "$ACQ" recreate mybox
   assert_failure
-  assert_output --partial 'does not support stateful recreate'
+  assert_output --partial 'does not support sandbox recreate'
   refute_regex "$(cat "$CALLS")" 'sbx snapshot|sbx restore'
 }
 

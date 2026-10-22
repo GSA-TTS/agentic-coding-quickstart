@@ -91,7 +91,7 @@ Subcommands:
   create AGENT PATH [...]                  Create a sandbox (detached).
   ls                                       List sandboxes.
   stop NAME                                Stop a sandbox (without removing).
-  snapshot NAME [OUT]                      Snapshot a sandbox's live state (msb only).
+  snapshot NAME [OUT]                      Save durable disk state for a sandbox (msb only).
   restore NAME [SNAPSHOT]                  Restore a sandbox from SNAPSHOT, or
                                            the newest date-stamped snapshot (msb only).
   recreate NAME [OUT]                      Snapshot, remove, then restore NAME
@@ -338,41 +338,49 @@ U
       ;;
     snapshot)
       cat >&2 <<'U'
-acq snapshot — save a sandbox's live state (msb only)
+acq snapshot — save durable disk state for a sandbox (msb only)
 
 Usage:
   acq snapshot NAME [OUT]
 
-Creates a full native snapshot archive of NAME. On msb this captures disk,
-memory, execution, and device state. OUT is optional; when omitted, acq writes a
+Creates a disk-state snapshot archive of NAME. Restore always cold-boots from
+the saved disk image; in-flight process state is not preserved. When the snapshot
+includes acq-managed external workspace mounts, restore uses disk-only mode and
+re-applies kits via the exec-heal path; otherwise the sandbox cold-boots with its
+registered startup scripts. OUT is optional; when omitted, acq writes a
 date-stamped .msb archive under its snapshot state directory. Unsupported
 backends fail closed with a clear message.
 U
       ;;
     restore)
       cat >&2 <<'U'
-acq restore — restore a native snapshot and re-plumb acq-owned resources (msb only)
+acq restore — restore a disk-state snapshot and re-plumb acq-owned resources (msb only)
 
 Usage:
   acq restore NAME [SNAPSHOT]
 
-Restores NAME from SNAPSHOT. When SNAPSHOT is omitted, acq selects the newest
-date-stamped snapshot for NAME from its snapshot state directory. acq owns
-host-resource re-plumbing: it derives the current host SSH-agent vsock route and
-asks the backend to inherit validated source-local resources, rather than
-requiring the user to pass vsock/volume/port flags by hand. Unsupported backends
-fail closed with a clear message.
+Restores NAME from SNAPSHOT as a cold boot: the guest starts fresh from the
+saved disk image (no in-flight process state is recovered). When the snapshot
+includes acq-managed external workspace mounts, acq uses disk-only mode and
+re-applies kits via the exec-heal path after restore. When SNAPSHOT is omitted,
+acq selects the newest date-stamped snapshot for NAME from its snapshot state
+directory. acq owns host-resource re-plumbing: it derives the current host
+SSH-agent vsock route and asks the backend to inherit validated source-local
+resources, rather than requiring the user to pass vsock/volume/port flags by
+hand. Unsupported backends fail closed with a clear message.
 U
       ;;
     recreate)
       cat >&2 <<'U'
-acq recreate — snapshot, remove, then restore a sandbox (msb only)
+acq recreate — save disk state, remove, then cold-boot restore a sandbox (msb only)
 
 Usage:
   acq recreate NAME [OUT]
 
-Creates a full native snapshot archive, removes NAME, then restores the archive
-back to NAME with acq-owned host-resource re-plumbing. OUT defaults to an acq
+Saves a disk-state snapshot archive of NAME, removes NAME, then restores it as a
+cold boot (no in-flight process state is recovered). When the snapshot includes
+acq-managed external workspace mounts, kits are re-applied via the exec-heal
+path after restore. acq owns host-resource re-plumbing. OUT defaults to an acq
 state directory and is left in place if restore fails.
 U
       ;;
@@ -415,8 +423,9 @@ Usage:
   acq rm --snapshot NAME [OUT]
 
 Destroys the sandbox and all of its state (including uncommitted work in it).
-With --snapshot, acq first writes a full native snapshot archive and removes the
-sandbox only if that snapshot succeeds. Unsupported backends fail closed.
+With --snapshot, acq first saves a durable disk-state snapshot archive (cold-boot
+recoverable) and removes the sandbox only if that snapshot succeeds. Unsupported
+backends fail closed.
 U
       ;;
     exec)
@@ -1509,8 +1518,8 @@ case "$subcommand" in
   snapshot)
     shift
     if ! command -v acq_backend_snapshot >/dev/null 2>&1; then
-      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support stateful snapshots." >&2
-      echo "     This verb requires a native full-state snapshot/restore primitive." >&2
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support sandbox snapshots." >&2
+      echo "     This verb requires native disk-state snapshot/restore support." >&2
       exit 1
     fi
     acq_backend_prepare
@@ -1531,7 +1540,7 @@ case "$subcommand" in
   restore)
     shift
     if ! command -v acq_backend_restore >/dev/null 2>&1; then
-      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support stateful restore." >&2
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support sandbox restore." >&2
       echo "     This verb requires native restore with host-resource rebinding." >&2
       exit 1
     fi
@@ -1565,8 +1574,8 @@ case "$subcommand" in
     shift
     if ! command -v acq_backend_snapshot >/dev/null 2>&1 \
         || ! command -v acq_backend_restore >/dev/null 2>&1; then
-      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support stateful recreate." >&2
-      echo "     This verb requires native full-state snapshot/restore." >&2
+      echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support sandbox recreate." >&2
+      echo "     This verb requires native disk-state snapshot/restore." >&2
       exit 1
     fi
     acq_backend_prepare
@@ -1681,7 +1690,7 @@ case "$subcommand" in
     shift
     if [ "$snapshot_first" -eq 1 ]; then
       if ! command -v acq_backend_snapshot >/dev/null 2>&1; then
-        echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support stateful snapshots." >&2
+        echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not support sandbox snapshots." >&2
         echo "     Cannot run 'acq rm --snapshot' on this backend." >&2
         exit 1
       fi
