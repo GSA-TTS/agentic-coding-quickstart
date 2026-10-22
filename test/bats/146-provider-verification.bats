@@ -10,16 +10,18 @@ setup() { acq_setup_stubs; }
 teardown() { acq_teardown_stubs; }
 
 _check_reachability_harness() {
+  export REPO_ROOT
   cat <<'PRELUDE'
     set -u
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    source "$REPO_ROOT/scripts/verify-backends"
     PASS=0 FAIL=0 LAST_OUT="" LAST_ARGS=""
     pass() { PASS=$((PASS + 1)); }
     fail() { FAIL=$((FAIL + 1)); printf 'FAIL=%s\n' "$1"; }
     dump() { :; }
     run_acq() { LAST_ARGS="$*"; LAST_OUT="$FAKE_OUTPUT"; return "${FAKE_RC:-0}"; }
 PRELUDE
-  awk '/^check_usai_reachability\(\) \{$/,/^\}$/ { print }' \
-    "$REPO_ROOT/scripts/verify-backends"
 }
 
 @test "provider verification: failed reachability command is a failure" {
@@ -76,15 +78,16 @@ PRELUDE
     USAI_SEEDED_FOR=
     LAST_OUT=
     CALLS="'"$calls"'"
-    run_acq() { return 0; }
     sbx() {
       case "${1:-} ${2:-}" in
         "secret ls") printf "CUSTOM SECRETS\nSCOPE TARGETS ENV PLACEHOLDER\n" ;;
         "secret set-custom") printf "set-custom %s\n" "$*" >> "$CALLS" ;;
       esac
     }
-    source="$(awk "/^seed_usai_secret\(\) \{$/,/^}$/" "'"$REPO_ROOT"'/scripts/verify-backends")"
-    eval "$source"
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    run_acq() { return 0; }
     seed_usai_secret sbx box
   '
   assert_success
@@ -104,16 +107,17 @@ PRELUDE
     USAI_PROVIDER_KEY_ENV=CUSTOM_API_KEY
     USAI_SEEDED_FOR=
     CALLS="'"$calls"'"
-    run_acq() { return 0; }
     sbx() {
       case "${1:-} ${2:-}" in
         "secret ls") printf "CUSTOM SECRETS\nSCOPE TARGETS ENV PLACEHOLDER\n(global) custom.example.gov CUSTOM_API_KEY placeholder\n" ;;
         "secret set-custom") printf "unexpected seed\n" >> "$CALLS" ;;
       esac
     }
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    run_acq() { return 0; }
     _sbx_secret_has_global_row() { return 0; }
-    source="$(awk "/^seed_usai_secret\(\) \{$/,/^}$/" "'"$REPO_ROOT"'/scripts/verify-backends")"
-    eval "$source"
     seed_usai_secret sbx box
   '
   assert_success
@@ -129,16 +133,80 @@ PRELUDE
   assert_success
 }
 
+@test "provider verification: projected provider facts drive the reachability input" {
+  run bash -c '
+    set -u
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    ACQ=/dev/null
+    USAI_KIT="$STUBDIR/provider-kit"
+    acq_provider_facts_load_from_kit_or_fallback() {
+      USAI_PROVIDER_HOST=models.example.gov
+      USAI_PROVIDER_MODELS_URL=https://models.example.gov/v2/catalog
+      USAI_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
+    }
+    load_provider_facts
+    FAKE_OUTPUT=200 FAKE_RC=0 LAST_ARGS=
+    run_acq() { LAST_ARGS="$*"; LAST_OUT="$FAKE_OUTPUT"; return "$FAKE_RC"; }
+    check_usai_reachability msb box "$USAI_MODELS_URL"
+    case "$LAST_ARGS" in
+      *"verify https://models.example.gov/v2/catalog"*) ;;
+      *) printf "unexpected projected input: %s\n" "$LAST_ARGS"; exit 1 ;;
+    esac
+  '
+  assert_success
+}
+
+@test "provider verification: malformed provider facts fail closed before reachability" {
+  run bash -c '
+    set -u
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    ACQ=/dev/null
+    USAI_KIT="$STUBDIR/provider-kit"
+    acq_provider_facts_load_from_kit_or_fallback() {
+      printf invalid-provider-facts-artifact\\n >&2
+      USAI_PROVIDER_HOST=""
+      USAI_PROVIDER_MODELS_URL=""
+      return 1
+    }
+    if load_provider_facts; then
+      printf "unexpected provider facts success\n"
+      exit 1
+    fi
+    printf "provider facts rejected\n"
+  '
+  assert_success
+  assert_output --partial 'invalid-provider-facts-artifact'
+  assert_output --partial 'verify-backends: provider facts could not be loaded from'
+  assert_output --partial 'provider facts rejected'
+}
+
+@test "provider verification: acq source failure is actionable and does not fall through" {
+  run bash -c '
+    set -u
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    ACQ="$STUBDIR/missing-acq"
+    load_provider_facts 2>"$STUBDIR/diagnostics"; rc=$?
+    cat "$STUBDIR/diagnostics"
+    exit "$rc"
+  '
+  assert_failure
+  assert_output --partial 'verify-backends: unable to source acq from'
+  refute_output --partial 'acq_provider_facts_load_from_kit_or_fallback: command not found'
+}
+
 @test "provider verification: seeded credential is required for an installed backend" {
   run bash -c '
     set -u
     REPO_ROOT="'"$REPO_ROOT"'"
-    source="$(awk "/^seed_usai_secret\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
-    require_source="$(awk "/^require_usai_seed\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
-    status_source="$(awk "/^verification_succeeded\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
-    eval "$source"
-    eval "$require_source"
-    eval "$status_source"
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "$REPO_ROOT/scripts/verify-backends"
     VERIFY_USAI_DUMMY=synthetic
     USAI_HOST=api.example.gov
     USAI_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
@@ -184,10 +252,9 @@ PRELUDE
 @test "provider verification: lost post-provision binding fails and cleans up" {
   run bash -c '
     REPO_ROOT="'"$REPO_ROOT"'"
-    cleanup_source="$(awk "/^cleanup_failed_backend_verification\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
-    status_source="$(awk "/^verification_succeeded\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
-    eval "$cleanup_source"
-    eval "$status_source"
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "$REPO_ROOT/scripts/verify-backends"
     FAIL=1 KEEP="" CALLS=""
     unseed_usai_secret() { CALLS="${CALLS} usai:$1:$2"; }
     unseed_github_secret() { CALLS="${CALLS} github:$1:$2"; }
