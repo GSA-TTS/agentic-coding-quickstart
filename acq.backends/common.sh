@@ -445,17 +445,20 @@ acq_provider_facts_use_fallback() {
 
 acq_provider_facts_load_from_kit_or_fallback() {
   local provider_facts_rc
-  local _acq_saved_ifs="$IFS"
+  local IFS
 
   # Keep the loader in this shell so validated provider assignments persist, but
   # invoke it as a condition so caller errexit cannot skip status handling.
   # Diagnostics flow directly to stderr; no temporary file or trap is needed.
+  # Use 'local IFS' (Bash 3.2-safe dynamic scoping) to preserve the caller's
+  # IFS state (including when intentionally unset under 'set -u'). The local
+  # declaration auto-restores the caller's IFS on function exit, avoiding
+  # explicit snapshot/restore that fails when IFS is unset.
   if acq_provider_facts_load_from_kit "$@"; then
     provider_facts_rc=0
   else
     provider_facts_rc=$?
   fi
-  IFS="$_acq_saved_ifs"
 
   case "$provider_facts_rc" in
     0) : ;;

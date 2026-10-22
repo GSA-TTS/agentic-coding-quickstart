@@ -388,3 +388,40 @@ SPEC
   assert_failure
   assert_regex "$(printf '%s\n' "${KITS[@]}")" '/tmp/opencode'
 }
+
+@test "provider-facts: wrapper preserves unset caller IFS under set -u" {
+  load_acq
+
+  (
+    set -u
+    unset IFS
+    acq_provider_facts_load_from_kit() {
+      IFS='|'
+      USAI_PROVIDER_HOST="loaded.example.gov"
+      USAI_PROVIDER_FACTS_SOURCE="loaded"
+      return 0
+    }
+
+    acq_provider_facts_load_from_kit_or_fallback kit cache
+
+    [ -z "${IFS+x}" ]
+    [ "$USAI_PROVIDER_HOST" = "loaded.example.gov" ]
+    [ "$USAI_PROVIDER_FACTS_SOURCE" = "loaded" ]
+  )
+}
+
+@test "provider-facts: fallback preserves unset caller IFS under set -u" {
+  load_acq
+
+  (
+    set -u
+    unset IFS
+    acq_provider_facts_load_from_kit() { IFS='|'; return 2; }
+
+    acq_provider_facts_load_from_kit_or_fallback kit cache
+
+    [ -z "${IFS+x}" ]
+    [ "$USAI_PROVIDER_HOST" = "api.gsa.usai.gov" ]
+    [ "$USAI_PROVIDER_FACTS_SOURCE" = "fallback" ]
+  )
+}
