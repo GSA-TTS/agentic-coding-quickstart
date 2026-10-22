@@ -37,6 +37,7 @@ _env_merge_provision() {
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     ZSCALER_KIT=k1; USAI_KIT=k2; PLAYBOOK_KIT=k3; GITSSHSIGN_KIT=k4
     nk="'"$STUBDIR"'/mergenokit"; mkdir -p "$nk"
     printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" > "$nk/spec.yaml"

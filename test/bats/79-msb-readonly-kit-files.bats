@@ -91,6 +91,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision rocodebox shell /tmp >/dev/null 2>&1
   '
@@ -122,6 +123,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision rocode2box shell /tmp >/dev/null 2>&1
   '
@@ -145,6 +147,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     _acq_msb_apply_kit_dir legacyrobox "'"$k"'" 2>&1
   '
   assert_success
@@ -184,6 +187,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision romountbox shell /tmp >/dev/null 2>&1
   '

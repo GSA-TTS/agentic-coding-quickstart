@@ -59,11 +59,32 @@ MSB_GITHUB_SECRET_BINDING="GITHUB_TOKEN@github.com,api.github.com,codeload.githu
 export ACQ_SBX_KIT_PASSTHROUGH=1
 export ACQ_TEST_STUB_PROVIDER_INPUT=1
 
-# Some child-process tests intentionally replace HOME to isolate git identity.
-# Preserve the validator dependency path resolved before that replacement, or
-# Python disables the real user's site-packages and cannot import jsonschema.
-_ACQ_TEST_JSONSCHEMA_SITE=$(python3 -c 'import jsonschema, pathlib; print(pathlib.Path(jsonschema.__file__).parent.parent)')
-export PYTHONPATH="${_ACQ_TEST_JSONSCHEMA_SITE}${PYTHONPATH:+:$PYTHONPATH}"
+# Adapter-only subprocess tests intentionally avoid loading common.sh. Provide
+# their projection boundary explicitly so they exercise the adapter behavior
+# without fetching a release or invoking a host Python runtime.
+acq_test_stub_provider_input_boundary() {
+  acq_provider_input_root() { printf '%s/provider-input/%s/%s\n' "$ACQ_PROVENANCE_DIR" "$1" "$2"; }
+  acq_provider_input_project() {
+    local root
+    root=$(acq_provider_input_root "$1" "$2") || return 1
+    mkdir -p "$root/generations/empty/models/providers" || return 1
+    ln -sfn generations/empty "$root/current"
+  }
+  acq_provider_input_remove() { rm -rf "$(acq_provider_input_root "$1" "$2")"; }
+  acq_provider_input_lock_acquire() {
+    local lock="$ACQ_PROVENANCE_DIR/provider-input-lock-$1-$2"
+    mkdir -p "$ACQ_PROVENANCE_DIR" || return 1
+    mkdir "$lock" 2>/dev/null || return 1
+    printf '%s\n' "$lock"
+  }
+  acq_provider_input_lock_release() { rmdir "$1" 2>/dev/null || true; }
+  acq_provider_input_msb_mount() {
+    printf '%s:%s:ro\n' "$(acq_provider_input_root msb "$1")" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}"
+  }
+  acq_provider_input_guest_root() { printf '%s/current\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}"; }
+  acq_provider_input_sbx_mount() { printf '%s:ro\n' "$(acq_provider_input_root sbx "$1")"; }
+}
+export -f acq_test_stub_provider_input_boundary
 
 # msb equivalent: resolve every REMOTE kit ref to a local empty spec dir instead
 # of a real git fetch. This keeps the suite network-free for the msb

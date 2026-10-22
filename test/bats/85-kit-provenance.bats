@@ -209,6 +209,7 @@ STUB
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/note-secrets"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
+    acq_test_stub_provider_input_boundary
     printf "sk\n" | acq_secret_store "$(_acq_secret_key usai)"
     export SSH_AUTH_SOCK="'"$STUBDIR"'/does-not-matter.sock"
     acq_backend_provision notebox shell /tmp 2>&1 >/dev/null
@@ -223,6 +224,7 @@ STUB
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/quiet-secrets"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
+    acq_test_stub_provider_input_boundary
     printf "sk\n" | acq_secret_store "$(_acq_secret_key usai)"
     unset SSH_AUTH_SOCK
     acq_backend_provision quietbox shell /tmp 2>&1 >/dev/null

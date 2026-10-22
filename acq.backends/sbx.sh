@@ -679,7 +679,7 @@ _acq_backend_provision_unlocked() {
 
 acq_backend_provision() {
   ( local lock rc; lock=$(acq_provider_input_lock_acquire sbx "$1") || exit 1
-    trap 'rc=$?; acq_provider_input_lock_release "$lock" || true; exit "$rc"' EXIT
+    trap 'rc=$?; acq_provider_input_lock_release "${lock:-}" || true; exit "$rc"' EXIT
     trap 'exit 128' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
     _acq_backend_provision_unlocked "$@"; rc=$?; exit "$rc" )
 }
@@ -989,7 +989,7 @@ _acq_backend_terminate_unlocked() {
 
 acq_backend_terminate() {
   ( local lock rc; lock=$(acq_provider_input_lock_acquire sbx "$1") || exit 1
-    trap 'rc=$?; acq_provider_input_lock_release "$lock" || true; exit "$rc"' EXIT
+    trap 'rc=$?; acq_provider_input_lock_release "${lock:-}" || true; exit "$rc"' EXIT
     trap 'exit 128' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
     _acq_backend_terminate_unlocked "$@"; rc=$?; exit "$rc" )
 }

@@ -426,6 +426,14 @@ case "${1:-}" in
 esac
 STUB
   chmod +x "$STUBDIR/sbx"
+  cat >"$STUBDIR/python3" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */validate_provider_input_contract.py) exit 0 ;;
+  *) exec /usr/bin/python3 "$@" ;;
+esac
+STUB
+  chmod +x "$STUBDIR/python3"
   local proj="$STUBDIR/startup-race-proj"; mkdir -p "$proj"
   printf 'sk-test\n' | env ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
   seed_sbx_usai_proxy_fixture
