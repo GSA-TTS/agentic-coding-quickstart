@@ -255,6 +255,7 @@ SPEC
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/kit-translate.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     seed_host_config msb midlifebox
     acq_backend_apply_kit midlifebox "$mk" >/dev/null 2>&1 )
   local bg; bg=$(printf '%s\n' "$(cat "$CALLS")" | grep 'nohup' | head -n1)
@@ -277,6 +278,7 @@ SPEC
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/kit-translate.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     # shellcheck disable=SC2034  # read by the sourced acq_backend_ensure_kits_applied
     ACQ_CLI_KITS=()
     nk="$STUBDIR/healmergenokit"; mkdir -p "$nk"
@@ -401,6 +403,7 @@ OTHER_KIT_VAR=kept'
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/kit-translate.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     seed_host_config msb lostappendbox
     acq_backend_apply_kit lostappendbox "$mk" >/dev/null 2>&1 )
   local bg; bg=$(printf '%s\n' "$(cat "$CALLS")" | grep 'nohup' | head -n1)

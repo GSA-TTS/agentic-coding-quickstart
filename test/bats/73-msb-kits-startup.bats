@@ -26,6 +26,7 @@ load 'helper'
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     mk="'"$STUBDIR"'/multikit"; mkdir -p "$mk/files/home"
     printf "A\n" > "$mk/files/home/file_one"
     printf "B\n" > "$mk/files/home/file_two"
@@ -72,6 +73,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     ek="'"$STUBDIR"'/envkit"; mkdir -p "$ek"
     cat >"$ek/spec.yaml" <<'"'"'SPEC'"'"'
 schemaVersion: "hybrid/v1"
@@ -105,6 +107,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     nsk="'"$STUBDIR"'/noscriptkit"; mkdir -p "$nsk"
     cat >"$nsk/spec.yaml" <<'"'"'SPEC'"'"'
 schemaVersion: "hybrid/v1"
@@ -138,6 +141,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     imk="'"$STUBDIR"'/instmarkerkit"; mkdir -p "$imk"
     cat >"$imk/spec.yaml" <<'"'"'SPEC'"'"'
 schemaVersion: "hybrid/v1"
@@ -172,6 +176,7 @@ _provision_staged() { # NAME STAGE_SUBDIR PRE_SNIPPET
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     eval "$pre"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     acq_backend_provision "$name" shell /tmp >/dev/null 2>&1
   ' _ "$name" "$stage" "$pre"
 }
@@ -187,6 +192,7 @@ _staged_body() { cat "$(find "$STUBDIR/$1" -type f 2>/dev/null | head -n1)" 2>/d
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     suk="'"$STUBDIR"'/startupkit"; mkdir -p "$suk"
     cat >"$suk/spec.yaml" <<'"'"'SPEC'"'"'
 schemaVersion: "hybrid/v1"
@@ -224,6 +230,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     bsk="'"$STUBDIR"'/bgstartupkit"; mkdir -p "$bsk"
     cat >"$bsk/spec.yaml" <<'"'"'SPEC'"'"'
 schemaVersion: "hybrid/v1"
@@ -254,6 +261,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     nsk2="'"$STUBDIR"'/nostartupkit"; mkdir -p "$nsk2"
     cat >"$nsk2/spec.yaml" <<'"'"'SPEC'"'"'
 schemaVersion: "hybrid/v1"
@@ -281,6 +289,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     mxk="'"$STUBDIR"'/mixkit"; mkdir -p "$mxk"
     cat >"$mxk/spec.yaml" <<'"'"'SPEC'"'"'
 schemaVersion: "hybrid/v1"
@@ -326,6 +335,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     printf "SUPER_SECRET_VALUE_0017\n" | acq_secret_store "$(_acq_secret_key usai injbox)" >/dev/null 2>&1
     injk="'"$STUBDIR"'/injstartupkit"; mkdir -p "$injk"
     cat >"$injk/spec.yaml" <<'"'"'SPEC'"'"'
@@ -364,6 +374,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     fdk="'"$STUBDIR"'/fidelkit"; mkdir -p "$fdk"
     cat >"$fdk/spec.yaml" <<'"'"'SPEC'"'"'
 schemaVersion: "hybrid/v1"
@@ -401,6 +412,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     mk1="'"$STUBDIR"'/multikit1"; mkdir -p "$mk1"
     cat >"$mk1/spec.yaml" <<'"'"'SPEC'"'"'
 schemaVersion: "hybrid/v1"
@@ -458,6 +470,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     nmk="'"$STUBDIR"'/namedkit"; mkdir -p "$nmk"
     cat >"$nmk/spec.yaml" <<'"'"'SPEC'"'"'
 schemaVersion: "hybrid/v1"
@@ -497,6 +510,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     # The kit with the startup command is fetched FIRST (it stakes the single
     # script name), and the kit declaring the env comes LATER — the order that
     # fails without a pre-pass over the full kit set.
@@ -562,6 +576,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     sk="'"$STUBDIR"'/gvstagekit"; mkdir -p "$sk"
     cat >"$sk/spec.yaml" <<'"'"'SPEC'"'"'
 schemaVersion: "hybrid/v1"
