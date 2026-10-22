@@ -56,7 +56,9 @@ SPEC
 @test "dispatch: create fails closed when selected provider inputs cannot be fetched" {
   local proj="$STUBDIR/provider-facts-offline"; mkdir -p "$proj"
   rm -f "$STUBDIR/.msb_created"
-  run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
+  # This case deliberately exercises the real projection boundary: the global
+  # empty-projection seam would otherwise mask the failed remote-kit fetch.
+  run env -u ACQ_PROVIDER_INPUT_PYTHON ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
     STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
   assert_failure
   assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
@@ -595,12 +597,12 @@ FACTS
 }
 
 @test "kit-flag: run form also intercepts --kit" {
-  local proj="$STUBDIR/kitproj4"; mkdir -p "$proj"
+  local proj="$STUBDIR/kitproj4" kit="$STUBDIR/runkit"; mkdir -p "$proj" "$kit"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/runkit "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit "$kit" "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" '--kit /tmp/runkit'
-  refute_regex "$create_line" "$proj --kit /tmp/runkit"
+  assert_regex "$create_line" "--kit $kit"
+  refute_regex "$create_line" "$proj --kit $kit"
 }
 
 @test "kit-flag: a --kit after -- belongs to the agent, not the kit list" {
@@ -634,14 +636,14 @@ FACTS
 }
 
 @test "agent-kits: explicit --kit still reports the selected agent kit" {
-  local proj="$STUBDIR/agentkit-explicit"; mkdir -p "$proj"
+  local proj="$STUBDIR/agentkit-explicit" kit="$STUBDIR/team-opencode"; mkdir -p "$proj" "$kit"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/team-opencode "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit "$kit" "$proj"
 
   assert_success
   assert_output --partial 'selected built-in agent kit: agent=opencode kit=opencode'
   local create_line; create_line=$(grep '^sbx create' "$CALLS")
-  assert_regex "$create_line" '--kit /tmp/team-opencode'
+  assert_regex "$create_line" "--kit $kit"
   refute_regex "$create_line" 'acq-kits/opencode'
 }
 

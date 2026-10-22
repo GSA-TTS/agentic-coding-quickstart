@@ -294,7 +294,7 @@ SPEC
   acq_host_config_write() { return 1; }
 
   run env ACQ_MSB_KIT_PASSTHROUGH=1 \
-    bash -c '. "$1/acq.backends/common.sh"; . "$1/acq.backends/msb.sh"; acq_host_config_write() { return 1; }; acq_backend_provision msbgenericstatefail opencode "$2"' \
+    bash -c '. "$1/acq.backends/common.sh"; . "$1/acq.backends/msb.sh"; acq_test_stub_provider_input_boundary; acq_host_config_write() { return 1; }; acq_backend_provision msbgenericstatefail opencode "$2"' \
     _ "$REPO_ROOT" "$proj"
 
   assert_failure
@@ -307,7 +307,7 @@ SPEC
   _mk_repo "$proj"
 
   run env ACQ_MSB_KIT_PASSTHROUGH=1 \
-    bash -c '. "$1/acq.backends/common.sh"; . "$1/acq.backends/msb.sh"; _acq_msb_apply_kit_dir() { return 1; }; acq_backend_provision msbgenerickitfail opencode "$2"' \
+    bash -c '. "$1/acq.backends/common.sh"; . "$1/acq.backends/msb.sh"; acq_test_stub_provider_input_boundary; _acq_msb_apply_kit_dir() { return 1; }; acq_backend_provision msbgenerickitfail opencode "$2"' \
     _ "$REPO_ROOT" "$proj"
 
   assert_failure
@@ -345,11 +345,11 @@ SPEC
 }
 
 @test "migration gate(sbx): run opencode keeps native clone, workspace markers, image template, and kit order" {
-  local proj="$STUBDIR/sbxproj"
-  _mk_repo "$proj"
+  local proj="$STUBDIR/sbxproj" env1="$STUBDIR/env-one" env2="$STUBDIR/env-two" cli1="$STUBDIR/cli-one"
+  _mk_repo "$proj"; mkdir -p "$env1" "$env2" "$cli1"
   _seed_sbx_usai
-  run env ACQ_BACKEND=sbx ACQ_EXTRA_KITS="/extra/env-one /extra/env-two" ACQ_IMAGE=ghcr.io/acq/migration:v1 \
-    STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" run opencode --clone --kit /extra/cli-one "$proj" -- --version
+  run env ACQ_BACKEND=sbx ACQ_EXTRA_KITS="$env1 $env2" ACQ_IMAGE=ghcr.io/acq/migration:v1 \
+    STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" run opencode --clone --kit "$cli1" "$proj" -- --version
   assert_success
 
   local line logical
@@ -359,7 +359,7 @@ SPEC
   assert_regex "$line" "--env ACQ_WORKSPACE=${logical}( |$)"
   assert_regex "$line" '--env ACQ_CLONE=1( |$)'
   assert_regex "$line" '--template ghcr\.io/acq/migration:v1'
-  assert_regex "$line" '--kit /extra/env-one .*--kit /extra/env-two .*--kit /extra/cli-one'
+  assert_regex "$line" "--kit $env1 .*--kit $env2 .*--kit $cli1"
   assert_regex "$(cat "$CALLS")" 'sbx run --name opencode-sbxproj opencode -- --version'
 }
 

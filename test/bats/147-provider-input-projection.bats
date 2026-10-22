@@ -2,7 +2,7 @@
 # Provider inputs are validated as one set, published as immutable generations,
 # and mounted without exposing the shared host-config directory.
 
-setup() { acq_setup_stubs; unset ACQ_TEST_STUB_PROVIDER_INPUT; load_acq; }
+setup() { acq_setup_stubs; unset ACQ_PROVIDER_INPUT_PYTHON; load_acq; }
 teardown() { acq_teardown_stubs; }
 
 load 'helper'
@@ -65,6 +65,23 @@ EOF
   ACQ_PROVIDER_INPUT_PYTHON="$STUBDIR/missing-python" run _acq_provider_input_python
   assert_failure 2
   assert_output --partial 'configured provider-input Python is not executable'
+}
+
+@test "adapter projection seam contains unsafe names before cleanup" {
+  local raw_parent sentinel root
+  raw_parent="$ACQ_PROVENANCE_DIR/provider-input/msb"
+  sentinel="$ACQ_PROVENANCE_DIR/provider-input/evil"
+  mkdir -p "$raw_parent" "$sentinel"
+  printf 'must-survive\n' > "$sentinel/sentinel"
+
+  acq_test_stub_provider_input_boundary
+  root=$(acq_provider_input_root msb '../evil')
+  [[ "$root" == "$raw_parent/.._evil."* ]]
+  acq_provider_input_project msb '../evil'
+  acq_provider_input_remove msb '../evil'
+
+  [ -f "$sentinel/sentinel" ]
+  [ ! -e "$root" ]
 }
 
 @test "failed validator dependency probe publishes nothing" {

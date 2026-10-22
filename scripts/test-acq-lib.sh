@@ -57,27 +57,50 @@ MSB_GITHUB_SECRET_BINDING="GITHUB_TOKEN@github.com,api.github.com,codeload.githu
 # translation) so the harness stays fully offline. The neutral→sbx-v2
 # translation itself is exercised separately (see the kit-translate section).
 export ACQ_SBX_KIT_PASSTHROUGH=1
-export ACQ_TEST_STUB_PROVIDER_INPUT=1
 
 # Adapter-only subprocess tests intentionally avoid loading common.sh. Provide
 # their projection boundary explicitly so they exercise the adapter behavior
 # without fetching a release or invoking a host Python runtime.
 acq_test_stub_provider_input_boundary() {
-  acq_provider_input_root() { printf '%s/provider-input/%s/%s\n' "$ACQ_PROVENANCE_DIR" "$1" "$2"; }
+  # Keep adapter-only child shells on the production root shape. In particular,
+  # names must never become raw path components before the cleanup seam runs.
+  acq_provider_input_root() {
+    local backend="${1:-}" name="${2:-}" safe_backend safe_name name_sum
+    [ -n "$backend" ] && [ -n "$name" ] || return 1
+    safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
+    safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+    name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+    printf '%s/provider-input/%s/%s.%s\n' "$ACQ_PROVENANCE_DIR" "$safe_backend" "$safe_name" "$name_sum"
+  }
   acq_provider_input_project() {
     local root
     root=$(acq_provider_input_root "$1" "$2") || return 1
     mkdir -p "$root/generations/empty/models/providers" || return 1
     ln -sfn generations/empty "$root/current"
   }
-  acq_provider_input_remove() { rm -rf "$(acq_provider_input_root "$1" "$2")"; }
+  acq_provider_input_remove() {
+    local backend="$1" name="$2" root parent expected_parent
+    root=$(acq_provider_input_root "$backend" "$name") || return 1
+    expected_parent="$ACQ_PROVENANCE_DIR/provider-input/$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')"
+    parent=${root%/*}
+    [ "$parent" = "$expected_parent" ] || return 1
+    case "$root" in "$expected_parent"/*.*) ;; *) return 1 ;; esac
+    [ ! -L "$root" ] || return 1
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+    rm -rf -- "$root"
+  }
   acq_provider_input_lock_acquire() {
-    local lock="$ACQ_PROVENANCE_DIR/provider-input-lock-$1-$2"
-    mkdir -p "$ACQ_PROVENANCE_DIR" || return 1
+    local root lock parent
+    root=$(acq_provider_input_root "$1" "$2") || return 1
+    parent=${root%/*}
+    mkdir -p "$parent" || return 1
+    lock="${root}.lock"
     mkdir "$lock" 2>/dev/null || return 1
     printf '%s\n' "$lock"
   }
-  acq_provider_input_lock_release() { rmdir "$1" 2>/dev/null || true; }
+  acq_provider_input_lock_release() {
+    case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
+  }
   acq_provider_input_msb_mount() {
     printf '%s:%s:ro\n' "$(acq_provider_input_root msb "$1")" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}"
   }
@@ -135,6 +158,20 @@ make_stubs() {
   : >"$CALLS"
   # Preserve the base PATH (with coreutils etc.) but prepend the stub dir.
   _STUB_BASE_PATH="${PATH}"
+
+  # Executable-dispatch tests exercise routing rather than the released Python
+  # validator. Keep them deterministic with an explicit test-only interpreter;
+  # test 147 unsets this and supplies its own validator runtime.
+  cat >"$STUBDIR/provider-python" <<'PYTHON'
+#!/bin/sh
+case "${1:-}" in
+  -c) exit 0 ;;
+  */validate_provider_input_contract.py) exit 0 ;;
+  *) exec /usr/bin/python3 "$@" ;;
+esac
+PYTHON
+  chmod +x "$STUBDIR/provider-python"
+  export ACQ_PROVIDER_INPUT_PYTHON="$STUBDIR/provider-python"
 
   cat >"$STUBDIR/sbx" <<'STUB'
 #!/usr/bin/env bash
@@ -586,8 +623,7 @@ KEYGENSTUB
   # still crosses the provider-input boundary. BASH_ENV installs the explicit
   # test boundary before they source that adapter, keeping those tests offline.
   cat > "$STUBDIR/bash-env" <<'BASH_ENV'
-if [ "${ACQ_TEST_STUB_PROVIDER_INPUT:-}" = 1 ] \
-  && command -v acq_test_stub_provider_input_boundary >/dev/null 2>&1; then
+if command -v acq_test_stub_provider_input_boundary >/dev/null 2>&1; then
   acq_test_stub_provider_input_boundary
 fi
 BASH_ENV
@@ -631,14 +667,6 @@ load_acq() {
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   # Build the kit list (normally called by acq_resolve_backend).
   _build_kit_list
-  if [ "${ACQ_TEST_STUB_PROVIDER_INPUT:-}" = 1 ]; then
-    acq_provider_input_project() {
-      local root
-      root=$(acq_provider_input_root "$1" "$2") || return 1
-      _acq_provider_input_safe_mkdir "$root/generations/empty/models/providers" || return 1
-      ln -sfn generations/empty "$root/current"
-    }
-  fi
   # Do NOT `set +e` here (the pre-ADR-0025 bespoke runner did): bats detects a
   # failing command via errexit inherited into the @test body, so disabling it
   # in setup() makes every assertion in the suite pass vacuously (#381 review).
