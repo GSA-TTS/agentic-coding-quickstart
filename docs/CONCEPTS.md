@@ -231,6 +231,20 @@ catalog, kept in sync with the USAi `/models` API so new projects start from a
 current baseline. See the kit definition in the agentic-coding-patterns
 repository for details.
 
+### Provider input projection
+
+Provider-role kits may publish versioned provider facts, a normalizer, and a
+model snapshot. Before a sandbox is created, acq discovers every selected
+provider-role kit, validates the full set with the pinned Patterns validator,
+and projects only approved regular files into a backend-owned read-only mount.
+
+Consumers receive `ACQ_PROVIDER_INPUT_ROOT`; compose each provider directory as
+`$ACQ_PROVIDER_INPUT_ROOT/models/providers/<providerId>`. A missing root is not
+ready, while a present `models/providers` directory with no entries is an
+authoritative empty provider set. This is the durable neutral interface for
+Patterns provider consumers; it does not assume a provider allowlist, USAi, or
+an OpenCode configuration.
+
 ---
 
 ## Customizing your setup
@@ -303,6 +317,15 @@ is used verbatim.
 Extras are applied **after** the built-in kits (so they win on any overlapping
 config). They also work when re-running against an existing sandbox: adding a new
 entry and re-running `acq run <existing-sandbox>` injects just the new kit.
+
+### Provider input projection
+
+Provider-role kits may declare model facts, a normalizer, and a catalog snapshot.
+Before sandbox creation, `acq` validates the complete set with the validator and
+schemas from the pinned Patterns release, then mounts only the approved artifacts
+read-only at `ACQ_PROVIDER_INPUT_ROOT`. These projected facts and catalogs are
+guest-readable metadata, not secrets. Credentials remain in backend secret
+bindings and must never be included in a provider-input bundle.
 
 If an extra kit is hosted somewhere other than `github.com/GSA-TTS/`, add its
 scheme-less prefix so `acq` allowlists it:

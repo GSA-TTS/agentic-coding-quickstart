@@ -189,4 +189,7 @@ SPEC
   '
   # The host-config dir is mounted :ro at the well-known guest path.
   assert_regex "$(cat "$CALLS")" -- '--volume [^ ]*romountbox[^ ]*\.config:/var/lib/acq/host:ro'
+  # Provider metadata uses a second, dedicated read-only mount.
+  assert_regex "$(cat "$CALLS")" -- '--volume [^ ]*provider-input/msb/romountbox[^ ]*:/var/lib/acq/provider-input:ro'
+  assert_regex "$(cat "$CALLS")" -- '--env ACQ_PROVIDER_INPUT_ROOT=/var/lib/acq/provider-input/current'
 }

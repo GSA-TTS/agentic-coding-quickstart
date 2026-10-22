@@ -36,7 +36,8 @@ PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # the bundle-version anchor recorded in a sandbox's host-side provenance record
 # (see ACQ_BUILTIN_BUNDLE below + the provenance helpers) so acq can tell a
 # stale sandbox from a current one.
-# agentic-coding-patterns v1.16.1 release SHA.
+# agentic-coding-patterns v1.16.1 release SHA. It supplies the versioned
+# provider-input schemas and validator consumed below.
 PATTERNS_KIT_REF="d2674db8b424402e912e95254d6b194a062deb73"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
@@ -2342,6 +2343,363 @@ acq_cli_kits_load() {
 # for tests / unusual images. Kept under /var/lib/acq so it sits beside the
 # (being-migrated) legacy guest markers without colliding with them.
 ACQ_HOST_CONFIG_GUEST_DIR="${ACQ_HOST_CONFIG_GUEST_DIR:-/var/lib/acq/host}"
+
+# Provider inputs deliberately have a separate mount and host root.  In
+# particular, never place them below host config: host config can contain
+# workspace, SSH, and kit state that provider consumers must not receive.
+ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}"
+
+# acq_provider_input_project — host-validate and stage provider-role kit inputs.
+#
+# The validator, schemas, and credential-binding registry are shipped by the
+# pinned Patterns release. Do not duplicate its schema in this wrapper: fetch
+# that fixed release and run its validator before
+# copying any declared artifact.  A provider kit without a manifest is simply
+# not a provider-role kit; a manifest which cannot be validated is fatal.
+#
+# Return status 0 means discovery completed (including an authoritative empty
+# set).  Status 2 means the host cannot run the released validator and is a
+# provisioning blocker, never an empty-set fallback.
+acq_provider_input_project() {
+  local backend="$1" name="$2" root kitref kitdir manifest release_root=""
+  local validator="" schema_dir="" bindings="" token stage generation manifests=() kitdirs=()
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  command -v kit_translate_fetch >/dev/null 2>&1 || return 2
+  root=$(acq_provider_input_root "$backend" "$name") || return 1
+  _acq_provider_input_safe_mkdir "$root/generations" || return 1
+  chmod 755 "$root" "$root/generations" || return 1
+  stage=$(mktemp -d "${TMPDIR:-/tmp}/acq-provider-input.XXXXXXXX") || return 1
+  chmod 700 "$stage" || { rm -rf "$stage"; return 1; }
+  for kitref in "${KITS[@]}"; do
+    token=$(printf '%s' "$kitref" | cksum | cut -d' ' -f1) || { rm -rf "$stage"; return 1; }
+    kitdir=$(kit_translate_fetch "$kitref" "$stage/fetch-$token") || { rm -rf "$stage"; return 2; }
+    manifest="$kitdir/provider-input.json"
+    [ -e "$manifest" ] || continue
+    [ -f "$manifest" ] && [ ! -L "$manifest" ] || { echo "acq: unsafe provider input manifest: $manifest" >&2; rm -rf "$stage"; return 1; }
+    _acq_provider_input_snapshot "$kitdir" "$stage/candidate-$token" || { rm -rf "$stage"; return 1; }
+    manifests+=("$stage/candidate-$token/provider-input.json")
+    kitdirs+=("$stage/candidate-$token")
+  done
+  # A generation is complete and immutable before it is made visible through
+  # current. Consumers consequently see either the old complete tree or the new
+  # complete tree, never an empty or partially copied directory.
+  generation=$(mktemp -d "$root/generations/generation.XXXXXXXX") || { _acq_provider_input_cleanup_stage "$stage"; return 1; }
+  chmod 755 "$generation" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  _acq_provider_input_safe_mkdir "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  chmod 755 "$generation/models" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  # A present empty generation is authoritative; it replaces current atomically.
+  if [ "${#manifests[@]}" -eq 0 ]; then
+    _acq_provider_input_publish "$root" "$generation" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+    _acq_provider_input_cleanup_stage "$stage"
+    return 0
+  fi
+  # The validator and its control-plane inputs come from the fixed, pinned
+  # Patterns bundle, never from a provider-controlled candidate kit.
+  release_root=$(_acq_provider_input_control_plane "$stage/control-plane") || {
+    _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 2; }
+  validator="$release_root/scripts/validate_provider_input_contract.py"
+  schema_dir="$release_root/integrations/isolation/schemas"
+  bindings="$schema_dir/provider-credential-bindings.json"
+  [ -f "$validator" ] && [ ! -L "$validator" ] && [ -d "$schema_dir" ] && [ ! -L "$schema_dir" ] \
+    && [ -f "$bindings" ] && [ ! -L "$bindings" ] || {
+    echo "acq: pinned Patterns provider-input validator is unavailable" >&2; _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 2; }
+  local validator_args=(--schema-dir "$schema_dir" --credential-bindings "$bindings")
+  local i
+  for i in "${!manifests[@]}"; do validator_args+=(--bundle "${manifests[$i]}"); done
+  python3 "$validator" "${validator_args[@]}" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  for i in "${!manifests[@]}"; do
+    _acq_provider_input_materialize "${manifests[$i]}" "${kitdirs[$i]}" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  done
+  _acq_provider_input_publish "$root" "$generation" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  _acq_provider_input_cleanup_stage "$stage"
+}
+
+# Provider inputs share the provenance base only as a parent, never as a mounted
+# directory. The backend/name checksum prevents aliases after slug sanitization.
+acq_provider_input_root() {
+  local backend="${1:-}" name="${2:-}" safe_backend safe_name name_sum
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
+  safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+  name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+  printf '%s/provider-input/%s/%s.%s\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+}
+
+acq_provider_input_guest_root() {
+  local backend="$1" name="$2" root
+  root=$(acq_provider_input_root "$backend" "$name") || return 1
+  case "$backend" in
+    sbx) printf '%s/current\n' "$root" ;;
+    msb) printf '%s/current\n' "$ACQ_PROVIDER_INPUT_GUEST_DIR" ;;
+    *) return 1 ;;
+  esac
+}
+
+acq_provider_input_sbx_mount() {
+  local root
+  root=$(acq_provider_input_root sbx "$1") || return 1
+  printf '%s:ro\n' "$root"
+}
+
+acq_provider_input_msb_mount() {
+  local root host_root
+  root=$(acq_provider_input_root msb "$1") || return 1
+  if command -v host_path >/dev/null 2>&1; then
+    host_root=$(host_path "$root") || return 1
+  else
+    host_root="$root"
+  fi
+  printf '%s:%s:ro\n' "$host_root" "$ACQ_PROVIDER_INPUT_GUEST_DIR"
+}
+
+# Create a path one component at a time without ever traversing a symlink. This
+# protects the host-owned projection tree from a malicious pre-created ancestor.
+_acq_provider_input_safe_mkdir() {
+  python3 - "$1" <<'PY'
+import os, stat, sys
+path = sys.argv[1]
+if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
+fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+try:
+    for part in (p for p in path.split('/') if p):
+        try:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        except FileNotFoundError:
+            os.mkdir(part, 0o755, dir_fd=fd)
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit('unsafe provider-input path')
+        os.close(fd); fd = child
+finally:
+    os.close(fd)
+PY
+}
+
+_acq_provider_input_safe_dir() {
+  python3 - "$1" <<'PY'
+import os, stat, sys
+path = sys.argv[1]
+if not os.path.isabs(path): raise SystemExit(1)
+fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+try:
+    for part in (p for p in path.split('/') if p):
+        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit(1)
+        os.close(fd); fd = child
+finally:
+    os.close(fd)
+PY
+}
+
+_acq_provider_input_cleanup_stage() {
+  case "${1:-}" in "${TMPDIR:-/tmp}"/acq-provider-input.*) rm -rf -- "$1" ;; *) return 1 ;; esac
+}
+
+_acq_provider_input_cleanup_generation() {
+  local root="$1" generation="$2"
+  case "$root" in ""|/|/*/) return 1 ;; esac
+  case "$generation" in
+    "$root"/generations/generation.*)
+      _acq_provider_input_safe_dir "$root/generations" || return 1
+      [ -d "$generation" ] && [ ! -L "$generation" ] || return 1
+      chmod -R u+w "$generation" 2>/dev/null || true
+      rm -rf -- "$generation"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+_acq_provider_input_remove_tree() {
+  chmod -R u+w "$1" 2>/dev/null || return 1
+  rm -rf -- "$1"
+}
+
+_acq_provider_input_atomic_replace() {
+  python3 - "$1" "$2" <<'PY'
+import os, sys
+os.replace(sys.argv[1], sys.argv[2])
+PY
+}
+
+_acq_provider_input_publish() {
+  local root="$1" generation="$2" base temp current old
+  case "$root" in ""|/|/*/) return 1 ;; esac
+  case "$generation" in "$root"/generations/generation.*) ;; *) return 1 ;; esac
+  _acq_provider_input_safe_dir "$root/generations" || return 1
+  [ -d "$generation" ] && [ ! -L "$generation" ] || return 1
+  chmod -R a-w "$generation" || return 1
+  base=${generation##*/}
+  temp="$root/.current.$$.$RANDOM"
+  current="$root/current"
+  ln -s "generations/$base" "$temp" || return 1
+  # rename is atomic within root; do not remove current first.
+  _acq_provider_input_atomic_replace "$temp" "$current" || { rm -f "$temp"; return 1; }
+  old=""
+  for old in "$root/generations"/*; do
+    [ -d "$old" ] || continue
+    [ "$old" = "$generation" ] && continue
+    case "$old" in
+      "$root"/generations/*)
+        if [ -L "$old" ]; then
+          echo "acq: warning: retained unsafe old provider-input generation: $old" >&2
+        elif ! _acq_provider_input_remove_tree "$old"; then
+          echo "acq: warning: published provider inputs but could not clean old generation: $old" >&2
+        fi
+        ;;
+    esac
+  done
+}
+
+# One mkdir lock coordinates the complete create transaction on Bash 3.2 hosts:
+# discovery through argv construction, publication, backend create, and removal.
+# It is intentionally rooted beside, but never inside, the guest-visible tree.
+acq_provider_input_lock_acquire() {
+  local backend="$1" name="$2" root parent lock owner tries=0 pid identity actual_identity
+  root=$(acq_provider_input_root "$backend" "$name") || return 1
+  parent=${root%/*}
+  _acq_provider_input_safe_mkdir "$parent" || return 1
+  lock="${root}.lock"
+  while ! mkdir "$lock" 2>/dev/null; do
+    [ -d "$lock" ] && [ ! -L "$lock" ] || { echo "acq: unsafe provider-input lock: $lock" >&2; return 1; }
+    owner="$lock/owner"
+    IFS=' ' read -r pid identity < "$owner" 2>/dev/null || true
+    actual_identity=$(_acq_provider_input_process_identity "$pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && [ -n "$identity" ] && [ "$actual_identity" = "$identity" ]; then
+      echo "acq: provider-input lock is owned by live pid $pid: $lock" >&2
+    elif [ -n "$pid" ] && { ! kill -0 "$pid" 2>/dev/null || { [ -n "$actual_identity" ] && [ "$actual_identity" != "$identity" ]; }; }; then
+      echo "acq: recovering stale provider-input lock owned by pid $pid: $lock" >&2
+      rm -f -- "$owner" && rmdir -- "$lock" 2>/dev/null || return 1
+      continue
+    else
+      echo "acq: provider-input lock has no valid owner metadata: $lock" >&2
+      return 1
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -lt "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ] || return 1
+    sleep 1
+  done
+  identity=$(_acq_provider_input_process_identity "$$") || { rmdir -- "$lock"; return 1; }
+  printf '%s %s\n' "$$" "$identity" > "$lock/owner" || { rmdir -- "$lock"; return 1; }
+  printf '%s\n' "$lock"
+}
+
+_acq_provider_input_process_identity() {
+  local pid="${1:-}"
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  ps -o lstart= -p "$pid" 2>/dev/null | tr -d '[:space:]' | grep .
+}
+
+acq_provider_input_lock_release() {
+  case "${1:-}" in */provider-input/*/*.lock)
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    rm -f -- "$1/owner" && rmdir -- "$1" 2>/dev/null || return 1
+    ;;
+    *) return 1 ;;
+  esac
+}
+
+acq_provider_input_remove() {
+  local backend="$1" name="$2" root
+  root=$(acq_provider_input_root "$backend" "$name") || return 1
+  case "$root" in ""|/|/*/) return 1 ;; */provider-input/*/*.*) ;; *) return 1 ;; esac
+  _acq_provider_input_safe_dir "${root%/*}" || return 1
+  [ ! -L "$root" ] || return 1
+  _acq_provider_input_remove_tree "$root"
+}
+
+_acq_provider_input_contract_kit_ref() {
+  printf '%s#ref=%s&dir=%s/%s\n' \
+    "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR" "$USAI_PROVIDER_KIT_NAME"
+}
+
+# The control plane is a full, exact Patterns checkout: a sparse kit fetch does
+# not contain the repository-level validator or schemas. It remains private in
+# the staging directory and is never exposed through a sandbox mount.
+_acq_provider_input_control_plane() {
+  local dest="$1" actual
+  mkdir -p "$dest" || return 1
+  (
+    cd "$dest" || exit 1
+    export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
+    git init -q || exit 1
+    git remote add origin "${PATTERNS_KIT_REPO#git+}" || exit 1
+    git fetch -q --depth 1 origin "$PATTERNS_KIT_REF" || exit 1
+    git checkout -q --detach FETCH_HEAD || exit 1
+    actual=$(git rev-parse HEAD) || exit 1
+    [ "$actual" = "$PATTERNS_KIT_REF" ]
+  ) || return 1
+  [ ! -L "$dest/scripts" ] && [ ! -L "$dest/integrations" ] || return 1
+  printf '%s\n' "$dest"
+}
+
+# Snapshot only the declared regular files with descriptor-relative, no-follow
+# reads. Validation and later materialization therefore cannot observe a changed
+# candidate manifest, symlink, or path outside the fetched kit.
+_acq_provider_input_snapshot() {
+  python3 - "$1" "$2" <<'PY'
+import json, os, stat, sys
+kit, target = sys.argv[1:]
+def open_relative(root, value):
+    if not isinstance(value, str) or value.startswith('/') or not value or any(part in ('', '.', '..') for part in value.split('/')):
+        raise SystemExit('unsafe provider artifact path')
+    fd = os.dup(root)
+    try:
+        for part in value.split('/'):
+            nextfd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd); fd = nextfd
+        if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit('unsafe provider artifact')
+        return fd
+    except:
+        os.close(fd); raise
+root = os.open(kit, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    manifest_fd = open_relative(root, 'provider-input.json')
+    with os.fdopen(manifest_fd, encoding='utf-8') as stream: manifest_bytes = stream.read()
+    bundle = json.loads(manifest_bytes)
+    os.mkdir(target, 0o700)
+    with open(os.path.join(target, 'provider-input.json'), 'x', encoding='utf-8') as stream: stream.write(manifest_bytes)
+    for path in (bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):
+        source = open_relative(root, path)
+        destination = os.path.join(target, path)
+        os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
+        with os.fdopen(source, 'rb') as src, open(destination, 'xb') as dst:
+            source_mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode)
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk: break
+                dst.write(chunk)
+            os.fchmod(dst.fileno(), source_mode)
+finally:
+    os.close(root)
+PY
+}
+
+# Copy only validator-approved regular files into the backend-owned readonly tree.
+_acq_provider_input_materialize() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, os, shutil, sys
+manifest, kit, target_root = sys.argv[1:]
+bundle = json.load(open(manifest, encoding="utf-8"))
+provider = bundle["providerId"]
+if not isinstance(provider, str) or not provider or provider in ('.', '..') or '/' in provider or '\\' in provider:
+    raise SystemExit("unsafe provider ID")
+if bundle.get("schemaVersion") != "acq-provider-input-bundle/v2" or bundle.get("providerPath") != "models/providers/" + provider:
+    raise SystemExit("unsafe provider bundle layout")
+target = os.path.join(target_root, provider)
+if os.path.lexists(target) or os.path.dirname(target) != target_root or os.path.basename(target) != provider:
+    raise SystemExit("duplicate or unsafe provider target")
+os.mkdir(target, 0o755)
+for source, destination, mode in ((bundle["factsPath"], "facts.json", 0o444), (bundle["normalizerPath"], "normalizer", 0o555), (bundle["snapshotPath"], "snapshot.json", 0o444)):
+    if not isinstance(source, str) or source.startswith('/') or any(part in ('', '.', '..') for part in source.split('/')):
+        raise SystemExit("unsafe provider artifact path")
+    source = os.path.join(kit, source)
+    if os.path.islink(source) or not os.path.isfile(source):
+        raise SystemExit("unsafe provider artifact")
+    destination = os.path.join(target, destination)
+    shutil.copyfile(source, destination)
+    os.chmod(destination, mode)
+os.chmod(target, 0o555)
+PY
+}
 
 # Host directory holding one sandbox's config files. Same keying as the
 # provenance/cli-kits records (sanitized name + raw-name checksum) so the three

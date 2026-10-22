@@ -3091,7 +3091,7 @@ _acq_msb_clone_cleanup() {
 # is translated to msb's --volume mounts. Network allow-lists and the zscaler
 # --trust-host-cas shortcut are collected across all kits and applied at create.
 
-acq_backend_provision() {
+_acq_backend_provision_unlocked() {
   local name="$1"
   shift
 
@@ -3102,6 +3102,10 @@ acq_backend_provision() {
   local agent
   agent=$(first_positional "$@")
   [ -n "$agent" ] || agent="shell"
+  if acq_backend_exists "$name"; then
+    echo "acq(msb): error: sandbox '$name' already exists; refusing to alter its provider inputs." >&2
+    return 1
+  fi
 
   # Collect create-time flags: net rules (union of all kit caps), --trust-host-cas
   # (if any kit declares the msb zscaler shortcut), volume mounts (from paths),
@@ -3204,6 +3208,14 @@ $(kit_spec_published_ports "$spec")"
     _volrecs="${_volrecs}
 $(kit_spec_volumes "$spec")"
   done
+
+  # Stage the complete selected-provider set before the host config directory is
+  # mounted. Validation is deliberately one released-validator invocation across
+  # every candidate so duplicate provider IDs cannot slip through.
+  if ! acq_provider_input_project msb "$name"; then
+    echo "acq(msb): error: provider input projection failed for '$name'." >&2
+    return 1
+  fi
 
   # Merged kit env, computed ONCE now that every kit is fetched and BEFORE any kit
   # is applied — see _acq_msb_merge_kit_env_into for why it must be a pre-pass.
@@ -3598,19 +3610,27 @@ EOF
   _acq_msb_vsock_flags_into _vsock_flags "$name"
   [ "${#_vsock_flags[@]}" -gt 0 ] && create_flags+=("${_vsock_flags[@]}")
 
-  # Mount per-sandbox trusted configuration read-only. The guest can consume
-  # declared code and data here but cannot make acq trust a modified replacement.
+  # Preserve the existing trusted host-config mount used by read-only startup
+  # kit files and host-authoritative lifecycle state.
   local _hcfg_dir _hcfg_host
-  if _hcfg_dir=$(acq_host_config_dir msb "$name"); then
-    mkdir -p "$_hcfg_dir" 2>/dev/null || true
-    chmod 711 "$_hcfg_dir" 2>/dev/null || true
-    if command -v host_path >/dev/null 2>&1; then
-      _hcfg_host=$(host_path "$_hcfg_dir")
-    else
-      _hcfg_host="$_hcfg_dir"
-    fi
-    create_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
+  _hcfg_dir=$(acq_host_config_dir msb "$name") || return 1
+  mkdir -p "$_hcfg_dir" || return 1
+  chmod 711 "$_hcfg_dir" || return 1
+  if command -v host_path >/dev/null 2>&1; then
+    _hcfg_host=$(host_path "$_hcfg_dir") || return 1
+  else
+    _hcfg_host="$_hcfg_dir"
   fi
+  create_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
+
+  # Provider metadata has its own guest mount. It must never expose the shared
+  # host config directory, which contains workspace, SSH, and kit state.
+  local _provider_root _provider_mount
+  _provider_root=$(acq_provider_input_root msb "$name") || return 1
+  [ -d "$_provider_root/current" ] || return 1
+  _provider_mount=$(acq_provider_input_msb_mount "$name") || return 1
+  create_flags+=(--volume "$_provider_mount")
+  create_flags+=(--env "ACQ_PROVIDER_INPUT_ROOT=$(acq_provider_input_guest_root msb "$name")")
 
   # Credentials: read from the acq-owned secret store (keychain/file), scoped to
   # this sandbox first, then global. The real value is read into a TRANSIENT env
@@ -3696,6 +3716,7 @@ EOF
     # A fresh --clone scratch can hold no agent work yet — remove it (and the
     # fetch-back remote) so the next create doesn't refuse on a stale dir.
     [ -n "$_clone_src" ] && _acq_msb_clone_cleanup "$name"
+    acq_provider_input_remove msb "$name" || true
     return 1
   fi
 
@@ -3803,7 +3824,7 @@ EOF
         acq_spin_stop "Applying configuration kits"
         echo "acq(msb): error: required OpenCode kit did not fully apply for '$name'." >&2
         echo "          Removing the new sandbox because its generic image has no OpenCode binary." >&2
-        acq_backend_terminate "$name" >/dev/null 2>&1 || \
+        _acq_backend_terminate_unlocked "$name" >/dev/null 2>&1 || \
           echo "acq(msb): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
         return 1
       fi
@@ -3817,7 +3838,7 @@ EOF
         || ! acq_host_config_write msb "$name" generic-opencode generic-opencode; }; then
     echo "acq(msb): error: could not record completed generic OpenCode state for '$name'." >&2
     echo "          Removing the new sandbox to avoid an unpinned postinstall fallback." >&2
-    acq_backend_terminate "$name" >/dev/null 2>&1 || \
+    _acq_backend_terminate_unlocked "$name" >/dev/null 2>&1 || \
       echo "acq(msb): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
     return 1
   fi
@@ -3867,6 +3888,13 @@ EOF
 # 1000 is taken (e.g. by `node` on a plain base), `agent` is created at the next
 # free uid and the kits' `-u 1000` commands still map to it by NAME (see
 # _acq_msb_exec_command) with HOME exported.
+acq_backend_provision() {
+  ( local lock rc; lock=$(acq_provider_input_lock_acquire msb "$1") || exit 1
+    trap 'rc=$?; acq_provider_input_lock_release "$lock" || true; exit "$rc"' EXIT
+    trap 'exit 128' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+    _acq_backend_provision_unlocked "$@"; rc=$?; exit "$rc" )
+}
+
 _acq_msb_ensure_agent_user() {
   local name="$1"
   local marker="agent-user-ready"
@@ -4975,7 +5003,7 @@ acq_backend_stop() {
   _acq_msb_cli stop "$1"
 }
 
-acq_backend_terminate() {
+_acq_backend_terminate_unlocked() {
   # Tear down any post-hoc published-port tunnels (serve + ssh PIDs, state file)
   # before removing the sandbox (ADR-0015). Killing a dead PID / missing state
   # file is a no-op.
@@ -5005,7 +5033,15 @@ acq_backend_terminate() {
   # Remove host-authoritative config only after the sandbox is confirmed gone;
   # otherwise a failed removal could discard state still mounted by a live guest.
   acq_host_config_remove msb "$1" || true
+  acq_provider_input_remove msb "$1" || true
   return "$_rc"
+}
+
+acq_backend_terminate() {
+  ( local lock rc; lock=$(acq_provider_input_lock_acquire msb "$1") || exit 1
+    trap 'rc=$?; acq_provider_input_lock_release "$lock" || true; exit "$rc"' EXIT
+    trap 'exit 128' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+    _acq_backend_terminate_unlocked "$@"; rc=$?; exit "$rc" )
 }
 
 acq_backend_list() {

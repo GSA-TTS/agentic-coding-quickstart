@@ -57,6 +57,13 @@ MSB_GITHUB_SECRET_BINDING="GITHUB_TOKEN@github.com,api.github.com,codeload.githu
 # translation) so the harness stays fully offline. The neutral→sbx-v2
 # translation itself is exercised separately (see the kit-translate section).
 export ACQ_SBX_KIT_PASSTHROUGH=1
+export ACQ_TEST_STUB_PROVIDER_INPUT=1
+
+# Some child-process tests intentionally replace HOME to isolate git identity.
+# Preserve the validator dependency path resolved before that replacement, or
+# Python disables the real user's site-packages and cannot import jsonschema.
+_ACQ_TEST_JSONSCHEMA_SITE=$(python3 -c 'import jsonschema, pathlib; print(pathlib.Path(jsonschema.__file__).parent.parent)')
+export PYTHONPATH="${_ACQ_TEST_JSONSCHEMA_SITE}${PYTHONPATH:+:$PYTHONPATH}"
 
 # msb equivalent: resolve every REMOTE kit ref to a local empty spec dir instead
 # of a real git fetch. This keeps the suite network-free for the msb
@@ -582,7 +589,7 @@ KEYGENSTUB
   unset ACQ_EXTRA_KITS ACQ_EXTRA_KIT_SOURCES
 }
 
-cleanup_stubs() { [ -n "${STUBDIR:-}" ] && rm -rf "$STUBDIR"; }
+cleanup_stubs() { [ -n "${STUBDIR:-}" ] && { chmod -R u+w "$STUBDIR" 2>/dev/null || true; rm -rf "$STUBDIR"; }; }
 
 # Source acq for its functions (ACQ_SOURCE_ONLY guard).
 # shellcheck disable=SC1090
@@ -593,6 +600,14 @@ load_acq() {
   . "${REPO_ROOT}/acq.backends/sbx.sh"
   # Build the kit list (normally called by acq_resolve_backend).
   _build_kit_list
+  if [ "${ACQ_TEST_STUB_PROVIDER_INPUT:-}" = 1 ]; then
+    acq_provider_input_project() {
+      local root
+      root=$(acq_provider_input_root "$1" "$2") || return 1
+      _acq_provider_input_safe_mkdir "$root/generations/empty/models/providers" || return 1
+      ln -sfn generations/empty "$root/current"
+    }
+  fi
   # Do NOT `set +e` here (the pre-ADR-0025 bespoke runner did): bats detects a
   # failing command via errexit inherited into the @test body, so disabling it
   # in setup() makes every assertion in the suite pass vacuously (#381 review).
