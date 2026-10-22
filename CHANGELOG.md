@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.1.0...v4.1.1) (2026-10-22)
+
+
+### Performance Improvements
+
+* **msb:** reduce kit permission setup latency ([#614](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/614)) ([0415f5f](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/0415f5f62cc343bce6c287642bc80bd80a0cca61))
+
 ## [4.1.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.0.2...v4.1.0) (2026-10-22)
 
 
