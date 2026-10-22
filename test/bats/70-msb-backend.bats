@@ -167,6 +167,26 @@ _sha256() {
   assert_output --partial "re-applied kit startup"
 }
 
+@test "msb: metadata-free restore clears stale name-scoped state" {
+  mkdir -p "$STUBDIR/stale-workspace" "$STUBDIR/state/msb-restore"
+  : > "$STUBDIR/disk-state.msb"
+  printf 'volume\t%s:%s\n' "$STUBDIR/stale-workspace" "$STUBDIR/stale-workspace" > "$STUBDIR/state/msb-restore/restored.resources"
+  acq_host_config_write msb restored agent opencode
+  acq_host_config_write msb restored workspace "$STUBDIR/stale-workspace"
+  acq_host_config_write msb restored generic-opencode generic-opencode
+  acq_workspace_record_write msb restored "$STUBDIR/stale-workspace"
+  acq_cli_kits_write msb restored /stale/kit
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" restore restored "$STUBDIR/disk-state.msb"
+  assert_success
+  refute_regex "$(cat "$CALLS")" "--volume $STUBDIR/stale-workspace:$STUBDIR/stale-workspace"
+  [ ! -f "$STUBDIR/state/msb-restore/restored.resources" ]
+  assert_equal "$(acq_host_config_read msb restored agent)" ""
+  assert_equal "$(acq_host_config_read msb restored workspace)" ""
+  assert_equal "$(acq_host_config_read msb restored generic-opencode)" ""
+  assert_equal "$(acq_workspace_record_read msb restored)" ""
+}
+
 @test "msb: restore uses the provider facts secret binding" {
   local kit="$STUBDIR/provider-kit"
   mkdir -p "$kit/provider-facts" "$STUBDIR/secrets"

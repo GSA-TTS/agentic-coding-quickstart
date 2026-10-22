@@ -1215,6 +1215,15 @@ _acq_msb_restore_resources_adopt_trusted() {
   chmod 600 "$_file" 2>/dev/null || return 1
 }
 
+_acq_msb_restore_clear_stale_state() {
+  local name="$1" resource_file
+  resource_file=$(_acq_msb_restore_resource_file "$name") || return 1
+  rm -f "$resource_file" 2>/dev/null || return 1
+  acq_cli_kits_remove msb "$name"
+  acq_provenance_remove msb "$name"
+  acq_host_config_remove msb "$name"
+}
+
 _acq_msb_snapshot_kits_adopt_trusted() {
   local name="$1" snapshot="$2" source target dir
   source=$(_acq_msb_snapshot_kits_file "$snapshot") || return 0
@@ -1337,7 +1346,8 @@ acq_backend_restore() {
     rm -f "$_staged_snapshot"
     return "$_restore_rc"
   fi
-  if ! _acq_msb_restore_resources_adopt_trusted "$_name" "$_staged_snapshot" \
+  if ! _acq_msb_restore_clear_stale_state "$_name" \
+      || ! _acq_msb_restore_resources_adopt_trusted "$_name" "$_staged_snapshot" \
       || ! _acq_msb_snapshot_kits_adopt_trusted "$_name" "$_staged_snapshot" \
       || ! _acq_msb_snapshot_state_adopt "$_name" "$_staged_snapshot"; then
     rm -f "$_staged_snapshot"
