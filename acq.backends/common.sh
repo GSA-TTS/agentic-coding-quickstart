@@ -856,8 +856,8 @@ kit_spec_agent_field() {
       if (line ~ "^  " key ":[[:space:]]*") {
         sub("^  " key ":[[:space:]]*","",line)
         line=trim(line)
-        gsub(/^\"|\"$/, "", line)
-        gsub(/^'\''|'\''$/, "", line)
+        if (substr(line, 1, 1) == sprintf("%c", 34) && substr(line, length(line), 1) == sprintf("%c", 34)) line=substr(line, 2, length(line)-2)
+        if (substr(line, 1, 1) == "'" && substr(line, length(line), 1) == "'") line=substr(line, 2, length(line)-2)
         if (line != "") print line
         exit
       }
@@ -2097,6 +2097,22 @@ acq_provenance_field() {
   ' "$file" 2>/dev/null || true
 }
 
+# Remove a sandbox's provenance once its resources are permanently gone. Snapshot
+# sidecars and the separate CLI/extra-kit record remain available for restore.
+acq_provenance_remove() {
+  local backend="${1:-}" name="${2:-}" provenance
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  provenance=$(_acq_provenance_file "$backend" "$name") || return 0
+  rm -f "$provenance" 2>/dev/null || true
+}
+
+acq_cli_kits_remove() {
+  local backend="${1:-}" name="${2:-}" file
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  file=$(_acq_cli_kits_file "$backend" "$name") || return 0
+  rm -f "$file" 2>/dev/null || true
+}
+
 # Remember the primary host workspace mounted into a sandbox. This is non-secret
 # host-side state used by commands that take only SANDBOX later (for example,
 # `acq github-scope SANDBOX`) so they do not accidentally inspect the caller's
@@ -2276,6 +2292,24 @@ acq_cli_kits_write() {
   return 0
 }
 
+acq_cli_kits_copy_sidecar() {
+  local backend="${1:-}" name="${2:-}" snapshot="${3:-}" file
+  [ -n "$backend" ] && [ -n "$name" ] && [ -n "$snapshot" ] || return 0
+  file=$(_acq_cli_kits_file "$backend" "$name") || return 0
+  [ -f "$file" ] || return 0
+  cp "$file" "${snapshot}.kits" 2>/dev/null || return 1
+}
+
+acq_cli_kits_adopt_sidecar() {
+  local backend="${1:-}" name="${2:-}" snapshot="${3:-}" file dir
+  [ -n "$backend" ] && [ -n "$name" ] && [ -n "$snapshot" ] || return 0
+  [ -f "${snapshot}.kits" ] || return 0
+  file=$(_acq_cli_kits_file "$backend" "$name") || return 1
+  dir=$(dirname "$file")
+  mkdir -p "$dir" 2>/dev/null || return 1
+  cp "${snapshot}.kits" "$file" 2>/dev/null || return 1
+}
+
 # Reload a sandbox's persisted CLI (`--kit`) and extra kit refs into ACQ_CLI_KITS
 # / ACQ_EXTRA_KITS for the CURRENT shell, so a subsequent heal re-runs their
 # startup. Called by the start/restart verbs before ensure_kits_applied. No-op
@@ -2298,9 +2332,8 @@ acq_cli_kits_load() {
       extra=*) val="${line#extra=}"; [ -n "$val" ] && _extras="${_extras:+$_extras }$val" ;;
     esac
   done < "$file"
-  # Only overwrite ACQ_EXTRA_KITS from the record if the record carried extras;
-  # otherwise leave any env-supplied value in place (do not clobber the env).
-  [ -n "$_extras" ] && ACQ_EXTRA_KITS="$_extras"
+  # A persisted record is authoritative, including an empty extra-kit set.
+  ACQ_EXTRA_KITS="$_extras"
   acq_debug "cli-kits: reloaded $backend/$name (${#ACQ_CLI_KITS[@]} cli kit(s))"
   return 0
 }

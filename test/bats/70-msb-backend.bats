@@ -24,6 +24,20 @@ _with_adapter() { # ADAPTER BODY
   ' _ "$1" "$2"
 }
 
+_mk_unix_socket() {
+  python3 -c 'import socket,sys
+s=socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])' "$1" >/dev/null 2>&1 && [ -S "$1" ]
+}
+
+_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
 @test "msb: auto-detect prefers msb when both present and no sbx sandboxes" {
   rm -f "$STUBDIR/.sandbox_list"
   run bash -c '
@@ -59,9 +73,346 @@ _with_adapter() { # ADAPTER BODY
   assert_output --partial 'msb'
 }
 
-@test "msb: advertises SUPPORTS_SNAPSHOTS=0 (matches acq's surfaced verbs, #225)" {
+@test "msb: advertises SUPPORTS_SNAPSHOTS=1 because acq surfaces disk-state snapshot/restore" {
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh"; printf "%s" "$ACQ_BACKEND_SUPPORTS_SNAPSHOTS"'
-  assert_output '0'
+  assert_output '1'
+}
+
+@test "msb: snapshot maps to a disk-state msb archive with date-stamped default output" {
+  run env ACQ_BACKEND=msb ACQ_SNAPSHOT_DIR="$STUBDIR/snapshots" "$ACQ" snapshot mybox
+  assert_success
+  assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --guest-flush auto -o $STUBDIR/snapshots/mybox-[0-9]{8}T[0-9]{6}Z\.msb"
+  [ "$(stat -c '%a' "$STUBDIR/snapshots" 2>/dev/null || stat -f '%Lp' "$STUBDIR/snapshots")" = "700" ]
+  : > "$CALLS"
+  mkdir -p "$STUBDIR/state/msb-restore" "$STUBDIR/provenance/msb" "$STUBDIR/ws"
+  printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/state/msb-restore/mybox.resources"
+  local kit_record
+  kit_record=$(printf '%s' mybox | cksum | cut -d' ' -f1)
+  printf 'schema=1\nkit=%s\n' "$STUBDIR/custom-kit" > "$STUBDIR/provenance/msb/mybox.${kit_record}.kits"
+  acq_host_config_write msb mybox agent opencode
+  acq_host_config_write msb mybox workspace "$STUBDIR/ws"
+  acq_host_config_write msb mybox generic-opencode generic-opencode
+  acq_workspace_record_write msb mybox "$STUBDIR/ws"
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" snapshot mybox "$STUBDIR/mybox.msb"
+  assert_success
+  assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --guest-flush auto -o $STUBDIR/mybox\.msb"
+  [ "$(stat -c '%a' "$STUBDIR/mybox.msb" 2>/dev/null || stat -f '%Lp' "$STUBDIR/mybox.msb")" = "600" ]
+  [ -f "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/mybox.msb").resources" ]
+  [ -f "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/mybox.msb").state" ]
+}
+
+@test "msb: create with no workspace positional provisions without empty-array abort" {
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb USAI_API_KEY="sk-ci-host" "$ACQ" create opencode
+  assert_success
+  refute_output --partial 'unbound variable'
+  assert_regex "$(cat "$CALLS")" 'msb create --name opencode'
+}
+
+@test "msb: snapshot preserves legacy provenance agent state" {
+  mkdir -p "$STUBDIR/provenance/msb" "$STUBDIR/ws"
+  local record
+  record=$(printf '%s' legacybox | cksum | cut -d' ' -f1)
+  printf 'schema=1\nbackend=msb\nagent=opencode\nworkspace_source=host\nworkspace=%s\n' "$STUBDIR/ws" > "$STUBDIR/provenance/msb/legacybox.${record}.env"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" snapshot legacybox "$STUBDIR/legacy.msb"
+  assert_success
+  assert_regex "$(cat "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/legacy.msb").state")" $'agent\topencode'
+  assert_regex "$(cat "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/legacy.msb").state")" $'workspace\t'"$STUBDIR/ws"
+}
+
+@test "msb: restore maps to msb restore with inherited resources and re-derived vsock" {
+  _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
+  local sock_path="$STUBDIR/agent.sock"
+  command -v realpath >/dev/null 2>&1 && sock_path=$(realpath "$sock_path")
+  mkdir -p "$STUBDIR/secrets" "$STUBDIR/ws" "$STUBDIR/provenance/msb"
+  printf 'sk-restored\n' > "$STUBDIR/secrets/acq.usai"
+  : > "$STUBDIR/saved.msb"
+  mkdir -p "$STUBDIR/state/msb-snapshots"
+  printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/saved.msb").resources"
+  printf 'schema=1\nkit=%s\n' "$STUBDIR/custom-kit" > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/saved.msb").kits"
+  printf 'agent\topencode\nworkspace\t%s\ngeneric-opencode\tgeneric-opencode\nhost-workspace\t%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/saved.msb").state"
+  mkdir -p "$STUBDIR/custom-kit"
+  printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: custom\ndisplayName: Custom\ndescription: custom\n' > "$STUBDIR/custom-kit/spec.yaml"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/saved.msb"
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --volume $STUBDIR/provenance/msb/restored\\.[0-9]+\\.config:$ACQ_HOST_CONFIG_GUEST_DIR:ro --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream --secret USAI_API_KEY@api.gsa.usai.gov"
+  assert_regex "$log" 'USAI_API_KEY=present'
+  assert_regex "$log" 'socat UNIX-LISTEN:'
+  assert_regex "$log" 'msb inspect restored --format json'
+  assert_output --partial "re-applied kit startup"
+  [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
+  assert_equal "$(acq_host_config_read msb restored agent)" opencode
+  assert_equal "$(acq_host_config_read msb restored workspace)" "$STUBDIR/ws"
+  assert_equal "$(acq_host_config_read msb restored generic-opencode)" generic-opencode
+  assert_equal "$(acq_workspace_record_read msb restored)" "$STUBDIR/ws"
+  local kit_record
+  kit_record=$(printf '%s' restored | cksum | cut -d' ' -f1)
+  assert [ -f "$STUBDIR/provenance/msb/restored.${kit_record}.kits" ]
+  assert_regex "$(cat "$STUBDIR/provenance/msb/restored.${kit_record}.kits")" "$STUBDIR/custom-kit"
+  [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
+}
+
+@test "msb: restore without external workspace mounts re-applies kits" {
+  _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
+  : > "$STUBDIR/disk-state.msb"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/disk-state.msb"
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --volume $STUBDIR/provenance/msb/restored\\.[0-9]+\\.config:$ACQ_HOST_CONFIG_GUEST_DIR:ro --vsock"
+  assert_regex "$log" 'msb inspect restored --format json'
+  assert_output --partial "re-applied kit startup"
+}
+
+@test "msb: metadata-free restore clears stale name-scoped state" {
+  mkdir -p "$STUBDIR/stale-workspace" "$STUBDIR/state/msb-restore"
+  : > "$STUBDIR/disk-state.msb"
+  printf 'volume\t%s:%s\n' "$STUBDIR/stale-workspace" "$STUBDIR/stale-workspace" > "$STUBDIR/state/msb-restore/restored.resources"
+  acq_host_config_write msb restored agent opencode
+  acq_host_config_write msb restored workspace "$STUBDIR/stale-workspace"
+  acq_host_config_write msb restored generic-opencode generic-opencode
+  acq_workspace_record_write msb restored "$STUBDIR/stale-workspace"
+  acq_cli_kits_write msb restored /stale/kit
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" restore restored "$STUBDIR/disk-state.msb"
+  assert_success
+  refute_regex "$(cat "$CALLS")" "--volume $STUBDIR/stale-workspace:$STUBDIR/stale-workspace"
+  [ ! -f "$STUBDIR/state/msb-restore/restored.resources" ]
+  assert_equal "$(acq_host_config_read msb restored agent)" ""
+  assert_equal "$(acq_host_config_read msb restored workspace)" ""
+  assert_equal "$(acq_host_config_read msb restored generic-opencode)" ""
+  assert_equal "$(acq_workspace_record_read msb restored)" ""
+}
+
+@test "msb: restore refuses an existing destination without clearing its state" {
+  mkdir -p "$STUBDIR/existing-workspace" "$STUBDIR/state/msb-restore"
+  : > "$STUBDIR/disk-state.msb"
+  printf 'restored\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'volume\t%s:%s\n' "$STUBDIR/existing-workspace" "$STUBDIR/existing-workspace" > "$STUBDIR/state/msb-restore/restored.resources"
+  acq_host_config_write msb restored agent opencode
+  acq_workspace_record_write msb restored "$STUBDIR/existing-workspace"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" restore restored "$STUBDIR/disk-state.msb"
+  assert_failure
+  assert_output --partial "destination sandbox 'restored' already exists"
+  refute_regex "$(cat "$CALLS")" 'msb restore'
+  [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
+  assert_equal "$(acq_host_config_read msb restored agent)" opencode
+  assert_equal "$(acq_workspace_record_read msb restored)" "$STUBDIR/existing-workspace"
+}
+
+@test "msb: restore preserves destination state when absence cannot be confirmed" {
+  mkdir -p "$STUBDIR/existing-workspace" "$STUBDIR/state/msb-restore"
+  : > "$STUBDIR/disk-state.msb"
+  printf 'volume\t%s:%s\n' "$STUBDIR/existing-workspace" "$STUBDIR/existing-workspace" > "$STUBDIR/state/msb-restore/restored.resources"
+  acq_host_config_write msb restored agent opencode
+  acq_workspace_record_write msb restored "$STUBDIR/existing-workspace"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb STUB_MSB_LIST_FAIL=1 "$ACQ" restore restored "$STUBDIR/disk-state.msb"
+  assert_failure
+  assert_output --partial "could not confirm destination sandbox 'restored' is absent"
+  refute_regex "$(cat "$CALLS")" 'msb restore'
+  [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
+  assert_equal "$(acq_host_config_read msb restored agent)" opencode
+  assert_equal "$(acq_workspace_record_read msb restored)" "$STUBDIR/existing-workspace"
+}
+
+@test "msb: restore uses the provider facts secret binding" {
+  local kit="$STUBDIR/provider-kit"
+  mkdir -p "$kit/provider-facts" "$STUBDIR/secrets"
+  cat > "$kit/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: usai-provider
+displayName: USAi Provider
+description: test fixture
+SPEC
+  cat > "$kit/provider-facts/usai.env" <<'FACTS'
+ACQ_PROVIDER_FACTS_SCHEMA=1
+ACQ_PROVIDER_ID=usai
+ACQ_PROVIDER_HOST=api.restore.example.gov
+ACQ_PROVIDER_BASE_URL=https://api.restore.example.gov/api/v1
+ACQ_PROVIDER_MODELS_URL=https://api.restore.example.gov/api/v1/models
+ACQ_PROVIDER_KEY_ENV=RESTORE_API_KEY
+ACQ_PROVIDER_KEY_MGMT_URL=https://restore.example.gov/keys
+ACQ_PROVIDER_BIND_HOSTS=api.restore.example.gov
+FACTS
+  printf 'restored-key\n' > "$STUBDIR/secrets/acq.usai"
+  : > "$STUBDIR/disk-state.msb"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_TEST_USAI_KIT="$kit" "$ACQ" restore restored "$STUBDIR/disk-state.msb"
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb restore .* --secret RESTORE_API_KEY@api\.restore\.example\.gov'
+}
+
+@test "msb: restore ignores archive-adjacent resource sidecars" {
+  mkdir -p "$STUBDIR/ws" "$STUBDIR/attacker"
+  : > "$STUBDIR/untrusted.msb"
+  printf 'volume\t%s:%s\n' "$STUBDIR/attacker" "$STUBDIR/attacker" > "$STUBDIR/untrusted.msb.resources"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" restore restored "$STUBDIR/untrusted.msb"
+  assert_success
+  refute_regex "$(cat "$CALLS")" "--volume $STUBDIR/attacker:$STUBDIR/attacker"
+}
+
+@test "msb: private staging keeps identical snapshot restores independent" {
+  : > "$STUBDIR/shared.msb"
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    first=$(_acq_msb_snapshot_stage "'"$STUBDIR"'/shared.msb") || exit 1
+    second=$(_acq_msb_snapshot_stage "'"$STUBDIR"'/shared.msb") || exit 1
+    [ "$first" != "$second" ] || exit 1
+    [ -f "$first" ] && [ -f "$second" ] || exit 1
+    rm -f "$first"
+    [ ! -e "$first" ] && [ -f "$second" ] || exit 1
+    rm -f "$second"
+    printf "%s\n%s\n" "$first" "$second"
+  '
+  assert_success
+  assert_line --index 0 --regexp "/msb-snapshots/\\.restore\\.[[:alnum:]]{6}$"
+  assert_line --index 1 --regexp "/msb-snapshots/\\.restore\\.[[:alnum:]]{6}$"
+}
+
+@test "msb: restore fails when the guest never becomes exec-ready" {
+  : > "$STUBDIR/unready.msb"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb STUB_MSB_EXEC_FAIL=1 ACQ_MSB_EXEC_READY_TIMEOUT=0 \
+    "$ACQ" restore restored "$STUBDIR/unready.msb"
+  assert_failure
+  assert_output --partial "did not become exec-ready"
+  refute_output --partial "acq: restored 'restored'."
+}
+
+@test "msb: restore without a snapshot picks the newest date-stamped snapshot for the sandbox" {
+  _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
+  mkdir -p "$STUBDIR/snapshots" "$STUBDIR/ws2"
+  : > "$STUBDIR/snapshots/mybox-20260920T010203Z.msb"
+  : > "$STUBDIR/snapshots/mybox-20260921T010203Z.msb"
+  mkdir -p "$STUBDIR/state/msb-snapshots"
+  printf 'volume\t%s:%s\n' "$STUBDIR/ws2" "$STUBDIR/ws2" > "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/snapshots/mybox-20260921T010203Z.msb").resources"
+  : > "$STUBDIR/snapshots/mybox-z-not-a-date.msb"
+  : > "$STUBDIR/snapshots/other-20260922T010203Z.msb"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_SNAPSHOT_DIR="$STUBDIR/snapshots" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore mybox
+  assert_success
+  assert_regex "$(cat "$CALLS")" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name mybox"
+}
+
+@test "sbx: snapshot/restore/recreate are acq-owned unsupported verbs, not backend passthrough" {
+  run env ACQ_BACKEND=sbx "$ACQ" snapshot mybox
+  assert_failure
+  assert_output --partial 'does not support sandbox snapshots'
+  refute_regex "$(cat "$CALLS")" 'sbx snapshot'
+  : > "$CALLS"
+  run env ACQ_BACKEND=sbx "$ACQ" restore restored "$STUBDIR/saved.sbx"
+  assert_failure
+  assert_output --partial 'does not support sandbox restore'
+  refute_regex "$(cat "$CALLS")" 'sbx restore'
+  : > "$CALLS"
+  run env ACQ_BACKEND=sbx "$ACQ" recreate mybox
+  assert_failure
+  assert_output --partial 'does not support sandbox recreate'
+  refute_regex "$(cat "$CALLS")" 'sbx snapshot|sbx restore'
+}
+
+@test "msb: recreate snapshots, removes, then restores to the same name" {
+  _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
+  local sock_path="$STUBDIR/agent.sock"
+  command -v realpath >/dev/null 2>&1 && sock_path=$(realpath "$sock_path")
+  mkdir -p "$STUBDIR/state/msb-restore" "$STUBDIR/ws"
+  printf 'volume\t%s:%s\n' "$STUBDIR/ws" "$STUBDIR/ws" > "$STUBDIR/state/msb-restore/mybox.resources"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" recreate mybox "$STUBDIR/recreate.msb"
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" "msb snapshot create --from-sandbox mybox --guest-flush auto -o $STUBDIR/recreate\.msb"
+  assert_regex "$log" 'msb remove --force mybox'
+  refute_regex "$log" 'msb volume rm'
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name mybox --dangerously-inherit-resources --volume $STUBDIR/provenance/msb/mybox\\.[0-9]+\\.config:$ACQ_HOST_CONFIG_GUEST_DIR:ro --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
+  assert_regex "$log" 'msb inspect mybox --format json'
+  assert_output --partial "kit startup re-applied"
+}
+
+@test "msb: rm --snapshot snapshots before removing and does not restore" {
+  acq_host_config_write msb mybox agent opencode
+  acq_workspace_record_write msb mybox "$STUBDIR"
+  acq_cli_kits_write msb mybox
+  printf 'acq-mybox-volume\n' > "$STUBDIR/.msb_volume_list"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" rm --snapshot mybox "$STUBDIR/rm.msb"
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" "msb snapshot create --from-sandbox mybox --guest-flush auto -o $STUBDIR/rm\.msb"
+  assert_regex "$log" 'msb remove --force mybox'
+  refute_regex "$log" 'msb restore'
+  assert_regex "$log" 'msb volume rm'
+  assert_equal "$(acq_host_config_read msb mybox agent)" ""
+  assert_equal "$(acq_workspace_record_read msb mybox)" ""
+  assert_equal "$(acq_provenance_field msb mybox schema)" ""
+  local kit_record
+  kit_record=$(printf '%s' mybox | cksum | cut -d' ' -f1)
+  [ ! -f "$STUBDIR/provenance/msb/mybox.${kit_record}.kits" ]
+}
+
+@test "msb: rm --snapshot refuses clone-backed workspaces without deleting them" {
+  local clone="$STUBDIR/state/clones/mybox/workspace"
+  mkdir -p "$clone"
+  printf 'uncommitted work\n' > "$clone/sentinel"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" rm --snapshot mybox "$STUBDIR/rm.msb"
+  assert_failure
+  assert_output --partial "refusing clone-backed sandbox"
+  [ -f "$clone/sentinel" ]
+  refute_regex "$(cat "$CALLS")" 'msb snapshot create|msb remove'
+}
+
+@test "msb: snapshot refuses clone-backed workspaces before writing an archive" {
+  local clone="$STUBDIR/state/clones/mybox/workspace"
+  mkdir -p "$clone"
+  printf 'uncommitted work\n' > "$clone/sentinel"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" snapshot mybox "$STUBDIR/snapshot.msb"
+  assert_failure
+  assert_output --partial "refusing clone-backed sandbox"
+  [ -f "$clone/sentinel" ]
+  refute_regex "$(cat "$CALLS")" 'msb snapshot create'
+}
+
+@test "msb: recreate refuses clone-backed workspaces before removal" {
+  local clone="$STUBDIR/state/clones/mybox/workspace"
+  mkdir -p "$clone"
+  printf 'uncommitted work\n' > "$clone/sentinel"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" recreate mybox "$STUBDIR/recreate.msb"
+  assert_failure
+  assert_output --partial "refusing clone-backed sandbox"
+  [ -f "$clone/sentinel" ]
+  refute_regex "$(cat "$CALLS")" 'msb snapshot create|msb remove'
+}
+
+@test "msb: restore clears conflicting environment extra kits when snapshot has none" {
+  : > "$STUBDIR/saved.msb"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_EXTRA_KITS=conflicting-kit "$ACQ" restore restored "$STUBDIR/saved.msb"
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'conflicting-kit'
+}
+
+@test "msb: strict restore kit heal fails for an extra kit apply failure" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_fetch_kit() { printf "/tmp/%s\n" "$1"; }
+    _acq_msb_merge_kit_env_into() { eval "$1=()"; }
+    _acq_msb_reset_kit_env() { :; }
+    _acq_msb_apply_kit_dir() { [ "$2" != /tmp/extra ]; }
+    _acq_msb_heal_kit_set box 1 --strict builtin extra
+  '
+  assert_failure
 }
 
 @test "msb: ls/stop/rm/exec dispatch to the msb verbs (exec as agent user)" {

@@ -122,6 +122,7 @@ case "${1:-}" in
   create)
     [ "${STUB_SBX_CREATE_FAIL:-0}" = "1" ] && exit 1
     : >"$STUBDIR/.created"; exit 0 ;;
+  snapshot|restore) exit 64 ;;
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
@@ -261,7 +262,8 @@ case "$_msb_sub" in
   inspect)
     # `msb inspect <name> --format json` — emit a create-time published-ports
     # JSON fixture if the test planted one, else nothing (models an absent field
-    # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
+    # / no ports so _acq_msb_ports_from_inspect must degrade gracefully). When no
+    # fixture exists, require the sandbox to exist like real `msb inspect`.
     # STUB_MSB_INSPECT_FAIL_TIMES=N fails the first N inspects (with a stderr
     # line) and then succeeds, modelling a transient inspect failure.
     _inspect_fails=$(cat "$STUBDIR/.msb_inspect_fails" 2>/dev/null || echo 0)
@@ -270,7 +272,14 @@ case "$_msb_sub" in
       echo "error: stub inspect failure" >&2
       exit 1
     fi
-    [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
+    if [ -f "$STUBDIR/.msb_inspect_json" ]; then
+      cat "$STUBDIR/.msb_inspect_json"
+      exit 0
+    fi
+    if [ -f "$STUBDIR/.msb_sandbox_list" ] && grep -Fxq -- "${2:-}" "$STUBDIR/.msb_sandbox_list"; then
+      exit 0
+    fi
+    exit 1 ;;
   list|ls)
     [ "${STUB_MSB_LIST_FAIL:-0}" = "1" ] && exit 1
     # `msb list --running -q` (running-state probe, ADR-0017 stopped detection):
@@ -285,6 +294,7 @@ case "$_msb_sub" in
       [ -f "$STUBDIR/.msb_sandbox_list" ] && cat "$STUBDIR/.msb_sandbox_list"
     fi ;;
   exec)
+    [ "${STUB_MSB_EXEC_FAIL:-0}" = "1" ] && exit 1
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
     # `opencode --version` postinstall functionality probe (bare argv). Default
@@ -443,6 +453,20 @@ case "$_msb_sub" in
     # `--secret ENV@HOST` bindings and REQUIRES the value to be present in the
     # host env. Record which of the bound secret env vars were present at start
     # time so a test can assert acq_backend_start exported them before starting.
+    { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
+    { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
+    : ;;
+  snapshot)
+    _out=""
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = "-o" ] && { shift; _out="${1:-}"; }
+      shift || true
+    done
+    [ -n "$_out" ] && : >"$_out"
+    { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
+    { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
+    : ;;
+  restore)
     { [ -n "${USAI_API_KEY:-}" ] && printf 'USAI_API_KEY=present\n' >>"$CALLS"; } || true
     { [ -n "${GITHUB_TOKEN:-}" ] && printf 'GITHUB_TOKEN=present\n' >>"$CALLS"; } || true
     : ;;

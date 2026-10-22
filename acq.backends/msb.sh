@@ -59,7 +59,7 @@ ACQ_BACKEND_NAME="msb"
 # shellcheck disable=SC2034
 ACQ_BACKEND_SUPPORTS_PORT_FORWARD=1        # post-hoc publish via `msb ssh serve` + OpenSSH -L forwarding (ADR-0015)
 # shellcheck disable=SC2034
-ACQ_BACKEND_SUPPORTS_SNAPSHOTS=0           # msb HAS `msb snapshot`, but acq exposes NO `snapshot` verb; wiring one is beyond sbx parity (sbx has none), so this flag reflects what acq surfaces (0), not what msb can do
+ACQ_BACKEND_SUPPORTS_SNAPSHOTS=1           # acq surfaces msb disk-state snapshot/restore (cold-boot restore + restore-time resource rebinding)
 # shellcheck disable=SC2034
 ACQ_BACKEND_CAN_RESUME=1                   # msb stop / msb start preserve state
 # shellcheck disable=SC2034
@@ -583,6 +583,8 @@ ACQ_MSB_SSH_KEY="${ACQ_MSB_SSH_KEY:-${ACQ_MSB_SSH_DIR}/msb_id_ed25519}"
 ACQ_MSB_SSH_KNOWN_HOSTS="${ACQ_MSB_SSH_KNOWN_HOSTS:-${ACQ_MSB_SSH_DIR}/known_hosts}"
 ACQ_MSB_PORTS_DIR="${ACQ_MSB_PORTS_DIR:-${ACQ_STATE_DIR}/ports}"
 ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
+ACQ_MSB_RESTORE_DIR="${ACQ_MSB_RESTORE_DIR:-${ACQ_STATE_DIR}/msb-restore}"
+ACQ_MSB_SNAPSHOT_DIR="${ACQ_MSB_SNAPSHOT_DIR:-${ACQ_STATE_DIR}/msb-snapshots}"
 # Create-time startup-script staging state (ADR-0017). The staged host file list
 # is reset per provision; declare it at module scope so cleanup references are
 # always defined even if provision is not the entry point.
@@ -835,15 +837,14 @@ acq_backend_prepare() {
 # ---------------------------------------------------------------------------
 # acq_backend_exists — 0 if a named sandbox exists, else 1
 # ---------------------------------------------------------------------------
-# `msb list -q` prints one sandbox name per line (verified via --tree: "-q
-# Show only sandbox names"). Match the whole line exactly.
-# NOTE: not live-verified against a running daemon; the -q contract is from the
-# CLI help. If the column layout differs on a real host, adjust the parse.
-
+# Prefer `msb list -q` when it reports names directly, but fall back to
+# `msb inspect NAME`: some restore paths can produce sandboxes visible in the
+# table output before they appear in the quiet-name listing.
 acq_backend_exists() {
   local listed
   listed=$(_acq_msb_cli list -q 2>/dev/null) || return 1
-  grep -Fxq -- "$1" <<<"$listed"
+  grep -Fxq -- "$1" <<<"$listed" && return 0
+  _acq_msb_cli inspect "$1" >/dev/null 2>&1
 }
 
 # Return success only when msb successfully lists sandboxes and NAME is absent.
@@ -1056,6 +1057,347 @@ acq_backend_start() {
 }
 
 # ---------------------------------------------------------------------------
+# Restore resource metadata — acq-owned host bindings for exported snapshots
+# ---------------------------------------------------------------------------
+_acq_msb_restore_resource_file() {
+  local name="$1"
+  case "$name" in
+    ""|*[!A-Za-z0-9_-]*|-*)
+      echo "acq(msb): restore: refusing unsafe sandbox name '$name' for state path." >&2
+      return 1 ;;
+  esac
+  printf '%s/%s.resources' "$ACQ_MSB_RESTORE_DIR" "$name"
+}
+
+_acq_msb_snapshot_resource_file() {
+  local snapshot="$1" sum
+  [ -f "$snapshot" ] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sum=$(sha256sum "$snapshot" 2>/dev/null | cut -d' ' -f1) || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    sum=$(shasum -a 256 "$snapshot" 2>/dev/null | cut -d' ' -f1) || return 1
+  else
+    echo "acq(msb): snapshot metadata requires sha256sum or shasum." >&2
+    return 1
+  fi
+  printf '%s/%s.resources' "$ACQ_MSB_SNAPSHOT_DIR" "$sum"
+}
+
+_acq_msb_snapshot_stage() {
+  local snapshot="$1" tmp sum
+  [ -f "$snapshot" ] || return 1
+  ( umask 077; mkdir -p "$ACQ_MSB_SNAPSHOT_DIR" ) 2>/dev/null || return 1
+  chmod 700 "$ACQ_MSB_SNAPSHOT_DIR" 2>/dev/null || return 1
+  tmp=$(mktemp "$ACQ_MSB_SNAPSHOT_DIR/.restore.XXXXXX") || return 1
+  cp "$snapshot" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  if command -v sha256sum >/dev/null 2>&1; then
+    sum=$(sha256sum "$tmp" 2>/dev/null | cut -d' ' -f1) || { rm -f "$tmp"; return 1; }
+  elif command -v shasum >/dev/null 2>&1; then
+    sum=$(shasum -a 256 "$tmp" 2>/dev/null | cut -d' ' -f1) || { rm -f "$tmp"; return 1; }
+  else
+    rm -f "$tmp"
+    echo "acq(msb): snapshot metadata requires sha256sum or shasum." >&2
+    return 1
+  fi
+  # Keep the per-invocation mktemp name. The digest authenticates metadata, not
+  # the staged archive: a shared digest filename would let concurrent restores
+  # of identical snapshots remove or replace each other's restore input.
+  printf '%s\n' "$tmp"
+}
+
+_acq_msb_snapshot_kits_file() {
+  local snapshot="$1" resource_file
+  resource_file=$(_acq_msb_snapshot_resource_file "$snapshot") || return 1
+  printf '%s.kits' "${resource_file%.resources}"
+}
+
+_acq_msb_snapshot_state_file() {
+  local snapshot="$1" resource_file
+  resource_file=$(_acq_msb_snapshot_resource_file "$snapshot") || return 1
+  printf '%s.state' "${resource_file%.resources}"
+}
+
+_acq_msb_snapshot_state_copy() {
+  local name="$1" snapshot="$2" target agent workspace generic host_workspace
+  target=$(_acq_msb_snapshot_state_file "$snapshot") || return 1
+  agent=$(acq_host_config_read msb "$name" agent 2>/dev/null || true)
+  [ -n "$agent" ] || agent=$(acq_provenance_field msb "$name" agent)
+  workspace=$(acq_host_config_read msb "$name" workspace 2>/dev/null || true)
+  [ -n "$workspace" ] || workspace=$(acq_workspace_record_read msb "$name" 2>/dev/null || true)
+  generic=$(acq_host_config_read msb "$name" generic-opencode 2>/dev/null || true)
+  host_workspace=$(acq_workspace_record_read msb "$name" 2>/dev/null || true)
+  [ -n "$agent$workspace$generic$host_workspace" ] || return 0
+  ( umask 077; mkdir -p "$ACQ_MSB_SNAPSHOT_DIR" ) 2>/dev/null || return 1
+  {
+    printf 'agent\t%s\n' "$agent"
+    printf 'workspace\t%s\n' "$workspace"
+    printf 'generic-opencode\t%s\n' "$generic"
+    printf 'host-workspace\t%s\n' "$host_workspace"
+  } >"$target" 2>/dev/null || return 1
+  chmod 600 "$target" 2>/dev/null || return 1
+}
+
+_acq_msb_snapshot_state_adopt() {
+  local name="$1" snapshot="$2" source kind value agent="" workspace="" generic="" host_workspace=""
+  source=$(_acq_msb_snapshot_state_file "$snapshot") || return 0
+  [ -f "$source" ] || return 0
+  while IFS=$'\t' read -r kind value; do
+    case "$kind" in
+      agent) agent="$value" ;;
+      workspace) workspace="$value" ;;
+      generic-opencode) generic="$value" ;;
+      host-workspace) host_workspace="$value" ;;
+    esac
+  done <"$source"
+  case "$agent" in ""|*[!a-z-]*) return 1 ;; esac
+  # A restore's sidecar is authoritative. Never retain a removed sandbox's
+  # name-keyed state when this snapshot omits a field.
+  acq_host_config_clear msb "$name" agent
+  acq_host_config_clear msb "$name" workspace
+  acq_host_config_clear msb "$name" generic-opencode
+  acq_provenance_remove msb "$name"
+  acq_host_config_write msb "$name" agent "$agent" || return 1
+  [ -z "$workspace" ] || acq_host_config_write msb "$name" workspace "$workspace" || return 1
+  case "$generic" in
+    "") ;;
+    generic-opencode|1) acq_host_config_write msb "$name" generic-opencode generic-opencode || return 1 ;;
+    *) return 1 ;;
+  esac
+  [ -z "$host_workspace" ] || acq_workspace_record_write msb "$name" "$host_workspace" || return 1
+}
+
+_acq_msb_restore_resources_write() {
+  local name="$1" _file _spec
+  _file=$(_acq_msb_restore_resource_file "$name") || return 1
+  ( umask 077; mkdir -p "$ACQ_MSB_RESTORE_DIR" ) 2>/dev/null || return 1
+  chmod 700 "$ACQ_MSB_RESTORE_DIR" 2>/dev/null || return 1
+  : >"$_file" 2>/dev/null || return 1
+  shift
+  for _spec in ${@+"$@"}; do
+    printf 'volume\t%s\n' "$_spec" >>"$_file" 2>/dev/null || return 1
+  done
+}
+
+_acq_msb_restore_resources_copy_sidecar() {
+  local name="$1" snapshot="$2" _file _trusted
+  _file=$(_acq_msb_restore_resource_file "$name") || return 0
+  [ -f "$_file" ] || return 0
+  _trusted=$(_acq_msb_snapshot_resource_file "$snapshot") || return 1
+  ( umask 077; mkdir -p "$ACQ_MSB_SNAPSHOT_DIR" ) 2>/dev/null || return 1
+  chmod 700 "$ACQ_MSB_SNAPSHOT_DIR" 2>/dev/null || return 1
+  cp "$_file" "$_trusted" 2>/dev/null || return 1
+  chmod 600 "$_trusted" 2>/dev/null || return 1
+}
+
+_acq_msb_snapshot_kits_copy() {
+  local name="$1" snapshot="$2" source target
+  source=$(_acq_cli_kits_file msb "$name") || return 1
+  target=$(_acq_msb_snapshot_kits_file "$snapshot") || return 1
+  ( umask 077; mkdir -p "$ACQ_MSB_SNAPSHOT_DIR" ) 2>/dev/null || return 1
+  chmod 700 "$ACQ_MSB_SNAPSHOT_DIR" 2>/dev/null || return 1
+  if [ -f "$source" ]; then
+    cp "$source" "$target" 2>/dev/null || return 1
+  else
+    printf 'schema=1\n' >"$target" 2>/dev/null || return 1
+  fi
+  chmod 600 "$target" 2>/dev/null || return 1
+}
+
+_acq_msb_restore_resources_adopt_trusted() {
+  local name="$1" snapshot="$2" _file _trusted
+  _trusted=$(_acq_msb_snapshot_resource_file "$snapshot") || return 0
+  [ -f "$_trusted" ] || return 0
+  _file=$(_acq_msb_restore_resource_file "$name") || return 1
+  ( umask 077; mkdir -p "$ACQ_MSB_RESTORE_DIR" ) 2>/dev/null || return 1
+  chmod 700 "$ACQ_MSB_RESTORE_DIR" 2>/dev/null || return 1
+  cp "$_trusted" "$_file" 2>/dev/null || return 1
+  chmod 600 "$_file" 2>/dev/null || return 1
+}
+
+_acq_msb_restore_clear_stale_state() {
+  local name="$1" resource_file
+  resource_file=$(_acq_msb_restore_resource_file "$name") || return 1
+  rm -f "$resource_file" 2>/dev/null || return 1
+  acq_cli_kits_remove msb "$name"
+  acq_provenance_remove msb "$name"
+  acq_host_config_remove msb "$name"
+}
+
+_acq_msb_snapshot_kits_adopt_trusted() {
+  local name="$1" snapshot="$2" source target dir
+  source=$(_acq_msb_snapshot_kits_file "$snapshot") || return 0
+  target=$(_acq_cli_kits_file msb "$name") || return 1
+  dir=$(dirname "$target")
+  ( umask 077; mkdir -p "$dir" ) 2>/dev/null || return 1
+  chmod 700 "$dir" 2>/dev/null || return 1
+  if [ -f "$source" ]; then
+    cp "$source" "$target" 2>/dev/null || return 1
+  else
+    printf 'schema=1\n' >"$target" 2>/dev/null || return 1
+  fi
+  chmod 600 "$target" 2>/dev/null || return 1
+}
+
+_acq_msb_restore_resource_flags_into() { # ARRVAR SNAPSHOT
+  local _arr="$1" _snapshot="$2" _file _kind _spec
+  eval "$_arr=()"
+  _file=$(_acq_msb_snapshot_resource_file "$_snapshot") || return 0
+  [ -f "$_file" ] || return 0
+  while IFS=$'\t' read -r _kind _spec; do
+    case "$_kind" in
+      volume) [ -n "$_spec" ] && eval "$_arr+=(--volume \"\$_spec\")" ;;
+    esac
+  done <"$_file"
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_snapshot NAME [OUT] — create a disk-state msb snapshot (cold-boot recoverable)
+# ---------------------------------------------------------------------------
+acq_backend_snapshot() {
+  local _name="${1:-}" _out="${2:-}"
+  [ -n "$_name" ] || { echo "acq(msb): snapshot: missing sandbox name" >&2; return 1; }
+  if [ -n "${3:-}" ]; then
+    echo "acq(msb): snapshot: too many arguments" >&2
+    echo "     usage: acq snapshot NAME [OUT]" >&2
+    return 2
+  fi
+  if [ -n "$_out" ]; then
+    local _host_out="$_out"
+    if command -v host_path >/dev/null 2>&1; then
+      _host_out=$(host_path "$_out")
+    fi
+    ( umask 077; _acq_msb_cli snapshot create --from-sandbox "$_name" --guest-flush auto -o "$_host_out" ) || return $?
+    chmod 600 "$_out" 2>/dev/null || return 1
+    _acq_msb_restore_resources_copy_sidecar "$_name" "$_out" || return 1
+    _acq_msb_snapshot_kits_copy "$_name" "$_out" || return 1
+    _acq_msb_snapshot_state_copy "$_name" "$_out" || return 1
+  else
+    _acq_msb_cli snapshot create --from-sandbox "$_name" --guest-flush auto
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# acq_backend_restore SNAPSHOT --name NAME — restore and re-plumb resources
+# ---------------------------------------------------------------------------
+acq_backend_restore() {
+  local _snapshot="${1:-}" _name="" _arg _staged_snapshot
+  [ -n "$_snapshot" ] || { echo "acq(msb): restore: missing snapshot reference" >&2; return 1; }
+  shift || true
+  while [ "$#" -gt 0 ]; do
+    _arg="$1"; shift
+    case "$_arg" in
+      --name)
+        _name="${1:-}"; [ "$#" -gt 0 ] && shift || true ;;
+      --name=*)
+        _name="${_arg#--name=}" ;;
+      --*)
+        echo "acq(msb): restore: unknown flag '$_arg'" >&2
+        echo "     usage: acq restore SNAPSHOT --name NAME" >&2
+        return 2 ;;
+      *)
+        echo "acq(msb): restore: unexpected argument '$_arg'" >&2
+        echo "     usage: acq restore SNAPSHOT --name NAME" >&2
+        return 2 ;;
+    esac
+  done
+  case "$_name" in
+    ""|-*)
+      echo "acq(msb): restore: missing --name NAME" >&2
+      echo "     usage: acq restore SNAPSHOT --name NAME" >&2
+      return 2 ;;
+  esac
+
+  if acq_backend_exists "$_name"; then
+    echo "acq(msb): restore: destination sandbox '$_name' already exists." >&2
+    echo "     Remove it first or restore under a different name; existing state was left unchanged." >&2
+    return 1
+  fi
+  if ! _acq_msb_confirm_absent "$_name"; then
+    echo "acq(msb): restore: could not confirm destination sandbox '$_name' is absent." >&2
+    echo "     Existing state was left unchanged; retry when MSB is reachable." >&2
+    return 1
+  fi
+
+  _staged_snapshot=$(_acq_msb_snapshot_stage "$_snapshot") || {
+    echo "acq(msb): restore: could not stage snapshot privately." >&2
+    return 1
+  }
+
+  # Restore metadata is name-scoped. Remove stale state before collecting the
+  # trusted snapshot sidecars, then remount a fresh trusted host-config dir.
+  _acq_msb_restore_clear_stale_state "$_name" || {
+    rm -f "$_staged_snapshot"
+    return 1
+  }
+
+  local _restore_flags=(--name "$_name" --dangerously-inherit-resources)
+  local _resource_flags=() _vsock_flags=() _hcfg_dir _hcfg_mount _hcfg_host
+  if _hcfg_dir=$(acq_host_config_dir msb "$_name"); then
+    mkdir -p "$_hcfg_dir" 2>/dev/null || { rm -f "$_staged_snapshot"; return 1; }
+    chmod 711 "$_hcfg_dir" 2>/dev/null || { rm -f "$_staged_snapshot"; return 1; }
+    _hcfg_mount="$_hcfg_dir"
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      _hcfg_mount=$(canonicalize_path "$_hcfg_mount") || { rm -f "$_staged_snapshot"; return 1; }
+    fi
+    if command -v host_path >/dev/null 2>&1; then
+      _hcfg_host=$(host_path "$_hcfg_mount") || { rm -f "$_staged_snapshot"; return 1; }
+    else
+      _hcfg_host="$_hcfg_mount"
+    fi
+    _restore_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
+  fi
+  ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=0
+  _acq_msb_restore_resource_flags_into _resource_flags "$_staged_snapshot"
+  # The exported archive is MSB's disk snapshot format. It restores through the
+  # ordinary archive path, re-binding only acq-owned external resources.
+  ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=1
+  if [ "${#_resource_flags[@]}" -gt 0 ]; then
+    _restore_flags+=("${_resource_flags[@]}")
+  fi
+  _acq_msb_vsock_flags_into _vsock_flags
+  [ "${#_vsock_flags[@]}" -gt 0 ] && _restore_flags+=("${_vsock_flags[@]}")
+
+  local _host_snapshot="$_staged_snapshot"
+  if command -v host_path >/dev/null 2>&1; then
+    _host_snapshot=$(host_path "$_staged_snapshot")
+  fi
+
+  if command -v acq_provider_facts_load_from_kit_or_fallback >/dev/null 2>&1; then
+    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+  fi
+  local _restore_secret_flags=() _restore_secret_names=()
+  _acq_msb_bind_secrets_into _restore_secret_flags _restore_secret_names "$_name"
+  local _restore_rc=0
+  _acq_msb_cli restore "$_host_snapshot" "${_restore_flags[@]}" "${_restore_secret_flags[@]}" || _restore_rc=$?
+  local _rev
+  for _rev in ${_restore_secret_names[@]+"${_restore_secret_names[@]}"}; do
+    unset "$_rev"
+  done
+  if [ "$_restore_rc" -ne 0 ]; then
+    rm -f "$_staged_snapshot"
+    return "$_restore_rc"
+  fi
+  if ! _acq_msb_restore_resources_adopt_trusted "$_name" "$_staged_snapshot" \
+      || ! _acq_msb_snapshot_kits_adopt_trusted "$_name" "$_staged_snapshot" \
+      || ! _acq_msb_snapshot_state_adopt "$_name" "$_staged_snapshot"; then
+    rm -f "$_staged_snapshot"
+    return 1
+  fi
+  rm -f "$_staged_snapshot"
+  if ! _acq_msb_wait_for_exec_ready "$_name"; then
+    echo "acq(msb): restore: $_name did not become exec-ready." >&2
+    return 1
+  fi
+  if [ "${_ACQ_MSB_SSH_AGENT_FORWARDING:-0}" = "1" ]; then
+    _acq_msb_check_socat "$_name" && _acq_msb_start_ssh_agent_bridge "$_name"
+  else
+    echo "acq(msb): warning: no current host SSH_AUTH_SOCK was available;" \
+         "SSH signing will not be re-plumbed in restored sandbox '$_name'." >&2
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # _acq_msb_wait_for_exec_ready NAME — block until `msb exec` works in the guest
 # ---------------------------------------------------------------------------
 # msb create returns as soon as the sandbox is registered, but the guest boots
@@ -1072,10 +1414,11 @@ _acq_msb_wait_for_exec_ready() {
   while :; do
     _attempt=$(( _attempt + 1 ))
     acq_debug "msb exec-ready probe #${_attempt} for $name"
-    out=$(_acq_msb_cli exec "$name" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r')
+    out=$(_acq_msb_cli exec "$name" -- sh -c 'echo ok' </dev/null 2>/dev/null)
     _rc=$?
+    out=$(printf '%s' "$out" | tr -d '\r')
     acq_debug "msb exec-ready probe #${_attempt}: rc=${_rc} out='${out}'"
-    case "$out" in
+    [ "$_rc" -eq 0 ] && case "$out" in
       *ok*) acq_debug "msb exec-ready: $name (after ${_attempt} probe(s))"; return 0 ;;
     esac
     _now=$(date +%s)
@@ -3080,6 +3423,18 @@ _acq_msb_clone_cleanup() {
   return 0
 }
 
+# A clone's workspace is an acq-owned external mount, not part of MSB's disk
+# archive. Deleting it after snapshotting would leave an archive that cannot
+# restore the clone's working tree.
+acq_backend_snapshot_safe() {
+  local name="$1" dir="${ACQ_MSB_CLONES_DIR}/${1}"
+  if [ -d "$dir" ]; then
+    echo "acq(msb): snapshot: refusing clone-backed sandbox '$name'." >&2
+    echo "     Its external clone workspace is not included in the disk snapshot." >&2
+    return 1
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # acq_backend_provision — create a sandbox and apply the kits
 # ---------------------------------------------------------------------------
@@ -3506,6 +3861,7 @@ EOF
 
   ACQ_MSB_GUEST_WORKSPACE=""
   local _wi _wspec _wpath _wro _wsrc _whost _first_record _first_guest="" _first_host=""
+  local _restore_volume_specs=()
   for _wi in ${_ws_recs[@]+"${!_ws_recs[@]}"}; do
     _wspec="${_ws_recs[$_wi]}"
     # Split an optional trailing ":ro" (read-only) marker from the path.
@@ -3554,6 +3910,7 @@ EOF
       _whost="$_wsrc"
     fi
     create_flags+=(--volume "${_whost}:${_wpath}${_wro}")
+    _restore_volume_specs+=("${_whost}:${_wpath}${_wro}")
     acq_debug "msb volume: ${_whost} (host) -> ${_wpath}${_wro} (guest)"
   done
 
@@ -3597,14 +3954,21 @@ EOF
 
   # Mount per-sandbox trusted configuration read-only. The guest can consume
   # declared code and data here but cannot make acq trust a modified replacement.
-  local _hcfg_dir _hcfg_host
+  local _hcfg_dir _hcfg_mount _hcfg_host
   if _hcfg_dir=$(acq_host_config_dir msb "$name"); then
     mkdir -p "$_hcfg_dir" 2>/dev/null || true
     chmod 711 "$_hcfg_dir" 2>/dev/null || true
+    # msb rejects bind-mount sources reached through a host symlink. Host config
+    # commonly lives below macOS $TMPDIR (/var -> /private/var), so canonicalize
+    # this source just as we do workspace mounts above.
+    _hcfg_mount="$_hcfg_dir"
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      _hcfg_mount=$(canonicalize_path "$_hcfg_mount")
+    fi
     if command -v host_path >/dev/null 2>&1; then
-      _hcfg_host=$(host_path "$_hcfg_dir")
+      _hcfg_host=$(host_path "$_hcfg_mount")
     else
-      _hcfg_host="$_hcfg_dir"
+      _hcfg_host="$_hcfg_mount"
     fi
     create_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
   fi
@@ -3718,6 +4082,8 @@ EOF
   fi
   acq_spin_stop "Waiting for the sandbox to finish booting"
   acq_debug "msb provision: exec-ready OK ($name)"
+  _acq_msb_restore_resources_write "$name" \
+    ${_restore_volume_specs[@]+"${_restore_volume_specs[@]}"} || return 1
 
   # A same-named sandbox removed outside acq can leave host state behind. Clear
   # instance-scoped values before this fresh provision records replacement values.
@@ -4973,35 +5339,56 @@ acq_backend_stop() {
 }
 
 acq_backend_terminate() {
+  _acq_msb_terminate_impl "$1" cleanup
+}
+
+acq_backend_terminate_for_restore() {
+  _acq_msb_terminate_impl "$1" keep-resources
+}
+
+_acq_msb_terminate_impl() {
+  local _name="$1" _mode="${2:-cleanup}"
   # Tear down any post-hoc published-port tunnels (serve + ssh PIDs, state file)
   # before removing the sandbox (ADR-0015). Killing a dead PID / missing state
   # file is a no-op.
-  _acq_msb_ports_teardown "$1"
+  _acq_msb_ports_teardown "$_name"
   # Clean up derived volumes (ADR-0023) whenever the sandbox is GONE after the
   # remove attempt — not merely when remove succeeded. A failed remove of a
   # still-existing sandbox must not touch volumes that may be in use, but a
   # failed remove of an already-gone sandbox (removed via `msb rm` directly, or
   # a half-failed create that never registered) must still reach the cleanup,
   # or the volumes orphan forever under ~/.microsandbox/volumes/.
+  #
+  # Restore-aware removal keeps derived host resources: `acq recreate` snapshots,
+  # removes the VM, then restores from the snapshot, and msb restore inherits
+  # validated source-local resource records. Deleting the derived volumes in the
+  # gap would destroy the resources restore needs.
+  #
   # --clone (ADR-0027): surface unfetched agent commits BEFORE anything is deleted
   # (sbx-parity warning; rm proceeds — the scratch is disposable by contract).
-  _acq_msb_clone_warn_unfetched "$1"
+  _acq_msb_clone_warn_unfetched "$_name"
   local _rc=0
-  _acq_msb_cli remove --force "$1" || _rc=$?
+  _acq_msb_cli remove --force "$_name" || _rc=$?
   if [ "$_rc" -ne 0 ]; then
-    if acq_backend_exists "$1" || ! _acq_msb_confirm_absent "$1"; then
+    if acq_backend_exists "$_name" || ! _acq_msb_confirm_absent "$_name"; then
       return "$_rc"
     fi
   fi
-  _acq_msb_remove_derived_volumes "$1"
-  # Same GONE-after-remove-attempt rule as the volumes above: delete the scratch
-  # clone and drop the fetch-back remote only once the sandbox is really gone.
-  _acq_msb_clone_cleanup "$1"
-  # The managed ssh-agent route link (ADR-0021) is per sandbox; drop it too.
-  _acq_msb_ssh_agent_link_remove "$1"
-  # Remove host-authoritative config only after the sandbox is confirmed gone;
-  # otherwise a failed removal could discard state still mounted by a live guest.
-  acq_host_config_remove msb "$1" || true
+  if [ "$_mode" != "keep-resources" ]; then
+    _acq_msb_remove_derived_volumes "$_name"
+    local _restore_file
+    _restore_file=$(_acq_msb_restore_resource_file "$_name") && rm -f "$_restore_file" 2>/dev/null || true
+    # Same GONE-after-remove-attempt rule as the volumes above: delete the scratch
+    # clone and drop the fetch-back remote only once the sandbox is really gone.
+    _acq_msb_clone_cleanup "$_name"
+    # The managed ssh-agent route link (ADR-0021) is per sandbox; drop it too.
+    _acq_msb_ssh_agent_link_remove "$_name"
+    # Remove host-authoritative config only after the sandbox is confirmed gone;
+    # otherwise a failed removal could discard state still mounted by a live guest.
+    acq_host_config_remove msb "$_name" || true
+    acq_provenance_remove msb "$_name" || true
+    acq_cli_kits_remove msb "$_name" || true
+  fi
   return "$_rc"
 }
 
@@ -5482,13 +5869,18 @@ acq_backend_apply_kit() {
 # _acq_msb_heal_kit_set NAME BUILTIN_COUNT KITREF... — the heal's kit loop: fetch
 # every ref, merge their environment[] in a pre-pass (see
 # _acq_msb_merge_kit_env_into for why fetch and apply must be separate loops),
-# reset the marker, then apply each kit with that merged env. Returns 1 if any of
-# the first BUILTIN_COUNT refs failed to fetch or apply (the caller's provenance
-# verdict), 0 otherwise. _builtin mirrors _dirs so a built-in's apply failure stays
+# reset the marker, then apply each kit with that merged env. With --strict,
+# returns 1 if any ref fails; otherwise only built-in failures affect the
+# provenance verdict. _builtin mirrors _dirs so a built-in's apply failure stays
 # attributable across the two loops.
 _acq_msb_heal_kit_set() {
   local name="$1" builtin_count="$2"
   shift 2
+  local strict=0
+  if [ "${1:-}" = "--strict" ]; then
+    strict=1
+    shift
+  fi
   local kitref kitdir i=0 ok=1
   local _dirs=() _builtin=()
   for kitref in "$@"; do
@@ -5497,9 +5889,9 @@ _acq_msb_heal_kit_set() {
       if [ "$i" -lt "$builtin_count" ]; then _builtin+=(1); else _builtin+=(0); fi
     else
       echo "acq(msb): warning: could not fetch kit for healing: $kitref" >&2
-      # A built-in kit that can't even be fetched means we cannot claim the
-      # bundle is current. Extra-kit fetch failures don't affect the verdict.
-      [ "$i" -lt "$builtin_count" ] && ok=0
+      if [ "$i" -lt "$builtin_count" ] || [ "$strict" -eq 1 ]; then
+        ok=0
+      fi
     fi
     i=$((i + 1))
   done
@@ -5512,7 +5904,9 @@ _acq_msb_heal_kit_set() {
   local _ki
   for _ki in ${_dirs[@]+"${!_dirs[@]}"}; do
     if ! _acq_msb_apply_kit_dir "$name" "${_dirs[$_ki]}" _merged; then
-      [ "${_builtin[$_ki]}" -eq 1 ] && ok=0
+      if [ "${_builtin[$_ki]}" -eq 1 ] || [ "$strict" -eq 1 ]; then
+        ok=0
+      fi
     fi
   done
   [ "$ok" -eq 1 ]
@@ -5577,7 +5971,11 @@ acq_backend_ensure_kits_applied() {
   local builtin_count="${ACQ_BUILTIN_KIT_COUNT:-4}"
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"
-  _acq_msb_heal_kit_set "$name" "$builtin_count" "${kits[@]}" || ok=0
+  if [ "${ACQ_STRICT_KIT_HEAL:-0}" = "1" ]; then
+    _acq_msb_heal_kit_set "$name" "$builtin_count" --strict "${kits[@]}" || ok=0
+  else
+    _acq_msb_heal_kit_set "$name" "$builtin_count" "${kits[@]}" || ok=0
+  fi
   acq_spin_stop "Refreshing configuration kits"
   # Record host-side bundle provenance ONLY when every built-in kit applied.
   # msb re-applies all built-in kits idempotently, so on full

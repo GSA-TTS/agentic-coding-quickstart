@@ -162,6 +162,28 @@ FACTS
   refute_output --partial 'passed through'
 }
 
+@test "snapshot/restore: --help documents acq-owned disk-state verbs (no memory/live-state claims)" {
+  run env ACQ_BACKEND=sbx "$ACQ" snapshot --help
+  assert_output --partial 'durable disk state'
+  assert_output --partial 'cold-boots'
+  assert_output --partial 'backends fail closed'
+  refute_output --partial 'live state'
+  refute_output --partial 'execution, and device'
+  refute_output --partial 'passed through'
+  run env ACQ_BACKEND=sbx "$ACQ" restore --help
+  assert_output --partial 'cold boot'
+  assert_output --partial 'disk image'
+  assert_output --partial 'host-resource re-plumbing'
+  refute_output --partial 'live state'
+  refute_output --partial 'passed through'
+  run env ACQ_BACKEND=sbx "$ACQ" recreate --help
+  assert_output --partial 'disk state'
+  assert_output --partial 'cold-boot'
+  assert_output --partial 'host-resource re-plumbing'
+  refute_output --partial 'live state'
+  refute_output --partial 'passed through'
+}
+
 @test "dispatch: version reports backend and script path" {
   run env ACQ_BACKEND=sbx "$ACQ" version
   assert_output --partial 'backend:'
