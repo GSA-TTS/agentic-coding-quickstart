@@ -6,7 +6,7 @@
 # SECURITY guards for kit translation on msb: hostile file `mode`, command
 # `user`, unsafe paths, and env var names must be rejected/dropped and NEVER
 # interpolated into a root shell or msb argv. Also the home-dir ownership fix
-# (#234): the top-most created subtree under /home/agent is chowned recursively
+# the top-most created subtree under /home/agent is chowned recursively
 # by NAME. Each case runs the real helpers in an isolated subshell; the injected
 # payloads are asserted absent from the recorded $CALLS.
 #
@@ -41,7 +41,7 @@ SPEC
   assert_equal "$records" ""
 }
 
-@test "sec: msb copy/chmod refuses non-octal mode + unsafe path, never via sh -c" {
+@test "sec: msb copy/chmod refuses non-octal mode + unsafe path without shell interpolation" {
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-secrets"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
@@ -54,6 +54,49 @@ SPEC
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'chmod 0644;'
   refute_regex "$log" 'PWNED'
+}
+
+@test "msb: file permissions use a fixed guest shell and retain best-effort failures" {
+  run bash -euc '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_cli() {
+      [ "$1" = exec ] || return 0
+      shift 4  # exec NAME -u 0
+      [ "$1" = -- ] || return 99
+      shift
+      if [ "${3:-}" = '\''"$@"'\'' ]; then
+        [ "$1" = sh ] && [ "$2" = -c ] && [ "$4" = sh ] || return 98
+        shift 4
+        printf "%s\\n" "$@" >> "$CALLS.permissions"
+        return 17
+      fi
+      # Copy and presence checks succeed; no actual guest files are touched.
+      return 0
+    }
+    _acq_msb_copy_file_verified box /etc/hostname /home/agent/.local/bin/tool 0755
+  '
+  assert_success
+  assert_equal "$(cat "$CALLS.permissions")" $'chmod\n0755\n/home/agent/.local/bin/tool\nchown\n-R\n-P\nagent\n/home/agent/.local'
+}
+
+@test "msb: fixed permission shell preserves literal argument boundaries and exit status" {
+  # Execute the exact shell program captured from the helper, with a local
+  # recorder replacing chmod. No permission changes or guest access are needed.
+  run bash -euc '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_cli() {
+      if [ "${7:-}" = -c ] && [ "${10:-}" = chmod ]; then
+        printf "%s" "$8" > "$CALLS.program"
+      fi
+      return 0
+    }
+    _acq_msb_copy_file_verified box /etc/hostname /home/agent/tool 0644
+    program=$(cat "$CALLS.program")
+    [ "$program" = '\''"$@"'\'' ]
+    sh -c "$program" sh sh -c '\''printf "%s\\n" "$@"; exit 17'\'' sh "two words" '\''$(false);literal'\''
+  '
+  assert_failure 17
+  assert_output $'two words\n$(false);literal'
 }
 
 @test "sec (#234): chowns the top-most created home subtree recursively by name" {
