@@ -318,34 +318,35 @@ YAML
   local release="$ACQ_TEST_PATTERNS_REPO" kit="$STUBDIR/valid-real-kit" root
   mkdir -p "$kit/provider-input" "$kit/scripts" "$kit/files"
   cat > "$kit/provider-input.json" <<'JSON'
-{"providerId":"alpha","schemaVersion":"acq-provider-input-bundle/v2","providerPath":"models/providers/alpha","factsPath":"provider-input/facts.json","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json","credentialEnvNames":["ALPHA_KEY"]}
+{"providerId":"usai","schemaVersion":"acq-provider-input-bundle/v2","providerPath":"models/providers/usai","factsPath":"provider-input/facts.json","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json","credentialEnvNames":["USAI_API_KEY"]}
 JSON
   cat > "$kit/provider-input/facts.json" <<'JSON'
-{"schemaVersion":"acq-provider-facts/v1","providerId":"alpha","apiProtocol":"openai-compatible","host":"models.example.gov","baseUrl":"https://models.example.gov/v1","modelsUrl":"https://models.example.gov/v1/models","keyEnv":"ALPHA_KEY"}
+{"schemaVersion":"acq-provider-facts/v1","providerId":"usai","apiProtocol":"openai-compatible","host":"api.gsa.usai.gov","baseUrl":"https://api.gsa.usai.gov/api/v1","modelsUrl":"https://api.gsa.usai.gov/api/v1/models","keyEnv":"USAI_API_KEY"}
 JSON
-  printf '{"schemaVersion":"acq-neutral-model-catalog/v1","providerId":"alpha","models":[]}\n' > "$kit/files/snapshot.json"
+  printf '{"schemaVersion":"acq-neutral-model-catalog/v1","providerId":"usai","models":[]}\n' > "$kit/files/snapshot.json"
   printf '#!/bin/sh\nexit 0\n' > "$kit/scripts/normalize"; chmod 755 "$kit/scripts/normalize"
   cat > "$kit/spec.yaml" <<'YAML'
 schemaVersion: "hybrid/v1"
 kind: mixin
-name: alpha
-displayName: Alpha
-description: Alpha provider test fixture
+name: usai
+displayName: USAi
+description: USAi provider test fixture
 caps:
   network:
     allow:
-      - models.example.gov
+      - api.gsa.usai.gov
 YAML
-  printf '{"providers":{"alpha":"ALPHA_KEY"}}\n' > "$STUBDIR/bindings.json"
   _acq_provider_input_control_plane() { printf '%s\n' "$release"; }
-  _acq_provider_input_bindings_file() { printf '%s\n' "$STUBDIR/bindings.json"; }
   KITS=("$kit")
-  ACQ_PROVIDER_INPUT_PYTHON="$ACQ_TEST_PROVIDER_INPUT_PYTHON" run acq_provider_input_prepare sbx realprepare
-  assert_success
-  [ "${#lines[@]}" -eq 1 ]
+  ACQ_PROVIDER_INPUT_PYTHON="$ACQ_TEST_PROVIDER_INPUT_PYTHON" \
+    acq_provider_input_prepare sbx realprepare \
+    > "$STUBDIR/prepare.stdout" 2> "$STUBDIR/prepare.stderr"
+  output=$(cat "$STUBDIR/prepare.stdout")
+  [ "$(wc -l < "$STUBDIR/prepare.stdout" | tr -d ' ')" -eq 1 ]
+  grep -Fq 'validated 1 bundle' "$STUBDIR/prepare.stderr"
   root=$(acq_provider_input_root sbx realprepare)
   case "$output" in "$root"/generations/generation.*) ;; *) false ;; esac
-  [ -f "$output/models/providers/alpha/facts.json" ]
+  [ -f "$output/models/providers/usai/facts.json" ]
 }
 
 @test "parent exit cannot make a live transaction lock recoverable" {
