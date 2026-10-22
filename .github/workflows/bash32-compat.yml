@@ -245,8 +245,28 @@ jobs:
       # changes must not silently fall back to Ubuntu's system jsonschema.
       - name: Install Patterns provider-input validator dependencies
         run: |
-          "$pythonLocation/bin/python" -m pip install 'PyYAML==6.0.3' 'jsonschema==4.26.0'
+          "$pythonLocation/bin/python" -m pip install --require-hashes --requirement scripts/provider-input-validator-requirements-linux.txt
           printf 'ACQ_PROVIDER_INPUT_PYTHON=%s\n' "$pythonLocation/bin/python" >> "$GITHUB_ENV"
+
+      - name: Check out pinned Patterns validator contract
+        run: |
+          set -euo pipefail
+          patterns_ref=$(sed -n 's/^PATTERNS_KIT_REF="\([0-9a-f]\{40\}\)"$/\1/p' acq.backends/common.sh)
+          [ -n "$patterns_ref" ]
+          patterns_dir="$RUNNER_TEMP/agentic-coding-patterns"
+          git -C "$RUNNER_TEMP" init -q agentic-coding-patterns
+          git -C "$patterns_dir" remote add origin https://github.com/GSA-TTS/agentic-coding-patterns.git
+          git -C "$patterns_dir" fetch -q --depth 1 origin "$patterns_ref"
+          git -C "$patterns_dir" checkout -q --detach FETCH_HEAD
+          [ "$(git -C "$patterns_dir" rev-parse HEAD)" = "$patterns_ref" ]
+          test -z "$(git -C "$patterns_dir" status --porcelain)"
+          chmod -R a-w "$patterns_dir"
+
+      - name: Run pinned Patterns validator regression under bash 3.2
+        env:
+          ACQ_TEST_PATTERNS_REPO: ${{ runner.temp }}/agentic-coding-patterns
+          ACQ_TEST_PROVIDER_INPUT_PYTHON: ${{ env.pythonLocation }}/bin/python
+        run: PATH="/opt/bash32/bin:$PATH" /opt/bash32/bin/bash scripts/test-acq-bats test/bats/147-provider-input-projection.bats
 
       - name: Run acq offline suite under bash 3.2
         # Put the 3.2 interpreter first on PATH so bats' `#!/usr/bin/env bash`

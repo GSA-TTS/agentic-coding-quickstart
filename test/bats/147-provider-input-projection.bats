@@ -41,6 +41,7 @@ _provider_kit() {
   printf '{"providerId":"%s"}\n' "$provider_id" > "$kit/provider-input/facts.json"
   printf '#!/bin/sh\n' > "$kit/scripts/normalize"; chmod 755 "$kit/scripts/normalize"
   printf '{"providerId":"%s","models":[]}\n' "$provider_id" > "$kit/files/snapshot.json"
+  printf 'caps:\n  network:\n    allow:\n      - %s.example.gov\n' "$provider_id" > "$kit/spec.yaml"
 }
 
 _use_release() {
@@ -67,6 +68,130 @@ EOF
   assert_output --partial 'configured provider-input Python is not executable'
 }
 
+@test "projection prefers the supported project-local validator runtime" {
+  local original_script_dir="$ACQ_SCRIPT_DIR"
+  ACQ_SCRIPT_DIR="$STUBDIR/project"
+  local runtime="$ACQ_SCRIPT_DIR/.acq-tools/provider-input-validator/bin"
+  mkdir -p "$runtime"
+  cat > "$runtime/python3" <<'EOF'
+#!/bin/sh
+if [ "$1" = -c ]; then exit 0; fi
+exit 1
+EOF
+  chmod +x "$runtime/python3"
+
+  run _acq_provider_input_python
+  assert_success
+  assert_output "$runtime/python3"
+  ACQ_SCRIPT_DIR="$original_script_dir"
+}
+
+@test "setup validator runtime is dry-run by default and pins dependencies" {
+  run "$REPO_ROOT/scripts/setup-provider-input-validator"
+  assert_success
+  assert_output --partial '[dry-run]'
+  grep -Fq 'PyYAML==6.0.3' "$REPO_ROOT/scripts/provider-input-validator-requirements-linux.txt"
+  grep -Fq 'jsonschema==4.26.0' "$REPO_ROOT/scripts/provider-input-validator-requirements-linux.txt"
+  grep -Fq -- '--hash=sha256:' "$REPO_ROOT/scripts/provider-input-validator-requirements-linux.txt"
+  grep -Fq -- '--require-hashes' "$REPO_ROOT/scripts/setup-provider-input-validator"
+}
+
+@test "setup validator rejects invalid arguments without changing a runtime" {
+  local target="$REPO_ROOT/.acq-tools/provider-input-validator.current"
+  mkdir -p "$target"
+  printf 'working\n' > "$target/sentinel"
+  run "$REPO_ROOT/scripts/setup-provider-input-validator" --unexpected
+  assert_failure 2
+  [ -f "$target/sentinel" ]
+  rm -rf "$REPO_ROOT/.acq-tools"
+}
+
+@test "setup validator atomically replaces only a validated temporary runtime" {
+  local target="$REPO_ROOT/.acq-tools/provider-input-validator.current" legacy="$REPO_ROOT/.acq-tools/provider-input-validator"
+  local fakebin="$STUBDIR/python-bin" log="$STUBDIR/python.log"
+  local first_runtime second_runtime
+  mkdir -p "$fakebin"
+  cat > "$fakebin/python3" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+ if [ "$1" = -c ]; then
+   printf '3.12\n'
+   exit 0
+ fi
+ if [ "$1" = -m ] && [ "$2" = venv ]; then
+  mkdir -p "$3/bin"
+  cp "$0" "$3/bin/python3"
+  exit 0
+fi
+if [ "$1" = -m ] && [ "$2" = pip ]; then
+  [ "${VALIDATOR_SETUP_FAIL:-}" != 1 ]
+  exit
+fi
+ if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec /usr/bin/python3 "$@"; fi
+  if [ "$1" = - ]; then [ "${VALIDATOR_VALIDATE_FAIL:-}" != 1 ]; exit; fi
+exit 0
+EOF
+  chmod +x "$fakebin/python3"
+
+  VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  assert_success
+  [ -L "$target" ]
+  [ -x "$target/bin/python3" ]
+  grep -Fq -- '--require-hashes' "$log"
+  first_runtime=$(readlink "$target")
+
+  mkdir -p "$legacy"
+  printf 'legacy\n' > "$legacy/sentinel"
+
+  VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  assert_success
+  second_runtime=$(readlink "$target")
+  [ "$second_runtime" != "$first_runtime" ]
+  [ -x "$target/bin/python3" ]
+  [ ! -e "$legacy" ]
+  [ ! -e "$REPO_ROOT/.acq-tools/$first_runtime" ]
+
+  VALIDATOR_SETUP_LOG="$log" VALIDATOR_VALIDATE_FAIL=1 PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  assert_failure
+  [ "$second_runtime" = "$(readlink "$target")" ]
+  [ -x "$target/bin/python3" ]
+
+  rm -f "$target"
+  mkdir -p "$REPO_ROOT/.acq-tools/outside-runtime"
+  printf 'must-survive\n' > "$REPO_ROOT/.acq-tools/outside-runtime/sentinel"
+  ln -s 'provider-input-validator../outside-runtime' "$target"
+  VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  assert_success
+  [ -f "$REPO_ROOT/.acq-tools/outside-runtime/sentinel" ]
+  rm -rf "$REPO_ROOT/.acq-tools"
+}
+
+@test "runtime resolver recognizes Windows venv layout" {
+  local original_script_dir="$ACQ_SCRIPT_DIR" runtime
+  ACQ_SCRIPT_DIR="$STUBDIR/windows-project"
+  runtime="$ACQ_SCRIPT_DIR/.acq-tools/provider-input-validator.current/Scripts"
+  mkdir -p "$runtime"
+  cat > "$runtime/python.exe" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+  chmod +x "$runtime/python.exe"
+  run _acq_provider_input_python
+  assert_success
+  assert_output "$runtime/python.exe"
+  ACQ_SCRIPT_DIR="$original_script_dir"
+}
+
+@test "validator lock files cover every released host and require hashes" {
+  for lock in "$REPO_ROOT"/scripts/provider-input-validator-requirements-*.txt; do
+    grep -Fq 'rpds-py==' "$lock"
+    grep -Fq -- '--hash=sha256:' "$lock"
+  done
+  grep -Fq 'Linux x86_64/aarch64 Python 3.12' "$REPO_ROOT/scripts/provider-input-validator-requirements.txt"
+  grep -Fq 'macOS arm64 Python' "$REPO_ROOT/scripts/provider-input-validator-requirements.txt"
+  grep -Fq 'Windows x86_64/arm64 Python 3.12' "$REPO_ROOT/scripts/provider-input-validator-requirements.txt"
+}
+
 @test "adapter projection seam contains unsafe names before cleanup" {
   local raw_parent sentinel root
   raw_parent="$ACQ_PROVENANCE_DIR/provider-input/msb"
@@ -77,7 +202,7 @@ EOF
   acq_test_stub_provider_input_boundary
   root=$(acq_provider_input_root msb '../evil')
   [[ "$root" == "$raw_parent/.._evil."* ]]
-  acq_provider_input_project msb '../evil'
+    acq_provider_input_prepare msb '../evil' >/dev/null
   acq_provider_input_remove msb '../evil'
 
   [ -f "$sentinel/sentinel" ]
@@ -88,11 +213,11 @@ EOF
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
     root=$(acq_provider_input_root msb childbox) || exit 1
-    acq_provider_input_project msb childbox || exit 1
-    [ -L "$root/current" ] || exit 1
-    [ "$(acq_provider_input_guest_root sbx childbox)" = "$(acq_provider_input_root sbx childbox)/current" ] || exit 1
+    generation=$(acq_provider_input_prepare msb childbox) || exit 1
+    [ -d "$generation" ] || exit 1
+    case "$(acq_provider_input_guest_root sbx childbox "$generation")" in */generations/generation.*) ;; *) exit 1 ;; esac
     host_path() { printf "%s\n" "/host$1"; }
-    [ "$(acq_provider_input_msb_mount childbox)" = "/host$root:/var/lib/acq/provider-input:ro" ]
+    [ "$(acq_provider_input_msb_mount childbox "$generation")" = "/host$generation:/var/lib/acq/provider-input/${generation##*/}:ro" ]
   '
 
   assert_success
@@ -112,29 +237,164 @@ EOF
   _acq_provider_input_control_plane() { printf '%s\n' "$release"; }
   KITS=("$release/integrations/isolation/acq-kits/alpha")
 
-  run acq_provider_input_project sbx incompatiblebox
+  run acq_provider_input_prepare sbx incompatiblebox
   assert_failure 2
   root=$(acq_provider_input_root sbx incompatiblebox)
   [ ! -e "$root/current" ]
   [ ! -e "$STUBDIR/validator-invoked" ]
 }
 
-@test "projection validates all candidates once and publishes immutable generation" {
+@test "projection prepares immutable generation without changing current" {
   local release="$STUBDIR/release" root current
   _provider_release "$release"; _provider_kit "$release" alpha; _provider_kit "$release" beta
   export VALIDATOR_LOG="$STUBDIR/validator.log"
   _acq_provider_input_control_plane() { printf '%s\n' "$release"; }
   KITS=("$release/integrations/isolation/acq-kits/alpha" "$release/integrations/isolation/acq-kits/beta")
 
-  run acq_provider_input_project msb projectionbox
+  run acq_provider_input_prepare msb projectionbox
   assert_success
   root=$(acq_provider_input_root msb projectionbox)
-  [ -L "$root/current" ]
-  current=$(readlink "$root/current")
+  current="${output#$root/}"
+  [ ! -e "$root/current" ]
   [ -f "$root/$current/models/providers/alpha/facts.json" ]
   [ -x "$root/$current/models/providers/beta/normalizer" ]
   assert_equal "$(grep -c -- '--bundle' "$VALIDATOR_LOG")" 2
   [ ! -w "$root/$current/models/providers/alpha/facts.json" ]
+}
+
+@test "candidate snapshot preserves spec.yaml for host allowlist validation" {
+  local release="$STUBDIR/release" candidate="$STUBDIR/candidate"
+  _provider_release "$release"; _provider_kit "$release" alpha
+  _acq_provider_input_snapshot "$release/integrations/isolation/acq-kits/alpha" "$candidate"
+  [ -f "$candidate/spec.yaml" ]
+  grep -Fq 'alpha.example.gov' "$candidate/spec.yaml"
+}
+
+@test "pinned Patterns validator rejects facts host outside snapshotted kit allowlist" {
+  [ -n "${ACQ_TEST_PATTERNS_REPO:-}" ] || skip "pinned Patterns checkout is provided by required CI"
+  [ -n "${ACQ_TEST_PROVIDER_INPUT_PYTHON:-}" ] || skip "pinned validator Python is provided by required CI"
+  local release="$ACQ_TEST_PATTERNS_REPO" kit="$STUBDIR/real-validator-kit"
+  local candidate="$STUBDIR/real-validator-candidate" python
+  [ "$(git -C "$release" rev-parse HEAD)" = "$PATTERNS_KIT_REF" ]
+  mkdir -p "$kit/provider-input" "$kit/scripts" "$kit/files"
+  cat > "$kit/provider-input.json" <<'JSON'
+{"providerId":"alpha","schemaVersion":"acq-provider-input-bundle/v2","providerPath":"models/providers/alpha","factsPath":"provider-input/facts.json","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json","credentialEnvNames":["ALPHA_KEY"]}
+JSON
+  cat > "$kit/provider-input/facts.json" <<'JSON'
+{"schemaVersion":"acq-provider-facts/v1","providerId":"alpha","apiProtocol":"openai-compatible","host":"models.example.gov","baseUrl":"https://models.example.gov/v1","modelsUrl":"https://models.example.gov/v1/models","keyEnv":"ALPHA_KEY"}
+JSON
+  cat > "$kit/files/snapshot.json" <<'JSON'
+{"schemaVersion":"acq-neutral-model-catalog/v1","providerId":"alpha","models":[]}
+JSON
+  printf '#!/bin/sh\nexit 0\n' > "$kit/scripts/normalize"
+  chmod 755 "$kit/scripts/normalize"
+  cat > "$kit/spec.yaml" <<'YAML'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: alpha
+displayName: Alpha
+description: Alpha provider test fixture
+caps:
+  network:
+    allow:
+      - other.example.gov
+YAML
+  _acq_provider_input_snapshot "$kit" "$candidate"
+  printf '{"providers":{"alpha":"ALPHA_KEY"}}\n' > "$STUBDIR/bindings.json"
+  python="$ACQ_TEST_PROVIDER_INPUT_PYTHON"
+
+  run "$python" \
+    "$release/scripts/validate_provider_input_contract.py" \
+    --schema-dir "$release/integrations/isolation/schemas" \
+    --credential-bindings "$STUBDIR/bindings.json" \
+    --bundle "$candidate/provider-input.json"
+  assert_failure
+  assert_output --partial 'facts.host must be in the kit network allowlist'
+}
+
+@test "unknown backend existence preserves prior projection and skips replacement" {
+  local root
+  root=$(acq_provider_input_root sbx unknownbox)
+  _acq_provider_input_safe_mkdir "$root/generations/generation.old/models/providers"
+  ln -s generations/generation.old "$root/current"
+  acq_backend_exists() { return 1; }
+  _acq_sbx_confirm_absent() { return 1; }
+  acq_provider_input_project() { printf touched > "$STUBDIR/projected"; }
+  _build_kit_list() { return 0; }
+
+  run _acq_backend_provision_unlocked unknownbox shell /tmp
+  assert_failure
+  [ ! -e "$STUBDIR/projected" ]
+  [ "$(readlink "$root/current")" = generations/generation.old ]
+}
+
+@test "unknown msb existence preserves prior projection and skips replacement" {
+  local root
+  # load_acq selects one adapter for the test process; load MSB explicitly for
+  # this adapter-specific provisioning regression.
+  . "$REPO_ROOT/acq.backends/msb.sh"
+  root=$(acq_provider_input_root msb unknownmsb)
+  _acq_provider_input_safe_mkdir "$root/generations/generation.old/models/providers"
+  ln -s generations/generation.old "$root/current"
+  acq_backend_exists() { return 1; }
+  _acq_msb_confirm_absent() { return 1; }
+  acq_provider_input_project() { printf touched > "$STUBDIR/projected-msb"; }
+  _acq_msb_resolve_image() {
+    _ACQ_MSB_RESOLVED_IMAGE=image
+    _ACQ_MSB_RESOLVED_IMAGE_SOURCE="test"
+  }
+
+  run _acq_backend_provision_unlocked unknownmsb shell /tmp
+  assert_failure
+  [ ! -e "$STUBDIR/projected-msb" ]
+  [ "$(readlink "$root/current")" = generations/generation.old ]
+}
+
+@test "pre-create cleanup discards SBX attempt even when absence probe is unknown" {
+  local root generation
+  root=$(acq_provider_input_root sbx precreate-sbx)
+  generation="$root/generations/generation.precreate"
+  _acq_provider_input_safe_mkdir "$generation/models/providers"
+  _ACQ_SBX_ATTEMPT_NAME=precreate-sbx
+  _ACQ_SBX_ATTEMPT_GENERATION="$generation"
+  _ACQ_SBX_ATTEMPT_ACTIVE=1
+  _ACQ_SBX_CREATE_STARTED=""
+  _acq_sbx_confirm_absent() { return 1; }
+  _acq_sbx_cleanup_uncreated_attempt
+  [ ! -e "$generation" ]
+}
+
+@test "pre-create cleanup discards MSB attempt and clone when absence probe is unknown" {
+  local root generation clone
+  . "$REPO_ROOT/acq.backends/msb.sh"
+  root=$(acq_provider_input_root msb precreate-msb)
+  generation="$root/generations/generation.precreate"
+  clone="$ACQ_MSB_CLONES_DIR/precreate-msb"
+  _acq_provider_input_safe_mkdir "$generation/models/providers"
+  mkdir -p "$clone"
+  _ACQ_MSB_ATTEMPT_NAME=precreate-msb
+  _ACQ_MSB_ATTEMPT_GENERATION="$generation"
+  _ACQ_MSB_ATTEMPT_CLONE="$clone"
+  _ACQ_MSB_ATTEMPT_ACTIVE=1
+  _ACQ_MSB_CREATE_STARTED=""
+  _acq_msb_confirm_absent() { return 1; }
+  _acq_msb_clone_cleanup() { rm -rf -- "$clone"; }
+  _acq_msb_cleanup_uncreated_attempt
+  [ ! -e "$generation" ]
+  [ ! -e "$clone" ]
+}
+
+@test "sbx confirmed-absent removal cleans orphan provider projection" {
+  local root
+  root=$(acq_provider_input_root sbx gonebox)
+  _acq_provider_input_safe_mkdir "$root/generations/generation.old/models/providers"
+  ln -s generations/generation.old "$root/current"
+  sbx() { [ "$1" != rm ]; }
+  _acq_sbx_confirm_absent() { return 0; }
+
+  run _acq_backend_terminate_unlocked gonebox
+  assert_failure
+  [ ! -e "$root" ]
 }
 
 @test "rejected replacement preserves prior current generation" {
@@ -232,34 +492,35 @@ EOF
   [ ! -e "$root" ]
 }
 
-@test "publication reports stale-generation cleanup failure without rolling back current" {
+@test "publication retains old generation for existing current consumers" {
   local root old new
   root=$(acq_provider_input_root sbx cleanupbox)
   mkdir -p "$root/generations/generation.old/models/providers" "$root/generations/generation.new/models/providers"
   old="$root/generations/generation.old"; new="$root/generations/generation.new"
   ln -s generations/generation.old "$root/current"
-  _acq_provider_input_remove_tree() { [ "$1" != "$old" ]; }
   run _acq_provider_input_publish "$root" "$new"
   assert_success
-  assert_output --partial "could not clean old generation"
   assert_equal "$(readlink "$root/current")" "generations/generation.new"
+  [ -d "$old" ]
 }
 
-@test "failed backend create removes the orphan projection root" {
+@test "failed backend create discards only its unpublished generation" {
   local root
   root=$(acq_provider_input_root sbx orphanbox)
-  _acq_provider_input_safe_mkdir "$root/generations/one/models/providers"
-  chmod -R a-w "$root/generations/one"
-  ln -s generations/one "$root/current"
+  _acq_provider_input_safe_mkdir "$root/generations/generation.one/models/providers"
+  chmod -R a-w "$root/generations/generation.one"
+  ln -s generations/generation.one "$root/current"
   sbx() { [ "$1" != create ]; }
   acq_backend_exists() { return 1; }
-  acq_provider_input_project() { return 0; }
+  _acq_sbx_confirm_absent() { return 0; }
+  acq_provider_input_prepare() { printf '%s\n' "$root/generations/generation.one"; }
   _build_kit_list() { return 0; }
   _acq_sbx_kit_flags() { :; }
   _acq_sbx_startup_barrier_kit() { printf '%s\n' fixture; }
   run _acq_backend_provision_unlocked orphanbox shell /tmp
   assert_failure
-  [ ! -e "$root" ]
+  [ -d "$root" ]
+  [ ! -e "$root/generations/generation.one" ]
 }
 
 @test "failed sbx create under set -e still removes the projection root" {
@@ -271,12 +532,13 @@ set -e
 ACQ_SCRIPT_DIR="$REPO_ROOT"; ACQ_SOURCE_ONLY=1
 . "$REPO_ROOT/acq"
 . "$REPO_ROOT/acq.backends/sbx.sh"
-acq_provider_input_project() {
-  _acq_provider_input_safe_mkdir "$root/generations/one/models/providers"
-  ln -s generations/one "$root/current"
+  acq_provider_input_prepare() {
+    _acq_provider_input_safe_mkdir "$root/generations/generation.one/models/providers"
+    printf '%s/generations/generation.one\n' "$root"
 }
 sbx() { [ "\$1" != create ]; }
 acq_backend_exists() { return 1; }
+_acq_sbx_confirm_absent() { return 0; }
 _build_kit_list() { return 0; }
 _acq_sbx_kit_flags() { :; }
 _acq_sbx_startup_barrier_kit() { printf '%s\n' fixture; }
@@ -285,8 +547,98 @@ EOF
   chmod +x "$script"
   run "$script"
   assert_failure
-  [ ! -e "$root" ]
+  [ -d "$root" ]
+  [ ! -e "$root/generations/generation.one" ]
   [ ! -e "${root}.lock" ]
+}
+
+@test "failed create with unknown post-state preserves projected inputs" {
+  local root
+  root=$(acq_provider_input_root sbx unknown-create)
+  _acq_provider_input_safe_mkdir "$root/generations/generation.new/models/providers"
+  ln -s generations/generation.new "$root/current"
+  sbx() { [ "$1" != create ]; }
+  acq_backend_exists() { return 1; }
+  _acq_sbx_confirm_absent() { return 1; }
+  acq_provider_input_project() { return 0; }
+  _build_kit_list() { return 0; }
+  _acq_sbx_kit_flags() { :; }
+  _acq_sbx_startup_barrier_kit() { printf '%s\n' fixture; }
+
+  run _acq_backend_provision_unlocked unknown-create shell /tmp
+  assert_failure
+  [ "$(readlink "$root/current")" = generations/generation.new ]
+}
+
+@test "attempt cleanup removes an MSB clone and generation only after absence" {
+  local root generation
+  . "$REPO_ROOT/acq.backends/msb.sh"
+  root=$(acq_provider_input_root msb cleanup-msb)
+  generation="$root/generations/generation.attempt"
+  _acq_provider_input_safe_mkdir "$generation/models/providers"
+  _ACQ_MSB_ATTEMPT_NAME=cleanup-msb
+  _ACQ_MSB_ATTEMPT_GENERATION="$generation"
+  _ACQ_MSB_ATTEMPT_CLONE=/scratch
+  _ACQ_MSB_ATTEMPT_ACTIVE=1
+  _acq_msb_confirm_absent() { return 0; }
+  _acq_msb_clone_cleanup() { printf '%s\n' "$1" > "$STUBDIR/clone-cleanup"; }
+
+  _acq_msb_cleanup_uncreated_attempt
+  [ ! -e "$generation" ]
+  [ "$(cat "$STUBDIR/clone-cleanup")" = cleanup-msb ]
+}
+
+@test "pre-create MSB cleanup removes attempt resources despite unknown backend state" {
+  local root generation
+  . "$REPO_ROOT/acq.backends/msb.sh"
+  root=$(acq_provider_input_root msb unknown-msb)
+  generation="$root/generations/generation.attempt"
+  _acq_provider_input_safe_mkdir "$generation/models/providers"
+  _ACQ_MSB_ATTEMPT_NAME=unknown-msb
+  _ACQ_MSB_ATTEMPT_GENERATION="$generation"
+  _ACQ_MSB_ATTEMPT_CLONE=/scratch
+  _ACQ_MSB_ATTEMPT_ACTIVE=1
+  _ACQ_MSB_CREATE_STARTED=""
+  _acq_msb_confirm_absent() { return 1; }
+  _acq_msb_clone_cleanup() { printf called > "$STUBDIR/clone-cleanup"; }
+
+  _acq_msb_cleanup_uncreated_attempt
+  [ ! -e "$generation" ]
+  [ -e "$STUBDIR/clone-cleanup" ]
+}
+
+@test "post-create unknown MSB state preserves attempt resources" {
+  local root generation
+  . "$REPO_ROOT/acq.backends/msb.sh"
+  root=$(acq_provider_input_root msb unknown-created-msb)
+  generation="$root/generations/generation.attempt"
+  _acq_provider_input_safe_mkdir "$generation/models/providers"
+  _ACQ_MSB_ATTEMPT_NAME=unknown-created-msb
+  _ACQ_MSB_ATTEMPT_GENERATION="$generation"
+  _ACQ_MSB_ATTEMPT_CLONE=/scratch
+  _ACQ_MSB_ATTEMPT_ACTIVE=1
+  _ACQ_MSB_CREATE_STARTED=1
+  _acq_msb_confirm_absent() { return 1; }
+  _acq_msb_clone_cleanup() { printf called > "$STUBDIR/unexpected-clone-cleanup"; }
+
+  _acq_msb_cleanup_uncreated_attempt
+  [ -d "$generation" ]
+  [ ! -e "$STUBDIR/unexpected-clone-cleanup" ]
+}
+
+@test "post-create MSB readiness failure preserves its generation" {
+  local root generation
+  . "$REPO_ROOT/acq.backends/msb.sh"
+  root=$(acq_provider_input_root msb ready-msb)
+  generation="$root/generations/generation.attempt"
+  _acq_provider_input_safe_mkdir "$generation/models/providers"
+  _ACQ_MSB_ATTEMPT_NAME=ready-msb
+  _ACQ_MSB_ATTEMPT_GENERATION="$generation"
+  _ACQ_MSB_ATTEMPT_ACTIVE=""
+  _acq_msb_confirm_absent() { return 0; }
+
+  _acq_msb_cleanup_uncreated_attempt
+  [ -d "$generation" ]
 }
 
 @test "projection root and backend mount contracts expose no shared host config" {
@@ -294,10 +646,11 @@ EOF
   sbx_root=$(acq_provider_input_root sbx mountbox)
   msb_root=$(acq_provider_input_root msb mountbox)
   hcfg=$(acq_host_config_dir sbx mountbox)
-  assert_equal "$(acq_provider_input_sbx_mount mountbox)" "${sbx_root}:ro"
-  assert_equal "$(acq_provider_input_guest_root sbx mountbox)" "${sbx_root}/current"
-  assert_equal "$(acq_provider_input_msb_mount mountbox)" "${msb_root}:${ACQ_PROVIDER_INPUT_GUEST_DIR}:ro"
-  assert_equal "$(acq_provider_input_guest_root msb mountbox)" "${ACQ_PROVIDER_INPUT_GUEST_DIR}/current"
+  local sbx_generation="${sbx_root}/generations/generation.test" msb_generation="${msb_root}/generations/generation.test"
+  assert_equal "$(acq_provider_input_sbx_mount mountbox "$sbx_generation")" "${sbx_generation}:ro"
+  assert_equal "$(acq_provider_input_guest_root sbx mountbox "$sbx_generation")" "$sbx_generation"
+  assert_equal "$(acq_provider_input_msb_mount mountbox "$msb_generation")" "${msb_generation}:${ACQ_PROVIDER_INPUT_GUEST_DIR}/generation.test:ro"
+  assert_equal "$(acq_provider_input_guest_root msb mountbox "$msb_generation")" "${ACQ_PROVIDER_INPUT_GUEST_DIR}/generation.test"
   [[ "$sbx_root" != "$hcfg" ]]
   [[ "$msb_root" != *".config" ]]
 }
@@ -312,14 +665,14 @@ EOF
   # Consumed dynamically by acq_provider_input_project.
   # shellcheck disable=SC2034
   KITS=("$release/integrations/isolation/acq-kits/alpha")
-  run acq_provider_input_project msb traversalbox
+  run acq_provider_input_prepare msb traversalbox
   assert_failure
   root=$(acq_provider_input_root msb traversalbox); [ ! -e "$root/current" ]
 
   _provider_kit "$release" alpha
   rm "$release/integrations/isolation/acq-kits/alpha/provider-input/facts.json"
   ln -s "$outside" "$release/integrations/isolation/acq-kits/alpha/provider-input/facts.json"
-  run acq_provider_input_project msb symlinkbox
+  run acq_provider_input_prepare msb symlinkbox
   assert_failure
 }
 

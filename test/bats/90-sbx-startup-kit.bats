@@ -202,6 +202,15 @@ STUB
   refute_regex "$(cat "$spec")" 'GIT_AUTHOR_NAME: Global User'
 }
 
+@test "provision(sbx): shared projection boundary generation passes the mount contract" {
+  local generation
+  generation=$(acq_provider_input_prepare sbx boundarybox)
+  assert_regex "$generation" '/generations/generation\.'
+  run acq_provider_input_sbx_mount boundarybox "$generation"
+  assert_success
+  assert_output "${generation}:ro"
+}
+
 @test "rc.d(sbx): neutral kit files materialize as home rc snippets" {
   local kit="$STUBDIR/rcd-kit" out="$STUBDIR/rcd-sbx-v2"
   mkdir -p "$kit/files/home/agent/.rc.d"

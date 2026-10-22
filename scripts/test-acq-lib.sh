@@ -72,12 +72,16 @@ acq_test_stub_provider_input_boundary() {
     name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
     printf '%s/provider-input/%s/%s.%s\n' "$ACQ_PROVENANCE_DIR" "$safe_backend" "$safe_name" "$name_sum"
   }
-  acq_provider_input_project() {
-    local root
+  acq_provider_input_prepare() {
+    local root generation
     root=$(acq_provider_input_root "$1" "$2") || return 1
-    mkdir -p "$root/generations/empty/models/providers" || return 1
-    ln -sfn generations/empty "$root/current"
+    mkdir -p "$root/generations" || return 1
+    generation=$(mktemp -d "$root/generations/generation.test.XXXXXXXX") || return 1
+    mkdir -p "$generation/models/providers" || return 1
+    printf '%s\n' "$generation"
   }
+  acq_provider_input_project() { acq_provider_input_prepare "$@" >/dev/null; }
+  acq_provider_input_discard() { rm -rf -- "$3"; }
   acq_provider_input_remove() {
     local backend="$1" name="$2" root parent expected_parent
     root=$(acq_provider_input_root "$backend" "$name") || return 1
@@ -102,25 +106,23 @@ acq_test_stub_provider_input_boundary() {
     case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
   }
   acq_provider_input_msb_mount() {
-    local root host_root
-    root=$(acq_provider_input_root msb "$1") || return 1
+    local generation="$2" host_generation
     if command -v host_path >/dev/null 2>&1; then
-      host_root=$(host_path "$root") || return 1
+      host_generation=$(host_path "$generation") || return 1
     else
-      host_root="$root"
+      host_generation="$generation"
     fi
-    printf '%s:%s:ro\n' "$host_root" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}"
+    printf '%s:%s/%s:ro\n' "$host_generation" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}"
   }
   acq_provider_input_guest_root() {
-    local backend="$1" name="$2" root
-    root=$(acq_provider_input_root "$backend" "$name") || return 1
+    local backend="$1" generation="$3"
     case "$backend" in
-      sbx) printf '%s/current\n' "$root" ;;
-      msb) printf '%s/current\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" ;;
+      sbx) printf '%s\n' "$generation" ;;
+      msb) printf '%s/%s\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}" ;;
       *) return 1 ;;
     esac
   }
-  acq_provider_input_sbx_mount() { printf '%s:ro\n' "$(acq_provider_input_root sbx "$1")"; }
+  acq_provider_input_sbx_mount() { printf '%s:ro\n' "$2"; }
 }
 export -f acq_test_stub_provider_input_boundary
 
@@ -646,12 +648,16 @@ acq_provider_input_root() {
   name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
   printf '%s/provider-input/%s/%s.%s\n' "$ACQ_PROVENANCE_DIR" "$safe_backend" "$safe_name" "$name_sum"
 }
-acq_provider_input_project() {
-  local root
-  root=$(acq_provider_input_root "$1" "$2") || return 1
-  mkdir -p "$root/generations/empty/models/providers" || return 1
-  ln -sfn generations/empty "$root/current"
-}
+  acq_provider_input_prepare() {
+     local root generation
+     root=$(acq_provider_input_root "$1" "$2") || return 1
+     mkdir -p "$root/generations" || return 1
+     generation=$(mktemp -d "$root/generations/generation.test.XXXXXXXX") || return 1
+     mkdir -p "$generation/models/providers" || return 1
+     printf '%s\n' "$generation"
+  }
+  acq_provider_input_project() { acq_provider_input_prepare "$@" >/dev/null; }
+  acq_provider_input_discard() { rm -rf -- "$3"; }
 acq_provider_input_remove() {
   local backend="$1" name="$2" root parent expected_parent
   root=$(acq_provider_input_root "$backend" "$name") || return 1
@@ -675,26 +681,24 @@ acq_provider_input_lock_acquire() {
 acq_provider_input_lock_release() {
   case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
 }
-acq_provider_input_msb_mount() {
-  local root host_root
-  root=$(acq_provider_input_root msb "$1") || return 1
-  if command -v host_path >/dev/null 2>&1; then
-    host_root=$(host_path "$root") || return 1
-  else
-    host_root="$root"
-  fi
-  printf '%s:%s:ro\n' "$host_root" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}"
-}
-acq_provider_input_guest_root() {
-  local backend="$1" name="$2" root
-  root=$(acq_provider_input_root "$backend" "$name") || return 1
-  case "$backend" in
-    sbx) printf '%s/current\n' "$root" ;;
-    msb) printf '%s/current\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" ;;
-    *) return 1 ;;
-  esac
-}
-acq_provider_input_sbx_mount() { printf '%s:ro\n' "$(acq_provider_input_root sbx "$1")"; }
+  acq_provider_input_msb_mount() {
+    local generation="$2" host_generation
+    if command -v host_path >/dev/null 2>&1; then
+      host_generation=$(host_path "$generation") || return 1
+    else
+      host_generation="$generation"
+    fi
+    printf '%s:%s/%s:ro\n' "$host_generation" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}"
+  }
+  acq_provider_input_guest_root() {
+    local backend="$1" generation="$3"
+    case "$backend" in
+      sbx) printf '%s\n' "$generation" ;;
+      msb) printf '%s/%s\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}" ;;
+      *) return 1 ;;
+    esac
+  }
+  acq_provider_input_sbx_mount() { printf '%s:ro\n' "$2"; }
 BOUNDARY
   cat > "$STUBDIR/bash-env" <<BASH_ENV
 . "$STUBDIR/provider-input-boundary.sh"

@@ -3,7 +3,7 @@ title: "acq Concepts"
 description: "Backend-neutral concepts for working with acq sandboxes (workspaces, mounts, published ports)"
 status: canonical
 tier: 2
-last_updated: "2026-10-03"
+last_updated: "2026-10-22"
 audience: "developers"
 keywords: ["acq", "concepts", "workspace", "mount", "ports", "publish", "backend-neutral", "sbx", "msb"]
 related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0034-host-port-selection-and-publish-override.md"]
@@ -17,6 +17,20 @@ Cross-cutting concepts for working with `acq` sandboxes. These apply to **both**
 backends (sbx and msb) because `acq` presents one neutral interface over both.
 For per-backend strengths, tradeoffs, and caveats, see the
 [Backend Guide](BACKEND_GUIDE.md).
+
+## Provider Validator Runtime
+
+Provider-input validation uses an isolated project-local Python runtime. Before
+creating a sandbox that uses provider-role kits, inspect the planned setup with
+`scripts/setup-provider-input-validator`; pass `--apply` to build or update
+`.acq-tools/provider-input-validator`. The setup installs a fully hash-locked
+dependency closure into a fresh temporary virtual environment, verifies the
+expected distributions, and replaces the prior runtime only after validation
+succeeds. It never installs packages globally. Supported locked combinations are
+Linux x86_64/aarch64 with Python 3.12, macOS arm64 with Python 3.12, macOS
+x86_64 with Python 3.13, and Windows x86_64/arm64 with Python 3.12. The setup
+selects its matching host-specific lock file and rejects unsupported combinations
+rather than choosing an unhashed artifact.
 
 ---
 
@@ -232,6 +246,20 @@ current baseline. See the kit definition in the agentic-coding-patterns
 repository for details.
 
 ### Provider input projection
+
+Provider input validation uses exact Python dependency versions. Prepare the
+supported project-local runtime once from the Quickstart checkout:
+
+```bash
+scripts/setup-provider-input-validator --apply
+```
+
+The command creates `.acq-tools/provider-input-validator` and installs only the
+versions pinned in the selected `scripts/provider-input-validator-requirements-*.txt`
+lock file. `acq`
+prefers this isolated runtime when `ACQ_PROVIDER_INPUT_PYTHON` is not set. It
+does not install packages automatically during sandbox creation and does not
+modify the global Python environment.
 
 Provider-role kits may publish versioned provider facts, a normalizer, and a
 model snapshot. Before a sandbox is created, acq discovers every selected

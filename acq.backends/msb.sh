@@ -588,6 +588,22 @@ ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
 # always defined even if provision is not the entry point.
 _ACQ_MSB_STARTUP_STAGE_FILES=()
 _ACQ_MSB_STARTUP_STAGED=""
+_ACQ_MSB_ATTEMPT_GENERATION=""
+_ACQ_MSB_ATTEMPT_CLONE=""
+_ACQ_MSB_ATTEMPT_ACTIVE=""
+_ACQ_MSB_CREATE_STARTED=""
+
+_acq_msb_cleanup_uncreated_attempt() {
+  [ -n "${_ACQ_MSB_ATTEMPT_ACTIVE:-}" ] || return 0
+  if [ -z "${_ACQ_MSB_CREATE_STARTED:-}" ] || _acq_msb_confirm_absent "${_ACQ_MSB_ATTEMPT_NAME:-}"; then
+    [ -z "${_ACQ_MSB_ATTEMPT_CLONE:-}" ] || _acq_msb_clone_cleanup "$_ACQ_MSB_ATTEMPT_NAME"
+    acq_provider_input_discard msb "$_ACQ_MSB_ATTEMPT_NAME" "$_ACQ_MSB_ATTEMPT_GENERATION" || true
+  fi
+  _ACQ_MSB_ATTEMPT_GENERATION=""
+  _ACQ_MSB_ATTEMPT_CLONE=""
+  _ACQ_MSB_ATTEMPT_ACTIVE=""
+  _ACQ_MSB_CREATE_STARTED=""
+}
 # Per-kit readonly-file rewrite table: declared guest path -> read-only mount
 # path. Trusted startup code is never executed from a guest-writable copy.
 _ACQ_MSB_RO_REWRITE_FROM=()
@@ -3106,6 +3122,10 @@ _acq_backend_provision_unlocked() {
     echo "acq(msb): error: sandbox '$name' already exists; refusing to alter its provider inputs." >&2
     return 1
   fi
+  if ! _acq_msb_confirm_absent "$name"; then
+    echo "acq(msb): error: could not confirm sandbox '$name' is absent; preserving provider inputs." >&2
+    return 1
+  fi
 
   # Collect create-time flags: net rules (union of all kit caps), --trust-host-cas
   # (if any kit declares the msb zscaler shortcut), volume mounts (from paths),
@@ -3209,13 +3229,17 @@ $(kit_spec_published_ports "$spec")"
 $(kit_spec_volumes "$spec")"
   done
 
-  # Stage the complete selected-provider set before the host config directory is
-  # mounted. Validation is deliberately one released-validator invocation across
-  # every candidate so duplicate provider IDs cannot slip through.
-  if ! acq_provider_input_project msb "$name"; then
+  # Prepare the complete selected-provider set before the host config directory is
+  # mounted. It stays unpublished until this create succeeds; the guest receives
+  # the exact immutable generation rather than the mutable current symlink.
+  local _provider_generation
+  if ! _provider_generation=$(acq_provider_input_prepare msb "$name"); then
     echo "acq(msb): error: provider input projection failed for '$name'." >&2
     return 1
   fi
+  _ACQ_MSB_ATTEMPT_NAME="$name"
+  _ACQ_MSB_ATTEMPT_GENERATION="$_provider_generation"
+  _ACQ_MSB_ATTEMPT_ACTIVE=1
 
   # Merged kit env, computed ONCE now that every kit is fetched and BEFORE any kit
   # is applied — see _acq_msb_merge_kit_env_into for why it must be a pre-pass.
@@ -3517,6 +3541,7 @@ EOF
       return 1
     fi
     _clone_src="$_ACQ_MSB_CLONE_DIR"
+    _ACQ_MSB_ATTEMPT_CLONE="$_clone_src"
   fi
 
   ACQ_MSB_GUEST_WORKSPACE=""
@@ -3625,12 +3650,13 @@ EOF
 
   # Provider metadata has its own guest mount. It must never expose the shared
   # host config directory, which contains workspace, SSH, and kit state.
-  local _provider_root _provider_mount
-  _provider_root=$(acq_provider_input_root msb "$name") || return 1
-  [ -d "$_provider_root/current" ] || return 1
-  _provider_mount=$(acq_provider_input_msb_mount "$name") || return 1
+  local _provider_mount
+  _provider_mount=$(acq_provider_input_msb_mount "$name" "$_provider_generation") || {
+    _acq_msb_cleanup_uncreated_attempt
+    return 1
+  }
   create_flags+=(--volume "$_provider_mount")
-  create_flags+=(--env "ACQ_PROVIDER_INPUT_ROOT=$(acq_provider_input_guest_root msb "$name")")
+  create_flags+=(--env "ACQ_PROVIDER_INPUT_ROOT=$(acq_provider_input_guest_root msb "$name" "$_provider_generation")")
 
   # Credentials: read from the acq-owned secret store (keychain/file), scoped to
   # this sandbox first, then global. The real value is read into a TRANSIENT env
@@ -3666,12 +3692,13 @@ EOF
   local _create_output=""
   acq_debug "msb create: invoking (this returns fast; guest boots in background)"
   acq_spin_start "Creating sandbox '$name'"
+  _ACQ_MSB_CREATE_STARTED=1
   _create_output=$(_acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
   acq_spin_stop "Creating sandbox '$name'"
   [ -z "$_create_output" ] || printf '%s\n' "$_create_output" >&2
   if [ "$_create_rc" -ne 0 ] && [ "$_msb_image_source" = "agent-default" ] \
      && _acq_msb_image_not_found_error "$_create_output" \
-     && ! acq_backend_exists "$name"; then
+     && _acq_msb_confirm_absent "$name"; then
     echo "acq(msb): agent-specific image '$_msb_image' was not found;" >&2
     echo "acq(msb):   falling back to '$_ACQ_MSB_DEFAULT_IMAGE'." >&2
     _msb_image="$_ACQ_MSB_DEFAULT_IMAGE"
@@ -3713,12 +3740,17 @@ EOF
       acq_registry_auth_hint msb "$_msb_image"
     fi
     echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the full command trace)" >&2
-    # A fresh --clone scratch can hold no agent work yet — remove it (and the
-    # fetch-back remote) so the next create doesn't refuse on a stale dir.
-    [ -n "$_clone_src" ] && _acq_msb_clone_cleanup "$name"
-    acq_provider_input_remove msb "$name" || true
+    if _acq_msb_confirm_absent "$name"; then
+      # A confirmed absence proves this attempt never created a sandbox. Only
+      # then is it safe to remove this attempt's scratch clone and generation.
+      _acq_msb_cleanup_uncreated_attempt
+    fi
     return 1
   fi
+
+  # msb create returned success. Its async readiness can still fail, but the
+  # backend may own a live or inspectable sandbox, so preserve this attempt.
+  _ACQ_MSB_ATTEMPT_ACTIVE=""
 
   # CRITICAL: `msb create` returns 0 even when the sandbox later FAILS TO START
   # (e.g. a bad mount): the boot is asynchronous. So a zero rc from create does
@@ -3742,6 +3774,11 @@ EOF
   fi
   acq_spin_stop "Waiting for the sandbox to finish booting"
   acq_debug "msb provision: exec-ready OK ($name)"
+
+  if ! _acq_provider_input_publish "$(acq_provider_input_root msb "$name")" "$_provider_generation"; then
+    echo "acq(msb): error: sandbox '$name' was created but provider inputs could not be published." >&2
+    return 1
+  fi
 
   # A same-named sandbox removed outside acq can leave host state behind. Clear
   # instance-scoped values before this fresh provision records replacement values.
@@ -3890,7 +3927,7 @@ EOF
 # _acq_msb_exec_command) with HOME exported.
 acq_backend_provision() {
   ( local lock rc; lock=$(acq_provider_input_lock_acquire msb "$1") || exit 1
-    trap 'rc=$?; acq_provider_input_lock_release "${lock:-}" || true; exit "$rc"' EXIT
+    trap 'rc=$?; _acq_msb_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; exit "$rc"' EXIT
     trap 'exit 128' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
     _acq_backend_provision_unlocked "$@"; rc=$?; exit "$rc" )
 }

@@ -2349,7 +2349,7 @@ ACQ_HOST_CONFIG_GUEST_DIR="${ACQ_HOST_CONFIG_GUEST_DIR:-/var/lib/acq/host}"
 # workspace, SSH, and kit state that provider consumers must not receive.
 ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}"
 
-# acq_provider_input_project — host-validate and stage provider-role kit inputs.
+# acq_provider_input_prepare — host-validate and stage provider-role kit inputs.
 #
 # The validator, schemas, and credential-binding registry are shipped by the
 # pinned Patterns release. Do not duplicate its schema in this wrapper: fetch
@@ -2361,15 +2361,30 @@ ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provi
 # set).  Status 2 means the host cannot run the released validator and is a
 # provisioning blocker, never an empty-set fallback.
 _acq_provider_input_python() {
-  local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check
+  local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check runtime
   if [ -n "$python" ]; then
     [ -x "$python" ] || {
       echo "acq: configured provider-input Python is not executable: $python" >&2
       return 2
     }
   else
+    for runtime in \
+      "$ACQ_SCRIPT_DIR/.acq-tools/provider-input-validator.current" \
+      "$ACQ_SCRIPT_DIR/.acq-tools/provider-input-validator"; do
+      if [ -x "$runtime/bin/python3" ]; then
+        python="$runtime/bin/python3"
+        break
+      fi
+      if [ -x "$runtime/Scripts/python.exe" ]; then
+        python="$runtime/Scripts/python.exe"
+        break
+      fi
+    done
+  fi
+  if [ -z "$python" ]; then
     python=$(command -v python3 2>/dev/null) || {
       echo "acq: provider-input validation requires python3 with PyYAML 6.0.3 and jsonschema 4.26.0" >&2
+      echo "     Run: scripts/setup-provider-input-validator --apply" >&2
       return 2
     }
   fi
@@ -2383,12 +2398,13 @@ for package in required:
         actual[package] = None
 if actual != required:
     print("acq: provider-input validation requires PyYAML 6.0.3 and jsonschema 4.26.0; found " + ", ".join("%s=%s" % (package, actual[package] or "missing") for package in required), file=sys.stderr)
+    print("     Run: scripts/setup-provider-input-validator --apply", file=sys.stderr)
     raise SystemExit(2)'
   "$python" -c "$version_check" || return 2
   printf '%s\n' "$python"
 }
 
-acq_provider_input_project() {
+acq_provider_input_prepare() {
   local backend="$1" name="$2" root kitref kitdir manifest release_root="" python=""
   local validator="" schema_dir="" bindings="" token stage generation manifests=() kitdirs=()
   [ -n "$backend" ] && [ -n "$name" ] || return 1
@@ -2408,17 +2424,16 @@ acq_provider_input_project() {
     manifests+=("$stage/candidate-$token/provider-input.json")
     kitdirs+=("$stage/candidate-$token")
   done
-  # A generation is complete and immutable before it is made visible through
-  # current. Consumers consequently see either the old complete tree or the new
-  # complete tree, never an empty or partially copied directory.
+  # A generation is complete and immutable before an adapter mounts it. It is not
+  # visible through current until that adapter reports a successful create.
   generation=$(mktemp -d "$root/generations/generation.XXXXXXXX") || { _acq_provider_input_cleanup_stage "$stage"; return 1; }
   chmod 755 "$generation" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   _acq_provider_input_safe_mkdir "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   chmod 755 "$generation/models" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   # A present empty generation is authoritative; it replaces current atomically.
   if [ "${#manifests[@]}" -eq 0 ]; then
-    _acq_provider_input_publish "$root" "$generation" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
     _acq_provider_input_cleanup_stage "$stage"
+    printf '%s\n' "$generation"
     return 0
   fi
   # The validator and its control-plane inputs come from the fixed, pinned
@@ -2440,8 +2455,24 @@ acq_provider_input_project() {
   for i in "${!manifests[@]}"; do
     _acq_provider_input_materialize "${manifests[$i]}" "${kitdirs[$i]}" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   done
-  _acq_provider_input_publish "$root" "$generation" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   _acq_provider_input_cleanup_stage "$stage"
+  printf '%s\n' "$generation"
+}
+
+# acq_provider_input_project is retained for callers outside backend creation.
+# Adapters must use prepare, mount the returned generation, and publish only
+# after their backend create succeeds.
+acq_provider_input_project() {
+  local backend="$1" name="$2" generation root
+  generation=$(acq_provider_input_prepare "$backend" "$name") || return $?
+  root=$(acq_provider_input_root "$backend" "$name") || {
+    _acq_provider_input_cleanup_generation "${generation%/generations/*}" "$generation" || true
+    return 1
+  }
+  _acq_provider_input_publish "$root" "$generation" || {
+    _acq_provider_input_cleanup_generation "$root" "$generation" || true
+    return 1
+  }
 }
 
 # Provider inputs share the provenance base only as a parent, never as a mounted
@@ -2456,30 +2487,36 @@ acq_provider_input_root() {
 }
 
 acq_provider_input_guest_root() {
-  local backend="$1" name="$2" root
-  root=$(acq_provider_input_root "$backend" "$name") || return 1
+  local backend="$1" generation="$3" base
+  [ -n "$generation" ] || return 1
+  base=${generation##*/}
+  case "$base" in generation.*) ;; *) return 1 ;; esac
   case "$backend" in
-    sbx) printf '%s/current\n' "$root" ;;
-    msb) printf '%s/current\n' "$ACQ_PROVIDER_INPUT_GUEST_DIR" ;;
+    sbx) printf '%s\n' "$generation" ;;
+    msb) printf '%s/%s\n' "$ACQ_PROVIDER_INPUT_GUEST_DIR" "$base" ;;
     *) return 1 ;;
   esac
 }
 
 acq_provider_input_sbx_mount() {
-  local root
-  root=$(acq_provider_input_root sbx "$1") || return 1
-  printf '%s:ro\n' "$root"
+  case "${2:-}" in */generations/generation.*) printf '%s:ro\n' "$2" ;; *) return 1 ;; esac
 }
 
 acq_provider_input_msb_mount() {
-  local root host_root
-  root=$(acq_provider_input_root msb "$1") || return 1
+  local generation="$2" host_generation
+  case "$generation" in */generations/generation.*) ;; *) return 1 ;; esac
   if command -v host_path >/dev/null 2>&1; then
-    host_root=$(host_path "$root") || return 1
+    host_generation=$(host_path "$generation") || return 1
   else
-    host_root="$root"
+    host_generation="$generation"
   fi
-  printf '%s:%s:ro\n' "$host_root" "$ACQ_PROVIDER_INPUT_GUEST_DIR"
+  printf '%s:%s/%s:ro\n' "$host_generation" "$ACQ_PROVIDER_INPUT_GUEST_DIR" "${generation##*/}"
+}
+
+acq_provider_input_discard() {
+  local backend="$1" name="$2" generation="$3" root
+  root=$(acq_provider_input_root "$backend" "$name") || return 1
+  _acq_provider_input_cleanup_generation "$root" "$generation"
 }
 
 # Create a path one component at a time without ever traversing a symlink. This
@@ -2551,7 +2588,7 @@ PY
 }
 
 _acq_provider_input_publish() {
-  local root="$1" generation="$2" base temp current old
+  local root="$1" generation="$2" base temp current
   case "$root" in ""|/|/*/) return 1 ;; esac
   case "$generation" in "$root"/generations/generation.*) ;; *) return 1 ;; esac
   _acq_provider_input_safe_dir "$root/generations" || return 1
@@ -2563,20 +2600,9 @@ _acq_provider_input_publish() {
   ln -s "generations/$base" "$temp" || return 1
   # rename is atomic within root; do not remove current first.
   _acq_provider_input_atomic_replace "$temp" "$current" || { rm -f "$temp"; return 1; }
-  old=""
-  for old in "$root/generations"/*; do
-    [ -d "$old" ] || continue
-    [ "$old" = "$generation" ] && continue
-    case "$old" in
-      "$root"/generations/*)
-        if [ -L "$old" ]; then
-          echo "acq: warning: retained unsafe old provider-input generation: $old" >&2
-        elif ! _acq_provider_input_remove_tree "$old"; then
-          echo "acq: warning: published provider inputs but could not clean old generation: $old" >&2
-        fi
-        ;;
-    esac
-  done
+  # Retain prior generations. A sandbox created by an older acq may still mount
+  # current, and a failed concurrent create must never make that sandbox lose its
+  # inputs. New sandboxes mount an exact generation and are unaffected by swaps.
 }
 
 # One mkdir lock coordinates the complete create transaction on Bash 3.2 hosts:
@@ -2687,7 +2713,7 @@ try:
     bundle = json.loads(manifest_bytes)
     os.mkdir(target, 0o700)
     with open(os.path.join(target, 'provider-input.json'), 'x', encoding='utf-8') as stream: stream.write(manifest_bytes)
-    for path in (bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):
+    for path in ('spec.yaml', bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):
         source = open_relative(root, path)
         destination = os.path.join(target, path)
         os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)

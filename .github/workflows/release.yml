@@ -59,6 +59,8 @@ jobs:
           chmod 0755 dist/install.sh
           cp acq acq.cmd acq.ps1 install.ps1 LICENSE README.md package.json dist/acq-windows-x64/
           cp -R acq.backends dist/acq-windows-x64/
+          mkdir -p dist/acq-windows-x64/scripts
+          cp scripts/setup-provider-input-validator scripts/provider-input-validator-requirements*.txt dist/acq-windows-x64/scripts/
           (cd dist && zip -qr acq-windows-x64.zip acq-windows-x64)
           (cd dist && sha256sum install.sh install.ps1 acq-windows-x64.zip > SHA256SUMS)
 
