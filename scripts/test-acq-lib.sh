@@ -62,8 +62,8 @@ export ACQ_SBX_KIT_PASSTHROUGH=1
 # their projection boundary explicitly so they exercise the adapter behavior
 # without fetching a release or invoking a host Python runtime.
 acq_test_stub_provider_input_boundary() {
-  # Keep adapter-only child shells on the production root shape. In particular,
-  # names must never become raw path components before the cleanup seam runs.
+  # Keep adapter-only in-process shells on the production root shape. In
+  # particular, names must never become raw path components before cleanup.
   acq_provider_input_root() {
     local backend="${1:-}" name="${2:-}" safe_backend safe_name name_sum
     [ -n "$backend" ] && [ -n "$name" ] || return 1
@@ -102,9 +102,24 @@ acq_test_stub_provider_input_boundary() {
     case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
   }
   acq_provider_input_msb_mount() {
-    printf '%s:%s:ro\n' "$(acq_provider_input_root msb "$1")" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}"
+    local root host_root
+    root=$(acq_provider_input_root msb "$1") || return 1
+    if command -v host_path >/dev/null 2>&1; then
+      host_root=$(host_path "$root") || return 1
+    else
+      host_root="$root"
+    fi
+    printf '%s:%s:ro\n' "$host_root" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}"
   }
-  acq_provider_input_guest_root() { printf '%s/current\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}"; }
+  acq_provider_input_guest_root() {
+    local backend="$1" name="$2" root
+    root=$(acq_provider_input_root "$backend" "$name") || return 1
+    case "$backend" in
+      sbx) printf '%s/current\n' "$root" ;;
+      msb) printf '%s/current\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" ;;
+      *) return 1 ;;
+    esac
+  }
   acq_provider_input_sbx_mount() { printf '%s:ro\n' "$(acq_provider_input_root sbx "$1")"; }
 }
 export -f acq_test_stub_provider_input_boundary
@@ -620,12 +635,69 @@ KEYGENSTUB
   PATH="$STUBDIR:$PATH"
   export PATH CALLS STUBDIR
   # Adapter-only child shells source a backend without common.sh, but provisioning
-  # still crosses the provider-input boundary. BASH_ENV installs the explicit
-  # test boundary before they source that adapter, keeping those tests offline.
-  cat > "$STUBDIR/bash-env" <<'BASH_ENV'
-if command -v acq_test_stub_provider_input_boundary >/dev/null 2>&1; then
-  acq_test_stub_provider_input_boundary
-fi
+  # still crosses the provider-input boundary. BASH_ENV sources a self-contained
+  # definition rather than relying on Bash's exported-function import behavior.
+  cat > "$STUBDIR/provider-input-boundary.sh" <<'BOUNDARY'
+acq_provider_input_root() {
+  local backend="${1:-}" name="${2:-}" safe_backend safe_name name_sum
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
+  safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+  name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+  printf '%s/provider-input/%s/%s.%s\n' "$ACQ_PROVENANCE_DIR" "$safe_backend" "$safe_name" "$name_sum"
+}
+acq_provider_input_project() {
+  local root
+  root=$(acq_provider_input_root "$1" "$2") || return 1
+  mkdir -p "$root/generations/empty/models/providers" || return 1
+  ln -sfn generations/empty "$root/current"
+}
+acq_provider_input_remove() {
+  local backend="$1" name="$2" root parent expected_parent
+  root=$(acq_provider_input_root "$backend" "$name") || return 1
+  expected_parent="$ACQ_PROVENANCE_DIR/provider-input/$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')"
+  parent=${root%/*}
+  [ "$parent" = "$expected_parent" ] || return 1
+  case "$root" in "$expected_parent"/*.*) ;; *) return 1 ;; esac
+  [ ! -L "$root" ] || return 1
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  rm -rf -- "$root"
+}
+acq_provider_input_lock_acquire() {
+  local root lock parent
+  root=$(acq_provider_input_root "$1" "$2") || return 1
+  parent=${root%/*}
+  mkdir -p "$parent" || return 1
+  lock="${root}.lock"
+  mkdir "$lock" 2>/dev/null || return 1
+  printf '%s\n' "$lock"
+}
+acq_provider_input_lock_release() {
+  case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
+}
+acq_provider_input_msb_mount() {
+  local root host_root
+  root=$(acq_provider_input_root msb "$1") || return 1
+  if command -v host_path >/dev/null 2>&1; then
+    host_root=$(host_path "$root") || return 1
+  else
+    host_root="$root"
+  fi
+  printf '%s:%s:ro\n' "$host_root" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}"
+}
+acq_provider_input_guest_root() {
+  local backend="$1" name="$2" root
+  root=$(acq_provider_input_root "$backend" "$name") || return 1
+  case "$backend" in
+    sbx) printf '%s/current\n' "$root" ;;
+    msb) printf '%s/current\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" ;;
+    *) return 1 ;;
+  esac
+}
+acq_provider_input_sbx_mount() { printf '%s:ro\n' "$(acq_provider_input_root sbx "$1")"; }
+BOUNDARY
+  cat > "$STUBDIR/bash-env" <<BASH_ENV
+. "$STUBDIR/provider-input-boundary.sh"
 BASH_ENV
   export BASH_ENV="$STUBDIR/bash-env"
   # Keep acq's post-background liveness probe fast in tests (real default is 1s):

@@ -274,6 +274,7 @@ SPEC
   # a fresh bash never sees (the pre-#381 suite masked the resulting 127).
   (
     export ACQ_EXTRA_KITS="git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=some-extra-kit"
+    acq_test_stub_provider_input_boundary
     acq_backend_provision markerbox shell /tmp
   ) >/dev/null 2>&1 || true
   local log; log=$(cat "$CALLS")
@@ -287,6 +288,7 @@ SPEC
   (
     # shellcheck disable=SC2034  # consumed by the sourced acq_backend_provision
     ACQ_CLI_KITS=("git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=cli-kit-x")
+    acq_test_stub_provider_input_boundary
     acq_backend_provision climarkerbox shell /tmp
   ) >/dev/null 2>&1 || true
   assert_regex "$(cat "$CALLS")" 'cli-kit-x'

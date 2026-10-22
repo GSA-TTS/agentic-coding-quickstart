@@ -84,6 +84,20 @@ EOF
   [ ! -e "$root" ]
 }
 
+@test "adapter projection seam is available in a child shell through BASH_ENV" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
+    root=$(acq_provider_input_root msb childbox) || exit 1
+    acq_provider_input_project msb childbox || exit 1
+    [ -L "$root/current" ] || exit 1
+    [ "$(acq_provider_input_guest_root sbx childbox)" = "$(acq_provider_input_root sbx childbox)/current" ] || exit 1
+    host_path() { printf "%s\n" "/host$1"; }
+    [ "$(acq_provider_input_msb_mount childbox)" = "/host$root:/var/lib/acq/provider-input:ro" ]
+  '
+
+  assert_success
+}
+
 @test "failed validator dependency probe publishes nothing" {
   local release="$STUBDIR/release" root python="$STUBDIR/incompatible-python"
   _provider_release "$release"; _provider_kit "$release" alpha
