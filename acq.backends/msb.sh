@@ -1308,6 +1308,17 @@ acq_backend_restore() {
       return 2 ;;
   esac
 
+  if acq_backend_exists "$_name"; then
+    echo "acq(msb): restore: destination sandbox '$_name' already exists." >&2
+    echo "     Remove it first or restore under a different name; existing state was left unchanged." >&2
+    return 1
+  fi
+  if ! _acq_msb_confirm_absent "$_name"; then
+    echo "acq(msb): restore: could not confirm destination sandbox '$_name' is absent." >&2
+    echo "     Existing state was left unchanged; retry when MSB is reachable." >&2
+    return 1
+  fi
+
   _staged_snapshot=$(_acq_msb_snapshot_stage "$_snapshot") || {
     echo "acq(msb): restore: could not stage snapshot privately." >&2
     return 1

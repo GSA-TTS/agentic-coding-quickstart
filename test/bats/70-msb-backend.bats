@@ -187,6 +187,39 @@ _sha256() {
   assert_equal "$(acq_workspace_record_read msb restored)" ""
 }
 
+@test "msb: restore refuses an existing destination without clearing its state" {
+  mkdir -p "$STUBDIR/existing-workspace" "$STUBDIR/state/msb-restore"
+  : > "$STUBDIR/disk-state.msb"
+  printf 'restored\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'volume\t%s:%s\n' "$STUBDIR/existing-workspace" "$STUBDIR/existing-workspace" > "$STUBDIR/state/msb-restore/restored.resources"
+  acq_host_config_write msb restored agent opencode
+  acq_workspace_record_write msb restored "$STUBDIR/existing-workspace"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" restore restored "$STUBDIR/disk-state.msb"
+  assert_failure
+  assert_output --partial "destination sandbox 'restored' already exists"
+  refute_regex "$(cat "$CALLS")" 'msb restore'
+  [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
+  assert_equal "$(acq_host_config_read msb restored agent)" opencode
+  assert_equal "$(acq_workspace_record_read msb restored)" "$STUBDIR/existing-workspace"
+}
+
+@test "msb: restore preserves destination state when absence cannot be confirmed" {
+  mkdir -p "$STUBDIR/existing-workspace" "$STUBDIR/state/msb-restore"
+  : > "$STUBDIR/disk-state.msb"
+  printf 'volume\t%s:%s\n' "$STUBDIR/existing-workspace" "$STUBDIR/existing-workspace" > "$STUBDIR/state/msb-restore/restored.resources"
+  acq_host_config_write msb restored agent opencode
+  acq_workspace_record_write msb restored "$STUBDIR/existing-workspace"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb STUB_MSB_LIST_FAIL=1 "$ACQ" restore restored "$STUBDIR/disk-state.msb"
+  assert_failure
+  assert_output --partial "could not confirm destination sandbox 'restored' is absent"
+  refute_regex "$(cat "$CALLS")" 'msb restore'
+  [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
+  assert_equal "$(acq_host_config_read msb restored agent)" opencode
+  assert_equal "$(acq_workspace_record_read msb restored)" "$STUBDIR/existing-workspace"
+}
+
 @test "msb: restore uses the provider facts secret binding" {
   local kit="$STUBDIR/provider-kit"
   mkdir -p "$kit/provider-facts" "$STUBDIR/secrets"
