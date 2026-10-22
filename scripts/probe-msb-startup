@@ -435,21 +435,31 @@ def relay(pid, fd, directory):
 
 def terminate_owned_child(pid):
     """Bound cleanup when terminal or artifact I/O fails while the child runs."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(pid, sig)
-        except ProcessLookupError:
-            pass  # It may have exited between the failed relay and cleanup.
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
+    reaped = False
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass  # The group may already have exited.
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if not reaped:
             try:
                 ended, _ = os.waitpid(pid, os.WNOHANG)
+                reaped = bool(ended)
             except ChildProcessError:
-                return
-            if ended:
-                return
-            time.sleep(0.02)
-    os.waitpid(pid, 0)
+                reaped = True
+        # Reaping the leader does not imply that its descendants have exited.
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # All group members exited during the grace period.
+    if not reaped:
+        os.waitpid(pid, 0)
 
 
 def run(command, env, directory):

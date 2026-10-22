@@ -4,6 +4,7 @@
 import importlib.machinery
 import importlib.util
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -272,6 +273,51 @@ class ProbeTests(unittest.TestCase):
                     os.kill(child, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+    def test_relay_error_kills_resistant_descendant_after_leader_exits(self):
+        reader, writer = os.pipe()
+        os.set_inheritable(writer, True)
+        code = ("import os,signal,time\n"
+                "if os.fork() == 0:\n"
+                " signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                " signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+                f" os.write({writer}, b'ready')\n"
+                " time.sleep(60)\n"
+                "else:\n"
+                f" os.close({writer})\n"
+                " time.sleep(60)\n")
+        children = []
+        real_fork = probe.pty.fork
+        def remember_child():
+            pid, fd = real_fork()
+            if pid:
+                children.append(pid)
+                os.close(writer)
+            return pid, fd
+        def fail_after_descendant_ready(*_):
+            self.assertTrue(select.select([reader], [], [], 5)[0], "descendant not ready")
+            self.assertEqual(os.read(reader, 5), b"ready")
+            raise OSError("injected relay failure")
+        try:
+            with mock.patch.object(probe.pty, "fork", side_effect=remember_child), \
+                    mock.patch.object(probe, "relay", side_effect=fail_after_descendant_ready), \
+                    self.assertRaises(OSError):
+                probe.run([sys.executable, "-c", code], dict(os.environ), self.directory)
+            # EOF proves the descendant closed its inherited writer, even on hosts
+            # where an orphan remains visible as a zombie until init reaps it.
+            self.assertTrue(select.select([reader], [], [], 5)[0], "descendant survived cleanup")
+            self.assertEqual(os.read(reader, 1), b"")
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(children[0], os.WNOHANG)
+        finally:
+            if children:
+                try:
+                    os.killpg(children[0], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                os.close(writer)
+            os.close(reader)
 
     def test_ssh_serve_preserves_managed_pid(self):
         with mock.patch.dict(os.environ, ACQ_PROBE_DIR=str(self.directory), ACQ_PROBE_MSB="/real/msb"), \
