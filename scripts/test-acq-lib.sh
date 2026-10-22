@@ -73,17 +73,20 @@ export ACQ_SBX_KIT_PASSTHROUGH=1
 # them. Instead root a SINGLE shared offline-kit dir under bats' run-scoped
 # temp dir (BATS_RUN_TMPDIR, which bats removes at the end of the run); fall back
 # to a per-process mktemp only when run outside bats. The dir holds a stub spec
-# with no secrets, so sharing it across tests is safe.
+# with no secrets. Publish each complete spec atomically: parallel workers can
+# read these paths while another worker sources this helper.
 if [ -n "${BATS_RUN_TMPDIR:-}" ]; then
   _ACQ_MSB_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR}/acq-offline-kit"
   mkdir -p "$_ACQ_MSB_OFFLINE_KIT_DIR"
 else
   _ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-nokit.XXXXXX")
 fi
-printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml"
+printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" \
+  && mv -f "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml" || return 1
 _ACQ_AGENT_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR:-$_ACQ_MSB_OFFLINE_KIT_DIR}/acq-opencode-kit"
 mkdir -p "$_ACQ_AGENT_OFFLINE_KIT_DIR"
-printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml"
+printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml.$$" \
+  && mv -f "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml.$$" "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml" || return 1
 export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
 export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
 

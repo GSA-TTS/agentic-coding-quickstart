@@ -1,0 +1,575 @@
+#!/usr/bin/env python3
+"""Host timing probe; Python 3.9+, macOS/Linux. Supply a workspace DIRECTORY.
+Creates and retains a fresh sandbox with normal host configuration/caches.
+Exit OpenCode normally; summary.txt is also written at interactive handoff.
+Artifacts retain fixed labels/times/statuses, not output, arguments, or secrets.
+PTY preserves prompts. Debug output and Python shims add measurement overhead.
+Handoff is not UI readiness; prompt dwell is included, session time excluded.
+--calibrate SANDBOX compares direct/wrapped read-only calls on an existing VM.
+--calibrate-files SANDBOX compares copy/permissions/Node on fresh guest scratch
+files under /home/agent. Scratch files are retained; project files are untouched.
+--calibrate-batch SANDBOX compares separate direct, separate shell, and batched
+shell permission changes on fresh files; all MSB calls bypass the probe wrapper.
+--phase-only runs without the MSB wrapper; measures phases and whole command,
+including attach/session time. Exit promptly; Paseo's launcher exits itself.
+--summarize ARTIFACT_DIRECTORY regenerates a startup summary.
+"""
+
+import argparse
+import collections
+import datetime
+import errno
+import fcntl
+import json
+import os
+import platform
+import pty
+import re
+import select
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import termios
+import time
+import tty
+from pathlib import Path
+
+
+def emit(directory, event, label, **fields):
+    record = dict(event=event, label=label, mono=time.monotonic(),
+                  utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  pid=os.getpid(), **fields)
+    with (Path(directory) / "events.jsonl").open("a", encoding="utf-8") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        stream.write(json.dumps(record, sort_keys=True) + "\n")
+        stream.flush()
+
+
+def cli_label(args):
+    verbs = {"create", "exec", "list", "doctor", "copy", "cp", "start", "stop",
+             "inspect", "modify", "rm", "version", "--version", "image", "volume",
+             "ssh", "logs", "secret"}
+    verb = args[0] if args and args[0] in verbs else "other"
+    # Only flags before the guest command delimiter can identify a PTY attach.
+    flags = args[:args.index("--")] if "--" in args else args
+    if verb == "exec" and ("-t" in flags or "--tty" in flags):
+        return "interactive-exec"
+    if verb == "exec" and "--" in args:
+        guest = args[args.index("--") + 1:]
+        if guest and guest[0] in {"chmod", "chown", "node"}:
+            return "exec-" + guest[0]
+        if len(guest) == 3 and guest[:2] == ["sh", "-c"]:
+            for prefix, label in (("test -s '", "exec-file-check"), ("mkdir -p '", "exec-mkdir")):
+                if guest[2].startswith(prefix):
+                    return label
+        if len(guest) == 3 and guest[:2] == ["sh", "-c"] \
+                and guest[2].startswith("curl -sS -o /dev/null -w '%{http_code}'") \
+                and "Authorization: Bearer" in guest[2]:
+            return "key-validation-exec"
+    return verb
+
+
+def shim(args):
+    directory, real = os.environ["ACQ_PROBE_DIR"], os.environ["ACQ_PROBE_MSB"]
+    if args[:2] == ["ssh", "serve"]:
+        # ACQ owns this long-lived PID and stops it later; preserve that identity.
+        os.execvpe(real, [real, *args], os.environ)
+    label = cli_label(args)
+    launch = os.environ.pop("ACQ_PROBE_LAUNCH_EPOCH", None)
+    fields = {"launcher_seconds": time.time() - int(launch)} if launch else {}
+    emit(directory, "cli-start", label, **fields)
+    if label == "interactive-exec":
+        emit(directory, "attach", "interactive-handoff")
+    previous = signal.signal(signal.SIGINT, lambda *_: None)
+    before_spawn = time.monotonic()
+    child = subprocess.Popen([real, *args])
+    def terminate(_sig, _frame):
+        child.terminate()
+    previous_term = signal.signal(signal.SIGTERM, terminate)
+    try:
+        emit(directory, "spawned", label, spawn_seconds=time.monotonic() - before_spawn)
+        # Both processes receive foreground terminal signals; reap before exiting.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        rc = child.wait()
+    except BaseException:
+        child.terminate()
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+        raise
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        signal.signal(signal.SIGTERM, previous_term)
+    emit(directory, "cli-end", label, rc=rc)
+    return rc if rc >= 0 else 128 - rc
+
+
+class Markers:
+    """Keep only fixed categories; never retain unmatched output or arguments."""
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.buffer = b""
+        self.kit = 0
+        self.kit_name = "custom-or-unknown"
+
+    def feed(self, chunk):
+        for part in chunk.splitlines(keepends=True):
+            self.buffer = (self.buffer + part)[-16384:]
+            if part.endswith((b"\n", b"\r")):
+                self.line(self.buffer.decode("utf-8", errors="replace").strip())
+                self.buffer = b""
+
+    def line(self, line):
+        match = re.match(r"^acq\[debug [0-9:]+\]: (.*)$", line)
+        if not match:
+            return
+        text = match[1]
+        pairs = {
+            "msb create: invoking": ("phase-start", "create"),
+            "msb create: returned": ("phase-end", "create"),
+            "msb provision: waiting for exec-ready": ("phase-start", "boot-wait"),
+            "msb provision: exec-ready OK": ("phase-end", "boot-wait"),
+            "msb provision: checking prereqs": ("phase-start", "prerequisites"),
+            "msb provision: prereqs checked": ("phase-end", "prerequisites"),
+            "msb provision: ensuring agent user": ("phase-start", "agent-user"),
+            "msb provision: agent user ready": ("phase-end", "agent-user"),
+            "msb provision: all kits applied": ("milestone", "kits-complete"),
+            "msb startup-script staged": ("milestone", "startup-script-staged"),
+            "fetch: ref=": ("milestone", "kit-fetch"),
+            "msb copy verified:": ("milestone", "file-copy-verified"),
+        }
+        for prefix, (event, label) in pairs.items():
+            if text.startswith(prefix):
+                emit(self.directory, event, label)
+                return
+        self.kit_marker(text)
+
+    def kit_marker(self, text):
+        if text.startswith("msb provision: applying kit dir "):
+            self.kit += 1
+            # Emit only exact built-in names; paths/custom kit names stay private.
+            known = {"opencode", "paseo", "usai-provider", "usai-provider-api-key",
+                     "agentic-coding-playbook", "zscaler-ca-certificate", "git-ssh-sign"}
+            match = re.search(r"/([a-z-]+) \(", text)
+            self.kit_name = match[1] if match and match[1] in known else "custom-or-unknown"
+            emit(self.directory, "phase-start", "kit", kit=self.kit, kit_name=self.kit_name)
+        elif text.startswith("msb provision: applied kit dir "):
+            emit(self.directory, "phase-end", "kit", kit=self.kit)
+        else:
+            match = re.match(r"msb cmd\[(install|startup|startup:background)\] "
+                             r"(START|DONE|FAILED|DETACH|LAUNCHED|already done)\b", text)
+            if match:
+                phase, action = match.groups()
+                event = {"START": "phase-start", "DETACH": "phase-start",
+                         "DONE": "phase-end", "LAUNCHED": "phase-end",
+                         "FAILED": "phase-fail", "already done": "milestone"}[action]
+                emit(self.directory, event, phase, kit=self.kit)
+
+
+def read_events(directory):
+    # A killed writer can leave a partial last line; preserve it and report it.
+    records, partial = [], False
+    with (directory / "events.jsonl").open(encoding="utf-8") as stream:
+        fcntl.flock(stream, fcntl.LOCK_SH)
+        for line in stream:
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                partial = True
+    return sorted(records, key=lambda e: e["mono"]), partial
+
+
+def durations(events, cutoff):
+    opened, spans = {}, []
+    for event in events:
+        if event["mono"] > cutoff:
+            continue
+        kind, label = event["event"], event["label"]
+        family = "cli" if kind.startswith("cli-") else "phase"
+        key = (family, event["pid"], label, event.get("kit", 0))
+        if kind in ("cli-start", "phase-start"):
+            # A best-effort kit may never emit an end marker. Keep it incomplete.
+            if key in opened:
+                spans.append((opened.pop(key), event["mono"], "incomplete"))
+            opened[key] = event
+        elif kind in ("cli-end", "phase-end", "phase-fail") and key in opened:
+            status = str(event.get("rc", "failed" if kind == "phase-fail" else "done"))
+            spans.append((opened.pop(key), event["mono"], status))
+    spans.extend((event, cutoff, "incomplete") for event in opened.values())
+    return spans
+
+
+def summary(directory):
+    events, partial = read_events(directory)
+    metadata_path = directory / "metadata.json"
+    phase_only = metadata_path.exists() and json.loads(metadata_path.read_text()).get("phase_only", False)
+    start = next(e["mono"] for e in events if e["event"] == "run-start")
+    attach = next((e for e in events if e["event"] == "attach"), None)
+    end = next((e for e in events if e["event"] == "run-end"), None)
+    cutoff = attach["mono"] if attach else (end["mono"] if end else time.monotonic())
+    spans = durations(events, cutoff)
+    lines = ["MSB startup probe", f"Started (UTC): {events[0]['utc']}",
+             f"Time to interactive handoff: {cutoff - start:.3f}s" if attach else
+             f"No interactive handoff observed; elapsed: {cutoff - start:.3f}s",
+             f"Run exit: {end['rc']}" if end else "Run still active or interrupted before exit record",
+             "MSB calls not instrumented (phase-only); command duration includes attach/session." if phase_only else
+             f"Create calls: {sum(e['event'] == 'cli-start' and e['label'] == 'create' for e in events)}",
+             "Fresh sandbox; host caches/config retained. Prompt dwell is included.",
+             "No handoff marker in phase-only mode; phase spans remain usable." if phase_only else
+             "Handoff is not UI readiness. Interactive session time is excluded.",
+             "Phase/CLI durations overlap; do not add them together.",
+             "CLI times exclude Python shim startup; gaps include probe overhead."]
+    if partial:
+        lines.append("WARNING: malformed/partial event record present")
+    lines += phase_summary(spans, start)
+    calls = [(e, stop, status) for e, stop, status in spans
+             if e["event"] == "cli-start" and e["label"] != "interactive-exec"]
+    if not phase_only:
+        lines += cli_summary(calls, start, cutoff)
+    launches = [e for e in events if "launcher_seconds" in e and e["mono"] <= cutoff]
+    lines += ["", "Slowest shell-to-Python launches (seconds, ~1s uncertainty; includes interpreter startup):"]
+    for e in sorted(launches, key=lambda e: -e["launcher_seconds"])[:10]:
+        lines.append(f"  {e['launcher_seconds']:9.3f} {e['label']} pid={e['pid']}")
+    spawned = [e for e in events if "spawn_seconds" in e and e["mono"] <= cutoff]
+    lines.append(f"MSB process spawn time total: {sum(e['spawn_seconds'] for e in spawned):.3f}s")
+    lines += ["", "Timeline (offset seconds):"]
+    for e in events:
+        if e["mono"] <= cutoff:
+            suffix = f" kit#{e['kit']}" if e.get("kit") else ""
+            rc = f" rc={e['rc']}" if "rc" in e else ""
+            lines.append(f"  +{e['mono']-start:9.3f} {e['event']} {e['label']}{suffix}{rc}")
+    text = "\n".join(lines) + "\n"
+    (directory / "summary.txt").write_text(text, encoding="utf-8")
+    return text
+
+
+def phase_summary(spans, start):
+    lines = []
+    lines += ["", "Phase spans (seconds, start offset, status):"]
+    for event, stop, status in spans:
+        if event["event"] == "phase-start":
+            kit = f" kit#{event['kit']}" if event.get("kit") else ""
+            if "kit_name" in event:
+                kit += " " + event["kit_name"]
+            lines.append(f"  {stop-event['mono']:9.3f} +{event['mono']-start:9.3f} "
+                         f"{event['label']}{kit} [{status}]")
+    return lines
+
+
+def cli_summary(calls, start, cutoff):
+    totals = collections.defaultdict(lambda: [0, 0.0])
+    for e, stop, _ in calls:
+        totals[e["label"]][0] += 1
+        totals[e["label"]][1] += stop - e["mono"]
+    lines = ["", "MSB calls (category, count, cumulative seconds; overlaps possible):"]
+    for label, (count, elapsed) in sorted(totals.items(), key=lambda item: -item[1][1]):
+        lines.append(f"  {label:16} {count:5} {elapsed:9.3f}")
+    lines += ["", "Slowest MSB calls (seconds, start offset, exit/status):"]
+    for e, stop, status in sorted(calls, key=lambda row: row[1]-row[0]["mono"], reverse=True)[:15]:
+        lines.append(f"  {stop-e['mono']:9.3f} +{e['mono']-start:9.3f} {e['label']} [{status}]")
+    cursor, gaps = start, []
+    for e, stop, _ in sorted(calls, key=lambda row: row[0]["mono"]):
+        if e["mono"] > cursor:
+            gaps.append((cursor, e["mono"]))
+        cursor = max(cursor, stop)
+    if cursor < cutoff:
+        gaps.append((cursor, cutoff))
+    lines += ["", f"Time outside measured MSB calls: {sum(b-a for a, b in gaps):.3f}s",
+              "Largest gaps (seconds, start offset; host work/prompts/shim overhead):"]
+    for a, b in sorted(gaps, key=lambda pair: pair[1]-pair[0], reverse=True)[:10]:
+        lines.append(f"  {b-a:9.3f} +{a-start:9.3f}")
+    return lines
+
+
+def resize(fd):
+    if sys.stdin.isatty():
+        size = fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, size)
+
+
+def calibration_call(executable, command, env, directory, repeat, mode, label):
+    start = time.monotonic()
+    rc = subprocess.call([executable, *command], env=env, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    row = {"repeat": repeat, "mode": mode, "label": label, "rc": rc,
+           "seconds": time.monotonic() - start,
+           "utc": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    with (directory / "calibration.jsonl").open("a") as stream:
+        stream.write(json.dumps(row) + "\n")
+    print(f"{mode:7} {label:16} {row['seconds']:8.3f}s rc={rc}", flush=True)
+    if rc:
+        print("Calibration stopped: command failed; status preserved in artifacts.")
+    return rc
+
+
+def calibrate(name, real, launcher, env, directory, files=False):
+    """Compare identical calls in alternating order; never change existing files."""
+    cases = [(label, ["exec", name, "-u", "0", "--", *guest]) for label, guest in
+             (("true", ["true"]), ("chmod", ["chmod", "--version"]),
+              ("chown", ["chown", "--version"]), ("node", ["node", "--version"]))]
+    if files:
+        cases = file_calibration_cases(name, real, env, directory)
+        if cases is None:
+            return 1
+    for repeat in range(2):
+        for label, command in cases:
+            # Reverse order on the second pass to expose warming/order effects.
+            modes = [("direct", real), ("wrapped", str(launcher))][::1 if repeat == 0 else -1]
+            for mode, executable in modes:
+                if calibration_call(executable, command, env, directory, repeat + 1, mode, label):
+                    return 1
+    print(f"Calibration artifacts: {directory}")
+    return 0
+
+
+def file_calibration_cases(name, real, env, directory):
+    # mkdtemp's basename is ours, but validate before using it in a guest command.
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", directory.name):
+        raise ValueError("invalid artifact basename")
+    scratch = "/home/agent/" + directory.name
+    print(f"Guest scratch (retained): {scratch}", flush=True)
+    # mkdir without -p refuses a collision; nothing pre-existing is modified.
+    setup = ["exec", name, "-u", "0", "--", "mkdir", "-m", "755", scratch]
+    if calibration_call(real, setup, env, directory, 0, "direct", "scratch-create"):
+        return None
+    source = directory / "fixture.mjs"
+    source.write_text("if (1 + 1 !== 2) process.exit(1);\n", encoding="utf-8")
+    target = scratch + "/fixture.mjs"
+    root = ["exec", name, "-u", "0", "--"]
+    return [("copy", ["copy", str(source), name + ":" + target]),
+            ("file-check", [*root, "sh", "-c", f"test -s '{target}'"]),
+            ("chmod-644", [*root, "chmod", "644", target]),
+            ("chmod-755", [*root, "chmod", "755", target]),
+            ("chown", [*root, "chown", "-R", "-P", "agent", target]),
+            ("node-script", ["exec", name, "-u", "agent", "--", "node", target])]
+
+
+def permission_commands(target, mode):
+    operations = [["chmod", "644", target], ["chmod", "755", target],
+                  ["chown", "-R", "-P", "agent", target]]
+    if mode == "separate-direct":
+        return operations
+    scripts = [shlex.join(operation) for operation in operations]
+    if mode == "separate-shell":
+        return [["sh", "-c", script] for script in scripts]
+    if mode == "batched-shell":
+        return [["sh", "-c", " && ".join(scripts)]]
+    raise ValueError("unknown permission comparison mode")
+
+
+def calibrate_batch(name, real, env, directory):
+    env = dict(env, PATH=os.environ["PATH"])
+    cases = file_calibration_cases(name, real, env, directory)
+    if cases is None:
+        return 1
+    source = directory / "fixture.mjs"
+    scratch = "/home/agent/" + directory.name
+    root = ["exec", name, "-u", "0", "--"]
+    modes = ["separate-direct", "separate-shell", "batched-shell"]
+    totals = []
+    for repeat in (1, 2):
+        for mode in modes[::1 if repeat == 1 else -1]:
+            target = f"{scratch}/{mode}-{repeat}.mjs"
+            copy = ["copy", str(source), name + ":" + target]
+            if calibration_call(real, copy, env, directory, repeat, mode, "prepare-copy"):
+                return 1
+            start = time.monotonic()
+            for index, command in enumerate(permission_commands(target, mode), 1):
+                if calibration_call(real, [*root, *command], env, directory,
+                                    repeat, mode, f"permissions-{index}"):
+                    return 1
+            elapsed = time.monotonic() - start
+            # Verify actual end state rather than treating exit zero as proof.
+            verify = f'test "$(stat -c %a {shlex.quote(target)})" = 755 && '
+            verify += f'test "$(stat -c %U {shlex.quote(target)})" = agent'
+            if calibration_call(real, [*root, "sh", "-c", verify], env, directory,
+                                repeat, mode, "verify-mode-owner"):
+                return 1
+            row = {"repeat": repeat, "mode": mode, "seconds": elapsed}
+            totals.append(row)
+            (directory / "batch-totals.json").write_text(json.dumps(totals, indent=2) + "\n")
+            print(f"TOTAL pass={repeat} {mode}: {elapsed:.3f}s (copy/verification excluded)", flush=True)
+    print(f"Batch calibration artifacts: {directory}")
+    return 0
+
+
+def relay(pid, fd, directory):
+    markers, announced = Markers(directory), False
+    checked = 0.0
+    inputs = [fd, 0]
+    while True:
+        ready, _, _ = select.select(inputs, [], [], 0.25)
+        if fd in ready:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError as exc:
+                if exc.errno != errno.EIO:
+                    raise
+                break
+            if not chunk:
+                break
+            markers.feed(chunk)
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+        if 0 in ready:
+            chunk = os.read(0, 65536)
+            if chunk:
+                offset = 0
+                while offset < len(chunk):
+                    offset += os.write(fd, chunk[offset:])
+            else:
+                inputs.remove(0)
+        if not announced and time.monotonic() - checked >= 0.25:
+            checked = time.monotonic()
+            events, _ = read_events(directory)
+            if any(e["event"] == "attach" for e in events):
+                summary(directory)
+                announced = True
+
+
+def terminate_owned_child(pid):
+    """Bound cleanup when terminal or artifact I/O fails while the child runs."""
+    reaped = False
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass  # The group may already have exited.
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if not reaped:
+            try:
+                ended, _ = os.waitpid(pid, os.WNOHANG)
+                reaped = bool(ended)
+            except ChildProcessError:
+                reaped = True
+        # Reaping the leader does not imply that its descendants have exited.
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # All group members exited during the grace period.
+    if not reaped:
+        os.waitpid(pid, 0)
+
+
+def run(command, env, directory):
+    saved = termios.tcgetattr(0) if sys.stdin.isatty() else None
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe(command[0], command, env)
+    previous = signal.signal(signal.SIGWINCH, lambda *_: resize(fd))
+    def forward(sig, _frame):
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            pass  # Child has already exited; relay still collects its status.
+    handlers = {sig: signal.signal(sig, forward) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        resize(fd)
+        if saved:
+            tty.setraw(0)
+        relay(pid, fd, directory)
+        _, status = os.waitpid(pid, 0)
+        return os.waitstatus_to_exitcode(status)
+    except BaseException:
+        terminate_owned_child(pid)
+        raise
+    finally:
+        signal.signal(signal.SIGWINCH, previous)
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+        if saved:
+            termios.tcsetattr(0, termios.TCSADRAIN, saved)
+        os.close(fd)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("directory", nargs="?", type=Path)
+    parser.add_argument("--phase-only", action="store_true")
+    parser.add_argument("--summarize", type=Path, metavar="ARTIFACT_DIRECTORY")
+    calibration = parser.add_mutually_exclusive_group()
+    calibration.add_argument("--calibrate", metavar="SANDBOX")
+    calibration.add_argument("--calibrate-files", metavar="SANDBOX")
+    calibration.add_argument("--calibrate-batch", metavar="SANDBOX")
+    args = parser.parse_args()
+    args.calibrate = args.calibrate or args.calibrate_files or args.calibrate_batch
+    if args.phase_only and args.calibrate:
+        parser.error("--phase-only is for startup, not calibration")
+    if args.summarize:
+        print(summary(args.summarize), end="")
+        return 0
+    if args.calibrate and (args.directory or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", args.calibrate)):
+        parser.error("--calibrate requires a sandbox name and no directory")
+    if not args.calibrate and (not args.directory or not args.directory.is_dir()):
+        parser.error("supply an existing workspace directory")
+    real = shutil.which("msb")
+    if not real:
+        parser.error("msb is not on PATH; run this probe on the host")
+    if not args.calibrate and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+        parser.error("run from an interactive terminal (do not pipe or redirect)")
+    return execute(args, real)
+
+
+def execute(args, real):
+    root = Path(__file__).resolve().parent.parent
+    base = root / "tmp"
+    base.mkdir(exist_ok=True)
+    original_umask = os.umask(0o077)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    directory = Path(tempfile.mkdtemp(prefix=f"msb-startup-{stamp}-", dir=base))
+    name = "probe-" + directory.name.replace("_", "-")
+    bindir = directory / "bin"
+    bindir.mkdir()
+    # Timestamp before Python imports or host process-launch inspection can stall.
+    launcher = bindir / "msb"
+    launcher.write_text("#!/bin/sh\nACQ_PROBE_LAUNCH_EPOCH=$(/bin/date +%s) || exit 1\n"
+                        "export ACQ_PROBE_LAUNCH_EPOCH\n"
+                        "printf '%s\\t%s\\n' \"$$\" \"$ACQ_PROBE_LAUNCH_EPOCH\" "
+                        ">>\"$ACQ_PROBE_DIR/launcher.tsv\" || exit 1\nexec " + shlex.quote(sys.executable) + " " +
+                        shlex.quote(str(Path(__file__).resolve())) + " --msb-shim \"$@\"\n")
+    launcher.chmod(0o700)
+    env = dict(os.environ, ACQ_PROBE_DIR=str(directory), ACQ_PROBE_MSB=str(Path(real).absolute()),
+                ACQ_DEBUG="1", PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+    if args.phase_only or args.calibrate_batch:
+        env["PATH"] = os.environ["PATH"]
+    metadata = {"sandbox": args.calibrate or name, "platform": platform.system(),
+                "python": platform.python_version(), "cache_policy": "retained", "probe_schema": 6,
+                "phase_only": args.phase_only,
+                "mode": "batch-calibration" if args.calibrate_batch else
+                        "file-calibration" if args.calibrate_files else
+                        "calibration" if args.calibrate else "startup"}
+    (directory / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    os.umask(original_umask)
+    if args.calibrate:
+        print(f"Calibration artifacts: {directory}", flush=True)
+        if args.calibrate_batch:
+            return calibrate_batch(args.calibrate, real, env, directory)
+        return calibrate(args.calibrate, real, launcher, env, directory, files=bool(args.calibrate_files))
+    print(f"Artifacts: {directory}\nSandbox: {name}\nExit OpenCode normally after startup.", flush=True)
+    emit(directory, "run-start", "acq-run")
+    rc = run(["bash", str(root / "acq"), "--backend", "msb", "run", "opencode",
+              str(args.directory.resolve()), "--name", name], env, directory)
+    emit(directory, "run-end", "acq-run", rc=rc)
+    summary(directory)
+    print(f"\nTiming summary: {directory / 'summary.txt'}\nSandbox retained: {name}")
+    return rc if rc >= 0 else 128 - rc
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(shim(sys.argv[2:]) if sys.argv[1:2] == ["--msb-shim"] else main())
+    except (OSError, ValueError, KeyError) as error:
+        # Do not echo exception text: an OS exception can contain command arguments.
+        print(f"probe-msb-startup: {type(error).__name__}; probe could not finish", file=sys.stderr)
+        sys.exit(1)

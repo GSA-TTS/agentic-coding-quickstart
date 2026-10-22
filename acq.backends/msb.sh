@@ -1945,7 +1945,10 @@ _acq_msb_copy_file_verified() {
     esac
   fi
   if [ -n "$mode" ]; then
-    _acq_msb_cli exec "$name" -u 0 -- chmod "$mode" "$path" >/dev/null 2>&1 || true
+    # Host measurements show a multi-second penalty for direct permission argv,
+    # absent when the same operation runs through a guest shell. Keep the shell
+    # program fixed and pass all command/data tokens as positional arguments.
+    _acq_msb_cli exec "$name" -u 0 -- sh -c '"$@"' sh chmod "$mode" "$path" >/dev/null 2>&1 || true
   fi
   case "$path" in
     /home/agent/*)
@@ -1973,7 +1976,7 @@ _acq_msb_copy_file_verified() {
           # cannot be redirected to chown files OUTSIDE /home/agent. Defense in
           # depth — the tree is inside the ephemeral guest and the top component
           # is already ../. guarded above.
-          _acq_msb_cli exec "$name" -u 0 -- chown -R -P agent "/home/agent/$top" >/dev/null 2>&1 || true
+          _acq_msb_cli exec "$name" -u 0 -- sh -c '"$@"' sh chown -R -P agent "/home/agent/$top" >/dev/null 2>&1 || true
           ;;
       esac
       ;;
