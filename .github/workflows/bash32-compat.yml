@@ -7,7 +7,7 @@
 #   aborts — bash 4.4+ does not. That class of bug is INVISIBLE to the existing
 #   lanes, which all run on ubuntu-latest (bash 5.x). This gate reproduces the
 #   3.2 interpreter so the class is caught pre-merge instead of only when someone
-#   runs the suite locally on a Mac (see quickstart#331 for the 10c12 instance).
+#   runs the suite locally on a Mac.
 #
 #   The suite runs under bats-core (ADR-0025); bats supports bash 3.2.57, and the
 #   acq code + stub library it exercises are the 3.2 target. We invoke the
@@ -40,9 +40,8 @@
 #   "skipped, passing" one. Branch protection's required-status-checks list has
 #   no path awareness of its own, so a required context that's structurally
 #   never created sits "Expected"/pending forever and blocks merge — even when
-#   every check that DID run is green. This hit a real dependabot PR
-#   (agentic-coding-quickstart#449, an actions-version bump touching only
-#   .github/workflows/release.yml) and needed an admin-bypass merge to unblock.
+#   every check that DID run is green. This hit a dependabot actions-version
+#   bump touching only .github/workflows/release.yml and blocked its merge.
 #   This is GitHub's own documented failure mode for "required check backed by a
 #   path-filtered workflow" (see "Handling skipped but required checks" in
 #   GitHub's required-status-checks troubleshooting docs) and the fix below is
@@ -52,7 +51,7 @@
 #   interpreter-build job runs only when relevant; and an always-on `gate` job
 #   turns that conditional result into an unconditional status so the SAME
 #   required-check name ("acq offline suite under bash 3.2") keeps getting
-#   posted on every PR — skipped-and-green when irrelevant, real-result when
+#   posted on every PR and merge group — skipped-and-green when irrelevant, real-result when
 #   relevant. Keeping the required-check name unchanged (rather than renaming it
 #   to something like "bash 3.2 compat gate") means this fix needs zero
 #   out-of-band branch-protection/ruleset changes: the same context that was
@@ -70,6 +69,8 @@ on:
   pull_request:
     branches:
       - main
+  merge_group:
+    branches: [main]
 
 concurrency:
   group: bash32-compat-${{ github.head_ref || github.ref }}
@@ -92,7 +93,7 @@ env:
   BASH_SIGNING_KEY_FPR: "7C0135FB088AAF6C66C650B9BB5869F064EA74AB"
 
 jobs:
-  # Cheap relevance check: does this PR's diff touch anything the bash 3.2
+  # Cheap relevance check: does the PR or merge-group diff touch anything the bash 3.2
   # interpreter-build + acq-offline-suite job actually needs to re-verify?
   # Mirrors the path list the old workflow-level `paths:` filter encoded.
   # Uses a plain `git diff --name-only`, matching the existing in-repo
@@ -110,20 +111,24 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Compute relevance from the PR diff
+      - name: Compute relevance from the PR or merge-group diff
         id: filter
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           # Fail CLOSED on any error in this step: if the diff can't be
-          # computed for any reason, treat the PR as relevant rather than
-          # silently skipping the real check. An error here must surface as a
+          # computed for any reason, fail rather than silently skipping the
+          # real check. An error here must surface as a
           # job FAILURE (caught by the gate below), never as a quiet
           # relevant=false. Shallow-fetch just the base commit (mirrors
           # markdown-quality.yml's link-check job) rather than the whole
           # history — cheaper, and `git diff <sha> -- <paths>` only needs that
           # one commit to be present locally, not a merge-base walk.
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::event did not supply a valid base commit SHA."
+            exit 1
+          fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           changed="$(git diff --name-only "$BASE_SHA" -- \
             'acq' \
@@ -247,7 +252,7 @@ jobs:
   # troubleshooting doc, "Use always() with needs for required checks that
   # depend on other jobs") makes this job run regardless of whether its
   # dependencies succeeded, failed, or were skipped, so a check-run for this
-  # exact context is created on every single PR — closing the original gap
+  # exact context is created on every PR and merge group — closing the original gap
   # where a path-filtered trigger meant no check-run was created at all.
   #
   # Fail-closed logic, deliberately checking BOTH upstream jobs, not just the
