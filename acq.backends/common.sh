@@ -2332,9 +2332,8 @@ acq_cli_kits_load() {
       extra=*) val="${line#extra=}"; [ -n "$val" ] && _extras="${_extras:+$_extras }$val" ;;
     esac
   done < "$file"
-  # Only overwrite ACQ_EXTRA_KITS from the record if the record carried extras;
-  # otherwise leave any env-supplied value in place (do not clobber the env).
-  [ -n "$_extras" ] && ACQ_EXTRA_KITS="$_extras"
+  # A persisted record is authoritative, including an empty extra-kit set.
+  ACQ_EXTRA_KITS="$_extras"
   acq_debug "cli-kits: reloaded $backend/$name (${#ACQ_CLI_KITS[@]} cli kit(s))"
   return 0
 }

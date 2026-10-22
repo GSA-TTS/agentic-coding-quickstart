@@ -220,10 +220,9 @@ acq exec my-sandbox -- <cmd>   # run a one-off command in the sandbox
 ```
 
 Unlike sbx, msb **can** stop and resume detached long-running sandboxes. It also
-supports `acq snapshot` / `acq restore` via msb's disk-state snapshot/restore
-path; every restore is a cold boot from saved disk state. Snapshots with
-acq-managed external workspace mounts use explicit disk-only mode and re-apply
-kits after restore to avoid stale virtio-fs device state. sbx remains
+supports `acq snapshot` / `acq restore` via MSB's disk-state snapshot/restore
+path; every restore is a cold boot from saved disk state and re-applies kits.
+sbx remains
 unsupported for those acq verbs because its local template flow is
 disk-only/fresh-boot.
 
@@ -237,7 +236,7 @@ disk-only/fresh-boot.
 | Resume sandbox | `acq run <name>` | `msb run <name>` |
 | Remove sandbox | `acq rm <name>` | `msb remove <name>` |
 | Snapshot then remove | `acq rm --snapshot <name> [out.msb]` | `msb snapshot create ... && msb remove ...` |
-| Snapshot sandbox | `acq snapshot <name> [out.msb]` | `msb snapshot create --from-sandbox <name> --full [-o out.msb]` |
+| Snapshot sandbox | `acq snapshot <name> [out.msb]` | `msb snapshot create --from-sandbox <name> [-o out.msb]` |
 | Restore snapshot | `acq restore <name> [snapshot.msb]` | `msb restore <snapshot> --name <name> ...` |
 | Recreate from snapshot | `acq recreate <name> [out.msb]` | `msb snapshot create ... && msb remove ... && msb restore ...` |
 | Run a command | `acq exec <name> -- <cmd>` | `msb exec <name> -- <cmd>` |

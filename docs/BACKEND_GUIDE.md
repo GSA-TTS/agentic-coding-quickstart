@@ -136,10 +136,9 @@ automation story.
   `--secret GITHUB_TOKEN@github.com,api.github.com,codeload.github.com`); the real values never enter the VM.
   **Any** custom-endpoint secret stored with `acq secret set SVC --host H --env E`
   is bound generically the same way — no fixed usai/github table
-- **Snapshots**: `acq snapshot` / `acq restore` surface msb's disk-state
-  snapshot path (`msb snapshot create --full` + `msb restore`), including
-  restore-time SSH-agent re-plumbing. Snapshots with acq-managed external
-  workspace mounts cold-boot the captured disk (`--disk-only`) and re-bind
+- **Snapshots**: `acq snapshot` / `acq restore` surface MSB's disk-state
+  snapshot path (`msb snapshot create` + `msb restore`), including
+  restore-time SSH-agent re-plumbing and kit reapplication. acq re-binds
   validated host resources; see [ADR-0036](adr/0036-native-snapshot-restore.md)
 
 ### Requirements
@@ -420,7 +419,9 @@ msb has no native clone mode, so the neutral `--clone`
   scratch dir. `git fetch sandbox-<name>` pulls agent branches back as
   hash-verified objects; hooks and config never transfer over a fetch.
 - `acq rm` warns when the scratch still holds unfetched commits, then deletes
-  it and removes the remote. `acq stop`/restart preserve both.
+  it and removes the remote. `acq stop`/restart preserve both. Because the clone
+  is an external mount rather than disk-snapshot content, `acq snapshot`,
+  `acq recreate`, and `acq rm --snapshot` refuse clone-backed sandboxes.
 
 **Divergence from sbx (deliberate, per ADR-0027):** a git clone carries
 committed state only. Gitignored/untracked files (sbx copies these — the known
@@ -948,12 +949,11 @@ rationale, the fixed vsock port (3552), and the trust-boundary discussion.
 - **Snapshots are msb-only in acq.** `acq snapshot` / `acq restore` use msb's
   disk-state snapshot primitive. sbx is deliberately unsupported rather than
   degraded to a disk-only template flow, because local `sbx template save/load`
-  does not provide restore-time host-resource rebinding.
-  For acq-owned workspace bindings, restore intentionally uses `--disk-only` and
-  re-runs kit startup: msb can otherwise report a successful restore while
-  cold-booting after a virtio-fs rebind. `acq` never accepts archive-adjacent
-  resource metadata as authority; it uses private host metadata recorded when
-  the snapshot was created.
+  does not provide restore-time host-resource rebinding. Every restore re-runs
+  kit startup. Clone-backed sandboxes are refused by
+  snapshot-based lifecycle commands because their external clone workspace is not
+  captured. `acq` never accepts archive-adjacent resource metadata as authority;
+  it uses private host metadata recorded when the snapshot was created.
 - **Browser-based OpenCode is via the `openchamber` kit.** The former
   `opencode-web.sh` helper has been removed; use the `openchamber` acq kit, which
   publishes the OpenCode server port (4096) plus the OpenChamber UI (3000) with a

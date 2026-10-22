@@ -78,10 +78,10 @@ _sha256() {
   assert_output '1'
 }
 
-@test "msb: snapshot maps to msb snapshot create --full with date-stamped default output" {
+@test "msb: snapshot maps to a disk-state msb archive with date-stamped default output" {
   run env ACQ_BACKEND=msb ACQ_SNAPSHOT_DIR="$STUBDIR/snapshots" "$ACQ" snapshot mybox
   assert_success
-  assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/snapshots/mybox-[0-9]{8}T[0-9]{6}Z\.msb"
+  assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --guest-flush auto -o $STUBDIR/snapshots/mybox-[0-9]{8}T[0-9]{6}Z\.msb"
   [ "$(stat -c '%a' "$STUBDIR/snapshots" 2>/dev/null || stat -f '%Lp' "$STUBDIR/snapshots")" = "700" ]
   : > "$CALLS"
   mkdir -p "$STUBDIR/state/msb-restore" "$STUBDIR/provenance/msb" "$STUBDIR/ws"
@@ -95,7 +95,7 @@ _sha256() {
   acq_workspace_record_write msb mybox "$STUBDIR/ws"
   run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" "$ACQ" snapshot mybox "$STUBDIR/mybox.msb"
   assert_success
-  assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/mybox\.msb"
+  assert_regex "$(cat "$CALLS")" "msb snapshot create --from-sandbox mybox --guest-flush auto -o $STUBDIR/mybox\.msb"
   [ "$(stat -c '%a' "$STUBDIR/mybox.msb" 2>/dev/null || stat -f '%Lp' "$STUBDIR/mybox.msb")" = "600" ]
   [ -f "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/mybox.msb").resources" ]
   [ -f "$STUBDIR/state/msb-snapshots/$(_sha256 "$STUBDIR/mybox.msb").state" ]
@@ -138,7 +138,7 @@ _sha256() {
   run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/saved.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
   assert_regex "$log" 'USAI_API_KEY=present'
   assert_regex "$log" 'socat UNIX-LISTEN:'
   assert_regex "$log" 'msb inspect restored --format json'
@@ -155,7 +155,7 @@ _sha256() {
   [ -f "$STUBDIR/state/msb-restore/restored.resources" ]
 }
 
-@test "msb: restore without external workspace mounts cold-boots without kit startup" {
+@test "msb: restore without external workspace mounts re-applies kits" {
   _mk_unix_socket "$STUBDIR/agent.sock" || skip "python3 AF_UNIX socket unavailable"
   : > "$STUBDIR/disk-state.msb"
   : > "$CALLS"
@@ -163,9 +163,8 @@ _sha256() {
   assert_success
   local log; log=$(cat "$CALLS")
   assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --vsock"
-  refute_regex "$log" 'msb inspect restored --format json'
-  refute_output --partial "re-applied kit startup"
-  assert_output --partial "acq: restored 'restored'."
+  assert_regex "$log" 'msb inspect restored --format json'
+  assert_output --partial "re-applied kit startup"
 }
 
 @test "msb: restore ignores archive-adjacent resource sidecars" {
@@ -249,10 +248,10 @@ _sha256() {
   run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" recreate mybox "$STUBDIR/recreate.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/recreate\.msb"
+  assert_regex "$log" "msb snapshot create --from-sandbox mybox --guest-flush auto -o $STUBDIR/recreate\.msb"
   assert_regex "$log" 'msb remove --force mybox'
   refute_regex "$log" 'msb volume rm'
-  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name mybox --dangerously-inherit-resources --disk-only --external-mount-policy relaxed --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name mybox --dangerously-inherit-resources --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
   assert_regex "$log" 'msb inspect mybox --format json'
   assert_output --partial "kit startup re-applied"
 }
@@ -266,7 +265,7 @@ _sha256() {
   run env ACQ_BACKEND=msb "$ACQ" rm --snapshot mybox "$STUBDIR/rm.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb snapshot create --from-sandbox mybox --full --guest-flush auto -o $STUBDIR/rm\.msb"
+  assert_regex "$log" "msb snapshot create --from-sandbox mybox --guest-flush auto -o $STUBDIR/rm\.msb"
   assert_regex "$log" 'msb remove --force mybox'
   refute_regex "$log" 'msb restore'
   assert_regex "$log" 'msb volume rm'
@@ -276,6 +275,63 @@ _sha256() {
   local kit_record
   kit_record=$(printf '%s' mybox | cksum | cut -d' ' -f1)
   [ ! -f "$STUBDIR/provenance/msb/mybox.${kit_record}.kits" ]
+}
+
+@test "msb: rm --snapshot refuses clone-backed workspaces without deleting them" {
+  local clone="$STUBDIR/state/clones/mybox/workspace"
+  mkdir -p "$clone"
+  printf 'uncommitted work\n' > "$clone/sentinel"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" rm --snapshot mybox "$STUBDIR/rm.msb"
+  assert_failure
+  assert_output --partial "refusing clone-backed sandbox"
+  [ -f "$clone/sentinel" ]
+  refute_regex "$(cat "$CALLS")" 'msb snapshot create|msb remove'
+}
+
+@test "msb: snapshot refuses clone-backed workspaces before writing an archive" {
+  local clone="$STUBDIR/state/clones/mybox/workspace"
+  mkdir -p "$clone"
+  printf 'uncommitted work\n' > "$clone/sentinel"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" snapshot mybox "$STUBDIR/snapshot.msb"
+  assert_failure
+  assert_output --partial "refusing clone-backed sandbox"
+  [ -f "$clone/sentinel" ]
+  refute_regex "$(cat "$CALLS")" 'msb snapshot create'
+}
+
+@test "msb: recreate refuses clone-backed workspaces before removal" {
+  local clone="$STUBDIR/state/clones/mybox/workspace"
+  mkdir -p "$clone"
+  printf 'uncommitted work\n' > "$clone/sentinel"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb "$ACQ" recreate mybox "$STUBDIR/recreate.msb"
+  assert_failure
+  assert_output --partial "refusing clone-backed sandbox"
+  [ -f "$clone/sentinel" ]
+  refute_regex "$(cat "$CALLS")" 'msb snapshot create|msb remove'
+}
+
+@test "msb: restore clears conflicting environment extra kits when snapshot has none" {
+  : > "$STUBDIR/saved.msb"
+  : > "$CALLS"
+  run env ACQ_BACKEND=msb ACQ_EXTRA_KITS=conflicting-kit "$ACQ" restore restored "$STUBDIR/saved.msb"
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'conflicting-kit'
+}
+
+@test "msb: strict restore kit heal fails for an extra kit apply failure" {
+  run bash -c '
+    ACQ_SOURCE_ONLY=1 . "'"$ACQ"'" >/dev/null 2>&1
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    _acq_msb_fetch_kit() { printf "/tmp/%s\n" "$1"; }
+    _acq_msb_merge_kit_env_into() { eval "$1=()"; }
+    _acq_msb_reset_kit_env() { :; }
+    _acq_msb_apply_kit_dir() { [ "$2" != /tmp/extra ]; }
+    _acq_msb_heal_kit_set box 1 --strict builtin extra
+  '
+  assert_failure
 }
 
 @test "msb: ls/stop/rm/exec dispatch to the msb verbs (exec as agent user)" {

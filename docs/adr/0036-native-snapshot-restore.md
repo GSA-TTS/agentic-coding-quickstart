@@ -21,18 +21,14 @@ configuration). A selective backup of one tool's data directory is not enough:
 OpenCode, for example, keeps conversation state in its own XDG data directory
 while Paseo keeps only metadata that points to it.
 
-The msb backend has a native snapshot primitive that can capture disk state with
-`msb snapshot create --full`. Its restore path can also bind host resources at
+The msb backend has a native disk snapshot primitive. Its restore path can also bind host resources at
 restore time, including `--vsock`, which is the same mechanism acq uses for host
 SSH-agent forwarding. This matters because the msb SSH-agent route is otherwise
 create-time only; after a host reboot the old host socket endpoint may be stale.
 
-Note: `msb snapshot create --full` also supports capturing live memory,
-execution, and device state, but acq intentionally does not use that mode.
-Restored sandboxes always cold-boot from the saved disk image; in-flight process
-state is not preserved. When the snapshot includes acq-managed external workspace
-mounts, acq uses disk-only mode and re-applies kits via the exec-heal path after
-restore.
+acq exports a disk snapshot archive and restores it through ordinary `msb
+restore`. MSB accepts `--disk-only` only for installed full snapshot references,
+not direct archives. Every restore re-applies kits via the exec-heal path.
 
 The sbx local `template save` / `template load` model is different: it creates a
 reusable template. Local capture is disk-only; memory plus microVM checkpoint is
@@ -45,15 +41,11 @@ Add acq-owned `snapshot` and `restore` verbs that save durable disk state and
 restore it as a cold boot, backed by native backend primitives only when the
 backend supports disk-state snapshot with acq-managed host-resource re-plumbing.
 
-- msb is supported: `acq snapshot NAME [OUT]` maps to `msb snapshot create
-  --full -o OUT` and writes a date-stamped archive when OUT is omitted. `acq
-  restore NAME [SNAPSHOT]` maps to `msb restore`; when SNAPSHOT is omitted, acq
-  restores the newest date-stamped archive for NAME. When the snapshot includes
-  acq-managed external workspace mounts, acq adds `--disk-only` and re-applies
-  kits via the exec-heal path after restore. This is necessary because a virtio-fs
-  restore with a valid exported binding can return success while silently
-  cold-booting; `--disk-only` makes that outcome explicit and pairs it with the
-  kit-heal path to recover supervised services. acq supplies current host-resource
+- msb is supported: `acq snapshot NAME [OUT]` maps to `msb snapshot create -o
+  OUT` and writes a date-stamped archive when OUT is omitted. `acq restore NAME
+  [SNAPSHOT]` maps to ordinary `msb restore`; when SNAPSHOT is omitted, acq
+  restores the newest date-stamped archive for NAME. Every restore re-applies kits
+  via the exec-heal path. acq supplies current host-resource
   bindings internally.
 - sbx is unsupported for these verbs. It fails closed with a clear unsupported
   message rather than offering a disk-only degraded mode.
@@ -69,10 +61,7 @@ backend supports disk-state snapshot with acq-managed host-resource re-plumbing.
 - A supported backend can preserve durable agent context (disk state) across
   planned recreation without a per-application backup manifest. In-flight process
   state is not preserved; the restored sandbox boots fresh.
-- When a snapshot includes acq-managed external workspace mounts, kit services
-  are re-applied unconditionally via the exec-heal path after restore. For
-  snapshots without external mounts the guest cold-boots with its registered
-  startup scripts.
+- Every restore re-applies kit services via the exec-heal path.
 - msb restore can re-derive the current host SSH-agent socket route, avoiding the
   stale create-time vsock endpoint that occurs after host reboot.
 - Unsupported backends remain honest: the command fails clearly rather than

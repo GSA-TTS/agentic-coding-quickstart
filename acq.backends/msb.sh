@@ -1193,11 +1193,14 @@ _acq_msb_restore_resources_copy_sidecar() {
 _acq_msb_snapshot_kits_copy() {
   local name="$1" snapshot="$2" source target
   source=$(_acq_cli_kits_file msb "$name") || return 1
-  [ -f "$source" ] || return 0
   target=$(_acq_msb_snapshot_kits_file "$snapshot") || return 1
   ( umask 077; mkdir -p "$ACQ_MSB_SNAPSHOT_DIR" ) 2>/dev/null || return 1
   chmod 700 "$ACQ_MSB_SNAPSHOT_DIR" 2>/dev/null || return 1
-  cp "$source" "$target" 2>/dev/null || return 1
+  if [ -f "$source" ]; then
+    cp "$source" "$target" 2>/dev/null || return 1
+  else
+    printf 'schema=1\n' >"$target" 2>/dev/null || return 1
+  fi
   chmod 600 "$target" 2>/dev/null || return 1
 }
 
@@ -1215,12 +1218,15 @@ _acq_msb_restore_resources_adopt_trusted() {
 _acq_msb_snapshot_kits_adopt_trusted() {
   local name="$1" snapshot="$2" source target dir
   source=$(_acq_msb_snapshot_kits_file "$snapshot") || return 0
-  [ -f "$source" ] || return 0
   target=$(_acq_cli_kits_file msb "$name") || return 1
   dir=$(dirname "$target")
   ( umask 077; mkdir -p "$dir" ) 2>/dev/null || return 1
   chmod 700 "$dir" 2>/dev/null || return 1
-  cp "$source" "$target" 2>/dev/null || return 1
+  if [ -f "$source" ]; then
+    cp "$source" "$target" 2>/dev/null || return 1
+  else
+    printf 'schema=1\n' >"$target" 2>/dev/null || return 1
+  fi
   chmod 600 "$target" 2>/dev/null || return 1
 }
 
@@ -1252,13 +1258,13 @@ acq_backend_snapshot() {
     if command -v host_path >/dev/null 2>&1; then
       _host_out=$(host_path "$_out")
     fi
-    ( umask 077; _acq_msb_cli snapshot create --from-sandbox "$_name" --full --guest-flush auto -o "$_host_out" ) || return $?
+    ( umask 077; _acq_msb_cli snapshot create --from-sandbox "$_name" --guest-flush auto -o "$_host_out" ) || return $?
     chmod 600 "$_out" 2>/dev/null || return 1
     _acq_msb_restore_resources_copy_sidecar "$_name" "$_out" || return 1
     _acq_msb_snapshot_kits_copy "$_name" "$_out" || return 1
     _acq_msb_snapshot_state_copy "$_name" "$_out" || return 1
   else
-    _acq_msb_cli snapshot create --from-sandbox "$_name" --full --guest-flush auto
+    _acq_msb_cli snapshot create --from-sandbox "$_name" --guest-flush auto
   fi
 }
 
@@ -1302,15 +1308,11 @@ acq_backend_restore() {
   local _resource_flags=() _vsock_flags=()
   ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=0
   _acq_msb_restore_resource_flags_into _resource_flags "$_staged_snapshot"
+  # The exported archive is MSB's disk snapshot format. It restores through the
+  # ordinary archive path, re-binding only acq-owned external resources.
+  ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=1
   if [ "${#_resource_flags[@]}" -gt 0 ]; then
-    # msb 0.7.7 validates missing destination bindings, but with a matching
-    # virtio-fs binding it can return success while silently cold-booting. Use the
-    # explicit disk-only mode for trusted acq-owned resources so that outcome is
-    # intentional and the kit-heal path is always selected. Do not use msb's
-    # --allow-missing-resources escape hatch: it leaves the guest mount unusable.
-    _restore_flags+=(--disk-only --external-mount-policy relaxed)
     _restore_flags+=("${_resource_flags[@]}")
-    ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=1
   fi
   _acq_msb_vsock_flags_into _vsock_flags
   [ "${#_vsock_flags[@]}" -gt 0 ] && _restore_flags+=("${_vsock_flags[@]}")
@@ -3375,6 +3377,18 @@ _acq_msb_clone_cleanup() {
   fi
   rm -rf "$dir"
   return 0
+}
+
+# A clone's workspace is an acq-owned external mount, not part of MSB's disk
+# archive. Deleting it after snapshotting would leave an archive that cannot
+# restore the clone's working tree.
+acq_backend_snapshot_safe() {
+  local name="$1" dir="${ACQ_MSB_CLONES_DIR}/${1}"
+  if [ -d "$dir" ]; then
+    echo "acq(msb): snapshot: refusing clone-backed sandbox '$name'." >&2
+    echo "     Its external clone workspace is not included in the disk snapshot." >&2
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -5811,13 +5825,18 @@ acq_backend_apply_kit() {
 # _acq_msb_heal_kit_set NAME BUILTIN_COUNT KITREF... — the heal's kit loop: fetch
 # every ref, merge their environment[] in a pre-pass (see
 # _acq_msb_merge_kit_env_into for why fetch and apply must be separate loops),
-# reset the marker, then apply each kit with that merged env. Returns 1 if any of
-# the first BUILTIN_COUNT refs failed to fetch or apply (the caller's provenance
-# verdict), 0 otherwise. _builtin mirrors _dirs so a built-in's apply failure stays
+# reset the marker, then apply each kit with that merged env. With --strict,
+# returns 1 if any ref fails; otherwise only built-in failures affect the
+# provenance verdict. _builtin mirrors _dirs so a built-in's apply failure stays
 # attributable across the two loops.
 _acq_msb_heal_kit_set() {
   local name="$1" builtin_count="$2"
   shift 2
+  local strict=0
+  if [ "${1:-}" = "--strict" ]; then
+    strict=1
+    shift
+  fi
   local kitref kitdir i=0 ok=1
   local _dirs=() _builtin=()
   for kitref in "$@"; do
@@ -5826,9 +5845,9 @@ _acq_msb_heal_kit_set() {
       if [ "$i" -lt "$builtin_count" ]; then _builtin+=(1); else _builtin+=(0); fi
     else
       echo "acq(msb): warning: could not fetch kit for healing: $kitref" >&2
-      # A built-in kit that can't even be fetched means we cannot claim the
-      # bundle is current. Extra-kit fetch failures don't affect the verdict.
-      [ "$i" -lt "$builtin_count" ] && ok=0
+      if [ "$i" -lt "$builtin_count" ] || [ "$strict" -eq 1 ]; then
+        ok=0
+      fi
     fi
     i=$((i + 1))
   done
@@ -5841,7 +5860,9 @@ _acq_msb_heal_kit_set() {
   local _ki
   for _ki in ${_dirs[@]+"${!_dirs[@]}"}; do
     if ! _acq_msb_apply_kit_dir "$name" "${_dirs[$_ki]}" _merged; then
-      [ "${_builtin[$_ki]}" -eq 1 ] && ok=0
+      if [ "${_builtin[$_ki]}" -eq 1 ] || [ "$strict" -eq 1 ]; then
+        ok=0
+      fi
     fi
   done
   [ "$ok" -eq 1 ]
@@ -5906,7 +5927,11 @@ acq_backend_ensure_kits_applied() {
   local builtin_count="${ACQ_BUILTIN_KIT_COUNT:-4}"
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"
-  _acq_msb_heal_kit_set "$name" "$builtin_count" "${kits[@]}" || ok=0
+  if [ "${ACQ_STRICT_KIT_HEAL:-0}" = "1" ]; then
+    _acq_msb_heal_kit_set "$name" "$builtin_count" --strict "${kits[@]}" || ok=0
+  else
+    _acq_msb_heal_kit_set "$name" "$builtin_count" "${kits[@]}" || ok=0
+  fi
   acq_spin_stop "Refreshing configuration kits"
   # Record host-side bundle provenance ONLY when every built-in kit applied.
   # msb re-applies all built-in kits idempotently, so on full
