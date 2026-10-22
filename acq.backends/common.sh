@@ -2652,20 +2652,48 @@ acq_provider_input_lock_acquire() {
 # guardian PID instead. The guardian exits if its transaction parent disappears,
 # including after SIGKILL, making stale recovery safe.
 _acq_provider_input_guardian_start() {
+  _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=$(mktemp "${TMPDIR:-/tmp}/acq-provider-children.XXXXXX") || return 1
+  export _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN
   sh -c '
     parent=$PPID
     trap "exit 0" HUP INT TERM
-    while kill -0 "$parent" 2>/dev/null; do sleep 1; done
-  ' &
+    children=$1
+    while :; do
+      live=0
+      kill -0 "$parent" 2>/dev/null && live=1
+      if [ -f "$children" ]; then
+        while IFS= read -r child; do
+          case "$child" in ""|*[!0-9]*) continue ;; esac
+          kill -0 "$child" 2>/dev/null && live=1
+        done < "$children"
+      fi
+      [ "$live" -eq 1 ] || exit 0
+      sleep 1
+    done
+  ' sh "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" &
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$!
   export _ACQ_PROVIDER_INPUT_GUARDIAN_PID
+}
+
+_acq_provider_input_guardian_register_child() {
+  local pid="${1:-}" registry="${_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN:-}"
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  [ -n "$registry" ] && [ -f "$registry" ] || return 1
+  printf '%s\n' "$pid" >> "$registry"
+}
+
+_acq_provider_input_guardian_register_if_active() {
+  [ -z "${_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN:-}" ] && return 0
+  _acq_provider_input_guardian_register_child "$1"
 }
 
 _acq_provider_input_guardian_stop() {
   local pid="${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-}"
   [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
   [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+  [ -z "${_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN:-}" ] || rm -f -- "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN"
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=""
+  _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=""
 }
 
 _acq_provider_input_process_identity() {

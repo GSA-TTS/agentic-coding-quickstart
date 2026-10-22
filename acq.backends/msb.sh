@@ -3688,12 +3688,17 @@ EOF
   # function on failure BEFORE the error block and the transient-secret scrub
   # below ever run.
   acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
-  local _create_rc=0
-  local _create_output=""
+  local _create_rc=0 _create_pid
+  local _create_output="" _create_output_file
   acq_debug "msb create: invoking (this returns fast; guest boots in background)"
   acq_spin_start "Creating sandbox '$name'"
   _ACQ_MSB_CREATE_STARTED=1
-  _create_output=$(_acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
+  _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
+  _acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
+  _create_pid=$!
+  _acq_provider_input_guardian_register_if_active "$_create_pid" || { kill "$_create_pid" 2>/dev/null || true; wait "$_create_pid" 2>/dev/null || true; rm -f -- "$_create_output_file"; return 1; }
+  wait "$_create_pid" || _create_rc=$?
+  _create_output=$(cat "$_create_output_file"); rm -f -- "$_create_output_file"
   acq_spin_stop "Creating sandbox '$name'"
   [ -z "$_create_output" ] || printf '%s\n' "$_create_output" >&2
   if [ "$_create_rc" -ne 0 ] && [ "$_msb_image_source" = "agent-default" ] \
@@ -3707,7 +3712,12 @@ EOF
     _create_output=""
     acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
     acq_spin_start "Creating sandbox '$name'"
-    _create_output=$(_acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
+    _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
+    _acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
+    _create_pid=$!
+    _acq_provider_input_guardian_register_if_active "$_create_pid" || { kill "$_create_pid" 2>/dev/null || true; wait "$_create_pid" 2>/dev/null || true; rm -f -- "$_create_output_file"; return 1; }
+    wait "$_create_pid" || _create_rc=$?
+    _create_output=$(cat "$_create_output_file"); rm -f -- "$_create_output_file"
     acq_spin_stop "Creating sandbox '$name'"
     [ -z "$_create_output" ] || printf '%s\n' "$_create_output" >&2
   fi
@@ -5055,8 +5065,10 @@ _acq_backend_terminate_unlocked() {
   # --clone (ADR-0027): surface unfetched agent commits BEFORE anything is deleted
   # (sbx-parity warning; rm proceeds — the scratch is disposable by contract).
   _acq_msb_clone_warn_unfetched "$1"
-  local _rc=0
-  _acq_msb_cli remove --force "$1" || _rc=$?
+  local _rc=0 _remove_pid
+  _acq_msb_cli remove --force "$1" & _remove_pid=$!
+  _acq_provider_input_guardian_register_if_active "$_remove_pid" || { kill "$_remove_pid" 2>/dev/null || true; wait "$_remove_pid" 2>/dev/null || true; return 1; }
+  wait "$_remove_pid" || _rc=$?
   if [ "$_rc" -ne 0 ]; then
     if acq_backend_exists "$1" || ! _acq_msb_confirm_absent "$1"; then
       return "$_rc"

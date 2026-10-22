@@ -644,9 +644,12 @@ _acq_backend_provision_unlocked() {
   # Stale host state is cleared only after this create succeeds, avoiding races
   # with a concurrent create and destructive guesses when `sbx ls` fails.
   acq_spin_start "Creating sandbox '$name'"
-  local _rc=0
+  local _rc=0 _backend_pid
   _ACQ_SBX_CREATE_STARTED=1
-  sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" "${_provider_mount[@]}" ${_sbx_args[@]+"${_sbx_args[@]}"} || _rc=$?
+  sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" "${_provider_mount[@]}" ${_sbx_args[@]+"${_sbx_args[@]}"} &
+  _backend_pid=$!
+  _acq_provider_input_guardian_register_if_active "$_backend_pid" || { kill "$_backend_pid" 2>/dev/null || true; wait "$_backend_pid" 2>/dev/null || true; return 1; }
+  wait "$_backend_pid" || _rc=$?
   acq_spin_stop "Creating sandbox '$name'"
   # Record host-side bundle provenance ONLY after a successful create — a failed
   # create must not leave a record claiming the sandbox is current.
@@ -1019,7 +1022,11 @@ acq_backend_stop() {
 
 _acq_backend_terminate_unlocked() {
   local rc
-  sbx rm --force "$1"; rc=$?
+  local _backend_pid
+  sbx rm --force "$1" & _backend_pid=$!
+  _acq_provider_input_guardian_register_if_active "$_backend_pid" || { kill "$_backend_pid" 2>/dev/null || true; wait "$_backend_pid" 2>/dev/null || true; return 1; }
+  rc=0
+  wait "$_backend_pid" || rc=$?
   if [ "$rc" -ne 0 ] && ! _acq_sbx_confirm_absent "$1"; then
     return "$rc"
   fi

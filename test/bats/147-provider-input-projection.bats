@@ -392,6 +392,46 @@ EOF
   assert_output --partial "guardian ownership preserved"
 }
 
+@test "guardian retains lock while registered backend child survives transaction" {
+  local script="$STUBDIR/guardian-child.sh"
+  cat > "$script" <<EOF
+#!/usr/bin/env bash
+set -eu
+export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
+ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1 . "$REPO_ROOT/acq"
+(
+  _acq_provider_input_guardian_start
+  lock=\$(acq_provider_input_lock_acquire sbx backend-child "\$_ACQ_PROVIDER_INPUT_GUARDIAN_PID")
+  sleep 4 & child=\$!
+  _acq_provider_input_guardian_register_child "\$child"
+  printf '%s %s\n' "\$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" "\$child" > "$STUBDIR/pids"
+  sleep 10
+) & parent=\$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -s "$STUBDIR/pids" ] && break
+  sleep 0.1
+done
+read guardian child < "$STUBDIR/pids"
+kill -KILL "\$parent" 2>/dev/null || true
+if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx backend-child >/dev/null 2>"$STUBDIR/retry"; then
+  exit 1
+fi
+grep -Fq "owned by live pid \$guardian" "$STUBDIR/retry"
+wait "\$parent" 2>/dev/null || true
+waited=0
+while kill -0 "\$child" 2>/dev/null && [ "\$waited" -lt 60 ]; do sleep 0.1; waited=\$((waited + 1)); done
+waited=0
+while kill -0 "\$guardian" 2>/dev/null && [ "\$waited" -lt 30 ]; do sleep 0.1; waited=\$((waited + 1)); done
+lock=\$(acq_provider_input_lock_acquire sbx backend-child)
+acq_provider_input_lock_release "\$lock"
+echo retained
+EOF
+  chmod +x "$script"
+  BASH_ENV='' run bash "$script"
+  assert_success
+  assert_output --partial retained
+}
+
 @test "unknown backend existence preserves prior projection and skips replacement" {
   local root
   root=$(acq_provider_input_root sbx unknownbox)
@@ -495,15 +535,16 @@ EOF
 }
 
 @test "failed atomic swap preserves prior current generation" {
-  local root before
+  local root before called="$STUBDIR/replacement-called"
   root=$(acq_provider_input_root sbx publishbox)
-  mkdir -p "$root/generations/old/models/providers" "$root/generations/new/models/providers"
-  ln -s generations/old "$root/current"
+  mkdir -p "$root/generations/generation.old/models/providers" "$root/generations/generation.new/models/providers"
+  ln -s generations/generation.old "$root/current"
   before=$(readlink "$root/current")
-  _acq_provider_input_atomic_replace() { return 1; }
+  _acq_provider_input_atomic_replace() { printf called > "$called"; return 1; }
 
-  run _acq_provider_input_publish "$root" "$root/generations/new"
+  run _acq_provider_input_publish "$root" "$root/generations/generation.new"
   assert_failure
+  [ -f "$called" ]
   assert_equal "$(readlink "$root/current")" "$before"
 }
 
