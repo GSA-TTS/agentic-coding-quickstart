@@ -375,7 +375,7 @@ Usage:
   acq recreate NAME [OUT]
 
 Saves a disk-state snapshot archive of NAME, removes NAME, then restores it as a
-cold boot (no in-flight process state is recovered), re-applying kits via the
+cold-boot recovery (no in-flight process state is recovered), re-applying kits via the
 exec-heal path. acq owns host-resource re-plumbing. OUT defaults to an acq
 state directory and is left in place if restore fails.
 U

@@ -1322,10 +1322,13 @@ acq_backend_restore() {
     _host_snapshot=$(host_path "$_staged_snapshot")
   fi
 
+  if command -v acq_provider_facts_load_from_kit_or_fallback >/dev/null 2>&1; then
+    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+  fi
   local _restore_secret_flags=() _restore_secret_names=()
   _acq_msb_bind_secrets_into _restore_secret_flags _restore_secret_names "$_name"
   local _restore_rc=0
-  _acq_msb_cli restore "$_host_snapshot" "${_restore_flags[@]}" || _restore_rc=$?
+  _acq_msb_cli restore "$_host_snapshot" "${_restore_flags[@]}" "${_restore_secret_flags[@]}" || _restore_rc=$?
   local _rev
   for _rev in ${_restore_secret_names[@]+"${_restore_secret_names[@]}"}; do
     unset "$_rev"
