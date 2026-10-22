@@ -3926,8 +3926,9 @@ EOF
 # free uid and the kits' `-u 1000` commands still map to it by NAME (see
 # _acq_msb_exec_command) with HOME exported.
 acq_backend_provision() {
-  ( local lock rc; lock=$(acq_provider_input_lock_acquire msb "$1") || exit 1
-    trap 'rc=$?; _acq_msb_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; exit "$rc"' EXIT
+  ( local lock rc; _acq_provider_input_guardian_start || exit 1
+    lock=$(acq_provider_input_lock_acquire msb "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
+    trap 'rc=$?; _acq_msb_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
     trap 'exit 128' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
     _acq_backend_provision_unlocked "$@"; rc=$?; exit "$rc" )
 }
@@ -5075,8 +5076,9 @@ _acq_backend_terminate_unlocked() {
 }
 
 acq_backend_terminate() {
-  ( local lock rc; lock=$(acq_provider_input_lock_acquire msb "$1") || exit 1
-    trap 'rc=$?; acq_provider_input_lock_release "${lock:-}" || true; exit "$rc"' EXIT
+  ( local lock rc; _acq_provider_input_guardian_start || exit 1
+    lock=$(acq_provider_input_lock_acquire msb "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
+    trap 'rc=$?; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
     trap 'exit 128' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
     _acq_backend_terminate_unlocked "$@"; rc=$?; exit "$rc" )
 }

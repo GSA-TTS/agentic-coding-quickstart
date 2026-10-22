@@ -2451,7 +2451,7 @@ acq_provider_input_prepare() {
   local validator_args=(--schema-dir "$schema_dir" --credential-bindings "$bindings")
   local i
   for i in "${!manifests[@]}"; do validator_args+=(--bundle "${manifests[$i]}"); done
-  "$python" "$validator" "${validator_args[@]}" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  "$python" "$validator" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   for i in "${!manifests[@]}"; do
     _acq_provider_input_materialize "${manifests[$i]}" "${kitdirs[$i]}" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   done
@@ -2608,8 +2608,17 @@ _acq_provider_input_publish() {
 # One mkdir lock coordinates the complete create transaction on Bash 3.2 hosts:
 # discovery through argv construction, publication, backend create, and removal.
 # It is intentionally rooted beside, but never inside, the guest-visible tree.
+# acq_provider_input_lock_acquire backend name [tx_pid]
+#
+# tx_pid is the PID of the transaction subshell that owns the lock for its
+# entire lifetime.  Callers pass it explicitly so the lock is not tied to the
+# outer interactive shell ($$), which exits before the transaction completes.
+# Bash 3.2 does not have BASHPID, so callers compute their own PID with:
+#   tx_pid=$(exec sh -c 'echo $PPID')
+# and supply it as the third argument.  The fallback to $$ is retained for
+# tests that call lock_acquire directly (no surrounding subshell).
 acq_provider_input_lock_acquire() {
-  local backend="$1" name="$2" root parent lock owner tries=0 pid identity actual_identity
+  local backend="$1" name="$2" tx_pid="${3:-$$}" root parent lock owner tries=0 pid identity actual_identity
   root=$(acq_provider_input_root "$backend" "$name") || return 1
   parent=${root%/*}
   _acq_provider_input_safe_mkdir "$parent" || return 1
@@ -2633,9 +2642,30 @@ acq_provider_input_lock_acquire() {
     [ "$tries" -lt "${ACQ_PROVIDER_INPUT_LOCK_RETRIES:-300}" ] || return 1
     sleep 1
   done
-  identity=$(_acq_provider_input_process_identity "$$") || { rmdir -- "$lock"; return 1; }
-  printf '%s %s\n' "$$" "$identity" > "$lock/owner" || { rmdir -- "$lock"; return 1; }
+  identity=$(_acq_provider_input_process_identity "$tx_pid") || { rmdir -- "$lock"; return 1; }
+  printf '%s %s\n' "$tx_pid" "$identity" > "$lock/owner" || { rmdir -- "$lock"; return 1; }
   printf '%s\n' "$lock"
+}
+
+# Start a real process whose lifetime is tied to the transaction subshell. Bash
+# 3.2 preserves $$ across subshells and has no BASHPID, so the lock records this
+# guardian PID instead. The guardian exits if its transaction parent disappears,
+# including after SIGKILL, making stale recovery safe.
+_acq_provider_input_guardian_start() {
+  sh -c '
+    parent=$PPID
+    trap "exit 0" HUP INT TERM
+    while kill -0 "$parent" 2>/dev/null; do sleep 1; done
+  ' &
+  _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$!
+  export _ACQ_PROVIDER_INPUT_GUARDIAN_PID
+}
+
+_acq_provider_input_guardian_stop() {
+  local pid="${_ACQ_PROVIDER_INPUT_GUARDIAN_PID:-}"
+  [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+  [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+  _ACQ_PROVIDER_INPUT_GUARDIAN_PID=""
 }
 
 _acq_provider_input_process_identity() {

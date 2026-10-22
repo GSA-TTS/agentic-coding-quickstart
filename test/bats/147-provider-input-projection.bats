@@ -312,6 +312,85 @@ YAML
   assert_output --partial 'facts.host must be in the kit network allowlist'
 }
 
+@test "full preparation with pinned validator returns exactly one generation path" {
+  [ -n "${ACQ_TEST_PATTERNS_REPO:-}" ] || skip "pinned Patterns checkout is provided by required CI"
+  [ -n "${ACQ_TEST_PROVIDER_INPUT_PYTHON:-}" ] || skip "pinned validator Python is provided by required CI"
+  local release="$ACQ_TEST_PATTERNS_REPO" kit="$STUBDIR/valid-real-kit" root
+  mkdir -p "$kit/provider-input" "$kit/scripts" "$kit/files"
+  cat > "$kit/provider-input.json" <<'JSON'
+{"providerId":"alpha","schemaVersion":"acq-provider-input-bundle/v2","providerPath":"models/providers/alpha","factsPath":"provider-input/facts.json","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json","credentialEnvNames":["ALPHA_KEY"]}
+JSON
+  cat > "$kit/provider-input/facts.json" <<'JSON'
+{"schemaVersion":"acq-provider-facts/v1","providerId":"alpha","apiProtocol":"openai-compatible","host":"models.example.gov","baseUrl":"https://models.example.gov/v1","modelsUrl":"https://models.example.gov/v1/models","keyEnv":"ALPHA_KEY"}
+JSON
+  printf '{"schemaVersion":"acq-neutral-model-catalog/v1","providerId":"alpha","models":[]}\n' > "$kit/files/snapshot.json"
+  printf '#!/bin/sh\nexit 0\n' > "$kit/scripts/normalize"; chmod 755 "$kit/scripts/normalize"
+  cat > "$kit/spec.yaml" <<'YAML'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: alpha
+displayName: Alpha
+description: Alpha provider test fixture
+caps:
+  network:
+    allow:
+      - models.example.gov
+YAML
+  printf '{"providers":{"alpha":"ALPHA_KEY"}}\n' > "$STUBDIR/bindings.json"
+  _acq_provider_input_control_plane() { printf '%s\n' "$release"; }
+  _acq_provider_input_bindings_file() { printf '%s\n' "$STUBDIR/bindings.json"; }
+  KITS=("$kit")
+  ACQ_PROVIDER_INPUT_PYTHON="$ACQ_TEST_PROVIDER_INPUT_PYTHON" run acq_provider_input_prepare sbx realprepare
+  assert_success
+  [ "${#lines[@]}" -eq 1 ]
+  root=$(acq_provider_input_root sbx realprepare)
+  case "$output" in "$root"/generations/generation.*) ;; *) false ;; esac
+  [ -f "$output/models/providers/alpha/facts.json" ]
+}
+
+@test "parent exit cannot make a live transaction lock recoverable" {
+  local script="$STUBDIR/lock-orchestrator.sh"
+  cat > "$script" <<EOF
+#!/usr/bin/env bash
+set -eu
+ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1
+export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
+. "$REPO_ROOT/acq"
+(
+  _acq_provider_input_guardian_start
+  acq_provider_input_lock_acquire sbx parentexit "\$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" >/dev/null
+  printf '%s\n' "\$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" > "$STUBDIR/guardian.pid"
+  sleep 10
+) &
+parent=\$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -s "$STUBDIR/guardian.pid" ] && break
+  kill -0 "\$parent" 2>/dev/null || break
+  sleep 0.1
+done
+[ -s "$STUBDIR/guardian.pid" ]
+guardian_pid=\$(cat "$STUBDIR/guardian.pid")
+kill -KILL "\$parent" 2>/dev/null || true
+if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire sbx parentexit >"$STUBDIR/retry.out" 2>&1; then
+  echo "lock was recovered while guardian was alive" >&2
+  exit 1
+fi
+grep -Fq "owned by live pid \$guardian_pid" "$STUBDIR/retry.out"
+wait "\$parent" 2>/dev/null || true
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  kill -0 "\$guardian_pid" 2>/dev/null || break
+  sleep 0.1
+done
+lock=\$(acq_provider_input_lock_acquire sbx parentexit)
+acq_provider_input_lock_release "\$lock"
+echo "guardian ownership preserved"
+EOF
+  chmod +x "$script"
+  BASH_ENV='' run bash "$script"
+  assert_success
+  assert_output --partial "guardian ownership preserved"
+}
+
 @test "unknown backend existence preserves prior projection and skips replacement" {
   local root
   root=$(acq_provider_input_root sbx unknownbox)
