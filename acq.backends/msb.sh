@@ -1313,8 +1313,29 @@ acq_backend_restore() {
     return 1
   }
 
+  # Restore metadata is name-scoped. Remove stale state before collecting the
+  # trusted snapshot sidecars, then remount a fresh trusted host-config dir.
+  _acq_msb_restore_clear_stale_state "$_name" || {
+    rm -f "$_staged_snapshot"
+    return 1
+  }
+
   local _restore_flags=(--name "$_name" --dangerously-inherit-resources)
-  local _resource_flags=() _vsock_flags=()
+  local _resource_flags=() _vsock_flags=() _hcfg_dir _hcfg_mount _hcfg_host
+  if _hcfg_dir=$(acq_host_config_dir msb "$_name"); then
+    mkdir -p "$_hcfg_dir" 2>/dev/null || { rm -f "$_staged_snapshot"; return 1; }
+    chmod 711 "$_hcfg_dir" 2>/dev/null || { rm -f "$_staged_snapshot"; return 1; }
+    _hcfg_mount="$_hcfg_dir"
+    if command -v canonicalize_path >/dev/null 2>&1; then
+      _hcfg_mount=$(canonicalize_path "$_hcfg_mount") || { rm -f "$_staged_snapshot"; return 1; }
+    fi
+    if command -v host_path >/dev/null 2>&1; then
+      _hcfg_host=$(host_path "$_hcfg_mount") || { rm -f "$_staged_snapshot"; return 1; }
+    else
+      _hcfg_host="$_hcfg_mount"
+    fi
+    _restore_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
+  fi
   ACQ_BACKEND_RESTORE_NEEDS_KIT_HEAL=0
   _acq_msb_restore_resource_flags_into _resource_flags "$_staged_snapshot"
   # The exported archive is MSB's disk snapshot format. It restores through the
@@ -1346,8 +1367,7 @@ acq_backend_restore() {
     rm -f "$_staged_snapshot"
     return "$_restore_rc"
   fi
-  if ! _acq_msb_restore_clear_stale_state "$_name" \
-      || ! _acq_msb_restore_resources_adopt_trusted "$_name" "$_staged_snapshot" \
+  if ! _acq_msb_restore_resources_adopt_trusted "$_name" "$_staged_snapshot" \
       || ! _acq_msb_snapshot_kits_adopt_trusted "$_name" "$_staged_snapshot" \
       || ! _acq_msb_snapshot_state_adopt "$_name" "$_staged_snapshot"; then
     rm -f "$_staged_snapshot"

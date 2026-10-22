@@ -138,7 +138,7 @@ _sha256() {
   run env ACQ_BACKEND=msb ACQ_PROVENANCE_DIR="$STUBDIR/provenance" SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/saved.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream --secret USAI_API_KEY@api.gsa.usai.gov"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --volume $STUBDIR/provenance/msb/restored\\.[0-9]+\\.config:$ACQ_HOST_CONFIG_GUEST_DIR:ro --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream --secret USAI_API_KEY@api.gsa.usai.gov"
   assert_regex "$log" 'USAI_API_KEY=present'
   assert_regex "$log" 'socat UNIX-LISTEN:'
   assert_regex "$log" 'msb inspect restored --format json'
@@ -162,7 +162,7 @@ _sha256() {
   run env ACQ_BACKEND=msb SSH_AUTH_SOCK="$STUBDIR/agent.sock" "$ACQ" restore restored "$STUBDIR/disk-state.msb"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --vsock"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name restored --dangerously-inherit-resources --volume $STUBDIR/provenance/msb/restored\\.[0-9]+\\.config:$ACQ_HOST_CONFIG_GUEST_DIR:ro --vsock"
   assert_regex "$log" 'msb inspect restored --format json'
   assert_output --partial "re-applied kit startup"
 }
@@ -299,7 +299,7 @@ FACTS
   assert_regex "$log" "msb snapshot create --from-sandbox mybox --guest-flush auto -o $STUBDIR/recreate\.msb"
   assert_regex "$log" 'msb remove --force mybox'
   refute_regex "$log" 'msb volume rm'
-  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name mybox --dangerously-inherit-resources --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
+  assert_regex "$log" "msb restore $STUBDIR/state/msb-snapshots/\.restore\.[[:alnum:]]{6} --name mybox --dangerously-inherit-resources --volume $STUBDIR/provenance/msb/mybox\\.[0-9]+\\.config:$ACQ_HOST_CONFIG_GUEST_DIR:ro --volume $STUBDIR/ws:$STUBDIR/ws --vsock ${sock_path}:3552/stream"
   assert_regex "$log" 'msb inspect mybox --format json'
   assert_output --partial "kit startup re-applied"
 }
