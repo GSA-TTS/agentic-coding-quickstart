@@ -24,14 +24,14 @@ load 'helper'
 # silently absent while the secrets were still present. The fix threads the
 # MERGED env of the full effective kit set onto every lifecycle command.
 
-# _env_merge_provision KITDIRS... — provision `mergebox` with the given local kit
-# dirs as the full built-in kit set, in the order given (so the same two kits can
-# be applied in either order). Echoes nothing; assertions read $CALLS.
+# _env_merge_provision KITDIR_A KITDIR_B [SANDBOX] — provision a sandbox with
+# the given local kit dirs as the full built-in kit set, in the order given.
+# Echoes nothing; assertions read $CALLS.
 _env_merge_provision() {
   : > "$CALLS"
-  local a="$1" b="$2"
+  local a="$1" b="$2" sandbox="${3:-mergebox}"
   run bash -c '
-    a="$1"; b="$2"
+    a="$1"; b="$2"; sandbox="$3"
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/merge-secrets"
     export ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/merge-stage"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
@@ -44,8 +44,8 @@ _env_merge_provision() {
     _acq_msb_fetch_kit() {
       case "$1" in k1) printf "%s\n" "$a" ;; k2) printf "%s\n" "$b" ;; *) printf "%s\n" "$nk" ;; esac
     }
-    acq_backend_provision mergebox shell /tmp >/dev/null 2>&1
-  ' _ "$a" "$b"
+    acq_backend_provision "$sandbox" shell /tmp >/dev/null 2>&1
+  ' _ "$a" "$b" "$sandbox"
 }
 
 # Write a kit dir that declares OPENCODE_CONFIG and has no commands.
@@ -120,7 +120,7 @@ SPEC
   assert_regex "$bg1" '\-e OPENCODE_CONFIG=/home/agent/\.config/opencode/team\.jsonc'
   # daemon kit applied FIRST — the order that silently fails without a pre-pass:
   # the marker does not yet hold the config kit's entry when the daemon launches.
-  _env_merge_provision "$STUBDIR/daemonkit" "$STUBDIR/cfgkit"
+  _env_merge_provision "$STUBDIR/daemonkit" "$STUBDIR/cfgkit" mergebox-reversed
   local bg2; bg2=$(printf '%s\n' "$(cat "$CALLS")" | grep 'nohup' | head -n1)
   assert_regex "$bg2" '\-e OPENCODE_CONFIG=/home/agent/\.config/opencode/team\.jsonc'
 }
