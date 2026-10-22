@@ -493,7 +493,7 @@ SPEC
   refute_regex "$(cat "$CALLS")" '^sbx create '
 }
 
-@test "migration gate(sbx): unavailable name lookup and failed create retain launch mode" {
+@test "migration gate(sbx): unavailable name lookup blocks create and retains launch mode" {
   local proj="$STUBDIR/sbx-generic-mode-ls-fail"
   _mk_repo "$proj"
   acq_host_config_write sbx genericmodelsfail generic-opencode generic-opencode
@@ -503,8 +503,9 @@ SPEC
     _ "$REPO_ROOT" "$proj"
 
   assert_failure
+  assert_output --partial "could not confirm sandbox 'genericmodelsfail' is absent"
   assert_equal "$(acq_host_config_read sbx genericmodelsfail generic-opencode)" generic-opencode
-  assert_regex "$(cat "$CALLS")" 'sbx create --name genericmodelsfail'
+  refute_regex "$(cat "$CALLS")" 'sbx create --name genericmodelsfail'
   refute_regex "$(cat "$CALLS")" 'sbx rm --force genericmodelsfail'
 }
 
