@@ -166,6 +166,9 @@ jobs:
           persist-credentials: false
           # The suite runs under bats-core, vendored as submodules.
           submodules: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
 
       # Cache the built interpreter so the compile only happens on a version bump.
       - id: cache-bash32
@@ -238,10 +241,12 @@ jobs:
           /opt/bash32/bin/bash -c '[[ $BASH_VERSION == 3.2.* ]] || { echo "not bash 3.2: $BASH_VERSION" >&2; exit 1; }'
 
       # acq invokes the released Patterns validator during provider-input
-      # projection. Install the exact runtime declared by that release so this
-      # compatibility lane does not inherit Ubuntu's system jsonschema resolver.
+      # projection. Install and select setup-python's exact runtime; bash's PATH
+      # changes must not silently fall back to Ubuntu's system jsonschema.
       - name: Install Patterns provider-input validator dependencies
-        run: python -m pip install 'PyYAML==6.0.3' 'jsonschema==4.26.0'
+        run: |
+          "$pythonLocation/bin/python" -m pip install 'PyYAML==6.0.3' 'jsonschema==4.26.0'
+          printf 'ACQ_PROVIDER_INPUT_PYTHON=%s\n' "$pythonLocation/bin/python" >> "$GITHUB_ENV"
 
       - name: Run acq offline suite under bash 3.2
         # Put the 3.2 interpreter first on PATH so bats' `#!/usr/bin/env bash`

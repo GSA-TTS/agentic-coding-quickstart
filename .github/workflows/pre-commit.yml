@@ -67,11 +67,12 @@ jobs:
       - name: Install pre-commit
         run: python -m pip install pre-commit
       # The pinned Patterns provider-input validator is invoked by the offline
-      # suite. Keep its runtime aligned with the release's exact contract rather
-      # than depending on whichever jsonschema version happens to ship on a
-      # GitHub runner.
+      # suite. Install and select setup-python's exact runtime instead of the
+      # runner's ambient system interpreter.
       - name: Install Patterns provider-input validator dependencies
-        run: python -m pip install 'PyYAML==6.0.3' 'jsonschema==4.26.0'
+        run: |
+          "$pythonLocation/bin/python" -m pip install 'PyYAML==6.0.3' 'jsonschema==4.26.0'
+          printf 'ACQ_PROVIDER_INPUT_PYTHON=%s\n' "$pythonLocation/bin/python" >> "$GITHUB_ENV"
       - name: Install markdown linter dependencies
         run: npm ci --prefix .github/linters
       - name: Run pre-commit

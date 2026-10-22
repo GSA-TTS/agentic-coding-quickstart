@@ -2360,8 +2360,36 @@ ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provi
 # Return status 0 means discovery completed (including an authoritative empty
 # set).  Status 2 means the host cannot run the released validator and is a
 # provisioning blocker, never an empty-set fallback.
+_acq_provider_input_python() {
+  local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check
+  if [ -n "$python" ]; then
+    [ -x "$python" ] || {
+      echo "acq: configured provider-input Python is not executable: $python" >&2
+      return 2
+    }
+  else
+    python=$(command -v python3 2>/dev/null) || {
+      echo "acq: provider-input validation requires python3 with PyYAML 6.0.3 and jsonschema 4.26.0" >&2
+      return 2
+    }
+  fi
+  version_check='import importlib.metadata as m, sys
+required = {"PyYAML": "6.0.3", "jsonschema": "4.26.0"}
+actual = {}
+for package in required:
+    try:
+        actual[package] = m.version(package)
+    except m.PackageNotFoundError:
+        actual[package] = None
+if actual != required:
+    print("acq: provider-input validation requires PyYAML 6.0.3 and jsonschema 4.26.0; found " + ", ".join("%s=%s" % (package, actual[package] or "missing") for package in required), file=sys.stderr)
+    raise SystemExit(2)'
+  "$python" -c "$version_check" || return 2
+  printf '%s\n' "$python"
+}
+
 acq_provider_input_project() {
-  local backend="$1" name="$2" root kitref kitdir manifest release_root=""
+  local backend="$1" name="$2" root kitref kitdir manifest release_root="" python=""
   local validator="" schema_dir="" bindings="" token stage generation manifests=() kitdirs=()
   [ -n "$backend" ] && [ -n "$name" ] || return 1
   command -v kit_translate_fetch >/dev/null 2>&1 || return 2
@@ -2403,10 +2431,12 @@ acq_provider_input_project() {
   [ -f "$validator" ] && [ ! -L "$validator" ] && [ -d "$schema_dir" ] && [ ! -L "$schema_dir" ] \
     && [ -f "$bindings" ] && [ ! -L "$bindings" ] || {
     echo "acq: pinned Patterns provider-input validator is unavailable" >&2; _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 2; }
+  python=$(_acq_provider_input_python) || {
+    _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 2; }
   local validator_args=(--schema-dir "$schema_dir" --credential-bindings "$bindings")
   local i
   for i in "${!manifests[@]}"; do validator_args+=(--bundle "${manifests[$i]}"); done
-  python3 "$validator" "${validator_args[@]}" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  "$python" "$validator" "${validator_args[@]}" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   for i in "${!manifests[@]}"; do
     _acq_provider_input_materialize "${manifests[$i]}" "${kitdirs[$i]}" "$generation/models/providers" || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
   done

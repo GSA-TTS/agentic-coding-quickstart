@@ -582,6 +582,16 @@ KEYGENSTUB
 
   PATH="$STUBDIR:$PATH"
   export PATH CALLS STUBDIR
+  # Adapter-only child shells source a backend without common.sh, but provisioning
+  # still crosses the provider-input boundary. BASH_ENV installs the explicit
+  # test boundary before they source that adapter, keeping those tests offline.
+  cat > "$STUBDIR/bash-env" <<'BASH_ENV'
+if [ "${ACQ_TEST_STUB_PROVIDER_INPUT:-}" = 1 ] \
+  && command -v acq_test_stub_provider_input_boundary >/dev/null 2>&1; then
+  acq_test_stub_provider_input_boundary
+fi
+BASH_ENV
+  export BASH_ENV="$STUBDIR/bash-env"
   # Keep acq's post-background liveness probe fast in tests (real default is 1s):
   # the stubbed serve/ssh children stay alive ~3s (STUB_*_ALIVE), comfortably
   # past this settle window, so a healthy publish is observed without slow tests.

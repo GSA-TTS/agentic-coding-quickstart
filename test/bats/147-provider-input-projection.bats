@@ -10,6 +10,13 @@ load 'helper'
 _provider_release() {
   local root="$1"
   mkdir -p "$root/scripts" "$root/integrations/isolation/schemas"
+  cat > "$root/provider-python" <<'PYTHON'
+#!/bin/sh
+if [ "$1" = -c ]; then exit 0; fi
+exec /usr/bin/python3 "$@"
+PYTHON
+  chmod +x "$root/provider-python"
+  export ACQ_PROVIDER_INPUT_PYTHON="$root/provider-python"
   printf '{"providers":{"alpha":"ALPHA_KEY","beta":"BETA_KEY"}}\n' > "$root/integrations/isolation/schemas/provider-credential-bindings.json"
   cat > "$root/scripts/validate_provider_input_contract.py" <<'PY'
 import json, os, pathlib, sys
@@ -39,6 +46,46 @@ _provider_kit() {
 _use_release() {
   export VALIDATOR_LOG="$STUBDIR/validator.log"
   _acq_provider_input_control_plane() { printf '%s\n' "$1"; }
+}
+
+@test "projection selects a configured validator runtime and rejects a missing one" {
+  local python="$STUBDIR/provider-python" log="$STUBDIR/provider-python.log"
+  cat > "$python" <<EOF
+#!/bin/sh
+printf '%s\\n' "\$*" >> "$log"
+exit 0
+EOF
+  chmod +x "$python"
+
+  ACQ_PROVIDER_INPUT_PYTHON="$python" run _acq_provider_input_python
+  assert_success
+  assert_output "$python"
+  grep -F -- '-c import importlib.metadata as m, sys' "$log"
+
+  ACQ_PROVIDER_INPUT_PYTHON="$STUBDIR/missing-python" run _acq_provider_input_python
+  assert_failure 2
+  assert_output --partial 'configured provider-input Python is not executable'
+}
+
+@test "failed validator dependency probe publishes nothing" {
+  local release="$STUBDIR/release" root python="$STUBDIR/incompatible-python"
+  _provider_release "$release"; _provider_kit "$release" alpha
+  cat > "$python" <<EOF
+#!/bin/sh
+if [ "\$1" = -c ]; then exit 2; fi
+printf 'validator unexpectedly invoked\n' >> "$STUBDIR/validator-invoked"
+exit 0
+EOF
+  chmod +x "$python"
+  export ACQ_PROVIDER_INPUT_PYTHON="$python"
+  _acq_provider_input_control_plane() { printf '%s\n' "$release"; }
+  KITS=("$release/integrations/isolation/acq-kits/alpha")
+
+  run acq_provider_input_project sbx incompatiblebox
+  assert_failure 2
+  root=$(acq_provider_input_root sbx incompatiblebox)
+  [ ! -e "$root/current" ]
+  [ ! -e "$STUBDIR/validator-invoked" ]
 }
 
 @test "projection validates all candidates once and publishes immutable generation" {

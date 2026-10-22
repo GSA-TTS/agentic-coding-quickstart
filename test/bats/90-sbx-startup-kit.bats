@@ -429,6 +429,7 @@ STUB
   cat >"$STUBDIR/python3" <<'STUB'
 #!/usr/bin/env bash
 case "${1:-}" in
+  -c) exit 0 ;;
   */validate_provider_input_contract.py) exit 0 ;;
   *) exec /usr/bin/python3 "$@" ;;
 esac
