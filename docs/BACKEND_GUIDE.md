@@ -3,7 +3,7 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-10-03"
+last_updated: "2026-10-22"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
 related_files: ["docs/howto/acq.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md", "docs/adr/0034-host-port-selection-and-publish-override.md"]
@@ -705,7 +705,7 @@ You can also apply it for one sandbox by passing the pinned kit ref through
 `--kit`, or by exporting that same ref in `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=f3c6acb4d34a89b3b6539c44d47f56bacaeb94d7&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=d2674db8b424402e912e95254d6b194a062deb73&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 The kit provisions **rootless podman** and aliases `docker` to `podman`, so
