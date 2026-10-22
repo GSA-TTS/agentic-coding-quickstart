@@ -856,8 +856,8 @@ kit_spec_agent_field() {
       if (line ~ "^  " key ":[[:space:]]*") {
         sub("^  " key ":[[:space:]]*","",line)
         line=trim(line)
-        gsub(/^\"|\"$/, "", line)
-        gsub(/^'\''|'\''$/, "", line)
+        if (substr(line, 1, 1) == sprintf("%c", 34) && substr(line, length(line), 1) == sprintf("%c", 34)) line=substr(line, 2, length(line)-2)
+        if (substr(line, 1, 1) == "'" && substr(line, length(line), 1) == "'") line=substr(line, 2, length(line)-2)
         if (line != "") print line
         exit
       }
