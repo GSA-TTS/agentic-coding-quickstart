@@ -6,7 +6,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "4.1.0", # x-release-please-version
+    [string]$Version = "4.1.1", # x-release-please-version
     [string]$InstallDir = "",
     [string]$PackageUrl = "",
     [string]$Sha256 = "",
