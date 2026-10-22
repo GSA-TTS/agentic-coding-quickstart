@@ -155,7 +155,8 @@ trace() {
 }
 
 # Refuse to run inside a sandbox (no nested sandboxes).
-if [ -f /.dockerenv ] || [ -n "${SBX_SANDBOX:-}" ] || [ -n "${MSB_SANDBOX:-}" ]; then
+if [ "${VERIFY_BACKENDS_SOURCE_ONLY:-}" != "1" ] && \
+   { [ -f /.dockerenv ] || [ -n "${SBX_SANDBOX:-}" ] || [ -n "${MSB_SANDBOX:-}" ]; }; then
   echo "verify-backends: refusing to run inside a sandbox (no nested sandboxes)." >&2
   echo "                 Run on a sandbox-capable host. See ADR-0011 Validation." >&2
   exit 2
@@ -373,9 +374,19 @@ _sbx_secret_has_global_row() {
 }
 
 load_provider_facts() {
+  local source_rc
   # shellcheck disable=SC1090
-  ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
-  acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+  if ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1; then
+    :
+  else
+    source_rc=$?
+    echo "verify-backends: unable to source acq from $ACQ (exit $source_rc)" >&2
+    return "$source_rc"
+  fi
+  if ! acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"; then
+    echo "verify-backends: provider facts could not be loaded from $USAI_KIT" >&2
+    return 1
+  fi
   USAI_HOST="$USAI_PROVIDER_HOST"
   USAI_MODELS_URL="$USAI_PROVIDER_MODELS_URL"
 }
@@ -1406,6 +1417,16 @@ verify_agent_install() {
   fi
   unseed_usai_secret "$backend" "$aname"
 }
+
+# Tests source this script to exercise the production functions without creating
+# sandboxes. Keep this opt-in so the normal executable path remains live E2E.
+if [ "${VERIFY_BACKENDS_SOURCE_ONLY:-}" = "1" ]; then
+  if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    echo "verify-backends: source-only mode requires sourcing this script" >&2
+    exit 2
+  fi
+  return 0
+fi
 
 echo "verify-backends"
 echo "  workspace: $WORKDIR"
