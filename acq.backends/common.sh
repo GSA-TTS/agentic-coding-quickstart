@@ -2529,6 +2529,11 @@ acq_provider_input_discard() {
 # unaffected.  Echoes the canonical path on stdout.
 #
 # ACQ_TEST_HOST_OS overrides sys.platform for offline CI testing only.
+# ACQ_TEST_ALIAS_TABLE (offline CI only) overrides the alias pair table for
+# isolated-filesystem tests.  Format: tab-separated "alias<TAB>target" pairs,
+# one per line.  When set, ACQ_TEST_HOST_OS=darwin must also be set.  Production
+# builds never set this variable; it is documented alongside ACQ_TEST_HOST_OS as
+# a test-seam-only override.
 _acq_provider_input_canonical_path() {
   python3 - "$1" <<'PY'
 import os, re, sys
@@ -2540,7 +2545,12 @@ path = sys.argv[1]
 path = re.sub(r'^/+(?:\./+)*', '/', path)
 _platform = os.environ.get('ACQ_TEST_HOST_OS', sys.platform)
 if _platform == 'darwin':
-    for _alias, _target in (('/var', '/private/var'), ('/tmp', '/private/tmp'), ('/etc', '/private/etc')):
+    _alias_table_raw = os.environ.get('ACQ_TEST_ALIAS_TABLE', '')
+    if _alias_table_raw:
+        _alias_pairs = [tuple(line.split('\t', 1)) for line in _alias_table_raw.split('\n') if '\t' in line]
+    else:
+        _alias_pairs = (('/var', '/private/var'), ('/tmp', '/private/tmp'), ('/etc', '/private/etc'))
+    for _alias, _target in _alias_pairs:
         if path == _alias or path.startswith(_alias + '/'):
             path = _target + path[len(_alias):]
             break

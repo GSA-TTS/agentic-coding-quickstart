@@ -960,6 +960,90 @@ EOF
   assert_failure
 }
 
+# ---------------------------------------------------------------------------
+# safe_mkdir / safe_dir: both helpers traverse Darwin OS-level aliases
+# ---------------------------------------------------------------------------
+# These four tests execute the ACTUAL production _acq_provider_input_safe_mkdir
+# and _acq_provider_input_safe_dir helpers through a simulated Darwin trusted
+# alias using an isolated STUBDIR-local filesystem.  ACQ_TEST_ALIAS_TABLE
+# injects a test-only alias pair (alias_sym -> private_real); the production
+# /var|/tmp|/etc -> /private/... table is unchanged for non-test invocations.
+# ACQ_TEST_HOST_OS=darwin activates the canonicalization branch.
+#
+# Failure mode if canonicalization is removed: each alias_sym path contains a
+# user-visible symlink as its first component.  Without the canonical_path call
+# in the helper, O_NOFOLLOW hits that symlink and returns ELOOP/ENOTDIR ->
+# the positive-control tests below flip from assert_success to assert_failure.
+#
+# The user-symlink negative controls confirm that a symlink NOT in the alias
+# table is still rejected, even with darwin mode active.
+
+@test "safe_mkdir succeeds through simulated Darwin alias via ACQ_TEST_ALIAS_TABLE" {
+  # Build isolated FS: private_real is a real directory; alias_sym -> private_real
+  # models the macOS /var -> /private/var kernel symlink.
+  local private_real="$STUBDIR/da_private/var"
+  local alias_sym="$STUBDIR/da_var"
+  mkdir -p "$private_real"
+  ln -s "$private_real" "$alias_sym"
+
+  # With the alias table active, canonical_path maps alias_sym -> private_real,
+  # so O_NOFOLLOW traversal succeeds on the real directory.
+  export ACQ_TEST_HOST_OS=darwin
+  export ACQ_TEST_ALIAS_TABLE="${alias_sym}	${private_real}"
+  run _acq_provider_input_safe_mkdir "$alias_sym/acq/state"
+  unset ACQ_TEST_HOST_OS ACQ_TEST_ALIAS_TABLE
+  assert_success
+  [ -d "$private_real/acq/state" ]
+}
+
+@test "safe_dir succeeds through simulated Darwin alias via ACQ_TEST_ALIAS_TABLE" {
+  # Same topology as safe_mkdir test; safe_dir only checks existence, no mkdir.
+  local private_real="$STUBDIR/da_private2/var"
+  local alias_sym="$STUBDIR/da_var2"
+  mkdir -p "$private_real/acq/state"
+  ln -s "$private_real" "$alias_sym"
+
+  export ACQ_TEST_HOST_OS=darwin
+  export ACQ_TEST_ALIAS_TABLE="${alias_sym}	${private_real}"
+  run _acq_provider_input_safe_dir "$alias_sym/acq/state"
+  unset ACQ_TEST_HOST_OS ACQ_TEST_ALIAS_TABLE
+  assert_success
+}
+
+@test "safe_mkdir rejects user-controlled symlink not in Darwin alias table" {
+  # Even with darwin mode and a custom alias table, a symlink outside the alias
+  # table is still rejected by O_NOFOLLOW — it is not a trusted OS alias.
+  local private_real="$STUBDIR/da_private3/var"
+  local alias_sym="$STUBDIR/da_var3"
+  local user_sym="$STUBDIR/da_user_sym"
+  mkdir -p "$private_real"
+  ln -s "$private_real" "$alias_sym"
+  ln -s "$private_real" "$user_sym"
+
+  # alias_sym is in the table (trusted); user_sym is not.
+  export ACQ_TEST_HOST_OS=darwin
+  export ACQ_TEST_ALIAS_TABLE="${alias_sym}	${private_real}"
+  run _acq_provider_input_safe_mkdir "$user_sym/acq/state"
+  unset ACQ_TEST_HOST_OS ACQ_TEST_ALIAS_TABLE
+  assert_failure
+}
+
+@test "safe_dir rejects user-controlled symlink not in Darwin alias table" {
+  # Mirror of safe_mkdir negative control for safe_dir.
+  local private_real="$STUBDIR/da_private4/var"
+  local alias_sym="$STUBDIR/da_var4"
+  local user_sym="$STUBDIR/da_user_sym4"
+  mkdir -p "$private_real/acq/state"
+  ln -s "$private_real" "$alias_sym"
+  ln -s "$private_real" "$user_sym"
+
+  export ACQ_TEST_HOST_OS=darwin
+  export ACQ_TEST_ALIAS_TABLE="${alias_sym}	${private_real}"
+  run _acq_provider_input_safe_dir "$user_sym/acq/state"
+  unset ACQ_TEST_HOST_OS ACQ_TEST_ALIAS_TABLE
+  assert_failure
+}
+
 @test "publication retains old generation for existing current consumers" {
   local root old new
   root=$(acq_provider_input_root sbx cleanupbox)
