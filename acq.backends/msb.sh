@@ -116,6 +116,17 @@ _acq_msb_safe_agent_token() {
 # off MSYS, so POSIX hosts are unaffected. `msb` is invoked WITHOUT `command` so
 # a shell-function shim (tests) or the PATH executable is honored as before; the
 # env assignment still reaches the real process either way. See ADR-0029.
+#
+# IMPORTANT — background (provider-input lock) call sites:
+# The three background call sites (create × 2, remove × 1) that register with the
+# provider-input guardian use the MSYS2_ARG_CONV_EXCL='*' prefix INLINE rather
+# than going through this function. That causes bash to fork + exec-optimize into
+# the actual `msb` binary in one step, so $! is the backend executable's own PID.
+# Using _acq_msb_cli() in background would interpose an extra bash subshell level,
+# leaving the real binary as an unreachable grandchild that survives TERM sent to
+# the wrapper PID — the parent process the guardian registered would die but the
+# actual backend executable could outlive it and keep the lock ambiguous.
+# All synchronous (foreground) call sites continue to use _acq_msb_cli() normally.
 _acq_msb_cli() {
   MSYS2_ARG_CONV_EXCL='*' msb "$@"
 }
@@ -3694,7 +3705,11 @@ EOF
   acq_spin_start "Creating sandbox '$name'"
   _ACQ_MSB_CREATE_STARTED=1
   _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
-  _acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
+  # Inline the env assignment so the fork exec-optimizes into the actual msb binary
+  # (or test-stub script), making $! the backend executable's own PID.  An extra
+  # shell wrapper (_acq_msb_cli) would interpose another fork level, leaving the
+  # real binary as an unreachable grandchild that survives TERM to the wrapper.
+  MSYS2_ARG_CONV_EXCL='*' msb create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
   _create_pid=$!
   _acq_provider_input_guardian_register_if_active "$_create_pid" || { kill "$_create_pid" 2>/dev/null || true; wait "$_create_pid" 2>/dev/null || true; rm -f -- "$_create_output_file"; return 1; }
   wait "$_create_pid" || _create_rc=$?
@@ -3713,7 +3728,8 @@ EOF
     acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
     acq_spin_start "Creating sandbox '$name'"
     _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
-    _acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
+    # Same inline-env pattern as above: expose the msb executable PID directly.
+    MSYS2_ARG_CONV_EXCL='*' msb create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
     _create_pid=$!
     _acq_provider_input_guardian_register_if_active "$_create_pid" || { kill "$_create_pid" 2>/dev/null || true; wait "$_create_pid" 2>/dev/null || true; rm -f -- "$_create_output_file"; return 1; }
     wait "$_create_pid" || _create_rc=$?
@@ -5069,7 +5085,9 @@ _acq_backend_terminate_unlocked() {
   # (sbx-parity warning; rm proceeds — the scratch is disposable by contract).
   _acq_msb_clone_warn_unfetched "$1"
   local _rc=0 _remove_pid
-  _acq_msb_cli remove --force "$1" & _remove_pid=$!
+  # Inline env assignment: $! is the msb binary's own PID (exec-optimized fork),
+  # so the guardian can terminate and wait for the actual backend process.
+  MSYS2_ARG_CONV_EXCL='*' msb remove --force "$1" & _remove_pid=$!
   _acq_provider_input_guardian_register_if_active "$_remove_pid" || { kill "$_remove_pid" 2>/dev/null || true; wait "$_remove_pid" 2>/dev/null || true; return 1; }
   wait "$_remove_pid" || _rc=$?
   if [ "$_rc" -ne 0 ]; then

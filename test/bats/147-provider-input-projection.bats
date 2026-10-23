@@ -627,6 +627,221 @@ EOF
   [ ! -e "${root}.lock" ]
 }
 
+# ---------------------------------------------------------------------------
+# MSB-specific signal/lock regressions (external-executable variants)
+# ---------------------------------------------------------------------------
+# The following three tests reproduce the finding from PR #608 review commit
+# 32588ae: `_acq_msb_cli` (a bash function) was used as the backgrounded process,
+# so the guardian registered the *shell wrapper's* PID, not the actual msb
+# executable.  TERM killed the wrapper but left the real binary alive; the lock
+# appeared stale and a second operation could slip in.
+#
+# All three tests use an EXTERNAL EXECUTABLE for `msb` (a script placed in PATH)
+# rather than a shell-function override.  The slow-msb executable traps TERM and
+# stays alive for a few seconds so the test can verify that:
+#   - the lock cannot be acquired while the executable is running, and
+#   - the lock is released only after the executable exits.
+#
+# The fix (inline `MSYS2_ARG_CONV_EXCL='*' msb ...&` instead of `_acq_msb_cli ...&`)
+# causes bash to exec-optimize: the forked child becomes the msb binary/script
+# directly, so $! is its PID and TERM reaches it.
+
+@test "msb remove TERM: external executable survives initial signal, second lock blocked until exit" {
+  local script="$STUBDIR/msb-remove-term.sh" root msb_bin
+  root=$(acq_provider_input_root msb msbsignalbox)
+  msb_bin="$STUBDIR/slow-msb-remove"
+  # Create the external slow-msb executable: traps TERM (ignores it initially),
+  # writes its own PID, kills its PPID (= the transaction subshell) with TERM,
+  # then stays alive 2 s so the guardian must wait before releasing the lock.
+  cat > "$msb_bin" << 'MSB_SLOW'
+#!/bin/sh
+# Ignore the first TERM from signal_children; stay alive 2s then exit naturally.
+trap '' TERM
+printf '%s\n' "$$" > "$MSB_PID_FILE"
+kill -TERM "$PPID" 2>/dev/null || true
+sleep 2
+exit 0
+MSB_SLOW
+  chmod +x "$msb_bin"
+  cat > "$script" << EOF
+#!/usr/bin/env bash
+set -eu
+export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
+export MSB_PID_FILE="$STUBDIR/slow-msb.pid"
+# Prepend the slow-msb as \`msb\` in PATH.
+mkdir -p "$STUBDIR/msb-bin"
+ln -sf "$msb_bin" "$STUBDIR/msb-bin/msb"
+export PATH="$STUBDIR/msb-bin:\$PATH"
+export ACQ_STATE_DIR="$STUBDIR/state"
+ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1 . "$REPO_ROOT/acq"
+. "$REPO_ROOT/acq.backends/msb.sh"
+# Stub functions that run before/after the msb remove call and are irrelevant
+# to the lock/signal mechanism under test.
+_acq_msb_ports_teardown() { return 0; }
+_acq_msb_clone_warn_unfetched() { return 0; }
+_acq_msb_remove_derived_volumes() { return 0; }
+_acq_msb_clone_cleanup() { return 0; }
+_acq_msb_ssh_agent_link_remove() { return 0; }
+acq_host_config_remove() { return 0; }
+acq_backend_exists() { return 1; }       # sandbox confirmed gone after remove
+_acq_msb_confirm_absent() { return 0; }  # confirms gone for the rc-ne-0 path
+# Run terminate in background so we can probe lock state while it runs.
+rc=0
+acq_backend_terminate msbsignalbox & tx=\$!
+# Wait for slow-msb to register its PID (confirms the background executable started).
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -s "$STUBDIR/slow-msb.pid" ] && break
+  sleep 0.1
+done
+[ -s "$STUBDIR/slow-msb.pid" ] || { echo "slow-msb never started" >&2; exit 1; }
+msb_pid=\$(cat "$STUBDIR/slow-msb.pid")
+# Verify the lock is still held while the executable is alive.
+if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb msbsignalbox >"$STUBDIR/lock-retry.out" 2>&1; then
+  echo "lock acquired while msb executable was alive" >&2
+  exit 1
+fi
+grep -Fq "live pid" "$STUBDIR/lock-retry.out" || { cat "$STUBDIR/lock-retry.out" >&2; exit 1; }
+# Wait for the background transaction to complete.
+wait "\$tx" || rc=\$?
+# After the transaction exits the lock must be released.
+lock=\$(acq_provider_input_lock_acquire msb msbsignalbox)
+acq_provider_input_lock_release "\$lock"
+printf '%s\n' "rc=\$rc lock-cleared"
+EOF
+  chmod +x "$script"
+  BASH_ENV='' run bash "$script"
+  assert_success
+  assert_output --partial "rc=143"
+  assert_output --partial "lock-cleared"
+  [ ! -e "${root}.lock" ]
+}
+
+@test "msb remove external executable: HUP/INT/TERM each hold lock and yield 128/130/143" {
+  local msb_bin="$STUBDIR/slow-msb-signal"
+  # A self-exiting slow-msb: same structure as above but always just exits after 2 s.
+  cat > "$msb_bin" << 'MSB_SLOW2'
+#!/bin/sh
+trap '' TERM HUP INT
+printf '%s\n' "$$" >> "$MSB_PID_FILE"
+kill "-$TEST_SIGNAL" "$PPID" 2>/dev/null || true
+sleep 2
+exit 0
+MSB_SLOW2
+  chmod +x "$msb_bin"
+  mkdir -p "$STUBDIR/msb-bin2"
+  ln -sf "$msb_bin" "$STUBDIR/msb-bin2/msb"
+
+  local sig rc_expected
+  for sig_rc in "TERM 143" "INT 130" "HUP 128"; do
+    sig="${sig_rc% *}"; rc_expected="${sig_rc#* }"
+    local pids_file="$STUBDIR/slow-msb-${sig}.pids"
+    local script="$STUBDIR/msb-signal-${sig}.sh"
+    cat > "$script" << EOF
+#!/usr/bin/env bash
+set -eu
+export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
+export MSB_PID_FILE="$pids_file"
+export TEST_SIGNAL="$sig"
+export PATH="$STUBDIR/msb-bin2:\$PATH"
+export ACQ_STATE_DIR="$STUBDIR/state2"
+ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1 . "$REPO_ROOT/acq"
+. "$REPO_ROOT/acq.backends/msb.sh"
+_acq_msb_ports_teardown() { return 0; }
+_acq_msb_clone_warn_unfetched() { return 0; }
+_acq_msb_remove_derived_volumes() { return 0; }
+_acq_msb_clone_cleanup() { return 0; }
+_acq_msb_ssh_agent_link_remove() { return 0; }
+acq_host_config_remove() { return 0; }
+acq_backend_exists() { return 1; }
+_acq_msb_confirm_absent() { return 0; }
+rc=0; acq_backend_terminate msb-sig-$sig & tx=\$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -s "$pids_file" ] && break; sleep 0.1
+done
+[ -s "$pids_file" ] || { echo "slow-msb-${sig} never started" >&2; exit 1; }
+wait "\$tx" || rc=\$?
+printf 'rc=%s\n' "\$rc"
+EOF
+    chmod +x "$script"
+    BASH_ENV='' run bash "$script"
+    assert_success
+    assert_output "rc=$rc_expected"
+    root=$(acq_provider_input_root msb "msb-sig-$sig")
+    [ ! -e "${root}.lock" ]
+  done
+}
+
+@test "msb create TERM: external executable survives initial signal, lock held until exit" {
+  local script="$STUBDIR/msb-create-term.sh" root msb_bin
+  root=$(acq_provider_input_root msb msbcreatebox)
+  msb_bin="$STUBDIR/slow-msb-create"
+  cat > "$msb_bin" << 'MSB_CREATE'
+#!/bin/sh
+# Only slow down for 'create'; answer 'list' immediately (needed by _acq_msb_confirm_absent).
+case "${1:-}" in
+  create)
+    trap '' TERM
+    printf '%s\n' "$$" > "$MSB_PID_FILE"
+    kill -TERM "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" 2>/dev/null || true
+    sleep 2
+    exit 0 ;;
+  list) exit 0 ;;    # _acq_msb_confirm_absent uses 'list -q'
+  *) exit 0 ;;
+esac
+MSB_CREATE
+  chmod +x "$msb_bin"
+  cat > "$script" << EOF
+#!/usr/bin/env bash
+set -eu
+export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
+export MSB_PID_FILE="$STUBDIR/slow-msb-create.pid"
+mkdir -p "$STUBDIR/msb-create-bin"
+ln -sf "$msb_bin" "$STUBDIR/msb-create-bin/msb"
+export PATH="$STUBDIR/msb-create-bin:\$PATH"
+export ACQ_STATE_DIR="$STUBDIR/state3"
+ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1 . "$REPO_ROOT/acq"
+. "$REPO_ROOT/acq.backends/msb.sh"
+# Stub the complex provision helpers so execution reaches the msb create call.
+acq_backend_exists() { return 1; }
+_acq_msb_confirm_absent() { return 0; }
+_acq_msb_resolve_image() { _ACQ_MSB_RESOLVED_IMAGE=test-image; _ACQ_MSB_RESOLVED_IMAGE_SOURCE=test; }
+_acq_msb_select_kits() { return 0; }
+_acq_msb_net_rules_into() { return 0; }
+_acq_msb_merge_kit_env_into() { return 0; }
+_acq_msb_stage_startup_script() { return 0; }
+_acq_msb_volume_flags_from_records() { return 0; }
+_acq_msb_balanced_rules_into() { return 0; }
+_acq_msb_upstream_ca_flags_into() { return 0; }
+_acq_msb_vsock_flags_into() { return 0; }
+_acq_msb_bind_secrets_into() { return 0; }
+_acq_msb_cleanup_uncreated_attempt() { return 0; }
+_acq_msb_image_not_found_error() { return 1; }
+# Provision happens synchronously — run in background to probe lock state.
+rc=0
+acq_backend_provision msbcreatebox shell /tmp & tx=\$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -s "$STUBDIR/slow-msb-create.pid" ] && break; sleep 0.1
+done
+[ -s "$STUBDIR/slow-msb-create.pid" ] || { echo "slow-msb-create never started" >&2; exit 1; }
+# While slow-msb is running the lock must not be acquirable.
+if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb msbcreatebox >"$STUBDIR/create-lock-retry.out" 2>&1; then
+  echo "create lock acquired while msb executable was alive" >&2
+  exit 1
+fi
+grep -Fq "live pid" "$STUBDIR/create-lock-retry.out" || { cat "$STUBDIR/create-lock-retry.out" >&2; exit 1; }
+wait "\$tx" || rc=\$?
+lock=\$(acq_provider_input_lock_acquire msb msbcreatebox)
+acq_provider_input_lock_release "\$lock"
+printf '%s\n' "rc=\$rc lock-cleared"
+EOF
+  chmod +x "$script"
+  BASH_ENV='' run bash "$script"
+  assert_success
+  assert_output --partial "rc=143"
+  assert_output --partial "lock-cleared"
+  [ ! -e "${root}.lock" ]
+}
+
 @test "symlinked projection ancestor is rejected without outside mutation" {
   local base outside root
   base="$ACQ_PROVENANCE_DIR/provider-input"; outside="$STUBDIR/outside"
