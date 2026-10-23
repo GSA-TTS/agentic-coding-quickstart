@@ -29,6 +29,7 @@
 #   ./scripts/test-acq-bats                   # all .bats (parallel if available)
 #   ./scripts/test-acq-bats test/bats/X.bats  # a specific file (passed through)
 #   ACQ_BATS_JOBS=1 ./scripts/test-acq-bats   # force serial
+#   ACQ_BATS_TIMING=1 ./scripts/test-acq-bats # per-test timings, also in fallback
 set -uo pipefail
 
 _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,19 +56,36 @@ if [ ! -x "$BATS" ]; then
   exit 2
 fi
 
+_timing=()
+case "${ACQ_BATS_TIMING:-0}" in
+  0) ;;
+  1) _timing=(--timing) ;;
+  *) echo 'test-acq-bats: ACQ_BATS_TIMING must be 0 or 1' >&2; exit 2 ;;
+esac
+
 # Explicit file/dir args are passed straight through (no implicit parallelism),
 # so `./scripts/test-acq-bats test/bats/X.bats [--flags]` behaves like bats.
 if [ "$#" -gt 0 ]; then
-  exec "$BATS" "$@"
+  exec "$BATS" ${_timing[@]+"${_timing[@]}"} "$@"
 fi
 
 # Whole-suite run: opt into across-files parallelism when we can.
 #   - ACQ_BATS_JOBS overrides the job count; =1 forces serial.
 #   - bats --jobs needs GNU parallel or shenwei356/rush on PATH; without one it
 #     errors out, so we only pass --jobs when a parallelizer is present.
-_jobs="${ACQ_BATS_JOBS:-$( (command -v nproc >/dev/null 2>&1 && nproc) || echo 1 )}"
+_jobs="${ACQ_BATS_JOBS:-$( (command -v nproc >/dev/null 2>&1 && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 1 )}"
+case "$_jobs" in
+  ''|*[!0-9]*|0*) echo 'test-acq-bats: ACQ_BATS_JOBS must be a positive integer without leading zeros' >&2; exit 2 ;;
+esac
+if ! [ "$_jobs" -ge 1 ] 2>/dev/null; then
+  echo 'test-acq-bats: ACQ_BATS_JOBS exceeds the supported integer range' >&2
+  exit 2
+fi
+if [ "${ACQ_BATS_TIMING:-0}" = 1 ]; then
+  echo "test-acq-bats: workers=$_jobs; per-test timings include setup and teardown" >&2
+fi
 if [ "$_jobs" -gt 1 ] 2>/dev/null && { command -v parallel >/dev/null 2>&1 || command -v rush >/dev/null 2>&1; }; then
-  exec "$BATS" --jobs "$_jobs" --no-parallelize-within-files "${REPO_ROOT}/test/bats"
+  exec "$BATS" ${_timing[@]+"${_timing[@]}"} --jobs "$_jobs" --no-parallelize-within-files "${REPO_ROOT}/test/bats"
 fi
 
 if [ "$_jobs" -gt 1 ] 2>/dev/null && command -v xargs >/dev/null 2>&1 && printf 'x\0' | xargs -0 -n1 -P 1 true 2>/dev/null; then
@@ -78,7 +96,8 @@ if [ "$_jobs" -gt 1 ] 2>/dev/null && command -v xargs >/dev/null 2>&1 && printf 
       _bats=$1 _outdir=$2 _file=$3
       _name=$(basename "$_file")
       _out="${_outdir}/${_name}.out"
-      if "$_bats" "$_file" >"$_out" 2>&1; then
+      if [ "${ACQ_BATS_TIMING:-0}" = 1 ]; then set -- --timing; else set --; fi
+      if "$_bats" "$@" "$_file" >"$_out" 2>&1; then
         printf "0\n" >"${_out}.status"
       else
         printf "%s\n" "$?" >"${_out}.status"
@@ -97,4 +116,4 @@ if [ "$_jobs" -gt 1 ] 2>/dev/null && command -v xargs >/dev/null 2>&1 && printf 
   exit "$_rc"
 fi
 
-exec "$BATS" "${REPO_ROOT}/test/bats"
+exec "$BATS" ${_timing[@]+"${_timing[@]}"} "${REPO_ROOT}/test/bats"

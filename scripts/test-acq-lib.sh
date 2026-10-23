@@ -182,6 +182,51 @@ make_stubs() {
   # Preserve the base PATH (with coreutils etc.) but prepend the stub dir.
   _STUB_BASE_PATH="${PATH}"
 
+  # Keep real Git for local fixture repositories, but model the pinned kit
+  # transport offline. Projection fetches kits directly (not through the MSB
+  # adapter), so ACQ_MSB_KIT_LOCAL_DIR alone does not cover CLI creation tests.
+  # Tests of fetch failures replace this executable or set GIT_ALLOW_PROTOCOL.
+  export ACQ_TEST_REAL_GIT
+  ACQ_TEST_REAL_GIT=$(command -v git)
+  mkdir -p "$STUBDIR/transport"
+  cat >"$STUBDIR/transport/git" <<'GITSTUB'
+#!/usr/bin/env bash
+original=("$@")
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -c) shift 2 ;;
+    *) break ;;
+  esac
+done
+case "${1:-}" in
+  fetch)
+    if [ "${GIT_ALLOW_PROTOCOL:-}" != none ] \
+        && [ "$*" = "fetch --depth 1 origin $ACQ_TEST_PATTERNS_REF" ] \
+        && [ "$("$ACQ_TEST_REAL_GIT" config --get remote.origin.url)" = https://github.com/GSA-TTS/agentic-coding-patterns.git ]; then
+      IFS= read -r path < .git/info/sparse-checkout || exit 1
+      path=${path%/\*}
+      case "$path" in
+        *..*|*[!A-Za-z0-9._/-]*) exit 1 ;;
+        integrations/isolation/acq-kits/*) ;;
+        *) exit 1 ;;
+      esac
+      mkdir -p "$path" || exit 1
+      cp "$ACQ_MSB_KIT_LOCAL_DIR/spec.yaml" "$path/spec.yaml" || exit 1
+      : > .git/acq-offline-fetch
+      exit 0
+    fi
+    ;;
+  checkout)
+    if [ "$*" = 'checkout -q FETCH_HEAD' ] && [ -f .git/acq-offline-fetch ]; then
+      exit 0
+    fi
+    ;;
+esac
+# A missing fixture must fail locally rather than silently contact a network.
+GIT_ALLOW_PROTOCOL="${GIT_ALLOW_PROTOCOL:-file}" exec "$ACQ_TEST_REAL_GIT" "${original[@]}"
+GITSTUB
+  chmod +x "$STUBDIR/transport/git"
+
   # Executable-dispatch tests exercise routing rather than the released Python
   # validator. Keep them deterministic with an explicit test-only interpreter;
   # test 147 unsets this and supplies its own validator runtime.
@@ -256,6 +301,9 @@ case "${1:-}" in
     case "$snippet" in
       *"startup-complete"*) printf 'ready\n' ;;
       *"echo ok"*) printf 'ok\n' ;;
+      *present*)
+        [ "${STUB_SBX_FEATURES_PRESENT:-0}" = 1 ] && printf 'present\n'
+        exit 0 ;;
       *'%{http_code}'*)
         # check_key runs `curl … -w '%{http_code}'; printf '|%s' "$?"`, so the
         # real probe emits `<http_code>|<curl_exit>`. Model that shape.
@@ -640,7 +688,7 @@ exit 0
 KEYGENSTUB
   chmod +x "$STUBDIR/ssh-keygen"
 
-  PATH="$STUBDIR:$PATH"
+  PATH="$STUBDIR:$STUBDIR/transport:$PATH"
   export PATH CALLS STUBDIR
   # Adapter-only child shells source a backend without common.sh, but provisioning
   # still crosses the provider-input boundary. BASH_ENV sources a self-contained
@@ -747,6 +795,7 @@ cleanup_stubs() { [ -n "${STUBDIR:-}" ] && { chmod -R u+w "$STUBDIR" 2>/dev/null
 # shellcheck disable=SC1090
 load_acq() {
   ACQ_SOURCE_ONLY=1 . "$ACQ"
+  export ACQ_TEST_PATTERNS_REF="$PATTERNS_KIT_REF"
   # Also load the sbx adapter since acq_resolve_backend would normally do it.
   # shellcheck source=acq.backends/sbx.sh
   . "${REPO_ROOT}/acq.backends/sbx.sh"
