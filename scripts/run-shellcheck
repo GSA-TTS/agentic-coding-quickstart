@@ -17,4 +17,21 @@ fi
 # Four concurrent batches stay below the former dataflow-analysis memory ceiling.
 [ "$_jobs" -le 4 ] || _jobs=4
 
-printf '%s\0' "$@" | xargs -0 -n8 -P "$_jobs" shellcheck --severity=warning
+# Give xargs and its ShellCheck children their own process group so cancellation
+# reaches every concurrent batch rather than leaving linters behind.
+set -m
+xargs -0 -n8 -P "$_jobs" shellcheck --severity=warning < <(printf '%s\0' "$@") &
+_xargs_pid=$!
+_cleanup() {
+  trap - TERM INT HUP
+  kill -TERM -- "-$_xargs_pid" 2>/dev/null || true
+  wait "$_xargs_pid" 2>/dev/null || true
+  exit "$1"
+}
+trap '_cleanup 143' TERM
+trap '_cleanup 130' INT
+trap '_cleanup 129' HUP
+wait "$_xargs_pid"
+_status=$?
+trap - TERM INT HUP
+exit "$_status"

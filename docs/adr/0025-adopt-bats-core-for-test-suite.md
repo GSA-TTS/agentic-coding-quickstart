@@ -283,7 +283,8 @@ The same follow-up adds `scripts/run-shellcheck`: batches remain capped at eight
 files but run with up to four concurrent jobs (or `SHELLCHECK_JOBS=1` for serial
 diagnosis). The cap keeps concurrency below the previously documented ShellCheck
 memory risk. The runner rejects invalid or out-of-range job counts and preserves
-the failure status of any lint batch.
+the failure status of any lint batch. It creates a process group for xargs and
+its children, so termination reaches active concurrent ShellCheck processes.
 
 Local two-CPU measurements after the follow-up:
 

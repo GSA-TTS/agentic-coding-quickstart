@@ -216,9 +216,11 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   the distinction between production behavior and test transport fixtures.
 
   ShellCheck is also batched in groups of eight files and runs up to four batches
-  concurrently. Use `SHELLCHECK_JOBS=1 npm run lint` to force serial batches when
-  diagnosing a lint failure; its runner validates invalid values before invoking
-  ShellCheck.
+  concurrently. Use `SHELLCHECK_JOBS=1 bash scripts/run-shellcheck acq
+  acq.backends/*.sh scripts/test-acq-lib.sh scripts/test-acq-bats
+  scripts/run-shellcheck test/bats/*.bats test/bats/helper.bash` to force serial
+  batches when diagnosing a lint failure; its runner validates invalid values
+  before invoking ShellCheck.
 
   **One file is deliberately not stubbed.**
   `test/bats/101-sbx-grammar-acceptance.bats` asserts that the **real** `sbx`

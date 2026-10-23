@@ -97,6 +97,28 @@ STUB
   assert_failure 2
 }
 
+@test "shellcheck runner: termination reaches an active lint child" {
+  cat > "$STUBDIR/shellcheck" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$$" > "$STUBDIR/shellcheck.pid"
+trap 'touch "$STUBDIR/shellcheck.terminated"; exit 0' TERM
+while :; do sleep 1; done
+STUB
+  chmod +x "$STUBDIR/shellcheck"
+  run bash -c '
+    SHELLCHECK_JOBS=2 bash "$1/scripts/run-shellcheck" active.sh &
+    runner=$!
+    while [ ! -f "$2/shellcheck.pid" ]; do sleep 0.05; done
+    kill -TERM "$runner"
+    wait "$runner"
+    status=$?
+    test -f "$2/shellcheck.terminated"
+    exit "$status"
+  ' _ "$RUNNER_ROOT" "$STUBDIR"
+  assert_failure 143
+  [ -f "$STUBDIR/shellcheck.terminated" ]
+}
+
 @test "transport fixture: real projection is offline and local Git still works" {
   run acq_provider_input_prepare sbx offlinebox
   assert_success
