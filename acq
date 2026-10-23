@@ -71,11 +71,11 @@ print_help() {
   cat <<'HELP'
 acq — agentic coding quickstart wrapper
 
-acq wraps a sandbox backend (sbx or msb) and applies the shared federal
+acq wraps a sandbox backend and applies the shared federal
 "kits" (USAi provider, playbook, git-ssh-sign, zscaler CA) to each sandbox.
 
 Usage:
-  acq [--backend sbx|msb] <subcommand> [args...]
+  acq [--backend NAME] <subcommand> [args...]
 
 Subcommands:
   run AGENT PATH [...] [-- AGENT_ARGS...]  Create+attach a sandbox, or re-attach
@@ -113,7 +113,7 @@ Subcommands:
   version                                  Show acq version + backend info.
   doctor [NAME]                            Backend health check, or non-enforcing
                                            image diagnostics for an existing sandbox.
-  backend list                             List detected backends (sbx, msb).
+  backend list                             List registered backends and availability.
   backend set NAME                         Persist the default backend.
   backend unset                            Clear the persisted default (auto-detect).
   configure                                Interactive setup: pick extra kits and
@@ -132,7 +132,7 @@ Any other subcommand is passed through to the active backend's CLI (acq prints
 a notice first so you know the output/errors below it are the backend's).
 
 Global flags (before the subcommand):
-  --backend sbx|msb    Override the active backend for this invocation.
+  --backend NAME       Override the active backend for this invocation.
                        Default: the persisted backend (`acq backend set`),
                        else msb. `msb` runs microVMs via the microsandbox (msb)
                        CLI; `sbx` runs Docker sandboxes via the sbx CLI.
@@ -181,6 +181,13 @@ run/create flags:
 
 See docs/howto/acq.md and docs/BACKEND_GUIDE.md for more.
 HELP
+  printf 'Registered: '
+  local _backend_name _backend_sep=""
+  for _backend_name in "${ACQ_BACKEND_NAMES[@]}"; do
+    printf '%s%s' "$_backend_sep" "$_backend_name"
+    _backend_sep=', '
+  done
+  printf '. OpenShell is explicit-only until its adapter is available.\n'
 }
 
 # _acq_secret_usage / _acq_kit_usage — acq's OWN per-verb usage blocks. Printed
@@ -244,8 +251,8 @@ _acq_backend_subcmd_usage() {
 acq backend — select the sandbox backend
 
 Usage:
-  acq backend list        List detected/installed backends (sbx, msb)
-  acq backend set NAME    Persist the default backend (sbx | msb)
+  acq backend list        List registered backends and availability
+  acq backend set NAME    Persist the default backend
   acq backend unset       Clear the persisted default (fall back to auto-detect)
 BACKENDUSAGE
 }
@@ -589,7 +596,7 @@ _acq_parse_secret_scope_for_propagation() {
 _acq_propagate_secret_to_present_backends() {
   local service="$1" scope_name="${2:-}" origin="${3:-set}" current="${ACQ_RESOLVED_BACKEND:-}" be rc=0
   [ -n "$service" ] || return 0
-  for be in msb sbx; do
+  for be in "${ACQ_AUTODETECT_BACKEND_NAMES[@]}"; do
     [ "$be" != "$current" ] || continue
     _backend_installed "$be" || continue
     if [ "$origin" = "rotate" ] && [ "$current" = "sbx" ] && [ "$be" = "msb" ]; then
@@ -750,22 +757,20 @@ case "$subcommand" in
         # List detected/installed backends. Recover a backend installed in
         # ~/.local/bin but not on PATH first, so the listing matches what
         # `acq run` auto-detect will find.
-        _ensure_local_bin_on_path sbx >/dev/null 2>&1 || true
-        _ensure_local_bin_on_path msb >/dev/null 2>&1 || true
-        printf 'Installed backends:\n'
-        if command -v sbx >/dev/null 2>&1; then
-          local_ver=$(sbx version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 | sed 's/^v//' || echo "?")
-          printf '  sbx  v%s\n' "$local_ver"
-        else
-          printf '  sbx  (not found)\n'
-        fi
-        if command -v msb >/dev/null 2>&1; then
-          local_ver=$(msb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || echo "?")
-          printf '  msb  v%s\n' "$local_ver"
-        else
-          printf '  msb  (not found)\n'
-        fi
-        printf '\nDeferred (not scheduled):\n  ppp  (Podman-Plus-Proxy)\n'
+        printf 'Registered backends:\n'
+        for local_backend in "${ACQ_BACKEND_NAMES[@]}"; do
+          if acq_backend_is_explicit_only "$local_backend"; then
+            printf '  %s  (explicit-only; adapter not yet available)\n' "$local_backend"
+          else
+            _ensure_local_bin_on_path "$local_backend" >/dev/null 2>&1 || true
+            if command -v "$local_backend" >/dev/null 2>&1; then
+              local_ver=$(acq_backend_cli_version "$local_backend")
+              printf '  %s  v%s\n' "$local_backend" "$local_ver"
+            else
+              printf '  %s  (not found)\n' "$local_backend"
+            fi
+          fi
+        done
         ;;
       set)
         shift
