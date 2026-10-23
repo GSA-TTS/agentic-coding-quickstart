@@ -128,6 +128,7 @@ acq_test_stub_provider_input_boundary() {
   # so the lock_acquire signature change does not break callers in this context.
   _acq_provider_input_guardian_start() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$$; export _ACQ_PROVIDER_INPUT_GUARDIAN_PID; }
   _acq_provider_input_guardian_stop() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=''; }
+  _acq_provider_input_guardian_signal_children() { return 0; }
 }
 export -f acq_test_stub_provider_input_boundary
 
@@ -706,6 +707,7 @@ acq_provider_input_lock_release() {
   acq_provider_input_sbx_mount() { printf '%s:ro\n' "$2"; }
 _acq_provider_input_guardian_start() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$$; export _ACQ_PROVIDER_INPUT_GUARDIAN_PID; }
 _acq_provider_input_guardian_stop() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=''; }
+_acq_provider_input_guardian_signal_children() { return 0; }
 BOUNDARY
   cat > "$STUBDIR/bash-env" <<BASH_ENV
 . "$STUBDIR/provider-input-boundary.sh"

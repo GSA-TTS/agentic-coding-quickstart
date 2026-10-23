@@ -2672,7 +2672,10 @@ _acq_provider_input_guardian_start() {
     done
   ' sh "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" &
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$!
+  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(ps -o ppid= -p "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" 2>/dev/null | tr -d '[:space:]')
+  case "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" in ""|*[!0-9]*) _acq_provider_input_guardian_stop; return 1 ;; esac
   export _ACQ_PROVIDER_INPUT_GUARDIAN_PID
+  export _ACQ_PROVIDER_INPUT_TRANSACTION_PID
 }
 
 _acq_provider_input_guardian_register_child() {
@@ -2694,6 +2697,68 @@ _acq_provider_input_guardian_stop() {
   [ -z "${_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN:-}" ] || rm -f -- "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN"
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=""
   _ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN=""
+  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=""
+}
+
+# Signal all registered backend children and wait for them to exit before the
+# caller releases the lock or stops the guardian.  Called from the signal
+# handlers (TERM/INT/HUP) in provision/terminate wrappers so that a handled
+# signal cannot free the lock while a synchronous backend create/remove is
+# still running.
+#
+# Algorithm:
+#   1. Send TERM to every PID listed in the children registry.
+#   2. Poll until all are gone (up to ACQ_PROVIDER_INPUT_CHILD_WAIT_SECS,
+#      default 60).  Each 0.1 s tick is approximated with a 1-second sleep
+#      (POSIX sh: no sub-second sleep guarantee), so the effective ceiling is
+#      the same but granularity is coarser on some platforms.
+#   3. If any child is still live after the timeout, send KILL and poll for
+#      another 10 s.
+#   4. If a child still cannot be reaped (PID reuse is possible but rare in
+#      this context), leave the guardian and lock in place and return 1 so the
+#      wrapper can stay alive rather than permit lock overlap.
+#
+# Returns 0 when all children are confirmed gone; 1 when at least one
+# unkillable child remains (caller must NOT release lock).
+_acq_provider_input_guardian_signal_children() {
+  local registry="${_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN:-}"
+  [ -n "$registry" ] && [ -f "$registry" ] || return 0
+  local child
+  # TERM every registered child.
+  while IFS= read -r child; do
+    case "$child" in ""|*[!0-9]*) continue ;; esac
+    kill -TERM "$child" 2>/dev/null || true
+  done < "$registry"
+  # Wait up to ACQ_PROVIDER_INPUT_CHILD_WAIT_SECS (default 60) for all to exit.
+  local waited=0 max="${ACQ_PROVIDER_INPUT_CHILD_WAIT_SECS:-60}" any_live
+  while [ "$waited" -lt "$max" ]; do
+    any_live=0
+    while IFS= read -r child; do
+      case "$child" in ""|*[!0-9]*) continue ;; esac
+      kill -0 "$child" 2>/dev/null && { any_live=1; break; }
+    done < "$registry"
+    [ "$any_live" -eq 1 ] || return 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+  # Escalate to KILL for anything still running.
+  while IFS= read -r child; do
+    case "$child" in ""|*[!0-9]*) continue ;; esac
+    kill -0 "$child" 2>/dev/null && kill -KILL "$child" 2>/dev/null || true
+  done < "$registry"
+  waited=0
+  while [ "$waited" -lt 10 ]; do
+    any_live=0
+    while IFS= read -r child; do
+      case "$child" in ""|*[!0-9]*) continue ;; esac
+      kill -0 "$child" 2>/dev/null && { any_live=1; break; }
+    done < "$registry"
+    [ "$any_live" -eq 1 ] || return 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+  # At least one child could not be reaped; caller must retain lock.
+  return 1
 }
 
 _acq_provider_input_process_identity() {

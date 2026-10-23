@@ -601,6 +601,32 @@ EOF
   [ ! -e "${root}.lock" ]
 }
 
+@test "terminate TERM holds lock while backend child runs then releases after exit" {
+  local script="$STUBDIR/signal-term-child.sh" root
+  root=$(acq_provider_input_root sbx termbox)
+  cat > "$script" <<EOF
+#!/usr/bin/env bash
+set -eu
+ACQ_SCRIPT_DIR="$REPO_ROOT"; ACQ_SOURCE_ONLY=1
+. "$REPO_ROOT/acq"
+. "$REPO_ROOT/acq.backends/sbx.sh"
+# The controlled backend child signals its actual transaction parent, then stays
+# alive until the wrapper's TERM handler terminates and reaps it.
+sbx() {
+  [ "\$1" = rm ] || return 0
+  kill -TERM "\$_ACQ_PROVIDER_INPUT_TRANSACTION_PID"
+  sleep 3
+}
+acq_backend_terminate termbox
+EOF
+  chmod +x "$script"
+  BASH_ENV='' run "$script"
+  # Wrapper must exit 143 (TERM signal status)
+  assert_failure 143
+  # Lock must be gone — backend child must have exited before EXIT cleanup ran
+  [ ! -e "${root}.lock" ]
+}
+
 @test "symlinked projection ancestor is rejected without outside mutation" {
   local base outside root
   base="$ACQ_PROVENANCE_DIR/provider-input"; outside="$STUBDIR/outside"
