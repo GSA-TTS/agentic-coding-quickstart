@@ -109,7 +109,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-python_minor=$($BOOTSTRAP_PYTHON -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+python_minor=$("$BOOTSTRAP_PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 case "$HOST_OS:$python_minor" in
   Darwin:3.12|Darwin:3.13|Darwin:3.14|Linux:3.12|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12) : ;;
   *) echo "unsupported Python for provider-input validator on this host: Python $python_minor" >&2; exit 2 ;;
