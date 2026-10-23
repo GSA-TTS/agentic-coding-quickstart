@@ -88,6 +88,19 @@ _ACQ_SBX_SSH_AGENT_NOTICE_SHOWN=0
 # Module-scope flag: set to 1 once the ADR-0022 custom-image (--template) notice
 # has been printed, so it appears at most once per process.
 _ACQ_SBX_IMAGE_NOTICE_SHOWN=0
+_ACQ_SBX_ATTEMPT_GENERATION=""
+_ACQ_SBX_ATTEMPT_ACTIVE=""
+_ACQ_SBX_CREATE_STARTED=""
+
+_acq_sbx_cleanup_uncreated_attempt() {
+  [ -n "${_ACQ_SBX_ATTEMPT_ACTIVE:-}" ] || return 0
+  if [ -z "${_ACQ_SBX_CREATE_STARTED:-}" ] || _acq_sbx_confirm_absent "${_ACQ_SBX_ATTEMPT_NAME:-}"; then
+    acq_provider_input_discard sbx "$_ACQ_SBX_ATTEMPT_NAME" "$_ACQ_SBX_ATTEMPT_GENERATION" || true
+  fi
+  _ACQ_SBX_ATTEMPT_GENERATION=""
+  _ACQ_SBX_ATTEMPT_ACTIVE=""
+  _ACQ_SBX_CREATE_STARTED=""
+}
 
 # ---------------------------------------------------------------------------
 # Version comparison
@@ -166,6 +179,15 @@ acq_backend_exists() {
   local listed
   listed=$(sbx ls -q 2>/dev/null) || return 1
   grep -Fxq -- "$1" <<<"$listed"
+}
+
+# Return success only when sbx successfully lists sandboxes and NAME is absent.
+# A failed list probe is indeterminate and must never authorize projection
+# replacement or cleanup.
+_acq_sbx_confirm_absent() {
+  local name="$1" listed
+  listed=$(sbx ls -q 2>/dev/null) || return 1
+  ! grep -Fxq -- "$name" <<<"$listed"
 }
 
 # ---------------------------------------------------------------------------
@@ -459,7 +481,7 @@ _acq_sbx_kit_feature_absent() {
 # acq_backend_provision) so the implicit forward is a conscious choice, mirroring
 # the notice msb prints when it actively wires the forward.
 
-acq_backend_provision() {
+_acq_backend_provision_unlocked() {
   _acq_sbx_ensure_kit_sources_allowed
   local name="$1"
   shift
@@ -578,6 +600,37 @@ acq_backend_provision() {
   fi
 
   _build_kit_list "$agent" || return 1
+  if acq_backend_exists "$name"; then
+    echo "acq(sbx): error: sandbox '$name' already exists; refusing to alter its provider inputs." >&2
+    return 1
+  fi
+  if ! _acq_sbx_confirm_absent "$name"; then
+    echo "acq(sbx): error: could not confirm sandbox '$name' is absent; preserving provider inputs." >&2
+    return 1
+  fi
+  # Prepare an immutable generation before create, but leave current untouched.
+  # This sandbox mounts the exact generation; publication follows successful
+  # creation, so an older sandbox mounting current cannot observe a loser.
+  local _provider_generation
+  if ! _provider_generation=$(acq_provider_input_prepare sbx "$name"); then
+    echo "acq(sbx): error: provider input projection failed for '$name'." >&2
+    return 1
+  fi
+  _ACQ_SBX_ATTEMPT_NAME="$name"
+  _ACQ_SBX_ATTEMPT_GENERATION="$_provider_generation"
+  _ACQ_SBX_ATTEMPT_ACTIVE=1
+  local _hcfg_dir
+  _hcfg_dir=$(acq_host_config_dir sbx "$name") || return 1
+  mkdir -p "$_hcfg_dir" || return 1
+  chmod 711 "$_hcfg_dir" || return 1
+  # sbx supports only its same-absolute-path readonly positional mount. Publish
+  # that backend-owned guest root through the neutral environment contract.
+  local _provider_mount=()
+  _ef+=(--env "ACQ_PROVIDER_INPUT_ROOT=$(acq_provider_input_guest_root sbx "$name" "$_provider_generation")")
+  _provider_mount=("$(acq_provider_input_sbx_mount "$name" "$_provider_generation")") || {
+    _acq_sbx_cleanup_uncreated_attempt
+    return 1
+  }
   local kf=()
   while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
   local _git_identity_kit=""
@@ -587,30 +640,34 @@ acq_backend_provision() {
   _startup_barrier_token="acq-$$-$(date +%s)-$RANDOM-$RANDOM"
   kf+=(--kit "$(_acq_sbx_startup_barrier_kit "$_startup_barrier_token")")
 
-  acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_sbx_args[*]:-}"
-  # Do not replace the launch mode of an existing OpenCode sandbox. Stale host
-  # state is cleared only after this create succeeds, avoiding races with a
-  # concurrent create and avoiding destructive guesses when `sbx ls` fails.
-  if [ "$agent" = "opencode" ]; then
-    if acq_backend_exists "$name"; then
-      echo "acq(sbx): error: sandbox '$name' already exists; refusing to replace its launch mode." >&2
-      return 1
-    fi
-  fi
+  acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_provider_mount[*]} ${_sbx_args[*]:-}"
+  # Stale host state is cleared only after this create succeeds, avoiding races
+  # with a concurrent create and destructive guesses when `sbx ls` fails.
   acq_spin_start "Creating sandbox '$name'"
-  sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" ${_sbx_args[@]+"${_sbx_args[@]}"}
-  local _rc=$?
+  local _rc=0 _backend_pid
+  _ACQ_SBX_CREATE_STARTED=1
+  sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" "${_provider_mount[@]}" ${_sbx_args[@]+"${_sbx_args[@]}"} &
+  _backend_pid=$!
+  _acq_provider_input_guardian_register_if_active "$_backend_pid" || { kill "$_backend_pid" 2>/dev/null || true; wait "$_backend_pid" 2>/dev/null || true; return 1; }
+  wait "$_backend_pid" || _rc=$?
   acq_spin_stop "Creating sandbox '$name'"
   # Record host-side bundle provenance ONLY after a successful create — a failed
   # create must not leave a record claiming the sandbox is current.
   if [ "$_rc" -eq 0 ]; then
+    # A successful create may have produced a live sandbox even if a later
+    # readiness/provenance step fails; never discard its mounted generation.
+    _ACQ_SBX_ATTEMPT_ACTIVE=""
+    if ! _acq_provider_input_publish "$(acq_provider_input_root sbx "$name")" "$_provider_generation"; then
+      echo "acq(sbx): error: sandbox '$name' was created but provider inputs could not be published." >&2
+      return 1
+    fi
     acq_spin_start "Waiting for kit startup in '$name'"
     if ! _acq_sbx_wait_for_startup_barrier "$name" "$_startup_barrier_token"; then
       acq_spin_stop "Waiting for kit startup in '$name'"
       echo "acq(sbx): startup commands did not finish within ${ACQ_SBX_STARTUP_BARRIER_TIMEOUT}s." >&2
       echo "          Refusing to keep a sandbox whose kit-managed config was not" >&2
       echo "          confirmed complete before attach; removing '$name'." >&2
-      acq_backend_terminate "$name" >/dev/null 2>&1 || \
+      _acq_backend_terminate_unlocked "$name" >/dev/null 2>&1 || \
         echo "acq(sbx): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
       return 1
     fi
@@ -619,7 +676,7 @@ acq_backend_provision() {
     if ! acq_provenance_write sbx "$name" "$agent"; then
       echo "acq(sbx): error: could not record provenance for '$name'." >&2
       echo "          Removing the new sandbox because safe reattach requires complete state." >&2
-      acq_backend_terminate "$name" >/dev/null 2>&1 || \
+      _acq_backend_terminate_unlocked "$name" >/dev/null 2>&1 || \
         echo "acq(sbx): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
       return 1
     fi
@@ -631,7 +688,7 @@ acq_backend_provision() {
       if ! acq_host_config_write sbx "$name" generic-opencode "$_opencode_mode"; then
         echo "acq(sbx): error: could not record OpenCode launch mode for '$name'." >&2
         echo "          Removing the new sandbox because acq cannot safely choose SBX grammar." >&2
-        acq_backend_terminate "$name" >/dev/null 2>&1 || \
+        _acq_backend_terminate_unlocked "$name" >/dev/null 2>&1 || \
           echo "acq(sbx): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
         return 1
       fi
@@ -658,7 +715,21 @@ acq_backend_provision() {
     echo "acq(sbx): 'sbx create' failed for '$name' with custom image '$_neutral_image'." >&2
     acq_registry_auth_hint sbx "$_neutral_image"
   fi
+  if [ "$_rc" -ne 0 ] && _acq_sbx_confirm_absent "$name"; then
+    _acq_sbx_cleanup_uncreated_attempt
+  fi
   return "$_rc"
+}
+
+acq_backend_provision() {
+  ( local lock rc
+    _acq_provider_input_guardian_start || exit 1
+    lock=$(acq_provider_input_lock_acquire sbx "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
+    trap 'rc=$?; _acq_sbx_cleanup_uncreated_attempt; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
+    trap '_acq_provider_input_signal_exit 128' HUP
+    trap '_acq_provider_input_signal_exit 130' INT
+    trap '_acq_provider_input_signal_exit 143' TERM
+    _acq_backend_provision_unlocked "$@"; rc=$?; exit "$rc" )
 }
 
 # ---------------------------------------------------------------------------
@@ -952,13 +1023,34 @@ acq_backend_stop() {
 # and attach via `sbx run`, all of which auto-start a stopped sandbox — no
 # explicit start needed. See ADR-0017 for the reconciled sbx lifecycle model.
 
-acq_backend_terminate() {
-  sbx rm --force "$1"
+_acq_backend_terminate_unlocked() {
+  local rc
+  local _backend_pid
+  sbx rm --force "$1" & _backend_pid=$!
+  _acq_provider_input_guardian_register_if_active "$_backend_pid" || { kill "$_backend_pid" 2>/dev/null || true; wait "$_backend_pid" 2>/dev/null || true; return 1; }
+  rc=0
+  wait "$_backend_pid" || rc=$?
+  if [ "$rc" -ne 0 ] && ! _acq_sbx_confirm_absent "$1"; then
+    return "$rc"
+  fi
   # Remove any host-authoritative config dir for this sandbox (ADR-0035).
   # sbx does not use the guest /var/lib/acq markers today (its parity mechanism
   # is `sbx run --name` + ~/.acq-extra-kits), so this is a defensive no-op unless
   # a future sbx path writes host config. Best-effort, never blocks removal.
   acq_host_config_remove sbx "$1" || true
+  acq_provider_input_remove sbx "$1" || true
+  return "$rc"
+}
+
+acq_backend_terminate() {
+  ( local lock rc
+    _acq_provider_input_guardian_start || exit 1
+    lock=$(acq_provider_input_lock_acquire sbx "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
+    trap 'rc=$?; acq_provider_input_lock_release "${lock:-}" || true; _acq_provider_input_guardian_stop; exit "$rc"' EXIT
+    trap '_acq_provider_input_signal_exit 128' HUP
+    trap '_acq_provider_input_signal_exit 130' INT
+    trap '_acq_provider_input_signal_exit 143' TERM
+    _acq_backend_terminate_unlocked "$@"; rc=$?; exit "$rc" )
 }
 
 acq_backend_list() {

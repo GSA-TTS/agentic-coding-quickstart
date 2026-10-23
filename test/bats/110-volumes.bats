@@ -237,13 +237,18 @@ EOF
   : > "$CALLS"
   printf 'acq-volbox-var-lib-docker\n' > "$STUBDIR/.msb_volume_list"
   printf 'volbox\n' > "$STUBDIR/.msb_sandbox_list"
+  local projection_root; projection_root=$(acq_provider_input_root msb volbox)
+  _acq_provider_input_safe_mkdir "$projection_root/generations/one/models/providers"
+  chmod -R a-w "$projection_root/generations/one"
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null; STUB_MSB_RM_FAIL=1 acq_backend_terminate volbox >/dev/null 2>&1'
   refute_regex "$(cat "$CALLS")" 'volume rm'
+  [ -d "$projection_root" ]
   # (b) remove fails but the sandbox is GONE out of band -> clean up.
   : > "$CALLS"
   rm -f "$STUBDIR/.msb_sandbox_list"
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null; STUB_MSB_RM_FAIL=1 acq_backend_terminate volbox >/dev/null 2>&1'
   assert_regex "$(cat "$CALLS")" 'msb volume rm acq-volbox-var-lib-docker'
+  [ ! -e "$projection_root" ]
 }
 
 @test "vol: mid-life kit apply warns that volumes are creation-time only" {

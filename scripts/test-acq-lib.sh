@@ -58,6 +58,80 @@ MSB_GITHUB_SECRET_BINDING="GITHUB_TOKEN@github.com,api.github.com,codeload.githu
 # translation itself is exercised separately (see the kit-translate section).
 export ACQ_SBX_KIT_PASSTHROUGH=1
 
+# Adapter-only subprocess tests intentionally avoid loading common.sh. Provide
+# their projection boundary explicitly so they exercise the adapter behavior
+# without fetching a release or invoking a host Python runtime.
+acq_test_stub_provider_input_boundary() {
+  # Keep adapter-only in-process shells on the production root shape. In
+  # particular, names must never become raw path components before cleanup.
+  acq_provider_input_root() {
+    local backend="${1:-}" name="${2:-}" safe_backend safe_name name_sum
+    [ -n "$backend" ] && [ -n "$name" ] || return 1
+    safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
+    safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+    name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+    printf '%s/provider-input/%s/%s.%s\n' "$ACQ_PROVENANCE_DIR" "$safe_backend" "$safe_name" "$name_sum"
+  }
+  acq_provider_input_prepare() {
+    local root generation
+    root=$(acq_provider_input_root "$1" "$2") || return 1
+    mkdir -p "$root/generations" || return 1
+    generation=$(mktemp -d "$root/generations/generation.test.XXXXXXXX") || return 1
+    mkdir -p "$generation/models/providers" || return 1
+    printf '%s\n' "$generation"
+  }
+  acq_provider_input_project() { acq_provider_input_prepare "$@" >/dev/null; }
+  acq_provider_input_discard() { rm -rf -- "$3"; }
+  acq_provider_input_remove() {
+    local backend="$1" name="$2" root parent expected_parent
+    root=$(acq_provider_input_root "$backend" "$name") || return 1
+    expected_parent="$ACQ_PROVENANCE_DIR/provider-input/$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')"
+    parent=${root%/*}
+    [ "$parent" = "$expected_parent" ] || return 1
+    case "$root" in "$expected_parent"/*.*) ;; *) return 1 ;; esac
+    [ ! -L "$root" ] || return 1
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+    rm -rf -- "$root"
+  }
+  acq_provider_input_lock_acquire() {
+    local root lock parent
+    root=$(acq_provider_input_root "$1" "$2") || return 1
+    parent=${root%/*}
+    mkdir -p "$parent" || return 1
+    lock="${root}.lock"
+    mkdir "$lock" 2>/dev/null || return 1
+    printf '%s\n' "$lock"
+  }
+  acq_provider_input_lock_release() {
+    case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
+  }
+  acq_provider_input_msb_mount() {
+    local generation="$2" host_generation
+    if command -v host_path >/dev/null 2>&1; then
+      host_generation=$(host_path "$generation") || return 1
+    else
+      host_generation="$generation"
+    fi
+    printf '%s:%s/%s:ro\n' "$host_generation" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}"
+  }
+  acq_provider_input_guest_root() {
+    local backend="$1" generation="$3"
+    case "$backend" in
+      sbx) printf '%s\n' "$generation" ;;
+      msb) printf '%s/%s\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}" ;;
+      *) return 1 ;;
+    esac
+  }
+  acq_provider_input_sbx_mount() { printf '%s:ro\n' "$2"; }
+  # Guardian stubs: adapter-only tests do not exercise the guardian mechanism
+  # (no real subshell lifetime tracking needed); use $$ as a live PID placeholder
+  # so the lock_acquire signature change does not break callers in this context.
+  _acq_provider_input_guardian_start() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$$; export _ACQ_PROVIDER_INPUT_GUARDIAN_PID; }
+  _acq_provider_input_guardian_stop() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=''; }
+  _acq_provider_input_guardian_signal_children() { return 0; }
+}
+export -f acq_test_stub_provider_input_boundary
+
 # msb equivalent: resolve every REMOTE kit ref to a local empty spec dir instead
 # of a real git fetch. This keeps the suite network-free for the msb
 # heal/provision paths (acq_backend_provision / acq_backend_ensure_kits_applied),
@@ -107,6 +181,20 @@ make_stubs() {
   : >"$CALLS"
   # Preserve the base PATH (with coreutils etc.) but prepend the stub dir.
   _STUB_BASE_PATH="${PATH}"
+
+  # Executable-dispatch tests exercise routing rather than the released Python
+  # validator. Keep them deterministic with an explicit test-only interpreter;
+  # test 147 unsets this and supplies its own validator runtime.
+  cat >"$STUBDIR/provider-python" <<'PYTHON'
+#!/bin/sh
+case "${1:-}" in
+  -c) exit 0 ;;
+  */validate_provider_input_contract.py) exit 0 ;;
+  *) exec /usr/bin/python3 "$@" ;;
+esac
+PYTHON
+  chmod +x "$STUBDIR/provider-python"
+  export ACQ_PROVIDER_INPUT_PYTHON="$STUBDIR/provider-python"
 
   cat >"$STUBDIR/sbx" <<'STUB'
 #!/usr/bin/env bash
@@ -554,6 +642,77 @@ KEYGENSTUB
 
   PATH="$STUBDIR:$PATH"
   export PATH CALLS STUBDIR
+  # Adapter-only child shells source a backend without common.sh, but provisioning
+  # still crosses the provider-input boundary. BASH_ENV sources a self-contained
+  # definition rather than relying on Bash's exported-function import behavior.
+  cat > "$STUBDIR/provider-input-boundary.sh" <<'BOUNDARY'
+acq_provider_input_root() {
+  local backend="${1:-}" name="${2:-}" safe_backend safe_name name_sum
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
+  safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+  name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+  printf '%s/provider-input/%s/%s.%s\n' "$ACQ_PROVENANCE_DIR" "$safe_backend" "$safe_name" "$name_sum"
+}
+  acq_provider_input_prepare() {
+     local root generation
+     root=$(acq_provider_input_root "$1" "$2") || return 1
+     mkdir -p "$root/generations" || return 1
+     generation=$(mktemp -d "$root/generations/generation.test.XXXXXXXX") || return 1
+     mkdir -p "$generation/models/providers" || return 1
+     printf '%s\n' "$generation"
+  }
+  acq_provider_input_project() { acq_provider_input_prepare "$@" >/dev/null; }
+  acq_provider_input_discard() { rm -rf -- "$3"; }
+acq_provider_input_remove() {
+  local backend="$1" name="$2" root parent expected_parent
+  root=$(acq_provider_input_root "$backend" "$name") || return 1
+  expected_parent="$ACQ_PROVENANCE_DIR/provider-input/$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')"
+  parent=${root%/*}
+  [ "$parent" = "$expected_parent" ] || return 1
+  case "$root" in "$expected_parent"/*.*) ;; *) return 1 ;; esac
+  [ ! -L "$root" ] || return 1
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  rm -rf -- "$root"
+}
+acq_provider_input_lock_acquire() {
+  local root lock parent
+  root=$(acq_provider_input_root "$1" "$2") || return 1
+  parent=${root%/*}
+  mkdir -p "$parent" || return 1
+  lock="${root}.lock"
+  mkdir "$lock" 2>/dev/null || return 1
+  printf '%s\n' "$lock"
+}
+acq_provider_input_lock_release() {
+  case "${1:-}" in "$ACQ_PROVENANCE_DIR"/provider-input/*/*.lock) rmdir "$1" 2>/dev/null || true ;; *) return 1 ;; esac
+}
+  acq_provider_input_msb_mount() {
+    local generation="$2" host_generation
+    if command -v host_path >/dev/null 2>&1; then
+      host_generation=$(host_path "$generation") || return 1
+    else
+      host_generation="$generation"
+    fi
+    printf '%s:%s/%s:ro\n' "$host_generation" "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}"
+  }
+  acq_provider_input_guest_root() {
+    local backend="$1" generation="$3"
+    case "$backend" in
+      sbx) printf '%s\n' "$generation" ;;
+      msb) printf '%s/%s\n' "${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provider-input}" "${generation##*/}" ;;
+      *) return 1 ;;
+    esac
+  }
+  acq_provider_input_sbx_mount() { printf '%s:ro\n' "$2"; }
+_acq_provider_input_guardian_start() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$$; export _ACQ_PROVIDER_INPUT_GUARDIAN_PID; }
+_acq_provider_input_guardian_stop() { _ACQ_PROVIDER_INPUT_GUARDIAN_PID=''; }
+_acq_provider_input_guardian_signal_children() { return 0; }
+BOUNDARY
+  cat > "$STUBDIR/bash-env" <<BASH_ENV
+. "$STUBDIR/provider-input-boundary.sh"
+BASH_ENV
+  export BASH_ENV="$STUBDIR/bash-env"
   # Keep acq's post-background liveness probe fast in tests (real default is 1s):
   # the stubbed serve/ssh children stay alive ~3s (STUB_*_ALIVE), comfortably
   # past this settle window, so a healthy publish is observed without slow tests.
@@ -582,7 +741,7 @@ KEYGENSTUB
   unset ACQ_EXTRA_KITS ACQ_EXTRA_KIT_SOURCES
 }
 
-cleanup_stubs() { [ -n "${STUBDIR:-}" ] && rm -rf "$STUBDIR"; }
+cleanup_stubs() { [ -n "${STUBDIR:-}" ] && { chmod -R u+w "$STUBDIR" 2>/dev/null || true; rm -rf "$STUBDIR"; }; }
 
 # Source acq for its functions (ACQ_SOURCE_ONLY guard).
 # shellcheck disable=SC1090

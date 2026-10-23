@@ -14,6 +14,34 @@ This document captures real-world failure patterns when using Docker SBX + USAi 
 
 ---
 
+## Provider-input validator dependencies are missing
+
+### Symptoms
+
+- `acq create` stops before backend creation.
+- The error requires exact `PyYAML` and `jsonschema` versions.
+
+### Fix
+
+From the Quickstart checkout, create the isolated validator runtime:
+
+```bash
+scripts/setup-provider-input-validator --apply
+```
+
+The runtime is stored under `.acq-tools/` and does not modify global Python
+packages. The default invocation is a dry run; `--apply` builds a fresh,
+hash-verified environment and only replaces a working runtime after validation
+succeeds. Re-run the command after changing Quickstart versions if the pinned
+requirements change.
+
+The lock supports Linux x86_64/aarch64 with Python 3.12, macOS arm64 with
+Python 3.12, macOS x86_64 with Python 3.13, and Windows x86_64/arm64 with
+Python 3.12. An unsupported OS, architecture, or Python version fails before
+installation; use one of the supported runtimes rather than bypassing hashes.
+
+---
+
 ## 1. "Unknown Agent" Error on sbx create
 
 ### Symptoms
