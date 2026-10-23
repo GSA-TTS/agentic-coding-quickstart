@@ -272,10 +272,12 @@ Agent assumes host filesystem layout, not container layout.
 
 ### Fix
 
-The `usai-provider` kit sets both timeouts under the provider's `options` in its
-[`opencode.jsonc`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/acq-kits/usai-provider/files/home/usai-config/opencode.jsonc):
+The OpenCode agent kit renders provider options from validated provider inputs
+into the global OpenCode configuration. See its
+[`TROUBLESHOOTING.md`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/acq-kits/opencode/TROUBLESHOOTING.md)
+for current ownership and inspection steps. The generated USAi options include
 `timeout` (whole request, 10 minutes) and `chunkTimeout` (gap between streamed
-chunks, 2 minutes); check that file for the current values. If the read timeout
+chunks, 2 minutes). If the read timeout
 recurs, raise `chunkTimeout` in the project's `opencode.json`. The example below
 uses 5 minutes, the default from OpenCode 1.18.27 through 2.0.29; `false` disables the
 idle timeout entirely. A higher value makes a truly hung stream take longer to fail
