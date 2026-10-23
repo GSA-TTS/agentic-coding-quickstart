@@ -630,21 +630,15 @@ EOF
 # ---------------------------------------------------------------------------
 # MSB-specific signal/lock regressions (external-executable variants)
 # ---------------------------------------------------------------------------
-# The following three tests reproduce the finding from PR #608 review commit
-# 32588ae: `_acq_msb_cli` (a bash function) was used as the backgrounded process,
-# so the guardian registered the *shell wrapper's* PID, not the actual msb
-# executable.  TERM killed the wrapper but left the real binary alive; the lock
-# appeared stale and a second operation could slip in.
-#
 # All three tests use an EXTERNAL EXECUTABLE for `msb` (a script placed in PATH)
 # rather than a shell-function override.  The slow-msb executable traps TERM and
 # stays alive for a few seconds so the test can verify that:
 #   - the lock cannot be acquired while the executable is running, and
 #   - the lock is released only after the executable exits.
 #
-# The fix (inline `MSYS2_ARG_CONV_EXCL='*' msb ...&` instead of `_acq_msb_cli ...&`)
-# causes bash to exec-optimize: the forked child becomes the msb binary/script
-# directly, so $! is its PID and TERM reaches it.
+# The msb create background path uses inline `MSYS2_ARG_CONV_EXCL='*' msb ...&`
+# so bash exec-optimizes: the forked child becomes the msb binary/script
+# directly, giving $! the real executable PID so TERM reaches it.
 
 @test "msb remove TERM: external executable survives initial signal, second lock blocked until exit" {
   local script="$STUBDIR/msb-remove-term.sh" root msb_bin
@@ -824,15 +818,14 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# safe_mkdir / safe_dir direct-call tests (issue #620)
-# These exercise _acq_provider_input_safe_mkdir and _acq_provider_input_safe_dir
-# at the unit level.  The Darwin-alias canonicalization is validated via an
-# inline Python helper that forces sys.platform='darwin' so the test is
-# portable and runs in CI (Linux) without requiring a macOS host.
+# safe_mkdir / safe_dir / canonical_path direct-call tests
 # ---------------------------------------------------------------------------
+# All alias and spelling tests call the actual production helper
+# _acq_provider_input_canonical_path and the O_NOFOLLOW traversal helpers
+# directly.  ACQ_TEST_HOST_OS injects a synthetic platform so Darwin-branch
+# tests are portable on Linux CI; it is never set in non-test shells.
 
 @test "safe_mkdir creates and traverses a real path with no symlinks" {
-  # Verify the basic happy-path: all components are real directories, no symlinks.
   local real_path="$STUBDIR/real/a/b/c"
   run _acq_provider_input_safe_mkdir "$real_path"
   assert_success
@@ -855,98 +848,114 @@ EOF
 }
 
 @test "safe_dir rejects a path whose intermediate component is a symlink (malicious ancestor)" {
-  # Attacker pre-creates a symlink at an intermediate path component.
-  # safe_dir must reject this even though the target exists and is a directory.
   local base="$STUBDIR/evil_base" target="$STUBDIR/evil_target/sub" sym="$STUBDIR/evil_dir_check"
   mkdir -p "$base" "$target"
   ln -s "$base" "$sym"
-  # $sym is a symlink to a directory — safe_dir must fail (O_NOFOLLOW).
   run _acq_provider_input_safe_dir "$sym"
   assert_failure
 }
 
 @test "safe_mkdir rejects a path whose intermediate component is a symlink (malicious ancestor)" {
-  # A symlink planted at an existing component of the target path is rejected.
-  # This is the primary security invariant: no user-controlled symlink is ever followed.
   local real_deep="$STUBDIR/real_deep/legit"
   local evil_parent="$STUBDIR/evil_parent"
   local evil_target="$STUBDIR/evil_target_dir"
   mkdir -p "$real_deep" "$evil_target"
   ln -s "$evil_target" "$evil_parent"
-  # evil_parent -> evil_target_dir; try to safe_mkdir through it.
   run _acq_provider_input_safe_mkdir "$evil_parent/new_child"
   assert_failure
 }
 
-@test "safe_mkdir Darwin-alias canonicalization: /var -> /private/var (platform unit)" {
-  # Test the alias logic inline using Python with sys.platform forced to 'darwin'.
-  # This runs on all platforms (including Linux CI) and validates the exact code
-  # path that was broken on macOS before the fix (GSA-TTS/agentic-coding-quickstart#620).
-  run python3 - <<'PY'
-import sys
-# Force Darwin context for portable CI testing of the alias logic.
-_DARWIN_ALIASES = {'/var': '/private/var', '/tmp': '/private/tmp', '/etc': '/private/etc'}
-def apply_aliases(path, platform='darwin'):
-    if platform != 'darwin':
-        return path
-    for alias, target in _DARWIN_ALIASES.items():
-        if path == alias or path.startswith(alias + '/'):
-            return target + path[len(alias):]
-    return path
-
-failures = []
-cases = [
-    ('/var/folders/x/y/T/acq-test', '/private/var/folders/x/y/T/acq-test'),
-    ('/tmp/acq-test.XXX', '/private/tmp/acq-test.XXX'),
-    ('/etc/hosts', '/private/etc/hosts'),
-    ('/var', '/private/var'),
-    ('/tmp', '/private/tmp'),
-    ('/etc', '/private/etc'),
-    # Must NOT alias these non-matching paths:
-    ('/home/user/project', '/home/user/project'),
-    ('/private/var/already', '/private/var/already'),
-    ('/variably/something', '/variably/something'),
-    ('/tmpfile', '/tmpfile'),
-    ('/etc-extra', '/etc-extra'),
-    # Linux: no aliasing regardless of path
-    ('/var/folders/x/y', '/var/folders/x/y', 'linux'),
-    ('/tmp/test', '/tmp/test', 'linux'),
-]
-for entry in cases:
-    if len(entry) == 3:
-        path, expected, platform = entry
-    else:
-        path, expected = entry; platform = 'darwin'
-    result = apply_aliases(path, platform)
-    if result != expected:
-        failures.append(f'FAIL: apply_aliases({path!r}, {platform!r}) -> {result!r}, want {expected!r}')
-
-if failures:
-    for f in failures: print(f)
-    sys.exit(1)
-print('all alias cases pass')
-PY
-  assert_success
-  assert_output 'all alias cases pass'
+@test "canonical_path aliases /var /tmp /etc on Darwin via ACQ_TEST_HOST_OS" {
+  # Exercises the production _acq_provider_input_canonical_path helper directly
+  # with ACQ_TEST_HOST_OS=darwin so the Darwin branch runs on Linux CI.
+  local cases=(
+    '/var/folders/x/y/T/acq /private/var/folders/x/y/T/acq'
+    '/tmp/acq-test.XXX /private/tmp/acq-test.XXX'
+    '/etc/hosts /private/etc/hosts'
+    '/var /private/var'
+    '/tmp /private/tmp'
+    '/etc /private/etc'
+    '/home/user/project /home/user/project'
+    '/private/var/already /private/var/already'
+    '/variably/something /variably/something'
+    '/tmpfile /tmpfile'
+    '/etc-extra /etc-extra'
+  )
+  local pair input expected got
+  for pair in "${cases[@]}"; do
+    input="${pair%% *}"; expected="${pair##* }"
+    got=$(ACQ_TEST_HOST_OS=darwin _acq_provider_input_canonical_path "$input")
+    [ "$got" = "$expected" ] || {
+      printf 'FAIL canonical_path %s -> %s, want %s\n' "$input" "$got" "$expected" >&2
+      return 1
+    }
+  done
 }
 
-@test "safe_mkdir Darwin-alias: path via /var alias traverses to real /private/var (simulated)" {
-  # Simulate macOS /var->private/var by creating a symlink in STUBDIR,
-  # then confirm that safe_mkdir succeeds on the canonical form (/private/var/...)
-  # and fails on the non-canonical symlinked form, reproducing the pre-fix failure.
-  local alias_dir="$STUBDIR/var_alias_sim"
+@test "canonical_path leaves /var /tmp unchanged on Linux via ACQ_TEST_HOST_OS" {
+  local cases=(
+    '/var/folders/x/y /var/folders/x/y'
+    '/tmp/test /tmp/test'
+    '/etc/resolv.conf /etc/resolv.conf'
+  )
+  local pair input expected got
+  for pair in "${cases[@]}"; do
+    input="${pair%% *}"; expected="${pair##* }"
+    got=$(ACQ_TEST_HOST_OS=linux _acq_provider_input_canonical_path "$input")
+    [ "$got" = "$expected" ] || {
+      printf 'FAIL canonical_path linux %s -> %s, want %s\n' "$input" "$got" "$expected" >&2
+      return 1
+    }
+  done
+}
+
+@test "canonical_path normalizes //var and /./var spellings before alias match (Darwin)" {
+  local got
+  got=$(ACQ_TEST_HOST_OS=darwin _acq_provider_input_canonical_path '//var/folders')
+  [ "$got" = '/private/var/folders' ] || { printf 'FAIL //var: %s\n' "$got" >&2; return 1; }
+  got=$(ACQ_TEST_HOST_OS=darwin _acq_provider_input_canonical_path '/./var/folders')
+  [ "$got" = '/private/var/folders' ] || { printf 'FAIL /./var: %s\n' "$got" >&2; return 1; }
+  got=$(ACQ_TEST_HOST_OS=darwin _acq_provider_input_canonical_path '//tmp/test')
+  [ "$got" = '/private/tmp/test' ] || { printf 'FAIL //tmp: %s\n' "$got" >&2; return 1; }
+  got=$(ACQ_TEST_HOST_OS=darwin _acq_provider_input_canonical_path '/./tmp/test')
+  [ "$got" = '/private/tmp/test' ] || { printf 'FAIL /./tmp: %s\n' "$got" >&2; return 1; }
+}
+
+@test "canonical_path with ACQ_TEST_HOST_OS=darwin enables safe_mkdir on alias-prefixed paths" {
+  # Prove that safe_mkdir succeeds on a real directory (canonical form) and that
+  # a user-owned symlink planted at the path root is still rejected regardless of
+  # the platform override — ACQ_TEST_HOST_OS only controls the alias rewrite;
+  # O_NOFOLLOW enforcement is unconditional.
+  local real_dir="$STUBDIR/private_var_sim" alias_path
+  mkdir -p "$real_dir/acq/state"
+
+  # Real directory under STUBDIR succeeds — no symlinks involved.
+  ACQ_TEST_HOST_OS=linux _acq_provider_input_safe_mkdir "$real_dir/new_child"
+
+  # A path through a user-owned symlink must still fail regardless of platform.
+  # bats run does not propagate inline env= prefix, so export then restore.
+  alias_path="$STUBDIR/alias_link"
+  ln -s "$real_dir" "$alias_path"
+  export ACQ_TEST_HOST_OS=darwin
+  run _acq_provider_input_safe_mkdir "$alias_path/child"
+  unset ACQ_TEST_HOST_OS
+  assert_failure
+}
+
+@test "safe_mkdir Darwin-alias: canonical form succeeds, symlinked form fails (regression)" {
+  # Confirm that the production traversal rejects user-owned symlinks even after
+  # canonical_path runs.  This is the primary regression assertion: a user symlink
+  # planted at a path component is never followed regardless of the host OS.
   local real_dir="$STUBDIR/real_private_var"
+  local alias_dir="$STUBDIR/var_alias_sim"
   mkdir -p "$real_dir"
   ln -s "$real_dir" "$alias_dir"
 
-  # The canonical (real) path works fine with O_NOFOLLOW — no symlink to traverse.
+  # The real (canonical) path succeeds.
   run _acq_provider_input_safe_mkdir "$real_dir/acq/state"
   assert_success
 
-  # The symlinked alias path fails on ALL platforms (alias_dir itself is a symlink).
-  # On macOS before the fix, the OS-provided /var was also a symlink and failed
-  # identically.  The fix canonicalizes ONLY the three known OS-level aliases,
-  # not arbitrary user symlinks like alias_dir here.
+  # A user-owned symlink at the path root fails — not a trusted OS alias.
   run _acq_provider_input_safe_mkdir "$alias_dir/acq/state"
   assert_failure
 }
