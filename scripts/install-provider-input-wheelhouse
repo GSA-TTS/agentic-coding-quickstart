@@ -37,6 +37,9 @@ else
   actual=$(shasum -a 256 "$tmp/$asset" | cut -d' ' -f1)
 fi
 [ "$actual" = "$expected" ] || { echo "checksum mismatch for $asset" >&2; exit 2; }
+# setup-provider-input-validator looks for wheels under <wheelhouse>/<platform>/
+# so the extracted contents must land one level deeper than the base --target.
+target="${target}/${platform}"
 stage="${target}.stage.$$"
 backup="${target}.previous.$$"
 rm -rf "$stage"

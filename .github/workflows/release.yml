@@ -80,7 +80,7 @@ jobs:
               --requirement "${{ matrix.lock }}" --platform "${{ matrix.pip_platform }}" \
               --implementation cp --python-version "$py" --abi "cp$py" --dest wheelhouse
           done
-          (cd wheelhouse && python3 -c "import hashlib,pathlib; print(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\\n' for p in sorted(pathlib.Path('.').glob('*')) if p.is_file()), end='')" > SHA256SUMS)
+          (cd wheelhouse && python3 -c "import hashlib,pathlib; print(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\\n' for p in sorted(pathlib.Path('.').glob('*.whl')) if p.is_file()), end='')" > SHA256SUMS)
           tar -C wheelhouse -czf "../provider-input-validator-wheelhouse-${{ matrix.platform }}.tar.gz" .
       - name: Build Windows embedded validator runtime
         if: ${{ matrix.platform == 'windows-x86_64' }}

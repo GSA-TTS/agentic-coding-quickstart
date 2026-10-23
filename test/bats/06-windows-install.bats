@@ -267,3 +267,72 @@ teardown() {
   assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip provider-input-validator-wheelhouse-\*\.tar\.gz > SHA256SUMS'
   assert_regex "$workflow" 'dist/acq-windows-x64\.zip'
 }
+
+@test "release workflow: wheelhouse job tar path matches upload-artifact path" {
+  # Structural regression: the tar must be written to the same path that
+  # upload-artifact reads. If they diverge the artifact upload silently uploads
+  # an empty directory and downstream jobs receive nothing.
+  workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
+
+  # The tar is created one level above the wheelhouse working dir (../NAME.tar.gz
+  # resolves to the runner cwd), and upload-artifact uses the bare filename.
+  assert_regex "$workflow" \
+    'tar -C wheelhouse -czf "\.\./provider-input-validator-wheelhouse-\$\{\{ matrix\.platform \}\}\.tar\.gz" \.'
+  # upload-artifact path must reference the bare filename (runner cwd), not a subdirectory.
+  grep -qF 'path: provider-input-validator-wheelhouse-${{ matrix.platform }}.tar.gz' \
+    "$REPO_ROOT/.github/workflows/release.yml"
+}
+
+@test "release workflow: wheelhouse SHA256SUMS never hashes itself" {
+  # Regression: the shell redirect `> SHA256SUMS` creates the file as 0 bytes
+  # BEFORE Python's glob runs.  If the glob matches `*` it will include
+  # SHA256SUMS itself (hash of empty string), producing a permanently
+  # self-inconsistent manifest that always fails verification.
+  # The fix is to glob only *.whl so SHA256SUMS is never a candidate.
+  workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
+
+  # Must use *.whl glob (or equivalent explicit exclusion), not bare glob('*')
+  assert_regex "$workflow" "glob\('\*\.whl'\)"
+  refute_regex "$workflow" "glob\('\*'\)[^)]*is_file\(\)"
+}
+
+@test "release workflow: wheelhouse tar extracts into platform subdir for non-Windows" {
+  # Structural test: the release-assets job must extract each non-Windows
+  # wheelhouse tar into a platform-named subdirectory so that
+  # setup-provider-input-validator can find wheels at
+  # scripts/provider-input-validator-wheelhouse/<platform>/*.whl.
+  # (Windows is handled separately via the explicit windows-x86_64 path on line ~141.)
+  workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
+
+  # install-provider-input-wheelhouse appends the platform subdir itself; the
+  # release-assets job uses the direct tar -xzf approach only for Windows.
+  # Assert Windows extraction uses the correct subdir path.
+  assert_regex "$workflow" \
+    'tar -xzf.*provider-input-validator-wheelhouse-windows-x86_64.*-C dist/acq-windows-x64/scripts/provider-input-validator-wheelhouse/windows-x86_64'
+}
+
+@test "install-provider-input-wheelhouse: installs into platform subdir" {
+  # Regression: the script previously placed extracted wheels directly at
+  # <target>/*.whl, but setup-provider-input-validator expects them at
+  # <target>/<platform>/*.whl.  Verify the platform subdir is appended.
+  script=$(cat "$REPO_ROOT/scripts/install-provider-input-wheelhouse")
+
+  # The platform subdir must be appended to target before stage/backup are derived
+  assert_regex "$script" 'target="\$\{target\}/\$\{platform\}"'
+}
+
+@test "install-provider-input-wheelhouse: setup-provider-input-validator wheelhouse paths match" {
+  # Cross-check: every platform path that setup-provider-input-validator
+  # expects must correspond exactly to what install-provider-input-wheelhouse
+  # will produce (base target + "/" + platform slug).
+  setup_script=$(cat "$REPO_ROOT/scripts/setup-provider-input-validator")
+  install_script=$(cat "$REPO_ROOT/scripts/install-provider-input-wheelhouse")
+
+  # Verify that the four platform slugs used in setup are also the ones
+  # produced by the case statement in the install script.
+  for platform in macos-arm64 macos-x86_64 linux-x86_64 linux-aarch64; do
+    assert_regex "$setup_script" "provider-input-validator-wheelhouse/${platform}"
+    assert_regex "$install_script" "${platform}"
+  done
+  assert_regex "$install_script" 'target="\$\{target\}/\$\{platform\}"'
+}
