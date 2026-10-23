@@ -2414,7 +2414,7 @@ acq_provider_input_prepare() {
   chmod 755 "$root" "$root/generations" || return 1
   stage=$(mktemp -d "${TMPDIR:-/tmp}/acq-provider-input.XXXXXXXX") || return 1
   chmod 700 "$stage" || { rm -rf "$stage"; return 1; }
-  for kitref in "${KITS[@]}"; do
+  for kitref in ${KITS[@]+"${KITS[@]}"}; do
     token=$(printf '%s' "$kitref" | cksum | cut -d' ' -f1) || { rm -rf "$stage"; return 1; }
     kitdir=$(kit_translate_fetch "$kitref" "$stage/fetch-$token") || { rm -rf "$stage"; return 2; }
     manifest="$kitdir/provider-input.json"
