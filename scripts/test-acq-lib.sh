@@ -652,9 +652,10 @@ s.close()
 PY
   _pid="$!"
 fi
+trap '[ -z "$_pid" ] || { kill "$_pid" 2>/dev/null || true; wait "$_pid" 2>/dev/null || true; }; exit 0' TERM INT HUP
 exec >/dev/null 2>&1
 sleep "${STUB_SSH_ALIVE:-0.6}"
-[ -n "$_pid" ] && kill "$_pid" 2>/dev/null || true
+[ -z "$_pid" ] || { kill "$_pid" 2>/dev/null || true; wait "$_pid" 2>/dev/null || true; }
 exit 0
 SSHSTUB
   chmod +x "$STUBDIR/ssh"
@@ -761,10 +762,10 @@ BOUNDARY
 . "$STUBDIR/provider-input-boundary.sh"
 BASH_ENV
   export BASH_ENV="$STUBDIR/bash-env"
-  # Keep acq's post-background liveness probe fast in tests (real default is 1s):
-  # the stubbed serve/ssh children stay alive ~3s (STUB_*_ALIVE), comfortably
-  # past this settle window, so a healthy publish is observed without slow tests.
-  export ACQ_MSB_SERVE_SETTLE="0.3" ACQ_MSB_FORWARD_SETTLE="0.3"
+  # Keep acq's post-background liveness probe fast in tests (real default is 1s).
+  # The stubbed serve/ssh children outlive this window; failure tests still model
+  # a dead child or absent listener explicitly.
+  export ACQ_MSB_SERVE_SETTLE="0.1" ACQ_MSB_FORWARD_SETTLE="0.1"
   # Make the create-time host-port contention probe (ADR-0034) deterministic and
   # socket-free: every port reports FREE unless a test names it in
   # ACQ_MSB_HOST_PORTS_BUSY. Without this the verdict would depend on what the
