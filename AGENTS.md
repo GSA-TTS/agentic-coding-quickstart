@@ -594,16 +594,18 @@ The agent MUST:
 > (notably `acq.backends/msb.sh`) and forced the old one-file-per-invocation
 > workaround. With it off, memory is a non-issue (~135 MB), so you can lint in
 > small batches. Wall-clock still grows superlinearly with the number of files
-> in a *single* invocation, so batch with `xargs -n8` (matching the hook):
+> in a *single* invocation. Use the portable, bounded runner that matches the
+> hook (it batches eight files and runs up to four batches concurrently):
 >
 > ```sh
-> printf '%s\n' acq acq.backends/*.sh \
->   scripts/test-acq-lib.sh scripts/test-acq-bats test/bats/*.bats test/bats/helper.bash \
->   | xargs -r -n8 shellcheck --severity=warning
+> scripts/run-shellcheck acq acq.backends/*.sh \
+>   scripts/test-acq-lib.sh scripts/test-acq-bats scripts/run-shellcheck \
+>   test/bats/*.bats test/bats/helper.bash
 > ```
 >
-> `.shellcheckrc` is picked up automatically (ShellCheck walks up to the repo
-> root), so no extra flags are needed; `--severity=warning` matches the hook.
+> Set `SHELLCHECK_JOBS=1` to diagnose serially. `.shellcheckrc` is picked up
+> automatically (ShellCheck walks up to the repo root), so no extra flags are
+> needed; `--severity=warning` matches the hook.
 > Core correctness checks (SC2086/2154/2034/1090/…) are unaffected by the
 > dataflow pass being off. **Do not pass `-x`/`--external-sources`** on the test
 > suite: it pulls the shared stub library into every `.bats` file and re-triggers

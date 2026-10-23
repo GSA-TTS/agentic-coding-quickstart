@@ -75,10 +75,11 @@ repos:
         # We still bound the batch size with `xargs -n8`: even with the dataflow
         # pass off, ShellCheck's per-run wall-clock grows superlinearly with the
         # number of files held in ONE invocation (all ~39 files at once takes
-        # >100s; batches of 8 finish in ~10s total). `xargs -r` skips an empty
-        # batch (never runs argless, which would block reading stdin); `bash -c
-        # … --` with a `_` $0 keeps filenames as positional args.
-        entry: bash -c 'printf "%s\n" "$@" | xargs -r -n8 shellcheck --severity=warning' --
+        # >100s; batches of 8 finish in ~10s total). The runner returns before
+        # xargs on an empty file set, then schedules up to four independent batches
+        # concurrently; set
+        # SHELLCHECK_JOBS=1 to reproduce serial behavior.
+        entry: bash scripts/run-shellcheck
         language: system
         types: [shell]
         pass_filenames: true
@@ -110,7 +111,7 @@ repos:
         entry: bash scripts/test-acq-bats
         language: system
         pass_filenames: false
-        files: '^(acq|acq\.backends/.*|scripts/test-acq-lib\.sh|scripts/test-acq-bats|scripts/fix-exec-bits|scripts/verify-backends|test/bats/.*)$'
+        files: '^(acq|acq\.backends/.*|scripts/(test-acq-lib\.sh|test-acq-bats|run-shellcheck|fix-exec-bits|verify-backends)|test/bats/.*)$'
 
       - id: test-probe-msb-startup
         name: MSB startup probe offline tests
@@ -125,7 +126,7 @@ repos:
       # hook (it is tagged shell), but including it is harmless.
       - id: shellcheck-bats
         name: shellcheck (bats suite)
-        entry: bash -c 'printf "%s\n" "$@" | xargs -r -n8 shellcheck --severity=warning' --
+        entry: bash scripts/run-shellcheck
         language: system
         files: '^test/bats/.*\.(bats|bash)$'
 

@@ -266,6 +266,36 @@ The next CI run is the pickup trigger for the outstanding full-hook, Bash 3.2,
 external-validator, and GitHub-runner timing verification above. No live backend
 VM was created; the sandbox cannot run nested backend verification.
 
+### Follow-up performance work (2026-10-23)
+
+The post-change PR runner reported 830 tests and a 255-second modern-Bash Bats
+hook. The slowest test was the MSB serve-PID teardown regression at 30.5 seconds;
+the next port-related tests ranged from 8 to 16 seconds. The fixture, not the
+production implementation, was responsible for the largest delays: the custom
+serve stub launched `sleep 30` as a child and the test waited for that child after
+killing the wrapper. The stub now execs its long-lived process, so teardown waits
+for the exact PID being asserted. The generic SSH stub also reaps its temporary
+listener when terminated. Test-only healthy settle windows are 0.1 seconds;
+production defaults remain one second, and death/no-listener paths keep explicit
+failure coverage.
+
+The same follow-up adds `scripts/run-shellcheck`: batches remain capped at eight
+files but run with up to four concurrent jobs (or `SHELLCHECK_JOBS=1` for serial
+diagnosis). The cap keeps concurrency below the previously documented ShellCheck
+memory risk. The runner rejects invalid or out-of-range job counts and preserves
+the failure status of any lint batch.
+
+Local two-CPU measurements after the follow-up:
+
+| Measurement | Before | After |
+|-------------|--------|-------|
+| MSB serve-PID teardown regression | 30.2 s | 0.33 s |
+| MSB port teardown regression | 10.9 s | 2.8 s |
+| Port and host-port files combined | 120.6 s | 60.5 s |
+| Representative ShellCheck inputs | serial 17.4 s | parallel 7.8 s |
+
+These are local measurements; CI wall-clock verification remains required.
+
 ## Links
 
 - `.shellcheckrc` — the `extended-analysis=false` dataflow-OOM fix this decision

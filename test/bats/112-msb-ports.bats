@@ -66,7 +66,7 @@ PY
 if [ "\${1:-}" = "ssh" ] && [ "\${2:-}" = "serve" ]; then
   printf '%s' "\$\$" > "$STUBDIR/state/serve.pid"
   exec >/dev/null 2>&1
-  sleep 30
+  exec sleep 30
 fi
 MSBPIDSTUB
   chmod +x "$STUBDIR/msb"
@@ -79,7 +79,7 @@ MSBPIDSTUB
     printf "pid=%s child=%s\n" "$pid" "$child"
     [ "$pid" = "$child" ] && echo "pid-is-real-process" || echo "pid-is-wrapper"
     kill "$pid" 2>/dev/null
-    sleep 0.5
+    wait "$pid" 2>/dev/null
     if kill -0 "$child" 2>/dev/null; then echo "child-survived"; else echo "child-gone"; fi
   '
   assert_output --partial 'pid-is-real-process'
@@ -118,7 +118,8 @@ MSBPIDSTUB
 @test "msb ports(S2): a forward with no host listener fails the publish, no state recorded" {
   local hport; hport=$(free_tcp_port)
   run bash -c '
-    export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_SSH_NO_LISTENER=1
+    export ACQ_MSB_FORCE_SERVE_PORT=54321 STUB_SSH_NO_LISTENER=1 \
+      ACQ_MSB_FORWARD_PROBE_ATTEMPTS=1 ACQ_MSB_FORWARD_PROBE_DELAY=0
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_backend_ports pbox --publish "$1:3000" 2>&1
     echo "RC=$?"
