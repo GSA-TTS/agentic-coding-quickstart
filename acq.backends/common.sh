@@ -2374,21 +2374,11 @@ _acq_provider_input_python() {
       data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
     fi
     tools_dir="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}"
-    for runtime in \
-      "$tools_dir/provider-input-validator.current"; do
-      if [ -x "$runtime/bin/python3" ]; then
-        python="$runtime/bin/python3"
-        break
-      fi
-      if [ -x "$runtime/Scripts/python.exe" ]; then
-        python="$runtime/Scripts/python.exe"
-        break
-      fi
-      if [ -x "$runtime/python.exe" ]; then
-        python="$runtime/python.exe"
-        break
-      fi
-    done
+    runtime="$tools_dir/provider-input-validator.current"
+    if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
+    elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
+    elif [ -x "$runtime/python.exe" ]; then python="$runtime/python.exe"
+    fi
   fi
   if [ -z "$python" ]; then
     setup="$ACQ_SCRIPT_DIR/scripts/setup-provider-input-validator"
@@ -2397,12 +2387,24 @@ _acq_provider_input_python() {
       echo "     Reinstall acq from an official release; validation remains mandatory." >&2
       return 2
     }
+    # A git checkout has no release wheelhouse; name the online setup command so
+    # contributors know exactly how to proceed from a working tree.
+    if [ -e "$ACQ_SCRIPT_DIR/.git" ]; then
+      local _wh_hint
+      _wh_hint="$ACQ_SCRIPT_DIR/scripts/provider-input-validator-wheelhouse"
+      # Only show the git-checkout hint when the default wheelhouse is absent.
+      if ! [ -d "$_wh_hint" ]; then
+        echo "     Git checkout detected: run the following once to install from PyPI with hash verification:" >&2
+        echo "       scripts/setup-provider-input-validator --apply --online" >&2
+        echo "     Or set ACQ_PROVIDER_INPUT_PYTHON to a Python interpreter with PyYAML 6.0.3 and jsonschema 4.26.0." >&2
+      fi
+    fi
     "$setup" --apply >&2 || return 2
-    for runtime in "$tools_dir/provider-input-validator.current"; do
-      if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"; break; fi
-      if [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"; break; fi
-      if [ -x "$runtime/python.exe" ]; then python="$runtime/python.exe"; break; fi
-    done
+    runtime="$tools_dir/provider-input-validator.current"
+    if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
+    elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
+    elif [ -x "$runtime/python.exe" ]; then python="$runtime/python.exe"
+    fi
     [ -n "$python" ] || {
       echo "acq: provider-input validator bootstrap did not publish a runtime" >&2
       return 2

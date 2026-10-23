@@ -97,6 +97,73 @@ EOF
   grep -Fq -- '--require-hashes' "$REPO_ROOT/scripts/setup-provider-input-validator"
 }
 
+@test "setup validator honors explicit bootstrap Python and online hash install" {
+  local tools="$STUBDIR/online-data" fakebin="$STUBDIR/online-bin" log="$STUBDIR/online.log"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/python-custom" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+if [ "$1" = -c ]; then printf '3.14\n'; exit 0; fi
+if [ "$1" = -m ] && [ "$2" = venv ]; then
+  mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
+fi
+if [ "$1" = -m ] && [ "$2" = pip ]; then exit 0; fi
+if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec /usr/bin/python3 "$@"; fi
+if [ "$1" = - ]; then exit 0; fi
+exit 0
+EOF
+  cat > "$fakebin/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in -s) echo Darwin ;; -m) echo arm64 ;; *) echo Darwin ;; esac
+EOF
+  chmod +x "$fakebin/python-custom" "$fakebin/uname"
+
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python-custom" \
+    ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 \
+    ACQ_PROVIDER_INPUT_DATA_DIR="$tools" VALIDATOR_SETUP_LOG="$log" \
+    PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
+  assert_success
+  [ -L "$tools/provider-input-validator.current" ]
+  grep -Fq -- '--require-hashes' "$log"
+  ! grep -Fq -- '--no-index' "$log"
+}
+
+@test "setup validator prefers a supported versioned Python before python3" {
+  local fakebin="$STUBDIR/versioned-bin" log="$STUBDIR/versioned.log" tools="$STUBDIR/versioned-data"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/python3.14" <<'EOF'
+#!/bin/sh
+printf 'selected-3.14 %s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+if [ "$1" = -c ]; then printf '3.14\n'; exit 0; fi
+if [ "$1" = -m ] && [ "$2" = venv ]; then
+  mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
+fi
+if [ "$1" = -m ] && [ "$2" = pip ]; then exit 0; fi
+if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec /usr/bin/python3 "$@"; fi
+if [ "$1" = - ]; then exit 0; fi
+exit 0
+EOF
+  cat > "$fakebin/python3" <<'EOF'
+#!/bin/sh
+printf 'wrong-python3\n' >> "$VALIDATOR_SETUP_LOG"
+exit 1
+EOF
+  cat > "$fakebin/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in -s) echo Darwin ;; -m) echo arm64 ;; *) echo Darwin ;; esac
+EOF
+  chmod +x "$fakebin/python3.14" "$fakebin/python3" "$fakebin/uname"
+
+  ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 \
+    ACQ_PROVIDER_INPUT_BOOTSTRAP_CANDIDATES=python3.14 \
+    ACQ_PROVIDER_INPUT_DATA_DIR="$tools" VALIDATOR_SETUP_LOG="$log" \
+    PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
+  assert_success
+  [ -L "$tools/provider-input-validator.current" ]
+  grep -Fq 'selected-3.14' "$log"
+  ! grep -Fq 'wrong-python3' "$log"
+}
+
 @test "setup validator rejects invalid arguments without changing a runtime" {
   local target="$STUBDIR/user-data/provider-input-validator.current"
   mkdir -p "$target"
@@ -136,21 +203,21 @@ exit 0
 EOF
   chmod +x "$fakebin/python3"
 
-  ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
   assert_success
   [ -L "$target" ]
   [ -x "$target/bin/python3" ]
   grep -Fq -- '--require-hashes' "$log"
   first_runtime=$(readlink "$target")
 
-  ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
   assert_success
   second_runtime=$(readlink "$target")
   [ "$second_runtime" != "$first_runtime" ]
   [ -x "$target/bin/python3" ]
   [ ! -e "$tools/$first_runtime" ]
 
-  ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" VALIDATOR_VALIDATE_FAIL=1 PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" VALIDATOR_VALIDATE_FAIL=1 PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
   assert_failure
   [ "$second_runtime" = "$(readlink "$target")" ]
   [ -x "$target/bin/python3" ]

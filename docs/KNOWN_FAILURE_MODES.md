@@ -21,9 +21,9 @@ This document captures real-world failure patterns when using Docker SBX + USAi 
 - `acq create` stops before backend creation.
 - The error requires exact `PyYAML` and `jsonschema` versions.
 
-### Fix
+### Fix: release install (Homebrew, npm, `install.sh --release`)
 
-From the Quickstart checkout, create the isolated validator runtime:
+`--apply` alone uses the offline wheelhouse bundled with the release:
 
 ```bash
 scripts/setup-provider-input-validator --apply
@@ -35,6 +35,39 @@ packages. The default invocation is a dry run; `--apply` builds a fresh,
 hash-verified environment and only replaces a working runtime after validation
 succeeds. Re-run the command after changing Quickstart versions if the pinned
 requirements change.
+
+### Fix: git checkout / development install (no wheelhouse)
+
+A working-tree clone (`install.sh --clone`, or running `./acq` directly from a
+`git checkout`) has no release wheelhouse. Use the `--online` flag, which
+downloads the same hash-locked packages from PyPI instead:
+
+```bash
+scripts/setup-provider-input-validator --apply --online
+```
+
+Network access is restricted to this explicit setup call; `acq create` itself
+remains fully offline after the runtime is installed.
+
+If the error message already names this command, that means `acq` detected a git
+checkout with no wheelhouse and surfaced the hint automatically.
+
+### Alternative: `ACQ_PROVIDER_INPUT_PYTHON`
+
+If you already have a Python interpreter with the exact required versions
+(`PyYAML 6.0.3` and `jsonschema 4.26.0`), point `acq` at it directly:
+
+```bash
+export ACQ_PROVIDER_INPUT_PYTHON=/path/to/python3
+acq create opencode .
+```
+
+`acq` validates the dependency versions at startup and exits with a clear error
+if they do not match. This is useful when a system-managed environment already
+carries the right packages, or when the setup script cannot run (restricted
+network, air-gapped lab). It is not a substitute for the pinned runtime in
+production; the venv created by `setup-provider-input-validator` is preferred
+because it is isolated from system upgrades.
 
 The lock supports Linux x86_64/aarch64 with Python 3.12, macOS x86_64/arm64 with
 Python 3.12-3.14, and Windows x86_64/arm64 with
