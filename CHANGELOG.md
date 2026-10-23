@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.1.1...v4.2.0) (2026-10-23)
+
+
+### Features
+
+* **acq:** project provider inputs read-only ([#608](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/608)) ([bd11c77](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/bd11c77f81673c1f7fb0a574c38e7cbb54fbd341))
+
+
+### Performance Improvements
+
+* **test:** eliminate redundant bats fetches and waits ([#621](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/621)) ([dda5fe1](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/dda5fe17667ecc6e3f15d2924a7b303657f4aa9d))
+
 ## [4.1.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.1.0...v4.1.1) (2026-10-22)
 
 
