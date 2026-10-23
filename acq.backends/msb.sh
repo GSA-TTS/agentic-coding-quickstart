@@ -3195,7 +3195,8 @@ _acq_backend_provision_unlocked() {
   # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
   local kitref kitdir
   _acq_msb_select_kits "$agent" || return 1
-  local kits=("${KITS[@]}")
+  local kits=()
+  for kitref in ${KITS[@]+"${KITS[@]}"}; do kits+=("$kitref"); done
   local _generic_opencode_kit=""
   if [ "$_msb_image_source" = "generic-opencode-default" ]; then
     _generic_opencode_kit=$(_acq_agent_builtin_kit_ref opencode) || return 1
@@ -5687,7 +5688,8 @@ acq_backend_ensure_kits_applied() {
   local agent
   agent=$(acq_backend_recorded_agent "$name")
   _acq_msb_select_kits "$agent"
-  local kits=("${KITS[@]}")
+  local kits=()
+  for kitref in ${KITS[@]+"${KITS[@]}"}; do kits+=("$kitref"); done
   local builtin_count="${ACQ_BUILTIN_KIT_COUNT:-4}"
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"
