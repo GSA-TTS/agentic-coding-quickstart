@@ -39,13 +39,20 @@ while [ "$#" -gt 0 ]; do
 done
 
 select_bootstrap_python() {
-  local candidate candidates
+  local candidate candidates host_os
   if [ -n "${ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON:-}" ]; then
     [ -x "$ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON" ] || return 1
     printf '%s\n' "$ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON"
     return 0
   fi
-  candidates=${ACQ_PROVIDER_INPUT_BOOTSTRAP_CANDIDATES:-$(printf '%s\n' python3.14 python3.13 python3.12 python3)}
+  host_os=${ACQ_PROVIDER_INPUT_HOST_OS:-$(uname -s 2>/dev/null)}
+  if [ -n "${ACQ_PROVIDER_INPUT_BOOTSTRAP_CANDIDATES:-}" ]; then
+    candidates=$ACQ_PROVIDER_INPUT_BOOTSTRAP_CANDIDATES
+  elif [ "$host_os" = Darwin ]; then
+    candidates=$(printf '%s\n' python3.14 python3.13 python3.12 python3)
+  else
+    candidates=$(printf '%s\n' python3.12 python3)
+  fi
   while IFS= read -r candidate; do
     command -v "$candidate" 2>/dev/null && return 0
   done <<EOF

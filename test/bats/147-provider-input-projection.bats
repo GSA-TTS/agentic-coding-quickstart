@@ -164,6 +164,36 @@ EOF
   ! grep -Fq 'wrong-python3' "$log"
 }
 
+@test "setup validator skips unsupported newer Python on Linux" {
+  local fakebin="$STUBDIR/linux-versioned-bin" log="$STUBDIR/linux-versioned.log" tools="$STUBDIR/linux-data"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/python3.14" <<'EOF'
+#!/bin/sh
+printf 'wrong-3.14\n' >> "$VALIDATOR_SETUP_LOG"
+exit 1
+EOF
+  cat > "$fakebin/python3.12" <<'EOF'
+#!/bin/sh
+printf 'selected-3.12 %s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+if [ "$1" = -c ]; then printf '3.12\n'; exit 0; fi
+if [ "$1" = -m ] && [ "$2" = venv ]; then
+  mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
+fi
+if [ "$1" = -m ] && [ "$2" = pip ]; then exit 0; fi
+if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec /usr/bin/python3 "$@"; fi
+if [ "$1" = - ]; then exit 0; fi
+exit 0
+EOF
+  chmod +x "$fakebin/python3.14" "$fakebin/python3.12"
+
+  ACQ_PROVIDER_INPUT_HOST_OS=Linux ACQ_PROVIDER_INPUT_HOST_ARCH=x86_64 \
+    ACQ_PROVIDER_INPUT_DATA_DIR="$tools" VALIDATOR_SETUP_LOG="$log" \
+    PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
+  assert_success
+  grep -Fq 'selected-3.12' "$log"
+  ! grep -Fq 'wrong-3.14' "$log"
+}
+
 @test "setup validator rejects invalid arguments without changing a runtime" {
   local target="$STUBDIR/user-data/provider-input-validator.current"
   mkdir -p "$target"
