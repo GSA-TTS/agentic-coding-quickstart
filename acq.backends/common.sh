@@ -2761,6 +2761,17 @@ _acq_provider_input_guardian_signal_children() {
   return 1
 }
 
+_acq_provider_input_signal_exit() {
+  local status="${1:-1}"
+  if _acq_provider_input_guardian_signal_children; then
+    exit "$status"
+  fi
+  # An unkillable registered backend child still owns the transaction. Keep the
+  # guardian and lock rather than allowing EXIT cleanup to expose overlap.
+  trap - EXIT
+  exit 1
+}
+
 _acq_provider_input_process_identity() {
   local pid="${1:-}"
   case "$pid" in ""|*[!0-9]*) return 1 ;; esac
