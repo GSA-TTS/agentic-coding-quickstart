@@ -3202,7 +3202,7 @@ _acq_backend_provision_unlocked() {
     _generic_opencode_kit=$(_acq_agent_builtin_kit_ref opencode) || return 1
   fi
 
-  for kitref in "${kits[@]}"; do
+  for kitref in ${kits[@]+"${kits[@]}"}; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
       echo "acq(msb): error: could not fetch kit: $kitref" >&2
       exit 1
@@ -5693,7 +5693,7 @@ acq_backend_ensure_kits_applied() {
   local builtin_count="${ACQ_BUILTIN_KIT_COUNT:-4}"
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"
-  _acq_msb_heal_kit_set "$name" "$builtin_count" "${kits[@]}" || ok=0
+  _acq_msb_heal_kit_set "$name" "$builtin_count" ${kits[@]+"${kits[@]}"} || ok=0
   acq_spin_stop "Refreshing configuration kits"
   # Record host-side bundle provenance ONLY when every built-in kit applied.
   # msb re-applies all built-in kits idempotently, so on full

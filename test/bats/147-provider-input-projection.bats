@@ -750,6 +750,7 @@ case "${1:-}" in
   create)
     trap '' TERM
     printf '%s\n' "$$" > "$MSB_PID_FILE"
+    kill -TERM "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" 2>/dev/null || true
     sleep 2
     exit 0 ;;
   list) exit 0 ;;    # _acq_msb_confirm_absent uses 'list -q'
@@ -791,7 +792,6 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
   [ -s "$STUBDIR/slow-msb-create.pid" ] && break; sleep 0.1
 done
 [ -s "$STUBDIR/slow-msb-create.pid" ] || { echo "slow-msb-create never started" >&2; exit 1; }
-kill -TERM "\$tx"
 # While slow-msb is running the lock must not be acquirable.
 if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb msbcreatebox >"$STUBDIR/create-lock-retry.out" 2>&1; then
   echo "create lock acquired while msb executable was alive" >&2
