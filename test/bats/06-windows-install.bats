@@ -269,18 +269,18 @@ teardown() {
 }
 
 @test "release workflow: wheelhouse job tar path matches upload-artifact path" {
-  # Structural regression: the tar must be written to the same path that
-  # upload-artifact reads. If they diverge the artifact upload silently uploads
-  # an empty directory and downstream jobs receive nothing.
+  # Execute the release command in a job-like working directory and verify the
+  # archive exists exactly where upload-artifact reads it.
   workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
-
-  # The tar is created one level above the wheelhouse working dir (../NAME.tar.gz
-  # resolves to the runner cwd), and upload-artifact uses the bare filename.
   assert_regex "$workflow" \
-    'tar -C wheelhouse -czf "\.\./provider-input-validator-wheelhouse-\$\{\{ matrix\.platform \}\}\.tar\.gz" \.'
-  # upload-artifact path must reference the bare filename (runner cwd), not a subdirectory.
+    'tar -czf "provider-input-validator-wheelhouse-\$\{\{ matrix\.platform \}\}\.tar\.gz" -C wheelhouse \.'
   grep -qF 'path: provider-input-validator-wheelhouse-${{ matrix.platform }}.tar.gz' \
     "$REPO_ROOT/.github/workflows/release.yml"
+
+  mkdir -p "$STUBDIR/release-job/wheelhouse"
+  printf 'wheel\n' > "$STUBDIR/release-job/wheelhouse/example.whl"
+  run bash -c 'cd "$1" && tar -czf provider-input-validator-wheelhouse-linux-x86_64.tar.gz -C wheelhouse . && test -f provider-input-validator-wheelhouse-linux-x86_64.tar.gz' _ "$STUBDIR/release-job"
+  assert_success
 }
 
 @test "release workflow: wheelhouse SHA256SUMS never hashes itself" {
