@@ -2521,11 +2521,26 @@ acq_provider_input_discard() {
 
 # Create a path one component at a time without ever traversing a symlink. This
 # protects the host-owned projection tree from a malicious pre-created ancestor.
+#
+# macOS presents /var, /tmp, and /etc as symlinks to /private/{var,tmp,etc}.
+# These are trusted OS-level aliases (not user-controlled). We canonicalize only
+# these three specific prefixes before traversal so O_NOFOLLOW does not reject
+# them with ELOOP. All later path components remain subject to O_NOFOLLOW: no
+# arbitrary realpath is called on user-supplied paths. Linux is unaffected
+# (sys.platform != 'darwin', so canonicalization is skipped). See issue #620.
 _acq_provider_input_safe_mkdir() {
   python3 - "$1" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
+# Canonicalize well-known macOS Darwin system-alias prefixes only.
+# These three symlinks are part of the macOS base OS; no other symlinks are followed.
+if sys.platform == 'darwin':
+    _DARWIN_ALIASES = {'/var': '/private/var', '/tmp': '/private/tmp', '/etc': '/private/etc'}
+    for _alias, _target in _DARWIN_ALIASES.items():
+        if path == _alias or path.startswith(_alias + '/'):
+            path = _target + path[len(_alias):]
+            break
 fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
 try:
     for part in (p for p in path.split('/') if p):
@@ -2546,6 +2561,14 @@ _acq_provider_input_safe_dir() {
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
+# Canonicalize well-known macOS Darwin system-alias prefixes only.
+# These three symlinks are part of the macOS base OS; no other symlinks are followed.
+if sys.platform == 'darwin':
+    _DARWIN_ALIASES = {'/var': '/private/var', '/tmp': '/private/tmp', '/etc': '/private/etc'}
+    for _alias, _target in _DARWIN_ALIASES.items():
+        if path == _alias or path.startswith(_alias + '/'):
+            path = _target + path[len(_alias):]
+            break
 fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
 try:
     for part in (p for p in path.split('/') if p):
