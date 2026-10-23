@@ -192,6 +192,25 @@ teardown() {
   assert_regex "$installer" '"scripts"'
 }
 
+@test "windows installer: atomically verifies and publishes the embedded validator runtime" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  assert_regex "$installer" 'function Install-ProviderValidatorRuntime'
+  assert_regex "$installer" 'Get-FileHash -Algorithm SHA256 -LiteralPath \$runtimeArchive'
+  assert_regex "$installer" 'Embedded provider validator SHA-256 verification failed'
+  assert_regex "$installer" 'provider-input-validator\.stage'
+  assert_regex "$installer" 'provider-input-validator\.previous'
+  assert_regex "$installer" 'python\.exe'
+  assert_regex "$installer" 'Install-ProviderValidatorRuntime'
+}
+
+@test "windows launcher: provides the user-data validator runtime to Git Bash" {
+  launcher=$(cat "$REPO_ROOT/acq.ps1")
+
+  assert_regex "$launcher" 'ACQ_PROVIDER_INPUT_DATA_DIR'
+  assert_regex "$launcher" 'LOCALAPPDATA.*provider-input-validator'
+}
+
 @test "windows launcher: converts Windows paths before Git Bash handoff" {
   launcher=$(cat "$REPO_ROOT/acq.ps1")
 
@@ -239,6 +258,12 @@ teardown() {
   assert_regex "$workflow" 'cp install\.ps1 dist/install\.ps1'
   assert_regex "$workflow" 'cp acq acq\.cmd acq\.ps1 install\.ps1 LICENSE README\.md package\.json'
   assert_regex "$workflow" 'setup-provider-input-validator scripts/provider-input-validator-requirements\*\.txt'
-  assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip > SHA256SUMS'
+  assert_regex "$workflow" 'provider-input-validator-wheelhouse/windows-x86_64'
+  assert_regex "$workflow" 'provider-input-validator-wheelhouse-windows-x86_64\.tar\.gz'
+  assert_regex "$workflow" 'python-3\.12\.10-embed-amd64\.zip'
+  assert_regex "$workflow" 'PYTHON_EMBED_SHA256'
+  assert_regex "$workflow" 'provider-input-validator-runtime-windows-x86_64\.zip'
+  assert_regex "$workflow" 'test -f runtime/LICENSE\.txt'
+  assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip provider-input-validator-wheelhouse-\*\.tar\.gz > SHA256SUMS'
   assert_regex "$workflow" 'dist/acq-windows-x64\.zip'
 }

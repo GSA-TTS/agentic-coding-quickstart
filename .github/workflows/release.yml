@@ -1,12 +1,10 @@
-# Release - Uses release-please directly (simpler than reusable workflow)
-# Based on: https://github.com/googleapis/release-please-action
-
+# Release assets include an offline, exact-hash validator wheelhouse for each
+# supported host. Runtime creation never downloads Python packages.
 name: Release
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -32,9 +30,88 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+  wheelhouse:
+    name: Validator Wheelhouse (${{ matrix.platform }})
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x86_64
+            pip_platform: manylinux_2_17_x86_64
+            lock: scripts/provider-input-validator-requirements-linux.txt
+            python_versions: "312"
+          - runner: ubuntu-24.04-arm
+            platform: linux-aarch64
+            pip_platform: manylinux_2_17_aarch64
+            lock: scripts/provider-input-validator-requirements-linux.txt
+            python_versions: "312"
+          - runner: macos-14
+            platform: macos-arm64
+            pip_platform: macosx_11_0_arm64
+            lock: scripts/provider-input-validator-requirements-macos.txt
+            python_versions: "312 313 314"
+          - runner: macos-13
+            platform: macos-x86_64
+            pip_platform: macosx_10_13_x86_64
+            lock: scripts/provider-input-validator-requirements-macos.txt
+            python_versions: "312 313 314"
+          - runner: windows-2022
+            platform: windows-x86_64
+            pip_platform: win_amd64
+            lock: scripts/provider-input-validator-requirements-windows.txt
+            python_versions: "312"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+      - name: Build exact wheelhouse
+        run: |
+          set -euo pipefail
+          for py in ${{ matrix.python_versions }}; do
+            python3 -m pip download --only-binary=:all: --require-hashes \
+              --requirement "${{ matrix.lock }}" --platform "${{ matrix.pip_platform }}" \
+              --implementation cp --python-version "$py" --abi "cp$py" --dest wheelhouse
+          done
+          (cd wheelhouse && python3 -c "import hashlib,pathlib; print(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\\n' for p in sorted(pathlib.Path('.').glob('*')) if p.is_file()), end='')" > SHA256SUMS)
+          tar -C wheelhouse -czf "../provider-input-validator-wheelhouse-${{ matrix.platform }}.tar.gz" .
+      - name: Build Windows embedded validator runtime
+        if: ${{ matrix.platform == 'windows-x86_64' }}
+        env:
+          PYTHON_EMBED_URL: https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip
+          PYTHON_EMBED_SHA256: 4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error "$PYTHON_EMBED_URL" -o python-embed.zip
+          actual="$(python3 -c "import hashlib; print(hashlib.sha256(open('python-embed.zip', 'rb').read()).hexdigest())")"
+          [ "$actual" = "$PYTHON_EMBED_SHA256" ] || { echo "embedded Python checksum mismatch" >&2; exit 1; }
+          mkdir runtime
+          unzip -q python-embed.zip -d runtime
+          python3 -m pip install --no-index --find-links wheelhouse --require-hashes --requirement scripts/provider-input-validator-requirements-windows.txt --target runtime/Lib/site-packages
+          printf 'python312.zip\n.\nLib/site-packages\nimport site\n' > runtime/python312._pth
+          test -f runtime/LICENSE.txt
+          mv runtime validator-runtime
+          (cd validator-runtime && zip -qr ../provider-input-validator-runtime-windows-x86_64.zip .)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: provider-input-validator-wheelhouse-${{ matrix.platform }}
+          path: provider-input-validator-wheelhouse-${{ matrix.platform }}.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ matrix.platform == 'windows-x86_64' }}
+        with:
+          name: provider-input-validator-runtime-windows-x86_64
+          path: provider-input-validator-runtime-windows-x86_64.zip
+
   release-assets:
     name: Release Assets
-    needs: release-please
+    needs: [release-please, wheelhouse]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
@@ -42,39 +119,41 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - name: Check out release commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
           persist-credentials: false
-
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: wheelhouse-artifacts
       - name: Build release assets
         run: |
-          set -eu
+          set -euo pipefail
           release_sha="$(git rev-parse HEAD)"
-          mkdir -p dist/acq-windows-x64
+          mkdir -p dist/acq-windows-x64/scripts/provider-input-validator-wheelhouse/windows-x86_64
           cp install.sh dist/install.sh
           cp install.ps1 dist/install.ps1
           sed -i "s/^DEFAULT_RELEASE_SHA=.*/DEFAULT_RELEASE_SHA=\"${release_sha}\"/" dist/install.sh
           chmod 0755 dist/install.sh
           cp acq acq.cmd acq.ps1 install.ps1 LICENSE README.md package.json dist/acq-windows-x64/
           cp -R acq.backends dist/acq-windows-x64/
-          mkdir -p dist/acq-windows-x64/scripts
           cp scripts/setup-provider-input-validator scripts/provider-input-validator-requirements*.txt dist/acq-windows-x64/scripts/
+          tar -xzf wheelhouse-artifacts/provider-input-validator-wheelhouse-windows-x86_64/provider-input-validator-wheelhouse-windows-x86_64.tar.gz -C dist/acq-windows-x64/scripts/provider-input-validator-wheelhouse/windows-x86_64
+          cp wheelhouse-artifacts/provider-input-validator-runtime-windows-x86_64/provider-input-validator-runtime-windows-x86_64.zip dist/acq-windows-x64/scripts/
+          (cd dist/acq-windows-x64/scripts && sha256sum provider-input-validator-runtime-windows-x86_64.zip > provider-input-validator-runtime-windows-x86_64.sha256)
           (cd dist && zip -qr acq-windows-x64.zip acq-windows-x64)
-          (cd dist && sha256sum install.sh install.ps1 acq-windows-x64.zip > SHA256SUMS)
-
-      - name: Attest release assets
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+          find wheelhouse-artifacts -name '*.tar.gz' -exec cp {} dist/ \;
+          (cd dist && sha256sum install.sh install.ps1 acq-windows-x64.zip provider-input-validator-wheelhouse-*.tar.gz > SHA256SUMS)
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/install.sh
             dist/install.ps1
             dist/acq-windows-x64.zip
             dist/SHA256SUMS
-
+            dist/provider-input-validator-wheelhouse-*.tar.gz
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: gh release upload "$RELEASE_TAG" dist/install.sh dist/install.ps1 dist/acq-windows-x64.zip dist/SHA256SUMS --clobber
+        run: gh release upload "$RELEASE_TAG" dist/install.sh dist/install.ps1 dist/acq-windows-x64.zip dist/provider-input-validator-wheelhouse-*.tar.gz dist/SHA256SUMS --clobber

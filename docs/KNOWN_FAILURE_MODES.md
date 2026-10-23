@@ -29,14 +29,15 @@ From the Quickstart checkout, create the isolated validator runtime:
 scripts/setup-provider-input-validator --apply
 ```
 
-The runtime is stored under `.acq-tools/` and does not modify global Python
+The runtime is stored under `$XDG_DATA_HOME/acq/provider-input-validator` (or
+`~/.local/share/acq/provider-input-validator`) and does not modify global Python
 packages. The default invocation is a dry run; `--apply` builds a fresh,
 hash-verified environment and only replaces a working runtime after validation
 succeeds. Re-run the command after changing Quickstart versions if the pinned
 requirements change.
 
-The lock supports Linux x86_64/aarch64 with Python 3.12, macOS arm64 with
-Python 3.12, macOS x86_64 with Python 3.13, and Windows x86_64/arm64 with
+The lock supports Linux x86_64/aarch64 with Python 3.12, macOS x86_64/arm64 with
+Python 3.12-3.14, and Windows x86_64/arm64 with
 Python 3.12. An unsupported OS, architecture, or Python version fails before
 installation; use one of the supported runtimes rather than bypassing hashes.
 

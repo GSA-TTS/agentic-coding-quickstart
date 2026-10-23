@@ -20,17 +20,23 @@ For per-backend strengths, tradeoffs, and caveats, see the
 
 ## Provider Validator Runtime
 
-Provider-input validation uses an isolated project-local Python runtime. Before
-creating a sandbox that uses provider-role kits, inspect the planned setup with
-`scripts/setup-provider-input-validator`; pass `--apply` to build or update
-`.acq-tools/provider-input-validator`. The setup installs a fully hash-locked
-dependency closure into a fresh temporary virtual environment, verifies the
-expected distributions, and replaces the prior runtime only after validation
-succeeds. It never installs packages globally. Supported locked combinations are
-Linux x86_64/aarch64 with Python 3.12, macOS arm64 with Python 3.12, macOS
-x86_64 with Python 3.13, and Windows x86_64/arm64 with Python 3.12. The setup
-selects its matching host-specific lock file and rejects unsupported combinations
-rather than choosing an unhashed artifact.
+Provider-input validation uses an isolated runtime in user data
+(`$XDG_DATA_HOME/acq/provider-input-validator`, or `~/.local/share` by default).
+Normal official, npm, and Homebrew installations acquire a release-built,
+checksummed wheelhouse at installation time. On first provider-backed create,
+acq atomically creates the runtime from that local wheelhouse with
+`pip --no-index --require-hashes`.
+It never installs packages globally or downloads packages during creation.
+The macOS wheelhouse supports the pinned closure on Python 3.12-3.14, including
+Homebrew Python 3.14 on Apple Silicon. A failed refresh leaves the previous
+published runtime intact; a missing or invalid wheelhouse fails validation closed.
+Windows x64 releases additionally include CPython 3.12.10's embedded
+distribution, downloaded and SHA-256 verified by release CI from python.org,
+then packaged with the existing exact locked wheelhouse. The installer verifies
+the nested archive and atomically publishes it under `%LOCALAPPDATA%\acq`; it
+does not install Python globally or use WinGet. The embedded distribution is
+covered by the [Python Software Foundation License Version 2](https://docs.python.org/3/license.html);
+the release includes its notice as `PYTHON-NOTICE.txt`.
 
 ---
 
@@ -247,19 +253,19 @@ repository for details.
 
 ### Provider input projection
 
-Provider input validation uses exact Python dependency versions. Prepare the
-supported project-local runtime once from the Quickstart checkout:
+Provider input validation uses exact Python dependency versions. Normal installs
+bootstrap the user-data runtime automatically and offline on first use. To
+prepare it explicitly, run:
 
 ```bash
 scripts/setup-provider-input-validator --apply
 ```
 
-The command creates `.acq-tools/provider-input-validator` and installs only the
-versions pinned in the selected `scripts/provider-input-validator-requirements-*.txt`
-lock file. `acq`
-prefers this isolated runtime when `ACQ_PROVIDER_INPUT_PYTHON` is not set. It
-does not install packages automatically during sandbox creation and does not
-modify the global Python environment.
+The command creates `$XDG_DATA_HOME/acq/provider-input-validator` and installs
+only the versions pinned in the selected lock file from the shipped checksum-
+verified wheelhouse. `acq` prefers this isolated runtime when
+`ACQ_PROVIDER_INPUT_PYTHON` is not set. It never modifies the global Python
+environment or downloads packages during sandbox creation.
 
 Provider-role kits may publish versioned provider facts, a normalizer, and a
 model snapshot. Before a sandbox is created, acq discovers every selected

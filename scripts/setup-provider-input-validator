@@ -4,16 +4,17 @@ IFS=$'\n\t'
 
 APPLY=0
 ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-LEGACY_TARGET="$ROOT/.acq-tools/provider-input-validator"
-TARGET="$ROOT/.acq-tools/provider-input-validator.current"
+DATA_HOME="${XDG_DATA_HOME:-${HOME:-}/.local/share}"
+TOOLS_DIR="${ACQ_PROVIDER_INPUT_DATA_DIR:-$DATA_HOME/acq/provider-input-validator}"
+TARGET="$TOOLS_DIR/provider-input-validator.current"
 REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements.txt"
-TOOLS_DIR="$ROOT/.acq-tools"
+WHEELHOUSE="${ACQ_PROVIDER_INPUT_WHEELHOUSE:-}"
 
 usage() {
   cat <<'EOF'
 Usage: scripts/setup-provider-input-validator [--apply] [--help]
 
-Create the project-local Python environment used for provider-input validation.
+Create the user-data Python environment used for provider-input validation.
 The default is a dry run. Pass --apply to create or update the environment.
 EOF
 }
@@ -32,9 +33,11 @@ command -v python3 >/dev/null 2>&1 || {
   exit 2
 }
 case "$(uname -s 2>/dev/null)-$(uname -m 2>/dev/null)" in
-  Linux-x86_64|Linux-aarch64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-linux.txt" ;;
-  Darwin-arm64|Darwin-x86_64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-macos.txt" ;;
-  MINGW*|MSYS*|CYGWIN*) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-windows.txt" ;;
+  Linux-x86_64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-linux.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/linux-x86_64" ;;
+  Linux-aarch64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-linux.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/linux-aarch64" ;;
+  Darwin-arm64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-macos.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/macos-arm64" ;;
+  Darwin-x86_64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-macos.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/macos-x86_64" ;;
+  MINGW*|MSYS*|CYGWIN*) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-windows.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/windows-x86_64" ;;
   *) echo "unsupported host for provider-input validator lock: $(uname -s)-$(uname -m)" >&2; exit 2 ;;
 esac
 
@@ -42,12 +45,21 @@ esac
   echo "missing pinned requirements: $REQUIREMENTS" >&2
   exit 2
 }
-
 if [ "$APPLY" -ne 1 ]; then
   echo "[dry-run] would create $TARGET and install pinned requirements"
   echo "Run with --apply to make changes."
   exit 0
 fi
+
+[ -d "$WHEELHOUSE" ] || {
+  echo "provider-input validator wheelhouse is missing: $WHEELHOUSE" >&2
+  echo "Reinstall acq from an official release; validation cannot download packages during create." >&2
+  exit 2
+}
+[ -f "$WHEELHOUSE/SHA256SUMS" ] || {
+  echo "provider-input validator wheelhouse checksum manifest is missing: $WHEELHOUSE/SHA256SUMS" >&2
+  exit 2
+}
 
 mkdir -p "$TOOLS_DIR"
 stage=$(mktemp -d "$TOOLS_DIR/.provider-input-validator.XXXXXXXX")
@@ -61,21 +73,45 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 python_minor=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-case "$(uname -s 2>/dev/null)-$(uname -m 2>/dev/null):$python_minor" in
-  Linux-x86_64:3.12|Linux-aarch64:3.12|Darwin-arm64:3.12|Darwin-x86_64:3.13|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12) : ;;
+case "$(uname -s 2>/dev/null):$python_minor" in
+  Darwin:3.12|Darwin:3.13|Darwin:3.14|Linux:3.12|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12) : ;;
   *) echo "unsupported Python for provider-input validator on this host: Python $python_minor" >&2; exit 2 ;;
 esac
+
+sha256_check() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c SHA256SUMS
+  elif command -v shasum >/dev/null 2>&1; then
+    while IFS='  ' read -r expected filename; do
+      [ -n "$expected" ] || continue
+      actual=$(shasum -a 256 "$filename" | cut -d' ' -f1)
+      [ "$actual" = "$expected" ] || return 1
+    done < SHA256SUMS
+  else
+    echo "sha256sum or shasum is required to verify the validator wheelhouse" >&2
+    return 1
+  fi
+}
+
+# The release builds this wheelhouse from the exact hash-locked requirements.
+# Verify it before pip sees it: no package network access is permitted at create.
+(cd "$WHEELHOUSE" && sha256_check) || {
+  echo "provider-input validator wheelhouse checksum verification failed" >&2
+  exit 2
+}
 
 python3 -m venv "$stage/runtime"
 if [ -x "$stage/runtime/bin/python3" ]; then
   runtime_python="$stage/runtime/bin/python3"
 elif [ -x "$stage/runtime/Scripts/python.exe" ]; then
   runtime_python="$stage/runtime/Scripts/python.exe"
+elif [ -x "$stage/runtime/python.exe" ]; then
+  runtime_python="$stage/runtime/python.exe"
 else
   echo "provider-input validator venv has no supported Python executable" >&2
   exit 1
 fi
-"$runtime_python" -m pip install --require-hashes --requirement "$REQUIREMENTS"
+"$runtime_python" -m pip install --no-index --find-links "$WHEELHOUSE" --require-hashes --requirement "$REQUIREMENTS"
 "$runtime_python" - <<'PY'
 import importlib.metadata as metadata
 required = {"PyYAML": "6.0.3", "jsonschema": "4.26.0"}
@@ -104,12 +140,6 @@ if [ -L "$TARGET" ]; then
 fi
 replace_link
 link=""
-# Readers prefer the atomic current pointer. A legacy directory remains intact
-# as fallback until the first successful current publication, then can be
-# removed without any absent-target window.
-if [ -d "$LEGACY_TARGET" ] && [ ! -L "$LEGACY_TARGET" ]; then
-  rm -rf -- "$LEGACY_TARGET"
-fi
 case "$old_runtime" in
   provider-input-validator.*)
     if [ "${old_runtime##*/}" = "$old_runtime" ] \
