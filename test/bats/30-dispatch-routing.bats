@@ -53,16 +53,18 @@ SPEC
   assert [ -f "$STUBDIR/.msb_created" ]
 }
 
-@test "dispatch: create warns and falls back when provider facts cannot be fetched" {
+@test "dispatch: create fails closed when selected provider inputs cannot be fetched" {
   local proj="$STUBDIR/provider-facts-offline"; mkdir -p "$proj"
   rm -f "$STUBDIR/.msb_created"
-  run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
+  # This case deliberately exercises the real projection boundary: the global
+  # empty-projection seam would otherwise mask the failed remote-kit fetch.
+  run env -u ACQ_PROVIDER_INPUT_PYTHON ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
     STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
-  assert_success
+  assert_failure
   assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
-  refute_output --partial 'invalid provider facts'
-  assert_regex "$(cat "$CALLS")" 'msb create'
-  assert [ -f "$STUBDIR/.msb_created" ]
+  assert_output --partial 'provider input projection failed'
+  refute_regex "$(cat "$CALLS")" 'msb create'
+  assert [ ! -f "$STUBDIR/.msb_created" ]
 }
 
 @test "dispatch: create fails closed when provider facts artifact is malformed" {
@@ -565,42 +567,42 @@ FACTS
 }
 
 @test "kit-flag: --kit on create is folded into the kit list, workspace positional clean" {
-  local proj="$STUBDIR/kitproj"; mkdir -p "$proj"
+  local proj="$STUBDIR/kitproj" kit="$STUBDIR/mykit"; mkdir -p "$proj" "$kit"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/mykit "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit "$kit" "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" '--kit /tmp/mykit'
+  assert_regex "$create_line" "--kit $kit"
   assert_regex "$create_line" "$proj"
-  refute_regex "$create_line" "$proj --kit /tmp/mykit"
-  refute_regex "$create_line" "$proj /tmp/mykit"
+  refute_regex "$create_line" "$proj --kit $kit"
+  refute_regex "$create_line" "$proj $kit"
 }
 
 @test "kit-flag: --kit=<ref> equals form is intercepted" {
-  local proj="$STUBDIR/kitproj2"; mkdir -p "$proj"
+  local proj="$STUBDIR/kitproj2" kit="$STUBDIR/eqkit"; mkdir -p "$proj" "$kit"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit=/tmp/eqkit "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit="$kit" "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" '--kit /tmp/eqkit'
+  assert_regex "$create_line" "--kit $kit"
   refute_regex "$create_line" '--kit=/tmp/eqkit'
 }
 
 @test "kit-flag: multiple --kit flags are all intercepted" {
-  local proj="$STUBDIR/kitproj3"; mkdir -p "$proj"
+  local proj="$STUBDIR/kitproj3" k1="$STUBDIR/k1" k2="$STUBDIR/k2"; mkdir -p "$proj" "$k1" "$k2"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/k1 --kit /tmp/k2 "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit "$k1" --kit "$k2" "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" '--kit /tmp/k1'
-  assert_regex "$create_line" '--kit /tmp/k2'
+  assert_regex "$create_line" "--kit $k1"
+  assert_regex "$create_line" "--kit $k2"
   assert_regex "$create_line" "$proj"
 }
 
 @test "kit-flag: run form also intercepts --kit" {
-  local proj="$STUBDIR/kitproj4"; mkdir -p "$proj"
+  local proj="$STUBDIR/kitproj4" kit="$STUBDIR/runkit"; mkdir -p "$proj" "$kit"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/runkit "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit "$kit" "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" '--kit /tmp/runkit'
-  refute_regex "$create_line" "$proj --kit /tmp/runkit"
+  assert_regex "$create_line" "--kit $kit"
+  refute_regex "$create_line" "$proj --kit $kit"
 }
 
 @test "kit-flag: a --kit after -- belongs to the agent, not the kit list" {
@@ -634,14 +636,14 @@ FACTS
 }
 
 @test "agent-kits: explicit --kit still reports the selected agent kit" {
-  local proj="$STUBDIR/agentkit-explicit"; mkdir -p "$proj"
+  local proj="$STUBDIR/agentkit-explicit" kit="$STUBDIR/team-opencode"; mkdir -p "$proj" "$kit"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/team-opencode "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit "$kit" "$proj"
 
   assert_success
   assert_output --partial 'selected built-in agent kit: agent=opencode kit=opencode'
   local create_line; create_line=$(grep '^sbx create' "$CALLS")
-  assert_regex "$create_line" '--kit /tmp/team-opencode'
+  assert_regex "$create_line" "--kit $kit"
   refute_regex "$create_line" 'acq-kits/opencode'
 }
 

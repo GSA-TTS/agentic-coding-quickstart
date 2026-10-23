@@ -166,6 +166,9 @@ jobs:
           persist-credentials: false
           # The suite runs under bats-core, vendored as submodules.
           submodules: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
 
       # Cache the built interpreter so the compile only happens on a version bump.
       - id: cache-bash32
@@ -236,6 +239,34 @@ jobs:
           set -euo pipefail
           /opt/bash32/bin/bash --version | head -1
           /opt/bash32/bin/bash -c '[[ $BASH_VERSION == 3.2.* ]] || { echo "not bash 3.2: $BASH_VERSION" >&2; exit 1; }'
+
+      # acq invokes the released Patterns validator during provider-input
+      # projection. Install and select setup-python's exact runtime; bash's PATH
+      # changes must not silently fall back to Ubuntu's system jsonschema.
+      - name: Install Patterns provider-input validator dependencies
+        run: |
+          "$pythonLocation/bin/python" -m pip install --require-hashes --requirement scripts/provider-input-validator-requirements-linux.txt
+          printf 'ACQ_PROVIDER_INPUT_PYTHON=%s\n' "$pythonLocation/bin/python" >> "$GITHUB_ENV"
+
+      - name: Check out pinned Patterns validator contract
+        run: |
+          set -euo pipefail
+          patterns_ref=$(sed -n 's/^PATTERNS_KIT_REF="\([0-9a-f]\{40\}\)"$/\1/p' acq.backends/common.sh)
+          [ -n "$patterns_ref" ]
+          patterns_dir="$RUNNER_TEMP/agentic-coding-patterns"
+          git -C "$RUNNER_TEMP" init -q agentic-coding-patterns
+          git -C "$patterns_dir" remote add origin https://github.com/GSA-TTS/agentic-coding-patterns.git
+          git -C "$patterns_dir" fetch -q --depth 1 origin "$patterns_ref"
+          git -C "$patterns_dir" checkout -q --detach FETCH_HEAD
+          [ "$(git -C "$patterns_dir" rev-parse HEAD)" = "$patterns_ref" ]
+          test -z "$(git -C "$patterns_dir" status --porcelain)"
+          chmod -R a-w "$patterns_dir"
+
+      - name: Run pinned Patterns validator regression under bash 3.2
+        env:
+          ACQ_TEST_PATTERNS_REPO: ${{ runner.temp }}/agentic-coding-patterns
+          ACQ_TEST_PROVIDER_INPUT_PYTHON: ${{ env.pythonLocation }}/bin/python
+        run: PATH="/opt/bash32/bin:$PATH" /opt/bash32/bin/bash scripts/test-acq-bats test/bats/147-provider-input-projection.bats
 
       - name: Run acq offline suite under bash 3.2
         # Put the 3.2 interpreter first on PATH so bats' `#!/usr/bin/env bash`

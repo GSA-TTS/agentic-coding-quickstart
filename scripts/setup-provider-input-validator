@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+APPLY=0
+ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+LEGACY_TARGET="$ROOT/.acq-tools/provider-input-validator"
+TARGET="$ROOT/.acq-tools/provider-input-validator.current"
+REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements.txt"
+TOOLS_DIR="$ROOT/.acq-tools"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/setup-provider-input-validator [--apply] [--help]
+
+Create the project-local Python environment used for provider-input validation.
+The default is a dry run. Pass --apply to create or update the environment.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --apply) APPLY=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "python3 is required" >&2
+  exit 2
+}
+case "$(uname -s 2>/dev/null)-$(uname -m 2>/dev/null)" in
+  Linux-x86_64|Linux-aarch64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-linux.txt" ;;
+  Darwin-arm64|Darwin-x86_64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-macos.txt" ;;
+  MINGW*|MSYS*|CYGWIN*) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-windows.txt" ;;
+  *) echo "unsupported host for provider-input validator lock: $(uname -s)-$(uname -m)" >&2; exit 2 ;;
+esac
+
+[ -f "$REQUIREMENTS" ] || {
+  echo "missing pinned requirements: $REQUIREMENTS" >&2
+  exit 2
+}
+
+if [ "$APPLY" -ne 1 ]; then
+  echo "[dry-run] would create $TARGET and install pinned requirements"
+  echo "Run with --apply to make changes."
+  exit 0
+fi
+
+mkdir -p "$TOOLS_DIR"
+stage=$(mktemp -d "$TOOLS_DIR/.provider-input-validator.XXXXXXXX")
+runtime=""
+link=""
+cleanup() {
+  rm -rf -- "$stage"
+  [ -z "$link" ] || rm -f -- "$link"
+  [ -z "$runtime" ] || rm -rf -- "$runtime"
+}
+trap cleanup EXIT HUP INT TERM
+
+python_minor=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+case "$(uname -s 2>/dev/null)-$(uname -m 2>/dev/null):$python_minor" in
+  Linux-x86_64:3.12|Linux-aarch64:3.12|Darwin-arm64:3.12|Darwin-x86_64:3.13|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12) : ;;
+  *) echo "unsupported Python for provider-input validator on this host: Python $python_minor" >&2; exit 2 ;;
+esac
+
+python3 -m venv "$stage/runtime"
+if [ -x "$stage/runtime/bin/python3" ]; then
+  runtime_python="$stage/runtime/bin/python3"
+elif [ -x "$stage/runtime/Scripts/python.exe" ]; then
+  runtime_python="$stage/runtime/Scripts/python.exe"
+else
+  echo "provider-input validator venv has no supported Python executable" >&2
+  exit 1
+fi
+"$runtime_python" -m pip install --require-hashes --requirement "$REQUIREMENTS"
+"$runtime_python" - <<'PY'
+import importlib.metadata as metadata
+required = {"PyYAML": "6.0.3", "jsonschema": "4.26.0"}
+actual = {name: metadata.version(name) for name in required}
+if actual != required:
+    raise SystemExit(f"provider-input validator dependency mismatch: {actual}")
+PY
+runtime="$TOOLS_DIR/provider-input-validator.$(basename "$stage")"
+mv "$stage/runtime" "$runtime"
+link="$TOOLS_DIR/.provider-input-validator.link.$$.${RANDOM:-0}"
+ln -s "${runtime##*/}" "$link"
+
+replace_link() {
+  python3 - "$link" "$TARGET" <<'PY'
+import os
+import sys
+
+source, target = sys.argv[1:]
+os.replace(source, target)
+PY
+}
+
+old_runtime=""
+if [ -L "$TARGET" ]; then
+  old_runtime=$(readlink "$TARGET" || true)
+fi
+replace_link
+link=""
+# Readers prefer the atomic current pointer. A legacy directory remains intact
+# as fallback until the first successful current publication, then can be
+# removed without any absent-target window.
+if [ -d "$LEGACY_TARGET" ] && [ ! -L "$LEGACY_TARGET" ]; then
+  rm -rf -- "$LEGACY_TARGET"
+fi
+case "$old_runtime" in
+  provider-input-validator.*)
+    if [ "${old_runtime##*/}" = "$old_runtime" ] \
+        && [ "$old_runtime" != "${runtime##*/}" ]; then
+      superseded="$TOOLS_DIR/$old_runtime"
+      case "$superseded" in
+        "$TOOLS_DIR"/provider-input-validator.*)
+          rm -rf -- "${superseded:?}"
+          ;;
+      esac
+    fi
+    ;;
+esac
+runtime=""
+echo "Provider-input validator runtime ready: $TARGET"

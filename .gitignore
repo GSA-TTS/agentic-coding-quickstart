@@ -24,6 +24,7 @@ keys.txt
 
 # Agent sandbox runtime state
 .agent-sandbox/
+.acq-tools/
 
 # Generated model-sync snapshot (sync-usai-models.mjs --write-snapshot)
 tests/output/

@@ -3,7 +3,7 @@ title: "acq Concepts"
 description: "Backend-neutral concepts for working with acq sandboxes (workspaces, mounts, published ports)"
 status: canonical
 tier: 2
-last_updated: "2026-10-03"
+last_updated: "2026-10-22"
 audience: "developers"
 keywords: ["acq", "concepts", "workspace", "mount", "ports", "publish", "backend-neutral", "sbx", "msb"]
 related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0034-host-port-selection-and-publish-override.md"]
@@ -17,6 +17,20 @@ Cross-cutting concepts for working with `acq` sandboxes. These apply to **both**
 backends (sbx and msb) because `acq` presents one neutral interface over both.
 For per-backend strengths, tradeoffs, and caveats, see the
 [Backend Guide](BACKEND_GUIDE.md).
+
+## Provider Validator Runtime
+
+Provider-input validation uses an isolated project-local Python runtime. Before
+creating a sandbox that uses provider-role kits, inspect the planned setup with
+`scripts/setup-provider-input-validator`; pass `--apply` to build or update
+`.acq-tools/provider-input-validator`. The setup installs a fully hash-locked
+dependency closure into a fresh temporary virtual environment, verifies the
+expected distributions, and replaces the prior runtime only after validation
+succeeds. It never installs packages globally. Supported locked combinations are
+Linux x86_64/aarch64 with Python 3.12, macOS arm64 with Python 3.12, macOS
+x86_64 with Python 3.13, and Windows x86_64/arm64 with Python 3.12. The setup
+selects its matching host-specific lock file and rejects unsupported combinations
+rather than choosing an unhashed artifact.
 
 ---
 
@@ -231,6 +245,34 @@ catalog, kept in sync with the USAi `/models` API so new projects start from a
 current baseline. See the kit definition in the agentic-coding-patterns
 repository for details.
 
+### Provider input projection
+
+Provider input validation uses exact Python dependency versions. Prepare the
+supported project-local runtime once from the Quickstart checkout:
+
+```bash
+scripts/setup-provider-input-validator --apply
+```
+
+The command creates `.acq-tools/provider-input-validator` and installs only the
+versions pinned in the selected `scripts/provider-input-validator-requirements-*.txt`
+lock file. `acq`
+prefers this isolated runtime when `ACQ_PROVIDER_INPUT_PYTHON` is not set. It
+does not install packages automatically during sandbox creation and does not
+modify the global Python environment.
+
+Provider-role kits may publish versioned provider facts, a normalizer, and a
+model snapshot. Before a sandbox is created, acq discovers every selected
+provider-role kit, validates the full set with the pinned Patterns validator,
+and projects only approved regular files into a backend-owned read-only mount.
+
+Consumers receive `ACQ_PROVIDER_INPUT_ROOT`; compose each provider directory as
+`$ACQ_PROVIDER_INPUT_ROOT/models/providers/<providerId>`. A missing root is not
+ready, while a present `models/providers` directory with no entries is an
+authoritative empty provider set. This is the durable neutral interface for
+Patterns provider consumers; it does not assume a provider allowlist, USAi, or
+an OpenCode configuration.
+
 ---
 
 ## Customizing your setup
@@ -303,6 +345,15 @@ is used verbatim.
 Extras are applied **after** the built-in kits (so they win on any overlapping
 config). They also work when re-running against an existing sandbox: adding a new
 entry and re-running `acq run <existing-sandbox>` injects just the new kit.
+
+### Provider input projection
+
+Provider-role kits may declare model facts, a normalizer, and a catalog snapshot.
+Before sandbox creation, `acq` validates the complete set with the validator and
+schemas from the pinned Patterns release, then mounts only the approved artifacts
+read-only at `ACQ_PROVIDER_INPUT_ROOT`. These projected facts and catalogs are
+guest-readable metadata, not secrets. Credentials remain in backend secret
+bindings and must never be included in a provider-input bundle.
 
 If an extra kit is hosted somewhere other than `github.com/GSA-TTS/`, add its
 scheme-less prefix so `acq` allowlists it:
