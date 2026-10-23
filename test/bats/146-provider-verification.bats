@@ -9,17 +9,79 @@ load 'helper'
 setup() { acq_setup_stubs; }
 teardown() { acq_teardown_stubs; }
 
+# ---------------------------------------------------------------------------
+# Blocker 1 + 2 regressions: source-state isolation and direct-invocation guard
+# ---------------------------------------------------------------------------
+
+@test "source-state regression: sourcing verify-backends with VERIFY_BACKENDS_SOURCE_ONLY=1 does not mutate caller XDG_CONFIG_HOME" {
+  run bash -c '
+    export XDG_CONFIG_HOME="/sentinel-xdg-before"
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    printf "%s\n" "$XDG_CONFIG_HOME"
+  '
+  assert_success
+  assert_output "/sentinel-xdg-before"
+}
+
+@test "source-state regression: sourcing verify-backends with VERIFY_BACKENDS_SOURCE_ONLY=1 does not mutate caller ACQ_EXTRA_KITS" {
+  run bash -c '
+    export ACQ_EXTRA_KITS="caller-kit-a caller-kit-b"
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    printf "%s\n" "${ACQ_EXTRA_KITS:-EMPTY}"
+  '
+  assert_success
+  assert_output "caller-kit-a caller-kit-b"
+}
+
+@test "source-state regression: sourcing verify-backends with VERIFY_BACKENDS_SOURCE_ONLY=1 does not override existing EXIT trap" {
+  run bash -c '
+    _trap_fired=0
+    trap '"'"'_trap_fired=1'"'"' EXIT
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    # The caller trap must not have been overwritten; if it were, the sentinel
+    # would not appear in the EXIT output. We test by reading current trap state.
+    current_trap=$(trap -p EXIT 2>/dev/null)
+    case "$current_trap" in
+      *_trap_fired*) printf "EXIT trap preserved\n" ;;
+      *) printf "EXIT trap LOST: %s\n" "$current_trap"; exit 1 ;;
+    esac
+  '
+  assert_success
+  assert_output "EXIT trap preserved"
+}
+
+@test "source-state regression: VERIFY_BACKENDS_SOURCE_ONLY=1 direct -h invocation fails with status 2 and actionable message" {
+  run bash -c 'VERIFY_BACKENDS_SOURCE_ONLY=1 "'"$REPO_ROOT"'/scripts/verify-backends" -h'
+  assert_failure 2
+  assert_output --partial 'VERIFY_BACKENDS_SOURCE_ONLY=1 requires sourcing this script'
+  assert_output --partial 'Usage:'
+}
+
+@test "source-state regression: VERIFY_BACKENDS_SOURCE_ONLY=1 direct invocation (no flags) fails with status 2 and actionable message" {
+  run bash -c 'VERIFY_BACKENDS_SOURCE_ONLY=1 "'"$REPO_ROOT"'/scripts/verify-backends"'
+  assert_failure 2
+  assert_output --partial 'VERIFY_BACKENDS_SOURCE_ONLY=1 requires sourcing this script'
+}
+
 _check_reachability_harness() {
+  export REPO_ROOT
   cat <<'PRELUDE'
     set -u
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    source "$REPO_ROOT/scripts/verify-backends"
     PASS=0 FAIL=0 LAST_OUT="" LAST_ARGS=""
     pass() { PASS=$((PASS + 1)); }
     fail() { FAIL=$((FAIL + 1)); printf 'FAIL=%s\n' "$1"; }
     dump() { :; }
     run_acq() { LAST_ARGS="$*"; LAST_OUT="$FAKE_OUTPUT"; return "${FAKE_RC:-0}"; }
 PRELUDE
-  awk '/^check_usai_reachability\(\) \{$/,/^\}$/ { print }' \
-    "$REPO_ROOT/scripts/verify-backends"
 }
 
 @test "provider verification: failed reachability command is a failure" {
@@ -76,15 +138,16 @@ PRELUDE
     USAI_SEEDED_FOR=
     LAST_OUT=
     CALLS="'"$calls"'"
-    run_acq() { return 0; }
     sbx() {
       case "${1:-} ${2:-}" in
         "secret ls") printf "CUSTOM SECRETS\nSCOPE TARGETS ENV PLACEHOLDER\n" ;;
         "secret set-custom") printf "set-custom %s\n" "$*" >> "$CALLS" ;;
       esac
     }
-    source="$(awk "/^seed_usai_secret\(\) \{$/,/^}$/" "'"$REPO_ROOT"'/scripts/verify-backends")"
-    eval "$source"
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    run_acq() { return 0; }
     seed_usai_secret sbx box
   '
   assert_success
@@ -104,23 +167,27 @@ PRELUDE
     USAI_PROVIDER_KEY_ENV=CUSTOM_API_KEY
     USAI_SEEDED_FOR=
     CALLS="'"$calls"'"
-    run_acq() { return 0; }
     sbx() {
       case "${1:-} ${2:-}" in
         "secret ls") printf "CUSTOM SECRETS\nSCOPE TARGETS ENV PLACEHOLDER\n(global) custom.example.gov CUSTOM_API_KEY placeholder\n" ;;
         "secret set-custom") printf "unexpected seed\n" >> "$CALLS" ;;
       esac
     }
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    run_acq() { return 0; }
     _sbx_secret_has_global_row() { return 0; }
-    source="$(awk "/^seed_usai_secret\(\) \{$/,/^}$/" "'"$REPO_ROOT"'/scripts/verify-backends")"
-    eval "$source"
     seed_usai_secret sbx box
   '
   assert_success
   refute [ -f "$calls" ]
 }
 
-@test "provider verification: provider facts drive the models URL" {
+@test "provider verification: provider facts drive the models URL (offline wiring seam, not live projection validation)" {
+  # This is an offline seam test: it checks that the variable assignments exist
+  # in verify-backends so the wiring is correct. It does NOT prove that a real
+  # provider kit returns valid values or that a live SBX/MSB run works.
   run grep -n 'USAI_MODELS_URL="\$USAI_PROVIDER_MODELS_URL"' \
     "$REPO_ROOT/scripts/verify-backends"
   assert_success
@@ -129,16 +196,112 @@ PRELUDE
   assert_success
 }
 
+@test "provider verification: projected provider facts drive the reachability input (offline seam, not live backend validation)" {
+  # Offline seam: stubs load_provider_facts and check_usai_reachability to verify
+  # that the URL from provider facts flows through to the reachability call.
+  # This does NOT validate a real projected parser, a real kit, or a live backend.
+  run bash -c '
+    set -u
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    ACQ=/dev/null
+    USAI_KIT="$STUBDIR/provider-kit"
+    acq_provider_facts_load_from_kit_or_fallback() {
+      USAI_PROVIDER_HOST=models.example.gov
+      USAI_PROVIDER_MODELS_URL=https://models.example.gov/v2/catalog
+      USAI_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
+    }
+    load_provider_facts
+    FAKE_OUTPUT=200 FAKE_RC=0 LAST_ARGS=
+    run_acq() { LAST_ARGS="$*"; LAST_OUT="$FAKE_OUTPUT"; return "$FAKE_RC"; }
+    check_usai_reachability msb box "$USAI_MODELS_URL"
+    case "$LAST_ARGS" in
+      *"verify https://models.example.gov/v2/catalog"*) ;;
+      *) printf "unexpected projected input: %s\n" "$LAST_ARGS"; exit 1 ;;
+    esac
+  '
+  assert_success
+}
+
+@test "provider verification: malformed provider facts fail closed before reachability (offline seam, not live kit validation)" {
+  # Offline seam: verifies that load_provider_facts propagates failures and
+  # does not silently fall through to reachability checks. Does NOT test a real
+  # provider kit or a live projected parser.
+  run bash -c '
+    set -u
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    ACQ=/dev/null
+    USAI_KIT="$STUBDIR/provider-kit"
+    acq_provider_facts_load_from_kit_or_fallback() {
+      printf invalid-provider-facts-artifact\\n >&2
+      USAI_PROVIDER_HOST=""
+      USAI_PROVIDER_MODELS_URL=""
+      return 1
+    }
+    if load_provider_facts; then
+      printf "unexpected provider facts success\n"
+      exit 1
+    fi
+    printf "provider facts rejected\n"
+  '
+  assert_success
+  assert_output --partial 'invalid-provider-facts-artifact'
+  assert_output --partial 'verify-backends: provider facts could not be loaded from'
+  assert_output --partial 'provider facts rejected'
+}
+
+@test "provider verification: acq source failure is actionable and does not fall through (offline seam with syntax error)" {
+  # Offline seam: proves that when acq cannot be sourced (e.g. syntax error or
+  # missing file), load_provider_facts surfaces a useful root-cause diagnostic
+  # and returns non-zero before invoking acq_provider_facts_load_from_kit_or_fallback.
+  # Uses a missing file to trigger a real source failure without a live acq process.
+  run bash -c '
+    set -u
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    ACQ="$STUBDIR/missing-acq"
+    load_provider_facts 2>"$STUBDIR/diagnostics"; rc=$?
+    cat "$STUBDIR/diagnostics"
+    exit "$rc"
+  '
+  assert_failure
+  assert_output --partial 'verify-backends: unable to source acq from'
+  refute_output --partial 'acq_provider_facts_load_from_kit_or_fallback: command not found'
+}
+
+@test "provider verification: acq source failure categorizes stderr without replaying it" {
+  # Offline seam: proves that source stderr selects an actionable category but
+  # is never replayed verbatim, even when it contains secret-like text.
+  local bad_acq="$STUBDIR/bad-acq.sh"
+  printf '#!/usr/bin/env bash\necho "syntax error SENTINEL_SECRET_VALUE" >&2\nreturn 1\n' \
+    > "$bad_acq"
+  run bash -c '
+    set -u
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    ACQ="'"$bad_acq"'"
+    load_provider_facts 2>&1; rc=$?
+    exit "$rc"
+  '
+  assert_failure
+  assert_output --partial 'verify-backends: unable to source acq from'
+  assert_output --partial 'cause: shell syntax error'
+  refute_output --partial 'SENTINEL_SECRET_VALUE'
+  refute_output --partial 'acq_provider_facts_load_from_kit_or_fallback: command not found'
+}
+
 @test "provider verification: seeded credential is required for an installed backend" {
   run bash -c '
     set -u
     REPO_ROOT="'"$REPO_ROOT"'"
-    source="$(awk "/^seed_usai_secret\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
-    require_source="$(awk "/^require_usai_seed\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
-    status_source="$(awk "/^verification_succeeded\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
-    eval "$source"
-    eval "$require_source"
-    eval "$status_source"
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "$REPO_ROOT/scripts/verify-backends"
     VERIFY_USAI_DUMMY=synthetic
     USAI_HOST=api.example.gov
     USAI_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
@@ -184,10 +347,9 @@ PRELUDE
 @test "provider verification: lost post-provision binding fails and cleans up" {
   run bash -c '
     REPO_ROOT="'"$REPO_ROOT"'"
-    cleanup_source="$(awk "/^cleanup_failed_backend_verification\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
-    status_source="$(awk "/^verification_succeeded\(\) \{$/,/^}$/" "$REPO_ROOT/scripts/verify-backends")"
-    eval "$cleanup_source"
-    eval "$status_source"
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "$REPO_ROOT/scripts/verify-backends"
     FAIL=1 KEEP="" CALLS=""
     unseed_usai_secret() { CALLS="${CALLS} usai:$1:$2"; }
     unseed_github_secret() { CALLS="${CALLS} github:$1:$2"; }

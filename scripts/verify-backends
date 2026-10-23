@@ -79,7 +79,26 @@
 # WARN lines are known, tracked limitations — surfaced every run but NOT counted
 # as failures.
 
-set -uo pipefail
+# Tests source this script to exercise production functions in isolation.
+# This guard MUST appear before executable-only side effects such as shell-option
+# changes, traps, temporary state, and environment exports. Source mode still
+# defines the verifier's functions and their supporting default variables.
+# A direct invocation with VERIFY_BACKENDS_SOURCE_ONLY=1 is always a usage
+# error and must fail immediately with an actionable message, even for -h.
+_VERIFY_BACKENDS_SOURCED=0
+if [ "${VERIFY_BACKENDS_SOURCE_ONLY:-}" = "1" ]; then
+  # BASH_SOURCE[0] == $0 only when executed directly (not sourced).
+  if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    echo "verify-backends: VERIFY_BACKENDS_SOURCE_ONLY=1 requires sourcing this script, not executing it" >&2
+    echo "  Usage: VERIFY_BACKENDS_SOURCE_ONLY=1 . path/to/scripts/verify-backends" >&2
+    exit 2
+  fi
+  _VERIFY_BACKENDS_SOURCED=1
+fi
+
+if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ]; then
+  set -uo pipefail
+fi
 
 # macOS ships an ancient /bin/bash (3.2, 2007). Its lexer mis-parses a
 # double-quoted word that contains BOTH a multibyte UTF-8 char (e.g. an em-dash)
@@ -89,16 +108,18 @@ set -uo pipefail
 # ASCII-clean in its executable statements to avoid that, but as belt-and-braces
 # we (a) force a UTF-8 ctype when the current one is C/POSIX, and (b) warn once if
 # running under bash 3.x so the cause is named rather than mysterious.
-case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
-  *[Uu][Tt][Ff]*) : ;;
-  *) export LC_CTYPE=C.UTF-8 2>/dev/null || export LC_CTYPE=en_US.UTF-8 ;;
-esac
-case "${BASH_VERSINFO:-0}" in
-  ""|0|1|2|3)
-    echo "verify-backends: note: running under bash ${BASH_VERSION:-<3.x>}." >&2
-    echo "                 Prefer bash 4+ (e.g. \`brew install bash\`) for best results." >&2
-    ;;
-esac
+if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ]; then
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]*) : ;;
+    *) export LC_CTYPE=C.UTF-8 2>/dev/null || export LC_CTYPE=en_US.UTF-8 ;;
+  esac
+  case "${BASH_VERSINFO:-0}" in
+    ""|0|1|2|3)
+      echo "verify-backends: note: running under bash ${BASH_VERSION:-<3.x>}." >&2
+      echo "                 Prefer bash 4+ (e.g. \`brew install bash\`) for best results." >&2
+      ;;
+  esac
+fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
@@ -112,22 +133,24 @@ KEEP="${VERIFY_KEEP:-}"
 # instead of silently buffering inside a command substitution. See trace().
 TRACE="${VERIFY_TRACE:-}"
 POSITIONAL=()
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -v|--verbose) VERBOSE=1 ;;
-    -k|--keep)    KEEP=1 ;;
-    -x|--trace)   TRACE=1 ;;
-    --only)       shift; ONLY_BACKEND="${1:-}" ;;
-    --only=*)     ONLY_BACKEND="${1#--only=}" ;;
-    --oci-only)   OCI_ONLY=1 ;;
-    -h|--help)
-      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
-      exit 0 ;;
-    *) POSITIONAL+=("$1") ;;
-  esac
-  shift
-done
-set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
+if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ]; then
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -v|--verbose) VERBOSE=1 ;;
+      -k|--keep)    KEEP=1 ;;
+      -x|--trace)   TRACE=1 ;;
+      --only)       shift; ONLY_BACKEND="${1:-}" ;;
+      --only=*)     ONLY_BACKEND="${1#--only=}" ;;
+      --oci-only)   OCI_ONLY=1 ;;
+      -h|--help)
+        sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0 ;;
+      *) POSITIONAL+=("$1") ;;
+    esac
+    shift
+  done
+  set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
+fi
 
 # _verify_backend_enabled BACKEND — honor --only <backend> (run just that one).
 # Empty ONLY_BACKEND means "all". Used to skip work when iterating on one backend.
@@ -139,7 +162,7 @@ _verify_backend_enabled() {
 # When tracing, acq's internal debug trace is streamed live so we can see which
 # msb/sbx sub-call is executing when a step hangs. Enabling TRACE implies live
 # streaming of the create step (see run_acq).
-if [ -n "$TRACE" ]; then
+if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ] && [ -n "$TRACE" ]; then
   export ACQ_DEBUG="${ACQ_DEBUG:-1}"
   VERBOSE=1
 fi
@@ -154,8 +177,11 @@ trace() {
   printf '        [trace %s] %s\n' "$(_ts)" "$*" >&2
 }
 
-# Refuse to run inside a sandbox (no nested sandboxes).
-if [ -f /.dockerenv ] || [ -n "${SBX_SANDBOX:-}" ] || [ -n "${MSB_SANDBOX:-}" ]; then
+# Refuse to run inside a sandbox (no nested sandboxes). VERIFY_BACKENDS_SOURCE_ONLY
+# is always intercepted at the top of the script before reaching here, so any
+# invocation that reaches this point is a normal executable run.
+if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ] && \
+   { [ -f /.dockerenv ] || [ -n "${SBX_SANDBOX:-}" ] || [ -n "${MSB_SANDBOX:-}" ]; }; then
   echo "verify-backends: refusing to run inside a sandbox (no nested sandboxes)." >&2
   echo "                 Run on a sandbox-capable host. See ADR-0011 Validation." >&2
   exit 2
@@ -199,16 +225,17 @@ cleanup_verify_state() {
   _stop_ephemeral_agent
   [ -n "$VERIFY_STATE" ] && rm -rf "$VERIFY_STATE"
 }
-trap cleanup_verify_state EXIT
+if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ]; then
+  trap cleanup_verify_state EXIT
 
-# Keep acq's per-run state hermetic. The verifier should not read the user's
-# default backend, acq-owned secret store, provenance cache, or port/ssh state.
-VERIFY_STATE=$(mktemp -d "${TMPDIR:-/tmp}/acq-verify-state.XXXXXX") || exit 1
-export XDG_CONFIG_HOME="$VERIFY_STATE/config"
-export ACQ_SECRET_FORCE_FILE=1
-export ACQ_SECRET_STORE_DIR="$VERIFY_STATE/secrets"
-export ACQ_STATE_DIR="$VERIFY_STATE/state"
-export ACQ_PROVENANCE_DIR="$VERIFY_STATE/provenance"
+  # Keep acq's per-run state hermetic. The verifier should not read the user's
+  # default backend, acq-owned secret store, provenance cache, or port/ssh state.
+  VERIFY_STATE=$(mktemp -d "${TMPDIR:-/tmp}/acq-verify-state.XXXXXX") || exit 1
+  export XDG_CONFIG_HOME="$VERIFY_STATE/config"
+  export ACQ_SECRET_FORCE_FILE=1
+  export ACQ_SECRET_STORE_DIR="$VERIFY_STATE/secrets"
+  export ACQ_STATE_DIR="$VERIFY_STATE/state"
+  export ACQ_PROVENANCE_DIR="$VERIFY_STATE/provenance"
 # CRITICAL for not clobbering the user's LIVE sandboxes: the acq secret store is
 # redirected above, but a GLOBAL `acq secret set -g usai` / `secret rm -g usai`
 # on the msb backend otherwise sweeps EVERY running sandbox with
@@ -218,7 +245,7 @@ export ACQ_PROVENANCE_DIR="$VERIFY_STATE/provenance"
 # working USAi key. ACQ_SECRET_NO_LIVE_REFEED=1 makes secret set/rm store-only
 # (no `msb modify` against running VMs); the throwaway sandboxes this script
 # creates still bind the key at create time, which is all the checks need.
-export ACQ_SECRET_NO_LIVE_REFEED=1
+  export ACQ_SECRET_NO_LIVE_REFEED=1
 # The hermetic XDG_CONFIG_HOME above means acq never finds a config file here, so
 # EVERY verify run looks like a first run to `maybe_first_run_configure` — which
 # then blocks on an interactive confirm and hangs the verifier forever (the
@@ -229,17 +256,17 @@ export ACQ_SECRET_NO_LIVE_REFEED=1
 # `acq configure`, which then reports "configuration unchanged" and makes no
 # writes). This only affects the three config widgets — secret VALUE reads are
 # gated on `[ -t 0 ]`, not on this, so seeding still works.
-export ACQ_NO_PROMPT=1
-mkdir -p "$XDG_CONFIG_HOME" "$ACQ_SECRET_STORE_DIR" "$ACQ_STATE_DIR" "$ACQ_PROVENANCE_DIR"
+  export ACQ_NO_PROMPT=1
+  mkdir -p "$XDG_CONFIG_HOME" "$ACQ_SECRET_STORE_DIR" "$ACQ_STATE_DIR" "$ACQ_PROVENANCE_DIR"
 
 # Fixture kit for the neutral `volumes:` vocabulary (ADR-0023): a tiny local kit
 # declaring a 256m block volume. Appended to ACQ_EXTRA_KITS so every create below
 # carries it; the volumes check inside verify_backend asserts the mount landed.
 # 256m, not smaller: msb refuses tiny ext4 disk images ("image size is too small
 # for ext4 formatting"; floor is 128M on msb 0.6.12), so stay well above it.
-VOLKIT_DIR="$VERIFY_STATE/verify-volumes-kit"
-mkdir -p "$VOLKIT_DIR"
-cat >"$VOLKIT_DIR/spec.yaml" <<'SPEC'
+  VOLKIT_DIR="$VERIFY_STATE/verify-volumes-kit"
+  mkdir -p "$VOLKIT_DIR"
+  cat >"$VOLKIT_DIR/spec.yaml" <<'SPEC'
 schemaVersion: "hybrid/v1"
 kind: mixin
 name: verify-volumes
@@ -249,7 +276,8 @@ volumes:
   - path: /acq-verify-vol
     size: 256m
 SPEC
-export ACQ_EXTRA_KITS="${ACQ_EXTRA_KITS:+${ACQ_EXTRA_KITS} }${VOLKIT_DIR}"
+  export ACQ_EXTRA_KITS="${ACQ_EXTRA_KITS:+${ACQ_EXTRA_KITS} }${VOLKIT_DIR}"
+fi
 
 # _run_captured CMD... — run CMD, put its combined stdout+stderr in LAST_OUT, and
 # return its exit status. In verbose mode the output also streams live.
@@ -335,8 +363,11 @@ run_acq() {
 # shallow guest target (verified on msb 0.6.6). A real directory under $HOME
 # mounts fine. So the verify workspace lives under a stable cache dir, and we
 # resolve it to its canonical (symlink-free) path before mounting.
-WORKDIR="${1:-}"
-if [ -z "$WORKDIR" ]; then
+WORKDIR=""
+if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ]; then
+  WORKDIR="${1:-}"
+fi
+if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ] && [ -z "$WORKDIR" ]; then
   _verify_base="${XDG_CACHE_HOME:-$HOME/.cache}/acq/verify"
   mkdir -p "$_verify_base"
   WORKDIR=$(mktemp -d "${_verify_base}/ws.XXXXXX")
@@ -347,7 +378,7 @@ fi
 # Canonicalize (resolve symlinks) so the mounted host path is the real one. acq
 # does this too, but resolving here keeps the derived sandbox name and any direct
 # msb/sbx checks below consistent with what acq actually mounts.
-if command -v realpath >/dev/null 2>&1; then
+if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ] && command -v realpath >/dev/null 2>&1; then
   WORKDIR=$(realpath "$WORKDIR" 2>/dev/null || printf '%s' "$WORKDIR")
 fi
 
@@ -373,9 +404,45 @@ _sbx_secret_has_global_row() {
 }
 
 load_provider_facts() {
+  local source_rc _diag_file _diag
+  # Capture stderr for a useful root-cause diagnostic while discarding stdout
+  # (acq source-mode is chatty on stdout). Bound the capture to 4 KB, then emit
+  # only a diagnostic category. Never replay arbitrary source stderr because a
+  # future dependency could include environment-derived sensitive text.
+  _diag_file=$(mktemp "${TMPDIR:-/tmp}/vb-load-diag.XXXXXX") || _diag_file=""
   # shellcheck disable=SC1090
-  ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null 2>&1
-  acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+  if ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO_ROOT" . "$ACQ" >/dev/null \
+       2>"${_diag_file:-/dev/null}"; then
+    rm -f "$_diag_file"
+  else
+    source_rc=$?
+    if [ -n "$_diag_file" ] && [ -s "$_diag_file" ]; then
+      _diag=$(dd if="$_diag_file" bs=1 count=4096 2>/dev/null | tr -d '\000')
+      echo "verify-backends: unable to source acq from $ACQ (exit $source_rc)" >&2
+      case "$_diag" in
+        *"syntax error"*)
+          printf '  cause: shell syntax error; run: bash -n %s\n' "$ACQ" >&2
+          ;;
+        *"No such file or directory"*)
+          printf '  cause: a required source file is missing\n' >&2
+          ;;
+        *"command not found"*)
+          printf '  cause: a required source-time command is unavailable\n' >&2
+          ;;
+        *)
+          printf '  cause: source initialization failed; run: bash -n %s\n' "$ACQ" >&2
+          ;;
+      esac
+    else
+      echo "verify-backends: unable to source acq from $ACQ (exit $source_rc)" >&2
+    fi
+    rm -f "$_diag_file"
+    return "$source_rc"
+  fi
+  if ! acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"; then
+    echo "verify-backends: provider facts could not be loaded from $USAI_KIT" >&2
+    return 1
+  fi
   USAI_HOST="$USAI_PROVIDER_HOST"
   USAI_MODELS_URL="$USAI_PROVIDER_MODELS_URL"
 }
@@ -1406,6 +1473,11 @@ verify_agent_install() {
   fi
   unseed_usai_secret "$backend" "$aname"
 }
+
+if [ "$_VERIFY_BACKENDS_SOURCED" -eq 1 ]; then
+  unset _VERIFY_BACKENDS_SOURCED
+  return 0
+fi
 
 echo "verify-backends"
 echo "  workspace: $WORKDIR"
