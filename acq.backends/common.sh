@@ -2361,30 +2361,52 @@ ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provi
 # set).  Status 2 means the host cannot run the released validator and is a
 # provisioning blocker, never an empty-set fallback.
 _acq_provider_input_python() {
-  local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check runtime
+  local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check runtime data_home tools_dir setup
   if [ -n "$python" ]; then
     [ -x "$python" ] || {
       echo "acq: configured provider-input Python is not executable: $python" >&2
       return 2
     }
   else
-    for runtime in \
-      "$ACQ_SCRIPT_DIR/.acq-tools/provider-input-validator.current" \
-      "$ACQ_SCRIPT_DIR/.acq-tools/provider-input-validator"; do
-      if [ -x "$runtime/bin/python3" ]; then
-        python="$runtime/bin/python3"
-        break
-      fi
-      if [ -x "$runtime/Scripts/python.exe" ]; then
-        python="$runtime/Scripts/python.exe"
-        break
-      fi
-    done
+    if [ -n "${LOCALAPPDATA:-}" ] && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
+      data_home="$LOCALAPPDATA/acq"
+    else
+      data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
+    fi
+    tools_dir="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}"
+    runtime="$tools_dir/provider-input-validator.current"
+    if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
+    elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
+    elif [ -x "$runtime/python.exe" ]; then python="$runtime/python.exe"
+    fi
   fi
   if [ -z "$python" ]; then
-    python=$(command -v python3 2>/dev/null) || {
-      echo "acq: provider-input validation requires python3 with PyYAML 6.0.3 and jsonschema 4.26.0" >&2
-      echo "     Run: scripts/setup-provider-input-validator --apply" >&2
+    setup="$ACQ_SCRIPT_DIR/scripts/setup-provider-input-validator"
+    [ -x "$setup" ] || {
+      echo "acq: provider-input validation runtime is unavailable and this install lacks its offline bootstrap" >&2
+      echo "     Reinstall acq from an official release; validation remains mandatory." >&2
+      return 2
+    }
+    # A git checkout has no release wheelhouse; name the online setup command so
+    # contributors know exactly how to proceed from a working tree.
+    if [ -e "$ACQ_SCRIPT_DIR/.git" ]; then
+      local _wh_hint
+      _wh_hint="$ACQ_SCRIPT_DIR/scripts/provider-input-validator-wheelhouse"
+      # Only show the git-checkout hint when the default wheelhouse is absent.
+      if ! [ -d "$_wh_hint" ]; then
+        echo "     Git checkout detected: run the following once to install from PyPI with hash verification:" >&2
+        echo "       scripts/setup-provider-input-validator --apply --online" >&2
+        echo "     Or set ACQ_PROVIDER_INPUT_PYTHON to a Python interpreter with PyYAML 6.0.3 and jsonschema 4.26.0." >&2
+      fi
+    fi
+    "$setup" --apply >&2 || return 2
+    runtime="$tools_dir/provider-input-validator.current"
+    if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
+    elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
+    elif [ -x "$runtime/python.exe" ]; then python="$runtime/python.exe"
+    fi
+    [ -n "$python" ] || {
+      echo "acq: provider-input validator bootstrap did not publish a runtime" >&2
       return 2
     }
   fi

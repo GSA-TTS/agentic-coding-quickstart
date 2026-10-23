@@ -634,6 +634,21 @@ install_via_clone() {
   fi
 }
 
+install_provider_validator_wheelhouse() {
+  case "$METHOD" in
+    brew) return 0 ;;
+    clone) target="$CLONE_DIR/scripts/provider-input-validator-wheelhouse" ;;
+    npm) return 0 ;; # npm runs its package-local postinstall hook.
+  esac
+  case "$REF" in
+    v[0-9]*.[0-9]*.[0-9]*) : ;;
+    *) warn "  provider validator wheelhouse is only published for release tags; this development ref will fail closed for provider-backed creates."; return 0 ;;
+  esac
+  [ "$DRY_RUN" -eq 1 ] && { printf '  [dry-run] install verified provider validator wheelhouse into %s\n' "$target"; return 0; }
+  "$CLONE_DIR/scripts/install-provider-input-wheelhouse" --target "$target" --version "${REF#v}" \
+    || die "could not install the verified offline provider validator wheelhouse"
+}
+
 msb_candidate_paths() {
   if command -v msb >/dev/null 2>&1; then
     command -v msb
@@ -1224,6 +1239,8 @@ case "$METHOD" in
   npm)   install_via_npm ;;
   clone) install_via_clone ;;
 esac
+
+install_provider_validator_wheelhouse
 
 # ---------------------------------------------------------------------------
 # Optionally install the msb sandbox runtime

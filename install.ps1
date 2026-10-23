@@ -657,6 +657,50 @@ function Install-AcqZip {
     }
 }
 
+function Install-ProviderValidatorRuntime {
+    # The release ZIP is verified before this runs. The nested runtime still has
+    # its own manifest so extraction cannot publish a corrupted embedded Python.
+    if ($DryRun) {
+        Write-Host "  [dry-run] verify and atomically install the embedded provider validator runtime"
+        return
+    }
+
+    $runtimeArchive = Join-Path $InstallDir "scripts\provider-input-validator-runtime-windows-x86_64.zip"
+    $runtimeManifest = Join-Path $InstallDir "scripts\provider-input-validator-runtime-windows-x86_64.sha256"
+    if (-not (Test-Path -LiteralPath $runtimeArchive -PathType Leaf) -or -not (Test-Path -LiteralPath $runtimeManifest -PathType Leaf)) {
+        throw "The installed acq release lacks the embedded provider validator runtime. Reinstall an official release."
+    }
+    $expected = ((Get-Content -LiteralPath $runtimeManifest -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+    if ($expected -notmatch '^[0-9a-f]{64}$') { throw "Invalid embedded provider validator checksum manifest." }
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $runtimeArchive).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) { throw "Embedded provider validator SHA-256 verification failed. Expected $expected, got $actual." }
+
+    $dataRoot = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "acq\provider-input-validator" } else { throw "LOCALAPPDATA is required for the provider validator runtime." }
+    $target = Join-Path $dataRoot "provider-input-validator.current"
+    $stage = Join-Path $dataRoot (".provider-input-validator.stage-" + [guid]::NewGuid().ToString("N"))
+    $backup = Join-Path $dataRoot (".provider-input-validator.previous-" + [guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
+        Expand-Archive -LiteralPath $runtimeArchive -DestinationPath $stage -Force
+        $python = Join-Path $stage "python.exe"
+        if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "Embedded provider validator runtime is missing python.exe." }
+        & $python -c "import jsonschema, yaml; assert jsonschema.__version__ == '4.26.0'; assert yaml.__version__ == '6.0.3'"
+        if ($LASTEXITCODE -ne 0) { throw "Embedded provider validator dependency verification failed." }
+        if (Test-Path -LiteralPath $target) { Move-Item -LiteralPath $target -Destination $backup }
+        try {
+            Move-Item -LiteralPath $stage -Destination $target
+            if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+        }
+        catch {
+            if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $target }
+            throw
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Add-UserPath {
     # Offer to put a directory on the user PATH. Shared by the acq install dir and
     # the msb bin dir. Never changes PATH without asking, and honors -NoPath.
@@ -712,6 +756,7 @@ Ensure-Msb
 
 Write-Step "Installing acq"
 Install-AcqZip
+Install-ProviderValidatorRuntime
 Ensure-Path
 
 Write-Step "Done"
