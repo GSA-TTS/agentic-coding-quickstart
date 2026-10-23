@@ -86,12 +86,11 @@ jobs:
           [ "$(git -C "$patterns_dir" rev-parse HEAD)" = "$patterns_ref" ]
           test -z "$(git -C "$patterns_dir" status --porcelain)"
           chmod -R a-w "$patterns_dir"
-      - name: Run pinned Patterns validator regression
-        env:
-          ACQ_TEST_PATTERNS_REPO: ${{ runner.temp }}/agentic-coding-patterns
-          ACQ_TEST_PROVIDER_INPUT_PYTHON: ${{ env.pythonLocation }}/bin/python
-        run: ./scripts/test-acq-bats test/bats/147-provider-input-projection.bats
       - name: Install markdown linter dependencies
         run: npm ci --prefix .github/linters
       - name: Run pre-commit
-        run: pre-commit run --all-files --show-diff-on-failure --color=always
+        env:
+          ACQ_TEST_PATTERNS_REPO: ${{ runner.temp }}/agentic-coding-patterns
+          ACQ_TEST_PROVIDER_INPUT_PYTHON: ${{ env.pythonLocation }}/bin/python
+          ACQ_BATS_TIMING: '1'
+        run: pre-commit run --all-files --show-diff-on-failure --color=always --verbose

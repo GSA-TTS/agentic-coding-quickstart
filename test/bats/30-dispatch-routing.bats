@@ -399,6 +399,7 @@ FACTS
 }
 
 @test "run(opencode): generic default reattach does not run an unpinned npm postinstall fallback" {
+  export STUB_SBX_FEATURES_PRESENT=1
   local proj="$STUBDIR/ocreattach"; mkdir -p "$proj"
   _seed_usai
   run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" create opencode --name ocreattach "$proj"
