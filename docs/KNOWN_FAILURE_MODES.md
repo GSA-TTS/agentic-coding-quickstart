@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-10-22"
+last_updated: "2026-10-23"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -1924,7 +1924,7 @@ running on the host (or no key is loaded), there is nothing to forward.
 
 ### Fix
 
-- **Use a supported msb**: acq's default install pin is 0.7.7; existing
+- **Use a supported msb**: acq's default install pin is 0.7.9; existing
   0.6.9-0.6.18 and 0.7.3+ installs remain accepted. msb 0.7.0-0.7.2 are
   refused — see §43.
 - **Ensure `socat` is in `ACQ_MSB_IMAGE`** — the default
@@ -2669,11 +2669,11 @@ command -v msb && msb --version             # confirm which binary acq will use
 Do **not** use `curl -fsSL https://install.microsandbox.dev | sh` to get a
 specific version. It takes no version argument and reads `releases/latest`, and
 every release publishes a **byte-identical** copy of that script as a release
-asset — so `.../releases/download/v0.7.7/install.sh` looks like a pin and
+asset — so `.../releases/download/v0.7.9/install.sh` looks like a pin and
 installs whatever is newest.
 
 `acq` accepts `msb 0.6.9` through `0.6.18`, refuses `0.7.0` through `0.7.2`, and
-accepts `0.7.3` or newer. Fresh installs use pinned `0.7.7`. Remove stale copies
+accepts `0.7.3` or newer. Fresh installs use pinned `0.7.9`. Remove stale copies
 or adjust `PATH` so the intended `msb` appears first.
 
 ### Prevention / Status
@@ -2681,7 +2681,7 @@ or adjust `PATH` so the intended `msb` appears first.
 - `acq_backend_check_version` fails closed on the blocked range before any
   command that opens the catalog — including state-touching verbs like `acq ls`,
   which previously reached `msb` unguarded and surfaced the raw upstream error.
-- `install.sh` installs the pinned `0.7.7` from a checksum-verified release
+- `install.sh` installs the pinned `0.7.9` from a checksum-verified release
   bundle, prompts before replacing a too-old, unparseable, or blocked active
   version, offers the forward path first when the catalog was already migrated,
   refuses to drive a rollback with a binary that would wedge the install, and
@@ -2690,7 +2690,7 @@ or adjust `PATH` so the intended `msb` appears first.
 - `install.ps1` applies the same policy on Windows, which previously had none.
   The Windows-specific logic has been smoke-tested on a real Windows host, but
   remains lower-confidence than the POSIX path.
-- `scripts/verify-msb-pin` verifies the 0.7.7 install pin plus recovery behavior
+- `scripts/verify-msb-pin` verifies the 0.7.9 install pin plus recovery behavior
   against real 0.6.18 / 0.7.2 / 0.7.3 binaries in a throwaway `MSB_HOME`. It
   boots no VM, so it needs no virtualization and runs inside a sandbox.
 

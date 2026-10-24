@@ -3,7 +3,7 @@ title: "msb How-To Guide"
 description: "Detailed how-to for the msb (microsandbox) backend behind acq"
 status: canonical
 tier: 2
-last_updated: "2026-10-03"
+last_updated: "2026-10-23"
 audience: "developers"
 keywords: ["msb", "microsandbox", "backend", "acq", "howto", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/acq.md", "docs/howto/sbx.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0024-neutral-user-facing-docs-vs-backend-specific.md"]
@@ -54,7 +54,7 @@ strengths/tradeoffs comparison.
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](../adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases migrate 0.6.x sandbox state one-way, into a form the 0.6.x line cannot read. The default install pin is 0.7.7; existing 0.6.9-0.6.18 and 0.7.3+ installs remain accepted ([ADR-0032](../adr/0032-msb-version-policy-and-migration-recovery.md)). |
+| `msb` CLI | >= 0.6.9, except 0.7.0-0.7.2 | `--net-rule`, `--trust-host-cas`, `--secret`, `--net-default-egress`, the release-build DNS parser fix, and host ssh-agent forwarding (`--vsock`; [ADR-0021](../adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)). `acq` refuses msb 0.7.0 through 0.7.2 because those releases migrate 0.6.x sandbox state one-way, into a form the 0.6.x line cannot read. The default install pin is 0.7.9, which also returns structured HTTP policy denials; existing 0.6.9-0.6.18 and 0.7.3+ installs remain accepted ([ADR-0032](../adr/0032-msb-version-policy-and-migration-recovery.md)). |
 | Host virtualization | — | Linux: KVM (`/dev/kvm`); macOS: HVF (Apple Silicon); Windows: WHP |
 
 Run `msb doctor` to check host readiness (`msb doctor --fix` attempts setup).
@@ -78,7 +78,7 @@ unparseable, or PATH-shadowed `msb`.
 > `irm … | iex` equivalent) take no version argument and read
 > `releases/latest`. Every release also publishes a **byte-identical** copy of
 > that script as a release asset, so a URL like
-> `.../releases/download/v0.7.7/install.sh` looks like a pin and still installs
+> `.../releases/download/v0.7.9/install.sh` looks like a pin and still installs
 > whatever is newest — which may be a version `acq` refuses.
 
 ```bash
@@ -90,6 +90,65 @@ If you have both Homebrew and a prior manual/curl install, verify which binary i
 active with `command -v msb`. Multiple `msb` copies on PATH can create or migrate
 sandbox state with different versions depending on shell PATH order; keep only
 one intended version active.
+
+## Policy denials
+
+msb 0.7.9 returns a JSON `403` for supported HTTP requests denied by its local
+proxy. `acq` recognizes the stable `network_policy_denied` and
+`secret_policy_denied` codes so it can distinguish a sandbox policy problem from
+an upstream USAi authorization failure. A policy denial is not an interactive
+approval request: update the kit egress rule or secret host binding, then
+recreate the sandbox. An upstream `401` or unstructured `403` remains an
+authorization response and follows the normal key-remediation path.
+
+### Host-side validation
+
+Run this validation on a sandbox-capable **host**, not from an existing sbx or
+msb sandbox. It requires msb **0.7.9 or newer**: 0.7.7 remains supported by
+`acq`, but predates the structured denial response and cannot validate this
+behavior. Upgrading a host is an operator decision; `acq` does not upgrade msb
+automatically.
+
+First capture the active executable and version, then install the pinned release
+only after approving the host change:
+
+```bash
+command -v msb
+msb --version
+msb list
+
+# Optional approved upgrade to this repository's checksum-verified 0.7.9 pin.
+./scripts/verify-msb-pin --install
+
+command -v msb
+msb --version
+```
+
+The second version check must report `0.7.9` or newer. Next, run the existing
+live backend verification. It creates throwaway sandboxes, uses a synthetic
+USAi value, and must not be given or print a real `USAI_API_KEY` or
+`GITHUB_TOKEN` value:
+
+```bash
+./scripts/verify-backends --only msb
+```
+
+Then validate the denial contract with a throwaway sandbox whose egress policy
+omits a test HTTPS host. Record only the HTTP status and JSON `code` field; do
+not record request headers, environment output, or credential values. The
+expected evidence is:
+
+| Case | Expected result | `acq` diagnosis |
+|------|-----------------|------------------|
+| HTTPS host omitted from egress policy | HTTP `403`, `code: network_policy_denied` | Local sandbox network policy; add the host/port to the kit policy and recreate. |
+| Secret presented to a host omitted from its `--secret ENV@HOST` binding | HTTP `403`, `code: secret_policy_denied` | Local sandbox secret policy; correct the host binding and recreate. |
+| Real USAi request rejected upstream | Upstream `401`, or an unstructured/unknown `403` | Upstream authorization; retain the normal key-remediation path. |
+
+Do not use a successful status alone as evidence of the policy contract: the
+validation must capture the two structured `403` codes and one non-MSB upstream
+authorization response. MSB has no host-popup or allow-once approval hook; a
+denial is resolved by an explicit policy or binding change followed by sandbox
+recreation.
 
 If a 0.7.0-0.7.2 `msb` has already touched your sandbox state, do **not** just
 swap the binary — the catalog was migrated. Move forward with

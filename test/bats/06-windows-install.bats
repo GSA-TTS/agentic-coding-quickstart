@@ -120,10 +120,10 @@ teardown() {
   assert_regex "$code" 'Get-FileHash -Algorithm SHA256'
 }
 
-@test "windows installer: msb version policy stays in lockstep with install.sh" {
+@test "windows installer: all msb version policy copies stay in lockstep" {
   # Four files carry this policy (install.sh, install.ps1, acq.backends/msb.sh,
   # scripts/verify-msb-pin) because three must run standalone. Drift means Windows
-  # accepts an msb the rest of acq refuses, so pin the Windows copy to install.sh's.
+  # accepts an msb the rest of acq refuses, so all copies must match install.sh.
   for var in MSB_MIN_VERSION:MsbMinVersion \
              MSB_PINNED_VERSION:MsbPinnedVersion \
              MSB_ROLLBACK_VERSION:MsbRollbackVersion \
@@ -137,7 +137,14 @@ teardown() {
 
     [ -n "$sh_value" ] || fail "install.sh does not define $sh_name"
     assert_equal "$ps_value" "$sh_value"
+    adapter_name=$sh_name
+    [ "$sh_name" = MSB_MIN_VERSION ] && adapter_name=MIN_MSB_VERSION
+    adapter_value=$(sed -n "s/^$adapter_name=\"\([^\"]*\)\".*/\1/p" "$REPO_ROOT/acq.backends/msb.sh")
+    assert_equal "$adapter_value" "$sh_value"
   done
+
+  pin_value=$(sed -n 's/^PINNED_VERSION="\([^"]*\)".*/\1/p' "$REPO_ROOT/scripts/verify-msb-pin")
+  assert_equal "$pin_value" "$(sed -n 's/^MSB_PINNED_VERSION="\([^"]*\)".*/\1/p' "$REPO_ROOT/install.sh")"
 }
 
 @test "windows PowerShell: msb version parser preserves suffix policy" {

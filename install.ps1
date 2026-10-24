@@ -29,7 +29,7 @@ $PackageName = "acq-windows-x64.zip"
 # line cannot read. 0.7.3 carries the upstream compatibility fix; acq installs a
 # newer fixed release by default. See ADR-0032.
 $MsbMinVersion = "0.6.9"
-$MsbPinnedVersion = "0.7.7"
+$MsbPinnedVersion = "0.7.9"
 $MsbRollbackVersion = "0.6.18"
 $MsbBlockedVersionMin = "0.7.0"
 $MsbBlockedVersionMax = "0.7.2"

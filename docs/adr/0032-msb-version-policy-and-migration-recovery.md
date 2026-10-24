@@ -59,7 +59,7 @@ Both upstream install vectors resolve the version at run time:
   and reads `releases/latest`.
 - Every release additionally publishes `install.sh` as a release asset, and
   those copies are **byte-identical** — so
-  `.../releases/download/v0.7.7/install.sh` *looks* like a pin and installs
+  `.../releases/download/v0.7.9/install.sh` *looks* like a pin and installs
   whatever is newest. An earlier revision of this work used exactly that URL and
   was wrong to.
 - `superradcompany/tap/microsandbox` (Homebrew) tracks the newest release by
@@ -182,7 +182,7 @@ parity, even though on `sbx` the two currently do the same work.
 
 ### 2. Installing a specific version
 
-`install.sh` installs the pinned **0.7.7** when it must install or repair
+`install.sh` installs the pinned **0.7.9** when it must install or repair
 `msb`, by fetching the release bundle and verifying it against that release's
 published `checksums.sha256`. The `libkrunfw` filename and ABI are derived
 **from the artifact**, never hardcoded — a hardcoded name is precisely the bug
@@ -246,7 +246,9 @@ after the fixed threshold. The result is **re-checked** rather than assumed — 
 upstream ships something newer that `acq` does not accept, the post-update
 version check catches it and falls back to the pin.
 
-The install pin is now **0.7.7** for a fresh install. That is separate from the
+The install pin is now **0.7.9** for a fresh install. This release also adds
+structured HTTP policy-denial responses, which acq uses to distinguish local
+network or secret policy from upstream authorization failures. That is separate from the
 rollback target: if a blocked 0.7.0-0.7.2 binary already migrated a catalog and
 the user chooses rollback instead of forward recovery, `msb self downgrade` still
 targets **0.6.18**, the newest 0.6.x catalog format.
@@ -314,7 +316,7 @@ the snapshot-group downgrade refusal; and the keg-only formula layout.
   Windows is no longer a hole in the policy; the distribution claims are
   verified live rather than asserted.
 - **Negative / trade-off:** the version policy is duplicated in four files, and
-  only the Windows copy is drift-tested. Fresh installs now land on 0.7.7, while
+  only the Windows copy is drift-tested. Fresh installs now land on 0.7.9, while
   rollback guidance still needs 0.6.18 as a distinct state-recovery target.
 - **Negative:** `install.sh` executes no upstream code, but it does download
   release artifacts from GitHub; the checksum is fetched from the same release,

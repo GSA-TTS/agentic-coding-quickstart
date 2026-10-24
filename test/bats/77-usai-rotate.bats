@@ -47,6 +47,19 @@ load 'helper'
   assert [ -f "$STUBDIR/secrets/acq.usai" ]
 }
 
+@test "rotate(msb): structured policy denial is not diagnosed as a key failure" {
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_secret_set() { return 0; }
+    check_fresh_sandbox_key() { printf "network_policy_denied\n"; }
+    acq_backend_rotate_key
+  '
+  assert_failure
+  assert_output --partial 'blocked the USAi API by sandbox network policy'
+  refute_output --partial 'Double-check the key'
+}
+
 @test "rotate(msb): also propagates to existing sbx sandboxes" {
   printf 'runningbox\n' > "$STUBDIR/.msb_sandbox_list"
   printf 'legacy-sbx\n' > "$STUBDIR/.sandbox_list"

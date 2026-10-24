@@ -3175,7 +3175,8 @@ ensure_opencode_postinstall() {
 }
 
 # Probe the USAi API from inside the sandbox. Emits ONE clean token on stdout:
-#   - a 3-digit HTTP status (e.g. 200, 401) on a real HTTP response,
+#   - a 3-digit HTTP status (e.g. 200, 401) on an upstream HTTP response,
+#   - an msb structured policy code when its local proxy returned one,
 #   - "unresolved" when the guest resolver returned no answer for the name
 #     (curl exit 6 / NXDOMAIN) — the split-horizon-DNS tell,
 #   - the literal "unreachable" when curl could not complete a request at all
@@ -3186,24 +3187,35 @@ ensure_opencode_postinstall() {
 # key, so it must never be reported as "invalid or expired" or trigger a rotate.
 #
 # Sanitize hard: curl's stderr can leak through the backend exec (which may merge
-# streams), so we emit the raw curl output as `<http_code>|<exit>` and reduce it
-# to a bare code here. Only ^[0-9]{3}$ or "unreachable" or "" can ever escape —
-# no free-form error text can splice into the caller's "(HTTP …)" message.
+# streams), so the guest emits `<http_code>|<exit>|<policy_code>`. Only a status,
+# an allowlisted policy code, "unreachable", "unresolved", or "" can escape.
+# No response body or other free-form error text reaches a caller diagnostic.
 check_key() {
-  local name="$1"
-  local raw code exit_code key_ref
+  local name="$1" raw code exit_code key_ref probe
   key_ref="\$${USAI_PROVIDER_KEY_ENV}"
+  probe='body=$(mktemp) || exit 1
+    trap "rm -f \"$body\"" EXIT
+    curl -sS --max-filesize 4096 -o "$body" -w "%{http_code}" -H "Authorization: Bearer '
+  probe="$probe$key_ref"
+  probe="$probe"'" "'
+  probe="$probe$USAI_PROVIDER_MODELS_URL"
+  probe="$probe"'"
+    rc=$?
+    policy=""
+    case "$(cat "$body")" in
+      *"\"code\":\"network_policy_denied\""*) policy=network_policy_denied ;;
+      *"\"code\":\"secret_policy_denied\""*) policy=secret_policy_denied ;;
+    esac
+    printf "|%s|%s" "$rc" "$policy"'
   raw=$(acq_backend_run "$name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer $key_ref\" \
-     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" 2>/dev/null || true)
+    "$probe" 2>/dev/null || true)
   _classify_key_status "$raw"
 }
 
-# Reduce a raw `<http_code>|<curl_exit>` probe result (possibly polluted with
-# curl error text) to a clean status token: a 3-digit HTTP code, "unresolved"
-# (DNS did not resolve the name — curl exit 6), "unreachable" (resolved but the
-# connection never completed — TLS reset / connect refused / HTTP 000), or "".
+# Reduce a raw `<http_code>|<curl_exit>|<policy_code>` probe result (possibly
+# polluted with curl error text) to a clean status token: a 3-digit upstream HTTP
+# code, an msb policy code, "unresolved" (DNS did not resolve the name — curl
+# exit 6), "unreachable" (connection did not complete), or "".
 # Shared by check_key and check_fresh_sandbox_key.
 #
 # WHY "unresolved" is split out from "unreachable": a curl exit 6 means the guest
@@ -3214,16 +3226,25 @@ check_key() {
 # cut. Keeping them separate lets the caller give the right advice instead of a
 # generic "network problem". See docs/KNOWN_FAILURE_MODES.md §30.
 _classify_key_status() {
-  local raw="$1" code exit_code
-  # The curl exit code is the last field after the final '|'. Keep only digits.
-  exit_code="${raw##*|}"
+  local raw="$1" code exit_code policy rest
+  # The curl exit code is the field after the first '|'. Keep only digits.
+  rest="${raw#*|}"
+  exit_code="${rest%%|*}"
   exit_code=$(printf '%s' "$exit_code" | tr -cd '0-9')
+  policy="${rest#*|}"
   # The http_code is the last 3-digit run before that '|' (curl's %{http_code}).
   code="${raw%%|*}"
   code=$(printf '%s' "$code" | tr -cd '0-9')
   # Keep only the trailing 3 digits (guards against any leading leaked digits).
   code="${code: -3}"
 
+  # Only msb's two stable 0.7.9 policy codes reclassify a local 403. An upstream
+  # 403 remains an HTTP status and keeps the normal authorization handling.
+  if [ "$exit_code" = "0" ] && [ "$code" = "403" ]; then
+    case "$policy" in
+      network_policy_denied|secret_policy_denied) printf '%s\n' "$policy"; return 0 ;;
+    esac
+  fi
   # curl succeeded (exit 0) AND returned a plausible non-000 HTTP code.
   if [ "$exit_code" = "0" ] && [ -n "$code" ] && [ "$code" != "000" ]; then
     printf '%s\n' "$code"
@@ -3267,12 +3288,24 @@ check_fresh_sandbox_key() {
   fi
   # shellcheck disable=SC2064
   trap "acq_backend_terminate '$validation_name' </dev/null >/dev/null 2>&1 || true" EXIT
-  local raw key_ref
+  local raw key_ref probe
   key_ref="\$${USAI_PROVIDER_KEY_ENV}"
+  probe='body=$(mktemp) || exit 1
+    trap "rm -f \"$body\"" EXIT
+    curl -sS --max-filesize 4096 -o "$body" -w "%{http_code}" -H "Authorization: Bearer '
+  probe="$probe$key_ref"
+  probe="$probe"'" "'
+  probe="$probe$USAI_PROVIDER_MODELS_URL"
+  probe="$probe"'"
+    rc=$?
+    policy=""
+    case "$(cat "$body")" in
+      *"\"code\":\"network_policy_denied\""*) policy=network_policy_denied ;;
+      *"\"code\":\"secret_policy_denied\""*) policy=secret_policy_denied ;;
+    esac
+    printf "|%s|%s" "$rc" "$policy"'
   raw=$(acq_backend_run "$validation_name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer $key_ref\" \
-     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
+    "$probe" </dev/null 2>/dev/null || true)
   status=$(_classify_key_status "$raw")
   acq_backend_terminate "$validation_name" </dev/null >/dev/null 2>&1 || true
   trap - EXIT
@@ -3849,6 +3882,13 @@ advise_valid_key() {
     return 0
   fi
 
+  case "$status" in
+    network_policy_denied|secret_policy_denied)
+      _report_usai_policy_denied "$status"
+      return 0
+      ;;
+  esac
+
   echo "acq: note — your USAi API key looks invalid or expired (HTTP $status)." >&2
   echo "      USAi keys expire every 7 days. This sandbox was created, but the" >&2
   echo "      key must be valid before an agent can use it." >&2
@@ -3902,6 +3942,29 @@ _report_usai_unresolved() {
   echo "      msb's rebind protection is not forced on (ACQ_MSB_DNS_REBIND_PROTECTION" >&2
   echo "      unset, or 0 if the sandbox was created while the tunnel was down)." >&2
   echo "      See docs/KNOWN_FAILURE_MODES.md §30 (USAi-only NXDOMAIN)." >&2
+  echo >&2
+}
+
+# msb >= 0.7.9 answered locally. A policy denial neither reached USAi nor says
+# anything about the credential, so do not recommend key rotation or registry
+# login. The policy is create-time configuration: correct it and recreate.
+_report_usai_policy_denied() {
+  local policy="$1"
+  echo >&2
+  case "$policy" in
+    network_policy_denied)
+      echo "acq: msb blocked the USAi API by sandbox network policy." >&2
+      echo "      The request did not reach USAi, so this is not an invalid or expired key." >&2
+      echo "      Add $USAI_PROVIDER_HOST:443 to the selected kit's egress policy, then recreate" >&2
+      echo "      the sandbox. Do not rotate the key." >&2
+      ;;
+    secret_policy_denied)
+      echo "acq: msb blocked the USAi credential by sandbox secret policy." >&2
+      echo "      The request did not reach USAi, so this is not an upstream authorization failure." >&2
+      echo "      Verify the USAi --secret binding includes $USAI_PROVIDER_HOST, then recreate" >&2
+      echo "      the sandbox. Do not rotate the key." >&2
+      ;;
+  esac
   echo >&2
 }
 
@@ -4057,6 +4120,13 @@ ensure_valid_key() {
     _report_usai_unresolved
     return 1
   fi
+
+  case "$status" in
+    network_policy_denied|secret_policy_denied)
+      _report_usai_policy_denied "$status"
+      return 1
+      ;;
+  esac
 
   # A key IS stored (ensure_key_present gated create on that) but the models API
   # rejected it: it is expired or invalid. Offer an in-place rotation, then

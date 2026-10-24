@@ -65,7 +65,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 
 # Versions under test. Keep in lockstep with install.sh / acq.backends/msb.sh:
 # a drift here is a silently weaker test, not a failure.
-PINNED_VERSION="0.7.7"
+PINNED_VERSION="0.7.9"
 ROLLBACK_VERSION="0.6.18"
 BLOCKED_VERSION="0.7.2"
 FIXED_VERSION="0.7.3"

@@ -69,7 +69,7 @@ BREW_FORMULA="GSA-TTS/tap/acq"
 # install or repair msb, and keep refusing that historical blocked range. See
 # ADR-0032.
 MSB_MIN_VERSION="0.6.9"
-MSB_PINNED_VERSION="0.7.7"
+MSB_PINNED_VERSION="0.7.9"
 MSB_ROLLBACK_VERSION="0.6.18"
 MSB_BLOCKED_VERSION_MIN="0.7.0"
 MSB_BLOCKED_VERSION_MAX="0.7.2"

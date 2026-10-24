@@ -443,25 +443,51 @@ FACTS
   refute_output --partial 'did not RESOLVE'
 }
 
-@test "classify: _classify_key_status yields clean tokens (code|unresolved|unreachable)" {
+@test "classify: _classify_key_status preserves only structured msb policy codes" {
   load_acq
   run bash -c '
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
-    _classify_key_status "200|0"; echo
-    _classify_key_status "401|0"; echo
-    _classify_key_status "000|56"; echo
-    _classify_key_status "000|7"; echo
-    _classify_key_status "000|6"; echo
-    _classify_key_status "000|35"; echo
-    _classify_key_status "curl: (56) OpenSSL SSL_read: unexpected eof000|56"; echo
+    _classify_key_status "200|0|"; echo
+    _classify_key_status "401|0|"; echo
+    _classify_key_status "403|0|network_policy_denied"; echo
+    _classify_key_status "403|0|secret_policy_denied"; echo
+    _classify_key_status "403|0|unauthorized"; echo
+    _classify_key_status "000|56|"; echo
+    _classify_key_status "000|7|"; echo
+    _classify_key_status "000|6|"; echo
+    _classify_key_status "000|35|"; echo
+    _classify_key_status "curl: (56) OpenSSL SSL_read: unexpected eof000|56|"; echo
   '
   assert_line --index 0 '200'
   assert_line --index 1 '401'
-  assert_line --index 2 'unreachable'
-  assert_line --index 3 'unreachable'
-  assert_line --index 4 'unresolved'
+  assert_line --index 2 'network_policy_denied'
+  assert_line --index 3 'secret_policy_denied'
+  assert_line --index 4 '403'
   assert_line --index 5 'unreachable'
   assert_line --index 6 'unreachable'
+  assert_line --index 7 'unresolved'
+  assert_line --index 8 'unreachable'
+  assert_line --index 9 'unreachable'
+}
+
+@test "run: msb policy denial is not diagnosed as an invalid USAi key" {
+  local proj="$STUBDIR/msb-policy"; mkdir -p "$proj"
+  _seed_usai
+  run env STUB_KEY_STATUS=403 STUB_KEY_POLICY_CODE=network_policy_denied \
+    ACQ_BACKEND=msb "$ACQ" run opencode "$proj"
+  assert_failure
+  assert_output --partial 'blocked the USAi API by sandbox network policy'
+  assert_output --partial 'Do not rotate the key'
+  refute_output --partial 'Your USAi API key looks invalid'
+}
+
+@test "run: upstream USAi 403 retains authorization handling" {
+  local proj="$STUBDIR/msb-upstream-403"; mkdir -p "$proj"
+  _seed_usai
+  run env STUB_KEY_STATUS=403 ACQ_BACKEND=msb "$ACQ" run opencode "$proj"
+  assert_failure
+  assert_output --partial 'invalid or expired (HTTP 403 from the models API)'
+  refute_output --partial 'sandbox network policy'
 }
 
 @test "run: NXDOMAIN (curl 6) is a resolver problem with a DNS hint; fail closed" {
