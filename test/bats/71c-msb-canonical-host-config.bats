@@ -40,6 +40,9 @@ _provision_hcfg() { # NAME PRE_SNIPPET WS_ARGS...
     name="$1"; pre="$2"; shift 2
     export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
     . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    # Adapter tests source common.sh directly. Individual cases provide the
+    # trusted canonicalizer result expected from the complete acq entrypoint.
+    _acq_provider_input_canonical_path() { printf "%s\n" "$1"; }
     eval "$pre"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     mkdir -p "'"$STUBDIR"'/nokit"
@@ -74,6 +77,10 @@ _provision_hcfg() { # NAME PRE_SNIPPET WS_ARGS...
     acq_host_config_dir() {
       printf "%s\n" "'"$alias_cfgdir"'"
     }
+    _acq_provider_input_canonical_path() {
+      [ "$1" = "'"$alias_cfgdir"'" ] || return 1
+      printf "%s\n" "'"$resolved_cfgdir"'"
+    }
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/594a-secrets"
   ' "$ws"
   rm -rf "$ws" "$alias_cfgdir" "$real_cfgdir"
@@ -96,23 +103,22 @@ _provision_hcfg() { # NAME PRE_SNIPPET WS_ARGS...
 # return the symlink path, and assert the resulting volume mount uses the
 # resolved target, not the symlink name.
 # ---------------------------------------------------------------------------
-@test "594(b): host-config dir with an arbitrary symlink resolves to the real target" {
-  local real_cfgdir symlink_cfgdir ws resolved_cfgdir
+@test "594(b): host-config canonicalization failure prevents backend create" {
+  local real_cfgdir symlink_cfgdir ws
   real_cfgdir=$(mktemp -d "${TMPDIR:-/tmp}/594b-real.XXXXXX")
   symlink_cfgdir="${TMPDIR:-/tmp}/594b-link-$$"
   ln -sf "$real_cfgdir" "$symlink_cfgdir"
   ws=$(mktemp -d "${TMPDIR:-/tmp}/594b-ws.XXXXXX")
-  resolved_cfgdir=$(realpath "$real_cfgdir" 2>/dev/null || printf '%s' "$real_cfgdir")
 
   _provision_hcfg hcfgsym594b '
     acq_host_config_dir() {
       printf "%s\n" "'"$symlink_cfgdir"'"
     }
+    _acq_provider_input_canonical_path() { return 1; }
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/594b-secrets"
   ' "$ws"
   rm -rf "$ws" "$symlink_cfgdir" "$real_cfgdir"
 
-  # The --volume SOURCE must be the real (resolved) path, not the symlink.
-  assert_regex "$(cat "$CALLS")" "--volume ${resolved_cfgdir}:"
-  refute_regex "$(cat "$CALLS")" "--volume ${symlink_cfgdir}:"
+  assert_failure
+  refute_regex "$(cat "$CALLS")" '^msb create '
 }

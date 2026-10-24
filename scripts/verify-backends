@@ -223,7 +223,10 @@ dump() {
 
 cleanup_verify_state() {
   _stop_ephemeral_agent
-  [ -n "$VERIFY_STATE" ] && rm -rf "$VERIFY_STATE"
+  if [ -n "$VERIFY_STATE" ]; then
+    chmod -R u+w "$VERIFY_STATE" 2>/dev/null || true
+    rm -rf "$VERIFY_STATE"
+  fi
 }
 if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ]; then
   trap cleanup_verify_state EXIT
@@ -383,7 +386,6 @@ if [ "$_VERIFY_BACKENDS_SOURCED" -eq 0 ] && command -v realpath >/dev/null 2>&1;
 fi
 
 USAI_MODELS_URL="https://api.gsa.usai.gov/api/v1/models"
-USAI_KIT_CONFIG_PATH="/home/agent/usai-config/opencode.jsonc"
 
 # Load the provider contract used by acq's backend adapters before the verifier
 # performs any provider-specific checks. The fallback remains available through
@@ -834,11 +836,12 @@ verify_backend() {
     return
   fi
 
-  # 1) USAi kit config landed.
-  if run_acq "exec usai-check" --backend "$backend" exec "$name" -- sh -c "test -f '$USAI_KIT_CONFIG_PATH'"; then
-    pass "${backend}: usai-provider kit applied (config staged)"
+  # 1) Provider-neutral facts landed through the read-only projection.
+  if run_acq "exec provider-input-check" --backend "$backend" exec "$name" -- sh -c \
+      'test -n "$ACQ_PROVIDER_INPUT_ROOT" && test -r "$ACQ_PROVIDER_INPUT_ROOT/models/providers/usai/facts.json"'; then
+    pass "${backend}: provider input facts projected and readable"
   else
-    fail "${backend}: usai-provider kit config missing at $USAI_KIT_CONFIG_PATH"
+    fail "${backend}: provider input facts missing from projected root"
     dump "exec output" "$LAST_OUT"
   fi
 
@@ -1438,6 +1441,14 @@ verify_agent_install() {
     pass "${backend}: opencode binary installed and on PATH"
   else
     fail "${backend}: opencode binary NOT found in sandbox (agent install failed)"
+    dump "exec output" "$LAST_OUT"
+  fi
+
+  if run_acq "exec opencode-config" --backend "$backend" exec "$aname" -- sh -c \
+      'test -r /home/agent/.config/opencode/opencode.jsonc'; then
+    pass "${backend}: OpenCode kit generated the global config"
+  else
+    fail "${backend}: OpenCode global config was not generated"
     dump "exec output" "$LAST_OUT"
   fi
 

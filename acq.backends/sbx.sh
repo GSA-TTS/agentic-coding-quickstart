@@ -623,42 +623,20 @@ _acq_backend_provision_unlocked() {
   _hcfg_dir=$(acq_host_config_dir sbx "$name") || return 1
   mkdir -p "$_hcfg_dir" || return 1
   chmod 711 "$_hcfg_dir" || return 1
-  # sbx positional syntax: AGENT [WORKSPACE[:ro]...]  The provider generation must
-  # appear AFTER the agent token as a workspace-style read-only mount — placing it
-  # before the agent causes sbx to resolve the path as a kit reference (issue #629).
-  # Compute the mount string, then inject it into _sbx_args right after the first
-  # non-flag positional (the agent), preserving any flags that precede it and all
-  # workspace positionals that follow.  ACQ_PROVIDER_INPUT_ROOT points guests to
-  # the same-absolute-path mount that sbx enforces read-only at the VMM layer.
+  # SBX positional syntax is AGENT PRIMARY_WORKSPACE [OTHER_WORKSPACE[:ro]...].
+  # The provider generation therefore follows every existing workspace: placing
+  # it before the agent makes it a kit path, while placing it first after the
+  # agent makes it an invalid read-only primary workspace.
   local _provider_mount_val
   _provider_mount_val=$(acq_provider_input_sbx_mount "$name" "$_provider_generation") || {
     _acq_sbx_cleanup_uncreated_attempt
     return 1
   }
   _ef+=(--env "ACQ_PROVIDER_INPUT_ROOT=$(acq_provider_input_guest_root sbx "$name" "$_provider_generation")")
-  # Insert _provider_mount_val into _sbx_args after the first positional (agent).
-  # Scan past any leading flags (e.g. --template imgref) to find the agent index.
-  local _sbx_args_final=() _pmv_inserted=0 _pma_prev="" _pma_idx _pma_elem
-  for _pma_idx in "${!_sbx_args[@]}"; do
-    _pma_elem="${_sbx_args[$_pma_idx]}"
-    _sbx_args_final+=("$_pma_elem")
-    if [ "$_pmv_inserted" -eq 0 ]; then
-      if _takes_value "$_pma_prev"; then
-        _pma_prev="$_pma_elem"
-        continue
-      fi
-      case "$_pma_elem" in
-        -*) _pma_prev="$_pma_elem"; continue ;;
-      esac
-      # First non-flag positional: the agent.  Insert the provider mount immediately
-      # after it so sbx sees: AGENT /gen:ro [workspace...], not /gen:ro AGENT [ws].
-      _sbx_args_final+=("$_provider_mount_val")
-      _pmv_inserted=1
-    fi
-    _pma_prev="$_pma_elem"
-  done
-  # No positional found (empty or all-flag _sbx_args): append mount at the end.
-  [ "$_pmv_inserted" -eq 0 ] && _sbx_args_final+=("$_provider_mount_val")
+  # SBX requires the first workspace after the agent to be read/write. Append
+  # the provider generation after all existing workspace positionals so its
+  # read-only marker cannot become the primary workspace.
+  local _sbx_args_final=("${_sbx_args[@]}" "$_provider_mount_val")
 
   local kf=()
   while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)

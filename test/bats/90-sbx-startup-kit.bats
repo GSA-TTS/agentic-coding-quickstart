@@ -572,16 +572,21 @@ STUB
   # (b) generation:ro must appear AFTER the selected agent token so sbx treats
   #     it as a workspace-style read-only mount, not a kit path. Avoid generic
   #     flag parsing here: SBX has both value-taking and boolean flags.
-  local gen_pos agent_pos
+  local gen_pos agent_pos workspace_pos
   gen_pos=$(printf '%s\n' "$create_line" | awk '{
     for (i=1; i<=NF; i++) { if ($i ~ /\/generation\..*:ro$/) { print i; exit } }
   }')
   agent_pos=$(printf '%s\n' "$create_line" | awk '{
     for (i=1; i<=NF; i++) { if ($i == "shell") { print i; exit } }
   }')
+  workspace_pos=$(printf '%s\n' "$create_line" | awk -v workspace="/tmp" '{
+    for (i=1; i<=NF; i++) { if ($i == workspace) { print i; exit } }
+  }')
   [ -n "$gen_pos" ]
   [ -n "$agent_pos" ]
+  [ -n "$workspace_pos" ]
   assert [ "$agent_pos" -lt "$gen_pos" ]
+  assert [ "$workspace_pos" -lt "$gen_pos" ]
 
   # (c) ACQ_PROVIDER_INPUT_ROOT must be in the env flags (no :ro suffix on the guest path).
   assert_regex "$create_line" 'ACQ_PROVIDER_INPUT_ROOT=[^ ]*/generation\.[^ :]*([ ]|$)'

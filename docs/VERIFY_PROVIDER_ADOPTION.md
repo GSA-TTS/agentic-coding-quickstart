@@ -54,12 +54,38 @@ actual command output.
 
 | Check | SBX | MSB | Observed output / notes |
 |---|---|---|---|
-| Fresh `acq run opencode .` startup | BLOCKED | BLOCKED | No live run claimed in this preparatory slice |
-| Fresh OpenCode process starts | BLOCKED | BLOCKED | Record actual startup output |
-| `acq exec NAME -- opencode models` consumes projected provider input | BLOCKED | BLOCKED | Record actual model listing; do not claim from mocks |
+| Fresh `acq run opencode .` startup | FAIL | FAIL | 2026-10-24: backend create failed before startup. SBX treated the provider mount as a kit/primary workspace; MSB rejected an uncanonicalized host-config bind source. Fixes are consolidated in this draft; rerun required. |
+| Fresh OpenCode process starts | BLOCKED | BLOCKED | Blocked by the observed create failures above; no process-start claim. |
+| `acq exec NAME -- opencode models` consumes projected provider input | BLOCKED | BLOCKED | Blocked by the observed create failures above; no model-list claim. |
 | Remove projected provider input and restart OpenCode | BLOCKED | BLOCKED | Record expected actionable failure or documented fallback |
 | Malformed provider input is rejected before startup | BLOCKED | BLOCKED | Record exact validation error and exit status |
-| `scripts/verify-backends --only <backend>` | BLOCKED | BLOCKED | Run only outside a sandbox; capture transcript |
+| `scripts/verify-backends --only <backend>` | FAIL | FAIL | SBX transcript: `tmp/provider-neutral-validation.aguo8ZPz/sbx.log`. MSB transcript: `tmp/provider-neutral-validation.ktM9ig5z/msb.log`. Both reached validated provider inputs before backend-specific create failure. |
+
+### Preserved Live Evidence (2026-10-24)
+
+The full host transcripts remain in the gitignored Quickstart `tmp/` directory.
+The decisive output is preserved here so review does not depend on those local
+files.
+
+SBX reached provider validation, then failed before sandbox creation:
+
+```text
+provider input contract: validated 1 bundle(s)
+error: primary workspace must be read/write (remove ':ro' or ':readonly')
+```
+
+MSB version `0.7.7` reached provider validation, then failed before sandbox
+creation because the host-config bind source retained macOS `/var` spelling:
+
+```text
+provider input contract: validated 1 bundle(s)
+error: invalid config: bind mount host path /var/folders/... goes through symlink /var;
+use the resolved path /private/var/folders/... or add follow-root-symlinks
+```
+
+These are product failures, not environmental blocks. Both backend fixes are
+included in this draft. Final validation remains blocked until Quickstart main
+contains the trusted macOS system-alias canonicalizer used by the MSB adapter.
 
 ### Negative-Validation Procedure (malformed provider input)
 
