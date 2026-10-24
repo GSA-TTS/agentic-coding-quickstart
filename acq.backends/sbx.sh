@@ -623,14 +623,43 @@ _acq_backend_provision_unlocked() {
   _hcfg_dir=$(acq_host_config_dir sbx "$name") || return 1
   mkdir -p "$_hcfg_dir" || return 1
   chmod 711 "$_hcfg_dir" || return 1
-  # sbx supports only its same-absolute-path readonly positional mount. Publish
-  # that backend-owned guest root through the neutral environment contract.
-  local _provider_mount=()
-  _ef+=(--env "ACQ_PROVIDER_INPUT_ROOT=$(acq_provider_input_guest_root sbx "$name" "$_provider_generation")")
-  _provider_mount=("$(acq_provider_input_sbx_mount "$name" "$_provider_generation")") || {
+  # sbx positional syntax: AGENT [WORKSPACE[:ro]...]  The provider generation must
+  # appear AFTER the agent token as a workspace-style read-only mount — placing it
+  # before the agent causes sbx to resolve the path as a kit reference (issue #629).
+  # Compute the mount string, then inject it into _sbx_args right after the first
+  # non-flag positional (the agent), preserving any flags that precede it and all
+  # workspace positionals that follow.  ACQ_PROVIDER_INPUT_ROOT points guests to
+  # the same-absolute-path mount that sbx enforces read-only at the VMM layer.
+  local _provider_mount_val
+  _provider_mount_val=$(acq_provider_input_sbx_mount "$name" "$_provider_generation") || {
     _acq_sbx_cleanup_uncreated_attempt
     return 1
   }
+  _ef+=(--env "ACQ_PROVIDER_INPUT_ROOT=$(acq_provider_input_guest_root sbx "$name" "$_provider_generation")")
+  # Insert _provider_mount_val into _sbx_args after the first positional (agent).
+  # Scan past any leading flags (e.g. --template imgref) to find the agent index.
+  local _sbx_args_final=() _pmv_inserted=0 _pma_prev="" _pma_idx _pma_elem
+  for _pma_idx in "${!_sbx_args[@]}"; do
+    _pma_elem="${_sbx_args[$_pma_idx]}"
+    _sbx_args_final+=("$_pma_elem")
+    if [ "$_pmv_inserted" -eq 0 ]; then
+      if _takes_value "$_pma_prev"; then
+        _pma_prev="$_pma_elem"
+        continue
+      fi
+      case "$_pma_elem" in
+        -*) _pma_prev="$_pma_elem"; continue ;;
+      esac
+      # First non-flag positional: the agent.  Insert the provider mount immediately
+      # after it so sbx sees: AGENT /gen:ro [workspace...], not /gen:ro AGENT [ws].
+      _sbx_args_final+=("$_provider_mount_val")
+      _pmv_inserted=1
+    fi
+    _pma_prev="$_pma_elem"
+  done
+  # No positional found (empty or all-flag _sbx_args): append mount at the end.
+  [ "$_pmv_inserted" -eq 0 ] && _sbx_args_final+=("$_provider_mount_val")
+
   local kf=()
   while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
   local _git_identity_kit=""
@@ -640,13 +669,13 @@ _acq_backend_provision_unlocked() {
   _startup_barrier_token="acq-$$-$(date +%s)-$RANDOM-$RANDOM"
   kf+=(--kit "$(_acq_sbx_startup_barrier_kit "$_startup_barrier_token")")
 
-  acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_provider_mount[*]} ${_sbx_args[*]:-}"
+  acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_sbx_args_final[*]:-}"
   # Stale host state is cleared only after this create succeeds, avoiding races
   # with a concurrent create and destructive guesses when `sbx ls` fails.
   acq_spin_start "Creating sandbox '$name'"
   local _rc=0 _backend_pid
   _ACQ_SBX_CREATE_STARTED=1
-  sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" "${_provider_mount[@]}" ${_sbx_args[@]+"${_sbx_args[@]}"} &
+  sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" ${_sbx_args_final[@]+"${_sbx_args_final[@]}"} &
   _backend_pid=$!
   _acq_provider_input_guardian_register_if_active "$_backend_pid" || { kill "$_backend_pid" 2>/dev/null || true; wait "$_backend_pid" 2>/dev/null || true; return 1; }
   wait "$_backend_pid" || _rc=$?
