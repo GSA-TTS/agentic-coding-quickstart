@@ -852,6 +852,9 @@ export ACQ_STATE_DIR="$STUBDIR/state3"
 ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1 . "$REPO_ROOT/acq"
 . "$REPO_ROOT/acq.backends/msb.sh"
 KITS=()
+# Current main does not contain the macOS alias helper until the approved path
+# fix merges; this adapter-focused test supplies its pass-through contract.
+_acq_provider_input_canonical_path() { printf '%s\n' "\$1"; }
 # Stub the complex provision helpers so execution reaches the msb create call.
 acq_backend_exists() { return 1; }
 _acq_msb_confirm_absent() { return 0; }
