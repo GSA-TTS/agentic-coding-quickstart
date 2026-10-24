@@ -3653,6 +3653,19 @@ EOF
   _hcfg_dir=$(acq_host_config_dir msb "$name") || return 1
   mkdir -p "$_hcfg_dir" || return 1
   chmod 711 "$_hcfg_dir" || return 1
+  # Canonicalize to the real, symlink-free path before mounting. msb cannot
+  # mount a symlinked host path (same constraint as the workspace mount above,
+  # diagnosed at lines 3574-3579). On macOS the config dir sits under
+  # $HOME/.local/state/acq/..., which on some installs resolves through the
+  # /var -> /private/var alias (e.g. when $HOME or XDG_STATE_HOME itself lies
+  # under /var/folders/...); passing the un-resolved path causes msb to fail
+  # with "mount ...: Not a directory (os error 20)". Resolving to the canonical
+  # /private/... form fixes it. Falls back to the original path if the resolver
+  # is unavailable or returns empty. Trusted (acq-owned) dir only — no
+  # arbitrary user-symlink traversal. See GSA-TTS/agentic-coding-quickstart#594.
+  if command -v canonicalize_path >/dev/null 2>&1; then
+    _hcfg_dir=$(canonicalize_path "$_hcfg_dir")
+  fi
   if command -v host_path >/dev/null 2>&1; then
     _hcfg_host=$(host_path "$_hcfg_dir") || return 1
   else
