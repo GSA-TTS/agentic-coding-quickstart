@@ -106,6 +106,10 @@ if (-not (Test-Path -LiteralPath $acqScript -PathType Leaf)) {
 
 $bash = Find-GitBash
 $bashAcq = Convert-ToGitBashPath -Path $acqScript
+$validatorData = Join-Path $env:LOCALAPPDATA "acq\provider-input-validator"
+if (Test-Path -LiteralPath $validatorData -PathType Container) {
+    $env:ACQ_PROVIDER_INPUT_DATA_DIR = (Convert-ToGitBashPath -Path $validatorData)
+}
 $convertedArgs = @($args | ForEach-Object { Convert-ArgumentForGitBash -Argument $_ })
 
 & $bash --noprofile --norc $bashAcq @convertedArgs
