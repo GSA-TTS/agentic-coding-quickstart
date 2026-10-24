@@ -195,10 +195,35 @@ original=("$@")
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -c) shift 2 ;;
+    -C) cd "$2" || exit 1; shift 2 ;;
     *) break ;;
   esac
 done
 case "${1:-}" in
+  rev-parse)
+    if [ "$*" = 'rev-parse HEAD' ] && [ -f .git/acq-offline-fetch ]; then
+      printf '%s\n' "$ACQ_TEST_PATTERNS_REF"
+      exit 0
+    fi
+    ;;
+  cat-file)
+    if [ -f .git/acq-offline-fetch ]; then
+      printf 'tree\n'
+      exit 0
+    fi
+    ;;
+  read-tree)
+    if [ -f .git/acq-offline-fetch ]; then
+      exit 0
+    fi
+    ;;
+  checkout-index)
+    if [ -f .git/acq-offline-fetch ]; then
+      path=${3#--prefix=}
+      cp "$ACQ_MSB_KIT_LOCAL_DIR/spec.yaml" "$path/spec.yaml" || exit 1
+      exit 0
+    fi
+    ;;
   fetch)
     if [ "${GIT_ALLOW_PROTOCOL:-}" != none ] \
         && [ "$*" = "fetch --depth 1 origin $ACQ_TEST_PATTERNS_REF" ] \
