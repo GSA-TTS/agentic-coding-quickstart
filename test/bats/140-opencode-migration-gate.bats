@@ -381,6 +381,7 @@ SPEC
 }
 
 @test "migration gate(sbx): generic default attach launches kit entrypoint and preserves -- escape" {
+  export STUB_SBX_FEATURES_PRESENT=1
   local proj="$STUBDIR/sbx-generic-attach"
   _mk_repo "$proj"
   _seed_sbx_usai
@@ -444,6 +445,7 @@ SPEC
 }
 
 @test "migration gate(sbx): lost generic launch mode refuses legacy attach grammar" {
+  export STUB_SBX_FEATURES_PRESENT=1
   local proj="$STUBDIR/sbx-generic-mode-lost"
   _mk_repo "$proj"
   _seed_sbx_usai
@@ -463,6 +465,7 @@ SPEC
 }
 
 @test "migration gate(sbx): prior generic launch-mode record keeps the shell launcher" {
+  export STUB_SBX_FEATURES_PRESENT=1
   local proj="$STUBDIR/sbx-generic-mode-prior"
   _mk_repo "$proj"
   _seed_sbx_usai

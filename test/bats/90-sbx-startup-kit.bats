@@ -9,7 +9,7 @@
 #
 # shellcheck shell=bats
 
-setup() { acq_setup_stubs; load_acq; }
+setup() { acq_setup_stubs; }
 teardown() { acq_teardown_stubs; }
 
 load 'helper'
@@ -364,7 +364,11 @@ case "${1:-}" in
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
-    case "$snippet" in *present*) printf 'present\n' ;; *) exit 0 ;; esac ;;
+    case "$snippet" in
+      *"echo ok"*) printf 'ok\n' ;;
+      *present*) printf 'present\n' ;;
+      *) exit 0 ;;
+    esac ;;
   kit) exit 0 ;;
   settings) exit 0 ;;
   *) exit 0 ;;
@@ -378,7 +382,8 @@ STUB
   # network-free while still proving agent-kit refresh wiring.
   acq_agent_builtin_kit_ready() { [ "$1" = "opencode" ]; }
   _acq_agent_builtin_kit_ref() { printf '%s#ref=%s&dir=%s/opencode\n' "$PATTERNS_KIT_REPO" "$PATTERNS_KIT_REF" "$PATTERNS_KIT_DIR"; }
-  ( ACQ_FORCE_KIT_REAPPLY=1 acq_backend_ensure_kits_applied agentrefreshbox >/dev/null 2>&1 ) || true
+  ACQ_FORCE_KIT_REAPPLY=1 run acq_backend_ensure_kits_applied agentrefreshbox
+  assert_success
   assert_regex "$(cat "$CALLS")" 'acq-kits/opencode'
 }
 
@@ -425,6 +430,7 @@ case "${1:-}" in
     esac
     case "$snippet" in
       *"startup-complete"*) printf 'ready\n' ;;
+      *"echo ok"*) printf 'ok\n' ;;
       *'%{http_code}'*) printf '200|0' ;;
       *) exit 0 ;;
     esac ;;

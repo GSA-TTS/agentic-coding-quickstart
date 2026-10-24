@@ -1,5 +1,8 @@
 ---
 title: "Adopt bats-core for the acq offline unit suite"
+description: "Bats isolation, offline fixtures, and measured test-runner performance"
+tier: 2
+last_updated: "2026-10-23"
 status: accepted
 date: 2026-08-23
 decision_makers: ["Bret Mogilefsky"]
@@ -185,6 +188,83 @@ runner + `scripts/test-acq.d/` were removed. Final state:
   across-only ~46–54s vs. across+within ~87–97s. So `--no-parallelize-within-files`
   is a performance choice, not a safety one; revisit only if the suite ever runs
   on a host with many idle cores relative to the file count.
+
+## Performance investigation (2026-10-23)
+
+Successful main-branch CI runs showed the Bats hook increasing from 105 seconds
+on October 2 to 285 seconds on October 6 and 615 seconds on October 23. Test count
+grew from 546 to 823 over the same interval: growth alone did not explain the
+nearly sixfold runtime increase.
+
+Profiling found two avoidable costs:
+
+- Provider-input preparation calls `kit_translate_fetch` directly, bypassing the
+  MSB adapter's offline kit override. Ordinary tests repeatedly fetched remote
+  pinned kits. The shared harness now supplies an exact-pin Git transport fixture
+  while preserving real local Git, production ref parsing, and projection logic.
+  The fixture lives below test-specific executables on PATH so tests can wrap it
+  without accidentally overwriting their own delegate. Unknown remote requests
+  fail locally. The real validator tests consume CI's pre-fetched pinned checkout.
+- Several successful SBX reattach/heal fixtures did not answer readiness or
+  feature probes, so tests waited through production retry budgets. Those
+  success fixtures now answer the probes; timeout and failure tests retain their
+  explicit failure behavior. The forced agent-kit refresh test also asserts
+  success rather than swallowing its failed readiness result.
+
+Eleven setup functions also loaded acq twice; the redundant immediate load was
+removed. Mutable per-test state and real guardian/signal/locking tests remain
+isolated and unchanged. No production timeout or validation behavior was modified.
+
+Observed inside a two-CPU Linux sandbox using file-level xargs parallelism:
+
+| Measurement | Before | After |
+|-------------|--------|-------|
+| SBX forced agent-kit refresh test | 60.6 s | 1.0 s |
+| SBX startup barrier/attach test | 74.0 s | 2.3 s |
+| Full suite | exceeded 20-minute command limit | 9 min 8 s |
+
+The full run passed with eight environment skips (three PowerShell, three real
+SBX grammar, two externally provisioned Patterns-validator checks). The targeted
+timings are same-sandbox measurements; sandbox load varied and these are not
+claims about post-change GitHub CI latency. A fresh CI run is required to measure
+that. The pre-change timeout is a lower bound, not a completed baseline.
+
+The runner exposes `ACQ_BATS_TIMING=1` through native, serial, and fallback paths;
+CI retains timing output for successful tests. macOS CPU detection now falls back
+to `sysctl`, and invalid worker counts fail early. Both CI lanes run the pinned
+validator tests within the full suite instead of repeating the entire projection
+test file separately. File-level parallelism remains the default.
+
+### Verification transcript and remaining environment checks
+
+AI-assisted verification on October 23, 2026:
+
+- `ACQ_BATS_TIMING=1 ACQ_BATS_JOBS=2 bash scripts/test-acq-bats`: passed,
+  9m08.128s, 829 tests reported, eight environment skips. The subsequently added
+  fallback-status regression passed in the focused seven-test runner file.
+- `bash scripts/test-acq-bats --timing test/bats/01-test-runner.bats`: seven
+  tests passed, including invalid arguments, macOS CPU fallback, xargs failure
+  propagation, exact-pin transport, and real local Git behavior.
+- ShellCheck at warning severity over the runner, harness, and all Bats files:
+  passed; `bash -n` over the runner and harness: passed.
+- `scripts/fix-exec-bits --check` and `git diff --check`: passed.
+- Markdownlint on both changed documents: passed. Installation reported the
+  existing `ini@7.0.0` Node engine mismatch (sandbox Node 22.22.1).
+- Both workflow YAML files parsed successfully with PyYAML.
+- `python3 -B scripts/test-probe-msb-startup.py`: 25 tests passed.
+- `pre-commit run --all-files --show-diff-on-failure`: BLOCKED during hook
+  environment installation, before hooks ran. The sandbox Python 3.14 pip
+  environment raised `ssl.SSLError: NO_CERTIFICATE_OR_CRL_FOUND` while loading
+  its CA bundle. Full hook verification, including gitleaks, must run after a
+  working hook environment is available or in the normal CI environment.
+- Bash 3.2 and the pinned external validator remain CI checks: those runtimes
+  were unavailable locally. The workflow environment now supplies the pinned
+  validator to the whole suite; confirm both validator tests execute rather
+  than skip in the next CI run, and record its wall time for comparison.
+
+The next CI run is the pickup trigger for the outstanding full-hook, Bash 3.2,
+external-validator, and GitHub-runner timing verification above. No live backend
+VM was created; the sandbox cannot run nested backend verification.
 
 ## Links
 

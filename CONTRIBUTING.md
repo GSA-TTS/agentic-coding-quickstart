@@ -1,3 +1,11 @@
+---
+title: "Contributing to Agentic Coding Quickstart"
+description: "Development, verification, and contribution workflow for acq"
+status: canonical
+tier: 2
+last_updated: "2026-10-23"
+---
+
 # Contributing to Agentic Coding Quickstart
 
 Thank you for contributing! This repository helps GSA teams use AI coding agents effectively.
@@ -179,9 +187,33 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   The suite runs test files **in parallel** when [GNU
   parallel](https://www.gnu.org/software/parallel/) (or `shenwei356/rush`) is on
   `PATH` — roughly halving wall-clock on a 2-core machine — and falls back to
-  serial otherwise (identical results, just slower). Override the job count with
+  file-level `xargs -P` otherwise, or serial if neither is available. CPU
+  detection uses `nproc` on Linux and `sysctl -n hw.ncpu` on macOS. Override the job count with
   `ACQ_BATS_JOBS=<n>`, or force serial with `ACQ_BATS_JOBS=1` (handy when
   debugging a failure, so TAP output isn't interleaved).
+
+  To investigate performance without changing which tests run:
+
+  ```bash
+  ACQ_BATS_TIMING=1 ACQ_BATS_JOBS=2 ./scripts/test-acq-bats
+  ./scripts/test-acq-bats --timing test/bats/90-sbx-startup-kit.bats
+  ```
+
+  Timing mode reports the worker count and Bats' per-test elapsed time, including
+  setup and teardown. Explicit file/flag arguments still pass directly to Bats;
+  they do not implicitly enable parallelism. CI enables timing and verbose
+  pre-commit output so successful runs retain measurements. The fallback buffers
+  output per file, so log-arrival timestamps are not test durations.
+
+  The shared harness uses an offline Git transport fixture for the exact pinned
+  Patterns kit fetch. Local fixture repositories still use real Git; unhandled
+  remote transports fail locally. This covers direct provider-input discovery as
+  well as the MSB adapter's kit path. Tests of fetch failures and kit contents
+  supply explicit overrides. The pinned Patterns validator checks run once as
+  part of the full CI suite, using the checkout and interpreter supplied by CI.
+  Real process-lifetime and locking tests retain their actual waits. See
+  [ADR-0025](docs/adr/0025-adopt-bats-core-for-test-suite.md) for measurements and
+  the distinction between production behavior and test transport fixtures.
 
   **One file is deliberately not stubbed.**
   `test/bats/101-sbx-grammar-acceptance.bats` asserts that the **real** `sbx`
