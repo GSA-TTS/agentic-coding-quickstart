@@ -110,7 +110,7 @@ repos:
         entry: bash scripts/test-acq-bats
         language: system
         pass_filenames: false
-        files: '^(acq|acq\.backends/.*|scripts/test-acq-lib\.sh|scripts/test-acq-bats|scripts/fix-exec-bits|scripts/verify-backends|test/bats/.*)$'
+        files: '^(acq|acq\.backends/.*|scripts/test-acq-lib\.sh|scripts/test-acq-bats|scripts/(probe-msb-node-startup|test-probe-msb-node-startup\.py)|scripts/fix-exec-bits|scripts/verify-backends|test/bats/.*)$'
 
       - id: test-probe-msb-startup
         name: MSB startup probe offline tests
