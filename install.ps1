@@ -6,7 +6,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "4.0.2", # x-release-please-version
+    [string]$Version = "4.1.1", # x-release-please-version
     [string]$InstallDir = "",
     [string]$PackageUrl = "",
     [string]$Sha256 = "",
@@ -638,7 +638,7 @@ function Install-AcqZip {
             }
 
             New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-            foreach ($item in @("acq", "acq.backends", "acq.cmd", "acq.ps1", "install.ps1", "README.md", "LICENSE", "package.json")) {
+            foreach ($item in @("acq", "acq.backends", "acq.cmd", "acq.ps1", "install.ps1", "README.md", "LICENSE", "package.json", "scripts")) {
                 $src = Join-Path $sourceDir $item
                 if (Test-Path -LiteralPath $src) {
                     $dst = Join-Path $InstallDir $item

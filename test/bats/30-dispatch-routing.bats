@@ -22,6 +22,29 @@ _seed_usai() {
   seed_sbx_usai_proxy_fixture
 }
 
+# Model the installed-kit capability probes on a freshly created sandbox.
+# Readiness and unrelated exec calls still use the shared stub's responses.
+_stub_sbx_installed_kits() {
+  mv "$STUBDIR/sbx" "$STUBDIR/sbx-base"
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+if [ "${1:-}" = exec ]; then
+  snippet=""; prev=""
+  for a in "$@"; do [ "$prev" = -c ] && { snippet="$a"; break; }; prev="$a"; done
+  case "$snippet" in
+    'if test -e /usr/local/share/ca-certificates/zscaler-ca.crt >'* | \
+    "if test -f '/home/agent/usai-config/opencode.jsonc' >"* | \
+    'if test -e "$HOME/.agentic-coding-playbook/AGENTS.md" >'*)
+      printf 'sbx %s\n' "$*" >>"$CALLS"
+      printf 'present\n'
+      exit 0 ;;
+  esac
+fi
+exec "$STUBDIR/sbx-base" "$@"
+STUB
+  chmod +x "$STUBDIR/sbx"
+}
+
 @test "dispatch: ls -> sbx ls" {
   run env ACQ_BACKEND=sbx "$ACQ" ls
   assert_regex "$(cat "$CALLS")" 'sbx ls'
@@ -53,16 +76,18 @@ SPEC
   assert [ -f "$STUBDIR/.msb_created" ]
 }
 
-@test "dispatch: create warns and falls back when provider facts cannot be fetched" {
+@test "dispatch: create fails closed when selected provider inputs cannot be fetched" {
   local proj="$STUBDIR/provider-facts-offline"; mkdir -p "$proj"
   rm -f "$STUBDIR/.msb_created"
-  run env ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
+  # This case deliberately exercises the real projection boundary: the global
+  # empty-projection seam would otherwise mask the failed remote-kit fetch.
+  run env -u BASH_ENV -u ACQ_PROVIDER_INPUT_PYTHON ACQ_BACKEND=msb GIT_ALLOW_PROTOCOL=none USAI_API_KEY="usai-key-stub" \
     STUB_KEY_STATUS=200 STUB_OPENCODE_OK=1 "$ACQ" create opencode "$proj"
-  assert_success
+  assert_failure
   assert_output --partial 'provider facts could not be fetched; using transitional fallback defaults'
-  refute_output --partial 'invalid provider facts'
-  assert_regex "$(cat "$CALLS")" 'msb create'
-  assert [ -f "$STUBDIR/.msb_created" ]
+  assert_output --partial 'provider input projection failed'
+  refute_regex "$(cat "$CALLS")" 'msb create'
+  assert [ ! -f "$STUBDIR/.msb_created" ]
 }
 
 @test "dispatch: create fails closed when provider facts artifact is malformed" {
@@ -98,7 +123,7 @@ FACTS
 @test "dispatch: run existing sandbox does not fetch provider facts" {
   printf 'mybox\n' > "$STUBDIR/.msb_sandbox_list"
   printf 'mybox\n' > "$STUBDIR/.msb_running_list"
-  run env TERM= ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none \
+  run env TERM= COLORTERM= ACQ_BACKEND=msb ACQ_DEBUG=1 GIT_ALLOW_PROTOCOL=none \
     STUB_AGENT_USER_READY=1 "$ACQ" run mybox
   assert_success
   assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /home/agent -e SHELL=/bin/sh mybox -- /bin/sh -l'
@@ -386,15 +411,31 @@ FACTS
   assert_regex "$(cat "$CALLS")" 'Authorization: Bearer \$USAI_API_KEY'
 }
 
-@test "run(opencode): runs postinstall under a timeout guard when binary not functional" {
+@test "run(opencode): generic default does not run an unpinned npm postinstall fallback" {
   local proj="$STUBDIR/ocrun"; mkdir -p "$proj"
   _seed_usai
   run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'postinstall\.mjs'
-  assert_regex "$log" 'timeout'
+  refute_regex "$log" 'postinstall\.mjs|opencode-ai|npm root -g'
   refute_output --partial 'does not appear runnable'
+}
+
+@test "run(opencode): generic default reattach does not run an unpinned npm postinstall fallback" {
+  local proj="$STUBDIR/ocreattach"; mkdir -p "$proj"
+  _seed_usai
+  run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" create opencode --name ocreattach "$proj"
+  assert_success
+  printf 'ocreattach\n' >"$STUBDIR/.sandbox_list"
+  _stub_sbx_installed_kits
+  : >"$CALLS"
+
+  run env ACQ_UPDATE_CHECK=0 ACQ_BACKEND=sbx "$ACQ" run ocreattach
+
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'postinstall\.mjs|opencode-ai|npm root -g'
+  refute_regex "$(cat "$CALLS")" '^sbx kit add '
+  assert_equal "$(grep -c 'then echo present; else echo absent; fi' "$CALLS")" "3"
 }
 
 @test "run(opencode): skips postinstall when already runnable" {
@@ -490,7 +531,7 @@ FACTS
   assert_output --partial 'ACQ_ACTIVATE_PROJECT_ENV=1'
   local log; log=$(cat "$CALLS")
   local run_line; run_line=$(grep '^sbx run --name opencode-direnvproj' "$CALLS")
-  assert_regex "$run_line" 'sbx run --name opencode-direnvproj -- echo hi'
+  assert_regex "$run_line" 'sbx run --name opencode-direnvproj shell -- -lc exec.*sh echo hi'
   refute_regex "$log" 'direnv export|direnv allow'
 }
 
@@ -502,7 +543,7 @@ FACTS
   assert_success
   assert_output --partial 'project environment detected (direnv)'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'sbx run --name opencode-direnvproj2 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'sbx run --name opencode-direnvproj2 shell -- -lc exec.*sh env ACQ_WORKSPACE=.* sh -c'
   assert_regex "$log" 'direnv export sh'
   assert_regex "$log" 'sh opencode --version'
   refute_regex "$log" 'direnv allow'
@@ -515,7 +556,7 @@ FACTS
   run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'sbx run --name opencode-direnvproj3 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'sbx run --name opencode-direnvproj3 shell -- -lc exec.*sh env ACQ_WORKSPACE=.* sh -c'
   assert_regex "$log" 'sh opencode'
 }
 
@@ -552,42 +593,42 @@ FACTS
 }
 
 @test "kit-flag: --kit on create is folded into the kit list, workspace positional clean" {
-  local proj="$STUBDIR/kitproj"; mkdir -p "$proj"
+  local proj="$STUBDIR/kitproj" kit="$STUBDIR/mykit"; mkdir -p "$proj" "$kit"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/mykit "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit "$kit" "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" '--kit /tmp/mykit'
+  assert_regex "$create_line" "--kit $kit"
   assert_regex "$create_line" "$proj"
-  refute_regex "$create_line" "$proj --kit /tmp/mykit"
-  refute_regex "$create_line" "$proj /tmp/mykit"
+  refute_regex "$create_line" "$proj --kit $kit"
+  refute_regex "$create_line" "$proj $kit"
 }
 
 @test "kit-flag: --kit=<ref> equals form is intercepted" {
-  local proj="$STUBDIR/kitproj2"; mkdir -p "$proj"
+  local proj="$STUBDIR/kitproj2" kit="$STUBDIR/eqkit"; mkdir -p "$proj" "$kit"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit=/tmp/eqkit "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit="$kit" "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" '--kit /tmp/eqkit'
+  assert_regex "$create_line" "--kit $kit"
   refute_regex "$create_line" '--kit=/tmp/eqkit'
 }
 
 @test "kit-flag: multiple --kit flags are all intercepted" {
-  local proj="$STUBDIR/kitproj3"; mkdir -p "$proj"
+  local proj="$STUBDIR/kitproj3" k1="$STUBDIR/k1" k2="$STUBDIR/k2"; mkdir -p "$proj" "$k1" "$k2"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit /tmp/k1 --kit /tmp/k2 "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" create opencode --kit "$k1" --kit "$k2" "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" '--kit /tmp/k1'
-  assert_regex "$create_line" '--kit /tmp/k2'
+  assert_regex "$create_line" "--kit $k1"
+  assert_regex "$create_line" "--kit $k2"
   assert_regex "$create_line" "$proj"
 }
 
 @test "kit-flag: run form also intercepts --kit" {
-  local proj="$STUBDIR/kitproj4"; mkdir -p "$proj"
+  local proj="$STUBDIR/kitproj4" kit="$STUBDIR/runkit"; mkdir -p "$proj" "$kit"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/runkit "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit "$kit" "$proj"
   local create_line; create_line=$(printf '%s\n' "$(cat "$CALLS")" | grep '^sbx create')
-  assert_regex "$create_line" '--kit /tmp/runkit'
-  refute_regex "$create_line" "$proj --kit /tmp/runkit"
+  assert_regex "$create_line" "--kit $kit"
+  refute_regex "$create_line" "$proj --kit $kit"
 }
 
 @test "kit-flag: a --kit after -- belongs to the agent, not the kit list" {
@@ -620,15 +661,15 @@ FACTS
   assert_regex "$(cat "$CALLS")" 'acq-opencode-kit'
 }
 
-@test "agent-kits: explicit --kit suppresses implicit selection notice" {
-  local proj="$STUBDIR/agentkit-explicit"; mkdir -p "$proj"
+@test "agent-kits: explicit --kit still reports the selected agent kit" {
+  local proj="$STUBDIR/agentkit-explicit" kit="$STUBDIR/team-opencode"; mkdir -p "$proj" "$kit"
   _seed_usai
-  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/team-opencode "$proj"
+  run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit "$kit" "$proj"
 
   assert_success
-  refute_output --partial 'built-in agent kit candidate'
+  assert_output --partial 'selected built-in agent kit: agent=opencode kit=opencode'
   local create_line; create_line=$(grep '^sbx create' "$CALLS")
-  assert_regex "$create_line" '--kit /tmp/team-opencode'
+  assert_regex "$create_line" "--kit $kit"
   refute_regex "$create_line" 'acq-kits/opencode'
 }
 

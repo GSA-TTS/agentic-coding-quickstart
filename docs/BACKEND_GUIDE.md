@@ -3,7 +3,7 @@ title: "acq Backend Guide"
 description: "Per-backend strengths, tradeoffs, and configuration for acq"
 status: canonical
 tier: 2
-last_updated: "2026-10-03"
+last_updated: "2026-10-22"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "microsandbox", "tradeoffs"]
 related_files: ["docs/howto/acq.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/CONCEPTS.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0014-neutral-port-publish-and-background-vocab.md", "docs/adr/0015-msb-post-hoc-port-publish-via-ssh.md", "docs/adr/0034-host-port-selection-and-publish-override.md"]
@@ -188,7 +188,7 @@ Tunables:
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `ACQ_MSB_IMAGE` | (unset) | Backend-specific base OCI image override. A custom override must be pullable and ship the base-image prerequisites. **Precedence (ADR-0022):** an explicitly set `ACQ_MSB_IMAGE` wins over the backend-neutral `--image`/`ACQ_IMAGE` (a one-time notice is printed); if only the neutral knob is set, it is used; otherwise msb derives `docker.io/docker/sandbox-templates:<agent>-docker` for known agents (with `claude` → `claude-code-docker` and `cursor` → `cursor-agent-docker`) and falls back to `docker.io/docker/sandbox-templates:shell-docker` if that derived image is not found. |
+| `ACQ_MSB_IMAGE` | (unset) | Backend-specific base OCI image override. A custom override must be pullable and ship the base-image prerequisites. **Precedence (ADR-0022):** an explicitly set `ACQ_MSB_IMAGE` wins over the backend-neutral `--image`/`ACQ_IMAGE` (a one-time notice is printed). With no override, OpenCode uses the ADR-0030 pinned generic devenv base; other agents keep their existing derived-template defaults. |
 | `ACQ_IMAGE` | (unset) | Backend-**neutral** base image (ADR-0022). On msb it feeds `ACQ_MSB_IMAGE` (above); on sbx it maps to `sbx create --template <ref>`. Equivalent to the `acq run/create --image <ref>` flag (the flag wins over the env var). See [Custom base image](#custom-base-image---image--acq_image). |
 | `ACQ_MSB_PULL` | (unset → msb default `if-missing`) | Image pull policy forwarded to `msb create --pull` (`always` \| `if-missing` \| `never`). `msb create` treats the image as a **registry** reference; a locally-built/registry-less image must first be imported with `msb image load -i <tar> -t <ref>`, then created with `ACQ_MSB_PULL=never` so msb uses the cache instead of trying to pull it. |
 | `ACQ_MSB_SKIP_PREREQ_CHECK` | (unset) | Skip the base-image prerequisite presence check |
@@ -564,16 +564,40 @@ Verify the whole path live on a sandbox-capable host with
 `./scripts/verify-image-override` (builds a tiny marked image, creates a sandbox
 on each installed backend with `--image`, and confirms the custom image booted).
 
+### Default OpenCode generic base
+
+`acq run opencode .` uses the same immutable generic base on both backends:
+
+```text
+ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:7b923fb5e722ad27c751ead836f24145c4cea3fac015a3ba753bd7473891e1e7
+```
+
+The digest was derived from `ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell:2.0.0`
+on 2026-10-14 and covers published Linux amd64 and arm64 manifests. `acq` applies
+the pinned OpenCode agent kit with the support kits and fails before provisioning
+if that kit cannot be fetched, is malformed, or does not declare the expected
+OpenCode metadata and entrypoint. Passing `--kit` adds a kit; it cannot remove the
+required OpenCode kit. SBX injects this base with `--template` and explicitly
+launches the kit-declared entrypoint, rather than using an OpenCode template.
+
+An explicit MSB image override or explicit SBX `--template` retains its existing
+custom-image behavior. The obsolete `opencode-ai` postinstall recovery is not used
+on the generic default path because the pinned kit installs the direct binary.
+
+Existing OpenCode sandboxes keep the image and kit set they were created with.
+Recreate a sandbox to adopt this default:
+
+```bash
+./acq rm opencode-your-project
+./acq run opencode /path/to/your/project
+```
+
 ### Base image and prerequisites
 
-Unlike sbx (whose agent templates supply the image via a template mechanism),
-the msb backend runs an OCI image directly and layers the kits on top. When no
-explicit image override is set, msb derives the same sbx agent-template image
-name from the requested agent (`docker/sandbox-templates:<agent>-docker`, with
-`claude` → `claude-code-docker` and `cursor` → `cursor-agent-docker` as the two
-product-name exceptions) and
-falls back to `docker/sandbox-templates:shell-docker` if that derived image is
-not found. A custom override may be any OCI image. The four pinned kits need
+Unlike sbx (whose templates select an image), the msb backend runs an OCI image
+directly and layers kits on top. The default OpenCode path uses the generic base
+above; non-OpenCode agents retain their established template-derived defaults. A
+custom override may be any OCI image. The pinned kits need
 `node` (usai merge), `git` (playbook clone + signing), `curl`, and
 `ca-certificates`/`update-ca-certificates` (zscaler) **already present in the
 base image**.
@@ -586,12 +610,10 @@ from Docker Hub without auth. Before applying kits, the adapter **verifies** the
 tools are present and warns if any are missing (it does not try to install
 them). A custom override must ship them too.
 
-**The agent binary.** sbx's agent templates bake the requested agent (e.g.
-`opencode`) into the image. On msb, `opencode` is supplied by the selected
-agent-kit path from the pinned patterns bundle; the msb adapter no longer
-installs `opencode-ai` directly. Custom `ACQ_MSB_IMAGE` overrides must either
-ship the requested agent binary or work with the selected agent kit's install
-contract.
+**The agent binary.** Default OpenCode receives its direct binary and entrypoint
+from the pinned agent kit on both backends. Custom image/template overrides retain
+their existing responsibility for the requested agent binary or compatible kit
+install contract.
 
 **The base-image contract (Docker sandbox templates).** sbx's templates are built
 on `docker/sandbox-templates:<agent>-docker`, and acq now derives the same image
@@ -683,7 +705,7 @@ You can also apply it for one sandbox by passing the pinned kit ref through
 `--kit`, or by exporting that same ref in `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=56d1f5f49ef928f50e61aa64a93d618b3d21c415&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=d2674db8b424402e912e95254d6b194a062deb73&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 The kit provisions **rootless podman** and aliases `docker` to `podman`, so
@@ -1156,14 +1178,20 @@ practical floor (`acq kit validate` warns below it).
 
 Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 
-### ADR-0030 migration sequencing: agent-kit/devenv model
+### ADR-0030 generic-base implementation
 
-ADR-0030 moves the `acq run opencode .` implementation toward an agent-kit and
-devenv model. The migration is deliberately sequenced so user-visible behavior
-stays stable while internals move behind the existing `acq` surface.
+ADR-0030 now makes `acq run opencode .` use the generic pinned devenv base and
+the inferred pinned OpenCode kit on both backends. The kit is mandatory for this
+default and must declare `agent.name: opencode` and `agent.entrypoint: opencode`.
+The generic default is create-time behavior, so existing sandboxes must be
+recreated to migrate; their existing sessions are not changed in place.
+SBX OpenCode sandboxes without a recorded launch mode are also refused at
+reattach: acq cannot safely distinguish a legacy template sandbox from a generic
+one whose host state was lost. Recreate the sandbox rather than selecting a
+launch grammar by guesswork.
 
-**Increment 0: freeze the current contract before moving code.** Keep the
-observable backend-neutral contract green: `--clone` and `ACQ_CLONE=1`,
+The retained migration verification keeps the observable backend-neutral contract
+green: `--clone` and `ACQ_CLONE=1`,
 `ACQ_WORKSPACE`, `ACQ_EXTRA_KITS` before CLI `--kit`, `ACQ_IMAGE`, boot-time
 `volumes`, `acq exec` workspace/user behavior, and `acq shell` login-shell
 behavior. Verification:
@@ -1173,38 +1201,10 @@ behavior. Verification:
 - `./scripts/verify-backends --only sbx` on an sbx-capable host
 - `./scripts/verify-backends --only msb` on an msb-capable host
 
-**Increment 1: introduce the opencode agent-kit inputs without changing dispatch.**
-Add the new kit/devenv artifacts and validation in the patterns/team-kit layer,
-but keep `acq run opencode .` wired through the existing wrapper behavior until
-Increment 0 remains green. When the team kit ships its own verifier, run it from
-that repository or checked-out kit path with `scripts/verify` in addition to the
-Quickstart gates above. Unresolved schema or team-kit vocabulary questions stay
-inside this increment; do not change `acq` dispatch to depend on them first.
-
-**Increment 2: switch `opencode` provisioning to consume the agent kit.** Replace
-only the internal source of the opencode configuration/devenv setup. Preserve the
-same create-time inputs and guest markers. Verification:
-
-- Increment 0 offline bats commands
-- team-kit `scripts/verify` when available
-- `./scripts/verify-backends --only sbx`
-- `./scripts/verify-backends --only msb`
-
-**Increment 3: move devenv-specific setup behind the kit boundary.** Remove any
-now-duplicated wrapper-side setup only after the kit verifier and Quickstart gates
-prove the kit supplies it. Defer unresolved image-layout, login-shell, and
-workspace-start-directory questions to this increment so earlier increments do
-not overfit speculative behavior. Verification:
-
-- Increment 0 offline bats commands
-- focused live `./scripts/verify-backends --only <backend>` for every backend
-  whose setup changed
-- team-kit `scripts/verify` when available
-
-**Increment 4: cleanup and documentation.** Only after all gates above pass,
-remove obsolete wrapper code and update user docs. Re-run the full offline suite
-(`./scripts/test-acq-bats`) and live backend verifier on installed backends before
-claiming the ADR-0030 migration complete.
+Live validation remains required on hosts that can create each sandbox type. Run
+`./scripts/verify-backends --only sbx` and
+`./scripts/verify-backends --only msb` after changing the generic base, pinned
+kit, or backend translation.
 
 ### Kit-bundle provenance and stale-sandbox refresh
 

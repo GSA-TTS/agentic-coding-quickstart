@@ -89,7 +89,7 @@ SPEC
   assert_regex "$log" 'ocistartbox:/home/agent/oci-engine-marker'
   run cat "$(_acq_cli_kits_file msb ocistartbox)"
   assert_output --partial 'dir=integrations/isolation/acq-kits/oci-engine'
-  assert_output --partial 'ref=56d1f5f49ef928f50e61aa64a93d618b3d21c415'
+  assert_output --partial 'ref=d2674db8b424402e912e95254d6b194a062deb73'
 }
 
 @test "cli-kits: backend keying — an sbx read does not see an msb record" {
@@ -105,8 +105,6 @@ SPEC
 # with an EMPTY in-memory set reloads it and the heal re-applies the kit's file.
 @test "cli-kits: provision persists --kit and resume heal re-applies it" {
   load_acq
-  printf 'clidurable\n' > "$STUBDIR/.msb_sandbox_list"
-  printf 'clidurable\n' > "$STUBDIR/.msb_running_list"
   local clikit="$STUBDIR/clidurable-kit"
   mkdir -p "$clikit/files"
   cat > "$clikit/spec.yaml" <<'SPEC'
@@ -127,9 +125,12 @@ SPEC
     export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/clidur-stage"
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     ACQ_CLI_KITS=("$clikit")
     _acq_msb_fetch_kit() { printf '%s\n' "$clikit"; }
-    acq_backend_provision clidurable shell /tmp >/dev/null 2>&1 )
+    acq_backend_provision clidurable shell /tmp )
+  printf 'clidurable\n' > "$STUBDIR/.msb_sandbox_list"
+  printf 'clidurable\n' > "$STUBDIR/.msb_running_list"
 
   local recf
   recf=$(find "$ACQ_PROVENANCE_DIR" -name '*.kits' 2>/dev/null | head -n1)

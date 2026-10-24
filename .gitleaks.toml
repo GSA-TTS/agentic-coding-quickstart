@@ -12,7 +12,7 @@ minVersion = "v8.25.0"
 # Use the default gitleaks rules as the base configuration
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "Allow documented example secrets and deliberate test fixtures"
 
 # Documentation + test paths that contain intentional, non-sensitive example
@@ -30,3 +30,10 @@ paths = [
   '''scripts/tests/test_validate_sensitive_terms\.py''',
   '''test/sandbox-unit\.sh''',
 ]
+
+[[allowlists]]
+description = "Literal placeholder in the startup probe command-parser test"
+condition = "AND"
+paths = ['''^scripts/test-probe-msb-startup\.py$''']
+regexTarget = "secret"
+regexes = ['''^PLACEHOLDER$''']

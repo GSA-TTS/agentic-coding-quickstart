@@ -1,6 +1,6 @@
 ---
 title: "Use Agent Kits on a Devenv-Enabled Agent-Less Base Image"
-status: proposed
+status: accepted
 date: 2026-09-15
 decision_makers: ["Bret Mogilefsky", "William Zujkowski", "Basilio Bogado"]
 category: architecture
@@ -116,9 +116,9 @@ Consequences for the substrate and the kit contract:
    plus agent kits.** This keeps the base image generic, preserves familiar OS
    choices, and moves agent-specific knowledge to kits.
 
-## Proposed Decision Outcome
+## Decision Outcome
 
-Proposed option: **Option 3**.
+Accepted option: **Option 3**.
 
 `acq` should target an agent-less, devenv-enabled base-image contract: Nix
 (single-user), devenv, and direnv layered onto a parametrized `BASE_IMAGE`.
@@ -169,8 +169,9 @@ acq
       └─ personal kit
 ```
 
-This ADR is intentionally proposed, not accepted. It records the direction, the
-review outcomes, and the questions that remain open before implementation.
+The default OpenCode path is implemented with a pinned generic base image and
+the pinned OpenCode kit. It remains subject to the live verification cadence
+defined below.
 
 ## Lifecycle Sketch
 
@@ -381,18 +382,18 @@ as the image override; and `volumes:` mounted at boot before any exec. The
 login.gov team's `scripts/verify` asserts each of these against a real `--clone`
 sandbox on the active backend and can gate the refactor.
 
-### Migration sequencing
+### Implemented rollout and verification
 
-The `acq run opencode .` behavior changes in the staged sequence documented in
-[`docs/BACKEND_GUIDE.md`](../BACKEND_GUIDE.md#adr-0030-migration-sequencing-agent-kitdevenv-model):
-freeze the current contract first, introduce agent-kit inputs without changing
-dispatch, switch OpenCode provisioning to consume the agent kit, move
-remaining devenv-specific setup behind the kit boundary, then remove obsolete
-wrapper code. Each increment has explicit offline and live verification commands.
-The Increment 0 freeze is implemented in
-[`test/bats/140-opencode-migration-gate.bats`](../../test/bats/140-opencode-migration-gate.bats),
-which keeps the current backend-neutral contract green while the migration
-continues.
+The default `acq run opencode .` path now selects the pinned generic devenv base
+and pinned OpenCode kit on both backends. Explicit image overrides retain their
+documented precedence, and SBX uses its neutral `shell` launcher token while
+retaining OpenCode provenance and the kit entrypoint for attachment. The current
+backend behavior and verification commands are documented in
+[`docs/BACKEND_GUIDE.md`](../BACKEND_GUIDE.md#adr-0030-generic-base-implementation).
+
+[`test/bats/140-opencode-migration-gate.bats`](../../test/bats/140-opencode-migration-gate.bats)
+exercises the offline create and reattach contract. The backend verifier performs
+the corresponding live checks when a sandbox-capable host is available.
 
 ## Open Questions
 
@@ -417,6 +418,9 @@ continues.
   agent-populated images only as optional cache optimizations.
 - The same environment/capability model can span msb and sbx.
 - Kit-authoring agents and humans can rely on the broader devenv ecosystem.
+- Default OpenCode no longer selects an OpenCode-specific sandbox template; both
+  backends use the same immutable generic devenv base and the kit-declared
+  `opencode` entrypoint.
 
 ### Negative Consequences
 
@@ -431,6 +435,8 @@ continues.
 - Debugging startup failures may require better introspection into generated
   devenv config and kit application order.
 - Agent install steps must be idempotent and safe to re-run.
+- Existing default OpenCode sandboxes retain their original image and launch
+  behavior. Recreate them to adopt the generic base and pinned kit path.
 
 ### Compliance Consequences
 

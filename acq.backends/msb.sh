@@ -116,6 +116,17 @@ _acq_msb_safe_agent_token() {
 # off MSYS, so POSIX hosts are unaffected. `msb` is invoked WITHOUT `command` so
 # a shell-function shim (tests) or the PATH executable is honored as before; the
 # env assignment still reaches the real process either way. See ADR-0029.
+#
+# IMPORTANT — background (provider-input lock) call sites:
+# The three background call sites (create × 2, remove × 1) that register with the
+# provider-input guardian use the MSYS2_ARG_CONV_EXCL='*' prefix INLINE rather
+# than going through this function. That causes bash to fork + exec-optimize into
+# the actual `msb` binary in one step, so $! is the backend executable's own PID.
+# Using _acq_msb_cli() in background would interpose an extra bash subshell level,
+# leaving the real binary as an unreachable grandchild that survives TERM sent to
+# the wrapper PID — the parent process the guardian registered would die but the
+# actual backend executable could outlive it and keep the lock ambiguous.
+# All synchronous (foreground) call sites continue to use _acq_msb_cli() normally.
 _acq_msb_cli() {
   MSYS2_ARG_CONV_EXCL='*' msb "$@"
 }
@@ -161,7 +172,7 @@ MSB_ROLLBACK_VERSION="0.6.18"
 # duplicate snapshots exist. See ADR-0032.
 MSB_FIXED_VERSION="0.7.3"
 
-# Default OCI image for provisioned sandboxes. We default to the SAME image
+# Default OCI image for provisioned non-OpenCode sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
 # agent template. It ALREADY ships the non-root `agent` user (with passwordless
 # sudo), node, git, curl, and ca-certificates (the four kits' runtime
@@ -192,7 +203,7 @@ _ACQ_MSB_IMAGE_NOTICE_SHOWN=0
 
 # _acq_msb_resolve_image AGENT — set the OCI image `msb create` should use,
 # applying the ADR-0022 precedence: explicit ACQ_MSB_IMAGE > neutral
-# --image/ACQ_IMAGE > agent-derived sandbox-template image > built-in default.
+# --image/ACQ_IMAGE > generic OpenCode base > agent-derived sandbox-template image > built-in default.
 # Prints a one-time notice if BOTH the backend var and the neutral image are set
 # (backend var wins). Idempotent notice (once per process).
 _ACQ_MSB_RESOLVED_IMAGE=""
@@ -219,6 +230,11 @@ _acq_msb_resolve_image() {
   if [ -n "$neutral" ]; then
     _ACQ_MSB_RESOLVED_IMAGE="$neutral"
     _ACQ_MSB_RESOLVED_IMAGE_SOURCE="neutral"
+    return 0
+  fi
+  if [ "$agent" = "opencode" ]; then
+    _ACQ_MSB_RESOLVED_IMAGE="$ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE"
+    _ACQ_MSB_RESOLVED_IMAGE_SOURCE="generic-opencode-default"
     return 0
   fi
   if _ACQ_MSB_RESOLVED_IMAGE=$(acq_agent_template_image "$agent" 2>/dev/null) \
@@ -583,6 +599,22 @@ ACQ_MSB_CLONES_DIR="${ACQ_MSB_CLONES_DIR:-${ACQ_STATE_DIR}/clones}"
 # always defined even if provision is not the entry point.
 _ACQ_MSB_STARTUP_STAGE_FILES=()
 _ACQ_MSB_STARTUP_STAGED=""
+_ACQ_MSB_ATTEMPT_GENERATION=""
+_ACQ_MSB_ATTEMPT_CLONE=""
+_ACQ_MSB_ATTEMPT_ACTIVE=""
+_ACQ_MSB_CREATE_STARTED=""
+
+_acq_msb_cleanup_uncreated_attempt() {
+  [ -n "${_ACQ_MSB_ATTEMPT_ACTIVE:-}" ] || return 0
+  if [ -z "${_ACQ_MSB_CREATE_STARTED:-}" ] || _acq_msb_confirm_absent "${_ACQ_MSB_ATTEMPT_NAME:-}"; then
+    [ -z "${_ACQ_MSB_ATTEMPT_CLONE:-}" ] || _acq_msb_clone_cleanup "$_ACQ_MSB_ATTEMPT_NAME"
+    acq_provider_input_discard msb "$_ACQ_MSB_ATTEMPT_NAME" "$_ACQ_MSB_ATTEMPT_GENERATION" || true
+  fi
+  _ACQ_MSB_ATTEMPT_GENERATION=""
+  _ACQ_MSB_ATTEMPT_CLONE=""
+  _ACQ_MSB_ATTEMPT_ACTIVE=""
+  _ACQ_MSB_CREATE_STARTED=""
+}
 # Per-kit readonly-file rewrite table: declared guest path -> read-only mount
 # path. Trusted startup code is never executed from a guest-writable copy.
 _ACQ_MSB_RO_REWRITE_FROM=()
@@ -1940,7 +1972,10 @@ _acq_msb_copy_file_verified() {
     esac
   fi
   if [ -n "$mode" ]; then
-    _acq_msb_cli exec "$name" -u 0 -- chmod "$mode" "$path" >/dev/null 2>&1 || true
+    # Host measurements show a multi-second penalty for direct permission argv,
+    # absent when the same operation runs through a guest shell. Keep the shell
+    # program fixed and pass all command/data tokens as positional arguments.
+    _acq_msb_cli exec "$name" -u 0 -- sh -c '"$@"' sh chmod "$mode" "$path" >/dev/null 2>&1 || true
   fi
   case "$path" in
     /home/agent/*)
@@ -1968,7 +2003,7 @@ _acq_msb_copy_file_verified() {
           # cannot be redirected to chown files OUTSIDE /home/agent. Defense in
           # depth — the tree is inside the ephemeral guest and the top component
           # is already ../. guarded above.
-          _acq_msb_cli exec "$name" -u 0 -- chown -R -P agent "/home/agent/$top" >/dev/null 2>&1 || true
+          _acq_msb_cli exec "$name" -u 0 -- sh -c '"$@"' sh chown -R -P agent "/home/agent/$top" >/dev/null 2>&1 || true
           ;;
       esac
       ;;
@@ -3083,7 +3118,7 @@ _acq_msb_clone_cleanup() {
 # is translated to msb's --volume mounts. Network allow-lists and the zscaler
 # --trust-host-cas shortcut are collected across all kits and applied at create.
 
-acq_backend_provision() {
+_acq_backend_provision_unlocked() {
   local name="$1"
   shift
 
@@ -3094,6 +3129,14 @@ acq_backend_provision() {
   local agent
   agent=$(first_positional "$@")
   [ -n "$agent" ] || agent="shell"
+  if acq_backend_exists "$name"; then
+    echo "acq(msb): error: sandbox '$name' already exists; refusing to alter its provider inputs." >&2
+    return 1
+  fi
+  if ! _acq_msb_confirm_absent "$name"; then
+    echo "acq(msb): error: could not confirm sandbox '$name' is absent; preserving provider inputs." >&2
+    return 1
+  fi
 
   # Collect create-time flags: net rules (union of all kit caps), --trust-host-cas
   # (if any kit declares the msb zscaler shortcut), volume mounts (from paths),
@@ -3112,6 +3155,13 @@ acq_backend_provision() {
   _acq_msb_resolve_image "$agent"
   local _msb_image="$_ACQ_MSB_RESOLVED_IMAGE"
   local _msb_image_source="$_ACQ_MSB_RESOLVED_IMAGE_SOURCE"
+  if [ "$_msb_image_source" = "generic-opencode-default" ]; then
+    ACQ_REQUIRED_AGENT_KIT="opencode"
+    ACQ_DEFAULT_OPENCODE_GENERIC=1
+  else
+    ACQ_REQUIRED_AGENT_KIT=""
+    ACQ_DEFAULT_OPENCODE_GENERIC=""
+  fi
 
   # Optional pull policy (ACQ_MSB_PULL): forwarded to `msb create --pull`.
   # `msb create` reads an image REF and by default pulls if-missing from a
@@ -3144,10 +3194,15 @@ acq_backend_provision() {
   # Zscaler CA trust FIRST so later network-fetching kits (playbook clone, USAi
   # validation) succeed behind a TLS-intercepting proxy (e.g. Zscaler).
   local kitref kitdir
-  _acq_msb_select_kits "$agent"
-  local kits=("${KITS[@]}")
+  _acq_msb_select_kits "$agent" || return 1
+  local kits=()
+  for kitref in ${KITS[@]+"${KITS[@]}"}; do kits+=("$kitref"); done
+  local _generic_opencode_kit=""
+  if [ "$_msb_image_source" = "generic-opencode-default" ]; then
+    _generic_opencode_kit=$(_acq_agent_builtin_kit_ref opencode) || return 1
+  fi
 
-  for kitref in "${kits[@]}"; do
+  for kitref in ${kits[@]+"${kits[@]}"}; do
     kitdir=$(_acq_msb_fetch_kit "$kitref") || {
       echo "acq(msb): error: could not fetch kit: $kitref" >&2
       exit 1
@@ -3185,6 +3240,18 @@ $(kit_spec_published_ports "$spec")"
     _volrecs="${_volrecs}
 $(kit_spec_volumes "$spec")"
   done
+
+  # Prepare the complete selected-provider set before the host config directory is
+  # mounted. It stays unpublished until this create succeeds; the guest receives
+  # the exact immutable generation rather than the mutable current symlink.
+  local _provider_generation
+  if ! _provider_generation=$(acq_provider_input_prepare msb "$name"); then
+    echo "acq(msb): error: provider input projection failed for '$name'." >&2
+    return 1
+  fi
+  _ACQ_MSB_ATTEMPT_NAME="$name"
+  _ACQ_MSB_ATTEMPT_GENERATION="$_provider_generation"
+  _ACQ_MSB_ATTEMPT_ACTIVE=1
 
   # Merged kit env, computed ONCE now that every kit is fetched and BEFORE any kit
   # is applied — see _acq_msb_merge_kit_env_into for why it must be a pre-pass.
@@ -3486,6 +3553,7 @@ EOF
       return 1
     fi
     _clone_src="$_ACQ_MSB_CLONE_DIR"
+    _ACQ_MSB_ATTEMPT_CLONE="$_clone_src"
   fi
 
   ACQ_MSB_GUEST_WORKSPACE=""
@@ -3579,19 +3647,28 @@ EOF
   _acq_msb_vsock_flags_into _vsock_flags "$name"
   [ "${#_vsock_flags[@]}" -gt 0 ] && create_flags+=("${_vsock_flags[@]}")
 
-  # Mount per-sandbox trusted configuration read-only. The guest can consume
-  # declared code and data here but cannot make acq trust a modified replacement.
+  # Preserve the existing trusted host-config mount used by read-only startup
+  # kit files and host-authoritative lifecycle state.
   local _hcfg_dir _hcfg_host
-  if _hcfg_dir=$(acq_host_config_dir msb "$name"); then
-    mkdir -p "$_hcfg_dir" 2>/dev/null || true
-    chmod 711 "$_hcfg_dir" 2>/dev/null || true
-    if command -v host_path >/dev/null 2>&1; then
-      _hcfg_host=$(host_path "$_hcfg_dir")
-    else
-      _hcfg_host="$_hcfg_dir"
-    fi
-    create_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
+  _hcfg_dir=$(acq_host_config_dir msb "$name") || return 1
+  mkdir -p "$_hcfg_dir" || return 1
+  chmod 711 "$_hcfg_dir" || return 1
+  if command -v host_path >/dev/null 2>&1; then
+    _hcfg_host=$(host_path "$_hcfg_dir") || return 1
+  else
+    _hcfg_host="$_hcfg_dir"
   fi
+  create_flags+=(--volume "${_hcfg_host}:${ACQ_HOST_CONFIG_GUEST_DIR}:ro")
+
+  # Provider metadata has its own guest mount. It must never expose the shared
+  # host config directory, which contains workspace, SSH, and kit state.
+  local _provider_mount
+  _provider_mount=$(acq_provider_input_msb_mount "$name" "$_provider_generation") || {
+    _acq_msb_cleanup_uncreated_attempt
+    return 1
+  }
+  create_flags+=(--volume "$_provider_mount")
+  create_flags+=(--env "ACQ_PROVIDER_INPUT_ROOT=$(acq_provider_input_guest_root msb "$name" "$_provider_generation")")
 
   # Credentials: read from the acq-owned secret store (keychain/file), scoped to
   # this sandbox first, then global. The real value is read into a TRANSIENT env
@@ -3623,16 +3700,26 @@ EOF
   # function on failure BEFORE the error block and the transient-secret scrub
   # below ever run.
   acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
-  local _create_rc=0
-  local _create_output=""
+  local _create_rc=0 _create_pid
+  local _create_output="" _create_output_file
   acq_debug "msb create: invoking (this returns fast; guest boots in background)"
   acq_spin_start "Creating sandbox '$name'"
-  _create_output=$(_acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
+  _ACQ_MSB_CREATE_STARTED=1
+  _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
+  # Inline the env assignment so the fork exec-optimizes into the actual msb binary
+  # (or test-stub script), making $! the backend executable's own PID.  An extra
+  # shell wrapper (_acq_msb_cli) would interpose another fork level, leaving the
+  # real binary as an unreachable grandchild that survives TERM to the wrapper.
+  MSYS2_ARG_CONV_EXCL='*' msb create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
+  _create_pid=$!
+  _acq_provider_input_guardian_register_if_active "$_create_pid" || { kill "$_create_pid" 2>/dev/null || true; wait "$_create_pid" 2>/dev/null || true; rm -f -- "$_create_output_file"; return 1; }
+  wait "$_create_pid" || _create_rc=$?
+  _create_output=$(cat "$_create_output_file"); rm -f -- "$_create_output_file"
   acq_spin_stop "Creating sandbox '$name'"
   [ -z "$_create_output" ] || printf '%s\n' "$_create_output" >&2
   if [ "$_create_rc" -ne 0 ] && [ "$_msb_image_source" = "agent-default" ] \
      && _acq_msb_image_not_found_error "$_create_output" \
-     && ! acq_backend_exists "$name"; then
+     && _acq_msb_confirm_absent "$name"; then
     echo "acq(msb): agent-specific image '$_msb_image' was not found;" >&2
     echo "acq(msb):   falling back to '$_ACQ_MSB_DEFAULT_IMAGE'." >&2
     _msb_image="$_ACQ_MSB_DEFAULT_IMAGE"
@@ -3641,7 +3728,13 @@ EOF
     _create_output=""
     acq_debug "msb create --name $name ${create_flags[*]} $_msb_image"
     acq_spin_start "Creating sandbox '$name'"
-    _create_output=$(_acq_msb_cli create --name "$name" "${create_flags[@]}" "$_msb_image" 2>&1) || _create_rc=$?
+    _create_output_file=$(mktemp "${TMPDIR:-/tmp}/acq-msb-create.XXXXXX") || return 1
+    # Same inline-env pattern as above: expose the msb executable PID directly.
+    MSYS2_ARG_CONV_EXCL='*' msb create --name "$name" "${create_flags[@]}" "$_msb_image" >"$_create_output_file" 2>&1 &
+    _create_pid=$!
+    _acq_provider_input_guardian_register_if_active "$_create_pid" || { kill "$_create_pid" 2>/dev/null || true; wait "$_create_pid" 2>/dev/null || true; rm -f -- "$_create_output_file"; return 1; }
+    wait "$_create_pid" || _create_rc=$?
+    _create_output=$(cat "$_create_output_file"); rm -f -- "$_create_output_file"
     acq_spin_stop "Creating sandbox '$name'"
     [ -z "$_create_output" ] || printf '%s\n' "$_create_output" >&2
   fi
@@ -3674,11 +3767,17 @@ EOF
       acq_registry_auth_hint msb "$_msb_image"
     fi
     echo "acq(msb):   (re-run with ACQ_DEBUG=1 for the full command trace)" >&2
-    # A fresh --clone scratch can hold no agent work yet — remove it (and the
-    # fetch-back remote) so the next create doesn't refuse on a stale dir.
-    [ -n "$_clone_src" ] && _acq_msb_clone_cleanup "$name"
+    if _acq_msb_confirm_absent "$name"; then
+      # A confirmed absence proves this attempt never created a sandbox. Only
+      # then is it safe to remove this attempt's scratch clone and generation.
+      _acq_msb_cleanup_uncreated_attempt
+    fi
     return 1
   fi
+
+  # msb create returned success. Its async readiness can still fail, but the
+  # backend may own a live or inspectable sandbox, so preserve this attempt.
+  _ACQ_MSB_ATTEMPT_ACTIVE=""
 
   # CRITICAL: `msb create` returns 0 even when the sandbox later FAILS TO START
   # (e.g. a bad mount): the boot is asynchronous. So a zero rc from create does
@@ -3702,6 +3801,11 @@ EOF
   fi
   acq_spin_stop "Waiting for the sandbox to finish booting"
   acq_debug "msb provision: exec-ready OK ($name)"
+
+  if ! _acq_provider_input_publish "$(acq_provider_input_root msb "$name")" "$_provider_generation"; then
+    echo "acq(msb): error: sandbox '$name' was created but provider inputs could not be published." >&2
+    return 1
+  fi
 
   # A same-named sandbox removed outside acq can leave host state behind. Clear
   # instance-scoped values before this fresh provision records replacement values.
@@ -3767,19 +3871,41 @@ EOF
   # individually non-fatal (the playbook kit already self-heals on next start),
   # matching acq_backend_ensure_kits_applied's best-effort heal loop. Each kit's
   # commands get the merged env from the pre-pass above.
-  local kd
+  local kd _kit_index _generic_opencode_kit_applied=0
   acq_spin_start "Applying configuration kits"
   _acq_msb_reset_kit_env "$name"
-  for kd in "${kitdirs[@]}"; do
+  for _kit_index in "${!kitdirs[@]}"; do
+    kd="${kitdirs[$_kit_index]}"
+    kitref="${kits[$_kit_index]}"
     acq_debug "msb provision: applying kit dir $kd ($name)"
     if _acq_msb_apply_kit_dir "$name" "$kd" _merged_kit_env; then
       acq_debug "msb provision: applied kit dir $kd ($name)"
+      if [ "$kitref" = "$_generic_opencode_kit" ]; then
+        _generic_opencode_kit_applied=1
+      fi
     else
+      if [ "$kitref" = "$_generic_opencode_kit" ]; then
+        acq_spin_stop "Applying configuration kits"
+        echo "acq(msb): error: required OpenCode kit did not fully apply for '$name'." >&2
+        echo "          Removing the new sandbox because its generic image has no OpenCode binary." >&2
+        _acq_backend_terminate_unlocked "$name" >/dev/null 2>&1 || \
+          echo "acq(msb): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
+        return 1
+      fi
       echo "acq(msb): warning: kit did not fully apply: $kd" >&2
       echo "acq(msb):   the sandbox is up; re-run 'acq run' to re-apply, or inspect with ACQ_DEBUG=1." >&2
     fi
   done
   acq_spin_stop "Applying configuration kits"
+  if [ "$_msb_image_source" = "generic-opencode-default" ] \
+      && { [ "$_generic_opencode_kit_applied" != 1 ] \
+        || ! acq_host_config_write msb "$name" generic-opencode generic-opencode; }; then
+    echo "acq(msb): error: could not record completed generic OpenCode state for '$name'." >&2
+    echo "          Removing the new sandbox to avoid an unpinned postinstall fallback." >&2
+    _acq_backend_terminate_unlocked "$name" >/dev/null 2>&1 || \
+      echo "acq(msb): warning: could not remove '$name'; run 'acq rm $name' before retrying." >&2
+    return 1
+  fi
   acq_debug "msb provision: all kits applied; provision complete ($name)"
 
   # Start the in-guest socat bridge for the host ssh-agent forward (ADR-0021).
@@ -3826,6 +3952,19 @@ EOF
 # 1000 is taken (e.g. by `node` on a plain base), `agent` is created at the next
 # free uid and the kits' `-u 1000` commands still map to it by NAME (see
 # _acq_msb_exec_command) with HOME exported.
+acq_backend_provision() {
+  ( # Bash 3.2 unwinds function locals before EXIT on errexit. Bind the lock
+    # into the trap with %q, even if a caller has a same-named local variable.
+    _acq_provider_input_guardian_start || exit 1
+    _ACQ_PROVIDER_INPUT_LOCK=$(acq_provider_input_lock_acquire msb "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
+    printf -v _ACQ_PROVIDER_INPUT_LOCK '%q' "$_ACQ_PROVIDER_INPUT_LOCK"
+    trap '_ACQ_PROVIDER_INPUT_EXIT_STATUS=$?; _acq_msb_cleanup_uncreated_attempt; acq_provider_input_lock_release '"$_ACQ_PROVIDER_INPUT_LOCK"' || true; _acq_provider_input_guardian_stop; exit "$_ACQ_PROVIDER_INPUT_EXIT_STATUS"' EXIT
+    trap '_acq_provider_input_signal_exit 128' HUP
+    trap '_acq_provider_input_signal_exit 130' INT
+    trap '_acq_provider_input_signal_exit 143' TERM
+    _acq_backend_provision_unlocked "$@"; exit "$?" )
+}
+
 _acq_msb_ensure_agent_user() {
   local name="$1"
   local marker="agent-user-ready"
@@ -4934,7 +5073,7 @@ acq_backend_stop() {
   _acq_msb_cli stop "$1"
 }
 
-acq_backend_terminate() {
+_acq_backend_terminate_unlocked() {
   # Tear down any post-hoc published-port tunnels (serve + ssh PIDs, state file)
   # before removing the sandbox (ADR-0015). Killing a dead PID / missing state
   # file is a no-op.
@@ -4948,8 +5087,12 @@ acq_backend_terminate() {
   # --clone (ADR-0027): surface unfetched agent commits BEFORE anything is deleted
   # (sbx-parity warning; rm proceeds — the scratch is disposable by contract).
   _acq_msb_clone_warn_unfetched "$1"
-  local _rc=0
-  _acq_msb_cli remove --force "$1" || _rc=$?
+  local _rc=0 _remove_pid
+  # Inline env assignment: $! is the msb binary's own PID (exec-optimized fork),
+  # so the guardian can terminate and wait for the actual backend process.
+  MSYS2_ARG_CONV_EXCL='*' msb remove --force "$1" & _remove_pid=$!
+  _acq_provider_input_guardian_register_if_active "$_remove_pid" || { kill "$_remove_pid" 2>/dev/null || true; wait "$_remove_pid" 2>/dev/null || true; return 1; }
+  wait "$_remove_pid" || _rc=$?
   if [ "$_rc" -ne 0 ]; then
     if acq_backend_exists "$1" || ! _acq_msb_confirm_absent "$1"; then
       return "$_rc"
@@ -4964,7 +5107,20 @@ acq_backend_terminate() {
   # Remove host-authoritative config only after the sandbox is confirmed gone;
   # otherwise a failed removal could discard state still mounted by a live guest.
   acq_host_config_remove msb "$1" || true
+  acq_provider_input_remove msb "$1" || true
   return "$_rc"
+}
+
+acq_backend_terminate() {
+  ( # Bake the quoted lock into EXIT; Bash 3.2 can unwind inherited locals.
+    _acq_provider_input_guardian_start || exit 1
+    _ACQ_PROVIDER_INPUT_LOCK=$(acq_provider_input_lock_acquire msb "$1" "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID") || { _acq_provider_input_guardian_stop; exit 1; }
+    printf -v _ACQ_PROVIDER_INPUT_LOCK '%q' "$_ACQ_PROVIDER_INPUT_LOCK"
+    trap '_ACQ_PROVIDER_INPUT_EXIT_STATUS=$?; acq_provider_input_lock_release '"$_ACQ_PROVIDER_INPUT_LOCK"' || true; _acq_provider_input_guardian_stop; exit "$_ACQ_PROVIDER_INPUT_EXIT_STATUS"' EXIT
+    trap '_acq_provider_input_signal_exit 128' HUP
+    trap '_acq_provider_input_signal_exit 130' INT
+    trap '_acq_provider_input_signal_exit 143' TERM
+    _acq_backend_terminate_unlocked "$@"; exit "$?" )
 }
 
 acq_backend_list() {
@@ -5535,11 +5691,12 @@ acq_backend_ensure_kits_applied() {
   local agent
   agent=$(acq_backend_recorded_agent "$name")
   _acq_msb_select_kits "$agent"
-  local kits=("${KITS[@]}")
+  local kits=()
+  for kitref in ${KITS[@]+"${KITS[@]}"}; do kits+=("$kitref"); done
   local builtin_count="${ACQ_BUILTIN_KIT_COUNT:-4}"
   local kitref kitdir i=0 ok=1
   acq_spin_start "Refreshing configuration kits"
-  _acq_msb_heal_kit_set "$name" "$builtin_count" "${kits[@]}" || ok=0
+  _acq_msb_heal_kit_set "$name" "$builtin_count" ${kits[@]+"${kits[@]}"} || ok=0
   acq_spin_stop "Refreshing configuration kits"
   # Record host-side bundle provenance ONLY when every built-in kit applied.
   # msb re-applies all built-in kits idempotently, so on full

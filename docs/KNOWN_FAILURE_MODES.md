@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-10-08"
+last_updated: "2026-10-22"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -11,6 +11,34 @@ keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 # Known Failure Modes
 
 This document captures real-world failure patterns when using Docker SBX + USAi + agent frameworks. If you're hitting something weird, it's probably in here.
+
+---
+
+## Provider-input validator dependencies are missing
+
+### Symptoms
+
+- `acq create` stops before backend creation.
+- The error requires exact `PyYAML` and `jsonschema` versions.
+
+### Fix
+
+From the Quickstart checkout, create the isolated validator runtime:
+
+```bash
+scripts/setup-provider-input-validator --apply
+```
+
+The runtime is stored under `.acq-tools/` and does not modify global Python
+packages. The default invocation is a dry run; `--apply` builds a fresh,
+hash-verified environment and only replaces a working runtime after validation
+succeeds. Re-run the command after changing Quickstart versions if the pinned
+requirements change.
+
+The lock supports Linux x86_64/aarch64 with Python 3.12, macOS arm64 with
+Python 3.12, macOS x86_64 with Python 3.13, and Windows x86_64/arm64 with
+Python 3.12. An unsupported OS, architecture, or Python version fails before
+installation; use one of the supported runtimes rather than bypassing hashes.
 
 ---
 
@@ -223,7 +251,7 @@ Agent assumes host filesystem layout, not container layout.
 - Agent appears stuck
 - Eventually fails with timeout
 - OpenCode shows a retry notice for a streamed-response read timeout: `Timed out
-  waiting for response data` on OpenCode 2.0.22 (the version the kit installs),
+  waiting for response data` on OpenCode 2.0.30 (the version the kit installs),
   `SSE read timed out` on 1.18.x
 
 ### Root Cause
@@ -234,8 +262,9 @@ Agent assumes host filesystem layout, not container layout.
 - Proxy misconfiguration
 - Streamed-response read timeout: the response sent no data for longer than the
   provider's `chunkTimeout`. OpenCode before 1.18.27 has no default for this option
-  (unset means no idle timeout; 1.18.27 and later default to 5 minutes), so on those
-  versions the 2-minute value the `usai-provider` kit sets is what makes it fire.
+  (unset means no idle timeout; 1.18.27 through 2.0.29 default to 5 minutes, 2.0.30
+  to 15), so on those versions the 2-minute value the `usai-provider` kit sets is
+  what makes it fire.
   Common during long reasoning or while the model generates a large tool call (such
   as writing a long file), or when a hop on the path (sandbox proxy, Zscaler, USAi,
   the upstream model) stalls. OpenCode retries automatically, so an occasional one
@@ -248,7 +277,7 @@ The `usai-provider` kit sets both timeouts under the provider's `options` in its
 `timeout` (whole request, 10 minutes) and `chunkTimeout` (gap between streamed
 chunks, 2 minutes); check that file for the current values. If the read timeout
 recurs, raise `chunkTimeout` in the project's `opencode.json`. The example below
-uses 5 minutes, the default OpenCode 1.18.27 and later ship; `false` disables the
+uses 5 minutes, the default from OpenCode 1.18.27 through 2.0.29; `false` disables the
 idle timeout entirely. A higher value makes a truly hung stream take longer to fail
 over to the retry. Do not set it to a few seconds: normal model pauses would then
 abort nearly every long response.
@@ -265,7 +294,7 @@ abort nearly every long response.
 }
 ```
 
-If the retries run out (OpenCode 2.0.22 gives up after three retries of a timed-out
+If the retries run out (OpenCode 2.0.30 gives up after three retries of a timed-out
 request, while other retryable errors follow a separate policy; 1.18.17 through the
 1.18.x line stop after five; earlier releases keep retrying until you abort), note
 the model, the time, and what the agent was doing, so a slow model can be told
@@ -1844,7 +1873,7 @@ For a single sandbox, pass the pinned kit ref with `--kit` or include it in
 `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=56d1f5f49ef928f50e61aa64a93d618b3d21c415&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=d2674db8b424402e912e95254d6b194a062deb73&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 Existing sandboxes that were created before this change keep whatever podman
@@ -2903,3 +2932,26 @@ When you discover a new failure mode:
 3. Provide a minimal fix
 4. Add it to this document
 5. Consider if it indicates a gap in AGENTS.md rules
+
+---
+
+## Default OpenCode Generic Base Requires Recreation
+
+**Symptom:** An existing OpenCode sandbox still starts through an older
+OpenCode-specific template or does not receive the pinned kit behavior.
+
+**Cause:** The ADR-0030 generic base and kit composition are selected only when
+the sandbox is created. Existing sandboxes intentionally keep the image and kit
+set they were created with.
+
+**Resolution:** Recreate the sandbox from the project path:
+
+```bash
+./acq rm opencode-your-project
+./acq run opencode /path/to/your/project
+```
+
+The new default uses the pinned generic `devenv-shell` image and validates the
+pinned OpenCode kit before provisioning. If that validation fails, correct the
+pinned kit availability or metadata rather than falling back to an unpinned npm
+installation.

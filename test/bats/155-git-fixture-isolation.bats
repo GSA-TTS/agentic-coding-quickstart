@@ -138,6 +138,42 @@ _mk_sentinel_repo() { # PATH
   assert_output --partial 'refusing to fetch into an empty destination'
 }
 
+@test "kit fetch: preserves a bare repository and its refs and config" {
+  local source="$STUBDIR/source" bare="$STUBDIR/archive.git"
+  _mk_sentinel_repo "$source"
+  git clone -q --bare "$source" "$bare"
+  cp "$bare/config" "$STUBDIR/config.before"
+  local head_before refs_before
+  head_before=$(git -C "$bare" rev-parse HEAD)
+  refs_before=$(git -C "$bare" show-ref)
+
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$bare"
+  assert_failure
+  assert_output --partial 'refusing to fetch into a git repository'
+  assert_equal "$(git -C "$bare" rev-parse --is-bare-repository)" true
+  assert_equal "$(git -C "$bare" rev-parse HEAD)" "$head_before"
+  assert_equal "$(git -C "$bare" show-ref)" "$refs_before"
+  cmp "$bare/config" "$STUBDIR/config.before"
+  assert_equal "$(git -C "$bare" show HEAD:sentinel.txt)" sentinel
+  refute [ -e "$bare/.git" ]
+}
+
+@test "kit fetch: refuses a symlink into bare repository metadata" {
+  local bare="$STUBDIR/empty.git" alias="$STUBDIR/alias"
+  git init -q --bare "$bare"
+  cp "$bare/config" "$STUBDIR/config.before"
+  ln -s "$bare/objects" "$alias"
+
+  run kit_translate_fetch \
+    'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' "$alias"
+  assert_failure
+  assert_output --partial 'refusing to fetch into a git repository'
+  cmp "$bare/config" "$STUBDIR/config.before"
+  assert_equal "$(git -C "$bare" rev-parse --is-bare-repository)" true
+  refute [ -e "$bare/objects/.git" ]
+}
+
 @test "kit fetch: refuses / as a destination" {
   run kit_translate_fetch \
     'git+https://example.invalid/x.git#ref=deadbeef&dir=kits/a' '/'

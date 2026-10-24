@@ -301,6 +301,7 @@ _msb_create_line() { grep '^msb create' "$CALLS" | head -n1; }
   # shell, dropping the agent args we are here to observe.
   _acq_child ACQ_BACKEND=msb STUB_AGENT_PRESENT=1 STUB_RECORDED_AGENT=opencode -- \
     run opencode "$proj" -- --publish 6868:6767
+  assert_success
   local log; log=$(cat "$CALLS")
   # Forwarded verbatim to the inner agent invocation ...
   assert_regex "$log" '\-\-publish 6868:6767'
@@ -313,6 +314,7 @@ _msb_create_line() { grep '^msb create' "$CALLS" | head -n1; }
   : > "$CALLS"
   _acq_child ACQ_BACKEND=msb STUB_AGENT_PRESENT=1 STUB_RECORDED_AGENT=opencode -- \
     run opencode --publish 6868:6767 "$proj"
+  assert_success
   assert_regex "$(_msb_create_line)" '\-p 6868:6767'
   refute_regex "$(cat "$CALLS")" '\-\-publish'
 }

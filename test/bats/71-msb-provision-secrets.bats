@@ -51,7 +51,7 @@ _provision() { # NAME PRE_SNIPPET
   # image. The mount SOURCE is the native host form, the TARGET the guest form
   # (ADR-0029); identical on POSIX.
   load_acq
-  local ws wshost; ws=$(canonicalize_path /tmp); wshost=$(host_path /tmp)
+  local ws wshost; ws=$(canonicalize_path /tmp); wshost=$(host_path "$ws")
   assert_regex "$log" "--volume ${wshost}:${ws}"
   refute_regex "$log" "--volume ${ws}:/home/agent/workspace"
   assert_regex "$log" 'msb create --name provbox'

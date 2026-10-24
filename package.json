@@ -1,7 +1,7 @@
 {
   "name": "@gsa-tts/agentic-coding-quickstart",
   "//version": "Managed by release-please via extra-files in release-please-config.json; do not edit by hand.",
-  "version": "4.0.2",
+  "version": "4.1.1",
   "description": "acq — run AI coding agents inside a federally-configured sandbox (SBX or MSB) with USAi endpoints",
   "type": "module",
   "bin": {
@@ -9,7 +9,12 @@
   },
   "files": [
     "acq",
-    "acq.backends/"
+    "acq.backends/",
+    "scripts/setup-provider-input-validator",
+    "scripts/provider-input-validator-requirements.txt",
+    "scripts/provider-input-validator-requirements-linux.txt",
+    "scripts/provider-input-validator-requirements-macos.txt",
+    "scripts/provider-input-validator-requirements-windows.txt"
   ],
   "scripts": {
     "lint:md": ".github/linters/node_modules/.bin/markdownlint --config .markdownlint.jsonc --ignore-path .markdownlintignore --dot \"**/*.md\"",

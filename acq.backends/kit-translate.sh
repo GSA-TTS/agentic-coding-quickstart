@@ -105,7 +105,7 @@ kit_translate_fetch() {
       # repository would have its Git metadata replaced and its tracked files
       # overwritten with the kit bundle's tree. Refuse before any of that runs.
       # Reject: empty, root, and any destination inside an existing Git
-      # repository (which also covers $destdir being a repository root itself).
+      # work tree or Git metadata directory, including bare repositories.
       if [ -z "$destdir" ]; then
         echo "kit-translate: refusing to fetch into an empty destination" >&2
         return 1
@@ -115,10 +115,10 @@ kit_translate_fetch() {
       esac
       mkdir -p "$destdir" || return 1
       local _dest_repo
-      _dest_repo=$(cd "$destdir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || _dest_repo=""
+      _dest_repo=$(cd "$destdir" 2>/dev/null && git rev-parse --absolute-git-dir 2>/dev/null) || _dest_repo=""
       if [ -n "$_dest_repo" ]; then
         echo "kit-translate: refusing to fetch into a git repository: $destdir" >&2
-        echo "kit-translate:   resolved repository root: $_dest_repo" >&2
+        echo "kit-translate:   resolved Git directory: $_dest_repo" >&2
         return 1
       fi
       # Fetch NON-INTERACTIVELY. We MUST NOT drop into an interactive git

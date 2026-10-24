@@ -98,11 +98,11 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   assert_regex "$(_create_line msb)" 'docker\.io/docker/sandbox-templates:shell-docker'
 }
 
-@test "image(msb): known agent defaults to matching sandbox-template image" {
+@test "image(msb): default opencode uses the pinned generic devenv base" {
   _msb_create -- create opencode --name imgopencode "$IMGPROJ"
   local line; line=$(_create_line msb)
-  assert_regex "$line" 'docker\.io/docker/sandbox-templates:opencode-docker'
-  refute_regex "$line" 'docker\.io/docker/sandbox-templates:shell-docker'
+  assert_regex "$line" 'ghcr\.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:7b923fb5e722ad27c751ead836f24145c4cea3fac015a3ba753bd7473891e1e7'
+  refute_regex "$line" 'devenv-opencode|sandbox-templates:opencode-docker'
 }
 
 @test "image(msb): claude/cursor derive their real product template tags" {
@@ -118,6 +118,26 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   refute_regex "$(_create_line msb)" 'sandbox-templates:cursor-docker'
 }
 
+@test "image(msb): missing non-OpenCode agent image falls back to shell" {
+  _msb_create STUB_MSB_CREATE_FAIL_IMAGE=docker.io/docker/sandbox-templates:claude-code-docker -- \
+    create claude --name imgclaudefallback "$IMGPROJ"
+
+  assert_success
+  assert_output --partial 'agent-specific image'
+  assert_output --partial 'falling back'
+  assert_regex "$(cat "$CALLS")" 'msb create .*claude-code-docker'
+  assert_regex "$(cat "$CALLS")" 'msb create .*shell-docker'
+}
+
+@test "image(msb): auth failure for a non-OpenCode agent image does not fall back" {
+  _msb_create STUB_MSB_CREATE_FAIL_IMAGE=docker.io/docker/sandbox-templates:claude-code-docker \
+    STUB_MSB_CREATE_FAIL_MESSAGE=unauthorized -- create claude --name imgclaudeauth "$IMGPROJ"
+
+  assert_failure
+  refute_output --partial 'falling back'
+  refute_regex "$(cat "$CALLS")" 'msb create .*shell-docker'
+}
+
 @test "image(msb): explicit ACQ_MSB_IMAGE beats the agent-derived default" {
   # 3-way precedence: ACQ_MSB_IMAGE must win over a known agent's derived image
   # (not just over the neutral --image/ACQ_IMAGE tier).
@@ -125,31 +145,6 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   local line; line=$(_create_line msb)
   assert_regex "$line" 'localhost/backend-specific:test'
   refute_regex "$line" 'docker\.io/docker/sandbox-templates:opencode-docker'
-}
-
-@test "image(msb): missing agent-specific default falls back to shell-docker" {
-  # The failure message is the VERBATIM msb stderr for a nonexistent Docker Hub
-  # tag (live-verified): the registry returns `manifest unknown`. This proves
-  # _acq_msb_image_not_found_error matches the real wording, not a paraphrase.
-  _msb_create \
-    STUB_MSB_CREATE_FAIL_IMAGE=docker.io/docker/sandbox-templates:opencode-docker \
-    STUB_MSB_CREATE_FAIL_MESSAGE="error: image error: registry error: Registry error: url https://index.docker.io/v2/docker/sandbox-templates/manifests/opencode-docker, envelope: OCI API errors: [OCI API error: manifest unknown]" \
-    -- create opencode --name imgfallback "$IMGPROJ"
-  local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'docker\.io/docker/sandbox-templates:opencode-docker'
-  assert_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
-  assert_output --partial 'falling back'
-}
-
-@test "image(msb): auth failure for agent-specific default does not fall back" {
-  _msb_create \
-    STUB_MSB_CREATE_FAIL_IMAGE=docker.io/docker/sandbox-templates:opencode-docker \
-    STUB_MSB_CREATE_FAIL_MESSAGE="error: image error: registry error: unauthorized: authentication required" \
-    -- create opencode --name imgauthfail "$IMGPROJ"
-  local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'docker\.io/docker/sandbox-templates:opencode-docker'
-  refute_regex "$log" 'docker\.io/docker/sandbox-templates:shell-docker'
-  refute_output --partial 'falling back'
 }
 
 # sbx image tests: store a global usai key + seed the proxy fixture.
@@ -187,9 +182,12 @@ _sbx_create() { # CREATE_ARGS... (with optional leading ENV via `env`)
   assert_output --partial 'ignoring --image'
 }
 
-@test "image(sbx): no image set -> no --template injected" {
+@test "image(sbx): default opencode injects the pinned generic template" {
   _sbx_create ACQ_BACKEND=sbx "$ACQ" create opencode "$IMGPROJ"
-  refute_regex "$(_create_line sbx)" '--template'
+  local line; line=$(_create_line sbx)
+  assert_regex "$line" '--template ghcr\.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:7b923fb5e722ad27c751ead836f24145c4cea3fac015a3ba753bd7473891e1e7'
+  assert_regex "$line" " shell ${IMGPROJ}$"
+  refute_regex "$line" 'devenv-opencode|sandbox-templates:opencode-docker'
 }
 
 @test "image(reattach): --image on an existing sandbox warns and does not re-provision" {

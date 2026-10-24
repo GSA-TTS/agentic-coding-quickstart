@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.1.0...v4.1.1) (2026-10-22)
+
+
+### Performance Improvements
+
+* **msb:** reduce kit permission setup latency ([#614](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/614)) ([0415f5f](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/0415f5f62cc343bce6c287642bc80bd80a0cca61))
+
+## [4.1.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.0.2...v4.1.0) (2026-10-22)
+
+
+### Features
+
+* **kits:** pin agentic-coding-patterns v1.15.0 ([#595](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/595)) ([1e9ef27](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/1e9ef2705adc1729abeb32b527e49f0e9bcf35b6))
+* **kits:** pin agentic-coding-patterns v1.16.1 ([#609](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/609)) ([20d6bab](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/20d6babb969d5c3162e3f7238677a9ea1ad09856))
+* **opencode:** use generic devenv base by default ([#584](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/584)) ([cefd6f2](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/cefd6f27d437bee69acd742e4b4e338138aa2a22))
+
+
+### Bug Fixes
+
+* **ci:** bump markdown-it to 14.3.3 and smol-toml to 1.9.0 overrides ([#599](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/599)) ([5ab74b8](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/5ab74b8c46a164e58631f198589906ba82dfd0a7))
+* **msb:** stop false "no ssh-agent route" warnings from grep sigpipe ([#598](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/598)) ([24c8493](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/24c8493dfeefb68cd183f057ee8ec411ed46ec35))
+* **provider-facts:** preserve caller-visible assignments through wrapper subshell ([#603](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/603)) ([2361b11](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/2361b112e2c99b16312685a0cf5c21bf23065675))
+* **provider-facts:** preserve unset caller IFS ([#605](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/605)) ([3fe3150](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/3fe3150c18d85724f49feaea6b10e5b9adddfcc8))
+* **rc.d:** list ~/.rc.d with command ls in the login bridge ([#588](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/588)) ([d7dbeb6](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/d7dbeb685e2515d6678c6b73cda31ea470875f68))
+* **verify:** make provider backend verification fail closed ([#602](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/602)) ([f67041a](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/f67041a7e4396c9f9fc4214763c5837c514ff949))
+
 ## [4.0.2](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.0.1...v4.0.2) (2026-10-10)
 
 

@@ -3,7 +3,7 @@ title = "agent-sandbox repo allowlist for test fixtures"
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "Allow known fake secrets used in test fixtures and verification"
 
 paths = [
@@ -25,3 +25,10 @@ regexes = [
     '''(?i)test[_-]?secret''',
     '''(?i)fake[_-]?key''',
 ]
+
+[[allowlists]]
+description = "Literal placeholder in the startup probe command-parser test"
+condition = "AND"
+paths = ['''^scripts/test-probe-msb-startup\.py$''']
+regexTarget = "secret"
+regexes = ['''^PLACEHOLDER$''']

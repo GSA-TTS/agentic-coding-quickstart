@@ -189,6 +189,7 @@ teardown() {
   installer=$(cat "$REPO_ROOT/install.ps1")
 
   assert_regex "$installer" '"acq", "acq\.backends", "acq\.cmd", "acq\.ps1", "install\.ps1"'
+  assert_regex "$installer" '"scripts"'
 }
 
 @test "windows launcher: converts Windows paths before Git Bash handoff" {
@@ -237,6 +238,7 @@ teardown() {
   assert_regex "$workflow" 'acq-windows-x64\.zip'
   assert_regex "$workflow" 'cp install\.ps1 dist/install\.ps1'
   assert_regex "$workflow" 'cp acq acq\.cmd acq\.ps1 install\.ps1 LICENSE README\.md package\.json'
+  assert_regex "$workflow" 'setup-provider-input-validator scripts/provider-input-validator-requirements\*\.txt'
   assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip > SHA256SUMS'
   assert_regex "$workflow" 'dist/acq-windows-x64\.zip'
 }

@@ -237,13 +237,68 @@ EOF
   : > "$CALLS"
   printf 'acq-volbox-var-lib-docker\n' > "$STUBDIR/.msb_volume_list"
   printf 'volbox\n' > "$STUBDIR/.msb_sandbox_list"
-  run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null; STUB_MSB_RM_FAIL=1 acq_backend_terminate volbox >/dev/null 2>&1'
+  local projection_root; projection_root=$(acq_provider_input_root msb volbox)
+  _acq_provider_input_safe_mkdir "$projection_root/generations/one/models/providers"
+  chmod -R a-w "$projection_root/generations/one"
+  BASH_ENV='' run bash -c 'set -e; . "'"$REPO_ROOT"'/acq.backends/common.sh"; . "'"$REPO_ROOT"'/acq.backends/msb.sh"; STUB_MSB_RM_FAIL=1 acq_backend_terminate volbox'
+  assert_failure
+  assert_regex "$(cat "$CALLS")" 'msb remove --force volbox'
   refute_regex "$(cat "$CALLS")" 'volume rm'
+  [ -d "$projection_root" ]
+  # A failed backend removal must still release the lock so a retry can run.
+  [ ! -d "${projection_root}.lock" ]
   # (b) remove fails but the sandbox is GONE out of band -> clean up.
   : > "$CALLS"
   rm -f "$STUBDIR/.msb_sandbox_list"
-  run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh" 2>/dev/null; STUB_MSB_RM_FAIL=1 acq_backend_terminate volbox >/dev/null 2>&1'
+  BASH_ENV='' run bash -c 'set -e; . "'"$REPO_ROOT"'/acq.backends/common.sh"; . "'"$REPO_ROOT"'/acq.backends/msb.sh"; STUB_MSB_RM_FAIL=1 acq_backend_terminate volbox'
+  assert_failure
   assert_regex "$(cat "$CALLS")" 'msb volume rm acq-volbox-var-lib-docker'
+  [ ! -e "$projection_root" ]
+}
+
+@test "backend transaction traps release locks after errors with inherited locals" {
+  local backend operation mode root
+  # Exercise trap quoting with spaces, quotes, and literal shell syntax.
+  export ACQ_PROVENANCE_DIR="$STUBDIR/quote' \" \$(false)"
+  for backend in msb sbx; do
+    for operation in provision terminate; do
+      for mode in return error exit HUP INT TERM; do
+        root=$(acq_provider_input_root "$backend" trapbox)
+        BASH_ENV='' run bash -c '
+          set -eu
+          . "$1/acq.backends/common.sh"
+          . "$1/acq.backends/$2.sh"
+          fail_transaction() {
+            case "$mode" in
+              return) return 23 ;;
+              error) (exit 23); echo "unreachable" ;;
+              exit) exit 23 ;;
+              *) kill -s "$mode" "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" ;;
+            esac
+          }
+          _acq_backend_provision_unlocked() { fail_transaction; }
+          _acq_backend_terminate_unlocked() { fail_transaction; }
+          caller() {
+            # Bash 3.2 unwinds these on errexit. Even dedicated transaction
+            # names can be inherited locals; cleanup must bind the actual path.
+            local lock=wrong rc=99 _ACQ_PROVIDER_INPUT_LOCK=wrong
+            local _ACQ_PROVIDER_INPUT_EXIT_STATUS=99
+            "acq_backend_$operation" trapbox
+          }
+          operation=$3 mode=$4
+          caller
+        ' bash "$REPO_ROOT" "$backend" "$operation" "$mode"
+        case "$mode" in
+          HUP) assert_failure 128 ;;
+          INT) assert_failure 130 ;;
+          TERM) assert_failure 143 ;;
+          *) assert_failure 23 ;;
+        esac
+        refute_output --partial unreachable
+        [ ! -e "${root}.lock" ]
+      done
+    done
+  done
 }
 
 @test "vol: mid-life kit apply warns that volumes are creation-time only" {

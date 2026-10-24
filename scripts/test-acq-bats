@@ -35,6 +35,10 @@ _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${_dir}/.." && pwd)"
 BATS="${REPO_ROOT}/test/vendor/bats-core/bin/bats"
 
+# shellcheck source=scripts/test-acq-env.sh
+source "${REPO_ROOT}/scripts/test-acq-env.sh"
+acq_test_prepare_environment || exit 1
+
 if [ ! -f "$BATS" ]; then
   echo "test-acq-bats: vendored bats not found at $BATS" >&2
   echo "  run: git submodule update --init test/vendor/bats-core \\" >&2
@@ -65,7 +69,11 @@ fi
 #   - ACQ_BATS_JOBS overrides the job count; =1 forces serial.
 #   - bats --jobs needs GNU parallel or shenwei356/rush on PATH; without one it
 #     errors out, so we only pass --jobs when a parallelizer is present.
-_jobs="${ACQ_BATS_JOBS:-$( (command -v nproc >/dev/null 2>&1 && nproc) || echo 1 )}"
+_jobs="${ACQ_BATS_JOBS:-$( (command -v nproc >/dev/null 2>&1 && nproc) || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1 )}"
+# Bound automatic concurrency on large developer machines; explicit overrides
+# remain useful for reproducing serial behavior.
+if [ -z "${ACQ_BATS_JOBS:-}" ] && [ "$_jobs" -gt 4 ] 2>/dev/null; then _jobs=4; fi
+printf 'test-acq-bats: running with %s worker(s)\n' "$_jobs" >&2
 if [ "$_jobs" -gt 1 ] 2>/dev/null && { command -v parallel >/dev/null 2>&1 || command -v rush >/dev/null 2>&1; }; then
   exec "$BATS" --jobs "$_jobs" --no-parallelize-within-files "${REPO_ROOT}/test/bats"
 fi
@@ -78,11 +86,13 @@ if [ "$_jobs" -gt 1 ] 2>/dev/null && command -v xargs >/dev/null 2>&1 && printf 
       _bats=$1 _outdir=$2 _file=$3
       _name=$(basename "$_file")
       _out="${_outdir}/${_name}.out"
+      printf "test-acq-bats: starting %s\n" "$_name" >&2
       if "$_bats" "$_file" >"$_out" 2>&1; then
         printf "0\n" >"${_out}.status"
       else
         printf "%s\n" "$?" >"${_out}.status"
       fi
+      printf "test-acq-bats: finished %s (exit %s)\n" "$_name" "$(cat "${_out}.status")" >&2
     ' sh "$BATS" "$_tmp"
 
   _rc=0

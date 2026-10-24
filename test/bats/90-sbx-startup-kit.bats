@@ -202,6 +202,15 @@ STUB
   refute_regex "$(cat "$spec")" 'GIT_AUTHOR_NAME: Global User'
 }
 
+@test "provision(sbx): shared projection boundary generation passes the mount contract" {
+  local generation
+  generation=$(acq_provider_input_prepare sbx boundarybox)
+  assert_regex "$generation" '/generations/generation\.'
+  run acq_provider_input_sbx_mount boundarybox "$generation"
+  assert_success
+  assert_output "${generation}:ro"
+}
+
 @test "rc.d(sbx): neutral kit files materialize as home rc snippets" {
   local kit="$STUBDIR/rcd-kit" out="$STUBDIR/rcd-sbx-v2"
   mkdir -p "$kit/files/home/agent/.rc.d"
@@ -274,6 +283,7 @@ SPEC
   # a fresh bash never sees (the pre-#381 suite masked the resulting 127).
   (
     export ACQ_EXTRA_KITS="git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=some-extra-kit"
+    acq_test_stub_provider_input_boundary
     acq_backend_provision markerbox shell /tmp
   ) >/dev/null 2>&1 || true
   local log; log=$(cat "$CALLS")
@@ -287,6 +297,7 @@ SPEC
   (
     # shellcheck disable=SC2034  # consumed by the sourced acq_backend_provision
     ACQ_CLI_KITS=("git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=cli-kit-x")
+    acq_test_stub_provider_input_boundary
     acq_backend_provision climarkerbox shell /tmp
   ) >/dev/null 2>&1 || true
   assert_regex "$(cat "$CALLS")" 'cli-kit-x'
@@ -399,7 +410,7 @@ STUB
   assert [ -f "$STUBDIR/.removed" ]
 }
 
-@test "run(sbx): waits for the startup barrier before opencode postinstall probe" {
+@test "run(sbx): waits for the startup barrier before generic-default opencode attach" {
   cat >"$STUBDIR/sbx" <<'STUB'
 #!/usr/bin/env bash
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
@@ -411,9 +422,9 @@ case "${1:-}" in
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
     case " $* " in
-      *" opencode --version "*) printf 'opencode 1.18.12\n'; exit 0 ;;
     esac
     case "$snippet" in
+      'echo ok') printf 'ok\n' ;;
       *"startup-complete"*) printf 'ready\n' ;;
       *'%{http_code}'*) printf '200|0' ;;
       *) exit 0 ;;
@@ -427,6 +438,15 @@ case "${1:-}" in
 esac
 STUB
   chmod +x "$STUBDIR/sbx"
+  cat >"$STUBDIR/python3" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -c) exit 0 ;;
+  */validate_provider_input_contract.py) exit 0 ;;
+  *) exec /usr/bin/python3 "$@" ;;
+esac
+STUB
+  chmod +x "$STUBDIR/python3"
   local proj="$STUBDIR/startup-race-proj"; mkdir -p "$proj"
   printf 'sk-test\n' | env ACQ_BACKEND=sbx "$ACQ" secret set -g usai >/dev/null 2>&1 || true
   seed_sbx_usai_proxy_fixture
@@ -434,17 +454,15 @@ STUB
   run env ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
   assert_success
 
-  local log create_line barrier_line opencode_line attach_line
+  local log create_line barrier_line attach_line
   log=$(cat "$CALLS")
   create_line=$(printf '%s\n' "$log" | grep -n '^sbx create' | cut -d: -f1)
   barrier_line=$(printf '%s\n' "$log" | grep -n 'startup-complete' | cut -d: -f1)
-  opencode_line=$(printf '%s\n' "$log" | grep -n 'opencode --version' | cut -d: -f1)
-  attach_line=$(printf '%s\n' "$log" | grep -n '^sbx run --name' | cut -d: -f1)
+  attach_line=$(printf '%s\n' "$log" | grep -n '^sbx run --name.* shell -- -lc exec.*sh opencode' | cut -d: -f1)
 
   assert_regex "$log" 'startup-barrier'
   assert [ "$create_line" -lt "$barrier_line" ]
-  assert [ "$barrier_line" -lt "$opencode_line" ]
-  assert [ "$opencode_line" -lt "$attach_line" ]
+  assert [ "$barrier_line" -lt "$attach_line" ]
 }
 
 @test "wait(sbx): startup barrier requires this create's token" {

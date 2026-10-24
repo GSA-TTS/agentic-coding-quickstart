@@ -362,13 +362,14 @@ SPEC
   assert_equal "$ACQ_BUILTIN_KIT_COUNT" "5"
 }
 
-@test "agent-kits: explicit CLI kit suppresses implicit agent-kit inference" {
+@test "agent-kits: explicit CLI kit preserves the selected-kit notice" {
   load_acq
   ACQ_EXTRA_KITS=""
   ACQ_CLI_KITS=(/tmp/team-opencode)
 
   run acq_selected_agent_kit_summary opencode
-  assert_failure
+  assert_success
+  assert_output --partial 'agent=opencode kit=opencode'
   _build_kit_list opencode
   local joined; joined=$(printf '%s\n' "${KITS[@]}")
   assert_regex "$joined" '/tmp/team-opencode'
@@ -386,4 +387,41 @@ SPEC
   run acq_selected_agent_kit_summary shell
   assert_failure
   assert_regex "$(printf '%s\n' "${KITS[@]}")" '/tmp/opencode'
+}
+
+@test "provider-facts: wrapper preserves unset caller IFS under set -u" {
+  load_acq
+
+  (
+    set -u
+    unset IFS
+    acq_provider_facts_load_from_kit() {
+      IFS='|'
+      USAI_PROVIDER_HOST="loaded.example.gov"
+      USAI_PROVIDER_FACTS_SOURCE="loaded"
+      return 0
+    }
+
+    acq_provider_facts_load_from_kit_or_fallback kit cache
+
+    [ -z "${IFS+x}" ]
+    [ "$USAI_PROVIDER_HOST" = "loaded.example.gov" ]
+    [ "$USAI_PROVIDER_FACTS_SOURCE" = "loaded" ]
+  )
+}
+
+@test "provider-facts: fallback preserves unset caller IFS under set -u" {
+  load_acq
+
+  (
+    set -u
+    unset IFS
+    acq_provider_facts_load_from_kit() { IFS='|'; return 2; }
+
+    acq_provider_facts_load_from_kit_or_fallback kit cache
+
+    [ -z "${IFS+x}" ]
+    [ "$USAI_PROVIDER_HOST" = "api.gsa.usai.gov" ]
+    [ "$USAI_PROVIDER_FACTS_SOURCE" = "fallback" ]
+  )
 }

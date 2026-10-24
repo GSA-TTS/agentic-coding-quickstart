@@ -14,7 +14,15 @@
 #
 # shellcheck shell=bats
 
-setup() { acq_setup_stubs; load_acq; }
+setup() {
+  # Managed links must fit the real 103-byte macOS sun_path limit. Use a short,
+  # physical temp root rather than the much longer per-user macOS TMPDIR.
+  TMPDIR=$(cd /tmp && pwd -P)
+  export TMPDIR
+  unset SSH_AUTH_SOCK ACQ_FORWARD_HOST_SOCKETS
+  acq_setup_stubs
+  load_acq
+}
 teardown() { acq_teardown_stubs; }
 
 load 'helper'
