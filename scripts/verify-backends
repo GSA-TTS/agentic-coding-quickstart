@@ -1452,6 +1452,14 @@ verify_agent_install() {
     dump "exec output" "$LAST_OUT"
   fi
 
+  if run_acq "exec opencode-models" --backend "$backend" exec "$aname" -- sh -c \
+      'opencode models | grep -q "^usai/"'; then
+    pass "${backend}: opencode models lists projected USAi models"
+  else
+    fail "${backend}: opencode models did not list projected USAi models"
+    dump "exec output" "$LAST_OUT"
+  fi
+
   # Exercise the live attach/launch path without requiring a real USAi key. A
   # fresh `acq run opencode "$WORKDIR" -- --version` also performs post-create
   # USAi key validation and intentionally fails with the verifier's synthetic key;

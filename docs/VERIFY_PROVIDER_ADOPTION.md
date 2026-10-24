@@ -54,14 +54,15 @@ actual command output.
 
 | Check | SBX | MSB | Observed output / notes |
 |---|---|---|---|
-| Fresh `acq run opencode .` startup | FAIL | FAIL | 2026-10-24: backend create failed before startup. SBX treated the provider mount as a kit/primary workspace; MSB rejected an uncanonicalized host-config bind source. Fixes are consolidated in this draft; rerun required. |
-| Fresh OpenCode process starts | BLOCKED | BLOCKED | Blocked by the observed create failures above; no process-start claim. |
-| `acq exec NAME -- opencode models` consumes projected provider input | BLOCKED | BLOCKED | Blocked by the observed create failures above; no model-list claim. |
+| Fresh `acq run opencode .` startup | BLOCKED | BLOCKED | Not executed: the verifier uses synthetic provider credentials, while the literal fresh-run path intentionally performs post-create credential validation. |
+| Fresh OpenCode sandbox create + name reattach | PASS | PASS | 2026-10-24: OpenCode sandboxes were created, then reattached by derived name. SBX recorded 12 passes; MSB recorded 17 passes. |
+| Fresh OpenCode process starts | PASS | PASS | `acq run <name> -- --version` succeeded on both backends. |
+| `acq exec NAME -- opencode models` consumes projected provider input | BLOCKED | BLOCKED | Not executed in transcripts `WYG6UyXD` or `DRJKRq2R`; the verifier check is added for the next run. |
 | Remove projected provider input and restart OpenCode | BLOCKED | BLOCKED | Record expected actionable failure or documented fallback |
 | Malformed provider input is rejected before startup | BLOCKED | BLOCKED | Record exact validation error and exit status |
-| `scripts/verify-backends --only <backend>` | FAIL | FAIL | SBX transcript: `tmp/provider-neutral-validation.aguo8ZPz/sbx.log`. MSB transcript: `tmp/provider-neutral-validation.ktM9ig5z/msb.log`. Both reached validated provider inputs before backend-specific create failure. |
+| `scripts/verify-backends --only <backend>` | PASS | PASS | SBX transcript: `tmp/provider-neutral-validation.WYG6UyXD/sbx.log` (12 pass, 0 fail, 1 skip). MSB transcript: `tmp/provider-neutral-validation.DRJKRq2R/msb.log` (17 pass, 0 fail, 1 skip). |
 
-### Preserved Live Evidence (2026-10-24)
+### Earlier Failed Live Evidence (2026-10-24)
 
 The full host transcripts remain in the gitignored Quickstart `tmp/` directory.
 The decisive output is preserved here so review does not depend on those local
@@ -83,9 +84,41 @@ error: invalid config: bind mount host path /var/folders/... goes through symlin
 use the resolved path /private/var/folders/... or add follow-root-symlinks
 ```
 
-These are product failures, not environmental blocks. Both backend fixes are
-included in this draft. Final validation remains blocked until Quickstart main
-contains the trusted macOS system-alias canonicalizer used by the MSB adapter.
+These were product failures, not environmental blocks. Both backend fixes are
+included in this draft and the later successful run below advanced past them.
+
+### Successful Live Evidence (2026-10-24)
+
+The combined validation worktree included the v1.17.0 pin, OpenCode renderer,
+macOS alias fix, validator installer, and the SBX/MSB fixes consolidated here.
+
+SBX observed output:
+
+```text
+ok sbx: provider input facts projected and readable
+ok sbx: USAi host reachable from guest (HTTP 401; auth rewritten on wire)
+ok sbx: opencode binary installed and on PATH
+ok sbx: OpenCode kit generated the global config
+ok sbx: acq run re-attaches opencode sandbox and launches --version
+passed: 12 failed: 0 skipped: 1 warnings: 0
+```
+
+MSB observed output:
+
+```text
+ok msb: provider input facts projected and readable
+ok msb: USAi host reachable from guest (HTTP 401; auth rewritten on wire)
+ok msb: opencode binary installed and on PATH
+ok msb: OpenCode kit generated the global config
+ok msb: acq run re-attaches opencode sandbox and launches --version
+passed: 17 failed: 0 skipped: 1 warnings: 0
+```
+
+The skipped row on each backend was the private playbook fetch because `gh` was
+not logged in on the host. It does not affect provider-neutral OpenCode evidence.
+The `opencode models`, provider-removal, and malformed-input rows remain
+`BLOCKED` until separately observed; this document does not infer them from the
+successful startup run.
 
 ### Negative-Validation Procedure (malformed provider input)
 
