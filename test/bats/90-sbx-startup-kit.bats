@@ -542,7 +542,7 @@ STUB
   assert [ "$wait_line" -lt "$attach_line" ]
 }
 
-@test "provision(sbx): provider generation mount appears after agent, not among --kit refs (GSA-TTS/agentic-coding-quickstart#629)" {
+@test "provision(sbx): provider generation mount appears after agent, not among --kit refs" {
   # Regression: before this fix, /path/generation.XXX:ro was placed BEFORE the agent
   # positional in sbx create argv.  sbx resolves pre-agent positionals as kit paths,
   # producing "error: resolve kits: kit path .../generation.<id>:ro does not exist".
@@ -558,7 +558,7 @@ STUB
   [ -n "$create_line" ]
 
   # (a) generation:ro must NOT be a --kit value — if it were, sbx tries to resolve
-  #     a non-existent kit path (the exact failure from issue #629).
+  #     a non-existent kit path.
   local gen_after_kit
   gen_after_kit=$(printf '%s\n' "$create_line" | awk '{
     for (i=1; i<=NF; i++) {
@@ -569,28 +569,22 @@ STUB
   }')
   [ -z "$gen_after_kit" ]
 
-  # (b) generation:ro must appear AFTER the agent positional (first non-flag, non-verb
-  #     token) so sbx treats it as a workspace-style read-only mount, not a kit path.
+  # (b) generation:ro must appear AFTER the selected agent token so sbx treats
+  #     it as a workspace-style read-only mount, not a kit path. Avoid generic
+  #     flag parsing here: SBX has both value-taking and boolean flags.
   local gen_pos agent_pos
   gen_pos=$(printf '%s\n' "$create_line" | awk '{
     for (i=1; i<=NF; i++) { if ($i ~ /\/generation\..*:ro$/) { print i; exit } }
   }')
-  # Find the agent positional: skip "sbx" and "create", then skip flags and their values.
   agent_pos=$(printf '%s\n' "$create_line" | awk '{
-    skip=0
-    for (i=1; i<=NF; i++) {
-      if (skip)         { skip=0; next }
-      if ($i ~ /^--/)   { skip=1; next }
-      if ($i == "sbx" || $i == "create") next
-      print i; exit
-    }
+    for (i=1; i<=NF; i++) { if ($i == "shell") { print i; exit } }
   }')
   [ -n "$gen_pos" ]
   [ -n "$agent_pos" ]
   assert [ "$agent_pos" -lt "$gen_pos" ]
 
   # (c) ACQ_PROVIDER_INPUT_ROOT must be in the env flags (no :ro suffix on the guest path).
-  assert_regex "$create_line" 'ACQ_PROVIDER_INPUT_ROOT=.*/generation\.[^:]*$'
+  assert_regex "$create_line" 'ACQ_PROVIDER_INPUT_ROOT=[^ ]*/generation\.[^ :]*([ ]|$)'
 
   # (d) The :ro suffix on the generation path must be preserved intact as a single token
   #     (spaces in the path or suffix must not be split by word expansion).
