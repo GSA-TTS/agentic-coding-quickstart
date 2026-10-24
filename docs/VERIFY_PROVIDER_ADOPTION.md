@@ -54,13 +54,13 @@ actual command output.
 
 | Check | SBX | MSB | Observed output / notes |
 |---|---|---|---|
-| Fresh `acq run opencode .` startup | BLOCKED | BLOCKED | Not executed: the verifier uses synthetic provider credentials, while the literal fresh-run path intentionally performs post-create credential validation. |
+| Fresh `acq run opencode .` startup | BLOCKED | BLOCKED | Not executed literally: the verifier uses synthetic provider credentials, while this path intentionally performs post-create credential validation. The related fresh create + reattach flow passed below. |
 | Fresh OpenCode sandbox create + name reattach | PASS | PASS | 2026-10-24: OpenCode sandboxes were created, then reattached by derived name. SBX recorded 12 passes; MSB recorded 17 passes. |
 | Fresh OpenCode process starts | PASS | PASS | `acq run <name> -- --version` succeeded on both backends. |
-| `acq exec NAME -- opencode models` consumes projected provider input | BLOCKED | BLOCKED | Not executed in transcripts `WYG6UyXD` or `DRJKRq2R`; the verifier check is added for the next run. |
+| `acq exec NAME -- opencode models` consumes projected provider input | PASS | PASS | 2026-10-24: `opencode models` listed projected `usai/` models on both backends. |
 | Remove projected provider input and restart OpenCode | BLOCKED | BLOCKED | Record expected actionable failure or documented fallback |
 | Malformed provider input is rejected before startup | BLOCKED | BLOCKED | Record exact validation error and exit status |
-| `scripts/verify-backends --only <backend>` | PASS | PASS | SBX transcript: `tmp/provider-neutral-validation.WYG6UyXD/sbx.log` (12 pass, 0 fail, 1 skip). MSB transcript: `tmp/provider-neutral-validation.DRJKRq2R/msb.log` (17 pass, 0 fail, 1 skip). |
+| `scripts/verify-backends --only <backend>` | PASS | PASS | SBX transcript: `tmp/provider-neutral-validation.lK64ypzb/sbx.log` (13 pass, 0 fail, 1 skip). MSB transcript: `tmp/provider-neutral-validation.qJrzRYY1/msb.log` (18 pass, 0 fail, 1 skip). |
 
 ### Earlier Failed Live Evidence (2026-10-24)
 
@@ -116,9 +116,31 @@ passed: 17 failed: 0 skipped: 1 warnings: 0
 
 The skipped row on each backend was the private playbook fetch because `gh` was
 not logged in on the host. It does not affect provider-neutral OpenCode evidence.
-The `opencode models`, provider-removal, and malformed-input rows remain
-`BLOCKED` until separately observed; this document does not infer them from the
-successful startup run.
+Provider removal and malformed-input rejection remain `BLOCKED` until separately
+observed; this document does not infer them from the successful startup run.
+
+### Final Live Evidence with Model Listing (2026-10-24)
+
+The validation worktree included the v1.17.0 renderer, macOS alias fix,
+validator installer, and the consolidated SBX/MSB backend fixes.
+
+```text
+SBX: opencode models lists projected USAi models
+SBX totals: passed 13, failed 0, skipped 1, warnings 0
+MSB: opencode models lists projected USAi models
+MSB totals: passed 18, failed 0, skipped 1, warnings 0
+```
+
+Host result files:
+
+```text
+tmp/provider-neutral-validation.lK64ypzb/results.tsv
+tmp/provider-neutral-validation.qJrzRYY1/results.tsv
+```
+
+Provider removal and malformed-input rejection remain `BLOCKED`; they require
+separate destructive/negative host procedures and are not inferred from the
+successful positive matrix.
 
 ### Negative-Validation Procedure (malformed provider input)
 
