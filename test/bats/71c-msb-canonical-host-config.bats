@@ -45,6 +45,7 @@ _provision_hcfg() { # NAME PRE_SNIPPET WS_ARGS...
     _acq_provider_input_canonical_path() { printf "%s\n" "$1"; }
     eval "$pre"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
     mkdir -p "'"$STUBDIR"'/nokit"
     printf "schemaVersion: \"hybrid/v1\"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n" \
       > "'"$STUBDIR"'/nokit/spec.yaml"
@@ -78,11 +79,15 @@ _provision_hcfg() { # NAME PRE_SNIPPET WS_ARGS...
       printf "%s\n" "'"$alias_cfgdir"'"
     }
     _acq_provider_input_canonical_path() {
-      [ "$1" = "'"$alias_cfgdir"'" ] || return 1
-      printf "%s\n" "'"$resolved_cfgdir"'"
+      if [ "$1" = "'"$alias_cfgdir"'" ]; then
+        printf "%s\n" "'"$resolved_cfgdir"'"
+      else
+        printf "%s\n" "$1"
+      fi
     }
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/594a-secrets"
   ' "$ws"
+  assert_success
   rm -rf "$ws" "$alias_cfgdir" "$real_cfgdir"
 
   # The --volume SOURCE must be the resolved real path, not the alias.
