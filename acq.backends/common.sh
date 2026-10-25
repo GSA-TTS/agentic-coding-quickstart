@@ -2251,8 +2251,9 @@ acq_provenance_status() {
 # Reapply the built-in bundle to an existing sandbox and, on success, refresh its
 # host-side provenance record. Uses the backend's heal path
 # (acq_backend_ensure_kits_applied) with ACQ_FORCE_KIT_REAPPLY=1 so a
-# present-but-stale kit is actually re-applied (the sbx feature-probe would
-# otherwise skip a kit that is present but built from an older ref). msb already
+# present-but-stale kit is actually re-applied (the sbx host builtin-kits record
+# would otherwise skip a kit recorded as applied at an older ref; the force flag
+# bypasses that record). msb already
 # re-applies all kits idempotently; the force flag is a no-op there. After a usai
 # refresh the kit's own startup global-merge re-runs on next attach, so the
 # refreshed model catalog reaches the config. State (sessions, secrets, unrelated
@@ -3185,7 +3186,7 @@ acq_host_config_clear_instance_state() {
   rm -f "$dir"/install-* "$dir"/agent-installed-* \
         "$dir"/agent-user-ready \
         "$dir"/workspace "$dir"/ssh-auth-sock "$dir"/generic-opencode \
-        "$dir"/extra-kits 2>/dev/null || true
+        "$dir"/extra-kits "$dir"/builtin-kits 2>/dev/null || true
   return 0
 }
 

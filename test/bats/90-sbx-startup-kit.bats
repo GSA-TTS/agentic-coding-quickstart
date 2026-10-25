@@ -49,6 +49,39 @@ _seed_stale_provenance() {
     "$f" > "$f.seed" && mv -f "$f.seed" "$f"
 }
 
+# Record all three heal-consulted built-in kits as applied at the current pinned
+# refs in the host config store (what create / a successful heal writes).
+_record_builtin_kits() {
+  acq_host_config_write sbx "$1" builtin-kits "zscaler-ca-certificate ${ZSCALER_KIT}
+${USAI_PROVIDER_KIT_NAME} ${USAI_KIT}
+agentic-coding-playbook ${PLAYBOOK_KIT}"
+}
+
+# Plant an sbx stub that reports EVERY feature probe as present (what a sudo guest
+# that touched the probed files would answer) and accepts `kit add`.
+_plant_all_present_stub() {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in
+      *"echo ok"*) printf 'ok\n' ;;
+      *present*) printf 'present\n' ;;
+      *) exit 0 ;;
+    esac ;;
+  kit) exit 0 ;;
+  settings) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+}
+
 @test "heal(sbx 0.38): a startup refusal yields consolidated recreate guidance, status unknown" {
   _plant_refusal_stub
   printf 'refusebox\n' > "$STUBDIR/.sandbox_list"
@@ -164,10 +197,12 @@ esac
 STUB
   chmod +x "$STUBDIR/sbx"
   printf 'probebox\n' > "$STUBDIR/.sandbox_list"
+  _record_builtin_kits probebox
   (
     unset EMAIL GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
     unset GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-    HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" \
+    # The probe is a non-authoritative diagnostic: it only runs under ACQ_DEBUG.
+    ACQ_DEBUG=1 HOME="$STUBDIR/nohome" XDG_CONFIG_HOME="$STUBDIR/noconfig" \
       acq_backend_ensure_kits_applied probebox >/dev/null 2>&1 || true
   )
   local log; log=$(cat "$CALLS")
@@ -373,9 +408,165 @@ STUB
   local kit='git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=some-extra-kit'
   printf 'hostbox\n' > "$STUBDIR/.sandbox_list"
   acq_host_config_write sbx hostbox extra-kits "$kit"
+  _record_builtin_kits hostbox
   ACQ_EXTRA_KITS="$kit" run acq_backend_ensure_kits_applied hostbox
   refute_regex "$(cat "$CALLS")" 'sbx kit add hostbox'
   refute_output --partial 'unexpected kit apply'
+}
+
+@test "heal(sbx): guest probes reporting present cannot suppress built-ins when the host record is absent" {
+  _plant_all_present_stub
+  printf 'nohostrec\n' > "$STUBDIR/.sandbox_list"
+  run acq_backend_ensure_kits_applied nohostrec
+  assert_output --partial 'missing the Zscaler CA kit'
+  assert_output --partial 'missing the USAi kit'
+  assert_output --partial 'missing the playbook kit'
+  local n; n=$(grep -c '^sbx kit add nohostrec ' "$CALLS" || true)
+  [ "$n" -ge 3 ]
+}
+
+@test "heal(sbx): a stale host built-in record (older ref) re-applies despite present probes" {
+  _plant_all_present_stub
+  printf 'stalerec\n' > "$STUBDIR/.sandbox_list"
+  acq_host_config_write sbx stalerec builtin-kits "zscaler-ca-certificate git+https://example.invalid/old.git#ref=oldoldold&dir=zscaler-ca-certificate
+${USAI_PROVIDER_KIT_NAME} ${USAI_KIT}
+agentic-coding-playbook ${PLAYBOOK_KIT}"
+  run acq_backend_ensure_kits_applied stalerec
+  assert_output --partial 'missing the Zscaler CA kit'
+  refute_output --partial 'missing the USAi kit'
+  refute_output --partial 'missing the playbook kit'
+  # The stale line is replaced, not duplicated, once the re-apply succeeds.
+  assert_equal "$(acq_host_config_read sbx stalerec builtin-kits | grep -c '^zscaler-ca-certificate ')" "1"
+  acq_host_config_read sbx stalerec builtin-kits | grep -Fxq -- "zscaler-ca-certificate ${ZSCALER_KIT}"
+}
+
+@test "heal(sbx): a partial host record applies only the unrecorded built-in kits" {
+  _plant_all_present_stub
+  printf 'partialrec\n' > "$STUBDIR/.sandbox_list"
+  acq_host_config_write sbx partialrec builtin-kits "zscaler-ca-certificate ${ZSCALER_KIT}"
+  run acq_backend_ensure_kits_applied partialrec
+  refute_output --partial 'missing the Zscaler CA kit'
+  assert_output --partial 'missing the USAi kit'
+  assert_output --partial 'missing the playbook kit'
+}
+
+@test "heal(sbx): a complete host record suppresses re-apply even if the guest probes report absent" {
+  _plant_refusal_stub
+  printf 'fullrec\n' > "$STUBDIR/.sandbox_list"
+  _record_builtin_kits fullrec
+  run acq_backend_ensure_kits_applied fullrec
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'sbx kit add fullrec'
+  refute_output --partial 'missing the'
+}
+
+@test "heal(sbx): a successful heal records built-ins so the next heal skips them" {
+  _plant_all_present_stub
+  printf 'recordbox\n' > "$STUBDIR/.sandbox_list"
+  run acq_backend_ensure_kits_applied recordbox
+  assert_success
+  local rec; rec=$(acq_host_config_read sbx recordbox builtin-kits)
+  grep -Fxq -- "zscaler-ca-certificate ${ZSCALER_KIT}" <<<"$rec"
+  grep -Fxq -- "${USAI_PROVIDER_KIT_NAME} ${USAI_KIT}" <<<"$rec"
+  grep -Fxq -- "agentic-coding-playbook ${PLAYBOOK_KIT}" <<<"$rec"
+  : > "$CALLS"
+  run acq_backend_ensure_kits_applied recordbox
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'sbx kit add recordbox'
+}
+
+@test "heal(sbx): a refused built-in kit add is NOT recorded as applied" {
+  _plant_refusal_stub
+  printf 'refusedrec\n' > "$STUBDIR/.sandbox_list"
+  run acq_backend_ensure_kits_applied refusedrec
+  assert_equal "$(acq_host_config_read sbx refusedrec builtin-kits)" ''
+}
+
+@test "heal(sbx): ACQ_FORCE_KIT_REAPPLY re-applies built-ins despite a complete host record" {
+  _plant_all_present_stub
+  printf 'forcerec\n' > "$STUBDIR/.sandbox_list"
+  _record_builtin_kits forcerec
+  ACQ_FORCE_KIT_REAPPLY=1 run acq_backend_ensure_kits_applied forcerec
+  assert_output --partial 'missing the Zscaler CA kit'
+  assert_output --partial 'missing the USAi kit'
+  assert_output --partial 'missing the playbook kit'
+}
+
+@test "heal(sbx): the guest probe is not even consulted without ACQ_DEBUG" {
+  _plant_all_present_stub
+  printf 'quietrec\n' > "$STUBDIR/.sandbox_list"
+  _record_builtin_kits quietrec
+  : > "$CALLS"
+  run acq_backend_ensure_kits_applied quietrec
+  refute_regex "$(cat "$CALLS")" 'ca-certificates/zscaler-ca\.crt'
+}
+
+@test "heal(sbx): a diagnostic probe reporting absent does not override the host record" {
+  _plant_refusal_stub
+  printf 'diagrec\n' > "$STUBDIR/.sandbox_list"
+  _record_builtin_kits diagrec
+  ACQ_DEBUG=1 run acq_backend_ensure_kits_applied diagrec
+  assert_output --partial 'diagnostic only'
+  refute_regex "$(cat "$CALLS")" 'sbx kit add diagrec'
+}
+
+@test "provision(sbx): built-in kits are recorded in host config at create" {
+  : > "$CALLS"
+  (
+    acq_test_stub_provider_input_boundary
+    acq_backend_provision builtinseedbox shell /tmp
+  ) >/dev/null 2>&1 || true
+  local rec; rec=$(acq_host_config_read sbx builtinseedbox builtin-kits)
+  grep -Fxq -- "zscaler-ca-certificate ${ZSCALER_KIT}" <<<"$rec"
+  grep -Fxq -- "${USAI_PROVIDER_KIT_NAME} ${USAI_KIT}" <<<"$rec"
+  grep -Fxq -- "agentic-coding-playbook ${PLAYBOOK_KIT}" <<<"$rec"
+}
+
+@test "provision(sbx): an empty provider selection seeds no USAi built-in record" {
+  : > "$CALLS"
+  (
+    acq_test_stub_provider_input_boundary
+    # shellcheck disable=SC2034 # acq_usai_provider_selected reads these globals
+    ACQ_PROVIDER_KITS=""
+    # shellcheck disable=SC2034
+    ACQ_PROVIDER_KITS_FROM_ENV=1
+    # shellcheck disable=SC2034
+    ACQ_PROVIDER_KITS_FROM_CLI=""
+    acq_backend_provision noproviderbox shell /tmp
+  ) >/dev/null 2>&1 || true
+  local rec; rec=$(acq_host_config_read sbx noproviderbox builtin-kits)
+  grep -Fxq -- "zscaler-ca-certificate ${ZSCALER_KIT}" <<<"$rec"
+  grep -Fxq -- "agentic-coding-playbook ${PLAYBOOK_KIT}" <<<"$rec"
+  refute_regex "$rec" "${USAI_PROVIDER_KIT_NAME}"
+}
+
+@test "clear-instance-state(sbx): drops stale builtin-kits and extra-kits host keys" {
+  acq_host_config_write sbx stalestate extra-kits "git+https://example.invalid/x.git#ref=abc&dir=x"
+  _record_builtin_kits stalestate
+  assert_regex "$(acq_host_config_read sbx stalestate builtin-kits)" 'zscaler-ca-certificate'
+  assert_regex "$(acq_host_config_read sbx stalestate extra-kits)" 'example\.invalid'
+  acq_host_config_clear_instance_state sbx stalestate
+  assert_equal "$(acq_host_config_read sbx stalestate builtin-kits)" ''
+  assert_equal "$(acq_host_config_read sbx stalestate extra-kits)" ''
+}
+
+@test "provision(sbx): a FAILED create writes no host built-in record" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  create) printf 'ERROR: create failed\n' >&2; exit 1 ;;
+  exec) printf 'ok\n' ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  (
+    acq_test_stub_provider_input_boundary
+    acq_backend_provision failbuiltinbox shell /tmp
+  ) >/dev/null 2>&1 || true
+  assert_equal "$(acq_host_config_read sbx failbuiltinbox builtin-kits)" ''
 }
 
 @test "agent-kit-heal(sbx): forced refresh includes recorded agent kit" {

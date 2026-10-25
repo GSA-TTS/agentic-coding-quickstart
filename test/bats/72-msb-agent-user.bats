@@ -196,7 +196,7 @@ _attach() { # PRE_SNIPPET NAME
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'PODMAN_PKGS='
   refute_regex "$log" '/usr/local/bin/docker'
-  refute_regex "$log" 'oci-ready'
+  refute_regex "$log" 'oci-engine-ready'
   refute_regex "$log" '/etc/containers/storage\.conf'
   refute_regex "$log" 'acq-oci-selftest'
   refute_regex "$log" '/dev/net/tun'

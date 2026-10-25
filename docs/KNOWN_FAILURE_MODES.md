@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-10-22"
+last_updated: "2026-10-25"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -760,12 +760,15 @@ create or a cold start, exec fails with `inspect exec: context deadline
 exceeded` for a few seconds; `acq` polls until a trivial exec succeeds) so a
 cold-start delay is not misread as "kit absent".
 
-> **Detecting a pre-kit sandbox.** `acq` decides a kit is missing by checking for
-> the kit's footprint (e.g. the USAi config file), classifying on the probe's
-> **stdout** (`present`/`absent`), never its exit status — `test -f` exits
-> non-zero when the file is absent, which is indistinguishable from a genuine
-> exec failure, so an exit-status check would wrongly treat "file absent" as
-> "probe failed" and skip healing.
+> **Detecting a pre-kit sandbox.** `acq` decides a built-in kit is missing from
+> the **host** `builtin-kits` record (kit name plus the pinned ref applied),
+> written at create and after a successful heal. A guest-side footprint probe
+> (e.g. the USAi config file) can be forged by the sandbox's passwordless-sudo
+> agent, so it is not authoritative: it runs only under `ACQ_DEBUG` as a
+> diagnostic and never changes the heal decision. Where the diagnostic runs it
+> classifies on the probe's **stdout** (`present`/`absent`), never its exit
+> status — `test -f` exits non-zero when the file is absent, which is
+> indistinguishable from a genuine exec failure.
 
 [sbx133]: https://github.com/docker/sbx-releases/issues/133
 
@@ -1773,6 +1776,34 @@ acq rm <sandbox>
 acq run <agent> <workspace>
 ```
 
+### Edge cases for a sandbox created before the migration
+
+acq reads none of the old guest markers (`/var/lib/acq/*`, `~/.acq-extra-kits`),
+so there is no data migration. Each missing host-config key degrades as follows
+(derived from `acq.backends/msb.sh` and `acq.backends/sbx.sh`; the offline tests
+named below pin the behavior, and none of it was re-verified against a live
+sandbox):
+
+| Backend | Missing host state | Observed behavior | Recovery |
+| --- | --- | --- | --- |
+| msb | `ssh-auth-sock` | No fallback. `SSH_AUTH_SOCK` is not set in sessions until a heal writes the key. `acq run`, `acq start`, and `acq restart` heal it only when a host ssh-agent forward is requested (`SSH_AUTH_SOCK` names an existing socket) **and** the sandbox has the create-time ssh-agent `--vsock` route. Without a host forward the heal is a silent no-op; with a forward but no route acq warns and leaves it unset. `acq exec` and `acq shell` run no heal, so they stay without it until a heal has run. | Run `acq run <sandbox>` with `SSH_AUTH_SOCK` set. With no route, recreate (see KFM §35). |
+| msb | `install-<cksum>` | Each install-phase kit command runs once more on the first heal, then the host gate is written. A command that fails is not recorded and is retried on every heal. acq does not check that third-party install commands are idempotent. | None needed for kits written to be idempotent. |
+| msb | `agent-user-ready` | The agent-user and passwordless-sudo setup runs once more on the first heal, then the gate is written. An existing `agent` user is reused. | None needed. |
+| msb | `kit-env` | `acq exec`, `acq shell`, and attach replay no kit `environment[]` until a full heal rebuilds the key from the current kits. | Run `acq run <sandbox>` once. |
+| sbx | `generic-opencode` launch mode, agent recorded as `opencode` | Attach fails closed with `cannot determine OpenCode launch mode` and runs no `sbx run`. acq cannot tell a pre-ADR-0030 template sandbox from a generic one whose host state was lost, and it does not trust a guest value. Other agents are not affected. | `acq rm <sandbox>` then `acq run opencode <workspace>`. |
+| sbx | `builtin-kits` | A sandbox created before the record has none. On sbx 0.38 or later the first re-attach tries to re-apply the three heal-consulted built-ins (Zscaler CA, USAi provider, playbook); `sbx kit add` refuses startup-bearing kits, so acq prints the recreate notice on every attach until the sandbox is recreated. | Recreate to get the record (and the current bundle). |
+| sbx | `extra-kits` (replaces the guest `~/.acq-extra-kits`) | The old marker is ignored. With `ACQ_EXTRA_KITS` set, the first heal tries `sbx kit add` for each extra kit. On sbx 0.38 or later a startup-bearing kit is refused and acq prints the recreate notice. `--kit` refs are create-time only on sbx and are not re-driven. | Recreate if the notice appears. |
+
+Orphaned guest files under `/var/lib/acq/` stay in the guest. acq never reads
+them, so they are harmless.
+
+Offline coverage: `test/bats/82-msb-legacy-sandbox.bats` (msb `ssh-auth-sock`,
+`install-<cksum>`, and `agent-user-ready` rows), `test/bats/72-msb-agent-user.bats` (provenance fallback),
+`test/bats/115-ssh-agent-forward.bats` (heal re-drives the forward), and
+`test/bats/140-opencode-migration-gate.bats` (sbx launch-mode refusal), and
+`test/bats/90-sbx-startup-kit.bats` (sbx `builtin-kits` record, refusal, and
+recreate notice).
+
 ### Prevention / Status
 
 - Fixed without trusting legacy guest state. A one-time idempotent replay after
@@ -2117,11 +2148,15 @@ Three issues compounded:
   diagnostic rather than being hidden. `acq kit update` fails with the same
   guidance. acq does **not** auto-recreate (a recreate discards the sandbox's
   session/context — it stays a deliberate, user-consented action).
-- Probes the playbook with `test -e "$HOME/.agentic-coding-playbook/AGENTS.md"`,
-  which matches **both** the historical git-clone and the current tarball
-  delivery.
-- Writes `~/.acq-extra-kits` at **create** for every extra/CLI kit, so re-attach
-  correctly sees them as already applied.
+- Decides which built-in kits to re-apply from the host `builtin-kits` record
+  (written at **create** and after a successful heal), not from guest state. The
+  guest footprint probe (including the playbook check
+  `test -e "$HOME/.agentic-coding-playbook/AGENTS.md"`, which matches both the
+  historical git-clone and the current tarball delivery) remains only as a
+  debug-only diagnostic under `ACQ_DEBUG`.
+- Writes the host `extra-kits` key at **create** for every extra/CLI kit, so
+  re-attach correctly sees them as already applied. It replaces the old guest
+  `~/.acq-extra-kits` marker, which acq no longer reads.
 
 To pick up a refreshed built-in bundle on sbx 0.38 you must recreate the sandbox
 (this discards its session/context):
