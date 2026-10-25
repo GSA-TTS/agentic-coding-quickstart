@@ -167,9 +167,15 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   mount/export semantics, not Unix ownership inside the guest: sbx already
   enforces read-only extra mounts, and msb 0.7.2 was live-verified to export the
   virtiofs mount read-only even when guest root can make the guest-visible mount
-  flag appear `rw`. acq also probes that guest root cannot create a file in the
-  mount before it rewrites `readonly: true` startup code to that path; if the
-  probe fails, acq falls back to the legacy guest-copy path and warns. If a future
+  flag appear `rw`. Whether a sandbox may rely on the mount for `readonly: true`
+  startup code is a **host-recorded create fact** (host key `ro-host-config`,
+  written only after a successful create that passed the `:ro` volume and became
+  exec-ready), not the answer of a guest command, which a passwordless-sudo guest
+  could forge to force the guest-copy downgrade. A sandbox with no record
+  (created before the key existed, or never fully created) takes the legacy
+  guest-copy path and warns. A guest-executed probe of the mount remains as a
+  diagnostic only: a mismatch with the record warns but never changes the
+  decision. If a future
   msb changes `--volume ...:ro` parsing or enforcement, acq must raise or gate
   its minimum msb version before relying on ADR-0035. Host and guest path forms
   follow ADR-0029.

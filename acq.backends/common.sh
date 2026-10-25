@@ -3186,7 +3186,7 @@ acq_host_config_clear_instance_state() {
   rm -f "$dir"/install-* "$dir"/agent-installed-* \
         "$dir"/agent-user-ready \
         "$dir"/workspace "$dir"/ssh-auth-sock "$dir"/generic-opencode \
-        "$dir"/extra-kits "$dir"/builtin-kits 2>/dev/null || true
+        "$dir"/extra-kits "$dir"/builtin-kits "$dir"/ro-host-config 2>/dev/null || true
   return 0
 }
 
