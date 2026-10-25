@@ -342,8 +342,36 @@ sequenceDiagram
   mechanism itself; the provider-facts declaration is specified in patterns
   ADR 0003.
 
+## Implementation evidence and remaining live validation
+
+Reconciliation of the session-and-exec slice (tracked in the Links section)
+against the offline evidence in the stacked branch. Offline Bats cases use
+stubbed backends; they prove acq's decision logic, not live sbx or msb behavior.
+
+| Acceptance bullet | Evidence | Live validation still needed |
+|---|---|---|
+| Agent derives from host authority only | msb: host `agent` key, then trusted provenance (`81-msb-forged-guest-markers.bats`, "attach launches the host-recorded agent", "trusted provenance ... supplies a legacy sandbox's agent"); sbx: provenance plus host `generic-opencode` launch mode (`90-sbx-startup-kit.bats`, `85-kit-provenance.bats`) | Forge the guest copy on a real msb sandbox and attach |
+| Workspace derives from host authority only | `81`: "run, attach and shell use the host-recorded workspace", "falls back to the agent home", "host workspace record outranks the forged marker" | As above, plus a name-only re-attach |
+| SSH socket derives from host authority only | `81`: "SSH_AUTH_SOCK comes from the host record", "no host ssh-auth-sock record ... no SSH_AUTH_SOCK" (sbx forwards natively, no acq-held value) | Forged socket marker with a live ssh-agent forward |
+| Kit environment derives from host authority only | `81`: "kit environment replay uses only the host kit-env record", "no host kit-env record ... no forged variable"; `78-msb-kit-env.bats` (sbx injects natively) | Forge the guest marker, confirm the session environment |
+| A forged guest marker cannot redirect any of the four | Same cases; the forging stub answers every legacy `/var/lib/acq/*` read with attacker values and asserts those values never reach argv | Same live checks |
+| Inventory of remaining guest reads | The remaining guest-derived reads are fail-soft liveness and presence probes, the diagnostic mount probe, the passwd login shell and the sbx startup barrier (the last two in `docs/KNOWN_FAILURE_MODES.md` sections 46 and 47) | None |
+| Real backend validation recorded | Not recorded for this slice | Record in `docs/VERIFY_PROVIDER_ADOPTION.md` after `scripts/verify-backends` on both backends |
+
+Adjacent gates the same branch moves to host authority, beyond the four #636
+fields: the sbx `extra-kits` and `builtin-kits` records (forged-probe cases in
+`90-sbx-startup-kit.bats`), the msb `ro-host-config` create fact
+(`83-msb-ro-host-config-record.bats`), and the msb install and agent-user gates
+(`81`, `82-msb-legacy-sandbox.bats`). Legacy sandboxes degrade as documented in
+`docs/KNOWN_FAILURE_MODES.md` section 32.1. SBX trusted-startup parity is
+proposed separately in [ADR-0036](0036-sbx-trusted-startup-parity.md).
+
 ## Links
 
+- Tracking: [GSA-TTS/agentic-coding-quickstart#503](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/503)
+  (host-authoritative lifecycle) and its session-and-exec child
+  [GSA-TTS/agentic-coding-quickstart#636](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/636),
+  reconciled in the evidence section above.
 - ADR-0005 — kits-from-patterns and the agent trust model (sandbox is the
   boundary; passwordless sudo rationale).
 - ADR-0011 — msb backend and neutral kits (the exec-based marker/kit-apply paths
