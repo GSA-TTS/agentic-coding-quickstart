@@ -2992,6 +2992,77 @@ the fix), and covers a transient and a persistent inspect failure via the stub's
 `STUB_MSB_INSPECT_FAIL_TIMES` knob. In new code, do not pipe into `grep -q`
 (or `head`) under `pipefail` when the writer may still be producing output.
 
+## 46. msb Session Shell Is Read From the Guest Passwd Entry (Accepted Residual Risk)
+
+**Status:** Accepted / observed. No code change: a host-recorded shell was
+evaluated and rejected.
+
+### Observation
+
+`_acq_msb_agent_passwd_shell` reads the `agent` account's login shell from the
+guest (`getent passwd agent` / `/etc/passwd` via `msb exec`). The value is
+charset-guarded to a word-safe absolute path (anything else becomes `/bin/sh`),
+exported as `SHELL`, and the session then runs that shell as the unprivileged
+`agent` user inside the guest. A passwordless-sudo guest can therefore choose
+which shell binary its own next interactive session starts.
+
+### Why this is accepted
+
+- **No privilege or boundary change.** The shell runs as `agent`, the same user
+  and filesystem the guest already controls. The agent can equally edit
+  `~/.profile`, `~/.bashrc`, or any binary on its `PATH`; choosing the login shell
+  grants nothing new. No host path, host credential, or acq decision (agent,
+  workspace, SSH socket, kit environment, run-once gates) is derived from it.
+- **A host record would be wrong, not safer.** The passwd shell is legitimately
+  guest state: `chsh`, image defaults, and `_acq_msb_ensure_agent_shell` (which
+  prefers bash when the image has it) all change it, and a host copy would go
+  stale or override a deliberate in-guest choice.
+- **The charset guard and `/bin/sh` fallback already bound it** to a plain
+  absolute path in argv, never shell syntax.
+
+### Revisit if
+
+A future acq feature runs the shell as root or with host-derived secrets in its
+environment, or uses the shell path as an input to a host-side decision.
+
+---
+
+## 47. SBX Startup Barrier Is a Guest File Check (Accepted Residual Risk)
+
+**Status:** Accepted / observed. No code change: the barrier cannot be made
+host-authoritative without sbx features that have not been verified.
+
+### Observation
+
+After `sbx create`, acq waits for `/tmp/acq/startup-complete` inside the sandbox
+to contain a random per-create token (`_acq_sbx_wait_for_startup_barrier`). The
+token is generated on the host and delivered in a generated barrier kit whose
+startup command writes it, so the host side of the comparison is authoritative,
+but the signal itself is a guest file. A guest that can read the token (or that
+can alter how the startup command is replayed, which is unverified on sbx) could
+make acq believe startup finished.
+
+### Why this is accepted
+
+- **The barrier is a readiness/liveness gate, not an integrity gate.** Its only
+  consequence is ordering: acq proceeds to its post-create steps (host-config
+  record writes, stale-state clear, attach) before the guest finished its own
+  startup commands. The failure surface is the guest breaking its own setup.
+- **No acq trust decision reads it.** The values acq acts on across restarts
+  (`extra-kits`, `builtin-kits`, `generic-opencode`, provenance) are host-written
+  and independent of this file.
+- **A host-authoritative signal needs sbx support not verified here.** The only
+  candidates are a backend-reported startup status or a host-visible channel out
+  of the guest. Neither is documented in the sbx CLI that this repository
+  targets, and adding one by guessing would trade a low-impact residual risk for
+  an unverifiable mechanism. The related trusted-startup question for SBX is
+  analyzed in ADR-0036 (SBX trusted-startup parity).
+
+### Revisit if
+
+sbx exposes a startup-complete status through `sbx inspect` or an equivalent
+host-side API, or a read-only host channel into the sandbox.
+
 ---
 
 ## Contributing
