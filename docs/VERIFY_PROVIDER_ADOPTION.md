@@ -58,7 +58,7 @@ actual command output.
 | Fresh OpenCode sandbox create + name reattach | PASS | PASS | 2026-10-25: OpenCode sandboxes were created, then reattached by derived name. SBX recorded 13 passes; MSB recorded 18 passes. |
 | Fresh OpenCode process starts | PASS | PASS | `acq run <name> -- --version` succeeded on both backends. |
 | `acq exec NAME -- opencode models` consumes projected provider input | PASS | PASS | 2026-10-24: `opencode models` listed projected `usai/` models on both backends. |
-| Remove projected provider input and restart OpenCode | BLOCKED | BLOCKED | Record expected actionable failure or documented fallback |
+| Fresh authoritative-empty provider selection has no USAi models | PASS | PASS | 2026-10-25: `--no-provider-kits` created fresh OpenCode sandboxes with no USAi kit, credential gate, or models on either backend. |
 | Malformed provider input is rejected before startup | PASS | PASS | 2026-10-25: both backends rejected malformed `provider-input.json` before backend creation with `acq: invalid provider input manifest ... invalid JSON at line 1 column 2`. |
 | `scripts/verify-backends --only <backend>` | PASS | PASS | Final combined branch: SBX transcript `tmp/provider-neutral-validation.TCY2fZvE/sbx.log` (13 pass, 0 fail, 1 skip); MSB transcript `tmp/provider-neutral-validation.8MP6vbkX/msb.log` (18 pass, 0 fail, 1 skip). |
 
@@ -116,9 +116,8 @@ passed: 17 failed: 0 skipped: 1 warnings: 0
 
 The skipped row on each backend was the private playbook fetch because `gh` was
 not logged in on the host. It does not affect provider-neutral OpenCode evidence.
-Provider removal remains `BLOCKED` until the supported host-side omission
-capability is implemented; this document does not infer it from the successful
-startup run.
+Provider omission is independently observed below; it is not inferred from the
+successful default-provider startup run.
 
 ### Final Live Evidence with Model Listing (2026-10-25)
 
@@ -140,8 +139,8 @@ tmp/provider-neutral-validation.TCY2fZvE/results.tsv
 tmp/provider-neutral-validation.8MP6vbkX/results.tsv
 ```
 
-Provider removal remains `BLOCKED`; it requires a supported authoritative-empty
-provider selection and is not inferred from the successful positive matrix.
+Provider omission evidence is recorded below; it is not inferred from the
+successful positive-provider matrix.
 
 ### Malformed Provider Input Evidence (2026-10-25)
 
@@ -161,6 +160,26 @@ tmp/malformed-provider-validation.GQGSRccw/results.tsv
 ```
 
 Both rows are `PASS`; no backend create command was reached.
+
+### Authoritative Empty Provider Evidence (2026-10-25)
+
+The supported host-side `--no-provider-kits` selection created fresh OpenCode
+sandboxes with an immutable empty provider generation on both backends. The
+applied kit lists omitted `usai-provider`, no USAi credential gate ran, and
+`opencode models` returned successfully with no USAi model, endpoint, or
+credential marker.
+
+```text
+SBX: PASS
+MSB: PASS
+```
+
+Result files:
+
+```text
+tmp/provider-omission-validation.4AJo3ZKd/results.tsv
+tmp/provider-omission-validation.fO13wRpW/results.tsv
+```
 
 ### Literal Credential Flow (2026-10-25)
 
