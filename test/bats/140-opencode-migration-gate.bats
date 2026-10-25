@@ -391,7 +391,7 @@ SPEC
   printf 'genericattach\n' >"$STUBDIR/.sandbox_list"
   local create_line
   create_line=$(_create_line sbx)
-  assert_regex "$create_line" " shell ${proj}$"
+  assert_regex "$create_line" " shell ${proj} .+:ro$"
   assert_equal "$(printf '%s\n' "$create_line" | grep -o 'acq-opencode-kit' | wc -l | tr -d ' ')" "1"
 
   : >"$CALLS"
