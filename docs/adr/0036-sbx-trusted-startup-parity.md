@@ -41,10 +41,16 @@ shipped kit. Re-check this against the pin in force when the ADR is accepted.
 This ADR decides the direction so that the first kit to opt in does not silently
 get weaker guarantees on SBX than on msb.
 
-`sbx kit add` of startup-bearing kits is refused on sbx >= 0.38
-(`docs/KNOWN_FAILURE_MODES.md` section 36), so mid-life repair is already
-"recreate the sandbox"; this ADR concerns create-time delivery and restart replay
-only.
+`sbx kit add` of startup-bearing kits is refused on sbx 0.38
+(`docs/KNOWN_FAILURE_MODES.md` section 36), so on that version mid-life repair is
+already "recreate the sandbox". The Kits v2 documentation
+([docs.docker.com Kits v2](https://docs.docker.com/ai/sandboxes/customize/kits/))
+says current sbx supports `setup.startup` mixins via recreate, so the refusal is
+version-scoped and is not assumed for later releases. This ADR concerns
+create-time delivery and restart replay only.
+
+ADR numbers: other unmerged work may carry a different ADR numbered 0036. A
+number collision is possible and must be resolved when this branch is rebased.
 
 ## Decision Drivers
 
@@ -93,8 +99,9 @@ path to the mount path before emitting `setup.startup`.
   ADR-0029); the dedicated directory must contain only non-sensitive, public,
   pinned kit payload (traversable `0711`, files `0555`, per ADR-0035), never the
   flat `0600` keys, so the whole config directory must not be mounted; the
-  translator gains a `readonly` consumer; behavior with `--clone` and mountless
-  sandboxes (sbx >= 0.42) must be confirmed; the registration itself (the argv
+  translator gains a `readonly` consumer; behavior with mountless sandboxes
+  (sbx >= 0.42) must be confirmed (extra workspaces under `--clone` are documented
+  as always mounted directly rather than cloned, `docs/howto/sbx.md`); the registration itself (the argv
   naming the mount path) is still sbx-held state (Option A's unverified point 1),
   though tampering with it can only redirect execution, not substitute trusted
   content.
@@ -159,8 +166,9 @@ Run on a real sbx host (cannot run inside a sandbox). Record exact sbx version.
    filesystem). As guest root, edit the registered command and each file it
    references, restart, and record what executes. This determines how much the
    registration itself can be trusted.
-6. **Sandbox modes**: repeat 1 and 4 with `--clone` and, on sbx >= 0.42, with no
-   workspace.
+6. **Sandbox modes**: repeat 1 and 4 with `--clone` (extra workspaces are
+   documented as always mounted directly; confirm that holds for the `:ro`
+   positional) and, on sbx >= 0.42, with no workspace.
 7. **Windows path forms** (ADR-0029): confirm the mount path embedded in argv is
    valid in the guest.
 8. **Negative control**: confirm no host config keys (`workspace`, `extra-kits`,

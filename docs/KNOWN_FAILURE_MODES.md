@@ -3019,6 +3019,10 @@ which shell binary its own next interactive session starts.
   stale or override a deliberate in-guest choice.
 - **The charset guard and `/bin/sh` fallback already bound it** to a plain
   absolute path in argv, never shell syntax.
+- **The session environment is already visible to the agent user.** The forwarded
+  SSH socket path and kit environment are in the session shell's environment, and
+  that is the same exposure the `agent` user already has; choosing the shell adds
+  none.
 
 ### Revisit if
 
@@ -3044,10 +3048,10 @@ make acq believe startup finished.
 
 ### Why this is accepted
 
-- **The barrier is a readiness/liveness gate, not an integrity gate.** Its only
-  consequence is ordering: acq proceeds to its post-create steps (host-config
-  record writes, stale-state clear, attach) before the guest finished its own
-  startup commands. The failure surface is the guest breaking its own setup.
+- **The barrier is a readiness/liveness gate, not an integrity gate.** It gates
+  whether acq keeps the sandbox and proceeds to the host-written records and
+  attach. A forged token lets acq proceed before kit startup has finished, so the
+  guest can only hurt its own setup; it changes no host-derived value.
 - **No acq trust decision reads it.** The values acq acts on across restarts
   (`extra-kits`, `builtin-kits`, `generic-opencode`, provenance) are host-written
   and independent of this file.

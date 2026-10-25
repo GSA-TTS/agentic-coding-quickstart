@@ -167,15 +167,22 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   mount/export semantics, not Unix ownership inside the guest: sbx already
   enforces read-only extra mounts, and msb 0.7.2 was live-verified to export the
   virtiofs mount read-only even when guest root can make the guest-visible mount
-  flag appear `rw`. Whether a sandbox may rely on the mount for `readonly: true`
-  startup code is a **host-recorded create fact** (host key `ro-host-config`,
-  written only after a successful create that passed the `:ro` volume and became
-  exec-ready), not the answer of a guest command, which a passwordless-sudo guest
-  could forge to force the guest-copy downgrade. A sandbox with no record
-  (created before the key existed, or never fully created) takes the legacy
-  guest-copy path and warns. A guest-executed probe of the mount remains as a
-  diagnostic only: a mismatch with the record warns but never changes the
-  decision. If a future
+  flag appear `rw`. acq refuses msb 0.7.2 and older and pins 0.7.7, so this must
+  be re-verified on the pinned version before it is relied on. Whether a sandbox
+  may rely on the mount for `readonly: true` startup code is a **host-recorded
+  create fact** (host key `ro-host-config`), written only after a create that
+  passed the `:ro` volume flag returned success and the sandbox became
+  exec-ready. The record does **not** prove the guest mount works; it proves only
+  that acq asked for it and the sandbox booted. The decision is not the answer of
+  a guest command, which a passwordless-sudo guest could forge to force the
+  guest-copy downgrade. A sandbox with no record (created before the key existed,
+  or never fully created) takes the legacy guest-copy path and warns. A
+  guest-executed probe of the mount remains as a diagnostic only: when a record
+  exists and the probe disagrees, acq warns that the heal will likely fail and
+  that the sandbox should be recreated, and still trusts the record. This is a
+  deliberate change from "degrade to a guest copy" to "warn and possibly fail"
+  (fail-closed, no escalation to the guest-writable path), applied only when the
+  record exists; legacy and no-record sandboxes still degrade safely. If a future
   msb changes `--volume ...:ro` parsing or enforcement, acq must raise or gate
   its minimum msb version before relying on ADR-0035. Host and guest path forms
   follow ADR-0029.
@@ -345,12 +352,12 @@ sequenceDiagram
 ## Implementation evidence and remaining live validation
 
 Reconciliation of the session-and-exec slice (tracked in the Links section)
-against the offline evidence in the stacked branch. Offline Bats cases use
+against the offline evidence in the test suite. Offline Bats cases use
 stubbed backends; they prove acq's decision logic, not live sbx or msb behavior.
 
 | Acceptance bullet | Evidence | Live validation still needed |
 |---|---|---|
-| Agent derives from host authority only | msb: host `agent` key, then trusted provenance (`81-msb-forged-guest-markers.bats`, "attach launches the host-recorded agent", "trusted provenance ... supplies a legacy sandbox's agent"); sbx: provenance plus host `generic-opencode` launch mode (`90-sbx-startup-kit.bats`, `85-kit-provenance.bats`) | Forge the guest copy on a real msb sandbox and attach |
+| Agent derives from host authority only | msb: host `agent` key, then trusted provenance (`81-msb-forged-guest-markers.bats`, "attach launches the host-recorded agent", "trusted provenance ... supplies a legacy sandbox's agent"); sbx: provenance plus host `generic-opencode` launch mode (`85-kit-provenance.bats`; launch-mode derivation in `140-opencode-migration-gate.bats`) | Forge the guest copy on a real msb sandbox and attach |
 | Workspace derives from host authority only | `81`: "run, attach and shell use the host-recorded workspace", "falls back to the agent home", "host workspace record outranks the forged marker" | As above, plus a name-only re-attach |
 | SSH socket derives from host authority only | `81`: "SSH_AUTH_SOCK comes from the host record", "no host ssh-auth-sock record ... no SSH_AUTH_SOCK" (sbx forwards natively, no acq-held value) | Forged socket marker with a live ssh-agent forward |
 | Kit environment derives from host authority only | `81`: "kit environment replay uses only the host kit-env record", "no host kit-env record ... no forged variable"; `78-msb-kit-env.bats` (sbx injects natively) | Forge the guest marker, confirm the session environment |
@@ -358,8 +365,8 @@ stubbed backends; they prove acq's decision logic, not live sbx or msb behavior.
 | Inventory of remaining guest reads | The remaining guest-derived reads are fail-soft liveness and presence probes, the diagnostic mount probe, the passwd login shell and the sbx startup barrier (the last two in `docs/KNOWN_FAILURE_MODES.md` sections 46 and 47) | None |
 | Real backend validation recorded | Not recorded for this slice | Record in `docs/VERIFY_PROVIDER_ADOPTION.md` after `scripts/verify-backends` on both backends |
 
-Adjacent gates the same branch moves to host authority, beyond the four #636
-fields: the sbx `extra-kits` and `builtin-kits` records (forged-probe cases in
+Adjacent gates also moved to host authority, beyond the four
+GSA-TTS/agentic-coding-quickstart#636 fields: the sbx `extra-kits` and `builtin-kits` records (forged-probe cases in
 `90-sbx-startup-kit.bats`), the msb `ro-host-config` create fact
 (`83-msb-ro-host-config-record.bats`), and the msb install and agent-user gates
 (`81`, `82-msb-legacy-sandbox.bats`). Legacy sandboxes degrade as documented in
