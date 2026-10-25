@@ -109,9 +109,10 @@ Subcommands:
   github-scope SANDBOX [PATH]              Scope a GitHub token to the workspace's
                                            repos; PATH defaults to the recorded
                                            sandbox workspace when available.
-  provider-credential set PROVIDER KEY_ENV  Bind a provider kit's credential ENV
-                                           var (ACQ_PROVIDER_CREDENTIAL_BINDINGS).
-  provider-credential ls                   List configured provider bindings.
+  provider-credential set PROVIDER KEY_ENV --host H[,H]
+                                           Pin a provider kit's credential env
+                                           var and destination host.
+  provider-credential ls                   List pinned provider bindings.
   provider-credential rm PROVIDER          Remove a configured binding.
   usai-rotate-api-key                      Rotate the USAi API key.
   version                                  Show acq version + backend info.
@@ -247,27 +248,35 @@ KITUSAGE
 
 _acq_provider_credential_usage() {
   cat >&2 <<'PROVIDERCREDUSAGE'
-acq provider-credential — register provider-kit credential ENV vars
+acq provider-credential — pin a provider kit's credential env var AND host
 
 Usage:
-  acq provider-credential set PROVIDER KEY_ENV   Bind PROVIDER's credential to KEY_ENV
-  acq provider-credential ls                     List configured bindings
-  acq provider-credential rm PROVIDER            Remove a configured binding
+  acq provider-credential set PROVIDER KEY_ENV --host HOST[,HOST]
+  acq provider-credential ls
+  acq provider-credential rm PROVIDER
 
-A provider kit (a kit shipping provider-input.json) is validated against the
-Pinned Patterns credential-bindings table. acq layers YOUR bindings on top of
-that table so a provider kit from any git+https repository can be used:
+A provider kit (one shipping provider-input.json) is validated against the
+pinned Patterns credential-bindings table. acq layers YOUR bindings on top so a
+provider kit from any git+https repository can be used:
 
-  1. the pinned Patterns defaults (usai, acme-ai) — the trust anchor;
-  2. config.yaml `provider_credential_bindings:` — what `set`/`rm` write here;
-  3. ACQ_PROVIDER_CREDENTIAL_BINDINGS="id=ENV id=ENV" — one invocation only.
+  1. the pinned Patterns defaults — the trust anchor;
+  2. config.yaml `provider_credential_bindings:` — what set/rm write here;
+  3. ACQ_PROVIDER_CREDENTIAL_BINDINGS="id=ENV[@host]" — one invocation only.
+
+--host is REQUIRED. It is the trust decision that lets acq send your stored
+credential to a destination: a kit can claim any providerId and allow-list any
+host, so acq only ever injects into a host you pinned explicitly. An
+unpinned provider, or a kit whose facts.host differs from the pinned (or
+recorded) host, fails closed rather than sending your credential somewhere new.
 
 PROVIDER must match ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$ and KEY_ENV must be an
-upper-case env var name; a malformed entry fails closed (never silently binds
-another provider's credential). These commands record WHERE the key comes from —
-the key itself lives in the acq store:
+upper-case env var name. Built-in credential names (USAI_API_KEY, GITHUB_TOKEN,
+GH_TOKEN, GITLAB_TOKEN) and process-critical names (PATH, IFS, HOME, ...) are
+refused. These commands record WHERE the key comes from — the key itself lives in
+the acq store:
 
-  acq provider-credential set opencode-go OPENCODE_GO_API_KEY
+  acq provider-credential set opencode-go OPENCODE_GO_API_KEY \
+    --host models.opencode-go.example
   acq secret set -g opencode-go          # prompts for the value, never on argv
   acq run opencode .                     # binds OPENCODE_GO_API_KEY@host
 
@@ -1808,10 +1817,10 @@ case "$subcommand" in
         shift
         if [ "$#" -lt 2 ]; then
           echo "acq: provider-credential set: missing arguments" >&2
-          echo "     usage: acq provider-credential set PROVIDER KEY_ENV" >&2
+          echo "     usage: acq provider-credential set PROVIDER KEY_ENV --host HOST[,HOST]" >&2
           exit 1
         fi
-        acq_provider_credential_set "$1" "$2" || exit 1
+        acq_provider_credential_set "$@" || exit 1
         ;;
       ls)
         acq_provider_credential_ls || exit 1

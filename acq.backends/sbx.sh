@@ -1359,8 +1359,11 @@ _acq_service_hosts_env() {
     usai)   printf '%s\t%s\n' "$USAI_PROVIDER_BIND_HOSTS" "$USAI_PROVIDER_KEY_ENV" ;;
     github) printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
     *)
+      # The sandbox is passed explicitly: a standalone `acq secret set -g <id>`
+      # resolves the registered host, while rm/rotate resolve a sandbox's
+      # recorded facts. No ambient create-time state is required.
       if command -v acq_provider_binding_host_env >/dev/null 2>&1 \
-          && provider_binding=$(acq_provider_binding_host_env "$1" 2>/dev/null); then
+          && provider_binding=$(acq_provider_binding_host_env "$1" "${2:-}" 2>/dev/null); then
         provider_host=$(printf '%s' "$provider_binding" | cut -f1)
         provider_env=$(printf '%s' "$provider_binding" | cut -f2)
         if [ -n "$provider_host" ] && [ -n "$provider_env" ]; then
@@ -1484,8 +1487,8 @@ acq_backend_secret_set() {
     *" $service "*) : ;;   # built-in: no default host/env
     *)
       local svc_hosts svc_env
-      svc_hosts=$(_acq_service_hosts_env "$service" | cut -f1)
-      svc_env=$(_acq_service_hosts_env "$service" | cut -f2)
+      svc_hosts=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)
+      svc_env=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)
       [ -z "$host" ] && [ -n "$svc_hosts" ] && host="${svc_hosts%%,*}"   # primary host
       [ -z "$env_var" ] && [ -n "$svc_env" ] && env_var="$svc_env"
       ;;
@@ -1661,7 +1664,7 @@ acq_backend_secret_set() {
       # The user's --host wins over the static service mapping (#384).
       svc_hosts="$host"
     else
-      svc_hosts=$(_acq_service_hosts_env "$service" | cut -f1)
+      svc_hosts=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)
       [ -z "$svc_hosts" ] && svc_hosts="$host"
     fi
     local _oldifs="$IFS"; IFS=','
@@ -1743,8 +1746,8 @@ acq_backend_secret_propagate() {
     env_var=$(printf '%s' "$meta" | cut -f2)
     sidecar=1
   else
-    host=$(_acq_service_hosts_env "$service" | cut -f1)
-    env_var=$(_acq_service_hosts_env "$service" | cut -f2)
+    host=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)
+    env_var=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)
     sidecar=0
   fi
 
@@ -1889,7 +1892,7 @@ acq_backend_secret_rm() {
     # secrets table for this scope + env var — the sidecar env wins over the
     # static mapping (it records what was actually bound) — then remove it.
     local env_var placeholder
-    env_var="${sidecar_env:-$(_acq_service_hosts_env "$service" | cut -f2)}"
+    env_var="${sidecar_env:-$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)}"
     placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" "$env_var")
     if [ -n "$placeholder" ]; then
       sbx secret rm --placeholder "$placeholder" ${scope_args[@]+"${scope_args[@]}"} -f </dev/null >/dev/null 2>&1 || true
@@ -1978,7 +1981,7 @@ acq_backend_key_present() {
       # Anything else keeps the permissive default (injectability is the
       # backend's own concern for services acq does not model).
       if command -v acq_provider_binding_host_env >/dev/null 2>&1 \
-          && provider_binding=$(acq_provider_binding_host_env "$service" 2>/dev/null); then
+          && provider_binding=$(acq_provider_binding_host_env "$service" "$scope_sandbox" 2>/dev/null); then
         provider_env=$(printf '%s' "$provider_binding" | cut -f2)
         [ -n "$provider_env" ] || return 1
         if [ -n "$scope_sandbox" ] \

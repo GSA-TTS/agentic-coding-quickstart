@@ -1194,25 +1194,38 @@ last) is:
 1. the pinned Patterns `provider-credential-bindings.json` — the trust anchor;
 2. `provider_credential_bindings:` in `~/.config/acq/config.yaml`
    (`acq provider-credential set|ls|rm`);
-3. `ACQ_PROVIDER_CREDENTIAL_BINDINGS` (`id=ENV …`) for one invocation.
+3. `ACQ_PROVIDER_CREDENTIAL_BINDINGS` (`id=ENV[@host] …`) for one invocation.
 
 The merged table is written into the prepare staging directory and passed to the
-validator; it is removed with that stage. Malformed ids/ENV names fail closed
-before validation runs.
+validator; it is removed with that stage. Malformed ids, reserved ENV names, or
+malformed hosts fail closed before validation runs.
+
+**Host pinning.** A kit can declare any `providerId` and allow-list any host, so
+the registry also pins the destination host(s) per providerId
+(`--host` is required by `acq provider-credential set`). Before acq binds a
+stored credential it requires `facts.host` to match the pinned host, or — when
+nothing is pinned for that provider — the host recorded for that sandbox at
+create. A mismatch, an unpinned provider, or a host that changed under an
+existing record **fails closed**; moving a credential to a new host is an
+explicit re-pin. The gate prompt and `acq provider-credential ls` both show the
+destination host.
 
 Injection is then data-driven per backend — no provider-specific `acq` code:
 
 | Backend | How `keyEnv@host` is bound at create |
 |---------|--------------------------------------|
-| sbx | a custom proxy secret (`sbx secret set-custom --host … --env …`) derived from the provider's facts; create snapshots the table |
-| msb | `--secret ENV@HOST` from the same facts, value resolved out of the acq store |
+| sbx | a custom proxy secret (`sbx secret set-custom --host … --env …`) derived from the provider's facts; create snapshots the table, so a host-exported value cannot be bound and acq fails closed instead |
+| msb | `--secret ENV@HOST` from the same facts, value resolved out of the acq store (or from a host-exported value, for CI) |
 
 `acq secret set -g <providerId>` stores the value under that provider; the
 injected `providerId`/`keyEnv`/`host`/`modelsUrl` are recorded in the sandbox's
-host config so resume/heal re-injects without re-prompting. On attach,
-`check_provider_key` probes `facts.modelsUrl` with `Authorization: Bearer
-$keyEnv`; a rejected key fails closed with an `acq secret set -g <providerId>`
-hint. USAi keeps its dedicated flow (`ensure_key_present` / `ensure_valid_key`,
+host config so resume/heal re-injects without re-prompting. Binding helpers take
+the sandbox name explicitly, so `acq start`/`restart` and `acq secret rm` resolve
+the same binding as create. On attach, `check_provider_key` probes
+`facts.modelsUrl` with `Authorization: Bearer $keyEnv` (URL passed as positional
+data, never spliced into the guest program): `401`/`403` and redirects fail
+closed, `429`/`5xx` are transient, and an inconclusive probe refuses to attach.
+USAi keeps its dedicated flow (`ensure_key_present` / `ensure_valid_key`,
 including interactive rotation) unchanged.
 
 ### ADR-0030 generic-base implementation

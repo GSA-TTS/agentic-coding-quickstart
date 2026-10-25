@@ -339,9 +339,10 @@ _acq_msb_service_binding() {
   esac
   # Provider kits hosted outside the pinned Patterns release: the validated
   # facts.json names this provider's (host, keyEnv), so the --secret binding is
-  # derived from data rather than a per-provider branch here.
+  # derived from data rather than a per-provider branch here. The SANDBOX is
+  # passed explicitly so resume and `acq secret rm` resolve the same binding.
   if command -v acq_provider_binding_host_env >/dev/null 2>&1; then
-    _meta=$(acq_provider_binding_host_env "$_service" 2>/dev/null) || _meta=""
+    _meta=$(acq_provider_binding_host_env "$_service" "$_sandbox" 2>/dev/null) || _meta=""
     if [ -n "$_meta" ]; then
       _host=$(printf '%s' "$_meta" | cut -f1)
       _env=$(printf '%s' "$_meta" | cut -f2)
@@ -922,6 +923,13 @@ _acq_msb_is_running() {
 # The real value moves via a TRANSIENT exported env var, never argv.
 _acq_msb_bind_one() {
   local _arrn="$1" _namesn="$2" _svc="$3" _name="$4" _env="$5" _host="$6" _val
+  # These fields can originate from a facts.json or a host-config record, so they
+  # are validated BEFORE they reach eval/export/argv: only a bare ENV identifier
+  # and a bare DNS name can ever be interpolated below.
+  case "$_env" in
+    ''|*[!A-Z0-9_]*|[!A-Z]*) acq_debug "msb secret: refusing unsafe env name for '$_svc'"; return 1 ;;
+  esac
+  _acq_provider_fact_safe_host "$_host" || { acq_debug "msb secret: refusing unsafe host for '$_svc'"; return 1; }
   _val=$(acq_secret_resolve "$_svc" "$_name" 2>/dev/null) && [ -n "$_val" ] || return 1
   # shellcheck disable=SC2163  # dynamic export of the resolved binding env var
   export "$_env=$_val"; _val=""
@@ -1026,18 +1034,28 @@ EOF
     # credential-bindings registry unioned with the facts recorded at create)
     # resolves its (env, host) from validated facts, so a provider kit hosted
     # outside the pinned Patterns release binds with no per-provider code here.
+    # A value pre-exported by CI is bound from the host environment, matching the
+    # USAi/GitHub fallbacks — otherwise a CI run would pass the gate and create a
+    # sandbox with a dead credential.
     if command -v acq_provider_binding_host_env >/dev/null 2>&1; then
-      local _pid _pbinding _penv _phost _pnames
+      local _pid _pbinding _penv _phost _pnames _pexported
       while IFS= read -r _pid; do
         [ -n "$_pid" ] || continue
         case "$_pid" in usai|github) continue ;; esac
-        _pbinding=$(acq_provider_binding_host_env "$_pid" 2>/dev/null) || continue
+        _pbinding=$(acq_provider_binding_host_env "$_pid" "$_name" 2>/dev/null) || continue
         _penv=$(printf '%s' "$_pbinding" | cut -f2)
         _phost=$(printf '%s' "$_pbinding" | cut -f1)
         [ -n "$_penv" ] && [ -n "$_phost" ] || continue
         eval "_pnames=\" \${${_namesn}[*]-} \""
         case "$_pnames" in *" $_penv "*) continue ;; esac
-        _acq_msb_bind_one "$_arrn" "$_namesn" "$_pid" "$_name" "$_penv" "$_phost" || true
+        if ! _acq_msb_bind_one "$_arrn" "$_namesn" "$_pid" "$_name" "$_penv" "$_phost"; then
+          eval "_pexported=\${${_penv}:-}"
+          if [ -n "$_pexported" ]; then
+            eval "$_arrn+=(--secret \"\${_penv}@\${_phost}\")"
+            acq_debug "msb secret: binding ${_penv}@${_phost} for '$_pid' (from env)"
+          fi
+          _pexported=""
+        fi
       done <<PROVIDERS
 $(acq_provider_delivery_ids "$_name")
 PROVIDERS

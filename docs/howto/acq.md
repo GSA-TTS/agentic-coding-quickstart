@@ -588,26 +588,37 @@ acq create opencode --kit 'git+https://github.com/acme/kits.git#ref=<sha>&dir=ac
 against, so declare where the key comes from and `acq` does the rest. The
 registry is merged in this order (highest precedence last):
 
-1. the pinned Patterns `provider-credential-bindings.json` — the trust anchor
-   (it already covers `usai` and `acme-ai`);
+1. the pinned Patterns `provider-credential-bindings.json` — the trust anchor;
 2. `provider_credential_bindings:` in `~/.config/acq/config.yaml` — durable;
 3. `ACQ_PROVIDER_CREDENTIAL_BINDINGS` — one invocation only.
 
+A layer entry is `providerId=KEY_ENV` or `providerId=KEY_ENV@host[,host]`.
+
 ```bash
-# Durable: bind provider id -> the env var its credential is read from
-acq provider-credential set opencode-go OPENCODE_GO_API_KEY
+# Durable: pin a provider to a credential env var AND the host it may use
+acq provider-credential set opencode-go OPENCODE_GO_API_KEY \
+  --host models.opencode-go.example
 acq provider-credential ls
 acq provider-credential rm opencode-go
 
-# Per-invocation override (whitespace-separated id=ENV pairs)
-ACQ_PROVIDER_CREDENTIAL_BINDINGS='opencode-go=OPENCODE_GO_API_KEY' \
+# Per-invocation override (whitespace-separated entries)
+ACQ_PROVIDER_CREDENTIAL_BINDINGS='opencode-go=OPENCODE_GO_API_KEY@models.opencode-go.example' \
   acq run opencode /path/to/project
 ```
 
-`providerId` must match `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$` and `KEY_ENV` must
-be an upper-case env var name (`^[A-Z][A-Z0-9_]*$`). A malformed entry **fails
-closed** — before the validator runs — rather than silently binding a different
-provider's credential.
+**The host is the trust decision, and it is required.** A kit can claim any
+`providerId` and allow-list any host, so `acq` sends your stored credential only
+to hosts you pinned. `--host` is therefore mandatory for `set`, and an unpinned
+provider — or a kit whose `facts.host` is not the pinned (or previously
+recorded) host for that `providerId` — **fails closed** rather than quietly
+moving your credential to a new destination. Changing hosts is an explicit
+re-pin, never a silent overwrite.
+
+`providerId` must match `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`, `KEY_ENV` must be
+an upper-case env var name (`^[A-Z][A-Z0-9_]*$`), and hosts must be bare DNS
+names. Built-in credential names (`USAI_API_KEY`, `GITHUB_TOKEN`, `GH_TOKEN`,
+`GITLAB_TOKEN`) and process-critical names (`PATH`, `IFS`, `HOME`, `LD_PRELOAD`,
+…) are refused. A malformed entry fails closed before the validator runs.
 
 The key itself never goes in the registry; it lives in the acq secret store:
 
@@ -618,18 +629,23 @@ acq secret set -g opencode-go     # prompts for the value (never on argv)
 From there the injection is generic — no provider-specific `acq` code:
 
 - at **create**, the selected generation's `facts.json` is the facts source (the
-  same data `usai` gets from `provider-facts/usai.env`), and the credential is
-  bound as `KEY_ENV@host` by both backends (`sbx` custom secret; msb
-  `--secret ENV@HOST`);
+  same data `usai` gets from `provider-facts/usai.env`), the registry decides the
+  ENV var, and the credential is bound as `KEY_ENV@host` by both backends (`sbx`
+  custom secret; msb `--secret ENV@HOST`). A value exported by CI is bindable on
+  msb; on sbx, which snapshots its own proxy table, `acq` fails closed and tells
+  you to store it;
 - the binding (`providerId`, `keyEnv`, `host`, `modelsUrl`) is recorded in the
-  sandbox's host config, so resume/heal re-injects it without re-prompting;
+  sandbox's host config, so resume/heal re-injects it without re-prompting, and a
+  later host change is caught and refused;
 - on attach, `acq` probes `facts.modelsUrl` with
   `Authorization: Bearer $KEY_ENV` (`check_provider_key`) and fails closed on a
-  rejected key with an actionable `acq secret set -g <providerId>` hint.
-  USAi keeps its existing flow, including interactive rotation.
+  rejected key (`401`/`403`) or a redirect; `429`/`5xx` are treated as transient
+  and do not block the attach. USAi keeps its existing flow, including
+  interactive rotation.
 
 If a provider kit is selected but no credential is available, the create fails
-closed (non-interactive) or offers to store one (interactive).
+closed (non-interactive) or offers to store one (interactive), showing the
+destination host in the prompt.
 
 ---
 
