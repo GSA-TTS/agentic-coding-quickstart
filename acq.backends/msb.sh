@@ -337,6 +337,20 @@ _acq_msb_service_binding() {
     usai)   printf '%s\t%s\n' "$USAI_PROVIDER_KEY_ENV" "$ACQ_MSB_USAI_HOST"; return 0 ;;
     github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
   esac
+  # Provider kits hosted outside the pinned Patterns release: the validated
+  # facts.json names this provider's (host, keyEnv), so the --secret binding is
+  # derived from data rather than a per-provider branch here.
+  if command -v acq_provider_binding_host_env >/dev/null 2>&1; then
+    _meta=$(acq_provider_binding_host_env "$_service" 2>/dev/null) || _meta=""
+    if [ -n "$_meta" ]; then
+      _host=$(printf '%s' "$_meta" | cut -f1)
+      _env=$(printf '%s' "$_meta" | cut -f2)
+      if [ -n "$_host" ] && [ -n "$_env" ]; then
+        printf '%s\t%s\n' "$_env" "$_host"
+        return 0
+      fi
+    fi
+  fi
   printf '\t\n'
 }
 
@@ -1006,6 +1020,27 @@ _acq_msb_bind_secrets_into() {
       done <<EOF
 $(acq_secret_meta_list "$_name")
 EOF
+    fi
+
+    # Provider kits: every provider id acq knows for this sandbox (the
+    # credential-bindings registry unioned with the facts recorded at create)
+    # resolves its (env, host) from validated facts, so a provider kit hosted
+    # outside the pinned Patterns release binds with no per-provider code here.
+    if command -v acq_provider_binding_host_env >/dev/null 2>&1; then
+      local _pid _pbinding _penv _phost _pnames
+      while IFS= read -r _pid; do
+        [ -n "$_pid" ] || continue
+        case "$_pid" in usai|github) continue ;; esac
+        _pbinding=$(acq_provider_binding_host_env "$_pid" 2>/dev/null) || continue
+        _penv=$(printf '%s' "$_pbinding" | cut -f2)
+        _phost=$(printf '%s' "$_pbinding" | cut -f1)
+        [ -n "$_penv" ] && [ -n "$_phost" ] || continue
+        eval "_pnames=\" \${${_namesn}[*]-} \""
+        case "$_pnames" in *" $_penv "*) continue ;; esac
+        _acq_msb_bind_one "$_arrn" "$_namesn" "$_pid" "$_name" "$_penv" "$_phost" || true
+      done <<PROVIDERS
+$(acq_provider_delivery_ids "$_name")
+PROVIDERS
     fi
   elif { ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; } \
       && [ -n "${USAI_API_KEY:-}" ]; then
@@ -3259,6 +3294,14 @@ $(kit_spec_volumes "$spec")"
   _ACQ_MSB_ATTEMPT_NAME="$name"
   _ACQ_MSB_ATTEMPT_GENERATION="$_provider_generation"
   _ACQ_MSB_ATTEMPT_ACTIVE=1
+  # msb binds secrets only at create (--secret ENV@HOST), so a provider
+  # credential must resolve now. USAi keeps its own pre-create gate; this covers
+  # every other provider selected from the credential-bindings registry, using
+  # the facts of the generation prepared above.
+  if ! acq_provider_credentials_gate msb "$name" "$_provider_generation"; then
+    echo "acq(msb): error: provider credentials are not ready for '$name'." >&2
+    return 1
+  fi
 
   # Merged kit env, computed ONCE now that every kit is fetched and BEFORE any kit
   # is applied — see _acq_msb_merge_kit_env_into for why it must be a pre-pass.

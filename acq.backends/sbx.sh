@@ -619,6 +619,14 @@ _acq_backend_provision_unlocked() {
   _ACQ_SBX_ATTEMPT_NAME="$name"
   _ACQ_SBX_ATTEMPT_GENERATION="$_provider_generation"
   _ACQ_SBX_ATTEMPT_ACTIVE=1
+  # Provider credentials must exist in sbx's proxy table BEFORE create (create
+  # snapshots it). USAi keeps its own pre-create gate; this covers every other
+  # provider selected from the credential-bindings registry, using the facts of
+  # the generation we just prepared.
+  if ! acq_provider_credentials_gate sbx "$name" "$_provider_generation"; then
+    _acq_sbx_cleanup_uncreated_attempt
+    return 1
+  fi
   local _hcfg_dir
   _hcfg_dir=$(acq_host_config_dir sbx "$name") || return 1
   mkdir -p "$_hcfg_dir" || return 1
@@ -1340,12 +1348,28 @@ acq_backend_ensure_kits_applied() {
 # sbx.sh and msb.sh agree on the mapping.
 #   usai   -> $USAI_PROVIDER_HOST          $USAI_PROVIDER_KEY_ENV
 #   github -> github.com,api.github.com   GITHUB_TOKEN (sbx built-in service)
+#   other  -> the provider's validated facts.json (providerId -> host, keyEnv),
+#             resolved through acq's credential-bindings registry. This is what
+#             lets a provider kit hosted outside the pinned Patterns release be
+#             injected with no per-provider code here.
 # Echoes "host1[,host2] <TAB> ENVVAR"; empty for unknown services.
 _acq_service_hosts_env() {
+  local provider_binding provider_host provider_env
   case "$1" in
     usai)   printf '%s\t%s\n' "$USAI_PROVIDER_BIND_HOSTS" "$USAI_PROVIDER_KEY_ENV" ;;
     github) printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
-    *)      printf '\t\n' ;;
+    *)
+      if command -v acq_provider_binding_host_env >/dev/null 2>&1 \
+          && provider_binding=$(acq_provider_binding_host_env "$1" 2>/dev/null); then
+        provider_host=$(printf '%s' "$provider_binding" | cut -f1)
+        provider_env=$(printf '%s' "$provider_binding" | cut -f2)
+        if [ -n "$provider_host" ] && [ -n "$provider_env" ]; then
+          printf '%s\t%s\n' "$provider_host" "$provider_env"
+          return 0
+        fi
+      fi
+      printf '\t\n'
+      ;;
   esac
 }
 
@@ -1940,7 +1964,7 @@ _acq_sbx_secret_exists() {
 }
 
 acq_backend_key_present() {
-  local service="${1:-}" scope_sandbox="${2:-}"
+  local service="${1:-}" scope_sandbox="${2:-}" provider_binding provider_env
   case "$service" in
     usai)
       if [ -n "$scope_sandbox" ] && _acq_sbx_secret_exists "" "$scope_sandbox" usai "$USAI_PROVIDER_KEY_ENV"; then
@@ -1949,6 +1973,21 @@ acq_backend_key_present() {
       _acq_sbx_secret_exists -g "" usai "$USAI_PROVIDER_KEY_ENV"
       ;;
     *)
+      # A provider declared in acq's credential-bindings registry is only
+      # injectable once sbx's table actually carries its KEY_ENV for this scope.
+      # Anything else keeps the permissive default (injectability is the
+      # backend's own concern for services acq does not model).
+      if command -v acq_provider_binding_host_env >/dev/null 2>&1 \
+          && provider_binding=$(acq_provider_binding_host_env "$service" 2>/dev/null); then
+        provider_env=$(printf '%s' "$provider_binding" | cut -f2)
+        [ -n "$provider_env" ] || return 1
+        if [ -n "$scope_sandbox" ] \
+            && _acq_sbx_secret_exists "" "$scope_sandbox" "$service" "$provider_env"; then
+          return 0
+        fi
+        _acq_sbx_secret_exists -g "" "$service" "$provider_env"
+        return $?
+      fi
       return 0
       ;;
   esac

@@ -109,6 +109,10 @@ Subcommands:
   github-scope SANDBOX [PATH]              Scope a GitHub token to the workspace's
                                            repos; PATH defaults to the recorded
                                            sandbox workspace when available.
+  provider-credential set PROVIDER KEY_ENV  Bind a provider kit's credential ENV
+                                           var (ACQ_PROVIDER_CREDENTIAL_BINDINGS).
+  provider-credential ls                   List configured provider bindings.
+  provider-credential rm PROVIDER          Remove a configured binding.
   usai-rotate-api-key                      Rotate the USAi API key.
   version                                  Show acq version + backend info.
   doctor [NAME]                            Backend health check, or non-enforcing
@@ -239,6 +243,36 @@ Usage:
 
 See docs/BACKEND_GUIDE.md and docs/adr/0011-msb-backend-and-neutral-kits.md.
 KITUSAGE
+}
+
+_acq_provider_credential_usage() {
+  cat >&2 <<'PROVIDERCREDUSAGE'
+acq provider-credential — register provider-kit credential ENV vars
+
+Usage:
+  acq provider-credential set PROVIDER KEY_ENV   Bind PROVIDER's credential to KEY_ENV
+  acq provider-credential ls                     List configured bindings
+  acq provider-credential rm PROVIDER            Remove a configured binding
+
+A provider kit (a kit shipping provider-input.json) is validated against the
+Pinned Patterns credential-bindings table. acq layers YOUR bindings on top of
+that table so a provider kit from any git+https repository can be used:
+
+  1. the pinned Patterns defaults (usai, acme-ai) — the trust anchor;
+  2. config.yaml `provider_credential_bindings:` — what `set`/`rm` write here;
+  3. ACQ_PROVIDER_CREDENTIAL_BINDINGS="id=ENV id=ENV" — one invocation only.
+
+PROVIDER must match ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$ and KEY_ENV must be an
+upper-case env var name; a malformed entry fails closed (never silently binds
+another provider's credential). These commands record WHERE the key comes from —
+the key itself lives in the acq store:
+
+  acq provider-credential set opencode-go OPENCODE_GO_API_KEY
+  acq secret set -g opencode-go          # prompts for the value, never on argv
+  acq run opencode .                     # binds OPENCODE_GO_API_KEY@host
+
+See docs/howto/acq.md ("Non-USAi provider kits").
+PROVIDERCREDUSAGE
 }
 
 _acq_backend_subcmd_usage() {
@@ -477,7 +511,7 @@ U
 _acq_verb_backend_help_kind() {
   case "${1%% *}" in
     run|ls|stop|rm|exec|cp|ports|secret|kit) printf 'shared' ;;
-    start|restart|create|shell|version|doctor|github-scope|usai-rotate-api-key|backend) printf 'acqonly' ;;
+    start|restart|create|shell|version|doctor|github-scope|usai-rotate-api-key|backend|provider-credential) printf 'acqonly' ;;
     *) printf '' ;;
   esac
 }
@@ -495,6 +529,7 @@ _acq_print_topic_help() {
     kit)       _acq_kit_usage; return 0 ;;
     backend)   _acq_backend_subcmd_usage; return 0 ;;
     configure) _acq_configure_usage; return 0 ;;
+    provider-credential) _acq_provider_credential_usage; return 0 ;;
     *)         _acq_simple_verb_usage "$head"; return $? ;;
   esac
 }
@@ -1311,6 +1346,14 @@ case "$subcommand" in
         exit 1
       fi
 
+      # Generic provider gate. USAi keeps its dedicated flow above (including
+      # interactive rotation); every OTHER provider selected from the
+      # credential-bindings registry is validated against its own models API
+      # (facts.modelsUrl). No-op when no such provider is selected.
+      if ! ensure_valid_provider_keys "$local_name"; then
+        exit 1
+      fi
+
       # Advisories.
       warn_if_no_ssh_signing_key
 
@@ -1751,6 +1794,50 @@ case "$subcommand" in
       echo "acq: github-scope: using recorded workspace for '$gs_sandbox': $gs_ws" >&2
     fi
     github_scope_sandbox "$gs_sandbox" "$gs_ws"
+    ;;
+
+  provider-credential)
+    # acq-owned provider -> KEY_ENV registry. Records WHERE a provider kit's
+    # credential arrives from; the value itself stays in the acq secret store
+    # (`acq secret set -g PROVIDER`). Keeping the registry in acq is what lets a
+    # provider kit hosted outside the pinned Patterns release validate and be
+    # injected with no per-provider acq code.
+    shift
+    case "${1:-}" in
+      set)
+        shift
+        if [ "$#" -lt 2 ]; then
+          echo "acq: provider-credential set: missing arguments" >&2
+          echo "     usage: acq provider-credential set PROVIDER KEY_ENV" >&2
+          exit 1
+        fi
+        acq_provider_credential_set "$1" "$2" || exit 1
+        ;;
+      ls)
+        acq_provider_credential_ls || exit 1
+        ;;
+      rm)
+        shift
+        if [ "$#" -lt 1 ]; then
+          echo "acq: provider-credential rm: missing provider id" >&2
+          echo "     usage: acq provider-credential rm PROVIDER" >&2
+          exit 1
+        fi
+        acq_provider_credential_rm "$1" || exit 1
+        ;;
+      --help|-h)
+        _acq_provider_credential_usage
+        ;;
+      "")
+        _acq_provider_credential_usage
+        exit 2
+        ;;
+      *)
+        echo "acq: unknown provider-credential subcommand '${1}'." >&2
+        echo "     Try: acq provider-credential set | ls | rm | --help" >&2
+        exit 1
+        ;;
+    esac
     ;;
 
   "")

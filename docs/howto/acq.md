@@ -573,6 +573,64 @@ of kit refs, following the same format as `ACQ_EXTRA_KITS`. `ACQ_PROVIDER_KITS='
 also selects the empty set, but `--no-provider-kits` is the portable form when
 configuration layers cannot preserve an empty environment value.
 
+### Non-USAi provider kits
+
+A provider kit is **data**. Once the pinned validation pipeline accepts it, its
+`facts.json` names everything `acq` needs: `providerId`, `keyEnv`, `host`,
+`modelsUrl`, and `apiProtocol`. That means a provider kit from **your own
+repository** works without touching the pinned Patterns release:
+
+```bash
+acq create opencode --kit 'git+https://github.com/acme/kits.git#ref=<sha>&dir=acme-ai' /path/to/project
+```
+
+`acq` owns the provider → credential registry that the validator checks the kit
+against, so declare where the key comes from and `acq` does the rest. The
+registry is merged in this order (highest precedence last):
+
+1. the pinned Patterns `provider-credential-bindings.json` — the trust anchor
+   (it already covers `usai` and `acme-ai`);
+2. `provider_credential_bindings:` in `~/.config/acq/config.yaml` — durable;
+3. `ACQ_PROVIDER_CREDENTIAL_BINDINGS` — one invocation only.
+
+```bash
+# Durable: bind provider id -> the env var its credential is read from
+acq provider-credential set opencode-go OPENCODE_GO_API_KEY
+acq provider-credential ls
+acq provider-credential rm opencode-go
+
+# Per-invocation override (whitespace-separated id=ENV pairs)
+ACQ_PROVIDER_CREDENTIAL_BINDINGS='opencode-go=OPENCODE_GO_API_KEY' \
+  acq run opencode /path/to/project
+```
+
+`providerId` must match `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$` and `KEY_ENV` must
+be an upper-case env var name (`^[A-Z][A-Z0-9_]*$`). A malformed entry **fails
+closed** — before the validator runs — rather than silently binding a different
+provider's credential.
+
+The key itself never goes in the registry; it lives in the acq secret store:
+
+```bash
+acq secret set -g opencode-go     # prompts for the value (never on argv)
+```
+
+From there the injection is generic — no provider-specific `acq` code:
+
+- at **create**, the selected generation's `facts.json` is the facts source (the
+  same data `usai` gets from `provider-facts/usai.env`), and the credential is
+  bound as `KEY_ENV@host` by both backends (`sbx` custom secret; msb
+  `--secret ENV@HOST`);
+- the binding (`providerId`, `keyEnv`, `host`, `modelsUrl`) is recorded in the
+  sandbox's host config, so resume/heal re-injects it without re-prompting;
+- on attach, `acq` probes `facts.modelsUrl` with
+  `Authorization: Bearer $KEY_ENV` (`check_provider_key`) and fails closed on a
+  rejected key with an actionable `acq secret set -g <providerId>` hint.
+  USAi keeps its existing flow, including interactive rotation.
+
+If a provider kit is selected but no credential is available, the create fails
+closed (non-interactive) or offers to store one (interactive).
+
 ---
 
 ## Progress output

@@ -1178,6 +1178,43 @@ practical floor (`acq kit validate` warns below it).
 
 Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 
+### Provider kits and generic credential binding
+
+A **provider kit** ships `provider-input.json` and, after validation, a
+`facts.json` naming `providerId`, `keyEnv`, `host`, `modelsUrl`, and
+`apiProtocol`. `acq` validates the selected set host-side with the pinned
+Patterns validator, then materializes an immutable generation the agent kit
+renders (`models/providers/<providerId>/`).
+
+The validator checks each kit's `facts.keyEnv` against a **credential-bindings
+registry**. `acq` owns that registry so a provider kit hosted outside the pinned
+Patterns release works without editing it. The merge order (highest precedence
+last) is:
+
+1. the pinned Patterns `provider-credential-bindings.json` — the trust anchor;
+2. `provider_credential_bindings:` in `~/.config/acq/config.yaml`
+   (`acq provider-credential set|ls|rm`);
+3. `ACQ_PROVIDER_CREDENTIAL_BINDINGS` (`id=ENV …`) for one invocation.
+
+The merged table is written into the prepare staging directory and passed to the
+validator; it is removed with that stage. Malformed ids/ENV names fail closed
+before validation runs.
+
+Injection is then data-driven per backend — no provider-specific `acq` code:
+
+| Backend | How `keyEnv@host` is bound at create |
+|---------|--------------------------------------|
+| sbx | a custom proxy secret (`sbx secret set-custom --host … --env …`) derived from the provider's facts; create snapshots the table |
+| msb | `--secret ENV@HOST` from the same facts, value resolved out of the acq store |
+
+`acq secret set -g <providerId>` stores the value under that provider; the
+injected `providerId`/`keyEnv`/`host`/`modelsUrl` are recorded in the sandbox's
+host config so resume/heal re-injects without re-prompting. On attach,
+`check_provider_key` probes `facts.modelsUrl` with `Authorization: Bearer
+$keyEnv`; a rejected key fails closed with an `acq secret set -g <providerId>`
+hint. USAi keeps its dedicated flow (`ensure_key_present` / `ensure_valid_key`,
+including interactive rotation) unchanged.
+
 ### ADR-0030 generic-base implementation
 
 ADR-0030 now makes `acq run opencode .` use the generic pinned devenv base and
