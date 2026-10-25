@@ -352,8 +352,11 @@ EOF
 
 @test "projection: explicit empty selection creates a provider-free generation" {
   local root generation
+  # shellcheck disable=SC2034 # _build_kit_list reads these globals
   ACQ_PROVIDER_KITS=""
+  # shellcheck disable=SC2034 # _build_kit_list reads these globals
   ACQ_PROVIDER_KITS_FROM_ENV=1
+  # shellcheck disable=SC2034 # _build_kit_list reads these globals
   ACQ_PROVIDER_KITS_FROM_CLI=""
   _build_kit_list opencode
 

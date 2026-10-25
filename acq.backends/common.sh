@@ -855,7 +855,7 @@ _acq_selected_provider_kit_refs() {
   elif [ -n "$ACQ_PROVIDER_KITS" ]; then
     split_noglob provider_refs "$ACQ_PROVIDER_KITS"
   fi
-  for ref in "${provider_refs[@]}"; do
+  for ref in ${provider_refs[@]+"${provider_refs[@]}"}; do
     printf '%s\n' "$ref"
   done
 }
