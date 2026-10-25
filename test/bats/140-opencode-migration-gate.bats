@@ -341,7 +341,7 @@ SPEC
     bash -c '. "$1/acq.backends/common.sh"; acq_host_config_write msb migbox workspace /workspace; exec "$2" shell migbox' \
     _ "$REPO_ROOT" "$ACQ"
   assert_success
-  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /workspace -e TERM=xterm-256color -e SHELL=/bin/bash migbox -- /bin/bash -l'
+  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /workspace -e TERM=xterm-256color -e COLORTERM=truecolor -e SHELL=/bin/bash migbox -- /bin/bash -l'
 }
 
 @test "migration gate(sbx): run opencode keeps native clone, workspace markers, image template, and kit order" {
