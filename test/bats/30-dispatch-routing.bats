@@ -182,6 +182,17 @@ FACTS
   assert_regex "$create_line" "$proj"
 }
 
+@test "create(sbx): provider input mount follows the agent and workspace positionals" {
+  local proj="$STUBDIR/provider-order"; mkdir -p "$proj"
+  _seed_usai
+
+  run env ACQ_BACKEND=sbx "$ACQ" create shell "$proj"
+  assert_success
+
+  local create_line; create_line=$(grep '^sbx create' "$CALLS")
+  assert_regex "$create_line" "shell $proj .*/generations/generation\\.[^[:space:]]+:ro$"
+}
+
 @test "dispatch: create runs the github-scope advisory" {
   local ghproj="$STUBDIR/ghproj"; mkdir -p "$ghproj"
   ( cd "$ghproj" && git init -q && git remote add origin https://github.com/GSA-TTS/quickstart.git )
