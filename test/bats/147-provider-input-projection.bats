@@ -350,6 +350,24 @@ EOF
   [ ! -w "$root/$current/models/providers/alpha/facts.json" ]
 }
 
+@test "projection: explicit empty selection creates a provider-free generation" {
+  local root generation
+  ACQ_PROVIDER_KITS=""
+  ACQ_PROVIDER_KITS_FROM_ENV=1
+  ACQ_PROVIDER_KITS_FROM_CLI=""
+  _build_kit_list opencode
+
+  run acq_provider_input_prepare sbx emptyproviders
+  assert_success
+  generation="$output"
+  root=$(acq_provider_input_root sbx emptyproviders)
+  [ -d "$generation/models/providers" ]
+  [ -z "$(ls -A "$generation/models/providers")" ]
+  refute_regex "$(printf '%s\n' "${KITS[@]}")" 'usai-provider'
+  refute [ -e "$generation/models/providers/usai" ]
+  [[ "$generation" == "$root/generations/"* ]]
+}
+
 @test "candidate snapshot preserves spec.yaml for host allowlist validation" {
   local release="$STUBDIR/release" candidate="$STUBDIR/candidate"
   _provider_release "$release"; _provider_kit "$release" alpha

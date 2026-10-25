@@ -67,6 +67,29 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   assert_equal "${KITS[7]}" "/extra/cli-two"
 }
 
+@test "provider omission(msb): skips USAi gate and binds no USAi secret before create" {
+  local proj="$STUBDIR/no-provider-project"
+  mkdir -p "$proj"
+
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" create opencode --no-provider-kits "$proj"
+
+  assert_success
+  refute_output --partial 'no USAi API key stored'
+  refute_regex "$(cat "$CALLS")" 'USAI_API_KEY@api\.gsa\.usai\.gov'
+  refute_regex "$(cat "$CALLS")" 'acq-kits/usai-provider'
+}
+
+@test "provider omission: invalid selection fails before either backend create" {
+  local proj="$STUBDIR/invalid-provider-project"
+  mkdir -p "$proj"
+
+  run env ACQ_BACKEND=msb ACQ_PROVIDER_KITS="$STUBDIR/invalid-provider-kit" ACQ_NO_PROMPT=1 "$ACQ" create shell "$proj"
+
+  assert_failure
+  assert_output --partial 'could not fetch kit'
+  refute_regex "$(cat "$CALLS")" '^msb create'
+}
+
 _mk_opencode_agent_kit() { # PATH [schema] [kit-name] [agent-name] [entrypoint]
   mkdir -p "$1"
   cat >"$1/spec.yaml" <<SPEC

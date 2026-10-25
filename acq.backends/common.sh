@@ -89,6 +89,20 @@ ACQ_BUILTIN_BUNDLE_REPO="GSA-TTS/agentic-coding-patterns"
 ACQ_EXTRA_KITS="${ACQ_EXTRA_KITS:-}"
 ACQ_EXTRA_KIT_SOURCES="${ACQ_EXTRA_KIT_SOURCES:-}"
 
+# Provider kits are selected independently from support and extra kits. Unset
+# preserves the historical default; an explicitly set empty value is authoritative.
+# `--no-provider-kits` supplies a shell-independent spelling of that empty set.
+if [ -z "${_ACQ_PROVIDER_KITS_INITIALIZED:-}" ]; then
+  if [ "${ACQ_PROVIDER_KITS+x}" = x ]; then
+    ACQ_PROVIDER_KITS_FROM_ENV=1
+  else
+    ACQ_PROVIDER_KITS_FROM_ENV=""
+  fi
+  ACQ_PROVIDER_KITS="${ACQ_PROVIDER_KITS:-}"
+  _ACQ_PROVIDER_KITS_INITIALIZED=1
+fi
+ACQ_PROVIDER_KITS_FROM_CLI=""
+
 # Record whether ACQ_EXTRA_KITS came from the ENVIRONMENT (vs. being empty or set
 # later by acq itself). The configured-default and create-time picker paths honor
 # env > config > interactive: a user who exported ACQ_EXTRA_KITS gets it verbatim
@@ -834,6 +848,44 @@ _acq_builtin_support_kit_names() {
   printf '%s\n' zscaler-ca-certificate "$USAI_PROVIDER_KIT_NAME" agentic-coding-playbook git-ssh-sign
 }
 
+_acq_selected_provider_kit_refs() {
+  local provider_refs=() ref
+  if [ -z "${ACQ_PROVIDER_KITS_FROM_ENV:-}" ] && [ -z "${ACQ_PROVIDER_KITS_FROM_CLI:-}" ]; then
+    provider_refs=("$USAI_KIT")
+  elif [ -n "$ACQ_PROVIDER_KITS" ]; then
+    split_noglob provider_refs "$ACQ_PROVIDER_KITS"
+  fi
+  for ref in "${provider_refs[@]}"; do
+    printf '%s\n' "$ref"
+  done
+}
+
+acq_provider_kit_selected() {
+  local wanted="$1" name
+  while IFS= read -r name; do
+    [ "$name" = "$wanted" ] && return 0
+  done < <(_acq_selected_provider_kit_refs)
+  return 1
+}
+
+acq_usai_provider_selected() {
+  acq_provider_kit_selected "$USAI_KIT"
+}
+
+acq_provider_selection_load() {
+  local backend="$1" name="$2" mode kits
+  mode=$(acq_provenance_field "$backend" "$name" provider_selection)
+  kits=$(acq_provenance_field "$backend" "$name" provider_kits)
+  case "$mode" in
+    default) ACQ_PROVIDER_KITS=""; ACQ_PROVIDER_KITS_FROM_ENV=""; ACQ_PROVIDER_KITS_FROM_CLI="" ;;
+    explicit) ACQ_PROVIDER_KITS="$kits"; ACQ_PROVIDER_KITS_FROM_ENV=1; ACQ_PROVIDER_KITS_FROM_CLI="" ;;
+    # Legacy records predate provider selection and therefore retain the
+    # historical default rather than inheriting a later host environment choice.
+    "") ACQ_PROVIDER_KITS=""; ACQ_PROVIDER_KITS_FROM_ENV=""; ACQ_PROVIDER_KITS_FROM_CLI="" ;;
+    *) return 1 ;;
+  esac
+}
+
 _acq_agent_builtin_kit_ref() {
   local kit_name
   kit_name=$(acq_agent_builtin_kit_name "$1") || return 1
@@ -918,7 +970,12 @@ acq_agent_builtin_kit_ready() {
 
 _acq_selected_support_kit_refs() {
   local name kit
-  for name in $(_acq_builtin_support_kit_names); do
+  kit=$(_acq_builtin_kit_ref zscaler-ca-certificate) || return 1
+  printf '%s\n' "$kit"
+  while IFS= read -r kit; do
+    [ -n "$kit" ] && printf '%s\n' "$kit"
+  done < <(_acq_selected_provider_kit_refs)
+  for name in agentic-coding-playbook git-ssh-sign; do
     kit=$(_acq_builtin_kit_ref "$name") || return 1
     printf '%s\n' "$kit"
   done
@@ -1423,6 +1480,24 @@ extract_kit_flags() {
   if [ "$expect_kit" -eq 1 ]; then
     echo "acq: --kit given with no value; ignoring" >&2
   fi
+}
+
+# Extract the explicit empty provider selection without relying on shell export
+# semantics for empty values. It is acq-owned and never reaches a backend CLI.
+extract_provider_flags() {
+  ACQ_PROVIDER_REMAINING=()
+  local arg seen_sep=0
+  for arg in "$@"; do
+    if [ "$seen_sep" -eq 1 ]; then
+      ACQ_PROVIDER_REMAINING+=("$arg")
+      continue
+    fi
+    case "$arg" in
+      --) seen_sep=1; ACQ_PROVIDER_REMAINING+=("$arg") ;;
+      --no-provider-kits) ACQ_PROVIDER_KITS=""; ACQ_PROVIDER_KITS_FROM_CLI=1 ;;
+      *) ACQ_PROVIDER_REMAINING+=("$arg") ;;
+    esac
+  done
 }
 
 # Extract a user-supplied `--image <ref>` / `--image=<ref>` flag from a run/create
@@ -2039,7 +2114,7 @@ _acq_provenance_file() {
 # and returns non-zero but never aborts the caller (fail-open).
 # Usage: acq_provenance_write BACKEND SANDBOX_NAME [AGENT] [WORKSPACE]
 acq_provenance_write() {
-  local backend="${1:-}" name="${2:-}" agent="${3:-}" workspace="${4:-}"
+  local backend="${1:-}" name="${2:-}" agent="${3:-}" workspace="${4:-}" provider_selection provider_kits
   [ -n "$backend" ] && [ -n "$name" ] || return 1
   local file dir ts workspace_source
   file=$(_acq_provenance_file "$backend" "$name") || return 1
@@ -2062,6 +2137,13 @@ acq_provenance_write() {
     "") : ;;
     *[!A-Za-z0-9._/-]*) workspace="" ;;
   esac
+  if [ -n "${ACQ_PROVIDER_KITS_FROM_ENV:-}" ] || [ -n "${ACQ_PROVIDER_KITS_FROM_CLI:-}" ]; then
+    provider_selection=explicit
+    provider_kits="$ACQ_PROVIDER_KITS"
+  else
+    provider_selection=default
+    provider_kits=""
+  fi
   # Write atomically via a temp file + mv so a crash mid-write can't leave a
   # half-written record that later parses as a bogus "current" ref.
   local tmp="${file}.tmp.$$"
@@ -2071,6 +2153,8 @@ acq_provenance_write() {
     printf 'repo=%s\n' "$ACQ_BUILTIN_BUNDLE_REPO"
     printf 'applied_ref=%s\n' "$PATTERNS_KIT_REF"
     printf 'backend=%s\n' "$backend"
+    printf 'provider_selection=%s\n' "$provider_selection"
+    [ -n "$provider_kits" ] && printf 'provider_kits=%s\n' "$provider_kits"
     [ -n "$agent" ] && printf 'agent=%s\n' "$agent"
     printf 'applied_at=%s\n' "$ts"
     if [ -n "${workspace:-}" ]; then

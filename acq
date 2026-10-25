@@ -157,6 +157,8 @@ run/create flags:
   --kit REF            Apply an extra kit (repeatable). REF is a local dir or a
                        git+https ref (like an ACQ_EXTRA_KITS entry); acq
                        translates it to the backend — it is NOT forwarded raw.
+  --no-provider-kits   Create without provider kits. This is authoritative: no
+                       USAi provider config or credential is required.
   --image REF          Same as the global --image above; accepted here too so
                        `acq create AGENT --image REF PATH` works.
   --clone              Run the agent on a disposable clone of the primary
@@ -1071,6 +1073,8 @@ case "$subcommand" in
     # asked for. Only honored BEFORE `--`.
     extract_publish_flags "$@" || exit 1
     set -- ${ACQ_PUBLISH_REMAINING[@]+"${ACQ_PUBLISH_REMAINING[@]}"}
+    extract_provider_flags "$@"
+    set -- ${ACQ_PROVIDER_REMAINING[@]+"${ACQ_PROVIDER_REMAINING[@]}"}
     if [ "${#ACQ_PUBLISH_FLAGS[@]}" -gt 0 ]; then
       # A create-time host-port override only means something on a backend that
       # CHOOSES the host port. sbx assigns it itself and exposes no knob (its
@@ -1110,7 +1114,9 @@ esac
 case "$subcommand" in
   usai-rotate-api-key)
     shift
-    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+    if acq_usai_provider_selected; then
+      acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+    fi
     if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
       echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not implement key rotation" >&2
       echo "     (acq_backend_rotate_key). Rotate manually, then re-run." >&2
@@ -1122,7 +1128,9 @@ case "$subcommand" in
 
   create)
     shift
-    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+    if acq_usai_provider_selected; then
+      acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+    fi
     acq_backend_prepare
     # First-run onboarding (ADR-0031): offer `acq configure` once before we
     # provision, so a brand-new user picks kits up front. No-op after first run
@@ -1144,7 +1152,7 @@ case "$subcommand" in
     # at create time, so a sandbox created before the key exists carries no USAi
     # binding. Gate on key presence first (fail closed if declined) so create
     # picks it up. `create` is otherwise detached and never attaches.
-    if ! ensure_key_present "$local_name"; then
+    if acq_usai_provider_selected && ! ensure_key_present "$local_name"; then
       exit 1
     fi
 
@@ -1165,7 +1173,9 @@ case "$subcommand" in
     # so unlike `run` we don't gate on the key or offer interactive rotation —
     # just warn if it's already invalid so a create-only user knows before they
     # later `acq run`.
-    advise_valid_key "$local_name"
+    if acq_usai_provider_selected; then
+      advise_valid_key "$local_name"
+    fi
     ;;
 
   run)
@@ -1190,10 +1200,15 @@ case "$subcommand" in
     [ "${#create_args[@]}" -gt 0 ] && first=$(first_positional "${create_args[@]}")
 
     if [ -n "$first" ] && is_known_agent "$first"; then
-      acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
       # AGENT form: create if missing, then attach.
       local_name=$(derive_name "${create_args[@]}") || exit 1
       [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
+      if acq_backend_exists "$local_name"; then
+        acq_provider_selection_load "${ACQ_RESOLVED_BACKEND}" "$local_name" || exit 1
+      fi
+      if acq_usai_provider_selected; then
+        acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
+      fi
       acq_print_selected_agent_kit "$first"
 
       # Pre-flight: validate the workspace path before provisioning (#issue).
@@ -1271,7 +1286,7 @@ case "$subcommand" in
         create_time_kit_picker
         _build_kit_list "$first"
 
-        if ! ensure_key_present "$local_name"; then
+        if acq_usai_provider_selected && ! ensure_key_present "$local_name"; then
           exit 1
         fi
 
@@ -1292,7 +1307,7 @@ case "$subcommand" in
       # abort explicitly on a non-zero return rather than relying on `set -e`
       # to propagate from a bare function call (its behavior for a function
       # used as the tested command is not portable across bash versions).
-      if ! ensure_valid_key "$local_name" "${create_args[@]}"; then
+      if acq_usai_provider_selected && ! ensure_valid_key "$local_name" "${create_args[@]}"; then
         exit 1
       fi
 

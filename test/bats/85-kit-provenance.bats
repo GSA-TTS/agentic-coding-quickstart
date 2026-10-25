@@ -44,6 +44,18 @@ _seed_stale_provenance() { # BACKEND NAME
   assert_equal "$(acq_provenance_field sbx agentbox agent)" "opencode"
 }
 
+@test "provenance: distinguishes default providers from an explicit empty set" {
+  acq_provenance_write sbx defaultproviders
+  assert_equal "$(acq_provenance_field sbx defaultproviders provider_selection)" "default"
+
+  ACQ_PROVIDER_KITS=""
+  ACQ_PROVIDER_KITS_FROM_ENV=1
+  acq_provenance_write sbx emptyproviders
+  assert_equal "$(acq_provenance_field sbx emptyproviders provider_selection)" "explicit"
+  acq_provider_selection_load sbx emptyproviders
+  refute acq_usai_provider_selected
+}
+
 @test "provenance: recorded agent can rebuild an enabled agent kit list" {
   ACQ_TEST_AGENT_KIT="$STUBDIR/provenance-opencode-kit"
   mkdir -p "$ACQ_TEST_AGENT_KIT"

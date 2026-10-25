@@ -3,7 +3,7 @@ title: "acq How-To Guide"
 description: "Detailed how-to for acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-09-30"
+last_updated: "2026-10-25"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "howto", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -553,6 +553,25 @@ acq create opencode --kit ./kit-a --kit git+https://github.com/acme/kits.git#ref
 `--kit` refs are translated by `acq` exactly like `ACQ_EXTRA_KITS` entries (a
 neutral `hybrid/v1` kit is converted to the active backend's format), so they
 work with any backend — they are **not** forwarded raw to the backend CLI.
+
+### Provider kits
+
+New sandboxes include the USAi provider kit by default, unchanged from earlier
+releases. To create one without any provider kit, pass `--no-provider-kits` to
+`run` or `create` before `--`. This is authoritative, so `acq` does not require
+or bind a USAi credential and projects an empty provider generation for the
+guest. The choice is recorded with the sandbox and remains in effect when its
+kits are healed or it is resumed.
+
+```bash
+acq run opencode --no-provider-kits /path/to/project
+acq create shell --no-provider-kits /path/to/project
+```
+
+For scripted selection, `ACQ_PROVIDER_KITS` accepts a whitespace-separated list
+of kit refs, following the same format as `ACQ_EXTRA_KITS`. `ACQ_PROVIDER_KITS=''`
+also selects the empty set, but `--no-provider-kits` is the portable form when
+configuration layers cannot preserve an empty environment value.
 
 ---
 

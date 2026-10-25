@@ -950,16 +950,18 @@ _acq_msb_bind_secrets_into() {
     # (_acq_msb_service_binding), so a `--host` sidecar recorded at `acq secret
     # set` overrides the compiled-in endpoint here too (#384) instead of being
     # written-but-ignored at provision.
-    local _usai_binding _usai_env _usai_host
-    _usai_binding=$(_acq_msb_service_binding usai "$_name")
-    _usai_env=$(printf '%s' "$_usai_binding" | cut -f1)
-    _usai_host=$(printf '%s' "$_usai_binding" | cut -f2)
+    if ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; then
+      local _usai_binding _usai_env _usai_host
+      _usai_binding=$(_acq_msb_service_binding usai "$_name")
+      _usai_env=$(printf '%s' "$_usai_binding" | cut -f1)
+      _usai_host=$(printf '%s' "$_usai_binding" | cut -f2)
 
-    # USAi: acq store first, else a pre-exported USAI_API_KEY (e.g. CI).
-    if ! _acq_msb_bind_one "$_arrn" "$_namesn" usai "$_name" "$_usai_env" "$_usai_host"; then
-      if [ -n "${USAI_API_KEY:-}" ]; then
-        eval "$_arrn+=(--secret \"\${_usai_env}@\${_usai_host}\")"
-        acq_debug "msb secret: binding ${_usai_env}@${_usai_host} (from env)"
+      # USAi: acq store first, else a pre-exported USAI_API_KEY (e.g. CI).
+      if ! _acq_msb_bind_one "$_arrn" "$_namesn" usai "$_name" "$_usai_env" "$_usai_host"; then
+        if [ -n "${USAI_API_KEY:-}" ]; then
+          eval "$_arrn+=(--secret \"\${_usai_env}@\${_usai_host}\")"
+          acq_debug "msb secret: binding ${_usai_env}@${_usai_host} (from env)"
+        fi
       fi
     fi
 
@@ -1005,7 +1007,8 @@ _acq_msb_bind_secrets_into() {
 $(acq_secret_meta_list "$_name")
 EOF
     fi
-  elif [ -n "${USAI_API_KEY:-}" ]; then
+  elif { ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; } \
+      && [ -n "${USAI_API_KEY:-}" ]; then
     eval "$_arrn+=(--secret \"${USAI_PROVIDER_KEY_ENV}@\${ACQ_MSB_USAI_HOST}\")"
   fi
 }
@@ -1059,7 +1062,11 @@ EOF
 # matter for start.
 acq_backend_start() {
   local _name="$1"
-  if command -v acq_provider_facts_load_from_kit_or_fallback >/dev/null 2>&1; then
+  if command -v acq_provider_selection_load >/dev/null 2>&1; then
+    acq_provider_selection_load msb "$_name" || return 1
+  fi
+  if command -v acq_provider_facts_load_from_kit_or_fallback >/dev/null 2>&1 \
+      && { ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; }; then
     acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
   fi
   local _start_secret_flags=() _start_secret_names=()
@@ -5658,6 +5665,9 @@ _acq_msb_heal_kit_set() {
 
 acq_backend_ensure_kits_applied() {
   local name="$1"
+  if command -v acq_provider_selection_load >/dev/null 2>&1; then
+    acq_provider_selection_load msb "$name" || return 1
+  fi
   # START-IF-STOPPED (ADR-0017). This heal loop drives `msb exec` against
   # the guest for every kit (feature-probe, file drops, startup re-run). Those
   # exec calls FAIL against a STOPPED guest, so a stopped sandbox must be started

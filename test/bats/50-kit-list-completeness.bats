@@ -27,6 +27,37 @@ load 'helper'
   assert_regex "${KITS[0]}" 'acq-kits/zscaler-ca-certificate'
 }
 
+@test "provider selection: unset preserves the USAi default" {
+  load_acq
+  unset ACQ_PROVIDER_KITS_FROM_ENV ACQ_PROVIDER_KITS_FROM_CLI
+  ACQ_PROVIDER_KITS=""
+  _build_kit_list
+
+  assert_equal "${KITS[1]}" "$USAI_KIT"
+  assert_equal "$ACQ_BUILTIN_SUPPORT_KIT_COUNT" "4"
+}
+
+@test "provider selection: explicit empty omits every provider kit" {
+  load_acq
+  ACQ_PROVIDER_KITS=""
+  ACQ_PROVIDER_KITS_FROM_ENV=1
+  ACQ_PROVIDER_KITS_FROM_CLI=""
+  _build_kit_list
+
+  assert_equal "$ACQ_BUILTIN_SUPPORT_KIT_COUNT" "3"
+  refute_regex "$(printf '%s\n' "${KITS[@]}")" 'acq-kits/usai-provider'
+  refute acq_usai_provider_selected
+}
+
+@test "provider selection: an explicit ref replaces the default provider ref" {
+  load_acq
+  ACQ_PROVIDER_KITS="$STUBDIR/missing-provider-kit"
+  ACQ_PROVIDER_KITS_FROM_ENV=1
+
+  _build_kit_list
+  assert_equal "${KITS[1]}" "$STUBDIR/missing-provider-kit"
+}
+
 @test "kits: count matches the documented set and no doc hardcodes an English count" {
   assert_equal "${#ACQ_KIT_NAMES[@]}" "4"
   local doc bad

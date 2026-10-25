@@ -1191,12 +1191,17 @@ acq_backend_ensure_kits_applied() {
   # _acq_sbx_print_recreate_notice). Without this reset, a second heal in the
   # same process would suppress the notice.
   _ACQ_SBX_RECREATE_NOTICE_SHOWN=0
+  if command -v acq_provider_selection_load >/dev/null 2>&1; then
+    acq_provider_selection_load sbx "$name" || return 1
+  fi
 
   _acq_sbx_ensure_kit_sources_allowed
 
   # Neutral kits must be translated to local sbx-v2 kit dirs before sbx kit add.
-  local usai_local playbook_local zscaler_local
-  usai_local=$(_acq_sbx_translate_kit "$USAI_KIT")
+  local usai_local="" playbook_local zscaler_local
+  if ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; then
+    usai_local=$(_acq_sbx_translate_kit "$USAI_KIT")
+  fi
   playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT")
   zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT")
 
@@ -1217,7 +1222,8 @@ acq_backend_ensure_kits_applied() {
   fi
 
   # 2) USAi provider kit
-  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
+  if { ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; } \
+      && { [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; }; then
     echo "acq: '$name' is missing the USAi kit; injecting with 'sbx kit add'..." >&2
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$usai_local" || _kadd_rc=$?
     case $_kadd_rc in
