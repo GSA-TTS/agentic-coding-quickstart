@@ -54,7 +54,7 @@ actual command output.
 
 | Check | SBX | MSB | Observed output / notes |
 |---|---|---|---|
-| Fresh `acq run opencode .` startup | BLOCKED | PASS | 2026-10-25: MSB created `opencode-validate-601-final-r2`, launched the interactive OpenCode session, listed USAi models, and completed a model request successfully. SBX was intentionally not run through the real credential flow because the host key was not rotated. |
+| Fresh `acq run opencode .` startup | PASS | PASS | 2026-10-25: both backends launched interactive OpenCode sessions from the final validation worktree. USAi models were visible and a model request returned successfully on each backend. |
 | Fresh OpenCode sandbox create + name reattach | PASS | PASS | 2026-10-25: OpenCode sandboxes were created, then reattached by derived name. SBX recorded 13 passes; MSB recorded 18 passes. |
 | Fresh OpenCode process starts | PASS | PASS | `acq run <name> -- --version` succeeded on both backends. |
 | `acq exec NAME -- opencode models` consumes projected provider input | PASS | PASS | 2026-10-24: `opencode models` listed projected `usai/` models on both backends. |
@@ -143,15 +143,16 @@ Provider removal and malformed-input rejection remain `BLOCKED`; they require
 separate destructive/negative host procedures and are not inferred from the
 successful positive matrix.
 
-### Literal MSB Credential Flow (2026-10-25)
+### Literal Credential Flow (2026-10-25)
 
-The literal host command completed on MSB from the final validation worktree:
+The literal host command completed on both backends from the final validation
+worktree:
 
 ```text
 bash ./acq --backend msb run opencode .
 ```
 
-Observed behavior:
+Observed MSB behavior:
 
 ```text
 provider input contract: validated 1 bundle(s)
@@ -161,9 +162,10 @@ Starting background server...
 ```
 
 Inside the launched OpenCode session, USAi models were visible and a model
-request returned a successful response. This fulfills the literal MSB
-credential-flow row. SBX remains `BLOCKED` for this row because the host owner
-did not elect to rotate the USAi key for a real-credential SBX run.
+request returned a successful response. The same interactive checks then passed
+on SBX after its USAi secret was updated through the supported rotation flow.
+This fulfills the literal credential-flow row for both backends. No credential
+value, secret placeholder, or session identifier is retained in this record.
 
 ### Negative-Validation Procedure (malformed provider input)
 
