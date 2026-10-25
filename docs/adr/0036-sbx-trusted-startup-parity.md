@@ -45,12 +45,14 @@ get weaker guarantees on SBX than on msb.
 (`docs/KNOWN_FAILURE_MODES.md` section 36), so on that version mid-life repair is
 already "recreate the sandbox". The Kits v2 documentation
 ([docs.docker.com Kits v2](https://docs.docker.com/ai/sandboxes/customize/kits/))
-says current sbx supports `setup.startup` mixins via recreate, so the refusal is
-version-scoped and is not assumed for later releases. This ADR concerns
+says current sbx supports `setup.startup` mixins via recreate (not verified
+here; no network or sbx access on the authoring host), so the refusal is
+version-scoped and is not assumed for later releases. The "mountless sandbox"
+behavior attributed to sbx >= 0.42 below is likewise unverified. This ADR concerns
 create-time delivery and restart replay only.
 
-ADR numbers: other unmerged work may carry a different ADR numbered 0036. A
-number collision is possible and must be resolved when this branch is rebased.
+ADR numbering: a number collision with other unmerged ADRs is possible and must
+be resolved by renumbering at merge.
 
 ## Decision Drivers
 

@@ -167,8 +167,10 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   mount/export semantics, not Unix ownership inside the guest: sbx already
   enforces read-only extra mounts, and msb 0.7.2 was live-verified to export the
   virtiofs mount read-only even when guest root can make the guest-visible mount
-  flag appear `rw`. acq refuses msb 0.7.2 and older and pins 0.7.7, so this must
-  be re-verified on the pinned version before it is relied on. Whether a sandbox
+  flag appear `rw`. acq now refuses 0.7.0 through 0.7.2 and accepts 0.6.9 or newer
+  otherwise, with 0.7.7 only the default install pin, so `:ro` enforcement has not
+  been re-verified on any version acq accepts. It must be re-verified on the
+  pinned version before it is relied on. Whether a sandbox
   may rely on the mount for `readonly: true` startup code is a **host-recorded
   create fact** (host key `ro-host-config`), written only after a create that
   passed the `:ro` volume flag returned success and the sandbox became
@@ -178,11 +180,15 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   guest-copy downgrade. A sandbox with no record (created before the key existed,
   or never fully created) takes the legacy guest-copy path and warns. A
   guest-executed probe of the mount remains as a diagnostic only: when a record
-  exists and the probe disagrees, acq warns that the heal will likely fail and
-  that the sandbox should be recreated, and still trusts the record. This is a
-  deliberate change from "degrade to a guest copy" to "warn and possibly fail"
-  (fail-closed, no escalation to the guest-writable path), applied only when the
-  record exists; legacy and no-record sandboxes still degrade safely. If a future
+  exists and the probe disagrees, acq warns and still trusts the record. If the
+  mount looks absent, acq warns that staged kit commands may fail (kit command
+  failures are themselves reported as warnings) and does not fall back to a guest
+  copy; if it looks guest-writable, acq warns that staged code runs from a path
+  the guest may be able to modify, which is no stronger than the guest copy and
+  signals that `:ro` is not being enforced. This is a deliberate change from
+  "degrade to a guest copy" to "warn and possibly fail" (no escalation to the
+  guest-writable path), applied only when the record exists; legacy and
+  no-record sandboxes still degrade safely. If a future
   msb changes `--volume ...:ro` parsing or enforcement, acq must raise or gate
   its minimum msb version before relying on ADR-0035. Host and guest path forms
   follow ADR-0029.
@@ -212,8 +218,8 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   reads (e.g. `opencode.jsonc`) must stay a normal guest-writable drop.
 - A file **without** `readonly: true` is unchanged: copied into the guest and
   invoked by its guest path (full backward compatibility; no shipped kit changes
-  behavior until it opts in). If an existing sandbox predates the
-  `/var/lib/acq/host` mount, acq warns and falls back to this legacy guest-copy
+  behavior until it opts in). If an existing sandbox has no `ro-host-config`
+  record (it predates the mount, or its create did not complete), acq warns and falls back to this legacy guest-copy
   behavior for `readonly: true` files too, rather than rewriting startup argv to a
   path that does not exist; recreating the sandbox restores the tamper-resistant
   read-only path.

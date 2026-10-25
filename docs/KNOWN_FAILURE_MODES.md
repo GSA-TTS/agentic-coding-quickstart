@@ -3039,12 +3039,13 @@ host-authoritative without sbx features that have not been verified.
 ### Observation
 
 After `sbx create`, acq waits for `/tmp/acq/startup-complete` inside the sandbox
-to contain a random per-create token (`_acq_sbx_wait_for_startup_barrier`). The
-token is generated on the host and delivered in a generated barrier kit whose
-startup command writes it, so the host side of the comparison is authoritative,
-but the signal itself is a guest file. A guest that can read the token (or that
-can alter how the startup command is replayed, which is unverified on sbx) could
-make acq believe startup finished.
+to contain a per-create token (`_acq_sbx_wait_for_startup_barrier`). The token
+is generated on the host (not a secret: PID, epoch and shell random values) and
+delivered in a generated barrier kit whose startup command writes it, so it is
+present in the guest's own startup registration. The host side of the comparison
+is authoritative, but the signal itself is a guest file. A guest that can read
+the token (the normal case, not a hypothetical) or that can alter how the startup
+command is replayed (unverified on sbx) could make acq believe startup finished.
 
 ### Why this is accepted
 
@@ -3057,8 +3058,8 @@ make acq believe startup finished.
   and independent of this file.
 - **A host-authoritative signal needs sbx support not verified here.** The only
   candidates are a backend-reported startup status or a host-visible channel out
-  of the guest. Neither is documented in the sbx CLI that this repository
-  targets, and adding one by guessing would trade a low-impact residual risk for
+  of the guest. Neither was found in the sbx documentation or CLI
+  help consulted for this repository (not exhaustively checked), and adding one by guessing would trade a low-impact residual risk for
   an unverifiable mechanism. The related trusted-startup question for SBX is
   analyzed in ADR-0036 (SBX trusted-startup parity).
 
