@@ -2,7 +2,10 @@
 #
 # 83-msb-ro-host-config-record.bats — ADR-0035 Mechanism 2: whether the :ro
 # host-config mount may carry readonly kit code is a HOST-recorded create fact
-# (host key ro-host-config), never the answer of a guest-executed probe.
+# (host key ro-host-config), never the answer of a guest-executed probe. The
+# record means "the create passed the :ro volume flag and the sandbox became
+# exec-ready"; it does not prove the guest mount works (a disagreeing probe only
+# warns, and the heal then fails closed rather than degrading to a guest copy).
 #
 # A passwordless-sudo guest controls `sh`/`test`, so a probe result must not be
 # able to flip the staged-:ro path to the guest-writable copy (or the reverse).
@@ -63,6 +66,7 @@ _apply() { # NAME KITDIR RECORD [ENV...]
   assert_regex "$log" 'node /var/lib/acq/host/kit-files/'
   refute_regex "$log" 'msb copy .*recmissing:/home/agent/cfg/merge\.mjs'
   assert_output --partial 'guest probe does not confirm it'
+  assert_output --partial 'will likely FAIL'
 }
 
 @test "ro record: host record wins when the guest probe reports the mount writable" {
@@ -73,6 +77,7 @@ _apply() { # NAME KITDIR RECORD [ENV...]
   assert_regex "$log" 'node /var/lib/acq/host/kit-files/'
   refute_regex "$log" 'msb copy .*recwritable:/home/agent/cfg/merge\.mjs'
   assert_output --partial 'guest probe does not confirm it'
+  assert_output --partial 'will likely FAIL'
 }
 
 @test "ro record: a confirming probe is silent" {
@@ -108,7 +113,7 @@ _apply() { # NAME KITDIR RECORD [ENV...]
   refute_regex "$(cat "$CALLS")" '/var/lib/acq/host/kit-files'
 }
 
-@test "ro record: successful provision records ro-host-config" {
+@test "ro record: successful create plus exec-ready records ro-host-config" {
   local k="$STUBDIR/k6"; _ro_kit "$k"
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-prov"
@@ -151,4 +156,52 @@ _apply() { # NAME KITDIR RECORD [ENV...]
     acq_host_config_has msb stalebox ro-host-config
   '
   assert_failure
+}
+
+# Provision-level pins: the record is written only after exec-ready, and a fresh
+# provision clears stale instance state itself (not just the helper in isolation).
+_prov_msb() { # NAME KITDIR [ENV...]  (runs provision with a seeded stale record)
+  local name="$1" kit="$2"; shift 2
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-'"$name"'"
+    export ACQ_MSB_EXEC_READY_TIMEOUT=1
+    for kv in '"${*:-:}"'; do export "$kv" 2>/dev/null || true; done
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
+    acq_host_config_write msb "'"$name"'" ro-host-config 1
+    acq_host_config_write msb "'"$name"'" install-stale 1
+    _acq_msb_fetch_kit() { printf "%s\n" "'"$kit"'"; }
+    acq_backend_provision "'"$name"'" shell /tmp >/dev/null 2>&1
+  '
+}
+
+@test "ro record: create ok but never exec-ready leaves no ro-host-config record" {
+  local k="$STUBDIR/k9"; _ro_kit "$k"
+  # Replace the stub msb with one whose create succeeds and exec never does.
+  cat >"$STUBDIR/msb" <<'MSBSTUB'
+#!/usr/bin/env bash
+{ printf 'msb'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  --version|-V) printf 'msb %s\n' "${STUB_MSB_VERSION:-0.7.7}" ;;
+  create) exit 0 ;;
+  exec) exit 1 ;;
+  *) exit 0 ;;
+esac
+MSBSTUB
+  chmod +x "$STUBDIR/msb"
+  _prov_msb notready "$k"
+  assert_failure
+  assert_regex "$(cat "$CALLS")" 'msb create '
+  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/notready.*.config/ro-host-config 2>&1'
+  assert_failure
+}
+
+@test "ro record: provision itself clears stale instance state before recording" {
+  local k="$STUBDIR/k10"; _ro_kit "$k"
+  _prov_msb staleprov "$k"
+  local cfg; cfg=$(ls -d "$ACQ_PROVENANCE_DIR"/msb/staleprov.*.config | head -n1)
+  assert_equal "$(cat "$cfg/ro-host-config")" "1"
+  [ ! -e "$cfg/install-stale" ]
 }

@@ -1876,18 +1876,21 @@ _acq_msb_reset_kit_env() {
 
 # Whether sandbox NAME's trusted :ro host-config mount may be relied on for
 # readonly kit code. The decision comes from the HOST-recorded create fact
-# (key ro-host-config, written by acq_backend_provision only after a successful
-# create that passed the :ro --volume), never from a guest command: a
-# passwordless-sudo guest controls `test`/`sh` and could otherwise force the
-# guest-copy downgrade. A sandbox with no record (legacy, or a create that never
-# completed) takes the safe compatibility path: the caller copies the file and
-# prints its warning. The guest probe below is diagnostic only: it can warn
-# about a mismatch but never changes the decision.
+# (key ro-host-config, written by acq_backend_provision only after a create that
+# passed the :ro --volume returned success and the sandbox became exec-ready),
+# never from a guest command: a passwordless-sudo guest controls `test`/`sh` and
+# could otherwise force the guest-copy downgrade. The record does NOT prove the
+# guest mount works; it proves only that acq asked for it and the sandbox booted.
+# A sandbox with no record (legacy, or a create that never completed) takes the
+# safe compatibility path: the caller copies the file and prints its warning.
+# The guest probe below is diagnostic only: it can warn about a mismatch but
+# never changes the decision (fail-closed: if the mount is really absent, the
+# staged-path heal fails rather than silently degrading to a guest copy).
 _acq_msb_host_config_mount_available() {
   local name="$1"
   [ "$(acq_host_config_read msb "$name" ro-host-config)" = "1" ] || return 1
   _acq_msb_host_config_mount_probe "$name" || \
-    echo "acq(msb): warning: sandbox '$name' was created with the read-only host-config mount but a guest probe does not confirm it; using the host-recorded state. Recreate the sandbox if this persists." >&2
+    echo "acq(msb): warning: sandbox '$name' was created with the read-only host-config mount but a guest probe does not confirm it. Acq trusts the host record and will not fall back to a guest copy, so the kit heal will likely FAIL; recreate the sandbox." >&2
   return 0
 }
 
@@ -3817,6 +3820,12 @@ EOF
   # backend may own a live or inspectable sandbox, so preserve this attempt.
   _ACQ_MSB_ATTEMPT_ACTIVE=""
 
+  # A same-named sandbox removed outside acq can leave host state behind. Clear
+  # instance-scoped values as soon as this create is known to have produced a
+  # fresh instance, so a stale ro-host-config record cannot survive a boot that
+  # never becomes exec-ready; replacement values are recorded further below.
+  acq_host_config_clear_instance_state msb "$name"
+
   # CRITICAL: `msb create` returns 0 even when the sandbox later FAILS TO START
   # (e.g. a bad mount): the boot is asynchronous. So a zero rc from create does
   # NOT mean the sandbox is usable. The ONLY reliable readiness signal is that
@@ -3845,14 +3854,11 @@ EOF
     return 1
   fi
 
-  # A same-named sandbox removed outside acq can leave host state behind. Clear
-  # instance-scoped values before this fresh provision records replacement values.
-  acq_host_config_clear_instance_state msb "$name"
-
-  # Host-recorded create fact for ADR-0035 Mechanism 2: this sandbox was created
-  # (create succeeded, exec-ready) with the host-config dir mounted :ro. Written
-  # only here so a failed create records nothing; heal consults this key instead
-  # of a guest probe. A write failure leaves it absent (the safe legacy path).
+  # Host-recorded create fact for ADR-0035 Mechanism 2: the create passed the
+  # host-config :ro volume flag and the sandbox became exec-ready. This does not
+  # prove the guest mount works. Written only here so a failed create records
+  # nothing; heal consults this key instead of a guest probe. A write failure
+  # leaves it absent (the safe legacy path).
   acq_host_config_write msb "$name" ro-host-config 1 || \
     echo "acq(msb): warning: could not record the read-only host-config mount for '$name'; readonly kit files will use the guest-copy compatibility path." >&2
 
