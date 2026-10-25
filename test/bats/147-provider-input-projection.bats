@@ -762,9 +762,11 @@ EOF
 # directly, giving $! the real executable PID so TERM reaches it.
 
 @test "msb remove TERM: external executable survives initial signal, second lock blocked until exit" {
-  local script="$STUBDIR/msb-remove-term.sh" root msb_bin
-  root=$(acq_provider_input_root msb msbsignalbox)
+  local script="$STUBDIR/msb-remove-term-${BATS_TEST_NUMBER}.sh" root msb_bin sandbox pid_file
+  sandbox="msbsignalbox-${BATS_TEST_NUMBER}"
+  root=$(acq_provider_input_root msb "$sandbox")
   msb_bin="$STUBDIR/slow-msb-remove"
+  pid_file="$STUBDIR/slow-msb-${BATS_TEST_NUMBER}.pid"
   # Create the external slow-msb executable: traps TERM (ignores it initially),
   # writes its own PID, kills its PPID (= the transaction subshell) with TERM,
   # then stays alive 2 s so the guardian must wait before releasing the lock.
@@ -782,7 +784,7 @@ MSB_SLOW
 #!/usr/bin/env bash
 set -eu
 export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
-export MSB_PID_FILE="$STUBDIR/slow-msb.pid"
+export MSB_PID_FILE="$pid_file"
 # Prepend the slow-msb as \`msb\` in PATH.
 mkdir -p "$STUBDIR/msb-bin"
 ln -sf "$msb_bin" "$STUBDIR/msb-bin/msb"
@@ -802,16 +804,16 @@ acq_backend_exists() { return 1; }       # sandbox confirmed gone after remove
 _acq_msb_confirm_absent() { return 0; }  # confirms gone for the rc-ne-0 path
 # Run terminate in background so we can probe lock state while it runs.
 rc=0
-acq_backend_terminate msbsignalbox & tx=\$!
+acq_backend_terminate "$sandbox" & tx=\$!
 # Wait for slow-msb to register its PID (confirms the background executable started).
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -s "$STUBDIR/slow-msb.pid" ] && break
+  [ -s "$pid_file" ] && break
   sleep 0.1
 done
-[ -s "$STUBDIR/slow-msb.pid" ] || { echo "slow-msb never started" >&2; exit 1; }
-msb_pid=\$(cat "$STUBDIR/slow-msb.pid")
+[ -s "$pid_file" ] || { echo "slow-msb never started" >&2; exit 1; }
+msb_pid=\$(cat "$pid_file")
 # Verify the lock is still held while the executable is alive.
-if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb msbsignalbox >"$STUBDIR/lock-retry.out" 2>&1; then
+if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb "$sandbox" >"$STUBDIR/lock-retry.out" 2>&1; then
   echo "lock acquired while msb executable was alive" >&2
   exit 1
 fi
@@ -819,7 +821,7 @@ grep -Fq "live pid" "$STUBDIR/lock-retry.out" || { cat "$STUBDIR/lock-retry.out"
 # Wait for the background transaction to complete.
 wait "\$tx" || rc=\$?
 # After the transaction exits the lock must be released.
-lock=\$(acq_provider_input_lock_acquire msb msbsignalbox)
+lock=\$(acq_provider_input_lock_acquire msb "$sandbox")
 acq_provider_input_lock_release "\$lock"
 printf '%s\n' "rc=\$rc lock-cleared"
 EOF
