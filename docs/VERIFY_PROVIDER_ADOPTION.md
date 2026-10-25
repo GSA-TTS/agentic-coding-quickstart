@@ -59,7 +59,7 @@ actual command output.
 | Fresh OpenCode process starts | PASS | PASS | `acq run <name> -- --version` succeeded on both backends. |
 | `acq exec NAME -- opencode models` consumes projected provider input | PASS | PASS | 2026-10-24: `opencode models` listed projected `usai/` models on both backends. |
 | Remove projected provider input and restart OpenCode | BLOCKED | BLOCKED | Record expected actionable failure or documented fallback |
-| Malformed provider input is rejected before startup | BLOCKED | BLOCKED | Record exact validation error and exit status |
+| Malformed provider input is rejected before startup | PASS | PASS | 2026-10-25: both backends rejected malformed `provider-input.json` before backend creation with `acq: invalid provider input manifest ... invalid JSON at line 1 column 2`. |
 | `scripts/verify-backends --only <backend>` | PASS | PASS | Final combined branch: SBX transcript `tmp/provider-neutral-validation.TCY2fZvE/sbx.log` (13 pass, 0 fail, 1 skip); MSB transcript `tmp/provider-neutral-validation.8MP6vbkX/msb.log` (18 pass, 0 fail, 1 skip). |
 
 ### Earlier Failed Live Evidence (2026-10-24)
@@ -116,8 +116,9 @@ passed: 17 failed: 0 skipped: 1 warnings: 0
 
 The skipped row on each backend was the private playbook fetch because `gh` was
 not logged in on the host. It does not affect provider-neutral OpenCode evidence.
-Provider removal and malformed-input rejection remain `BLOCKED` until separately
-observed; this document does not infer them from the successful startup run.
+Provider removal remains `BLOCKED` until the supported host-side omission
+capability is implemented; this document does not infer it from the successful
+startup run.
 
 ### Final Live Evidence with Model Listing (2026-10-25)
 
@@ -139,9 +140,27 @@ tmp/provider-neutral-validation.TCY2fZvE/results.tsv
 tmp/provider-neutral-validation.8MP6vbkX/results.tsv
 ```
 
-Provider removal and malformed-input rejection remain `BLOCKED`; they require
-separate destructive/negative host procedures and are not inferred from the
-successful positive matrix.
+Provider removal remains `BLOCKED`; it requires a supported authoritative-empty
+provider selection and is not inferred from the successful positive matrix.
+
+### Malformed Provider Input Evidence (2026-10-25)
+
+The bounded host runner executed on both backends and rejected the candidate
+before any sandbox creation:
+
+```text
+SBX: acq: invalid provider input manifest: provider-input.json: invalid JSON at line 1 column 2
+MSB: acq: invalid provider input manifest: provider-input.json: invalid JSON at line 1 column 2
+```
+
+Result files:
+
+```text
+tmp/malformed-provider-validation.fFFNukSX/results.tsv
+tmp/malformed-provider-validation.GQGSRccw/results.tsv
+```
+
+Both rows are `PASS`; no backend create command was reached.
 
 ### Literal Credential Flow (2026-10-25)
 
