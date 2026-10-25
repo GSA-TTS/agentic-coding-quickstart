@@ -701,7 +701,7 @@ _acq_backend_provision_unlocked() {
       fi
     fi
     acq_workspace_record_write sbx "$name" "$_primary_ws" || true
-    _acq_sbx_seed_extra_kit_marker "$name"
+    _acq_sbx_seed_extra_kit_record "$name"
     # Backend parity (ADR-0030): sbx DELIVERS ~/.rc.d/*.sh via kit files[] but,
     # unlike msb's .profile bridge, nothing SOURCES them at login. Write the same
     # bridge here at create time so a kit-dropped snippet actually runs. This is a
@@ -740,48 +740,36 @@ acq_backend_provision() {
 }
 
 # ---------------------------------------------------------------------------
-# _acq_sbx_seed_extra_kit_marker — write ~/.acq-extra-kits at CREATE
+# _acq_sbx_seed_extra_kit_record — write host extra-kits state at CREATE
 # ---------------------------------------------------------------------------
-# The re-attach heal decides whether an extra kit is already applied by reading
-# this marker (see acq_backend_ensure_kits_applied step 4); previously only the
-# heal path wrote it, so a sandbox created WITH ACQ_EXTRA_KITS / --kit refs never
-# got the marker and every re-attach re-attempted every extra kit (and, under
-# sbx 0.38, warn-failed each time). Write the same marker here so the create and
-# heal paths agree: one ORIGINAL ref per line (stable across runs), matching the
-# heal's append form (so the heal's exact-line match detects it). Built-in kits
-# are tracked by feature-probe, not the marker, so they are not listed here.
+# The re-attach heal decides whether an extra kit is already applied from this
+# host record (see acq_backend_ensure_kits_applied step 4). A guest marker is not
+# a trust boundary because a passwordless-sudo guest can forge it. Recording the
+# original ref once per line lets create and heal agree without trusting guest
+# state. Built-in kits are tracked by feature-probe and are not listed here.
 #
 # ACQ_CLI_KITS (`--kit` on the CLI) are recorded for completeness even though the
 # current sbx heal loop only re-drives ACQ_EXTRA_KITS. This is safe, not a
 # functional suppression input: on sbx, `--kit` refs are baked in as create-time
 # `sbx create --kit` flags and never re-applied mid-life (unlike msb, which folds
-# ACQ_CLI_KITS into its heal). The marker is a suppression list, so a recorded CLI
+# ACQ_CLI_KITS into its heal). The record is a suppression list, so a recorded CLI
 # ref can only ever be matched if the SAME ref is also supplied via ACQ_EXTRA_KITS
 # — and in that degenerate case skipping re-apply is the correct outcome (the kit
 # was already applied at create). So the CLI entries are a truthful record of what
 # was applied at create; they can never wrongly suppress a needed apply.
-_acq_sbx_seed_extra_kit_marker() {
-  local name="$1" _mkk
+_acq_sbx_seed_extra_kit_record() {
+  local name="$1" _mkk _records=""
   local _mk=()
   [ -n "$ACQ_EXTRA_KITS" ] && split_noglob _mk "$ACQ_EXTRA_KITS"
   [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _mk+=("${ACQ_CLI_KITS[@]}")
-  # Nothing to record — skip the (potentially slow) exec-ready wait entirely.
+  # Nothing to record. A later heal treats absent host state as untrusted and
+  # applies any requested extra kit rather than consulting guest-writable state.
   [ "${#_mk[@]}" -gt 0 ] || return 0
-  # A freshly-created sandbox is not immediately exec-able; the heal path guards
-  # its probes the same way. Without this, the marker write can race the sandbox
-  # becoming ready, silently write nothing, and reintroduce the re-attempt bug.
-  if ! _acq_sbx_wait_for_exec_ready "$name"; then
-    echo "acq: warning: sandbox '$name' not exec-ready; could not record the" \
-         "extra-kit marker (~/.acq-extra-kits). Re-attach may re-attempt extra kits." >&2
-    return 0
-  fi
   for _mkk in ${_mk[@]+"${_mk[@]}"}; do
-    if ! sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$_mkk" \
-        </dev/null >/dev/null 2>&1; then
-      echo "acq: warning: could not record extra kit '$_mkk' in ~/.acq-extra-kits" \
-           "for '$name'; re-attach may re-attempt it." >&2
-    fi
+    _records="${_records}${_records:+$'\n'}${_mkk}"
   done
+  acq_host_config_write sbx "$name" extra-kits "$_records" || \
+    echo "acq: warning: could not record extra kits for '$name'; re-attach may re-attempt them." >&2
 }
 
 # ---------------------------------------------------------------------------
@@ -1040,10 +1028,8 @@ _acq_backend_terminate_unlocked() {
   if [ "$rc" -ne 0 ] && ! _acq_sbx_confirm_absent "$1"; then
     return "$rc"
   fi
-  # Remove any host-authoritative config dir for this sandbox (ADR-0035).
-  # sbx does not use the guest /var/lib/acq markers today (its parity mechanism
-  # is `sbx run --name` + ~/.acq-extra-kits), so this is a defensive no-op unless
-  # a future sbx path writes host config. Best-effort, never blocks removal.
+  # Remove the host-authoritative config dir, including extra-kit suppression
+  # state. Best-effort, never blocks removal.
   acq_host_config_remove sbx "$1" || true
   acq_provider_input_remove sbx "$1" || true
   return "$rc"
@@ -1296,12 +1282,12 @@ acq_backend_ensure_kits_applied() {
   _acq_sbx_apply_git_identity_kit "$name"
   [ "${_ACQ_SBX_LAST_KIT_ADD_SUCCEEDED:-0}" = "1" ] && healed=1
 
-  # 4) Extra kits (tracked by marker file). Extra kits may be neutral or already
-  #    sbx-v2; _acq_sbx_translate_kit handles both. The marker records one
+  # 4) Extra kits (tracked by host config). Extra kits may be neutral or already
+  #    sbx-v2; _acq_sbx_translate_kit handles both. The host record contains one
   #    ORIGINAL ref per line (stable across runs), not the translated local dir.
   #    Extra-kit failures do not affect the built-in bundle's provenance verdict.
   local applied k local_extra
-  applied=$(sbx exec "$name" -- sh -c 'cat "$HOME/.acq-extra-kits" 2>/dev/null' </dev/null 2>/dev/null || true)
+  applied=$(acq_host_config_read sbx "$name" extra-kits)
   local _extras=()
   [ -n "$ACQ_EXTRA_KITS" ] && split_noglob _extras "$ACQ_EXTRA_KITS"
   for k in ${_extras[@]+"${_extras[@]}"}; do
@@ -1317,7 +1303,8 @@ acq_backend_ensure_kits_applied() {
     case $_kadd_rc in
       0)
         healed=1
-        sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$k" </dev/null >/dev/null 2>&1 || true
+        acq_host_config_append sbx "$name" extra-kits "$k" || \
+          echo "acq: warning: could not record extra kit '$k' for '$name'; re-attach may re-attempt it." >&2
         ;;
       3) _acq_sbx_print_recreate_notice "$name" ;;
       *) echo "acq: warning: 'sbx kit add' (extra kit) failed for '$name' (see error above)." >&2 ;;
