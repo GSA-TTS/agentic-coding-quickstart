@@ -2917,7 +2917,13 @@ root = os.open(kit, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 try:
     manifest_fd = open_relative(root, 'provider-input.json')
     with os.fdopen(manifest_fd, encoding='utf-8') as stream: manifest_bytes = stream.read()
-    bundle = json.loads(manifest_bytes)
+    try:
+        bundle = json.loads(manifest_bytes)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            'acq: invalid provider input manifest: provider-input.json: '
+            f'invalid JSON at line {exc.lineno} column {exc.colno}'
+        )
     os.mkdir(target, 0o700)
     with open(os.path.join(target, 'provider-input.json'), 'x', encoding='utf-8') as stream: stream.write(manifest_bytes)
     for path in ('spec.yaml', bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):

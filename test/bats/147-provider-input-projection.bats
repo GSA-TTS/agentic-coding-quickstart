@@ -358,6 +358,18 @@ EOF
   grep -Fq 'alpha.example.gov' "$candidate/spec.yaml"
 }
 
+@test "candidate snapshot rejects malformed provider input manifest with actionable error" {
+  local release="$STUBDIR/release"
+  local kit="$release/integrations/isolation/acq-kits/alpha"
+  _provider_release "$release"; _provider_kit "$release" alpha
+  printf '{this-is-not-json\n' > "$kit/provider-input.json"
+
+  run _acq_provider_input_snapshot "$kit" "$STUBDIR/malformed-candidate"
+  assert_failure
+  assert_output --partial 'acq: invalid provider input manifest: provider-input.json: invalid JSON'
+  refute_output --partial 'Traceback'
+}
+
 @test "pinned Patterns validator rejects facts host outside snapshotted kit allowlist" {
   [ -n "${ACQ_TEST_PATTERNS_REPO:-}" ] || skip "pinned Patterns checkout is provided by required CI"
   [ -n "${ACQ_TEST_PROVIDER_INPUT_PYTHON:-}" ] || skip "pinned validator Python is provided by required CI"
