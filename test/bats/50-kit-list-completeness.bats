@@ -29,7 +29,9 @@ load 'helper'
 
 @test "provider selection: unset preserves the USAi default" {
   load_acq
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
   unset ACQ_PROVIDER_KITS_FROM_ENV ACQ_PROVIDER_KITS_FROM_CLI
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
   ACQ_PROVIDER_KITS=""
   _build_kit_list
 
@@ -39,8 +41,11 @@ load 'helper'
 
 @test "provider selection: explicit empty omits every provider kit" {
   load_acq
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
   ACQ_PROVIDER_KITS=""
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
   ACQ_PROVIDER_KITS_FROM_ENV=1
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
   ACQ_PROVIDER_KITS_FROM_CLI=""
   _build_kit_list
 
@@ -51,7 +56,9 @@ load 'helper'
 
 @test "provider selection: an explicit ref replaces the default provider ref" {
   load_acq
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
   ACQ_PROVIDER_KITS="$STUBDIR/missing-provider-kit"
+  # shellcheck disable=SC2034 # _build_kit_list reads this global dynamically
   ACQ_PROVIDER_KITS_FROM_ENV=1
 
   _build_kit_list
