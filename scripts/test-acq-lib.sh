@@ -498,7 +498,7 @@ case "$_msb_sub" in
       *"test -d '/var/lib/acq/host'"*)
         [ "${STUB_HOST_CONFIG_MOUNT:-1}" = "0" ] && exit 1 || exit 0 ;;
       *".acq-ro-probe"*)
-        [ "${STUB_HOST_CONFIG_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
+        [ "${STUB_HOST_CONFIG_WRITABLE:-0}" = "1" ] && exit 2 || exit 0 ;;
       # `command -v <agent>` (agent-presence probe): controllable so the install
       # path can be exercised. By default the agent is ABSENT (exit 1) so install
       # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq

@@ -158,7 +158,7 @@ SPEC
   assert_regex "$log" 'msb copy .*legacyrobox:/home/agent/cfg/merge\.mjs'
   assert_regex "$log" 'node /home/agent/cfg/merge\.mjs'
   refute_regex "$log" '/var/lib/acq/host/kit-files'
-  assert_output --partial 'has no readable or read-only ADR-0035 host-config mount'
+  assert_output --partial 'has no ADR-0035 read-only host-config record'
 }
 
 @test "msb ro: writable host-config mount falls back to the guest copy" {
@@ -176,7 +176,7 @@ SPEC
   assert_regex "$log" 'msb copy .*writablerobox:/home/agent/cfg/merge\.mjs'
   assert_regex "$log" 'node /home/agent/cfg/merge\.mjs'
   refute_regex "$log" '/var/lib/acq/host/kit-files'
-  assert_output --partial 'has no readable or read-only ADR-0035 host-config mount'
+  assert_output --partial 'has no ADR-0035 read-only host-config record'
 }
 
 @test "msb ro: the create-time host-config mount is read-only" {

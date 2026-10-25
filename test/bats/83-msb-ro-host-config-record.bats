@@ -5,7 +5,7 @@
 # (host key ro-host-config), never the answer of a guest-executed probe. The
 # record means "the create passed the :ro volume flag and the sandbox became
 # exec-ready"; it does not prove the guest mount works (a disagreeing probe only
-# warns, and the heal then fails closed rather than degrading to a guest copy).
+# warns, and acq never degrades to a guest copy on that disagreement).
 #
 # A passwordless-sudo guest controls `sh`/`test`, so a probe result must not be
 # able to flip the staged-:ro path to the guest-writable copy (or the reverse).
@@ -65,8 +65,8 @@ _apply() { # NAME KITDIR RECORD [ENV...]
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'node /var/lib/acq/host/kit-files/'
   refute_regex "$log" 'msb copy .*recmissing:/home/agent/cfg/merge\.mjs'
-  assert_output --partial 'guest probe does not confirm it'
-  assert_output --partial 'will likely FAIL'
+  assert_output --partial 'does not confirm it is present'
+  assert_output --partial 'does not fall back to a guest copy'
 }
 
 @test "ro record: host record wins when the guest probe reports the mount writable" {
@@ -76,15 +76,15 @@ _apply() { # NAME KITDIR RECORD [ENV...]
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'node /var/lib/acq/host/kit-files/'
   refute_regex "$log" 'msb copy .*recwritable:/home/agent/cfg/merge\.mjs'
-  assert_output --partial 'guest probe does not confirm it'
-  assert_output --partial 'will likely FAIL'
+  assert_output --partial 'finds it WRITABLE'
+  assert_output --partial 'may be able to modify'
 }
 
 @test "ro record: a confirming probe is silent" {
   local k="$STUBDIR/k3"; _ro_kit "$k"
   _apply recquiet "$k" 1
   assert_success
-  refute_output --partial 'guest probe does not confirm it'
+  refute_output --partial 'host-config mount but a guest probe'
   assert_regex "$(cat "$CALLS")" 'node /var/lib/acq/host/kit-files/'
 }
 
@@ -95,7 +95,7 @@ _apply() { # NAME KITDIR RECORD [ENV...]
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'msb copy .*norecord:/home/agent/cfg/merge\.mjs'
   refute_regex "$log" '/var/lib/acq/host/kit-files'
-  assert_output --partial 'has no readable or read-only ADR-0035 host-config mount'
+  assert_output --partial 'has no ADR-0035 read-only host-config record'
 }
 
 @test "ro record: a value other than 1 is not a record" {
@@ -146,7 +146,7 @@ _apply() { # NAME KITDIR RECORD [ENV...]
   assert_failure
 }
 
-@test "ro record: stale record from a same-named removed sandbox is cleared on fresh provision" {
+@test "ro record: clear_instance_state helper removes a stale record" {
   local k="$STUBDIR/k8"; _ro_kit "$k"
   run bash -c '
     export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-stale"

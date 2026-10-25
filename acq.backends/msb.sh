@@ -1813,7 +1813,7 @@ EOF
     fi
     if { [ "$_readonly" != "true" ] || [ "$_hcfg_mount_ok" -ne 1 ]; } && [ -n "$src" ] && [ -f "$src" ]; then
       if [ "$_readonly" = "true" ]; then
-        echo "acq(msb): warning: sandbox '$name' has no readable or read-only ADR-0035 host-config mount; copying readonly kit file '$path' into the guest for compatibility. Recreate the sandbox to get tamper-resistant readonly startup code." >&2
+        echo "acq(msb): warning: sandbox '$name' has no ADR-0035 read-only host-config record (older sandbox, or its create did not complete); copying readonly kit file '$path' into the guest for compatibility. Recreate the sandbox to get tamper-resistant readonly startup code." >&2
       fi
       _acq_msb_copy_file_verified "$name" "$src" "$path" "$mode" || {
         echo "acq(msb): error: could not place kit file at ${name}:${path}" >&2
@@ -1885,12 +1885,18 @@ _acq_msb_reset_kit_env() {
 # safe compatibility path: the caller copies the file and prints its warning.
 # The guest probe below is diagnostic only: it can warn about a mismatch but
 # never changes the decision (fail-closed: if the mount is really absent, the
-# staged-path heal fails rather than silently degrading to a guest copy).
+# staged-path commands may fail rather than silently degrading to a guest copy;
+# if it is writable, the warning says so).
 _acq_msb_host_config_mount_available() {
   local name="$1"
   [ "$(acq_host_config_read msb "$name" ro-host-config)" = "1" ] || return 1
-  _acq_msb_host_config_mount_probe "$name" || \
-    echo "acq(msb): warning: sandbox '$name' was created with the read-only host-config mount but a guest probe does not confirm it. Acq trusts the host record and will not fall back to a guest copy, so the kit heal will likely FAIL; recreate the sandbox." >&2
+  local _probe_rc=0
+  _acq_msb_host_config_mount_probe "$name" || _probe_rc=$?
+  case "$_probe_rc" in
+    0) ;;
+    2) echo "acq(msb): warning: sandbox '$name' was created with the read-only host-config mount but a guest probe finds it WRITABLE. Acq trusts the host record, so staged kit code runs from a path the guest may be able to modify. Recreate the sandbox and report this if it persists." >&2 ;;
+    *) echo "acq(msb): warning: sandbox '$name' was created with the read-only host-config mount but a guest probe does not confirm it is present. Acq trusts the host record and does not fall back to a guest copy, so staged kit commands may fail (kit command failures are reported as warnings). Recreate the sandbox if this persists." >&2 ;;
+  esac
   return 0
 }
 
@@ -1900,7 +1906,7 @@ _acq_msb_host_config_mount_probe() {
     "test -d '$ACQ_HOST_CONFIG_GUEST_DIR' && test -x '$ACQ_HOST_CONFIG_GUEST_DIR'" \
     </dev/null >/dev/null 2>&1 || return 1
   _acq_msb_cli exec "$name" -u 0 -- sh -c \
-    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; if : > "$_tmp" 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 1; fi; exit 0' \
+    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; if : > "$_tmp" 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 2; fi; exit 0' \
     sh "$ACQ_HOST_CONFIG_GUEST_DIR" </dev/null >/dev/null 2>&1
 }
 
