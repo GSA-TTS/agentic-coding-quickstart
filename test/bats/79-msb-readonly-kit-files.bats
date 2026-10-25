@@ -161,7 +161,7 @@ SPEC
   assert_output --partial 'has no ADR-0035 read-only host-config record'
 }
 
-@test "msb ro: writable host-config mount falls back to the guest copy" {
+@test "msb ro: no-record sandbox falls back to the guest copy regardless of the writable probe stub" {
   local k="$STUBDIR/writablero"; _ro_kit "$k"
   : > "$CALLS"
   run bash -c '

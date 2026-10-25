@@ -1894,12 +1894,16 @@ _acq_msb_host_config_mount_available() {
   _acq_msb_host_config_mount_probe "$name" || _probe_rc=$?
   case "$_probe_rc" in
     0) ;;
-    2) echo "acq(msb): warning: sandbox '$name' was created with the read-only host-config mount but a guest probe finds it WRITABLE. Acq trusts the host record, so staged kit code runs from a path the guest may be able to modify. Recreate the sandbox and report this if it persists." >&2 ;;
+    2) echo "acq(msb): warning: sandbox '$name' was created with the read-only host-config mount but a guest probe indicates it is WRITABLE. Acq trusts the host record, so staged kit code runs from a path the guest may be able to modify. Recreate the sandbox and report this if it persists." >&2 ;;
     *) echo "acq(msb): warning: sandbox '$name' was created with the read-only host-config mount but a guest probe does not confirm it is present. Acq trusts the host record and does not fall back to a guest copy, so staged kit commands may fail (kit command failures are reported as warnings). Recreate the sandbox if this persists." >&2 ;;
   esac
   return 0
 }
 
+# Exit 0: mount present and not writable; 1: mount absent/unreadable; 2: guest
+# root could write to it. Exit 2 relies on `msb exec` passing the guest exit code
+# through unchanged; that is not live-verified, so the WRITABLE warning is
+# diagnostic only and never affects the decision.
 _acq_msb_host_config_mount_probe() {
   local name="$1"
   _acq_msb_cli exec "$name" -u agent -- sh -c \

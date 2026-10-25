@@ -76,7 +76,7 @@ _apply() { # NAME KITDIR RECORD [ENV...]
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'node /var/lib/acq/host/kit-files/'
   refute_regex "$log" 'msb copy .*recwritable:/home/agent/cfg/merge\.mjs'
-  assert_output --partial 'finds it WRITABLE'
+  assert_output --partial 'indicates it is WRITABLE'
   assert_output --partial 'may be able to modify'
 }
 
