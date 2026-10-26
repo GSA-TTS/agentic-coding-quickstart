@@ -4388,18 +4388,29 @@ _acq_provider_input_safe_mkdir() {
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
-fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
-try:
-    for part in (p for p in path.split('/') if p):
-        try:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        except FileNotFoundError:
-            os.mkdir(part, 0o755, dir_fd=fd)
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit('unsafe provider-input path')
-        os.close(fd); fd = child
-finally:
-    os.close(fd)
+if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'):
+    # POSIX: openat-style traversal with O_NOFOLLOW so no component follows a
+    # symlink (the host-owned projection tree must not be redirected).
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in (p for p in path.split('/') if p):
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                os.mkdir(part, 0o755, dir_fd=fd)
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit('unsafe provider-input path')
+            os.close(fd); fd = child
+    finally:
+        os.close(fd)
+else:
+    # MSYS/Windows Python lacks O_DIRECTORY/O_NOFOLLOW/dir_fd, and MSYS2 hands
+    # argv in Windows form (C:/...), which manual `/`-splitting would corrupt
+    # (producing a bogus "/C:" component). os.makedirs is drive-aware; reject a
+    # symlinked/reparse-point result instead of walking components.
+    os.makedirs(path, mode=0o755, exist_ok=True)
+    if os.path.islink(path) or not os.path.isdir(path):
+        raise SystemExit('unsafe provider-input path')
 PY
 }
 
@@ -4410,14 +4421,18 @@ _acq_provider_input_safe_dir() {
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
-fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
-try:
-    for part in (p for p in path.split('/') if p):
-        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit(1)
-        os.close(fd); fd = child
-finally:
-    os.close(fd)
+if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'):
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in (p for p in path.split('/') if p):
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit(1)
+            os.close(fd); fd = child
+    finally:
+        os.close(fd)
+else:
+    # MSYS/Windows: reject a symlinked/reparse-point path and require a real dir.
+    if os.path.islink(path) or not os.path.isdir(path): raise SystemExit(1)
 PY
 }
 
@@ -4511,6 +4526,26 @@ acq_provider_input_lock_acquire() {
   printf '%s\n' "$lock"
 }
 
+# True (0) on MSYS2/Git-Bash (MINGW/MSYS/CYGWIN), where `ps` does not accept
+# the `-o FIELD=` output-format specifier and instead prints a fixed table via
+# `ps -p PID` (columns: PID PPID PGID WINPID TTY UID STIME COMMAND).
+_acq_provider_input_msys_ps() {
+  [ -n "${LOCALAPPDATA:-}" ] || return 1
+  case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac
+}
+
+# Parent PID of PID (empty on failure), portable across GNU/macOS and MSYS.
+# GNU/macOS: `ps -o ppid= -p PID`. MSYS: PPID is column 2 of `ps -p PID`.
+_acq_provider_input_parent_pid() {
+  local pid="${1:-}"
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  if _acq_provider_input_msys_ps; then
+    ps -p "$pid" 2>/dev/null | awk 'NR==2 {print $2}'
+  else
+    ps -o ppid= -p "$pid" 2>/dev/null
+  fi | tr -d '[:space:]'
+}
+
 # Start a real process whose lifetime is tied to the transaction subshell. Bash
 # 3.2 preserves $$ across subshells and has no BASHPID, so the lock records this
 # guardian PID instead. The guardian exits if its transaction parent disappears,
@@ -4536,7 +4571,7 @@ _acq_provider_input_guardian_start() {
     done
   ' sh "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" &
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$!
-  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(ps -o ppid= -p "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" 2>/dev/null | tr -d '[:space:]')
+  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(_acq_provider_input_parent_pid "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID")
   case "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" in ""|*[!0-9]*) _acq_provider_input_guardian_stop; return 1 ;; esac
   export _ACQ_PROVIDER_INPUT_GUARDIAN_PID
   export _ACQ_PROVIDER_INPUT_TRANSACTION_PID
@@ -4639,7 +4674,13 @@ _acq_provider_input_signal_exit() {
 _acq_provider_input_process_identity() {
   local pid="${1:-}"
   case "$pid" in ""|*[!0-9]*) return 1 ;; esac
-  ps -o lstart= -p "$pid" 2>/dev/null | tr -d '[:space:]' | grep .
+  if _acq_provider_input_msys_ps; then
+    # MSYS has no lstart; WINPID (column 4) is the stable, unique Windows
+    # process id, so it distinguishes a reused MSYS PID from the original owner.
+    ps -p "$pid" 2>/dev/null | awk 'NR==2 {print $4}'
+  else
+    ps -o lstart= -p "$pid" 2>/dev/null
+  fi | tr -d '[:space:]' | grep .
 }
 
 acq_provider_input_lock_release() {
@@ -4692,44 +4733,52 @@ _acq_provider_input_snapshot() {
   python3 - "$1" "$2" <<'PY'
 import json, os, stat, sys
 kit, target = sys.argv[1:]
-def open_relative(root, value):
-    if not isinstance(value, str) or value.startswith('/') or not value or any(part in ('', '.', '..') for part in value.split('/')):
+def safe_path(base, rel):
+    if not isinstance(rel, str) or rel.startswith('/') or not rel or any(part in ('', '.', '..') for part in rel.split('/')):
         raise SystemExit('unsafe provider artifact path')
-    fd = os.dup(root)
-    try:
-        for part in value.split('/'):
-            nextfd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd); fd = nextfd
-        if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit('unsafe provider artifact')
-        return fd
-    except:
-        os.close(fd); raise
-root = os.open(kit, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'):
+        # POSIX: descriptor-relative, no-follow walk rejects symlinks and any
+        # path outside the fetched kit.
+        fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in rel.split('/'):
+                nextfd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd); fd = nextfd
+            if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit('unsafe provider artifact')
+        finally:
+            os.close(fd)
+    else:
+        # MSYS/Windows: no O_NOFOLLOW/dir_fd. Reject symlinks per component.
+        cur = base
+        for part in rel.split('/'):
+            cur = os.path.join(cur, part)
+            if os.path.islink(cur): raise SystemExit('unsafe provider artifact')
+        if not os.path.isfile(cur): raise SystemExit('unsafe provider artifact')
+    return os.path.join(base, rel)
+if os.path.islink(kit) or not os.path.isdir(kit):
+    raise SystemExit('unsafe provider kit path')
+manifest_path = safe_path(kit, 'provider-input.json')
+with open(manifest_path, encoding='utf-8') as stream: manifest_bytes = stream.read()
 try:
-    manifest_fd = open_relative(root, 'provider-input.json')
-    with os.fdopen(manifest_fd, encoding='utf-8') as stream: manifest_bytes = stream.read()
-    try:
-        bundle = json.loads(manifest_bytes)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(
-            'acq: invalid provider input manifest: provider-input.json: '
-            f'invalid JSON at line {exc.lineno} column {exc.colno}'
-        )
-    os.mkdir(target, 0o700)
-    with open(os.path.join(target, 'provider-input.json'), 'x', encoding='utf-8') as stream: stream.write(manifest_bytes)
-    for path in ('spec.yaml', bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):
-        source = open_relative(root, path)
-        destination = os.path.join(target, path)
-        os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
-        with os.fdopen(source, 'rb') as src, open(destination, 'xb') as dst:
-            source_mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode)
-            while True:
-                chunk = src.read(1024 * 1024)
-                if not chunk: break
-                dst.write(chunk)
-            os.fchmod(dst.fileno(), source_mode)
-finally:
-    os.close(root)
+    bundle = json.loads(manifest_bytes)
+except json.JSONDecodeError as exc:
+    raise SystemExit(
+        'acq: invalid provider input manifest: provider-input.json: '
+        f'invalid JSON at line {exc.lineno} column {exc.colno}'
+    )
+os.mkdir(target, 0o700)
+with open(os.path.join(target, 'provider-input.json'), 'x', encoding='utf-8') as stream: stream.write(manifest_bytes)
+for path in ('spec.yaml', bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):
+    source = safe_path(kit, path)
+    destination = os.path.join(target, path)
+    os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
+    source_mode = stat.S_IMODE(os.stat(source).st_mode)
+    with open(source, 'rb') as src, open(destination, 'xb') as dst:
+        while True:
+            chunk = src.read(1024 * 1024)
+            if not chunk: break
+            dst.write(chunk)
+    os.chmod(destination, source_mode)
 PY
 }
 
