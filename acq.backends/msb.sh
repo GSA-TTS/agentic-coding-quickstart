@@ -1809,7 +1809,7 @@ EOF
       else
         # Recorded read-only create: never degrade to a guest-writable copy.
         echo "acq(msb): error: could not stage read-only kit file '$path' for '$name'." >&2
-        echo "acq(msb):   No guest-copy fallback is taken because the sandbox was created with a read-only host config; recreate the sandbox or fix the host state directory." >&2
+        echo "acq(msb):   No guest-copy fallback is taken because the sandbox was created with a read-only host config; fix the host state directory and re-run, or recreate the sandbox." >&2
         return 1
       fi
     fi
@@ -1888,7 +1888,8 @@ _acq_msb_reset_kit_env() {
 # The guest probe below is diagnostic only: it can warn about a mismatch but
 # never changes the decision (fail-closed: if the mount is really absent, the
 # staged-path commands may fail rather than silently degrading to a guest copy;
-# if it is writable, the warning says so).
+# if it is writable, the warning says so). Likewise a recorded sandbox whose host
+# staging step fails aborts the apply instead of copying the file into the guest.
 _acq_msb_host_config_mount_available() {
   local name="$1"
   [ "$(acq_host_config_read msb "$name" ro-host-config)" = "1" ] || return 1
