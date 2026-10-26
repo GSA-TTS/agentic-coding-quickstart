@@ -324,8 +324,11 @@ SANDBOX='<sandbox-name-from-acq-output>'
 
 To verify provider removal, create a second fresh sandbox with the supported
 `--no-provider-kits` flag (`acq run`/`acq create`; see `docs/howto/acq.md`,
-"Provider kits"). Run it with no USAi credential seeded for the sandbox, so a
-credential gate would show up as a prompt or failure. Then assert omission
+"Provider kits"). Run it with no USAi credential available to acq (remove any
+global USAi secret first, or use a clean host profile), so a credential gate
+would show up as a prompt or failure. Run the block as a script, not pasted into
+an interactive shell: its failure paths use `exit`, and a failed run leaves the
+sandbox in place for inspection (remove it with `acq rm`). Then assert omission
 explicitly; any failed assertion is a failure, not `BLOCKED`:
 
 ```bash
@@ -333,9 +336,11 @@ BACKEND=sbx # repeat with BACKEND=msb
 RUN_OUT=$(mktemp "${TMPDIR:-/tmp}/acq-provider-omit.XXXXXX")
 ./acq --backend "$BACKEND" run opencode --no-provider-kits "$LIVE_ROOT" \
   -- --version >"$RUN_OUT" 2>&1 || { echo "FAIL: create/run failed" >&2; cat "$RUN_OUT"; exit 1; }
-SANDBOX='<sandbox-name-from-acq-output>'
+SANDBOX='<sandbox-name-from-acq-output>' # edit before continuing; do not paste unedited
+case "$SANDBOX" in '<'*) echo "set SANDBOX first" >&2; exit 2 ;; esac
 
-# 1) No USAi kit and no USAi credential gate in the create output.
+# 1) No USAi kit and no USAi credential gate in the create output. This is a
+#    best-effort text check; assertions 2 and 3 are the substantive ones.
 ! grep -Eiq 'usai-provider|USAI_API_KEY|usai credential' "$RUN_OUT" \
   || { echo "FAIL: USAi kit or credential gate appeared" >&2; exit 1; }
 

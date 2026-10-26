@@ -1399,7 +1399,7 @@ verify_oci_kit() {
 # the model keys of the rendered global OpenCode config for that provider, and
 # the `opencode models` output for that provider. Both observed sets must equal
 # the snapshot set exactly. Not yet exercised on a live SBX/MSB host.
-PROVIDER_MODEL_IDENTITY_SCRIPT=$(cat <<'EOS'
+IFS= read -r -d '' PROVIDER_MODEL_IDENTITY_SCRIPT <<'EOS' || true
 prov=$1
 node -e '
 const fs = require("fs"), path = require("path");
@@ -1413,7 +1413,6 @@ for (const id of Object.keys((((cfg.provider || {})[prov]) || {}).models || {}))
 ' "$prov" || exit 1
 opencode models | sed -n "s|^${prov}/|CLI |p"
 EOS
-)
 
 # verify_provider_model_identity BACKEND PROVIDER OUTPUT — compare the three
 # sets in OUTPUT (see PROVIDER_MODEL_IDENTITY_SCRIPT); fail on missing or
