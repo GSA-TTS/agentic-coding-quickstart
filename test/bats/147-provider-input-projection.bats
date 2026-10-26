@@ -741,6 +741,14 @@ EOF
 # Ignore TERM until the lock assertion completes; bound fixture failure cleanup.
 trap '' TERM
 printf '%s\n' "$$" > "$MSB_PID_FILE"
+# Signal only after the wrapper has registered this PID with the guardian; a
+# TERM handled before registration would see an empty child registry.
+attempt=0
+while ! grep -qx "$$" "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" 2>/dev/null; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 100 ] || exit 125
+  sleep 0.1
+done
 kill -TERM "$PPID" 2>/dev/null || true
 attempt=0
 while [ ! -e "$MSB_RELEASE_FILE" ]; do
@@ -849,6 +857,14 @@ case "${1:-}" in
   create)
     trap '' TERM
     printf '%s\n' "$$" > "$MSB_PID_FILE"
+    # Signal only after the wrapper has registered this PID with the guardian; a
+    # TERM handled before registration would see an empty child registry.
+    attempt=0
+    while ! grep -qx "$$" "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" 2>/dev/null; do
+      attempt=$((attempt + 1))
+      [ "$attempt" -lt 100 ] || exit 125
+      sleep 0.1
+    done
     kill -TERM "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" 2>/dev/null || true
     sleep 2
     exit 0 ;;
