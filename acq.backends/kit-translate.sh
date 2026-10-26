@@ -195,7 +195,12 @@ kit_translate_fetch() {
         )
       }
       local _ferr _anon_cfg
-      _anon_cfg="-c credential.helper= -c url.https://github.com/.insteadOf="
+      # An empty insteadOf value makes git treat the empty string as a match
+      # prefix and prepend https://github.com/ to every URL (git doubles the
+      # URL and the fetch 404s). Use an IDENTITY rewrite instead: it is a no-op
+      # that still shadows a user's url.<x>.insteadOf=https://github.com/ rewrite
+      # for the anonymous attempt, which is the intent here.
+      _anon_cfg="-c credential.helper= -c url.https://github.com/.insteadOf=https://github.com/"
       if _ferr=$(_kit_git_fetch "$_anon_cfg"); then
         :
       elif _ferr=$(_kit_git_fetch ""); then
