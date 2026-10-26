@@ -341,10 +341,33 @@ _fake_source_tree() {
   refute_output --partial "agentic-coding-patterns|$PATTERNS_KIT_REF|"
 }
 
-@test "an unresolvable provider_kit fails closed instead of dropping the provider" {
+@test "an unresolvable provider_kit blocks create/run but not the management verbs" {
   _acq_config_write_field provider_kit 'evil-kits/x-provider'
 
-  run _build_kit_list
+  # Building the kit list LATCHES the error instead of aborting: every verb runs
+  # it via acq_resolve_backend, and configure/kit-source are how the user repairs
+  # the config. The latch only becomes fatal at the create/run gate. Called
+  # directly (not via `run`, which runs in a subshell and would drop the latch).
+  _build_kit_list
+  run _acq_require_provider_selection
+  assert_failure
+  assert_output --partial 'could not be resolved'
+
+  # Management verbs keep working with the broken config in place.
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" configure
+  assert_success
+  run env ACQ_BACKEND=msb "$ACQ" kit-source add github.com/acme/other --ref abc123
+  assert_success
+
+  # create/run fail closed rather than shipping a sandbox without the provider.
+  local proj="$STUBDIR/bad-provider-proj"; mkdir -p "$proj"
+  rm -f "$STUBDIR/.msb_created"
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 STUB_OPENCODE_OK=1 "$ACQ" create shell "$proj"
+  assert_failure
+  assert_output --partial 'provider kit could not be resolved'
+  refute [ -f "$STUBDIR/.msb_created" ]
+
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 STUB_OPENCODE_OK=1 "$ACQ" run shell "$proj"
   assert_failure
   assert_output --partial 'provider kit could not be resolved'
 }

@@ -234,6 +234,14 @@ ACQ_PUBLISH_FLAGS=()
 # shellcheck disable=SC2034  # consumed by the sbx allowlist sync
 KIT_SOURCE_PREFIXES=()
 
+# Latched provider-selection error. acq_resolve_backend builds the kit list for
+# EVERY verb, so a bad `provider_kit:`/`kit_sources:` must not lock the user out of
+# the verbs that repair it (configure, kit-source, backend, doctor, help). The
+# failure is recorded here and turned into a hard stop by
+# _acq_require_provider_selection, which only create/run call.
+# shellcheck disable=SC2034  # read by _acq_require_provider_selection
+ACQ_PROVIDER_SELECTION_ERROR="" 
+
 # Transitional fallback defaults for the pinned usai-provider kit. ADR-0030's
 # target state is for the kit to export these provider facts as static metadata
 # consumable before sandbox creation. acq keeps these defaults only for backend
@@ -921,22 +929,26 @@ acq_agent_builtin_kit_ready() {
 }
 
 _acq_selected_support_kit_refs() {
-  local name kit provider_refs
+  local skip_provider="${1:-0}" name kit provider_refs
   kit=$(_acq_builtin_kit_ref zscaler-ca-certificate) || return 1
   printf '%s\n' "$kit"
   # Captured, NOT consumed through a process substitution: a failed provider-kit
-  # resolution must abort the run (fail closed) instead of silently dropping the
-  # provider kit and continuing without one.
-  provider_refs=$(_acq_selected_provider_kit_refs) || {
-    echo "acq: the configured provider kit could not be resolved (see above)." >&2
-    echo "     Fix 'provider_kit:' / 'kit_sources:' or unset ACQ_PROVIDER_KITS." >&2
-    return 1
-  }
-  while IFS= read -r kit; do
-    [ -n "$kit" ] && printf '%s\n' "$kit"
-  done <<EOF
+  # resolution is reported to the caller instead of silently dropping the provider
+  # kit. SKIP_PROVIDER=1 yields the provider-free list, which is what the
+  # management verbs get to use while a config typo still exists.
+  if [ "$skip_provider" != "1" ]; then
+    provider_refs=$(_acq_selected_provider_kit_refs) || {
+      echo "acq: the configured provider kit could not be resolved (see above)." >&2
+      echo "     Fix 'provider_kit:' / 'kit_sources:' (acq kit-source ls)," >&2
+      echo "     or unset ACQ_PROVIDER_KITS." >&2
+      return 1
+    }
+    while IFS= read -r kit; do
+      [ -n "$kit" ] && printf '%s\n' "$kit"
+    done <<EOF
 $provider_refs
 EOF
+  fi
   for name in agentic-coding-playbook git-ssh-sign; do
     kit=$(_acq_builtin_kit_ref "$name") || return 1
     printf '%s\n' "$kit"
@@ -976,6 +988,19 @@ acq_print_selected_agent_kit() {
   fi
 }
 
+# _acq_require_provider_selection — the create/run gate for a provider kit that
+# could not be resolved while the kit list was built. Management verbs deliberately
+# ignore the latch (they are how the user fixes the config); building a sandbox
+# without the selected provider would silently ship a different environment.
+_acq_require_provider_selection() {
+  [ -n "${ACQ_PROVIDER_SELECTION_ERROR:-}" ] || return 0
+  echo "acq: the configured provider kit could not be resolved:" >&2
+  printf '%s\n' "$ACQ_PROVIDER_SELECTION_ERROR" >&2
+  echo "     Fix 'provider_kit:' / 'kit_sources:' (see: acq kit-source ls)," >&2
+  echo "     or unset ACQ_PROVIDER_KITS." >&2
+  return 1
+}
+
 # Assemble the full kit list: selected built-ins, then extras.
 # Zscaler CA trust FIRST (see ACQ_KIT_NAMES) so later network-fetching kits
 # succeed behind a TLS-intercepting proxy.
@@ -983,7 +1008,16 @@ acq_print_selected_agent_kit() {
 _build_kit_list() {
   local agent="${1:-}" kit support_refs
   KITS=()
-  support_refs=$(_acq_selected_support_kit_refs) || return 1
+  # This runs for EVERY verb (acq_resolve_backend), so a provider-selection
+  # failure is LATCHED here and only enforced by create/run through
+  # _acq_require_provider_selection. The kit list still builds (without the
+  # provider) so `acq configure`/`kit-source`/`help` can repair the config.
+  if support_refs=$(_acq_selected_support_kit_refs 2>/dev/null); then
+    ACQ_PROVIDER_SELECTION_ERROR=""
+  else
+    ACQ_PROVIDER_SELECTION_ERROR=$(_acq_selected_support_kit_refs 2>&1 >/dev/null || true)
+    support_refs=$(_acq_selected_support_kit_refs 1) || return 1
+  fi
   while IFS= read -r kit; do
     [ -n "$kit" ] && KITS+=("$kit")
   done <<EOF

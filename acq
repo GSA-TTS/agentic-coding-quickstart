@@ -1212,6 +1212,7 @@ case "$subcommand" in
     _acq_apply_configured_extra_kits || exit 1
     create_time_kit_picker
     _build_kit_list "$create_agent"
+    _acq_require_provider_selection || exit 1
     # Pre-flight: validate the workspace path before provisioning (#issue).
     ws=$(workspace_path "$@")
     preflight_workspace_path "$ws" || exit 1
@@ -1346,6 +1347,7 @@ case "$subcommand" in
         _acq_apply_configured_extra_kits || exit 1
         create_time_kit_picker
         _build_kit_list "$first"
+        _acq_require_provider_selection || exit 1
 
 
         # Nudge toward a per-sandbox scoped GitHub token BEFORE provisioning, for
@@ -1872,7 +1874,10 @@ case "$subcommand" in
         acq_kit_source_rm "$1" || exit 1
         # Revoke the prefix from the backend's own allowlist too (sbx unions on
         # create; without this a removed source stays fetchable by the backend).
-        acq_backend_prepare
+        # NO acq_backend_prepare here: this is a config-only verb, and on msb a
+        # prepare can run `msb doctor --fix` (host mutation). acq_resolve_backend
+        # has already loaded the active adapter, so the hook is available when the
+        # backend implements one.
         if command -v acq_backend_kit_source_revoked >/dev/null 2>&1; then
           revoked_repo=$(_acq_kit_source_normalize_repo "$1" 2>/dev/null) || revoked_repo=""
           if [ -n "$revoked_repo" ]; then
