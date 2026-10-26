@@ -367,3 +367,84 @@ PRELUDE
   assert_output --partial 'rm:--backend:msb:rm:box'
   assert_line 'FINAL_RC=1'
 }
+
+# ---------------------------------------------------------------------------
+# Identity-bound provider model check (snapshot vs rendered config vs CLI)
+# ---------------------------------------------------------------------------
+
+_identity_check() { # OUTPUT -> prints PASS/FAIL counters and verifier output
+  OUT="$1" run bash -c '
+    REPO_ROOT="'"$REPO_ROOT"'"
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "$REPO_ROOT/scripts/verify-backends"
+    PASS=0 FAIL=0
+    if verify_provider_model_identity sbx usai "$OUT"; then rc=0; else rc=$?; fi
+    printf "RC=%s PASS=%s FAIL=%s\n" "$rc" "$PASS" "$FAIL"
+  '
+}
+
+@test "model identity: exact match across snapshot, config and CLI passes" {
+  _identity_check $'SNAPSHOT a\nSNAPSHOT b\nCONFIG b\nCONFIG a\nCLI a\nCLI b'
+  assert_success
+  assert_output --partial 'match the projected usai snapshot (2 models)'
+  assert_line 'RC=0 PASS=1 FAIL=0'
+}
+
+@test "model identity: a stale unrelated usai model in the CLI output fails" {
+  _identity_check $'SNAPSHOT a\nCONFIG a\nCLI stale-model'
+  assert_success
+  assert_output --partial 'CLI usai models differ'
+  assert_output --partial '| stale-model'
+  assert_output --partial '| a'
+  assert_line 'RC=1 PASS=0 FAIL=1'
+}
+
+@test "model identity: a model missing from the rendered config fails" {
+  _identity_check $'SNAPSHOT a\nSNAPSHOT b\nCONFIG a\nCLI a\nCLI b'
+  assert_success
+  assert_output --partial 'CONFIG usai models differ'
+  assert_output --partial 'missing from CONFIG'
+  assert_line 'RC=1 PASS=0 FAIL=1'
+}
+
+@test "model identity: an extra model in the rendered config fails" {
+  _identity_check $'SNAPSHOT a\nCONFIG a\nCONFIG extra\nCLI a'
+  assert_success
+  assert_output --partial 'unexpected in CONFIG'
+  assert_output --partial '| extra'
+  assert_line 'RC=1 PASS=0 FAIL=1'
+}
+
+@test "model identity: an empty snapshot cannot bind identity and fails" {
+  _identity_check $'CONFIG a\nCLI a'
+  assert_success
+  assert_output --partial 'snapshot lists no models'
+  assert_line 'RC=1 PASS=0 FAIL=1'
+}
+
+@test "model identity: guest script reads snapshot, rendered config and CLI output" {
+  command -v node >/dev/null || skip "node not available"
+  local root="$STUBDIR/pir" home="$STUBDIR/idhome" bin="$STUBDIR/idbin"
+  mkdir -p "$root/models/providers/usai" "$home/.config/opencode" "$bin"
+  printf '{"schemaVersion":"acq-neutral-model-catalog/v1","providerId":"usai","models":[{"id":"m1"},{"id":"m2"}]}\n' \
+    > "$root/models/providers/usai/snapshot.json"
+  printf '// acq-provider-config-state: abc\n{"provider":{"usai":{"models":{"m1":{},"m2":{}}},"other":{"models":{"zz":{}}}}}\n' \
+    > "$home/.config/opencode/opencode.jsonc"
+  printf '#!/bin/sh\nprintf "usai/m1\\nusai/m2\\nother/zz\\n"\n' > "$bin/opencode"
+  chmod +x "$bin/opencode"
+  run bash -c '
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    export ACQ_PROVIDER_INPUT_ROOT="'"$root"'" HOME="'"$home"'" PATH="'"$bin"':$PATH"
+    sh -c "$PROVIDER_MODEL_IDENTITY_SCRIPT" sh usai
+  '
+  assert_success
+  assert_output $'SNAPSHOT m1\nSNAPSHOT m2\nCONFIG m1\nCONFIG m2\nCLI m1\nCLI m2'
+}
+
+@test "model identity: the live verifier no longer relies on a bare usai/ prefix grep" {
+  run grep -n 'opencode models | grep -q' "$REPO_ROOT/scripts/verify-backends"
+  assert_failure
+}

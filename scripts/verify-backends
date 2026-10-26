@@ -1391,6 +1391,57 @@ verify_oci_kit() {
   fi
 }
 
+# Identity-bound provider model check. The expected model IDs come from the
+# read-only projected snapshot the sandbox was given
+# ($ACQ_PROVIDER_INPUT_ROOT/models/providers/<provider>/snapshot.json, the same
+# projection the facts check above reads). The guest script prints one
+# "SNAPSHOT <id>", "CONFIG <id>" or "CLI <id>" line per model: the snapshot IDs,
+# the model keys of the rendered global OpenCode config for that provider, and
+# the `opencode models` output for that provider. Both observed sets must equal
+# the snapshot set exactly. Not yet exercised on a live SBX/MSB host.
+PROVIDER_MODEL_IDENTITY_SCRIPT=$(cat <<'EOS'
+prov=$1
+node -e '
+const fs = require("fs"), path = require("path");
+const prov = process.argv[1];
+const snap = JSON.parse(fs.readFileSync(path.join(process.env.ACQ_PROVIDER_INPUT_ROOT, "models/providers", prov, "snapshot.json"), "utf8"));
+for (const m of snap.models) console.log("SNAPSHOT " + m.id);
+const file = path.join(process.env.HOME, ".config/opencode/opencode.jsonc");
+const text = fs.readFileSync(file, "utf8").split("\n").filter((l) => !l.startsWith("//")).join("\n");
+const cfg = JSON.parse(text);
+for (const id of Object.keys((((cfg.provider || {})[prov]) || {}).models || {})) console.log("CONFIG " + id);
+' "$prov" || exit 1
+opencode models | sed -n "s|^${prov}/|CLI |p"
+EOS
+)
+
+# verify_provider_model_identity BACKEND PROVIDER OUTPUT — compare the three
+# sets in OUTPUT (see PROVIDER_MODEL_IDENTITY_SCRIPT); fail on missing or
+# unexpected IDs and print the differences.
+verify_provider_model_identity() {
+  local backend="$1" provider="$2" out="$3" kind
+  local expected observed missing extra ok=1
+  expected=$(printf '%s\n' "$out" | tr -d '\r' | sed -n 's/^SNAPSHOT //p' | LC_ALL=C sort -u | sed '/^$/d')
+  if [ -z "$expected" ]; then
+    fail "${backend}: projected ${provider} snapshot lists no models (cannot bind identity)"
+    dump "model identity output" "$out"
+    return 1
+  fi
+  for kind in CONFIG CLI; do
+    observed=$(printf '%s\n' "$out" | tr -d '\r' | sed -n "s/^${kind} //p" | LC_ALL=C sort -u | sed '/^$/d')
+    missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$observed") | sed '/^$/d')
+    extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$observed") | sed '/^$/d')
+    if [ -n "$missing" ] || [ -n "$extra" ]; then
+      ok=0
+      fail "${backend}: ${kind} ${provider} models differ from the projected snapshot"
+      dump "missing from ${kind} (expected by snapshot)" "$missing"
+      dump "unexpected in ${kind} (not in snapshot)" "$extra"
+    fi
+  done
+  [ "$ok" -eq 1 ] || return 1
+  pass "${backend}: rendered config and opencode models match the projected ${provider} snapshot ($(printf '%s\n' "$expected" | wc -l | tr -d ' ') models)"
+}
+
 # verify_agent_install BACKEND — provision an `opencode` sandbox (not `shell`)
 # and assert the agent binary is actually installed and launchable. This catches
 # the class of bug where a sandbox comes up but the agent was never installed
@@ -1452,11 +1503,11 @@ verify_agent_install() {
     dump "exec output" "$LAST_OUT"
   fi
 
-  if run_acq "exec opencode-models" --backend "$backend" exec "$aname" -- sh -c \
-      'opencode models | grep -q "^usai/"'; then
-    pass "${backend}: opencode models lists projected USAi models"
+  if run_acq "exec opencode-model-identity" --backend "$backend" exec "$aname" -- sh -c \
+      "$PROVIDER_MODEL_IDENTITY_SCRIPT" sh usai; then
+    verify_provider_model_identity "$backend" usai "$LAST_OUT"
   else
-    fail "${backend}: opencode models did not list projected USAi models"
+    fail "${backend}: could not collect provider model identity from the sandbox"
     dump "exec output" "$LAST_OUT"
   fi
 
