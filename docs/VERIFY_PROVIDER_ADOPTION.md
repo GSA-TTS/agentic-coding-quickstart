@@ -26,24 +26,26 @@ host. Real projected parser validation requires a live backend run (see
 ## Merge Gate
 
 Provider-neutral adoption is **not** shown to be complete by this document. The
-table below records what has been observed and what is still required.
+sections below record what has been observed and what is still required; per-row
+results live in the Live Validation Record.
 
 **Observed so far**
 
 - Offline Bats seam tests and CI (`146`, `147` and neighbors): stubbed backends
   only; they prove acq's decision logic, not live SBX or MSB behavior.
 - Earlier live PASS rows in the Live Validation Record (2026-10-24 and
-  2026-10-25). Those used the previous prefix-only model check
-  (`opencode models | grep "^usai/"`) and an earlier head of this branch. They
-  make no claim about the identity-bound check or the current revision.
+  2026-10-25), observed on earlier heads of this branch. Any model-listing
+  evidence in them came from the previous prefix-only check
+  (`opencode models | grep "^usai/"`) or a manual `opencode models`. They make
+  no claim about the identity-bound check or the current revision.
 
 **Required before merge (not yet done)**
 
 1. Run the updated `scripts/verify-backends` identity-bound model check
    (projected snapshot vs rendered OpenCode config vs `opencode models`) on a
    real SBX host and a real MSB host.
-2. Run the `--no-provider-kits` removal procedure (see "Provider removal" under
-   the live commands) on real SBX and MSB, including all three omission
+2. Run the `--no-provider-kits` removal procedure (the **Provider removal**
+   paragraph in the live-commands block below) on real SBX and MSB, including all three omission
    assertions.
 3. Record each result as `PASS`, `FAIL`, or `BLOCKED`, with the backend version,
    timestamp, and the **tested revision SHA**, replacing the PENDING row.
