@@ -1277,8 +1277,11 @@ _acq_msb_fetch_kit() {
       git+*|*://*) printf '%s\n' "$ACQ_MSB_KIT_LOCAL_DIR"; return 0 ;;
     esac
   fi
-  # Derive a stable cache subdir from the ref (sha + dir tail).
-  slug=$(printf '%s' "$kitref" | tr -c 'A-Za-z0-9._-' '_' )
+  # Derive a stable, SHORT cache subdir from the ref. The full sanitized ref
+  # (URL + sha + dir) can exceed Windows MAX_PATH once git materializes
+  # .git/objects/pack/* under it ("Filename too long" on fetch), so key the
+  # cache by a hash of the ref instead — deterministic and collision-resistant.
+  slug=$(printf '%s' "$kitref" | git hash-object --stdin)
   dest="${ACQ_MSB_KIT_CACHE}/${slug}"
   if [ -d "$dest/.git" ]; then
     # Already fetched — recompute the kit subdir path from the ref's dir=.
