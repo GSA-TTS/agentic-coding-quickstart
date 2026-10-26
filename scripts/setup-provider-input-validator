@@ -3,38 +3,72 @@ set -euo pipefail
 IFS=$'\n\t'
 
 APPLY=0
+ONLINE=0
 ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-LEGACY_TARGET="$ROOT/.acq-tools/provider-input-validator"
-TARGET="$ROOT/.acq-tools/provider-input-validator.current"
+DATA_HOME="${XDG_DATA_HOME:-${HOME:-}/.local/share}"
+TOOLS_DIR="${ACQ_PROVIDER_INPUT_DATA_DIR:-$DATA_HOME/acq/provider-input-validator}"
+TARGET="$TOOLS_DIR/provider-input-validator.current"
 REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements.txt"
-TOOLS_DIR="$ROOT/.acq-tools"
+WHEELHOUSE="${ACQ_PROVIDER_INPUT_WHEELHOUSE:-}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/setup-provider-input-validator [--apply] [--help]
+Usage: scripts/setup-provider-input-validator [--apply] [--online] [--help]
 
-Create the project-local Python environment used for provider-input validation.
+Create the user-data Python environment used for provider-input validation.
 The default is a dry run. Pass --apply to create or update the environment.
+
+Options:
+  --apply   Build or update the runtime (default is a dry run).
+  --online  Download packages from PyPI using the hash-locked requirements
+            instead of a local wheelhouse. Use this for git checkouts that
+            have no wheelhouse. Network access is restricted to this command;
+            it never occurs during "acq create".
+  --help    Show this message.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1 ;;
+    --online) ONLINE=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
 
-command -v python3 >/dev/null 2>&1 || {
-  echo "python3 is required" >&2
-  exit 2
+select_bootstrap_python() {
+  local candidate candidates host_os
+  if [ -n "${ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON:-}" ]; then
+    [ -x "$ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON" ] || return 1
+    printf '%s\n' "$ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON"
+    return 0
+  fi
+  host_os=${ACQ_PROVIDER_INPUT_HOST_OS:-$(uname -s 2>/dev/null)}
+  if [ -n "${ACQ_PROVIDER_INPUT_BOOTSTRAP_CANDIDATES:-}" ]; then
+    candidates=$ACQ_PROVIDER_INPUT_BOOTSTRAP_CANDIDATES
+  elif [ "$host_os" = Darwin ]; then
+    candidates=$(printf '%s\n' python3.14 python3.13 python3.12 python3)
+  else
+    candidates=$(printf '%s\n' python3.12 python3)
+  fi
+  while IFS= read -r candidate; do
+    command -v "$candidate" 2>/dev/null && return 0
+  done <<EOF
+$candidates
+EOF
+  return 1
 }
-case "$(uname -s 2>/dev/null)-$(uname -m 2>/dev/null)" in
-  Linux-x86_64|Linux-aarch64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-linux.txt" ;;
-  Darwin-arm64|Darwin-x86_64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-macos.txt" ;;
-  MINGW*|MSYS*|CYGWIN*) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-windows.txt" ;;
+
+HOST_OS="${ACQ_PROVIDER_INPUT_HOST_OS:-$(uname -s 2>/dev/null)}"
+HOST_ARCH="${ACQ_PROVIDER_INPUT_HOST_ARCH:-$(uname -m 2>/dev/null)}"
+case "$HOST_OS-$HOST_ARCH" in
+  Linux-x86_64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-linux.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/linux-x86_64" ;;
+  Linux-aarch64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-linux.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/linux-aarch64" ;;
+  Darwin-arm64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-macos.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/macos-arm64" ;;
+  Darwin-x86_64) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-macos.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/macos-x86_64" ;;
+  MINGW*|MSYS*|CYGWIN*) REQUIREMENTS="$ROOT/scripts/provider-input-validator-requirements-windows.txt"; [ -n "$WHEELHOUSE" ] || WHEELHOUSE="$ROOT/scripts/provider-input-validator-wheelhouse/windows-x86_64" ;;
   *) echo "unsupported host for provider-input validator lock: $(uname -s)-$(uname -m)" >&2; exit 2 ;;
 esac
 
@@ -42,11 +76,33 @@ esac
   echo "missing pinned requirements: $REQUIREMENTS" >&2
   exit 2
 }
-
 if [ "$APPLY" -ne 1 ]; then
-  echo "[dry-run] would create $TARGET and install pinned requirements"
-  echo "Run with --apply to make changes."
+  if [ "$ONLINE" -eq 1 ]; then
+    echo "[dry-run] would create $TARGET and download pinned requirements from PyPI"
+    echo "Run with --apply --online to make changes."
+  else
+    echo "[dry-run] would create $TARGET and install pinned requirements"
+    echo "Run with --apply to make changes."
+  fi
   exit 0
+fi
+
+BOOTSTRAP_PYTHON=$(select_bootstrap_python) || {
+  echo "Python 3.12, 3.13, or 3.14 is required" >&2
+  exit 2
+}
+
+if [ "$ONLINE" -ne 1 ]; then
+  # Offline path: requires a release-built wheelhouse.
+  [ -d "$WHEELHOUSE" ] || {
+    echo "provider-input validator wheelhouse is missing: $WHEELHOUSE" >&2
+    echo "Reinstall acq from an official release, or run with --online for a git checkout." >&2
+    exit 2
+  }
+  [ -f "$WHEELHOUSE/SHA256SUMS" ] || {
+    echo "provider-input validator wheelhouse checksum manifest is missing: $WHEELHOUSE/SHA256SUMS" >&2
+    exit 2
+  }
 fi
 
 mkdir -p "$TOOLS_DIR"
@@ -60,22 +116,57 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-python_minor=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-case "$(uname -s 2>/dev/null)-$(uname -m 2>/dev/null):$python_minor" in
-  Linux-x86_64:3.12|Linux-aarch64:3.12|Darwin-arm64:3.12|Darwin-x86_64:3.13|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12) : ;;
+python_minor=$("$BOOTSTRAP_PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+case "$HOST_OS:$python_minor" in
+  Darwin:3.12|Darwin:3.13|Darwin:3.14|Linux:3.12|MINGW*:3.12|MSYS*:3.12|CYGWIN*:3.12) : ;;
   *) echo "unsupported Python for provider-input validator on this host: Python $python_minor" >&2; exit 2 ;;
 esac
 
-python3 -m venv "$stage/runtime"
+sha256_check() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c SHA256SUMS
+  elif command -v shasum >/dev/null 2>&1; then
+    while IFS='  ' read -r expected filename; do
+      [ -n "$expected" ] || continue
+      actual=$(shasum -a 256 "$filename" | cut -d' ' -f1)
+      [ "$actual" = "$expected" ] || return 1
+    done < SHA256SUMS
+  else
+    echo "sha256sum or shasum is required to verify the validator wheelhouse" >&2
+    return 1
+  fi
+}
+
+if [ "$ONLINE" -ne 1 ]; then
+  # The release builds this wheelhouse from the exact hash-locked requirements.
+  # Verify it before pip sees it: no package network access is permitted at create.
+  (cd "$WHEELHOUSE" && sha256_check) || {
+    echo "provider-input validator wheelhouse checksum verification failed" >&2
+    exit 2
+  }
+fi
+
+"$BOOTSTRAP_PYTHON" -m venv "$stage/runtime"
 if [ -x "$stage/runtime/bin/python3" ]; then
   runtime_python="$stage/runtime/bin/python3"
 elif [ -x "$stage/runtime/Scripts/python.exe" ]; then
   runtime_python="$stage/runtime/Scripts/python.exe"
+elif [ -x "$stage/runtime/python.exe" ]; then
+  runtime_python="$stage/runtime/python.exe"
 else
   echo "provider-input validator venv has no supported Python executable" >&2
   exit 1
 fi
-"$runtime_python" -m pip install --require-hashes --requirement "$REQUIREMENTS"
+if [ "$ONLINE" -eq 1 ]; then
+  # Online path for git checkouts: download from PyPI using the hash-locked
+  # requirements file. --require-hashes is mandatory: every listed package must
+  # carry a hash and pip verifies them before unpacking. No wheelhouse needed.
+  # Network access is scoped to this explicit command and does not affect
+  # "acq create", which remains fully offline.
+  "$runtime_python" -m pip install --require-hashes --requirement "$REQUIREMENTS"
+else
+  "$runtime_python" -m pip install --no-index --find-links "$WHEELHOUSE" --require-hashes --requirement "$REQUIREMENTS"
+fi
 "$runtime_python" - <<'PY'
 import importlib.metadata as metadata
 required = {"PyYAML": "6.0.3", "jsonschema": "4.26.0"}
@@ -89,7 +180,7 @@ link="$TOOLS_DIR/.provider-input-validator.link.$$.${RANDOM:-0}"
 ln -s "${runtime##*/}" "$link"
 
 replace_link() {
-  python3 - "$link" "$TARGET" <<'PY'
+  "$BOOTSTRAP_PYTHON" - "$link" "$TARGET" <<'PY'
 import os
 import sys
 
@@ -104,12 +195,6 @@ if [ -L "$TARGET" ]; then
 fi
 replace_link
 link=""
-# Readers prefer the atomic current pointer. A legacy directory remains intact
-# as fallback until the first successful current publication, then can be
-# removed without any absent-target window.
-if [ -d "$LEGACY_TARGET" ] && [ ! -L "$LEGACY_TARGET" ]; then
-  rm -rf -- "$LEGACY_TARGET"
-fi
 case "$old_runtime" in
   provider-input-validator.*)
     if [ "${old_runtime##*/}" = "$old_runtime" ] \

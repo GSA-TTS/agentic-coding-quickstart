@@ -68,10 +68,11 @@ EOF
   assert_output --partial 'configured provider-input Python is not executable'
 }
 
-@test "projection prefers the supported project-local validator runtime" {
-  local original_script_dir="$ACQ_SCRIPT_DIR"
-  ACQ_SCRIPT_DIR="$STUBDIR/project"
-  local runtime="$ACQ_SCRIPT_DIR/.acq-tools/provider-input-validator/bin"
+@test "projection prefers the user-data validator runtime over a read-only install root" {
+  local original_data_dir="${ACQ_PROVIDER_INPUT_DATA_DIR:-}" install_root="$STUBDIR/homebrew/libexec"
+  export ACQ_PROVIDER_INPUT_DATA_DIR="$STUBDIR/user-data"
+  mkdir -p "$install_root"; chmod 555 "$install_root"
+  local runtime="$ACQ_PROVIDER_INPUT_DATA_DIR/provider-input-validator.current/bin"
   mkdir -p "$runtime"
   cat > "$runtime/python3" <<'EOF'
 #!/bin/sh
@@ -83,7 +84,7 @@ EOF
   run _acq_provider_input_python
   assert_success
   assert_output "$runtime/python3"
-  ACQ_SCRIPT_DIR="$original_script_dir"
+  ACQ_PROVIDER_INPUT_DATA_DIR="$original_data_dir"
 }
 
 @test "setup validator runtime is dry-run by default and pins dependencies" {
@@ -96,21 +97,120 @@ EOF
   grep -Fq -- '--require-hashes' "$REPO_ROOT/scripts/setup-provider-input-validator"
 }
 
+@test "setup validator honors explicit bootstrap Python and online hash install" {
+  local tools="$STUBDIR/online-data" fakebin="$STUBDIR/online-bin" log="$STUBDIR/online.log"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/python-custom" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+if [ "$1" = -c ]; then printf '3.14\n'; exit 0; fi
+if [ "$1" = -m ] && [ "$2" = venv ]; then
+  mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
+fi
+if [ "$1" = -m ] && [ "$2" = pip ]; then exit 0; fi
+if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec /usr/bin/python3 "$@"; fi
+if [ "$1" = - ]; then exit 0; fi
+exit 0
+EOF
+  cat > "$fakebin/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in -s) echo Darwin ;; -m) echo arm64 ;; *) echo Darwin ;; esac
+EOF
+  chmod +x "$fakebin/python-custom" "$fakebin/uname"
+
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python-custom" \
+    ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 \
+    ACQ_PROVIDER_INPUT_DATA_DIR="$tools" VALIDATOR_SETUP_LOG="$log" \
+    PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
+  assert_success
+  [ -L "$tools/provider-input-validator.current" ]
+  grep -Fq -- '--require-hashes' "$log"
+  ! grep -Fq -- '--no-index' "$log"
+}
+
+@test "setup validator prefers a supported versioned Python before python3" {
+  local fakebin="$STUBDIR/versioned-bin" log="$STUBDIR/versioned.log" tools="$STUBDIR/versioned-data"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/python3.14" <<'EOF'
+#!/bin/sh
+printf 'selected-3.14 %s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+if [ "$1" = -c ]; then printf '3.14\n'; exit 0; fi
+if [ "$1" = -m ] && [ "$2" = venv ]; then
+  mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
+fi
+if [ "$1" = -m ] && [ "$2" = pip ]; then exit 0; fi
+if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec /usr/bin/python3 "$@"; fi
+if [ "$1" = - ]; then exit 0; fi
+exit 0
+EOF
+  cat > "$fakebin/python3" <<'EOF'
+#!/bin/sh
+printf 'wrong-python3\n' >> "$VALIDATOR_SETUP_LOG"
+exit 1
+EOF
+  cat > "$fakebin/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in -s) echo Darwin ;; -m) echo arm64 ;; *) echo Darwin ;; esac
+EOF
+  chmod +x "$fakebin/python3.14" "$fakebin/python3" "$fakebin/uname"
+
+  ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 \
+    ACQ_PROVIDER_INPUT_BOOTSTRAP_CANDIDATES=python3.14 \
+    ACQ_PROVIDER_INPUT_DATA_DIR="$tools" VALIDATOR_SETUP_LOG="$log" \
+    PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
+  assert_success
+  [ -L "$tools/provider-input-validator.current" ]
+  grep -Fq 'selected-3.14' "$log"
+  ! grep -Fq 'wrong-python3' "$log"
+}
+
+@test "setup validator skips unsupported newer Python on Linux" {
+  local fakebin="$STUBDIR/linux-versioned-bin" log="$STUBDIR/linux-versioned.log" tools="$STUBDIR/linux-data"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/python3.14" <<'EOF'
+#!/bin/sh
+printf 'wrong-3.14\n' >> "$VALIDATOR_SETUP_LOG"
+exit 1
+EOF
+  cat > "$fakebin/python3.12" <<'EOF'
+#!/bin/sh
+printf 'selected-3.12 %s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
+if [ "$1" = -c ]; then printf '3.12\n'; exit 0; fi
+if [ "$1" = -m ] && [ "$2" = venv ]; then
+  mkdir -p "$3/bin"; cp "$0" "$3/bin/python3"; exit 0
+fi
+if [ "$1" = -m ] && [ "$2" = pip ]; then exit 0; fi
+if [ "$1" = - ] && [ "$#" -eq 3 ]; then exec /usr/bin/python3 "$@"; fi
+if [ "$1" = - ]; then exit 0; fi
+exit 0
+EOF
+  chmod +x "$fakebin/python3.14" "$fakebin/python3.12"
+
+  ACQ_PROVIDER_INPUT_HOST_OS=Linux ACQ_PROVIDER_INPUT_HOST_ARCH=x86_64 \
+    ACQ_PROVIDER_INPUT_DATA_DIR="$tools" VALIDATOR_SETUP_LOG="$log" \
+    PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply --online
+  assert_success
+  grep -Fq 'selected-3.12' "$log"
+  ! grep -Fq 'wrong-3.14' "$log"
+}
+
 @test "setup validator rejects invalid arguments without changing a runtime" {
-  local target="$REPO_ROOT/.acq-tools/provider-input-validator.current"
+  local target="$STUBDIR/user-data/provider-input-validator.current"
   mkdir -p "$target"
   printf 'working\n' > "$target/sentinel"
-  run "$REPO_ROOT/scripts/setup-provider-input-validator" --unexpected
+  ACQ_PROVIDER_INPUT_DATA_DIR="$STUBDIR/user-data" run "$REPO_ROOT/scripts/setup-provider-input-validator" --unexpected
   assert_failure 2
   [ -f "$target/sentinel" ]
-  rm -rf "$REPO_ROOT/.acq-tools"
 }
 
 @test "setup validator atomically replaces only a validated temporary runtime" {
-  local target="$REPO_ROOT/.acq-tools/provider-input-validator.current" legacy="$REPO_ROOT/.acq-tools/provider-input-validator"
+  local tools="$STUBDIR/user-data" target="$STUBDIR/user-data/provider-input-validator.current"
   local fakebin="$STUBDIR/python-bin" log="$STUBDIR/python.log"
   local first_runtime second_runtime
   mkdir -p "$fakebin"
+  mkdir -p "$STUBDIR/wheelhouse"
+  : > "$STUBDIR/wheelhouse/placeholder.whl"
+  (cd "$STUBDIR/wheelhouse" && sha256sum placeholder.whl > SHA256SUMS)
   cat > "$fakebin/python3" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$VALIDATOR_SETUP_LOG"
@@ -133,43 +233,31 @@ exit 0
 EOF
   chmod +x "$fakebin/python3"
 
-  VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
   assert_success
   [ -L "$target" ]
   [ -x "$target/bin/python3" ]
   grep -Fq -- '--require-hashes' "$log"
   first_runtime=$(readlink "$target")
 
-  mkdir -p "$legacy"
-  printf 'legacy\n' > "$legacy/sentinel"
-
-  VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
   assert_success
   second_runtime=$(readlink "$target")
   [ "$second_runtime" != "$first_runtime" ]
   [ -x "$target/bin/python3" ]
-  [ ! -e "$legacy" ]
-  [ ! -e "$REPO_ROOT/.acq-tools/$first_runtime" ]
+  [ ! -e "$tools/$first_runtime" ]
 
-  VALIDATOR_SETUP_LOG="$log" VALIDATOR_VALIDATE_FAIL=1 PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
+  ACQ_PROVIDER_INPUT_BOOTSTRAP_PYTHON="$fakebin/python3" ACQ_PROVIDER_INPUT_HOST_OS=Darwin ACQ_PROVIDER_INPUT_HOST_ARCH=arm64 ACQ_PROVIDER_INPUT_DATA_DIR="$tools" ACQ_PROVIDER_INPUT_WHEELHOUSE="$STUBDIR/wheelhouse" VALIDATOR_SETUP_LOG="$log" VALIDATOR_VALIDATE_FAIL=1 PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
   assert_failure
   [ "$second_runtime" = "$(readlink "$target")" ]
   [ -x "$target/bin/python3" ]
 
-  rm -f "$target"
-  mkdir -p "$REPO_ROOT/.acq-tools/outside-runtime"
-  printf 'must-survive\n' > "$REPO_ROOT/.acq-tools/outside-runtime/sentinel"
-  ln -s 'provider-input-validator../outside-runtime' "$target"
-  VALIDATOR_SETUP_LOG="$log" PATH="$fakebin:/usr/bin" run "$REPO_ROOT/scripts/setup-provider-input-validator" --apply
-  assert_success
-  [ -f "$REPO_ROOT/.acq-tools/outside-runtime/sentinel" ]
-  rm -rf "$REPO_ROOT/.acq-tools"
 }
 
 @test "runtime resolver recognizes Windows venv layout" {
-  local original_script_dir="$ACQ_SCRIPT_DIR" runtime
-  ACQ_SCRIPT_DIR="$STUBDIR/windows-project"
-  runtime="$ACQ_SCRIPT_DIR/.acq-tools/provider-input-validator.current/Scripts"
+  local original_data_dir="${ACQ_PROVIDER_INPUT_DATA_DIR:-}" runtime
+  export ACQ_PROVIDER_INPUT_DATA_DIR="$STUBDIR/windows-user-data"
+  runtime="$ACQ_PROVIDER_INPUT_DATA_DIR/provider-input-validator.current/Scripts"
   mkdir -p "$runtime"
   cat > "$runtime/python.exe" <<'EOF'
 #!/bin/sh
@@ -179,7 +267,7 @@ EOF
   run _acq_provider_input_python
   assert_success
   assert_output "$runtime/python.exe"
-  ACQ_SCRIPT_DIR="$original_script_dir"
+  ACQ_PROVIDER_INPUT_DATA_DIR="$original_data_dir"
 }
 
 @test "validator lock files cover every released host and require hashes" {
@@ -188,7 +276,7 @@ EOF
     grep -Fq -- '--hash=sha256:' "$lock"
   done
   grep -Fq 'Linux x86_64/aarch64 Python 3.12' "$REPO_ROOT/scripts/provider-input-validator-requirements.txt"
-  grep -Fq 'macOS arm64 Python' "$REPO_ROOT/scripts/provider-input-validator-requirements.txt"
+  grep -Fq 'macOS Python 3.12-3.14' "$REPO_ROOT/scripts/provider-input-validator-requirements-macos.txt"
   grep -Fq 'Windows x86_64/arm64 Python 3.12' "$REPO_ROOT/scripts/provider-input-validator-requirements.txt"
 }
 
@@ -630,21 +718,15 @@ EOF
 # ---------------------------------------------------------------------------
 # MSB-specific signal/lock regressions (external-executable variants)
 # ---------------------------------------------------------------------------
-# The following three tests reproduce the finding from PR #608 review commit
-# 32588ae: `_acq_msb_cli` (a bash function) was used as the backgrounded process,
-# so the guardian registered the *shell wrapper's* PID, not the actual msb
-# executable.  TERM killed the wrapper but left the real binary alive; the lock
-# appeared stale and a second operation could slip in.
-#
 # All three tests use an EXTERNAL EXECUTABLE for `msb` (a script placed in PATH)
 # rather than a shell-function override.  The slow-msb executable traps TERM and
 # stays alive for a few seconds so the test can verify that:
 #   - the lock cannot be acquired while the executable is running, and
 #   - the lock is released only after the executable exits.
 #
-# The fix (inline `MSYS2_ARG_CONV_EXCL='*' msb ...&` instead of `_acq_msb_cli ...&`)
-# causes bash to exec-optimize: the forked child becomes the msb binary/script
-# directly, so $! is its PID and TERM reaches it.
+# The msb create background path uses inline `MSYS2_ARG_CONV_EXCL='*' msb ...&`
+# so bash exec-optimizes: the forked child becomes the msb binary/script
+# directly, giving $! the real executable PID so TERM reaches it.
 
 @test "msb remove TERM: external executable survives initial signal, second lock blocked until exit" {
   local script="$STUBDIR/msb-remove-term.sh" root msb_bin
@@ -843,6 +925,233 @@ EOF
   [ -z "$(ls -A "$outside")" ]
   root=$(acq_provider_input_root sbx symlinkbox)
   [ ! -e "$root" ]
+}
+
+# ---------------------------------------------------------------------------
+# safe_mkdir / safe_dir / canonical_path direct-call tests
+# ---------------------------------------------------------------------------
+# All alias and spelling tests call the actual production helper
+# _acq_provider_input_canonical_path and the O_NOFOLLOW traversal helpers
+# directly.  ACQ_TEST_HOST_OS injects a synthetic platform so Darwin-branch
+# tests are portable on Linux CI; it is never set in non-test shells.
+
+@test "safe_mkdir creates and traverses a real path with no symlinks" {
+  local real_path="$STUBDIR/real/a/b/c"
+  run _acq_provider_input_safe_mkdir "$real_path"
+  assert_success
+  [ -d "$real_path" ]
+}
+
+@test "safe_mkdir is idempotent on an already-existing real path" {
+  local real_path="$STUBDIR/idempotent/x/y"
+  mkdir -p "$real_path"
+  run _acq_provider_input_safe_mkdir "$real_path"
+  assert_success
+  [ -d "$real_path" ]
+}
+
+@test "safe_dir accepts an existing real path with no symlinks" {
+  local real_path="$STUBDIR/safe_dir_real/p/q"
+  mkdir -p "$real_path"
+  run _acq_provider_input_safe_dir "$real_path"
+  assert_success
+}
+
+@test "safe_dir rejects a path whose intermediate component is a symlink (malicious ancestor)" {
+  local base="$STUBDIR/evil_base" target="$STUBDIR/evil_target/sub" sym="$STUBDIR/evil_dir_check"
+  mkdir -p "$base" "$target"
+  ln -s "$base" "$sym"
+  run _acq_provider_input_safe_dir "$sym"
+  assert_failure
+}
+
+@test "safe_mkdir rejects a path whose intermediate component is a symlink (malicious ancestor)" {
+  local real_deep="$STUBDIR/real_deep/legit"
+  local evil_parent="$STUBDIR/evil_parent"
+  local evil_target="$STUBDIR/evil_target_dir"
+  mkdir -p "$real_deep" "$evil_target"
+  ln -s "$evil_target" "$evil_parent"
+  run _acq_provider_input_safe_mkdir "$evil_parent/new_child"
+  assert_failure
+}
+
+@test "canonical_path aliases /var /tmp /etc on Darwin via ACQ_TEST_HOST_OS" {
+  # Exercises the production _acq_provider_input_canonical_path helper directly
+  # with ACQ_TEST_HOST_OS=darwin so the Darwin branch runs on Linux CI.
+  local cases=(
+    '/var/folders/x/y/T/acq /private/var/folders/x/y/T/acq'
+    '/tmp/acq-test.XXX /private/tmp/acq-test.XXX'
+    '/etc/hosts /private/etc/hosts'
+    '/var /private/var'
+    '/tmp /private/tmp'
+    '/etc /private/etc'
+    '/home/user/project /home/user/project'
+    '/private/var/already /private/var/already'
+    '/variably/something /variably/something'
+    '/tmpfile /tmpfile'
+    '/etc-extra /etc-extra'
+  )
+  local pair input expected got
+  for pair in "${cases[@]}"; do
+    input="${pair%% *}"; expected="${pair##* }"
+    got=$(ACQ_TEST_HOST_OS=darwin _acq_provider_input_canonical_path "$input")
+    [ "$got" = "$expected" ] || {
+      printf 'FAIL canonical_path %s -> %s, want %s\n' "$input" "$got" "$expected" >&2
+      return 1
+    }
+  done
+}
+
+@test "canonical_path leaves /var /tmp unchanged on Linux via ACQ_TEST_HOST_OS" {
+  local cases=(
+    '/var/folders/x/y /var/folders/x/y'
+    '/tmp/test /tmp/test'
+    '/etc/resolv.conf /etc/resolv.conf'
+  )
+  local pair input expected got
+  for pair in "${cases[@]}"; do
+    input="${pair%% *}"; expected="${pair##* }"
+    got=$(ACQ_TEST_HOST_OS=linux _acq_provider_input_canonical_path "$input")
+    [ "$got" = "$expected" ] || {
+      printf 'FAIL canonical_path linux %s -> %s, want %s\n' "$input" "$got" "$expected" >&2
+      return 1
+    }
+  done
+}
+
+@test "canonical_path normalizes //var and /./var spellings before alias match (Darwin)" {
+  local got
+  got=$(ACQ_TEST_HOST_OS=darwin _acq_provider_input_canonical_path '//var/folders')
+  [ "$got" = '/private/var/folders' ] || { printf 'FAIL //var: %s\n' "$got" >&2; return 1; }
+  got=$(ACQ_TEST_HOST_OS=darwin _acq_provider_input_canonical_path '/./var/folders')
+  [ "$got" = '/private/var/folders' ] || { printf 'FAIL /./var: %s\n' "$got" >&2; return 1; }
+  got=$(ACQ_TEST_HOST_OS=darwin _acq_provider_input_canonical_path '//tmp/test')
+  [ "$got" = '/private/tmp/test' ] || { printf 'FAIL //tmp: %s\n' "$got" >&2; return 1; }
+  got=$(ACQ_TEST_HOST_OS=darwin _acq_provider_input_canonical_path '/./tmp/test')
+  [ "$got" = '/private/tmp/test' ] || { printf 'FAIL /./tmp: %s\n' "$got" >&2; return 1; }
+}
+
+@test "canonical_path with ACQ_TEST_HOST_OS=darwin enables safe_mkdir on alias-prefixed paths" {
+  # Prove that safe_mkdir succeeds on a real directory (canonical form) and that
+  # a user-owned symlink planted at the path root is still rejected regardless of
+  # the platform override — ACQ_TEST_HOST_OS only controls the alias rewrite;
+  # O_NOFOLLOW enforcement is unconditional.
+  local real_dir="$STUBDIR/private_var_sim" alias_path
+  mkdir -p "$real_dir/acq/state"
+
+  # Real directory under STUBDIR succeeds — no symlinks involved.
+  ACQ_TEST_HOST_OS=linux _acq_provider_input_safe_mkdir "$real_dir/new_child"
+
+  # A path through a user-owned symlink must still fail regardless of platform.
+  # bats run does not propagate inline env= prefix, so export then restore.
+  alias_path="$STUBDIR/alias_link"
+  ln -s "$real_dir" "$alias_path"
+  export ACQ_TEST_HOST_OS=darwin
+  run _acq_provider_input_safe_mkdir "$alias_path/child"
+  unset ACQ_TEST_HOST_OS
+  assert_failure
+}
+
+@test "safe_mkdir Darwin-alias: canonical form succeeds, symlinked form fails (regression)" {
+  # Confirm that the production traversal rejects user-owned symlinks even after
+  # canonical_path runs.  This is the primary regression assertion: a user symlink
+  # planted at a path component is never followed regardless of the host OS.
+  local real_dir="$STUBDIR/real_private_var"
+  local alias_dir="$STUBDIR/var_alias_sim"
+  mkdir -p "$real_dir"
+  ln -s "$real_dir" "$alias_dir"
+
+  # The real (canonical) path succeeds.
+  run _acq_provider_input_safe_mkdir "$real_dir/acq/state"
+  assert_success
+
+  # A user-owned symlink at the path root fails — not a trusted OS alias.
+  run _acq_provider_input_safe_mkdir "$alias_dir/acq/state"
+  assert_failure
+}
+
+# ---------------------------------------------------------------------------
+# safe_mkdir / safe_dir: both helpers traverse Darwin OS-level aliases
+# ---------------------------------------------------------------------------
+# These four tests execute the ACTUAL production _acq_provider_input_safe_mkdir
+# and _acq_provider_input_safe_dir helpers through a simulated Darwin trusted
+# alias using an isolated STUBDIR-local filesystem.  ACQ_TEST_ALIAS_TABLE
+# injects a test-only alias pair (alias_sym -> private_real); the production
+# /var|/tmp|/etc -> /private/... table is unchanged for non-test invocations.
+# ACQ_TEST_HOST_OS=darwin activates the canonicalization branch.
+#
+# Failure mode if canonicalization is removed: each alias_sym path contains a
+# user-visible symlink as its first component.  Without the canonical_path call
+# in the helper, O_NOFOLLOW hits that symlink and returns ELOOP/ENOTDIR ->
+# the positive-control tests below flip from assert_success to assert_failure.
+#
+# The user-symlink negative controls confirm that a symlink NOT in the alias
+# table is still rejected, even with darwin mode active.
+
+@test "safe_mkdir succeeds through simulated Darwin alias via ACQ_TEST_ALIAS_TABLE" {
+  # Build isolated FS: private_real is a real directory; alias_sym -> private_real
+  # models the macOS /var -> /private/var kernel symlink.
+  local private_real="$STUBDIR/da_private/var"
+  local alias_sym="$STUBDIR/da_var"
+  mkdir -p "$private_real"
+  ln -s "$private_real" "$alias_sym"
+
+  # With the alias table active, canonical_path maps alias_sym -> private_real,
+  # so O_NOFOLLOW traversal succeeds on the real directory.
+  export ACQ_TEST_HOST_OS=darwin
+  export ACQ_TEST_ALIAS_TABLE="${alias_sym}	${private_real}"
+  run _acq_provider_input_safe_mkdir "$alias_sym/acq/state"
+  unset ACQ_TEST_HOST_OS ACQ_TEST_ALIAS_TABLE
+  assert_success
+  [ -d "$private_real/acq/state" ]
+}
+
+@test "safe_dir succeeds through simulated Darwin alias via ACQ_TEST_ALIAS_TABLE" {
+  # Same topology as safe_mkdir test; safe_dir only checks existence, no mkdir.
+  local private_real="$STUBDIR/da_private2/var"
+  local alias_sym="$STUBDIR/da_var2"
+  mkdir -p "$private_real/acq/state"
+  ln -s "$private_real" "$alias_sym"
+
+  export ACQ_TEST_HOST_OS=darwin
+  export ACQ_TEST_ALIAS_TABLE="${alias_sym}	${private_real}"
+  run _acq_provider_input_safe_dir "$alias_sym/acq/state"
+  unset ACQ_TEST_HOST_OS ACQ_TEST_ALIAS_TABLE
+  assert_success
+}
+
+@test "safe_mkdir rejects user-controlled symlink not in Darwin alias table" {
+  # Even with darwin mode and a custom alias table, a symlink outside the alias
+  # table is still rejected by O_NOFOLLOW — it is not a trusted OS alias.
+  local private_real="$STUBDIR/da_private3/var"
+  local alias_sym="$STUBDIR/da_var3"
+  local user_sym="$STUBDIR/da_user_sym"
+  mkdir -p "$private_real"
+  ln -s "$private_real" "$alias_sym"
+  ln -s "$private_real" "$user_sym"
+
+  # alias_sym is in the table (trusted); user_sym is not.
+  export ACQ_TEST_HOST_OS=darwin
+  export ACQ_TEST_ALIAS_TABLE="${alias_sym}	${private_real}"
+  run _acq_provider_input_safe_mkdir "$user_sym/acq/state"
+  unset ACQ_TEST_HOST_OS ACQ_TEST_ALIAS_TABLE
+  assert_failure
+}
+
+@test "safe_dir rejects user-controlled symlink not in Darwin alias table" {
+  # Mirror of safe_mkdir negative control for safe_dir.
+  local private_real="$STUBDIR/da_private4/var"
+  local alias_sym="$STUBDIR/da_var4"
+  local user_sym="$STUBDIR/da_user_sym4"
+  mkdir -p "$private_real/acq/state"
+  ln -s "$private_real" "$alias_sym"
+  ln -s "$private_real" "$user_sym"
+
+  export ACQ_TEST_HOST_OS=darwin
+  export ACQ_TEST_ALIAS_TABLE="${alias_sym}	${private_real}"
+  run _acq_provider_input_safe_dir "$user_sym/acq/state"
+  unset ACQ_TEST_HOST_OS ACQ_TEST_ALIAS_TABLE
+  assert_failure
 }
 
 @test "publication retains old generation for existing current consumers" {

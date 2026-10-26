@@ -21,22 +21,56 @@ This document captures real-world failure patterns when using Docker SBX + USAi 
 - `acq create` stops before backend creation.
 - The error requires exact `PyYAML` and `jsonschema` versions.
 
-### Fix
+### Fix: release install (Homebrew, npm, `install.sh --release`)
 
-From the Quickstart checkout, create the isolated validator runtime:
+`--apply` alone uses the offline wheelhouse bundled with the release:
 
 ```bash
 scripts/setup-provider-input-validator --apply
 ```
 
-The runtime is stored under `.acq-tools/` and does not modify global Python
+The runtime is stored under `$XDG_DATA_HOME/acq/provider-input-validator` (or
+`~/.local/share/acq/provider-input-validator`) and does not modify global Python
 packages. The default invocation is a dry run; `--apply` builds a fresh,
 hash-verified environment and only replaces a working runtime after validation
 succeeds. Re-run the command after changing Quickstart versions if the pinned
 requirements change.
 
-The lock supports Linux x86_64/aarch64 with Python 3.12, macOS arm64 with
-Python 3.12, macOS x86_64 with Python 3.13, and Windows x86_64/arm64 with
+### Fix: git checkout / development install (no wheelhouse)
+
+A working-tree clone (`install.sh --clone`, or running `./acq` directly from a
+`git checkout`) has no release wheelhouse. Use the `--online` flag, which
+downloads the same hash-locked packages from PyPI instead:
+
+```bash
+scripts/setup-provider-input-validator --apply --online
+```
+
+Network access is restricted to this explicit setup call; `acq create` itself
+remains fully offline after the runtime is installed.
+
+If the error message already names this command, that means `acq` detected a git
+checkout with no wheelhouse and surfaced the hint automatically.
+
+### Alternative: `ACQ_PROVIDER_INPUT_PYTHON`
+
+If you already have a Python interpreter with the exact required versions
+(`PyYAML 6.0.3` and `jsonschema 4.26.0`), point `acq` at it directly:
+
+```bash
+export ACQ_PROVIDER_INPUT_PYTHON=/path/to/python3
+acq create opencode .
+```
+
+`acq` validates the dependency versions at startup and exits with a clear error
+if they do not match. This is useful when a system-managed environment already
+carries the right packages, or when the setup script cannot run (restricted
+network, air-gapped lab). It is not a substitute for the pinned runtime in
+production; the venv created by `setup-provider-input-validator` is preferred
+because it is isolated from system upgrades.
+
+The lock supports Linux x86_64/aarch64 with Python 3.12, macOS x86_64/arm64 with
+Python 3.12-3.14, and Windows x86_64/arm64 with
 Python 3.12. An unsupported OS, architecture, or Python version fails before
 installation; use one of the supported runtimes rather than bypassing hashes.
 
@@ -272,10 +306,12 @@ Agent assumes host filesystem layout, not container layout.
 
 ### Fix
 
-The `usai-provider` kit sets both timeouts under the provider's `options` in its
-[`opencode.jsonc`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/acq-kits/usai-provider/files/home/usai-config/opencode.jsonc):
+The OpenCode agent kit renders provider options from validated provider inputs
+into the global OpenCode configuration. See its
+[`TROUBLESHOOTING.md`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/acq-kits/opencode/TROUBLESHOOTING.md)
+for current ownership and inspection steps. The generated USAi options include
 `timeout` (whole request, 10 minutes) and `chunkTimeout` (gap between streamed
-chunks, 2 minutes); check that file for the current values. If the read timeout
+chunks, 2 minutes). If the read timeout
 recurs, raise `chunkTimeout` in the project's `opencode.json`. The example below
 uses 5 minutes, the default from OpenCode 1.18.27 through 2.0.29; `false` disables the
 idle timeout entirely. A higher value makes a truly hung stream take longer to fail
@@ -1873,7 +1909,7 @@ For a single sandbox, pass the pinned kit ref with `--kit` or include it in
 `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=d2674db8b424402e912e95254d6b194a062deb73&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=a1206c52ec82ae7ce080ad44a6e6ac6f951e6d20&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 Existing sandboxes that were created before this change keep whatever podman
