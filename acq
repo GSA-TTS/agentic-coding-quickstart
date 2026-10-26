@@ -626,6 +626,51 @@ acq_propagate_usai_rotation() {
 # ---------------------------------------------------------------------------
 if [ -n "${ACQ_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
+# Dispatch stays in the original foreground shell: $$, stdin, terminal signals,
+# and exec retain their normal meaning. A private guardian covers replaced EXIT
+# traps and exec; ordinary exits also reap it synchronously. No root is exported.
+_acq_kit_fetch_cleanup() {
+  if [ -n "${_ACQ_KIT_FETCH_GUARDIAN:-}" ]; then
+    kill -USR1 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true
+    wait "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true
+  fi
+  rm -rf -- "$_ACQ_KIT_FETCH_ROOT"
+}
+
+_acq_kit_fetch_start() {
+  _ACQ_KIT_FETCH_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/acq-kit-fetch.XXXXXX") || exit 1
+  export -n _ACQ_KIT_FETCH_ROOT
+  _ACQ_KIT_FETCH_GUARDIAN=""
+  trap '_acq_kit_fetch_cleanup' EXIT
+  # Cover startup until the guardian acknowledges its signal handlers are ready.
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  (
+    trap '' HUP INT TERM
+    exec sh -c '
+      owner=$1 root=$2 tick=""
+      trap '\''[ -z "$tick" ] || { kill "$tick" 2>/dev/null || :; wait "$tick" 2>/dev/null || :; }; rm -rf -- "$root"'\'' EXIT
+      trap "exit 0" USR1
+      : > "$root/ready" || exit 1
+      while [ -d "$root" ]; do
+        parent=$(ps -o ppid= -p "$$") || exit 1
+        [ "$(printf "%s" "$parent" | tr -d "[:space:]")" = "$owner" ] || exit 0
+        sleep 1 & tick=$!
+        wait "$tick" || :
+        tick=""
+      done
+    ' sh "$$" "$_ACQ_KIT_FETCH_ROOT"
+  ) </dev/null >/dev/null &
+  _ACQ_KIT_FETCH_GUARDIAN=$!
+  while [ ! -f "$_ACQ_KIT_FETCH_ROOT/ready" ]; do
+    kill -0 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || exit 1
+    sleep 0.01
+  done
+  trap - HUP INT TERM
+}
+_acq_kit_fetch_start
+
 # ---------------------------------------------------------------------------
 # Pre-parse global flags that may appear BEFORE the subcommand.
 #   --backend sbx|msb   pick the backend for this invocation
@@ -1523,6 +1568,8 @@ case "$subcommand" in
       _shell_ws=$(acq_backend_workspace_for "$local_name" 2>/dev/null || true)
     fi
     advise_project_env_activation "$_shell_ws"
+    # Consumed by the sourced backend's attach implementation.
+    # shellcheck disable=SC2034
     ACQ_SESSION_KIND="shell"
     acq_backend_shell "$local_name"
     ;;
