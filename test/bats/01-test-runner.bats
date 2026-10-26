@@ -8,6 +8,7 @@ setup() {
   RUNNER_ROOT="$STUBDIR/runner"
   mkdir -p "$RUNNER_ROOT/scripts" "$RUNNER_ROOT/test/vendor/bats-core/bin" "$RUNNER_ROOT/test/bats"
   cp "$REPO_ROOT/scripts/test-acq-bats" "$RUNNER_ROOT/scripts/test-acq-bats"
+  cp "$REPO_ROOT/scripts/run-shellcheck" "$RUNNER_ROOT/scripts/run-shellcheck"
   cat > "$RUNNER_ROOT/test/vendor/bats-core/bin/bats" <<'STUB'
 #!/bin/sh
 printf 'bats-arg:%s\n' "$@"
@@ -77,6 +78,45 @@ STUB
   assert_line "bats-arg:$RUNNER_ROOT/test/bats/a.bats"
   assert_line "bats-arg:$RUNNER_ROOT/test/bats/b.bats"
   assert_line 'bats-arg:--timing'
+}
+
+@test "shellcheck runner: validates workers and preserves a failing batch" {
+  cat > "$STUBDIR/shellcheck" <<'STUB'
+#!/bin/sh
+printf 'shellcheck-arg:%s\n' "$@"
+case "$*" in *bad.sh) exit 3 ;; *) exit 0 ;; esac
+STUB
+  chmod +x "$STUBDIR/shellcheck"
+  local files=(good-1.sh good-2.sh good-3.sh good-4.sh good-5.sh good-6.sh good-7.sh good-8.sh bad.sh)
+  run env SHELLCHECK_JOBS=2 bash "$RUNNER_ROOT/scripts/run-shellcheck" "${files[@]}"
+  assert_failure
+  assert_line 'shellcheck-arg:good-1.sh'
+  assert_line 'shellcheck-arg:good-8.sh'
+  assert_line 'shellcheck-arg:bad.sh'
+  run env SHELLCHECK_JOBS=999999999999999999999999999999 bash "$RUNNER_ROOT/scripts/run-shellcheck" good.sh
+  assert_failure 2
+}
+
+@test "shellcheck runner: termination reaches an active lint child" {
+  cat > "$STUBDIR/shellcheck" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$$" > "$STUBDIR/shellcheck.pid"
+trap 'touch "$STUBDIR/shellcheck.terminated"; exit 0' TERM
+while :; do sleep 1; done
+STUB
+  chmod +x "$STUBDIR/shellcheck"
+  run bash -c '
+    SHELLCHECK_JOBS=2 bash "$1/scripts/run-shellcheck" active.sh &
+    runner=$!
+    while [ ! -f "$2/shellcheck.pid" ]; do sleep 0.05; done
+    kill -TERM "$runner"
+    wait "$runner"
+    status=$?
+    test -f "$2/shellcheck.terminated"
+    exit "$status"
+  ' _ "$RUNNER_ROOT" "$STUBDIR"
+  assert_failure 143
+  [ -f "$STUBDIR/shellcheck.terminated" ]
 }
 
 @test "transport fixture: real projection is offline and local Git still works" {

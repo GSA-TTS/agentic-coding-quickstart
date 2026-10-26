@@ -733,30 +733,19 @@ EOF
   root=$(acq_provider_input_root msb msbsignalbox)
   msb_bin="$STUBDIR/slow-msb-remove"
   # Create the external slow-msb executable: traps TERM (ignores it initially),
-  # writes its own PID, kills its PPID (= the transaction subshell) with TERM,
-  # then waits for the test to release it after checking lock exclusion. A fixed
-  # sleep can expire before that assertion on a loaded CI runner.
+# writes its own PID, waits until the guardian registry contains that exact PID,
+# then waits for the test before killing its PPID (= the transaction subshell)
+# with TERM. This handshake avoids racing child registration under Bash 3.2.
   cat > "$msb_bin" << 'MSB_SLOW'
 #!/bin/sh
-# Ignore TERM until the lock assertion completes; bound fixture failure cleanup.
+# Ignore the first TERM from signal_children; stay alive 2s then exit naturally.
 trap '' TERM
 printf '%s\n' "$$" > "$MSB_PID_FILE"
-# Signal only after the wrapper has registered this PID with the guardian; a
-# TERM handled before registration would see an empty child registry.
-attempt=0
-while ! grep -qx "$$" "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" 2>/dev/null; do
-  attempt=$((attempt + 1))
-  [ "$attempt" -lt 100 ] || exit 125
-  sleep 0.1
-done
+while ! grep -Fx "$$" "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" >/dev/null 2>&1; do sleep 0.05; done
+while [ ! -f "$MSB_SIGNAL_GO" ]; do sleep 0.05; done
 kill -TERM "$PPID" 2>/dev/null || true
-attempt=0
-while [ ! -e "$MSB_RELEASE_FILE" ]; do
-  attempt=$((attempt + 1))
-  [ "$attempt" -lt 300 ] || exit 125
-  sleep 0.1
-done
-printf released > "$MSB_RELEASED_FILE"
+touch "$MSB_SIGNAL_SENT"
+sleep 2
 exit 0
 MSB_SLOW
   chmod +x "$msb_bin"
@@ -765,8 +754,8 @@ MSB_SLOW
 set -eu
 export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
 export MSB_PID_FILE="$STUBDIR/slow-msb.pid"
-export MSB_RELEASE_FILE="$STUBDIR/slow-msb.release"
-export MSB_RELEASED_FILE="$STUBDIR/slow-msb.released"
+export MSB_SIGNAL_GO="$STUBDIR/slow-msb.go"
+export MSB_SIGNAL_SENT="$STUBDIR/slow-msb.signalled"
 # Prepend the slow-msb as \`msb\` in PATH.
 mkdir -p "$STUBDIR/msb-bin"
 ln -sf "$msb_bin" "$STUBDIR/msb-bin/msb"
@@ -787,7 +776,6 @@ _acq_msb_confirm_absent() { return 0; }  # confirms gone for the rc-ne-0 path
 # Run terminate in background so we can probe lock state while it runs.
 rc=0
 acq_backend_terminate msbsignalbox & tx=\$!
-trap 'touch "\$MSB_RELEASE_FILE"; wait "\$tx" 2>/dev/null || true' EXIT
 # Wait for slow-msb to register its PID (confirms the background executable started).
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
   [ -s "$STUBDIR/slow-msb.pid" ] && break
@@ -795,21 +783,19 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
 done
 [ -s "$STUBDIR/slow-msb.pid" ] || { echo "slow-msb never started" >&2; exit 1; }
 msb_pid=\$(cat "$STUBDIR/slow-msb.pid")
-# Deliberately exceed the former two-second fixture lifetime. This reproduces
-# delayed CI scheduling without relying on the runner being busy.
-sleep 3
-kill -0 "\$msb_pid" || { echo "slow-msb exited before lock assertion" >&2; exit 1; }
+# The external child waits for its own registry entry before observing this gate.
+touch "$STUBDIR/slow-msb.go"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$STUBDIR/slow-msb.signalled" ] && break; sleep 0.1; done
+[ -f "$STUBDIR/slow-msb.signalled" ] || { echo "slow-msb never signalled" >&2; exit 1; }
+kill -0 "\$msb_pid" 2>/dev/null || { echo "slow-msb exited before lock probe" >&2; exit 1; }
 # Verify the lock is still held while the executable is alive.
 if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb msbsignalbox >"$STUBDIR/lock-retry.out" 2>&1; then
   echo "lock acquired while msb executable was alive" >&2
   exit 1
 fi
 grep -Fq "live pid" "$STUBDIR/lock-retry.out" || { cat "$STUBDIR/lock-retry.out" >&2; exit 1; }
-kill -0 "\$msb_pid" || { echo "slow-msb exited during lock assertion" >&2; exit 1; }
-touch "\$MSB_RELEASE_FILE"
 # Wait for the background transaction to complete.
 wait "\$tx" || rc=\$?
-[ -s "\$MSB_RELEASED_FILE" ] || { echo "slow-msb watchdog expired" >&2; exit 1; }
 # After the transaction exits the lock must be released.
 lock=\$(acq_provider_input_lock_acquire msb msbsignalbox)
 acq_provider_input_lock_release "\$lock"
@@ -857,15 +843,10 @@ case "${1:-}" in
   create)
     trap '' TERM
     printf '%s\n' "$$" > "$MSB_PID_FILE"
-    # Signal only after the wrapper has registered this PID with the guardian; a
-    # TERM handled before registration would see an empty child registry.
-    attempt=0
-    while ! grep -qx "$$" "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" 2>/dev/null; do
-      attempt=$((attempt + 1))
-      [ "$attempt" -lt 100 ] || exit 125
-      sleep 0.1
-    done
+    while ! grep -Fx "$$" "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" >/dev/null 2>&1; do sleep 0.05; done
+    while [ ! -f "$MSB_SIGNAL_GO" ]; do sleep 0.05; done
     kill -TERM "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" 2>/dev/null || true
+    touch "$MSB_SIGNAL_SENT"
     sleep 2
     exit 0 ;;
   list) exit 0 ;;    # _acq_msb_confirm_absent uses 'list -q'
@@ -878,6 +859,8 @@ MSB_CREATE
 set -eu
 export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
 export MSB_PID_FILE="$STUBDIR/slow-msb-create.pid"
+export MSB_SIGNAL_GO="$STUBDIR/slow-msb-create.go"
+export MSB_SIGNAL_SENT="$STUBDIR/slow-msb-create.signalled"
 mkdir -p "$STUBDIR/msb-create-bin"
 ln -sf "$msb_bin" "$STUBDIR/msb-create-bin/msb"
 export PATH="$STUBDIR/msb-create-bin:\$PATH"
@@ -907,6 +890,12 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
   [ -s "$STUBDIR/slow-msb-create.pid" ] && break; sleep 0.1
 done
 [ -s "$STUBDIR/slow-msb-create.pid" ] || { echo "slow-msb-create never started" >&2; exit 1; }
+msb_pid=\$(cat "$STUBDIR/slow-msb-create.pid")
+# The external child waits for its own registry entry before observing this gate.
+touch "$STUBDIR/slow-msb-create.go"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$STUBDIR/slow-msb-create.signalled" ] && break; sleep 0.1; done
+[ -f "$STUBDIR/slow-msb-create.signalled" ] || { echo "slow-msb-create never signalled" >&2; exit 1; }
+kill -0 "\$msb_pid" 2>/dev/null || { echo "slow-msb-create exited before lock probe" >&2; exit 1; }
 # While slow-msb is running the lock must not be acquirable.
 if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb msbcreatebox >"$STUBDIR/create-lock-retry.out" 2>&1; then
   echo "create lock acquired while msb executable was alive" >&2
