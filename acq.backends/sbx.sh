@@ -215,8 +215,26 @@ _acq_sbx_kit_sources_manual_hint() {
   echo "        sbx settings set kit.allowedSources '${cmd}'" >&2
 }
 
-_acq_sbx_ensure_kit_sources_allowed() {
-  local current desired
+# acq_backend_kit_source_revoked PREFIX — a trusted kit source was removed, so
+# drop its prefix from sbx's kit.allowedSources. _acq_sbx_ensure_kit_sources_allowed
+# only ever UNIONS, which left a revoked source allowed until the user edited the
+# setting by hand. Best-effort: a failed/absent jq or sbx simply leaves it alone.
+acq_backend_kit_source_revoked() {
+  local prefix="${1:-}" current desired
+  [ -n "$prefix" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  command -v sbx >/dev/null 2>&1 || return 0
+  current=$(sbx settings get kit.allowedSources 2>/dev/null) || return 0
+  printf '%s' "$current" | jq -e 'type == "array"' >/dev/null 2>&1 || return 0
+  desired=$(printf '%s' "$current" | jq -c --arg p "$prefix" 'map(select(. != $p))' 2>/dev/null) || return 0
+  [ -n "$desired" ] || return 0
+  if sbx settings set kit.allowedSources "$desired" </dev/null >/dev/null 2>&1; then
+    acq_debug "kit-source: removed $prefix from sbx kit.allowedSources"
+  fi
+  return 0
+}
+
+_acq_sbx_ensure_kit_sources_allowed() {  local current desired
 
   if ! command -v jq >/dev/null 2>&1; then
     _acq_sbx_kit_sources_manual_hint "jq not found; cannot safely update the allowlist"
@@ -1200,9 +1218,15 @@ acq_backend_ensure_kits_applied() {
   # Neutral kits must be translated to local sbx-v2 kit dirs before sbx kit add.
   local provider_local="" playbook_local zscaler_local
   # The default provider is DATA (provider_kit), so heal resolves the selected
-  # ref instead of naming the USAi kit.
-  local provider_ref=""
-  provider_ref=$(_acq_selected_provider_kit_refs 2>/dev/null | head -n1)
+  # ref instead of naming the USAi kit. An invalid selection FAILS CLOSED here:
+  # silently healing without the provider kit would leave a half-configured sandbox.
+  local provider_local="" provider_ref="" provider_refs
+  if ! provider_refs=$(_acq_selected_provider_kit_refs); then
+    echo "acq(sbx): error: the configured provider kit could not be resolved;" >&2
+    echo "            refusing to heal '$name' without it." >&2
+    return 1
+  fi
+  provider_ref=$(printf '%s\n' "$provider_refs" | head -n1)
   if [ -n "$provider_ref" ]; then
     provider_local=$(_acq_sbx_translate_kit "$provider_ref")
   fi

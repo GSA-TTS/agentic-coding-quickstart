@@ -1870,6 +1870,16 @@ case "$subcommand" in
           exit 1
         fi
         acq_kit_source_rm "$1" || exit 1
+        # Revoke the prefix from the backend's own allowlist too (sbx unions on
+        # create; without this a removed source stays fetchable by the backend).
+        acq_backend_prepare
+        if command -v acq_backend_kit_source_revoked >/dev/null 2>&1; then
+          revoked_repo=$(_acq_kit_source_normalize_repo "$1" 2>/dev/null) || revoked_repo=""
+          if [ -n "$revoked_repo" ]; then
+            acq_backend_kit_source_revoked \
+              "${revoked_repo%%/*}/$(printf '%s' "${revoked_repo#*/}" | cut -d/ -f1)/"
+          fi
+        fi
         ;;
       --help|-h)
         _acq_kit_source_usage

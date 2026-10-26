@@ -680,6 +680,16 @@ is overridden for a run.
 (by scanning for `*/provider-input.json`). Discovery is best-effort: an
 unreachable source simply lists nothing.
 
+**What the registry does and does not gate.** The registry governs the sources
+`acq` *resolves* on your behalf — the trusted-source allowlist handed to the
+backend (sbx `kit.allowedSources`, updated on `add` **and** revoked on `rm`) and
+`provider_kit:` entries written in `config.yaml`, which must name a trusted source
+or an already-trusted remote ref. A **literal ref you supply on this invocation**
+(`--kit git+https://…`, `ACQ_PROVIDER_KITS`, `ACQ_EXTRA_KITS`) is trusted by *you*,
+not by the registry: `acq` fetches it as given. Local paths are always used
+verbatim. In short: the registry is the durable-trust boundary, not a sandbox for
+refs you type.
+
 The provider kit `acq` uses by default is likewise data:
 
 ```yaml

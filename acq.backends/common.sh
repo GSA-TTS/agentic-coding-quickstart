@@ -585,36 +585,32 @@ _acq_import_parse_args() {
         return 1
         ;;
       *)
-        # A BARE token is only a service when it is a built-in managed service.
-        # Provider ids must be named with --service, so a provider id that
-        # happens to match a sandbox name can never silently switch the scope
-        # from global to that sandbox.
-        case "$ACQ_MANAGED_SECRET_SERVICES" in
-          *" $arg "*)
-            if [ -z "$only_service" ]; then
-              only_service="$arg"
-            elif [ "$only_service" != "$arg" ]; then
-              echo "acq: secret import: unexpected extra argument '$arg'" >&2
-              return 1
-            fi
-            ;;
-          *)
-            if [ -z "$scope_sandbox" ]; then
-              scope_sandbox="$arg"
-            else
-              echo "acq: secret import: unexpected extra argument '$arg'" >&2
-              return 1
-            fi
-            ;;
-        esac
+        # A BARE token is a service when acq knows it as importable (a built-in
+        # managed service, or a provider reachable through the trust anchor /
+        # credential registry). That keeps `acq secret import usai` working after
+        # usai stopped being a compiled-in service. Anything else is the SANDBOX
+        # scope.
+        if _acq_is_importable_service "$arg"; then
+          if [ -z "$only_service" ]; then
+            only_service="$arg"
+          elif [ "$only_service" != "$arg" ]; then
+            echo "acq: secret import: unexpected extra argument '$arg'" >&2
+            return 1
+          fi
+        elif [ -z "$scope_sandbox" ]; then
+          scope_sandbox="$arg"
+        else
+          echo "acq: secret import: unexpected extra argument '$arg'" >&2
+          return 1
+        fi
         ;;
     esac
   done
   printf '%s\t%s\t%s\t%s\n' "$mode" "$dry_run" "$only_service" "$scope_sandbox"
 }
 
-# _acq_is_importable_service SERVICE — a built-in managed service or a provider
-# pinned in the credential-bindings registry (the latter only via --service).
+# _acq_is_importable_service SERVICE — a built-in managed service, or a provider
+# acq can import for (trust anchor, config.yaml, or ACQ_PROVIDER_CREDENTIAL_BINDINGS).
 _acq_is_importable_service() {
   case "$ACQ_MANAGED_SECRET_SERVICES" in
     *" ${1:-} "*) return 0 ;;
@@ -622,6 +618,19 @@ _acq_is_importable_service() {
   _acq_provider_credential_id_ok "${1:-}" || return 1
   command -v acq_provider_credential_key_env >/dev/null 2>&1 || return 1
   [ -n "$(acq_provider_credential_key_env "$1" 2>/dev/null)" ]
+}
+
+# acq_importable_services — every service `acq secret import` may scan for,
+# deduped and in a stable order: the built-in host services, then the providers
+# acq knows (trust anchor first, then config/env).
+acq_importable_services() {
+  {
+    for _svc in $ACQ_MANAGED_SECRET_SERVICES; do
+      printf '%s\n' "$_svc"
+    done
+    acq_provider_trusted_ids
+    acq_provider_registry_ids
+  } 2>/dev/null | awk 'NF && !seen[$0]++'
 }
 
 # acq_secret_import [SERVICE] [-g|--global|SANDBOX] [--all] [--force] [--dry-run]
@@ -662,8 +671,10 @@ acq_secret_import() {
     return 1
   fi
 
-  # Which services to consider: a single named one, or all managed services.
-  local services="$ACQ_MANAGED_SECRET_SERVICES"
+  # Which services to consider: a single named one, or every importable service
+  # (built-ins plus the providers acq knows through its trust anchor/registry).
+  local services
+  services=$(acq_importable_services)
   [ -n "$only_service" ] && services="$only_service"
 
   local scope_desc="global"
@@ -910,12 +921,22 @@ acq_agent_builtin_kit_ready() {
 }
 
 _acq_selected_support_kit_refs() {
-  local name kit
+  local name kit provider_refs
   kit=$(_acq_builtin_kit_ref zscaler-ca-certificate) || return 1
   printf '%s\n' "$kit"
+  # Captured, NOT consumed through a process substitution: a failed provider-kit
+  # resolution must abort the run (fail closed) instead of silently dropping the
+  # provider kit and continuing without one.
+  provider_refs=$(_acq_selected_provider_kit_refs) || {
+    echo "acq: the configured provider kit could not be resolved (see above)." >&2
+    echo "     Fix 'provider_kit:' / 'kit_sources:' or unset ACQ_PROVIDER_KITS." >&2
+    return 1
+  }
   while IFS= read -r kit; do
     [ -n "$kit" ] && printf '%s\n' "$kit"
-  done < <(_acq_selected_provider_kit_refs)
+  done <<EOF
+$provider_refs
+EOF
   for name in agentic-coding-playbook git-ssh-sign; do
     kit=$(_acq_builtin_kit_ref "$name") || return 1
     printf '%s\n' "$kit"
@@ -960,11 +981,14 @@ acq_print_selected_agent_kit() {
 # succeed behind a TLS-intercepting proxy.
 # shellcheck disable=SC2120  # optional agent argument; many callers use default
 _build_kit_list() {
-  local agent="${1:-}" kit
+  local agent="${1:-}" kit support_refs
   KITS=()
+  support_refs=$(_acq_selected_support_kit_refs) || return 1
   while IFS= read -r kit; do
     [ -n "$kit" ] && KITS+=("$kit")
-  done < <(_acq_selected_support_kit_refs)
+  done <<EOF
+$support_refs
+EOF
   # shellcheck disable=SC2034  # read by adapters/tests after _build_kit_list
   ACQ_BUILTIN_SUPPORT_KIT_COUNT="${#KITS[@]}"
   if [ -n "${ACQ_REQUIRED_AGENT_KIT:-}" ] \
@@ -2407,6 +2431,12 @@ _acq_kit_source_parse_entry() {
       return 1
       ;;
   esac
+  # An entry naming the shipped default source may omit @ref: it then follows the
+  # shipped PATTERNS_KIT_REF, so a future pin bump keeps applying. Only an
+  # explicit --ref freezes it.
+  if [ -z "$ref" ] && [ "$repo" = "$ACQ_KIT_SOURCE_DEFAULT_REPO" ]; then
+    ref="$ACQ_KIT_SOURCE_DEFAULT_REF"
+  fi
   [ -n "$dir" ] || dir="$ACQ_KIT_SOURCE_DEFAULT_DIR"
   case "$dir" in
     /*|*..*|*[!A-Za-z0-9._/-]*)
@@ -2553,14 +2583,36 @@ _acq_kit_source_kit_ref() {
 # Accepted forms: <kit>@<source>, <source>/<kit>, host/owner/repo/<kit>.
 acq_provider_kit_ref() {
   local value="${1:-}" kit="" repo="" head
+  local from_config=""
   if [ -z "$value" ]; then
     value=$(_acq_config_read_field "$ACQ_PROVIDER_KIT_CONFIG_KEY")
     [ -n "$value" ] || value="$ACQ_PROVIDER_KIT_DEFAULT"
+    [ -z "$value" ] || from_config=1
   fi
-  # A literal kit ref (local path or git+https) is used verbatim: this keeps
-  # `provider_kit:` able to name a ref directly, and keeps the test seam working.
+  # A literal kit ref (local path or git+https) is used verbatim. A REMOTE ref
+  # that comes from config.yaml is additionally held to the trusted-source
+  # allowlist: a config file is durable state acq acts on automatically, unlike a
+  # ref the user typed on this command line (--kit) or the test seam.
   case "$value" in
     git+http*|/*|./*|../*)
+      if [ -n "$from_config" ]; then
+        case "$value" in
+          git+http*)
+            local ref_authority="${value#git+http}"
+            ref_authority="${ref_authority#s://}"
+            ref_authority="${ref_authority#*://}"
+            ref_authority="${ref_authority%%/*}/$(printf '%s' "${ref_authority#*/}" | cut -d/ -f1)/"
+            case " $(acq_kit_source_prefixes | tr '\n' ' ') " in
+              *" $ref_authority "*) ;;
+              *)
+                echo "acq: provider_kit names an untrusted remote ref: $value" >&2
+                echo "     Trust its source first: acq kit-source add ${ref_authority%/} --ref <sha>" >&2
+                return 1
+                ;;
+            esac
+            ;;
+        esac
+      fi
       printf '%s\n' "$value"
       return 0
       ;;
@@ -2627,7 +2679,13 @@ _acq_kit_source_rewrite() {
       seen=1
       continue
     fi
-    updated="${updated:+$updated }${repo}@${ref}"
+    # Emit the default source WITHOUT @ref when it still tracks the shipped pin,
+    # so the entry stays dynamic across a PATTERNS_KIT_REF bump.
+    if [ "$repo" = "$ACQ_KIT_SOURCE_DEFAULT_REPO" ] && [ "$ref" = "$ACQ_KIT_SOURCE_DEFAULT_REF" ]; then
+      updated="${updated:+$updated }${repo}"
+    else
+      updated="${updated:+$updated }${repo}@${ref}"
+    fi
     case "$dir" in
       ""|"$ACQ_KIT_SOURCE_DEFAULT_DIR") : ;;
       *) updated="${updated}|${dir}" ;;
@@ -3076,6 +3134,34 @@ acq_provider_selection_active() {
     [ -n "${ACQ_PROVIDER_KITS:-}" ] || return 1
   fi
   return 0
+}
+
+# acq_provider_trusted_ids — the provider ids shipped in the trust anchor.
+# Selection-independent (used by `acq secret import`/managed-service checks).
+acq_provider_trusted_ids() {
+  local id rest
+  while IFS='|' read -r id rest; do
+    [ -n "$id" ] && printf '%s\n' "$id"
+  done <<EOF
+$ACQ_PROVIDER_TRUSTED_DEFAULTS
+EOF
+  return 0
+}
+
+# acq_provider_default_selected — 0 when the DEFAULT provider kit is among the
+# selected provider refs. Guards the trust anchor so an external-provider-only
+# selection does not bind/export the default provider's credential.
+acq_provider_default_selected() {
+  local refs default_ref ref
+  refs=$(_acq_selected_provider_kit_refs) || return 1
+  default_ref=$(acq_provider_kit_ref) || return 1
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    [ "$ref" = "$default_ref" ] && return 0
+  done <<EOF
+$refs
+EOF
+  return 1
 }
 
 # acq_provider_default_id — the id of the shipped default provider (the first
@@ -3564,11 +3650,10 @@ acq_provider_registry_ids() {
   done <<EOF
 $pairs
 EOF
-  while IFS='|' read -r id _key _hosts; do
-    [ -n "$id" ] && printf '%s\n' "$id"
-  done <<EOF
-$ACQ_PROVIDER_TRUSTED_DEFAULTS
-EOF
+  # The trust anchor participates only when its provider is actually selected.
+  if acq_provider_default_selected; then
+    acq_provider_trusted_ids
+  fi
   return 0
 }
 
@@ -3613,6 +3698,18 @@ EOF
   # Bind EVERY pinned host (both backends accept a comma-separated host list), so
   # the destination `provider-credential ls` prints is exactly what gets bound.
   printf '%s\t%s\t%s\n' "$registry_hosts" "$key_env" ""
+}
+
+# _acq_provider_is_host_service ID — 0 for the ids BOTH backends bind from
+# compiled-in tables (`github` only). A host service's token must never be
+# resolved from kit-supplied facts, probed at a kit-chosen host, or bound there:
+# the gate skips it, and so must every later stage (see
+# ensure_valid_provider_keys / check_provider_key).
+_acq_provider_is_host_service() {
+  case "${1:-}" in
+    github) return 0 ;;
+  esac
+  return 1
 }
 
 # acq_provider_binding_host_env SERVICE [SANDBOX] — echo "host<TAB>keyEnv" for a
@@ -3760,12 +3857,10 @@ acq_provider_credentials_gate() {
   tab=$(printf '\t')
   while IFS="$tab" read -r provider_id key_env host models_url api_protocol; do
     [ -n "$provider_id" ] || continue
-    # Skip ONLY ids a backend hard-codes at its binding layer. That is now just
-    # `github` (a host service, not a provider): `usai` is routed through the
-    # generic provider path like every other provider.
-    case "$provider_id" in
-      github) continue ;;
-    esac
+    # Skip ONLY ids a backend hard-codes at its binding layer (see
+    # _acq_provider_is_host_service): `usai` is routed through the generic
+    # provider path like every other provider.
+    _acq_provider_is_host_service "$provider_id" && continue
     _acq_provider_credentials_gate_trust "$backend" "$name" "$provider_id" "$host" || return 1
     _acq_provider_credentials_gate_one "$backend" "$name" "$provider_id" "$key_env" "$host" || return 1
   done <<EOF
@@ -3784,6 +3879,10 @@ EOF
 check_provider_key() {
   local name="${1:-}" provider_id="${2:-}" binding key_env host models_url key_ref raw
   [ -n "$name" ] && [ -n "$provider_id" ] || return 0
+  if _acq_provider_is_host_service "$provider_id"; then
+    echo "acq: '$provider_id' is a host service; acq never probes it from kit facts." >&2
+    return 1
+  fi
   binding=$(acq_provider_binding "${ACQ_RESOLVED_BACKEND:-}" "$name" "$provider_id") || {
     echo "acq: no validated provider facts for '$provider_id' in sandbox '$name'." >&2
     return 1
@@ -3829,6 +3928,9 @@ ensure_valid_provider_keys() {
   [ -n "$ids" ] || return 0
   while IFS= read -r provider_id; do
     [ -n "$provider_id" ] || continue
+    # Never probe a host service: its token belongs to a compiled-in endpoint,
+    # and a kit that declares the id would otherwise direct it to its own host.
+    _acq_provider_is_host_service "$provider_id" && continue
     status=$(check_provider_key "$name" "$provider_id")
     case "$status" in
       "200") continue ;;

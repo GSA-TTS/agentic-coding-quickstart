@@ -297,3 +297,73 @@ _fake_source_tree() {
   esac
   refute grep -Fq 'usai-provider' <<<"$refs"
 }
+
+# ---------------------------------------------------------------------------
+# Regression guards from review
+# ---------------------------------------------------------------------------
+
+@test "secret import still accepts a bare usai token and --all scans it" {
+  # usai is no longer a compiled-in managed service; it is reachable through the
+  # trust anchor, so both the bare form and the full scan must keep working.
+  run _acq_import_parse_args usai
+  assert_success
+  assert_output "$(printf 'interactive\t0\tusai\t')"
+
+  run acq_importable_services
+  assert_success
+  assert_line 'usai'
+  assert_line 'github'
+  assert_line 'gitlab'
+}
+
+@test "adding a source does not freeze the shipped default ref" {
+  run "$ACQ" kit-source add github.com/mogul/kits --ref abcd
+  assert_success
+
+  # The default entry is stored WITHOUT @ref, so a future PATTERNS_KIT_REF bump
+  # keeps applying while the user's explicit pin is untouched.
+  grep -Fq 'kit_sources:' "$XDG_CONFIG_HOME/acq/config.yaml"
+  refute grep -Fq "agentic-coding-patterns@$PATTERNS_KIT_REF" "$XDG_CONFIG_HOME/acq/config.yaml"
+
+  run acq_kit_sources_entries
+  assert_success
+  assert_output --partial "agentic-coding-patterns|$PATTERNS_KIT_REF|"
+  assert_output --partial 'mogul/kits|abcd|'
+}
+
+@test "an explicitly pinned default source keeps its own ref" {
+  run "$ACQ" kit-source add github.com/GSA-TTS/agentic-coding-patterns --ref deadbeef
+  assert_success
+
+  run acq_kit_sources_entries
+  assert_success
+  assert_output --partial 'agentic-coding-patterns|deadbeef|'
+  refute_output --partial "agentic-coding-patterns|$PATTERNS_KIT_REF|"
+}
+
+@test "an unresolvable provider_kit fails closed instead of dropping the provider" {
+  _acq_config_write_field provider_kit 'evil-kits/x-provider'
+
+  run _build_kit_list
+  assert_failure
+  assert_output --partial 'provider kit could not be resolved'
+}
+
+@test "provider_kit from config refuses an untrusted remote ref" {
+  _acq_config_write_field provider_kit 'git+https://github.com/evil/kits.git#ref=abc123&dir=kits'
+
+  run acq_provider_kit_ref
+  assert_failure
+  assert_output --partial 'untrusted remote ref'
+  assert_output --partial 'acq kit-source add github.com/evil'
+}
+
+@test "a trusted remote ref from config is accepted" {
+  run "$ACQ" kit-source add github.com/evil/kits --ref abc123
+  assert_success
+  _acq_config_write_field provider_kit 'git+https://github.com/evil/kits.git#ref=abc123&dir=kits'
+
+  run acq_provider_kit_ref
+  assert_success
+  assert_output --partial 'github.com/evil/kits.git#ref=abc123'
+}

@@ -315,18 +315,23 @@ _provider_kit() {
   assert_success
 }
 
-@test "secret import needs --service for a provider id so it cannot become a scope" {
+@test "secret import treats a known provider id as a service, an unknown token as a scope" {
   export ACQ_PROVIDER_CREDENTIAL_BINDINGS='opencode-go=OPENCODE_GO_API_KEY@go.example.gov'
 
-  # A bare provider id is treated as the SANDBOX scope (refresh semantics kept),
-  # never as a service.
+  # A KNOWN provider id is the service even as a bare token — that is what keeps
+  # `acq secret import usai` working after usai stopped being a built-in service.
   run _acq_import_parse_args opencode-go
   assert_success
-  assert_output "$(printf 'interactive\t0\t\topencode-go')"
+  assert_output "$(printf 'interactive\t0\topencode-go\t')"
 
   run _acq_import_parse_args --service=opencode-go
   assert_success
   assert_output "$(printf 'interactive\t0\topencode-go\t')"
+
+  # An unknown token is the SANDBOX scope, not a service.
+  run _acq_import_parse_args my-sandbox
+  assert_success
+  assert_output "$(printf 'interactive\t0\t\tmy-sandbox')"
 
   run _acq_import_parse_args --service=nope-not-a-provider
   assert_failure
@@ -861,4 +866,22 @@ PYTHON
   assert_failure
   assert_output --partial 'acq secret set -g alpha'
   refute_output --partial 'usai-rotate-api-key'
+}
+
+@test "a kit cannot make acq probe a host service's token at its own host" {
+  local generation
+  # `github` is bound from a compiled-in table. A kit declaring the id (with its
+  # own host) must not turn the attach probe into "send GITHUB_TOKEN here".
+  generation=$(_make_generation github GITHUB_TOKEN attacker.example.gov)
+  export ACQ_PROVIDER_BINDINGS_GENERATION="$generation"
+  acq_backend_run() { printf 'probe-called\n' > "$STUBDIR/probe.called"; printf '200|0\n'; }
+
+  run ensure_valid_provider_keys box
+  assert_success
+  refute [ -e "$STUBDIR/probe.called" ]
+
+  run check_provider_key box github
+  assert_failure
+  assert_output --partial 'host service'
+  refute [ -e "$STUBDIR/probe.called" ]
 }
