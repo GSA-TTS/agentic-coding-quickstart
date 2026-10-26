@@ -2608,8 +2608,16 @@ EOF
 }
 
 # _acq_kit_source_kit_ref REPO REF DIR KIT — the git+https ref acq fetches.
+# DIR "." means the kits live at the repository root (no kits subdirectory), in
+# which case the ref points straight at the kit directory.
 _acq_kit_source_kit_ref() {
-  printf 'git+https://%s.git#ref=%s&dir=%s/%s\n' "$1" "$2" "$3" "$4"
+  local repo="$1" ref="$2" dir="$3" kit="$4" path
+  if [ "$dir" = "." ]; then
+    path="$kit"
+  else
+    path="${dir}/${kit}"
+  fi
+  printf 'git+https://%s.git#ref=%s&dir=%s\n' "$repo" "$ref" "$path"
 }
 
 # acq_provider_kit_ref [VALUE] — resolve the default provider kit (config
@@ -3399,7 +3407,7 @@ acq_provider_credential_ls() {
   [ "$printed" -eq 1 ] || printf '%-24s %-32s %-32s %s\n' '(none)' '-' '-' '-'
   echo ""
   echo "HOST is the pinned destination: acq refuses to send a stored credential"
-  echo "anywhere else. `acq secret set -g <providerId>` stores the value itself."
+  echo "anywhere else. 'acq secret set -g <providerId>' stores the value itself."
   return 0
 }
 
