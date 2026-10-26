@@ -32,8 +32,11 @@ ACQ_RESOLVED_PATH="${ACQ_SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 . "${ACQ_SCRIPT_DIR}/acq.backends/common.sh"
 
 # Test-only seam for executable dispatch tests that need a local provider kit.
+# It overrides the DEFAULT provider kit (which is otherwise data in config.yaml),
+# so the same fixtures keep working after the default moved out of code.
 if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_USAI_KIT:-}" ]; then
   USAI_KIT="$ACQ_TEST_USAI_KIT"
+  ACQ_PROVIDER_KIT_DEFAULT="$ACQ_TEST_USAI_KIT"
 fi
 # ---------------------------------------------------------------------------
 # Print version/identity
@@ -114,6 +117,9 @@ Subcommands:
                                            var and destination host.
   provider-credential ls                   List pinned provider bindings.
   provider-credential rm PROVIDER          Remove a configured binding.
+  kit-source add REPO --ref REF            Trust a kit repository at a pinned commit.
+  kit-source ls                            Trusted sources + published provider kits.
+  kit-source rm REPO                       Stop trusting a kit repository.
   usai-rotate-api-key                      Rotate the USAi API key.
   version                                  Show acq version + backend info.
   doctor [NAME]                            Backend health check, or non-enforcing
@@ -282,6 +288,39 @@ the acq store:
 
 See docs/howto/acq.md ("Non-USAi provider kits").
 PROVIDERCREDUSAGE
+}
+
+_acq_kit_source_usage() {
+  cat >&2 <<'KITSOURCEUSAGE'
+acq kit-source — trusted repositories acq will fetch kits from
+
+Usage:
+  acq kit-source add REPO --ref REF [--dir DIR]   Trust a repository at a pinned commit
+  acq kit-source ls                              Sources + the provider kits they publish
+  acq kit-source rm REPO                         Stop trusting a repository
+
+REPO is host/owner/repo (a pasted clone URL or git+https ref is normalized).
+A trusted source may be FETCHED from, and its provider kits may be selected. It
+does NOT extend to the validation control plane: the provider-input validator and
+its schemas stay pinned to the Patterns release, so a new source can ship kits but
+cannot redefine what a valid kit is.
+
+Sources live in ~/.config/acq/config.yaml as `kit_sources:`; the shipped default
+is github.com/GSA-TTS/agentic-coding-patterns pinned to the release acq was built
+against. ACQ_KIT_SOURCES overrides the list for one invocation, and
+ACQ_EXTRA_KIT_SOURCES still ADDS allowlist prefixes (backward compatibility).
+
+`ls` also lists the provider kits each source publishes (by scanning for
+*/provider-input.json). Discovery is best-effort: an unreachable source simply
+lists nothing.
+
+Pick the provider kit acq uses by default with `acq configure`, or set
+`provider_kit: <source>/<kit>` in config.yaml (default:
+agentic-coding-patterns/usai-provider). Per-run selection is still
+ACQ_PROVIDER_KITS / --no-provider-kits.
+
+See docs/howto/acq.md ("Trusted kit sources").
+KITSOURCEUSAGE
 }
 
 _acq_backend_subcmd_usage() {
@@ -520,7 +559,7 @@ U
 _acq_verb_backend_help_kind() {
   case "${1%% *}" in
     run|ls|stop|rm|exec|cp|ports|secret|kit) printf 'shared' ;;
-    start|restart|create|shell|version|doctor|github-scope|usai-rotate-api-key|backend|provider-credential) printf 'acqonly' ;;
+    start|restart|create|shell|version|doctor|github-scope|usai-rotate-api-key|backend|provider-credential|kit-source) printf 'acqonly' ;;
     *) printf '' ;;
   esac
 }
@@ -539,6 +578,7 @@ _acq_print_topic_help() {
     backend)   _acq_backend_subcmd_usage; return 0 ;;
     configure) _acq_configure_usage; return 0 ;;
     provider-credential) _acq_provider_credential_usage; return 0 ;;
+    kit-source) _acq_kit_source_usage; return 0 ;;
     *)         _acq_simple_verb_usage "$head"; return $? ;;
   esac
 }
@@ -1844,6 +1884,49 @@ case "$subcommand" in
       *)
         echo "acq: unknown provider-credential subcommand '${1}'." >&2
         echo "     Try: acq provider-credential set | ls | rm | --help" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  kit-source)
+    # Trusted kit sources: which repositories acq will FETCH kits from. Trust does
+    # not extend to the validation control plane (the validator + schemas stay
+    # pinned to the Patterns release), so a new source can ship kits but cannot
+    # redefine what a valid kit is.
+    shift
+    case "${1:-}" in
+      add)
+        shift
+        if [ "$#" -lt 1 ]; then
+          echo "acq: kit-source add: missing repository" >&2
+          echo "     usage: acq kit-source add REPO --ref REF [--dir DIR]" >&2
+          exit 1
+        fi
+        acq_kit_source_set "$@" || exit 1
+        ;;
+      ls)
+        acq_kit_source_ls || exit 1
+        ;;
+      rm)
+        shift
+        if [ "$#" -lt 1 ]; then
+          echo "acq: kit-source rm: missing repository" >&2
+          echo "     usage: acq kit-source rm REPO" >&2
+          exit 1
+        fi
+        acq_kit_source_rm "$1" || exit 1
+        ;;
+      --help|-h)
+        _acq_kit_source_usage
+        ;;
+      "")
+        _acq_kit_source_usage
+        exit 2
+        ;;
+      *)
+        echo "acq: unknown kit-source subcommand '${1}'." >&2
+        echo "     Try: acq kit-source add | ls | rm | --help" >&2
         exit 1
         ;;
     esac

@@ -647,6 +647,47 @@ If a provider kit is selected but no credential is available, the create fails
 closed (non-interactive) or offers to store one (interactive), showing the
 destination host in the prompt.
 
+### Trusted kit sources
+
+`acq` fetches kits only from **trusted sources**, recorded as data in
+`~/.config/acq/config.yaml`:
+
+```bash
+acq kit-source add github.com/acme/kits --ref <sha>   # trust a repo at a pinned commit
+acq kit-source ls                                    # sources + the provider kits they publish
+acq kit-source rm github.com/acme/kits
+```
+
+The shipped default is `github.com/GSA-TTS/agentic-coding-patterns` pinned to the
+release `acq` was built against, so a fresh install needs no configuration.
+`ACQ_KIT_SOURCES` overrides the list for one invocation (whitespace-separated
+`host/owner/repo[@ref][|dir]` entries); `ACQ_EXTRA_KIT_SOURCES` still **adds**
+allowlist prefixes for backward compatibility. The fetch allowlist handed to the
+backend (e.g. sbx `kit.allowedSources`) is derived from this registry.
+
+Trust is **narrow**: a trusted source may be fetched from, and may contribute
+provider kits. It does **not** extend to the validation control plane — the
+provider-input validator and its schemas stay pinned to the Patterns release, so a
+new source can ship kits but cannot redefine what a valid kit is. Because the
+pinned release *is* the control plane, it stays resolvable even when the registry
+is overridden for a run.
+
+`acq kit-source ls` also **auto-lists** the provider kits each source publishes
+(by scanning for `*/provider-input.json`). Discovery is best-effort: an
+unreachable source simply lists nothing.
+
+The provider kit `acq` uses by default is likewise data:
+
+```yaml
+provider_kit: agentic-coding-patterns/usai-provider   # default
+# or: agentic-coding-kits/opencode-go-provider
+# or: opencode-go-provider@github.com/mogul/agentic-coding-kits
+```
+
+`acq configure` offers the discovered kits in a picker, so you can select one
+without hand-writing a `git+https` ref. Per-run selection is still
+`ACQ_PROVIDER_KITS` / `--no-provider-kits`.
+
 ---
 
 ## Progress output

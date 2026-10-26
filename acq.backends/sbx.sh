@@ -204,7 +204,13 @@ _acq_sbx_kit_sources_manual_hint() {
       'reduce $ARGS.positional[] as $p (.; if index($p) then . else . + [$p] end)' \
       "${KIT_SOURCE_PREFIXES[@]}" 2>/dev/null)
   fi
-  [ -z "${cmd:-}" ] && cmd='["docker.io/","github.com/GSA-TTS/"]'
+  if [ -z "${cmd:-}" ]; then
+    local _acc='["docker.io/"' _p
+    for _p in ${KIT_SOURCE_PREFIXES[@]+"${KIT_SOURCE_PREFIXES[@]}"}; do
+      _acc="$_acc,\"$_p\""
+    done
+    cmd="$_acc]"
+  fi
   echo "      If kit resolution fails, review the current value and run:" >&2
   echo "        sbx settings set kit.allowedSources '${cmd}'" >&2
 }

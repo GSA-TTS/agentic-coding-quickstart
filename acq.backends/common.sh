@@ -229,8 +229,10 @@ ACQ_AGENT_KIT_READY_CACHE=""
 # where they override a kit's mapping for the same guest port.
 ACQ_PUBLISH_FLAGS=()
 
-KIT_SOURCE_PREFIX="github.com/GSA-TTS/"
-KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
+# Fetch allowlist, derived from the trusted kit-source registry (see
+# acq_kit_source_prefixes). Populated by _build_kit_list.
+# shellcheck disable=SC2034  # consumed by the sbx allowlist sync
+KIT_SOURCE_PREFIXES=()
 
 # Transitional fallback defaults for the pinned usai-provider kit. ADR-0030's
 # target state is for the kit to export these provider facts as static metadata
@@ -902,9 +904,12 @@ _acq_builtin_support_kit_names() {
 }
 
 _acq_selected_provider_kit_refs() {
-  local provider_refs=() ref
+  local provider_refs=() ref resolved
   if [ -z "${ACQ_PROVIDER_KITS_FROM_ENV:-}" ] && [ -z "${ACQ_PROVIDER_KITS_FROM_CLI:-}" ]; then
-    provider_refs=("$USAI_KIT")
+    # The default provider kit is DATA (`provider_kit:` in config.yaml), so a new
+    # provider needs no code change here.
+    resolved=$(acq_provider_kit_ref) || return 1
+    provider_refs=("$resolved")
   elif [ -n "$ACQ_PROVIDER_KITS" ]; then
     split_noglob provider_refs "$ACQ_PROVIDER_KITS"
   fi
@@ -1107,14 +1112,13 @@ _build_kit_list() {
     KITS+=("${ACQ_CLI_KITS[@]}")
   fi
 
-  # Also build the allowed sources list.
-  KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
-  if [ -n "$ACQ_EXTRA_KIT_SOURCES" ]; then
-    local _extra_sources=()
-    split_noglob _extra_sources "$ACQ_EXTRA_KIT_SOURCES"
-    # shellcheck disable=SC2154
-    KIT_SOURCE_PREFIXES+=("${_extra_sources[@]}")
-  fi
+  # Also build the allowed sources list. Trusted kit sources are now DATA (the
+  # kit_sources registry), so the allowlist is derived rather than hardcoded.
+  KIT_SOURCE_PREFIXES=()
+  local _prefix
+  while IFS= read -r _prefix; do
+    [ -n "$_prefix" ] && KIT_SOURCE_PREFIXES+=("$_prefix")
+  done < <(acq_kit_source_prefixes)
 }
 
 # Normalize a string into a sandbox-name slug: lowercase, runs of
@@ -2440,6 +2444,490 @@ acq_cli_kits_load() {
   # otherwise leave any env-supplied value in place (do not clobber the env).
   [ -n "$_extras" ] && ACQ_EXTRA_KITS="$_extras"
   acq_debug "cli-kits: reloaded $backend/$name (${#ACQ_CLI_KITS[@]} cli kit(s))"
+  return 0
+}
+
+# ============================================================================
+# Trusted kit sources (which repositories acq will fetch kits from)
+# ============================================================================
+# Trust here is deliberately NARROW: a trusted source may be FETCHED from, and
+# its provider kits may be selected. It does NOT extend to the validation
+# control plane — the provider-input validator and its schemas stay pinned to the
+# Patterns release (PATTERNS_KIT_REF), so a new source can ship kits but cannot
+# redefine what a valid kit is.
+#
+# The registry is DATA in config.yaml so the default provider is not special-cased
+# in code:
+#   kit_sources:  host/owner/repo[@REF][|DIR] ...   (whitespace separated)
+#   provider_kit: <source-or-repo>/<kit>            (or <kit>@<repo>)
+# ACQ_KIT_SOURCES overrides the source list for one invocation.
+ACQ_KIT_SOURCE_CONFIG_KEY="kit_sources"
+ACQ_PROVIDER_KIT_CONFIG_KEY="provider_kit"
+ACQ_KIT_SOURCE_DEFAULT_REPO="github.com/GSA-TTS/agentic-coding-patterns"
+ACQ_KIT_SOURCE_DEFAULT_REF="$PATTERNS_KIT_REF"
+ACQ_KIT_SOURCE_DEFAULT_DIR="$PATTERNS_KIT_DIR"
+# The default provider kit, expressed as data. The short source name is matched
+# against the registered sources, so bumping PATTERNS_KIT_REF needs no code edit.
+ACQ_PROVIDER_KIT_DEFAULT="agentic-coding-patterns/${USAI_PROVIDER_KIT_NAME}"
+
+# _acq_kit_source_repo_ok REPO — host/owner/repo, lower-case host, no scheme.
+_acq_kit_source_repo_ok() {
+  local repo="${1:-}"
+  [ -n "$repo" ] && [ "${#repo}" -le 200 ] || return 1
+  printf '%s' "$repo" | LC_ALL=C grep -qE \
+    '^[a-z0-9][a-z0-9.-]*/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+}
+
+# _acq_kit_source_normalize_repo ARG — accept what a human pastes (a bare
+# host/owner/repo, a clone URL, a git+https kit-style URL) and emit host/owner/repo.
+# Fails closed on anything else so a typo cannot silently trust a different repo.
+_acq_kit_source_normalize_repo() {
+  local arg="${1:-}" repo
+  repo="$arg"
+  repo="${repo#git+}"
+  case "$repo" in
+    *://*) repo="${repo#*://}" ;;
+  esac
+  case "$repo" in
+    *@*) return 1 ;;   # credential-bearing URLs are never a kit source
+  esac
+  repo="${repo%%#*}"
+  repo="${repo%%\?*}"
+  repo="${repo%.git}"
+  repo="${repo%/}"
+  _acq_kit_source_repo_ok "$repo" || return 1
+  printf '%s\n' "$repo"
+}
+
+# _acq_kit_source_parse_entry ENTRY SOURCE — normalize "repo[@REF][|DIR]" into
+# "repo<TAB>ref<TAB>dir". REF may be empty (the source is then registered but
+# unusable for fetching, which the reader reports as unpinned). DIR defaults to
+# the neutral acq-kits path.
+_acq_kit_source_parse_entry() {
+  local entry="${1:-}" source="${2:-kit_sources}" rest repo ref="" dir=""
+  [ -n "$entry" ] || return 1
+  rest="$entry"
+  case "$rest" in
+    *'|'*) dir="${rest#*|}"; rest="${rest%%|*}" ;;
+  esac
+  case "$rest" in
+    *'@'*) ref="${rest#*@}"; rest="${rest%%@*}" ;;
+  esac
+  if ! repo=$(_acq_kit_source_normalize_repo "$rest"); then
+    echo "acq: ${source}: invalid kit source '$entry'" >&2
+    echo "     want host/owner/repo[@REF][|DIR] (for example github.com/acme/kits@<sha>)" >&2
+    return 1
+  fi
+  case "$ref" in
+    *[!A-Za-z0-9_.-]*)
+      echo "acq: ${source}: invalid ref '$ref' for '$repo'" >&2
+      return 1
+      ;;
+  esac
+  [ -n "$dir" ] || dir="$ACQ_KIT_SOURCE_DEFAULT_DIR"
+  case "$dir" in
+    /*|*..*|*[!A-Za-z0-9._/-]*)
+      echo "acq: ${source}: unsafe kit dir '$dir' for '$repo'" >&2
+      return 1
+      ;;
+  esac
+  printf '%s|%s|%s\n' "$repo" "$ref" "$dir"
+}
+
+# _acq_kit_source_default_entry — the shipped default, as a registry ENTRY.
+_acq_kit_source_default_entry() {
+  printf '%s@%s|%s\n' \
+    "$ACQ_KIT_SOURCE_DEFAULT_REPO" "$ACQ_KIT_SOURCE_DEFAULT_REF" "$ACQ_KIT_SOURCE_DEFAULT_DIR"
+}
+
+# acq_kit_sources_entries — echo one "repo<TAB>ref<TAB>dir" per trusted source.
+# Precedence: ACQ_KIT_SOURCES (this invocation) > config.yaml > shipped default.
+acq_kit_sources_entries() {
+  local raw tokens=() token source_label
+  if [ -n "${ACQ_KIT_SOURCES:-}" ]; then
+    raw="$ACQ_KIT_SOURCES"
+    source_label="ACQ_KIT_SOURCES"
+  else
+    raw=$(_acq_config_read_field "$ACQ_KIT_SOURCE_CONFIG_KEY")
+    if [ -n "$raw" ]; then
+      source_label="config.yaml ${ACQ_KIT_SOURCE_CONFIG_KEY}"
+    else
+      raw=$(_acq_kit_source_default_entry)
+      source_label="default"
+    fi
+  fi
+  # `none` is the explicit "no trusted sources" spelling: the flat config writer
+  # removes a key when its value is empty, so absence cannot express it.
+  case "$raw" in
+    none|NONE|None) return 0 ;;
+  esac
+  split_noglob tokens "$raw"
+  for token in ${tokens[@]+"${tokens[@]}"}; do
+    _acq_kit_source_parse_entry "$token" "$source_label" || return 1
+  done
+  return 0
+}
+
+# acq_kit_source_prefixes — the fetch allowlist, derived from the registry.
+# ACQ_EXTRA_KIT_SOURCES (a list of host/owner/ prefixes) still works as a
+# backward-compatible ADDITION so existing setups keep fetching their kits.
+acq_kit_source_prefixes() {
+  local entries repo rest prefix seen=""
+  entries=$(acq_kit_sources_entries) || return 1
+  while IFS='|' read -r repo rest; do
+    [ -n "$repo" ] || continue
+    prefix="${repo%%/*}/$(printf '%s' "${repo#*/}" | cut -d/ -f1)/"
+    case " $seen " in *" $prefix "*) continue ;; esac
+    seen="$seen $prefix"
+    printf '%s\n' "$prefix"
+  done <<EOF
+$entries
+EOF
+  local _extra=() _source
+  if [ -n "${ACQ_EXTRA_KIT_SOURCES:-}" ]; then
+    split_noglob _extra "$ACQ_EXTRA_KIT_SOURCES"
+    for _source in ${_extra[@]+"${_extra[@]}"}; do
+      [ -n "$_source" ] || continue
+      printf '%s\n' "$_source"
+    done
+  fi
+  return 0
+}
+
+# _acq_kit_source_entry_for_repo REPO — echo "repo<TAB>ref<TAB>dir" for a repo that
+# is registered (exact host/owner/repo), or fail.
+_acq_kit_source_entry_for_repo() {
+  local wanted="${1:-}" repo ref dir
+  [ -n "$wanted" ] || return 1
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] || continue
+    [ "$repo" = "$wanted" ] || continue
+    printf '%s|%s|%s\n' "$repo" "$ref" "$dir"
+    return 0
+  done <<EOF
+$(acq_kit_sources_entries)
+EOF
+  # The pinned Patterns release is acq's CONTROL PLANE (validator + schemas), so
+  # it stays resolvable even when the registry is overridden for one invocation
+  # (ACQ_KIT_SOURCES) or emptied: the default provider kit must not vanish just
+  # because an extra source was added for this run.
+  if [ "$wanted" = "$ACQ_KIT_SOURCE_DEFAULT_REPO" ]; then
+    printf '%s|%s|%s\n' \
+      "$ACQ_KIT_SOURCE_DEFAULT_REPO" "$ACQ_KIT_SOURCE_DEFAULT_REF" "$ACQ_KIT_SOURCE_DEFAULT_DIR"
+    return 0
+  fi
+  return 1
+}
+
+# _acq_kit_source_resolve_repo WANT — accept a full repo or a unique source
+# basename ("agentic-coding-patterns") and echo the full repo.
+_acq_kit_source_resolve_repo() {
+  local want="${1:-}" repo ref dir found="" count=0
+  [ -n "$want" ] || return 1
+  # The shipped default source is the pinned control plane: always resolvable.
+  if [ "$want" = "${ACQ_KIT_SOURCE_DEFAULT_REPO##*/}" ]; then
+    printf '%s\n' "$ACQ_KIT_SOURCE_DEFAULT_REPO"
+    return 0
+  fi
+  case "$want" in
+    */*) _acq_kit_source_entry_for_repo "$want" >/dev/null || {
+           echo "acq: kit source '$want' is not trusted." >&2
+           echo "     Add it first: acq kit-source add $want --ref <sha>" >&2
+           return 1
+         }
+         printf '%s\n' "$want"
+         return 0
+         ;;
+  esac
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] || continue
+    [ "${repo##*/}" = "$want" ] || continue
+    count=$((count + 1))
+    found="$repo"
+  done <<EOF
+$(acq_kit_sources_entries)
+EOF
+  if [ "$count" -eq 0 ]; then
+    echo "acq: kit source name '$want' is not registered." >&2
+    echo "     See: acq kit-source ls" >&2
+    return 1
+  fi
+  if [ "$count" -gt 1 ]; then
+    echo "acq: kit source name '$want' is ambiguous; use host/owner/repo." >&2
+    echo "     See: acq kit-source ls" >&2
+    return 1
+  fi
+  printf '%s\n' "$found"
+}
+
+# _acq_kit_source_kit_ref REPO REF DIR KIT — the git+https ref acq fetches.
+_acq_kit_source_kit_ref() {
+  printf 'git+https://%s.git#ref=%s&dir=%s/%s\n' "$1" "$2" "$3" "$4"
+}
+
+# acq_provider_kit_ref [VALUE] — resolve the default provider kit (config
+# provider_kit, else ACQ_PROVIDER_KIT_DEFAULT) to a fetchable kit ref.
+# Accepted forms: <kit>@<source>, <source>/<kit>, host/owner/repo/<kit>.
+acq_provider_kit_ref() {
+  local value="${1:-}" kit="" repo="" head
+  if [ -z "$value" ]; then
+    value=$(_acq_config_read_field "$ACQ_PROVIDER_KIT_CONFIG_KEY")
+    [ -n "$value" ] || value="$ACQ_PROVIDER_KIT_DEFAULT"
+  fi
+  # A literal kit ref (local path or git+https) is used verbatim: this keeps
+  # `provider_kit:` able to name a ref directly, and keeps the test seam working.
+  case "$value" in
+    git+http*|/*|./*|../*)
+      printf '%s\n' "$value"
+      return 0
+      ;;
+  esac
+  case "$value" in
+    *@*)
+      kit="${value%@*}"
+      repo="${value#*@}"
+      ;;
+    */*/*/*)
+      repo=$(printf '%s' "$value" | cut -d/ -f1-3)
+      kit=$(printf '%s' "$value" | cut -d/ -f4-)
+      ;;
+    */*)
+      head="${value%%/*}"
+      kit="${value#*/}"
+      repo="$head"
+      ;;
+    *)
+      kit="$value"
+      ;;
+  esac
+  if [ -z "$kit" ]; then
+    echo "acq: provider_kit '$value' does not name a kit." >&2
+    return 1
+  fi
+  case "$kit" in
+    *[!A-Za-z0-9._-]*)
+      echo "acq: provider_kit '$value' has an unsafe kit name '$kit'." >&2
+      return 1
+      ;;
+  esac
+  if [ -z "$repo" ]; then
+    repo=$(printf '%s' "$ACQ_PROVIDER_KIT_DEFAULT" | sed 's|/.*||')
+  fi
+  repo=$(_acq_kit_source_resolve_repo "$repo") || return 1
+  local entry ref dir
+  entry=$(_acq_kit_source_entry_for_repo "$repo") || {
+    echo "acq: kit source '$repo' is not trusted." >&2
+    return 1
+  }
+  ref=$(printf '%s' "$entry" | cut -d'|' -f2)
+  dir=$(printf '%s' "$entry" | cut -d'|' -f3)
+  if [ -z "$ref" ]; then
+    echo "acq: kit source '$repo' has no pinned ref, so it cannot be fetched." >&2
+    echo "     Re-add it with an explicit ref: acq kit-source add $repo --ref <sha>" >&2
+    return 1
+  fi
+  _acq_kit_source_kit_ref "$repo" "$ref" "$dir" "$kit"
+}
+
+# _acq_kit_source_rewrite DROP_REPO [ADD_REPO ADD_REF ADD_DIR] — rewrite the flat
+# kit_sources value: drop DROP_REPO, then append the ADD_* entry when given.
+# Emits "added" or "updated" on stdout. Writes "none" when the result is empty,
+# because the flat writer removes a key whose value is empty (absence would
+# resurrect the shipped default).
+_acq_kit_source_rewrite() {
+  local drop="${1:-}" add_repo="${2:-}" add_ref="${3:-}" add_dir="${4:-}"
+  local entries repo ref dir updated="" seen=0
+  entries=$(acq_kit_sources_entries) || return 1
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] || continue
+    if [ "$repo" = "$drop" ]; then
+      seen=1
+      continue
+    fi
+    updated="${updated:+$updated }${repo}@${ref}"
+    case "$dir" in
+      ""|"$ACQ_KIT_SOURCE_DEFAULT_DIR") : ;;
+      *) updated="${updated}|${dir}" ;;
+    esac
+  done <<EOF
+$entries
+EOF
+  if [ -n "$add_repo" ]; then
+    updated="${updated:+$updated }${add_repo}@${add_ref}"
+    case "$add_dir" in
+      ""|"$ACQ_KIT_SOURCE_DEFAULT_DIR") : ;;
+      *) updated="${updated}|${add_dir}" ;;
+    esac
+  fi
+  [ -n "$updated" ] || updated="none"
+  _acq_config_write_field "$ACQ_KIT_SOURCE_CONFIG_KEY" "$updated" || return 1
+  if [ "$seen" -eq 1 ] && [ -n "$add_repo" ]; then
+    printf 'updated\n'
+  elif [ -n "$add_repo" ]; then
+    printf 'added\n'
+  fi
+  return 0
+}
+
+# acq_provider_kit_candidates — "value<TAB>label" per selectable provider kit:
+# the shipped default first, then every provider kit discovered in a trusted
+# source. Values are unambiguous `<host/owner/repo>/<kit>` so a stored
+# `provider_kit:` never depends on a basename being unique.
+acq_provider_kit_candidates() {
+  local entries repo ref dir kits kit ksource kref kdir seen
+  printf '%s\t%s\n' "$ACQ_PROVIDER_KIT_DEFAULT" "$ACQ_PROVIDER_KIT_DEFAULT (shipped)"
+  seen=" $ACQ_PROVIDER_KIT_DEFAULT "
+  entries=$(acq_kit_sources_entries) || return 1
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] && [ -n "$ref" ] || continue
+    kits=$(acq_kit_source_provider_kits "$repo" "$ref" "$dir")
+    [ -n "$kits" ] || continue
+    while IFS="$(printf '\t')" read -r kit ksource kref kdir; do
+      [ -n "$kit" ] || continue
+      case " $seen " in
+        *" $ksource/$kit "*) continue ;;
+      esac
+      seen="$seen $ksource/$kit"
+      printf '%s\t%s\n' "$ksource/$kit" "$ksource/$kit (@${kref})"
+    done <<EOF
+$kits
+EOF
+  done <<EOF
+$entries
+EOF
+  return 0
+}
+
+# acq_kit_source_set REPO --ref REF [--dir DIR] — persist (or replace) one source.
+acq_kit_source_set() {
+  local repo_arg="${1:-}" ref="" dir="" arg repo summary
+  if [ "$#" -ge 1 ]; then shift; fi
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+      --ref)
+        [ "$#" -ge 2 ] || { echo "acq: kit-source add: --ref needs a value" >&2; return 1; }
+        ref="$2"; shift 2
+        ;;
+      --dir)
+        [ "$#" -ge 2 ] || { echo "acq: kit-source add: --dir needs a value" >&2; return 1; }
+        dir="$2"; shift 2
+        ;;
+      *)
+        echo "acq: kit-source add: unexpected argument '$arg'" >&2
+        echo "     usage: acq kit-source add REPO --ref REF [--dir DIR]" >&2
+        return 1
+        ;;
+    esac
+  done
+  repo=$(_acq_kit_source_normalize_repo "$repo_arg") || {
+    echo "acq: kit-source add: invalid repository '$repo_arg'" >&2
+    echo "     want host/owner/repo (for example github.com/acme/kits)" >&2
+    return 1
+  }
+  if [ -z "$ref" ]; then
+    echo "acq: kit-source add: --ref <sha> is required." >&2
+    echo "     A trusted source is fetched at a pinned commit for reproducibility." >&2
+    return 1
+  fi
+  [ -n "$dir" ] || dir="$ACQ_KIT_SOURCE_DEFAULT_DIR"
+  # Validate the entry before persisting it (same rules the reader enforces).
+  _acq_kit_source_parse_entry "${repo}@${ref}|${dir}" "kit-source add" >/dev/null || return 1
+  summary=$(_acq_kit_source_rewrite "$repo" "$repo" "$ref" "$dir") || {
+    echo "acq: kit-source add: could not write $(_acq_config_file)" >&2
+    return 1
+  }
+  case "$summary" in
+    updated) echo "acq: updated kit source '${repo}' (@${ref})." >&2 ;;
+    *)       echo "acq: added kit source '${repo}' (@${ref})." >&2 ;;
+  esac
+  return 0
+}
+
+# acq_kit_source_rm REPO — drop one source (the shipped default included; with no
+# sources left acq fetches nothing instead of silently reinstating it).
+acq_kit_source_rm() {
+  local repo_arg="${1:-}" repo summary
+  if [ -z "$repo_arg" ]; then
+    echo "acq: kit-source rm: missing repository" >&2
+    echo "     usage: acq kit-source rm REPO" >&2
+    return 1
+  fi
+  repo=$(_acq_kit_source_normalize_repo "$repo_arg") || {
+    echo "acq: kit-source rm: invalid repository '$repo_arg'" >&2
+    return 1
+  }
+  if ! _acq_kit_source_entry_for_repo "$repo" >/dev/null; then
+    echo "acq: kit source '${repo}' is not registered." >&2
+    return 1
+  fi
+  summary=$(_acq_kit_source_rewrite "$repo") || {
+    echo "acq: kit-source rm: could not write $(_acq_config_file)" >&2
+    return 1
+  }
+  echo "acq: removed kit source '${repo}'." >&2
+  return 0
+}
+
+# acq_kit_source_provider_kits ENTRY — list the provider kits a source publishes.
+# Best-effort and OFFLINE-SAFE: a failed fetch yields nothing (callers say so)
+# rather than failing the whole listing or a create.
+acq_kit_source_provider_kits() {
+  local repo="${1:-}" ref="${2:-}" dir="${3:-}" cache seed root kit manifest
+  [ -n "$repo" ] && [ -n "$ref" ] && [ -n "$dir" ] || return 0
+  command -v kit_translate_fetch >/dev/null 2>&1 || return 0
+  seed=$(printf '%s@%s' "$repo" "$ref" | cksum 2>/dev/null | cut -d' ' -f1)
+  cache="${XDG_CACHE_HOME:-${HOME:-}/.cache}/acq/kit-sources/${seed:-0}"
+  root=$(kit_translate_fetch "git+https://${repo}.git#ref=${ref}&dir=${dir}" "$cache" 2>/dev/null) || {
+    acq_debug "kit-source: could not fetch $repo@$ref for discovery"
+    return 0
+  }
+  [ -d "$root" ] || return 0
+  for manifest in "$root"/*/provider-input.json; do
+    [ -f "$manifest" ] || continue
+    kit="${manifest%/provider-input.json}"
+    kit="${kit##*/}"
+    printf '%s\t%s\t%s\t%s\n' "$kit" "$repo" "$ref" "$dir"
+  done
+  return 0
+}
+
+# acq_kit_source_ls — sources, their pinned state, and the provider kits each
+# publishes (discovery is best-effort; see acq_kit_source_provider_kits).
+acq_kit_source_ls() {
+  local entries repo ref dir pinned kits kit ksource kref kdir printed
+  entries=$(acq_kit_sources_entries) || return 1
+  printf '%-52s %-12s %s\n' SOURCE REF KITS-DIR
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] || continue
+    if [ -n "$ref" ]; then pinned="$ref"; else pinned="<unpinned>"; fi
+    printf '%-52s %-12s %s\n' "$repo" "$pinned" "$dir"
+  done <<EOF
+$entries
+EOF
+  echo ""
+  echo "Provider kits published by these sources:"
+  printed=0
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] && [ -n "$ref" ] || continue
+    kits=$(acq_kit_source_provider_kits "$repo" "$ref" "$dir")
+    [ -n "$kits" ] || continue
+    while IFS="$(printf '\t')" read -r kit ksource kref kdir; do
+      [ -n "$kit" ] || continue
+      printed=1
+      printf '  %-34s %s (@%s)\n' "$kit" "$ksource" "$kref"
+    done <<EOF2
+$kits
+EOF2
+  done <<EOF
+$entries
+EOF
+  if [ "$printed" -eq 0 ]; then
+    echo "  (none discovered — sources are unreachable, or publish no provider kits)"
+  fi
+  echo ""
+  echo "Set the default provider kit via 'acq configure', or in config.yaml:"
+  echo "  provider_kit: <source>/<kit>      # e.g. agentic-coding-patterns/${USAI_PROVIDER_KIT_NAME}"
   return 0
 }
 
@@ -5524,17 +6012,21 @@ acq_print_doctor() {
 # _acq_configure_show_current — print the current durable configuration
 # (config.yaml) to stderr, so `acq configure` opens by showing what is in effect.
 _acq_configure_show_current() {
-  local cfg backend extras scope bindings
+  local cfg backend extras scope bindings provider_kit sources
   cfg=$(_acq_config_file)
   backend=$(_acq_config_read_field backend)
   extras=$(_acq_config_read_field extra_kits)
   scope=$(_acq_config_read_field scope_github_token)
   bindings=$(_acq_config_read_field "$ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY")
+  provider_kit=$(_acq_config_read_field "$ACQ_PROVIDER_KIT_CONFIG_KEY")
+  sources=$(_acq_config_read_field "$ACQ_KIT_SOURCE_CONFIG_KEY")
   echo "acq: current configuration (${cfg}):" >&2
   echo "      default backend:    ${backend:-<auto-detect>}" >&2
   echo "      extra kits:         ${extras:-<none>}" >&2
   echo "      scope GitHub token: ${scope:-no}" >&2
   echo "      provider creds:     ${bindings:-<none>}   (acq provider-credential ls)" >&2
+  echo "      provider kit:       ${provider_kit:-$ACQ_PROVIDER_KIT_DEFAULT}   (acq kit-source ls)" >&2
+  echo "      kit sources:        ${sources:-<shipped default>}" >&2
   echo "" >&2
 }
 
@@ -5630,9 +6122,42 @@ acq_configure() {
     _acq_config_write_field scope_github_token no
   fi
 
+  # Provider kit (single select). Candidates are the shipped default plus every
+  # provider kit discovered in a trusted source, so a user can pick
+  # e.g. `opencode-go-provider` without hand-writing a git+https ref.
+  local candidates=() labels=() candidate label provider_default="" provider_sel=""
+  local current_provider pidx pargs=()
+  while IFS="$(printf '\t')" read -r candidate label; do
+    [ -n "$candidate" ] || continue
+    candidates+=("$candidate")
+    labels+=("$label")
+  done < <(acq_provider_kit_candidates 2>/dev/null)
+  current_provider=$(_acq_config_read_field "$ACQ_PROVIDER_KIT_CONFIG_KEY")
+  [ -n "$current_provider" ] || current_provider="$ACQ_PROVIDER_KIT_DEFAULT"
+  pidx=1
+  while [ "$pidx" -le "${#candidates[@]}" ]; do
+    candidate="${candidates[$((pidx-1))]}"
+    pargs+=("$candidate" "${labels[$((pidx-1))]}")
+    case "$candidate" in
+      "$current_provider") provider_default="$pidx" ;;
+    esac
+    pidx=$((pidx + 1))
+  done
+  if [ "${#candidates[@]}" -gt 0 ]; then
+    acq_prompt_multiselect 0 "$provider_default" "${pargs[@]}" >/dev/null
+    if [ "$_ACQ_PROMPT_SELECTION" != "CANCELLED" ] && [ -n "$_ACQ_PROMPT_SELECTION" ]; then
+      set -- $_ACQ_PROMPT_SELECTION
+      if [ "$1" -ge 1 ] && [ "$1" -le "${#candidates[@]}" ] 2>/dev/null; then
+        provider_sel="${candidates[$(($1 - 1))]}"
+        [ -n "$provider_sel" ] && _acq_config_write_field "$ACQ_PROVIDER_KIT_CONFIG_KEY" "$provider_sel"
+      fi
+    fi
+  fi
+
   echo "" >&2
   echo "acq: configuration saved to $(_acq_config_file)." >&2
   echo "      extra kits:         ${selected_names:-<none>}" >&2
+  echo "      provider kit:       ${provider_sel:-$current_provider}" >&2
   return 0
 }
 
