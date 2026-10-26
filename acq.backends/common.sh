@@ -2475,9 +2475,9 @@ ACQ_PROVIDER_FORBIDDEN_KEY_ENVS="PATH IFS LD_PRELOAD LD_LIBRARY_PATH BASH_ENV EN
 # Facts published by a provider kit are untrusted input until validated: they
 # reach an sh -c probe and a backend --secret binding. `ACQ_PROVIDER_BINDINGS_GENERATION`
 # is an INTERNAL seam only — it is reset at load so an inherited environment
-# variable cannot redirect which facts acq trusts.
+# variable cannot redirect which facts acq trusts. It is declared `local` in the
+# create gate, so it never outlives that one call.
 ACQ_PROVIDER_BINDINGS_GENERATION=""
-ACQ_PROVIDER_BINDINGS_SANDBOX=""
 
 # providerId grammar (shared with the validator's own provider naming rule).
 _acq_provider_credential_id_ok() {
@@ -2644,7 +2644,9 @@ _acq_provider_credential_field() {
 acq_provider_credential_lookup() {
   local wanted="${1:-}" field="${2:-}" pairs entry found=""
   [ -n "$wanted" ] || return 0
-  pairs=$(acq_provider_credential_overrides 2>/dev/null) || return 0
+  # A malformed durable pin is an error, not a reason to fall back to a host a
+  # kit chose: the caller can only honour the registry if it is well formed.
+  pairs=$(acq_provider_credential_overrides) || return 1
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     [ "$(_acq_provider_credential_field "$entry" id)" = "$wanted" ] || continue
@@ -2870,6 +2872,63 @@ $entries
 EOF
 }
 
+# _acq_provider_env_value NAME — echo the value of the environment variable NAME
+# WITHOUT eval. Bash 3.2's indirect expansion has no default-operator form, so the
+# nounset guard is toggled explicitly (the same save/restore idiom split_noglob
+# uses for noglob). NAME must be an identifier: it is passed to `${!name}`, never
+# into program text.
+_acq_provider_env_value() {
+  local name="${1:-}" had_u=0 value=""
+  case "$name" in
+    ''|*[!A-Za-z0-9_]*) return 0 ;;
+  esac
+  case "$-" in *u*) had_u=1 ;; esac
+  set +u
+  value="${!name}"
+  if [ "$had_u" -eq 1 ]; then set -u; fi
+  printf '%s' "$value"
+}
+
+# _acq_provider_credentials_validate_records RECORDS — validate the facts copied
+# into a sandbox's host-config `provider-credentials` record. Host config is
+# acq-owned but still on disk, and its fields reach eval-free exports, backend
+# argv, and a curl probe, so every field is re-checked before use.
+_acq_provider_credentials_validate_records() {
+  local records="${1:-}" tab provider_id key_env host models_url api_protocol
+  local IFS
+  [ -n "$records" ] || return 0
+  tab=$(printf '\t')
+  while IFS="$tab" read -r provider_id key_env host models_url api_protocol; do
+    [ -n "$provider_id" ] || continue
+    _acq_provider_credential_id_ok "$provider_id" || return 1
+    _acq_provider_credential_env_ok "$key_env" || return 1
+    _acq_provider_credential_host_ok "$host" || return 1
+    _acq_provider_fact_strict_url_ok "$models_url" "$host" || return 1
+    case "$api_protocol" in
+      ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+  done <<EOF
+$records
+EOF
+  return 0
+}
+
+# acq_provider_recorded_facts BACKEND NAME — the sandbox's recorded facts, after
+# validation. Fails closed: a tampered or half-written record is never parsed into
+# a credential binding.
+acq_provider_recorded_facts() {
+  local backend="${1:-}" name="${2:-}" records
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  records=$(acq_host_config_read "$backend" "$name" provider-credentials)
+  [ -n "$records" ] || return 0
+  _acq_provider_credentials_validate_records "$records" || {
+    echo "acq: invalid provider-credentials record for $backend/$name (host config)." >&2
+    echo "     Refusing to use it; recreate the sandbox to re-record provider facts." >&2
+    return 1
+  }
+  printf '%s\n' "$records"
+}
+
 # _acq_provider_facts_python — resolve a Python runtime for reading facts.json
 # WITHOUT bootstrapping the validator (facts are read on hot paths). Honors
 # ACQ_PROVIDER_INPUT_PYTHON and the installed validator runtime first, so
@@ -3009,10 +3068,13 @@ acq_provider_credentials_write() {
 }
 
 # acq_provider_recorded_host BACKEND NAME PROVIDER_ID — the host recorded for a
-# provider at create time (empty when nothing is recorded).
+# provider at create time (empty when nothing is recorded). Reads through
+# acq_provider_recorded_facts, so a tampered record is rejected, not parsed.
 acq_provider_recorded_host() {
-  local backend="${1:-}" name="${2:-}" wanted="${3:-}" tab provider_id key_env host rest
+  local backend="${1:-}" name="${2:-}" wanted="${3:-}" tab provider_id key_env host rest records
   [ -n "$wanted" ] || return 0
+  records=$(acq_provider_recorded_facts "$backend" "$name") || return 1
+  [ -n "$records" ] || return 0
   tab=$(printf '\t')
   while IFS="$tab" read -r provider_id key_env host rest; do
     [ -n "$provider_id" ] || continue
@@ -3020,8 +3082,9 @@ acq_provider_recorded_host() {
     printf '%s\n' "$host"
     return 0
   done <<EOF
-$(acq_host_config_read "$backend" "$name" provider-credentials)
+$records
 EOF
+  return 0
 }
 
 # acq_provider_sandbox_facts BACKEND NAME — the facts acq should act on for this
@@ -3040,7 +3103,7 @@ acq_provider_sandbox_facts() {
     acq_provider_facts_list_generation "$root/current" || return 1
     return 0
   fi
-  acq_host_config_read "$backend" "$name" provider-credentials
+  acq_provider_recorded_facts "$backend" "$name"
 }
 
 # acq_provider_sandbox_provider_ids BACKEND NAME — the provider ids this sandbox
@@ -3096,8 +3159,8 @@ acq_provider_binding() {
   local backend="${1:-}" name="${2:-}" wanted="${3:-}" tab provider_id facts_key_env host models_url api_protocol
   local key_env registry_hosts facts
   [ -n "$wanted" ] || return 1
-  key_env=$(acq_provider_credential_key_env "$wanted")
-  registry_hosts=$(acq_provider_credential_hosts "$wanted")
+  key_env=$(acq_provider_credential_key_env "$wanted") || return 1
+  registry_hosts=$(acq_provider_credential_hosts "$wanted") || return 1
   tab=$(printf '\t')
   facts=$(acq_provider_sandbox_facts "$backend" "$name") || return 1
   while IFS="$tab" read -r provider_id facts_key_env host models_url api_protocol; do
@@ -3110,7 +3173,9 @@ acq_provider_binding() {
 $facts
 EOF
   [ -n "$registry_hosts" ] || return 1
-  printf '%s\t%s\t%s\n' "${registry_hosts%%,*}" "$key_env" ""
+  # Bind EVERY pinned host (both backends accept a comma-separated host list), so
+  # the destination `provider-credential ls` prints is exactly what gets bound.
+  printf '%s\t%s\t%s\n' "$registry_hosts" "$key_env" ""
 }
 
 # acq_provider_binding_host_env SERVICE [SANDBOX] — echo "host<TAB>keyEnv" for a
@@ -3142,7 +3207,7 @@ _acq_provider_credentials_gate_trust() {
     echo "       acq provider-credential set $provider_id <KEY_ENV> --host $host" >&2
     return 1
   fi
-  recorded=$(acq_provider_recorded_host "$backend" "$name" "$provider_id")
+  recorded=$(acq_provider_recorded_host "$backend" "$name" "$provider_id") || return 1
   if [ -n "$recorded" ]; then
     if [ "$recorded" = "$host" ]; then
       return 0
@@ -3186,7 +3251,7 @@ _acq_provider_credentials_gate_one() {
   # A host-exported value (CI) is bindable only where the backend reads host env
   # at create. sbx snapshots its own proxy table, so claiming success there would
   # create a sandbox with a dead credential.
-  eval "exported=\${$key_env:-}"
+  exported=$(_acq_provider_env_value "$key_env")
   if [ -n "$exported" ]; then
     case "$backend" in
       msb) return 0 ;;
@@ -3212,6 +3277,7 @@ _acq_provider_credentials_gate_one() {
   echo >&2
   if [ "$stored" -eq 1 ]; then
     echo "Provider '$provider_id' needs its key re-stored to bind \$${key_env} here." >&2
+    echo "  sends to: ${host}" >&2
     printf 'Re-store it now? [y/N] ' >&2
   else
     echo "Store a credential for provider '$provider_id'?" >&2
@@ -3249,18 +3315,22 @@ acq_provider_credentials_gate() {
   local backend="${1:-}" name="${2:-}" generation="${3:-}" records provider_id key_env host models_url api_protocol tab
   # Dynamic scoping: visible to the helpers below for THIS call only, so the
   # USAi throwaway-sandbox probe can never inherit another sandbox's facts.
-  local ACQ_PROVIDER_BINDINGS_GENERATION ACQ_PROVIDER_BINDINGS_SANDBOX
+  local ACQ_PROVIDER_BINDINGS_GENERATION
   [ -n "$backend" ] && [ -n "$name" ] || return 1
   records=$(acq_provider_facts_list_generation "$generation") || return 1
   [ -n "$records" ] || return 0
   ACQ_PROVIDER_BINDINGS_GENERATION="$generation"
-  ACQ_PROVIDER_BINDINGS_SANDBOX="$name"
   tab=$(printf '\t')
   while IFS="$tab" read -r provider_id key_env host models_url api_protocol; do
     [ -n "$provider_id" ] || continue
-    # USAi (and the other built-in services) keep their own gates.
-    case " $ACQ_MANAGED_SECRET_SERVICES " in
-      *" $provider_id "*) continue ;;
+    # Skip ONLY the ids the ACTIVE backend hard-codes at its binding layer:
+    # msb binds `usai` and `github` from compiled-in tables, and everything else
+    # (including `gitlab`) is resolved from facts. Anything this gate skipped but
+    # the backend still bound from stored values would be an unpinned credential
+    # path, so the skip set is deliberately narrower than
+    # ACQ_MANAGED_SECRET_SERVICES and mirrors _acq_msb_bind_secrets_into.
+    case "$provider_id" in
+      usai|github) continue ;;
     esac
     _acq_provider_credentials_gate_trust "$backend" "$name" "$provider_id" "$host" || return 1
     _acq_provider_credentials_gate_one "$backend" "$name" "$provider_id" "$key_env" "$host" || return 1
@@ -3278,13 +3348,25 @@ EOF
 # name a modelsUrl. The URL is passed as POSITIONAL DATA, never spliced into the
 # guest program text, so URL punctuation cannot become shell syntax.
 check_provider_key() {
-  local name="${1:-}" provider_id="${2:-}" binding key_env models_url key_ref raw
+  local name="${1:-}" provider_id="${2:-}" binding key_env host models_url key_ref raw
   [ -n "$name" ] && [ -n "$provider_id" ] || return 0
-  binding=$(acq_provider_binding "${ACQ_RESOLVED_BACKEND:-}" "$name" "$provider_id") || return 0
+  binding=$(acq_provider_binding "${ACQ_RESOLVED_BACKEND:-}" "$name" "$provider_id") || {
+    echo "acq: no validated provider facts for '$provider_id' in sandbox '$name'." >&2
+    return 1
+  }
+  host=$(printf '%s\n' "$binding" | cut -f1)
   key_env=$(printf '%s\n' "$binding" | cut -f2)
   models_url=$(printf '%s\n' "$binding" | cut -f3)
-  _acq_provider_credential_env_ok "$key_env" || return 0
-  _acq_provider_fact_strict_url_ok "$models_url" || return 0
+  _acq_provider_credential_env_ok "$key_env" || {
+    echo "acq: provider '$provider_id' declares an unsafe credential env name." >&2
+    return 1
+  }
+  # Enforce the same-host invariant at the probe, not just when facts were read:
+  # the Bearer token must never be sent to a host other than facts.host.
+  _acq_provider_fact_strict_url_ok "$models_url" "${host%%,*}" || {
+    echo "acq: provider '$provider_id' models URL does not match its declared host ($host)." >&2
+    return 1
+  }
   command -v acq_backend_run >/dev/null 2>&1 || return 0
   key_ref="\$${key_env}"
   raw=$(acq_backend_run "$name" -- sh -c \

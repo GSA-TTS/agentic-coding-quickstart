@@ -547,6 +547,81 @@ PYTHON
   assert_output --partial "collides with an sbx built-in service"
 }
 
+@test "credentials gate gates gitlab instead of skipping it" {
+  local generation
+  # `gitlab` is an acq-managed secret but NOT hard-coded by either backend's
+  # binding layer, so a kit claiming it must still pass the host-pin check.
+  generation=$(_make_generation gitlab GITLAB_TOKEN attacker.example.gov)
+  _pin gitlab GITLAB_TOKEN gitlab.com
+  export GITLAB_TOKEN='exported-by-ci'
+
+  run acq_provider_credentials_gate msb box "$generation"
+  assert_failure
+  assert_output --partial 'Refusing to send the stored credential there'
+}
+
+@test "credentials gate refuses an unpinned gitlab provider" {
+  local generation
+  generation=$(_make_generation gitlab GITLAB_TOKEN attacker.example.gov)
+  export GITLAB_TOKEN='exported-by-ci'
+
+  run acq_provider_credentials_gate msb box "$generation"
+  assert_failure
+  assert_output --partial 'is not pinned to a host yet'
+}
+
+@test "credentials gate still skips the ids both backends hard-code" {
+  local generation
+  generation=$(_make_generation github GITHUB_TOKEN)
+  mkdir -p "$generation/models/providers/usai"
+  printf '{"providerId":"usai","apiProtocol":"openai-compatible","host":"api.gsa.usai.gov","modelsUrl":"https://api.gsa.usai.gov/api/v1/models","keyEnv":"USAI_API_KEY"}\n' \
+    > "$generation/models/providers/usai/facts.json"
+
+  run acq_provider_credentials_gate msb box "$generation"
+  assert_success
+}
+
+@test "a tampered provider-credentials record is rejected, not parsed" {
+  acq_host_config_write msb box provider-credentials \
+    "$(printf 'alpha\tEVIL;touch /tmp/pwned\thttp://x\tnope\tprotocol')"
+
+  run acq_provider_recorded_facts msb box
+  assert_failure
+  assert_output --partial 'invalid provider-credentials record'
+
+  # …and the binding path fails closed instead of falling back to a pin.
+  export ACQ_RESOLVED_BACKEND=msb
+  _pin alpha ALPHA_KEY alpha.example.gov
+  run acq_provider_binding_host_env alpha box
+  assert_failure
+}
+
+@test "a multi-host pin binds every pinned host" {
+  _acq_config_write_field provider_credential_bindings \
+    'alpha=ALPHA_KEY@a.example.gov,b.example.gov'
+
+  run acq_provider_binding sbx "" alpha
+  assert_success
+  assert_output --partial 'a.example.gov,b.example.gov'
+}
+
+@test "check_provider_key refuses a cross-host models URL at the probe" {
+  acq_provider_binding() { printf '%s\t%s\t%s\n' alpha.example.gov ALPHA_KEY https://attacker.example.gov/v1/models; }
+  acq_backend_run() { printf '200|0\n'; }
+
+  run check_provider_key probe-box alpha
+  assert_failure
+  assert_output --partial 'models URL does not match its declared host'
+}
+
+@test "check_provider_key refuses an unsafe credential env name" {
+  acq_provider_binding() { printf '%s\t%s\t%s\n' alpha.example.gov 'EVIL;touch x' https://alpha.example.gov/v1/models; }
+
+  run check_provider_key probe-box alpha
+  assert_failure
+  assert_output --partial 'unsafe credential env name'
+}
+
 # ---------------------------------------------------------------------------
 # Create-time gate behaviour
 # ---------------------------------------------------------------------------

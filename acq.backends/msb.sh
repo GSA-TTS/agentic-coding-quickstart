@@ -1049,7 +1049,12 @@ EOF
         eval "_pnames=\" \${${_namesn}[*]-} \""
         case "$_pnames" in *" $_penv "*) continue ;; esac
         if ! _acq_msb_bind_one "$_arrn" "$_namesn" "$_pid" "$_name" "$_penv" "$_phost"; then
-          eval "_pexported=\${${_penv}:-}"
+          # Indirect expansion, never eval: `_penv` is validated by
+          # _acq_msb_bind_one but this runs before that guard for the env branch.
+          case "$_penv" in
+            ''|*[!A-Z0-9_]*|[!A-Z]*) _pexported="" ;;
+            *) _pexported=$(_acq_provider_env_value "$_penv") ;;
+          esac
           if [ -n "$_pexported" ]; then
             eval "$_arrn+=(--secret \"\${_penv}@\${_phost}\")"
             acq_debug "msb secret: binding ${_penv}@${_phost} for '$_pid' (from env)"
