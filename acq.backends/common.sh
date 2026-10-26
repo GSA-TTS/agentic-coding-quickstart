@@ -325,7 +325,10 @@ acq_debug() {
 # Services acq manages in its own secret store (and knows how to inject). Used to
 # decide whether `acq secret rm` should route to the acq-owned removal path vs.
 # pass a raw placeholder token through to the backend secret CLI.
-ACQ_MANAGED_SECRET_SERVICES=" usai github gitlab "
+# PROVIDERS are no longer listed here: they are registry-driven (see the
+# provider credential bindings section), so `usai` is a provider like any other
+# and only non-provider HOST services remain compiled in.
+ACQ_MANAGED_SECRET_SERVICES=" github gitlab "
 
 # _acq_import_env_vars_for SERVICE — echo the host environment variable name(s)
 # that `acq secret import` reads to populate SERVICE, most-preferred first (space
@@ -389,126 +392,6 @@ _acq_provider_fact_safe_url() {
     case "$hex" in *[!0-9A-Fa-f]*) return 1 ;; esac
     suffix="${suffix:2}"
   done
-  return 0
-}
-
-acq_provider_facts_load() {
-  local file="${1:-}" line key value schema="" id=""
-  local host="" base_url="" models_url="" key_env="" key_mgmt_url="" bind_hosts=""
-  [ -n "$file" ] || return 1
-  [ -f "$file" ] || return 2
-
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in ""|'#'*) continue ;; esac
-    case "$line" in *=*) ;; *) return 1 ;; esac
-    key="${line%%=*}"
-    value="${line#*=}"
-    case "$key" in
-      ACQ_PROVIDER_FACTS_SCHEMA) schema="$value" ;;
-      ACQ_PROVIDER_ID) id="$value" ;;
-      ACQ_PROVIDER_HOST) host="$value" ;;
-      ACQ_PROVIDER_BASE_URL) base_url="$value" ;;
-      ACQ_PROVIDER_MODELS_URL) models_url="$value" ;;
-      ACQ_PROVIDER_KEY_ENV) key_env="$value" ;;
-      ACQ_PROVIDER_KEY_MGMT_URL) key_mgmt_url="$value" ;;
-      ACQ_PROVIDER_BIND_HOSTS) bind_hosts="$value" ;;
-      *) return 1 ;;
-    esac
-  done < "$file"
-
-  [ "$schema" = "1" ] || return 1
-  [ "$id" = "usai" ] || return 1
-  _acq_provider_fact_safe_host "$host" || return 1
-  _acq_provider_fact_safe_url "$base_url" || return 1
-  _acq_provider_fact_safe_url "$models_url" || return 1
-  _acq_provider_fact_safe_url "$key_mgmt_url" || return 1
-  _acq_provider_fact_safe_env "$key_env" || return 1
-  [ -n "$bind_hosts" ] || bind_hosts="$host"
-  _acq_provider_fact_safe_host "$bind_hosts" || return 1
-
-  USAI_PROVIDER_HOST="$host"
-  USAI_PROVIDER_BASE_URL="$base_url"
-  USAI_PROVIDER_MODELS_URL="$models_url"
-  USAI_PROVIDER_KEY_ENV="$key_env"
-  USAI_PROVIDER_KEY_MGMT_URL="$key_mgmt_url"
-  # shellcheck disable=SC2034  # consumed by adapters/tests after facts load
-  USAI_PROVIDER_BIND_HOSTS="$bind_hosts"
-  # shellcheck disable=SC2034  # consumed by diagnostics/tests after facts load
-  USAI_PROVIDER_FACTS_SOURCE="$file"
-}
-
-acq_provider_facts_load_from_kit() {
-  local kitref="${1:-$USAI_KIT}" base_dir="${2:-}" kitdir facts rc
-  if [ -z "$base_dir" ]; then
-    base_dir="${ACQ_PROVIDER_FACTS_CACHE_DIR:-${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}/provider-facts}"
-  fi
-  mkdir -p "$base_dir" || return 3
-  if ! command -v kit_translate_fetch >/dev/null 2>&1; then
-    return 3
-  fi
-  kitdir=$(kit_translate_fetch "$kitref" "$base_dir/usai-provider") || return 3
-  facts="$kitdir/provider-facts/usai.env"
-  acq_provider_facts_load "$facts"
-  rc=$?
-  case "$rc" in
-    0) return 0 ;;
-    2) return 2 ;;
-    *) echo "acq: invalid provider facts artifact: $facts" >&2; return 1 ;;
-  esac
-}
-
-acq_provider_facts_use_fallback() {
-  USAI_PROVIDER_HOST="api.gsa.usai.gov"
-  USAI_PROVIDER_BASE_URL="https://${USAI_PROVIDER_HOST}/api/v1"
-  USAI_PROVIDER_KEY_ENV="USAI_API_KEY"
-  USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_BASE_URL}/models"
-  USAI_PROVIDER_KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
-  # shellcheck disable=SC2034  # consumed by adapters/tests after facts load
-  USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_HOST}"
-  # shellcheck disable=SC2034  # consumed by diagnostics/tests after facts load
-  USAI_PROVIDER_FACTS_SOURCE="fallback"
-}
-
-acq_provider_facts_load_from_kit_or_fallback() {
-  local provider_facts_rc
-  local IFS
-
-  # Keep the loader in this shell so validated provider assignments persist, but
-  # invoke it as a condition so caller errexit cannot skip status handling.
-  # Diagnostics flow directly to stderr; no temporary file or trap is needed.
-  # Use 'local IFS' (Bash 3.2-safe dynamic scoping) to preserve the caller's
-  # IFS state (including when intentionally unset under 'set -u'). The local
-  # declaration auto-restores the caller's IFS on function exit, avoiding
-  # explicit snapshot/restore that fails when IFS is unset.
-  if acq_provider_facts_load_from_kit "$@"; then
-    provider_facts_rc=0
-  else
-    provider_facts_rc=$?
-  fi
-
-  case "$provider_facts_rc" in
-    0) : ;;
-    1)
-      return 1
-      ;;
-    2)
-      acq_provider_facts_use_fallback
-      acq_debug "provider facts unavailable from kit; using transitional fallback defaults"
-      ;;
-    3)
-      acq_provider_facts_use_fallback
-      echo "acq: warning: provider facts could not be fetched; using transitional fallback defaults" >&2
-      acq_debug "provider facts fetch failed; using transitional fallback defaults"
-      ;;
-    *)
-      return "$provider_facts_rc"
-      ;;
-  esac
-  # msb derives this adapter-local binding host when sourced, before lazy facts load.
-  if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ]; then
-    # shellcheck disable=SC2034  # consumed by msb adapter functions at dispatch
-    ACQ_MSB_USAI_HOST="$USAI_PROVIDER_BIND_HOSTS"
-  fi
   return 0
 }
 
@@ -2953,6 +2836,13 @@ EOF
 # provider's credential or a different destination host.
 ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY="provider_credential_bindings"
 
+# Providers acq trusts BY DEFAULT, as data: `id|keyEnv|host`. The pinned
+# Patterns release is acq's validation+source trust anchor, so its provider comes
+# pre-pinned. A new provider is pinned explicitly with
+# `acq provider-credential set <id> <KEY_ENV> --host <H>`.
+# shellcheck disable=SC2034  # consumed by _acq_provider_trusted_default
+ACQ_PROVIDER_TRUSTED_DEFAULTS="usai|${USAI_PROVIDER_KEY_ENV}|${USAI_PROVIDER_HOST}"
+
 # KEY_ENV names owned by acq's built-in services: only the owning providerId may
 # claim them (otherwise a provider kit could re-point, say, GITHUB_TOKEN).
 ACQ_PROVIDER_RESERVED_KEY_ENVS="USAI_API_KEY GITHUB_TOKEN GH_TOKEN GITLAB_TOKEN"
@@ -3142,12 +3032,63 @@ acq_provider_credential_lookup() {
   done <<EOF
 $pairs
 EOF
-  [ -n "$found" ] || return 0
+  [ -n "$found" ] || {
+    # Not configured by the user: fall back to the shipped trust anchor so the
+    # DEFAULT provider needs no per-install configuration. A miss here is "no
+    # pin", not an error — the facts may still name the provider (validated by
+    # the pinned validator), and the gate decides whether a host is trusted.
+    _acq_provider_trusted_default "$wanted" "$field" || return 0
+    return 0
+  }
   _acq_provider_credential_field "$found" "$field"
 }
 
 acq_provider_credential_key_env() {
   acq_provider_credential_lookup "${1:-}" env
+}
+
+# _acq_provider_trusted_default PROVIDER_ID FIELD — read a provider out of the
+# shipped trust-anchor table (`id|keyEnv|host`). This is why the DEFAULT provider
+# needs no configuration: its (keyEnv, host) pair is data, not a code branch.
+_acq_provider_trusted_default() {
+  local wanted="${1:-}" field="${2:-}" id key_env hosts
+  [ -n "$wanted" ] || return 1
+  while IFS='|' read -r id key_env hosts; do
+    [ "$id" = "$wanted" ] || continue
+    case "$field" in
+      id)    printf '%s\n' "$id" ;;
+      env)   printf '%s\n' "$key_env" ;;
+      hosts) printf '%s\n' "$hosts" ;;
+      *)     return 1 ;;
+    esac
+    return 0
+  done <<EOF
+$ACQ_PROVIDER_TRUSTED_DEFAULTS
+EOF
+  return 1
+}
+
+# True when at least one provider kit is selected. `--no-provider-kits` (or an
+# explicit empty ACQ_PROVIDER_KITS) disables every provider, trusted default
+# included — so no credential is bound and no prompt is shown.
+acq_provider_selection_active() {
+  if [ -n "${ACQ_PROVIDER_KITS_FROM_ENV:-}" ] || [ -n "${ACQ_PROVIDER_KITS_FROM_CLI:-}" ]; then
+    [ -n "${ACQ_PROVIDER_KITS:-}" ] || return 1
+  fi
+  return 0
+}
+
+# acq_provider_default_id — the id of the shipped default provider (the first
+# entry of the trust-anchor table), used where a facts-free fallback needs to name
+# "the default provider" without hardcoding `usai`.
+acq_provider_default_id() {
+  local id rest
+  [ -n "$ACQ_PROVIDER_TRUSTED_DEFAULTS" ] || return 1
+  IFS='|' read -r id rest <<EOF
+$ACQ_PROVIDER_TRUSTED_DEFAULTS
+EOF
+  [ -n "$id" ] || return 1
+  printf '%s\n' "$id"
 }
 
 acq_provider_credential_hosts() {
@@ -3610,15 +3551,23 @@ EOF
   return 0
 }
 
-# acq_provider_registry_ids — provider ids bound in the config/env layers.
+# acq_provider_registry_ids — provider ids bound in the config/env layers, plus
+# the shipped trust anchor (so the default provider participates like any other).
+# Empty when provider selection is explicitly off (`--no-provider-kits`).
 acq_provider_registry_ids() {
-  local pairs line
+  local pairs line id
+  acq_provider_selection_active || return 0
   pairs=$(acq_provider_credential_overrides 2>/dev/null) || return 0
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     printf '%s\n' "${line%%=*}"
   done <<EOF
 $pairs
+EOF
+  while IFS='|' read -r id _key _hosts; do
+    [ -n "$id" ] && printf '%s\n' "$id"
+  done <<EOF
+$ACQ_PROVIDER_TRUSTED_DEFAULTS
 EOF
   return 0
 }
@@ -3811,14 +3760,11 @@ acq_provider_credentials_gate() {
   tab=$(printf '\t')
   while IFS="$tab" read -r provider_id key_env host models_url api_protocol; do
     [ -n "$provider_id" ] || continue
-    # Skip ONLY the ids the ACTIVE backend hard-codes at its binding layer:
-    # msb binds `usai` and `github` from compiled-in tables, and everything else
-    # (including `gitlab`) is resolved from facts. Anything this gate skipped but
-    # the backend still bound from stored values would be an unpinned credential
-    # path, so the skip set is deliberately narrower than
-    # ACQ_MANAGED_SECRET_SERVICES and mirrors _acq_msb_bind_secrets_into.
+    # Skip ONLY ids a backend hard-codes at its binding layer. That is now just
+    # `github` (a host service, not a provider): `usai` is routed through the
+    # generic provider path like every other provider.
     case "$provider_id" in
-      usai|github) continue ;;
+      github) continue ;;
     esac
     _acq_provider_credentials_gate_trust "$backend" "$name" "$provider_id" "$host" || return 1
     _acq_provider_credentials_gate_one "$backend" "$name" "$provider_id" "$key_env" "$host" || return 1
@@ -3864,11 +3810,12 @@ check_provider_key() {
   _classify_key_status "$raw"
 }
 
-# ensure_valid_provider_keys NAME — the generic counterpart of ensure_valid_key.
-# USAi's flow (including interactive rotation) stays byte-for-byte unchanged;
-# this only inspects non-usai providers, and never rotates (rotation is a USAi
-# console workflow). An inconclusive probe FAILS CLOSED: silently attaching with
-# an unverified credential is how a dead key reaches the agent.
+# ensure_valid_provider_keys NAME — validate every selected provider's credential
+# against its own facts.modelsUrl. There is no USAi branch: the default provider
+# is checked exactly like any other, and its 401 remediation points at the
+# dedicated rotate verb. An inconclusive probe FAILS CLOSED (silently attaching
+# with an unverified credential is how a dead key reaches the agent), while
+# 429/5xx are treated as transient.
 ensure_valid_provider_keys() {
   local name="${1:-}" ids provider_id status
   [ -n "$name" ] || return 0
@@ -3882,7 +3829,6 @@ ensure_valid_provider_keys() {
   [ -n "$ids" ] || return 0
   while IFS= read -r provider_id; do
     [ -n "$provider_id" ] || continue
-    [ "$provider_id" = "usai" ] && continue
     status=$(check_provider_key "$name" "$provider_id")
     case "$status" in
       "200") continue ;;
@@ -3908,7 +3854,14 @@ ensure_valid_provider_keys() {
         ;;
       401|403)
         echo "acq: provider '$provider_id' rejected the stored key (HTTP ${status})." >&2
-        echo "     Update it with: acq secret set -g $provider_id" >&2
+        if [ "$(acq_provider_credential_key_env "$provider_id")" = "$USAI_PROVIDER_KEY_ENV" ]; then
+          # The default provider's remediation stays the dedicated rotate verb
+          # (it knows the USAi key-management console); no interactive prompt.
+          echo "     Rotate it with: acq usai-rotate-api-key" >&2
+          echo "     Or re-store it: acq secret set -g $provider_id" >&2
+        else
+          echo "     Update it with: acq secret set -g $provider_id" >&2
+        fi
         return 1
         ;;
       429|5??)
@@ -4885,32 +4838,6 @@ ensure_opencode_postinstall() {
   return 0
 }
 
-# Probe the USAi API from inside the sandbox. Emits ONE clean token on stdout:
-#   - a 3-digit HTTP status (e.g. 200, 401) on a real HTTP response,
-#   - "unresolved" when the guest resolver returned no answer for the name
-#     (curl exit 6 / NXDOMAIN) — the split-horizon-DNS tell,
-#   - the literal "unreachable" when curl could not complete a request at all
-#     (TLS reset, DNS failure, proxy/Zscaler interception, offline — curl exits
-#     non-zero and writes http_code 000), or
-#   - "" (empty) only when the probe is genuinely indeterminate.
-# The caller distinguishes these: "unreachable" is a NETWORK problem, NOT a bad
-# key, so it must never be reported as "invalid or expired" or trigger a rotate.
-#
-# Sanitize hard: curl's stderr can leak through the backend exec (which may merge
-# streams), so we emit the raw curl output as `<http_code>|<exit>` and reduce it
-# to a bare code here. Only ^[0-9]{3}$ or "unreachable" or "" can ever escape —
-# no free-form error text can splice into the caller's "(HTTP …)" message.
-check_key() {
-  local name="$1"
-  local raw code exit_code key_ref
-  key_ref="\$${USAI_PROVIDER_KEY_ENV}"
-  raw=$(acq_backend_run "$name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer $key_ref\" \
-     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" 2>/dev/null || true)
-  _classify_key_status "$raw"
-}
-
 # Reduce a raw `<http_code>|<curl_exit>` probe result (possibly polluted with
 # curl error text) to a clean status token: a 3-digit HTTP code, "unresolved"
 # (DNS did not resolve the name — curl exit 6), "unreachable" (resolved but the
@@ -4959,35 +4886,6 @@ _classify_key_status() {
   fi
   # Indeterminate (no exit code captured, no usable http_code): stay silent.
   printf '\n'
-}
-
-# Check USAi key in a fresh temporary sandbox (to distinguish bad key from stale
-# placeholder).
-check_fresh_sandbox_key() {
-  local validation_name="acq-keycheck-$$"
-  local status=""
-  # The throwaway sandbox only needs the USAi binding. Publishing ports would
-  # make it contend with the real sandbox for every explicit host port (a
-  # `--publish` pin or a kit's `host:`), fail its create, and silently skip this
-  # check. Dynamic scoping hands the flag to acq_backend_provision.
-  local _ACQ_PROVISION_WITHOUT_PORTS=1
-
-  # Use the backend to create a minimal sandbox for validation.
-  if ! acq_backend_provision "$validation_name" shell . </dev/null >/dev/null 2>&1; then
-    return 0
-  fi
-  # shellcheck disable=SC2064
-  trap "acq_backend_terminate '$validation_name' </dev/null >/dev/null 2>&1 || true" EXIT
-  local raw key_ref
-  key_ref="\$${USAI_PROVIDER_KEY_ENV}"
-  raw=$(acq_backend_run "$validation_name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer $key_ref\" \
-     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
-  status=$(_classify_key_status "$raw")
-  acq_backend_terminate "$validation_name" </dev/null >/dev/null 2>&1 || true
-  trap - EXIT
-  printf '%s\n' "$status"
 }
 
 # Warn (do not block) if a sandbox has published ports with nothing listening
@@ -5532,100 +5430,6 @@ preflight_workspace_path() {
   return 1
 }
 
-# Validate the sandbox's USAi key and walk the user through rotating it if
-# needed. Best-effort: warn and continue if we cannot run the check.
-# advise_valid_key NAME — non-blocking USAi key advisory for `acq create`.
-# Unlike ensure_valid_key (which gates attach and offers interactive rotation),
-# this only WARNS if the key isn't valid, then returns 0 regardless. `create`
-# is detached and never attaches, so there is nothing to gate; the point is to
-# give a create-only user a heads-up that their key is stale before they later
-# `acq run`. Silent on a healthy key or an inconclusive check (empty status).
-advise_valid_key() {
-  local name="$1"
-  local status
-  status=$(check_key "$name")
-
-  # 200 = healthy; empty = could not validate (network/tooling) — stay quiet in
-  # both cases to avoid noise. Only speak up on a definitive non-200.
-  [ "$status" = "200" ] && return 0
-  [ -z "$status" ] && return 0
-
-  if [ "$status" = "unreachable" ]; then
-    _report_usai_unreachable
-    return 0
-  fi
-
-  if [ "$status" = "unresolved" ]; then
-    _report_usai_unresolved
-    return 0
-  fi
-
-  echo "acq: note — your USAi API key looks invalid or expired (HTTP $status)." >&2
-  echo "      USAi keys expire every 7 days. This sandbox was created, but the" >&2
-  echo "      key must be valid before an agent can use it." >&2
-  echo "      To rotate: acq usai-rotate-api-key   (or re-run via 'acq run', which" >&2
-  echo "      validates and offers to rotate before attaching)." >&2
-  return 0
-}
-
-# Print a network-oriented diagnosis when the USAi models API could not be
-# reached from the sandbox at all (curl connection failure / HTTP 000). This is
-# a reachability problem — NOT an invalid or expired key — so it deliberately
-# does not mention rotating the key. The point is an accurate diagnosis, not a
-# prescription: it states what failed and the signal to look for, and points at
-# the docs rather than guessing the user's network fix.
-_report_usai_unreachable() {
-  echo >&2
-  echo "acq: could not reach the USAi API ($USAI_PROVIDER_MODELS_URL) from the sandbox." >&2
-  echo "      The request did not complete (no HTTP response) — this is a network" >&2
-  echo "      reachability problem, NOT an invalid or expired key, so rotating the" >&2
-  echo "      key will not help." >&2
-  echo "      If the playbook/kit fetch also failed with a TLS 'unexpected eof'," >&2
-  echo "      both outbound connections are being cut — a strong sign of a network" >&2
-  echo "      or TLS-interception (e.g. corporate proxy) issue rather than USAi." >&2
-  echo "      See docs/KNOWN_FAILURE_MODES.md for diagnosis steps." >&2
-  echo >&2
-}
-
-# Print a DNS-oriented diagnosis when the USAi models API name did not RESOLVE
-# from the sandbox (curl exit 6 / NXDOMAIN). This is distinct from the broad
-# "unreachable" cut: the tell is that the name has no answer for the guest
-# resolver, while other public hosts (GitHub, npm) resolve and connect fine.
-#
-# The usual cause on GFE is split-horizon DNS — the USAi host resolves to an
-# INTERNAL address that only exists in the corporate/tunnel zone. The guest
-# follows the host's resolvers by default, with msb's rebind protection off on
-# a ZPA host, so this now points at a forced public resolver
-# (ACQ_MSB_DNS_NAMESERVER), rebind protection forced on
-# (ACQ_MSB_DNS_REBIND_PROTECTION=1), or a sandbox created while the tunnel was
-# down (detection missed; recreate with ACQ_MSB_DNS_REBIND_PROTECTION=0). A key
-# rotation cannot fix this, and neither can a msb data wipe. State the signal
-# and point at the docs.
-_report_usai_unresolved() {
-  echo >&2
-  echo "acq: the USAi API host in $USAI_PROVIDER_MODELS_URL did not RESOLVE from the sandbox" >&2
-  echo "      (DNS returned no address). This is a name-resolution problem, NOT an" >&2
-  echo "      invalid or expired key, so rotating the key will not help." >&2
-  echo "      If other public hosts (GitHub, npm) work from the sandbox but only" >&2
-  echo "      USAi fails to resolve, USAi is likely a split-horizon name whose" >&2
-  echo "      address lives in an internal/tunnel-only zone. Check that the guest" >&2
-  echo "      follows the host's resolvers (ACQ_MSB_DNS_NAMESERVER unset) and that" >&2
-  echo "      msb's rebind protection is not forced on (ACQ_MSB_DNS_REBIND_PROTECTION" >&2
-  echo "      unset, or 0 if the sandbox was created while the tunnel was down)." >&2
-  echo "      See docs/KNOWN_FAILURE_MODES.md §30 (USAi-only NXDOMAIN)." >&2
-  echo >&2
-}
-
-# Diagnose a USAi value that is stored but cannot be presented by the active
-# backend (an undecryptable DPAPI envelope written under a different Windows
-# profile, or a damaged store). Reporting "not set" here would send the user to
-# create a fresh key when the real problem is the stored one.
-_report_usai_unreadable() {
-  echo "acq: a USAi API key is stored for this user, but it cannot be read or decrypted here." >&2
-  echo "     It may have been stored under a different user or host, or the stored value is damaged." >&2
-  echo "     Re-set it with 'acq secret set -g usai' (or remove it with 'acq secret rm -g usai')." >&2
-}
-
 # acq_key_injectable SERVICE [SANDBOX] -> 0 if the ACTIVE BACKEND can inject
 # SERVICE for that scope, else 1. Single source of truth for the "is this
 # credential actually usable at provision?" predicate, composed of two checks:
@@ -5644,176 +5448,6 @@ acq_key_injectable() {
     acq_backend_key_present "$service" "$scope_sandbox" || return 1
   fi
   return 0
-}
-
-# ensure_key_present — pre-create gate: make sure a USAi API key is available to
-# the active backend BEFORE the sandbox is created. This must run before
-# acq_backend_provision on a fresh run because msb binds secrets only at create
-# time (--secret ENV@HOST), and sbx snapshots custom secret placeholders from its
-# proxy table at create time. A sandbox created without the backend-visible key
-# binding carries no working USAi credential.
-#
-# Returns 0 if a key is present (already, or after the user pastes one), 1 if the
-# user declines or setup fails. A no-op (returns 0) when the store helper isn't
-# loaded — the post-create ensure_valid_key gate still catches a bad key.
-ensure_key_present() {
-  local scope_sandbox="${1:-}"
-  if ! command -v acq_secret_has >/dev/null 2>&1; then
-    return 0
-  fi
-  if acq_secret_has usai "$scope_sandbox"; then
-    # acq_key_injectable composes the store check (already true here) with the
-    # backend-inject check; it is the shared predicate `acq secret has` also uses.
-    acq_key_injectable usai "$scope_sandbox" && return 0
-
-    echo "acq: USAi API key is stored, but the active backend is not configured to inject it." >&2
-    echo "     Run 'acq secret set -g usai' from a terminal so the backend can bind it, then retry." >&2
-    return 1
-  fi
-
-  # Backend mismatch: msb provision also accepts a host-exported USAI_API_KEY and
-  # binds it at create time (see _acq_msb_bind_secrets_into in msb.sh), so an empty
-  # acq store is NOT a blocker under msb when the env var is set (e.g. CI). Treat
-  # that as present to avoid prompting/aborting a create msb would have satisfied.
-  # sbx does NOT read host env at provision, so this short-circuit is msb-only.
-  if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ] && [ -n "${USAI_API_KEY:-}" ]; then
-    return 0
-  fi
-
-  # Present-but-unreadable: a value is stored for this user but cannot be read or
-  # decrypted (e.g. a DPAPI envelope written under a different Windows profile,
-  # or a damaged store). Reporting "not set" here would send the user to create a
-  # fresh key when the real problem is the stored one — fail closed with the real
-  # diagnosis instead.
-  if acq_secret_unreadable usai "$scope_sandbox"; then
-    _report_usai_unreadable
-    return 1
-  fi
-
-  # Non-interactive (CI / piped stdin): no one can answer the prompt below, so
-  # emit a single terse line and fail closed rather than the full interactive
-  # help (mirrors the non-tty guard in the kit-update path above).
-  if [ ! -t 0 ]; then
-    echo "acq: no USAi API key stored; set one with 'acq secret set -g usai' (see $USAI_PROVIDER_KEY_MGMT_URL). Aborting." >&2
-    return 1
-  fi
-
-  echo >&2
-  echo "No USAi API key is stored yet." >&2
-  echo "USAi keys are created at $USAI_PROVIDER_KEY_MGMT_URL and expire every 7 days." >&2
-  echo >&2
-  echo "To set one:" >&2
-  echo "  1. Open $USAI_PROVIDER_KEY_MGMT_URL" >&2
-  echo "  2. Create a key (or copy an existing one) with the console copy button" >&2
-  echo >&2
-
-  if ! command -v acq_backend_secret_set >/dev/null 2>&1; then
-    echo "The '${ACQ_RESOLVED_BACKEND:-active}' backend does not implement key setup." >&2
-    echo "Set the key manually (acq secret set -g usai), then re-run." >&2
-    return 1
-  fi
-
-  local answer=""
-  printf 'Have your USAi API key ready to paste? Set it now? [y/N] ' >&2
-  read -r answer || true
-  case "$answer" in
-    [yY]|[yY][eE][sS])
-      # Store the key in the acq store (read from the TTY; never argv). This does
-      # NOT create a sandbox — the value just needs to be present before create.
-      acq_backend_secret_set -g usai || {
-        echo "Key setup did not complete. Aborting." >&2
-        return 1
-      }
-      if acq_secret_has usai; then
-        return 0
-      fi
-      echo "No USAi API key was stored. Aborting." >&2
-      return 1
-      ;;
-    *)
-      echo "Skipping. Aborting; re-run when your USAi API key is set." >&2
-      return 1
-      ;;
-  esac
-}
-
-ensure_valid_key() {
-  local name="$1"
-  shift
-  local status
-  status=$(check_key "$name")
-
-  if [ "$status" = "200" ]; then
-    return 0
-  fi
-
-  if [ -z "$status" ]; then
-    echo "warning: could not validate USAI_API_KEY for '$name' (skipping check)" >&2
-    return 0
-  fi
-
-  # The request never reached USAi (TLS reset / DNS / proxy interception /
-  # offline) — a NETWORK problem, not a key problem. Rotating a key cannot fix
-  # this, so DO NOT prompt to rotate. Fail closed (attaching would just fail on
-  # the first USAi call) with a network-oriented diagnosis.
-  if [ "$status" = "unreachable" ]; then
-    _report_usai_unreachable
-    return 1
-  fi
-
-  # DNS returned no address for the USAi host (curl exit 6). Distinct from a
-  # broad cut: the split-horizon-DNS case, where only USAi fails to resolve. A
-  # rotation cannot fix it, so fail closed with a resolver-oriented diagnosis.
-  if [ "$status" = "unresolved" ]; then
-    _report_usai_unresolved
-    return 1
-  fi
-
-  # A key IS stored (ensure_key_present gated create on that) but the models API
-  # rejected it: it is expired or invalid. Offer an in-place rotation, then
-  # re-validate THIS sandbox — the same one the agent will attach to, so a 200
-  # here is truthful (no throwaway-sandbox result stands in for the real one).
-  echo >&2
-  echo "Your USAi API key looks invalid or expired (HTTP $status from the models API)." >&2
-  echo "USAi keys expire every 7 days." >&2
-  echo >&2
-  echo "To rotate it:" >&2
-  echo "  1. Open $USAI_PROVIDER_KEY_MGMT_URL" >&2
-  echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
-  echo "  3. Copy the new key using the console copy button" >&2
-  echo >&2
-
-  if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
-    echo "The '${ACQ_RESOLVED_BACKEND:-active}' backend does not implement key setup." >&2
-    echo "Set the key manually, then re-run." >&2
-    return 1
-  fi
-
-  local answer=""
-  printf 'Have the new API key ready to paste? Rotate now? [y/N] ' >&2
-  read -r answer || true
-  case "$answer" in
-    [yY]|[yY][eE][sS])
-      acq_backend_rotate_key || {
-        echo "Key setup did not complete. Aborting attach." >&2
-        return 1
-      }
-      if command -v acq_propagate_usai_rotation >/dev/null 2>&1; then
-        acq_propagate_usai_rotation || return 1
-      fi
-      status=$(check_key "$name")
-      if [ "$status" = "200" ]; then
-        echo "Key validated. Continuing." >&2
-        return 0
-      fi
-      echo "Key still not working (HTTP ${status:-unknown}). Aborting attach." >&2
-      return 1
-      ;;
-    *)
-      echo "Skipping. Aborting attach; re-run when your USAi API key is set." >&2
-      return 1
-      ;;
-  esac
 }
 
 # ============================================================================

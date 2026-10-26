@@ -570,13 +570,12 @@ PYTHON
   assert_output --partial 'is not pinned to a host yet'
 }
 
-@test "credentials gate still skips the ids both backends hard-code" {
+@test "credentials gate skips the one id both backends hard-code" {
   local generation
   generation=$(_make_generation github GITHUB_TOKEN)
-  mkdir -p "$generation/models/providers/usai"
-  printf '{"providerId":"usai","apiProtocol":"openai-compatible","host":"api.gsa.usai.gov","modelsUrl":"https://api.gsa.usai.gov/api/v1/models","keyEnv":"USAI_API_KEY"}\n' \
-    > "$generation/models/providers/usai/facts.json"
 
+  # `github` is a HOST service with a compiled-in binding on both backends, so it
+  # is the only id the gate skips. `usai` is a provider and is gated below.
   run acq_provider_credentials_gate msb box "$generation"
   assert_success
 }
@@ -626,23 +625,20 @@ PYTHON
 # Create-time gate behaviour
 # ---------------------------------------------------------------------------
 
-@test "credentials gate records provider facts and never gates usai" {
+@test "usai is gated and injected through the trusted default pin" {
   local generation
-  generation=$(_make_generation alpha ALPHA_KEY)
-  mkdir -p "$generation/models/providers/usai"
-  printf '{"providerId":"usai","apiProtocol":"openai-compatible","host":"api.gsa.usai.gov","modelsUrl":"https://api.gsa.usai.gov/api/v1/models","keyEnv":"USAI_API_KEY"}\n' \
-    > "$generation/models/providers/usai/facts.json"
-  _pin alpha ALPHA_KEY alpha.example.gov
-  export ALPHA_KEY='exported-by-ci'
+  generation=$(_make_generation usai USAI_API_KEY api.gsa.usai.gov)
+  export USAI_API_KEY='exported-by-ci'
 
-  # USAI_API_KEY is deliberately unset: USAi keeps its own pre-create gate.
+  # No user pin for usai: the shipped trust anchor (usai|USAI_API_KEY|api.gsa.usai.gov)
+  # supplies both the env var and the trusted host, so the gate passes.
   run acq_provider_credentials_gate msb credbox "$generation"
   assert_success
-  refute_output --partial 'USAI_API_KEY'
+  refute_output --partial 'acq secret set -g usai'
 
   run acq_host_config_read msb credbox provider-credentials
   assert_success
-  assert_output --partial 'alpha'
+  assert_output --partial "$(printf 'usai\tUSAI_API_KEY\tapi.gsa.usai.gov')"
 }
 
 @test "credentials gate fails closed non-interactively when a provider key is missing" {
@@ -762,13 +758,15 @@ PYTHON
   assert_output --partial 'That is a network problem, not a credential one.'
 }
 
-@test "ensure_valid_provider_keys skips usai" {
+@test "ensure_valid_provider_keys validates usai through the generic path" {
   acq_provider_sandbox_provider_ids() { printf 'usai\n'; }
   check_provider_key() { printf '401\n'; }
 
+  # No USAi bypass: a rejected default-provider key fails the gate and names the
+  # dedicated remediation verb.
   run ensure_valid_provider_keys probe-box
-  assert_success
-  assert_output ''
+  assert_failure
+  assert_output --partial 'acq usai-rotate-api-key'
 }
 
 @test "sbx maps a registry provider to its facts host and key env" {
@@ -815,8 +813,7 @@ PYTHON
   assert_output "$(printf 'alpha.example.gov\tALPHA_KEY')"
 }
 
-@test "sbx reports a registry provider injectable only once its key env is bound" {
-  local generation
+@test "sbx reports a registry provider injectable only once its key env is bound" {  local generation
   generation=$(_make_generation alpha ALPHA_KEY)
   export ACQ_PROVIDER_BINDINGS_GENERATION="$generation"
   _acq_sbx_secret_exists() { return 1; }
@@ -831,4 +828,37 @@ PYTHON
   # Services acq does not model keep the documented permissive default.
   run acq_backend_key_present some-raw-placeholder
   assert_success
+}
+
+# ---------------------------------------------------------------------------
+# De-specialized default provider (usai flows through the generic path)
+# ---------------------------------------------------------------------------
+
+@test "the default provider resolves through the generic binding, facts-free" {
+  # No generation, no record: the shipped trust anchor supplies both halves, which
+  # is what keeps a pre-merge sandbox resumable.
+  run acq_provider_binding_host_env usai
+  assert_success
+  assert_output "$(printf 'api.gsa.usai.gov\tUSAI_API_KEY')"
+}
+
+@test "a rejected default-provider key points at usai-rotate-api-key" {
+  acq_provider_sandbox_provider_ids() { printf 'usai\n'; }
+  check_provider_key() { printf '401\n'; }
+
+  run ensure_valid_provider_keys probe-box
+  assert_failure
+  assert_output --partial 'Rotate it with: acq usai-rotate-api-key'
+  refute_output --partial 'Rotate now?'
+}
+
+@test "a rejected non-default provider key points at acq secret set" {
+  acq_provider_sandbox_provider_ids() { printf 'alpha\n'; }
+  check_provider_key() { printf '403\n'; }
+  _pin alpha ALPHA_KEY a.example.gov
+
+  run ensure_valid_provider_keys probe-box
+  assert_failure
+  assert_output --partial 'acq secret set -g alpha'
+  refute_output --partial 'usai-rotate-api-key'
 }

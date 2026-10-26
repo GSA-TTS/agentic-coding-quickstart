@@ -334,13 +334,10 @@ _acq_msb_service_binding() {
     fi
   fi
   case "$_service" in
-    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_KEY_ENV" "$ACQ_MSB_USAI_HOST"; return 0 ;;
     github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
   esac
-  # Provider kits hosted outside the pinned Patterns release: the validated
-  # facts.json names this provider's (host, keyEnv), so the --secret binding is
-  # derived from data rather than a per-provider branch here. The SANDBOX is
-  # passed explicitly so resume and `acq secret rm` resolve the same binding.
+  # Providers (the default one included) are resolved from acq's registry + the
+  # validated facts, never from a compiled-in table: there is no `usai` branch.
   if command -v acq_provider_binding_host_env >/dev/null 2>&1; then
     _meta=$(acq_provider_binding_host_env "$_service" "$_sandbox" 2>/dev/null) || _meta=""
     if [ -n "$_meta" ]; then
@@ -968,24 +965,13 @@ _acq_msb_bind_secrets_into() {
   local _arrn="$1" _namesn="$2" _name="$3"
 
   if command -v acq_secret_resolve >/dev/null 2>&1; then
-    # usai/github hosts resolve through the SAME binding table set/rm/refeed use
-    # (_acq_msb_service_binding), so a `--host` sidecar recorded at `acq secret
-    # set` overrides the compiled-in endpoint here too (#384) instead of being
-    # written-but-ignored at provision.
-    if ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; then
-      local _usai_binding _usai_env _usai_host
-      _usai_binding=$(_acq_msb_service_binding usai "$_name")
-      _usai_env=$(printf '%s' "$_usai_binding" | cut -f1)
-      _usai_host=$(printf '%s' "$_usai_binding" | cut -f2)
-
-      # USAi: acq store first, else a pre-exported USAI_API_KEY (e.g. CI).
-      if ! _acq_msb_bind_one "$_arrn" "$_namesn" usai "$_name" "$_usai_env" "$_usai_host"; then
-        if [ -n "${USAI_API_KEY:-}" ]; then
-          eval "$_arrn+=(--secret \"\${_usai_env}@\${_usai_host}\")"
-          acq_debug "msb secret: binding ${_usai_env}@${_usai_host} (from env)"
-        fi
-      fi
-    fi
+    # github hosts resolve through the SAME binding table set/rm/refeed use
+    # (_acq_msb_service_binding), so a `--host` sidecar recorded at
+    # `acq secret set` overrides the compiled-in endpoint here too (#384) instead
+    # of being written-but-ignored at provision.
+    #
+    # Providers (the default one included) are bound by the generic provider loop
+    # below; only the github HOST service keeps a compiled-in branch.
 
     # GitHub: bind the token to the API and git-transport hosts. acq store first,
     # then a pre-exported GITHUB_TOKEN, then GH_TOKEN (CI). Absent token => no
@@ -1041,7 +1027,9 @@ EOF
       local _pid _pbinding _penv _phost _pnames _pexported
       while IFS= read -r _pid; do
         [ -n "$_pid" ] || continue
-        case "$_pid" in usai|github) continue ;; esac
+        # `github` is bound above from the compiled-in host table; every provider
+        # (the default one included) comes through this loop.
+        case "$_pid" in github) continue ;; esac
         _pbinding=$(acq_provider_binding_host_env "$_pid" "$_name" 2>/dev/null) || continue
         _penv=$(printf '%s' "$_pbinding" | cut -f2)
         _phost=$(printf '%s' "$_pbinding" | cut -f1)
@@ -1065,9 +1053,17 @@ EOF
 $(acq_provider_delivery_ids "$_name")
 PROVIDERS
     fi
-  elif { ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; } \
-      && [ -n "${USAI_API_KEY:-}" ]; then
-    eval "$_arrn+=(--secret \"${USAI_PROVIDER_KEY_ENV}@\${ACQ_MSB_USAI_HOST}\")"
+  elif acq_provider_selection_active 2>/dev/null || ! command -v acq_provider_selection_active >/dev/null 2>&1; then
+    # No secret store loaded (e.g. a minimal harness): fall back to a host-exported
+    # value for the DEFAULT provider, derived from the same registry data. This is
+    # the facts-free fallback that keeps a pre-merge sandbox resumable.
+    local _default_env _default_host
+    _default_env=$(acq_provider_credential_key_env "$(acq_provider_default_id 2>/dev/null)" 2>/dev/null) || _default_env=""
+    _default_host=$(acq_provider_credential_hosts "$(acq_provider_default_id 2>/dev/null)" 2>/dev/null) || _default_host=""
+    if [ -n "$_default_env" ] && [ -n "$_default_host" ] \
+        && [ -n "$(_acq_provider_env_value "$_default_env")" ]; then
+      eval "$_arrn+=(--secret \"\${_default_env}@\${_default_host}\")"
+    fi
   fi
 }
 
@@ -1123,10 +1119,9 @@ acq_backend_start() {
   if command -v acq_provider_selection_load >/dev/null 2>&1; then
     acq_provider_selection_load msb "$_name" || return 1
   fi
-  if command -v acq_provider_facts_load_from_kit_or_fallback >/dev/null 2>&1 \
-      && { ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; }; then
-    acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-  fi
+  # Provider facts are resolved from the sandbox's own generation/record (see
+  # acq_provider_binding), and the DEFAULT provider falls back to the shipped
+  # trust-anchor data — so a pre-merge sandbox still resumes with no facts file.
   local _start_secret_flags=() _start_secret_names=()
   _acq_msb_bind_secrets_into _start_secret_flags _start_secret_names "$_name"
   local _start_rc=0
@@ -6252,42 +6247,12 @@ acq_backend_rotate_key() {
     return 1
   }
 
-  # Validate the new key in a fresh throwaway sandbox (backend-neutral helper).
-  # NOTE: on msb the throwaway sandbox is NOT the sandbox the agent attaches to.
-  # The real running sandbox is re-fed via `msb modify --secret`, which can apply
-  # to 0 sandboxes if the real one is still booting. So a throwaway "HTTP 200"
-  # here does NOT prove the real sandbox will authenticate — printing it would
-  # reproduce the exact 200-then-401 split this change set out to kill. We only
-  # use the throwaway to surface a hard-negative early (invalid key / network),
-  # and leave the authoritative "validated" verdict to ensure_valid_key's
-  # real-sandbox check_key on next attach.
-  local status=""
-  if command -v check_fresh_sandbox_key >/dev/null 2>&1; then
-    acq_spin_start "Validating the new key in a temporary sandbox"
-    status=$(check_fresh_sandbox_key)
-    acq_spin_stop "Validating the new key in a temporary sandbox"
-  fi
-
-  if [ -z "$status" ] || [ "$status" = "200" ]; then
-    # No throwaway result, or the throwaway accepted the key. Do NOT claim the
-    # real sandbox is validated — the re-feed may not have reached it yet.
-    echo "Key stored. It will be validated against the running sandbox on next attach." >&2
-    return 0
-  fi
-  if [ "$status" = "unreachable" ]; then
-    # The validation request never reached USAi — a network/egress problem, not
-    # the key. Report it as such (no "double-check the key") via the shared
-    # helper when available.
-    if command -v _report_usai_unreachable >/dev/null 2>&1; then
-      _report_usai_unreachable
-    else
-      echo "acq(msb): could not reach the USAi API to validate — a network/egress" >&2
-      echo "      problem (proxy/Zscaler/DNS/offline), not the key itself." >&2
-    fi
-    return 1
-  fi
-  echo "acq(msb): key validation failed (HTTP ${status}). Double-check the key and rotate again." >&2
-  return 1
+  # The throwaway-sandbox probe is gone with the USAi-specific key subsystem: the
+  # authoritative verdict is the generic `ensure_valid_provider_keys` check on
+  # next attach (it probes the provider's own facts.modelsUrl in the REAL
+  # sandbox), so a 200 here could never prove the real sandbox authenticates.
+  echo "Key stored. It will be validated against the running sandbox on next attach." >&2
+  return 0
 }
 
 # ---------------------------------------------------------------------------

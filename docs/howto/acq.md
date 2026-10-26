@@ -640,8 +640,12 @@ From there the injection is generic — no provider-specific `acq` code:
 - on attach, `acq` probes `facts.modelsUrl` with
   `Authorization: Bearer $KEY_ENV` (`check_provider_key`) and fails closed on a
   rejected key (`401`/`403`) or a redirect; `429`/`5xx` are treated as transient
-  and do not block the attach. USAi keeps its existing flow, including
-  interactive rotation.
+  and do not block the attach. **USAi is not special-cased**: it is the default
+  provider kit (`provider_kit: agentic-coding-patterns/usai-provider`) and its
+  `(USAI_API_KEY, api.gsa.usai.gov)` pair is the shipped trust anchor, so it is
+  gated, bound, and validated like any other provider. A rejected USAi key points
+  at `acq usai-rotate-api-key`, the one remaining provider-specific verb (it needs
+  the USAi key-management console); there is no interactive rotation prompt.
 
 If a provider kit is selected but no credential is available, the create fails
 closed (non-interactive) or offers to store one (interactive), showing the

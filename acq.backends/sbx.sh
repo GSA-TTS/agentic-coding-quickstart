@@ -1198,9 +1198,13 @@ acq_backend_ensure_kits_applied() {
   _acq_sbx_ensure_kit_sources_allowed
 
   # Neutral kits must be translated to local sbx-v2 kit dirs before sbx kit add.
-  local usai_local="" playbook_local zscaler_local
-  if ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; then
-    usai_local=$(_acq_sbx_translate_kit "$USAI_KIT")
+  local provider_local="" playbook_local zscaler_local
+  # The default provider is DATA (provider_kit), so heal resolves the selected
+  # ref instead of naming the USAi kit.
+  local provider_ref=""
+  provider_ref=$(_acq_selected_provider_kit_refs 2>/dev/null | head -n1)
+  if [ -n "$provider_ref" ]; then
+    provider_local=$(_acq_sbx_translate_kit "$provider_ref")
   fi
   playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT")
   zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT")
@@ -1221,21 +1225,21 @@ acq_backend_ensure_kits_applied() {
     esac
   fi
 
-  # 2) USAi provider kit
-  if { ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; } \
+  # 2) Default provider kit
+  if [ -n "$provider_ref" ] \
       && { [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; }; then
-    echo "acq: '$name' is missing the USAi kit; injecting with 'sbx kit add'..." >&2
-    _kadd_rc=0; _acq_sbx_kit_add "$name" "$usai_local" || _kadd_rc=$?
+    echo "acq: '$name' is missing the provider kit; injecting with 'sbx kit add'..." >&2
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$provider_local" || _kadd_rc=$?
     case $_kadd_rc in
       0)
         healed=1
         sbx exec "$name" -- sh -c \
           'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
           </dev/null >/dev/null 2>&1 || true
-        echo "acq: USAi kit injected into '$name'." >&2
+        echo "acq: provider kit injected into '$name'." >&2
         ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
-      *) echo "acq: warning: 'sbx kit add' (USAi kit) failed for '$name' (see error above)." >&2; ok=0 ;;
+      *) echo "acq: warning: 'sbx kit add' (provider kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
   fi
 
@@ -1362,12 +1366,12 @@ acq_backend_ensure_kits_applied() {
 _acq_service_hosts_env() {
   local provider_binding provider_host provider_env
   case "$1" in
-    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_BIND_HOSTS" "$USAI_PROVIDER_KEY_ENV" ;;
     github) printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
     *)
-      # The sandbox is passed explicitly: a standalone `acq secret set -g <id>`
-      # resolves the registered host, while rm/rotate resolve a sandbox's
-      # recorded facts. No ambient create-time state is required.
+      # Providers (the default one included) resolve from acq's registry + the
+      # validated facts; there is no `usai` branch. The sandbox is passed
+      # explicitly so a standalone `acq secret set -g <id>` uses the pinned host
+      # and rm/rotate use a sandbox's recorded facts.
       if command -v acq_provider_binding_host_env >/dev/null 2>&1 \
           && provider_binding=$(acq_provider_binding_host_env "$1" "${2:-}" 2>/dev/null); then
         provider_host=$(printf '%s' "$provider_binding" | cut -f1)
@@ -1975,17 +1979,10 @@ _acq_sbx_secret_exists() {
 acq_backend_key_present() {
   local service="${1:-}" scope_sandbox="${2:-}" provider_binding provider_env
   case "$service" in
-    usai)
-      if [ -n "$scope_sandbox" ] && _acq_sbx_secret_exists "" "$scope_sandbox" usai "$USAI_PROVIDER_KEY_ENV"; then
-        return 0
-      fi
-      _acq_sbx_secret_exists -g "" usai "$USAI_PROVIDER_KEY_ENV"
-      ;;
     *)
-      # A provider declared in acq's credential-bindings registry is only
-      # injectable once sbx's table actually carries its KEY_ENV for this scope.
-      # Anything else keeps the permissive default (injectability is the
-      # backend's own concern for services acq does not model).
+      # Every provider (the default one included) is registry-driven: injectable
+      # once sbx's table carries its KEY_ENV for this scope. A service acq does
+      # not model keeps the permissive default.
       if command -v acq_provider_binding_host_env >/dev/null 2>&1 \
           && provider_binding=$(acq_provider_binding_host_env "$service" "$scope_sandbox" 2>/dev/null); then
         provider_env=$(printf '%s' "$provider_binding" | cut -f2)

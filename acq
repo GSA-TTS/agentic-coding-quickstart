@@ -634,17 +634,6 @@ _acq_secret_service_arg() {
   esac
 }
 
-_acq_secret_needs_usai_facts() {
-  [ "$(_acq_secret_service_arg "$@")" = "usai" ]
-}
-
-_acq_secret_import_includes_usai() {
-  local parsed only_service
-  parsed=$(_acq_import_parse_args "$@" 2>/dev/null) || return 1
-  only_service=$(printf '%s' "$parsed" | cut -f3)
-  [ -z "$only_service" ] || [ "$only_service" = "usai" ]
-}
-
 _acq_parse_secret_scope_for_propagation() {
   ACQ_PROPAGATE_SCOPE=""
   ACQ_PROPAGATE_SERVICE=""
@@ -1198,9 +1187,9 @@ esac
 case "$subcommand" in
   usai-rotate-api-key)
     shift
-    if acq_usai_provider_selected; then
-      acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-    fi
+    # Kept as its own verb: rotation needs the provider's key-management console,
+    # which no generic facts field describes. Everything else about the default
+    # provider flows through the generic path.
     if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
       echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not implement key rotation" >&2
       echo "     (acq_backend_rotate_key). Rotate manually, then re-run." >&2
@@ -1212,9 +1201,6 @@ case "$subcommand" in
 
   create)
     shift
-    if acq_usai_provider_selected; then
-      acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-    fi
     acq_backend_prepare
     # First-run onboarding (ADR-0031): offer `acq configure` once before we
     # provision, so a brand-new user picks kits up front. No-op after first run
@@ -1236,12 +1222,12 @@ case "$subcommand" in
     # at create time, so a sandbox created before the key exists carries no USAi
     # binding. Gate on key presence first (fail closed if declined) so create
     # picks it up. `create` is otherwise detached and never attaches.
-    if acq_usai_provider_selected && ! ensure_key_present "$local_name"; then
-      exit 1
-    fi
+    # The provider-credential gate runs inside provision (after the provider
+    # inputs are materialized, so it can read each provider's facts): it prompts,
+    # stores, and fails closed there. Nothing provider-specific is needed here.
 
     # Nudge toward a per-sandbox scoped GitHub token BEFORE provisioning, for the
-    # same reason as the USAi gate above: msb binds secrets only at create time
+    # same reason as the provider gate:: msb binds secrets only at create time
     # (--secret ENV@HOST), so a GitHub token stored AFTER create would never bind
     # to this sandbox. Prompting first lets a supplied token be picked up at
     # create. Warn-not-block (ADR-0013): declining never aborts the create, it
@@ -1252,14 +1238,8 @@ case "$subcommand" in
     acq_print_selected_agent_kit "$create_agent"
 
     acq_backend_provision "$local_name" "$@"
-
-    # Non-blocking USAi key advisory. `create` is detached and never attaches,
-    # so unlike `run` we don't gate on the key or offer interactive rotation —
-    # just warn if it's already invalid so a create-only user knows before they
-    # later `acq run`.
-    if acq_usai_provider_selected; then
-      advise_valid_key "$local_name"
-    fi
+    # `create` is detached and never attaches, so provider credentials are
+    # validated on the next attach (ensure_valid_provider_keys), not here.
     ;;
 
   run)
@@ -1289,9 +1269,6 @@ case "$subcommand" in
       [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
       if acq_backend_exists "$local_name"; then
         acq_provider_selection_load "${ACQ_RESOLVED_BACKEND}" "$local_name" || exit 1
-      fi
-      if acq_usai_provider_selected; then
-        acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
       fi
       acq_print_selected_agent_kit "$first"
 
@@ -1370,9 +1347,6 @@ case "$subcommand" in
         create_time_kit_picker
         _build_kit_list "$first"
 
-        if acq_usai_provider_selected && ! ensure_key_present "$local_name"; then
-          exit 1
-        fi
 
         # Nudge toward a per-sandbox scoped GitHub token BEFORE provisioning, for
         # the SAME reason as the USAi gate: msb binds secrets only at create time
@@ -1387,18 +1361,11 @@ case "$subcommand" in
         acq_backend_provision "$local_name" "${create_args[@]}"
       fi
 
-      # Validate USAi key before attaching. This gate must fail closed, so
-      # abort explicitly on a non-zero return rather than relying on `set -e`
-      # to propagate from a bare function call (its behavior for a function
-      # used as the tested command is not portable across bash versions).
-      if acq_usai_provider_selected && ! ensure_valid_key "$local_name" "${create_args[@]}"; then
-        exit 1
-      fi
-
-      # Generic provider gate. USAi keeps its dedicated flow above (including
-      # interactive rotation); every OTHER provider selected from the
-      # credential-bindings registry is validated against its own models API
-      # (facts.modelsUrl). No-op when no such provider is selected.
+      # Validate every selected provider's credential before attaching. This is
+      # the single provider gate: the default provider is checked exactly like any
+      # other (its facts name its own modelsUrl). It must fail closed, so abort
+      # explicitly on a non-zero return rather than relying on `set -e` to
+      # propagate from a bare function call.
       if ! ensure_valid_provider_keys "$local_name"; then
         exit 1
       fi
@@ -1436,7 +1403,7 @@ case "$subcommand" in
 
     elif [ -n "$first" ] && acq_backend_exists "$first"; then
       # Existing sandbox by name (no agent/path given). Heal kits and attach.
-      # ensure_valid_key is intentionally omitted here: we don't have the
+      # Provider validation is intentionally omitted here: we don't have the
       # create args needed to provision a fresh validation sandbox, and
       # attaching by name is a re-attach to a running session where the key
       # was already validated on the original acq run.
@@ -1655,9 +1622,6 @@ case "$subcommand" in
     case "$sub2" in
       set)
         shift
-        if _acq_secret_needs_usai_facts "$@"; then
-          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-        fi
         acq_backend_secret_set "$@"
         if _acq_parse_secret_scope_for_propagation "$@"; then
           _acq_propagate_secret_to_present_backends "$ACQ_PROPAGATE_SERVICE" "$ACQ_PROPAGATE_SCOPE"
@@ -1677,9 +1641,6 @@ case "$subcommand" in
         ;;
       rm)
         shift
-        if _acq_secret_needs_usai_facts "$@"; then
-          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-        fi
         # `acq secret rm [-g | SANDBOX] SERVICE` removes an acq-owned secret from
         # the acq store (and clears the backend's injector). If the args name a
         # scope + known acq service (-g or a sandbox name), route to the backend
@@ -1710,15 +1671,11 @@ case "$subcommand" in
       has)
         # `acq secret has [-g | SANDBOX] SERVICE` — SILENT predicate for scripting:
         # exit 0 if the ACTIVE BACKEND can inject SERVICE for that scope, else 1.
-        # This is exactly the composed check `ensure_key_present` uses as its
-        # pre-create gate (acq_secret_has AND, when the backend defines it,
-        # acq_backend_key_present) — factored into the shared common.sh helper
-        # acq_key_injectable so the two can never drift. Fail closed; never forward
-        # to the backend CLI.
+        # This is the same composed check acq's create gate makes (acq_secret_has
+        # AND, when the backend defines it, acq_backend_key_present) — factored into
+        # the shared helper acq_key_injectable so the two can never drift. Fail
+        # closed; never forward to the backend CLI.
         shift
-        if _acq_secret_needs_usai_facts "$@"; then
-          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT" >/dev/null 2>&1 || true
-        fi
         # Parse scope the same way secret set/rm do: `-g`/`--global` -> global; a
         # leading bare token before the service -> sandbox; a lone token -> service.
         secret_has_scope=""
@@ -1794,9 +1751,6 @@ case "$subcommand" in
         # it never invokes the backend's own `secret` CLI. See acq_secret_import
         # in acq.backends/common.sh and docs/BACKEND_GUIDE.md "Migration".
         shift
-        if _acq_secret_import_includes_usai "$@"; then
-          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-        fi
         acq_secret_import "$@"
         ;;
       --help|-h|"")

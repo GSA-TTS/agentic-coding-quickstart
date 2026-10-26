@@ -1225,8 +1225,15 @@ the same binding as create. On attach, `check_provider_key` probes
 `facts.modelsUrl` with `Authorization: Bearer $keyEnv` (URL passed as positional
 data, never spliced into the guest program): `401`/`403` and redirects fail
 closed, `429`/`5xx` are transient, and an inconclusive probe refuses to attach.
-USAi keeps its dedicated flow (`ensure_key_present` / `ensure_valid_key`,
-including interactive rotation) unchanged.
+
+There is **no USAi-specific key path**. The default provider (`usai`) is the
+first entry of the shipped trust-anchor table
+(`usai|USAI_API_KEY|api.gsa.usai.gov`), so it is gated, bound, recorded, and
+validated exactly like any other provider; a facts-free fallback to that table
+keeps a sandbox created before the provider-input pipeline resumable. The one
+provider-specific verb left is `acq usai-rotate-api-key`, because rotation needs
+the USAi key-management console — a rejected default-provider key points at it
+instead of offering an interactive prompt.
 
 ### ADR-0030 generic-base implementation
 
