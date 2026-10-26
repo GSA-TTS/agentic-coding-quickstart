@@ -3,7 +3,7 @@ title: "Provider-Neutral Adoption Validation"
 description: "Offline and live procedures for validating provider-input adoption on SBX and MSB"
 status: draft
 tier: 2
-last_updated: "2026-10-22"
+last_updated: "2026-10-26"
 audience: "developers"
 keywords: ["provider", "validation", "sbx", "msb", "opencode", "offline"]
 related_files: ["scripts/verify-backends", "test/bats/146-provider-verification.bats", "test/bats/147-provider-input-projection.bats", "docs/howto/acq.md"]
@@ -15,11 +15,39 @@ review_cycle: "quarterly"
 
 This procedure separates the preparatory offline checks from the live backend
 validation required before provider-input adoption can be considered complete.
+That live validation is tracked in the Merge Gate section below and is not
+finished.
 The Bats cases named below are **offline seam tests**. They use local fixtures
 and stubs to verify internal wiring and control-flow; they are not E2E tests and
 do not prove that SBX, MSB, USAi, or a fresh OpenCode process works on a real
 host. Real projected parser validation requires a live backend run (see
 "Live Validation Record" below).
+
+## Merge Gate
+
+Provider-neutral adoption is **not** shown to be complete by this document. The
+table below records what has been observed and what is still required.
+
+**Observed so far**
+
+- Offline Bats seam tests and CI (`146`, `147` and neighbors): stubbed backends
+  only; they prove acq's decision logic, not live SBX or MSB behavior.
+- Earlier live PASS rows in the Live Validation Record (2026-10-24 and
+  2026-10-25). Those used the previous prefix-only model check
+  (`opencode models | grep "^usai/"`) and an earlier head of this branch. They
+  make no claim about the identity-bound check or the current revision.
+
+**Required before merge (not yet done)**
+
+1. Run the updated `scripts/verify-backends` identity-bound model check
+   (projected snapshot vs rendered OpenCode config vs `opencode models`) on a
+   real SBX host and a real MSB host.
+2. Run the `--no-provider-kits` removal procedure (see "Provider removal" under
+   the live commands) on real SBX and MSB, including all three omission
+   assertions.
+3. Record each result as `PASS`, `FAIL`, or `BLOCKED`, with the backend version,
+   timestamp, and the **tested revision SHA**, replacing the PENDING row.
+   A result for a different revision does not satisfy this gate.
 
 ## Offline Checks
 
@@ -65,6 +93,7 @@ it is not a result and must be replaced by `PASS`, `FAIL`, or `BLOCKED`.
 | Malformed provider input is rejected before startup | PASS | PASS | 2026-10-25: both backends rejected malformed `provider-input.json` before backend creation with `acq: invalid provider input manifest ... invalid JSON at line 1 column 2`. |
 | `scripts/verify-backends --only <backend>` | PASS | PASS | Final combined branch: SBX transcript `tmp/provider-neutral-validation.TCY2fZvE/sbx.log` (13 pass, 0 fail, 1 skip); MSB transcript `tmp/provider-neutral-validation.8MP6vbkX/msb.log` (18 pass, 0 fail, 1 skip). |
 | Identity-bound provider model check in `scripts/verify-backends` (snapshot vs rendered config vs `opencode models`) | PENDING | PENDING | Not yet run on a live SBX or MSB host. The stronger check is new: it compares the projected snapshot's model IDs to both the rendered OpenCode config and the `opencode models` output and fails on missing or unexpected IDs. Only offline stubbed Bats cases (`test/bats/146-provider-verification.bats`) exist. The PASS rows above predate it and make no claim about it; they used the earlier `^usai/` prefix check. |
+| `--no-provider-kits` removal procedure with the three explicit omission assertions (no USAi kit/credential text, no `usai` projection, no `usai/` models) | PENDING | PENDING | Not yet run on a live SBX or MSB host. The earlier 2026-10-25 omission PASS row above was observed on an earlier head with its own checks; it is not a result for these assertions or this revision. |
 
 ### Earlier Failed Live Evidence (2026-10-24)
 
@@ -322,7 +351,8 @@ SANDBOX='<sandbox-name-from-acq-output>'
 ./acq --backend "$BACKEND" rm "$SANDBOX"
 ```
 
-To verify provider removal, create a second fresh sandbox with the supported
+**Provider removal.** To verify provider removal, create a second fresh
+sandbox with the supported
 `--no-provider-kits` flag (`acq run`/`acq create`; see `docs/howto/acq.md`,
 "Provider kits"). Run it with no USAi credential available to acq (remove any
 global USAi secret first, or use a clean host profile), so a credential gate
