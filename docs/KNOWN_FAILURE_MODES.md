@@ -90,6 +90,7 @@ SBX `create` command requires an agent type (e.g., `opencode`, `claude`, `shell`
 ### Fix
 
 Use the correct syntax:
+
 ```bash
 # Correct: specify agent type and path
 sbx create opencode .
@@ -119,11 +120,13 @@ Available agents: `claude`, `codex`, `copilot`, `docker-agent`, `gemini`, `kiro`
 ### Fix
 
 Ensure header format is correct:
+
 ```
 Authorization: Bearer <API_KEY>
 ```
 
 Confirm the injected env var is present inside the sandbox:
+
 ```bash
 acq exec <sandbox> -- sh -c 'echo $USAI_API_KEY'
 ```
@@ -143,6 +146,7 @@ acq exec <sandbox> -- sh -c 'echo $USAI_API_KEY'
 SBX's secret proxy only works with **standard provider endpoints**. USAi uses a custom `baseURL` (`https://api.gsa.usai.gov/api/v1`), which the proxy doesn't recognize.
 
 When you use `sbx secret set -g openai`, SBX:
+
 1. Stores your key
 2. Sets `OPENAI_API_KEY=proxy-managed` in the container
 3. Intercepts requests to `api.openai.com` and injects the real key
@@ -199,11 +203,13 @@ Wrong endpoint format in configuration.
 ### Fix
 
 Use the correct format:
+
 ```
 https://api.gsa.usai.gov/api/v1
 ```
 
 NOT:
+
 - Missing `/api/v1` suffix
 - Swagger UI URL
 - Documentation endpoint
@@ -285,7 +291,7 @@ Agent assumes host filesystem layout, not container layout.
 - Agent appears stuck
 - Eventually fails with timeout
 - OpenCode shows a retry notice for a streamed-response read timeout: `Timed out
-  waiting for response data` on OpenCode 2.0.30 (the version the kit installs),
+waiting for response data` on OpenCode 2.0.30 (the version the kit installs),
   `SSE read timed out` on 1.18.x
 
 ### Root Cause
@@ -337,6 +343,7 @@ the model, the time, and what the agent was doing, so a slow model can be told
 apart from a network stall.
 
 Check network connectivity from inside container:
+
 ```bash
 acq exec <sandbox> -- curl -I https://api.gsa.usai.gov/api/v1/models
 ```
@@ -376,6 +383,7 @@ Over-engineering instead of testing. Adding layers when simplicity would work.
 ### Reality
 
 Containers are NOT perfect isolation:
+
 - Container escapes exist
 - Mounted volumes expose host data
 - Network access can leak information
@@ -402,6 +410,7 @@ Containers are NOT perfect isolation:
 ### Root Cause
 
 Multiple tools expecting different env var names:
+
 - `OPENAI_API_KEY`
 - `USAI_API_KEY`
 - `API_KEY`
@@ -524,6 +533,7 @@ sbx secret set-custom --host api.gsa.usai.gov --env USAI_API_KEY
 ```
 
 Your `opencode.jsonc` should use variable substitution:
+
 ```json
 {
   "provider": {
@@ -553,24 +563,26 @@ the raw key under the current setup.
 ### Context
 
 GitHub is a built-in SBX service (`sbx secret set -g github`), but GitLab is not. This means:
+
 - **GitHub**: Uses the proxy (recommended)
 - **GitLab**: Must use a custom secret (`sbx secret set-custom -g --host <host> --env GITLAB_TOKEN`)
 
 ### Security Assessment for MVP
 
-| Concern | Severity | Mitigation |
-|---------|----------|------------|
-| Token visible in container env | Low | Container is isolated, short-lived |
-| Token in shell history | Low | sbx prompts for the value; never typed on the command line |
-| Token in process list | Low | Stored secret injected by sbx, not passed via process args |
-| Agent could exfiltrate token | Medium | Agent already has network access; proxy doesn't prevent this |
-| Token logged by agent | Medium | AGENTS.md prohibits; pre-commit hooks catch committed secrets |
+| Concern                        | Severity | Mitigation                                                    |
+| ------------------------------ | -------- | ------------------------------------------------------------- |
+| Token visible in container env | Low      | Container is isolated, short-lived                            |
+| Token in shell history         | Low      | sbx prompts for the value; never typed on the command line    |
+| Token in process list          | Low      | Stored secret injected by sbx, not passed via process args    |
+| Agent could exfiltrate token   | Medium   | Agent already has network access; proxy doesn't prevent this  |
+| Token logged by agent          | Medium   | AGENTS.md prohibits; pre-commit hooks catch committed secrets |
 
 ### Key Insight
 
-**The SBX proxy doesn't prevent a malicious agent from exfiltrating credentials** - it prevents the agent from *seeing* them directly. A compromised agent could still make authenticated API calls and exfiltrate data through those APIs.
+**The SBX proxy doesn't prevent a malicious agent from exfiltrating credentials** - it prevents the agent from _seeing_ them directly. A compromised agent could still make authenticated API calls and exfiltrate data through those APIs.
 
 The real security boundary is:
+
 1. **Sandbox isolation** - container can't escape to host
 2. **Trusted agent software** - OpenCode, Claude Code, etc. are vetted
 3. **Scoped tokens** - use minimal scopes (e.g., `repo`, not admin)
@@ -629,6 +641,7 @@ Because the sandboxed container runs a vanilla Linux environment, it does not au
 To resolve this during local development, you can tell Node.js to ignore TLS validation errors inside the sandbox using `NODE_TLS_REJECT_UNAUTHORIZED=0`.
 
 > **⚠️ SECURITY WARNING:** Disabling TLS validation bypasses certificate verification, which is a significant security risk. This workaround should **only** be used:
+>
 > - For debugging TLS issues in isolated local development environments
 > - **Never** with real credentials or production endpoints
 > - **Never** in CI/CD pipelines or shared environments
@@ -672,6 +685,7 @@ sbx exec -e NODE_TLS_REJECT_UNAUTHORIZED=0 debug-sandbox opencode
 ### Fix
 
 Reset and reconfigure:
+
 ```bash
 # Reset policy (will prompt for new choice)
 sbx policy reset
@@ -704,13 +718,13 @@ The Docker Desktop-integrated `docker sandbox` command is deprecated. The standa
 
 Migrate to the equivalent `sbx` commands:
 
-| Deprecated Command | New Command |
-|-------------------|-------------|
+| Deprecated Command                             | New Command                         |
+| ---------------------------------------------- | ----------------------------------- |
 | `docker sandbox create --name NAME opencode .` | `sbx create --name NAME opencode .` |
-| `docker sandbox run NAME` | `sbx run --name NAME` |
-| `docker sandbox exec NAME cmd` | `sbx exec NAME cmd` |
-| `docker sandbox ls` | `sbx ls` |
-| `docker sandbox rm NAME` | `sbx rm NAME` |
+| `docker sandbox run NAME`                      | `sbx run --name NAME`               |
+| `docker sandbox exec NAME cmd`                 | `sbx exec NAME cmd`                 |
+| `docker sandbox ls`                            | `sbx ls`                            |
+| `docker sandbox rm NAME`                       | `sbx rm NAME`                       |
 
 Your existing sandboxes and secrets will continue to work with the `sbx` CLI.
 
@@ -749,9 +763,9 @@ augmented kit set while preserving state.
 > bundle you must recreate the sandbox (`acq rm && acq run`). acq detects the
 > refusal and prints that guidance.
 >
-> **Historical note.** Earlier releases could *not* auto-heal in place: on
+> **Historical note.** Earlier releases could _not_ auto-heal in place: on
 > `sbx` ≤ 0.34.x, `sbx kit add` failed (`failed to read tar header: unexpected
-> EOF`) on any kit shipping a static file — including the `usai-provider` kit
+EOF`) on any kit shipping a static file — including the `usai-provider` kit
 > ([docker/sbx-releases#133][sbx133]). `sbx` 0.35.0 fixed this, so `acq` requires
 > `sbx` >= 0.35.0 on the sbx backend and heals unconditionally.
 
@@ -869,8 +883,8 @@ sbx rm my-project
 
 - Commits made inside a sandbox are signed (`git log --show-signature` looks
   fine locally) but GitHub shows an **Unverified** badge, or no badge.
-- `acq` printed a note before attaching: *"no repo-local git user.email is set
-  for this project."*
+- `acq` printed a note before attaching: _"no repo-local git user.email is set
+  for this project."_
 
 ### Root Cause
 
@@ -991,7 +1005,7 @@ preserves the placeholder, so this resolves the common expired-key case:
 > non-destructive sandbox-scoped rebind to the current global placeholder — is
 > **not implemented in `acq`** (see [ADR-0008](adr/0008-usai-placeholder-recovery.md)
 > for the design). If an in-place rotate does not clear the 401 (because the
-> stored *placeholder* — not the key value — is stale), use the manual rebind
+> stored _placeholder_ — not the key value — is stale), use the manual rebind
 > below or recreate the sandbox.
 
 ### Fix (manual)
@@ -1015,7 +1029,7 @@ sbx secret set-custom <sandbox-name> --host api.gsa.usai.gov \
   --env USAI_API_KEY --placeholder <current-placeholder>
 ```
 
-> **Do not** bind to the sandbox's *old* placeholder — that is the value that
+> **Do not** bind to the sandbox's _old_ placeholder — that is the value that
 > stopped resolving. Always bind to the **current global** one.
 
 ### Prevention
@@ -1050,15 +1064,15 @@ Two independent traps, often combined:
 
 1. **`git pull origin <branch>` does not switch you to that branch.** `pull` =
    `fetch` + `merge FETCH_HEAD` into the branch you are **currently on**.
-   `Already up to date` means the *merge* was a no-op — **not** that your working
+   `Already up to date` means the _merge_ was a no-op — **not** that your working
    tree now contains the branch. If you never ran `git switch <branch>` /
    `git checkout <branch>`, your working tree still has the old `acq`.
 
-2. **An `acq` on your `PATH` points at a *different* clone.** If `acq` is
+2. **An `acq` on your `PATH` points at a _different_ clone.** If `acq` is
    invoked by bare name (not `./acq`), the shell resolves it via
    `PATH`. A symlink in `~/bin` or `/usr/local/bin` may point at a **different
    clone** than the one you edited/pulled. `acq` follows that symlink to find
-   its own directory, so it runs the *other* clone's code — you update clone A
+   its own directory, so it runs the _other_ clone's code — you update clone A
    and execute clone B.
 
 A related variant: exporting `QUICKSTART_CLONE` overrides where sibling helper
@@ -1128,7 +1142,7 @@ You may already be authenticated with the `gh` CLI (`gh auth status` is green).
 `gh auth login` authenticates the **`gh` CLI**, not plain **git**. The acq kit
 fetch uses `git` directly. If your machine has a global git credential helper or
 a `url.<x>.insteadOf` rewrite (common in enterprise/egress setups), git tries to
-*authenticate* to the kit source and — failing — drops into an interactive
+_authenticate_ to the kit source and — failing — drops into an interactive
 prompt (and GitHub disabled git password auth in 2021, so it can't succeed).
 
 ### Fix
@@ -1409,11 +1423,11 @@ which one you have before acting.
 
 ### Triage — which signature is it?
 
-| Signature (from inside the guest) | Cause | Fix |
-|---|---|---|
-| **Broad** `curl (56) unexpected eof` / HTTP `000` on **multiple** hosts at once (USAi *and* GitHub *and* npm) | Corrupted / stale **msb state** (not a clean-install behavior) | **Wipe msb data + reinstall, then `msb doctor`** (below) |
+| Signature (from inside the guest)                                                                                                                                 | Cause                                                                                                                                                                                                                          | Fix                                                                                                                                                                                                                                                                                                        |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Broad** `curl (56) unexpected eof` / HTTP `000` on **multiple** hosts at once (USAi _and_ GitHub _and_ npm)                                                     | Corrupted / stale **msb state** (not a clean-install behavior)                                                                                                                                                                 | **Wipe msb data + reinstall, then `msb doctor`** (below)                                                                                                                                                                                                                                                   |
 | **USAi only** fails with `NXDOMAIN` / `curl rc=6` (or a WAF-gated API such as GitLab's `/api/v4/*` returns `403` from `awselb/2.0`), while GitHub + npm work fine | **Split-horizon DNS** — the host resolves the name to a private tunnel address (`100.64.x` on ZPA); a public resolver returns the public endpoint, which the WAF rejects, and msb's rebind protection drops the private answer | Let the guest follow the host's resolvers with rebind protection off, which acq does automatically on a host whose resolvers are in `100.64/10`: unset `ACQ_MSB_DNS_NAMESERVER` and `ACQ_MSB_DNS_REBIND_PROTECTION`, or set the latter to `0` if the sandbox was created while the tunnel was down (below) |
-| A **genuinely intercepted** endpoint fails its TLS handshake behind a corporate proxy that terminates it | The proxy's **root CA** isn't trusted on msb's upstream (proxy→server) leg | acq passes it via `--tls-upstream-ca-cert` (defense-in-depth; below) |
+| A **genuinely intercepted** endpoint fails its TLS handshake behind a corporate proxy that terminates it                                                          | The proxy's **root CA** isn't trusted on msb's upstream (proxy→server) leg                                                                                                                                                     | acq passes it via `--tls-upstream-ca-cert` (defense-in-depth; below)                                                                                                                                                                                                                                       |
 
 Probe from inside the sandbox to read the signature — the curl exit code is the
 discriminator (`6` = didn't resolve; `35`/`56` or `000` = resolved but the
@@ -1508,12 +1522,12 @@ rather than as a generic network cut or a bad key.
 
 When a corporate proxy (Zscaler, Netskope, …) **genuinely terminates** an
 endpoint, acq's `--tls-intercept` (which msb needs to substitute injected secrets
-on the wire) makes msb's host-side proxy re-originate an *upstream* TLS connection
+on the wire) makes msb's host-side proxy re-originate an _upstream_ TLS connection
 to that proxy — which presents a corporate-signed leaf. That upstream leg must
 trust the **corporate root**. `--trust-host-cas` does not help (it only ships CAs
 into the guest, not into the proxy's upstream verifier), and msb's native-cert
 loader surfaces enterprise roots unevenly on macOS. When the root isn't surfaced,
-the upstream handshake fails *after* the guest-facing TLS completed and the guest
+the upstream handshake fails _after_ the guest-facing TLS completed and the guest
 sees `unexpected eof`.
 
 acq passes the host's root CAs to that upstream verifier via
@@ -1577,10 +1591,10 @@ bundled copy:
 
 - sbx v0.37.1 bundles a notarized `mkfs.erofs` at
   `/opt/homebrew/Caskroom/sbx/<version>/libexec/mkfs.erofs`
-  (`spctl` → *accepted*; Developer ID: **Docker Inc (9BNSXJN65R)**).
+  (`spctl` → _accepted_; Developer ID: **Docker Inc (9BNSXJN65R)**).
 - If Homebrew `erofs-utils` is also installed, `/opt/homebrew/bin/mkfs.erofs`
   (a symlink into `Cellar/erofs-utils/…`) is earlier on `$PATH`. That binary is
-  **ad-hoc-signed / not notarized** (`spctl` → *rejected*, `Signature=adhoc`,
+  **ad-hoc-signed / not notarized** (`spctl` → _rejected_, `Signature=adhoc`,
   no TeamIdentifier).
 - sbx resolves `mkfs.erofs` from `$PATH`, picks up the unnotarized Homebrew
   binary instead of its own, and macOS Gatekeeper rejects it.
@@ -1803,7 +1817,7 @@ Error: Unable to connect. Is the computer able to access the url?
 
 An `acq exec <sandbox> -- ps -ef` shows **no `opencode serve`, no `openchamber`,
 and — the tell — no `supervisor:` respawn loops** at all. This is distinct from a
-startup *race* (§ the wrapper's "shared server not answering yet on :4096"),
+startup _race_ (§ the wrapper's "shared server not answering yet on :4096"),
 where the supervisor processes ARE present and merely still warming up: here the
 supervisors were never (re-)launched, so the ports forward into a guest with the
 kit's services entirely absent.
@@ -1827,7 +1841,7 @@ them (ADR-0017). Two compounding gaps kept those services dead on resume:
    `acq restart` (or a name-only `acq run <sandbox>`) does not re-parse `--kit` and
    may run in a shell that never exported `ACQ_EXTRA_KITS`, so the heal ran with an
    **empty** CLI/extra set and re-ran only the built-ins' startup. The provision
-   path *does* fold `--kit` in, so the create-time `-p` port mappings are part of
+   path _does_ fold `--kit` in, so the create-time `-p` port mappings are part of
    the persisted sandbox config and are restored by msb on start — but the heal
    skipped the kit whose `startup` phase brings the services up. Result: ports
    restored, services not — exactly the "mapped but dead" state above.
@@ -1841,7 +1855,7 @@ Both gaps are closed:
 - acq now **persists** the CLI (`--kit`) and `ACQ_EXTRA_KITS` refs host-side at
   provision (a small `*.kits` record beside the bundle-provenance record, keyed by
   backend + sandbox name) and **reloads** them in the `acq start` / `acq restart`
-  verbs and on a name-only `acq run <sandbox>` re-attach, *before* the heal. So a
+  verbs and on a name-only `acq run <sandbox>` re-attach, _before_ the heal. So a
   `msb stop` + `acq start` cycle now re-runs a `--kit` kit's startup automatically
   — **you no longer have to re-pass `--kit`.** The record's presence is
   authoritative: a sandbox created with no CLI/extra kits reloads nothing, and a
@@ -1938,7 +1952,7 @@ On the **msb** backend, committing inside the guest fails to sign:
 ```
 
 or `acq` printed a warning at create/attach about `socat` not being found in the
-guest image, or a *"host ssh-agent forwarding needs msb >= 0.6.9"* warning and
+guest image, or a _"host ssh-agent forwarding needs msb >= 0.6.9"_ warning and
 then skipped the forward.
 
 ### Root Cause
@@ -1980,7 +1994,7 @@ mechanism and the trust-boundary discussion.
 ### Variant: `SSH_AUTH_SOCK` unset on re-attach to a running sandbox
 
 A distinct signature of the same feature: signing works right after the initial
-`acq run` but **fails on a later re-attach** to the *same, still-running*
+`acq run` but **fails on a later re-attach** to the _same, still-running_
 sandbox, and it starts working again as soon as you
 `export SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock` by hand. Here the vsock
 route and the `socat` bridge are fine — what is missing is the
@@ -1997,8 +2011,8 @@ Fixed in `acq.backends/msb.sh`: `acq_backend_ensure_kits_applied` now calls
 forward (restart the bridge + write the marker) on every re-attach when both a
 host forward is requested (`SSH_AUTH_SOCK` set) **and** the sandbox carries the
 create-time `--vsock` route. The route is create-time only, so a sandbox created
-*without* a host agent still needs a recreate to gain forwarding — but one
-created *with* the route now re-injects `SSH_AUTH_SOCK` on every re-attach without
+_without_ a host agent still needs a recreate to gain forwarding — but one
+created _with_ the route now re-injects `SSH_AUTH_SOCK` on every re-attach without
 a manual export. See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
 ("Re-attach to a running sandbox").
 
@@ -2022,7 +2036,7 @@ E connect(…, cid:2 port:3552, …): Connection reset by peer
 route has no live listener**. The `--vsock HOST_PATH:3552` route is emitted
 **only at create time** and pins `HOST_PATH` to the host's `SSH_AUTH_SOCK` path
 captured then; it is persisted in the sandbox config and **never re-derived** on
-`msb start` or re-attach. A host reboot restarts the host ssh-agent under a *new*
+`msb start` or re-attach. A host reboot restarts the host ssh-agent under a _new_
 socket path, so the persisted route now points at a dead host endpoint. This is
 distinct from the previous variant: there the guest env var was missing; here the
 env var and bridge are present but the route's host end is dead.
@@ -2277,7 +2291,7 @@ Notes:
 - `git log --show-signature` may still print
   `gpg.ssh.allowedSignersFile needs to be configured and exist` and show
   `No signature` even when the commit **is** signed — that is a local
-  *verification* gap (no allowed-signers file), not a signing failure. GitHub
+  _verification_ gap (no allowed-signers file), not a signing failure. GitHub
   verifies against its own registered-key store on push and will show
   **Verified**. Prefer the `git cat-file … | grep '^gpgsig'` check to confirm
   signing.
@@ -2300,8 +2314,8 @@ new mode 100644
 
 The noise breaks scripted branch work: a `git commit --amend` picks up the mode
 churn, leaving the working tree "dirty," so a following `git switch <branch>`
-aborts with *"Your local changes to the following files would be overwritten by
-checkout"* — and a loop that assumed the switch succeeded then operates on the
+aborts with _"Your local changes to the following files would be overwritten by
+checkout"_ — and a loop that assumed the switch succeeded then operates on the
 **wrong** branch.
 
 ### Root Cause
@@ -2356,13 +2370,13 @@ amending the wrong branch.
 - Git for Windows installs `Git\bin` but does **not** put it on `PATH` by default,
   so `Get-Command bash.exe` resolves to `C:\Windows\System32\bash.exe` — the WSL
   interop shim, not Git Bash.
-- The WHP optional-feature *flag* is not the thing that makes WHP work. When the
+- The WHP optional-feature _flag_ is not the thing that makes WHP work. When the
   Windows hypervisor is already running (WSL2 / VirtualMachine Platform, VBS, or a
   virtualized guest), the user-mode WHP API (`WinHvPlatform.dll`, e.g.
   `WHvCreatePartition`) is callable regardless of the flag, which is also not
   readable without an elevated shell.
 - Windows 11 **client** defaults its PowerShell execution policy to `Restricted`,
-  which refuses to run script *files*. `powershell -File` is not exempt, so
+  which refuses to run script _files_. `powershell -File` is not exempt, so
   `acq.cmd` (which runs `acq.ps1`) and a direct `.\install.ps1` are blocked; the
   `irm ... | iex` path is unaffected because piped text is not a script file.
 
@@ -2761,7 +2775,7 @@ LAST_OUT=$("$ACQ" "$@" 2>&1 | tee /dev/stderr)
 ```
 
 Command substitution reads the capture pipe until **EOF**, which arrives only
-when *every* writer closes it — not when `acq` exits. Two things in `acq` hold a
+when _every_ writer closes it — not when `acq` exits. Two things in `acq` hold a
 descriptor on that pipe past exit:
 
 - `acq.backends/secret-store.sh` dups the process's stderr to fd 9 (the warning
@@ -2771,7 +2785,7 @@ descriptor on that pipe past exit:
   ssh-agent `socat` bridge started at the end of provisioning.
 
 So `acq` finished successfully, while the verifier blocked on a pipe that a
-long-lived descendant kept open. The stall therefore appeared at the *last*
+long-lived descendant kept open. The stall therefore appeared at the _last_
 thing provisioning logs, making a completed create look like a hung one.
 
 Because the hang is in the harness, not the backend, it masqueraded as a backend
@@ -2798,10 +2812,9 @@ against the new one.
 
 ### Also Fixed in the Same Pass
 
-- **`markdownlint` never linted `.github/**/*.md`.** markdownlint's globber skips
-  dot-directories unless `--dot` is passed, so `.github/pull_request_template.md`
-  was silently excluded from CI, `npm run lint:md`, and the pre-commit hook. All
-  three now pass `--dot`.
+- **`markdownlint` never linted `.github/**/\*.md`.** markdownlint's globber skips
+dot-directories unless `--dot`is passed, so`.github/pull_request_template.md`was silently excluded from CI,`npm run lint:md`, and the pre-commit hook. All
+three now pass `--dot`.
 - **The "did it lint anything?" assertion counted a different set than the
   linter.** It hand-translated `.markdownlintignore` into `git ls-files :!`
   pathspecs, but those matchers differ: a bare `test/vendor` pathspec excludes
@@ -2853,7 +2866,7 @@ correct, and it opens a blind spot:
    and renaming it — a **new inode** with the ambient umask (0644), so the exec
    bit is dropped;
 3. with `core.fileMode = false` git is **blind** to it. Measured: a 100755 →
-   0644 drift with byte-identical content yields an empty `git status` *and* an
+   0644 drift with byte-identical content yields an empty `git status` _and_ an
    empty `git diff --summary`. With `core.fileMode = true` the same drift reports
    `mode change 100755 => 100644`.
 
@@ -2873,9 +2886,9 @@ bit only moves the error deeper.
 #### The fix
 
 `scripts/fix-exec-bits` treats the **git index as the single source of truth**: a
-file recorded `100755` must be executable on disk. A shebang is explicitly *not*
-the criterion — `acq.backends/*.sh` are *sourced* and `test/bats/*.bats` are read
-*by bats*, so both are correctly `100644` and must stay non-executable. It walks
+file recorded `100755` must be executable on disk. A shebang is explicitly _not_
+the criterion — `acq.backends/*.sh` are _sourced_ and `test/bats/*.bats` are read
+_by bats_, so both are correctly `100644` and must stay non-executable. It walks
 initialized submodules too, and reports (never silently clears) an unexpected
 exec bit on a file the index says is `100644`.
 
@@ -2904,7 +2917,7 @@ Two other things in the same code path can also look like a hang:
   fallback.
 - **Missing executable bit.** A fresh worktree checkout whose mode bits were lost
   yields `Permission denied` and `rc=126` on every `acq` step; `chmod +x acq
-  scripts/verify-backends` restores it.
+scripts/verify-backends` restores it.
 
 ---
 
@@ -2956,6 +2969,34 @@ large inspect document with the route near the start (this test failed before
 the fix), and covers a transient and a persistent inspect failure via the stub's
 `STUB_MSB_INSPECT_FAIL_TIMES` knob. In new code, do not pipe into `grep -q`
 (or `head`) under `pipefail` when the writer may still be producing output.
+
+## 46. "Cannot connect to API: The socket connection was closed unexpectedly"
+
+### Symptoms
+
+Agent work halts abruptly with:
+
+```
+Provider retry (attempt 1): Cannot connect to API: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()
+```
+
+and so on until it times out.
+
+### Root cause
+
+Work the agent was doing is emitted results that contained potential credentials. E.g. a script may be running `env` and the output includes API tokens. The USAi guardrails are set to reject such potential secrets, so it closes the connection.
+
+### Fix
+
+Look at the action the agent was taking that might have included potentially suspect output, then take action to squash such output
+
+### Prevention
+
+It can also help to provide the following prompt, but it won't help if the code you're working on has the issue:
+
+```
+Never include any GITHUB_TOKEN or USAI_API_KEY env var values in any request to any API.
+```
 
 ---
 
