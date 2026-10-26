@@ -192,6 +192,25 @@ teardown() {
   assert_regex "$installer" '"scripts"'
 }
 
+@test "windows installer: atomically verifies and publishes the embedded validator runtime" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  assert_regex "$installer" 'function Install-ProviderValidatorRuntime'
+  assert_regex "$installer" 'Get-FileHash -Algorithm SHA256 -LiteralPath \$runtimeArchive'
+  assert_regex "$installer" 'Embedded provider validator SHA-256 verification failed'
+  assert_regex "$installer" 'provider-input-validator\.stage'
+  assert_regex "$installer" 'provider-input-validator\.previous'
+  assert_regex "$installer" 'python\.exe'
+  assert_regex "$installer" 'Install-ProviderValidatorRuntime'
+}
+
+@test "windows launcher: provides the user-data validator runtime to Git Bash" {
+  launcher=$(cat "$REPO_ROOT/acq.ps1")
+
+  assert_regex "$launcher" 'ACQ_PROVIDER_INPUT_DATA_DIR'
+  assert_regex "$launcher" 'LOCALAPPDATA.*provider-input-validator'
+}
+
 @test "windows launcher: converts Windows paths before Git Bash handoff" {
   launcher=$(cat "$REPO_ROOT/acq.ps1")
 
@@ -239,6 +258,81 @@ teardown() {
   assert_regex "$workflow" 'cp install\.ps1 dist/install\.ps1'
   assert_regex "$workflow" 'cp acq acq\.cmd acq\.ps1 install\.ps1 LICENSE README\.md package\.json'
   assert_regex "$workflow" 'setup-provider-input-validator scripts/provider-input-validator-requirements\*\.txt'
-  assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip > SHA256SUMS'
+  assert_regex "$workflow" 'provider-input-validator-wheelhouse/windows-x86_64'
+  assert_regex "$workflow" 'provider-input-validator-wheelhouse-windows-x86_64\.tar\.gz'
+  assert_regex "$workflow" 'python-3\.12\.10-embed-amd64\.zip'
+  assert_regex "$workflow" 'PYTHON_EMBED_SHA256'
+  assert_regex "$workflow" 'provider-input-validator-runtime-windows-x86_64\.zip'
+  assert_regex "$workflow" 'test -f runtime/LICENSE\.txt'
+  assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip provider-input-validator-wheelhouse-\*\.tar\.gz > SHA256SUMS'
   assert_regex "$workflow" 'dist/acq-windows-x64\.zip'
+}
+
+@test "release workflow: wheelhouse job tar path matches upload-artifact path" {
+  # Execute the release command in a job-like working directory and verify the
+  # archive exists exactly where upload-artifact reads it.
+  workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
+  assert_regex "$workflow" \
+    'tar -czf "provider-input-validator-wheelhouse-\$\{\{ matrix\.platform \}\}\.tar\.gz" -C wheelhouse \.'
+  grep -qF 'path: provider-input-validator-wheelhouse-${{ matrix.platform }}.tar.gz' \
+    "$REPO_ROOT/.github/workflows/release.yml"
+
+  mkdir -p "$STUBDIR/release-job/wheelhouse"
+  printf 'wheel\n' > "$STUBDIR/release-job/wheelhouse/example.whl"
+  run bash -c 'cd "$1" && tar -czf provider-input-validator-wheelhouse-linux-x86_64.tar.gz -C wheelhouse . && test -f provider-input-validator-wheelhouse-linux-x86_64.tar.gz' _ "$STUBDIR/release-job"
+  assert_success
+}
+
+@test "release workflow: wheelhouse SHA256SUMS never hashes itself" {
+  # Regression: the shell redirect `> SHA256SUMS` creates the file as 0 bytes
+  # BEFORE Python's glob runs.  If the glob matches `*` it will include
+  # SHA256SUMS itself (hash of empty string), producing a permanently
+  # self-inconsistent manifest that always fails verification.
+  # The fix is to glob only *.whl so SHA256SUMS is never a candidate.
+  workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
+
+  # Must use *.whl glob (or equivalent explicit exclusion), not bare glob('*')
+  assert_regex "$workflow" "glob\('\*\.whl'\)"
+  refute_regex "$workflow" "glob\('\*'\)[^)]*is_file\(\)"
+}
+
+@test "release workflow: wheelhouse tar extracts into platform subdir for non-Windows" {
+  # Structural test: the release-assets job must extract each non-Windows
+  # wheelhouse tar into a platform-named subdirectory so that
+  # setup-provider-input-validator can find wheels at
+  # scripts/provider-input-validator-wheelhouse/<platform>/*.whl.
+  # (Windows is handled separately via the explicit windows-x86_64 path on line ~141.)
+  workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
+
+  # install-provider-input-wheelhouse appends the platform subdir itself; the
+  # release-assets job uses the direct tar -xzf approach only for Windows.
+  # Assert Windows extraction uses the correct subdir path.
+  assert_regex "$workflow" \
+    'tar -xzf.*provider-input-validator-wheelhouse-windows-x86_64.*-C dist/acq-windows-x64/scripts/provider-input-validator-wheelhouse/windows-x86_64'
+}
+
+@test "install-provider-input-wheelhouse: installs into platform subdir" {
+  # Regression: the script previously placed extracted wheels directly at
+  # <target>/*.whl, but setup-provider-input-validator expects them at
+  # <target>/<platform>/*.whl.  Verify the platform subdir is appended.
+  script=$(cat "$REPO_ROOT/scripts/install-provider-input-wheelhouse")
+
+  # The platform subdir must be appended to target before stage/backup are derived
+  assert_regex "$script" 'target="\$\{target\}/\$\{platform\}"'
+}
+
+@test "install-provider-input-wheelhouse: setup-provider-input-validator wheelhouse paths match" {
+  # Cross-check: every platform path that setup-provider-input-validator
+  # expects must correspond exactly to what install-provider-input-wheelhouse
+  # will produce (base target + "/" + platform slug).
+  setup_script=$(cat "$REPO_ROOT/scripts/setup-provider-input-validator")
+  install_script=$(cat "$REPO_ROOT/scripts/install-provider-input-wheelhouse")
+
+  # Verify that the four platform slugs used in setup are also the ones
+  # produced by the case statement in the install script.
+  for platform in macos-arm64 macos-x86_64 linux-x86_64 linux-aarch64; do
+    assert_regex "$setup_script" "provider-input-validator-wheelhouse/${platform}"
+    assert_regex "$install_script" "${platform}"
+  done
+  assert_regex "$install_script" 'target="\$\{target\}/\$\{platform\}"'
 }

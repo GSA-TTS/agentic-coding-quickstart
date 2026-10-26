@@ -36,9 +36,9 @@ PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # the bundle-version anchor recorded in a sandbox's host-side provenance record
 # (see ACQ_BUILTIN_BUNDLE below + the provenance helpers) so acq can tell a
 # stale sandbox from a current one.
-# agentic-coding-patterns v1.16.1 release SHA. It supplies the versioned
+# agentic-coding-patterns v1.17.0 release SHA. It supplies the versioned
 # provider-input schemas and validator consumed below.
-PATTERNS_KIT_REF="d2674db8b424402e912e95254d6b194a062deb73"
+PATTERNS_KIT_REF="a1206c52ec82ae7ce080ad44a6e6ac6f951e6d20"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_PROVIDER_KIT_NAME="usai-provider"
@@ -2361,30 +2361,52 @@ ACQ_PROVIDER_INPUT_GUEST_DIR="${ACQ_PROVIDER_INPUT_GUEST_DIR:-/var/lib/acq/provi
 # set).  Status 2 means the host cannot run the released validator and is a
 # provisioning blocker, never an empty-set fallback.
 _acq_provider_input_python() {
-  local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check runtime
+  local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" version_check runtime data_home tools_dir setup
   if [ -n "$python" ]; then
     [ -x "$python" ] || {
       echo "acq: configured provider-input Python is not executable: $python" >&2
       return 2
     }
   else
-    for runtime in \
-      "$ACQ_SCRIPT_DIR/.acq-tools/provider-input-validator.current" \
-      "$ACQ_SCRIPT_DIR/.acq-tools/provider-input-validator"; do
-      if [ -x "$runtime/bin/python3" ]; then
-        python="$runtime/bin/python3"
-        break
-      fi
-      if [ -x "$runtime/Scripts/python.exe" ]; then
-        python="$runtime/Scripts/python.exe"
-        break
-      fi
-    done
+    if [ -n "${LOCALAPPDATA:-}" ] && [[ "$(uname -s 2>/dev/null)" = MINGW* || "$(uname -s 2>/dev/null)" = MSYS* || "$(uname -s 2>/dev/null)" = CYGWIN* ]]; then
+      data_home="$LOCALAPPDATA/acq"
+    else
+      data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
+    fi
+    tools_dir="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}"
+    runtime="$tools_dir/provider-input-validator.current"
+    if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
+    elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
+    elif [ -x "$runtime/python.exe" ]; then python="$runtime/python.exe"
+    fi
   fi
   if [ -z "$python" ]; then
-    python=$(command -v python3 2>/dev/null) || {
-      echo "acq: provider-input validation requires python3 with PyYAML 6.0.3 and jsonschema 4.26.0" >&2
-      echo "     Run: scripts/setup-provider-input-validator --apply" >&2
+    setup="$ACQ_SCRIPT_DIR/scripts/setup-provider-input-validator"
+    [ -x "$setup" ] || {
+      echo "acq: provider-input validation runtime is unavailable and this install lacks its offline bootstrap" >&2
+      echo "     Reinstall acq from an official release; validation remains mandatory." >&2
+      return 2
+    }
+    # A git checkout has no release wheelhouse; name the online setup command so
+    # contributors know exactly how to proceed from a working tree.
+    if [ -e "$ACQ_SCRIPT_DIR/.git" ]; then
+      local _wh_hint
+      _wh_hint="$ACQ_SCRIPT_DIR/scripts/provider-input-validator-wheelhouse"
+      # Only show the git-checkout hint when the default wheelhouse is absent.
+      if ! [ -d "$_wh_hint" ]; then
+        echo "     Git checkout detected: run the following once to install from PyPI with hash verification:" >&2
+        echo "       scripts/setup-provider-input-validator --apply --online" >&2
+        echo "     Or set ACQ_PROVIDER_INPUT_PYTHON to a Python interpreter with PyYAML 6.0.3 and jsonschema 4.26.0." >&2
+      fi
+    fi
+    "$setup" --apply >&2 || return 2
+    runtime="$tools_dir/provider-input-validator.current"
+    if [ -x "$runtime/bin/python3" ]; then python="$runtime/bin/python3"
+    elif [ -x "$runtime/Scripts/python.exe" ]; then python="$runtime/Scripts/python.exe"
+    elif [ -x "$runtime/python.exe" ]; then python="$runtime/python.exe"
+    fi
+    [ -n "$python" ] || {
+      echo "acq: provider-input validator bootstrap did not publish a runtime" >&2
       return 2
     }
   fi
@@ -2503,12 +2525,13 @@ acq_provider_input_sbx_mount() {
 }
 
 acq_provider_input_msb_mount() {
-  local generation="$2" host_generation
+  local generation="$2" host_generation canonical_generation
   case "$generation" in */generations/generation.*) ;; *) return 1 ;; esac
+  canonical_generation=$(_acq_provider_input_canonical_path "$generation") || return 1
   if command -v host_path >/dev/null 2>&1; then
-    host_generation=$(host_path "$generation") || return 1
+    host_generation=$(host_path "$canonical_generation") || return 1
   else
-    host_generation="$generation"
+    host_generation="$canonical_generation"
   fi
   printf '%s:%s/%s:ro\n' "$host_generation" "$ACQ_PROVIDER_INPUT_GUEST_DIR" "${generation##*/}"
 }
@@ -2519,10 +2542,58 @@ acq_provider_input_discard() {
   _acq_provider_input_cleanup_generation "$root" "$generation"
 }
 
-# Create a path one component at a time without ever traversing a symlink. This
-# protects the host-owned projection tree from a malicious pre-created ancestor.
-_acq_provider_input_safe_mkdir() {
+# Normalize the three macOS kernel-managed path aliases to their canonical
+# /private/{var,tmp,etc} spellings so O_NOFOLLOW traversal never sees a
+# symlink at the first path component.  Also collapses harmless absolute
+# spelling variants (//foo or /./foo) that would otherwise skip the alias
+# match.  No arbitrary realpath or symlink following is performed; only the
+# three OS-level prefixes are rewritten.  Linux and other platforms are
+# unaffected.  Echoes the canonical path on stdout.
+#
+# ACQ_TEST_HOST_OS overrides sys.platform for offline CI testing only.
+# ACQ_TEST_ALIAS_TABLE (offline CI only) overrides the alias pair table for
+# isolated-filesystem tests.  Format: tab-separated "alias<TAB>target" pairs,
+# one per line.  When set, ACQ_TEST_HOST_OS=darwin must also be set.  Production
+# builds never set this variable; it is documented alongside ACQ_TEST_HOST_OS as
+# a test-seam-only override.
+_acq_provider_input_canonical_path() {
   python3 - "$1" <<'PY'
+import os, re, sys
+path = sys.argv[1]
+# Collapse harmless absolute spelling variants before alias matching.
+# //foo or /./foo must resolve to /foo so the alias table hits correctly.
+# Only the leading segment is touched; interior components are left for the
+# O_NOFOLLOW traversal to validate normally.
+path = re.sub(r'^/+(?:\./+)*', '/', path)
+_platform = os.environ.get('ACQ_TEST_HOST_OS', sys.platform)
+if _platform == 'darwin':
+    _alias_table_raw = os.environ.get('ACQ_TEST_ALIAS_TABLE', '')
+    if _alias_table_raw:
+        _alias_pairs = [tuple(line.split('\t', 1)) for line in _alias_table_raw.split('\n') if '\t' in line]
+    else:
+        _alias_pairs = (('/var', '/private/var'), ('/tmp', '/private/tmp'), ('/etc', '/private/etc'))
+    for _alias, _target in _alias_pairs:
+        if path == _alias or path.startswith(_alias + '/'):
+            path = _target + path[len(_alias):]
+            break
+print(path, end='')
+PY
+}
+
+# Create a path one component at a time without ever traversing a symlink.
+# This protects the host-owned projection tree from a malicious pre-created
+# ancestor.
+#
+# On macOS, /var, /tmp, and /etc are kernel-managed symlinks to
+# /private/{var,tmp,etc}.  _acq_provider_input_canonical_path rewrites only
+# those three OS-level prefixes (plus harmless double-slash/dot variants) so
+# O_NOFOLLOW does not reject them with ELOOP.  All subsequent components —
+# including every user-influenced one — still traverse with O_NOFOLLOW.
+# Linux is unaffected.
+_acq_provider_input_safe_mkdir() {
+  local _canon
+  _canon=$(_acq_provider_input_canonical_path "$1") || return 1
+  python3 - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
@@ -2542,7 +2613,9 @@ PY
 }
 
 _acq_provider_input_safe_dir() {
-  python3 - "$1" <<'PY'
+  local _canon
+  _canon=$(_acq_provider_input_canonical_path "$1") || return 1
+  python3 - "$_canon" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
