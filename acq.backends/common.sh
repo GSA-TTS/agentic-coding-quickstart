@@ -3614,6 +3614,12 @@ acq_provider_facts_json_fields() {
 import json, sys
 from urllib.parse import urlsplit
 
+# Windows Python translates print()'s "\n" to CRLF when stdout is a pipe, and
+# the shell `read` below then keeps the trailing "\r", corrupting each value.
+# Force LF so the values arrive clean on every host.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(newline="\n")
+
 try:
     with open(sys.argv[1], encoding="utf-8") as handle:
         facts = json.load(handle)
