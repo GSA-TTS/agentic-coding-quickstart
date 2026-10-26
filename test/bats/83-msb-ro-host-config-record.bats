@@ -205,3 +205,38 @@ MSBSTUB
   assert_equal "$(cat "$cfg/ro-host-config")" "1"
   [ ! -e "$cfg/install-stale" ]
 }
+
+# Staging failure after a RECORDED read-only create must fail closed: no silent
+# downgrade to a guest-writable copy. Without a record the legacy copy remains.
+_apply_stage_fail() { # NAME KITDIR RECORD
+  local name="$1" kit="$2" record="$3"
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-'"$name"'"
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
+    _acq_msb_stage_readonly_file() { return 1; }
+    [ "'"$record"'" = 1 ] && acq_host_config_write msb "'"$name"'" ro-host-config 1
+    _acq_msb_apply_kit_dir "'"$name"'" "'"$kit"'" 2>&1
+  '
+}
+
+@test "ro record: stage failure with a record fails closed and copies nothing into the guest" {
+  local k="$STUBDIR/k11"; _ro_kit "$k"
+  _apply_stage_fail stagefailrec "$k" 1
+  assert_failure
+  assert_output --partial "could not stage read-only kit file '/home/agent/cfg/merge.mjs'"
+  assert_output --partial 'No guest-copy fallback is taken'
+  refute_regex "$(cat "$CALLS")" 'msb copy .*stagefailrec:/home/agent/cfg/merge\.mjs'
+  refute_regex "$(cat "$CALLS")" 'node /home/agent/cfg/merge\.mjs'
+}
+
+@test "ro record: stage failure without a record keeps the legacy guest copy and its warning" {
+  local k="$STUBDIR/k12"; _ro_kit "$k"
+  _apply_stage_fail stagefailnorec "$k" 0
+  assert_success
+  assert_output --partial 'has no ADR-0035 read-only host-config record'
+  assert_regex "$(cat "$CALLS")" 'msb copy .*stagefailnorec:/home/agent/cfg/merge\.mjs'
+}

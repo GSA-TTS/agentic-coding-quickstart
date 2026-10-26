@@ -188,7 +188,11 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   signals that `:ro` is not being enforced. This is a deliberate change from
   "degrade to a guest copy" to "warn and possibly fail" (no escalation to the
   guest-writable path), applied only when the record exists; legacy and
-  no-record sandboxes still degrade safely. If a future
+  no-record sandboxes still degrade safely. The record is never evidence of
+  verified read-only enforcement: it proves a `:ro` request plus exec readiness only. When a record
+  exists and staging a `readonly: true` file onto the host fails, the apply fails
+  with an error naming the file rather than copying it into the guest; only
+  sandboxes with no record take the guest copy. If a future
   msb changes `--volume ...:ro` parsing or enforcement, acq must raise or gate
   its minimum msb version before relying on ADR-0035. Host and guest path forms
   follow ADR-0029.

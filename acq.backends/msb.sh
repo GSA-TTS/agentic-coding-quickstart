@@ -1807,8 +1807,10 @@ EOF
         _ACQ_MSB_RO_REWRITE_FROM+=("$path")
         _ACQ_MSB_RO_REWRITE_TO+=("$_ro_guest")
       else
-        echo "acq(msb): warning: could not stage read-only kit file '$path' for '$name'; falling back to the legacy guest copy." >&2
-        _readonly=""
+        # Recorded read-only create: never degrade to a guest-writable copy.
+        echo "acq(msb): error: could not stage read-only kit file '$path' for '$name'." >&2
+        echo "acq(msb):   No guest-copy fallback is taken because the sandbox was created with a read-only host config; recreate the sandbox or fix the host state directory." >&2
+        return 1
       fi
     fi
     if { [ "$_readonly" != "true" ] || [ "$_hcfg_mount_ok" -ne 1 ]; } && [ -n "$src" ] && [ -f "$src" ]; then
