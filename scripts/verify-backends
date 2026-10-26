@@ -1411,7 +1411,11 @@ const text = fs.readFileSync(file, "utf8").split("\n").filter((l) => !l.startsWi
 const cfg = JSON.parse(text);
 for (const id of Object.keys((((cfg.provider || {})[prov]) || {}).models || {})) console.log("CONFIG " + id);
 ' "$prov" || exit 1
-opencode models | sed -n "s|^${prov}/|CLI |p"
+models_out=$(opencode models) || {
+  echo "opencode models failed (exit $?); refusing to compare partial output" >&2
+  exit 1
+}
+printf '%s\n' "$models_out" | sed -n "s|^${prov}/|CLI |p"
 EOS
 
 # verify_provider_model_identity BACKEND PROVIDER OUTPUT — compare the three

@@ -448,3 +448,45 @@ _identity_check() { # OUTPUT -> prints PASS/FAIL counters and verifier output
   run grep -n 'opencode models | grep -q' "$REPO_ROOT/scripts/verify-backends"
   assert_failure
 }
+
+_identity_guest_fixture() { # OPENCODE_EXIT -> sets ID_ROOT ID_HOME ID_BIN
+  ID_ROOT="$STUBDIR/pir2" ID_HOME="$STUBDIR/idhome2" ID_BIN="$STUBDIR/idbin2"
+  mkdir -p "$ID_ROOT/models/providers/usai" "$ID_HOME/.config/opencode" "$ID_BIN"
+  printf '{"schemaVersion":"acq-neutral-model-catalog/v1","providerId":"usai","models":[{"id":"m1"},{"id":"m2"}]}\n' \
+    > "$ID_ROOT/models/providers/usai/snapshot.json"
+  printf '// acq-provider-config-state: abc\n{"provider":{"usai":{"models":{"m1":{},"m2":{}}}}}\n' \
+    > "$ID_HOME/.config/opencode/opencode.jsonc"
+  printf '#!/bin/sh\nprintf "usai/m1\\nusai/m2\\n"\nexit %s\n' "$1" > "$ID_BIN/opencode"
+  chmod +x "$ID_BIN/opencode"
+}
+
+_run_identity_guest() {
+  run bash -c '
+    VERIFY_BACKENDS_SOURCE_ONLY=1
+    export VERIFY_BACKENDS_SOURCE_ONLY
+    . "'"$REPO_ROOT"'/scripts/verify-backends"
+    export ACQ_PROVIDER_INPUT_ROOT="'"$ID_ROOT"'" HOME="'"$ID_HOME"'" PATH="'"$ID_BIN"':$PATH"
+    sh -c "$PROVIDER_MODEL_IDENTITY_SCRIPT" sh usai 2>&1
+    echo "GUEST_RC=$?"
+  '
+}
+
+@test "model identity: opencode models exiting non-zero fails even when its output matches" {
+  command -v node >/dev/null || skip "node not available"
+  _identity_guest_fixture 7
+  _run_identity_guest
+  assert_success
+  assert_output --partial 'opencode models failed (exit 7)'
+  assert_line 'GUEST_RC=1'
+  refute_output --partial 'CLI m1'
+}
+
+@test "model identity: opencode models exiting zero with matching output still passes" {
+  command -v node >/dev/null || skip "node not available"
+  _identity_guest_fixture 0
+  _run_identity_guest
+  assert_success
+  assert_output --partial 'CLI m1'
+  assert_output --partial 'CLI m2'
+  assert_line 'GUEST_RC=0'
+}
