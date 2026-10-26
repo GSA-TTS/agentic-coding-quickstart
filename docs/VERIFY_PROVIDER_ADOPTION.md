@@ -52,6 +52,9 @@ backend, virtualization, credentials, or released provider kit is unavailable
 and the step cannot run. Do not use `PASS` for a row unless you observed the
 actual command output.
 
+`PENDING` marks a check that is implemented but has not been run on a live host;
+it is not a result and must be replaced by `PASS`, `FAIL`, or `BLOCKED`.
+
 | Check | SBX | MSB | Observed output / notes |
 |---|---|---|---|
 | Fresh `acq run opencode .` startup | PASS | PASS | 2026-10-25: both backends launched interactive OpenCode sessions from the final validation worktree. USAi models were visible and a model request returned successfully on each backend. |
@@ -61,6 +64,7 @@ actual command output.
 | Fresh authoritative-empty provider selection has no USAi models | PASS | PASS | 2026-10-25: `--no-provider-kits` created fresh OpenCode sandboxes with no USAi kit, credential gate, or models on either backend. |
 | Malformed provider input is rejected before startup | PASS | PASS | 2026-10-25: both backends rejected malformed `provider-input.json` before backend creation with `acq: invalid provider input manifest ... invalid JSON at line 1 column 2`. |
 | `scripts/verify-backends --only <backend>` | PASS | PASS | Final combined branch: SBX transcript `tmp/provider-neutral-validation.TCY2fZvE/sbx.log` (13 pass, 0 fail, 1 skip); MSB transcript `tmp/provider-neutral-validation.8MP6vbkX/msb.log` (18 pass, 0 fail, 1 skip). |
+| Identity-bound provider model check in `scripts/verify-backends` (snapshot vs rendered config vs `opencode models`) | PENDING | PENDING | Not yet run on a live SBX or MSB host. The stronger check is new: it compares the projected snapshot's model IDs to both the rendered OpenCode config and the `opencode models` output and fails on missing or unexpected IDs. Only offline stubbed Bats cases (`test/bats/146-provider-verification.bats`) exist. The PASS rows above predate it and make no claim about it; they used the earlier `^usai/` prefix check. |
 
 ### Earlier Failed Live Evidence (2026-10-24)
 
@@ -318,13 +322,41 @@ SANDBOX='<sandbox-name-from-acq-output>'
 ./acq --backend "$BACKEND" rm "$SANDBOX"
 ```
 
-To verify provider removal, create a second fresh sandbox with an empty
-authoritative provider set by overriding the default provider kit selection in
-a temporary test configuration. Record the exact override used and confirm that
-`opencode models` no longer lists the removed provider. If the installed `acq`
-version has no supported host-side way to omit the default provider kit, record
-that row as `BLOCKED`; do not edit the read-only guest projection or claim a
-mocked result as live evidence.
+To verify provider removal, create a second fresh sandbox with the supported
+`--no-provider-kits` flag (`acq run`/`acq create`; see `docs/howto/acq.md`,
+"Provider kits"). Run it with no USAi credential seeded for the sandbox, so a
+credential gate would show up as a prompt or failure. Then assert omission
+explicitly; any failed assertion is a failure, not `BLOCKED`:
+
+```bash
+BACKEND=sbx # repeat with BACKEND=msb
+RUN_OUT=$(mktemp "${TMPDIR:-/tmp}/acq-provider-omit.XXXXXX")
+./acq --backend "$BACKEND" run opencode --no-provider-kits "$LIVE_ROOT" \
+  -- --version >"$RUN_OUT" 2>&1 || { echo "FAIL: create/run failed" >&2; cat "$RUN_OUT"; exit 1; }
+SANDBOX='<sandbox-name-from-acq-output>'
+
+# 1) No USAi kit and no USAi credential gate in the create output.
+! grep -Eiq 'usai-provider|USAI_API_KEY|usai credential' "$RUN_OUT" \
+  || { echo "FAIL: USAi kit or credential gate appeared" >&2; exit 1; }
+
+# 2) The projected provider root has no USAi provider directory.
+./acq --backend "$BACKEND" exec "$SANDBOX" -- sh -c \
+  'test -d "$ACQ_PROVIDER_INPUT_ROOT/models/providers" && test ! -e "$ACQ_PROVIDER_INPUT_ROOT/models/providers/usai"' \
+  || { echo "FAIL: usai projection present or provider root missing" >&2; exit 1; }
+
+# 3) No usai models in `opencode models` (the command itself must succeed).
+MODELS=$(./acq --backend "$BACKEND" exec "$SANDBOX" -- opencode models) \
+  || { echo "FAIL: opencode models failed" >&2; exit 1; }
+! printf '%s\n' "$MODELS" | grep -q '^usai/' \
+  || { echo "FAIL: usai models listed" >&2; exit 1; }
+
+./acq --backend "$BACKEND" rm "$SANDBOX"
+rm -f "$RUN_OUT"
+```
+
+Record the backend version and the output of each assertion. If the backend or
+its host prerequisites are unavailable, record `BLOCKED`; do not edit the
+read-only guest projection or claim a mocked result as live evidence.
 
 **Outcome recording:** Update the Live Validation Record table above with the
 observed output, timestamp, and backend version for each row that ran. Do not
