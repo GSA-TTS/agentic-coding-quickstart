@@ -4802,53 +4802,57 @@ _acq_provider_input_snapshot() {
   python3 - "$1" "$2" <<'PY'
 import json, os, stat, sys
 kit, target = sys.argv[1:]
-def safe_path(base, rel):
+def safe_open(base, rel):
+    # Validate `rel` under `base` with a no-follow walk and return an OPEN
+    # binary reader bound to the validated file. On POSIX the reader keeps the
+    # descriptor from the O_NOFOLLOW walk, so a file or ancestor swapped after
+    # validation cannot redirect the read. On Windows (no O_NOFOLLOW/dir_fd) we
+    # walk with lstat and reopen the validated pathname as a guarded fallback.
     if not isinstance(rel, str) or rel.startswith('/') or not rel or any(part in ('', '.', '..') for part in rel.split('/')):
         raise SystemExit('unsafe provider artifact path')
     if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'):
-        # POSIX: descriptor-relative, no-follow walk rejects symlinks and any
-        # path outside the fetched kit.
         fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             for part in rel.split('/'):
                 nextfd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
                 os.close(fd); fd = nextfd
             if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit('unsafe provider artifact')
-        finally:
+            return os.fdopen(fd, 'rb')
+        except BaseException:
             os.close(fd)
-    else:
-        # Windows (native Python 3.12): no O_NOFOLLOW/dir_fd. Walk the relative
-        # path component by component under `base`, rejecting symlinks (S_IFLNK),
-        # junctions, and every other reparse point at each step, and require a
-        # regular file at the end. Backslash is treated as a separator here so a
-        # manifest path cannot smuggle '..\\..' traversal on Windows.
-        def _fatal():
-            raise SystemExit('unsafe provider artifact')
-        def _unsafe(st):
-            return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) != 0
-        parts = rel.replace('\\', '/').split('/')
-        if any(p in ('', '.', '..') for p in parts):
+            raise
+    # Windows guarded fallback (native Python 3.12): no O_NOFOLLOW/dir_fd. Walk
+    # the relative path component by component under `base`, rejecting symlinks
+    # (S_IFLNK), junctions, and every other reparse point at each step, and
+    # require a regular file at the end. Backslash is treated as a separator here
+    # so a manifest path cannot smuggle '..\\..' traversal on Windows.
+    def _fatal():
+        raise SystemExit('unsafe provider artifact')
+    def _unsafe(st):
+        return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) != 0
+    parts = rel.replace('\\', '/').split('/')
+    if any(p in ('', '.', '..') for p in parts):
+        _fatal()
+    cur = base
+    for i, part in enumerate(parts):
+        cur = os.path.join(cur, part)
+        try:
+            st = os.lstat(cur)
+        except OSError:
             _fatal()
-        cur = base
-        for i, part in enumerate(parts):
-            cur = os.path.join(cur, part)
-            try:
-                st = os.lstat(cur)
-            except OSError:
+        if _unsafe(st):
+            _fatal()
+        if i == len(parts) - 1:
+            if not stat.S_ISREG(st.st_mode):
                 _fatal()
-            if _unsafe(st):
-                _fatal()
-            if i == len(parts) - 1:
-                if not stat.S_ISREG(st.st_mode):
-                    _fatal()
-            elif not stat.S_ISDIR(st.st_mode):
-                _fatal()
-    return os.path.join(base, rel)
+        elif not stat.S_ISDIR(st.st_mode):
+            _fatal()
+    return open(cur, 'rb')
 if os.path.islink(kit) or not os.path.isdir(kit) \
         or getattr(os.lstat(kit), 'st_reparse_tag', 0) != 0:
     raise SystemExit('unsafe provider kit path')
-manifest_path = safe_path(kit, 'provider-input.json')
-with open(manifest_path, encoding='utf-8') as stream: manifest_bytes = stream.read()
+with safe_open(kit, 'provider-input.json') as stream:
+    manifest_bytes = stream.read()
 try:
     bundle = json.loads(manifest_bytes)
 except json.JSONDecodeError as exc:
@@ -4857,17 +4861,18 @@ except json.JSONDecodeError as exc:
         f'invalid JSON at line {exc.lineno} column {exc.colno}'
     )
 os.mkdir(target, 0o700)
-with open(os.path.join(target, 'provider-input.json'), 'x', encoding='utf-8') as stream: stream.write(manifest_bytes)
+with open(os.path.join(target, 'provider-input.json'), 'xb') as stream:
+    stream.write(manifest_bytes)
 for path in ('spec.yaml', bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):
-    source = safe_path(kit, path)
     destination = os.path.join(target, path)
     os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
-    source_mode = stat.S_IMODE(os.stat(source).st_mode)
-    with open(source, 'rb') as src, open(destination, 'xb') as dst:
-        while True:
-            chunk = src.read(1024 * 1024)
-            if not chunk: break
-            dst.write(chunk)
+    with safe_open(kit, path) as src:
+        source_mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode)
+        with open(destination, 'xb') as dst:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk: break
+                dst.write(chunk)
     os.chmod(destination, source_mode)
 PY
 }
