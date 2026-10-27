@@ -24,14 +24,14 @@ host. Real projected parser validation requires a live backend run (see
 
 ## Merge Gate
 
-**Status: the required live runs were done at tested revision `ec8d5e17`
-(`ec8d5e177a520a69e1b835895763a9aac520af1b`) and passed on both backends.** One
-recording gap remains: the SBX version was not captured. The gate's required
-runs are satisfied for that revision only. Offline Bats seam tests remain
-separate from the live evidence; they prove acq's decision logic with stubbed
-backends, not live SBX or MSB behavior.
+**Status: the required live runs were done at tested revision `8a594932`
+(`8a594932e47745ed8f670a477f9da974121f3506`) and passed on both backends,** with
+the SBX version captured (v0.48.0). An earlier run at `ec8d5e17` also passed and
+is kept as history. The gate's required runs are satisfied for `8a594932` only.
+Offline Bats seam tests remain separate from the live evidence; they prove acq's
+decision logic with stubbed backends, not live SBX or MSB behavior.
 
-**Required before merge, and their status at `ec8d5e17`**
+**Required before merge, and their status at `8a594932`**
 
 1. Run the updated `scripts/verify-backends` identity-bound model check
    (projected snapshot vs rendered OpenCode config vs `opencode models`) on a
@@ -40,11 +40,16 @@ backends, not live SBX or MSB behavior.
    paragraph in the live-commands block below) on real SBX and MSB, including
    all three omission assertions. **Done, PASS on both** (2026-10-27).
 3. Record each result as `PASS`, `FAIL`, or `BLOCKED`, with the backend version,
-   timestamp, and the **tested revision SHA**. **Done in the Live Validation
-   Record below, except that the SBX version was not captured** (MSB 0.7.7 was).
+   timestamp, and the **tested revision SHA**. **Done** in the Live Validation
+   Record below (SBX v0.48.0, MSB 0.7.7).
+
+**Why a re-run at `8a594932`.** Between `ec8d5e17` and `8a594932` the branch
+merged a newer `main`, which changed, among other files, `acq`,
+`acq.backends/kit-translate.sh` and `acq.backends/msb.sh`; the earlier result did not cover those changes, so the
+live checks were run again on the merged head.
 
 **Applying this to later heads.** A result for a different revision does not
-satisfy the gate by itself. Any commit after `ec8d5e17` must be judged by what it
+satisfy the gate by itself. Any commit after `8a594932` must be judged by what it
 changes: a commit that only edits this document does not change the tested code,
 but a change to `acq`, `acq.backends/`, `scripts/verify-backends`, the pinned
 kits, or provider-input handling needs its effect judged and, where it could
@@ -53,9 +58,10 @@ change the checked behavior, a re-run.
 **Evidence.** The earlier live PASS rows (2026-10-24 and 2026-10-25) were
 observed on earlier heads and used the previous prefix-only model check
 (`opencode models | grep "^usai/"`) or a manual `opencode models`; they make no
-claim about the identity-bound check or this revision. The 2026-10-27 rows
-(see the table) were produced by the maintainer running the validation script on
-a real host; raw results are kept in a gitignored host directory (see the rows).
+claim about the identity-bound check or these revisions. The 2026-10-27 rows
+(see the table) were produced by the maintainer running a validation script on a
+real host; raw results are kept in gitignored host directories (see the rows) and
+are not committed.
 
 ## Offline Checks
 
@@ -90,7 +96,7 @@ actual command output.
 
 `PENDING` marks a check that is implemented but has not been run on a live host;
 it is not a result and must be replaced by `PASS`, `FAIL`, or `BLOCKED`. No row
-is PENDING at `ec8d5e17`.
+is PENDING at `ec8d5e17` or `8a594932`.
 
 | Check | SBX | MSB | Observed output / notes |
 |---|---|---|---|
@@ -101,8 +107,10 @@ is PENDING at `ec8d5e17`.
 | Fresh authoritative-empty provider selection has no USAi models | PASS | PASS | 2026-10-25: `--no-provider-kits` created fresh OpenCode sandboxes with no USAi kit, credential gate, or models on either backend. |
 | Malformed provider input is rejected before startup | PASS | PASS | 2026-10-25: both backends rejected malformed `provider-input.json` before backend creation with `acq: invalid provider input manifest ... invalid JSON at line 1 column 2`. |
 | `scripts/verify-backends --only <backend>` | PASS | PASS | Final combined branch: SBX transcript `tmp/provider-neutral-validation.TCY2fZvE/sbx.log` (13 pass, 0 fail, 1 skip); MSB transcript `tmp/provider-neutral-validation.8MP6vbkX/msb.log` (18 pass, 0 fail, 1 skip). |
-| Identity-bound provider model check in `scripts/verify-backends` (snapshot vs rendered config vs `opencode models`) | PASS | PASS | 2026-10-27, tested revision `ec8d5e177a520a69e1b835895763a9aac520af1b`, run by the maintainer on a real host. SBX: `verify-backends` 13 passed, 0 failed, 1 skipped (sbx version not captured). MSB 0.7.7: 18 passed, 0 failed, 1 skipped. Both printed `rendered config and opencode models match the projected usai snapshot (24 models)`. The skip on both is the playbook fetch (no GitHub token available to the run). The earlier PASS rows above used the prefix-only check and are not evidence for this row. Raw results: `tmp/validate-611-results-20261027T100924Z/results.tsv`, in a gitignored host-side directory (not committed). |
-| `--no-provider-kits` removal procedure with the three explicit omission assertions (no USAi kit/credential text, no `usai` projection, no `usai/` models) | PASS | PASS | 2026-10-27, tested revision `ec8d5e177a520a69e1b835895763a9aac520af1b`, same run and host as the row above (SBX version not captured; MSB 0.7.7). All three assertions passed on each backend. The earlier 2026-10-25 omission row used its own checks and is a separate observation. Raw results: same gitignored `results.tsv`. |
+| Identity-bound provider model check in `scripts/verify-backends` (snapshot vs rendered config vs `opencode models`) | PASS | PASS | History, superseded by the `8a594932` rows below. 2026-10-27, tested revision `ec8d5e177a520a69e1b835895763a9aac520af1b`, run by the maintainer on a real host. SBX: `verify-backends` 13 passed, 0 failed, 1 skipped (SBX version not captured in that run; captured in the `8a594932` rows). MSB 0.7.7: 18 passed, 0 failed, 1 skipped. Both printed `rendered config and opencode models match the projected usai snapshot (24 models)`. The skip on both is the playbook fetch (no GitHub token available to the run). The earlier PASS rows above used the prefix-only check and are not evidence for this row. Raw results: `tmp/validate-611-results-20261027T100924Z/results.tsv`, in a gitignored host-side directory (not committed). |
+| `--no-provider-kits` removal procedure with the three explicit omission assertions (no USAi kit/credential text, no `usai` projection, no `usai/` models) | PASS | PASS | History, superseded by the `8a594932` rows below. 2026-10-27, tested revision `ec8d5e177a520a69e1b835895763a9aac520af1b`, same run and host as the row above (SBX version not captured in that run, captured in the `8a594932` rows; MSB 0.7.7). All three assertions passed on each backend. The earlier 2026-10-25 omission row used its own checks and is a separate observation. Raw results: same gitignored `results.tsv`. |
+| Identity-bound provider model check in `scripts/verify-backends` (snapshot vs rendered config vs `opencode models`), re-run on the merged head | PASS | PASS | 2026-10-27 (run started 15:26Z), tested revision `8a594932e47745ed8f670a477f9da974121f3506`, run by the maintainer on a real host under bash 3.2.57 with a guard that the checked-out revision matched. SBX v0.48.0 (`5caf923e0587d376848f6f388eca3e0f5ca00e2d`): `verify-backends` 13 passed, 0 failed, 1 skipped. MSB 0.7.7: 18 passed, 0 failed, 1 skipped (its `oci-engine` kit checks also passed). Both printed `rendered config and opencode models match the projected usai snapshot (24 models)`. The skip on both is the playbook fetch (no GitHub token available to the run). The earlier `ec8d5e17` row is history and this row supersedes it for the merged head. Raw results: `tmp/validate-611-results-20261027T152646Z/` in a gitignored host-side directory (not committed). |
+| `--no-provider-kits` removal procedure with the three omission assertions, re-run on the merged head | PASS | PASS | 2026-10-27, tested revision `8a594932e47745ed8f670a477f9da974121f3506`, same run and host as the row above (SBX v0.48.0, MSB 0.7.7). All three assertions passed on each backend. |
 
 ### Earlier Failed Live Evidence (2026-10-24)
 
