@@ -4410,13 +4410,48 @@ if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'):
     finally:
         os.close(fd)
 else:
-    # MSYS/Windows Python lacks O_DIRECTORY/O_NOFOLLOW/dir_fd, and MSYS2 hands
-    # argv in Windows form (C:/...), which manual `/`-splitting would corrupt
-    # (producing a bogus "/C:" component). os.makedirs is drive-aware; reject a
-    # symlinked/reparse-point result instead of walking components.
-    os.makedirs(path, mode=0o755, exist_ok=True)
-    if os.path.islink(path) or not os.path.isdir(path):
+    # Windows (native Python 3.12): no O_DIRECTORY/O_NOFOLLOW/dir_fd, and MSYS2
+    # hands argv in Windows form (C:/...). Walk component by component from the
+    # drive root, creating missing directories one at a time so no ancestor is
+    # followed before it is validated. Reject symlinks (S_IFLNK), junctions
+    # (IO_REPARSE_TAG_MOUNT_POINT), and every other reparse point at each step,
+    # so a writable ancestor cannot redirect projection creation outside the
+    # intended tree (os.path.islink alone silently misses junctions).
+    if not hasattr(os.path, 'splitdrive'):
+        raise SystemExit('unsafe provider-input path: reparse-point traversal unavailable')
+    def _fatal():
         raise SystemExit('unsafe provider-input path')
+    def _unsafe(st):
+        # st_reparse_tag != 0 covers os.path.isjunction() (mount points) plus
+        # every other reparse tag; S_IFLNK covers symlinks.
+        return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) != 0
+    drive, tail = os.path.splitdrive(path)
+    if not drive:
+        _fatal()
+    cur = drive + os.sep
+    def _validate_dir(p, create):
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            if not create:
+                _fatal()
+            try:
+                os.mkdir(p, 0o755)
+            except FileExistsError:
+                pass
+            st = os.lstat(p)
+        except OSError:
+            _fatal()
+        if _unsafe(st) or not stat.S_ISDIR(st.st_mode):
+            _fatal()
+    _validate_dir(cur, False)
+    for comp in tail.replace('\\', '/').split('/'):
+        if comp in ('', '.'):
+            continue
+        if comp == '..':
+            _fatal()
+        cur = os.path.join(cur, comp)
+        _validate_dir(cur, True)
 PY
 }
 
@@ -4437,8 +4472,36 @@ if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'):
     finally:
         os.close(fd)
 else:
-    # MSYS/Windows: reject a symlinked/reparse-point path and require a real dir.
-    if os.path.islink(path) or not os.path.isdir(path): raise SystemExit(1)
+    # Windows (native Python 3.12): walk component by component from the drive
+    # root, rejecting symlinks (S_IFLNK), junctions (IO_REPARSE_TAG_MOUNT_POINT),
+    # and every other reparse point at each step so an attacker-controlled
+    # ancestor cannot redirect the existence/type check (islink alone misses
+    # junctions). Requires a real directory, never creating anything.
+    if not hasattr(os.path, 'splitdrive'):
+        raise SystemExit(1)
+    def _fatal():
+        raise SystemExit(1)
+    def _unsafe(st):
+        return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) != 0
+    drive, tail = os.path.splitdrive(path)
+    if not drive:
+        _fatal()
+    cur = drive + os.sep
+    def _validate_dir(p):
+        try:
+            st = os.lstat(p)
+        except OSError:
+            _fatal()
+        if _unsafe(st) or not stat.S_ISDIR(st.st_mode):
+            _fatal()
+    _validate_dir(cur)
+    for comp in tail.replace('\\', '/').split('/'):
+        if comp in ('', '.'):
+            continue
+        if comp == '..':
+            _fatal()
+        cur = os.path.join(cur, comp)
+        _validate_dir(cur)
 PY
 }
 
@@ -4754,14 +4817,35 @@ def safe_path(base, rel):
         finally:
             os.close(fd)
     else:
-        # MSYS/Windows: no O_NOFOLLOW/dir_fd. Reject symlinks per component.
+        # Windows (native Python 3.12): no O_NOFOLLOW/dir_fd. Walk the relative
+        # path component by component under `base`, rejecting symlinks (S_IFLNK),
+        # junctions, and every other reparse point at each step, and require a
+        # regular file at the end. Backslash is treated as a separator here so a
+        # manifest path cannot smuggle '..\\..' traversal on Windows.
+        def _fatal():
+            raise SystemExit('unsafe provider artifact')
+        def _unsafe(st):
+            return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) != 0
+        parts = rel.replace('\\', '/').split('/')
+        if any(p in ('', '.', '..') for p in parts):
+            _fatal()
         cur = base
-        for part in rel.split('/'):
+        for i, part in enumerate(parts):
             cur = os.path.join(cur, part)
-            if os.path.islink(cur): raise SystemExit('unsafe provider artifact')
-        if not os.path.isfile(cur): raise SystemExit('unsafe provider artifact')
+            try:
+                st = os.lstat(cur)
+            except OSError:
+                _fatal()
+            if _unsafe(st):
+                _fatal()
+            if i == len(parts) - 1:
+                if not stat.S_ISREG(st.st_mode):
+                    _fatal()
+            elif not stat.S_ISDIR(st.st_mode):
+                _fatal()
     return os.path.join(base, rel)
-if os.path.islink(kit) or not os.path.isdir(kit):
+if os.path.islink(kit) or not os.path.isdir(kit) \
+        or getattr(os.lstat(kit), 'st_reparse_tag', 0) != 0:
     raise SystemExit('unsafe provider kit path')
 manifest_path = safe_path(kit, 'provider-input.json')
 with open(manifest_path, encoding='utf-8') as stream: manifest_bytes = stream.read()

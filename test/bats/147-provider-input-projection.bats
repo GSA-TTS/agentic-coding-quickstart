@@ -1013,6 +1013,89 @@ EOF
   assert_failure
 }
 
+# ---------------------------------------------------------------------------
+# Windows reparse-point negative tests (real Windows runner only)
+# ---------------------------------------------------------------------------
+# The Windows fallback (native Python 3.12, no O_NOFOLLOW/dir_fd) walks each
+# path component from the drive root and rejects symlinks (S_IFLNK), junctions
+# (IO_REPARSE_TAG_MOUNT_POINT), and every other reparse point. os.path.islink()
+# alone does NOT report junctions, so these tests prove the traversal actually
+# rejects a planted junction / symlink ancestor rather than following it.
+#
+# They require a real Windows runner with a native Windows python3 on PATH (the
+# repo CI is Linux, so they `skip` there). Junctions need no elevation; a
+# directory symlink needs developer mode / admin, so the symlink cases skip
+# when mklink /D is unavailable while the junction cases still run.
+
+_windows_runner() {
+  case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac
+}
+
+_windows_path() { command -v cygpath >/dev/null 2>&1 || return 1; cygpath -w "$1"; }
+
+_windows_make_junction() { # LINK TARGET  (no elevation required)
+  local win_link win_target
+  win_link=$(_windows_path "$1") || return 1
+  win_target=$(_windows_path "$2") || return 1
+  cmd //c mklink //J "$win_link" "$win_target" >/dev/null 2>&1
+}
+
+_windows_make_dir_symlink() { # LINK TARGET  (developer mode / admin required)
+  local win_link win_target
+  win_link=$(_windows_path "$1") || return 1
+  win_target=$(_windows_path "$2") || return 1
+  cmd //c mklink //D "$win_link" "$win_target" >/dev/null 2>&1
+}
+
+@test "windows: safe_mkdir succeeds on a real path (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local real="$STUBDIR/real_win/a/b"
+  run _acq_provider_input_safe_mkdir "$real"
+  assert_success
+  [ -d "$real" ]
+}
+
+@test "windows: safe_mkdir rejects an ancestor junction (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local target="$STUBDIR/junction_target" link="$STUBDIR/junction_link"
+  mkdir -p "$target"
+  _windows_make_junction "$link" "$target" || skip "junction creation unavailable on this runner"
+  [ -d "$link" ] || skip "junction not created"
+  run _acq_provider_input_safe_mkdir "$link/new_child"
+  assert_failure
+  # The projection must not have been redirected into the junction target.
+  [ ! -e "$target/new_child" ]
+}
+
+@test "windows: safe_dir rejects an ancestor junction (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local target="$STUBDIR/junction_target_dir" link="$STUBDIR/junction_link_dir"
+  mkdir -p "$target"
+  _windows_make_junction "$link" "$target" || skip "junction creation unavailable on this runner"
+  [ -d "$link" ] || skip "junction not created"
+  run _acq_provider_input_safe_dir "$link"
+  assert_failure
+}
+
+@test "windows: safe_mkdir rejects an ancestor symlink (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local target="$STUBDIR/symlink_target" link="$STUBDIR/symlink_link"
+  mkdir -p "$target"
+  _windows_make_dir_symlink "$link" "$target" || skip "directory symlink creation unavailable (developer mode / elevation required)"
+  run _acq_provider_input_safe_mkdir "$link/new_child"
+  assert_failure
+  [ ! -e "$target/new_child" ]
+}
+
+@test "windows: safe_dir rejects an ancestor symlink (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local target="$STUBDIR/symlink_target_dir" link="$STUBDIR/symlink_link_dir"
+  mkdir -p "$target"
+  _windows_make_dir_symlink "$link" "$target" || skip "directory symlink creation unavailable (developer mode / elevation required)"
+  run _acq_provider_input_safe_dir "$link"
+  assert_failure
+}
+
 @test "canonical_path aliases /var /tmp /etc on Darwin via ACQ_TEST_HOST_OS" {
   # Exercises the production _acq_provider_input_canonical_path helper directly
   # with ACQ_TEST_HOST_OS=darwin so the Darwin branch runs on Linux CI.
