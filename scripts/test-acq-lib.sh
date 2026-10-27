@@ -488,11 +488,15 @@ case "$_msb_sub" in
         exit 0 ;;
       *"echo ok"*) printf 'ok\n' ;;
       *'%{http_code}'*)
-        # Match check_key's `<http_code>|<curl_exit>` shape (see the sbx stub).
-        if [ "${STUB_KEY_UNREACHABLE:-0}" = "1" ]; then
-          printf '000|56'
+        # Match check_key's `<http_code>|<curl_exit>|<policy_code>` shape.
+        if [ "${STUB_KEY_UNRESOLVED:-0}" = "1" ]; then
+          printf '000|6|'
+        elif [ "${STUB_KEY_UNREACHABLE:-0}" = "35" ]; then
+          printf '000|35|'
+        elif [ "${STUB_KEY_UNREACHABLE:-0}" != "0" ]; then
+          printf '000|56|'
         else
-          printf '%s|0' "${STUB_KEY_STATUS:-200}"
+          printf '%s|0|%s' "${STUB_KEY_STATUS:-200}" "${STUB_KEY_POLICY_CODE:-}"
         fi ;;
       *"postinstall.mjs"*) touch "$STUBDIR/.opencode_fixed"; exit 0 ;;
       # The ensure-agent-user block is one big `sh -c` (useradd/mkdir/chown + a

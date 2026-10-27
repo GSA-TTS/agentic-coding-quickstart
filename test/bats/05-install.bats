@@ -206,9 +206,9 @@ done
 [ -n "$out" ] || { printf 'curl stub: no -o in: %s\n' "$*" >&2; exit 1; }
 
 case "$*" in
-  *releases/download/v0.7.7/checksums.sha256*)
+  *releases/download/v0.7.9/checksums.sha256*)
     cp "$fixture/checksums.sha256" "$out" ;;
-  *releases/download/v0.7.7/microsandbox-*.tar.gz*)
+  *releases/download/v0.7.9/microsandbox-*.tar.gz*)
     cp "$fixture"/microsandbox-*.tar.gz "$out" ;;
   *)
     printf 'curl stub: unexpected URL: %s\n' "$*" >&2; exit 1 ;;
@@ -298,7 +298,7 @@ _no_package_manager_path() {
     sh "$REPO_ROOT/install.sh" --method npm --dry-run --yes
 
   assert_success
-  assert_output --partial 'Installing msb 0.7.7 from the pinned release bundle'
+  assert_output --partial 'Installing msb 0.7.9 from the pinned release bundle'
   assert_output --partial '[dry-run] verify the active msb is a version acq accepts'
   refute_output --partial 'no msb is active on PATH'
   # Nothing may be written in a dry run.
@@ -491,30 +491,30 @@ _no_package_manager_path() {
   assert_regex "$(cat "$GIT_STUB_LOG")" "fetch --unshallow --tags origin"
 }
 
-@test "install: missing msb installs the pinned 0.7.7 release bundle" {
+@test "install: missing msb installs the pinned 0.7.9 release bundle" {
   _write_npm_stub
-  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  fixture=$(_make_msb_bundle_fixture 0.7.9) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
   _write_curl_msb_bundle_stub "$fixture"
 
   run env PATH="$ACQ_INSTALL_BIN_DIR:$STUBDIR/bin:$(_msb_pin_tools_path)" \
     sh "$REPO_ROOT/install.sh" --method npm --yes
 
   assert_success
-  assert_output --partial 'Installing msb 0.7.7 from the pinned release bundle'
-  assert_output --partial 'releases/download/v0.7.7'
-  assert_output --partial 'Active msb is 0.7.7'
+  assert_output --partial 'Installing msb 0.7.9 from the pinned release bundle'
+  assert_output --partial 'releases/download/v0.7.9'
+  assert_output --partial 'Active msb is 0.7.9'
   # The upstream one-line installer cannot pin a version, so it must not be the
   # thing that placed msb -- not even via a versioned install.sh asset URL, whose
   # per-release copies are byte-identical and still resolve releases/latest.
   refute_output --partial 'install.sh | sh'
-  refute_output --partial 'v0.7.7/install.sh'
+  refute_output --partial 'v0.7.9/install.sh'
   run "$ACQ_INSTALL_BIN_DIR/msb" --version
-  assert_output 'msb 0.7.7'
+  assert_output 'msb 0.7.9'
 }
 
 @test "install: pinned bundle install fails closed on a checksum mismatch" {
   _write_npm_stub
-  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  fixture=$(_make_msb_bundle_fixture 0.7.9) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
   # Corrupt the artifact AFTER the checksum was recorded: the published checksum
   # stays valid, the bytes do not. This is the tamper/truncation case, and it must
   # not install anything.
@@ -535,7 +535,7 @@ _no_package_manager_path() {
 
 @test "install: pinned bundle install fails closed when the release has no checksum for it" {
   _write_npm_stub
-  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  fixture=$(_make_msb_bundle_fixture 0.7.9) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
   # A checksums.sha256 that covers other assets but not ours. Verification has
   # nothing to compare against, so it must refuse rather than install unverified.
   printf '%s  some-other-asset.tar.gz\n' "$(printf 0 | _sha256_of /dev/stdin)" \
@@ -551,9 +551,9 @@ _no_package_manager_path() {
   [ ! -e "$ACQ_INSTALL_BIN_DIR/msb" ]
 }
 
-@test "install: active msb 0.6.8 upgrades to the pinned 0.7.7" {
+@test "install: active msb 0.6.8 upgrades to the pinned 0.7.9" {
   _write_npm_stub
-  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  fixture=$(_make_msb_bundle_fixture 0.7.9) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
   _write_curl_msb_bundle_stub "$fixture"
   _write_msb_stub "$HOME/.local/bin/msb" 0.6.8
 
@@ -562,15 +562,15 @@ _no_package_manager_path() {
 
   assert_success
   assert_output --partial 'active msb version is too old'
-  assert_output --partial 'Installing msb 0.7.7 from the pinned release bundle'
-  assert_output --partial 'Active msb is 0.7.7'
+  assert_output --partial 'Installing msb 0.7.9 from the pinned release bundle'
+  assert_output --partial 'Active msb is 0.7.9'
   run "$ACQ_INSTALL_BIN_DIR/msb" --version
-  assert_output 'msb 0.7.7'
+  assert_output 'msb 0.7.9'
 }
 
 @test "install: unparseable active msb is replaced with the pinned version" {
   _write_npm_stub
-  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  fixture=$(_make_msb_bundle_fixture 0.7.9) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
   _write_curl_msb_bundle_stub "$fixture"
   _write_unparseable_msb_stub "$HOME/.local/bin/msb"
 
@@ -579,14 +579,14 @@ _no_package_manager_path() {
 
   assert_success
   assert_output --partial 'active msb version is not a supported final release'
-  assert_output --partial 'Active msb is 0.7.7'
+  assert_output --partial 'Active msb is 0.7.9'
   run "$ACQ_INSTALL_BIN_DIR/msb" --version
-  assert_output 'msb 0.7.7'
+  assert_output 'msb 0.7.9'
 }
 
 @test "install: failed active msb version probe is replaced with the pinned version" {
   _write_npm_stub
-  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  fixture=$(_make_msb_bundle_fixture 0.7.9) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
   _write_curl_msb_bundle_stub "$fixture"
   _write_msb_stub "$HOME/.local/bin/msb" 0.7.3 42
 
@@ -595,14 +595,14 @@ _no_package_manager_path() {
 
   assert_success
   assert_output --partial 'active msb version is not a supported final release'
-  assert_output --partial 'Active msb is 0.7.7'
+  assert_output --partial 'Active msb is 0.7.9'
   run "$ACQ_INSTALL_BIN_DIR/msb" --version
-  assert_output 'msb 0.7.7'
+  assert_output 'msb 0.7.9'
 }
 
 @test "install: prerelease active msb is replaced with the pinned version" {
   _write_npm_stub
-  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  fixture=$(_make_msb_bundle_fixture 0.7.9) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
   _write_curl_msb_bundle_stub "$fixture"
   _write_msb_stub "$HOME/.local/bin/msb" '0.7.3-rc1'
 
@@ -611,14 +611,14 @@ _no_package_manager_path() {
 
   assert_success
   assert_output --partial 'active msb version is not a supported final release'
-  assert_output --partial 'Active msb is 0.7.7'
+  assert_output --partial 'Active msb is 0.7.9'
   run "$ACQ_INSTALL_BIN_DIR/msb" --version
-  assert_output 'msb 0.7.7'
+  assert_output 'msb 0.7.9'
 }
 
 @test "install: build-suffixed active msb is replaced with the pinned version" {
   _write_npm_stub
-  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  fixture=$(_make_msb_bundle_fixture 0.7.9) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
   _write_curl_msb_bundle_stub "$fixture"
   _write_msb_stub "$HOME/.local/bin/msb" '0.7.3+build.1'
 
@@ -627,9 +627,9 @@ _no_package_manager_path() {
 
   assert_success
   assert_output --partial 'active msb version is not a supported final release'
-  assert_output --partial 'Active msb is 0.7.7'
+  assert_output --partial 'Active msb is 0.7.9'
   run "$ACQ_INSTALL_BIN_DIR/msb" --version
-  assert_output 'msb 0.7.7'
+  assert_output 'msb 0.7.9'
 }
 
 @test "install: platform-suffixed final msb is accepted" {
@@ -681,9 +681,9 @@ _no_package_manager_path() {
   assert_regex "$code" 'Checksum mismatch'
 }
 
-@test "install: active local msb 0.7.2 is replaced by the pinned 0.7.7" {
+@test "install: active local msb 0.7.2 is replaced by the pinned 0.7.9" {
   _write_npm_stub
-  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  fixture=$(_make_msb_bundle_fixture 0.7.9) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
   _write_curl_msb_bundle_stub "$fixture"
   # A blocked msb whose catalog is NOT ahead (the stub answers `list` cleanly), so
   # there is nothing to recover and the rollback/forward prompts do not apply.
@@ -694,15 +694,15 @@ _no_package_manager_path() {
 
   assert_success
   assert_output --partial 'active msb version is blocked'
-  assert_output --partial 'Installing msb 0.7.7 from the pinned release bundle'
-  assert_output --partial 'Active msb is 0.7.7'
+  assert_output --partial 'Installing msb 0.7.9 from the pinned release bundle'
+  assert_output --partial 'Active msb is 0.7.9'
   run "$ACQ_INSTALL_BIN_DIR/msb" --version
-  assert_output 'msb 0.7.7'
+  assert_output 'msb 0.7.9'
 }
 
 @test "install: blocked msb shadowing the pinned install fails closed" {
   _write_npm_stub
-  fixture=$(_make_msb_bundle_fixture 0.7.7) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
+  fixture=$(_make_msb_bundle_fixture 0.7.9) || skip "no msb bundle name for $(uname -s)/$(uname -m)"
   _write_curl_msb_bundle_stub "$fixture"
   # The blocked binary sits EARLIER on PATH than where the pinned install lands,
   # so the install succeeds and is then shadowed. That must be fatal, not a
@@ -732,7 +732,7 @@ _no_package_manager_path() {
 
 @test "install: duplicate msb paths are reported with active marker" {
   _write_npm_stub
-  _write_msb_stub "$STUBDIR/bin/msb" 0.7.7
+  _write_msb_stub "$STUBDIR/bin/msb" 0.7.9
   mkdir -p "$HOME/.local/bin"
   _write_msb_stub "$HOME/.local/bin/msb" 0.7.2
 
@@ -741,7 +741,7 @@ _no_package_manager_path() {
 
   assert_success
   assert_output --partial 'Multiple msb binaries were found'
-  assert_output --partial "$STUBDIR/bin/msb: 0.7.7 (active)"
+  assert_output --partial "$STUBDIR/bin/msb: 0.7.9 (active)"
   assert_output --partial "$HOME/.local/bin/msb: 0.7.2"
 }
 

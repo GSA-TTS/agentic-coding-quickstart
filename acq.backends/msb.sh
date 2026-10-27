@@ -154,9 +154,9 @@ MIN_MSB_VERSION="0.6.9"
 MSB_BLOCKED_VERSION_MIN="0.7.0"
 MSB_BLOCKED_VERSION_MAX="0.7.2"
 
-# Version acq's own tooling installs by default: latest release known to carry
-# the upstream 0.7.3+ cross-version compatibility fix. See ADR-0032.
-MSB_PINNED_VERSION="0.7.7"
+# Version acq's own tooling installs by default: 0.7.9 adds structured HTTP
+# policy-denial responses while retaining the upstream 0.7.3+ compatibility fix.
+MSB_PINNED_VERSION="0.7.9"
 
 # Rollback target for catalogs already migrated by blocked 0.7.0-0.7.2 releases.
 # This stays on the newest 0.6.x release because `msb self downgrade` is a state
@@ -6213,6 +6213,16 @@ acq_backend_rotate_key() {
     fi
     return 1
   fi
+  case "$status" in
+    network_policy_denied|secret_policy_denied)
+      if command -v _report_usai_policy_denied >/dev/null 2>&1; then
+        _report_usai_policy_denied "$status"
+      else
+        echo "acq(msb): USAi validation was blocked by sandbox policy ($status)." >&2
+      fi
+      return 1
+      ;;
+  esac
   echo "acq(msb): key validation failed (HTTP ${status}). Double-check the key and rotate again." >&2
   return 1
 }
