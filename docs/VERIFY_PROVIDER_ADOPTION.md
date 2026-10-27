@@ -3,7 +3,7 @@ title: "Provider-Neutral Adoption Validation"
 description: "Offline and live procedures for validating provider-input adoption on SBX and MSB"
 status: draft
 tier: 2
-last_updated: "2026-10-26"
+last_updated: "2026-10-27"
 audience: "developers"
 keywords: ["provider", "validation", "sbx", "msb", "opencode", "offline"]
 related_files: ["scripts/verify-backends", "test/bats/146-provider-verification.bats", "test/bats/147-provider-input-projection.bats", "docs/howto/acq.md"]
@@ -15,8 +15,7 @@ review_cycle: "quarterly"
 
 This procedure separates the preparatory offline checks from the live backend
 validation required before provider-input adoption can be considered complete.
-That live validation is tracked in the Merge Gate section below and is not
-finished.
+Its status is recorded in the Merge Gate section below.
 The Bats cases named below are **offline seam tests**. They use local fixtures
 and stubs to verify internal wiring and control-flow; they are not E2E tests and
 do not prove that SBX, MSB, USAi, or a fresh OpenCode process works on a real
@@ -25,31 +24,38 @@ host. Real projected parser validation requires a live backend run (see
 
 ## Merge Gate
 
-Provider-neutral adoption is **not** shown to be complete by this document. The
-sections below record what has been observed and what is still required; per-row
-results live in the Live Validation Record.
+**Status: the required live runs were done at tested revision `ec8d5e17`
+(`ec8d5e177a520a69e1b835895763a9aac520af1b`) and passed on both backends.** One
+recording gap remains: the SBX version was not captured. The gate's required
+runs are satisfied for that revision only. Offline Bats seam tests remain
+separate from the live evidence; they prove acq's decision logic with stubbed
+backends, not live SBX or MSB behavior.
 
-**Observed so far**
-
-- Offline Bats seam tests and CI (`146`, `147` and neighbors): stubbed backends
-  only; they prove acq's decision logic, not live SBX or MSB behavior.
-- Earlier live PASS rows in the Live Validation Record (2026-10-24 and
-  2026-10-25), observed on earlier heads of this branch. Any model-listing
-  evidence in them came from the previous prefix-only check
-  (`opencode models | grep "^usai/"`) or a manual `opencode models`. They make
-  no claim about the identity-bound check or the current revision.
-
-**Required before merge (not yet done)**
+**Required before merge, and their status at `ec8d5e17`**
 
 1. Run the updated `scripts/verify-backends` identity-bound model check
    (projected snapshot vs rendered OpenCode config vs `opencode models`) on a
-   real SBX host and a real MSB host.
+   real SBX host and a real MSB host. **Done, PASS on both** (2026-10-27).
 2. Run the `--no-provider-kits` removal procedure (the **Provider removal**
-   paragraph in the live-commands block below) on real SBX and MSB, including all three omission
-   assertions.
+   paragraph in the live-commands block below) on real SBX and MSB, including
+   all three omission assertions. **Done, PASS on both** (2026-10-27).
 3. Record each result as `PASS`, `FAIL`, or `BLOCKED`, with the backend version,
-   timestamp, and the **tested revision SHA**, replacing the PENDING row.
-   A result for a different revision does not satisfy this gate.
+   timestamp, and the **tested revision SHA**. **Done in the Live Validation
+   Record below, except that the SBX version was not captured** (MSB 0.7.7 was).
+
+**Applying this to later heads.** A result for a different revision does not
+satisfy the gate by itself. Any commit after `ec8d5e17` must be judged by what it
+changes: a commit that only edits this document does not change the tested code,
+but a change to `acq`, `acq.backends/`, `scripts/verify-backends`, the pinned
+kits, or provider-input handling needs its effect judged and, where it could
+change the checked behavior, a re-run.
+
+**Evidence.** The earlier live PASS rows (2026-10-24 and 2026-10-25) were
+observed on earlier heads and used the previous prefix-only model check
+(`opencode models | grep "^usai/"`) or a manual `opencode models`; they make no
+claim about the identity-bound check or this revision. The 2026-10-27 rows
+(see the table) were produced by the maintainer running the validation script on
+a real host; raw results are kept in a gitignored host directory (see the rows).
 
 ## Offline Checks
 
@@ -83,7 +89,8 @@ and the step cannot run. Do not use `PASS` for a row unless you observed the
 actual command output.
 
 `PENDING` marks a check that is implemented but has not been run on a live host;
-it is not a result and must be replaced by `PASS`, `FAIL`, or `BLOCKED`.
+it is not a result and must be replaced by `PASS`, `FAIL`, or `BLOCKED`. No row
+is PENDING at `ec8d5e17`.
 
 | Check | SBX | MSB | Observed output / notes |
 |---|---|---|---|
@@ -94,8 +101,8 @@ it is not a result and must be replaced by `PASS`, `FAIL`, or `BLOCKED`.
 | Fresh authoritative-empty provider selection has no USAi models | PASS | PASS | 2026-10-25: `--no-provider-kits` created fresh OpenCode sandboxes with no USAi kit, credential gate, or models on either backend. |
 | Malformed provider input is rejected before startup | PASS | PASS | 2026-10-25: both backends rejected malformed `provider-input.json` before backend creation with `acq: invalid provider input manifest ... invalid JSON at line 1 column 2`. |
 | `scripts/verify-backends --only <backend>` | PASS | PASS | Final combined branch: SBX transcript `tmp/provider-neutral-validation.TCY2fZvE/sbx.log` (13 pass, 0 fail, 1 skip); MSB transcript `tmp/provider-neutral-validation.8MP6vbkX/msb.log` (18 pass, 0 fail, 1 skip). |
-| Identity-bound provider model check in `scripts/verify-backends` (snapshot vs rendered config vs `opencode models`) | PENDING | PENDING | Not yet run on a live SBX or MSB host. The stronger check is new: it compares the projected snapshot's model IDs to both the rendered OpenCode config and the `opencode models` output and fails on missing or unexpected IDs. Only offline stubbed Bats cases (`test/bats/146-provider-verification.bats`) exist. The PASS rows above predate it and make no claim about it; they used the earlier `^usai/` prefix check. |
-| `--no-provider-kits` removal procedure with the three explicit omission assertions (no USAi kit/credential text, no `usai` projection, no `usai/` models) | PENDING | PENDING | Not yet run on a live SBX or MSB host. The earlier 2026-10-25 omission PASS row above was observed on an earlier head with its own checks; it is not a result for these assertions or this revision. |
+| Identity-bound provider model check in `scripts/verify-backends` (snapshot vs rendered config vs `opencode models`) | PASS | PASS | 2026-10-27, tested revision `ec8d5e177a520a69e1b835895763a9aac520af1b`, run by the maintainer on a real host. SBX: `verify-backends` 13 passed, 0 failed, 1 skipped (sbx version not captured). MSB 0.7.7: 18 passed, 0 failed, 1 skipped. Both printed `rendered config and opencode models match the projected usai snapshot (24 models)`. The skip on both is the playbook fetch (no GitHub token available to the run). The earlier PASS rows above used the prefix-only check and are not evidence for this row. Raw results: `tmp/validate-611-results-20261027T100924Z/results.tsv`, in a gitignored host-side directory (not committed). |
+| `--no-provider-kits` removal procedure with the three explicit omission assertions (no USAi kit/credential text, no `usai` projection, no `usai/` models) | PASS | PASS | 2026-10-27, tested revision `ec8d5e177a520a69e1b835895763a9aac520af1b`, same run and host as the row above (SBX version not captured; MSB 0.7.7). All three assertions passed on each backend. The earlier 2026-10-25 omission row used its own checks and is a separate observation. Raw results: same gitignored `results.tsv`. |
 
 ### Earlier Failed Live Evidence (2026-10-24)
 
