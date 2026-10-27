@@ -1787,8 +1787,9 @@ EOF
   local path mode phase source _readonly src _i
   _ACQ_MSB_RO_REWRITE_FROM=()
   _ACQ_MSB_RO_REWRITE_TO=()
-  local _hcfg_mount_ok=0
-  _acq_msb_host_config_mount_available "$name" && _hcfg_mount_ok=1
+  local _hcfg_mount_ok=0 _hcfg_rc=0
+  _acq_msb_host_config_mount_available "$name" || _hcfg_rc=$?
+  [ "$_hcfg_rc" -eq 0 ] && _hcfg_mount_ok=1
   for _i in ${_frecs[@]+"${!_frecs[@]}"}; do
     fline="${_frecs[$_i]}"
     path=$(printf '%s' "$fline" | cut -f1)
@@ -1800,6 +1801,17 @@ EOF
     src=""
     if [ -n "$source" ]; then
       src="${kitdir}/${source}"
+    fi
+    if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_rc" -ge 2 ]; then
+      # Recorded read-only create, but the mount is not confirmed read-only. Never
+      # stage or run trusted code from it and never degrade to a guest copy.
+      if [ "$_hcfg_rc" -eq 2 ]; then
+        echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': the host-config mount looks WRITABLE from the guest, so code staged there would not be trusted." >&2
+      else
+        echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': the host-config mount is not a confirmed read-only mount (the guest probe did not confirm it)." >&2
+      fi
+      echo "acq(msb):   No guest-copy fallback is taken because the sandbox was created with a read-only host config; recreate the sandbox." >&2
+      return 1
     fi
     if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_mount_ok" -eq 1 ]; then
       local _ro_guest
@@ -1877,36 +1889,38 @@ _acq_msb_reset_kit_env() {
 }
 
 # Whether sandbox NAME's trusted :ro host-config mount may be relied on for
-# readonly kit code. The decision comes from the HOST-recorded create fact
-# (key ro-host-config, written by acq_backend_provision only after a create that
-# passed the :ro --volume returned success and the sandbox became exec-ready),
-# never from a guest command: a passwordless-sudo guest controls `test`/`sh` and
-# could otherwise force the guest-copy downgrade. The record does NOT prove the
-# guest mount works; it proves only that acq asked for it and the sandbox booted.
-# A sandbox with no record (legacy, or a create that never completed) takes the
-# safe compatibility path: the caller copies the file and prints its warning.
-# The guest probe below is diagnostic only: it can warn about a mismatch but
-# never changes the decision (fail-closed: if the mount is really absent, the
-# staged-path commands may fail rather than silently degrading to a guest copy;
-# if it is writable, the warning says so). Likewise a recorded sandbox whose host
-# staging step fails aborts the apply instead of copying the file into the guest.
+# readonly kit code. Return codes:
+#   0  recorded at create AND the guest probe confirms a present, non-writable mount
+#   1  no host record (legacy sandbox, or a create that never completed): the caller
+#      takes the compatibility path and copies the file into the guest, with its warning
+#   2  recorded, but the probe finds the mount WRITABLE by the guest
+#   3  recorded, but the probe does not confirm the mount (absent, unreadable, or the
+#      probe could not run)
+# The record (key ro-host-config, written by acq_backend_provision after a create that
+# passed the :ro --volume returned success and the sandbox became exec-ready) is host
+# state a guest cannot forge, but it proves only that acq asked for the mount, not that
+# the mount works. The guest probe can only make acq STRICTER: a guest controlling
+# `test`/`sh` can answer it however it likes, and every answer other than "present and
+# non-writable" makes the caller fail closed (codes 2 and 3) rather than stage or run
+# trusted code from the mount, or degrade to a guest copy. A guest that forges the
+# "confirmed" answer gains nothing it did not already have: the mount's real
+# enforcement is the VMM's, not the probe's.
 _acq_msb_host_config_mount_available() {
-  local name="$1"
+  local name="$1" _probe_rc=0
   [ "$(acq_host_config_read msb "$name" ro-host-config)" = "1" ] || return 1
-  local _probe_rc=0
   _acq_msb_host_config_mount_probe "$name" || _probe_rc=$?
   case "$_probe_rc" in
-    0) ;;
-    2) echo "acq(msb): warning: sandbox '$name' was created with the read-only host-config mount but a guest probe indicates it is WRITABLE. Acq trusts the host record, so staged kit code runs from a path the guest may be able to modify. Recreate the sandbox and report this if it persists." >&2 ;;
-    *) echo "acq(msb): warning: sandbox '$name' was created with the read-only host-config mount but a guest probe does not confirm it is present. Acq trusts the host record and does not fall back to a guest copy, so staged kit commands may fail (kit command failures are reported as warnings). Recreate the sandbox if this persists." >&2 ;;
+    0) return 0 ;;
+    2) return 2 ;;
+    *) return 3 ;;
   esac
-  return 0
 }
 
 # Exit 0: mount present and not writable; 1: mount absent/unreadable; 2: guest
 # root could write to it. Exit 2 relies on `msb exec` passing the guest exit code
-# through unchanged; that is not live-verified, so the WRITABLE warning is
-# diagnostic only and never affects the decision.
+# through unchanged, which is not live-verified. If a different code is returned,
+# the writable case is reported as "not confirmed" (code 3 above); both fail closed,
+# so only the message differs.
 _acq_msb_host_config_mount_probe() {
   local name="$1"
   _acq_msb_cli exec "$name" -u agent -- sh -c \

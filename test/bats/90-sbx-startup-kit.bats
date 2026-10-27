@@ -522,6 +522,33 @@ agentic-coding-playbook ${PLAYBOOK_KIT}"
   grep -Fxq -- "agentic-coding-playbook ${PLAYBOOK_KIT}" <<<"$rec"
 }
 
+@test "provision(sbx): the built-in kit record exists before the startup barrier is consulted" {
+  : > "$CALLS"
+  (
+    acq_test_stub_provider_input_boundary
+    # The barrier is a guest-forgeable readiness signal. Whatever it reports, the
+    # built-in record must already be fixed from host-observed create status.
+    _acq_sbx_wait_for_startup_barrier() {
+      acq_host_config_read sbx barrierorder builtin-kits > "$STUBDIR/rec-at-barrier"
+      return 0
+    }
+    acq_backend_provision barrierorder shell /tmp
+  ) >/dev/null 2>&1 || true
+  grep -Fxq -- "zscaler-ca-certificate ${ZSCALER_KIT}" "$STUBDIR/rec-at-barrier"
+  grep -Fxq -- "agentic-coding-playbook ${PLAYBOOK_KIT}" "$STUBDIR/rec-at-barrier"
+}
+
+@test "provision(sbx): a failed startup barrier leaves no built-in kit record" {
+  : > "$CALLS"
+  (
+    acq_test_stub_provider_input_boundary
+    _acq_sbx_wait_for_startup_barrier() { return 1; }
+    acq_backend_provision barrierfail shell /tmp
+  ) >/dev/null 2>&1 || true
+  assert_regex "$(cat "$CALLS")" 'sbx rm --force barrierfail'
+  assert_equal "$(acq_host_config_read sbx barrierfail builtin-kits)" ''
+}
+
 @test "provision(sbx): an empty provider selection seeds no USAi built-in record" {
   : > "$CALLS"
   (

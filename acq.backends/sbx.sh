@@ -668,6 +668,13 @@ _acq_backend_provision_unlocked() {
       echo "acq(sbx): error: sandbox '$name' was created but provider inputs could not be published." >&2
       return 1
     fi
+    # Host state is fixed from what the host observed (this create succeeded with
+    # these kit flags), BEFORE the guest-written startup barrier is consulted. The
+    # barrier is a readiness signal a guest can satisfy early, so no record may
+    # depend on it. Clear stale same-name state first, then seed.
+    acq_host_config_clear_instance_state sbx "$name"
+    _acq_sbx_seed_extra_kit_record "$name"
+    _acq_sbx_seed_builtin_kit_record "$name"
     acq_spin_start "Waiting for kit startup in '$name'"
     if ! _acq_sbx_wait_for_startup_barrier "$name" "$_startup_barrier_token"; then
       acq_spin_stop "Waiting for kit startup in '$name'"
@@ -679,7 +686,6 @@ _acq_backend_provision_unlocked() {
       return 1
     fi
     acq_spin_stop "Waiting for kit startup in '$name'"
-    acq_host_config_clear_instance_state sbx "$name"
     if ! acq_provenance_write sbx "$name" "$agent"; then
       echo "acq(sbx): error: could not record provenance for '$name'." >&2
       echo "          Removing the new sandbox because safe reattach requires complete state." >&2
@@ -701,8 +707,6 @@ _acq_backend_provision_unlocked() {
       fi
     fi
     acq_workspace_record_write sbx "$name" "$_primary_ws" || true
-    _acq_sbx_seed_extra_kit_record "$name"
-    _acq_sbx_seed_builtin_kit_record "$name"
     # Backend parity (ADR-0030): sbx DELIVERS ~/.rc.d/*.sh via kit files[] but,
     # unlike msb's .profile bridge, nothing SOURCES them at login. Write the same
     # bridge here at create time so a kit-dropped snippet actually runs. This is a
@@ -806,7 +810,10 @@ _acq_sbx_builtin_kit_record() {
     echo "acq: warning: could not record built-in kit '$kit' for '$name'; re-attach may re-attempt it." >&2
 }
 
-# Create-time seed: the kits the heal consults, as just applied by `sbx create`.
+# Create-time seed: the kits the heal consults, as passed to the `sbx create` that
+# the host just observed succeed. This is the host-observable fact; it does not
+# claim the guest's kit startup commands succeeded (the startup barrier is a guest
+# file and is deliberately not an input here). Seeded before the barrier wait.
 _acq_sbx_seed_builtin_kit_record() {
   local name="$1" records
   records="zscaler-ca-certificate ${ZSCALER_KIT}"

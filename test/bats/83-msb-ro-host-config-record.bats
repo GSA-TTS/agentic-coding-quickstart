@@ -58,26 +58,55 @@ _apply() { # NAME KITDIR RECORD [ENV...]
   '
 }
 
-@test "ro record: host record wins when the guest probe reports the mount missing" {
+# Deliberate change: these two cases used to assert warn-and-continue (stage and
+# run from the mount despite a probe that did not confirm it read-only). A recorded
+# sandbox whose mount does not look read-only now fails closed: nothing is staged,
+# copied into the guest, or executed.
+@test "ro record: a probe that does not confirm the mount fails closed (missing)" {
   local k="$STUBDIR/k1"; _ro_kit "$k"
   _apply recmissing "$k" 1 STUB_HOST_CONFIG_MOUNT=0
-  assert_success
+  assert_failure
+  assert_output --partial "'/home/agent/cfg/merge.mjs'"
+  assert_output --partial 'not a confirmed read-only mount'
+  assert_output --partial 'No guest-copy fallback is taken'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'node /var/lib/acq/host/kit-files/'
+  refute_regex "$log" 'node '
   refute_regex "$log" 'msb copy .*recmissing:/home/agent/cfg/merge\.mjs'
-  assert_output --partial 'does not confirm it is present'
-  assert_output --partial 'does not fall back to a guest copy'
+  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/recmissing.*.config/kit-files 2>&1'
+  assert_failure
 }
 
-@test "ro record: host record wins when the guest probe reports the mount writable" {
+@test "ro record: a probe that finds the mount writable fails closed and stages and runs nothing" {
   local k="$STUBDIR/k2"; _ro_kit "$k"
   _apply recwritable "$k" 1 STUB_HOST_CONFIG_WRITABLE=1
-  assert_success
+  assert_failure
+  assert_output --partial "'/home/agent/cfg/merge.mjs'"
+  assert_output --partial 'WRITABLE'
+  assert_output --partial 'No guest-copy fallback is taken'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'node /var/lib/acq/host/kit-files/'
+  refute_regex "$log" 'node '
   refute_regex "$log" 'msb copy .*recwritable:/home/agent/cfg/merge\.mjs'
-  assert_output --partial 'indicates it is WRITABLE'
-  assert_output --partial 'may be able to modify'
+  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/recwritable.*.config/kit-files 2>&1'
+  assert_failure
+}
+
+@test "ro record: a writable mount does not block a kit with no readonly files" {
+  local k="$STUBDIR/k2b"; mkdir -p "$k/files"
+  printf '{}\n' > "$k/files/data.jsonc"
+  cat >"$k/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: plain-kit
+displayName: Plain Kit
+description: data only
+files:
+  - path: /home/agent/cfg/data.jsonc
+    mode: "0644"
+    source: files/data.jsonc
+SPEC
+  _apply plainwritable "$k" 1 STUB_HOST_CONFIG_WRITABLE=1
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'msb copy .*plainwritable:/home/agent/cfg/data\.jsonc'
 }
 
 @test "ro record: a confirming probe is silent" {
