@@ -3033,8 +3033,8 @@ environment, or uses the shell path as an input to a host-side decision.
 
 ## 47. SBX Startup Barrier Is a Guest File Check (Accepted Residual Risk)
 
-**Status:** Accepted / observed. No code change: the barrier cannot be made
-host-authoritative without sbx features that have not been verified.
+**Status:** Accepted / observed for the barrier itself. No host-authoritative
+startup signal exists; the barrier no longer decides the kit records.
 
 ### Observation
 
@@ -3047,21 +3047,40 @@ is authoritative, but the signal itself is a guest file. A guest that can read
 the token (the normal case, not a hypothetical) or that can alter how the startup
 command is replayed (unverified on sbx) could make acq believe startup finished.
 
+### What the barrier does and does not guarantee
+
+- **It guarantees only** that acq does not attach, or keep the sandbox, until a
+  guest file contains this create's token. That is an ordering aid for honest
+  guests; it is not evidence that any kit's startup commands succeeded.
+- **It does not decide the kit records.** The `extra-kits` and `builtin-kits`
+  records are written from what the host observed: the `sbx create` it ran
+  succeeded with those kit flags. They are seeded before the barrier is
+  consulted, so a guest that satisfies the barrier early (or never runs its
+  startup commands) changes neither. Provenance and the launch-mode record are
+  also host-derived but are written after the barrier succeeds; the barrier
+  decides only whether acq goes on to write them or removes the sandbox and its
+  host state.
+- **What a record therefore means:** "these kits were passed to a create that
+  succeeded", not "these kits' startup commands ran and finished". A heal that
+  trusts the record will not re-apply those kits on its own initiative; the
+  recovery for a damaged guest is `acq rm` and recreate (and on sbx 0.38 a
+  re-apply of a startup-bearing kit is refused anyway, see section 36).
+
 ### Why this is accepted
 
-- **The barrier is a readiness/liveness gate, not an integrity gate.** It gates
-  whether acq keeps the sandbox and proceeds to the host-written records and
-  attach. A forged token lets acq proceed before kit startup has finished, so the
-  guest can only hurt its own setup; it changes no host-derived value.
-- **No acq trust decision reads it.** The values acq acts on across restarts
-  (`extra-kits`, `builtin-kits`, `generic-opencode`, provenance) are host-written
-  and independent of this file.
+- **Nothing in the guest is a trust anchor.** The sandbox is the boundary, and a
+  guest can already damage its own setup by editing its filesystem after create.
+  The barrier adds no new way to do that.
+- **No acq trust decision reads the barrier.** The values acq acts on across
+  restarts (`extra-kits`, `builtin-kits`, `generic-opencode`, provenance) are
+  host-written from host-observed status and independent of this file.
 - **A host-authoritative signal needs sbx support not verified here.** The only
   candidates are a backend-reported startup status or a host-visible channel out
-  of the guest. Neither was found in the sbx documentation or CLI
-  help consulted for this repository (not exhaustively checked), and adding one by guessing would trade a low-impact residual risk for
-  an unverifiable mechanism. The related trusted-startup question for SBX is
-  analyzed in ADR-0036 (SBX trusted-startup parity).
+  of the guest. Neither was found in the sbx documentation or CLI help consulted
+  for this repository (not exhaustively checked), and adding one by guessing would
+  trade a low-impact residual risk for an unverifiable mechanism. The related
+  trusted-startup question for SBX is analyzed in the SBX trusted-startup parity
+  ADR (`docs/adr/0036-sbx-trusted-startup-parity.md`).
 
 ### Revisit if
 

@@ -179,20 +179,21 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   a guest command, which a passwordless-sudo guest could forge to force the
   guest-copy downgrade. A sandbox with no record (created before the key existed,
   or never fully created) takes the legacy guest-copy path and warns. A
-  guest-executed probe of the mount remains as a diagnostic only: when a record
-  exists and the probe disagrees, acq warns and still trusts the record. If the
-  mount looks absent, acq warns that staged kit commands may fail (kit command
-  failures are themselves reported as warnings) and does not fall back to a guest
-  copy; if it looks guest-writable, acq warns that staged code runs from a path
-  the guest may be able to modify, which is no stronger than the guest copy and
-  signals that `:ro` is not being enforced. This is a deliberate change from
-  "degrade to a guest copy" to "warn and possibly fail" (no escalation to the
-  guest-writable path), applied only when the record exists; legacy and
-  no-record sandboxes still degrade safely. The record is never evidence of
-  verified read-only enforcement: it proves a `:ro` request plus exec readiness
-  only. When a record exists and staging a `readonly: true` file onto the host
-  fails, the apply fails with an error naming the file rather than copying it into
-  the guest; only sandboxes with no record take the guest copy. If a future
+  guest-executed probe of the mount can only make acq stricter: when a record
+  exists, any probe answer other than "present and not writable" makes acq fail
+  closed. If the mount looks absent or the probe cannot confirm it, or if it looks
+  guest-writable, applying a `readonly: true` file fails with an error naming the
+  file; acq stages nothing, runs nothing from the mount, and does not copy the file
+  into the guest. A guest that controls the probe can therefore cause a refusal but
+  cannot make acq trust anything it would not otherwise trust. This is a deliberate
+  change from "degrade to a guest copy" (and from an intermediate "warn and
+  continue" for the writable case) to fail closed, applied only when the record
+  exists; legacy and no-record sandboxes still degrade to the guest copy with a
+  warning. The record is never evidence of verified read-only enforcement: it
+  proves a `:ro` request plus exec readiness only. When a record exists and
+  staging a `readonly: true` file onto the host fails, the apply likewise fails
+  with an error naming the file rather than copying it into the guest; only
+  sandboxes with no record take the guest copy. If a future
   msb changes `--volume ...:ro` parsing or enforcement, acq must raise or gate
   its minimum msb version before relying on ADR-0035. Host and guest path forms
   follow ADR-0029.
@@ -372,12 +373,12 @@ stubbed backends; they prove acq's decision logic, not live sbx or msb behavior.
 | SSH socket derives from host authority only | `81`: "SSH_AUTH_SOCK comes from the host record", "no host ssh-auth-sock record ... no SSH_AUTH_SOCK" (sbx forwards natively, no acq-held value) | Forged socket marker with a live ssh-agent forward |
 | Kit environment derives from host authority only | `81`: "kit environment replay uses only the host kit-env record", "no host kit-env record ... no forged variable"; `78-msb-kit-env.bats` (sbx injects natively) | Forge the guest marker, confirm the session environment |
 | A forged guest marker cannot redirect any of the four | Same cases; the forging stub answers every legacy `/var/lib/acq/*` read with attacker values and asserts those values never reach argv | Same live checks |
-| Inventory of remaining guest reads | The remaining guest-derived reads are fail-soft liveness and presence probes, the diagnostic mount probe, the passwd login shell and the sbx startup barrier (the last two in `docs/KNOWN_FAILURE_MODES.md` sections 46 and 47) | None |
+| Inventory of remaining guest reads | The remaining guest-derived reads are fail-soft liveness and presence probes, the mount probe (which can only make acq stricter), the passwd login shell and the sbx startup barrier (the last two in `docs/KNOWN_FAILURE_MODES.md` sections 46 and 47) | None |
 | Real backend validation recorded | Not recorded for this slice | Record in `docs/VERIFY_PROVIDER_ADOPTION.md` after `scripts/verify-backends` on both backends |
 
 Adjacent gates also moved to host authority, beyond the four
 GSA-TTS/agentic-coding-quickstart#636 fields: the sbx `extra-kits` and `builtin-kits` records (forged-probe cases in
-`90-sbx-startup-kit.bats`), the msb `ro-host-config` create fact
+`90-sbx-startup-kit.bats`; both are seeded from the host-observed `sbx create` before the guest startup barrier is consulted, so they do not depend on it), the msb `ro-host-config` create fact
 (`83-msb-ro-host-config-record.bats`), and the msb install and agent-user gates
 (`81`, `82-msb-legacy-sandbox.bats`). Legacy sandboxes degrade as documented in
 `docs/KNOWN_FAILURE_MODES.md` section 32.1. SBX trusted-startup parity is
