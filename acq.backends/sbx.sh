@@ -215,23 +215,69 @@ _acq_sbx_kit_sources_manual_hint() {
   echo "        sbx settings set kit.allowedSources '${cmd}'" >&2
 }
 
-# acq_backend_kit_source_revoked PREFIX — a trusted kit source was removed, so
-# drop its prefix from sbx's kit.allowedSources. _acq_sbx_ensure_kit_sources_allowed
-# only ever UNIONS, which left a revoked source allowed until the user edited the
-# setting by hand. Best-effort: a failed/absent jq or sbx simply leaves it alone.
+# acq_backend_kit_source_revoked REPO — a trusted kit source was removed. sbx's
+# kit.allowedSources is owner-granular (host/owner/) and _acq_sbx_ensure_kit_sources_allowed
+# only ever UNIONS, so a revoked source stayed fetchable until the setting was
+# edited by hand. Recompute against what REMAINS trusted once REPO is gone: the
+# owner prefix is dropped only when no remaining registry entry (and no explicit legacy
+# ACQ_EXTRA_KIT_SOURCES grant) still needs it. Returns 0 only when the backend
+# allowlist is verified to no longer grant a prefix nothing needs; any inability
+# to read, write, or verify returns 1 with a recovery command, never a quiet 0.
 acq_backend_kit_source_revoked() {
-  local prefix="${1:-}" current desired
-  [ -n "$prefix" ] || return 0
-  command -v jq >/dev/null 2>&1 || return 0
-  command -v sbx >/dev/null 2>&1 || return 0
-  current=$(sbx settings get kit.allowedSources 2>/dev/null) || return 0
-  printf '%s' "$current" | jq -e 'type == "array"' >/dev/null 2>&1 || return 0
-  desired=$(printf '%s' "$current" | jq -c --arg p "$prefix" 'map(select(. != $p))' 2>/dev/null) || return 0
-  [ -n "$desired" ] || return 0
-  if sbx settings set kit.allowedSources "$desired" </dev/null >/dev/null 2>&1; then
-    acq_debug "kit-source: removed $prefix from sbx kit.allowedSources"
+  local repo="${1:-}" prefix remaining current desired verify
+  [ -n "$repo" ] || return 0
+  prefix=$(_acq_kit_source_owner_prefix "$repo")
+  remaining=$(acq_kit_source_prefixes "$repo") || remaining=""
+  case "
+$remaining
+" in
+    *"
+$prefix
+"*) return 0 ;;
+  esac
+  if ! command -v sbx >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "sbx and jq are both needed to update kit.allowedSources"
+    return 1
   fi
+  current=$(sbx settings get kit.allowedSources 2>/dev/null) || current=""
+  if ! printf '%s' "$current" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "could not read kit.allowedSources as a JSON array"
+    return 1
+  fi
+  if ! printf '%s' "$current" | jq -e --arg p "$prefix" 'index($p) != null' >/dev/null 2>&1; then
+    return 0
+  fi
+  desired=$(printf '%s' "$current" | jq -c --arg p "$prefix" 'map(select(. != $p))' 2>/dev/null)
+  if [ -z "$desired" ]; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "could not compute the updated allowlist"
+    return 1
+  fi
+  if ! sbx settings set kit.allowedSources "$desired" </dev/null >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "could not write kit.allowedSources" "$desired"
+    return 1
+  fi
+  verify=$(sbx settings get kit.allowedSources 2>/dev/null) || verify=""
+  if ! printf '%s' "$verify" | jq -e --arg p "$prefix" 'type == "array" and (index($p) == null)' >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "kit.allowedSources still lists it after the update" "$desired"
+    return 1
+  fi
+  echo "acq: removed $prefix from sbx kit.allowedSources." >&2
   return 0
+}
+
+# _acq_sbx_kit_source_revoke_failed PREFIX REASON [DESIRED_JSON] — the loud half
+# of the fail-closed contract: say what is still permitted and how to fix it.
+_acq_sbx_kit_source_revoke_failed() {
+  local prefix="$1" reason="$2" desired="${3:-}"
+  echo "acq: error: $reason, so sbx kit.allowedSources still permits '$prefix'." >&2
+  echo "     Revocation is NOT complete: the source stays registered because the sbx" >&2
+  echo "     backend could still fetch kits from that owner." >&2
+  if [ -n "$desired" ]; then
+    echo "     Run:   sbx settings set kit.allowedSources '$desired'" >&2
+  else
+    echo "     Review: sbx settings get kit.allowedSources   (remove '$prefix', then 'sbx settings set kit.allowedSources <json-array>')" >&2
+  fi
+  echo "     Then re-run: acq kit-source rm <repo>" >&2
 }
 
 _acq_sbx_ensure_kit_sources_allowed() {  local current desired

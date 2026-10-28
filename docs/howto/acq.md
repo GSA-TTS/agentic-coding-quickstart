@@ -3,7 +3,7 @@ title: "acq How-To Guide"
 description: "Detailed how-to for acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-10-25"
+last_updated: "2026-10-28"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "howto", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -666,8 +666,16 @@ The shipped default is `github.com/GSA-TTS/agentic-coding-patterns` pinned to th
 release `acq` was built against, so a fresh install needs no configuration.
 `ACQ_KIT_SOURCES` overrides the list for one invocation (whitespace-separated
 `host/owner/repo[@ref][|dir]` entries); `ACQ_EXTRA_KIT_SOURCES` still **adds**
-allowlist prefixes for backward compatibility. The fetch allowlist handed to the
-backend (e.g. sbx `kit.allowedSources`) is derived from this registry.
+owner-wide allowlist prefixes for backward compatibility.
+
+**Trust granularity.** Trust is recorded and checked per **repository**
+(`host/owner/repo`): trusting `github.com/acme/trusted` does not authorize
+`github.com/acme/other`. The one place a coarser unit appears is a backend that can
+only allowlist by prefix: sbx `kit.allowedSources` is owner-granular
+(`host/owner/`), so the prefix handed to sbx is derived from the registry. `acq`
+therefore re-checks the repository itself before it acts on a durable
+`provider_kit:` ref. `ACQ_EXTRA_KIT_SOURCES` is the only owner-wide grant, and it is
+explicit.
 
 Trust is **narrow**: a trusted source may be fetched from, and may contribute
 provider kits. It does **not** extend to the validation control plane — the
@@ -683,12 +691,21 @@ unreachable source simply lists nothing.
 **What the registry does and does not gate.** The registry governs the sources
 `acq` *resolves* on your behalf — the trusted-source allowlist handed to the
 backend (sbx `kit.allowedSources`, updated on `add` **and** revoked on `rm`) and
-`provider_kit:` entries written in `config.yaml`, which must name a trusted source
-or an already-trusted remote ref. A **literal ref you supply on this invocation**
+`provider_kit:` entries written in `config.yaml`, which must name a trusted
+repository exactly (or an already-trusted remote ref to one). A **literal ref you supply on this invocation**
 (`--kit git+https://…`, `ACQ_PROVIDER_KITS`, `ACQ_EXTRA_KITS`) is trusted by *you*,
 not by the registry: `acq` fetches it as given. Local paths are always used
 verbatim. In short: the registry is the durable-trust boundary, not a sandbox for
 refs you type.
+
+**Removing a source (`kit-source rm`) fails closed.** `acq` first recomputes what
+the backend allowlist should be from the sources that *remain* (plus any explicit
+`ACQ_EXTRA_KIT_SOURCES`), so removing one repository never revokes an owner prefix
+another trusted repository still needs. If the backend allowlist cannot be read,
+written, or verified (for example `jq` or `sbx` is missing, or `sbx settings set`
+fails), the command exits non-zero, leaves the source registered, and prints the
+exact `sbx settings set kit.allowedSources …` recovery command. Fix the cause (or
+apply the printed command) and re-run `acq kit-source rm`; it is safe to repeat.
 
 The provider kit `acq` uses by default is likewise data:
 

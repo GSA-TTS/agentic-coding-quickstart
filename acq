@@ -310,6 +310,11 @@ is github.com/GSA-TTS/agentic-coding-patterns pinned to the release acq was buil
 against. ACQ_KIT_SOURCES overrides the list for one invocation, and
 ACQ_EXTRA_KIT_SOURCES still ADDS allowlist prefixes (backward compatibility).
 
+Trust is per repository: trusting host/owner/one does not trust host/owner/two.
+`rm` also revokes the backend's owner-wide allowlist entry (sbx) unless another
+trusted source still needs it, and FAILS (leaving the source registered, with a
+recovery command) if the backend allowlist cannot be updated.
+
 `ls` also lists the provider kits each source publishes (by scanning for
 */provider-input.json). Discovery is best-effort: an unreachable source simply
 lists nothing.
@@ -1918,20 +1923,10 @@ case "$subcommand" in
           echo "     usage: acq kit-source rm REPO" >&2
           exit 1
         fi
+        # Also revokes the owner prefix from the backend's own allowlist when no
+        # remaining trusted source needs it; exits non-zero (fail closed) if the
+        # backend allowlist could not be reconciled.
         acq_kit_source_rm "$1" || exit 1
-        # Revoke the prefix from the backend's own allowlist too (sbx unions on
-        # create; without this a removed source stays fetchable by the backend).
-        # NO acq_backend_prepare here: this is a config-only verb, and on msb a
-        # prepare can run `msb doctor --fix` (host mutation). acq_resolve_backend
-        # has already loaded the active adapter, so the hook is available when the
-        # backend implements one.
-        if command -v acq_backend_kit_source_revoked >/dev/null 2>&1; then
-          revoked_repo=$(_acq_kit_source_normalize_repo "$1" 2>/dev/null) || revoked_repo=""
-          if [ -n "$revoked_repo" ]; then
-            acq_backend_kit_source_revoked \
-              "${revoked_repo%%/*}/$(printf '%s' "${revoked_repo#*/}" | cut -d/ -f1)/"
-          fi
-        fi
         ;;
       --help|-h)
         _acq_kit_source_usage

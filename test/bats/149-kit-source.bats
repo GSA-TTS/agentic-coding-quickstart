@@ -390,3 +390,182 @@ _fake_source_tree() {
   assert_success
   assert_output --partial 'github.com/evil/kits.git#ref=abc123'
 }
+
+# ---------------------------------------------------------------------------
+# Trust granularity: a durable remote ref is trusted per REPOSITORY, not per owner
+# ---------------------------------------------------------------------------
+
+@test "trusting one repository does not authorize a sibling repo of the same owner" {
+  run "$ACQ" kit-source add github.com/acme/trusted --ref abc123
+  assert_success
+
+  _acq_config_write_field provider_kit 'git+https://github.com/acme/untrusted.git#ref=abc123&dir=kits'
+  run acq_provider_kit_ref
+  assert_failure
+  assert_output --partial 'untrusted remote ref'
+  assert_output --partial 'acq kit-source add github.com/acme/untrusted'
+
+  # A repository whose name merely starts with a trusted name is a different repo.
+  _acq_config_write_field provider_kit 'git+https://github.com/acme/trusted-evil.git#ref=abc123&dir=kits'
+  run acq_provider_kit_ref
+  assert_failure
+  assert_output --partial 'untrusted remote ref'
+
+  # The trusted repository itself still resolves.
+  _acq_config_write_field provider_kit 'git+https://github.com/acme/trusted.git#ref=abc123&dir=kits'
+  run acq_provider_kit_ref
+  assert_success
+  assert_output --partial 'github.com/acme/trusted.git#ref=abc123'
+}
+
+@test "a durable remote ref that cannot be parsed to one repository fails closed" {
+  run "$ACQ" kit-source add github.com/acme/trusted --ref abc123
+  assert_success
+
+  local bad
+  for bad in \
+    'git+https://user@github.com/acme/trusted.git#ref=abc123&dir=kits' \
+    'git+https://github.com/acme/trusted/extra.git#ref=abc123&dir=kits' \
+    'git+https://github.com/acme#ref=abc123&dir=kits' \
+    'git+http://github.com/acme/trusted.git#ref=abc123&dir=kits' \
+    'git+https://evil.example/x://github.com/acme/trusted.git#ref=abc123&dir=kits' \
+    'git+https://evil.example/github.com/acme/trusted.git#ref=abc123&dir=kits' \
+    'git+https://github.com/acme/trusted/.git#ref=abc123&dir=kits' \
+    'git+https://github.com:8443/acme/trusted.git#ref=abc123&dir=kits' \
+    'git+https://GitHub.com/acme/trusted.git#ref=abc123&dir=kits'; do
+    _acq_config_write_field provider_kit "$bad"
+    run acq_provider_kit_ref
+    assert_failure
+    assert_output --partial 'untrusted remote ref'
+  done
+}
+
+# ---------------------------------------------------------------------------
+# kit-source rm: the backend allowlist is recomputed from what REMAINS trusted
+# ---------------------------------------------------------------------------
+
+# _plant_sbx_allowlist_stub CURRENT_JSON — an sbx whose kit.allowedSources lives
+# in $STUBDIR/allowed. STUB_SET_FAIL=1 makes `settings set` fail.
+_plant_sbx_allowlist_stub() {
+  printf '%s\n' "$1" > "$STUBDIR/allowed"
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.48.0 abc123\n' ;;
+  settings)
+    case "${2:-}" in
+      get) cat "$STUBDIR/allowed" ;;
+      set)
+        [ "${STUB_SET_FAIL:-0}" = 1 ] && exit 1
+        printf '%s\n' "$4" > "$STUBDIR/allowed" ;;
+    esac
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+}
+
+@test "kit-source rm keeps a shared owner prefix while another trusted repo needs it" {
+  _plant_sbx_allowlist_stub '["docker.io/","github.com/acme/"]'
+  run "$ACQ" kit-source add github.com/acme/one --ref aaaa
+  assert_success
+  run "$ACQ" kit-source add github.com/acme/two --ref bbbb
+  assert_success
+
+  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/acme/one
+  assert_success
+  grep -Fq 'github.com/acme/' "$STUBDIR/allowed"
+  refute grep -Fq 'settings set' "$CALLS"
+
+  # Removing the last repository of that owner finally drops the prefix, and only
+  # that prefix: unrelated entries the operator set stay put.
+  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/acme/two
+  assert_success
+  refute grep -Fq 'github.com/acme/' "$STUBDIR/allowed"
+  grep -Fq 'docker.io/' "$STUBDIR/allowed"
+}
+
+@test "kit-source rm keeps a prefix still granted by ACQ_EXTRA_KIT_SOURCES" {
+  _plant_sbx_allowlist_stub '["docker.io/","github.com/acme/"]'
+  run "$ACQ" kit-source add github.com/acme/one --ref aaaa
+  assert_success
+
+  run env ACQ_BACKEND=sbx ACQ_EXTRA_KIT_SOURCES='github.com/acme/' "$ACQ" kit-source rm github.com/acme/one
+  assert_success
+  grep -Fq 'github.com/acme/' "$STUBDIR/allowed"
+}
+
+@test "kit-source rm fails closed when the backend allowlist cannot be updated" {
+  _plant_sbx_allowlist_stub '["docker.io/","github.com/acme/"]'
+  run "$ACQ" kit-source add github.com/acme/one --ref aaaa
+  assert_success
+
+  run env ACQ_BACKEND=sbx STUB_SET_FAIL=1 "$ACQ" kit-source rm github.com/acme/one
+  assert_failure
+  assert_output --partial 'still permits'
+  assert_output --partial 'sbx settings set kit.allowedSources'
+  assert_output --partial 'NOT removed'
+  refute_output --partial "removed kit source 'github.com/acme/one'."
+  # Nothing is reported as removed, so the source stays registered and the same
+  # command can be retried once the backend setting is fixed.
+  run acq_kit_sources_entries
+  assert_output --partial 'github.com/acme/one'
+  grep -Fq 'github.com/acme/' "$STUBDIR/allowed"
+
+  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/acme/one
+  assert_success
+  refute grep -Fq 'github.com/acme/' "$STUBDIR/allowed"
+}
+
+@test "kit-source rm fails closed when the backend allowlist cannot be read" {
+  _plant_sbx_allowlist_stub 'not json'
+  run "$ACQ" kit-source add github.com/acme/one --ref aaaa
+  assert_success
+
+  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/acme/one
+  assert_failure
+  assert_output --partial 'still permits'
+  run acq_kit_sources_entries
+  assert_output --partial 'github.com/acme/one'
+}
+
+@test "kit-source rm fails closed when jq cannot be used" {
+  _plant_sbx_allowlist_stub '["docker.io/","github.com/acme/"]'
+  run "$ACQ" kit-source add github.com/acme/one --ref aaaa
+  assert_success
+
+  printf '#!/bin/sh\nexit 127\n' > "$STUBDIR/jq"
+  chmod +x "$STUBDIR/jq"
+  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/acme/one
+  assert_failure
+  assert_output --partial 'still permits'
+  assert_output --partial 'NOT removed'
+  run acq_kit_sources_entries
+  assert_output --partial 'github.com/acme/one'
+}
+
+@test "kit-source rm fails closed when the backend does not apply the update" {
+  _plant_sbx_allowlist_stub '["docker.io/","github.com/acme/"]'
+  # `settings set` reports success but the value does not change.
+  sed -i 's|printf .%s\\n. "\$4" > "\$STUBDIR/allowed" ;;|: ;;|' "$STUBDIR/sbx"
+  run "$ACQ" kit-source add github.com/acme/one --ref aaaa
+  assert_success
+
+  run env ACQ_BACKEND=sbx "$ACQ" kit-source rm github.com/acme/one
+  assert_failure
+  assert_output --partial 'still lists it after the update'
+  assert_output --partial 'NOT removed'
+  run acq_kit_sources_entries
+  assert_output --partial 'github.com/acme/one'
+}
+
+@test "kit-source rm still works on a backend with no allowlist (msb)" {
+  run "$ACQ" kit-source add github.com/acme/one --ref aaaa
+  assert_success
+  run env ACQ_BACKEND=msb "$ACQ" kit-source rm github.com/acme/one
+  assert_success
+  run acq_kit_sources_entries
+  refute_output --partial 'github.com/acme/one'
+}

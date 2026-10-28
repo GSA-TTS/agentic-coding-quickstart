@@ -81,7 +81,7 @@ _seed_stale_provenance() {
   '
   assert_output --partial 'cannot extend a live sandbox with startup-bearing kits'
   assert_output --partial 'missing the Zscaler CA kit'
-  assert_output --partial 'missing the USAi kit'
+  assert_output --partial 'missing the provider kit'
   assert_output --partial 'missing the playbook kit'
 }
 

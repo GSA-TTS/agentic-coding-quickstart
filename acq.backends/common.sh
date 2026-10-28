@@ -250,10 +250,10 @@ ACQ_PROVIDER_SELECTION_ERROR=""
 USAI_PROVIDER_HOST="api.gsa.usai.gov"
 USAI_PROVIDER_BASE_URL="https://${USAI_PROVIDER_HOST}/api/v1"
 USAI_PROVIDER_KEY_ENV="USAI_API_KEY"
+# shellcheck disable=SC2034  # consumed by the sbx adapter (sbx.sh)
 USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_BASE_URL}/models"
-USAI_PROVIDER_KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
+# shellcheck disable=SC2034  # consumed by the sbx and msb adapters
 USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_HOST}"
-USAI_PROVIDER_FACTS_SOURCE="fallback"
 
 # Source the shared agent catalog (single source of truth for agent tokens and
 # the sandbox-template image naming convention; issue #377). Both adapters also
@@ -2515,15 +2515,26 @@ acq_kit_sources_entries() {
   return 0
 }
 
-# acq_kit_source_prefixes — the fetch allowlist, derived from the registry.
-# ACQ_EXTRA_KIT_SOURCES (a list of host/owner/ prefixes) still works as a
-# backward-compatible ADDITION so existing setups keep fetching their kits.
+# _acq_kit_source_owner_prefix REPO — the host/owner/ prefix of host/owner/repo.
+# Backends that allowlist by prefix (sbx) can only express owner granularity; acq's
+# own trust decisions (below) stay at exact-repository granularity.
+_acq_kit_source_owner_prefix() {
+  local repo="${1:-}"
+  printf '%s/%s/\n' "${repo%%/*}" "$(printf '%s' "${repo#*/}" | cut -d/ -f1)"
+}
+
+# acq_kit_source_prefixes [EXCLUDE_REPO] — the BACKEND allowlist (owner prefixes),
+# derived from the registry; EXCLUDE_REPO is left out so a caller can ask what
+# would REMAIN after removing it. ACQ_EXTRA_KIT_SOURCES (a list of host/owner/
+# prefixes) still works as a backward-compatible ADDITION so existing setups keep
+# fetching their kits.
 acq_kit_source_prefixes() {
-  local entries repo rest prefix seen=""
+  local exclude="${1:-}" entries repo rest prefix seen=""
   entries=$(acq_kit_sources_entries) || return 1
   while IFS='|' read -r repo rest; do
     [ -n "$repo" ] || continue
-    prefix="${repo%%/*}/$(printf '%s' "${repo#*/}" | cut -d/ -f1)/"
+    [ "$repo" != "$exclude" ] || continue
+    prefix=$(_acq_kit_source_owner_prefix "$repo")
     case " $seen " in *" $prefix "*) continue ;; esac
     seen="$seen $prefix"
     printf '%s\n' "$prefix"
@@ -2620,6 +2631,52 @@ _acq_kit_source_kit_ref() {
   printf 'git+https://%s.git#ref=%s&dir=%s\n' "$repo" "$ref" "$path"
 }
 
+# _acq_kit_source_ref_trusted REF — a durable (config.yaml) literal remote kit
+# ref is trusted only if it names EXACTLY one repository that is registered.
+# Trusting github.com/acme/trusted must not authorize github.com/acme/other, so
+# the comparison is on host/owner/repo, never on the owner prefix. A ref that
+# cannot be reduced to one plain https repository (credentials, extra path
+# segments, a non-https scheme, odd encoding) is refused. The only owner-wide
+# grant is the explicit, legacy ACQ_EXTRA_KIT_SOURCES prefix list.
+_acq_kit_source_ref_trusted() {
+  local ref="${1:-}" body="" repo="" token _extra=()
+  case "$ref" in
+    git+https://*) body="${ref#git+https://}" ;;
+  esac
+  body="${body%%#*}"
+  # The lenient normalizer (built for what a human pastes) must not be the
+  # judge here: it strips through the LAST scheme separator, so a hostile
+  # authority could hide in front of a trusted-looking path. Require the body
+  # to already BE host/owner/repo[.git], byte for byte.
+  case "$body" in
+    *@*|*%*|*\?*|*://*|*:*|*//*|*/) body="" ;;
+  esac
+  if [ -n "$body" ]; then
+    repo=$(_acq_kit_source_normalize_repo "$body") || repo=""
+    [ "$repo" = "${body%.git}" ] || repo=""
+  fi
+  if [ -n "$repo" ]; then
+    if _acq_kit_source_entry_for_repo "$repo" >/dev/null; then
+      return 0
+    fi
+    if [ -n "${ACQ_EXTRA_KIT_SOURCES:-}" ]; then
+      split_noglob _extra "$ACQ_EXTRA_KIT_SOURCES"
+      for token in ${_extra[@]+"${_extra[@]}"}; do
+        case "$token" in
+          */) case "$repo" in "$token"*) return 0 ;; esac ;;
+        esac
+      done
+    fi
+  fi
+  echo "acq: provider_kit names an untrusted remote ref: $ref" >&2
+  if [ -n "$repo" ]; then
+    echo "     Trust its source first: acq kit-source add $repo --ref <sha>" >&2
+  else
+    echo "     It must name one https repository (host/owner/repo) that is trusted." >&2
+  fi
+  return 1
+}
+
 # acq_provider_kit_ref [VALUE] — resolve the default provider kit (config
 # provider_kit, else ACQ_PROVIDER_KIT_DEFAULT) to a fetchable kit ref.
 # Accepted forms: <kit>@<source>, <source>/<kit>, host/owner/repo/<kit>.
@@ -2633,26 +2690,14 @@ acq_provider_kit_ref() {
   fi
   # A literal kit ref (local path or git+https) is used verbatim. A REMOTE ref
   # that comes from config.yaml is additionally held to the trusted-source
-  # allowlist: a config file is durable state acq acts on automatically, unlike a
-  # ref the user typed on this command line (--kit) or the test seam.
+  # registry, per repository: a config file is durable state acq acts on
+  # automatically, unlike a ref the user typed on this command line (--kit) or
+  # the test seam.
   case "$value" in
     git+http*|/*|./*|../*)
       if [ -n "$from_config" ]; then
         case "$value" in
-          git+http*)
-            local ref_authority="${value#git+http}"
-            ref_authority="${ref_authority#s://}"
-            ref_authority="${ref_authority#*://}"
-            ref_authority="${ref_authority%%/*}/$(printf '%s' "${ref_authority#*/}" | cut -d/ -f1)/"
-            case " $(acq_kit_source_prefixes | tr '\n' ' ') " in
-              *" $ref_authority "*) ;;
-              *)
-                echo "acq: provider_kit names an untrusted remote ref: $value" >&2
-                echo "     Trust its source first: acq kit-source add ${ref_authority%/} --ref <sha>" >&2
-                return 1
-                ;;
-            esac
-            ;;
+          git+http*) _acq_kit_source_ref_trusted "$value" || return 1 ;;
         esac
       fi
       printf '%s\n' "$value"
@@ -2757,7 +2802,7 @@ EOF
 # source. Values are unambiguous `<host/owner/repo>/<kit>` so a stored
 # `provider_kit:` never depends on a basename being unique.
 acq_provider_kit_candidates() {
-  local entries repo ref dir kits kit ksource kref kdir seen
+  local entries repo ref dir kits kit ksource kref seen
   printf '%s\t%s\n' "$ACQ_PROVIDER_KIT_DEFAULT" "$ACQ_PROVIDER_KIT_DEFAULT (shipped)"
   seen=" $ACQ_PROVIDER_KIT_DEFAULT "
   entries=$(acq_kit_sources_entries) || return 1
@@ -2765,7 +2810,7 @@ acq_provider_kit_candidates() {
     [ -n "$repo" ] && [ -n "$ref" ] || continue
     kits=$(acq_kit_source_provider_kits "$repo" "$ref" "$dir")
     [ -n "$kits" ] || continue
-    while IFS="$(printf '\t')" read -r kit ksource kref kdir; do
+    while IFS="$(printf '\t')" read -r kit ksource kref _; do
       [ -n "$kit" ] || continue
       case " $seen " in
         *" $ksource/$kit "*) continue ;;
@@ -2844,12 +2889,32 @@ acq_kit_source_rm() {
     echo "acq: kit source '${repo}' is not registered." >&2
     return 1
   fi
+  # Reconcile the BACKEND allowlist first. If it cannot be brought in line, stop
+  # with the registry untouched: nothing is reported as removed, the source stays
+  # listed, and re-running this command after fixing the backend retries cleanly.
+  # (The reverse order would leave acq saying "removed" while the backend still
+  # permits the whole owner.)
+  if ! _acq_kit_source_revoke_in_backend "$repo"; then
+    echo "acq: kit source '${repo}' was NOT removed (still registered)." >&2
+    return 1
+  fi
   summary=$(_acq_kit_source_rewrite "$repo") || {
     echo "acq: kit-source rm: could not write $(_acq_config_file)" >&2
     return 1
   }
   echo "acq: removed kit source '${repo}'." >&2
   return 0
+}
+
+# _acq_kit_source_revoke_in_backend REPO — ask the active backend (when it keeps
+# its own source allowlist) to drop what no source remaining AFTER removing REPO
+# needs. NO
+# acq_backend_prepare: this is a config-only verb, and on msb a prepare can run
+# `msb doctor --fix` (host mutation). acq_resolve_backend has already loaded the
+# active adapter, so the hook exists when the backend implements one.
+_acq_kit_source_revoke_in_backend() {
+  command -v acq_backend_kit_source_revoked >/dev/null 2>&1 || return 0
+  acq_backend_kit_source_revoked "$1"
 }
 
 # acq_kit_source_provider_kits ENTRY — list the provider kits a source publishes.
@@ -2878,7 +2943,7 @@ acq_kit_source_provider_kits() {
 # acq_kit_source_ls — sources, their pinned state, and the provider kits each
 # publishes (discovery is best-effort; see acq_kit_source_provider_kits).
 acq_kit_source_ls() {
-  local entries repo ref dir pinned kits kit ksource kref kdir printed
+  local entries repo ref dir pinned kits kit ksource kref printed
   entries=$(acq_kit_sources_entries) || return 1
   printf '%-52s %-12s %s\n' SOURCE REF KITS-DIR
   while IFS='|' read -r repo ref dir; do
@@ -2895,7 +2960,7 @@ EOF
     [ -n "$repo" ] && [ -n "$ref" ] || continue
     kits=$(acq_kit_source_provider_kits "$repo" "$ref" "$dir")
     [ -n "$kits" ] || continue
-    while IFS="$(printf '\t')" read -r kit ksource kref kdir; do
+    while IFS="$(printf '\t')" read -r kit ksource kref _; do
       [ -n "$kit" ] || continue
       printed=1
       printf '  %-34s %s (@%s)\n' "$kit" "$ksource" "$kref"
@@ -2942,10 +3007,6 @@ ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY="provider_credential_bindings"
 # `acq provider-credential set <id> <KEY_ENV> --host <H>`.
 # shellcheck disable=SC2034  # consumed by _acq_provider_trusted_default
 ACQ_PROVIDER_TRUSTED_DEFAULTS="usai|${USAI_PROVIDER_KEY_ENV}|${USAI_PROVIDER_HOST}"
-
-# KEY_ENV names owned by acq's built-in services: only the owning providerId may
-# claim them (otherwise a provider kit could re-point, say, GITHUB_TOKEN).
-ACQ_PROVIDER_RESERVED_KEY_ENVS="USAI_API_KEY GITHUB_TOKEN GH_TOKEN GITLAB_TOKEN"
 
 # Process-critical variables a provider credential must never occupy.
 ACQ_PROVIDER_FORBIDDEN_KEY_ENVS="PATH IFS LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV HOME SHELLOPTS PS4 CDPATH TMPDIR"

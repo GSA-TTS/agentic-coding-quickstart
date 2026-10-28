@@ -449,7 +449,7 @@ PYTHON
   rm -f "$wrapper"
   local saved_path="$PATH" saved_localappdata="${LOCALAPPDATA:-}"
   mkdir -p "$STUBDIR/emptybin"
-  PATH="$STUBDIR/emptybin"
+  export PATH="$STUBDIR/emptybin"
   LOCALAPPDATA="$STUBDIR/no-localappdata"
   ACQ_PROVIDER_INPUT_DATA_DIR="$STUBDIR/no-runtime"
   export PATH LOCALAPPDATA ACQ_PROVIDER_INPUT_DATA_DIR
@@ -791,7 +791,7 @@ PYTHON
 }
 
 @test "the registry keyEnv is authoritative for injection" {
-  local generation binding
+  local generation
   generation=$(_make_generation alpha ALPHA_KEY)
   export ACQ_PROVIDER_BINDINGS_GENERATION="$generation"
   _pin alpha ALPHA_KEY_OVERRIDE alpha.example.gov
