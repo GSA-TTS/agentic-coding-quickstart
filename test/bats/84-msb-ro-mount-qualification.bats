@@ -53,10 +53,13 @@ _apply_ver() { # NAME KITDIR VERSION QUALIFIED_LIST
   '
 }
 
-@test "qualified list: ships empty, so no msb version is trusted for readonly code today" {
+# Deliberate change: this case used to assert that the list ships EMPTY. The 0.7.7
+# canary PASSED (ADR-0035, "Qualification evidence"), so the shipped list is exactly
+# that one version. Any other entry must come with its own evidence in the same change.
+@test "qualified list: the shipped list is exactly msb 0.7.7 (ADR-0035 evidence)" {
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh"; printf "[%s]\n" "$MSB_RO_MOUNT_QUALIFIED_VERSIONS"'
   assert_success
-  assert_output '[]'
+  assert_output '[0.7.7]'
 }
 
 @test "qualified list: a forged zero-exit probe does not unlock staging on an unlisted version" {
@@ -381,4 +384,90 @@ _run_canary() { # [ENV...]
   assert_success
   run git -C "$REPO_ROOT" check-ignore -q tmp/qualify-msb-ro-mount-x/results.tsv
   [ "$status" -eq 0 ] || skip "not a git checkout, or tmp/ not ignored here"
+}
+
+# --- the shipped list (no override), deliberate-evidence behavior -------------------
+
+_apply_shipped() { # NAME KITDIR VERSION [ENV...]
+  local name="$1" kit="$2" ver="$3"; shift 3
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-'"$name"'" STUB_MSB_VERSION="'"$ver"'"
+    for kv in '"${*:-:}"'; do export "$kv" 2>/dev/null || true; done
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
+    acq_host_config_write msb "'"$name"'" ro-host-config 1
+    _acq_msb_apply_kit_dir "'"$name"'" "'"$kit"'" 2>&1
+  '
+}
+
+@test "shipped list: msb 0.7.7 with an ro-host-config record unlocks trusted staging" {
+  local k="$STUBDIR/s1"; _ro_kit "$k"
+  _apply_shipped shipped077 "$k" 0.7.7
+  assert_success
+  local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'node /var/lib/acq/host/kit-files/'
+  refute_regex "$log" 'msb copy .*shipped077:/home/agent/cfg/merge\.mjs'
+}
+
+@test "shipped list: msb 0.7.7 without a record still takes the guest-copy path (the record is still required)" {
+  local k="$STUBDIR/s2"; _ro_kit "$k"
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-s2" STUB_MSB_VERSION=0.7.7
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
+    _acq_msb_apply_kit_dir norecord077 "'"$k"'" 2>&1
+  '
+  assert_success
+  refute_regex "$(cat "$CALLS")" '/var/lib/acq/host/kit-files'
+  assert_regex "$(cat "$CALLS")" 'msb copy .*norecord077:/home/agent/cfg/merge\.mjs'
+}
+
+@test "shipped list: another msb version is refused even with a record and an all-clear probe" {
+  local k="$STUBDIR/s3"; _ro_kit "$k"
+  _apply_shipped shipped078 "$k" 0.7.8
+  assert_failure
+  assert_output --partial 'msb 0.7.8 is not on acq'
+  refute_regex "$(cat "$CALLS")" 'node '
+  _apply_shipped shipped069 "$k" 0.6.9
+  assert_failure
+  assert_output --partial 'msb 0.6.9 is not on acq'
+}
+
+@test "shipped list: a prerelease of the qualified version is refused" {
+  local k="$STUBDIR/s4"; _ro_kit "$k"
+  _apply_shipped shippedrc "$k" 0.7.7-rc1
+  assert_failure
+  assert_output --partial 'not on acq'
+  refute_regex "$(cat "$CALLS")" 'node '
+}
+
+@test "shipped list: an unparsable msb version is refused" {
+  local k="$STUBDIR/s5"; _ro_kit "$k"
+  _apply_shipped shippedbad "$k" banana
+  assert_failure
+  refute_regex "$(cat "$CALLS")" 'node '
+}
+
+@test "shipped list: a forged all-clear guest probe does not unlock an unlisted version" {
+  local k="$STUBDIR/s6"; _ro_kit "$k"
+  # The stub guest answers every probe as 'present and not writable' by default.
+  _apply_shipped shippedforge "$k" 0.7.9
+  assert_failure
+  assert_output --partial 'msb 0.7.9 is not on acq'
+  refute_regex "$(cat "$CALLS")" 'node '
+  refute_regex "$(cat "$CALLS")" 'msb copy .*shippedforge:/home/agent/cfg/merge\.mjs'
+}
+
+@test "shipped list: msb 0.7.7 still fails closed when the guest says the mount is writable" {
+  local k="$STUBDIR/s7"; _ro_kit "$k"
+  _apply_shipped shippedwrit "$k" 0.7.7 STUB_HOST_CONFIG_WRITABLE=1
+  assert_failure
+  assert_output --partial 'WRITABLE'
+  refute_regex "$(cat "$CALLS")" 'node '
 }

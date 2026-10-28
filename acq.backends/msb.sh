@@ -177,11 +177,13 @@ MSB_FIXED_VERSION="0.7.3"
 # Trusted execution of `readonly: true` kit files from the host-config mount
 # (ADR-0035 Mechanism 2) is permitted ONLY on a version listed here. The list is
 # deliberately checked in, not read from the environment or any guest-reachable
-# state, and it starts EMPTY: no version has been qualified yet, so such kit files
-# are refused (fail closed) with a message naming the version and the script.
-# Space-separated bare X.Y.Z. Each entry needs its evidence recorded in ADR-0035
-# (tested msb version, canary revision, date, PASS result) in the same change.
-MSB_RO_MOUNT_QUALIFIED_VERSIONS=""
+# state. A version not listed is refused (fail closed) with a message naming the
+# version and the script. Space-separated bare X.Y.Z. Each entry needs its evidence
+# recorded in ADR-0035 (msb version, canary revision, date, host OS/arch, image,
+# PASS result) in the same change, and covers that evidence's scope only.
+#   0.7.7  PASS 2026-10-28, macOS arm64, default shell-docker image, fresh create
+#          (ADR-0035, "Qualification evidence").
+MSB_RO_MOUNT_QUALIFIED_VERSIONS="0.7.7"
 
 # Default OCI image for provisioned non-OpenCode sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
