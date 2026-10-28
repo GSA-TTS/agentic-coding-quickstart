@@ -3593,6 +3593,12 @@ _acq_provider_facts_python() {
 # value is re-validated after parsing: these values reach an sh -c probe and a
 # --secret binding, so a tampered facts.json must not be able to smuggle shell
 # syntax, a cross-host models URL, or an unsafe ENV name any further.
+# The embedded Python forces LF on stdout: native Windows Python turns each
+# newline into CRLF when stdout is a pipe, and the `read` loop would then keep
+# the trailing carriage return in every value. That explanation lives here, not
+# in the heredoc, because bash 3.2 scans a heredoc body inside a process
+# substitution for quote and parenthesis balance, so no comment or string in the
+# body may contain an apostrophe, a backtick, or an unbalanced parenthesis.
 acq_provider_facts_json_fields() {
   local file="${1:-}" python value provider_id="" key_env="" host="" models_url="" api_protocol="" count=0
   [ -n "$file" ] || return 2
@@ -3616,9 +3622,6 @@ acq_provider_facts_json_fields() {
 import json, sys
 from urllib.parse import urlsplit
 
-# Windows Python translates print()'s "\n" to CRLF when stdout is a pipe, and
-# the shell `read` below then keeps the trailing "\r", corrupting each value.
-# Force LF so the values arrive clean on every host.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(newline="\n")
 
