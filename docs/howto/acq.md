@@ -3,7 +3,7 @@ title: "acq How-To Guide"
 description: "Detailed how-to for acq, the pluggable-backend wrapper for agentic-coding-quickstart"
 status: canonical
 tier: 2
-last_updated: "2026-10-25"
+last_updated: "2026-10-28"
 audience: "developers"
 keywords: ["acq", "backend", "sbx", "msb", "howto", "sandbox"]
 related_files: ["docs/BACKEND_GUIDE.md", "docs/CONCEPTS.md", "docs/howto/msb.md", "docs/howto/sbx.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
@@ -572,6 +572,152 @@ For scripted selection, `ACQ_PROVIDER_KITS` accepts a whitespace-separated list
 of kit refs, following the same format as `ACQ_EXTRA_KITS`. `ACQ_PROVIDER_KITS=''`
 also selects the empty set, but `--no-provider-kits` is the portable form when
 configuration layers cannot preserve an empty environment value.
+
+### Non-USAi provider kits
+
+A provider kit is **data**. Once the pinned validation pipeline accepts it, its
+`facts.json` names everything `acq` needs: `providerId`, `keyEnv`, `host`,
+`modelsUrl`, and `apiProtocol`. That means a provider kit from **your own
+repository** works without touching the pinned Patterns release:
+
+```bash
+acq create opencode --kit 'git+https://github.com/acme/kits.git#ref=<sha>&dir=acme-ai' /path/to/project
+```
+
+`acq` owns the provider → credential registry that the validator checks the kit
+against, so declare where the key comes from and `acq` does the rest. The
+registry is merged in this order (highest precedence last):
+
+1. the pinned Patterns `provider-credential-bindings.json` — the trust anchor;
+2. `provider_credential_bindings:` in `~/.config/acq/config.yaml` — durable;
+3. `ACQ_PROVIDER_CREDENTIAL_BINDINGS` — one invocation only.
+
+A layer entry is `providerId=KEY_ENV` or `providerId=KEY_ENV@host[,host]`.
+
+```bash
+# Durable: pin a provider to a credential env var AND the host it may use
+acq provider-credential set opencode-go OPENCODE_GO_API_KEY \
+  --host models.opencode-go.example
+acq provider-credential ls
+acq provider-credential rm opencode-go
+
+# Per-invocation override (whitespace-separated entries)
+ACQ_PROVIDER_CREDENTIAL_BINDINGS='opencode-go=OPENCODE_GO_API_KEY@models.opencode-go.example' \
+  acq run opencode /path/to/project
+```
+
+**The host is the trust decision, and it is required.** A kit can claim any
+`providerId` and allow-list any host, so `acq` sends your stored credential only
+to hosts you pinned. `--host` is therefore mandatory for `set`, and an unpinned
+provider — or a kit whose `facts.host` is not the pinned (or previously
+recorded) host for that `providerId` — **fails closed** rather than quietly
+moving your credential to a new destination. Changing hosts is an explicit
+re-pin, never a silent overwrite.
+
+`providerId` must match `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`, `KEY_ENV` must be
+an upper-case env var name (`^[A-Z][A-Z0-9_]*$`), and hosts must be bare DNS
+names. Built-in credential names (`USAI_API_KEY`, `GITHUB_TOKEN`, `GH_TOKEN`,
+`GITLAB_TOKEN`) and process-critical names (`PATH`, `IFS`, `HOME`, `LD_PRELOAD`,
+…) are refused. A malformed entry fails closed before the validator runs.
+
+The key itself never goes in the registry; it lives in the acq secret store:
+
+```bash
+acq secret set -g opencode-go     # prompts for the value (never on argv)
+```
+
+From there the injection is generic — no provider-specific `acq` code:
+
+- at **create**, the selected generation's `facts.json` is the facts source (the
+  same data `usai` gets from `provider-facts/usai.env`), the registry decides the
+  ENV var, and the credential is bound as `KEY_ENV@host` by both backends (`sbx`
+  custom secret; msb `--secret ENV@HOST`). A value exported by CI is bindable on
+  msb; on sbx, which snapshots its own proxy table, `acq` fails closed and tells
+  you to store it;
+- the binding (`providerId`, `keyEnv`, `host`, `modelsUrl`) is recorded in the
+  sandbox's host config, so resume/heal re-injects it without re-prompting, and a
+  later host change is caught and refused;
+- on attach, `acq` probes `facts.modelsUrl` with
+  `Authorization: Bearer $KEY_ENV` (`check_provider_key`) and fails closed on a
+  rejected key (`401`/`403`) or a redirect; `429`/`5xx` are treated as transient
+  and do not block the attach. **USAi is not special-cased**: it is the default
+  provider kit (`provider_kit: agentic-coding-patterns/usai-provider`) and its
+  `(USAI_API_KEY, api.gsa.usai.gov)` pair is the shipped trust anchor, so it is
+  gated, bound, and validated like any other provider. A rejected USAi key points
+  at `acq usai-rotate-api-key`, the one remaining provider-specific verb (it needs
+  the USAi key-management console); there is no interactive rotation prompt.
+
+If a provider kit is selected but no credential is available, the create fails
+closed (non-interactive) or offers to store one (interactive), showing the
+destination host in the prompt.
+
+### Trusted kit sources
+
+`acq` fetches kits only from **trusted sources**, recorded as data in
+`~/.config/acq/config.yaml`:
+
+```bash
+acq kit-source add github.com/acme/kits --ref <sha>   # trust a repo at a pinned commit
+acq kit-source ls                                    # sources + the provider kits they publish
+acq kit-source rm github.com/acme/kits
+```
+
+The shipped default is `github.com/GSA-TTS/agentic-coding-patterns` pinned to the
+release `acq` was built against, so a fresh install needs no configuration.
+`ACQ_KIT_SOURCES` overrides the list for one invocation (whitespace-separated
+`host/owner/repo[@ref][|dir]` entries); `ACQ_EXTRA_KIT_SOURCES` still **adds**
+owner-wide allowlist prefixes for backward compatibility.
+
+**Trust granularity.** Trust is recorded and checked per **repository**
+(`host/owner/repo`): trusting `github.com/acme/trusted` does not authorize
+`github.com/acme/other`. The one place a coarser unit appears is a backend that can
+only allowlist by prefix: sbx `kit.allowedSources` is owner-granular
+(`host/owner/`), so the prefix handed to sbx is derived from the registry. `acq`
+therefore re-checks the repository itself before it acts on a durable
+`provider_kit:` ref. `ACQ_EXTRA_KIT_SOURCES` is the only owner-wide grant, and it is
+explicit.
+
+Trust is **narrow**: a trusted source may be fetched from, and may contribute
+provider kits. It does **not** extend to the validation control plane — the
+provider-input validator and its schemas stay pinned to the Patterns release, so a
+new source can ship kits but cannot redefine what a valid kit is. Because the
+pinned release *is* the control plane, it stays resolvable even when the registry
+is overridden for a run.
+
+`acq kit-source ls` also **auto-lists** the provider kits each source publishes
+(by scanning for `*/provider-input.json`). Discovery is best-effort: an
+unreachable source simply lists nothing.
+
+**What the registry does and does not gate.** The registry governs the sources
+`acq` *resolves* on your behalf — the trusted-source allowlist handed to the
+backend (sbx `kit.allowedSources`, updated on `add` **and** revoked on `rm`) and
+`provider_kit:` entries written in `config.yaml`, which must name a trusted
+repository exactly (or an already-trusted remote ref to one). A **literal ref you supply on this invocation**
+(`--kit git+https://…`, `ACQ_PROVIDER_KITS`, `ACQ_EXTRA_KITS`) is trusted by *you*,
+not by the registry: `acq` fetches it as given. Local paths are always used
+verbatim. In short: the registry is the durable-trust boundary, not a sandbox for
+refs you type.
+
+**Removing a source (`kit-source rm`) fails closed.** `acq` first recomputes what
+the backend allowlist should be from the sources that *remain* (plus any explicit
+`ACQ_EXTRA_KIT_SOURCES`), so removing one repository never revokes an owner prefix
+another trusted repository still needs. If the backend allowlist cannot be read,
+written, or verified (for example `jq` or `sbx` is missing, or `sbx settings set`
+fails), the command exits non-zero, leaves the source registered, and prints the
+exact `sbx settings set kit.allowedSources …` recovery command. Fix the cause (or
+apply the printed command) and re-run `acq kit-source rm`; it is safe to repeat.
+
+The provider kit `acq` uses by default is likewise data:
+
+```yaml
+provider_kit: agentic-coding-patterns/usai-provider   # default
+# or: agentic-coding-kits/opencode-go-provider
+# or: opencode-go-provider@github.com/mogul/agentic-coding-kits
+```
+
+`acq configure` offers the discovered kits in a picker, so you can select one
+without hand-writing a `git+https` ref. Per-run selection is still
+`ACQ_PROVIDER_KITS` / `--no-provider-kits`.
 
 ---
 

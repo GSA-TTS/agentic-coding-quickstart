@@ -433,7 +433,7 @@ stubbed backends; they prove acq's decision logic, not live sbx or msb behavior.
 | SSH socket derives from host authority only | `81`: "SSH_AUTH_SOCK comes from the host record", "no host ssh-auth-sock record ... no SSH_AUTH_SOCK" (sbx forwards natively, no acq-held value) | Forged socket marker with a live ssh-agent forward |
 | Kit environment derives from host authority only | `81`: "kit environment replay uses only the host kit-env record", "no host kit-env record ... no forged variable"; `78-msb-kit-env.bats` (sbx injects natively) | Forge the guest marker, confirm the session environment |
 | A forged guest marker cannot redirect any of the four | Same cases; the forging stub answers every legacy `/var/lib/acq/*` read with attacker values and asserts those values never reach argv | Same live checks |
-| Inventory of remaining guest reads | The remaining guest-derived reads are fail-soft liveness and presence probes, the mount probe (which can only make acq stricter), the passwd login shell and the sbx startup barrier (the last two in `docs/KNOWN_FAILURE_MODES.md` sections 46 and 47) | None |
+| Inventory of remaining guest reads | The remaining guest-derived reads are fail-soft liveness and presence probes, the mount probe (which can only make acq stricter), the passwd login shell and the sbx startup barrier (the last two in `docs/KNOWN_FAILURE_MODES.md` sections 47 and 48) | None |
 | Real backend validation recorded | Not recorded for this slice | Record in `docs/VERIFY_PROVIDER_ADOPTION.md` after `scripts/verify-backends` on both backends |
 
 Adjacent gates also moved to host authority, beyond the four

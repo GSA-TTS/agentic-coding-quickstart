@@ -223,8 +223,8 @@ fixture kit and an SBX tamper step, mirroring the msb live fixture.
 - [ADR-0011](0011-msb-backend-and-neutral-kits.md) — neutral kits; per-backend
   translation is the adapter's job.
 - [ADR-0029](0029-windows-host-guest-path-forms.md) — host/guest path forms.
-- `docs/KNOWN_FAILURE_MODES.md` sections 36 (sbx kit-add refusal), 46 (msb session
-  shell), and 47 (sbx startup barrier): related accepted residual risks.
+- `docs/KNOWN_FAILURE_MODES.md` sections 36 (sbx kit-add refusal), 47 (msb session
+  shell), and 48 (sbx startup barrier): related accepted residual risks.
 - sbx documentation:
   [Kits v2](https://docs.docker.com/ai/sandboxes/customize/kits/),
   [Architecture](https://docs.docker.com/ai/sandboxes/architecture/),

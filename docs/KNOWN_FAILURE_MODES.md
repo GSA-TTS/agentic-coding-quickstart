@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-10-25"
+last_updated: "2026-10-28"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -2992,7 +2992,40 @@ the fix), and covers a transient and a persistent inspect failure via the stub's
 `STUB_MSB_INSPECT_FAIL_TIMES` knob. In new code, do not pipe into `grep -q`
 (or `head`) under `pipefail` when the writer may still be producing output.
 
-## 46. msb Session Shell Is Read From the Guest Passwd Entry (Accepted Residual Risk)
+## 46. `acq kit-source rm` Refuses to Finish (Backend Allowlist Still Permits the Owner)
+
+### Symptoms
+
+```text
+acq: error: could not write kit.allowedSources, so sbx kit.allowedSources still permits 'github.com/acme/'.
+     Revocation is NOT complete: the source stays registered ...
+acq: kit source 'github.com/acme/kits' was NOT removed (still registered).
+```
+
+### Root Cause
+
+sbx allowlists kit sources by **owner prefix** (`host/owner/`), while `acq` trusts
+**repositories**. Removing a source must therefore also drop the owner prefix from
+sbx, but only if no other trusted repository (and no `ACQ_EXTRA_KIT_SOURCES`
+entry) still needs it. When `acq` cannot read, write, or verify that backend
+setting (`jq` or `sbx` missing, a non-array value, or `sbx settings set` failing),
+it refuses to report the source as removed rather than leave a silently stale
+grant.
+
+### Fix
+
+Install the missing tool, or run the `sbx settings set kit.allowedSources '<json>'`
+command the error prints, then re-run `acq kit-source rm <repo>` (it is
+idempotent). `acq kit-source ls` shows the source until the removal completes.
+
+### Prevention
+
+Regression tests in `test/bats/149-kit-source.bats` cover shared-prefix removal
+and the read/write/`jq` failure paths.
+
+---
+
+## 47. msb Session Shell Is Read From the Guest Passwd Entry (Accepted Residual Risk)
 
 **Status:** Accepted / observed. No code change: a host-recorded shell was
 evaluated and rejected.
@@ -3031,7 +3064,7 @@ environment, or uses the shell path as an input to a host-side decision.
 
 ---
 
-## 47. SBX Startup Barrier Is a Guest File Check (Accepted Residual Risk)
+## 48. SBX Startup Barrier Is a Guest File Check (Accepted Residual Risk)
 
 **Status:** Accepted / observed for the barrier itself. No host-authoritative
 startup signal exists; the barrier no longer decides the kit records.
@@ -3089,7 +3122,7 @@ host-side API, or a read-only host channel into the sandbox.
 
 ---
 
-## 48. msb: Readonly Kit Files Are Refused When msb's Own Record Does Not Show a Read-Only Mount
+## 49. msb: Readonly Kit Files Are Refused When msb's Own Record Does Not Show a Read-Only Mount
 
 **Status:** Fail closed by design. Applies to a kit with `files[]` entries marked
 `readonly: true` on an msb sandbox created with the read-only host-config mount.

@@ -441,10 +441,9 @@ load_provider_facts() {
     rm -f "$_diag_file"
     return "$source_rc"
   fi
-  if ! acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"; then
-    echo "verify-backends: provider facts could not be loaded from $USAI_KIT" >&2
-    return 1
-  fi
+  # Provider facts are no longer fetched host-side: the provider's endpoints come
+  # from the validated facts.json materialized into the sandbox, and the DEFAULT
+  # provider's host/keyEnv come from the shipped trust-anchor table.
   USAI_HOST="$USAI_PROVIDER_HOST"
   USAI_MODELS_URL="$USAI_PROVIDER_MODELS_URL"
 }

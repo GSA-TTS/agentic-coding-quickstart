@@ -114,7 +114,7 @@ STUB
   '
   assert_output --partial 'cannot extend a live sandbox with startup-bearing kits'
   assert_output --partial 'missing the Zscaler CA kit'
-  assert_output --partial 'missing the USAi kit'
+  assert_output --partial 'missing the provider kit'
   assert_output --partial 'missing the playbook kit'
 }
 
@@ -419,7 +419,7 @@ STUB
   printf 'nohostrec\n' > "$STUBDIR/.sandbox_list"
   run acq_backend_ensure_kits_applied nohostrec
   assert_output --partial 'missing the Zscaler CA kit'
-  assert_output --partial 'missing the USAi kit'
+  assert_output --partial 'missing the provider kit'
   assert_output --partial 'missing the playbook kit'
   local n; n=$(grep -c '^sbx kit add nohostrec ' "$CALLS" || true)
   [ "$n" -ge 3 ]
@@ -433,7 +433,7 @@ ${USAI_PROVIDER_KIT_NAME} ${USAI_KIT}
 agentic-coding-playbook ${PLAYBOOK_KIT}"
   run acq_backend_ensure_kits_applied stalerec
   assert_output --partial 'missing the Zscaler CA kit'
-  refute_output --partial 'missing the USAi kit'
+  refute_output --partial 'missing the provider kit'
   refute_output --partial 'missing the playbook kit'
   # The stale line is replaced, not duplicated, once the re-apply succeeds.
   assert_equal "$(acq_host_config_read sbx stalerec builtin-kits | grep -c '^zscaler-ca-certificate ')" "1"
@@ -446,7 +446,7 @@ agentic-coding-playbook ${PLAYBOOK_KIT}"
   acq_host_config_write sbx partialrec builtin-kits "zscaler-ca-certificate ${ZSCALER_KIT}"
   run acq_backend_ensure_kits_applied partialrec
   refute_output --partial 'missing the Zscaler CA kit'
-  assert_output --partial 'missing the USAi kit'
+  assert_output --partial 'missing the provider kit'
   assert_output --partial 'missing the playbook kit'
 }
 
@@ -488,7 +488,7 @@ agentic-coding-playbook ${PLAYBOOK_KIT}"
   _record_builtin_kits forcerec
   ACQ_FORCE_KIT_REAPPLY=1 run acq_backend_ensure_kits_applied forcerec
   assert_output --partial 'missing the Zscaler CA kit'
-  assert_output --partial 'missing the USAi kit'
+  assert_output --partial 'missing the provider kit'
   assert_output --partial 'missing the playbook kit'
 }
 
