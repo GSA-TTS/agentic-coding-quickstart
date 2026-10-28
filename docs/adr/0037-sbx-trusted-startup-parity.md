@@ -19,10 +19,9 @@ supersedes: []
 `readonly: true` startup code tamper-resistant on msb: acq stages the pinned file
 on the host, mounts the per-sandbox config directory `:ro`, and runs the heal from
 the mounted path, so a passwordless-sudo guest cannot rewrite the code acq
-re-executes on restart, **on an msb version where a host-observed canary has shown
-the `:ro` mount is enforced** (ADR-0035 gates that on a checked-in list of qualified
-versions, currently msb 0.7.7 only on one host class; a guest-run probe is never
-accepted as proof).
+re-executes on restart. On msb that rests on msb's own host-side enforcement of the
+`:ro` mount, confirmed per sandbox from `msb inspect` and a version floor (ADR-0035);
+a guest-run probe is never accepted as proof.
 
 SBX has no equivalent. `acq_backend_provision` for sbx creates the host config
 directory but never mounts it (it holds host-only keys such as `extra-kits`,
@@ -63,7 +62,8 @@ reads a guest answer about them. The msb gate was forgeable because acq took a
 guest-run probe's zero exit as proof of read-only enforcement; sbx has no such gate.
 The open question for sbx is the one this ADR already states: native replay and mount
 enforcement are unverified, and Option B must not be implemented without a
-host-judged canary of the same shape.
+host-side check of the same kind as msb's: what the backend itself recorded for the
+mount, plus a host-judged canary as corroboration.
 
 ## Decision Drivers
 
@@ -170,8 +170,8 @@ Run on a real sbx host (cannot run inside a sandbox). Record exact sbx version.
    Confirm all fail and the host copy is unchanged. Judge it from the host side
    (inspect the real host directory afterwards), as the msb canary in
    `scripts/qualify-msb-ro-mount` does; a guest-reported denial is not evidence.
-   Nothing is recorded for sbx, and msb has only an earlier manual observation on
-   a version acq now refuses.
+   Nothing is recorded for sbx. For msb, enforcement is host-side (ADR-0035) and one
+   canary run on msb 0.7.7 corroborates it.
 3. **Permissions**: the guest `agent` (uid 1000) can execute a `0555` file under a
    `0711` directory it cannot list, with host files owned by the host user.
 4. **Restart persistence**: after `sbx stop`/start and after a host reboot, the

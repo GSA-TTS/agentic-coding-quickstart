@@ -3089,7 +3089,7 @@ host-side API, or a read-only host channel into the sandbox.
 
 ---
 
-## 48. msb: Readonly Kit Files Are Refused on an Unqualified msb Version
+## 48. msb: Readonly Kit Files Are Refused When msb's Own Record Does Not Show a Read-Only Mount
 
 **Status:** Fail closed by design. Applies to a kit with `files[]` entries marked
 `readonly: true` on an msb sandbox created with the read-only host-config mount.
@@ -3097,50 +3097,58 @@ host-side API, or a read-only host channel into the sandbox.
 ### Symptoms
 
 ```text
-acq(msb): error: cannot place read-only kit file '<path>' for '<sandbox>': msb <version> is not on acq's list of versions where a read-only mount has been shown to be enforced.
-acq(msb):   Run scripts/qualify-msb-ro-mount on this host; ...
+acq(msb): error: cannot place read-only kit file '<path>' for '<sandbox>': <reason>.
+acq(msb):   acq will not run trusted code from a mount msb does not report as read-only. ...
 acq(msb):   No guest-copy fallback is taken because the sandbox was created with a read-only host config; recreate the sandbox.
 ```
 
-The kit does not fully apply; for built-in kits at provision this is a warning, and
-a heal reports it on each re-attach.
+`<reason>` names the cause, one of: msb is below the minimum version (or its version
+is a prerelease or unreadable); `msb inspect` failed, returned unparsable output, an
+unexpected shape, or a null `active_config` that stayed null; `python3` is missing;
+msb lists no mount, or more than one, at `/var/lib/acq/host`; the mount is not a Bind
+mount, is not recorded read-only, or is backed by a directory other than this
+sandbox's acq host config directory; a writable mount overlaps it; or this platform
+(Windows) was not reviewed. The guest probe can add two more: the mount "looks
+WRITABLE" or "is not a confirmed read-only mount". The kit does not fully apply; for
+built-in kits at provision this is a warning, and a heal reports it on each
+re-attach. No shipped built-in kit marks a file `readonly: true`, so default
+sandboxes are not affected.
 
 ### Root Cause
 
 acq runs `readonly: true` kit code from a host directory mounted into the guest
-`:ro`, on the assumption that the runtime enforces that flag. Only the runtime can
-establish that. A guest-run probe cannot stand in for it: a guest with passwordless
-sudo controls `sh` and `test`, and on msb the guest's own view of its mount flags can
-even flip to `rw` after a remount while the host side still refuses writes (see
-ADR-0035). So acq trusts the mount only on msb versions a **host-observed** canary
-has qualified (`MSB_RO_MOUNT_QUALIFIED_VERSIONS`). Today that list holds **0.7.7**
-only (macOS arm64, default image, fresh create; evidence in ADR-0035). On any other
-msb version acq refuses rather than staging, running, or copying that code.
+`:ro`. In msb that flag is enforced on the host by the filesystem server that exports
+the directory, not by the guest kernel (ADR-0035), so a guest root can relabel its own
+mount without gaining write access. acq therefore does not trust anything the guest
+says about the mount. It trusts what **msb itself recorded** for this sandbox, read by
+the host with `msb inspect --format json`, together with a version floor. If that
+record does not show the one read-only Bind of acq's host config directory at the
+guest path, acq refuses rather than staging, running, or copying that code.
 
 ### Fix
 
-Run `scripts/qualify-msb-ro-mount` on a sandbox-capable host (outside any sandbox).
-It judges the result by inspecting the real host directory afterwards, so nothing
-the guest reports can make it pass. All output (results, guest log, host snapshots,
-and on FAIL or BLOCKED the throwaway directories) is written under
-`<repo>/tmp/qualify-msb-ro-mount-<stamp>/` (gitignored; override with
-`ACQ_QUALIFY_OUT_DIR`), and a final `RESULT ...` line can be pasted back. A remount
-that the guest accepts is informational, not a write; the verdict rests on the
-later writes being denied and the host directory being unchanged. On PASS, add the printed version to
-`MSB_RO_MOUNT_QUALIFIED_VERSIONS` and record the output in ADR-0035 (with host
-OS/arch and image). Existing sandboxes need no recreate for this: the version list
-is checked at apply time. The guest probe is
-diagnostic only: it can add a refusal ("writable" or "not confirmed") but never
-grants trust.
+Match the reason to the step:
+
+1. **Version:** update msb (acq installs the pinned release; the floor is
+   `MSB_RO_MOUNT_MIN_VERSION`).
+2. **`inspect` failed, null `active_config`, or unparsable output:** make sure the
+   sandbox is running (`acq start <sandbox>`), that `msb inspect <sandbox> --format
+   json` works on the host, and that `python3` is installed; then re-run.
+3. **Mount missing, duplicated, not read-only, wrong directory, or overlapped by a
+   writable mount:** the sandbox was not created the way acq creates it (for example
+   an extra `--volume` over `/var/lib/acq`). Recreate it with `acq rm` and `acq run`.
+4. **Guest probe says writable or unconfirmed:** the sandbox may be damaged or not
+   running; restart it and retry, and recreate it if it persists.
 
 ### Prevention / Status
 
-On msb 0.7.7 readonly kit files are accepted. That qualification covers a fresh
-create on macOS arm64 with the default image; it says nothing about Linux, Windows,
-other images or behavior after `msb start`, which remain unverified. On any other
-msb version the refusal is expected until that version passes the canary. No shipped built-in kit marks a file
-`readonly: true`, so default sandboxes are not affected either way; the gate matters
-for the first kit that opts in.
+The gate confirms what msb was asked to enforce; it does not independently prove
+enforcement, so an upstream regression would not be caught by it. The optional,
+non-gating `scripts/qualify-msb-ro-mount` canary corroborates enforcement on a given
+msb release (output goes to a gitignored `tmp/qualify-msb-ro-mount-<stamp>/` under the
+repo, ending with a pasteable `RESULT ...` line); run it when adopting a new msb.
+Windows is not covered. One canary run on msb 0.7.7 (macOS arm64, default image,
+fresh create) is recorded in ADR-0035.
 
 ---
 

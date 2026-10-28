@@ -105,8 +105,9 @@ provisioning decision.
 > lifecycle decision — data *and* code — MUST be one of:
 >
 > - **(H1) Host-resident and mounted read-only into the guest** (the VMM/mount
->   layer enforces read-only; guest sudo cannot override it; acq relies on that
->   only for a runtime version a host-observed canary has qualified), or
+>   layer enforces read-only; guest sudo cannot override it; for msb, acq relies on
+>   that only where msb's own `inspect` record shows the mount read-only on a version
+>   at or above a verified floor), or
 > - **(H2) Held on the host and supplied at exec time** from acq's own state
 >   (never read back from the guest).
 >
@@ -165,80 +166,84 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
 - acq mounts that directory into the guest **read-only** at a well-known path:
   `/var/lib/acq/host/` (`:ro`). On msb via `--volume <hostdir>:/var/lib/acq/host:ro`;
   on sbx via the `:ro` positional the CLI already honors. This relies on backend
-  mount/export semantics, not Unix ownership inside the guest. **What is and is not
-  established about that enforcement:** an earlier manual observation on msb 0.7.2
-  (a version acq now refuses) found the virtiofs mount exported read-only even when
-  guest root could make the guest-visible mount flag appear `rw`. It was not a
-  repeatable check and covers no version acq accepts. The first repeatable,
-  host-judged result is the msb 0.7.7 qualification recorded below, which covers one
-  version, image and host class and nothing else. For sbx nothing is recorded. So
-  `:ro` enforcement is **unverified on every other msb version, on other host
-  platforms and images, after `msb start`, and on sbx**.
+  mount/export semantics, not Unix ownership inside the guest.
 
-  **Authority for trusting the mount (msb).** Trusted execution of `readonly: true`
-  kit files from the mount is permitted only when the installed msb version is on
-  `MSB_RO_MOUNT_QUALIFIED_VERSIONS` in `acq.backends/msb.sh`, a checked-in list of
-  versions for which a **host-observed canary** passed. The canary
-  (`scripts/qualify-msb-ro-mount`) creates a throwaway sandbox from the default
-  image, mounts one host directory read-only and a second read-write as a positive
-  control, makes the guest (as root) attempt create, overwrite, append, mkdir,
-  chmod, rename, delete and remount-rw on the read-only mount, and then judges the
-  result **from the host**: it compares the real host directory before and after
-  and requires that the host saw the control file. A changed host directory is FAIL
-  whatever the guest reports. **A remount the guest kernel accepts is not a
-  write.** The canary records `mount -o remount,rw` and a bind remount as
-  informational (`REMOUNT-ACCEPTED` or `REMOUNT-DENIED`) and then repeats every kind
-  of data write (create, overwrite, append, mkdir, chmod, rename, delete) *after*
-  them. A guest root can alter its own mount flags, and the guest's view may then
-  show the volume as read-write; what matters is whether the host directory behind
-  it can still be changed. So the decision rests on two things together: every data
-  write after the remount was denied, and the real host directory is byte-for-byte
-  unchanged. If a remount is accepted and the later writes are still denied with
-  the host unchanged, that is PASS, with a printed note that a remount was
-  accepted. We considered failing qualification on any accepted remount and
-  rejected it as the wrong test: the guest-visible mount flag need not reflect what
-  the host side enforces (not verified for msb), and the host-side comparison is the
-  thing we trust, so that rule could disqualify a runtime that holds while adding no
-  protection the post-remount writes do not already measure. The
-  residual gap is a window we do not exercise, for example a different sequence
-  of guest actions, a later `msb start`, or another host platform or image; the
-  PASS says nothing about those, which is why each list entry records its host,
-  image and revision. A missing control (the log, a root uid, or the same
-  operations succeeding on the read-write volume) is BLOCKED, never PASS. The
-  decision is the host-side comparison; the guest's own log is used only to prove
-  the attempts really ran, and it can only turn a PASS into BLOCKED or FAIL, never
-  the reverse. The canary runs the trusted default image, so it does not defend
-  against a hostile image. The list is
-  checked in and **starts with one qualified version (0.7.7)**; every other version
-  is refused for readonly files with an error that names the version and the script.
-  There is no operator override. Each entry added to the list must record, in this
-  ADR, the msb version, the acq revision the canary ran at, the date, the host OS
-  and architecture, the image reference (the default image tag is mutable) and the
-  PASS output. A PASS covers a freshly created sandbox on that host; enforcement
-  after `msb start`, on other host platforms, or with another image is not covered
-  by it.
+  **Where enforcement lives (msb).** In msb the `:ro` setting is enforced on the
+  host, by the filesystem server that exports the directory to the guest, not by the
+  guest's kernel. In the microsandbox source at v0.7.7
+  (`crates/filesystem/lib/backends/passthroughfs/unix/mod.rs`) the passthrough
+  backend carries a `readonly` configuration documented as host-side defense in
+  depth that holds against a privileged guest process attempting to remount, and every
+  mutating operation (write-intent open including truncate, create, mkdir, mknod,
+  symlink, link, unlink, rmdir, rename, setattr, extended attributes, fallocate,
+  copy-file-range and DAX write mapping) returns `EROFS` when it is set. The flag is
+  parsed from the same `ro` mount option that `msb inspect` reports
+  (`crates/runtime/lib/runner/vm.rs`). The check is present from v0.6.0 through
+  v0.7.10 (the field and the operation checks; check bodies were not diffed per tag).
+  This was read, not exercised, except for the live run below. msb on Windows uses a
+  different filesystem backend that was not reviewed.
+
+  **What acq checks.** Trusted execution of `readonly: true` kit files from the mount
+  is allowed only when ALL of these hold, evaluated on the host when the first
+  readonly file of a kit is applied:
+  1. the host-recorded `ro-host-config` key exists (below);
+  2. `msb inspect <sandbox> --format json`, run by acq on the host, lists in
+     `.active_config.mounts[]` **exactly one** mount at `/var/lib/acq/host`, of type
+     `Bind`, with `options.readonly == true`, whose host path (after resolving
+     symlinks) is acq's own host config directory for this sandbox, and **no other
+     mount at, above or below that guest path that is not read-only**; a null
+     `active_config` right after boot is retried briefly, and an `inspect` failure,
+     unparsable output, an unexpected shape or a missing `python3` all refuse;
+  3. the installed msb is a final `X.Y.Z` release at or above
+     `MSB_RO_MOUNT_MIN_VERSION` (0.7.7, the version the behavior was verified on;
+     older, prerelease and unparsable versions are refused).
+  The check is made on macOS and Linux hosts only; on Windows hosts acq does not
+  rely on the mount. The JSON is parsed with Python, never with grep or sed.
+
+  **What that does and does not prove.** `msb inspect` is read by the host from msb's
+  own stored record, which the guest cannot alter, so it cannot be forged. It shows
+  what msb was **asked to enforce** for this sandbox's mount; it is not independent
+  proof that enforcement works. A future upstream regression in how msb enforces
+  `readonly` would **not** be caught by this gate. We trust msb upstream for
+  enforcement, and the version floor limits that trust to the release the behavior
+  was checked on. `scripts/qualify-msb-ro-mount` is kept as an optional, non-gating
+  corroboration for when a new msb release is adopted or a regression is suspected;
+  nothing in acq runs it or depends on its result.
+
+  **Live corroboration (one run).** On 2026-10-28 the canary passed on msb 0.7.7 on
+  macOS arm64 with the default image: see "Qualification evidence" below, which also
+  records that after an accepted guest remount the guest's own view of the mount
+  became `rw` while every write stayed denied and the host directory stayed
+  unchanged. That is consistent with enforcement living on the host side, and it is
+  why the guest's view of its own mount flags is **not** a signal acq uses in either
+  direction. For sbx nothing is recorded, and sbx has no consumer of this mechanism.
+  So `:ro` enforcement is **unverified on msb versions other than 0.7.7, on other
+  host platforms and images, after `msb start`, and on sbx**, beyond what the source
+  reading above indicates.
 
   Whether a sandbox is a candidate at all is a **host-recorded create fact** (host
   key `ro-host-config`), written only after a create that passed the `:ro` volume
   flag returned success and the sandbox became exec-ready. The record proves only
   that acq asked for the mount and the sandbox booted; it is never evidence of
-  enforcement. A sandbox with no record (created before the key existed, or never
+  enforcement (item 2 above is what reads msb's own record). A sandbox with no record (created before the key existed, or never
   fully created) takes the legacy guest-copy path and warns.
 
   **The guest probe is a diagnostic and can only make acq stricter.** A guest with
   passwordless sudo controls `sh` and `test`, so a zero exit from a probe it runs
   proves nothing; acq therefore never treats it as proof the mount is read-only.
-  When the version is qualified and a record exists, a probe answer of "writable"
-  or "not confirmed" makes acq fail closed. For any readonly file, a refusal means
+  When the gate above passes, a probe answer of "writable" or "not confirmed"
+  still makes acq fail closed. For any readonly file, a refusal means
   acq stages nothing, runs nothing from the mount, and does not copy the file into
   the guest. This is a deliberate change from "degrade to a guest copy", through an
-  intermediate "probe decides", to fail closed with host-side authority; it applies
+  intermediate "probe decides" and a per-version allowlist, to fail closed on msb's
+  own host-side record; it applies
   only when a record exists, so legacy and no-record sandboxes still degrade to the
   guest copy with a warning. When a record exists and staging a `readonly: true`
   file onto the host fails, the apply likewise fails with an error naming the file.
-  If a future msb changes `--volume ...:ro` parsing or enforcement, re-run the
-  canary and drop the old version from the list before relying on ADR-0035. Host
-  and guest path forms follow ADR-0029.
+  If a future msb changes `--volume ...:ro` parsing, the shape of `msb inspect`, or
+  enforcement, raise `MSB_RO_MOUNT_MIN_VERSION` or gate on the new shape, and re-run
+  the optional canary before relying on this ADR. Host and guest path forms follow
+  ADR-0029.
 - The mount root and `kit-files/` subtree are traversable but not listable (`0711`)
   so the guest `agent` user can open/execute known read-only kit payload paths,
   while flat acq-internal keys stay host-private (`0600`). This is also a
@@ -372,7 +377,7 @@ sequenceDiagram
     ACQ->>ACQ: validate facts host-side (env-var-ownership, SSRF, schema)
     ACQ->>HSTATE: write validated facts + staged startup code
     ACQ->>RO: mount HSTATE read-only (--volume …:ro / :ro positional)
-    AGENT-->>RO: sudo tee facts.json (expected to FAIL on a qualified msb: read-only mount, enforced by the runtime)
+    AGENT-->>RO: sudo tee facts.json (expected to FAIL: read-only mount, enforced by msb on the host)
     ACQ->>RO: invoke staged startup from :ro path
     RO->>RW: orchestrator computes per-sandbox catalog (rw, not shared)
     Note over ACQ,RO: acq trusts only host-authoritative :ro inputs
@@ -439,10 +444,11 @@ GSA-TTS/agentic-coding-quickstart#636 fields: the sbx `extra-kits` and `builtin-
 `docs/KNOWN_FAILURE_MODES.md` section 32.1. SBX trusted-startup parity is
 proposed separately in [ADR-0037](0037-sbx-trusted-startup-parity.md).
 
-## Qualification evidence (msb read-only host-config mount)
+## Corroborating evidence (msb read-only host-config mount canary)
 
-One entry per qualified msb version. The list lives in
-`MSB_RO_MOUNT_QUALIFIED_VERSIONS` (`acq.backends/msb.sh`).
+An optional host-judged canary, `scripts/qualify-msb-ro-mount`, corroborates the
+host-side enforcement described above. It is **not part of the gate** (see "What that
+does and does not prove"). One entry per run worth recording.
 
 ### msb 0.7.7
 
@@ -474,17 +480,18 @@ change how its own kernel labels the mount without changing what the host allows
 consequence for acq is that the guest's view of its own mount flags is **not a
 reliable signal in either direction**. A "read-only" reading from inside the guest
 proves nothing, and neither does "rw". That is why the guest probe stays a
-diagnostic that can only add refusals and never grants trust, and why qualification
-is judged from the host.
+diagnostic that can only add refusals and never grants trust, and why the canary
+judges from the host.
 
-**Scope.** This qualifies a **fresh create** of **msb 0.7.7** with **this image** on
-**this host class (macOS arm64)**. It does **not** qualify: Linux or Windows hosts or
+**Scope.** This is one run on a **fresh create** of **msb 0.7.7** with **this image**
+on **this host class (macOS arm64)**. It says nothing about: Linux or Windows hosts or
 other CPU architectures; any other image, or the same tag at a different digest;
 behavior after `msb stop`/`msb start` or a host restart; sandboxes created before the
 canary; or any other sequence of guest actions than the one the script performs.
 **Still unverified:** all of those, and whether the remount acceptance is stable
 across runs (this is one run). The result is one observation of a runtime we do not
-control, so a later msb release must be re-run before it is added.
+control; re-run the canary when adopting a later msb release (and raise
+`MSB_RO_MOUNT_MIN_VERSION` only with such a check behind it).
 
 ## Links
 
