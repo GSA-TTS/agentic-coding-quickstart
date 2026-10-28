@@ -229,8 +229,18 @@ ACQ_AGENT_KIT_READY_CACHE=""
 # where they override a kit's mapping for the same guest port.
 ACQ_PUBLISH_FLAGS=()
 
-KIT_SOURCE_PREFIX="github.com/GSA-TTS/"
-KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
+# Fetch allowlist, derived from the trusted kit-source registry (see
+# acq_kit_source_prefixes). Populated by _build_kit_list.
+# shellcheck disable=SC2034  # consumed by the sbx allowlist sync
+KIT_SOURCE_PREFIXES=()
+
+# Latched provider-selection error. acq_resolve_backend builds the kit list for
+# EVERY verb, so a bad `provider_kit:`/`kit_sources:` must not lock the user out of
+# the verbs that repair it (configure, kit-source, backend, doctor, help). The
+# failure is recorded here and turned into a hard stop by
+# _acq_require_provider_selection, which only create/run call.
+# shellcheck disable=SC2034  # read by _acq_require_provider_selection
+ACQ_PROVIDER_SELECTION_ERROR="" 
 
 # Transitional fallback defaults for the pinned usai-provider kit. ADR-0030's
 # target state is for the kit to export these provider facts as static metadata
@@ -240,10 +250,10 @@ KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
 USAI_PROVIDER_HOST="api.gsa.usai.gov"
 USAI_PROVIDER_BASE_URL="https://${USAI_PROVIDER_HOST}/api/v1"
 USAI_PROVIDER_KEY_ENV="USAI_API_KEY"
+# shellcheck disable=SC2034  # consumed by the sbx adapter (sbx.sh)
 USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_BASE_URL}/models"
-USAI_PROVIDER_KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
+# shellcheck disable=SC2034  # consumed by the sbx and msb adapters
 USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_HOST}"
-USAI_PROVIDER_FACTS_SOURCE="fallback"
 
 # Source the shared agent catalog (single source of truth for agent tokens and
 # the sandbox-template image naming convention; issue #377). Both adapters also
@@ -323,7 +333,10 @@ acq_debug() {
 # Services acq manages in its own secret store (and knows how to inject). Used to
 # decide whether `acq secret rm` should route to the acq-owned removal path vs.
 # pass a raw placeholder token through to the backend secret CLI.
-ACQ_MANAGED_SECRET_SERVICES=" usai github gitlab "
+# PROVIDERS are no longer listed here: they are registry-driven (see the
+# provider credential bindings section), so `usai` is a provider like any other
+# and only non-provider HOST services remain compiled in.
+ACQ_MANAGED_SECRET_SERVICES=" github gitlab "
 
 # _acq_import_env_vars_for SERVICE — echo the host environment variable name(s)
 # that `acq secret import` reads to populate SERVICE, most-preferred first (space
@@ -334,11 +347,20 @@ ACQ_MANAGED_SECRET_SERVICES=" usai github gitlab "
 #   gitlab <- GITLAB_TOKEN
 # Only acq-managed services are importable; an unknown service echoes nothing.
 _acq_import_env_vars_for() {
+  local provider_key_env=""
   case "$1" in
     usai)   printf '%s\n' "$USAI_PROVIDER_KEY_ENV" ;;
     github) printf 'GITHUB_TOKEN GH_TOKEN\n' ;;
     gitlab) printf 'GITLAB_TOKEN\n' ;;
-    *)      printf '\n' ;;
+    *)
+      # A provider kit declared in acq's credential-bindings registry is
+      # importable from the ENV var that registry names, so a non-USAi provider
+      # needs no per-provider entry here.
+      if command -v acq_provider_credential_key_env >/dev/null 2>&1; then
+        provider_key_env=$(acq_provider_credential_key_env "$1" 2>/dev/null) || provider_key_env=""
+      fi
+      printf '%s\n' "$provider_key_env"
+      ;;
   esac
 }
 
@@ -378,126 +400,6 @@ _acq_provider_fact_safe_url() {
     case "$hex" in *[!0-9A-Fa-f]*) return 1 ;; esac
     suffix="${suffix:2}"
   done
-  return 0
-}
-
-acq_provider_facts_load() {
-  local file="${1:-}" line key value schema="" id=""
-  local host="" base_url="" models_url="" key_env="" key_mgmt_url="" bind_hosts=""
-  [ -n "$file" ] || return 1
-  [ -f "$file" ] || return 2
-
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in ""|'#'*) continue ;; esac
-    case "$line" in *=*) ;; *) return 1 ;; esac
-    key="${line%%=*}"
-    value="${line#*=}"
-    case "$key" in
-      ACQ_PROVIDER_FACTS_SCHEMA) schema="$value" ;;
-      ACQ_PROVIDER_ID) id="$value" ;;
-      ACQ_PROVIDER_HOST) host="$value" ;;
-      ACQ_PROVIDER_BASE_URL) base_url="$value" ;;
-      ACQ_PROVIDER_MODELS_URL) models_url="$value" ;;
-      ACQ_PROVIDER_KEY_ENV) key_env="$value" ;;
-      ACQ_PROVIDER_KEY_MGMT_URL) key_mgmt_url="$value" ;;
-      ACQ_PROVIDER_BIND_HOSTS) bind_hosts="$value" ;;
-      *) return 1 ;;
-    esac
-  done < "$file"
-
-  [ "$schema" = "1" ] || return 1
-  [ "$id" = "usai" ] || return 1
-  _acq_provider_fact_safe_host "$host" || return 1
-  _acq_provider_fact_safe_url "$base_url" || return 1
-  _acq_provider_fact_safe_url "$models_url" || return 1
-  _acq_provider_fact_safe_url "$key_mgmt_url" || return 1
-  _acq_provider_fact_safe_env "$key_env" || return 1
-  [ -n "$bind_hosts" ] || bind_hosts="$host"
-  _acq_provider_fact_safe_host "$bind_hosts" || return 1
-
-  USAI_PROVIDER_HOST="$host"
-  USAI_PROVIDER_BASE_URL="$base_url"
-  USAI_PROVIDER_MODELS_URL="$models_url"
-  USAI_PROVIDER_KEY_ENV="$key_env"
-  USAI_PROVIDER_KEY_MGMT_URL="$key_mgmt_url"
-  # shellcheck disable=SC2034  # consumed by adapters/tests after facts load
-  USAI_PROVIDER_BIND_HOSTS="$bind_hosts"
-  # shellcheck disable=SC2034  # consumed by diagnostics/tests after facts load
-  USAI_PROVIDER_FACTS_SOURCE="$file"
-}
-
-acq_provider_facts_load_from_kit() {
-  local kitref="${1:-$USAI_KIT}" base_dir="${2:-}" kitdir facts rc
-  if [ -z "$base_dir" ]; then
-    base_dir="${ACQ_PROVIDER_FACTS_CACHE_DIR:-${ACQ_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/acq}/provider-facts}"
-  fi
-  mkdir -p "$base_dir" || return 3
-  if ! command -v kit_translate_fetch >/dev/null 2>&1; then
-    return 3
-  fi
-  kitdir=$(kit_translate_fetch "$kitref" "$base_dir/usai-provider") || return 3
-  facts="$kitdir/provider-facts/usai.env"
-  acq_provider_facts_load "$facts"
-  rc=$?
-  case "$rc" in
-    0) return 0 ;;
-    2) return 2 ;;
-    *) echo "acq: invalid provider facts artifact: $facts" >&2; return 1 ;;
-  esac
-}
-
-acq_provider_facts_use_fallback() {
-  USAI_PROVIDER_HOST="api.gsa.usai.gov"
-  USAI_PROVIDER_BASE_URL="https://${USAI_PROVIDER_HOST}/api/v1"
-  USAI_PROVIDER_KEY_ENV="USAI_API_KEY"
-  USAI_PROVIDER_MODELS_URL="${USAI_PROVIDER_BASE_URL}/models"
-  USAI_PROVIDER_KEY_MGMT_URL="https://gsa.usai.gov/console/key-management"
-  # shellcheck disable=SC2034  # consumed by adapters/tests after facts load
-  USAI_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_HOST}"
-  # shellcheck disable=SC2034  # consumed by diagnostics/tests after facts load
-  USAI_PROVIDER_FACTS_SOURCE="fallback"
-}
-
-acq_provider_facts_load_from_kit_or_fallback() {
-  local provider_facts_rc
-  local IFS
-
-  # Keep the loader in this shell so validated provider assignments persist, but
-  # invoke it as a condition so caller errexit cannot skip status handling.
-  # Diagnostics flow directly to stderr; no temporary file or trap is needed.
-  # Use 'local IFS' (Bash 3.2-safe dynamic scoping) to preserve the caller's
-  # IFS state (including when intentionally unset under 'set -u'). The local
-  # declaration auto-restores the caller's IFS on function exit, avoiding
-  # explicit snapshot/restore that fails when IFS is unset.
-  if acq_provider_facts_load_from_kit "$@"; then
-    provider_facts_rc=0
-  else
-    provider_facts_rc=$?
-  fi
-
-  case "$provider_facts_rc" in
-    0) : ;;
-    1)
-      return 1
-      ;;
-    2)
-      acq_provider_facts_use_fallback
-      acq_debug "provider facts unavailable from kit; using transitional fallback defaults"
-      ;;
-    3)
-      acq_provider_facts_use_fallback
-      echo "acq: warning: provider facts could not be fetched; using transitional fallback defaults" >&2
-      acq_debug "provider facts fetch failed; using transitional fallback defaults"
-      ;;
-    *)
-      return "$provider_facts_rc"
-      ;;
-  esac
-  # msb derives this adapter-local binding host when sourced, before lazy facts load.
-  if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ]; then
-    # shellcheck disable=SC2034  # consumed by msb adapter functions at dispatch
-    ACQ_MSB_USAI_HOST="$USAI_PROVIDER_BIND_HOSTS"
-  fi
   return 0
 }
 
@@ -556,11 +458,15 @@ _acq_secret_last4_of() {
 }
 
 # _acq_is_managed_service SERVICE -> 0 if SERVICE is an acq-managed service.
+# Besides the built-in services, any provider declared in acq's
+# credential-bindings registry is managed: `acq secret set -g <providerId>` then
+# stores (and the adapters inject) that provider's credential.
 _acq_is_managed_service() {
   case "$ACQ_MANAGED_SECRET_SERVICES" in
     *" $1 "*) return 0 ;;
-    *) return 1 ;;
   esac
+  command -v acq_provider_credential_key_env >/dev/null 2>&1 || return 1
+  [ -n "$(acq_provider_credential_key_env "$1" 2>/dev/null)" ]
 }
 
 # _acq_import_decide MODE DRY_RUN EXISTS -> prints one of "import", "skip", or
@@ -670,16 +576,35 @@ _acq_import_parse_args() {
       --force|-f)  mode="force" ;;
       --dry-run)   dry_run=1 ;;
       -g|--global) scope_sandbox="" ;;   # global is already the default
+      --service)
+        echo "acq: secret import: --service needs a value" >&2
+        return 1
+        ;;
+      --service=*)
+        only_service="${arg#--service=}"
+        if ! _acq_is_importable_service "$only_service"; then
+          echo "acq: secret import: unknown service '$only_service' for --service" >&2
+          return 1
+        fi
+        ;;
       -*)
         echo "acq: secret import: unknown flag '$arg'" >&2
         echo "     usage: acq secret import [SERVICE] [-g | SANDBOX] [--all] [--force] [--dry-run]" >&2
         return 1
         ;;
       *)
-        # First bare token that is a managed service -> restrict to it; a second
-        # bare token is the SANDBOX scope (NOT a second service).
-        if [ -z "$only_service" ] && _acq_is_managed_service "$arg"; then
-          only_service="$arg"
+        # A BARE token is a service when acq knows it as importable (a built-in
+        # managed service, or a provider reachable through the trust anchor /
+        # credential registry). That keeps `acq secret import usai` working after
+        # usai stopped being a compiled-in service. Anything else is the SANDBOX
+        # scope.
+        if _acq_is_importable_service "$arg"; then
+          if [ -z "$only_service" ]; then
+            only_service="$arg"
+          elif [ "$only_service" != "$arg" ]; then
+            echo "acq: secret import: unexpected extra argument '$arg'" >&2
+            return 1
+          fi
         elif [ -z "$scope_sandbox" ]; then
           scope_sandbox="$arg"
         else
@@ -690,6 +615,30 @@ _acq_import_parse_args() {
     esac
   done
   printf '%s\t%s\t%s\t%s\n' "$mode" "$dry_run" "$only_service" "$scope_sandbox"
+}
+
+# _acq_is_importable_service SERVICE — a built-in managed service, or a provider
+# acq can import for (trust anchor, config.yaml, or ACQ_PROVIDER_CREDENTIAL_BINDINGS).
+_acq_is_importable_service() {
+  case "$ACQ_MANAGED_SECRET_SERVICES" in
+    *" ${1:-} "*) return 0 ;;
+  esac
+  _acq_provider_credential_id_ok "${1:-}" || return 1
+  command -v acq_provider_credential_key_env >/dev/null 2>&1 || return 1
+  [ -n "$(acq_provider_credential_key_env "$1" 2>/dev/null)" ]
+}
+
+# acq_importable_services — every service `acq secret import` may scan for,
+# deduped and in a stable order: the built-in host services, then the providers
+# acq knows (trust anchor first, then config/env).
+acq_importable_services() {
+  {
+    for _svc in $ACQ_MANAGED_SECRET_SERVICES; do
+      printf '%s\n' "$_svc"
+    done
+    acq_provider_trusted_ids
+    acq_provider_registry_ids
+  } 2>/dev/null | awk 'NF && !seen[$0]++'
 }
 
 # acq_secret_import [SERVICE] [-g|--global|SANDBOX] [--all] [--force] [--dry-run]
@@ -730,8 +679,10 @@ acq_secret_import() {
     return 1
   fi
 
-  # Which services to consider: a single named one, or all managed services.
-  local services="$ACQ_MANAGED_SECRET_SERVICES"
+  # Which services to consider: a single named one, or every importable service
+  # (built-ins plus the providers acq knows through its trust anchor/registry).
+  local services
+  services=$(acq_importable_services)
   [ -n "$only_service" ] && services="$only_service"
 
   local scope_desc="global"
@@ -806,6 +757,12 @@ _acq_is_managed_secret_rm() {
   case "$ACQ_MANAGED_SECRET_SERVICES" in
     *" $svc "*) return 0 ;;
   esac
+  # A provider pinned in the credential-bindings registry is acq-managed too, so
+  # `acq secret rm <providerId>` routes to the acq-store removal path.
+  if command -v acq_provider_credential_key_env >/dev/null 2>&1 \
+      && [ -n "$(acq_provider_credential_key_env "$svc" 2>/dev/null)" ]; then
+    return 0
+  fi
   # Not a built-in: managed iff the entry exists in the acq store at this scope.
   # (Only checkable when the neutral store is loaded — the native-store backends.)
   if command -v _acq_secret_key >/dev/null 2>&1 && command -v acq_secret_get >/dev/null 2>&1; then
@@ -849,9 +806,12 @@ _acq_builtin_support_kit_names() {
 }
 
 _acq_selected_provider_kit_refs() {
-  local provider_refs=() ref
+  local provider_refs=() ref resolved
   if [ -z "${ACQ_PROVIDER_KITS_FROM_ENV:-}" ] && [ -z "${ACQ_PROVIDER_KITS_FROM_CLI:-}" ]; then
-    provider_refs=("$USAI_KIT")
+    # The default provider kit is DATA (`provider_kit:` in config.yaml), so a new
+    # provider needs no code change here.
+    resolved=$(acq_provider_kit_ref) || return 1
+    provider_refs=("$resolved")
   elif [ -n "$ACQ_PROVIDER_KITS" ]; then
     split_noglob provider_refs "$ACQ_PROVIDER_KITS"
   fi
@@ -969,12 +929,26 @@ acq_agent_builtin_kit_ready() {
 }
 
 _acq_selected_support_kit_refs() {
-  local name kit
+  local skip_provider="${1:-0}" name kit provider_refs
   kit=$(_acq_builtin_kit_ref zscaler-ca-certificate) || return 1
   printf '%s\n' "$kit"
-  while IFS= read -r kit; do
-    [ -n "$kit" ] && printf '%s\n' "$kit"
-  done < <(_acq_selected_provider_kit_refs)
+  # Captured, NOT consumed through a process substitution: a failed provider-kit
+  # resolution is reported to the caller instead of silently dropping the provider
+  # kit. SKIP_PROVIDER=1 yields the provider-free list, which is what the
+  # management verbs get to use while a config typo still exists.
+  if [ "$skip_provider" != "1" ]; then
+    provider_refs=$(_acq_selected_provider_kit_refs) || {
+      echo "acq: the configured provider kit could not be resolved (see above)." >&2
+      echo "     Fix 'provider_kit:' / 'kit_sources:' (acq kit-source ls)," >&2
+      echo "     or unset ACQ_PROVIDER_KITS." >&2
+      return 1
+    }
+    while IFS= read -r kit; do
+      [ -n "$kit" ] && printf '%s\n' "$kit"
+    done <<EOF
+$provider_refs
+EOF
+  fi
   for name in agentic-coding-playbook git-ssh-sign; do
     kit=$(_acq_builtin_kit_ref "$name") || return 1
     printf '%s\n' "$kit"
@@ -1014,16 +988,41 @@ acq_print_selected_agent_kit() {
   fi
 }
 
+# _acq_require_provider_selection — the create/run gate for a provider kit that
+# could not be resolved while the kit list was built. Management verbs deliberately
+# ignore the latch (they are how the user fixes the config); building a sandbox
+# without the selected provider would silently ship a different environment.
+_acq_require_provider_selection() {
+  [ -n "${ACQ_PROVIDER_SELECTION_ERROR:-}" ] || return 0
+  echo "acq: the configured provider kit could not be resolved:" >&2
+  printf '%s\n' "$ACQ_PROVIDER_SELECTION_ERROR" >&2
+  echo "     Fix 'provider_kit:' / 'kit_sources:' (see: acq kit-source ls)," >&2
+  echo "     or unset ACQ_PROVIDER_KITS." >&2
+  return 1
+}
+
 # Assemble the full kit list: selected built-ins, then extras.
 # Zscaler CA trust FIRST (see ACQ_KIT_NAMES) so later network-fetching kits
 # succeed behind a TLS-intercepting proxy.
 # shellcheck disable=SC2120  # optional agent argument; many callers use default
 _build_kit_list() {
-  local agent="${1:-}" kit
+  local agent="${1:-}" kit support_refs
   KITS=()
+  # This runs for EVERY verb (acq_resolve_backend), so a provider-selection
+  # failure is LATCHED here and only enforced by create/run through
+  # _acq_require_provider_selection. The kit list still builds (without the
+  # provider) so `acq configure`/`kit-source`/`help` can repair the config.
+  if support_refs=$(_acq_selected_support_kit_refs 2>/dev/null); then
+    ACQ_PROVIDER_SELECTION_ERROR=""
+  else
+    ACQ_PROVIDER_SELECTION_ERROR=$(_acq_selected_support_kit_refs 2>&1 >/dev/null || true)
+    support_refs=$(_acq_selected_support_kit_refs 1) || return 1
+  fi
   while IFS= read -r kit; do
     [ -n "$kit" ] && KITS+=("$kit")
-  done < <(_acq_selected_support_kit_refs)
+  done <<EOF
+$support_refs
+EOF
   # shellcheck disable=SC2034  # read by adapters/tests after _build_kit_list
   ACQ_BUILTIN_SUPPORT_KIT_COUNT="${#KITS[@]}"
   if [ -n "${ACQ_REQUIRED_AGENT_KIT:-}" ] \
@@ -1054,14 +1053,13 @@ _build_kit_list() {
     KITS+=("${ACQ_CLI_KITS[@]}")
   fi
 
-  # Also build the allowed sources list.
-  KIT_SOURCE_PREFIXES=("$KIT_SOURCE_PREFIX")
-  if [ -n "$ACQ_EXTRA_KIT_SOURCES" ]; then
-    local _extra_sources=()
-    split_noglob _extra_sources "$ACQ_EXTRA_KIT_SOURCES"
-    # shellcheck disable=SC2154
-    KIT_SOURCE_PREFIXES+=("${_extra_sources[@]}")
-  fi
+  # Also build the allowed sources list. Trusted kit sources are now DATA (the
+  # kit_sources registry), so the allowlist is derived rather than hardcoded.
+  KIT_SOURCE_PREFIXES=()
+  local _prefix
+  while IFS= read -r _prefix; do
+    [ -n "$_prefix" ] && KIT_SOURCE_PREFIXES+=("$_prefix")
+  done < <(acq_kit_source_prefixes)
 }
 
 # Normalize a string into a sandbox-name slug: lowercase, runs of
@@ -2391,6 +2389,1706 @@ acq_cli_kits_load() {
 }
 
 # ============================================================================
+# Trusted kit sources (which repositories acq will fetch kits from)
+# ============================================================================
+# Trust here is deliberately NARROW: a trusted source may be FETCHED from, and
+# its provider kits may be selected. It does NOT extend to the validation
+# control plane — the provider-input validator and its schemas stay pinned to the
+# Patterns release (PATTERNS_KIT_REF), so a new source can ship kits but cannot
+# redefine what a valid kit is.
+#
+# The registry is DATA in config.yaml so the default provider is not special-cased
+# in code:
+#   kit_sources:  host/owner/repo[@REF][|DIR] ...   (whitespace separated)
+#   provider_kit: <source-or-repo>/<kit>            (or <kit>@<repo>)
+# ACQ_KIT_SOURCES overrides the source list for one invocation.
+ACQ_KIT_SOURCE_CONFIG_KEY="kit_sources"
+ACQ_PROVIDER_KIT_CONFIG_KEY="provider_kit"
+ACQ_KIT_SOURCE_DEFAULT_REPO="github.com/GSA-TTS/agentic-coding-patterns"
+ACQ_KIT_SOURCE_DEFAULT_REF="$PATTERNS_KIT_REF"
+ACQ_KIT_SOURCE_DEFAULT_DIR="$PATTERNS_KIT_DIR"
+# The default provider kit, expressed as data. The short source name is matched
+# against the registered sources, so bumping PATTERNS_KIT_REF needs no code edit.
+ACQ_PROVIDER_KIT_DEFAULT="agentic-coding-patterns/${USAI_PROVIDER_KIT_NAME}"
+
+# _acq_kit_source_repo_ok REPO — host/owner/repo, lower-case host, no scheme.
+_acq_kit_source_repo_ok() {
+  local repo="${1:-}"
+  [ -n "$repo" ] && [ "${#repo}" -le 200 ] || return 1
+  printf '%s' "$repo" | LC_ALL=C grep -qE \
+    '^[a-z0-9][a-z0-9.-]*/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+}
+
+# _acq_kit_source_normalize_repo ARG — accept what a human pastes (a bare
+# host/owner/repo, a clone URL, a git+https kit-style URL) and emit host/owner/repo.
+# Fails closed on anything else so a typo cannot silently trust a different repo.
+_acq_kit_source_normalize_repo() {
+  local arg="${1:-}" repo
+  repo="$arg"
+  repo="${repo#git+}"
+  case "$repo" in
+    *://*) repo="${repo#*://}" ;;
+  esac
+  case "$repo" in
+    *@*) return 1 ;;   # credential-bearing URLs are never a kit source
+  esac
+  repo="${repo%%#*}"
+  repo="${repo%%\?*}"
+  repo="${repo%.git}"
+  repo="${repo%/}"
+  _acq_kit_source_repo_ok "$repo" || return 1
+  printf '%s\n' "$repo"
+}
+
+# _acq_kit_source_parse_entry ENTRY SOURCE — normalize "repo[@REF][|DIR]" into
+# "repo<TAB>ref<TAB>dir". REF may be empty (the source is then registered but
+# unusable for fetching, which the reader reports as unpinned). DIR defaults to
+# the neutral acq-kits path.
+_acq_kit_source_parse_entry() {
+  local entry="${1:-}" source="${2:-kit_sources}" rest repo ref="" dir=""
+  [ -n "$entry" ] || return 1
+  rest="$entry"
+  case "$rest" in
+    *'|'*) dir="${rest#*|}"; rest="${rest%%|*}" ;;
+  esac
+  case "$rest" in
+    *'@'*) ref="${rest#*@}"; rest="${rest%%@*}" ;;
+  esac
+  if ! repo=$(_acq_kit_source_normalize_repo "$rest"); then
+    echo "acq: ${source}: invalid kit source '$entry'" >&2
+    echo "     want host/owner/repo[@REF][|DIR] (for example github.com/acme/kits@<sha>)" >&2
+    return 1
+  fi
+  case "$ref" in
+    *[!A-Za-z0-9_.-]*)
+      echo "acq: ${source}: invalid ref '$ref' for '$repo'" >&2
+      return 1
+      ;;
+  esac
+  # An entry naming the shipped default source may omit @ref: it then follows the
+  # shipped PATTERNS_KIT_REF, so a future pin bump keeps applying. Only an
+  # explicit --ref freezes it.
+  if [ -z "$ref" ] && [ "$repo" = "$ACQ_KIT_SOURCE_DEFAULT_REPO" ]; then
+    ref="$ACQ_KIT_SOURCE_DEFAULT_REF"
+  fi
+  [ -n "$dir" ] || dir="$ACQ_KIT_SOURCE_DEFAULT_DIR"
+  case "$dir" in
+    /*|*..*|*[!A-Za-z0-9._/-]*)
+      echo "acq: ${source}: unsafe kit dir '$dir' for '$repo'" >&2
+      return 1
+      ;;
+  esac
+  printf '%s|%s|%s\n' "$repo" "$ref" "$dir"
+}
+
+# _acq_kit_source_default_entry — the shipped default, as a registry ENTRY.
+_acq_kit_source_default_entry() {
+  printf '%s@%s|%s\n' \
+    "$ACQ_KIT_SOURCE_DEFAULT_REPO" "$ACQ_KIT_SOURCE_DEFAULT_REF" "$ACQ_KIT_SOURCE_DEFAULT_DIR"
+}
+
+# acq_kit_sources_entries — echo one "repo<TAB>ref<TAB>dir" per trusted source.
+# Precedence: ACQ_KIT_SOURCES (this invocation) > config.yaml > shipped default.
+acq_kit_sources_entries() {
+  local raw tokens=() token source_label
+  if [ -n "${ACQ_KIT_SOURCES:-}" ]; then
+    raw="$ACQ_KIT_SOURCES"
+    source_label="ACQ_KIT_SOURCES"
+  else
+    raw=$(_acq_config_read_field "$ACQ_KIT_SOURCE_CONFIG_KEY")
+    if [ -n "$raw" ]; then
+      source_label="config.yaml ${ACQ_KIT_SOURCE_CONFIG_KEY}"
+    else
+      raw=$(_acq_kit_source_default_entry)
+      source_label="default"
+    fi
+  fi
+  # `none` is the explicit "no trusted sources" spelling: the flat config writer
+  # removes a key when its value is empty, so absence cannot express it.
+  case "$raw" in
+    none|NONE|None) return 0 ;;
+  esac
+  split_noglob tokens "$raw"
+  for token in ${tokens[@]+"${tokens[@]}"}; do
+    _acq_kit_source_parse_entry "$token" "$source_label" || return 1
+  done
+  return 0
+}
+
+# _acq_kit_source_owner_prefix REPO — the host/owner/ prefix of host/owner/repo.
+# Backends that allowlist by prefix (sbx) can only express owner granularity; acq's
+# own trust decisions (below) stay at exact-repository granularity.
+_acq_kit_source_owner_prefix() {
+  local repo="${1:-}"
+  printf '%s/%s/\n' "${repo%%/*}" "$(printf '%s' "${repo#*/}" | cut -d/ -f1)"
+}
+
+# acq_kit_source_prefixes [EXCLUDE_REPO] — the BACKEND allowlist (owner prefixes),
+# derived from the registry; EXCLUDE_REPO is left out so a caller can ask what
+# would REMAIN after removing it. ACQ_EXTRA_KIT_SOURCES (a list of host/owner/
+# prefixes) still works as a backward-compatible ADDITION so existing setups keep
+# fetching their kits.
+acq_kit_source_prefixes() {
+  local exclude="${1:-}" entries repo rest prefix seen=""
+  entries=$(acq_kit_sources_entries) || return 1
+  while IFS='|' read -r repo rest; do
+    [ -n "$repo" ] || continue
+    [ "$repo" != "$exclude" ] || continue
+    prefix=$(_acq_kit_source_owner_prefix "$repo")
+    case " $seen " in *" $prefix "*) continue ;; esac
+    seen="$seen $prefix"
+    printf '%s\n' "$prefix"
+  done <<EOF
+$entries
+EOF
+  local _extra=() _source
+  if [ -n "${ACQ_EXTRA_KIT_SOURCES:-}" ]; then
+    split_noglob _extra "$ACQ_EXTRA_KIT_SOURCES"
+    for _source in ${_extra[@]+"${_extra[@]}"}; do
+      [ -n "$_source" ] || continue
+      printf '%s\n' "$_source"
+    done
+  fi
+  return 0
+}
+
+# _acq_kit_source_entry_for_repo REPO — echo "repo<TAB>ref<TAB>dir" for a repo that
+# is registered (exact host/owner/repo), or fail.
+_acq_kit_source_entry_for_repo() {
+  local wanted="${1:-}" repo ref dir
+  [ -n "$wanted" ] || return 1
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] || continue
+    [ "$repo" = "$wanted" ] || continue
+    printf '%s|%s|%s\n' "$repo" "$ref" "$dir"
+    return 0
+  done <<EOF
+$(acq_kit_sources_entries)
+EOF
+  # The pinned Patterns release is acq's CONTROL PLANE (validator + schemas), so
+  # it stays resolvable even when the registry is overridden for one invocation
+  # (ACQ_KIT_SOURCES) or emptied: the default provider kit must not vanish just
+  # because an extra source was added for this run.
+  if [ "$wanted" = "$ACQ_KIT_SOURCE_DEFAULT_REPO" ]; then
+    printf '%s|%s|%s\n' \
+      "$ACQ_KIT_SOURCE_DEFAULT_REPO" "$ACQ_KIT_SOURCE_DEFAULT_REF" "$ACQ_KIT_SOURCE_DEFAULT_DIR"
+    return 0
+  fi
+  return 1
+}
+
+# _acq_kit_source_resolve_repo WANT — accept a full repo or a unique source
+# basename ("agentic-coding-patterns") and echo the full repo.
+_acq_kit_source_resolve_repo() {
+  local want="${1:-}" repo ref dir found="" count=0
+  [ -n "$want" ] || return 1
+  # The shipped default source is the pinned control plane: always resolvable.
+  if [ "$want" = "${ACQ_KIT_SOURCE_DEFAULT_REPO##*/}" ]; then
+    printf '%s\n' "$ACQ_KIT_SOURCE_DEFAULT_REPO"
+    return 0
+  fi
+  case "$want" in
+    */*) _acq_kit_source_entry_for_repo "$want" >/dev/null || {
+           echo "acq: kit source '$want' is not trusted." >&2
+           echo "     Add it first: acq kit-source add $want --ref <sha>" >&2
+           return 1
+         }
+         printf '%s\n' "$want"
+         return 0
+         ;;
+  esac
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] || continue
+    [ "${repo##*/}" = "$want" ] || continue
+    count=$((count + 1))
+    found="$repo"
+  done <<EOF
+$(acq_kit_sources_entries)
+EOF
+  if [ "$count" -eq 0 ]; then
+    echo "acq: kit source name '$want' is not registered." >&2
+    echo "     See: acq kit-source ls" >&2
+    return 1
+  fi
+  if [ "$count" -gt 1 ]; then
+    echo "acq: kit source name '$want' is ambiguous; use host/owner/repo." >&2
+    echo "     See: acq kit-source ls" >&2
+    return 1
+  fi
+  printf '%s\n' "$found"
+}
+
+# _acq_kit_source_kit_ref REPO REF DIR KIT — the git+https ref acq fetches.
+# DIR "." means the kits live at the repository root (no kits subdirectory), in
+# which case the ref points straight at the kit directory.
+_acq_kit_source_kit_ref() {
+  local repo="$1" ref="$2" dir="$3" kit="$4" path
+  if [ "$dir" = "." ]; then
+    path="$kit"
+  else
+    path="${dir}/${kit}"
+  fi
+  printf 'git+https://%s.git#ref=%s&dir=%s\n' "$repo" "$ref" "$path"
+}
+
+# _acq_kit_source_ref_trusted REF — a durable (config.yaml) literal remote kit
+# ref is trusted only if it names EXACTLY one repository that is registered.
+# Trusting github.com/acme/trusted must not authorize github.com/acme/other, so
+# the comparison is on host/owner/repo, never on the owner prefix. A ref that
+# cannot be reduced to one plain https repository (credentials, extra path
+# segments, a non-https scheme, odd encoding) is refused. The only owner-wide
+# grant is the explicit, legacy ACQ_EXTRA_KIT_SOURCES prefix list.
+_acq_kit_source_ref_trusted() {
+  local ref="${1:-}" body="" repo="" token _extra=()
+  case "$ref" in
+    git+https://*) body="${ref#git+https://}" ;;
+  esac
+  body="${body%%#*}"
+  # The lenient normalizer (built for what a human pastes) must not be the
+  # judge here: it strips through the LAST scheme separator, so a hostile
+  # authority could hide in front of a trusted-looking path. Require the body
+  # to already BE host/owner/repo[.git], byte for byte.
+  case "$body" in
+    *@*|*%*|*\?*|*://*|*:*|*//*|*/) body="" ;;
+    *[!A-Za-z0-9._/-]*) body="" ;;
+    */.|*/..|*/./*|*/../*) body="" ;;
+  esac
+  if [ -n "$body" ]; then
+    repo=$(_acq_kit_source_normalize_repo "$body") || repo=""
+    [ "$repo" = "${body%.git}" ] || repo=""
+  fi
+  if [ -n "$repo" ]; then
+    if _acq_kit_source_entry_for_repo "$repo" >/dev/null; then
+      return 0
+    fi
+    if [ -n "${ACQ_EXTRA_KIT_SOURCES:-}" ]; then
+      split_noglob _extra "$ACQ_EXTRA_KIT_SOURCES"
+      for token in ${_extra[@]+"${_extra[@]}"}; do
+        case "$token" in
+          */) case "$repo" in "$token"*) return 0 ;; esac ;;
+        esac
+      done
+    fi
+  fi
+  echo "acq: provider_kit names an untrusted remote ref: $ref" >&2
+  if [ -n "$repo" ]; then
+    echo "     Trust its source first: acq kit-source add $repo --ref <sha>" >&2
+  else
+    echo "     It must name one https repository (host/owner/repo) that is trusted." >&2
+  fi
+  return 1
+}
+
+# acq_provider_kit_ref [VALUE] — resolve the default provider kit (config
+# provider_kit, else ACQ_PROVIDER_KIT_DEFAULT) to a fetchable kit ref.
+# Accepted forms: <kit>@<source>, <source>/<kit>, host/owner/repo/<kit>.
+acq_provider_kit_ref() {
+  local value="${1:-}" kit="" repo="" head
+  local from_config=""
+  if [ -z "$value" ]; then
+    value=$(_acq_config_read_field "$ACQ_PROVIDER_KIT_CONFIG_KEY")
+    [ -n "$value" ] || value="$ACQ_PROVIDER_KIT_DEFAULT"
+    [ -z "$value" ] || from_config=1
+  fi
+  # A literal kit ref (local path or git+https) is used verbatim. A REMOTE ref
+  # that comes from config.yaml is additionally held to the trusted-source
+  # registry, per repository: a config file is durable state acq acts on
+  # automatically, unlike a ref the user typed on this command line (--kit) or
+  # the test seam.
+  case "$value" in
+    git+http*|/*|./*|../*)
+      if [ -n "$from_config" ]; then
+        case "$value" in
+          git+http*) _acq_kit_source_ref_trusted "$value" || return 1 ;;
+        esac
+      fi
+      printf '%s\n' "$value"
+      return 0
+      ;;
+  esac
+  case "$value" in
+    *@*)
+      kit="${value%@*}"
+      repo="${value#*@}"
+      ;;
+    */*/*/*)
+      repo=$(printf '%s' "$value" | cut -d/ -f1-3)
+      kit=$(printf '%s' "$value" | cut -d/ -f4-)
+      ;;
+    */*)
+      head="${value%%/*}"
+      kit="${value#*/}"
+      repo="$head"
+      ;;
+    *)
+      kit="$value"
+      ;;
+  esac
+  if [ -z "$kit" ]; then
+    echo "acq: provider_kit '$value' does not name a kit." >&2
+    return 1
+  fi
+  case "$kit" in
+    *[!A-Za-z0-9._-]*)
+      echo "acq: provider_kit '$value' has an unsafe kit name '$kit'." >&2
+      return 1
+      ;;
+  esac
+  if [ -z "$repo" ]; then
+    repo=$(printf '%s' "$ACQ_PROVIDER_KIT_DEFAULT" | sed 's|/.*||')
+  fi
+  repo=$(_acq_kit_source_resolve_repo "$repo") || return 1
+  local entry ref dir
+  entry=$(_acq_kit_source_entry_for_repo "$repo") || {
+    echo "acq: kit source '$repo' is not trusted." >&2
+    return 1
+  }
+  ref=$(printf '%s' "$entry" | cut -d'|' -f2)
+  dir=$(printf '%s' "$entry" | cut -d'|' -f3)
+  if [ -z "$ref" ]; then
+    echo "acq: kit source '$repo' has no pinned ref, so it cannot be fetched." >&2
+    echo "     Re-add it with an explicit ref: acq kit-source add $repo --ref <sha>" >&2
+    return 1
+  fi
+  _acq_kit_source_kit_ref "$repo" "$ref" "$dir" "$kit"
+}
+
+# _acq_kit_source_rewrite DROP_REPO [ADD_REPO ADD_REF ADD_DIR] — rewrite the flat
+# kit_sources value: drop DROP_REPO, then append the ADD_* entry when given.
+# Emits "added" or "updated" on stdout. Writes "none" when the result is empty,
+# because the flat writer removes a key whose value is empty (absence would
+# resurrect the shipped default).
+_acq_kit_source_rewrite() {
+  local drop="${1:-}" add_repo="${2:-}" add_ref="${3:-}" add_dir="${4:-}"
+  local entries repo ref dir updated="" seen=0
+  entries=$(acq_kit_sources_entries) || return 1
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] || continue
+    if [ "$repo" = "$drop" ]; then
+      seen=1
+      continue
+    fi
+    # Emit the default source WITHOUT @ref when it still tracks the shipped pin,
+    # so the entry stays dynamic across a PATTERNS_KIT_REF bump.
+    if [ "$repo" = "$ACQ_KIT_SOURCE_DEFAULT_REPO" ] && [ "$ref" = "$ACQ_KIT_SOURCE_DEFAULT_REF" ]; then
+      updated="${updated:+$updated }${repo}"
+    else
+      updated="${updated:+$updated }${repo}@${ref}"
+    fi
+    case "$dir" in
+      ""|"$ACQ_KIT_SOURCE_DEFAULT_DIR") : ;;
+      *) updated="${updated}|${dir}" ;;
+    esac
+  done <<EOF
+$entries
+EOF
+  if [ -n "$add_repo" ]; then
+    updated="${updated:+$updated }${add_repo}@${add_ref}"
+    case "$add_dir" in
+      ""|"$ACQ_KIT_SOURCE_DEFAULT_DIR") : ;;
+      *) updated="${updated}|${add_dir}" ;;
+    esac
+  fi
+  [ -n "$updated" ] || updated="none"
+  _acq_config_write_field "$ACQ_KIT_SOURCE_CONFIG_KEY" "$updated" || return 1
+  if [ "$seen" -eq 1 ] && [ -n "$add_repo" ]; then
+    printf 'updated\n'
+  elif [ -n "$add_repo" ]; then
+    printf 'added\n'
+  fi
+  return 0
+}
+
+# acq_provider_kit_candidates — "value<TAB>label" per selectable provider kit:
+# the shipped default first, then every provider kit discovered in a trusted
+# source. Values are unambiguous `<host/owner/repo>/<kit>` so a stored
+# `provider_kit:` never depends on a basename being unique.
+acq_provider_kit_candidates() {
+  local entries repo ref dir kits kit ksource kref seen
+  printf '%s\t%s\n' "$ACQ_PROVIDER_KIT_DEFAULT" "$ACQ_PROVIDER_KIT_DEFAULT (shipped)"
+  seen=" $ACQ_PROVIDER_KIT_DEFAULT "
+  entries=$(acq_kit_sources_entries) || return 1
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] && [ -n "$ref" ] || continue
+    kits=$(acq_kit_source_provider_kits "$repo" "$ref" "$dir")
+    [ -n "$kits" ] || continue
+    while IFS="$(printf '\t')" read -r kit ksource kref _; do
+      [ -n "$kit" ] || continue
+      case " $seen " in
+        *" $ksource/$kit "*) continue ;;
+      esac
+      seen="$seen $ksource/$kit"
+      printf '%s\t%s\n' "$ksource/$kit" "$ksource/$kit (@${kref})"
+    done <<EOF
+$kits
+EOF
+  done <<EOF
+$entries
+EOF
+  return 0
+}
+
+# acq_kit_source_set REPO --ref REF [--dir DIR] — persist (or replace) one source.
+acq_kit_source_set() {
+  local repo_arg="${1:-}" ref="" dir="" arg repo summary
+  if [ "$#" -ge 1 ]; then shift; fi
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+      --ref)
+        [ "$#" -ge 2 ] || { echo "acq: kit-source add: --ref needs a value" >&2; return 1; }
+        ref="$2"; shift 2
+        ;;
+      --dir)
+        [ "$#" -ge 2 ] || { echo "acq: kit-source add: --dir needs a value" >&2; return 1; }
+        dir="$2"; shift 2
+        ;;
+      *)
+        echo "acq: kit-source add: unexpected argument '$arg'" >&2
+        echo "     usage: acq kit-source add REPO --ref REF [--dir DIR]" >&2
+        return 1
+        ;;
+    esac
+  done
+  repo=$(_acq_kit_source_normalize_repo "$repo_arg") || {
+    echo "acq: kit-source add: invalid repository '$repo_arg'" >&2
+    echo "     want host/owner/repo (for example github.com/acme/kits)" >&2
+    return 1
+  }
+  if [ -z "$ref" ]; then
+    echo "acq: kit-source add: --ref <sha> is required." >&2
+    echo "     A trusted source is fetched at a pinned commit for reproducibility." >&2
+    return 1
+  fi
+  [ -n "$dir" ] || dir="$ACQ_KIT_SOURCE_DEFAULT_DIR"
+  # Validate the entry before persisting it (same rules the reader enforces).
+  _acq_kit_source_parse_entry "${repo}@${ref}|${dir}" "kit-source add" >/dev/null || return 1
+  summary=$(_acq_kit_source_rewrite "$repo" "$repo" "$ref" "$dir") || {
+    echo "acq: kit-source add: could not write $(_acq_config_file)" >&2
+    return 1
+  }
+  case "$summary" in
+    updated) echo "acq: updated kit source '${repo}' (@${ref})." >&2 ;;
+    *)       echo "acq: added kit source '${repo}' (@${ref})." >&2 ;;
+  esac
+  return 0
+}
+
+# acq_kit_source_rm REPO — drop one source (the shipped default included; with no
+# sources left acq fetches nothing instead of silently reinstating it).
+acq_kit_source_rm() {
+  local repo_arg="${1:-}" repo summary
+  if [ -z "$repo_arg" ]; then
+    echo "acq: kit-source rm: missing repository" >&2
+    echo "     usage: acq kit-source rm REPO" >&2
+    return 1
+  fi
+  repo=$(_acq_kit_source_normalize_repo "$repo_arg") || {
+    echo "acq: kit-source rm: invalid repository '$repo_arg'" >&2
+    return 1
+  }
+  if ! _acq_kit_source_entry_for_repo "$repo" >/dev/null; then
+    echo "acq: kit source '${repo}' is not registered." >&2
+    return 1
+  fi
+  # Reconcile the BACKEND allowlist first. If it cannot be brought in line, stop
+  # with the registry untouched: nothing is reported as removed, the source stays
+  # listed, and re-running this command after fixing the backend retries cleanly.
+  # (The reverse order would leave acq saying "removed" while the backend still
+  # permits the whole owner.)
+  if ! _acq_kit_source_revoke_in_backend "$repo"; then
+    echo "acq: kit source '${repo}' was NOT removed (still registered)." >&2
+    return 1
+  fi
+  summary=$(_acq_kit_source_rewrite "$repo") || {
+    echo "acq: kit-source rm: could not write $(_acq_config_file)" >&2
+    return 1
+  }
+  echo "acq: removed kit source '${repo}'." >&2
+  return 0
+}
+
+# _acq_kit_source_revoke_in_backend REPO — ask the active backend (when it keeps
+# its own source allowlist) to drop what no source remaining AFTER removing REPO
+# needs. NO
+# acq_backend_prepare: this is a config-only verb, and on msb a prepare can run
+# `msb doctor --fix` (host mutation). acq_resolve_backend has already loaded the
+# active adapter, so the hook exists when the backend implements one.
+_acq_kit_source_revoke_in_backend() {
+  command -v acq_backend_kit_source_revoked >/dev/null 2>&1 || return 0
+  acq_backend_kit_source_revoked "$1"
+}
+
+# acq_kit_source_provider_kits ENTRY — list the provider kits a source publishes.
+# Best-effort and OFFLINE-SAFE: a failed fetch yields nothing (callers say so)
+# rather than failing the whole listing or a create.
+acq_kit_source_provider_kits() {
+  local repo="${1:-}" ref="${2:-}" dir="${3:-}" cache seed root kit manifest
+  [ -n "$repo" ] && [ -n "$ref" ] && [ -n "$dir" ] || return 0
+  command -v kit_translate_fetch >/dev/null 2>&1 || return 0
+  seed=$(printf '%s@%s' "$repo" "$ref" | cksum 2>/dev/null | cut -d' ' -f1)
+  cache="${XDG_CACHE_HOME:-${HOME:-}/.cache}/acq/kit-sources/${seed:-0}"
+  root=$(kit_translate_fetch "git+https://${repo}.git#ref=${ref}&dir=${dir}" "$cache" 2>/dev/null) || {
+    acq_debug "kit-source: could not fetch $repo@$ref for discovery"
+    return 0
+  }
+  [ -d "$root" ] || return 0
+  for manifest in "$root"/*/provider-input.json; do
+    [ -f "$manifest" ] || continue
+    kit="${manifest%/provider-input.json}"
+    kit="${kit##*/}"
+    printf '%s\t%s\t%s\t%s\n' "$kit" "$repo" "$ref" "$dir"
+  done
+  return 0
+}
+
+# acq_kit_source_ls — sources, their pinned state, and the provider kits each
+# publishes (discovery is best-effort; see acq_kit_source_provider_kits).
+acq_kit_source_ls() {
+  local entries repo ref dir pinned kits kit ksource kref printed
+  entries=$(acq_kit_sources_entries) || return 1
+  printf '%-52s %-12s %s\n' SOURCE REF KITS-DIR
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] || continue
+    if [ -n "$ref" ]; then pinned="$ref"; else pinned="<unpinned>"; fi
+    printf '%-52s %-12s %s\n' "$repo" "$pinned" "$dir"
+  done <<EOF
+$entries
+EOF
+  echo ""
+  echo "Provider kits published by these sources:"
+  printed=0
+  while IFS='|' read -r repo ref dir; do
+    [ -n "$repo" ] && [ -n "$ref" ] || continue
+    kits=$(acq_kit_source_provider_kits "$repo" "$ref" "$dir")
+    [ -n "$kits" ] || continue
+    while IFS="$(printf '\t')" read -r kit ksource kref _; do
+      [ -n "$kit" ] || continue
+      printed=1
+      printf '  %-34s %s (@%s)\n' "$kit" "$ksource" "$kref"
+    done <<EOF2
+$kits
+EOF2
+  done <<EOF
+$entries
+EOF
+  if [ "$printed" -eq 0 ]; then
+    echo "  (none discovered — sources are unreachable, or publish no provider kits)"
+  fi
+  echo ""
+  echo "Set the default provider kit via 'acq configure', or in config.yaml:"
+  echo "  provider_kit: <source>/<kit>      # e.g. agentic-coding-patterns/${USAI_PROVIDER_KIT_NAME}"
+  return 0
+}
+
+# ============================================================================
+# Provider credential bindings + generic provider key injection
+# ============================================================================
+# A provider kit is DATA: it ships `provider-input.json` and, once the pinned
+# validator accepts it, a materialized `facts.json` naming its providerId,
+# keyEnv, host, modelsUrl, and apiProtocol. acq owns the registry that maps a
+# providerId to BOTH the ENV var its credential arrives in AND the host(s) that
+# credential may be sent to, so a provider kit hosted outside the pinned Patterns
+# release (a user's own git+https repo) is injected with no provider-specific
+# acq code — without turning "declare someone else's providerId" into a way to
+# ship a stored credential to an attacker's host.
+#
+# The registry is a three-layer merge, highest precedence last:
+#   1. the pinned Patterns `provider-credential-bindings.json` — the trust
+#      anchor, and the table the pinned validator itself checks facts against;
+#   2. config.yaml `provider_credential_bindings:` — durable, user-owned;
+#   3. ACQ_PROVIDER_CREDENTIAL_BINDINGS — this invocation.
+# A layer entry is "providerId=KEY_ENV" or "providerId=KEY_ENV@host[,host]".
+# Malformed entries fail closed: a typo must never silently bind a different
+# provider's credential or a different destination host.
+ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY="provider_credential_bindings"
+
+# Providers acq trusts BY DEFAULT, as data: `id|keyEnv|host`. The pinned
+# Patterns release is acq's validation+source trust anchor, so its provider comes
+# pre-pinned. A new provider is pinned explicitly with
+# `acq provider-credential set <id> <KEY_ENV> --host <H>`.
+# shellcheck disable=SC2034  # consumed by _acq_provider_trusted_default
+ACQ_PROVIDER_TRUSTED_DEFAULTS="usai|${USAI_PROVIDER_KEY_ENV}|${USAI_PROVIDER_HOST}"
+
+# Process-critical variables a provider credential must never occupy.
+ACQ_PROVIDER_FORBIDDEN_KEY_ENVS="PATH IFS LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV HOME SHELLOPTS PS4 CDPATH TMPDIR"
+
+# Facts published by a provider kit are untrusted input until validated: they
+# reach an sh -c probe and a backend --secret binding. `ACQ_PROVIDER_BINDINGS_GENERATION`
+# is an INTERNAL seam only — it is reset at load so an inherited environment
+# variable cannot redirect which facts acq trusts. It is declared `local` in the
+# create gate, so it never outlives that one call.
+ACQ_PROVIDER_BINDINGS_GENERATION=""
+
+# providerId grammar (shared with the validator's own provider naming rule).
+_acq_provider_credential_id_ok() {
+  case "${1:-}" in
+    ''|*[!a-z0-9-]*) return 1 ;;
+  esac
+  # Bounded, lower-case, and never starting/ending with '-'.
+  printf '%s' "$1" | LC_ALL=C grep -qE '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
+}
+
+# KEY_ENV grammar: an upper-case environment variable name.
+_acq_provider_credential_env_ok() {
+  case "${1:-}" in
+    '') return 1 ;;
+  esac
+  case " $ACQ_PROVIDER_FORBIDDEN_KEY_ENVS " in
+    *" $1 "*) return 1 ;;
+  esac
+  printf '%s' "$1" | LC_ALL=C grep -qE '^[A-Z][A-Z0-9_]*$'
+}
+
+# _acq_provider_credential_env_owner KEY_ENV — echo the built-in service that
+# owns KEY_ENV, or nothing. A provider may only reuse a reserved name when it IS
+# that provider (e.g. providerId `usai` + USAI_API_KEY).
+_acq_provider_credential_env_owner() {
+  case "${1:-}" in
+    USAI_API_KEY)          printf 'usai\n' ;;
+    GITHUB_TOKEN|GH_TOKEN) printf 'github\n' ;;
+    GITLAB_TOKEN)          printf 'gitlab\n' ;;
+  esac
+}
+
+# _acq_provider_credential_host_ok HOST — one DNS name, lower-case, no port, no
+# path, no wildcard, no wildcard-cert tricks (a leading dot or '*' is rejected).
+_acq_provider_credential_host_ok() {
+  local host="${1:-}"
+  [ -n "$host" ] && [ "${#host}" -le 253 ] || return 1
+  printf '%s' "$host" | LC_ALL=C grep -qE \
+    '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+}
+
+# _acq_provider_fact_strict_url_ok URL [HOST] — provider-KIT facts are stricter
+# than the shared USAi facts contract: a kit may declare any host, so its models
+# URL must also be free of shell metacharacters even though acq passes it as
+# positional data (defense in depth), and it must stay on the declared host.
+_acq_provider_fact_strict_url_ok() {
+  local url="${1:-}" host="${2:-}"
+  _acq_provider_fact_safe_url "$url" || return 1
+  case "$url" in
+    *'&'*|*'#'*|*';'*|*'|'*|*'`'*|*'$'*|*'"'*|*"'"*|*'('*|*')'*|*'<'*|*'>'*) return 1 ;;
+  esac
+  if [ -n "$host" ]; then
+    case "$url" in
+      "https://$host/"*|"https://$host"|"https://$host:443/"*) ;;
+      *) return 1 ;;
+    esac
+  fi
+  return 0
+}
+
+# _acq_provider_credential_check_env OWNER PROVIDER_ID KEY_ENV — validate a
+# KEY_ENV for a provider, including the reserved/forbidden name rules.
+_acq_provider_credential_check_env() {
+  local source="$1" provider_id="$2" key_env="$3" owner
+  if ! _acq_provider_credential_env_ok "$key_env"; then
+    echo "acq: ${source}: invalid KEY_ENV '$key_env' for provider '$provider_id'" >&2
+    echo "     want an upper-case env var name (for example: OPENCODE_GO_API_KEY)" >&2
+    return 1
+  fi
+  owner=$(_acq_provider_credential_env_owner "$key_env")
+  if [ -n "$owner" ] && [ "$owner" != "$provider_id" ]; then
+    echo "acq: ${source}: KEY_ENV '$key_env' belongs to the '$owner' service," >&2
+    echo "     so provider '$provider_id' cannot claim it. Use a provider-specific name." >&2
+    return 1
+  fi
+  return 0
+}
+
+# _acq_provider_credential_parse_pairs SOURCE PAIRS — normalize a
+# whitespace-separated list of "<providerId>=<KEY_ENV>[@<host>[,<host>]]" into one
+# entry per line, validating every field. Fails closed (rc 1, nothing on stdout)
+# on a malformed token.
+_acq_provider_credential_parse_pairs() {
+  local source="$1" pairs="$2" tokens=() token provider_id rest key_env hosts hosts_out host IFS
+  [ -n "$pairs" ] || return 0
+  split_noglob tokens "$pairs"
+  for token in ${tokens[@]+"${tokens[@]}"}; do
+    case "$token" in
+      *=*) ;;
+      *)
+        echo "acq: ${source}: expected '<providerId>=<KEY_ENV>', got '$token'" >&2
+        return 1
+        ;;
+    esac
+    provider_id="${token%%=*}"
+    rest="${token#*=}"
+    case "$rest" in
+      *@*) key_env="${rest%%@*}"; hosts="${rest#*@}" ;;
+      *)   key_env="$rest"; hosts="" ;;
+    esac
+    case "$key_env" in
+      *@*|*=*)
+        echo "acq: ${source}: '$token' has a malformed credential name" >&2
+        return 1
+        ;;
+    esac
+    if ! _acq_provider_credential_id_ok "$provider_id"; then
+      echo "acq: ${source}: invalid provider id '$provider_id'" >&2
+      echo "     want ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?\$ (for example: opencode-go)" >&2
+      return 1
+    fi
+    _acq_provider_credential_check_env "$source" "$provider_id" "$key_env" || return 1
+    hosts_out=""
+    if [ -n "$hosts" ]; then
+      IFS=','
+      for host in $hosts; do
+        if ! _acq_provider_credential_host_ok "$host"; then
+          echo "acq: ${source}: invalid host '$host' for provider '$provider_id'" >&2
+          echo "     want a bare DNS name such as models.example.gov (no scheme, port, or path)" >&2
+          return 1
+        fi
+        hosts_out="${hosts_out:+$hosts_out,}$host"
+      done
+    fi
+    if [ -n "$hosts_out" ]; then
+      printf '%s=%s@%s\n' "$provider_id" "$key_env" "$hosts_out"
+    else
+      printf '%s=%s\n' "$provider_id" "$key_env"
+    fi
+  done
+  return 0
+}
+
+# acq_provider_credential_overrides — echo the CONFIG then ENV layers as
+# normalized entries (lowest first). The pinned base layer is merged where it is
+# actually available (acq_provider_input_prepare, which already fetched the
+# pinned release), so this stays offline and cheap.
+acq_provider_credential_overrides() {
+  local configured
+  configured=$(_acq_config_read_field "$ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY")
+  _acq_provider_credential_parse_pairs "config.yaml ${ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY}" "$configured" || return 1
+  _acq_provider_credential_parse_pairs "ACQ_PROVIDER_CREDENTIAL_BINDINGS" \
+    "${ACQ_PROVIDER_CREDENTIAL_BINDINGS:-}" || return 1
+}
+
+# _acq_provider_credential_field ENTRY FIELD — read id|env|hosts out of one
+# normalized entry ("id=ENV[@hosts]").
+_acq_provider_credential_field() {
+  local entry="$1" field="$2" rest
+  case "$field" in
+    id)  printf '%s' "${entry%%=*}" ;;
+    env) rest="${entry#*=}"; printf '%s' "${rest%%@*}" ;;
+    hosts)
+      case "$entry" in
+        *@*) printf '%s' "${entry#*@}" ;;
+        *)   printf '' ;;
+      esac
+      ;;
+  esac
+}
+
+# acq_provider_credential_lookup PROVIDER_ID FIELD — echo id|env|hosts for the
+# highest-precedence entry naming PROVIDER_ID (ENV overrides CONFIG).
+acq_provider_credential_lookup() {
+  local wanted="${1:-}" field="${2:-}" pairs entry found=""
+  [ -n "$wanted" ] || return 0
+  # A malformed durable pin is an error, not a reason to fall back to a host a
+  # kit chose: the caller can only honour the registry if it is well formed.
+  pairs=$(acq_provider_credential_overrides) || return 1
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    [ "$(_acq_provider_credential_field "$entry" id)" = "$wanted" ] || continue
+    found="$entry"
+  done <<EOF
+$pairs
+EOF
+  [ -n "$found" ] || {
+    # Not configured by the user: fall back to the shipped trust anchor so the
+    # DEFAULT provider needs no per-install configuration. A miss here is "no
+    # pin", not an error — the facts may still name the provider (validated by
+    # the pinned validator), and the gate decides whether a host is trusted.
+    _acq_provider_trusted_default "$wanted" "$field" || return 0
+    return 0
+  }
+  _acq_provider_credential_field "$found" "$field"
+}
+
+acq_provider_credential_key_env() {
+  acq_provider_credential_lookup "${1:-}" env
+}
+
+# _acq_provider_trusted_default PROVIDER_ID FIELD — read a provider out of the
+# shipped trust-anchor table (`id|keyEnv|host`). This is why the DEFAULT provider
+# needs no configuration: its (keyEnv, host) pair is data, not a code branch.
+_acq_provider_trusted_default() {
+  local wanted="${1:-}" field="${2:-}" id key_env hosts
+  [ -n "$wanted" ] || return 1
+  while IFS='|' read -r id key_env hosts; do
+    [ "$id" = "$wanted" ] || continue
+    case "$field" in
+      id)    printf '%s\n' "$id" ;;
+      env)   printf '%s\n' "$key_env" ;;
+      hosts) printf '%s\n' "$hosts" ;;
+      *)     return 1 ;;
+    esac
+    return 0
+  done <<EOF
+$ACQ_PROVIDER_TRUSTED_DEFAULTS
+EOF
+  return 1
+}
+
+# True when at least one provider kit is selected. `--no-provider-kits` (or an
+# explicit empty ACQ_PROVIDER_KITS) disables every provider, trusted default
+# included — so no credential is bound and no prompt is shown.
+acq_provider_selection_active() {
+  if [ -n "${ACQ_PROVIDER_KITS_FROM_ENV:-}" ] || [ -n "${ACQ_PROVIDER_KITS_FROM_CLI:-}" ]; then
+    [ -n "${ACQ_PROVIDER_KITS:-}" ] || return 1
+  fi
+  return 0
+}
+
+# acq_provider_trusted_ids — the provider ids shipped in the trust anchor.
+# Selection-independent (used by `acq secret import`/managed-service checks).
+acq_provider_trusted_ids() {
+  local id rest
+  while IFS='|' read -r id rest; do
+    [ -n "$id" ] && printf '%s\n' "$id"
+  done <<EOF
+$ACQ_PROVIDER_TRUSTED_DEFAULTS
+EOF
+  return 0
+}
+
+# acq_provider_default_selected — 0 when the DEFAULT provider kit is among the
+# selected provider refs. Guards the trust anchor so an external-provider-only
+# selection does not bind/export the default provider's credential.
+acq_provider_default_selected() {
+  local refs default_ref ref
+  refs=$(_acq_selected_provider_kit_refs) || return 1
+  default_ref=$(acq_provider_kit_ref) || return 1
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    [ "$ref" = "$default_ref" ] && return 0
+  done <<EOF
+$refs
+EOF
+  return 1
+}
+
+# acq_provider_default_id — the id of the shipped default provider (the first
+# entry of the trust-anchor table), used where a facts-free fallback needs to name
+# "the default provider" without hardcoding `usai`.
+acq_provider_default_id() {
+  local id rest
+  [ -n "$ACQ_PROVIDER_TRUSTED_DEFAULTS" ] || return 1
+  IFS='|' read -r id rest <<EOF
+$ACQ_PROVIDER_TRUSTED_DEFAULTS
+EOF
+  [ -n "$id" ] || return 1
+  printf '%s\n' "$id"
+}
+
+acq_provider_credential_hosts() {
+  acq_provider_credential_lookup "${1:-}" hosts
+}
+
+# acq_provider_credential_merge_json BASE OUT PYTHON — write the three-layer
+# merge to OUT. BASE is the pinned patterns registry (read-only trust anchor),
+# OUT is a temp file the caller cleans up with its staging dir. The document stays
+# in the shape the pinned validator expects (`providers[providerId]` = ENV), so a
+# richer trust anchor keeps working but the validator never sees acq's own host
+# pins: those are enforced at injection time, not by the schema.
+acq_provider_credential_merge_json() {
+  local base="$1" out="$2" python="$3" overrides
+  [ -n "$base" ] && [ -n "$out" ] && [ -n "$python" ] || return 1
+  overrides=$(acq_provider_credential_overrides) || return 1
+  # shellcheck disable=SC2086  # validated entries; word splitting is the framing
+  "$python" - "$base" "$out" $overrides <<'PY'
+import json, os, sys
+
+base_path, out_path = sys.argv[1], sys.argv[2]
+entries = sys.argv[3:]
+
+try:
+    with open(base_path, encoding="utf-8") as handle:
+        document = json.load(handle)
+except Exception as exc:  # a malformed trust anchor is fatal, never ignored
+    raise SystemExit(
+        "acq: cannot read pinned provider credential bindings %s: %s" % (base_path, exc)
+    )
+
+if not isinstance(document, dict):
+    raise SystemExit("acq: pinned provider credential bindings must be a JSON object")
+
+providers = document.get("providers")
+if providers is None:
+    providers = {}
+if not isinstance(providers, dict):
+    raise SystemExit("acq: pinned provider credential bindings 'providers' must be an object")
+
+for entry in entries:
+    provider_id, _, rest = entry.partition("=")
+    key_env = rest.partition("@")[0]
+    current = providers.get(provider_id)
+    if isinstance(current, dict):
+        merged = dict(current)
+        merged["keyEnv"] = key_env
+        providers[provider_id] = merged
+    else:
+        providers[provider_id] = key_env
+
+document["providers"] = providers
+temporary = out_path + ".tmp"
+descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, out_path)
+PY
+}
+
+# acq_provider_credential_set PROVIDER_ID KEY_ENV [--host HOST[,HOST]] — persist
+# one binding. The host is REQUIRED: it is the trust decision that lets acq send
+# a stored credential to that destination, so it must be explicit rather than
+# inherited from whatever a kit happens to declare.
+acq_provider_credential_set() {
+  local provider_id="${1:-}" key_env="${2:-}" hosts="" arg configured existing line updated=""
+  if [ "$#" -ge 2 ]; then shift 2; else set --; fi
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+      --host)
+        [ "$#" -ge 2 ] || {
+          echo "acq: provider-credential set: --host needs a value" >&2
+          return 1
+        }
+        hosts="${hosts:+$hosts,}$2"
+        shift 2
+        ;;
+      --host=*)
+        hosts="${hosts:+$hosts,}${arg#--host=}"
+        shift
+        ;;
+      *)
+        echo "acq: provider-credential set: unexpected argument '$arg'" >&2
+        echo "     usage: acq provider-credential set PROVIDER KEY_ENV --host HOST[,HOST]" >&2
+        return 1
+        ;;
+    esac
+  done
+  if ! _acq_provider_credential_id_ok "$provider_id"; then
+    echo "acq: provider-credential set: invalid provider id '${provider_id}'" >&2
+    echo "     want ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?\$ (for example: opencode-go)" >&2
+    return 1
+  fi
+  _acq_provider_credential_check_env "provider-credential set" "$provider_id" "$key_env" || return 1
+  if [ -z "$hosts" ]; then
+    echo "acq: provider-credential set: a --host is required." >&2
+    echo "     The host is the trust decision that lets acq send this credential" >&2
+    echo "     to a destination, so acq never infers it from a kit's facts." >&2
+    echo "     usage: acq provider-credential set $provider_id $key_env --host models.example.gov" >&2
+    return 1
+  fi
+  configured=$(_acq_config_read_field "$ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY")
+  existing=$(_acq_provider_credential_parse_pairs \
+    "config.yaml ${ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY}" "$configured") || {
+    echo "acq: provider-credential set: refusing to rewrite a malformed" >&2
+    echo "     ${ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY} entry in $(_acq_config_file)" >&2
+    echo "     Fix that line by hand, then retry." >&2
+    return 1
+  }
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "${provider_id}="*) continue ;;
+    esac
+    updated="${updated:+$updated }$line"
+  done <<EOF
+$existing
+EOF
+  updated="${updated:+$updated }${provider_id}=${key_env}@${hosts}"
+  # Re-parse our own candidate so a bad --host value fails before it is written.
+  _acq_provider_credential_parse_pairs "provider-credential set" "$updated" >/dev/null || return 1
+  if ! _acq_config_write_field "$ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY" "$updated"; then
+    echo "acq: provider-credential set: could not write $(_acq_config_file)" >&2
+    return 1
+  fi
+  echo "acq: bound provider '${provider_id}' to \$${key_env} for host(s) ${hosts}." >&2
+  return 0
+}
+
+# acq_provider_credential_rm PROVIDER_ID — drop the config.yaml binding. The
+# ENV layer is per-invocation, so it cannot be removed durably (and saying so is
+# more useful than silently reporting success).
+acq_provider_credential_rm() {
+  local provider_id="${1:-}" configured existing line updated="" removed=0
+  if ! _acq_provider_credential_id_ok "$provider_id"; then
+    echo "acq: provider-credential rm: invalid provider id '${provider_id}'" >&2
+    return 1
+  fi
+  configured=$(_acq_config_read_field "$ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY")
+  existing=$(_acq_provider_credential_parse_pairs \
+    "config.yaml ${ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY}" "$configured") || {
+    echo "acq: provider-credential rm: refusing to rewrite a malformed" >&2
+    echo "     ${ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY} entry in $(_acq_config_file)" >&2
+    return 1
+  }
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "${provider_id}="*) removed=1; continue ;;
+    esac
+    updated="${updated:+$updated }$line"
+  done <<EOF
+$existing
+EOF
+  if [ "$removed" -eq 0 ]; then
+    echo "acq: no config.yaml binding for provider '${provider_id}'." >&2
+    echo "     (An ACQ_PROVIDER_CREDENTIAL_BINDINGS entry is per-invocation only.)" >&2
+    return 1
+  fi
+  _acq_config_write_field "$ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY" "$updated" || {
+    echo "acq: provider-credential rm: could not write $(_acq_config_file)" >&2
+    return 1
+  }
+  echo "acq: removed the '${provider_id}' binding from $(_acq_config_file)." >&2
+  return 0
+}
+
+# acq_provider_credential_ls — list the USER-owned layers (config, env) with the
+# host each credential may be sent to. The pinned defaults still apply underneath
+# and are named in the footer rather than fetched, so `ls` never needs network.
+acq_provider_credential_ls() {
+  local configured from_config from_env printed
+  configured=$(_acq_config_read_field "$ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY")
+  from_config=$(_acq_provider_credential_parse_pairs \
+    "config.yaml ${ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY}" "$configured") || return 1
+  from_env=$(_acq_provider_credential_parse_pairs \
+    "ACQ_PROVIDER_CREDENTIAL_BINDINGS" "${ACQ_PROVIDER_CREDENTIAL_BINDINGS:-}") || return 1
+  printf '%-24s %-32s %-32s %s\n' PROVIDER KEY_ENV HOST SOURCE
+  printed=0
+  if [ -n "$from_config" ]; then
+    _acq_provider_credential_ls_rows "$from_config" "config.yaml" && printed=1
+  fi
+  if [ -n "$from_env" ]; then
+    _acq_provider_credential_ls_rows "$from_env" "env" && printed=1
+  fi
+  [ "$printed" -eq 1 ] || printf '%-24s %-32s %-32s %s\n' '(none)' '-' '-' '-'
+  echo ""
+  echo "HOST is the pinned destination: acq refuses to send a stored credential"
+  echo "anywhere else. 'acq secret set -g <providerId>' stores the value itself."
+  return 0
+}
+
+# _acq_provider_credential_ls_rows ENTRIES SOURCE — print table rows directly on
+# stdout (never captured into a variable, which would strip the final newline and
+# glue the config block onto the env block).
+_acq_provider_credential_ls_rows() {
+  local entries="$1" source="$2" line hosts
+  [ -n "$entries" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    hosts=$(_acq_provider_credential_field "$line" hosts)
+    printf '%-24s %-32s %-32s %s\n' \
+      "$(_acq_provider_credential_field "$line" id)" \
+      "$(_acq_provider_credential_field "$line" env)" \
+      "${hosts:-<unpinned>}" "$source"
+  done <<EOF
+$entries
+EOF
+}
+
+# _acq_provider_env_value NAME — echo the value of the environment variable NAME
+# WITHOUT eval. Bash 3.2's indirect expansion has no default-operator form, so the
+# nounset guard is toggled explicitly (the same save/restore idiom split_noglob
+# uses for noglob). NAME must be an identifier: it is passed to `${!name}`, never
+# into program text.
+_acq_provider_env_value() {
+  local name="${1:-}" had_u=0 value=""
+  case "$name" in
+    ''|*[!A-Za-z0-9_]*) return 0 ;;
+  esac
+  case "$-" in *u*) had_u=1 ;; esac
+  set +u
+  value="${!name}"
+  if [ "$had_u" -eq 1 ]; then set -u; fi
+  printf '%s' "$value"
+}
+
+# _acq_provider_credentials_validate_records RECORDS — validate the facts copied
+# into a sandbox's host-config `provider-credentials` record. Host config is
+# acq-owned but still on disk, and its fields reach eval-free exports, backend
+# argv, and a curl probe, so every field is re-checked before use.
+_acq_provider_credentials_validate_records() {
+  local records="${1:-}" tab provider_id key_env host models_url api_protocol
+  local IFS
+  [ -n "$records" ] || return 0
+  tab=$(printf '\t')
+  while IFS="$tab" read -r provider_id key_env host models_url api_protocol; do
+    [ -n "$provider_id" ] || continue
+    _acq_provider_credential_id_ok "$provider_id" || return 1
+    _acq_provider_credential_env_ok "$key_env" || return 1
+    _acq_provider_credential_host_ok "$host" || return 1
+    _acq_provider_fact_strict_url_ok "$models_url" "$host" || return 1
+    case "$api_protocol" in
+      ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+  done <<EOF
+$records
+EOF
+  return 0
+}
+
+# acq_provider_recorded_facts BACKEND NAME — the sandbox's recorded facts, after
+# validation. Fails closed: a tampered or half-written record is never parsed into
+# a credential binding.
+acq_provider_recorded_facts() {
+  local backend="${1:-}" name="${2:-}" records
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  records=$(acq_host_config_read "$backend" "$name" provider-credentials)
+  [ -n "$records" ] || return 0
+  _acq_provider_credentials_validate_records "$records" || {
+    echo "acq: invalid provider-credentials record for $backend/$name (host config)." >&2
+    echo "     Refusing to use it; recreate the sandbox to re-record provider facts." >&2
+    return 1
+  }
+  printf '%s\n' "$records"
+}
+
+# _acq_provider_facts_python — resolve a Python runtime for reading facts.json
+# WITHOUT bootstrapping the validator (facts are read on hot paths). Honors
+# ACQ_PROVIDER_INPUT_PYTHON and the installed validator runtime first, so
+# Windows (`Scripts/python.exe`) and custom interpreters work; only then PATH.
+_acq_provider_facts_python() {
+  local python="${ACQ_PROVIDER_INPUT_PYTHON:-}" runtime data_home
+  if [ -n "$python" ] && [ -x "$python" ]; then
+    printf '%s\n' "$python"
+    return 0
+  fi
+  if [ -n "${LOCALAPPDATA:-}" ] && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
+    data_home="$LOCALAPPDATA/acq"
+  else
+    data_home="${XDG_DATA_HOME:-${HOME:-}/.local/share}/acq"
+  fi
+  runtime="${ACQ_PROVIDER_INPUT_DATA_DIR:-$data_home/provider-input-validator}.current"
+  if [ -x "$runtime/bin/python3" ]; then
+    printf '%s\n' "$runtime/bin/python3"
+    return 0
+  fi
+  if [ -x "$runtime/Scripts/python.exe" ]; then
+    printf '%s\n' "$runtime/Scripts/python.exe"
+    return 0
+  fi
+  if [ -x "$runtime/python.exe" ]; then
+    printf '%s\n' "$runtime/python.exe"
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "python3"
+    return 0
+  fi
+  return 1
+}
+
+# acq_provider_facts_json_fields FILE — echo one TAB-separated record:
+#   providerId<TAB>keyEnv<TAB>host<TAB>modelsUrl<TAB>apiProtocol
+# rc 1 when FILE is absent (no provider facts to read), 2 when it is present but
+# not a usable facts document (including "no Python runtime available"). Every
+# value is re-validated after parsing: these values reach an sh -c probe and a
+# --secret binding, so a tampered facts.json must not be able to smuggle shell
+# syntax, a cross-host models URL, or an unsafe ENV name any further.
+acq_provider_facts_json_fields() {
+  local file="${1:-}" python value provider_id="" key_env="" host="" models_url="" api_protocol="" count=0
+  [ -n "$file" ] || return 2
+  { [ -f "$file" ] && [ ! -L "$file" ]; } || return 1
+  python=$(_acq_provider_facts_python) || {
+    echo "acq: no Python runtime available to read provider facts ($file)." >&2
+    echo "     Set ACQ_PROVIDER_INPUT_PYTHON or install the validator runtime:" >&2
+    echo "       scripts/setup-provider-input-validator --apply" >&2
+    return 2
+  }
+  while IFS= read -r value; do
+    count=$((count + 1))
+    case "$count" in
+      1) provider_id="$value" ;;
+      2) key_env="$value" ;;
+      3) host="$value" ;;
+      4) models_url="$value" ;;
+      5) api_protocol="$value" ;;
+    esac
+  done < <("$python" - "$file" <<'PY'
+import json, sys
+from urllib.parse import urlsplit
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        facts = json.load(handle)
+except Exception:
+    raise SystemExit(2)
+if not isinstance(facts, dict):
+    raise SystemExit(2)
+values = {}
+for name in ("providerId", "keyEnv", "host", "modelsUrl", "apiProtocol"):
+    value = facts.get(name)
+    if not isinstance(value, str) or not value:
+        raise SystemExit(2)
+    if any(character in value for character in "\t\n\r"):
+        raise SystemExit(2)
+    values[name] = value
+# The credential is only ever sent to facts.host, so a models URL naming any
+# other host (or a non-https scheme) is a mismatch, not a warning.
+parsed = urlsplit(values["modelsUrl"])
+if parsed.scheme != "https" or parsed.hostname != values["host"]:
+    raise SystemExit(2)
+if parsed.port not in (None, 443):
+    raise SystemExit(2)
+for value in values.values():
+    print(value)
+PY
+  )
+  [ "$count" -eq 5 ] || return 2
+  _acq_provider_credential_id_ok "$provider_id" || return 2
+  _acq_provider_credential_env_ok "$key_env" || return 2
+  _acq_provider_credential_host_ok "$host" || return 2
+  _acq_provider_fact_strict_url_ok "$models_url" "$host" || return 2
+  case "$api_protocol" in
+    ''|*[!A-Za-z0-9._-]*) return 2 ;;
+  esac
+  printf '%s\t%s\t%s\t%s\t%s\n' "$provider_id" "$key_env" "$host" "$models_url" "$api_protocol"
+}
+
+# acq_provider_facts_list_generation GENERATION — one validated facts record per
+# provider directory of a materialized generation. FAILS CLOSED (non-zero) on the
+# first record that does not validate: the generation was gated by the pinned
+# validator, so anything unreadable now means tampering, not "no providers".
+acq_provider_facts_list_generation() {
+  local generation="${1:-}" providers_dir record
+  [ -n "$generation" ] || return 0
+  providers_dir="$generation/models/providers"
+  [ -d "$providers_dir" ] || return 0
+  for record in "$providers_dir"/*/facts.json; do
+    [ -e "$record" ] || continue
+    acq_provider_facts_json_fields "$record" || {
+      echo "acq: invalid provider facts: $record" >&2
+      return 1
+    }
+  done
+  return 0
+}
+
+# acq_provider_credentials_write BACKEND NAME GENERATION — record the injected
+# provider credentials (providerId, keyEnv, host, modelsUrl) in the sandbox's
+# HOST config. Resume/heal then re-inject the identical bindings without reading
+# a generation a later create may have replaced, and without re-prompting.
+# Called only AFTER the gate succeeds, and best-effort (fail-open) like the
+# provenance/cli-kits records.
+acq_provider_credentials_write() {
+  local backend="${1:-}" name="${2:-}" generation="${3:-}" records
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  records=$(acq_provider_facts_list_generation "$generation") || return 1
+  if [ -z "$records" ]; then
+    acq_debug "provider-credentials: no provider facts to record for $backend/$name"
+    return 0
+  fi
+  acq_host_config_write "$backend" "$name" provider-credentials "$records"
+}
+
+# acq_provider_recorded_host BACKEND NAME PROVIDER_ID — the host recorded for a
+# provider at create time (empty when nothing is recorded). Reads through
+# acq_provider_recorded_facts, so a tampered record is rejected, not parsed.
+acq_provider_recorded_host() {
+  local backend="${1:-}" name="${2:-}" wanted="${3:-}" tab provider_id key_env host rest records
+  [ -n "$wanted" ] || return 0
+  records=$(acq_provider_recorded_facts "$backend" "$name") || return 1
+  [ -n "$records" ] || return 0
+  tab=$(printf '\t')
+  while IFS="$tab" read -r provider_id key_env host rest; do
+    [ -n "$provider_id" ] || continue
+    [ "$provider_id" = "$wanted" ] || continue
+    printf '%s\n' "$host"
+    return 0
+  done <<EOF
+$records
+EOF
+  return 0
+}
+
+# acq_provider_sandbox_facts BACKEND NAME — the facts acq should act on for this
+# sandbox: the generation being created (internal, create-time only), else the
+# published generation, else the recorded host-config copy. Fails closed when a
+# facts document exists but does not validate.
+acq_provider_sandbox_facts() {
+  local backend="${1:-}" name="${2:-}" generation="$ACQ_PROVIDER_BINDINGS_GENERATION" root
+  if [ -n "$generation" ] && [ -d "$generation" ]; then
+    acq_provider_facts_list_generation "$generation" || return 1
+    return 0
+  fi
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  root=$(acq_provider_input_root "$backend" "$name") || return 0
+  if [ -e "$root/current" ]; then
+    acq_provider_facts_list_generation "$root/current" || return 1
+    return 0
+  fi
+  acq_provider_recorded_facts "$backend" "$name"
+}
+
+# acq_provider_sandbox_provider_ids BACKEND NAME — the provider ids this sandbox
+# has facts for, one per line. Fails closed on invalid facts.
+acq_provider_sandbox_provider_ids() {
+  local backend="${1:-}" name="${2:-}" facts tab provider_id rest
+  facts=$(acq_provider_sandbox_facts "$backend" "$name") || return 1
+  tab=$(printf '\t')
+  while IFS="$tab" read -r provider_id rest; do
+    [ -n "$provider_id" ] && printf '%s\n' "$provider_id"
+  done <<EOF
+$facts
+EOF
+  # An empty facts set is "no providers", not a failure: the loop's last command
+  # is the `[ -n ]` test, which would otherwise leak status 1 to the caller.
+  return 0
+}
+
+# acq_provider_registry_ids — provider ids bound in the config/env layers, plus
+# the shipped trust anchor (so the default provider participates like any other).
+# Empty when provider selection is explicitly off (`--no-provider-kits`).
+acq_provider_registry_ids() {
+  local pairs line id
+  acq_provider_selection_active || return 0
+  pairs=$(acq_provider_credential_overrides 2>/dev/null) || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\n' "${line%%=*}"
+  done <<EOF
+$pairs
+EOF
+  # The trust anchor participates only when its provider is actually selected.
+  if acq_provider_default_selected; then
+    acq_provider_trusted_ids
+  fi
+  return 0
+}
+
+# acq_provider_delivery_ids NAME — every provider id acq should inject for this
+# sandbox: the registry (a provider whose kit is new has no facts yet) unioned
+# with the sandbox's materialized/recorded facts.
+acq_provider_delivery_ids() {
+  local name="${1:-}" backend="${2:-${ACQ_RESOLVED_BACKEND:-}}" facts_ids
+  facts_ids=""
+  if [ -n "$name" ]; then
+    facts_ids=$(acq_provider_sandbox_provider_ids "$backend" "$name") || return 1
+  fi
+  {
+    acq_provider_registry_ids
+    printf '%s\n' "$facts_ids"
+  } 2>/dev/null | awk 'NF && !seen[$0]++'
+}
+
+# acq_provider_binding BACKEND NAME PROVIDER_ID — echo "host<TAB>keyEnv<TAB>modelsUrl".
+# The REGISTRY is authoritative for keyEnv (so a config/env override changes what
+# is injected, not just what `ls` prints); facts supply host and modelsUrl. A
+# registered host may stand in when no facts exist yet (a standalone
+# `acq secret set`), in which case modelsUrl is empty.
+acq_provider_binding() {
+  local backend="${1:-}" name="${2:-}" wanted="${3:-}" tab provider_id facts_key_env host models_url api_protocol
+  local key_env registry_hosts facts
+  [ -n "$wanted" ] || return 1
+  key_env=$(acq_provider_credential_key_env "$wanted") || return 1
+  registry_hosts=$(acq_provider_credential_hosts "$wanted") || return 1
+  tab=$(printf '\t')
+  facts=$(acq_provider_sandbox_facts "$backend" "$name") || return 1
+  while IFS="$tab" read -r provider_id facts_key_env host models_url api_protocol; do
+    [ -n "$provider_id" ] || continue
+    [ "$provider_id" = "$wanted" ] || continue
+    [ -n "$key_env" ] || key_env="$facts_key_env"
+    printf '%s\t%s\t%s\n' "$host" "$key_env" "$models_url"
+    return 0
+  done <<EOF
+$facts
+EOF
+  [ -n "$registry_hosts" ] || return 1
+  # Bind EVERY pinned host (both backends accept a comma-separated host list), so
+  # the destination `provider-credential ls` prints is exactly what gets bound.
+  printf '%s\t%s\t%s\n' "$registry_hosts" "$key_env" ""
+}
+
+# _acq_provider_is_host_service ID — 0 for the ids BOTH backends bind from
+# compiled-in tables (`github` only). A host service's token must never be
+# resolved from kit-supplied facts, probed at a kit-chosen host, or bound there:
+# the gate skips it, and so must every later stage (see
+# ensure_valid_provider_keys / check_provider_key).
+_acq_provider_is_host_service() {
+  case "${1:-}" in
+    github) return 0 ;;
+  esac
+  return 1
+}
+
+# acq_provider_binding_host_env SERVICE [SANDBOX] — echo "host<TAB>keyEnv" for a
+# provider service, the pair the backend adapters bind at create time. The
+# sandbox is passed EXPLICITLY: resume and `acq secret rm` resolve it for an
+# existing sandbox, where no create-time ambient state exists.
+acq_provider_binding_host_env() {
+  local service="${1:-}" sandbox="${2:-}" binding
+  [ -n "$service" ] || return 1
+  binding=$(acq_provider_binding "${ACQ_RESOLVED_BACKEND:-}" "$sandbox" "$service" 2>/dev/null) || return 1
+  printf '%s\n' "$binding" | cut -f1-2
+}
+
+# _acq_provider_credentials_gate_trust BACKEND NAME PROVIDER_ID HOST — the trust
+# check that makes providerId spoofing useless. A kit may declare any providerId
+# it likes (and allow-list the host), so before acq binds a stored credential it
+# requires the destination host to be pinned for that providerId, either in the
+# acq-owned registry or in this sandbox's recorded credentials.
+_acq_provider_credentials_gate_trust() {
+  local backend="$1" name="$2" provider_id="$3" host="$4" pinned recorded
+  pinned=$(acq_provider_credential_hosts "$provider_id")
+  if [ -n "$pinned" ]; then
+    case ",$pinned," in
+      *",$host,"*) return 0 ;;
+    esac
+    echo "acq: provider '$provider_id' declares host '$host', which is not one of" >&2
+    echo "     its pinned hosts (${pinned}). Refusing to send the stored credential there." >&2
+    echo "     If that host is legitimate, re-pin it explicitly:" >&2
+    echo "       acq provider-credential set $provider_id <KEY_ENV> --host $host" >&2
+    return 1
+  fi
+  recorded=$(acq_provider_recorded_host "$backend" "$name" "$provider_id") || return 1
+  if [ -n "$recorded" ]; then
+    if [ "$recorded" = "$host" ]; then
+      return 0
+    fi
+    echo "acq: provider '$provider_id' host changed for sandbox '$name':" >&2
+    echo "     recorded '$recorded', kit now declares '$host'." >&2
+    echo "     Refusing to silently move your credential. Re-pin the new host:" >&2
+    echo "       acq provider-credential set $provider_id <KEY_ENV> --host $host" >&2
+    return 1
+  fi
+  echo "acq: provider '$provider_id' is not pinned to a host yet (kit declares '$host')." >&2
+  echo "     acq will not send a stored credential to a host chosen by the kit." >&2
+  echo "     Pin it explicitly, then re-run:" >&2
+  echo "       acq provider-credential set $provider_id <KEY_ENV> --host $host" >&2
+  return 1
+}
+
+# _acq_provider_credentials_gate_one BACKEND NAME PROVIDER_ID KEY_ENV HOST — make
+# sure one provider's credential is storable and injectable before the create.
+_acq_provider_credentials_gate_one() {
+  local backend="$1" name="$2" provider_id="$3" key_env="$4" host="$5" answer="" exported="" stored=0
+  # An sbx compiled-in vendor service would silently use its own endpoint instead
+  # of facts.host, so a provider must not shadow one.
+  if [ "$backend" = "sbx" ]; then
+    case " ${_ACQ_SBX_BUILTIN_SERVICES:-} " in
+      *" $provider_id "*)
+        echo "acq: provider id '$provider_id' collides with an sbx built-in service," >&2
+        echo "     which would bind to sbx's own vendor endpoint instead of '$host'." >&2
+        echo "     Rename the provider in its kit (provider-input.json)." >&2
+        return 1
+        ;;
+    esac
+  fi
+  command -v acq_secret_has >/dev/null 2>&1 || return 0
+  if acq_secret_has "$provider_id" "$name"; then
+    acq_key_injectable "$provider_id" "$name" && return 0
+    stored=1
+    echo "acq: the '$provider_id' key is stored, but the active backend cannot" >&2
+    echo "     inject it for '$host' yet." >&2
+  fi
+  # A host-exported value (CI) is bindable only where the backend reads host env
+  # at create. sbx snapshots its own proxy table, so claiming success there would
+  # create a sandbox with a dead credential.
+  exported=$(_acq_provider_env_value "$key_env")
+  if [ -n "$exported" ]; then
+    case "$backend" in
+      msb) return 0 ;;
+      *)
+        echo "acq: \$${key_env} is exported on the host, but the '$backend' backend" >&2
+        echo "     cannot bind a credential from host env at create. Store it instead:" >&2
+        echo "       acq secret set -g $provider_id" >&2
+        return 1
+        ;;
+    esac
+  fi
+  if [ ! -t 0 ]; then
+    if [ "$stored" -eq 1 ]; then
+      echo "acq: no injectable key for provider '$provider_id' (\$${key_env})." >&2
+      echo "     Re-store it from a terminal so the binding is created:" >&2
+    else
+      echo "acq: no key stored for provider '$provider_id' (\$${key_env})." >&2
+      echo "     Set one with:" >&2
+    fi
+    echo "       acq secret set -g $provider_id" >&2
+    return 1
+  fi
+  echo >&2
+  if [ "$stored" -eq 1 ]; then
+    echo "Provider '$provider_id' needs its key re-stored to bind \$${key_env} here." >&2
+    echo "  sends to: ${host}" >&2
+    printf 'Re-store it now? [y/N] ' >&2
+  else
+    echo "Store a credential for provider '$provider_id'?" >&2
+    echo "  env var:  \$${key_env}" >&2
+    echo "  sends to: ${host}" >&2
+    printf 'Store it now? [y/N] ' >&2
+  fi
+  read -r answer || true
+  case "$answer" in
+    [yY]|[yY][eE][sS]) ;;
+    *)
+      echo "Skipping. Aborting; re-run when the '$provider_id' key is set." >&2
+      return 1
+      ;;
+  esac
+  if ! command -v acq_backend_secret_set >/dev/null 2>&1; then
+    echo "acq: the '${ACQ_RESOLVED_BACKEND:-active}' backend cannot store provider keys." >&2
+    return 1
+  fi
+  acq_backend_secret_set -g "$provider_id" || return 1
+  acq_key_injectable "$provider_id" "$name" || {
+    echo "acq: the '$provider_id' key is still not injectable. Aborting." >&2
+    return 1
+  }
+  return 0
+}
+
+# acq_provider_credentials_gate BACKEND NAME GENERATION — run AFTER
+# acq_provider_input_prepare and BEFORE the backend create, for the same reason
+# the USAi gate exists: msb binds secrets only at create (`--secret ENV@HOST`)
+# and sbx snapshots its proxy table at create, so a credential stored later never
+# reaches the sandbox. USAi keeps its dedicated flow (ensure_key_present /
+# ensure_valid_key); this gate covers every OTHER provider.
+acq_provider_credentials_gate() {
+  local backend="${1:-}" name="${2:-}" generation="${3:-}" records provider_id key_env host models_url api_protocol tab
+  # Dynamic scoping: visible to the helpers below for THIS call only, so the
+  # USAi throwaway-sandbox probe can never inherit another sandbox's facts.
+  local ACQ_PROVIDER_BINDINGS_GENERATION
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  records=$(acq_provider_facts_list_generation "$generation") || return 1
+  [ -n "$records" ] || return 0
+  ACQ_PROVIDER_BINDINGS_GENERATION="$generation"
+  tab=$(printf '\t')
+  while IFS="$tab" read -r provider_id key_env host models_url api_protocol; do
+    [ -n "$provider_id" ] || continue
+    # Skip ONLY ids a backend hard-codes at its binding layer (see
+    # _acq_provider_is_host_service): `usai` is routed through the generic
+    # provider path like every other provider.
+    _acq_provider_is_host_service "$provider_id" && continue
+    _acq_provider_credentials_gate_trust "$backend" "$name" "$provider_id" "$host" || return 1
+    _acq_provider_credentials_gate_one "$backend" "$name" "$provider_id" "$key_env" "$host" || return 1
+  done <<EOF
+$records
+EOF
+  # Recorded only once every provider passed, so a failed gate never leaves a
+  # record implying bindings that were never applied.
+  acq_provider_credentials_write "$backend" "$name" "$generation" || true
+  return 0
+}
+
+# check_provider_key NAME PROVIDER_ID — probe PROVIDER_ID's models endpoint from
+# inside the sandbox, mirroring check_key (USAi) for any provider whose facts
+# name a modelsUrl. The URL is passed as POSITIONAL DATA, never spliced into the
+# guest program text, so URL punctuation cannot become shell syntax.
+check_provider_key() {
+  local name="${1:-}" provider_id="${2:-}" binding key_env host models_url key_ref raw
+  [ -n "$name" ] && [ -n "$provider_id" ] || return 0
+  if _acq_provider_is_host_service "$provider_id"; then
+    echo "acq: '$provider_id' is a host service; acq never probes it from kit facts." >&2
+    return 1
+  fi
+  binding=$(acq_provider_binding "${ACQ_RESOLVED_BACKEND:-}" "$name" "$provider_id") || {
+    echo "acq: no validated provider facts for '$provider_id' in sandbox '$name'." >&2
+    return 1
+  }
+  host=$(printf '%s\n' "$binding" | cut -f1)
+  key_env=$(printf '%s\n' "$binding" | cut -f2)
+  models_url=$(printf '%s\n' "$binding" | cut -f3)
+  _acq_provider_credential_env_ok "$key_env" || {
+    echo "acq: provider '$provider_id' declares an unsafe credential env name." >&2
+    return 1
+  }
+  # Enforce the same-host invariant at the probe, not just when facts were read:
+  # the Bearer token must never be sent to a host other than facts.host.
+  _acq_provider_fact_strict_url_ok "$models_url" "${host%%,*}" || {
+    echo "acq: provider '$provider_id' models URL does not match its declared host ($host)." >&2
+    return 1
+  }
+  command -v acq_backend_run >/dev/null 2>&1 || return 0
+  key_ref="\$${key_env}"
+  raw=$(acq_backend_run "$name" -- sh -c \
+    "curl -sS -o /dev/null -w '%{http_code}' \
+     -H \"Authorization: Bearer $key_ref\" \
+     \"\$1\"; printf '|%s' \"\$?\"" sh "$models_url" 2>/dev/null || true)
+  _classify_key_status "$raw"
+}
+
+# ensure_valid_provider_keys NAME — validate every selected provider's credential
+# against its own facts.modelsUrl. There is no USAi branch: the default provider
+# is checked exactly like any other, and its 401 remediation points at the
+# dedicated rotate verb. An inconclusive probe FAILS CLOSED (silently attaching
+# with an unverified credential is how a dead key reaches the agent), while
+# 429/5xx are treated as transient.
+ensure_valid_provider_keys() {
+  local name="${1:-}" ids provider_id status
+  [ -n "$name" ] || return 0
+  command -v acq_backend_run >/dev/null 2>&1 || return 0
+  acq_debug "provider keys: validating non-usai providers for '$name'"
+  ids=$(acq_provider_sandbox_provider_ids "${ACQ_RESOLVED_BACKEND:-}" "$name") || {
+    acq_debug "provider keys: provider facts are invalid for '$name'"
+    return 1
+  }
+  acq_debug "provider keys: ids=$(printf '%s' "$ids" | tr '\n' ' ')"
+  [ -n "$ids" ] || return 0
+  while IFS= read -r provider_id; do
+    [ -n "$provider_id" ] || continue
+    # Never probe a host service: its token belongs to a compiled-in endpoint,
+    # and a kit that declares the id would otherwise direct it to its own host.
+    _acq_provider_is_host_service "$provider_id" && continue
+    status=$(check_provider_key "$name" "$provider_id")
+    case "$status" in
+      "200") continue ;;
+      "")
+        echo "acq: could not validate the '$provider_id' provider key for '$name'" >&2
+        echo "     (no models endpoint in its facts, or the probe returned no status)." >&2
+        echo "     Refusing to attach with an unverified credential." >&2
+        return 1
+        ;;
+      unreachable)
+        echo "acq: the '$provider_id' models endpoint could not be reached from" >&2
+        echo "     sandbox '$name'. That is a network problem, not a credential one." >&2
+        return 1
+        ;;
+      unresolved)
+        echo "acq: sandbox '$name' could not resolve the '$provider_id' provider host (DNS)." >&2
+        return 1
+        ;;
+      3??)
+        echo "acq: the '$provider_id' models endpoint redirected (HTTP ${status})." >&2
+        echo "     Update the kit's facts.modelsUrl to the final endpoint." >&2
+        return 1
+        ;;
+      401|403)
+        echo "acq: provider '$provider_id' rejected the stored key (HTTP ${status})." >&2
+        if [ "$(acq_provider_credential_key_env "$provider_id")" = "$USAI_PROVIDER_KEY_ENV" ]; then
+          # The default provider's remediation stays the dedicated rotate verb
+          # (it knows the USAi key-management console); no interactive prompt.
+          echo "     Rotate it with: acq usai-rotate-api-key" >&2
+          echo "     Or re-store it: acq secret set -g $provider_id" >&2
+        else
+          echo "     Update it with: acq secret set -g $provider_id" >&2
+        fi
+        return 1
+        ;;
+      429|5??)
+        echo "acq: warning — provider '$provider_id' returned HTTP ${status} (transient);" >&2
+        echo "     continuing without blocking attach." >&2
+        continue
+        ;;
+      *)
+        echo "acq: provider '$provider_id' rejected the stored key (HTTP ${status})." >&2
+        echo "     Update it with: acq secret set -g $provider_id" >&2
+        return 1
+        ;;
+    esac
+  done <<EOF
+$ids
+EOF
+  return 0
+}
+
+# ============================================================================
 # Host-authoritative per-sandbox config store (ADR-0035)
 # ============================================================================
 # acq must NOT rely on guest-generated or guest-tamperable state to configure a
@@ -2512,7 +4210,7 @@ if actual != required:
 
 acq_provider_input_prepare() {
   local backend="$1" name="$2" root kitref kitdir manifest release_root="" python=""
-  local validator="" schema_dir="" bindings="" token stage generation manifests=() kitdirs=()
+  local validator="" schema_dir="" bindings="" merged_bindings="" token stage generation manifests=() kitdirs=()
   [ -n "$backend" ] && [ -n "$name" ] || return 1
   command -v kit_translate_fetch >/dev/null 2>&1 || return 2
   root=$(acq_provider_input_root "$backend" "$name") || return 1
@@ -2554,7 +4252,16 @@ acq_provider_input_prepare() {
     echo "acq: pinned Patterns provider-input validator is unavailable" >&2; _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 2; }
   python=$(_acq_provider_input_python) || {
     _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 2; }
-  local validator_args=(--schema-dir "$schema_dir" --credential-bindings "$bindings")
+  # acq owns the provider -> KEY_ENV registry, layered over the pinned Patterns
+  # defaults (its trust anchor) and then per-invocation config/env overrides, so
+  # a provider kit hosted outside the pinned release validates without editing
+  # that release. The merged file lives in the staging dir, so the existing
+  # stage cleanup removes it with everything else. A malformed override fails
+  # closed here — before the validator runs — rather than binding the wrong key.
+  merged_bindings="$stage/provider-credential-bindings.json"
+  acq_provider_credential_merge_json "$bindings" "$merged_bindings" "$python" || {
+    _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
+  local validator_args=(--schema-dir "$schema_dir" --credential-bindings "$merged_bindings")
   local i
   for i in "${!manifests[@]}"; do validator_args+=(--bundle "${manifests[$i]}"); done
   "$python" "$validator" "${validator_args[@]}" >&2 || { _acq_provider_input_cleanup_stage "$stage"; _acq_provider_input_cleanup_generation "$root" "$generation"; return 1; }
@@ -3338,32 +5045,6 @@ ensure_opencode_postinstall() {
   return 0
 }
 
-# Probe the USAi API from inside the sandbox. Emits ONE clean token on stdout:
-#   - a 3-digit HTTP status (e.g. 200, 401) on a real HTTP response,
-#   - "unresolved" when the guest resolver returned no answer for the name
-#     (curl exit 6 / NXDOMAIN) — the split-horizon-DNS tell,
-#   - the literal "unreachable" when curl could not complete a request at all
-#     (TLS reset, DNS failure, proxy/Zscaler interception, offline — curl exits
-#     non-zero and writes http_code 000), or
-#   - "" (empty) only when the probe is genuinely indeterminate.
-# The caller distinguishes these: "unreachable" is a NETWORK problem, NOT a bad
-# key, so it must never be reported as "invalid or expired" or trigger a rotate.
-#
-# Sanitize hard: curl's stderr can leak through the backend exec (which may merge
-# streams), so we emit the raw curl output as `<http_code>|<exit>` and reduce it
-# to a bare code here. Only ^[0-9]{3}$ or "unreachable" or "" can ever escape —
-# no free-form error text can splice into the caller's "(HTTP …)" message.
-check_key() {
-  local name="$1"
-  local raw code exit_code key_ref
-  key_ref="\$${USAI_PROVIDER_KEY_ENV}"
-  raw=$(acq_backend_run "$name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer $key_ref\" \
-     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" 2>/dev/null || true)
-  _classify_key_status "$raw"
-}
-
 # Reduce a raw `<http_code>|<curl_exit>` probe result (possibly polluted with
 # curl error text) to a clean status token: a 3-digit HTTP code, "unresolved"
 # (DNS did not resolve the name — curl exit 6), "unreachable" (resolved but the
@@ -3412,35 +5093,6 @@ _classify_key_status() {
   fi
   # Indeterminate (no exit code captured, no usable http_code): stay silent.
   printf '\n'
-}
-
-# Check USAi key in a fresh temporary sandbox (to distinguish bad key from stale
-# placeholder).
-check_fresh_sandbox_key() {
-  local validation_name="acq-keycheck-$$"
-  local status=""
-  # The throwaway sandbox only needs the USAi binding. Publishing ports would
-  # make it contend with the real sandbox for every explicit host port (a
-  # `--publish` pin or a kit's `host:`), fail its create, and silently skip this
-  # check. Dynamic scoping hands the flag to acq_backend_provision.
-  local _ACQ_PROVISION_WITHOUT_PORTS=1
-
-  # Use the backend to create a minimal sandbox for validation.
-  if ! acq_backend_provision "$validation_name" shell . </dev/null >/dev/null 2>&1; then
-    return 0
-  fi
-  # shellcheck disable=SC2064
-  trap "acq_backend_terminate '$validation_name' </dev/null >/dev/null 2>&1 || true" EXIT
-  local raw key_ref
-  key_ref="\$${USAI_PROVIDER_KEY_ENV}"
-  raw=$(acq_backend_run "$validation_name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer $key_ref\" \
-     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
-  status=$(_classify_key_status "$raw")
-  acq_backend_terminate "$validation_name" </dev/null >/dev/null 2>&1 || true
-  trap - EXIT
-  printf '%s\n' "$status"
 }
 
 # Warn (do not block) if a sandbox has published ports with nothing listening
@@ -3985,100 +5637,6 @@ preflight_workspace_path() {
   return 1
 }
 
-# Validate the sandbox's USAi key and walk the user through rotating it if
-# needed. Best-effort: warn and continue if we cannot run the check.
-# advise_valid_key NAME — non-blocking USAi key advisory for `acq create`.
-# Unlike ensure_valid_key (which gates attach and offers interactive rotation),
-# this only WARNS if the key isn't valid, then returns 0 regardless. `create`
-# is detached and never attaches, so there is nothing to gate; the point is to
-# give a create-only user a heads-up that their key is stale before they later
-# `acq run`. Silent on a healthy key or an inconclusive check (empty status).
-advise_valid_key() {
-  local name="$1"
-  local status
-  status=$(check_key "$name")
-
-  # 200 = healthy; empty = could not validate (network/tooling) — stay quiet in
-  # both cases to avoid noise. Only speak up on a definitive non-200.
-  [ "$status" = "200" ] && return 0
-  [ -z "$status" ] && return 0
-
-  if [ "$status" = "unreachable" ]; then
-    _report_usai_unreachable
-    return 0
-  fi
-
-  if [ "$status" = "unresolved" ]; then
-    _report_usai_unresolved
-    return 0
-  fi
-
-  echo "acq: note — your USAi API key looks invalid or expired (HTTP $status)." >&2
-  echo "      USAi keys expire every 7 days. This sandbox was created, but the" >&2
-  echo "      key must be valid before an agent can use it." >&2
-  echo "      To rotate: acq usai-rotate-api-key   (or re-run via 'acq run', which" >&2
-  echo "      validates and offers to rotate before attaching)." >&2
-  return 0
-}
-
-# Print a network-oriented diagnosis when the USAi models API could not be
-# reached from the sandbox at all (curl connection failure / HTTP 000). This is
-# a reachability problem — NOT an invalid or expired key — so it deliberately
-# does not mention rotating the key. The point is an accurate diagnosis, not a
-# prescription: it states what failed and the signal to look for, and points at
-# the docs rather than guessing the user's network fix.
-_report_usai_unreachable() {
-  echo >&2
-  echo "acq: could not reach the USAi API ($USAI_PROVIDER_MODELS_URL) from the sandbox." >&2
-  echo "      The request did not complete (no HTTP response) — this is a network" >&2
-  echo "      reachability problem, NOT an invalid or expired key, so rotating the" >&2
-  echo "      key will not help." >&2
-  echo "      If the playbook/kit fetch also failed with a TLS 'unexpected eof'," >&2
-  echo "      both outbound connections are being cut — a strong sign of a network" >&2
-  echo "      or TLS-interception (e.g. corporate proxy) issue rather than USAi." >&2
-  echo "      See docs/KNOWN_FAILURE_MODES.md for diagnosis steps." >&2
-  echo >&2
-}
-
-# Print a DNS-oriented diagnosis when the USAi models API name did not RESOLVE
-# from the sandbox (curl exit 6 / NXDOMAIN). This is distinct from the broad
-# "unreachable" cut: the tell is that the name has no answer for the guest
-# resolver, while other public hosts (GitHub, npm) resolve and connect fine.
-#
-# The usual cause on GFE is split-horizon DNS — the USAi host resolves to an
-# INTERNAL address that only exists in the corporate/tunnel zone. The guest
-# follows the host's resolvers by default, with msb's rebind protection off on
-# a ZPA host, so this now points at a forced public resolver
-# (ACQ_MSB_DNS_NAMESERVER), rebind protection forced on
-# (ACQ_MSB_DNS_REBIND_PROTECTION=1), or a sandbox created while the tunnel was
-# down (detection missed; recreate with ACQ_MSB_DNS_REBIND_PROTECTION=0). A key
-# rotation cannot fix this, and neither can a msb data wipe. State the signal
-# and point at the docs.
-_report_usai_unresolved() {
-  echo >&2
-  echo "acq: the USAi API host in $USAI_PROVIDER_MODELS_URL did not RESOLVE from the sandbox" >&2
-  echo "      (DNS returned no address). This is a name-resolution problem, NOT an" >&2
-  echo "      invalid or expired key, so rotating the key will not help." >&2
-  echo "      If other public hosts (GitHub, npm) work from the sandbox but only" >&2
-  echo "      USAi fails to resolve, USAi is likely a split-horizon name whose" >&2
-  echo "      address lives in an internal/tunnel-only zone. Check that the guest" >&2
-  echo "      follows the host's resolvers (ACQ_MSB_DNS_NAMESERVER unset) and that" >&2
-  echo "      msb's rebind protection is not forced on (ACQ_MSB_DNS_REBIND_PROTECTION" >&2
-  echo "      unset, or 0 if the sandbox was created while the tunnel was down)." >&2
-  echo "      See docs/KNOWN_FAILURE_MODES.md §30 (USAi-only NXDOMAIN)." >&2
-  echo >&2
-}
-
-# Diagnose a USAi value that is stored but cannot be presented by the active
-# backend (an undecryptable DPAPI envelope written under a different Windows
-# profile, or a damaged store). Reporting "not set" here would send the user to
-# create a fresh key when the real problem is the stored one.
-_report_usai_unreadable() {
-  echo "acq: a USAi API key is stored for this user, but it cannot be read or decrypted here." >&2
-  echo "     It may have been stored under a different user or host, or the stored value is damaged." >&2
-  echo "     Re-set it with 'acq secret set -g usai' (or remove it with 'acq secret rm -g usai')." >&2
-}
-
 # acq_key_injectable SERVICE [SANDBOX] -> 0 if the ACTIVE BACKEND can inject
 # SERVICE for that scope, else 1. Single source of truth for the "is this
 # credential actually usable at provision?" predicate, composed of two checks:
@@ -4097,176 +5655,6 @@ acq_key_injectable() {
     acq_backend_key_present "$service" "$scope_sandbox" || return 1
   fi
   return 0
-}
-
-# ensure_key_present — pre-create gate: make sure a USAi API key is available to
-# the active backend BEFORE the sandbox is created. This must run before
-# acq_backend_provision on a fresh run because msb binds secrets only at create
-# time (--secret ENV@HOST), and sbx snapshots custom secret placeholders from its
-# proxy table at create time. A sandbox created without the backend-visible key
-# binding carries no working USAi credential.
-#
-# Returns 0 if a key is present (already, or after the user pastes one), 1 if the
-# user declines or setup fails. A no-op (returns 0) when the store helper isn't
-# loaded — the post-create ensure_valid_key gate still catches a bad key.
-ensure_key_present() {
-  local scope_sandbox="${1:-}"
-  if ! command -v acq_secret_has >/dev/null 2>&1; then
-    return 0
-  fi
-  if acq_secret_has usai "$scope_sandbox"; then
-    # acq_key_injectable composes the store check (already true here) with the
-    # backend-inject check; it is the shared predicate `acq secret has` also uses.
-    acq_key_injectable usai "$scope_sandbox" && return 0
-
-    echo "acq: USAi API key is stored, but the active backend is not configured to inject it." >&2
-    echo "     Run 'acq secret set -g usai' from a terminal so the backend can bind it, then retry." >&2
-    return 1
-  fi
-
-  # Backend mismatch: msb provision also accepts a host-exported USAI_API_KEY and
-  # binds it at create time (see _acq_msb_bind_secrets_into in msb.sh), so an empty
-  # acq store is NOT a blocker under msb when the env var is set (e.g. CI). Treat
-  # that as present to avoid prompting/aborting a create msb would have satisfied.
-  # sbx does NOT read host env at provision, so this short-circuit is msb-only.
-  if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ] && [ -n "${USAI_API_KEY:-}" ]; then
-    return 0
-  fi
-
-  # Present-but-unreadable: a value is stored for this user but cannot be read or
-  # decrypted (e.g. a DPAPI envelope written under a different Windows profile,
-  # or a damaged store). Reporting "not set" here would send the user to create a
-  # fresh key when the real problem is the stored one — fail closed with the real
-  # diagnosis instead.
-  if acq_secret_unreadable usai "$scope_sandbox"; then
-    _report_usai_unreadable
-    return 1
-  fi
-
-  # Non-interactive (CI / piped stdin): no one can answer the prompt below, so
-  # emit a single terse line and fail closed rather than the full interactive
-  # help (mirrors the non-tty guard in the kit-update path above).
-  if [ ! -t 0 ]; then
-    echo "acq: no USAi API key stored; set one with 'acq secret set -g usai' (see $USAI_PROVIDER_KEY_MGMT_URL). Aborting." >&2
-    return 1
-  fi
-
-  echo >&2
-  echo "No USAi API key is stored yet." >&2
-  echo "USAi keys are created at $USAI_PROVIDER_KEY_MGMT_URL and expire every 7 days." >&2
-  echo >&2
-  echo "To set one:" >&2
-  echo "  1. Open $USAI_PROVIDER_KEY_MGMT_URL" >&2
-  echo "  2. Create a key (or copy an existing one) with the console copy button" >&2
-  echo >&2
-
-  if ! command -v acq_backend_secret_set >/dev/null 2>&1; then
-    echo "The '${ACQ_RESOLVED_BACKEND:-active}' backend does not implement key setup." >&2
-    echo "Set the key manually (acq secret set -g usai), then re-run." >&2
-    return 1
-  fi
-
-  local answer=""
-  printf 'Have your USAi API key ready to paste? Set it now? [y/N] ' >&2
-  read -r answer || true
-  case "$answer" in
-    [yY]|[yY][eE][sS])
-      # Store the key in the acq store (read from the TTY; never argv). This does
-      # NOT create a sandbox — the value just needs to be present before create.
-      acq_backend_secret_set -g usai || {
-        echo "Key setup did not complete. Aborting." >&2
-        return 1
-      }
-      if acq_secret_has usai; then
-        return 0
-      fi
-      echo "No USAi API key was stored. Aborting." >&2
-      return 1
-      ;;
-    *)
-      echo "Skipping. Aborting; re-run when your USAi API key is set." >&2
-      return 1
-      ;;
-  esac
-}
-
-ensure_valid_key() {
-  local name="$1"
-  shift
-  local status
-  status=$(check_key "$name")
-
-  if [ "$status" = "200" ]; then
-    return 0
-  fi
-
-  if [ -z "$status" ]; then
-    echo "warning: could not validate USAI_API_KEY for '$name' (skipping check)" >&2
-    return 0
-  fi
-
-  # The request never reached USAi (TLS reset / DNS / proxy interception /
-  # offline) — a NETWORK problem, not a key problem. Rotating a key cannot fix
-  # this, so DO NOT prompt to rotate. Fail closed (attaching would just fail on
-  # the first USAi call) with a network-oriented diagnosis.
-  if [ "$status" = "unreachable" ]; then
-    _report_usai_unreachable
-    return 1
-  fi
-
-  # DNS returned no address for the USAi host (curl exit 6). Distinct from a
-  # broad cut: the split-horizon-DNS case, where only USAi fails to resolve. A
-  # rotation cannot fix it, so fail closed with a resolver-oriented diagnosis.
-  if [ "$status" = "unresolved" ]; then
-    _report_usai_unresolved
-    return 1
-  fi
-
-  # A key IS stored (ensure_key_present gated create on that) but the models API
-  # rejected it: it is expired or invalid. Offer an in-place rotation, then
-  # re-validate THIS sandbox — the same one the agent will attach to, so a 200
-  # here is truthful (no throwaway-sandbox result stands in for the real one).
-  echo >&2
-  echo "Your USAi API key looks invalid or expired (HTTP $status from the models API)." >&2
-  echo "USAi keys expire every 7 days." >&2
-  echo >&2
-  echo "To rotate it:" >&2
-  echo "  1. Open $USAI_PROVIDER_KEY_MGMT_URL" >&2
-  echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
-  echo "  3. Copy the new key using the console copy button" >&2
-  echo >&2
-
-  if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
-    echo "The '${ACQ_RESOLVED_BACKEND:-active}' backend does not implement key setup." >&2
-    echo "Set the key manually, then re-run." >&2
-    return 1
-  fi
-
-  local answer=""
-  printf 'Have the new API key ready to paste? Rotate now? [y/N] ' >&2
-  read -r answer || true
-  case "$answer" in
-    [yY]|[yY][eE][sS])
-      acq_backend_rotate_key || {
-        echo "Key setup did not complete. Aborting attach." >&2
-        return 1
-      }
-      if command -v acq_propagate_usai_rotation >/dev/null 2>&1; then
-        acq_propagate_usai_rotation || return 1
-      fi
-      status=$(check_key "$name")
-      if [ "$status" = "200" ]; then
-        echo "Key validated. Continuing." >&2
-        return 0
-      fi
-      echo "Key still not working (HTTP ${status:-unknown}). Aborting attach." >&2
-      return 1
-      ;;
-    *)
-      echo "Skipping. Aborting attach; re-run when your USAi API key is set." >&2
-      return 1
-      ;;
-  esac
 }
 
 # ============================================================================
@@ -4465,15 +5853,21 @@ acq_print_doctor() {
 # _acq_configure_show_current — print the current durable configuration
 # (config.yaml) to stderr, so `acq configure` opens by showing what is in effect.
 _acq_configure_show_current() {
-  local cfg backend extras scope
+  local cfg backend extras scope bindings provider_kit sources
   cfg=$(_acq_config_file)
   backend=$(_acq_config_read_field backend)
   extras=$(_acq_config_read_field extra_kits)
   scope=$(_acq_config_read_field scope_github_token)
+  bindings=$(_acq_config_read_field "$ACQ_PROVIDER_CREDENTIAL_CONFIG_KEY")
+  provider_kit=$(_acq_config_read_field "$ACQ_PROVIDER_KIT_CONFIG_KEY")
+  sources=$(_acq_config_read_field "$ACQ_KIT_SOURCE_CONFIG_KEY")
   echo "acq: current configuration (${cfg}):" >&2
   echo "      default backend:    ${backend:-<auto-detect>}" >&2
   echo "      extra kits:         ${extras:-<none>}" >&2
   echo "      scope GitHub token: ${scope:-no}" >&2
+  echo "      provider creds:     ${bindings:-<none>}   (acq provider-credential ls)" >&2
+  echo "      provider kit:       ${provider_kit:-$ACQ_PROVIDER_KIT_DEFAULT}   (acq kit-source ls)" >&2
+  echo "      kit sources:        ${sources:-<shipped default>}" >&2
   echo "" >&2
 }
 
@@ -4569,9 +5963,42 @@ acq_configure() {
     _acq_config_write_field scope_github_token no
   fi
 
+  # Provider kit (single select). Candidates are the shipped default plus every
+  # provider kit discovered in a trusted source, so a user can pick
+  # e.g. `opencode-go-provider` without hand-writing a git+https ref.
+  local candidates=() labels=() candidate label provider_default="" provider_sel=""
+  local current_provider pidx pargs=()
+  while IFS="$(printf '\t')" read -r candidate label; do
+    [ -n "$candidate" ] || continue
+    candidates+=("$candidate")
+    labels+=("$label")
+  done < <(acq_provider_kit_candidates 2>/dev/null)
+  current_provider=$(_acq_config_read_field "$ACQ_PROVIDER_KIT_CONFIG_KEY")
+  [ -n "$current_provider" ] || current_provider="$ACQ_PROVIDER_KIT_DEFAULT"
+  pidx=1
+  while [ "$pidx" -le "${#candidates[@]}" ]; do
+    candidate="${candidates[$((pidx-1))]}"
+    pargs+=("$candidate" "${labels[$((pidx-1))]}")
+    case "$candidate" in
+      "$current_provider") provider_default="$pidx" ;;
+    esac
+    pidx=$((pidx + 1))
+  done
+  if [ "${#candidates[@]}" -gt 0 ]; then
+    acq_prompt_multiselect 0 "$provider_default" "${pargs[@]}" >/dev/null
+    if [ "$_ACQ_PROMPT_SELECTION" != "CANCELLED" ] && [ -n "$_ACQ_PROMPT_SELECTION" ]; then
+      set -- $_ACQ_PROMPT_SELECTION
+      if [ "$1" -ge 1 ] && [ "$1" -le "${#candidates[@]}" ] 2>/dev/null; then
+        provider_sel="${candidates[$(($1 - 1))]}"
+        [ -n "$provider_sel" ] && _acq_config_write_field "$ACQ_PROVIDER_KIT_CONFIG_KEY" "$provider_sel"
+      fi
+    fi
+  fi
+
   echo "" >&2
   echo "acq: configuration saved to $(_acq_config_file)." >&2
   echo "      extra kits:         ${selected_names:-<none>}" >&2
+  echo "      provider kit:       ${provider_sel:-$current_provider}" >&2
   return 0
 }
 

@@ -204,13 +204,83 @@ _acq_sbx_kit_sources_manual_hint() {
       'reduce $ARGS.positional[] as $p (.; if index($p) then . else . + [$p] end)' \
       "${KIT_SOURCE_PREFIXES[@]}" 2>/dev/null)
   fi
-  [ -z "${cmd:-}" ] && cmd='["docker.io/","github.com/GSA-TTS/"]'
+  if [ -z "${cmd:-}" ]; then
+    local _acc='["docker.io/"' _p
+    for _p in ${KIT_SOURCE_PREFIXES[@]+"${KIT_SOURCE_PREFIXES[@]}"}; do
+      _acc="$_acc,\"$_p\""
+    done
+    cmd="$_acc]"
+  fi
   echo "      If kit resolution fails, review the current value and run:" >&2
   echo "        sbx settings set kit.allowedSources '${cmd}'" >&2
 }
 
-_acq_sbx_ensure_kit_sources_allowed() {
-  local current desired
+# acq_backend_kit_source_revoked REPO — a trusted kit source was removed. sbx's
+# kit.allowedSources is owner-granular (host/owner/) and _acq_sbx_ensure_kit_sources_allowed
+# only ever UNIONS, so a revoked source stayed fetchable until the setting was
+# edited by hand. Recompute against what REMAINS trusted once REPO is gone: the
+# owner prefix is dropped only when no remaining registry entry (and no explicit legacy
+# ACQ_EXTRA_KIT_SOURCES grant) still needs it. Returns 0 only when the backend
+# allowlist is verified to no longer grant a prefix nothing needs; any inability
+# to read, write, or verify returns 1 with a recovery command, never a quiet 0.
+acq_backend_kit_source_revoked() {
+  local repo="${1:-}" prefix remaining current desired verify
+  [ -n "$repo" ] || return 0
+  prefix=$(_acq_kit_source_owner_prefix "$repo")
+  remaining=$(acq_kit_source_prefixes "$repo") || remaining=""
+  case "
+$remaining
+" in
+    *"
+$prefix
+"*) return 0 ;;
+  esac
+  if ! command -v sbx >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "sbx and jq are both needed to update kit.allowedSources"
+    return 1
+  fi
+  current=$(sbx settings get kit.allowedSources 2>/dev/null) || current=""
+  if ! printf '%s' "$current" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "could not read kit.allowedSources as a JSON array"
+    return 1
+  fi
+  if ! printf '%s' "$current" | jq -e --arg p "$prefix" 'index($p) != null' >/dev/null 2>&1; then
+    return 0
+  fi
+  desired=$(printf '%s' "$current" | jq -c --arg p "$prefix" 'map(select(. != $p))' 2>/dev/null)
+  if [ -z "$desired" ]; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "could not compute the updated allowlist"
+    return 1
+  fi
+  if ! sbx settings set kit.allowedSources "$desired" </dev/null >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "could not write kit.allowedSources" "$desired"
+    return 1
+  fi
+  verify=$(sbx settings get kit.allowedSources 2>/dev/null) || verify=""
+  if ! printf '%s' "$verify" | jq -e --arg p "$prefix" 'type == "array" and (index($p) == null)' >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "kit.allowedSources still lists it after the update" "$desired"
+    return 1
+  fi
+  echo "acq: removed $prefix from sbx kit.allowedSources." >&2
+  return 0
+}
+
+# _acq_sbx_kit_source_revoke_failed PREFIX REASON [DESIRED_JSON] — the loud half
+# of the fail-closed contract: say what is still permitted and how to fix it.
+_acq_sbx_kit_source_revoke_failed() {
+  local prefix="$1" reason="$2" desired="${3:-}"
+  echo "acq: error: $reason, so sbx kit.allowedSources still permits '$prefix'." >&2
+  echo "     Revocation is NOT complete: the source stays registered because the sbx" >&2
+  echo "     backend could still fetch kits from that owner." >&2
+  if [ -n "$desired" ]; then
+    echo "     Run:   sbx settings set kit.allowedSources '$desired'" >&2
+  else
+    echo "     Review: sbx settings get kit.allowedSources   (remove '$prefix', then 'sbx settings set kit.allowedSources <json-array>')" >&2
+  fi
+  echo "     Then re-run: acq kit-source rm <repo>" >&2
+}
+
+_acq_sbx_ensure_kit_sources_allowed() {  local current desired
 
   if ! command -v jq >/dev/null 2>&1; then
     _acq_sbx_kit_sources_manual_hint "jq not found; cannot safely update the allowlist"
@@ -619,6 +689,14 @@ _acq_backend_provision_unlocked() {
   _ACQ_SBX_ATTEMPT_NAME="$name"
   _ACQ_SBX_ATTEMPT_GENERATION="$_provider_generation"
   _ACQ_SBX_ATTEMPT_ACTIVE=1
+  # Provider credentials must exist in sbx's proxy table BEFORE create (create
+  # snapshots it). USAi keeps its own pre-create gate; this covers every other
+  # provider selected from the credential-bindings registry, using the facts of
+  # the generation we just prepared.
+  if ! acq_provider_credentials_gate sbx "$name" "$_provider_generation"; then
+    _acq_sbx_cleanup_uncreated_attempt
+    return 1
+  fi
   local _hcfg_dir
   _hcfg_dir=$(acq_host_config_dir sbx "$name") || return 1
   mkdir -p "$_hcfg_dir" || return 1
@@ -1184,9 +1262,19 @@ acq_backend_ensure_kits_applied() {
   _acq_sbx_ensure_kit_sources_allowed
 
   # Neutral kits must be translated to local sbx-v2 kit dirs before sbx kit add.
-  local usai_local="" playbook_local zscaler_local
-  if ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; then
-    usai_local=$(_acq_sbx_translate_kit "$USAI_KIT")
+  local provider_local="" playbook_local zscaler_local
+  # The default provider is DATA (provider_kit), so heal resolves the selected
+  # ref instead of naming the USAi kit. An invalid selection FAILS CLOSED here:
+  # silently healing without the provider kit would leave a half-configured sandbox.
+  local provider_local="" provider_ref="" provider_refs
+  if ! provider_refs=$(_acq_selected_provider_kit_refs); then
+    echo "acq(sbx): error: the configured provider kit could not be resolved;" >&2
+    echo "            refusing to heal '$name' without it." >&2
+    return 1
+  fi
+  provider_ref=$(printf '%s\n' "$provider_refs" | head -n1)
+  if [ -n "$provider_ref" ]; then
+    provider_local=$(_acq_sbx_translate_kit "$provider_ref")
   fi
   playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT")
   zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT")
@@ -1207,21 +1295,21 @@ acq_backend_ensure_kits_applied() {
     esac
   fi
 
-  # 2) USAi provider kit
-  if { ! command -v acq_usai_provider_selected >/dev/null 2>&1 || acq_usai_provider_selected; } \
+  # 2) Default provider kit
+  if [ -n "$provider_ref" ] \
       && { [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; }; then
-    echo "acq: '$name' is missing the USAi kit; injecting with 'sbx kit add'..." >&2
-    _kadd_rc=0; _acq_sbx_kit_add "$name" "$usai_local" || _kadd_rc=$?
+    echo "acq: '$name' is missing the provider kit; injecting with 'sbx kit add'..." >&2
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$provider_local" || _kadd_rc=$?
     case $_kadd_rc in
       0)
         healed=1
         sbx exec "$name" -- sh -c \
           'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
           </dev/null >/dev/null 2>&1 || true
-        echo "acq: USAi kit injected into '$name'." >&2
+        echo "acq: provider kit injected into '$name'." >&2
         ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
-      *) echo "acq: warning: 'sbx kit add' (USAi kit) failed for '$name' (see error above)." >&2; ok=0 ;;
+      *) echo "acq: warning: 'sbx kit add' (provider kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
   fi
 
@@ -1340,12 +1428,31 @@ acq_backend_ensure_kits_applied() {
 # sbx.sh and msb.sh agree on the mapping.
 #   usai   -> $USAI_PROVIDER_HOST          $USAI_PROVIDER_KEY_ENV
 #   github -> github.com,api.github.com   GITHUB_TOKEN (sbx built-in service)
+#   other  -> the provider's validated facts.json (providerId -> host, keyEnv),
+#             resolved through acq's credential-bindings registry. This is what
+#             lets a provider kit hosted outside the pinned Patterns release be
+#             injected with no per-provider code here.
 # Echoes "host1[,host2] <TAB> ENVVAR"; empty for unknown services.
 _acq_service_hosts_env() {
+  local provider_binding provider_host provider_env
   case "$1" in
-    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_BIND_HOSTS" "$USAI_PROVIDER_KEY_ENV" ;;
     github) printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
-    *)      printf '\t\n' ;;
+    *)
+      # Providers (the default one included) resolve from acq's registry + the
+      # validated facts; there is no `usai` branch. The sandbox is passed
+      # explicitly so a standalone `acq secret set -g <id>` uses the pinned host
+      # and rm/rotate use a sandbox's recorded facts.
+      if command -v acq_provider_binding_host_env >/dev/null 2>&1 \
+          && provider_binding=$(acq_provider_binding_host_env "$1" "${2:-}" 2>/dev/null); then
+        provider_host=$(printf '%s' "$provider_binding" | cut -f1)
+        provider_env=$(printf '%s' "$provider_binding" | cut -f2)
+        if [ -n "$provider_host" ] && [ -n "$provider_env" ]; then
+          printf '%s\t%s\n' "$provider_host" "$provider_env"
+          return 0
+        fi
+      fi
+      printf '\t\n'
+      ;;
   esac
 }
 
@@ -1460,8 +1567,8 @@ acq_backend_secret_set() {
     *" $service "*) : ;;   # built-in: no default host/env
     *)
       local svc_hosts svc_env
-      svc_hosts=$(_acq_service_hosts_env "$service" | cut -f1)
-      svc_env=$(_acq_service_hosts_env "$service" | cut -f2)
+      svc_hosts=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)
+      svc_env=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)
       [ -z "$host" ] && [ -n "$svc_hosts" ] && host="${svc_hosts%%,*}"   # primary host
       [ -z "$env_var" ] && [ -n "$svc_env" ] && env_var="$svc_env"
       ;;
@@ -1637,7 +1744,7 @@ acq_backend_secret_set() {
       # The user's --host wins over the static service mapping (#384).
       svc_hosts="$host"
     else
-      svc_hosts=$(_acq_service_hosts_env "$service" | cut -f1)
+      svc_hosts=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)
       [ -z "$svc_hosts" ] && svc_hosts="$host"
     fi
     local _oldifs="$IFS"; IFS=','
@@ -1719,8 +1826,8 @@ acq_backend_secret_propagate() {
     env_var=$(printf '%s' "$meta" | cut -f2)
     sidecar=1
   else
-    host=$(_acq_service_hosts_env "$service" | cut -f1)
-    env_var=$(_acq_service_hosts_env "$service" | cut -f2)
+    host=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)
+    env_var=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)
     sidecar=0
   fi
 
@@ -1865,7 +1972,7 @@ acq_backend_secret_rm() {
     # secrets table for this scope + env var — the sidecar env wins over the
     # static mapping (it records what was actually bound) — then remove it.
     local env_var placeholder
-    env_var="${sidecar_env:-$(_acq_service_hosts_env "$service" | cut -f2)}"
+    env_var="${sidecar_env:-$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)}"
     placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" "$env_var")
     if [ -n "$placeholder" ]; then
       sbx secret rm --placeholder "$placeholder" ${scope_args[@]+"${scope_args[@]}"} -f </dev/null >/dev/null 2>&1 || true
@@ -1940,15 +2047,23 @@ _acq_sbx_secret_exists() {
 }
 
 acq_backend_key_present() {
-  local service="${1:-}" scope_sandbox="${2:-}"
+  local service="${1:-}" scope_sandbox="${2:-}" provider_binding provider_env
   case "$service" in
-    usai)
-      if [ -n "$scope_sandbox" ] && _acq_sbx_secret_exists "" "$scope_sandbox" usai "$USAI_PROVIDER_KEY_ENV"; then
-        return 0
-      fi
-      _acq_sbx_secret_exists -g "" usai "$USAI_PROVIDER_KEY_ENV"
-      ;;
     *)
+      # Every provider (the default one included) is registry-driven: injectable
+      # once sbx's table carries its KEY_ENV for this scope. A service acq does
+      # not model keeps the permissive default.
+      if command -v acq_provider_binding_host_env >/dev/null 2>&1 \
+          && provider_binding=$(acq_provider_binding_host_env "$service" "$scope_sandbox" 2>/dev/null); then
+        provider_env=$(printf '%s' "$provider_binding" | cut -f2)
+        [ -n "$provider_env" ] || return 1
+        if [ -n "$scope_sandbox" ] \
+            && _acq_sbx_secret_exists "" "$scope_sandbox" "$service" "$provider_env"; then
+          return 0
+        fi
+        _acq_sbx_secret_exists -g "" "$service" "$provider_env"
+        return $?
+      fi
       return 0
       ;;
   esac

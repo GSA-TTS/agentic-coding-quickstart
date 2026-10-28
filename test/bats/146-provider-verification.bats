@@ -196,23 +196,19 @@ PRELUDE
   assert_success
 }
 
-@test "provider verification: projected provider facts drive the reachability input (offline seam, not live backend validation)" {
-  # Offline seam: stubs load_provider_facts and check_usai_reachability to verify
-  # that the URL from provider facts flows through to the reachability call.
-  # This does NOT validate a real projected parser, a real kit, or a live backend.
+@test "provider verification: the reachability input is the provider's models URL" {
+  # Offline seam: the URL handed to the reachability probe comes from the
+  # provider's endpoints (now shipped constants instead of a fetched facts file).
   run bash -c '
     set -u
     VERIFY_BACKENDS_SOURCE_ONLY=1
     export VERIFY_BACKENDS_SOURCE_ONLY
     . "'"$REPO_ROOT"'/scripts/verify-backends"
-    ACQ=/dev/null
-    USAI_KIT="$STUBDIR/provider-kit"
-    acq_provider_facts_load_from_kit_or_fallback() {
-      USAI_PROVIDER_HOST=models.example.gov
-      USAI_PROVIDER_MODELS_URL=https://models.example.gov/v2/catalog
-      USAI_PROVIDER_KEY_ENV=EXAMPLE_API_KEY
-    }
+    ACQ="'"$REPO_ROOT"'/acq"
+    ACQ_SOURCE_ONLY=1
+    export ACQ_SOURCE_ONLY
     load_provider_facts
+    USAI_MODELS_URL=https://models.example.gov/v2/catalog
     FAKE_OUTPUT=200 FAKE_RC=0 LAST_ARGS=
     run_acq() { LAST_ARGS="$*"; LAST_OUT="$FAKE_OUTPUT"; return "$FAKE_RC"; }
     check_usai_reachability msb box "$USAI_MODELS_URL"
@@ -224,33 +220,21 @@ PRELUDE
   assert_success
 }
 
-@test "provider verification: malformed provider facts fail closed before reachability (offline seam, not live kit validation)" {
-  # Offline seam: verifies that load_provider_facts propagates failures and
-  # does not silently fall through to reachability checks. Does NOT test a real
-  # provider kit or a live projected parser.
+@test "provider verification: load_provider_facts yields the shipped default endpoints" {
   run bash -c '
     set -u
     VERIFY_BACKENDS_SOURCE_ONLY=1
     export VERIFY_BACKENDS_SOURCE_ONLY
     . "'"$REPO_ROOT"'/scripts/verify-backends"
-    ACQ=/dev/null
-    USAI_KIT="$STUBDIR/provider-kit"
-    acq_provider_facts_load_from_kit_or_fallback() {
-      printf invalid-provider-facts-artifact\\n >&2
-      USAI_PROVIDER_HOST=""
-      USAI_PROVIDER_MODELS_URL=""
-      return 1
-    }
-    if load_provider_facts; then
-      printf "unexpected provider facts success\n"
-      exit 1
-    fi
-    printf "provider facts rejected\n"
+    ACQ="'"$REPO_ROOT"'/acq"
+    ACQ_SOURCE_ONLY=1
+    export ACQ_SOURCE_ONLY
+    load_provider_facts
+    printf "%s\n%s\n" "$USAI_HOST" "$USAI_MODELS_URL"
   '
   assert_success
-  assert_output --partial 'invalid-provider-facts-artifact'
-  assert_output --partial 'verify-backends: provider facts could not be loaded from'
-  assert_output --partial 'provider facts rejected'
+  assert_output --partial 'api.gsa.usai.gov'
+  assert_output --partial 'https://api.gsa.usai.gov/api/v1/models'
 }
 
 @test "provider verification: acq source failure is actionable and does not fall through (offline seam with syntax error)" {

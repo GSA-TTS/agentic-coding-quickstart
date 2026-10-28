@@ -32,8 +32,11 @@ ACQ_RESOLVED_PATH="${ACQ_SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 . "${ACQ_SCRIPT_DIR}/acq.backends/common.sh"
 
 # Test-only seam for executable dispatch tests that need a local provider kit.
+# It overrides the DEFAULT provider kit (which is otherwise data in config.yaml),
+# so the same fixtures keep working after the default moved out of code.
 if [ -n "${BATS_TEST_NAME:-}" ] && [ -n "${ACQ_TEST_USAI_KIT:-}" ]; then
   USAI_KIT="$ACQ_TEST_USAI_KIT"
+  ACQ_PROVIDER_KIT_DEFAULT="$ACQ_TEST_USAI_KIT"
 fi
 # ---------------------------------------------------------------------------
 # Print version/identity
@@ -109,6 +112,14 @@ Subcommands:
   github-scope SANDBOX [PATH]              Scope a GitHub token to the workspace's
                                            repos; PATH defaults to the recorded
                                            sandbox workspace when available.
+  provider-credential set PROVIDER KEY_ENV --host H[,H]
+                                           Pin a provider kit's credential env
+                                           var and destination host.
+  provider-credential ls                   List pinned provider bindings.
+  provider-credential rm PROVIDER          Remove a configured binding.
+  kit-source add REPO --ref REF            Trust a kit repository at a pinned commit.
+  kit-source ls                            Trusted sources + published provider kits.
+  kit-source rm REPO                       Stop trusting a kit repository.
   usai-rotate-api-key                      Rotate the USAi API key.
   version                                  Show acq version + backend info.
   doctor [NAME]                            Backend health check, or non-enforcing
@@ -239,6 +250,82 @@ Usage:
 
 See docs/BACKEND_GUIDE.md and docs/adr/0011-msb-backend-and-neutral-kits.md.
 KITUSAGE
+}
+
+_acq_provider_credential_usage() {
+  cat >&2 <<'PROVIDERCREDUSAGE'
+acq provider-credential — pin a provider kit's credential env var AND host
+
+Usage:
+  acq provider-credential set PROVIDER KEY_ENV --host HOST[,HOST]
+  acq provider-credential ls
+  acq provider-credential rm PROVIDER
+
+A provider kit (one shipping provider-input.json) is validated against the
+pinned Patterns credential-bindings table. acq layers YOUR bindings on top so a
+provider kit from any git+https repository can be used:
+
+  1. the pinned Patterns defaults — the trust anchor;
+  2. config.yaml `provider_credential_bindings:` — what set/rm write here;
+  3. ACQ_PROVIDER_CREDENTIAL_BINDINGS="id=ENV[@host]" — one invocation only.
+
+--host is REQUIRED. It is the trust decision that lets acq send your stored
+credential to a destination: a kit can claim any providerId and allow-list any
+host, so acq only ever injects into a host you pinned explicitly. An
+unpinned provider, or a kit whose facts.host differs from the pinned (or
+recorded) host, fails closed rather than sending your credential somewhere new.
+
+PROVIDER must match ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$ and KEY_ENV must be an
+upper-case env var name. Built-in credential names (USAI_API_KEY, GITHUB_TOKEN,
+GH_TOKEN, GITLAB_TOKEN) and process-critical names (PATH, IFS, HOME, ...) are
+refused. These commands record WHERE the key comes from — the key itself lives in
+the acq store:
+
+  acq provider-credential set opencode-go OPENCODE_GO_API_KEY \
+    --host models.opencode-go.example
+  acq secret set -g opencode-go          # prompts for the value, never on argv
+  acq run opencode .                     # binds OPENCODE_GO_API_KEY@host
+
+See docs/howto/acq.md ("Non-USAi provider kits").
+PROVIDERCREDUSAGE
+}
+
+_acq_kit_source_usage() {
+  cat >&2 <<'KITSOURCEUSAGE'
+acq kit-source — trusted repositories acq will fetch kits from
+
+Usage:
+  acq kit-source add REPO --ref REF [--dir DIR]   Trust a repository at a pinned commit
+  acq kit-source ls                              Sources + the provider kits they publish
+  acq kit-source rm REPO                         Stop trusting a repository
+
+REPO is host/owner/repo (a pasted clone URL or git+https ref is normalized).
+A trusted source may be FETCHED from, and its provider kits may be selected. It
+does NOT extend to the validation control plane: the provider-input validator and
+its schemas stay pinned to the Patterns release, so a new source can ship kits but
+cannot redefine what a valid kit is.
+
+Sources live in ~/.config/acq/config.yaml as `kit_sources:`; the shipped default
+is github.com/GSA-TTS/agentic-coding-patterns pinned to the release acq was built
+against. ACQ_KIT_SOURCES overrides the list for one invocation, and
+ACQ_EXTRA_KIT_SOURCES still ADDS allowlist prefixes (backward compatibility).
+
+Trust is per repository: trusting host/owner/one does not trust host/owner/two.
+`rm` also revokes the backend's owner-wide allowlist entry (sbx) unless another
+trusted source still needs it, and FAILS (leaving the source registered, with a
+recovery command) if the backend allowlist cannot be updated.
+
+`ls` also lists the provider kits each source publishes (by scanning for
+*/provider-input.json). Discovery is best-effort: an unreachable source simply
+lists nothing.
+
+Pick the provider kit acq uses by default with `acq configure`, or set
+`provider_kit: <source>/<kit>` in config.yaml (default:
+agentic-coding-patterns/usai-provider). Per-run selection is still
+ACQ_PROVIDER_KITS / --no-provider-kits.
+
+See docs/howto/acq.md ("Trusted kit sources").
+KITSOURCEUSAGE
 }
 
 _acq_backend_subcmd_usage() {
@@ -477,7 +564,7 @@ U
 _acq_verb_backend_help_kind() {
   case "${1%% *}" in
     run|ls|stop|rm|exec|cp|ports|secret|kit) printf 'shared' ;;
-    start|restart|create|shell|version|doctor|github-scope|usai-rotate-api-key|backend) printf 'acqonly' ;;
+    start|restart|create|shell|version|doctor|github-scope|usai-rotate-api-key|backend|provider-credential|kit-source) printf 'acqonly' ;;
     *) printf '' ;;
   esac
 }
@@ -495,6 +582,8 @@ _acq_print_topic_help() {
     kit)       _acq_kit_usage; return 0 ;;
     backend)   _acq_backend_subcmd_usage; return 0 ;;
     configure) _acq_configure_usage; return 0 ;;
+    provider-credential) _acq_provider_credential_usage; return 0 ;;
+    kit-source) _acq_kit_source_usage; return 0 ;;
     *)         _acq_simple_verb_usage "$head"; return $? ;;
   esac
 }
@@ -548,17 +637,6 @@ _acq_secret_service_arg() {
       esac
       ;;
   esac
-}
-
-_acq_secret_needs_usai_facts() {
-  [ "$(_acq_secret_service_arg "$@")" = "usai" ]
-}
-
-_acq_secret_import_includes_usai() {
-  local parsed only_service
-  parsed=$(_acq_import_parse_args "$@" 2>/dev/null) || return 1
-  only_service=$(printf '%s' "$parsed" | cut -f3)
-  [ -z "$only_service" ] || [ "$only_service" = "usai" ]
 }
 
 _acq_parse_secret_scope_for_propagation() {
@@ -1159,9 +1237,9 @@ esac
 case "$subcommand" in
   usai-rotate-api-key)
     shift
-    if acq_usai_provider_selected; then
-      acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-    fi
+    # Kept as its own verb: rotation needs the provider's key-management console,
+    # which no generic facts field describes. Everything else about the default
+    # provider flows through the generic path.
     if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
       echo "acq: the '${ACQ_RESOLVED_BACKEND}' backend does not implement key rotation" >&2
       echo "     (acq_backend_rotate_key). Rotate manually, then re-run." >&2
@@ -1173,9 +1251,6 @@ case "$subcommand" in
 
   create)
     shift
-    if acq_usai_provider_selected; then
-      acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-    fi
     acq_backend_prepare
     # First-run onboarding (ADR-0031): offer `acq configure` once before we
     # provision, so a brand-new user picks kits up front. No-op after first run
@@ -1187,6 +1262,7 @@ case "$subcommand" in
     _acq_apply_configured_extra_kits || exit 1
     create_time_kit_picker
     _build_kit_list "$create_agent"
+    _acq_require_provider_selection || exit 1
     # Pre-flight: validate the workspace path before provisioning (#issue).
     ws=$(workspace_path "$@")
     preflight_workspace_path "$ws" || exit 1
@@ -1197,12 +1273,12 @@ case "$subcommand" in
     # at create time, so a sandbox created before the key exists carries no USAi
     # binding. Gate on key presence first (fail closed if declined) so create
     # picks it up. `create` is otherwise detached and never attaches.
-    if acq_usai_provider_selected && ! ensure_key_present "$local_name"; then
-      exit 1
-    fi
+    # The provider-credential gate runs inside provision (after the provider
+    # inputs are materialized, so it can read each provider's facts): it prompts,
+    # stores, and fails closed there. Nothing provider-specific is needed here.
 
     # Nudge toward a per-sandbox scoped GitHub token BEFORE provisioning, for the
-    # same reason as the USAi gate above: msb binds secrets only at create time
+    # same reason as the provider gate:: msb binds secrets only at create time
     # (--secret ENV@HOST), so a GitHub token stored AFTER create would never bind
     # to this sandbox. Prompting first lets a supplied token be picked up at
     # create. Warn-not-block (ADR-0013): declining never aborts the create, it
@@ -1213,14 +1289,8 @@ case "$subcommand" in
     acq_print_selected_agent_kit "$create_agent"
 
     acq_backend_provision "$local_name" "$@"
-
-    # Non-blocking USAi key advisory. `create` is detached and never attaches,
-    # so unlike `run` we don't gate on the key or offer interactive rotation —
-    # just warn if it's already invalid so a create-only user knows before they
-    # later `acq run`.
-    if acq_usai_provider_selected; then
-      advise_valid_key "$local_name"
-    fi
+    # `create` is detached and never attaches, so provider credentials are
+    # validated on the next attach (ensure_valid_provider_keys), not here.
     ;;
 
   run)
@@ -1250,9 +1320,6 @@ case "$subcommand" in
       [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
       if acq_backend_exists "$local_name"; then
         acq_provider_selection_load "${ACQ_RESOLVED_BACKEND}" "$local_name" || exit 1
-      fi
-      if acq_usai_provider_selected; then
-        acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
       fi
       acq_print_selected_agent_kit "$first"
 
@@ -1330,10 +1397,8 @@ case "$subcommand" in
         _acq_apply_configured_extra_kits || exit 1
         create_time_kit_picker
         _build_kit_list "$first"
+        _acq_require_provider_selection || exit 1
 
-        if acq_usai_provider_selected && ! ensure_key_present "$local_name"; then
-          exit 1
-        fi
 
         # Nudge toward a per-sandbox scoped GitHub token BEFORE provisioning, for
         # the SAME reason as the USAi gate: msb binds secrets only at create time
@@ -1348,11 +1413,12 @@ case "$subcommand" in
         acq_backend_provision "$local_name" "${create_args[@]}"
       fi
 
-      # Validate USAi key before attaching. This gate must fail closed, so
-      # abort explicitly on a non-zero return rather than relying on `set -e`
-      # to propagate from a bare function call (its behavior for a function
-      # used as the tested command is not portable across bash versions).
-      if acq_usai_provider_selected && ! ensure_valid_key "$local_name" "${create_args[@]}"; then
+      # Validate every selected provider's credential before attaching. This is
+      # the single provider gate: the default provider is checked exactly like any
+      # other (its facts name its own modelsUrl). It must fail closed, so abort
+      # explicitly on a non-zero return rather than relying on `set -e` to
+      # propagate from a bare function call.
+      if ! ensure_valid_provider_keys "$local_name"; then
         exit 1
       fi
 
@@ -1389,7 +1455,7 @@ case "$subcommand" in
 
     elif [ -n "$first" ] && acq_backend_exists "$first"; then
       # Existing sandbox by name (no agent/path given). Heal kits and attach.
-      # ensure_valid_key is intentionally omitted here: we don't have the
+      # Provider validation is intentionally omitted here: we don't have the
       # create args needed to provision a fresh validation sandbox, and
       # attaching by name is a re-attach to a running session where the key
       # was already validated on the original acq run.
@@ -1610,9 +1676,6 @@ case "$subcommand" in
     case "$sub2" in
       set)
         shift
-        if _acq_secret_needs_usai_facts "$@"; then
-          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-        fi
         acq_backend_secret_set "$@"
         if _acq_parse_secret_scope_for_propagation "$@"; then
           _acq_propagate_secret_to_present_backends "$ACQ_PROPAGATE_SERVICE" "$ACQ_PROPAGATE_SCOPE"
@@ -1632,9 +1695,6 @@ case "$subcommand" in
         ;;
       rm)
         shift
-        if _acq_secret_needs_usai_facts "$@"; then
-          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-        fi
         # `acq secret rm [-g | SANDBOX] SERVICE` removes an acq-owned secret from
         # the acq store (and clears the backend's injector). If the args name a
         # scope + known acq service (-g or a sandbox name), route to the backend
@@ -1665,15 +1725,11 @@ case "$subcommand" in
       has)
         # `acq secret has [-g | SANDBOX] SERVICE` — SILENT predicate for scripting:
         # exit 0 if the ACTIVE BACKEND can inject SERVICE for that scope, else 1.
-        # This is exactly the composed check `ensure_key_present` uses as its
-        # pre-create gate (acq_secret_has AND, when the backend defines it,
-        # acq_backend_key_present) — factored into the shared common.sh helper
-        # acq_key_injectable so the two can never drift. Fail closed; never forward
-        # to the backend CLI.
+        # This is the same composed check acq's create gate makes (acq_secret_has
+        # AND, when the backend defines it, acq_backend_key_present) — factored into
+        # the shared helper acq_key_injectable so the two can never drift. Fail
+        # closed; never forward to the backend CLI.
         shift
-        if _acq_secret_needs_usai_facts "$@"; then
-          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT" >/dev/null 2>&1 || true
-        fi
         # Parse scope the same way secret set/rm do: `-g`/`--global` -> global; a
         # leading bare token before the service -> sandbox; a lone token -> service.
         secret_has_scope=""
@@ -1749,9 +1805,6 @@ case "$subcommand" in
         # it never invokes the backend's own `secret` CLI. See acq_secret_import
         # in acq.backends/common.sh and docs/BACKEND_GUIDE.md "Migration".
         shift
-        if _acq_secret_import_includes_usai "$@"; then
-          acq_provider_facts_load_from_kit_or_fallback "$USAI_KIT"
-        fi
         acq_secret_import "$@"
         ;;
       --help|-h|"")
@@ -1798,6 +1851,96 @@ case "$subcommand" in
       echo "acq: github-scope: using recorded workspace for '$gs_sandbox': $gs_ws" >&2
     fi
     github_scope_sandbox "$gs_sandbox" "$gs_ws"
+    ;;
+
+  provider-credential)
+    # acq-owned provider -> KEY_ENV registry. Records WHERE a provider kit's
+    # credential arrives from; the value itself stays in the acq secret store
+    # (`acq secret set -g PROVIDER`). Keeping the registry in acq is what lets a
+    # provider kit hosted outside the pinned Patterns release validate and be
+    # injected with no per-provider acq code.
+    shift
+    case "${1:-}" in
+      set)
+        shift
+        if [ "$#" -lt 2 ]; then
+          echo "acq: provider-credential set: missing arguments" >&2
+          echo "     usage: acq provider-credential set PROVIDER KEY_ENV --host HOST[,HOST]" >&2
+          exit 1
+        fi
+        acq_provider_credential_set "$@" || exit 1
+        ;;
+      ls)
+        acq_provider_credential_ls || exit 1
+        ;;
+      rm)
+        shift
+        if [ "$#" -lt 1 ]; then
+          echo "acq: provider-credential rm: missing provider id" >&2
+          echo "     usage: acq provider-credential rm PROVIDER" >&2
+          exit 1
+        fi
+        acq_provider_credential_rm "$1" || exit 1
+        ;;
+      --help|-h)
+        _acq_provider_credential_usage
+        ;;
+      "")
+        _acq_provider_credential_usage
+        exit 2
+        ;;
+      *)
+        echo "acq: unknown provider-credential subcommand '${1}'." >&2
+        echo "     Try: acq provider-credential set | ls | rm | --help" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  kit-source)
+    # Trusted kit sources: which repositories acq will FETCH kits from. Trust does
+    # not extend to the validation control plane (the validator + schemas stay
+    # pinned to the Patterns release), so a new source can ship kits but cannot
+    # redefine what a valid kit is.
+    shift
+    case "${1:-}" in
+      add)
+        shift
+        if [ "$#" -lt 1 ]; then
+          echo "acq: kit-source add: missing repository" >&2
+          echo "     usage: acq kit-source add REPO --ref REF [--dir DIR]" >&2
+          exit 1
+        fi
+        acq_kit_source_set "$@" || exit 1
+        ;;
+      ls)
+        acq_kit_source_ls || exit 1
+        ;;
+      rm)
+        shift
+        if [ "$#" -lt 1 ]; then
+          echo "acq: kit-source rm: missing repository" >&2
+          echo "     usage: acq kit-source rm REPO" >&2
+          exit 1
+        fi
+        # Also revokes the owner prefix from the backend's own allowlist when no
+        # remaining trusted source needs it; exits non-zero (fail closed) if the
+        # backend allowlist could not be reconciled.
+        acq_kit_source_rm "$1" || exit 1
+        ;;
+      --help|-h)
+        _acq_kit_source_usage
+        ;;
+      "")
+        _acq_kit_source_usage
+        exit 2
+        ;;
+      *)
+        echo "acq: unknown kit-source subcommand '${1}'." >&2
+        echo "     Try: acq kit-source add | ls | rm | --help" >&2
+        exit 1
+        ;;
+    esac
     ;;
 
   "")
