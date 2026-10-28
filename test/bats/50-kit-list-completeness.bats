@@ -168,5 +168,3 @@ SPEC
   assert_failure
   assert_regex "$(printf '%s\n' "${KITS[@]}")" '/tmp/opencode'
 }
-
-
