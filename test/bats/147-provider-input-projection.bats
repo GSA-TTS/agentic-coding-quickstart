@@ -1096,6 +1096,111 @@ _windows_make_dir_symlink() { # LINK TARGET  (developer mode / admin required)
   assert_failure
 }
 
+# ---------------------------------------------------------------------------
+# MSYS argv conversion must not resolve links before the walk sees the path
+# ---------------------------------------------------------------------------
+# MSYS2 rewrites POSIX-looking argv for native programs and, in doing so,
+# resolves an intermediate junction/symlink. The helpers therefore disable that
+# conversion and translate to the native form lexically. These tests simulate the
+# conversion on Linux with a python3 shim that resolves symlinks in its argv
+# exactly when conversion has not been disabled. Whether real MSYS honors
+# MSYS2_ARG_CONV_EXCL / MSYS_NO_PATHCONV for this call, and the cygpath mount
+# mapping, are verifiable only on a Windows host (the windows: tests above).
+
+_install_resolving_python_shim() {
+  mkdir -p "$STUBDIR/shim"
+  cat > "$STUBDIR/shim/python3" <<'SHIM'
+#!/bin/bash
+convert=1
+[ -n "${MSYS2_ARG_CONV_EXCL:-}" ] && convert=0
+[ -n "${MSYS_NO_PATHCONV:-}" ] && convert=0
+args=()
+for a in "$@"; do
+  if [ "$convert" = 1 ] && [[ "$a" == /* ]]; then a=$(realpath -m "$a"); fi
+  args+=("$a")
+done
+exec /usr/bin/python3 "${args[@]}"
+SHIM
+  chmod +x "$STUBDIR/shim/python3"
+  PATH="$STUBDIR/shim:$PATH"
+}
+
+@test "conversion shim control: it resolves a symlinked ancestor when conversion is not disabled" {
+  _install_resolving_python_shim
+  local target="$STUBDIR/shim_target" link="$STUBDIR/shim_link"
+  mkdir -p "$target"; ln -s "$target" "$link"
+  run python3 -c 'import sys; print(sys.argv[1])' "$link/child"
+  assert_output "$target/child"
+  MSYS_NO_PATHCONV=1 run python3 -c 'import sys; print(sys.argv[1])' "$link/child"
+  assert_output "$link/child"
+}
+
+@test "native_path is the identity on a non-MSYS host" {
+  run _acq_provider_input_native_path "/tmp/a/link/child"
+  assert_output "/tmp/a/link/child"
+}
+
+@test "native_path maps only the mount component and keeps the rest lexical on MSYS" {
+  local log="$STUBDIR/cygpath.log"; : > "$log"
+  _acq_provider_input_is_msys() { return 0; }
+  cygpath() { printf '%s\n' "$*" >> "$log"; case "$2" in /c) printf 'C:/' ;; *) printf 'D:/mnt%s' "$2" ;; esac; }
+  run _acq_provider_input_native_path "/c/Users/x/link/new_child"
+  assert_output "C:/Users/x/link/new_child"
+  run _acq_provider_input_native_path "/tmp/a/link/new_child"
+  assert_output "D:/mnt/tmp/a/link/new_child"
+  # cygpath only ever saw a single mount component, never the user-controlled tail.
+  run cat "$log"
+  refute_output --partial "Users"
+  refute_output --partial "link"
+  run _acq_provider_input_native_path 'C:\Users\x\link'
+  assert_output "C:/Users/x/link"
+  run _acq_provider_input_native_path "relative/path"
+  assert_output "relative/path"
+  run _acq_provider_input_native_path "/../x"
+  assert_failure
+}
+
+@test "portable walk: a path-conversion shim cannot bypass the ancestor check in safe_mkdir" {
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  _install_resolving_python_shim
+  local target="$STUBDIR/cv_target" base="$STUBDIR/cv_base"
+  mkdir -p "$base" "$target"; ln -s "$target" "$base/link"
+  run _acq_provider_input_safe_mkdir "$base/link/new_child"
+  assert_failure
+  [ ! -e "$target/new_child" ]
+  run _acq_provider_input_safe_mkdir "$base/link/deep/er/new_child"
+  assert_failure
+  [ -z "$(ls -A "$target")" ]
+}
+
+@test "portable walk: a path-conversion shim cannot bypass the ancestor check in safe_dir" {
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  _install_resolving_python_shim
+  local target="$STUBDIR/cvd_target" base="$STUBDIR/cvd_base"
+  mkdir -p "$base" "$target/sub"; ln -s "$target" "$base/link"
+  run _acq_provider_input_safe_dir "$base/link/sub"
+  assert_failure
+}
+
+@test "portable walk: a path-conversion shim cannot bypass the snapshot or the MSYS-form walk" {
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  _install_resolving_python_shim
+  _acq_provider_input_is_msys() { return 0; }
+  cygpath() { printf '%s' "$2"; }
+  local target="$STUBDIR/cvm_target" base="$STUBDIR/cvm_base"
+  mkdir -p "$base" "$target"; ln -s "$target" "$base/link"
+  run _acq_provider_input_safe_mkdir "$base/link/new_child"
+  assert_failure
+  [ ! -e "$target/new_child" ]
+
+  local release="$STUBDIR/release" kit
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  run _acq_provider_input_snapshot "$kit" "$STUBDIR/cvm_ok_candidate"
+  assert_success
+  [ -f "$STUBDIR/cvm_ok_candidate/provider-input.json" ]
+}
+
 @test "canonical_path aliases /var /tmp /etc on Darwin via ACQ_TEST_HOST_OS" {
   # Exercises the production _acq_provider_input_canonical_path helper directly
   # with ACQ_TEST_HOST_OS=darwin so the Darwin branch runs on Linux CI.

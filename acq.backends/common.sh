@@ -4339,6 +4339,49 @@ acq_provider_input_discard() {
   _acq_provider_input_cleanup_generation "$root" "$generation"
 }
 
+# True (0) on MSYS2/Git-Bash/Cygwin. Separate from _acq_provider_input_msys_ps
+# (which also requires LOCALAPPDATA) so tests can override it.
+_acq_provider_input_is_msys() {
+  case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac
+}
+
+# Run python3 so that no argv word is rewritten by the shell runtime. MSYS2
+# converts POSIX-looking arguments to native paths before a native program sees
+# them, and that conversion RESOLVES an intermediate NTFS junction or symlink,
+# so the path walk below would validate a path whose ancestor links were already
+# followed. Path words are therefore passed literally and translated to the
+# native form by _acq_provider_input_native_path instead. The two variables are
+# inert on POSIX hosts.
+_acq_provider_input_py() {
+  MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 python3 "$@"
+}
+
+# Translate PATH to the native form the Windows path walk expects WITHOUT
+# resolving it. Identity on POSIX hosts. On MSYS the leading component is mapped
+# through cygpath (it names a drive or a mount such as /c or /tmp, never
+# user-controlled content) and every remaining component is appended as a
+# string, so a junction or symlink below the mount point reaches the walk
+# intact. A drive-form path is passed through with separators normalized.
+# Relative paths are returned unchanged and rejected by the walk.
+_acq_provider_input_native_path() {
+  local p="$1" rest first head
+  _acq_provider_input_is_msys || { printf '%s' "$p"; return 0; }
+  case "$p" in
+    [A-Za-z]:[/\\]*) printf '%s' "${p//\\//}"; return 0 ;;
+    /*) ;;
+    *) printf '%s' "$p"; return 0 ;;
+  esac
+  rest=${p#/}
+  first=${rest%%/*}
+  if [ "$first" = "$rest" ]; then rest=""; else rest=${rest#*/}; fi
+  case "$first" in .|..) return 1 ;; esac
+  command -v cygpath >/dev/null 2>&1 || return 1
+  head=$(cygpath -m "/$first" 2>/dev/null) || return 1
+  [ -n "$head" ] || return 1
+  case "$head" in */) ;; *) head="$head/" ;; esac
+  printf '%s%s' "$head" "$rest"
+}
+
 # Normalize the three macOS kernel-managed path aliases to their canonical
 # /private/{var,tmp,etc} spellings so O_NOFOLLOW traversal never sees a
 # symlink at the first path component.  Also collapses harmless absolute
@@ -4354,7 +4397,7 @@ acq_provider_input_discard() {
 # builds never set this variable; it is documented alongside ACQ_TEST_HOST_OS as
 # a test-seam-only override.
 _acq_provider_input_canonical_path() {
-  python3 - "$1" <<'PY'
+  _acq_provider_input_py - "$1" <<'PY'
 import os, re, sys
 path = sys.argv[1]
 # Collapse harmless absolute spelling variants before alias matching.
@@ -4388,9 +4431,10 @@ PY
 # including every user-influenced one — still traverse with O_NOFOLLOW.
 # Linux is unaffected.
 _acq_provider_input_safe_mkdir() {
-  local _canon
+  local _canon _native
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  _native=$(_acq_provider_input_native_path "$_canon") || return 1
+  _acq_provider_input_py - "$_native" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
@@ -4413,8 +4457,11 @@ if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW') and not _force_walk:
     finally:
         os.close(fd)
 else:
-    # Windows (native Python 3.12): no O_DIRECTORY/O_NOFOLLOW/dir_fd, and MSYS2
-    # hands argv in Windows form (C:/...). Walk component by component from the
+    # Windows (native Python 3.12): no O_DIRECTORY/O_NOFOLLOW/dir_fd. The caller
+    # passes the native path built lexically by _acq_provider_input_native_path
+    # with MSYS argv conversion disabled (see _acq_provider_input_py), so the
+    # path seen here is the literal one, never one whose intermediate junction
+    # the shell already resolved. Walk component by component from the
     # drive root, creating missing directories one at a time so no ancestor is
     # followed before it is validated. Reject symlinks (S_IFLNK), junctions
     # (IO_REPARSE_TAG_MOUNT_POINT), and every other reparse point at each step,
@@ -4459,9 +4506,10 @@ PY
 }
 
 _acq_provider_input_safe_dir() {
-  local _canon
+  local _canon _native
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  _native=$(_acq_provider_input_native_path "$_canon") || return 1
+  _acq_provider_input_py - "$_native" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
@@ -4533,7 +4581,10 @@ _acq_provider_input_remove_tree() {
 }
 
 _acq_provider_input_atomic_replace() {
-  python3 - "$1" "$2" <<'PY'
+  local _src _dst
+  _src=$(_acq_provider_input_native_path "$1") || return 1
+  _dst=$(_acq_provider_input_native_path "$2") || return 1
+  _acq_provider_input_py - "$_src" "$_dst" <<'PY'
 import os, sys
 os.replace(sys.argv[1], sys.argv[2])
 PY
@@ -4803,7 +4854,10 @@ _acq_provider_input_control_plane() {
 # reads. Validation and later materialization therefore cannot observe a changed
 # candidate manifest, symlink, or path outside the fetched kit.
 _acq_provider_input_snapshot() {
-  python3 - "$1" "$2" <<'PY'
+  local _kit _target
+  _kit=$(_acq_provider_input_native_path "$1") || return 1
+  _target=$(_acq_provider_input_native_path "$2") || return 1
+  _acq_provider_input_py - "$_kit" "$_target" <<'PY'
 import json, os, stat, sys
 kit, target = sys.argv[1:]
 # ACQ_TEST_FORCE_PORTABLE_WALK (offline tests only) selects the portable lstat
@@ -4903,7 +4957,11 @@ PY
 
 # Copy only validator-approved regular files into the backend-owned readonly tree.
 _acq_provider_input_materialize() {
-  python3 - "$1" "$2" "$3" <<'PY'
+  local _manifest _kit _root
+  _manifest=$(_acq_provider_input_native_path "$1") || return 1
+  _kit=$(_acq_provider_input_native_path "$2") || return 1
+  _root=$(_acq_provider_input_native_path "$3") || return 1
+  _acq_provider_input_py - "$_manifest" "$_kit" "$_root" <<'PY'
 import json, os, shutil, sys
 manifest, kit, target_root = sys.argv[1:]
 bundle = json.load(open(manifest, encoding="utf-8"))
