@@ -105,7 +105,8 @@ provisioning decision.
 > lifecycle decision — data *and* code — MUST be one of:
 >
 > - **(H1) Host-resident and mounted read-only into the guest** (the VMM/mount
->   layer enforces read-only; guest sudo cannot override it), or
+>   layer enforces read-only; guest sudo cannot override it; acq relies on that
+>   only for a runtime version a host-observed canary has qualified), or
 > - **(H2) Held on the host and supplied at exec time** from acq's own state
 >   (never read back from the guest).
 >
@@ -164,39 +165,60 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
 - acq mounts that directory into the guest **read-only** at a well-known path:
   `/var/lib/acq/host/` (`:ro`). On msb via `--volume <hostdir>:/var/lib/acq/host:ro`;
   on sbx via the `:ro` positional the CLI already honors. This relies on backend
-  mount/export semantics, not Unix ownership inside the guest: sbx already
-  enforces read-only extra mounts, and msb 0.7.2 was live-verified to export the
-  virtiofs mount read-only even when guest root can make the guest-visible mount
-  flag appear `rw`. acq now refuses 0.7.0 through 0.7.2 and accepts 0.6.9 or newer
-  otherwise, with 0.7.7 only the default install pin, so `:ro` enforcement has not
-  been re-verified on any version acq accepts. It must be re-verified on the
-  pinned version before it is relied on. Whether a sandbox
-  may rely on the mount for `readonly: true` startup code is a **host-recorded
-  create fact** (host key `ro-host-config`), written only after a create that
-  passed the `:ro` volume flag returned success and the sandbox became
-  exec-ready. The record does **not** prove the guest mount works; it proves only
-  that acq asked for it and the sandbox booted. The decision is not the answer of
-  a guest command, which a passwordless-sudo guest could forge to force the
-  guest-copy downgrade. A sandbox with no record (created before the key existed,
-  or never fully created) takes the legacy guest-copy path and warns. A
-  guest-executed probe of the mount can only make acq stricter: when a record
-  exists, any probe answer other than "present and not writable" makes acq fail
-  closed. If the mount looks absent or the probe cannot confirm it, or if it looks
-  guest-writable, applying a `readonly: true` file fails with an error naming the
-  file; acq stages nothing, runs nothing from the mount, and does not copy the file
-  into the guest. A guest that controls the probe can therefore cause a refusal but
-  cannot make acq trust anything it would not otherwise trust. This is a deliberate
-  change from "degrade to a guest copy" (and from an intermediate "warn and
-  continue" for the writable case) to fail closed, applied only when the record
-  exists; legacy and no-record sandboxes still degrade to the guest copy with a
-  warning. The record is never evidence of verified read-only enforcement: it
-  proves a `:ro` request plus exec readiness only. When a record exists and
-  staging a `readonly: true` file onto the host fails, the apply likewise fails
-  with an error naming the file rather than copying it into the guest; only
-  sandboxes with no record take the guest copy. If a future
-  msb changes `--volume ...:ro` parsing or enforcement, acq must raise or gate
-  its minimum msb version before relying on ADR-0035. Host and guest path forms
-  follow ADR-0029.
+  mount/export semantics, not Unix ownership inside the guest. **What is and is not
+  established about that enforcement:** an earlier manual observation on msb 0.7.2
+  (a version acq now refuses) found the virtiofs mount exported read-only even when
+  guest root could make the guest-visible mount flag appear `rw`. That is the only
+  observation, it is not a repeatable check, and it covers no version acq accepts.
+  For sbx nothing is recorded. So `:ro` enforcement is **unverified on every
+  accepted msb version and on sbx**.
+
+  **Authority for trusting the mount (msb).** Trusted execution of `readonly: true`
+  kit files from the mount is permitted only when the installed msb version is on
+  `MSB_RO_MOUNT_QUALIFIED_VERSIONS` in `acq.backends/msb.sh`, a checked-in list of
+  versions for which a **host-observed canary** passed. The canary
+  (`scripts/qualify-msb-ro-mount`) creates a throwaway sandbox from the default
+  image, mounts one host directory read-only and a second read-write as a positive
+  control, makes the guest (as root) attempt create, overwrite, append, mkdir,
+  chmod, rename, delete and remount-rw on the read-only mount, and then judges the
+  result **from the host**: it compares the real host directory before and after
+  and requires that the host saw the control file. A changed host directory is FAIL
+  whatever the guest reports; a missing control (the log, a root uid, or the same
+  operations succeeding on the read-write volume) is BLOCKED, never PASS. The
+  decision is the host-side comparison; the guest's own log is used only to prove
+  the attempts really ran, and it can only turn a PASS into BLOCKED or FAIL, never
+  the reverse. The canary runs the trusted default image, so it does not defend
+  against a hostile image. The list **ships
+  empty**: until a PASS is recorded here for a version, readonly files with a
+  `ro-host-config` record are refused on that version with an error that names the
+  version and the script. There is no operator override. Each entry added to the
+  list must record, in this ADR, the msb version, the acq revision the canary ran
+  at, the date, the host OS and architecture, the image reference (the default
+  image tag is mutable) and the PASS output. A PASS covers a freshly created
+  sandbox on that host; enforcement after `msb start`, on other host platforms, or
+  with another image is not covered by it.
+
+  Whether a sandbox is a candidate at all is a **host-recorded create fact** (host
+  key `ro-host-config`), written only after a create that passed the `:ro` volume
+  flag returned success and the sandbox became exec-ready. The record proves only
+  that acq asked for the mount and the sandbox booted; it is never evidence of
+  enforcement. A sandbox with no record (created before the key existed, or never
+  fully created) takes the legacy guest-copy path and warns.
+
+  **The guest probe is a diagnostic and can only make acq stricter.** A guest with
+  passwordless sudo controls `sh` and `test`, so a zero exit from a probe it runs
+  proves nothing; acq therefore never treats it as proof the mount is read-only.
+  When the version is qualified and a record exists, a probe answer of "writable"
+  or "not confirmed" makes acq fail closed. For any readonly file, a refusal means
+  acq stages nothing, runs nothing from the mount, and does not copy the file into
+  the guest. This is a deliberate change from "degrade to a guest copy", through an
+  intermediate "probe decides", to fail closed with host-side authority; it applies
+  only when a record exists, so legacy and no-record sandboxes still degrade to the
+  guest copy with a warning. When a record exists and staging a `readonly: true`
+  file onto the host fails, the apply likewise fails with an error naming the file.
+  If a future msb changes `--volume ...:ro` parsing or enforcement, re-run the
+  canary and drop the old version from the list before relying on ADR-0035. Host
+  and guest path forms follow ADR-0029.
 - The mount root and `kit-files/` subtree are traversable but not listable (`0711`)
   so the guest `agent` user can open/execute known read-only kit payload paths,
   while flat acq-internal keys stay host-private (`0600`). This is also a
@@ -330,7 +352,7 @@ sequenceDiagram
     ACQ->>ACQ: validate facts host-side (env-var-ownership, SSRF, schema)
     ACQ->>HSTATE: write validated facts + staged startup code
     ACQ->>RO: mount HSTATE read-only (--volume …:ro / :ro positional)
-    AGENT-->>RO: sudo tee facts.json (FAILS: read-only mount, VMM-enforced)
+    AGENT-->>RO: sudo tee facts.json (expected to FAIL on a qualified msb: read-only mount, enforced by the runtime)
     ACQ->>RO: invoke staged startup from :ro path
     RO->>RW: orchestrator computes per-sandbox catalog (rw, not shared)
     Note over ACQ,RO: acq trusts only host-authoritative :ro inputs

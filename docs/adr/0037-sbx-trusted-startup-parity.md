@@ -19,7 +19,9 @@ supersedes: []
 `readonly: true` startup code tamper-resistant on msb: acq stages the pinned file
 on the host, mounts the per-sandbox config directory `:ro`, and runs the heal from
 the mounted path, so a passwordless-sudo guest cannot rewrite the code acq
-re-executes on restart.
+re-executes on restart, **on an msb version where a host-observed canary has shown
+the `:ro` mount is enforced** (ADR-0035 gates that on a checked-in list of qualified
+versions, which ships empty; a guest-run probe is never accepted as proof).
 
 SBX has no equivalent. `acq_backend_provision` for sbx creates the host config
 directory but never mounts it (it holds host-only keys such as `extra-kits`,
@@ -50,6 +52,17 @@ here; no network or sbx access on the authoring host), so the refusal is
 version-scoped and is not assumed for later releases. The "mountless sandbox"
 behavior attributed to sbx >= 0.42 below is likewise unverified. This ADR concerns
 create-time delivery and restart replay only.
+
+**Does sbx share the msb forgeable-gate class?** No, because sbx does not run
+trusted code from the `:ro` mount today: `acq.backends/sbx.sh` has no consumer of the
+kit `readonly` field, the translator ignores it, and the sbx host config directory is
+never mounted. The only `:ro` mounts on sbx are the provider-input generation
+(read as data by the guest-side renderer, not executed by acq) and no acq decision
+reads a guest answer about them. The msb gate was forgeable because acq took a
+guest-run probe's zero exit as proof of read-only enforcement; sbx has no such gate.
+The open question for sbx is the one this ADR already states: native replay and mount
+enforcement are unverified, and Option B must not be implemented without a
+host-judged canary of the same shape.
 
 ## Decision Drivers
 
@@ -153,8 +166,11 @@ Run on a real sbx host (cannot run inside a sandbox). Record exact sbx version.
    provider-input generation.
 2. **Enforcement under sudo**: as guest root, attempt a write, create, rename,
    `chmod`, and `mount -o remount,rw` on the directory and on a file in it.
-   Confirm all fail and the host copy is unchanged (ADR-0035 recorded this for msb
-   0.7.2; it has not been recorded for sbx).
+   Confirm all fail and the host copy is unchanged. Judge it from the host side
+   (inspect the real host directory afterwards), as the msb canary in
+   `scripts/qualify-msb-ro-mount` does; a guest-reported denial is not evidence.
+   Nothing is recorded for sbx, and msb has only an earlier manual observation on
+   a version acq now refuses.
 3. **Permissions**: the guest `agent` (uid 1000) can execute a `0555` file under a
    `0711` directory it cannot list, with host files owned by the host user.
 4. **Restart persistence**: after `sbx stop`/start and after a host reboot, the

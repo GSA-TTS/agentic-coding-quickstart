@@ -3089,6 +3089,51 @@ host-side API, or a read-only host channel into the sandbox.
 
 ---
 
+## 48. msb: Readonly Kit Files Are Refused Until the Read-Only Mount Is Qualified
+
+**Status:** Fail closed by design. Applies to a kit with `files[]` entries marked
+`readonly: true` on an msb sandbox created with the read-only host-config mount.
+
+### Symptoms
+
+```text
+acq(msb): error: cannot place read-only kit file '<path>' for '<sandbox>': msb <version> is not on acq's list of versions where a read-only mount has been shown to be enforced.
+acq(msb):   Run scripts/qualify-msb-ro-mount on this host; ...
+acq(msb):   No guest-copy fallback is taken because the sandbox was created with a read-only host config; recreate the sandbox.
+```
+
+The kit does not fully apply; for built-in kits at provision this is a warning, and
+a heal reports it on each re-attach.
+
+### Root Cause
+
+acq runs `readonly: true` kit code from a host directory mounted into the guest
+`:ro`, on the assumption that the runtime enforces that flag. Only the runtime can
+establish that, and it is unverified on every msb version acq accepts. A guest-run
+probe cannot stand in for it: a guest with passwordless sudo controls `sh` and
+`test`. So acq trusts the mount only on msb versions a **host-observed** canary has
+qualified (`MSB_RO_MOUNT_QUALIFIED_VERSIONS`, which ships empty), and otherwise
+refuses rather than staging, running, or copying that code.
+
+### Fix
+
+Run `scripts/qualify-msb-ro-mount` on a sandbox-capable host (outside any sandbox).
+It judges the result by inspecting the real host directory afterwards, so nothing
+the guest reports can make it pass. On PASS, add the printed version to
+`MSB_RO_MOUNT_QUALIFIED_VERSIONS` and record the output in ADR-0035 (with host
+OS/arch and image). Existing sandboxes need no recreate for this: the version list
+is checked at apply time. The guest probe is
+diagnostic only: it can add a refusal ("writable" or "not confirmed") but never
+grants trust.
+
+### Prevention / Status
+
+No shipped built-in kit marks a file `readonly: true`, so default sandboxes are not
+affected today; the gate matters for the first kit that opts in. Until a version is
+qualified this is expected, not a defect.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:
