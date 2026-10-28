@@ -265,6 +265,19 @@ behavior:
    same-named sandbox recreated after an out-of-band `msb rm` cannot inherit stale
    "already done" markers or session paths. (Lower severity; last.)
 
+   **Follow-up: a host key is still only a record of a guest-reported exit.**
+   Moving a gate to the host stops a guest from *planting* it, but the host writes
+   it when a guest command exits zero, and acq cannot verify what the command did.
+   A guest that reports one false success could therefore suppress a later run.
+   Where the gated step is idempotent and cheap, acq no longer gates on a record at
+   all: the msb agent-user setup is re-verified on every provision and heal, and
+   no `agent-user-ready` key is written. Where a step must not repeat by default,
+   the msb install-phase gate (`install-<cksum>`) stays as a run-once cache of
+   guest-reported success, not an integrity fact, and an explicit forced re-apply
+   (`ACQ_FORCE_KIT_REAPPLY=1`, as set by `acq kit update` and the stale-bundle refresh) bypasses it. Install
+   commands are expected to be idempotent. The `agent-installed-*` key is cleared
+   with the other instance keys but no code writes or reads it any more.
+
 ## Threat model and flows
 
 Participants: **GitHub** (pinned kit source), **Host** (acq + real credentials +
