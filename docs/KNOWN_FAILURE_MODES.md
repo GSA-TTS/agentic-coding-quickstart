@@ -3119,7 +3119,12 @@ refuses rather than staging, running, or copying that code.
 
 Run `scripts/qualify-msb-ro-mount` on a sandbox-capable host (outside any sandbox).
 It judges the result by inspecting the real host directory afterwards, so nothing
-the guest reports can make it pass. On PASS, add the printed version to
+the guest reports can make it pass. All output (results, guest log, host snapshots,
+and on FAIL or BLOCKED the throwaway directories) is written under
+`<repo>/tmp/qualify-msb-ro-mount-<stamp>/` (gitignored; override with
+`ACQ_QUALIFY_OUT_DIR`), and a final `RESULT ...` line can be pasted back. A remount
+that the guest accepts is informational, not a write; the verdict rests on the
+later writes being denied and the host directory being unchanged. On PASS, add the printed version to
 `MSB_RO_MOUNT_QUALIFIED_VERSIONS` and record the output in ADR-0035 (with host
 OS/arch and image). Existing sandboxes need no recreate for this: the version list
 is checked at apply time. The guest probe is

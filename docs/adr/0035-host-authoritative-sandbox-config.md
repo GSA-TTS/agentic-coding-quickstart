@@ -183,7 +183,25 @@ Concretely, this ADR introduces two mechanisms and a staged migration.
   chmod, rename, delete and remount-rw on the read-only mount, and then judges the
   result **from the host**: it compares the real host directory before and after
   and requires that the host saw the control file. A changed host directory is FAIL
-  whatever the guest reports; a missing control (the log, a root uid, or the same
+  whatever the guest reports. **A remount the guest kernel accepts is not a
+  write.** The canary records `mount -o remount,rw` and a bind remount as
+  informational (`REMOUNT-ACCEPTED` or `REMOUNT-DENIED`) and then repeats every kind
+  of data write (create, overwrite, append, mkdir, chmod, rename, delete) *after*
+  them. A guest root can alter its own mount flags, and the guest's view may then
+  show the volume as read-write; what matters is whether the host directory behind
+  it can still be changed. So the decision rests on two things together: every data
+  write after the remount was denied, and the real host directory is byte-for-byte
+  unchanged. If a remount is accepted and the later writes are still denied with
+  the host unchanged, that is PASS, with a printed note that a remount was
+  accepted. We considered failing qualification on any accepted remount and
+  rejected it as the wrong test: the guest-visible mount flag need not reflect what
+  the host side enforces (not verified for msb), and the host-side comparison is the
+  thing we trust, so that rule could disqualify a runtime that holds while adding no
+  protection the post-remount writes do not already measure. The
+  residual gap is a window we do not exercise, for example a different sequence
+  of guest actions, a later `msb start`, or another host platform or image; the
+  PASS says nothing about those, which is why each list entry records its host,
+  image and revision. A missing control (the log, a root uid, or the same
   operations succeeding on the read-write volume) is BLOCKED, never PASS. The
   decision is the host-side comparison; the guest's own log is used only to prove
   the attempts really ran, and it can only turn a PASS into BLOCKED or FAIL, never
