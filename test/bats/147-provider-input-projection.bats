@@ -1182,7 +1182,10 @@ SHIM
   assert_failure
 }
 
-@test "portable walk: a path-conversion shim cannot bypass the snapshot or the MSYS-form walk" {
+# The snapshot half below only proves the wrapper still produces a working
+# snapshot under the shim; snapshot does not walk its target ancestors, so the
+# ancestor-link rejection itself is asserted on the mkdir walk.
+@test "portable walk: the MSYS-form path walk rejects a shim-resolvable ancestor and snapshot still works" {
   export ACQ_TEST_FORCE_PORTABLE_WALK=1
   _install_resolving_python_shim
   _acq_provider_input_is_msys() { return 0; }
