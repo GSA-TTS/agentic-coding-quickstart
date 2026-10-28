@@ -2253,8 +2253,8 @@ acq_provenance_status() {
 # (acq_backend_ensure_kits_applied) with ACQ_FORCE_KIT_REAPPLY=1 so a
 # present-but-stale kit is actually re-applied (the sbx host builtin-kits record
 # would otherwise skip a kit recorded as applied at an older ref; the force flag
-# bypasses that record). msb already
-# re-applies all kits idempotently; the force flag is a no-op there. After a usai
+# bypasses that record). msb re-applies all kits on every heal; there the force
+# flag additionally bypasses the host run-once gate for install-phase commands. After a usai
 # refresh the kit's own startup global-merge re-runs on next attach, so the
 # refreshed model catalog reaches the config. State (sessions, secrets, unrelated
 # config, project overrides) is preserved: this is an in-place kit reapply, never

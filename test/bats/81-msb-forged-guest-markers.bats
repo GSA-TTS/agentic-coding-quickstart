@@ -276,6 +276,19 @@ SPEC
   assert_equal "$(grep -c 'INSTALL_FORGE_PROBE' "$CALLS")" 1
 }
 
+@test "forged marker(msb): a forced re-apply re-runs an install command a recorded success would suppress" {
+  _install_forging_msb
+  : > "$CALLS"
+  _apply_install_kit forcegate
+  assert_success
+  assert_equal "$(grep -c 'INSTALL_FORGE_PROBE' "$CALLS")" 1
+  _apply_install_kit forcegate
+  assert_equal "$(grep -c 'INSTALL_FORGE_PROBE' "$CALLS")" 1
+  ACQ_FORCE_KIT_REAPPLY=1 _apply_install_kit forcegate
+  assert_success
+  assert_equal "$(grep -c 'INSTALL_FORGE_PROBE' "$CALLS")" 2
+}
+
 # --- agent-user-ready gate --------------------------------------------------
 
 @test "forged marker(msb): a forged agent-user-ready marker cannot skip agent-user setup" {
@@ -288,20 +301,36 @@ SPEC
   assert_regex "$log" 'test -w /home/agent'
   assert_regex "$log" 'NOPASSWD:ALL'
   refute_regex "$log" "$LEGACY_MARKER_RE"
-  # The host gate was recorded host-side.
-  local hostkey; hostkey=$(ls "$ACQ_PROVENANCE_DIR"/msb/gatebox.*.config/agent-user-ready 2>/dev/null | head -n1)
-  [ -n "$hostkey" ]
+  # No gate is recorded anywhere: the setup is re-verified on every call.
+  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/gatebox.*.config/agent-user-ready 2>&1'
+  assert_failure
 }
 
-@test "forged marker(msb): the host agent-user-ready key (not a guest marker) is what skips setup" {
+# Deliberate change: this test used to assert that a host agent-user-ready key
+# SKIPS the setup block. The key is a record of a guest-reported zero exit, which a
+# guest can fake once, so it no longer suppresses the (idempotent, cheap) setup:
+# it is re-verified on every call and a one-time false success cannot stick.
+@test "forged marker(msb): a recorded agent-user success does not suppress re-verification" {
   _install_forging_msb
   _forged_run '
     acq_host_config_write msb hostgatebox agent-user-ready 1
     _acq_msb_ensure_agent_user hostgatebox
+    _acq_msb_ensure_agent_user hostgatebox
   '
   assert_success
   local log; log=$(cat "$CALLS")
-  refute_regex "$log" 'test -w /home/agent'
-  refute_regex "$log" 'NOPASSWD:ALL'
+  assert_equal "$(grep -c 'NOPASSWD:ALL' "$CALLS")" 2
   refute_regex "$log" "$LEGACY_MARKER_RE"
+}
+
+@test "forged marker(msb): a first run that only appeared to succeed is re-run, not remembered" {
+  _install_forging_msb
+  _forged_run '
+    _acq_msb_ensure_agent_user falsesuccess
+    _acq_msb_ensure_agent_user falsesuccess
+  '
+  assert_success
+  assert_equal "$(grep -c 'NOPASSWD:ALL' "$CALLS")" 2
+  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/falsesuccess.*.config/agent-user-ready 2>&1'
+  assert_failure
 }

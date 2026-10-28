@@ -2311,8 +2311,12 @@ _acq_msb_exec_foreground() {
 
 # _acq_msb_exec_install NAME USER UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV... — run an
 # install-phase command, gated by a per-command marker (hash of argv) so it runs
-# once per sandbox even across re-applies. The marker is held in host config so
-# a passwordless-sudo guest cannot forge it to suppress the command.
+# once per sandbox even across re-applies. The marker is held in host config, so a
+# guest cannot plant it, but it records only that the guest REPORTED a zero exit:
+# the host cannot verify what an install command did, and a guest that lies about
+# one run could suppress later ones. It is therefore a cache, not an integrity
+# fact, and an explicit forced re-apply (ACQ_FORCE_KIT_REAPPLY=1, as set by
+# `acq kit update`) bypasses it. Install commands are expected to be idempotent.
 _acq_msb_exec_install() {
   local _name="$1" _user="$2" _uflagn="$3" _eflagn="$4"
   shift 4
@@ -2326,7 +2330,7 @@ _acq_msb_exec_install() {
 
   local marker
   marker="install-$(printf '%s\0' "$@" | cksum | cut -d' ' -f1)"
-  if acq_host_config_has msb "$_name" "$marker"; then
+  if [ "${ACQ_FORCE_KIT_REAPPLY:-0}" != "1" ] && acq_host_config_has msb "$_name" "$marker"; then
     acq_debug "msb cmd[install] already done (marker hit): $*"
     return 0
   fi
@@ -4037,12 +4041,12 @@ EOF
 #   - HTTP proxy env (HTTP_PROXY/HTTPS_PROXY/NO_PROXY) PRESERVED ACROSS SUDO
 #   - the agent binary (baked in, or installed via commands.install)
 # The default image satisfies the first three already, so this step is a
-# short-circuit there (the marker/`id agent` check returns early, and the
-# sudoers block merely re-asserts NOPASSWD, which is harmless). A plain OCI base
+# no-op there (`id agent` succeeds, and the sudoers block merely re-asserts
+# NOPASSWD, which is harmless). A plain OCI base
 # override (e.g. node:22-bookworm, which ships `node` at uid 1000 and no `agent`,
 # and no sudoers rule) meets NONE of the first three. The msb adapter therefore
 # synthesizes them here so both the kits (which run as `-u 1000`) and the agent
-# behave as they do on sbx. Idempotent + marker-gated; runs fully offline
+# behave as they do on sbx. Idempotent and re-run on every call; runs fully offline
 # (useradd/adduser/sudoers edits need no network). The uid defaults to 1000; if
 # 1000 is taken (e.g. by `node` on a plain base), `agent` is created at the next
 # free uid and the kits' `-u 1000` commands still map to it by NAME (see
@@ -4060,14 +4064,11 @@ acq_backend_provision() {
 
 _acq_msb_ensure_agent_user() {
   local name="$1"
-  local marker="agent-user-ready"
-  if acq_host_config_has msb "$name" "$marker"; then
-    # The user exists from an earlier run, but its login shell may predate the
-    # passwd-shell setup: re-sync it so an existing /bin/sh agent user
-    # is healed to bash on its next run, not left behind.
-    _acq_msb_ensure_agent_shell "$name"
-    return 0
-  fi
+  # Not gated on any recorded marker: the setup below is idempotent and cheap, and
+  # a "done" record could only ever say the guest reported a zero exit, which a
+  # guest could fake once and so suppress the check forever. Re-running it on every
+  # provision and heal keeps the base-image contract verified rather than
+  # remembered. No agent-user-ready key is written any more.
 
   acq_debug "msb: ensuring agent user + /home/agent + passwordless sudo + proxy-preserve in $name"
   # Idempotent, distro-agnostic. If an `agent` user already exists, reuse it
@@ -4145,7 +4146,6 @@ _acq_msb_ensure_agent_user() {
     return 1
   }
   _acq_msb_ensure_agent_shell "$name"
-  acq_host_config_write msb "$name" "$marker" 1 || true
 }
 
 # _acq_msb_ensure_agent_shell NAME — align the agent's login shell with what
@@ -4162,8 +4162,8 @@ _acq_msb_ensure_agent_user() {
 # `export SHELL=/bin/sh` line earlier acq versions appended is removed wherever
 # it appears (it stopped a login bash cold); a ~/.profile with any other content
 # is left alone (image/user-owned — Debian's own skel already bridges).
-# Idempotent and re-run on every provision AND heal (even on an agent-user-ready
-# marker hit), which is what upgrades sandboxes created before this setup.
+# Idempotent and re-run on every provision AND heal, which is what upgrades
+# sandboxes created before this setup.
 # Fail-soft: a sync failure leaves sessions on the /bin/sh fallback, never blocks
 # the run.
 _acq_msb_ensure_agent_shell() {
@@ -5734,7 +5734,8 @@ _acq_msb_heal_kit_set() {
 # msb sandboxes are recreated cheaply and msb has no in-place kit-add that
 # preserves state guarantees the way sbx 0.35.0 does. Rather than silently
 # destroy state, re-apply the neutral kits idempotently (files are overwritten,
-# commands are idempotent / install-marker-gated). If a caller needs a clean
+# commands are idempotent / install-marker-gated unless a forced re-apply is
+# requested). If a caller needs a clean
 # rebuild, they can `acq rm && acq run`.
 
 acq_backend_ensure_kits_applied() {
@@ -5774,10 +5775,11 @@ acq_backend_ensure_kits_applied() {
   # present — the reported "have to export SSH_AUTH_SOCK by hand" symptom. Cheap
   # no-op when no host forward is requested or the sandbox has no vsock route.
   _acq_msb_ensure_ssh_agent_forward "$name"
-  # Re-run the agent-user setup. It is idempotent and marker-gated, and its
-  # login-shell sync deliberately runs even on a marker hit — that is
-  # what heals a sandbox whose agent user was created with /bin/sh before the
-  # passwd-shell setup existed. Best-effort like the rest of the heal.
+  # Re-run the agent-user setup. It is idempotent and not gated on any recorded
+  # marker (a guest-reported success is not trusted to skip it), and it includes
+  # the login-shell sync that heals a sandbox whose agent user was created with
+  # /bin/sh before the passwd-shell setup existed. Best-effort like the rest of
+  # the heal.
   _acq_msb_ensure_agent_user "$name" || \
     echo "acq(msb): warning: agent-user heal failed for '$name'." >&2
   # Rebuild after any persisted refs were loaded by the dispatcher. CLI-supplied

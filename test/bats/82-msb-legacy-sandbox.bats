@@ -6,7 +6,8 @@
 # Such a sandbox has no host-config keys. acq never imports the old guest markers
 # (a passwordless-sudo guest could forge them), so each missing key must degrade
 # as documented in docs/KNOWN_FAILURE_MODES.md (section 32.1): no SSH_AUTH_SOCK
-# until the forward is re-driven, and the install / agent-user gates replay once.
+# until the forward is re-driven, and the install gate replays once. The
+# agent-user setup has no gate: it is re-verified on every heal.
 #
 # shellcheck shell=bats
 
@@ -79,11 +80,14 @@ SPEC
   [ -n "$gate" ]
 }
 
-@test "legacy msb: the agent-user setup replays once on heal, then the host gate holds" {
+# Deliberate change: this used to assert the agent-user setup replays ONCE and is
+# then suppressed by a host gate. The gate recorded only a guest-reported success,
+# so the setup is now re-verified on every heal and no gate key is written.
+@test "legacy msb: the agent-user setup is re-verified on every heal and writes no gate" {
   : > "$CALLS"
   _heal_legacy legacyuserbox
   local runs; runs=$(grep -c 'NOPASSWD:ALL' "$CALLS" || true)
-  assert_equal "$runs" "1"
-  run test -f "$(ls -d "$ACQ_PROVENANCE_DIR"/msb/legacyuserbox.*.config)/agent-user-ready"
-  assert_success
+  assert_equal "$runs" "2"
+  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/legacyuserbox.*.config/agent-user-ready 2>&1'
+  assert_failure
 }
