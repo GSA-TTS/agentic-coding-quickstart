@@ -3080,7 +3080,7 @@ command is replayed (unverified on sbx) could make acq believe startup finished.
   for this repository (not exhaustively checked), and adding one by guessing would
   trade a low-impact residual risk for an unverifiable mechanism. The related
   trusted-startup question for SBX is analyzed in the SBX trusted-startup parity
-  ADR (`docs/adr/0036-sbx-trusted-startup-parity.md`).
+  ADR (`docs/adr/0037-sbx-trusted-startup-parity.md`).
 
 ### Revisit if
 

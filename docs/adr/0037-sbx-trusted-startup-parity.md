@@ -11,7 +11,7 @@ risk_treatment: mitigate
 supersedes: []
 ---
 
-# ADR-0036: SBX Trusted-Startup Parity
+# ADR-0037: SBX Trusted-Startup Parity
 
 ## Context and Problem Statement
 
@@ -50,9 +50,6 @@ here; no network or sbx access on the authoring host), so the refusal is
 version-scoped and is not assumed for later releases. The "mountless sandbox"
 behavior attributed to sbx >= 0.42 below is likewise unverified. This ADR concerns
 create-time delivery and restart replay only.
-
-ADR numbering: a number collision with other unmerged ADRs is possible and must
-be resolved by renumbering at merge.
 
 ## Decision Drivers
 

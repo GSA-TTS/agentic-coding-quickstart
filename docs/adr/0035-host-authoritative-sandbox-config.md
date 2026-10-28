@@ -382,7 +382,7 @@ GSA-TTS/agentic-coding-quickstart#636 fields: the sbx `extra-kits` and `builtin-
 (`83-msb-ro-host-config-record.bats`), and the msb install and agent-user gates
 (`81`, `82-msb-legacy-sandbox.bats`). Legacy sandboxes degrade as documented in
 `docs/KNOWN_FAILURE_MODES.md` section 32.1. SBX trusted-startup parity is
-proposed separately in [ADR-0036](0036-sbx-trusted-startup-parity.md).
+proposed separately in [ADR-0037](0037-sbx-trusted-startup-parity.md).
 
 ## Links
 
