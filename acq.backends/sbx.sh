@@ -197,12 +197,16 @@ _acq_sbx_confirm_absent() {
 _acq_sbx_kit_sources_manual_hint() {
   local reason="$1" cmd cur
   echo "acq: warning: $reason." >&2
+  # KIT_SOURCE_PREFIXES can legitimately be empty (every trusted source removed, or
+  # _build_kit_list not run yet); on bash 3.2 a bare "${arr[@]}" of an empty array is
+  # an unbound-variable error under set -u, so it is expanded with the ${arr[@]+...}
+  # guard everywhere.
   if command -v jq >/dev/null 2>&1; then
     cur=$(sbx settings get kit.allowedSources 2>/dev/null || true)
     printf '%s' "$cur" | jq -e 'type == "array"' >/dev/null 2>&1 || cur='["docker.io/"]'
     cmd=$(printf '%s' "$cur" | jq -c --args \
       'reduce $ARGS.positional[] as $p (.; if index($p) then . else . + [$p] end)' \
-      "${KIT_SOURCE_PREFIXES[@]}" 2>/dev/null)
+      ${KIT_SOURCE_PREFIXES[@]+"${KIT_SOURCE_PREFIXES[@]}"} 2>/dev/null)
   fi
   if [ -z "${cmd:-}" ]; then
     local _acc='["docker.io/"' _p
@@ -296,7 +300,7 @@ _acq_sbx_ensure_kit_sources_allowed() {  local current desired
 
   desired=$(printf '%s' "$current" | jq -c --args \
     'reduce $ARGS.positional[] as $p (.; if index($p) then . else . + [$p] end)' \
-    "${KIT_SOURCE_PREFIXES[@]}" 2>/dev/null)
+    ${KIT_SOURCE_PREFIXES[@]+"${KIT_SOURCE_PREFIXES[@]}"} 2>/dev/null)
   if [ -z "$desired" ]; then
     _acq_sbx_kit_sources_manual_hint "failed to compute updated allowlist"
     return 0

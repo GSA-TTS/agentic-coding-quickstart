@@ -590,3 +590,33 @@ STUB
   run acq_provider_kit_ref
   assert_success
 }
+
+# Regression for the bash 3.2 CI failure: KIT_SOURCE_PREFIXES is legitimately empty
+# before _build_kit_list runs (and after every trusted source is removed), and on
+# bash 3.2 a bare "${arr[@]}" of an empty array is a fatal unbound-variable error
+# under `set -u`, which `set -e` then turned into an abort of the whole create.
+@test "sbx allowlist sync tolerates an empty KIT_SOURCE_PREFIXES under set -euo pipefail" {
+  run bash -c '
+    set -euo pipefail
+    ACQ_SCRIPT_DIR="'"$REPO_ROOT"'" ACQ_SOURCE_ONLY=1
+    . "'"$REPO_ROOT"'/acq"
+    . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
+    KIT_SOURCE_PREFIXES=()
+    sbx() { [ "${1:-}" = settings ] && [ "${2:-}" = get ] && printf "%s\n" "[\"docker.io/\"]"; return 0; }
+    _acq_sbx_ensure_kit_sources_allowed
+    # the hint path (unreadable setting) must survive an empty list as well
+    sbx() { return 0; }
+    _acq_sbx_ensure_kit_sources_allowed 2>/dev/null
+    echo SURVIVED
+  '
+  assert_success
+  assert_output --partial 'SURVIVED'
+}
+
+@test "sbx.sh never expands KIT_SOURCE_PREFIXES bare (bash 3.2 empty-array guard)" {
+  run grep -n '"\${KIT_SOURCE_PREFIXES\[@\]}"' "$REPO_ROOT/acq.backends/sbx.sh"
+  # every use must be the ${arr[@]+"${arr[@]}"} form, which contains the bare form only inside the guard
+  [ -n "$output" ] || skip "no bare uses at all"
+  run bash -c 'grep -n "KIT_SOURCE_PREFIXES\[@\]" "'"$REPO_ROOT"'/acq.backends/sbx.sh" | grep -v "KIT_SOURCE_PREFIXES\[@\]+"'
+  assert_failure
+}
