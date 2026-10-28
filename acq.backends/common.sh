@@ -240,7 +240,7 @@ KIT_SOURCE_PREFIXES=()
 # failure is recorded here and turned into a hard stop by
 # _acq_require_provider_selection, which only create/run call.
 # shellcheck disable=SC2034  # read by _acq_require_provider_selection
-ACQ_PROVIDER_SELECTION_ERROR="" 
+ACQ_PROVIDER_SELECTION_ERROR=""
 
 # Transitional fallback defaults for the pinned usai-provider kit. ADR-0030's
 # target state is for the kit to export these provider facts as static metadata
@@ -2528,6 +2528,7 @@ _acq_kit_source_owner_prefix() {
 # would REMAIN after removing it. ACQ_EXTRA_KIT_SOURCES (a list of host/owner/
 # prefixes) still works as a backward-compatible ADDITION so existing setups keep
 # fetching their kits.
+# shellcheck disable=SC2120  # EXCLUDE_REPO is passed by sbx.sh (another file), which per-file analysis cannot see
 acq_kit_source_prefixes() {
   local exclude="${1:-}" entries repo rest prefix seen=""
   entries=$(acq_kit_sources_entries) || return 1
@@ -2682,6 +2683,7 @@ _acq_kit_source_ref_trusted() {
 # acq_provider_kit_ref [VALUE] — resolve the default provider kit (config
 # provider_kit, else ACQ_PROVIDER_KIT_DEFAULT) to a fetchable kit ref.
 # Accepted forms: <kit>@<source>, <source>/<kit>, host/owner/repo/<kit>.
+# shellcheck disable=SC2120  # VALUE is the documented optional explicit-ref form; no in-tree caller passes it today, and the contract is kept as documented
 acq_provider_kit_ref() {
   local value="${1:-}" kit="" repo="" head
   local from_config=""
