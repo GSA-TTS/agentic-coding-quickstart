@@ -449,7 +449,14 @@ _msb_create_line() { grep '^msb create' "$CALLS" | head -n1; }
   assert_output "41001"
 }
 
-@test "publish(B): the throwaway key-check sandbox publishes no ports" {
+# Deliberate change: this case used to drive the throwaway key-check sandbox through
+# `check_fresh_sandbox_key`. That helper was removed with the USAi-specific key
+# subsystem (provider keys are now validated by the generic check on attach), so the
+# case now exercises the provisioning seam it depended on directly:
+# `_ACQ_PROVISION_WITHOUT_PORTS=1` must drop every published port, including a
+# `--publish` override, so a throwaway sandbox never contends for the real
+# sandbox's host ports.
+@test "publish(B): a provision with _ACQ_PROVISION_WITHOUT_PORTS=1 publishes no ports" {
   local k; k=$(_pp_kit keycheckkit 3000 7000)
   : > "$CALLS"
   ( export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-keycheck"
@@ -463,11 +470,13 @@ _msb_create_line() { grep '^msb create' "$CALLS" | head -n1; }
     # shellcheck disable=SC2034  # consumed by the sourced acq_backend_provision
     ACQ_PUBLISH_FLAGS=(6868:6767)
     _acq_msb_fetch_kit() { printf '%s\n' "$k"; }
-    # Both host ports are held by the real sandbox; the key check must not
+    # Both host ports are held by the real sandbox; a throwaway sandbox must not
     # contend for them.
     export ACQ_MSB_HOST_PORTS_BUSY=6868,7000
-    check_fresh_sandbox_key ) >/dev/null 2>&1 || true
+    _ACQ_PROVISION_WITHOUT_PORTS=1
+    acq_backend_provision acq-keycheck-throwaway shell . </dev/null ) >/dev/null 2>&1 || true
   local line; line=$(grep '^msb create' "$CALLS" | head -n1)
-  assert_regex "$line" 'acq-keycheck-'
+  assert_regex "$line" 'acq-keycheck-throwaway'
   refute_regex "$line" '\-p '
+  refute_regex "$line" '6868|7000'
 }

@@ -1030,9 +1030,14 @@ EOF
         # `github` is bound above from the compiled-in host table; every provider
         # (the default one included) comes through this loop.
         case "$_pid" in github) continue ;; esac
-        _pbinding=$(acq_provider_binding_host_env "$_pid" "$_name" 2>/dev/null) || continue
-        _penv=$(printf '%s' "$_pbinding" | cut -f2)
-        _phost=$(printf '%s' "$_pbinding" | cut -f1)
+        # _acq_msb_service_binding is the single source for provision, rotate and
+        # unbind: an explicit `acq secret set <id> --host H --env E` sidecar (written
+        # by the user on the host, never by a kit) wins, else the registry/facts
+        # binding. Provisioning from the registry alone would bind a different
+        # host than the one rotate and `secret rm` act on.
+        _pbinding=$(_acq_msb_service_binding "$_pid" "$_name" 2>/dev/null) || continue
+        _penv=$(printf '%s' "$_pbinding" | cut -f1)
+        _phost=$(printf '%s' "$_pbinding" | cut -f2)
         [ -n "$_penv" ] && [ -n "$_phost" ] || continue
         eval "_pnames=\" \${${_namesn}[*]-} \""
         case "$_pnames" in *" $_penv "*) continue ;; esac
