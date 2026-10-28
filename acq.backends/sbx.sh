@@ -750,6 +750,13 @@ _acq_backend_provision_unlocked() {
       echo "acq(sbx): error: sandbox '$name' was created but provider inputs could not be published." >&2
       return 1
     fi
+    # Host state is fixed from what the host observed (this create succeeded with
+    # these kit flags), BEFORE the guest-written startup barrier is consulted. The
+    # barrier is a readiness signal a guest can satisfy early, so no record may
+    # depend on it. Clear stale same-name state first, then seed.
+    acq_host_config_clear_instance_state sbx "$name"
+    _acq_sbx_seed_extra_kit_record "$name"
+    _acq_sbx_seed_builtin_kit_record "$name"
     acq_spin_start "Waiting for kit startup in '$name'"
     if ! _acq_sbx_wait_for_startup_barrier "$name" "$_startup_barrier_token"; then
       acq_spin_stop "Waiting for kit startup in '$name'"
@@ -761,7 +768,6 @@ _acq_backend_provision_unlocked() {
       return 1
     fi
     acq_spin_stop "Waiting for kit startup in '$name'"
-    acq_host_config_clear_instance_state sbx "$name"
     if ! acq_provenance_write sbx "$name" "$agent"; then
       echo "acq(sbx): error: could not record provenance for '$name'." >&2
       echo "          Removing the new sandbox because safe reattach requires complete state." >&2
@@ -783,7 +789,6 @@ _acq_backend_provision_unlocked() {
       fi
     fi
     acq_workspace_record_write sbx "$name" "$_primary_ws" || true
-    _acq_sbx_seed_extra_kit_record "$name"
     # Backend parity (ADR-0030): sbx DELIVERS ~/.rc.d/*.sh via kit files[] but,
     # unlike msb's .profile bridge, nothing SOURCES them at login. Write the same
     # bridge here at create time so a kit-dropped snippet actually runs. This is a
@@ -828,7 +833,7 @@ acq_backend_provision() {
 # host record (see acq_backend_ensure_kits_applied step 4). A guest marker is not
 # a trust boundary because a passwordless-sudo guest can forge it. Recording the
 # original ref once per line lets create and heal agree without trusting guest
-# state. Built-in kits are tracked by feature-probe and are not listed here.
+# state. Built-in kits are tracked separately (`builtin-kits`, below).
 #
 # ACQ_CLI_KITS (`--kit` on the CLI) are recorded for completeness even though the
 # current sbx heal loop only re-drives ACQ_EXTRA_KITS. This is safe, not a
@@ -852,6 +857,74 @@ _acq_sbx_seed_extra_kit_record() {
   done
   acq_host_config_write sbx "$name" extra-kits "$_records" || \
     echo "acq: warning: could not record extra kits for '$name'; re-attach may re-attempt them." >&2
+}
+
+# ---------------------------------------------------------------------------
+# Host-authoritative built-in kit state (host config key `builtin-kits`)
+# ---------------------------------------------------------------------------
+# The re-attach heal decides whether the Zscaler CA, USAi config and playbook
+# built-in kits need (re)applying from this host record, never from a guest
+# `sbx exec` probe: a passwordless-sudo guest can create the probed files and so
+# control the answer. One line per kit: "<kit-name> <pinned-ref>". Recording the
+# ref makes a record from an older bundle stale (the ref no longer matches), so a
+# bundle bump re-applies the kit instead of trusting the old record.
+#
+# Legacy default: a sandbox created before this record existed has no
+# `builtin-kits` key. Absent or non-matching host state means "not recorded as
+# applied", so the heal re-applies (fail toward re-apply, never toward skip). On
+# sbx >= 0.38 that re-apply of a startup-bearing kit is refused with the
+# recreate notice; the record is only written on success, so such a sandbox
+# keeps prompting for recreate until it is recreated.
+
+# True if KIT at REF is recorded as applied. Usage: ... NAME KIT REF
+_acq_sbx_builtin_kit_recorded() {
+  local recorded
+  recorded=$(acq_host_config_read sbx "$1" builtin-kits)
+  grep -Fxq -- "$2 $3" <<<"$recorded"
+}
+
+# Record KIT at REF (replacing any older line for KIT). Usage: ... NAME KIT REF
+_acq_sbx_builtin_kit_record() {
+  local name="$1" kit="$2" ref="$3" recorded kept
+  recorded=$(acq_host_config_read sbx "$name" builtin-kits)
+  kept=$(printf '%s\n' "$recorded" | awk -v k="$kit " 'NF && index($0, k) != 1')
+  acq_host_config_write sbx "$name" builtin-kits "${kept}${kept:+$'\n'}${kit} ${ref}" || \
+    echo "acq: warning: could not record built-in kit '$kit' for '$name'; re-attach may re-attempt it." >&2
+}
+
+# Create-time seed: the kits the heal consults, as passed to the `sbx create` that
+# the host just observed succeed. This is the host-observable fact; it does not
+# claim the guest's kit startup commands succeeded (the startup barrier is a guest
+# file and is deliberately not an input here). Seeded before the barrier wait.
+_acq_sbx_seed_builtin_kit_record() {
+  local name="$1" records
+  records="zscaler-ca-certificate ${ZSCALER_KIT}"
+  # The selected provider kit, as the heal resolves it (first selected ref). An empty
+  # selection records nothing; a selection that cannot be resolved records nothing, so
+  # a later heal re-checks rather than trusting a record acq could not form.
+  local _prov_refs _prov_ref
+  if _prov_refs=$(_acq_selected_provider_kit_refs 2>/dev/null); then
+    _prov_ref=$(printf '%s\n' "$_prov_refs" | head -n1)
+    [ -z "$_prov_ref" ] || records="${records}"$'\n'"${USAI_PROVIDER_KIT_NAME} ${_prov_ref}"
+  fi
+  records="${records}"$'\n'"agentic-coding-playbook ${PLAYBOOK_KIT}"
+  acq_host_config_write sbx "$name" builtin-kits "$records" || \
+    echo "acq: warning: could not record built-in kits for '$name'; re-attach may re-apply them." >&2
+}
+
+# Heal decision: 0 = apply, 1 = skip. Authority is the host record only. The
+# guest probe (SNIPPET, as for _acq_sbx_kit_feature_absent) runs solely under
+# ACQ_DEBUG as a non-authoritative diagnostic and never changes the decision.
+# Usage: _acq_sbx_builtin_kit_needs_apply NAME KIT REF SNIPPET
+_acq_sbx_builtin_kit_needs_apply() {
+  local name="$1" kit="$2" ref="$3" snippet="$4" _prc=0
+  [ "${ACQ_FORCE_KIT_REAPPLY:-0}" = "1" ] && return 0
+  _acq_sbx_builtin_kit_recorded "$name" "$kit" "$ref" || return 0
+  if [ -n "${ACQ_DEBUG:-}" ]; then
+    _acq_sbx_kit_feature_absent "$name" "$snippet" || _prc=$?
+    [ "$_prc" -eq 0 ] && acq_debug "heal(sbx): host records '$kit' applied but the guest probe reports it absent (diagnostic only; not re-applying)"
+  fi
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -1240,10 +1313,11 @@ acq_backend_apply_kit() {
 # ---------------------------------------------------------------------------
 # acq_backend_ensure_kits_applied — heal a pre-kit sandbox in place
 # ---------------------------------------------------------------------------
-# Injects any ABSENT built-in kit. When ACQ_FORCE_KIT_REAPPLY=1 (set by
-# acq_bundle_reapply for a stale-bundle refresh) it re-adds ALL
-# built-in kits even when present, so a kit built from an older ref is actually
-# refreshed — the feature-probe alone would skip a present-but-stale kit.
+# Injects any built-in kit (Zscaler CA, USAi, playbook) not recorded as applied
+# at its current pinned ref in the HOST config store (key `builtin-kits`); the
+# guest is never consulted for that decision (see the helpers above). When
+# ACQ_FORCE_KIT_REAPPLY=1 (set by acq_bundle_reapply for a stale-bundle refresh)
+# it re-adds ALL built-in kits regardless of the record.
 # Returns 0 only if every built-in kit is present-or-successfully-applied, so a
 # caller can gate a provenance write on real success (never claim currency after
 # a failed apply).
@@ -1266,7 +1340,7 @@ acq_backend_ensure_kits_applied() {
   _acq_sbx_ensure_kit_sources_allowed
 
   # Neutral kits must be translated to local sbx-v2 kit dirs before sbx kit add.
-  local provider_local="" playbook_local zscaler_local
+  local playbook_local zscaler_local
   # The default provider is DATA (provider_kit), so heal resolves the selected
   # ref instead of naming the USAi kit. An invalid selection FAILS CLOSED here:
   # silently healing without the provider kit would leave a half-configured sandbox.
@@ -1287,21 +1361,25 @@ acq_backend_ensure_kits_applied() {
   # makes an outbound HTTPS request. Behind a TLS-intercepting proxy (Zscaler),
   # the USAi and playbook kits fail with a TLS 'unexpected eof' unless the
   # intercepting CA is already trusted.
-  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
+  if _acq_sbx_builtin_kit_needs_apply "$name" zscaler-ca-certificate "$ZSCALER_KIT" 'test -e /usr/local/share/ca-certificates/zscaler-ca.crt && echo present'; then
     echo "acq: '$name' is missing the Zscaler CA kit; injecting with 'sbx kit add'..." >&2
     # `set -e`-safe: _acq_sbx_kit_add's non-zero returns (3=refusal, 1=other) are
     # normal signalling — capture the status inline so the loop is not aborted.
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$zscaler_local" || _kadd_rc=$?
     case $_kadd_rc in
-      0) healed=1; echo "acq: Zscaler CA kit injected into '$name'." >&2 ;;
+      0) healed=1; _acq_sbx_builtin_kit_record "$name" zscaler-ca-certificate "$ZSCALER_KIT"; echo "acq: Zscaler CA kit injected into '$name'." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (Zscaler CA kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
   fi
 
-  # 2) Default provider kit
+  # 2) Default provider kit. The kit is DATA (the selected provider ref), and whether
+  # it needs applying is decided from the host `builtin-kits` record, never from a
+  # guest probe. The record slot keeps the historical USAi kit name as its key so
+  # records written by earlier acq versions still match; its ref is the selected
+  # provider ref, so changing the provider kit re-applies it.
   if [ -n "$provider_ref" ] \
-      && { [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; }; then
+      && _acq_sbx_builtin_kit_needs_apply "$name" "$USAI_PROVIDER_KIT_NAME" "$provider_ref" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
     echo "acq: '$name' is missing the provider kit; injecting with 'sbx kit add'..." >&2
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$provider_local" || _kadd_rc=$?
     case $_kadd_rc in
@@ -1310,6 +1388,7 @@ acq_backend_ensure_kits_applied() {
         sbx exec "$name" -- sh -c \
           'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
           </dev/null >/dev/null 2>&1 || true
+        _acq_sbx_builtin_kit_record "$name" "$USAI_PROVIDER_KIT_NAME" "$provider_ref"
         echo "acq: provider kit injected into '$name'." >&2
         ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
@@ -1323,11 +1402,11 @@ acq_backend_ensure_kits_applied() {
   # NO .git. The symlink farm consumes AGENTS.md, so its presence is the
   # delivery-agnostic signal; probing for .git reported the playbook "absent"
   # forever on tarball-provisioned sandboxes.
-  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" 'test -e "$HOME/.agentic-coding-playbook/AGENTS.md" && echo present'; then
+  if _acq_sbx_builtin_kit_needs_apply "$name" agentic-coding-playbook "$PLAYBOOK_KIT" 'test -e "$HOME/.agentic-coding-playbook/AGENTS.md" && echo present'; then
     echo "acq: '$name' is missing the playbook kit; injecting with 'sbx kit add'..." >&2
     _kadd_rc=0; _acq_sbx_kit_add "$name" "$playbook_local" || _kadd_rc=$?
     case $_kadd_rc in
-      0) healed=1; echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2 ;;
+      0) healed=1; _acq_sbx_builtin_kit_record "$name" agentic-coding-playbook "$PLAYBOOK_KIT"; echo "acq: playbook kit injected into '$name'. Restart the agent to pick it up." >&2 ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
       *) echo "acq: warning: 'sbx kit add' (playbook kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac

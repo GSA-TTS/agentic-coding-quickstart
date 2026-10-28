@@ -17,6 +17,11 @@
 #     the path is left alone).
 #
 # shellcheck shell=bats
+# NOTE: these cases exercise the staged-mount path itself, so each gives the stub msb a
+# floor-satisfying version and an `msb inspect` record showing the host-config mount as
+# the read-only Bind of acq's host config dir. Whether the gate trusts that record is
+# covered in 84-msb-ro-mount-qualification.bats; before the gate existed, a recorded
+# sandbox was unlocked by the guest probe alone.
 
 setup() { acq_setup_stubs; }
 teardown() { acq_teardown_stubs; }
@@ -91,6 +96,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
     acq_test_stub_provider_input_boundary
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision rocodebox shell /tmp >/dev/null 2>&1
@@ -123,6 +129,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
     acq_test_stub_provider_input_boundary
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision rocode2box shell /tmp >/dev/null 2>&1
@@ -147,6 +154,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
     acq_test_stub_provider_input_boundary
     _acq_msb_apply_kit_dir legacyrobox "'"$k"'" 2>&1
   '
@@ -158,10 +166,10 @@ SPEC
   assert_regex "$log" 'msb copy .*legacyrobox:/home/agent/cfg/merge\.mjs'
   assert_regex "$log" 'node /home/agent/cfg/merge\.mjs'
   refute_regex "$log" '/var/lib/acq/host/kit-files'
-  assert_output --partial 'has no readable or read-only ADR-0035 host-config mount'
+  assert_output --partial 'has no ADR-0035 read-only host-config record'
 }
 
-@test "msb ro: writable host-config mount falls back to the guest copy" {
+@test "msb ro: no-record sandbox falls back to the guest copy regardless of the writable probe stub" {
   local k="$STUBDIR/writablero"; _ro_kit "$k"
   : > "$CALLS"
   run bash -c '
@@ -169,6 +177,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
     _acq_msb_apply_kit_dir writablerobox "'"$k"'" 2>&1
   '
   assert_success
@@ -176,7 +185,7 @@ SPEC
   assert_regex "$log" 'msb copy .*writablerobox:/home/agent/cfg/merge\.mjs'
   assert_regex "$log" 'node /home/agent/cfg/merge\.mjs'
   refute_regex "$log" '/var/lib/acq/host/kit-files'
-  assert_output --partial 'has no readable or read-only ADR-0035 host-config mount'
+  assert_output --partial 'has no ADR-0035 read-only host-config record'
 }
 
 @test "msb ro: the create-time host-config mount is read-only" {
@@ -187,6 +196,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
     acq_test_stub_provider_input_boundary
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision romountbox shell /tmp >/dev/null 2>&1
