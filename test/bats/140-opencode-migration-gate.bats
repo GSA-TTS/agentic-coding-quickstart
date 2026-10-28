@@ -67,6 +67,29 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
   assert_equal "${KITS[7]}" "/extra/cli-two"
 }
 
+@test "provider omission(msb): skips USAi gate and binds no USAi secret before create" {
+  local proj="$STUBDIR/no-provider-project"
+  mkdir -p "$proj"
+
+  run env ACQ_BACKEND=msb ACQ_NO_PROMPT=1 "$ACQ" create opencode --no-provider-kits "$proj"
+
+  assert_success
+  refute_output --partial 'no USAi API key stored'
+  refute_regex "$(cat "$CALLS")" 'USAI_API_KEY@api\.gsa\.usai\.gov'
+  refute_regex "$(cat "$CALLS")" 'acq-kits/usai-provider'
+}
+
+@test "provider omission: invalid selection fails before either backend create" {
+  local proj="$STUBDIR/invalid-provider-project"
+  mkdir -p "$proj"
+
+  run env ACQ_BACKEND=msb ACQ_PROVIDER_KITS="$STUBDIR/invalid-provider-kit" ACQ_NO_PROMPT=1 "$ACQ" create shell "$proj"
+
+  assert_failure
+  assert_output --partial 'could not fetch kit'
+  refute_regex "$(cat "$CALLS")" '^msb create'
+}
+
 _mk_opencode_agent_kit() { # PATH [schema] [kit-name] [agent-name] [entrypoint]
   mkdir -p "$1"
   cat >"$1/spec.yaml" <<SPEC
@@ -341,7 +364,7 @@ SPEC
     bash -c '. "$1/acq.backends/common.sh"; acq_host_config_write msb migbox workspace /workspace; exec "$2" shell migbox' \
     _ "$REPO_ROOT" "$ACQ"
   assert_success
-  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /workspace -e TERM=xterm-256color -e SHELL=/bin/bash migbox -- /bin/bash -l'
+  assert_regex "$(cat "$CALLS")" 'msb exec -t -u agent -w /workspace -e TERM=xterm-256color -e (COLORTERM=truecolor -e )?SHELL=/bin/bash migbox -- /bin/bash -l'
 }
 
 @test "migration gate(sbx): run opencode keeps native clone, workspace markers, image template, and kit order" {
@@ -391,7 +414,7 @@ SPEC
   printf 'genericattach\n' >"$STUBDIR/.sandbox_list"
   local create_line
   create_line=$(_create_line sbx)
-  assert_regex "$create_line" " shell ${proj}$"
+  assert_regex "$create_line" " shell ${proj} .+:ro$"
   assert_equal "$(printf '%s\n' "$create_line" | grep -o 'acq-opencode-kit' | wc -l | tr -d ' ')" "1"
 
   : >"$CALLS"

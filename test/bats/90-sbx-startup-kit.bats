@@ -4,7 +4,7 @@
 # (ADR-0025)
 #
 # sbx 0.38 startup-kit refusal handling, stale-probe footprint, and the
-# create-time extra-kit marker. All offline via the stubbed sbx. Each @test
+# host-authoritative extra-kit record. All offline via the stubbed sbx. Each @test
 # plants a purpose-built sbx stub, so the stubs live inline.
 #
 # shellcheck shell=bats
@@ -81,7 +81,7 @@ _seed_stale_provenance() {
   '
   assert_output --partial 'cannot extend a live sandbox with startup-bearing kits'
   assert_output --partial 'missing the Zscaler CA kit'
-  assert_output --partial 'missing the USAi kit'
+  assert_output --partial 'missing the provider kit'
   assert_output --partial 'missing the playbook kit'
 }
 
@@ -277,7 +277,7 @@ SPEC
   refute_regex "$bridgelines" 'kit add'
 }
 
-@test "provision(sbx): ACQ_EXTRA_KITS is marked into ~/.acq-extra-kits at create" {
+@test "provision(sbx): ACQ_EXTRA_KITS is recorded in host config at create" {
   : > "$CALLS"
   # Subshell, NOT `bash -c`: acq_backend_provision is a sourced function, which
   # a fresh bash never sees (the pre-#381 suite masked the resulting 127).
@@ -286,12 +286,12 @@ SPEC
     acq_test_stub_provider_input_boundary
     acq_backend_provision markerbox shell /tmp
   ) >/dev/null 2>&1 || true
-  local log; log=$(cat "$CALLS")
-  assert_regex "$log" '\.acq-extra-kits'
-  assert_regex "$log" 'some-extra-kit'
+  local record; record=$(acq_host_config_read sbx markerbox extra-kits)
+  assert_regex "$record" 'some-extra-kit'
+  refute_regex "$(cat "$CALLS")" '\.acq-extra-kits'
 }
 
-@test "provision(sbx): a CLI --kit ref (ACQ_CLI_KITS) is also marked at create" {
+@test "provision(sbx): a CLI --kit ref (ACQ_CLI_KITS) is also recorded at create" {
   : > "$CALLS"
   # Subshell, NOT `bash -c` (see the ACQ_EXTRA_KITS marker test above).
   (
@@ -300,10 +300,10 @@ SPEC
     acq_test_stub_provider_input_boundary
     acq_backend_provision climarkerbox shell /tmp
   ) >/dev/null 2>&1 || true
-  assert_regex "$(cat "$CALLS")" 'cli-kit-x'
+  assert_regex "$(acq_host_config_read sbx climarkerbox extra-kits)" 'cli-kit-x'
 }
 
-@test "provision(sbx): a FAILED create writes no extra-kit marker" {
+@test "provision(sbx): a FAILED create writes no host extra-kit record" {
   cat >"$STUBDIR/sbx" <<'STUB'
 #!/usr/bin/env bash
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
@@ -320,10 +320,10 @@ STUB
     export ACQ_EXTRA_KITS="git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=fail-extra-kit"
     acq_backend_provision failbox shell /tmp >/dev/null 2>&1 || true
   '
-  refute_regex "$(cat "$CALLS")" '\.acq-extra-kits'
+  assert_equal "$(acq_host_config_read sbx failbox extra-kits)" ''
 }
 
-@test "heal(sbx): a marked extra kit is not re-applied (no refusal noise)" {
+@test "heal(sbx): a forged guest extra-kit marker cannot suppress healing" {
   cat >"$STUBDIR/sbx" <<'STUB'
 #!/usr/bin/env bash
 { printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
@@ -334,6 +334,7 @@ case "${1:-}" in
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
     case "$snippet" in
+      # A sudo-capable guest can forge this old marker. The host must not query it.
       *acq-extra-kits*) printf '%s\n' "git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=some-extra-kit" ;;
       *present*) printf 'present\n' ;;
       *) exit 0 ;;
@@ -344,14 +345,37 @@ case "${1:-}" in
 esac
 STUB
   chmod +x "$STUBDIR/sbx"
-  printf 'skipbox\n' > "$STUBDIR/.sandbox_list"
-  run bash -c '
-    ACQ_EXTRA_KITS="git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=some-extra-kit" \
-      acq_backend_ensure_kits_applied skipbox 2>&1 || true
-  '
+  printf 'forgedbox\n' > "$STUBDIR/.sandbox_list"
+  ACQ_EXTRA_KITS='git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=some-extra-kit' \
+    run acq_backend_ensure_kits_applied forgedbox
   local log; log=$(cat "$CALLS")
-  refute_regex "$log" 'sbx kit add skipbox'
-  refute_output --partial 'cannot extend a live sandbox'
+  assert_regex "$log" 'sbx kit add forgedbox'
+  refute_regex "$log" '\.acq-extra-kits'
+}
+
+@test "heal(sbx): a matching host extra-kit record suppresses re-apply" {
+  cat >"$STUBDIR/sbx" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'sbx'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$CALLS"
+case "${1:-}" in
+  version) printf 'sbx version: v0.39.0 abc123\n' ;;
+  ls) [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"; exit 0 ;;
+  exec)
+    snippet=""; prev=""
+    for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
+    case "$snippet" in *present*) printf 'present\n' ;; *) exit 0 ;; esac ;;
+  kit) [ "${2:-}" = "add" ] && { printf 'unexpected kit apply\n' >&2; exit 1; }; exit 0 ;;
+  settings) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+  chmod +x "$STUBDIR/sbx"
+  local kit='git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=some-extra-kit'
+  printf 'hostbox\n' > "$STUBDIR/.sandbox_list"
+  acq_host_config_write sbx hostbox extra-kits "$kit"
+  ACQ_EXTRA_KITS="$kit" run acq_backend_ensure_kits_applied hostbox
+  refute_regex "$(cat "$CALLS")" 'sbx kit add hostbox'
+  refute_output --partial 'unexpected kit apply'
 }
 
 @test "agent-kit-heal(sbx): forced refresh includes recorded agent kit" {
@@ -540,6 +564,60 @@ STUB
 
   assert [ "$kit_line" -lt "$wait_line" ]
   assert [ "$wait_line" -lt "$attach_line" ]
+}
+
+@test "provision(sbx): provider generation mount appears after agent, not among --kit refs" {
+  # Regression: before this fix, /path/generation.XXX:ro was placed BEFORE the agent
+  # positional in sbx create argv.  sbx resolves pre-agent positionals as kit paths,
+  # producing "error: resolve kits: kit path .../generation.<id>:ro does not exist".
+  # After the fix the mount appears AFTER the agent and is NOT a --kit value.
+  : > "$CALLS"
+  (
+    acq_test_stub_provider_input_boundary
+    acq_backend_provision mountposbox shell /tmp
+  ) >/dev/null 2>&1 || true
+  local log create_line
+  log=$(cat "$CALLS")
+  create_line=$(printf '%s\n' "$log" | grep '^sbx create')
+  [ -n "$create_line" ]
+
+  # (a) generation:ro must NOT be a --kit value — if it were, sbx tries to resolve
+  #     a non-existent kit path.
+  local gen_after_kit
+  gen_after_kit=$(printf '%s\n' "$create_line" | awk '{
+    for (i=1; i<=NF; i++) {
+      if ($i == "--kit" && i+1 <= NF && $(i+1) ~ /\/generation\..*:ro/) {
+        print "kit-value:" $(i+1); exit
+      }
+    }
+  }')
+  [ -z "$gen_after_kit" ]
+
+  # (b) generation:ro must appear AFTER the selected agent token so sbx treats
+  #     it as a workspace-style read-only mount, not a kit path. Avoid generic
+  #     flag parsing here: SBX has both value-taking and boolean flags.
+  local gen_pos agent_pos workspace_pos
+  gen_pos=$(printf '%s\n' "$create_line" | awk '{
+    for (i=1; i<=NF; i++) { if ($i ~ /\/generation\..*:ro$/) { print i; exit } }
+  }')
+  agent_pos=$(printf '%s\n' "$create_line" | awk '{
+    for (i=1; i<=NF; i++) { if ($i == "shell") { print i; exit } }
+  }')
+  workspace_pos=$(printf '%s\n' "$create_line" | awk -v workspace="/tmp" '{
+    for (i=1; i<=NF; i++) { if ($i == workspace) { print i; exit } }
+  }')
+  [ -n "$gen_pos" ]
+  [ -n "$agent_pos" ]
+  [ -n "$workspace_pos" ]
+  assert [ "$agent_pos" -lt "$gen_pos" ]
+  assert [ "$workspace_pos" -lt "$gen_pos" ]
+
+  # (c) ACQ_PROVIDER_INPUT_ROOT must be in the env flags (no :ro suffix on the guest path).
+  assert_regex "$create_line" 'ACQ_PROVIDER_INPUT_ROOT=[^ ]*/generation\.[^ :]*([ ]|$)'
+
+  # (d) The :ro suffix on the generation path must be preserved intact as a single token
+  #     (spaces in the path or suffix must not be split by word expansion).
+  assert_regex "$create_line" '/generation\.[^ ]*:ro'
 }
 
 @test "run(sbx): refuses attach when reattach heal never becomes exec-ready" {

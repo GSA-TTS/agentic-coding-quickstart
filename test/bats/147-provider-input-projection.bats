@@ -350,12 +350,45 @@ EOF
   [ ! -w "$root/$current/models/providers/alpha/facts.json" ]
 }
 
+@test "projection: explicit empty selection creates a provider-free generation" {
+  local root generation
+  # shellcheck disable=SC2034 # _build_kit_list reads these globals
+  ACQ_PROVIDER_KITS=""
+  # shellcheck disable=SC2034 # _build_kit_list reads these globals
+  ACQ_PROVIDER_KITS_FROM_ENV=1
+  # shellcheck disable=SC2034 # _build_kit_list reads these globals
+  ACQ_PROVIDER_KITS_FROM_CLI=""
+  _build_kit_list opencode
+
+  run acq_provider_input_prepare sbx emptyproviders
+  assert_success
+  generation="$output"
+  root=$(acq_provider_input_root sbx emptyproviders)
+  [ -d "$generation/models/providers" ]
+  [ -z "$(ls -A "$generation/models/providers")" ]
+  refute_regex "$(printf '%s\n' "${KITS[@]}")" 'usai-provider'
+  refute [ -e "$generation/models/providers/usai" ]
+  [[ "$generation" == "$root/generations/"* ]]
+}
+
 @test "candidate snapshot preserves spec.yaml for host allowlist validation" {
   local release="$STUBDIR/release" candidate="$STUBDIR/candidate"
   _provider_release "$release"; _provider_kit "$release" alpha
   _acq_provider_input_snapshot "$release/integrations/isolation/acq-kits/alpha" "$candidate"
   [ -f "$candidate/spec.yaml" ]
   grep -Fq 'alpha.example.gov' "$candidate/spec.yaml"
+}
+
+@test "candidate snapshot rejects malformed provider input manifest with actionable error" {
+  local release="$STUBDIR/release"
+  local kit="$release/integrations/isolation/acq-kits/alpha"
+  _provider_release "$release"; _provider_kit "$release" alpha
+  printf '{this-is-not-json\n' > "$kit/provider-input.json"
+
+  run _acq_provider_input_snapshot "$kit" "$STUBDIR/malformed-candidate"
+  assert_failure
+  assert_output --partial 'acq: invalid provider input manifest: provider-input.json: invalid JSON'
+  refute_output --partial 'Traceback'
 }
 
 @test "pinned Patterns validator rejects facts host outside snapshotted kit allowlist" {
@@ -729,9 +762,11 @@ EOF
 # directly, giving $! the real executable PID so TERM reaches it.
 
 @test "msb remove TERM: external executable survives initial signal, second lock blocked until exit" {
-  local script="$STUBDIR/msb-remove-term.sh" root msb_bin
-  root=$(acq_provider_input_root msb msbsignalbox)
+  local script="$STUBDIR/msb-remove-term-${BATS_TEST_NUMBER}.sh" root msb_bin sandbox pid_file
+  sandbox="msbsignalbox-${BATS_TEST_NUMBER}"
+  root=$(acq_provider_input_root msb "$sandbox")
   msb_bin="$STUBDIR/slow-msb-remove"
+  pid_file="$STUBDIR/slow-msb-${BATS_TEST_NUMBER}.pid"
   # Create the external slow-msb executable: traps TERM (ignores it initially),
 # writes its own PID, waits until the guardian registry contains that exact PID,
 # then waits for the test before killing its PPID (= the transaction subshell)
@@ -753,7 +788,7 @@ MSB_SLOW
 #!/usr/bin/env bash
 set -eu
 export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
-export MSB_PID_FILE="$STUBDIR/slow-msb.pid"
+export MSB_PID_FILE="$pid_file"
 export MSB_SIGNAL_GO="$STUBDIR/slow-msb.go"
 export MSB_SIGNAL_SENT="$STUBDIR/slow-msb.signalled"
 # Prepend the slow-msb as \`msb\` in PATH.
@@ -775,21 +810,21 @@ acq_backend_exists() { return 1; }       # sandbox confirmed gone after remove
 _acq_msb_confirm_absent() { return 0; }  # confirms gone for the rc-ne-0 path
 # Run terminate in background so we can probe lock state while it runs.
 rc=0
-acq_backend_terminate msbsignalbox & tx=\$!
+acq_backend_terminate "$sandbox" & tx=\$!
 # Wait for slow-msb to register its PID (confirms the background executable started).
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -s "$STUBDIR/slow-msb.pid" ] && break
+  [ -s "$pid_file" ] && break
   sleep 0.1
 done
-[ -s "$STUBDIR/slow-msb.pid" ] || { echo "slow-msb never started" >&2; exit 1; }
-msb_pid=\$(cat "$STUBDIR/slow-msb.pid")
+[ -s "$pid_file" ] || { echo "slow-msb never started" >&2; exit 1; }
+msb_pid=\$(cat "$pid_file")
 # The external child waits for its own registry entry before observing this gate.
 touch "$STUBDIR/slow-msb.go"
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$STUBDIR/slow-msb.signalled" ] && break; sleep 0.1; done
 [ -f "$STUBDIR/slow-msb.signalled" ] || { echo "slow-msb never signalled" >&2; exit 1; }
 kill -0 "\$msb_pid" 2>/dev/null || { echo "slow-msb exited before lock probe" >&2; exit 1; }
 # Verify the lock is still held while the executable is alive.
-if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb msbsignalbox >"$STUBDIR/lock-retry.out" 2>&1; then
+if ACQ_PROVIDER_INPUT_LOCK_RETRIES=1 acq_provider_input_lock_acquire msb "$sandbox" >"$STUBDIR/lock-retry.out" 2>&1; then
   echo "lock acquired while msb executable was alive" >&2
   exit 1
 fi
@@ -797,7 +832,7 @@ grep -Fq "live pid" "$STUBDIR/lock-retry.out" || { cat "$STUBDIR/lock-retry.out"
 # Wait for the background transaction to complete.
 wait "\$tx" || rc=\$?
 # After the transaction exits the lock must be released.
-lock=\$(acq_provider_input_lock_acquire msb msbsignalbox)
+lock=\$(acq_provider_input_lock_acquire msb "$sandbox")
 acq_provider_input_lock_release "\$lock"
 printf '%s\n' "rc=\$rc lock-cleared"
 EOF
@@ -868,6 +903,9 @@ export ACQ_STATE_DIR="$STUBDIR/state3"
 ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1 . "$REPO_ROOT/acq"
 . "$REPO_ROOT/acq.backends/msb.sh"
 KITS=()
+# Current main does not contain the macOS alias helper until the approved path
+# fix merges; this adapter-focused test supplies its pass-through contract.
+_acq_provider_input_canonical_path() { printf '%s\n' "\$1"; }
 # Stub the complex provision helpers so execution reaches the msb create call.
 acq_backend_exists() { return 1; }
 _acq_msb_confirm_absent() { return 0; }

@@ -197,20 +197,94 @@ _acq_sbx_confirm_absent() {
 _acq_sbx_kit_sources_manual_hint() {
   local reason="$1" cmd cur
   echo "acq: warning: $reason." >&2
+  # KIT_SOURCE_PREFIXES can legitimately be empty (every trusted source removed, or
+  # _build_kit_list not run yet); on bash 3.2 a bare "${arr[@]}" of an empty array is
+  # an unbound-variable error under set -u, so it is expanded with the ${arr[@]+...}
+  # guard everywhere.
   if command -v jq >/dev/null 2>&1; then
     cur=$(sbx settings get kit.allowedSources 2>/dev/null || true)
     printf '%s' "$cur" | jq -e 'type == "array"' >/dev/null 2>&1 || cur='["docker.io/"]'
     cmd=$(printf '%s' "$cur" | jq -c --args \
       'reduce $ARGS.positional[] as $p (.; if index($p) then . else . + [$p] end)' \
-      "${KIT_SOURCE_PREFIXES[@]}" 2>/dev/null)
+      ${KIT_SOURCE_PREFIXES[@]+"${KIT_SOURCE_PREFIXES[@]}"} 2>/dev/null)
   fi
-  [ -z "${cmd:-}" ] && cmd='["docker.io/","github.com/GSA-TTS/"]'
+  if [ -z "${cmd:-}" ]; then
+    local _acc='["docker.io/"' _p
+    for _p in ${KIT_SOURCE_PREFIXES[@]+"${KIT_SOURCE_PREFIXES[@]}"}; do
+      _acc="$_acc,\"$_p\""
+    done
+    cmd="$_acc]"
+  fi
   echo "      If kit resolution fails, review the current value and run:" >&2
   echo "        sbx settings set kit.allowedSources '${cmd}'" >&2
 }
 
-_acq_sbx_ensure_kit_sources_allowed() {
-  local current desired
+# acq_backend_kit_source_revoked REPO — a trusted kit source was removed. sbx's
+# kit.allowedSources is owner-granular (host/owner/) and _acq_sbx_ensure_kit_sources_allowed
+# only ever UNIONS, so a revoked source stayed fetchable until the setting was
+# edited by hand. Recompute against what REMAINS trusted once REPO is gone: the
+# owner prefix is dropped only when no remaining registry entry (and no explicit legacy
+# ACQ_EXTRA_KIT_SOURCES grant) still needs it. Returns 0 only when the backend
+# allowlist is verified to no longer grant a prefix nothing needs; any inability
+# to read, write, or verify returns 1 with a recovery command, never a quiet 0.
+acq_backend_kit_source_revoked() {
+  local repo="${1:-}" prefix remaining current desired verify
+  [ -n "$repo" ] || return 0
+  prefix=$(_acq_kit_source_owner_prefix "$repo")
+  remaining=$(acq_kit_source_prefixes "$repo") || remaining=""
+  case "
+$remaining
+" in
+    *"
+$prefix
+"*) return 0 ;;
+  esac
+  if ! command -v sbx >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "sbx and jq are both needed to update kit.allowedSources"
+    return 1
+  fi
+  current=$(sbx settings get kit.allowedSources 2>/dev/null) || current=""
+  if ! printf '%s' "$current" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "could not read kit.allowedSources as a JSON array"
+    return 1
+  fi
+  if ! printf '%s' "$current" | jq -e --arg p "$prefix" 'index($p) != null' >/dev/null 2>&1; then
+    return 0
+  fi
+  desired=$(printf '%s' "$current" | jq -c --arg p "$prefix" 'map(select(. != $p))' 2>/dev/null)
+  if [ -z "$desired" ]; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "could not compute the updated allowlist"
+    return 1
+  fi
+  if ! sbx settings set kit.allowedSources "$desired" </dev/null >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "could not write kit.allowedSources" "$desired"
+    return 1
+  fi
+  verify=$(sbx settings get kit.allowedSources 2>/dev/null) || verify=""
+  if ! printf '%s' "$verify" | jq -e --arg p "$prefix" 'type == "array" and (index($p) == null)' >/dev/null 2>&1; then
+    _acq_sbx_kit_source_revoke_failed "$prefix" "kit.allowedSources still lists it after the update" "$desired"
+    return 1
+  fi
+  echo "acq: removed $prefix from sbx kit.allowedSources." >&2
+  return 0
+}
+
+# _acq_sbx_kit_source_revoke_failed PREFIX REASON [DESIRED_JSON] — the loud half
+# of the fail-closed contract: say what is still permitted and how to fix it.
+_acq_sbx_kit_source_revoke_failed() {
+  local prefix="$1" reason="$2" desired="${3:-}"
+  echo "acq: error: $reason, so sbx kit.allowedSources still permits '$prefix'." >&2
+  echo "     Revocation is NOT complete: the source stays registered because the sbx" >&2
+  echo "     backend could still fetch kits from that owner." >&2
+  if [ -n "$desired" ]; then
+    echo "     Run:   sbx settings set kit.allowedSources '$desired'" >&2
+  else
+    echo "     Review: sbx settings get kit.allowedSources   (remove '$prefix', then 'sbx settings set kit.allowedSources <json-array>')" >&2
+  fi
+  echo "     Then re-run: acq kit-source rm <repo>" >&2
+}
+
+_acq_sbx_ensure_kit_sources_allowed() {  local current desired
 
   if ! command -v jq >/dev/null 2>&1; then
     _acq_sbx_kit_sources_manual_hint "jq not found; cannot safely update the allowlist"
@@ -226,7 +300,7 @@ _acq_sbx_ensure_kit_sources_allowed() {
 
   desired=$(printf '%s' "$current" | jq -c --args \
     'reduce $ARGS.positional[] as $p (.; if index($p) then . else . + [$p] end)' \
-    "${KIT_SOURCE_PREFIXES[@]}" 2>/dev/null)
+    ${KIT_SOURCE_PREFIXES[@]+"${KIT_SOURCE_PREFIXES[@]}"} 2>/dev/null)
   if [ -z "$desired" ]; then
     _acq_sbx_kit_sources_manual_hint "failed to compute updated allowlist"
     return 0
@@ -619,18 +693,33 @@ _acq_backend_provision_unlocked() {
   _ACQ_SBX_ATTEMPT_NAME="$name"
   _ACQ_SBX_ATTEMPT_GENERATION="$_provider_generation"
   _ACQ_SBX_ATTEMPT_ACTIVE=1
+  # Provider credentials must exist in sbx's proxy table BEFORE create (create
+  # snapshots it). USAi keeps its own pre-create gate; this covers every other
+  # provider selected from the credential-bindings registry, using the facts of
+  # the generation we just prepared.
+  if ! acq_provider_credentials_gate sbx "$name" "$_provider_generation"; then
+    _acq_sbx_cleanup_uncreated_attempt
+    return 1
+  fi
   local _hcfg_dir
   _hcfg_dir=$(acq_host_config_dir sbx "$name") || return 1
   mkdir -p "$_hcfg_dir" || return 1
   chmod 711 "$_hcfg_dir" || return 1
-  # sbx supports only its same-absolute-path readonly positional mount. Publish
-  # that backend-owned guest root through the neutral environment contract.
-  local _provider_mount=()
-  _ef+=(--env "ACQ_PROVIDER_INPUT_ROOT=$(acq_provider_input_guest_root sbx "$name" "$_provider_generation")")
-  _provider_mount=("$(acq_provider_input_sbx_mount "$name" "$_provider_generation")") || {
+  # SBX positional syntax is AGENT PRIMARY_WORKSPACE [OTHER_WORKSPACE[:ro]...].
+  # The provider generation therefore follows every existing workspace: placing
+  # it before the agent makes it a kit path, while placing it first after the
+  # agent makes it an invalid read-only primary workspace.
+  local _provider_mount_val
+  _provider_mount_val=$(acq_provider_input_sbx_mount "$name" "$_provider_generation") || {
     _acq_sbx_cleanup_uncreated_attempt
     return 1
   }
+  _ef+=(--env "ACQ_PROVIDER_INPUT_ROOT=$(acq_provider_input_guest_root sbx "$name" "$_provider_generation")")
+  # SBX requires the first workspace after the agent to be read/write. Append
+  # the provider generation after all existing workspace positionals so its
+  # read-only marker cannot become the primary workspace.
+  local _sbx_args_final=("${_sbx_args[@]}" "$_provider_mount_val")
+
   local kf=()
   while IFS= read -r line; do kf+=("$line"); done < <(_acq_sbx_kit_flags)
   local _git_identity_kit=""
@@ -640,13 +729,13 @@ _acq_backend_provision_unlocked() {
   _startup_barrier_token="acq-$$-$(date +%s)-$RANDOM-$RANDOM"
   kf+=(--kit "$(_acq_sbx_startup_barrier_kit "$_startup_barrier_token")")
 
-  acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_provider_mount[*]} ${_sbx_args[*]:-}"
+  acq_debug "sbx create --name $name ${_cf[*]:-} ${_ef[*]:-} ${_tf[*]:-} ${kf[*]} ${_sbx_args_final[*]:-}"
   # Stale host state is cleared only after this create succeeds, avoiding races
   # with a concurrent create and destructive guesses when `sbx ls` fails.
   acq_spin_start "Creating sandbox '$name'"
   local _rc=0 _backend_pid
   _ACQ_SBX_CREATE_STARTED=1
-  sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" "${_provider_mount[@]}" ${_sbx_args[@]+"${_sbx_args[@]}"} &
+  sbx create --name "$name" ${_cf[@]+"${_cf[@]}"} ${_ef[@]+"${_ef[@]}"} ${_tf[@]+"${_tf[@]}"} "${kf[@]}" ${_sbx_args_final[@]+"${_sbx_args_final[@]}"} &
   _backend_pid=$!
   _acq_provider_input_guardian_register_if_active "$_backend_pid" || { kill "$_backend_pid" 2>/dev/null || true; wait "$_backend_pid" 2>/dev/null || true; return 1; }
   wait "$_backend_pid" || _rc=$?
@@ -694,7 +783,7 @@ _acq_backend_provision_unlocked() {
       fi
     fi
     acq_workspace_record_write sbx "$name" "$_primary_ws" || true
-    _acq_sbx_seed_extra_kit_marker "$name"
+    _acq_sbx_seed_extra_kit_record "$name"
     # Backend parity (ADR-0030): sbx DELIVERS ~/.rc.d/*.sh via kit files[] but,
     # unlike msb's .profile bridge, nothing SOURCES them at login. Write the same
     # bridge here at create time so a kit-dropped snippet actually runs. This is a
@@ -733,48 +822,36 @@ acq_backend_provision() {
 }
 
 # ---------------------------------------------------------------------------
-# _acq_sbx_seed_extra_kit_marker — write ~/.acq-extra-kits at CREATE
+# _acq_sbx_seed_extra_kit_record — write host extra-kits state at CREATE
 # ---------------------------------------------------------------------------
-# The re-attach heal decides whether an extra kit is already applied by reading
-# this marker (see acq_backend_ensure_kits_applied step 4); previously only the
-# heal path wrote it, so a sandbox created WITH ACQ_EXTRA_KITS / --kit refs never
-# got the marker and every re-attach re-attempted every extra kit (and, under
-# sbx 0.38, warn-failed each time). Write the same marker here so the create and
-# heal paths agree: one ORIGINAL ref per line (stable across runs), matching the
-# heal's append form (so the heal's exact-line match detects it). Built-in kits
-# are tracked by feature-probe, not the marker, so they are not listed here.
+# The re-attach heal decides whether an extra kit is already applied from this
+# host record (see acq_backend_ensure_kits_applied step 4). A guest marker is not
+# a trust boundary because a passwordless-sudo guest can forge it. Recording the
+# original ref once per line lets create and heal agree without trusting guest
+# state. Built-in kits are tracked by feature-probe and are not listed here.
 #
 # ACQ_CLI_KITS (`--kit` on the CLI) are recorded for completeness even though the
 # current sbx heal loop only re-drives ACQ_EXTRA_KITS. This is safe, not a
 # functional suppression input: on sbx, `--kit` refs are baked in as create-time
 # `sbx create --kit` flags and never re-applied mid-life (unlike msb, which folds
-# ACQ_CLI_KITS into its heal). The marker is a suppression list, so a recorded CLI
+# ACQ_CLI_KITS into its heal). The record is a suppression list, so a recorded CLI
 # ref can only ever be matched if the SAME ref is also supplied via ACQ_EXTRA_KITS
 # — and in that degenerate case skipping re-apply is the correct outcome (the kit
 # was already applied at create). So the CLI entries are a truthful record of what
 # was applied at create; they can never wrongly suppress a needed apply.
-_acq_sbx_seed_extra_kit_marker() {
-  local name="$1" _mkk
+_acq_sbx_seed_extra_kit_record() {
+  local name="$1" _mkk _records=""
   local _mk=()
   [ -n "$ACQ_EXTRA_KITS" ] && split_noglob _mk "$ACQ_EXTRA_KITS"
   [ "${#ACQ_CLI_KITS[@]}" -gt 0 ] && _mk+=("${ACQ_CLI_KITS[@]}")
-  # Nothing to record — skip the (potentially slow) exec-ready wait entirely.
+  # Nothing to record. A later heal treats absent host state as untrusted and
+  # applies any requested extra kit rather than consulting guest-writable state.
   [ "${#_mk[@]}" -gt 0 ] || return 0
-  # A freshly-created sandbox is not immediately exec-able; the heal path guards
-  # its probes the same way. Without this, the marker write can race the sandbox
-  # becoming ready, silently write nothing, and reintroduce the re-attempt bug.
-  if ! _acq_sbx_wait_for_exec_ready "$name"; then
-    echo "acq: warning: sandbox '$name' not exec-ready; could not record the" \
-         "extra-kit marker (~/.acq-extra-kits). Re-attach may re-attempt extra kits." >&2
-    return 0
-  fi
   for _mkk in ${_mk[@]+"${_mk[@]}"}; do
-    if ! sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$_mkk" \
-        </dev/null >/dev/null 2>&1; then
-      echo "acq: warning: could not record extra kit '$_mkk' in ~/.acq-extra-kits" \
-           "for '$name'; re-attach may re-attempt it." >&2
-    fi
+    _records="${_records}${_records:+$'\n'}${_mkk}"
   done
+  acq_host_config_write sbx "$name" extra-kits "$_records" || \
+    echo "acq: warning: could not record extra kits for '$name'; re-attach may re-attempt them." >&2
 }
 
 # ---------------------------------------------------------------------------
@@ -1033,10 +1110,8 @@ _acq_backend_terminate_unlocked() {
   if [ "$rc" -ne 0 ] && ! _acq_sbx_confirm_absent "$1"; then
     return "$rc"
   fi
-  # Remove any host-authoritative config dir for this sandbox (ADR-0035).
-  # sbx does not use the guest /var/lib/acq markers today (its parity mechanism
-  # is `sbx run --name` + ~/.acq-extra-kits), so this is a defensive no-op unless
-  # a future sbx path writes host config. Best-effort, never blocks removal.
+  # Remove the host-authoritative config dir, including extra-kit suppression
+  # state. Best-effort, never blocks removal.
   acq_host_config_remove sbx "$1" || true
   acq_provider_input_remove sbx "$1" || true
   return "$rc"
@@ -1184,12 +1259,27 @@ acq_backend_ensure_kits_applied() {
   # _acq_sbx_print_recreate_notice). Without this reset, a second heal in the
   # same process would suppress the notice.
   _ACQ_SBX_RECREATE_NOTICE_SHOWN=0
+  if command -v acq_provider_selection_load >/dev/null 2>&1; then
+    acq_provider_selection_load sbx "$name" || return 1
+  fi
 
   _acq_sbx_ensure_kit_sources_allowed
 
   # Neutral kits must be translated to local sbx-v2 kit dirs before sbx kit add.
-  local usai_local playbook_local zscaler_local
-  usai_local=$(_acq_sbx_translate_kit "$USAI_KIT")
+  local provider_local="" playbook_local zscaler_local
+  # The default provider is DATA (provider_kit), so heal resolves the selected
+  # ref instead of naming the USAi kit. An invalid selection FAILS CLOSED here:
+  # silently healing without the provider kit would leave a half-configured sandbox.
+  local provider_local="" provider_ref="" provider_refs
+  if ! provider_refs=$(_acq_selected_provider_kit_refs); then
+    echo "acq(sbx): error: the configured provider kit could not be resolved;" >&2
+    echo "            refusing to heal '$name' without it." >&2
+    return 1
+  fi
+  provider_ref=$(printf '%s\n' "$provider_refs" | head -n1)
+  if [ -n "$provider_ref" ]; then
+    provider_local=$(_acq_sbx_translate_kit "$provider_ref")
+  fi
   playbook_local=$(_acq_sbx_translate_kit "$PLAYBOOK_KIT")
   zscaler_local=$(_acq_sbx_translate_kit "$ZSCALER_KIT")
 
@@ -1209,20 +1299,21 @@ acq_backend_ensure_kits_applied() {
     esac
   fi
 
-  # 2) USAi provider kit
-  if [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; then
-    echo "acq: '$name' is missing the USAi kit; injecting with 'sbx kit add'..." >&2
-    _kadd_rc=0; _acq_sbx_kit_add "$name" "$usai_local" || _kadd_rc=$?
+  # 2) Default provider kit
+  if [ -n "$provider_ref" ] \
+      && { [ "$force" = "1" ] || _acq_sbx_kit_feature_absent "$name" "test -f '$USAI_KIT_CONFIG_PATH' && echo present"; }; then
+    echo "acq: '$name' is missing the provider kit; injecting with 'sbx kit add'..." >&2
+    _kadd_rc=0; _acq_sbx_kit_add "$name" "$provider_local" || _kadd_rc=$?
     case $_kadd_rc in
       0)
         healed=1
         sbx exec "$name" -- sh -c \
           'f="$HOME/.config/opencode/opencode.jsonc"; if [ -L "$f" ] && [ ! -e "$f" ]; then rm -f "$f"; fi' \
           </dev/null >/dev/null 2>&1 || true
-        echo "acq: USAi kit injected into '$name'." >&2
+        echo "acq: provider kit injected into '$name'." >&2
         ;;
       3) _acq_sbx_print_recreate_notice "$name"; ok=0 ;;
-      *) echo "acq: warning: 'sbx kit add' (USAi kit) failed for '$name' (see error above)." >&2; ok=0 ;;
+      *) echo "acq: warning: 'sbx kit add' (provider kit) failed for '$name' (see error above)." >&2; ok=0 ;;
     esac
   fi
 
@@ -1283,12 +1374,12 @@ acq_backend_ensure_kits_applied() {
   _acq_sbx_apply_git_identity_kit "$name"
   [ "${_ACQ_SBX_LAST_KIT_ADD_SUCCEEDED:-0}" = "1" ] && healed=1
 
-  # 4) Extra kits (tracked by marker file). Extra kits may be neutral or already
-  #    sbx-v2; _acq_sbx_translate_kit handles both. The marker records one
+  # 4) Extra kits (tracked by host config). Extra kits may be neutral or already
+  #    sbx-v2; _acq_sbx_translate_kit handles both. The host record contains one
   #    ORIGINAL ref per line (stable across runs), not the translated local dir.
   #    Extra-kit failures do not affect the built-in bundle's provenance verdict.
   local applied k local_extra
-  applied=$(sbx exec "$name" -- sh -c 'cat "$HOME/.acq-extra-kits" 2>/dev/null' </dev/null 2>/dev/null || true)
+  applied=$(acq_host_config_read sbx "$name" extra-kits)
   local _extras=()
   [ -n "$ACQ_EXTRA_KITS" ] && split_noglob _extras "$ACQ_EXTRA_KITS"
   for k in ${_extras[@]+"${_extras[@]}"}; do
@@ -1304,7 +1395,8 @@ acq_backend_ensure_kits_applied() {
     case $_kadd_rc in
       0)
         healed=1
-        sbx exec "$name" -- sh -c 'printf "%s\n" "$0" >> "$HOME/.acq-extra-kits"' "$k" </dev/null >/dev/null 2>&1 || true
+        acq_host_config_append sbx "$name" extra-kits "$k" || \
+          echo "acq: warning: could not record extra kit '$k' for '$name'; re-attach may re-attempt it." >&2
         ;;
       3) _acq_sbx_print_recreate_notice "$name" ;;
       *) echo "acq: warning: 'sbx kit add' (extra kit) failed for '$name' (see error above)." >&2 ;;
@@ -1340,12 +1432,31 @@ acq_backend_ensure_kits_applied() {
 # sbx.sh and msb.sh agree on the mapping.
 #   usai   -> $USAI_PROVIDER_HOST          $USAI_PROVIDER_KEY_ENV
 #   github -> github.com,api.github.com   GITHUB_TOKEN (sbx built-in service)
+#   other  -> the provider's validated facts.json (providerId -> host, keyEnv),
+#             resolved through acq's credential-bindings registry. This is what
+#             lets a provider kit hosted outside the pinned Patterns release be
+#             injected with no per-provider code here.
 # Echoes "host1[,host2] <TAB> ENVVAR"; empty for unknown services.
 _acq_service_hosts_env() {
+  local provider_binding provider_host provider_env
   case "$1" in
-    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_BIND_HOSTS" "$USAI_PROVIDER_KEY_ENV" ;;
     github) printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
-    *)      printf '\t\n' ;;
+    *)
+      # Providers (the default one included) resolve from acq's registry + the
+      # validated facts; there is no `usai` branch. The sandbox is passed
+      # explicitly so a standalone `acq secret set -g <id>` uses the pinned host
+      # and rm/rotate use a sandbox's recorded facts.
+      if command -v acq_provider_binding_host_env >/dev/null 2>&1 \
+          && provider_binding=$(acq_provider_binding_host_env "$1" "${2:-}" 2>/dev/null); then
+        provider_host=$(printf '%s' "$provider_binding" | cut -f1)
+        provider_env=$(printf '%s' "$provider_binding" | cut -f2)
+        if [ -n "$provider_host" ] && [ -n "$provider_env" ]; then
+          printf '%s\t%s\n' "$provider_host" "$provider_env"
+          return 0
+        fi
+      fi
+      printf '\t\n'
+      ;;
   esac
 }
 
@@ -1460,8 +1571,8 @@ acq_backend_secret_set() {
     *" $service "*) : ;;   # built-in: no default host/env
     *)
       local svc_hosts svc_env
-      svc_hosts=$(_acq_service_hosts_env "$service" | cut -f1)
-      svc_env=$(_acq_service_hosts_env "$service" | cut -f2)
+      svc_hosts=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)
+      svc_env=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)
       [ -z "$host" ] && [ -n "$svc_hosts" ] && host="${svc_hosts%%,*}"   # primary host
       [ -z "$env_var" ] && [ -n "$svc_env" ] && env_var="$svc_env"
       ;;
@@ -1637,7 +1748,7 @@ acq_backend_secret_set() {
       # The user's --host wins over the static service mapping (#384).
       svc_hosts="$host"
     else
-      svc_hosts=$(_acq_service_hosts_env "$service" | cut -f1)
+      svc_hosts=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)
       [ -z "$svc_hosts" ] && svc_hosts="$host"
     fi
     local _oldifs="$IFS"; IFS=','
@@ -1719,8 +1830,8 @@ acq_backend_secret_propagate() {
     env_var=$(printf '%s' "$meta" | cut -f2)
     sidecar=1
   else
-    host=$(_acq_service_hosts_env "$service" | cut -f1)
-    env_var=$(_acq_service_hosts_env "$service" | cut -f2)
+    host=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f1)
+    env_var=$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)
     sidecar=0
   fi
 
@@ -1865,7 +1976,7 @@ acq_backend_secret_rm() {
     # secrets table for this scope + env var — the sidecar env wins over the
     # static mapping (it records what was actually bound) — then remove it.
     local env_var placeholder
-    env_var="${sidecar_env:-$(_acq_service_hosts_env "$service" | cut -f2)}"
+    env_var="${sidecar_env:-$(_acq_service_hosts_env "$service" "$scope_name" | cut -f2)}"
     placeholder=$(_acq_sbx_custom_placeholder "$scope_flag" "$scope_name" "$env_var")
     if [ -n "$placeholder" ]; then
       sbx secret rm --placeholder "$placeholder" ${scope_args[@]+"${scope_args[@]}"} -f </dev/null >/dev/null 2>&1 || true
@@ -1940,15 +2051,23 @@ _acq_sbx_secret_exists() {
 }
 
 acq_backend_key_present() {
-  local service="${1:-}" scope_sandbox="${2:-}"
+  local service="${1:-}" scope_sandbox="${2:-}" provider_binding provider_env
   case "$service" in
-    usai)
-      if [ -n "$scope_sandbox" ] && _acq_sbx_secret_exists "" "$scope_sandbox" usai "$USAI_PROVIDER_KEY_ENV"; then
-        return 0
-      fi
-      _acq_sbx_secret_exists -g "" usai "$USAI_PROVIDER_KEY_ENV"
-      ;;
     *)
+      # Every provider (the default one included) is registry-driven: injectable
+      # once sbx's table carries its KEY_ENV for this scope. A service acq does
+      # not model keeps the permissive default.
+      if command -v acq_provider_binding_host_env >/dev/null 2>&1 \
+          && provider_binding=$(acq_provider_binding_host_env "$service" "$scope_sandbox" 2>/dev/null); then
+        provider_env=$(printf '%s' "$provider_binding" | cut -f2)
+        [ -n "$provider_env" ] || return 1
+        if [ -n "$scope_sandbox" ] \
+            && _acq_sbx_secret_exists "" "$scope_sandbox" "$service" "$provider_env"; then
+          return 0
+        fi
+        _acq_sbx_secret_exists -g "" "$service" "$provider_env"
+        return $?
+      fi
       return 0
       ;;
   esac

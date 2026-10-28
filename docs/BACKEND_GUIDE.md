@@ -1178,6 +1178,63 @@ practical floor (`acq kit validate` warns below it).
 
 Manage kits with `acq kit list | validate PATH | apply NAME KITREF`.
 
+### Provider kits and generic credential binding
+
+A **provider kit** ships `provider-input.json` and, after validation, a
+`facts.json` naming `providerId`, `keyEnv`, `host`, `modelsUrl`, and
+`apiProtocol`. `acq` validates the selected set host-side with the pinned
+Patterns validator, then materializes an immutable generation the agent kit
+renders (`models/providers/<providerId>/`).
+
+The validator checks each kit's `facts.keyEnv` against a **credential-bindings
+registry**. `acq` owns that registry so a provider kit hosted outside the pinned
+Patterns release works without editing it. The merge order (highest precedence
+last) is:
+
+1. the pinned Patterns `provider-credential-bindings.json` — the trust anchor;
+2. `provider_credential_bindings:` in `~/.config/acq/config.yaml`
+   (`acq provider-credential set|ls|rm`);
+3. `ACQ_PROVIDER_CREDENTIAL_BINDINGS` (`id=ENV[@host] …`) for one invocation.
+
+The merged table is written into the prepare staging directory and passed to the
+validator; it is removed with that stage. Malformed ids, reserved ENV names, or
+malformed hosts fail closed before validation runs.
+
+**Host pinning.** A kit can declare any `providerId` and allow-list any host, so
+the registry also pins the destination host(s) per providerId
+(`--host` is required by `acq provider-credential set`). Before acq binds a
+stored credential it requires `facts.host` to match the pinned host, or — when
+nothing is pinned for that provider — the host recorded for that sandbox at
+create. A mismatch, an unpinned provider, or a host that changed under an
+existing record **fails closed**; moving a credential to a new host is an
+explicit re-pin. The gate prompt and `acq provider-credential ls` both show the
+destination host.
+
+Injection is then data-driven per backend — no provider-specific `acq` code:
+
+| Backend | How `keyEnv@host` is bound at create |
+|---------|--------------------------------------|
+| sbx | a custom proxy secret (`sbx secret set-custom --host … --env …`) derived from the provider's facts; create snapshots the table, so a host-exported value cannot be bound and acq fails closed instead |
+| msb | `--secret ENV@HOST` from the same facts, value resolved out of the acq store (or from a host-exported value, for CI) |
+
+`acq secret set -g <providerId>` stores the value under that provider; the
+injected `providerId`/`keyEnv`/`host`/`modelsUrl` are recorded in the sandbox's
+host config so resume/heal re-injects without re-prompting. Binding helpers take
+the sandbox name explicitly, so `acq start`/`restart` and `acq secret rm` resolve
+the same binding as create. On attach, `check_provider_key` probes
+`facts.modelsUrl` with `Authorization: Bearer $keyEnv` (URL passed as positional
+data, never spliced into the guest program): `401`/`403` and redirects fail
+closed, `429`/`5xx` are transient, and an inconclusive probe refuses to attach.
+
+There is **no USAi-specific key path**. The default provider (`usai`) is the
+first entry of the shipped trust-anchor table
+(`usai|USAI_API_KEY|api.gsa.usai.gov`), so it is gated, bound, recorded, and
+validated exactly like any other provider; a facts-free fallback to that table
+keeps a sandbox created before the provider-input pipeline resumable. The one
+provider-specific verb left is `acq usai-rotate-api-key`, because rotation needs
+the USAi key-management console — a rejected default-provider key points at it
+instead of offering an interactive prompt.
+
 ### ADR-0030 generic-base implementation
 
 ADR-0030 now makes `acq run opencode .` use the generic pinned devenv base and
