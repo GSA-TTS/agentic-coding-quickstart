@@ -401,6 +401,18 @@ otherwise corrupt colon-delimited mounts and guest-only paths. See
 [ADR-0029](adr/0029-windows-host-guest-path-forms.md). On macOS/Linux the two
 forms are identical.
 
+**Windows provider-input boundary:** on macOS/Linux the host-owned provider-input
+tree and the fetched kit are walked with descriptor-relative, no-follow opens, and
+the snapshot reads the very descriptor it validated. Native Windows Python has no
+equivalent, so `acq` falls back to a component-by-component walk that rejects
+symlinks, junctions, and any other reparse point at every level (creating missing
+directories one level at a time), and rejects backslash and drive-qualified
+manifest paths. That fallback validates by name and then opens by name, so it is
+weaker than the POSIX path: it assumes the staging and projection directories are
+private to the current user. It is exercised on a real Windows runner only by the
+Windows-guarded tests; the Linux suite covers the same walk's symlink handling by
+forcing the portable code path.
+
 ### Disposable primary (`--clone`)
 
 msb has no native clone mode, so the neutral `--clone`

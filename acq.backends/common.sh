@@ -4394,7 +4394,10 @@ _acq_provider_input_safe_mkdir() {
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
-if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'):
+# ACQ_TEST_FORCE_PORTABLE_WALK (offline tests only) selects the portable
+# lstat walk below on POSIX so its symlink handling is testable without Windows.
+_force_walk = bool(os.environ.get('ACQ_TEST_FORCE_PORTABLE_WALK'))
+if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW') and not _force_walk:
     # POSIX: openat-style traversal with O_NOFOLLOW so no component follows a
     # symlink (the host-owned projection tree must not be redirected).
     fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
@@ -4426,7 +4429,7 @@ else:
         # every other reparse tag; S_IFLNK covers symlinks.
         return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) != 0
     drive, tail = os.path.splitdrive(path)
-    if not drive:
+    if not drive and not (_force_walk and path.startswith('/')):
         _fatal()
     cur = drive + os.sep
     def _validate_dir(p, create):
@@ -4462,7 +4465,8 @@ _acq_provider_input_safe_dir() {
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
-if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'):
+_force_walk = bool(os.environ.get('ACQ_TEST_FORCE_PORTABLE_WALK'))
+if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW') and not _force_walk:
     fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in (p for p in path.split('/') if p):
@@ -4484,7 +4488,7 @@ else:
     def _unsafe(st):
         return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) != 0
     drive, tail = os.path.splitdrive(path)
-    if not drive:
+    if not drive and not (_force_walk and path.startswith('/')):
         _fatal()
     cur = drive + os.sep
     def _validate_dir(p):
@@ -4802,18 +4806,35 @@ _acq_provider_input_snapshot() {
   python3 - "$1" "$2" <<'PY'
 import json, os, stat, sys
 kit, target = sys.argv[1:]
+# ACQ_TEST_FORCE_PORTABLE_WALK (offline tests only) selects the portable lstat
+# walk on POSIX so its symlink rejection is testable without a Windows runner.
+_posix_nofollow = hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW') \
+    and not os.environ.get('ACQ_TEST_FORCE_PORTABLE_WALK')
+def rel_parts(rel):
+    # Single validation point for every manifest-declared path, used for both the
+    # source open and the destination join so the two can never disagree. Where
+    # the portable walk applies, backslash and drive/stream ':' are also rejected
+    # so a manifest cannot smuggle a separator or a drive-relative component.
+    if not isinstance(rel, str) or not rel or rel.startswith('/'):
+        raise SystemExit('unsafe provider artifact path')
+    if not _posix_nofollow:
+        if '\\' in rel or ':' in rel:
+            raise SystemExit('unsafe provider artifact path')
+    parts = rel.split('/')
+    if any(part in ('', '.', '..') for part in parts):
+        raise SystemExit('unsafe provider artifact path')
+    return parts
 def safe_open(base, rel):
     # Validate `rel` under `base` with a no-follow walk and return an OPEN
     # binary reader bound to the validated file. On POSIX the reader keeps the
     # descriptor from the O_NOFOLLOW walk, so a file or ancestor swapped after
     # validation cannot redirect the read. On Windows (no O_NOFOLLOW/dir_fd) we
     # walk with lstat and reopen the validated pathname as a guarded fallback.
-    if not isinstance(rel, str) or rel.startswith('/') or not rel or any(part in ('', '.', '..') for part in rel.split('/')):
-        raise SystemExit('unsafe provider artifact path')
-    if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'):
+    parts = rel_parts(rel)
+    if _posix_nofollow:
         fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            for part in rel.split('/'):
+            for part in parts:
                 nextfd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
                 os.close(fd); fd = nextfd
             if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit('unsafe provider artifact')
@@ -4824,15 +4845,16 @@ def safe_open(base, rel):
     # Windows guarded fallback (native Python 3.12): no O_NOFOLLOW/dir_fd. Walk
     # the relative path component by component under `base`, rejecting symlinks
     # (S_IFLNK), junctions, and every other reparse point at each step, and
-    # require a regular file at the end. Backslash is treated as a separator here
-    # so a manifest path cannot smuggle '..\\..' traversal on Windows.
+    # require a regular file at the end. rel_parts() has already rejected
+    # backslash and ':' so a manifest path cannot smuggle a separator or a
+    # drive-relative component. This path is check-then-open by name (the stdlib
+    # has no handle-relative open on Windows), so it is weaker than the POSIX
+    # descriptor-bound read; it relies on the fetched kit living in a private
+    # host-owned staging directory.
     def _fatal():
         raise SystemExit('unsafe provider artifact')
     def _unsafe(st):
         return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) != 0
-    parts = rel.replace('\\', '/').split('/')
-    if any(p in ('', '.', '..') for p in parts):
-        _fatal()
     cur = base
     for i, part in enumerate(parts):
         cur = os.path.join(cur, part)
@@ -4864,9 +4886,11 @@ os.mkdir(target, 0o700)
 with open(os.path.join(target, 'provider-input.json'), 'xb') as stream:
     stream.write(manifest_bytes)
 for path in ('spec.yaml', bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):
-    destination = os.path.join(target, path)
-    os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
+    # Validate and open the source BEFORE touching the destination tree, so a
+    # rejected path can never create a directory outside the candidate target.
     with safe_open(kit, path) as src:
+        destination = os.path.join(target, *rel_parts(path))
+        os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
         source_mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode)
         with open(destination, 'xb') as dst:
             while True:
@@ -4896,7 +4920,8 @@ for source, destination, mode in ((bundle["factsPath"], "facts.json", 0o444), (b
     if not isinstance(source, str) or source.startswith('/') or any(part in ('', '.', '..') for part in source.split('/')):
         raise SystemExit("unsafe provider artifact path")
     source = os.path.join(kit, source)
-    if os.path.islink(source) or not os.path.isfile(source):
+    if os.path.islink(source) or not os.path.isfile(source) \
+            or getattr(os.lstat(source), 'st_reparse_tag', 0) != 0:
         raise SystemExit("unsafe provider artifact")
     destination = os.path.join(target, destination)
     shutil.copyfile(source, destination)

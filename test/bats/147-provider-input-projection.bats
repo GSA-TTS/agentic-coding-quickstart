@@ -1473,3 +1473,89 @@ EOF
   grep -Fqx "fetch -q --depth 1 origin $PATTERNS_KIT_REF" "$log"
   grep -Fqx "checkout -q --detach FETCH_HEAD" "$log"
 }
+
+@test "candidate snapshot validates artifact paths before creating any directory" {
+  local release="$STUBDIR/release" kit candidate="$STUBDIR/candidate-order" bad
+  _provider_release "$release"
+  for bad in "../escape-rel/facts.json" "$STUBDIR/escape-abs/facts.json"; do
+    _provider_kit "$release" alpha
+    kit="$release/integrations/isolation/acq-kits/alpha"
+    printf '{"providerId":"alpha","factsPath":"%s","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}\n' "$bad" > "$kit/provider-input.json"
+    rm -rf "$candidate"
+    run _acq_provider_input_snapshot "$kit" "$candidate"
+    assert_failure
+    [ ! -e "$STUBDIR/escape-rel" ]
+    [ ! -e "$STUBDIR/escape-abs" ]
+    [ ! -e "$candidate/../escape-rel" ]
+  done
+}
+
+@test "candidate snapshot rejects drive-qualified and backslash artifact paths on the portable walk" {
+  # The artifacts really exist (those names are legal on POSIX), so only the
+  # path-form check, not a missing file, can make the snapshot fail.
+  local release="$STUBDIR/release" kit candidate="$STUBDIR/candidate-win" bad
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  _provider_release "$release"
+  for bad in 'C:foo/facts.json' 'provider-input\facts.json'; do
+    _provider_kit "$release" alpha
+    kit="$release/integrations/isolation/acq-kits/alpha"
+    mkdir -p "$kit/$(dirname "$bad")"
+    printf '{"providerId":"alpha"}\n' > "$kit/$bad"
+    python3 -c 'import json,sys; print(json.dumps({"providerId":"alpha","factsPath":sys.argv[1],"normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}))' "$bad" > "$kit/provider-input.json"
+    rm -rf "$candidate"
+    run _acq_provider_input_snapshot "$kit" "$candidate"
+    assert_failure
+  done
+  # Control: the same layout with a plain relative path is accepted.
+  _provider_kit "$release" alpha
+  run _acq_provider_input_snapshot "$release/integrations/isolation/acq-kits/alpha" "$candidate-ok"
+  assert_success
+}
+
+# The portable (Windows) lstat walk is selected on POSIX by the offline-only
+# ACQ_TEST_FORCE_PORTABLE_WALK seam so its symlink-ancestor rejection runs in CI.
+# Real junction/reparse behavior is covered only by the Windows-runner tests above.
+
+@test "portable walk: snapshot copies a real kit and rejects a symlinked artifact ancestor" {
+  local release="$STUBDIR/release" kit outside="$STUBDIR/outside-kit" candidate="$STUBDIR/candidate-pw"
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  run _acq_provider_input_snapshot "$kit" "$candidate"
+  assert_success
+  [ -f "$candidate/provider-input/facts.json" ]
+
+  mkdir -p "$outside"; printf '{"providerId":"alpha"}\n' > "$outside/facts.json"
+  rm -rf "$kit/provider-input"; ln -s "$outside" "$kit/provider-input"
+  rm -rf "$candidate"
+  run _acq_provider_input_snapshot "$kit" "$candidate"
+  assert_failure
+}
+
+@test "portable walk: safe_mkdir and safe_dir accept real paths and reject symlinked ancestors" {
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  local real="$STUBDIR/pw_real" target="$STUBDIR/pw_target" link="$STUBDIR/pw_link"
+  run _acq_provider_input_safe_mkdir "$real/a/b"
+  assert_success
+  [ -d "$real/a/b" ]
+  run _acq_provider_input_safe_dir "$real/a/b"
+  assert_success
+
+  mkdir -p "$target"; ln -s "$target" "$link"
+  run _acq_provider_input_safe_mkdir "$link/child"
+  assert_failure
+  [ ! -e "$target/child" ]
+  run _acq_provider_input_safe_dir "$link"
+  assert_failure
+  run _acq_provider_input_safe_dir "$link/nope"
+  assert_failure
+}
+
+@test "portable walk: safe_mkdir does not follow a symlink planted mid-path" {
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  local target="$STUBDIR/pw_mid_target" base="$STUBDIR/pw_mid"
+  mkdir -p "$base" "$target"; ln -s "$target" "$base/inner"
+  run _acq_provider_input_safe_mkdir "$base/inner/deep/er"
+  assert_failure
+  [ -z "$(ls -A "$target")" ]
+}
