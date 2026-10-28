@@ -172,6 +172,17 @@ MSB_ROLLBACK_VERSION="0.6.18"
 # duplicate snapshots exist. See ADR-0032.
 MSB_FIXED_VERSION="0.7.3"
 
+# msb versions on which the host-observed canary (scripts/qualify-msb-ro-mount) has
+# shown that a `:ro` --volume is enforced by the runtime even against guest root.
+# Trusted execution of `readonly: true` kit files from the host-config mount
+# (ADR-0035 Mechanism 2) is permitted ONLY on a version listed here. The list is
+# deliberately checked in, not read from the environment or any guest-reachable
+# state, and it starts EMPTY: no version has been qualified yet, so such kit files
+# are refused (fail closed) with a message naming the version and the script.
+# Space-separated bare X.Y.Z. Each entry needs its evidence recorded in ADR-0035
+# (tested msb version, canary revision, date, PASS result) in the same change.
+MSB_RO_MOUNT_QUALIFIED_VERSIONS=""
+
 # Default OCI image for provisioned non-OpenCode sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
 # agent template. It ALREADY ships the non-root `agent` user (with passwordless
@@ -1805,7 +1816,10 @@ EOF
     if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_rc" -ge 2 ]; then
       # Recorded read-only create, but the mount is not confirmed read-only. Never
       # stage or run trusted code from it and never degrade to a guest copy.
-      if [ "$_hcfg_rc" -eq 2 ]; then
+      if [ "$_hcfg_rc" -eq 4 ]; then
+        echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': msb ${_ACQ_MSB_RO_MOUNT_VERSION:-<unknown version>} is not on acq's list of versions where a read-only mount has been shown to be enforced." >&2
+        echo "acq(msb):   Run scripts/qualify-msb-ro-mount on this host; a PASS lets that version be added to MSB_RO_MOUNT_QUALIFIED_VERSIONS (see ADR-0035)." >&2
+      elif [ "$_hcfg_rc" -eq 2 ]; then
         echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': the host-config mount looks WRITABLE from the guest, so code staged there would not be trusted." >&2
       else
         echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': the host-config mount is not a confirmed read-only mount (the guest probe did not confirm it)." >&2
@@ -1888,26 +1902,53 @@ _acq_msb_reset_kit_env() {
   acq_host_config_clear msb "$1" kit-env
 }
 
+# True iff the installed msb is a final X.Y.Z release listed in
+# MSB_RO_MOUNT_QUALIFIED_VERSIONS. Anything else (empty list, unparsable or
+# prerelease version output, a version not on the list) is "not qualified". Sets
+# _ACQ_MSB_RO_MOUNT_VERSION to what was seen, for the caller's message.
+_ACQ_MSB_RO_MOUNT_VERSION=""
+_acq_msb_ro_mount_version_qualified() {
+  local _v _q
+  _v=$(_acq_msb_version)
+  _ACQ_MSB_RO_MOUNT_VERSION="$_v"
+  [ -n "$_v" ] || return 1
+  _acq_msb_version_is_final "$_v" || return 1
+  case "$_v" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  set -f
+  for _q in $MSB_RO_MOUNT_QUALIFIED_VERSIONS; do
+    if [ "$_q" = "$_v" ]; then set +f; return 0; fi
+  done
+  set +f
+  return 1
+}
+
 # Whether sandbox NAME's trusted :ro host-config mount may be relied on for
 # readonly kit code. Return codes:
-#   0  recorded at create AND the guest probe confirms a present, non-writable mount
+#   0  recorded at create, the msb version is qualified, and the guest probe did
+#      not contradict the mount
 #   1  no host record (legacy sandbox, or a create that never completed): the caller
 #      takes the compatibility path and copies the file into the guest, with its warning
-#   2  recorded, but the probe finds the mount WRITABLE by the guest
-#   3  recorded, but the probe does not confirm the mount (absent, unreadable, or the
-#      probe could not run)
-# The record (key ro-host-config, written by acq_backend_provision after a create that
-# passed the :ro --volume returned success and the sandbox became exec-ready) is host
-# state a guest cannot forge, but it proves only that acq asked for the mount, not that
-# the mount works. The guest probe can only make acq STRICTER: a guest controlling
-# `test`/`sh` can answer it however it likes, and every answer other than "present and
-# non-writable" makes the caller fail closed (codes 2 and 3) rather than stage or run
-# trusted code from the mount, or degrade to a guest copy. A guest that forges the
-# "confirmed" answer gains nothing it did not already have: the mount's real
-# enforcement is the VMM's, not the probe's.
+#   2  recorded and qualified, but the probe finds the mount WRITABLE by the guest
+#   3  recorded and qualified, but the probe does not confirm the mount (absent,
+#      unreadable, or the probe could not run)
+#   4  recorded, but the installed msb version is not on the qualified list
+# Authority: the only thing that can establish that a `:ro` mount is read-only is
+# the runtime, and acq establishes it per msb VERSION, from the host, by running the
+# canary in scripts/qualify-msb-ro-mount (a throwaway sandbox attempts the strongest
+# writes it can, and the REAL host directory is inspected afterwards). A version is
+# trusted only if it is on MSB_RO_MOUNT_QUALIFIED_VERSIONS. The create-time record
+# (key ro-host-config) proves only that acq asked for the mount; it is not evidence
+# of enforcement. The guest probe below is a diagnostic that can only make acq
+# stricter: a guest with root controls `test`/`sh` and can answer a probe however it
+# likes, so a zero exit proves nothing, while a "writable" answer is always taken at
+# face value (fail closed).
 _acq_msb_host_config_mount_available() {
   local name="$1" _probe_rc=0
   [ "$(acq_host_config_read msb "$name" ro-host-config)" = "1" ] || return 1
+  _acq_msb_ro_mount_version_qualified || return 4
   _acq_msb_host_config_mount_probe "$name" || _probe_rc=$?
   case "$_probe_rc" in
     0) return 0 ;;
@@ -1916,11 +1957,13 @@ _acq_msb_host_config_mount_available() {
   esac
 }
 
-# Exit 0: mount present and not writable; 1: mount absent/unreadable; 2: guest
-# root could write to it. Exit 2 relies on `msb exec` passing the guest exit code
-# through unchanged, which is not live-verified. If a different code is returned,
-# the writable case is reported as "not confirmed" (code 3 above); both fail closed,
-# so only the message differs.
+# DIAGNOSTIC ONLY. Exit 0: the guest reports a present mount that it could not write;
+# 1: mount absent/unreadable; 2: guest root could write to it. A zero exit is the
+# guest's own claim and is NOT proof of anything (see the authority note above); only
+# the non-zero answers carry weight, and they can only make acq stricter. Exit 2
+# relies on `msb exec` passing the guest exit code through unchanged, which is not
+# live-verified; if a different code is returned the writable case is reported as
+# "not confirmed" (code 3). Both fail closed, so only the message differs.
 _acq_msb_host_config_mount_probe() {
   local name="$1"
   _acq_msb_cli exec "$name" -u agent -- sh -c \
@@ -2638,9 +2681,13 @@ _acq_msb_startup_body_into() {
 
   # The create-time script is assembled before the normal apply path stages the
   # files, so derive the same readonly path rewrite locally.
-  local _ro_from=() _ro_to=() _frec _fpath _fsource _freadonly _fslug _fcrc
+  local _ro_from=() _ro_to=() _frec _fpath _fsource _freadonly _fslug _fcrc _ro_ok=0
+  _acq_msb_ro_mount_version_qualified && _ro_ok=1
   while IFS= read -r _frec; do
     [ -n "$_frec" ] || continue
+    # Not qualified: leave argv at the declared guest path. The apply step refuses
+    # the readonly file itself, so nothing is staged on, or run from, the mount.
+    [ "$_ro_ok" -eq 1 ] || continue
     _freadonly=$(printf '%s' "$_frec" | cut -f5)
     [ "$_freadonly" = "true" ] || continue
     _fpath=$(printf '%s' "$_frec" | cut -f1)

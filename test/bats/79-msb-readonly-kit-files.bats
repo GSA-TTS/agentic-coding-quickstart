@@ -17,6 +17,10 @@
 #     the path is left alone).
 #
 # shellcheck shell=bats
+# NOTE: these cases exercise the staged-mount path itself, so each marks the stub's
+# msb version as qualified (MSB_RO_MOUNT_QUALIFIED_VERSIONS). Whether a version may be
+# trusted at all is covered in 84-msb-ro-mount-qualification.bats; before that gate
+# existed, a recorded sandbox was unlocked by the guest probe alone.
 
 setup() { acq_setup_stubs; }
 teardown() { acq_teardown_stubs; }
@@ -91,6 +95,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    MSB_RO_MOUNT_QUALIFIED_VERSIONS="${STUB_MSB_VERSION:-0.6.9}"
     acq_test_stub_provider_input_boundary
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision rocodebox shell /tmp >/dev/null 2>&1
@@ -123,6 +128,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    MSB_RO_MOUNT_QUALIFIED_VERSIONS="${STUB_MSB_VERSION:-0.6.9}"
     acq_test_stub_provider_input_boundary
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision rocode2box shell /tmp >/dev/null 2>&1
@@ -147,6 +153,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    MSB_RO_MOUNT_QUALIFIED_VERSIONS="${STUB_MSB_VERSION:-0.6.9}"
     acq_test_stub_provider_input_boundary
     _acq_msb_apply_kit_dir legacyrobox "'"$k"'" 2>&1
   '
@@ -169,6 +176,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    MSB_RO_MOUNT_QUALIFIED_VERSIONS="${STUB_MSB_VERSION:-0.6.9}"
     _acq_msb_apply_kit_dir writablerobox "'"$k"'" 2>&1
   '
   assert_success
@@ -187,6 +195,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    MSB_RO_MOUNT_QUALIFIED_VERSIONS="${STUB_MSB_VERSION:-0.6.9}"
     acq_test_stub_provider_input_boundary
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision romountbox shell /tmp >/dev/null 2>&1

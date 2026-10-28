@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# qualify-msb-ro-mount — host-observed canary: does THIS msb enforce a `:ro` volume?
+#
+# acq (ADR-0035 Mechanism 2) runs readonly kit code from a host directory mounted
+# into the guest with `--volume HOST:GUEST:ro`. A guest-run probe cannot show that the
+# mount is read-only (a guest with root controls `sh` and `test`), so this script
+# judges it from the HOST: it creates a throwaway sandbox from acq's default image,
+# mounts a host directory read-only, makes the guest (as root) try every write it can
+# think of, including remounting read-write, and then inspects the REAL host
+# directory. Any change there means the mount was writable. A second, read-write host
+# directory is mounted as a positive control: the host must see the control file the
+# guest wrote there, otherwise the attempts proved nothing and the result is BLOCKED.
+#
+# Result: PASS (host directory unchanged, controls seen), FAIL (host directory
+# changed), or BLOCKED (could not run to a conclusion). Exit 0 / 1 / 2.
+# On PASS add the printed version to MSB_RO_MOUNT_QUALIFIED_VERSIONS in
+# acq.backends/msb.sh and record the output in ADR-0035 in the same change.
+#
+# Usage:  [EXPECT_SHA=<prefix>] bash scripts/qualify-msb-ro-mount
+#   EXPECT_SHA        abort (BLOCKED) unless this checkout's HEAD starts with it
+#   QUALIFY_BASE      scratch/results dir (default ~/.cache/acq/qualify; NOT $TMPDIR:
+#                     msb cannot mount host paths under macOS $TMPDIR)
+#   QUALIFY_IMAGE     image to test (default: acq's default msb image)
+#   STEP_TIMEOUT      seconds for create (image pull) (default 600)
+#   EXEC_TIMEOUT      seconds for each exec step (default 90)
+#
+# Never prints credentials. Needs msb on PATH, a KVM/HVF-capable host, network access
+# for the image pull. Bash 3.2 compatible. Run it OUTSIDE any sandbox.
+set -uo pipefail
+
+STEP_TIMEOUT="${STEP_TIMEOUT:-600}"
+EXEC_TIMEOUT="${EXEC_TIMEOUT:-90}"
+IMAGE="${QUALIFY_IMAGE:-docker.io/docker/sandbox-templates:shell-docker}"
+BASE="${QUALIFY_BASE:-${XDG_CACHE_HOME:-$HOME/.cache}/acq/qualify}"
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+REPO=$(cd "$HERE/.." && pwd -P)
+
+SANDBOX="" ; RODIR="" ; RWDIR="" ; RESULTS="" ; DONE=0
+
+# Run a command with a per-step timeout when a timeout tool exists. --foreground keeps
+# the child able to read the terminal and be interrupted; fall back to running it bare.
+_to() { # SECONDS CMD...
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --foreground "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --foreground "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
+say() { printf '%s\n' "$*"; }
+
+cleanup() {
+  if [ -n "$SANDBOX" ]; then
+    _to 60 msb remove --force "$SANDBOX" </dev/null >/dev/null 2>&1 || true
+    SANDBOX=""
+  fi
+  local d
+  for d in "$RODIR" "$RWDIR"; do
+    if [ -n "$d" ] && [ -d "$d" ]; then chmod -R u+w "$d" 2>/dev/null || true; rm -rf -- "$d"; fi
+  done
+}
+trap 'cleanup' EXIT
+trap 'echo; echo "interrupted; removing the throwaway sandbox"; cleanup; exit 130' INT TERM
+
+finish() { # VERDICT DETAIL
+  local verdict="$1" detail="$2" rc
+  DONE=1
+  case "$verdict" in PASS) rc=0 ;; FAIL) rc=1 ;; *) rc=2 ;; esac
+  say ""
+  say "RESULT: $verdict"
+  say "msb version : ${VERSION:-unknown}"
+  say "image       : $IMAGE"
+  say "host        : $(uname -srm 2>/dev/null || echo unknown)"
+  say "revision    : ${REVISION:-unknown}"
+  say "detail      : $detail"
+  if [ -n "$RESULTS" ]; then
+    printf '%s\t%s\t%s\t%s\n' "$verdict" "${VERSION:-unknown}" "${REVISION:-unknown}" "$detail" >>"$RESULTS" 2>/dev/null || true
+    say "results     : $RESULTS"
+  fi
+  if [ "$verdict" = PASS ] && [ "${VERSION_OK:-0}" -ne 1 ]; then
+    say ""
+    say "NOTE: '${VERSION}' is not a final X.Y.Z release, so acq will never match it; do NOT add it to the list."
+  elif [ "$verdict" = PASS ]; then
+    say ""
+    say "Next: add ${VERSION} to MSB_RO_MOUNT_QUALIFIED_VERSIONS in acq.backends/msb.sh and"
+    say "record this output (version, revision, date, host OS/arch, image) in"
+    say "docs/adr/0035-host-authoritative-sandbox-config.md."
+  fi
+  exit "$rc"
+}
+
+# --- preconditions ----------------------------------------------------------
+command -v msb >/dev/null 2>&1 || { VERSION="" ; REVISION="" ; finish BLOCKED "msb is not on PATH"; }
+VERSION=$(msb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1)
+[ -n "$VERSION" ] || VERSION="version not parsed"
+VERSION_OK=0
+case "$VERSION" in
+  *[!0-9.]*|"") ;;
+  [0-9]*.[0-9]*.[0-9]*) VERSION_OK=1 ;;
+esac
+
+REVISION=""
+if git -C "$REPO" rev-parse HEAD >/dev/null 2>&1; then REVISION=$(git -C "$REPO" rev-parse HEAD); fi
+if [ -n "${EXPECT_SHA:-}" ]; then
+  case "$REVISION" in
+    "$EXPECT_SHA"*) ;;
+    *) finish BLOCKED "checkout revision '${REVISION:-unknown}' does not match EXPECT_SHA=$EXPECT_SHA" ;;
+  esac
+fi
+
+mkdir -p "$BASE" 2>/dev/null || finish BLOCKED "cannot create $BASE"
+BASE=$(cd "$BASE" && pwd -P)
+RESULTS="$BASE/results.tsv"
+STAMP=$(date -u +%Y%m%d%H%M%S)
+RODIR=$(mktemp -d "$BASE/ro.XXXXXX") || finish BLOCKED "cannot create the read-only test directory"
+RWDIR=$(mktemp -d "$BASE/rw.XXXXXX") || finish BLOCKED "cannot create the control directory"
+RODIR=$(cd "$RODIR" && pwd -P); RWDIR=$(cd "$RWDIR" && pwd -P)
+chmod 0755 "$RODIR" "$RWDIR"
+printf 'HOST-ORIGINAL\n' >"$RODIR/sentinel"
+chmod 0644 "$RODIR/sentinel"
+
+# Snapshot of everything a guest write could change: names, modes, sizes, mtimes and
+# file contents. Compared byte-for-byte before and after.
+snapshot() { # DIR
+  ( cd "$1" && LC_ALL=C ls -lnaR . 2>&1; \
+    find . -type f -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do cksum "$f"; done )
+}
+BEFORE=$(snapshot "$RODIR")
+
+# --- guest attack script (positional args: the guest ro path, the guest rw path) --
+# Everything it does is an ATTEMPT; the verdict never depends on what it reports.
+read -r -d '' ATTACK <<'EOS'
+ro=$1; rw=$2; log=$rw/attempts.log
+: > "$log"
+note() { printf '%s\n' "$*" >>"$log"; }
+try() { d=$1; shift; if "$@" >/dev/null 2>&1; then note "WROTE $d"; else note "DENIED $d"; fi; }
+note "uid=$(id -u)"
+# Control: the same operations MUST succeed on the read-write volume, so a DENIED on
+# the read-only volume cannot just mean "that command is missing in this image".
+ctl=$rw/ctl; mkdir -p "$ctl" && : > "$ctl/f" && echo x >> "$ctl/f" && chmod 0600 "$ctl/f" \
+  && mv "$ctl/f" "$ctl/g" && mkdir "$ctl/d" && rm -f "$ctl/g" && note "CONTROL-OK" || note "CONTROL-BROKEN"
+if [ "$(cat "$ro/sentinel" 2>/dev/null)" = "HOST-ORIGINAL" ]; then note "READ-OK"; else note "READ-MISSING"; fi
+try create-file   sh -c ': > "$0/qual-new-file"' "$ro"
+try overwrite     sh -c 'echo tampered > "$0/sentinel"' "$ro"
+try append        sh -c 'echo extra >> "$0/sentinel"' "$ro"
+try mkdir         mkdir "$ro/qual-dir"
+try chmod         chmod 0777 "$ro/sentinel"
+try rename        mv "$ro/sentinel" "$ro/sentinel.moved"
+try delete        rm -f "$ro/sentinel"
+try remount-rw    mount -o remount,rw "$ro"
+try remount-bind  mount -o remount,bind,rw "$ro"
+try create-after-remount sh -c ': > "$0/qual-after-remount"' "$ro"
+try overwrite-after-remount sh -c 'echo tampered2 > "$0/sentinel"' "$ro"
+note "DONE"
+EOS
+
+# --- create the throwaway sandbox ------------------------------------------
+SANDBOX="acq-qual-ro-${STAMP}-$$"
+say "msb $VERSION; testing image $IMAGE"
+say "creating throwaway sandbox $SANDBOX (this pulls the image on first use)..."
+if ! _to "$STEP_TIMEOUT" msb create --name "$SANDBOX" \
+      --volume "$RODIR:/mnt/qual-ro:ro" --volume "$RWDIR:/mnt/qual-rw" \
+      "$IMAGE" </dev/null; then
+  finish BLOCKED "msb create failed or timed out"
+fi
+
+# --- wait until exec works --------------------------------------------------
+ready=0; i=0
+while [ "$i" -lt 30 ]; do
+  out=$(_to "$EXEC_TIMEOUT" msb exec "$SANDBOX" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r')
+  case "$out" in *ok*) ready=1; break ;; esac
+  i=$((i + 1)); sleep 2
+done
+[ "$ready" -eq 1 ] || finish BLOCKED "sandbox never became exec-ready"
+
+# --- attempts, as root ------------------------------------------------------
+say "running write attempts as root inside the guest..."
+_to "$EXEC_TIMEOUT" msb exec "$SANDBOX" -u 0 -- sh -c "$ATTACK" sh /mnt/qual-ro /mnt/qual-rw </dev/null >/dev/null 2>&1 || true
+
+# --- judge from the HOST only -----------------------------------------------
+LOG="$RWDIR/attempts.log"
+if [ ! -s "$LOG" ] || ! grep -q '^DONE$' "$LOG" 2>/dev/null; then
+  finish BLOCKED "positive control failed: the host did not see the guest's attempts log, so the attempts are unproven"
+fi
+if ! grep -q '^uid=0$' "$LOG" 2>/dev/null; then
+  finish BLOCKED "the attempts did not run as root (uid): a denial as an unprivileged user proves nothing"
+fi
+if ! grep -q '^CONTROL-OK$' "$LOG" 2>/dev/null; then
+  finish BLOCKED "the same operations did not succeed on the read-write control volume, so a denial on the read-only volume is unproven"
+fi
+if ! grep -q '^READ-OK$' "$LOG" 2>/dev/null; then
+  finish BLOCKED "the guest could not read the mounted sentinel, so the read-only mount was not visible"
+fi
+if grep -q '^WROTE ' "$LOG" 2>/dev/null; then
+  say "--- guest reports it wrote to the read-only mount ---"
+  grep '^WROTE ' "$LOG" | head -n 20
+  finish FAIL "the guest was able to write to the :ro mount (even if the host directory did not change, the guest's view of trusted code was modifiable)"
+fi
+AFTER=$(snapshot "$RODIR")
+if [ "$BEFORE" != "$AFTER" ]; then
+  say "--- host directory changed ---"
+  diff <(printf '%s\n' "$BEFORE") <(printf '%s\n' "$AFTER") | head -n 40
+  finish FAIL "the host directory behind the :ro volume was modified by the guest; this msb does NOT enforce read-only"
+fi
+finish PASS "the host directory behind the :ro volume was unchanged after root write, remount and rename attempts, and the guest reported every attempt denied ($(grep -c '^DENIED' "$LOG") denied)"
