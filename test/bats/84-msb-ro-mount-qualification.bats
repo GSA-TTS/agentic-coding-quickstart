@@ -187,14 +187,32 @@ case "${1:-}" in
       *"qual-ro"*)
         ro=$(cat "$STUBDIR/.qual_ro"); rw=$(cat "$STUBDIR/.qual_rw")
         [ "${STUB_QUAL_NO_LOG:-0}" = 1 ] && exit 0
-        { echo "uid=${STUB_QUAL_UID:-0}"; echo "READ-OK"; [ "${STUB_QUAL_CONTROL_BROKEN:-0}" = 1 ] && echo "CONTROL-BROKEN" || echo "CONTROL-OK"; } >"$rw/attempts.log"
+        {
+          echo "uid=${STUB_QUAL_UID:-0}"; echo "READ-OK"
+          [ "${STUB_QUAL_CONTROL_BROKEN:-0}" = 1 ] && echo "CONTROL-BROKEN" || echo "CONTROL-OK"
+          echo "MOUNT-BEFORE ro: tmpfs /mnt/qual-ro virtiofs ro 0 0"
+        } >"$rw/attempts.log"
+        # Remount attempts are informational. STUB_QUAL_REMOUNT=accepted models the
+        # guest kernel accepting `mount -o remount,rw` (exit 0), which is not a write.
+        if [ "${STUB_QUAL_REMOUNT:-denied}" = accepted ]; then
+          { echo "REMOUNT-ACCEPTED remount-rw"; echo "REMOUNT-ACCEPTED remount-bind"; } >>"$rw/attempts.log"
+          echo "MOUNT-AFTER ro: tmpfs /mnt/qual-ro virtiofs rw 0 0" >>"$rw/attempts.log"
+        else
+          { echo "REMOUNT-DENIED remount-rw"; echo "REMOUNT-DENIED remount-bind"; } >>"$rw/attempts.log"
+          echo "MOUNT-AFTER ro: tmpfs /mnt/qual-ro virtiofs ro 0 0" >>"$rw/attempts.log"
+        fi
         if [ "${STUB_RO_ENFORCED:-1}" = 1 ]; then
           echo "DENIED create-file" >>"$rw/attempts.log"
+          echo "DENIED create-after-remount" >>"$rw/attempts.log"
         else
           : >"$ro/qual-new-file"
           if [ "${STUB_QUAL_FORGE_DENIED:-0}" = 1 ]; then echo "DENIED create-file" >>"$rw/attempts.log"
           else echo "WROTE create-file" >>"$rw/attempts.log"; fi
         fi
+        # STUB_QUAL_REPORT_WROTE=1 with an enforced mount: the guest REPORTS a data write
+        # but the host directory is untouched (a lying or mistaken guest).
+        [ "${STUB_QUAL_REPORT_WROTE:-0}" = 1 ] && echo "WROTE overwrite" >>"$rw/attempts.log"
+        echo "READ-AFTER-OK" >>"$rw/attempts.log"
         echo "DONE" >>"$rw/attempts.log"
         exit 0 ;;
     esac
@@ -206,7 +224,7 @@ STUB
 }
 
 _run_canary() { # [ENV...]
-  run env "$@" PATH="$STUBDIR/canary-bin:$PATH" STUBDIR="$STUBDIR" QUALIFY_BASE="$STUBDIR/qbase" \
+  run env "$@" PATH="$STUBDIR/canary-bin:$PATH" STUBDIR="$STUBDIR" ACQ_QUALIFY_OUT_DIR="$STUBDIR/qout" \
     STEP_TIMEOUT=20 EXEC_TIMEOUT=20 bash "$REPO_ROOT/scripts/qualify-msb-ro-mount"
 }
 
@@ -246,7 +264,7 @@ _run_canary() { # [ENV...]
 }
 
 @test "canary: msb missing => BLOCKED" {
-  run env PATH="/usr/bin:/bin" QUALIFY_BASE="$STUBDIR/qbase2" bash -c 'command -v msb >/dev/null 2>&1 && exit 77; exec bash "'"$REPO_ROOT"'/scripts/qualify-msb-ro-mount"'
+  run env PATH="/usr/bin:/bin" ACQ_QUALIFY_OUT_DIR="$STUBDIR/qout2" bash -c 'command -v msb >/dev/null 2>&1 && exit 77; exec bash "'"$REPO_ROOT"'/scripts/qualify-msb-ro-mount"'
   [ "$status" -eq 77 ] && skip "a real msb is on the minimal PATH"
   assert_failure 2
   assert_output --partial 'RESULT: BLOCKED'
@@ -291,4 +309,76 @@ _run_canary() { # [ENV...]
   assert_output --partial 'RESULT: PASS'
   assert_output --partial 'do NOT add it to the list'
   refute_output --partial 'Next: add'
+}
+
+# --- remount classification, verdict order and evidence layout -------------------
+
+@test "canary: an ACCEPTED remount with every data write denied and the host unchanged => PASS" {
+  _plant_canary_msb
+  _run_canary STUB_RO_ENFORCED=1 STUB_QUAL_REMOUNT=accepted
+  assert_success
+  assert_output --partial 'RESULT: PASS'
+  assert_output --partial 'a remount was ACCEPTED'
+  assert_output --partial 'every data write the guest attempted was denied'
+  assert_output --partial '2 remount attempt(s) accepted, which is informational'
+  refute_output --partial 'WROTE remount'
+}
+
+@test "canary: a data write reported WROTE with the host unchanged => FAIL" {
+  _plant_canary_msb
+  _run_canary STUB_RO_ENFORCED=1 STUB_QUAL_REPORT_WROTE=1
+  assert_failure 1
+  assert_output --partial 'RESULT: FAIL'
+  assert_output --partial 'the guest was able to write to the :ro mount'
+}
+
+@test "canary: host directory changed while the guest log says all denied => FAIL from the host snapshot" {
+  _plant_canary_msb
+  _run_canary STUB_RO_ENFORCED=0 STUB_QUAL_FORGE_DENIED=1 STUB_QUAL_REMOUNT=accepted
+  assert_failure 1
+  assert_output --partial 'RESULT: FAIL'
+  assert_output --partial 'even though the guest reported every write denied'
+  assert_output --partial '--- host directory changed ---'
+}
+
+@test "canary: the guest script classifies remount separately from data writes (not a WROTE)" {
+  run grep -n 'rtry remount-rw\|rtry remount-bind' "$REPO_ROOT/scripts/qualify-msb-ro-mount"
+  assert_success
+  run grep -n '^try remount' "$REPO_ROOT/scripts/qualify-msb-ro-mount"
+  assert_failure
+}
+
+@test "canary: all output lands under the output directory, one pasteable line is printed" {
+  _plant_canary_msb
+  _run_canary STUB_RO_ENFORCED=1
+  assert_success
+  assert_output --partial "dir=$STUBDIR/qout"
+  assert_regex "$output" 'RESULT PASS msb=0\.7\.7 image=[^ ]+ host=[^ ]+ [^ ]* ?rev='
+  [ -f "$STUBDIR/qout/results.tsv" ]
+  [ -f "$STUBDIR/qout/attempts.log" ]
+  [ -f "$STUBDIR/qout/before.snapshot" ]
+  [ -f "$STUBDIR/qout/after.snapshot" ]
+  [ -f "$STUBDIR/qout/verdict.txt" ]
+  grep -q 'MOUNT-BEFORE ro:' "$STUBDIR/qout/attempts.log"
+  grep -q 'MOUNT-AFTER ro:' "$STUBDIR/qout/attempts.log"
+  # PASS removes the throwaway host directories; the evidence stays.
+  [ ! -d "$STUBDIR/qout/ro" ]
+  [ ! -d "$STUBDIR/qout/rw" ]
+}
+
+@test "canary: FAIL and BLOCKED keep the throwaway host directories as evidence" {
+  _plant_canary_msb
+  _run_canary STUB_RO_ENFORCED=0
+  assert_failure 1
+  [ -d "$STUBDIR/qout/ro" ]
+  [ -f "$STUBDIR/qout/ro/qual-new-file" ]
+  [ -f "$STUBDIR/qout/host.diff" ]
+  assert_output --partial 'RESULT FAIL'
+}
+
+@test "canary: the default output directory is under the repo tmp/, which is gitignored" {
+  run grep -n 'qualify-msb-ro-mount-\$STAMP' "$REPO_ROOT/scripts/qualify-msb-ro-mount"
+  assert_success
+  run git -C "$REPO_ROOT" check-ignore -q tmp/qualify-msb-ro-mount-x/results.tsv
+  [ "$status" -eq 0 ] || skip "not a git checkout, or tmp/ not ignored here"
 }
