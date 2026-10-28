@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# qualify-msb-ro-mount — host-observed canary: does THIS msb enforce a `:ro` volume?
+# qualify-msb-ro-mount — OPTIONAL, NON-GATING host-observed canary: does THIS msb
+# enforce a `:ro` volume?
+#
+# acq does NOT depend on this script. Its gate for running trusted code from the
+# read-only host-config mount is the per-sandbox record msb keeps (`msb inspect`) plus a
+# version floor (ADR-0035). This canary is corroborating evidence: run it when adopting
+# a new msb release, or if you suspect an upstream regression in `:ro` enforcement, which
+# the gate would not catch.
 #
 # acq (ADR-0035 Mechanism 2) runs readonly kit code from a host directory mounted
 # into the guest with `--volume HOST:GUEST:ro`. A guest-run probe cannot show that the
@@ -31,8 +38,7 @@
 # directories (ro/ and rw/) are kept there too; on PASS they are removed, because
 # everything of value has been copied out. Every run ends with one pasteable line:
 #   RESULT <PASS|FAIL|BLOCKED> msb=<ver> image=<image> host=<os arch> rev=<sha> dir=<abs path>
-# On PASS add the printed version to MSB_RO_MOUNT_QUALIFIED_VERSIONS in
-# acq.backends/msb.sh and record the output in ADR-0035 in the same change.
+# A PASS is corroborating evidence only; record it in ADR-0035 when adopting a version.
 #
 # Usage:  [EXPECT_SHA=<prefix>] bash scripts/qualify-msb-ro-mount
 #   EXPECT_SHA          abort (BLOCKED) unless this checkout's HEAD starts with it
@@ -107,11 +113,11 @@ finish() { # VERDICT DETAIL
   fi
   if [ "$verdict" = PASS ] && [ "${VERSION_OK:-0}" -ne 1 ]; then
     say ""
-    say "NOTE: '${VERSION}' is not a final X.Y.Z release, so acq will never match it; do NOT add it to the list."
+    say "NOTE: '${VERSION}' is not a final X.Y.Z release, so acq will not rely on the read-only mount on it."
   elif [ "$verdict" = PASS ]; then
     say ""
-    say "Next: add ${VERSION} to MSB_RO_MOUNT_QUALIFIED_VERSIONS in acq.backends/msb.sh and"
-    say "record this output (version, revision, date, host OS/arch, image) in"
+    say "This is corroborating evidence only; acq's gate does not depend on it. If you are adopting"
+    say "msb ${VERSION}, record this output (version, revision, date, host OS/arch, image) in"
     say "docs/adr/0035-host-authoritative-sandbox-config.md."
   fi
   say ""

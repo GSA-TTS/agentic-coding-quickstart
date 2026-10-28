@@ -12,10 +12,11 @@
 # The stubs below answer the guest probe CONTRARY to the host record.
 #
 # shellcheck shell=bats
-# NOTE: these cases exercise the staged-mount path itself, so each marks the stub's
-# msb version as qualified (MSB_RO_MOUNT_QUALIFIED_VERSIONS). Whether a version may be
-# trusted at all is covered in 84-msb-ro-mount-qualification.bats; before that gate
-# existed, a recorded sandbox was unlocked by the guest probe alone.
+# NOTE: these cases exercise the staged-mount path itself, so each gives the stub msb a
+# floor-satisfying version and an `msb inspect` record showing the host-config mount as
+# the read-only Bind of acq's host config dir. Whether the gate trusts that record is
+# covered in 84-msb-ro-mount-qualification.bats; before the gate existed, a recorded
+# sandbox was unlocked by the guest probe alone.
 
 setup() { acq_setup_stubs; }
 teardown() { acq_teardown_stubs; }
@@ -56,7 +57,7 @@ _apply() { # NAME KITDIR RECORD [ENV...]
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    MSB_RO_MOUNT_QUALIFIED_VERSIONS="${STUB_MSB_VERSION:-0.6.9}"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
     acq_test_stub_provider_input_boundary
     [ "'"$record"'" = 1 ] && acq_host_config_write msb "'"$name"'" ro-host-config 1
     _acq_msb_apply_kit_dir "'"$name"'" "'"$kit"'" 2>&1
@@ -139,7 +140,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    MSB_RO_MOUNT_QUALIFIED_VERSIONS="${STUB_MSB_VERSION:-0.6.9}"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
     acq_test_stub_provider_input_boundary
     acq_host_config_write msb badval ro-host-config 0
     _acq_msb_apply_kit_dir badval "'"$k"'" 2>&1
@@ -155,7 +156,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    MSB_RO_MOUNT_QUALIFIED_VERSIONS="${STUB_MSB_VERSION:-0.6.9}"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
     acq_test_stub_provider_input_boundary
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision recprov shell /tmp >/dev/null 2>&1
@@ -172,7 +173,7 @@ SPEC
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    MSB_RO_MOUNT_QUALIFIED_VERSIONS="${STUB_MSB_VERSION:-0.6.9}"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
     acq_test_stub_provider_input_boundary
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision recfail shell /tmp >/dev/null 2>&1
@@ -206,7 +207,7 @@ _prov_msb() { # NAME KITDIR [ENV...]  (runs provision with a seeded stale record
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    MSB_RO_MOUNT_QUALIFIED_VERSIONS="${STUB_MSB_VERSION:-0.6.9}"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
     acq_test_stub_provider_input_boundary
     acq_host_config_write msb "'"$name"'" ro-host-config 1
     acq_host_config_write msb "'"$name"'" install-stale 1
@@ -254,7 +255,7 @@ _apply_stage_fail() { # NAME KITDIR RECORD
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    MSB_RO_MOUNT_QUALIFIED_VERSIONS="${STUB_MSB_VERSION:-0.6.9}"
+    export STUB_MSB_VERSION="${STUB_MSB_VERSION:-0.7.7}" STUB_MSB_INSPECT_MODE="${STUB_MSB_INSPECT_MODE:-ro-ok}"
     acq_test_stub_provider_input_boundary
     _acq_msb_stage_readonly_file() { return 1; }
     [ "'"$record"'" = 1 ] && acq_host_config_write msb "'"$name"'" ro-host-config 1

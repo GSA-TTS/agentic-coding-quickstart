@@ -1,10 +1,17 @@
 #!/usr/bin/env bats
 #
 # 84-msb-ro-mount-qualification.bats — ADR-0035 Mechanism 2 authority. Trusted
-# execution from the read-only host-config mount is permitted only on an msb version
-# that appears on a checked-in list of versions a HOST-observed canary has qualified.
-# A guest-run probe can never unlock it (a guest with root controls `sh`/`test`).
-# Also covers scripts/qualify-msb-ro-mount against a stubbed msb.
+# execution from the read-only host-config mount is permitted only when ALL hold:
+# a host ro-host-config record exists; the msb version is a final release at or above
+# a floor; and msb's own `inspect` record (read from the host, not the guest) shows
+# the host-config mount as the one read-only Bind of acq's host config directory with
+# no overlapping writable mount. A guest-run probe can never unlock it (a guest with
+# root controls `sh`/`test`); it can only add refusals.
+#
+# Deliberate replacement: the earlier per-version allowlist
+# (MSB_RO_MOUNT_QUALIFIED_VERSIONS) and the cases that pinned it were replaced by the
+# cases below. Also covers scripts/qualify-msb-ro-mount (now an optional,
+# non-gating verification tool) against a stubbed msb.
 #
 # shellcheck shell=bats
 
@@ -36,118 +43,257 @@ commands:
 SPEC
 }
 
-# Apply KITDIR to NAME with a host ro-host-config record, under an msb version and
-# qualified list. The probe stub is left in its default state: it forges "all good".
-_apply_ver() { # NAME KITDIR VERSION QUALIFIED_LIST
-  local name="$1" kit="$2" ver="$3" qual="$4"
+# Apply KITDIR to NAME with a host ro-host-config record. Environment (KEY=VAL ...)
+# follows the positional args. Defaults: msb 0.7.7 and an inspect record showing the
+# host-config mount as the read-only Bind. The guest probe stub is left in its default
+# state, which forges "all good" (present and not writable).
+_gate() { # NAME KITDIR [ENV...]
+  local name="$1" kit="$2"; shift 2
   : > "$CALLS"
   run bash -c '
-    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-'"$name"'" STUB_MSB_VERSION="'"$ver"'"
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-'"$name"'"
+    export STUB_MSB_VERSION=0.7.7 STUB_MSB_INSPECT_MODE=ro-ok ACQ_MSB_RO_INSPECT_RETRY_SLEEP=0
+    for kv in '"${*:-:}"'; do export "$kv" 2>/dev/null || true; done
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_test_stub_provider_input_boundary
-    MSB_RO_MOUNT_QUALIFIED_VERSIONS="'"$qual"'"
     acq_host_config_write msb "'"$name"'" ro-host-config 1
     _acq_msb_apply_kit_dir "'"$name"'" "'"$kit"'" 2>&1
   '
 }
 
-# Deliberate change: this case used to assert that the list ships EMPTY. The 0.7.7
-# canary PASSED (ADR-0035, "Qualification evidence"), so the shipped list is exactly
-# that one version. Any other entry must come with its own evidence in the same change.
-@test "qualified list: the shipped list is exactly msb 0.7.7 (ADR-0035 evidence)" {
-  run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh"; printf "[%s]\n" "$MSB_RO_MOUNT_QUALIFIED_VERSIONS"'
-  assert_success
-  assert_output '[0.7.7]'
-}
-
-@test "qualified list: a forged zero-exit probe does not unlock staging on an unlisted version" {
-  local k="$STUBDIR/k1"; _ro_kit "$k"
-  _apply_ver unlisted "$k" 0.7.7 ""
+_assert_refused() { # NAME [MESSAGE_FRAGMENT]
   assert_failure
   assert_output --partial "'/home/agent/cfg/merge.mjs'"
-  assert_output --partial 'msb 0.7.7 is not on acq'
-  assert_output --partial 'scripts/qualify-msb-ro-mount'
   assert_output --partial 'No guest-copy fallback is taken'
+  [ -z "${2:-}" ] || assert_output --partial "$2"
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'node '
-  refute_regex "$log" 'msb copy .*unlisted:/home/agent/cfg/merge\.mjs'
-  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/unlisted.*.config/kit-files 2>&1'
+  refute_regex "$log" "msb copy .*$1:/home/agent/cfg/merge\\.mjs"
+  run bash -c 'ls "'"$ACQ_PROVENANCE_DIR"'"/msb/'"$1"'.*.config/kit-files 2>&1'
   assert_failure
 }
 
-@test "qualified list: a version that is not the listed one is refused" {
-  local k="$STUBDIR/k2"; _ro_kit "$k"
-  _apply_ver otherver "$k" 0.7.8 "0.7.7"
-  assert_failure
-  assert_output --partial 'msb 0.7.8 is not on acq'
+@test "gate: the version floor is 0.7.7 and no per-version allowlist remains" {
+  run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh"; printf "[%s]\n" "$MSB_RO_MOUNT_MIN_VERSION"; printf "[%s]\n" "${MSB_RO_MOUNT_QUALIFIED_VERSIONS-unset}"'
+  assert_success
+  assert_line '[0.7.7]'
+  assert_line '[unset]'
 }
 
-@test "qualified list: a listed version stages and runs from the mount" {
-  local k="$STUBDIR/k3"; _ro_kit "$k"
-  _apply_ver listed "$k" 0.7.7 "0.7.7"
+@test "gate: record + msb recorded ro Bind of the host config dir + floor version => unlocks staging" {
+  local k="$STUBDIR/g1"; _ro_kit "$k"
+  _gate unlocks "$k"
   assert_success
   local log; log=$(cat "$CALLS")
+  assert_regex "$log" 'msb inspect unlocks --format json'
   assert_regex "$log" 'node /var/lib/acq/host/kit-files/'
-  refute_regex "$log" 'msb copy .*listed:/home/agent/cfg/merge\.mjs'
+  refute_regex "$log" 'msb copy .*unlocks:/home/agent/cfg/merge\.mjs'
 }
 
-@test "qualified list: a listed version is still refused when the guest says the mount is writable" {
-  local k="$STUBDIR/k4"; _ro_kit "$k"
+@test "gate: a version above the floor unlocks too" {
+  local k="$STUBDIR/g2"; _ro_kit "$k"
+  _gate newer "$k" STUB_MSB_VERSION=0.7.9
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'node /var/lib/acq/host/kit-files/'
+}
+
+@test "gate: a forged all-clear guest probe does not help when msb records the mount as NOT read-only" {
+  local k="$STUBDIR/g3"; _ro_kit "$k"
+  _gate rwrecorded "$k" STUB_MSB_INSPECT_MODE=rw
+  _assert_refused rwrecorded 'does not record the mount'
+}
+
+@test "gate: no host-config mount in msb's record => refused" {
+  local k="$STUBDIR/g4"; _ro_kit "$k"
+  _gate nomount "$k" STUB_MSB_INSPECT_MODE=missing
+  _assert_refused nomount 'lists no mount at /var/lib/acq/host'
+}
+
+@test "gate: two mounts at the host-config guest path => refused" {
+  local k="$STUBDIR/g5"; _ro_kit "$k"
+  _gate dupmount "$k" STUB_MSB_INSPECT_MODE=dup
+  _assert_refused dupmount 'more than one mount'
+}
+
+@test "gate: a writable mount overlapping the host-config guest path => refused" {
+  local k="$STUBDIR/g6"; _ro_kit "$k"
+  _gate overlap "$k" STUB_MSB_INSPECT_MODE=overlap-rw
+  _assert_refused overlap 'overlaps'
+}
+
+@test "gate: a read-only mount backed by some other host directory => refused" {
+  local k="$STUBDIR/g7"; _ro_kit "$k"
+  _gate wronghost "$k" STUB_MSB_INSPECT_MODE=wrong-host
+  _assert_refused wronghost "not backed by this sandbox's acq host config directory"
+}
+
+@test "gate: a mount that is not a Bind mount => refused" {
+  local k="$STUBDIR/g8"; _ro_kit "$k"
+  _gate notbind "$k" STUB_MSB_INSPECT_MODE=not-bind
+  _assert_refused notbind 'not a Bind mount'
+}
+
+@test "gate: active_config null (after the short retry) => refused, naming the cause" {
+  local k="$STUBDIR/g9"; _ro_kit "$k"
+  _gate nullcfg "$k" STUB_MSB_INSPECT_MODE=null
+  _assert_refused nullcfg 'active_config is null'
+}
+
+@test "gate: active_config null at first, populated on a retry => unlocks" {
+  local k="$STUBDIR/g10"; _ro_kit "$k"
+  _gate nullthenok "$k" STUB_MSB_INSPECT_NULL_TIMES=1
+  assert_success
+  assert_regex "$(cat "$CALLS")" 'node /var/lib/acq/host/kit-files/'
+}
+
+@test "gate: msb inspect failing => refused" {
+  local k="$STUBDIR/g11"; _ro_kit "$k"
+  rm -f "$STUBDIR/.msb_inspect_fails"
+  _gate inspectfail "$k" STUB_MSB_INSPECT_FAIL_TIMES=99
+  _assert_refused inspectfail "'msb inspect' failed"
+}
+
+@test "gate: unparsable inspect output => refused" {
+  local k="$STUBDIR/g12"; _ro_kit "$k"
+  _gate badjson "$k" STUB_MSB_INSPECT_MODE=badjson
+  _assert_refused badjson 'not valid JSON'
+}
+
+@test "gate: unexpected mounts shape => refused" {
+  local k="$STUBDIR/g13"; _ro_kit "$k"
+  _gate noshape "$k" STUB_MSB_INSPECT_MODE=noshape
+  _assert_refused noshape 'no mounts list'
+}
+
+@test "gate: without python3 the structured check cannot run => refused" {
+  local k="$STUBDIR/g14"; _ro_kit "$k"
   : > "$CALLS"
   run bash -c '
-    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-lw" STUB_MSB_VERSION=0.7.7 STUB_HOST_CONFIG_WRITABLE=1
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-nopy" STUB_MSB_VERSION=0.7.7 STUB_MSB_INSPECT_MODE=ro-ok
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_test_stub_provider_input_boundary
-    MSB_RO_MOUNT_QUALIFIED_VERSIONS="0.7.7"
-    acq_host_config_write msb listedwritable ro-host-config 1
-    _acq_msb_apply_kit_dir listedwritable "'"$k"'" 2>&1
+    _acq_msb_ro_python() { return 1; }
+    acq_host_config_write msb nopy ro-host-config 1
+    _acq_msb_apply_kit_dir nopy "'"$k"'" 2>&1
   '
+  _assert_refused nopy 'python3 is required'
+}
+
+@test "gate: an unreviewed platform (Windows msb backend) => refused" {
+  local k="$STUBDIR/g15"; _ro_kit "$k"
+  : > "$CALLS"
+  run bash -c '
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-win" STUB_MSB_VERSION=0.7.7 STUB_MSB_INSPECT_MODE=ro-ok
+    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_test_stub_provider_input_boundary
+    uname() { echo MINGW64_NT-10.0; }
+    acq_host_config_write msb win ro-host-config 1
+    _acq_msb_apply_kit_dir win "'"$k"'" 2>&1
+  '
+  _assert_refused win 'was not reviewed'
+}
+
+@test "gate: a version below the floor is refused" {
+  local k="$STUBDIR/g16"; _ro_kit "$k"
+  _gate old "$k" STUB_MSB_VERSION=0.7.6
+  _assert_refused old 'below acq'"'"'s minimum'
+  _gate older "$k" STUB_MSB_VERSION=0.6.9
+  assert_failure
+}
+
+@test "gate: a prerelease or unparsable msb version is refused" {
+  local k="$STUBDIR/g17"; _ro_kit "$k"
+  _gate prerel "$k" STUB_MSB_VERSION=0.7.7-rc1
+  assert_failure
+  assert_output --partial 'below acq'
+  refute_regex "$(cat "$CALLS")" 'node '
+  _gate garbled "$k" STUB_MSB_VERSION=banana
+  assert_failure
+  refute_regex "$(cat "$CALLS")" 'node '
+}
+
+@test "gate: msb recording the mount read-only still fails closed when the guest probe says WRITABLE" {
+  local k="$STUBDIR/g18"; _ro_kit "$k"
+  _gate probewrit "$k" STUB_HOST_CONFIG_WRITABLE=1
   assert_failure
   assert_output --partial 'WRITABLE'
   refute_regex "$(cat "$CALLS")" 'node '
 }
 
-@test "qualified list: an unparsable or prerelease msb version fails closed even if listed" {
-  local k="$STUBDIR/k5"; _ro_kit "$k"
-  _apply_ver prerel "$k" 0.7.7-rc1 "0.7.7 0.7.7-rc1"
-  assert_failure
-  assert_output --partial 'not on acq'
-  refute_regex "$(cat "$CALLS")" 'node '
-  _apply_ver garbled "$k" "banana" "banana"
-  assert_failure
-  refute_regex "$(cat "$CALLS")" 'node '
+@test "gate: a kit with no readonly files never consults msb inspect or the probe" {
+  local k="$STUBDIR/g0"; mkdir -p "$k/files"
+  printf '{}\n' > "$k/files/data.jsonc"
+  cat >"$k/spec.yaml" <<'SPEC'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: plain-kit
+displayName: Plain Kit
+description: data only
+files:
+  - path: /home/agent/cfg/data.jsonc
+    mode: "0644"
+    source: files/data.jsonc
+SPEC
+  _gate plainkit "$k" STUB_MSB_INSPECT_MODE=rw STUB_HOST_CONFIG_WRITABLE=1
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'msb inspect plainkit'
+  refute_regex "$(cat "$CALLS")" 'acq-ro-probe'
+  assert_regex "$(cat "$CALLS")" 'msb copy .*plainkit:/home/agent/cfg/data\.jsonc'
 }
 
-@test "qualified list: no host record keeps the guest-copy compatibility path regardless of version" {
-  local k="$STUBDIR/k6"; _ro_kit "$k"
+@test "gate: the inspect check normalizes guest paths (a writable mount at //var overlaps)" {
+  command -v python3 >/dev/null || skip "python3 not available"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    mk() { python3 - "$1" <<PY
+import json,sys
+g="/var/lib/acq/host"
+h={"type":"Bind","guest":g,"host":"/x/cfg","options":{"readonly":True}}
+o={"type":"Bind","guest":sys.argv[1],"host":"/y","options":{"readonly":False}}
+print(json.dumps({"active_config":{"mounts":[h,o]}}))
+PY
+    }
+    for g in //var / /var/lib//acq /var/lib/acq/host/../host/sub; do
+      r=$(mk "$g" | python3 -c "$_ACQ_MSB_RO_INSPECT_PY" /var/lib/acq/host /x/cfg 2>&1); printf "%s => %s\n" "$g" "$r"
+    done
+  '
+  assert_success
+  refute_output --partial '=> ok'
+}
+
+@test "gate: no host record keeps the guest-copy compatibility path, without consulting msb inspect" {
+  local k="$STUBDIR/g19"; _ro_kit "$k"
   : > "$CALLS"
   run bash -c '
-    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-nr" STUB_MSB_VERSION=0.7.7
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-nr" STUB_MSB_VERSION=0.7.7 STUB_MSB_INSPECT_MODE=ro-ok
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_test_stub_provider_input_boundary
-    _acq_msb_apply_kit_dir norecordver "'"$k"'" 2>&1
+    _acq_msb_apply_kit_dir norecordgate "'"$k"'" 2>&1
   '
   assert_success
-  assert_regex "$(cat "$CALLS")" 'msb copy .*norecordver:/home/agent/cfg/merge\.mjs'
+  assert_regex "$(cat "$CALLS")" 'msb copy .*norecordgate:/home/agent/cfg/merge\.mjs'
+  refute_regex "$(cat "$CALLS")" '/var/lib/acq/host/kit-files'
+  refute_regex "$(cat "$CALLS")" 'msb inspect norecordgate'
 }
 
-@test "qualified list: the create-time startup script keeps the guest path when the version is unlisted" {
-  local k="$STUBDIR/k7"; _ro_kit "$k"
+@test "gate: the create-time startup script keeps the guest path below the version floor" {
+  local k="$STUBDIR/g20"; _ro_kit "$k"
   : > "$CALLS"
   run bash -c '
-    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-ss" STUB_MSB_VERSION=0.7.7
+    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-ss" STUB_MSB_VERSION=0.7.6 STUB_MSB_INSPECT_MODE=ro-ok
     export ACQ_MSB_KEEP_STARTUP_STAGE=1 ACQ_MSB_STARTUP_STAGE_DIR="'"$STUBDIR"'/ss-stage"
     . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
     . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
     . "'"$REPO_ROOT"'/acq.backends/msb.sh"
     acq_test_stub_provider_input_boundary
-    MSB_RO_MOUNT_QUALIFIED_VERSIONS=""
     _acq_msb_fetch_kit() { printf "%s\n" "'"$k"'"; }
     acq_backend_provision stagebox shell /tmp >/dev/null 2>&1
   '
@@ -237,7 +383,7 @@ _run_canary() { # [ENV...]
   assert_success
   assert_output --partial 'RESULT: PASS'
   assert_output --partial 'msb version : 0.7.7'
-  assert_output --partial 'MSB_RO_MOUNT_QUALIFIED_VERSIONS'
+  assert_output --partial 'corroborating evidence'
   [ -f "$STUBDIR/.qual_removed" ]
 }
 
@@ -247,7 +393,6 @@ _run_canary() { # [ENV...]
   assert_failure 1
   assert_output --partial 'RESULT: FAIL'
   assert_output --partial 'host directory behind the :ro volume was modified'
-  refute_output --partial 'Next: add'
   [ -f "$STUBDIR/.qual_removed" ]
 }
 
@@ -305,13 +450,12 @@ _run_canary() { # [ENV...]
   [ -f "$STUBDIR/.qual_removed" ]
 }
 
-@test "canary: a PASS on a non-final msb version tells the operator not to add it" {
+@test "canary: a PASS on a non-final msb version says acq will not rely on the mount there" {
   _plant_canary_msb
   _run_canary STUB_RO_ENFORCED=1 STUB_MSB_VERSION=0.7.7-rc1
   assert_success
   assert_output --partial 'RESULT: PASS'
-  assert_output --partial 'do NOT add it to the list'
-  refute_output --partial 'Next: add'
+  assert_output --partial 'will not rely on the read-only mount'
 }
 
 # --- remount classification, verdict order and evidence layout -------------------
@@ -386,88 +530,3 @@ _run_canary() { # [ENV...]
   [ "$status" -eq 0 ] || skip "not a git checkout, or tmp/ not ignored here"
 }
 
-# --- the shipped list (no override), deliberate-evidence behavior -------------------
-
-_apply_shipped() { # NAME KITDIR VERSION [ENV...]
-  local name="$1" kit="$2" ver="$3"; shift 3
-  : > "$CALLS"
-  run bash -c '
-    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-'"$name"'" STUB_MSB_VERSION="'"$ver"'"
-    for kv in '"${*:-:}"'; do export "$kv" 2>/dev/null || true; done
-    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
-    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
-    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_test_stub_provider_input_boundary
-    acq_host_config_write msb "'"$name"'" ro-host-config 1
-    _acq_msb_apply_kit_dir "'"$name"'" "'"$kit"'" 2>&1
-  '
-}
-
-@test "shipped list: msb 0.7.7 with an ro-host-config record unlocks trusted staging" {
-  local k="$STUBDIR/s1"; _ro_kit "$k"
-  _apply_shipped shipped077 "$k" 0.7.7
-  assert_success
-  local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'node /var/lib/acq/host/kit-files/'
-  refute_regex "$log" 'msb copy .*shipped077:/home/agent/cfg/merge\.mjs'
-}
-
-@test "shipped list: msb 0.7.7 without a record still takes the guest-copy path (the record is still required)" {
-  local k="$STUBDIR/s2"; _ro_kit "$k"
-  : > "$CALLS"
-  run bash -c '
-    export ACQ_SECRET_STORE_DIR="'"$STUBDIR"'/sec-s2" STUB_MSB_VERSION=0.7.7
-    . "'"$REPO_ROOT"'/acq.backends/secret-store.sh"
-    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
-    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
-    acq_test_stub_provider_input_boundary
-    _acq_msb_apply_kit_dir norecord077 "'"$k"'" 2>&1
-  '
-  assert_success
-  refute_regex "$(cat "$CALLS")" '/var/lib/acq/host/kit-files'
-  assert_regex "$(cat "$CALLS")" 'msb copy .*norecord077:/home/agent/cfg/merge\.mjs'
-}
-
-@test "shipped list: another msb version is refused even with a record and an all-clear probe" {
-  local k="$STUBDIR/s3"; _ro_kit "$k"
-  _apply_shipped shipped078 "$k" 0.7.8
-  assert_failure
-  assert_output --partial 'msb 0.7.8 is not on acq'
-  refute_regex "$(cat "$CALLS")" 'node '
-  _apply_shipped shipped069 "$k" 0.6.9
-  assert_failure
-  assert_output --partial 'msb 0.6.9 is not on acq'
-}
-
-@test "shipped list: a prerelease of the qualified version is refused" {
-  local k="$STUBDIR/s4"; _ro_kit "$k"
-  _apply_shipped shippedrc "$k" 0.7.7-rc1
-  assert_failure
-  assert_output --partial 'not on acq'
-  refute_regex "$(cat "$CALLS")" 'node '
-}
-
-@test "shipped list: an unparsable msb version is refused" {
-  local k="$STUBDIR/s5"; _ro_kit "$k"
-  _apply_shipped shippedbad "$k" banana
-  assert_failure
-  refute_regex "$(cat "$CALLS")" 'node '
-}
-
-@test "shipped list: a forged all-clear guest probe does not unlock an unlisted version" {
-  local k="$STUBDIR/s6"; _ro_kit "$k"
-  # The stub guest answers every probe as 'present and not writable' by default.
-  _apply_shipped shippedforge "$k" 0.7.9
-  assert_failure
-  assert_output --partial 'msb 0.7.9 is not on acq'
-  refute_regex "$(cat "$CALLS")" 'node '
-  refute_regex "$(cat "$CALLS")" 'msb copy .*shippedforge:/home/agent/cfg/merge\.mjs'
-}
-
-@test "shipped list: msb 0.7.7 still fails closed when the guest says the mount is writable" {
-  local k="$STUBDIR/s7"; _ro_kit "$k"
-  _apply_shipped shippedwrit "$k" 0.7.7 STUB_HOST_CONFIG_WRITABLE=1
-  assert_failure
-  assert_output --partial 'WRITABLE'
-  refute_regex "$(cat "$CALLS")" 'node '
-}

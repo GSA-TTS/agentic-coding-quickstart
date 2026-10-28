@@ -172,18 +172,15 @@ MSB_ROLLBACK_VERSION="0.6.18"
 # duplicate snapshots exist. See ADR-0032.
 MSB_FIXED_VERSION="0.7.3"
 
-# msb versions on which the host-observed canary (scripts/qualify-msb-ro-mount) has
-# shown that a `:ro` --volume is enforced by the runtime even against guest root.
-# Trusted execution of `readonly: true` kit files from the host-config mount
-# (ADR-0035 Mechanism 2) is permitted ONLY on a version listed here. The list is
-# deliberately checked in, not read from the environment or any guest-reachable
-# state. A version not listed is refused (fail closed) with a message naming the
-# version and the script. Space-separated bare X.Y.Z. Each entry needs its evidence
-# recorded in ADR-0035 (msb version, canary revision, date, host OS/arch, image,
-# PASS result) in the same change, and covers that evidence's scope only.
-#   0.7.7  PASS 2026-10-28, macOS arm64, default shell-docker image, fresh create
-#          (ADR-0035, "Qualification evidence").
-MSB_RO_MOUNT_QUALIFIED_VERSIONS="0.7.7"
+# Lowest msb version on which acq relies on a `:ro` host-config mount for trusted
+# `readonly: true` kit code (ADR-0035 Mechanism 2). 0.7.7 is the version the mount
+# behavior was verified on, live (a host-side canary, scripts/qualify-msb-ro-mount) and
+# in the upstream source: msb's host-side virtiofs server denies every mutating
+# operation on a mount whose `ro` option is set, independent of the guest. Older
+# versions were not checked and are refused; prerelease or unparsable versions are
+# refused too. This is a floor, not a guarantee: the per-sandbox `msb inspect` check
+# below is what confirms THIS sandbox's mount was created read-only.
+MSB_RO_MOUNT_MIN_VERSION="0.7.7"
 
 # Default OCI image for provisioned non-OpenCode sandboxes. We default to the SAME image
 # family sbx uses: `docker/sandbox-templates:shell-docker`, an Ubuntu-based
@@ -1800,9 +1797,10 @@ EOF
   local path mode phase source _readonly src _i
   _ACQ_MSB_RO_REWRITE_FROM=()
   _ACQ_MSB_RO_REWRITE_TO=()
-  local _hcfg_mount_ok=0 _hcfg_rc=0
-  _acq_msb_host_config_mount_available "$name" || _hcfg_rc=$?
-  [ "$_hcfg_rc" -eq 0 ] && _hcfg_mount_ok=1
+  # The mount gate (record, version, msb's own mount record, guest probe) is evaluated
+  # lazily, once, at the first readonly file this kit declares, so kits without readonly
+  # files pay none of its cost (an inspect, a python3 spawn and the probes).
+  local _hcfg_mount_ok=0 _hcfg_rc=0 _hcfg_done=0
   for _i in ${_frecs[@]+"${!_frecs[@]}"}; do
     fline="${_frecs[$_i]}"
     path=$(printf '%s' "$fline" | cut -f1)
@@ -1815,12 +1813,20 @@ EOF
     if [ -n "$source" ]; then
       src="${kitdir}/${source}"
     fi
+    if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_done" -eq 0 ]; then
+      _hcfg_done=1
+      _acq_msb_host_config_mount_available "$name" || _hcfg_rc=$?
+      [ "$_hcfg_rc" -eq 0 ] && _hcfg_mount_ok=1
+    fi
     if [ "$_readonly" = "true" ] && [ -n "$src" ] && [ -f "$src" ] && [ "$_hcfg_rc" -ge 2 ]; then
       # Recorded read-only create, but the mount is not confirmed read-only. Never
       # stage or run trusted code from it and never degrade to a guest copy.
       if [ "$_hcfg_rc" -eq 4 ]; then
-        echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': msb ${_ACQ_MSB_RO_MOUNT_VERSION:-<unknown version>} is not on acq's list of versions where a read-only mount has been shown to be enforced." >&2
-        echo "acq(msb):   Run scripts/qualify-msb-ro-mount on this host; a PASS lets that version be added to MSB_RO_MOUNT_QUALIFIED_VERSIONS (see ADR-0035)." >&2
+        echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': msb ${_ACQ_MSB_RO_MOUNT_VERSION:-<unknown version>} is below acq's minimum (${MSB_RO_MOUNT_MIN_VERSION}) for relying on a read-only mount, or its version could not be read as a final release." >&2
+        echo "acq(msb):   Update msb (acq installs ${MSB_PINNED_VERSION}), or see ADR-0035." >&2
+      elif [ "$_hcfg_rc" -eq 5 ]; then
+        echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': ${_ACQ_MSB_RO_MOUNT_REASON:-the msb record does not show a read-only host-config mount}." >&2
+        echo "acq(msb):   acq will not run trusted code from a mount msb does not report as read-only. Recreate the sandbox, or see KNOWN_FAILURE_MODES 48." >&2
       elif [ "$_hcfg_rc" -eq 2 ]; then
         echo "acq(msb): error: cannot place read-only kit file '$path' for '$name': the host-config mount looks WRITABLE from the guest, so code staged there would not be trusted." >&2
       else
@@ -1904,13 +1910,12 @@ _acq_msb_reset_kit_env() {
   acq_host_config_clear msb "$1" kit-env
 }
 
-# True iff the installed msb is a final X.Y.Z release listed in
-# MSB_RO_MOUNT_QUALIFIED_VERSIONS. Anything else (empty list, unparsable or
-# prerelease version output, a version not on the list) is "not qualified". Sets
-# _ACQ_MSB_RO_MOUNT_VERSION to what was seen, for the caller's message.
+# True iff the installed msb is a final X.Y.Z release at or above
+# MSB_RO_MOUNT_MIN_VERSION. Prerelease, build-suffixed, unparsable or older versions
+# are refused. Sets _ACQ_MSB_RO_MOUNT_VERSION to what was seen, for the caller's message.
 _ACQ_MSB_RO_MOUNT_VERSION=""
-_acq_msb_ro_mount_version_qualified() {
-  local _v _q
+_acq_msb_ro_mount_version_ok() {
+  local _v
   _v=$(_acq_msb_version)
   _ACQ_MSB_RO_MOUNT_VERSION="$_v"
   [ -n "$_v" ] || return 1
@@ -1919,38 +1924,179 @@ _acq_msb_ro_mount_version_qualified() {
     [0-9]*.[0-9]*.[0-9]*) ;;
     *) return 1 ;;
   esac
-  set -f
-  for _q in $MSB_RO_MOUNT_QUALIFIED_VERSIONS; do
-    if [ "$_q" = "$_v" ]; then set +f; return 0; fi
+  [ "$(_acq_msb_version_ge "$_v" "$MSB_RO_MOUNT_MIN_VERSION")" -eq 0 ]
+}
+
+# The backend-recorded check below was reviewed for the POSIX msb backend. msb on
+# Windows uses a different filesystem backend that was not reviewed, so acq does not
+# rely on the mount there.
+_acq_msb_ro_mount_platform_ok() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) return 1 ;;
+  esac
+  return 0
+}
+
+# Python 3, required for the structured parse of `msb inspect` JSON (a security
+# decision must not rest on grep/sed heuristics). Absent => the check fails closed.
+_acq_msb_ro_python() {
+  command -v python3 2>/dev/null
+}
+
+# Reads `msb inspect --format json` on stdin; argv: GUEST_DIR HOST_DIR... Exit 0 and
+# prints "ok" only if exactly one mount sits at GUEST_DIR, is type Bind, has
+# options.readonly == true, its host path is (after realpath) one of HOST_DIR..., and
+# no OTHER mount at, above or below GUEST_DIR is writable. Exit 3 (retriable) if
+# .active_config is null; exit 1 with a reason for anything else, including an
+# unexpected shape. Never prints the JSON.
+IFS= read -r -d '' _ACQ_MSB_RO_INSPECT_PY <<'PYEOF' || true
+import json, os, posixpath, sys
+
+def out(code, msg):
+    print(msg)
+    sys.exit(code)
+
+guest = sys.argv[1]
+expected = [e for e in sys.argv[2:] if e]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    out(1, "msb inspect output is not valid JSON")
+if not isinstance(data, dict):
+    out(1, "msb inspect output has an unexpected shape (not an object)")
+ac = data.get("active_config")
+if ac is None:
+    out(3, "msb reports no active config for the sandbox yet (active_config is null)")
+if not isinstance(ac, dict):
+    out(1, "msb inspect active_config has an unexpected shape")
+mounts = ac.get("mounts")
+if not isinstance(mounts, list):
+    out(1, "msb inspect active_config has no mounts list")
+
+def norm(p):
+    if not isinstance(p, str) or not p.startswith("/"):
+        return None
+    return posixpath.normpath("/" + p.lstrip("/"))
+
+target = norm(guest)
+entries = []
+for m in mounts:
+    if not isinstance(m, dict):
+        out(1, "msb inspect lists a mount with an unexpected shape")
+    if m.get("guest") is None:
+        continue
+    if norm(m.get("guest")) is None:
+        out(1, "msb inspect lists a mount with an unexpected guest path")
+    entries.append((norm(m.get("guest")), m))
+same = [m for g, m in entries if g == target]
+if not same:
+    out(1, "msb lists no mount at %s" % guest)
+if len(same) > 1:
+    out(1, "msb lists more than one mount at %s" % guest)
+m = same[0]
+if m.get("type") != "Bind":
+    out(1, "the mount at %s is not a Bind mount" % guest)
+opts = m.get("options")
+if not isinstance(opts, dict) or opts.get("readonly") is not True:
+    out(1, "msb does not record the mount at %s as read-only" % guest)
+host = m.get("host")
+if not isinstance(host, str) or not host:
+    out(1, "the mount at %s has no host path" % guest)
+if os.path.realpath(host) not in [os.path.realpath(e) for e in expected]:
+    out(1, "the mount at %s is not backed by this sandbox's acq host config directory" % guest)
+for g, o in entries:
+    if o is m:
+        continue
+    if g == "/" or target.startswith(g + "/") or g.startswith(target + "/"):
+        oo = o.get("options")
+        if not isinstance(oo, dict) or oo.get("readonly") is not True:
+            out(1, "another mount (%s) that is not read-only overlaps %s" % (g, guest))
+out(0, "ok")
+PYEOF
+
+# Ask msb itself, from the host, what it recorded for NAME's host-config mount. This is
+# what the backend was told to enforce for THIS sandbox; a guest cannot alter it.
+# Returns 0 if the recorded mount is the read-only Bind of acq's host config dir; else
+# non-zero with a human reason in _ACQ_MSB_RO_MOUNT_REASON. A null active_config right
+# after boot is retried a few times (ACQ_MSB_RO_INSPECT_RETRIES, default 3, one second
+# apart); everything else fails closed at once.
+_ACQ_MSB_RO_MOUNT_REASON=""
+_acq_msb_ro_mount_recorded_readonly() {
+  local name="$1" py hcfg hcfg_canon hcfg_host json res rc tries max
+  _ACQ_MSB_RO_MOUNT_REASON=""
+  if ! _acq_msb_ro_mount_platform_ok; then
+    _ACQ_MSB_RO_MOUNT_REASON="this platform's msb filesystem backend was not reviewed for read-only enforcement"
+    return 1
+  fi
+  py=$(_acq_msb_ro_python) || py=""
+  if [ -z "$py" ]; then
+    _ACQ_MSB_RO_MOUNT_REASON="python3 is required to read msb's mount record and was not found"
+    return 1
+  fi
+  hcfg=$(acq_host_config_dir msb "$name") || hcfg=""
+  if [ -z "$hcfg" ]; then
+    _ACQ_MSB_RO_MOUNT_REASON="acq has no host config directory for this sandbox"
+    return 1
+  fi
+  hcfg_canon="$hcfg"
+  if command -v _acq_provider_input_canonical_path >/dev/null 2>&1; then
+    hcfg_canon=$(_acq_provider_input_canonical_path "$hcfg" 2>/dev/null) || hcfg_canon="$hcfg"
+  fi
+  hcfg_host="$hcfg_canon"
+  if command -v host_path >/dev/null 2>&1; then
+    hcfg_host=$(host_path "$hcfg_canon" 2>/dev/null) || hcfg_host="$hcfg_canon"
+  fi
+  max="${ACQ_MSB_RO_INSPECT_RETRIES:-3}"
+  case "$max" in ""|*[!0-9]*) max=3 ;; esac
+  [ "$max" -ge 1 ] || max=1
+  tries=0
+  while :; do
+    tries=$((tries + 1))
+    if ! json=$(_acq_msb_cli inspect "$name" --format json 2>/dev/null </dev/null); then
+      _ACQ_MSB_RO_MOUNT_REASON="'msb inspect' failed, so the recorded mount could not be read"
+      return 1
+    fi
+    rc=0
+    res=$(printf '%s' "$json" | "$py" -c "$_ACQ_MSB_RO_INSPECT_PY" "$ACQ_HOST_CONFIG_GUEST_DIR" "$hcfg" "$hcfg_canon" "$hcfg_host" 2>/dev/null) || rc=$?
+    case "$rc" in
+      0) [ "$res" = "ok" ] && return 0
+         _ACQ_MSB_RO_MOUNT_REASON="the mount record check returned an unexpected result"; return 1 ;;
+      3) if [ "$tries" -lt "$max" ]; then sleep "${ACQ_MSB_RO_INSPECT_RETRY_SLEEP:-1}"; continue; fi
+         _ACQ_MSB_RO_MOUNT_REASON="$res"; return 1 ;;
+      *) _ACQ_MSB_RO_MOUNT_REASON="${res:-the mount record check failed}"; return 1 ;;
+    esac
   done
-  set +f
-  return 1
 }
 
 # Whether sandbox NAME's trusted :ro host-config mount may be relied on for
 # readonly kit code. Return codes:
-#   0  recorded at create, the msb version is qualified, and the guest probe did
-#      not contradict the mount
+#   0  all hold: a host ro-host-config record; msb at or above the version floor;
+#      msb's own `inspect` record shows the host-config mount as the one read-only
+#      Bind of acq's host config directory; and the guest probe did not contradict it
 #   1  no host record (legacy sandbox, or a create that never completed): the caller
 #      takes the compatibility path and copies the file into the guest, with its warning
-#   2  recorded and qualified, but the probe finds the mount WRITABLE by the guest
-#   3  recorded and qualified, but the probe does not confirm the mount (absent,
+#   2  all of the above but the guest probe finds the mount WRITABLE
+#   3  all of the above but the guest probe does not confirm the mount (absent,
 #      unreadable, or the probe could not run)
-#   4  recorded, but the installed msb version is not on the qualified list
-# Authority: the only thing that can establish that a `:ro` mount is read-only is
-# the runtime, and acq establishes it per msb VERSION, from the host, by running the
-# canary in scripts/qualify-msb-ro-mount (a throwaway sandbox attempts the strongest
-# writes it can, and the REAL host directory is inspected afterwards). A version is
-# trusted only if it is on MSB_RO_MOUNT_QUALIFIED_VERSIONS. The create-time record
-# (key ro-host-config) proves only that acq asked for the mount; it is not evidence
-# of enforcement. The guest probe below is a diagnostic that can only make acq
-# stricter: a guest with root controls `test`/`sh` and can answer a probe however it
-# likes, so a zero exit proves nothing, while a "writable" answer is always taken at
-# face value (fail closed).
+#   4  recorded, but the msb version is below the floor, a prerelease, or unparsable
+#   5  recorded, but msb's own record does not show the read-only host-config mount
+#      (reason in _ACQ_MSB_RO_MOUNT_REASON)
+# Authority: enforcement of `:ro` is msb's, on the host: its virtiofs server denies
+# mutating operations on a read-only mount whatever the guest does (a guest root can
+# even relabel its own mount flags). What acq checks is that msb RECORDED this
+# sandbox's mount as read-only, read from the host with `msb inspect`, which a guest
+# cannot forge. That confirms the setting msb was asked to enforce; it is not
+# independent proof of enforcement, so a future upstream regression would not be
+# caught here (scripts/qualify-msb-ro-mount is the optional re-check). The create-time
+# record (key ro-host-config) proves only that acq asked for the mount. The guest
+# probe is a diagnostic that can only make acq stricter: a guest with root controls
+# `test`/`sh` and can answer a probe however it likes, so a zero exit proves nothing,
+# while a "writable" answer is always taken at face value (fail closed).
 _acq_msb_host_config_mount_available() {
   local name="$1" _probe_rc=0
   [ "$(acq_host_config_read msb "$name" ro-host-config)" = "1" ] || return 1
-  _acq_msb_ro_mount_version_qualified || return 4
+  _acq_msb_ro_mount_version_ok || return 4
+  _acq_msb_ro_mount_recorded_readonly "$name" || return 5
   _acq_msb_host_config_mount_probe "$name" || _probe_rc=$?
   case "$_probe_rc" in
     0) return 0 ;;
@@ -2684,11 +2830,15 @@ _acq_msb_startup_body_into() {
   # The create-time script is assembled before the normal apply path stages the
   # files, so derive the same readonly path rewrite locally.
   local _ro_from=() _ro_to=() _frec _fpath _fsource _freadonly _fslug _fcrc _ro_ok=0
-  _acq_msb_ro_mount_version_qualified && _ro_ok=1
+  _acq_msb_ro_mount_version_ok && _acq_msb_ro_mount_platform_ok && _ro_ok=1
   while IFS= read -r _frec; do
     [ -n "$_frec" ] || continue
-    # Not qualified: leave argv at the declared guest path. The apply step refuses
-    # the readonly file itself, so nothing is staged on, or run from, the mount.
+    # Version below the floor (or an unreviewed platform): leave argv at the declared
+    # guest path. The sandbox does not exist yet, so the per-sandbox msb record cannot
+    # be read here; the apply step re-checks it and refuses the readonly file when it
+    # does not show a read-only mount, so nothing is staged on, or run from, the mount.
+    # The registered startup script is inert at boot and is only run through acq's
+    # apply/heal path, which performs that check first.
     [ "$_ro_ok" -eq 1 ] || continue
     _freadonly=$(printf '%s' "$_frec" | cut -f5)
     [ "$_freadonly" = "true" ] || continue
