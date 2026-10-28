@@ -434,6 +434,55 @@ case "$_msb_sub" in
       echo "error: stub inspect failure" >&2
       exit 1
     fi
+    # STUB_MSB_INSPECT_MODE serves the real observed `msb inspect --format json` shape
+    # for a sandbox created by acq (msb 0.7.7): `.active_config.mounts[]` with
+    # {type, guest, host, options:{readonly,...}}. Modes: ro-ok (host-config mount is
+    # the read-only Bind of acq's host config dir), rw (readonly false), missing (no
+    # host-config mount), dup (two mounts at the guest path), overlap-rw (a writable
+    # mount above the guest path), wrong-host (read-only Bind of another directory),
+    # not-bind (type is not Bind), null (active_config null; STUB_MSB_INSPECT_NULL_TIMES=N
+    # makes only the first N answers null), badjson, noshape (mounts is not a list).
+    if [ -n "${STUB_MSB_INSPECT_MODE:-}" ]; then
+      _sb="${2:-}"
+      _sum=$(printf '%s' "$_sb" | cksum | cut -d' ' -f1)
+      _safe=$(printf '%s' "$_sb" | tr -c 'A-Za-z0-9._-' '_')
+      _cfg="${ACQ_PROVENANCE_DIR}/msb/${_safe}.${_sum}.config"
+      _mode="$STUB_MSB_INSPECT_MODE"
+      if [ "$_mode" = "null" ] || [ -n "${STUB_MSB_INSPECT_NULL_TIMES:-}" ]; then
+        _nulls=$(cat "$STUBDIR/.msb_inspect_nulls" 2>/dev/null || echo 0)
+        if [ "$_mode" = "null" ] || [ "$_nulls" -lt "${STUB_MSB_INSPECT_NULL_TIMES:-0}" ]; then
+          echo $((_nulls + 1)) >"$STUBDIR/.msb_inspect_nulls"
+          printf '{"name":"%s","config":{"spec":{"mounts":null}},"active_config":null}\n' "$_sb"
+          exit 0
+        fi
+        [ "$_mode" = "null" ] && _mode=ro-ok
+      fi
+      [ "$_mode" = "badjson" ] && { printf 'this is not json {{\n'; exit 0; }
+      python3 - "$_mode" "$_sb" "$_cfg" "${ACQ_HOST_CONFIG_GUEST_DIR:-/var/lib/acq/host}" <<'PYSTUB'
+import json, sys
+mode, name, cfg, guest = sys.argv[1:5]
+def mount(g, h, ro, typ="Bind"):
+    return {"type": typ, "guest": g, "host": h,
+            "options": {"readonly": ro, "noexec": False, "nosuid": False, "nodev": False},
+            "follow_root_symlinks": False, "host_permissions": "private",
+            "stat_virtualization": "strict", "quota_mib": None}
+ws = mount("/tmp/ws", "/tmp/ws", False)
+prov = mount("/var/lib/acq/provider-input", "/tmp/prov", True)
+hcfg = mount(guest, cfg, True)
+mounts = [ws, prov, hcfg]
+if mode == "rw": mounts = [ws, prov, mount(guest, cfg, False)]
+elif mode == "missing": mounts = [ws, prov]
+elif mode == "dup": mounts = [ws, prov, hcfg, mount(guest, cfg, True)]
+elif mode == "overlap-rw": mounts = [ws, prov, hcfg, mount("/var/lib/acq", "/tmp/other", False)]
+elif mode == "wrong-host": mounts = [ws, prov, mount(guest, "/tmp/some/other/dir", True)]
+elif mode == "not-bind": mounts = [ws, prov, mount(guest, cfg, True, typ="Named")]
+elif mode == "noshape": mounts = {"unexpected": True}
+d = {"name": name, "config": {"spec": {"mounts": None}, "mounts": mounts},
+     "active_config": {"mounts": mounts}}
+print(json.dumps(d))
+PYSTUB
+      exit 0
+    fi
     [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
   list|ls)
     [ "${STUB_MSB_LIST_FAIL:-0}" = "1" ] && exit 1
@@ -523,7 +572,7 @@ case "$_msb_sub" in
       *"test -d '/var/lib/acq/host'"*)
         [ "${STUB_HOST_CONFIG_MOUNT:-1}" = "0" ] && exit 1 || exit 0 ;;
       *".acq-ro-probe"*)
-        [ "${STUB_HOST_CONFIG_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
+        [ "${STUB_HOST_CONFIG_WRITABLE:-0}" = "1" ] && exit 2 || exit 0 ;;
       # `command -v <agent>` (agent-presence probe): controllable so the install
       # path can be exercised. By default the agent is ABSENT (exit 1) so install
       # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq

@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+# qualify-msb-ro-mount — OPTIONAL, NON-GATING host-observed canary: does THIS msb
+# enforce a `:ro` volume?
+#
+# acq does NOT depend on this script. Its gate for running trusted code from the
+# read-only host-config mount is the per-sandbox record msb keeps (`msb inspect`) plus a
+# version floor (ADR-0035). This canary is corroborating evidence: run it when adopting
+# a new msb release, or if you suspect an upstream regression in `:ro` enforcement, which
+# the gate would not catch.
+#
+# acq (ADR-0035 Mechanism 2) runs readonly kit code from a host directory mounted
+# into the guest with `--volume HOST:GUEST:ro`. A guest-run probe cannot show that the
+# mount is read-only (a guest with root controls `sh` and `test`), so this script
+# judges it from the HOST: it creates a throwaway sandbox from acq's default image,
+# mounts a host directory read-only, makes the guest (as root) try every write it can
+# think of, including remounting read-write, and then inspects the REAL host
+# directory. Any change there means the mount was writable. A second, read-write host
+# directory is mounted as a positive control: the host must see the control file the
+# guest wrote there, otherwise the attempts proved nothing and the result is BLOCKED.
+#
+# Result: PASS (host directory unchanged, no data write reported, controls seen),
+# FAIL (a data write was reported, or the host directory changed), or BLOCKED
+# (could not run to a conclusion). Exit 0 / 1 / 2.
+#
+# Classification: only genuine data-modifying operations (create, overwrite, append,
+# mkdir, chmod, rename, delete, and create/overwrite AFTER the remount attempts) are
+# recorded WROTE or DENIED. A `mount -o remount` that the guest kernel accepts is NOT
+# a write: it is recorded REMOUNT-ACCEPTED / REMOUNT-DENIED (informational) and the
+# writes after it show whether it changed anything. Verdict order: BLOCKED controls,
+# then the host-side comparison and the guest's WROTE lines are both computed and
+# reported, FAIL if either shows a change, PASS only if neither does.
+#
+# Evidence: every run writes ALL its output under one directory,
+# <repo root>/tmp/qualify-msb-ro-mount-<UTC stamp>/ (tmp/ is gitignored; override with
+# ACQ_QUALIFY_OUT_DIR=<dir>): results.tsv, the guest log (attempts.log, including
+# /proc/mounts before and after the remount attempts), the before and after host
+# snapshots and their diff, and verdict.txt. On FAIL or BLOCKED the throwaway host
+# directories (ro/ and rw/) are kept there too; on PASS they are removed, because
+# everything of value has been copied out. Every run ends with one pasteable line:
+#   RESULT <PASS|FAIL|BLOCKED> msb=<ver> image=<image> host=<os arch> rev=<sha> dir=<abs path>
+# A PASS is corroborating evidence only; record it in ADR-0035 when adopting a version.
+#
+# Usage:  [EXPECT_SHA=<prefix>] bash scripts/qualify-msb-ro-mount
+#   EXPECT_SHA          abort (BLOCKED) unless this checkout's HEAD starts with it
+#   ACQ_QUALIFY_OUT_DIR output directory (default <repo root>/tmp/qualify-msb-ro-mount-<stamp>;
+#                       NOT $TMPDIR: msb cannot mount host paths under macOS $TMPDIR)
+#   QUALIFY_IMAGE       image to test (default: acq's default msb image)
+#   STEP_TIMEOUT        seconds for create (image pull) (default 600)
+#   EXEC_TIMEOUT        seconds for each exec step (default 90)
+#
+# Never prints credentials. Needs msb on PATH, a KVM/HVF-capable host, network access
+# for the image pull. Bash 3.2 compatible. Run it OUTSIDE any sandbox.
+set -uo pipefail
+
+STEP_TIMEOUT="${STEP_TIMEOUT:-600}"
+EXEC_TIMEOUT="${EXEC_TIMEOUT:-90}"
+IMAGE="${QUALIFY_IMAGE:-docker.io/docker/sandbox-templates:shell-docker}"
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+REPO=$(cd "$HERE/.." && pwd -P)
+
+SANDBOX="" ; RODIR="" ; RWDIR="" ; RUNDIR="" ; RESULTS="" ; DONE=0 ; KEEP_DIRS=1 ; LOG="" ; VERSION="" ; REVISION=""
+
+# Run a command with a per-step timeout when a timeout tool exists. --foreground keeps
+# the child able to read the terminal and be interrupted; fall back to running it bare.
+_to() { # SECONDS CMD...
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --foreground "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --foreground "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
+say() { printf '%s\n' "$*"; }
+
+cleanup() {
+  if [ -n "$SANDBOX" ]; then
+    _to 60 msb remove --force "$SANDBOX" </dev/null >/dev/null 2>&1 || true
+    SANDBOX=""
+  fi
+  local d
+  if [ "$KEEP_DIRS" -eq 0 ] && [ -n "$RUNDIR" ]; then
+    for d in "$RUNDIR/ro" "$RUNDIR/rw"; do
+      if [ -d "$d" ]; then chmod -R u+w "$d" 2>/dev/null || true; rm -rf -- "$d"; fi
+    done
+  fi
+}
+trap 'cleanup' EXIT
+trap 'echo; echo "interrupted; removing the throwaway sandbox"; cleanup; exit 130' INT TERM
+
+finish() { # VERDICT DETAIL
+  local verdict="$1" detail="$2" rc hostid
+  DONE=1
+  case "$verdict" in PASS) rc=0 ;; FAIL) rc=1 ;; *) rc=2 ;; esac
+  hostid=$(uname -sm 2>/dev/null || echo unknown)
+  say ""
+  say "RESULT: $verdict"
+  say "msb version : ${VERSION:-unknown}"
+  say "image       : $IMAGE"
+  say "host        : $(uname -srm 2>/dev/null || echo unknown)"
+  say "revision    : ${REVISION:-unknown}"
+  say "detail      : $detail"
+  if [ -n "$RUNDIR" ] && [ -d "$RUNDIR" ]; then
+    RESULTS="$RUNDIR/results.tsv"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$verdict" "${VERSION:-unknown}" "${REVISION:-unknown}" "$detail" "$RUNDIR/attempts.log" >>"$RESULTS" 2>/dev/null || true
+    printf 'RESULT: %s\nmsb version: %s\nimage: %s\nhost: %s\nrevision: %s\ndetail: %s\n' "$verdict" "${VERSION:-unknown}" "$IMAGE" "$hostid" "${REVISION:-unknown}" "$detail" >"$RUNDIR/verdict.txt" 2>/dev/null || true
+    if [ "$verdict" = PASS ]; then KEEP_DIRS=0; else KEEP_DIRS=1; fi
+    say "results     : $RESULTS"
+    say "evidence    : $RUNDIR (guest log, host snapshots and diff, verdict)"
+    [ "$KEEP_DIRS" -eq 1 ] && say "kept        : the throwaway host directories under $RUNDIR (ro/ and rw/)"
+  fi
+  if [ "$verdict" = PASS ] && [ "${VERSION_OK:-0}" -ne 1 ]; then
+    say ""
+    say "NOTE: '${VERSION}' is not a final X.Y.Z release, so acq will not rely on the read-only mount on it."
+  elif [ "$verdict" = PASS ]; then
+    say ""
+    say "This is corroborating evidence only; acq's gate does not depend on it. If you are adopting"
+    say "msb ${VERSION}, record this output (version, revision, date, host OS/arch, image) in"
+    say "docs/adr/0035-host-authoritative-sandbox-config.md."
+  fi
+  say ""
+  say "RESULT $verdict msb=${VERSION:-unknown} image=$IMAGE host=$hostid rev=${REVISION:-unknown} dir=${RUNDIR:-none}"
+  exit "$rc"
+}
+
+# Output directory first, so even an early BLOCKED leaves evidence the operator can
+# paste or share. Repo-local by default so it is readable from the same checkout.
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+RUNDIR="${ACQ_QUALIFY_OUT_DIR:-$REPO/tmp/qualify-msb-ro-mount-$STAMP}"
+if mkdir -p "$RUNDIR" 2>/dev/null; then
+  RUNDIR=$(cd "$RUNDIR" && pwd -P)
+else
+  RUNDIR=""
+fi
+RODIR=""; RWDIR=""
+[ -n "$RUNDIR" ] || { echo "cannot create the output directory (set ACQ_QUALIFY_OUT_DIR)" >&2; VERSION=""; finish BLOCKED "cannot create the output directory"; }
+
+# --- preconditions ----------------------------------------------------------
+command -v msb >/dev/null 2>&1 || finish BLOCKED "msb is not on PATH"
+VERSION=$(msb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?([+-][^[:space:]]*)?' | head -n1)
+[ -n "$VERSION" ] || VERSION="version not parsed"
+VERSION_OK=0
+case "$VERSION" in
+  *[!0-9.]*|"") ;;
+  [0-9]*.[0-9]*.[0-9]*) VERSION_OK=1 ;;
+esac
+
+REVISION=""
+if git -C "$REPO" rev-parse HEAD >/dev/null 2>&1; then REVISION=$(git -C "$REPO" rev-parse HEAD); fi
+if [ -n "${EXPECT_SHA:-}" ]; then
+  case "$REVISION" in
+    "$EXPECT_SHA"*) ;;
+    *) finish BLOCKED "checkout revision '${REVISION:-unknown}' does not match EXPECT_SHA=$EXPECT_SHA" ;;
+  esac
+fi
+
+RODIR="$RUNDIR/ro"; RWDIR="$RUNDIR/rw"
+mkdir "$RODIR" "$RWDIR" || finish BLOCKED "cannot create the test directories"
+chmod 0755 "$RODIR" "$RWDIR"
+printf 'HOST-ORIGINAL\n' >"$RODIR/sentinel"
+chmod 0644 "$RODIR/sentinel"
+
+# Snapshot of everything a guest write could change: names, modes, sizes, mtimes and
+# file contents. Compared byte-for-byte before and after.
+snapshot() { # DIR
+  ( cd "$1" && LC_ALL=C ls -lnaR . 2>&1; \
+    find . -type f -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do cksum "$f"; done )
+}
+BEFORE=$(snapshot "$RODIR")
+
+# --- guest attack script (positional args: the guest ro path, the guest rw path) --
+# Everything it does is an ATTEMPT; the verdict never depends on what it reports.
+read -r -d '' ATTACK <<'EOS'
+ro=$1; rw=$2; log=$rw/attempts.log
+: > "$log"
+note() { printf '%s\n' "$*" >>"$log"; }
+try() { d=$1; shift; if "$@" >/dev/null 2>&1; then note "WROTE $d"; else note "DENIED $d"; fi; }
+# A remount that is accepted changes the guest's own mount flags; it is not a write.
+rtry() { d=$1; shift; if "$@" >/dev/null 2>&1; then note "REMOUNT-ACCEPTED $d"; else note "REMOUNT-DENIED $d"; fi; }
+mline() { grep " $1 " /proc/mounts 2>/dev/null | head -n1; }
+note "uid=$(id -u)"
+# Control: the same operations MUST succeed on the read-write volume, so a DENIED on
+# the read-only volume cannot just mean "that command is missing in this image".
+ctl=$rw/ctl; mkdir -p "$ctl" && : > "$ctl/f" && echo x >> "$ctl/f" && chmod 0600 "$ctl/f" \
+  && mv "$ctl/f" "$ctl/g" && mkdir "$ctl/d" && rm -f "$ctl/g" && note "CONTROL-OK" || note "CONTROL-BROKEN"
+if [ "$(cat "$ro/sentinel" 2>/dev/null)" = "HOST-ORIGINAL" ]; then note "READ-OK"; else note "READ-MISSING"; fi
+try create-file   sh -c ': > "$0/qual-new-file"' "$ro"
+try overwrite     sh -c 'echo tampered > "$0/sentinel"' "$ro"
+try append        sh -c 'echo extra >> "$0/sentinel"' "$ro"
+try mkdir         mkdir "$ro/qual-dir"
+try chmod         chmod 0777 "$ro/sentinel"
+try rename        mv "$ro/sentinel" "$ro/sentinel.moved"
+try delete        rm -f "$ro/sentinel"
+note "MOUNT-BEFORE ro: $(mline "$ro")"
+note "MOUNT-BEFORE rw: $(mline "$rw")"
+rtry remount-rw    mount -o remount,rw "$ro"
+rtry remount-bind  mount -o remount,bind,rw "$ro"
+note "MOUNT-AFTER ro: $(mline "$ro")"
+note "MOUNT-AFTER rw: $(mline "$rw")"
+try create-after-remount sh -c ': > "$0/qual-after-remount"' "$ro"
+try overwrite-after-remount sh -c 'echo tampered2 > "$0/sentinel"' "$ro"
+try append-after-remount sh -c 'echo extra2 >> "$0/sentinel"' "$ro"
+try mkdir-after-remount mkdir "$ro/qual-dir2"
+try chmod-after-remount chmod 0777 "$ro/sentinel"
+try rename-after-remount mv "$ro/sentinel" "$ro/sentinel.moved2"
+try delete-after-remount rm -f "$ro/sentinel"
+if [ "$(cat "$ro/sentinel" 2>/dev/null)" = "HOST-ORIGINAL" ]; then note "READ-AFTER-OK"; else note "READ-AFTER-CHANGED"; fi
+note "DONE"
+EOS
+
+# --- create the throwaway sandbox ------------------------------------------
+SANDBOX="acq-qual-ro-${STAMP}-$$"
+say "msb $VERSION; testing image $IMAGE"
+say "creating throwaway sandbox $SANDBOX (this pulls the image on first use)..."
+if ! _to "$STEP_TIMEOUT" msb create --name "$SANDBOX" \
+      --volume "$RODIR:/mnt/qual-ro:ro" --volume "$RWDIR:/mnt/qual-rw" \
+      "$IMAGE" </dev/null; then
+  finish BLOCKED "msb create failed or timed out"
+fi
+
+# --- wait until exec works --------------------------------------------------
+ready=0; i=0
+while [ "$i" -lt 30 ]; do
+  out=$(_to "$EXEC_TIMEOUT" msb exec "$SANDBOX" -- sh -c 'echo ok' </dev/null 2>/dev/null | tr -d '\r')
+  case "$out" in *ok*) ready=1; break ;; esac
+  i=$((i + 1)); sleep 2
+done
+[ "$ready" -eq 1 ] || finish BLOCKED "sandbox never became exec-ready"
+
+# --- attempts, as root ------------------------------------------------------
+say "running write attempts as root inside the guest..."
+_to "$EXEC_TIMEOUT" msb exec "$SANDBOX" -u 0 -- sh -c "$ATTACK" sh /mnt/qual-ro /mnt/qual-rw </dev/null >/dev/null 2>&1 || true
+
+# --- judge from the HOST only -----------------------------------------------
+LOG="$RWDIR/attempts.log"
+if [ ! -s "$LOG" ] || ! grep -q '^DONE$' "$LOG" 2>/dev/null; then
+  finish BLOCKED "positive control failed: the host did not see the guest's attempts log, so the attempts are unproven"
+fi
+if ! grep -q '^uid=0$' "$LOG" 2>/dev/null; then
+  finish BLOCKED "the attempts did not run as root (uid): a denial as an unprivileged user proves nothing"
+fi
+if ! grep -q '^CONTROL-OK$' "$LOG" 2>/dev/null; then
+  finish BLOCKED "the same operations did not succeed on the read-write control volume, so a denial on the read-only volume is unproven"
+fi
+if ! grep -q '^READ-OK$' "$LOG" 2>/dev/null; then
+  finish BLOCKED "the guest could not read the mounted sentinel, so the read-only mount was not visible"
+fi
+AFTER=$(snapshot "$RODIR")
+cp "$LOG" "$RUNDIR/attempts.log" 2>/dev/null || true
+printf '%s\n' "$BEFORE" >"$RUNDIR/before.snapshot"
+printf '%s\n' "$AFTER" >"$RUNDIR/after.snapshot"
+LOG="$RUNDIR/attempts.log"
+
+say "--- guest-reported log (diagnostic; the host snapshot below is the authority) ---"
+sed 's/^/  /' "$LOG"
+if grep -q '^REMOUNT-ACCEPTED ' "$LOG" 2>/dev/null; then
+  say "--- note: a remount was ACCEPTED ---"
+  say "  A guest root can change the guest's own mount flags, and the guest's view may then"
+  say "  show the mount as read-write. That does not by itself mean the host directory is"
+  say "  writable. This verdict rests on (1) every later data write being denied and (2) the"
+  say "  real host directory being unchanged. It covers a freshly created sandbox on this"
+  say "  msb version, image and host, and does not exercise other sequences of guest actions."
+fi
+
+WROTE_LINES=$(grep '^WROTE ' "$LOG" 2>/dev/null || true)
+if grep -q '^READ-AFTER-CHANGED$' "$LOG" 2>/dev/null; then
+  WROTE_LINES="${WROTE_LINES}${WROTE_LINES:+
+}READ-AFTER-CHANGED (the guest's own view of the sentinel no longer matches the original)"
+fi
+HOST_CHANGED=0
+if [ "$BEFORE" != "$AFTER" ]; then
+  HOST_CHANGED=1
+  say "--- host directory changed ---"
+  diff <(printf '%s\n' "$BEFORE") <(printf '%s\n' "$AFTER") >"$RUNDIR/host.diff" 2>&1 || true
+  head -n 40 "$RUNDIR/host.diff"
+fi
+if [ -n "$WROTE_LINES" ] && [ "$HOST_CHANGED" -eq 1 ]; then
+  finish FAIL "the guest wrote to the :ro mount AND the host directory behind it changed; this msb does NOT enforce read-only"
+elif [ "$HOST_CHANGED" -eq 1 ]; then
+  finish FAIL "the host directory behind the :ro volume was modified by the guest even though the guest reported every write denied; this msb does NOT enforce read-only"
+elif [ -n "$WROTE_LINES" ]; then
+  say "--- data writes the guest reports as successful ---"
+  printf '%s\n' "$WROTE_LINES" | head -n 20
+  finish FAIL "the guest was able to write to the :ro mount (the host directory did not change, but code the guest runs from that mount could be modified)"
+fi
+finish PASS "the host directory behind the :ro volume was unchanged and every data write the guest attempted was denied ($(grep -c '^DENIED' "$LOG") denied; $(grep -c '^REMOUNT-ACCEPTED' "$LOG") remount attempt(s) accepted, which is informational)"

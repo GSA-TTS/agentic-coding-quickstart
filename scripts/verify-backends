@@ -995,7 +995,7 @@ verify_backend() {
   #    oci-engine catalog kit, verified separately below.
   if [ "$backend" = "msb" ]; then
     if run_acq "exec no-default-oci" --backend "$backend" exec "$name" -- sh -c \
-        'test ! -e /var/lib/acq/oci-ready && ! command -v podman >/dev/null 2>&1'; then
+        'test ! -e /var/lib/acq/oci-engine-ready && ! command -v podman >/dev/null 2>&1'; then
       pass "${backend}: OCI engine is not installed by default"
     else
       fail "${backend}: OCI engine appeared without selecting the oci-engine kit"

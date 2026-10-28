@@ -196,7 +196,7 @@ _attach() { # PRE_SNIPPET NAME
   local log; log=$(cat "$CALLS")
   refute_regex "$log" 'PODMAN_PKGS='
   refute_regex "$log" '/usr/local/bin/docker'
-  refute_regex "$log" 'oci-ready'
+  refute_regex "$log" 'oci-engine-ready'
   refute_regex "$log" '/etc/containers/storage\.conf'
   refute_regex "$log" 'acq-oci-selftest'
   refute_regex "$log" '/dev/net/tun'
@@ -389,7 +389,7 @@ _attach() { # PRE_SNIPPET NAME
   assert_equal "$(grep -c -- '-w /tmp/myrepo cachebox' "$CALLS")" "2"
 }
 
-@test "msb #426: heal upgrades an existing /bin/sh agent user (marker hit still syncs the shell)" {
+@test "msb #426: heal upgrades an existing /bin/sh agent user (the shell sync runs on every heal)" {
   : > "$CALLS"
   printf 'healshbox\n' > "$STUBDIR/.msb_sandbox_list"
   printf 'healshbox\n' > "$STUBDIR/.msb_running_list"
@@ -405,7 +405,6 @@ _attach() { # PRE_SNIPPET NAME
   '
   local log; log=$(cat "$CALLS")
   assert_regex "$log" 'acq-login-profile.* sh /bin/bash'
-  refute_regex "$log" 'useradd'
 }
 
 @test "msb #426: shell and attach exec the agent passwd shell and set SHELL to match" {
