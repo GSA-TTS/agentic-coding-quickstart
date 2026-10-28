@@ -3089,7 +3089,7 @@ host-side API, or a read-only host channel into the sandbox.
 
 ---
 
-## 48. msb: Readonly Kit Files Are Refused Until the Read-Only Mount Is Qualified
+## 48. msb: Readonly Kit Files Are Refused on an Unqualified msb Version
 
 **Status:** Fail closed by design. Applies to a kit with `files[]` entries marked
 `readonly: true` on an msb sandbox created with the read-only host-config mount.
@@ -3109,11 +3109,13 @@ a heal reports it on each re-attach.
 
 acq runs `readonly: true` kit code from a host directory mounted into the guest
 `:ro`, on the assumption that the runtime enforces that flag. Only the runtime can
-establish that, and it is unverified on every msb version acq accepts. A guest-run
-probe cannot stand in for it: a guest with passwordless sudo controls `sh` and
-`test`. So acq trusts the mount only on msb versions a **host-observed** canary has
-qualified (`MSB_RO_MOUNT_QUALIFIED_VERSIONS`, which ships empty), and otherwise
-refuses rather than staging, running, or copying that code.
+establish that. A guest-run probe cannot stand in for it: a guest with passwordless
+sudo controls `sh` and `test`, and on msb the guest's own view of its mount flags can
+even flip to `rw` after a remount while the host side still refuses writes (see
+ADR-0035). So acq trusts the mount only on msb versions a **host-observed** canary
+has qualified (`MSB_RO_MOUNT_QUALIFIED_VERSIONS`). Today that list holds **0.7.7**
+only (macOS arm64, default image, fresh create; evidence in ADR-0035). On any other
+msb version acq refuses rather than staging, running, or copying that code.
 
 ### Fix
 
@@ -3133,9 +3135,12 @@ grants trust.
 
 ### Prevention / Status
 
-No shipped built-in kit marks a file `readonly: true`, so default sandboxes are not
-affected today; the gate matters for the first kit that opts in. Until a version is
-qualified this is expected, not a defect.
+On msb 0.7.7 readonly kit files are accepted. That qualification covers a fresh
+create on macOS arm64 with the default image; it says nothing about Linux, Windows,
+other images or behavior after `msb start`, which remain unverified. On any other
+msb version the refusal is expected until that version passes the canary. No shipped built-in kit marks a file
+`readonly: true`, so default sandboxes are not affected either way; the gate matters
+for the first kit that opts in.
 
 ---
 

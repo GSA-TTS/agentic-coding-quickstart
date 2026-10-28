@@ -21,7 +21,8 @@ on the host, mounts the per-sandbox config directory `:ro`, and runs the heal fr
 the mounted path, so a passwordless-sudo guest cannot rewrite the code acq
 re-executes on restart, **on an msb version where a host-observed canary has shown
 the `:ro` mount is enforced** (ADR-0035 gates that on a checked-in list of qualified
-versions, which ships empty; a guest-run probe is never accepted as proof).
+versions, currently msb 0.7.7 only on one host class; a guest-run probe is never
+accepted as proof).
 
 SBX has no equivalent. `acq_backend_provision` for sbx creates the host config
 directory but never mounts it (it holds host-only keys such as `extra-kits`,
