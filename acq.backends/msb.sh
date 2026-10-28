@@ -2298,6 +2298,23 @@ _acq_msb_exec_flags_into() {
   done
 }
 
+# Foreground kit execution only. A fixed waiting shell avoids the measured MSB
+# direct-Node startup cost; argv stays positional, never shell source (ADR-0036).
+# Keep wrapping here, AFTER install marker hashing and background dispatch.
+# Args: NAME [MSB EXEC FLAGS...] -- ARGV... (the delimiter is caller-supplied).
+_acq_msb_exec_foreground() {
+  local _fg_prefix=(exec)
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    _fg_prefix+=("$1")
+    shift
+  done
+  [ "$1" = "--" ] && shift
+  if [ "${1:-}" = node ]; then
+    set -- sh -c '"$@"' sh "$@"
+  fi
+  _acq_msb_cli "${_fg_prefix[@]}" -- "$@" </dev/null
+}
+
 # _acq_msb_exec_install NAME USER UFLAG_ARRVAR EFLAG_ARRVAR -- ARGV... — run an
 # install-phase command, gated by a per-command marker (hash of argv) so it runs
 # once per sandbox even across re-applies. The marker is held in host config so
@@ -2320,7 +2337,7 @@ _acq_msb_exec_install() {
     return 0
   fi
   acq_debug "msb cmd[install] START (user=${_user:-0}): $*"
-  _acq_msb_cli exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
+  _acq_msb_exec_foreground "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" || {
     acq_debug "msb cmd[install] FAILED: $*"
     echo "acq(msb): warning: install command failed for '$_name'" >&2
     return 0
@@ -2354,7 +2371,7 @@ _acq_msb_exec_run() {
     acq_debug "msb cmd[startup:background] LAUNCHED: $*"
   else
     acq_debug "msb cmd[${_phase}] START (user=${_user:-0}): $*"
-    _acq_msb_cli exec "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" </dev/null || {
+    _acq_msb_exec_foreground "$_name" "${_uf[@]}" ${_ef[@]+"${_ef[@]}"} -- "$@" || {
       acq_debug "msb cmd[${_phase}] FAILED: $*"
       echo "acq(msb): warning: ${_phase} command failed for '$_name'" >&2
     }

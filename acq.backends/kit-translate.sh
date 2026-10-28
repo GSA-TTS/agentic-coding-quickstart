@@ -44,6 +44,62 @@
 #
 # These read the spec file each call (kits are tiny; simplicity over caching).
 
+# Only full immutable commit IDs participate. Symbolic/abbreviated refs keep
+# their original per-call fetch semantics. The owning acq shell creates and
+# cleans this private root; command substitutions share files, not shell state.
+_kit_fetch_reuse() {
+  local kitref="$1" destdir="$2" url="$3" ref="$4" dir="$5"
+  local key source actual
+  key=$(printf '%s\0%s' "$url" "$ref" | git hash-object --stdin) || return 1
+  source="$_ACQ_KIT_FETCH_ROOT/$key"
+  if [ ! -f "$source/.git/acq-verified" ]; then
+    # Fetch into a private source, never a consumer's mutable destination.
+    # The empty root disables recursion without affecting the owning shell.
+    _ACQ_KIT_FETCH_ROOT='' kit_translate_fetch "$kitref" "$source" >/dev/null || return 1
+    actual=$(git -C "$source" rev-parse HEAD 2>/dev/null) || return 1
+    if [ "$actual" != "$ref" ]; then
+      echo 'kit-translate: failed to fetch remote kit' >&2
+      echo 'kit-translate:   fetched revision does not match pinned commit' >&2
+      return 1
+    fi
+    : > "$source/.git/acq-verified" || return 1
+  fi
+  _kit_fetch_materialize "$source" "$ref" "$dir" "$destdir"
+}
+
+# Read committed objects, not the source working tree. Never hand that tree to
+# consumers: their edits must not contaminate later provider/agent/kit reads.
+_kit_fetch_materialize() (
+  set -o pipefail
+  local source="$1" ref="$2" dir="$3" destdir="$4" stage tree
+  # Filesystem spelling permits ./ and repeated slashes; Git tree lookup does
+  # not. Traversal has already been rejected by the shared source validator.
+  dir=$(printf '%s' "$dir" | sed -e 's|//*|/|g' -e ':again' \
+    -e 's|^\./||' -e 's|/\./|/|g' -e 't again' -e 's|/\.$||' -e 's|/$||')
+  [ "$dir" != . ] || dir=''
+  tree="$ref:$dir"
+  if [ "$(git -C "$source" cat-file -t "$tree" 2>/dev/null)" != tree ]; then
+    echo 'kit-translate: remote kit directory not found' >&2
+    return 1
+  fi
+  stage=$(mktemp -d "$_ACQ_KIT_FETCH_ROOT/materialize.XXXXXX") || return 1
+  trap 'rm -rf -- "$stage"' EXIT
+  mkdir -p "$stage/payload/$dir" || return 1
+  # checkout-index preserves files marked export-ignore/export-subst, unlike
+  # git archive. A private index also leaves the verified source untouched.
+  export GIT_INDEX_FILE="$stage/index"
+  if ! git -C "$source" read-tree "$tree" 2>/dev/null ||
+      ! git -C "$source" checkout-index --all --prefix="$stage/payload/$dir/" 2>/dev/null; then
+    echo 'kit-translate: failed to materialize remote kit' >&2
+    return 1
+  fi
+  rm -f -- "$stage/index" || return 1
+  mkdir -p "$(dirname "$destdir")" || return 1
+  rm -rf -- "$destdir" || return 1
+  mv -- "$stage/payload" "$destdir" || return 1
+  printf '%s/%s\n' "$destdir" "$dir"
+)
+
 # ---------------------------------------------------------------------------
 # kit_translate_fetch KITREF DESTDIR
 # ---------------------------------------------------------------------------
@@ -98,13 +154,17 @@ kit_translate_fetch() {
         echo "kit-translate: unsafe kit dir (illegal characters): $dir" >&2
         return 1
       fi
-      command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: ref=$ref dir=$dir -> $destdir"
+      if [ -n "${_ACQ_KIT_FETCH_ROOT:-}" ] && [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+        _kit_fetch_reuse "$kitref" "$destdir" "$url" "$ref" "$dir"
+        return $?
+      fi
+      command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: remote kit -> $destdir"
       mkdir -p "$destdir"
       # Fetch NON-INTERACTIVELY. We MUST NOT drop into an interactive git
       # credential prompt (which hangs, or fails on GitHub's disabled password
       # auth) just because the user has a global git credential helper or a
       # url.<x>.insteadOf rewrite — `gh auth login` authenticates the gh CLI,
-      # not plain git. See #207 / KNOWN_FAILURE_MODES.
+      # not plain git. See docs/KNOWN_FAILURE_MODES.md.
       #
       # Attempt 1 (anonymous): prompts disabled + inherited credential helper and
       # github.com insteadOf rewrite neutralized, so an unauthenticated fetch
@@ -126,7 +186,7 @@ kit_translate_fetch() {
           # `git init` does not always create .git/info/ (platform-dependent),
           # so create it before writing the sparse-checkout file — otherwise the
           # redirect fails with ".git/info/sparse-checkout: No such file or
-          # directory" (harmless-but-noisy; fetch still fell back). See #211-adjacent.
+          # directory" (harmless-but-noisy; fetch still fell back).
           mkdir -p .git/info
           printf '%s/*\n' "$dir" > .git/info/sparse-checkout
           # shellcheck disable=SC2086
