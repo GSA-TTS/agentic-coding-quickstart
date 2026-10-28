@@ -529,4 +529,3 @@ _run_canary() { # [ENV...]
   run git -C "$REPO_ROOT" check-ignore -q tmp/qualify-msb-ro-mount-x/results.tsv
   [ "$status" -eq 0 ] || skip "not a git checkout, or tmp/ not ignored here"
 }
-
