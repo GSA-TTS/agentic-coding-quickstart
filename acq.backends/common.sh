@@ -2650,6 +2650,8 @@ _acq_kit_source_ref_trusted() {
   # to already BE host/owner/repo[.git], byte for byte.
   case "$body" in
     *@*|*%*|*\?*|*://*|*:*|*//*|*/) body="" ;;
+    *[!A-Za-z0-9._/-]*) body="" ;;
+    */.|*/..|*/./*|*/../*) body="" ;;
   esac
   if [ -n "$body" ]; then
     repo=$(_acq_kit_source_normalize_repo "$body") || repo=""

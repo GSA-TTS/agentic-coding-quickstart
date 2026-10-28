@@ -432,7 +432,8 @@ _fake_source_tree() {
     'git+https://evil.example/github.com/acme/trusted.git#ref=abc123&dir=kits' \
     'git+https://github.com/acme/trusted/.git#ref=abc123&dir=kits' \
     'git+https://github.com:8443/acme/trusted.git#ref=abc123&dir=kits' \
-    'git+https://GitHub.com/acme/trusted.git#ref=abc123&dir=kits'; do
+    'git+https://GitHub.com/acme/trusted.git#ref=abc123&dir=kits' \
+    "$(printf 'git+https://github.com/acme/x\nevil.example/a/b#ref=abc123&dir=kits')"; do
     _acq_config_write_field provider_kit "$bad"
     run acq_provider_kit_ref
     assert_failure
@@ -568,4 +569,24 @@ STUB
   assert_success
   run acq_kit_sources_entries
   refute_output --partial 'github.com/acme/one'
+}
+
+@test "an ACQ_EXTRA_KIT_SOURCES owner grant still needs a plain repository ref" {
+  export ACQ_EXTRA_KIT_SOURCES='github.com/acme/'
+  local bad
+  for bad in \
+    'git+https://github.com/acme/..#ref=abc123&dir=kits' \
+    'git+https://github.com/acme/.#ref=abc123&dir=kits'; do
+    _acq_config_write_field provider_kit "$bad"
+    run acq_provider_kit_ref
+    assert_failure
+  done
+
+  # The flat config reader is line-oriented, so exercise the check directly.
+  run _acq_kit_source_ref_trusted "$(printf 'git+https://github.com/acme/x\nevil.example/a/b#ref=abc123&dir=kits')"
+  assert_failure
+
+  _acq_config_write_field provider_kit 'git+https://github.com/acme/anything.git#ref=abc123&dir=kits'
+  run acq_provider_kit_ref
+  assert_success
 }
