@@ -1013,6 +1013,128 @@ EOF
   assert_failure
 }
 
+# ---------------------------------------------------------------------------
+# Host-neutral link adversaries
+# ---------------------------------------------------------------------------
+# A POSIX symlink and a Windows junction are the same adversary for the path
+# guard: a pre-created ancestor that must never be traversed. Tests use this
+# helper so one shared invariant is asserted on every host, instead of a
+# Windows-only truth. It fails rather than skips when the host refuses to create
+# a link, because a silent skip would retire the traversal guarantee unnoticed.
+_make_dir_link() {
+  local target="$1" link="$2"
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # `mklink /J` needs no elevation; `ln -s` under MSYS only makes an
+      # emulated link that native APIs see as a regular file, which is a
+      # different (weaker) case than a real reparse point. mklink wants
+      # backslashes, so translate with -w (never -m).
+      cmd //c "mklink /J $(cygpath -w "$link") $(cygpath -w "$target")" >/dev/null 2>&1 || return 1
+      ;;
+    *)
+      ln -s "$target" "$link" || return 1
+      ;;
+  esac
+  [ -L "$link" ]
+}
+
+@test "path guard: a pre-created link ancestor receives no created components" {
+  local target="$STUBDIR/linkguard/target" link="$STUBDIR/linkguard/ancestor"
+  mkdir -p "$target"
+  _make_dir_link "$target" "$link" || fail "could not create a directory link on this host"
+  run _acq_provider_input_safe_mkdir "$link/child/grandchild"
+  assert_failure
+  # The invariant is not just "returns non-zero": nothing may be created on the
+  # far side of the link either.
+  [ -z "$(ls -A "$target")" ]
+}
+
+@test "path guard: safe_dir rejects a pre-created link ancestor" {
+  local target="$STUBDIR/linkguard2/target" link="$STUBDIR/linkguard2/ancestor"
+  mkdir -p "$target"
+  _make_dir_link "$target" "$link" || fail "could not create a directory link on this host"
+  run _acq_provider_input_safe_dir "$link/child"
+  assert_failure
+}
+
+@test "path guard: a link as the final component is rejected" {
+  local target="$STUBDIR/linkguard3/target" link="$STUBDIR/linkguard3/leaf"
+  mkdir -p "$target"
+  _make_dir_link "$target" "$link" || fail "could not create a directory link on this host"
+  run _acq_provider_input_safe_dir "$link"
+  assert_failure
+}
+
+@test "path guard: a relative path is rejected with the POSIX diagnostic" {
+  # Windows has no O_DIRECTORY/O_NOFOLLOW/dir_fd, so the same guarantee is
+  # implemented separately there (ADR-0038). Both implementations must reject
+  # the same inputs with the same message, or callers cannot treat them alike.
+  run _acq_provider_input_safe_mkdir "relative/path"
+  assert_failure
+  assert_output --partial 'provider-input path must be absolute'
+}
+
+@test "path guard: an ordinary nested path is created and then accepted" {
+  local real="$STUBDIR/linkguard4/plain/a/b"
+  run _acq_provider_input_safe_mkdir "$real"
+  assert_success
+  [ -d "$real" ]
+  run _acq_provider_input_safe_dir "$real"
+  assert_success
+}
+
+@test "guardian start discovers a numeric transaction parent on this host" {
+  # Regression: MSYS `ps` has no `-o`, so `ps -o ppid=` printed nothing and the
+  # guardian start failed with an empty $!-parent, which aborted every terminate
+  # before port teardown ran (ADR-0038).
+  local script="$STUBDIR/guardian-parent.sh"
+  cat > "$script" <<EOF
+#!/usr/bin/env bash
+set -eu
+export ACQ_PROVENANCE_DIR="$ACQ_PROVENANCE_DIR"
+ACQ_SCRIPT_DIR="$REPO_ROOT" ACQ_SOURCE_ONLY=1 . "$REPO_ROOT/acq"
+(
+  _acq_provider_input_guardian_start
+  printf 'guardian=%s transaction=%s\n' "\$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" "\$_ACQ_PROVIDER_INPUT_TRANSACTION_PID"
+  _acq_provider_input_guardian_stop
+)
+EOF
+  chmod +x "$script"
+  BASH_ENV='' run bash "$script"
+  assert_success
+  assert_regex "$output" '^guardian=[0-9]+ transaction=[0-9]+$'
+}
+
+@test "process identity is stable for a live pid and fails closed otherwise" {
+  run _acq_provider_input_process_identity $$
+  assert_success
+  local first="$output"
+  [ -n "$first" ]
+  run _acq_provider_input_process_identity $$
+  assert_success
+  [ "$output" = "$first" ]
+  run _acq_provider_input_process_identity not-a-pid
+  assert_failure
+  [ -z "$output" ]
+}
+
+@test "transaction parent pid matches the host's own answer and fails closed" {
+  local expected
+  case "$(uname -s 2>/dev/null)" in
+    # MSYS/Cygwin `ps` only offers the BSD layout.
+    MINGW*|MSYS*|CYGWIN*) expected=$(ps -p $$ 2>/dev/null | awk '$1 == '"$$"' { print $2; exit }') ;;
+    *) expected=$(ps -o ppid= -p $$ 2>/dev/null | tr -d '[:space:]') ;;
+  esac
+  [ -n "$expected" ]
+  run _acq_provider_input_parent_pid $$
+  assert_success
+  assert_equal "$output" "$expected"
+  run _acq_provider_input_parent_pid ""
+  assert_failure
+  run _acq_provider_input_parent_pid 0x10
+  assert_failure
+}
+
 @test "canonical_path aliases /var /tmp /etc on Darwin via ACQ_TEST_HOST_OS" {
   # Exercises the production _acq_provider_input_canonical_path helper directly
   # with ACQ_TEST_HOST_OS=darwin so the Darwin branch runs on Linux CI.
