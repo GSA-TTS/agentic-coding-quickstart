@@ -160,7 +160,7 @@ _cfg_src() {
   '
   assert_success
   assert_line 'oci-engine'
-   assert_output --partial 'ref=a1206c52ec82ae7ce080ad44a6e6ac6f951e6d20'
+   assert_output --partial 'ref=7dd2ddc034b6597e97f450fa716e7d47c9a38287'
   assert_output --partial 'dir=integrations/isolation/acq-kits/oci-engine'
 }
 

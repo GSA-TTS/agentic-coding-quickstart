@@ -37,9 +37,14 @@ start. Two facts about that path are **not established**:
    filesystem, so these are the same guest-resident copies ADR-0035 rejects.
 
 Scope today is small. An audit of the pinned Patterns release (v1.17.0) found no
-`acq-kits/*/spec.yaml` that declares `readonly: true`, so Mechanism 2 has no
-consumer on either backend, and the SBX gap is latent rather than exploitable by a
-shipped kit. Re-check this against the pin in force when the ADR is accepted.
+`acq-kits/*/spec.yaml` that declares `readonly: true`, so Mechanism 2 had no
+consumer on either backend. The v1.18.0 pin changes that: the opt-in `oci-engine`
+kit now declares `readonly: true` on its root startup grant script and storage
+helper. On msb those run from the read-only mount; on sbx the translator still
+ignores the field, so the kit's startup command takes its legacy branch and runs
+the root-owned copies published at create. The SBX gap is therefore no longer
+latent for that one opt-in kit. Re-check this against the pin in force when the ADR
+is accepted.
 This ADR decides the direction so that the first kit to opt in does not silently
 get weaker guarantees on SBX than on msb.
 
