@@ -4596,6 +4596,40 @@ os.replace(sys.argv[1], sys.argv[2])
 PY
 }
 
+# Create a Windows junction LINK -> TARGET via `mklink /J`. Unlike a directory
+# symlink (which needs elevation or Developer Mode), a junction needs neither,
+# so it is the reliable reparse pointer on a stock Windows host. `cmd` is driven
+# with MSYS argument escaping and backslash (`cygpath -w`) paths, matching the
+# test helper in 147-provider-input-projection.bats. Returns non-zero on failure.
+_acq_provider_input_make_junction() {
+  local link="$1" target="$2" win_link win_target
+  command -v cygpath >/dev/null 2>&1 || return 1
+  win_link=$(cygpath -w "$link" 2>/dev/null) || return 1
+  win_target=$(cygpath -w "$target" 2>/dev/null) || return 1
+  cmd //c mklink //J "$win_link" "$win_target" >/dev/null 2>&1
+}
+
+# Remove a reparse-point link (POSIX symlink or Windows junction) WITHOUT
+# following it into its target. MSYS rm/rmdir mishandle junctions, so use
+# Python: `os.rmdir` on a junction issues RemoveDirectory on the reparse point
+# itself (the target is left untouched). A symlink or plain file is unlinked.
+_acq_provider_input_remove_link() {
+  local _native
+  _native=$(_acq_provider_input_native_path "$1") || return 1
+  _acq_provider_input_py - "$_native" <<'PY'
+import os, stat, sys
+p = sys.argv[1]
+try:
+    st = os.lstat(p)
+except FileNotFoundError:
+    raise SystemExit(0)
+if stat.S_ISDIR(st.st_mode):
+    os.rmdir(p)
+else:
+    os.unlink(p)
+PY
+}
+
 _acq_provider_input_publish() {
   local root="$1" generation="$2" base temp current
   case "$root" in ""|/|/*/) return 1 ;; esac
@@ -4606,9 +4640,21 @@ _acq_provider_input_publish() {
   base=${generation##*/}
   temp="$root/.current.$$.$RANDOM"
   current="$root/current"
-  ln -s "generations/$base" "$temp" || return 1
-  # rename is atomic within root; do not remove current first.
-  _acq_provider_input_atomic_replace "$temp" "$current" || { rm -f "$temp"; return 1; }
+  if _acq_provider_input_is_msys; then
+    # A directory symlink needs elevation/Developer Mode on Windows; a junction
+    # does not. Build the junction at `temp`, then swap it into place. Windows
+    # cannot atomically replace an existing junction (os.replace fails with
+    # Access denied), so remove the old pointer first; the provider-input lock
+    # serializes creates, so the brief gap is benign (readers see no `current`
+    # and skip, while prior generations stay intact).
+    _acq_provider_input_make_junction "$temp" "$generation" || return 1
+    _acq_provider_input_remove_link "$current" || { _acq_provider_input_remove_link "$temp"; return 1; }
+    _acq_provider_input_atomic_replace "$temp" "$current" || { _acq_provider_input_remove_link "$temp"; return 1; }
+  else
+    ln -s "generations/$base" "$temp" || return 1
+    # rename is atomic within root; do not remove current first.
+    _acq_provider_input_atomic_replace "$temp" "$current" || { rm -f "$temp"; return 1; }
+  fi
   # Retain prior generations. A sandbox created by an older acq may still mount
   # current, and a failed concurrent create must never make that sandbox lose its
   # inputs. New sandboxes mount an exact generation and are unaffected by swaps.

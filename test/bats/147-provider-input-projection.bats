@@ -1096,6 +1096,32 @@ _windows_make_dir_symlink() { # LINK TARGET  (developer mode / admin required)
   assert_failure
 }
 
+@test "windows: publication makes current a junction and retains generations (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local root old new native_current
+  root=$(acq_provider_input_root sbx winpub)
+  mkdir -p "$root/generations/generation.old/models/providers" "$root/generations/generation.new/models/providers"
+  old="$root/generations/generation.old"; new="$root/generations/generation.new"
+
+  # Publish: current must become a junction (a reparse point), not a symlink or a
+  # directory copy, and it must resolve to the published generation.
+  run _acq_provider_input_publish "$root" "$new"
+  assert_success
+  native_current=$(cygpath -m "$root/current" 2>/dev/null) || skip "cygpath unavailable"
+  run _acq_provider_input_py -c 'import os,sys; print("junction" if os.path.isjunction(sys.argv[1]) else "not-junction")' "$native_current"
+  assert_success
+  assert_output "junction"
+  [ -d "$root/current/models/providers" ]
+  [ -d "$new" ]
+
+  # Publish again: current swaps to the other generation; both stay intact.
+  run _acq_provider_input_publish "$root" "$old"
+  assert_success
+  [ -d "$root/current/models/providers" ]
+  [ -d "$old" ]
+  [ -d "$new" ]
+}
+
 # ---------------------------------------------------------------------------
 # MSYS argv conversion must not resolve links before the walk sees the path
 # ---------------------------------------------------------------------------
