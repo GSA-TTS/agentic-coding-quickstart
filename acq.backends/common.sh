@@ -4514,6 +4514,51 @@ acq_provider_input_lock_acquire() {
   printf '%s\n' "$lock"
 }
 
+# Parent PID of PID, or fail.
+#
+# `ps -o ppid=` is the POSIX answer and stays first so POSIX behaviour is
+# untouched. MSYS/Cygwin `ps` (Git Bash) has no `-o` at all - it prints
+# "ps: unknown option -- o" and nothing else - but `ps -p PID` does print a row
+# in the BSD layout `PID PPID PGID WINPID TTY UID STIME COMMAND`. The fallback
+# selects that one row by exact PID match and prints its PPID column, which
+# keeps it correct whether or not the host emits the header line. Anything
+# empty or non-numeric fails closed, exactly as the caller's own guard does.
+_acq_provider_input_parent_pid() {
+  local pid="${1:-}" out
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  out=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  case "$out" in
+    ""|*[!0-9]*)
+      out=$(ps -p "$pid" 2>/dev/null |
+        awk -v want="$pid" '$1 == want && $2 ~ /^[0-9]+$/ { print $2; exit }')
+      ;;
+  esac
+  case "$out" in ""|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$out"
+}
+
+# Start time of PID as the host kernel reports it, or fail.
+#
+# This is the rung `_acq_provider_input_process_identity` falls back to where
+# `ps -o lstart=` does not exist. procfs field 22 (starttime, in clock ticks
+# since boot) is the very value Linux `ps` derives lstart from, so it carries
+# the same strength: it changes when a PID is recycled, and it is stable for the
+# lifetime of one process. MSYS `ps -p` also exposes STIME, but STIME has
+# one-second resolution: two processes started in the same second are
+# indistinguishable, which is not enough to tell a recycled PID from the
+# original lock owner. Field 2 (comm) may contain spaces and parentheses, so the
+# line is split after the LAST ')'.
+_acq_provider_input_process_start_ticks() {
+  local pid="${1:-}" stat_line ticks
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  [ -r "/proc/$pid/stat" ] || return 1
+  stat_line=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  ticks=$(printf '%s\n' "$stat_line" |
+    awk '{ sub(/^.*\) /, ""); if (NF >= 20 && $20 ~ /^[0-9]+$/) print $20 }')
+  case "$ticks" in ""|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$ticks"
+}
+
 # Start a real process whose lifetime is tied to the transaction subshell. Bash
 # 3.2 preserves $$ across subshells and has no BASHPID, so the lock records this
 # guardian PID instead. The guardian exits if its transaction parent disappears,
@@ -4539,7 +4584,7 @@ _acq_provider_input_guardian_start() {
     done
   ' sh "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" &
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$!
-  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(ps -o ppid= -p "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" 2>/dev/null | tr -d '[:space:]')
+  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(_acq_provider_input_parent_pid "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID")
   case "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" in ""|*[!0-9]*) _acq_provider_input_guardian_stop; return 1 ;; esac
   export _ACQ_PROVIDER_INPUT_GUARDIAN_PID
   export _ACQ_PROVIDER_INPUT_TRANSACTION_PID
@@ -4640,9 +4685,15 @@ _acq_provider_input_signal_exit() {
 }
 
 _acq_provider_input_process_identity() {
-  local pid="${1:-}"
+  local pid="${1:-}" out
   case "$pid" in ""|*[!0-9]*) return 1 ;; esac
-  ps -o lstart= -p "$pid" 2>/dev/null | tr -d '[:space:]' | grep .
+  out=$(ps -o lstart= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  # MSYS/Cygwin `ps` has no `-o lstart=`; fall back to the kernel start time.
+  if [ -z "$out" ]; then
+    out=$(_acq_provider_input_process_start_ticks "$pid") || return 1
+  fi
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
 }
 
 acq_provider_input_lock_release() {
