@@ -57,11 +57,38 @@ acq_setup_stubs() {
   export HOME="$STUBDIR/home"
   export XDG_CONFIG_HOME="$STUBDIR/xdg"
   unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+  acq_clear_git_local_env
   # Git for Windows sets core.autocrlf=true system-wide, which rewrites LF->CRLF
   # in the stub repos and breaks byte-exact fixture assertions on Windows hosts.
   # Isolate the stub git from that host default so line endings are deterministic.
   git config --global core.autocrlf false 2>/dev/null || true
   load_acq
+}
+
+# acq_clear_git_local_env — drop Git's repository-local environment so a fixture
+# repo created by this suite can never be redirected at another repository.
+#
+# `git -C <dir>` changes the working directory but does NOT override an inherited
+# GIT_DIR. Git exports its repository-local variables to hooks, so a suite run
+# from a pre-commit hook inherits a GIT_DIR pointing at the invoking repository;
+# every `git -C "$fixture" init`/`commit` in this suite would then target that
+# repository instead of the fixture. Observed consequences: fixture commits
+# landing on the real branch under the fixture's throwaway identity, and
+# core.worktree being written into the invoking repository's config, which
+# redirects later Git commands (including a real kit fetch's checkout) at the
+# wrong tree.
+#
+# Git's documented remedy is to clear `git rev-parse --local-env-vars` before
+# operating on a different repository. Read into a variable first so the unset
+# loop runs in THIS shell: a `while read` fed by a pipeline runs in a subshell on
+# Bash 3.2, where the unsets would be discarded. Process substitution is avoided
+# for the same portability reason.
+acq_clear_git_local_env() {
+  local _vars _v
+  _vars=$(git rev-parse --local-env-vars 2>/dev/null) || return 0
+  for _v in $_vars; do
+    unset "$_v"
+  done
 }
 
 # bats teardown(): remove this test's stub dir. Safe if setup partially ran.
