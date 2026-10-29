@@ -17,11 +17,19 @@
 # Why build 3.2.57 from source instead of a bash:3.2 container:
 #   - 3.2.57 built against glibc on the runner is the exact version macOS ships;
 #     the docker `bash:3.2` image is musl (aarch64-unknown-linux-musl), a
-#     different libc.
+#     different libc, and a digest-pinned image is content-pinned but not
+#     signer-authenticated (see ADR-0039, which also records why the
+#     Docker-Hub fetch in scripts/fetch-bash32-oci.py is a local-dev
+#     convenience and not used here).
 #   - The suite needs real git + python3 + coreutils (git-identity, GitHub
 #     down-scoping, and the AF_UNIX socket tests). ubuntu-latest already has all
 #     three, so nothing is stubbed/SKIPped; the Alpine image would need a
 #     network `apk add`.
+#
+# Shape of the run (ADR-0039): `changes` -> `prepare-bash32` (builds or
+# restores the interpreter ONCE and publishes it as a sha256-verified run
+# artifact) -> `test-acq-bash32` (a matrix of shard legs, each running its share
+# of test/bats under that interpreter) -> `gate` (the required check).
 #
 # Supply-chain: the source tarball is authenticated with GNU's detached OpenPGP
 # signature, trust-anchored to Chet Ramey's release-signing key by full
@@ -135,6 +143,11 @@ jobs:
             'acq.backends' \
             'scripts/test-acq-lib.sh' \
             'scripts/test-acq-bats' \
+            'scripts/bats-shard' \
+            'scripts/summarize-bats-timing' \
+            'scripts/test-acq-bash32' \
+            'scripts/scan-heredoc-subst.py' \
+            'scripts/fetch-bash32-oci.py' \
             'test/bats' \
             '.github/workflows/bash32-compat.yml')"
           if [ -n "$changed" ]; then
@@ -146,29 +159,28 @@ jobs:
             echo "No bash-3.2-relevant paths changed; the interpreter build + offline suite will be skipped."
           fi
 
-  # The real check: build bash 3.2.57 from source and run the acq offline
-  # suite under it. Only runs when `changes` found a relevant diff — the
-  # multi-minute interpreter build (cached across runs, but not across a
-  # cold cache) is the cost this conditional exists to avoid paying on every
-  # docs/CI-only PR. Renamed from the required-check name (which now lives on
-  # the `gate` job below) to avoid two jobs in one run racing to post the same
-  # context — GitHub's branch-protection docs warn that duplicate job names
-  # across a run produce ambiguous status-check results.
-  test-acq-bash32:
-    name: acq offline suite under bash 3.2 (build)
+  # Provide the bash 3.2.57 interpreter ONCE per run, for all shard legs.
+  # This job is the only one that touches the actions/cache entry (so there is
+  # no concurrent-save race) and the only one that can compile: it restores the
+  # cached build or builds from source with the OpenPGP-verified tarball, then
+  # packs /opt/bash32 into a tarball and hands THAT to the legs as a run
+  # artifact, with its sha256 as a job output. A failed upload fails this job,
+  # and a leg that cannot download or verify the tarball fails closed; no leg
+  # ever falls back to another bash. Why a source build and not the Docker Hub
+  # bash:3.2.57 image, and why an artifact and not a per-leg cache restore:
+  # docs/adr/0039-bash32-ci-shard-matrix-and-interpreter-handoff.md.
+  prepare-bash32:
+    name: Prepare bash 3.2.57 interpreter
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # The suite runs under bats-core, vendored as submodules.
-          submodules: true
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
 
       # Cache the built interpreter so the compile only happens on a version bump.
       - id: cache-bash32
@@ -234,11 +246,91 @@ jobs:
           make -j"$(nproc)"
           make install
 
-      - name: Confirm interpreter is bash 3.2
+      - name: Confirm interpreter is exactly bash ${{ env.BASH32_VERSION }}
         run: |
           set -euo pipefail
           /opt/bash32/bin/bash --version | head -1
-          /opt/bash32/bin/bash -c '[[ $BASH_VERSION == 3.2.* ]] || { echo "not bash 3.2: $BASH_VERSION" >&2; exit 1; }'
+          got="$(/opt/bash32/bin/bash -c 'printf %s "${BASH_VERSION%%(*}"')"
+          [ "$got" = "$BASH32_VERSION" ] || { echo "::error::interpreter reports $got, need $BASH32_VERSION" >&2; exit 1; }
+
+      # upload-artifact does not preserve file modes, so ship a tarball.
+      - name: Pack the interpreter
+        id: pack
+        run: |
+          set -euo pipefail
+          tar -C /opt/bash32 -czf "$RUNNER_TEMP/bash32.tar.gz" .
+          sha="$(sha256sum "$RUNNER_TEMP/bash32.tar.gz" | awk '{print $1}')"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "bash32.tar.gz sha256: $sha"
+
+      - name: Publish the interpreter for the shard legs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bash32-interpreter
+          path: ${{ runner.temp }}/bash32.tar.gz
+          if-no-files-found: error
+          # Not keyed by run_attempt: "re-run failed jobs" re-runs only the legs
+          # and must still find this attempt-1 artifact (its sha256 output is
+          # preserved too). Short retention; after it expires a leg fails closed
+          # and a full re-run rebuilds it.
+          retention-days: 2
+          overwrite: true
+
+  # The real check: run the acq offline suite under the prepared bash 3.2.57,
+  # split across a matrix of shards. scripts/bats-shard picks each shard's files
+  # from test/bats at run time, so new test files are included automatically; the
+  # shard count is the length of `matrix.shard` and every leg derives "I/N" from
+  # it, so there is no second number to keep in sync. Legs are named
+  # "... (build N/M)" — deliberately NOT the required context — and `gate`
+  # (below) aggregates them. Only runs when `changes` found a relevant diff.
+  # Renamed from the required-check name (which lives on `gate`) to avoid two
+  # jobs in one run racing to post the same context.
+  test-acq-bash32:
+    name: acq offline suite under bash 3.2 (build ${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: [changes, prepare-bash32]
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      # Distinct per leg: labels the timing summary and names its artifact.
+      ACQ_SHARD_ID: ${{ matrix.shard }}of${{ strategy.job-total }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The suite runs under bats-core, vendored as submodules.
+          submodules: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Download the prepared interpreter
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bash32-interpreter
+          path: ${{ runner.temp }}/bash32-dl
+
+      # Fail closed: the tarball must match the digest prepare-bash32 computed,
+      # and the extracted interpreter must report exactly 3.2.57.
+      - name: Install and confirm bash ${{ env.BASH32_VERSION }}
+        env:
+          EXPECTED_SHA256: ${{ needs.prepare-bash32.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::prepare-bash32 supplied no valid sha256" >&2; exit 1; }
+          tarball="$RUNNER_TEMP/bash32-dl/bash32.tar.gz"
+          echo "$EXPECTED_SHA256  $tarball" | sha256sum --check --strict -
+          # /opt is root-owned on hosted runners; same /opt/bash32 layout as the build.
+          sudo mkdir -p /opt/bash32
+          sudo chown "$(id -u):$(id -g)" /opt/bash32
+          tar -xzf "$tarball" -C /opt/bash32
+          /opt/bash32/bin/bash --version | head -1
+          got="$(/opt/bash32/bin/bash -c 'printf %s "${BASH_VERSION%%(*}"')"
+          [ "$got" = "$BASH32_VERSION" ] || { echo "::error::interpreter reports $got, need $BASH32_VERSION" >&2; exit 1; }
 
       # acq invokes the released Patterns validator during provider-input
       # projection. Install and select setup-python's exact runtime; bash's PATH
@@ -262,17 +354,60 @@ jobs:
           test -z "$(git -C "$patterns_dir" status --porcelain)"
           chmod -R a-w "$patterns_dir"
 
-      - name: Run acq offline suite under bash 3.2
+      - name: Run acq offline suite under bash 3.2 (shard ${{ matrix.shard }}/${{ strategy.job-total }})
         env:
           ACQ_TEST_PATTERNS_REPO: ${{ runner.temp }}/agentic-coding-patterns
           ACQ_TEST_PROVIDER_INPUT_PYTHON: ${{ env.pythonLocation }}/bin/python
           ACQ_BATS_TIMING: '1'
+          ACQ_BATS_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
         # Put the 3.2 interpreter first on PATH so bats' `#!/usr/bin/env bash`
         # shebangs — and the acq/adapters the @tests drive — all resolve to
         # bash 3.2.57. bats-core supports >= 3.2 (its own bin/bats guards on it).
         run: |
           set -euo pipefail
-          PATH="/opt/bash32/bin:$PATH" /opt/bash32/bin/bash scripts/test-acq-bats
+          # Keep a copy of the TAP stream for the timing summary step below
+          # (pipefail keeps the suite's exit status).
+          mkdir -p "$RUNNER_TEMP/bats-timing"
+          date +%s > "$RUNNER_TEMP/bats-timing/start-epoch"
+          PATH="/opt/bash32/bin:$PATH" /opt/bash32/bin/bash scripts/test-acq-bats 2>&1 |
+            tee "$RUNNER_TEMP/bats-timing/bats.log"
+          # Fail closed if this checkout's runner ignored ACQ_BATS_SHARD (it
+          # would silently run, and pass, the whole suite on every leg).
+          grep -q "^test-acq-bats: shard ${ACQ_BATS_SHARD}:" "$RUNNER_TEMP/bats-timing/bats.log" || {
+            echo "::error::scripts/test-acq-bats did not run shard ${ACQ_BATS_SHARD}" >&2
+            exit 1
+          }
+
+      # Advisory only: never fails the job. always() so it also covers failed
+      # and cancelled runs (partial logs are summarized and flagged incomplete).
+      # The heading names the leg (ACQ_SHARD_ID), so the per-leg summaries are
+      # distinguishable on the run page.
+      - name: Summarize bats timings
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          # Keep in sync with this job's timeout-minutes.
+          BATS_JOB_TIMEOUT_MINUTES: '25'
+        run: |
+          python3 scripts/summarize-bats-timing \
+            --log "$RUNNER_TEMP/bats-timing/bats.log" \
+            --start-epoch-file "$RUNNER_TEMP/bats-timing/start-epoch" \
+            --timeout-minutes "$BATS_JOB_TIMEOUT_MINUTES" \
+            --json "$RUNNER_TEMP/bats-timing/timing.json" \
+            --summary-file "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload bats timing record
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bats-timing-${{ env.ACQ_SHARD_ID }}-${{ github.run_attempt }}
+          overwrite: true
+          path: ${{ runner.temp }}/bats-timing/timing.json
+          if-no-files-found: ignore
+          retention-days: 30
 
   # Always-posting gate: this is what branch protection actually requires,
   # under the ORIGINAL required-check name ("acq offline suite under bash
@@ -284,16 +419,22 @@ jobs:
   # exact context is created on every PR and merge group — closing the original gap
   # where a path-filtered trigger meant no check-run was created at all.
   #
-  # Fail-closed logic, deliberately checking BOTH upstream jobs, not just the
-  # expensive one: `needs.changes.result` must be `success` (a `changes`
-  # failure — e.g. the diff computation errored — must not be laundered into
-  # a passing gate just because the downstream job was consequently skipped),
-  # AND `needs.test-acq-bash32.result` must be `success` or `skipped` (skipped
-  # is the expected, correct outcome for an irrelevant diff; anything else —
-  # failure or cancelled — fails the gate).
+  # Fail-closed logic over the WHOLE dependency chain. The expected outcome is
+  # fully determined by `changes`:
+  #   - `changes` must be `success` (a failed diff computation must not be
+  #     laundered into a pass just because everything downstream was skipped);
+  #   - relevant == 'true'  -> `prepare-bash32` AND the matrix job
+  #     `test-acq-bash32` must both be `success`. The matrix job's result is
+  #     `success` only if EVERY shard leg succeeded; any failed or cancelled leg
+  #     makes it `failure`/`cancelled`. A `skipped` matrix job here means the
+  #     prepare job failed (needs-skip), which is a failure, not a pass;
+  #   - relevant == 'false' -> both must be `skipped` (the correct outcome for an
+  #     irrelevant diff); anything else is unexpected and fails.
+  # Checking the relevance output, not just the results, is what stops a
+  # prepare-job failure (which skips the matrix) from reading as "irrelevant".
   gate:
     name: acq offline suite under bash 3.2
-    needs: [changes, test-acq-bash32]
+    needs: [changes, prepare-bash32, test-acq-bash32]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -301,23 +442,39 @@ jobs:
       - name: Evaluate upstream results
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          PREPARE_RESULT: ${{ needs.prepare-bash32.result }}
           TEST_RESULT: ${{ needs.test-acq-bash32.result }}
         run: |
           set -euo pipefail
-          echo "changes job result:        $CHANGES_RESULT"
-          echo "test-acq-bash32 job result: $TEST_RESULT"
+          echo "changes job result:          $CHANGES_RESULT (relevant=$RELEVANT)"
+          echo "prepare-bash32 job result:   $PREPARE_RESULT"
+          echo "test-acq-bash32 job result:  $TEST_RESULT (all shard legs)"
 
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "::error::relevance-detection job did not succeed ($CHANGES_RESULT) — failing closed, not treating this as 'irrelevant'."
             exit 1
           fi
 
-          case "$TEST_RESULT" in
-            success|skipped)
-              echo "Gate passes: offline suite $TEST_RESULT."
+          case "$RELEVANT" in
+            true)
+              if [ "$PREPARE_RESULT" = "success" ] && [ "$TEST_RESULT" = "success" ]; then
+                echo "Gate passes: interpreter prepared and every shard succeeded."
+              else
+                echo "::error::relevant diff but prepare=$PREPARE_RESULT, offline suite=$TEST_RESULT (every shard must succeed)."
+                exit 1
+              fi
+              ;;
+            false)
+              if [ "$PREPARE_RESULT" = "skipped" ] && [ "$TEST_RESULT" = "skipped" ]; then
+                echo "Gate passes: no bash-3.2-relevant paths changed; suite skipped."
+              else
+                echo "::error::irrelevant diff but prepare=$PREPARE_RESULT, offline suite=$TEST_RESULT (expected both skipped)."
+                exit 1
+              fi
               ;;
             *)
-              echo "::error::acq offline suite under bash 3.2 did not pass (result: $TEST_RESULT)."
+              echo "::error::unexpected relevance output '$RELEVANT' — failing closed."
               exit 1
               ;;
           esac
