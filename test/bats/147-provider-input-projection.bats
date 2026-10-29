@@ -1122,6 +1122,28 @@ _windows_make_dir_symlink() { # LINK TARGET  (developer mode / admin required)
   [ -d "$new" ]
 }
 
+@test "windows: failed swap restores the prior current junction (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local root old new
+  root=$(acq_provider_input_root sbx winswap)
+  mkdir -p "$root/generations/generation.old/models/providers" "$root/generations/generation.new/models/providers"
+  old="$root/generations/generation.old"; new="$root/generations/generation.new"
+  printf old > "$old/models/providers/marker"
+  printf new > "$new/models/providers/marker"
+
+  run _acq_provider_input_publish "$root" "$old"
+  assert_success
+  # Fail the swap; `current` must stay the old junction (restored), not be left
+  # absent or redirected to the new generation.
+  _acq_provider_input_atomic_replace() { return 1; }
+  run _acq_provider_input_publish "$root" "$new"
+  assert_failure
+  [ "$(cat "$root/current/models/providers/marker" 2>/dev/null)" = "old" ]
+  [ -d "$old" ]
+  [ -d "$new" ]
+}
+
+
 # ---------------------------------------------------------------------------
 # MSYS argv conversion must not resolve links before the walk sees the path
 # ---------------------------------------------------------------------------

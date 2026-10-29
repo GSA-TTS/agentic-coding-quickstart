@@ -4630,8 +4630,24 @@ else:
 PY
 }
 
+# Move a reparse-point link (POSIX symlink or Windows junction) from SRC to DST
+# WITHOUT following it into its target. A missing SRC is a no-op. os.rename moves
+# the link itself (it does not resolve a junction), and DST must not exist yet.
+_acq_provider_input_move_link() {
+  local _src _dst
+  _src=$(_acq_provider_input_native_path "$1") || return 1
+  _dst=$(_acq_provider_input_native_path "$2") || return 1
+  _acq_provider_input_py - "$_src" "$_dst" <<'PY'
+import os, sys
+try:
+    os.rename(sys.argv[1], sys.argv[2])
+except FileNotFoundError:
+    pass
+PY
+}
+
 _acq_provider_input_publish() {
-  local root="$1" generation="$2" base temp current
+  local root="$1" generation="$2" base temp current backup
   case "$root" in ""|/|/*/) return 1 ;; esac
   case "$generation" in "$root"/generations/generation.*) ;; *) return 1 ;; esac
   _acq_provider_input_safe_dir "$root/generations" || return 1
@@ -4644,12 +4660,18 @@ _acq_provider_input_publish() {
     # A directory symlink needs elevation/Developer Mode on Windows; a junction
     # does not. Build the junction at `temp`, then swap it into place. Windows
     # cannot atomically replace an existing junction (os.replace fails with
-    # Access denied), so remove the old pointer first; the provider-input lock
-    # serializes creates, so the brief gap is benign (readers see no `current`
-    # and skip, while prior generations stay intact).
+    # Access denied), so move the old pointer aside, swap the new one in, and
+    # restore the old pointer if the swap fails — `current` is never left absent.
     _acq_provider_input_make_junction "$temp" "$generation" || return 1
-    _acq_provider_input_remove_link "$current" || { _acq_provider_input_remove_link "$temp"; return 1; }
-    _acq_provider_input_atomic_replace "$temp" "$current" || { _acq_provider_input_remove_link "$temp"; return 1; }
+    backup="$current.acq-old.$$.$RANDOM"
+    _acq_provider_input_move_link "$current" "$backup" || { _acq_provider_input_remove_link "$temp"; return 1; }
+    if _acq_provider_input_atomic_replace "$temp" "$current"; then
+      _acq_provider_input_remove_link "$backup"
+    else
+      _acq_provider_input_move_link "$backup" "$current"
+      _acq_provider_input_remove_link "$temp"
+      return 1
+    fi
   else
     ln -s "generations/$base" "$temp" || return 1
     # rename is atomic within root; do not remove current first.
