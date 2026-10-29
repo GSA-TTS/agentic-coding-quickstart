@@ -81,6 +81,7 @@ This project operates under professional standards of conduct. All contributors:
 | `install.sh`                        | One-line `curl \| sh` installer (auto-selects brew/npm/clone; direct `sh install.sh` still installs the default release tag from the repo, not the current checkout) |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`acq usai-rotate-api-key`) |
 | `scripts/test-acq-bats`             | Offline unit suite for acq (bats-core) |
+| `scripts/bats-shard`                | Picks the `test/bats` files for shard `I/N` (CI matrix; `ACQ_BATS_SHARD=I/N`) |
 | `scripts/verify-backends`           | Live end-to-end backend verification (needs Docker or KVM) |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
@@ -198,6 +199,13 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   ACQ_BATS_TIMING=1 ACQ_BATS_JOBS=2 ./scripts/test-acq-bats
   ./scripts/test-acq-bats --timing test/bats/90-sbx-startup-kit.bats
   ```
+
+  To run only part of the suite (this is how the bash 3.2 CI job splits the work
+  across a matrix), set `ACQ_BATS_SHARD=I/N`, e.g. `ACQ_BATS_SHARD=2/3
+  ./scripts/test-acq-bats`. `scripts/bats-shard` derives each shard from the
+  `.bats` files on disk (balanced by `@test` count; no checked-in table), so a new
+  test file joins a shard automatically, and an invalid spec or empty shard
+  fails closed with exit 2.
 
   Timing mode reports the worker count and Bats' per-test elapsed time, including
   setup and teardown. Explicit file/flag arguments still pass directly to Bats;
