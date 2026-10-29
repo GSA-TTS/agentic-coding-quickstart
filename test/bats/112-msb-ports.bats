@@ -247,6 +247,25 @@ MSBPIDSTUB
   refute_output --regexp '127\.0\.0\.1:(1|9|16|00|256)( |$)'
 }
 
+@test "msb ports: LIST mode lists every port when jq emits CRLF line endings (Windows)" {
+  printf '%s\n' '{"active_config":{"network":{"ports":[{"guest_port":3000,"host_port":3000},{"guest_port":4096,"host_port":4096},{"guest_port":8443,"host_port":8443}]}}}' \
+    >"$STUBDIR/.msb_inspect_json"
+  cat >"$STUBDIR/jq" <<'CRLFJQ'
+#!/bin/sh
+cat >/dev/null
+printf '3000:3000\r\n4096:4096\r\n8443:8443\r\n'
+CRLFJQ
+  chmod +x "$STUBDIR/jq"
+  run bash -c '
+    . "'"$REPO_ROOT"'/acq.backends/msb.sh"
+    acq_backend_ports listbox
+  '
+  assert_success
+  assert_output --partial 'sandbox 3000 -> host 127.0.0.1:3000 (create-time -p)'
+  assert_output --partial 'sandbox 4096 -> host 127.0.0.1:4096 (create-time -p)'
+  assert_output --partial 'sandbox 8443 -> host 127.0.0.1:8443 (create-time -p)'
+}
+
 @test "msb ports: LIST mode with zero ports exits 0 (empty list, not an error)" {
   run bash -c '. "'"$REPO_ROOT"'/acq.backends/msb.sh"; acq_backend_ports emptybox'
   assert_success
