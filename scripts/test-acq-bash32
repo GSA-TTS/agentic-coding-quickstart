@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+#
+# test-acq-bash32 — run the acq offline suite (or a fast syntax preflight) under
+# a real GNU Bash 3.2.57, the macOS system bash, before CI does.
+#
+# The CI gate (.github/workflows/bash32-compat.yml) stays the authoritative,
+# source-authenticated check; this is the local, faster feedback loop. See
+# docs/howto/bash32-testing.md and ADR-0038.
+#
+# Usage:
+#   scripts/test-acq-bash32 [BATS-ARGS...]   # bats under bash 3.2 (no args = full suite)
+#   scripts/test-acq-bash32 test/bats/72-msb-agent-user.bats
+#   scripts/test-acq-bash32 --syntax [FILE...]  # `bash-3.2 -n` (default: host shell files) + heredoc scan
+#   scripts/test-acq-bash32 --lint [FILE...]    # heredoc-in-substitution scan only (any bash)
+#   scripts/test-acq-bash32 --which          # print the resolved interpreter and exit
+#   scripts/test-acq-bash32 --install        # build + signature-verify 3.2.57 into the cache
+#   scripts/test-acq-bash32 --install-oci    # fallback when GNU mirrors/compiler are unavailable:
+#                                            # digest-pinned Docker Hub bash:3.2.57 (no Docker needed)
+#
+# Interpreter resolution (first match wins; every candidate must report exactly
+# BASH_VERSION 3.2.57, otherwise this FAILS CLOSED):
+#   1. $ACQ_BASH32            explicit path (a mismatch is fatal, never skipped)
+#   2. $ACQ_BASH32_PREFIX/bin/bash, default ~/.cache/acq/bash-3.2.57 (from --install)
+#   3. /bin/bash              only on macOS, where the system bash is 3.2.57
+#   4. /opt/bash32/bin/bash   the CI location
+#
+# The resolved interpreter is exposed as `bash` on a private PATH directory, so
+# bats and nested `#!/usr/bin/env bash` scripts also run under 3.2. This checks the
+# bash INTERPRETER only; it does not reproduce BSD/macOS sed, find, stat, xargs.
+#
+# This script itself must parse under bash 3.2 (it can run as /bin/bash on macOS).
+set -uo pipefail
+
+REQUIRED_VERSION="3.2.57"
+# Chet Ramey <chet@case.edu>, the bash release signer. Must match
+# BASH_SIGNING_KEY_FPR in .github/workflows/bash32-compat.yml (a bats test pins this).
+SIGNING_KEY_FPR="7C0135FB088AAF6C66C650B9BB5869F064EA74AB"
+DEFAULT_MIRRORS="https://ftpmirror.gnu.org/gnu/bash https://mirrors.kernel.org/gnu/bash https://mirrors.ocf.berkeley.edu/gnu/bash https://mirrors.mit.edu/gnu/bash https://ftp.gnu.org/gnu/bash"
+
+_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${_dir}/.." && pwd)"
+PREFIX="${ACQ_BASH32_PREFIX:-${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/acq/bash-${REQUIRED_VERSION}}"
+
+# Remove temp state on every exit path; signals exit with the conventional status
+# (a bare cleanup-only handler would resume the interrupted command).
+SHIM=""
+WORK=""
+cleanup() { [ -z "$SHIM" ] || rm -rf "$SHIM"; [ -z "$WORK" ] || rm -rf "$WORK"; }
+set_cleanup_traps() {
+  trap cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+die() { echo "test-acq-bash32: $*" >&2; exit 2; }
+
+case "$PREFIX" in /*) ;; *) die "ACQ_BASH32_PREFIX must be an absolute path (got '${PREFIX}')" ;; esac
+
+usage() { sed -n '2,/^set -uo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+# Print the version core ("3.2.57") the interpreter reports, or nothing.
+interp_version() {
+  local v
+  [ -x "$1" ] || return 1
+  v="$("$1" -c 'printf %s "$BASH_VERSION"' 2>/dev/null)" || return 1
+  printf '%s' "${v%%(*}"
+}
+
+# 0 if $1 is an executable that reports exactly the required version.
+is_required() { [ "$(interp_version "$1")" = "$REQUIRED_VERSION" ]; }
+
+fail_not_found() {
+  {
+    echo "test-acq-bash32: no GNU Bash ${REQUIRED_VERSION} interpreter found."
+    echo "  Provide one of:"
+    echo "    ACQ_BASH32=/path/to/bash   an existing bash ${REQUIRED_VERSION} (macOS: /bin/bash)"
+    echo "    scripts/test-acq-bash32 --install   build and signature-verify it (needs curl, gpg, make, cc, network)"
+    echo "  See docs/howto/bash32-testing.md."
+  } >&2
+  exit 2
+}
+
+resolve_interp() {
+  local c v
+  if [ -n "${ACQ_BASH32:-}" ]; then
+    c="$ACQ_BASH32"
+    case "$c" in */*) ;; *) c="$(command -v "$c" 2>/dev/null || true)" ;; esac
+    [ -n "$c" ] && [ -x "$c" ] && [ ! -d "$c" ] || die "ACQ_BASH32='${ACQ_BASH32}' is not an executable file"
+    c="$(cd "$(dirname "$c")" && pwd)/$(basename "$c")"
+    v="$(interp_version "$c")"
+    [ "$v" = "$REQUIRED_VERSION" ] ||
+      die "ACQ_BASH32='${ACQ_BASH32}' reports BASH_VERSION '${v:-<unknown>}', need exactly ${REQUIRED_VERSION}"
+    INTERP="$c"
+    return 0
+  fi
+  for c in "${PREFIX}/bin/bash" "$([ "$(uname -s)" = Darwin ] && echo /bin/bash)" /opt/bash32/bin/bash; do
+    [ -n "$c" ] && is_required "$c" && { INTERP="$c"; return 0; }
+  done
+  fail_not_found
+}
+
+# Host-side shell files bash 3.2 must parse: the entry point, adapters, installer,
+# the scripts/ tools whose shebang is a POSIX/bash shell, and the bats helper.
+shell_files() {
+  local f first
+  printf '%s\n' "${REPO_ROOT}/acq" "${REPO_ROOT}/install.sh" "${REPO_ROOT}/test/bats/helper.bash"
+  for f in "${REPO_ROOT}"/acq.backends/*.sh "${REPO_ROOT}"/scripts/*; do
+    [ -f "$f" ] || continue
+    first="$(head -n 1 "$f" 2>/dev/null)" || continue
+    case "$first" in
+      '#!'*bash* | '#!'*/sh | '#!'*' sh') printf '%s\n' "$f" ;;
+    esac
+  done
+}
+
+run_lint() {
+  command -v python3 >/dev/null 2>&1 || die "python3 is required for the heredoc scan"
+  local files=() f
+  if [ "$#" -gt 0 ]; then
+    files=("$@")
+  else
+    while IFS= read -r f; do files+=("$f"); done < <(shell_files)
+    for f in "${REPO_ROOT}"/test/bats/*.bats; do [ -f "$f" ] && files+=("$f"); done
+  fi
+  python3 -B "${_dir}/scan-heredoc-subst.py" ${files[@]+"${files[@]}"}
+}
+
+run_syntax() {
+  local f rc=0 n=0
+  while IFS= read -r f; do
+    n=$((n + 1))
+    "$INTERP" -n -- "$f" || { echo "test-acq-bash32: bash ${REQUIRED_VERSION} cannot parse ${f#"${REPO_ROOT}"/}" >&2; rc=1; }
+  done < <(if [ "$#" -gt 0 ]; then printf '%s\n' "$@"; else shell_files; fi)
+  [ "$rc" -eq 0 ] && echo "test-acq-bash32: ${n} files parse under bash ${REQUIRED_VERSION}"
+  return "$rc"
+}
+
+# Source build with the same authentication as the CI job: GNU's detached OpenPGP
+# signature, trust-anchored to Chet Ramey's key by full fingerprint. Fails closed.
+do_install() {
+  local tool tarball m ok gnupg got f
+  for tool in curl gpg tar awk; do
+    command -v "$tool" >/dev/null 2>&1 || die "--install needs '${tool}' on PATH (alternatively set ACQ_BASH32)"
+  done
+  if is_required "${PREFIX}/bin/bash"; then
+    echo "test-acq-bash32: already installed: ${PREFIX}/bin/bash"
+    return 0
+  fi
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/acq-bash32.XXXXXX")" || die "cannot create a temp dir"
+  set_cleanup_traps
+  tarball="bash-${REQUIRED_VERSION}.tar.gz"
+  for f in "$tarball" "${tarball}.sig"; do
+    ok=0
+    for m in ${ACQ_BASH32_MIRRORS:-$DEFAULT_MIRRORS}; do
+      if curl -fsSL --connect-timeout 20 --retry 2 -o "${WORK}/${f}" "${m}/${f}"; then ok=1; break; fi
+      echo "warn: fetch of ${f} from ${m} failed; trying next mirror" >&2
+    done
+    [ "$ok" -eq 1 ] || die "could not download ${f} from any mirror"
+  done
+  gnupg="${WORK}/gnupg"
+  mkdir -m 700 "$gnupg"
+  export GNUPGHOME="$gnupg"
+  gpg --batch --quiet --import "${REPO_ROOT}/.github/keys/chet-ramey-bash-release-signing-key.asc" ||
+    die "cannot import the vendored signing key"
+  got="$(gpg --batch --with-colons --fingerprint "$SIGNING_KEY_FPR" | awk -F: '$1=="fpr"{print $10; exit}')"
+  [ "$got" = "$SIGNING_KEY_FPR" ] || die "vendored signing key fingerprint mismatch: ${got:-<none>}"
+  gpg --batch --verify "${WORK}/${tarball}.sig" "${WORK}/${tarball}" ||
+    die "signature verification FAILED for ${tarball}; refusing to build"
+  for tool in make cc; do
+    command -v "$tool" >/dev/null 2>&1 || die "--install needs '${tool}' on PATH to compile (alternatively set ACQ_BASH32)"
+  done
+  (
+    cd "$WORK" && tar -xzf "$tarball" && cd "bash-${REQUIRED_VERSION}" &&
+      # 2007 source vs modern compilers: relax implicit function/int errors.
+      CFLAGS="-Wno-implicit-function-declaration -Wno-implicit-int" ./configure --prefix="$PREFIX" >"${WORK}/build.log" 2>&1 &&
+      make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)" >>"${WORK}/build.log" 2>&1 &&
+      make install >>"${WORK}/build.log" 2>&1
+  ) || { [ ! -f "${WORK}/build.log" ] || tail -n 30 "${WORK}/build.log" >&2; die "build of bash ${REQUIRED_VERSION} failed"; }
+  is_required "${PREFIX}/bin/bash" || die "built interpreter does not report ${REQUIRED_VERSION}"
+  echo "test-acq-bash32: installed ${PREFIX}/bin/bash"
+}
+
+do_install_oci() {
+  command -v python3 >/dev/null 2>&1 || die "--install-oci needs python3"
+  is_required "${PREFIX}/bin/bash" && { echo "test-acq-bash32: already installed: ${PREFIX}/bin/bash"; return 0; }
+  python3 -B "${_dir}/fetch-bash32-oci.py" "$PREFIX" || die "OCI fetch failed"
+  is_required "${PREFIX}/bin/bash" || die "fetched interpreter does not report ${REQUIRED_VERSION}"
+}
+
+case "${1:-}" in
+  -h | --help) usage; exit 0 ;;
+  --install-oci) shift; [ "$#" -eq 0 ] || die "--install-oci takes no arguments"; do_install_oci; exit $? ;;
+  --install) shift; [ "$#" -eq 0 ] || die "--install takes no arguments"; do_install; exit $? ;;
+  --lint) shift; run_lint ${1+"$@"}; exit $? ;;
+esac
+
+MODE=bats
+case "${1:-}" in
+  --syntax) MODE=syntax; shift ;;
+  --which) MODE=which; shift; [ "$#" -eq 0 ] || die "--which takes no arguments" ;;
+esac
+
+resolve_interp
+if [ "$MODE" = which ]; then
+  echo "${INTERP} ($(interp_version "$INTERP"))"
+  exit 0
+fi
+
+# Private PATH dir exposing the verified interpreter as `bash`, so bats and nested
+# `#!/usr/bin/env bash` scripts resolve to it without reordering system dirs.
+SHIM="$(mktemp -d "${TMPDIR:-/tmp}/acq-bash32-path.XXXXXX")" || die "cannot create a temp dir"
+set_cleanup_traps
+ln -s "$INTERP" "${SHIM}/bash" || die "cannot link the interpreter"
+export PATH="${SHIM}:${PATH}"
+is_required "$(command -v bash)" || die "PATH shim did not resolve to bash ${REQUIRED_VERSION}"
+
+if [ "$MODE" = syntax ]; then
+  rc=0
+  run_syntax ${1+"$@"} || rc=1
+  run_lint ${1+"$@"} || rc=1
+  exit "$rc"
+fi
+
+"$INTERP" "${_dir}/test-acq-bats" "$@"
