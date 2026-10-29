@@ -709,9 +709,10 @@ if [ -n "${ACQ_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 # Dispatch stays in the original foreground shell: $$, stdin, terminal signals,
 # and exec retain their normal meaning. A private guardian covers replaced EXIT
 # traps and exec; ordinary exits also reap it synchronously. No root is exported.
-# The guardian ignores HUP/INT/TERM and its sleep tick inherits that, and POSIX
-# forbids a child shell from resetting an inherited ignore, so the tick can only
-# be stopped promptly with KILL; SIGTERM would leave the exit waiting out the tick.
+# The guardian ignores HUP/INT/TERM and its sleep tick inherits that. A
+# non-interactive shell cannot reset a signal that was ignored on entry, so the
+# tick can only be stopped promptly with KILL; SIGTERM would leave the exit
+# waiting out the rest of the tick (up to one second).
 _acq_kit_fetch_cleanup() {
   if [ -n "${_ACQ_KIT_FETCH_GUARDIAN:-}" ]; then
     kill -USR1 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true

@@ -101,9 +101,12 @@ class Case:
         self.guardian = int(ready[3])
         self.tick = fresh_tick(self.guardian)
 
-    def finish(self, label, since=None):
+    def finish(self, label, since=None, bound=SETTLE_BOUND):
         """Collect the exit, then require root, guardian and tick to be gone.
 
+        `bound` is how long everything may take to disappear; the guardian is
+        signalled directly in the exit and signal cases, so those use the tight
+        LATENCY_BOUND and an orphaned tick that merely times out is a failure.
         The guardian shares the owner's stderr pipe, so communicate() also waits
         for the guardian to exit; time is therefore measured from `since`.
         """
@@ -114,9 +117,10 @@ class Case:
             pass
         self.process.stdin = None
         rest, errors = self.process.communicate(timeout=SETTLE_BOUND)
+        # communicate() also waited for the guardian's end of the stderr pipe.
         self.output += rest.decode()
         assert not errors, (label, errors)
-        while time.monotonic() - since < SETTLE_BOUND:
+        while time.monotonic() - since < bound:
             if not (self.root.exists() or alive(self.guardian) or alive(self.tick)):
                 return time.monotonic() - since
             time.sleep(0.02)
@@ -143,7 +147,7 @@ def latency_exit():
         code = case.process.wait(timeout=SETTLE_BOUND)
         delay = time.monotonic() - said
         assert code == 0 and delay < LATENCY_BOUND, ("exit", code, delay)
-        case.finish("exit", said)
+        case.finish("exit", said, LATENCY_BOUND)
         return "exit-latency %.3fs" % delay
     finally:
         case.close()
@@ -157,7 +161,7 @@ def latency_signal(sig):
         code = case.process.wait(timeout=SETTLE_BOUND)
         delay = time.monotonic() - sent
         assert code in (-sig, 128 + sig) and delay < LATENCY_BOUND, (sig, code, delay)
-        case.finish(signal.Signals(sig).name, sent)
+        case.finish(signal.Signals(sig).name, sent, LATENCY_BOUND)
         return "%s-latency %.3fs" % (signal.Signals(sig).name, delay)
     finally:
         case.close()
