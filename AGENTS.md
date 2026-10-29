@@ -3,10 +3,10 @@ title: "Agentic Coding Quickstart - Agent Rules"
 description: "Behavioral rules for AI coding agents operating with a sandboxing backend (SBX or MSB) + USAi"
 status: canonical
 tier: 1
-last_updated: "2026-08-18"
+last_updated: "2026-10-29"
 audience: "developers"
 keywords: ["AGENTS.md", "acq", "sbx", "msb", "usai", "sandbox", "agent-rules", "workspace"]
-related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0001-sbx-usai-agent-execution-architecture.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md"]
+related_files: ["docs/howto/acq.md", "docs/BACKEND_GUIDE.md", "docs/KNOWN_FAILURE_MODES.md", "docs/adr/0001-sbx-usai-agent-execution-architecture.md", "docs/adr/0010-acq-pluggable-backends.md", "docs/adr/0011-msb-backend-and-neutral-kits.md", "docs/adr/0038-local-bash32-test-runner.md", "docs/adr/0039-bash32-ci-shard-matrix-and-interpreter-handoff.md"]
 load_priority: "always"
 review_cycle: "quarterly"
 ---
@@ -586,6 +586,16 @@ The agent MUST:
 > **Note:** `acq run` is the preferred method — it creates the sandbox if needed,
 > mounts your project, and applies the pinned kits, then attaches.
 
+**Offline suite and bash 3.2:** `scripts/test-acq-bats` runs the offline suite
+(`ACQ_BATS_SHARD=I/N` runs one shard). macOS ships bash 3.2.57, so CI runs the whole
+suite under it as the required check `acq offline suite under bash 3.2`: an
+interpreter built once, then a matrix of shard legs, each with a timing summary
+(ADR-0039, `.github/workflows/bash32-compat.yml`). Get the same interpreter locally
+with `scripts/test-acq-bash32` (ADR-0038, `docs/howto/bash32-testing.md`). The
+workflow's trust model (signer-authenticated source build) is not interchangeable
+with the local convenience route (digest-pinned Docker Hub image); do not switch CI
+to it without a new ADR. Diagnosis: `docs/KNOWN_FAILURE_MODES.md` section 50.
+
 **ADR location:** `docs/adr/`
 
 > **Running shellcheck locally:** The repo-root `.shellcheckrc` sets
@@ -599,7 +609,8 @@ The agent MUST:
 >
 > ```sh
 > scripts/run-shellcheck acq acq.backends/*.sh \
->   scripts/test-acq-lib.sh scripts/test-acq-bats scripts/run-shellcheck \
+>   scripts/test-acq-lib.sh scripts/test-acq-bats scripts/bats-shard \
+>   scripts/test-acq-bash32 scripts/run-shellcheck \
 >   test/bats/*.bats test/bats/helper.bash
 > ```
 >
