@@ -569,11 +569,11 @@ on each installed backend with `--image`, and confirms the custom image booted).
 `acq run opencode .` uses the same immutable generic base on both backends:
 
 ```text
-ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:7b923fb5e722ad27c751ead836f24145c4cea3fac015a3ba753bd7473891e1e7
+ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c
 ```
 
-The digest was derived from `ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell:2.0.0`
-on 2026-10-14 and covers published Linux amd64 and arm64 manifests. `acq` applies
+The digest was derived from `ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell:2.1.0`
+on 2026-10-30 and covers published Linux amd64 and arm64 manifests. `acq` applies
 the pinned OpenCode agent kit with the support kits and fails before provisioning
 if that kit cannot be fetched, is malformed, or does not declare the expected
 OpenCode metadata and entrypoint. Passing `--kit` adds a kit; it cannot remove the

@@ -101,7 +101,7 @@ _create_line() { printf '%s\n' "$(cat "$CALLS")" | grep "^$1 create"; }
 @test "image(msb): default opencode uses the pinned generic devenv base" {
   _msb_create -- create opencode --name imgopencode "$IMGPROJ"
   local line; line=$(_create_line msb)
-  assert_regex "$line" 'ghcr\.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:7b923fb5e722ad27c751ead836f24145c4cea3fac015a3ba753bd7473891e1e7'
+  assert_regex "$line" 'ghcr\.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c'
   refute_regex "$line" 'devenv-opencode|sandbox-templates:opencode-docker'
 }
 
@@ -185,7 +185,7 @@ _sbx_create() { # CREATE_ARGS... (with optional leading ENV via `env`)
 @test "image(sbx): default opencode injects the pinned generic template" {
   _sbx_create ACQ_BACKEND=sbx "$ACQ" create opencode "$IMGPROJ"
   local line; line=$(_create_line sbx)
-  assert_regex "$line" '--template ghcr\.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:7b923fb5e722ad27c751ead836f24145c4cea3fac015a3ba753bd7473891e1e7'
+  assert_regex "$line" '--template ghcr\.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c'
   assert_regex "$line" " shell ${IMGPROJ} .+:ro$"
   refute_regex "$line" 'devenv-opencode|sandbox-templates:opencode-docker'
 }
