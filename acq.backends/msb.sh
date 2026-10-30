@@ -2175,8 +2175,11 @@ _acq_msb_host_config_mount_probe() {
   _acq_msb_cli exec "$name" -u agent -- sh -c \
     "test -d '$ACQ_HOST_CONFIG_GUEST_DIR' && test -x '$ACQ_HOST_CONFIG_GUEST_DIR'" \
     </dev/null >/dev/null 2>&1 || return 1
+  # A failed redirection on the special builtin ':' terminates some POSIX
+  # shells with status 2. Contain it in a subshell so only a successful write
+  # selects our explicit WRITABLE status; denial returns the probe's status 0.
   _acq_msb_cli exec "$name" -u 0 -- sh -c \
-    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; if : > "$_tmp" 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 2; fi; exit 0' \
+    '_dir=$1; _tmp="$_dir/.acq-ro-probe.$$"; if ( : > "$_tmp" ) 2>/dev/null; then rm -f "$_tmp" 2>/dev/null; exit 2; fi; exit 0' \
     sh "$ACQ_HOST_CONFIG_GUEST_DIR" </dev/null >/dev/null 2>&1
 }
 
