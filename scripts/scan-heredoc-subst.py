@@ -17,6 +17,7 @@ and can report a false positive (comments and multi-line quotes are not modeled)
 
 Usage: scan-heredoc-subst.py FILE...   (prints file:line: reason; exit 1 on findings)
 """
+import os
 import re
 import sys
 
@@ -43,9 +44,10 @@ def hazards(body):
 
 
 def mask(line):
-    """Blank the inside of quoted strings (keeping the quote characters) and drop a trailing comment."""
+    """Blank quoted strings and a trailing comment, preserving the line length."""
     out = QUOTED_RE.sub(lambda m: m.group(0)[0] + "x" * (len(m.group(0)) - 2) + m.group(0)[0], line)
-    return re.sub(r"(^|\s)#.*$", r"\1", out)
+    # Blank the comment with spaces so offsets stay aligned with the original line.
+    return re.sub(r"(^|\s)#.*$", lambda m: m.group(1) + " " * (len(m.group(0)) - len(m.group(1))), out)
 
 
 def paren_delta(masked):
@@ -93,8 +95,23 @@ def scan(path):
     return found
 
 
-if __name__ == "__main__":
-    findings = [f for p in sys.argv[1:] for f in scan(p)]
+def main(paths):
+    findings = []
+    for path in paths:
+        try:
+            findings.extend(scan(path))
+        except Exception as err:  # noqa: BLE001 - never leak a traceback; fail closed
+            print("scan-heredoc-subst: internal error scanning %s: %s: %s" % (path, type(err).__name__, err))
+            return 2
     if findings:
-        print("\n".join(findings))
-        sys.exit(1)
+        try:
+            print("\n".join(findings))
+            sys.stdout.flush()
+        except BrokenPipeError:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -21,6 +21,7 @@ import io
 import json
 import os
 import platform
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -62,7 +63,36 @@ def verified(data, digest, what):
     return data
 
 
+def check_prefix(prefix):
+    """Reject a prefix that cannot be a plain absolute path (before any network or disk work)."""
+    if not os.path.isabs(prefix):
+        raise SystemExit("fetch-bash32-oci: PREFIX must be an absolute path")
+    try:
+        prefix.encode("utf-8")
+    except UnicodeEncodeError:
+        raise SystemExit("fetch-bash32-oci: PREFIX must be valid UTF-8")
+    if os.path.normpath(prefix) == "/":
+        raise SystemExit("fetch-bash32-oci: PREFIX must not be the filesystem root")
+    if "\0" in prefix or any(ord(c) < 32 or ord(c) == 127 for c in prefix):
+        raise SystemExit("fetch-bash32-oci: PREFIX must not contain control characters (newline, NUL, ...)")
+    return prefix
+
+
+def launcher_text(prefix, arch):
+    """A bash launcher with absolute paths: the interpreter needs its own musl loader and libraries.
+
+    It must be a bash script (not /bin/sh): dash drops exported functions
+    (BASH_FUNC_*%%), which bats relies on across nested bash calls. Every path is
+    shell-quoted so a prefix with quotes, spaces or `$(...)` runs as literal text.
+    """
+    loader = shlex.quote("%s/lib/ld-musl-%s.so.1" % (prefix, arch))
+    libdir = shlex.quote("%s/lib" % prefix)
+    binary = shlex.quote("%s/libexec/bash" % prefix)
+    return "#!/bin/bash\nexec %s --library-path %s %s \"$@\"\n" % (loader, libdir, binary)
+
+
 def main(prefix):
+    check_prefix(prefix)
     arch = platform.machine()
     arch = {"arm64": "aarch64", "amd64": "x86_64"}.get(arch, arch)
     if arch not in MANIFESTS:
@@ -88,6 +118,8 @@ def main(prefix):
     for rel, data in found.items():
         dest = os.path.join(prefix, rel)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if os.path.lexists(dest):
+            os.remove(dest)
         with open(dest, "wb") as handle:
             handle.write(data)
         os.chmod(dest, 0o755)
@@ -96,16 +128,12 @@ def main(prefix):
         os.remove(link)
     os.symlink("libncursesw.so.6.5", link)
 
-    # A launcher with absolute paths: the interpreter needs its own musl loader and
-    # libraries. It must be a bash script (not /bin/sh): dash drops exported
-    # functions (BASH_FUNC_*%%), which bats relies on across nested bash calls.
     launcher = os.path.join(prefix, "bin", "bash")
     os.makedirs(os.path.dirname(launcher), exist_ok=True)
+    if os.path.lexists(launcher):
+        os.remove(launcher)
     with open(launcher, "w") as handle:
-        handle.write(
-            "#!/bin/bash\nexec '%s/lib/ld-musl-%s.so.1' --library-path '%s/lib' '%s/libexec/bash' \"$@\"\n"
-            % (prefix, arch, prefix, prefix)
-        )
+        handle.write(launcher_text(prefix, arch))
     os.chmod(launcher, 0o755)
 
     out = subprocess.run([launcher, "-c", "printf %s \"$BASH_VERSION\""], capture_output=True, text=True, check=False)
@@ -115,6 +143,6 @@ def main(prefix):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or not os.path.isabs(sys.argv[1]):
+    if len(sys.argv) != 2:
         raise SystemExit("usage: fetch-bash32-oci.py ABSOLUTE_PREFIX")
     main(sys.argv[1])
