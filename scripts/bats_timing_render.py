@@ -81,7 +81,7 @@ def untimed_section():
     return [
         "| Timing | none |",
         "",
-        "No per-test timings were present (`in Nms` suffixes). "
+        "No per-test timings were present (`in Nms` or `# in N ms` suffixes). "
         "Run the suite with `ACQ_BATS_TIMING=1` to get slowest-test and slowest-file tables.",
     ]
 

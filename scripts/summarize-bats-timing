@@ -30,9 +30,16 @@ import os
 import sys
 
 sys.dont_write_bytecode = True  # keep __pycache__ out of scripts/
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
-from bats_timing_core import SHARD_RE, Note, Stats, clean, consume, load_name_map  # noqa: E402
-from bats_timing_render import build_json, fmt_secs, render, wall_seconds  # noqa: E402
+try:
+    from bats_timing_core import SHARD_RE, Note, Stats, clean, consume, load_name_map
+    from bats_timing_render import build_json, fmt_secs, render, wall_seconds
+except BaseException as exc:  # advisory tool: a broken install must not fail the job
+    sys.stderr.write("summarize-bats-timing: cannot load modules (%s)\n" % type(exc).__name__)
+    sys.stdout.write("## bats timing\n\nThe timing summary could not be produced (module load failed).\n")
+    sys.stdout.flush()
+    os._exit(0)
 
 
 def write_text(path, text, append):
