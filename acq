@@ -709,6 +709,16 @@ if [ -n "${ACQ_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 # Dispatch stays in the original foreground shell: $$, stdin, terminal signals,
 # and exec retain their normal meaning. A private guardian covers replaced EXIT
 # traps and exec; ordinary exits also reap it synchronously. No root is exported.
+# The guardian ignores HUP/INT/TERM and its sleep tick inherits that. A
+# non-interactive shell cannot reset a signal that was ignored on entry, so the
+# tick can only be stopped promptly with KILL; SIGTERM would leave the exit
+# waiting out the rest of the tick (up to one second). `tick` still holds the
+# child's PID for a moment after `wait` has reaped it, and USR1 can be handled in
+# exactly that window, so the exit trap never signals the saved PID on trust: it
+# first asks ps whether that PID is a `sleep` whose parent is this guardian, and
+# signals nothing otherwise. A stale PID that has been reused by another process
+# has a different parent and is left alone. A second USR1 is ignored once cleanup
+# has started so it cannot cut the exit trap short.
 _acq_kit_fetch_cleanup() {
   if [ -n "${_ACQ_KIT_FETCH_GUARDIAN:-}" ]; then
     kill -USR1 "$_ACQ_KIT_FETCH_GUARDIAN" 2>/dev/null || true
@@ -730,7 +740,18 @@ _acq_kit_fetch_start() {
     trap '' HUP INT TERM
     exec sh -c '
       owner=$1 root=$2 tick=""
-      trap '\''[ -z "$tick" ] || { kill "$tick" 2>/dev/null || :; wait "$tick" 2>/dev/null || :; }; rm -rf -- "$root"'\'' EXIT
+      stop_tick() {
+        trap "" USR1
+        set -f
+        [ -n "$tick" ] || return 0
+        info=$(ps -o ppid= -o comm= -p "$tick" 2>/dev/null) || info=""
+        set -- $info
+        if [ "$#" -eq 2 ] && [ "$1" = "$$" ]; then
+          case "$2" in sleep|*/sleep) kill -s KILL "$tick" 2>/dev/null || : ;; esac
+        fi
+        wait "$tick" 2>/dev/null || :
+      }
+      trap '\''stop_tick; rm -rf -- "$root"'\'' EXIT
       trap "exit 0" USR1
       : > "$root/ready" || exit 1
       while [ -d "$root" ]; do
