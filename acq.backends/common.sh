@@ -3594,6 +3594,12 @@ _acq_provider_facts_python() {
 # value is re-validated after parsing: these values reach an sh -c probe and a
 # --secret binding, so a tampered facts.json must not be able to smuggle shell
 # syntax, a cross-host models URL, or an unsafe ENV name any further.
+# The embedded Python forces LF on stdout: native Windows Python turns each
+# newline into CRLF when stdout is a pipe, and the `read` loop would then keep
+# the trailing carriage return in every value. That explanation lives here, not
+# in the heredoc, because bash 3.2 scans a heredoc body inside a process
+# substitution for quote and parenthesis balance, so no comment or string in the
+# body may contain an apostrophe, a backtick, or an unbalanced parenthesis.
 acq_provider_facts_json_fields() {
   local file="${1:-}" python value provider_id="" key_env="" host="" models_url="" api_protocol="" count=0
   [ -n "$file" ] || return 2
@@ -3616,6 +3622,9 @@ acq_provider_facts_json_fields() {
   done < <("$python" - "$file" <<'PY'
 import json, sys
 from urllib.parse import urlsplit
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(newline="\n")
 
 try:
     with open(sys.argv[1], encoding="utf-8") as handle:
@@ -4336,6 +4345,49 @@ acq_provider_input_discard() {
   _acq_provider_input_cleanup_generation "$root" "$generation"
 }
 
+# True (0) on MSYS2/Git-Bash/Cygwin. Separate from _acq_provider_input_msys_ps
+# (which also requires LOCALAPPDATA) so tests can override it.
+_acq_provider_input_is_msys() {
+  case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac
+}
+
+# Run python3 so that no argv word is rewritten by the shell runtime. MSYS2
+# converts POSIX-looking arguments to native paths before a native program sees
+# them, and that conversion RESOLVES an intermediate NTFS junction or symlink,
+# so the path walk below would validate a path whose ancestor links were already
+# followed. Path words are therefore passed literally and translated to the
+# native form by _acq_provider_input_native_path instead. The two variables are
+# inert on POSIX hosts.
+_acq_provider_input_py() {
+  MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 python3 "$@"
+}
+
+# Translate PATH to the native form the Windows path walk expects WITHOUT
+# resolving it. Identity on POSIX hosts. On MSYS the leading component is mapped
+# through cygpath (it names a drive or a mount such as /c or /tmp, never
+# user-controlled content) and every remaining component is appended as a
+# string, so a junction or symlink below the mount point reaches the walk
+# intact. A drive-form path is passed through with separators normalized.
+# Relative paths are returned unchanged and rejected by the walk.
+_acq_provider_input_native_path() {
+  local p="$1" rest first head
+  _acq_provider_input_is_msys || { printf '%s' "$p"; return 0; }
+  case "$p" in
+    [A-Za-z]:[/\\]*) printf '%s' "${p//\\//}"; return 0 ;;
+    /*) ;;
+    *) printf '%s' "$p"; return 0 ;;
+  esac
+  rest=${p#/}
+  first=${rest%%/*}
+  if [ "$first" = "$rest" ]; then rest=""; else rest=${rest#*/}; fi
+  case "$first" in .|..) return 1 ;; esac
+  command -v cygpath >/dev/null 2>&1 || return 1
+  head=$(cygpath -m "/$first" 2>/dev/null) || return 1
+  [ -n "$head" ] || return 1
+  case "$head" in */) ;; *) head="$head/" ;; esac
+  printf '%s%s' "$head" "$rest"
+}
+
 # Normalize the three macOS kernel-managed path aliases to their canonical
 # /private/{var,tmp,etc} spellings so O_NOFOLLOW traversal never sees a
 # symlink at the first path component.  Also collapses harmless absolute
@@ -4351,7 +4403,7 @@ acq_provider_input_discard() {
 # builds never set this variable; it is documented alongside ACQ_TEST_HOST_OS as
 # a test-seam-only override.
 _acq_provider_input_canonical_path() {
-  python3 - "$1" <<'PY'
+  _acq_provider_input_py - "$1" <<'PY'
 import os, re, sys
 path = sys.argv[1]
 # Collapse harmless absolute spelling variants before alias matching.
@@ -4385,42 +4437,129 @@ PY
 # including every user-influenced one — still traverse with O_NOFOLLOW.
 # Linux is unaffected.
 _acq_provider_input_safe_mkdir() {
-  local _canon
+  local _canon _native
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  _native=$(_acq_provider_input_native_path "$_canon") || return 1
+  _acq_provider_input_py - "$_native" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
-fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
-try:
-    for part in (p for p in path.split('/') if p):
+# ACQ_TEST_FORCE_PORTABLE_WALK (offline tests only) selects the portable
+# lstat walk below on POSIX so its symlink handling is testable without Windows.
+_force_walk = bool(os.environ.get('ACQ_TEST_FORCE_PORTABLE_WALK'))
+if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW') and not _force_walk:
+    # POSIX: openat-style traversal with O_NOFOLLOW so no component follows a
+    # symlink (the host-owned projection tree must not be redirected).
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in (p for p in path.split('/') if p):
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                os.mkdir(part, 0o755, dir_fd=fd)
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit('unsafe provider-input path')
+            os.close(fd); fd = child
+    finally:
+        os.close(fd)
+else:
+    # Windows (native Python 3.12): no O_DIRECTORY/O_NOFOLLOW/dir_fd. The caller
+    # passes the native path built lexically by _acq_provider_input_native_path
+    # with MSYS argv conversion disabled (see _acq_provider_input_py), so the
+    # path seen here is the literal one, never one whose intermediate junction
+    # the shell already resolved. Walk component by component from the
+    # drive root, creating missing directories one at a time so no ancestor is
+    # followed before it is validated. Reject symlinks (S_IFLNK), junctions
+    # (IO_REPARSE_TAG_MOUNT_POINT), and every other reparse point at each step,
+    # so a writable ancestor cannot redirect projection creation outside the
+    # intended tree (os.path.islink alone silently misses junctions).
+    if not hasattr(os.path, 'splitdrive'):
+        raise SystemExit('unsafe provider-input path: reparse-point traversal unavailable')
+    def _fatal():
+        raise SystemExit('unsafe provider-input path')
+    def _unsafe(st):
+        # st_reparse_tag != 0 covers os.path.isjunction() (mount points) plus
+        # every other reparse tag; S_IFLNK covers symlinks.
+        return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) != 0
+    drive, tail = os.path.splitdrive(path)
+    if not drive and not (_force_walk and path.startswith('/')):
+        _fatal()
+    cur = drive + os.sep
+    def _validate_dir(p, create):
         try:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            st = os.lstat(p)
         except FileNotFoundError:
-            os.mkdir(part, 0o755, dir_fd=fd)
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit('unsafe provider-input path')
-        os.close(fd); fd = child
-finally:
-    os.close(fd)
+            if not create:
+                _fatal()
+            try:
+                os.mkdir(p, 0o755)
+            except FileExistsError:
+                pass
+            st = os.lstat(p)
+        except OSError:
+            _fatal()
+        if _unsafe(st) or not stat.S_ISDIR(st.st_mode):
+            _fatal()
+    _validate_dir(cur, False)
+    for comp in tail.replace('\\', '/').split('/'):
+        if comp in ('', '.'):
+            continue
+        if comp == '..':
+            _fatal()
+        cur = os.path.join(cur, comp)
+        _validate_dir(cur, True)
 PY
 }
 
 _acq_provider_input_safe_dir() {
-  local _canon
+  local _canon _native
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  _native=$(_acq_provider_input_native_path "$_canon") || return 1
+  _acq_provider_input_py - "$_native" <<'PY'
 import os, stat, sys
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
-fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
-try:
-    for part in (p for p in path.split('/') if p):
-        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit(1)
-        os.close(fd); fd = child
-finally:
-    os.close(fd)
+_force_walk = bool(os.environ.get('ACQ_TEST_FORCE_PORTABLE_WALK'))
+if hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW') and not _force_walk:
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in (p for p in path.split('/') if p):
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            if not stat.S_ISDIR(os.fstat(child).st_mode): raise SystemExit(1)
+            os.close(fd); fd = child
+    finally:
+        os.close(fd)
+else:
+    # Windows (native Python 3.12): walk component by component from the drive
+    # root, rejecting symlinks (S_IFLNK), junctions (IO_REPARSE_TAG_MOUNT_POINT),
+    # and every other reparse point at each step so an attacker-controlled
+    # ancestor cannot redirect the existence/type check (islink alone misses
+    # junctions). Requires a real directory, never creating anything.
+    if not hasattr(os.path, 'splitdrive'):
+        raise SystemExit(1)
+    def _fatal():
+        raise SystemExit(1)
+    def _unsafe(st):
+        return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) != 0
+    drive, tail = os.path.splitdrive(path)
+    if not drive and not (_force_walk and path.startswith('/')):
+        _fatal()
+    cur = drive + os.sep
+    def _validate_dir(p):
+        try:
+            st = os.lstat(p)
+        except OSError:
+            _fatal()
+        if _unsafe(st) or not stat.S_ISDIR(st.st_mode):
+            _fatal()
+    _validate_dir(cur)
+    for comp in tail.replace('\\', '/').split('/'):
+        if comp in ('', '.'):
+            continue
+        if comp == '..':
+            _fatal()
+        cur = os.path.join(cur, comp)
+        _validate_dir(cur)
 PY
 }
 
@@ -4448,14 +4587,67 @@ _acq_provider_input_remove_tree() {
 }
 
 _acq_provider_input_atomic_replace() {
-  python3 - "$1" "$2" <<'PY'
+  local _src _dst
+  _src=$(_acq_provider_input_native_path "$1") || return 1
+  _dst=$(_acq_provider_input_native_path "$2") || return 1
+  _acq_provider_input_py - "$_src" "$_dst" <<'PY'
 import os, sys
 os.replace(sys.argv[1], sys.argv[2])
 PY
 }
 
+# Create a Windows junction LINK -> TARGET via `mklink /J`. Unlike a directory
+# symlink (which needs elevation or Developer Mode), a junction needs neither,
+# so it is the reliable reparse pointer on a stock Windows host. `cmd` is driven
+# with MSYS argument escaping and backslash (`cygpath -w`) paths, matching the
+# test helper in 147-provider-input-projection.bats. Returns non-zero on failure.
+_acq_provider_input_make_junction() {
+  local link="$1" target="$2" win_link win_target
+  command -v cygpath >/dev/null 2>&1 || return 1
+  win_link=$(cygpath -w "$link" 2>/dev/null) || return 1
+  win_target=$(cygpath -w "$target" 2>/dev/null) || return 1
+  cmd //c mklink //J "$win_link" "$win_target" >/dev/null 2>&1
+}
+
+# Remove a reparse-point link (POSIX symlink or Windows junction) WITHOUT
+# following it into its target. MSYS rm/rmdir mishandle junctions, so use
+# Python: `os.rmdir` on a junction issues RemoveDirectory on the reparse point
+# itself (the target is left untouched). A symlink or plain file is unlinked.
+_acq_provider_input_remove_link() {
+  local _native
+  _native=$(_acq_provider_input_native_path "$1") || return 1
+  _acq_provider_input_py - "$_native" <<'PY'
+import os, stat, sys
+p = sys.argv[1]
+try:
+    st = os.lstat(p)
+except FileNotFoundError:
+    raise SystemExit(0)
+if stat.S_ISDIR(st.st_mode):
+    os.rmdir(p)
+else:
+    os.unlink(p)
+PY
+}
+
+# Move a reparse-point link (POSIX symlink or Windows junction) from SRC to DST
+# WITHOUT following it into its target. A missing SRC is a no-op. os.rename moves
+# the link itself (it does not resolve a junction), and DST must not exist yet.
+_acq_provider_input_move_link() {
+  local _src _dst
+  _src=$(_acq_provider_input_native_path "$1") || return 1
+  _dst=$(_acq_provider_input_native_path "$2") || return 1
+  _acq_provider_input_py - "$_src" "$_dst" <<'PY'
+import os, sys
+try:
+    os.rename(sys.argv[1], sys.argv[2])
+except FileNotFoundError:
+    pass
+PY
+}
+
 _acq_provider_input_publish() {
-  local root="$1" generation="$2" base temp current
+  local root="$1" generation="$2" base temp current backup
   case "$root" in ""|/|/*/) return 1 ;; esac
   case "$generation" in "$root"/generations/generation.*) ;; *) return 1 ;; esac
   _acq_provider_input_safe_dir "$root/generations" || return 1
@@ -4464,9 +4656,27 @@ _acq_provider_input_publish() {
   base=${generation##*/}
   temp="$root/.current.$$.$RANDOM"
   current="$root/current"
-  ln -s "generations/$base" "$temp" || return 1
-  # rename is atomic within root; do not remove current first.
-  _acq_provider_input_atomic_replace "$temp" "$current" || { rm -f "$temp"; return 1; }
+  if _acq_provider_input_is_msys; then
+    # A directory symlink needs elevation/Developer Mode on Windows; a junction
+    # does not. Build the junction at `temp`, then swap it into place. Windows
+    # cannot atomically replace an existing junction (os.replace fails with
+    # Access denied), so move the old pointer aside, swap the new one in, and
+    # restore the old pointer if the swap fails — `current` is never left absent.
+    _acq_provider_input_make_junction "$temp" "$generation" || return 1
+    backup="$current.acq-old.$$.$RANDOM"
+    _acq_provider_input_move_link "$current" "$backup" || { _acq_provider_input_remove_link "$temp"; return 1; }
+    if _acq_provider_input_atomic_replace "$temp" "$current"; then
+      _acq_provider_input_remove_link "$backup"
+    else
+      _acq_provider_input_move_link "$backup" "$current"
+      _acq_provider_input_remove_link "$temp"
+      return 1
+    fi
+  else
+    ln -s "generations/$base" "$temp" || return 1
+    # rename is atomic within root; do not remove current first.
+    _acq_provider_input_atomic_replace "$temp" "$current" || { rm -f "$temp"; return 1; }
+  fi
   # Retain prior generations. A sandbox created by an older acq may still mount
   # current, and a failed concurrent create must never make that sandbox lose its
   # inputs. New sandboxes mount an exact generation and are unaffected by swaps.
@@ -4514,6 +4724,26 @@ acq_provider_input_lock_acquire() {
   printf '%s\n' "$lock"
 }
 
+# True (0) on MSYS2/Git-Bash (MINGW/MSYS/CYGWIN), where `ps` does not accept
+# the `-o FIELD=` output-format specifier and instead prints a fixed table via
+# `ps -p PID` (columns: PID PPID PGID WINPID TTY UID STIME COMMAND).
+_acq_provider_input_msys_ps() {
+  [ -n "${LOCALAPPDATA:-}" ] || return 1
+  case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac
+}
+
+# Parent PID of PID (empty on failure), portable across GNU/macOS and MSYS.
+# GNU/macOS: `ps -o ppid= -p PID`. MSYS: PPID is column 2 of `ps -p PID`.
+_acq_provider_input_parent_pid() {
+  local pid="${1:-}"
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  if _acq_provider_input_msys_ps; then
+    ps -p "$pid" 2>/dev/null | awk 'NR==2 {print $2}'
+  else
+    ps -o ppid= -p "$pid" 2>/dev/null
+  fi | tr -d '[:space:]'
+}
+
 # Start a real process whose lifetime is tied to the transaction subshell. Bash
 # 3.2 preserves $$ across subshells and has no BASHPID, so the lock records this
 # guardian PID instead. The guardian exits if its transaction parent disappears,
@@ -4539,7 +4769,7 @@ _acq_provider_input_guardian_start() {
     done
   ' sh "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" &
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$!
-  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(ps -o ppid= -p "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" 2>/dev/null | tr -d '[:space:]')
+  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(_acq_provider_input_parent_pid "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID")
   case "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" in ""|*[!0-9]*) _acq_provider_input_guardian_stop; return 1 ;; esac
   export _ACQ_PROVIDER_INPUT_GUARDIAN_PID
   export _ACQ_PROVIDER_INPUT_TRANSACTION_PID
@@ -4642,7 +4872,13 @@ _acq_provider_input_signal_exit() {
 _acq_provider_input_process_identity() {
   local pid="${1:-}"
   case "$pid" in ""|*[!0-9]*) return 1 ;; esac
-  ps -o lstart= -p "$pid" 2>/dev/null | tr -d '[:space:]' | grep .
+  if _acq_provider_input_msys_ps; then
+    # MSYS has no lstart; WINPID (column 4) is the stable, unique Windows
+    # process id, so it distinguishes a reused MSYS PID from the original owner.
+    ps -p "$pid" 2>/dev/null | awk 'NR==2 {print $4}'
+  else
+    ps -o lstart= -p "$pid" 2>/dev/null
+  fi | tr -d '[:space:]' | grep .
 }
 
 acq_provider_input_lock_release() {
@@ -4692,53 +4928,114 @@ _acq_provider_input_control_plane() {
 # reads. Validation and later materialization therefore cannot observe a changed
 # candidate manifest, symlink, or path outside the fetched kit.
 _acq_provider_input_snapshot() {
-  python3 - "$1" "$2" <<'PY'
+  local _kit _target
+  _kit=$(_acq_provider_input_native_path "$1") || return 1
+  _target=$(_acq_provider_input_native_path "$2") || return 1
+  _acq_provider_input_py - "$_kit" "$_target" <<'PY'
 import json, os, stat, sys
 kit, target = sys.argv[1:]
-def open_relative(root, value):
-    if not isinstance(value, str) or value.startswith('/') or not value or any(part in ('', '.', '..') for part in value.split('/')):
+# ACQ_TEST_FORCE_PORTABLE_WALK (offline tests only) selects the portable lstat
+# walk on POSIX so its symlink rejection is testable without a Windows runner.
+_posix_nofollow = hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW') \
+    and not os.environ.get('ACQ_TEST_FORCE_PORTABLE_WALK')
+def rel_parts(rel):
+    # Single validation point for every manifest-declared path, used for both the
+    # source open and the destination join so the two can never disagree. Where
+    # the portable walk applies, backslash and drive/stream ':' are also rejected
+    # so a manifest cannot smuggle a separator or a drive-relative component.
+    if not isinstance(rel, str) or not rel or rel.startswith('/'):
         raise SystemExit('unsafe provider artifact path')
-    fd = os.dup(root)
-    try:
-        for part in value.split('/'):
-            nextfd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd); fd = nextfd
-        if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit('unsafe provider artifact')
-        return fd
-    except:
-        os.close(fd); raise
-root = os.open(kit, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    if not _posix_nofollow:
+        if '\\' in rel or ':' in rel:
+            raise SystemExit('unsafe provider artifact path')
+    parts = rel.split('/')
+    if any(part in ('', '.', '..') for part in parts):
+        raise SystemExit('unsafe provider artifact path')
+    return parts
+def safe_open(base, rel):
+    # Validate `rel` under `base` with a no-follow walk and return an OPEN
+    # binary reader bound to the validated file. On POSIX the reader keeps the
+    # descriptor from the O_NOFOLLOW walk, so a file or ancestor swapped after
+    # validation cannot redirect the read. On Windows (no O_NOFOLLOW/dir_fd) we
+    # walk with lstat and reopen the validated pathname as a guarded fallback.
+    parts = rel_parts(rel)
+    if _posix_nofollow:
+        fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in parts:
+                nextfd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd); fd = nextfd
+            if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit('unsafe provider artifact')
+            return os.fdopen(fd, 'rb')
+        except BaseException:
+            os.close(fd)
+            raise
+    # Windows guarded fallback (native Python 3.12): no O_NOFOLLOW/dir_fd. Walk
+    # the relative path component by component under `base`, rejecting symlinks
+    # (S_IFLNK), junctions, and every other reparse point at each step, and
+    # require a regular file at the end. rel_parts() has already rejected
+    # backslash and ':' so a manifest path cannot smuggle a separator or a
+    # drive-relative component. This path is check-then-open by name (the stdlib
+    # has no handle-relative open on Windows), so it is weaker than the POSIX
+    # descriptor-bound read; it relies on the fetched kit living in a private
+    # host-owned staging directory.
+    def _fatal():
+        raise SystemExit('unsafe provider artifact')
+    def _unsafe(st):
+        return stat.S_ISLNK(st.st_mode) or getattr(st, 'st_reparse_tag', 0) != 0
+    cur = base
+    for i, part in enumerate(parts):
+        cur = os.path.join(cur, part)
+        try:
+            st = os.lstat(cur)
+        except OSError:
+            _fatal()
+        if _unsafe(st):
+            _fatal()
+        if i == len(parts) - 1:
+            if not stat.S_ISREG(st.st_mode):
+                _fatal()
+        elif not stat.S_ISDIR(st.st_mode):
+            _fatal()
+    return open(cur, 'rb')
+if os.path.islink(kit) or not os.path.isdir(kit) \
+        or getattr(os.lstat(kit), 'st_reparse_tag', 0) != 0:
+    raise SystemExit('unsafe provider kit path')
+with safe_open(kit, 'provider-input.json') as stream:
+    manifest_bytes = stream.read()
 try:
-    manifest_fd = open_relative(root, 'provider-input.json')
-    with os.fdopen(manifest_fd, encoding='utf-8') as stream: manifest_bytes = stream.read()
-    try:
-        bundle = json.loads(manifest_bytes)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(
-            'acq: invalid provider input manifest: provider-input.json: '
-            f'invalid JSON at line {exc.lineno} column {exc.colno}'
-        )
-    os.mkdir(target, 0o700)
-    with open(os.path.join(target, 'provider-input.json'), 'x', encoding='utf-8') as stream: stream.write(manifest_bytes)
-    for path in ('spec.yaml', bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):
-        source = open_relative(root, path)
-        destination = os.path.join(target, path)
+    bundle = json.loads(manifest_bytes)
+except json.JSONDecodeError as exc:
+    raise SystemExit(
+        'acq: invalid provider input manifest: provider-input.json: '
+        f'invalid JSON at line {exc.lineno} column {exc.colno}'
+    )
+os.mkdir(target, 0o700)
+with open(os.path.join(target, 'provider-input.json'), 'xb') as stream:
+    stream.write(manifest_bytes)
+for path in ('spec.yaml', bundle['factsPath'], bundle['normalizerPath'], bundle['snapshotPath']):
+    # Validate and open the source BEFORE touching the destination tree, so a
+    # rejected path can never create a directory outside the candidate target.
+    with safe_open(kit, path) as src:
+        destination = os.path.join(target, *rel_parts(path))
         os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
-        with os.fdopen(source, 'rb') as src, open(destination, 'xb') as dst:
-            source_mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode)
+        source_mode = stat.S_IMODE(os.fstat(src.fileno()).st_mode)
+        with open(destination, 'xb') as dst:
             while True:
                 chunk = src.read(1024 * 1024)
                 if not chunk: break
                 dst.write(chunk)
-            os.fchmod(dst.fileno(), source_mode)
-finally:
-    os.close(root)
+    os.chmod(destination, source_mode)
 PY
 }
 
 # Copy only validator-approved regular files into the backend-owned readonly tree.
 _acq_provider_input_materialize() {
-  python3 - "$1" "$2" "$3" <<'PY'
+  local _manifest _kit _root
+  _manifest=$(_acq_provider_input_native_path "$1") || return 1
+  _kit=$(_acq_provider_input_native_path "$2") || return 1
+  _root=$(_acq_provider_input_native_path "$3") || return 1
+  _acq_provider_input_py - "$_manifest" "$_kit" "$_root" <<'PY'
 import json, os, shutil, sys
 manifest, kit, target_root = sys.argv[1:]
 bundle = json.load(open(manifest, encoding="utf-8"))
@@ -4755,7 +5052,8 @@ for source, destination, mode in ((bundle["factsPath"], "facts.json", 0o444), (b
     if not isinstance(source, str) or source.startswith('/') or any(part in ('', '.', '..') for part in source.split('/')):
         raise SystemExit("unsafe provider artifact path")
     source = os.path.join(kit, source)
-    if os.path.islink(source) or not os.path.isfile(source):
+    if os.path.islink(source) or not os.path.isfile(source) \
+            or getattr(os.lstat(source), 'st_reparse_tag', 0) != 0:
         raise SystemExit("unsafe provider artifact")
     destination = os.path.join(target, destination)
     shutil.copyfile(source, destination)

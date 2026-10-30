@@ -226,11 +226,11 @@ SPEC
   refute_regex "$spec" "chmod 0755 '/workspace/w\.sh'"
 }
 
-@test "#207: a git+https kit fetch is non-interactive and neutralizes credentials" {
+@test "#207: a git+https kit fetch is non-interactive and isolates inherited git config" {
   local gitlog="$STUBDIR/git-invocations.log"; : >"$gitlog"
   cat >"$STUBDIR/git" <<GITSTUB
 #!/usr/bin/env bash
-printf 'PROMPT=%s ARGS=%s\n' "\${GIT_TERMINAL_PROMPT:-UNSET}" "\$*" >>"$gitlog"
+printf 'PROMPT=%s NOSYS=%s GLOBAL=%s ARGS=%s\n' "\${GIT_TERMINAL_PROMPT:-UNSET}" "\${GIT_CONFIG_NOSYSTEM:-UNSET}" "\${GIT_CONFIG_GLOBAL:-UNSET}" "\$*" >>"$gitlog"
 case "\$*" in
   *fetch*) exit 0 ;;
   *checkout*) mkdir -p "integrations/isolation/acq-kits/usai-provider"; exit 0 ;;
@@ -247,7 +247,42 @@ GITSTUB
   assert_regex "$fetchline" 'PROMPT=0'
   anonline=$(grep -m1 'credential.helper=' "$gitlog" || true)
   assert_regex "$anonline" 'credential\.helper='
-  assert_regex "$anonline" 'insteadOf='
+  assert_regex "$anonline" 'NOSYS=1'
+  assert_regex "$anonline" 'GLOBAL=.*\.gitconfig-empty'
+}
+
+@test "#207: an equal-length global insteadOf mirror rewrite is neutralized for the anonymous attempt" {
+  # A global `url.https://mirror.invalid/.insteadOf=https://github.com/` has the
+  # SAME prefix length as the old command-line identity rewrite, so git's
+  # longest-prefix match kept the inherited mirror rewrite winning and the
+  # anonymous fetch was redirected to the mirror. Isolating git from inherited
+  # config (GIT_CONFIG_NOSYSTEM + empty GIT_CONFIG_GLOBAL) neutralizes it.
+  local realgit="$ACQ_TEST_REAL_GIT" home="$STUBDIR/fakehome" resolved="$STUBDIR/resolved-url"
+  mkdir -p "$home"
+  "$realgit" config --file "$home/.gitconfig" url.https://mirror.invalid/.insteadOf https://github.com/
+
+  # A git that resolves the origin URL (as a fetch would) with the REAL git under
+  # the fetch's own environment, records the result, and fakes a successful fetch.
+  cat >"$STUBDIR/git" <<GITSTUB
+#!/usr/bin/env bash
+original=("\$@")
+while [ "\$#" -gt 0 ]; do case "\$1" in -c) shift 2 ;; *) break ;; esac; done
+case "\${1:-}" in
+  fetch) "$realgit" remote get-url origin > "$resolved"; exit 0 ;;
+  checkout) exit 0 ;;
+  *) "$realgit" "\${original[@]}" ;;
+esac
+GITSTUB
+  chmod +x "$STUBDIR/git"
+
+  run bash -c '
+    export HOME="'"$home"'"
+    . "'"$REPO_ROOT"'/acq.backends/kit-translate.sh"
+    kit_translate_fetch "git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=deadbeef&dir=integrations/isolation/acq-kits/usai-provider" "'"$STUBDIR"'/kitdest" >/dev/null 2>&1
+  '
+
+  assert_success
+  assert_equal "$(cat "$resolved" 2>/dev/null || printf 'UNRESOLVED')" "https://github.com/GSA-TTS/agentic-coding-patterns.git"
 }
 
 @test "#207: authenticated retry diagnostics never expose credential-bearing URLs" {

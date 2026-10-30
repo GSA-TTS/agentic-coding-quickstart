@@ -1013,6 +1013,245 @@ EOF
   assert_failure
 }
 
+# ---------------------------------------------------------------------------
+# Windows reparse-point negative tests (real Windows runner only)
+# ---------------------------------------------------------------------------
+# The Windows fallback (native Python 3.12, no O_NOFOLLOW/dir_fd) walks each
+# path component from the drive root and rejects symlinks (S_IFLNK), junctions
+# (IO_REPARSE_TAG_MOUNT_POINT), and every other reparse point. os.path.islink()
+# alone does NOT report junctions, so these tests prove the traversal actually
+# rejects a planted junction / symlink ancestor rather than following it.
+#
+# They require a real Windows runner with a native Windows python3 on PATH (the
+# repo CI is Linux, so they `skip` there). Junctions need no elevation; a
+# directory symlink needs developer mode / admin, so the symlink cases skip
+# when mklink /D is unavailable while the junction cases still run.
+
+_windows_runner() {
+  case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac
+}
+
+_windows_path() { command -v cygpath >/dev/null 2>&1 || return 1; cygpath -w "$1"; }
+
+_windows_make_junction() { # LINK TARGET  (no elevation required)
+  local win_link win_target
+  win_link=$(_windows_path "$1") || return 1
+  win_target=$(_windows_path "$2") || return 1
+  cmd //c mklink //J "$win_link" "$win_target" >/dev/null 2>&1
+}
+
+_windows_make_dir_symlink() { # LINK TARGET  (developer mode / admin required)
+  local win_link win_target
+  win_link=$(_windows_path "$1") || return 1
+  win_target=$(_windows_path "$2") || return 1
+  cmd //c mklink //D "$win_link" "$win_target" >/dev/null 2>&1
+}
+
+@test "windows: safe_mkdir succeeds on a real path (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local real="$STUBDIR/real_win/a/b"
+  run _acq_provider_input_safe_mkdir "$real"
+  assert_success
+  [ -d "$real" ]
+}
+
+@test "windows: safe_mkdir rejects an ancestor junction (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local target="$STUBDIR/junction_target" link="$STUBDIR/junction_link"
+  mkdir -p "$target"
+  _windows_make_junction "$link" "$target" || skip "junction creation unavailable on this runner"
+  [ -d "$link" ] || skip "junction not created"
+  run _acq_provider_input_safe_mkdir "$link/new_child"
+  assert_failure
+  # The projection must not have been redirected into the junction target.
+  [ ! -e "$target/new_child" ]
+}
+
+@test "windows: safe_dir rejects an ancestor junction (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local target="$STUBDIR/junction_target_dir" link="$STUBDIR/junction_link_dir"
+  mkdir -p "$target"
+  _windows_make_junction "$link" "$target" || skip "junction creation unavailable on this runner"
+  [ -d "$link" ] || skip "junction not created"
+  run _acq_provider_input_safe_dir "$link"
+  assert_failure
+}
+
+@test "windows: safe_mkdir rejects an ancestor symlink (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local target="$STUBDIR/symlink_target" link="$STUBDIR/symlink_link"
+  mkdir -p "$target"
+  _windows_make_dir_symlink "$link" "$target" || skip "directory symlink creation unavailable (developer mode / elevation required)"
+  run _acq_provider_input_safe_mkdir "$link/new_child"
+  assert_failure
+  [ ! -e "$target/new_child" ]
+}
+
+@test "windows: safe_dir rejects an ancestor symlink (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local target="$STUBDIR/symlink_target_dir" link="$STUBDIR/symlink_link_dir"
+  mkdir -p "$target"
+  _windows_make_dir_symlink "$link" "$target" || skip "directory symlink creation unavailable (developer mode / elevation required)"
+  run _acq_provider_input_safe_dir "$link"
+  assert_failure
+}
+
+@test "windows: publication makes current a junction and retains generations (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local root old new native_current
+  root=$(acq_provider_input_root sbx winpub)
+  mkdir -p "$root/generations/generation.old/models/providers" "$root/generations/generation.new/models/providers"
+  old="$root/generations/generation.old"; new="$root/generations/generation.new"
+
+  # Publish: current must become a junction (a reparse point), not a symlink or a
+  # directory copy, and it must resolve to the published generation.
+  run _acq_provider_input_publish "$root" "$new"
+  assert_success
+  native_current=$(cygpath -m "$root/current" 2>/dev/null) || skip "cygpath unavailable"
+  run _acq_provider_input_py -c 'import os,sys; print("junction" if os.path.isjunction(sys.argv[1]) else "not-junction")' "$native_current"
+  assert_success
+  assert_output "junction"
+  [ -d "$root/current/models/providers" ]
+  [ -d "$new" ]
+
+  # Publish again: current swaps to the other generation; both stay intact.
+  run _acq_provider_input_publish "$root" "$old"
+  assert_success
+  [ -d "$root/current/models/providers" ]
+  [ -d "$old" ]
+  [ -d "$new" ]
+}
+
+@test "windows: failed swap restores the prior current junction (real Windows runner only)" {
+  _windows_runner || skip "requires a real Windows runner to exercise the Windows reparse-point traversal"
+  local root old new
+  root=$(acq_provider_input_root sbx winswap)
+  mkdir -p "$root/generations/generation.old/models/providers" "$root/generations/generation.new/models/providers"
+  old="$root/generations/generation.old"; new="$root/generations/generation.new"
+  printf old > "$old/models/providers/marker"
+  printf new > "$new/models/providers/marker"
+
+  run _acq_provider_input_publish "$root" "$old"
+  assert_success
+  # Fail the swap; `current` must stay the old junction (restored), not be left
+  # absent or redirected to the new generation.
+  _acq_provider_input_atomic_replace() { return 1; }
+  run _acq_provider_input_publish "$root" "$new"
+  assert_failure
+  [ "$(cat "$root/current/models/providers/marker" 2>/dev/null)" = "old" ]
+  [ -d "$old" ]
+  [ -d "$new" ]
+}
+
+
+# ---------------------------------------------------------------------------
+# MSYS argv conversion must not resolve links before the walk sees the path
+# ---------------------------------------------------------------------------
+# MSYS2 rewrites POSIX-looking argv for native programs and, in doing so,
+# resolves an intermediate junction/symlink. The helpers therefore disable that
+# conversion and translate to the native form lexically. These tests simulate the
+# conversion on Linux with a python3 shim that resolves symlinks in its argv
+# exactly when conversion has not been disabled. Whether real MSYS honors
+# MSYS2_ARG_CONV_EXCL / MSYS_NO_PATHCONV for this call, and the cygpath mount
+# mapping, are verifiable only on a Windows host (the windows: tests above).
+
+_install_resolving_python_shim() {
+  mkdir -p "$STUBDIR/shim"
+  cat > "$STUBDIR/shim/python3" <<'SHIM'
+#!/bin/bash
+convert=1
+[ -n "${MSYS2_ARG_CONV_EXCL:-}" ] && convert=0
+[ -n "${MSYS_NO_PATHCONV:-}" ] && convert=0
+args=()
+for a in "$@"; do
+  if [ "$convert" = 1 ] && [[ "$a" == /* ]]; then a=$(realpath -m "$a"); fi
+  args+=("$a")
+done
+exec /usr/bin/python3 "${args[@]}"
+SHIM
+  chmod +x "$STUBDIR/shim/python3"
+  PATH="$STUBDIR/shim:$PATH"
+}
+
+@test "conversion shim control: it resolves a symlinked ancestor when conversion is not disabled" {
+  _install_resolving_python_shim
+  local target="$STUBDIR/shim_target" link="$STUBDIR/shim_link"
+  mkdir -p "$target"; ln -s "$target" "$link"
+  run python3 -c 'import sys; print(sys.argv[1])' "$link/child"
+  assert_output "$target/child"
+  MSYS_NO_PATHCONV=1 run python3 -c 'import sys; print(sys.argv[1])' "$link/child"
+  assert_output "$link/child"
+}
+
+@test "native_path is the identity on a non-MSYS host" {
+  run _acq_provider_input_native_path "/tmp/a/link/child"
+  assert_output "/tmp/a/link/child"
+}
+
+@test "native_path maps only the mount component and keeps the rest lexical on MSYS" {
+  local log="$STUBDIR/cygpath.log"; : > "$log"
+  _acq_provider_input_is_msys() { return 0; }
+  cygpath() { printf '%s\n' "$*" >> "$log"; case "$2" in /c) printf 'C:/' ;; *) printf 'D:/mnt%s' "$2" ;; esac; }
+  run _acq_provider_input_native_path "/c/Users/x/link/new_child"
+  assert_output "C:/Users/x/link/new_child"
+  run _acq_provider_input_native_path "/tmp/a/link/new_child"
+  assert_output "D:/mnt/tmp/a/link/new_child"
+  # cygpath only ever saw a single mount component, never the user-controlled tail.
+  run cat "$log"
+  refute_output --partial "Users"
+  refute_output --partial "link"
+  run _acq_provider_input_native_path 'C:\Users\x\link'
+  assert_output "C:/Users/x/link"
+  run _acq_provider_input_native_path "relative/path"
+  assert_output "relative/path"
+  run _acq_provider_input_native_path "/../x"
+  assert_failure
+}
+
+@test "portable walk: a path-conversion shim cannot bypass the ancestor check in safe_mkdir" {
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  _install_resolving_python_shim
+  local target="$STUBDIR/cv_target" base="$STUBDIR/cv_base"
+  mkdir -p "$base" "$target"; ln -s "$target" "$base/link"
+  run _acq_provider_input_safe_mkdir "$base/link/new_child"
+  assert_failure
+  [ ! -e "$target/new_child" ]
+  run _acq_provider_input_safe_mkdir "$base/link/deep/er/new_child"
+  assert_failure
+  [ -z "$(ls -A "$target")" ]
+}
+
+@test "portable walk: a path-conversion shim cannot bypass the ancestor check in safe_dir" {
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  _install_resolving_python_shim
+  local target="$STUBDIR/cvd_target" base="$STUBDIR/cvd_base"
+  mkdir -p "$base" "$target/sub"; ln -s "$target" "$base/link"
+  run _acq_provider_input_safe_dir "$base/link/sub"
+  assert_failure
+}
+
+# The snapshot half below only proves the wrapper still produces a working
+# snapshot under the shim; snapshot does not walk its target ancestors, so the
+# ancestor-link rejection itself is asserted on the mkdir walk.
+@test "portable walk: the MSYS-form path walk rejects a shim-resolvable ancestor and snapshot still works" {
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  _install_resolving_python_shim
+  _acq_provider_input_is_msys() { return 0; }
+  cygpath() { printf '%s' "$2"; }
+  local target="$STUBDIR/cvm_target" base="$STUBDIR/cvm_base"
+  mkdir -p "$base" "$target"; ln -s "$target" "$base/link"
+  run _acq_provider_input_safe_mkdir "$base/link/new_child"
+  assert_failure
+  [ ! -e "$target/new_child" ]
+
+  local release="$STUBDIR/release" kit
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  run _acq_provider_input_snapshot "$kit" "$STUBDIR/cvm_ok_candidate"
+  assert_success
+  [ -f "$STUBDIR/cvm_ok_candidate/provider-input.json" ]
+}
+
 @test "canonical_path aliases /var /tmp /etc on Darwin via ACQ_TEST_HOST_OS" {
   # Exercises the production _acq_provider_input_canonical_path helper directly
   # with ACQ_TEST_HOST_OS=darwin so the Darwin branch runs on Linux CI.
@@ -1389,4 +1628,90 @@ EOF
   assert_success
   grep -Fqx "fetch -q --depth 1 origin $PATTERNS_KIT_REF" "$log"
   grep -Fqx "checkout -q --detach FETCH_HEAD" "$log"
+}
+
+@test "candidate snapshot validates artifact paths before creating any directory" {
+  local release="$STUBDIR/release" kit candidate="$STUBDIR/candidate-order" bad
+  _provider_release "$release"
+  for bad in "../escape-rel/facts.json" "$STUBDIR/escape-abs/facts.json"; do
+    _provider_kit "$release" alpha
+    kit="$release/integrations/isolation/acq-kits/alpha"
+    printf '{"providerId":"alpha","factsPath":"%s","normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}\n' "$bad" > "$kit/provider-input.json"
+    rm -rf "$candidate"
+    run _acq_provider_input_snapshot "$kit" "$candidate"
+    assert_failure
+    [ ! -e "$STUBDIR/escape-rel" ]
+    [ ! -e "$STUBDIR/escape-abs" ]
+    [ ! -e "$candidate/../escape-rel" ]
+  done
+}
+
+@test "candidate snapshot rejects drive-qualified and backslash artifact paths on the portable walk" {
+  # The artifacts really exist (those names are legal on POSIX), so only the
+  # path-form check, not a missing file, can make the snapshot fail.
+  local release="$STUBDIR/release" kit candidate="$STUBDIR/candidate-win" bad
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  _provider_release "$release"
+  for bad in 'C:foo/facts.json' 'provider-input\facts.json'; do
+    _provider_kit "$release" alpha
+    kit="$release/integrations/isolation/acq-kits/alpha"
+    mkdir -p "$kit/$(dirname "$bad")"
+    printf '{"providerId":"alpha"}\n' > "$kit/$bad"
+    python3 -c 'import json,sys; print(json.dumps({"providerId":"alpha","factsPath":sys.argv[1],"normalizerPath":"scripts/normalize","snapshotPath":"files/snapshot.json"}))' "$bad" > "$kit/provider-input.json"
+    rm -rf "$candidate"
+    run _acq_provider_input_snapshot "$kit" "$candidate"
+    assert_failure
+  done
+  # Control: the same layout with a plain relative path is accepted.
+  _provider_kit "$release" alpha
+  run _acq_provider_input_snapshot "$release/integrations/isolation/acq-kits/alpha" "$candidate-ok"
+  assert_success
+}
+
+# The portable (Windows) lstat walk is selected on POSIX by the offline-only
+# ACQ_TEST_FORCE_PORTABLE_WALK seam so its symlink-ancestor rejection runs in CI.
+# Real junction/reparse behavior is covered only by the Windows-runner tests above.
+
+@test "portable walk: snapshot copies a real kit and rejects a symlinked artifact ancestor" {
+  local release="$STUBDIR/release" kit outside="$STUBDIR/outside-kit" candidate="$STUBDIR/candidate-pw"
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  _provider_release "$release"; _provider_kit "$release" alpha
+  kit="$release/integrations/isolation/acq-kits/alpha"
+  run _acq_provider_input_snapshot "$kit" "$candidate"
+  assert_success
+  [ -f "$candidate/provider-input/facts.json" ]
+
+  mkdir -p "$outside"; printf '{"providerId":"alpha"}\n' > "$outside/facts.json"
+  rm -rf "$kit/provider-input"; ln -s "$outside" "$kit/provider-input"
+  rm -rf "$candidate"
+  run _acq_provider_input_snapshot "$kit" "$candidate"
+  assert_failure
+}
+
+@test "portable walk: safe_mkdir and safe_dir accept real paths and reject symlinked ancestors" {
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  local real="$STUBDIR/pw_real" target="$STUBDIR/pw_target" link="$STUBDIR/pw_link"
+  run _acq_provider_input_safe_mkdir "$real/a/b"
+  assert_success
+  [ -d "$real/a/b" ]
+  run _acq_provider_input_safe_dir "$real/a/b"
+  assert_success
+
+  mkdir -p "$target"; ln -s "$target" "$link"
+  run _acq_provider_input_safe_mkdir "$link/child"
+  assert_failure
+  [ ! -e "$target/child" ]
+  run _acq_provider_input_safe_dir "$link"
+  assert_failure
+  run _acq_provider_input_safe_dir "$link/nope"
+  assert_failure
+}
+
+@test "portable walk: safe_mkdir does not follow a symlink planted mid-path" {
+  export ACQ_TEST_FORCE_PORTABLE_WALK=1
+  local target="$STUBDIR/pw_mid_target" base="$STUBDIR/pw_mid"
+  mkdir -p "$base" "$target"; ln -s "$target" "$base/inner"
+  run _acq_provider_input_safe_mkdir "$base/inner/deep/er"
+  assert_failure
+  [ -z "$(ls -A "$target")" ]
 }

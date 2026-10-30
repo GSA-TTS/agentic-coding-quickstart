@@ -166,19 +166,31 @@ kit_translate_fetch() {
       # url.<x>.insteadOf rewrite — `gh auth login` authenticates the gh CLI,
       # not plain git. See docs/KNOWN_FAILURE_MODES.md.
       #
-      # Attempt 1 (anonymous): prompts disabled + inherited credential helper and
-      # github.com insteadOf rewrite neutralized, so an unauthenticated fetch
-      # proceeds without prompting.
+      # Attempt 1 (anonymous): prompts disabled + inherited (system/global) git
+      # config isolated, so no url.<x>.insteadOf rewrite (e.g. an enterprise
+      # mirror) or credential helper can redirect or authenticate the fetch.
       # Attempt 2 (authed retry): if attempt 1 genuinely fails (a source that
       # needs auth / egress-restricted enterprise mirror that needs the rewrite),
       # retry with the system git config intact but STILL prompt-disabled, so a
       # configured credential helper can supply creds without ever hanging.
       _kit_git_fetch() {
         # $1 = extra git -c flags (as a single string, word-split intentionally)
-        local _cfg="$1"
+        # $2 = non-empty to isolate git from inherited (system + global) config.
+        local _cfg="$1" _isolate="${2:-}"
         (
           cd "$destdir" || exit 1
           export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo GCM_INTERACTIVE=never
+          if [ -n "$_isolate" ]; then
+            # A command-line identity insteadOf rewrite does NOT shadow an
+            # inherited equal-length url.*.insteadOf (git's longest-prefix match
+            # keeps the inherited rewrite winning), and an empty insteadOf value
+            # makes git prepend the URL to itself. Isolate git from system and
+            # global config so only the fresh repo's .git/config applies; the
+            # authed retry below restores inherited config when it is required.
+            export GIT_CONFIG_NOSYSTEM=1
+            export GIT_CONFIG_GLOBAL="$destdir/.gitconfig-empty"
+            : > "$GIT_CONFIG_GLOBAL"
+          fi
           rm -rf .git 2>/dev/null
           git init -q
           git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url"
@@ -195,8 +207,10 @@ kit_translate_fetch() {
         )
       }
       local _ferr _anon_cfg
-      _anon_cfg="-c credential.helper= -c url.https://github.com/.insteadOf="
-      if _ferr=$(_kit_git_fetch "$_anon_cfg"); then
+      # Attempt 1 runs with inherited git config isolated (see _kit_git_fetch);
+      # the credential helper is also explicitly emptied for defense-in-depth.
+      _anon_cfg="-c credential.helper="
+      if _ferr=$(_kit_git_fetch "$_anon_cfg" isolate); then
         :
       elif _ferr=$(_kit_git_fetch ""); then
         # authed retry (system config) succeeded
