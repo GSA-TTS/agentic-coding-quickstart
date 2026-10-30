@@ -26,13 +26,17 @@ prefix = (repo / "acq").read_text().split("# Pre-parse global flags", 1)[0]
 # exact state a real USR1 would find if it arrived in that window: `tick` still set
 # but the child already reaped. With WINDOW_VICTIM set it also points `tick` at that
 # unrelated process, which is what a reused PID looks like; without it the real
-# stale value is left in place. With WINDOW_CHILD set, `tick` is instead a live
+# stale value is left in place. With WINDOW_DOUBLE set, a stream of USR1s follows the
+# first for ~0.3s and `ps` is slowed to 0.1s, so several land while the exit trap runs. With WINDOW_CHILD set, `tick` is instead a live
 # child of the guardian that is not a `sleep`.
 WAIT_LINE = '        wait "$tick" || :\n'
 assert prefix.count(WAIT_LINE) == 1, "guardian loop changed; update the window injection"
 window_prefix = prefix.replace(WAIT_LINE, WAIT_LINE
                                + '        [ -z "$WINDOW_VICTIM" ] || tick=$WINDOW_VICTIM\n'
                                + '        [ -z "$WINDOW_CHILD" ] || { sh -c "sleep 2; :" & tick=$!; }\n'
+                               + '        [ -z "$WINDOW_DOUBLE" ] || ps() { sleep 0.1; command ps "$@"; }\n'
+                               + '        [ -z "$WINDOW_DOUBLE" ] || { (n=0; while [ "$n" -lt 300 ]; do sleep 0.001;'
+                               + ' kill -USR1 "$$" 2>/dev/null || break; n=$((n+1)); done) & }\n'
                                + '        kill -USR1 "$$"\n')
 script = scratch / "acq"
 window_script = scratch / "acq-window"
@@ -121,7 +125,7 @@ def fresh_tick(guardian):
 
 
 class Case:
-    def __init__(self, mode, window=None, wait_for_tick=True, child=False):
+    def __init__(self, mode, window=None, wait_for_tick=True, child=False, double=False):
         """Start an acq owner; leave nothing behind if startup fails part-way.
 
         Every process this case may later kill is recorded together with its
@@ -137,6 +141,7 @@ class Case:
             if window is not None:
                 env["WINDOW_VICTIM"] = str(window)
                 env["WINDOW_CHILD"] = "1" if child else ""
+                env["WINDOW_DOUBLE"] = "1" if double else ""
             self.process = subprocess.Popen(
                 [shell, str(window_script if window is not None else script), mode],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -299,7 +304,7 @@ def window_child():
         case.close()
 
 
-def window(victim):
+def window(victim, double=False):
     """USR1 arrives after `wait` reaped the tick but before `tick` is cleared.
 
     With a victim, `tick` holds the PID of an unrelated `sleep` that is not the
@@ -313,7 +318,8 @@ def window(victim):
         if bystander is not None:
             bystander_id = identity(bystander.pid)
             assert bystander_id is not None and bystander_id[0] == "sleep", bystander_id
-        case = Case("signal", window=bystander.pid if victim else "", wait_for_tick=False)
+        case = Case("signal", window=bystander.pid if victim else "", wait_for_tick=False,
+                    double=double)
         started = time.monotonic()
         # The guardian reaches the window when its first one-second tick ends.
         deadline = started + SETTLE_BOUND
@@ -329,7 +335,8 @@ def window(victim):
         case.process.wait(timeout=SETTLE_BOUND)
         errors = case.process.stderr.read().decode()
         assert not errors, errors
-        return "window-%s %.3fs" % ("bystander-spared" if victim else "stale-pid-clean",
+        return "window-%s %.3fs" % ("bystander-spared" if victim else
+                                    "double-usr1-clean" if double else "stale-pid-clean",
                                     time.monotonic() - started)
     finally:
         if case is not None:
@@ -339,7 +346,7 @@ def window(victim):
             bystander.wait()
 
 
-jobs = [lambda: window(True), lambda: window(False), window_child, latency_exit, lambda: latency_signal(signal.SIGTERM), lambda: latency_signal(signal.SIGINT),
+jobs = [lambda: window(True), lambda: window(False), lambda: window(False, True), window_child, latency_exit, lambda: latency_signal(signal.SIGTERM), lambda: latency_signal(signal.SIGINT),
         lambda: latency_signal(signal.SIGHUP), lambda: settles("replace", "replaced-trap"),
         lambda: settles("exec", "exec"), orphaned]
 with ThreadPoolExecutor(max_workers=4) as pool:
