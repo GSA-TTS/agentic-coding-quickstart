@@ -3185,6 +3185,35 @@ fresh create) is recorded in ADR-0035.
 
 ---
 
+## 50. SBX: Readonly Kit Files Are Guest-Resident Copies (Accepted Residual Risk)
+
+**Status:** Accepted interim state (ADR-0037, Option D). Applies to a kit with
+`files[]` entries marked `readonly: true` (the opt-in `oci-engine` kit in Patterns
+v1.18.0 is the first) on an sbx sandbox.
+
+### Symptoms
+
+```text
+acq(sbx): WARNING: kit '<kit>' marks startup files readonly: <guest paths>
+acq(sbx):   On sbx these are guest-resident copies with NO integrity guarantee
+```
+
+The kit still applies. The warning is printed once per kit on create or kit-add.
+
+### Root Cause
+
+msb stages `readonly: true` files from a read-only host mount. sbx has no validated
+equivalent yet, so the translated kit copies them into the guest, where a
+passwordless-sudo agent can rewrite them before a root startup command runs them.
+
+### Fix / Mitigation
+
+Use the msb backend (`ACQ_BACKEND=msb`) when the tamper-resistance of those files
+matters, or do not enable the kit on sbx. The sbx read-only mount (ADR-0037, Option B)
+is gated on live sbx validation.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:

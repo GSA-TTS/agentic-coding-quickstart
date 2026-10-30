@@ -162,6 +162,16 @@ Until then the SBX translator MUST NOT silently treat `readonly: true` as
 satisfied. When the first kit opts in, the SBX path must either implement
 Option B or emit a visible warning that the file is a guest copy on SBX.
 
+**Implementation status (interim, Option D):** the visible warning is
+implemented. `_acq_sbx_translate_kit` in `acq.backends/sbx.sh` writes one
+stderr warning per kit translation (so once per kit per create or kit-add) that
+names the kit and the guest path of every `readonly: true` file and states that
+on SBX they are guest-resident copies with no integrity guarantee against a
+sudo guest. The kit still applies unchanged; kits with no `readonly: true`
+files stay silent. The first kit to opt in is `oci-engine` (Patterns v1.18.0).
+Regression coverage: `test/bats/91-sbx-readonly-warning.bats`. Option B (the
+read-only mount) remains unimplemented and gated on the live validation below.
+
 ## Live Validation Required Before Implementing Option B
 
 Run on a real sbx host (cannot run inside a sandbox). Record exact sbx version.
