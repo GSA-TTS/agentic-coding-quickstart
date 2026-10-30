@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.1.1...v4.2.0) (2026-10-30)
+
+
+### Features
+
+* **acq:** project provider inputs read-only ([#608](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/608)) ([bd11c77](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/bd11c77f81673c1f7fb0a574c38e7cbb54fbd341))
+* **sbx:** trust host state for built-in kit heal; add MSB forged-marker and legacy-sandbox coverage ([#637](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/637)) ([ef24965](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/ef2496532fdd6ff643b7d67d44b1701c35bd2d22))
+* **scripts:** add summarize-bats-timing for bats TAP timings ([#652](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/652)) ([5bf9398](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/5bf93982296576f5113422d9ff2fc17dda07c630))
+
+
+### Bug Fixes
+
+* **common:** canonicalize macOS /var,/tmp,/etc aliases before O_NOFOLLOW traversal ([#622](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/622)) ([1135fcc](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/1135fcc7d77023a5e677164dc84740e7edae21a0))
+* **install:** package provider validator runtime ([#619](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/619)) ([5192fa1](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/5192fa1901215c9fd273219bb10d95861afdc492))
+* **msb:** strip CR from jq output in acq ports (Windows) ([#663](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/663)) ([7ad6e56](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/7ad6e56d9202ee7f444b70b857c2e482fadc3fd4))
+
+
+### Performance Improvements
+
+* **acq:** stop the kit-fetch guardian tick from delaying exit ([#664](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/664)) ([fe686ea](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/fe686ea7871bfc56f0290d5bebd4adb9fd01b17b))
+* **kits:** reuse pinned fetches within one invocation ([#631](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/631)) ([b433a61](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/b433a616014bf56214645bf47d98779061a82bc9))
+* **msb:** reduce foreground node kit invocation latency ([#616](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/616)) ([ec73abd](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/ec73abd996086f16c3cce3562809f870198accb8))
+* **test:** eliminate redundant bats fetches and waits ([#621](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/621)) ([dda5fe1](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/dda5fe17667ecc6e3f15d2924a7b303657f4aa9d))
+* **test:** shorten hostport and cli-kits test tail ([#654](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/654)) ([a3acc7b](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/a3acc7bc94814a3002a4916fd8fcbe2ac61cf967))
+* **test:** shorten port fixtures and parallelize shellcheck ([#624](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/624)) ([8eb3ff8](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/8eb3ff87fc52ac5e764b6b78ac2b99047ee6e452))
+
 ## [4.1.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.1.0...v4.1.1) (2026-10-22)
 
 
