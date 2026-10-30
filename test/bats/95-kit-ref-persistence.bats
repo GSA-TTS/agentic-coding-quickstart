@@ -89,7 +89,7 @@ SPEC
   assert_regex "$log" 'ocistartbox:/home/agent/oci-engine-marker'
   run cat "$(_acq_cli_kits_file msb ocistartbox)"
   assert_output --partial 'dir=integrations/isolation/acq-kits/oci-engine'
-   assert_output --partial 'ref=a1206c52ec82ae7ce080ad44a6e6ac6f951e6d20'
+   assert_output --partial 'ref=7dd2ddc034b6597e97f450fa716e7d47c9a38287'
 }
 
 @test "cli-kits: backend keying — an sbx read does not see an msb record" {
