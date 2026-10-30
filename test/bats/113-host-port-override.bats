@@ -40,7 +40,8 @@ _provision_line() {
   local _env=() ; while [ "$1" != "--" ]; do _env+=("$1"); shift; done; shift
   local _name="$1" _kit="$2"
   : > "$CALLS"
-  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-$_name"
+  ( acq_untrace_subshell
+    export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-$_name"
     export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/stage-$_name"
     local _kv; for _kv in ${_env[@]+"${_env[@]}"}; do export "${_kv?}"; done
     # shellcheck source=acq.backends/secret-store.sh
@@ -188,7 +189,8 @@ REC
   a=$(_pp_kit dupa 5000 7001)
   b=$(_pp_kit dupb 5000 7002)
   : > "$CALLS"
-  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-dup"
+  ( acq_untrace_subshell
+    export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-dup"
     export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/stage-dup"
     # shellcheck source=acq.backends/secret-store.sh
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
@@ -368,7 +370,8 @@ _msb_create_line() { grep '^msb create' "$CALLS" | head -n1; }
 @test "hostport(A): an unprobeable host is reported for a KIT-PINNED host port" {
   local k; k=$(_pp_kit unprobekit 3000 8080)
   : > "$CALLS"
-  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-unprobe"
+  ( acq_untrace_subshell
+    export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-unprobe"
     export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/stage-unprobe"
     export ACQ_MSB_HOST_PROBE_UNKNOWN=1
     # shellcheck source=acq.backends/secret-store.sh
@@ -459,7 +462,8 @@ _msb_create_line() { grep '^msb create' "$CALLS" | head -n1; }
 @test "publish(B): a provision with _ACQ_PROVISION_WITHOUT_PORTS=1 publishes no ports" {
   local k; k=$(_pp_kit keycheckkit 3000 7000)
   : > "$CALLS"
-  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-keycheck"
+  ( acq_untrace_subshell
+    export ACQ_SECRET_STORE_DIR="$STUBDIR/sec-keycheck"
     export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/stage-keycheck"
     # shellcheck source=acq.backends/secret-store.sh
     . "${REPO_ROOT}/acq.backends/secret-store.sh"

@@ -121,7 +121,8 @@ SPEC
   printf 'CLIDURABLE_MARKER\n' > "$clikit/files/marker"
 
   # Provision with the kit in ACQ_CLI_KITS (as the run/create arm sets it).
-  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/clidur-secrets"
+  ( acq_untrace_subshell
+    export ACQ_SECRET_STORE_DIR="$STUBDIR/clidur-secrets"
     export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/clidur-stage"
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
@@ -139,7 +140,8 @@ SPEC
 
   # Fresh resume shell: empty in-memory set, reload, then heal re-applies the file.
   : > "$CALLS"
-  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/clidur-secrets"
+  ( acq_untrace_subshell
+    export ACQ_SECRET_STORE_DIR="$STUBDIR/clidur-secrets"
     export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/clidur-stage"
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
