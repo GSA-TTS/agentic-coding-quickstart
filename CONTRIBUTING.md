@@ -81,6 +81,7 @@ This project operates under professional standards of conduct. All contributors:
 | `install.sh`                        | One-line `curl \| sh` installer (auto-selects brew/npm/clone; direct `sh install.sh` still installs the default release tag from the repo, not the current checkout) |
 | `scripts/rotate-apikey`             | Rotate your USAi API key secret (`acq usai-rotate-api-key`) |
 | `scripts/test-acq-bats`             | Offline unit suite for acq (bats-core) |
+| `scripts/test-acq-bash32`           | Same suite, or a syntax preflight, under a verified Bash 3.2.57 (helpers: `scan-heredoc-subst.py`, `fetch-bash32-oci.py`) |
 | `scripts/verify-backends`           | Live end-to-end backend verification (needs Docker or KVM) |
 | `.pre-commit-config.yaml`           | Optional pre-commit hooks (secret detection, file hygiene) |
 | `AGENTS.md`                         | Rules for working **on this quickstart repo**              |
@@ -241,6 +242,14 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   > `~/.local/bin/env`), the whole suite exits **0 having run nothing** — a
   > silent false green. If `./scripts/test-acq-bats` prints no TAP output, run
   > it as `PATH="/usr/bin:$PATH" ./scripts/test-acq-bats` and compare.
+
+**Check Bash 3.2 compatibility before pushing.** macOS ships Bash 3.2.57 and the CI
+gate runs the suite under it (9 to 16 minutes per round trip). Get the same
+feedback locally with `scripts/test-acq-bash32 --syntax` (seconds) or
+`scripts/test-acq-bash32 [test/bats/file.bats ...]` (focused or full suite under a
+verified 3.2.57; set `ACQ_BASH32=/path/to/bash` or run `--install`). It checks the
+bash interpreter only, not BSD/macOS utilities; CI stays authoritative. See
+[`docs/howto/bash32-testing.md`](docs/howto/bash32-testing.md).
 
 To verify the backends end-to-end against the **real** toolchain (requires a
 host that can create sandboxes — Docker for sbx, or KVM for msb):
