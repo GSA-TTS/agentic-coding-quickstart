@@ -205,6 +205,20 @@ network), built on [bats-core](https://github.com/bats-core/bats-core) (ADR-0025
   pre-commit output so successful runs retain measurements. The fallback buffers
   output per file, so log-arrival timestamps are not test durations.
 
+  `scripts/summarize-bats-timing` turns the timing output into a Markdown table
+  (slowest tests and files, summed vs wall time, margin to a job timeout) and a
+  JSON record for comparing runs. It is advisory and always exits 0. Run it with
+  `ACQ_BATS_TIMING=1 ./scripts/test-acq-bats 2>&1 | tee bats.log` and then
+  `python3 scripts/summarize-bats-timing --log bats.log --timeout-minutes 25`.
+  Files are attributed by matching test names against `test/bats/*.bats`.
+  It reads both timing formats the pinned bats prints: `ok N name in 123ms`
+  (plain `bats --timing`, `--jobs`, and the xargs fallback) and
+  `ok N name # in 123 ms` (the `tap` formatter behind `--report-formatter`).
+  Real captures live in `test/bats/fixtures/` and are checked in
+  `test/bats/155-summarize-bats-timing.bats`. The tool is split into
+  `scripts/summarize-bats-timing` (entry point) and `scripts/bats_timing_core.py` /
+  `scripts/bats_timing_render.py` to stay within the size limits in Development Standards.
+
   The shared harness uses an offline Git transport fixture for the exact pinned
   Patterns kit fetch. Local fixture repositories still use real Git; unhandled
   remote transports fail locally. This covers direct provider-input discovery as
