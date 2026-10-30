@@ -1,0 +1,7 @@
+1..6
+ok 1 fast one # in 2 ms
+ok 2 name with in 5ms inside # in 28 ms
+ok 3 skipped one # skip why not
+ok 4 bare skip # skip
+not ok 5 fails # in 2 ms
+not ok 6 slow one # in 1025 ms # timeout after 1 s

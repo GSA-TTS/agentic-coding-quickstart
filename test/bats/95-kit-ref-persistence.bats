@@ -89,7 +89,7 @@ SPEC
   assert_regex "$log" 'ocistartbox:/home/agent/oci-engine-marker'
   run cat "$(_acq_cli_kits_file msb ocistartbox)"
   assert_output --partial 'dir=integrations/isolation/acq-kits/oci-engine'
-   assert_output --partial 'ref=a1206c52ec82ae7ce080ad44a6e6ac6f951e6d20'
+   assert_output --partial 'ref=7dd2ddc034b6597e97f450fa716e7d47c9a38287'
 }
 
 @test "cli-kits: backend keying — an sbx read does not see an msb record" {
@@ -121,7 +121,8 @@ SPEC
   printf 'CLIDURABLE_MARKER\n' > "$clikit/files/marker"
 
   # Provision with the kit in ACQ_CLI_KITS (as the run/create arm sets it).
-  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/clidur-secrets"
+  ( acq_untrace_subshell
+    export ACQ_SECRET_STORE_DIR="$STUBDIR/clidur-secrets"
     export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/clidur-stage"
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
@@ -139,7 +140,8 @@ SPEC
 
   # Fresh resume shell: empty in-memory set, reload, then heal re-applies the file.
   : > "$CALLS"
-  ( export ACQ_SECRET_STORE_DIR="$STUBDIR/clidur-secrets"
+  ( acq_untrace_subshell
+    export ACQ_SECRET_STORE_DIR="$STUBDIR/clidur-secrets"
     export ACQ_MSB_STARTUP_STAGE_DIR="$STUBDIR/clidur-stage"
     . "${REPO_ROOT}/acq.backends/secret-store.sh"
     . "${REPO_ROOT}/acq.backends/msb.sh"
