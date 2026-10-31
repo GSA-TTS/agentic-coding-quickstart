@@ -5875,6 +5875,8 @@ _acq_msb_ports_from_inspect() {
     # `?//empty` keeps a missing path from erroring; each port -> "H:G".
     # `|| true`: acq runs under `set -euo pipefail`; a jq that emits nothing (no
     # ports) can still exit non-zero and would otherwise abort this query.
+    # `tr -d '\r'`: a native Windows jq (used from Git Bash) ends each line with
+    # CRLF; a trailing CR would fail the digit guard below and drop the port.
     lines=$(printf '%s' "$json" | jq -r '
       [ ((.active_config.network.ports?) // (.config.network.ports?)
           // .ports? // .portMappings? // .publishedPorts? // [])[]?
@@ -5883,7 +5885,7 @@ _acq_msb_ports_from_inspect() {
             (((.host_port // .hostPort // .host)|tostring) + ":" +
              ((.guest_port // .guestPort // .guest // .container)|tostring))
           else empty end ]
-      | .[]?' 2>/dev/null) || true
+      | .[]?' 2>/dev/null | tr -d '\r') || true
   fi
   if [ -z "$lines" ]; then
     # jq absent/failed: dependency-free. Read the ports array as flat key:value

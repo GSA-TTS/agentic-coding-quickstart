@@ -64,6 +64,18 @@ acq_setup_stubs() {
   load_acq
 }
 
+# acq_untrace_subshell — call first inside a ( ... ) subshell that provisions a
+# sandbox in-process. bats runs every @test under `set -T` with a DEBUG trap that
+# captures a stack trace before EVERY simple command, and subshells inherit both.
+# A provision runs tens of thousands of commands, so the trap alone made it ~2.5x
+# slower than the same code outside bats (measured 12s vs 2.3s locally, with no
+# change in what runs). The subshell's output is already discarded or captured to a
+# file by the caller, so bats' failure-location tracing adds nothing there.
+acq_untrace_subshell() {
+  set +T
+  trap - DEBUG
+}
+
 # bats teardown(): remove this test's stub dir. Safe if setup partially ran.
 acq_teardown_stubs() {
   cleanup_stubs || true
