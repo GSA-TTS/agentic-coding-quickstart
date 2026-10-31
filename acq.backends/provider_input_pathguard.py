@@ -20,11 +20,15 @@ provides the equivalent guarantee with the Win32 API (see ADR-0038):
   ``FILE_ATTRIBUTE_REPARSE_POINT`` (symbolic link, junction, mount point) is
   rejected, and so is anything that is not ``FILE_ATTRIBUTE_DIRECTORY``. This is
   the ``O_DIRECTORY`` check plus the no-symlink invariant.
-* The handle's own resolved name (``GetFinalPathNameByHandleW``) must be exactly
-  the parent handle's resolved name plus the component name. A child that
-  resolves anywhere else means an ancestor was swapped for a reparse point
-  between the parent being vetted and this open, which is the descriptor-relative
-  walk's TOCTOU protection expressed as an identity check.
+* The handle's own resolved name (``GetFinalPathNameByHandleW``) must be a
+  direct child of the parent handle's resolved name: the resolved path's parent
+  directory must equal the vetted parent's resolved path, and its last component
+  must be a real name. The last component is deliberately *not* compared with the
+  literal spelling, because the kernel reports the long name for an 8.3 alias
+  (``PROGRA~1`` -> ``Program Files``). A child whose resolved parent is anywhere
+  else means an ancestor was swapped for a reparse point between the parent being
+  vetted and this open, which is the descriptor-relative walk's TOCTOU protection
+  expressed as an identity check.
 
 Nothing here follows a link, and every failure path raises rather than
 returning a "best effort" result. There is deliberately no fallback to
@@ -40,7 +44,7 @@ call site, so callers cannot tell the two implementations apart:
 """
 
 import ctypes
-import os
+import ntpath
 from ctypes import wintypes
 
 FILE_ATTRIBUTE_DIRECTORY = 0x0010
@@ -148,7 +152,7 @@ def _final_path(handle):
     if written == 0 or written >= size:
         raise ctypes.WinError(ctypes.get_last_error())
     path = buffer.value
-    if path.startswith("\\\\?\\UNC\\"):
+    if path[:8].upper() == "\\\\?\\UNC\\":
         return "\\\\" + path[8:]
     if path.startswith("\\\\?\\"):
         return path[4:]
@@ -168,7 +172,7 @@ def _anchor(path):
     opens ``/`` without ``O_NOFOLLOW`` and canonicalizes only OS-level aliases
     such as macOS ``/var`` -> ``/private/var``.
     """
-    drive, rest = os.path.splitdrive(path)
+    drive, rest = ntpath.splitdrive(path)
     if not drive:
         raise UnsafePath("no volume in %r" % (path,))
     if len(drive) == 2 and drive[1] == ":":
@@ -176,6 +180,10 @@ def _anchor(path):
     else:
         anchor = drive
     parts = [part for part in rest.replace("/", "\\").split("\\") if part]
+    # A colon in a component would make ntpath.join treat it as a drive or an
+    # alternate data stream, so the vetted object would not be the one named.
+    if any(":" in part for part in parts):
+        raise UnsafePath("colon in a path component of %r" % (path,))
     return anchor, parts
 
 
@@ -197,27 +205,57 @@ def _open_component(literal, create):
         return _open_directory(literal)
 
 
-def _vet(child, literal, parent_final, part):
-    """Reject a link, a non-directory, or a child reached through a link."""
+def _normalized(path):
+    """Fold PATH to the form two names of the same Windows object compare in.
+
+    ``ntpath`` is used explicitly: this is Windows path logic, and ``os.path`` is
+    ``posixpath`` on any other host, where it would give the wrong answer.
+    """
+    return ntpath.normcase(ntpath.normpath(path)).rstrip("\\")
+
+
+def _resolved_leaf(parent_final, actual):
+    """Return ACTUAL's last component if ACTUAL is a direct child of PARENT_FINAL.
+
+    The parent is compared by resolved name, never by the caller's spelling, so a
+    short (8.3) alias that resolves to a long name under the same parent is
+    accepted while anything resolving under a different parent is not. Returns
+    ``None`` for a drive/share root, a ``.``/``..`` component, or a different
+    parent.
+    """
+    if any(c in (".", "..") for c in actual.replace("/", "\\").split("\\")):
+        return None
+    head, leaf = ntpath.split(ntpath.normpath(actual))
+    if not leaf or leaf in (".", ".."):
+        return None
+    if _normalized(head) != _normalized(parent_final):
+        return None
+    return leaf
+
+
+def _vet(child, literal, parent_final):
+    """Reject a link, a non-directory, or a child not directly under the parent."""
     attributes = _attributes(child)
     if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
         raise UnsafePath("reparse point at %r" % (literal,))
     if not attributes & FILE_ATTRIBUTE_DIRECTORY:
         raise UnsafePath("not a directory at %r" % (literal,))
-    expected = os.path.join(parent_final, part)
     actual = _final_path(child)
-    if os.path.normcase(os.path.normpath(actual)) != os.path.normcase(
-        os.path.normpath(expected)
-    ):
-        raise UnsafePath("redirected %r -> %r (expected %r)" % (literal, actual, expected))
+    leaf = _resolved_leaf(parent_final, actual)
+    # A colon cannot occur in a directory name; it marks an alternate-data-stream
+    # handle (``dir:stream``) that must not stand in for the directory itself.
+    if leaf is None or ":" in leaf:
+        raise UnsafePath(
+            "redirected %r -> %r (not directly under %r)" % (literal, actual, parent_final)
+        )
     return actual
 
 
 def _walk(path, create):
     """Validate (and optionally create) PATH without traversing any link."""
-    if not os.path.isabs(path):
+    if not ntpath.isabs(path):
         raise UnsafePath("not absolute: %r" % (path,))
-    anchor, parts = _anchor(os.path.normpath(path))
+    anchor, parts = _anchor(ntpath.normpath(path))
     handle = _open_directory(anchor)
     parent_literal = anchor
     parent_final = _final_path(handle)
@@ -225,10 +263,10 @@ def _walk(path, create):
         if not _attributes(handle) & FILE_ATTRIBUTE_DIRECTORY:
             raise UnsafePath("anchor is not a directory: %r" % (anchor,))
         for part in parts:
-            literal = os.path.join(parent_literal, part)
+            literal = ntpath.join(parent_literal, part)
             child = _open_component(literal, create)
             try:
-                actual = _vet(child, literal, parent_final, part)
+                actual = _vet(child, literal, parent_final)
             except UnsafePath:
                 _close(child)
                 raise
@@ -245,7 +283,7 @@ def safe_mkdir(path):
     try:
         _walk(path, create=True)
     except UnsafePath as exc:
-        if not os.path.isabs(path):
+        if not ntpath.isabs(path):
             raise SystemExit("provider-input path must be absolute")
         raise SystemExit("unsafe provider-input path") from exc
 

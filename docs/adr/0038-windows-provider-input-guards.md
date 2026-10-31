@@ -4,14 +4,14 @@ description: "Win32 equivalents for the O_NOFOLLOW path walk and the ps-based lo
 status: proposed
 tier: 2
 date: 2026-10-29
-last_updated: "2026-10-29"
+last_updated: "2026-10-31"
 decision_makers: ["Bret Mogilefsky"]
 category: architecture
 nist_controls: ["AC-6", "CM-3", "SI-10"]
 impact_level: medium
 ato_relevance: no
 risk_treatment: mitigate
-related_files: ["acq.backends/common.sh", "acq.backends/provider_input_pathguard.py", "test/bats/147-provider-input-projection.bats", "test/bats/112-msb-ports.bats"]
+related_files: ["acq.backends/common.sh", "acq.backends/provider_input_pathguard.py", "test/bats/147-provider-input-projection.bats", "test/bats/157-provider-input-pathguard-vet.bats", "test/bats/112-msb-ports.bats"]
 ---
 
 # ADR-0038: Provider-input path and lock-identity guards on Windows
@@ -90,14 +90,34 @@ Each handle is then vetted with `GetFileInformationByHandleEx(FileAttributeTagIn
   volume mount point).
 - `FILE_ATTRIBUTE_DIRECTORY` clear -> reject (the `O_DIRECTORY` check).
 
-The handle's own resolved name (`GetFinalPathNameByHandleW`) must equal the
-parent handle's resolved name plus the component name. That is the
-descriptor-relative walk's anti-TOCTOU property expressed as an identity check: a
-child that resolves anywhere but directly under the vetted parent means an
-ancestor was replaced between the parent being vetted and this open, and it is
-rejected. Comparing against the *parent's* resolved name (rather than the literal
-spelling) also keeps 8.3 short components working, because both sides come from
-the same kernel-resolved form.
+The handle's own resolved name (`GetFinalPathNameByHandleW`) must be a *direct
+child* of the parent handle's resolved name. That is the descriptor-relative
+walk's anti-TOCTOU property expressed as an identity check: a child that resolves
+anywhere but directly under the vetted parent means an ancestor was replaced
+between the parent being vetted and this open, and it is rejected.
+
+Comparison semantics, in order:
+
+1. Reparse-point and directory attribute checks run first and are unaffected.
+2. The resolved name has its `\\?\` / `\\?\UNC\` prefix stripped
+   (case-insensitively) and is split into parent and last component with
+   `ntpath`. Windows path logic uses `ntpath` explicitly, because `os.path` is
+   `posixpath` on any other host and would give the wrong answer there.
+3. The resolved parent, case-folded and normalized, must equal the vetted
+   parent's resolved name. A different parent, another volume or server, a
+   shallower or deeper result, the parent itself, or a `.`/`..` component is
+   rejected, as is a last component containing `:` (an alternate data stream).
+4. The last component is deliberately *not* compared with the literal spelling.
+   For an 8.3 alias such as `C:\PROGRA~1` or `C:\Users\RUNNER~1`, the kernel
+   reports the long name (`Program Files`, `runneradmin`), so a textual match
+   would reject a legitimate path. An alias is accepted only when what it
+   resolves to sits directly under the vetted parent; an alias that resolves
+   elsewhere fails step 3. A literal and its resolved leaf may therefore differ
+   (short vs long name, trailing dots or spaces that Win32 strips, case) while
+   still naming a child of the same vetted parent.
+5. A trailing separator on the parent (a drive or share root) is ignored when
+   comparing. A `:` in any *input* component is rejected up front, because
+   `ntpath.join` would otherwise read it as a drive or stream.
 
 Missing components are created with `CreateDirectoryW`, which inherits the
 parent ACL — the Windows analogue of the POSIX `0o755` mkdir honouring umask.
@@ -167,6 +187,15 @@ parentheses, so the line is split after the last `)`.
   kit with `O_DIRECTORY`/`O_NOFOLLOW` and walks it with `dir_fd`. It is on the
   provider-input *staging* path, not the transaction path, and is documented as a
   known Windows gap rather than fixed here.
+
+Component vetting is also covered offline on any host by
+`test/bats/157-provider-input-pathguard-vet.bats`, which drives the real walk over
+a fake volume of literal-to-resolved names: 8.3 aliases (first, mid-path, UNC),
+case-only differences, redirects to another parent/volume/server, `..` and
+alternate-data-stream results, reparse points (including behind an alias), and
+non-directories. That proves the comparison logic only; it cannot prove what a
+real Windows volume reports for a short name, which needs a Windows host with 8.3
+name generation enabled.
 
 Regression coverage lives in `test/bats/147-provider-input-projection.bats`
 (pre-created link ancestor rejected with no mutation on the far side, link as
