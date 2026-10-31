@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-10-28"
+last_updated: "2026-10-29"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -3211,6 +3211,72 @@ passwordless-sudo agent can rewrite them before a root startup command runs them
 Use the msb backend (`ACQ_BACKEND=msb`) when the tamper-resistance of those files
 matters, or do not enable the kit on sbx. The sbx read-only mount (ADR-0037, Option B)
 is gated on live sbx validation.
+
+---
+
+## 51. Windows preview: provider-input staging still needs POSIX-only path primitives
+
+### Symptoms
+
+- On Windows, `acq create`/`acq run` stops while staging provider inputs, with a
+  Python traceback naming `os.O_DIRECTORY` (`AttributeError`) or `dir_fd`
+  (`NotImplementedError`).
+- `acq terminate`, the port teardown, and the transaction lock are **not**
+  affected: those were fixed by ADR-0038.
+
+### Cause
+
+`_acq_provider_input_snapshot` reads the fetched kit with
+`os.open(..., O_DIRECTORY | O_NOFOLLOW)` and walks it with `dir_fd=`-relative
+opens. Native Windows CPython has none of those primitives. The sibling helpers
+`_acq_provider_input_safe_mkdir` and `_acq_provider_input_safe_dir` now delegate
+to `acq.backends/provider_input_pathguard.py` (ADR-0038); the snapshot walk was
+deliberately not converted in the same change, because it also returns file
+descriptors and copies validated bytes, and `os.fchmod` (used to reproduce the
+source mode) is Unix-only.
+
+### Status / Prevention
+
+Deferred, tracked here. The gap is fail-closed: the staging step errors out
+rather than copying an unvalidated tree, so no sandbox is created with
+unverified provider inputs. Converting it needs the same
+`FILE_FLAG_OPEN_REPARSE_POINT` walk extended to regular files, plus a documented
+Windows answer for the mode bits (`os.fchmod` is Unix-only; on Windows the only
+meaningful attribute is read-only). Trigger to revisit: provider-input staging
+being exercised on a Windows host, or `acq run` on Windows reaching that step.
+
+---
+
+## 52. Windows preview: the `msb create TERM` suite test hangs instead of failing fast
+
+### Symptoms
+
+- On Windows, `test/bats/147-provider-input-projection.bats` does not finish: it
+  blocks on `msb create TERM: external executable survives initial signal, lock
+  held until exit` for minutes (observed >300 s; the rest of the file's failures
+  are separate, pre-existing ones).
+
+### Cause
+
+On the parent commit the provider-input transaction wrapper aborted immediately
+on Windows (see ADR-0038), so this test failed fast with
+`slow-msb-create never started` and never reached the lock/signal path. With the
+wrapper fixed, provisioning proceeds far enough for the test's slow `msb create`
+stub to start, and from there the run does not complete: the stub waits for its
+own PID to appear in the guardian's child registry, and something in the MSYS
+process/signal model (background-child PID registration, or TERM delivery to the
+transaction subshell) never satisfies it. The exact blocking point is
+**unconfirmed**; it is not in the path guard, whose behaviour is covered by
+`112-msb-ports.bats`, `117-msys-path-forms.bats`,
+`120-workspace-preflight.bats` and `146-provider-verification.bats`.
+
+### Status / Prevention
+
+Deferred, tracked here. While this is open, a full Windows run of that file
+needs a per-test timeout (or that test deselected); Linux CI remains the
+authoritative result for the file. Trigger to revisit: the next Windows suite
+run that includes `147`, or any change to how background backend children are
+registered with the guardian.
 
 ---
 

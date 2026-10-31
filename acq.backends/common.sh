@@ -4374,6 +4374,94 @@ print(path, end='')
 PY
 }
 
+# True when the running shell is MSYS/Cygwin (Git Bash on Windows).
+_acq_provider_input_on_windows() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+  esac
+  return 1
+}
+
+# Windows spelling of a POSIX path, WITHOUT resolving any component below the
+# OS-level mount point.
+#
+# The MSYS runtime rewrites POSIX-looking argv values on their way to a native
+# program, and that rewrite canonicalizes: it resolves junctions and symlinks.
+# A Windows path guard fed that value could no longer distinguish a malicious
+# pre-created link from a legitimate directory, so the guard is given a path
+# this function built instead. A drive-form value passes through untouched,
+# which keeps an unresolved `link/child` intact (see ADR-0038).
+#
+# The mount table (`/proc/mounts`, which MSYS/Cygwin owns) is the authority: the
+# longest mount point that prefixes PATH is replaced by its Windows spelling and
+# everything below it is appended verbatim, so only the mount point - the
+# analogue of macOS /tmp -> /private/tmp - is ever canonicalized. Deliberately
+# no `cygpath` call: `cygpath` resolves links in the parts of PATH that matter
+# here, and the mount table answers the same question without doing that.
+# Paths outside every mount, and paths with no mount table, fail closed: they
+# must never be walked as if they were Windows paths.
+_acq_provider_input_windows_path() {
+  local path="${1:-}"
+  [ -n "$path" ] || return 1
+  case "$path" in
+    [A-Za-z]:[\\/]*) printf '%s\n' "$path"; return 0 ;;
+  esac
+  if [ -r /proc/mounts ]; then
+    local mapped
+    mapped=$(awk -v target="$path" '
+      function unescape(value, out) {
+        out = value
+        gsub(/\\134/, "\\\\", out)
+        gsub(/\\040/, " ", out)
+        gsub(/\\011/, "\t", out)
+        gsub(/\\012/, "\n", out)
+        return out
+      }
+      BEGIN {
+        # Only absolute targets can be mapped; a relative one is left for the
+        # caller, which fails it closed with the POSIX diagnostic.
+        if (substr(target, 1, 1) != "/") exit 1
+      }
+      {
+        win = unescape($1)
+        mount = unescape($2)
+        if (mount == "/" || target == mount || index(target, mount "/") == 1) {
+          if (length(mount) > best) {
+            best = length(mount)
+            best_win = win
+            best_mount = mount
+          }
+        }
+      }
+      END {
+        if (best == 0) exit 1
+        rest = target
+        if (best_mount != "/") rest = substr(target, length(best_mount) + 1)
+        printf "%s%s\n", best_win, rest
+      }' /proc/mounts 2>/dev/null) || mapped=""
+    if [ -n "$mapped" ]; then printf '%s\n' "$mapped"; return 0; fi
+  fi
+  case "$path" in
+    # No mount table: the MSYS convention is that /x/... is drive X:.
+    /[A-Za-z]/*)
+      printf '%s:/%s\n' "$(printf '%s' "${path#/}" | cut -c1 | tr '[:lower:]' '[:upper:]')" "${path#/?/}"
+      return 0
+      ;;
+    # A relative path is not translatable, and must not be: it is handed on
+    # unchanged so the guard rejects it with the same message POSIX prints.
+    [!\\/]*) printf '%s\n' "$path"; return 0 ;;
+  esac
+  return 1
+}
+
+# Absolute path of the helper module that implements the Windows path walk.
+# It ships beside this file, inside acq.backends/.
+_acq_provider_input_pathguard_module() {
+  local dir
+  dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || return 1
+  printf '%s\n' "$dir/provider_input_pathguard.py"
+}
+
 # Create a path one component at a time without ever traversing a symlink.
 # This protects the host-owned projection tree from a malicious pre-created
 # ancestor.
@@ -4385,10 +4473,30 @@ PY
 # including every user-influenced one — still traverse with O_NOFOLLOW.
 # Linux is unaffected.
 _acq_provider_input_safe_mkdir() {
-  local _canon
+  local _canon _win="" pathguard=""
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  # Windows CPython has no O_DIRECTORY/O_NOFOLLOW/dir_fd, so the walk below
+  # cannot run there; provider_input_pathguard.py implements the same
+  # descriptor-anchored guarantee with the Win32 API (ADR-0038). It needs the
+  # path as the caller spelled it, because the MSYS rewrite that produced
+  # _canon has already resolved links.
+  if _acq_provider_input_on_windows; then
+    _win=$(_acq_provider_input_windows_path "$1") || {
+      echo "acq: cannot map provider-input path to a host path: $1" >&2
+      return 1
+    }
+    pathguard=$(_acq_provider_input_pathguard_module) || return 1
+  fi
+  python3 - "$_canon" "$_win" "$pathguard" <<'PY'
 import os, stat, sys
+if sys.platform == 'win32':
+    # Never write bytecode into the acq checkout: the clone may be read-only and
+    # a stray __pycache__ would appear in every user's tree.
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, os.path.dirname(sys.argv[3]))
+    import provider_input_pathguard
+    provider_input_pathguard.safe_mkdir(sys.argv[2])
+    raise SystemExit(0)
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit('provider-input path must be absolute')
 fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
@@ -4407,10 +4515,25 @@ PY
 }
 
 _acq_provider_input_safe_dir() {
-  local _canon
+  local _canon _win="" pathguard=""
   _canon=$(_acq_provider_input_canonical_path "$1") || return 1
-  python3 - "$_canon" <<'PY'
+  # See _acq_provider_input_safe_mkdir: same Windows gap, same delegate.
+  if _acq_provider_input_on_windows; then
+    _win=$(_acq_provider_input_windows_path "$1") || {
+      echo "acq: cannot map provider-input path to a host path: $1" >&2
+      return 1
+    }
+    pathguard=$(_acq_provider_input_pathguard_module) || return 1
+  fi
+  python3 - "$_canon" "$_win" "$pathguard" <<'PY'
 import os, stat, sys
+if sys.platform == 'win32':
+    # See _acq_provider_input_safe_mkdir: no bytecode in the acq checkout.
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, os.path.dirname(sys.argv[3]))
+    import provider_input_pathguard
+    provider_input_pathguard.safe_dir(sys.argv[2])
+    raise SystemExit(0)
 path = sys.argv[1]
 if not os.path.isabs(path): raise SystemExit(1)
 fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
@@ -4514,6 +4637,51 @@ acq_provider_input_lock_acquire() {
   printf '%s\n' "$lock"
 }
 
+# Parent PID of PID, or fail.
+#
+# `ps -o ppid=` is the POSIX answer and stays first so POSIX behaviour is
+# untouched. MSYS/Cygwin `ps` (Git Bash) has no `-o` at all - it prints
+# "ps: unknown option -- o" and nothing else - but `ps -p PID` does print a row
+# in the BSD layout `PID PPID PGID WINPID TTY UID STIME COMMAND`. The fallback
+# selects that one row by exact PID match and prints its PPID column, which
+# keeps it correct whether or not the host emits the header line. Anything
+# empty or non-numeric fails closed, exactly as the caller's own guard does.
+_acq_provider_input_parent_pid() {
+  local pid="${1:-}" out
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  out=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  case "$out" in
+    ""|*[!0-9]*)
+      out=$(ps -p "$pid" 2>/dev/null |
+        awk -v want="$pid" '$1 == want && $2 ~ /^[0-9]+$/ { print $2; exit }')
+      ;;
+  esac
+  case "$out" in ""|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$out"
+}
+
+# Start time of PID as the host kernel reports it, or fail.
+#
+# This is the rung `_acq_provider_input_process_identity` falls back to where
+# `ps -o lstart=` does not exist. procfs field 22 (starttime, in clock ticks
+# since boot) is the very value Linux `ps` derives lstart from, so it carries
+# the same strength: it changes when a PID is recycled, and it is stable for the
+# lifetime of one process. MSYS `ps -p` also exposes STIME, but STIME has
+# one-second resolution: two processes started in the same second are
+# indistinguishable, which is not enough to tell a recycled PID from the
+# original lock owner. Field 2 (comm) may contain spaces and parentheses, so the
+# line is split after the LAST ')'.
+_acq_provider_input_process_start_ticks() {
+  local pid="${1:-}" stat_line ticks
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  [ -r "/proc/$pid/stat" ] || return 1
+  stat_line=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  ticks=$(printf '%s\n' "$stat_line" |
+    awk '{ sub(/^.*\) /, ""); if (NF >= 20 && $20 ~ /^[0-9]+$/) print $20 }')
+  case "$ticks" in ""|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$ticks"
+}
+
 # Start a real process whose lifetime is tied to the transaction subshell. Bash
 # 3.2 preserves $$ across subshells and has no BASHPID, so the lock records this
 # guardian PID instead. The guardian exits if its transaction parent disappears,
@@ -4539,7 +4707,7 @@ _acq_provider_input_guardian_start() {
     done
   ' sh "$_ACQ_PROVIDER_INPUT_GUARDIAN_CHILDREN" &
   _ACQ_PROVIDER_INPUT_GUARDIAN_PID=$!
-  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(ps -o ppid= -p "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID" 2>/dev/null | tr -d '[:space:]')
+  _ACQ_PROVIDER_INPUT_TRANSACTION_PID=$(_acq_provider_input_parent_pid "$_ACQ_PROVIDER_INPUT_GUARDIAN_PID")
   case "$_ACQ_PROVIDER_INPUT_TRANSACTION_PID" in ""|*[!0-9]*) _acq_provider_input_guardian_stop; return 1 ;; esac
   export _ACQ_PROVIDER_INPUT_GUARDIAN_PID
   export _ACQ_PROVIDER_INPUT_TRANSACTION_PID
@@ -4640,9 +4808,15 @@ _acq_provider_input_signal_exit() {
 }
 
 _acq_provider_input_process_identity() {
-  local pid="${1:-}"
+  local pid="${1:-}" out
   case "$pid" in ""|*[!0-9]*) return 1 ;; esac
-  ps -o lstart= -p "$pid" 2>/dev/null | tr -d '[:space:]' | grep .
+  out=$(ps -o lstart= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  # MSYS/Cygwin `ps` has no `-o lstart=`; fall back to the kernel start time.
+  if [ -z "$out" ]; then
+    out=$(_acq_provider_input_process_start_ticks "$pid") || return 1
+  fi
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
 }
 
 acq_provider_input_lock_release() {
