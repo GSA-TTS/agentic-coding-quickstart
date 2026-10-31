@@ -317,6 +317,27 @@ _acq_sbx_ensure_kit_sources_allowed() {  local current desired
   fi
 }
 
+# Warn (stderr, never stdout) when a neutral kit declares files[] entries with
+# `readonly: true`. msb stages those from a read-only host mount; sbx has no
+# equivalent yet, so the translated kit copies them into the guest, where a
+# passwordless-sudo agent can rewrite them. This is the documented interim
+# state (Option D) in docs/adr/0037-sbx-trusted-startup-parity.md; the kit still
+# applies unchanged. Emitted once per translation, i.e. once per kit per
+# create or kit-add. Silent for kits with no readonly files.
+_acq_sbx_warn_readonly_files() {
+  local kitdir="$1" spec ro_paths kname
+  spec="${kitdir}/spec.yaml"
+  [ -f "$spec" ] || return 0
+  ro_paths=$(kit_spec_files "$spec" 2>/dev/null | awk -F'\t' '$5 == "true" { print $1 }' | tr '\n' ' ' | sed 's/ $//') || ro_paths=""
+  [ -n "$ro_paths" ] || return 0
+  kname=$(kit_spec_field "$spec" name 2>/dev/null || true)
+  echo "acq(sbx): WARNING: kit '${kname:-unknown}' marks startup files readonly: ${ro_paths}" >&2
+  echo "acq(sbx):   On sbx these are guest-resident copies with NO integrity guarantee" >&2
+  echo "acq(sbx):   against a sudo guest (the agent can rewrite them). This is the" >&2
+  echo "acq(sbx):   documented interim state in docs/adr/0037-sbx-trusted-startup-parity.md." >&2
+  echo "acq(sbx):   The kit still applies. msb stages these files from a read-only host mount." >&2
+}
+
 # ---------------------------------------------------------------------------
 # Neutral-kit → sbx-v2 translation
 # ---------------------------------------------------------------------------
@@ -380,6 +401,7 @@ _acq_sbx_translate_kit() {
         printf '%s\n' "$kitref"
         return 0
       }
+      _acq_sbx_warn_readonly_files "$kitdir"
       printf '%s\n' "$out"
       ;;
     *)

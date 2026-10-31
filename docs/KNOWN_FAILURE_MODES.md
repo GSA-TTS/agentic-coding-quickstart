@@ -1940,7 +1940,7 @@ For a single sandbox, pass the pinned kit ref with `--kit` or include it in
 `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=a1206c52ec82ae7ce080ad44a6e6ac6f951e6d20&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=7dd2ddc034b6597e97f450fa716e7d47c9a38287&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 Existing sandboxes that were created before this change keep whatever podman
@@ -3182,6 +3182,35 @@ msb release (output goes to a gitignored `tmp/qualify-msb-ro-mount-<stamp>/` und
 repo, ending with a pasteable `RESULT ...` line); run it when adopting a new msb.
 Windows is not covered. One canary run on msb 0.7.7 (macOS arm64, default image,
 fresh create) is recorded in ADR-0035.
+
+---
+
+## 50. SBX: Readonly Kit Files Are Guest-Resident Copies (Accepted Residual Risk)
+
+**Status:** Accepted interim state (ADR-0037, Option D). Applies to a kit with
+`files[]` entries marked `readonly: true` (the opt-in `oci-engine` kit in Patterns
+v1.18.0 is the first) on an sbx sandbox.
+
+### Symptoms
+
+```text
+acq(sbx): WARNING: kit '<kit>' marks startup files readonly: <guest paths>
+acq(sbx):   On sbx these are guest-resident copies with NO integrity guarantee
+```
+
+The kit still applies. The warning is printed once per kit on create or kit-add.
+
+### Root Cause
+
+msb stages `readonly: true` files from a read-only host mount. sbx has no validated
+equivalent yet, so the translated kit copies them into the guest, where a
+passwordless-sudo agent can rewrite them before a root startup command runs them.
+
+### Fix / Mitigation
+
+Use the msb backend (`ACQ_BACKEND=msb`) when the tamper-resistance of those files
+matters, or do not enable the kit on sbx. The sbx read-only mount (ADR-0037, Option B)
+is gated on live sbx validation.
 
 ---
 
