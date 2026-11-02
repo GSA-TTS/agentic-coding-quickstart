@@ -46,8 +46,8 @@ These boundaries are settled; implementation must respect them.
 
 | Seam | What crosses it | Source |
 |---|---|---|
-| CLI surface | argv, exit codes (0 success / 2 usage / 1 operational), stdout/stderr | ADR-0038m §1 |
-| Structured output | versioned JSON on stdout; diagnostics on stderr | ADR-0038m §2 |
+| CLI surface | argv, exit codes (0 success / 2 usage / 1 operational), stdout/stderr | ADR-0038m |
+| Structured output | versioned JSON on stdout; diagnostics on stderr | ADR-0038m |
 | Backend adapter | capability contract, error vocabulary, host/guest path types | ADR-0040m |
 | State | orchestrator-owned records, per-record `schema=N`, tree generation marker | ADR-0041m |
 | Test oracle | subprocess-only vectors; Bash and pytest runners | ADR-0043m |
@@ -59,21 +59,21 @@ there, and no test reaches into implementation internals for contract evidence.
 
 ### Ordinary user
 
-1. As an existing acq user, I want my documented commands to keep working, so that my workflow does not break on upgrade (ADR-0038m §1).
-2. As a scripter, I want a `--json` flag with a stable, versioned envelope, so that I can parse results rather than scrape tables (ADR-0038m §2).
-3. As a scripter, I want a meaningful exit code for every outcome, so that my scripts can branch reliably (ADR-0038m §1).
-4. As an existing user, I want my configuration, credentials, and sandboxes to survive the upgrade, so that I do not recreate state (ADR-0041m).
+1. As an existing acq user, I want my documented commands to keep working, so that my workflow does not break on upgrade (ADR-0038m).
+2. As a scripter, I want a `--json` flag with a stable, versioned envelope, so that I can parse results rather than scrape tables (ADR-0038m).
+3. As a scripter, I want a meaningful exit code for every outcome, so that my scripts can branch reliably (ADR-0038m).
+4. As an existing user, I want my configuration, credentials, and sandboxes to survive the upgrade — host records and secrets carry forward, and only the security-exception recreation discards the guest filesystem — so that I do not recreate state (ADR-0041m).
 5. As a user on Windows, macOS, or Linux, I want `acq` to run without me managing Python, so that installation stays a single step (ADR-0042m).
 6. As a user on a restricted or air-gapped host, I want ordinary operation never to touch the network for acq's own assets, so that it keeps working offline (ADR-0042m).
-7. As a user, I want no secret value ever to appear in argv, logs, fixtures, or output, so that credentials cannot leak (ADR-0038m §5).
-8. As a user, I want host-authoritative configuration and trusted startup code never to be writable by the guest, so that the sandbox cannot escalate (ADR-0038m §5, ADR-0041m §5).
-9. As a user, I want an announced, verbatim backend passthrough for backend-only commands, so that backend-specific features stay reachable without becoming portable contracts (ADR-0038m §1, §4).
-10. As a user, I want non-interactive runs never to block waiting for input or invent consent, so that automation is safe (ADR-0038m §7).
+7. As a user, I want no secret value ever to appear in argv, logs, fixtures, or output, so that credentials cannot leak (ADR-0038m).
+8. As a user, I want host-authoritative configuration and trusted startup code never to be writable by the guest, so that the sandbox cannot escalate (ADR-0038m, ADR-0041m).
+9. As a user, I want an announced, verbatim backend passthrough for backend-only commands, so that backend-specific features stay reachable without becoming portable contracts (ADR-0038m).
+10. As a user, I want non-interactive runs never to block waiting for input or invent consent, so that automation is safe (ADR-0038m).
 
 ### Enterprise
 
 11. As IT, I want a managed runtime with clear provenance and a named patch owner, so that patch cadence is auditable (ADR-0042m).
-12. As IT, I want installation to be user-scoped and non-elevating, so that it fits a locked-down fleet (ADR-0038m §7).
+12. As IT, I want installation to be user-scoped and non-elevating, so that it fits a locked-down fleet (ADR-0038m).
 13. As IT, I want a complete, enumerated offline asset set whose completeness is proven by a live blocked-network install, so that air-gapped hosts are supported (ADR-0042m).
 14. As IT, I want the qualification matrix to state exactly which platform/backend cells are claimed and which are unqualified, so that deployment claims are honest (ADR-0044m).
 
@@ -85,9 +85,9 @@ there, and no test reaches into implementation internals for contract evidence.
 
 ## Implementation Decisions
 
-1. **Command and exit contract** — preserve documented commands; `0` success, `2` usage, `1` operational; child/backend status preserved on exec, attach, shell, copy, ports, and passthrough (ADR-0038m §1).
-2. **Structured output** — common envelope (`schema_version`, `command`, `data` or `error{code,message,remediation?}`); a required-field table per command; unknown fields additive, required-field changes bump the schema version (ADR-0038m §2).
-3. **Behaviour triage** — the preserve / drop / preserve-with-warning classification, each entry carrying its named test, is binding (ADR-0038m §6).
+1. **Command and exit contract** — preserve documented commands; `0` success, `2` usage, `1` operational; child/backend status preserved on exec, attach, shell, copy, ports, and passthrough (ADR-0038m).
+2. **Structured output** — common envelope (`schema_version`, `command`, `data` or `error{code,message,remediation?}`); a required-field table per command; unknown fields additive, required-field changes bump the schema version (ADR-0038m).
+3. **Behaviour triage** — the preserve / drop / preserve-with-warning classification, each entry carrying its named test, is binding (ADR-0038m).
 4. **Backend seam** — transport-neutral capability contract; 27 adapter obligations (23 common + 4 backend-specific) declared with support levels and proven by conformance vectors; a ~14-code error vocabulary with backend-native text never a portable field; host-authoritative trust (ADR-0040m).
 5. **State migration** — orchestrator-owned; per-record `schema=N` plus a tree generation marker under an auto-releasing OS advisory lock; forward-only and fail-closed; the security-exception recreation flow for a sandbox missing the verified read-only mount (ADR-0041m).
 6. **Runtime and install** — app-private CPython on all five platform cells; update by re-running the installer; no `acq update` command; OS signing deferred with the fleet application-control risk recorded as a tracked task (ADR-0042m).
@@ -97,7 +97,7 @@ there, and no test reaches into implementation internals for contract evidence.
 
 ## Testing Decisions
 
-- Only external behaviour is tested; the CLI subprocess is the sole oracle seam.
+- Contract evidence comes only from the CLI subprocess boundary; Tier-2 implementation tests may exist but never count as contract evidence.
 - Fast coverage is Tier-1 vectors (offline, CI); unit and integration are Tier-2 (non-contract); live qualification is Tier-3 with recorded transcripts, gating releases and security-touching PRs.
 - Backend-specific behaviour is proven only through the CLI (Tier-1 conformance with stubbed backends, Tier-3 live with real backends); adapter-level unit tests in isolation are permitted as Tier-2 implementation detail and never count as contract evidence.
 - Coverage percentages and mock/stub counts are never evidence of done; a command is done when its contract vectors pass and its Tier-3 oracles hold a green transcript where required.
