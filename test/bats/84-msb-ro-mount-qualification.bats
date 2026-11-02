@@ -20,6 +20,37 @@ teardown() { acq_teardown_stubs; }
 
 load 'helper'
 
+# Execute the actual guest command with real sh rather than forging its status
+# in the msb stub. A non-root fixture can model denied writes without a daemon.
+@test "guest probe: denied special-builtin redirection is not a writable result" {
+  [ "$(id -u)" -ne 0 ] || skip "denial fixture requires non-root test user"
+  local ro="$STUBDIR/real-ro" rw="$STUBDIR/real-rw"
+  mkdir "$ro" "$rw"
+  chmod 0555 "$ro"
+  run env PROBE_RO="$ro" PROBE_RW="$rw" REPO_ROOT="$REPO_ROOT" bash -c '
+    . "$REPO_ROOT/acq.backends/msb.sh"
+    _acq_msb_cli() {
+      # Remove exactly the transport prefix; run the actual supplied sh argv.
+      [ "$1" = exec ] && [ "$3" = -u ] && [ "$5" = -- ] || return 99
+      shift 5
+      "$@"
+    }
+    ACQ_HOST_CONFIG_GUEST_DIR="$PROBE_RO"
+    _acq_msb_host_config_mount_probe fixture; denied=$?
+    ACQ_HOST_CONFIG_GUEST_DIR="$PROBE_RW"
+    _acq_msb_host_config_mount_probe fixture; writable=$?
+    ACQ_HOST_CONFIG_GUEST_DIR="$PROBE_RW/missing"
+    _acq_msb_host_config_mount_probe fixture; missing=$?
+    printf "denied=%s writable=%s missing=%s\n" "$denied" "$writable" "$missing"
+    [ "$denied" -eq 0 ] && [ "$writable" -eq 2 ] && [ "$missing" -eq 1 ]
+  '
+  chmod 0755 "$ro"
+  assert_success
+  assert_output --partial 'denied=0 writable=2 missing=1'
+  [ -z "$(ls -A "$ro")" ]
+  [ -z "$(ls -A "$rw")" ]
+}
+
 _ro_kit() { # DIR
   local k="$1"; mkdir -p "$k/files"
   printf 'console.log("merge");\n' > "$k/files/merge.mjs"
