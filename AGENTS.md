@@ -13,6 +13,10 @@ review_cycle: "quarterly"
 
 # AGENTS.md — Agentic Coding Quickstart
 
+> **Fork rules:** This checkout is the `mogul/agentic-coding-quickstart` fork.
+> Additional and overriding rules apply — see [`AGENTS.fork.md`](AGENTS.fork.md).
+> Where that file conflicts with this one, the fork rules take precedence.
+
 > **System:** Agentic Coding Quickstart | **Environment:** Local development (build Low/Moderate-impact code) | **Agency:** GSA
 >
 > **Last Updated:** 2026-08-18 | **Reviewed By:** William Zujkowski
