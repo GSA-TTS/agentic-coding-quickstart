@@ -22,7 +22,7 @@ reached solely through a pull request with the human as sole merge approver.
 
 The retained gates — required checks, adversarial review by a distinct
 non-authoring agent, and human oversight — and the exception classes, generic
-attribution, and cost/stop conditions are defined in ADR-0045.
+attribution, and cost/stop conditions are defined in ADR-0045m.
 
 ## Permission deltas (override the AGENTS.md permission tables)
 
@@ -46,3 +46,7 @@ setup.
 ADRs may be recorded as `proposed` on any non-`main` branch, but a change may
 not merge to `main` while its ADR is still `proposed`: promote it to `accepted`
 before merge, or keep it out of the merged change.
+
+Fork ADRs are numbered with an `m` suffix (e.g. `0038m`) so they never collide
+with upstream's own ADR numbers (upstream will claim 0038 and up). Drop the
+suffix only when a decision is fed back to upstream.
