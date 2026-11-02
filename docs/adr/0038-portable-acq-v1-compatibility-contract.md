@@ -1,10 +1,10 @@
 ---
 title: "Portable acq v1 compatibility contract"
-status: proposed
+status: accepted
 date: 2026-11-01
 decision_makers: ["Bret Mogilefsky"]
 category: architecture
-nist_controls: []
+nist_controls: ["AC-3", "CM-3", "CM-6", "SA-8", "SC-8", "SI-10"]
 impact_level: moderate
 ato_relevance: no
 risk_treatment: mitigate

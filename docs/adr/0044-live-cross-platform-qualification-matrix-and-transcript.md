@@ -1,10 +1,10 @@
 ---
 title: "Live cross-platform qualification matrix and transcript"
-status: proposed
+status: accepted
 date: 2026-11-02
 decision_makers: ["Bret Mogilefsky"]
 category: development-process
-nist_controls: []
+nist_controls: ["CA-2", "CA-7", "SA-11"]
 impact_level: moderate
 ato_relevance: no
 risk_treatment: mitigate

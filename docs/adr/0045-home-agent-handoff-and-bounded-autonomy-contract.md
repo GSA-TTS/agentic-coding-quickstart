@@ -1,10 +1,10 @@
 ---
 title: "Home-agent handoff and bounded autonomy contract"
-status: proposed
+status: accepted
 date: 2026-11-02
 decision_makers: ["Bret Mogilefsky"]
 category: governance
-nist_controls: []
+nist_controls: ["AC-2", "AC-3", "AC-6", "AC-17", "AU-2", "AU-3", "AU-6", "CM-5", "IA-2", "PL-4", "SI-7"]
 impact_level: moderate
 ato_relevance: no
 risk_treatment: mitigate

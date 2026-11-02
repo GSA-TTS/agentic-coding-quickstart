@@ -1,10 +1,10 @@
 ---
 title: "v1 installation, runtime ownership, and update channels"
-status: proposed
+status: accepted
 date: 2026-11-01
 decision_makers: ["Bret Mogilefsky"]
 category: architecture
-nist_controls: []
+nist_controls: ["SA-4", "SR-3", "SR-11", "CM-5", "CM-10", "SI-7"]
 impact_level: moderate
 ato_relevance: no
 risk_treatment: mitigate

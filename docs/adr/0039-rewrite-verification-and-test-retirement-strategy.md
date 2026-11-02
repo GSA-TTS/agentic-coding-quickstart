@@ -1,10 +1,10 @@
 ---
 title: "Rewrite verification and test-retirement strategy"
-status: proposed
+status: accepted
 date: 2026-11-01
 decision_makers: ["Bret Mogilefsky"]
 category: development-process
-nist_controls: []
+nist_controls: ["SA-11", "CA-2", "CA-7", "RA-5", "SI-2"]
 impact_level: moderate
 ato_relevance: no
 risk_treatment: mitigate

@@ -1,10 +1,10 @@
 ---
 title: "Language-neutral test-vector format and runners"
-status: proposed
+status: accepted
 date: 2026-11-02
 decision_makers: ["Bret Mogilefsky"]
 category: development-process
-nist_controls: []
+nist_controls: ["SA-11", "SA-15", "CA-2"]
 impact_level: moderate
 ato_relevance: no
 risk_treatment: mitigate

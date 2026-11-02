@@ -41,7 +41,7 @@ records were merged to the most complete definition rather than kept twice.
 
 - **Install channel** — a delivery mechanism for first-time placement; distinct from the **update path** by which an installed acq moves to a newer release. *(Source: ADR-0042)*
 
-- **Live transcript** — a durable, self-describing record of one Tier-3 run (schema below). *(Source: ADR-0044)*
+- **Live transcript** — a durable, self-describing record of one Tier-3 run; its schema is defined in ADR-0044. *(Source: ADR-0044)*
 
 - **Managed Python runtime** — the prebuilt CPython that executes acq's Python source, distinct from the **backend** (msb/sbx) and the **validator runtime**. *(Source: ADR-0042)*
 
