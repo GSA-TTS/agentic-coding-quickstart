@@ -11,7 +11,7 @@ risk_treatment: mitigate
 supersedes: []
 ---
 
-# ADR-0038: Portable acq v1 compatibility contract
+# ADR-0038m: Portable acq v1 compatibility contract
 
 ## Context and Problem Statement
 

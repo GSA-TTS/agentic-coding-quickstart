@@ -11,7 +11,7 @@ risk_treatment: mitigate
 supersedes: ["0010-acq-pluggable-backends.md §Adapter contract"]
 ---
 
-# ADR-0040: Backend adapter capability contract
+# ADR-0040m: Backend adapter capability contract
 
 ## Context and Problem Statement
 

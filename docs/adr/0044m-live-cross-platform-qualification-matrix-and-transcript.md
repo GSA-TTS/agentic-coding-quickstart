@@ -11,7 +11,7 @@ risk_treatment: mitigate
 supersedes: []
 ---
 
-# ADR-0044: Live cross-platform qualification matrix and transcript
+# ADR-0044m: Live cross-platform qualification matrix and transcript
 
 ## Context and Problem Statement
 
@@ -29,7 +29,7 @@ host-enforced read-only trusted-config mount (ADR-0035/ADR-0037); secret
 placeholder/proxy and swap-on-the-wire substitution and secret non-exposure;
 real backend behaviour (kit apply, attach, boot contract, version
 fail-closed); offline completeness (network-blocked install plus smoke);
-the security-exception recreation flow (ADR-0041); and native-Windows
+the security-exception recreation flow (ADR-0041m); and native-Windows
 ordinary-user operation.
 
 The qualified matrix is: msb on Linux x86_64, Linux aarch64, macOS arm64,
