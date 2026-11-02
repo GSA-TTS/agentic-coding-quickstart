@@ -2595,6 +2595,13 @@ gate-job pattern. A conditional trigger and "required" are structurally
 incompatible in GitHub Actions; check new required workflows for this before
 adding them to branch protection.
 
+The `changes` job's path list is the other half of this contract: a file the
+real suite reads but the list omits skips the 3.2 run while the gate stays
+green. Add every new input (script, requirements file, key, submodule pin) to
+the `git diff` pathspecs. `test/bats/158-bash32-relevance-paths.bats` fails when
+a known entry is missing and when a new tracked file is neither listed nor
+declared a non-input.
+
 ---
 
 ## 43. A Second Parallel Sandbox From the Same Kit Is Unreachable on Its Published Port (msb)
