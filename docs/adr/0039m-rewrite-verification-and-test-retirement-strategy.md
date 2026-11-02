@@ -11,7 +11,7 @@ risk_treatment: mitigate
 supersedes: []
 ---
 
-# ADR-0039: Rewrite verification and test-retirement strategy
+# ADR-0039m: Rewrite verification and test-retirement strategy
 
 ## Context and Problem Statement
 

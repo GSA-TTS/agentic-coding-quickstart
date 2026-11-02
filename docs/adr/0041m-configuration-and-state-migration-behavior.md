@@ -11,7 +11,7 @@ risk_treatment: mitigate
 supersedes: []
 ---
 
-# ADR-0041: Configuration and state migration behavior
+# ADR-0041m: Configuration and state migration behavior
 
 ## Context and Problem Statement
 

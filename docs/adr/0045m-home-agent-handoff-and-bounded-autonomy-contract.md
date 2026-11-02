@@ -11,7 +11,7 @@ risk_treatment: mitigate
 supersedes: []
 ---
 
-# ADR-0045: Home-agent handoff and bounded autonomy contract
+# ADR-0045m: Home-agent handoff and bounded autonomy contract
 
 ## Context and Problem Statement
 
@@ -75,7 +75,7 @@ retry, no unbounded loop.
 authoring, decomposition into implementation tickets, and orchestration of the
 open decision tickets, because the compatibility, security, feasibility, and
 verification constraints are now coherent. Waits: writing the replacement,
-until the final specification is approved and ADR-0038 through ADR-0045 are
+until the final specification is approved and ADR-0038m through ADR-0045m are
 recorded.
 
 **MicroVM validation.** Home agents may run on the host and create microVMs to

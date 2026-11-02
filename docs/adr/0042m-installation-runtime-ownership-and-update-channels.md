@@ -11,7 +11,7 @@ risk_treatment: mitigate
 supersedes: []
 ---
 
-# ADR-0042: v1 installation, runtime ownership, and update channels
+# ADR-0042m: v1 installation, runtime ownership, and update channels
 
 ## Context and Problem Statement
 
