@@ -66,10 +66,21 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   (ADR-0040m): exit `0` when `NAME` is installed and supported, else exit `1`
   with `backend_not_found`, `backend_version_unsupported`, or
   `backend_version_unknown`. No mutation occurs.
+* `acq-py create AGENT PATH [--name N] [--image REF] [--json]` — create a sandbox
+  (detached) through the MSB adapter, wait for exec-readiness, and record a
+  host-authoritative state record carrying `schema=N` (ADR-0041m).
+* `acq-py run AGENT PATH [--name N] [--image REF] [--json]` — create (if missing)
+  then launch the agent in the foreground; `acq-py run NAME` re-attaches to an
+  existing sandbox by name.
+* `acq-py ls [--json]` — list sandboxes with `name`/`backend`/`state`
+  (ADR-0038m §2).
+* `acq-py stop NAME [--json]` and `acq-py rm NAME [--json]` — stop (state
+  preserved) or remove a sandbox and its record.
 * Exit codes (ADR-0038m §1): `0` success, `2` usage, `1` operational. A
   well-formed command acq cannot carry out (for example `doctor NAME` while no
   backend adapter is present) fails closed with exit `1` and the
-  `unsupported_capability` code (ADR-0040m).
+  `unsupported_capability` code (ADR-0040m). The lifecycle verbs add
+  `sandbox_not_found`, `sandbox_exists`, `validation_failed`, and `timeout`.
 
 Detection and the reported version are overridable for reproducible, offline
 tests: `ACQ_SBX_INSTALLED`/`ACQ_MSB_INSTALLED` (`"0"`/`"1"`) and

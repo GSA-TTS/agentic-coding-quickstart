@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "cli/lifecycle-stop",
+  "oracle": "ADR-0040m msb stop capability: stop a sandbox without removing it",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "stop", "alpha", "--json"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{\"alpha\":\"running\"}"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_FAIL"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "stop",
+        "data": {"name": "alpha", "backend": "msb", "state": "stopped"}
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}
