@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "cli/passthrough-exit-code",
+  "oracle": "ADR-0038m §1 passthrough preserves the backend binary's exit status (5, not acq's 0/1)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "echo", "hi"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_EXIT_CODE": "5"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_STUB_EXEC_EXIT", "ACQ_MSB_STUB_COPY_EXIT", "ACQ_MSB_STUB_EXIT_CODE", "ACQ_MSB_STUB_PORTS"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 5,
+    "stdout": {"mode": "contains", "value": "hi", "normalize": []},
+    "stderr": {"mode": "contains", "value": "forwarding to 'msb'", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

@@ -21,17 +21,34 @@ from pathlib import Path
 
 CATALOG_ENV = "ACQ_MSB_STUB_CATALOG"
 VERSION_ENV = "ACQ_MSB_STUB_VERSION"
+PORTS_ENV = "ACQ_MSB_STUB_PORTS"
+INSPECT_RAW_ENV = "ACQ_MSB_STUB_INSPECT_RAW"
 
 # ``exec`` prints this marker to its own stdout to simulate a real agent writing
 # to stdout; the adapter's json-mode launch must route it to acq's stderr so the
 # CLI stdout stays a single JSON document (ADR-0038m §2).
 EXEC_MARKER = "[stub exec]"
+COPY_MARKER = "[stub copy]"
 
 # When ``ACQ_MSB_STUB_FAIL`` names a command, that command fails with a
 # distinctive raw stderr line (simulating a backend-native failure) so a vector
 # can assert the raw text never reaches the structured output.
 FAIL_ENV = "ACQ_MSB_STUB_FAIL"
 RAW_FAIL_STDERR = "raw backend failure detail: 7f3a2c1"
+
+# Per-subcommand exit-status knobs so contract vectors can assert child/backend
+# status propagation (ADR-0038m §1) without a real guest. Each defaults to 0.
+EXEC_EXIT_ENV = "ACQ_MSB_STUB_EXEC_EXIT"
+COPY_EXIT_ENV = "ACQ_MSB_STUB_COPY_EXIT"
+ECHO_EXIT_ENV = "ACQ_MSB_STUB_EXIT_CODE"
+
+
+def _exit_code(env_name: str) -> int:
+    raw = os.environ.get(env_name, "0")
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
 
 
 def _should_fail(cmd: str) -> bool:
@@ -112,27 +129,75 @@ def main(argv: list[str]) -> int:
 
     if cmd == "exec":
         # `msb exec [-u USER] [-w DIR] [-e K=V] [-t] NAME -- CMD...` — exit 0 when
-        # NAME exists (exec-ready), else 1. The sandbox name is the first
-        # non-flag token before the `--` separator.
+        # NAME exists (exec-ready), else 1. Flags may precede or follow NAME; the
+        # command after `--` is echoed to stdout so a vector can assert verbatim
+        # forwarding, and the exit status is driven by ``ACQ_MSB_STUB_EXEC_EXIT``.
+        try:
+            sep = args.index("--")
+        except ValueError:
+            sep = len(args)
+        head = args[1:sep]
+        command = args[sep + 1 :] if sep < len(args) else []
         name = None
-        i = 1
-        while i < len(args):
-            token = args[i]
-            if token == "--":
-                break
-            if token in ("-u", "-w", "-e") and i + 1 < len(args):
+        i = 0
+        while i < len(head):
+            token = head[i]
+            if token in ("-u", "-w", "-e") and i + 1 < len(head):
                 i += 2
                 continue
             if token.startswith("-"):
                 i += 1
                 continue
             name = token
-            break
+            i += 1
         if name is None or name not in catalog:
             print(f"msb: no such sandbox '{name}'", file=sys.stderr)
             return 1
-        print(EXEC_MARKER)
+        marker = EXEC_MARKER
+        if command:
+            marker += " " + " ".join(command)
+        print(marker)
+        return _exit_code(EXEC_EXIT_ENV)
+
+    if cmd in ("copy", "cp"):
+        src = args[1] if len(args) > 1 else ""
+        dst = args[2] if len(args) > 2 else ""
+        print(f"{COPY_MARKER} {src} -> {dst}", file=sys.stderr)
+        return _exit_code(COPY_EXIT_ENV)
+
+    if cmd == "inspect":
+        if _should_fail("inspect"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
+        name = args[1] if len(args) > 1 else None
+        if name is None or name not in catalog:
+            print(f"msb: no such sandbox '{name}'", file=sys.stderr)
+            return 1
+        raw = os.environ.get(INSPECT_RAW_ENV)
+        if raw is not None:
+            # A raw inspect payload (a vector feeds a wrong-shape document here so
+            # the adapter's shape guard is exercised end to end).
+            print(raw)
+            return 0
+        ports_env = os.environ.get(PORTS_ENV, "")
+        try:
+            declared = json.loads(ports_env) if ports_env else {}
+        except json.JSONDecodeError:
+            declared = {}
+        if not isinstance(declared, dict):
+            declared = {}
+        port_list = declared.get(name, [])
+        # msb 0.6.7 `inspect --format json` shape (ADR-0014): published ports live
+        # at active_config.network.ports[] as {host_port, guest_port, protocol,
+        # host_bind}.
+        print(json.dumps({"active_config": {"network": {"ports": port_list}}}))
         return 0
+
+    if cmd == "echo":
+        # Used only to exercise verbatim passthrough: prints its args and returns
+        # ``ACQ_MSB_STUB_EXIT_CODE`` so a vector can assert forwarding + status.
+        print(" ".join(args[1:]))
+        return _exit_code(ECHO_EXIT_ENV)
 
     if cmd == "stop":
         if _should_fail("stop"):
