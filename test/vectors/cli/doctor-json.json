@@ -20,9 +20,9 @@
         "schema_version": 1,
         "command": "doctor",
         "data": {
-          "status": "degraded",
+          "status": "warn",
           "checks": [
-            { "id": "runtime", "status": "ok" },
+            { "id": "runtime", "status": "pass" },
             { "id": "backend", "status": "warn" }
           ]
         }

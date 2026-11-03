@@ -16,7 +16,7 @@
     "exit": 0,
     "stdout": {
       "mode": "contains",
-      "value": "overall: degraded",
+      "value": "overall: warn",
       "normalize": []
     },
     "stderr": {

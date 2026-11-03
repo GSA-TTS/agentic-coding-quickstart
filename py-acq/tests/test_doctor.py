@@ -4,7 +4,7 @@ Non-contract evidence (ADR-0039m): these reach into the package and the
 subprocess boundary, but the contract evidence lives in the vector corpus
 (``test/vectors/cli/doctor-*.json``). Here we assert the full per-check shape the
 vectors deliberately do not pin: every check carries a non-empty ``message``, and
-every non-``ok`` check carries actionable ``remediation``.
+every non-``pass`` check carries actionable ``remediation``.
 """
 
 from __future__ import annotations
@@ -27,25 +27,25 @@ def run_cli(*args: str) -> subprocess.CompletedProcess:
 
 def test_doctor_data_shape():
     data = doctor.doctor_data()
-    assert data["status"] in ("ok", "degraded", "failed")
+    assert data["status"] in ("pass", "warn", "fail")
     checks = data["checks"]
     assert checks, "doctor produced no checks"
 
     for check in checks:
         assert check["id"], "check missing stable id"
-        assert check["status"] in ("ok", "warn", "fail")
+        assert check["status"] in ("pass", "warn", "fail")
         assert check["message"], "check missing message"
-        if check["status"] != "ok":
-            assert check.get("remediation"), "non-ok check missing remediation"
+        if check["status"] != "pass":
+            assert check.get("remediation"), "non-pass check missing remediation"
 
 
 def test_overall_status_derivation():
-    ok = [{"id": "a", "status": "ok"}]
+    ok = [{"id": "a", "status": "pass"}]
     warn = [{"id": "a", "status": "warn"}]
     fail = [{"id": "a", "status": "fail"}]
-    assert doctor.overall_status(ok) == "ok"
-    assert doctor.overall_status(ok + warn) == "degraded"
-    assert doctor.overall_status(ok + warn + fail) == "failed"
+    assert doctor.overall_status(ok) == "pass"
+    assert doctor.overall_status(ok + warn) == "warn"
+    assert doctor.overall_status(ok + warn + fail) == "fail"
 
 
 def test_doctor_json_subprocess():
@@ -54,7 +54,7 @@ def test_doctor_json_subprocess():
     doc = json.loads(proc.stdout)
     assert doc["schema_version"] == envelope.SCHEMA_VERSION
     assert doc["command"] == "doctor"
-    assert doc["data"]["status"] in ("ok", "degraded", "failed")
+    assert doc["data"]["status"] in ("pass", "warn", "fail")
     assert isinstance(doc["data"]["checks"], list)
 
 
