@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "id": "cli/doctor-json",
+  "oracle": "ADR-0038m §2 structured output success envelope for doctor: overall status and per-check id/status",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "doctor", "--json"],
+    "env": {},
+    "unset": ["ACQ_RUNTIME"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "doctor",
+        "data": {
+          "status": "degraded",
+          "checks": [
+            { "id": "runtime", "status": "ok" },
+            { "id": "backend", "status": "warn" }
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

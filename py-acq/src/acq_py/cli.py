@@ -2,8 +2,8 @@
 
 The highest seam is the subprocess boundary (ADR-0038m section 1): exit codes
 0/1/2 and the structured-output envelope (``--json``) are the contract. The
-foundation slice implements ``version`` and the ``--json`` flag end to end;
-the rest of the command surface arrives with later slices.
+foundation slice implements ``version`` and ``doctor`` plus the ``--json`` flag
+end to end; the rest of the command surface arrives with later slices.
 
 Output contract:
     * human output -> stdout, diagnostics -> stderr (no ``--json``)
@@ -17,7 +17,7 @@ import argparse
 import json
 import sys
 
-from . import envelope, errors, version_info
+from . import doctor, envelope, errors, version_info
 
 
 class UsageError(Exception):
@@ -64,6 +64,8 @@ def build_parser() -> _Parser:
     parser.add_argument("--version", action="store_true", help="show version and exit")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     sub.add_parser("version", help="show acq version + backend info")
+    doctor_p = sub.add_parser("doctor", help="diagnose the acq environment")
+    doctor_p.add_argument("name", nargs="?", default=None, help="sandbox to inspect (requires a backend)")
     sub.add_parser("help", help="show help")
     return parser
 
@@ -83,6 +85,29 @@ def _usage_failure(command: str | None, message: str, emit_json: bool) -> int:
     return errors.EXIT_USAGE
 
 
+def _operational_failure(
+    command: str,
+    code: str,
+    message: str,
+    remediation: str | None,
+    emit_json: bool,
+) -> int:
+    """Emit an operational failure (exit 1) with a stable error code.
+
+    Distinct from a usage error (exit 2): the command was well-formed but could
+    not be carried out. The JSON form puts the failure envelope on stdout; the
+    human form writes diagnostics to stderr.
+    """
+    if emit_json:
+        doc = envelope.error(command, code, message, remediation=remediation)
+        print(json.dumps(doc))
+    else:
+        print(f"acq: {message}", file=sys.stderr)
+        if remediation:
+            print(remediation, file=sys.stderr)
+    return errors.EXIT_FAILURE
+
+
 def run_version(emit_json: bool) -> int:
     data = version_info.version_data()
     if emit_json:
@@ -94,6 +119,38 @@ def run_version(emit_json: bool) -> int:
     print(f"  backend:           {data['backend'] or 'none'}")
     print(f"  backend version:   {data['backend_version'] or 'none'}")
     print(f"  kit control plane: {data['kit_control_plane_ref'] or 'none'}")
+    return errors.EXIT_SUCCESS
+
+
+def _print_doctor_human(data: dict) -> None:
+    print("acq: doctor")
+    for check in data["checks"]:
+        print(f"  [{check['status']:4}] {check['id']}: {check['message']}")
+        remediation = check.get("remediation")
+        if remediation:
+            print(f"           {remediation}")
+    print(f"overall: {data['status']}")
+
+
+def run_doctor(emit_json: bool, name: str | None) -> int:
+    # `acq doctor NAME` inspects a named sandbox's image contract, a
+    # backend-provided capability (ADR-0040m `doctor`). No adapter is present in
+    # this slice, so the request fails closed with exit 1 rather than inventing
+    # a result.
+    if name is not None:
+        return _operational_failure(
+            "doctor",
+            errors.UNSUPPORTED,
+            f"cannot inspect sandbox {name!r}: no backend adapter is available",
+            "backend adapters ship in a later slice; sandbox inspection is unavailable in this build",
+            emit_json,
+        )
+
+    data = doctor.doctor_data()
+    if emit_json:
+        print(json.dumps(envelope.success("doctor", data)))
+        return errors.EXIT_SUCCESS
+    _print_doctor_human(data)
     return errors.EXIT_SUCCESS
 
 
@@ -115,6 +172,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if parsed.version or parsed.command == "version":
         return run_version(emit_json)
+
+    if parsed.command == "doctor":
+        return run_doctor(emit_json, parsed.name)
 
     if parsed.command == "help" or parsed.command is None:
         parser.print_help()

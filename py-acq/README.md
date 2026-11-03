@@ -49,11 +49,19 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
 ## The CLI (foundation surface)
 
 * `acq-py version` — human version/identity output (ADR-0042m).
-* `acq-py version --json` (and `acq-py --json version`) — the structured-output
-  envelope (ADR-0038m §2): `{"schema_version", "command", "data"}` on success,
+* `acq-py doctor` — human diagnostic output (ADR-0038m §doctor): an overall
+  `status` plus a check list, each with a stable `id`, `status`, `message`, and
+  optional `remediation`. In this slice the checks are `runtime` (managed-runtime
+  resolution, ADR-0042m) and `backend` (adapter availability, ADR-0040m).
+* `acq-py version --json` and `acq-py doctor --json` (and `acq-py --json version`
+  / `acq-py --json doctor`) — the structured-output envelope (ADR-0038m §2):
+  `{"schema_version", "command", "data"}` on success,
   `{"schema_version", "command", "error": {"code", "message", "remediation?"}}`
   on failure. One document on stdout; diagnostics on stderr.
-* Exit codes (ADR-0038m §1): `0` success, `2` usage, `1` operational.
+* Exit codes (ADR-0038m §1): `0` success, `2` usage, `1` operational. A
+  well-formed command acq cannot carry out (for example `doctor NAME` while no
+  backend adapter is present) fails closed with exit `1` and the
+  `unsupported_capability` code (ADR-0040m).
 
 ## Managed runtime (ADR-0042m)
 

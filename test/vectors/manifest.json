@@ -23,8 +23,24 @@
       "vectors": ["cli/version-json"]
     },
     {
+      "contract": "ADR-0038m §2 doctor required result data fields (overall status + per-check id/status)",
+      "vectors": ["cli/doctor-json"]
+    },
+    {
+      "contract": "ADR-0038m §2 human output by default for doctor, diagnostics on stderr",
+      "vectors": ["cli/doctor-human"]
+    },
+    {
+      "contract": "ADR-0038m §1 exit 1 (operational failure)",
+      "vectors": ["cli/doctor-unsupported"]
+    },
+    {
+      "contract": "ADR-0040m unsupported-capability fail-closed (sandbox inspection without a backend)",
+      "vectors": ["cli/doctor-unsupported"]
+    },
+    {
       "contract": "ADR-0042m runtime: offline operation, no opportunistic download",
-      "vectors": ["cli/version-json", "cli/version-human"]
+      "vectors": ["cli/version-json", "cli/version-human", "cli/doctor-json", "cli/doctor-human"]
     },
     {
       "contract": "ADR-0043m runner assertion modes (exact/contains/json)",
