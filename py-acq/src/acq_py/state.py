@@ -74,7 +74,17 @@ def _checksum(token: str) -> str:
 
 def record_path(backend: str, name: str) -> Path:
     """Path to one sandbox's state record, keyed by backend + sandbox name."""
-    return state_dir() / _safe(backend) / f"{_safe(name)}.{_checksum(name)}.json"
+    return backend_dir(backend) / f"{_safe(name)}.{_checksum(name)}.json"
+
+
+def backend_dir(backend: str) -> Path:
+    """The state subdirectory holding one backend's sandbox records.
+
+    Sandbox-state records live directly under ``state_dir()/<backend>/``; sibling
+    directories (``kit-sources/``, ``provenance/``, ``kit-consent/``) hold other
+    record types with their own schema number space and are never sandbox state.
+    """
+    return state_dir() / _safe(backend)
 
 
 def record_write(
@@ -198,7 +208,7 @@ def list_records(backend: str) -> list[dict]:
     skipped (ADR-0041m: read-only diagnostics may report ``unknown`` rather than
     misread); a schema-less legacy record is likewise skipped.
     """
-    root = state_dir() / _safe(backend)
+    root = backend_dir(backend)
     out: list[dict] = []
     if not root.is_dir():
         return out

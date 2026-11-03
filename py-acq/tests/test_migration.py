@@ -14,6 +14,7 @@ class are pinned, so removing or weakening the guard fails the test.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -389,3 +390,136 @@ def test_doctor_state_check_reports_newer_as_fail(monkeypatch, tmp_path, capsys)
     assert rc == 0
     checks = {c["id"]: c for c in doc["data"]["checks"]}
     assert checks["state"]["status"] == "fail"
+
+
+# ---------------------------------------------------------------------------
+# Review fixes.
+# ---------------------------------------------------------------------------
+
+def test_attach_fails_closed_when_probe_unset(monkeypatch, tmp_path, capsys):
+    """The security gate fails closed when the mount probe is unset (not "ok")."""
+    _env(monkeypatch, tmp_path, catalog={"sec": "running"})
+    _write_record("msb", "sec", _SEC_RECORD)
+    # No ACQ_SECURITY_MOUNT_STATE -> the offline default is "unknown", fail closed.
+    assert "ACQ_SECURITY_MOUNT_STATE" not in os.environ
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "attach", "sec", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == errors.SECURITY_EXCEPTION
+
+
+def test_mount_state_unset_is_unknown():
+    assert security.mount_state("msb", "anything") == "unknown"
+
+
+def test_crash_window_preserves_record(monkeypatch, tmp_path):
+    """A crash at the rename step must not orphan a record onto a .bak sidecar.
+
+    The fix copies (not moves) the prior record to ``.bak``, so ``path`` always
+    holds a valid record; a crash at the rename leaves the old record in place.
+    """
+    _env(monkeypatch, tmp_path)
+    legacy = {"name": "legacy", "backend": "msb", "agent": "opencode"}
+    path = _write_record("msb", "legacy", legacy)
+
+    class _Crash(BaseException):
+        pass
+
+    real_replace = os.replace
+
+    def crash_at_rename(src, dst, *a, **k):
+        # Crash only when the new record is about to go live (dst == path);
+        # a ".bak" sidecar move (dst == backup) is allowed to succeed so the
+        # test can observe the orphan the buggy move would create.
+        if dst == path:
+            raise _Crash("simulated crash at rename")
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(migration.os, "replace", crash_at_rename)
+
+    with pytest.raises(_Crash):
+        migration.migrate_tree()
+
+    # `path` still holds the OLD record — it was copied, never moved.
+    assert json.loads(path.read_text(encoding="utf-8")) == legacy
+
+    # Resume converges without losing the record.
+    monkeypatch.setattr(migration.os, "replace", real_replace)
+    migration.migrate_tree()
+    record = state.record_read("msb", "legacy")
+    assert record is not None
+    assert record["agent"] == "opencode"
+    assert record["schema"] == state.STATE_SCHEMA
+
+
+def test_sandbox_migration_does_not_touch_kit_records(monkeypatch, tmp_path):
+    """Migration is type-aware: kit records keep their own KIT_SCHEMA space."""
+    _env(monkeypatch, tmp_path)
+    root = state.state_dir()
+
+    kit_source = root / "kit-sources" / "github.com_acme_team-kits.abc12345.json"
+    kit_source.parent.mkdir(parents=True, exist_ok=True)
+    kit_source.write_text(
+        json.dumps({"repository": "github.com/acme/team-kits", "ref": "a" * 40, "directory": "kits"}),
+        encoding="utf-8",
+    )
+    kit_prov = root / "provenance" / "msb" / "box.abc12345.json"
+    kit_prov.parent.mkdir(parents=True, exist_ok=True)
+    kit_prov.write_text(
+        json.dumps({"schema": 99, "backend": "msb", "sandbox": "box", "applied_ref": "x"}),
+        encoding="utf-8",
+    )
+    _write_record("msb", "legacy", {"name": "legacy", "backend": "msb", "agent": "opencode"})
+
+    migration.migrate_tree()
+
+    # The sandbox record migrated...
+    assert state.record_read("msb", "legacy") is not None
+    # ...but the kit records are untouched: the schema-less kit-source record is
+    # NOT rewritten into sandbox space, and the bumped KIT_SCHEMA record is
+    # ignored rather than hard-failing sandbox migration.
+    assert json.loads(kit_source.read_text(encoding="utf-8")) == {
+        "repository": "github.com/acme/team-kits",
+        "ref": "a" * 40,
+        "directory": "kits",
+    }
+    assert json.loads(kit_prov.read_text(encoding="utf-8")) == {
+        "schema": 99,
+        "backend": "msb",
+        "sandbox": "box",
+        "applied_ref": "x",
+    }
+
+
+def test_config_migrated_independently_of_generation_marker(monkeypatch, tmp_path):
+    """A legacy config.yaml is migrated even after the state tree is current."""
+    _env(monkeypatch, tmp_path)
+    _write_record("msb", "legacy", {"name": "legacy", "backend": "msb"})
+    migration.migrate_tree()
+    assert migration.read_generation() == migration.TARGET_SCHEMA
+
+    # A legacy config.yaml appears after the state tree is already current.
+    path = config.config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("backend: msb\n", encoding="utf-8")
+
+    migration.migrate_tree()
+    assert config.config_schema() == config.CONFIG_SCHEMA
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == f"schema: {config.CONFIG_SCHEMA}"
+
+
+def test_seed_is_materialized_inside_lock(monkeypatch, tmp_path):
+    """The test-seam materialization happens inside the migration lock."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_MIGRATION_LOCK_TIMEOUT", "0.2")
+    monkeypatch.setenv("ACQ_STATE_SEED", json.dumps({"msb/legacy": {"name": "legacy", "backend": "msb"}}))
+    path = state.record_path("msb", "legacy")
+
+    with lock.exclusive_lock(migration.lock_path(), timeout_s=5.0):
+        with pytest.raises(migration.MigrationError) as exc:
+            migration.migrate_tree()
+        assert exc.value.code == errors.MIGRATION_LOCKED
+
+    # The seed was NOT materialized: it happens inside the (held) lock.
+    assert not path.exists()

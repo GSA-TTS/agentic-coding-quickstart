@@ -20,10 +20,18 @@ synchronized pre-step that runs before any mutating verb:
   intact and the path + failed step + remediation are reported. A migration is
   never reported successful unless the read-back verifies.
 
-All record files live under the state root (``state.state_dir()``) as ``*.json``.
-The generation marker is ``state_dir()/generation`` (no ``.json`` suffix) and the
-migration lock is ``state_dir()/migration.lock``, so neither is picked up by the
-record scan.
+All sandbox-state records live under the state root (``state.state_dir()``) as
+``state_dir()/<backend>/*.json``. The generation marker is
+``state_dir()/generation`` (no ``.json`` suffix) and the migration lock is
+``state_dir()/migration.lock``, so neither is picked up by the record scan.
+
+This migration is **type-aware** (ADR-0041m): it only ever touches *sandbox-state*
+records (those under a backend directory). Kit-source / provenance / consent
+records live in sibling ``kit-sources/``, ``provenance/``, and ``kit-consent/``
+directories and carry their OWN ``KIT_SCHEMA`` number space; sandbox-state
+migration never rewrites or rejects them, so a future ``KIT_SCHEMA`` bump cannot
+hard-fail sandbox migration and a legacy kit record is never rewritten into
+sandbox space.
 
 ``ACQ_STATE_SEED`` is an internal test seam (never a secret, never written to
 output): a JSON object mapping ``"<backend>/<name>"`` to a record (a dict is
@@ -36,9 +44,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
-from . import config, errors, lock, state
+from . import backends, config, errors, lock, state
 
 # The tree generation this reader migrates records TO, and the schema level this
 # reader itself understands. All record types currently write ``schema=1``; if a
@@ -129,11 +138,22 @@ def write_generation(generation: int) -> None:
 # ---------------------------------------------------------------------------
 
 def iter_records() -> list[Path]:
-    """Every record file under the state root, in deterministic path order."""
+    """Every *sandbox-state* record path, in deterministic path order.
+
+    Only records under a backend directory (``state_dir()/<backend>/``) are
+    sandbox state and therefore migratable here. Kit-source / provenance /
+    consent records live in sibling directories with their own ``KIT_SCHEMA``
+    number space and are deliberately excluded (ADR-0041m type-awareness).
+    """
     root = state_root()
     if not root.is_dir():
         return []
-    return sorted(p for p in root.glob("**/*.json") if p.is_file())
+    out: list[Path] = []
+    for backend in backends.BACKENDS:
+        directory = state.backend_dir(backend)
+        if directory.is_dir():
+            out.extend(sorted(p for p in directory.glob("*.json") if p.is_file()))
+    return out
 
 
 def _seed_records() -> None:
@@ -261,43 +281,75 @@ def _verify(path: Path) -> None:
 def _atomic_migrate(path: Path, new_doc: dict, old_schema: int) -> None:
     """Migrate one record atomically and non-destructively (ADR-0041m).
 
-    The prior record is retained as ``<name>.bak.<old_schema>`` until the new
-    record parses back (:func:`_verify`), then deleted. On any failure the old
-    record is restored and a :class:`MigrationError` names the path + failed step.
+    The prior record is **copied** to ``<name>.bak.<old_schema>`` — ``path`` keeps
+    holding the valid old record — then the new record is written to a temp file,
+    fsynced, and atomically renamed over ``path``. ``path`` therefore always holds
+    a valid record (old until the rename, new after), so a crash at any point can
+    never orphan a record onto a ``.bak`` sidecar the scanner ignores. On a
+    read-back failure the old record is restored; on any earlier failure ``path``
+    still holds the old record. Either way a :class:`MigrationError` names the
+    path + failed step.
     """
     backup = path.with_name(path.name + f".bak.{old_schema}")
     tmp = path.with_suffix(".json.tmp")
-    step = "write"
     try:
-        if path.exists():
-            os.replace(path, backup)
+        shutil.copyfile(path, backup)
+    except OSError as exc:
+        raise MigrationError(
+            errors.MIGRATION_FAILED,
+            f"could not back up state record {str(path)!r} (step backup)",
+            "the prior record is intact; retry the migration",
+            path=str(path),
+            step="backup",
+        ) from exc
+    try:
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(new_doc, indent=2, sort_keys=False) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
-        step = "verify"
+    except OSError as exc:
+        _remove_sidecars(backup, tmp)
+        raise MigrationError(
+            errors.MIGRATION_FAILED,
+            f"could not migrate state record {str(path)!r} (step write)",
+            "the prior record is intact; retry the migration",
+            path=str(path),
+            step="write",
+        ) from exc
+    try:
         _verify(path)
-        backup.unlink(missing_ok=True)
     except MigrationError:
         _restore(path, backup, tmp)
         raise
-    except OSError as exc:
-        _restore(path, backup, tmp)
-        raise MigrationError(
-            errors.MIGRATION_FAILED,
-            f"could not migrate state record {str(path)!r} (step {step})",
-            "the prior record has been retained; retry the migration",
-            path=str(path),
-            step=step,
-        ) from exc
+    backup.unlink(missing_ok=True)
 
 
 def _restore(path: Path, backup: Path, tmp: Path) -> None:
-    """Best-effort restore of the prior record after a failed migration."""
+    """Restore the prior record after a failed read-back (best-effort).
+
+    ``path`` holds the new (unverified) record and ``backup`` the prior copy;
+    swap the prior back into place and drop the temp file.
+    """
     try:
         if backup.exists():
             os.replace(backup, path)
+    except OSError:
+        pass
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+
+
+def _remove_sidecars(backup: Path, tmp: Path) -> None:
+    """Remove the ``.bak``/``.tmp`` sidecars after a pre-rename failure.
+
+    ``path`` still holds the valid prior record (the rename never happened), so
+    the copy and temp file are just dropped.
+    """
+    try:
+        backup.unlink()
     except OSError:
         pass
     try:
@@ -340,17 +392,19 @@ def migrate_tree() -> None:
     """Run the forward migration under the exclusive advisory lock.
 
     Idempotent and crash-converging: a generation marker at or above the target
-    short-circuits; otherwise every record is (re)classified and forward-migrated
-    — an already-migrated record is a no-op — and the marker is written LAST so a
-    crash mid-migration resumes on the next run. ``config.yaml`` is migrated in
-    the same critical section.
+    short-circuits the *record* pass; otherwise every sandbox-state record is
+    (re)classified and forward-migrated — an already-migrated record is a no-op —
+    and the marker is written LAST so a crash mid-migration resumes on the next
+    run. ``config.yaml`` is migrated in the same critical section but INDEPENDENT
+    of the state generation marker, so a subsequently-legacy config is still
+    migrated once the record tree is already current.
     """
-    _seed_records()
     try:
         with lock.exclusive_lock(lock_path()):
+            _seed_records()  # materialize the test seam inside the critical section
+            config.migrate_config()  # independent of the generation marker
             if read_generation() >= TARGET_SCHEMA:
                 return
-            config.migrate_config()
             for path in iter_records():
                 doc = _load_record(path)
                 _migrate_record(path, doc)

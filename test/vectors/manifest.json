@@ -261,7 +261,7 @@
     },
     {
       "contract": "ADR-0035/0041m security exception: a sandbox missing its read-only mount fails closed on trusted operations",
-      "vectors": ["cli/security-exception-attach"]
+      "vectors": ["cli/security-exception-attach", "cli/security-exception-unprobed"]
     },
     {
       "contract": "ADR-0041m security-exception recreation is explicit and consent-gated (refused without --yes, recreates preserving host records with --yes)",
