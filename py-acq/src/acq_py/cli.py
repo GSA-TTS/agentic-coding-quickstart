@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 
-from . import backends, doctor, envelope, errors, msb, state, version_info
+from . import backends, doctor, envelope, errors, kits, msb, state, version_info
 
 # Agent tokens accepted by acq dispatch (mirrors acq.backends/agents.sh). Kept in
 # the CLI because it owns the create-vs-reattach decision for ``run``.
@@ -38,7 +38,7 @@ KNOWN_AGENTS = frozenset(
 # flag) is treated as an unknown verb and forwarded verbatim to the active
 # backend (announced passthrough, spec user story #9 / ADR-0038m §1).
 KNOWN_COMMANDS = frozenset(
-    "version doctor help backend create run ls stop rm exec attach shell cp ports secret".split()
+    "version doctor help backend create run ls stop rm exec attach shell cp ports secret kit kit-source".split()
 )
 
 # Guest-side workspace a session starts in when no host record supplies one
@@ -188,6 +188,30 @@ def build_parser() -> _Parser:
 
     secret_has = secret_sub.add_parser("has", help="silent predicate: exit 0 if the secret is present")
     _secret_scope_args(secret_has, remainder_help="[-g | SANDBOX] SERVICE")
+
+    kit_parser = sub.add_parser("kit", help="inspect kits and the trusted-source registry")
+    kit_sub = kit_parser.add_subparsers(dest="kit_command", metavar="SUBCOMMAND")
+    kit_sub.add_parser("list", help="show the pinned kit bundle and effective sets")
+    kit_validate_p = kit_sub.add_parser("validate", help="validate a neutral hybrid/v1 kit")
+    kit_validate_p.add_argument("path", help="kit directory or spec.yaml")
+    kit_apply_p = kit_sub.add_parser("apply", help="apply a kit to an existing sandbox")
+    kit_apply_p.add_argument("name", help="sandbox name")
+    kit_apply_p.add_argument("kitref", help="kit ref (local dir or git+https)")
+    kit_check_p = kit_sub.add_parser("check", help="report if a sandbox is on the pinned bundle")
+    kit_check_p.add_argument("name", help="sandbox name")
+    kit_update_p = kit_sub.add_parser("update", help="refresh the built-in bundle in place (consented)")
+    kit_update_p.add_argument("name", help="sandbox name")
+    kit_update_p.add_argument("--yes", "-y", action="store_true", help="skip the confirmation prompt")
+
+    kit_source_parser = sub.add_parser("kit-source", help="manage trusted kit repositories")
+    kit_source_sub = kit_source_parser.add_subparsers(dest="kit_source_command", metavar="SUBCOMMAND")
+    kit_source_add = kit_source_sub.add_parser("add", help="trust a kit repository at a pinned commit")
+    kit_source_add.add_argument("repo", help="host/owner/repo (clone URL or git+https ref is normalized)")
+    kit_source_add.add_argument("--ref", dest="ref", default=None, help="full immutable commit SHA (required)")
+    kit_source_add.add_argument("--dir", dest="dir", default=None, help="kits subdirectory (default: the neutral acq-kits path)")
+    kit_source_sub.add_parser("ls", help="trusted sources + the provider kits they publish")
+    kit_source_rm = kit_source_sub.add_parser("rm", help="stop trusting a kit repository")
+    kit_source_rm.add_argument("repo", help="host/owner/repo")
 
     return parser
 
@@ -1199,6 +1223,305 @@ def run_secret_has(parsed, backend_override: str | None) -> int:
     return errors.EXIT_SUCCESS if present else errors.EXIT_FAILURE
 
 
+# ---------------------------------------------------------------------------
+# kit list / validate / apply / check / update, and kit-source add / ls / rm
+# (ADR-0038m §kit; ADR-0016 provenance; trusted-source policy). This is the
+# kit-source registry + kit-inspection layer only: kit-apply (the ADR-0030
+# devenv-base + agent-install machinery) is out of scope here (a separate slice).
+# ---------------------------------------------------------------------------
+
+def _print_kit_list_human(data: dict) -> None:
+    print("Pinned acq kits (neutral hybrid/v1):")
+    print(f"  control plane: {data['control_plane_ref']}")
+    print()
+    for name in data["built_in"]:
+        print(f"  - {name}")
+    for name in data["provider"]:
+        print(f"  - {name} (provider)")
+    if data["extra"]:
+        print()
+        print("Extra kits (ACQ_EXTRA_KITS):")
+        for name in data["extra"]:
+            print(f"  - {name}")
+
+
+def run_kit_list(emit_json: bool) -> int:
+    data = kits.kit_list_data()
+    if emit_json:
+        print(json.dumps(envelope.success("kit list", data)))
+    else:
+        _print_kit_list_human(data)
+    return errors.EXIT_SUCCESS
+
+
+def run_kit_validate(parsed, emit_json: bool) -> int:
+    """``acq kit validate PATH`` — validity + coded findings (ADR-0038m §2).
+
+    A readable kit (valid or not) is a successful query answer (exit 0): validity
+    and the coded findings are the result data. A kit that cannot be read at all —
+    a missing path, a directory without ``spec.yaml``, or an unreadable
+    ``spec.yaml`` — is an operational failure (``validation_failed``, exit 1).
+    """
+    path = parsed.path
+    try:
+        data = kits.validate_kit(path)
+    except kits.KitSpecError as exc:
+        return _operational_failure(
+            "kit validate",
+            errors.VALIDATION_FAILED,
+            str(exc),
+            "pass a kit directory (containing spec.yaml) or a path to spec.yaml",
+            emit_json,
+        )
+    if emit_json:
+        print(json.dumps(envelope.success("kit validate", data)))
+    else:
+        if data["valid"]:
+            print("valid")
+        else:
+            for finding in data["findings"]:
+                line = f"[{finding['code']}] {finding['message']}"
+                print(line)
+                if finding.get("remediation"):
+                    print(f"           {finding['remediation']}")
+    return errors.EXIT_SUCCESS
+
+
+def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
+    """``acq kit apply NAME KITREF`` — fail closed; the kit-apply capability is
+    deferred to the later kit-apply slice (ADR-0040m ``kit-apply`` obligation is unmet here)."""
+    backend, exit_code = _resolve_backend_for_mutation(
+        backend_override, emit_json, "kit apply", domain="kit"
+    )
+    if exit_code is not None:
+        return exit_code
+    return _operational_failure(
+        "kit apply",
+        errors.UNSUPPORTED,
+        f"kit apply is not implemented for sandbox {parsed.name!r}",
+        "kit-apply and the devenv-base agent-install machinery ship in a later slice",
+        emit_json,
+    )
+
+
+def _print_kit_check_human(data: dict) -> None:
+    print(f"sandbox:       {data['sandbox']} (backend: {data['backend']})")
+    print(f"local pinned:  {data['local']}")
+    print(f"applied ref:   {data['applied'] or '<none recorded>'}")
+    if data["status"] == "current":
+        print("status:        current (on the pinned bundle)")
+    elif data["status"] == "stale":
+        print("status:        stale (does not match the pinned bundle)")
+        print()
+        print(f"refresh in place with: acq kit update {data['sandbox']}")
+    else:
+        print("status:        unknown (no provenance record; may predate tracking)")
+        print()
+        print(f"refresh in place with: acq kit update {data['sandbox']}")
+
+
+def run_kit_check(parsed, emit_json: bool, backend_override: str | None) -> int:
+    """``acq kit check SANDBOX`` — read-only currency report (ADR-0016).
+
+    Exit 0 for current/stale/unknown; exit 1 for a missing sandbox (ADR-0038m).
+    """
+    backend, exit_code = _resolve_backend_for_mutation(
+        backend_override, emit_json, "kit check", domain="kit inspection"
+    )
+    if exit_code is not None:
+        return exit_code
+    name = parsed.name
+    if not msb.exists(name):
+        return _operational_failure(
+            "kit check",
+            errors.SANDBOX_NOT_FOUND,
+            f"sandbox '{name}' not found",
+            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            emit_json,
+        )
+    data = kits.kit_check_data(backend, name)
+    if emit_json:
+        print(json.dumps(envelope.success("kit check", data)))
+    else:
+        _print_kit_check_human(data)
+    return errors.EXIT_SUCCESS
+
+
+def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int:
+    """``acq kit update SANDBOX [--yes]`` — consented bundle refresh.
+
+    Refresh is consented (ADR-0038m §46): ``--yes`` consents explicitly, an
+    interactive TTY prompts, and a non-interactive run without ``--yes`` refuses
+    (never invents consent; spec user story #10). ``--json`` is always
+    non-interactive.
+
+    The reapply itself (kit-apply) is deferred, so ``kit update`` records the
+    user's *consent* to the pinned ref and reports ``consent recorded, reapply
+    deferred``. It does NOT write ``applied_ref`` or report ``current``/``refreshed``:
+    ``kit check`` keeps reading ``stale``/``unknown`` until the kit-apply slice
+    actually reapplies (ADR-0038m §3 drops false partial success).
+    """
+    backend, exit_code = _resolve_backend_for_mutation(
+        backend_override, emit_json, "kit update", domain="kit inspection"
+    )
+    if exit_code is not None:
+        return exit_code
+    name = parsed.name
+    if not msb.exists(name):
+        return _operational_failure(
+            "kit update",
+            errors.SANDBOX_NOT_FOUND,
+            f"sandbox '{name}' not found",
+            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            emit_json,
+        )
+    status = kits.provenance_status(backend, name)
+    if status == "current":
+        data = {**kits.kit_check_data(backend, name), "action": "noop"}
+        if emit_json:
+            print(json.dumps(envelope.success("kit update", data)))
+        else:
+            print(f"sandbox '{name}' is already on the pinned bundle; nothing to do.")
+        return errors.EXIT_SUCCESS
+    if not parsed.yes:
+        if emit_json or not sys.stdin.isatty():
+            return _operational_failure(
+                "kit update",
+                errors.CONSENT_REQUIRED,
+                f"refusing to refresh '{name}' non-interactively without --yes",
+                f"re-run with 'acq kit update {name} --yes' to consent",
+                emit_json,
+            )
+        answer = input(f"refresh the kit bundle in '{name}' to {kits.CONTROL_PLANE_REF}? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            if emit_json:
+                print(json.dumps(envelope.success("kit update", {"sandbox": name, "backend": backend, "action": "cancelled"})))
+            else:
+                print("cancelled.")
+            return errors.EXIT_SUCCESS
+    # Consent recorded; the idempotent in-place reapply is the deferred kit-apply
+    # slice. This is deliberately NOT applied provenance: applied_ref is unchanged,
+    # so kit check keeps reporting stale/unknown rather than fabricating currency.
+    rec = kits.consent_write(backend, name)
+    data = {
+        "sandbox": name,
+        "backend": backend,
+        "consented_ref": rec["consented_ref"],
+        "status": "deferred",
+        "action": "consent_recorded",
+    }
+    if emit_json:
+        print(json.dumps(envelope.success("kit update", data)))
+    else:
+        print(f"consent recorded for '{name}' to {kits.CONTROL_PLANE_REF}; reapply deferred.")
+    return errors.EXIT_SUCCESS
+
+
+def _print_kit_source_ls_human(data: dict) -> None:
+    print(f"{'SOURCE':52} {'REF':40} KITS-DIR")
+    for src in data["sources"]:
+        print(f"{src['repository']:52} {src['ref']:40} {src['directory']}")
+    print()
+    print("Provider kits published by these sources:")
+    found = False
+    for src in data["sources"]:
+        if src["discovery_status"] != "reachable":
+            continue
+        for kit in src["provider_kits"]:
+            found = True
+            print(f"  {kit:34} {src['repository']} (@{src['ref']})")
+    if not found:
+        print("  (none discovered — sources are unreachable, or publish no provider kits)")
+
+
+def run_kit_source_ls(emit_json: bool) -> int:
+    data = kits.kit_source_ls_data()
+    if emit_json:
+        print(json.dumps(envelope.success("kit-source ls", data)))
+    else:
+        _print_kit_source_ls_human(data)
+    return errors.EXIT_SUCCESS
+
+
+def run_kit_source_add(parsed, emit_json: bool) -> int:
+    repo = kits.normalize_repo(parsed.repo)
+    if repo is None:
+        return _usage_failure(
+            "kit-source add",
+            f"invalid repository: {parsed.repo!r} (want host/owner/repo)",
+            emit_json,
+        )
+    if repo == kits.CONTROL_PLANE_REPO:
+        return _operational_failure(
+            "kit-source add",
+            errors.VALIDATION_FAILED,
+            "the built-in control-plane source is always trusted and cannot be re-added",
+            "the control plane is the pinned trust anchor; add team/personal sources instead",
+            emit_json,
+        )
+    ref = parsed.ref
+    if not ref:
+        return _usage_failure(
+            "kit-source add",
+            "kit-source add requires --ref <full-sha>",
+            emit_json,
+        )
+    if not kits.is_full_ref(ref):
+        return _operational_failure(
+            "kit-source add",
+            errors.KIT_REF_NOT_PINNED,
+            f"kit source '{repo}' requires a full immutable ref (40/64-char SHA), got {ref!r}",
+            "re-run with --ref <full-commit-sha>",
+            emit_json,
+        )
+    directory = kits.normalize_dir(parsed.dir)
+    if directory is None:
+        return _usage_failure(
+            "kit-source add",
+            f"unsafe kit directory: {parsed.dir!r}",
+            emit_json,
+        )
+    action = kits.set_source(repo, ref, directory)
+    data = {"repository": repo, "ref": ref, "directory": directory, "action": action}
+    if emit_json:
+        print(json.dumps(envelope.success("kit-source add", data)))
+    else:
+        print(f"{action} kit source '{repo}' (@{ref}).")
+    return errors.EXIT_SUCCESS
+
+
+def run_kit_source_rm(parsed, emit_json: bool) -> int:
+    repo = kits.normalize_repo(parsed.repo)
+    if repo is None:
+        return _usage_failure(
+            "kit-source rm",
+            f"invalid repository: {parsed.repo!r} (want host/owner/repo)",
+            emit_json,
+        )
+    if repo == kits.CONTROL_PLANE_REPO:
+        return _operational_failure(
+            "kit-source rm",
+            errors.VALIDATION_FAILED,
+            "the built-in control-plane source cannot be removed",
+            "team/personal sources can be removed; the control plane is the pinned trust anchor",
+            emit_json,
+        )
+    if not kits.remove_source(repo):
+        return _operational_failure(
+            "kit-source rm",
+            errors.KIT_SOURCE_NOT_FOUND,
+            f"kit source '{repo}' is not registered",
+            "list trusted sources with 'acq kit-source ls'",
+            emit_json,
+        )
+    data = {"repository": repo, "removed": True}
+    if emit_json:
+        print(json.dumps(envelope.success("kit-source rm", data)))
+    else:
+        print(f"removed kit source '{repo}'.")
+    return errors.EXIT_SUCCESS
+
+
 def _passthrough(argv: list[str], explicit: str | None, emit_json: bool) -> int:
     """Forward an unknown subcommand verbatim to the active backend (ADR-0038m §1).
 
@@ -1330,6 +1653,34 @@ def main(argv: list[str] | None = None) -> int:
         if subcmd == "rm":
             return run_secret_rm(parsed, emit_json)
         return run_secret_ls(parsed, emit_json)
+
+    if parsed.command == "kit":
+        subcmd = parsed.kit_command
+        if subcmd is None:
+            return _usage_failure("kit", "kit requires a subcommand: list | validate | apply | check | update", emit_json)
+        if subcmd == "list":
+            return run_kit_list(emit_json)
+        if subcmd == "validate":
+            return run_kit_validate(parsed, emit_json)
+        if subcmd == "apply":
+            return run_kit_apply(parsed, emit_json, backend_override)
+        if subcmd == "check":
+            return run_kit_check(parsed, emit_json, backend_override)
+        if subcmd == "update":
+            return run_kit_update(parsed, emit_json, backend_override)
+        return _usage_failure(f"kit {subcmd}", f"unknown kit subcommand: {subcmd}", emit_json)
+
+    if parsed.command == "kit-source":
+        subcmd = parsed.kit_source_command
+        if subcmd is None:
+            return _usage_failure("kit-source", "kit-source requires a subcommand: add | ls | rm", emit_json)
+        if subcmd == "add":
+            return run_kit_source_add(parsed, emit_json)
+        if subcmd == "ls":
+            return run_kit_source_ls(emit_json)
+        if subcmd == "rm":
+            return run_kit_source_rm(parsed, emit_json)
+        return _usage_failure(f"kit-source {subcmd}", f"unknown kit-source subcommand: {subcmd}", emit_json)
 
     if parsed.command == "help" or parsed.command is None:
         parser.print_help()

@@ -51,3 +51,14 @@ STATE_SCHEMA_UNSUPPORTED = "state_schema_unsupported"
 # an error).
 SECRET_MISSING = "secret_missing"
 SECRET_UNREADABLE = "secret_unreadable"
+
+# Kit slice (ADR-0038m §kit, ADR-0016 provenance, trusted-source policy).
+# ``kit_ref_not_pinned``: ``kit-source add`` refuses a non-full (mutable) ref —
+# a trusted source is fetched at an immutable full SHA, never a branch/tag.
+# ``kit_source_not_found``: ``kit-source rm`` on a repository that is not
+# registered as a trusted source.
+# ``consent_required``: ``kit update`` refuses a non-interactive refresh that
+# did not carry ``--yes`` (refresh is consented; automation never infers consent).
+KIT_REF_NOT_PINNED = "kit_ref_not_pinned"
+KIT_SOURCE_NOT_FOUND = "kit_source_not_found"
+CONSENT_REQUIRED = "consent_required"
