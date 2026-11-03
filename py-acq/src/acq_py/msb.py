@@ -37,8 +37,9 @@ READY_TIMEOUT_S = float(os.environ.get("ACQ_MSB_READY_TIMEOUT", "30"))
 class MsbError(Exception):
     """A backend-native failure the seam maps to a stable error code.
 
-    ``stderr`` (when present) is for diagnostics only and is never a portable
-    field (ADR-0040m: raw backend text is never a contract field).
+    ``remediation`` (when present) is stable acq-authored prose only. Raw backend
+    stderr is never stored or surfaced: ADR-0040m makes raw backend text a
+    non-portable field, and the envelope forbids it entirely.
     """
 
     def __init__(self, code: str, message: str, remediation: str | None = None):
@@ -105,16 +106,27 @@ def create(name: str, image: str, workspace: str, memory: str | None = None, cpu
         argv += ["--cpus", cpus]
     proc = _run(argv)
     if proc.returncode != 0:
+        # `internal` is the ADR-0038m catch-all for an operational backend-command
+        # failure (no ADR-0040m code describes a backend command returning
+        # nonzero); the raw backend stderr is deliberately not surfaced here.
         raise MsbError(
             errors.INTERNAL,
             f"msb create failed for sandbox '{name}'",
-            proc.stderr.strip() or "check msb logs and retry",
+            "check msb logs and retry",
         )
 
 
 def exec_ready(name: str) -> bool:
-    """True when ``msb exec NAME -- true`` succeeds (the exec-ready gate)."""
-    proc = _run(["exec", name, "--", "true"], timeout=5)
+    """True when ``msb exec NAME -- true`` succeeds (the exec-ready gate).
+
+    A ``TimeoutExpired`` from the probe is treated as "not ready yet": the caller
+    polls until its overall deadline and then surfaces the stable ``timeout``
+    code, never a traceback.
+    """
+    try:
+        proc = _run(["exec", name, "--", "true"], timeout=5)
+    except subprocess.TimeoutExpired:
+        return False
     return proc.returncode == 0
 
 
@@ -124,7 +136,7 @@ def stop(name: str) -> None:
         raise MsbError(
             errors.INTERNAL,
             f"msb stop failed for sandbox '{name}'",
-            proc.stderr.strip() or "check msb logs and retry",
+            "check msb logs and retry",
         )
 
 
@@ -134,17 +146,19 @@ def remove(name: str) -> None:
         raise MsbError(
             errors.INTERNAL,
             f"msb remove failed for sandbox '{name}'",
-            proc.stderr.strip() or "check msb logs and retry",
+            "check msb logs and retry",
         )
 
 
-def launch(name: str, workspace: str | None, agent: str | None) -> int:
+def launch(name: str, workspace: str | None, agent: str | None, *, json_mode: bool = False) -> int:
     """Launch the recorded agent (or a login shell) in the foreground.
 
     Runs as the unprivileged ``agent`` user in the recorded workspace (ADR-0011),
-    with stdio inherited so the agent renders and its exit status is this
-    function's return value (child-status propagation, ADR-0038m §1). Interactive
-    PTY allocation and ssh-agent forwarding are the attach slice's concern.
+    with the child's exit status as this function's return value (child-status
+    propagation, ADR-0038m §1). In ``json_mode`` the child's stdout is routed to
+    stderr so the CLI's stdout stays a single JSON document (ADR-0038m §2); in
+    interactive use stdio is inherited so the agent renders. Interactive PTY
+    allocation and ssh-agent forwarding are the attach slice's concern.
     """
     argv = ["exec", "-u", "agent"]
     if workspace:
@@ -154,4 +168,15 @@ def launch(name: str, workspace: str | None, agent: str | None) -> int:
     else:
         command = ["/bin/sh", "-l"]
     argv += [name, "--", *command]
-    return subprocess.run([*msb_command(), *argv]).returncode
+    if json_mode:
+        # In --json mode the launched child's stdout must not corrupt acq's
+        # single-JSON-document stdout, so route it to stderr (fd 2). Passing the
+        # fd directly keeps this working when ``sys.stderr`` has been replaced by
+        # a harness object without a usable fileno().
+        try:
+            stdout: object = sys.stderr.fileno()
+        except (AttributeError, OSError, ValueError):
+            stdout = 2
+    else:
+        stdout = None
+    return subprocess.run([*msb_command(), *argv], stdout=stdout).returncode

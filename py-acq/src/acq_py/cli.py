@@ -31,7 +31,26 @@ KNOWN_AGENTS = frozenset(
     "claude codex copilot cursor docker-agent droid gemini kiro opencode shell".split()
 )
 
-DEFAULT_MSB_IMAGE = "docker.io/docker/sandbox-templates:shell-docker"
+# Agent-dependent default base image (ADR-0030). ``opencode`` resolves to the
+# pinned generic devenv base; ``shell`` and the other known agents keep the
+# sandbox-templates derivation, with the ``claude``/``cursor`` product-name stem
+# mapping (ADR-0011). Full kit-driven agent install (devenv base + pinned agent
+# kit) is deferred to the kits slice.
+OPENCODE_DEVENV_IMAGE = (
+    "ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@"
+    "sha256:7b923fb5e722ad27c751ead836f24145c4cea3fac015a3ba753bd7473891e1e7"
+)
+SHELL_IMAGE = "docker.io/docker/sandbox-templates:shell-docker"
+_AGENT_TEMPLATE_STEM = {"claude": "claude-code", "cursor": "cursor-agent"}
+
+
+def _default_image_for_agent(agent: str) -> str:
+    if agent == "shell":
+        return SHELL_IMAGE
+    if agent == "opencode":
+        return OPENCODE_DEVENV_IMAGE
+    stem = _AGENT_TEMPLATE_STEM.get(agent, agent)
+    return f"docker.io/docker/sandbox-templates:{stem}-docker"
 
 
 class UsageError(Exception):
@@ -329,13 +348,21 @@ def _derive_name(agent: str, workspace: str) -> str:
     return f"{_slugify(agent)}-{_slugify(base)}"
 
 
-def _resolve_image(flag_image: str | None) -> str:
+def _resolve_image(flag_image: str | None, agent: str) -> str:
+    """Resolve the base image (ADR-0022 precedence).
+
+    ``--image`` flag, then ``ACQ_IMAGE``, then ``ACQ_MSB_IMAGE``, then the
+    agent-dependent default (ADR-0030).
+    """
     if flag_image:
         return flag_image
-    env = os.environ.get("ACQ_IMAGE") or os.environ.get("ACQ_MSB_IMAGE")
-    if env:
-        return env
-    return DEFAULT_MSB_IMAGE
+    acq_image = os.environ.get("ACQ_IMAGE")
+    if acq_image:
+        return acq_image
+    msb_image = os.environ.get("ACQ_MSB_IMAGE")
+    if msb_image:
+        return msb_image
+    return _default_image_for_agent(agent)
 
 
 def _resolve_backend_for_lifecycle(
@@ -434,6 +461,12 @@ def _print_create_human(data: dict) -> None:
 
 
 def run_create(parsed, emit_json: bool) -> int:
+    if parsed.agent not in KNOWN_AGENTS:
+        return _usage_failure(
+            "create",
+            f"unknown agent: {parsed.agent!r} (expected one of: {', '.join(sorted(KNOWN_AGENTS))})",
+            emit_json,
+        )
     workspace, exit_code = _validate_workspace("create", parsed.path, emit_json)
     if exit_code is not None:
         return exit_code
@@ -446,7 +479,7 @@ def run_create(parsed, emit_json: bool) -> int:
             f"re-attach with 'acq run {name}', or remove it with 'acq rm {name}'",
             emit_json,
         )
-    image = _resolve_image(parsed.image)
+    image = _resolve_image(parsed.image, parsed.agent)
     try:
         data = _create_sandbox(parsed.agent, workspace, name, image)
     except msb.MsbError as exc:
@@ -459,6 +492,13 @@ def run_create(parsed, emit_json: bool) -> int:
 
 
 def run_run(parsed, emit_json: bool) -> int:
+    """Create (if missing) then launch, or re-attach an existing sandbox by name.
+
+    In ``--json`` mode the create/attach result is emitted as one JSON envelope on
+    stdout, and the launched child's own output is routed to stderr so stdout
+    stays a single document (ADR-0038m §2). In interactive use the child inherits
+    stdio. The child's exit status is ``run``'s exit status (ADR-0038m §1).
+    """
     target = parsed.target
     if target in KNOWN_AGENTS:
         workspace, exit_code = _validate_workspace("run", parsed.path, emit_json)
@@ -467,7 +507,7 @@ def run_run(parsed, emit_json: bool) -> int:
         name = parsed.name or _derive_name(target, workspace)
         action = "reattached" if msb.exists(name) else "created"
         if not msb.exists(name):
-            image = _resolve_image(parsed.image)
+            image = _resolve_image(parsed.image, target)
             try:
                 _create_sandbox(target, workspace, name, image)
             except msb.MsbError as exc:
@@ -481,8 +521,10 @@ def run_run(parsed, emit_json: bool) -> int:
                     )
                 )
             )
-        # Launch in the foreground; the child's status is `run`'s exit status.
-        return msb.launch(name, workspace, target)
+        # Launch in the foreground; the child's status is `run`'s exit status. In
+        # --json mode the child's stdout is routed to stderr so stdout stays one
+        # JSON document.
+        return msb.launch(name, workspace, target, json_mode=emit_json)
 
     # Not a known agent: re-attach to an existing sandbox by name, else fail
     # closed as ambiguous (a token that is neither agent nor sandbox is a usage
@@ -494,9 +536,28 @@ def run_run(parsed, emit_json: bool) -> int:
             emit_json,
         )
     # Re-attach by sandbox name (host-authoritative record supplies agent/workspace).
-    record = state.record_read("msb", target)
-    agent = record.get("agent") if record else None
-    workspace = record.get("workspace") if record else None
+    # A sandbox whose host record is absent or unreadable must fail closed, never
+    # launch a bare `/bin/sh -l` without a workspace.
+    try:
+        record = state.record_read("msb", target)
+    except state.StateSchemaError as exc:
+        return _operational_failure(
+            "run",
+            errors.STATE_SCHEMA_UNSUPPORTED,
+            str(exc),
+            f"recreate the sandbox with 'acq create', or remove it with 'acq rm {target}'",
+            emit_json,
+        )
+    if record is None:
+        return _operational_failure(
+            "run",
+            errors.VALIDATION_FAILED,
+            f"sandbox '{target}' has no readable host state record; cannot determine the agent to launch",
+            f"create it with 'acq create', or remove it with 'acq rm {target}'",
+            emit_json,
+        )
+    agent = record.get("agent")
+    workspace = record.get("workspace")
     if emit_json:
         print(
             json.dumps(
@@ -506,16 +567,17 @@ def run_run(parsed, emit_json: bool) -> int:
                 )
             )
         )
-    return msb.launch(target, workspace, agent)
+    return msb.launch(target, workspace, agent, json_mode=emit_json)
 
 
 def _ls_data() -> dict:
     names = msb.list_names() or []
     running = set(msb.running_names() or [])
+    records = {record["name"]: record for record in state.list_records("msb")}
     sandboxes: list[dict] = []
     for name in names:
         entry: dict = {"name": name, "backend": "msb", "state": "running" if name in running else "stopped"}
-        record = state.record_read("msb", name)
+        record = records.get(name)
         if record:
             if record.get("agent"):
                 entry["agent"] = record["agent"]
@@ -523,8 +585,8 @@ def _ls_data() -> dict:
                 entry["workspace"] = record["workspace"]
         sandboxes.append(entry)
     # A host record whose sandbox is gone (removed out-of-band) reads as unknown.
-    for record in state.list_records("msb"):
-        if record.get("name") not in names:
+    for record in records.values():
+        if record["name"] not in names:
             entry = {"name": record["name"], "backend": "msb", "state": "unknown"}
             if record.get("agent"):
                 entry["agent"] = record["agent"]

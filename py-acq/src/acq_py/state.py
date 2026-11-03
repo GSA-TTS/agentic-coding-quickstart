@@ -28,6 +28,17 @@ from pathlib import Path
 # from the structured-output ``schema_version`` in ``envelope.py``.
 STATE_SCHEMA = 1
 
+
+class StateSchemaError(Exception):
+    """A record carries a state-schema this reader cannot read (ADR-0041m).
+
+    Raised for a newer-than-this-reader or non-integer schema, or an unparseable
+    record. The reader refuses rather than misreads; a schema-less (legacy v0)
+    record is the one tolerated case and is reported as absent (forward migration
+    is the state-migration slice's job).
+    """
+
+
 # The sandbox name reaches a filesystem path, so it is sanitized to a safe
 # filename charset (defense-in-depth). A short checksum of the RAW name is
 # appended so two distinct names that sanitize to the same string (e.g. "a/b" and
@@ -105,21 +116,54 @@ def record_write(
     return doc
 
 
-def record_read(backend: str, name: str) -> dict | None:
-    """Read a sandbox's state record, or ``None`` if absent/unparseable/legacy.
+def _record_from_path(path: Path, *, strict: bool, label: str) -> dict | None:
+    """Read one record from ``path``.
 
-    A record without a ``schema`` marker is legacy v0 (ADR-0041m) and is refused
-    here (returned as ``None``) rather than misread; forward migration is the
-    state-migration slice's job.
+    Returns the record dict when its ``schema`` is exactly ``STATE_SCHEMA``.
+
+    * ``strict=True`` raises :class:`StateSchemaError` for a newer/unknown schema
+      or unparseable content (the re-attach path refuses rather than misread).
+    * ``strict=False`` returns ``None`` for anything unreadable, so a read-only
+      diagnostic (``ls``) skips it rather than surfacing it as understood.
+
+    A schema-less record is legacy v0 in both modes: it returns ``None`` (forward
+    migration is the state-migration slice's job).
     """
-    path = record_path(backend, name)
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
         return None
-    if not isinstance(doc, dict) or "schema" not in doc:
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        if strict:
+            raise StateSchemaError(f"state record for {label!r} is not valid JSON") from exc
+        return None
+    if not isinstance(doc, dict):
+        if strict:
+            raise StateSchemaError(f"state record for {label!r} is not a JSON object")
+        return None
+    schema = doc.get("schema")
+    if schema is None:
+        return None  # legacy v0 (no marker)
+    if not isinstance(schema, int) or schema != STATE_SCHEMA:
+        if strict:
+            raise StateSchemaError(
+                f"state record for {label!r} carries schema {schema!r}; "
+                f"this reader understands schema {STATE_SCHEMA}"
+            )
         return None
     return doc
+
+
+def record_read(backend: str, name: str) -> dict | None:
+    """Read a sandbox's state record (strict).
+
+    Returns the record when its schema is ``STATE_SCHEMA``, or ``None`` when the
+    record is absent or legacy v0. Raises :class:`StateSchemaError` for a
+    newer/unknown schema or unparseable content (ADR-0041m fail-closed).
+    """
+    return _record_from_path(record_path(backend, name), strict=True, label=name)
 
 
 def record_remove(backend: str, name: str) -> None:
@@ -131,16 +175,19 @@ def record_remove(backend: str, name: str) -> None:
 
 
 def list_records(backend: str) -> list[dict]:
-    """List every readable state record for a backend, sorted by record path."""
+    """List every readable (schema ``STATE_SCHEMA``) record for a backend.
+
+    Sorted by record path. Newer/unknown-schema and unparseable records are
+    skipped (ADR-0041m: read-only diagnostics may report ``unknown`` rather than
+    misread); a schema-less legacy record is likewise skipped.
+    """
     root = state_dir() / _safe(backend)
     out: list[dict] = []
     if not root.is_dir():
         return out
     for path in sorted(root.glob("*.json")):
-        try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(doc, dict) and "schema" in doc:
-            out.append(doc)
+        label = f"{backend}/{path.stem}"
+        record = _record_from_path(path, strict=False, label=label)
+        if record is not None:
+            out.append(record)
     return out

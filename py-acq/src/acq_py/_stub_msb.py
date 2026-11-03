@@ -22,6 +22,21 @@ from pathlib import Path
 CATALOG_ENV = "ACQ_MSB_STUB_CATALOG"
 VERSION_ENV = "ACQ_MSB_STUB_VERSION"
 
+# ``exec`` prints this marker to its own stdout to simulate a real agent writing
+# to stdout; the adapter's json-mode launch must route it to acq's stderr so the
+# CLI stdout stays a single JSON document (ADR-0038m §2).
+EXEC_MARKER = "[stub exec]"
+
+# When ``ACQ_MSB_STUB_FAIL`` names a command, that command fails with a
+# distinctive raw stderr line (simulating a backend-native failure) so a vector
+# can assert the raw text never reaches the structured output.
+FAIL_ENV = "ACQ_MSB_STUB_FAIL"
+RAW_FAIL_STDERR = "raw backend failure detail: 7f3a2c1"
+
+
+def _should_fail(cmd: str) -> bool:
+    return os.environ.get(FAIL_ENV) == cmd
+
 
 def _catalog_path() -> Path:
     base = os.environ.get("MSB_HOME") or os.environ.get("HOME") or "."
@@ -81,6 +96,9 @@ def main(argv: list[str]) -> int:
         return 0
 
     if cmd == "create":
+        if _should_fail("create"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
         name = _arg_after(args, "--name")
         if name is None:
             print("msb: create requires --name", file=sys.stderr)
@@ -113,9 +131,13 @@ def main(argv: list[str]) -> int:
         if name is None or name not in catalog:
             print(f"msb: no such sandbox '{name}'", file=sys.stderr)
             return 1
+        print(EXEC_MARKER)
         return 0
 
     if cmd == "stop":
+        if _should_fail("stop"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
         name = args[1] if len(args) > 1 else None
         if name is None or name not in catalog:
             print(f"msb: no such sandbox '{name}'", file=sys.stderr)
@@ -125,6 +147,9 @@ def main(argv: list[str]) -> int:
         return 0
 
     if cmd == "remove":
+        if _should_fail("remove"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
         name = _arg_after(args, "--name")
         if name is None:
             for a in args[1:]:

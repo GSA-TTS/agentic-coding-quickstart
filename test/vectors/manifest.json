@@ -67,6 +67,14 @@
       "vectors": ["cli/lifecycle-rm-missing", "cli/lifecycle-create-exists"]
     },
     {
+      "contract": "ADR-0038m §1 usage exit 2: create validates the agent against the known-agent set",
+      "vectors": ["cli/lifecycle-create-unknown-agent"]
+    },
+    {
+      "contract": "ADR-0040m raw backend text is never a portable field (stable prose in remediation)",
+      "vectors": ["cli/lifecycle-create-backend-failure"]
+    },
+    {
       "contract": "ADR-0042m runtime: offline operation, no opportunistic download",
       "vectors": ["cli/version-json", "cli/version-human", "cli/doctor-json", "cli/doctor-human"]
     },

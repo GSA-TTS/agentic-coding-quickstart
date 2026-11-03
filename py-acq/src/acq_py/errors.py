@@ -16,7 +16,14 @@ EXIT_FAILURE = 1
 EXIT_USAGE = 2
 
 USAGE = "usage"
+
+# ADR-0038m catch-all for an operational failure acq cannot classify further. A
+# backend command (e.g. `msb create`) that returns nonzero is an operational
+# failure, not a usage error, a version refusal, a sandbox-missing/exists
+# condition, a validation refusal, or a timeout — so no ADR-0040m code fits and
+# the catch-all is the correct, documented choice.
 INTERNAL = "internal"
+
 UNSUPPORTED = "unsupported_capability"
 
 # Backend error vocabulary (ADR-0040m), read side.
@@ -31,3 +38,8 @@ SANDBOX_NOT_FOUND = "sandbox_not_found"
 SANDBOX_EXISTS = "sandbox_exists"
 VALIDATION_FAILED = "validation_failed"
 TIMEOUT = "timeout"
+
+# ADR-0041m state-schema refusal: a record carrying a newer or unknown schema (or
+# unparseable content) is refused rather than misread. Forward migration of older
+# (legacy v0) records is the state-migration slice's job.
+STATE_SCHEMA_UNSUPPORTED = "state_schema_unsupported"

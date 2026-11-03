@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from acq_py import cli, state
 
 
@@ -20,7 +22,7 @@ def _env(monkeypatch, tmp_path, *, catalog=None):
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "0")
     monkeypatch.setenv("ACQ_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("MSB_HOME", str(tmp_path / "msb-home"))
-    for name in ("ACQ_BACKEND", "ACQ_MSB_STUB_CATALOG", "ACQ_IMAGE", "ACQ_MSB_IMAGE"):
+    for name in ("ACQ_BACKEND", "ACQ_MSB_STUB_CATALOG", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_FAIL"):
         monkeypatch.delenv(name, raising=False)
     if catalog is not None:
         monkeypatch.setenv("ACQ_MSB_STUB_CATALOG", json.dumps(catalog))
@@ -108,3 +110,83 @@ def test_slugify_and_derive_name():
     assert cli._slugify("OpenCode!") == "opencode"
     assert cli._slugify("  a/b  ") == "a-b"
     assert cli._derive_name("opencode", "/workspace/my-app") == "opencode-my-app"
+
+
+def _write_record(backend, name, doc):
+    path = state.record_path(backend, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def test_record_read_refuses_newer_schema(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    _write_record("msb", "future", {"schema": 99, "name": "future", "backend": "msb"})
+
+    with pytest.raises(state.StateSchemaError):
+        state.record_read("msb", "future")
+    # Read-only diagnostics skip a newer-schema record rather than misread it.
+    assert state.list_records("msb") == []
+
+
+def test_record_read_legacy_v0_is_absent(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    _write_record("msb", "legacy", {"name": "legacy", "backend": "msb"})  # no schema marker
+
+    assert state.record_read("msb", "legacy") is None
+    assert state.list_records("msb") == []
+
+
+def test_run_reattach_missing_record_fails_closed(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, catalog={"orphan": "running"})
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "orphan", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+
+
+def test_run_reattach_newer_schema_fails_closed(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, catalog={"future": "running"})
+    _write_record(
+        "msb",
+        "future",
+        {"schema": 99, "name": "future", "backend": "msb", "agent": "opencode", "workspace": "/w"},
+    )
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "future", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "state_schema_unsupported"
+
+
+def test_create_unknown_agent_fails_closed(monkeypatch, tmp_path, capsys):
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "create", "notanagent", str(ws), "--json")
+    assert rc == 2
+    assert doc["error"]["code"] == "usage"
+    assert "unknown agent" in doc["error"]["message"]
+
+
+def test_default_image_resolution():
+    assert cli._default_image_for_agent("shell") == "docker.io/docker/sandbox-templates:shell-docker"
+    assert cli._default_image_for_agent("opencode") == cli.OPENCODE_DEVENV_IMAGE
+    assert cli._default_image_for_agent("claude") == "docker.io/docker/sandbox-templates:claude-code-docker"
+    assert cli._default_image_for_agent("cursor") == "docker.io/docker/sandbox-templates:cursor-agent-docker"
+    assert cli._default_image_for_agent("codex") == "docker.io/docker/sandbox-templates:codex-docker"
+
+
+def test_image_override_precedence(monkeypatch):
+    for name in ("ACQ_IMAGE", "ACQ_MSB_IMAGE"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert cli._resolve_image(None, "opencode") == cli.OPENCODE_DEVENV_IMAGE
+
+    monkeypatch.setenv("ACQ_MSB_IMAGE", "msb-image")
+    assert cli._resolve_image(None, "opencode") == "msb-image"
+
+    monkeypatch.setenv("ACQ_IMAGE", "acq-image")
+    assert cli._resolve_image(None, "opencode") == "acq-image"
+
+    assert cli._resolve_image("flag-image", "opencode") == "flag-image"
