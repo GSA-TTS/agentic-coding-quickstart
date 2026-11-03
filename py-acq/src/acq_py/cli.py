@@ -1050,16 +1050,22 @@ def run_ports(parsed, emit_json: bool) -> int:
 # ---------------------------------------------------------------------------
 
 def _read_secret_value() -> str:
-    """Read the secret value from stdin, stripping one trailing newline (CR/LF).
+    """Read the secret value from stdin, preserving trailing-newline fidelity.
+
+    Exactly the single terminal newline that a terminal/``echo`` appends is
+    stripped (plus an immediately preceding ``\\r`` for a CRLF terminator). Any
+    further trailing newlines are value content and are preserved: a value that
+    legitimately ends in newlines is not silently truncated. A lone trailing
+    ``\\r`` with no preceding ``\\n`` is likewise preserved.
 
     The value is returned to the caller and must never be printed, logged, or
     placed on argv. An empty result signals "no value was piped".
     """
     data = sys.stdin.read()
     if data.endswith("\n"):
-        data = data[:-1]
-    if data.endswith("\r"):
-        data = data[:-1]
+        data = data[:-1]  # strip exactly one terminal newline
+        if data.endswith("\r"):  # optional preceding CR (CRLF terminator)
+            data = data[:-1]
     return data
 
 
@@ -1073,10 +1079,15 @@ def run_secret_set(parsed, emit_json: bool) -> int:
     if scope is None or service is None:
         return _usage_failure("secret set", "usage: acq secret set [-g | SANDBOX] SERVICE (value on stdin)", emit_json)
     value = _read_secret_value()
-    if not value:
-        return _usage_failure(
+    if not value.strip():
+        # Empty (or whitespace-only) stdin is a validation failure (exit 1), not a
+        # usage error (exit 2): the invocation was well-formed but supplied no
+        # storable value (ADR-0038m §1 "validation" class).
+        return _operational_failure(
             "secret set",
+            errors.VALIDATION_FAILED,
             "no secret value provided on stdin",
+            "pipe the secret value on stdin, e.g. printf '%s' VALUE | acq secret set -g SERVICE",
             emit_json,
         )
     try:
@@ -1094,13 +1105,21 @@ def run_secret_set(parsed, emit_json: bool) -> int:
 def run_secret_rm(parsed, emit_json: bool) -> int:
     """``acq secret rm (-g | SANDBOX) SERVICE`` — remove a secret.
 
-    An absent secret fails closed with ``secret_missing`` (ADR-0040m) rather than
-    a generic failure.
+    An absent secret fails closed with ``secret_missing`` (ADR-0040m); a backend
+    that cannot answer fails closed with its own accurate code (``backend_not_found``
+    / ``failure``) and never deletes.
     """
     scope, service = _parse_secret_scope_service(parsed.global_scope, parsed.args)
     if scope is None or service is None:
         return _usage_failure("secret rm", "usage: acq secret rm [-g | SANDBOX] SERVICE", emit_json)
-    if not msb.secret_has(scope, service):
+    try:
+        present = msb.secret_has(scope, service)
+    except msb.MsbError as exc:
+        # A backend that cannot answer is NOT "absent": fail closed with the
+        # accurate code (backend_not_found / failure), never secret_missing, and
+        # never delete.
+        return _operational_failure("secret rm", exc.code, exc.message, exc.remediation, emit_json)
+    if not present:
         return _operational_failure(
             "secret rm",
             errors.SECRET_MISSING,
@@ -1164,8 +1183,20 @@ def run_secret_has(parsed, backend_override: str | None) -> int:
         backend_override, False, "secret has", domain="secret management"
     )
     if exit_code is not None:
+        # The resolver already wrote a stderr diagnostic (unsupported/non-msb
+        # backend, no backend, or version floor): exit 1/2 with stdout still
+        # silent, so "cannot check" is never a silent false "absent".
         return exit_code
-    return errors.EXIT_SUCCESS if msb.secret_has(scope, service) else errors.EXIT_FAILURE
+    try:
+        present = msb.secret_has(scope, service)
+    except msb.MsbError as exc:
+        # Backend error at query time: keep stdout silent and exit 1, but announce
+        # on stderr so a scripter can tell "absent" from "could not check".
+        print(f"acq: {exc.message}", file=sys.stderr)
+        if exc.remediation:
+            print(exc.remediation, file=sys.stderr)
+        return errors.EXIT_FAILURE
+    return errors.EXIT_SUCCESS if present else errors.EXIT_FAILURE
 
 
 def _passthrough(argv: list[str], explicit: str | None, emit_json: bool) -> int:

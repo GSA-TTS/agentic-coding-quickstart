@@ -98,16 +98,24 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   is read from **stdin only** (never argv) and forwarded to the backend on its
   stdin; the success envelope reports `scope`/`service`/`value_state` and never
   the value (ADR-0038m §secret set). A scope-less `secret set` is a usage error
-  (ADR-0038m §48 drops scope-less secret set), as is an empty stdin value.
+  (ADR-0038m §48 drops scope-less secret set); an empty or whitespace-only stdin
+  value is a `validation_failed` failure (exit 1). Exactly one terminal newline is
+  stripped (plus a CRLF `\r`); any further trailing newlines are value content.
 * `acq-py secret rm (-g | SANDBOX) SERVICE [--json]` — remove a secret. An absent
-  secret fails closed with the `secret_missing` code (ADR-0040m).
+  secret fails closed with the `secret_missing` code; a backend that cannot answer
+  fails closed with its accurate code (`backend_not_found`/`failure`) and never
+  deletes (ADR-0040m).
 * `acq-py secret ls [(-g | SANDBOX)] [--json]` — list secrets with
   `scope`/`service`/`value_state` (set/unset) only, never a value
-  (ADR-0038m §2 secret ls required data). An unreadable or wrong-shape backend
-  listing fails closed with `secret_unreadable` (ADR-0040m).
+  (ADR-0038m §2 secret ls required data). An unreadable, wrong-shape document, or
+  wrong-shape *entry* fails closed with `secret_unreadable` — never silently
+  dropped (ADR-0040m, ADR-0038m §48).
 * `acq-py secret has (-g | SANDBOX) SERVICE` — a silent predicate (ADR-0038m):
-  exit `0` when the secret is present, `1` when absent (or fail-closed), `2` on a
-  usage error. It prints nothing on stdout, even with `--json`.
+  exit `0` when the secret is present, `1` when absent, `2` on a usage error. It
+  prints nothing on stdout, even with `--json`. A backend that cannot answer (an
+  unsupported backend, or a query failure) still exits `1` with stdout silent but
+  announces a diagnostic on stderr so "cannot check" is not a silent false
+  "absent".
 * Any other subcommand is forwarded verbatim to the active backend binary with an
   announced stderr notice, preserving its exit status (spec user story #9).
 * Exit codes (ADR-0038m §1): `0` success, `2` usage, `1` operational. A

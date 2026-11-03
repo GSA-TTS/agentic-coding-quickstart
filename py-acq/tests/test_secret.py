@@ -136,13 +136,86 @@ def test_secret_ls_bad_shape_fails_closed(monkeypatch, tmp_path, capsys):
     assert doc["error"]["code"] == "secret_unreadable"
 
 
-def test_secret_set_no_value_usage(monkeypatch, tmp_path, capsys):
+def test_secret_set_no_value_validation_failed(monkeypatch, tmp_path, capsys):
+    # Empty stdin is a validation failure (exit 1), not a usage error (exit 2):
+    # the invocation is well-formed but supplies no storable value (ADR-0038m §1).
     _env(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
 
     rc, doc = _invoke(capsys, "--backend", "msb", "secret", "set", "-g", "usai", "--json")
-    assert rc == 2
-    assert doc["error"]["code"] == "usage"
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+
+
+def test_secret_set_whitespace_only_validation_failed(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("   \n"))
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "secret", "set", "-g", "usai", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+
+
+def test_secret_value_trailing_newline_preserved(monkeypatch, tmp_path, capsys):
+    # Trailing-newline fidelity: exactly one terminal newline is stripped; any
+    # further trailing newlines are value content, not silently truncated.
+    _env(monkeypatch, tmp_path)
+    captured: dict = {}
+    real_run = msb._run
+
+    def spy(argv, *, timeout=None, input_text=None):
+        captured["input_text"] = input_text
+        return real_run(argv, timeout=timeout, input_text=input_text)
+
+    monkeypatch.setattr(msb, "_run", spy)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("abc\n\n"))
+
+    rc = cli.main(["--backend", "msb", "secret", "set", "-g", "usai", "--json"])
+    assert rc == 0
+    assert captured["input_text"] == "abc\n"
+
+    # A lone trailing \r (no preceding \n) is preserved, and a CRLF terminator is
+    # stripped to the bare value.
+    monkeypatch.setattr(sys, "stdin", io.StringIO("abc\r"))
+    assert cli._read_secret_value() == "abc\r"
+    monkeypatch.setattr(sys, "stdin", io.StringIO("abc\r\n"))
+    assert cli._read_secret_value() == "abc"
+
+
+def test_secret_rm_backend_error_not_secret_missing(monkeypatch, tmp_path, capsys):
+    # A down backend is NOT "absent": `secret rm` must report the backend's
+    # accurate code (backend_not_found here) and never delete, never secret_missing.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_MSB_BIN", str(tmp_path / "definitely-missing-msb"))
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "secret", "rm", "-g", "usai", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "backend_not_found"
+    assert doc["error"]["code"] != "secret_missing"
+
+
+def test_secret_has_backend_error_silent_stdout_stderr_diag(monkeypatch, tmp_path, capsys):
+    # `secret has` on a backend that cannot answer: stdout stays silent and exit
+    # is 1, but a stderr diagnostic distinguishes it from a true "absent".
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_MSB_BIN", str(tmp_path / "definitely-missing-msb"))
+
+    rc = cli.main(["--backend", "msb", "secret", "has", "-g", "usai"])
+    out, err = capsys.readouterr()
+    assert rc == 1
+    assert out == ""
+    assert "msb backend CLI" in err
+
+
+def test_secret_ls_entry_bad_shape_fails_closed(monkeypatch, tmp_path, capsys):
+    # A wrong-shape *entry* (a list element that is not {scope, service, ...})
+    # fails closed with secret_unreadable rather than being silently dropped.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_MSB_STUB_SECRET_LS_RAW", '[{"scope":"global","service":"usai","value_state":"set"}, 123]')
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "secret", "ls", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "secret_unreadable"
 
 
 def test_sbx_secret_unsupported(monkeypatch, tmp_path, capsys):

@@ -69,13 +69,23 @@ def _run(
     timeout: float | None = None,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [*msb_command(), *argv],
-        input=input_text,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            [*msb_command(), *argv],
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        # A missing msb binary must never surface as an uncaught traceback
+        # (ADR-0040m stable error vocabulary): fail closed with a code the seam
+        # can map, not a raw OSError.
+        raise MsbError(
+            errors.BACKEND_NOT_FOUND,
+            "the msb backend CLI could not be run",
+            "install msb and retry",
+        ) from exc
 
 
 def list_names() -> list[str] | None:
@@ -328,13 +338,29 @@ def secret_set(scope: str, service: str, value: str, *, timeout: float | None = 
 
 
 def secret_has(scope: str, service: str) -> bool:
-    """True when a secret for ``(scope, service)`` is present (exit 0), else False.
+    """True when a secret for ``(scope, service)`` is present; False when absent.
 
-    A predicate, not an error: any nonzero backend exit maps to ``False`` (fail
-    closed), so the caller's silent ``secret has`` answer stays a plain 0/1.
+    Tri-state at the caller's level: presence is a bool, but a backend that
+    *cannot answer* raises :class:`MsbError` (``backend_not_found`` from a missing
+    binary, ``failure`` from an unexpected exit status) so the seam never
+    conflates "the backend is down" with "the secret is absent" (ADR-0040m: fail
+    closed, but with the accurate code).
+
+    There is no dedicated `secret has` capability: on msb, presence is read
+    through the ``secret-list`` capability (ADR-0040m's ``key_present`` obligation
+    is sbx-only), so ``secret has`` is a thin exit-status predicate over
+    ``msb secret has``.
     """
     proc = _run(["secret", "has", *_secret_scope_argv(scope), service])
-    return proc.returncode == 0
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    raise MsbError(
+        errors.FAILURE,
+        f"could not query secret '{service}' for scope '{scope}'",
+        "check backend logs and retry",
+    )
 
 
 def secret_rm(scope: str, service: str) -> None:
@@ -358,10 +384,11 @@ def secret_ls(scope: str | None = None) -> list[dict]:
     """Return ``[{scope, service, value_state}, …]`` — never a value.
 
     ``scope`` is an optional filter (``"global"`` or a sandbox name); ``None``
-    lists every scope. An inspect that *fails* or returns unparseable/wrong-shape
-    output raises :class:`MsbError` with ``secret_unreadable`` so the seam fails
-    closed rather than swallowing the store status as an empty list
-    (ADR-0038m §48 drops "inspection-failure-as-empty").
+    lists every scope. An inspect that *fails* or returns unparseable output, or a
+    wrong-shape document *or entry*, raises :class:`MsbError` with
+    ``secret_unreadable`` so the seam fails closed rather than swallowing the
+    store status as an empty list (ADR-0038m §48 drops
+    "inspection-failure-as-empty").
     """
     argv = ["secret", "ls"]
     if scope is not None:
@@ -389,14 +416,24 @@ def secret_ls(scope: str | None = None) -> list[dict]:
         )
     out: list[dict] = []
     for entry in doc:
-        # A wrong-shape entry (non-dict, or missing scope/service) is skipped
-        # rather than raising; a top-level non-list already failed closed above.
-        if isinstance(entry, dict) and "scope" in entry and "service" in entry:
-            out.append(
-                {
-                    "scope": entry["scope"],
-                    "service": entry["service"],
-                    "value_state": entry.get("value_state", "set"),
-                }
+        # A wrong-shape *entry* (non-dict, or missing scope/service) fails closed
+        # too — never silently dropped (ADR-0038m §48 drops
+        # "inspection-failure-as-empty"; a partially-readable listing is treated as
+        # unreadable, not as an empty result). NOTE: ``ports()`` still skips
+        # individual wrong-shape port entries; it should be aligned to fail closed
+        # the same way in a later pass (left unchanged here to keep this slice
+        # focused on the secret surface).
+        if not isinstance(entry, dict) or "scope" not in entry or "service" not in entry:
+            raise MsbError(
+                errors.SECRET_UNREADABLE,
+                "could not parse the secret store listing",
+                "the backend returned an unexpected secret-list entry; check backend logs and retry",
             )
+        out.append(
+            {
+                "scope": entry["scope"],
+                "service": entry["service"],
+                "value_state": entry.get("value_state", "set"),
+            }
+        )
     return out
