@@ -1864,6 +1864,47 @@ _acq_config_write_field() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# Backend registry
+# ---------------------------------------------------------------------------
+# Bash 3.2 does not have associative arrays, so keep backend metadata in one
+# registry accessor. OpenShell is deliberately explicit-only until it has an
+# adapter; it must never affect the established msb/sbx auto-detection path.
+ACQ_BACKEND_NAMES=(sbx msb openshell)
+ACQ_AUTODETECT_BACKEND_NAMES=(msb sbx)
+
+acq_backend_registry_field() {
+  local name="$1" field="$2"
+  case "${name}:${field}" in
+    sbx:explicit_only) printf '0\n' ;;
+    sbx:version_arg) printf 'version\n' ;;
+    sbx:version_regex) printf 'v?[0-9]+\.[0-9]+(\.[0-9]+)?\n' ;;
+    msb:explicit_only) printf '0\n' ;;
+    msb:version_arg) printf '%s\n' '--version' ;;
+    msb:version_regex) printf '[0-9]+\.[0-9]+(\.[0-9]+)?\n' ;;
+    openshell:explicit_only) printf '1\n' ;;
+    openshell:version_arg) printf '%s\n' '--version' ;;
+    openshell:version_regex) printf '[0-9]+\.[0-9]+(\.[0-9]+)?\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+acq_backend_is_explicit_only() {
+  [ "$(acq_backend_registry_field "$1" explicit_only 2>/dev/null || true)" = "1" ]
+}
+
+acq_backend_cli_version() {
+  local name="$1" arg regex version
+  arg=$(acq_backend_registry_field "$name" version_arg) || return 1
+  regex=$(acq_backend_registry_field "$name" version_regex) || return 1
+  version=$(command "$name" "$arg" 2>/dev/null | grep -oE "$regex" | head -n1 | sed 's/^v//' || true)
+  printf '%s\n' "${version:-?}"
+}
+
+acq_backend_registered_names() {
+  printf '%s\n' "${ACQ_BACKEND_NAMES[@]}"
+}
+
 # _ensure_local_bin_on_path — if a backend CLI is not on PATH but IS present in
 # ~/.local/bin (the default install location for `curl … | sh` installers, e.g.
 # microsandbox), prepend ~/.local/bin to PATH for THIS process so acq and the
@@ -1946,8 +1987,13 @@ _auto_detect_backend() {
   ACQ_AUTODETECT_BACKEND=""
   ACQ_AUTODETECT_REASON=""
   local have_msb=0 have_sbx=0
-  _backend_installed msb && have_msb=1
-  _backend_installed sbx && have_sbx=1
+  local backend
+  for backend in "${ACQ_AUTODETECT_BACKEND_NAMES[@]}"; do
+    case "$backend" in
+      msb) _backend_installed "$backend" && have_msb=1 ;;
+      sbx) _backend_installed "$backend" && have_sbx=1 ;;
+    esac
+  done
 
   if [ "$have_msb" -eq 1 ] && [ "$have_sbx" -eq 1 ]; then
     if _sbx_has_sandboxes; then
@@ -5775,34 +5821,25 @@ acq_print_image_contract_doctor() {
 }
 
 acq_print_doctor() {
-  local sbx_status msb_status
+  local backend status
 
   # Recover a backend installed in ~/.local/bin but not on PATH, so doctor's
   # verdict matches what `acq run` will actually find (self-repair parity).
-  _ensure_local_bin_on_path sbx >/dev/null 2>&1 || true
-  _ensure_local_bin_on_path msb >/dev/null 2>&1 || true
-
-  # Check sbx
-  if command -v sbx >/dev/null 2>&1; then
-    local sbx_ver
-    sbx_ver=$(sbx version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 | sed 's/^v//' || echo "?")
-    sbx_status="installed v${sbx_ver}"
-  else
-    sbx_status="not found"
-  fi
-
-  # Check msb (microsandbox).
-  if command -v msb >/dev/null 2>&1; then
-    local msb_ver
-    msb_ver=$(msb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || echo "?")
-    msb_status="installed v${msb_ver}"
-  else
-    msb_status="not found"
-  fi
+  for backend in "${ACQ_BACKEND_NAMES[@]}"; do
+    acq_backend_is_explicit_only "$backend" || _ensure_local_bin_on_path "$backend" >/dev/null 2>&1 || true
+  done
 
   echo "acq: backend health check"
-  echo "  [sbx: ${sbx_status}]"
-  echo "  [msb: ${msb_status}]"
+  for backend in "${ACQ_BACKEND_NAMES[@]}"; do
+    if acq_backend_is_explicit_only "$backend"; then
+      status="explicit-only; adapter not yet available"
+    elif command -v "$backend" >/dev/null 2>&1; then
+      status="installed v$(acq_backend_cli_version "$backend")"
+    else
+      status="not found"
+    fi
+    echo "  [$backend: $status]"
+  done
   echo ""
 
   local config_file

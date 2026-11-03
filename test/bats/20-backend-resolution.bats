@@ -82,6 +82,23 @@ _resolve() { # ADAPTER EXPLICIT  -> prints "<resolved>|<stderr-note>"
   refute_output --partial 'acq: using'
 }
 
+@test "backend: OpenShell registration is explicit-only and never auto-detected" {
+  unset ACQ_BACKEND
+  export XDG_CONFIG_HOME="$STUBDIR/noconfig"
+  export ACQ_TEST_INSTALLED_BACKENDS="openshell"
+  run _resolve sbx ''
+  assert_failure
+
+  # _resolve captures resolver stderr in $STUBDIR/note while asserting the
+  # in-process exit status. The CLI invocation below checks the user-facing error.
+  run cat "$STUBDIR/note"
+  assert_output --partial 'no backend detected'
+
+  run env ACQ_BACKEND=openshell "$ACQ" ls
+  assert_failure
+  assert_output --partial "no backend adapter found for 'openshell'"
+}
+
 @test "backend: both installed, no sbx sandboxes -> msb + notice" {
   unset ACQ_BACKEND
   export XDG_CONFIG_HOME="$STUBDIR/noconfig"
