@@ -245,10 +245,15 @@ def run_vector(
     # Capture raw bytes and decode UTF-8 ourselves. "Byte-exact" (ADR-0043m)
     # means no universal-newlines translation; the `crlf` transform exists
     # precisely so runners normalize line endings explicitly.
+    #
+    # The subprocess runs from the repository ROOT, matching the Bash runner
+    # (scripts/run-vectors), so a relative path in ``invoke.argv`` resolves the
+    # same under both runners (ADR-0043m: the two runners must agree). The corpus
+    # root is ``<repo>/test/vectors``, so its grandparent is the repo root.
     try:
         proc = subprocess.run(
             argv,
-            cwd=str(corpus_root),
+            cwd=str(corpus_root.parent.parent),
             env=env,
             input=stdin.encode("utf-8") if stdin else None,
             capture_output=True,

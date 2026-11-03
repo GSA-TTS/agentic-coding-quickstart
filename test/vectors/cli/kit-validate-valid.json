@@ -6,7 +6,7 @@
   "backend": null,
   "platform": "any",
   "invoke": {
-    "argv": ["{acq}", "kit", "validate", "../fixtures/kit-valid", "--json"],
+    "argv": ["{acq}", "kit", "validate", "test/fixtures/kit-valid", "--json"],
     "env": {},
     "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_MSB_INSTALLED", "ACQ_SBX_INSTALLED"],
     "stdin": "",
