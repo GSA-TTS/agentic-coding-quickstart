@@ -134,6 +134,46 @@
       "vectors": ["cli/ports-missing"]
     },
     {
+      "contract": "ADR-0038m §2 secret set success envelope: scope/service/value_state, value on stdin only, never a value field",
+      "vectors": ["cli/secret-set-json", "cli/secret-set-sandbox-json"]
+    },
+    {
+      "contract": "ADR-0038m §48 drop scope-less secret set: usage error (exit 2)",
+      "vectors": ["cli/secret-set-usage"]
+    },
+    {
+      "contract": "ADR-0038m §1 empty/whitespace-only stdin value is a validation failure (exit 1, validation_failed), not usage",
+      "vectors": ["cli/secret-set-no-value"]
+    },
+    {
+      "contract": "ADR-0038m §secret has silent predicate: exit 0 present / 1 absent / 2 usage, no stdout body",
+      "vectors": ["cli/secret-has-present", "cli/secret-has-absent", "cli/secret-has-usage"]
+    },
+    {
+      "contract": "ADR-0040m unsupported-capability fail-closed for secret has: exit 1 with a stderr diagnostic, never a silent false 'absent'",
+      "vectors": ["cli/secret-has-unsupported"]
+    },
+    {
+      "contract": "ADR-0038m §2 secret ls required data: scope/service/value_state, non-secret bindings only",
+      "vectors": ["cli/secret-ls-json", "cli/secret-ls-empty"]
+    },
+    {
+      "contract": "ADR-0038m §secret rm exit semantics: exit 0 and value_state unset on success",
+      "vectors": ["cli/secret-rm-json"]
+    },
+    {
+      "contract": "ADR-0040m secret rm on a down backend reports backend_not_found (not secret_missing) and never deletes",
+      "vectors": ["cli/secret-rm-backend-error"]
+    },
+    {
+      "contract": "ADR-0040m error vocabulary secret_missing / secret_unreadable on the secret failure paths",
+      "vectors": ["cli/secret-rm-missing", "cli/secret-ls-unreadable", "cli/secret-ls-bad-shape", "cli/secret-ls-entry-bad-shape"]
+    },
+    {
+      "contract": "ADR-0040m unsupported-capability fail-closed for secret management on a non-msb backend",
+      "vectors": ["cli/secret-sbx-unsupported"]
+    },
+    {
       "contract": "ADR-0038m §1 / spec story #9 passthrough: verbatim forwarding, announced stderr notice, status preserved",
       "vectors": ["cli/passthrough", "cli/passthrough-exit-code"]
     },

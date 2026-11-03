@@ -43,3 +43,11 @@ TIMEOUT = "timeout"
 # unparseable content) is refused rather than misread. Forward migration of older
 # (legacy v0) records is the state-migration slice's job.
 STATE_SCHEMA_UNSUPPORTED = "state_schema_unsupported"
+
+# Backend error vocabulary (ADR-0040m), secret verbs. ``secret_missing`` is the
+# removal path's "no such secret" failure; ``secret_unreadable`` is the
+# secret-list path's "store could not be read/parsed" failure. Neither is used for
+# ``secret has``, which maps "absent" to a silent exit 1 (a predicate answer, not
+# an error).
+SECRET_MISSING = "secret_missing"
+SECRET_UNREADABLE = "secret_unreadable"
