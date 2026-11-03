@@ -47,6 +47,18 @@ class VectorError(Exception):
     """Raised for a malformed or non-conformant vector."""
 
 
+class RefusalError(VectorError):
+    """Raised when a runner fails closed on an unsupported vector requirement.
+
+    ``code`` is a stable machine token: ``unsupported_vector_field``,
+    ``unsupported_isolation``, or ``unsupported_backend``.
+    """
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 def current_platform() -> str:
     if os.name == "nt":
         return "windows"
@@ -101,6 +113,23 @@ def apply_transforms(text: str, transforms: list[str]) -> str:
     return text
 
 
+def _is_subset(expected, actual) -> bool:
+    """Structural subset: every key/value of ``expected`` must be present in
+    ``actual``, recursively. Extra fields in ``actual`` are allowed (ADR-0038m:
+    unknown fields are additive). Scalars compare by equality; lists compare
+    element-wise by length.
+    """
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False
+        return all(k in actual and _is_subset(v, actual[k]) for k, v in expected.items())
+    if isinstance(expected, list):
+        if not isinstance(actual, list) or len(actual) != len(expected):
+            return False
+        return all(_is_subset(e, a) for e, a in zip(expected, actual))
+    return expected == actual
+
+
 def compare(actual: str, expected, mode: str, label: str) -> None:
     if mode == "exact":
         if actual != expected:
@@ -113,8 +142,8 @@ def compare(actual: str, expected, mode: str, label: str) -> None:
             parsed = json.loads(actual)
         except json.JSONDecodeError as exc:
             raise AssertionError(f"{label}: output is not valid JSON: {exc}") from exc
-        if parsed != expected:
-            raise AssertionError(f"{label}: JSON mismatch\n  expected: {expected!r}\n  actual:   {parsed!r}")
+        if not _is_subset(expected, parsed):
+            raise AssertionError(f"{label}: JSON mismatch\n  expected (subset): {expected!r}\n  actual:           {parsed!r}")
     else:
         raise VectorError(f"unknown assertion mode: {mode!r}")
 
@@ -153,7 +182,8 @@ def load_vector(path: Path) -> dict:
 
 
 def _validate(vector: dict, path: Path) -> None:
-    missing = [k for k in ("schema", "id", "oracle", "tier", "invoke", "expect") if k not in vector]
+    required = ("schema", "id", "oracle", "tier", "invoke", "expect", "isolation", "backend", "platform")
+    missing = [k for k in required if k not in vector]
     if missing:
         raise VectorError(f"{path}: missing required field(s): {', '.join(missing)}")
     invoke = vector.get("invoke", {})
@@ -162,6 +192,28 @@ def _validate(vector: dict, path: Path) -> None:
         raise VectorError(f"{path}: invoke.argv is required")
     if "exit" not in expect:
         raise VectorError(f"{path}: expect.exit is required")
+
+
+def _refuse_unsupported(vector: dict, invoke: dict, isolation: dict) -> None:
+    """Fail closed on any vector requirement this runner cannot honour.
+
+    ADR-0043m: a runner that cannot honour a vector's isolation fails closed,
+    and enumerated-but-unimplemented fields (``invoke.fixtures``,
+    ``isolation.no_live_refeed``) are rejected rather than silently ignored.
+    A non-null ``backend`` requests a capability this foundation slice does not
+    provide (ADR-0040m unsupported-capability fail-closed).
+    """
+    vid = vector["id"]
+    if "fixtures" in invoke:
+        raise RefusalError("unsupported_vector_field", f"{vid}: invoke.fixtures is not supported by this runner")
+    if "no_live_refeed" in isolation:
+        raise RefusalError("unsupported_vector_field", f"{vid}: isolation.no_live_refeed is not supported by this runner")
+    if isolation.get("offline") is False:
+        raise RefusalError("unsupported_isolation", f"{vid}: isolation.offline=false is not supported by this runner")
+    if isolation.get("ssh_stubs") is True:
+        raise RefusalError("unsupported_isolation", f"{vid}: isolation.ssh_stubs=true is not supported by this runner")
+    if vector.get("backend"):
+        raise RefusalError("unsupported_backend", f"{vid}: backend {vector['backend']!r} is not supported by this runner")
 
 
 def run_vector(
@@ -176,10 +228,7 @@ def run_vector(
     expect = vector.get("expect", {})
     isolation = vector.get("isolation", {})
 
-    if isolation.get("offline") is False:
-        raise VectorError(f"{vector['id']}: isolation.offline=false (network) is not supported by this runner")
-    if isolation.get("ssh_stubs") is True:
-        raise VectorError(f"{vector['id']}: isolation.ssh_stubs=true is not supported by this runner")
+    _refuse_unsupported(vector, invoke, isolation)
 
     argv = resolve_tokens(invoke.get("argv", []), acq_cmd, python_exe)
     env = dict(os.environ)

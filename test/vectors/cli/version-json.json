@@ -13,7 +13,6 @@
     },
     "unset": [],
     "stdin": "",
-    "fixtures": [],
     "timeout_ms": 5000
   },
   "expect": {
@@ -41,7 +40,6 @@
   },
   "isolation": {
     "offline": true,
-    "no_live_refeed": true,
     "ssh_stubs": false,
     "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
   }

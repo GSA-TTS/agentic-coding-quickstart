@@ -12,7 +12,7 @@ import pytest
 import vector_engine as engine
 from conftest import VECTORS_DIR
 
-VECTORS = engine.discover_vectors(VECTORS_DIR)
+VECTORS = [(vid, p) for vid, p in engine.discover_vectors(VECTORS_DIR) if not vid.startswith("negative/")]
 
 
 @pytest.mark.parametrize("vec_id,path", VECTORS, ids=[v[0] for v in VECTORS])
@@ -22,9 +22,6 @@ def test_vector(vec_id, path, tmp_path, acq_cmd, python_exe):
     platform = vector.get("platform", "any")
     if platform not in ("any", "all", engine.current_platform()):
         pytest.skip(f"platform {platform!r} != {engine.current_platform()!r}")
-
-    if vector.get("backend"):
-        pytest.skip(f"backend {vector['backend']!r} not available in the foundation slice")
 
     engine.run_vector(
         vector,

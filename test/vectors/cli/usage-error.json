@@ -10,7 +10,6 @@
     "env": {},
     "unset": [],
     "stdin": "",
-    "fixtures": [],
     "timeout_ms": 5000
   },
   "expect": {
@@ -21,9 +20,7 @@
         "schema_version": 1,
         "command": "acq",
         "error": {
-          "code": "usage",
-          "message": "argument COMMAND: invalid choice: 'bogus' (choose from version, help)",
-          "remediation": "run 'acq --help' for usage"
+          "code": "usage"
         }
       },
       "normalize": []
@@ -36,7 +33,6 @@
   },
   "isolation": {
     "offline": true,
-    "no_live_refeed": true,
     "ssh_stubs": false,
     "redirect": []
   }

@@ -12,6 +12,8 @@ runner and `scripts/run-vectors`) carry the *how*.
 * `cli/` — contract vectors driving the CLI-under-test (`{acq}`).
 * `sentinel/` — the golden set proving both runners implement every assertion
   mode and normalisation transform. A diverging runner fails on the feature.
+* `negative/` — negative oracles: vectors that require something the foundation
+  runner cannot honour and must be *refused* (fail closed) with a stable code.
 * `manifest.json` — the coverage manifest: maps every contract row to at least
   one vector id, and is validated against the corpus in CI (a missing or renamed
   vector fails the check rather than being assumed absent).
@@ -31,7 +33,6 @@ runner and `scripts/run-vectors`) carry the *how*.
     "env": {"ACQ_VERSION": "0.1.0"},
     "unset": ["SOME_VAR"],
     "stdin": "",
-    "fixtures": [],
     "timeout_ms": 5000
   },
   "expect": {
@@ -41,12 +42,15 @@ runner and `scripts/run-vectors`) carry the *how*.
   },
   "isolation": {
     "offline": true,
-    "no_live_refeed": true,
     "ssh_stubs": false,
     "redirect": ["HOME", "XDG_CONFIG_HOME"]
   }
 }
 ```
+
+`invoke.fixtures` and `isolation.no_live_refeed` are enumerated by ADR-0043m but
+not implemented in this slice; a vector that declares either is refused (fail
+closed) rather than silently ignored.
 
 Placeholders in `invoke.argv`: `{acq}` splices the CLI-under-test command list;
 `{python}` splices the interpreter used by deterministic sentinel subjects.
@@ -55,7 +59,10 @@ Placeholders in `invoke.argv`: `{acq}` splices the CLI-under-test command list;
 
 * `exact` — byte-exact equality (after transforms). The default.
 * `contains` — the expected value is a substring of the output.
-* `json` — the output is parsed as JSON and structurally compared to `value`.
+* `json` — the output is parsed as JSON; `value` must be a *structural subset*
+  of it (extra fields are allowed, per ADR-0038m "unknown fields are additive").
+  This is how a vector asserts the stable envelope fields (`code`, `command`)
+  without pinning prose.
 
 ## Normalisation transforms (`expect.<stream>.normalize`, in order)
 
@@ -67,8 +74,12 @@ declared transforms apply. Regex is not a mode. Placeholders are `<abspath>`,
   path normalisation is deferred to the platform-qualification slice.)
 * `tmpdir` — replace the temporary-directory root with `<tmpdir>`.
 * `crlf` — normalize CRLF line endings to LF.
-* `timing` — replace a duration literal (`123ms`, `1.5s`, …) with `<timing>`.
-* `order` — sort the lines of the output.
+* `timing` — replace a duration literal (`123ms`, `1.5s`, `150µs`, …) with
+  `<timing>`. Both runners match the same duration pattern, including the `µs`
+  microsecond suffix.
+* `order` — sort the lines of the output by codepoint (byte) order, preserving
+  whether the input ended in a newline. Non-ASCII lines are ordered identically
+  by both runners.
 * `json` — canonical re-serialisation (compact, sorted keys) of a JSON document.
 
 ## Isolation
@@ -76,5 +87,7 @@ declared transforms apply. Regex is not a mode. Placeholders are `<abspath>`,
 `redirect` names environment variables redirected to throwaway directories, so an
 oracle can never read or mutate the developer's real state (ADR-0039m); the
 runner always redirects `HOME` and the `XDG_*` set. A runner that cannot honour a
-declared requirement (`offline: false`, `ssh_stubs: true`, a non-null `backend`)
-fails closed.
+declared requirement (`offline: false`, `ssh_stubs: true`, a non-null `backend`,
+or an unimplemented `fixtures`/`no_live_refeed`) fails closed with a stable
+refusal code (`unsupported_isolation`, `unsupported_backend`, or
+`unsupported_vector_field`).
