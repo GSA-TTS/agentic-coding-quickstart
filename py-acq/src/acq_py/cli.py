@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -30,6 +31,17 @@ from . import backends, doctor, envelope, errors, msb, state, version_info
 KNOWN_AGENTS = frozenset(
     "claude codex copilot cursor docker-agent droid gemini kiro opencode shell".split()
 )
+
+# Every subcommand acq owns. An argv token that is not one of these (and is not a
+# flag) is treated as an unknown verb and forwarded verbatim to the active
+# backend (announced passthrough, spec user story #9 / ADR-0038m §1).
+KNOWN_COMMANDS = frozenset(
+    "version doctor help backend create run ls stop rm exec attach shell cp ports".split()
+)
+
+# Guest-side workspace a session starts in when no host record supplies one
+# (mirrors the legacy ``_acq_msb_workspace_for`` default, ADR-0011).
+DEFAULT_GUEST_WORKSPACE = "/home/agent"
 
 # Agent-dependent default base image (ADR-0030). ``opencode`` resolves to the
 # pinned generic devenv base; ``shell`` and the other known agents keep the
@@ -129,6 +141,25 @@ def build_parser() -> _Parser:
     rm_parser = sub.add_parser("rm", help="remove a sandbox")
     rm_parser.add_argument("name", help="sandbox name")
 
+    exec_parser = sub.add_parser("exec", help="run a command inside a sandbox")
+    exec_parser.add_argument("name", help="sandbox name")
+    exec_parser.add_argument(
+        "cmd", nargs=argparse.REMAINDER, help="command to run (opaque after `--`)"
+    )
+
+    attach_parser = sub.add_parser("attach", help="attach to an existing sandbox (interactive)")
+    attach_parser.add_argument("name", help="sandbox name")
+
+    shell_parser = sub.add_parser("shell", help="open an interactive shell in a sandbox")
+    shell_parser.add_argument("name", help="sandbox name")
+
+    cp_parser = sub.add_parser("cp", help="copy files in or out of a sandbox (NAME:path syntax)")
+    cp_parser.add_argument("src", help="source (host path or NAME:/guest/path)")
+    cp_parser.add_argument("dst", help="destination (host path or NAME:/guest/path)")
+
+    ports_parser = sub.add_parser("ports", help="list a sandbox's declared port mappings")
+    ports_parser.add_argument("name", help="sandbox name")
+
     return parser
 
 
@@ -153,12 +184,15 @@ def _operational_failure(
     message: str,
     remediation: str | None,
     emit_json: bool,
+    exit_code: int = errors.EXIT_FAILURE,
 ) -> int:
     """Emit an operational failure (exit 1) with a stable error code.
 
     Distinct from a usage error (exit 2): the command was well-formed but could
     not be carried out. The JSON form puts the failure envelope on stdout; the
-    human form writes diagnostics to stderr.
+    human form writes diagnostics to stderr. ``exit_code`` defaults to 1 and is
+    overridden only where the contract requires preserving a backend's own status
+    (e.g. ``cp`` forwarding ``msb copy``'s exit, ADR-0038m §1).
     """
     if emit_json:
         doc = envelope.error(command, code, message, remediation=remediation)
@@ -167,7 +201,7 @@ def _operational_failure(
         print(f"acq: {message}", file=sys.stderr)
         if remediation:
             print(remediation, file=sys.stderr)
-    return errors.EXIT_FAILURE
+    return exit_code
 
 
 def run_version(emit_json: bool) -> int:
@@ -661,14 +695,288 @@ def run_rm(parsed, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
+# ---------------------------------------------------------------------------
+# exec / attach / shell / cp / ports (ADR-0040m capabilities; ADR-0038m §1
+# child/backend status preservation).
+# ---------------------------------------------------------------------------
+
+def _sandbox_ref(token: str) -> tuple[str, str] | None:
+    """Return ``(name, guest_path)`` when ``token`` is a ``NAME:/guest/path`` ref.
+
+    Host and guest path types are distinct (ADR-0038m §4): only a bare ``NAME:``
+    prefix followed by a POSIX-absolute path is a guest ref. A Windows drive
+    (``C:/…``) is a single-letter host path, never a guest ref, so a host mount
+    source is never misread as a guest path implicitly.
+    """
+    if ":" not in token:
+        return None
+    name, _sep, rest = token.partition(":")
+    if not rest.startswith("/"):
+        return None
+    if not name or any(ch in name for ch in "/\\:"):
+        return None
+    if os.name == "nt" and len(name) == 1 and name.isalpha():
+        return None
+    return (name, rest)
+
+
+def _workspace_from_record(name: str) -> str:
+    """Resolve the guest workspace for a session (``-w``), host-authoritative.
+
+    Falls back to :data:`DEFAULT_GUEST_WORKSPACE` when the record is absent,
+    legacy v0, or unreadable — the workspace is a starting directory, not an
+    authority decision, and a shell/exec can still run without it (ADR-0041m:
+    guest-writable state is never authority; a missing record is not a guess).
+    """
+    try:
+        record = state.record_read("msb", name)
+    except state.StateSchemaError:
+        record = None
+    if record and record.get("workspace"):
+        return record["workspace"]
+    return DEFAULT_GUEST_WORKSPACE
+
+
+def run_exec(parsed, emit_json: bool) -> int:
+    """``acq exec NAME -- CMD...`` — run a command non-interactively.
+
+    The child's exit status is acq's exit status (ADR-0038m §1). In ``--json``
+    mode the child's stdout is routed to stderr and one success envelope carrying
+    the exit code is emitted on stdout (ADR-0038m §2).
+    """
+    name = parsed.name
+    command = list(parsed.cmd)
+    if not command:
+        return _usage_failure(
+            "exec",
+            f"exec requires a command after '--' (usage: acq exec {name} -- CMD...)",
+            emit_json,
+        )
+    if not msb.exists(name):
+        return _operational_failure(
+            "exec",
+            errors.SANDBOX_NOT_FOUND,
+            f"sandbox '{name}' not found",
+            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            emit_json,
+        )
+    rc = msb.exec_command(name, command, workspace=_workspace_from_record(name), json_mode=emit_json)
+    if emit_json:
+        print(json.dumps(envelope.success("exec", {"name": name, "exit_code": rc})))
+    return rc
+
+
+def run_attach(parsed, emit_json: bool) -> int:
+    """``acq attach NAME`` — attach to an existing sandbox, launching its agent.
+
+    This is the interactive path; its non-interactive contract is deterministic
+    (ADR-0038m §1, spec user story #10): fail closed on a missing sandbox, read
+    the recorded agent from host-authoritative state (defaulting to a login shell
+    when none is recorded, matching the legacy ``_acq_msb_attach``), launch it via
+    ``msb exec``, and propagate its status. True PTY allocation (``msb exec -t``)
+    and ssh-agent forwarding are Tier-3/live concerns and are not synthesized
+    here, so vector behavior never blocks or invents a terminal.
+    """
+    name = parsed.name
+    if not msb.exists(name):
+        return _operational_failure(
+            "attach",
+            errors.SANDBOX_NOT_FOUND,
+            f"sandbox '{name}' not found",
+            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            emit_json,
+        )
+    try:
+        record = state.record_read("msb", name)
+    except state.StateSchemaError as exc:
+        return _operational_failure(
+            "attach",
+            errors.STATE_SCHEMA_UNSUPPORTED,
+            str(exc),
+            f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'",
+            emit_json,
+        )
+    agent = (record or {}).get("agent") or "shell"
+    workspace = (record or {}).get("workspace") or DEFAULT_GUEST_WORKSPACE
+    rc = msb.launch(name, workspace, agent, json_mode=emit_json)
+    if emit_json:
+        print(json.dumps(envelope.success("attach", {"name": name, "backend": "msb", "agent": agent, "exit_code": rc})))
+    return rc
+
+
+def run_shell(parsed, emit_json: bool) -> int:
+    """``acq shell NAME`` — open an interactive login shell in a sandbox.
+
+    Runs ``/bin/sh -l`` as the unprivileged ``agent`` user (never root), with the
+    child's status preserved. Like ``attach``, the non-interactive path is
+    deterministic and PTY allocation is deferred to the live tier.
+    """
+    name = parsed.name
+    if not msb.exists(name):
+        return _operational_failure(
+            "shell",
+            errors.SANDBOX_NOT_FOUND,
+            f"sandbox '{name}' not found",
+            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            emit_json,
+        )
+    rc = msb.launch(name, _workspace_from_record(name), "shell", json_mode=emit_json)
+    if emit_json:
+        print(json.dumps(envelope.success("shell", {"name": name, "backend": "msb", "exit_code": rc})))
+    return rc
+
+
+def run_cp(parsed, emit_json: bool) -> int:
+    """``acq cp SRC DST`` — copy between a native host path and a POSIX guest path.
+
+    Exactly one side is a ``NAME:/guest/path`` reference; the other is a host
+    path. Host and guest types stay distinct (ADR-0038m §4): a host mount source
+    is never treated as a guest path implicitly, and a UNC/network host path —
+    which cannot round-trip losslessly across the host/guest boundary — fails
+    closed rather than being mis-forwarded. The ``msb copy`` status is preserved.
+    """
+    src = parsed.src
+    dst = parsed.dst
+    src_ref = _sandbox_ref(src)
+    dst_ref = _sandbox_ref(dst)
+    if src_ref and dst_ref:
+        return _usage_failure(
+            "cp",
+            "copying between two sandboxes is not supported; exactly one side must be a host path",
+            emit_json,
+        )
+    if not src_ref and not dst_ref:
+        return _usage_failure(
+            "cp",
+            "exactly one of SRC/DST must be a sandbox reference (NAME:/guest/path)",
+            emit_json,
+        )
+    name, guest_path = src_ref if src_ref else dst_ref
+    host_path = dst if src_ref else src
+    direction = "out" if src_ref else "in"
+    if not msb.exists(name):
+        return _operational_failure(
+            "cp",
+            errors.SANDBOX_NOT_FOUND,
+            f"sandbox '{name}' not found",
+            f"list sandboxes with 'acq ls'",
+            emit_json,
+        )
+    # UNC/network paths require separate qualification (ADR-0038m §4): fail
+    # closed rather than hand a host-side network path to `msb copy`.
+    if host_path.startswith("\\\\") or host_path.startswith("//"):
+        return _operational_failure(
+            "cp",
+            errors.VALIDATION_FAILED,
+            f"host path {host_path!r} is a UNC/network path and requires separate qualification",
+            "copy via a mounted or local path instead",
+            emit_json,
+        )
+    rc = msb.copy(src, dst)
+    if rc != 0:
+        return _operational_failure(
+            "cp",
+            errors.FAILURE,
+            f"copy failed between host and sandbox '{name}'",
+            "check msb logs and retry",
+            emit_json,
+            exit_code=rc,
+        )
+    if emit_json:
+        print(json.dumps(envelope.success("cp", {"name": name, "host": host_path, "guest": guest_path, "direction": direction})))
+    else:
+        if direction == "in":
+            print(f"copied {host_path} -> {name}:{guest_path}")
+        else:
+            print(f"copied {name}:{guest_path} -> {host_path}")
+    return errors.EXIT_SUCCESS
+
+
+def run_ports(parsed, emit_json: bool) -> int:
+    """``acq ports NAME`` — report declared host/guest mappings, never health.
+
+    ADR-0038m §2 fixes the required data: host/guest mappings plus origin. The
+    list is a query (exit 0, even when empty); a missing sandbox fails closed
+    with ``sandbox_not_found``. Post-hoc ``--publish`` (ADR-0015) is deferred.
+    """
+    name = parsed.name
+    if not msb.exists(name):
+        return _operational_failure(
+            "ports",
+            errors.SANDBOX_NOT_FOUND,
+            f"sandbox '{name}' not found",
+            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            emit_json,
+        )
+    mappings = msb.ports(name)
+    data = {"name": name, "ports": mappings}
+    if emit_json:
+        print(json.dumps(envelope.success("ports", data)))
+    else:
+        if not mappings:
+            print(f"no declared ports for sandbox '{name}'")
+        else:
+            for entry in mappings:
+                print(f"guest {entry['guest_port']} -> host {entry['host_port']} ({entry['origin']})")
+    return errors.EXIT_SUCCESS
+
+
+def _passthrough(argv: list[str], explicit: str | None) -> int:
+    """Forward an unknown subcommand verbatim to the active backend (ADR-0038m §1).
+
+    The handoff is announced on stderr so the user knows any output/errors below
+    the notice belong to the backend, not acq. The backend binary's exit status is
+    preserved. Passthrough is a verbatim escape hatch, so it never emits an acq
+    JSON envelope — the backend owns stdout (the ``--json`` flag is therefore
+    inert here).
+    """
+    verb = argv[0]
+    name = _resolve_active_backend(explicit)
+    if name is None:
+        return _operational_failure(
+            verb,
+            errors.BACKEND_NOT_FOUND,
+            "no sandbox backend detected",
+            f"install msb {backends.MSB_MIN_VERSION[0]}.{backends.MSB_MIN_VERSION[1]}.{backends.MSB_MIN_VERSION[2]} or newer and retry",
+            False,
+        )
+    # The msb adapter honors ACQ_MSB_BIN (its test seam); sbx forwards to the raw
+    # CLI. Either way the unknown verb + args are forwarded unchanged.
+    if name == "msb":
+        binary = msb.msb_command()
+    else:
+        binary = [backends.BACKENDS[name].cli]
+    print(f"acq: '{verb}' is not an acq subcommand - forwarding to '{name}'.", file=sys.stderr)
+    print(f"     (output and any errors below are from '{name}', not acq)", file=sys.stderr)
+    return subprocess.run([*binary, *argv]).returncode
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
-    emit_json = "--json" in args
-    # `--backend NAME` selects the active backend for read-only reporting.
-    backend_override = _flag_value(args, "--backend")
-    args = [a for a in args if a != "--json"]
-    args = _strip_flag(args, "--backend")
+    # Split at the first bare ``--`` so the exec/attach passthrough argv stays
+    # opaque: acq's global flags (--json, --backend) are recognized only before
+    # it (ADR-0038m §4 "exec argv after `--` is opaque").
+    head = args
+    tail: list[str] = []
+    for i, token in enumerate(args):
+        if token == "--":
+            head = args[:i]
+            tail = args[i + 1 :]
+            break
+
+    emit_json = "--json" in head
+    backend_override = _flag_value(head, "--backend")
+    head = [a for a in head if a != "--json"]
+    head = _strip_flag(head, "--backend")
+    args = head if not tail else [*head, "--", *tail]
+
+    # Announced verbatim backend passthrough (spec user story #9): an unknown
+    # subcommand is forwarded to the active backend binary with a stderr notice,
+    # preserving its exit status. Detected before argparse, which would otherwise
+    # treat the unknown verb as a usage error.
+    if args and not args[0].startswith("-") and args[0] not in KNOWN_COMMANDS:
+        return _passthrough(args, backend_override)
 
     parser = build_parser()
     try:
@@ -699,7 +1007,7 @@ def main(argv: list[str] | None = None) -> int:
     if parsed.command == "doctor":
         return run_doctor(emit_json, parsed.name)
 
-    if parsed.command in ("create", "run", "ls", "stop", "rm"):
+    if parsed.command in ("create", "run", "ls", "stop", "rm", "exec", "attach", "shell", "cp", "ports"):
         _backend, exit_code = _resolve_backend_for_lifecycle(backend_override, emit_json, parsed.command)
         if exit_code is not None:
             return exit_code
@@ -713,6 +1021,16 @@ def main(argv: list[str] | None = None) -> int:
             return run_stop(parsed, emit_json)
         if parsed.command == "rm":
             return run_rm(parsed, emit_json)
+        if parsed.command == "exec":
+            return run_exec(parsed, emit_json)
+        if parsed.command == "attach":
+            return run_attach(parsed, emit_json)
+        if parsed.command == "shell":
+            return run_shell(parsed, emit_json)
+        if parsed.command == "cp":
+            return run_cp(parsed, emit_json)
+        if parsed.command == "ports":
+            return run_ports(parsed, emit_json)
 
     if parsed.command == "help" or parsed.command is None:
         parser.print_help()

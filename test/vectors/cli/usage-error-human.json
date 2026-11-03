@@ -6,7 +6,7 @@
   "backend": null,
   "platform": "any",
   "invoke": {
-    "argv": ["{acq}", "bogus"],
+    "argv": ["{acq}", "--bad-flag"],
     "env": {},
     "unset": [],
     "stdin": "",
@@ -21,7 +21,7 @@
     },
     "stderr": {
       "mode": "contains",
-      "value": "bogus",
+      "value": "bad-flag",
       "normalize": []
     }
   },

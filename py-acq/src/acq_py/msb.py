@@ -15,6 +15,7 @@ internal test seam, never a secret, never written to acq output.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -150,29 +151,16 @@ def remove(name: str) -> None:
         )
 
 
-def launch(name: str, workspace: str | None, agent: str | None, *, json_mode: bool = False) -> int:
-    """Launch the recorded agent (or a login shell) in the foreground.
+def _run_stream(argv: list[str], *, json_mode: bool) -> int:
+    """Run a backend command with the child's exit status as the return value.
 
-    Runs as the unprivileged ``agent`` user in the recorded workspace (ADR-0011),
-    with the child's exit status as this function's return value (child-status
-    propagation, ADR-0038m §1). In ``json_mode`` the child's stdout is routed to
-    stderr so the CLI's stdout stays a single JSON document (ADR-0038m §2); in
-    interactive use stdio is inherited so the agent renders. Interactive PTY
-    allocation and ssh-agent forwarding are the attach slice's concern.
+    In ``json_mode`` the child's stdout is routed to stderr (fd 2) so the CLI's
+    stdout stays a single JSON document (ADR-0038m §2); otherwise stdio is
+    inherited so the child renders directly (and a TTY would attach normally).
+    Passing the fd directly keeps this working when ``sys.stderr`` has been
+    replaced by a harness object without a usable fileno().
     """
-    argv = ["exec", "-u", "agent"]
-    if workspace:
-        argv += ["-w", workspace]
-    if agent and agent != "shell":
-        command = [agent]
-    else:
-        command = ["/bin/sh", "-l"]
-    argv += [name, "--", *command]
     if json_mode:
-        # In --json mode the launched child's stdout must not corrupt acq's
-        # single-JSON-document stdout, so route it to stderr (fd 2). Passing the
-        # fd directly keeps this working when ``sys.stderr`` has been replaced by
-        # a harness object without a usable fileno().
         try:
             stdout: object = sys.stderr.fileno()
         except (AttributeError, OSError, ValueError):
@@ -180,3 +168,76 @@ def launch(name: str, workspace: str | None, agent: str | None, *, json_mode: bo
     else:
         stdout = None
     return subprocess.run([*msb_command(), *argv], stdout=stdout).returncode
+
+
+def launch(name: str, workspace: str | None, agent: str | None, *, json_mode: bool = False) -> int:
+    """Launch the recorded agent (or a login shell) in the foreground.
+
+    Runs as the unprivileged ``agent`` user in the recorded workspace (ADR-0011),
+    with the child's exit status as this function's return value (child-status
+    propagation, ADR-0038m §1). Interactive PTY allocation and ssh-agent
+    forwarding are the attach slice's concern; the deterministic non-interactive
+    path runs ``msb exec`` without a PTY and never blocks on stdin.
+    """
+    if agent and agent != "shell":
+        command = [agent]
+    else:
+        command = ["/bin/sh", "-l"]
+    return exec_command(name, command, workspace=workspace, json_mode=json_mode)
+
+
+def exec_command(name: str, command: list[str], *, workspace: str | None = None, json_mode: bool = False) -> int:
+    """Run an explicit command non-interactively (``acq exec``); returns its status.
+
+    Mirrors :func:`launch` but forwards an arbitrary ``command`` verbatim after the
+    ``--`` separator (ADR-0038m §4 "exec argv after ``--`` is opaque").
+    """
+    argv = ["exec", "-u", "agent"]
+    if workspace:
+        argv += ["-w", workspace]
+    argv += [name, "--", *command]
+    return _run_stream(argv, json_mode=json_mode)
+
+
+def copy(src: str, dst: str) -> int:
+    """Invoke ``msb copy SRC DST``; return its exit status (status preservation).
+
+    The two arguments are forwarded verbatim — the seam (``cli.py``) has already
+    validated the host/guest path types, so the adapter never re-interprets which
+    side is the sandbox reference (ADR-0040m: the adapter translates, the seam
+    validates).
+    """
+    proc = _run(["copy", src, dst])
+    return proc.returncode
+
+
+def ports(name: str) -> list[dict]:
+    """Return a sandbox's *declared* host/guest port mappings (ADR-0038m §ports).
+
+    Reads create-time mappings from ``msb inspect NAME --format json`` (backend
+    authority, host-side). This reports declarations, never listener health. A
+    backend read failure or an unparseable payload yields an empty list rather
+    than a hard failure — a ports query must never hard-fail on a missing field.
+    Post-hoc ``--publish`` origin (ADR-0015) lands with a later slice.
+    """
+    proc = _run(["inspect", name, "--format", "json"])
+    if proc.returncode != 0:
+        return []
+    try:
+        doc = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    entries = doc.get("active_config", {}).get("network", {}).get("ports", [])
+    if not isinstance(entries, list):
+        return []
+    out: list[dict] = []
+    for entry in entries:
+        if isinstance(entry, dict) and "host_port" in entry and "guest_port" in entry:
+            out.append(
+                {
+                    "host_port": entry["host_port"],
+                    "guest_port": entry["guest_port"],
+                    "origin": "create",
+                }
+            )
+    return out

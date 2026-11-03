@@ -6,7 +6,7 @@
   "backend": null,
   "platform": "any",
   "invoke": {
-    "argv": ["{acq}", "--json", "bogus"],
+    "argv": ["{acq}", "--json", "--bad-flag"],
     "env": {},
     "unset": [],
     "stdin": "",

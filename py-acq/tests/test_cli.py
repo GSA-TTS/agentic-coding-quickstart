@@ -55,14 +55,14 @@ def test_version_json_subprocess():
 
 
 def test_usage_error_exit_code_2_human():
-    proc = run_cli("bogus")
+    proc = run_cli("--bad-flag")
     assert proc.returncode == 2
     assert proc.stdout == ""
-    assert "bogus" in proc.stderr
+    assert "bad-flag" in proc.stderr
 
 
 def test_usage_error_json_envelope():
-    proc = run_cli("--json", "bogus")
+    proc = run_cli("--json", "--bad-flag")
     assert proc.returncode == 2
     doc = json.loads(proc.stdout)
     assert doc["schema_version"] == envelope.SCHEMA_VERSION
