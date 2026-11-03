@@ -6,8 +6,10 @@ foundation slice implements ``version`` and ``doctor`` plus the ``--json`` flag
 end to end; the backend-detection slice adds ``backend list`` and
 ``backend check`` (the read side of the adapter seam, ADR-0040m). The MSB
 lifecycle slice adds ``create``, ``run``, ``stop``, ``rm``, and ``ls`` through the
-subprocess-calling MSB adapter. The rest of the command surface arrives with
-later slices.
+subprocess-calling MSB adapter. The exec/passthrough slice adds ``exec``,
+``attach``, ``shell``, ``cp``, ``ports``, and announced verbatim passthrough. The
+secret slice adds ``secret set``/``rm``/``ls``/``has`` (value on stdin only, never
+a value in output). The rest of the command surface arrives with later slices.
 
 Output contract:
     * human output -> stdout, diagnostics -> stderr (no ``--json``)
@@ -36,7 +38,7 @@ KNOWN_AGENTS = frozenset(
 # flag) is treated as an unknown verb and forwarded verbatim to the active
 # backend (announced passthrough, spec user story #9 / ADR-0038m §1).
 KNOWN_COMMANDS = frozenset(
-    "version doctor help backend create run ls stop rm exec attach shell cp ports".split()
+    "version doctor help backend create run ls stop rm exec attach shell cp ports secret".split()
 )
 
 # Guest-side workspace a session starts in when no host record supplies one
@@ -165,7 +167,72 @@ def build_parser() -> _Parser:
     ports_parser = sub.add_parser("ports", help="list a sandbox's declared port mappings")
     ports_parser.add_argument("name", help="sandbox name")
 
+    secret_parser = sub.add_parser(
+        "secret", help="manage sandbox secrets (values are never on argv)"
+    )
+    secret_sub = secret_parser.add_subparsers(dest="secret_command", metavar="SUBCOMMAND")
+
+    # The scope/service shape is ``[-g | SANDBOX] SERVICE`` (``-g``/``--global``
+    # flag + one positional, or two positionals). argparse cannot express that
+    # flag-vs-two-positional alternation unambiguously, so ``-g``/``--global`` is a
+    # flag and the remaining tokens are captured with REMAINDER and disambiguated
+    # by ``_parse_secret_scope_service`` / ``_parse_secret_ls_scope``.
+    secret_set = secret_sub.add_parser("set", help="store a secret (value read from stdin)")
+    _secret_scope_args(secret_set, remainder_help="[-g | SANDBOX] SERVICE")
+
+    secret_rm = secret_sub.add_parser("rm", help="remove a secret")
+    _secret_scope_args(secret_rm, remainder_help="[-g | SANDBOX] SERVICE")
+
+    secret_ls = secret_sub.add_parser("ls", help="list secrets (scope/service/value-state, never values)")
+    _secret_scope_args(secret_ls, remainder_help="[-g | SANDBOX]")
+
+    secret_has = secret_sub.add_parser("has", help="silent predicate: exit 0 if the secret is present")
+    _secret_scope_args(secret_has, remainder_help="[-g | SANDBOX] SERVICE")
+
     return parser
+
+
+def _secret_scope_args(parser: argparse.ArgumentParser, *, remainder_help: str) -> None:
+    """Add the shared ``-g/--global`` flag + REMAINDER scope/service tokens."""
+    parser.add_argument("-g", "--global", dest="global_scope", action="store_true", help="global scope")
+    parser.add_argument("args", nargs=argparse.REMAINDER, help=remainder_help)
+
+
+def _parse_secret_scope_service(global_scope: bool, tokens: list[str]) -> tuple[str | None, str | None]:
+    """Parse ``[-g | --global | SANDBOX] SERVICE`` -> ``(scope, service)``.
+
+    ``scope`` is ``"global"`` for the flag form or the sandbox name for the
+    positional form. Returns ``(None, None)`` for any other shape so the caller
+    emits a usage error. Scope and service are non-secret identifiers only.
+    """
+    if global_scope:
+        if len(tokens) != 1:
+            return None, None
+        return "global", tokens[0]
+    if len(tokens) != 2:
+        return None, None
+    scope, service = tokens
+    if scope.startswith("-"):
+        return None, None
+    return scope, service
+
+
+def _parse_secret_ls_scope(global_scope: bool, tokens: list[str]) -> tuple[str | None, bool]:
+    """Parse the optional ``secret ls`` scope filter -> ``(scope, ok)``.
+
+    ``ok`` is False for a malformed filter (extra tokens, or an unknown flag),
+    in which case the caller emits a usage error.
+    """
+    if global_scope:
+        return ("global", True) if not tokens else (None, False)
+    if not tokens:
+        return None, True
+    if len(tokens) > 1:
+        return None, False
+    token = tokens[0]
+    if token.startswith("-"):
+        return None, False
+    return token, True
 
 
 def _usage_failure(command: str | None, message: str, emit_json: bool) -> int:
@@ -404,14 +471,16 @@ def _resolve_image(flag_image: str | None, agent: str) -> str:
     return _default_image_for_agent(agent)
 
 
-def _resolve_backend_for_lifecycle(
-    explicit: str | None, emit_json: bool, command: str
+def _resolve_backend_for_mutation(
+    explicit: str | None, emit_json: bool, command: str, *, domain: str = "lifecycle"
 ) -> tuple[str | None, int | None]:
     """Resolve the backend for a mutating verb and enforce the version floor.
 
     Returns ``(backend_name, exit_code)``; ``exit_code`` is non-``None`` when a
     failure was already emitted (unknown backend -> usage, no backend / non-msb /
     unsupported version -> operational, all fail-closed before mutation).
+    ``domain`` names the verb family for the non-msb refusal message (lifecycle
+    vs secret management).
     """
     if explicit is not None and explicit not in backends.BACKENDS:
         return None, _usage_failure(
@@ -432,7 +501,7 @@ def _resolve_backend_for_lifecycle(
         return None, _operational_failure(
             command,
             errors.UNSUPPORTED,
-            f"backend '{name}' lifecycle is not implemented in this build",
+            f"backend '{name}' {domain} is not implemented in this build",
             "only the msb adapter ships in this slice; the sbx adapter arrives later",
             emit_json,
         )
@@ -440,6 +509,13 @@ def _resolve_backend_for_lifecycle(
     if problem is not None:
         return None, _operational_failure(command, problem.code, problem.message, problem.remediation, emit_json)
     return name, None
+
+
+def _resolve_backend_for_lifecycle(
+    explicit: str | None, emit_json: bool, command: str
+) -> tuple[str | None, int | None]:
+    """Backend resolution for the lifecycle verbs (kept as a named alias)."""
+    return _resolve_backend_for_mutation(explicit, emit_json, command, domain="lifecycle")
 
 
 def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tuple[str | None, int | None]:
@@ -966,6 +1042,132 @@ def run_ports(parsed, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
+# ---------------------------------------------------------------------------
+# secret set / rm / ls / has (ADR-0040m `secret-write/rm`, `secret-list`;
+# ADR-0038m §secret ls/has required data). The paramount rule is that no secret
+# VALUE ever appears in argv, logs, fixtures, or output: scope/service are
+# non-secret identifiers on argv, while the value flows on stdin only.
+# ---------------------------------------------------------------------------
+
+def _read_secret_value() -> str:
+    """Read the secret value from stdin, stripping one trailing newline (CR/LF).
+
+    The value is returned to the caller and must never be printed, logged, or
+    placed on argv. An empty result signals "no value was piped".
+    """
+    data = sys.stdin.read()
+    if data.endswith("\n"):
+        data = data[:-1]
+    if data.endswith("\r"):
+        data = data[:-1]
+    return data
+
+
+def run_secret_set(parsed, emit_json: bool) -> int:
+    """``acq secret set (-g | SANDBOX) SERVICE`` — value read from stdin only.
+
+    The value is forwarded to the backend on its stdin (never argv) and is never
+    echoed; the success envelope carries only scope/service/value_state.
+    """
+    scope, service = _parse_secret_scope_service(parsed.global_scope, parsed.args)
+    if scope is None or service is None:
+        return _usage_failure("secret set", "usage: acq secret set [-g | SANDBOX] SERVICE (value on stdin)", emit_json)
+    value = _read_secret_value()
+    if not value:
+        return _usage_failure(
+            "secret set",
+            "no secret value provided on stdin",
+            emit_json,
+        )
+    try:
+        msb.secret_set(scope, service, value)
+    except msb.MsbError as exc:
+        return _operational_failure("secret set", exc.code, exc.message, exc.remediation, emit_json)
+    data = {"scope": scope, "service": service, "value_state": "set"}
+    if emit_json:
+        print(json.dumps(envelope.success("secret set", data)))
+    else:
+        print(f"stored secret '{service}' (scope {scope})")
+    return errors.EXIT_SUCCESS
+
+
+def run_secret_rm(parsed, emit_json: bool) -> int:
+    """``acq secret rm (-g | SANDBOX) SERVICE`` — remove a secret.
+
+    An absent secret fails closed with ``secret_missing`` (ADR-0040m) rather than
+    a generic failure.
+    """
+    scope, service = _parse_secret_scope_service(parsed.global_scope, parsed.args)
+    if scope is None or service is None:
+        return _usage_failure("secret rm", "usage: acq secret rm [-g | SANDBOX] SERVICE", emit_json)
+    if not msb.secret_has(scope, service):
+        return _operational_failure(
+            "secret rm",
+            errors.SECRET_MISSING,
+            f"no secret '{service}' for scope '{scope}'",
+            f"store one with 'acq secret set -g {service}' (or scoped to a sandbox)",
+            emit_json,
+        )
+    try:
+        msb.secret_rm(scope, service)
+    except msb.MsbError as exc:
+        return _operational_failure("secret rm", exc.code, exc.message, exc.remediation, emit_json)
+    data = {"scope": scope, "service": service, "value_state": "unset"}
+    if emit_json:
+        print(json.dumps(envelope.success("secret rm", data)))
+    else:
+        print(f"removed secret '{service}' (scope {scope})")
+    return errors.EXIT_SUCCESS
+
+
+def _print_secret_ls_human(data: dict) -> None:
+    secrets = data["secrets"]
+    if not secrets:
+        print("no secrets")
+        return
+    for entry in secrets:
+        print(f"  {entry['scope']}  {entry['service']}  {entry['value_state']}")
+
+
+def run_secret_ls(parsed, emit_json: bool) -> int:
+    """``acq secret ls [(-g | SANDBOX)]`` — scope/service/value_state, never a value.
+
+    An unreadable or unparseable backend listing fails closed with
+    ``secret_unreadable`` (ADR-0040m) rather than being reported as empty.
+    """
+    scope, ok = _parse_secret_ls_scope(parsed.global_scope, parsed.args)
+    if not ok:
+        return _usage_failure("secret ls", "usage: acq secret ls [-g | SANDBOX]", emit_json)
+    try:
+        secrets = msb.secret_ls(scope)
+    except msb.MsbError as exc:
+        return _operational_failure("secret ls", exc.code, exc.message, exc.remediation, emit_json)
+    data = {"secrets": secrets}
+    if emit_json:
+        print(json.dumps(envelope.success("secret ls", data)))
+    else:
+        _print_secret_ls_human(data)
+    return errors.EXIT_SUCCESS
+
+
+def run_secret_has(parsed, backend_override: str | None) -> int:
+    """``acq secret has (-g | SANDBOX) SERVICE`` — silent predicate (ADR-0038m).
+
+    Exit 0 (present), 1 (absent or fail-closed), 2 (usage). ``--json`` is inert:
+    there is never a stdout body — the answer is the exit status alone, and
+    failures are stderr diagnostics (so ``emit_json`` is deliberately not honored).
+    """
+    scope, service = _parse_secret_scope_service(parsed.global_scope, parsed.args)
+    if scope is None or service is None:
+        return _usage_failure("secret has", "usage: acq secret has [-g | SANDBOX] SERVICE", False)
+    _backend, exit_code = _resolve_backend_for_mutation(
+        backend_override, False, "secret has", domain="secret management"
+    )
+    if exit_code is not None:
+        return exit_code
+    return errors.EXIT_SUCCESS if msb.secret_has(scope, service) else errors.EXIT_FAILURE
+
+
 def _passthrough(argv: list[str], explicit: str | None, emit_json: bool) -> int:
     """Forward an unknown subcommand verbatim to the active backend (ADR-0038m §1).
 
@@ -1076,6 +1278,27 @@ def main(argv: list[str] | None = None) -> int:
             return run_cp(parsed, emit_json)
         if parsed.command == "ports":
             return run_ports(parsed, emit_json)
+
+    if parsed.command == "secret":
+        subcmd = parsed.secret_command
+        if subcmd is None:
+            return _usage_failure("secret", "secret requires a subcommand: set | rm | ls | has", emit_json)
+        command = f"secret {subcmd}"
+        # `secret has` is a silent predicate: it never emits a stdout body, so it
+        # resolves the backend itself with emit_json=False (failures -> stderr).
+        if subcmd == "has":
+            return run_secret_has(parsed, backend_override)
+        # argparse already refused an unknown choice, so subcmd is set|rm|ls here.
+        _backend, exit_code = _resolve_backend_for_mutation(
+            backend_override, emit_json, command, domain="secret management"
+        )
+        if exit_code is not None:
+            return exit_code
+        if subcmd == "set":
+            return run_secret_set(parsed, emit_json)
+        if subcmd == "rm":
+            return run_secret_rm(parsed, emit_json)
+        return run_secret_ls(parsed, emit_json)
 
     if parsed.command == "help" or parsed.command is None:
         parser.print_help()

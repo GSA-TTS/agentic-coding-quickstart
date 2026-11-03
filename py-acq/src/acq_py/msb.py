@@ -1,11 +1,14 @@
-"""MSB backend adapter — subprocess-calling lifecycle side (ADR-0040m).
+"""MSB backend adapter — subprocess-calling lifecycle + secret side (ADR-0040m).
 
 The read side (detection + version floor) lives in ``backends.py``; this module
 owns the mutating/lifecycle verbs the seam drives — ``create``, ``list``,
-``exec`` (readiness probe + agent launch), ``stop``, and ``remove`` — by invoking
-the ``msb`` CLI as a subprocess. The adapter reports outcomes and never decides
-trust: sandbox identity, agent, and workspace authority stay host-side in the
-seam (``cli.py`` + ``state.py``), per ADR-0040m §trust ownership.
+``exec`` (readiness probe + agent launch), ``stop``, ``remove``, ``copy``, and
+``ports`` — plus the secret verbs ``secret_set``/``secret_has``/``secret_rm``/
+``secret_ls`` — by invoking the ``msb`` CLI as a subprocess. The adapter reports
+outcomes and never decides trust: sandbox identity, agent, and workspace
+authority stay host-side in the seam (``cli.py`` + ``state.py``), per ADR-0040m
+§trust ownership. A secret VALUE crosses the adapter boundary only as the child's
+stdin — never argv, never output.
 
 The ``msb`` executable is overridable via ``ACQ_MSB_BIN`` for reproducible,
 offline contract vectors. ``__stub__`` routes to the bundled deterministic fake
@@ -60,9 +63,15 @@ def msb_command() -> list[str]:
     return ["msb"]
 
 
-def _run(argv: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess:
+def _run(
+    argv: list[str],
+    *,
+    timeout: float | None = None,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         [*msb_command(), *argv],
+        input=input_text,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -277,6 +286,117 @@ def ports(name: str) -> list[dict]:
                     # carry origin="post-hoc"; only create-time `-p` mappings read
                     # from `msb inspect` are "create".
                     "origin": "create",
+                }
+            )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Secret verbs (ADR-0040m `secret-write/rm`, `secret-list`). The value is the one
+# thing that must NEVER cross the CLI/adapter boundary except on the child's
+# stdin: scope and service are non-secret identifiers carried on argv, while the
+# value itself is passed via stdin (never argv) and never echoed, logged, or
+# returned by any of these functions (ADR-0038m §user story #7 "no secret
+# exposure").
+# ---------------------------------------------------------------------------
+
+# ``msb secret …`` takes the scope as either the ``--global`` flag or a leading
+# positional sandbox name; a global scope is encoded as the flag so a sandbox
+# whose name happens to be ``--global`` can never be confused with the flag.
+_GLOBAL_SCOPE = "global"
+
+
+def _secret_scope_argv(scope: str) -> list[str]:
+    """Encode a scope as the ``msb secret …`` argv token (non-secret)."""
+    return ["--global"] if scope == _GLOBAL_SCOPE else [scope]
+
+
+def secret_set(scope: str, service: str, value: str, *, timeout: float | None = None) -> None:
+    """Store a secret for ``(scope, service)``. The value travels on stdin only.
+
+    Raises :class:`MsbError` on a backend failure. ``value`` is never logged or
+    echoed; the raw backend stderr is deliberately not surfaced (ADR-0040m: raw
+    backend text is never a portable field).
+    """
+    proc = _run(["secret", "set", *_secret_scope_argv(scope), service], input_text=value, timeout=timeout)
+    if proc.returncode != 0:
+        raise MsbError(
+            errors.FAILURE,
+            f"could not store secret '{service}' for scope '{scope}'",
+            "check backend logs and retry",
+        )
+
+
+def secret_has(scope: str, service: str) -> bool:
+    """True when a secret for ``(scope, service)`` is present (exit 0), else False.
+
+    A predicate, not an error: any nonzero backend exit maps to ``False`` (fail
+    closed), so the caller's silent ``secret has`` answer stays a plain 0/1.
+    """
+    proc = _run(["secret", "has", *_secret_scope_argv(scope), service])
+    return proc.returncode == 0
+
+
+def secret_rm(scope: str, service: str) -> None:
+    """Remove a secret for ``(scope, service)``. Raises :class:`MsbError` on failure.
+
+    The seam (:func:`cli.run_secret_rm`) checks presence first and reports
+    ``secret_missing`` for an absent secret; a nonzero exit here is a generic
+    backend failure, not a missing-secret signal (mirrors the sandbox
+    exists-then-remove pattern).
+    """
+    proc = _run(["secret", "rm", *_secret_scope_argv(scope), service])
+    if proc.returncode != 0:
+        raise MsbError(
+            errors.FAILURE,
+            f"could not remove secret '{service}' for scope '{scope}'",
+            "check backend logs and retry",
+        )
+
+
+def secret_ls(scope: str | None = None) -> list[dict]:
+    """Return ``[{scope, service, value_state}, …]`` — never a value.
+
+    ``scope`` is an optional filter (``"global"`` or a sandbox name); ``None``
+    lists every scope. An inspect that *fails* or returns unparseable/wrong-shape
+    output raises :class:`MsbError` with ``secret_unreadable`` so the seam fails
+    closed rather than swallowing the store status as an empty list
+    (ADR-0038m §48 drops "inspection-failure-as-empty").
+    """
+    argv = ["secret", "ls"]
+    if scope is not None:
+        argv += _secret_scope_argv(scope)
+    proc = _run(argv)
+    if proc.returncode != 0:
+        raise MsbError(
+            errors.SECRET_UNREADABLE,
+            "could not read the secret store",
+            "check backend logs and retry",
+        )
+    try:
+        doc = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        raise MsbError(
+            errors.SECRET_UNREADABLE,
+            "could not parse the secret store listing",
+            "the backend returned an unreadable secret list; check backend logs and retry",
+        )
+    if not isinstance(doc, list):
+        raise MsbError(
+            errors.SECRET_UNREADABLE,
+            "could not parse the secret store listing",
+            "the backend returned an unexpected secret-list shape; check backend logs and retry",
+        )
+    out: list[dict] = []
+    for entry in doc:
+        # A wrong-shape entry (non-dict, or missing scope/service) is skipped
+        # rather than raising; a top-level non-list already failed closed above.
+        if isinstance(entry, dict) and "scope" in entry and "service" in entry:
+            out.append(
+                {
+                    "scope": entry["scope"],
+                    "service": entry["service"],
+                    "value_state": entry.get("value_state", "set"),
                 }
             )
     return out

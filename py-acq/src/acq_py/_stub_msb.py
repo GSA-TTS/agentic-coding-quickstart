@@ -24,6 +24,15 @@ VERSION_ENV = "ACQ_MSB_STUB_VERSION"
 PORTS_ENV = "ACQ_MSB_STUB_PORTS"
 INSPECT_RAW_ENV = "ACQ_MSB_STUB_INSPECT_RAW"
 
+# Secret-store knobs. ``ACQ_MSB_STUB_SECRETS`` seeds ``{scope: {service: "set"}}``
+# so a single-invocation vector can exercise ``secret ls``/``has``/``rm`` against
+# pre-existing entries. ``ACQ_MSB_STUB_SECRET_LS_RAW`` forces ``secret ls`` to emit
+# a raw (wrong-shape) document so a vector can assert the adapter fails closed
+# with ``secret_unreadable``. The stub records ONLY scope/service/state — it never
+# stores or echoes a secret value (it discards stdin after reading it).
+SECRETS_ENV = "ACQ_MSB_STUB_SECRETS"
+SECRET_LS_RAW_ENV = "ACQ_MSB_STUB_SECRET_LS_RAW"
+
 # ``exec`` prints this marker to its own stdout to simulate a real agent writing
 # to stdout; the adapter's json-mode launch must route it to acq's stderr so the
 # CLI stdout stays a single JSON document (ADR-0038m §2).
@@ -85,11 +94,140 @@ def _save(catalog: dict[str, str]) -> None:
     path.write_text(json.dumps(catalog, sort_keys=True), encoding="utf-8")
 
 
+def _secrets_path() -> Path:
+    return _catalog_path().parent / "secrets.json"
+
+
+def _load_secrets() -> dict[str, dict[str, str]]:
+    """Return the secret store as ``{scope: {service: "set"}}`` (state only).
+
+    The value is never stored: ``"set"`` is a presence marker. A seed via
+    ``SECRETS_ENV`` is honored first (single-invocation vectors), else the on-disk
+    catalog, else empty.
+    """
+    seed = os.environ.get(SECRETS_ENV)
+    if seed:
+        try:
+            loaded = json.loads(seed)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(loaded, dict):
+            return {
+                k: {s: st for s, st in v.items() if isinstance(st, str)}
+                for k, v in loaded.items()
+                if isinstance(v, dict)
+            }
+        return {}
+    try:
+        doc = json.loads(_secrets_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if isinstance(doc, dict):
+        return {
+            k: {s: st for s, st in v.items() if isinstance(st, str)}
+            for k, v in doc.items()
+            if isinstance(v, dict)
+        }
+    return {}
+
+
+def _save_secrets(secrets: dict[str, dict[str, str]]) -> None:
+    path = _secrets_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(secrets, sort_keys=True), encoding="utf-8")
+
+
 def _arg_after(args: list[str], flag: str) -> str | None:
     for i, a in enumerate(args):
         if a == flag and i + 1 < len(args):
             return args[i + 1]
     return None
+
+
+def _secret_scope_service(args: list[str]) -> tuple[str | None, str | None]:
+    """Parse ``[--global | SANDBOX] SERVICE`` into ``(scope, service)``."""
+    if not args:
+        return None, None
+    if args[0] in ("-g", "--global"):
+        return "global", (args[1] if len(args) > 1 else None)
+    return args[0], (args[1] if len(args) > 1 else None)
+
+
+def _secret_scope_only(args: list[str]) -> str | None:
+    """Parse an optional ``[--global | SANDBOX]`` scope filter (``secret ls``)."""
+    if not args:
+        return None
+    if args[0] in ("-g", "--global"):
+        return "global"
+    return args[0]
+
+
+def _secret_main(args: list[str]) -> int:
+    """Handle ``msb secret <subcommand> …`` (state only, never a value)."""
+    if not args:
+        print("msb: secret requires a subcommand", file=sys.stderr)
+        return 1
+    sub = args[0]
+    rest = args[1:]
+    secrets = _load_secrets()
+
+    if sub == "set":
+        # The value arrives on stdin and is read then discarded: it is never
+        # stored, echoed, or logged. Only (scope, service) -> "set" is recorded.
+        try:
+            sys.stdin.read()
+        except OSError:
+            pass
+        scope, service = _secret_scope_service(rest)
+        if scope is None or service is None:
+            print("msb: secret set requires a scope and service", file=sys.stderr)
+            return 1
+        secrets.setdefault(scope, {})[service] = "set"
+        _save_secrets(secrets)
+        return 0
+
+    if sub == "rm":
+        scope, service = _secret_scope_service(rest)
+        if scope is None or service is None:
+            print("msb: secret rm requires a scope and service", file=sys.stderr)
+            return 1
+        if service not in secrets.get(scope, {}):
+            print("msb: no such secret", file=sys.stderr)
+            return 1
+        del secrets[scope][service]
+        if not secrets[scope]:
+            del secrets[scope]
+        _save_secrets(secrets)
+        return 0
+
+    if sub == "ls":
+        if _should_fail("secret ls"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
+        raw = os.environ.get(SECRET_LS_RAW_ENV)
+        if raw is not None:
+            print(raw)
+            return 0
+        scope = _secret_scope_only(rest)
+        entries: list[dict] = []
+        for sc, services in secrets.items():
+            if scope is not None and sc != scope:
+                continue
+            for svc, state in services.items():
+                entries.append({"scope": sc, "service": svc, "value_state": state})
+        entries.sort(key=lambda e: (e["scope"], e["service"]))
+        print(json.dumps(entries))
+        return 0
+
+    if sub == "has":
+        scope, service = _secret_scope_service(rest)
+        if scope is None or service is None:
+            print("msb: secret has requires a scope and service", file=sys.stderr)
+            return 1
+        return 0 if service in secrets.get(scope, {}) else 1
+
+    print(f"msb: unrecognized secret subcommand '{sub}'", file=sys.stderr)
+    return 1
 
 
 def main(argv: list[str]) -> int:
@@ -101,6 +239,9 @@ def main(argv: list[str]) -> int:
     if cmd in ("--version", "-V"):
         print(f"msb {os.environ.get(VERSION_ENV, '0.7.7')}")
         return 0
+
+    if cmd == "secret":
+        return _secret_main(args[1:])
 
     catalog = _load()
 

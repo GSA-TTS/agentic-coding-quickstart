@@ -94,13 +94,28 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   mappings with origin (create-time), never listener health (ADR-0038m §2). A
   failed or unreadable `msb inspect` fails closed rather than reporting an empty
   list (ADR-0038m §48).
+* `acq-py secret set (-g | SANDBOX) SERVICE [--json]` — store a secret. The value
+  is read from **stdin only** (never argv) and forwarded to the backend on its
+  stdin; the success envelope reports `scope`/`service`/`value_state` and never
+  the value (ADR-0038m §secret set). A scope-less `secret set` is a usage error
+  (ADR-0038m §48 drops scope-less secret set), as is an empty stdin value.
+* `acq-py secret rm (-g | SANDBOX) SERVICE [--json]` — remove a secret. An absent
+  secret fails closed with the `secret_missing` code (ADR-0040m).
+* `acq-py secret ls [(-g | SANDBOX)] [--json]` — list secrets with
+  `scope`/`service`/`value_state` (set/unset) only, never a value
+  (ADR-0038m §2 secret ls required data). An unreadable or wrong-shape backend
+  listing fails closed with `secret_unreadable` (ADR-0040m).
+* `acq-py secret has (-g | SANDBOX) SERVICE` — a silent predicate (ADR-0038m):
+  exit `0` when the secret is present, `1` when absent (or fail-closed), `2` on a
+  usage error. It prints nothing on stdout, even with `--json`.
 * Any other subcommand is forwarded verbatim to the active backend binary with an
   announced stderr notice, preserving its exit status (spec user story #9).
 * Exit codes (ADR-0038m §1): `0` success, `2` usage, `1` operational. A
   well-formed command acq cannot carry out (for example `doctor NAME` while no
   backend adapter is present) fails closed with exit `1` and the
   `unsupported_capability` code (ADR-0040m). The lifecycle verbs add
-  `sandbox_not_found`, `sandbox_exists`, `validation_failed`, and `timeout`.
+  `sandbox_not_found`, `sandbox_exists`, `validation_failed`, and `timeout`; the
+  secret verbs add `secret_missing` and `secret_unreadable`.
   `exec`, `attach`, `shell`, `cp`, and passthrough preserve the child/backend
   exit status rather than acq's own `0`/`1`.
 
