@@ -27,6 +27,10 @@
       "vectors": ["cli/backend-list-none", "cli/backend-list-versions", "cli/backend-list-unknown"]
     },
     {
+      "contract": "ADR-0038m §2 backend list active_backend auto-detect default (none / single / both)",
+      "vectors": ["cli/backend-list-none", "cli/backend-list-unknown", "cli/backend-list-default-msb"]
+    },
+    {
       "contract": "ADR-0040m version floor fail-closed (backend_not_found / backend_version_unsupported / backend_version_unknown)",
       "vectors": ["cli/backend-check-ok", "cli/backend-check-unsupported", "cli/backend-check-blocked", "cli/backend-check-unknown", "cli/backend-check-not-found"]
     },

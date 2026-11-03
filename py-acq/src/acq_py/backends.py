@@ -22,7 +22,10 @@ uses for ``ACQ_VERSION``/``ACQ_SOURCE_REVISION``):
       backend CLI would report (implies ``installed`` unless the explicit
       ``INSTALLED`` override says otherwise).
 
-These are test/build overrides, never secrets, and are never written to output.
+These overrides are an internal test seam, not part of the public ``acq``
+command/contract surface: they exist only so contract vectors can run
+deterministically and offline. They are never secrets and are never written to
+output.
 """
 
 from __future__ import annotations

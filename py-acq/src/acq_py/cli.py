@@ -112,16 +112,32 @@ def _resolve_active_backend(explicit: str | None) -> str | None:
     """Resolve the active backend for read-only reporting.
 
     Precedence: the ``--backend`` flag, then the ``ACQ_BACKEND`` environment
-    variable. An invalid flag value is a usage error (handled by the caller); an
-    invalid environment value is dropped (ADR-0038m "drop invalid persisted
-    backends"). Config-file persistence (``backend set``) is a later slice, so
-    with no explicit selection the active backend is ``None``.
+    variable, then (in a later slice) config persistence via ``backend set``,
+    then the auto-detect default. An invalid flag value is a usage error
+    (handled by the caller); an invalid environment value is dropped (ADR-0038m
+    "drop invalid persisted backends").
+
+    Auto-detect default arms:
+
+        * exactly one backend installed -> that backend;
+        * sbx and msb both installed -> msb;
+        * none installed -> ``None``;
+        * (future) two or more installed and none is msb -> prompt the user and
+          persist the answer via ``backend set``.
+
+    The last arm cannot arise in v1 (only sbx and msb exist), so it is
+    documented but not implemented here.
     """
     if explicit is not None:
         return explicit
     env_backend = os.environ.get("ACQ_BACKEND")
     if env_backend in backends.BACKENDS:
         return env_backend
+    installed = [s.name for s in backends.detect_all() if s.installed]
+    if len(installed) == 1:
+        return installed[0]
+    if len(installed) > 1:
+        return "msb"
     return None
 
 
@@ -222,9 +238,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"unknown backend: {backend_override!r} (expected sbx or msb)",
                 emit_json,
             )
-        active_backend = _resolve_active_backend(backend_override)
         if parsed.backend_command == "list":
-            return run_backend_list(emit_json, active_backend)
+            return run_backend_list(emit_json, _resolve_active_backend(backend_override))
         if parsed.backend_command == "check":
             return run_backend_check(emit_json, parsed.name)
         return _usage_failure(

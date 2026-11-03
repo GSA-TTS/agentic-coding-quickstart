@@ -23,7 +23,7 @@
         "schema_version": 1,
         "command": "backend list",
         "data": {
-          "active_backend": null,
+          "active_backend": "sbx",
           "backends": [
             {"name": "sbx", "installed": true, "version": "unknown"},
             {"name": "msb", "installed": false, "version": null}
