@@ -22,6 +22,7 @@ from pathlib import Path
 CATALOG_ENV = "ACQ_MSB_STUB_CATALOG"
 VERSION_ENV = "ACQ_MSB_STUB_VERSION"
 PORTS_ENV = "ACQ_MSB_STUB_PORTS"
+INSPECT_RAW_ENV = "ACQ_MSB_STUB_INSPECT_RAW"
 
 # ``exec`` prints this marker to its own stdout to simulate a real agent writing
 # to stdout; the adapter's json-mode launch must route it to acq's stderr so the
@@ -172,6 +173,12 @@ def main(argv: list[str]) -> int:
         if name is None or name not in catalog:
             print(f"msb: no such sandbox '{name}'", file=sys.stderr)
             return 1
+        raw = os.environ.get(INSPECT_RAW_ENV)
+        if raw is not None:
+            # A raw inspect payload (a vector feeds a wrong-shape document here so
+            # the adapter's shape guard is exercised end to end).
+            print(raw)
+            return 0
         ports_env = os.environ.get(PORTS_ENV, "")
         try:
             declared = json.loads(ports_env) if ports_env else {}

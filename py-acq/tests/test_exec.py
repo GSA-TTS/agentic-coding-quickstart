@@ -30,6 +30,7 @@ def _env(monkeypatch, tmp_path, *, catalog=None):
         "ACQ_MSB_STUB_COPY_EXIT",
         "ACQ_MSB_STUB_EXIT_CODE",
         "ACQ_MSB_STUB_PORTS",
+        "ACQ_MSB_STUB_INSPECT_RAW",
     ):
         monkeypatch.delenv(name, raising=False)
     if catalog is not None:
@@ -151,6 +152,17 @@ def test_ports_inspect_failure_fails_closed(monkeypatch, tmp_path, capsys):
     # operational failure, not an empty ports list.
     _env(monkeypatch, tmp_path, catalog={"box": "running"})
     monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "inspect")
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "--json", "ports", "box")
+    assert rc == 1
+    assert doc["error"]["code"] == "failure"
+
+
+def test_ports_inspect_bad_shape_fails_closed(monkeypatch, tmp_path, capsys):
+    # A valid-JSON-but-wrong-shape inspect (non-dict intermediate level) must
+    # fail closed with a stable code, never raise an uncaught AttributeError.
+    _env(monkeypatch, tmp_path, catalog={"box": "running"})
+    monkeypatch.setenv("ACQ_MSB_STUB_INSPECT_RAW", '{"active_config":"x"}')
 
     rc, doc = _invoke(capsys, "--backend", "msb", "--json", "ports", "box")
     assert rc == 1

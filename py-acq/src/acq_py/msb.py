@@ -217,9 +217,10 @@ def ports(name: str) -> list[dict]:
     Reads create-time mappings from ``msb inspect NAME --format json`` (backend
     authority, host-side). This reports declarations, never listener health. An
     inspect that *succeeds* with no ``ports`` key is a legitimate empty result; an
-    inspect that *fails* (non-zero exit) or returns unparseable output raises
-    :class:`MsbError` so the seam fails closed rather than swallowing the backend
-    status as an empty list (ADR-0038m §48 drops "inspection-failure-as-empty").
+    inspect that *fails* (non-zero exit), returns unparseable output, or returns a
+    wrong-shape document raises :class:`MsbError` so the seam fails closed rather
+    than swallowing the backend status as an empty list (ADR-0038m §48 drops
+    "inspection-failure-as-empty").
     """
     proc = _run(["inspect", name, "--format", "json"])
     if proc.returncode != 0:
@@ -236,15 +237,35 @@ def ports(name: str) -> list[dict]:
             f"could not parse declared ports for sandbox '{name}'",
             "the backend returned an unreadable inspect result; check msb logs and retry",
         )
-    entries = doc.get("active_config", {}).get("network", {}).get("ports", [])
-    if entries is None:
-        entries = []
-    if not isinstance(entries, list):
-        raise MsbError(
+
+    def _bad_shape() -> MsbError:
+        return MsbError(
             errors.FAILURE,
             f"could not parse declared ports for sandbox '{name}'",
             "the backend returned an unexpected inspect shape; check msb logs and retry",
         )
+
+    # Traverse the msb inspect shape defensively: a wrong shape at any
+    # intermediate level (non-dict active_config/network, a top-level list) must
+    # fail closed, not raise an uncaught AttributeError. Absence of a level is a
+    # legitimate empty result (an older inspect shape).
+    if not isinstance(doc, dict):
+        raise _bad_shape()
+    active_config = doc.get("active_config")
+    if active_config is None:
+        return []
+    if not isinstance(active_config, dict):
+        raise _bad_shape()
+    network = active_config.get("network")
+    if network is None:
+        return []
+    if not isinstance(network, dict):
+        raise _bad_shape()
+    entries = network.get("ports")
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list):
+        raise _bad_shape()
     out: list[dict] = []
     for entry in entries:
         if isinstance(entry, dict) and "host_port" in entry and "guest_port" in entry:

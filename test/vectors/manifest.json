@@ -1,6 +1,9 @@
 {
   "schema": 1,
   "description": "Maps each contract row to at least one vector id. CI-validated against the actual corpus: a missing or renamed vector fails the check rather than being assumed absent.",
+  "notes": [
+    "attach child/backend exit-status preservation is Tier-2 only: the vector harness cannot yet seed host-authoritative state records (a readable record is required before attach will launch an agent). attach's status propagation shares the launch -> exec_command -> _run_stream path that cli/shell-exit-code covers at Tier-1, so it is covered transitively; attach-specific fail-closed behavior (missing sandbox, missing/unreadable record) is Tier-1 covered directly by cli/attach-missing and cli/attach-json. Do not re-add an attach-exit-code vector until the harness can seed state."
+  ],
   "rows": [
     {
       "contract": "ADR-0038m §1 exit codes 0 (success) and 2 (usage)",
@@ -121,6 +124,10 @@
     {
       "contract": "ADR-0038m §48 drop inspection-failure-as-empty: ports fails closed (failure) on a failed inspect",
       "vectors": ["cli/ports-inspect-failure"]
+    },
+    {
+      "contract": "ADR-0038m §48: ports fails closed (failure) on a wrong-shape inspect (no uncaught traceback)",
+      "vectors": ["cli/ports-inspect-bad-shape"]
     },
     {
       "contract": "ADR-0040m ports fails closed (sandbox_not_found) on a missing sandbox",
