@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "id": "sentinel/mode-json",
+  "oracle": "ADR-0043m assertion mode: json (parse and structural compare)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{python}", "-c", "import json, sys; sys.stdout.buffer.write(json.dumps({'ok': True, 'n': 1}).encode())"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "fixtures": [],
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {"ok": true, "n": 1},
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "no_live_refeed": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

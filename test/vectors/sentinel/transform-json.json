@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "id": "sentinel/transform-json",
+  "oracle": "ADR-0043m normalisation transform: json (canonical re-serialisation)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{python}", "-c", "import json, sys; sys.stdout.buffer.write(json.dumps({'b': 1, 'a': 2}).encode())"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "fixtures": [],
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "{\"a\":2,\"b\":1}",
+      "normalize": ["json"]
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "no_live_refeed": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

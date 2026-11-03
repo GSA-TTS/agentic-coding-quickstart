@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "id": "sentinel/transform-order",
+  "oracle": "ADR-0043m normalisation transform: order (sort lines)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{python}", "-c", "import sys; sys.stdout.buffer.write(b'z\\na\\nm\\n')"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "fixtures": [],
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "a\nm\nz\n",
+      "normalize": ["order"]
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "no_live_refeed": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

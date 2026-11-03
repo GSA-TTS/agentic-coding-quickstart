@@ -1,0 +1,80 @@
+# Test-vector corpus (ADR-0043m)
+
+One immutable UTF-8 JSON file per vector, at `test/vectors/<section>/<id>.json`.
+A vector records a single CLI invocation, its expected observable result, and the
+isolation it requires. Vectors carry the *what*; the two runners (the pytest
+runner and `scripts/run-vectors`) carry the *how*.
+
+> AI-assisted; owner: Bret Mogilefsky.
+
+## Sections
+
+* `cli/` — contract vectors driving the CLI-under-test (`{acq}`).
+* `sentinel/` — the golden set proving both runners implement every assertion
+  mode and normalisation transform. A diverging runner fails on the feature.
+* `manifest.json` — the coverage manifest: maps every contract row to at least
+  one vector id, and is validated against the corpus in CI (a missing or renamed
+  vector fails the check rather than being assumed absent).
+
+## Schema
+
+```jsonc
+{
+  "schema": 1,               // vector-schema version
+  "id": "cli/version-json",  // <section>/<name>, matches the file path
+  "oracle": "…",             // the contract row/capability this proves
+  "tier": 1,                 // 1 fast/CI, 2 impl, 3 live
+  "backend": null,           // sbx|msb|null (non-null needs that backend)
+  "platform": "any",         // any|linux|windows|macos
+  "invoke": {
+    "argv": ["{acq}", "version", "--json"],
+    "env": {"ACQ_VERSION": "0.1.0"},
+    "unset": ["SOME_VAR"],
+    "stdin": "",
+    "fixtures": [],
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {"mode": "json", "value": {…}, "normalize": []},
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "no_live_refeed": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME"]
+  }
+}
+```
+
+Placeholders in `invoke.argv`: `{acq}` splices the CLI-under-test command list;
+`{python}` splices the interpreter used by deterministic sentinel subjects.
+
+## Assertion modes (`expect.<stream>.mode`)
+
+* `exact` — byte-exact equality (after transforms). The default.
+* `contains` — the expected value is a substring of the output.
+* `json` — the output is parsed as JSON and structurally compared to `value`.
+
+## Normalisation transforms (`expect.<stream>.normalize`, in order)
+
+Exact-by-default: a field is byte-exact unless it declares transforms, and only
+declared transforms apply. Regex is not a mode. Placeholders are `<abspath>`,
+`<tmpdir>`, `<timing>`.
+
+* `abspath` — replace a POSIX absolute path with `<abspath>`. (Windows drive/UNC
+  path normalisation is deferred to the platform-qualification slice.)
+* `tmpdir` — replace the temporary-directory root with `<tmpdir>`.
+* `crlf` — normalize CRLF line endings to LF.
+* `timing` — replace a duration literal (`123ms`, `1.5s`, …) with `<timing>`.
+* `order` — sort the lines of the output.
+* `json` — canonical re-serialisation (compact, sorted keys) of a JSON document.
+
+## Isolation
+
+`redirect` names environment variables redirected to throwaway directories, so an
+oracle can never read or mutate the developer's real state (ADR-0039m); the
+runner always redirects `HOME` and the `XDG_*` set. A runner that cannot honour a
+declared requirement (`offline: false`, `ssh_stubs: true`, a non-null `backend`)
+fails closed.

@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "id": "cli/usage-error",
+  "oracle": "ADR-0038m §1 exit 2 and §2 structured output failure envelope for a usage error",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--json", "bogus"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "fixtures": [],
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 2,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "acq",
+        "error": {
+          "code": "usage",
+          "message": "argument COMMAND: invalid choice: 'bogus' (choose from version, help)",
+          "remediation": "run 'acq --help' for usage"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "no_live_refeed": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "description": "Maps each contract row to at least one vector id. CI-validated against the actual corpus: a missing or renamed vector fails the check rather than being assumed absent.",
+  "rows": [
+    {
+      "contract": "ADR-0038m §1 exit codes 0 (success) and 2 (usage)",
+      "vectors": ["cli/version-json", "cli/version-human", "cli/usage-error", "cli/usage-error-human"]
+    },
+    {
+      "contract": "ADR-0038m §2 structured output success envelope",
+      "vectors": ["cli/version-json"]
+    },
+    {
+      "contract": "ADR-0038m §2 structured output failure envelope",
+      "vectors": ["cli/usage-error"]
+    },
+    {
+      "contract": "ADR-0038m §2 human output on stdout, diagnostics on stderr",
+      "vectors": ["cli/version-human", "cli/usage-error-human"]
+    },
+    {
+      "contract": "ADR-0038m §2 version required result data fields",
+      "vectors": ["cli/version-json"]
+    },
+    {
+      "contract": "ADR-0042m runtime: offline operation, no opportunistic download",
+      "vectors": ["cli/version-json", "cli/version-human"]
+    },
+    {
+      "contract": "ADR-0043m runner assertion modes (exact/contains/json)",
+      "vectors": ["sentinel/mode-exact", "sentinel/mode-contains", "sentinel/mode-json"]
+    },
+    {
+      "contract": "ADR-0043m runner normalisation transforms (abspath/tmpdir/crlf/timing/order/json)",
+      "vectors": ["sentinel/transform-abspath", "sentinel/transform-tmpdir", "sentinel/transform-crlf", "sentinel/transform-timing", "sentinel/transform-order", "sentinel/transform-json"]
+    }
+  ]
+}
