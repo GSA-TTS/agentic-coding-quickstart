@@ -22,7 +22,7 @@ and never touch the network, so ``doctor`` is a safe diagnostic in any context.
 
 from __future__ import annotations
 
-from . import runtime
+from . import migration, runtime
 
 PASS = "pass"
 WARN = "warn"
@@ -63,7 +63,49 @@ def backend_check() -> dict:
 
 def doctor_checks() -> list[dict]:
     """Return the ordered check list for the current build."""
-    return [runtime_check(), backend_check()]
+    return [runtime_check(), backend_check(), state_check()]
+
+
+def state_check() -> dict:
+    """Report state-tree migration health (read-only; ADR-0041m).
+
+    ``doctor`` is a diagnostic and does NOT migrate: it reports the current tree
+    state so a newer/unparseable record is surfaced (``fail``) and a legacy v0
+    record is flagged (``warn``) as "will migrate forward on the next mutating
+    verb", rather than being silently skipped.
+    """
+    generation = migration.read_generation()
+    newer: list[str] = []
+    legacy: list[str] = []
+    for path in migration.iter_records():
+        try:
+            doc = migration._load_record(path)
+        except migration.MigrationError:
+            newer.append(path.name)
+            continue
+        schema = doc.get("schema")
+        if schema is None:
+            legacy.append(path.name)
+        elif isinstance(schema, int) and not isinstance(schema, bool) and schema > migration.TARGET_SCHEMA:
+            newer.append(path.name)
+    if newer:
+        return {
+            "id": "state",
+            "status": FAIL,
+            "message": f"state tree has {len(newer)} record(s) this reader cannot read "
+            f"(generation {generation})",
+            "remediation": "upgrade acq, or remove the offending record(s) and recreate "
+            "the sandboxes they describe",
+        }
+    if legacy:
+        return {
+            "id": "state",
+            "status": WARN,
+            "message": f"state tree has {len(legacy)} legacy v0 record(s) to migrate forward "
+            f"(generation {generation})",
+            "remediation": "run any mutating acq command; records migrate forward in place",
+        }
+    return {"id": "state", "status": PASS, "message": f"state tree migrated (generation {generation})"}
 
 
 def overall_status(checks: list[dict]) -> str:

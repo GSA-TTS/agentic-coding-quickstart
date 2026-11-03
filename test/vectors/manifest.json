@@ -250,6 +250,22 @@
     {
       "contract": "ADR-0038m §2 kit validate required data: validity + coded findings (valid / findings / missing-path and missing-spec fail-closed)",
       "vectors": ["cli/kit-validate-valid", "cli/kit-validate-findings", "cli/kit-validate-missing", "cli/kit-validate-no-spec"]
+    },
+    {
+      "contract": "ADR-0041m forward-only migration: a legacy v0 record migrates forward in place and a mutating verb then reads it",
+      "vectors": ["cli/migration-forward"]
+    },
+    {
+      "contract": "ADR-0041m fail-closed migration: a newer/unparseable/min_reader record is refused with a stable code before any mutation",
+      "vectors": ["cli/migration-newer-refused"]
+    },
+    {
+      "contract": "ADR-0035/0041m security exception: a sandbox missing its read-only mount fails closed on trusted operations",
+      "vectors": ["cli/security-exception-attach"]
+    },
+    {
+      "contract": "ADR-0041m security-exception recreation is explicit and consent-gated (refused without --yes, recreates preserving host records with --yes)",
+      "vectors": ["cli/security-recreate-consent", "cli/security-recreate-yes"]
     }
   ]
 }

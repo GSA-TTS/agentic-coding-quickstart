@@ -69,6 +69,11 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
 * `acq-py create AGENT PATH [--name N] [--image REF] [--json]` — create a sandbox
   (detached) through the MSB adapter, wait for exec-readiness, and record a
   host-authoritative state record carrying `schema=N` (ADR-0041m).
+* `acq-py create --recreate NAME [--yes] [--json]` — the security-exception
+  recreation (ADR-0035/0041m): recreate a sandbox whose read-only trusted-config
+  mount is missing. Explicit and consent-gated — a non-interactive run without
+  `--yes` refuses with `consent_required`; host records and secrets are
+  preserved, only the guest filesystem is lost.
 * `acq-py run AGENT PATH [--name N] [--image REF] [--json]` — create (if missing)
   then launch the agent in the foreground; `acq-py run NAME` re-attaches to an
   existing sandbox by name.
@@ -123,9 +128,25 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   backend adapter is present) fails closed with exit `1` and the
   `unsupported_capability` code (ADR-0040m). The lifecycle verbs add
   `sandbox_not_found`, `sandbox_exists`, `validation_failed`, and `timeout`; the
-  secret verbs add `secret_missing` and `secret_unreadable`.
+  secret verbs add `secret_missing` and `secret_unreadable`; the state-migration
+  slice adds `state_schema_unsupported` (a newer/unparseable/`min_reader`
+  record), `migration_locked` (the migration lock was held by a concurrent
+  invocation), `migration_failed` (an atomic record migration could not verify),
+  and `security_exception` (a sandbox missing its read-only mount).
   `exec`, `attach`, `shell`, `cp`, and passthrough preserve the child/backend
   exit status rather than acq's own `0`/`1`.
+
+## State migration (ADR-0041m)
+
+acq owns migration of acq-hosted state records; backend-native state is never
+migrated, and guest-writable state is never trusted. Before any mutating verb,
+acq runs a synchronized forward-migration pre-step under an exclusive OS advisory
+lock (`flock`/`fcntl` on POSIX, `msvcrt.locking` on Windows) that auto-releases on
+crash: legacy v0 records migrate forward in place, a single tree-level generation
+marker is written LAST so a partial migration is resumable, and a newer or
+unparseable record (or a reader below a record's `min_reader`) is refused with a
+stable code. Each record migrates atomically and non-destructively until
+verified. Read-only diagnostics (`ls`, `doctor`) report rather than migrate.
 
 Detection and the reported version are overridable for reproducible, offline
 tests: `ACQ_SBX_INSTALLED`/`ACQ_MSB_INSTALLED` (`"0"`/`"1"`) and

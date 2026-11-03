@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 
-from . import backends, doctor, envelope, errors, kits, msb, state, version_info
+from . import backends, doctor, envelope, errors, kits, migration, msb, security, state, version_info
 
 # Agent tokens accepted by acq dispatch (mirrors acq.backends/agents.sh). Kept in
 # the CLI because it owns the create-vs-reattach decision for ``run``.
@@ -129,10 +129,17 @@ def build_parser() -> _Parser:
     check_parser.add_argument("name", help="backend name (sbx | msb)")
 
     create_parser = sub.add_parser("create", help="create a sandbox (detached)")
-    create_parser.add_argument("agent", help="agent to provision (e.g. opencode, shell)")
-    create_parser.add_argument("path", help="workspace directory to mount")
+    create_parser.add_argument("agent", nargs="?", help="agent to provision (e.g. opencode, shell)")
+    create_parser.add_argument("path", nargs="?", help="workspace directory to mount")
     create_parser.add_argument("--name", help="explicit sandbox name (default: derived from agent+path)")
     create_parser.add_argument("--image", help="base image override (default: shell-docker)")
+    create_parser.add_argument(
+        "--recreate",
+        metavar="NAME",
+        default=None,
+        help="recreate a sandbox missing its read-only mount (security exception; consent-gated)",
+    )
+    create_parser.add_argument("--yes", "-y", action="store_true", help="consent to recreation")
 
     run_parser = sub.add_parser("run", help="create+attach a sandbox, or re-attach an existing one")
     run_parser.add_argument("target", help="AGENT (create+attach) or an existing sandbox name (re-attach)")
@@ -574,7 +581,7 @@ def _wait_exec_ready(name: str) -> bool:
         time.sleep(0.1)
 
 
-def _create_sandbox(agent: str, workspace: str, name: str, image: str) -> dict:
+def _create_sandbox(agent: str, workspace: str, name: str, image: str, *, ro_host_config: bool | None = None) -> dict:
     """Create + exec-ready gate + record write; returns the result record data."""
     msb.create(name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS)
     if not _wait_exec_ready(name):
@@ -588,7 +595,7 @@ def _create_sandbox(agent: str, workspace: str, name: str, image: str) -> dict:
             f"sandbox '{name}' did not become exec-ready",
             "check msb logs, then remove the half-created sandbox and retry",
         )
-    state.record_write("msb", name, agent=agent, workspace=workspace, image=image)
+    state.record_write("msb", name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_host_config)
     return {"name": name, "backend": "msb", "agent": agent, "workspace": workspace, "state": "running"}
 
 
@@ -600,7 +607,9 @@ def _print_create_human(data: dict) -> None:
 
 
 def run_create(parsed, emit_json: bool) -> int:
-    if parsed.agent not in KNOWN_AGENTS:
+    if parsed.recreate is not None:
+        return run_recreate(parsed, emit_json)
+    if not parsed.agent or parsed.agent not in KNOWN_AGENTS:
         return _usage_failure(
             "create",
             f"unknown agent: {parsed.agent!r} (expected one of: {', '.join(sorted(KNOWN_AGENTS))})",
@@ -627,6 +636,89 @@ def run_create(parsed, emit_json: bool) -> int:
         print(json.dumps(envelope.success("create", data)))
     else:
         _print_create_human(data)
+    return errors.EXIT_SUCCESS
+
+
+def run_recreate(parsed, emit_json: bool) -> int:
+    """``acq create --recreate NAME [--yes]`` — security-exception recreation.
+
+    Recreates a sandbox that is missing the host-enforced read-only trusted-config
+    mount (ADR-0035, ADR-0041m). It is explicit and consent-gated: a non-interactive
+    run without ``--yes`` refuses with ``consent_required`` (automation never infers
+    consent). Host-held records (agent/workspace/image/ro_host_config) and secrets
+    are preserved; only the guest filesystem is lost. Recreation is refused for a
+    sandbox that is NOT in the security exception — it is never a general "reset".
+    """
+    name = parsed.recreate
+    try:
+        record = state.record_read("msb", name)
+    except state.StateSchemaError as exc:
+        return _operational_failure(
+            "create",
+            errors.STATE_SCHEMA_UNSUPPORTED,
+            str(exc),
+            f"remove the unreadable record for '{name}', or recreate it out of band",
+            emit_json,
+        )
+    if record is None:
+        return _operational_failure(
+            "create",
+            errors.SANDBOX_NOT_FOUND,
+            f"sandbox '{name}' has no host state record to recreate",
+            f"create it with 'acq create', or list sandboxes with 'acq ls'",
+            emit_json,
+        )
+    try:
+        security.assert_trusted(record, "msb", name)
+    except security.SecurityException:
+        pass  # in the security exception -> recreation is the sanctioned recovery
+    else:
+        return _operational_failure(
+            "create",
+            errors.VALIDATION_FAILED,
+            f"sandbox '{name}' is not missing its read-only mount; recreation is "
+            "only for the security exception",
+            f"re-attach with 'acq run {name}' instead",
+            emit_json,
+        )
+    if not parsed.yes:
+        if emit_json or not sys.stdin.isatty():
+            return _operational_failure(
+                "create",
+                errors.CONSENT_REQUIRED,
+                f"refusing to recreate '{name}' non-interactively without --yes",
+                f"re-run with 'acq create --recreate {name} --yes' to consent",
+                emit_json,
+            )
+        answer = input(
+            f"recreate sandbox '{name}' (guest filesystem is lost; host records "
+            "and secrets are preserved)? [y/N] "
+        )
+        if answer.strip().lower() not in ("y", "yes"):
+            if emit_json:
+                print(json.dumps(envelope.success("create", {"name": name, "backend": "msb", "recreated": False})))
+            else:
+                print("cancelled.")
+            return errors.EXIT_SUCCESS
+
+    agent = record.get("agent") or "shell"
+    workspace = record.get("workspace") or DEFAULT_GUEST_WORKSPACE
+    image = record.get("image") or _default_image_for_agent(agent)
+    ro_host_config = bool(record.get("ro_host_config"))
+    try:
+        # Preserve host records + secrets; lose only the guest filesystem. If the
+        # guest is already gone (removed out of band) there is nothing to destroy:
+        # recreate from host authority either way.
+        if msb.exists(name):
+            msb.remove(name)
+        data = _create_sandbox(agent, workspace, name, image, ro_host_config=ro_host_config)
+    except msb.MsbError as exc:
+        return _operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
+    data = {**data, "recreated": True}
+    if emit_json:
+        print(json.dumps(envelope.success("create", data)))
+    else:
+        print(f"recreated sandbox '{name}' (host records and secrets preserved).")
     return errors.EXIT_SUCCESS
 
 
@@ -695,6 +787,9 @@ def run_run(parsed, emit_json: bool) -> int:
             f"create it with 'acq create', or remove it with 'acq rm {target}'",
             emit_json,
         )
+    gate = _trusted_gate(record, "run", target, emit_json)
+    if gate is not None:
+        return gate
     agent = record.get("agent")
     workspace = record.get("workspace")
     if emit_json:
@@ -840,6 +935,19 @@ def _workspace_from_record(name: str) -> str:
     return DEFAULT_GUEST_WORKSPACE
 
 
+def _trusted_gate(record: dict | None, command: str, name: str, emit_json: bool) -> int | None:
+    """Refuse a trusted operation on a sandbox missing its read-only mount.
+
+    Returns an emitted exit code when the record requires the mount and the probe
+    reports it missing (ADR-0035/0041m), else ``None`` to proceed.
+    """
+    try:
+        security.assert_trusted(record, "msb", name)
+    except security.SecurityException as exc:
+        return _operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    return None
+
+
 def run_exec(parsed, emit_json: bool) -> int:
     """``acq exec NAME -- CMD...`` — run a command non-interactively.
 
@@ -864,7 +972,7 @@ def run_exec(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        workspace = _workspace_from_record(name)
+        record = state.record_read("msb", name)
     except state.StateSchemaError as exc:
         return _operational_failure(
             "exec",
@@ -873,6 +981,10 @@ def run_exec(parsed, emit_json: bool) -> int:
             f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'",
             emit_json,
         )
+    gate = _trusted_gate(record, "exec", name, emit_json)
+    if gate is not None:
+        return gate
+    workspace = (record or {}).get("workspace") or DEFAULT_GUEST_WORKSPACE
     rc = msb.exec_command(name, command, workspace=workspace, json_mode=emit_json)
     if emit_json:
         print(json.dumps(envelope.success("exec", {"name": name, "exit_code": rc})))
@@ -918,6 +1030,9 @@ def run_attach(parsed, emit_json: bool) -> int:
             f"create it with 'acq create', or remove it with 'acq rm {name}'",
             emit_json,
         )
+    gate = _trusted_gate(record, "attach", name, emit_json)
+    if gate is not None:
+        return gate
     agent = record.get("agent")
     if not agent:
         return _operational_failure(
@@ -951,7 +1066,7 @@ def run_shell(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        workspace = _workspace_from_record(name)
+        record = state.record_read("msb", name)
     except state.StateSchemaError as exc:
         return _operational_failure(
             "shell",
@@ -960,6 +1075,10 @@ def run_shell(parsed, emit_json: bool) -> int:
             f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'",
             emit_json,
         )
+    gate = _trusted_gate(record, "shell", name, emit_json)
+    if gate is not None:
+        return gate
+    workspace = (record or {}).get("workspace") or DEFAULT_GUEST_WORKSPACE
     rc = msb.launch(name, workspace, "shell", json_mode=emit_json)
     if emit_json:
         print(json.dumps(envelope.success("shell", {"name": name, "backend": "msb", "exit_code": rc})))
@@ -1552,6 +1671,38 @@ def _passthrough(argv: list[str], explicit: str | None, emit_json: bool) -> int:
     return subprocess.run([*binary, *argv]).returncode
 
 
+# ---------------------------------------------------------------------------
+# Synchronized forward-migration pre-step (ADR-0041m).
+# ---------------------------------------------------------------------------
+
+def _is_mutating(parsed) -> bool:
+    """True for a verb that mutates acq/sandbox state and therefore needs the
+    migration pre-step first. Read-only/query verbs read leniently and never
+    trigger migration (ADR-0041m: read-only diagnostics may report ``unknown``).
+    """
+    cmd = parsed.command
+    if cmd in ("create", "run", "stop", "rm", "exec", "attach", "shell", "cp", "ports"):
+        return True
+    if cmd == "secret":
+        return parsed.secret_command in ("set", "rm")
+    if cmd == "kit":
+        return parsed.kit_command in ("apply", "update")
+    if cmd == "kit-source":
+        return parsed.kit_source_command in ("add", "rm")
+    return False
+
+
+def _migration_pre_step(emit_json: bool, command: str) -> int | None:
+    """Run the forward migration before a mutating verb; return an emitted exit
+    code on refusal, else ``None`` (proceed).
+    """
+    try:
+        migration.migrate_tree()
+    except migration.MigrationError as exc:
+        return _operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
@@ -1607,6 +1758,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if parsed.command == "doctor":
         return run_doctor(emit_json, parsed.name)
+
+    if _is_mutating(parsed):
+        pre_step = _migration_pre_step(emit_json, parsed.command)
+        if pre_step is not None:
+            return pre_step
 
     if parsed.command in ("create", "run", "ls", "stop", "rm", "exec", "attach", "shell", "cp", "ports"):
         _backend, exit_code = _resolve_backend_for_lifecycle(backend_override, emit_json, parsed.command)

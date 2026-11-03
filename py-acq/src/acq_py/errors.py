@@ -62,3 +62,19 @@ SECRET_UNREADABLE = "secret_unreadable"
 KIT_REF_NOT_PINNED = "kit_ref_not_pinned"
 KIT_SOURCE_NOT_FOUND = "kit_source_not_found"
 CONSENT_REQUIRED = "consent_required"
+
+# State-migration slice (ADR-0041m). ``state_schema_unsupported`` (above) covers
+# the fail-closed refusal of a newer/unparseable/min_reader record. These codes
+# cover the migration machinery's own failures:
+# ``migration_locked`` — the exclusive OS advisory migration lock could not be
+#   acquired within the bounded wait (a second concurrent invocation fails
+#   closed rather than racing the migration).
+# ``migration_failed`` — a record could not be migrated atomically (write or
+#   read-back verify failed); the old record is left intact and the path +
+#   failed step are reported.
+# ``security_exception`` — a sandbox whose host record requires the read-only
+#   trusted-config mount (ADR-0035) reports the mount missing: trusted
+#   operations fail closed and require consent-gated recreation.
+MIGRATION_LOCKED = "migration_locked"
+MIGRATION_FAILED = "migration_failed"
+SECURITY_EXCEPTION = "security_exception"
