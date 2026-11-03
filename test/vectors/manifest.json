@@ -51,6 +51,22 @@
       "vectors": ["cli/doctor-unsupported"]
     },
     {
+      "contract": "ADR-0040m msb provision capability (create end to end, host-authoritative state record)",
+      "vectors": ["cli/lifecycle-create", "cli/lifecycle-run"]
+    },
+    {
+      "contract": "ADR-0038m §2 ls required data: sandboxes with name/backend/state",
+      "vectors": ["cli/lifecycle-ls"]
+    },
+    {
+      "contract": "ADR-0040m msb stop and remove capabilities (state preserved on stop; record removed on rm)",
+      "vectors": ["cli/lifecycle-stop", "cli/lifecycle-rm"]
+    },
+    {
+      "contract": "ADR-0040m error vocabulary sandbox_not_found / sandbox_exists (fail closed, no mutation)",
+      "vectors": ["cli/lifecycle-rm-missing", "cli/lifecycle-create-exists"]
+    },
+    {
       "contract": "ADR-0042m runtime: offline operation, no opportunistic download",
       "vectors": ["cli/version-json", "cli/version-human", "cli/doctor-json", "cli/doctor-human"]
     },

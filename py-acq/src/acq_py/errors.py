@@ -23,3 +23,11 @@ UNSUPPORTED = "unsupported_capability"
 BACKEND_NOT_FOUND = "backend_not_found"
 BACKEND_VERSION_UNSUPPORTED = "backend_version_unsupported"
 BACKEND_VERSION_UNKNOWN = "backend_version_unknown"
+
+# Backend error vocabulary (ADR-0040m), lifecycle side. These land with the
+# mutating verbs (create/run/stop/rm/ls): a missing or already-present sandbox,
+# a host-side validation refusal, and the exec-ready timeout.
+SANDBOX_NOT_FOUND = "sandbox_not_found"
+SANDBOX_EXISTS = "sandbox_exists"
+VALIDATION_FAILED = "validation_failed"
+TIMEOUT = "timeout"
