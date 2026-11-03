@@ -75,16 +75,20 @@
       "vectors": ["cli/lifecycle-create-backend-failure"]
     },
     {
-      "contract": "ADR-0038m §1 child/backend status preservation for exec/attach/shell (not acq's 0/1)",
-      "vectors": ["cli/exec-exit-code", "cli/attach-exit-code", "cli/shell-exit-code"]
+      "contract": "ADR-0038m §1 child/backend status preservation for exec/shell (not acq's 0/1)",
+      "vectors": ["cli/exec-exit-code", "cli/shell-exit-code"]
     },
     {
       "contract": "ADR-0038m §2 --json envelope for exec (one document, child stdout routed to stderr)",
       "vectors": ["cli/exec-json"]
     },
     {
-      "contract": "ADR-0038m §2 --json envelope for attach and shell",
-      "vectors": ["cli/attach-json", "cli/shell-json"]
+      "contract": "ADR-0038m §2 --json envelope for shell (login shell as the agent user)",
+      "vectors": ["cli/shell-json"]
+    },
+    {
+      "contract": "ADR-0038m §48 drop agent-to-shell fallback: attach fails closed (validation_failed) on a missing host record",
+      "vectors": ["cli/attach-json"]
     },
     {
       "contract": "ADR-0038m §1 attach fails closed (sandbox_not_found) on a missing sandbox",
@@ -109,6 +113,14 @@
     {
       "contract": "ADR-0038m §2 ports reports declared host/guest mappings with origin, not listener health",
       "vectors": ["cli/ports-json"]
+    },
+    {
+      "contract": "ADR-0038m §2 ports legitimate empty result (successful inspect, no declared ports)",
+      "vectors": ["cli/ports-empty"]
+    },
+    {
+      "contract": "ADR-0038m §48 drop inspection-failure-as-empty: ports fails closed (failure) on a failed inspect",
+      "vectors": ["cli/ports-inspect-failure"]
     },
     {
       "contract": "ADR-0040m ports fails closed (sandbox_not_found) on a missing sandbox",

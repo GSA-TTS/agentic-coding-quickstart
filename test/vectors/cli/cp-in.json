@@ -25,7 +25,7 @@
       "value": {
         "schema_version": 1,
         "command": "cp",
-        "data": {"name": "box", "host": "./host-file.txt", "guest": "/tmp/dest.txt", "direction": "in"}
+        "data": {"name": "box", "host": "./host-file.txt", "guest": "/tmp/dest.txt", "direction": "in", "exit_code": 0}
       },
       "normalize": []
     },

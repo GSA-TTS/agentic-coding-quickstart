@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "cli/attach-json",
-  "oracle": "ADR-0038m §2 --json envelope for attach (agent defaulted to shell when no host record records one)",
+  "oracle": "ADR-0038m §48 drop agent-to-shell fallback: attach fails closed (validation_failed) on a missing host record",
   "tier": 1,
   "backend": null,
   "platform": "any",
@@ -19,17 +19,17 @@
     "timeout_ms": 5000
   },
   "expect": {
-    "exit": 0,
+    "exit": 1,
     "stdout": {
       "mode": "json",
       "value": {
         "schema_version": 1,
         "command": "attach",
-        "data": {"name": "box", "agent": "shell", "exit_code": 0}
+        "error": {"code": "validation_failed"}
       },
       "normalize": []
     },
-    "stderr": {"mode": "contains", "value": "[stub exec] /bin/sh -l", "normalize": []}
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
   },
   "isolation": {
     "offline": true,

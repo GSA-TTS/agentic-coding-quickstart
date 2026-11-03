@@ -165,6 +165,9 @@ def main(argv: list[str]) -> int:
         return _exit_code(COPY_EXIT_ENV)
 
     if cmd == "inspect":
+        if _should_fail("inspect"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
         name = args[1] if len(args) > 1 else None
         if name is None or name not in catalog:
             print(f"msb: no such sandbox '{name}'", file=sys.stderr)

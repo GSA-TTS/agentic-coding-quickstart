@@ -105,6 +105,11 @@ def build_parser() -> _Parser:
         prog="acq",
         description="acq v1 - run AI coding agents inside a federally-configured sandbox",
         add_help=True,
+        epilog=(
+            "Any subcommand acq does not own is forwarded verbatim to the active "
+            "backend binary with a notice on stderr; the backend's output and exit "
+            "status pass through unchanged (--json is inert for such passthrough)."
+        ),
     )
     parser.add_argument("--version", action="store_true", help="show version and exit")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
@@ -723,15 +728,13 @@ def _sandbox_ref(token: str) -> tuple[str, str] | None:
 def _workspace_from_record(name: str) -> str:
     """Resolve the guest workspace for a session (``-w``), host-authoritative.
 
-    Falls back to :data:`DEFAULT_GUEST_WORKSPACE` when the record is absent,
-    legacy v0, or unreadable — the workspace is a starting directory, not an
-    authority decision, and a shell/exec can still run without it (ADR-0041m:
-    guest-writable state is never authority; a missing record is not a guess).
+    Returns the recorded workspace, or :data:`DEFAULT_GUEST_WORKSPACE` when the
+    record is absent or legacy v0 (a missing record is a starting-directory
+    default, not an authority decision). A newer/unknown-schema or unparseable
+    record raises :class:`state.StateSchemaError` so the caller fails closed
+    rather than running in a guessed cwd (ADR-0041m).
     """
-    try:
-        record = state.record_read("msb", name)
-    except state.StateSchemaError:
-        record = None
+    record = state.record_read("msb", name)  # raises StateSchemaError
     if record and record.get("workspace"):
         return record["workspace"]
     return DEFAULT_GUEST_WORKSPACE
@@ -760,7 +763,17 @@ def run_exec(parsed, emit_json: bool) -> int:
             f"list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
-    rc = msb.exec_command(name, command, workspace=_workspace_from_record(name), json_mode=emit_json)
+    try:
+        workspace = _workspace_from_record(name)
+    except state.StateSchemaError as exc:
+        return _operational_failure(
+            "exec",
+            errors.STATE_SCHEMA_UNSUPPORTED,
+            str(exc),
+            f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'",
+            emit_json,
+        )
+    rc = msb.exec_command(name, command, workspace=workspace, json_mode=emit_json)
     if emit_json:
         print(json.dumps(envelope.success("exec", {"name": name, "exit_code": rc})))
     return rc
@@ -770,12 +783,13 @@ def run_attach(parsed, emit_json: bool) -> int:
     """``acq attach NAME`` — attach to an existing sandbox, launching its agent.
 
     This is the interactive path; its non-interactive contract is deterministic
-    (ADR-0038m §1, spec user story #10): fail closed on a missing sandbox, read
-    the recorded agent from host-authoritative state (defaulting to a login shell
-    when none is recorded, matching the legacy ``_acq_msb_attach``), launch it via
-    ``msb exec``, and propagate its status. True PTY allocation (``msb exec -t``)
-    and ssh-agent forwarding are Tier-3/live concerns and are not synthesized
-    here, so vector behavior never blocks or invents a terminal.
+    (ADR-0038m §1, spec user story #10): fail closed on a missing sandbox or a
+    missing/unreadable host record, then launch the recorded agent via
+    ``msb exec`` and propagate its status. The agent comes from host-authoritative
+    state only — there is no agent-to-shell fallback (ADR-0038m §48). True PTY
+    allocation (``msb exec -t``) and ssh-agent forwarding are Tier-3/live
+    concerns and are not synthesized here, so vector behavior never blocks or
+    invents a terminal.
     """
     name = parsed.name
     if not msb.exists(name):
@@ -796,8 +810,24 @@ def run_attach(parsed, emit_json: bool) -> int:
             f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'",
             emit_json,
         )
-    agent = (record or {}).get("agent") or "shell"
-    workspace = (record or {}).get("workspace") or DEFAULT_GUEST_WORKSPACE
+    if record is None:
+        return _operational_failure(
+            "attach",
+            errors.VALIDATION_FAILED,
+            f"sandbox '{name}' has no readable host state record; cannot determine the agent to launch",
+            f"create it with 'acq create', or remove it with 'acq rm {name}'",
+            emit_json,
+        )
+    agent = record.get("agent")
+    if not agent:
+        return _operational_failure(
+            "attach",
+            errors.VALIDATION_FAILED,
+            f"sandbox '{name}' records no agent; cannot determine the agent to launch",
+            f"create it with 'acq create', or remove it with 'acq rm {name}'",
+            emit_json,
+        )
+    workspace = record.get("workspace") or DEFAULT_GUEST_WORKSPACE
     rc = msb.launch(name, workspace, agent, json_mode=emit_json)
     if emit_json:
         print(json.dumps(envelope.success("attach", {"name": name, "backend": "msb", "agent": agent, "exit_code": rc})))
@@ -820,7 +850,17 @@ def run_shell(parsed, emit_json: bool) -> int:
             f"list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
-    rc = msb.launch(name, _workspace_from_record(name), "shell", json_mode=emit_json)
+    try:
+        workspace = _workspace_from_record(name)
+    except state.StateSchemaError as exc:
+        return _operational_failure(
+            "shell",
+            errors.STATE_SCHEMA_UNSUPPORTED,
+            str(exc),
+            f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'",
+            emit_json,
+        )
+    rc = msb.launch(name, workspace, "shell", json_mode=emit_json)
     if emit_json:
         print(json.dumps(envelope.success("shell", {"name": name, "backend": "msb", "exit_code": rc})))
     return rc
@@ -883,7 +923,7 @@ def run_cp(parsed, emit_json: bool) -> int:
             exit_code=rc,
         )
     if emit_json:
-        print(json.dumps(envelope.success("cp", {"name": name, "host": host_path, "guest": guest_path, "direction": direction})))
+        print(json.dumps(envelope.success("cp", {"name": name, "host": host_path, "guest": guest_path, "direction": direction, "exit_code": 0})))
     else:
         if direction == "in":
             print(f"copied {host_path} -> {name}:{guest_path}")
@@ -895,9 +935,11 @@ def run_cp(parsed, emit_json: bool) -> int:
 def run_ports(parsed, emit_json: bool) -> int:
     """``acq ports NAME`` — report declared host/guest mappings, never health.
 
-    ADR-0038m §2 fixes the required data: host/guest mappings plus origin. The
-    list is a query (exit 0, even when empty); a missing sandbox fails closed
-    with ``sandbox_not_found``. Post-hoc ``--publish`` (ADR-0015) is deferred.
+    ADR-0038m §2 fixes the required data: host/guest mappings plus origin. A
+    missing sandbox fails closed with ``sandbox_not_found``; an inspect that fails
+    or returns unparseable output fails closed with a stable code rather than
+    being swallowed as an empty list (ADR-0038m §48 drops
+    "inspection-failure-as-empty"). Post-hoc ``--publish`` (ADR-0015) is deferred.
     """
     name = parsed.name
     if not msb.exists(name):
@@ -908,7 +950,10 @@ def run_ports(parsed, emit_json: bool) -> int:
             f"list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
-    mappings = msb.ports(name)
+    try:
+        mappings = msb.ports(name)
+    except msb.MsbError as exc:
+        return _operational_failure("ports", exc.code, exc.message, exc.remediation, emit_json)
     data = {"name": name, "ports": mappings}
     if emit_json:
         print(json.dumps(envelope.success("ports", data)))

@@ -61,7 +61,7 @@ def test_sandbox_ref_typing():
 
 # ---------------------------------------------------------------------------
 # Host-authoritative record reads (ADR-0041m: guest-writable state is never
-# authority; a missing record falls back, a newer schema refuses).
+# authority; a missing record defaults the workspace, a newer schema refuses).
 # ---------------------------------------------------------------------------
 
 def test_workspace_from_record_and_default(monkeypatch, tmp_path):
@@ -72,22 +72,35 @@ def test_workspace_from_record_and_default(monkeypatch, tmp_path):
     assert cli._workspace_from_record("nope") == cli.DEFAULT_GUEST_WORKSPACE
 
 
-def test_attach_reads_agent_from_record(monkeypatch, tmp_path, capsys):
+def test_attach_reads_agent_from_record_and_propagates_status(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path, catalog={"box": "running"})
     state.record_write("msb", "box", agent="opencode", workspace="/w")
+    monkeypatch.setenv("ACQ_MSB_STUB_EXEC_EXIT", "9")
 
     rc, doc = _invoke(capsys, "--backend", "msb", "--json", "attach", "box")
-    assert rc == 0
+    assert rc == 9
     assert doc["command"] == "attach"
     assert doc["data"]["agent"] == "opencode"
+    assert doc["data"]["exit_code"] == 9
 
 
-def test_attach_defaults_to_shell_without_record(monkeypatch, tmp_path, capsys):
+def test_attach_missing_record_fails_closed(monkeypatch, tmp_path, capsys):
+    # ADR-0038m §48 drops agent-to-shell fallback: attach must not launch a bare
+    # shell when the host record is absent.
     _env(monkeypatch, tmp_path, catalog={"box": "running"})
 
     rc, doc = _invoke(capsys, "--backend", "msb", "--json", "attach", "box")
-    assert rc == 0
-    assert doc["data"]["agent"] == "shell"
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+
+
+def test_attach_missing_agent_fails_closed(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, catalog={"box": "running"})
+    state.record_write("msb", "box", agent=None, workspace="/w")
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "--json", "attach", "box")
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
 
 
 def test_exec_requires_command(monkeypatch, tmp_path, capsys):
@@ -105,6 +118,43 @@ def test_exec_preserves_child_status(monkeypatch, tmp_path, capsys):
     rc, doc = _invoke(capsys, "--backend", "msb", "--json", "exec", "box", "--", "false")
     assert rc == 42
     assert doc["data"]["exit_code"] == 42
+
+
+def _write_raw_record(tmp_path, name, doc):
+    path = state.record_path("msb", name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+
+
+def test_exec_schema_mismatch_fails_closed(monkeypatch, tmp_path, capsys):
+    # ADR-0041m: exec must refuse a newer/unknown-schema record, not run in a
+    # guessed cwd.
+    _env(monkeypatch, tmp_path, catalog={"box": "running"})
+    _write_raw_record(tmp_path, "box", {"schema": 99, "name": "box", "backend": "msb", "agent": "opencode", "workspace": "/w"})
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "--json", "exec", "box", "--", "true")
+    assert rc == 1
+    assert doc["error"]["code"] == "state_schema_unsupported"
+
+
+def test_shell_schema_mismatch_fails_closed(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, catalog={"box": "running"})
+    _write_raw_record(tmp_path, "box", {"schema": 99, "name": "box", "backend": "msb", "workspace": "/w"})
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "--json", "shell", "box")
+    assert rc == 1
+    assert doc["error"]["code"] == "state_schema_unsupported"
+
+
+def test_ports_inspect_failure_fails_closed(monkeypatch, tmp_path, capsys):
+    # ADR-0038m §48 drops inspection-failure-as-empty: a failed inspect is an
+    # operational failure, not an empty ports list.
+    _env(monkeypatch, tmp_path, catalog={"box": "running"})
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "inspect")
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "--json", "ports", "box")
+    assert rc == 1
+    assert doc["error"]["code"] == "failure"
 
 
 def test_cp_direction_typing(monkeypatch, tmp_path, capsys):

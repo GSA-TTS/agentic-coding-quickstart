@@ -81,16 +81,19 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   exit status (ADR-0038m §1). In `--json` mode the child's stdout is routed to
   stderr and one success envelope carrying `exit_code` is emitted on stdout.
 * `acq-py attach NAME [--json]` — attach to an existing sandbox, launching the
-  recorded agent (a login shell when none is recorded). The non-interactive
-  contract is deterministic: fail closed on a missing sandbox, propagate status;
-  true PTY allocation is deferred to the live tier.
+  recorded agent. The agent is read from host-authoritative state only; there is
+  no agent-to-shell fallback (ADR-0038m §48). The non-interactive contract is
+  deterministic: fail closed on a missing sandbox or a missing/unreadable host
+  record, propagate status; true PTY allocation is deferred to the live tier.
 * `acq-py shell NAME [--json]` — open a login shell (`/bin/sh -l`) in a sandbox.
 * `acq-py cp SRC DST [--json]` — copy between a native host path and a POSIX
   guest path. Exactly one side is a `NAME:/guest/path` reference; host and guest
   types stay distinct and a UNC/network host path fails closed (ADR-0038m §4).
   The `msb copy` status is preserved.
 * `acq-py ports NAME [--json]` — report a sandbox's *declared* host/guest port
-  mappings with origin (create-time), never listener health (ADR-0038m §2).
+  mappings with origin (create-time), never listener health (ADR-0038m §2). A
+  failed or unreadable `msb inspect` fails closed rather than reporting an empty
+  list (ADR-0038m §48).
 * Any other subcommand is forwarded verbatim to the active backend binary with an
   announced stderr notice, preserving its exit status (spec user story #9).
 * Exit codes (ADR-0038m §1): `0` success, `2` usage, `1` operational. A
