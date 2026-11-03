@@ -921,14 +921,14 @@ def run_ports(parsed, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
-def _passthrough(argv: list[str], explicit: str | None) -> int:
+def _passthrough(argv: list[str], explicit: str | None, emit_json: bool) -> int:
     """Forward an unknown subcommand verbatim to the active backend (ADR-0038m §1).
 
     The handoff is announced on stderr so the user knows any output/errors below
     the notice belong to the backend, not acq. The backend binary's exit status is
-    preserved. Passthrough is a verbatim escape hatch, so it never emits an acq
-    JSON envelope — the backend owns stdout (the ``--json`` flag is therefore
-    inert here).
+    preserved. Passthrough is a verbatim escape hatch: a successful handoff never
+    emits an acq JSON envelope (the backend owns stdout, so ``--json`` is inert);
+    only the no-backend failure follows acq's normal error contract.
     """
     verb = argv[0]
     name = _resolve_active_backend(explicit)
@@ -938,7 +938,7 @@ def _passthrough(argv: list[str], explicit: str | None) -> int:
             errors.BACKEND_NOT_FOUND,
             "no sandbox backend detected",
             f"install msb {backends.MSB_MIN_VERSION[0]}.{backends.MSB_MIN_VERSION[1]}.{backends.MSB_MIN_VERSION[2]} or newer and retry",
-            False,
+            emit_json,
         )
     # The msb adapter honors ACQ_MSB_BIN (its test seam); sbx forwards to the raw
     # CLI. Either way the unknown verb + args are forwarded unchanged.
@@ -976,7 +976,7 @@ def main(argv: list[str] | None = None) -> int:
     # preserving its exit status. Detected before argparse, which would otherwise
     # treat the unknown verb as a usage error.
     if args and not args[0].startswith("-") and args[0] not in KNOWN_COMMANDS:
-        return _passthrough(args, backend_override)
+        return _passthrough(args, backend_override, emit_json)
 
     parser = build_parser()
     try:
