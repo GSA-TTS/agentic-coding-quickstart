@@ -23,6 +23,14 @@
       "vectors": ["cli/version-json"]
     },
     {
+      "contract": "ADR-0038m §2 backend list required data: active backend and installed/name/version records",
+      "vectors": ["cli/backend-list-none", "cli/backend-list-versions", "cli/backend-list-unknown"]
+    },
+    {
+      "contract": "ADR-0040m version floor fail-closed (backend_not_found / backend_version_unsupported / backend_version_unknown)",
+      "vectors": ["cli/backend-check-ok", "cli/backend-check-unsupported", "cli/backend-check-blocked", "cli/backend-check-unknown", "cli/backend-check-not-found"]
+    },
+    {
       "contract": "ADR-0042m runtime: offline operation, no opportunistic download",
       "vectors": ["cli/version-json", "cli/version-human"]
     },

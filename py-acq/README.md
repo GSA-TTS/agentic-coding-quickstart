@@ -53,7 +53,19 @@ PYTHONPATH=py-acq/src python -m acq_py version --json
   envelope (ADR-0038m §2): `{"schema_version", "command", "data"}` on success,
   `{"schema_version", "command", "error": {"code", "message", "remediation?"}}`
   on failure. One document on stdout; diagnostics on stderr.
+* `acq-py backend list [--json]` — detected backends (sbx/msb) with
+  `active_backend` plus per-backend `name`/`installed`/`version` records
+  (ADR-0038m §2). Read-only: an unknown/unparseable version reports `"unknown"`
+  and never fails the query.
+* `acq-py backend check NAME [--json]` — the version floor, fail closed
+  (ADR-0040m): exit `0` when `NAME` is installed and supported, else exit `1`
+  with `backend_not_found`, `backend_version_unsupported`, or
+  `backend_version_unknown`. No mutation occurs.
 * Exit codes (ADR-0038m §1): `0` success, `2` usage, `1` operational.
+
+Detection and the reported version are overridable for reproducible, offline
+tests: `ACQ_SBX_INSTALLED`/`ACQ_MSB_INSTALLED` (`"0"`/`"1"`) and
+`ACQ_SBX_VERSION`/`ACQ_MSB_VERSION` (a forced version string).
 
 ## Managed runtime (ADR-0042m)
 

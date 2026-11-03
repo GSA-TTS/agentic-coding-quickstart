@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "id": "cli/backend-check-unsupported",
+  "oracle": "ADR-0040m version floor fail-closed: a below-floor version is refused with backend_version_unsupported before any mutation",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "backend", "check", "sbx", "--json"],
+    "env": {
+      "ACQ_SBX_VERSION": "0.35.0"
+    },
+    "unset": ["ACQ_SBX_INSTALLED", "ACQ_MSB_INSTALLED", "ACQ_MSB_VERSION", "ACQ_BACKEND"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "backend check",
+        "error": {"code": "backend_version_unsupported"}
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "id": "cli/backend-list-unknown",
+  "oracle": "ADR-0040m unknown/unparseable version reports 'unknown' for read-only diagnostics without failing",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "backend", "list", "--json"],
+    "env": {
+      "ACQ_SBX_VERSION": "garbage",
+      "ACQ_MSB_INSTALLED": "0"
+    },
+    "unset": ["ACQ_SBX_INSTALLED", "ACQ_MSB_VERSION", "ACQ_BACKEND"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "backend list",
+        "data": {
+          "active_backend": null,
+          "backends": [
+            {"name": "sbx", "installed": true, "version": "unknown"},
+            {"name": "msb", "installed": false, "version": null}
+          ]
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}
