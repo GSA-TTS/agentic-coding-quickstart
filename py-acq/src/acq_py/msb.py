@@ -106,11 +106,11 @@ def create(name: str, image: str, workspace: str, memory: str | None = None, cpu
         argv += ["--cpus", cpus]
     proc = _run(argv)
     if proc.returncode != 0:
-        # `internal` is the ADR-0038m catch-all for an operational backend-command
-        # failure (no ADR-0040m code describes a backend command returning
-        # nonzero); the raw backend stderr is deliberately not surfaced here.
+        # `failure` is the ADR-0038m usage/failure minimum's generic
+        # operational-failure code (no ADR-0040m code describes a backend command
+        # returning nonzero); the raw backend stderr is deliberately not surfaced.
         raise MsbError(
-            errors.INTERNAL,
+            errors.FAILURE,
             f"msb create failed for sandbox '{name}'",
             "check msb logs and retry",
         )
@@ -134,7 +134,7 @@ def stop(name: str) -> None:
     proc = _run(["stop", name])
     if proc.returncode != 0:
         raise MsbError(
-            errors.INTERNAL,
+            errors.FAILURE,
             f"msb stop failed for sandbox '{name}'",
             "check msb logs and retry",
         )
@@ -144,7 +144,7 @@ def remove(name: str) -> None:
     proc = _run(["remove", "--force", name])
     if proc.returncode != 0:
         raise MsbError(
-            errors.INTERNAL,
+            errors.FAILURE,
             f"msb remove failed for sandbox '{name}'",
             "check msb logs and retry",
         )

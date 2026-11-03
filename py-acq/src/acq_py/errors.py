@@ -17,12 +17,12 @@ EXIT_USAGE = 2
 
 USAGE = "usage"
 
-# ADR-0038m catch-all for an operational failure acq cannot classify further. A
-# backend command (e.g. `msb create`) that returns nonzero is an operational
-# failure, not a usage error, a version refusal, a sandbox-missing/exists
-# condition, a validation refusal, or a timeout — so no ADR-0040m code fits and
-# the catch-all is the correct, documented choice.
-INTERNAL = "internal"
+# The generic operational-failure token from the ADR-0038m exit-1 ``usage``/
+# ``failure`` minimum. A backend command (e.g. ``msb create``) that returns
+# nonzero is an operational failure no ADR-0040m code covers — it is not a
+# version refusal, a sandbox-missing/exists condition, a validation refusal, or a
+# timeout — so ``failure`` is the correct, stable code.
+FAILURE = "failure"
 
 UNSUPPORTED = "unsupported_capability"
 
