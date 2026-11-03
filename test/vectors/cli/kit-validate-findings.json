@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "cli/kit-validate-findings",
+  "oracle": "ADR-0038m §2 kit validate coded findings (a kit with a non-hybrid schemaVersion reports validity=false)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "kit", "validate", "../fixtures/kit-invalid", "--json"],
+    "env": {},
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_MSB_INSTALLED", "ACQ_SBX_INSTALLED"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit validate",
+        "data": {"valid": false, "findings": [{"code": "kit_schema_version"}]}
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

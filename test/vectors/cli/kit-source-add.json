@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "id": "cli/kit-source-add",
+  "oracle": "ADR-0038m §46 kit-source add persists a full immutable ref (pinned-ref provenance)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "kit-source", "add", "github.com/acme/team-kits", "--ref", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--json"],
+    "env": {},
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_MSB_INSTALLED", "ACQ_SBX_INSTALLED", "ACQ_KIT_SOURCE_SEED", "ACQ_KIT_SOURCE_DISCOVERY"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit-source add",
+        "data": {
+          "repository": "github.com/acme/team-kits",
+          "ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "directory": "integrations/isolation/acq-kits",
+          "action": "added"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

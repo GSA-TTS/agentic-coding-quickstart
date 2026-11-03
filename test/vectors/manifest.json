@@ -202,6 +202,46 @@
     {
       "contract": "ADR-0043m isolation fail-closed refusal / ADR-0040m unsupported-capability fail-closed",
       "vectors": ["negative/isolation-offline", "negative/isolation-ssh-stubs", "negative/backend-required"]
+    },
+    {
+      "contract": "ADR-0038m §46 kit-source add persists a full immutable ref (pinned-ref provenance)",
+      "vectors": ["cli/kit-source-add"]
+    },
+    {
+      "contract": "ADR-0038m §46 kit-source add refuses a non-full (mutable) ref with a stable code",
+      "vectors": ["cli/kit-source-add-nonpinned"]
+    },
+    {
+      "contract": "ADR-0038m §2 kit-source ls required data: repository/ref/directory/provider-kits/discovery-status",
+      "vectors": ["cli/kit-source-ls"]
+    },
+    {
+      "contract": "ADR-0038m §48 / ADR-0038m §46 unreachable kit-source discovery returns 0 with an explicit discovery_status",
+      "vectors": ["cli/kit-source-ls-unreachable"]
+    },
+    {
+      "contract": "ADR-0038m §46 kit-source rm stops trusting a registered repository / fails closed on an unregistered one",
+      "vectors": ["cli/kit-source-rm", "cli/kit-source-rm-not-found"]
+    },
+    {
+      "contract": "ADR-0038m §2 kit list required data: control-plane ref and effective built-in/provider/extra sets",
+      "vectors": ["cli/kit-list"]
+    },
+    {
+      "contract": "ADR-0038m §2 kit check required data: sandbox/backend/local/applied refs and current/stale/unknown",
+      "vectors": ["cli/kit-check-unknown", "cli/kit-check-current", "cli/kit-check-stale"]
+    },
+    {
+      "contract": "ADR-0038m §kit check exit semantics: exit 1 (sandbox_not_found) for a missing sandbox",
+      "vectors": ["cli/kit-check-missing"]
+    },
+    {
+      "contract": "ADR-0038m §46 kit update consent + records-only-success (non-interactive refusal / --yes records success)",
+      "vectors": ["cli/kit-update-consent", "cli/kit-update-yes"]
+    },
+    {
+      "contract": "ADR-0038m §2 kit validate required data: validity + coded findings (valid / findings / missing-path fail-closed)",
+      "vectors": ["cli/kit-validate-valid", "cli/kit-validate-findings", "cli/kit-validate-missing"]
     }
   ]
 }
