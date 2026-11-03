@@ -72,16 +72,16 @@ there, and no test reaches into implementation internals for contract evidence.
 
 ### Enterprise
 
-11. As IT, I want a managed runtime with clear provenance and a named patch owner, so that patch cadence is auditable (ADR-0042m).
-12. As IT, I want installation to be user-scoped and non-elevating, so that it fits a locked-down fleet (ADR-0038m).
-13. As IT, I want a complete, enumerated offline asset set whose completeness is proven by a live blocked-network install, so that air-gapped hosts are supported (ADR-0042m).
-14. As IT, I want the qualification matrix to state exactly which platform/backend cells are claimed and which are unqualified, so that deployment claims are honest (ADR-0044m).
+1. As IT, I want a managed runtime with clear provenance and a named patch owner, so that patch cadence is auditable (ADR-0042m).
+2. As IT, I want installation to be user-scoped and non-elevating, so that it fits a locked-down fleet (ADR-0038m).
+3. As IT, I want a complete, enumerated offline asset set whose completeness is proven by a live blocked-network install, so that air-gapped hosts are supported (ADR-0042m).
+4. As IT, I want the qualification matrix to state exactly which platform/backend cells are claimed and which are unqualified, so that deployment claims are honest (ADR-0044m).
 
 ### Home agent (implementer)
 
-15. As a home agent, I want each command's contract expressed as a language-neutral vector, so that I can implement against an oracle rather than the Bash source (ADR-0043m).
-16. As a home agent, I want fork-only write authorization with retained gates, so that I can work without per-action approval but never cross the fork boundary (ADR-0045m).
-17. As a home agent, I want this specification decomposed into vertical slices I can land and verify independently, so that I do not block on one enormous change (this document and its tickets).
+1. As a home agent, I want each command's contract expressed as a language-neutral vector, so that I can implement against an oracle rather than the Bash source (ADR-0043m).
+2. As a home agent, I want fork-only write authorization with retained gates, so that I can work without per-action approval but never cross the fork boundary (ADR-0045m).
+3. As a home agent, I want this specification decomposed into vertical slices I can land and verify independently, so that I do not block on one enormous change (this document and its tickets).
 
 ## Implementation Decisions
 
