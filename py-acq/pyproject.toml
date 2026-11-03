@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acq-py"
+version = "0.1.0"
+description = "Python skeleton for the acq v1 replacement (foundation slice)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "CC0-1.0"
+# No runtime dependencies: acq v1's managed runtime stays app-private and
+# offline (ADR-0042m). The CLI uses the Python standard library only, so
+# ordinary operation never installs or downloads anything.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0"]
+
+[project.scripts]
+# The console script is named acq-py during coexistence with the repo-root Bash
+# `acq`. It becomes `acq` at the cutover slice (see py-acq/README.md).
+acq-py = "acq_py.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

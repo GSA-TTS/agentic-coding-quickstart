@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# run-vectors — Bash runner for the language-neutral test-vector corpus
+# (ADR-0043m). It consumes the same `test/vectors/**/*.json` corpus as the
+# pytest runner and must agree with it on the sentinel golden set.
+#
+# The runner carries the "how": it drives the CLI-under-test as a subprocess,
+# applies the declared normalisation transforms (exact-by-default), and compares
+# against the expected result per assertion mode. It does not rewrite vectors.
+#
+# Usage:
+#   scripts/run-vectors [--acq "python3 -m acq_py"] [--python python3] \
+#                       [--vectors test/vectors] [--section NAME]
+#
+# Dependencies: bash, jq (pinned in CI), GNU coreutils (timeout, sort, head,
+# tail, od, tr), python3 (for {python} and the default {acq}). Fails closed if
+# jq or python3 is absent.
+#
+# Per-vector exit codes: 0 ok, 1 skip (platform scope), 2 refused (fail closed),
+# 3 fail (assertion/validation). The `negative/` section expects refusal (2).
+
+set -euo pipefail
+
+usage() {
+  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+ACQ_CMD="python3 -m acq_py"
+PYTHON_CMD="python3"
+VECTORS_DIR=""
+SECTION=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --acq) [ "$#" -ge 2 ] || { echo "run-vectors: --acq needs a value" >&2; exit 2; }
+           ACQ_CMD="$2"; shift 2 ;;
+    --python) [ "$#" -ge 2 ] || { echo "run-vectors: --python needs a value" >&2; exit 2; }
+           PYTHON_CMD="$2"; shift 2 ;;
+    --vectors) [ "$#" -ge 2 ] || { echo "run-vectors: --vectors needs a value" >&2; exit 2; }
+           VECTORS_DIR="$2"; shift 2 ;;
+    --section) [ "$#" -ge 2 ] || { echo "run-vectors: --section needs a value" >&2; exit 2; }
+           SECTION="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "run-vectors: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "$VECTORS_DIR" ]; then
+  VECTORS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/test/vectors"
+fi
+
+for tool in jq timeout; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "run-vectors: required tool '$tool' not found on PATH" >&2
+    exit 2
+  fi
+done
+
+# --- normalisation transforms (must mirror py-acq/tests/vector_engine.py) ----
+_apply_transform() {
+  # $1 = transform name, $2 = file to transform in place
+  local name="$1" file="$2" tmpdir _had_nl
+  tmpdir="${TMPDIR:-/tmp}"
+  case "$name" in
+    abspath) sed -E -i 's#/[^[:space:]]+#<abspath>#g' "$file" ;;
+    tmpdir)  sed -i -e "s#$tmpdir#<tmpdir>#g" -e 's#/tmp#<tmpdir>#g' "$file" ;;
+    crlf)    sed -i 's/\r$//' "$file" ;;
+    timing)  sed -E -i 's#[0-9]+(\.[0-9]+)?(ms|us|µs|s)#<timing>#g' "$file" ;;
+    order)
+      # Preserve the trailing-newline flag the Python runner tracks, and sort by
+      # byte (== codepoint for UTF-8) so both runners order non-ASCII alike.
+      _had_nl=0
+      if [ -s "$file" ] && [ "$(tail -c 1 "$file" | od -An -v -tu1 | tr -d ' \n')" = "10" ]; then
+        _had_nl=1
+      fi
+      LC_ALL=C sort -o "$file" "$file"
+      if [ "$_had_nl" -eq 0 ] && [ -s "$file" ]; then
+        head -c -1 "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+      fi
+      ;;
+    json)
+      if jq -e . "$file" >/dev/null 2>&1; then
+        # Canonical compact+sorted form, without jq's trailing newline, so the
+        # result is byte-identical to the Python runner's json.dumps sort_keys
+        # separators=(',',':').
+        printf '%s' "$(jq -c -S . "$file")" > "$file.tmp" && mv "$file.tmp" "$file"
+      fi
+      ;;
+    *) echo "run-vectors: unknown transform '$name'" >&2; exit 2 ;;
+  esac
+}
+
+# Structural-subset check for the `json` assertion mode: expected must be a
+# recursive subset of actual (extra fields allowed; ADR-0038m "unknown fields
+# are additive"). Scalars compare by equality, not substring.
+_jq_subset() {
+  local actual="$1" expected="$2"
+  jq -e --slurpfile exp "$expected" '
+    def subset($e):
+      . as $a
+      | if ($e | type) == "object" then
+          (($a | type) == "object") and
+          ([ $e | keys[] as $k | (($a | has($k)) and (($a[$k]) | subset($e[$k]))) ] | all)
+        elif ($e | type) == "array" then
+          (($a | type) == "array") and
+          (($a | length) == ($e | length)) and
+          ([ range(0; $e | length) as $i | (($a[$i]) | subset($e[$i])) ] | all)
+        else
+          ($a == $e)
+        end;
+    subset($exp[0])
+  ' "$actual" >/dev/null 2>&1
+}
+
+# --- run one vector ---------------------------------------------------------
+_run_vector() {
+  local vecfile="$1" outdir="$2"
+  local vid platform backend f
+  local -a cmd=() unset_list=() env_list=() redirect_list=()
+
+  vid="$(jq -r '.id' "$vecfile")"
+
+  # Structural validation: required fields must be present (fail closed).
+  for f in schema id oracle tier invoke expect isolation backend platform; do
+    if ! jq -e --arg f "$f" 'has($f)' "$vecfile" >/dev/null 2>&1; then
+      printf 'FAIL %s (missing required field: %s)\n' "$vid" "$f"
+      return 3
+    fi
+  done
+  if ! jq -e '.invoke | has("argv")' "$vecfile" >/dev/null 2>&1; then
+    printf 'FAIL %s (missing required field: invoke.argv)\n' "$vid"
+    return 3
+  fi
+  if ! jq -e '.expect | has("exit")' "$vecfile" >/dev/null 2>&1; then
+    printf 'FAIL %s (missing required field: expect.exit)\n' "$vid"
+    return 3
+  fi
+
+  platform="$(jq -r '.platform' "$vecfile")"
+  backend="$(jq -r '.backend' "$vecfile")"
+
+  # Enumerated-but-unimplemented fields: fail closed, never silently ignored.
+  if jq -e '.invoke | has("fixtures")' "$vecfile" >/dev/null 2>&1; then
+    printf 'refused %s (unsupported_vector_field: invoke.fixtures)\n' "$vid"
+    return 2
+  fi
+  if jq -e '.isolation | has("no_live_refeed")' "$vecfile" >/dev/null 2>&1; then
+    printf 'refused %s (unsupported_vector_field: isolation.no_live_refeed)\n' "$vid"
+    return 2
+  fi
+
+  # Platform scope (ADR-0043m): skip, never fail, on a mismatched platform.
+  case "$platform" in
+    any|all) : ;;
+    *)
+      local host
+      host="$(uname -s | tr '[:upper:]' '[:lower:]')"
+      [ "$host" = "darwin" ] && host="macos"
+      if [ "$platform" != "$host" ]; then
+        printf 'skip %s (platform %s)\n' "$vid" "$platform"
+        return 1
+      fi
+      ;;
+  esac
+
+  # Isolation / backend requirements: fail closed (ADR-0043m, ADR-0040m).
+  if [ -n "$backend" ] && [ "$backend" != "null" ]; then
+    printf 'refused %s (unsupported_backend: %s)\n' "$vid" "$backend"
+    return 2
+  fi
+  if [ "$(jq -r '.isolation.offline' "$vecfile")" = "false" ]; then
+    printf 'refused %s (unsupported_isolation: offline=false)\n' "$vid"
+    return 2
+  fi
+  if [ "$(jq -r '.isolation.ssh_stubs' "$vecfile")" = "true" ]; then
+    printf 'refused %s (unsupported_isolation: ssh_stubs=true)\n' "$vid"
+    return 2
+  fi
+
+  # Build argv, splicing {acq} and {python}.
+  while IFS= read -r token; do
+    case "$token" in
+      "{acq}") read -r -a words <<<"$ACQ_CMD"; cmd+=("${words[@]}") ;;
+      "{python}") cmd+=("$PYTHON_CMD") ;;
+      *) cmd+=("$token") ;;
+    esac
+  done < <(jq -r '.invoke.argv[]' "$vecfile")
+
+  # Environment: unset, then set, then redirect to throwaway dirs.
+  while IFS= read -r name; do [ -n "$name" ] && unset_list+=("$name"); done \
+    < <(jq -r '.invoke.unset[]?' "$vecfile")
+  while IFS= read -r kv; do [ -n "$kv" ] && env_list+=("$kv"); done \
+    < <(jq -r '.invoke.env | to_entries[]? | "\(.key)=\(.value)"' "$vecfile")
+  redirect_list=(HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME)
+  while IFS= read -r name; do [ -n "$name" ] && redirect_list+=("$name"); done \
+    < <(jq -r '.isolation.redirect[]?' "$vecfile")
+
+  local out="$outdir/out" err="$outdir/err" in="$outdir/in" exp="$outdir/expected"
+  jq -r '.invoke.stdin // ""' "$vecfile" > "$in"
+  local timeout_ms timeout_s
+  timeout_ms="$(jq -r '.invoke.timeout_ms // 5000' "$vecfile")"
+  timeout_s="$(awk -v ms="$timeout_ms" 'BEGIN { printf "%.3f", ms / 1000 }')"
+
+  # Run the command with the constructed environment in a subshell.
+  (
+    for u in "${unset_list[@]}"; do unset "$u"; done
+    [ "${#env_list[@]}" -gt 0 ] && export "${env_list[@]}"
+    for r in "${redirect_list[@]}"; do export "$r"="$outdir/redirect/$r"; done
+    exec timeout "$timeout_s" "${cmd[@]}"
+  ) < "$in" > "$out" 2> "$err"
+  local rc=$?
+
+  local want_exit
+  want_exit="$(jq -r '.expect.exit' "$vecfile")"
+  if [ "$rc" -ne "$want_exit" ]; then
+    local reason="expected exit $want_exit, got $rc"
+    [ "$rc" -eq 124 ] && reason="timed out after ${timeout_s}s"
+    printf 'FAIL %s (%s; stderr: %s)\n' "$vid" "$reason" "$(tr '\n' ' ' < "$err")"
+    return 3
+  fi
+
+  for stream in stdout stderr; do
+    # Skip a stream that has no expectation.
+    if ! jq -e ".expect.${stream}" "$vecfile" >/dev/null 2>&1; then continue; fi
+    local mode
+    mode="$(jq -r ".expect.${stream}.mode // \"exact\"" "$vecfile")"
+    local file
+    file="$out"; [ "$stream" = "stderr" ] && file="$err"
+    while IFS= read -r t; do [ -n "$t" ] && _apply_transform "$t" "$file"; done \
+      < <(jq -r ".expect.${stream}.normalize[]?" "$vecfile")
+
+    case "$mode" in
+      exact)
+        # Byte-faithful extraction: jq @base64 + base64 -d avoids jq -r's
+        # added trailing newline so the expected value is decoded verbatim.
+        jq -r ".expect.${stream}.value | @base64" "$vecfile" | base64 -d > "$exp"
+        cmp -s "$file" "$exp" || { printf 'FAIL %s (%s exact mismatch)\n' "$vid" "$stream"; return 3; }
+        ;;
+      contains)
+        jq -r ".expect.${stream}.value | @base64" "$vecfile" | base64 -d > "$exp"
+        IFS= read -r -d '' haystack < "$file" || true
+        IFS= read -r -d '' needle < "$exp" || true
+        [[ "$haystack" == *"$needle"* ]] || { printf 'FAIL %s (%s does not contain expected)\n' "$vid" "$stream"; return 3; }
+        ;;
+      json)
+        jq -c ".expect.${stream}.value" "$vecfile" > "$exp"
+        _jq_subset "$file" "$exp" || { printf 'FAIL %s (%s JSON mismatch)\n' "$vid" "$stream"; return 3; }
+        ;;
+      *) printf 'FAIL %s (unknown mode %s)\n' "$vid" "$mode"; return 3 ;;
+    esac
+  done
+
+  printf 'ok %s\n' "$vid"
+  return 0
+}
+
+# --- main loop --------------------------------------------------------------
+shopt -s nullglob
+vector_files=()
+if [ -n "$SECTION" ]; then
+  vector_files=("$VECTORS_DIR/$SECTION"/*.json)
+else
+  while IFS= read -r -d '' f; do vector_files+=("$f"); done \
+    < <(find "$VECTORS_DIR" -mindepth 2 -maxdepth 2 -name '*.json' -print0 | sort -z)
+fi
+
+if [ "${#vector_files[@]}" -eq 0 ]; then
+  echo "run-vectors: no vectors found under $VECTORS_DIR" >&2
+  exit 2
+fi
+
+tmp_root="$(mktemp -d)"
+trap 'rm -rf "$tmp_root"' EXIT
+
+pass=0 fail=0 skip=0
+for vecfile in "${vector_files[@]}"; do
+  outdir="$tmp_root/$(basename "$vecfile" .json)-$$"
+  mkdir -p "$outdir/redirect"
+  result="$(_run_vector "$vecfile" "$outdir")" && rc=0 || rc=$?
+
+  case "$(basename "$(dirname "$vecfile")")" in
+    negative) neg=1 ;;
+    *) neg=0 ;;
+  esac
+
+  if [ "$neg" -eq 1 ]; then
+    # A negative oracle passes only when the runner refused it (fail closed).
+    if [ "$rc" -eq 2 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); fi
+  else
+    case "$rc" in
+      0) pass=$((pass + 1)) ;;
+      1) skip=$((skip + 1)) ;;
+      *) fail=$((fail + 1)) ;;
+    esac
+  fi
+  printf '%s\n' "$result"
+done
+
+printf '\nrun-vectors: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
+[ "$fail" -eq 0 ]

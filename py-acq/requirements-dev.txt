@@ -1,0 +1,4 @@
+# Pinned test-only dependency for the pytest vector runner (see pyproject.toml
+# [project.optional-dependencies].dev, which pins the same version). Exact pin,
+# no floating ranges, per AGENTS.md dependency rules.
+pytest==9.2.0

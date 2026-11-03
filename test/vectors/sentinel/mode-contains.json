@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "sentinel/mode-contains",
+  "oracle": "ADR-0043m assertion mode: contains (substring)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{python}", "-c", "import sys; sys.stdout.buffer.write(b'the quick brown fox\\n')"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "contains",
+      "value": "quick brown",
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

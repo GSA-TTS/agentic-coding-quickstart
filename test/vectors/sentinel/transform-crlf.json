@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "sentinel/transform-crlf",
+  "oracle": "ADR-0043m normalisation transform: crlf (CRLF to LF)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{python}", "-c", "import sys; sys.stdout.buffer.write(b'a\\r\\nb\\n')"],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "exact",
+      "value": "a\nb\n",
+      "normalize": ["crlf"]
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

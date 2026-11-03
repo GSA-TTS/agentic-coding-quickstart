@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "id": "cli/version-json",
+  "oracle": "ADR-0038m §2 structured output success envelope and version required data fields",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "version", "--json"],
+    "env": {
+      "ACQ_VERSION": "0.1.0",
+      "ACQ_SOURCE_REVISION": "0000000000000000000000000000000000000000"
+    },
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "version",
+        "data": {
+          "acq_version": "0.1.0",
+          "source_revision": "0000000000000000000000000000000000000000",
+          "backend": null,
+          "backend_version": null,
+          "kit_control_plane_ref": null
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}
