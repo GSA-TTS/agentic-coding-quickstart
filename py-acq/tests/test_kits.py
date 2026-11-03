@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
+
+import pytest
 
 from acq_py import cli, kits, state
 
@@ -128,6 +131,15 @@ def test_kit_source_rm_control_plane_refused(monkeypatch, tmp_path, capsys):
     assert doc["error"]["code"] == "validation_failed"
 
 
+def test_kit_source_add_control_plane_refused(monkeypatch, tmp_path, capsys):
+    # Symmetry with rm: the pinned trust anchor cannot be re-added either.
+    _env(monkeypatch, tmp_path)
+    rc, doc = _invoke(capsys, "kit-source", "add", kits.CONTROL_PLANE_REPO, "--ref", FULL_REF, "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+    assert kits.source_record(kits.CONTROL_PLANE_REPO) is None
+
+
 def test_kit_source_discovery_seam_reachable(monkeypatch, tmp_path, capsys):
     """The discovery seam forces a non-control-plane source to reachable, offline."""
     _env(monkeypatch, tmp_path, discovery={TEAM_REPO: ["acme-provider"]})
@@ -197,13 +209,40 @@ def test_kit_update_consent_gate(monkeypatch, tmp_path, capsys):
     assert rc == 1
     assert doc["error"]["code"] == "consent_required"
     assert kits.provenance_read("msb", "mybox") is None
+    assert kits.consent_read("msb", "mybox") is None
 
-    # --yes consents and records success.
+    # --yes consents and records CONSENT (not applied provenance).
     rc, doc = _invoke(capsys, "--backend", "msb", "kit", "update", "mybox", "--yes", "--json")
     assert rc == 0
-    assert doc["data"]["action"] == "refreshed"
-    assert doc["data"]["applied"] == kits.CONTROL_PLANE_REF
-    assert kits.provenance_read("msb", "mybox")["applied_ref"] == kits.CONTROL_PLANE_REF
+    assert doc["data"]["action"] == "consent_recorded"
+    assert doc["data"]["status"] == "deferred"
+    assert doc["data"]["consented_ref"] == kits.CONTROL_PLANE_REF
+    # applied_ref is NOT written: kit update never fabricates currency.
+    assert kits.provenance_read("msb", "mybox") is None
+    assert kits.consent_read("msb", "mybox")["consented_ref"] == kits.CONTROL_PLANE_REF
+
+
+def test_kit_update_does_not_flip_check_to_current(monkeypatch, tmp_path, capsys):
+    """Mutation-proof guard: kit update must NOT make kit check report current.
+
+    A stale sandbox stays stale after a consented ``kit update`` (the reapply is
+    deferred), so removing the consent/applied separation flips ``kit check`` to
+    ``current`` and fails this test.
+    """
+    _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
+    _write_provenance(tmp_path, "msb", "mybox", "0" * 40)  # stale
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "check", "mybox", "--json")
+    assert rc == 0
+    assert doc["data"]["status"] == "stale"
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "update", "mybox", "--yes", "--json")
+    assert rc == 0
+    assert doc["data"]["status"] == "deferred"
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "check", "mybox", "--json")
+    assert rc == 0
+    assert doc["data"]["status"] == "stale"  # NOT current — reapply is deferred
 
 
 def test_kit_update_interactive_decline_records_nothing(monkeypatch, tmp_path, capsys):
@@ -216,6 +255,7 @@ def test_kit_update_interactive_decline_records_nothing(monkeypatch, tmp_path, c
     out, err = capsys.readouterr()
     assert rc == 0
     assert kits.provenance_read("msb", "mybox") is None
+    assert kits.consent_read("msb", "mybox") is None
 
 
 class _FakeStdin:
@@ -271,6 +311,47 @@ def test_kit_validate_missing_path(monkeypatch, tmp_path, capsys):
     rc, doc = _invoke(capsys, "kit", "validate", str(tmp_path / "nope"), "--json")
     assert rc == 1
     assert doc["error"]["code"] == "validation_failed"
+
+
+def test_kit_validate_missing_spec_dir_exit_1(monkeypatch, tmp_path, capsys):
+    # A directory without a spec.yaml is an operational failure (kit_spec_missing),
+    # not a successful query answer with a finding.
+    _env(monkeypatch, tmp_path)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    rc, doc = _invoke(capsys, "kit", "validate", str(empty), "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+
+
+def test_kit_validate_unreadable_spec_exit_1(monkeypatch, tmp_path, capsys):
+    # An unreadable spec.yaml is an operational failure (kit_spec_unreadable).
+    _env(monkeypatch, tmp_path)
+    kit_dir = _write_kit(tmp_path, "k", ['schemaVersion: "hybrid/v1"', "name: my-kit"])
+
+    def _boom(*args, **kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    rc, doc = _invoke(capsys, "kit", "validate", str(kit_dir), "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+
+
+def test_validate_kit_raises_kit_spec_error_for_unreadable(monkeypatch, tmp_path):
+    # Direct unit coverage of the KitSpecError branch in validate_kit.
+    kit_dir = _write_kit(tmp_path, "k", ['schemaVersion: "hybrid/v1"', "name: my-kit"])
+
+    with pytest.raises(kits.KitSpecError):
+        kits.validate_kit(str(tmp_path / "missing"))
+
+    def _boom(*args, **kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    with pytest.raises(kits.KitSpecError):
+        kits.validate_kit(str(kit_dir))
 
 
 # ---------------------------------------------------------------------------

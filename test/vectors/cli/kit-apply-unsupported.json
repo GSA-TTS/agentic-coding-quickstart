@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "cli/kit-apply-unsupported",
+  "oracle": "ADR-0040m unsupported-capability fail-closed: kit apply (deferred kit-apply slice) fails closed with unsupported_capability",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "kit", "apply", "mybox", "some-ref", "--json"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{\"mybox\": \"running\"}"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_READY_TIMEOUT"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 1,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit apply",
+        "error": {"code": "unsupported_capability"}
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

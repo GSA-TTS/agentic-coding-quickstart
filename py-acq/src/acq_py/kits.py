@@ -39,6 +39,16 @@ from pathlib import Path
 
 from . import state
 
+
+class KitSpecError(Exception):
+    """A kit path or ``spec.yaml`` cannot be read (missing or unreadable).
+
+    Distinct from an invalid-but-readable kit: this is a validation *failure*
+    (exit 1, ``validation_failed``), whereas an invalid kit is a successful query
+    answer (exit 0, ``valid=false`` plus coded findings).
+    """
+
+
 # ---------------------------------------------------------------------------
 # Pinned control plane (the trust anchor; ADR-0016, ADR-0030).
 # ---------------------------------------------------------------------------
@@ -456,12 +466,12 @@ def provenance_status(backend: str, sandbox: str) -> str:
 
 
 def provenance_write(backend: str, sandbox: str) -> dict:
-    """Record a successful bundle refresh (ADR-0016: only after success).
+    """Record a successful bundle reapply (ADR-0016: only after success).
 
-    The record is written only on a consented, successful refresh — a declined or
-    failed refresh never claims currency. The actual idempotent kit reapply is the
-    deferred kit-apply slice; until then the host-side provenance record is the durable
-    currency signal this slice owns.
+    This writes ``applied_ref``, the only currency signal ``kit check`` reads. It
+    is reserved for the kit-apply slice (deferred): ``kit update`` must NOT call
+    it — ``kit update`` records *consent* via :func:`consent_write` and never
+    claims currency (ADR-0038m §3 drops false partial success).
     """
     doc = {
         "schema": KIT_SCHEMA,
@@ -471,6 +481,38 @@ def provenance_write(backend: str, sandbox: str) -> dict:
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     _atomic_write(_provenance_path(backend, sandbox), doc)
+    return doc
+
+
+def _consent_dir() -> Path:
+    return state.state_dir() / "kit-consent"
+
+
+def _consent_path(backend: str, sandbox: str) -> Path:
+    return _consent_dir() / _safe(backend) / f"{_safe(sandbox)}.{_checksum(sandbox)}.json"
+
+
+def consent_read(backend: str, sandbox: str) -> dict | None:
+    """Read a sandbox's recorded refresh consent (lenient)."""
+    return _read_record(_consent_path(backend, sandbox), strict=False, label=sandbox)
+
+
+def consent_write(backend: str, sandbox: str) -> dict:
+    """Record the user's consent to refresh the bundle to the pinned ref.
+
+    Consent is durable and DISTINCT from applied provenance (ADR-0016): this
+    record says "the user wants to be on :data:`CONTROL_PLANE_REF`"; it does NOT
+    claim the bundle was actually applied. Only the kit-apply slice writes
+    ``applied_ref``, so a consent record never changes ``kit check``'s currency.
+    """
+    doc = {
+        "schema": KIT_SCHEMA,
+        "backend": backend,
+        "sandbox": sandbox,
+        "consented_ref": CONTROL_PLANE_REF,
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    _atomic_write(_consent_path(backend, sandbox), doc)
     return doc
 
 
@@ -506,36 +548,31 @@ def validate_kit(path: str) -> dict:
     shape acq itself consumes — a ``spec.yaml`` declaring ``schemaVersion:
     "hybrid/v1"`` and a safe kit name — and reports coded findings. It never
     fetches, sources, or executes anything.
+
+    A kit that cannot be read at all — a missing path, a directory without a
+    ``spec.yaml``, or an unreadable ``spec.yaml`` — raises :class:`KitSpecError`
+    (an operational failure, exit 1), rather than being reported as an invalid
+    kit (which is a successful query answer, exit 0).
     """
     p = Path(path)
+    if not p.exists():
+        raise KitSpecError(f"kit path does not exist: {path}")
     spec: Path | None = None
     if p.is_dir():
         candidate = p / "spec.yaml"
         if candidate.is_file():
             spec = candidate
-    elif p.is_file():
+        else:
+            raise KitSpecError(
+                f"no spec.yaml found in {path!r} (a kit is a directory containing spec.yaml)"
+            )
+    else:
         spec = p
-
-    if spec is None:
-        return {
-            "valid": False,
-            "findings": [
-                _finding(
-                    "kit_spec_missing",
-                    f"no spec.yaml found at {path!r} (a kit is a directory containing spec.yaml, or a path to spec.yaml)",
-                )
-            ],
-        }
 
     try:
         text = spec.read_text(encoding="utf-8")
-    except OSError:
-        return {
-            "valid": False,
-            "findings": [
-                _finding("kit_spec_unreadable", f"could not read {str(spec)!r}")
-            ],
-        }
+    except OSError as exc:
+        raise KitSpecError(f"could not read {str(spec)!r}") from exc
 
     findings: list[dict] = []
     if not re.search(r"schemaVersion:\s*['\"]?hybrid/v1['\"]?", text):

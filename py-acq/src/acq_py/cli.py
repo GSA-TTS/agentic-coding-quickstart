@@ -1258,19 +1258,21 @@ def run_kit_validate(parsed, emit_json: bool) -> int:
     """``acq kit validate PATH`` — validity + coded findings (ADR-0038m §2).
 
     A readable kit (valid or not) is a successful query answer (exit 0): validity
-    and the coded findings are the result data. Only a path that does not exist at
-    all is an operational failure (``validation_failed``).
+    and the coded findings are the result data. A kit that cannot be read at all —
+    a missing path, a directory without ``spec.yaml``, or an unreadable
+    ``spec.yaml`` — is an operational failure (``validation_failed``, exit 1).
     """
     path = parsed.path
-    if not os.path.exists(path):
+    try:
+        data = kits.validate_kit(path)
+    except kits.KitSpecError as exc:
         return _operational_failure(
             "kit validate",
             errors.VALIDATION_FAILED,
-            f"kit path does not exist: {path}",
+            str(exc),
             "pass a kit directory (containing spec.yaml) or a path to spec.yaml",
             emit_json,
         )
-    data = kits.validate_kit(path)
     if emit_json:
         print(json.dumps(envelope.success("kit validate", data)))
     else:
@@ -1288,7 +1290,7 @@ def run_kit_validate(parsed, emit_json: bool) -> int:
 def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
     """``acq kit apply NAME KITREF`` — fail closed; the kit-apply capability is
     deferred to the later kit-apply slice (ADR-0040m ``kit-apply`` obligation is unmet here)."""
-    _backend, exit_code = _resolve_backend_for_mutation(
+    backend, exit_code = _resolve_backend_for_mutation(
         backend_override, emit_json, "kit apply", domain="kit"
     )
     if exit_code is not None:
@@ -1323,7 +1325,7 @@ def run_kit_check(parsed, emit_json: bool, backend_override: str | None) -> int:
 
     Exit 0 for current/stale/unknown; exit 1 for a missing sandbox (ADR-0038m).
     """
-    _backend, exit_code = _resolve_backend_for_mutation(
+    backend, exit_code = _resolve_backend_for_mutation(
         backend_override, emit_json, "kit check", domain="kit inspection"
     )
     if exit_code is not None:
@@ -1337,7 +1339,7 @@ def run_kit_check(parsed, emit_json: bool, backend_override: str | None) -> int:
             f"list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
-    data = kits.kit_check_data("msb", name)
+    data = kits.kit_check_data(backend, name)
     if emit_json:
         print(json.dumps(envelope.success("kit check", data)))
     else:
@@ -1351,9 +1353,15 @@ def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int
     Refresh is consented (ADR-0038m §46): ``--yes`` consents explicitly, an
     interactive TTY prompts, and a non-interactive run without ``--yes`` refuses
     (never invents consent; spec user story #10). ``--json`` is always
-    non-interactive. Provenance records only a successful, consented refresh.
+    non-interactive.
+
+    The reapply itself (kit-apply) is deferred, so ``kit update`` records the
+    user's *consent* to the pinned ref and reports ``consent recorded, reapply
+    deferred``. It does NOT write ``applied_ref`` or report ``current``/``refreshed``:
+    ``kit check`` keeps reading ``stale``/``unknown`` until the kit-apply slice
+    actually reapplies (ADR-0038m §3 drops false partial success).
     """
-    _backend, exit_code = _resolve_backend_for_mutation(
+    backend, exit_code = _resolve_backend_for_mutation(
         backend_override, emit_json, "kit update", domain="kit inspection"
     )
     if exit_code is not None:
@@ -1367,9 +1375,9 @@ def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int
             f"list sandboxes with 'acq ls', or create one with 'acq create'",
             emit_json,
         )
-    status = kits.provenance_status("msb", name)
+    status = kits.provenance_status(backend, name)
     if status == "current":
-        data = {**kits.kit_check_data("msb", name), "action": "noop"}
+        data = {**kits.kit_check_data(backend, name), "action": "noop"}
         if emit_json:
             print(json.dumps(envelope.success("kit update", data)))
         else:
@@ -1387,26 +1395,25 @@ def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int
         answer = input(f"refresh the kit bundle in '{name}' to {kits.CONTROL_PLANE_REF}? [y/N] ")
         if answer.strip().lower() not in ("y", "yes"):
             if emit_json:
-                print(json.dumps(envelope.success("kit update", {"sandbox": name, "backend": "msb", "action": "cancelled"})))
+                print(json.dumps(envelope.success("kit update", {"sandbox": name, "backend": backend, "action": "cancelled"})))
             else:
                 print("cancelled.")
             return errors.EXIT_SUCCESS
-    # Consented refresh: record success only. The idempotent in-place kit reapply
-    # is the later kit-apply slice; until then the provenance record is the durable
-    # currency signal this slice owns.
-    rec = kits.provenance_write("msb", name)
+    # Consent recorded; the idempotent in-place reapply is the deferred kit-apply
+    # slice. This is deliberately NOT applied provenance: applied_ref is unchanged,
+    # so kit check keeps reporting stale/unknown rather than fabricating currency.
+    rec = kits.consent_write(backend, name)
     data = {
         "sandbox": name,
-        "backend": "msb",
-        "local": kits.CONTROL_PLANE_REF,
-        "applied": rec["applied_ref"],
-        "status": "current",
-        "action": "refreshed",
+        "backend": backend,
+        "consented_ref": rec["consented_ref"],
+        "status": "deferred",
+        "action": "consent_recorded",
     }
     if emit_json:
         print(json.dumps(envelope.success("kit update", data)))
     else:
-        print(f"refreshed sandbox '{name}' to {kits.CONTROL_PLANE_REF}.")
+        print(f"consent recorded for '{name}' to {kits.CONTROL_PLANE_REF}; reapply deferred.")
     return errors.EXIT_SUCCESS
 
 
@@ -1442,6 +1449,14 @@ def run_kit_source_add(parsed, emit_json: bool) -> int:
         return _usage_failure(
             "kit-source add",
             f"invalid repository: {parsed.repo!r} (want host/owner/repo)",
+            emit_json,
+        )
+    if repo == kits.CONTROL_PLANE_REPO:
+        return _operational_failure(
+            "kit-source add",
+            errors.VALIDATION_FAILED,
+            "the built-in control-plane source is always trusted and cannot be re-added",
+            "the control plane is the pinned trust anchor; add team/personal sources instead",
             emit_json,
         )
     ref = parsed.ref
