@@ -465,19 +465,6 @@ PY
   assert_output "one-line-error"
 }
 
-# --- bash 3.2 workflow relevance paths -------------------------------------------
-
-@test "bash32: the CI relevance path list covers the local runner and its helpers" {
-  local wf="$REPO_ROOT/.github/workflows/bash32-compat.yml" listed p covered missing=""
-  listed="$(sed -n "/git diff --name-only \"\$BASE_SHA\" -- /,/)\"/p" "$wf" | grep -o "'[^']*'" | tr -d "'")"
-  # Guard the parser itself: if the workflow layout changes, fail loudly rather than skip.
-  printf '%s\n' "$listed" | grep -qx 'acq.backends'
-  for p in scripts/test-acq-bash32 scripts/fetch-bash32-oci.py scripts/scan-heredoc-subst.py; do
-    covered=0
-    while IFS= read -r entry; do
-      case "$p" in "$entry" | "$entry"/*) covered=1 ;; esac
-    done <<<"$listed"
-    [ "$covered" -eq 1 ] || missing="$missing $p"
-  done
-  [ -z "$missing" ] || skip "bash32-compat.yml relevance paths do not yet list:$missing (workflow edit is deferred to the human-pushed ci/bash32-matrix branch; this test passes once they are added)"
-}
+# CI relevance coverage for scripts/test-acq-bash32, fetch-bash32-oci.py and
+# scan-heredoc-subst.py is enforced (fail, never skip) by 158-bash32-relevance-paths.bats,
+# which parses the workflow's pathspec list and requires them in REQUIRED_PATHSPECS.
