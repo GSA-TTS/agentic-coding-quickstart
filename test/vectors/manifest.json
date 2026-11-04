@@ -290,6 +290,10 @@
       "vectors": ["cli/kit-source-rm-sbx"]
     },
     {
+      "contract": "ADR-0040m sbx-only kit_source_revoked obligation via auto-detect: kit-source rm revokes on the resolved active backend (sbx auto-detected), not only on explicit selection",
+      "vectors": ["cli/kit-source-rm-sbx-autodetect"]
+    },
+    {
       "contract": "ADR-0040m unknown-backend validation for kit-source rm: --backend bogus is rejected with a usage error (matching the other mutating verbs)",
       "vectors": ["cli/kit-source-rm-unknown-backend"]
     },

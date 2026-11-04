@@ -8,9 +8,11 @@
   "invoke": {
     "argv": ["{acq}", "kit-source", "rm", "github.com/acme/team-kits", "--json"],
     "env": {
-      "ACQ_KIT_SOURCE_SEED": "[{\"repository\": \"github.com/acme/team-kits\", \"ref\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"directory\": \"integrations/isolation/acq-kits\"}]"
+      "ACQ_KIT_SOURCE_SEED": "[{\"repository\": \"github.com/acme/team-kits\", \"ref\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"directory\": \"integrations/isolation/acq-kits\"}]",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_INSTALLED": "0"
     },
-    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_MSB_INSTALLED", "ACQ_SBX_INSTALLED", "ACQ_KIT_SOURCE_DISCOVERY"],
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_SBX_BIN", "ACQ_SBX_VERSION", "ACQ_MSB_VERSION", "SBX_HOME", "MSB_HOME", "ACQ_KIT_SOURCE_DISCOVERY"],
     "stdin": "",
     "timeout_ms": 5000
   },

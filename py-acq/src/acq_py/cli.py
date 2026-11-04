@@ -2027,19 +2027,18 @@ def run_kit_source_rm(parsed, emit_json: bool, backend_override: str | None) -> 
         )
     # sbx-only: revoke the source from sbx's kit.allowedSources BEFORE the host
     # record is dropped, so a failed revocation never strands a trusted source the
-    # backend still fetches from (ADR-0040m ``kit_source_revoked``). This fires
-    # only when sbx is EXPLICITLY selected (--backend sbx or ACQ_BACKEND=sbx), never
-    # on auto-detect: the host-side rm is backend-agnostic, and auto-detecting sbx
-    # must not silently add a backend mutation.
-    #
-    # KNOWN ASYMMETRY: because revocation fires only on explicit selection, an
-    # auto-detected sbx backend still leaves the revoked owner prefix in
-    # kit.allowedSources (fetchable) after `acq kit-source rm <repo>`. This is the
-    # safe choice until the kit-apply slice (ADR-0030) makes kit sources actually
-    # resolvable by the backend; when that lands, this must revoke on the RESOLVED
-    # active backend (flag → env → auto-detect), not only on explicit selection.
-    selected = backend_override if backend_override is not None else os.environ.get("ACQ_BACKEND")
-    if selected == "sbx":
+    # backend still fetches from (ADR-0040m ``kit_source_revoked``). Revocation
+    # fires on the RESOLVED active backend (--backend flag → ACQ_BACKEND env →
+    # auto-detect): whenever sbx is the backend in effect — selected explicitly OR
+    # auto-detected as the sole installed backend — the owner prefix is dropped
+    # from kit.allowedSources so the source is no longer fetchable. When the
+    # resolved backend is msb (or there is no backend), only the host registry
+    # entry is dropped, as before.
+    # When both backends are installed with no flag/env, auto-detect resolves msb,
+    # so sbx's owner prefix is not revoked here — correct under the resolved-active-
+    # backend scope, and it becomes revocable once kit-apply (ADR-0030) lands.
+    resolved = _resolve_active_backend(backend_override)
+    if resolved == "sbx":
         try:
             sbx.kit_source_revoked(repo)
         except sbx.SbxError as exc:
