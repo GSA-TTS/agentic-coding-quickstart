@@ -12,7 +12,7 @@ impact_level: low
 ato_relevance: no
 risk_treatment: n/a
 supersedes: []
-related_files: ["scripts/test-acq-bash32", "scripts/fetch-bash32-oci.py", "scripts/scan-heredoc-subst.py", "docs/howto/bash32-testing.md", "test/bats/152-bash32-runner.bats"]
+related_files: ["scripts/test-acq-bash32", "scripts/fetch-bash32-oci.py", "scripts/scan-heredoc-subst.py", "docs/howto/bash32-testing.md", "test/bats/152-bash32-runner.bats", "test/bats/159-bash32-oci-and-scanner.bats"]
 ---
 
 # ADR-0038: Local Bash 3.2.57 test runner and its provisioning

@@ -6,7 +6,7 @@ tier: 2
 last_updated: "2026-10-29"
 audience: "developers"
 keywords: ["bash 3.2", "macos", "bats", "test-acq-bash32", "compatibility", "sandbox"]
-related_files: ["scripts/test-acq-bash32", "scripts/scan-heredoc-subst.py", "scripts/fetch-bash32-oci.py", "test/bats/152-bash32-runner.bats", "docs/adr/0038-local-bash32-test-runner.md", "CONTRIBUTING.md"]
+related_files: ["scripts/test-acq-bash32", "scripts/scan-heredoc-subst.py", "scripts/fetch-bash32-oci.py", "test/bats/152-bash32-runner.bats", "test/bats/159-bash32-oci-and-scanner.bats", "docs/adr/0038-local-bash32-test-runner.md", "CONTRIBUTING.md"]
 load_priority: "on-demand"
 review_cycle: "quarterly"
 ---
