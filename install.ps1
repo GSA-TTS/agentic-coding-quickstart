@@ -1,18 +1,25 @@
-# install.ps1 - Windows preview installer for acq.
+# install.ps1 - user-scoped installer for the acq v1 Python replacement (ADR-0042m).
 #
-# This installer keeps Windows support deliberately scoped: it installs the acq
-# release zip and uses Git Bash to run the existing Bash implementation. It does
-# not elevate PowerShell, enable Windows features, or reboot the machine.
+# Downloads the checksum-verified Windows release archive (acq-windows-x64.zip —
+# the enumerated offline asset set: readable source + bundled Python.org embedded
+# runtime + exact-hash wheelhouse + launcher scripts + SHA256SUMS + provenance),
+# extracts it under LOCALAPPDATA, and offers to put it on the user PATH.
+#
+# Guarantees (ADR-0042m, ADR-0038m):
+#   * dry-run       -DryRun            prints actions, makes no writes, no network
+#   * consent       PATH edits are consent-gated (default NO; -Yes skips)
+#   * checksum      the zip is verified against SHA256SUMS; mismatch fails closed
+#   * user-scope    installs only under LOCALAPPDATA; never elevates
+#   * update        re-running against a pinned, checksum-verified release is the
+#                   only update path — there is no `acq update` command
+#
+# Windows x64 only (ADR-0042m platform matrix). Windows ARM64 is out of scope.
 
 [CmdletBinding()]
 param(
-    [string]$Version = "4.1.1", # x-release-please-version
+    [string]$Version = "0.1.0", # x-release-please-version
     [string]$InstallDir = "",
-    [string]$PackageUrl = "",
-    [string]$Sha256 = "",
-    [string]$MsbPackageId = $env:ACQ_MSB_WINGET_ID,
-    [switch]$NoMsb,
-    [switch]$NoPath,
+    [string]$Source = "",
     [switch]$DryRun,
     [switch]$Yes,
     [switch]$Help
@@ -21,62 +28,33 @@ param(
 $ErrorActionPreference = "Stop"
 $ReleaseBaseUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version"
 $PackageName = "acq-windows-x64.zip"
-
-# msb version policy. Keep in lockstep with install.sh and acq.backends/msb.sh:
-# a drift here means Windows accepts an msb the rest of acq refuses.
-#
-# 0.7.0 through 0.7.2 migrate 0.6.x sandbox state one-way, into a form the 0.6.x
-# line cannot read. 0.7.3 carries the upstream compatibility fix; acq installs a
-# newer fixed release by default. See ADR-0032.
-$MsbMinVersion = "0.6.9"
-$MsbPinnedVersion = "0.7.7"
-$MsbRollbackVersion = "0.6.18"
-$MsbBlockedVersionMin = "0.7.0"
-$MsbBlockedVersionMax = "0.7.2"
-$MsbFixedVersion = "0.7.3"
-
-$MsbReleaseBaseUrl = "https://github.com/superradcompany/microsandbox/releases/download"
-
-function Get-DefaultInstallDir {
-    if ($env:LOCALAPPDATA) {
-        return (Join-Path $env:LOCALAPPDATA "Programs\acq")
-    }
-
-    if ($Help -or $DryRun) {
-        return (Join-Path ([System.IO.Path]::GetTempPath()) "acq-preview-install")
-    }
-
-    throw "LOCALAPPDATA is not set. install.ps1 must run on Windows unless -DryRun is used."
-}
+$SumsName = "SHA256SUMS"
+$RuntimeRelative = "py-acq\runtime\python.exe"
+$LauncherRelative = "acq.cmd"
 
 function Show-Usage {
     @"
-install.ps1 - install acq for Windows preview hosts
+install.ps1 - install acq (agentic-coding-quickstart, Python v1)
+
+Downloads and verifies the Windows release archive, installs it under
+LOCALAPPDATA, and offers to add it to your user PATH. Update by re-running this
+installer against a pinned release.
 
 Usage:
-  irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version/install.ps1 | iex
-  .\install.ps1 [-Version <version>] [-InstallDir <path>] [-NoMsb] [-DryRun] [-Yes]
+  irm <release-url>/install.ps1 | iex
+  .\install.ps1 [-InstallDir <path>] [-Source <url|dir>] [-Version <ver>]
+                [-DryRun] [-Yes] [-Help]
 
 Options:
-  -Version <version>      Release version to install. Default: $Version
-  -InstallDir <path>      User-writable install location. Default: $InstallDir
-  -PackageUrl <url>       Override the acq zip URL. Requires -Sha256 for verification.
-  -Sha256 <hash>          Expected SHA-256 for -PackageUrl.
-  -MsbPackageId <id>      Optional WinGet package ID for msb when available.
-  -NoMsb                 Do not install the msb runtime.
-  -NoPath                Do not offer to add acq to the user PATH.
-  -DryRun                Print actions without making changes.
-  -Yes                   Assume yes for consent prompts.
-  -Help                  Show this help.
+  -InstallDir <path>   User-writable install location. Default: %LOCALAPPDATA%\Programs\acq
+  -Source <url|dir>    Release source. A URL fetches SHA256SUMS + the zip; a local
+                       directory (the offline asset set) is read in place.
+  -Version <ver>       Release version to install. Default: $Version
+  -DryRun              Print actions without making changes.
+  -Yes                 Assume yes for the PATH prompt (non-interactive/CI).
+  -Help                Show this help.
 
-The installer does not elevate, enable Windows features, or reboot. Windows
-Hypervisor Platform must already be enabled.
-
-msb versions: acq accepts $MsbMinVersion up to (not including) $MsbBlockedVersionMin, and
-$MsbFixedVersion or newer. msb $MsbBlockedVersionMin-$MsbBlockedVersionMax migrate 0.6.x sandbox state one-way and are
-refused. When msb is missing, this installs the pinned $MsbPinnedVersion from its
-checksum-verified release bundle rather than the upstream one-line installer,
-which always resolves to the newest release.
+This installer never elevates, enables Windows features, or reboots.
 "@
 }
 
@@ -93,10 +71,9 @@ function Write-Warn {
 function Confirm-Action {
     param([Parameter(Mandatory = $true)][string]$Prompt)
 
-    if ($Yes) {
-        return $true
-    }
-
+    if ($Yes) { return $true }
+    # A non-interactive run never infers consent (ADR-0038m section 50): fail closed.
+    if ([Console]::IsInputRedirected) { return $false }
     $answer = Read-Host "$Prompt [y/N]"
     return $answer -match '^(y|yes)$'
 }
@@ -111,606 +88,120 @@ function Invoke-InstallCommand {
         Write-Host "  [dry-run] $Description"
         return
     }
-
     & $Command
 }
 
-function Assert-WindowsHost {
-    if ($DryRun) {
-        Write-Host "  [dry-run] check host is Windows"
-        return
+function Get-DefaultInstallDir {
+    if ($env:LOCALAPPDATA) {
+        return (Join-Path $env:LOCALAPPDATA "Programs\acq")
     }
-
-    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-        throw "install.ps1 is only supported on Windows preview hosts."
-    }
+    throw "LOCALAPPDATA is not set. install.ps1 requires a user profile to install under."
 }
 
-function Test-WhpEnabled {
-    # The WHP optional-feature flag is not a reliable readiness signal: it is not
-    # readable without elevation, and on hosts where the Windows hypervisor is
-    # already running (WSL2 / VirtualMachine Platform, VBS, or a virtualized guest)
-    # the WHP user-mode API works even when the feature still reports Disabled.
-    # Probe the API the way msb does - WHvCreatePartition needs no elevation and
-    # reflects whether WHP is actually usable. Returns $true / $false when a
-    # verdict is possible, and $null when the state stays undetermined.
-    try {
-        if (-not ("Whp.Capability" -as [type])) {
-            Add-Type -Namespace Whp -Name Capability -MemberDefinition @'
-[DllImport("WinHvPlatform.dll")]
-public static extern int WHvCreatePartition(out System.IntPtr Partition, uint Access);
-[DllImport("WinHvPlatform.dll")]
-public static extern int WHvDeletePartition(System.IntPtr Partition);
-'@
-        }
-        $partition = [System.IntPtr]::Zero
-        if ([Whp.Capability]::WHvCreatePartition([ref]$partition, 0) -eq 0) {
-            [void][Whp.Capability]::WHvDeletePartition($partition)
-            return $true
-        }
-        return $false
+function Resolve-Source {
+    # Empty -> default release URL. A local directory -> the offline asset set.
+    if (-not $Source) {
+        return @{ Url = "$ReleaseBaseUrl"; IsUrl = $true }
     }
-    catch {
-        # The API probe could not load; fall back to the feature state where the
-        # optional-feature check is readable at all (an elevated shell).
+    if ($Source -match '^https?://') {
+        return @{ Url = $Source; IsUrl = $true }
     }
-
-    try {
-        $dism = Get-Command dism.exe -ErrorAction SilentlyContinue
-        if ($null -ne $dism) {
-            $output = & $dism.Source /online /Get-FeatureInfo /FeatureName:HypervisorPlatform 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                $text = $output -join "`n"
-                if ($text -match 'State\s*:\s*Enabled') { return $true }
-                if ($text -match 'State\s*:\s*Disabled') { return $false }
-            }
-        }
-
-        $featureCmd = Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue
-        if ($null -ne $featureCmd) {
-            $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction Stop
-            return $feature.State -eq "Enabled"
-        }
-    }
-    catch {
-        # Not elevated, so the feature state is unreadable; leave WHP undetermined.
-    }
-
-    return $null
+    return @{ Url = $Source; IsUrl = $false }
 }
 
-function Assert-WhpEnabled {
-    if ($DryRun) {
-        Write-Host "  [dry-run] check Windows Hypervisor Platform is enabled"
-        return
-    }
-
-    $result = Test-WhpEnabled
-    if ($null -eq $result) {
-        Write-Warn "Could not verify Windows Hypervisor Platform directly. 'msb doctor' will confirm host readiness before the first sandbox starts."
-        return
-    }
-
-    if (-not $result) {
-        throw "Windows Hypervisor Platform is not enabled. Enable it through your device or enterprise administrator, reboot if required, then re-run this installer."
-    }
-}
-
-function Test-IsWslShim {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    if (-not $env:SystemRoot) {
-        return $false
-    }
-
-    $full = [System.IO.Path]::GetFullPath($Path)
-    foreach ($name in @("System32\bash.exe", "SysWOW64\bash.exe")) {
-        if ($full -eq [System.IO.Path]::GetFullPath((Join-Path $env:SystemRoot $name))) {
-            return $true
-        }
-    }
-
-    return $false
-}
-
-function Find-GitBash {
-    # Prefer Git for Windows' known install locations. A PATH lookup for bash.exe
-    # often resolves to C:\Windows\System32\bash.exe - the WSL interop shim, not
-    # Git Bash - so only fall back to PATH once those locations are exhausted, and
-    # never accept the shim (it would run acq inside a WSL distro, where the
-    # Windows msb.exe and this checkout's paths do not exist).
-    $candidates = @(
-        "$env:ProgramFiles\Git\bin\bash.exe",
-        "$env:ProgramFiles\Git\usr\bin\bash.exe",
-        "${env:ProgramFiles(x86)}\Git\bin\bash.exe",
-        "${env:ProgramFiles(x86)}\Git\usr\bin\bash.exe",
-        "$env:LocalAppData\Programs\Git\bin\bash.exe",
-        "$env:LocalAppData\Programs\Git\usr\bin\bash.exe"
-    )
-
-    foreach ($candidate in $candidates) {
-        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-            return $candidate
-        }
-    }
-
-    $fromPath = Get-Command bash.exe -ErrorAction SilentlyContinue
-    if ($null -ne $fromPath -and -not (Test-IsWslShim -Path $fromPath.Source)) {
-        return $fromPath.Source
-    }
-
-    return $null
-}
-
-function Install-WinGetPackage {
+function Get-ExpectedHash {
     param(
-        [Parameter(Mandatory = $true)][string]$Id,
-        [Parameter(Mandatory = $true)][string]$Name
+        [Parameter(Mandatory = $true)][string]$SumsPath
     )
 
-    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
-    if ($null -eq $winget) {
-        throw "WinGet is required to install $Name automatically, but winget.exe was not found."
-    }
-
-    Invoke-InstallCommand "winget install --id $Id --exact" {
-        & $winget.Source install --id $Id --exact --accept-package-agreements --accept-source-agreements
-        if ($LASTEXITCODE -ne 0) {
-            throw "WinGet failed to install $Name ($Id)."
+    foreach ($line in (Get-Content -LiteralPath $SumsPath)) {
+        if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($PackageName))\s*$") {
+            return $Matches[1].ToLowerInvariant()
         }
     }
+    throw "SHA256SUMS has no entry for $PackageName; refusing to install an unverified archive."
 }
 
-function Compare-MsbVersion {
-    # Returns -1/0/1 comparing two dotted versions by numeric component. Hand-rolled
-    # rather than [version] so a build suffix (0.6.18-rc1) cannot throw a parse error
-    # mid-install; the numeric prefix of each component is what matters here.
-    param(
-        [Parameter(Mandatory = $true)][string]$Left,
-        [Parameter(Mandatory = $true)][string]$Right
-    )
+function Install-AcqZip {
+    $resolved = Resolve-Source
 
-    $l = $Left.Split(".")
-    $r = $Right.Split(".")
-    for ($i = 0; $i -lt 3; $i++) {
-        $lp = 0; $rp = 0
-        if ($i -lt $l.Count -and $l[$i] -match '^(\d+)') { $lp = [int]$Matches[1] }
-        if ($i -lt $r.Count -and $r[$i] -match '^(\d+)') { $rp = [int]$Matches[1] }
-        if ($lp -gt $rp) { return 1 }
-        if ($lp -lt $rp) { return -1 }
-    }
-    return 0
-}
-
-function Test-MsbVersionBlocked {
-    param([Parameter(Mandatory = $true)][string]$MsbVersion)
-
-    return ((Compare-MsbVersion -Left $MsbVersion -Right $MsbBlockedVersionMin) -ge 0) -and
-           ((Compare-MsbVersion -Left $MsbVersion -Right $MsbBlockedVersionMax) -le 0)
-}
-
-function Test-MsbVersionFinal {
-    param([Parameter(Mandatory = $true)][string]$MsbVersion)
-
-    return -not ($MsbVersion -match '[-+]')
-}
-
-function Get-MsbVersion {
-    param([Parameter(Mandatory = $true)][string]$MsbPath)
-
-    try {
-        $output = & $MsbPath --version 2>&1
-    }
-    catch {
-        return ""
-    }
-    if ($LASTEXITCODE -ne 0) {
-        return ""
-    }
-
-    $match = [regex]::Match(($output -join " "), '\d+\.\d+(\.\d+)?([+-]\S*)?')
-    if ($match.Success) {
-        return $match.Value
-    }
-    return ""
-}
-
-function Get-MsbInstallRoot {
-    # Mirrors msb's own resolution: a non-empty MSB_HOME is used verbatim (no
-    # .microsandbox suffix appended), otherwise %USERPROFILE%\.microsandbox.
-    if (-not [string]::IsNullOrWhiteSpace($env:MSB_HOME)) {
-        return [System.IO.Path]::GetFullPath($env:MSB_HOME)
-    }
-    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
-        return (Join-Path ([System.IO.Path]::GetTempPath()) ".microsandbox")
-    }
-    return [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".microsandbox"))
-}
-
-function Get-MsbBundleName {
-    $arch = $env:PROCESSOR_ARCHITECTURE
-    if ([string]::IsNullOrWhiteSpace($arch)) { $arch = "AMD64" }
-    switch -Regex ($arch.ToUpperInvariant()) {
-        "^(ARM64|AARCH64)$" { return "microsandbox-windows-aarch64.zip" }
-        "^(AMD64|X64|X86_64)$" { return "microsandbox-windows-x86_64.zip" }
-        default { return "" }
-    }
-}
-
-function Install-MsbPinned {
-    # Install an exact msb from its release bundle, verified against that release's
-    # published checksums.sha256.
-    #
-    # This deliberately does NOT call upstream's Windows installer. That script
-    # resolves the version from releases/latest, and while it does honor an
-    # MSB_INSTALL_VERSION override, driving it would mean piping a remote script
-    # into Invoke-Expression and trusting it to respect an environment variable we
-    # cannot verify from here. The bundle is two files (msb.exe, libkrunfw.dll), so
-    # placing them directly is both simpler and checkable.
-    param([Parameter(Mandatory = $true)][string]$MsbVersion)
-
-    $bundle = Get-MsbBundleName
-    if (-not $bundle) {
-        throw "No msb bundle is published for this Windows architecture ($env:PROCESSOR_ARCHITECTURE). Install msb $MsbVersion manually, then re-run this installer."
-    }
-
-    $baseUrl = "$MsbReleaseBaseUrl/v$MsbVersion"
-    $installRoot = Get-MsbInstallRoot
-    $binDir = Join-Path $installRoot "bin"
-    $libDir = Join-Path $installRoot "lib"
-
-    Write-Host "  Installing msb $MsbVersion from $baseUrl/$bundle"
-    Write-Host "  (verified against that release's checksums.sha256)"
+    Write-Step "Installing acq $Version"
+    Write-Host "  package:     $PackageName"
+    Write-Host "  source:      $($resolved.Url)"
+    Write-Host "  install dir: $InstallDir"
 
     if ($DryRun) {
-        Write-Host "  [dry-run] download $baseUrl/$bundle and checksums.sha256"
-        Write-Host "  [dry-run] verify SHA-256, expand, install msb.exe and libkrunfw.dll into $installRoot"
+        Write-Host "  [dry-run] download $($resolved.Url)/$SumsName and $($resolved.Url)/$PackageName"
+        Write-Host "  [dry-run] verify $PackageName SHA-256 against $SumsName"
+        Write-Host "  [dry-run] expand $PackageName into $InstallDir"
+        Write-Host "  [dry-run] verify the bundled runtime and launcher are present"
+        Write-Host "  [dry-run] offer to add $InstallDir to your user PATH"
         return
     }
 
-    $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("acq-msb-" + [guid]::NewGuid().ToString("N"))
+    $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("acq-install-" + [guid]::NewGuid().ToString("N"))
     try {
         New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
-        $zipPath = Join-Path $tmpRoot $bundle
-        $sumsPath = Join-Path $tmpRoot "checksums.sha256"
+        $zipPath = Join-Path $tmpRoot $PackageName
+        $sumsPath = Join-Path $tmpRoot $SumsName
 
-        Invoke-WebRequest -Uri "$baseUrl/$bundle" -OutFile $zipPath
-        Invoke-WebRequest -Uri "$baseUrl/checksums.sha256" -OutFile $sumsPath
-
-        $expected = ""
-        foreach ($line in (Get-Content -LiteralPath $sumsPath)) {
-            if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($bundle))\s*$") {
-                $expected = $Matches[1].ToLowerInvariant()
-                break
+        if ($resolved.IsUrl) {
+            Invoke-WebRequest -Uri "$($resolved.Url)/$SumsName" -OutFile $sumsPath
+            Invoke-WebRequest -Uri "$($resolved.Url)/$PackageName" -OutFile $zipPath
+        }
+        else {
+            if (-not (Test-Path -LiteralPath (Join-Path $resolved.Url $SumsName) -PathType Leaf)) {
+                throw "offline asset set at $($resolved.Url) has no $SumsName."
             }
-        }
-        if (-not $expected) {
-            throw "checksums.sha256 for msb $MsbVersion has no entry for $bundle."
+            if (-not (Test-Path -LiteralPath (Join-Path $resolved.Url $PackageName) -PathType Leaf)) {
+                throw "offline asset set at $($resolved.Url) has no $PackageName."
+            }
+            Copy-Item -LiteralPath (Join-Path $resolved.Url $SumsName) -Destination $sumsPath
+            Copy-Item -LiteralPath (Join-Path $resolved.Url $PackageName) -Destination $zipPath
         }
 
+        $expected = Get-ExpectedHash -SumsPath $sumsPath
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
         if ($actual -ne $expected) {
-            throw "SHA-256 verification failed for $bundle. Expected $expected, got $actual."
+            throw "SHA-256 verification failed for $PackageName. Expected $expected, got $actual."
         }
-        Write-Host "  verified $bundle SHA-256: $actual"
+        Write-Host "  verified $PackageName SHA-256: $actual"
 
         $extractDir = Join-Path $tmpRoot "extract"
         Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
 
-        $msbSource = Join-Path $extractDir "msb.exe"
-        $libSource = Join-Path $extractDir "libkrunfw.dll"
-        if (-not (Test-Path -LiteralPath $msbSource -PathType Leaf)) {
-            throw "release bundle is missing msb.exe"
-        }
-        if (-not (Test-Path -LiteralPath $libSource -PathType Leaf)) {
-            throw "release bundle is missing libkrunfw.dll"
-        }
-
-        New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-        New-Item -ItemType Directory -Force -Path $libDir | Out-Null
-
-        # Windows cannot overwrite a running image. Fail with a clear instruction
-        # rather than a sharing violation from the middle of a copy.
-        foreach ($target in @((Join-Path $binDir "msb.exe"), (Join-Path $binDir "microsandbox.exe"))) {
-            if (Test-Path -LiteralPath $target -PathType Leaf) {
-                try {
-                    $stream = [System.IO.File]::Open($target, "Open", "ReadWrite", "None")
-                    $stream.Close()
-                }
-                catch {
-                    throw "$target is in use. Stop running sandboxes ('msb ls', then 'msb stop <name>'), close other msb processes, and re-run this installer."
-                }
+        # The zip may wrap its contents in a single top-level directory.
+        $sourceDir = $extractDir
+        if (-not (Test-Path -LiteralPath (Join-Path $sourceDir $LauncherRelative))) {
+            $children = @(Get-ChildItem -LiteralPath $extractDir -Directory)
+            if ($children.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $children[0].FullName $LauncherRelative))) {
+                $sourceDir = $children[0].FullName
             }
         }
+        if (-not (Test-Path -LiteralPath (Join-Path $sourceDir $LauncherRelative) -PathType Leaf)) {
+            throw "release archive is missing the '$LauncherRelative' launcher."
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $sourceDir $RuntimeRelative) -PathType Leaf)) {
+            throw "release archive is missing the bundled runtime ($RuntimeRelative)."
+        }
 
-        Copy-Item -LiteralPath $msbSource -Destination (Join-Path $binDir "msb.exe") -Force
-        Copy-Item -LiteralPath $msbSource -Destination (Join-Path $binDir "microsandbox.exe") -Force
-        Copy-Item -LiteralPath $libSource -Destination (Join-Path $libDir "libkrunfw.dll") -Force
-
-        Write-Host "  Installed msb $MsbVersion to $(Join-Path $binDir 'msb.exe')"
-        Add-UserPath -Directory $binDir
+        # Publish: replace an existing install in place (the update path).
+        $parent = Split-Path -Parent $InstallDir
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        if (Test-Path -LiteralPath $InstallDir) {
+            Remove-Item -LiteralPath $InstallDir -Recurse -Force
+        }
+        Move-Item -LiteralPath $sourceDir -Destination $InstallDir
     }
     finally {
-        Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Assert-MsbSupported {
-    # Verify the active msb after any install or repair. Fails closed: an msb this
-    # installer cannot vouch for is worse than none, because acq will refuse it
-    # later with a less obvious message.
-    param([Parameter(Mandatory = $true)][string]$Context)
-
-    if ($DryRun) { return }
-
-    $msb = Get-Command msb.exe -ErrorAction SilentlyContinue
-    if ($null -eq $msb) {
-        throw "$Context, but msb.exe was not found on PATH. Open a new PowerShell window and re-run this installer."
-    }
-
-    $found = Get-MsbVersion -MsbPath $msb.Source
-    if ((-not $found) -or (-not (Test-MsbVersionFinal -MsbVersion $found))) {
-        throw "$Context, but msb.exe at $($msb.Source) did not report a supported final version."
-    }
-    if ((Compare-MsbVersion -Left $found -Right $MsbMinVersion) -lt 0) {
-        throw "$Context, but the active msb is $found at $($msb.Source), older than the required $MsbMinVersion."
-    }
-    if (Test-MsbVersionBlocked -MsbVersion $found) {
-        throw "$Context, but the active msb is $found at $($msb.Source), which acq refuses (msb $MsbBlockedVersionMin-$MsbBlockedVersionMax migrate 0.6.x sandbox state one-way). Another msb may be earlier on PATH."
-    }
-
-    Write-Host "  Active msb is $found ($($msb.Source))."
-}
-
-function Ensure-GitBash {
-    $bash = Find-GitBash
-    if ($null -ne $bash) {
-        Write-Host "  Git Bash: $bash"
-        return
-    }
-
-    Write-Step "Git Bash is not installed"
-    if ($DryRun) {
-        Write-Host "  [dry-run] would prompt to install Git for Windows with WinGet"
-        return
-    }
-
-    if (-not (Confirm-Action "Install Git for Windows with WinGet now?")) {
-        throw "Git Bash is required. Install Git for Windows, then re-run this installer."
-    }
-
-    Install-WinGetPackage -Id "Git.Git" -Name "Git for Windows"
-    if (-not $DryRun -and $null -eq (Find-GitBash)) {
-        throw "Git for Windows installed, but Git Bash was not found on PATH or in standard install locations. Open a new PowerShell window and re-run this installer."
-    }
-}
-
-function Ensure-Msb {
-    if ($NoMsb) {
-        Write-Warn "Skipping msb install because -NoMsb was set."
-        Write-Host "  acq accepts msb $MsbMinVersion up to (not including) $MsbBlockedVersionMin, and $MsbFixedVersion or newer."
-        Write-Host "  Note: 'irm https://install.microsandbox.dev/windows | iex' installs whatever"
-        Write-Host "  release is newest; set MSB_INSTALL_VERSION=v$MsbPinnedVersion to pin it."
-        return
-    }
-
-    $msb = Get-Command msb.exe -ErrorAction SilentlyContinue
-    if ($null -ne $msb) {
-        $found = Get-MsbVersion -MsbPath $msb.Source
-
-        if ((-not $found) -or (-not (Test-MsbVersionFinal -MsbVersion $found))) {
-            Write-Step "The active msb version is not a supported final release"
-            Write-Warn "Found msb at $($msb.Source), but its version output was not a supported final release."
-            if (-not (Confirm-Action "Install msb $MsbPinnedVersion now?")) {
-                throw "acq needs an msb final release it can verify. Install msb $MsbPinnedVersion, then re-run this installer."
-            }
-            Install-MsbPinned -MsbVersion $MsbPinnedVersion
-            Assert-MsbSupported -Context "msb $MsbPinnedVersion was installed"
-            return
+        if (Test-Path -LiteralPath $tmpRoot) {
+            Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
-
-        if ((Compare-MsbVersion -Left $found -Right $MsbMinVersion) -lt 0) {
-            Write-Step "The active msb version is too old"
-            Write-Warn "Found msb $found at $($msb.Source). acq requires msb $MsbMinVersion or newer."
-            if (-not (Confirm-Action "Install msb $MsbPinnedVersion now?")) {
-                throw "acq requires msb $MsbMinVersion or newer. Install msb $MsbPinnedVersion, then re-run this installer."
-            }
-            Install-MsbPinned -MsbVersion $MsbPinnedVersion
-            Assert-MsbSupported -Context "msb $MsbPinnedVersion was installed"
-            return
-        }
-
-        if (Test-MsbVersionBlocked -MsbVersion $found) {
-            # A blocked msb may ALREADY have migrated the local sandbox catalog
-            # one-way. Swapping the binary does not undo that, so this installer
-            # does not try: the forward move to the fixed release is the one action
-            # that is safe regardless of whether the catalog was migrated, since
-            # the fixed line reads both old and migrated catalogs.
-            Write-Step "The active msb version is blocked"
-            Write-Warn "Found msb $found at $($msb.Source)."
-            Write-Warn "acq refuses msb $MsbBlockedVersionMin-$MsbBlockedVersionMax because those releases migrate 0.6.x sandbox state one-way, into a form the 0.6.x line cannot read."
-            Write-Host "  Moving forward to msb $MsbFixedVersion fixes this without rolling anything back: it"
-            Write-Host "  reads sandbox state this msb already migrated, so no state is rewritten."
-            Write-Host "  'msb self update' targets the newest release; acq re-checks that it lands on $MsbFixedVersion or newer."
-
-            if (-not (Confirm-Action "Run 'msb self update' to move to msb $MsbFixedVersion now?")) {
-                throw "acq refuses msb $found. Run 'msb self update' (or install msb $MsbPinnedVersion), then re-run this installer. If you roll back instead, run 'msb self downgrade $MsbRollbackVersion' with THIS msb first - an older msb cannot roll back these migrations, and a failed attempt blocks later catalog-opening msb commands."
-            }
-
-            Invoke-InstallCommand "msb self update" {
-                & $msb.Source self update
-                if ($LASTEXITCODE -ne 0) {
-                    throw "'msb self update' did not complete. Its output above is authoritative."
-                }
-            }
-            # Verify rather than assume: 'self update' targets whatever is newest,
-            # and acq must still reject unsupported results.
-            Assert-MsbSupported -Context "'msb self update' completed"
-            return
-        }
-
-        Write-Host "  msb: $($msb.Source) (v$found)"
-        return
-    }
-
-    Write-Step "msb is not installed"
-    if ($DryRun) {
-        if ($MsbPackageId) {
-            Write-Host "  [dry-run] would prompt to install msb with WinGet package '$MsbPackageId'"
-        }
-        else {
-            Write-Host "  [dry-run] would prompt to install pinned msb $MsbPinnedVersion from its verified release bundle"
-        }
-        return
-    }
-
-    if ($MsbPackageId) {
-        if (-not (Confirm-Action "Install msb with WinGet package '$MsbPackageId' now?")) {
-            throw "msb is required. Install msb, then re-run this installer."
-        }
-        Install-WinGetPackage -Id $MsbPackageId -Name "msb"
-        # A WinGet package version is outside our control, so check it like any
-        # other: an unsupported version here fails now, with a clear reason.
-        Assert-MsbSupported -Context "WinGet installed msb"
-        return
-    }
-
-    if (-not (Confirm-Action "Install msb $MsbPinnedVersion now?")) {
-        throw "msb is required. Install msb $MsbPinnedVersion, then re-run this installer."
-    }
-
-    Install-MsbPinned -MsbVersion $MsbPinnedVersion
-    Assert-MsbSupported -Context "msb $MsbPinnedVersion was installed"
-}
-
-function Get-ExpectedPackageHash {
-    if ($Sha256) {
-        return $Sha256.ToLowerInvariant()
-    }
-
-    if ($PackageUrl) {
-        throw "-PackageUrl requires -Sha256 so the downloaded zip can be verified."
-    }
-
-    $sumsUrl = "$ReleaseBaseUrl/SHA256SUMS"
-    $sums = Invoke-RestMethod $sumsUrl
-    foreach ($line in ($sums -split "`n")) {
-        if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($PackageName))$") {
-            return $Matches[1].ToLowerInvariant()
-        }
-    }
-
-    throw "SHA256SUMS did not contain an entry for $PackageName."
-}
-
-function Install-AcqZip {
-    $url = if ($PackageUrl) { $PackageUrl } else { "$ReleaseBaseUrl/$PackageName" }
-    $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("acq-install-" + [guid]::NewGuid().ToString("N"))
-    $zipPath = Join-Path $tmpRoot $PackageName
-    $extractDir = Join-Path $tmpRoot "extract"
-
-    try {
-        Invoke-InstallCommand "download $url" {
-            New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
-            Invoke-WebRequest -Uri $url -OutFile $zipPath
-        }
-
-        if (-not $DryRun) {
-            $expected = Get-ExpectedPackageHash
-            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
-            if ($actual -ne $expected) {
-                throw "SHA-256 verification failed for $PackageName. Expected $expected, got $actual."
-            }
-            Write-Host "  verified $PackageName SHA-256: $actual"
-        }
-
-        Invoke-InstallCommand "expand $zipPath to $InstallDir" {
-            Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
-            $sourceDir = $extractDir
-            if (-not (Test-Path -LiteralPath (Join-Path $sourceDir "acq") -PathType Leaf)) {
-                $children = Get-ChildItem -LiteralPath $extractDir -Directory
-                if ($children.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $children[0].FullName "acq") -PathType Leaf)) {
-                    $sourceDir = $children[0].FullName
-                }
-            }
-            if (-not (Test-Path -LiteralPath (Join-Path $sourceDir "acq") -PathType Leaf)) {
-                throw "Downloaded package does not contain the acq entry point."
-            }
-
-            New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-            foreach ($item in @("acq", "acq.backends", "acq.cmd", "acq.ps1", "install.ps1", "README.md", "LICENSE", "package.json", "scripts")) {
-                $src = Join-Path $sourceDir $item
-                if (Test-Path -LiteralPath $src) {
-                    $dst = Join-Path $InstallDir $item
-                    if (Test-Path -LiteralPath $dst) {
-                        Remove-Item -LiteralPath $dst -Recurse -Force
-                    }
-                    Copy-Item -LiteralPath $src -Destination $dst -Recurse
-                }
-            }
-        }
-    }
-    finally {
-        if (-not $DryRun -and (Test-Path -LiteralPath $tmpRoot)) {
-            Remove-Item -LiteralPath $tmpRoot -Recurse -Force
-        }
-    }
-}
-
-function Install-ProviderValidatorRuntime {
-    # The release ZIP is verified before this runs. The nested runtime still has
-    # its own manifest so extraction cannot publish a corrupted embedded Python.
-    if ($DryRun) {
-        Write-Host "  [dry-run] verify and atomically install the embedded provider validator runtime"
-        return
-    }
-
-    $runtimeArchive = Join-Path $InstallDir "scripts\provider-input-validator-runtime-windows-x86_64.zip"
-    $runtimeManifest = Join-Path $InstallDir "scripts\provider-input-validator-runtime-windows-x86_64.sha256"
-    if (-not (Test-Path -LiteralPath $runtimeArchive -PathType Leaf) -or -not (Test-Path -LiteralPath $runtimeManifest -PathType Leaf)) {
-        throw "The installed acq release lacks the embedded provider validator runtime. Reinstall an official release."
-    }
-    $expected = ((Get-Content -LiteralPath $runtimeManifest -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
-    if ($expected -notmatch '^[0-9a-f]{64}$') { throw "Invalid embedded provider validator checksum manifest." }
-    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $runtimeArchive).Hash.ToLowerInvariant()
-    if ($actual -ne $expected) { throw "Embedded provider validator SHA-256 verification failed. Expected $expected, got $actual." }
-
-    $dataRoot = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "acq\provider-input-validator" } else { throw "LOCALAPPDATA is required for the provider validator runtime." }
-    $target = Join-Path $dataRoot "provider-input-validator.current"
-    $stage = Join-Path $dataRoot (".provider-input-validator.stage-" + [guid]::NewGuid().ToString("N"))
-    $backup = Join-Path $dataRoot (".provider-input-validator.previous-" + [guid]::NewGuid().ToString("N"))
-    try {
-        New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
-        Expand-Archive -LiteralPath $runtimeArchive -DestinationPath $stage -Force
-        $python = Join-Path $stage "python.exe"
-        if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "Embedded provider validator runtime is missing python.exe." }
-        & $python -c "import jsonschema, yaml; assert jsonschema.__version__ == '4.26.0'; assert yaml.__version__ == '6.0.3'"
-        if ($LASTEXITCODE -ne 0) { throw "Embedded provider validator dependency verification failed." }
-        if (Test-Path -LiteralPath $target) { Move-Item -LiteralPath $target -Destination $backup }
-        try {
-            Move-Item -LiteralPath $stage -Destination $target
-            if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
-        }
-        catch {
-            if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $target }
-            throw
-        }
-    }
-    finally {
-        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
 
 function Add-UserPath {
-    # Offer to put a directory on the user PATH. Shared by the acq install dir and
-    # the msb bin dir. Never changes PATH without asking, and honors -NoPath.
     param([Parameter(Mandatory = $true)][string]$Directory)
-
-    if ($NoPath) {
-        Write-Warn "Not changing PATH because -NoPath was set."
-        Write-Host "  Add this directory to your user PATH: $Directory"
-        return
-    }
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $parts = @()
@@ -723,24 +214,20 @@ function Add-UserPath {
         return
     }
 
+    if ($DryRun) {
+        Write-Host "  [dry-run] add $Directory to your user PATH"
+        return
+    }
+
     if (-not (Confirm-Action "Add $Directory to your user PATH?")) {
         Write-Warn "Not changing PATH. Add this directory to your user PATH yourself: $Directory"
         return
     }
 
-    Invoke-InstallCommand "add $Directory to the user PATH" {
-        $newPath = if ($userPath) { "$userPath;$Directory" } else { $Directory }
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        $env:Path = "$env:Path;$Directory"
-    }
-}
-
-function Ensure-Path {
-    Add-UserPath -Directory $InstallDir
-}
-
-if (-not $InstallDir) {
-    $InstallDir = Get-DefaultInstallDir
+    $newPath = if ($userPath) { "$userPath;$Directory" } else { $Directory }
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    $env:Path = "$env:Path;$Directory"
+    Write-Host "  Added $Directory to your user PATH."
 }
 
 if ($Help) {
@@ -748,17 +235,27 @@ if ($Help) {
     exit 0
 }
 
-Write-Step "Checking Windows preview prerequisites"
-Assert-WindowsHost
-Assert-WhpEnabled
-Ensure-GitBash
-Ensure-Msb
+# -Help and -DryRun are read-only/planning paths and must not require a user
+# profile. Resolve the install dir lazily: -DryRun falls back to a placeholder
+# when LOCALAPPDATA is absent, and only the real install path requires it.
+if ($DryRun) {
+    if (-not $InstallDir) {
+        $InstallDir = if ($env:LOCALAPPDATA) { Get-DefaultInstallDir } else { "<LOCALAPPDATA>\Programs\acq" }
+    }
+    Write-Host "  [dry-run] check host is Windows"
+}
+else {
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        throw "install.ps1 is only supported on Windows hosts."
+    }
+    if (-not $InstallDir) {
+        $InstallDir = Get-DefaultInstallDir
+    }
+}
 
 Write-Step "Installing acq"
 Install-AcqZip
-Install-ProviderValidatorRuntime
-Ensure-Path
+Add-UserPath -Directory $InstallDir
 
 Write-Step "Done"
 Write-Host "Try it now: acq version"
-Write-Host "Next, start a sandbox: acq run opencode C:\path\to\your\project"

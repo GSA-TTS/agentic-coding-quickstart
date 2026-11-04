@@ -334,6 +334,26 @@
     {
       "contract": "ADR-0041m security-exception recreation is explicit and consent-gated (refused without --yes, recreates preserving host records with --yes)",
       "vectors": ["cli/security-recreate-consent", "cli/security-recreate-yes"]
+    },
+    {
+      "contract": "ADR-0042m installer entry options (--help / --version / usage error exit 2)",
+      "vectors": ["installer/help", "installer/version", "installer/usage-error"]
+    },
+    {
+      "contract": "ADR-0042m installer dry-run: prints a plan with no writes and no network",
+      "vectors": ["installer/dry-run"]
+    },
+    {
+      "contract": "ADR-0042m installer fail-closed checksum verification (mismatch exits 1 before any write)",
+      "vectors": ["installer/checksum-fail-closed"]
+    },
+    {
+      "contract": "ADR-0042m installer installs from the enumerated offline asset set alone",
+      "vectors": ["installer/offline-install"]
+    },
+    {
+      "contract": "ADR-0042m installer consent: PATH is never modified without an explicit yes",
+      "vectors": ["installer/consent-declined"]
     }
   ]
 }

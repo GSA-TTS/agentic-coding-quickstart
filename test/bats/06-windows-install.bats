@@ -1,5 +1,11 @@
 #!/usr/bin/env bats
 
+# Tests for the acq v1 Windows installer (install.ps1) — ADR-0042m. Windows x64
+# only: a checksum-verified acq-windows-x64.zip installed under LOCALAPPDATA, with
+# consent-gated user PATH and no elevation. The functional install path needs a
+# Windows host; these tests assert the source invariants and exercise -Help and
+# -DryRun under pwsh when available.
+
 load './helper.bash'
 
 setup() {
@@ -11,31 +17,76 @@ teardown() {
 }
 
 @test "windows installer: release version marker stays in sync with install.sh" {
-  sh_version=$(sed -n 's/^DEFAULT_RELEASE_VERSION="\([^"]*\)".*/\1/p' "$REPO_ROOT/install.sh")
+  sh_version=$(sed -n 's/^DEFAULT_VERSION="\([^"]*\)".*/\1/p' "$REPO_ROOT/install.sh")
   ps_version=$(sed -n 's/^    \[string\]\$Version = "\([^"]*\)".*/\1/p' "$REPO_ROOT/install.ps1")
 
   assert_equal "$ps_version" "$sh_version"
 }
 
-@test "windows PowerShell: installer help and dry-run execute when pwsh is available" {
+@test "windows installer: verifies the zip against SHA256SUMS before writing" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  assert_regex "$installer" 'function Get-ExpectedHash'
+  assert_regex "$installer" 'Get-FileHash -Algorithm SHA256'
+  assert_regex "$installer" 'SHA-256 verification failed'
+  assert_regex "$installer" 'SHA256SUMS has no entry'
+}
+
+@test "windows installer: PATH is consent-gated and never inferred non-interactively" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  assert_regex "$installer" 'function Confirm-Action'
+  assert_regex "$installer" '\[Console\]::IsInputRedirected'
+  assert_regex "$installer" 'SetEnvironmentVariable\("Path"'
+}
+
+@test "windows installer: never elevates" {
+  run grep -E 'Enable-WindowsOptionalFeature|Start-Process.*-Verb RunAs|Restart-Computer' \
+    "$REPO_ROOT/install.ps1"
+  assert_failure
+}
+
+@test "windows installer: never pipes a remote script to iex" {
+  # The usage here-string documents the `irm … | iex` bootstrap; that prose must
+  # not read as the installer itself piping a remote script to iex. Strip the
+  # here-string body, comments, and Write-* helpers, then assert on what runs.
+  code=$(awk '
+    /@"/   { inheredoc = 1 }
+    /^"@/  { inheredoc = 0; next }
+    inheredoc { next }
+    /^[[:space:]]*#/ { next }
+    /Write-(Host|Warn|Warning)/ { next }
+    { print }
+  ' "$REPO_ROOT/install.ps1")
+
+  refute_regex "$code" '(irm|Invoke-RestMethod|Invoke-WebRequest)[^|]*\|[[:space:]]*(iex|Invoke-Expression)'
+  refute_regex "$code" 'install\.microsandbox\.dev'
+}
+
+@test "windows installer: installs a checksum-verified zip under LOCALAPPDATA" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  assert_regex "$installer" 'acq-windows-x64\.zip'
+  assert_regex "$installer" 'LOCALAPPDATA.*Programs\\acq'
+  assert_regex "$installer" 'Expand-Archive'
+  assert_regex "$installer" 'py-acq\\runtime\\python\.exe'
+}
+
+@test "windows PowerShell: installer -Help and -DryRun execute when pwsh is available" {
   command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
 
   run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -Help
   assert_success
-  assert_output --partial 'install.ps1 - install acq for Windows preview hosts'
+  assert_output --partial 'install.ps1 - install acq'
 
-  run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun -NoMsb -NoPath
+  run pwsh -NoLogo -NoProfile -File "$REPO_ROOT/install.ps1" -DryRun
   assert_success
-  assert_output --partial '[dry-run] check host is Windows'
-  assert_output --partial '[dry-run] download'
+  assert_output --partial '[dry-run]'
 }
 
-@test "windows PowerShell: launcher and installer parse when pwsh is available" {
+@test "windows PowerShell: installer parses when pwsh is available" {
   command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
 
-  # Under Git Bash, $REPO_ROOT is a POSIX path (/c/...); a native Windows pwsh
-  # cannot Join-Path that into a readable path. Convert to a Windows path where
-  # cygpath exists (Git Bash), else keep the POSIX path (macOS/Linux pwsh).
   if command -v cygpath >/dev/null 2>&1; then
     repo_root_win=$(cygpath -w "$REPO_ROOT")
   else
@@ -43,296 +94,17 @@ teardown() {
   fi
 
   run pwsh -NoLogo -NoProfile -Command '
-    foreach ($file in @("install.ps1", "acq.ps1")) {
-      $tokens = $null
-      $errors = $null
-      $null = [System.Management.Automation.Language.Parser]::ParseFile(
-        (Join-Path "'"$repo_root_win"'" $file),
-        [ref]$tokens,
-        [ref]$errors
-      )
-      if ($errors.Count) {
-        $errors | ForEach-Object { $_.ToString() }
-        exit 1
-      }
-    }
-  '
-  assert_success
-}
-
-@test "windows installer: does not enable WHP or elevate" {
-  run grep -E 'Enable-WindowsOptionalFeature|Start-Process.*-Verb RunAs|Restart-Computer' \
-    "$REPO_ROOT/install.ps1"
-
-  assert_failure
-}
-
-@test "windows installer: verifies WHP before install" {
-  installer=$(cat "$REPO_ROOT/install.ps1")
-
-  assert_regex "$installer" 'Assert-WhpEnabled'
-  assert_regex "$installer" 'HypervisorPlatform'
-  assert_regex "$installer" 'Windows Hypervisor Platform is not enabled'
-}
-
-@test "windows installer: installs Git for Windows via WinGet" {
-  installer=$(cat "$REPO_ROOT/install.ps1")
-
-  assert_regex "$installer" 'Install-WinGetPackage -Id "Git\.Git" -Name "Git for Windows"'
-  assert_regex "$installer" 'winget install --id \$Id --exact'
-}
-
-@test "windows installer: msb WinGet package id is configurable and version-checked" {
-  installer=$(cat "$REPO_ROOT/install.ps1")
-
-  assert_regex "$installer" '\$MsbPackageId = \$env:ACQ_MSB_WINGET_ID'
-  # A WinGet package's version is outside our control, so that path must verify
-  # what it got rather than trusting the package.
-  assert_regex "$installer" 'Assert-MsbSupported -Context "WinGet installed msb"'
-}
-
-@test "windows installer: does not install msb by piping a remote script to iex" {
-  # install.ps1 previously ran `irm https://install.microsandbox.dev/windows | iex`
-  # with no version check, so a Windows host could land on a blocked release. That
-  # installer resolves the version at run time and cannot be pinned, so the only
-  # verifiable option is placing the release bundle ourselves.
-  #
-  # Asserted over CODE only. The URL legitimately survives in guidance text
-  # (Write-Host), and acq's OWN documented bootstrap is an `irm ... | iex` inside
-  # the usage here-string -- a whole-file regex would match both and prove nothing.
-  # Strip the here-string block and the output helpers, then assert on what runs.
-  code=$(awk '
-    /@"/   { inheredoc = 1 }
-    /^"@/  { inheredoc = 0; next }
-    inheredoc { next }
-    /^[[:space:]]*#/ { next }
-    /Write-(Host|Warn|Step|Warning)/ { next }
-    { print }
-  ' "$REPO_ROOT/install.ps1")
-
-  refute_regex "$code" '(irm|Invoke-RestMethod|Invoke-WebRequest)[^|]*\|[[:space:]]*(iex|Invoke-Expression)'
-  refute_regex "$code" 'install\.microsandbox\.dev'
-  # What replaced it: the pinned bundle, verified against the release's own
-  # checksums before anything is copied into place.
-  assert_regex "$code" 'function Install-MsbPinned'
-  assert_regex "$code" '\$baseUrl/checksums\.sha256'
-  assert_regex "$code" 'SHA-256 verification failed'
-  assert_regex "$code" 'Get-FileHash -Algorithm SHA256'
-}
-
-@test "windows installer: msb version policy stays in lockstep with install.sh" {
-  # Four files carry this policy (install.sh, install.ps1, acq.backends/msb.sh,
-  # scripts/verify-msb-pin) because three must run standalone. Drift means Windows
-  # accepts an msb the rest of acq refuses, so pin the Windows copy to install.sh's.
-  for var in MSB_MIN_VERSION:MsbMinVersion \
-             MSB_PINNED_VERSION:MsbPinnedVersion \
-             MSB_ROLLBACK_VERSION:MsbRollbackVersion \
-             MSB_BLOCKED_VERSION_MIN:MsbBlockedVersionMin \
-             MSB_BLOCKED_VERSION_MAX:MsbBlockedVersionMax \
-             MSB_FIXED_VERSION:MsbFixedVersion; do
-    sh_name=${var%%:*}
-    ps_name=${var##*:}
-    sh_value=$(sed -n "s/^$sh_name=\"\([^\"]*\)\".*/\1/p" "$REPO_ROOT/install.sh")
-    ps_value=$(sed -n "s/^\\\$$ps_name = \"\([^\"]*\)\".*/\1/p" "$REPO_ROOT/install.ps1")
-
-    [ -n "$sh_value" ] || fail "install.sh does not define $sh_name"
-    assert_equal "$ps_value" "$sh_value"
-  done
-}
-
-@test "windows PowerShell: msb version parser preserves suffix policy" {
-  command -v pwsh >/dev/null 2>&1 || skip "pwsh not available"
-
-  stub="$BATS_TEST_TMPDIR/msb"
-  printf '%s\n' '#!/usr/bin/env sh' 'printf "%s\n" "$MSB_VERSION_OUTPUT"' 'exit "${MSB_VERSION_RC:-0}"' >"$stub"
-  chmod +x "$stub"
-
-  run env MSB_STUB_PATH="$stub" pwsh -NoLogo -NoProfile -Command '
-    $script = Get-Content -Raw -LiteralPath "'"$REPO_ROOT"'/install.ps1"
     $tokens = $null
     $errors = $null
-    $ast = [System.Management.Automation.Language.Parser]::ParseInput($script, [ref]$tokens, [ref]$errors)
-    if ($errors.Count) { $errors | ForEach-Object { $_.ToString() }; exit 1 }
-    foreach ($name in @("Get-MsbVersion", "Test-MsbVersionFinal")) {
-      $fn = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
-      if ($null -eq $fn) { "missing $name"; exit 1 }
-      . ([scriptblock]::Create($fn.Extent.Text))
-    }
-    $cases = @(
-      @{ Output = "msb 0.7.3-rc1"; Parsed = "0.7.3-rc1"; Final = $false },
-      @{ Output = "msb 0.7.3+build.1"; Parsed = "0.7.3+build.1"; Final = $false },
-      @{ Output = "msb 0.7.3 linux-arm64"; Parsed = "0.7.3"; Final = $true }
+    $null = [System.Management.Automation.Language.Parser]::ParseFile(
+      (Join-Path "'"$repo_root_win"'" "install.ps1"),
+      [ref]$tokens,
+      [ref]$errors
     )
-    foreach ($case in $cases) {
-      $env:MSB_VERSION_OUTPUT = $case.Output
-      $env:MSB_VERSION_RC = "0"
-      $parsed = Get-MsbVersion -MsbPath $env:MSB_STUB_PATH
-      "parsed=$parsed final=$(Test-MsbVersionFinal -MsbVersion $parsed)"
-      if ($parsed -ne $case.Parsed) { "expected parsed=$($case.Parsed)"; exit 1 }
-      if ((Test-MsbVersionFinal -MsbVersion $parsed) -ne $case.Final) { "expected final=$($case.Final)"; exit 1 }
+    if ($errors.Count) {
+      $errors | ForEach-Object { $_.ToString() }
+      exit 1
     }
-    $env:MSB_VERSION_OUTPUT = "msb 0.7.3"
-    $env:MSB_VERSION_RC = "42"
-    $parsed = Get-MsbVersion -MsbPath $env:MSB_STUB_PATH
-    "failed-probe-parsed=[$parsed]"
-    if ($parsed -ne "") { "expected failed probe to parse empty"; exit 1 }
   '
-
   assert_success
-  assert_output --partial 'parsed=0.7.3-rc1 final=False'
-  assert_output --partial 'parsed=0.7.3+build.1 final=False'
-  assert_output --partial 'parsed=0.7.3 final=True'
-  assert_output --partial 'failed-probe-parsed=[]'
-}
-
-@test "windows installer: installed layout includes Windows launcher files" {
-  installer=$(cat "$REPO_ROOT/install.ps1")
-
-  assert_regex "$installer" '"acq", "acq\.backends", "acq\.cmd", "acq\.ps1", "install\.ps1"'
-  assert_regex "$installer" '"scripts"'
-}
-
-@test "windows installer: atomically verifies and publishes the embedded validator runtime" {
-  installer=$(cat "$REPO_ROOT/install.ps1")
-
-  assert_regex "$installer" 'function Install-ProviderValidatorRuntime'
-  assert_regex "$installer" 'Get-FileHash -Algorithm SHA256 -LiteralPath \$runtimeArchive'
-  assert_regex "$installer" 'Embedded provider validator SHA-256 verification failed'
-  assert_regex "$installer" 'provider-input-validator\.stage'
-  assert_regex "$installer" 'provider-input-validator\.previous'
-  assert_regex "$installer" 'python\.exe'
-  assert_regex "$installer" 'Install-ProviderValidatorRuntime'
-}
-
-@test "windows launcher: provides the user-data validator runtime to Git Bash" {
-  launcher=$(cat "$REPO_ROOT/acq.ps1")
-
-  assert_regex "$launcher" 'ACQ_PROVIDER_INPUT_DATA_DIR'
-  assert_regex "$launcher" 'LOCALAPPDATA.*provider-input-validator'
-}
-
-@test "windows launcher: converts Windows paths before Git Bash handoff" {
-  launcher=$(cat "$REPO_ROOT/acq.ps1")
-
-  assert_regex "$launcher" 'Find-GitBash'
-  assert_regex "$launcher" 'Convert-ArgumentForGitBash'
-  assert_regex "$launcher" 'if \(\$Argument -match.*\[A-Za-z\]:'
-  assert_regex "$launcher" 'function Test-IsUncPath'
-  assert_regex "$launcher" 'return \$slash \+ \$slash'
-  assert_regex "$launcher" 'TrimStart\(\[char\]92\)'
-  assert_regex "$launcher" 'Test-IsUncPath -Path \$Matches\[2\]'
-  refute_regex "$launcher" 'MSYS2_ARG_CONV_EXCL = "\*"'
-  assert_regex "$launcher" '& \$bash --noprofile --norc \$bashAcq @convertedArgs'
-}
-
-@test "windows launcher and installer: reject the WSL bash shim in favor of Git Bash" {
-  for f in "$REPO_ROOT/acq.ps1" "$REPO_ROOT/install.ps1"; do
-    script=$(cat "$f")
-    assert_regex "$script" 'Test-IsWslShim'
-    assert_regex "$script" 'System32\\bash\.exe'
-    assert_regex "$script" 'SysWOW64\\bash\.exe'
-    assert_regex "$script" 'Test-IsWslShim -Path \$fromPath\.Source'
-  done
-}
-
-@test "windows installer: probes WHP via the API, not just the feature flag" {
-  installer=$(cat "$REPO_ROOT/install.ps1")
-
-  assert_regex "$installer" 'WHvCreatePartition'
-  assert_regex "$installer" 'WHvDeletePartition'
-  assert_regex "$installer" 'WinHvPlatform\.dll'
-  assert_regex "$installer" 'return \$null'
-}
-
-@test "windows cmd shim: delegates to PowerShell launcher without policy bypass" {
-  shim=$(cat "$REPO_ROOT/acq.cmd")
-
-  assert_regex "$shim" 'powershell\.exe -NoLogo -NoProfile -File "%ACQ_PS1%" %\*'
-  refute_regex "$shim" 'ExecutionPolicy Bypass'
-}
-
-@test "release workflow: publishes Windows preview assets" {
-  workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
-
-  assert_regex "$workflow" 'acq-windows-x64\.zip'
-  assert_regex "$workflow" 'cp install\.ps1 dist/install\.ps1'
-  assert_regex "$workflow" 'cp acq acq\.cmd acq\.ps1 install\.ps1 LICENSE README\.md package\.json'
-  assert_regex "$workflow" 'setup-provider-input-validator scripts/provider-input-validator-requirements\*\.txt'
-  assert_regex "$workflow" 'provider-input-validator-wheelhouse/windows-x86_64'
-  assert_regex "$workflow" 'provider-input-validator-wheelhouse-windows-x86_64\.tar\.gz'
-  assert_regex "$workflow" 'python-3\.12\.10-embed-amd64\.zip'
-  assert_regex "$workflow" 'PYTHON_EMBED_SHA256'
-  assert_regex "$workflow" 'provider-input-validator-runtime-windows-x86_64\.zip'
-  assert_regex "$workflow" 'test -f runtime/LICENSE\.txt'
-  assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip provider-input-validator-wheelhouse-\*\.tar\.gz > SHA256SUMS'
-  assert_regex "$workflow" 'dist/acq-windows-x64\.zip'
-}
-
-@test "release workflow: wheelhouse job tar path matches upload-artifact path" {
-  # Execute the release command in a job-like working directory and verify the
-  # archive exists exactly where upload-artifact reads it.
-  workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
-  assert_regex "$workflow" \
-    'tar -czf "provider-input-validator-wheelhouse-\$\{\{ matrix\.platform \}\}\.tar\.gz" -C wheelhouse \.'
-  grep -qF 'path: provider-input-validator-wheelhouse-${{ matrix.platform }}.tar.gz' \
-    "$REPO_ROOT/.github/workflows/release.yml"
-
-  mkdir -p "$STUBDIR/release-job/wheelhouse"
-  printf 'wheel\n' > "$STUBDIR/release-job/wheelhouse/example.whl"
-  run bash -c 'cd "$1" && tar -czf provider-input-validator-wheelhouse-linux-x86_64.tar.gz -C wheelhouse . && test -f provider-input-validator-wheelhouse-linux-x86_64.tar.gz' _ "$STUBDIR/release-job"
-  assert_success
-}
-
-@test "release workflow: wheelhouse SHA256SUMS never hashes itself" {
-  # Regression: the shell redirect `> SHA256SUMS` creates the file as 0 bytes
-  # BEFORE Python's glob runs.  If the glob matches `*` it will include
-  # SHA256SUMS itself (hash of empty string), producing a permanently
-  # self-inconsistent manifest that always fails verification.
-  # The fix is to glob only *.whl so SHA256SUMS is never a candidate.
-  workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
-
-  # Must use *.whl glob (or equivalent explicit exclusion), not bare glob('*')
-  assert_regex "$workflow" "glob\('\*\.whl'\)"
-  refute_regex "$workflow" "glob\('\*'\)[^)]*is_file\(\)"
-}
-
-@test "release workflow: wheelhouse tar extracts into platform subdir for non-Windows" {
-  # Structural test: the release-assets job must extract each non-Windows
-  # wheelhouse tar into a platform-named subdirectory so that
-  # setup-provider-input-validator can find wheels at
-  # scripts/provider-input-validator-wheelhouse/<platform>/*.whl.
-  # (Windows is handled separately via the explicit windows-x86_64 path on line ~141.)
-  workflow=$(cat "$REPO_ROOT/.github/workflows/release.yml")
-
-  # install-provider-input-wheelhouse appends the platform subdir itself; the
-  # release-assets job uses the direct tar -xzf approach only for Windows.
-  # Assert Windows extraction uses the correct subdir path.
-  assert_regex "$workflow" \
-    'tar -xzf.*provider-input-validator-wheelhouse-windows-x86_64.*-C dist/acq-windows-x64/scripts/provider-input-validator-wheelhouse/windows-x86_64'
-}
-
-@test "install-provider-input-wheelhouse: installs into platform subdir" {
-  # Regression: the script previously placed extracted wheels directly at
-  # <target>/*.whl, but setup-provider-input-validator expects them at
-  # <target>/<platform>/*.whl.  Verify the platform subdir is appended.
-  script=$(cat "$REPO_ROOT/scripts/install-provider-input-wheelhouse")
-
-  # The platform subdir must be appended to target before stage/backup are derived
-  assert_regex "$script" 'target="\$\{target\}/\$\{platform\}"'
-}
-
-@test "install-provider-input-wheelhouse: setup-provider-input-validator wheelhouse paths match" {
-  # Cross-check: every platform path that setup-provider-input-validator
-  # expects must correspond exactly to what install-provider-input-wheelhouse
-  # will produce (base target + "/" + platform slug).
-  setup_script=$(cat "$REPO_ROOT/scripts/setup-provider-input-validator")
-  install_script=$(cat "$REPO_ROOT/scripts/install-provider-input-wheelhouse")
-
-  # Verify that the four platform slugs used in setup are also the ones
-  # produced by the case statement in the install script.
-  for platform in macos-arm64 macos-x86_64 linux-x86_64 linux-aarch64; do
-    assert_regex "$setup_script" "provider-input-validator-wheelhouse/${platform}"
-    assert_regex "$install_script" "${platform}"
-  done
-  assert_regex "$install_script" 'target="\$\{target\}/\$\{platform\}"'
 }
