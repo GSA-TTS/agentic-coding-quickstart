@@ -95,7 +95,8 @@ env:
 jobs:
   # Cheap relevance check: does the PR or merge-group diff touch anything the bash 3.2
   # interpreter-build + acq-offline-suite job actually needs to re-verify?
-  # Mirrors the path list the old workflow-level `paths:` filter encoded.
+  # The path list started as the old workflow-level `paths:` filter and now
+  # covers every input of the job below (see the comment at the `git diff`).
   # Uses a plain `git diff --name-only`, matching the existing in-repo
   # precedent in markdown-quality.yml's link-check job, rather than adding a
   # marketplace paths-filter action — consistent with this repo's minimal-
@@ -130,12 +131,47 @@ jobs:
             exit 1
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          # Every input the build + suite job reads must be listed: an unlisted
+          # file lets a PR skip the real bash 3.2 run while the gate stays green.
+          # test/bats/158-bash32-relevance-paths.bats pins this list; keep one
+          # quoted pathspec per line. test/vendor matches the bats submodule
+          # pins (a gitlink change reports as the submodule path).
           changed="$(git diff --name-only "$BASE_SHA" -- \
             'acq' \
             'acq.backends' \
+            'acq.cmd' \
+            'acq.ps1' \
+            'install.sh' \
+            'install.ps1' \
+            'README.md' \
+            'AGENTS.md' \
             'scripts/test-acq-lib.sh' \
             'scripts/test-acq-bats' \
+            'scripts/test-acq-bash32' \
+            'scripts/bats-shard' \
+            'scripts/fetch-bash32-oci.py' \
+            'scripts/scan-heredoc-subst.py' \
+            'scripts/bats_timing_core.py' \
+            'scripts/bats_timing_render.py' \
+            'scripts/summarize-bats-timing' \
+            'scripts/run-shellcheck' \
+            'scripts/fix-exec-bits' \
+            'scripts/verify-backends' \
+            'scripts/qualify-msb-ro-mount' \
+            'scripts/rotate-apikey' \
+            'scripts/probe-msb-node-startup' \
+            'scripts/test-probe-msb-node-startup.py' \
+            'scripts/setup-provider-input-validator' \
+            'scripts/install-provider-input-wheelhouse' \
+            'scripts/provider-input-validator-requirements.txt' \
+            'scripts/provider-input-validator-requirements-linux.txt' \
+            'scripts/provider-input-validator-requirements-macos.txt' \
+            'scripts/provider-input-validator-requirements-windows.txt' \
             'test/bats' \
+            'test/vendor' \
+            '.gitmodules' \
+            '.github/keys/chet-ramey-bash-release-signing-key.asc' \
+            '.github/workflows/release.yml' \
             '.github/workflows/bash32-compat.yml')"
           if [ -n "$changed" ]; then
             echo "relevant=true" >>"$GITHUB_OUTPUT"
@@ -166,7 +202,7 @@ jobs:
           persist-credentials: false
           # The suite runs under bats-core, vendored as submodules.
           submodules: true
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
