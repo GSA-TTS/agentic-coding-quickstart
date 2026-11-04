@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -88,6 +89,27 @@ def _install_dir(tmp_path: Path) -> Path:
 
 def _bin_dir(tmp_path: Path) -> Path:
     return tmp_path / "home" / ".local" / "bin"
+
+
+# A line whose first word is an elevation command (sudo/pkexec on POSIX, runas on
+# Windows) is an elevation *invocation*. The installer may still legitimately
+# mention "no sudo" in comments and --help prose, so a bare substring match is
+# wrong (and is exactly what failed in CI).
+_ELEVATION_COMMAND = re.compile(r"^\s*(sudo|pkexec|runas)\s")
+
+
+def _elevation_invocations(source: str) -> list[str]:
+    """Lines that *invoke* privilege elevation, ignoring comments/documentation."""
+    offending: list[str] = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _ELEVATION_COMMAND.match(line):
+            offending.append(line)
+        elif "osascript" in stripped and "with administrator privileges" in stripped:
+            offending.append(line)
+    return offending
 
 
 def test_help_exits_zero(tmp_path):
@@ -180,9 +202,18 @@ def test_unsupported_platform_fails_closed(tmp_path):
 
 def test_installer_never_elevates():
     source = INSTALL_SH.read_text(encoding="utf-8")
-    # Mutation proof: any reintroduction of privilege escalation fails this test.
-    assert "sudo" not in source
-    assert "pkexec" not in source
+    # The installer documents non-elevation ("no sudo") in comments and --help
+    # prose; that wording must not read as an elevation invocation.
+    assert "sudo" in source
+    assert _elevation_invocations(source) == []
+
+
+def test_elevation_guard_is_a_mutation_proof():
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    # Positive control: an introduced elevation command is detected, while the
+    # clean installer (with its "no sudo" documentation) is not.
+    assert _elevation_invocations(source + "\nsudo true\n") == ["sudo true"]
+    assert _elevation_invocations(source) == []
 
 
 def test_installer_has_no_secret_literals():
