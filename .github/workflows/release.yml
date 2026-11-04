@@ -52,12 +52,12 @@ jobs:
             pip_platform: manylinux_2_17_aarch64
             lock: scripts/provider-input-validator-requirements-linux.txt
             python_versions: "312"
-          - runner: macos-14
+          - runner: macos-15
             platform: macos-arm64
             pip_platform: macosx_11_0_arm64
             lock: scripts/provider-input-validator-requirements-macos.txt
             python_versions: "312 313 314"
-          - runner: macos-13
+          - runner: macos-15-intel
             platform: macos-x86_64
             pip_platform: macosx_10_13_x86_64
             lock: scripts/provider-input-validator-requirements-macos.txt
