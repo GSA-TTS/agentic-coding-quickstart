@@ -23,7 +23,8 @@
           "status": "warn",
           "checks": [
             { "id": "runtime", "status": "pass" },
-            { "id": "backend", "status": "warn" }
+            { "id": "backend", "status": "warn" },
+            { "id": "state", "status": "pass" }
           ]
         }
       },

@@ -74,7 +74,17 @@ def _checksum(token: str) -> str:
 
 def record_path(backend: str, name: str) -> Path:
     """Path to one sandbox's state record, keyed by backend + sandbox name."""
-    return state_dir() / _safe(backend) / f"{_safe(name)}.{_checksum(name)}.json"
+    return backend_dir(backend) / f"{_safe(name)}.{_checksum(name)}.json"
+
+
+def backend_dir(backend: str) -> Path:
+    """The state subdirectory holding one backend's sandbox records.
+
+    Sandbox-state records live directly under ``state_dir()/<backend>/``; sibling
+    directories (``kit-sources/``, ``provenance/``, ``kit-consent/``) hold other
+    record types with their own schema number space and are never sandbox state.
+    """
+    return state_dir() / _safe(backend)
 
 
 def record_write(
@@ -85,12 +95,16 @@ def record_write(
     workspace: str | None,
     image: str | None = None,
     created_at: str | None = None,
+    ro_host_config: bool | None = None,
 ) -> dict:
     """Write (atomically) a sandbox's host-authoritative state record.
 
     Call ONLY after the backend reports the sandbox created and exec-ready. The
     write is temp-file + fsync + rename so a crash cannot leave a half-written
     record (ADR-0041m atomic, non-destructive). ``schema`` is the first field.
+    ``ro_host_config`` records that the create passed the ADR-0035 read-only
+    trusted-config mount (host key ``ro-host-config``); it is preserved across the
+    security-exception recreation so the sandbox keeps requiring the guarantee.
     """
     doc: dict = {
         "schema": STATE_SCHEMA,
@@ -103,6 +117,8 @@ def record_write(
         doc["image"] = image
     if created_at:
         doc["created_at"] = created_at
+    if ro_host_config:
+        doc["ro_host_config"] = True
 
     path = record_path(backend, name)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,10 +162,21 @@ def _record_from_path(path: Path, *, strict: bool, label: str) -> dict | None:
     schema = doc.get("schema")
     if schema is None:
         return None  # legacy v0 (no marker)
-    if not isinstance(schema, int) or schema != STATE_SCHEMA:
+    if not isinstance(schema, int) or isinstance(schema, bool) or schema != STATE_SCHEMA:
         if strict:
             raise StateSchemaError(
                 f"state record for {label!r} carries schema {schema!r}; "
+                f"this reader understands schema {STATE_SCHEMA}"
+            )
+        return None
+    # A record may declare a minimum reader schema (ADR-0041m): a reader below it
+    # must refuse rather than misread, even though the record's own schema is one
+    # this reader can parse.
+    min_reader = doc.get("min_reader")
+    if isinstance(min_reader, int) and not isinstance(min_reader, bool) and min_reader > STATE_SCHEMA:
+        if strict:
+            raise StateSchemaError(
+                f"state record for {label!r} requires min_reader {min_reader}; "
                 f"this reader understands schema {STATE_SCHEMA}"
             )
         return None
@@ -181,7 +208,7 @@ def list_records(backend: str) -> list[dict]:
     skipped (ADR-0041m: read-only diagnostics may report ``unknown`` rather than
     misread); a schema-less legacy record is likewise skipped.
     """
-    root = state_dir() / _safe(backend)
+    root = backend_dir(backend)
     out: list[dict] = []
     if not root.is_dir():
         return out
