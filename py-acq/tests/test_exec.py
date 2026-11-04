@@ -68,9 +68,9 @@ def test_sandbox_ref_typing():
 def test_workspace_from_record_and_default(monkeypatch, tmp_path):
     _env(monkeypatch, tmp_path)
     state.record_write("msb", "box", agent="opencode", workspace="/home/agent/work")
-    assert cli._workspace_from_record("box") == "/home/agent/work"
+    assert cli._workspace_from_record("msb", "box") == "/home/agent/work"
     # No record -> the legacy agent-home default.
-    assert cli._workspace_from_record("nope") == cli.DEFAULT_GUEST_WORKSPACE
+    assert cli._workspace_from_record("msb", "nope") == cli.DEFAULT_GUEST_WORKSPACE
 
 
 def test_attach_reads_agent_from_record_and_propagates_status(monkeypatch, tmp_path, capsys):

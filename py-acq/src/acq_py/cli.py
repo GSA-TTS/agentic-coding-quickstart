@@ -35,10 +35,20 @@ from . import (
     migration,
     msb,
     provider_creds,
+    sbx,
     security,
     state,
     version_info,
 )
+
+# Both adapters raise an error carrying the same (code, message, remediation)
+# contract; catch this tuple uniformly at the seam.
+_ADAPTER_ERRORS = (msb.MsbError, sbx.SbxError)
+
+
+def _adapter(backend: str):
+    """Resolve the adapter module for a backend name (``"sbx"`` else ``msb``)."""
+    return sbx if backend == "sbx" else msb
 
 # Agent tokens accepted by acq dispatch (mirrors acq.backends/agents.sh). Kept in
 # the CLI because it owns the create-vs-reattach decision for ``run``.
@@ -553,10 +563,9 @@ def _resolve_backend_for_mutation(
     """Resolve the backend for a mutating verb and enforce the version floor.
 
     Returns ``(backend_name, exit_code)``; ``exit_code`` is non-``None`` when a
-    failure was already emitted (unknown backend -> usage, no backend / non-msb /
+    failure was already emitted (unknown backend -> usage, no backend /
     unsupported version -> operational, all fail-closed before mutation).
-    ``domain`` names the verb family for the non-msb refusal message (lifecycle
-    vs secret management).
+    ``domain`` names the verb family for the no-backend remediation prose.
     """
     if explicit is not None and explicit not in backends.BACKENDS:
         return None, _usage_failure(
@@ -573,15 +582,7 @@ def _resolve_backend_for_mutation(
             f"install msb {backends.MSB_MIN_VERSION[0]}.{backends.MSB_MIN_VERSION[1]}.{backends.MSB_MIN_VERSION[2]} or newer and retry",
             emit_json,
         )
-    if name != "msb":
-        return None, _operational_failure(
-            command,
-            errors.UNSUPPORTED,
-            f"backend '{name}' {domain} is not implemented in this build",
-            "only the msb adapter ships in this slice; the sbx adapter arrives later",
-            emit_json,
-        )
-    problem = backends.check_version(backends.BACKENDS["msb"])
+    problem = backends.check_version(backends.BACKENDS[name])
     if problem is not None:
         return None, _operational_failure(command, problem.code, problem.message, problem.remediation, emit_json)
     return name, None
@@ -616,32 +617,40 @@ def _validate_workspace(command: str, path: str | None, emit_json: bool) -> tupl
     return resolved, None
 
 
-def _wait_exec_ready(name: str) -> bool:
-    deadline = time.monotonic() + msb.READY_TIMEOUT_S
+def _wait_exec_ready(backend: str, name: str) -> bool:
+    adapter = _adapter(backend)
+    deadline = time.monotonic() + adapter.READY_TIMEOUT_S
     while True:
-        if msb.exec_ready(name):
+        if adapter.exec_ready(name):
             return True
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.1)
 
 
-def _create_sandbox(agent: str, workspace: str, name: str, image: str, *, ro_host_config: bool | None = None) -> dict:
+def _create_sandbox(
+    backend: str, agent: str, workspace: str, name: str, image: str, *, ro_host_config: bool | None = None
+) -> dict:
     """Create + exec-ready gate + record write; returns the result record data."""
-    msb.create(name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS)
-    if not _wait_exec_ready(name):
-        # A half-created sandbox must not strand (legacy _acq_msb_cleanup_uncreated_attempt).
+    adapter = _adapter(backend)
+    error_cls = sbx.SbxError if backend == "sbx" else msb.MsbError
+    if backend == "sbx":
+        adapter.create(name, image, workspace)
+    else:
+        adapter.create(name, image, workspace, memory=msb.DEFAULT_MEMORY, cpus=msb.DEFAULT_CPUS)
+    if not _wait_exec_ready(backend, name):
+        # A half-created sandbox must not strand (legacy cleanup).
         try:
-            msb.remove(name)
-        except msb.MsbError:
+            adapter.remove(name)
+        except _ADAPTER_ERRORS:
             pass
-        raise msb.MsbError(
+        raise error_cls(
             errors.TIMEOUT,
             f"sandbox '{name}' did not become exec-ready",
-            "check msb logs, then remove the half-created sandbox and retry",
+            f"check {backend} logs, then remove the half-created sandbox and retry",
         )
-    state.record_write("msb", name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_host_config)
-    return {"name": name, "backend": "msb", "agent": agent, "workspace": workspace, "state": "running"}
+    state.record_write(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_host_config)
+    return {"name": name, "backend": backend, "agent": agent, "workspace": workspace, "state": "running"}
 
 
 def _print_create_human(data: dict) -> None:
@@ -651,9 +660,9 @@ def _print_create_human(data: dict) -> None:
     )
 
 
-def run_create(parsed, emit_json: bool) -> int:
+def run_create(parsed, emit_json: bool, backend: str) -> int:
     if parsed.recreate is not None:
-        return run_recreate(parsed, emit_json)
+        return run_recreate(parsed, emit_json, backend)
     if not parsed.agent or parsed.agent not in KNOWN_AGENTS:
         return _usage_failure(
             "create",
@@ -664,7 +673,8 @@ def run_create(parsed, emit_json: bool) -> int:
     if exit_code is not None:
         return exit_code
     name = parsed.name or _derive_name(parsed.agent, workspace)
-    if msb.exists(name):
+    adapter = _adapter(backend)
+    if adapter.exists(name):
         return _operational_failure(
             "create",
             errors.SANDBOX_EXISTS,
@@ -674,8 +684,8 @@ def run_create(parsed, emit_json: bool) -> int:
         )
     image = _resolve_image(parsed.image, parsed.agent)
     try:
-        data = _create_sandbox(parsed.agent, workspace, name, image)
-    except msb.MsbError as exc:
+        data = _create_sandbox(backend, parsed.agent, workspace, name, image)
+    except _ADAPTER_ERRORS as exc:
         return _operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
     if emit_json:
         print(json.dumps(envelope.success("create", data)))
@@ -684,7 +694,7 @@ def run_create(parsed, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
-def run_recreate(parsed, emit_json: bool) -> int:
+def run_recreate(parsed, emit_json: bool, backend: str) -> int:
     """``acq create --recreate NAME [--yes]`` — security-exception recreation.
 
     Recreates a sandbox that is missing the host-enforced read-only trusted-config
@@ -695,8 +705,9 @@ def run_recreate(parsed, emit_json: bool) -> int:
     sandbox that is NOT in the security exception — it is never a general "reset".
     """
     name = parsed.recreate
+    adapter = _adapter(backend)
     try:
-        record = state.record_read("msb", name)
+        record = state.record_read(backend, name)
     except state.StateSchemaError as exc:
         return _operational_failure(
             "create",
@@ -714,7 +725,7 @@ def run_recreate(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        security.assert_trusted(record, "msb", name)
+        security.assert_trusted(record, backend, name)
     except security.SecurityException:
         pass  # in the security exception -> recreation is the sanctioned recovery
     else:
@@ -741,7 +752,7 @@ def run_recreate(parsed, emit_json: bool) -> int:
         )
         if answer.strip().lower() not in ("y", "yes"):
             if emit_json:
-                print(json.dumps(envelope.success("create", {"name": name, "backend": "msb", "recreated": False})))
+                print(json.dumps(envelope.success("create", {"name": name, "backend": backend, "recreated": False})))
             else:
                 print("cancelled.")
             return errors.EXIT_SUCCESS
@@ -754,10 +765,10 @@ def run_recreate(parsed, emit_json: bool) -> int:
         # Preserve host records + secrets; lose only the guest filesystem. If the
         # guest is already gone (removed out of band) there is nothing to destroy:
         # recreate from host authority either way.
-        if msb.exists(name):
-            msb.remove(name)
-        data = _create_sandbox(agent, workspace, name, image, ro_host_config=ro_host_config)
-    except msb.MsbError as exc:
+        if adapter.exists(name):
+            adapter.remove(name)
+        data = _create_sandbox(backend, agent, workspace, name, image, ro_host_config=ro_host_config)
+    except _ADAPTER_ERRORS as exc:
         return _operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
     data = {**data, "recreated": True}
     if emit_json:
@@ -767,7 +778,7 @@ def run_recreate(parsed, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
-def run_run(parsed, emit_json: bool) -> int:
+def run_run(parsed, emit_json: bool, backend: str) -> int:
     """Create (if missing) then launch, or re-attach an existing sandbox by name.
 
     In ``--json`` mode the create/attach result is emitted as one JSON envelope on
@@ -775,37 +786,38 @@ def run_run(parsed, emit_json: bool) -> int:
     stays a single document (ADR-0038m §2). In interactive use the child inherits
     stdio. The child's exit status is ``run``'s exit status (ADR-0038m §1).
     """
+    adapter = _adapter(backend)
     target = parsed.target
     if target in KNOWN_AGENTS:
         workspace, exit_code = _validate_workspace("run", parsed.path, emit_json)
         if exit_code is not None:
             return exit_code
         name = parsed.name or _derive_name(target, workspace)
-        action = "reattached" if msb.exists(name) else "created"
-        if not msb.exists(name):
+        action = "reattached" if adapter.exists(name) else "created"
+        if not adapter.exists(name):
             image = _resolve_image(parsed.image, target)
             try:
-                _create_sandbox(target, workspace, name, image)
-            except msb.MsbError as exc:
+                _create_sandbox(backend, target, workspace, name, image)
+            except _ADAPTER_ERRORS as exc:
                 return _operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
         if emit_json:
             print(
                 json.dumps(
                     envelope.success(
                         "run",
-                        {"name": name, "backend": "msb", "agent": target, "workspace": workspace, "state": "running", "action": action},
+                        {"name": name, "backend": backend, "agent": target, "workspace": workspace, "state": "running", "action": action},
                     )
                 )
             )
         # Launch in the foreground; the child's status is `run`'s exit status. In
         # --json mode the child's stdout is routed to stderr so stdout stays one
         # JSON document.
-        return msb.launch(name, workspace, target, json_mode=emit_json)
+        return adapter.launch(name, workspace, target, json_mode=emit_json)
 
     # Not a known agent: re-attach to an existing sandbox by name, else fail
     # closed as ambiguous (a token that is neither agent nor sandbox is a usage
     # error, matching the legacy dispatch).
-    if not msb.exists(target):
+    if not adapter.exists(target):
         return _usage_failure(
             "run",
             f"'{target}' is not a known agent or an existing sandbox",
@@ -815,7 +827,7 @@ def run_run(parsed, emit_json: bool) -> int:
     # A sandbox whose host record is absent or unreadable must fail closed, never
     # launch a bare `/bin/sh -l` without a workspace.
     try:
-        record = state.record_read("msb", target)
+        record = state.record_read(backend, target)
     except state.StateSchemaError as exc:
         return _operational_failure(
             "run",
@@ -832,7 +844,7 @@ def run_run(parsed, emit_json: bool) -> int:
             f"create it with 'acq create', or remove it with 'acq rm {target}'",
             emit_json,
         )
-    gate = _trusted_gate(record, "run", target, emit_json)
+    gate = _trusted_gate(record, backend, "run", target, emit_json)
     if gate is not None:
         return gate
     agent = record.get("agent")
@@ -842,20 +854,21 @@ def run_run(parsed, emit_json: bool) -> int:
             json.dumps(
                 envelope.success(
                     "run",
-                    {"name": target, "backend": "msb", "agent": agent, "workspace": workspace, "state": "running", "action": "reattached"},
+                    {"name": target, "backend": backend, "agent": agent, "workspace": workspace, "state": "running", "action": "reattached"},
                 )
             )
         )
-    return msb.launch(target, workspace, agent, json_mode=emit_json)
+    return adapter.launch(target, workspace, agent, json_mode=emit_json)
 
 
-def _ls_data() -> dict:
-    names = msb.list_names() or []
-    running = set(msb.running_names() or [])
-    records = {record["name"]: record for record in state.list_records("msb")}
+def _ls_data(backend: str) -> dict:
+    adapter = _adapter(backend)
+    names = adapter.list_names() or []
+    running = set(adapter.running_names() or [])
+    records = {record["name"]: record for record in state.list_records(backend)}
     sandboxes: list[dict] = []
     for name in names:
-        entry: dict = {"name": name, "backend": "msb", "state": "running" if name in running else "stopped"}
+        entry: dict = {"name": name, "backend": backend, "state": "running" if name in running else "stopped"}
         record = records.get(name)
         if record:
             if record.get("agent"):
@@ -866,7 +879,7 @@ def _ls_data() -> dict:
     # A host record whose sandbox is gone (removed out-of-band) reads as unknown.
     for record in records.values():
         if record["name"] not in names:
-            entry = {"name": record["name"], "backend": "msb", "state": "unknown"}
+            entry = {"name": record["name"], "backend": backend, "state": "unknown"}
             if record.get("agent"):
                 entry["agent"] = record["agent"]
             if record.get("workspace"):
@@ -886,8 +899,8 @@ def _print_ls_human(data: dict) -> None:
         print(f"  {entry['name']}  {entry['backend']}  {entry['state']}{extra}")
 
 
-def run_ls(emit_json: bool) -> int:
-    data = _ls_data()
+def run_ls(emit_json: bool, backend: str) -> int:
+    data = _ls_data(backend)
     if emit_json:
         print(json.dumps(envelope.success("ls", data)))
     else:
@@ -895,9 +908,10 @@ def run_ls(emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
-def run_stop(parsed, emit_json: bool) -> int:
+def run_stop(parsed, emit_json: bool, backend: str) -> int:
+    adapter = _adapter(backend)
     name = parsed.name
-    if not msb.exists(name):
+    if not adapter.exists(name):
         return _operational_failure(
             "stop",
             errors.SANDBOX_NOT_FOUND,
@@ -906,10 +920,10 @@ def run_stop(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        msb.stop(name)
-    except msb.MsbError as exc:
+        adapter.stop(name)
+    except _ADAPTER_ERRORS as exc:
         return _operational_failure("stop", exc.code, exc.message, exc.remediation, emit_json)
-    data = {"name": name, "backend": "msb", "state": "stopped"}
+    data = {"name": name, "backend": backend, "state": "stopped"}
     if emit_json:
         print(json.dumps(envelope.success("stop", data)))
     else:
@@ -917,9 +931,10 @@ def run_stop(parsed, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
-def run_rm(parsed, emit_json: bool) -> int:
+def run_rm(parsed, emit_json: bool, backend: str) -> int:
+    adapter = _adapter(backend)
     name = parsed.name
-    if not msb.exists(name):
+    if not adapter.exists(name):
         return _operational_failure(
             "rm",
             errors.SANDBOX_NOT_FOUND,
@@ -928,11 +943,11 @@ def run_rm(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        msb.remove(name)
-    except msb.MsbError as exc:
+        adapter.remove(name)
+    except _ADAPTER_ERRORS as exc:
         return _operational_failure("rm", exc.code, exc.message, exc.remediation, emit_json)
-    state.record_remove("msb", name)
-    data = {"name": name, "backend": "msb", "removed": True}
+    state.record_remove(backend, name)
+    data = {"name": name, "backend": backend, "removed": True}
     if emit_json:
         print(json.dumps(envelope.success("rm", data)))
     else:
@@ -965,7 +980,7 @@ def _sandbox_ref(token: str) -> tuple[str, str] | None:
     return (name, rest)
 
 
-def _workspace_from_record(name: str) -> str:
+def _workspace_from_record(backend: str, name: str) -> str:
     """Resolve the guest workspace for a session (``-w``), host-authoritative.
 
     Returns the recorded workspace, or :data:`DEFAULT_GUEST_WORKSPACE` when the
@@ -974,32 +989,33 @@ def _workspace_from_record(name: str) -> str:
     record raises :class:`state.StateSchemaError` so the caller fails closed
     rather than running in a guessed cwd (ADR-0041m).
     """
-    record = state.record_read("msb", name)  # raises StateSchemaError
+    record = state.record_read(backend, name)  # raises StateSchemaError
     if record and record.get("workspace"):
         return record["workspace"]
     return DEFAULT_GUEST_WORKSPACE
 
 
-def _trusted_gate(record: dict | None, command: str, name: str, emit_json: bool) -> int | None:
+def _trusted_gate(record: dict | None, backend: str, command: str, name: str, emit_json: bool) -> int | None:
     """Refuse a trusted operation on a sandbox missing its read-only mount.
 
     Returns an emitted exit code when the record requires the mount and the probe
     reports it missing (ADR-0035/0041m), else ``None`` to proceed.
     """
     try:
-        security.assert_trusted(record, "msb", name)
+        security.assert_trusted(record, backend, name)
     except security.SecurityException as exc:
         return _operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     return None
 
 
-def run_exec(parsed, emit_json: bool) -> int:
+def run_exec(parsed, emit_json: bool, backend: str) -> int:
     """``acq exec NAME -- CMD...`` — run a command non-interactively.
 
     The child's exit status is acq's exit status (ADR-0038m §1). In ``--json``
     mode the child's stdout is routed to stderr and one success envelope carrying
     the exit code is emitted on stdout (ADR-0038m §2).
     """
+    adapter = _adapter(backend)
     name = parsed.name
     command = list(parsed.cmd)
     if not command:
@@ -1008,7 +1024,7 @@ def run_exec(parsed, emit_json: bool) -> int:
             f"exec requires a command after '--' (usage: acq exec {name} -- CMD...)",
             emit_json,
         )
-    if not msb.exists(name):
+    if not adapter.exists(name):
         return _operational_failure(
             "exec",
             errors.SANDBOX_NOT_FOUND,
@@ -1017,7 +1033,7 @@ def run_exec(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        record = state.record_read("msb", name)
+        record = state.record_read(backend, name)
     except state.StateSchemaError as exc:
         return _operational_failure(
             "exec",
@@ -1026,30 +1042,29 @@ def run_exec(parsed, emit_json: bool) -> int:
             f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'",
             emit_json,
         )
-    gate = _trusted_gate(record, "exec", name, emit_json)
+    gate = _trusted_gate(record, backend, "exec", name, emit_json)
     if gate is not None:
         return gate
     workspace = (record or {}).get("workspace") or DEFAULT_GUEST_WORKSPACE
-    rc = msb.exec_command(name, command, workspace=workspace, json_mode=emit_json)
+    rc = adapter.exec_command(name, command, workspace=workspace, json_mode=emit_json)
     if emit_json:
         print(json.dumps(envelope.success("exec", {"name": name, "exit_code": rc})))
     return rc
 
 
-def run_attach(parsed, emit_json: bool) -> int:
+def run_attach(parsed, emit_json: bool, backend: str) -> int:
     """``acq attach NAME`` — attach to an existing sandbox, launching its agent.
 
     This is the interactive path; its non-interactive contract is deterministic
     (ADR-0038m §1, spec user story #10): fail closed on a missing sandbox or a
-    missing/unreadable host record, then launch the recorded agent via
-    ``msb exec`` and propagate its status. The agent comes from host-authoritative
-    state only — there is no agent-to-shell fallback (ADR-0038m §48). True PTY
-    allocation (``msb exec -t``) and ssh-agent forwarding are Tier-3/live
-    concerns and are not synthesized here, so vector behavior never blocks or
-    invents a terminal.
+    missing/unreadable host record, then launch the recorded agent and propagate
+    its status. The agent comes from host-authoritative state only — there is no
+    agent-to-shell fallback (ADR-0038m §48). True PTY allocation and ssh-agent
+    forwarding are Tier-3/live concerns and are not synthesized here.
     """
+    adapter = _adapter(backend)
     name = parsed.name
-    if not msb.exists(name):
+    if not adapter.exists(name):
         return _operational_failure(
             "attach",
             errors.SANDBOX_NOT_FOUND,
@@ -1058,7 +1073,7 @@ def run_attach(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        record = state.record_read("msb", name)
+        record = state.record_read(backend, name)
     except state.StateSchemaError as exc:
         return _operational_failure(
             "attach",
@@ -1075,7 +1090,7 @@ def run_attach(parsed, emit_json: bool) -> int:
             f"create it with 'acq create', or remove it with 'acq rm {name}'",
             emit_json,
         )
-    gate = _trusted_gate(record, "attach", name, emit_json)
+    gate = _trusted_gate(record, backend, "attach", name, emit_json)
     if gate is not None:
         return gate
     agent = record.get("agent")
@@ -1088,21 +1103,22 @@ def run_attach(parsed, emit_json: bool) -> int:
             emit_json,
         )
     workspace = record.get("workspace") or DEFAULT_GUEST_WORKSPACE
-    rc = msb.launch(name, workspace, agent, json_mode=emit_json)
+    rc = adapter.launch(name, workspace, agent, json_mode=emit_json)
     if emit_json:
-        print(json.dumps(envelope.success("attach", {"name": name, "backend": "msb", "agent": agent, "exit_code": rc})))
+        print(json.dumps(envelope.success("attach", {"name": name, "backend": backend, "agent": agent, "exit_code": rc})))
     return rc
 
 
-def run_shell(parsed, emit_json: bool) -> int:
+def run_shell(parsed, emit_json: bool, backend: str) -> int:
     """``acq shell NAME`` — open an interactive login shell in a sandbox.
 
     Runs ``/bin/sh -l`` as the unprivileged ``agent`` user (never root), with the
     child's status preserved. Like ``attach``, the non-interactive path is
     deterministic and PTY allocation is deferred to the live tier.
     """
+    adapter = _adapter(backend)
     name = parsed.name
-    if not msb.exists(name):
+    if not adapter.exists(name):
         return _operational_failure(
             "shell",
             errors.SANDBOX_NOT_FOUND,
@@ -1111,7 +1127,7 @@ def run_shell(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        record = state.record_read("msb", name)
+        record = state.record_read(backend, name)
     except state.StateSchemaError as exc:
         return _operational_failure(
             "shell",
@@ -1120,25 +1136,26 @@ def run_shell(parsed, emit_json: bool) -> int:
             f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'",
             emit_json,
         )
-    gate = _trusted_gate(record, "shell", name, emit_json)
+    gate = _trusted_gate(record, backend, "shell", name, emit_json)
     if gate is not None:
         return gate
     workspace = (record or {}).get("workspace") or DEFAULT_GUEST_WORKSPACE
-    rc = msb.launch(name, workspace, "shell", json_mode=emit_json)
+    rc = adapter.launch(name, workspace, "shell", json_mode=emit_json)
     if emit_json:
-        print(json.dumps(envelope.success("shell", {"name": name, "backend": "msb", "exit_code": rc})))
+        print(json.dumps(envelope.success("shell", {"name": name, "backend": backend, "exit_code": rc})))
     return rc
 
 
-def run_cp(parsed, emit_json: bool) -> int:
+def run_cp(parsed, emit_json: bool, backend: str) -> int:
     """``acq cp SRC DST`` — copy between a native host path and a POSIX guest path.
 
     Exactly one side is a ``NAME:/guest/path`` reference; the other is a host
     path. Host and guest types stay distinct (ADR-0038m §4): a host mount source
     is never treated as a guest path implicitly, and a UNC/network host path —
     which cannot round-trip losslessly across the host/guest boundary — fails
-    closed rather than being mis-forwarded. The ``msb copy`` status is preserved.
+    closed rather than being mis-forwarded. The backend copy status is preserved.
     """
+    adapter = _adapter(backend)
     src = parsed.src
     dst = parsed.dst
     src_ref = _sandbox_ref(src)
@@ -1158,7 +1175,7 @@ def run_cp(parsed, emit_json: bool) -> int:
     name, guest_path = src_ref if src_ref else dst_ref
     host_path = dst if src_ref else src
     direction = "out" if src_ref else "in"
-    if not msb.exists(name):
+    if not adapter.exists(name):
         return _operational_failure(
             "cp",
             errors.SANDBOX_NOT_FOUND,
@@ -1167,7 +1184,7 @@ def run_cp(parsed, emit_json: bool) -> int:
             emit_json,
         )
     # UNC/network paths require separate qualification (ADR-0038m §4): fail
-    # closed rather than hand a host-side network path to `msb copy`.
+    # closed rather than hand a host-side network path to the backend copy.
     if host_path.startswith("\\\\") or host_path.startswith("//"):
         return _operational_failure(
             "cp",
@@ -1176,13 +1193,13 @@ def run_cp(parsed, emit_json: bool) -> int:
             "copy via a mounted or local path instead",
             emit_json,
         )
-    rc = msb.copy(src, dst)
+    rc = adapter.copy(src, dst)
     if rc != 0:
         return _operational_failure(
             "cp",
             errors.FAILURE,
             f"copy failed between host and sandbox '{name}'",
-            "check msb logs and retry",
+            f"check {backend} logs and retry",
             emit_json,
             exit_code=rc,
         )
@@ -1196,17 +1213,18 @@ def run_cp(parsed, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
-def run_ports(parsed, emit_json: bool) -> int:
+def run_ports(parsed, emit_json: bool, backend: str) -> int:
     """``acq ports NAME`` — report declared host/guest mappings, never health.
 
     ADR-0038m §2 fixes the required data: host/guest mappings plus origin. A
-    missing sandbox fails closed with ``sandbox_not_found``; an inspect that fails
-    or returns unparseable output fails closed with a stable code rather than
-    being swallowed as an empty list (ADR-0038m §48 drops
+    missing sandbox fails closed with ``sandbox_not_found``; a ports read that
+    fails or returns unparseable output fails closed with a stable code rather
+    than being swallowed as an empty list (ADR-0038m §48 drops
     "inspection-failure-as-empty"). Post-hoc ``--publish`` (ADR-0015) is deferred.
     """
+    adapter = _adapter(backend)
     name = parsed.name
-    if not msb.exists(name):
+    if not adapter.exists(name):
         return _operational_failure(
             "ports",
             errors.SANDBOX_NOT_FOUND,
@@ -1215,8 +1233,8 @@ def run_ports(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        mappings = msb.ports(name)
-    except msb.MsbError as exc:
+        mappings = adapter.ports(name)
+    except _ADAPTER_ERRORS as exc:
         return _operational_failure("ports", exc.code, exc.message, exc.remediation, emit_json)
     data = {"name": name, "ports": mappings}
     if emit_json:
@@ -1257,12 +1275,13 @@ def _read_secret_value() -> str:
     return data
 
 
-def run_secret_set(parsed, emit_json: bool) -> int:
+def run_secret_set(parsed, emit_json: bool, backend: str) -> int:
     """``acq secret set (-g | SANDBOX) SERVICE`` — value read from stdin only.
 
     The value is forwarded to the backend on its stdin (never argv) and is never
     echoed; the success envelope carries only scope/service/value_state.
     """
+    adapter = _adapter(backend)
     scope, service = _parse_secret_scope_service(parsed.global_scope, parsed.args)
     if scope is None or service is None:
         return _usage_failure("secret set", "usage: acq secret set [-g | SANDBOX] SERVICE (value on stdin)", emit_json)
@@ -1279,8 +1298,8 @@ def run_secret_set(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        msb.secret_set(scope, service, value)
-    except msb.MsbError as exc:
+        adapter.secret_set(scope, service, value)
+    except _ADAPTER_ERRORS as exc:
         return _operational_failure("secret set", exc.code, exc.message, exc.remediation, emit_json)
     data = {"scope": scope, "service": service, "value_state": "set"}
     if emit_json:
@@ -1290,19 +1309,45 @@ def run_secret_set(parsed, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
-def run_secret_rm(parsed, emit_json: bool) -> int:
+def run_secret_rm_raw(placeholder: str, emit_json: bool) -> int:
+    """sbx-only raw-placeholder removal (ADR-0038m §48).
+
+    Removes a raw placeholder from sbx's proxy table; the acq store is left
+    unchanged (never rewrites host-held records). The placeholder is never a
+    secret value.
+    """
+    try:
+        sbx.secret_rm_raw(placeholder)
+    except sbx.SbxError as exc:
+        return _operational_failure("secret rm", exc.code, exc.message, exc.remediation, emit_json)
+    data = {"placeholder": placeholder, "value_state": "unset"}
+    if emit_json:
+        print(json.dumps(envelope.success("secret rm", data)))
+    else:
+        print(f"removed raw placeholder '{placeholder}'.")
+    return errors.EXIT_SUCCESS
+
+
+def run_secret_rm(parsed, emit_json: bool, backend: str) -> int:
     """``acq secret rm (-g | SANDBOX) SERVICE`` — remove a secret.
 
     An absent secret fails closed with ``secret_missing`` (ADR-0040m); a backend
     that cannot answer fails closed with its own accurate code (``backend_not_found``
-    / ``failure``) and never deletes.
+    / ``failure``) and never deletes. On sbx, a single bare token that is not a
+    managed scope+service is a raw placeholder to remove from the proxy table
+    (ADR-0038m §48) and leaves the acq store unchanged.
     """
+    adapter = _adapter(backend)
     scope, service = _parse_secret_scope_service(parsed.global_scope, parsed.args)
     if scope is None or service is None:
+        # sbx raw-placeholder removal: a single bare token (no scope, no second
+        # positional) is a raw placeholder for sbx's own `secret` CLI.
+        if backend == "sbx" and not parsed.global_scope and len(parsed.args) == 1 and not parsed.args[0].startswith("-"):
+            return run_secret_rm_raw(parsed.args[0], emit_json)
         return _usage_failure("secret rm", "usage: acq secret rm [-g | SANDBOX] SERVICE", emit_json)
     try:
-        present = msb.secret_has(scope, service)
-    except msb.MsbError as exc:
+        present = adapter.key_present(scope, service) if backend == "sbx" else adapter.secret_has(scope, service)
+    except _ADAPTER_ERRORS as exc:
         # A backend that cannot answer is NOT "absent": fail closed with the
         # accurate code (backend_not_found / failure), never secret_missing, and
         # never delete.
@@ -1316,8 +1361,8 @@ def run_secret_rm(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        msb.secret_rm(scope, service)
-    except msb.MsbError as exc:
+        adapter.secret_rm(scope, service)
+    except _ADAPTER_ERRORS as exc:
         return _operational_failure("secret rm", exc.code, exc.message, exc.remediation, emit_json)
     data = {"scope": scope, "service": service, "value_state": "unset"}
     if emit_json:
@@ -1336,12 +1381,22 @@ def _print_secret_ls_human(data: dict) -> None:
         print(f"  {entry['scope']}  {entry['service']}  {entry['value_state']}")
 
 
-def run_secret_ls(parsed, emit_json: bool) -> int:
+def run_secret_ls(parsed, emit_json: bool, backend: str) -> int:
     """``acq secret ls [(-g | SANDBOX)]`` — scope/service/value_state, never a value.
 
     An unreadable or unparseable backend listing fails closed with
     ``secret_unreadable`` (ADR-0040m) rather than being reported as empty.
+    ``secret ls`` realizes the ``secret-list`` obligation, which is msb-only
+    (ADR-0040m): on sbx it fails closed with ``unsupported_capability``.
     """
+    if backend == "sbx":
+        return _operational_failure(
+            "secret ls",
+            errors.UNSUPPORTED,
+            "secret listing is not supported on the sbx backend",
+            "secret ls is msb-only (ADR-0040m secret_ls); on sbx use 'acq secret has' to check presence",
+            emit_json,
+        )
     scope, ok = _parse_secret_ls_scope(parsed.global_scope, parsed.args)
     if not ok:
         return _usage_failure("secret ls", "usage: acq secret ls [-g | SANDBOX]", emit_json)
@@ -1363,21 +1418,27 @@ def run_secret_has(parsed, backend_override: str | None) -> int:
     Exit 0 (present), 1 (absent or fail-closed), 2 (usage). ``--json`` is inert:
     there is never a stdout body — the answer is the exit status alone, and
     failures are stderr diagnostics (so ``emit_json`` is deliberately not honored).
+    On sbx the presence predicate is the sbx-only ``key_present`` obligation; on
+    msb it is the thin ``secret has`` predicate over the secret-list capability.
     """
     scope, service = _parse_secret_scope_service(parsed.global_scope, parsed.args)
     if scope is None or service is None:
         return _usage_failure("secret has", "usage: acq secret has [-g | SANDBOX] SERVICE", False)
-    _backend, exit_code = _resolve_backend_for_mutation(
+    backend, exit_code = _resolve_backend_for_mutation(
         backend_override, False, "secret has", domain="secret management"
     )
     if exit_code is not None:
-        # The resolver already wrote a stderr diagnostic (unsupported/non-msb
-        # backend, no backend, or version floor): exit 1/2 with stdout still
-        # silent, so "cannot check" is never a silent false "absent".
+        # The resolver already wrote a stderr diagnostic (no backend, or version
+        # floor): exit 1/2 with stdout still silent, so "cannot check" is never a
+        # silent false "absent".
         return exit_code
+    adapter = _adapter(backend)
     try:
-        present = msb.secret_has(scope, service)
-    except msb.MsbError as exc:
+        if backend == "sbx":
+            present = sbx.key_present(scope, service)
+        else:
+            present = msb.secret_has(scope, service)
+    except _ADAPTER_ERRORS as exc:
         # Backend error at query time: keep stdout silent and exit 1, but announce
         # on stderr so a scripter can tell "absent" from "could not check".
         print(f"acq: {exc.message}", file=sys.stderr)
@@ -1395,13 +1456,14 @@ def run_secret_has(parsed, backend_override: str | None) -> int:
 # child's stdin. The binding / scope is host-authoritative state (ADR-0041m).
 # ---------------------------------------------------------------------------
 
-def run_provider_credential_set(parsed, emit_json: bool) -> int:
+def run_provider_credential_set(parsed, emit_json: bool, backend: str) -> int:
     """``acq provider-credential set PROVIDER KEY_ENV --host H[,H]`` (value on stdin).
 
     Validates the destination pin, reads the value on stdin only, forwards it to
     the backend on the child's stdin, and records the binding host-side. The
     success envelope carries only the binding fields (never a value).
     """
+    adapter = _adapter(backend)
     command = "provider-credential set"
     provider = parsed.provider
     key_env = parsed.key_env
@@ -1428,8 +1490,8 @@ def run_provider_credential_set(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        msb.provider_credential_set(provider, key_env, hosts, value)
-    except msb.MsbError as exc:
+        adapter.provider_credential_set(provider, key_env, hosts, value)
+    except _ADAPTER_ERRORS as exc:
         return _operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
     try:
         provider_creds.set_binding(provider, key_env, hosts)
@@ -1536,7 +1598,7 @@ def run_provider_credential_rm(parsed, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
-def _github_scope_workspace(parsed, emit_json: bool) -> tuple[str | None, int | None]:
+def _github_scope_workspace(parsed, backend: str, emit_json: bool) -> tuple[str | None, int | None]:
     """Resolve the workspace for ``github-scope`` (PATH, else the recorded one)."""
     sandbox = parsed.sandbox
     if parsed.path:
@@ -1551,7 +1613,7 @@ def _github_scope_workspace(parsed, emit_json: bool) -> tuple[str | None, int | 
             )
         return resolved, None
     try:
-        record = state.record_read("msb", sandbox)
+        record = state.record_read(backend, sandbox)
     except state.StateSchemaError as exc:
         return None, _operational_failure(
             "github-scope",
@@ -1572,15 +1634,16 @@ def _github_scope_workspace(parsed, emit_json: bool) -> tuple[str | None, int | 
     return workspace, None
 
 
-def run_github_scope(parsed, emit_json: bool) -> int:
+def run_github_scope(parsed, emit_json: bool, backend: str) -> int:
     """``acq github-scope SANDBOX [PATH]`` — per-sandbox GitHub token scope.
 
     The token is read on stdin only and forwarded to the backend (bound to the
     sandbox, never global); the scope is recorded host-side (ADR-0013). The token
     never appears in output.
     """
+    adapter = _adapter(backend)
     sandbox = parsed.sandbox
-    workspace, exit_code = _github_scope_workspace(parsed, emit_json)
+    workspace, exit_code = _github_scope_workspace(parsed, backend, emit_json)
     if exit_code is not None:
         return exit_code
     value = _read_secret_value()
@@ -1593,11 +1656,11 @@ def run_github_scope(parsed, emit_json: bool) -> int:
             emit_json,
         )
     try:
-        msb.github_scope(sandbox, value)
-    except msb.MsbError as exc:
+        adapter.github_scope(sandbox, value)
+    except _ADAPTER_ERRORS as exc:
         return _operational_failure("github-scope", exc.code, exc.message, exc.remediation, emit_json)
-    provider_creds.github_scope_write("msb", sandbox, workspace)
-    data = {"sandbox": sandbox, "backend": "msb", "scoped": True}
+    provider_creds.github_scope_write(backend, sandbox, workspace)
+    data = {"sandbox": sandbox, "backend": backend, "scoped": True}
     if emit_json:
         print(json.dumps(envelope.success("github-scope", data)))
     else:
@@ -1605,7 +1668,7 @@ def run_github_scope(parsed, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
-def run_usai_rotate_api_key(emit_json: bool) -> int:
+def run_usai_rotate_api_key(emit_json: bool, backend: str) -> int:
     """``acq usai-rotate-api-key`` — rotate the stored USAi key (ADR-0012).
 
     Reads the new key on stdin only and forwards it to the backend on the child's
@@ -1613,6 +1676,7 @@ def run_usai_rotate_api_key(emit_json: bool) -> int:
     failed rotation (provider_unreachable / provider_auth_failed) leaves the old
     key in place. The new key never appears in output.
     """
+    adapter = _adapter(backend)
     value = _read_secret_value()
     if not value.strip():
         return _operational_failure(
@@ -1623,8 +1687,8 @@ def run_usai_rotate_api_key(emit_json: bool) -> int:
             emit_json,
         )
     try:
-        msb.rotate_key(value)
-    except msb.MsbError as exc:
+        adapter.rotate_key(value)
+    except _ADAPTER_ERRORS as exc:
         return _operational_failure("usai-rotate-api-key", exc.code, exc.message, exc.remediation, emit_json)
     data = {
         "provider": provider_creds.USAI_PROVIDER_ID,
@@ -1746,7 +1810,7 @@ def run_kit_check(parsed, emit_json: bool, backend_override: str | None) -> int:
     if exit_code is not None:
         return exit_code
     name = parsed.name
-    if not msb.exists(name):
+    if not _adapter(backend).exists(name):
         return _operational_failure(
             "kit check",
             errors.SANDBOX_NOT_FOUND,
@@ -1782,7 +1846,7 @@ def run_kit_update(parsed, emit_json: bool, backend_override: str | None) -> int
     if exit_code is not None:
         return exit_code
     name = parsed.name
-    if not msb.exists(name):
+    if not _adapter(backend).exists(name):
         return _operational_failure(
             "kit update",
             errors.SANDBOX_NOT_FOUND,
@@ -1905,7 +1969,7 @@ def run_kit_source_add(parsed, emit_json: bool) -> int:
     return errors.EXIT_SUCCESS
 
 
-def run_kit_source_rm(parsed, emit_json: bool) -> int:
+def run_kit_source_rm(parsed, emit_json: bool, backend_override: str | None) -> int:
     repo = kits.normalize_repo(parsed.repo)
     if repo is None:
         return _usage_failure(
@@ -1921,7 +1985,7 @@ def run_kit_source_rm(parsed, emit_json: bool) -> int:
             "team/personal sources can be removed; the control plane is the pinned trust anchor",
             emit_json,
         )
-    if not kits.remove_source(repo):
+    if kits.source_record(repo) is None:
         return _operational_failure(
             "kit-source rm",
             errors.KIT_SOURCE_NOT_FOUND,
@@ -1929,6 +1993,19 @@ def run_kit_source_rm(parsed, emit_json: bool) -> int:
             "list trusted sources with 'acq kit-source ls'",
             emit_json,
         )
+    # sbx-only: revoke the source from sbx's kit.allowedSources BEFORE the host
+    # record is dropped, so a failed revocation never strands a trusted source the
+    # backend still fetches from (ADR-0040m ``kit_source_revoked``). This fires
+    # only when sbx is EXPLICITLY selected (--backend sbx or ACQ_BACKEND=sbx), never
+    # on auto-detect: the host-side rm is backend-agnostic, and auto-detecting sbx
+    # must not silently add a backend mutation.
+    selected = backend_override if backend_override is not None else os.environ.get("ACQ_BACKEND")
+    if selected == "sbx":
+        try:
+            sbx.kit_source_revoked(repo)
+        except sbx.SbxError as exc:
+            return _operational_failure("kit-source rm", exc.code, exc.message, exc.remediation, emit_json)
+    kits.remove_source(repo)
     data = {"repository": repo, "removed": True}
     if emit_json:
         print(json.dumps(envelope.success("kit-source rm", data)))
@@ -2069,25 +2146,25 @@ def main(argv: list[str] | None = None) -> int:
         if exit_code is not None:
             return exit_code
         if parsed.command == "create":
-            return run_create(parsed, emit_json)
+            return run_create(parsed, emit_json, _backend)
         if parsed.command == "run":
-            return run_run(parsed, emit_json)
+            return run_run(parsed, emit_json, _backend)
         if parsed.command == "ls":
-            return run_ls(emit_json)
+            return run_ls(emit_json, _backend)
         if parsed.command == "stop":
-            return run_stop(parsed, emit_json)
+            return run_stop(parsed, emit_json, _backend)
         if parsed.command == "rm":
-            return run_rm(parsed, emit_json)
+            return run_rm(parsed, emit_json, _backend)
         if parsed.command == "exec":
-            return run_exec(parsed, emit_json)
+            return run_exec(parsed, emit_json, _backend)
         if parsed.command == "attach":
-            return run_attach(parsed, emit_json)
+            return run_attach(parsed, emit_json, _backend)
         if parsed.command == "shell":
-            return run_shell(parsed, emit_json)
+            return run_shell(parsed, emit_json, _backend)
         if parsed.command == "cp":
-            return run_cp(parsed, emit_json)
+            return run_cp(parsed, emit_json, _backend)
         if parsed.command == "ports":
-            return run_ports(parsed, emit_json)
+            return run_ports(parsed, emit_json, _backend)
 
     if parsed.command == "secret":
         subcmd = parsed.secret_command
@@ -2105,10 +2182,10 @@ def main(argv: list[str] | None = None) -> int:
         if exit_code is not None:
             return exit_code
         if subcmd == "set":
-            return run_secret_set(parsed, emit_json)
+            return run_secret_set(parsed, emit_json, _backend)
         if subcmd == "rm":
-            return run_secret_rm(parsed, emit_json)
-        return run_secret_ls(parsed, emit_json)
+            return run_secret_rm(parsed, emit_json, _backend)
+        return run_secret_ls(parsed, emit_json, _backend)
 
     if parsed.command == "kit":
         subcmd = parsed.kit_command
@@ -2135,7 +2212,7 @@ def main(argv: list[str] | None = None) -> int:
         if subcmd == "ls":
             return run_kit_source_ls(emit_json)
         if subcmd == "rm":
-            return run_kit_source_rm(parsed, emit_json)
+            return run_kit_source_rm(parsed, emit_json, backend_override)
         return _usage_failure(f"kit-source {subcmd}", f"unknown kit-source subcommand: {subcmd}", emit_json)
 
     if parsed.command == "provider-credential":
@@ -2153,7 +2230,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if exit_code is not None:
             return exit_code
-        return run_provider_credential_set(parsed, emit_json)
+        return run_provider_credential_set(parsed, emit_json, _backend)
 
     if parsed.command == "github-scope":
         _backend, exit_code = _resolve_backend_for_mutation(
@@ -2161,7 +2238,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if exit_code is not None:
             return exit_code
-        return run_github_scope(parsed, emit_json)
+        return run_github_scope(parsed, emit_json, _backend)
 
     if parsed.command == "usai-rotate-api-key":
         _backend, exit_code = _resolve_backend_for_mutation(
@@ -2169,7 +2246,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if exit_code is not None:
             return exit_code
-        return run_usai_rotate_api_key(emit_json)
+        return run_usai_rotate_api_key(emit_json, _backend)
 
     if parsed.command == "help" or parsed.command is None:
         parser.print_help()
