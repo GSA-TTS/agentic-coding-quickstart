@@ -145,6 +145,27 @@ def test_kit_source_rm_on_sbx_revokes_and_removes(monkeypatch, tmp_path, capsys)
     assert doc["data"]["removed"] is True
 
 
+def test_kit_source_rm_auto_detected_sbx_revokes_and_removes(monkeypatch, tmp_path, capsys):
+    # kit-source rm resolves the ACTIVE backend (auto-detect included) and revokes
+    # the source from sbx's kit.allowedSources when sbx is the auto-detected
+    # backend, closing the prior asymmetry where revocation fired only on an
+    # explicit --backend sbx / ACQ_BACKEND=sbx selection. Mutation proof: the
+    # owner prefix is dropped from the persisted allowed-sources file, which only
+    # happens when sbx.kit_source_revoked fires.
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_KIT_SOURCE_SEED", json.dumps([{"repository": "github.com/acme/team-kits", "ref": "a" * 40, "directory": "kits"}]))
+    monkeypatch.setenv("ACQ_SBX_STUB_ALLOWED_SOURCES", json.dumps(["docker.io/", "github.com/acme/"]))
+
+    # No --backend flag, no ACQ_BACKEND: auto-detect resolves sbx (sole backend).
+    rc, doc = _invoke(capsys, "kit-source", "rm", "github.com/acme/team-kits", "--json")
+    assert rc == 0
+    assert doc["data"]["removed"] is True
+
+    # Mutation proof: the revoked owner prefix is gone from sbx's allowlist.
+    allowed_path = Path(tmp_path) / "sbx-home" / ".docker-sbx" / "allowed-sources.json"
+    assert json.loads(allowed_path.read_text(encoding="utf-8")) == ["docker.io/"]
+
+
 # ---------------------------------------------------------------------------
 # Raw-placeholder removal (sbx-only, ADR-0038m §48).
 # ---------------------------------------------------------------------------
