@@ -35,6 +35,7 @@ def _env(monkeypatch, tmp_path, *, secrets=None):
         "ACQ_MSB_STUB_SECRET_LS_RAW",
         "ACQ_MSB_STUB_ROTATE",
         "ACQ_PROVIDER_CREDENTIAL_BINDINGS",
+        "ACQ_PROVIDER_CREDENTIAL_SEED",
     ):
         monkeypatch.delenv(name, raising=False)
     if secrets is not None:
@@ -90,7 +91,7 @@ def test_provider_credential_set_ls_reports_binding_only(monkeypatch, tmp_path, 
     assert doc["data"]["provider"] == "usai"
     assert doc["data"]["key_env"] == "USAI_API_KEY"
     assert doc["data"]["hosts"] == ["api.gsa.usai.gov"]
-    assert doc["data"]["source_layer"] == "config.yaml"
+    assert doc["data"]["source_layer"] == "provider-credentials"
     # The value itself is never a field.
     assert "value" not in doc["data"]
     assert "value-1" not in json.dumps(doc)
@@ -98,7 +99,7 @@ def test_provider_credential_set_ls_reports_binding_only(monkeypatch, tmp_path, 
     rc, doc = _invoke(capsys, "provider-credential", "ls", "--json")
     assert rc == 0
     assert doc["data"]["bindings"] == [
-        {"provider": "usai", "key_env": "USAI_API_KEY", "hosts": ["api.gsa.usai.gov"], "source_layer": "config.yaml"}
+        {"provider": "usai", "key_env": "USAI_API_KEY", "hosts": ["api.gsa.usai.gov"], "source_layer": "provider-credentials"}
     ]
     # ls reports exactly the four non-secret fields, never a value or value_state.
     assert set(doc["data"]["bindings"][0]) == {"provider", "key_env", "hosts", "source_layer"}
@@ -120,6 +121,68 @@ def test_provider_credential_rm_semantics(monkeypatch, tmp_path, capsys):
     rc, doc = _invoke(capsys, "provider-credential", "rm", "usai", "--json")
     assert rc == 1
     assert doc["error"]["code"] == "secret_missing"
+
+
+def _write_binding_record(tmp_path, provider, doc):
+    path = provider_creds._binding_path(provider)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def test_provider_credential_rm_newer_schema_fails_closed(monkeypatch, tmp_path, capsys):
+    # A newer/unknown-schema binding record fails closed with the stable
+    # state_schema_unsupported code, never a raw traceback (ADR-0041m).
+    _env(monkeypatch, tmp_path)
+    _write_binding_record(
+        tmp_path, "usai",
+        {"schema": 99, "provider": "usai", "key_env": "USAI_API_KEY", "hosts": ["api.gsa.usai.gov"]},
+    )
+
+    rc, doc = _invoke(capsys, "provider-credential", "rm", "usai", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "state_schema_unsupported"
+
+
+def test_provider_credential_set_newer_schema_fails_closed(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    _write_binding_record(
+        tmp_path, "usai",
+        {"schema": 99, "provider": "usai", "key_env": "USAI_API_KEY", "hosts": ["api.gsa.usai.gov"]},
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO("value-1\n"))
+
+    rc, doc = _invoke(
+        capsys, "--backend", "msb", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"
+    )
+    assert rc == 1
+    assert doc["error"]["code"] == "state_schema_unsupported"
+
+
+def test_provider_credential_min_reader_fails_closed(monkeypatch, tmp_path, capsys):
+    # A record whose min_reader exceeds this reader is refused, not misread.
+    _env(monkeypatch, tmp_path)
+    _write_binding_record(
+        tmp_path, "usai",
+        {"schema": 1, "min_reader": 2, "provider": "usai", "key_env": "USAI_API_KEY", "hosts": ["api.gsa.usai.gov"]},
+    )
+
+    rc, doc = _invoke(capsys, "provider-credential", "rm", "usai", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "state_schema_unsupported"
+
+
+def test_provider_credential_bool_schema_fails_closed(monkeypatch, tmp_path, capsys):
+    # A bool schema (True == 1 in Python) must NOT be misread as schema 1.
+    _env(monkeypatch, tmp_path)
+    _write_binding_record(
+        tmp_path, "usai",
+        {"schema": True, "provider": "usai", "key_env": "USAI_API_KEY", "hosts": ["api.gsa.usai.gov"]},
+    )
+
+    rc, doc = _invoke(capsys, "provider-credential", "rm", "usai", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "state_schema_unsupported"
 
 
 def test_provider_credential_set_no_value_validation_failed(monkeypatch, tmp_path, capsys):
@@ -309,7 +372,16 @@ def test_rotate_key_never_in_argv_or_output(monkeypatch, tmp_path, capsys):
 
 
 def test_rotate_fails_closed_unreachable(monkeypatch, tmp_path, capsys):
-    _env(monkeypatch, tmp_path, secrets={"global": {"usai": "set"}})
+    # Seed the OLD key on DISK (not the env seam, which the stub prefers over
+    # disk) so the assertion genuinely proves a failed rotation did NOT touch the
+    # on-disk store. The file is written non-canonically (indent=2) so any
+    # rewrite by the stub's `_save_secrets` (compact, sorted keys) is detectable.
+    _env(monkeypatch, tmp_path)
+    secrets_path = tmp_path / "msb-home" / ".microsandbox" / "secrets.json"
+    secrets_path.parent.mkdir(parents=True, exist_ok=True)
+    original_bytes = json.dumps({"global": {"usai": "set"}}, indent=2)
+    secrets_path.write_text(original_bytes, encoding="utf-8")
+
     monkeypatch.setenv("ACQ_MSB_STUB_ROTATE", "unreachable")
     monkeypatch.setattr(sys, "stdin", io.StringIO("new-key\n"))
 
@@ -317,11 +389,9 @@ def test_rotate_fails_closed_unreachable(monkeypatch, tmp_path, capsys):
     assert rc == 1
     assert doc["error"]["code"] == "provider_unreachable"
 
-    # The old key was NOT replaced: the store still holds the usai entry.
-    rc, doc = _invoke(capsys, "--backend", "msb", "secret", "ls", "--json")
-    assert rc == 0
-    services = {e["service"] for e in doc["data"]["secrets"]}
-    assert "usai" in services
+    # The old key on DISK was NOT replaced: the file is byte-identical (a failed
+    # rotation leaves the old key in place, ADR-0012).
+    assert secrets_path.read_text(encoding="utf-8") == original_bytes
 
 
 def test_rotate_fails_closed_auth_failed(monkeypatch, tmp_path, capsys):

@@ -1431,12 +1431,23 @@ def run_provider_credential_set(parsed, emit_json: bool) -> int:
         msb.provider_credential_set(provider, key_env, hosts, value)
     except msb.MsbError as exc:
         return _operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
-    provider_creds.set_binding(provider, key_env, hosts)
+    try:
+        provider_creds.set_binding(provider, key_env, hosts)
+    except state.StateSchemaError as exc:
+        # A newer/unknown-schema or unparseable binding record fails closed with
+        # the ADR-0041m stable code rather than a raw traceback.
+        return _operational_failure(
+            command,
+            errors.STATE_SCHEMA_UNSUPPORTED,
+            str(exc),
+            f"remove or repair the unreadable provider-credential binding for '{provider}', then retry",
+            emit_json,
+        )
     data = {
         "provider": provider,
         "key_env": key_env,
         "hosts": hosts,
-        "source_layer": "config.yaml",
+        "source_layer": provider_creds.CONFIG_LAYER,
     }
     if emit_json:
         print(json.dumps(envelope.success(command, data)))
@@ -1497,7 +1508,19 @@ def run_provider_credential_rm(parsed, emit_json: bool) -> int:
             None,
             emit_json,
         )
-    if not provider_creds.remove_binding(provider):
+    try:
+        removed = provider_creds.remove_binding(provider)
+    except state.StateSchemaError as exc:
+        # A newer/unknown-schema or unparseable binding record fails closed with
+        # the ADR-0041m stable code rather than a raw traceback.
+        return _operational_failure(
+            "provider-credential rm",
+            errors.STATE_SCHEMA_UNSUPPORTED,
+            str(exc),
+            f"remove or repair the unreadable provider-credential binding for '{provider}', then retry",
+            emit_json,
+        )
+    if not removed:
         return _operational_failure(
             "provider-credential rm",
             errors.SECRET_MISSING,

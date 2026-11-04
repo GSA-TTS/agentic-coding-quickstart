@@ -40,6 +40,16 @@ from . import state
 # from the sandbox-record schema and from ``envelope.SCHEMA_VERSION``.
 CREDS_SCHEMA = 1
 
+# The ``source_layer`` a provider-credential binding reports. ``CONFIG_LAYER`` is
+# the host-side provider-credentials record written by ``provider-credential set``
+# (the durable, user-owned layer); ``ENV_LAYER`` is the per-invocation
+# ``ACQ_PROVIDER_CREDENTIAL_BINDINGS`` environment layer. TODO(migration): the
+# legacy ``~/.config/acq/config.yaml`` ``provider_credential_bindings:`` key is
+# NOT read yet — reading/migrating that key into these records is a
+# migration-slice follow-up (ADR-0041m).
+CONFIG_LAYER = "provider-credentials"
+ENV_LAYER = "env"
+
 # The shipped default provider trust anchor (id, key env, host).
 USAI_PROVIDER_ID = "usai"
 USAI_PROVIDER_KEY_ENV = "USAI_API_KEY"
@@ -197,10 +207,21 @@ def _read_record(path: Path, *, strict: bool, label: str) -> dict | None:
     schema = doc.get("schema")
     if schema is None:
         return None  # legacy v0 (no marker)
-    if not isinstance(schema, int) or schema != CREDS_SCHEMA:
+    if not isinstance(schema, int) or isinstance(schema, bool) or schema != CREDS_SCHEMA:
         if strict:
             raise state.StateSchemaError(
                 f"credential record for {label!r} carries schema {schema!r}; "
+                f"this reader understands schema {CREDS_SCHEMA}"
+            )
+        return None
+    # A record may declare a minimum reader schema (ADR-0041m): a reader below it
+    # must refuse rather than misread, even though the record's own schema is one
+    # this reader can parse (mirrors ``state._record_from_path``).
+    min_reader = doc.get("min_reader")
+    if isinstance(min_reader, int) and not isinstance(min_reader, bool) and min_reader > CREDS_SCHEMA:
+        if strict:
+            raise state.StateSchemaError(
+                f"credential record for {label!r} requires min_reader {min_reader}; "
                 f"this reader understands schema {CREDS_SCHEMA}"
             )
         return None
@@ -233,7 +254,7 @@ def set_binding(provider: str, key_env: str, hosts: list[str]) -> str:
             "provider": provider,
             "key_env": key_env,
             "hosts": hosts,
-            "source_layer": "config.yaml",
+            "source_layer": CONFIG_LAYER,
         },
     )
     return "updated" if existed else "added"
@@ -296,7 +317,7 @@ def _env_bindings() -> list[dict]:
                 "provider": provider,
                 "key_env": key_env,
                 "hosts": hosts,
-                "source_layer": "env",
+                "source_layer": ENV_LAYER,
             }
         )
     return out
@@ -325,7 +346,7 @@ def _seeded_bindings() -> list[dict] | None:
                     "provider": entry["provider"],
                     "key_env": entry.get("key_env"),
                     "hosts": entry.get("hosts") or [],
-                    "source_layer": entry.get("source_layer") or "config.yaml",
+                    "source_layer": entry.get("source_layer") or CONFIG_LAYER,
                 }
             )
     return out
@@ -353,7 +374,7 @@ def list_bindings() -> list[dict]:
                             "provider": doc.get("provider"),
                             "key_env": doc.get("key_env"),
                             "hosts": doc.get("hosts") or [],
-                            "source_layer": doc.get("source_layer") or "config.yaml",
+                            "source_layer": doc.get("source_layer") or CONFIG_LAYER,
                         }
                     )
     out.extend(_env_bindings())
