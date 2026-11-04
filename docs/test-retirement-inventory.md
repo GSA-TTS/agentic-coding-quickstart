@@ -81,6 +81,15 @@ result-data list), an ADR-0040m/0041m/0042m obligation, a "covered by
 `vector/id`" cross-reference, or a retire reason. Files are listed in
 numeric-prefix order.
 
+> **Legend — which document a section citation names:** every `§`-prefixed
+> citation (`§1`–`§6`, the paragraph-line cites `§46`/`§48`/`§50`, and the
+> named required-data rows such as `§secret set`, `§kit check`, `§ports`)
+> refers to **ADR-0038m** — the *Portable acq v1 compatibility contract*.
+> `§1` command/exit, `§2` output + required result data, `§3`
+> config/state/precedence, `§4` paths, `§5` security, `§6` preserve/drop
+> classification. References to `docs/spec/acq-v1.md` or to another ADR are
+> always written out in full (never as a bare `§`).
+
 ### Harness, tooling, and host-verifier internals
 
 | File | Tests | Bucket | Disposition |
@@ -99,12 +108,14 @@ numeric-prefix order.
 | `05-install.bats` | 9 | preserve | Installer contract (ADR-0042m). Covered by `installer/help`, `installer/version`, `installer/usage-error`, `installer/dry-run`, `installer/checksum-fail-closed`, `installer/offline-install`, `installer/consent-declined`. **Gap:** "never elevates" and "never dumps env / hardcodes a secret" are not yet a vector. |
 | `06-windows-install.bats` | 8 | re-express | Windows PowerShell installer (release-marker sync, zip checksum, consent-gated PATH, no elevation, no `iex` pipe, LOCALAPPDATA). Language-specific (PowerShell); needs Windows installer vectors + Tier-3 Windows qualification (ADR-0044m). |
 
-### Core CLI: version, help, backend, dispatch, image, agents
+### Core CLI: version, help, doctor, backend, dispatch, image, agents, naming
 
 | File | Tests | Bucket | Disposition |
 |---|---|---|---|
+| `10-name-derivation.bats` | 4 | re-express | §create sandbox-name derivation (`--name` wins; agent+path slug). Pure in-process `slugify`/`derive_name` unit tests — the observable derived-name behavior is contract, asserted language-specifically. **Gap G4.** `slugify` internals → retire. |
 | `55-version.bats` | 1 | preserve | §2 version identity. Covered by `cli/version-json`, `cli/version-human`. |
 | `60-help.bats` | 18 | preserve | §1 command surface + usage exit 2. Help flags and bare-`acq` exit 2 are covered by `cli/usage-error`/`cli/usage-error-human`; `secret import`/`secret set-custom` are documented verbs. **Mixed → retire:** "backend help is appended for shared verbs / bare `secret`" asserts the **DROP** row "backend help for bare `secret`" (ADR-0038m §6). |
+| `65-doctor-image-contract.bats` | 9 | preserve | §doctor diagnostic command + ADR-0030 image-contract diagnostics. Covered by `cli/doctor-json`, `cli/doctor-human`, `cli/doctor-unsupported`. **Mixed → retire:** the `doctor script:` blocks source `common.sh` and assert `acq_image_contract_doctor_script` internals (implementation detail). |
 | `20-backend-resolution.bats` | 10 | re-express | §active_backend resolution (flag > env > config > auto-detect) is contract. Auto-detect default is covered by `cli/backend-list-none/unknown/default-msb`; the **flag>env>config precedence and PATH self-repair** are Bash-internal and are a **gap**. |
 | `30-dispatch-routing.bats` | 45 | preserve | §1 command surface + §9 passthrough. Routing maps to `cli/lifecycle-*`, `cli/exec-*`, `cli/shell-*`, `cli/passthrough*`, `cli/github-scope-*`. **Mixed → retire:** `_classify_key_status` token classification and `project-env` direnv detection are in-process internals. |
 | `35-image-override.bats` | 24 | re-express | §4 image-override precedence (ADR-0030, ADR-0022: `--image` → `ACQ_IMAGE` → `ACQ_MSB_IMAGE` → agent default) is contract but no vector pins it — **gap**. `_acq_image_registry_host`/`acq_registry_auth_hint` are Bash internals → retire. |
@@ -215,6 +226,13 @@ retire-on-touch can proceed block by block:
 * **`70-msb-backend.bats`** — re-express `backend set/unset` and `prepare`
   host-readiness as new vectors (gap); preserve version-floor and auto-detect
   blocks already covered.
+* **`65-doctor-image-contract.bats`** — retire the `doctor script:` blocks
+  (source `common.sh` and assert `acq_image_contract_doctor_script` internals —
+  implementation detail); preserve the subprocess `acq doctor` blocks already
+  covered by `cli/doctor-*`.
+* **`10-name-derivation.bats`** — retire the `slugify` pure-function block
+  (Bash string-munging internals); re-express the `derive_name` `--name`
+  precedence and agent+path slug blocks as a create-name vector (gap G4).
 
 ---
 
