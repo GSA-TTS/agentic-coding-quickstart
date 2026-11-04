@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "qualification/repro-flaky",
+  "oracle": "ADR-0044m a FAIL that diverges across attempts is escalated flaky, never a definitive FAIL",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": [
+      "{python}", "-m", "qualification", "run",
+      "--backend", "msb", "--backend-version", "0.7.7",
+      "--os", "Linux", "--os-build", "6.1.0", "--arch", "x86_64",
+      "--hypervisor", "native", "--image", "img",
+      "--", "{python}", "-c",
+      "import os,sys; sys.exit(1 if os.environ.get('ACQ_QUALIFY_ATTEMPT') == '1' else 0)"
+    ],
+    "env": {},
+    "unset": [],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 3,
+    "stdout": {
+      "mode": "exact",
+      "value": "OUTCOME FLAKY\nRESULT FAIL msb=0.7.7 image=img host=Linux x86_64 rev=0000000000000000000000000000000000000000 dir=none\n",
+      "normalize": ["crlf"]
+    },
+    "stderr": {
+      "mode": "exact",
+      "value": "",
+      "normalize": []
+    }
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": []
+  }
+}

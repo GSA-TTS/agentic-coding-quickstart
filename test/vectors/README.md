@@ -14,6 +14,10 @@ runner and `scripts/run-vectors`) carry the *how*.
   mode and normalisation transform. A diverging runner fails on the feature.
 * `negative/` — negative oracles: vectors that require something the foundation
   runner cannot honour and must be *refused* (fail closed) with a stable code.
+* `qualification/` — the qualification harness (ADR-0044m): the verbatim `RESULT`
+  transcript signature, the first-class `BLOCKED` verdict, the 3-attempt
+  reproduction rule, and the honest unqualified-cell matrix. These drive
+  `{python} -m qualification` (repo-root tooling, not the `acq` CLI).
 * `manifest.json` — the coverage manifest: maps every contract row to at least
   one vector id, and is validated against the corpus in CI (a missing or renamed
   vector fails the check rather than being assumed absent).
