@@ -288,6 +288,10 @@
       "vectors": ["cli/kit-source-rm-sbx"]
     },
     {
+      "contract": "ADR-0040m unknown-backend validation for kit-source rm: --backend bogus is rejected with a usage error (matching the other mutating verbs)",
+      "vectors": ["cli/kit-source-rm-unknown-backend"]
+    },
+    {
       "contract": "ADR-0038m §46 kit-source add/rm both refuse the control-plane trust anchor (symmetry)",
       "vectors": ["cli/kit-source-add-control-plane"]
     },

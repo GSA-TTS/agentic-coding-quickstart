@@ -124,6 +124,20 @@ def test_kit_source_rm_roundtrip_and_errors(monkeypatch, tmp_path, capsys):
     assert doc["error"]["code"] == "kit_source_not_found"
 
 
+def test_kit_source_rm_rejects_unknown_backend(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: `--backend bogus` is rejected (usage, exit 2) BEFORE
+    # the registry entry is removed, matching every other mutating verb.
+    _env(monkeypatch, tmp_path)
+    _invoke(capsys, "kit-source", "add", TEAM_REPO, "--ref", FULL_REF, "--json")
+    assert kits.source_record(TEAM_REPO) is not None
+
+    rc, doc = _invoke(capsys, "--backend", "bogus", "kit-source", "rm", TEAM_REPO, "--json")
+    assert rc == 2
+    assert doc["error"]["code"] == "usage"
+    # The registry entry was NOT silently removed by the refused invocation.
+    assert kits.source_record(TEAM_REPO) is not None
+
+
 def test_kit_source_rm_control_plane_refused(monkeypatch, tmp_path, capsys):
     _env(monkeypatch, tmp_path)
     rc, doc = _invoke(capsys, "kit-source", "rm", kits.CONTROL_PLANE_REPO, "--json")

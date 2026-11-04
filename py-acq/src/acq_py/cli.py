@@ -50,6 +50,21 @@ def _adapter(backend: str):
     """Resolve the adapter module for a backend name (``"sbx"`` else ``msb``)."""
     return sbx if backend == "sbx" else msb
 
+
+def _supports(backend: str, capability: str) -> bool:
+    """Consult the adapter's declared capability record (ADR-0040m).
+
+    A capability the adapter declares ``unsupported`` fails closed; an adapter
+    without a ``capability_record`` (the pre-record msb adapter) supports whatever
+    it implements. The orchestrator reads the record once per decision, so the
+    fail-closed ``unsupported_capability`` behavior is derived from the record
+    rather than hardcoded per verb.
+    """
+    record_fn = getattr(_adapter(backend), "capability_record", None)
+    if record_fn is None:
+        return True
+    return record_fn().get("capabilities", {}).get(capability) != "unsupported"
+
 # Agent tokens accepted by acq dispatch (mirrors acq.backends/agents.sh). Kept in
 # the CLI because it owns the create-vs-reattach decision for ``run``.
 KNOWN_AGENTS = frozenset(
@@ -1389,7 +1404,7 @@ def run_secret_ls(parsed, emit_json: bool, backend: str) -> int:
     ``secret ls`` realizes the ``secret-list`` obligation, which is msb-only
     (ADR-0040m): on sbx it fails closed with ``unsupported_capability``.
     """
-    if backend == "sbx":
+    if not _supports(backend, "secret-list"):
         return _operational_failure(
             "secret ls",
             errors.UNSUPPORTED,
@@ -1774,6 +1789,11 @@ def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
     )
     if exit_code is not None:
         return exit_code
+    # TODO(capability-record): the ``unsupported_capability`` here is hardcoded for
+    # every backend because kit-apply is an unmet (deferred) slice, not a
+    # backend-specific divergence. When the kit-apply slice lands (ADR-0030), this
+    # must derive support from ``_supports(backend, "kit-apply")`` instead of
+    # failing closed unconditionally, so a backend that gains kit-apply can report it.
     return _operational_failure(
         "kit apply",
         errors.UNSUPPORTED,
@@ -1970,6 +1990,18 @@ def run_kit_source_add(parsed, emit_json: bool) -> int:
 
 
 def run_kit_source_rm(parsed, emit_json: bool, backend_override: str | None) -> int:
+    # Validate --backend up front (the same unknown-backend refusal every mutating
+    # verb makes via _resolve_backend_for_mutation): `acq --backend bogus kit-source
+    # rm` must reject the flag rather than silently dropping the registry entry.
+    # Unlike the lifecycle verbs, kit-source rm is a host-side registry operation
+    # that must still work with no backend installed, so only the flag is
+    # validated here — the version floor and no-backend refusal do not apply.
+    if backend_override is not None and backend_override not in backends.BACKENDS:
+        return _usage_failure(
+            "kit-source rm",
+            f"unknown backend: {backend_override!r} (expected sbx or msb)",
+            emit_json,
+        )
     repo = kits.normalize_repo(parsed.repo)
     if repo is None:
         return _usage_failure(
@@ -1999,6 +2031,13 @@ def run_kit_source_rm(parsed, emit_json: bool, backend_override: str | None) -> 
     # only when sbx is EXPLICITLY selected (--backend sbx or ACQ_BACKEND=sbx), never
     # on auto-detect: the host-side rm is backend-agnostic, and auto-detecting sbx
     # must not silently add a backend mutation.
+    #
+    # KNOWN ASYMMETRY: because revocation fires only on explicit selection, an
+    # auto-detected sbx backend still leaves the revoked owner prefix in
+    # kit.allowedSources (fetchable) after `acq kit-source rm <repo>`. This is the
+    # safe choice until the kit-apply slice (ADR-0030) makes kit sources actually
+    # resolvable by the backend; when that lands, this must revoke on the RESOLVED
+    # active backend (flag → env → auto-detect), not only on explicit selection.
     selected = backend_override if backend_override is not None else os.environ.get("ACQ_BACKEND")
     if selected == "sbx":
         try:
