@@ -235,15 +235,22 @@ if ($Help) {
     exit 0
 }
 
-if (-not $InstallDir) {
-    $InstallDir = Get-DefaultInstallDir
-}
-
+# -Help and -DryRun are read-only/planning paths and must not require a user
+# profile. Resolve the install dir lazily: -DryRun falls back to a placeholder
+# when LOCALAPPDATA is absent, and only the real install path requires it.
 if ($DryRun) {
+    if (-not $InstallDir) {
+        $InstallDir = if ($env:LOCALAPPDATA) { Get-DefaultInstallDir } else { "<LOCALAPPDATA>\Programs\acq" }
+    }
     Write-Host "  [dry-run] check host is Windows"
 }
-elseif ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-    throw "install.ps1 is only supported on Windows hosts."
+else {
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        throw "install.ps1 is only supported on Windows hosts."
+    }
+    if (-not $InstallDir) {
+        $InstallDir = Get-DefaultInstallDir
+    }
 }
 
 Write-Step "Installing acq"
