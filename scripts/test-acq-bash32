@@ -167,13 +167,17 @@ do_install() {
   [ "$got" = "$SIGNING_KEY_FPR" ] || die "vendored signing key fingerprint mismatch: ${got:-<none>}"
   gpg --batch --verify "${WORK}/${tarball}.sig" "${WORK}/${tarball}" ||
     die "signature verification FAILED for ${tarball}; refusing to build"
-  for tool in make cc; do
-    command -v "$tool" >/dev/null 2>&1 || die "--install needs '${tool}' on PATH to compile (alternatively set ACQ_BASH32)"
+  for tool in make "${CC:-cc}"; do
+    command -v "${tool%% *}" >/dev/null 2>&1 || die "--install needs '${tool%% *}' on PATH to compile (alternatively set ACQ_BASH32)"
   done
   (
     cd "$WORK" && tar -xzf "$tarball" && cd "bash-${REQUIRED_VERSION}" &&
-      # 2007 source vs modern compilers: relax implicit function/int errors.
-      CFLAGS="-Wno-implicit-function-declaration -Wno-implicit-int" ./configure --prefix="$PREFIX" >"${WORK}/build.log" 2>&1 &&
+      # 2007 source vs modern compilers. bash 3.2 is pre-ANSI K&R C, so pin the C
+      # dialect in CC (not CFLAGS): its build helpers (mkbuiltins, ...) are compiled
+      # with CC_FOR_BUILD=$(CC) and CFLAGS_FOR_BUILD, which ignore CFLAGS. gnu89 is
+      # the only dialect that builds with GCC 15 (gnu17 rejects printf.def). The
+      # -Wno- flags still relax implicit function/int diagnostics in the main build.
+      CC="${CC:-cc} -std=gnu89" CFLAGS="-Wno-implicit-function-declaration -Wno-implicit-int" ./configure --prefix="$PREFIX" >"${WORK}/build.log" 2>&1 &&
       make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)" >>"${WORK}/build.log" 2>&1 &&
       make install >>"${WORK}/build.log" 2>&1
   ) || { [ ! -f "${WORK}/build.log" ] || tail -n 30 "${WORK}/build.log" >&2; die "build of bash ${REQUIRED_VERSION} failed"; }

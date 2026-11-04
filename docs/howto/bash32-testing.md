@@ -59,6 +59,14 @@ mirrors, imports the vendored release key
 to equal the one the CI job pins, verifies the signature, and only then builds.
 It is the same authentication as the CI gate and fails closed.
 
+Bash 3.2 is pre-ANSI K&R C, so the build pins `-std=gnu89` in `CC` (your `$CC`,
+default `cc`, with the flag appended), not in `CFLAGS`: bash compiles its own
+build helpers with `CC_FOR_BUILD=$(CC)` and `CFLAGS_FOR_BUILD`, which ignore
+`CFLAGS`. GCC 15 defaults to `-std=gnu23` and fails to build it without the pin;
+`gnu17` also fails. Clang accepts `gnu89` too (it is a defined language standard
+in `LangStandards.def`), and the `-Wno-implicit-*` flags in `CFLAGS` still relax
+the main build's diagnostics.
+
 `--install-oci` downloads the official Docker Hub `bash:3.2.57` image's layers
 over HTTPS without Docker, checks the manifest and every layer against pinned
 sha256 digests, extracts three files, and runs them through the image's own musl

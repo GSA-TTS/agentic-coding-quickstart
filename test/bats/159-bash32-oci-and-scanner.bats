@@ -163,3 +163,54 @@ PY
   assert_success
   assert_output "one-line-error"
 }
+
+# --- scripts/test-acq-bash32 --install toolchain pin -----------------------------
+
+# Run --install against a fake signed tarball whose `configure` records the CC and
+# CFLAGS it was invoked with; gpg, cc and make are stubs, curl/tar are real.
+_run_install_recording() { # [CC value]; sets $INSTALL_LOG
+  command -v curl >/dev/null 2>&1 || skip "needs curl on PATH"
+  local mirror="$STUBDIR/mirror" src="$STUBDIR/src/bash-3.2.57" bin="$STUBDIR/stubbin"
+  mkdir -p "$mirror" "$src" "$bin"
+  INSTALL_LOG="$STUBDIR/configure.log"
+  printf '#!/bin/sh\nprintf "CC=%%s\\nCFLAGS=%%s\\nARGS=%%s\\n" "$CC" "$CFLAGS" "$*" > "%s"\n' "$INSTALL_LOG" > "$src/configure"
+  chmod +x "$src/configure"
+  tar -czf "$mirror/bash-3.2.57.tar.gz" -C "$STUBDIR/src" bash-3.2.57
+  printf 'sig\n' > "$mirror/bash-3.2.57.tar.gz.sig"
+  printf '#!/bin/sh\ncase "$*" in *--with-colons*) echo "fpr:::::::::7C0135FB088AAF6C66C650B9BB5869F064EA74AB:";; esac\nexit 0\n' > "$bin/gpg"
+  printf '#!/bin/sh\nexit 0\n' > "$bin/cc"
+  printf '#!/bin/sh\nif [ "$1" = install ]; then mkdir -p "%s/bin"; printf "#!/bin/sh\\nprintf 3.2.57\\\\(1\\\\)-release\\n" > "%s/bin/bash"; chmod +x "%s/bin/bash"; fi\nexit 0\n' \
+    "$ACQ_BASH32_PREFIX" "$ACQ_BASH32_PREFIX" "$ACQ_BASH32_PREFIX" > "$bin/make"
+  cp "$bin/cc" "$bin/gcc"
+  chmod +x "$bin/gpg" "$bin/cc" "$bin/gcc" "$bin/make"
+  if [ "$#" -gt 0 ]; then
+    run env PATH="$bin:$PATH" CC="$1" ACQ_BASH32_MIRRORS="file://$mirror" TMPDIR="$STUBDIR" "$RUNNER" --install
+  else
+    run env -u CC PATH="$bin:$PATH" ACQ_BASH32_MIRRORS="file://$mirror" TMPDIR="$STUBDIR" "$RUNNER" --install
+  fi
+}
+
+@test "bash32 --install: pins -std=gnu89 in CC (not CFLAGS) for GCC 15 / bash 3.2 K&R C" {
+  export ACQ_BASH32_PREFIX="$STUBDIR/inst"
+  _run_install_recording
+  assert_success
+  run cat "$INSTALL_LOG"
+  assert_line "CC=cc -std=gnu89"
+  assert_line "CFLAGS=-Wno-implicit-function-declaration -Wno-implicit-int"
+  refute_output --partial "CFLAGS=-std"
+}
+
+@test "bash32 --install: an existing CC is kept and the dialect pin is appended" {
+  export ACQ_BASH32_PREFIX="$STUBDIR/inst"
+  _run_install_recording "gcc -m64"
+  assert_success
+  run cat "$INSTALL_LOG"
+  assert_line "CC=gcc -m64 -std=gnu89"
+}
+
+@test "bash32 --install: a CC that is not on PATH is reported by name before building" {
+  export ACQ_BASH32_PREFIX="$STUBDIR/inst"
+  _run_install_recording "no-such-compiler -m64"
+  assert_failure 2
+  assert_output --partial "needs 'no-such-compiler' on PATH"
+}
