@@ -437,3 +437,76 @@ def secret_ls(scope: str | None = None) -> list[dict]:
             }
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Provider-credential / github-scope / rotation verbs (ADR-0040m secret-write,
+# key-rotate; ADR-0012, ADR-0013). A credential VALUE crosses the adapter
+# boundary only as the child's stdin (never argv, never output). The destination
+# pin (key_env + hosts) and the per-sandbox scope are host-side authority
+# (``provider_creds``); these verbs only move the value.
+# ---------------------------------------------------------------------------
+
+def provider_credential_set(provider: str, key_env: str, hosts: list[str], value: str) -> None:
+    """Store a provider credential value, pinned to ``key_env`` + ``hosts``.
+
+    The value travels on stdin only; ``key_env`` and ``hosts`` are non-secret
+    identifiers carried on argv so the backend binds the credential to its
+    destination. Raises :class:`MsbError` on a backend failure; ``value`` is
+    never logged or echoed.
+    """
+    proc = _run(
+        ["provider-credential", "set", provider, key_env, "--host", ",".join(hosts)],
+        input_text=value,
+    )
+    if proc.returncode != 0:
+        raise MsbError(
+            errors.FAILURE,
+            f"could not store the credential for provider '{provider}'",
+            "check backend logs and retry",
+        )
+
+
+def github_scope(sandbox: str, value: str) -> None:
+    """Store a sandbox-scoped GitHub token (ADR-0013); value travels on stdin only.
+
+    The token is bound to ``sandbox`` (never global) and never logged or echoed.
+    """
+    proc = _run(["github-scope", sandbox], input_text=value)
+    if proc.returncode != 0:
+        raise MsbError(
+            errors.FAILURE,
+            f"could not store the scoped GitHub token for sandbox '{sandbox}'",
+            "check backend logs and retry",
+        )
+
+
+def rotate_key(value: str) -> None:
+    """Rotate the USAi key: validate the new key, then replace the old (ADR-0012).
+
+    The backend validates the new key against the provider before storing it, so
+    the old key is only ever replaced after the new one is confirmed. The new key
+    travels on stdin only and is never echoed. Failure maps to the stable
+    rotation codes (ADR-0040m): ``provider_unreachable`` / ``provider_auth_failed``
+    when the provider cannot be reached or rejects the new key, else ``failure``.
+    """
+    proc = _run(["rotate"], input_text=value)
+    if proc.returncode == 0:
+        return
+    if proc.returncode == 2:
+        raise MsbError(
+            errors.PROVIDER_UNREACHABLE,
+            "the USAi provider endpoint could not be reached during rotation; the old key was left in place",
+            "check network/proxy access to the provider, then retry",
+        )
+    if proc.returncode == 3:
+        raise MsbError(
+            errors.PROVIDER_AUTH_FAILED,
+            "the USAi provider rejected the new key during rotation; the old key was left in place",
+            "mint a valid key and retry",
+        )
+    raise MsbError(
+        errors.FAILURE,
+        "the USAi key rotation failed",
+        "check backend logs and retry",
+    )

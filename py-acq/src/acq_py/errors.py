@@ -78,3 +78,10 @@ CONSENT_REQUIRED = "consent_required"
 MIGRATION_LOCKED = "migration_locked"
 MIGRATION_FAILED = "migration_failed"
 SECURITY_EXCEPTION = "security_exception"
+
+# Provider-credential / rotation slice (ADR-0040m). ``provider_unreachable`` and
+# ``provider_auth_failed`` are the stable rotation failure codes: rotation fails
+# closed when the provider endpoint cannot be reached or rejects the new key, and
+# the old key is never replaced until the new one is confirmed (ADR-0012).
+PROVIDER_UNREACHABLE = "provider_unreachable"
+PROVIDER_AUTH_FAILED = "provider_auth_failed"

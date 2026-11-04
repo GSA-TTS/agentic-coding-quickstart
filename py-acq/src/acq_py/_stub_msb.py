@@ -39,6 +39,14 @@ SECRET_LS_RAW_ENV = "ACQ_MSB_STUB_SECRET_LS_RAW"
 EXEC_MARKER = "[stub exec]"
 COPY_MARKER = "[stub copy]"
 
+# Rotation probe knob. ``ACQ_MSB_STUB_ROTATE`` drives the deterministic
+# provider-validation outcome for the ``rotate`` verb: "ok" (default) stores the
+# new key; "unreachable" / "auth_failed" fail before any store so the old key is
+# left in place (the adapter maps these to provider_unreachable /
+# provider_auth_failed). The stub reads and discards the new key on stdin — it
+# never stores or echoes a value.
+ROTATE_ENV = "ACQ_MSB_STUB_ROTATE"
+
 # When ``ACQ_MSB_STUB_FAIL`` names a command, that command fails with a
 # distinctive raw stderr line (simulating a backend-native failure) so a vector
 # can assert the raw text never reaches the structured output.
@@ -230,6 +238,79 @@ def _secret_main(args: list[str]) -> int:
     return 1
 
 
+def _discard_stdin() -> None:
+    """Read stdin to completion and discard it (a value must never be stored)."""
+    try:
+        sys.stdin.read()
+    except OSError:
+        pass
+
+
+def _provider_credential_main(args: list[str]) -> int:
+    """Handle ``msb provider-credential <subcommand> …`` (metadata only, never a value)."""
+    if not args:
+        print("msb: provider-credential requires a subcommand", file=sys.stderr)
+        return 1
+    sub = args[0]
+    if sub != "set":
+        print(f"msb: unrecognized provider-credential subcommand '{sub}'", file=sys.stderr)
+        return 1
+    rest = args[1:]
+    provider = rest[0] if rest else None
+    key_env = rest[1] if len(rest) > 1 else None
+    if provider is None or key_env is None:
+        print("msb: provider-credential set requires a provider and key_env", file=sys.stderr)
+        return 1
+    # The value arrives on stdin and is read then discarded: it is never stored,
+    # echoed, or logged. Only (global, provider) -> "set" is recorded so the
+    # credential's presence is tracked; the destination pin (key_env + hosts) is
+    # host-side authority, never backend state.
+    _discard_stdin()
+    secrets = _load_secrets()
+    secrets.setdefault("global", {})[provider] = "set"
+    _save_secrets(secrets)
+    return 0
+
+
+def _github_scope_main(args: list[str]) -> int:
+    """Handle ``msb github-scope SANDBOX`` (sandbox-scoped metadata only)."""
+    sandbox = args[0] if args else None
+    if sandbox is None:
+        print("msb: github-scope requires a sandbox name", file=sys.stderr)
+        return 1
+    # The token arrives on stdin and is read then discarded (never stored/echoed).
+    # Only (sandbox, github) -> "set" is recorded; the per-sandbox scope record is
+    # host-side authority.
+    _discard_stdin()
+    secrets = _load_secrets()
+    secrets.setdefault(sandbox, {})["github"] = "set"
+    _save_secrets(secrets)
+    return 0
+
+
+def _rotate_main(args: list[str]) -> int:
+    """Handle ``msb rotate`` — probe the new key, then store only on success.
+
+    Reads and discards the new key on stdin. The deterministic probe outcome is
+    driven by ``ACQ_MSB_STUB_ROTATE``: on "unreachable" / "auth_failed" the store
+    is skipped (the old key is left in place) and a distinct exit code is
+    returned (2 / 3) so the adapter maps it to a stable code.
+    """
+    _discard_stdin()
+    outcome = os.environ.get(ROTATE_ENV, "ok")
+    if outcome == "unreachable":
+        print(RAW_FAIL_STDERR, file=sys.stderr)
+        return 2
+    if outcome == "auth_failed":
+        print(RAW_FAIL_STDERR, file=sys.stderr)
+        return 3
+    # ok: replace the old key only now (after the new one was confirmed).
+    secrets = _load_secrets()
+    secrets.setdefault("global", {})["usai"] = "set"
+    _save_secrets(secrets)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     args = argv[1:]
     if not args:
@@ -242,6 +323,15 @@ def main(argv: list[str]) -> int:
 
     if cmd == "secret":
         return _secret_main(args[1:])
+
+    if cmd == "provider-credential":
+        return _provider_credential_main(args[1:])
+
+    if cmd == "github-scope":
+        return _github_scope_main(args[1:])
+
+    if cmd == "rotate":
+        return _rotate_main(args[1:])
 
     catalog = _load()
 
