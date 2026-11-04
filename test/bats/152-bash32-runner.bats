@@ -189,7 +189,7 @@ STUB
   local fake
   fake="$(make_fake_bash 3.2.57)"
   printf '%s\n' 'if then' > "$STUBDIR/bad.sh"
-  run env ACQ_BASH32="$fake" "$RUNNER" --syntax "$STUBDIR/bad.sh"
+  run env LC_ALL=C ACQ_BASH32="$fake" "$RUNNER" --syntax "$STUBDIR/bad.sh"
   assert_failure 1
   assert_output --partial "syntax error near unexpected token"
   assert_output --partial "cannot parse"
@@ -207,8 +207,9 @@ STUB
 @test "bash32 --syntax: a real bash 3.2 rejects a bash-4-only construct" {
   need_real_bash32
   printf '%s\n' 'case x in a) echo a ;& b) echo b ;; esac' > "$STUBDIR/b4.sh"
-  run env ACQ_BASH32="$REAL32" "$RUNNER" --syntax "$STUBDIR/b4.sh"
+  run env LC_ALL=C ACQ_BASH32="$REAL32" "$RUNNER" --syntax "$STUBDIR/b4.sh"
   assert_failure 1
+  assert_output --partial "syntax error near unexpected token"
   assert_output --partial "cannot parse"
 }
 
@@ -247,7 +248,7 @@ STUB
 @test "bash32 --lint: agrees with real bash 3.2 on the flagged construct" {
   need_real_bash32
   printf '%s\n' 'x=$(cat <<'"'"'E'"'"'' "it's" 'E' ')' > "$STUBDIR/h.sh"
-  run "$REAL32" -n "$STUBDIR/h.sh"
+  run env LC_ALL=C "$REAL32" -n "$STUBDIR/h.sh"
   assert_failure 2
   assert_output --partial "unexpected EOF while looking for matching"
   run "$RUNNER" --lint "$STUBDIR/h.sh"
