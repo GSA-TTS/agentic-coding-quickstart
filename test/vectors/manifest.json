@@ -354,6 +354,22 @@
     {
       "contract": "ADR-0042m installer consent: PATH is never modified without an explicit yes",
       "vectors": ["installer/consent-declined"]
+    },
+    {
+      "contract": "ADR-0044m verbatim RESULT transcript signature (PASS/FAIL/BLOCKED, backend=, image=, host=, rev=, dir=)",
+      "vectors": ["qualification/result-line-pass", "qualification/result-line-blocked"]
+    },
+    {
+      "contract": "ADR-0044m BLOCKED is a first-class recorded verdict, never a pass (missing command / unqualified cell)",
+      "vectors": ["qualification/result-line-blocked", "qualification/result-line-unqualified"]
+    },
+    {
+      "contract": "ADR-0044m 3-attempt reproduction rule: a FAIL that reproduces is FAIL, one that diverges is flaky",
+      "vectors": ["qualification/repro-fail", "qualification/repro-flaky"]
+    },
+    {
+      "contract": "ADR-0044m matrix reports unqualified cells honestly (Windows ARM64, musl, unclaimed sbx cells)",
+      "vectors": ["qualification/matrix-unqualified"]
     }
   ]
 }
