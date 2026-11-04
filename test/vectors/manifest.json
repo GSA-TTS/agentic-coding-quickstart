@@ -58,6 +58,10 @@
       "vectors": ["cli/lifecycle-create", "cli/lifecycle-run"]
     },
     {
+      "contract": "ADR-0040m sbx provision + list capabilities (create end to end, host-authoritative state record keyed by backend)",
+      "vectors": ["cli/lifecycle-sbx-create", "cli/lifecycle-sbx-ls"]
+    },
+    {
       "contract": "ADR-0038m §2 ls required data: sandboxes with name/backend/state",
       "vectors": ["cli/lifecycle-ls"]
     },
@@ -150,8 +154,8 @@
       "vectors": ["cli/secret-has-present", "cli/secret-has-absent", "cli/secret-has-usage"]
     },
     {
-      "contract": "ADR-0040m unsupported-capability fail-closed for secret has: exit 1 with a stderr diagnostic, never a silent false 'absent'",
-      "vectors": ["cli/secret-has-unsupported"]
+      "contract": "ADR-0040m sbx-only key_present obligation: secret has on sbx reports presence via the proxy table (exit 0 present / 1 absent), never a value",
+      "vectors": ["cli/secret-has-sbx-present", "cli/secret-has-sbx-absent"]
     },
     {
       "contract": "ADR-0038m §2 secret ls required data: scope/service/value_state, non-secret bindings only",
@@ -162,6 +166,10 @@
       "vectors": ["cli/secret-rm-json"]
     },
     {
+      "contract": "ADR-0038m §48 sbx raw-placeholder removal: a raw placeholder token is removed from sbx's proxy table, leaving the acq store unchanged",
+      "vectors": ["cli/secret-rm-raw-placeholder-sbx"]
+    },
+    {
       "contract": "ADR-0040m secret rm on a down backend reports backend_not_found (not secret_missing) and never deletes",
       "vectors": ["cli/secret-rm-backend-error"]
     },
@@ -170,7 +178,7 @@
       "vectors": ["cli/secret-rm-missing", "cli/secret-ls-unreadable", "cli/secret-ls-bad-shape", "cli/secret-ls-entry-bad-shape"]
     },
     {
-      "contract": "ADR-0040m unsupported-capability fail-closed for secret management on a non-msb backend",
+      "contract": "ADR-0040m unsupported-capability fail-closed for secret listing on a non-msb backend (secret-list is msb-only)",
       "vectors": ["cli/secret-sbx-unsupported"]
     },
     {
@@ -194,8 +202,8 @@
       "vectors": ["cli/provider-credential-set-usage"]
     },
     {
-      "contract": "ADR-0040m unsupported-capability fail-closed for provider-credential set on a non-msb backend",
-      "vectors": ["cli/provider-credential-sbx-unsupported"]
+      "contract": "ADR-0040m sbx provider-credential set (common secret-write): value on stdin only, binding reports provider/key_env/hosts/source_layer, never a value",
+      "vectors": ["cli/provider-credential-sbx-set"]
     },
     {
       "contract": "ADR-0013 per-sandbox GitHub token scoping: github-scope records a sandbox-scoped (never global) scope with the token never exposed",
@@ -206,8 +214,8 @@
       "vectors": ["cli/github-scope-no-value"]
     },
     {
-      "contract": "ADR-0040m unsupported-capability fail-closed for github-scope on a non-msb backend",
-      "vectors": ["cli/github-scope-sbx-unsupported"]
+      "contract": "ADR-0040m sbx github-scope (common): a per-sandbox (never global) scope is recorded with the token never exposed",
+      "vectors": ["cli/github-scope-sbx"]
     },
     {
       "contract": "ADR-0012 / ADR-0040m key-rotate: rotation re-feeds the new key and never emits it (provider/key_env/rotated, no value)",
@@ -222,8 +230,8 @@
       "vectors": ["cli/usai-rotate-no-value"]
     },
     {
-      "contract": "ADR-0040m unsupported-capability fail-closed for usai-rotate-api-key on a non-msb backend",
-      "vectors": ["cli/usai-rotate-sbx-unsupported"]
+      "contract": "ADR-0040m sbx key-rotate (common): rotation reports provider/key_env/rotated and never emits the new key",
+      "vectors": ["cli/usai-rotate-sbx"]
     },
     {
       "contract": "ADR-0038m §1 / spec story #9 passthrough: verbatim forwarding, announced stderr notice, status preserved",
@@ -274,6 +282,14 @@
     {
       "contract": "ADR-0038m §46 kit-source rm stops trusting a registered repository / fails closed on an unregistered one",
       "vectors": ["cli/kit-source-rm", "cli/kit-source-rm-not-found"]
+    },
+    {
+      "contract": "ADR-0040m sbx-only kit_source_revoked obligation: kit-source rm revokes the source from sbx's kit.allowedSources and drops the host registry entry",
+      "vectors": ["cli/kit-source-rm-sbx"]
+    },
+    {
+      "contract": "ADR-0040m unknown-backend validation for kit-source rm: --backend bogus is rejected with a usage error (matching the other mutating verbs)",
+      "vectors": ["cli/kit-source-rm-unknown-backend"]
     },
     {
       "contract": "ADR-0038m §46 kit-source add/rm both refuse the control-plane trust anchor (symmetry)",

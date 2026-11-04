@@ -241,18 +241,26 @@ def test_provider_credential_set_missing_host(monkeypatch, tmp_path, capsys):
     assert doc["error"]["code"] == "validation_failed"
 
 
-def test_provider_credential_sbx_unsupported(monkeypatch, tmp_path, capsys):
+def test_provider_credential_sbx(monkeypatch, tmp_path, capsys):
+    # provider-credential set is a common capability: it runs against the sbx
+    # adapter too, reporting the binding only and never the value (ADR-0040m).
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
+    monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
     monkeypatch.setattr(sys, "stdin", io.StringIO("value-1\n"))
 
     rc, doc = _invoke(
         capsys, "--backend", "sbx", "provider-credential", "set", "usai", "USAI_API_KEY", "--host", "api.gsa.usai.gov", "--json"
     )
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert rc == 0
+    assert doc["data"]["provider"] == "usai"
+    assert doc["data"]["key_env"] == "USAI_API_KEY"
+    assert doc["data"]["hosts"] == ["api.gsa.usai.gov"]
+    assert "value" not in doc["data"]
+    assert "value-1" not in json.dumps(doc)
 
 
 def test_provider_credential_env_layer_reported(monkeypatch, tmp_path, capsys):
@@ -331,16 +339,24 @@ def test_github_scope_no_value_validation_failed(monkeypatch, tmp_path, capsys):
     assert doc["error"]["code"] == "validation_failed"
 
 
-def test_github_scope_sbx_unsupported(monkeypatch, tmp_path, capsys):
+def test_github_scope_sbx(monkeypatch, tmp_path, capsys):
+    # github-scope is a common capability: the per-sandbox scope is recorded
+    # host-side for the sbx backend too (ADR-0013).
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
+    monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
     monkeypatch.setattr(sys, "stdin", io.StringIO("token\n"))
 
     rc, doc = _invoke(capsys, "--backend", "sbx", "github-scope", "mybox", str(tmp_path), "--json")
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert rc == 0
+    assert doc["data"]["backend"] == "sbx"
+    assert doc["data"]["scoped"] is True
+    record = provider_creds.github_scope_read("sbx", "mybox")
+    assert record is not None
+    assert record["sandbox"] == "mybox"
 
 
 # ---------------------------------------------------------------------------
@@ -423,13 +439,18 @@ def test_rotate_no_value_validation_failed(monkeypatch, tmp_path, capsys):
     assert doc["error"]["code"] == "validation_failed"
 
 
-def test_rotate_sbx_unsupported(monkeypatch, tmp_path, capsys):
+def test_rotate_sbx(monkeypatch, tmp_path, capsys):
+    # usai-rotate-api-key (key-rotate) is a common capability: it runs against the
+    # sbx adapter too, reporting provider/key_env/rotated and never the new key.
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
     monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
+    monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
     monkeypatch.setattr(sys, "stdin", io.StringIO("new-key\n"))
 
     rc, doc = _invoke(capsys, "--backend", "sbx", "usai-rotate-api-key", "--json")
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert rc == 0
+    assert doc["data"] == {"provider": "usai", "key_env": "USAI_API_KEY", "rotated": True}
+    assert "new-key" not in json.dumps(doc)

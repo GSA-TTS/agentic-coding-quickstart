@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "id": "cli/kit-source-rm-unknown-backend",
+  "oracle": "ADR-0040m unknown-backend validation: kit-source rm rejects --backend bogus with a usage error (exit 2), matching the other mutating verbs",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "bogus", "kit-source", "rm", "github.com/acme/team-kits", "--json"],
+    "env": {
+      "ACQ_KIT_SOURCE_SEED": "[{\"repository\": \"github.com/acme/team-kits\", \"ref\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"directory\": \"integrations/isolation/acq-kits\"}]"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "ACQ_MSB_BIN", "ACQ_MSB_INSTALLED", "ACQ_SBX_INSTALLED", "ACQ_KIT_SOURCE_DISCOVERY"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 2,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit-source rm",
+        "error": {"code": "usage"}
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

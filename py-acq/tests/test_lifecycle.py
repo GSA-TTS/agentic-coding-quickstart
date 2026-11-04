@@ -96,14 +96,42 @@ def test_stop_missing_fails_closed(monkeypatch, tmp_path, capsys):
     assert doc["error"]["code"] == "sandbox_not_found"
 
 
-def test_sbx_lifecycle_unsupported(monkeypatch, tmp_path, capsys):
+def test_sbx_lifecycle_end_to_end(monkeypatch, tmp_path, capsys):
+    # The sbx adapter routes the common lifecycle verbs through the sbx stub with
+    # host-authoritative state records keyed by the sbx backend (ADR-0040m).
     _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_SBX_BIN", "__stub__")
     monkeypatch.setenv("ACQ_SBX_VERSION", "0.39.0")
     monkeypatch.setenv("ACQ_SBX_INSTALLED", "1")
+    monkeypatch.setenv("ACQ_MSB_INSTALLED", "0")
+    monkeypatch.setenv("SBX_HOME", str(tmp_path / "sbx-home"))
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    rc, doc = _invoke(capsys, "--backend", "sbx", "create", "opencode", str(ws), "--name", "sbx-box", "--json")
+    assert rc == 0
+    assert doc["data"]["backend"] == "sbx"
+    assert doc["data"]["name"] == "sbx-box"
+
+    record = state.record_read("sbx", "sbx-box")
+    assert record is not None
+    assert record["schema"] == state.STATE_SCHEMA
+    assert record["agent"] == "opencode"
 
     rc, doc = _invoke(capsys, "--backend", "sbx", "ls", "--json")
-    assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert rc == 0
+    names = {entry["name"]: entry for entry in doc["data"]["sandboxes"]}
+    assert names["sbx-box"]["state"] == "running"
+    assert names["sbx-box"]["backend"] == "sbx"
+
+    rc, doc = _invoke(capsys, "--backend", "sbx", "stop", "sbx-box", "--json")
+    assert rc == 0
+    assert doc["data"]["state"] == "stopped"
+
+    rc, doc = _invoke(capsys, "--backend", "sbx", "rm", "sbx-box", "--json")
+    assert rc == 0
+    assert doc["data"]["removed"] is True
+    assert state.record_read("sbx", "sbx-box") is None
 
 
 def test_slugify_and_derive_name():
