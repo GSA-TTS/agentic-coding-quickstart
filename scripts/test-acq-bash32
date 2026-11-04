@@ -174,8 +174,8 @@ do_install() {
     cd "$WORK" && tar -xzf "$tarball" && cd "bash-${REQUIRED_VERSION}" &&
       # 2007 source vs modern compilers. bash 3.2 is pre-ANSI K&R C, so pin the C
       # dialect in CC (not CFLAGS): its build helpers (mkbuiltins, ...) are compiled
-      # with CC_FOR_BUILD=$(CC) and CFLAGS_FOR_BUILD, which ignore CFLAGS. gnu89 is
-      # the only dialect that builds with GCC 15 (gnu17 rejects printf.def). The
+      # with CC_FOR_BUILD=$(CC) and CFLAGS_FOR_BUILD, which ignore CFLAGS. gnu89 builds
+      # cleanly with GCC 15.2 while gnu17 failed on printf.def (observed in CI work). The
       # -Wno- flags still relax implicit function/int diagnostics in the main build.
       CC="${CC:-cc} -std=gnu89" CFLAGS="-Wno-implicit-function-declaration -Wno-implicit-int" ./configure --prefix="$PREFIX" >"${WORK}/build.log" 2>&1 &&
       make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)" >>"${WORK}/build.log" 2>&1 &&

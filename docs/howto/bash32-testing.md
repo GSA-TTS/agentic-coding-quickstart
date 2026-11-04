@@ -63,7 +63,9 @@ Bash 3.2 is pre-ANSI K&R C, so the build pins `-std=gnu89` in `CC` (your `$CC`,
 default `cc`, with the flag appended), not in `CFLAGS`: bash compiles its own
 build helpers with `CC_FOR_BUILD=$(CC)` and `CFLAGS_FOR_BUILD`, which ignore
 `CFLAGS`. GCC 15 defaults to `-std=gnu23` and fails to build it without the pin;
-`gnu17` also fails. Clang accepts `gnu89` too (it is a defined language standard
+`gnu89` built cleanly with GCC 15.2 while `gnu17` failed (observed). The pin is
+appended after any flags already in `$CC`, so it wins. The compiler path in `$CC`
+must not contain spaces. Clang accepts `gnu89` too (it is a defined language standard
 in `LangStandards.def`), and the `-Wno-implicit-*` flags in `CFLAGS` still relax
 the main build's diagnostics.
 
