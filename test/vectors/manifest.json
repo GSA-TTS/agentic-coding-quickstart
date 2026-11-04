@@ -174,6 +174,58 @@
       "vectors": ["cli/secret-sbx-unsupported"]
     },
     {
+      "contract": "ADR-0038m §2 provider-credential set success: value on stdin only, binding reports provider/key_env/hosts/source_layer, never a value",
+      "vectors": ["cli/provider-credential-set-json"]
+    },
+    {
+      "contract": "ADR-0038m §2 provider-credential ls required data: provider/key_env/hosts/source_layer, non-secret bindings only",
+      "vectors": ["cli/provider-credential-ls-json", "cli/provider-credential-ls-empty"]
+    },
+    {
+      "contract": "ADR-0038m §provider-credential rm exit semantics: exit 0 removed true, absent binding fails closed with secret_missing",
+      "vectors": ["cli/provider-credential-rm-json", "cli/provider-credential-rm-missing"]
+    },
+    {
+      "contract": "ADR-0038m §1 provider-credential set validation: empty value, missing --host, and malformed provider id fail closed (validation_failed)",
+      "vectors": ["cli/provider-credential-set-no-value", "cli/provider-credential-set-missing-host", "cli/provider-credential-set-invalid-provider"]
+    },
+    {
+      "contract": "ADR-0038m §1 usage exit 2: provider-credential set requires PROVIDER and KEY_ENV",
+      "vectors": ["cli/provider-credential-set-usage"]
+    },
+    {
+      "contract": "ADR-0040m unsupported-capability fail-closed for provider-credential set on a non-msb backend",
+      "vectors": ["cli/provider-credential-sbx-unsupported"]
+    },
+    {
+      "contract": "ADR-0013 per-sandbox GitHub token scoping: github-scope records a sandbox-scoped (never global) scope with the token never exposed",
+      "vectors": ["cli/github-scope-json"]
+    },
+    {
+      "contract": "ADR-0038m §1 github-scope validation: an empty stdin token fails closed (validation_failed)",
+      "vectors": ["cli/github-scope-no-value"]
+    },
+    {
+      "contract": "ADR-0040m unsupported-capability fail-closed for github-scope on a non-msb backend",
+      "vectors": ["cli/github-scope-sbx-unsupported"]
+    },
+    {
+      "contract": "ADR-0012 / ADR-0040m key-rotate: rotation re-feeds the new key and never emits it (provider/key_env/rotated, no value)",
+      "vectors": ["cli/usai-rotate-ok"]
+    },
+    {
+      "contract": "ADR-0040m error vocabulary provider_unreachable / provider_auth_failed: rotation fails closed and leaves the old key in place",
+      "vectors": ["cli/usai-rotate-unreachable", "cli/usai-rotate-auth-failed"]
+    },
+    {
+      "contract": "ADR-0038m §1 usai-rotate-api-key validation: an empty stdin key fails closed (validation_failed)",
+      "vectors": ["cli/usai-rotate-no-value"]
+    },
+    {
+      "contract": "ADR-0040m unsupported-capability fail-closed for usai-rotate-api-key on a non-msb backend",
+      "vectors": ["cli/usai-rotate-sbx-unsupported"]
+    },
+    {
       "contract": "ADR-0038m §1 / spec story #9 passthrough: verbatim forwarding, announced stderr notice, status preserved",
       "vectors": ["cli/passthrough", "cli/passthrough-exit-code"]
     },
