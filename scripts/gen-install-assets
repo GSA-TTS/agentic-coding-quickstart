@@ -1,0 +1,49 @@
+#!/bin/sh
+# gen-install-assets — generate SHA256SUMS for acq v1's enumerated offline asset
+# set (ADR-0042m).
+#
+# Reads the per-platform archive names from installer/assets.json (the single
+# source of truth) and verifies the release dist directory is complete, then
+# writes SHA256SUMS covering install.sh, install.ps1, and every platform archive.
+# Completeness is enforced by enumeration, not asserted: a missing enumerated
+# asset fails rather than producing a silently incomplete manifest.
+#
+# Usage:
+#   scripts/gen-install-assets [dist-dir]      # default: dist
+#
+# Requires: sha256sum, python3 (to read the manifest). Used by release automation;
+# ordinary operation never reaches the network for acq's own assets.
+
+set -eu
+
+die() { printf 'gen-install-assets: %s\n' "$*" >&2; exit 1; }
+
+dist="${1:-dist}"
+[ -d "$dist" ] || die "not a directory: $dist"
+
+command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
+
+# Enumerated archive names from the manifest (newline-separated). The manifest is
+# the durable home of the asset set; this script derives its file list from it so
+# the two cannot drift.
+archives="$(python3 -c '
+import json
+a = json.load(open("installer/assets.json", encoding="utf-8"))
+print("\n".join(sorted(p["archive"] for p in a["platforms"].values())))
+')"
+
+[ -n "$archives" ] || die "no platforms enumerated in installer/assets.json"
+
+# The SHA256SUMS file must never hash itself, so it is written only after the
+# candidate list is fixed (see the wheelhouse SHA256SUMS self-hash regression).
+for name in install.sh install.ps1 $archives; do
+  [ -f "$dist/$name" ] || die "missing enumerated asset: $name"
+done
+
+# Word-splitting is intentional: $archives is a newline-separated list of safe
+# (artifact) names read from the manifest, never user input.
+# shellcheck disable=SC2086
+( cd "$dist" && sha256sum install.sh install.ps1 $archives ) > "$dist/SHA256SUMS"
+
+printf 'wrote %s/SHA256SUMS\n' "$dist"
