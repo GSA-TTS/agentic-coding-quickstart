@@ -20,7 +20,7 @@ teardown() {
 }
 
 _install_dir() {
-  printf '%s/.local/share/acq' "$HOME"
+  printf '%s/acq' "${XDG_DATA_HOME:-$HOME/.local/share}"
 }
 
 @test "installer: --help exits 0 and prints usage" {
@@ -74,8 +74,15 @@ _install_dir() {
   [ ! -e "$HOME/.profile" ]
 }
 
-@test "installer: never elevates (no sudo/pkexec)" {
-  run grep -E 'sudo|pkexec' "$REPO_ROOT/install.sh"
+@test "installer: never elevates (no elevation invocation)" {
+  # The installer documents non-elevation ("no sudo") in comments and --help
+  # prose; that wording must not read as an invocation, but a real elevation
+  # command (a line whose first word is sudo/pkexec/runas, or an osascript
+  # "with administrator privileges") must be caught.
+  grep -q 'no sudo' "$REPO_ROOT/install.sh" || fail "documentation of non-elevation missing"
+
+  run grep -nE '^[[:space:]]*(sudo|pkexec|runas)[[:space:]]|osascript .*with administrator privileges' \
+    "$REPO_ROOT/install.sh"
   assert_failure
 }
 

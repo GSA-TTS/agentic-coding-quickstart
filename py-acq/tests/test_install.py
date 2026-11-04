@@ -39,18 +39,34 @@ def _have_tools() -> bool:
 pytestmark = pytest.mark.skipif(not _have_tools(), reason="POSIX shell/toolchain unavailable")
 
 
-def _make_release(root: Path, *, bad: bool = False, drop_entry: bool = False) -> Path:
-    """Create an offline release dir (``SHA256SUMS`` + archive); returns the dir."""
+# The archive's enumerated components (ADR-0042m), keyed by the name the installer
+# reports in its fail-closed "missing" diagnostic.
+_COMPONENTS = {
+    "launcher": ("acq", "#!/bin/sh\necho acq test launcher\n"),
+    "runtime": ("py-acq/runtime/bin/python3", "#!/bin/sh\necho acq test runtime\n"),
+    "source": ("py-acq/src/acq_py/__init__.py", '__version__ = "0.1.0"\n'),
+    "wheelhouse": ("wheelhouse/placeholder.whl", "placeholder wheel\n"),
+}
+
+
+def _make_release(
+    root: Path, *, bad: bool = False, drop_entry: bool = False, omit: str | None = None
+) -> Path:
+    """Create an offline release dir (SHA256SUMS + provenance + archive).
+
+    ``omit`` names a component to leave OUT of the archive, so the completeness
+    fail-closed tests can build a release that is checksum-valid but incomplete.
+    """
     root.mkdir(parents=True, exist_ok=True)
     release = root / "release"
     release.mkdir()
     stage = root / "stage"
-    for rel in ("py-acq/runtime/bin", "py-acq/src/acq_py", "wheelhouse"):
-        (stage / rel).mkdir(parents=True)
-    (stage / "acq").write_text("#!/bin/sh\necho acq test launcher\n")
-    (stage / "py-acq/runtime/bin/python3").write_text("#!/bin/sh\necho acq test runtime\n")
-    (stage / "py-acq/src/acq_py/__init__.py").write_text('__version__ = "0.1.0"\n')
-    (stage / "wheelhouse/placeholder.whl").write_text("placeholder wheel\n")
+    for name, (rel, body) in _COMPONENTS.items():
+        if name == omit:
+            continue
+        path = stage / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
 
     archive = release / "acq-linux-x86_64.tar.gz"
     with tarfile.open(archive, "w:gz") as tf:
@@ -63,6 +79,10 @@ def _make_release(root: Path, *, bad: bool = False, drop_entry: bool = False) ->
     else:
         recorded = "0" * 64 if bad else sha
         (release / "SHA256SUMS").write_text(f"{recorded}  acq-linux-x86_64.tar.gz\n")
+    # The provenance manifest travels alongside SHA256SUMS (a separate asset).
+    (release / "provenance.json").write_text(
+        '{"schema": 1, "note": "test fixture provenance (no secrets)"}\n'
+    )
     return release
 
 
@@ -91,11 +111,14 @@ def _bin_dir(tmp_path: Path) -> Path:
     return tmp_path / "home" / ".local" / "bin"
 
 
-# A line whose first word is an elevation command (sudo/pkexec on POSIX, runas on
-# Windows) is an elevation *invocation*. The installer may still legitimately
-# mention "no sudo" in comments and --help prose, so a bare substring match is
-# wrong (and is exactly what failed in CI).
-_ELEVATION_COMMAND = re.compile(r"^\s*(sudo|pkexec|runas)\s")
+# An elevation command token (sudo/pkexec on POSIX, runas on Windows) followed by
+# an argument. Requiring a trailing whitespace (i.e. the command has arguments)
+# distinguishes an invocation from prose naming the word — "no sudo," (comma) or
+# "(no sudo)" (paren) do not match — while still catching elevation through a
+# wrapper (`run sudo …`) or a command substitution (`$(sudo …)`). The installer may
+# legitimately mention "no sudo" in comments and --help prose, so a bare substring
+# match is wrong (and is exactly what failed in CI).
+_ELEVATION_COMMAND = re.compile(r"\b(sudo|pkexec|runas)\s")
 
 
 def _elevation_invocations(source: str) -> list[str]:
@@ -105,11 +128,21 @@ def _elevation_invocations(source: str) -> list[str]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if _ELEVATION_COMMAND.match(line):
+        if _ELEVATION_COMMAND.search(line):
             offending.append(line)
         elif "osascript" in stripped and "with administrator privileges" in stripped:
             offending.append(line)
     return offending
+
+
+def _secret_literal_lines(source: str) -> list[str]:
+    """Lines that dump the environment or hardcode a secret-looking value."""
+    return [
+        line
+        for line in source.splitlines()
+        if "printenv" in line
+        or any(tok in line.upper() for tok in ("API_KEY=", "TOKEN=", "PASSWORD=", "SECRET="))
+    ]
 
 
 def test_help_exits_zero(tmp_path):
@@ -165,6 +198,34 @@ def test_missing_checksum_entry_fails_closed(tmp_path):
     assert not _install_dir(tmp_path).exists()
 
 
+@pytest.mark.parametrize(
+    "omit,needle",
+    [
+        ("launcher", "launcher"),
+        ("runtime", "runtime"),
+        ("source", "source tree"),
+        ("wheelhouse", "wheelhouse"),
+    ],
+)
+def test_missing_component_fails_closed(tmp_path, omit, needle):
+    # A checksum-valid archive that is nonetheless missing an enumerated component
+    # must fail closed before publishing, not install and fail later.
+    release = _make_release(tmp_path, omit=omit)
+    proc = _run_installer(tmp_path, "--source", str(release), "--yes")
+    assert proc.returncode == 1
+    assert needle in proc.stderr.decode()
+    assert not _install_dir(tmp_path).exists()
+
+
+def test_missing_provenance_fails_closed(tmp_path):
+    release = _make_release(tmp_path)
+    (release / "provenance.json").unlink()
+    proc = _run_installer(tmp_path, "--source", str(release), "--yes")
+    assert proc.returncode == 1
+    assert "provenance" in proc.stderr.decode()
+    assert not _install_dir(tmp_path).exists()
+
+
 def test_consent_is_not_inferred_when_noninteractive(tmp_path):
     release = _make_release(tmp_path)
     # No --yes and a non-interactive stdin: consent must decline (fail closed).
@@ -210,20 +271,26 @@ def test_installer_never_elevates():
 
 def test_elevation_guard_is_a_mutation_proof():
     source = INSTALL_SH.read_text(encoding="utf-8")
-    # Positive control: an introduced elevation command is detected, while the
-    # clean installer (with its "no sudo" documentation) is not.
+    # Positive control: an introduced elevation command is detected — directly,
+    # through a wrapper (`run sudo …`), and through command substitution — while
+    # the clean installer (with its "no sudo" documentation) is not.
     assert _elevation_invocations(source + "\nsudo true\n") == ["sudo true"]
+    assert _elevation_invocations(source + "\nrun sudo true\n") == ["run sudo true"]
+    assert _elevation_invocations(source + '\nx="$(sudo true)"\n') == ['x="$(sudo true)"']
     assert _elevation_invocations(source) == []
 
 
 def test_installer_has_no_secret_literals():
     source = INSTALL_SH.read_text(encoding="utf-8")
     # Mutation proof: no secret value or environment dump is ever introduced.
-    assert "printenv" not in source
-    for line in source.splitlines():
-        assert not any(
-            token in line.upper() for token in ("API_KEY=", "TOKEN=", "PASSWORD=", "SECRET=")
-        ), line
+    assert _secret_literal_lines(source) == []
+
+
+def test_windows_installer_has_no_secret_literals():
+    source = (REPO_ROOT / "install.ps1").read_text(encoding="utf-8")
+    # Coverage symmetry with install.sh: the Windows installer is just as free of
+    # secret literals and environment dumps.
+    assert _secret_literal_lines(source) == []
 
 
 def test_gen_install_assets_writes_complete_sha256sums(tmp_path):
@@ -234,6 +301,7 @@ def test_gen_install_assets_writes_complete_sha256sums(tmp_path):
     dist.mkdir()
     shutil.copy(INSTALL_SH, dist / "install.sh")
     shutil.copy(REPO_ROOT / "install.ps1", dist / "install.ps1")
+    shutil.copy(REPO_ROOT / "installer" / "provenance.json", dist / "provenance.json")
     # The enumerated archive names from installer/assets.json; gen-install-assets
     # only hashes them, so the bodies need not be a real runtime.
     for name, body in (
@@ -255,6 +323,7 @@ def test_gen_install_assets_writes_complete_sha256sums(tmp_path):
     for name in (
         "install.sh",
         "install.ps1",
+        "provenance.json",
         "acq-linux-x86_64.tar.gz",
         "acq-linux-aarch64.tar.gz",
         "acq-macos-arm64.tar.gz",

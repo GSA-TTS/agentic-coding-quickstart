@@ -47,10 +47,20 @@ teardown() {
 }
 
 @test "windows installer: never pipes a remote script to iex" {
-  installer=$(cat "$REPO_ROOT/install.ps1")
+  # The usage here-string documents the `irm … | iex` bootstrap; that prose must
+  # not read as the installer itself piping a remote script to iex. Strip the
+  # here-string body, comments, and Write-* helpers, then assert on what runs.
+  code=$(awk '
+    /@"/   { inheredoc = 1 }
+    /^"@/  { inheredoc = 0; next }
+    inheredoc { next }
+    /^[[:space:]]*#/ { next }
+    /Write-(Host|Warn|Warning)/ { next }
+    { print }
+  ' "$REPO_ROOT/install.ps1")
 
-  refute_regex "$installer" '(irm|Invoke-RestMethod|Invoke-WebRequest)[^|]*\|[[:space:]]*(iex|Invoke-Expression)'
-  refute_regex "$installer" 'install\.microsandbox\.dev'
+  refute_regex "$code" '(irm|Invoke-RestMethod|Invoke-WebRequest)[^|]*\|[[:space:]]*(iex|Invoke-Expression)'
+  refute_regex "$code" 'install\.microsandbox\.dev'
 }
 
 @test "windows installer: installs a checksum-verified zip under LOCALAPPDATA" {

@@ -38,6 +38,7 @@ DEFAULT_VERSION="0.1.0" # x-release-please-version
 
 RELEASE_BASE_URL="https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download"
 SHA256SUMS_NAME="SHA256SUMS"
+PROVENANCE_NAME="provenance.json"
 
 VERSION="${ACQ_INSTALL_VERSION:-$DEFAULT_VERSION}"
 SOURCE="${ACQ_INSTALL_SOURCE:-}"
@@ -90,8 +91,9 @@ Options:
   --install-dir <dir>   Where to install (default: $XDG_DATA_HOME/acq or
                         ~/.local/share/acq).
   --bin-dir <dir>       Where to link the `acq` launcher (default: ~/.local/bin).
-  --source <url|dir>    Release source. A URL fetches SHA256SUMS + the archive; a
-                        local directory (the offline asset set) is read in place.
+  --source <url|dir>    Release source. A URL fetches SHA256SUMS, the provenance
+                        manifest, and the archive; a local directory (the offline
+                        asset set) is read in place.
   --ref <ver>           Release version to install (default: the version baked
                         into this installer).
   --dry-run             Print what would happen; make no changes, no network.
@@ -263,13 +265,15 @@ if [ "$DRY_RUN" -eq 1 ]; then
   step "Would install acq $VERSION"
   if [ "$SOURCE_IS_URL" -eq 1 ]; then
     printf '  [dry-run] curl -fsSL %s/%s -o <tmp>/%s\n' "$SOURCE" "$SHA256SUMS_NAME" "$SHA256SUMS_NAME"
+    printf '  [dry-run] curl -fsSL %s/%s -o <tmp>/%s\n' "$SOURCE" "$PROVENANCE_NAME" "$PROVENANCE_NAME"
     printf '  [dry-run] curl -fsSL %s/%s -o <tmp>/%s\n' "$SOURCE" "$ARCHIVE" "$ARCHIVE"
   else
-    printf '  [dry-run] read %s/%s and %s/%s from the offline asset set\n' "$SOURCE" "$SHA256SUMS_NAME" "$SOURCE" "$ARCHIVE"
+    printf '  [dry-run] read %s/%s, %s/%s, and %s/%s from the offline asset set\n' \
+      "$SOURCE" "$SHA256SUMS_NAME" "$SOURCE" "$PROVENANCE_NAME" "$SOURCE" "$ARCHIVE"
   fi
   printf '  [dry-run] verify sha256 of %s against %s\n' "$ARCHIVE" "$SHA256SUMS_NAME"
   printf '  [dry-run] extract %s into %s\n' "$ARCHIVE" "$INSTALL_DIR"
-  printf '  [dry-run] verify the bundled runtime and launcher are present\n'
+  printf '  [dry-run] verify the enumerated set (launcher, runtime, source, wheelhouse) is present\n'
   printf '  [dry-run] link %s/acq -> %s/acq\n' "$BIN_DIR" "$INSTALL_DIR"
   if path_has_bindir; then
     ok "  $BIN_DIR is already on your PATH."
@@ -294,12 +298,16 @@ trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
 if [ "$SOURCE_IS_URL" -eq 1 ]; then
   curl -fsSL "$SOURCE/$SHA256SUMS_NAME" -o "$tmpdir/$SHA256SUMS_NAME" \
     || die "could not download $SOURCE/$SHA256SUMS_NAME"
+  curl -fsSL "$SOURCE/$PROVENANCE_NAME" -o "$tmpdir/$PROVENANCE_NAME" \
+    || die "could not download $SOURCE/$PROVENANCE_NAME"
   curl -fsSL "$SOURCE/$ARCHIVE" -o "$tmpdir/$ARCHIVE" \
     || die "could not download $SOURCE/$ARCHIVE"
 else
   [ -f "$SOURCE/$SHA256SUMS_NAME" ] || die "offline asset set at $SOURCE has no $SHA256SUMS_NAME"
+  [ -f "$SOURCE/$PROVENANCE_NAME" ] || die "offline asset set at $SOURCE has no $PROVENANCE_NAME"
   [ -f "$SOURCE/$ARCHIVE" ] || die "offline asset set at $SOURCE has no $ARCHIVE"
   cp "$SOURCE/$SHA256SUMS_NAME" "$tmpdir/$SHA256SUMS_NAME"
+  cp "$SOURCE/$PROVENANCE_NAME" "$tmpdir/$PROVENANCE_NAME"
   cp "$SOURCE/$ARCHIVE" "$tmpdir/$ARCHIVE"
 fi
 
@@ -321,6 +329,10 @@ if [ "$expected" != "$actual" ]; then
   die "checksum mismatch for $ARCHIVE (expected $expected, got $actual)"
 fi
 ok "  verified $ARCHIVE (sha256 $actual)"
+
+# The provenance manifest travels alongside SHA256SUMS and is part of the
+# enumerated offline asset set; its absence is a fail-closed gate.
+[ -f "$tmpdir/$PROVENANCE_NAME" ] || die "release is missing the provenance manifest ($PROVENANCE_NAME)"
 
 # ---------------------------------------------------------------------------
 # Extract into a staging directory, then publish atomically (update-by-reinstall).
@@ -348,10 +360,15 @@ if [ ! -e "$staging/acq" ] && [ ! -e "$staging/py-acq" ]; then
   fi
 fi
 
-# Verify the enumerated, security-relevant components are present before writing.
-# (Full asset-set completeness is proven by the Tier-3 offline-install transcript.)
+# Verify every enumerated component of the offline asset set is present before
+# writing (ADR-0042m). A release that passes SHA256SUMS but is missing the source
+# tree, the bundled runtime, the wheelhouse, or the launcher would otherwise
+# "install" and fail later — so each is a fail-closed gate. (The provenance
+# manifest was fetched alongside SHA256SUMS above.)
 [ -e "$staging/acq" ] || die "release archive is missing the 'acq' launcher"
 [ -e "$staging/py-acq/runtime/bin/python3" ] || die "release archive is missing the bundled runtime (py-acq/runtime/bin/python3)"
+[ -e "$staging/py-acq/src/acq_py/__init__.py" ] || die "release archive is missing the acq source tree (py-acq/src/acq_py/)"
+[ -d "$staging/wheelhouse" ] || die "release archive is missing the dependency wheelhouse (wheelhouse/)"
 
 # Publish: replace an existing install in place (the update path).
 mkdir -p "$(dirname "$INSTALL_DIR")"

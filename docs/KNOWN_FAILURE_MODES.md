@@ -14,6 +14,35 @@ This document captures real-world failure patterns when using Docker SBX + USAi 
 
 ---
 
+## Deferred: live offline-install completeness transcript (Tier-3)
+
+**Status:** deferred (tracked per AGENTS.md "Track Deferred Work").
+
+The acq v1 installer (ADR-0042m) enforces the enumerated offline asset set at
+install time: it checksum-verifies the release archive against `SHA256SUMS` and
+fails closed before publishing if the archive is missing the launcher, the
+bundled runtime, the source tree, or the wheelhouse, or if the provenance
+manifest is absent. It does **not** yet prove the set is *complete enough to run
+acq end-to-end from a blocked network*: that is a Tier-3 live transcript, not a
+unit assertion, and it has not been fabricated.
+
+**What the deferred transcript must assert:**
+
+1. On a network-blocked host, `install.sh --source <offline-set>` (and
+   `install.ps1 -Source <offline-set>` on Windows x64) installs from the
+   enumerated asset set alone — no network is reached for acq's own assets.
+2. After install, `acq version` reports the baked `acq_version` and
+   `source_revision` on a non-git install.
+3. A sandbox starts and runs a smoke command (e.g. `acq run opencode <dir>`).
+
+**Unblock trigger:** release automation assembles and publishes the per-platform
+archives carrying the bundled managed runtime (Python.org embedded on Windows;
+python-build-standalone install-only archives on macOS/Linux) and the exact-hash
+wheelhouse. Until then the fail-closed presence checks are proven offline against
+a checked-in fixture, and the live transcript stays open.
+
+---
+
 ## Provider-input validator dependencies are missing
 
 ### Symptoms
