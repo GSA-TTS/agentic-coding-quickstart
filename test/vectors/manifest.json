@@ -1,8 +1,10 @@
 {
   "schema": 1,
   "description": "Maps each contract row to at least one vector id. CI-validated against the actual corpus: a missing or renamed vector fails the check rather than being assumed absent.",
+  "inventory": "docs/test-retirement-inventory.md",
   "notes": [
-    "attach child/backend exit-status preservation is Tier-2 only: the vector harness cannot yet seed host-authoritative state records (a readable record is required before attach will launch an agent). attach's status propagation shares the launch -> exec_command -> _run_stream path that cli/shell-exit-code covers at Tier-1, so it is covered transitively; attach-specific fail-closed behavior (missing sandbox, missing/unreadable record) is Tier-1 covered directly by cli/attach-missing and cli/attach-json. Do not re-add an attach-exit-code vector until the harness can seed state."
+    "attach child/backend exit-status preservation is Tier-2 only: the vector harness cannot yet seed host-authoritative state records (a readable record is required before attach will launch an agent). attach's status propagation shares the launch -> exec_command -> _run_stream path that cli/shell-exit-code covers at Tier-1, so it is covered transitively; attach-specific fail-closed behavior (missing sandbox, missing/unreadable record) is Tier-1 covered directly by cli/attach-missing and cli/attach-json. Do not re-add an attach-exit-code vector until the harness can seed state.",
+    "Legacy-suite retirement classification: docs/test-retirement-inventory.md buckets every test/bats file as preserve/re-express/retire and records gaps G1-G19. This manifest maps only the preserve-tier contract rows to vectors; the inventory is the authoritative cross-reference from legacy tests to vectors and DROP rows."
   ],
   "rows": [
     {

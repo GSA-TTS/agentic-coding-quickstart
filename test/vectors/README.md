@@ -20,7 +20,11 @@ runner and `scripts/run-vectors`) carry the *how*.
   `{python} -m qualification` (repo-root tooling, not the `acq` CLI).
 * `manifest.json` — the coverage manifest: maps every contract row to at least
   one vector id, and is validated against the corpus in CI (a missing or renamed
-  vector fails the check rather than being assumed absent).
+  vector fails the check rather than being assumed absent). Its `inventory`
+  field points at the legacy-suite retirement classification
+  (`docs/test-retirement-inventory.md`), which buckets every legacy
+  `test/bats/*.bats` test as preserve/re-express/retire and records the gaps
+  (valuable behaviors with no existing vector) as named follow-ups.
 
 ## Schema
 
