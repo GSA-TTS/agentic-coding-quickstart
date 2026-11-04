@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#
+# bats-shard — print the .bats files that belong to shard I of N.
+#
+# Used by scripts/test-acq-bats (ACQ_BATS_SHARD=I/N) so a CI matrix can split
+# the offline suite across runners. Selection is derived from the files on disk
+# every time — there is no checked-in table that can go stale: a new .bats file
+# lands in a shard automatically.
+#
+# Algorithm (deterministic, balanced): weight each file by its number of @test
+# blocks (minimum 1; a good, free proxy for wall time), sort by weight
+# descending then path ascending (C locale), and greedily assign each file to
+# the currently lightest shard (lowest index wins ties). Every file is assigned
+# to exactly one shard. Adding or removing a file may move other files between
+# shards, which is harmless: every run re-derives the full partition.
+#
+# Fails closed (exit 2) on a malformed spec, I > N, a missing directory, no
+# .bats files, or an empty shard — an empty shard would otherwise pass vacuously.
+#
+# Usage:
+#   scripts/bats-shard I/N [DIR]     # DIR defaults to test/bats; one path per line
+#
+# Portable to bash 3.2 / macOS (no mapfile, no associative arrays, POSIX awk).
+set -uo pipefail
+
+_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_spec="${1:-}"
+_bats_dir="${2:-${_dir}/../test/bats}"
+
+case "$_spec" in
+  [1-9]*/[1-9]*) ;;
+  *) echo "bats-shard: spec must be I/N with positive integers (got '${_spec}')" >&2; exit 2 ;;
+esac
+_i="${_spec%%/*}"
+_n="${_spec#*/}"
+case "${_i}${_n}" in
+  *[!0-9]*) echo "bats-shard: spec must be I/N with positive integers (got '${_spec}')" >&2; exit 2 ;;
+esac
+if [ "${#_i}" -gt 4 ] || [ "${#_n}" -gt 4 ] || [ "$_i" -gt "$_n" ]; then
+  echo "bats-shard: need 1 <= I <= N <= 9999 (got '${_spec}')" >&2
+  exit 2
+fi
+
+if [ ! -d "$_bats_dir" ]; then
+  echo "bats-shard: not a directory: ${_bats_dir}" >&2
+  exit 2
+fi
+_bats_dir="$(cd "$_bats_dir" && pwd)"
+
+export LC_ALL=C
+_files=()
+for _f in "${_bats_dir}"/*.bats; do
+  [ -f "$_f" ] && _files+=("$_f")
+done
+if [ "${#_files[@]}" -eq 0 ]; then
+  echo "bats-shard: no .bats files in ${_bats_dir}" >&2
+  exit 2
+fi
+
+_picked="$(awk -v shard="$_i" -v total="$_n" '
+  /^[ \t]*@test[ \t]/ { c[FILENAME]++ }
+  END {
+    nf = ARGC - 1
+    for (k = 1; k <= nf; k++) {
+      name[k] = ARGV[k] ""
+      w[k] = (c[ARGV[k]] > 0) ? c[ARGV[k]] : 1
+      ord[k] = k
+    }
+    for (a = 2; a <= nf; a++) {
+      cur = ord[a]
+      b = a - 1
+      while (b >= 1 && (w[ord[b]] < w[cur] || (w[ord[b]] == w[cur] && name[ord[b]] > name[cur]))) {
+        ord[b + 1] = ord[b]
+        b--
+      }
+      ord[b + 1] = cur
+    }
+    for (s = 1; s <= total; s++) load[s] = 0
+    for (a = 1; a <= nf; a++) {
+      k = ord[a]
+      best = 1
+      for (s = 2; s <= total; s++) if (load[s] < load[best]) best = s
+      load[best] += w[k]
+      if (best == shard) print name[k]
+    }
+  }
+' "${_files[@]}")" || { echo "bats-shard: failed to read test files" >&2; exit 2; }
+
+if [ -z "$_picked" ]; then
+  echo "bats-shard: shard ${_i}/${_n} is empty (only ${#_files[@]} .bats files); refusing to pass vacuously" >&2
+  exit 2
+fi
+printf '%s\n' "$_picked" | sort
