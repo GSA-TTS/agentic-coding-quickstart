@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "id": "cli/run-kit-explicit-override",
+  "oracle": "ADR-0030 agent-kit inference: an explicit --kit wins over inference (shell, which selects no agent kit, applies the opencode kit when --kit opencode is given)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "run", "shell", ".", "--name", "sh-box", "--kit", "opencode", "--json"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_FAIL", "ACQ_KIT_APPLIED_SEED"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "run",
+        "data": {
+          "name": "sh-box",
+          "backend": "msb",
+          "agent": "shell",
+          "action": "created",
+          "image": "docker.io/docker/sandbox-templates:shell-docker",
+          "kit": "opencode",
+          "entrypoint": "opencode"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "contains", "value": "[stub exec]", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

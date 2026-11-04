@@ -86,8 +86,8 @@ DEFAULT_GUEST_WORKSPACE = "/home/agent"
 # Agent-dependent default base image (ADR-0030). ``opencode`` resolves to the
 # pinned generic devenv base; ``shell`` and the other known agents keep the
 # sandbox-templates derivation, with the ``claude``/``cursor`` product-name stem
-# mapping (ADR-0011). Full kit-driven agent install (devenv base + pinned agent
-# kit) is deferred to the kits slice.
+# mapping (ADR-0011). The devenv base is agent-less: the agent binary is installed
+# by the pinned opencode kit at create time (see ``_apply_agent_kit``).
 OPENCODE_DEVENV_IMAGE = (
     "ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@"
     "sha256:7b923fb5e722ad27c751ead836f24145c4cea3fac015a3ba753bd7473891e1e7"
@@ -171,6 +171,7 @@ def build_parser() -> _Parser:
     create_parser.add_argument("path", nargs="?", help="workspace directory to mount")
     create_parser.add_argument("--name", help="explicit sandbox name (default: derived from agent+path)")
     create_parser.add_argument("--image", help="base image override (default: shell-docker)")
+    create_parser.add_argument("--kit", help="built-in agent kit to apply (overrides inference; e.g. opencode)")
     create_parser.add_argument(
         "--recreate",
         metavar="NAME",
@@ -184,6 +185,7 @@ def build_parser() -> _Parser:
     run_parser.add_argument("path", nargs="?", help="workspace directory to mount (AGENT form)")
     run_parser.add_argument("--name", help="explicit sandbox name (AGENT form)")
     run_parser.add_argument("--image", help="base image override (AGENT form)")
+    run_parser.add_argument("--kit", help="built-in agent kit to apply (overrides inference; e.g. opencode)")
 
     sub.add_parser("ls", help="list sandboxes")
 
@@ -239,9 +241,9 @@ def build_parser() -> _Parser:
     kit_sub.add_parser("list", help="show the pinned kit bundle and effective sets")
     kit_validate_p = kit_sub.add_parser("validate", help="validate a neutral hybrid/v1 kit")
     kit_validate_p.add_argument("path", help="kit directory or spec.yaml")
-    kit_apply_p = kit_sub.add_parser("apply", help="apply a kit to an existing sandbox")
+    kit_apply_p = kit_sub.add_parser("apply", help="apply a built-in agent kit to an existing sandbox")
     kit_apply_p.add_argument("name", help="sandbox name")
-    kit_apply_p.add_argument("kitref", help="kit ref (local dir or git+https)")
+    kit_apply_p.add_argument("kitref", help="built-in agent kit name (e.g. opencode)")
     kit_check_p = kit_sub.add_parser("check", help="report if a sandbox is on the pinned bundle")
     kit_check_p.add_argument("name", help="sandbox name")
     kit_update_p = kit_sub.add_parser("update", help="refresh the built-in bundle in place (consented)")
@@ -572,6 +574,67 @@ def _resolve_image(flag_image: str | None, agent: str) -> str:
     return _default_image_for_agent(agent)
 
 
+def _validate_kit_flag(kit_flag: str | None, command: str, emit_json: bool) -> tuple[str | None, int | None]:
+    """Validate an explicit ``--kit``; returns ``(kit_name, exit_code)``.
+
+    An explicit ``--kit`` must name a built-in agent kit (ADR-0030 "Agent kit
+    inference"): an unknown name is a usage error (exit 2), and team/personal kit
+    sources are never resolved here.
+    """
+    if kit_flag is None:
+        return None, None
+    if not kits.is_agent_kit(kit_flag):
+        return None, _usage_failure(
+            command,
+            f"unknown kit: {kit_flag!r} (built-in agent kits: {', '.join(kits.AGENT_KIT_NAMES)})",
+            emit_json,
+        )
+    return kit_flag, None
+
+
+def _apply_agent_kit(
+    backend: str, name: str, kit_name: str, workspace: str, command: str, emit_json: bool
+) -> int | None:
+    """Apply a built-in agent kit to a sandbox (create-time install, ADR-0030).
+
+    Idempotent and host-authoritative: a sandbox already on ``kit_name`` is a
+    no-op (no duplicate install), tracked by the applied-kit record (ADR-0041m).
+    The install runs in-guest via the backend ``kit-apply`` capability; acq never
+    executes kit code on the host, and the install argv carries no credential
+    (ADR-0038m §46, §7). Returns an emitted exit code on failure, else ``None``.
+    """
+    if not _supports(backend, "kit-apply"):
+        return _operational_failure(
+            command,
+            errors.UNSUPPORTED,
+            f"kit apply is not supported on the {backend} backend",
+            "the agent kit requires kit-apply; use a backend that supports it (msb in this slice)",
+            emit_json,
+        )
+    existing = kits.kit_applied_read(backend, name)
+    if existing and existing.get("kit") == kit_name:
+        return None  # already applied: idempotent no-op
+    try:
+        _adapter(backend).kit_apply(name, kit_name, kits.agent_kit_install(kit_name), workspace)
+    except _ADAPTER_ERRORS as exc:
+        return _operational_failure(command, exc.code, exc.message, exc.remediation, emit_json)
+    kits.kit_applied_write(backend, name, kit_name, kits.agent_kit_entrypoint(kit_name))
+    return None
+
+
+def _discard_half_created(backend: str, name: str) -> None:
+    """Remove a just-created sandbox (and its record) after a failed kit apply.
+
+    Mirrors the exec-ready timeout cleanup in ``_create_sandbox``: a sandbox
+    created but left without its agent binary must not strand.
+    """
+    try:
+        _adapter(backend).remove(name)
+    except _ADAPTER_ERRORS:
+        pass
+    state.record_remove(backend, name)
+
+
 def _resolve_backend_for_mutation(
     explicit: str | None, emit_json: bool, command: str, *, domain: str = "lifecycle"
 ) -> tuple[str | None, int | None]:
@@ -665,14 +728,24 @@ def _create_sandbox(
             f"check {backend} logs, then remove the half-created sandbox and retry",
         )
     state.record_write(backend, name, agent=agent, workspace=workspace, image=image, ro_host_config=ro_host_config)
-    return {"name": name, "backend": backend, "agent": agent, "workspace": workspace, "state": "running"}
+    return {
+        "name": name,
+        "backend": backend,
+        "agent": agent,
+        "workspace": workspace,
+        "state": "running",
+        "image": image,
+    }
 
 
 def _print_create_human(data: dict) -> None:
-    print(
+    line = (
         f"sandbox '{data['name']}' created (backend {data['backend']}, "
         f"agent {data['agent']}, workspace {data['workspace']})"
     )
+    if data.get("kit"):
+        line += f"; applied kit '{data['kit']}' (entrypoint {data['entrypoint']})"
+    print(line)
 
 
 def run_create(parsed, emit_json: bool, backend: str) -> int:
@@ -687,6 +760,11 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
     workspace, exit_code = _validate_workspace("create", parsed.path, emit_json)
     if exit_code is not None:
         return exit_code
+    kit_name, exit_code = _validate_kit_flag(parsed.kit, "create", emit_json)
+    if exit_code is not None:
+        return exit_code
+    if kit_name is None:
+        kit_name = kits.agent_kit_for(parsed.agent)  # implicit inference (built-in only)
     name = parsed.name or _derive_name(parsed.agent, workspace)
     adapter = _adapter(backend)
     if adapter.exists(name):
@@ -697,11 +775,30 @@ def run_create(parsed, emit_json: bool, backend: str) -> int:
             f"re-attach with 'acq run {name}', or remove it with 'acq rm {name}'",
             emit_json,
         )
+    # Fail closed BEFORE create when the agent needs a kit the backend can't apply
+    # (never strand a half-provisioned sandbox missing its agent binary).
+    if kit_name is not None and not _supports(backend, "kit-apply"):
+        return _operational_failure(
+            "create",
+            errors.UNSUPPORTED,
+            f"agent '{parsed.agent}' requires the '{kit_name}' kit, which the {backend} backend cannot apply",
+            "use a backend that supports kit-apply (msb in this slice), or choose an agent without a kit",
+            emit_json,
+        )
     image = _resolve_image(parsed.image, parsed.agent)
     try:
         data = _create_sandbox(backend, parsed.agent, workspace, name, image)
     except _ADAPTER_ERRORS as exc:
         return _operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
+    entrypoint = None
+    if kit_name is not None:
+        gate = _apply_agent_kit(backend, name, kit_name, workspace, "create", emit_json)
+        if gate is not None:
+            _discard_half_created(backend, name)
+            return gate
+        entrypoint = kits.agent_kit_entrypoint(kit_name)
+    data["kit"] = kit_name
+    data["entrypoint"] = entrypoint
     if emit_json:
         print(json.dumps(envelope.success("create", data)))
     else:
@@ -785,6 +882,20 @@ def run_recreate(parsed, emit_json: bool, backend: str) -> int:
         data = _create_sandbox(backend, agent, workspace, name, image, ro_host_config=ro_host_config)
     except _ADAPTER_ERRORS as exc:
         return _operational_failure("create", exc.code, exc.message, exc.remediation, emit_json)
+    # The guest filesystem was destroyed, so a prior applied-kit record no longer
+    # describes the fresh guest: clear it and re-apply the agent kit (if any) so
+    # the recreated sandbox has its agent binary (ADR-0030 create-time install).
+    kit_name = kits.agent_kit_for(agent)
+    entrypoint = None
+    if kit_name is not None:
+        kits.kit_applied_remove(backend, name)
+        gate = _apply_agent_kit(backend, name, kit_name, workspace, "create", emit_json)
+        if gate is not None:
+            _discard_half_created(backend, name)
+            return gate
+        entrypoint = kits.agent_kit_entrypoint(kit_name)
+    data["kit"] = kit_name
+    data["entrypoint"] = entrypoint
     data = {**data, "recreated": True}
     if emit_json:
         print(json.dumps(envelope.success("create", data)))
@@ -807,23 +918,56 @@ def run_run(parsed, emit_json: bool, backend: str) -> int:
         workspace, exit_code = _validate_workspace("run", parsed.path, emit_json)
         if exit_code is not None:
             return exit_code
+        kit_name, exit_code = _validate_kit_flag(parsed.kit, "run", emit_json)
+        if exit_code is not None:
+            return exit_code
         name = parsed.name or _derive_name(target, workspace)
         action = "reattached" if adapter.exists(name) else "created"
+        image: str | None = None
+        entrypoint: str | None = None
         if not adapter.exists(name):
+            if kit_name is None:
+                kit_name = kits.agent_kit_for(target)  # implicit inference (built-in only)
+            if kit_name is not None and not _supports(backend, "kit-apply"):
+                return _operational_failure(
+                    "run",
+                    errors.UNSUPPORTED,
+                    f"agent '{target}' requires the '{kit_name}' kit, which the {backend} backend cannot apply",
+                    "use a backend that supports kit-apply (msb in this slice), or choose an agent without a kit",
+                    emit_json,
+                )
             image = _resolve_image(parsed.image, target)
             try:
                 _create_sandbox(backend, target, workspace, name, image)
             except _ADAPTER_ERRORS as exc:
                 return _operational_failure("run", exc.code, exc.message, exc.remediation, emit_json)
+            if kit_name is not None:
+                gate = _apply_agent_kit(backend, name, kit_name, workspace, "run", emit_json)
+                if gate is not None:
+                    _discard_half_created(backend, name)
+                    return gate
+                entrypoint = kits.agent_kit_entrypoint(kit_name)
+        else:
+            # Re-attach: the kit (if any) was applied at create time; read the
+            # recorded kit/entrypoint (lenient) so the launch surfaces provenance.
+            applied = kits.kit_applied_read(backend, name)
+            if applied:
+                kit_name = applied.get("kit")
+                entrypoint = applied.get("entrypoint")
+        data = {
+            "name": name,
+            "backend": backend,
+            "agent": target,
+            "workspace": workspace,
+            "state": "running",
+            "action": action,
+        }
+        if action == "created":
+            data["image"] = image
+        data["kit"] = kit_name
+        data["entrypoint"] = entrypoint
         if emit_json:
-            print(
-                json.dumps(
-                    envelope.success(
-                        "run",
-                        {"name": name, "backend": backend, "agent": target, "workspace": workspace, "state": "running", "action": action},
-                    )
-                )
-            )
+            print(json.dumps(envelope.success("run", data)))
         # Launch in the foreground; the child's status is `run`'s exit status. In
         # --json mode the child's stdout is routed to stderr so stdout stays one
         # JSON document.
@@ -1719,9 +1863,10 @@ def run_usai_rotate_api_key(emit_json: bool, backend: str) -> int:
 
 # ---------------------------------------------------------------------------
 # kit list / validate / apply / check / update, and kit-source add / ls / rm
-# (ADR-0038m §kit; ADR-0016 provenance; trusted-source policy). This is the
-# kit-source registry + kit-inspection layer only: kit-apply (the ADR-0030
-# devenv-base + agent-install machinery) is out of scope here (a separate slice).
+# (ADR-0038m §kit; ADR-0016 provenance; trusted-source policy; ADR-0030
+# agent-kit install). ``kit apply`` is the ADR-0030 devenv-base + agent-install
+# path: it applies a built-in agent kit in-guest via the backend ``kit-apply``
+# capability, idempotently.
 # ---------------------------------------------------------------------------
 
 def _print_kit_list_human(data: dict) -> None:
@@ -1782,25 +1927,93 @@ def run_kit_validate(parsed, emit_json: bool) -> int:
 
 
 def run_kit_apply(parsed, emit_json: bool, backend_override: str | None) -> int:
-    """``acq kit apply NAME KITREF`` — fail closed; the kit-apply capability is
-    deferred to the later kit-apply slice (ADR-0040m ``kit-apply`` obligation is unmet here)."""
+    """``acq kit apply NAME KITREF`` — apply a built-in agent kit to a sandbox.
+
+    The ``kit-apply`` capability maps through the adapter seam (ADR-0040m): a
+    backend that declares it ``unsupported`` fails closed with
+    ``unsupported_capability`` (sbx in this slice). Only built-in agent kits are
+    applicable by name here; team/personal kit application is deferred. The
+    install runs in-guest and is idempotent: a re-apply of the same kit is a no-op
+    (no duplicate install), tracked by the host-authoritative applied-kit record
+    (ADR-0041m).
+    """
     backend, exit_code = _resolve_backend_for_mutation(
         backend_override, emit_json, "kit apply", domain="kit"
     )
     if exit_code is not None:
         return exit_code
-    # TODO(capability-record): the ``unsupported_capability`` here is hardcoded for
-    # every backend because kit-apply is an unmet (deferred) slice, not a
-    # backend-specific divergence. When the kit-apply slice lands (ADR-0030), this
-    # must derive support from ``_supports(backend, "kit-apply")`` instead of
-    # failing closed unconditionally, so a backend that gains kit-apply can report it.
-    return _operational_failure(
-        "kit apply",
-        errors.UNSUPPORTED,
-        f"kit apply is not implemented for sandbox {parsed.name!r}",
-        "kit-apply and the devenv-base agent-install machinery ship in a later slice",
-        emit_json,
-    )
+    if not _supports(backend, "kit-apply"):
+        return _operational_failure(
+            "kit apply",
+            errors.UNSUPPORTED,
+            f"kit apply is not supported on the {backend} backend",
+            "kit-apply is msb-only in this slice (ADR-0040m); use msb to apply an agent kit",
+            emit_json,
+        )
+    name = parsed.name
+    kitref = parsed.kitref
+    if not _adapter(backend).exists(name):
+        return _operational_failure(
+            "kit apply",
+            errors.SANDBOX_NOT_FOUND,
+            f"sandbox '{name}' not found",
+            f"list sandboxes with 'acq ls', or create one with 'acq create'",
+            emit_json,
+        )
+    if not kits.is_agent_kit(kitref):
+        return _operational_failure(
+            "kit apply",
+            errors.VALIDATION_FAILED,
+            f"kit ref {kitref!r} is not a built-in agent kit (expected one of: {', '.join(kits.AGENT_KIT_NAMES)})",
+            "this slice applies built-in agent kits by name; team/personal kit application is deferred",
+            emit_json,
+        )
+    try:
+        record = state.record_read(backend, name)
+    except state.StateSchemaError as exc:
+        return _operational_failure(
+            "kit apply",
+            errors.STATE_SCHEMA_UNSUPPORTED,
+            str(exc),
+            f"recreate the sandbox with 'acq create', or remove it with 'acq rm {name}'",
+            emit_json,
+        )
+    workspace = (record or {}).get("workspace") or DEFAULT_GUEST_WORKSPACE
+    kit_name = kitref
+    entrypoint = kits.agent_kit_entrypoint(kit_name)
+    existing = kits.kit_applied_read(backend, name)
+    if existing and existing.get("kit") == kit_name:
+        data = {
+            "sandbox": name,
+            "backend": backend,
+            "kit": kit_name,
+            "entrypoint": entrypoint,
+            "applied": False,
+            "action": "noop",
+        }
+        if emit_json:
+            print(json.dumps(envelope.success("kit apply", data)))
+        else:
+            print(f"kit '{kit_name}' already applied to sandbox '{name}'.")
+        return errors.EXIT_SUCCESS
+    try:
+        _adapter(backend).kit_apply(name, kit_name, kits.agent_kit_install(kit_name), workspace)
+    except _ADAPTER_ERRORS as exc:
+        return _operational_failure("kit apply", exc.code, exc.message, exc.remediation, emit_json)
+    kits.kit_applied_write(backend, name, kit_name, entrypoint)
+    data = {
+        "sandbox": name,
+        "backend": backend,
+        "kit": kit_name,
+        "entrypoint": entrypoint,
+        "applied": True,
+        "action": "applied",
+    }
+    if emit_json:
+        print(json.dumps(envelope.success("kit apply", data)))
+    else:
+        print(f"applied kit '{kit_name}' to sandbox '{name}' (entrypoint {entrypoint}).")
+    return errors.EXIT_SUCCESS
 
 
 def _print_kit_check_human(data: dict) -> None:

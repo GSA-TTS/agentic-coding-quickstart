@@ -318,8 +318,24 @@
       "vectors": ["cli/kit-update-consent", "cli/kit-update-yes"]
     },
     {
-      "contract": "ADR-0040m unsupported-capability fail-closed for kit apply (deferred kit-apply slice)",
+      "contract": "ADR-0040m unsupported-capability fail-closed for kit apply: the kit-apply capability maps through the adapter seam and a backend that declares it unsupported (sbx) fails closed",
       "vectors": ["cli/kit-apply-unsupported"]
+    },
+    {
+      "contract": "ADR-0030 agent install contract: kit apply installs the built-in opencode kit (pinned by content) and declares its entrypoint, idempotently (applied / re-apply no-op)",
+      "vectors": ["cli/kit-apply-opencode", "cli/kit-apply-noop"]
+    },
+    {
+      "contract": "ADR-0030 inference scope + ADR-0040m error vocabulary: kit apply refuses a non-built-in kit ref (validation_failed) and a missing sandbox (sandbox_not_found)",
+      "vectors": ["cli/kit-apply-unknown-kit", "cli/kit-apply-missing"]
+    },
+    {
+      "contract": "ADR-0030 default path: acq run opencode . provisions the pinned generic devenv base and applies the pinned opencode kit while shell keeps the sandbox-templates default (no kit)",
+      "vectors": ["cli/run-opencode-kit", "cli/run-shell-no-kit"]
+    },
+    {
+      "contract": "ADR-0030 agent-kit inference: an explicit --kit wins over inference, and a team/personal kit named after a non-built-in agent is never inferred (built-in bundle only)",
+      "vectors": ["cli/run-kit-explicit-override", "cli/run-inference-ignores-team-kits"]
     },
     {
       "contract": "ADR-0038m §2 kit validate required data: validity + coded findings (valid / findings / missing-path and missing-spec fail-closed)",

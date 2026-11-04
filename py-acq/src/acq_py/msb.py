@@ -150,6 +150,31 @@ def exec_ready(name: str) -> bool:
     return proc.returncode == 0
 
 
+def kit_apply(name: str, kit: str, install_cmd: list[str], workspace: str) -> None:
+    """Apply a kit in-guest (ADR-0040m ``kit-apply``): run the kit's pinned
+    install command inside the sandbox as the unprivileged ``agent`` user.
+
+    acq never executes kit code on the host (ADR-0038m §46): the install command
+    is data sourced from the pinned control plane and is forwarded verbatim to the
+    backend, which runs it in-guest. The argv is the ``nix profile install
+    …#<agent>`` install — it carries no credential — so nothing sensitive crosses
+    the boundary. ``workspace`` is the recorded guest workspace (authority stays
+    host-side in the seam). Raises :class:`MsbError` on backend failure.
+
+    Idempotency is a host-authoritative concern (the seam short-circuits a re-apply
+    of an already-applied kit via :func:`acq_py.kits.kit_applied_read`); the
+    backend re-runs a genuinely idempotent install when asked, and the host record
+    is the durable "already applied" signal.
+    """
+    proc = _run(["kit-apply", name, kit, "--", *install_cmd])
+    if proc.returncode != 0:
+        raise MsbError(
+            errors.FAILURE,
+            f"could not apply kit '{kit}' to sandbox '{name}'",
+            "check msb logs and retry",
+        )
+
+
 def stop(name: str) -> None:
     proc = _run(["stop", name])
     if proc.returncode != 0:

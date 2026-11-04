@@ -13,12 +13,15 @@ This is the kit-source registry + kit-inspection layer only. It owns:
 * the offline **provider-kit discovery seam** so ``kit-source ls`` can report a
   deterministic ``discovery_status`` without network (ADR-0038m §48 explicit
   best-effort discovery status);
-* minimal structural **kit validation** (ADR-0038m §kit validate).
+* minimal structural **kit validation** (ADR-0038m §kit validate);
+* the **built-in agent-kit registry** (ADR-0030) — the pinned-by-content install
+  argv and declared entrypoint for each built-in agent kit, plus the
+  host-authoritative per-sandbox applied-kit record that makes ``kit apply``
+  idempotent and re-runnable.
 
-The ADR-0030 devenv-base + kit-driven agent-install machinery (``kit apply``) is
-**out of scope** here and tracked separately as a follow-on slice: this module records and
-inspects kit provenance and the trusted-source registry, but never applies a kit
-to a sandbox or installs an agent.
+This module still never executes kit code (on the host or in the guest): the
+install argv is data forwarded through the backend seam, which runs it in-guest
+via the ``kit-apply`` capability (ADR-0040m).
 
 Trusted-source policy (ADR-0030 §"Agent kit inference", ADR-0038m §46 "durable
 trust is repository-granular"): only the built-in bundle participates in implicit
@@ -69,6 +72,75 @@ BUILTIN_KIT_NAMES = (
 PROVIDER_KIT_NAMES = ("usai-provider",)
 # The non-provider built-in neutral kits (CA trust, playbook, git signing).
 BUILTIN_NEUTRAL_NAMES = tuple(n for n in BUILTIN_KIT_NAMES if n not in PROVIDER_KIT_NAMES)
+
+
+# ---------------------------------------------------------------------------
+# Built-in agent kits (ADR-0030). An agent kit installs or exposes an agent
+# harness, declares its entrypoint, and renders that harness's configuration
+# from provider facts. The install step is pinned by content: a
+# ``nix profile install github:NixOS/nixpkgs/<rev>#<agent>`` at the substrate's
+# declared rev (content-hashed, cached, and identical across arches) — never a
+# mutable ``npm install -g …@latest`` fallback (ADR-0030 "Agent install
+# contract"). Only ``opencode`` is a built-in agent kit today; the other known
+# agents keep the sandbox-templates derivation and select no agent kit (spec
+# implementation decision #4).
+# ---------------------------------------------------------------------------
+
+# The substrate's declared nixpkgs rev (ADR-0030 "substrate contract"): the
+# pinned generic devenv base resolves its Nix/devenv toolchain at this rev, and
+# an agent kit installs its binary at the SAME rev so the install is
+# content-hashed, cached, and identical across arches. This is data sourced from
+# the pinned control plane. The offline path treats it as opaque data (the
+# install argv is never executed here); the live install re-verifies it on the
+# quarterly review cadence.
+OPENCODE_NIXPKGS_REV = "c9f60e6a2b5d1f7e4a3c8d9b0e6f2a4c1d7b8e9a"
+
+# Built-in agent kits: kit name -> (pinned install argv, entrypoint).
+AGENT_KITS: dict[str, tuple[list[str], str]] = {
+    "opencode": (
+        [
+            "nix",
+            "profile",
+            "install",
+            f"github:NixOS/nixpkgs/{OPENCODE_NIXPKGS_REV}#opencode",
+        ],
+        "opencode",
+    ),
+}
+
+AGENT_KIT_NAMES = tuple(AGENT_KITS)
+
+
+def agent_kit_for(agent: str) -> str | None:
+    """Return the built-in agent-kit name for an agent, or ``None`` (no kit).
+
+    Implicit agent-kit selection matches the **built-in bundle only** (ADR-0030
+    "Agent kit inference"): a team/personal kit named after an agent is never
+    consulted, and ``shell`` selects no agent kit. This function is the single
+    inference point — it never reads :func:`extra_kits` or the trusted-source
+    registry.
+    """
+    return agent if agent in AGENT_KITS else None
+
+
+def is_agent_kit(name: str) -> bool:
+    """True when ``name`` is a built-in agent kit.
+
+    This is the only kit set ``kit apply`` and implicit agent-kit selection
+    resolve by name in this slice; team/personal kit application is deferred.
+    """
+    return name in AGENT_KITS
+
+
+def agent_kit_install(name: str) -> list[str]:
+    """The pinned-by-content install argv for a built-in agent kit (ADR-0030)."""
+    return list(AGENT_KITS[name][0])
+
+
+def agent_kit_entrypoint(name: str) -> str:
+    """The entrypoint a built-in agent kit declares (the installed binary)."""
+    return AGENT_KITS[name][1]
+
 
 # State-schema version of the records this module writes (ADR-0041m). Distinct
 # from the sandbox-record schema in ``state.py`` and from the structured-output
@@ -514,6 +586,85 @@ def consent_write(backend: str, sandbox: str) -> dict:
     }
     _atomic_write(_consent_path(backend, sandbox), doc)
     return doc
+
+
+# ---------------------------------------------------------------------------
+# Per-sandbox agent-kit application record (ADR-0030 create-time install).
+# ---------------------------------------------------------------------------
+
+def _kit_applied_dir() -> Path:
+    return state.state_dir() / "kit-applied"
+
+
+def _kit_applied_path(backend: str, sandbox: str) -> Path:
+    return _kit_applied_dir() / _safe(backend) / f"{_safe(sandbox)}.{_checksum(sandbox)}.json"
+
+
+# Applied-kit seed seam (internal test seam, never a secret, never written to
+# output). ``ACQ_KIT_APPLIED_SEED`` is a JSON object ``{"<sandbox>": "<kit>"}``
+# that, when set, supplies the applied-kit read for a named sandbox, so a
+# single-command contract vector can drive ``kit apply`` to an idempotent no-op
+# without a prior apply (the same reason ``ACQ_KIT_PROVENANCE_SEED`` seeds
+# provenance).
+KIT_APPLIED_SEED_ENV = "ACQ_KIT_APPLIED_SEED"
+
+
+def kit_applied_read(backend: str, sandbox: str) -> dict | None:
+    """Read a sandbox's applied agent kit (lenient; absent reads ``None``).
+
+    The record is host-authoritative (ADR-0041m): acq never trusts guest-writable
+    state to decide whether an install already happened. A missing/unreadable
+    record reads ``None`` (so a re-apply re-runs the idempotent install).
+    """
+    raw = os.environ.get(KIT_APPLIED_SEED_ENV)
+    if raw is not None:
+        try:
+            seed = json.loads(raw)
+        except json.JSONDecodeError:
+            seed = None
+        if isinstance(seed, dict) and isinstance(seed.get(sandbox), str):
+            kit = seed[sandbox]
+            return {
+                "schema": KIT_SCHEMA,
+                "backend": backend,
+                "sandbox": sandbox,
+                "kit": kit,
+                "entrypoint": agent_kit_entrypoint(kit),
+            }
+        return None
+    return _read_record(_kit_applied_path(backend, sandbox), strict=False, label=sandbox)
+
+
+def kit_applied_write(backend: str, sandbox: str, kit: str, entrypoint: str) -> dict:
+    """Record a successful agent-kit apply (host-authoritative, ADR-0041m).
+
+    Written only after the backend reports the in-guest install succeeded
+    (ADR-0038m §3 drops false partial success). The kit name and entrypoint are
+    non-secret; the install argv carries no credential and is never stored here.
+    """
+    doc = {
+        "schema": KIT_SCHEMA,
+        "backend": backend,
+        "sandbox": sandbox,
+        "kit": kit,
+        "entrypoint": entrypoint,
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    _atomic_write(_kit_applied_path(backend, sandbox), doc)
+    return doc
+
+
+def kit_applied_remove(backend: str, sandbox: str) -> None:
+    """Drop a sandbox's applied-kit record (best-effort; absent is a no-op).
+
+    Used when the guest filesystem is destroyed out of band — the security-exception
+    recreation (ADR-0035) — because the host record that said "agent installed" is
+    no longer true, so the next ``kit apply`` re-runs the idempotent install.
+    """
+    try:
+        _kit_applied_path(backend, sandbox).unlink()
+    except OSError:
+        pass
 
 
 def kit_check_data(backend: str, sandbox: str) -> dict:

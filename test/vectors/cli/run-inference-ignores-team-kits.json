@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "id": "cli/run-inference-ignores-team-kits",
+  "oracle": "ADR-0030 agent-kit inference scope: a team/personal kit named after a non-built-in agent (claude) is never inferred as the agent kit (built-in bundle only)",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "run", "claude", ".", "--name", "cl-box", "--json"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_EXTRA_KITS": "opencode claude shell"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_CATALOG", "ACQ_MSB_READY_TIMEOUT", "ACQ_MSB_STUB_FAIL", "ACQ_KIT_APPLIED_SEED"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "run",
+        "data": {
+          "name": "cl-box",
+          "backend": "msb",
+          "agent": "claude",
+          "action": "created",
+          "image": "docker.io/docker/sandbox-templates:claude-code-docker",
+          "kit": null,
+          "entrypoint": null
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "contains", "value": "[stub exec]", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

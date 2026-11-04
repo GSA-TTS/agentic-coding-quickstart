@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "id": "cli/lifecycle-sbx-create",
-  "oracle": "ADR-0040m sbx provision capability: create a sandbox end to end against the sbx stub and record host-authoritative state",
+  "oracle": "ADR-0040m sbx provision capability: create a sandbox end to end against the sbx stub and record host-authoritative state (shell selects no agent kit, so it stays on the sandbox-templates path; opencode requires kit-apply, which is msb-only in this slice)",
   "tier": 1,
   "backend": null,
   "platform": "any",
   "invoke": {
-    "argv": ["{acq}", "--backend", "sbx", "create", "opencode", ".", "--name", "sbx-life-test", "--json"],
+    "argv": ["{acq}", "--backend", "sbx", "create", "shell", ".", "--name", "sbx-life-test", "--json"],
     "env": {
       "ACQ_SBX_BIN": "__stub__",
       "ACQ_SBX_VERSION": "0.39.0",
@@ -24,7 +24,7 @@
       "value": {
         "schema_version": 1,
         "command": "create",
-        "data": {"name": "sbx-life-test", "backend": "sbx", "agent": "opencode", "state": "running"}
+        "data": {"name": "sbx-life-test", "backend": "sbx", "agent": "shell", "state": "running", "kit": null}
       },
       "normalize": []
     },
