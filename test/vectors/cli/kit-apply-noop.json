@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "id": "cli/kit-apply-noop",
+  "oracle": "ADR-0030 idempotency: a re-apply of an already-applied kit is a no-op (no duplicate install), tracked by the host-authoritative applied-kit record",
+  "tier": 1,
+  "backend": null,
+  "platform": "any",
+  "invoke": {
+    "argv": ["{acq}", "--backend", "msb", "kit", "apply", "mybox", "opencode", "--json"],
+    "env": {
+      "ACQ_MSB_BIN": "__stub__",
+      "ACQ_MSB_VERSION": "0.7.7",
+      "ACQ_MSB_INSTALLED": "1",
+      "ACQ_SBX_INSTALLED": "0",
+      "ACQ_MSB_STUB_CATALOG": "{\"mybox\": \"running\"}",
+      "ACQ_KIT_APPLIED_SEED": "{\"mybox\": \"opencode\"}"
+    },
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_FAIL"],
+    "stdin": "",
+    "timeout_ms": 5000
+  },
+  "expect": {
+    "exit": 0,
+    "stdout": {
+      "mode": "json",
+      "value": {
+        "schema_version": 1,
+        "command": "kit apply",
+        "data": {
+          "sandbox": "mybox",
+          "backend": "msb",
+          "kit": "opencode",
+          "entrypoint": "opencode",
+          "applied": false,
+          "action": "noop"
+        }
+      },
+      "normalize": []
+    },
+    "stderr": {"mode": "exact", "value": "", "normalize": []}
+  },
+  "isolation": {
+    "offline": true,
+    "ssh_stubs": false,
+    "redirect": ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+  }
+}

@@ -1,20 +1,20 @@
 {
   "schema": 1,
   "id": "cli/kit-apply-unsupported",
-  "oracle": "ADR-0040m unsupported-capability fail-closed: kit apply (deferred kit-apply slice) fails closed with unsupported_capability",
+  "oracle": "ADR-0040m unsupported-capability fail-closed: kit apply maps through the adapter seam and a backend that declares kit-apply unsupported (sbx) fails closed with unsupported_capability",
   "tier": 1,
   "backend": null,
   "platform": "any",
   "invoke": {
-    "argv": ["{acq}", "--backend", "msb", "kit", "apply", "mybox", "some-ref", "--json"],
+    "argv": ["{acq}", "--backend", "sbx", "kit", "apply", "mybox", "opencode", "--json"],
     "env": {
-      "ACQ_MSB_BIN": "__stub__",
-      "ACQ_MSB_VERSION": "0.7.7",
-      "ACQ_MSB_INSTALLED": "1",
-      "ACQ_SBX_INSTALLED": "0",
-      "ACQ_MSB_STUB_CATALOG": "{\"mybox\": \"running\"}"
+      "ACQ_SBX_BIN": "__stub__",
+      "ACQ_SBX_VERSION": "0.39.0",
+      "ACQ_SBX_INSTALLED": "1",
+      "ACQ_MSB_INSTALLED": "0",
+      "ACQ_SBX_STUB_CATALOG": "{\"mybox\": \"running\"}"
     },
-    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_MSB_STUB_FAIL", "ACQ_MSB_READY_TIMEOUT"],
+    "unset": ["ACQ_BACKEND", "ACQ_STATE_DIR", "MSB_HOME", "SBX_HOME", "ACQ_IMAGE", "ACQ_MSB_IMAGE", "ACQ_SBX_STUB_FAIL", "ACQ_KIT_APPLIED_SEED"],
     "stdin": "",
     "timeout_ms": 5000
   },

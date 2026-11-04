@@ -59,6 +59,13 @@ EXEC_EXIT_ENV = "ACQ_MSB_STUB_EXEC_EXIT"
 COPY_EXIT_ENV = "ACQ_MSB_STUB_COPY_EXIT"
 ECHO_EXIT_ENV = "ACQ_MSB_STUB_EXIT_CODE"
 
+# ``kit-apply`` markers, mirroring ``EXEC_MARKER``/``COPY_MARKER``, so a vector or
+# Tier-2 test can observe the install running (and its idempotency) without a real
+# guest. The stub records ONLY the kit name — never the install argv's content as
+# a value and never a secret.
+KIT_APPLY_MARKER = "[stub kit-apply]"
+SUBSTRATE_PROVISION_MARKER = "[stub substrate-provision]"
+
 
 def _exit_code(env_name: str) -> int:
     raw = os.environ.get(env_name, "0")
@@ -143,6 +150,74 @@ def _save_secrets(secrets: dict[str, dict[str, str]]) -> None:
     path = _secrets_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(secrets, sort_keys=True), encoding="utf-8")
+
+
+def _kit_applied_path() -> Path:
+    return _catalog_path().parent / "kit-applied.json"
+
+
+def _load_kit_applied() -> dict[str, list[str]]:
+    try:
+        doc = json.loads(_kit_applied_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if isinstance(doc, dict):
+        return {k: [x for x in v if isinstance(x, str)] for k, v in doc.items() if isinstance(v, list)}
+    return {}
+
+
+def _save_kit_applied(applied: dict[str, list[str]]) -> None:
+    path = _kit_applied_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(applied, sort_keys=True), encoding="utf-8")
+
+
+def _kit_apply_main(args: list[str]) -> int:
+    """Handle ``msb kit-apply NAME KIT -- INSTALL...`` (in-guest install model).
+
+    Records the applied kit per sandbox in ``kit-applied.json``; a re-apply of the
+    same kit is a no-op (reports "already applied") so the stub models the
+    idempotency the real ``nix profile install`` provides. The install argv after
+    ``--`` is data (never a secret) and is never stored or echoed as a value.
+    """
+    name = args[0] if args else None
+    kit = args[1] if len(args) > 1 else None
+    if name is None or kit is None:
+        print("msb: kit-apply requires a sandbox and kit", file=sys.stderr)
+        return 1
+    catalog = _load()
+    if name not in catalog:
+        print(f"msb: no such sandbox '{name}'", file=sys.stderr)
+        return 1
+    applied = _load_kit_applied()
+    kits = applied.get(name, [])
+    if kit in kits:
+        print(f"{KIT_APPLY_MARKER} {kit} already applied")
+        return 0
+    kits.append(kit)
+    applied[name] = kits
+    _save_kit_applied(applied)
+    print(f"{KIT_APPLY_MARKER} {kit} applied")
+    return 0
+
+
+def _substrate_provision_main(args: list[str]) -> int:
+    """Handle ``msb substrate-provision NAME [-- STEP]...`` (in-guest bootstrap model).
+
+    Models the substrate bootstrap (single-user Nix + devenv + direnv + agent user)
+    as a no-op success with a marker; the steps after ``--`` are data (never a
+    secret) and are never stored or echoed as a value.
+    """
+    name = args[0] if args else None
+    if name is None:
+        print("msb: substrate-provision requires a sandbox name", file=sys.stderr)
+        return 1
+    catalog = _load()
+    if name not in catalog:
+        print(f"msb: no such sandbox '{name}'", file=sys.stderr)
+        return 1
+    print(f"{SUBSTRATE_PROVISION_MARKER} {name}")
+    return 0
 
 
 def _arg_after(args: list[str], flag: str) -> str | None:
@@ -332,6 +407,18 @@ def main(argv: list[str]) -> int:
 
     if cmd == "rotate":
         return _rotate_main(args[1:])
+
+    if cmd == "kit-apply":
+        if _should_fail("kit-apply"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
+        return _kit_apply_main(args[1:])
+
+    if cmd == "substrate-provision":
+        if _should_fail("substrate-provision"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
+        return _substrate_provision_main(args[1:])
 
     catalog = _load()
 

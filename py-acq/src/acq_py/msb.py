@@ -63,6 +63,50 @@ def msb_command() -> list[str]:
     return ["msb"]
 
 
+# ---------------------------------------------------------------------------
+# Capability record (ADR-0040m). A declaration, not a proof: conformance is
+# asserted by the Tier-1 subprocess vectors and, for host-enforcement
+# capabilities, by a Tier-3 live transcript.
+# ---------------------------------------------------------------------------
+
+# The declared capability map. Support levels: ``required`` (implemented and
+# conformance-asserted), ``optional`` (declared but not part of the shipped
+# surface), ``unsupported`` (fails closed with ``unsupported_capability``).
+# ``secret-list``/``start``/``restart`` are msb-only obligations; ``key-present``/
+# ``kit-source-revoke`` are sbx-only (ADR-0040m). ``kit-apply`` is required here
+# so ``_supports("msb", "kit-apply")`` resolves from the record, not the
+# ``record_fn is None → True`` fallback.
+def capability_record(version: str | None = None) -> dict:
+    return {
+        "backend": "msb",
+        "version": version,
+        "capabilities": {
+            "detect": "required",
+            "version": "required",
+            "provision": "required",
+            "list": "required",
+            "exec": "required",
+            "attach": "required",
+            "shell": "required",
+            "stop": "required",
+            "remove": "required",
+            "copy": "required",
+            "ports": "required",
+            "kit-apply": "required",
+            "secret-write": "required",
+            "secret-rm": "required",
+            "secret-list": "required",  # msb-only (secret_ls)
+            "key-rotate": "required",
+            "key-present": "unsupported",  # sbx-only
+            "kit-source-revoke": "unsupported",  # sbx-only
+            "start": "required",  # msb-only
+            "restart": "required",  # msb-only
+            "provenance": "required",
+            "doctor": "required",
+        },
+    }
+
+
 def _run(
     argv: list[str],
     *,
@@ -148,6 +192,51 @@ def exec_ready(name: str) -> bool:
     except subprocess.TimeoutExpired:
         return False
     return proc.returncode == 0
+
+
+def kit_apply(name: str, kit: str, install_cmd: list[str]) -> None:
+    """Apply a kit in-guest (ADR-0040m ``kit-apply``): run the kit's pinned
+    install command inside the sandbox as the unprivileged ``agent`` user.
+
+    acq never executes kit code on the host (ADR-0038m §46): the install command
+    is data sourced from the pinned control plane and is forwarded verbatim to the
+    backend, which runs it in-guest. The argv is the ``nix profile install
+    …#<agent>`` install — it carries no credential — so nothing sensitive crosses
+    the boundary. Raises :class:`MsbError` on backend failure.
+
+    Idempotency is a host-authoritative concern (the seam short-circuits a re-apply
+    of an already-applied kit via :func:`acq_py.kits.kit_applied_read`); the
+    backend re-runs a genuinely idempotent install when asked, and the host record
+    is the durable "already applied" signal.
+    """
+    proc = _run(["kit-apply", name, kit, "--", *install_cmd])
+    if proc.returncode != 0:
+        raise MsbError(
+            errors.FAILURE,
+            f"could not apply kit '{kit}' to sandbox '{name}'",
+            "check msb logs and retry",
+        )
+
+
+def provision_substrate(name: str, steps: list[list[str]]) -> None:
+    """Provision addressable substrate gaps in-guest (ADR-0030 "bring-your-own
+    image contract"): bootstrap single-user Nix + devenv + direnv and create the
+    agent user before the agent install.
+
+    The steps are data sourced from the pinned control plane (never a secret,
+    never a credential) and run in-guest via the backend seam; acq never executes
+    them on the host. Raises :class:`MsbError` on backend failure.
+    """
+    argv = ["substrate-provision", name]
+    for step in steps:
+        argv += ["--", *step]
+    proc = _run(argv)
+    if proc.returncode != 0:
+        raise MsbError(
+            errors.FAILURE,
+            f"could not provision the substrate for sandbox '{name}'",
+            "check msb logs and retry",
+        )
 
 
 def stop(name: str) -> None:

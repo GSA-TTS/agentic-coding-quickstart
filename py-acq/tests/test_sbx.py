@@ -229,6 +229,19 @@ def test_secret_ls_unsupported_on_sbx(monkeypatch, tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# kit apply is msb-only: unsupported_capability on sbx (ADR-0040m kit-apply).
+# ---------------------------------------------------------------------------
+
+def test_kit_apply_unsupported_on_sbx(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: sbx declares kit-apply unsupported, so `kit apply`
+    # fails closed (exit 1, unsupported_capability) rather than installing.
+    _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
+    rc, doc = _invoke(capsys, "--backend", "sbx", "kit", "apply", "mybox", "opencode", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "unsupported_capability"
+
+
+# ---------------------------------------------------------------------------
 # exec / cp / ports route through the sbx stub too (common capabilities).
 # ---------------------------------------------------------------------------
 

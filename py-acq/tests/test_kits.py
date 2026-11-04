@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from acq_py import cli, kits, state
+from acq_py import cli, kits, msb, state
 
 FULL_REF = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # 40-char SHA-1 (synthetic)
 TEAM_REPO = "github.com/acme/team-kits"
@@ -40,6 +40,7 @@ def _env(monkeypatch, tmp_path, *, catalog=None, discovery=None):
         "ACQ_KIT_SOURCE_DISCOVERY",
         "ACQ_EXTRA_KITS",
         "ACQ_PROVIDER_KITS",
+        "ACQ_SUBSTRATE_STATE",
     ):
         monkeypatch.delenv(name, raising=False)
     if catalog is not None:
@@ -280,11 +281,20 @@ class _FakeStdin:
         return self._isatty
 
 
-def test_kit_apply_fails_closed(monkeypatch, tmp_path, capsys):
+def test_kit_apply_unknown_kit_ref_fails_closed(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: only a built-in agent kit can be applied by name; a
+    # team/personal ref (or unknown name) is refused with validation_failed.
     _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
     rc, doc = _invoke(capsys, "--backend", "msb", "kit", "apply", "mybox", "some-ref", "--json")
     assert rc == 1
-    assert doc["error"]["code"] == "unsupported_capability"
+    assert doc["error"]["code"] == "validation_failed"
+
+
+def test_kit_apply_missing_sandbox_fails_closed(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
+    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "apply", "nope", "opencode", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "sandbox_not_found"
 
 
 # ---------------------------------------------------------------------------
@@ -396,3 +406,286 @@ def test_kit_list_provider_env_override(monkeypatch, tmp_path, capsys):
     rc, doc = _invoke(capsys, "kit", "list", "--json")
     assert rc == 0
     assert doc["data"]["provider"] == ["acme-provider", "other-provider"]
+
+
+# ---------------------------------------------------------------------------
+# Built-in agent kits (ADR-0030): inference, pinned install, kit apply.
+# ---------------------------------------------------------------------------
+
+def test_agent_kit_for_builtin_bundle_only(monkeypatch):
+    # Mutation-proof guard: implicit agent-kit inference matches the built-in
+    # bundle only. A team/personal kit named after an agent (ACQ_EXTRA_KITS) is
+    # never consulted, and shell selects no agent kit (ADR-0030 §Agent kit
+    # inference).
+    monkeypatch.setenv("ACQ_EXTRA_KITS", "opencode claude shell")
+    assert kits.agent_kit_for("opencode") == "opencode"
+    assert kits.agent_kit_for("shell") is None
+    assert kits.agent_kit_for("claude") is None
+    assert kits.agent_kit_for("codex") is None
+    assert kits.is_agent_kit("opencode") is True
+    assert kits.is_agent_kit("claude") is False
+
+
+def test_agent_kit_install_pinned_by_content():
+    # Mutation-proof guard: the install step is a content-pinned nix profile
+    # install at a full immutable rev — never the mutable npm fallback the ADR
+    # rejects (ADR-0030 "Agent install contract").
+    argv = kits.agent_kit_install("opencode")
+    assert argv[:3] == ["nix", "profile", "install"]
+    assert argv[-1].endswith("#opencode")
+    assert "npm" not in argv
+    rev = argv[-1].split("/")[-1].split("#")[0]
+    assert kits.is_full_ref(rev)
+    assert kits.agent_kit_entrypoint("opencode") == "opencode"
+
+
+def test_kit_apply_capability_maps_through_seam():
+    # Mutation-proof guard: the kit-apply capability maps through the adapter
+    # seam (ADR-0040m) — msb declares it supported (via its capability record,
+    # not the record_fn-is-None fallback), sbx declares it unsupported (fail-closed).
+    rec = msb.capability_record("0.7.7")
+    assert rec["backend"] == "msb"
+    assert rec["capabilities"]["kit-apply"] == "required"
+    assert rec["capabilities"]["secret-list"] == "required"  # msb-only
+    assert rec["capabilities"]["key-present"] == "unsupported"  # sbx-only
+    assert cli._supports("msb", "kit-apply") is True
+    assert cli._supports("sbx", "kit-apply") is False
+
+
+def test_kit_apply_applies_and_records(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "apply", "mybox", "opencode", "--json")
+    assert rc == 0
+    assert doc["data"]["action"] == "applied"
+    assert doc["data"]["applied"] is True
+    assert doc["data"]["kit"] == "opencode"
+    assert doc["data"]["entrypoint"] == "opencode"
+    rec = kits.kit_applied_read("msb", "mybox")
+    assert rec is not None
+    assert rec["kit"] == "opencode"
+    assert rec["entrypoint"] == "opencode"
+
+
+def test_kit_apply_reapply_is_noop(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: re-applying the same kit is a no-op — the in-guest
+    # install is NOT re-invoked (no duplicate install). The host record gates it.
+    _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
+    calls: list[tuple] = []
+    monkeypatch.setattr(msb, "kit_apply", lambda *a, **k: calls.append(a) or None)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "apply", "mybox", "opencode", "--json")
+    assert rc == 0
+    assert doc["data"]["action"] == "applied"
+    assert len(calls) == 1
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "apply", "mybox", "opencode", "--json")
+    assert rc == 0
+    assert doc["data"]["action"] == "noop"
+    assert doc["data"]["applied"] is False
+    assert len(calls) == 1  # the install ran exactly once across both applies
+
+
+def test_kit_apply_backend_failure_fails_closed(monkeypatch, tmp_path, capsys):
+    # Raw backend text never reaches the envelope (ADR-0040m): a failing
+    # kit-apply maps to a stable code, not the stub's raw stderr.
+    _env(monkeypatch, tmp_path, catalog={"mybox": "running"})
+    monkeypatch.setenv("ACQ_MSB_STUB_FAIL", "kit-apply")
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "kit", "apply", "mybox", "opencode", "--json")
+    assert rc == 1
+    assert doc["error"]["code"] == "failure"
+    # The applied-kit record is written only on success (ADR-0038m §3 drops false
+    # partial success).
+    assert kits.kit_applied_read("msb", "mybox") is None
+
+
+def test_run_opencode_selects_devenv_and_applies_kit(monkeypatch, tmp_path, capsys):
+    # acq run opencode . provisions the pinned devenv base and applies the pinned
+    # opencode kit (ADR-0030), while reporting image/kit/entrypoint.
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "oc-box", "--json")
+    assert rc == 0
+    data = doc["data"]
+    assert data["image"] == cli.OPENCODE_DEVENV_IMAGE
+    assert data["kit"] == "opencode"
+    assert data["entrypoint"] == "opencode"
+    assert kits.kit_applied_read("msb", "oc-box")["kit"] == "opencode"
+
+
+def test_run_shell_keeps_no_kit(monkeypatch, tmp_path, capsys):
+    # shell selects no agent kit but still lands on the devenv base (ADR-0030:
+    # the base image no longer differs per agent).
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "shell", str(ws), "--name", "sh-box", "--json")
+    assert rc == 0
+    data = doc["data"]
+    assert data["image"] == cli.OPENCODE_DEVENV_IMAGE
+    assert data["kit"] is None
+    assert data["entrypoint"] is None
+    assert kits.kit_applied_read("msb", "sh-box") is None
+
+
+def test_run_claude_ignores_team_kits(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: a team/personal kit named after a non-built-in agent
+    # (claude) is never inferred as the agent kit (ADR-0030 inference scope).
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACQ_EXTRA_KITS", "opencode claude shell")
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "claude", str(ws), "--name", "cl-box", "--json")
+    assert rc == 0
+    data = doc["data"]
+    assert data["kit"] is None  # claude is not a built-in agent kit
+    assert data["image"] == cli.OPENCODE_DEVENV_IMAGE
+    assert kits.kit_applied_read("msb", "cl-box") is None
+
+
+def test_run_kit_explicit_override_wins(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: an explicit --kit overrides inference — shell (which
+    # selects no agent kit) with --kit opencode applies the opencode kit.
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "shell", str(ws), "--name", "sh-box", "--kit", "opencode", "--json")
+    assert rc == 0
+    data = doc["data"]
+    assert data["image"] == cli.OPENCODE_DEVENV_IMAGE
+    assert data["kit"] == "opencode"
+    assert data["entrypoint"] == "opencode"
+    assert kits.kit_applied_read("msb", "sh-box")["kit"] == "opencode"
+
+
+def test_run_kit_unverifiable_substrate_fails_closed(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: a kit on an overridden image whose substrate state is
+    # UNKNOWN (no seam) fails closed with validation_failed BEFORE create — acq
+    # never applies a kit to an unverified image (ADR-0030 bring-your-own image
+    # contract).
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+
+    rc, doc = _invoke(
+        capsys,
+        "--backend", "msb", "run", "opencode", str(ws), "--name", "oc-box",
+        "--image", "docker.io/docker/sandbox-templates:shell-docker", "--json",
+    )
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+    # Nothing was created by the refused invocation.
+    assert state.record_read("msb", "oc-box") is None
+
+
+def test_run_kit_unaddressable_substrate_fails_closed(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: an unaddressable substrate gap (non-linux) is refused
+    # with validation_failed BEFORE create — acq cannot provision it in-guest.
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "ACQ_SUBSTRATE_STATE",
+        json.dumps({"docker.io/docker/sandbox-templates:shell-docker": ["non-linux"]}),
+    )
+
+    rc, doc = _invoke(
+        capsys,
+        "--backend", "msb", "run", "opencode", str(ws), "--name", "oc-box",
+        "--image", "docker.io/docker/sandbox-templates:shell-docker", "--json",
+    )
+    assert rc == 1
+    assert doc["error"]["code"] == "validation_failed"
+    assert state.record_read("msb", "oc-box") is None
+
+
+def test_run_kit_addressable_substrate_is_provisioned(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: addressable substrate gaps (nix + agent-user) are
+    # PROVISIONED in-guest rather than rejected, then the agent kit is applied.
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "ACQ_SUBSTRATE_STATE",
+        json.dumps({"docker.io/docker/sandbox-templates:shell-docker": ["nix", "agent-user"]}),
+    )
+    calls: list[tuple] = []
+    monkeypatch.setattr(msb, "provision_substrate", lambda name, steps: calls.append((name, steps)) or None)
+
+    rc, doc = _invoke(
+        capsys,
+        "--backend", "msb", "run", "opencode", str(ws), "--name", "oc-box",
+        "--image", "docker.io/docker/sandbox-templates:shell-docker", "--json",
+    )
+    assert rc == 0
+    assert doc["data"]["kit"] == "opencode"
+    # The substrate gaps were provisioned in-guest (bootstrap nix + agent user)
+    # before the agent install.
+    assert len(calls) == 1
+    assert calls[0][0] == "oc-box"
+    assert ["install-nix", "--single-user"] in calls[0][1]
+    assert ["useradd", "-m", "agent"] in calls[0][1]
+    assert kits.kit_applied_read("msb", "oc-box")["kit"] == "opencode"
+
+
+def test_run_kit_substrate_ok_no_provision(monkeypatch, tmp_path, capsys):
+    # An overridden image whose substrate is declared "ok" is applied without any
+    # provision step (no bootstrap, just the agent install).
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "ACQ_SUBSTRATE_STATE",
+        json.dumps({"docker.io/docker/sandbox-templates:shell-docker": "ok"}),
+    )
+    calls: list[tuple] = []
+    monkeypatch.setattr(msb, "provision_substrate", lambda name, steps: calls.append((name, steps)) or None)
+
+    rc, doc = _invoke(
+        capsys,
+        "--backend", "msb", "run", "opencode", str(ws), "--name", "oc-box",
+        "--image", "docker.io/docker/sandbox-templates:shell-docker", "--json",
+    )
+    assert rc == 0
+    assert doc["data"]["kit"] == "opencode"
+    assert calls == []  # no substrate gaps -> no provision step
+
+
+def test_run_unknown_kit_is_usage_error(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: --kit with a non-built-in name is a usage error (exit
+    # 2), never a silent fallback to inference.
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _env(monkeypatch, tmp_path)
+
+    rc, doc = _invoke(capsys, "--backend", "msb", "run", "opencode", str(ws), "--name", "oc-box", "--kit", "team-kit", "--json")
+    assert rc == 2
+    assert doc["error"]["code"] == "usage"
+
+
+def test_launch_uses_recorded_entrypoint(monkeypatch, tmp_path, capsys):
+    # Mutation-proof guard: attach launches the recorded kit entrypoint, not the
+    # raw agent token, so a future kit whose entrypoint differs from its agent name
+    # works (ADR-0030 "declares its entrypoint").
+    _env(monkeypatch, tmp_path, catalog={"box": "running"})
+    state.record_write("msb", "box", agent="opencode", workspace="/w")
+    kits.kit_applied_write("msb", "box", "opencode", "custom-opencode-bin")
+
+    captured: dict = {}
+    real_launch = msb.launch
+
+    def spy(name, workspace, agent, *, json_mode=False):
+        captured["agent"] = agent
+        return 0
+
+    monkeypatch.setattr(msb, "launch", spy)
+    rc = cli.main(["--backend", "msb", "--json", "attach", "box"])
+    capsys.readouterr()
+    assert rc == 0
+    assert captured["agent"] == "custom-opencode-bin"  # entrypoint, not "opencode"
