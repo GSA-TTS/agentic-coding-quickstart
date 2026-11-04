@@ -2034,6 +2034,9 @@ def run_kit_source_rm(parsed, emit_json: bool, backend_override: str | None) -> 
     # from kit.allowedSources so the source is no longer fetchable. When the
     # resolved backend is msb (or there is no backend), only the host registry
     # entry is dropped, as before.
+    # When both backends are installed with no flag/env, auto-detect resolves msb,
+    # so sbx's owner prefix is not revoked here — correct under the resolved-active-
+    # backend scope, and it becomes revocable once kit-apply (ADR-0030) lands.
     resolved = _resolve_active_backend(backend_override)
     if resolved == "sbx":
         try:
