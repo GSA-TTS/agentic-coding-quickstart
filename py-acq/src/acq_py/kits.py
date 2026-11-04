@@ -56,6 +56,8 @@ class KitSpecError(Exception):
 # Pinned control plane (the trust anchor; ADR-0016, ADR-0030).
 # ---------------------------------------------------------------------------
 # The ref is a full 40-char SHA, never a mutable branch or tag (ADR-0038m §46).
+# TODO(quarterly): a real, reproducible pin re-reviewed on the quarterly cadence
+# (ADR-0030), sourced from the pinned patterns release.
 CONTROL_PLANE_REPO = "github.com/GSA-TTS/agentic-coding-patterns"
 CONTROL_PLANE_REF = "7dd2ddc034b6597e97f450fa716e7d47c9a38287"
 CONTROL_PLANE_DIR = "integrations/isolation/acq-kits"
@@ -82,18 +84,19 @@ BUILTIN_NEUTRAL_NAMES = tuple(n for n in BUILTIN_KIT_NAMES if n not in PROVIDER_
 # declared rev (content-hashed, cached, and identical across arches) — never a
 # mutable ``npm install -g …@latest`` fallback (ADR-0030 "Agent install
 # contract"). Only ``opencode`` is a built-in agent kit today; the other known
-# agents keep the sandbox-templates derivation and select no agent kit (spec
+# agents select no agent kit but still land on the devenv base (spec
 # implementation decision #4).
 # ---------------------------------------------------------------------------
 
-# The substrate's declared nixpkgs rev (ADR-0030 "substrate contract"): the
-# pinned generic devenv base resolves its Nix/devenv toolchain at this rev, and
-# an agent kit installs its binary at the SAME rev so the install is
-# content-hashed, cached, and identical across arches. This is data sourced from
-# the pinned control plane. The offline path treats it as opaque data (the
-# install argv is never executed here); the live install re-verifies it on the
-# quarterly review cadence.
-OPENCODE_NIXPKGS_REV = "c9f60e6a2b5d1f7e4a3c8d9b0e6f2a4c1d7b8e9a"
+# The nixpkgs rev an agent kit installs its binary at (ADR-0030 "substrate
+# contract"): the install is content-hashed, cached, and identical across arches
+# because it pins a full rev, never a mutable branch/tag. TODO(quarterly): this is
+# a real, reproducible pin — re-reviewed on the quarterly cadence (ADR-0030). It
+# is sourced from the substrate's declared NIXPKGS_REV (nixos-26.05) in
+# ``integrations/isolation/images/devenv/`` and upstream ``acq.backends/agents.sh``;
+# the offline path treats it as opaque data (the install argv is never executed
+# here).
+OPENCODE_NIXPKGS_REV = "0d9e9b832d03ac387417e16ce1febf73b2e631e1"
 
 # Built-in agent kits: kit name -> (pinned install argv, entrypoint).
 AGENT_KITS: dict[str, tuple[list[str], str]] = {

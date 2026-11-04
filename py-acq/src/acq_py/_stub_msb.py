@@ -64,6 +64,7 @@ ECHO_EXIT_ENV = "ACQ_MSB_STUB_EXIT_CODE"
 # guest. The stub records ONLY the kit name — never the install argv's content as
 # a value and never a secret.
 KIT_APPLY_MARKER = "[stub kit-apply]"
+SUBSTRATE_PROVISION_MARKER = "[stub substrate-provision]"
 
 
 def _exit_code(env_name: str) -> int:
@@ -197,6 +198,25 @@ def _kit_apply_main(args: list[str]) -> int:
     applied[name] = kits
     _save_kit_applied(applied)
     print(f"{KIT_APPLY_MARKER} {kit} applied")
+    return 0
+
+
+def _substrate_provision_main(args: list[str]) -> int:
+    """Handle ``msb substrate-provision NAME [-- STEP]...`` (in-guest bootstrap model).
+
+    Models the substrate bootstrap (single-user Nix + devenv + direnv + agent user)
+    as a no-op success with a marker; the steps after ``--`` are data (never a
+    secret) and are never stored or echoed as a value.
+    """
+    name = args[0] if args else None
+    if name is None:
+        print("msb: substrate-provision requires a sandbox name", file=sys.stderr)
+        return 1
+    catalog = _load()
+    if name not in catalog:
+        print(f"msb: no such sandbox '{name}'", file=sys.stderr)
+        return 1
+    print(f"{SUBSTRATE_PROVISION_MARKER} {name}")
     return 0
 
 
@@ -393,6 +413,12 @@ def main(argv: list[str]) -> int:
             print(RAW_FAIL_STDERR, file=sys.stderr)
             return 1
         return _kit_apply_main(args[1:])
+
+    if cmd == "substrate-provision":
+        if _should_fail("substrate-provision"):
+            print(RAW_FAIL_STDERR, file=sys.stderr)
+            return 1
+        return _substrate_provision_main(args[1:])
 
     catalog = _load()
 

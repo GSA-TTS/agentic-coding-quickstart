@@ -222,11 +222,11 @@ def test_create_unknown_agent_fails_closed(monkeypatch, tmp_path, capsys):
 
 
 def test_default_image_resolution():
-    assert cli._default_image_for_agent("shell") == "docker.io/docker/sandbox-templates:shell-docker"
-    assert cli._default_image_for_agent("opencode") == cli.OPENCODE_DEVENV_IMAGE
-    assert cli._default_image_for_agent("claude") == "docker.io/docker/sandbox-templates:claude-code-docker"
-    assert cli._default_image_for_agent("cursor") == "docker.io/docker/sandbox-templates:cursor-agent-docker"
-    assert cli._default_image_for_agent("codex") == "docker.io/docker/sandbox-templates:codex-docker"
+    # ADR-0030: the default base image is the pinned devenv shell image for EVERY
+    # agent (harness installation is deferred to kits). The per-agent
+    # sandbox-templates mapping is collapsed to a single default.
+    for agent in ("shell", "opencode", "claude", "cursor", "codex", "droid", "gemini"):
+        assert cli._default_image_for_agent(agent) == cli.OPENCODE_DEVENV_IMAGE
 
 
 def test_image_override_precedence(monkeypatch):

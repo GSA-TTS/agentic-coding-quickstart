@@ -330,12 +330,16 @@
       "vectors": ["cli/kit-apply-unknown-kit", "cli/kit-apply-missing"]
     },
     {
-      "contract": "ADR-0030 default path: acq run opencode . provisions the pinned generic devenv base and applies the pinned opencode kit while shell keeps the sandbox-templates default (no kit)",
+      "contract": "ADR-0030 default path: acq run opencode . provisions the pinned generic devenv base and applies the pinned opencode kit while shell lands on the same devenv base with no agent kit",
       "vectors": ["cli/run-opencode-kit", "cli/run-shell-no-kit"]
     },
     {
       "contract": "ADR-0030 agent-kit inference: an explicit --kit wins over inference, and a team/personal kit named after a non-built-in agent is never inferred (built-in bundle only)",
       "vectors": ["cli/run-kit-explicit-override", "cli/run-inference-ignores-team-kits"]
+    },
+    {
+      "contract": "ADR-0030 bring-your-own image contract: a kit verifies the substrate — addressable gaps are provisioned in-guest, while an unverified or unaddressable substrate fails closed with validation_failed",
+      "vectors": ["cli/run-kit-substrate-provision", "cli/run-kit-substrate-unknown", "cli/run-kit-substrate-unaddressable"]
     },
     {
       "contract": "ADR-0038m §2 kit validate required data: validity + coded findings (valid / findings / missing-path and missing-spec fail-closed)",

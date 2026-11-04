@@ -29,7 +29,7 @@
           "backend": "msb",
           "agent": "opencode",
           "action": "created",
-          "image": "ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:7b923fb5e722ad27c751ead836f24145c4cea3fac015a3ba753bd7473891e1e7",
+          "image": "ghcr.io/gsa-tts/agentic-coding-patterns/devenv-shell@sha256:0b5f4cc95c8fa7dd7f3ffd02b56e63d0caf9b151421ff6ea3cb34b2139e3966c",
           "kit": "opencode",
           "entrypoint": "opencode"
         }
