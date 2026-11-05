@@ -98,7 +98,7 @@ jobs:
           printf 'python312.zip\n.\nLib/site-packages\nimport site\n' > runtime/python312._pth
           test -f runtime/LICENSE.txt
           mv runtime validator-runtime
-          (cd validator-runtime && zip -qr ../provider-input-validator-runtime-windows-x86_64.zip .)
+          python3 -c "import shutil; shutil.make_archive('provider-input-validator-runtime-windows-x86_64', 'zip', 'validator-runtime')"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: provider-input-validator-wheelhouse-${{ matrix.platform }}
