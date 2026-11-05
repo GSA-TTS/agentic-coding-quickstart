@@ -207,11 +207,13 @@ jobs:
           python-version: '3.12'
 
       # Cache the built interpreter so the compile only happens on a version bump.
+      # The -gnu89 suffix is the build recipe (see the build step): bump it when
+      # the compiler flags change so a binary built the old way is never reused.
       - id: cache-bash32
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /opt/bash32
-          key: bash32-${{ runner.os }}-${{ env.BASH32_VERSION }}
+          key: bash32-${{ runner.os }}-${{ env.BASH32_VERSION }}-gnu89
 
       - name: Build bash ${{ env.BASH32_VERSION }} from source
         if: steps.cache-bash32.outputs.cache-hit != 'true'
@@ -263,8 +265,16 @@ jobs:
 
           tar -xzf "$tarball"
           cd "bash-${BASH32_VERSION}"
-          # bash 3.2.57 (2007) predates modern GCC defaults; relax the two
-          # errors-by-default (implicit function/int) so it configures & builds.
+          # bash 3.2.57 (2007) is pre-ANSI K&R C and predates modern GCC
+          # defaults. GCC 15 (ubuntu-26.04) defaults to -std=gnu23, where an
+          # empty parameter list `()` means `(void)` ("too many arguments to
+          # function 'list_reverse'"), and GCC 14+ makes `return;` in an int
+          # function an error in C99+ modes (gnu89 keeps it a warning). Pin the
+          # language via CC, not CFLAGS: bash builds helper tools (mkbuiltins,
+          # ...) with CC_FOR_BUILD=$(CC) and CFLAGS_FOR_BUILD, which ignore
+          # CFLAGS. gnu89 also keeps configure's RETSIGTYPE=void/VOID_SIGHANDLER
+          # answers (gnu23 flips them). The two -Wno flags only cut noise.
+          CC="gcc -std=gnu89" \
           CFLAGS="-Wno-implicit-function-declaration -Wno-implicit-int" \
             ./configure --prefix=/opt/bash32
           make -j"$(nproc)"

@@ -76,12 +76,11 @@ test/vendor
 # TEMPORARY ALLOWLIST — delete this variable (and the `pending` handling in the
 # existence test) once the files below have landed on main.
 # These pathspecs are listed ahead of time (a git pathspec that matches no file
-# is harmless) for scripts that only exist on the open bats-sharding and local
-# bash-3.2-launcher changes. While absent, the existence check must not demand
+# is harmless) for scripts that only exist on the open local bash-3.2-launcher
+# change. While absent, the existence check must not demand
 # them. As soon as one EXISTS it must leave this list (see the existence test),
 # so the allowlist cannot outlive the files it covers.
 PENDING_PATHSPECS='
-scripts/bats-shard
 scripts/test-acq-bash32
 scripts/fetch-bash32-oci.py
 scripts/scan-heredoc-subst.py

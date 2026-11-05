@@ -30,6 +30,13 @@
 #   ./scripts/test-acq-bats test/bats/X.bats  # a specific file (passed through)
 #   ACQ_BATS_JOBS=1 ./scripts/test-acq-bats   # force serial
 #   ACQ_BATS_TIMING=1 ./scripts/test-acq-bats # per-test timings, also in fallback
+#   ACQ_BATS_SHARD=1/2 ./scripts/test-acq-bats  # only shard 1 of 2 (see below)
+#
+# SHARDING: ACQ_BATS_SHARD=I/N runs only the files scripts/bats-shard assigns to
+# shard I of N, so CI can split the suite across a job matrix. Selection is
+# recomputed from test/bats/*.bats on every run (no checked-in table), so a new
+# file joins a shard automatically; an invalid spec or empty shard fails closed
+# (exit 2). Ignored when explicit file arguments are given.
 set -uo pipefail
 
 _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,7 +76,27 @@ if [ "$#" -gt 0 ]; then
   exec "$BATS" ${_timing[@]+"${_timing[@]}"} "$@"
 fi
 
-# Whole-suite run: opt into across-files parallelism when we can.
+# Whole-suite run (optionally one shard): the targets are the whole directory,
+# or the explicit file list scripts/bats-shard selects. A bad shard spec must
+# stop the run here rather than silently running nothing or everything.
+_targets=("${REPO_ROOT}/test/bats")
+_shard_files=()
+if [ -n "${ACQ_BATS_SHARD:-}" ]; then
+  _shard_out="$(bash "${_dir}/bats-shard" "$ACQ_BATS_SHARD")" || {
+    echo "test-acq-bats: invalid ACQ_BATS_SHARD='${ACQ_BATS_SHARD}'" >&2
+    exit 2
+  }
+  while IFS= read -r _f; do
+    _shard_files+=("$_f")
+  done <<EOF_SHARD
+${_shard_out}
+EOF_SHARD
+  _targets=("${_shard_files[@]}")
+  echo "test-acq-bats: shard ${ACQ_BATS_SHARD}: ${#_shard_files[@]} file(s)" >&2
+  printf 'test-acq-bats:   %s\n' "${_shard_files[@]##*/}" >&2
+fi
+
+# Opt into across-files parallelism when we can.
 #   - ACQ_BATS_JOBS overrides the job count; =1 forces serial.
 #   - bats --jobs needs GNU parallel or shenwei356/rush on PATH; without one it
 #     errors out, so we only pass --jobs when a parallelizer is present.
@@ -85,13 +112,15 @@ if [ "${ACQ_BATS_TIMING:-0}" = 1 ]; then
   echo "test-acq-bats: workers=$_jobs; per-test timings include setup and teardown" >&2
 fi
 if [ "$_jobs" -gt 1 ] 2>/dev/null && { command -v parallel >/dev/null 2>&1 || command -v rush >/dev/null 2>&1; }; then
-  exec "$BATS" ${_timing[@]+"${_timing[@]}"} --jobs "$_jobs" --no-parallelize-within-files "${REPO_ROOT}/test/bats"
+  exec "$BATS" ${_timing[@]+"${_timing[@]}"} --jobs "$_jobs" --no-parallelize-within-files "${_targets[@]}"
 fi
 
 if [ "$_jobs" -gt 1 ] 2>/dev/null && command -v xargs >/dev/null 2>&1 && printf 'x\0' | xargs -0 -n1 -P 1 true 2>/dev/null; then
   _tmp="$(mktemp -d "${TMPDIR:-/tmp}/acq-bats.XXXXXX")"
   trap 'rm -rf "$_tmp"' EXIT HUP INT TERM
-  printf '%s\0' "${REPO_ROOT}"/test/bats/*.bats |
+  _xargs_files=("${REPO_ROOT}"/test/bats/*.bats)
+  if [ "${#_shard_files[@]}" -gt 0 ]; then _xargs_files=("${_shard_files[@]}"); fi
+  printf '%s\0' "${_xargs_files[@]}" |
     xargs -0 -n1 -P "$_jobs" sh -c '
       _bats=$1 _outdir=$2 _file=$3
       _name=$(basename "$_file")
@@ -105,7 +134,7 @@ if [ "$_jobs" -gt 1 ] 2>/dev/null && command -v xargs >/dev/null 2>&1 && printf 
     ' sh "$BATS" "$_tmp"
 
   _rc=0
-  for _file in "${REPO_ROOT}"/test/bats/*.bats; do
+  for _file in "${_xargs_files[@]}"; do
     _out="${_tmp}/$(basename "$_file").out"
     [ -f "$_out" ] && cat "$_out"
     _status="${_out}.status"
@@ -116,4 +145,4 @@ if [ "$_jobs" -gt 1 ] 2>/dev/null && command -v xargs >/dev/null 2>&1 && printf 
   exit "$_rc"
 fi
 
-exec "$BATS" ${_timing[@]+"${_timing[@]}"} "${REPO_ROOT}/test/bats"
+exec "$BATS" ${_timing[@]+"${_timing[@]}"} "${_targets[@]}"
