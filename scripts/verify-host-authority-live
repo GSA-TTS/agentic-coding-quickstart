@@ -20,6 +20,9 @@
 #   --step-timeout SECS     per command timeout (default 120)
 #   --create-timeout SECS   timeout for sandbox creation (default 1200)
 #   --keep                  keep throwaway sandboxes when a step fails
+#   --no-provider-kits      create sbx sandboxes without the USAi provider kit (default
+#                           uses your existing acq/sbx USAi setup, never printed); the
+#                           USAi parts of the sbx steps then report BLOCKED
 #   --dry-run               print the plan and the MANUAL instructions; touch no backend
 #   -h, --help              show this help
 #   EXPECT_SHA=<prefix>     abort unless this checkout's HEAD starts with it
@@ -42,6 +45,7 @@ CREATE_TIMEOUT=1200
 KEEP=0
 DRY=0
 STAMP=$(date -u +%Y%m%dt%H%M%Sz)
+WITH_PROVIDER=1
 
 usage() { sed -n '2,/^set -uo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 die_usage() { echo "verify-host-authority-live: $1" >&2; echo "try --help" >&2; exit 2; }
@@ -61,6 +65,7 @@ while [ "$#" -gt 0 ]; do
     --create-timeout) [ "$#" -ge 2 ] || die_usage "--create-timeout needs a value"; CREATE_TIMEOUT="$2"; shift ;;
     --create-timeout=*) CREATE_TIMEOUT="${1#--create-timeout=}" ;;
     --keep) KEEP=1 ;;
+    --no-provider-kits) WITH_PROVIDER=0 ;;
     --dry-run) DRY=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die_usage "unknown argument: $1" ;;
@@ -113,7 +118,8 @@ step_selected() { # ID -> 0 if it should run
   return 1
 }
 
-say() { printf '%s\n' "$*"; if [ -n "${TRANSCRIPT:-}" ]; then printf '%s\n' "$*" >>"$TRANSCRIPT"; fi; }
+TRANSCRIPT=""
+say() { printf '%s\n' "$*"; if [ -n "$TRANSCRIPT" ]; then printf '%s\n' "$*" >>"$TRANSCRIPT"; fi; }
 
 print_plan() {
   local id n=0
