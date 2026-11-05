@@ -327,10 +327,6 @@ record() { # ID RESULT DETAIL
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$b" "${ver:-unknown}" "$REVISION$DIRTY" "$RUN_DATE" "$res" "$detail" "$TRANSCRIPT" >>"$RESULTS"
 }
 
-acq_var() { # NAME -> value of an acq variable after sourcing acq
-  # shellcheck disable=SC1090
-  ( ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO" . "$ACQ" >/dev/null 2>&1; eval "printf '%s' \"\${$1:-}\"" ) 2>/dev/null
-}
 
 # ver_ge A B : dotted numeric A >= B
 ver_ge() {
