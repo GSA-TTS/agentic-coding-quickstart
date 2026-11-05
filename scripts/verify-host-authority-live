@@ -626,7 +626,7 @@ step_sbx_stale_refresh() {
 }
 
 step_sbx_legacy_reseed() {
-  local id=sbx-legacy-reseed rec
+  local id=sbx-legacy-reseed rec ws
   [ "$SBX_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from sbx-baseline"; return 0; }
   rec=$(sbx_record_path "$SBX_A")
   rm -f "$rec"
@@ -641,3 +641,48 @@ step_sbx_legacy_reseed() {
   if [ "$LAST_RC" -eq 0 ] && [ -s "$rec" ]; then record "$id" PASS "legacy notice shown once; acq rm plus a fresh create re-seeded the builtin-kits record"
   else record "$id" FAIL "fresh create after rm did not re-seed the host builtin-kits record (rc $LAST_RC)"; fi
 }
+
+# --- driver -------------------------------------------------------------------
+say "verify-host-authority-live"
+say "revision : $REVISION$DIRTY"
+say "date     : $RUN_DATE"
+say "host     : $(uname -srm 2>/dev/null || echo unknown)"
+say "out dir  : $OUT"
+say "run from OUTSIDE any sandbox; transcript: $TRANSCRIPT"
+msb_preflight
+sbx_preflight
+say "msb      : ${MSB_VER:-not available} (ready: $MSB_READY)"
+say "sbx      : ${SBX_VER:-not available} (ready: $SBX_READY)"
+say ""
+print_plan
+
+run_step() { # ID FUNCTION
+  step_selected "$1" || return 0
+  say ""
+  say "--- $1: $(step_title "$1") ---"
+  "$2"
+}
+run_step msb-ro-kit-create step_msb_ro_kit_create
+run_step msb-inspect-shape step_msb_inspect_shape
+run_step msb-exit-code step_msb_exit_code
+run_step msb-ro-kit-heal step_msb_ro_kit_heal
+run_step msb-forged-markers step_msb_forged_markers
+run_step msb-install-gate step_msb_install_gate
+run_step msb-ro-oci step_msb_ro_oci
+run_step sbx-baseline step_sbx_baseline
+run_step sbx-forged-heal step_sbx_forged_heal
+run_step sbx-record-change step_sbx_record_change
+run_step sbx-stale-refresh step_sbx_stale_refresh
+run_step sbx-legacy-reseed step_sbx_legacy_reseed
+
+cleanup
+say ""
+print_manual | while IFS= read -r l; do printf '%s\n' "$l" >>"$TRANSCRIPT"; printf '%s\n' "$l"; done
+say ""
+say "SUMMARY: PASS=$n_pass FAIL=$n_fail BLOCKED=$n_blocked   revision=$REVISION$DIRTY msb=${MSB_VER:-none} sbx=${SBX_VER:-none}"
+say "results : $RESULTS"
+say "transcript: $TRANSCRIPT"
+say "Paste the results rows into the Host Authority Live Validation Record in docs/VERIFY_PROVIDER_ADOPTION.md."
+if [ "$n_fail" -gt 0 ]; then exit 1; fi
+if [ "$n_blocked" -gt 0 ]; then exit 2; fi
+exit 0
