@@ -132,7 +132,7 @@ print_plan() {
 
 # --- MANUAL instructions (never scored; printed after the automated steps) ----
 manual_part1() {
-  cat <<'MANUAL'
+  cat <<'HAL_EOF'
 MANUAL 1 (msb, interactive): forged legacy guest markers vs a real session.
   The automated step msb-forged-markers covers exec sessions. The agent marker needs an
   interactive attach, so do it by hand:
@@ -162,11 +162,11 @@ MANUAL 4 (msb, other hosts and versions): Linux hosts and msb versions other tha
   On each additional host or msb version run this script again (it records the version
   and host) and also: bash scripts/qualify-msb-ro-mount
   Record one row per host and version in docs/VERIFY_PROVIDER_ADOPTION.md.
-MANUAL
+HAL_EOF
 }
 
 manual_part2() {
-  cat <<'MANUAL'
+  cat <<'HAL_EOF'
 MANUAL 5 (sbx, ADR-0037 steps 1-4 and 6): read-only mount experiments on a real sbx.
     D="$HOME/hal37"; mkdir -p "$D/ro" "$D/ws" && printf 'HOST-ORIGINAL\n' > "$D/ro/sentinel"
     sbx create --name hal-adr37 shell "$D/ws" "$D/ro:ro"
@@ -196,7 +196,7 @@ MANUAL 6 (sbx, ADR-0037 steps 5 and 8): replay integrity and negative control.
 
 MANUAL 7 (sbx, Windows): ADR-0037 step 7 and ADR-0029 path forms need a Windows host.
   Create with a drive-form path and confirm the mount path in argv is valid in the guest.
-MANUAL
+HAL_EOF
 }
 
 print_manual() { manual_part1; echo; manual_part2; }
@@ -309,7 +309,6 @@ trap 'cleanup' EXIT
 trap 'echo; echo "interrupted; removing throwaway sandboxes"; cleanup; exit 130' INT TERM
 
 # --- recording ---------------------------------------------------------------
-ANY_BLOCKED=0
 MSB_VER=""; SBX_VER=""
 n_pass=0; n_fail=0; n_blocked=0
 
@@ -321,7 +320,7 @@ record() { # ID RESULT DETAIL
   case "$res" in
     PASS) n_pass=$((n_pass + 1)) ;;
     FAIL) n_fail=$((n_fail + 1)); ANY_FAIL=1 ;;
-    *) n_blocked=$((n_blocked + 1)); ANY_BLOCKED=1 ;;
+    *) n_blocked=$((n_blocked + 1)); : ;;
   esac
   say ""
   say "==> $res  $id: $detail"
@@ -410,7 +409,6 @@ block_if_not_ready() { # ID BACKEND_READY_VAR REASON
 }
 
 # --- MSB steps ------------------------------------------------------------------
-msb_a_ws=""
 proof_lines() { # NAME FILE -> line count in the guest (0 if absent)
   msb exec "$1" -u 0 -- sh -c "wc -l < $2 2>/dev/null || echo 0" </dev/null 2>/dev/null | tr -d '\r[:space:]'
 }
@@ -472,7 +470,7 @@ step_msb_exit_code() {
   else record "$id" FAIL "guest exit 2 became $r2 and exit 7 became $r7 on msb $MSB_VER (affects only the wording of a refusal)"; fi
 }
 
-INSTALL_BASE=0; INSTALL_RERAN_ON_HEAL=0
+INSTALL_RERAN_ON_HEAL=0
 step_msb_ro_kit_heal() {
   local id=msb-ro-kit-heal r0 r1 i0 i1 why=""
   [ "$MSB_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from msb-ro-kit-create"; return 0; }
