@@ -507,7 +507,7 @@ step_msb_forged_markers() {
   last_has "SOCK=[/tmp/forged.sock]" && why="${why}the forged ssh socket reached the session; "
   run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- sh -c 'command -v claude >/dev/null 2>&1 && echo CLAUDE-PRESENT || echo no-claude'
   run_cmd "$STEP_TIMEOUT" "$ACQ" --backend msb exec "$MSB_A" -- id -un
-  last_has agent || why="${why}exec no longer runs as the agent user; "
+  last_out | grep -qx agent || why="${why}exec no longer runs as the agent user; "
   if [ -z "$why" ]; then record "$id" PASS "forged agent/workspace/ssh-socket/kit-env/ready markers changed no exec-session behavior (attach and agent-key cases: MANUAL 1)"
   else record "$id" FAIL "$why"; fi
 }
@@ -529,4 +529,115 @@ step_msb_install_gate() {
   say "  install proof lines: $i0 -> $i1"
   if [ "${i1:-0}" -gt "${i0:-0}" ]; then record "$id" PASS "install command re-ran after the host install key was deleted"
   else record "$id" FAIL "install command did not re-run after the host install key was deleted"; fi
+}
+
+step_msb_ro_oci() {
+  local id=msb-ro-oci n ws ref
+  block_if_not_ready "$id" "$MSB_READY" "msb unavailable" || return 0
+  ref=$(
+    # shellcheck disable=SC1090
+    ACQ_SOURCE_ONLY=1 ACQ_SCRIPT_DIR="$REPO" . "$ACQ" >/dev/null 2>&1
+    _acq_optin_kit_ref oci-engine 2>/dev/null
+  )
+  [ -n "$ref" ] || { record "$id" BLOCKED "could not resolve the oci-engine kit ref"; return 0; }
+  n=$(sandbox_name oci)
+  ws=$(mk_workspace oci) || { record "$id" BLOCKED "cannot create a workspace under $WS_ROOT"; return 0; }
+  say "  oci-engine ref: $ref"
+  create_sandbox msb "$n" "$ws" --kit "$ref"
+  if last_has "cannot place read-only kit file"; then record "$id" FAIL "acq refused a readonly oci-engine file on create"; return 0; fi
+  if [ "$LAST_RC" -ne 0 ]; then record "$id" BLOCKED "acq create with oci-engine exited $LAST_RC (see transcript)"; return 0; fi
+  run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'ls -l /var/lib/acq/host/kit-files 2>&1 | head -n 10; test ! -e /home/agent/oci-engine-grant-devs.sh && echo NO-GUEST-COPY-OF-GRANT-SCRIPT'
+  if msb_inspect_check "$n" && last_has NO-GUEST-COPY-OF-GRANT-SCRIPT; then
+    record "$id" PASS "oci-engine readonly files were staged on the read-only mount, not copied to the guest, and inspect shows the read-only Bind"
+  else
+    record "$id" FAIL "oci-engine readonly files were not staged as expected, or inspect lacks the read-only Bind"
+  fi
+}
+
+# --- SBX steps ------------------------------------------------------------------
+SBX_READY=0; SBX_A=""; SBX_A_OK=0
+sbx_preflight() {
+  if ! command -v sbx >/dev/null 2>&1; then say "sbx: not on PATH"; return 0; fi
+  SBX_VER=$(sbx version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+  [ -n "$SBX_VER" ] || SBX_VER="unparsed"
+  SBX_READY=1
+}
+
+sbx_record_path() { printf '%s/builtin-kits\n' "$(hc_dir sbx "$1")"; }
+
+step_sbx_baseline() {
+  local id=sbx-baseline n ws rec
+  block_if_not_ready "$id" "$SBX_READY" "sbx not on PATH" || return 0
+  n=$(sandbox_name s); SBX_A="$n"
+  ws=$(mk_workspace s) || { record "$id" BLOCKED "cannot create a workspace under $WS_ROOT"; return 0; }
+  create_sandbox sbx "$n" "$ws"
+  if [ "$LAST_RC" -ne 0 ]; then record "$id" BLOCKED "acq create on sbx exited $LAST_RC (login, Docker, or provider setup? see transcript)"; return 0; fi
+  rec=$(sbx_record_path "$n")
+  if [ -s "$rec" ]; then
+    SBX_A_OK=1
+    say "  builtin-kits record has $(grep -c . "$rec") line(s): $(cut -d' ' -f1 "$rec" | tr '\n' ' ')"
+    record "$id" PASS "fresh create seeded a host builtin-kits record ($rec)"
+  else
+    record "$id" FAIL "fresh create left no host builtin-kits record at $rec"
+  fi
+}
+
+step_sbx_forged_heal() {
+  local id=sbx-forged-heal before after
+  [ "$SBX_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from sbx-baseline"; return 0; }
+  run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sudo sh -c 'rm -f /usr/local/share/ca-certificates/zscaler-ca.crt /home/agent/usai-config/opencode.jsonc; rm -rf "$HOME/.agentic-coding-playbook/AGENTS.md"; echo REMOVED'
+  last_has REMOVED || { record "$id" BLOCKED "could not remove the guest files as root (sudo unavailable?)"; return 0; }
+  before=$(cksum <"$(sbx_record_path "$SBX_A")")
+  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- true
+  after=$(cksum <"$(sbx_record_path "$SBX_A")")
+  if last_has "injecting with 'sbx kit add'" || last_has "injected into"; then
+    record "$id" FAIL "re-attach re-applied a kit although the host record was current"; return 0
+  fi
+  run_cmd "$STEP_TIMEOUT" sbx exec "$SBX_A" -- sh -c 'test ! -e /home/agent/usai-config/opencode.jsonc && echo STILL-ABSENT'
+  if [ "$before" = "$after" ] && last_has STILL-ABSENT; then record "$id" PASS "re-attach did not re-apply removed guest files while the host builtin-kits record was current"
+  else record "$id" FAIL "host record changed or the removed guest file reappeared after re-attach"; fi
+}
+
+step_sbx_record_change() {
+  local id=sbx-record-change rec
+  [ "$SBX_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from sbx-baseline"; return 0; }
+  rec=$(sbx_record_path "$SBX_A")
+  cp "$rec" "$OUT/builtin-kits.saved"
+  sed 's/#ref=[0-9a-f]\{40\}/#ref=0000000000000000000000000000000000000000/' "$OUT/builtin-kits.saved" >"$rec.new" && mv -f "$rec.new" "$rec"
+  say "  altered the host builtin-kits record (refs replaced with zeros); original saved in $OUT"
+  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- true
+  if last_has "sbx kit add" || last_has "sbx >= 0.38" || last_has "injecting with"; then
+    record "$id" PASS "altering the host record triggered the kit add path (output above shows add or the 0.38+ recreate notice)"
+  else
+    record "$id" FAIL "altering the host builtin-kits record did not trigger kit add"
+  fi
+}
+
+step_sbx_stale_refresh() {
+  local id=sbx-stale-refresh
+  [ "$SBX_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from sbx-baseline"; return 0; }
+  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx kit update "$SBX_A" --yes
+  if last_has "refreshed" || last_has "sbx >= 0.38"; then
+    say "  refreshed lines: $(last_count refreshed); 0.38+ notice lines: $(last_count 'sbx >= 0.38')"
+    record "$id" PASS "forced refresh re-attempted all built-in kits (output above: refreshed or one consolidated recreate notice)"
+  else
+    record "$id" FAIL "kit update did not report re-applying the built-in kits"
+  fi
+}
+
+step_sbx_legacy_reseed() {
+  local id=sbx-legacy-reseed rec
+  [ "$SBX_A_OK" -eq 1 ] || { record "$id" BLOCKED "needs the sandbox from sbx-baseline"; return 0; }
+  rec=$(sbx_record_path "$SBX_A")
+  rm -f "$rec"
+  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx run "$SBX_A" -- true
+  if ver_ge "${SBX_VER#v}" 0.38.0; then
+    if [ "$(last_count 'sbx >= 0.38')" -ne 1 ]; then record "$id" FAIL "expected exactly one consolidated recreate notice on sbx $SBX_VER, saw $(last_count 'sbx >= 0.38')"; return 0; fi
+  fi
+  run_cmd "$CREATE_TIMEOUT" "$ACQ" --backend sbx rm "$SBX_A"
+  SBX_A_OK=0
+  ws=$(mk_workspace s2) || { record "$id" BLOCKED "cannot create a workspace"; return 0; }
+  create_sandbox sbx "$SBX_A" "$ws"
+  if [ "$LAST_RC" -eq 0 ] && [ -s "$rec" ]; then record "$id" PASS "legacy notice shown once; acq rm plus a fresh create re-seeded the builtin-kits record"
+  else record "$id" FAIL "fresh create after rm did not re-seed the host builtin-kits record (rc $LAST_RC)"; fi
 }
