@@ -548,7 +548,7 @@ step_msb_ro_oci() {
   if last_has "cannot place read-only kit file"; then record "$id" FAIL "acq refused a readonly oci-engine file on create"; return 0; fi
   if [ "$LAST_RC" -ne 0 ]; then record "$id" BLOCKED "acq create with oci-engine exited $LAST_RC (see transcript)"; return 0; fi
   run_cmd "$STEP_TIMEOUT" msb exec "$n" -u 0 -- sh -c 'ls /var/lib/acq/host/kit-files 2>&1; test ! -e /home/agent/oci-engine-grant-devs.sh && echo NO-GUEST-COPY-OF-GRANT-SCRIPT'
-  if [ "$LAST_RC" -eq 0 ] && last_has 'home-agent-oci-engine-grant-devs-sh.' && last_has 'home-agent-oci-engine-storage-driver-sh.' \
+  if [ "$LAST_RC" -eq 0 ] && last_has 'home-agent-oci-engine-grant-devs-sh.' && last_has 'home-agent-oci-engine-config-oci-engine-storage-driver-sh.' \
       && last_has NO-GUEST-COPY-OF-GRANT-SCRIPT && msb_inspect_check "$n"; then
     record "$id" PASS "oci-engine readonly files were staged on the read-only mount, not copied to the guest, and inspect shows the read-only Bind"
   else
