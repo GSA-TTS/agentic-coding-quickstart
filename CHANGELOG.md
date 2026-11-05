@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.1](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.2.0...v4.2.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **release:** build windows validator runtime zip without zip binary ([#681](https://github.com/GSA-TTS/agentic-coding-quickstart/issues/681)) ([6a3557a](https://github.com/GSA-TTS/agentic-coding-quickstart/commit/6a3557a2f44ece53c109d708fc74263b0b99afc6))
+
 ## [4.2.0](https://github.com/GSA-TTS/agentic-coding-quickstart/compare/v4.1.1...v4.2.0) (2026-11-05)
 
 
